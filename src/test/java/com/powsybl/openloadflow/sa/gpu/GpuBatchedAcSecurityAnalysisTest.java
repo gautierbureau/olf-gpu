@@ -5055,6 +5055,101 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         assertEquals(3, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(), "census=" + GpuBatchScopeCensus.snapshot());
     }
 
+    /** Two SETPOINT-mode HVDC links (no AC emulation extension) from a node-breaker level to the external bus h, each
+     *  rectifier station behind its own breaker at a section node. A converter station is not an end node for OLF's
+     *  tripping, so the section's loss retains and opens that breaker and the station's bus is islanded on its own.
+     *  Link a (section bbs1): that bus is ISOLATED in OLF's sense (Networks.isIsolatedBusForHvdc - a one-bus component,
+     *  no load, no generator but the station) and LfContingency.processHvdcsWithoutPower zeroes BOTH stations: h loses
+     *  cs2a's injection. Link b (section bbs2): the station shares its bus with a load through an internal connection,
+     *  so OLF keeps the link's power and cs2b goes on injecting at h with its counterpart gone. The sections keep their
+     *  own bus alive through a line behind a disconnector-hub-breaker feeder, and lose a load behind a breaker.
+     *  network.xiidm EWVZ/EWWB/ZJI/ZJJ are link a's shape (EWVX_5 alone behind EWZM). */
+    private static Network setpointHvdcSectionsNetwork() {
+        Network network = Network.create("setpoint-hvdc-sections", "code");
+        com.powsybl.iidm.network.Substation s = network.newSubstation().setId("s").add();
+        for (String b : List.of("a", "b", "h")) {
+            s.newVoltageLevel().setId("vl_" + b).setNominalV(400).setTopologyKind(com.powsybl.iidm.network.TopologyKind.BUS_BREAKER)
+                    .add().getBusBreakerView().newBus().setId(b).add();
+        }
+        com.powsybl.iidm.network.VoltageLevel vlc = s.newVoltageLevel().setId("vlc").setNominalV(400)
+                .setTopologyKind(com.powsybl.iidm.network.TopologyKind.NODE_BREAKER).add();
+        String[] externals = {"a", "b", "a"};
+        for (int k = 0; k < 3; k++) {
+            vlc.getNodeBreakerView().newBusbarSection().setId("bbs" + k).setNode(k).add();
+            if (k > 0) {
+                vlc.getNodeBreakerView().newBreaker().setId("c" + (k - 1) + k).setNode1(k - 1).setNode2(k).setOpen(false).add();
+            }
+            vlc.getNodeBreakerView().newDisconnector().setId("d" + k).setNode1(k).setNode2(10 + k).setOpen(false).add();
+            vlc.getNodeBreakerView().newBreaker().setId("bh" + k).setNode1(10 + k).setNode2(20 + k).setOpen(false).add();
+            network.newLine().setId("l" + k).setVoltageLevel1("vlc").setNode1(20 + k)
+                    .setVoltageLevel2("vl_" + externals[k]).setBus2(externals[k]).setConnectableBus2(externals[k])
+                    .setR(0.4).setX(10 + 2 * k).setG1(0).setB1(0).setG2(0).setB2(0).add();
+            if (k < 2) {
+                vlc.getNodeBreakerView().newBreaker().setId("bl" + k).setNode1(k).setNode2(40 + k).setOpen(false).add();
+                vlc.newLoad().setId("ld" + k).setNode(40 + k).setP0(30 + 10 * k).setQ0(10).add();
+            }
+        }
+        // link a: the station alone behind its breaker on bbs1
+        vlc.getNodeBreakerView().newBreaker().setId("bs1").setNode1(1).setNode2(31).setOpen(false).add();
+        vlc.newVscConverterStation().setId("cs1a").setNode(31).setVoltageRegulatorOn(false).setVoltageSetpoint(400)
+                .setReactivePowerSetpoint(0).setLossFactor(1.1f).add();
+        // link b: the station shares its bus with a load (internal connection 32-33) on bbs2
+        vlc.getNodeBreakerView().newBreaker().setId("bs2").setNode1(2).setNode2(32).setOpen(false).add();
+        vlc.getNodeBreakerView().newInternalConnection().setNode1(32).setNode2(33).add();
+        vlc.newVscConverterStation().setId("cs1b").setNode(32).setVoltageRegulatorOn(false).setVoltageSetpoint(400)
+                .setReactivePowerSetpoint(0).setLossFactor(1.1f).add();
+        vlc.newLoad().setId("ldb").setNode(33).setP0(15).setQ0(5).add();
+        for (String link : List.of("a", "b")) {
+            network.getVoltageLevel("vl_h").newVscConverterStation().setId("cs2" + link).setBus("h").setConnectableBus("h")
+                    .setVoltageRegulatorOn(false).setVoltageSetpoint(400).setReactivePowerSetpoint(0).setLossFactor(1.1f).add();
+            network.newHvdcLine().setId("hvdc" + link).setConverterStationId1("cs1" + link).setConverterStationId2("cs2" + link)
+                    .setNominalV(400).setR(1).setActivePowerSetpoint(link.equals("a") ? 60 : 40)
+                    .setConvertersMode(com.powsybl.iidm.network.HvdcLine.ConvertersMode.SIDE_1_RECTIFIER_SIDE_2_INVERTER)
+                    .setMaxP(500).add();
+        }
+        java.util.function.BiConsumer<String[], double[]> line = (ids, rx) -> network.newLine().setId(ids[0])
+                .setVoltageLevel1("vl_" + ids[1]).setBus1(ids[1]).setConnectableBus1(ids[1])
+                .setVoltageLevel2("vl_" + ids[2]).setBus2(ids[2]).setConnectableBus2(ids[2])
+                .setR(rx[0]).setX(rx[1]).setG1(0).setB1(0).setG2(0).setB2(0).add();
+        line.accept(new String[] {"lab", "a", "b"}, new double[] {0.4, 10});
+        line.accept(new String[] {"lah", "a", "h"}, new double[] {0.4, 15});
+        line.accept(new String[] {"lbh", "b", "h"}, new double[] {0.4, 15});
+        network.getVoltageLevel("vl_a").newGenerator().setId("ga").setBus("a").setConnectableBus("a")
+                .setMinP(0).setMaxP(1000).setTargetP(250).setTargetV(400).setVoltageRegulatorOn(true).add();
+        network.getVoltageLevel("vl_b").newGenerator().setId("gb").setBus("b").setConnectableBus("b")
+                .setMinP(0).setMaxP(1000).setTargetP(100).setTargetV(402).setVoltageRegulatorOn(true).add();
+        network.getVoltageLevel("vl_b").newLoad().setId("ldbb").setBus("b").setConnectableBus("b").setP0(120).setQ0(40).add();
+        network.getVoltageLevel("vl_h").newLoad().setId("ldh").setBus("h").setConnectableBus("h").setP0(180).setQ0(30).add();
+        return network;
+    }
+
+    /** A setpoint-mode HVDC link whose rectifier bus a section loss islands on its own: OLF zeroes both stations
+     *  (processHvdcsWithoutPower), so the inverter's injection leaves the live side - the device must take it off the
+     *  survivor's bus. Its twin whose islanded bus also holds a load is NOT isolated in OLF's sense: the link keeps
+     *  its power and nothing moves on the live side. Both on device, both at machine precision. */
+    @Test
+    void deviceSetpointHvdcLosingItsIslandedEndpointMatchesCpu() {
+        assumeTrue(GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = setpointHvdcSectionsNetwork();
+        List<Contingency> ctgs = List.of(
+                new Contingency("bus-1", new com.powsybl.contingency.BusbarSectionContingency("bbs1")),
+                new Contingency("bus-2", new com.powsybl.contingency.BusbarSectionContingency("bbs2")));
+        var pcs = com.powsybl.openloadflow.network.impl.PropagatedContingency.createList(network, ctgs,
+                new com.powsybl.openloadflow.network.LfTopoConfig(),
+                new com.powsybl.openloadflow.network.impl.PropagatedContingencyCreationParameters());
+        assertEquals(java.util.Set.of("c01", "c12", "bs1"), pcs.get(0).getBranchIdsToOpen().keySet(), "the station's breaker opens");
+        assertEquals(java.util.Set.of("c12", "bs2"), pcs.get(1).getBranchIdsToOpen().keySet());
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setDistributedSlack(true).setUseReactiveLimits(true);
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
+                .setSlackBusSelectionMode(com.powsybl.openloadflow.network.SlackBusSelectionMode.NAME)
+                .setSlackBusesIds(List.of("vl_a"));
+        GpuBatchScopeCensus.reset();
+        assertGpuMatchesCpu(network, ctgs, 1e-12, lfp, true);
+        assertEquals(java.util.Set.of(), GpuBatchScopeCensus.planRefusedIds(), "census=" + GpuBatchScopeCensus.snapshot());
+        assertEquals(2, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(), "census=" + GpuBatchScopeCensus.snapshot());
+    }
+
     /** OLF's g1/g2/g3 -> b4 remote voltage control with what a contingency can take from the PILOT b4: a second load
      *  (l4b, 30 MW / 20 MVar) and a fixed-Q generator (g4q, 10 MW / 15 MVar, outside the slack distribution - a lost
      *  participant beside a participating slack is another shape). The slack is b1, so b4 is the pilot only. */

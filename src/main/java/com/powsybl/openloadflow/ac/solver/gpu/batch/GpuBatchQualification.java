@@ -257,8 +257,8 @@ final class GpuBatchQualification {
                 // is not expressed here, so those still go to the CPU.
                 for (var h : bus.getHvdcs()) {
                     if (!h.isAcEmulation()) {
-                        return VcSplit.UNMODELED;
-                    }
+                        continue;                            // SETPOINT link: its stations' targets are the caller's
+                    }                                        // injection channel (hvdcStationResets), no element to mask
                     if (!islandedHvdcs.contains(h)) {
                         islandedHvdcs.add(h);
                     }
@@ -1157,6 +1157,67 @@ final class GpuBatchQualification {
                 c.lostLoads().stream().map(ll -> ll.bus() == null ? "?" : ll.bus().getId()).sorted().toList());
     }
 
+    /** OLF's {@code LfContingency.processHvdcsWithoutPower} for the SETPOINT (non-AC-emulation) links whose endpoint
+     *  this contingency islands: when the islanded converter bus is ISOLATED in OLF's sense
+     *  ({@code Networks.isIsolatedBusForHvdc}: a one-bus component after the cut, no non-fictitious load, no
+     *  generator other than converter stations) and the other endpoint survives, OLF zeroes BOTH stations' targetP.
+     *  The islanded station leaves with its frozen bus (its scheduled P is already out of the loss,
+     *  {@link #scheduledActivePowerLoss} mirrors {@code getBusLostGenerationTargetP}); the SURVIVING station's
+     *  injection is what changes on the live side, and it rides the plain injection channel as generation
+     *  removed - a negative load loss on its bus, composed with whatever else that bus loses. A link whose islanded
+     *  bus is NOT isolated (the island also holds a load or a generator, or more than one bus) keeps its power in
+     *  OLF: the survivor goes on injecting with its counterpart gone, and the distributed slack absorbs it on both
+     *  arms - nothing to do here. network.xiidm EWVZ/EWWB/ZJI/ZJJ: a section loss that opens the station's own
+     *  breaker (a converter station is not an end node for the tripping), leaving EWVX_5 / EWVX_4 / ZJH_8 / ZJH_9
+     *  alone with their station - refused as ISLANDS_REMOTE_VC_MEMBER until this. */
+    static List<LoadLoss> hvdcStationResets(List<LfBus> islandedBuses, BatchContingency c) {
+        List<LoadLoss> out = new ArrayList<>();
+        java.util.Set<LfBus> islanded = new java.util.HashSet<>(islandedBuses);
+        for (LfBus bus : islandedBuses) {
+            for (com.powsybl.openloadflow.network.LfHvdc h : bus.getHvdcs()) {
+                if (h.isAcEmulation()) {
+                    continue;
+                }
+                LfBus other = h.getBus1() == bus ? h.getBus2() : h.getBus1();
+                if (other == null || islanded.contains(other) || other.isDisabled() || !isolatedForHvdc(bus, c)) {
+                    continue;
+                }
+                com.powsybl.openloadflow.network.LfGenerator survivor = h.getBus1() == other
+                        ? h.getConverterStation1() : h.getConverterStation2();
+                double p = survivor.getTargetP();
+                if (p != 0) {
+                    out.add(new LoadLoss(other, -p, 0));   // generation removed: the row target drops by p
+                }
+                if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {
+                    System.err.printf("QUALIFY_TRACE hvdc %s without power in %s: station %s on %s targetP %.6f -> 0%n",
+                            h.getId(), c.contingencyId(), survivor.getId(), other.getId(), p);
+                }
+            }
+        }
+        return out;
+    }
+
+    /** {@code Networks.isIsolatedBusForHvdc} on the post-contingency connectivity: OLF removes every branch of the
+     *  contingency from the graph (closed outages, opened couplers, side-opened branches alike) and asks whether the
+     *  bus is alone in its component. */
+    private static boolean isolatedForHvdc(LfBus bus, BatchContingency c) {
+        if (bus.getNonFictitiousLoadTargetP() != 0.0
+                || bus.getGenerators().stream().anyMatch(com.powsybl.openloadflow.network.impl.LfGeneratorImpl.class::isInstance)) {
+            return false;
+        }
+        java.util.Set<LfBranch> cut = new java.util.HashSet<>(c.outagedBranches());
+        cut.addAll(c.outagedZiBranches());
+        for (BatchContingency.SideOpen so : c.sideOpenBranches()) {
+            cut.add(so.branch());
+        }
+        for (LfBranch br : bus.getBranches()) {
+            if (!br.isDisabled() && br.isConnectedAtBothSides() && !cut.contains(br)) {
+                return false;                                // a live branch: the component is bigger than the bus
+            }
+        }
+        return true;
+    }
+
     private static double scheduledActivePowerLoss(BatchContingency c, List<LfBus> islandedBuses) {
         double loss = 0;
         // An ISLANDED bus contributes its WHOLE injection below (generation minus load), so anything
@@ -1390,9 +1451,10 @@ final class GpuBatchQualification {
                 List<com.powsybl.openloadflow.network.LfGenerator> liveLostGens = c.lostGenerators().stream()
                         .filter(g -> g.getBus() == null || !islandedNumSet.contains(g.getBus().getNum()))
                         .toList();
-                List<LoadLoss> liveLostLoads = c.lostLoads().stream()
+                List<LoadLoss> liveLostLoads = new ArrayList<>(c.lostLoads().stream()
                         .filter(ll -> ll.bus() == null || !islandedNumSet.contains(ll.bus().getNum()))
-                        .toList();
+                        .toList());
+                liveLostLoads.addAll(hvdcStationResets(q.islandedBuses(), c));   // a setpoint link losing its other end
                 if (busRows == null) {                       // once per plan: the coupler-tree relocation
                     LfBus anyBus = !liveLostGens.isEmpty() ? liveLostGens.get(0).getBus()
                             : liveLostLoads.isEmpty() ? null : liveLostLoads.get(0).bus();
@@ -1746,7 +1808,7 @@ final class GpuBatchQualification {
                                 deadControlBuses.stream().map(LfBus::getId).toList());
                     }
                     refuse(c, "PLAN:ISLANDS_REMOTE_VC_MEMBER");
-                    continue;                                // an islanded HVDC endpoint — CPU
+                    continue;                                // a DISTR_Q row with no reachable control — CPU
                 }
                 if (!deadControlBuses.isEmpty()) {
                     // Row-mode-only GenOutage entries (pRow < 0, no P change): each surviving member
@@ -1774,6 +1836,25 @@ final class GpuBatchQualification {
                         continue;                            // no V row to flip — CPU
                     }
                     genOutagesByIndex[i] = vcOff.toArray(new GenOutage[0]);
+                }
+                List<LoadLoss> stationResets = hvdcStationResets(q.islandedBuses(), c);
+                if (!stationResets.isEmpty()) {              // a setpoint link losing its other end: the survivor's P
+                    if (busRows == null) {
+                        busRows = com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcDataExtractor
+                                .busPowerRows(stationResets.get(0).bus().getNetwork(), es);
+                    }
+                    GenOutage[] st = GpuBatchInjectionOutages.computeInjectionOutages(es, gpuData, dsSum, slackParticipates,
+                            dsParams, List.of(), stationResets, busRows);
+                    if (st == null) {
+                        refuse(c, "PLAN:INJECTION_OUTAGE_SHAPE");
+                        continue;
+                    }
+                    List<GenOutage> merged = new ArrayList<>();
+                    if (genOutagesByIndex[i] != null) {
+                        merged.addAll(java.util.Arrays.asList(genOutagesByIndex[i]));
+                    }
+                    merged.addAll(java.util.Arrays.asList(st));
+                    genOutagesByIndex[i] = merged.toArray(new GenOutage[0]);
                 }
                 if (!reHomed.pvTargets().isEmpty() || !reHomed.remoteMainTargets().isEmpty()) {
                     List<GenOutage> pvOn = new ArrayList<>();

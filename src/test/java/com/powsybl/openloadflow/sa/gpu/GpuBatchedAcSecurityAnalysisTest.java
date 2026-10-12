@@ -4320,6 +4320,29 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         assertMergedPilotLossMatchesCpu(network, ctgs, 2);
     }
 
+    /** A generator loss that leaves its bus a controller, composed with an in-flight pin in the same group. OLF's
+     *  reactive keys after the loss (updateReactiveKeys: the bus keeps a smaller key) are renormalized again when g1
+     *  pins. The device carried the loss as per-contribution WEIGHTS fixed at plan time, which the fill applied over
+     *  its pin-aware recompute - the rows kept the outage-only split while the targets followed the pin. Now the
+     *  plan hands the kernels the post-loss member KEYS and both renormalize them over the members a pin leaves.
+     *  remotePinNetwork with a second generator g2b on g2's bus: losing g2b and l45b together. 1e-12 on device. */
+    @org.junit.jupiter.api.Test
+    void deviceGeneratorLossWithInFlightPinRenormalizesKeysMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = remotePinNetwork("g1", 186.0);
+        com.powsybl.iidm.network.Generator g2 = network.getGenerator("g2");
+        g2.getTerminal().getVoltageLevel().newGenerator().setId("g2b").setBus("b2").setConnectableBus("b2")
+                .setMinP(0).setMaxP(200).setTargetP(40).setTargetQ(0).setVoltageRegulatorOn(true)
+                .setRegulatingTerminal(g2.getRegulatingTerminal()).setTargetV(g2.getTargetV()).add()
+                .newMinMaxReactiveLimits().setMinQ(-150).setMaxQ(150).add();
+        List<Contingency> ctgs = List.of(new Contingency("g2b+l45b",
+                new com.powsybl.contingency.GeneratorContingency("g2b"), new BranchContingency("l45b")));
+        GpuBatchScopeCensus.reset();
+        assertGpuMatchesCpu(network, ctgs, 1e-12, remotePinParameters());
+        assertEquals(java.util.Set.of(), GpuBatchScopeCensus.planRefusedIds(), "census=" + GpuBatchScopeCensus.snapshot());
+    }
+
     private static com.powsybl.loadflow.LoadFlowParameters remotePinParameters() {
         com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
                 .setDistributedSlack(true).setUseReactiveLimits(true);

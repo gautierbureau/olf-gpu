@@ -353,7 +353,7 @@ final class GpuBatchQualification {
                 }
             }
             if (toggled.isEmpty()) {
-                return new double[][] {new double[0], new double[0]};
+                return new double[][] {new double[0], new double[0], new double[0], new double[0]};
             }
             // On the MAIN control (the merged group), as OLF does: a member's OWN control is the DEPENDENT one
             // whose element list is just itself, and updateReactiveKeys on it set that member's reactive
@@ -370,6 +370,36 @@ final class GpuBatchQualification {
             // OLF_GPU_DQ_REWEIGHT=extract: the whole-network re-extraction instead of the analytic reweight (A/B)
             String reweightMode = System.getenv("OLF_GPU_DQ_REWEIGHT");
             double[] newW = "extract".equals(reweightMode) ? null : reweightedDqWeights(es, gpuData, touched);
+            // The member KEYS after the loss (OLF's qPct on the touched groups' MAIN controls, just updated): the
+            // kernels renormalize them over the members a pin leaves enabled, so the loss and an in-flight pin in the
+            // same group compose - which fixed per-contribution weights cannot do (the fill applied them over its
+            // pin-aware recompute and the rows kept the outage-only split while the targets followed the pin).
+            boolean keyed = newW != null;                    // the analytic path: the pack's structure is the base's
+            List<Double> keyMember = new ArrayList<>();
+            List<Double> keyValue = new ArrayList<>();
+            int[] memberBusNum = gpuData.dqMemberBusNum();
+            if (memberBusNum != null) {
+                java.util.Map<Integer, Integer> memberOfBusNum = new java.util.HashMap<>();
+                for (int m = 0; m < memberBusNum.length; m++) {
+                    memberOfBusNum.put(memberBusNum[m], m);
+                }
+                java.util.Set<Integer> done = new java.util.HashSet<>();
+                for (LfBus bus : touched) {
+                    var main = bus.getGeneratorVoltageControl()
+                            .<com.powsybl.openloadflow.network.GeneratorVoltageControl>map(
+                                    com.powsybl.openloadflow.network.VoltageControl::getMainVoltageControl).orElse(null);
+                    if (main == null) {
+                        continue;
+                    }
+                    for (LfBus mb : main.getMergedControllerElements()) {
+                        Integer m = memberOfBusNum.get(mb.getNum());
+                        if (m != null && done.add(m)) {
+                            keyMember.add((double) m);
+                            keyValue.add(mb.getRemoteControlReactivePercent());
+                        }
+                    }
+                }
+            }
             GpuAcData nd = null;
             if (newW == null || "check".equals(reweightMode)) {
                 // the free role of a table-less group may move with the loss: re-extract, as before
@@ -405,8 +435,12 @@ final class GpuBatchQualification {
             List<Double> w = new ArrayList<>();
             boolean dqOvTrace = System.getenv("OLF_GPU_DQOV_TRACE") != null;
             int traced = 0;
+            int[] kMemberOf = gpuData.dqKMember();
             for (int k = 0; k < newW.length; k++) {
                 if (newW[k] != baseW[k]) {
+                    if (keyed && kMemberOf != null && kMemberOf[k] >= 0) {
+                        continue;                            // the keys carry it (the kernels' live recompute)
+                    }
                     idx.add((double) k);
                     w.add(newW[k]);
                     if (dqOvTrace && traced++ < 12 && nd != null) {   // the two packs' metadata at a differing index
@@ -421,7 +455,9 @@ final class GpuBatchQualification {
                         + " of " + newW.length + " oldFlags(ds,rl)=? newFlags=(false,false)");
             }
             return new double[][] {idx.stream().mapToDouble(Double::doubleValue).toArray(),
-                w.stream().mapToDouble(Double::doubleValue).toArray()};
+                w.stream().mapToDouble(Double::doubleValue).toArray(),
+                keyMember.stream().mapToDouble(Double::doubleValue).toArray(),
+                keyValue.stream().mapToDouble(Double::doubleValue).toArray()};
         } finally {
             for (var g : toggled) {
                 g.setGeneratorControlType(com.powsybl.openloadflow.network.LfGenerator.GeneratorControlType.VOLTAGE);
@@ -873,10 +909,25 @@ final class GpuBatchQualification {
             }
             keep.add(k);
         }
-        double[][] out = new double[2][keep.size()];
+        List<Integer> keepKey = new ArrayList<>();
+        for (int k = 0; ov.length > 3 && k < ov[2].length; k++) {
+            int m = (int) ov[2][k];
+            if (!groups.contains(gpuData.dqMemberGroupStart()[m])) {
+                keepKey.add(k);
+            }
+        }
+        double[][] out = new double[4][];
+        out[0] = new double[keep.size()];
+        out[1] = new double[keep.size()];
         for (int i = 0; i < keep.size(); i++) {
             out[0][i] = ov[0][keep.get(i)];
             out[1][i] = ov[1][keep.get(i)];
+        }
+        out[2] = new double[keepKey.size()];
+        out[3] = new double[keepKey.size()];
+        for (int i = 0; i < keepKey.size(); i++) {
+            out[2][i] = ov[2][keepKey.get(i)];
+            out[3][i] = ov[3][keepKey.get(i)];
         }
         return out;
     }
@@ -1264,6 +1315,9 @@ final class GpuBatchQualification {
                         GenOutage[][] genOutagesByIndex, int islandingCount,
                         double[] activePowerLossByIndex,
                         int[][] dqOvContribByIndex, double[][] dqOvWByIndex,
+                        /** Per scenario, the members whose reactive KEY the contingency changes (a generator lost at a
+                         *  bus that keeps a controller) and OLF's post-loss key; the kernels renormalize them live. */
+                        int[][] dqKeyOvMemberByIndex, double[][] dqKeyOvByIndex,
                         int[][] drOvContribByIndex, double[][] drOvCByIndex,
                         /** Per scenario, the distributed-slack participants this contingency strands in
                          *  another synchronous component — the set the device must renormalize over. */
@@ -1322,6 +1376,8 @@ final class GpuBatchQualification {
         List<com.powsybl.openloadflow.network.LfHvdc>[] islandedHvdcsByIndex = new List[contingencies.size()];
         int[][] dqOvContribByIndex = new int[contingencies.size()][];
         double[][] dqOvWByIndex = new double[contingencies.size()][];
+        int[][] dqKeyOvMemberByIndex = new int[contingencies.size()][];
+        double[][] dqKeyOvByIndex = new double[contingencies.size()][];
         // Per-contingency DISTR_RHO coefficient overrides (plan A5): outaging a NON-FREE member of a
         // shared-TVC group renormalizes the survivors' 1/count coefficients (the CPU's coefficients
         // are live suppliers over !isDisabled) and zeroes every contribution touching the outaged
@@ -1735,6 +1791,8 @@ final class GpuBatchQualification {
                     }
                     dqOvContribByIndex[i] = java.util.Arrays.stream(ov[0]).mapToInt(d -> (int) d).toArray();
                     dqOvWByIndex[i] = ov[1];
+                    dqKeyOvMemberByIndex[i] = java.util.Arrays.stream(ov[2]).mapToInt(d -> (int) d).toArray();
+                    dqKeyOvByIndex[i] = ov[3];
                     String dqOvTrace = System.getenv("OLF_GPU_DQOV_TRACE");   // <contingency id>: every reweighted entry
                     if (dqOvTrace != null && dqOvTrace.equals(c.contingencyId())) {
                         int[] mBus = gpuData.dqMemberBusNum();
@@ -1925,6 +1983,8 @@ final class GpuBatchQualification {
                     }
                     dqOvContribByIndex[i] = java.util.Arrays.stream(vcOv[0]).mapToInt(d -> (int) d).toArray();
                     dqOvWByIndex[i] = vcOv[1];
+                    dqKeyOvMemberByIndex[i] = java.util.Arrays.stream(vcOv[2]).mapToInt(d -> (int) d).toArray();
+                    dqKeyOvByIndex[i] = vcOv[3];
                     // and the survivors' DISTR_Q row TARGETS + the islanded members' inactive entries
                     List<GenOutage> dq = GpuBatchInjectionOutages.islandedDistrQEntries(gpuData, lostVcControllers, relocDummyQRows, outagedZiNums,
                             GpuBatchInjectionOutages.labelsOf(dqSubByIndex[i]));
@@ -2030,7 +2090,7 @@ final class GpuBatchQualification {
         com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.LAST_ISLANDED_DS_MASKED.set(maskedDs);
         return new ScenarioPlan(batchedIndices, frozenRowsByIndex, islandedNumsByIndex,
                 frozenTargetsByIndex, genOutagesByIndex, islandingCount, activePowerLossByIndex,
-                dqOvContribByIndex, dqOvWByIndex, drOvContribByIndex, drOvCByIndex, islandedDsByIndex,
+                dqOvContribByIndex, dqOvWByIndex, dqKeyOvMemberByIndex, dqKeyOvByIndex, drOvContribByIndex, drOvCByIndex, islandedDsByIndex,
                 islandedRlByIndex, islandedHvdcsByIndex, dqSubByIndex,
                 new SlackRelocations(relocatedSlackRow, relocatedSlackShift));
     }

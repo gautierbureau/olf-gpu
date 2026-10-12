@@ -800,6 +800,11 @@ public final class GpuAcNewtonSolver {
 
     public static native void setBatchDqWeightOverrides(long handle, int[] idx, double[] w);
 
+    /** Per-scenario member reactive keys: {@code idx} = flat {scenario, member} pairs, {@code key} = OLF's
+     *  qPct after the scenario's generator losses (updateReactiveKeys); the DISTR_Q fill and the target kernel
+     *  renormalize them over the members a pin leaves enabled. Per-chunk state; nulls clear it. */
+    public static native void setBatchDqKeyOverrides(long handle, int[] idx, double[] key);
+
     /** Install (or clear, with nulls) per-scenario DISTR_RHO coefficient overrides on a batch
      *  context — {@code idx} = flat {scenario, contribution} pairs, {@code c} = the renormalized
      *  1/count' coefficient (a shared-TVC group member outaged in that scenario). Per-chunk state. */

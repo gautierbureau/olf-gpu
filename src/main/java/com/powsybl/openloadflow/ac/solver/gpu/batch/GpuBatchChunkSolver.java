@@ -84,6 +84,7 @@ final class GpuBatchChunkSolver {
                                                double[][] rowCriteria, GpuBatchRlCurves.Channel rlCurves,
                                                GpuBatchForcedTargetQ.Channel forcedTargetQ,
                                                int[][] dqOvContribByIndex, double[][] dqOvWByIndex,
+                                               int[][] dqKeyOvMemberByIndex, double[][] dqKeyOvByIndex,
                                                int[][] drOvContribByIndex, double[][] drOvCByIndex,
                                                int[][] islandedDsByIndex, int[][] islandedRlByIndex,
                                                List<com.powsybl.openloadflow.network.LfHvdc>[] islandedHvdcsByIndex,
@@ -109,7 +110,7 @@ final class GpuBatchChunkSolver {
                 solveQualifiedInChunksAt(chunkSize, remaining, contingencies, elementMapper, gpuData, baseState,
                         baseTargets, baseRowMode, frozenRowsByIndex, frozenTargetsByIndex, genOutagesByIndex,
                         activePowerLossByIndex, hvdcElemIndex, rowCriteria, rlCurves, forcedTargetQ,
-                        dqOvContribByIndex, dqOvWByIndex, drOvContribByIndex, drOvCByIndex, islandedDsByIndex,
+                        dqOvContribByIndex, dqOvWByIndex, dqKeyOvMemberByIndex, dqKeyOvByIndex, drOvContribByIndex, drOvCByIndex, islandedDsByIndex,
                         islandedRlByIndex, islandedHvdcsByIndex, dqSubByIndex, slackRelocations,
                         n, nElements, parameters, tol, reactiveLimitTol, slackDistTol, convEpsPerEq, resultsByIndex,
                         preDistributedByIndex, distributedByIndex, varType, phases, hvdcControllers, config);
@@ -322,6 +323,7 @@ final class GpuBatchChunkSolver {
                                                double[][] rowCriteria, GpuBatchRlCurves.Channel rlCurves,
                                                GpuBatchForcedTargetQ.Channel forcedTargetQ,
                                                int[][] dqOvContribByIndex, double[][] dqOvWByIndex,
+                                               int[][] dqKeyOvMemberByIndex, double[][] dqKeyOvByIndex,
                                                int[][] drOvContribByIndex, double[][] drOvCByIndex,
                                                int[][] islandedDsByIndex, int[][] islandedRlByIndex,
                                                List<com.powsybl.openloadflow.network.LfHvdc>[] islandedHvdcsByIndex,
@@ -660,6 +662,8 @@ final class GpuBatchChunkSolver {
                     List<Integer> pfRlPool = new ArrayList<>();
                     List<Integer> dqOvIdxList = new ArrayList<>();   // {s, contrib} pairs (DISTR_Q reweight)
                     List<Double> dqOvWList = new ArrayList<>();
+                    List<Integer> dqKeyOvIdxList = new ArrayList<>();
+                    List<Double> dqKeyOvList = new ArrayList<>();
                     List<Integer> drOvIdxList = new ArrayList<>();   // {s, contrib} pairs (DISTR_RHO renorm, plan A5)
                     List<Double> drOvCList = new ArrayList<>();
                     // per-scenario ACTIVE equation counts (L2 threshold parity — the CPU removes an
@@ -720,6 +724,13 @@ final class GpuBatchChunkSolver {
                                     dqOvIdxList.add(s);
                                     dqOvIdxList.add(dqOvContribByIndex[ci][k]);
                                     dqOvWList.add(dqOvWByIndex[ci][k]);
+                                }
+                            }
+                            if (dqKeyOvMemberByIndex != null && dqKeyOvMemberByIndex[ci] != null) {
+                                for (int k = 0; k < dqKeyOvMemberByIndex[ci].length; k++) {
+                                    dqKeyOvIdxList.add(s);
+                                    dqKeyOvIdxList.add(dqKeyOvMemberByIndex[ci][k]);
+                                    dqKeyOvList.add(dqKeyOvByIndex[ci][k]);
                                 }
                             }
                             if (drOvContribByIndex != null && drOvContribByIndex[ci] != null) {
@@ -1953,6 +1964,9 @@ final class GpuBatchChunkSolver {
                     GpuAcNewtonSolver.setBatchDqWeightOverrides(handle,
                             dqOvIdxList.isEmpty() ? null : dqOvIdxList.stream().mapToInt(Integer::intValue).toArray(),
                             dqOvWList.isEmpty() ? null : dqOvWList.stream().mapToDouble(Double::doubleValue).toArray());
+                    GpuAcNewtonSolver.setBatchDqKeyOverrides(handle,
+                            dqKeyOvIdxList.isEmpty() ? null : dqKeyOvIdxList.stream().mapToInt(Integer::intValue).toArray(),
+                            dqKeyOvList.isEmpty() ? null : dqKeyOvList.stream().mapToDouble(Double::doubleValue).toArray());
                     GpuAcNewtonSolver.setBatchDrCoefOverrides(handle,
                             drOvIdxList.isEmpty() ? null : drOvIdxList.stream().mapToInt(Integer::intValue).toArray(),
                             drOvCList.isEmpty() ? null : drOvCList.stream().mapToDouble(Double::doubleValue).toArray());

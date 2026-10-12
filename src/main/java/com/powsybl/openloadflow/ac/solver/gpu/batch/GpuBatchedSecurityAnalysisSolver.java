@@ -410,7 +410,7 @@ public final class GpuBatchedSecurityAnalysisSolver {
                         baseTargets, baseActivation.rowMode(), plan.frozenRowsByIndex(), plan.frozenTargetsByIndex(), plan.genOutagesByIndex(),
                         plan.activePowerLossByIndex(),
                         GpuBatchHvdcAcEmulation.elementIndices(network, nElements), rowCriteria, rlCurves, forcedTargetQ,
-                        plan.dqOvContribByIndex(), plan.dqOvWByIndex(),
+                        plan.dqOvContribByIndex(), plan.dqOvWByIndex(), plan.dqKeyOvMemberByIndex(), plan.dqKeyOvByIndex(),
                         plan.drOvContribByIndex(), plan.drOvCByIndex(), plan.islandedDsByIndex(),
                         plan.islandedRlByIndex(), plan.islandedHvdcsByIndex(), plan.dqSubByIndex(), plan.slackRelocations(),
                         n, nElements, parameters, tol, reactiveLimitTol, slackDistTol, convEpsPerEq, resultsByIndex,

@@ -145,6 +145,7 @@ final class GpuContingencyMapper {
         for (Map.Entry<String, com.powsybl.openloadflow.network.PowerShift> e : pc.getLoadIdsToLose().entrySet()) {
             com.powsybl.iidm.network.Load load = network.getLoad(e.getKey());
             if (load == null) {
+                trace(pc, "lost load " + e.getKey() + " is not a Load (an LCC station's share?)");
                 return null;                                 // an LCC station's load share: CPU
             }
             // The load's LfBus through OLF's OWN map (loadsById), never through the bus view: a
@@ -154,8 +155,17 @@ final class GpuContingencyMapper {
             // physical bus in each. Measured on network.xiidm / LJBS: the island's two loads (26 MW,
             // 106 MVar) were removed from the neighbour GIU_0 instead of the frozen GIU_1 — 3.1 kV.
             com.powsybl.openloadflow.network.LfLoad lfLoad = net.getLoadById(e.getKey());
-            LfBus bus = lfLoad != null ? lfLoad.getBus() : null;
+            if (lfLoad == null) {
+                // OLF SKIPS it - toLfContingency resolves loadIdsToLose with getLoadById and drops a null
+                // ("could be in another component"), the rule it applies to branch and generator ids too.
+                // network.xiidm's fixed list CONTINGENCY_13703 (lines LOSL + LOSM) trips the load EAAK of a
+                // level outside the solved component; rejecting on it sent the whole contingency to the CPU.
+                trace(pc, "skipped load " + e.getKey() + " not in the LfNetwork (OLF drops it too)");
+                continue;
+            }
+            LfBus bus = lfLoad.getBus();
             if (bus == null || bus.isDisabled()) {
+                trace(pc, "lost load " + e.getKey() + (bus == null ? " has no bus" : " is on a disabled bus"));
                 return null;
             }
             if (lostLfBusIds.contains(bus.getId())) {

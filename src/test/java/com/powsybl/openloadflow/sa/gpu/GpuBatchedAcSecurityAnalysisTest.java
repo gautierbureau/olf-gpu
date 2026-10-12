@@ -5150,6 +5150,35 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         assertEquals(2, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(), "census=" + GpuBatchScopeCensus.snapshot());
     }
 
+    /** A line outage whose propagation also trips a load OUTSIDE the solved component: the load's level hangs off a
+     *  line that is open on the main side, so it is its own component, and the branch tripping of that line still
+     *  disconnects the load behind its disconnector. OLF resolves loadIdsToLose with getLoadById and skips the null
+     *  ("could be in another component") - the mapper refused the whole contingency on it (network.xiidm's fixed list
+     *  CONTINGENCY_13703, lines LOSL + LOSM, load EAAK), while the main-side line outage it carries is a plain batch. */
+    @Test
+    void deviceSkipsLostLoadOutsideTheSolvedComponentLikeOlf() {
+        assumeTrue(GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = IeeeCdfNetworkFactory.create14();
+        com.powsybl.iidm.network.VoltageLevel vx = network.newVoltageLevel().setId("vx").setNominalV(135)
+                .setTopologyKind(com.powsybl.iidm.network.TopologyKind.NODE_BREAKER).add();
+        vx.getNodeBreakerView().newBusbarSection().setId("bbsx").setNode(0).add();
+        vx.getNodeBreakerView().newDisconnector().setId("dx").setNode1(0).setNode2(1).setOpen(false).add();
+        vx.getNodeBreakerView().newBreaker().setId("bx").setNode1(1).setNode2(2).setOpen(false).add();
+        vx.newLoad().setId("ldx").setNode(2).setP0(12).setQ0(4).add();
+        vx.getNodeBreakerView().newDisconnector().setId("dlx").setNode1(0).setNode2(3).setOpen(false).add();
+        network.newLine().setId("lx").setVoltageLevel1("VL4").setConnectableBus1("B4")   // open at the main side
+                .setVoltageLevel2("vx").setNode2(3).setR(0.5).setX(5).setG1(0).setB1(0).setG2(0).setB2(0).add();
+        List<Contingency> ctgs = List.of(new Contingency("l23+lx", new BranchContingency("L2-3-1"), new BranchContingency("lx")));
+        var pc = com.powsybl.openloadflow.network.impl.PropagatedContingency.createList(network, ctgs,
+                new com.powsybl.openloadflow.network.LfTopoConfig(),
+                new com.powsybl.openloadflow.network.impl.PropagatedContingencyCreationParameters()).get(0);
+        assertEquals(java.util.Set.of("ldx"), pc.getLoadIdsToLose().keySet(), "the propagation trips the far load");
+        GpuBatchScopeCensus.reset();
+        assertGpuMatchesCpu(network, ctgs, 1e-12);
+        assertEquals(java.util.Set.of(), GpuBatchScopeCensus.planRefusedIds(), "census=" + GpuBatchScopeCensus.snapshot());
+        assertEquals(1, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(), "census=" + GpuBatchScopeCensus.snapshot());
+    }
+
     /** OLF's g1/g2/g3 -> b4 remote voltage control with what a contingency can take from the PILOT b4: a second load
      *  (l4b, 30 MW / 20 MVar) and a fixed-Q generator (g4q, 10 MW / 15 MVar, outside the slack distribution - a lost
      *  participant beside a participating slack is another shape). The slack is b1, so b4 is the pilot only. */

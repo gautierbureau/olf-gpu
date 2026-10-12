@@ -307,6 +307,9 @@ final class GpuBatchPrecomputer {
                     String rejectReason = composeRejectReason(branches, gens, loads, shifts, hvdcs, sideOpens,
                             loadsBatchable);
                     GpuBatchScopeCensus.record(rejectReason);
+                    // ...and by id: a mapper reject never reaches the device, so the harness's verdict must count it
+                    // with the plan refusals (a scope gap), not as a scenario the device tried and failed.
+                    GpuBatchScopeCensus.planRefused(pc.getContingency().getId(), rejectReason);
                     if (System.getenv("OLF_GPU_REJECT_TRACE") != null) {
                         // the census counts these by KIND; the id is what lets a scope report say
                         // whether a non-batched contingency is one OLF itself does not answer

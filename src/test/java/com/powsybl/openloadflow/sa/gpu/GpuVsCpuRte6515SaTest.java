@@ -193,6 +193,7 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
         // (14266 contingencies: lines, transformers, generators, busbar sections, shunts, SVC, HVDC, some
         // multi-element) is such a file.
         String ctgFile = System.getenv("OLF_GPU_SA_CTG_FILE");
+        List<Contingency> fixedList = null;
         if (ctgFile != null && !ctgFile.isEmpty()) {
             com.fasterxml.jackson.databind.ObjectMapper om = com.powsybl.commons.json.JsonUtil.createObjectMapper()
                     .registerModule(new com.powsybl.contingency.json.ContingencyJsonModule());
@@ -207,7 +208,7 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
                 }
             }
             System.out.printf("  CTG_FILE %s: %d contingencies, elements by kind %s%n", ctgFile, fixed.size(), byKind);
-            return new java.util.ArrayList<>(fixed);
+            fixedList = new java.util.ArrayList<>(fixed);   // the RANGE / ONLY / EXCLUDE levers below still apply
         }
         // OLF_GPU_SA_ID_KIND=<id>[,<id>]: what CLASS an id actually is in the IIDM network. A mapper
         // reject naming an id the branch scope never built a contingency for is answered here: the
@@ -231,8 +232,8 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
                         extra);
             }
         }
-        String kinds = System.getenv().getOrDefault("OLF_GPU_SA_CTG_KINDS", "branch");
-        List<Contingency> all = new java.util.ArrayList<>();
+        String kinds = fixedList != null ? "" : System.getenv().getOrDefault("OLF_GPU_SA_CTG_KINDS", "branch");
+        List<Contingency> all = fixedList != null ? fixedList : new java.util.ArrayList<>();
         if (kinds.contains("branch")) {
             keepSolved(network.getBranchStream().toList(),
                     b -> inSolvedNetwork(b.getTerminal1()) || inSolvedNetwork(b.getTerminal2()), "branch")

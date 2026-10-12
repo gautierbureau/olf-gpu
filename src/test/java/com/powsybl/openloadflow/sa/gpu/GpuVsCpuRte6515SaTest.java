@@ -185,7 +185,30 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
         return kept;
     }
 
-    private static List<Contingency> allBranchContingencies(Network network) {
+    private static List<Contingency> allBranchContingencies(Network network) throws java.io.IOException {
+        // OLF_GPU_SA_CTG_FILE=<file.json>: a FIXED list of contingencies, in powsybl's contingency JSON (a bare
+        // array of {id, elements}, or a contingency list object) instead of the kinds built below. The list is
+        // taken as is - no solved-network filter, OLF drops a contingency without impact itself - and the
+        // CTG_FIRST / CTG_EXCLUDE / CTG_ONLY levers still apply to it. The operational list for network.xiidm
+        // (14266 contingencies: lines, transformers, generators, busbar sections, shunts, SVC, HVDC, some
+        // multi-element) is such a file.
+        String ctgFile = System.getenv("OLF_GPU_SA_CTG_FILE");
+        if (ctgFile != null && !ctgFile.isEmpty()) {
+            com.fasterxml.jackson.databind.ObjectMapper om = com.powsybl.commons.json.JsonUtil.createObjectMapper()
+                    .registerModule(new com.powsybl.contingency.json.ContingencyJsonModule());
+            com.fasterxml.jackson.databind.JsonNode root = om.readTree(java.nio.file.Path.of(ctgFile).toFile());
+            com.fasterxml.jackson.databind.JsonNode array = root.isArray() ? root : root.get("contingencies");
+            List<Contingency> fixed = om.readerFor(new com.fasterxml.jackson.core.type.TypeReference<List<Contingency>>() { })
+                    .readValue(array);
+            java.util.Map<String, Long> byKind = new java.util.TreeMap<>();
+            for (Contingency c : fixed) {
+                for (var e : c.getElements()) {
+                    byKind.merge(e.getType().name(), 1L, Long::sum);
+                }
+            }
+            System.out.printf("  CTG_FILE %s: %d contingencies, elements by kind %s%n", ctgFile, fixed.size(), byKind);
+            return new java.util.ArrayList<>(fixed);
+        }
         // OLF_GPU_SA_ID_KIND=<id>[,<id>]: what CLASS an id actually is in the IIDM network. A mapper
         // reject naming an id the branch scope never built a contingency for is answered here: the
         // class says whether the harness could have covered it at all.

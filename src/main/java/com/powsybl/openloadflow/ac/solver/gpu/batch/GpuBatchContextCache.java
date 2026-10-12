@@ -57,6 +57,12 @@ public final class GpuBatchContextCache {
     static final int AUTO_MAX_CHUNK = 4096;
 
     private static CachedBatchContext cachedContext;
+    private static final java.util.concurrent.atomic.AtomicLong BUILDS = new java.util.concurrent.atomic.AtomicLong();
+
+    /** How many batched contexts this JVM has built (a reuse does not count). */
+    public static long buildCount() {
+        return BUILDS.get();
+    }
 
     /** The auto-sized chunk RECOMMENDATION for the extraction it was computed on, remembered for the
      *  whole run. {@code recommendBatchSize} prices the chunk against FREE device memory, so asking it
@@ -93,12 +99,18 @@ public final class GpuBatchContextCache {
         final GpuAcData data;
         final int chunkSize;
         final int mode;
+        /** The shared device structure the context was built on. The base load flow's VALUES path refreshes a
+         *  structure's device values in place and re-keys it (GpuAcStructures.rebind), after which this context
+         *  solves the refreshed values while {@code data} still describes the old ones: a request for the old
+         *  extraction must then resolve to ANOTHER structure and rebuild, not be handed this context. */
+        final long structure;
 
-        CachedBatchContext(long handle, GpuAcData data, int chunkSize, int mode) {
+        CachedBatchContext(long handle, GpuAcData data, int chunkSize, int mode, long structure) {
             this.handle = handle;
             this.data = data;
             this.chunkSize = chunkSize;
             this.mode = mode;
+            this.structure = structure;
         }
     }
 
@@ -109,8 +121,11 @@ public final class GpuBatchContextCache {
 
     /** Acquire a batched native context for this (data, chunkSize, mode), reusing the cache when it matches. */
     public static synchronized long acquireBatchContext(GpuAcData data, int chunkSize, int mode, int n) {
+        // the structure this extraction resolves to today (a hit on the shared cache, or a fresh build that a
+        // rebuilt context would need anyway); a cached context built on another one solves other values
+        long structure = GpuAcStructures.handle(n, data);
         if (cachedContext != null && cachedContext.chunkSize == chunkSize && cachedContext.mode == mode
-                && cachedContext.data.sameAs(data)) {
+                && cachedContext.data.sameAs(data) && cachedContext.structure == structure) {
             LOGGER.debug("Batched N-1: reusing cached GPU context (chunk {}, mode {})", chunkSize, mode);
             return cachedContext.handle;
         }
@@ -124,14 +139,15 @@ public final class GpuBatchContextCache {
         }
         // the shared structure comes from the per-extraction cache — when the base load flow ran
         // on the GPU with the same extraction (GpuAcDataCache hand-off), this is a device-side hit
-        long handle = GpuAcNewtonSolver.createBatchContext(GpuAcStructures.handle(n, data), chunkSize, mode,
+        long handle = GpuAcNewtonSolver.createBatchContext(structure, chunkSize, mode,
                 data.rlVrow(), data.rlMinQ(), data.rlMaxQ(), data.rlLoadQ(), data.rlVtarget(), data.rlMonitored(), data.rowSlope(),
                 data.dsPhiRow(), data.dsFactor(), data.dsSlackPhiRow(), data.dsSlackTargetP(),
                 data.dsBaseTargetP(), data.dsMaxDelta(), data.dsMinDelta(),
                 data.dsMode(), data.dsMarginUp(), data.dsMarginDown(),
                 data.dsSlackMarginUp(), data.dsSlackMarginDown());
         GpuBatchOuterLoopTables.installRlElection(handle, data);
-        cachedContext = new CachedBatchContext(handle, data, chunkSize, mode);
+        cachedContext = new CachedBatchContext(handle, data, chunkSize, mode, structure);
+        BUILDS.incrementAndGet();
         return handle;
     }
 

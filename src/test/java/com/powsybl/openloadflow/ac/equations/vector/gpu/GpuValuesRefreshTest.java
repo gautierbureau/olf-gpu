@@ -81,13 +81,19 @@ class GpuValuesRefreshTest {
         assertTrue(d1.sameStructureAs(d2), "an r1 (tap) move must keep the CSR pattern (sameStructureAs)");
         assertFalse(d1.sameAs(d2), "an r1 move must change the element parameter packs (not sameAs)");
 
-        // VALUES path: re-upload the packs into the existing context (no rebuild, no re-analysis).
-        GpuAcNewtonSolver.refreshContextValues(h1, d2.cbIn(), d2.obIn(), d2.shIn(), d2.hvIn(), d2.ziIn());
-        double[] outRefreshed = GpuAcNewtonSolver.solveContext(h1, x0, targets, rowMode, MAX_ITER, TOL, 0.0, 0, 0, 0.0, 0.0, 0.0, new int[n]);
-
-        // Reference: a context built FROM SCRATCH on the new values.
+        // Reference: a context built FROM SCRATCH on the new values - built BEFORE the refresh below, so the
+        // structure cache cannot alias it onto the refreshed one (the two extractions differ in values).
         long h2 = GpuAcNewtonSolver.createContext(GpuAcStructures.handle(n, d2));
         double[] outRebuilt = GpuAcNewtonSolver.solveContext(h2, x0, targets, rowMode, MAX_ITER, TOL, 0.0, 0, 0, 0.0, 0.0, 0.0, new int[n]);
+
+        // VALUES path: re-upload the packs into the existing context (no rebuild, no re-analysis). The
+        // context's structure is the SHARED one keyed by d1: a refresh writes its device values, so the
+        // key must move with them (GpuAcStructures.rebind, what GpuNewtonRaphson does after its own
+        // refresh) - left keyed by d1, the next stock-Eurostag extraction content-matches d1 and solves
+        // the tap-moved system (measured: a later load flow returned a state at OLF residual 8.79).
+        GpuAcNewtonSolver.refreshContextValues(h1, d2.cbIn(), d2.obIn(), d2.shIn(), d2.hvIn(), d2.ziIn());
+        GpuAcStructures.rebind(d1, d2);
+        double[] outRefreshed = GpuAcNewtonSolver.solveContext(h1, x0, targets, rowMode, MAX_ITER, TOL, 0.0, 0, 0, 0.0, 0.0, 0.0, new int[n]);
 
         double worst = 0;
         double moved = 0;

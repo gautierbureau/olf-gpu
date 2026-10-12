@@ -5857,6 +5857,41 @@ __device__ inline double dqTargetQOf(int nTqOv, const int* tqOvKey, const double
     return mTargetQ[idx];
 }
 
+// OLF's frozen targetQ (generation minus load) of a PINNED reactive-limit entry this scenario, the value its peers'
+// DISTR_Q targets sum (AcTargetVector: otherControllerBus.getTargetQ()) and a pilot-self carrier hosts. The
+// entry's own balance row carries that value whenever the pin gave it one (mode 4): the reactive-limit kernel's
+// limit, rlInitTgtQ for a realistic-voltage freeze (OLF freezes at the INITIAL generation target Q), the injection
+// channel's target for a bus that lost generators, the limit drift included - one source for the member's own
+// row and for its peers. A pinned entry whose row is not a balance (a pilot-self pilot keeps its voltage identity)
+// takes the pin rule directly. Rebuilding every pinned peer from `lt == 1 ? rlMinQ : rlMaxQ` put a realistic-
+// voltage freeze at its CEILING (g1 frozen at 10 MVar with a 6000 MVar maxQ on the three-controller fixture)
+// and a generator-lost member at its lost generator's maximum.
+__device__ inline double pinnedTargetQ(int s, int e, int n, int nrl, const int* mode, const double* target,
+                                       const int* rlVrowArr, const int* rlQrow, const int* relocOwn,
+                                       const char* limitType, const double* rlMinQ, const double* rlMaxQ,
+                                       const double* rlLoadQ, int cvStride, const double* rlInitTgtQ,
+                                       const char* rlGenLost) {
+    int vrow = rlVrowArr[e];
+    int qrow = (rlQrow != nullptr && rlQrow[e] >= 0) ? rlQrow[e] : vrow;
+    if (qrow >= 0 && mode[(size_t) s * n + qrow] == 4) {
+        return target[(size_t) s * n + qrow];
+    }
+    if (vrow >= 0 && vrow != qrow && mode[(size_t) s * n + vrow] == 4) {   // the balance went home (coupler opened)
+        return target[(size_t) s * n + vrow];
+    }
+    if (qrow >= 0 && relocOwn != nullptr && relocOwn[qrow] >= 0 && mode[(size_t) s * n + relocOwn[qrow]] == 4) {
+        return target[(size_t) s * n + relocOwn[qrow]];
+    }
+    char lt = limitType[(size_t) s * nrl + e];
+    size_t li = cvStride ? (size_t) s * nrl + e : (size_t) e;
+    double lim = (lt == 3 || lt == 4) && rlInitTgtQ != nullptr ? rlInitTgtQ[e]
+               : (lt == 1 || lt == 3) ? rlMinQ[li] : rlMaxQ[li];
+    if (lt == RL_LIMIT_FROZEN && rlGenLost != nullptr && rlGenLost[(size_t) s * nrl + e]) {
+        lim = 0.0;                                       // every generator lost: no generation term at all
+    }
+    return lim - rlLoadQ[li];
+}
+
 __global__ void updateDistrQTargetsBatch(int nMembers, int nScenarios, int n, int nrl,
                                          const double* mKey, const int* mRlEntry,
                                          const int* mGroupStart, const int* mGroupCount,
@@ -5872,7 +5907,8 @@ __global__ void updateDistrQTargetsBatch(int nMembers, int nScenarios, int n, in
                                          const int* mTgtPtr, const int* mTgtPeer,
                                          const int* psEntry, int psMask, const int* relocOwn,
                                 const char* dqSub, const int* qrMemberStart, const char* rlGenLost,
-                                const int* qrDepBase, const char* veqOff) {
+                                const int* qrDepBase, const char* veqOff,
+                                const double* rlInitTgtQ, const int* rlQrow) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nMembers * nScenarios) return;
     int k = tid % nMembers;
@@ -5955,21 +5991,14 @@ __global__ void updateDistrQTargetsBatch(int nMembers, int nScenarios, int n, in
             }
             char plt = limitType[(size_t) s * nrl + pe];
             if (plt != 0) {
-                // pilot-self, pilot PINNED: the carrier hosts the pilot's own balance, q = its limit (the RL
-                // kernel leaves the pilot's row a V identity in this case). Realistic-V pins (3/4) take the
-                // nearer limit here; rlInitTgtQ is not in this kernel's tables.
-                size_t pli = cvStride ? (size_t) s * nrl + pe : (size_t) pe;
-                double lim = (plt == 1 || plt == 3) ? rlMinQ[pli] : rlMaxQ[pli];
-                // A pilot whose bus LOST EVERY GENERATOR (RL_LIMIT_FROZEN via setBatchRlGenLost) is pinned at no
-                // limit: OLF's BUS_TARGET_Q there has no generation term. Falling through to rlMaxQ asked the dead
-                // bus for its lost generator's maximum - rte6515 GEN-676 with every busbar section in the list:
-                // the carrier's target 0.957 (1.0 - 0.043) against OLF's -0.043, VL-676_1 supplying the 100 MVAr,
-                // pinned, unpinned, and 1.133 MW distributed where OLF distributes nothing. Same rule as
-                // updatePilotVeqBatch's flip target.
-                if (plt == RL_LIMIT_FROZEN && rlGenLost != nullptr && rlGenLost[(size_t) s * nrl + pe]) {
-                    lim = 0.0;
-                }
-                target[(size_t) s * n + mrow] = lim - rlLoadQ[pli];
+                // pilot-self, pilot PINNED: the carrier hosts the pilot's own balance at OLF's frozen targetQ (the RL
+                // kernel leaves the pilot's row a V identity in this case, so pinnedTargetQ takes the pin rule: the
+                // limit, the initial generation target Q of a realistic-voltage freeze, nothing for a bus whose every
+                // generator is lost - rte6515 GEN-676 with every busbar section in the list read its lost generator's
+                // maximum here: the carrier's target 0.957 against OLF's -0.043, VL-676_1 supplying the 100 MVAr,
+                // pinned, unpinned, and 1.133 MW distributed where OLF distributes nothing).
+                target[(size_t) s * n + mrow] = pinnedTargetQ(s, pe, n, nrl, mode, target, rlVrowArr, rlQrow, relocOwn,
+                        limitType, rlMinQ, rlMaxQ, rlLoadQ, cvStride, rlInitTgtQ, rlGenLost);
                 return;
             }
             // pilot-self, pilot UNPINNED: its q feeds the DISTR_Q rows weighted and the carrier hosts its OWN
@@ -6001,11 +6030,11 @@ __global__ void updateDistrQTargetsBatch(int nMembers, int nScenarios, int n, in
         int re = mRlEntry[m];
         bool pinned = re >= 0 && limitType[(size_t) s * nrl + re] != 0;
         if (pinned) {
-            // a FROZEN member's targetQ IS its q limit: OLF's RL switch calls setGenerationTargetQ(limit),
-            // so getTargetQ() = limit - loadTargetQ. Unpinned members keep their packed targetQ.
-            size_t li = cvStride ? (size_t) s * nrl + re : (size_t) re;
-            char lt = limitType[(size_t) s * nrl + re];
-            sumTargetQ += (lt == 1 ? rlMinQ[li] : rlMaxQ[li]) - rlLoadQ[li];
+            // a FROZEN member's targetQ is what OLF froze it at (freezeGenerationTargetQ...: the limit on a
+            // reactive-limit switch, the INITIAL generation target Q on a realistic-voltage freeze), minus its
+            // load - the value the member's own balance row enforces. Unpinned members keep their packed targetQ.
+            sumTargetQ += pinnedTargetQ(s, re, n, nrl, mode, target, rlVrowArr, rlQrow, relocOwn,
+                    limitType, rlMinQ, rlMaxQ, rlLoadQ, cvStride, rlInitTgtQ, rlGenLost);
         } else {
             sumTargetQ += dqTargetQOf(nTqOv, tqOvKey, tqOvVal, s, nMembers, m, mTargetQ);
         }
@@ -10791,7 +10820,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                     ctx->hasDqSub ? ctx->dDqSub.as<char>() : nullptr, ctx->hasDqSub ? ctx->dQrMemberStart.as<int>() : nullptr,
                     ctx->nRlGenLost > 0 ? ctx->dRlGenLost.as<char>() : nullptr,
                     ctx->st->dQrDepBase.p ? ctx->st->dQrDepBase.as<int>() : nullptr,
-                    ctx->dQrVeqOff.p ? ctx->dQrVeqOff.as<char>() : nullptr);
+                    ctx->dQrVeqOff.p ? ctx->dQrVeqOff.as<char>() : nullptr,
+                        ctx->dRlInitTgtQ.as<double>(), ctx->dRlQrow.as<int>());
         }
     };
     std::vector<char> rlActive(nS), rlSwitched(nS), wasActive(nS);

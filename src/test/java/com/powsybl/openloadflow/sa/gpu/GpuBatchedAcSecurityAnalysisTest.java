@@ -4211,6 +4211,61 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         return network;
     }
 
+    /** robustRealisticVNetwork with two more REMOTE controllers of b2 on healthy 400 kV buses (g4 at b4, g5 at b5,
+     *  reactive ranges +-3000 MVar against g1's [-3000, 6000], so the keys leave g1 43 % of the duty and its 20 kV
+     *  bus still collapses on the l23b outage while g4 and g5 stay inside their ranges). OLF then freezes g1 at its INITIAL generation target Q (10 MVar,
+     *  MIN_REALISTIC_V) while g4 and g5 stay a two-member sharing group whose DISTR_Q targets carry
+     *  qPct x targetQ(g1) - the frozen 10 MVar, not g1's 6000 MVar ceiling. */
+    private static Network realisticFreezePeersNetwork() {
+        Network network = robustRealisticVNetwork();
+        // twice the transformer reactance: g1 now takes 43 % of the group's absorption instead of all of it, and its
+        // 20 kV bus must still leave the realistic band on the outage
+        network.getTwoWindingsTransformer("t12a").setX(30);
+        com.powsybl.iidm.network.Terminal pilot = network.getTwoWindingsTransformer("t12a").getTerminal2();
+        for (String k : List.of("4", "5")) {
+            com.powsybl.iidm.network.VoltageLevel vl = network.newVoltageLevel().setId("vl" + k).setNominalV(400)
+                    .setTopologyKind(com.powsybl.iidm.network.TopologyKind.BUS_BREAKER).add();
+            vl.getBusBreakerView().newBus().setId("b" + k).add();
+            network.newLine().setId("l2" + k).setR(0.5).setX(5)
+                    .setBus1("b2").setConnectableBus1("b2").setBus2("b" + k).setConnectableBus2("b" + k).add();
+            vl.newGenerator().setId("g" + k).setMaxP(300).setMinP(0).setTargetP(50)
+                    .setBus("b" + k).setConnectableBus("b" + k)
+                    .setVoltageRegulatorOn(true).setRegulatingTerminal(pilot).setTargetV(401).setTargetQ(0).add()
+                    .newMinMaxReactiveLimits().setMinQ(-3000).setMaxQ(3000).add();
+        }
+        return network;
+    }
+
+    /** A member FROZEN by the realistic-voltage check (OLF: generation target Q frozen at its INITIAL value,
+     *  MIN/MAX_REALISTIC_V) enters its peers' DISTR_Q targets at that frozen value (AcTargetVector sums
+     *  otherControllerBus.getTargetQ()). The device rebuilt a pinned peer's targetQ from its Q limit, which for a
+     *  realistic-voltage freeze is not where OLF froze it. g1 (10 MVar initial, 6000 MVar ceiling) frozen on l23b,
+     *  g4/g5 sharing: at 1e-12. */
+    @org.junit.jupiter.api.Test
+    void deviceRealisticVoltageFrozenMemberInPeersTargetsMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = realisticFreezePeersNetwork();
+        List<Contingency> ctgs = List.of(new Contingency("l23b", new BranchContingency("l23b")));
+        com.powsybl.loadflow.LoadFlowParameters lfp = robustRealisticVParameters(true);
+        // non-vacuity: OLF freezes g1 at its initial target Q on the contingency - the transformer's b1-side
+        // reactive flow IS g1's output (b1 carries g1 alone), read off the CPU's own branch result
+        com.powsybl.security.SecurityAnalysisParameters sap = new com.powsybl.security.SecurityAnalysisParameters();
+        sap.setLoadFlowParameters(lfp);
+        List<com.powsybl.security.monitor.StateMonitor> monitors = List.of(new com.powsybl.security.monitor.StateMonitor(
+                com.powsybl.contingency.ContingencyContext.all(), java.util.Set.of("t12a"), java.util.Set.of(), java.util.Set.of()));
+        SecurityAnalysisResult cpu = runSecurityAnalysis(network, ctgs, monitors, sap);
+        assertEquals(com.powsybl.loadflow.LoadFlowResult.ComponentResult.Status.CONVERGED, cpu.getPreContingencyResult().getStatus());
+        var post = cpu.getPostContingencyResults().get(0);
+        assertEquals(com.powsybl.security.PostContingencyComputationStatus.CONVERGED, post.getStatus());
+        double q1 = post.getNetworkResult().getBranchResult("t12a").getQ1();
+        assertEquals(10.0, Math.abs(q1), 0.1, "g1 frozen at its initial 10 MVar on the CPU (q1 of t12a = " + q1
+                + "; the branch flow carries the default criterion's slack; unfrozen it absorbs about 900 MVar)");
+        GpuBatchScopeCensus.reset();
+        assertGpuMatchesCpu(network, ctgs, 1e-12, lfp, true);
+        assertEquals(java.util.Set.of(), GpuBatchScopeCensus.planRefusedIds(), "census=" + GpuBatchScopeCensus.snapshot());
+    }
+
     private static com.powsybl.loadflow.LoadFlowParameters remotePinParameters() {
         com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
                 .setDistributedSlack(true).setUseReactiveLimits(true);

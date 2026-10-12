@@ -255,6 +255,13 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
 
     /** Ends a lazy voltage restore: {@code onlyDisabled} null restores every bus voltage, otherwise only those buses
      *  (the disabled ones of a device-answered contingency, whose voltages its injection does not write). */
+    /** Drops the run's file-backed state map, if its states went to one (GpuStateStore). */
+    private static void closeStateStore(RunState rs) {
+        if (rs != null && rs.precomputed != null && rs.precomputed.states() instanceof GpuStateStore store) {
+            store.close();
+        }
+    }
+
     private static void restoreStaleVoltages(RunState rs, java.util.Collection<LfBus> onlyDisabled) {
         if (rs.staleVoltages == null) {
             return;
@@ -833,6 +840,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                 runState.get().restoreCheck.print();
                 System.err.println("RESTORE_CHECK targeted restores (cumulative this run): " + LAST_TARGETED_RESTORE_COUNT.get());
             }
+            closeStateStore(runState.get());                 // a file-backed state map is dropped with the run
             runState.remove();                               // pooled partition threads must not leak a run's state
             if (System.getenv("OLF_GPU_PHASE_TIME") != null) {
                 // CUMULATIVE over the JVM, never cleared: threadCount > 1 runs one partition per
@@ -1096,6 +1104,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
             return;
         }
         long tPre = System.nanoTime();
+        closeStateStore(rs);                                 // a previous batch's file-backed states
         rs.precomputed = GpuBatchPrecomputer.precompute(network, rs.lfNetwork, rs.context,
                 rs.contingencies, rs.operatorStrategies, rs.actions, rs.batchDistributedSlack,
                 rs.batchReactiveLimits, rs.batchReactiveLimitTol, rs.batchSlackDistTol, rs.batchConvEpsPerEq,

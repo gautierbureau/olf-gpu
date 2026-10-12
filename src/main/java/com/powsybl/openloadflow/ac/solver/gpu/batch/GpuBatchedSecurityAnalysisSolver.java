@@ -429,7 +429,11 @@ public final class GpuBatchedSecurityAnalysisSolver {
         for (int i = 0; i < contingencies.size(); i++) {
             String id = contingencies.get(i).contingencyId();
             double[] result = resultsByIndex[i];
-            if (result != null) {                          // the state is the result row's first n entries
+            if (result != null && result.length == 3) {    // the state went to the sink: the result carries no state
+                results.add(new BatchScenarioResult(id, null, (int) result[0], result[1], (int) result[2],
+                        plan.islandedNumsByIndex()[i] != null ? plan.islandedNumsByIndex()[i] : new int[0],
+                        preDistributedByIndex[i], distributedByIndex[i]));
+            } else if (result != null) {                   // the state is the result row's first n entries
                 results.add(new BatchScenarioResult(id, result, (int) result[n], result[n + 1], (int) result[n + 2],
                         plan.islandedNumsByIndex()[i] != null ? plan.islandedNumsByIndex()[i] : new int[0],
                         preDistributedByIndex[i], distributedByIndex[i]));

@@ -350,6 +350,16 @@ final class GpuBatchPrecomputer {
             }
             GpuBatchElementMapper screenMapper = new GpuBatchElementMapper(net);
 
+            // Every batched scenario's state is held until the analysis ends (the violation screen decides on all of
+            // them at once, the results are injected later in OLF's loop). Past GpuStateStore's threshold they go to
+            // a temporary file as each chunk completes instead of the heap: network.xiidm's all-kinds + busbar list
+            // is 37k states of 280 KB, 10.4 GB, more than this machine's heap can hold beside the rest of the run.
+            if (config.stateSink() == null && config.outerLoopMode() != OuterLoopMode.JAVA
+                    && com.powsybl.openloadflow.sa.gpu.GpuStateStore.wanted(batch.size(), baseState.length)) {
+                config = config.withStateSink(com.powsybl.openloadflow.sa.gpu.GpuStateStore.create(baseState.length));
+                LOGGER.info("Batched N-1: {} states of {} entries go to a temporary file (over {} bytes)", batch.size(),
+                        baseState.length, com.powsybl.openloadflow.sa.gpu.GpuStateStore.thresholdBytes());
+            }
             List<BatchScenarioResult> results = config.outerLoopMode() == OuterLoopMode.JAVA
                     ? GpuBatchedSecurityAnalysisSolver.solveBatchN1JavaOuterLoops(
                             net, context, baseState, batch, es, target,
@@ -361,7 +371,9 @@ final class GpuBatchPrecomputer {
             results = retryRejectedOnDevice(results, batch, net, baseState, es, target, context,
                     distributedSlack, reactiveLimits, reactiveLimitTol, slackDistTol, convEpsPerEq,
                     reportNode, config);
-            Map<String, double[]> states = new HashMap<>();
+            // the converged states: the sink when the run has one (every chunk put its states there as it
+            // completed), a heap map otherwise
+            Map<String, double[]> states = config.stateSink() != null ? config.stateSink() : new HashMap<>();
             Map<String, int[]> islandedBuses = new HashMap<>();
             java.util.Set<String> exhausted = new java.util.HashSet<>();
             Map<String, Double> preDistributed = new HashMap<>();
@@ -374,7 +386,9 @@ final class GpuBatchPrecomputer {
                                     ? " (never batched: refused at plan time)" : ""));
                 }
                 if (r.hasConverged()) {
-                    states.put(r.contingencyId(), r.state());
+                    if (r.state() != null) {                 // null: already in the sink
+                        states.put(r.contingencyId(), r.state());
+                    }
                     recordDistributed(r, preDistributed, distributed);
                     if (r.islandedBusNums().length > 0) {
                         islandedBuses.put(r.contingencyId(), r.islandedBusNums());

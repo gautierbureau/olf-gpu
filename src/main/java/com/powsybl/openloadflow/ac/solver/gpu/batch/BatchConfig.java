@@ -57,7 +57,11 @@ public record BatchConfig(int lsMode, double maxDv, double maxDphi, boolean tran
                           double genVcMinNominalV,
                           boolean rlRobustMode, double minRealisticVoltage, double maxRealisticVoltage,
                           double minNominalVoltageRealisticVoltageCheck, int realisticFixingLoop,
-                          boolean robustSolveMode, SlackRelocation slackRelocation) {
+                          boolean robustSolveMode, SlackRelocation slackRelocation,
+                          /** Where the chunk solver puts every CONVERGED scenario's state as its chunk completes, keyed by
+                           *  contingency id, instead of carrying it in its result - a run whose states would not fit the
+                           *  heap gives a disk-backed map (GpuStateStore); null keeps the states in the results. */
+                          java.util.Map<String, double[]> stateSink) {
 
     /** How OLF re-picks the slack when a contingency isolates it (PropagatedContingency: every bus outside the
      *  largest connected component becomes ineligible, LfSynchronousNetworkImpl re-runs the RUN's slack-bus
@@ -93,7 +97,7 @@ public record BatchConfig(int lsMode, double maxDv, double maxDphi, boolean tran
             true, com.powsybl.openloadflow.ac.AcLoadFlowParameters.DEFAULT_MIN_REALISTIC_VOLTAGE,
             com.powsybl.openloadflow.ac.AcLoadFlowParameters.DEFAULT_MAX_REALISTIC_VOLTAGE,
             com.powsybl.openloadflow.ac.AcLoadFlowParameters.DEFAULT_MIN_NOMINAL_VOLTAGE_REALISTIC_VOLTAGE_CHECK, -1,
-            false, null);
+            false, null, null);
 
     /**
      * This config with the ROBUST single-matrix solve (mode 6) selected, for the SECOND device pass over
@@ -113,7 +117,19 @@ public record BatchConfig(int lsMode, double maxDv, double maxDphi, boolean tran
                 hvdcLimits, secondaryVoltageControl, minPlausibleTargetV, maxPlausibleTargetV, voltageMonitoring,
                 continuousPhaseControl, contingencyLossPreDistribution, rlCurveExtrapolate, forceTargetQ, perEqCriteria,
                 genVcMinNominalV, rlRobustMode, minRealisticVoltage, maxRealisticVoltage,
-                minNominalVoltageRealisticVoltageCheck, realisticFixingLoop, true, slackRelocation);
+                minNominalVoltageRealisticVoltageCheck, realisticFixingLoop, true, slackRelocation, stateSink);
+    }
+
+    /** This config with the given state sink (see {@link #stateSink()}). */
+    public BatchConfig withStateSink(java.util.Map<String, double[]> sink) {
+        return new BatchConfig(lsMode, maxDv, maxDphi, transformerControl, maxOuterIterations, maxPqPvSwitch,
+                dsRejectResidual, outerLoopMode, dsParams, incrementalTransformerControl, incTvcMaxTapShift,
+                incrementalShuntControl, incShuntMaxSectionShift, simpleShuntControl, incrementalRpcControl,
+                incrementalPhaseControl, simpleTransformerControl, tvcUseInitialTapPosition, hvdcFreezing,
+                hvdcLimits, secondaryVoltageControl, minPlausibleTargetV, maxPlausibleTargetV, voltageMonitoring,
+                continuousPhaseControl, contingencyLossPreDistribution, rlCurveExtrapolate, forceTargetQ, perEqCriteria,
+                genVcMinNominalV, rlRobustMode, minRealisticVoltage, maxRealisticVoltage,
+                minNominalVoltageRealisticVoltageCheck, realisticFixingLoop, robustSolveMode, slackRelocation, sink);
     }
 
     int dsRejectResidualFlag() {

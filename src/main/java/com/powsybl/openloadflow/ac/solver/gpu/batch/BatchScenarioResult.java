@@ -29,7 +29,7 @@ public record BatchScenarioResult(String contingencyId, double[] state, int iter
                                   double preDistributedActivePower, double distributedActivePower) {
     public BatchScenarioResult {
         Objects.requireNonNull(contingencyId);
-        Objects.requireNonNull(state);
+        // state may be null: the chunk solver put it in the run's state sink (BatchConfig.stateSink) as its chunk completed
     }
 
     /** A result whose contingency loss pre-distribution was not replayed ({@code preDistributedActivePower}

@@ -348,7 +348,8 @@ final class GpuSaRunScope {
                 acParameters.getMinNominalVoltageRealisticVoltageCheck(),
                 com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchOuterLoopTables.realisticFixingLoop(acParameters),
                 false,                                       // the robust retry pass derives its own config
-                slackRelocation(acParameters));
+                slackRelocation(acParameters),
+                null);                                       // the precomputer picks the state sink per run
         return new Scope(batchDisabled, unsupportedOuterLoops, distributedSlack, reactiveLimits,
                 slackDistTol, reactiveLimitTol, convEpsPerEq, batchConfig);
     }

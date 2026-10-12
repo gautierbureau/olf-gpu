@@ -3102,6 +3102,65 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
     void deviceRemoteGroupUnpinnedByContingencyRecomputesTargetQMatchesCpu() {
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = unpinnedRemoteGroupNetwork();
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setDistributedSlack(true).setUseReactiveLimits(true);
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
+                .setSlackBusSelectionMode(com.powsybl.openloadflow.network.SlackBusSelectionMode.NAME)
+                .setSlackBusesIds(List.of("vl0_0"));
+        assertGpuMatchesCpu(network, List.of(new Contingency("lpq", new com.powsybl.contingency.LineContingency("lpq"))),
+                1e-12, lfp);
+        assertEquals(1, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(),
+                "the contingency must batch (or the test proves nothing)");
+    }
+
+    /** maxPqPvSwitch = 0: OLF's switchPqPv blocks EVERY PQ -> PV switch (a bus's pvPqSwitchCount is never
+     *  below 0), so a bus pinned in the base stays pinned through every contingency. The device read 0 as
+     *  "unset" and applied OLF's default of 3: on the fixture above both members un-pin on the device
+     *  where the CPU keeps them pinned. The two CPU answers (cap 0 / default cap) are first shown to
+     *  differ on a member bus, or the cap would not be exercised. GPU SA == CPU SA at 1e-12. */
+    @org.junit.jupiter.api.Test
+    void deviceHonoursZeroPqPvSwitchCapMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = unpinnedRemoteGroupNetwork();
+        List<Contingency> contingencies = List.of(new Contingency("lpq", new com.powsybl.contingency.LineContingency("lpq")));
+        java.util.function.IntFunction<com.powsybl.loadflow.LoadFlowParameters> params = cap -> {
+            com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                    .setDistributedSlack(true).setUseReactiveLimits(true);
+            com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
+                    .setSlackBusSelectionMode(com.powsybl.openloadflow.network.SlackBusSelectionMode.NAME)
+                    .setSlackBusesIds(List.of("vl0_0"))
+                    .setReactiveLimitsMaxPqPvSwitch(cap);
+            return lfp;
+        };
+        // the cap must matter here: the CPU keeps both members pinned at 0 and un-pins them at the default
+        double vCapped = cpuPostContingencyV(network, contingencies, params.apply(0), "vlc1");
+        double vDefault = cpuPostContingencyV(network, contingencies, params.apply(3), "vlc1");
+        assertTrue(Math.abs(vCapped - vDefault) > 0.1,
+                "CPU at cap 0 vs the default cap: " + vCapped + " vs " + vDefault + " kV, the cap is not exercised");
+        GpuBatchScopeCensus.reset();
+        assertGpuMatchesCpu(network, contingencies, 1e-12, params.apply(0));
+        assertEquals(1, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(),
+                "the contingency must batch (or the test proves nothing)");
+    }
+
+    /** The post-contingency voltage of a monitored voltage level's bus, CPU security analysis. */
+    private double cpuPostContingencyV(Network network, List<Contingency> contingencies,
+                                       com.powsybl.loadflow.LoadFlowParameters lfp, String voltageLevelId) {
+        com.powsybl.security.SecurityAnalysisParameters sap = new com.powsybl.security.SecurityAnalysisParameters();
+        sap.setLoadFlowParameters(lfp);
+        var monitors = List.of(new com.powsybl.security.monitor.StateMonitor(
+                com.powsybl.contingency.ContingencyContext.all(), java.util.Set.of(), java.util.Set.of(voltageLevelId), java.util.Set.of()));
+        SecurityAnalysisResult cpu = runSecurityAnalysis(network, contingencies, monitors, sap);
+        assertEquals(com.powsybl.security.PostContingencyComputationStatus.CONVERGED, cpu.getPostContingencyResults().get(0).getStatus());
+        return cpu.getPostContingencyResults().get(0).getNetworkResult().getBusResults().get(0).getV();
+    }
+
+    /** A remote voltage-control group whose members are ALL pinned at MAX_Q in the base (a radial 200 MVar
+     *  load at vlq) and all UNPINNED by the contingency (losing that radial line) - see
+     *  {@link #deviceRemoteGroupUnpinnedByContingencyRecomputesTargetQMatchesCpu()}. */
+    private static Network unpinnedRemoteGroupNetwork() {
         Network network = Network.create("unpinned-remote-group", "code");
         com.powsybl.iidm.network.Substation s = network.newSubstation().setId("s").add();
         for (String vl : List.of("vl0", "vlp", "vlq", "vlc1", "vlc2")) {
@@ -3133,15 +3192,7 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         line.accept("lpc2", new String[] {"vlp", "vlc2"});
         line.accept("l0c1", new String[] {"vl0", "vlc1"});
         line.accept("l0c2", new String[] {"vl0", "vlc2"});
-        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
-                .setDistributedSlack(true).setUseReactiveLimits(true);
-        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
-                .setSlackBusSelectionMode(com.powsybl.openloadflow.network.SlackBusSelectionMode.NAME)
-                .setSlackBusesIds(List.of("vl0_0"));
-        assertGpuMatchesCpu(network, List.of(new Contingency("lpq", new com.powsybl.contingency.LineContingency("lpq"))),
-                1e-12, lfp);
-        assertEquals(1, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(),
-                "the contingency must batch (or the test proves nothing)");
+        return network;
     }
 
     /** A BRANCH outage combined with a GENERATOR outage on the bus that branch islands, where the lost

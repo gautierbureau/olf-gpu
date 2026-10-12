@@ -864,7 +864,9 @@ public final class GpuAcNewtonSolver {
                 // one-shot: no per-scenario gen-override flips, so any scenario's row mode IS the base row mode
                 return solveBatchContext(handle, x0Base, targetBase, rowMode, rowMode[0], disabledElementMask,
                         new int[0], new double[0], new int[0], new double[0], new double[0], new double[0], new double[0], null, null, null, null, null, null, null, null,
-                        maxIter, tol, reactiveLimitTol, slackDistTol, 0.0, 0, 0.0, 0.0, null, null, null, null, null, null, null, null, 0, 0, 0, 0, 0, null, null);
+                        maxIter, tol, reactiveLimitTol, slackDistTol, 0.0, 0, 0.0, 0.0, null, null, null, null, null, null, null, null, 0,
+                        com.powsybl.openloadflow.ac.outerloop.ReactiveLimitsOuterLoop.MAX_SWITCH_PQ_PV_DEFAULT_VALUE,   // OLF's cap: 0 means never switch back
+                        0, 0, 0, null, null);
             } finally {
                 destroyBatchContext(handle);
             }

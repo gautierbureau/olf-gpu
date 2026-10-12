@@ -10387,7 +10387,9 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                                              || ctx->nmon > 0 || ctx->nTvc > 0 || ctx->nShc > 0 || ctx->nFlc > 0 || ctx->nCph > 0
                                              || ctx->nTvd > 0 || ctx->nSvd > 0 || ctx->nSvc > 0);
     const int RL_MAX_OUTER = maxOuterProductive > 0 ? maxOuterProductive : 20;   // OLF maxOuterLoopIterations
-    const int RL_MAX_SWITCH = rlMaxSwitch > 0 ? rlMaxSwitch : 3;   // per-bus PV→PQ count cap (OLF maxPqPvSwitch)
+    // per-bus PV→PQ count cap (OLF maxPqPvSwitch): 0 is OLF's "never switch back" and is honoured as such;
+    // only a negative value (no cap given) takes OLF's default of 3.
+    const int RL_MAX_SWITCH = rlMaxSwitch >= 0 ? rlMaxSwitch : 3;
     static const char* swLogEnv = std::getenv("OLF_GPU_SW_LOG");
     const int swLogSlot = swLogEnv == nullptr ? -1 : (std::string(swLogEnv) == "all" ? -2 : std::atoi(swLogEnv));
     // OLF_GPU_ITER_LOG=1: EVERY scenario's stopping decision at every Newton iteration (ITER_LOG), the score of

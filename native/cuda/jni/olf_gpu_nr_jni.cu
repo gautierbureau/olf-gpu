@@ -5722,9 +5722,11 @@ __global__ void forcedTargetQLimitsBatch(int nfq, int nS, int n, int nds, int ng
 
 __global__ void rlCurveLimitsBatch(int nrl, int nScenarios, int ncv, int n, int cvExtrapolate,
                                    const int* cvIdx, const double* cvIn, const double* cvPts,
+                                   const int* cvPtr, const int* cvList,
                                    const double* rlMinQ, const double* rlMaxQ, const double* rlLoadQ,
                                    const double* target,
                                    int nQOv, const int* qOvSlotEntry, const double* qOvMinMax,
+                                   const int* qOvPtr, const int* qOvList,
                                    const int* cvOvPtr, const int* cvOvEntry, const double* cvOvVal,
                                    const double* genCum, const char* genCumValid, int ngen,
                                    const int* dsPhiRow, const int* dsRowOv, int nds, const int* dgBus,
@@ -5738,8 +5740,13 @@ __global__ void rlCurveLimitsBatch(int nrl, int nScenarios, int ncv, int n, int 
     double lq = rlLoadQ[i];
     int ovLo = cvOvPtr != nullptr ? cvOvPtr[s] : 0;           // this scenario's curve repairs, if any
     int ovHi = cvOvPtr != nullptr ? cvOvPtr[s + 1] : 0;       // (CSR by scenario: a handful of entries)
-    for (int g = 0; g < ncv; g++) {
-        if (cvIdx[g * 5] != i) continue;
+    // This entry's OWN curves, CSR by entry (built at upload, pack order kept so the sums accumulate in the
+    // same order). The flat scan over every curve cost nrl * nS * ncv reads per launch - quadratic in the
+    // network's size, and this kernel runs before every reactive-limit decision of every chunk.
+    // (ncv == 0: no curve channel on this context, or a cached context's stale table from an earlier run - the
+    // pointers are not read; the kernel still runs for the Q overrides and the forced target Q below.)
+    for (int c = ncv > 0 ? cvPtr[i] : 0; c < (ncv > 0 ? cvPtr[i + 1] : 0); c++) {
+        int g = cvList[c];
         // A generator outage at this bus skews the p_now reconstruction below. pStep is the part of
         // the row target the OUTAGE moved (the lost P, and any shed load) — not slack power, so it
         // moves nobody's curve; shareScale renormalizes this generator's slack share over the
@@ -5810,8 +5817,11 @@ __global__ void rlCurveLimitsBatch(int nrl, int nScenarios, int ncv, int n, int 
     // static aggregate is run-constant and still holds it, while OLF's bus.getMinQ()/getMaxQ() sum only
     // the generators still there, so the scenario's own delta comes in here. Without curves this is the
     // ONLY reason the dynamic limits exist, which is why the seeding above starts from the static pair.
-    for (int k = 0; k < nQOv; k++) {
-        if (qOvSlotEntry[2 * k] == s && qOvSlotEntry[2 * k + 1] == i) {
+    // ...the scenario's OWN overrides, CSR by slot: the flat {slot, entry} scan cost nrl * nS * nQOv reads per
+    // launch, with nQOv about nS on a generator-outage chunk (one override per scenario).
+    for (int c = qOvPtr != nullptr ? qOvPtr[s] : 0; c < (qOvPtr != nullptr ? qOvPtr[s + 1] : 0); c++) {
+        int k = qOvList[c];
+        if (qOvSlotEntry[2 * k + 1] == i) {
             mn += qOvMinMax[3 * k];
             mx += qOvMinMax[3 * k + 1];
             lq += qOvMinMax[3 * k + 2];                      // a SHED load's reactive power: the pinned
@@ -7932,6 +7942,8 @@ struct BatchSolverContext {
     int ncv = 0;
     int cvExtrapolate = 0;                                 // OLF extrapolateReactiveLimits for curve gens
     DeviceBuf dCvIdx, dCvIn, dCvPts, dRlMinQDyn, dRlMaxQDyn;
+    DeviceBuf dCvPtr, dCvList;                             // the curves of each reactive-limit entry, CSR
+                                                           // (cvPtr[nrl + 1] into cvList[ncv], pack order kept)
     // forceTargetQInReactiveLimits (GpuBatchForcedTargetQ): generators whose IIDM target Q OLF clamps into their
     // curve limits at their CURRENT target P - on a bus whose Q balance carries it (qRow), or in a voltage-controlled
     // bus's reactive limits (rlIdx). fqIdx stride 7 {qRow, dsGenSlot, ptsOff, npts, dsBusIdx, baseQRowMode, rlIdx}; fqIn stride 5 {basePpu, rawTargetQPu, baseClampedPu, share,
@@ -10665,10 +10677,20 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     // does not count.
     // The reactive-limit limits become PER-SCENARIO as soon as either channel is live: curve limits at
     // the runtime P, or a generator lost at a bus that keeps voltage control taking its capability away.
-    DeviceBuf dRlQOvSlotEntry, dRlQOvMinMax;
+    DeviceBuf dRlQOvSlotEntry, dRlQOvMinMax, dRlQOvPtr, dRlQOvList;
     if (nRlQOv > 0) {
         dRlQOvSlotEntry.upload(rlQOvSlotEntry, static_cast<size_t>(nRlQOv) * 2 * sizeof(int));
         dRlQOvMinMax.upload(rlQOvMinMax, static_cast<size_t>(nRlQOv) * 3 * sizeof(double));   // {dMinQ, dMaxQ, dLoadQ}
+        // ...indexed by slot (CSR, entry order kept), so the dynamic-limits kernel reads its scenario's own
+        // overrides instead of scanning the chunk's.
+        std::vector<int> qPtr(nS + 1, 0);
+        std::vector<int> qList(nRlQOv);
+        for (int k = 0; k < nRlQOv; k++) qPtr[rlQOvSlotEntry[2 * k] + 1]++;
+        for (int t = 0; t < nS; t++) qPtr[t + 1] += qPtr[t];
+        std::vector<int> qCursor(qPtr.begin(), qPtr.end() - 1);
+        for (int k = 0; k < nRlQOv; k++) qList[qCursor[rlQOvSlotEntry[2 * k]]++] = k;
+        dRlQOvPtr.upload(qPtr.data(), qPtr.size() * sizeof(int));
+        dRlQOvList.upload(qList.data(), qList.size() * sizeof(int));
     }
     // Per-scenario curve repairs, CSR by scenario: the dynamic-limits kernel runs one thread per
     // (reactive-limit entry, scenario) and walks the curve entries inside, so a flat {slot, entry}
@@ -10875,10 +10897,12 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             if (useDynRlLimits) {                            // curve limits at the CURRENT (seeded) targets,
                 rlCurveLimitsBatch<<<grid(ctx->nrl * nS), BLOCK, 0, ctx->stream>>>(ctx->nrl, nS, ctx->ncv, n, ctx->cvExtrapolate,
                         ctx->dCvIdx.as<int>(), ctx->dCvIn.as<double>(), ctx->dCvPts.as<double>(),
+                        ctx->dCvPtr.as<int>(), ctx->dCvList.as<int>(),
                         ctx->dRlMinQ.as<double>(), ctx->dRlMaxQ.as<double>(), ctx->dRlLoadQ.as<double>(),
                         ctx->dTarget.as<double>(),
                         nRlQOv, nRlQOv > 0 ? dRlQOvSlotEntry.as<int>() : nullptr,
                         nRlQOv > 0 ? dRlQOvMinMax.as<double>() : nullptr,
+                        nRlQOv > 0 ? dRlQOvPtr.as<int>() : nullptr, nRlQOv > 0 ? dRlQOvList.as<int>() : nullptr,
                         nCvOv > 0 ? dCvOvPtr.as<int>() : nullptr,
                         nCvOv > 0 ? dCvOvEntry.as<int>() : nullptr,
                         nCvOv > 0 ? dCvOvVal.as<double>() : nullptr,
@@ -10958,10 +10982,12 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         if (useDynRlLimits) {                            // curve limits at the CURRENT (seeded) targets,
             rlCurveLimitsBatch<<<grid(ctx->nrl * nS), BLOCK, 0, ctx->stream>>>(ctx->nrl, nS, ctx->ncv, n, ctx->cvExtrapolate,
                     ctx->dCvIdx.as<int>(), ctx->dCvIn.as<double>(), ctx->dCvPts.as<double>(),
+                        ctx->dCvPtr.as<int>(), ctx->dCvList.as<int>(),
                     ctx->dRlMinQ.as<double>(), ctx->dRlMaxQ.as<double>(), ctx->dRlLoadQ.as<double>(),
                     ctx->dTarget.as<double>(),
                     nRlQOv, nRlQOv > 0 ? dRlQOvSlotEntry.as<int>() : nullptr,
                     nRlQOv > 0 ? dRlQOvMinMax.as<double>() : nullptr,
+                        nRlQOv > 0 ? dRlQOvPtr.as<int>() : nullptr, nRlQOv > 0 ? dRlQOvList.as<int>() : nullptr,
                     nCvOv > 0 ? dCvOvPtr.as<int>() : nullptr,
                     nCvOv > 0 ? dCvOvEntry.as<int>() : nullptr,
                     nCvOv > 0 ? dCvOvVal.as<double>() : nullptr,
@@ -13092,10 +13118,12 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             if (useDynRlLimits) {                            // curve limits at the CURRENT (post-DS) targets,
                 rlCurveLimitsBatch<<<grid(ctx->nrl * nS), BLOCK, 0, ctx->stream>>>(ctx->nrl, nS, ctx->ncv, n, ctx->cvExtrapolate,
                         ctx->dCvIdx.as<int>(), ctx->dCvIn.as<double>(), ctx->dCvPts.as<double>(),
+                        ctx->dCvPtr.as<int>(), ctx->dCvList.as<int>(),
                         ctx->dRlMinQ.as<double>(), ctx->dRlMaxQ.as<double>(), ctx->dRlLoadQ.as<double>(),
                         ctx->dTarget.as<double>(),
                         nRlQOv, nRlQOv > 0 ? dRlQOvSlotEntry.as<int>() : nullptr,
                         nRlQOv > 0 ? dRlQOvMinMax.as<double>() : nullptr,
+                        nRlQOv > 0 ? dRlQOvPtr.as<int>() : nullptr, nRlQOv > 0 ? dRlQOvList.as<int>() : nullptr,
                         nCvOv > 0 ? dCvOvPtr.as<int>() : nullptr,
                         nCvOv > 0 ? dCvOvEntry.as<int>() : nullptr,
                         nCvOv > 0 ? dCvOvVal.as<double>() : nullptr,
@@ -13666,10 +13694,12 @@ psgStep(ctx, nS, n, outer, "afterDistrQ");
         if (useDynRlLimits) {                                // limits at the FINAL targets
             rlCurveLimitsBatch<<<grid(ctx->nrl * nS), BLOCK, 0, ctx->stream>>>(ctx->nrl, nS, ctx->ncv, n, ctx->cvExtrapolate,
                     ctx->dCvIdx.as<int>(), ctx->dCvIn.as<double>(), ctx->dCvPts.as<double>(),
+                        ctx->dCvPtr.as<int>(), ctx->dCvList.as<int>(),
                     ctx->dRlMinQ.as<double>(), ctx->dRlMaxQ.as<double>(), ctx->dRlLoadQ.as<double>(),
                     ctx->dTarget.as<double>(),
                     nRlQOv, nRlQOv > 0 ? dRlQOvSlotEntry.as<int>() : nullptr,
                     nRlQOv > 0 ? dRlQOvMinMax.as<double>() : nullptr,
+                        nRlQOv > 0 ? dRlQOvPtr.as<int>() : nullptr, nRlQOv > 0 ? dRlQOvList.as<int>() : nullptr,
                     nCvOv > 0 ? dCvOvPtr.as<int>() : nullptr,
                     nCvOv > 0 ? dCvOvEntry.as<int>() : nullptr,
                     nCvOv > 0 ? dCvOvVal.as<double>() : nullptr,
@@ -14908,6 +14938,30 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
     ctx->dCvIdx.upload(cvIdx, static_cast<size_t>(ncv) * 5 * sizeof(int));
     ctx->dCvIn.upload(cvIn, static_cast<size_t>(ncv) * 5 * sizeof(double));
     ctx->dCvPts.upload(cvPts, static_cast<size_t>(env->GetArrayLength(jCvPts)) * sizeof(double));
+    // The curves of each reactive-limit entry, CSR (pack order kept within an entry): rlCurveLimitsBatch runs
+    // one thread per (entry, scenario) and walked EVERY curve to find its own.
+    {
+        std::vector<int> ptr(static_cast<size_t>(ctx->nrl) + 1, 0);
+        std::vector<int> list(ncv);
+        for (int g = 0; g < ncv; g++) {
+            int e = cvIdx[g * 5];
+            if (e < 0 || e >= ctx->nrl) {
+                env->ReleaseIntArrayElements(jCvIdx, cvIdx, JNI_ABORT);
+                env->ReleaseDoubleArrayElements(jCvIn, cvIn, JNI_ABORT);
+                env->ReleaseDoubleArrayElements(jCvPts, cvPts, JNI_ABORT);
+                ctx->ncv = 0;
+                env->ThrowNew(env->FindClass("java/lang/IllegalStateException"),
+                              "GPU batch: a curve's reactive-limit entry is outside the pack");
+                return;
+            }
+            ptr[e + 1]++;
+        }
+        for (int e = 0; e < ctx->nrl; e++) ptr[e + 1] += ptr[e];
+        std::vector<int> cursor(ptr.begin(), ptr.end() - 1);
+        for (int g = 0; g < ncv; g++) list[cursor[cvIdx[g * 5]]++] = g;
+        ctx->dCvPtr.upload(ptr.data(), ptr.size() * sizeof(int));
+        ctx->dCvList.upload(list.data(), list.size() * sizeof(int));
+    }
     ctx->dRlMinQDyn.alloc(static_cast<size_t>(ctx->nScenarios) * ctx->nrl * sizeof(double));
     ctx->dRlMaxQDyn.alloc(static_cast<size_t>(ctx->nScenarios) * ctx->nrl * sizeof(double));
     ctx->dRlLoadQDyn.alloc(static_cast<size_t>(ctx->nScenarios) * ctx->nrl * sizeof(double));

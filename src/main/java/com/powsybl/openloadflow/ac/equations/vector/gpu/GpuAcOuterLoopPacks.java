@@ -686,14 +686,21 @@ public final class GpuAcOuterLoopPacks {
                 // all-pinned-group fixture, 0.68 kV at the pilot.
                 boolean pilotSelf = isPilotSelfEntry(bus);
                 if ((remoteMember || pilotSelf) && vCol[bn] >= 0) {
-                    var vc = mainGenVc(bus);                   // the GROUP's control, never the member's own
-                    int pilotV = vCol[vc.getControlledBus().getNum()];
+                    var vc = mainGenVc(bus);                   // the GROUP's control: the group identity, the pilot's V row
+                    // ...but the switch-back test is the member's OWN control's: OLF's ReactiveLimitsOuterLoop reads
+                    // getBusV / getBusTargetV off bus.getGeneratorVoltageControl(), which for a control MERGED into
+                    // the group (a dependent section) keeps its own controlled bus and its own target while the
+                    // cluster sits at the main's. Compared against the main's target a base-pinned dependent at
+                    // 405 kV in a 406 kV cluster never saw its "voltage above target" and stayed pinned where OLF
+                    // unpins it (deviceMergedDependentSwitchesBackAgainstItsOwnTargetMatchesCpu).
+                    var own = bus.getGeneratorVoltageControl().orElse(vc);
+                    int pilotV = vCol[own.getControlledBus().getNum()];
                     if (pilotV >= 0 && bus.getMinQ() < bus.getMaxQ()) {
                         rlVrow.add(vCol[bn]);                  // transition WRITE row: the member's own bus row
                         rlMinQ.add(bus.getMinQ());
                         rlMaxQ.add(bus.getMaxQ());
                         rlLoadQ.add(bus.getLoadTargetQ());
-                        rlVtarget.add(vc.getTargetValue());    // the GROUP target (pilot-referenced)
+                        rlVtarget.add(own.getTargetValue());   // the member's own control's target
                         addSvcQuadratic(bus, rlSvcBmin, rlSvcBmax, rlV2Base);
                         rlMonitored.add((byte) 0);
                         // 2 = pilot-self; 1 = a remote member OLF's robust rule APPLIES to;
@@ -710,7 +717,7 @@ public final class GpuAcOuterLoopPacks {
                             System.err.println("GPU_RL_ENTRY idx=" + (rlVrow.size() - 1) + " vRow=" + vCol[bn]
                                     + " bus=" + bus.getId() + " remote=" + remoteClass + " pilotVRow=" + pilotV);
                         }
-                        rlNominalV.add(vc.getControlledBus().getNominalV());
+                        rlNominalV.add(own.getControlledBus().getNominalV());
                         rlPRow.add(GpuAcRowIndexing.row(es, bn, AcEquationType.BUS_TARGET_P) >= 0 ? columns.pRow()[bn] : -1);
                         rlTargetP.add(bus.getTargetP());
                         rlBusId.add(bus.getId());

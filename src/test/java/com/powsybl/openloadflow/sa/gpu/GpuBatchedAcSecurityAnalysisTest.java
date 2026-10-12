@@ -4292,6 +4292,34 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         }
     }
 
+    /** A merged DEPENDENT control keeps its own target (OLF's ReactiveLimitsOuterLoop compares the bus's own control:
+     *  getBusV / getBusTargetV read bus.getGeneratorVoltageControl(), the dependent's), while the cluster sits at the
+     *  MAIN's target. Two sections: g0 (main, 401 kV, +-300 MVar) and g1 (dependent, 400.5 kV, 5 MVar ceiling), g1
+     *  base-pinned at MAX_Q by the keys. Losing the 40 MVar load on section 0 cuts the group's need: OLF unpins g1
+     *  (the cluster's 401 kV is above g1's OWN 400.5 kV target) and it shares again; compared against the MAIN's
+     *  401 kV the device saw no reason to unpin and kept g1 at its ceiling. 1e-12 on device. */
+    @org.junit.jupiter.api.Test
+    void deviceMergedDependentSwitchesBackAgainstItsOwnTargetMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = splitGroupNetwork(2, java.util.Set.of(1));
+        // a lightly loaded group: the external loads carry no reactive power and the targets sit close to the
+        // slack's 400 kV, so the group's reactive need is about the 40 MVar of ld0 - enough for the keys (g0 +-300,
+        // g1 [-300, 5]) to pin g1 in the base, gone with ld0
+        for (String ld : List.of("lds", "ld3", "ld4")) {
+            network.getLoad(ld).setQ0(0);
+        }
+        network.getGenerator("g0").setTargetV(401);
+        network.getGenerator("g1").setTargetV(400.5);
+        // the section loss keeps the coupler RETAINED (OLF retains only the switches a listed contingency opens);
+        // without it the two sections are one bus with one control and nothing is merged
+        List<Contingency> ctgs = List.of(
+                new Contingency("bus-0", new com.powsybl.contingency.BusbarSectionContingency("bbs0")),
+                new Contingency("ld0", new com.powsybl.contingency.LoadContingency("ld0")));
+        GpuBatchScopeCensus.reset();
+        assertMergedPilotLossMatchesCpu(network, ctgs, 2);
+    }
+
     private static com.powsybl.loadflow.LoadFlowParameters remotePinParameters() {
         com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
                 .setDistributedSlack(true).setUseReactiveLimits(true);

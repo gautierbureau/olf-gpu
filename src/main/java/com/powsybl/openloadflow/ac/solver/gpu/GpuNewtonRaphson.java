@@ -163,6 +163,10 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
     private final double driverReactiveLimitTol;
     private final int driverMaxOuterIterations;
     private final int driverMaxPqPvSwitch;
+    /** slackDistributionFailureBehavior other than LEAVE_ON_SLACK_BUS: the device cannot apply it (FAIL, THROW,
+     *  DISTRIBUTE_ON_REFERENCE_GENERATOR), so a distribution that leaves a residual is rejected and the solve
+     *  goes to the CPU, where OLF's own loop decides — the same flag the batched SA passes per scenario. */
+    private final boolean driverDsRejectResidual;
 
     /** The OLF outer loops that the driver will pause for — empty when driverOuterLoops is off. */
     private final List<com.powsybl.openloadflow.ac.outerloop.AcOuterLoop> hostOuterLoops;
@@ -736,6 +740,9 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
         this.driverMaxPqPvSwitch = driverMaxPqPvSwitch;
         this.hostOuterLoops = Objects.requireNonNull(hostOuterLoops);
         this.acLoadFlowParameters = acLoadFlowParameters;
+        this.driverDsRejectResidual = acLoadFlowParameters != null
+                && acLoadFlowParameters.getSlackDistributionFailureBehavior()
+                        != com.powsybl.openloadflow.OpenLoadFlowParameters.SlackDistributionFailureBehavior.LEAVE_ON_SLACK_BUS;
         EquationSystemIndex<AcVariableType, AcEquationType> index = equationSystem.getIndex();
         // Purge listeners of ALREADY-COLLECTED solvers synchronously (we are on the solve thread,
         // no dispatch in flight) — this caps accumulation on a long-lived LfNetwork at ~1 while
@@ -1225,6 +1232,15 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                 }
                 restartLoopKind = 0;
             }
+            if (driverOuterLoops && driverDsRejectResidual && driverDsLoop() != null && cachedData.dsPhiRow().length == 0) {
+                // No participant row: either nobody participates (the pack dropped the distribution, the
+                // mismatch simply stays at the slack) or the slack alone does (its absorbed total has no limit
+                // to decide a failure with). OLF's run is decided by its (possibly empty) participating set
+                // under this behaviour — the CPU fallback runs OLF's own loop.
+                throw new PowsyblException("GPU driver: a distribution without participant rows cannot apply "
+                        + "slackDistributionFailureBehavior " + acLoadFlowParameters.getSlackDistributionFailureBehavior()
+                        + "; the solve goes to the CPU");
+            }
             double[] out = GpuAcNewtonSolver.solveBatchContext(context.handle.get(),
                     x0, target, new int[][] {activation.rowMode()}, activation.rowMode(),
                     elementMask,
@@ -1240,7 +1256,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                     varType, null,
                     null, null, rlStateIn, rlStateOut, null, null,
                     driverOuterLoops ? driverMaxOuterIterations : 0,
-                    driverOuterLoops ? driverMaxPqPvSwitch : 0, 0,
+                    driverOuterLoops ? driverMaxPqPvSwitch : 0, driverOuterLoops && driverDsRejectResidual ? 1 : 0,
                     driverOuterLoops ? 0 : 1,                // skipRlPhase: the driver owns RL now
                     0, null, null)[0];
             long t2 = System.nanoTime();
@@ -1652,7 +1668,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                     parameters.getMaxVoltageChangeStateVectorScalingMaxDphi(),
                     varType, null,
                     null, null, null, rlStateOut, null, null,
-                    driverMaxOuterIterations, driverMaxPqPvSwitch, 0, 0,
+                    driverMaxOuterIterations, driverMaxPqPvSwitch, driverDsRejectResidual ? 1 : 0, 0,
                     0, null, null)[0];
             pausedKind = GpuAcNewtonSolver.readBatchDriverPaused(handle);
         }
@@ -1697,7 +1713,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                 varType, null,
                 null, null, null, rlStateOut, null, null,
                 driverOuterLoops ? driverMaxOuterIterations : 0,
-                driverOuterLoops ? driverMaxPqPvSwitch : 0, 0,
+                driverOuterLoops ? driverMaxPqPvSwitch : 0, driverOuterLoops && driverDsRejectResidual ? 1 : 0,
                 driverOuterLoops ? 0 : 1,
                 0, null, null)[0];
         int iterations = (int) out[n];

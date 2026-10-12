@@ -6961,6 +6961,7 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
     // pair with a participating slack, 2x); scaling by the per-scenario EFFECTIVE sum instead over-tightens
     // a gen-outage scenario with a non-participating slack and adds a round the CPU never runs (3.9e-4).
     double fsGlobal = 0.0;
+    bool noCapacity = false;                                 // nobody — the slack included — can move this way
     if (dsMode == 1) {
         double sumM = 0.0;
         for (int i = 0; i < nds; i++) {
@@ -6979,6 +6980,7 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
             slackM = fmax(0.0, slackM - (dirUp ? dsSlackShift[s] : -dsSlackShift[s]));
         }
         fsGlobal = sumM + slackM > 0 ? sumM / (sumM + slackM) : 0.0;
+        noCapacity = !(sumM + slackM > 0);
     } else {
         double fsActive = 0.0;
         double fsAll = 0.0;
@@ -6999,6 +7001,8 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
         fsGlobal = fsActive == fsAll
                 ? fsActive
                 : (fsActive + rho > 0 ? fsActive / (fsActive + rho) : 0.0);
+        // every participant stranded and no slack share (rho is 1 minus a normalized sum: zero up to rounding)
+        noCapacity = !(fsActive > 0.0) && rho < 1e-12;
     }
     if (dbgTrace && s == dbgTrace - 1) {
         printf("[DS-GATE] slackMismatch=%.9f retain=%.9f rem=%.9f fsGlobal=%.9f tol=%.9f slackTgt=%.9f fire=%d\n",
@@ -7021,7 +7025,22 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
         gateLast[8 * s + 6] = fsGlobal;
         gateLast[8 * s + 7] = 0.0;
     }
-    if (fsGlobal <= 0.0 || fabs(rem) <= fsGlobal * slackDistTol) {
+    if (fsGlobal <= 0.0) {
+        // No participant share. With the slack's own margin left this is OLF distributing onto the slack's
+        // generators, which succeeds. With NOBODY able to move — every participant and the slack at a limit
+        // in this direction (REMAINING_MARGIN), or every participant stranded with a non-participating
+        // slack — OLF's participating set is empty, ActivePowerDistribution.run leaves the whole mismatch
+        // and handleDistributionFailureBehavior decides. Flag it like a saturated water-fill: the host
+        // rejects the scenario under a behaviour other than LEAVE_ON_SLACK_BUS and keeps today's answer
+        // (the mismatch stays at the slack) under it. OLF's gate is on the raw slack mismatch, above
+        // slackBusPMaxMismatch and above P_RESIDUE_EPS; nothing has been retained or absorbed here.
+        double mis = qBuf[(size_t) s * n + slackPhiRow] - slackTgt;
+        if (noCapacity && fabs(mis) > slackDistTol && fabs(mis) > residueEps) {
+            dsResidual[s] = 1;
+        }
+        return;
+    }
+    if (fabs(rem) <= fsGlobal * slackDistTol) {
         return;
     }
     if (retainApplied != nullptr) {

@@ -11826,11 +11826,19 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                     live[s] = 0;                             // failed: stop iterating its outer loops
                     nActive--;
                     anyChanged = true;
-                } else if (converged && it > 0) {            // force >=1 iteration, like CPU NewtonRaphson /
-                    res.status[s] = 0;                       // solveContext (line ~1227): a warm-started state may
-                    active[s] = 0;                           // already meet the global 2-norm threshold yet leave a
-                    nActive--;                               // just-flipped identity row (PV target) unpinned — one
-                    anyChanged = true;                       // Newton step pins it. Retiring at it==0 skips that solve.
+                } else if (converged && it > 0 && (it < maxIter || checkOnlyAtEnd)) {
+                    // Force >=1 iteration, like CPU NewtonRaphson / solveContext (line ~1227): a warm-started
+                    // state may already meet the global 2-norm threshold yet leave a just-flipped identity row
+                    // (PV target) unpinned — one Newton step pins it. Retiring at it==0 skips that solve.
+                    // And NOT at the budget: OLF's NewtonRaphson.run counts a step before testing it and
+                    // reports MAX_ITERATION_REACHED whenever iterations >= maxIterations, so a test that
+                    // passes after the LAST allowed step is not CONVERGED there — the it == maxIter branch
+                    // below reports it at OLF's budget (with a sound last solve). The fixed-iteration
+                    // benchmark (checkOnlyAtEnd) tests only at its K-th step and keeps its verdict.
+                    res.status[s] = 0;
+                    active[s] = 0;
+                    nActive--;
+                    anyChanged = true;
                 } else if (it == maxIter) {
                     // exhausted iterations. With fixed inner iterations those are the K steps asked for, not OLF's
                     // Newton budget, so the scenario is REJECTED (the CPU replays it) rather than reported

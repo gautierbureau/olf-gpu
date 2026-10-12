@@ -5669,6 +5669,50 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         assertJavaSaMatchesCpu(network, ctgs, lfp, "SLOPE-SVC");
     }
 
+    /** OLF's NewtonRaphson.run counts a step BEFORE testing it and reports MAX_ITERATION_REACHED whenever
+     *  iterations >= maxIterations: a post-contingency solve whose stopping test passes after the LAST
+     *  allowed step is MAX_ITERATION_REACHED on the CPU, with no network result. The device tested
+     *  convergence before it tested the budget and answered CONVERGED, with a state and violations, for
+     *  that same solve. The budget is the exact number of steps the contingency needs, found on the CPU;
+     *  the base load flow starts from its own solved state (PREVIOUS_VALUES), so it needs one step
+     *  under any budget. */
+    @org.junit.jupiter.api.Test
+    void deviceReportsMaxIterationWhenConvergingOnTheLastAllowedStep() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = IeeeCdfNetworkFactory.create14();
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setDistributedSlack(false).setUseReactiveLimits(false)
+                .setVoltageInitMode(com.powsybl.loadflow.LoadFlowParameters.VoltageInitMode.PREVIOUS_VALUES);
+        com.powsybl.openloadflow.OpenLoadFlowParameters ext = com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp);
+        // the solved base state on the network, so both arms' base load flow needs a single step
+        new com.powsybl.loadflow.LoadFlow.Runner(new com.powsybl.openloadflow.OpenLoadFlowProvider(commonTestConfig.matrixFactory()))
+                .run(network, new com.powsybl.loadflow.LoadFlowParameters().setDistributedSlack(false).setUseReactiveLimits(false));
+        List<Contingency> contingencies = List.of(new Contingency("L1-2-1", new BranchContingency("L1-2-1")));
+        com.powsybl.security.SecurityAnalysisParameters sap = new com.powsybl.security.SecurityAnalysisParameters();
+        sap.setLoadFlowParameters(lfp);
+        int budget = -1;                                     // the smallest budget the CPU converges under
+        for (int m = 2; m <= 30 && budget < 0; m++) {
+            ext.setMaxNewtonRaphsonIterations(m);
+            SecurityAnalysisResult cpu = runSecurityAnalysis(network, contingencies, java.util.Collections.emptyList(), sap);
+            assertEquals(com.powsybl.loadflow.LoadFlowResult.ComponentResult.Status.CONVERGED,
+                    cpu.getPreContingencyResult().getStatus(), "the base must converge under budget " + m);
+            if (cpu.getPostContingencyResults().get(0).getStatus() == com.powsybl.security.PostContingencyComputationStatus.CONVERGED) {
+                budget = m;
+            }
+        }
+        assertTrue(budget >= 3, "the contingency must need at least two steps, smallest converging budget " + budget);
+        // one step short: OLF's test passes ON the last allowed step and it reports MAX_ITERATION_REACHED
+        ext.setMaxNewtonRaphsonIterations(budget - 1);
+        GpuBatchScopeCensus.reset();
+        assertGpuMatchesCpuNoEngage(network, contingencies, 1e-12, lfp);
+        assertEquals(1L, GpuBatchScopeCensus.snapshot().getOrDefault("DEVICE:MAX_ITERATION_REACHED", 0L),
+                "the device itself must have decided it; census=" + GpuBatchScopeCensus.snapshot());
+        // one more step allowed: CONVERGED on both arms, solved on the device
+        ext.setMaxNewtonRaphsonIterations(budget);
+        assertGpuMatchesCpu(network, contingencies, 1e-12, lfp);
+    }
+
     private void assertGpuMatchesCpu(Network network, List<Contingency> contingencies) {
         assertGpuMatchesCpu(network, contingencies, 1e-12);
     }

@@ -1390,7 +1390,11 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                     System.err.println(sb);
                 }
             }
-            status = result.isStop() ? AcSolverStatus.CONVERGED : AcSolverStatus.MAX_ITERATION_REACHED;
+            // OLF's NewtonRaphson.run reports MAX_ITERATION_REACHED whenever iterations >= maxIterations, a
+            // test passing after the last allowed step included; the device applies the same rule and its
+            // verdict is kept. OLF's own criterion on the returned state decides the rest.
+            boolean deviceBudgetOut = out.length > n + 2 && (int) out[n + 2] == GpuBatchStatus.STATUS_MAX_ITERATION;
+            status = result.isStop() && !deviceBudgetOut ? AcSolverStatus.CONVERGED : AcSolverStatus.MAX_ITERATION_REACHED;
             lastRunOnDevice = driverOuterLoops;              // "the DRIVER decided the loops of this solve"
 
             // DEVICE-BROKEN result safety net: a non-finite or absurd residual is a device-side
@@ -1708,7 +1712,8 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
             equationVector.minus(targetVector);               // re-measure against the written-back targets
             result = parameters.getStoppingCriteria().test(equationVector.getArray(), equationSystem);
         }
-        AcSolverStatus status = result.isStop() ? AcSolverStatus.CONVERGED : AcSolverStatus.MAX_ITERATION_REACHED;
+        boolean deviceBudgetOut = out.length > n + 2 && (int) out[n + 2] == GpuBatchStatus.STATUS_MAX_ITERATION;
+        AcSolverStatus status = result.isStop() && !deviceBudgetOut ? AcSolverStatus.CONVERGED : AcSolverStatus.MAX_ITERATION_REACHED;
         LOGGER.debug("GPU Newton-Raphson resume: {} iterations, |f(x)|={}, {}", iterations, result.getNorm(), status);
         Map<Integer, Double> slackBusActivePowerMismatch = new TreeMap<>();
         for (LfSynchronousNetwork lfScNetwork : network.getSynchronousNetworks()) {

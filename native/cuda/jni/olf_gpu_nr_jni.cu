@@ -10283,13 +10283,12 @@ __global__ void svcGatherBatch(SvcTables T, int nScenarios, int n, int i, int nE
     }
     T.jk[((size_t) s * T.nCtl + i) * T.nCtl + j] = 2.0 * sq / (T.maxQ[j] - T.minQ[j]);
     if (j == 0) {
-        // the pilot sensitivity of controlled bus i, for whichever zone i belongs to
+        // the pilot sensitivity of controlled bus i at EVERY zone's pilot: OLF's pilot row of zone z (createJvpp
+        // over allControlledBuses) carries each controlled bus's response at THAT pilot, other zones' buses
+        // included - a controller in one zone moves another zone's pilot through the network. Stored for i's
+        // own zone only, the pilot row of a multi-zone system read the other zones' columns at their own pilots.
         for (int z = 0; z < T.nZones; z++) {
-            for (int k = T.zonePtr[z]; k < T.zonePtr[z + 1]; k++) {
-                if (T.zoneCtl[k] == i) {
-                    T.jvpp[(size_t) s * T.nCtl + i] = dxs[T.zonePilotRow[z]];
-                }
-            }
+            T.jvpp[((size_t) s * T.nZones + z) * T.nCtl + i] = dxs[T.zonePilotRow[z]];
         }
     }
 }
@@ -10331,8 +10330,9 @@ __global__ void svcAssembleBatch(SvcTables T, int nScenarios, int n, const char*
         }
     }
     if (i == last) {                                         // the zone's LAST controlled bus carries the pilot row
-        for (int j = 0; j < nC; j++) {
-            m[(size_t) j * nC + i] = T.enabled[(size_t) s * nC + j] ? T.jvpp[(size_t) s * nC + j] : 0.0;
+        for (int j = 0; j < nC; j++) {                       // every enabled controlled bus's response at pilot z
+            m[(size_t) j * nC + i] = T.enabled[(size_t) s * nC + j]
+                    ? T.jvpp[((size_t) s * T.nZones + z) * nC + j] : 0.0;
         }
         r[i] = T.zoneTargetV[z] - x[(size_t) s * n + T.zonePilotRow[z]];
         return;
@@ -16133,7 +16133,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
     ctx->dSvcTargetV.ensure(nS * nC * sizeof(double));
     ctx->dSvcK0.ensure(nS * nC * sizeof(double));
     ctx->dSvcJk.ensure(nS * nC * nC * sizeof(double));
-    ctx->dSvcJvpp.ensure(nS * nC * sizeof(double));
+    ctx->dSvcJvpp.ensure(static_cast<size_t>(nS) * static_cast<size_t>(nZ) * nC * sizeof(double));   // per (zone pilot, controlled bus)
     ctx->dSvcEnabled.ensure(nS * nC * sizeof(char));
     ctx->dSvcNeed.ensure(nS * sizeof(char));
     ctx->dSvcReject.ensure(nS * sizeof(char));

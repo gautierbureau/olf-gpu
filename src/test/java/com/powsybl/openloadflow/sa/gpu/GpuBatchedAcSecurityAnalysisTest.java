@@ -4343,6 +4343,44 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         assertEquals(java.util.Set.of(), GpuBatchScopeCensus.planRefusedIds(), "census=" + GpuBatchScopeCensus.snapshot());
     }
 
+    /** TWO secondary voltage control zones in one system. OLF assembles one system over every enabled controller of
+     *  every zone and replaces each zone's last row by the pilot row built from EVERY controlled bus's sensitivity at
+     *  THAT zone's pilot (createJvpp over allControlledBuses): a controller of one zone moves the other zone's pilot
+     *  through the network. The device stored each controlled bus's pilot sensitivity for its own zone only, so a
+     *  pilot row read the other zone's columns at the other zone's pilot. ieee14: z1 (pilot B10: B6-G, B8-G) and
+     *  z2 (pilot B4: B2-G, B3-G). 1e-11 like the single-zone fixtures. */
+    @org.junit.jupiter.api.Test
+    void deviceTwoZoneSecondaryVoltageControlMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = com.powsybl.ieeecdf.converter.IeeeCdfNetworkFactory.create14();
+        network.newExtension(com.powsybl.iidm.network.extensions.SecondaryVoltageControlAdder.class)
+                .newControlZone().withName("z1")
+                .newPilotPoint().withTargetV(13).withBusbarSectionsOrBusesIds(List.of("B10")).add()
+                .newControlUnit().withId("B6-G").add()
+                .newControlUnit().withId("B8-G").add()
+                .add()
+                .newControlZone().withName("z2")
+                .newPilotPoint().withTargetV(140).withBusbarSectionsOrBusesIds(List.of("B4")).add()
+                .newControlUnit().withId("B2-G").add()
+                .newControlUnit().withId("B3-G").add()
+                .add().add();
+        List<String> ctgIds = List.of("L1-2-1", "L2-3-1");
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setDistributedSlack(true).setUseReactiveLimits(true);
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
+                .setSecondaryVoltageControl(true).setMaxPlausibleTargetVoltage(1.6);
+        // ONE contingency per analysis: OLF's security analysis does not restore a voltage-control target between
+        // contingencies (BusState saves no control target), and secondary voltage control moves those targets, so
+        // the CPU's second contingency starts from the first one's targets (measured: L1-2-1 after L2-3-1 ends B2 at
+        // 128.6831 kV, alone at 128.6782; the device gives 128.6782 in either order).
+        for (String id : ctgIds) {
+            GpuBatchScopeCensus.reset();
+            assertGpuMatchesCpu(network, List.of(new Contingency(id, new BranchContingency(id))), 1e-11, lfp);
+            assertEquals(1, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(), "census=" + GpuBatchScopeCensus.snapshot());
+        }
+    }
+
     /** A shared transformer group whose outage leaves ONE survivor. OLF picks the adjustment path on the controllers
      *  left after the outage (adjustWithOneController) and reads the controlled bus's deviation; the device picked it
      *  on the static group size and, on the shared path, read the deviation off the group's FIRST member - the

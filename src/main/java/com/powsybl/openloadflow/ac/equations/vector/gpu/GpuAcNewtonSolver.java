@@ -701,6 +701,22 @@ public final class GpuAcNewtonSolver {
      *  a run without the criterion must clear (null, null). */
     public static native void setBatchRowCriteria(long handle, double[] thrIdent, double[] thrPower);
 
+    /** The alternate per-row threshold and its selector row (-1: none) of the PER_EQUATION_TYPE criterion (see
+     *  GpuAcActivationExtractor.extractRowCriteria); nulls clear them. Call after {@link #setBatchRowCriteria}. */
+    public static native void setBatchRowCriteriaAlt(long handle, double[] thrAlt, int[] thrSel);
+
+    /** Installs the four arrays of GpuAcActivationExtractor.extractRowCriteria, or clears every threshold. */
+    public static void installRowCriteria(long handle, double[][] rowCriteria) {
+        setBatchRowCriteria(handle, rowCriteria != null ? rowCriteria[0] : null, rowCriteria != null ? rowCriteria[1] : null);
+        if (rowCriteria != null && rowCriteria.length >= 4) {
+            int[] sel = new int[rowCriteria[3].length];
+            for (int i = 0; i < sel.length; i++) {
+                sel[i] = (int) rowCriteria[3][i];
+            }
+            setBatchRowCriteriaAlt(handle, rowCriteria[2], sel);
+        }
+    }
+
     /** LINE_SEARCH backtracking parameters for a batch context (OLF LineSearchStateVectorScaling's
      *  maxIteration and stepFold) — consumed by solves called with {@code lsMode == 1}. */
     public static native void setBatchLineSearch(long handle, int lsMaxIter, double lsStepFold);

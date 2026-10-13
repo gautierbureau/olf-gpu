@@ -1618,6 +1618,36 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
     }
 
+    /** PER_EQUATION_TYPE criteria on relocated rows. The coupler-tree relocation puts a child section's balances on
+     *  its parent coupler's dummy rows and the coupler's ZERO equations on the child's rows; the device took each row's
+     *  threshold from the VARIABLE at its column, so a child's P balance was judged at the angle threshold, its
+     *  coupler's ZERO_V at the reactive one, and the reverse once a section loss re-homed the child. Thresholds far
+     *  apart (1 MW / 1 MVar against 1e-6 pu for voltages and angles) make the stopping decision depend on the type.
+     *  The three-section chain, each section lost in turn. 1e-12 on device. */
+    @org.junit.jupiter.api.Test
+    void devicePerEquationTypeCriteriaOnRelocatedRowsMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = liveSectionChainNetwork();
+        List<Contingency> ctgs = new java.util.ArrayList<>();
+        for (int k = 0; k < 3; k++) {
+            ctgs.add(new Contingency("bus-" + k, new com.powsybl.contingency.BusbarSectionContingency("bbs" + k)));
+        }
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setDistributedSlack(true).setUseReactiveLimits(true);
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
+                .setSlackBusSelectionMode(com.powsybl.openloadflow.network.SlackBusSelectionMode.NAME)
+                .setSlackBusesIds(List.of("vl0"))
+                .setNewtonRaphsonStoppingCriteriaType(
+                        com.powsybl.openloadflow.ac.solver.NewtonRaphsonStoppingCriteriaType.PER_EQUATION_TYPE_CRITERIA)
+                .setMaxActivePowerMismatch(1).setMaxReactivePowerMismatch(1)
+                .setMaxVoltageMismatch(1e-6).setMaxAngleMismatch(1e-6)
+                .setMaxRatioMismatch(1e-6).setMaxSusceptanceMismatch(1e-6);
+        GpuBatchScopeCensus.reset();
+        assertGpuMatchesCpu(network, ctgs, 1e-12, lfp, true);
+        assertEquals(3, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(), "census=" + GpuBatchScopeCensus.snapshot());
+    }
+
     /** PER_EQUATION_TYPE criteria in JAVA hybrid mode: the hybrid's inner solves install the same
      *  per-row thresholds, so OLF's Java loops see states stopped exactly where the CPU's would. */
     @org.junit.jupiter.api.Test

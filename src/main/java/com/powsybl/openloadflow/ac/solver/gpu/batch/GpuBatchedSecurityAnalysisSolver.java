@@ -383,7 +383,7 @@ public final class GpuBatchedSecurityAnalysisSolver {
             // variable pairing (null under UNIFORM_CRITERIA — the chunk solver then CLEARS the cached
             // context's thresholds, since contexts survive across runs).
             double[][] rowCriteria = config.perEqCriteria() != null
-                    ? GpuAcActivationExtractor.extractRowCriteria(equationSystem, n,
+                    ? GpuAcActivationExtractor.extractRowCriteria(network, equationSystem, baseActivation, n,
                             config.perEqCriteria().p(), config.perEqCriteria().q(), config.perEqCriteria().v(),
                             config.perEqCriteria().angle(), config.perEqCriteria().ratio(), config.perEqCriteria().b(),
                             config.perEqCriteria().eps())
@@ -568,7 +568,7 @@ public final class GpuBatchedSecurityAnalysisSolver {
                         30, maxOuter, 3,
                         GpuNewtonRaphson.GPU_TOLERANCE, reactiveLimitTol, slackDistTol, convEpsPerEq,
                         config.perEqCriteria() != null
-                                ? GpuAcActivationExtractor.extractRowCriteria(equationSystem, n,
+                                ? GpuAcActivationExtractor.extractRowCriteria(network, equationSystem, baseActivation, n,
                                         config.perEqCriteria().p(), config.perEqCriteria().q(), config.perEqCriteria().v(),
                                         config.perEqCriteria().angle(), config.perEqCriteria().ratio(),
                                         config.perEqCriteria().b(), config.perEqCriteria().eps())

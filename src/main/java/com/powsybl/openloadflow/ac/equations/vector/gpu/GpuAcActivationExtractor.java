@@ -422,6 +422,102 @@ public final class GpuAcActivationExtractor {
         return new double[][] {thrIdent, thrPower};
     }
 
+    /** OLF's PerEquationTypeStoppingCriteria threshold for an equation TYPE (its checkEquation switch, power values
+     *  in per unit). */
+    @SuppressWarnings("java:S107")
+    static double thresholdOf(AcEquationType type, double maxP, double maxQ, double maxV, double maxAngle,
+                              double maxRatio, double maxSusceptance, double eps) {
+        double sb = 100.0;
+        return switch (type) {
+            case BRANCH_TARGET_P, BUS_TARGET_P, DUMMY_TARGET_P, BUS_DISTR_SLACK_P -> maxP / sb;
+            case BRANCH_TARGET_Q, BUS_TARGET_Q, DISTR_Q, DUMMY_TARGET_Q -> maxQ / sb;
+            case BUS_TARGET_V, ZERO_V -> maxV;
+            case BRANCH_TARGET_RHO1, DISTR_RHO -> maxRatio;
+            case DISTR_SHUNT_B, SHUNT_TARGET_B -> maxSusceptance;
+            case BUS_TARGET_PHI, ZERO_PHI, BRANCH_TARGET_ALPHA1 -> maxAngle;
+            default -> eps;
+        };
+    }
+
+    /**
+     * PER_EQUATION_TYPE thresholds per device row, from the EQUATION each row hosts rather than from the variable at
+     * its column: the variable-based defaults of {@link #extractRowCriteria(EquationSystem, int, double, double,
+     * double, double, double, double, double)} for the slot a row does not use in the base, and, for the slot it does
+     * use (identity for row mode 0 and 2, power for 1, 3 and 4), the threshold of the equation the activation placed
+     * there. A relocated row then carries its own equation's threshold: a coupler-tree child's P balance on its
+     * parent's DUMMY_P row (maxP, not the ZERO_PHI angle), the coupler's ZERO_V on the child's V row (maxV, not maxQ),
+     * a transformer- or shunt-controlled bus's Q balance on the control variable's row (maxQ, not the ratio or
+     * susceptance one).
+     *
+     * <p>Two placements change per scenario and get an ALTERNATE threshold with a SELECTOR row: a relocated child whose
+     * parent coupler opens comes back HOME (its PHI / V rows hold its own balances again, the selector being the
+     * coupler's dummy row, an identity in that scenario), and a cross identity (row mode 6: a child's voltage target on
+     * its parent's DUMMY_Q row) is a voltage equation. Returns {thrIdent, thrPower, thrAlt, thrSel (as double, -1 when
+     * none)}.
+     */
+    @SuppressWarnings("java:S107")
+    public static double[][] extractRowCriteria(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
+                                                GpuAcActivation activation, int n,
+                                                double maxP, double maxQ, double maxV, double maxAngle,
+                                                double maxRatio, double maxSusceptance, double eps) {
+        double[][] base = extractRowCriteria(es, n, maxP, maxQ, maxV, maxAngle, maxRatio, maxSusceptance, eps);
+        double[] thrIdent = base[0];
+        double[] thrPower = base[1];
+        double[] thrAlt = new double[n];
+        double[] thrSel = new double[n];
+        java.util.Arrays.fill(thrSel, -1);
+        java.util.Arrays.fill(thrAlt, eps);
+        java.util.Map<Integer, AcEquationType> typeOfColumn = new java.util.HashMap<>();
+        for (SingleEquation<AcVariableType, AcEquationType> e : es.getIndex().getSortedSingleEquationsToSolve()) {
+            typeOfColumn.put(e.getColumn(), e.getType());
+        }
+        int[] mode = activation.rowMode();
+        int[] targetMap = activation.targetMap();
+        for (int r = 0; r < n; r++) {
+            AcEquationType type = targetMap[r] >= 0 ? typeOfColumn.get(targetMap[r]) : null;
+            if (type == null) {
+                continue;
+            }
+            double thr = thresholdOf(type, maxP, maxQ, maxV, maxAngle, maxRatio, maxSusceptance, eps);
+            switch (mode[r]) {
+                case 0, 2 -> thrIdent[r] = thr;
+                case 6 -> thrAlt[r] = thr;
+                default -> thrPower[r] = thr;
+            }
+        }
+        // The coupler-tree relocation, per scenario: a child's own rows host the coupler's ZERO equations while the
+        // coupler lives and the child's balances once it opens (the dummy rows are then DUMMY_TARGET identities,
+        // whose identity thresholds are already the dummy variables' defaults).
+        ExtractionColumns cols = ExtractionColumns.of(network, es);
+        for (LfBus bus : network.getBuses()) {
+            int b = bus.getNum();
+            int pe = cols.ziParentEdge()[b];
+            if (pe < 0) {
+                continue;
+            }
+            int dp = cols.dummyPCol()[pe];
+            int dq = cols.dummyQCol()[pe];
+            int phi = cols.phiCol()[b];
+            int v = cols.vCol()[b];
+            if (phi >= 0 && dp >= 0) {
+                thrSel[phi] = dp;
+                thrAlt[phi] = maxP / 100.0;                  // BUS_TARGET_P back home
+            }
+            if (v >= 0 && dq >= 0) {
+                thrSel[v] = dq;
+                thrAlt[v] = maxQ / 100.0;                    // its reactive balance back home (its voltage target,
+            }                                                // an identity, keeps the V row's identity threshold)
+            if (dq >= 0) {
+                thrAlt[dq] = maxV;                           // the child's voltage target written crosswise (mode 6)
+                thrPower[dq] = maxQ / 100.0;                 // its reactive balance there, shared or pinned
+            }
+            if (dp >= 0) {
+                thrPower[dp] = maxP / 100.0;
+            }
+        }
+        return new double[][] {thrIdent, thrPower, thrAlt, thrSel};
+    }
+
     public static int[] extractVarType(EquationSystem<AcVariableType, AcEquationType> es, int n) {
         int[] varType = new int[n];
         java.util.Arrays.fill(varType, 2);

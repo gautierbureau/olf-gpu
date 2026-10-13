@@ -7778,7 +7778,8 @@ __global__ void worstRowBatch(int n, const double* F, const int* mode, const dou
 }
 
 __global__ void residualNormsBatch(int n, const double* F, const char* active, double* out,
-                                   const double* thrIdent, const double* thrPower, const int* mode) {
+                                   const double* thrIdent, const double* thrPower, const int* mode,
+                                   const double* thrAlt, const int* thrSel) {
     int s = blockIdx.x;
     __shared__ double smInf[BLOCK];
     __shared__ double smSsq[BLOCK];
@@ -7801,6 +7802,16 @@ __global__ void residualNormsBatch(int n, const double* F, const char* active, d
                 // remote-member Q row (mode 4) the power-type one
                 int m = mode[(size_t) s * n + i];
                 double thr = (m == 1 || m == 3 || m == 4) ? thrPower[i] : thrIdent[i];
+                if (thrAlt != nullptr) {
+                    // the row's equation in THIS lane: a cross identity (mode 6) is a voltage target; a
+                    // relocated child's own row hosts its balance again once its coupler's dummy row (the
+                    // selector) is an identity
+                    if (m == 6) {
+                        thr = thrAlt[i];
+                    } else if ((m == 1 || m == 3 || m == 4) && thrSel[i] >= 0 && mode[(size_t) s * n + thrSel[i]] == 0) {
+                        thr = thrAlt[i];
+                    }
+                }
                 mRat = fmax(mRat, fabs(v) / thr);
             }
         }
@@ -7917,6 +7928,8 @@ struct BatchSolverContext {
     DeviceBuf dNorms;                                        // nS*4 device-side convergence norms (see residualNormsBatch)
     DeviceBuf dThrIdent, dThrPower;                          // n each: per-row PER_EQUATION_TYPE thresholds (empty = 2-norm/infnorm criterion)
     bool perRowCriteria = false;
+    DeviceBuf dThrAlt, dThrSel;                              // n each: the alternate threshold and its selector row (see residualNormsBatch)
+    bool perRowAlt = false;
     int nShOv = 0;                                           // per-scenario shunt admittance overrides (set per solve)
     DeviceBuf dShOvSlotElem, dShOvGb;                        // nShOv*2 ints (slot, PACK elem) / nShOv*2 doubles (dG, dB)
     int nziBase = 0;                                         // zi elements [0,nziBase) always enabled; [nziBase,nzi) are
@@ -11941,7 +11954,9 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     auto readNormsBatch = [&](std::vector<double>& hn) {
         residualNormsBatch<<<nS, BLOCK, 0, ctx->stream>>>(n, ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->dNorms.as<double>(),
                 ctx->perRowCriteria ? ctx->dThrIdent.as<double>() : nullptr,
-                ctx->perRowCriteria ? ctx->dThrPower.as<double>() : nullptr, ctx->dMode.as<int>());
+                ctx->perRowCriteria ? ctx->dThrPower.as<double>() : nullptr, ctx->dMode.as<int>(),
+                ctx->perRowCriteria && ctx->perRowAlt ? ctx->dThrAlt.as<double>() : nullptr,
+                ctx->perRowCriteria && ctx->perRowAlt ? ctx->dThrSel.as<int>() : nullptr);
         hn.resize(static_cast<size_t>(nS) * 4);
         CUDA_CHECK(cudaMemcpy(hn.data(), ctx->dNorms.p, hn.size() * sizeof(double), cudaMemcpyDeviceToHost));
     };
@@ -14970,6 +14985,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
     }
     if (jThrIdent == nullptr || jThrPower == nullptr) {
         ctx->perRowCriteria = false;
+        ctx->perRowAlt = false;
         return;
     }
     int n = ctx->st->n;
@@ -14980,6 +14996,30 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
     env->ReleaseDoubleArrayElements(jThrIdent, thrIdent, JNI_ABORT);
     env->ReleaseDoubleArrayElements(jThrPower, thrPower, JNI_ABORT);
     ctx->perRowCriteria = true;
+}
+
+// The per-row ALTERNATE threshold and its selector row (-1: none) of the PER_EQUATION_TYPE criterion, read by
+// residualNormsBatch for a cross identity (mode 6) and for a relocated child's row once its coupler's dummy row
+// is an identity. Nulls clear them. Install after setBatchRowCriteria, which clears them too.
+extern "C" JNIEXPORT void JNICALL
+Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchRowCriteriaAlt(
+        JNIEnv* env, jclass, jlong handle, jdoubleArray jThrAlt, jintArray jThrSel) {
+    auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
+    if (ctx == nullptr) {
+        return;
+    }
+    if (jThrAlt == nullptr || jThrSel == nullptr) {
+        ctx->perRowAlt = false;
+        return;
+    }
+    int n = ctx->st->n;
+    jdouble* thrAlt = env->GetDoubleArrayElements(jThrAlt, nullptr);
+    jint* thrSel = env->GetIntArrayElements(jThrSel, nullptr);
+    ctx->dThrAlt.upload(thrAlt, static_cast<size_t>(n) * sizeof(double));
+    ctx->dThrSel.upload(thrSel, static_cast<size_t>(n) * sizeof(int));
+    env->ReleaseDoubleArrayElements(jThrAlt, thrAlt, JNI_ABORT);
+    env->ReleaseIntArrayElements(jThrSel, thrSel, JNI_ABORT);
+    ctx->perRowAlt = true;
 }
 
 // Reactive-capability CURVES at runtime P: install (or clear, with nulls) the per-gen curve channel

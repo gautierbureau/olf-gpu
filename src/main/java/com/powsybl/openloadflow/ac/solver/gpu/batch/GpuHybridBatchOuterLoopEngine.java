@@ -291,8 +291,7 @@ public final class GpuHybridBatchOuterLoopEngine {
         long h = createHandleRaw(structure, count, mode, d);
         // PER_EQUATION_TYPE stopping criterion: install the per-row thresholds so the hybrid's
         // inner solves stop exactly where OLF's PerEquationTypeStoppingCriteria would.
-        GpuAcNewtonSolver.setBatchRowCriteria(h,
-                rowCriteria != null ? rowCriteria[0] : null, rowCriteria != null ? rowCriteria[1] : null);
+        GpuAcNewtonSolver.installRowCriteria(h, rowCriteria);
         // plan-B4 (JAVA): when a remote group has a pilot-Q relocation table, OLF's RL loop may pin
         // the FREE member — the pushed mode-4 row re-picks the carrier in the fills, and these
         // tables gate the new carrier's DISTR_Q row off (its row hosts the relocated pilot balance,

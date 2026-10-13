@@ -355,8 +355,7 @@ final class GpuBatchChunkSolver {
                 config.robustSolveMode() ? GpuBatchContextCache.MODE_ROBUST : GpuBatchContextCache.resolveBatchMode(), n);
         // PER_EQUATION_TYPE criterion: install the per-row thresholds on the (possibly cached)
         // context — or CLEAR a previous run's thresholds under UNIFORM_CRITERIA.
-        GpuAcNewtonSolver.setBatchRowCriteria(handle,
-                rowCriteria != null ? rowCriteria[0] : null, rowCriteria != null ? rowCriteria[1] : null);
+        GpuAcNewtonSolver.installRowCriteria(handle, rowCriteria);
         // LINE_SEARCH: OLF's backtracking budget and step fold, on the (possibly cached) context; read only in lsMode 1.
         GpuAcNewtonSolver.setBatchLineSearch(handle, parameters.getLineSearchStateVectorScalingMaxIteration(),
                 parameters.getLineSearchStateVectorScalingStepFold());

@@ -696,11 +696,11 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
      *  PerEquationTypeStoppingCriteria (every row's |F| under its type threshold). */
     private void installRowCriteria(int n) {
         if (parameters.getStoppingCriteria() instanceof PerEquationTypeStoppingCriteria c) {
-            double[][] thr = GpuAcActivationExtractor.extractRowCriteria(equationSystem, n,
+            double[][] thr = GpuAcActivationExtractor.extractRowCriteria(network, equationSystem, activation, n,
                     c.getMaxActivePowerMismatch(), c.getMaxReactivePowerMismatch(), c.getMaxVoltageMismatch(),
                     c.getMaxDefaultAngleMismatch(), c.getMaxDefaultRatioMismatch(),
                     c.getMaxDefaultSusceptanceMismatch(), c.getConvEpsPerEq());
-            GpuAcNewtonSolver.setBatchRowCriteria(context.handle.get(), thr[0], thr[1]);
+            GpuAcNewtonSolver.installRowCriteria(context.handle.get(), thr);
         } else {
             GpuAcNewtonSolver.setBatchRowCriteria(context.handle.get(), null, null);
         }

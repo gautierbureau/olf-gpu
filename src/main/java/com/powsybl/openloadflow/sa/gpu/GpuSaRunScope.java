@@ -319,7 +319,9 @@ final class GpuSaRunScope {
             cfgLsMode = 2;
             cfgMaxDv = olfParams.getMaxVoltageChangeStateVectorScalingMaxDv();
             cfgMaxDphi = olfParams.getMaxVoltageChangeStateVectorScalingMaxDphi();
-        }
+        } else if (olfParams.getStateVectorScalingMode() == com.powsybl.openloadflow.ac.solver.StateVectorScalingMode.LINE_SEARCH) {
+            cfgLsMode = 1;                                   // per-lane backtracking on the device (the chunk solver
+        }                                                    // installs OLF's max iteration and step fold)
         // Assemble the run's per-call batched config (replaces the solver's former JVM-global statics).
         BatchConfig batchConfig = new BatchConfig(cfgLsMode, cfgMaxDv, cfgMaxDphi,
                 cfgTransformerControl, cfgMaxOuterIterations, cfgMaxPqPvSwitch, cfgDsRejectResidual, outerLoopMode,

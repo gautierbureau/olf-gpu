@@ -357,6 +357,9 @@ final class GpuBatchChunkSolver {
         // context — or CLEAR a previous run's thresholds under UNIFORM_CRITERIA.
         GpuAcNewtonSolver.setBatchRowCriteria(handle,
                 rowCriteria != null ? rowCriteria[0] : null, rowCriteria != null ? rowCriteria[1] : null);
+        // LINE_SEARCH: OLF's backtracking budget and step fold, on the (possibly cached) context; read only in lsMode 1.
+        GpuAcNewtonSolver.setBatchLineSearch(handle, parameters.getLineSearchStateVectorScalingMaxIteration(),
+                parameters.getLineSearchStateVectorScalingStepFold());
         // The run-constant outer-loop tables, shared with the base load flow's batch-of-one.
         GpuBatchOuterLoopTables.install(handle, gpuData, rlCurves, forcedTargetQ,
                 config.rlRobustMode(), config.minRealisticVoltage(), config.maxRealisticVoltage(),

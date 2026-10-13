@@ -4410,6 +4410,32 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         assertEquals(2, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(), "census=" + GpuBatchScopeCensus.snapshot());
     }
 
+    /** LINE_SEARCH state-vector scaling in the batched SA. The scope used to map it to an undamped Newton (only
+     *  MAX_VOLTAGE_CHANGE reached the device), so a contingency whose first steps overshoot took another trajectory
+     *  than OLF's backtracking one. Two-bus network loaded near the nose of its PV curve with a parallel line: losing
+     *  that line leaves the single-line case undamped Newton cannot solve. 1e-12 on device. */
+    @org.junit.jupiter.api.Test
+    void deviceLineSearchScalingMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = com.powsybl.openloadflow.network.TwoBusNetworkFactory.create();
+        network.getLoad("l1").setP0(3.902);
+        com.powsybl.iidm.network.Line l0 = network.getLine("l12");
+        network.newLine().setId("l12_BIS")
+                .setVoltageLevel1(l0.getTerminal1().getVoltageLevel().getId()).setBus1(l0.getTerminal1().getBusBreakerView().getBus().getId())
+                .setVoltageLevel2(l0.getTerminal2().getVoltageLevel().getId()).setBus2(l0.getTerminal2().getBusBreakerView().getBus().getId())
+                .setR(l0.getR() * 0.2).setX(l0.getX() * 0.2).setG1(0).setB1(0).setG2(0).setB2(0).add();
+        List<Contingency> ctgs = List.of(new Contingency("l12_BIS", new BranchContingency("l12_BIS")));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setDistributedSlack(false).setUseReactiveLimits(false);
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
+                .setStateVectorScalingMode(com.powsybl.openloadflow.ac.solver.StateVectorScalingMode.LINE_SEARCH)
+                .setMaxNewtonRaphsonIterations(30);
+        GpuBatchScopeCensus.reset();
+        assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
+        assertEquals(1, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(), "census=" + GpuBatchScopeCensus.snapshot());
+    }
+
     /** An AC-emulation HVDC with a converter ON THE SLACK BUS, carrying a flow above the slack-distribution gate.
      *  OLF's slack mismatch (getMismatchP) carries the emulation term. The device's bus-balance buffer has no HVDC
      *  term, and this still matches at 1e-12; adding the term to that buffer was tried and counts the flow twice

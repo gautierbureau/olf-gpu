@@ -4343,6 +4343,35 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         assertEquals(java.util.Set.of(), GpuBatchScopeCensus.planRefusedIds(), "census=" + GpuBatchScopeCensus.snapshot());
     }
 
+    /** A shared transformer group whose outage leaves ONE survivor. OLF picks the adjustment path on the controllers
+     *  left after the outage (adjustWithOneController) and reads the controlled bus's deviation; the device picked it
+     *  on the static group size and, on the shared path, read the deviation off the group's FIRST member - the
+     *  outaged one, whose deadband check writes nothing: the survivor never moved (0 on a fresh context) or moved
+     *  on a stale value. Two parallel transformers regulating BUS_3 with no deadband: losing either, the other
+     *  must bring BUS_3 back alone. 1e-12, both on device. */
+    @org.junit.jupiter.api.Test
+    void deviceSharedGroupSurvivorAdjustsAloneMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = com.powsybl.openloadflow.network.VoltageControlNetworkFactory.createWithTransformerSharedRemoteControl();
+        for (String id : new String[] {"T2wT", "T2wT2"}) {
+            com.powsybl.iidm.network.TwoWindingsTransformer t = network.getTwoWindingsTransformer(id);
+            t.getRatioTapChanger().setTargetDeadband(0).setTapPosition(0)
+                    .setRegulationMode(com.powsybl.iidm.network.RatioTapChanger.RegulationMode.VOLTAGE)
+                    .setRegulationTerminal(t.getTerminal2()).setTargetV(33.0).setRegulating(true);
+        }
+        List<Contingency> ctgs = List.of(
+                new Contingency("T2wT", new BranchContingency("T2wT")),
+                new Contingency("T2wT2", new BranchContingency("T2wT2")));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setTransformerVoltageControlOn(true).setDistributedSlack(true).setUseReactiveLimits(true);
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
+                .setTransformerVoltageControlMode(com.powsybl.openloadflow.OpenLoadFlowParameters.TransformerVoltageControlMode.INCREMENTAL_VOLTAGE_CONTROL);
+        GpuBatchScopeCensus.reset();
+        assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
+        assertEquals(2, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(), "census=" + GpuBatchScopeCensus.snapshot());
+    }
+
     private static com.powsybl.loadflow.LoadFlowParameters remotePinParameters() {
         com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
                 .setDistributedSlack(true).setUseReactiveLimits(true);

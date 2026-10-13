@@ -356,7 +356,7 @@ public final class GpuBatchedSecurityAnalysisSolver {
         Set<LfBranch> relocatedCouplers = GpuAcOuterLoopPacks.relocatedCouplerBranches(network, equationSystem);
         GpuBatchQualification.ScenarioPlan plan = GpuBatchQualification.planScenarios(contingencies, qualifications,
                 elementMapper, gpuData, equationSystem, dsSum, slackParticipates, dsParams, distrRhoControllers,
-                relocatedCouplers, curvePRows);
+                relocatedCouplers, curvePRows, config.incrementalTransformerControl());
         List<Integer> batchedIndices = plan.batchedIndices();
         if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
             System.err.println("PLAN batched=" + batchedIndices.size() + " of " + contingencies.size());

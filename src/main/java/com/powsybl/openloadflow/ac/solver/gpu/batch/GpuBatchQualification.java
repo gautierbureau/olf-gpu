@@ -147,7 +147,7 @@ final class GpuBatchQualification {
      *  and the remaining survivors renormalize over c'. */
     private static double[][] distrRhoOverrides(EquationSystem<AcVariableType, AcEquationType> es,
                                                 GpuAcData gpuData, Set<LfBranch> distrRhoControllers,
-                                                List<LfBranch> outaged) {
+                                                List<LfBranch> outaged, boolean incrementalTvc) {
         List<LfBranch> members = outaged.stream().filter(distrRhoControllers::contains).toList();
         if (members.isEmpty()) {
             return new double[][] {new double[0], new double[0]};
@@ -162,6 +162,13 @@ final class GpuBatchQualification {
         }
         List<LfBranch> group = tvc.getMergedControllerElements().stream()
                 .filter(b -> !b.isDisabled()).toList();
+        // The INCREMENTAL transformer mode never activates a DISTR_RHO equation (each tap is a fixed ratio the outer
+        // loop moves), so an outage has no sharing coefficient to renormalize and no free role to re-pick: the
+        // survivors' tap moves are the in-kernel loop's business (tvcGroupDecisionBatch decides on the live members).
+        // Not "inactive at plan time": the other modes start with the sharing off and switch it on during the run.
+        if (incrementalTvc) {
+            return new double[][] {new double[0], new double[0]};
+        }
         if (group.size() < 2) {
             return null;                                     // no survivor — CPU
         }
@@ -1357,7 +1364,7 @@ final class GpuBatchQualification {
             EquationSystem<AcVariableType, AcEquationType> es,
             double dsSum, boolean slackParticipates,
             com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDsParams dsParams, Set<LfBranch> distrRhoControllers,
-            Set<LfBranch> relocatedCouplers, int[] curvePRows) {
+            Set<LfBranch> relocatedCouplers, int[] curvePRows, boolean incrementalTvc) {
         List<Integer> batchedIndices = new ArrayList<>();
         java.util.Map<Integer, int[]> relocRows = relocatedChildRows(gpuData);
         java.util.Map<Integer, int[]> relocDummyQRows = relocatedDummyQRows(gpuData);
@@ -1544,7 +1551,7 @@ final class GpuBatchQualification {
                 }
                 List<LfBus> islandLostVcControllers = new ArrayList<>();   // filled by the island-injection path
                 if (!c.outagedBranches().isEmpty()) {        // COMBO: the branch part must also qualify
-                    double[][] drOv = distrRhoOverrides(es, gpuData, distrRhoControllers, c.outagedBranches());
+                    double[][] drOv = distrRhoOverrides(es, gpuData, distrRhoControllers, c.outagedBranches(), incrementalTvc);
                     if (drOv == null) {
                         if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
                             System.err.println("QUAL_REJECT drOv " + c.contingencyId());
@@ -1997,7 +2004,7 @@ final class GpuBatchQualification {
                         genOutagesByIndex[i] = merged.toArray(new GenOutage[0]);
                     }
                 }
-                double[][] drOv = distrRhoOverrides(es, gpuData, distrRhoControllers, c.outagedBranches());
+                double[][] drOv = distrRhoOverrides(es, gpuData, distrRhoControllers, c.outagedBranches(), incrementalTvc);
                 if (drOv == null) {
                     if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
                         System.err.println("QUAL_REJECT drOv2 " + c.contingencyId());

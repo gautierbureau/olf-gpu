@@ -8951,10 +8951,12 @@ __global__ void tvcDeadbandCheckBatch(int nTvc, int nScenarios, int n, int nElem
     int s = tid / nTvc;
     if (!active[s]) {
         outOfDb[tid] = 0;
+        diffV[tid] = 0.0;
         return;
     }
     if (disabled[(size_t) s * nElements + tvcElemIndex[c]]) {    // outaged in this scenario
         outOfDb[tid] = 0;
+        diffV[tid] = 0.0;                                    // never read as a group's remaining deviation
         return;
     }
     double v = x[(size_t) s * n + tvcVRow[c]];
@@ -9026,7 +9028,12 @@ __global__ void tvcGroupDecisionBatch(int nGroups, int nScenarios, int nTvc,
         if (outOfDb[(size_t) s * nTvc + c]) { nLive++; lastLive = c; }
     }
     if (nLive == 0) return;
-    if (nLive == 1 && k1 - k0 == 1) {                        // adjustWithOneController
+    // OLF picks the path on the controllers LEFT after the outage (getMergedControllerElements minus the
+    // disabled ones): one survivor of a shared group adjusts alone. The static group size chose the shared path
+    // for it, and the shared path read the group's deviation off the FIRST member - the outaged one, whose
+    // deadband check writes nothing: 0 on a fresh context (the survivor never moved), a stale value from an
+    // earlier chunk on a reused one (chunk-dependent moves).
+    if (nLive == 1) {                                        // adjustWithOneController
         size_t st = (size_t) s * nTvc + lastLive;
         double sv = sensi[st];
         if (fabs(sv) < minSensiFilter) return;
@@ -9034,10 +9041,15 @@ __global__ void tvcGroupDecisionBatch(int nGroups, int nScenarios, int nTvc,
                        curTap, ratchetDir, ratchetCount, ratchetAllowed) != 0) moved[s] = 1;
         return;
     }
-    // adjustWithSeveralControllers: one tap per controller per pass, in merged order
-    size_t st0 = (size_t) s * nTvc + groupCtrl[k0];
+    // adjustWithSeveralControllers: one tap per controller per pass, in merged order; the deviation and the
+    // deadband are the controlled bus's, read off any live member (every live member of a group controls it)
+    int firstLive = -1;
+    for (int k = k0; k < k1 && firstLive < 0; k++) {
+        if (outOfDb[(size_t) s * nTvc + groupCtrl[k]]) firstLive = groupCtrl[k];
+    }
+    size_t st0 = (size_t) s * nTvc + firstLive;
     double remaining = diffV[st0];
-    double hdb = halfDb[groupCtrl[k0]];
+    double hdb = halfDb[firstLive];
     bool changed = true;
     bool any = false;
     while (changed) {

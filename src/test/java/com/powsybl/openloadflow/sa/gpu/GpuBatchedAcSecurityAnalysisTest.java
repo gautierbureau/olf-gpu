@@ -5013,6 +5013,35 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
     }
 
+    /** A voltage-dependent (ZIP) load on a relocated coupler-tree child whose coupler opens. The relocation puts the
+     *  child's balances on its parent coupler's dummy rows, and the ZIP family wrote its terms there in every lane:
+     *  once the coupler opens those rows are identities, and the load's voltage-dependent part vanished from the
+     *  child's balance. The three-section chain with a ZIP load on every section, each coupler opened in turn (both
+     *  sides stay energized). 1e-12 on device. */
+    @org.junit.jupiter.api.Test
+    void deviceZipLoadOnARehomedSectionMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = liveSectionChainNetwork();
+        com.powsybl.iidm.network.VoltageLevel vl12 = network.getVoltageLevel("vl12");
+        for (int k = 0; k < 3; k++) {
+            vl12.getNodeBreakerView().newBreaker().setId("bz" + k).setNode1(k).setNode2(50 + k).setOpen(false).add();
+            vl12.newLoad().setId("zl" + k).setNode(50 + k).setP0(20 + 5 * k).setQ0(8)
+                    .newZipModel().setC0p(0.2).setC0q(0.3).setC1p(0.3).setC1q(0.3).setC2p(0.5).setC2q(0.4).add()
+                    .add();
+        }
+        List<Contingency> ctgs = List.of(new Contingency("c01", new com.powsybl.contingency.SwitchContingency("c01")),
+                new Contingency("c12", new com.powsybl.contingency.SwitchContingency("c12")));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setDistributedSlack(true).setUseReactiveLimits(true);
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp).setUseLoadModel(true)
+                .setSlackBusSelectionMode(com.powsybl.openloadflow.network.SlackBusSelectionMode.NAME)
+                .setSlackBusesIds(List.of("vl0"));
+        GpuBatchScopeCensus.reset();
+        assertGpuMatchesCpu(network, ctgs, 1e-12, lfp, true);
+        assertEquals(2, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(), "census=" + GpuBatchScopeCensus.snapshot());
+    }
+
     /** DEVICE-mode SimpleTransformerVoltageControl (WITH_GENERATOR): the first solve runs with the
      *  VC-ON activation deltas (continuous rho), then one round-to-closest-tap re-solve
      *  (GpuBatchSimpleTvc); GPU SA == CPU SA at 1e-12, tap-moving strong outage included. */

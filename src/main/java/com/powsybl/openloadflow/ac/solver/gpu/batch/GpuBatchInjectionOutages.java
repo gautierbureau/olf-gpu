@@ -657,18 +657,28 @@ final class GpuBatchInjectionOutages {
                 double gf = dsParams.factor(gen);
                 if (gf != 0) {
                     dsFactorDelta += gf / dsSum;
-                    if (dsParams.useActiveLimits()) {        // rooms are +-infinity otherwise — a lost gen
-                        double minTp = gen.getMinTargetP();  // cannot change them (and inf - inf = NaN)
-                        double maxTp = gen.getMaxTargetP();
-                        double tp = gen.getTargetP();
-                        if (tp < 0) {
-                            maxTp = Math.min(maxTp, 0);
-                        } else {
-                            minTp = Math.max(minTp, 0);
+                    double[] r = dsParams.rooms(gen, gen.getTargetP());
+                    // An infinite room (active limits off, OLF's sign rule leaves one side open) cannot be taken
+                    // off the bus's aggregate as a delta: it is 0 while another participant on the bus keeps that
+                    // side open, and inexpressible (inf - inf) when the survivors all close it.
+                    for (int side = 0; side < 2; side++) {
+                        if (Double.isInfinite(r[side])) {
+                            boolean stillOpen = false;
+                            for (LfGenerator other : bus.getGenerators()) {
+                                if (!lostSet.contains(other) && dsParams.factor(other) != 0
+                                        && Double.isInfinite(dsParams.rooms(other, other.getTargetP())[side])) {
+                                    stillOpen = true;
+                                    break;
+                                }
+                            }
+                            if (!stillOpen && !dsParams.isLoadBased()) {
+                                return reject("DS_ROOM_UNBOUNDED_TO_BOUNDED", bus);
+                            }
+                            r[side] = 0;
                         }
-                        dsMaxDelta += maxTp - tp;
-                        dsMinDelta += minTp - tp;
                     }
+                    dsMaxDelta += r[0];
+                    dsMinDelta += r[1];
                 }
             }
         }

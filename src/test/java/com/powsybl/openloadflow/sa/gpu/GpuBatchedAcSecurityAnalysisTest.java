@@ -391,6 +391,31 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
                 new Contingency("L1-5-1", new BranchContingency("L1-5-1"))), 1e-12, lfp);
     }
 
+    /** useActiveLimits=false still keeps OLF's no-sign-change rule (GenerationActivePowerDistributionStep: the limits
+     *  become -+MAX_VALUE, THEN a positive generator's floor is 0 and a negative one's ceiling 0). B2-G at 0.5 MW
+     *  participates under P_MAX; with the slack's unit out of the distribution the base mismatch pushes generation DOWN, B2-G's
+     *  share by more than 0.5 MW, and OLF holds B2-G at 0 (B3-G, at 200 MW, takes the rest) while the device, with infinite rooms, took it negative. The contingencies'
+     *  own loss is pre-distributed on the host with OLF's rule; the base load flow and the in-loop residuals run the
+     *  device's water-fill. 1e-12 on device. */
+    @org.junit.jupiter.api.Test
+    void deviceDsNoActiveLimitsKeepsTheGenerationSignMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = IeeeCdfNetworkFactory.create14();
+        network.getGenerator("B2-G").setTargetP(0.5);         // participates (P_MAX), 0.5 MW above its sign floor
+        network.getGenerator("B3-G").setMaxP(400).setTargetP(200); // a second participant, with room to go down
+        network.getGenerator("B1-G").newExtension(com.powsybl.iidm.network.extensions.ActivePowerControlAdder.class)
+                .withParticipate(false).withDroop(4).add();             // the slack's own unit does not participate
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setDistributedSlack(true).setUseReactiveLimits(true);
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp).setUseActiveLimits(false);
+        List<Contingency> ctgs = List.of(new Contingency("B9-L", new com.powsybl.contingency.LoadContingency("B9-L")),
+                new Contingency("B14-L", new com.powsybl.contingency.LoadContingency("B14-L")));
+        GpuBatchScopeCensus.reset();
+        assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
+        assertEquals(2, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(), "census=" + GpuBatchScopeCensus.snapshot());
+    }
+
     /** DEVICE DS balance type PROPORTIONAL_TO_LOAD: participants are the LOADS (per-bus factor = the
      *  variable load share, unbounded absorption); GPU SA == CPU SA at machine precision. */
     @org.junit.jupiter.api.Test

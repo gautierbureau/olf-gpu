@@ -55,6 +55,26 @@ public record GpuDsParams(LoadFlowParameters.BalanceType balanceType, boolean us
         return anchorOnInitialTargetP ? g.getInitialTargetP() : g.getTargetP();
     }
 
+    /**
+     * OLF's distribution rooms of a participating generator from {@code tp}, as {maxDelta, minDelta}: the bounds are
+     * the target P limits with active limits on and -+infinity (OLF: -+Double.MAX_VALUE) with them off, and THEN the
+     * sign rule of GenerationActivePowerDistributionStep applies in both cases: a generator at a negative target never
+     * rises above 0, any other never falls below 0. Load-based types are unbounded (OLF rescales loads freely).
+     */
+    public double[] rooms(LfGenerator g, double tp) {
+        if (isLoadBased()) {
+            return new double[] {Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY};
+        }
+        double minTp = useActiveLimits ? g.getMinTargetP() : Double.NEGATIVE_INFINITY;
+        double maxTp = useActiveLimits ? g.getMaxTargetP() : Double.POSITIVE_INFINITY;
+        if (tp < 0) {
+            maxTp = Math.min(maxTp, 0);
+        } else {
+            minTp = Math.max(minTp, 0);
+        }
+        return new double[] {maxTp - tp, minTp - tp};
+    }
+
     /** True if the device DS pass models this balance type: the static-factor generation types and the
      *  load-based types (per-bus factors = the variable load share, unbounded absorption — at BUS level the
      *  target update is identical to the generation case, so the same water-fill kernel serves both). */

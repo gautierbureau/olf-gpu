@@ -982,22 +982,15 @@ public final class GpuAcOuterLoopPacks {
             double footroom = 0;
             for (LfGenerator g : bus.getGenerators()) {
                 if (dsParams.factor(g) != 0) {
-                    double minTp = g.getMinTargetP();
-                    double maxTp = g.getMaxTargetP();
-                    double tp = dsParams.anchorTargetP(g);
-                    if (tp < 0) {                                       // OLF: distribution never flips a gen's sign
-                        maxTp = Math.min(maxTp, 0);
-                    } else {
-                        minTp = Math.max(minTp, 0);
-                    }
-                    headroom += maxTp - tp;
-                    footroom += minTp - tp;
+                    double[] r = dsParams.rooms(g, dsParams.anchorTargetP(g));   // OLF's bounds + sign rule
+                    headroom += r[0];
+                    footroom += r[1];
                 }
             }
-            if (!dsParams.useActiveLimits() || dsParams.isLoadBased()) {
-                headroom = Double.POSITIVE_INFINITY;                    // OLF: +-Double.MAX_VALUE bounds (or loads,
-                footroom = Double.NEGATIVE_INFINITY;                    // which OLF rescales unbounded) — the
-            }                                                           // water-fill clamp never saturates
+            if (dsParams.isLoadBased()) {
+                headroom = Double.POSITIVE_INFINITY;                    // loads: OLF rescales them unbounded
+                footroom = Double.NEGATIVE_INFINITY;
+            }
             if (factor > 0 && System.getenv("OLF_GPU_DS_PACK_TRACE") != null
                     && (footroom > 0 || headroom < 0)) {
                 // The base P is OUTSIDE the bus's own active limits. OLF's water-fill still SETS such a
@@ -1033,14 +1026,7 @@ public final class GpuAcOuterLoopPacks {
                     if (gf == 0) {
                         continue;                            // OLF: isParticipating(gen) && factor != 0
                     }
-                    double minTp = g.getMinTargetP();
-                    double maxTp = g.getMaxTargetP();
                     double tp = dsParams.anchorTargetP(g);
-                    if (tp < 0) {                            // OLF: distribution never flips a gen's sign
-                        maxTp = Math.min(maxTp, 0);
-                    } else {
-                        minTp = Math.max(minTp, 0);
-                    }
                     if (System.getenv("OLF_GPU_DS_GEN_TRACE") != null) {
                         System.err.println("GPU_DS_GEN idx=" + dgFactorRaw.size() + " bus=" + bus.getId()
                                 + " gen=" + g.getId() + " factor=" + gf
@@ -1050,9 +1036,9 @@ public final class GpuAcOuterLoopPacks {
                     dgBus.add(dsPhiRow.size() - 1);
                     dgGenId.add(g.getId());
                     dgFactorRaw.add(gf);
-                    boolean unbounded = !dsParams.useActiveLimits() || dsParams.isLoadBased();
-                    dgMaxDelta.add(unbounded ? Double.POSITIVE_INFINITY : maxTp - tp);
-                    dgMinDelta.add(unbounded ? Double.NEGATIVE_INFINITY : minTp - tp);
+                    double[] rooms = dsParams.rooms(g, tp);  // with active limits off the sign rule still holds
+                    dgMaxDelta.add(rooms[0]);
+                    dgMinDelta.add(rooms[1]);
                     if (dsParams.isRemainingMargin()) {
                         double minP = g.getMinP();
                         double maxP = g.getMaxP();

@@ -1534,6 +1534,7 @@ final class GpuBatchChunkSolver {
                     }
                     double[] dsAnchorShift = null;
                     double[] dsSlackShift = null;
+                    double[] pairSlackAbsorbedSeed = null;   // slack-only pairs: the parent's absorbed total they start from
                     if (!pairPhase && (hasDs || dsSlackOnly) && config.contingencyLossPreDistribution()) {
                         // CPU parity (DefaultContingencyActivePowerLossDistribution): with DS on, the
                         // contingency's SCHEDULED lost active power is distributed ONCE over the
@@ -1834,6 +1835,7 @@ final class GpuBatchChunkSolver {
                             dsSlackShift = new double[chunkSize];
                         } else if (dsSlackOnly) {
                             dsSlackShift = new double[chunkSize];    // absorbed-total seeds (no participant anchors)
+                            pairSlackAbsorbedSeed = new double[chunkSize];
                         }
                         double dsFactorSum = 0;
                         for (double fv : gpuData.dsFactor()) {
@@ -1869,6 +1871,7 @@ final class GpuBatchChunkSolver {
                             }
                             if (dsSlackOnly && dsSlackShift != null && parentSlackAbs != null) {
                                 dsSlackShift[s] = parentSlackAbs;    // seed the pair with the parent's absorbed total
+                                pairSlackAbsorbedSeed[s] = parentSlackAbs;
                             }
                             if (parentDs != null && dsAnchorShift != null && dsFactorSum > 0) {
                                 // parentDs = [absorption per DS row..., parent factor sum] (captured after the
@@ -2650,10 +2653,11 @@ final class GpuBatchChunkSolver {
                                     contingencies.get(group.get(chunkStart + s)).contingencyId(), pinned, ids);
                         }
                     }
-                    if (!pairPhase && (hasDs || dsSlackOnly)
+                    if ((hasDs || dsSlackOnly)
                             && GpuAcNewtonSolver.readBatchSolveCount(handle) - solveCountBefore == 1) {
                         recordDistributedActivePower(handle, gpuData, realCount, chunkSize, n, group, chunkStart,
-                                dsSlackOnly, dsOvBus, dsOvBaseDelta, preDistributedByIndex, distributedByIndex);
+                                dsSlackOnly, dsOvBus, dsOvBaseDelta, pairPhase ? dsAnchorShift : null,
+                                pairPhase ? pairSlackAbsorbedSeed : null, preDistributedByIndex, distributedByIndex);
                     }
                     for (int s = 0; s < realCount; s++) {
                         double[] row = chunkResults[s];
@@ -2708,15 +2712,23 @@ final class GpuBatchChunkSolver {
      * distribution is the pre-distribution alone. Slack-only participation keeps everything in the slack's
      * absorbed total. Only valid when ONE solve covered the chunk (the read-backs are per solve): the caller
      * checks; a scenario left NaN reports the pre-distribution as before.
+     *
+     * <p>A strategy pair reports what OLF's action simulation reports: the distribution of the strategy
+     * load flow alone, which starts from the parent contingency's distributed targets and has no loss
+     * pre-distribution. The pair phase re-anchors the water-fill and the slack target at the parent
+     * ({@code anchorShift}) and seeds the slack-only accumulator with the parent's total
+     * ({@code slackAbsorbedSeed}); both are taken back out here. Null outside the pair phase.
      */
     private static void recordDistributedActivePower(long handle, GpuAcData gpuData, int realCount, int chunkSize, int n,
                                                      List<Integer> group, int chunkStart, boolean dsSlackOnly,
                                                      int[] dsOvBus, double[] dsOvBaseDelta,
+                                                     double[] anchorShift, double[] slackAbsorbedSeed,
                                                      double[] preDistributedByIndex, double[] distributedByIndex) {
+        boolean pair = anchorShift != null || slackAbsorbedSeed != null;
         if (dsSlackOnly) {
             double[] absorbed = GpuAcNewtonSolver.readBatchSlackAbsorbed(handle);
             for (int s = 0; s < realCount && absorbed != null; s++) {
-                distributedByIndex[group.get(chunkStart + s)] = absorbed[s];
+                distributedByIndex[group.get(chunkStart + s)] = absorbed[s] - (slackAbsorbedSeed != null ? slackAbsorbedSeed[s] : 0.0);
             }
             return;
         }
@@ -2730,11 +2742,18 @@ final class GpuBatchChunkSolver {
         for (int s = 0; s < realCount; s++) {
             int idx = group.get(chunkStart + s);
             if (Double.isNaN(retain[s])) {                   // no pass fired: the pre-distribution alone
-                distributedByIndex[idx] = preDistributedByIndex[idx];
+                distributedByIndex[idx] = pair ? 0.0 : preDistributedByIndex[idx];
                 continue;
             }
             double participants = 0;
-            if (ngen > 0) {
+            // The kernel runs the per-generator water-fill only for a scenario that is not re-anchored: a pair
+            // whose parent distributed something takes the bus-level loop, which moves the row targets and
+            // leaves genCum at zero (distributeSlackBatch's `anchored` test, on the same values).
+            boolean anchored = false;
+            for (int i = 0; anchorShift != null && i < gpuData.dsPhiRow().length && !anchored; i++) {
+                anchored = anchorShift[s * gpuData.dsPhiRow().length + i] != 0.0;
+            }
+            if (ngen > 0 && !anchored) {
                 if (genCum == null) {
                     genCum = GpuAcNewtonSolver.readBatchDsGenCum(handle);
                 }
@@ -2750,7 +2769,8 @@ final class GpuBatchChunkSolver {
                 }
                 int ov = dsOvBus != null && dsOvBus.length > 0 ? dsOvBus[s] : -1;
                 for (int i = 0; i < gpuData.dsPhiRow().length; i++) {
-                    double anchor = gpuData.dsBaseTargetP()[i] - (ov == i ? dsOvBaseDelta[s] : 0.0);
+                    double anchor = gpuData.dsBaseTargetP()[i] - (ov == i ? dsOvBaseDelta[s] : 0.0)
+                            + (anchorShift != null ? anchorShift[s * gpuData.dsPhiRow().length + i] : 0.0);
                     participants += targets[s * n + gpuData.dsPhiRow()[i]] - anchor;
                 }
             }

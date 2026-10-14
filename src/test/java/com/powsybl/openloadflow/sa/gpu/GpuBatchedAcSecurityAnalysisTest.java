@@ -6802,6 +6802,8 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
             assertEquals(cpuS.getStatus(), gpuS.getStatus());
             assertEquals(cpuS.getLimitViolationsResult().getLimitViolations().size(),
                     gpuS.getLimitViolationsResult().getLimitViolations().size(), "strategy violation count");
+            assertEquals(cpuS.getDistributedActivePower(), gpuS.getDistributedActivePower(), 1e-9,
+                    "strategy distributed active power");
             var cb = cpuS.getNetworkResult().getBusResults();
             var gb = gpuS.getNetworkResult().getBusResults();
             assertEquals(cb.size(), gb.size());
@@ -7026,6 +7028,8 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
                 assertEquals(cpuS.getStatus(), gpuS.getStatus());
                 assertEquals(cpuS.getLimitViolationsResult().getLimitViolations().size(),
                         gpuS.getLimitViolationsResult().getLimitViolations().size(), "strategy violation count");
+                assertEquals(cpuS.getDistributedActivePower(), gpuS.getDistributedActivePower(), 1e-9,
+                        "strategy distributed active power");
                 var cb = cpuS.getNetworkResult().getBusResults();
                 var gb = gpuS.getNetworkResult().getBusResults();
                 assertEquals(cb.size(), gb.size());

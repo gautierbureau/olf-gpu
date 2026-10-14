@@ -1149,8 +1149,14 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         String scId = contingency.getId() + STRATEGY_KEY_SEP + operatorStrategy.getId();
         PrecomputedBatch precomputed = runState.get().precomputed;
         double[] state = precomputed.states().get(scId);
-        if (state == null || !precomputed.isReady()) {
-            // pair not precomputed (condition not TrueCondition / out-of-scope action / diverged) — CPU path
+        // What OLF reports for the strategy: the distribution of the strategy load flow alone (no loss
+        // pre-distribution, counted from the parent's distributed targets). The device records it when one
+        // solve covered the pair's chunk; without it the state is not a complete answer.
+        Double distributed = securityAnalysisParameters.getLoadFlowParameters().isDistributedSlack()
+                ? precomputed.distributedActivePower().get(scId) : Double.valueOf(0.0);
+        if (state == null || !precomputed.isReady() || distributed == null) {
+            // pair not precomputed (condition not TrueCondition / out-of-scope action / diverged) or its
+            // distributed active power not recorded — CPU path
             return super.runActionSimulation(network, context, operatorStrategy, actionsIds, preContingencyLimitViolationManager,
                     securityAnalysisParameters, lfActionById, createResultExtension, lfContingency, contingency,
                     preContingencyNetworkResult, networkParameters, limitReductions);
@@ -1175,8 +1181,6 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                 securityAnalysisParameters.getModifiedMonitoredElementsParameters());
         postActionsNetworkResult.update();
         postActionsViolationManager.detectViolations(network);
-        // Stage 1 reports no ADDITIONAL distributed power for the action solve (the batch already ran
-        // its device-side DS within the scenario) — mirrors the post-contingency injection convention.
         return new OperatorStrategyResult(operatorStrategy,
                 List.of(new OperatorStrategyResult.ConditionalActionsResult(operatorStrategy.getId(),
                         PostContingencyComputationStatus.CONVERGED,
@@ -1184,7 +1188,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                         GpuStateInjector.filterIslanded(network, precomputed.islandedBuses().get(scId), scId,
                                 new NetworkResult(postActionsNetworkResult.getBranchResults(), postActionsNetworkResult.getBusResults(),
                                         postActionsNetworkResult.getThreeWindingsTransformerResults())),
-                        0.0)));
+                        distributed * PerUnit.SB)));
     }
 
     /** OLF's residual at the injected device state, worst rows first — see {@code OLF_GPU_SA_RESID}. */

@@ -734,6 +734,11 @@ public final class GpuAcNewtonSolver {
     /** Per-chunk loss pre-distribution moves of the forced-target-Q generators ([nS * nfq] pu), or null. */
     public static native void setBatchForcedTargetQPre(long handle, double[] fqPre);
 
+    /** Slack-only distribution: per scenario, the slack generators' initial target relative to the slack's target P
+     *  for the following solves - a strategy pair's parent total, which OLF re-anchors on; null = 0 (a contingency,
+     *  whose loss pre-distribution OLF undoes at its first pass). */
+    public static native void setBatchSlackOnlyAnchor(long handle, double[] anchor);
+
     /** Remote-member RL entries (plan-B1): per-entry remote kinds + compare rows (PILOT v column for
      *  remote group members — both RL switch conditions test the pilot's V against the GROUP target).
      *  {@code dqMemberQrGroup} (plan-B4) links each group member to its pilot's relocation candidate

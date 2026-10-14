@@ -778,11 +778,11 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
     }
 
     /** Tightened-DS regression for the INCREMENTAL FLOW-CONTROL orchestrator: at 0.01 MW the
-     *  scenarios batch at 1e-12 with the DS carry plumbed. The second block pins the PATHOLOGICAL
-     *  micro-threshold corner: a sweep measured thresholds 1e-3/5e-4/2e-4 MW all &lt; 1e-14 kV and
-     *  ONLY 1e-4 MW at 1.1e-10 kV — a distribute/skip decision landing on opposite sides of the
-     *  threshold boundary (the 1-MW DS knife edge's 100-W sibling), NOT a scaling systematic.
-     *  Accepted parity per the 2026-09-08 decision (1e-10-class agreement is good; no guard). */
+     *  scenarios batch at 1e-12 with the DS carry plumbed. The second block is the 1e-4 MW threshold,
+     *  below OLF's other distribution bound: DistributedSlackOuterLoop.check distributes only past BOTH
+     *  slackBusPMaxMismatch and P_RESIDUE_EPS (1 kW). The device tested the threshold alone and ran one
+     *  more pass on L1 (a 1.196e-6 pu mismatch OLF leaves): 1.1e-10 kV and 1.2e-4 MW of distributed
+     *  power, once read as a knife edge. */
     @org.junit.jupiter.api.Test
     void deviceIncrementalPhaseDsCarryMatchesCpu() {
         org.junit.jupiter.api.Assumptions.assumeTrue(
@@ -806,9 +806,9 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
                 .setPhaseShifterControlMode(com.powsybl.openloadflow.OpenLoadFlowParameters.PhaseShifterControlMode.INCREMENTAL)
                 .setSlackBusPMaxMismatch(0.01);
         assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
-        // micro-threshold corner (100 W): batches, agrees to the measured 1.1e-10 kV ordering gap
+        // a threshold below P_RESIDUE_EPS (100 W)
         com.powsybl.openloadflow.OpenLoadFlowParameters.get(lfp).setSlackBusPMaxMismatch(1e-4);
-        assertGpuMatchesCpu(network, ctgs, 1e-9, lfp);
+        assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
     }
 
     /** DEVICE-mode IncrementalTransformerReactivePowerControl: rho taps drive the controlled branch's Q

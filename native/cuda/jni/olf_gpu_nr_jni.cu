@@ -7211,15 +7211,21 @@ static int dsDebugTraceSlot() {
     return (e != nullptr ? std::atoi(e) : 0) + 1;
 }
 
+// anchor: the slack generators' INITIAL target, relative to slackTargetP - 0 for a contingency (OLF's first pass
+// undoes the loss pre-distribution), the parent's absorbed total for a strategy pair (OLF re-anchors there).
+// OLF's ActivePowerDistribution resets to the anchor and places the whole remaining mismatch only above
+// P_RESIDUE_EPS: below it the generators stay at the anchor, and the outer loop still re-solves.
 __global__ void slackOnlyDsCheck(int nScenarios, int n, int slackPhiRowBase, const int* slackRowOv, double slackTargetP,
-                                 double slackDistTol, const double* qBuf, const char* rlActive,
-                                 double* absorbed, char* switched) {
+                                 double slackDistTol, double residueEps, const double* qBuf, const char* rlActive,
+                                 const double* anchor, double* absorbed, char* switched) {
     int s = blockIdx.x * blockDim.x + threadIdx.x;
     if (s >= nScenarios || !rlActive[s]) return;
     int slackPhiRow = slackRowOv != nullptr && slackRowOv[s] >= 0 ? slackRowOv[s] : slackPhiRowBase;   // relocated slack
     double m = qBuf[(size_t) s * n + slackPhiRow] - slackTargetP - absorbed[s];
-    if (fabs(m) > slackDistTol) {
-        absorbed[s] += m;
+    if (fabs(m) > slackDistTol && fabs(m) > residueEps) {   // OLF's check: both bounds
+        double a = anchor != nullptr ? anchor[s] : 0.0;
+        double total = absorbed[s] + m - a;                  // this check's mismatch plus the undone previous move
+        absorbed[s] = a + (fabs(total) > residueEps ? total : 0.0);
         switched[s] = 1;
     }
 }
@@ -7340,6 +7346,9 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
     if (s >= nScenarios) return;
     if (!rlActive[s]) return;
     int slackPhiRow = slackRowOv != nullptr && slackRowOv[s] >= 0 ? slackRowOv[s] : slackPhiRowBase;   // relocated slack
+    // OLF's DistributedSlackOuterLoop.check distributes only when the slack mismatch exceeds BOTH
+    // slackBusPMaxMismatch and ActivePowerDistribution.P_RESIDUE_EPS; the second only binds below 1 kW.
+    double gateTol = fmax(slackDistTol, residueEps);
     // The participating buses share the mismatch in EXCESS of the slack's retained share (rem); only distribute
     // past the slackBusPMaxMismatch outer gate, exactly like OLF's DistributedSlackOuterLoop.check.
     double slackTgt = slackTargetP + (dsSlackShift != nullptr ? dsSlackShift[s] : 0.0);
@@ -7403,7 +7412,7 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
     if (dbgTrace && s == dbgTrace - 1) {
         printf("[DS-GATE] slackMismatch=%.9f retain=%.9f rem=%.9f fsGlobal=%.9f tol=%.9f slackTgt=%.9f fire=%d\n",
                qBuf[(size_t) s * n + slackPhiRow] - slackTgt, dsRetain[s], rem, fsGlobal, slackDistTol, slackTgt,
-               (fsGlobal > 0.0 && fabs(rem) > fsGlobal * slackDistTol) ? 1 : 0);
+               (fsGlobal > 0.0 && fabs(rem) > fsGlobal * gateTol) ? 1 : 0);
     }
     if (gateLast != nullptr) {
         // The WHOLE accounting of one slack pass, host-readable (device printf does not reach the test log).
@@ -7413,7 +7422,7 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
         // `DS_RUN mismatch=... participants=n`, and the two TOTALS must agree: a difference in the amount
         // distributed is a defect, not a different route.
         gateLast[8 * s] = rem;
-        gateLast[8 * s + 1] = (fsGlobal > 0.0 && fabs(rem) > fsGlobal * slackDistTol) ? 1.0 : 0.0;
+        gateLast[8 * s + 1] = (fsGlobal > 0.0 && fabs(rem) > fsGlobal * gateTol) ? 1.0 : 0.0;
         gateLast[8 * s + 2] = qBuf[(size_t) s * n + slackPhiRow];
         gateLast[8 * s + 3] = slackTgt;
         gateLast[8 * s + 4] = qBuf[(size_t) s * n + slackPhiRow] - slackTgt;
@@ -7441,14 +7450,14 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
             // slack carries the whole total from the anchor here; what it took at the last pass that fired is
             // retainApplied (NaN before any), relative to a target the loss pre-distribution already shifted.
             double prev = isnan(retainApplied[s]) ? 0.0 : retainApplied[s];
-            if (fabs(mis - prev) > slackDistTol) {
+            if (fabs(mis - prev) > gateTol) {
                 retainApplied[s] = mis;
                 switched[s] = 1;
             }
         }
         return;
     }
-    if (fabs(rem) <= fsGlobal * slackDistTol) {
+    if (fabs(rem) <= fsGlobal * gateTol) {
         return;
     }
     if (retainApplied != nullptr) {
@@ -8468,6 +8477,8 @@ struct BatchSolverContext {
     DeviceBuf dDsResidual;                                   // nS chars: waterfill left an out-of-tolerance residual                                   // per scenario (nS): frozen slack-retained mismatch share
     bool dsSlackOnly = false;                                // DS enabled with the SLACK generator as the only participant:
     DeviceBuf dDsSlackAbsorbed;                              // nS doubles — mismatch absorbed into the slack's own target so far
+    DeviceBuf dDsSlackAnchor;                                // nS doubles — slack-only strategy pairs: the parent's total
+    bool dsSlackHasAnchor = false;                           // (setBatchSlackOnlyAnchor; zero anchor when unset)
                                                              // (OLF distributes into the slack gen and re-solves; no flow change,
                                                              // but the extra polish run must happen to match the CPU trajectory)
     CudssCtx ds;
@@ -13310,7 +13321,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         if (ctx->dsSlackOnly) {
             slackOnlyDsCheck<<<grid(nS), BLOCK, 0, ctx->stream>>>(nS, n, ctx->dsSlackPhiRow,
                     ctx->hasDsSlackRowOv ? ctx->dDsSlackRowOv.as<int>() : nullptr, ctx->dsSlackTargetP,
-                    SLACK_DIST_TOL, ctx->dQbuf.as<double>(), ctx->dRlActive.as<char>(),
+                    SLACK_DIST_TOL, P_RESIDUE_EPS, ctx->dQbuf.as<double>(), ctx->dRlActive.as<char>(),
+                    ctx->dsSlackHasAnchor ? ctx->dDsSlackAnchor.as<double>() : nullptr,
                     ctx->dDsSlackAbsorbed.as<double>(), ctx->dRlSwitched.as<char>());
         }
         if (ctx->nds > 0) {
@@ -15358,6 +15370,25 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
 
 // Remote-member RL entries (plan-B1): install (or clear) the per-entry remote kinds + compare rows
 // on a batch context. The RL kernel SKIPS remote entries until the B3 transition machinery lands.
+// Slack-only distribution: the slack generators' initial target per scenario (relative to the slack's target P)
+// for the next solves - a strategy pair's parent total; null clears it (zero: a contingency's base).
+extern "C" JNIEXPORT void JNICALL
+Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchSlackOnlyAnchor(
+        JNIEnv* env, jclass, jlong handle, jdoubleArray jAnchor) {
+    auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
+    if (ctx == nullptr) {
+        return;
+    }
+    if (jAnchor == nullptr || !ctx->dsSlackOnly) {
+        ctx->dsSlackHasAnchor = false;
+        return;
+    }
+    jdouble* a = env->GetDoubleArrayElements(jAnchor, nullptr);
+    ctx->dDsSlackAnchor.upload(a, static_cast<size_t>(env->GetArrayLength(jAnchor)) * sizeof(double));
+    env->ReleaseDoubleArrayElements(jAnchor, a, JNI_ABORT);
+    ctx->dsSlackHasAnchor = true;
+}
+
 extern "C" JNIEXPORT void JNICALL
 Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchRlElection(
         JNIEnv* env, jclass, jlong handle, jdoubleArray jNomV, jintArray jPRow, jdoubleArray jStaticP, jintArray jIdRank) {

@@ -12884,11 +12884,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     // scenario that is EVER unrealistic to the CPU replay, which applies OLF's rule itself. That is
     // stricter than OLF (a state it would have let a later loop fix also leaves the batch), so it
     // can cost batching share and can never change an answer.
-    if (ctx->realisticCheck && solvePass && loopIdx > realisticFixingIdx) {
-        std::vector<char> gate(nS);
-        for (int s = 0; s < nS; s++) {
-            gate[s] = (wasActive[s] && res.status[s] == 0 && live[s]) ? 1 : 0;
-        }
+    // One check over the scenarios gate selects: any whose state leaves the band goes to the CPU replay.
+    auto rejectUnrealistic = [&](const std::vector<char>& gate) {
         if (!ctx->dRealisticGate.p) ctx->dRealisticGate.alloc(nS * sizeof(char));
         if (!ctx->dRealisticBad.p) ctx->dRealisticBad.alloc(nS * sizeof(char));
         CUDA_CHECK(cudaMemcpyAsync(ctx->dRealisticGate.p, gate.data(), nS * sizeof(char),
@@ -12913,6 +12910,13 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                 active[s] = 0;
             }
         }
+    };
+    if (ctx->realisticCheck && solvePass && loopIdx > realisticFixingIdx) {
+        std::vector<char> gate(nS);
+        for (int s = 0; s < nS; s++) {
+            gate[s] = (wasActive[s] && res.status[s] == 0 && live[s]) ? 1 : 0;
+        }
+        rejectUnrealistic(gate);
     }
 
     if (!fullLoadflow) {
@@ -13734,6 +13738,17 @@ psgStep(ctx, nS, n, outer, "afterDistrQ");
         seqChanged = true;
         solvePass = true;                                   // mutated targets/modes -> a real re-solve is due
     } else {                                               // this outer loop stabilized
+        // The last loop that can fix an unrealistic state is done for this sweep: AcloadFlowEngine checks the
+        // state it leaves (runOuterLoop, after its do-while), whether or not the loop re-solved. The solve gate
+        // above only sees the solves of the LATER loops, so with that loop last in the order (the discrete
+        // TransformerVoltageControl under the validation parameters) only the final state was ever checked.
+        if (ctx->realisticCheck && realisticFixingIdx >= 0 && loopIdx == realisticFixingIdx) {
+            std::vector<char> gate(nS);
+            for (int s = 0; s < nS; s++) {
+                gate[s] = (res.status[s] == 0 && live[s]) ? 1 : 0;
+            }
+            rejectUnrealistic(gate);
+        }
         if (++loopIdx >= nLoops) {                          // ...move to the next loop in OLF's order
             if (!seqChanged) {
                 break;                                      // a full sweep re-solved nothing -> converged

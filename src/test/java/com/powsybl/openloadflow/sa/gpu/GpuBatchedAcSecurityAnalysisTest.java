@@ -4109,6 +4109,31 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
     /** 3-member shared transformer voltage-control group (T2wT + T2wT2 + a cloned T2wT3, all
      *  regulating BUS_3 to 33 kV) plus a parallel line for a non-islanding line outage. Free
      *  member = T2wT (first enabled). */
+    /** OLF checks the realistic band on the state the last loop able to fix it (here the discrete
+     *  TransformerVoltageControl) leaves at the end of EVERY sweep, not only on the final state. Under the T2wT
+     *  outage an intermediate sweep ends with a bus at 1.0240039 pu, the final state peaks at 1.0239403 pu and the
+     *  base at 1.0227 pu: with maxRealisticVoltage 1.02397 the CPU reports FAILED. The device checked only the
+     *  solves of the loops after the fixing one - none here - and the final state, so it reported CONVERGED. */
+    @org.junit.jupiter.api.Test
+    void deviceUnrealisticStateAtTransformerLoopEndMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        List<Contingency> ctgs = List.of(new Contingency("T2wT", new BranchContingency("T2wT")));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setTransformerVoltageControlOn(true).setDistributedSlack(true).setUseReactiveLimits(true);
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
+                .setTransformerVoltageControlMode(com.powsybl.openloadflow.OpenLoadFlowParameters.TransformerVoltageControlMode.AFTER_GENERATOR_VOLTAGE_CONTROL)
+                .setMinNominalVoltageRealisticVoltageCheck(0)
+                .setMaxRealisticVoltage(1.02397);
+        com.powsybl.security.SecurityAnalysisParameters sap = new com.powsybl.security.SecurityAnalysisParameters()
+                .setLoadFlowParameters(lfp);
+        // Non-vacuity: the base converges and the CPU fails the contingency, on a state that is not its final one.
+        assertEquals(com.powsybl.security.PostContingencyComputationStatus.FAILED,
+                runSecurityAnalysis(sharedThreeMemberTvcNetwork(), ctgs, List.of(), sap,
+                        com.powsybl.commons.report.ReportNode.NO_OP).getPostContingencyResults().get(0).getStatus());
+        assertGpuMatchesCpu(sharedThreeMemberTvcNetwork(), ctgs, 1e-12, lfp, false);
+    }
+
     private static Network sharedThreeMemberTvcNetwork() {
         Network network = com.powsybl.openloadflow.network.VoltageControlNetworkFactory.createWithTransformerSharedRemoteControl();
         com.powsybl.iidm.network.TwoWindingsTransformer t2 = network.getTwoWindingsTransformer("T2wT2");

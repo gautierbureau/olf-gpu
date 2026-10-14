@@ -4398,6 +4398,39 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         assertEquals(java.util.Set.of(), GpuBatchScopeCensus.planRefusedIds(), "census=" + GpuBatchScopeCensus.snapshot());
     }
 
+    /** Two remote voltage controls merged through a zero-impedance line (g1, g1b, g2 -> b4 main; g3, g3b -> b5
+     *  dependent), every generator with a 1000 MVar range, so the keys follow the RANGES (b1 40 %, b2 20 %, b3 40 %).
+     *  OLF's key rules skip a lost (disabled) generator and renormalize on the MAIN control: losing g1b gives
+     *  25/25/50 %, losing g3b 50/25/25 %. The plan's key replay must disable the generator as OLF does, otherwise
+     *  its range stays in its bus's key. */
+    @org.junit.jupiter.api.Test
+    void deviceGeneratorLossInRangeKeyedMergedControlsMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = com.powsybl.openloadflow.network.VoltageControlNetworkFactory.createWithGeneratorRemoteControl();
+        network.getSubstation("s").newVoltageLevel().setId("vl5").setNominalV(400)
+                .setTopologyKind(com.powsybl.iidm.network.TopologyKind.BUS_BREAKER).add();
+        network.getVoltageLevel("vl5").getBusBreakerView().newBus().setId("b5").add();
+        com.powsybl.iidm.network.Line zl = network.newLine().setId("zl45").setBus1("b4").setConnectableBus1("b4")
+                .setBus2("b5").setConnectableBus2("b5").setR(0).setX(0).add();
+        com.powsybl.iidm.network.Generator g1 = network.getGenerator("g1");
+        com.powsybl.iidm.network.Generator g3 = network.getGenerator("g3");
+        g3.setRegulatingTerminal(zl.getTerminal2());
+        network.getVoltageLevel("vl1").newGenerator().setId("g1b").setBus("b1").setConnectableBus("b1")
+                .setMinP(0).setMaxP(200).setTargetP(50).setVoltageRegulatorOn(true)
+                .setRegulatingTerminal(g1.getRegulatingTerminal()).setTargetV(g1.getTargetV()).add();
+        network.getVoltageLevel("vl3").newGenerator().setId("g3b").setBus("b3").setConnectableBus("b3")
+                .setMinP(0).setMaxP(200).setTargetP(50).setVoltageRegulatorOn(true)
+                .setRegulatingTerminal(zl.getTerminal2()).setTargetV(g3.getTargetV()).add();
+        network.getGeneratorStream().forEach(g -> g.newMinMaxReactiveLimits().setMinQ(-500).setMaxQ(500).add());
+        List<Contingency> ctgs = List.of(
+                new Contingency("g1b", new com.powsybl.contingency.GeneratorContingency("g1b")),
+                new Contingency("g3b", new com.powsybl.contingency.GeneratorContingency("g3b")));
+        GpuBatchScopeCensus.reset();
+        assertGpuMatchesCpu(network, ctgs, 1e-12);
+        assertEquals(java.util.Set.of(), GpuBatchScopeCensus.planRefusedIds(), "census=" + GpuBatchScopeCensus.snapshot());
+    }
+
     /** TWO secondary voltage control zones in one system. OLF assembles one system over every enabled controller of
      *  every zone and replaces each zone's last row by the pilot row built from EVERY controlled bus's sensitivity at
      *  THAT zone's pilot (createJvpp over allControlledBuses): a controller of one zone moves the other zone's pilot

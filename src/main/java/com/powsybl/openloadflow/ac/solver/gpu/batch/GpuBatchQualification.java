@@ -355,6 +355,7 @@ final class GpuBatchQualification {
                         && g.getBus() != null
                         && es.getEquation(g.getBus().getNum(), AcEquationType.DISTR_Q).isPresent()) {
                     g.setGeneratorControlType(com.powsybl.openloadflow.network.LfGenerator.GeneratorControlType.OFF);
+                    g.setDisabled(true);                     // OLF's key rules skip a lost (disabled) generator
                     toggled.add(g);
                     touched.add(g.getBus());
                 }
@@ -468,6 +469,7 @@ final class GpuBatchQualification {
         } finally {
             for (var g : toggled) {
                 g.setGeneratorControlType(com.powsybl.openloadflow.network.LfGenerator.GeneratorControlType.VOLTAGE);
+                g.setDisabled(false);
             }
             for (LfBus bus : touched) {
                 updateMainReactiveKeys(bus);

@@ -534,17 +534,53 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
 
     private static boolean targetedByOperatorStrategy(List<OperatorStrategy> strategies, String contingencyId) {
         for (OperatorStrategy strategy : strategies) {
-            var ctx = strategy.getContingencyContext();
-            boolean targets = switch (ctx.getContextType()) {
-                case ALL, ONLY_CONTINGENCIES -> true;
-                case SPECIFIC -> contingencyId.equals(ctx.getContingencyId());
-                case NONE -> false;
-            };
-            if (targets) {
+            if (targets(strategy, contingencyId)) {
                 return true;
             }
         }
         return false;
+    }
+
+    private static boolean targets(OperatorStrategy strategy, String contingencyId) {
+        var ctx = strategy.getContingencyContext();
+        return switch (ctx.getContextType()) {
+            case ALL, ONLY_CONTINGENCIES -> true;
+            case SPECIFIC -> contingencyId.equals(ctx.getContingencyId());
+            case NONE -> false;
+        };
+    }
+
+    /**
+     * What a strategy pair's device answer reports as distributed active power, or null when the pair is not answered
+     * on the device: no state, the batch not ready, or its distribution not recorded under distributed slack. OLF
+     * reports the distribution of the strategy load flow alone (no loss pre-distribution, counted from the parent's
+     * distributed targets); the device records it when one solve covered the pair's chunk.
+     */
+    private static Double pairDistributedOnDevice(PrecomputedBatch precomputed, String pairId,
+                                                  SecurityAnalysisParameters securityAnalysisParameters) {
+        if (!precomputed.isReady() || precomputed.states().get(pairId) == null) {
+            return null;
+        }
+        return securityAnalysisParameters.getLoadFlowParameters().isDistributedSlack()
+                ? precomputed.distributedActivePower().get(pairId) : Double.valueOf(0.0);
+    }
+
+    /**
+     * A strategy pair the device does not answer runs OLF's strategy load flow from the network its parent left. The
+     * parent's injected device state holds the bus voltages only, not what OLF's post-contingency run leaves behind
+     * (the generators' distributed targets, the PV/PQ switches, tap moves...), so such a parent is solved on the CPU.
+     * Measured: an absolute GeneratorAction pair routed to the CPU after a device parent reported -43.62 MW of
+     * distributed power where OLF reports -42.67.
+     */
+    private static boolean everyStrategyAnsweredOnDevice(RunState rs, String contingencyId,
+                                                         SecurityAnalysisParameters securityAnalysisParameters) {
+        for (OperatorStrategy strategy : rs.operatorStrategies) {
+            if (targets(strategy, contingencyId) && pairDistributedOnDevice(rs.precomputed,
+                    contingencyId + STRATEGY_KEY_SEP + strategy.getId(), securityAnalysisParameters) == null) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /**
@@ -1149,12 +1185,8 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         String scId = contingency.getId() + STRATEGY_KEY_SEP + operatorStrategy.getId();
         PrecomputedBatch precomputed = runState.get().precomputed;
         double[] state = precomputed.states().get(scId);
-        // What OLF reports for the strategy: the distribution of the strategy load flow alone (no loss
-        // pre-distribution, counted from the parent's distributed targets). The device records it when one
-        // solve covered the pair's chunk; without it the state is not a complete answer.
-        Double distributed = securityAnalysisParameters.getLoadFlowParameters().isDistributedSlack()
-                ? precomputed.distributedActivePower().get(scId) : Double.valueOf(0.0);
-        if (state == null || !precomputed.isReady() || distributed == null) {
+        Double distributed = pairDistributedOnDevice(precomputed, scId, securityAnalysisParameters);
+        if (distributed == null) {
             // pair not precomputed (condition not TrueCondition / out-of-scope action / diverged) or its
             // distributed active power not recorded — CPU path
             return super.runActionSimulation(network, context, operatorStrategy, actionsIds, preContingencyLimitViolationManager,
@@ -1563,8 +1595,10 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                             .getOrDefault(contingency.getId(), preDistributedActivePower) * PerUnit.SB);
         }
         double[] state = precomputed.states().get(contingency.getId());
-        if (state == null || !precomputed.isReady()) {
-            // not batched (multi-element / islanding / out of scope / rejected) — standard CPU path
+        if (state == null || !precomputed.isReady()
+                || !everyStrategyAnsweredOnDevice(runState.get(), contingency.getId(), securityAnalysisParameters)) {
+            // not batched (multi-element / islanding / out of scope / rejected), or a strategy pair of it is left to
+            // the CPU (everyStrategyAnsweredOnDevice) — standard CPU path
             long tCpu = System.nanoTime();
             PostContingencyResult cpuResult = super.runPostContingencySimulation(network, context, contingency, lfContingency,
                     preContingencyLimitViolationManager, securityAnalysisParameters, preContingencyNetworkResult,

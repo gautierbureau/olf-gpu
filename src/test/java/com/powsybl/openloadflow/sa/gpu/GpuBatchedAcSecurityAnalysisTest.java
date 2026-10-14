@@ -7321,6 +7321,13 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
                         com.powsybl.contingency.ContingencyContext.specificContingency(loadId),
                         new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of("set2")));
         assertStrategyMatchesCpu(network, contingencies, strategies, actions, 2);
+
+        // A second participant on B2: how the parent's share of the bus splits between the two is not known to the
+        // pair leg, so the pair goes to the CPU (the contingency alone on the device).
+        Network shared = IeeeCdfNetworkFactory.create14();
+        shared.getVoltageLevel("VL2").newGenerator().setId("B2-G2").setBus("B2").setConnectableBus("B2")
+                .setTargetP(10).setTargetQ(0).setVoltageRegulatorOn(false).setMinP(0).setMaxP(50).add();
+        assertStrategyMatchesCpu(shared, contingencies, strategies, actions, 1);
     }
 
     @Test

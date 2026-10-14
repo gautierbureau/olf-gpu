@@ -7329,6 +7329,25 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
     }
 
     @Test
+    void participatingGeneratorOutageWithAParticipatingSlackMatchesCpu() {
+        // The slack bus's generator takes part in the distribution. Losing another participant renormalizes
+        // the factors over the survivors, the slack's included: its retained share grows. On ieee14 the only
+        // other participant is B2-G, so its loss leaves the slack generators alone; with a third participant
+        // at B6 the survivors share it.
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        assertGpuMatchesCpu(IeeeCdfNetworkFactory.create14(), List.of(new Contingency("B2-G",
+                new com.powsybl.contingency.GeneratorContingency("B2-G"))));
+        assertEquals(1, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(), "B2-G outage on the device");
+        Network network = IeeeCdfNetworkFactory.create14();
+        network.getVoltageLevel("VL6").newGenerator().setId("B6-GP").setBus("B6").setConnectableBus("B6")
+                .setTargetP(20).setTargetQ(0).setVoltageRegulatorOn(false).setMinP(0).setMaxP(80).add();
+        assertGpuMatchesCpu(network, List.of(new Contingency("B2-G",
+                new com.powsybl.contingency.GeneratorContingency("B2-G"))));
+        assertEquals(1, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(), "B2-G outage on the device");
+    }
+
+    @Test
     void l121SevereContingencyMatchesCpuAtTightSlackTol() {
         // The L1-2-1 outage (main B1-B2 tie) pins ALL PV buses — an ill-conditioned state where the
         // DS stopping band (slackBusPMaxMismatch, default 1 MW) leaves ~0.1 kV of legitimate

@@ -557,9 +557,6 @@ final class GpuBatchInjectionOutages {
         if (dsParams.isRemainingMargin() && dsBus >= 0 && lostParticipation) {
             return reject("REMAINING_MARGIN_DS", bus);       // RM margins reweight per scenario: not modeled — CPU
         }
-        if (dsBus >= 0 && lostParticipation && slackParticipates) {
-            return reject("PARTICIPATING_SLACK", bus);   // FACTOR reweight + participating slack: the retain math
-        }                                           // doesn't hold (a pure base shift keeps the factors — exact)
         if (!distrQBus && bus.getGeneratorVoltageControl().map(vc -> vc.getControlledBus() != null
                 && vc.getControlledBus().getNum() != busNum).orElse(false)) {
             return reject("REMOTE_SINGLE_CONTROLLER", bus);   // (pilot-Q remap, no DISTR_Q row at this bus):

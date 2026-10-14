@@ -7246,19 +7246,22 @@ __global__ void computeSlackRetain(int nScenarios, int n, int nds, int slackPhiR
                                    const double* dsAnchorShift, const double* dsSlackShift,
                                    int dsMode, const double* dsMarginUp, const double* dsMarginDown,
                                    double slackMarginUp, double slackMarginDown,
-                                   const char* dsIslanded, const double* dsFactor) {
+                                   const char* dsIslanded, const double* dsFactor, const double* dsOvFactorDelta) {
     int s = blockIdx.x * blockDim.x + threadIdx.x;
     if (s >= nScenarios) return;
     if (!rlActive[s]) return;
     int slackPhiRow = slackRowOv != nullptr && slackRowOv[s] >= 0 ? slackRowOv[s] : slackPhiRowBase;   // relocated slack
     double absorbed = 0.0;
     double fsActive = 0.0;                                   // Σ f over the participants still in the main component
+    double fsAll = 0.0;
     int ov = dsOvBus != nullptr ? dsOvBus[s] : -1;
     for (int i = 0; i < nds; i++) {
+        fsAll += dsFactor[i];
         if (dsIslanded != nullptr && dsIslanded[(size_t) s * nds + i]) {
             continue;                                        // in another component: not a participant here
         }
-        fsActive += dsFactor[i];
+        // a lost participating generator leaves the participation like a stranded one: its factor goes
+        fsActive += dsFactor[i] - (ov == i && dsOvFactorDelta != nullptr ? dsOvFactorDelta[s] : 0.0);
         // A composed injection override on a participant bus (redispatch action, load delta) shifts
         // the row target WITHOUT being distributed power — the effective base must shift with it,
         // or the retain math counts the override as absorbed slack and the waterfill CANCELS it
@@ -7275,9 +7278,9 @@ __global__ void computeSlackRetain(int nScenarios, int n, int nds, int slackPhiR
     double slackTgt = slackTargetP + (dsSlackShift != nullptr ? dsSlackShift[s] : 0.0);
     double tot = (qBuf[(size_t) s * n + slackPhiRow] - slackTgt) + absorbed;   // total-from-anchor, OLF's
     double rho = oneMinusFactorSum;                                            // remainingMismatch at run() start
-    if (dsIslanded != nullptr && dsMode != 1) {
+    if (fsActive != fsAll && dsMode != 1) {
         // The factors were normalized over ALL participants (W), so rho = w_slack/W. Dropping the
-        // stranded ones renormalizes over W' = W - Σ_stranded w, and w_slack/W' = rho/(Σ_active f + rho).
+        // stranded or lost ones renormalizes over W' = W - Σ_dropped w, and w_slack/W' = rho/(Σ_active f + rho).
         // Leaving rho global is exactly what made the first attempt at this fail: the participants
         // were masked out of the distribution loops while the slack kept the share it had when they
         // were still in, so the pass retired with most of the mismatch undistributed.
@@ -7382,10 +7385,10 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
             if (dsIslanded != nullptr && dsIslanded[(size_t) s * nds + i]) {
                 continue;
             }
-            fsActive += dsFactor[i];
+            fsActive += dsFactor[i] - (ov == i && dsOvFactorDelta != nullptr ? dsOvFactorDelta[s] : 0.0);
         }
-        // With every participant present this is Σf, bit-for-bit what it was. With some stranded it
-        // is the survivors' share of the RENORMALIZED set, 1 - rho' = fsActive/(fsActive + rho) with
+        // With every participant present this is Σf, bit-for-bit what it was. With some stranded or a
+        // participating generator lost it is the survivors' share of the RENORMALIZED set, 1 - rho' = fsActive/(fsActive + rho) with
         // rho = 1 - Σf the slack's original share — the same formula computeSlackRetain uses for
         // rho', so the two halves of the split still add up to the whole mismatch. The gate below
         // then scales the tolerance by the share these participants really carry, which is what
@@ -7430,6 +7433,18 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
         double mis = qBuf[(size_t) s * n + slackPhiRow] - slackTgt;
         if (noCapacity && fabs(mis) > slackDistTol && fabs(mis) > residueEps) {
             dsResidual[s] = 1;
+        }
+        if (!noCapacity && retainApplied != nullptr) {
+            // Only the slack bus's generators participate (every other participant lost or stranded). OLF's
+            // check measures the slack's mismatch against the target its last distribution gave those
+            // generators, distributes past slackBusPMaxMismatch onto them, and the outer loop re-solves. The
+            // slack carries the whole total from the anchor here; what it took at the last pass that fired is
+            // retainApplied (NaN before any), relative to a target the loss pre-distribution already shifted.
+            double prev = isnan(retainApplied[s]) ? 0.0 : retainApplied[s];
+            if (fabs(mis - prev) > slackDistTol) {
+                retainApplied[s] = mis;
+                switched[s] = 1;
+            }
         }
         return;
     }
@@ -13314,7 +13329,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                     ctx->dsMode == 1 ? ctx->dDsMarginDown.as<double>() : nullptr,
                     ctx->dsSlackMarginUp, ctx->dsSlackMarginDown,
                     ctx->nDsIslanded > 0 ? ctx->dDsIslanded.as<char>() : nullptr,
-                    ctx->dDsFactor.as<double>());
+                    ctx->dDsFactor.as<double>(), hasDsOverride ? dDsOvFactorDelta.as<double>() : nullptr);
             if (!ctx->dDsResidual.p) ctx->dDsResidual.alloc(nS * sizeof(char));
             CUDA_CHECK(cudaMemsetAsync(ctx->dDsResidual.p, 0, nS * sizeof(char), ctx->stream));
             distributeSlackBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(ctx->nds, nS, n, SLACK_DIST_TOL, P_RESIDUE_EPS,

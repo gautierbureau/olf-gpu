@@ -92,12 +92,20 @@ final class GpuBatchLossPreDistribution {
                 if (islanded != null && islanded[i]) {
                     continue;                                // in another synchronous component now
                 }
-                fsActive += gpuData.dsFactor()[i];
+                // a lost participating generator leaves the participation like a stranded one
+                fsActive += gpuData.dsFactor()[i] - (i == ovBus ? ovFactorDelta : 0.0);
             }
             double rho = 1.0 - fsAll;                        // the slack's own share, over the FULL set
             fs = fsActive == fsAll || fsActive + rho <= 0
                     ? fsActive
                     : fsActive / (fsActive + rho);
+            if (fs <= 0 && rho > 0) {
+                // Only the slack bus's generators are left to participate: OLF puts the whole mismatch on
+                // them. The device carries it in the slack's retained share; the result reports it.
+                double[] out = new double[nds + 1];
+                out[nds] = mismatch;
+                return out;
+            }
         }
         if (fs <= 0) {
             return null;

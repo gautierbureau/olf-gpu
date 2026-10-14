@@ -1535,6 +1535,8 @@ final class GpuBatchChunkSolver {
                     double[] dsAnchorShift = null;
                     double[] dsSlackShift = null;
                     double[] pairSlackAbsorbedSeed = null;   // slack-only pairs: the parent's absorbed total they start from
+                    double[] preSlackSeed = null;            // the loss pre-distribution's share on the slack generators,
+                                                             // when nobody else is left to participate
                     if (!pairPhase && (hasDs || dsSlackOnly) && config.contingencyLossPreDistribution()) {
                         // CPU parity (DefaultContingencyActivePowerLossDistribution): with DS on, the
                         // contingency's SCHEDULED lost active power is distributed ONCE over the
@@ -1682,6 +1684,19 @@ final class GpuBatchChunkSolver {
                                 preDistributed += share;
                             }
                             preDistributedByIndex[preIdx] = preDistributed;
+                            if (preDistributed == shares[nds] && shares[nds] != 0) {
+                                // Only the slack bus's generators participate: OLF moved their target by the whole
+                                // loss, and its slack check measures against that target. The device's slack-only
+                                // pass (distributeSlackBatch) measures against slackTargetP + dsSlackShift.
+                                if (dsSlackShift == null) {
+                                    dsSlackShift = new double[chunkSize];
+                                }
+                                if (preSlackSeed == null) {
+                                    preSlackSeed = new double[chunkSize];
+                                }
+                                dsSlackShift[s] = shares[nds];
+                                preSlackSeed[s] = shares[nds];
+                            }
                             for (int i = 0; i < nds; i++) {
                                 preAbsorbedBySlot[s] += shares[i];        // participants only
                             }
@@ -2657,7 +2672,8 @@ final class GpuBatchChunkSolver {
                             && GpuAcNewtonSolver.readBatchSolveCount(handle) - solveCountBefore == 1) {
                         recordDistributedActivePower(handle, gpuData, realCount, chunkSize, n, group, chunkStart,
                                 dsSlackOnly, dsOvBus, dsOvBaseDelta, pairPhase ? dsAnchorShift : null,
-                                pairPhase ? pairSlackAbsorbedSeed : null, preDistributedByIndex, distributedByIndex);
+                                pairPhase ? pairSlackAbsorbedSeed : null, pairPhase ? null : preSlackSeed,
+                                preDistributedByIndex, distributedByIndex);
                     }
                     for (int s = 0; s < realCount; s++) {
                         double[] row = chunkResults[s];
@@ -2718,11 +2734,15 @@ final class GpuBatchChunkSolver {
      * pre-distribution. The pair phase re-anchors the water-fill and the slack target at the parent
      * ({@code anchorShift}) and seeds the slack-only accumulator with the parent's total
      * ({@code slackAbsorbedSeed}); both are taken back out here. Null outside the pair phase.
+     *
+     * <p>{@code preSlackSeed}: a contingency that leaves only the slack bus's generators participating has
+     * its loss pre-distribution on them, carried as a shift of the slack target the device's retain is
+     * measured from; it is added back. Null when no scenario of the chunk has one.
      */
     private static void recordDistributedActivePower(long handle, GpuAcData gpuData, int realCount, int chunkSize, int n,
                                                      List<Integer> group, int chunkStart, boolean dsSlackOnly,
                                                      int[] dsOvBus, double[] dsOvBaseDelta,
-                                                     double[] anchorShift, double[] slackAbsorbedSeed,
+                                                     double[] anchorShift, double[] slackAbsorbedSeed, double[] preSlackSeed,
                                                      double[] preDistributedByIndex, double[] distributedByIndex) {
         boolean pair = anchorShift != null || slackAbsorbedSeed != null;
         if (dsSlackOnly) {
@@ -2774,7 +2794,8 @@ final class GpuBatchChunkSolver {
                     participants += targets[s * n + gpuData.dsPhiRow()[i]] - anchor;
                 }
             }
-            distributedByIndex[idx] = participants + retain[s];
+            // a slack-only pass measures the slack's take from the target the pre-distribution moved
+            distributedByIndex[idx] = participants + retain[s] + (preSlackSeed != null ? preSlackSeed[s] : 0.0);
         }
     }
 

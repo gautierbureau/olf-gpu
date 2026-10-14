@@ -269,7 +269,8 @@ public final class GpuHybridBatchOuterLoopEngine {
      */
     public record Result(double[][] states, double[][] round0States, int[][] rowMode, double[][] scenTargets,
                          boolean[] retired, boolean[] routedByBudget, GpuHybridOuterLoopBridge[] bridges,
-                         int rounds, long solveNanos, long javaNanos, long snapshotNanos, long javaCalls) {
+                         int rounds, long solveNanos, long javaNanos, long snapshotNanos, long javaCalls,
+                         double[] distributedActivePower) {
 
         /** true = converged on the GPU (reached a terminal state and was NOT routed to CPU). */
         public boolean gpuConverged(int scenario) {
@@ -368,6 +369,7 @@ public final class GpuHybridBatchOuterLoopEngine {
         double[][] states = new double[nS][];
         boolean[] retired = new boolean[nS];
         boolean[] routedByBudget = new boolean[nS];
+        double[] distributed = new double[nS];
         int rounds = 0;
         long tSolve = 0;
         long tJava = 0;
@@ -396,6 +398,7 @@ public final class GpuHybridBatchOuterLoopEngine {
             }
             System.arraycopy(r.states(), 0, states, start, size);
             System.arraycopy(r.retired(), 0, retired, start, size);
+            System.arraycopy(r.distributedActivePower(), 0, distributed, start, size);
             System.arraycopy(r.routedByBudget(), 0, routedByBudget, start, size);
             // NOT the bridges: each one retains a full per-scenario set of OLF outer-loop objects and
             // their contexts (reactive-limits / distributed-slack context data included). Holding 6474 of
@@ -410,7 +413,7 @@ public final class GpuHybridBatchOuterLoopEngine {
             start += size;
         }
         return new Result(states, null, null, null,
-                retired, routedByBudget, null, rounds, tSolve, tJava, tSnap, nJavaCalls);
+                retired, routedByBudget, null, rounds, tSolve, tJava, tSnap, nJavaCalls, distributed);
     }
 
     /** Every per-scenario array the native solve dereferences must have exactly {@code nA} non-null
@@ -1481,7 +1484,12 @@ public final class GpuHybridBatchOuterLoopEngine {
             genVcs.get(v).setTargetValue(baseVcTarget[v]);
         }
 
+        // what each scenario's active-power distribution loop placed, the load flow's own part of what OLF reports
+        double[] distributed = new double[nS];
+        for (int s = 0; s < nS; s++) {
+            distributed[s] = bridges[s].distributedActivePower();
+        }
         return new Result(states, round0States, rowMode, scenTargets, retired, routedByBudget, bridges,
-                rounds, tSolve, tJava, tSnap, nJavaCalls);
+                rounds, tSolve, tJava, tSnap, nJavaCalls, distributed);
     }
 }

@@ -591,7 +591,9 @@ public final class GpuBatchedSecurityAnalysisSolver {
                 double[] st = res.states()[e];
                 double[] state = new double[n];
                 System.arraycopy(st, 0, state, 0, n);
-                results.add(new BatchScenarioResult(id, state, (int) st[n], st[n + 1], GpuBatchStatus.STATUS_CONVERGED, new int[0]));
+                // branch outages only: no loss pre-distribution, the load flow's own distribution is the whole
+                results.add(new BatchScenarioResult(id, state, (int) st[n], st[n + 1], GpuBatchStatus.STATUS_CONVERGED, new int[0],
+                        0.0, res.distributedActivePower()[e]));
                 engineConverged++;
             } else {
                 if (e < 0) {

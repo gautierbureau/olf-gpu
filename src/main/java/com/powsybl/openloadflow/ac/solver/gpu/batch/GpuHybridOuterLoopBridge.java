@@ -106,6 +106,20 @@ public final class GpuHybridOuterLoopBridge {
         return outerLoops.size();
     }
 
+    /** What the scenario's active-power distribution loop placed (pu), summed over the synchronous components: the
+     *  totals AcloadFlowEngine reads at the end of its outer loops, which the load flow result reports. */
+    public double distributedActivePower() {
+        double sum = 0;
+        for (int i = 0; i < outerLoops.size(); i++) {
+            if (outerLoops.get(i) instanceof com.powsybl.openloadflow.ac.outerloop.AcActivePowerDistributionOuterLoop loop) {
+                for (var sc : network.getSynchronousNetworks()) {
+                    sum += loop.getDistributedActivePower(outerLoopContexts.get(i), sc.getNumSC());
+                }
+            }
+        }
+        return sum;
+    }
+
     /** Max |per-SC slack active-power mismatch (pu)| at the last step — huge/steady ⇒ islanding or DS not applied. */
     public double lastSlackMismatch() {
         return lastSlackMismatch;

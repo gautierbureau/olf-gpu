@@ -6613,6 +6613,42 @@ __global__ void hvdcAcEmulationLoopBatch(int nh, int nScenarios, int n, int nEle
 }
 
 
+// OLF's slack mismatch is slack.getP() - slack.getTargetP() (DistributedSlackOuterLoop): getP() carries the
+// AC-emulation term of a link ending on the slack while the link is linear, and getTargetP() the converter
+// station's target P while it is frozen or saturated. qBuf holds the branch flows only, and the slack's target P
+// is the base one, so a link on the slack bus is put back here: its live term on the balance side, its station's
+// move since the base (appliedD, see hvdcAcEmulationLoopBatch) on the target side. Without it the frozen link of
+// a post-contingency solve read as an 84 MW slack mismatch where OLF saw 0.66 MW, and the device ran slack passes
+// OLF never ran.
+__global__ void hvdcSlackBalanceBatch(int nS, int nh, int n, int nElements, int slackRowBase, const int* slackRowOv,
+                                      const int* hvBus1Row, const int* hvBus2Row, const int* hvBus1Phi,
+                                      const int* hvBus2Phi, const int* hvElem, const double* hvIn,
+                                      const int* status, const double* d1, const double* d2, const char* ctgOut,
+                                      const char* disabled, const double* x, const char* rlActive, double* qBuf) {
+    int s = blockIdx.x * blockDim.x + threadIdx.x;
+    if (s >= nS || !rlActive[s]) return;
+    int slackRow = slackRowOv != nullptr && slackRowOv[s] >= 0 ? slackRowOv[s] : slackRowBase;
+    const double* xs = x + (size_t) s * n;
+    double corr = 0.0;
+    for (int h = 0; h < nh; h++) {
+        int r1 = hvBus1Row[h] < 0 ? ~hvBus1Row[h] : hvBus1Row[h];
+        int r2 = hvBus2Row[h] < 0 ? ~hvBus2Row[h] : hvBus2Row[h];
+        if (r1 != slackRow && r2 != slackRow) continue;
+        size_t sh = (size_t) s * nh + h;
+        const double* p = hvIn + (size_t) h * 9;
+        bool live = status[sh] == HV_LINEAR && !ctgOut[sh] && !disabled[(size_t) s * nElements + hvElem[h]];
+        double ph1 = xs[hvBus1Phi[h]];
+        double ph2 = xs[hvBus2Phi[h]];
+        if (r1 == slackRow) {
+            corr += (live ? hvdc::p1(p[0], p[1], p[4], p[5], p[6], ph1, ph2) : 0.0) - d1[sh];
+        }
+        if (r2 == slackRow) {
+            corr += (live ? hvdc::p2(p[0], p[1], p[4], p[5], p[6], ph1, ph2) : 0.0) - d2[sh];
+        }
+    }
+    qBuf[(size_t) s * n + slackRow] += corr;
+}
+
 // on-device reactive-limit decision log (OLF_GPU_SW_LOG): capacity in records, width in doubles
 #define SW_LOG_CAP 1048576
 #define SW_LOG_W 12
@@ -13022,6 +13058,14 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                 ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>(),
                 ctx->nShOv, ctx->dShOvSlotElem.as<int>(), ctx->dShOvGb.as<double>(),
                 rmqTraceRow);
+    }
+    if (ctx->nhv > 0 && ctx->dsSlackPhiRow >= 0) {           // a link on the slack bus, as OLF's slack mismatch sees it
+        hvdcSlackBalanceBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(nS, ctx->nhv, n, ctx->nElements, ctx->dsSlackPhiRow,
+                ctx->hasDsSlackRowOv ? ctx->dDsSlackRowOv.as<int>() : nullptr,
+                ctx->dHvBus1Row.as<int>(), ctx->dHvBus2Row.as<int>(), ctx->dHvBus1Phi.as<int>(), ctx->dHvBus2Phi.as<int>(),
+                ctx->dHvElem.as<int>(), ctx->dHvIn.as<double>(), ctx->dHvStatus.as<int>(),
+                ctx->dHvAppliedD1.as<double>(), ctx->dHvAppliedD2.as<double>(), ctx->dHvCtgOut.as<char>(),
+                ctx->dDisabled.as<char>(), ctx->dX.as<double>(), ctx->dRlActive.as<char>(), ctx->dQbuf.as<double>());
     }
     CUDA_CHECK(cudaMemsetAsync(ctx->dRlSwitched.p, 0, nS * sizeof(char), ctx->stream));
     if (outer == 0 && !resume && ctx->loopTraceSlot >= 0 && ctx->loopTraceSlot < nS) {

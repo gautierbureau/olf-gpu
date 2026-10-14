@@ -5614,6 +5614,68 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         assertEquals(1, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(), "census=" + GpuBatchScopeCensus.snapshot());
     }
 
+    /** b1 (slack g1) -- l12a, l12b -- b2 (load), an AC-emulation link cs1 (b1) -> cs2 (b2) whose inverter regulates b2
+     *  with a curve opening with P (+-5 MVar at 0 MW, +-60 at +-100 MW) or plain +-60 MVar limits; b3 hangs off b1
+     *  through l13 and carries nothing. OLF's own fixture for the curve read at the link flow
+     *  (testAcEmulationVscReactiveLimitsFollowTheFlow). */
+    private static Network acEmulationVscNetwork(boolean curve) {
+        Network network = Network.create("acEmulationCurve", "code");
+        com.powsybl.iidm.network.Substation s = network.newSubstation().setId("s").add();
+        for (String b : List.of("b1", "b2", "b3")) {
+            s.newVoltageLevel().setId("vl" + b.substring(1)).setNominalV(400)
+                    .setTopologyKind(com.powsybl.iidm.network.TopologyKind.BUS_BREAKER)
+                    .add().getBusBreakerView().newBus().setId(b).add();
+        }
+        network.getVoltageLevel("vl1").newGenerator().setId("g1").setBus("b1").setConnectableBus("b1")
+                .setMinP(0).setMaxP(1000).setTargetP(200).setTargetV(400).setVoltageRegulatorOn(true).add();
+        network.getVoltageLevel("vl2").newLoad().setId("ld2").setBus("b2").setConnectableBus("b2").setP0(150).setQ0(60).add();
+        for (String id : List.of("l12a", "l12b")) {
+            network.newLine().setId(id).setBus1("b1").setConnectableBus1("b1").setBus2("b2").setConnectableBus2("b2")
+                    .setR(1).setX(20).setG1(0).setB1(0).setG2(0).setB2(0).add();
+        }
+        network.newLine().setId("l13").setBus1("b1").setConnectableBus1("b1").setBus2("b3").setConnectableBus2("b3")
+                .setR(1).setX(20).setG1(0).setB1(0).setG2(0).setB2(0).add();
+        network.getVoltageLevel("vl1").newVscConverterStation().setId("cs1").setBus("b1").setConnectableBus("b1")
+                .setLossFactor(1.1f).setReactivePowerSetpoint(0).setVoltageRegulatorOn(false).add();
+        com.powsybl.iidm.network.VscConverterStation cs2 = network.getVoltageLevel("vl2").newVscConverterStation()
+                .setId("cs2").setBus("b2").setConnectableBus("b2").setLossFactor(1.1f).setVoltageSetpoint(410)
+                .setVoltageRegulatorOn(true).add();
+        if (curve) {
+            cs2.newReactiveCapabilityCurve()
+                    .beginPoint().setP(-100).setMinQ(-60).setMaxQ(60).endPoint()
+                    .beginPoint().setP(0).setMinQ(-5).setMaxQ(5).endPoint()
+                    .beginPoint().setP(100).setMinQ(-60).setMaxQ(60).endPoint()
+                    .add();
+        } else {
+            cs2.newMinMaxReactiveLimits().setMinQ(-60).setMaxQ(60).add();
+        }
+        network.newHvdcLine().setId("hvdc12").setConverterStationId1("cs1").setConverterStationId2("cs2")
+                .setNominalV(400).setR(1).setMaxP(200).setActivePowerSetpoint(60)
+                .setConvertersMode(com.powsybl.iidm.network.HvdcLine.ConvertersMode.SIDE_1_RECTIFIER_SIDE_2_INVERTER)
+                .add()
+                .newExtension(com.powsybl.iidm.network.extensions.HvdcAngleDroopActivePowerControlAdder.class)
+                .withP0(40).withDroop(180).withEnabled(true).add();
+        return network;
+    }
+
+    /** An AC-emulation link whose rectifier sits on the SLACK bus. OLF's slack mismatch is slack.getP() -
+     *  slack.getTargetP(): the link's emulation term while it is linear, its station's target P while it is frozen
+     *  (the post-contingency solve starts frozen). The device read the branch flows against the base target only:
+     *  84 MW of "mismatch" on the frozen first check, a slack pass OLF never ran, and an extra Newton step that
+     *  left b2 1.6e-6 pu off. */
+    @Test
+    void deviceAcEmulationLinkOnTheSlackBusMatchesCpu() {
+        assumeTrue(GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        List<Contingency> ctgs = List.of(new Contingency("l13", new BranchContingency("l13")),
+                new Contingency("l12a", new BranchContingency("l12a")));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setDistributedSlack(true).setUseReactiveLimits(true).setHvdcAcEmulation(true);
+        GpuBatchScopeCensus.reset();
+        assertGpuMatchesCpu(acEmulationVscNetwork(false), ctgs, 1e-12, lfp, true);
+        assertEquals(java.util.Set.of(), GpuBatchScopeCensus.planRefusedIds(), "census=" + GpuBatchScopeCensus.snapshot());
+        assertEquals(2, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(), "census=" + GpuBatchScopeCensus.snapshot());
+    }
+
     /** A line outage whose propagation also trips a load OUTSIDE the solved component: the load's level hangs off a
      *  line that is open on the main side, so it is its own component, and the branch tripping of that line still
      *  disconnects the load behind its disconnector. OLF resolves loadIdsToLose with getLoadById and skips the null

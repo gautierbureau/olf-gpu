@@ -6680,6 +6680,9 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
                 assertEquals(cpu.getPostContingencyResults().get(i).getLimitViolationsResult().getLimitViolations().size(),
                         gpu.getPostContingencyResults().get(i).getLimitViolationsResult().getLimitViolations().size(),
                         "violation count for " + cpu.getPostContingencyResults().get(i).getContingency().getId());
+                assertEquals(cpu.getPostContingencyResults().get(i).getDistributedActivePower(),
+                        gpu.getPostContingencyResults().get(i).getDistributedActivePower(), 1e-9,
+                        "distributed active power for " + cpu.getPostContingencyResults().get(i).getContingency().getId());
                 var cpuBuses = cpu.getPostContingencyResults().get(i).getNetworkResult().getBusResults();
                 var gpuBuses = gpu.getPostContingencyResults().get(i).getNetworkResult().getBusResults();
                 assertEquals(cpuBuses.size(), gpuBuses.size());

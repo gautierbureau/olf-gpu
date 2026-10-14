@@ -5544,6 +5544,45 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         assertEquals(2, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(), "census=" + GpuBatchScopeCensus.snapshot());
     }
 
+    /** The same two links in AC emulation, with a droop pushing their flow past maxP: the base ends SATURATED, and
+     *  a saturated link carries its power as converter targetP. OLF's AC-emulation station reports targetP 0 as soon
+     *  as a bus of its link is disabled (LfVscConverterStationImpl.getTargetP), so the SURVIVING station loses its
+     *  injection under both section losses - the isolated station of link a (bbs1) and the one sharing its bus with
+     *  a load on link b (bbs2), where a setpoint link would keep its power. Before, the device kept it in both:
+     *  2.6e-2 kV at h. */
+    @Test
+    void deviceSaturatedAcEmulationHvdcLosingItsIslandedEndpointMatchesCpu() {
+        assumeTrue(GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        java.util.function.Supplier<Network> saturated = () -> {
+            Network n = setpointHvdcSectionsNetwork();
+            for (String link : List.of("a", "b")) {
+                com.powsybl.iidm.network.HvdcLine h = n.getHvdcLine("hvdc" + link);
+                h.setMaxP(45);
+                h.newExtension(com.powsybl.iidm.network.extensions.HvdcAngleDroopActivePowerControlAdder.class)
+                        .withP0(40).withDroop(180).withEnabled(true).add();
+            }
+            return n;
+        };
+        List<Contingency> ctgs = List.of(
+                new Contingency("bus-1", new com.powsybl.contingency.BusbarSectionContingency("bbs1")),
+                new Contingency("bus-2", new com.powsybl.contingency.BusbarSectionContingency("bbs2")));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setDistributedSlack(true).setUseReactiveLimits(true).setHvdcAcEmulation(true);
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
+                .setSlackBusSelectionMode(com.powsybl.openloadflow.network.SlackBusSelectionMode.NAME)
+                .setSlackBusesIds(List.of("vl_a"));
+        // Non-vacuity: the base saturates both links (rectifier at maxP, off the droop line)
+        Network base = saturated.get();
+        assertTrue(com.powsybl.loadflow.LoadFlow.run(base, lfp).isFullyConverged());
+        for (String link : List.of("a", "b")) {
+            assertEquals(45, base.getVscConverterStation("cs1" + link).getTerminal().getP(), 1e-9, "link " + link + " saturated");
+        }
+        GpuBatchScopeCensus.reset();
+        assertGpuMatchesCpu(saturated.get(), ctgs, 1e-12, lfp, true);
+        assertEquals(java.util.Set.of(), GpuBatchScopeCensus.planRefusedIds(), "census=" + GpuBatchScopeCensus.snapshot());
+        assertEquals(2, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(), "census=" + GpuBatchScopeCensus.snapshot());
+    }
+
     /** A line outage whose propagation also trips a load OUTSIDE the solved component: the load's level hangs off a
      *  line that is open on the main side, so it is its own component, and the branch tripping of that line still
      *  disconnects the load behind its disconnector. OLF resolves loadIdsToLose with getLoadById and skips the null

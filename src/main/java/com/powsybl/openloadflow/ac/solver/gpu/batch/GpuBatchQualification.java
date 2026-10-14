@@ -1217,8 +1217,10 @@ final class GpuBatchQualification {
                 c.lostLoads().stream().map(ll -> ll.bus() == null ? "?" : ll.bus().getId()).sorted().toList());
     }
 
-    /** OLF's {@code LfContingency.processHvdcsWithoutPower} for the SETPOINT (non-AC-emulation) links whose endpoint
-     *  this contingency islands: when the islanded converter bus is ISOLATED in OLF's sense
+    /** The surviving converter station's injection when this contingency islands the other endpoint of its link.
+     *  AC emulation: OLF's station reports targetP 0 once a bus of its link is disabled, so a saturated or frozen
+     *  link's survivor always loses its injection (a linear one has none). SETPOINT links follow
+     *  {@code LfContingency.processHvdcsWithoutPower}: when the islanded converter bus is ISOLATED in OLF's sense
      *  ({@code Networks.isIsolatedBusForHvdc}: a one-bus component after the cut, no non-fictitious load, no
      *  generator other than converter stations) and the other endpoint survives, OLF zeroes BOTH stations' targetP.
      *  The islanded station leaves with its frozen bus (its scheduled P is already out of the loss,
@@ -1235,11 +1237,13 @@ final class GpuBatchQualification {
         java.util.Set<LfBus> islanded = new java.util.HashSet<>(islandedBuses);
         for (LfBus bus : islandedBuses) {
             for (com.powsybl.openloadflow.network.LfHvdc h : bus.getHvdcs()) {
-                if (h.isAcEmulation()) {
-                    continue;
-                }
+                // AC emulation: a SATURATED or FROZEN link carries its power as station targetP (a LINEAR one as an
+                // equation term, masked with the link), and LfVscConverterStationImpl.getTargetP returns 0 for an
+                // AC-emulation station as soon as either endpoint bus is disabled - isolated or not. A setpoint link
+                // loses its power only through processHvdcsWithoutPower, i.e. when the islanded bus is isolated.
                 LfBus other = h.getBus1() == bus ? h.getBus2() : h.getBus1();
-                if (other == null || islanded.contains(other) || other.isDisabled() || !isolatedForHvdc(bus, c)) {
+                if (other == null || islanded.contains(other) || other.isDisabled()
+                        || !h.isAcEmulation() && !isolatedForHvdc(bus, c)) {
                     continue;
                 }
                 com.powsybl.openloadflow.network.LfGenerator survivor = h.getBus1() == other

@@ -967,8 +967,8 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                 // The SAME run-constant outer-loop tables the batched SA installs on its chunk
                 // contexts — a batch of one drives the same loops as a batch of five hundred.
                 var dsLoop = driverDsLoop();
-                GpuBatchRlCurves.Channel rlCurves = driverRlLoop() != null && dsLoop != null
-                        ? GpuBatchRlCurves.build(network, equationSystem, cachedData, driverDsParams(), true, target,
+                GpuBatchRlCurves.Channel rlCurves = driverRlLoop() != null
+                        ? GpuBatchRlCurves.build(network, equationSystem, cachedData, driverDsParams(), dsLoop != null, target,
                                 acLoadFlowParameters.getNetworkParameters().isExtrapolateReactiveLimits())
                         : null;
                 // forceTargetQInReactiveLimits: the base load flow's slack moves P too, and OLF re-clamps.

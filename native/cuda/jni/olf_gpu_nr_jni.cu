@@ -5764,9 +5764,45 @@ __global__ void forcedTargetQLimitsBatch(int nfq, int nS, int n, int nds, int ng
     }
 }
 
+// The AC-emulation VSC entries of the curve channel: OLF evaluates such a station's curve at the live flow of its
+// link in the linear mode (LfVscConverterStationImpl.getReactiveLimitsActivePower: minus the side's emulation term),
+// and at its target P otherwise (saturated, frozen, disabled link), which the HVDC loop holds as baseD + appliedD.
+// hv == nullptr: no such entry. nhv == 0: the HVDC loops are not on this context (then nothing was packed).
+struct CvHvdc {
+    const int* hv;            // per curve entry {hvdc index in the loop pack, side 1|2}, -1 for a plain generator
+    int nhv;
+    const int* status;        // per (scenario, hvdc)
+    const double* d1;
+    const double* d2;
+    const double* in;         // per hvdc x9: p0 k pMax12 pMax21 loss1 loss2 r baseD1 baseD2
+    const int* phi1;
+    const int* phi2;
+    const int* elem;
+    const char* disabled;
+    int nElements;
+    const char* ctgOut;
+    const double* x;
+};
+
+CvHvdc cvHvdcView(BatchSolverContext* ctx);   // defined with the curve channel's upload
+
+__device__ inline double cvHvdcActivePower(const CvHvdc& c, int s, int n, int h, int side) {
+    size_t sh = (size_t) s * c.nhv + h;
+    const double* p = c.in + (size_t) h * 9;
+    bool off = c.ctgOut[sh] || c.disabled[(size_t) s * c.nElements + c.elem[h]];
+    if (c.status[sh] == HV_LINEAR && !off) {
+        const double* xs = c.x + (size_t) s * n;
+        double ph1 = xs[c.phi1[h]];
+        double ph2 = xs[c.phi2[h]];
+        return side == 1 ? -hvdc::p1(p[0], p[1], p[4], p[5], p[6], ph1, ph2)
+                         : -hvdc::p2(p[0], p[1], p[4], p[5], p[6], ph1, ph2);
+    }
+    return side == 1 ? c.d1[sh] + p[7] : c.d2[sh] + p[8];
+}
+
 __global__ void rlCurveLimitsBatch(int nrl, int nScenarios, int ncv, int n, int cvExtrapolate,
                                    const int* cvIdx, const double* cvIn, const double* cvPts,
-                                   const int* cvPtr, const int* cvList,
+                                   const int* cvPtr, const int* cvList, CvHvdc cvHv,
                                    const double* rlMinQ, const double* rlMaxQ, const double* rlLoadQ,
                                    const double* target,
                                    int nQOv, const int* qOvSlotEntry, const double* qOvMinMax,
@@ -5829,12 +5865,16 @@ __global__ void rlCurveLimitsBatch(int nrl, int nScenarios, int ncv, int n, int 
         // to its four siblings. The share reconstruction stays as the fallback for an entry with no
         // slot, and for the outaged bus's own entries, whose pStep/shareScale repair is expressed in
         // those terms.
-        double pNow;
         // genCum already reflects the outage — the lost generator is marked out of the water-fill and
         // the bus's anchor carries its P — so pStep and shareScale, which exist only to repair the
         // share reconstruction on the outaged bus, are not needed when it is available. The lost
-        // generator's OWN entry never reaches here (shareScale < 0 continues above).
-        if (genCum != nullptr && genCumValid != nullptr && genCumValid[s] && slot >= 0) {
+        // generator's OWN entry never reaches here (shareScale < 0 continues above). An AC-emulation
+        // VSC is not in the slack distribution: its P is its link's (CvHvdc).
+        double pNow;
+        int hvh = cvHv.hv != nullptr ? cvHv.hv[2 * g] : -1;
+        if (hvh >= 0 && cvHv.nhv > 0) {
+            pNow = cvHvdcActivePower(cvHv, s, n, hvh, cvHv.hv[2 * g + 1]);
+        } else if (genCum != nullptr && genCumValid != nullptr && genCumValid[s] && slot >= 0) {
             pNow = cvIn[g * 5] + genCum[(size_t) s * ngen + slot];
         } else {
             pNow = cvIn[g * 5]
@@ -8069,6 +8109,8 @@ struct BatchSolverContext {
     int ncv = 0;
     int cvExtrapolate = 0;                                 // OLF extrapolateReactiveLimits for curve gens
     DeviceBuf dCvIdx, dCvIn, dCvPts, dRlMinQDyn, dRlMaxQDyn;
+    DeviceBuf dCvHv;                                         // per curve entry {hvdc, side}, see CvHvdc
+    bool cvHasHvdc = false;
     DeviceBuf dCvPtr, dCvList;                             // the curves of each reactive-limit entry, CSR
                                                            // (cvPtr[nrl + 1] into cvList[ncv], pack order kept)
     // forceTargetQInReactiveLimits (GpuBatchForcedTargetQ): generators whose IIDM target Q OLF clamps into their
@@ -11074,7 +11116,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             if (useDynRlLimits) {                            // curve limits at the CURRENT (seeded) targets,
                 rlCurveLimitsBatch<<<grid(ctx->nrl * nS), BLOCK, 0, ctx->stream>>>(ctx->nrl, nS, ctx->ncv, n, ctx->cvExtrapolate,
                         ctx->dCvIdx.as<int>(), ctx->dCvIn.as<double>(), ctx->dCvPts.as<double>(),
-                        ctx->dCvPtr.as<int>(), ctx->dCvList.as<int>(),
+                        ctx->dCvPtr.as<int>(), ctx->dCvList.as<int>(), cvHvdcView(ctx),
                         ctx->dRlMinQ.as<double>(), ctx->dRlMaxQ.as<double>(), ctx->dRlLoadQ.as<double>(),
                         ctx->dTarget.as<double>(),
                         nRlQOv, nRlQOv > 0 ? dRlQOvSlotEntry.as<int>() : nullptr,
@@ -11159,7 +11201,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         if (useDynRlLimits) {                            // curve limits at the CURRENT (seeded) targets,
             rlCurveLimitsBatch<<<grid(ctx->nrl * nS), BLOCK, 0, ctx->stream>>>(ctx->nrl, nS, ctx->ncv, n, ctx->cvExtrapolate,
                     ctx->dCvIdx.as<int>(), ctx->dCvIn.as<double>(), ctx->dCvPts.as<double>(),
-                        ctx->dCvPtr.as<int>(), ctx->dCvList.as<int>(),
+                        ctx->dCvPtr.as<int>(), ctx->dCvList.as<int>(), cvHvdcView(ctx),
                     ctx->dRlMinQ.as<double>(), ctx->dRlMaxQ.as<double>(), ctx->dRlLoadQ.as<double>(),
                     ctx->dTarget.as<double>(),
                     nRlQOv, nRlQOv > 0 ? dRlQOvSlotEntry.as<int>() : nullptr,
@@ -13317,7 +13359,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             if (useDynRlLimits) {                            // curve limits at the CURRENT (post-DS) targets,
                 rlCurveLimitsBatch<<<grid(ctx->nrl * nS), BLOCK, 0, ctx->stream>>>(ctx->nrl, nS, ctx->ncv, n, ctx->cvExtrapolate,
                         ctx->dCvIdx.as<int>(), ctx->dCvIn.as<double>(), ctx->dCvPts.as<double>(),
-                        ctx->dCvPtr.as<int>(), ctx->dCvList.as<int>(),
+                        ctx->dCvPtr.as<int>(), ctx->dCvList.as<int>(), cvHvdcView(ctx),
                         ctx->dRlMinQ.as<double>(), ctx->dRlMaxQ.as<double>(), ctx->dRlLoadQ.as<double>(),
                         ctx->dTarget.as<double>(),
                         nRlQOv, nRlQOv > 0 ? dRlQOvSlotEntry.as<int>() : nullptr,
@@ -13905,7 +13947,7 @@ psgStep(ctx, nS, n, outer, "afterDistrQ");
         if (useDynRlLimits) {                                // limits at the FINAL targets
             rlCurveLimitsBatch<<<grid(ctx->nrl * nS), BLOCK, 0, ctx->stream>>>(ctx->nrl, nS, ctx->ncv, n, ctx->cvExtrapolate,
                     ctx->dCvIdx.as<int>(), ctx->dCvIn.as<double>(), ctx->dCvPts.as<double>(),
-                        ctx->dCvPtr.as<int>(), ctx->dCvList.as<int>(),
+                        ctx->dCvPtr.as<int>(), ctx->dCvList.as<int>(), cvHvdcView(ctx),
                     ctx->dRlMinQ.as<double>(), ctx->dRlMaxQ.as<double>(), ctx->dRlLoadQ.as<double>(),
                     ctx->dTarget.as<double>(),
                     nRlQOv, nRlQOv > 0 ? dRlQOvSlotEntry.as<int>() : nullptr,
@@ -15149,18 +15191,45 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
     ctx->perRowAlt = true;
 }
 
+namespace {   // the declaration sits in the anonymous namespace with the curve kernel
+// The curve kernel's view of the AC-emulation loop state (see CvHvdc).
+CvHvdc cvHvdcView(BatchSolverContext* ctx) {
+    CvHvdc c{};
+    if (!ctx->cvHasHvdc) {
+        return c;
+    }
+    c.hv = ctx->dCvHv.as<int>();
+    c.nhv = ctx->nhv;
+    if (ctx->nhv > 0) {
+        c.status = ctx->dHvStatus.as<int>();
+        c.d1 = ctx->dHvAppliedD1.as<double>();
+        c.d2 = ctx->dHvAppliedD2.as<double>();
+        c.in = ctx->dHvIn.as<double>();
+        c.phi1 = ctx->dHvBus1Phi.as<int>();
+        c.phi2 = ctx->dHvBus2Phi.as<int>();
+        c.elem = ctx->dHvElem.as<int>();
+        c.disabled = ctx->dDisabled.as<char>();
+        c.nElements = ctx->nElements;
+        c.ctgOut = ctx->dHvCtgOut.as<char>();
+        c.x = ctx->dX.as<double>();
+    }
+    return c;
+}
+}  // namespace
+
 // Reactive-capability CURVES at runtime P: install (or clear, with nulls) the per-gen curve channel
 // on a batch context — see rlCurveLimitsBatch. cvIdx stride 5 {rlIdx, pRow, ptsOff, npts, dsGenSlot}; cvIn
 // stride 5 {basePpu, share, baseRowTargetP, baseEvalMinPu, baseEvalMaxPu}; cvPts stride 3
-// {p_MW, minQ_MW, maxQ_MW} sorted by p.
+// {p_MW, minQ_MW, maxQ_MW} sorted by p; cvHv (null when no entry is an AC-emulation VSC) stride 2 {hvdc, side}.
 extern "C" JNIEXPORT void JNICALL
 Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchRlCurves(
         JNIEnv* env, jclass, jlong handle, jintArray jCvIdx, jdoubleArray jCvIn, jdoubleArray jCvPts,
-        jint extrapolate) {
+        jintArray jCvHv, jint extrapolate) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx == nullptr) {
         return;
     }
+    ctx->cvHasHvdc = false;
     if (jCvIdx == nullptr || jCvIn == nullptr || jCvPts == nullptr) {
         ctx->ncv = 0;
         return;
@@ -15169,6 +15238,12 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
     if (ncv == 0) {
         ctx->ncv = 0;
         return;
+    }
+    if (jCvHv != nullptr) {                      // stride 2 per entry: {hvdc, side}, -1 for a plain generator
+        jint* hv = env->GetIntArrayElements(jCvHv, nullptr);
+        ctx->dCvHv.upload(hv, static_cast<size_t>(ncv) * 2 * sizeof(int));
+        env->ReleaseIntArrayElements(jCvHv, hv, JNI_ABORT);
+        ctx->cvHasHvdc = true;
     }
     jint* cvIdx = env->GetIntArrayElements(jCvIdx, nullptr);
     jdouble* cvIn = env->GetDoubleArrayElements(jCvIn, nullptr);

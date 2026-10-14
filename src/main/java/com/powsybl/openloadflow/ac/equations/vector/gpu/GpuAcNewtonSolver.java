@@ -724,7 +724,7 @@ public final class GpuAcNewtonSolver {
     /** Install (or clear, with nulls) the reactive-capability-CURVE channel on a batch context —
      *  per-scenario dynamic RL limits evaluated at the current targets (see GpuBatchRlCurves). */
     public static native void setBatchRlCurves(long handle, int[] cvIdx, double[] cvIn, double[] cvPts,
-                                               int extrapolate);
+                                               int[] cvHv, int extrapolate);
 
     /** Install (or clear, with nulls) the forceTargetQInReactiveLimits channel on a batch context: the Q
      *  targets of generators OLF clamps into their curve limits at their current P (see GpuBatchForcedTargetQ). */

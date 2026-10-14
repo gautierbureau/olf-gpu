@@ -35,7 +35,12 @@ import java.util.List;
  *
  * <p>Channel layout (setBatchRlCurves): cvIdx stride 5 {rlIdx, pRow, ptsOff, npts, dsGenSlot}; cvIn stride 5
  * {basePpu, share, baseRowTargetP, baseEvalMinPu, baseEvalMaxPu}; cvPts stride 3
- * {p_MW, minQ_MW, maxQ_MW} sorted by p.
+ * {p_MW, minQ_MW, maxQ_MW} sorted by p; cvHv stride 2 {hvdc, side} (null when no entry is one).
+ *
+ * <p>An AC-emulation VSC station is an entry too, whatever the slack distribution: OLF evaluates its curve at the
+ * live flow of its link in the linear mode, and at its target P otherwise
+ * (LfVscConverterStationImpl.getReactiveLimitsActivePower). Its {hvdc, side} points the kernel at the link's state
+ * in the HVDC loop tables (the same enumeration as GpuBatchHvdcAcEmulation.buildControllers).
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
@@ -49,7 +54,12 @@ public final class GpuBatchRlCurves {
      *  two-point slope past [minP, maxP] instead of clamping (the base evals in cvIn come from
      *  OLF's own gen.getMinQ()/getMaxQ(), which already honor the flag). */
     public record Channel(int[] cvIdx, double[] cvIn, double[] cvPts, boolean extrapolate,
-                         String[] cvGenId, double[] cvBusFactor) {
+                         String[] cvGenId, double[] cvBusFactor, int[] cvHv) {
+
+        /** Whether entry {@code e} is an AC-emulation VSC: its P is its link's, not the slack's. */
+        public boolean isHvdc(int e) {
+            return cvHv != null && cvHv[2 * e] >= 0;
+        }
     }
 
     /** True when any generator carries a reactive capability CURVE (the guard input for the
@@ -66,9 +76,16 @@ public final class GpuBatchRlCurves {
     public static Channel build(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
                                 GpuAcData gpuData, GpuDsParams dsParams, boolean distributedSlack,
                                 double[] baseTargets, boolean extrapolate) {
-        if (!distributedSlack) {
-            return null;                                     // P never moves — the base snapshot is exact
+        // the AC-emulation stations, in the HVDC loop tables' order: station -> {hvdc, side}
+        java.util.Map<LfGenerator, int[]> hvdcSides = new java.util.IdentityHashMap<>();
+        List<com.powsybl.openloadflow.network.LfHvdc> packedHvdcs = network.getHvdcs().stream()
+                .filter(h -> h.getBus1() != null && h.getBus2() != null && h.isAcEmulation())
+                .toList();
+        for (int h = 0; h < packedHvdcs.size(); h++) {
+            hvdcSides.put(packedHvdcs.get(h).getConverterStation1(), new int[] {h, 1});
+            hvdcSides.put(packedHvdcs.get(h).getConverterStation2(), new int[] {h, 2});
         }
+        List<Integer> cvHv = new ArrayList<>();
         List<int[]> cvIdx = new ArrayList<>();
         List<double[]> cvIn = new ArrayList<>();
         List<Double> cvPts = new ArrayList<>();
@@ -106,8 +123,8 @@ public final class GpuBatchRlCurves {
                 // remote members keep STATIC limits in the channel (a curve gen at a remote member is
                 // possible but its own P participation is the same as a local bus's) — fall through to
                 // the same per-generator curve packing below.
-                packBusCurves(bus, rlIdx, es, dsParams, baseTargets, busPRow, cvIdx, cvIn, cvPts,
-                        cvGenId, cvBusFactor, gpuData);
+                packBusCurves(bus, rlIdx, es, distributedSlack ? dsParams : null, baseTargets, busPRow, cvIdx, cvIn, cvPts,
+                        cvGenId, cvBusFactor, gpuData, hvdcSides, cvHv);
                 rlIdx++;
                 continue;
             }
@@ -122,8 +139,8 @@ public final class GpuBatchRlCurves {
                 throw new PowsyblException("GPU AC solver: RL-pack enumeration drift while packing curve limits (bus "
                         + bus.getId() + ")");
             }
-            packBusCurves(bus, rlIdx, es, dsParams, baseTargets, busPRow, cvIdx, cvIn, cvPts,
-                    cvGenId, cvBusFactor, gpuData);
+            packBusCurves(bus, rlIdx, es, distributedSlack ? dsParams : null, baseTargets, busPRow, cvIdx, cvIn, cvPts,
+                    cvGenId, cvBusFactor, gpuData, hvdcSides, cvHv);
             rlIdx++;
         }
         if (cvIdx.isEmpty()) {
@@ -160,7 +177,8 @@ public final class GpuBatchRlCurves {
                 cvIn.stream().flatMapToDouble(java.util.stream.DoubleStream::of).toArray(),
                 cvPts.stream().mapToDouble(Double::doubleValue).toArray(), extrapolate,
                 cvGenId.toArray(new String[0]),
-                cvBusFactor.stream().mapToDouble(Double::doubleValue).toArray());
+                cvBusFactor.stream().mapToDouble(Double::doubleValue).toArray(),
+                cvHv.stream().anyMatch(h -> h >= 0) ? cvHv.stream().mapToInt(Integer::intValue).toArray() : null);
     }
 
     /** The bus's index in the distributed-slack BUS pack, or -1 when it does not participate. */
@@ -194,14 +212,17 @@ public final class GpuBatchRlCurves {
     private static void packBusCurves(LfBus bus, int rlIdx, EquationSystem<AcVariableType, AcEquationType> es,
                                       GpuDsParams dsParams, double[] baseTargets, int[] busPRow,
                                       List<int[]> cvIdx, List<double[]> cvIn, List<Double> cvPts,
-                                      List<String> cvGenId, List<Double> cvBusFactor, GpuAcData gpuData) {
+                                      List<String> cvGenId, List<Double> cvBusFactor, GpuAcData gpuData,
+                                      java.util.Map<LfGenerator, int[]> hvdcSides, List<Integer> cvHv) {
         String[] dgGenId = gpuData.dgGenId();
-        double busFactor = bus.getGenerators().stream().mapToDouble(dsParams::factor).sum();
+        // dsParams == null: no slack distribution, only the AC-emulation stations' P moves
+        double busFactor = dsParams != null ? bus.getGenerators().stream().mapToDouble(dsParams::factor).sum() : 0;
         for (LfGenerator gen : bus.getGenerators()) {
             var curve = gen instanceof AbstractLfGenerator alg
                     ? alg.getReactiveLimits().filter(rl -> rl.getKind() == ReactiveLimitsKind.CURVE).orElse(null)
                     : null;
-            if (curve == null || busFactor <= 0 || dsParams.factor(gen) <= 0) {
+            int[] hvdcSide = hvdcSides.get(gen);
+            if (curve == null || hvdcSide == null && (busFactor <= 0 || dsParams.factor(gen) <= 0)) {
                 continue;                                    // no curve, or its P never moves — static is exact
             }
             // A bus limit is NOT the sum of its generators' curve limits. AbstractLfBus.getLimitQ
@@ -240,9 +261,21 @@ public final class GpuBatchRlCurves {
             // proportional, and OLF's water-fill clamps PER GENERATOR, which breaks it the moment one
             // generator on the bus saturates. -1 when the generator is not in the pack (then the share
             // reconstruction is the only thing available).
+            if (hvdcSide != null) {
+                // its P is its link's (the kernel reads it from the HVDC loop state): no slack slot, no share
+                cvIdx.add(new int[] {rlIdx, pRow, ptsOff, points.size(), -1});
+                cvIn.add(new double[] {gen.getTargetP(), 0, baseTargets[pRow], gen.getMinQ(), gen.getMaxQ()});
+                cvHv.add(hvdcSide[0]);
+                cvHv.add(hvdcSide[1]);
+                cvGenId.add(gen.getId());
+                cvBusFactor.add(busFactor);
+                continue;
+            }
             cvIdx.add(new int[] {rlIdx, pRow, ptsOff, points.size(), dsSlotOf(dgGenId, gen.getId())});
             cvIn.add(new double[] {gen.getTargetP(), dsParams.factor(gen) / busFactor, baseTargets[pRow],
                 gen.getMinQ(), gen.getMaxQ()});              // base evals AT base targetP (bit-zero delta at base)
+            cvHv.add(-1);
+            cvHv.add(-1);
             cvGenId.add(gen.getId());                        // host-side only: which generator this entry is,
             cvBusFactor.add(busFactor);                      // and the denominator its share was built on, so a
                                                              // scenario losing a sibling can renormalize it

@@ -5615,9 +5615,13 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
     }
 
     /** b1 (slack g1) -- l12a, l12b -- b2 (load), an AC-emulation link cs1 (b1) -> cs2 (b2) whose inverter regulates b2
-     *  with a curve opening with P (+-5 MVar at 0 MW, +-60 at +-100 MW) or plain +-60 MVar limits; b3 hangs off b1
-     *  through l13 and carries nothing. OLF's own fixture for the curve read at the link flow
-     *  (testAcEmulationVscReactiveLimitsFollowTheFlow). */
+     *  with a curve opening with P (+-5 MVar at 0 MW, +-60 at +-100 MW); b3 hangs off b1 through l13 and carries
+     *  nothing. OLF's own fixture for the curve read at the link flow (testAcEmulationVscReactiveLimitsFollowTheFlow). */
+    private static Network acEmulationCurveLimitedVscNetwork() {
+        return acEmulationVscNetwork(true);
+    }
+
+    /** The same link, its inverter with a curve or with plain +-60 MVar limits. */
     private static Network acEmulationVscNetwork(boolean curve) {
         Network network = Network.create("acEmulationCurve", "code");
         com.powsybl.iidm.network.Substation s = network.newSubstation().setId("s").add();
@@ -5656,6 +5660,27 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
                 .newExtension(com.powsybl.iidm.network.extensions.HvdcAngleDroopActivePowerControlAdder.class)
                 .withP0(40).withDroop(180).withEnabled(true).add();
         return network;
+    }
+
+    /** An AC-emulation VSC pinned at its curve limit: OLF reads the curve at the live flow of the link
+     *  (LfVscConverterStationImpl.getReactiveLimitsActivePower), so the limit moves with the flow inside the solve.
+     *  l13 carries nothing (the limit must stay where the base left it), l12a moves the flow (and the limit). */
+    @Test
+    void deviceAcEmulationVscCurveLimitFollowsTheFlowMatchesCpu() {
+        assumeTrue(GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        List<Contingency> ctgs = List.of(new Contingency("l13", new BranchContingency("l13")),
+                new Contingency("l12a", new BranchContingency("l12a")));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setDistributedSlack(true).setUseReactiveLimits(true).setHvdcAcEmulation(true);
+        // Non-vacuity: cs2 sits at its curve maximum at the power it delivers
+        Network base = acEmulationCurveLimitedVscNetwork();
+        assertTrue(com.powsybl.loadflow.LoadFlow.run(base, lfp).isFullyConverged());
+        com.powsybl.iidm.network.Terminal t2 = base.getVscConverterStation("cs2").getTerminal();
+        assertEquals(5 + 55 * -t2.getP() / 100, -t2.getQ(), 1e-6);
+        GpuBatchScopeCensus.reset();
+        assertGpuMatchesCpu(acEmulationCurveLimitedVscNetwork(), ctgs, 1e-12, lfp, true);
+        assertEquals(java.util.Set.of(), GpuBatchScopeCensus.planRefusedIds(), "census=" + GpuBatchScopeCensus.snapshot());
+        assertEquals(2, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(), "census=" + GpuBatchScopeCensus.snapshot());
     }
 
     /** An AC-emulation link whose rectifier sits on the SLACK bus. OLF's slack mismatch is slack.getP() -

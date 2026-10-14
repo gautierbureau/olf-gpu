@@ -89,6 +89,7 @@ public final class GpuBatchOuterLoopTables {
                 rlCurves != null ? rlCurves.cvIdx() : null,
                 rlCurves != null ? rlCurves.cvIn() : null,
                 rlCurves != null ? rlCurves.cvPts() : null,
+                rlCurves != null ? rlCurves.cvHv() : null,
                 rlCurves != null && rlCurves.extrapolate() ? 1 : 0);
         // forceTargetQInReactiveLimits: the clamped generators' Q targets follow their P (or the channel is cleared).
         GpuBatchForcedTargetQ.install(handle, forcedTargetQ);

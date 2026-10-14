@@ -347,8 +347,8 @@ public final class GpuBatchedSecurityAnalysisSolver {
                 ? GpuBatchForcedTargetQ.build(network, equationSystem, gpuData, config.dsParams(), config.forceTargetQ(),
                         distributedSlack, baseTargets, baseActivation.rowMode(), config.rlCurveExtrapolate())
                 : null;
-        int[] curvePRows = rlCurves != null
-                ? java.util.stream.IntStream.range(0, rlCurves.cvIdx().length / 5)
+        int[] curvePRows = rlCurves != null           // an AC-emulation VSC's P is its link's, not the bus row's
+                ? java.util.stream.IntStream.range(0, rlCurves.cvIdx().length / 5).filter(g -> !rlCurves.isHvdc(g))
                         .map(g -> rlCurves.cvIdx()[g * 5 + 1]).toArray()
                 : null;
         // Couplers whose DUMMY rows host a bus's power equations under the tree relocation: an island has to

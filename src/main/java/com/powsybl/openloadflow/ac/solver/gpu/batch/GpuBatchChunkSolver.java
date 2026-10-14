@@ -1502,7 +1502,9 @@ final class GpuBatchChunkSolver {
                                             cvOvSlot.add(s);
                                             cvOvSlot.add(e);
                                             cvOvVal.add(go.pStep());
-                                            cvOvVal.add(dead || left <= 0 ? -1 : busFactor / left);
+                                            // an AC-emulation VSC's P is its link's: only its own loss matters
+                                            cvOvVal.add(dead || !rlCurves.isHvdc(e) && left <= 0 ? -1
+                                                    : rlCurves.isHvdc(e) ? 1 : busFactor / left);
                                         }
                                     }
                                     if (hasDs && go.dsBus() >= 0) {   // lost gen(s) on a DS-participant bus: per-scenario reweight

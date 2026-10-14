@@ -1896,11 +1896,23 @@ final class GpuBatchChunkSolver {
                                 // in the kernel (base_eff = base - ovDelta + shift), so gen-outage parents and
                                 // action deltas are both handled without double counting.
                                 double absorbedSum = 0;
+                                // An absolute GeneratorAction on a participant sets its target (and OLF's initial
+                                // target) to the value: its bus is not re-anchored on the parent's share, the
+                                // action's own delta (base-referenced, on the override bus) is the whole move.
+                                // The precomputer only batches it when that generator is its bus's only participant.
+                                int absoluteBus = -1;
+                                if (dsOvBus.length > 0 && dsOvBus[s] >= 0) {
+                                    for (com.powsybl.openloadflow.network.LfGenerator g : contingencies.get(group.get(chunkStart + s)).absoluteTargetGenerators()) {
+                                        if (config.dsParams().factor(g) != 0) {
+                                            absoluteBus = dsOvBus[s];
+                                        }
+                                    }
+                                }
                                 for (int i = 0; i < nds; i++) {
                                     int row = gpuData.dsPhiRow()[i];
-                                    double shift = parentDs[i];
+                                    double shift = i == absoluteBus ? 0.0 : parentDs[i];
                                     dsAnchorShift[s * nds + i] = shift;
-                                    absorbedSum += shift;
+                                    absorbedSum += parentDs[i];      // the slack's share of the parent counts it all
                                     // Seed the DS-row target at the CPU strategy leg's starting value — the
                                     // parent-absorbed target plus the pair's own composed delta — so the first
                                     // inner solve runs at the CPU leg's starting operating point (losses are

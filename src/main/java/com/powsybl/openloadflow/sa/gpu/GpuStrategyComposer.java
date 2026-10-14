@@ -78,6 +78,7 @@ final class GpuStrategyComposer {
         List<ShuntShift> shifts = new java.util.ArrayList<>(ctgShifts);
         List<TapR1Override> taps = new java.util.ArrayList<>();
         List<LfBranch> reclosed = new java.util.ArrayList<>();
+        List<LfGenerator> absoluteTargets = new java.util.ArrayList<>();
         Map<String, Action> actionById = new java.util.HashMap<>();
         for (Action a : currentActions) {
             actionById.put(a.getId(), a);
@@ -235,12 +236,16 @@ final class GpuStrategyComposer {
                 double deltaP = relative ? ga.getActivePowerValue().getAsDouble()
                                          : ga.getActivePowerValue().getAsDouble() - gen.getTargetP();
                 loads.add(new LoadLoss(bus, deltaP / PerUnit.SB, 0));
+                if (!relative) {
+                    absoluteTargets.add(lfGen);              // the value replaces the parent's distributed target
+                }
             } else {
                 return null;                                 // out of stage-1 scope — CPU per-strategy path
             }
         }
         return new BatchContingency(contingencyId + GpuBatchStatus.STRATEGY_KEY_SEP + strategy.getId(),
-                branches, ctgGens, loads, shifts, taps, List.of(), reclosed, ctgZiOutages, ctgHvdcs);
+                branches, ctgGens, loads, shifts, taps, List.of(), reclosed, ctgZiOutages, ctgHvdcs, List.of(), List.of(),
+                absoluteTargets);
     }
 
     /** Compiles a tap-position action (RTC or PST) into a per-scenario full-row override — the

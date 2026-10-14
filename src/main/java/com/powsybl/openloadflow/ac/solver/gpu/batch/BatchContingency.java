@@ -37,7 +37,11 @@ public record BatchContingency(String contingencyId, List<LfBranch> outagedBranc
                                 *  contingency runs, so without this it solves every scenario on the BASE tree
                                 *  while OLF has moved on (network.xiidm: LMK at extraction, LMO, then LMQ for
                                 *  the remaining 2938 of 3528). Empty = the base tree. */
-                               List<LfBranch> stickyNonTreeZi) {
+                               List<LfBranch> stickyNonTreeZi,
+                               /** Strategy pairs: the generators an absolute GeneratorAction sets. OLF sets their
+                                *  targetP (and initial targetP) to the value, over whatever the parent contingency's
+                                *  distribution gave them, so the pair leg does not re-anchor their bus on the parent. */
+                               List<LfGenerator> absoluteTargetGenerators) {
 
     /** A branch opened on ONE side by the contingency (node-breaker propagation): the closed-branch
      *  element is masked and the pre-packed side-open OB view enabled — {@code side} is the OPEN
@@ -49,6 +53,18 @@ public record BatchContingency(String contingencyId, List<LfBranch> outagedBranc
                 throw new IllegalArgumentException("side must be 1 or 2");
             }
         }
+    }
+
+    /** 12-arg compatibility constructor (no absolute generator target). */
+    @SuppressWarnings("java:S107")
+    public BatchContingency(String contingencyId, List<LfBranch> outagedBranches, List<LfGenerator> lostGenerators,
+                            List<LoadLoss> lostLoads, List<ShuntShift> shuntShifts, List<TapR1Override> tapOverrides,
+                            List<LfShunt> outagedShunts, List<LfBranch> reclosedBranches,
+                            List<LfBranch> outagedZiBranches, List<LfHvdc> outagedHvdcs,
+                            List<SideOpen> sideOpenBranches, List<LfBranch> stickyNonTreeZi) {
+        this(contingencyId, outagedBranches, lostGenerators, lostLoads, shuntShifts, tapOverrides,
+                outagedShunts, reclosedBranches, outagedZiBranches, outagedHvdcs, sideOpenBranches, stickyNonTreeZi,
+                List.of());
     }
 
     /** 11-arg compatibility constructor (base spanning tree). */
@@ -81,6 +97,7 @@ public record BatchContingency(String contingencyId, List<LfBranch> outagedBranc
         Objects.requireNonNull(tapOverrides);
         Objects.requireNonNull(outagedShunts);
         Objects.requireNonNull(sideOpenBranches);
+        Objects.requireNonNull(absoluteTargetGenerators);
         boolean isInjection = !lostGenerators.isEmpty() || !lostLoads.isEmpty() || !shuntShifts.isEmpty()
                 || !tapOverrides.isEmpty() || !outagedHvdcs.isEmpty();
         boolean isShunt = !outagedShunts.isEmpty();

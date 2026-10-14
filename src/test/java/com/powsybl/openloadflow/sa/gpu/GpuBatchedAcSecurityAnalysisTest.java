@@ -7304,6 +7304,26 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
     }
 
     @Test
+    void absoluteGeneratorActionAfterADistributingContingencyStrategyBatchMatchesCpu() {
+        // OLF's LfGeneratorAction SETS targetP to an absolute value, starting from the parent contingency's
+        // distributed targets: the generator ends at the value, whatever share of the lost load it took.
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = IeeeCdfNetworkFactory.create14();
+        String loadId = loadAtBus(network, "B9").getId();
+        List<Contingency> contingencies = List.of(new Contingency(loadId,
+                new com.powsybl.contingency.LoadContingency(loadId)));
+        List<com.powsybl.action.Action> actions = List.of(
+                new com.powsybl.action.GeneratorActionBuilder().withId("set2")
+                        .withGeneratorId("B2-G").withActivePowerRelativeValue(false).withActivePowerValue(60).build());
+        List<com.powsybl.contingency.strategy.OperatorStrategy> strategies = List.of(
+                new com.powsybl.contingency.strategy.OperatorStrategy("sSet",
+                        com.powsybl.contingency.ContingencyContext.specificContingency(loadId),
+                        new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of("set2")));
+        assertStrategyMatchesCpu(network, contingencies, strategies, actions, 2);
+    }
+
+    @Test
     void generatorActionOnTheLostGeneratorStrategyBatchMatchesCpu() {
         // A generator action on the generator its contingency loses does nothing in OLF
         // (LfGeneratorAction.apply checks isDisabled).
@@ -7320,12 +7340,6 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
                         com.powsybl.contingency.ContingencyContext.specificContingency("B3-G"),
                         new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of("up3")));
         assertStrategyMatchesCpu(network, contingencies, strategies, actions, 2);
-    }
-
-    private static com.powsybl.iidm.network.Load loadAtBus(Network network, String busId) {
-        return network.getLoadStream()
-                .filter(l -> busId.equals(l.getTerminal().getBusBreakerView().getBus().getId()))
-                .findFirst().orElseThrow();
     }
 
     @Test
@@ -7345,6 +7359,12 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         assertGpuMatchesCpu(network, List.of(new Contingency("B2-G",
                 new com.powsybl.contingency.GeneratorContingency("B2-G"))));
         assertEquals(1, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(), "B2-G outage on the device");
+    }
+
+    private static com.powsybl.iidm.network.Load loadAtBus(Network network, String busId) {
+        return network.getLoadStream()
+                .filter(l -> busId.equals(l.getTerminal().getBusBreakerView().getBus().getId()))
+                .findFirst().orElseThrow();
     }
 
     @Test

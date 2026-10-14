@@ -187,7 +187,7 @@ final class GpuBatchInjectionOutages {
                 }
             }
             out.add(new GenOutage(-1, 0, -1, 0, false, false, -1, 0, 0, 0, 0, -1, 0, 0, false,
-                    java.util.Set.of(), 0, 0, 0, im, new int[0], rows, values, 0, -1, 0, -1, 0, -1, 0, -1, -1, 0, false, -1));
+                    java.util.Set.of(), 0, 0, 0, im, new int[0], rows, values, 0, -1, 0, -1, 0, -1, 0, -1, -1, 0, false, -1, 0, 0));
         }
         return out;
     }
@@ -701,9 +701,20 @@ final class GpuBatchInjectionOutages {
             }
         }
         double loadQDelta = 0;
+        double svcBminDelta = 0;
+        double svcBmaxDelta = 0;
         if (rlEntry >= 0 && !toPq) {
             minQDelta = -lost.stream().mapToDouble(g -> qContrib(g, LfGenerator::getMinQ)).sum();
             maxQDelta = -lost.stream().mapToDouble(g -> qContrib(g, LfGenerator::getMaxQ)).sum();
+            // the same SVCs GpuAcOuterLoopPacks.addSvcQuadratic folds into the entry's coefficients
+            double v2 = bus.getV() * bus.getV();
+            for (LfGenerator g : lost) {
+                if (g instanceof com.powsybl.openloadflow.network.LfStaticVarCompensator
+                        && g.getGeneratorControlType() == LfGenerator.GeneratorControlType.VOLTAGE) {
+                    svcBminDelta -= g.getMinQ() / v2;
+                    svcBmaxDelta -= g.getMaxQ() / v2;
+                }
+            }
             // The pack's loadQ is the bus's load target Q as EXTRACTED, and the reactive-limit
             // machinery reads it in two paired forms: the pinned target is limit - loadQ, and the
             // controller's own q is the net injection + loadQ. Shed a Q-carrying load and both go
@@ -905,6 +916,6 @@ final class GpuBatchInjectionOutages {
                 lostLoadP - lostP, loadQDelta, inactiveDqMember, pilotSurvivorRlEntries,
                 dqTargetRows, dqTargetValues, deadRemoteMember ? 4 : 1,
                 deadPilotVRow, deadPilotQTarget, pinnedPilotVRow, pinnedPilotQTarget,
-                dqTargetQOvMember, dqTargetQOvValue, qTargetRow, pilotQGroup, pilotQDelta, slackBus, -1);
+                dqTargetQOvMember, dqTargetQOvValue, qTargetRow, pilotQGroup, pilotQDelta, slackBus, -1, svcBminDelta, svcBmaxDelta);
     }
 }

@@ -31,7 +31,7 @@ class GpuBatchChunkSolverGateTest {
     private static GenOutage entry(int pRow, int vRow, boolean toPq, boolean qOverride, int[] dqRows, int deadPilotVRow) {
         return new GenOutage(pRow, 0, vRow, 0, toPq, qOverride, -1, 0, 0, 0, 0, -1, 0, 0, false, Set.of(), 0, 0, 0,
                 dqRows.length > 0 ? 0 : -1, new int[0], dqRows, new double[dqRows.length], 0,
-                deadPilotVRow, 0, -1, 0, -1, 0, -1, -1, 0, false, -1);
+                deadPilotVRow, 0, -1, 0, -1, 0, -1, -1, 0, false, -1, 0, 0);
     }
 
     @Test

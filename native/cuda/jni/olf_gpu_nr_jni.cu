@@ -5866,9 +5866,9 @@ __global__ void rlCurveLimitsBatch(int nrl, int nScenarios, int ncv, int n, int 
     for (int c = qOvPtr != nullptr ? qOvPtr[s] : 0; c < (qOvPtr != nullptr ? qOvPtr[s + 1] : 0); c++) {
         int k = qOvList[c];
         if (qOvSlotEntry[2 * k + 1] == i) {
-            mn += qOvMinMax[3 * k];
-            mx += qOvMinMax[3 * k + 1];
-            lq += qOvMinMax[3 * k + 2];                      // a SHED load's reactive power: the pinned
+            mn += qOvMinMax[5 * k];
+            mx += qOvMinMax[5 * k + 1];
+            lq += qOvMinMax[5 * k + 2];                      // a SHED load's reactive power: the pinned
         }                                                    // target and the controller's own q both
     }                                                        // measure against the bus's load target Q
     minQDyn[(size_t) s * nrl + i] = mn;
@@ -6628,6 +6628,7 @@ __global__ void reactiveLimitsBatch(const double* svcRlVt, int nrl, int nScenari
                                     const double* rowSlope, double* savedTarget, int cvStride,
                                     const char* rlRemote, const int* rlCmpVrow,
                                     const double* rlSvcBmin, const double* rlSvcBmax, const double* rlV2Base,
+                                    const double* svcBminDyn, const double* svcBmaxDyn,
                                     const char* rlIslanded,
                                     const double* rlInitTgtQ, double vLoRobust, double vHiRobust,
                                     int robust,
@@ -6659,6 +6660,9 @@ __global__ void reactiveLimitsBatch(const double* svcRlVt, int nrl, int nScenari
     // the per-entry svcB coefficients add the quadratic delta vs the packed base v^2 — exact for
     // the SVC part, identically zero on SVC-less buses.
     bool svcLim = rlSvcBmin[i] != 0.0 || rlSvcBmax[i] != 0.0;
+    // ...minus a lost SVC's share, per scenario (svcBminDyn: built only when an outage takes one)
+    double svcBMin = svcBminDyn != nullptr ? svcBminDyn[(size_t) s * nrl + i] : rlSvcBmin[i];
+    double svcBMax = svcBmaxDyn != nullptr ? svcBmaxDyn[(size_t) s * nrl + i] : rlSvcBmax[i];
     // records one decision of the traced scenario; the branches below call it right where they act
     // swLogSlot >= 0: every check of that ONE scenario. swLogSlot == -2 ("all"): only the checks
     // that DECIDED something, for every scenario - the whole batch's decision set in ~40 records per
@@ -6703,8 +6707,8 @@ __global__ void reactiveLimitsBatch(const double* svcRlVt, int nrl, int nScenari
         // the extraction ran on a never-solved network (the base load flow's own context) — 0 × NaN
         // poisoned every entry's limits there and nothing ever pinned at base.
         double rdv2 = svcLim ? x[ridx] * x[ridx] - rlV2Base[i] : 0.0;
-        double rliMin = rlMinQ[rli] + (svcLim ? rlSvcBmin[i] * rdv2 : 0.0);
-        double rliMax = rlMaxQ[rli] + (svcLim ? rlSvcBmax[i] * rdv2 : 0.0);
+        double rliMin = rlMinQ[rli] + (svcLim ? svcBMin * rdv2 : 0.0);
+        double rliMax = rlMaxQ[rli] + (svcLim ? svcBMax * rdv2 : 0.0);
         // rlRemote 2 = a PILOT that is one of its own controllers: unpinned, its row is the group's
         // voltage IDENTITY (mode 0), not a DISTR_Q share; pinned, its own Q balance (mode 4, the
         // alternate dest). Everything else (q via the remote q pack, the pilot's V as compare row)
@@ -6840,8 +6844,8 @@ __global__ void reactiveLimitsBatch(const double* svcRlVt, int nrl, int nScenari
     size_t li = cvStride ? st : (size_t) i;                 // curve limits are per (scenario, entry)
     bool slopeRow = rowSlope[vrow] != 0;                    // SLOPE-SVC bus: its PV form is row mode 2
     double dv2 = svcLim ? x[idx] * x[idx] - rlV2Base[i] : 0.0;   // see the remote branch: NaN base v² otherwise
-    double liMin = rlMinQ[li] + (svcLim ? rlSvcBmin[i] * dv2 : 0.0);
-    double liMax = rlMaxQ[li] + (svcLim ? rlSvcBmax[i] * dv2 : 0.0);
+    double liMin = rlMinQ[li] + (svcLim ? svcBMin * dv2 : 0.0);
+    double liMax = rlMaxQ[li] + (svcLim ? svcBMax * dv2 : 0.0);
     // A DEGENERATE reactive range (min >= max) belongs to a bus with no reactive capability of its
     // own: the CONTROLLED (pilot) bus of a remote group carries a generator voltage control but no
     // generators, so bus.getMinQ()/getMaxQ() are a sum over nothing and both are 0. OLF never checks
@@ -8072,6 +8076,7 @@ struct BatchSolverContext {
     DeviceBuf dRlBaseLimitType;                            // OLF's base pin kind per entry (0..4); see hasRlBaseLt
     int hasRlBaseLt = 0;
     DeviceBuf dRlCmpVrow;                                  // per-entry compare row (PILOT v col for remote members)
+    DeviceBuf dRlSvcBminDyn, dRlSvcBmaxDyn;                // per (scenario, entry) coefs when a lost SVC takes its share
     DeviceBuf dRlSvcBmin, dRlSvcBmax, dRlV2Base;           // per-entry SVC quadratic limit coefs + packed base v^2
                                                            // (limit(v) = static + b*(v^2 - v2Base)); zeroed default
     int nDqDyn = 0;                                        // dynamic reactive keys (plan-B3): an RL pin zeroes the
@@ -10785,7 +10790,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     DeviceBuf dRlQOvSlotEntry, dRlQOvMinMax, dRlQOvPtr, dRlQOvList;
     if (nRlQOv > 0) {
         dRlQOvSlotEntry.upload(rlQOvSlotEntry, static_cast<size_t>(nRlQOv) * 2 * sizeof(int));
-        dRlQOvMinMax.upload(rlQOvMinMax, static_cast<size_t>(nRlQOv) * 3 * sizeof(double));   // {dMinQ, dMaxQ, dLoadQ}
+        dRlQOvMinMax.upload(rlQOvMinMax, static_cast<size_t>(nRlQOv) * 5 * sizeof(double));   // {dMinQ, dMaxQ, dLoadQ, dBmin, dBmax}
         // ...indexed by slot (CSR, entry order kept), so the dynamic-limits kernel reads its scenario's own
         // overrides instead of scanning the chunk's.
         std::vector<int> qPtr(nS + 1, 0);
@@ -10796,6 +10801,35 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         for (int k = 0; k < nRlQOv; k++) qList[qCursor[rlQOvSlotEntry[2 * k]]++] = k;
         dRlQOvPtr.upload(qPtr.data(), qPtr.size() * sizeof(int));
         dRlQOvList.upload(qList.data(), qList.size() * sizeof(int));
+    }
+    // A lost voltage-controlling SVC also takes its share of the entry's quadratic limit coefficients (an SVC's
+    // limit is its susceptance times v^2): per (scenario, entry) coefficients, read by the reactive-limits check
+    // in place of the run-constant ones. Built only when some override carries such a share.
+    bool svcCoefDyn = false;
+    for (int k = 0; k < nRlQOv && !svcCoefDyn; k++) {
+        svcCoefDyn = rlQOvMinMax[5 * k + 3] != 0.0 || rlQOvMinMax[5 * k + 4] != 0.0;
+    }
+    if (svcCoefDyn && ctx->nrl > 0) {
+        size_t nrl = static_cast<size_t>(ctx->nrl);
+        std::vector<double> bmin(nrl), bmax(nrl);
+        CUDA_CHECK(cudaMemcpy(bmin.data(), ctx->dRlSvcBmin.p, nrl * sizeof(double), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(bmax.data(), ctx->dRlSvcBmax.p, nrl * sizeof(double), cudaMemcpyDeviceToHost));
+        std::vector<double> dynMin(static_cast<size_t>(nS) * nrl), dynMax(static_cast<size_t>(nS) * nrl);
+        for (int t = 0; t < nS; t++) {
+            std::copy(bmin.begin(), bmin.end(), dynMin.begin() + static_cast<size_t>(t) * nrl);
+            std::copy(bmax.begin(), bmax.end(), dynMax.begin() + static_cast<size_t>(t) * nrl);
+        }
+        for (int k = 0; k < nRlQOv; k++) {
+            size_t at = static_cast<size_t>(rlQOvSlotEntry[2 * k]) * nrl + rlQOvSlotEntry[2 * k + 1];
+            dynMin[at] += rlQOvMinMax[5 * k + 3];
+            dynMax[at] += rlQOvMinMax[5 * k + 4];
+        }
+        if (!ctx->dRlSvcBminDyn.p) {
+            ctx->dRlSvcBminDyn.alloc(static_cast<size_t>(ctx->nScenarios) * nrl * sizeof(double));
+            ctx->dRlSvcBmaxDyn.alloc(static_cast<size_t>(ctx->nScenarios) * nrl * sizeof(double));
+        }
+        CUDA_CHECK(cudaMemcpy(ctx->dRlSvcBminDyn.p, dynMin.data(), dynMin.size() * sizeof(double), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(ctx->dRlSvcBmaxDyn.p, dynMax.data(), dynMax.size() * sizeof(double), cudaMemcpyHostToDevice));
     }
     // Per-scenario curve repairs, CSR by scenario: the dynamic-limits kernel runs one thread per
     // (reactive-limit entry, scenario) and walks the curve entries inside, so a flat {slot, entry}
@@ -13293,6 +13327,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                     ctx->nRlRemote > 0 ? ctx->dRlRemote.as<char>() : nullptr,
                     ctx->nRlRemote > 0 ? ctx->dRlCmpVrow.as<int>() : nullptr,
                     ctx->dRlSvcBmin.as<double>(), ctx->dRlSvcBmax.as<double>(), ctx->dRlV2Base.as<double>(),
+                    svcCoefDyn ? ctx->dRlSvcBminDyn.as<double>() : nullptr, svcCoefDyn ? ctx->dRlSvcBmaxDyn.as<double>() : nullptr,
                     ctx->nRlIslanded > 0 ? ctx->dRlIslanded.as<char>() : nullptr,
                     ctx->rlRobust ? ctx->dRlInitTgtQ.as<double>() : nullptr,
                     ctx->rlVLoRobust, ctx->rlVHiRobust, ctx->rlRobust, rlNoPinRow,
@@ -13876,6 +13911,7 @@ psgStep(ctx, nS, n, outer, "afterDistrQ");
                 ctx->nRlRemote > 0 ? ctx->dRlRemote.as<char>() : nullptr,
                 ctx->nRlRemote > 0 ? ctx->dRlCmpVrow.as<int>() : nullptr,
                 ctx->dRlSvcBmin.as<double>(), ctx->dRlSvcBmax.as<double>(), ctx->dRlV2Base.as<double>(),
+                    svcCoefDyn ? ctx->dRlSvcBminDyn.as<double>() : nullptr, svcCoefDyn ? ctx->dRlSvcBmaxDyn.as<double>() : nullptr,
                 ctx->nRlIslanded > 0 ? ctx->dRlIslanded.as<char>() : nullptr,
                 ctx->rlRobust ? ctx->dRlInitTgtQ.as<double>() : nullptr,
                 ctx->rlVLoRobust, ctx->rlVHiRobust, ctx->rlRobust, -1,
@@ -14619,7 +14655,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_solveBat
                                 static_cast<int>(rlVtOvValVec.size()),
                                 rlVtOvSlotIdxVec.empty() ? nullptr : rlVtOvSlotIdxVec.data(),
                                 rlVtOvValVec.empty() ? nullptr : rlVtOvValVec.data(),
-                                static_cast<int>(rlQOvMinMaxVec.size() / 3),
+                                static_cast<int>(rlQOvMinMaxVec.size() / 5),
                                 rlQOvSlotEntryVec.empty() ? nullptr : rlQOvSlotEntryVec.data(),
                                 rlQOvMinMaxVec.empty() ? nullptr : rlQOvMinMaxVec.data(),
                                 static_cast<int>(cvOvStepScaleVec.size() / 2),

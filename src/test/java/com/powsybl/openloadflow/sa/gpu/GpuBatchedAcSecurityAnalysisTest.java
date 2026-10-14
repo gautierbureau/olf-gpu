@@ -5583,6 +5583,37 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         assertEquals(2, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(), "census=" + GpuBatchScopeCensus.snapshot());
     }
 
+    /** Two voltage-controlling SVCs on one bus, losing one: the bus keeps voltage control. An SVC's reactive limit
+     *  is b*v^2 at the live voltage, so the bus limit after the loss is the SURVIVOR's b times v^2. The device takes
+     *  the lost SVC's limit at the base voltage off the aggregate (minQDelta/maxQDelta), and must also take its b off
+     *  the quadratic term, otherwise the pinned survivor's target moves with the lost SVC's coefficient: 4.5e-3 kV
+     *  at B4 before. */
+    @Test
+    void deviceLostSvcOnABusKeepingVoltageControlMatchesCpu() {
+        assumeTrue(GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        java.util.function.Supplier<Network> net = () -> {
+            Network n = IeeeCdfNetworkFactory.create14();
+            com.powsybl.iidm.network.VoltageLevel vl = n.getBusBreakerView().getBus("B9").getVoltageLevel();
+            for (String id : List.of("svc1", "svc2")) {
+                vl.newStaticVarCompensator().setId(id).setBus("B9").setConnectableBus("B9")
+                        .setBmin(-0.06).setBmax(0.06).setVoltageSetpoint(n.getBusBreakerView().getBus("B9").getV() * 1.03)
+                        .setRegulationMode(com.powsybl.iidm.network.StaticVarCompensator.RegulationMode.VOLTAGE).setRegulating(true).add();
+            }
+            return n;
+        };
+        List<Contingency> ctgs = List.of(new Contingency("svc2", new com.powsybl.contingency.StaticVarCompensatorContingency("svc2")));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setDistributedSlack(true).setUseReactiveLimits(true);
+        // Non-vacuity: both SVCs sit at their maximum in the base (10 MVar each), below their voltage target
+        Network base = net.get();
+        assertTrue(com.powsybl.loadflow.LoadFlow.run(base, lfp).isFullyConverged());
+        assertTrue(base.getBusBreakerView().getBus("B9").getV() < base.getStaticVarCompensator("svc1").getVoltageSetpoint() - 0.1);
+        GpuBatchScopeCensus.reset();
+        assertGpuMatchesCpu(net.get(), ctgs, 1e-12, lfp, true);
+        assertEquals(java.util.Set.of(), GpuBatchScopeCensus.planRefusedIds(), "census=" + GpuBatchScopeCensus.snapshot());
+        assertEquals(1, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(), "census=" + GpuBatchScopeCensus.snapshot());
+    }
+
     /** A line outage whose propagation also trips a load OUTSIDE the solved component: the load's level hangs off a
      *  line that is open on the main side, so it is its own component, and the branch tripping of that line still
      *  disconnects the load behind its disconnector. OLF resolves loadIdsToLose with getLoadById and skips the null

@@ -49,7 +49,11 @@ public record GenOutage(int pRow, double pTarget, int vRow, double qTarget, bool
                         /** ROW_REMOTE_REHOME: the V row of the pilot this remote controller regulates this scenario (OLF's
                          *  re-merged control after a zero-impedance split), read by its reactive-limit check instead of the
                          *  base group's pilot; -1 for every other kind. */
-                        int reHomePilotVRow) {
+                        int reHomePilotVRow,
+                        /** The lost voltage-controlling SVCs' share of the entry's quadratic limit coefficients (pu, the
+                         *  b of limit(v) = packedLimit + b*(v^2 - v2Base)): an SVC's limit is its susceptance times v^2,
+                         *  so taking its base-voltage limit off (minQDelta/maxQDelta) leaves its b in the aggregate. */
+                        double svcBminDelta, double svcBmaxDelta) {
 
     /** Where to write this bus's Q target: the relocated Q-balance row, else the BUS_V row. */
     public int qTargetRowOrV() {
@@ -69,7 +73,7 @@ public record GenOutage(int pRow, double pTarget, int vRow, double qTarget, bool
                 dsMaxDelta, dsMinDelta, rlEntry, minQDelta, maxQDelta, allGensLost, lostGenIds, lostFactorSum, pStep,
                 loadQDelta, inactiveDqMember, pilotGroupSurvivorRlEntries, dqTargetRows, dqTargetValues,
                 pqRowMode, deadPilotVRow, deadPilotQTarget, pinnedPilotVRow, pinnedPilotQTarget, dqTargetQOvMember,
-                dqTargetQOvValue, newQTargetRow, pilotQGroup, pilotQDelta, onSlack, reHomePilotVRow);
+                dqTargetQOvValue, newQTargetRow, pilotQGroup, pilotQDelta, onSlack, reHomePilotVRow, svcBminDelta, svcBmaxDelta);
     }
 
     /** This entry without the DISTR_Q row targets that fall on a FROZEN (islanded) row: such a row is an identity
@@ -95,7 +99,7 @@ public record GenOutage(int pRow, double pTarget, int vRow, double qTarget, bool
                 loadQDelta, inactiveDqMember, pilotGroupSurvivorRlEntries,
                 rows.stream().mapToInt(Integer::intValue).toArray(), values.stream().mapToDouble(Double::doubleValue).toArray(),
                 pqRowMode, deadPilotVRow, deadPilotQTarget, pinnedPilotVRow, pinnedPilotQTarget, dqTargetQOvMember,
-                dqTargetQOvValue, qTargetRow, pilotQGroup, pilotQDelta, onSlack, reHomePilotVRow);
+                dqTargetQOvValue, qTargetRow, pilotQGroup, pilotQDelta, onSlack, reHomePilotVRow, svcBminDelta, svcBmaxDelta);
     }
     // lostGenIds / lostFactorSum exist for the reactive-capability CURVE channel, which evaluates each
     // generator's curve at its OWN post-distribution active power, reconstructed from the bus's row
@@ -244,6 +248,6 @@ public record GenOutage(int pRow, double pTarget, int vRow, double qTarget, bool
      *  lost generators take with them, and the load target Q the pinned target and the controller's own
      *  q are both measured against. */
     public boolean shrinksReactiveLimits() {
-        return rlEntry >= 0 && (minQDelta != 0 || maxQDelta != 0 || loadQDelta != 0);
+        return rlEntry >= 0 && (minQDelta != 0 || maxQDelta != 0 || loadQDelta != 0 || svcBminDelta != 0 || svcBmaxDelta != 0);
     }
 }

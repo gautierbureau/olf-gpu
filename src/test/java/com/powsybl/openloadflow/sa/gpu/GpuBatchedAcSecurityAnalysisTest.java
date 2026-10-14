@@ -7256,6 +7256,79 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
     }
 
     @Test
+    void loadActionReactivePowerStrategyBatchMatchesCpu() {
+        // OLF's LfLoadAction shifts the load's P AND Q. The composer used to keep P only, and sent a
+        // reactive-only action to the CPU: the pair's bus voltages followed a load that kept its Q.
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = IeeeCdfNetworkFactory.create14();
+        String lineId = network.getLineStream().skip(4).findFirst().orElseThrow().getId();
+        com.powsybl.iidm.network.Load load12 = loadAtBus(network, "B12");
+        com.powsybl.iidm.network.Load load14 = loadAtBus(network, "B14");
+        List<Contingency> contingencies = List.of(new Contingency(lineId, new BranchContingency(lineId)));
+        List<com.powsybl.action.Action> actions = List.of(
+                new com.powsybl.action.LoadActionBuilder().withId("halve12").withLoadId(load12.getId())
+                        .withRelativeValue(false).withActivePowerValue(load12.getP0() / 2)
+                        .withReactivePowerValue(load12.getQ0() / 2).build(),
+                new com.powsybl.action.LoadActionBuilder().withId("q14").withLoadId(load14.getId())
+                        .withRelativeValue(true).withReactivePowerValue(8).build());
+        List<com.powsybl.contingency.strategy.OperatorStrategy> strategies = List.of(
+                new com.powsybl.contingency.strategy.OperatorStrategy("sPQ",
+                        com.powsybl.contingency.ContingencyContext.specificContingency(lineId),
+                        new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of("halve12")),
+                new com.powsybl.contingency.strategy.OperatorStrategy("sQ",
+                        com.powsybl.contingency.ContingencyContext.specificContingency(lineId),
+                        new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of("q14")));
+        assertStrategyMatchesCpu(network, contingencies, strategies, actions, 3);
+    }
+
+    @Test
+    void loadActionOnTheLostLoadStrategyBatchMatchesCpu() {
+        // A load action on the load its contingency loses does nothing in OLF (LfLoadAction.apply checks
+        // isOriginalLoadDisabled): composing its shift on top of the outage would move the bus again.
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = IeeeCdfNetworkFactory.create14();
+        com.powsybl.iidm.network.Load load12 = loadAtBus(network, "B12");
+        List<Contingency> contingencies = List.of(new Contingency(load12.getId(),
+                new com.powsybl.contingency.LoadContingency(load12.getId())));
+        List<com.powsybl.action.Action> actions = List.of(
+                new com.powsybl.action.LoadActionBuilder().withId("halve12").withLoadId(load12.getId())
+                        .withRelativeValue(false).withActivePowerValue(load12.getP0() / 2)
+                        .withReactivePowerValue(load12.getQ0() / 2).build());
+        List<com.powsybl.contingency.strategy.OperatorStrategy> strategies = List.of(
+                new com.powsybl.contingency.strategy.OperatorStrategy("sLost",
+                        com.powsybl.contingency.ContingencyContext.specificContingency(load12.getId()),
+                        new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of("halve12")));
+        assertStrategyMatchesCpu(network, contingencies, strategies, actions, 2);
+    }
+
+    @Test
+    void generatorActionOnTheLostGeneratorStrategyBatchMatchesCpu() {
+        // A generator action on the generator its contingency loses does nothing in OLF
+        // (LfGeneratorAction.apply checks isDisabled).
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = IeeeCdfNetworkFactory.create14();
+        List<Contingency> contingencies = List.of(new Contingency("B3-G",
+                new com.powsybl.contingency.GeneratorContingency("B3-G")));
+        List<com.powsybl.action.Action> actions = List.of(
+                new com.powsybl.action.GeneratorActionBuilder().withId("up3")
+                        .withGeneratorId("B3-G").withActivePowerRelativeValue(true).withActivePowerValue(20).build());
+        List<com.powsybl.contingency.strategy.OperatorStrategy> strategies = List.of(
+                new com.powsybl.contingency.strategy.OperatorStrategy("sLostGen",
+                        com.powsybl.contingency.ContingencyContext.specificContingency("B3-G"),
+                        new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of("up3")));
+        assertStrategyMatchesCpu(network, contingencies, strategies, actions, 2);
+    }
+
+    private static com.powsybl.iidm.network.Load loadAtBus(Network network, String busId) {
+        return network.getLoadStream()
+                .filter(l -> busId.equals(l.getTerminal().getBusBreakerView().getBus().getId()))
+                .findFirst().orElseThrow();
+    }
+
+    @Test
     void l121SevereContingencyMatchesCpuAtTightSlackTol() {
         // The L1-2-1 outage (main B1-B2 tie) pins ALL PV buses — an ill-conditioned state where the
         // DS stopping band (slackBusPMaxMismatch, default 1 MW) leaves ~0.1 kV of legitimate

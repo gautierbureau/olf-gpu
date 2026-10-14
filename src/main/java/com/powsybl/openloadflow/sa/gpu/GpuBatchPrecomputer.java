@@ -293,7 +293,7 @@ final class GpuBatchPrecomputer {
                             continue;                        // pair handled by the CPU per-strategy path
                         }
                         BatchContingency pair = GpuStrategyComposer.composeStrategyScenario(network, net, pc.getContingency().getId(), strategy, actions,
-                                ziOutages, branches, gens, loads, shifts, hvdcs);
+                                ziOutages, branches, gens, loads, pc.getLoadIdsToLose().keySet(), shifts, hvdcs);
                         if (pair != null) {
                             batch.add(pair);
                         }

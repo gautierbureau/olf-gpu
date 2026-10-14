@@ -62,13 +62,15 @@ final class GpuStrategyComposer {
 
     /** Compile the strategy's actions onto the contingency's deltas into ONE extra batch scenario,
      *  or null when any action is out of stage-1 scope (branch open/RECLOSE, LoadAction,
-     *  GeneratorAction — absolute or relative active power). */
+     *  GeneratorAction — absolute or relative active power). {@code ctgLostLoadIds} are the loads the
+     *  contingency itself loses, on which a load action is a no-op. */
     static BatchContingency composeStrategyScenario(Network network, LfNetwork net, String contingencyId,
                                                     OperatorStrategy strategy, List<Action> currentActions,
                                                     List<LfBranch> ctgZiOutages,
                                                     List<LfBranch> ctgBranches,
                                                     List<LfGenerator> ctgGens,
                                                     List<LoadLoss> ctgLoads,
+                                                    java.util.Set<String> ctgLostLoadIds,
                                                     List<ShuntShift> ctgShifts,
                                                     List<com.powsybl.openloadflow.network.LfHvdc> ctgHvdcs) {
         List<LfBranch> branches = new java.util.ArrayList<>(ctgBranches);
@@ -163,12 +165,18 @@ final class GpuStrategyComposer {
                 if (bus == null) {
                     return null;
                 }
-                double newP = la.getActivePowerValue().orElse(Double.NaN);
-                if (Double.isNaN(newP)) {
-                    return null;
+                if (ctgLostLoadIds.contains(la.getLoadId())) {
+                    continue;                                // OLF's LfLoadAction does nothing on a load the contingency lost
                 }
-                double dP = la.isRelativeValue() ? -newP : load.getP0() - newP;   // LoadLoss.p = load REMOVED (pu)
-                loads.add(new LoadLoss(bus, dP / PerUnit.SB, 0));
+                // LfLoadAction's power shift: the value itself when relative, value - P0 (Q0) when absolute, 0 for
+                // the part the action leaves out. LoadLoss carries the load REMOVED, hence the sign (pu).
+                double dP = la.getActivePowerValue().isPresent()
+                        ? -(la.isRelativeValue() ? la.getActivePowerValue().getAsDouble() : la.getActivePowerValue().getAsDouble() - load.getP0())
+                        : 0.0;
+                double dQ = la.getReactivePowerValue().isPresent()
+                        ? -(la.isRelativeValue() ? la.getReactivePowerValue().getAsDouble() : la.getReactivePowerValue().getAsDouble() - load.getQ0())
+                        : 0.0;
+                loads.add(new LoadLoss(bus, dP / PerUnit.SB, dQ / PerUnit.SB));
             } else if (a instanceof com.powsybl.action.RatioTapChangerTapPositionAction rtca) {
                 var tapChanger = network.getTwoWindingsTransformer(rtca.getTransformerId()) != null
                         ? network.getTwoWindingsTransformer(rtca.getTransformerId()).getRatioTapChanger() : null;
@@ -219,6 +227,9 @@ final class GpuStrategyComposer {
                 LfBus bus = lfGen != null ? lfGen.getBus() : null;    // OLF's own map, never the bus view
                 if (bus == null) {
                     return null;
+                }
+                if (ctgGens.contains(lfGen)) {
+                    continue;                                // OLF's LfGeneratorAction does nothing on a generator the contingency lost
                 }
                 boolean relative = ga.isActivePowerRelativeValue().orElse(false);
                 double deltaP = relative ? ga.getActivePowerValue().getAsDouble()

@@ -106,6 +106,46 @@ class GpuZiTreeReplayTest extends AbstractLoadFlowNetworkFactory {
         assertEquals(base, ids(replay.applyAndRevert(pcs.get("lA"))), "and back in the tree once reverted");
     }
 
+    /** A loop of three couplers z12, z13, z23 between b1, b2 and b3 (numbered by id: z23 closes the loop), and
+     *  two lines to b4. Opening z12 brings z23 into the tree for that contingency; OLF re-elects the tree when z12
+     *  comes back, so the next contingency starts from the base tree again (olf-local-patches 7dd48d92b). Before
+     *  that fix z12 stayed out of OLF's tree for every later contingency, and the replay copied that. */
+    @Test
+    void replayStartsEveryContingencyFromOlfsBaseTree() {
+        Network iidm = Network.create("coupler-loop", "code");
+        Bus b1 = createBus(iidm, "y", "b1");
+        createGenerator(b1, "g1", 2, 1.0);
+        Bus b2 = createBus(iidm, "y", "b2");
+        Bus b3 = createBus(iidm, "y", "b3");
+        Bus b4 = createBus(iidm, "x", "b4");
+        createLoad(b4, "l4", 2, 0.5);
+        createLine(iidm, b1, b2, "z12", 0.0, 0.0);
+        createLine(iidm, b2, b3, "z23", 0.0, 0.0);
+        createLine(iidm, b1, b3, "z13", 0.0, 0.0);
+        createLine(iidm, b3, b4, "l34", 0.1);
+        createLine(iidm, b1, b4, "l14", 0.1);
+        LfNetwork network = Networks.load(iidm, new LfNetworkParameters()).get(0);
+        Map<String, PropagatedContingency> pcs = PropagatedContingency.createList(iidm, List.of(
+                        new Contingency("z12", new BranchContingency("z12")),
+                        new Contingency("l34", new BranchContingency("l34"))),
+                new LfTopoConfig(), new PropagatedContingencyCreationParameters()).stream()
+                .collect(Collectors.toMap(pc -> pc.getContingency().getId(), Function.identity()));
+
+        GpuZiTreeReplay replay = new GpuZiTreeReplay(network);
+        assertEquals(List.of("z23"), ids(replay.nonTree()), "z23 closes the loop");
+        assertEquals(List.of("z12"), ids(replay.applyAndRevert(pcs.get("z12"))), "z12 opened, z23 in the tree");
+        assertEquals(List.of("z23"), ids(replay.applyAndRevert(pcs.get("l34"))), "the next contingency starts from the base tree");
+
+        // and that is OLF's own tree after the same open and close
+        LfBranch z12 = network.getBranchById("z12");
+        z12.setDisabled(true);
+        z12.setDisabled(false);
+        assertEquals(List.of("z23"), network.getBranches().stream()
+                .filter(b -> b.isZeroImpedance(com.powsybl.openloadflow.network.LoadFlowModel.AC)
+                        && !b.isSpanningTreeEdge(com.powsybl.openloadflow.network.LoadFlowModel.AC))
+                .map(LfBranch::getId).toList());
+    }
+
     private static List<String> ids(List<LfBranch> branches) {
         return branches.stream().map(LfBranch::getId).toList();
     }

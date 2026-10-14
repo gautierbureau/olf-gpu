@@ -21,6 +21,7 @@ import org.jgrapht.Graphs;
 import org.jgrapht.alg.connectivity.ConnectivityInspector;
 import org.jgrapht.alg.spanning.KruskalMinimumSpanningTree;
 import org.jgrapht.graph.AsSubgraph;
+import org.jgrapht.graph.AsWeightedGraph;
 import org.jgrapht.graph.Pseudograph;
 
 import java.util.ArrayList;
@@ -35,14 +36,13 @@ import java.util.Set;
 
 /**
  * OLF's AC zero-impedance spanning trees, replayed contingency by contingency on PRIVATE copies of its
- * graphs. OLF's tree is history-dependent: a contingency that disables a tree coupler re-elects the tree
- * of its network, and the revert only re-adds the edge ({@code LfZeroImpedanceNetwork#addBranch}), so the
- * tree OLF solves the k-th contingency on depends on every contingency before it. The device extracted
- * its structure on the BASE tree, so it must be told, per contingency, which couplers are out of OLF's
- * tree at that point.
+ * graphs. A contingency that disables a tree coupler re-elects the tree of its network inside the apply, so
+ * the device, which extracted its structure on the BASE tree, must be told which couplers are out of OLF's
+ * tree for that contingency. OLF elects by Kruskal weighted by branch number and re-elects when a coupler
+ * comes back (olf-local-patches 7dd48d92b): the tree a contingency starts from is the base one, whatever ran
+ * before. Before that fix the tree depended on the contingencies run before it, and this replay followed it.
  *
- * <p>The replay runs the SAME jgrapht operations OLF runs, in the same order, so Kruskal sees the same
- * edge iteration order and breaks its (all-equal-weight) ties identically:
+ * <p>The replay runs the SAME jgrapht operations OLF runs, in the same order:
  * {@code removeBranchAndTryToSplit} on every BOTH_SIDES-disabled zero-impedance branch of the
  * contingency's {@link LfContingency} in its own order, then the {@code NetworkState} restore in branch
  * number order ({@code addBranch} within a network, {@code addBranchAndMerge} across two). Nothing on the
@@ -112,7 +112,8 @@ final class GpuZiTreeReplay {
             Graph<LfBus, LfBranch> g1 = netOf.get(b.getBus1());
             Graph<LfBus, LfBranch> g2 = netOf.get(b.getBus2());
             if (g1 == g2) {
-                g1.addEdge(b.getBus1(), b.getBus2(), b);     // addBranch: the tree is NOT re-elected
+                g1.addEdge(b.getBus1(), b.getBus2(), b);     // addBranch: the tree is re-elected
+                elect(g1);
             } else {
                 Graph<LfBus, LfBranch> merged = new Pseudograph<>(LfBranch.class);
                 Graphs.addGraph(merged, g1);
@@ -151,7 +152,10 @@ final class GpuZiTreeReplay {
     }
 
     private void elect(Graph<LfBus, LfBranch> graph) {
-        Set<LfBranch> tree = new KruskalMinimumSpanningTree<>(graph).getSpanningTree().getEdges();
+        // weighted by branch number like LfZeroImpedanceNetwork#updateSpanningTree: the tree is a function of
+        // the enabled couplers alone, whatever order the graph received them in
+        Set<LfBranch> tree = new KruskalMinimumSpanningTree<>(new AsWeightedGraph<>(graph, b -> (double) b.getNum(), true, false))
+                .getSpanningTree().getEdges();
         for (LfBranch e : graph.edgeSet()) {
             if (tree.contains(e)) {
                 inTree.add(e);

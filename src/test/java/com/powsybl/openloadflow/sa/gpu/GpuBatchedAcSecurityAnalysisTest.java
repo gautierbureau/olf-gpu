@@ -6148,6 +6148,34 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
                 "every contingency must batch (or the test proves nothing)");
     }
 
+    /** A merged control whose group is lost in the BASE (both sections pinned at MAX_Q under a heavy local reactive
+     *  load) and pinned at the other limit by the contingency (the load lost: both absorb down to MIN_Q). A pair starts
+     *  with the pilot's row as the reactive balance the base activation laid out, at the BASE pin; OLF continues the
+     *  contingency's (rte6515 BUS-6230_BBS, VL-6229_0: MAX_Q 0.0 in the base, MIN_Q -0.06 after it, the pair at 0.0). */
+    @org.junit.jupiter.api.Test
+    void strategiesOnABaseLostMergedControlMatchCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = splitGroupNetwork(2);
+        for (String g : List.of("g0", "g1")) {
+            network.getGenerator(g).setTargetV(398);
+            network.getGenerator(g).newMinMaxReactiveLimits().setMinQ(-5).setMaxQ(60).add();
+        }
+        network.getLoad("ld0").setQ0(200);
+        // a listed section loss keeps the coupler retained: two sections under one merged control, the pilot one of
+        // its own controllers
+        List<Contingency> ctgs = List.of(new Contingency("bus-1", new com.powsybl.contingency.BusbarSectionContingency("bbs1")),
+                new Contingency("ld0", new com.powsybl.contingency.LoadContingency("ld0")));
+        List<com.powsybl.action.Action> actions = List.of(
+                new com.powsybl.action.LoadActionBuilder().withId("more4").withLoadId("ld4").withRelativeValue(true)
+                        .withActivePowerValue(20).build(),
+                new com.powsybl.action.LoadActionBuilder().withId("same4").withLoadId("ld4").withRelativeValue(true)
+                        .withActivePowerValue(0).build());
+        assertStrategyMatchesCpu(network, ctgs, strategiesOf("ld0", "more4", "same4"), actions, 4, true,
+                p -> p.setSlackBusSelectionMode(com.powsybl.openloadflow.network.SlackBusSelectionMode.NAME)
+                        .setSlackBusesIds(List.of("vl0_b")));
+    }
+
     /** splitGroupNetwork(2) with a reactive-capability curve on g0 (MAX_Q 60 -> 62 MVAr over 0..500 MW, so a
      *  slack move of a few hundred kW drifts the limit by ~1e-5 pu) and a 60 MVAr ceiling on g1. */
     private static Network pilotSelfCurveNetwork() {

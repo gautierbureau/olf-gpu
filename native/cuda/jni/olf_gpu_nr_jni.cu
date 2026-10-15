@@ -6234,7 +6234,8 @@ __global__ void updatePilotVeqBatch(int nQr, int nScenarios, int n,
                                     int nDqMembers, const int* dqMemberQrGroup, const int* dqMemberRlEntry,
                                     const char* rlIslandedMask,
                                 const char* dqSub, const int* qrMemberStart, double tol,
-                                const char* rlGenLost, const int* qrDepBase, const int* relocOwn) {
+                                const char* rlGenLost, const int* qrDepBase, const int* relocOwn,
+                                const double* pinTargetIn) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nQr * nScenarios) return;
     int g = tid % nQr;
@@ -6271,6 +6272,7 @@ __global__ void updatePilotVeqBatch(int nQr, int nScenarios, int n,
     int pe = psEntry != nullptr ? psEntry[g] : -1;
     char plt = pe >= 0 && limitType != nullptr ? limitType[(size_t) s * nrl + pe] : 0;
     double flipTarget = pilotQ[(size_t) s * nQr + g];
+    bool continuedFlip = false;
     if (pe >= 0 && plt != 0) {
         size_t li = cvStride ? (size_t) s * nrl + pe : (size_t) pe;
         double lim = (plt == 3 || plt == 4) && rlInitTgtQ != nullptr ? rlInitTgtQ[pe]
@@ -6285,6 +6287,15 @@ __global__ void updatePilotVeqBatch(int nQr, int nScenarios, int n,
             lim = 0.0;
         }
         flipTarget = lim - rlLoadQ[li];
+        // A pilot whose group the PREVIOUS solve had already flipped (a strategy pair continuing its contingency):
+        // OLF restores that solve's frozen target Q and re-freezes it only past the reactive power mismatch. The
+        // seed launch reads the base limits, which a curve moved since (rte6515 BUS-6066_BBS_1, VL-6231_0: flipped
+        // at 0.576013 against the parent's 0.574331, then re-frozen at the pair's limit - 3.8e-5 kV on every
+        // strategy, even one changing nothing).
+        if (pinTargetIn != nullptr && plt >= 1 && plt <= 4 && !isnan(pinTargetIn[(size_t) s * nrl + pe])) {
+            flipTarget = pinTargetIn[(size_t) s * nrl + pe];
+            continuedFlip = true;
+        }
     }
     // An ISLANDED pilot has no equation at all on the CPU: OLF removes the bus. Its row here is
     // frozen to a flat voltage identity, and every member row is frozen to identity too, so the
@@ -6379,6 +6390,12 @@ __global__ void updatePilotVeqBatch(int nQr, int nScenarios, int n,
         // VL-6003_0 kept 0.7477 pu against OLF's 0.0 through the first passes, and the first slack read was
         // 0.049 MW off (238.816 MW distributed against OLF's 238.865).
         if (plt == RL_LIMIT_FROZEN && rlGenLost != nullptr && rlGenLost[(size_t) s * nrl + pe]) {
+            target[pi] = flipTarget;
+        }
+        // ...and a group the previous solve had flipped at another pin (a strategy pair continuing its
+        // contingency) holds THAT target, not the base one the activation laid out (rte6515 BUS-6230_BBS: VL-6229_0
+        // pinned at MAX_Q 0.0 in the base, at MIN_Q -0.06 after the contingency; the pair kept 0.0, 8.8e-5 kV)
+        if (continuedFlip) {
             target[pi] = flipTarget;
         }
     } else if (!lost && pe < 0 && mode[pi] == 1 && qrPilotRlEntry != nullptr && qrPilotRlEntry[g] >= 0) {
@@ -7951,12 +7968,21 @@ __global__ void seedRlModeFromState(int nrl, int nScenarios, int n, const int* r
 // an unpinned entry): what a continued solve (a strategy pair) restores, as OLF restores the parent's target Q.
 __global__ void exportRlPinTargets(int nrl, int nScenarios, int n, const int* rlVrow, const int* rlQrow,
                                    const char* limitType, const int* mode, const double* target, const char* rlIslanded,
-                                   double* out) {
+                                   int nQr, const int* psEntry, const int* qrPtr, const int* qrRows, const char* veqOff,
+                                   const int* qrDepBase, double* out) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nrl * nScenarios) return;
     int i = tid % nrl;
     int s = tid / nrl;
     char lt = limitType[(size_t) s * nrl + i];
+    // an enrolled pilot's pin is its group's flip: the flipped row's target when the group is flipped (what a
+    // continued solve's seed flip restores), nothing otherwise (its balance rides a carrier, never its own rows)
+    for (int g = 0; psEntry != nullptr && g < nQr; g++) {
+        if (psEntry[g] != i) continue;
+        bool flipped = lt != 0 && veqOff != nullptr && veqOff[(size_t) s * nQr + g] && (qrDepBase == nullptr || qrDepBase[g] < 0);
+        out[tid] = flipped ? target[(size_t) s * n + qrRows[qrPtr[g]]] : NAN;
+        return;
+    }
     // an islanded controller's row holds its bus's frozen value, not a Q: a pair that brings the bus back seeds the
     // pin from its limit, the target the bus kept while it was out
     if (lt == 0 || (rlIslanded != nullptr && rlIslanded[(size_t) s * nrl + i])) {
@@ -11125,7 +11151,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     // measured on rte6515 BUS-6112_BBS_2: row 12834 converged at target 0 through outer 32, then the RL phase
     // re-stamped -0.444 and the solve had to catch up, one pass behind OLF. The re-stamp branch in the kernel
     // keeps the value current once the curve limits exist, so the static value is a correct starting point.
-    auto launchPilotVeqInner = [&](bool staticLimits = false) {
+    auto launchPilotVeqInner = [&](bool staticLimits = false, bool continuedPins = false) {
         const bool useDyn = useDynRlLimits && !staticLimits;
         if (ctx->hasDqQrGroups && ctx->st->nQr > 0) {
             updatePilotVeqBatch<<<grid(ctx->st->nQr * nS), BLOCK, 0, ctx->stream>>>(
@@ -11152,7 +11178,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                     ctx->hasDqSub ? ctx->dDqSub.as<char>() : nullptr, ctx->hasDqSub ? ctx->dQrMemberStart.as<int>() : nullptr,
                     REACTIVE_LIMIT_TOL, ctx->nRlGenLost > 0 ? ctx->dRlGenLost.as<char>() : nullptr,
                     ctx->st->dQrDepBase.p ? ctx->st->dQrDepBase.as<int>() : nullptr,
-                    ctx->st->dRelocOwn.p ? ctx->st->dRelocOwn.as<int>() : nullptr);
+                    ctx->st->dRelocOwn.p ? ctx->st->dRelocOwn.as<int>() : nullptr,
+                    continuedPins && ctx->hasRlPinTgtIn ? ctx->dRlPinTgtIn.as<double>() : nullptr);
         }
     };
     auto launchDistrQTargetsInner = [&]() {
@@ -11418,7 +11445,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                     ctx->dRlLoadQDyn.as<double>(), cvProbeEntry, cvProbeSlotByCtg ? ctx->loopTraceSlot : cvProbeSlot);
             launchForcedTargetQLimits(ctx, nS, n);
         }
-        launchPilotVeqInner(true);                           // seed: with the limits above
+        launchPilotVeqInner(true, true);                     // seed: base limits, or the previous solve's flip
         launchDistrQTargetsInner();
         if (ctx->nds > 0) {                                  // slack-retained share: 0 until frozen at the first pass
             CUDA_CHECK(cudaMemsetAsync(ctx->dDsRetain.p, 0, nS * sizeof(double), ctx->stream));
@@ -16074,7 +16101,12 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_readBatc
     out.alloc(static_cast<size_t>(ctx->nrl) * nS * sizeof(double));
     exportRlPinTargets<<<grid(ctx->nrl * nS), BLOCK, 0, ctx->stream>>>(ctx->nrl, nS, n, ctx->dRlVrow.as<int>(),
             ctx->dRlQrow.p ? ctx->dRlQrow.as<int>() : nullptr, ctx->dRlLimitType.as<char>(), ctx->dMode.as<int>(),
-            ctx->dTarget.as<double>(), ctx->nRlIslanded > 0 ? ctx->dRlIslanded.as<char>() : nullptr, out.as<double>());
+            ctx->dTarget.as<double>(), ctx->nRlIslanded > 0 ? ctx->dRlIslanded.as<char>() : nullptr,
+            ctx->hasDqQrGroups ? ctx->st->nQr : 0, psEntryPtr(ctx),
+            ctx->hasDqQrGroups && ctx->st->nQr > 0 ? ctx->st->dQrPtr.as<int>() : nullptr,
+            ctx->hasDqQrGroups && ctx->st->nQr > 0 ? ctx->st->dQrRows.as<int>() : nullptr,
+            ctx->hasDqQrGroups && ctx->st->nQr > 0 ? ctx->dQrVeqOff.as<char>() : nullptr,
+            ctx->st->dQrDepBase.p ? ctx->st->dQrDepBase.as<int>() : nullptr, out.as<double>());
     std::vector<double> host(static_cast<size_t>(ctx->nrl) * nS);
     CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
     CUDA_CHECK(cudaMemcpy(host.data(), out.p, host.size() * sizeof(double), cudaMemcpyDeviceToHost));

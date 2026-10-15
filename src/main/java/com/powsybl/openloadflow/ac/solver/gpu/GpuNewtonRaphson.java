@@ -338,13 +338,56 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                 LfBus bus = data.dsBusNum() != null && i < data.dsBusNum().length ? network.getBus(data.dsBusNum()[i]) : null;
                 distributed += deviceTargets[row] - data.dsBaseTargetP()[i];
                 if (bus != null) {
-                    setAnchoredShare(bus, deviceTargets[row] - data.dsBaseTargetP()[i], dsParams);
+                    if (dsParams.isLoadBased()) {
+                        moveLoads(bus, deviceTargets[row] - data.dsBaseTargetP()[i]);
+                    } else {
+                        setAnchoredShare(bus, deviceTargets[row] - data.dsBaseTargetP()[i], dsParams);
+                    }
                 }
             }
         }
         lastDistributedActivePower = distributed;
         if (slackBus != null && retain[0] != 0 && !slackInPack) {
-            setAnchoredShare(slackBus, retain[0], dsParams);
+            if (dsParams.isLoadBased()) {
+                moveLoads(slackBus, retain[0]);
+            } else {
+                setAnchoredShare(slackBus, retain[0], dsParams);
+            }
+        }
+    }
+
+    /** Each load's target P when the device's distribution anchor was extracted (load-based balance types). */
+    private java.util.Map<com.powsybl.openloadflow.network.LfLoad, Double> loadAnchorTargetP = java.util.Map.of();
+
+    private void captureLoadAnchors() {
+        java.util.Map<com.powsybl.openloadflow.network.LfLoad, Double> anchors = new java.util.IdentityHashMap<>();
+        for (LfBus bus : network.getBuses()) {
+            for (com.powsybl.openloadflow.network.LfLoad load : bus.getLoads()) {
+                anchors.put(load, load.getTargetP());
+            }
+        }
+        loadAnchorTargetP = anchors;
+    }
+
+    /** A load-based distribution's bus-level amount on the bus's loads, as OLF's LoadActivePowerDistributionStep
+     *  moves them: from where they stood when the distribution started (the step is incremental, it has no initial
+     *  target to go back to), each in proportion to its variable active power. A bus injection rising by
+     *  {@code delta} is its loads consuming {@code delta} less. Moving only generators, as for the generation-based
+     *  types, left OLF's load targets where they were, and OLF measured the converged state against them: an ieee14
+     *  base whose slack bus carries a participating load came back MAX_ITERATION_REACHED. */
+    private void moveLoads(LfBus bus, double delta) {
+        double factorSum = 0;
+        for (com.powsybl.openloadflow.network.LfLoad load : bus.getLoads()) {
+            factorSum += load.getAbsVariableTargetP();
+        }
+        if (factorSum <= 0) {
+            return;
+        }
+        for (com.powsybl.openloadflow.network.LfLoad load : bus.getLoads()) {
+            double f = load.getAbsVariableTargetP();
+            if (f != 0) {
+                load.setTargetP(loadAnchorTargetP.getOrDefault(load, load.getTargetP()) - delta * f / factorSum);
+            }
         }
     }
 
@@ -867,6 +910,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                     // OLF's forced-PV election keys are part of creating one.
                     GpuBatchOuterLoopTables.installRlElection(context.handle.get(), data);
                     cachedData = data;
+                    captureLoadAnchors();
                     rebuilt = true;
                     criteriaDirty = true;
                     tablesDirty = true;
@@ -878,6 +922,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                     // extraction so content matching never aliases it under the old one
                     GpuAcStructures.rebind(cachedData, data);
                     cachedData = data;
+                    captureLoadAnchors();
                     // The election keys are per-extraction (nominal V, live target P, id rank), so a
                     // value refresh re-installs them too — a driver run would, and a non-driver run
                     // drives the RL phase all the same.

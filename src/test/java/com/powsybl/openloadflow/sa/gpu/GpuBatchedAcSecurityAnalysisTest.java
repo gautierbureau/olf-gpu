@@ -6649,6 +6649,8 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
             if (System.getenv("OLF_GPU_DBG_CENSUS") != null) {
                 System.err.println("CENSUS " + com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.snapshot());
             }
+            assertEquals(cpu.getPreContingencyResult().getStatus(), gpu.getPreContingencyResult().getStatus(),
+                    "pre-contingency status");
             if (requireEngage) {
                 assertTrue(GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get() > 0,
                         "the batch must ENGAGE (fallen-back run proves nothing); census="
@@ -7766,6 +7768,26 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         assertStrategyMatchesCpu(network, List.of(new Contingency("L14-15-1", new BranchContingency("L14-15-1"))),
                 strategiesOf("L14-15-1", "up2", "close"), actions, 3, true,
                 p -> p.setStateVectorScalingMode(com.powsybl.openloadflow.ac.solver.StateVectorScalingMode.MAX_VOLTAGE_CHANGE));
+    }
+
+    /** Load-based distribution whose BASE load flow distributes, with a load on the slack bus: the device's
+     *  distribution is the loads' (OLF's LoadActivePowerDistributionStep), so it is written back onto the loads, the
+     *  slack's own share onto the slack bus's. Moving only generators left OLF's load targets where they were, and OLF
+     *  measured the device's converged base against them: MAX_ITERATION_REACHED. */
+    @Test
+    void deviceDsBalanceTypeLoadDistributingInTheBaseMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = IeeeCdfNetworkFactory.create14();
+        network.getVoltageLevel("VL1").newLoad().setId("B1-L").setBus("B1").setConnectableBus("B1").setP0(30).setQ0(10).add();
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setDistributedSlack(true).setUseReactiveLimits(true)
+                .setBalanceType(com.powsybl.loadflow.LoadFlowParameters.BalanceType.PROPORTIONAL_TO_LOAD);
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
+                .setSlackBusSelectionMode(com.powsybl.openloadflow.network.SlackBusSelectionMode.NAME)
+                .setSlackBusesIds(List.of("VL1_0"));
+        assertGpuMatchesCpu(network, List.of(new Contingency("L1-2-1", new BranchContingency("L1-2-1")),
+                new Contingency("L2-3-1", new BranchContingency("L2-3-1"))), 1e-12, lfp);
     }
 
     /** A contingency with a device state can still be solved on OLF's own path: when one of its strategies is not

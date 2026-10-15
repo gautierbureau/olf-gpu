@@ -2037,6 +2037,14 @@ final class GpuBatchChunkSolver {
                         }
                         targetOverrideIndex = overrides.indexArray();
                         targetOverrideValue = overrides.valueArray();
+                        // OLF_GPU_TARGET_ROW once more, AFTER the pair's re-anchoring composed onto the overrides: the
+                        // print above runs before it, and showed a frozen row's clean 0 where the device got -8.728
+                        for (String probeSpec : tgtRow == null ? new String[0] : tgtRow.split(",")) {
+                            int probe = Integer.parseInt(probeSpec.trim().split("-")[0]);
+                            System.err.print("PAIR-COMPOSED ");
+                            emitTargetRow(probe, n, realCount, baseTargets, baseRowMode, rowModePerScenario,
+                                    targetOverrideIndex, targetOverrideValue);
+                        }
                     }
                     // HVDC AC-emulation: snapshot the pre-freeze override lists (the round rebuild base),
                     // then OLF's FreezingHvdcACEmulation freezes every live hvdc at its scenario's
@@ -2905,6 +2913,10 @@ final class GpuBatchChunkSolver {
                         double[] row = chunkResults[s];
                         if (rejectAfterSolve != null && rejectAfterSolve[s]) {
                             row[n + 2] = GpuBatchStatus.STATUS_REJECTED;   // the census names the reason where it is decided
+                        } else if (pairPhase && (int) row[n + 2] != GpuBatchStatus.STATUS_CONVERGED) {
+                            // a pair the device solved and did not converge: a device failure wherever OLF converges it
+                            com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.pairDeviceFailed(
+                                    contingencies.get(group.get(chunkStart + s)).contingencyId());
                         }
                         if (config.stateSink() != null && (int) row[n + 2] == GpuBatchStatus.STATUS_CONVERGED) {
                             // the state leaves the heap now, as its chunk completes; the result keeps the tail

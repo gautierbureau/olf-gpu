@@ -52,6 +52,8 @@ public final class GpuBatchScopeCensus {
      *  failed"). The split "refused at plan time" vs "tried on the device and failed" needs the IDS. */
     private static final java.util.Set<String> PLAN_REFUSED_IDS = ConcurrentHashMap.newKeySet();
     private static final Map<String, String> PLAN_REFUSAL_TAG = new ConcurrentHashMap<>();
+    /** Strategy pairs the device SOLVED and did not converge (not the ones it hands back by design). */
+    private static final java.util.Set<String> PAIR_DEVICE_FAILED_IDS = ConcurrentHashMap.newKeySet();
 
     private GpuBatchScopeCensus() {
     }
@@ -70,6 +72,16 @@ public final class GpuBatchScopeCensus {
     public static void planRefused(String contingencyId, String tag) {
         PLAN_REFUSED_IDS.add(contingencyId);
         PLAN_REFUSAL_TAG.putIfAbsent(contingencyId, tag);
+    }
+
+    /** Name a strategy pair the device solved without converging. */
+    public static void pairDeviceFailed(String pairId) {
+        PAIR_DEVICE_FAILED_IDS.add(pairId);
+    }
+
+    /** The strategy pairs the device solved without converging since the last {@link #reset()}. */
+    public static java.util.Set<String> pairDeviceFailedIds() {
+        return java.util.Collections.unmodifiableSet(PAIR_DEVICE_FAILED_IDS);
     }
 
     /** The ids the plan refused since the last {@link #reset()}. */
@@ -94,5 +106,6 @@ public final class GpuBatchScopeCensus {
         COUNTS.clear();
         PLAN_REFUSED_IDS.clear();
         PLAN_REFUSAL_TAG.clear();
+        PAIR_DEVICE_FAILED_IDS.clear();
     }
 }

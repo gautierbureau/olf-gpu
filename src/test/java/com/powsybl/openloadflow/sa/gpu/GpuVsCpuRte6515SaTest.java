@@ -989,6 +989,12 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
         boolean cpuWarmRun = "1".equals(System.getenv("OLF_GPU_SA_CPU_WARM"));
         Network networkCpuWarm = cpuWarmRun ? Network.read(CASE_FILE) : null;
 
+        // OLF_GPU_SA_STRATEGIES=1: operator strategies on every k-th contingency (OLF_GPU_SA_STRATEGY_EVERY, default 20),
+        // one per action kind the device composes, built from the network's own elements (syntheticStrategies)
+        if ("1".equals(System.getenv("OLF_GPU_SA_STRATEGIES"))) {
+            syntheticStrategies(network, contingencies,
+                    Integer.parseInt(System.getenv().getOrDefault("OLF_GPU_SA_STRATEGY_EVERY", "20")));
+        }
         armMark("cpu start");
         long cpuT0 = System.nanoTime();
         // With a single contingency under the lens, monitor every voltage level: whether the two arms
@@ -1066,7 +1072,9 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
         String cpuArmDir = System.getenv("OLF_GPU_SA_CPU_ARM_DIR");
         String cpuArmMode = System.getenv().getOrDefault("OLF_GPU_SA_CPU_ARM_MODE", "");
         BusVoltageSpill cpuSpill = null;
-        BusVoltageSpill gpuSpill = busDiff ? new BusVoltageSpill("gpu") : null;
+        // OLF_GPU_SA_NO_SPILL=1: keep every bus result in the result objects (a small list, read back afterwards)
+        boolean spill = busDiff && !"1".equals(System.getenv("OLF_GPU_SA_NO_SPILL"));
+        BusVoltageSpill gpuSpill = spill ? new BusVoltageSpill("gpu") : null;
         SecurityAnalysisResult cpu;
         long cpuMs;
         if ("load".equals(cpuArmMode)) {
@@ -1078,12 +1086,12 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
             cpuMs = Long.parseLong(java.nio.file.Files.readString(dir.resolve("cpu-ms.txt")).trim());
             System.out.printf("  CPU arm loaded from %s (%d post-contingency results)%n", dir, cpu.getPostContingencyResults().size());
         } else {
-            cpuSpill = busDiff ? new BusVoltageSpill("cpu") : null;
+            cpuSpill = spill ? new BusVoltageSpill("cpu") : null;
             // OLF_GPU_SA_GPU_ONLY=1: debug lever - skip the CPU arm (run it on an EMPTY contingency
             // list) so the GPU arm's own behaviour on a large scope can be traced in minutes.
             // Every comparison below is then meaningless; only the GPU arm's lines are.
             List<Contingency> cpuCtgs = "1".equals(System.getenv("OLF_GPU_SA_GPU_ONLY")) ? List.of() : contingencies;
-            SecurityAnalysisResult raw = runSecurityAnalysis(network, cpuCtgs, monitors, sap);
+            SecurityAnalysisResult raw = runSa(network, cpuCtgs, monitors, sap);
             cpuMs = (System.nanoTime() - cpuT0) / 1_000_000;
             cpu = cpuSpill != null ? cpuSpill.spill(raw) : raw;
             raw = null;                                          // the block alone did not free it: 6876 x 6877
@@ -1109,7 +1117,7 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
         long cpuWarmMs = -1;
         if (cpuWarmRun && !"load".equals(cpuArmMode) && networkCpuWarm != null) {
             long cpuT1 = System.nanoTime();
-            SecurityAnalysisResult cpuWarm = runSecurityAnalysis(networkCpuWarm, contingencies, monitors, sap);
+            SecurityAnalysisResult cpuWarm = runSa(networkCpuWarm, contingencies, monitors, sap);
             cpuWarmMs = (System.nanoTime() - cpuT1) / 1_000_000;
             System.out.printf("  CPU warm run: violations=%d statuses=%s%n", violationCount(cpuWarm), statusCounts(cpuWarm));
         }
@@ -1165,7 +1173,7 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
             armMark("gpu cold start");
             long g0 = System.nanoTime();
             {
-                SecurityAnalysisResult raw = runSecurityAnalysis(networkGpuCold, contingencies, monitors, sapGpu);
+                SecurityAnalysisResult raw = runSa(networkGpuCold, contingencies, monitors, sapGpu);
                 gpuColdMs = (System.nanoTime() - g0) / 1_000_000;
                 gpuCold = gpuSpill != null ? gpuSpill.spill(raw) : raw;
                 raw = null;
@@ -1206,7 +1214,7 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
                 GpuBatchScopeCensus.reset();
                 long g1 = System.nanoTime();
                 {
-                    SecurityAnalysisResult raw = runSecurityAnalysis(networkGpuWarm, contingencies, monitors, sapGpu);
+                    SecurityAnalysisResult raw = runSa(networkGpuWarm, contingencies, monitors, sapGpu);
                     gpuWarmMs = (System.nanoTime() - g1) / 1_000_000;
                     gpuWarm = busDiff ? BusVoltageSpill.dropPostBusResults(raw) : raw;   // only its BASE is compared
                     raw = null;
@@ -1445,7 +1453,7 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
                 }
             }
         }
-        if (busDiff) {
+        if (busDiff && spill) {
             for (var cp : cpu.getPostContingencyResults()) {
                 var gp = gpuCold.getPostContingencyResults().stream()
                         .filter(x -> x.getContingency().getId().equals(cp.getContingency().getId()))
@@ -1585,9 +1593,13 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
             }
         }
 
+        List<String> strategyMismatches = compareStrategies(cpu, gpuCold);
+
         // ASSERTIONS
         // after every per-contingency diff line, so a failing run still says whether the STATES agree
-        reportTriple();                                      // before any assertion: a failing run is exactly when the joined table is wanted
+        reportTriple();
+        assertTrue(strategyMismatches.isEmpty(), "operator strategy results must match the CPU: " + strategyMismatches.size()
+                + " differ " + strategyMismatches.subList(0, Math.min(20, strategyMismatches.size())));                                      // before any assertion: a failing run is exactly when the joined table is wanted
         assertTrue(worstDistributed < 1e-3, "distributed active power must match the CPU: worst " + worstDistributed + " MW");
         assertEquals(statusCounts(cpu), statusCounts(gpuCold),
                 "post-contingency status counts must match CPU");
@@ -1622,6 +1634,266 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
         assertTrue(violDiffPct < 0.01,
                 "violation diff " + violDiff + " over " + differingCtg + " contingencies ("
                         + violDiffPct + "%) exceeds 0.01% threshold");
+    }
+
+    private List<com.powsybl.contingency.strategy.OperatorStrategy> strategies = List.of();
+    private List<com.powsybl.action.Action> actions = List.of();
+
+    private SecurityAnalysisResult runSa(Network n, List<Contingency> ctgs, List<com.powsybl.security.monitor.StateMonitor> monitors,
+                                         SecurityAnalysisParameters sap) {
+        return strategies.isEmpty() ? runSecurityAnalysis(n, ctgs, monitors, sap)
+                : runSecurityAnalysis(n, ctgs, monitors, sap, strategies, actions, com.powsybl.commons.report.ReportNode.NO_OP);
+    }
+
+    /**
+     * Operator strategies on every {@code every}-th contingency, one per action kind the device composes, on elements
+     * picked deterministically from the network (by id order): a generator moved relative and absolute, a load moved,
+     * a line opened, the contingency's own branch reclosed, a shunt section added, a phase tap moved, an AC-emulation
+     * HVDC switched to set points, and a two-stage strategy (always + any violation). Prints which elements it took.
+     */
+    private void syntheticStrategies(Network network, List<Contingency> contingencies, int every) {
+        List<com.powsybl.action.Action> acts = new ArrayList<>();
+        List<String> common = new ArrayList<>();
+        java.util.function.Predicate<com.powsybl.iidm.network.Terminal> live = t -> t.isConnected()
+                && t.getBusView().getBus() != null && t.getBusView().getBus().isInMainSynchronousComponent();
+        network.getGeneratorStream()
+                .filter(g -> live.test(g.getTerminal()) && g.getMaxP() < 5000 && g.getTargetP() > 50
+                        && g.getTargetP() < g.getMaxP() - 50 && g.getTargetP() > g.getMinP() + 50)
+                .max(java.util.Comparator.comparingDouble(com.powsybl.iidm.network.Generator::getMaxP)
+                        .thenComparing(com.powsybl.iidm.network.Generator::getId))
+                .ifPresent(g -> {
+                    acts.add(new com.powsybl.action.GeneratorActionBuilder().withId("genUp").withGeneratorId(g.getId())
+                            .withActivePowerRelativeValue(true).withActivePowerValue(20).build());
+                    acts.add(new com.powsybl.action.GeneratorActionBuilder().withId("genSet").withGeneratorId(g.getId())
+                            .withActivePowerRelativeValue(false).withActivePowerValue(g.getTargetP() - 20).build());
+                    common.add("genUp");
+                    common.add("genSet");
+                    if ("1".equals(System.getenv("OLF_GPU_SA_STRATEGY_NOOP"))) {   // the pair re-solves its parent
+                        acts.add(new com.powsybl.action.GeneratorActionBuilder().withId("genZero").withGeneratorId(g.getId())
+                                .withActivePowerRelativeValue(true).withActivePowerValue(0).build());
+                        common.add("genZero");
+                    }
+                    System.out.printf("  STRATEGY generator %s%n", g.getId());
+                });
+        network.getLoadStream().filter(l -> live.test(l.getTerminal()) && l.getP0() > 50)
+                .max(java.util.Comparator.comparingDouble(com.powsybl.iidm.network.Load::getP0)
+                        .thenComparing(com.powsybl.iidm.network.Load::getId))
+                .ifPresent(l -> {
+                    acts.add(new com.powsybl.action.LoadActionBuilder().withId("loadDown").withLoadId(l.getId())
+                            .withRelativeValue(true).withActivePowerValue(-20).build());
+                    common.add("loadDown");
+                    System.out.printf("  STRATEGY load %s%n", l.getId());
+                });
+        List<com.powsybl.iidm.network.Line> lines = network.getLineStream()
+                .filter(l -> live.test(l.getTerminal1()) && live.test(l.getTerminal2()))
+                .sorted(java.util.Comparator.comparing(com.powsybl.iidm.network.Line::getId)).toList();
+        if (!lines.isEmpty()) {
+            String lineId = lines.get(lines.size() / 2).getId();
+            acts.add(new com.powsybl.action.TerminalsConnectionActionBuilder().withId("openLine")
+                    .withNetworkElementId(lineId).withOpen(true).build());
+            common.add("openLine");
+            System.out.printf("  STRATEGY line %s%n", lineId);
+        }
+        network.getShuntCompensatorStream()
+                .filter(sc -> live.test(sc.getTerminal()) && sc.getModelType() == com.powsybl.iidm.network.ShuntCompensatorModelType.LINEAR
+                        && sc.getSectionCount() < sc.getMaximumSectionCount())
+                .min(java.util.Comparator.comparing(com.powsybl.iidm.network.ShuntCompensator::getId))
+                .ifPresent(sc -> {
+                    acts.add(new com.powsybl.action.ShuntCompensatorPositionActionBuilder().withId("shuntUp")
+                            .withShuntCompensatorId(sc.getId()).withSectionCount(sc.getSectionCount() + 1).build());
+                    common.add("shuntUp");
+                    System.out.printf("  STRATEGY shunt %s%n", sc.getId());
+                });
+        network.getTwoWindingsTransformerStream()
+                .filter(t -> live.test(t.getTerminal1()) && live.test(t.getTerminal2()) && t.hasPhaseTapChanger()
+                        && t.getPhaseTapChanger().getTapPosition() < t.getPhaseTapChanger().getHighTapPosition())
+                .min(java.util.Comparator.comparing(com.powsybl.iidm.network.TwoWindingsTransformer::getId))
+                .ifPresent(t -> {
+                    acts.add(new com.powsybl.action.PhaseTapChangerTapPositionActionBuilder().withId("pstUp")
+                            .withTransformerId(t.getId()).withRelativeValue(true).withTapPosition(1).build());
+                    common.add("pstUp");
+                    System.out.printf("  STRATEGY phase shifter %s%n", t.getId());
+                });
+        network.getHvdcLineStream()
+                .filter(h -> live.test(h.getConverterStation1().getTerminal()) && live.test(h.getConverterStation2().getTerminal())
+                        && h.getExtension(com.powsybl.iidm.network.extensions.HvdcAngleDroopActivePowerControl.class) != null
+                        && h.getExtension(com.powsybl.iidm.network.extensions.HvdcAngleDroopActivePowerControl.class).isEnabled())
+                .min(java.util.Comparator.comparing(com.powsybl.iidm.network.HvdcLine::getId))
+                .ifPresent(h -> {
+                    acts.add(new com.powsybl.action.HvdcActionBuilder().withId("hvdcOff").withHvdcId(h.getId())
+                            .withAcEmulationEnabled(false).build());
+                    common.add("hvdcOff");
+                    System.out.printf("  STRATEGY AC-emulation HVDC %s%n", h.getId());
+                });
+        // OLF_GPU_SA_STRATEGY_KINDS=<kind>[,<kind>]: only these kinds (genUp, genSet, genZero, loadDown, openLine, shuntUp,
+        // pstUp, hvdcOff, close, twoStage)
+        String kindsEnv = System.getenv("OLF_GPU_SA_STRATEGY_KINDS");
+        java.util.Set<String> kinds = kindsEnv == null ? null : java.util.Set.of(kindsEnv.split(","));
+        if (kinds != null) {
+            common.retainAll(kinds);
+        }
+        List<com.powsybl.contingency.strategy.OperatorStrategy> strats = new ArrayList<>();
+        int chosen = 0;
+        // OLF_GPU_SA_STRATEGY_ONLY=<id>[,<id>]: strategies on these contingencies only (a bisection lever)
+        String onlyEnv = System.getenv("OLF_GPU_SA_STRATEGY_ONLY");
+        java.util.Set<String> onlyParents = onlyEnv == null ? null : java.util.Set.of(onlyEnv.split(","));
+        for (int i = 0; i < contingencies.size(); i += onlyParents != null ? 1 : every) {
+            Contingency c = contingencies.get(i);
+            if (c.getId().startsWith("KEEP_TOPO") || onlyParents != null && !onlyParents.contains(c.getId())) {
+                continue;                                    // the harness's topology placeholder, not a real outage
+            }
+            chosen++;
+            var ctx = com.powsybl.contingency.ContingencyContext.specificContingency(c.getId());
+            for (String a : common) {
+                strats.add(new com.powsybl.contingency.strategy.OperatorStrategy("s-" + a + "-" + c.getId(), ctx,
+                        new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of(a)));
+            }
+            if ((kinds == null || kinds.contains("close")) && c.getElements().size() == 1 && c.getElements().get(0) instanceof BranchContingency bc
+                    && network.getLine(bc.getId()) != null) {
+                String closeId = "close-" + bc.getId();
+                acts.add(new com.powsybl.action.TerminalsConnectionActionBuilder().withId(closeId)
+                        .withNetworkElementId(bc.getId()).withOpen(false).build());
+                strats.add(new com.powsybl.contingency.strategy.OperatorStrategy("s-close-" + c.getId(), ctx,
+                        new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of(closeId)));
+            }
+            if ((kinds == null || kinds.contains("twoStage")) && acts.stream().anyMatch(a -> a.getId().equals("genUp"))
+                    && acts.stream().anyMatch(a -> a.getId().equals("openLine"))) {
+                strats.add(new com.powsybl.contingency.strategy.OperatorStrategy("s-twoStage-" + c.getId(), ctx, List.of(
+                        new com.powsybl.contingency.strategy.ConditionalActions("always",
+                                new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of("genUp")),
+                        new com.powsybl.contingency.strategy.ConditionalActions("onViolation",
+                                new com.powsybl.contingency.strategy.condition.AnyViolationCondition(), List.of("openLine")))));
+            }
+        }
+        this.actions = List.copyOf(acts);
+        this.strategies = List.copyOf(strats);
+        String parentsDump = System.getenv("OLF_GPU_SA_STRATEGY_PARENTS_DUMP");   // the contingencies given strategies, in order
+        if (parentsDump != null) {
+            try {
+                Files.write(Path.of(parentsDump), strats.stream()
+                        .map(st -> st.getContingencyContext().getContingencyId()).distinct().toList());
+            } catch (java.io.IOException e) {
+                throw new java.io.UncheckedIOException(e);
+            }
+        }
+        System.out.printf("  STRATEGIES: %d on %d contingencies (every %d-th), %d actions%n", strats.size(), chosen, every, acts.size());
+    }
+
+    /** Strategy by strategy: status, distributed active power, violation count. Returns the differing ones. */
+    private static List<String> compareStrategies(SecurityAnalysisResult cpu, SecurityAnalysisResult gpu) {
+        // (the parent's bus voltages are read from the same results: the GPU's post-contingency ones may be dropped)
+        if (cpu.getOperatorStrategyResults().isEmpty() && gpu.getOperatorStrategyResults().isEmpty()) {
+            return List.of();
+        }
+        Map<String, com.powsybl.security.results.OperatorStrategyResult> g = new TreeMap<>();
+        gpu.getOperatorStrategyResults().forEach(r -> g.put(r.getOperatorStrategy().getId(), r));
+        List<String> mismatches = new ArrayList<>();
+        Map<String, Long> statuses = new TreeMap<>();
+        double worstDap = 0;
+        String worstId = "-";
+        int differingViolations = 0;
+        int aboveFloor = 0;
+        for (var c : cpu.getOperatorStrategyResults()) {
+            String id = c.getOperatorStrategy().getId();
+            var r = g.remove(id);
+            var cs = c.getConditionalActionsResults().get(0);
+            statuses.merge(cs.getStatus().name(), 1L, Long::sum);
+            if (r == null) {
+                mismatches.add(id + " (no GPU result)");
+                continue;
+            }
+            var gs = r.getConditionalActionsResults().get(0);
+            if (cs.getStatus() != gs.getStatus()) {
+                mismatches.add(id + " status " + cs.getStatus() + " vs " + gs.getStatus());
+                continue;
+            }
+            double d = Math.abs(cs.getDistributedActivePower() - gs.getDistributedActivePower());
+            if (Double.isFinite(d) && d > worstDap) {
+                worstDap = d;
+                worstId = id;
+            }
+            if (d > 1e-3) {
+                mismatches.add(id + " distributed power " + cs.getDistributedActivePower() + " vs " + gs.getDistributedActivePower());
+            }
+            if (Double.isFinite(d) && d > 1e-9) {
+                aboveFloor++;
+            }
+            if (cs.getLimitViolationsResult().getLimitViolations().size() != gs.getLimitViolationsResult().getLimitViolations().size()) {
+                differingViolations++;
+                System.out.printf("    STRATEGY_VIOLATIONS %s cpu=%d gpu=%d%n", id, cs.getLimitViolationsResult().getLimitViolations().size(),
+                        gs.getLimitViolationsResult().getLimitViolations().size());
+                // the violations one side has and the other does not, with value and limit (a knife edge shows as a
+                // value on its limit)
+                java.util.function.Function<com.powsybl.contingency.violations.LimitViolation, String> key = v -> v.getSubjectId() + "|"
+                        + v.getSide() + "|" + v.getLimitType() + "|" + v.getLimitName() + "|" + v.getAcceptableDuration();
+                Map<String, com.powsybl.contingency.violations.LimitViolation> gByKey = new TreeMap<>();
+                gs.getLimitViolationsResult().getLimitViolations().forEach(v -> gByKey.put(key.apply(v), v));
+                Map<String, com.powsybl.contingency.violations.LimitViolation> cByKey = new TreeMap<>();
+                cs.getLimitViolationsResult().getLimitViolations().forEach(v -> cByKey.put(key.apply(v), v));
+                cByKey.forEach((k, v) -> {
+                    if (!gByKey.containsKey(k)) {
+                        System.out.printf("      CPU_ONLY %s value=%.12f limit=%.12f reduction=%.6f%n", k, v.getValue(), v.getLimit(),
+                                v.getLimitReduction());
+                    }
+                });
+                gByKey.forEach((k, v) -> {
+                    if (!cByKey.containsKey(k)) {
+                        System.out.printf("      GPU_ONLY %s value=%.12f limit=%.12f reduction=%.6f%n", k, v.getValue(), v.getLimit(),
+                                v.getLimitReduction());
+                    }
+                });
+            }
+            // bus voltages, when the run monitors them: the worst bus, and the few worst for the worst strategy
+            Map<String, Double> gv = new TreeMap<>();
+            gs.getNetworkResult().getBusResults().forEach(b -> gv.put(b.getBusId(), b.getV()));
+            List<double[]> diffs = new ArrayList<>();
+            List<String> busIds = new ArrayList<>();
+            for (var b : cs.getNetworkResult().getBusResults()) {
+                Double v = gv.get(b.getBusId());
+                if (v != null && Double.isFinite(v) && Double.isFinite(b.getV())) {
+                    diffs.add(new double[] {Math.abs(v - b.getV()), busIds.size()});
+                    busIds.add(b.getBusId());
+                }
+            }
+            if (!diffs.isEmpty()) {
+                diffs.sort((x, y) -> Double.compare(y[0], x[0]));
+                StringBuilder top = new StringBuilder();
+                for (int k = 0; k < Math.min(5, diffs.size()); k++) {
+                    top.append(' ').append(busIds.get((int) diffs.get(k)[1])).append('=').append(String.format("%.2e", diffs.get(k)[0]));
+                }
+                System.out.printf("    STRATEGY_BUS %s worst %.3e kV over %d buses:%s%n", id, diffs.get(0)[0], diffs.size(), top);
+                String wb = busIds.get((int) diffs.get(0)[1]);
+                String ctgId = c.getOperatorStrategy().getContingencyContext().getContingencyId();
+                java.util.function.BiFunction<SecurityAnalysisResult, Boolean, Double> parentV = (res, x) -> res.getPostContingencyResults().stream()
+                        .filter(pc -> pc.getContingency().getId().equals(ctgId)).findFirst()
+                        .flatMap(pc -> pc.getNetworkResult().getBusResults().stream().filter(b -> b.getBusId().equals(wb)).findFirst())
+                        .map(b -> b.getV()).orElse(Double.NaN);
+                double cpuS = cs.getNetworkResult().getBusResults().stream().filter(b -> b.getBusId().equals(wb)).findFirst().get().getV();
+                System.out.printf("    STRATEGY_BUS_V %s %s: strategy cpu=%.9f gpu=%.9f | parent cpu=%.9f gpu=%.9f%n", id, wb,
+                        cpuS, gv.get(wb), parentV.apply(cpu, true), parentV.apply(gpu, true));
+            }
+        }
+        g.keySet().forEach(id -> mismatches.add(id + " (no CPU result)"));
+        // a strategy OLF converges whose pair the device SOLVED and did not converge: a device failure (the CPU replay
+        // then hides it in the statuses)
+        java.util.Set<String> failed = GpuBatchScopeCensus.pairDeviceFailedIds();
+        List<String> deviceFailures = cpu.getOperatorStrategyResults().stream()
+                .filter(r -> r.getConditionalActionsResults().get(0).getStatus() == PostContingencyComputationStatus.CONVERGED)
+                .map(r -> r.getOperatorStrategy().getContingencyContext().getContingencyId()
+                        + com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchStatus.STRATEGY_KEY_SEP + r.getOperatorStrategy().getId())
+                .filter(id -> failed.stream().anyMatch(f -> f.equals(id)
+                        || f.startsWith(id + com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchStatus.STRATEGY_KEY_SEP)))
+                .map(id -> id.replace(com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchStatus.STRATEGY_KEY_SEP, '|'))
+                .toList();
+        System.out.printf("  STRATEGY DEVICE FAILURES on a strategy OLF converges: %d %s%n", deviceFailures.size(),
+                deviceFailures.subList(0, Math.min(20, deviceFailures.size())));
+        deviceFailures.forEach(id -> mismatches.add(id + " (device failure, OLF converges)"));
+        System.out.printf("  STRATEGY RESULTS: %d CPU / %d GPU | statuses %s | worst distributed power %.3e MW (%s), %d above 1e-9 MW"
+                        + " | %d with a different violation count | %d mismatches%n",
+                cpu.getOperatorStrategyResults().size(), gpu.getOperatorStrategyResults().size(), statuses,
+                worstDap, worstId, aboveFloor, differingViolations, mismatches.size());
+        mismatches.stream().limit(30).forEach(m -> System.out.println("    STRATEGY_DIFF " + m));
+        return mismatches;
     }
 
     /** OLF_GPU_SA_MEM=1: print the JVM uptime at an arm boundary, to cut an external memory trace (GC log with

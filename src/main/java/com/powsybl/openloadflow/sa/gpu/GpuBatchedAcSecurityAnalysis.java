@@ -1576,11 +1576,14 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                             .map(com.powsybl.openloadflow.network.LfBranch::getId).sorted().toList());
         }
         PrecomputedBatch precomputed = runState.get().precomputed;
-        if (precomputed.isReady() && precomputed.exhausted().contains(contingency.getId())) {
+        if (precomputed.isReady() && precomputed.exhausted().contains(contingency.getId())
+                && everyStrategyAnsweredOnDevice(runState.get(), contingency.getId(), securityAnalysisParameters)) {
             // The device carried this scenario through OLF's whole Newton budget without
             // convergence. OLF's own path (AbstractSecurityAnalysis.runPostContingencySimulation)
             // reports MAX_ITERATION_REACHED with an empty network result and no violations for
             // that outcome; the same result is built here, from the contingency already applied.
+            // A strategy of it the device did not answer starts from what OLF's failed run leaves on the network
+            // (its targets, its bus types), which only that run produces: the contingency then runs on the CPU.
             logPostContingencyStart(network, lfContingency);
             return new PostContingencyResult(contingency, PostContingencyComputationStatus.MAX_ITERATION_REACHED,
                     new LimitViolationsResult(List.of()),

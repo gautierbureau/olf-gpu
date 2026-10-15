@@ -133,7 +133,11 @@ public record BatchContingency(String contingencyId, List<LfBranch> outagedBranc
         // mechanisms: element mask vs target/row-mode overrides); fixed shunts stay exclusive
         // (their DISTR_Q interplay is validated separately). The former <=2-branch cap was
         // validated-scope only — lifted 2026-09-08 (N-3/N-4 at 1e-12).
-        if (!isInjection && !isShunt && !isBranch
+        // A strategy pair may compose to NOTHING: an action reclosing the contingency's only branch leaves the base
+        // topology, solved from where the contingency left the network. It used to throw here and take the whole
+        // precompute down with it (every contingency of the run then went to the CPU).
+        boolean emptyPair = !isInjection && !isShunt && !isBranch && contingencyId.indexOf(GpuBatchStatus.STRATEGY_KEY_SEP) >= 0;
+        if (!emptyPair && !isInjection && !isShunt && !isBranch
                 || isShunt && (isInjection || isBranch)) {
             throw new IllegalArgumentException(
                     "a batched contingency is branch(es) and/or injection loss(es), or fixed shunt(s) alone");

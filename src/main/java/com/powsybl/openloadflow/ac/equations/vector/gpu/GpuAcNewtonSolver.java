@@ -358,6 +358,10 @@ public final class GpuAcNewtonSolver {
      *  gives the slack bus's participating generators, which have no device row of their own. */
     public static native double[] readBatchDsRetain(long handle);
 
+    /** One scenario's state at its last CONVERGED inner solve of the last solve, or its starting state when none
+     *  converged: what OLF's network holds after a run that failed, where it starts that contingency's strategies. */
+    public static native double[] readBatchLastConvergedState(long handle, int slot);
+
     /** How many {@code solveBatchContext} calls the context has run. The distributed-slack read-backs
      *  ({@link #readBatchDsRetain}, {@link #readBatchDsGenCum}, {@link #readBatchSlackAbsorbed}) are reset at
      *  every solve: they describe the whole distribution only when one solve covered it. */

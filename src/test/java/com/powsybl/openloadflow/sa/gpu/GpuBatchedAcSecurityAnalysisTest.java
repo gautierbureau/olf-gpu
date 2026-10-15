@@ -6983,8 +6983,17 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
                                           List<com.powsybl.contingency.strategy.OperatorStrategy> strategies,
                                           List<com.powsybl.action.Action> actions, int expectedPrecomputed,
                                           boolean distributedSlack) {
+        assertStrategyMatchesCpu(network, contingencies, strategies, actions, expectedPrecomputed, distributedSlack, p -> { });
+    }
+
+    private void assertStrategyMatchesCpu(Network network, List<Contingency> contingencies,
+                                          List<com.powsybl.contingency.strategy.OperatorStrategy> strategies,
+                                          List<com.powsybl.action.Action> actions, int expectedPrecomputed,
+                                          boolean distributedSlack,
+                                          java.util.function.Consumer<com.powsybl.openloadflow.OpenLoadFlowParameters> customize) {
         com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
                 .setDistributedSlack(distributedSlack).setUseReactiveLimits(true);
+        customize.accept(com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp));
         String sConvEps = System.getProperty("olf.gpu.test.convEps", System.getenv("OLF_GPU_DBG_CONV_EPS"));
         if (sConvEps != null) {
             com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
@@ -7509,6 +7518,77 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         assertGpuMatchesCpu(network5, List.of(new Contingency(loadId5,
                 new com.powsybl.contingency.LoadContingency(loadId5))));
         assertEquals(1, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(), "load loss on the device");
+    }
+
+    /** OLF runs a contingency's strategies even when the contingency's own load flow fails, from what that run left:
+     *  the generators' targets (here the loss pre-distribution of B4's load, which become the strategy's initial
+     *  targets), the bus types its reactive-limit checks switched, and the voltages of its last converged solve (the
+     *  base ones when none converged). L1-2-1 with B4's load lost runs out of Newton iterations on its first solve,
+     *  on both arms; reclosing L1-2-1 converges. */
+    @Test
+    void strategyOfAContingencyThatRanOutOfIterationsMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = IeeeCdfNetworkFactory.create14();
+        for (String g : List.of("B2-G", "B3-G", "B6-G", "B8-G")) {
+            network.getGenerator(g).newMinMaxReactiveLimits().setMinQ(-6).setMaxQ(12).add();
+        }
+        String loadId = loadAtBus(network, "B4").getId();
+        String ctgId = "L1-2-1+" + loadId;
+        List<Contingency> contingencies = List.of(new Contingency(ctgId,
+                List.of(new BranchContingency("L1-2-1"), new com.powsybl.contingency.LoadContingency(loadId))));
+        List<com.powsybl.action.Action> actions = List.of(
+                new com.powsybl.action.TerminalsConnectionActionBuilder().withId("close")
+                        .withNetworkElementId("L1-2-1").withOpen(false).build());
+        // the pair on the device, the contingency reported from the device
+        assertStrategyMatchesCpu(network, contingencies, strategiesOf(ctgId, "close"), actions, 1, true,
+                p -> p.setMaxNewtonRaphsonIterations(8));
+        // ...and with a second strategy the device does not compose (a GeneratorAction carrying a target Q), which
+        // OLF starts from its own failed run of the contingency: that run has to happen
+        List<com.powsybl.action.Action> actions2 = List.of(actions.get(0),
+                new com.powsybl.action.GeneratorActionBuilder().withId("closeAndUp2").withGeneratorId("B2-G")
+                        .withActivePowerRelativeValue(true).withActivePowerValue(10).withTargetQ(5).build());
+        List<com.powsybl.contingency.strategy.OperatorStrategy> strategies2 = new java.util.ArrayList<>(strategiesOf(ctgId, "close"));
+        strategies2.add(new com.powsybl.contingency.strategy.OperatorStrategy("s-closeAndUp2",
+                com.powsybl.contingency.ContingencyContext.specificContingency(ctgId),
+                new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of("close", "closeAndUp2")));
+        assertStrategyMatchesCpu(network, contingencies, strategies2, actions2, 1, true,
+                p -> p.setMaxNewtonRaphsonIterations(8));
+        // A contingency that CONVERGES four times (reactive-limit switches in between), then runs out of iterations:
+        // its strategies start from the fourth solve's voltages, with the bus types and targets its outer loops left
+        Network network2 = IeeeCdfNetworkFactory.create14();
+        for (String g : List.of("B2-G", "B3-G", "B6-G", "B8-G")) {
+            network2.getGenerator(g).newMinMaxReactiveLimits().setMinQ(-20).setMaxQ(20).add();
+        }
+        List<Contingency> contingencies2 = List.of(new Contingency("L1-2-1", new BranchContingency("L1-2-1")));
+        assertStrategyMatchesCpu(network2, contingencies2, strategiesOf("L1-2-1", "close"), actions, 1, true,
+                p -> p.setMaxNewtonRaphsonIterations(8));
+        List<com.powsybl.contingency.strategy.OperatorStrategy> strategies3 = new java.util.ArrayList<>(strategiesOf("L1-2-1", "close"));
+        strategies3.add(new com.powsybl.contingency.strategy.OperatorStrategy("s-closeAndUp2",
+                com.powsybl.contingency.ContingencyContext.specificContingency("L1-2-1"),
+                new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of("close", "closeAndUp2")));
+        assertStrategyMatchesCpu(network2, contingencies2, strategies3, actions2, 1, true,
+                p -> p.setMaxNewtonRaphsonIterations(8));
+    }
+
+    /** A contingency the device hands back to the CPU: its strategy starts from what OLF's run of it leaves, which
+     *  only that run has, so the strategy goes back too. B4's load loss saturates the only participant (B2-G, 2 MW
+     *  above its minP) and the device does not keep a saturated distribution; the strategy adds the lost load back
+     *  at B9, which a distribution from the base would not see the same way. */
+    @Test
+    void strategyOfAContingencyTheDeviceHandsBackRunsOnCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = IeeeCdfNetworkFactory.create14();
+        network.getGenerator("B1-G").newExtension(com.powsybl.iidm.network.extensions.ActivePowerControlAdder.class)
+                .withParticipate(false).add();
+        network.getGenerator("B2-G").setMinP(38).setMaxP(200);
+        String loadId = loadAtBus(network, "B4").getId();
+        String load9 = loadAtBus(network, "B9").getId();
+        List<Contingency> contingencies = List.of(new Contingency(loadId, new com.powsybl.contingency.LoadContingency(loadId)));
+        List<com.powsybl.action.Action> actions = List.of(new com.powsybl.action.LoadActionBuilder().withId("more9")
+                .withLoadId(load9).withRelativeValue(true).withActivePowerValue(47.8).build());
+        assertStrategyMatchesCpu(network, contingencies, strategiesOf(loadId, "more9"), actions, 0);
     }
 
     /** A GeneratorAction re-checks its generator's participation (OLF's reApplyActivePowerControlChecks): a target

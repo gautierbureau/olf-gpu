@@ -8129,6 +8129,10 @@ struct BatchSolverContext {
     int cbOffset = 0, obOffset = 0, shOffset = 0, hvOffset = 0;   // element-mask offsets per family
     int ndq = 0, ndr = 0, ndb = 0, nzi = 0;                  // copies of the structure counts
     DeviceBuf dX, dTarget, dF, dB, dDx, dVals, dMode;        // per-scenario (n or nnz strided)
+    // per scenario: the state at its last CONVERGED inner solve (its starting state before any): what OLF's network
+    // holds when a run fails (NewtonRaphson updates the buses only on convergence), and so where OLF starts the
+    // strategies of a contingency that ran out of iterations (PreviousValueVoltageInitializer)
+    DeviceBuf dXLastConv;
     DeviceBuf dTargetBase;                                   // the base targets (n), before tiling/overrides
     DeviceBuf dHazSnap, dHazBSnap, dHazChoice;               // zero-diagonal repair scratch (lazy)
     int hazCap = 0;
@@ -8852,6 +8856,7 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& st, int nScenar
     size_t nS = static_cast<size_t>(n) * nScenarios;
     size_t nnzS = static_cast<size_t>(ctx->nnz) * nScenarios;
     ctx->dX.alloc(nS * sizeof(double));
+    ctx->dXLastConv.alloc(nS * sizeof(double));
     ctx->dTarget.alloc(nS * sizeof(double));
     ctx->dF.alloc(nS * sizeof(double));
     ctx->dB.alloc(nS * sizeof(double));
@@ -11144,6 +11149,10 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         std::vector<double> nanv(static_cast<size_t>(nS) * std::max(ctx->nrl, 1), std::nan(""));
         CUDA_CHECK(cudaMemcpy(ctx->dSvcRlVt.p, nanv.data(), nanv.size() * sizeof(double), cudaMemcpyHostToDevice));
     }
+    if (!resume) {                                           // no inner solve has converged yet: the start
+        CUDA_CHECK(cudaMemcpyAsync(ctx->dXLastConv.p, ctx->dX.p, static_cast<size_t>(nS) * n * sizeof(double),
+                                   cudaMemcpyDeviceToDevice, ctx->stream));
+    }
     if (fullLoadflow && !resume) {                           // per-solve PV↔PQ state: 0 switches, limitType from base
         // Each generator's own slack move is per-solve state, cleared before ANYTHING reads it: the seed-time curve
         // limits below evaluate a curve at base + genCum wherever genCumValid is set. Cleared only after the seed,
@@ -12470,6 +12479,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                     active[s] = 0;
                     nActive--;
                     anyChanged = true;
+                    CUDA_CHECK(cudaMemcpyAsync(ctx->dXLastConv.as<double>() + (size_t) s * n, ctx->dX.as<double>() + (size_t) s * n,
+                                               n * sizeof(double), cudaMemcpyDeviceToDevice, ctx->stream));
                 } else if (it == maxIter) {
                     // exhausted iterations. With fixed inner iterations those are the K steps asked for, not OLF's
                     // Newton budget, so the scenario is REJECTED (the CPU replays it) rather than reported
@@ -15201,6 +15212,24 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_readBatc
         JNIEnv*, jclass, jlong handle) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     return ctx == nullptr ? -1 : static_cast<jlong>(ctx->solveCount);
+}
+
+// One scenario's state at its last converged inner solve of the last solve (its starting state if none converged).
+extern "C" JNIEXPORT jdoubleArray JNICALL
+Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_readBatchLastConvergedState(
+        JNIEnv* env, jclass, jlong handle, jint slot) {
+    auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
+    if (ctx == nullptr || !ctx->dXLastConv.p || slot < 0 || slot >= ctx->nScenarios) {
+        return nullptr;
+    }
+    int n = ctx->st->n;
+    std::vector<double> host(n);
+    CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+    CUDA_CHECK(cudaMemcpy(host.data(), ctx->dXLastConv.as<double>() + (size_t) slot * n, n * sizeof(double),
+                          cudaMemcpyDeviceToHost));
+    jdoubleArray out = env->NewDoubleArray(n);
+    env->SetDoubleArrayRegion(out, 0, n, host.data());
+    return out;
 }
 
 extern "C" JNIEXPORT jdoubleArray JNICALL

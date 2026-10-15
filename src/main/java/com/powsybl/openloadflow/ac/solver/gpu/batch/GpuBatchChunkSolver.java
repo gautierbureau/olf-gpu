@@ -533,6 +533,8 @@ final class GpuBatchChunkSolver {
         // loss pre-distribution alone when no slack pass fired): its pairs' per-generator anchors
         int ngen = gpuData.dgBus() == null ? 0 : gpuData.dgBus().length;
         java.util.Map<Integer, double[]> genMovesByIndex = new java.util.HashMap<>();
+        // ctg index -> the state its pairs start from when it ran out of Newton iterations (see the capture)
+        java.util.Map<Integer, double[]> exhaustedStartByIndex = new java.util.HashMap<>();
         java.util.Map<Integer, Double> slackAbsorbedByIndex = new java.util.HashMap<>();   // slack-only DS parents
         boolean dsSlackOnly = gpuData.dsPhiRow().length == 0 && gpuData.dsSlackPhiRow() >= 0;
         // Host-side base RL seed (mirrors initRlLimitTypeBatch) for PADDING slots of pair chunks.
@@ -1544,6 +1546,7 @@ final class GpuBatchChunkSolver {
                     double[] dgSeedAnchor = null;            // ...and the same without the strategy's GeneratorActions
                     double[] dsSlackShift = null;
                     double[] pairSlackAbsorbedSeed = null;   // slack-only pairs: the parent's absorbed total they start from
+                    boolean[] rejectAfterSolve = null;       // pairs whose parent the device did not answer: CPU
                     double[] preSlackSeed = null;            // the loss pre-distribution's share on the slack generators,
                                                              // when nobody else is left to participate
                     if (!pairPhase && (hasDs || dsSlackOnly) && config.contingencyLossPreDistribution()) {
@@ -1876,13 +1879,25 @@ final class GpuBatchChunkSolver {
                             if (s < realCount) {
                                 String pairId = contingencies.get(group.get(chunkStart + s)).contingencyId();
                                 Integer pIdx = indexById.get(pairId.substring(0, pairId.indexOf(GpuBatchStatus.STRATEGY_KEY_SEP)));
-                                if (pIdx != null && resultsByIndex[pIdx] != null
-                                        && rowStatus(resultsByIndex[pIdx], n) == GpuBatchStatus.STATUS_CONVERGED) {
+                                int parentStatus = pIdx != null && resultsByIndex[pIdx] != null
+                                        ? rowStatus(resultsByIndex[pIdx], n) : GpuBatchStatus.STATUS_REJECTED;
+                                if (parentStatus == GpuBatchStatus.STATUS_CONVERGED) {
                                     parent = fullRow(resultsByIndex[pIdx], n, config.stateSink(),
                                             contingencies.get(pIdx).contingencyId());
+                                } else if (parentStatus == GpuBatchStatus.STATUS_MAX_ITERATION) {
+                                    parent = exhaustedStartByIndex.get(pIdx);   // OLF's network after the failed run
+                                }
+                                if (parent != null) {
                                     parentRl = rlByIndex.get(pIdx);
                                     parentDs = dsTargetsByIndex.get(pIdx);
                                     parentSlackAbs = slackAbsorbedByIndex.get(pIdx);
+                                } else {
+                                    // The device has no answer for the parent (the CPU replays it): OLF starts the strategy
+                                    // from the state that replay leaves, which only the CPU has. CPU.
+                                    if (rejectAfterSolve == null) {
+                                        rejectAfterSolve = new boolean[chunkSize];
+                                    }
+                                    rejectAfterSolve[s] = true;
                                 }
                             }
                             for (int i = 0; i < n; i++) {
@@ -2619,6 +2634,18 @@ final class GpuBatchChunkSolver {
                                     + " rows differing from base:\n" + sb);
                         }
                     }
+                    if (!pairPhase && !pairIdxList.isEmpty()) {
+                        // A contingency that ran out of Newton iterations on the device (OLF's MAX_ITERATION_REACHED):
+                        // OLF still runs its strategies, from what the failed run left - the voltages of its last
+                        // converged solve (NewtonRaphson updates the network only then), and the targets and bus
+                        // types its outer loops had moved, which the captures below read as they read a converged one.
+                        for (int s = 0; s < realCount; s++) {
+                            if ((int) chunkResults[s][n + 2] == GpuBatchStatus.STATUS_MAX_ITERATION) {
+                                exhaustedStartByIndex.put(group.get(chunkStart + s),
+                                        GpuAcNewtonSolver.readBatchLastConvergedState(handle, s));
+                            }
+                        }
+                    }
                     if (!pairPhase && nds > 0 && !pairIdxList.isEmpty()) {
                         // Capture each ctg's DS ABSORPTION (final distributed target minus the ctg's own
                         // effective base per DS row) plus its factor sum, for its pairs' re-anchoring —
@@ -2777,6 +2804,10 @@ final class GpuBatchChunkSolver {
                     }
                     for (int s = 0; s < realCount; s++) {
                         double[] row = chunkResults[s];
+                        if (rejectAfterSolve != null && rejectAfterSolve[s]) {
+                            row[n + 2] = GpuBatchStatus.STATUS_REJECTED;
+                            com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("PAIR:PARENT_NOT_ON_DEVICE");
+                        }
                         if (config.stateSink() != null && (int) row[n + 2] == GpuBatchStatus.STATUS_CONVERGED) {
                             // the state leaves the heap now, as its chunk completes; the result keeps the tail
                             // (iterations, norm, status) - see sunkTail / fullRow

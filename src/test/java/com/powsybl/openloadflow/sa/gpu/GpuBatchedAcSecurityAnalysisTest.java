@@ -7731,6 +7731,21 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
                 p -> p.setStateVectorScalingMode(com.powsybl.openloadflow.ac.solver.StateVectorScalingMode.MAX_VOLTAGE_CHANGE));
     }
 
+    /** A contingency with a device state can still be solved on OLF's own path: when one of its strategies is not
+     *  answered on the device. It then starts from every bus's voltage, so the voltages the previous contingency's
+     *  injection left must be back at the base first (rte6515 LINE-2349-694 after LINE-2348-693: 1.44 MW). */
+    @Test
+    void contingencyWithACpuStrategyStartsFromTheBaseMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = participationRecheckNetwork();
+        String loadId = loadAtBus(network, "B4").getId();
+        List<Contingency> contingencies = List.of(new Contingency("L1-2-1", new BranchContingency("L1-2-1")),
+                new Contingency(loadId, new com.powsybl.contingency.LoadContingency(loadId)));
+        List<com.powsybl.action.Action> actions = List.of(genAction("start8", "B8-GP", false, 20));
+        assertStrategyMatchesCpu(network, contingencies, strategiesOf(loadId, "start8"), actions, 2);
+    }
+
     /** A generator pinned at its reactive limit in the base and released by the contingency: its strategy pairs
      *  start with it back on voltage control, as OLF's strategies do. The base activation still held the pin, and a
      *  pair solved the generator at its base limit (rte6515 LINE-3273-1812: 0.016 kV for a strategy that changes

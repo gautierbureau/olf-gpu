@@ -91,22 +91,48 @@ final class GpuZiTreeReplay {
      * the four contingencies whose apply re-elects.
      */
     List<LfBranch> applyAndRevert(PropagatedContingency pc) {
+        return applyAndRevert(pc, List.of(), List.of());
+    }
+
+    /**
+     * The same for a strategy pair: the contingency, then the strategy's coupler openings ({@code opened}) and
+     * closings ({@code closed}: a coupler the contingency opened, or one open at base), the tree read, everything
+     * reverted. A pair otherwise inherits its contingency's tree, which still holds a reclosed coupler out of it.
+     */
+    List<LfBranch> applyAndRevert(PropagatedContingency pc, List<LfBranch> opened, List<LfBranch> closed) {
         Optional<LfContingency> lfc = pc.toLfContingency(network, false, GpuZiTreeReplay::connectivityLoss);
-        if (lfc.isEmpty()) {
+        if (lfc.isEmpty() && opened.isEmpty() && closed.isEmpty()) {
             return nonTree();                                // no impact: OLF never applies it
         }
         List<LfBranch> disabled = new ArrayList<>();
-        for (Map.Entry<LfBranch, DisabledBranchStatus> e : lfc.get().getDisabledNetwork().getBranchesStatus().entrySet()) {
-            LfBranch b = e.getKey();
-            if (e.getValue() == DisabledBranchStatus.BOTH_SIDES && !b.isDisabled() && b.isZeroImpedance(AC)
-                    && b.getBus1() != null && b.getBus2() != null) {
+        if (lfc.isPresent()) {
+            for (Map.Entry<LfBranch, DisabledBranchStatus> e : lfc.get().getDisabledNetwork().getBranchesStatus().entrySet()) {
+                LfBranch b = e.getKey();
+                if (e.getValue() == DisabledBranchStatus.BOTH_SIDES && !b.isDisabled() && b.isZeroImpedance(AC)
+                        && b.getBus1() != null && b.getBus2() != null && !closed.contains(b)) {
+                    disabled.add(b);
+                }
+            }
+        }
+        for (LfBranch b : opened) {
+            if (!b.isDisabled() && b.isZeroImpedance(AC) && b.getBus1() != null && b.getBus2() != null && !disabled.contains(b)) {
                 disabled.add(b);
             }
         }
         for (LfBranch b : disabled) {
             removeBranchAndTryToSplit(b);
         }
+        List<LfBranch> added = new ArrayList<>();         // couplers open at base that the strategy closes
+        for (LfBranch b : closed) {
+            if (b.isDisabled() && b.isZeroImpedance(AC) && b.getBus1() != null && b.getBus2() != null) {
+                addBranch(b);
+                added.add(b);
+            }
+        }
         List<LfBranch> solvedOn = nonTree();
+        for (LfBranch b : added) {
+            removeBranchAndTryToSplit(b);
+        }
         disabled.sort(Comparator.comparingInt(LfBranch::getNum));
         for (LfBranch b : disabled) {
             Graph<LfBus, LfBranch> g1 = netOf.get(b.getBus1());
@@ -123,6 +149,30 @@ final class GpuZiTreeReplay {
             }
         }
         return solvedOn;
+    }
+
+    /** OLF's addBranch: merge the two networks the coupler joins (a lone bus is its own), or re-elect within one. */
+    private void addBranch(LfBranch b) {
+        Graph<LfBus, LfBranch> g1 = graphOf(b.getBus1());
+        Graph<LfBus, LfBranch> g2 = graphOf(b.getBus2());
+        if (g1 == g2) {
+            g1.addEdge(b.getBus1(), b.getBus2(), b);
+            elect(g1);
+        } else {
+            Graph<LfBus, LfBranch> merged = new Pseudograph<>(LfBranch.class);
+            Graphs.addGraph(merged, g1);
+            Graphs.addGraph(merged, g2);
+            merged.addEdge(b.getBus1(), b.getBus2(), b);
+            register(merged);
+        }
+    }
+
+    private Graph<LfBus, LfBranch> graphOf(LfBus bus) {
+        return netOf.computeIfAbsent(bus, k -> {
+            Graph<LfBus, LfBranch> single = new Pseudograph<>(LfBranch.class);
+            single.addVertex(k);
+            return single;
+        });
     }
 
     private void removeBranchAndTryToSplit(LfBranch b) {

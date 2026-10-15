@@ -294,7 +294,7 @@ final class GpuBatchPrecomputer {
                         }
                         BatchContingency pair = GpuStrategyComposer.composeStrategyScenario(network, net, pc.getContingency().getId(), strategy, actions,
                                 ziOutages, branches, gens, loads, pc.getLoadIdsToLose().keySet(), shifts, hvdcs,
-                                context.getParameters().getNetworkParameters(), pairBt);
+                                sideOpens, ziNonTree, context.getParameters().getNetworkParameters(), pairBt);
                         // An absolute GeneratorAction on a participant restarts that generator from the value, over
                         // its share of the parent's distribution. The pair leg drops the parent's anchor shift of the
                         // generator's BUS, which is that share only when no other participant sits on the bus.
@@ -314,6 +314,7 @@ final class GpuBatchPrecomputer {
                             pair = null;
                         }
                         if (pair != null) {
+                            pair = withPairTree(pair, pc, branches, ziOutages, ziTree);
                             batch.add(pair);
                         }
                     }
@@ -619,6 +620,28 @@ final class GpuBatchPrecomputer {
             return results;
         }
         return results.stream().map(r -> better.getOrDefault(r.contingencyId(), r)).toList();
+    }
+
+    /** A pair whose actions open or close couplers is solved on the tree OLF elects after those actions, not on its
+     *  contingency's: a coupler the strategy recloses (open at base, or opened by the contingency) goes back in it. */
+    private static BatchContingency withPairTree(BatchContingency pair, PropagatedContingency pc, List<LfBranch> ctgBranches,
+                                                 List<LfBranch> ctgZiOutages, GpuZiTreeReplay ziTree) {
+        java.util.Set<LfBranch> ctgOut = new java.util.HashSet<>(ctgBranches);
+        ctgOut.addAll(ctgZiOutages);
+        java.util.Set<LfBranch> pairOut = new java.util.HashSet<>(pair.outagedBranches());
+        pairOut.addAll(pair.outagedZiBranches());
+        List<LfBranch> opened = pairOut.stream()
+                .filter(b -> !ctgOut.contains(b) && b.isZeroImpedance(com.powsybl.openloadflow.network.LoadFlowModel.AC)).toList();
+        List<LfBranch> closed = new ArrayList<>(pair.reclosedBranches().stream()
+                .filter(b -> b.isZeroImpedance(com.powsybl.openloadflow.network.LoadFlowModel.AC)).toList());
+        ctgOut.stream().filter(b -> !pairOut.contains(b) && b.isZeroImpedance(com.powsybl.openloadflow.network.LoadFlowModel.AC))
+                .forEach(closed::add);
+        if (opened.isEmpty() && closed.isEmpty()) {
+            return pair;
+        }
+        return new BatchContingency(pair.contingencyId(), pair.outagedBranches(), pair.lostGenerators(), pair.lostLoads(),
+                pair.shuntShifts(), pair.tapOverrides(), pair.outagedShunts(), pair.reclosedBranches(), pair.outagedZiBranches(),
+                pair.outagedHvdcs(), pair.sideOpenBranches(), ziTree.applyAndRevert(pc, opened, closed), pair.generatorActions());
     }
 
     private static String composeRejectReason(List<LfBranch> branches, List<LfGenerator> gens, List<LoadLoss> loads,

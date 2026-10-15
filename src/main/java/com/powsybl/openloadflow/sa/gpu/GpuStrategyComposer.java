@@ -73,6 +73,8 @@ final class GpuStrategyComposer {
                                                     java.util.Set<String> ctgLostLoadIds,
                                                     List<ShuntShift> ctgShifts,
                                                     List<com.powsybl.openloadflow.network.LfHvdc> ctgHvdcs,
+                                                    List<BatchContingency.SideOpen> ctgSideOpens,
+                                                    List<LfBranch> ctgStickyNonTreeZi,
                                                     com.powsybl.openloadflow.network.LfNetworkParameters networkParameters,
                                                     com.powsybl.loadflow.LoadFlowParameters.BalanceType balanceType) {
         List<LfBranch> branches = new java.util.ArrayList<>(ctgBranches);
@@ -89,8 +91,11 @@ final class GpuStrategyComposer {
         for (String actionId : strategy.getConditionalActions().get(0).getActionIds()) {
             Action a = actionById.get(actionId);
             if (a instanceof com.powsybl.action.TerminalsConnectionAction tca) {
-                LfBranch b = net.getBranchById(tca.getElementId());
-                if (b == null) {
+                // OLF operates every LfBranch of the equipment (getBranchesByOriginalId): the three legs of a
+                // three-winding transformer, the branch itself otherwise
+                LfBranch single = net.getBranchById(tca.getElementId());
+                List<LfBranch> legs = single != null ? List.of(single) : net.getBranchesByOriginalId(tca.getElementId());
+                if (legs == null || legs.isEmpty()) {
                     // Not a branch: a SHUNT compensator's terminals (OLF supports (re)connection since
                     // the olf-local-patches shuntIdsToClose retention) — composed as a per-scenario
                     // admittance shift: the retained base-open compensator contributes 0 at base, so
@@ -117,23 +122,31 @@ final class GpuStrategyComposer {
                             sign * gPerSection * n * zb, sign * lin.getBPerSection() * n * zb));
                     continue;
                 }
-                if (tca.isOpen()) {
-                    if (!branches.contains(b)) {
-                        branches.add(b);
+                for (LfBranch b : legs) {
+                    if (ctgSideOpens.stream().anyMatch(so -> so.branch() == b)) {
+                        return null;                         // the contingency opened ONE side of it: CPU
                     }
-                } else {
-                    if (!branches.remove(b)) {
-                        // close of a BASE-OPEN branch (retained disabled by LfTopoConfig): batched as a
-                        // per-scenario mask CLEAR on the base-open packed element — dead-island
-                        // reconnection (a disabled endpoint bus) is rejected at qualification.
-                        if (!b.isDisabled()) {
-                            return null;                     // closing an already-closed branch — CPU decides
+                    if (tca.isOpen()) {
+                        if (!branches.contains(b)) {
+                            branches.add(b);
                         }
-                        reclosed.add(b);
+                    } else {
+                        if (!branches.remove(b)) {
+                            // close of a BASE-OPEN branch (retained disabled by LfTopoConfig): batched as a
+                            // per-scenario mask CLEAR on the base-open packed element — dead-island
+                            // reconnection (a disabled endpoint bus) is rejected at qualification.
+                            if (!b.isDisabled()) {
+                                return null;                 // closing an already-closed branch — CPU decides
+                            }
+                            reclosed.add(b);
+                        }
                     }
                 }
             } else if (a instanceof com.powsybl.action.SwitchAction sw) {
                 LfBranch b = net.getBranchById(sw.getSwitchId());
+                if (b != null && ctgSideOpens.stream().anyMatch(so -> so.branch() == b)) {
+                    return null;                             // the contingency opened ONE side of it: CPU
+                }
                 if (b == null || (sw.isOpen() ? branches.contains(b) : !branches.remove(b))) {
                     if (b != null && sw.isOpen()) {
                         branches.add(b);
@@ -213,15 +226,11 @@ final class GpuStrategyComposer {
                 shifts.add(new ShuntShift(shunt,
                         gPerSection * dSections * zb, lin.getBPerSection() * dSections * zb));
             } else if (a instanceof com.powsybl.action.GeneratorAction ga) {
-                // Pure ACTIVE-POWER redispatch only: a targetV/targetQ/regulator change alters the
-                // voltage-control problem itself — CPU path. The P delta is composed exactly like a
-                // load delta with q=0 (net injection at the bus; the device DS reweight machinery is
-                // NOT touched: participation factors are unchanged by a redispatch, and the headroom
-                // shift only matters if this generator saturates during redistribution — CPU handles
-                // any such contingency via the DS-residual rejection).
-                if (ga.getTargetV().isPresent() || ga.getTargetQ().isPresent()
-                        || ga.isVoltageRegulatorOn().isPresent() || ga.getActivePowerValue().isEmpty()) {
-                    return null;
+                // OLF's LfGeneratorAction reads the active power value and its relative flag ONLY (it refuses an action
+                // without them): a target V, a target Q or a regulator flag on the action changes nothing in OLF's
+                // equations, so it changes nothing here. The P delta is composed like a load delta with q=0.
+                if (ga.getActivePowerValue().isEmpty() || ga.isActivePowerRelativeValue().isEmpty()) {
+                    return null;                             // OLF does not build such an action
                 }
                 com.powsybl.iidm.network.Generator gen = network.getGenerator(ga.getGeneratorId());
                 if (gen == null) {
@@ -255,8 +264,11 @@ final class GpuStrategyComposer {
         }
         generatorNetMove.forEach((g, d) -> loads.add(new LoadLoss(g.getBus(), d, 0)));
         return new BatchContingency(contingencyId + GpuBatchStatus.STRATEGY_KEY_SEP + strategy.getId(),
-                branches, ctgGens, loads, shifts, taps, List.of(), reclosed, ctgZiOutages, ctgHvdcs, List.of(), List.of(),
-                generatorActions);
+                // the parent's one-side openings and the zero-impedance tree OLF reaches the strategy with: the pair is
+                // the contingency's topology plus the actions (dropping them solved another network: 0.52 kV at B4 on a
+                // three-winding transformer outage)
+                branches, ctgGens, loads, shifts, taps, List.of(), reclosed, ctgZiOutages, ctgHvdcs, ctgSideOpens,
+                ctgStickyNonTreeZi, generatorActions);
     }
 
     /** Compiles a tap-position action (RTC or PST) into a per-scenario full-row override — the

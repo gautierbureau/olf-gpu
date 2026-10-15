@@ -7543,15 +7543,13 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         // the pair on the device, the contingency reported from the device
         assertStrategyMatchesCpu(network, contingencies, strategiesOf(ctgId, "close"), actions, 1, true,
                 p -> p.setMaxNewtonRaphsonIterations(8));
-        // ...and with a second strategy the device does not compose (a GeneratorAction carrying a target Q), which
-        // OLF starts from its own failed run of the contingency: that run has to happen
+        // ...and with a second strategy the device does not compose (two stages), which OLF starts from its own failed
+        // run of the contingency: that run has to happen
         List<com.powsybl.action.Action> actions2 = List.of(actions.get(0),
                 new com.powsybl.action.GeneratorActionBuilder().withId("closeAndUp2").withGeneratorId("B2-G")
-                        .withActivePowerRelativeValue(true).withActivePowerValue(10).withTargetQ(5).build());
+                        .withActivePowerRelativeValue(true).withActivePowerValue(10).build());
         List<com.powsybl.contingency.strategy.OperatorStrategy> strategies2 = new java.util.ArrayList<>(strategiesOf(ctgId, "close"));
-        strategies2.add(new com.powsybl.contingency.strategy.OperatorStrategy("s-closeAndUp2",
-                com.powsybl.contingency.ContingencyContext.specificContingency(ctgId),
-                new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of("close", "closeAndUp2")));
+        strategies2.add(twoStageStrategy("s-closeAndUp2", ctgId, "close", "closeAndUp2"));
         assertStrategyMatchesCpu(network, contingencies, strategies2, actions2, 1, true,
                 p -> p.setMaxNewtonRaphsonIterations(8));
         // A contingency that CONVERGES four times (reactive-limit switches in between), then runs out of iterations:
@@ -7564,9 +7562,7 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         assertStrategyMatchesCpu(network2, contingencies2, strategiesOf("L1-2-1", "close"), actions, 1, true,
                 p -> p.setMaxNewtonRaphsonIterations(8));
         List<com.powsybl.contingency.strategy.OperatorStrategy> strategies3 = new java.util.ArrayList<>(strategiesOf("L1-2-1", "close"));
-        strategies3.add(new com.powsybl.contingency.strategy.OperatorStrategy("s-closeAndUp2",
-                com.powsybl.contingency.ContingencyContext.specificContingency("L1-2-1"),
-                new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of("close", "closeAndUp2")));
+        strategies3.add(twoStageStrategy("s-closeAndUp2", "L1-2-1", "close", "closeAndUp2"));
         assertStrategyMatchesCpu(network2, contingencies2, strategies3, actions2, 1, true,
                 p -> p.setMaxNewtonRaphsonIterations(8));
     }
@@ -7589,6 +7585,75 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         List<com.powsybl.action.Action> actions = List.of(new com.powsybl.action.LoadActionBuilder().withId("more9")
                 .withLoadId(load9).withRelativeValue(true).withActivePowerValue(47.8).build());
         assertStrategyMatchesCpu(network, contingencies, strategiesOf(loadId, "more9"), actions, 0);
+    }
+
+    /** A strategy pair is solved on the zero-impedance tree OLF reaches it with: its contingency's. Opening coupler
+     *  z12 puts z23 back in the tree; a pair left on the base tree would hold z23 out and leave b2 hanging. */
+    @Test
+    void strategyPairKeepsItsContingencysCouplerTreeMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = GpuZiTreeReplayTest.couplerLoop();
+        network.getBusBreakerView().getBus("b2").getVoltageLevel().newLoad().setId("l2").setBus("b2").setConnectableBus("b2")
+                .setP0(0.5).setQ0(0.2).add();
+        List<Contingency> contingencies = List.of(new Contingency("z12", new BranchContingency("z12")));
+        List<com.powsybl.action.Action> actions = List.of(new com.powsybl.action.LoadActionBuilder().withId("more4")
+                .withLoadId("l4").withRelativeValue(true).withActivePowerValue(0.3).build());
+        assertStrategyMatchesCpu(network, contingencies, strategiesOf("z12", "more4"), actions, 2, false);
+    }
+
+    /** A TerminalsConnectionAction on a three-winding transformer opens or closes its three legs (OLF's
+     *  getBranchesByOriginalId). ieee14 with a three-winding transformer between B4, B7 and B9, in parallel with the
+     *  two-winding ones there: opening it after B4's load loss; after losing it, reclosing it or opening a line. A
+     *  pair keeps its contingency's one-side openings (the legs at the star bus). */
+    @Test
+    void threeWindingsTransformerConnectionActionMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = IeeeCdfNetworkFactory.create14();
+        var vl4 = network.getVoltageLevel("VL4");
+        vl4.getSubstation().orElseThrow().newThreeWindingsTransformer().setId("T3W")
+                .newLeg1().setVoltageLevel("VL4").setBus("B4").setConnectableBus("B4")
+                        .setRatedU(vl4.getNominalV()).setR(0.5).setX(20).setG(0).setB(0).add()
+                .newLeg2().setVoltageLevel("VL7").setBus("B7").setConnectableBus("B7")
+                        .setRatedU(network.getVoltageLevel("VL7").getNominalV()).setR(0.5).setX(20).setG(0).setB(0).add()
+                .newLeg3().setVoltageLevel("VL9").setBus("B9").setConnectableBus("B9")
+                        .setRatedU(network.getVoltageLevel("VL9").getNominalV()).setR(0.5).setX(20).setG(0).setB(0).add()
+                .add();
+        String loadId = loadAtBus(network, "B4").getId();
+        List<Contingency> contingencies = List.of(
+                new Contingency(loadId, new com.powsybl.contingency.LoadContingency(loadId)),
+                new Contingency("T3W", new com.powsybl.contingency.ThreeWindingsTransformerContingency("T3W")));
+        List<com.powsybl.action.Action> actions = List.of(
+                new com.powsybl.action.TerminalsConnectionActionBuilder().withId("open3w")
+                        .withNetworkElementId("T3W").withOpen(true).build(),
+                new com.powsybl.action.TerminalsConnectionActionBuilder().withId("close3w")
+                        .withNetworkElementId("T3W").withOpen(false).build(),
+                new com.powsybl.action.TerminalsConnectionActionBuilder().withId("open1011")
+                        .withNetworkElementId("L10-11-1").withOpen(true).build());
+        List<com.powsybl.contingency.strategy.OperatorStrategy> strategies = new java.util.ArrayList<>(strategiesOf(loadId, "open3w"));
+        // reclosing or opening the outaged transformer stays on the CPU: the contingency opened its legs on ONE side
+        strategies.addAll(strategiesOf("T3W", "close3w", "open1011", "open3w"));
+        assertStrategyMatchesCpu(network, contingencies, strategies, actions, 4);
+    }
+
+    /** OLF's LfGeneratorAction applies the active power only: a target Q, a target V or a regulator flag carried by
+     *  the same action changes nothing in OLF's equations, and these pairs run on the device. */
+    @Test
+    void generatorActionWithVoltageFieldsMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = IeeeCdfNetworkFactory.create14();
+        String loadId = loadAtBus(network, "B4").getId();
+        List<Contingency> contingencies = List.of(new Contingency(loadId, new com.powsybl.contingency.LoadContingency(loadId)));
+        List<com.powsybl.action.Action> actions = List.of(
+                new com.powsybl.action.GeneratorActionBuilder().withId("upQ").withGeneratorId("B2-G")
+                        .withActivePowerRelativeValue(true).withActivePowerValue(10).withTargetQ(5).build(),
+                new com.powsybl.action.GeneratorActionBuilder().withId("upV").withGeneratorId("B2-G")
+                        .withActivePowerRelativeValue(true).withActivePowerValue(10).withTargetV(140).build(),
+                new com.powsybl.action.GeneratorActionBuilder().withId("upOff").withGeneratorId("B2-G")
+                        .withActivePowerRelativeValue(false).withActivePowerValue(50).withVoltageRegulatorOn(false).build());
+        assertStrategyMatchesCpu(network, contingencies, strategiesOf(loadId, "upQ", "upV", "upOff"), actions, 4);
     }
 
     /** A GeneratorAction re-checks its generator's participation (OLF's reApplyActivePowerControlChecks): a target
@@ -7614,6 +7679,17 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
                     new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of(a)));
         }
         return out;
+    }
+
+    /** A strategy whose actions come in two always-applied stages: OLF applies both. */
+    private static com.powsybl.contingency.strategy.OperatorStrategy twoStageStrategy(String id, String ctgId,
+                                                                                    String action1, String action2) {
+        return new com.powsybl.contingency.strategy.OperatorStrategy(id,
+                com.powsybl.contingency.ContingencyContext.specificContingency(ctgId), List.of(
+                        new com.powsybl.contingency.strategy.ConditionalActions("stage1",
+                                new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of(action1)),
+                        new com.powsybl.contingency.strategy.ConditionalActions("stage2",
+                                new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of(action2))));
     }
 
     private static com.powsybl.action.Action genAction(String id, String gen, boolean relative, double value) {

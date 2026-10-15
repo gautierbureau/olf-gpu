@@ -112,18 +112,7 @@ class GpuZiTreeReplayTest extends AbstractLoadFlowNetworkFactory {
      *  that fix z12 stayed out of OLF's tree for every later contingency, and the replay copied that. */
     @Test
     void replayStartsEveryContingencyFromOlfsBaseTree() {
-        Network iidm = Network.create("coupler-loop", "code");
-        Bus b1 = createBus(iidm, "y", "b1");
-        createGenerator(b1, "g1", 2, 1.0);
-        Bus b2 = createBus(iidm, "y", "b2");
-        Bus b3 = createBus(iidm, "y", "b3");
-        Bus b4 = createBus(iidm, "x", "b4");
-        createLoad(b4, "l4", 2, 0.5);
-        createLine(iidm, b1, b2, "z12", 0.0, 0.0);
-        createLine(iidm, b2, b3, "z23", 0.0, 0.0);
-        createLine(iidm, b1, b3, "z13", 0.0, 0.0);
-        createLine(iidm, b3, b4, "l34", 0.1);
-        createLine(iidm, b1, b4, "l14", 0.1);
+        Network iidm = couplerLoop();
         LfNetwork network = Networks.load(iidm, new LfNetworkParameters()).get(0);
         Map<String, PropagatedContingency> pcs = PropagatedContingency.createList(iidm, List.of(
                         new Contingency("z12", new BranchContingency("z12")),
@@ -144,6 +133,23 @@ class GpuZiTreeReplayTest extends AbstractLoadFlowNetworkFactory {
                 .filter(b -> b.isZeroImpedance(com.powsybl.openloadflow.network.LoadFlowModel.AC)
                         && !b.isSpanningTreeEdge(com.powsybl.openloadflow.network.LoadFlowModel.AC))
                 .map(LfBranch::getId).toList());
+    }
+
+    /** Three couplers in a loop (z12, z23, z13; z23 out of the base tree) feeding a load over two lines. */
+    static Network couplerLoop() {
+        Network iidm = Network.create("coupler-loop", "code");
+        Bus b1 = createBus(iidm, "y", "b1");
+        createGenerator(b1, "g1", 2, 1.0);
+        Bus b2 = createBus(iidm, "y", "b2");
+        Bus b3 = createBus(iidm, "y", "b3");
+        Bus b4 = createBus(iidm, "x", "b4");
+        createLoad(b4, "l4", 2, 0.5);
+        createLine(iidm, b1, b2, "z12", 0.0, 0.0);
+        createLine(iidm, b2, b3, "z23", 0.0, 0.0);
+        createLine(iidm, b1, b3, "z13", 0.0, 0.0);
+        createLine(iidm, b3, b4, "l34", 0.1);
+        createLine(iidm, b1, b4, "l14", 0.1);
+        return iidm;
     }
 
     private static List<String> ids(List<LfBranch> branches) {

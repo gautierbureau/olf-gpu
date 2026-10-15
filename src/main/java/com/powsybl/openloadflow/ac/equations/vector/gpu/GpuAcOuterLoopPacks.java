@@ -915,18 +915,17 @@ public final class GpuAcOuterLoopPacks {
         // takes a share of it into its BUS_TARGET_P target. Default balance type PROPORTIONAL_TO_GENERATION_
         // P_MAX: per-bus factor = Σ (maxP / droop) over its participating generators, normalized to sum 1.
         //
-        // PARTICIPATING SLACK: if the slack/reference bus ITSELF has participating generators, OLF gives them
-        // a share too (it resets the reference generator and redistributes the full mismatch over ALL
-        // participants incl. the slack). The GPU has no BUS_TARGET_P at the slack to retarget, but it does not
-        // need one: by including the slack's factor in the NORMALIZATION DENOMINATOR (without emitting a row),
-        // the non-slack shares shrink to f_i/Σ_all and the slack bus naturally retains the remaining
-        // f_slack/Σ_all of the mismatch — exactly OLF's allocation.
+        // PARTICIPATING SLACK: if the slack/reference bus ITSELF has participating generators, OLF lists them with
+        // the other participants (it resets every one of them and water-fills the full mismatch over all). The
+        // slack's factor is in the NORMALIZATION DENOMINATOR, and its generators join the per-generator pack with
+        // no row (dgBus -1): they take their share, clamp at their own limits and leave the list like any other, so
+        // a saturated peer's remainder is renormalized over them too. The slack's placement is the sum of their
+        // moves (dsRetain / retainApplied).
         //
-        // SATURATION: per-bus headroom/footroom (Σ over participating gens of maxTargetP−targetP / minTargetP−
-        // targetP, with OLF's no-sign-change rule, useActiveLimits assumed true = the default) bound how much a
-        // bus may absorb. The batch kernel clamps each bus's CUMULATIVE delta to [footroom, headroom]; an
-        // over-allocation is clamped and its residual reappears at the slack, redistributed next outer pass to
-        // unsaturated buses ∝ their fixed factors — converging to OLF's water-filling fixed point.
+        // SATURATION: per-generator rooms (maxTargetP−targetP / minTargetP−targetP with OLF's no-sign-change rule)
+        // bound each generator's move; the water-fill removes a generator when it strictly overshoots and
+        // renormalizes over the rest, as GenerationActivePowerDistributionStep does. The per-bus headroom/footroom
+        // below remain for the bus-level aggregate.
         int dsSlackPhiRow = -1;
         double dsSlackTargetP = 0;
         double dsSlackFactor = 0;                                       // slack's own participation (denominator only)
@@ -966,6 +965,19 @@ public final class GpuAcOuterLoopPacks {
                     double[] m = dsParams.busMargins(bus);
                     dsSlackMarginUp = m[0];
                     dsSlackMarginDown = m[1];
+                }
+                // OLF's water-fill lists the slack bus's participating generators with every other participant,
+                // in bus order: they take a share, are clamped at their own limits and leave the list like any
+                // other, so a peer's saturated remainder is renormalized over them too. They join the generator
+                // pack with no row (dgBus -1); the slack's placement is the sum of their moves. Loads have no
+                // limits, so a load-based slack keeps its fixed share.
+                if (!dsParams.isLoadBased()) {
+                    for (LfGenerator g : bus.getGenerators()) {
+                        if (dsParams.factor(g) != 0) {
+                            addPackGenerator(g, -1, dsParams, dgBus, dgGenId, dgFactorRaw, dgMaxDelta, dgMinDelta,
+                                    dgMarginUp, dgMarginDown);
+                        }
+                    }
                 }
                 continue;
             }
@@ -1022,34 +1034,11 @@ public final class GpuAcOuterLoopPacks {
                 // and the limits.
                 busGenStart.add(dgFactorRaw.size());
                 for (LfGenerator g : bus.getGenerators()) {
-                    double gf = dsParams.factor(g);
-                    if (gf == 0) {
+                    if (dsParams.factor(g) == 0) {
                         continue;                            // OLF: isParticipating(gen) && factor != 0
                     }
-                    double tp = dsParams.anchorTargetP(g);
-                    if (System.getenv("OLF_GPU_DS_GEN_TRACE") != null) {
-                        System.err.println("GPU_DS_GEN idx=" + dgFactorRaw.size() + " bus=" + bus.getId()
-                                + " gen=" + g.getId() + " factor=" + gf
-                                + " targetP=" + g.getTargetP()
-                                + " maxTargetP=" + g.getMaxTargetP() + " minTargetP=" + g.getMinTargetP());
-                    }
-                    dgBus.add(dsPhiRow.size() - 1);
-                    dgGenId.add(g.getId());
-                    dgFactorRaw.add(gf);
-                    double[] rooms = dsParams.rooms(g, tp);  // with active limits off the sign rule still holds
-                    dgMaxDelta.add(rooms[0]);
-                    dgMinDelta.add(rooms[1]);
-                    if (dsParams.isRemainingMargin()) {
-                        double minP = g.getMinP();
-                        double maxP = g.getMaxP();
-                        if (tp < 0) {
-                            maxP = Math.min(maxP, 0);
-                        } else {
-                            minP = Math.max(minP, 0);
-                        }
-                        dgMarginUp.add(Math.max(0.0, maxP - tp));
-                        dgMarginDown.add(Math.max(0.0, tp - minP));
-                    }
+                    addPackGenerator(g, dsPhiRow.size() - 1, dsParams, dgBus, dgGenId, dgFactorRaw, dgMaxDelta, dgMinDelta,
+                            dgMarginUp, dgMarginDown);
                 }
                 busGenEnd.add(dgFactorRaw.size());
             }
@@ -1059,15 +1048,25 @@ public final class GpuAcOuterLoopPacks {
         for (int i = 0; i < dsFactor.length; i++) {
             dsFactor[i] = dsFactorRaw.get(i) / dsSum;
         }
-        double[] dgFactor = new double[dgFactorRaw.size()];     // SAME denominator, so Σ over a bus's
-        for (int i = 0; i < dgFactor.length; i++) {             // generators is exactly its dsFactor
-            dgFactor[i] = dgFactorRaw.get(i) / dsSum;
-        }
         // A pack with participants but no slack row is unusable; one with NEITHER participants nor a
         // participating slack means DS never fires. But a PARTICIPATING SLACK ALONE is kept (nds == 0,
         // dsSlackPhiRow >= 0): OLF then distributes the whole mismatch into the slack generator's own
         // target — no flow change, but the outer loop reports UNSTABLE and re-solves, and the device
         // must take that same extra polish run (slackOnlyDsCheck) to match the CPU trajectory.
+        if (dsSlackPhiRow < 0 || dsPhiRow.isEmpty()) {
+            // a participating slack alone keeps its own path (slackOnlyDsCheck): no generator pack
+            dgBus.clear();
+            dgFactorRaw.clear();
+            dgMaxDelta.clear();
+            dgMinDelta.clear();
+            dgMarginUp.clear();
+            dgMarginDown.clear();
+            dgGenId.clear();
+        }
+        double[] dgFactor = new double[dgFactorRaw.size()];     // SAME denominator, so Σ over a bus's
+        for (int i = 0; i < dgFactor.length; i++) {             // generators is exactly its dsFactor
+            dgFactor[i] = dgFactorRaw.get(i) / dsSum;
+        }
         if (dsSlackPhiRow < 0 || dsPhiRow.isEmpty() && dsSlackFactor <= 0) {
             dsPhiRow.clear();
             dsFactor = new double[0];
@@ -1099,6 +1098,38 @@ public final class GpuAcOuterLoopPacks {
                 GpuAcArrays.toDoubleArray(dgMarginUp), GpuAcArrays.toDoubleArray(dgMarginDown),
                 GpuAcArrays.toIntArray(busGenStart), GpuAcArrays.toIntArray(busGenEnd),
                 GpuAcArrays.toIntArray(dsBusNum), dgGenId.toArray(new String[0]));
+    }
+
+    /** One participating generator of the slack distribution, on DS row {@code dsRow} (-1: the slack bus's own,
+     *  which has no row): its factor, its rooms from the anchor and, for REMAINING_MARGIN, its margins. */
+    private static void addPackGenerator(LfGenerator g, int dsRow, GpuDsParams dsParams, List<Integer> dgBus,
+                                         List<String> dgGenId, List<Double> dgFactorRaw, List<Double> dgMaxDelta,
+                                         List<Double> dgMinDelta, List<Double> dgMarginUp, List<Double> dgMarginDown) {
+        double gf = dsParams.factor(g);
+        double tp = dsParams.anchorTargetP(g);
+        if (System.getenv("OLF_GPU_DS_GEN_TRACE") != null) {
+            System.err.println("GPU_DS_GEN idx=" + dgFactorRaw.size() + " bus=" + g.getBus().getId()
+                    + " gen=" + g.getId() + " factor=" + gf
+                    + " targetP=" + g.getTargetP()
+                    + " maxTargetP=" + g.getMaxTargetP() + " minTargetP=" + g.getMinTargetP());
+        }
+        dgBus.add(dsRow);
+        dgGenId.add(g.getId());
+        dgFactorRaw.add(gf);
+        double[] rooms = dsParams.rooms(g, tp);              // with active limits off the sign rule still holds
+        dgMaxDelta.add(rooms[0]);
+        dgMinDelta.add(rooms[1]);
+        if (dsParams.isRemainingMargin()) {
+            double minP = g.getMinP();
+            double maxP = g.getMaxP();
+            if (tp < 0) {
+                maxP = Math.min(maxP, 0);
+            } else {
+                minP = Math.max(minP, 0);
+            }
+            dgMarginUp.add(Math.max(0.0, maxP - tp));
+            dgMarginDown.add(Math.max(0.0, tp - minP));
+        }
     }
 
     /**

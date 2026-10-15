@@ -7360,7 +7360,7 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         network.getGenerator("B6-G").setMinP(0).setMaxP(100);
         network.getGenerator("B8-G").setMinP(0).setMaxP(100);
         // the slack's generator sits out, as on rte6515 and network.xiidm (a participating slack whose peers
-        // saturate is a separate gap of the parent contingencies)
+        // saturate: participatingSlackWithASaturatingPeerMatchesCpu)
         g1.newExtension(com.powsybl.iidm.network.extensions.ActivePowerControlAdder.class)
                 .withParticipate(false).add();
         String loadId = loadAtBus(network, "B4").getId();
@@ -7447,6 +7447,104 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         assertGpuMatchesCpu(network, List.of(new Contingency("B2-G",
                 new com.powsybl.contingency.GeneratorContingency("B2-G"))));
         assertEquals(1, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(), "B2-G outage on the device");
+    }
+
+    /** The slack bus's generator participates and a peer reaches its limit. OLF keeps the slack generators in the
+     *  water-fill list: the peer's leftover is renormalized over the survivors, the slack's included, in the same
+     *  distribution. Losing B4's load lowers generation; B2-G stops at its minP 38 MW, 2 MW down. */
+    @Test
+    void participatingSlackWithASaturatingPeerMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = IeeeCdfNetworkFactory.create14();
+        network.getGenerator("B1-G").setMinP(0).setMaxP(400);
+        network.getGenerator("B2-G").setMinP(38).setMaxP(200);
+        String loadId = loadAtBus(network, "B4").getId();
+        assertGpuMatchesCpu(network, List.of(new Contingency(loadId,
+                new com.powsybl.contingency.LoadContingency(loadId))));
+        assertEquals(1, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(), "load loss on the device");
+        // ...and the slack generator itself at its limit: losing B2-G's 40 MW, B1-G stops at maxP 240 MW (+8.4 MW)
+        // and the rest goes to B6-GP
+        Network network2 = IeeeCdfNetworkFactory.create14();
+        network2.getGenerator("B1-G").setMinP(0).setMaxP(240);
+        network2.getGenerator("B2-G").setMinP(0).setMaxP(200);
+        network2.getVoltageLevel("VL6").newGenerator().setId("B6-GP").setBus("B6").setConnectableBus("B6")
+                .setTargetP(20).setTargetQ(0).setVoltageRegulatorOn(false).setMinP(0).setMaxP(80).add();
+        assertGpuMatchesCpu(network2, List.of(new Contingency("B2-G",
+                new com.powsybl.contingency.GeneratorContingency("B2-G"))));
+        assertEquals(1, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(), "B2-G outage on the device");
+        // ...and the slack generator on a capability curve: its limits follow its own distributed P
+        Network network3 = IeeeCdfNetworkFactory.create14();
+        // (B1-G absorbs about 17 MVAr, so it stays at min Q, which rises 2 MVAr per 100 MW)
+        network3.getGenerator("B1-G").setMinP(0).setMaxP(400).newReactiveCapabilityCurve()
+                .beginPoint().setP(0).setMinQ(-10).setMaxQ(100).endPoint()
+                .beginPoint().setP(400).setMinQ(-2).setMaxQ(100).endPoint()
+                .add();
+        network3.getGenerator("B2-G").setMinP(38).setMaxP(200);
+        assertGpuMatchesCpu(network3, List.of(new Contingency(loadId,
+                new com.powsybl.contingency.LoadContingency(loadId))));
+        assertEquals(1, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(), "load loss on the device");
+        // ...and a small loss after which OLF's slack check stays STABLE: the loss pre-distribution alone places it.
+        // Losing a 5 MW load at B4, B2-G stops at its minP 44.5 MW.
+        Network network4 = IeeeCdfNetworkFactory.create14();
+        network4.getGenerator("B1-G").setMinP(0).setMaxP(400);
+        network4.getGenerator("B2-G").setTargetP(45).setMinP(44.5).setMaxP(200);
+        network4.getVoltageLevel("VL4").newLoad().setId("B4-SMALL").setBus("B4").setConnectableBus("B4")
+                .setP0(5).setQ0(0).add();
+        String smallLoadId = "B4-SMALL";
+        assertGpuMatchesCpu(network4, List.of(new Contingency(smallLoadId,
+                new com.powsybl.contingency.LoadContingency(smallLoadId))));
+        assertEquals(1, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(), "load loss on the device");
+        // ...and two generators on the slack bus, the second one stopped at its minP by the BASE load flow (B6-GP's
+        // 20 MW are surplus): every contingency starts from the base's per-generator split of the slack's share
+        Network network5 = IeeeCdfNetworkFactory.create14();
+        network5.getGenerator("B1-G").setMinP(0).setMaxP(400);
+        network5.getGenerator("B2-G").setMinP(0).setMaxP(200);
+        network5.getVoltageLevel("VL6").newGenerator().setId("B6-GP").setBus("B6").setConnectableBus("B6")
+                .setTargetP(20).setTargetQ(0).setVoltageRegulatorOn(false).setMinP(0).setMaxP(80).add();
+        network5.getVoltageLevel("VL1").newGenerator().setId("B1-G2").setBus("B1").setConnectableBus("B1")
+                .setTargetP(10).setTargetQ(0).setVoltageRegulatorOn(false).setMinP(9.5).setMaxP(300).add();
+        String loadId5 = loadAtBus(network5, "B4").getId();
+        assertGpuMatchesCpu(network5, List.of(new Contingency(loadId5,
+                new com.powsybl.contingency.LoadContingency(loadId5))));
+        assertEquals(1, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(), "load loss on the device");
+    }
+
+    /** Strategy pairs whose parent water-filled over a participating slack with a saturated peer: each pair starts
+     *  from the slack generator's own parent move. */
+    @Test
+    void participatingSlackStrategyPairsMatchCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = IeeeCdfNetworkFactory.create14();
+        network.getGenerator("B1-G").setMinP(0).setMaxP(400);
+        network.getGenerator("B2-G").setMinP(38).setMaxP(200);
+        String loadId = loadAtBus(network, "B4").getId();
+        List<Contingency> contingencies = List.of(new Contingency(loadId,
+                new com.powsybl.contingency.LoadContingency(loadId)));
+        List<com.powsybl.action.Action> actions = List.of(
+                new com.powsybl.action.GeneratorActionBuilder().withId("up2")
+                        .withGeneratorId("B2-G").withActivePowerRelativeValue(true).withActivePowerValue(20).build(),
+                new com.powsybl.action.TerminalsConnectionActionBuilder().withId("open1011")
+                        .withNetworkElementId("L10-11-1").withOpen(true).build(),
+                new com.powsybl.action.GeneratorActionBuilder().withId("up1")
+                        .withGeneratorId("B1-G").withActivePowerRelativeValue(true).withActivePowerValue(10).build(),
+                new com.powsybl.action.GeneratorActionBuilder().withId("set1")
+                        .withGeneratorId("B1-G").withActivePowerRelativeValue(false).withActivePowerValue(220).build());
+        List<com.powsybl.contingency.strategy.OperatorStrategy> strategies = List.of(
+                new com.powsybl.contingency.strategy.OperatorStrategy("sUp1",
+                        com.powsybl.contingency.ContingencyContext.specificContingency(loadId),
+                        new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of("up1")),
+                new com.powsybl.contingency.strategy.OperatorStrategy("sSet1",
+                        com.powsybl.contingency.ContingencyContext.specificContingency(loadId),
+                        new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of("set1")),
+                new com.powsybl.contingency.strategy.OperatorStrategy("sUp2",
+                        com.powsybl.contingency.ContingencyContext.specificContingency(loadId),
+                        new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of("up2")),
+                new com.powsybl.contingency.strategy.OperatorStrategy("sOpen",
+                        com.powsybl.contingency.ContingencyContext.specificContingency(loadId),
+                        new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of("open1011")));
+        assertStrategyMatchesCpu(network, contingencies, strategies, actions, 5);
     }
 
     private static com.powsybl.iidm.network.Load loadAtBus(Network network, String busId) {

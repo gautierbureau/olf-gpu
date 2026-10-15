@@ -108,6 +108,9 @@ public final class GpuBatchForcedTargetQ {
                 if (curve == null || slot < 0 || dsParams.factor(gen) <= 0) {
                     continue;                                // its clamp cannot move: the base target stays exact
                 }
+                if (gpuData.dgBus()[slot] < 0) {
+                    continue;                                // the slack bus's own (no row): its clamp stays at base P
+                }
                 if (gen.getGeneratorControlType() == LfGenerator.GeneratorControlType.REMOTE_REACTIVE_POWER) {
                     throw new PowsyblException("GPU AC solver: forced target Q of generator " + gen.getId()
                             + " on a reactive-power-controlled bus is not supported");

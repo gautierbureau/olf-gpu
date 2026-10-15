@@ -316,9 +316,14 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
             }
         }
         double distributed = retain[0];                     // the slack's retained share + the participants' below
+        boolean slackInPack = false;                        // the slack's own generators listed (DS row -1)
         if (genCum != null && data.dgGenId() != null && genCum.length >= data.dgGenId().length) {
             for (int g = 0; g < data.dgGenId().length; g++) {
-                distributed += genCum[g];
+                if (data.dgBus()[g] < 0) {
+                    slackInPack = true;                     // its move is the retained share already counted
+                } else {
+                    distributed += genCum[g];
+                }
                 LfGenerator gen = genById.get(data.dgGenId()[g]);
                 if (gen != null) {
                     gen.setTargetP(dsParams.anchorTargetP(gen) + genCum[g]);
@@ -338,7 +343,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
             }
         }
         lastDistributedActivePower = distributed;
-        if (slackBus != null && retain[0] != 0) {
+        if (slackBus != null && retain[0] != 0 && !slackInPack) {
             setAnchoredShare(slackBus, retain[0], dsParams);
         }
     }

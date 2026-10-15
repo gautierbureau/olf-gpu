@@ -64,6 +64,10 @@ final class GpuBatchLossPreDistribution {
             return null;
         }
         boolean dirUp = mismatch > 0;
+        int ngen = gpuData.dgBus() == null ? 0 : gpuData.dgBus().length;
+        // The slack bus's own generators in the generator pack (dgBus -1): they are water-filled with the others,
+        // clamped at their own limits, so the whole mismatch goes into the list and the slack's share is theirs.
+        boolean slackInPack = slackInPack(gpuData);
         // fs = the participants' collective share of the mismatch = 1 - rho, with rho the slack's
         // retained share. With every participant present that is just Σf. With some stranded in
         // another synchronous component it is NOT: OLF renormalizes over the survivors, so the slack's
@@ -99,7 +103,7 @@ final class GpuBatchLossPreDistribution {
             fs = fsActive == fsAll || fsActive + rho <= 0
                     ? fsActive
                     : fsActive / (fsActive + rho);
-            if (fs <= 0 && rho > 0) {
+            if (fs <= 0 && rho > 0 && !slackInPack) {
                 // Only the slack bus's generators are left to participate: OLF puts the whole mismatch on
                 // them. The device carries it in the slack's retained share; the result reports it.
                 double[] out = new double[nds + 1];
@@ -107,16 +111,19 @@ final class GpuBatchLossPreDistribution {
                 return out;
             }
         }
+        if (slackInPack) {
+            fs = 1.0;
+        }
         if (fs <= 0) {
             return null;
         }
         double rem = fs * mismatch;                          // the participants' collective share of the loss
         double[] cum = new double[nds];
+        double slackShare = 0;
         // PER-GENERATOR, exactly as the kernel and exactly as OLF: the seed and the device's own
         // water-fill have to be the same function, or the device re-derives from an anchor the seed
         // never produced. The bus-aggregate loop below stays for the cases the generator arrays do
         // not cover (a pack built without them).
-        int ngen = gpuData.dgBus() == null ? 0 : gpuData.dgBus().length;
         if (ngen > 0) {
             double[] genCum = new double[ngen];
             boolean[] removed = new boolean[ngen];
@@ -140,8 +147,7 @@ final class GpuBatchLossPreDistribution {
             for (int iter = 0; iter < ngen && Math.abs(rem) > P_RESIDUE_EPS; iter++) {
                 double fsumActive = 0.0;
                 for (int g = 0; g < ngen; g++) {
-                    if (removed[g] || (gpuData.dgBus()[g] == ovBus && !ovPerGen)
-                            || islanded != null && islanded[gpuData.dgBus()[g]]) {
+                    if (removed[g] || excluded(gpuData.dgBus()[g], ovBus, ovPerGen, islanded)) {
                         continue;
                     }
                     fsumActive += fWork[g];
@@ -169,8 +175,7 @@ final class GpuBatchLossPreDistribution {
                 }
                 double done = 0.0;
                 for (int g = 0; g < ngen; g++) {
-                    if (removed[g] || (gpuData.dgBus()[g] == ovBus && !ovPerGen)
-                            || islanded != null && islanded[gpuData.dgBus()[g]]) {
+                    if (removed[g] || excluded(gpuData.dgBus()[g], ovBus, ovPerGen, islanded)) {
                         continue;
                     }
                     fWork[g] /= fsumActive;
@@ -211,6 +216,11 @@ final class GpuBatchLossPreDistribution {
             }
             if (genMovesOut != null) {
                 System.arraycopy(genCum, 0, genMovesOut, 0, ngen);
+            }
+            for (int g = 0; g < ngen; g++) {
+                if (gpuData.dgBus()[g] < 0) {
+                    slackShare += genCum[g];
+                }
             }
             for (int i = 0; i < nds; i++) {
                 if (islanded != null && islanded[i]) {
@@ -265,8 +275,26 @@ final class GpuBatchLossPreDistribution {
         }
         double[] out = new double[nds + 1];
         System.arraycopy(cum, 0, out, 0, nds);
-        out[nds] = (1.0 - fs) / fs * absorbed;               // the slack's own share, pair-leg convention
+        // the slack's own share: its generators' moves, or with them outside the list the pair-leg convention
+        out[nds] = slackInPack ? slackShare : (1.0 - fs) / fs * absorbed;
         return out;
+    }
+
+    /** Whether the slack bus's own participating generators are in the generator pack (DS row -1). */
+    static boolean slackInPack(GpuAcData gpuData) {
+        int[] dgBus = gpuData.dgBus();
+        for (int g = 0; dgBus != null && g < dgBus.length; g++) {
+            if (dgBus[g] < 0) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Whether generator pack entry on DS row {@code bus} sits out: the outaged bus's aggregate, or islanded. A slack
+     *  generator (row -1) is neither. */
+    private static boolean excluded(int bus, int ovBus, boolean ovPerGen, boolean[] islanded) {
+        return bus >= 0 && (bus == ovBus && !ovPerGen || islanded != null && islanded[bus]);
     }
 
     /** A generator's factor under the run's balance type — the margins are direction-dependent. */

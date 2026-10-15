@@ -5870,7 +5870,7 @@ __global__ void rlCurveLimitsBatch(int nrl, int nScenarios, int ncv, int n, int 
         // VL-6231_0) had 0.566571 - the same unit halves at the same P - and the 9.4e-3 pu of reactive
         // power that put on the coupler moved the slack mismatch by 9.6e-6 pu, the whole 9.56e-4 MW
         // distributed-power gap.
-        if (slot >= 0 && dgBus != nullptr && dsPhiRow != nullptr) {
+        if (slot >= 0 && dgBus != nullptr && dsPhiRow != nullptr && dgBus[slot] >= 0) {   // -1: the slack's own
             pRow = dsRowOf(dsPhiRow, dsRowOv, s, nds, dgBus[slot]);
         }
         // This generator's OWN movement, straight from the distributed-slack water-fill, which clamps
@@ -7261,6 +7261,16 @@ __host__ __device__ inline int dsRowOf(const int* dsPhiRow, const int* dsRowOv, 
     return dsPhiRow[i];
 }
 
+// Whether the slack bus's own participating generators are in the per-generator pack (dgBus -1, no row).
+__host__ __device__ inline bool slackGeneratorsInPack(int ngen, const int* dgBus) {
+    for (int g = 0; g < ngen; g++) {
+        if (dgBus[g] < 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
 __global__ void computeSlackRetain(int nScenarios, int n, int nds, int slackPhiRowBase, const int* slackRowOv, double slackTargetP,
                                    double oneMinusFactorSum, const int* dsPhiRow, const int* dsRowOv,
                                    const double* dsBaseTargetP,
@@ -7270,10 +7280,28 @@ __global__ void computeSlackRetain(int nScenarios, int n, int nds, int slackPhiR
                                    const double* dsAnchorShift, const double* dsSlackShift,
                                    int dsMode, const double* dsMarginUp, const double* dsMarginDown,
                                    double slackMarginUp, double slackMarginDown,
-                                   const char* dsIslanded, const double* dsFactor, const double* dsOvFactorDelta) {
+                                   const char* dsIslanded, const double* dsFactor, const double* dsOvFactorDelta,
+                                   int ngen, const int* dgBus, const double* dgStart, const double* retainApplied) {
     int s = blockIdx.x * blockDim.x + threadIdx.x;
     if (s >= nScenarios) return;
     if (!rlActive[s]) return;
+    if (slackGeneratorsInPack(ngen, dgBus)) {
+        // The slack's generators are in the water-fill list: its share is what the last distribution gave them
+        // (clamped like anyone's), not a fixed fraction of the total. Before any pass in this solve that is the
+        // loss pre-distribution's move of them (a pair starts at its parent's, which its slack target holds).
+        double placed = 0.0;
+        if (retainApplied != nullptr && !isnan(retainApplied[s])) {
+            placed = retainApplied[s];
+        } else if (dgStart != nullptr) {
+            for (int g = 0; g < ngen; g++) {
+                if (dgBus[g] < 0) {
+                    placed += dgStart[(size_t) s * ngen + g];
+                }
+            }
+        }
+        retain[s] = placed;
+        return;
+    }
     int slackPhiRow = slackRowOv != nullptr && slackRowOv[s] >= 0 ? slackRowOv[s] : slackPhiRowBase;   // relocated slack
     double absorbed = 0.0;
     double fsActive = 0.0;                                   // Σ f over the participants still in the main component
@@ -7427,6 +7455,13 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
         // every participant stranded and no slack share (rho is 1 minus a normalized sum: zero up to rounding)
         noCapacity = !(fsActive > 0.0) && rho < 1e-12;
     }
+    // The slack's own generators in the list: the water-fill places the WHOLE total, theirs included, and dsRetain
+    // is what they hold now, so rem is OLF's slack mismatch itself and the gate needs no scaling.
+    bool slackInPack = ngen > 0 && slackGeneratorsInPack(ngen, dgBus);
+    if (slackInPack) {
+        fsGlobal = 1.0;
+        noCapacity = false;
+    }
     if (dbgTrace && s == dbgTrace - 1) {
         printf("[DS-GATE] slackMismatch=%.9f retain=%.9f rem=%.9f fsGlobal=%.9f tol=%.9f slackTgt=%.9f fire=%d\n",
                qBuf[(size_t) s * n + slackPhiRow] - slackTgt, dsRetain[s], rem, fsGlobal, slackDistTol, slackTgt,
@@ -7567,9 +7602,9 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
         for (int iter = 0; iter < ngen && fabs(rem) > residueEps; iter++) {
             double fsumActive = 0.0;                         // normalizeParticipationFactors, over the remaining
             for (int g = 0; g < ngen; g++) {
-                int i = dgBus[g];
-                if (genRemoved[(size_t) s * ngen + g] || (ov == i && !ovPerGen)
-                        || (dsIslanded != nullptr && dsIslanded[(size_t) s * nds + i])) {
+                int i = dgBus[g];                            // -1: a slack generator, never islanded nor outaged here
+                if (genRemoved[(size_t) s * ngen + g] || (i >= 0 && ((ov == i && !ovPerGen)
+                        || (dsIslanded != nullptr && dsIslanded[(size_t) s * nds + i])))) {
                     continue;
                 }
                 fsumActive += genFactorWork[(size_t) s * ngen + g];
@@ -7600,9 +7635,9 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
             }
             double done = 0.0;
             for (int g = 0; g < ngen; g++) {
-                int i = dgBus[g];
-                if (genRemoved[(size_t) s * ngen + g] || (ov == i && !ovPerGen)
-                        || (dsIslanded != nullptr && dsIslanded[(size_t) s * nds + i])) {
+                int i = dgBus[g];                            // -1: a slack generator, never islanded nor outaged here
+                if (genRemoved[(size_t) s * ngen + g] || (i >= 0 && ((ov == i && !ovPerGen)
+                        || (dsIslanded != nullptr && dsIslanded[(size_t) s * nds + i])))) {
                     continue;
                 }
                 // normalizeParticipationFactors: divide the STORED factor, then use it.
@@ -7664,6 +7699,15 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
                        iter, fsumActive, rem, done);
             }
             rem -= done;
+        }
+        if (slackInPack && retainApplied != nullptr) {
+            double placed = 0.0;                             // the slack's share of THIS distribution (write-back)
+            for (int g = 0; g < ngen; g++) {
+                if (dgBus[g] < 0) {
+                    placed += genCum[(size_t) s * ngen + g];
+                }
+            }
+            retainApplied[s] = placed;
         }
     } else {
     for (int iter = 0; iter < nds && fabs(rem) > residueEps; iter++) {
@@ -13382,7 +13426,9 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                     ctx->dsMode == 1 ? ctx->dDsMarginDown.as<double>() : nullptr,
                     ctx->dsSlackMarginUp, ctx->dsSlackMarginDown,
                     ctx->nDsIslanded > 0 ? ctx->dDsIslanded.as<char>() : nullptr,
-                    ctx->dDsFactor.as<double>(), hasDsOverride ? dDsOvFactorDelta.as<double>() : nullptr);
+                    ctx->dDsFactor.as<double>(), hasDsOverride ? dDsOvFactorDelta.as<double>() : nullptr,
+                    ctx->ngen, ctx->ngen > 0 ? ctx->dgBus.as<int>() : nullptr,
+                    ctx->hasDgStart ? ctx->dDgStart.as<double>() : nullptr, ctx->dDsRetainApplied.as<double>());
             if (!ctx->dDsResidual.p) ctx->dDsResidual.alloc(nS * sizeof(char));
             CUDA_CHECK(cudaMemsetAsync(ctx->dDsResidual.p, 0, nS * sizeof(char), ctx->stream));
             distributeSlackBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(ctx->nds, nS, n, SLACK_DIST_TOL, P_RESIDUE_EPS,

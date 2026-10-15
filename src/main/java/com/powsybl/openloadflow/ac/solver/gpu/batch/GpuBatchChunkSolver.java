@@ -1692,7 +1692,8 @@ final class GpuBatchChunkSolver {
                                 preDistributed += share;
                             }
                             preDistributedByIndex[preIdx] = preDistributed;
-                            if (preDistributed == shares[nds] && shares[nds] != 0) {
+                            if (preDistributed == shares[nds] && shares[nds] != 0
+                                    && !GpuBatchLossPreDistribution.slackInPack(gpuData)) {
                                 // Only the slack bus's generators participate: OLF moved their target by the whole
                                 // loss, and its slack check measures against that target. The device's slack-only
                                 // pass (distributeSlackBatch) measures against slackTargetP + dsSlackShift.
@@ -1947,6 +1948,24 @@ final class GpuBatchChunkSolver {
                                 if (parentMoves != null) {
                                     System.arraycopy(parentMoves, 0, dgAnchor, s * ngen, ngen);
                                     System.arraycopy(parentMoves, 0, dgSeedAnchor, s * ngen, ngen);
+                                    if (dsSlackShift != null && GpuBatchLossPreDistribution.slackInPack(gpuData)) {
+                                        // the slack's generators are listed: the parent left them at their own moves,
+                                        // except one an absolute action restarts from its value (the action's own
+                                        // move of the slack target carries that)
+                                        java.util.Set<String> absolute = new java.util.HashSet<>();
+                                        for (BatchContingency.GeneratorMove m : contingencies.get(group.get(chunkStart + s)).generatorActions()) {
+                                            if (m.absolute()) {
+                                                absolute.add(m.generator().getId());
+                                            }
+                                        }
+                                        double slackMoves = 0;
+                                        for (int g = 0; g < ngen; g++) {
+                                            if (gpuData.dgBus()[g] < 0 && !absolute.contains(gpuData.dgGenId()[g])) {
+                                                slackMoves += parentMoves[g];
+                                            }
+                                        }
+                                        dsSlackShift[s] = slackMoves;
+                                    }
                                 }
                                 for (BatchContingency.GeneratorMove m : contingencies.get(group.get(chunkStart + s)).generatorActions()) {
                                     int g = dgSlotOf(gpuData, m.generator().getId());
@@ -2848,7 +2867,9 @@ final class GpuBatchChunkSolver {
                     continue;
                 }
                 for (int g = 0; g < ngen; g++) {
-                    participants += genCum[s * ngen + g];
+                    if (gpuData.dgBus()[g] >= 0) {           // the slack's own generators are in retain
+                        participants += genCum[s * ngen + g];
+                    }
                 }
             } else {                                         // bus-level participants: targets from the anchor
                 if (targets == null) {

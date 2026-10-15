@@ -1420,6 +1420,9 @@ final class GpuBatchQualification {
         java.util.Arrays.fill(relocatedSlackRow, -1);
         double[] relocatedSlackShift = new double[contingencies.size()];
         int islandingCount = 0;
+        // per contingency id: the buses it islands, and the branches it opens itself
+        java.util.Map<String, Set<Integer>> islandedByContingency = new java.util.HashMap<>();
+        java.util.Map<String, List<LfBranch>> openedByContingency = new java.util.HashMap<>();
         for (int i = 0; i < qualifications.size(); i++) {
             GpuBatchContingencyValidator.Qualification q = qualifications.get(i);
             if (!q.qualified()) {
@@ -1433,6 +1436,36 @@ final class GpuBatchQualification {
                 continue;
             }
             BatchContingency c = contingencies.get(i);
+            // Reclosing into a multi-bus island. OLF's reclose re-adds the reclosed branch to the post-contingency
+            // connectivity, from which the contingency removed the island's own branches too (both their ends were
+            // lost), so only the reclosed branch's end comes back and the rest of the island stays out. The device
+            // reconnects the whole island (rte6515 LINE-3273-1812, a 10-bus island reclosed: the device redistributed
+            // 154.7 MW of the island's load, OLF nothing, 3 kV at VL-1812). A pair that brings back any other bus: CPU.
+            Set<Integer> islandedHere = new java.util.HashSet<>();
+            q.islandedBuses().forEach(b -> islandedHere.add(b.getNum()));
+            int strategySep = c.contingencyId().indexOf(GpuBatchStatus.STRATEGY_KEY_SEP);
+            if (strategySep < 0) {
+                islandedByContingency.put(c.contingencyId(), islandedHere);
+                openedByContingency.put(c.contingencyId(), c.outagedBranches());
+            } else {
+                String parentId = c.contingencyId().substring(0, strategySep);
+                Set<Integer> parentIslanded = islandedByContingency.getOrDefault(parentId, Set.of());
+                Set<Integer> reclosedEnds = new java.util.HashSet<>();
+                for (LfBranch b : openedByContingency.getOrDefault(parentId, List.of())) {
+                    if (!c.outagedBranches().contains(b)) {
+                        if (b.getBus1() != null) {
+                            reclosedEnds.add(b.getBus1().getNum());
+                        }
+                        if (b.getBus2() != null) {
+                            reclosedEnds.add(b.getBus2().getNum());
+                        }
+                    }
+                }
+                if (parentIslanded.stream().anyMatch(num -> !islandedHere.contains(num) && !reclosedEnds.contains(num))) {
+                    refuse(c, "PAIR:RECLOSE_INTO_ISLAND");
+                    continue;
+                }
+            }
             // A GeneratorAction moves its generator's target P, and with reactive limits its capability curve moves
             // with it. The curve and forced-target-Q channels track a generator's P only when it is in the
             // distributed-slack generator pack (its anchor and its own move); any other curve generator keeps its

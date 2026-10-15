@@ -7709,6 +7709,43 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         return network;
     }
 
+    /** Reclosing the line whose loss islanded loads. OLF re-adds the reclosed branch to the post-contingency
+     *  connectivity, from which the contingency also removed the island's own branches (both ends lost): the branch's
+     *  end comes back, the rest of the island stays out. ieee14 with a radial chain B14 - B15 - B16, a load on each:
+     *  losing L15-16-1 islands B16 alone, which its reclose brings back whole, on the device as in OLF (and a B16
+     *  load the contingency names stays lost); losing L14-15-1 islands B15 and B16, and its reclose brings back B15
+     *  only, where the device would reconnect both (rte6515 LINE-3273-1812: 154.7 MW, 3 kV): CPU. */
+    @Test
+    void recloseIntoAnIslandMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = ieee14WithRadialBus(vl -> {
+            vl.newLoad().setId("B15-L").setBus("B15").setConnectableBus("B15").setP0(20).setQ0(5).add();
+            vl.getBusBreakerView().newBus().setId("B16").add();
+            vl.newLoad().setId("B16-L").setBus("B16").setConnectableBus("B16").setP0(15).setQ0(4).add();
+        });
+        network.newLine().setId("L15-16-1").setVoltageLevel1("VL15").setBus1("B15").setVoltageLevel2("VL15").setBus2("B16")
+                .setR(0.05).setX(0.2).setG1(0).setB1(0).setG2(0).setB2(0).add();
+        List<com.powsybl.action.Action> actions = List.of(
+                new com.powsybl.action.TerminalsConnectionActionBuilder().withId("close15").withNetworkElementId("L14-15-1")
+                        .withOpen(false).build(),
+                new com.powsybl.action.TerminalsConnectionActionBuilder().withId("close16").withNetworkElementId("L15-16-1")
+                        .withOpen(false).build());
+        List<Contingency> contingencies = List.of(new Contingency("L15-16-1", new BranchContingency("L15-16-1")),
+                new Contingency("L15-16-1+B16-L", List.of(new BranchContingency("L15-16-1"),
+                        new com.powsybl.contingency.LoadContingency("B16-L"))),
+                new Contingency("L14-15-1", new BranchContingency("L14-15-1")));
+        List<com.powsybl.contingency.strategy.OperatorStrategy> strategies = new java.util.ArrayList<>(strategiesOf("L15-16-1", "close16"));
+        strategies.add(new com.powsybl.contingency.strategy.OperatorStrategy("s-close16-named",
+                com.powsybl.contingency.ContingencyContext.specificContingency("L15-16-1+B16-L"),
+                new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of("close16")));
+        strategies.add(new com.powsybl.contingency.strategy.OperatorStrategy("s-close15",
+                com.powsybl.contingency.ContingencyContext.specificContingency("L14-15-1"),
+                new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of("close15")));
+        // the three contingencies and the two single-bus reclosures; the two-bus one is OLF's
+        assertStrategyMatchesCpu(network, contingencies, strategies, actions, 5);
+    }
+
     /** A synchronous condenser pinned at its reactive limit in the base, islanded by the contingency. A pair keeping
      *  the island must leave its frozen rows alone: stamping the continued pin turned the islanded bus's V row into a
      *  reactive balance (rte6515 LINE-3477-2893, 0.0075 MW). A pair reclosing it re-energizes the bus where OLF does:

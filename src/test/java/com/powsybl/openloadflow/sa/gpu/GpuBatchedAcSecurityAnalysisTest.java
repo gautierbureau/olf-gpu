@@ -6148,6 +6148,38 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
                 "every contingency must batch (or the test proves nothing)");
     }
 
+    /** Strategy pairs on the coupler-joined curve sections. Opening the coupler (c01) brings the child's balance home
+     *  to its own angle row: the pair re-anchors its distribution on what the parent absorbed THERE, not on the
+     *  coupler's dummy row, a pinned stub the parent's capture read as absorption (rte6515 BUS-1359_BBS_2: 19.27 MW).
+     *  Losing g3 (the slack out of the distribution) moves the slack's share of the parent: none. Losing g3 pins both sections, so the group loses control and the pilot's
+     *  own row hosts its reactive balance: a pair starts with that flip at the parent's frozen target, which the
+     *  seed took from the base limit instead (rte6515 BUS-6066_BBS_1, VL-6231_0: 3.8e-5 kV even for a no-op). */
+    @org.junit.jupiter.api.Test
+    void strategiesOnCoupledCurveSectionsMatchCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = pilotSelfCurveNetwork(true, 100);
+        List<Contingency> ctgs = List.of(
+                new Contingency("c01", new com.powsybl.contingency.SwitchContingency("c01")),
+                new Contingency("g3", new com.powsybl.contingency.GeneratorContingency("g3")));
+        List<com.powsybl.action.Action> actions = List.of(
+                new com.powsybl.action.LoadActionBuilder().withId("more4").withLoadId("ld4").withRelativeValue(true)
+                        .withActivePowerValue(20).build(),
+                new com.powsybl.action.LoadActionBuilder().withId("same4").withLoadId("ld4").withRelativeValue(true)
+                        .withActivePowerValue(0).build());
+        List<com.powsybl.contingency.strategy.OperatorStrategy> strategies = new java.util.ArrayList<>();
+        for (Contingency c : ctgs) {
+            for (String a : List.of("more4", "same4")) {
+                strategies.add(new com.powsybl.contingency.strategy.OperatorStrategy("s-" + a + "-" + c.getId(),
+                        com.powsybl.contingency.ContingencyContext.specificContingency(c.getId()),
+                        new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of(a)));
+            }
+        }
+        assertStrategyMatchesCpu(network, ctgs, strategies, actions, 6, true,
+                p -> p.setSlackBusSelectionMode(com.powsybl.openloadflow.network.SlackBusSelectionMode.NAME)
+                        .setSlackBusesIds(List.of("vl0_b")));
+    }
+
     /** A merged control whose group is lost in the BASE (both sections pinned at MAX_Q under a heavy local reactive
      *  load) and pinned at the other limit by the contingency (the load lost: both absorb down to MIN_Q). A pair starts
      *  with the pilot's row as the reactive balance the base activation laid out, at the BASE pin; OLF continues the

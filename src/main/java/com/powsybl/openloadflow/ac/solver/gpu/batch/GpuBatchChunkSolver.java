@@ -1976,15 +1976,19 @@ final class GpuBatchChunkSolver {
                                     // parent-absorbed target plus the pair's own composed delta — so the first
                                     // inner solve runs at the CPU leg's starting operating point (losses are
                                     // nonlinear along the path). A pair override on the row (gen action /
-                                    // gen-outage pTarget) is base-referenced: add the parent absorption to it.
-                                    int flat = s * n + row;
-                                    overrides.compose(flat, baseTargets[row], shift);
+                                    // gen-outage pTarget) is base-referenced: add the parent absorption to it. On the row
+                                    // this pair solves the balance on (its own coupler openings), from the participant's
+                                    // own base target, as the loss pre-distribution composes its shares.
+                                    int pairRow = dsRowOvBySlot[s] != null && dsRowOvBySlot[s][i] >= 0 ? dsRowOvBySlot[s][i] : row;
+                                    overrides.compose(s * n + pairRow, baseTargets[row], shift);
                                 }
-                                // the slack's own absorption in the parent's distribution, proportional to the
-                                // participants' share at the PARENT's factor sum (reweighted if the parent lost
-                                // a participating generator)
+                                // the slack's own absorption in the parent's distribution: its own factor's share
+                                // against the participants that distribution renormalized over (the kernel's retain),
+                                // not one minus their sum - a lost or islanded participant's factor is not the
+                                // slack's (pilotSelfCurveNetwork losing g3, the slack out of the distribution:
+                                // 0.2234 pu of slack target where OLF has none, 2.1 MW distributed against 20.2)
                                 double parentFs = parentDs[nds];
-                                dsSlackShift[s] = parentFs > 0 ? (1.0 - parentFs) / parentFs * absorbedSum : 0.0;
+                                dsSlackShift[s] = parentFs > 0 ? (1.0 - dsFactorSum) / parentFs * absorbedSum : 0.0;
                             }
                             if (dgAnchor != null && s < realCount) {
                                 // Each generator's own anchor: where the parent's distribution left it, and for a
@@ -2763,8 +2767,6 @@ final class GpuBatchChunkSolver {
                             double fs = 0;
                             int[] islandedDs = islandedDsByIndex != null ? islandedDsByIndex[group.get(chunkStart + s)] : null;
                             for (int i = 0; i < nds; i++) {
-                                fs += gpuData.dsFactor()[i]
-                                        - (dsOvBus[s] == i ? dsOvFactorDelta[s] : 0.0);
                                 if (islandedDs != null && contains(islandedDs, i)) {
                                     // A participant this contingency islanded absorbed nothing. Its row is a FROZEN
                                     // identity whose target is an angle: read as a P it handed the pairs minus the bus's
@@ -2772,10 +2774,19 @@ final class GpuBatchChunkSolver {
                                     // -8.728 rad held at the islanded VL-6297, 0.007 MW) or, by a reclose, onto its live one.
                                     continue;
                                 }
-                                int row = gpuData.dsPhiRow()[i];
-                                double effBase = baseTargets[row]
+                                // read where this scenario solved the participant's balance: a coupler it opened
+                                // brought a relocated balance home to the bus's own phi row, and the coupler's dummy
+                                // row left behind holds a pinned stub (rte6515 BUS-1359_BBS_2: read there, -0.1926 pu
+                                // of "absorption" that the pairs' first distribution took back, 19.27 MW)
+                                int row = dsRowOvBySlot[s] != null && dsRowOvBySlot[s][i] >= 0
+                                        ? dsRowOvBySlot[s][i] : gpuData.dsPhiRow()[i];
+                                double effBase = baseTargets[gpuData.dsPhiRow()[i]]
                                         - (dsOvBus[s] == i ? dsOvBaseDelta[s] : 0.0);
                                 slice[i] = finalTargets[s * n + row] - effBase;
+                                // the factors the parent's distribution renormalized over: an islanded participant
+                                // is out of them, a lost generator's share leaves its bus
+                                fs += gpuData.dsFactor()[i]
+                                        - (dsOvBus[s] == i ? dsOvFactorDelta[s] : 0.0);
                             }
                             slice[nds] = fs;
                             dsTargetsByIndex.put(group.get(chunkStart + s), slice);

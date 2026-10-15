@@ -2746,13 +2746,21 @@ final class GpuBatchChunkSolver {
                         for (int s = 0; s < realCount; s++) {
                             double[] slice = new double[nds + 1];
                             double fs = 0;
+                            int[] islandedDs = islandedDsByIndex != null ? islandedDsByIndex[group.get(chunkStart + s)] : null;
                             for (int i = 0; i < nds; i++) {
+                                fs += gpuData.dsFactor()[i]
+                                        - (dsOvBus[s] == i ? dsOvFactorDelta[s] : 0.0);
+                                if (islandedDs != null && contains(islandedDs, i)) {
+                                    // A participant this contingency islanded absorbed nothing. Its row is a FROZEN
+                                    // identity whose target is an angle: read as a P it handed the pairs minus the bus's
+                                    // whole base injection, composed onto the pair's frozen row (rte6515 LINE-4468-670:
+                                    // -8.728 rad held at the islanded VL-6297, 0.007 MW) or, by a reclose, onto its live one.
+                                    continue;
+                                }
                                 int row = gpuData.dsPhiRow()[i];
                                 double effBase = baseTargets[row]
                                         - (dsOvBus[s] == i ? dsOvBaseDelta[s] : 0.0);
                                 slice[i] = finalTargets[s * n + row] - effBase;
-                                fs += gpuData.dsFactor()[i]
-                                        - (dsOvBus[s] == i ? dsOvFactorDelta[s] : 0.0);
                             }
                             slice[nds] = fs;
                             dsTargetsByIndex.put(group.get(chunkStart + s), slice);

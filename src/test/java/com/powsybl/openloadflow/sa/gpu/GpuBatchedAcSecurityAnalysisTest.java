@@ -7661,6 +7661,41 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
                 strategiesOf("l14_BIS", "acEmuOff23"), actions2, 2);
     }
 
+    /** A strategy pair re-anchors its distribution on what its parent's moved, read off the parent's final targets.
+     *  A participant the contingency islanded absorbed nothing: its row is a FROZEN identity (an angle), and read as a
+     *  P it handed the pairs minus its whole target, which a reclose then composed onto the bus's live row (and a pair
+     *  keeping the island onto its frozen one: rte6515 LINE-4468-670, 9 Newton iterations where OLF takes one, 0.007
+     *  MW). ieee14 with a radial B15 generator behind line L14-15-1 taking most of any distribution: its island kept,
+     *  reclosed, and created by a strategy after the loss of B2-G. */
+    @Test
+    void strategiesAroundAnIslandedDistributionParticipantMatchCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = ieee14WithRadialBus(vl -> vl.newGenerator().setId("B15-G").setBus("B15").setConnectableBus("B15")
+                .setMinP(0).setMaxP(4000).setTargetP(40).setVoltageRegulatorOn(false).setTargetQ(0).add());
+        // B15-G takes most of any distribution: its share of B2-G's loss is past the angle step clamp
+        network.getGenerator("B1-G").setMaxP(400);
+        for (String condenser : List.of("B3-G", "B6-G", "B8-G")) {
+            network.getGenerator(condenser).newExtension(com.powsybl.iidm.network.extensions.ActivePowerControlAdder.class)
+                    .withParticipate(false).withDroop(4).add();
+        }
+        List<com.powsybl.action.Action> actions = List.of(
+                new com.powsybl.action.GeneratorActionBuilder().withId("up2").withGeneratorId("B2-G")
+                        .withActivePowerRelativeValue(true).withActivePowerValue(10).build(),
+                new com.powsybl.action.TerminalsConnectionActionBuilder().withId("close15").withNetworkElementId("L14-15-1")
+                        .withOpen(false).build(),
+                new com.powsybl.action.TerminalsConnectionActionBuilder().withId("open15").withNetworkElementId("L14-15-1")
+                        .withOpen(true).build());
+        List<com.powsybl.contingency.strategy.OperatorStrategy> strategies = new java.util.ArrayList<>(
+                strategiesOf("L14-15-1", "up2", "close15"));
+        strategies.addAll(strategiesOf("B2-G", "open15"));
+        assertStrategyMatchesCpu(network, List.of(new Contingency("L14-15-1", new BranchContingency("L14-15-1")),
+                        new Contingency("B2-G", new com.powsybl.contingency.GeneratorContingency("B2-G"))),
+                strategies, actions, 5, true,
+                p -> p.setStateVectorScalingMode(com.powsybl.openloadflow.ac.solver.StateVectorScalingMode.MAX_VOLTAGE_CHANGE)
+                        .setMaxVoltageChangeStateVectorScalingMaxDphi(0.05));
+    }
+
     /** ieee14 with a radial bus B15 behind line L14-15-1, equipped by {@code equip}. */
     private static Network ieee14WithRadialBus(java.util.function.Consumer<com.powsybl.iidm.network.VoltageLevel> equip) {
         Network network = IeeeCdfNetworkFactory.create14();

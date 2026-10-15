@@ -641,7 +641,8 @@ final class GpuBatchPrecomputer {
         }
         return new BatchContingency(pair.contingencyId(), pair.outagedBranches(), pair.lostGenerators(), pair.lostLoads(),
                 pair.shuntShifts(), pair.tapOverrides(), pair.outagedShunts(), pair.reclosedBranches(), pair.outagedZiBranches(),
-                pair.outagedHvdcs(), pair.sideOpenBranches(), ziTree.applyAndRevert(pc, opened, closed), pair.generatorActions());
+                pair.outagedHvdcs(), pair.sideOpenBranches(), ziTree.applyAndRevert(pc, opened, closed), pair.generatorActions(),
+                pair.acEmulationOffHvdcs());
     }
 
     private static String composeRejectReason(List<LfBranch> branches, List<LfGenerator> gens, List<LoadLoss> loads,

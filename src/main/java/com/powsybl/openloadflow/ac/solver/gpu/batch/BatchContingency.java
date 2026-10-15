@@ -42,7 +42,20 @@ public record BatchContingency(String contingencyId, List<LfBranch> outagedBranc
                                 *  their targetP AND initial targetP, so the pair's slack distribution starts each of
                                 *  them from the action's value: the parent's target plus the change (relative), or the
                                 *  value itself over whatever the parent's distribution gave it (absolute). */
-                               List<GeneratorMove> generatorActions) {
+                               List<GeneratorMove> generatorActions,
+                               /** Strategy pairs: the AC-emulation links an HvdcAction switches to fixed set points (OLF's
+                                *  LfHvdcAction: each station's target becomes the flow at the strategy's starting state). */
+                               List<LfHvdc> acEmulationOffHvdcs) {
+
+    @SuppressWarnings("java:S107")
+    public BatchContingency(String contingencyId, List<LfBranch> outagedBranches, List<LfGenerator> lostGenerators,
+                            List<LoadLoss> lostLoads, List<ShuntShift> shuntShifts, List<TapR1Override> tapOverrides,
+                            List<LfShunt> outagedShunts, List<LfBranch> reclosedBranches,
+                            List<LfBranch> outagedZiBranches, List<LfHvdc> outagedHvdcs, List<SideOpen> sideOpenBranches,
+                            List<LfBranch> stickyNonTreeZi, List<GeneratorMove> generatorActions) {
+        this(contingencyId, outagedBranches, lostGenerators, lostLoads, shuntShifts, tapOverrides, outagedShunts,
+                reclosedBranches, outagedZiBranches, outagedHvdcs, sideOpenBranches, stickyNonTreeZi, generatorActions, List.of());
+    }
 
     /** One GeneratorAction of a strategy pair: {@code deltaP} (pu) is the change of target P from the BASE
      *  target, which is the whole move for an absolute action and the change added to the parent's target
@@ -122,6 +135,7 @@ public record BatchContingency(String contingencyId, List<LfBranch> outagedBranc
         Objects.requireNonNull(outagedShunts);
         Objects.requireNonNull(sideOpenBranches);
         Objects.requireNonNull(generatorActions);
+        Objects.requireNonNull(acEmulationOffHvdcs);
         boolean isInjection = !lostGenerators.isEmpty() || !lostLoads.isEmpty() || !shuntShifts.isEmpty()
                 || !tapOverrides.isEmpty() || !outagedHvdcs.isEmpty();
         boolean isShunt = !outagedShunts.isEmpty();

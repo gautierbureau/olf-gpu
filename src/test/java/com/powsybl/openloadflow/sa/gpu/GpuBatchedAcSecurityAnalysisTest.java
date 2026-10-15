@@ -7587,6 +7587,44 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         assertStrategyMatchesCpu(network, contingencies, strategiesOf(loadId, "more9"), actions, 0);
     }
 
+    /** An HvdcAction switching AC emulation off (OLF's LfHvdcAction): the link becomes two fixed converter set points
+     *  at the flows the strategy's starting state carries (the contingency's solution), not clamped at the link's
+     *  limits, and keeps them for the whole strategy load flow. An action that does not say "off" is a no-op in OLF. */
+    @Test
+    void hvdcActionSwitchingAcEmulationOffMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = com.powsybl.openloadflow.network.HvdcNetworkFactory.createHvdcInAcEmulationInSymetricNetwork();
+        com.powsybl.iidm.network.Line l12 = network.getLine("l12");
+        network.newLine().setId("l12_BIS")
+                .setVoltageLevel1(l12.getTerminal1().getVoltageLevel().getId()).setBus1(l12.getTerminal1().getBusBreakerView().getBus().getId())
+                .setVoltageLevel2(l12.getTerminal2().getVoltageLevel().getId()).setBus2(l12.getTerminal2().getBusBreakerView().getBus().getId())
+                .setR(l12.getR() * 2).setX(l12.getX() * 2)
+                .setG1(l12.getG1()).setB1(l12.getB1()).setG2(l12.getG2()).setB2(l12.getB2()).add();
+        List<Contingency> contingencies = List.of(new Contingency("l12_BIS", new BranchContingency("l12_BIS")));
+        List<com.powsybl.action.Action> actions = List.of(
+                new com.powsybl.action.HvdcActionBuilder().withId("acEmuOff").withHvdcId("hvdc12")
+                        .withAcEmulationEnabled(false).build(),
+                new com.powsybl.action.HvdcActionBuilder().withId("setpointOnly").withHvdcId("hvdc12")
+                        .withActivePowerSetpoint(50.0).build());
+        assertStrategyMatchesCpu(network, contingencies, strategiesOf("l12_BIS", "acEmuOff", "setpointOnly"), actions, 3);
+        // ...and a link whose stations are both off the slack bus (their set points on their own buses' rows)
+        Network network2 = com.powsybl.openloadflow.network.HvdcNetworkFactory.createHvdcLinkedByTwoLinesAndSwitch(
+                com.powsybl.iidm.network.HvdcConverterStation.HvdcType.VSC);
+        network2.getHvdcLine("hvdc23").setMaxP(500);
+        network2.getLineStream().forEach(l -> l.setR(1).setX(10));
+        com.powsybl.iidm.network.Line l14 = network2.getLine("l14");
+        network2.newLine().setId("l14_BIS")
+                .setVoltageLevel1(l14.getTerminal1().getVoltageLevel().getId()).setBus1(l14.getTerminal1().getBusBreakerView().getBus().getId())
+                .setVoltageLevel2(l14.getTerminal2().getVoltageLevel().getId()).setBus2(l14.getTerminal2().getBusBreakerView().getBus().getId())
+                .setR(3).setX(25)
+                .setG1(l14.getG1()).setB1(l14.getB1()).setG2(l14.getG2()).setB2(l14.getB2()).add();
+        List<com.powsybl.action.Action> actions2 = List.of(new com.powsybl.action.HvdcActionBuilder().withId("acEmuOff23")
+                .withHvdcId("hvdc23").withAcEmulationEnabled(false).build());
+        assertStrategyMatchesCpu(network2, List.of(new Contingency("l14_BIS", new BranchContingency("l14_BIS"))),
+                strategiesOf("l14_BIS", "acEmuOff23"), actions2, 2);
+    }
+
     /** A strategy pair is solved on the zero-impedance tree OLF reaches it with: its contingency's. Opening coupler
      *  z12 puts z23 back in the tree; a pair left on the base tree would hold z23 out and leave b2 hanging. */
     @Test

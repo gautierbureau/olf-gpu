@@ -110,12 +110,12 @@ public final class GpuBatchHvdcAcEmulation {
          *  recomputes flows AND derivatives for every branch in the network — a whole-network pass
          *  per scenario per check round, which measured 6 s of a 10 s orchestrator on a 9k-branch
          *  case. The row IS the bus's BUS_PHI row (one device row per variable). */
-        double p1At(double[] x) {
+        public double p1At(double[] x) {
             return HvdcAcEmulationSide1ActiveFlowEquationTerm.p1(p0, k, loss1, loss2, r, x[bus1PhiRow()], x[bus2PhiRow()]);
         }
 
         /** OLF's own {@code HvdcAcEmulationSide2ActiveFlowEquationTerm.p2}; see {@link #p1At}. */
-        double p2At(double[] x) {
+        public double p2At(double[] x) {
             return HvdcAcEmulationSide2ActiveFlowEquationTerm.p2(p0, k, loss1, loss2, r, x[bus1PhiRow()], x[bus2PhiRow()]);
         }
     }

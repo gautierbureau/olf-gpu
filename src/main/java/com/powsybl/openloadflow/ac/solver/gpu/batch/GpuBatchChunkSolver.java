@@ -1547,6 +1547,7 @@ final class GpuBatchChunkSolver {
                     double[] dsSlackShift = null;
                     double[] pairSlackAbsorbedSeed = null;   // slack-only pairs: the parent's absorbed total they start from
                     boolean[] rejectAfterSolve = null;       // pairs whose parent the device did not answer: CPU
+                    boolean[] pairParentConverged = new boolean[chunkSize];
                     double[] preSlackSeed = null;            // the loss pre-distribution's share on the slack generators,
                                                              // when nobody else is left to participate
                     if (!pairPhase && (hasDs || dsSlackOnly) && config.contingencyLossPreDistribution()) {
@@ -1884,6 +1885,7 @@ final class GpuBatchChunkSolver {
                                 if (parentStatus == GpuBatchStatus.STATUS_CONVERGED) {
                                     parent = fullRow(resultsByIndex[pIdx], n, config.stateSink(),
                                             contingencies.get(pIdx).contingencyId());
+                                    pairParentConverged[s] = true;
                                 } else if (parentStatus == GpuBatchStatus.STATUS_MAX_ITERATION) {
                                     parent = exhaustedStartByIndex.get(pIdx);   // OLF's network after the failed run
                                 }
@@ -1898,6 +1900,9 @@ final class GpuBatchChunkSolver {
                                         rejectAfterSolve = new boolean[chunkSize];
                                     }
                                     rejectAfterSolve[s] = true;
+                                    if (s < realCount) {
+                                        com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("PAIR:PARENT_NOT_ON_DEVICE");
+                                    }
                                 }
                             }
                             for (int i = 0; i < n; i++) {
@@ -2013,6 +2018,51 @@ final class GpuBatchChunkSolver {
                     int[][] hvdcStatus = null;
                     double[] hvAppliedD1 = null;
                     double[] hvAppliedD2 = null;
+                    // HvdcAction (AC emulation off): OLF sets each station's target to the link's flow at the state the
+                    // strategy starts from - the parent's converged solution, which is this pair's warm start - unclamped,
+                    // and takes the link out of its equations. On the device: the element masked, the two set points as
+                    // converter-bus target overrides, the status left LINEAR so the HVDC loops treat the link as the
+                    // scenario's own (never frozen, unfrozen or saturated by them). A station on the slack bus has no row:
+                    // its set point reaches the slack mismatch through the applied delta (hvdcSlackBalanceBatch), which
+                    // the VSC curve channel reads too - set below, once the HVDC arrays exist.
+                    List<double[]> hvActionApplied = new ArrayList<>();   // {slot, ctl, d1 - baseD1, d2 - baseD2}
+                    for (int s = 0; pairPhase && s < realCount; s++) {
+                        List<com.powsybl.openloadflow.network.LfHvdc> off = contingencies.get(group.get(chunkStart + s)).acEmulationOffHvdcs();
+                        if (off.isEmpty()) {
+                            continue;
+                        }
+                        // OLF evaluates the flow on its equation system's state: a parent that did not converge left
+                        // its last iterate there, which the device does not keep
+                        boolean ok = pairParentConverged[s] && x0Full != null && hvdcControllers != null;
+                        for (com.powsybl.openloadflow.network.LfHvdc hv : off) {
+                            Integer elem = hvdcElemIndex.get(hv);
+                            GpuBatchHvdcAcEmulation.Ctl c = !ok || elem == null ? null : hvdcControllers.stream()
+                                    .filter(ctl -> ctl.hvElemIndex() == elem).findFirst().orElse(null);
+                            if (c == null) {
+                                ok = false;
+                                break;
+                            }
+                            double[] warm = java.util.Arrays.copyOfRange(x0Full, s * n, (s + 1) * n);
+                            double d1 = -c.p1At(warm);
+                            double d2 = -c.p2At(warm);
+                            int[] rm = rowModePerScenario[s];
+                            disabledMask[s][c.hvElemIndex()] = true;
+                            if (c.bus1PActive()) {
+                                overrides.merge(s * n + c.bus1WriteRow(rm), baseTargets[c.bus1WriteRow(rm)], c.baseD1(), d1);
+                            }
+                            if (c.bus2PActive()) {
+                                overrides.merge(s * n + c.bus2WriteRow(rm), baseTargets[c.bus2WriteRow(rm)], c.baseD2(), d2);
+                            }
+                            hvActionApplied.add(new double[] {s, hvdcControllers.indexOf(c), d1 - c.baseD1(), d2 - c.baseD2()});
+                        }
+                        if (!ok) {
+                            if (rejectAfterSolve == null) {
+                                rejectAfterSolve = new boolean[chunkSize];
+                            }
+                            rejectAfterSolve[s] = true;
+                            com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("PAIR:HVDC_ACTION_PARENT_NOT_CONVERGED");
+                        }
+                    }
                     if (hvdcControllers != null && !hvdcControllers.isEmpty()) {
                         hvAppliedD1 = new double[chunkSize * hvdcControllers.size()];
                         hvAppliedD2 = new double[chunkSize * hvdcControllers.size()];
@@ -2121,6 +2171,11 @@ final class GpuBatchChunkSolver {
                     // between DistributedSlack and ReactiveLimits. Running them instead as host
                     // orchestrators after the whole solve put them out of OLF's order and left one
                     // differing violation line over 2000 rte6515 branch contingencies.
+                    for (double[] e : hvActionApplied) {           // the HvdcAction set points, as applied deltas
+                        int k = (int) e[0] * hvdcControllers.size() + (int) e[1];
+                        hvAppliedD1[k] = e[2];
+                        hvAppliedD2[k] = e[3];
+                    }
                     byte[] ctgOutOf = null;
                     boolean hasHvdcDriverLoops = hvdcControllers != null && !hvdcControllers.isEmpty();
                     ctgOutOf = GpuBatchHvdcAcEmulation.installDriverLoops(handle,
@@ -2805,8 +2860,7 @@ final class GpuBatchChunkSolver {
                     for (int s = 0; s < realCount; s++) {
                         double[] row = chunkResults[s];
                         if (rejectAfterSolve != null && rejectAfterSolve[s]) {
-                            row[n + 2] = GpuBatchStatus.STATUS_REJECTED;
-                            com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("PAIR:PARENT_NOT_ON_DEVICE");
+                            row[n + 2] = GpuBatchStatus.STATUS_REJECTED;   // the census names the reason where it is decided
                         }
                         if (config.stateSink() != null && (int) row[n + 2] == GpuBatchStatus.STATUS_CONVERGED) {
                             // the state leaves the heap now, as its chunk completes; the result keeps the tail

@@ -84,6 +84,7 @@ final class GpuStrategyComposer {
         List<LfBranch> reclosed = new java.util.ArrayList<>();
         List<BatchContingency.GeneratorMove> generatorActions = new java.util.ArrayList<>();
         Map<LfGenerator, Double> generatorNetMove = new java.util.LinkedHashMap<>();
+        List<com.powsybl.openloadflow.network.LfHvdc> acEmulationOff = new java.util.ArrayList<>();
         Map<String, Action> actionById = new java.util.HashMap<>();
         for (Action a : currentActions) {
             actionById.put(a.getId(), a);
@@ -258,6 +259,21 @@ final class GpuStrategyComposer {
                         ga.getActivePowerValue().getAsDouble() / PerUnit.SB,
                         com.powsybl.openloadflow.ac.solver.gpu.batch.GpuGeneratorParticipation.atTargetP(lfGen, gen,
                                 networkParameters, balanceType)));
+            } else if (a instanceof com.powsybl.action.HvdcAction ha) {
+                // OLF's LfHvdcAction: only "AC emulation off" does anything (any other content is a logged no-op, and
+                // "on" is refused when the action is built); the link then holds each station at the flow of the state
+                // the strategy starts from, unclamped, for the whole strategy load flow.
+                if (ha.isAcEmulationEnabled().isEmpty()) {
+                    continue;
+                }
+                com.powsybl.openloadflow.network.LfHvdc hv = net.getHvdcById(ha.getHvdcId());
+                if (ha.isAcEmulationEnabled().get() || hv == null || !hv.isAcEmulation() || hv.isDisabled()
+                        || ctgHvdcs.contains(hv)) {
+                    return null;                             // refused by OLF, unknown, not emulated, or lost: CPU
+                }
+                if (!acEmulationOff.contains(hv)) {
+                    acEmulationOff.add(hv);
+                }
             } else {
                 return null;                                 // out of stage-1 scope — CPU per-strategy path
             }
@@ -268,7 +284,7 @@ final class GpuStrategyComposer {
                 // the contingency's topology plus the actions (dropping them solved another network: 0.52 kV at B4 on a
                 // three-winding transformer outage)
                 branches, ctgGens, loads, shifts, taps, List.of(), reclosed, ctgZiOutages, ctgHvdcs, ctgSideOpens,
-                ctgStickyNonTreeZi, generatorActions);
+                ctgStickyNonTreeZi, generatorActions, acEmulationOff);
     }
 
     /** Compiles a tap-position action (RTC or PST) into a per-scenario full-row override — the

@@ -1591,6 +1591,10 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
         assertTrue(worstDistributed < 1e-3, "distributed active power must match the CPU: worst " + worstDistributed + " MW");
         assertEquals(statusCounts(cpu), statusCounts(gpuCold),
                 "post-contingency status counts must match CPU");
+        // per contingency, not only the counts: a device convergence where OLF fails and a device failure where
+        // OLF converges cancel in the counts, and either one alone is a bug
+        assertTrue(mismatched.isEmpty(), "post-contingency status must match CPU per contingency: " + mismatched.size()
+                + " differ " + mismatched.subList(0, Math.min(20, mismatched.size())));
         // Violation count: allow a small tolerance for border flips (ulp-level value near limit).
         // With powsybl's 0-default thresholds every solver-tolerance flicker re-reports; the
         // increased-violations thresholds above suppress most, but a few (measured: 2 out of 583k)

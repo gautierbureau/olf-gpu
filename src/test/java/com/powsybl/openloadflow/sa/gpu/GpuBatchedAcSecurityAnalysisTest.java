@@ -7033,7 +7033,25 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
                     com.powsybl.commons.report.ReportNode.NO_OP);
             if (expectedPrecomputed >= 0) {
                 assertEquals(expectedPrecomputed, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(),
-                        "contingencies AND (ctg, strategy) pairs must precompute on the device");
+                        "contingencies AND (ctg, strategy) pairs must precompute on the device (pre-contingency cpu="
+                                + cpu.getPreContingencyResult().getStatus() + " gpu=" + gpu.getPreContingencyResult().getStatus()
+                                + ", census " + GpuBatchScopeCensus.snapshot() + ")");
+            }
+            assertEquals(cpu.getPostContingencyResults().size(), gpu.getPostContingencyResults().size());
+            for (int r = 0; r < cpu.getPostContingencyResults().size(); r++) {
+                var cpuC = cpu.getPostContingencyResults().get(r);
+                var gpuC = gpu.getPostContingencyResults().get(r);
+                String ctgId = cpuC.getContingency().getId();
+                assertEquals(cpuC.getStatus(), gpuC.getStatus(), "contingency status of " + ctgId);
+                assertEquals(cpuC.getDistributedActivePower(), gpuC.getDistributedActivePower(), 1e-9,
+                        "contingency distributed active power of " + ctgId);
+                var cb = cpuC.getNetworkResult().getBusResults();
+                var gb = gpuC.getNetworkResult().getBusResults();
+                assertEquals(cb.size(), gb.size());
+                for (int b = 0; b < cb.size(); b++) {
+                    org.junit.jupiter.api.Assertions.assertEquals(cb.get(b).getV(), gb.get(b).getV(), 1e-12,
+                            "contingency " + ctgId + " bus voltage " + cb.get(b).getBusId());
+                }
             }
             assertEquals(cpu.getOperatorStrategyResults().size(), gpu.getOperatorStrategyResults().size());
             for (int r = 0; r < cpu.getOperatorStrategyResults().size(); r++) {
@@ -7696,6 +7714,25 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
                 strategies, actions, 5, true,
                 p -> p.setStateVectorScalingMode(com.powsybl.openloadflow.ac.solver.StateVectorScalingMode.MAX_VOLTAGE_CHANGE)
                         .setMaxVoltageChangeStateVectorScalingMaxDphi(0.05));
+    }
+
+    /** Strategy pairs of a lost distribution participant with the slack out of the distribution: the pair starts from
+     *  the parent's distribution with the slack keeping none of it. ieee14 with B1-G (on the slack bus) out of the
+     *  distribution and B3-G, B6-G producing, losing B2-G; the pair then loads B9. */
+    @Test
+    void strategyAfterLosingADistributionParticipantMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = IeeeCdfNetworkFactory.create14();
+        network.getGenerator("B1-G").newExtension(com.powsybl.iidm.network.extensions.ActivePowerControlAdder.class)
+                .withParticipate(false).withDroop(4).add();
+        network.getGenerator("B3-G").setMaxP(100).setTargetP(30);   // two participants that stay
+        network.getGenerator("B6-G").setMaxP(150).setTargetP(30);
+        List<com.powsybl.action.Action> actions = List.of(new com.powsybl.action.LoadActionBuilder().withId("more9")
+                .withLoadId("B9-L").withRelativeValue(true).withActivePowerValue(10).build());
+        assertStrategyMatchesCpu(network, List.of(new Contingency("B2-G", new com.powsybl.contingency.GeneratorContingency("B2-G"))),
+                strategiesOf("B2-G", "more9"), actions, 2, true, p -> p.setSlackBusSelectionMode(
+                        com.powsybl.openloadflow.network.SlackBusSelectionMode.NAME).setSlackBusesIds(List.of("VL1_0")));
     }
 
     /** ieee14 with a radial bus B15 behind line L14-15-1, equipped by {@code equip}. */

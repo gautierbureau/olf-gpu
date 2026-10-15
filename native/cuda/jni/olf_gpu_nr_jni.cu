@@ -7876,12 +7876,43 @@ __global__ void seedRlModeFromState(int nrl, int nScenarios, int n, const int* r
                                     const double* rlMinQ, const double* rlMaxQ, const double* rlLoadQ,
                                     const char* limitType, int* mode, double* target, int cvStride,
                                     const char* rlRemote, double* savedTarget, char* savedMode,
-                                    const char* rlBaseLt, const int* psEntry, int nQr) {
+                                    const char* rlBaseLt, const int* psEntry, int nQr,
+                                    const double* rlVtarget, int nRlVtOv, const int* rlVtOvSlotIdx, const double* rlVtOvVal,
+                                    const double* svcRlVt, const char* rlLocalOv, const double* rlLocalVt,
+                                    const double* pinTargetIn, const char* rlIslanded) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nrl * nScenarios) return;
     int i = tid % nrl;
     int s = tid / nrl;
+    // A controller this scenario islanded: its bus is out of the system and its rows are FROZEN identities. Stamping
+    // the continued pin turned its V row into a reactive balance at the frozen target, an island equation OLF does not
+    // have, which the first solve then iterated on (rte6515 LINE-3477-2893: 0.0075 MW on every strategy that moves P).
+    if (rlIslanded != nullptr && rlIslanded[(size_t) s * nrl + i]) return;
     char lt = limitType[(size_t) s * nrl + i];
+    // A LOCAL controller pinned in the BASE case that the previous solve released (its exported state says PV): the
+    // base activation still has it pinned, and OLF's strategy starts with the bus back on voltage control, exactly as
+    // the reactive-limit switch-back left it - the PV form (6 on a cross row) at its voltage target. Left alone it
+    // stayed pinned at the base limit: a strategy pair of rte6515 LINE-3273-1812 solved two generators the parent had
+    // released at their base Q limits, 0.016 kV at VL-2968 even for a strategy that changes nothing.
+    if (lt == 0 && rlBaseLt != nullptr && rlBaseLt[i] >= 1 && rlBaseLt[i] <= 4 && (rlRemote == nullptr || !rlRemote[i])
+            && !isEnrolledPilot(psEntry, nQr, i)) {
+        size_t st = (size_t) s * nrl + i;
+        bool localOv = rlLocalOv != nullptr && rlLocalOv[st];
+        int vrow = rlVrow[i];
+        int pinRow = vrow;
+        if (localOv && rlQrow != nullptr && rlQrow[i] >= 0 && rlQrow[i] != vrow) {
+            size_t r2 = (size_t) s * n + rlQrow[i];
+            if (mode[r2] == 6 || (mode[r2] == 4 && mode[(size_t) s * n + vrow] != 4)) {
+                pinRow = rlQrow[i];
+            }
+        }
+        size_t pidx = (size_t) s * n + pinRow;
+        if (mode[pidx] == 1 || mode[pidx] == 4) {            // still holding the base pin
+            mode[pidx] = pinRow != vrow ? 6 : 0;
+            target[pidx] = localOv ? rlLocalVt[st] : rlTargetOf(nRlVtOv, rlVtOvSlotIdx, rlVtOvVal, svcRlVt, nrl, s, i, rlVtarget[i]);
+        }
+        return;
+    }
     // An entry that does not OWN the pin on its V row must not have one stamped there: its balance lives on
     // another row (or that row carries another bus's), and the row it does own was already set correctly by
     // the base activation. RL_LIMIT_FROZEN alone is not enough to skip on, because the run-time freeze uses
@@ -7908,8 +7939,35 @@ __global__ void seedRlModeFromState(int nrl, int nScenarios, int n, const int* r
         savedMode[(size_t) s * nrl + i] = static_cast<char>(mode[idx]);
         // a pinned REMOTE member's row is mode 4 (own Q balance), a pinned local one mode 1
         mode[idx] = (rlRemote != nullptr && rlRemote[i]) ? 4 : 1;
-        target[idx] = (lt == 1 ? rlMinQ[li] : rlMaxQ[li]) - rlLoadQ[li];
+        // the pinned target the previous solve ENDED with, when it exported one: OLF restores the bus's generation
+        // target Q from the parent's end, which is not the current limit when that limit moved by less than the
+        // re-freeze tolerance (rte6515 LINE-3273-1812, VL-6095: 0.7518298 frozen, the curve at 0.7518918)
+        double pin = pinTargetIn != nullptr ? pinTargetIn[(size_t) s * nrl + i] : NAN;
+        target[idx] = !isnan(pin) ? pin : (lt == 1 ? rlMinQ[li] : rlMaxQ[li]) - rlLoadQ[li];
     }
+}
+
+// The pinned target of every pinned entry at the end of a solve, read on the row the seed above writes it to (NaN for
+// an unpinned entry): what a continued solve (a strategy pair) restores, as OLF restores the parent's target Q.
+__global__ void exportRlPinTargets(int nrl, int nScenarios, int n, const int* rlVrow, const int* rlQrow,
+                                   const char* limitType, const int* mode, const double* target, const char* rlIslanded,
+                                   double* out) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= nrl * nScenarios) return;
+    int i = tid % nrl;
+    int s = tid / nrl;
+    char lt = limitType[(size_t) s * nrl + i];
+    // an islanded controller's row holds its bus's frozen value, not a Q: a pair that brings the bus back seeds the
+    // pin from its limit, the target the bus kept while it was out
+    if (lt == 0 || (rlIslanded != nullptr && rlIslanded[(size_t) s * nrl + i])) {
+        out[tid] = NAN;
+        return;
+    }
+    int seedRow = rlQrow != nullptr ? rlQrow[i] : rlVrow[i];
+    if (seedRow != rlVrow[i] && mode[(size_t) s * n + seedRow] == 0) {
+        seedRow = rlVrow[i];
+    }
+    out[tid] = target[(size_t) s * n + seedRow];
 }
 
 __global__ void axpy1Batch(int total, const double* dx, double* x) {      // x += dx over all scenarios
@@ -8496,6 +8554,8 @@ struct BatchSolverContext {
     int nFrozenRow = 0;                                    // outage froze to a flat identity state
     DeviceBuf dDsLostGen;                                  // (scenario, DS generator slot) pairs: the
     int nDsLostGen = 0;                                    // generators an outage removes, by identity
+    DeviceBuf dRlPinTgtIn;                                 // per (scenario, entry): the pinned target a continued
+    bool hasRlPinTgtIn = false;                            // solve restores (setBatchRlPinTargets), NaN = the limit
     DeviceBuf dDsOutGen;                                   // (scenario, DS generator slot) pairs: participants
     int nDsOutGen = 0;                                     // a GeneratorAction took out of the distribution
     DeviceBuf dGenCumValid;                                // per scenario: the PER-GENERATOR water-fill ran, so
@@ -11276,7 +11336,13 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                     ctx->nRlRemote > 0 ? ctx->dRlRemote.as<char>() : nullptr,
                     ctx->dRlSavedTarget.as<double>(), ctx->dRlSavedMode.as<char>(),
                     ctx->hasRlBaseLt ? ctx->dRlBaseLimitType.as<char>() : nullptr,
-                    psEntryPtr(ctx), ctx->st->nQr);
+                    psEntryPtr(ctx), ctx->st->nQr,
+                    ctx->dRlVtarget.as<double>(), nRlVtOv, nRlVtOv > 0 ? dRlVtOvSlotIdx.as<int>() : nullptr,
+                    nRlVtOv > 0 ? dRlVtOvVal.as<double>() : nullptr, ctx->nSvc > 0 ? ctx->dSvcRlVt.as<double>() : nullptr,
+                    ctx->nRlLocal > 0 ? ctx->dRlLocalOv.as<char>() : nullptr,
+                    ctx->nRlLocal > 0 ? ctx->dRlLocalVt.as<double>() : nullptr,
+                    ctx->hasRlPinTgtIn ? ctx->dRlPinTgtIn.as<double>() : nullptr,
+                    ctx->nRlIslanded > 0 ? ctx->dRlIslanded.as<char>() : nullptr);
         } else {
             CUDA_CHECK(cudaMemsetAsync(ctx->dRlSwitchCount.p, 0, static_cast<size_t>(ctx->nrl) * nS * sizeof(char), ctx->stream));
             if (ctx->nrl > 0) {                              // seed the pinned limit for base-PQ controllers (else all PV)
@@ -15975,6 +16041,46 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
     ctx->dDsLostGen.upload(sg, static_cast<size_t>(n2) * sizeof(int));
     env->ReleaseIntArrayElements(jSlotGen, sg, JNI_ABORT);
     ctx->nDsLostGen = n2 / 2;
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchRlPinTargets(
+        JNIEnv* env, jclass, jlong handle, jdoubleArray jTargets) {
+    auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
+    if (ctx == nullptr) {
+        return;
+    }
+    if (jTargets == nullptr || env->GetArrayLength(jTargets) == 0) {
+        ctx->hasRlPinTgtIn = false;
+        return;
+    }
+    int len = env->GetArrayLength(jTargets);
+    jdouble* t = env->GetDoubleArrayElements(jTargets, nullptr);
+    ctx->dRlPinTgtIn.upload(t, static_cast<size_t>(len) * sizeof(double));
+    env->ReleaseDoubleArrayElements(jTargets, t, JNI_ABORT);
+    ctx->hasRlPinTgtIn = true;
+}
+
+extern "C" JNIEXPORT jdoubleArray JNICALL
+Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_readBatchRlPinTargets(
+        JNIEnv* env, jclass, jlong handle) {
+    auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
+    if (ctx == nullptr || ctx->nrl <= 0) {
+        return nullptr;
+    }
+    int nS = ctx->nScenarios;
+    int n = ctx->st->n;
+    DeviceBuf out;
+    out.alloc(static_cast<size_t>(ctx->nrl) * nS * sizeof(double));
+    exportRlPinTargets<<<grid(ctx->nrl * nS), BLOCK, 0, ctx->stream>>>(ctx->nrl, nS, n, ctx->dRlVrow.as<int>(),
+            ctx->dRlQrow.p ? ctx->dRlQrow.as<int>() : nullptr, ctx->dRlLimitType.as<char>(), ctx->dMode.as<int>(),
+            ctx->dTarget.as<double>(), ctx->nRlIslanded > 0 ? ctx->dRlIslanded.as<char>() : nullptr, out.as<double>());
+    std::vector<double> host(static_cast<size_t>(ctx->nrl) * nS);
+    CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+    CUDA_CHECK(cudaMemcpy(host.data(), out.p, host.size() * sizeof(double), cudaMemcpyDeviceToHost));
+    jdoubleArray arr = env->NewDoubleArray(static_cast<jsize>(host.size()));
+    env->SetDoubleArrayRegion(arr, 0, static_cast<jsize>(host.size()), host.data());
+    return arr;
 }
 
 extern "C" JNIEXPORT void JNICALL

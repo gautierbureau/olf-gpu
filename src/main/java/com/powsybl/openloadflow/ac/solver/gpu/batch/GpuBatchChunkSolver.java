@@ -524,6 +524,7 @@ final class GpuBatchChunkSolver {
         }
         int nrl = gpuData.rlVrow().length;
         java.util.Map<Integer, int[]> rlByIndex = new java.util.HashMap<>();    // ctg index -> its nrl RL-state slice
+        java.util.Map<Integer, double[]> rlPinByIndex = new java.util.HashMap<>();   // ctg index -> its final pinned targets
         // ctg index -> its FINAL distributed-slack targets at the DS participant rows (the device DS mutates
         // targets in place; read back after each ctg chunk). The pair phase re-anchors its distribution here,
         // mirroring OLF's setGeneratorsInitialTargetPToTargetP before the strategy re-solve.
@@ -1548,6 +1549,7 @@ final class GpuBatchChunkSolver {
                     double[] pairSlackAbsorbedSeed = null;   // slack-only pairs: the parent's absorbed total they start from
                     boolean[] rejectAfterSolve = null;       // pairs whose parent the device did not answer: CPU
                     boolean[] pairParentConverged = new boolean[chunkSize];
+                    double[] rlPinIn = null;                 // pairs: each parent's final pinned targets (NaN = none)
                     double[] preSlackSeed = null;            // the loss pre-distribution's share on the slack generators,
                                                              // when nobody else is left to participate
                     if (!pairPhase && (hasDs || dsSlackOnly) && config.contingencyLossPreDistribution()) {
@@ -1908,6 +1910,23 @@ final class GpuBatchChunkSolver {
                             for (int i = 0; i < n; i++) {
                                 x0Full[s * n + i] = parent != null ? parent[i] : baseState[i];
                             }
+                            int parentIdx = pIdxOf(contingencies, group, chunkStart, s, indexById, realCount);
+                            if (parent != null && parentIdx >= 0 && frozenRowsByIndex[parentIdx] != null) {
+                                // A bus the parent islanded and this pair re-energizes (a reclose) starts where OLF starts it:
+                                // its stored voltage, which a disabled bus keeps at the base solution - not the parent's frozen
+                                // identity (1 pu at angle 0), from which Newton found the collapsed root (rte6515 LINE-1404-389
+                                // reclosed: VL-1404 at 0.02 kV where OLF has 65.26 kV)
+                                java.util.Set<Integer> stillFrozen = new java.util.HashSet<>();
+                                int[] pf = s < realCount ? frozenRowsByIndex[group.get(chunkStart + s)] : null;
+                                for (int r : pf == null ? new int[0] : pf) {
+                                    stillFrozen.add(r);
+                                }
+                                for (int r : frozenRowsByIndex[parentIdx]) {
+                                    if (!stillFrozen.contains(r)) {
+                                        x0Full[s * n + r] = baseState[r];
+                                    }
+                                }
+                            }
                             for (int k = 0; k < frozenSeedSlot.size(); k++) {
                                 if (frozenSeedSlot.get(k) == s) {   // a frozen row stays AT its frozen state
                                     x0Full[s * n + frozenSeedRow.get(k)] = frozenSeedValue.get(k);
@@ -1915,6 +1934,14 @@ final class GpuBatchChunkSolver {
                             }
                             if (rlStateIn != null) {
                                 System.arraycopy(parentRl != null ? parentRl : baseRlSeed, 0, rlStateIn, s * nrl, nrl);
+                                double[] pins = parentRl != null ? rlPinByIndex.get(pIdxOf(contingencies, group, chunkStart, s, indexById, realCount)) : null;
+                                if (pins != null) {
+                                    if (rlPinIn == null) {
+                                        rlPinIn = new double[chunkSize * nrl];
+                                        java.util.Arrays.fill(rlPinIn, Double.NaN);
+                                    }
+                                    System.arraycopy(pins, 0, rlPinIn, s * nrl, nrl);
+                                }
                             }
                             if (dsSlackOnly && dsSlackShift != null && parentSlackAbs != null) {
                                 dsSlackShift[s] = parentSlackAbs;    // seed the pair with the parent's absorbed total
@@ -2299,6 +2326,9 @@ final class GpuBatchChunkSolver {
                     if (dsSlackOnly) {
                         GpuAcNewtonSolver.setBatchSlackOnlyAnchor(handle, pairPhase ? pairSlackAbsorbedSeed : null);
                     }
+                    if (nrl > 0) {
+                        GpuAcNewtonSolver.setBatchRlPinTargets(handle, pairPhase ? rlPinIn : null);
+                    }
                     if (ngen > 0) {
                         GpuAcNewtonSolver.setBatchGenAnchor(handle, pairPhase ? dgAnchor : null,
                                 pairPhase ? null : flat(genPreMovesBySlot, chunkSize, ngen), pairPhase ? dgSeedAnchor : null);
@@ -2644,7 +2674,13 @@ final class GpuBatchChunkSolver {
                         }
                     }
                     if (rlStateOut != null && !pairPhase) {      // capture each ctg's final RL pinning for its pairs
+                        // ...and the targets its pins ENDED with, which its pairs restore (OLF restores the parent's
+                        // generation target Q; a limit that moved by less than the re-freeze tolerance kept the old one)
+                        double[] pins = GpuAcNewtonSolver.readBatchRlPinTargets(handle);
                         for (int s = 0; s < realCount; s++) {
+                            if (pins != null) {
+                                rlPinByIndex.put(group.get(chunkStart + s), java.util.Arrays.copyOfRange(pins, s * nrl, (s + 1) * nrl));
+                            }
                             int[] slice = new int[nrl];
                             System.arraycopy(rlStateOut, s * nrl, slice, 0, nrl);
                             rlByIndex.put(group.get(chunkStart + s), slice);
@@ -2999,6 +3035,18 @@ final class GpuBatchChunkSolver {
         int[] out = java.util.Arrays.copyOf(a, a.length + theirs.length);
         System.arraycopy(theirs, 0, out, a.length, theirs.length);
         return out;
+    }
+
+    /** The index of a pair slot's parent contingency, or -1 (padding slot, or no parent). */
+    private static int pIdxOf(List<BatchContingency> contingencies, List<Integer> group, int chunkStart, int s,
+                              java.util.Map<String, Integer> indexById, int realCount) {
+        if (s >= realCount) {
+            return -1;
+        }
+        String pairId = contingencies.get(group.get(chunkStart + s)).contingencyId();
+        int sep = pairId.indexOf(GpuBatchStatus.STRATEGY_KEY_SEP);
+        Integer p = sep < 0 ? null : indexById.get(pairId.substring(0, sep));
+        return p == null ? -1 : p;
     }
 
     /** The generator's slot in the distributed-slack generator pack, or -1 when it does not participate. */

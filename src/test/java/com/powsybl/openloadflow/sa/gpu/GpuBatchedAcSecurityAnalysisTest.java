@@ -7661,6 +7661,82 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
                 strategiesOf("l14_BIS", "acEmuOff23"), actions2, 2);
     }
 
+    /** ieee14 with a radial bus B15 behind line L14-15-1, equipped by {@code equip}. */
+    private static Network ieee14WithRadialBus(java.util.function.Consumer<com.powsybl.iidm.network.VoltageLevel> equip) {
+        Network network = IeeeCdfNetworkFactory.create14();
+        com.powsybl.iidm.network.VoltageLevel vl14 = network.getVoltageLevel("VL14");
+        com.powsybl.iidm.network.VoltageLevel vl15 = network.newSubstation().setId("S15").add().newVoltageLevel().setId("VL15")
+                .setNominalV(vl14.getNominalV()).setTopologyKind(com.powsybl.iidm.network.TopologyKind.BUS_BREAKER).add();
+        vl15.getBusBreakerView().newBus().setId("B15").add();
+        equip.accept(vl15);
+        network.newLine().setId("L14-15-1").setVoltageLevel1("VL14").setBus1("B14").setVoltageLevel2("VL15").setBus2("B15")
+                .setR(0.05).setX(0.2).setG1(0).setB1(0).setG2(0).setB2(0).add();
+        return network;
+    }
+
+    /** A synchronous condenser pinned at its reactive limit in the base, islanded by the contingency. A pair keeping
+     *  the island must leave its frozen rows alone: stamping the continued pin turned the islanded bus's V row into a
+     *  reactive balance (rte6515 LINE-3477-2893, 0.0075 MW). A pair reclosing it re-energizes the bus where OLF does:
+     *  from its stored voltage (not the frozen 1 pu at angle 0), pinned at its limit (not at the frozen row's value,
+     *  which the pin export read as a reactive power). */
+    @Test
+    void strategiesAroundAnIslandedPinnedCondenserMatchCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = ieee14WithRadialBus(vl -> vl.newGenerator().setId("B15-G").setBus("B15").setConnectableBus("B15")
+                .setMinP(0).setMaxP(50).setTargetP(0).setVoltageRegulatorOn(true).setTargetV(vl.getNominalV() * 1.08)
+                .add().newMinMaxReactiveLimits().setMinQ(-1).setMaxQ(1).add());
+        List<com.powsybl.action.Action> actions = List.of(
+                new com.powsybl.action.GeneratorActionBuilder().withId("up2").withGeneratorId("B2-G")
+                        .withActivePowerRelativeValue(true).withActivePowerValue(10).build(),
+                new com.powsybl.action.TerminalsConnectionActionBuilder().withId("close").withNetworkElementId("L14-15-1")
+                        .withOpen(false).build());
+        assertStrategyMatchesCpu(network, List.of(new Contingency("L14-15-1", new BranchContingency("L14-15-1"))),
+                strategiesOf("L14-15-1", "up2", "close"), actions, 3, true,
+                p -> p.setStateVectorScalingMode(com.powsybl.openloadflow.ac.solver.StateVectorScalingMode.MAX_VOLTAGE_CHANGE));
+    }
+
+    /** A generator pinned at its reactive limit in the base and released by the contingency: its strategy pairs
+     *  start with it back on voltage control, as OLF's strategies do. The base activation still held the pin, and a
+     *  pair solved the generator at its base limit (rte6515 LINE-3273-1812: 0.016 kV for a strategy that changes
+     *  nothing). B6-G is pinned at 5 MVar in the base and released once B6's load is lost. */
+    @Test
+    void strategyAfterAContingencyReleasingABasePinMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = IeeeCdfNetworkFactory.create14();
+        network.getGenerator("B6-G").newMinMaxReactiveLimits().setMinQ(-6).setMaxQ(5).add();
+        String loadId = loadAtBus(network, "B6").getId();
+        List<com.powsybl.action.Action> actions = List.of(new com.powsybl.action.LoadActionBuilder().withId("more9")
+                .withLoadId(loadAtBus(network, "B9").getId()).withRelativeValue(true).withActivePowerValue(5).build());
+        assertStrategyMatchesCpu(network, List.of(new Contingency(loadId, new com.powsybl.contingency.LoadContingency(loadId))),
+                strategiesOf(loadId, "more9"), actions, 2);
+    }
+
+    /** A pinned bus keeps the reactive power it was frozen at until the limit moves by more than the reactive
+     *  power mismatch: OLF's strategy starts from that frozen value, which the parent's distribution may leave a little
+     *  off the curve. The pair stamped its pin at the curve instead (rte6515 VL-6095: frozen 0.7518298, the curve at
+     *  0.7518918). B2-G sits on a sloped curve at its maximum, takes a small share of the contingency's distribution,
+     *  and the strategy switches the B9 shunt off. */
+    @Test
+    void strategyKeepsTheParentsFrozenReactivePowerMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = IeeeCdfNetworkFactory.create14();
+        network.getGenerator("B1-G").setMaxP(1000);
+        com.powsybl.iidm.network.Generator b2 = network.getGenerator("B2-G");
+        b2.setMaxP(60);
+        b2.newReactiveCapabilityCurve()
+                .beginPoint().setP(0).setMinQ(-40).setMaxQ(30).endPoint()
+                .beginPoint().setP(100).setMinQ(-40).setMaxQ(25).endPoint()
+                .add();
+        String shuntId = network.getShuntCompensatorStream().findFirst().orElseThrow().getId();
+        List<com.powsybl.action.Action> actions = List.of(new com.powsybl.action.ShuntCompensatorPositionActionBuilder()
+                .withId("shuntOff").withShuntCompensatorId(shuntId).withSectionCount(0).build());
+        assertStrategyMatchesCpu(network, List.of(new Contingency("L2-4-1", new BranchContingency("L2-4-1"))),
+                strategiesOf("L2-4-1", "shuntOff"), actions, 2);
+    }
+
     /** A strategy pair is solved on the zero-impedance tree OLF reaches it with: its contingency's. Opening coupler
      *  z12 puts z23 back in the tree; a pair left on the base tree would hold z23 out and leave b2 hanging. */
     @Test

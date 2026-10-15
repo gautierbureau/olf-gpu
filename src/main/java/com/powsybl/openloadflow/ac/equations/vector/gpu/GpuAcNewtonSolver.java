@@ -832,6 +832,13 @@ public final class GpuAcNewtonSolver {
      *  take no share. Null clears the channel. */
     public static native void setBatchDsOutGenerators(long handle, int[] slotGen);
 
+    /** Per (scenario, reactive-limit entry): the pinned target a continued solve restores (a strategy pair takes its
+     *  parent's, as OLF restores the parent's target Q), NaN = stamp the pin at its limit. Null clears it. */
+    public static native void setBatchRlPinTargets(long handle, double[] targets);
+
+    /** Per (scenario, reactive-limit entry): the pinned target the last solve ended with, NaN when not pinned. */
+    public static native double[] readBatchRlPinTargets(long handle);
+
     /** Rows an islanding outage froze to a flat identity state, as (scenario, row) pairs. Their targets
      *  are not the outer loops' to write — OLF removes an islanded bus's equations, so nothing there
      *  re-derives a target for them. */

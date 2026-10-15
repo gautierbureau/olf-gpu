@@ -38,10 +38,25 @@ public record BatchContingency(String contingencyId, List<LfBranch> outagedBranc
                                 *  while OLF has moved on (network.xiidm: LMK at extraction, LMO, then LMQ for
                                 *  the remaining 2938 of 3528). Empty = the base tree. */
                                List<LfBranch> stickyNonTreeZi,
-                               /** Strategy pairs: the generators an absolute GeneratorAction sets. OLF sets their
-                                *  targetP (and initial targetP) to the value, over whatever the parent contingency's
-                                *  distribution gave them, so the pair leg does not re-anchor their bus on the parent. */
-                               List<LfGenerator> absoluteTargetGenerators) {
+                               /** Strategy pairs: the generators a GeneratorAction moves. OLF's LfGeneratorAction sets
+                                *  their targetP AND initial targetP, so the pair's slack distribution starts each of
+                                *  them from the action's value: the parent's target plus the change (relative), or the
+                                *  value itself over whatever the parent's distribution gave it (absolute). */
+                               List<GeneratorMove> generatorActions) {
+
+    /** One GeneratorAction of a strategy pair: {@code deltaP} (pu) is the change of target P from the BASE
+     *  target, which is the whole move for an absolute action and the change added to the parent's target
+     *  for a relative one. */
+    public record GeneratorMove(LfGenerator generator, double deltaP, boolean absolute) {
+        public GeneratorMove {
+            Objects.requireNonNull(generator);
+        }
+    }
+
+    /** The generators an absolute GeneratorAction sets: the pair does not re-anchor their bus on the parent. */
+    public List<LfGenerator> absoluteTargetGenerators() {
+        return generatorActions.stream().filter(GeneratorMove::absolute).map(GeneratorMove::generator).toList();
+    }
 
     /** A branch opened on ONE side by the contingency (node-breaker propagation): the closed-branch
      *  element is masked and the pre-packed side-open OB view enabled — {@code side} is the OPEN
@@ -97,7 +112,7 @@ public record BatchContingency(String contingencyId, List<LfBranch> outagedBranc
         Objects.requireNonNull(tapOverrides);
         Objects.requireNonNull(outagedShunts);
         Objects.requireNonNull(sideOpenBranches);
-        Objects.requireNonNull(absoluteTargetGenerators);
+        Objects.requireNonNull(generatorActions);
         boolean isInjection = !lostGenerators.isEmpty() || !lostLoads.isEmpty() || !shuntShifts.isEmpty()
                 || !tapOverrides.isEmpty() || !outagedHvdcs.isEmpty();
         boolean isShunt = !outagedShunts.isEmpty();
@@ -122,6 +137,7 @@ public record BatchContingency(String contingencyId, List<LfBranch> outagedBranc
         outagedShunts = List.copyOf(outagedShunts);
         outagedHvdcs = List.copyOf(outagedHvdcs);
         sideOpenBranches = List.copyOf(sideOpenBranches);
+        generatorActions = List.copyOf(generatorActions);
     }
 
     /** A branch outage (N-1 .. N-k). */

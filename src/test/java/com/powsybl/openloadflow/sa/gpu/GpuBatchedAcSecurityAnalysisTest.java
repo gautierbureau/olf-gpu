@@ -7333,6 +7333,84 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         assertStrategyMatchesCpu(shared, contingencies, strategies, actions, 1);
     }
 
+    /** Strategy pairs on a network with capability curves. OLF starts a strategy leg from each generator's
+     *  post-contingency target (setGeneratorsInitialTargetPToTargetP), and a GeneratorAction sets its generator's
+     *  target and initial target; the curve limits are read at those targets. B3 holds two participants: B3-G
+     *  controls B3's voltage with a curve that puts B3 at its max Q, and B3-G2 hits its min P during the parent's
+     *  distribution, so B3's move does not split between them by their factors. The pair's curve generator sits at
+     *  its OWN parent target (plus the action), which a reconstruction from B3's row target cannot give. */
+    @Test
+    void strategyPairsOnCurveGeneratorsMatchCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = IeeeCdfNetworkFactory.create14();
+        com.powsybl.iidm.network.Generator g3 = network.getGenerator("B3-G");
+        g3.setTargetP(40).setMinP(0).setMaxP(200);
+        g3.newReactiveCapabilityCurve()
+                .beginPoint().setP(0).setMinQ(-40).setMaxQ(5).endPoint()
+                .beginPoint().setP(200).setMinQ(-40).setMaxQ(-45).endPoint()
+                .add();
+        // regulator off: a constant targetQ in B3's box, low enough that B3 sits at its max Q
+        network.getVoltageLevel("VL3").newGenerator().setId("B3-G2").setBus("B3").setConnectableBus("B3")
+                .setTargetP(60).setMinP(59.9).setMaxP(80).setTargetQ(-10).setVoltageRegulatorOn(false).add();
+        com.powsybl.iidm.network.Generator g1 = network.getGenerator("B1-G");
+        g1.setTargetP(g1.getTargetP() - 100);
+        g1.newMinMaxReactiveLimits().setMinQ(-990).setMaxQ(990).add();
+        network.getGenerator("B2-G").setMinP(0).setMaxP(200);
+        network.getGenerator("B6-G").setMinP(0).setMaxP(100);
+        network.getGenerator("B8-G").setMinP(0).setMaxP(100);
+        // the slack's generator sits out, as on rte6515 and network.xiidm (a participating slack whose peers
+        // saturate is a separate gap of the parent contingencies)
+        g1.newExtension(com.powsybl.iidm.network.extensions.ActivePowerControlAdder.class)
+                .withParticipate(false).add();
+        String loadId = loadAtBus(network, "B4").getId();
+        List<Contingency> contingencies = List.of(new Contingency(loadId,
+                new com.powsybl.contingency.LoadContingency(loadId)));
+        assertGpuMatchesCpu(network, contingencies);        // the parents first: a pair starts where its parent ends
+        List<com.powsybl.action.Action> actions = List.of(
+                new com.powsybl.action.GeneratorActionBuilder().withId("up3")
+                        .withGeneratorId("B3-G").withActivePowerRelativeValue(true).withActivePowerValue(20).build(),
+                new com.powsybl.action.TerminalsConnectionActionBuilder().withId("open1011")
+                        .withNetworkElementId("L10-11-1").withOpen(true).build());
+        List<com.powsybl.contingency.strategy.OperatorStrategy> strategies = List.of(
+                new com.powsybl.contingency.strategy.OperatorStrategy("sUp3",
+                        com.powsybl.contingency.ContingencyContext.specificContingency(loadId),
+                        new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of("up3")),
+                new com.powsybl.contingency.strategy.OperatorStrategy("sOpen",
+                        com.powsybl.contingency.ContingencyContext.specificContingency(loadId),
+                        new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of("open1011")));
+        assertStrategyMatchesCpu(network, contingencies, strategies, actions, 3);
+    }
+
+    /** A GeneratorAction on a voltage-controlling curve generator that does not take part in the slack distribution:
+     *  the device knows the P of the generators in its slack pack only, so this one's limits would stay at its base
+     *  P. B6-G (P 0) sits at its curve's max Q and the action moves it 10 MW, which lowers the max by 2.5 MVAr: the
+     *  pair goes to the CPU, the contingency stays on the device. */
+    @Test
+    void generatorActionOnAnUntrackedCurveGeneratorRunsOnCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = IeeeCdfNetworkFactory.create14();
+        com.powsybl.iidm.network.Generator g6 = network.getGenerator("B6-G");
+        g6.setMinP(0).setMaxP(100);
+        g6.newReactiveCapabilityCurve()
+                .beginPoint().setP(0).setMinQ(-6).setMaxQ(5).endPoint()
+                .beginPoint().setP(100).setMinQ(-6).setMaxQ(-20).endPoint()
+                .add();
+        g6.newExtension(com.powsybl.iidm.network.extensions.ActivePowerControlAdder.class).withParticipate(false).add();
+        String loadId = loadAtBus(network, "B9").getId();
+        List<Contingency> contingencies = List.of(new Contingency(loadId,
+                new com.powsybl.contingency.LoadContingency(loadId)));
+        List<com.powsybl.action.Action> actions = List.of(
+                new com.powsybl.action.GeneratorActionBuilder().withId("up6")
+                        .withGeneratorId("B6-G").withActivePowerRelativeValue(true).withActivePowerValue(10).build());
+        List<com.powsybl.contingency.strategy.OperatorStrategy> strategies = List.of(
+                new com.powsybl.contingency.strategy.OperatorStrategy("sUp6",
+                        com.powsybl.contingency.ContingencyContext.specificContingency(loadId),
+                        new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of("up6")));
+        assertStrategyMatchesCpu(network, contingencies, strategies, actions, 1);
+    }
+
     @Test
     void generatorActionOnTheLostGeneratorStrategyBatchMatchesCpu() {
         // A generator action on the generator its contingency loses does nothing in OLF

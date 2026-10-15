@@ -815,6 +815,18 @@ final class GpuBatchQualification {
 
     /** A plan refusal, counted in the census AND named by contingency id: the census counts are per attempt and
      *  carry no id, which made 19 refusals read as device failures (tasks #70). */
+    /** Whether the generator's reactive limits are a capability CURVE (they then depend on its target P). */
+    private static boolean hasCurve(com.powsybl.openloadflow.network.LfGenerator g) {
+        return g instanceof com.powsybl.openloadflow.network.impl.AbstractLfGenerator alg
+                && alg.getReactiveLimits().map(rl -> rl.getKind() == com.powsybl.iidm.network.ReactiveLimitsKind.CURVE)
+                        .orElse(false);
+    }
+
+    /** Whether the generator is in the distributed-slack generator pack (the device then knows its own P). */
+    private static boolean inGeneratorPack(GpuAcData gpuData, String genId) {
+        return gpuData.dgGenId() != null && java.util.Arrays.asList(gpuData.dgGenId()).contains(genId);
+    }
+
     private static void refuse(BatchContingency c, String tag) {
         com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record(tag);
         com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.planRefused(c.contingencyId(), tag);
@@ -1370,7 +1382,7 @@ final class GpuBatchQualification {
             EquationSystem<AcVariableType, AcEquationType> es,
             double dsSum, boolean slackParticipates,
             com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDsParams dsParams, Set<LfBranch> distrRhoControllers,
-            Set<LfBranch> relocatedCouplers, int[] curvePRows, boolean incrementalTvc) {
+            Set<LfBranch> relocatedCouplers, boolean reactiveLimits, boolean incrementalTvc) {
         List<Integer> batchedIndices = new ArrayList<>();
         java.util.Map<Integer, int[]> relocRows = relocatedChildRows(gpuData);
         java.util.Map<Integer, int[]> relocDummyQRows = relocatedDummyQRows(gpuData);
@@ -1421,6 +1433,15 @@ final class GpuBatchQualification {
                 continue;
             }
             BatchContingency c = contingencies.get(i);
+            // A GeneratorAction moves its generator's target P, and with reactive limits its capability curve moves
+            // with it. The curve and forced-target-Q channels track a generator's P only when it is in the
+            // distributed-slack generator pack (its anchor and its own move); any other curve generator keeps its
+            // limits at the base target P - CPU.
+            if (reactiveLimits && c.generatorActions().stream()
+                    .anyMatch(m -> hasCurve(m.generator()) && !inGeneratorPack(gpuData, m.generator().getId()))) {
+                refuse(c, "PLAN:PAIR_ACTION_UNTRACKED_CURVE");
+                continue;
+            }
             LfBus newSlack = q.relocatedSlack();
             if (newSlack != null) {
                 // OLF moved the slack to newSlack (the base one is in the island): the new slack's P balance leaves
@@ -1545,15 +1566,6 @@ final class GpuBatchQualification {
                         System.err.println("GENOUT_REJECT   ctg=" + c.contingencyId());
                     }
                     continue;
-                }
-                // Curve-limits channel active: its p_now linkage models the DS delta ONLY. An injection
-                // outage at a curve bus's P row used to skew the evaluated limits, and the chunk solver
-                // now repairs that per scenario (the lost entry, the outage's own row step, and the
-                // survivors' renormalized shares). A strategy PAIR still cannot: its anchor shift moves
-                // EVERY distributed-slack row, so there is no single bus step to take back out — CPU.
-                if (curvePRows != null && c.contingencyId().indexOf(GpuBatchStatus.STRATEGY_KEY_SEP) >= 0) {
-                    refuse(c, "PLAN:PAIR_CURVE_LINKAGE");
-                    continue;                                // same reason as the other arm: one tag
                 }
                 List<LfBus> islandLostVcControllers = new ArrayList<>();   // filled by the island-injection path
                 if (!c.outagedBranches().isEmpty()) {        // COMBO: the branch part must also qualify
@@ -2021,10 +2033,6 @@ final class GpuBatchQualification {
                 if (drOv[0].length > 0) {
                     drOvContribByIndex[i] = java.util.Arrays.stream(drOv[0]).mapToInt(d -> (int) d).toArray();
                     drOvCByIndex[i] = drOv[1];
-                }
-                if (curvePRows != null && c.contingencyId().indexOf(GpuBatchStatus.STRATEGY_KEY_SEP) >= 0) {
-                    refuse(c, "PLAN:PAIR_CURVE_LINKAGE");
-                    continue;                                // pair anchor shifts skew the curve linkage — CPU
                 }
                 FrozenIsland fi = islandedFrozen(es, q.islandedBuses(), relocatedCouplers);
                 // A contingency that BOTH splits the network AND strands a distributed-slack participant.

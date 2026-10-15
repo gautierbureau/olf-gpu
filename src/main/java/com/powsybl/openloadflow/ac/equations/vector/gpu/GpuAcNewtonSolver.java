@@ -739,6 +739,15 @@ public final class GpuAcNewtonSolver {
      *  whose loss pre-distribution OLF undoes at its first pass). */
     public static native void setBatchSlackOnlyAnchor(long handle, double[] anchor);
 
+    /** Per scenario and participating generator ({@code s * ngen + g}, pu) for the following solves: {@code anchor},
+     *  its move from its base target P to where the slack's water-fill starts it (a strategy pair: the parent's final
+     *  target, or a GeneratorAction's value; null = the base); {@code start}, its move from that anchor when the solve
+     *  starts (a contingency's loss pre-distribution; null = none). The curve and forced-target-Q channels evaluate a
+     *  generator at anchor + its water-fill move once a slack pass ran, at anchor + start before. {@code seedAnchor}
+     *  (strategy pairs): the anchor without the strategy's GeneratorActions, the P the pins continued from the parent
+     *  are stamped at (OLF keeps their restored target Q until its reactive-limit check); null = the anchor. */
+    public static native void setBatchGenAnchor(long handle, double[] anchor, double[] start, double[] seedAnchor);
+
     /** Remote-member RL entries (plan-B1): per-entry remote kinds + compare rows (PILOT v column for
      *  remote group members — both RL switch conditions test the pilot's V against the GROUP target).
      *  {@code dqMemberQrGroup} (plan-B4) links each group member to its pilot's relocation candidate

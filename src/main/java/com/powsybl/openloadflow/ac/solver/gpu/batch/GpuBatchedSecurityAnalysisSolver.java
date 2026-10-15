@@ -335,9 +335,8 @@ public final class GpuBatchedSecurityAnalysisSolver {
             }
         }
         boolean slackParticipates = java.util.Arrays.stream(gpuData.dsFactor()).sum() < 1 - 1e-9;
-        // Reactive capability CURVES at runtime P (GpuBatchRlCurves): built BEFORE planning — a
-        // contingency whose injection overrides touch a curve bus's P row (or any strategy pair,
-        // whose anchor shifts move every DS row) breaks the channel's DS-only linkage -> CPU.
+        // Reactive capability CURVES at runtime P (GpuBatchRlCurves): each tracked generator is evaluated at its own
+        // P (its anchor plus its own slack move); a strategy pair moving an untracked curve generator -> CPU.
         GpuBatchRlCurves.Channel rlCurves = reactiveLimits
                 ? GpuBatchRlCurves.build(network, equationSystem, gpuData, config.dsParams(), distributedSlack, baseTargets,
                         config.rlCurveExtrapolate())
@@ -347,16 +346,12 @@ public final class GpuBatchedSecurityAnalysisSolver {
                 ? GpuBatchForcedTargetQ.build(network, equationSystem, gpuData, config.dsParams(), config.forceTargetQ(),
                         distributedSlack, baseTargets, baseActivation.rowMode(), config.rlCurveExtrapolate())
                 : null;
-        int[] curvePRows = rlCurves != null           // an AC-emulation VSC's P is its link's, not the bus row's
-                ? java.util.stream.IntStream.range(0, rlCurves.cvIdx().length / 5).filter(g -> !rlCurves.isHvdc(g))
-                        .map(g -> rlCurves.cvIdx()[g * 5 + 1]).toArray()
-                : null;
         // Couplers whose DUMMY rows host a bus's power equations under the tree relocation: an island has to
         // freeze those rows too (see GpuBatchQualification.islandedFrozen). Empty when the relocation is off.
         Set<LfBranch> relocatedCouplers = GpuAcOuterLoopPacks.relocatedCouplerBranches(network, equationSystem);
         GpuBatchQualification.ScenarioPlan plan = GpuBatchQualification.planScenarios(contingencies, qualifications,
                 elementMapper, gpuData, equationSystem, dsSum, slackParticipates, dsParams, distrRhoControllers,
-                relocatedCouplers, curvePRows, config.incrementalTransformerControl());
+                relocatedCouplers, reactiveLimits, config.incrementalTransformerControl());
         List<Integer> batchedIndices = plan.batchedIndices();
         if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
             System.err.println("PLAN batched=" + batchedIndices.size() + " of " + contingencies.size());

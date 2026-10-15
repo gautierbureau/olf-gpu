@@ -5684,6 +5684,20 @@ __device__ bool fqEntryLive(int s, int e, int n, int nds, const int* fqIdx, int 
     return fqIdx[e * 7] < 0 || mode[(size_t) s * n + fqIdx[e * 7]] == fqIdx[e * 7 + 5];
 }
 
+// A participating generator's move from its base target P in scenario s: its anchor (a strategy pair's parent target,
+// or a GeneratorAction's value; dgAnchor, null = the base) plus its own move from that anchor - this solve's water-fill
+// (genCum) once a pass ran, else where the solve STARTED it (dgStart: a contingency's loss pre-distribution, which
+// moves each generator by its own clamped share, not by a share of its bus's move).
+__device__ inline double genPNowMove(int s, int g, int ngen, const double* genCum, const char* genCumValid,
+                                     const double* dgAnchor, const double* dgStart) {
+    size_t k = (size_t) s * ngen + g;
+    double a = dgAnchor != nullptr ? dgAnchor[k] : 0.0;
+    if (genCum != nullptr && genCumValid != nullptr && genCumValid[s]) {
+        return a + genCum[k];
+    }
+    return a + (dgStart != nullptr ? dgStart[k] : 0.0);
+}
+
 // The generator's target P now: its base P plus its own water-fill move (genCum), or - when the per-generator
 // water-fill has not run - its share of its bus's row movement. genCum ALREADY carries the loss pre-distribution:
 // like OLF's ActivePowerDistribution (which redistributes previousMismatch + the new mismatch from the INITIAL
@@ -5691,11 +5705,12 @@ __device__ bool fqEntryLive(int s, int e, int n, int nds, const int* fqIdx, int 
 // genCum 0.0947 = 0.0909 + the pass's own 0.0038. Adding the pre-distribution again put B3's max limit at -0.2718
 // against OLF's re-freeze at -0.2173 (0.84 kV at B3). Before the first pass the init kernel uses base + pre.
 __device__ double fqPNow(int s, int e, int n, int nds, int ngen, int nfq, const int* fqIdx, const double* fqIn,
-                         const double* fqPre, const double* genCum, const char* genCumValid, const int* dsPhiRow,
-                         const int* dsRowOv, const double* target) {
+                         const double* fqPre, const double* genCum, const char* genCumValid, const double* dgAnchor,
+                         const double* dgStart, const int* dsPhiRow, const int* dsRowOv, const double* target) {
     int slot = fqIdx[e * 7 + 1];
-    if (genCum != nullptr && genCumValid != nullptr && genCumValid[s] && slot >= 0) {
-        return fqIn[e * 5] + genCum[(size_t) s * ngen + slot];
+    if (slot >= 0 && (dgAnchor != nullptr || dgStart != nullptr
+                      || genCum != nullptr && genCumValid != nullptr && genCumValid[s])) {
+        return fqIn[e * 5] + genPNowMove(s, slot, ngen, genCum, genCumValid, dgAnchor, dgStart);
     }
     int pRow = dsRowOf(dsPhiRow, dsRowOv, s, nds, fqIdx[e * 7 + 4]);
     return fqIn[e * 5] + fqIn[e * 5 + 3] * (target[(size_t) s * n + pRow] - fqIn[e * 5 + 4]);
@@ -5726,14 +5741,14 @@ __global__ void forcedTargetQInitBatch(int nfq, int nS, int n, int nds, int extr
 // After a distributed-slack pass: the Q target of a Q-row entry follows the clamp at the generator's new P.
 __global__ void forcedTargetQBatch(int nfq, int nS, int n, int nds, int ngen, int extrapolate, const int* fqIdx,
                                    const double* fqIn, const double* fqPts, const double* fqPre,
-                                   const double* genCum, const char* genCumValid, const int* dsPhiRow,
-                                   const int* dsRowOv, int nLost, const int* lost, const char* dsIslanded,
+                                   const double* genCum, const char* genCumValid, const double* dgAnchor,
+                                   const double* dgStart, const int* dsPhiRow, const int* dsRowOv, int nLost, const int* lost, const char* dsIslanded,
                                    const int* mode, const char* rlActive, double* target, double* applied) {
     int s = blockIdx.x * blockDim.x + threadIdx.x;
     if (s >= nS || !rlActive[s]) return;
     for (int e = 0; e < nfq; e++) {
         if (fqIdx[e * 7] < 0 || !fqEntryLive(s, e, n, nds, fqIdx, nLost, lost, dsIslanded, mode)) continue;
-        double p = fqPNow(s, e, n, nds, ngen, nfq, fqIdx, fqIn, fqPre, genCum, genCumValid, dsPhiRow, dsRowOv, target);
+        double p = fqPNow(s, e, n, nds, ngen, nfq, fqIdx, fqIn, fqPre, genCum, genCumValid, dgAnchor, dgStart, dsPhiRow, dsRowOv, target);
         double q = fqClamped(p, fqIn[e * 5 + 1], fqPts + fqIdx[e * 7 + 2] * 3, fqIdx[e * 7 + 3], extrapolate);
         size_t a = (size_t) s * nfq + e;
         target[(size_t) s * n + fqIdx[e * 7]] += q - applied[a];
@@ -5748,7 +5763,7 @@ __global__ void forcedTargetQBatch(int nfq, int nS, int n, int nds, int ngen, in
 __global__ void forcedTargetQLimitsBatch(int nfq, int nS, int n, int nds, int ngen, int nrl, int extrapolate,
                                          const int* fqIdx, const double* fqIn, const double* fqPts,
                                          const double* fqPre, const double* genCum, const char* genCumValid,
-                                         const int* dsPhiRow, const int* dsRowOv, int nLost, const int* lost,
+                                         const double* dgAnchor, const double* dgStart, const int* dsPhiRow, const int* dsRowOv, int nLost, const int* lost,
                                          const char* dsIslanded, const int* mode, const double* target,
                                          double* minQDyn, double* maxQDyn) {
     int s = blockIdx.x * blockDim.x + threadIdx.x;
@@ -5756,7 +5771,7 @@ __global__ void forcedTargetQLimitsBatch(int nfq, int nS, int n, int nds, int ng
     for (int e = 0; e < nfq; e++) {
         int rl = fqIdx[e * 7 + 6];
         if (rl < 0 || !fqEntryLive(s, e, n, nds, fqIdx, nLost, lost, dsIslanded, mode)) continue;
-        double p = fqPNow(s, e, n, nds, ngen, nfq, fqIdx, fqIn, fqPre, genCum, genCumValid, dsPhiRow, dsRowOv, target);
+        double p = fqPNow(s, e, n, nds, ngen, nfq, fqIdx, fqIn, fqPre, genCum, genCumValid, dgAnchor, dgStart, dsPhiRow, dsRowOv, target);
         double d = fqClamped(p, fqIn[e * 5 + 1], fqPts + fqIdx[e * 7 + 2] * 3, fqIdx[e * 7 + 3], extrapolate)
                 - fqIn[e * 5 + 2];
         minQDyn[(size_t) s * nrl + rl] += d;
@@ -5808,7 +5823,7 @@ __global__ void rlCurveLimitsBatch(int nrl, int nScenarios, int ncv, int n, int 
                                    int nQOv, const int* qOvSlotEntry, const double* qOvMinMax,
                                    const int* qOvPtr, const int* qOvList,
                                    const int* cvOvPtr, const int* cvOvEntry, const double* cvOvVal,
-                                   const double* genCum, const char* genCumValid, int ngen,
+                                   const double* genCum, const char* genCumValid, const double* dgAnchor, const double* dgStart, int ngen,
                                    const int* dsPhiRow, const int* dsRowOv, int nds, const int* dgBus,
                                    double* minQDyn, double* maxQDyn, double* loadQDyn, int cvProbeEntry, int cvProbeSlot) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -5874,8 +5889,11 @@ __global__ void rlCurveLimitsBatch(int nrl, int nScenarios, int ncv, int n, int 
         int hvh = cvHv.hv != nullptr ? cvHv.hv[2 * g] : -1;
         if (hvh >= 0 && cvHv.nhv > 0) {
             pNow = cvHvdcActivePower(cvHv, s, n, hvh, cvHv.hv[2 * g + 1]);
-        } else if (genCum != nullptr && genCumValid != nullptr && genCumValid[s] && slot >= 0) {
-            pNow = cvIn[g * 5] + genCum[(size_t) s * ngen + slot];
+        } else if (slot >= 0 && (dgAnchor != nullptr || dgStart != nullptr
+                                 || genCum != nullptr && genCumValid != nullptr && genCumValid[s])) {
+            // the generator's own P: its anchor, plus this solve's water-fill or, before any pass, where the
+            // solve started it (genPNowMove). A share of its bus row's move is not that once anything clamps.
+            pNow = cvIn[g * 5] + genPNowMove(s, slot, ngen, genCum, genCumValid, dgAnchor, dgStart);
         } else {
             pNow = cvIn[g * 5]
                     + cvIn[g * 5 + 1] * shareScale * (target[(size_t) s * n + pRow] - cvIn[g * 5 + 2] - pStep);
@@ -7339,7 +7357,7 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
                                               const double* dgMaxDelta, const double* dgMinDelta,
                                               const double* dgMarginUp, const double* dgMarginDown,
                                               const int* busGenStart, const int* busGenEnd,
-                                              double* genCum, char* genCumValid, char* genRemoved, double* genFactorWork,
+                                              double* genCum, char* genCumValid, const double* dgAnchor, const double* dgStart, char* genRemoved, double* genFactorWork,
                                               int nDsLostGen, const int* dsLostGen,
                                               double* target, char* switched, char* dsResidual, double* retainApplied, double* gateLast, int dbgTrace) {
     int s = blockIdx.x * blockDim.x + threadIdx.x;
@@ -7519,7 +7537,9 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
             }
         }
     }
-    bool perGen = ngen > 0 && !anchored;
+    // A re-anchored scenario that carries its PER-GENERATOR anchors (dgAnchor: a strategy pair, each generator's
+    // post-contingency target) takes the per-generator water-fill too, from those anchors.
+    bool perGen = ngen > 0 && (!anchored || dgAnchor != nullptr);
     if (genCumValid != nullptr) {
         genCumValid[s] = perGen ? 1 : 0;
     }
@@ -7540,8 +7560,9 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
                 }
             }
             genRemoved[(size_t) s * ngen + g] = lost ? 1 : 0;
+            double a = dgAnchor != nullptr ? dgAnchor[(size_t) s * ngen + g] : 0.0;   // a moved anchor eats headroom
             genFactorWork[(size_t) s * ngen + g] = lost ? 0.0
-                    : (dsMode == 1 ? (dirUp ? dgMarginUp[g] : dgMarginDown[g]) : dgFactor[g]);
+                    : (dsMode == 1 ? fmax(0.0, dirUp ? dgMarginUp[g] - a : dgMarginDown[g] + a) : dgFactor[g]);
         }
         for (int iter = 0; iter < ngen && fabs(rem) > residueEps; iter++) {
             double fsumActive = 0.0;                         // normalizeParticipationFactors, over the remaining
@@ -7589,13 +7610,17 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
                 genFactorWork[(size_t) s * ngen + g] = f;
                 double cum = genCum[(size_t) s * ngen + g];
                 double newCum = cum + rem * f;
+                // its limits seen from its own anchor (the base target unless a strategy pair moved it)
+                double a = dgAnchor != nullptr ? dgAnchor[(size_t) s * ngen + g] : 0.0;
+                double maxD = dgMaxDelta[g] - a;
+                double minD = dgMinDelta[g] - a;
                 // OLF removes an element only on a STRICT overshoot: one that lands exactly on its
                 // limit stays in the list another iteration, where it takes weight and moves nothing.
-                if (rem > 0 && newCum > dgMaxDelta[g]) {
-                    newCum = dgMaxDelta[g];
+                if (rem > 0 && newCum > maxD) {
+                    newCum = maxD;
                     genRemoved[(size_t) s * ngen + g] = 1;
-                } else if (rem < 0 && newCum < dgMinDelta[g]) {
-                    newCum = dgMinDelta[g];
+                } else if (rem < 0 && newCum < minD) {
+                    newCum = minD;
                     genRemoved[(size_t) s * ngen + g] = 1;
                 }
                 if (newCum != cum) {
@@ -7604,9 +7629,9 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
                     changed = true;
                 }
                 if (dbgTrace && s == dbgTrace - 1 && genRemoved[(size_t) s * ngen + g]
-                        && (newCum == dgMaxDelta[g] || newCum == dgMinDelta[g])) {
+                        && (newCum == maxD || newCum == minD)) {
                     printf("[DS-SAT] iter=%d gen=%d newCum=%.9f maxD=%.9f minD=%.9f\n",
-                           iter, g, newCum, dgMaxDelta[g], dgMinDelta[g]);
+                           iter, g, newCum, maxD, minD);
                 }
             }
             if (ovActive) {
@@ -7628,9 +7653,11 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
                 for (int g = busGenStart[i]; g < busGenEnd[i]; g++) {
                     sum += genCum[(size_t) s * ngen + g];
                 }
-                // The outage's own move of the row target is not slack power: it shifts the anchor.
+                // The outage's own move of the row target is not slack power: it shifts the anchor, and so
+                // does a strategy pair's parent distribution (the bus's share of dgAnchor).
                 target[(size_t) s * n + dsRowOf(dsPhiRow, dsRowOv, s, nds, i)] =
-                        dsBaseTargetP[i] - (ov == i ? dsOvBaseDelta[s] : 0.0) + sum;
+                        dsBaseTargetP[i] + (dsAnchorShift != nullptr ? dsAnchorShift[(size_t) s * nds + i] : 0.0)
+                        - (ov == i ? dsOvBaseDelta[s] : 0.0) + sum;
             }
             if (dbgTrace && s == dbgTrace - 1) {
                 printf("[DS-WF] iter=%d fsumActive=%.9f rem=%.9f done=%.9f (per-generator)\n",
@@ -8479,6 +8506,12 @@ struct BatchSolverContext {
     DeviceBuf dDsSlackAbsorbed;                              // nS doubles — mismatch absorbed into the slack's own target so far
     DeviceBuf dDsSlackAnchor;                                // nS doubles — slack-only strategy pairs: the parent's total
     bool dsSlackHasAnchor = false;                           // (setBatchSlackOnlyAnchor; zero anchor when unset)
+    DeviceBuf dDgAnchor;                                     // nS * ngen doubles — strategy pairs: each participating
+    bool hasDgAnchor = false;                                // generator's target at the parent's end (setBatchGenAnchor)
+    DeviceBuf dDgStart;                                      // nS * ngen doubles — each participating generator's move
+    bool hasDgStart = false;                                 // from its anchor at the solve's start (setBatchGenAnchor)
+    DeviceBuf dDgSeedAnchor;                                 // nS * ngen doubles — strategy pairs: the parent's own end,
+    bool hasDgSeedAnchor = false;                            // without the actions (the continued pins' stamps)
                                                              // (OLF distributes into the slack gen and re-solves; no flow change,
                                                              // but the extra polish run must happen to match the CPU trajectory)
     CudssCtx ds;
@@ -10599,7 +10632,7 @@ static void launchForcedTargetQLimits(BatchSolverContext* ctx, int nS, int n) {
             ctx->fqExtrapolate, ctx->dFqIdx.as<int>(), ctx->dFqIn.as<double>(), ctx->dFqPts.as<double>(),
             ctx->fqHasPre ? ctx->dFqPre.as<double>() : nullptr,
             ctx->ngen > 0 ? ctx->dGenCum.as<double>() : nullptr,
-            ctx->ngen > 0 ? ctx->dGenCumValid.as<char>() : nullptr,
+            ctx->ngen > 0 ? ctx->dGenCumValid.as<char>() : nullptr, ctx->hasDgAnchor ? ctx->dDgAnchor.as<double>() : nullptr, ctx->hasDgStart ? ctx->dDgStart.as<double>() : nullptr,
             ctx->nds > 0 ? ctx->dDsPhiRow.as<int>() : nullptr, ctx->nDsRowOv > 0 ? ctx->dDsRowOv.as<int>() : nullptr,
             ctx->nDsLostGen, ctx->nDsLostGen > 0 ? ctx->dDsLostGen.as<int>() : nullptr,
             ctx->nDsIslanded > 0 ? ctx->dDsIslanded.as<char>() : nullptr, ctx->dMode.as<int>(),
@@ -11060,6 +11093,14 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         CUDA_CHECK(cudaMemcpy(ctx->dSvcRlVt.p, nanv.data(), nanv.size() * sizeof(double), cudaMemcpyHostToDevice));
     }
     if (fullLoadflow && !resume) {                           // per-solve PV↔PQ state: 0 switches, limitType from base
+        // Each generator's own slack move is per-solve state, cleared before ANYTHING reads it: the seed-time curve
+        // limits below evaluate a curve at base + genCum wherever genCumValid is set. Cleared only after the seed,
+        // a reused context evaluated scenario slot s at the move of the contingency the PREVIOUS chunk solved in
+        // that slot. The write-back also reads it when the DS phase never fires (NaN targetP otherwise).
+        if (ctx->ngen > 0 && ctx->dGenCum.p) {
+            CUDA_CHECK(cudaMemsetAsync(ctx->dGenCum.p, 0, static_cast<size_t>(ctx->ngen) * nS * sizeof(double), ctx->stream));
+            CUDA_CHECK(cudaMemsetAsync(ctx->dGenCumValid.p, 0, (size_t) nS * sizeof(char), ctx->stream));
+        }
         if (ctx->hasDqQrGroups && ctx->st->nQr > 0) {        // plan-B4: capture each group's pilot-Q target from
             size_t need = static_cast<size_t>(ctx->st->nQr) * nS * sizeof(double);   // the BASE carrier's row,
             if (!ctx->dQrPilotQ.p) ctx->dQrPilotQ.alloc(need);   // BEFORE any RL mode seeding rewrites it
@@ -11139,6 +11180,9 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             }
             CUDA_CHECK(cudaMemcpyAsync(ctx->dRlLimitType.p, lt.data(), lt.size(), cudaMemcpyHostToDevice, ctx->stream));
             CUDA_CHECK(cudaMemcpy(ctx->dRlSwitchCount.p, sc.data(), sc.size(), cudaMemcpyHostToDevice));
+            // The limits the continued pins are STAMPED at: OLF restores each pinned bus's generation target Q from
+            // the parent's end, and a GeneratorAction only invalidates the bus's target P, so the first solve keeps
+            // the limit at the parent's P (dgSeedAnchor) and the reactive-limit check refreshes it afterwards.
             if (useDynRlLimits) {                            // curve limits at the CURRENT (seeded) targets,
                 rlCurveLimitsBatch<<<grid(ctx->nrl * nS), BLOCK, 0, ctx->stream>>>(ctx->nrl, nS, ctx->ncv, n, ctx->cvExtrapolate,
                         ctx->dCvIdx.as<int>(), ctx->dCvIn.as<double>(), ctx->dCvPts.as<double>(),
@@ -11152,7 +11196,9 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                         nCvOv > 0 ? dCvOvEntry.as<int>() : nullptr,
                         nCvOv > 0 ? dCvOvVal.as<double>() : nullptr,
                         ctx->ngen > 0 ? ctx->dGenCum.as<double>() : nullptr,
-                        ctx->ngen > 0 ? ctx->dGenCumValid.as<char>() : nullptr, ctx->ngen,
+                        ctx->ngen > 0 ? ctx->dGenCumValid.as<char>() : nullptr, ctx->hasDgSeedAnchor ? ctx->dDgSeedAnchor.as<double>()
+                                : (ctx->hasDgAnchor ? ctx->dDgAnchor.as<double>() : nullptr),
+                        ctx->hasDgStart ? ctx->dDgStart.as<double>() : nullptr, ctx->ngen,
                         ctx->nds > 0 ? ctx->dDsPhiRow.as<int>() : nullptr,
                         ctx->nDsRowOv > 0 ? ctx->dDsRowOv.as<int>() : nullptr, ctx->nds,
                         ctx->ngen > 0 ? ctx->dgBus.as<int>() : nullptr,
@@ -11237,7 +11283,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                     nCvOv > 0 ? dCvOvEntry.as<int>() : nullptr,
                     nCvOv > 0 ? dCvOvVal.as<double>() : nullptr,
                     ctx->ngen > 0 ? ctx->dGenCum.as<double>() : nullptr,
-                    ctx->ngen > 0 ? ctx->dGenCumValid.as<char>() : nullptr, ctx->ngen,
+                    ctx->ngen > 0 ? ctx->dGenCumValid.as<char>() : nullptr, ctx->hasDgAnchor ? ctx->dDgAnchor.as<double>() : nullptr, ctx->hasDgStart ? ctx->dDgStart.as<double>() : nullptr, ctx->ngen,
                     ctx->nds > 0 ? ctx->dDsPhiRow.as<int>() : nullptr,
                     ctx->nDsRowOv > 0 ? ctx->dDsRowOv.as<int>() : nullptr, ctx->nds,
                     ctx->ngen > 0 ? ctx->dgBus.as<int>() : nullptr,
@@ -11253,11 +11299,6 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                 std::vector<double> nanv(nS, std::numeric_limits<double>::quiet_NaN());
                 CUDA_CHECK(cudaMemcpyAsync(ctx->dDsRetainApplied.p, nanv.data(), nS * sizeof(double), cudaMemcpyHostToDevice, ctx->stream));
                 CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
-            }
-            if (ctx->ngen > 0 && ctx->dGenCum.p) {           // per-solve too: the write-back reads it even when
-                CUDA_CHECK(cudaMemsetAsync(ctx->dGenCum.p, 0,   // the DS phase never fired (NaN targetP otherwise)
-                        static_cast<size_t>(ctx->ngen) * nS * sizeof(double), ctx->stream));
-                CUDA_CHECK(cudaMemsetAsync(ctx->dGenCumValid.p, 0, (size_t) nS * sizeof(char), ctx->stream));
             }
             if (ctx->nfq > 0) {                              // forced target Q: the clamp at each scenario's start P
                 forcedTargetQInitBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(ctx->nfq, nS, n, ctx->nds, ctx->fqExtrapolate,
@@ -13362,7 +13403,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                     ctx->dgMaxDelta.as<double>(), ctx->dgMinDelta.as<double>(),
                     ctx->dgMarginUp.as<double>(), ctx->dgMarginDown.as<double>(),
                     ctx->dBusGenStart.as<int>(), ctx->dBusGenEnd.as<int>(),
-                    ctx->dGenCum.as<double>(), ctx->ngen > 0 ? ctx->dGenCumValid.as<char>() : nullptr,
+                    ctx->dGenCum.as<double>(), ctx->ngen > 0 ? ctx->dGenCumValid.as<char>() : nullptr, ctx->hasDgAnchor ? ctx->dDgAnchor.as<double>() : nullptr, ctx->hasDgStart ? ctx->dDgStart.as<double>() : nullptr,
                     ctx->dGenRemoved.as<char>(), ctx->dGenFactorWork.as<double>(),
                     ctx->nDsLostGen, ctx->nDsLostGen > 0 ? ctx->dDsLostGen.as<int>() : nullptr,
                     ctx->dTarget.as<double>(), ctx->dRlSwitched.as<char>(), ctx->dDsResidual.as<char>(),
@@ -13374,7 +13415,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                         ctx->fqExtrapolate, ctx->dFqIdx.as<int>(), ctx->dFqIn.as<double>(), ctx->dFqPts.as<double>(),
                         ctx->fqHasPre ? ctx->dFqPre.as<double>() : nullptr,
                         ctx->ngen > 0 ? ctx->dGenCum.as<double>() : nullptr,
-                        ctx->ngen > 0 ? ctx->dGenCumValid.as<char>() : nullptr,
+                        ctx->ngen > 0 ? ctx->dGenCumValid.as<char>() : nullptr, ctx->hasDgAnchor ? ctx->dDgAnchor.as<double>() : nullptr, ctx->hasDgStart ? ctx->dDgStart.as<double>() : nullptr,
                         ctx->dDsPhiRow.as<int>(), ctx->nDsRowOv > 0 ? ctx->dDsRowOv.as<int>() : nullptr,
                         ctx->nDsLostGen, ctx->nDsLostGen > 0 ? ctx->dDsLostGen.as<int>() : nullptr,
                         ctx->nDsIslanded > 0 ? ctx->dDsIslanded.as<char>() : nullptr, ctx->dMode.as<int>(),
@@ -13396,7 +13437,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                         nCvOv > 0 ? dCvOvEntry.as<int>() : nullptr,
                         nCvOv > 0 ? dCvOvVal.as<double>() : nullptr,
                         ctx->ngen > 0 ? ctx->dGenCum.as<double>() : nullptr,
-                        ctx->ngen > 0 ? ctx->dGenCumValid.as<char>() : nullptr, ctx->ngen,
+                        ctx->ngen > 0 ? ctx->dGenCumValid.as<char>() : nullptr, ctx->hasDgAnchor ? ctx->dDgAnchor.as<double>() : nullptr, ctx->hasDgStart ? ctx->dDgStart.as<double>() : nullptr, ctx->ngen,
                         ctx->nds > 0 ? ctx->dDsPhiRow.as<int>() : nullptr,
                         ctx->nDsRowOv > 0 ? ctx->dDsRowOv.as<int>() : nullptr, ctx->nds,
                         ctx->ngen > 0 ? ctx->dgBus.as<int>() : nullptr,
@@ -13984,7 +14025,7 @@ psgStep(ctx, nS, n, outer, "afterDistrQ");
                     nCvOv > 0 ? dCvOvEntry.as<int>() : nullptr,
                     nCvOv > 0 ? dCvOvVal.as<double>() : nullptr,
                     ctx->ngen > 0 ? ctx->dGenCum.as<double>() : nullptr,
-                    ctx->ngen > 0 ? ctx->dGenCumValid.as<char>() : nullptr, ctx->ngen,
+                    ctx->ngen > 0 ? ctx->dGenCumValid.as<char>() : nullptr, ctx->hasDgAnchor ? ctx->dDgAnchor.as<double>() : nullptr, ctx->hasDgStart ? ctx->dDgStart.as<double>() : nullptr, ctx->ngen,
                     ctx->nds > 0 ? ctx->dDsPhiRow.as<int>() : nullptr,
                     ctx->nDsRowOv > 0 ? ctx->dDsRowOv.as<int>() : nullptr, ctx->nds,
                     ctx->ngen > 0 ? ctx->dgBus.as<int>() : nullptr,
@@ -15387,6 +15428,39 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
     ctx->dDsSlackAnchor.upload(a, static_cast<size_t>(env->GetArrayLength(jAnchor)) * sizeof(double));
     env->ReleaseDoubleArrayElements(jAnchor, a, JNI_ABORT);
     ctx->dsSlackHasAnchor = true;
+}
+
+// Per scenario and participating generator (s * ngen + g, pu): anchor = its move from its base target P to where the
+// slack's water-fill starts it (a strategy pair: the parent's final target, or a GeneratorAction's value; null = the
+// base), start = its move from that anchor at the solve's start (a contingency's loss pre-distribution; null = none).
+// The curve and forced-target-Q channels evaluate a generator at anchor + (genCum once a pass ran, else start).
+// seedAnchor (pairs): the anchor WITHOUT the strategy's GeneratorActions - where the continued pins are stamped.
+extern "C" JNIEXPORT void JNICALL
+Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchGenAnchor(
+        JNIEnv* env, jclass, jlong handle, jdoubleArray jAnchor, jdoubleArray jStart, jdoubleArray jSeedAnchor) {
+    auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
+    if (ctx == nullptr) {
+        return;
+    }
+    size_t want = static_cast<size_t>(ctx->nScenarios) * std::max(ctx->ngen, 0);
+    auto put = [&](jdoubleArray arr, DeviceBuf& buf, bool& has) {
+        has = false;
+        if (arr == nullptr || ctx->ngen <= 0) {
+            return true;
+        }
+        if (static_cast<size_t>(env->GetArrayLength(arr)) != want) {
+            env->ThrowNew(env->FindClass("java/lang/IllegalArgumentException"), "setBatchGenAnchor: expected nScenarios * ngen");
+            return false;
+        }
+        jdouble* a = env->GetDoubleArrayElements(arr, nullptr);
+        buf.upload(a, want * sizeof(double));
+        env->ReleaseDoubleArrayElements(arr, a, JNI_ABORT);
+        has = true;
+        return true;
+    };
+    if (put(jAnchor, ctx->dDgAnchor, ctx->hasDgAnchor) && put(jStart, ctx->dDgStart, ctx->hasDgStart)) {
+        put(jSeedAnchor, ctx->dDgSeedAnchor, ctx->hasDgSeedAnchor);
+    }
 }
 
 extern "C" JNIEXPORT void JNICALL

@@ -7883,6 +7883,32 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
                 strategiesOf("L2-4-1", "shuntOff"), actions, 2);
     }
 
+    /** An HvdcAction on a link that carries no power after its contingency - one of its converter buses isolated, or
+     *  the link itself tripped - changes nothing in OLF (its stations are already at zero). The device evaluated the
+     *  flow at the pair's start, where an isolated bus sits at its frozen 1 pu / 0 rad, and routed a tripped link to
+     *  the CPU. And on a link that does carry power, after a line contingency, the action holds it at its flows. */
+    @Test
+    void hvdcActionOnALinkWithoutPowerMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = com.powsybl.openloadflow.network.HvdcNetworkFactory.createWithHvdcInAcEmulation();
+        network.getHvdcLine("hvdc34").newExtension(com.powsybl.iidm.network.extensions.HvdcAngleDroopActivePowerControlAdder.class)
+                .withDroop(180).withP0(0.f).withEnabled(true).add();
+        List<Contingency> contingencies = List.of(
+                new Contingency("l45+l46", new BranchContingency("l45"), new BranchContingency("l46")),   // b4 holds cs4 alone
+                new Contingency("hvdc34", new com.powsybl.contingency.HvdcLineContingency("hvdc34")),
+                new Contingency("l12", new BranchContingency("l12")));
+        List<com.powsybl.action.Action> actions = List.of(new com.powsybl.action.HvdcActionBuilder().withId("acEmuOff")
+                .withHvdcId("hvdc34").withAcEmulationEnabled(false).build());
+        List<com.powsybl.contingency.strategy.OperatorStrategy> strategies = new java.util.ArrayList<>();
+        for (Contingency c : contingencies) {
+            strategies.add(new com.powsybl.contingency.strategy.OperatorStrategy("s-" + c.getId(),
+                    com.powsybl.contingency.ContingencyContext.specificContingency(c.getId()),
+                    new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of("acEmuOff")));
+        }
+        assertStrategyMatchesCpu(network, contingencies, strategies, actions, 6);
+    }
+
     /** A strategy pair is solved on the zero-impedance tree OLF reaches it with: its contingency's. Opening coupler
      *  z12 puts z23 back in the tree; a pair left on the base tree would hold z23 out and leave b2 hanging. */
     @Test

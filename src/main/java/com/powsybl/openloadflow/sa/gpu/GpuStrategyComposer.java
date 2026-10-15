@@ -312,9 +312,11 @@ final class GpuStrategyComposer {
                     continue;
                 }
                 com.powsybl.openloadflow.network.LfHvdc hv = net.getHvdcById(ha.getHvdcId());
-                if (ha.isAcEmulationEnabled().get() || hv == null || !hv.isAcEmulation() || hv.isDisabled()
-                        || ctgHvdcs.contains(hv)) {
-                    return null;                             // refused by OLF, unknown, not emulated, or lost: CPU
+                if (ha.isAcEmulationEnabled().get() || hv == null || !hv.isAcEmulation()) {
+                    return null;                             // refused by OLF, unknown or not emulated: CPU
+                }
+                if (hv.isDisabled() || ctgHvdcs.contains(hv)) {
+                    continue;                                // a link without power: OLF's action changes nothing
                 }
                 if (!acEmulationOff.contains(hv)) {
                     acEmulationOff.add(hv);

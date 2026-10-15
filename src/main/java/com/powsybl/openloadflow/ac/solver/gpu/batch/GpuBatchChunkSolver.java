@@ -2062,7 +2062,14 @@ final class GpuBatchChunkSolver {
                     // the VSC curve channel reads too - set below, once the HVDC arrays exist.
                     List<double[]> hvActionApplied = new ArrayList<>();   // {slot, ctl, d1 - baseD1, d2 - baseD2}
                     for (int s = 0; pairPhase && s < realCount; s++) {
-                        List<com.powsybl.openloadflow.network.LfHvdc> off = contingencies.get(group.get(chunkStart + s)).acEmulationOffHvdcs();
+                        List<com.powsybl.openloadflow.network.LfHvdc> off = new ArrayList<>(contingencies.get(group.get(chunkStart + s)).acEmulationOffHvdcs());
+                        // a link whose converter bus the contingency isolated carries no power: OLF's action changes nothing
+                        // (the device held the bus's frozen 1 pu / 0 rad and froze the link at the flow that gave)
+                        List<com.powsybl.openloadflow.network.LfHvdc> islandedLinks = islandedHvdcsByIndex != null
+                                ? islandedHvdcsByIndex[group.get(chunkStart + s)] : null;
+                        if (islandedLinks != null) {
+                            off.removeAll(islandedLinks);
+                        }
                         if (off.isEmpty()) {
                             continue;
                         }

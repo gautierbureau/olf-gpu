@@ -72,13 +72,16 @@ final class GpuStrategyComposer {
                                                     List<LoadLoss> ctgLoads,
                                                     java.util.Set<String> ctgLostLoadIds,
                                                     List<ShuntShift> ctgShifts,
-                                                    List<com.powsybl.openloadflow.network.LfHvdc> ctgHvdcs) {
+                                                    List<com.powsybl.openloadflow.network.LfHvdc> ctgHvdcs,
+                                                    com.powsybl.openloadflow.network.LfNetworkParameters networkParameters,
+                                                    com.powsybl.loadflow.LoadFlowParameters.BalanceType balanceType) {
         List<LfBranch> branches = new java.util.ArrayList<>(ctgBranches);
         List<LoadLoss> loads = new java.util.ArrayList<>(ctgLoads);
         List<ShuntShift> shifts = new java.util.ArrayList<>(ctgShifts);
         List<TapR1Override> taps = new java.util.ArrayList<>();
         List<LfBranch> reclosed = new java.util.ArrayList<>();
         List<BatchContingency.GeneratorMove> generatorActions = new java.util.ArrayList<>();
+        Map<LfGenerator, Double> generatorNetMove = new java.util.LinkedHashMap<>();
         Map<String, Action> actionById = new java.util.HashMap<>();
         for (Action a : currentActions) {
             actionById.put(a.getId(), a);
@@ -233,15 +236,24 @@ final class GpuStrategyComposer {
                     continue;                                // OLF's LfGeneratorAction does nothing on a generator the contingency lost
                 }
                 boolean relative = ga.isActivePowerRelativeValue().orElse(false);
-                double deltaP = relative ? ga.getActivePowerValue().getAsDouble()
-                                         : ga.getActivePowerValue().getAsDouble() - gen.getTargetP();
-                loads.add(new LoadLoss(bus, deltaP / PerUnit.SB, 0));
+                // An absolute value is measured from the generator's target in the BASE solution the device anchors
+                // at, which the base load flow's distribution moved for a participant - not from the network's own
+                // target (measured: B2-G set to 70 MW landed at 66.97, its base share of a 27 MW distribution short).
+                double deltaP = relative ? ga.getActivePowerValue().getAsDouble() / PerUnit.SB
+                                         : ga.getActivePowerValue().getAsDouble() / PerUnit.SB - lfGen.getTargetP();
+                // the bus injection moves by the generator's NET change: an absolute action replaces what the
+                // actions before it did (measured: 70 then 50 MW on B2-G injected both, 34 MW too much)
+                generatorNetMove.merge(lfGen, deltaP, (before, d) -> relative ? before + d : d);
                 // absolute: the value replaces the parent's distributed target
-                generatorActions.add(new BatchContingency.GeneratorMove(lfGen, deltaP / PerUnit.SB, !relative));
+                generatorActions.add(new BatchContingency.GeneratorMove(lfGen, deltaP, !relative,
+                        ga.getActivePowerValue().getAsDouble() / PerUnit.SB,
+                        com.powsybl.openloadflow.ac.solver.gpu.batch.GpuGeneratorParticipation.atTargetP(lfGen, gen,
+                                networkParameters, balanceType)));
             } else {
                 return null;                                 // out of stage-1 scope — CPU per-strategy path
             }
         }
+        generatorNetMove.forEach((g, d) -> loads.add(new LoadLoss(g.getBus(), d, 0)));
         return new BatchContingency(contingencyId + GpuBatchStatus.STRATEGY_KEY_SEP + strategy.getId(),
                 branches, ctgGens, loads, shifts, taps, List.of(), reclosed, ctgZiOutages, ctgHvdcs, List.of(), List.of(),
                 generatorActions);

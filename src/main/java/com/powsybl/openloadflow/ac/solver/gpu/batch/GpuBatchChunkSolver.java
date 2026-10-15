@@ -648,6 +648,7 @@ final class GpuBatchChunkSolver {
                     // SLOT in this chunk, so a list that outlives the chunk applies chunk N's entries to
                     // chunk N+1's slots. That is invisible to any validation run in windows of one chunk.
                     List<Integer> dsLostGenList = new ArrayList<>();
+                    List<Integer> dsOutList = new ArrayList<>();   // (slot, DS generator) a GeneratorAction took out
                     List<Integer> frozenSeedSlot = new ArrayList<>();
                     List<Integer> frozenSeedRow = new ArrayList<>();
                     List<Double> frozenSeedValue = new ArrayList<>();
@@ -1967,10 +1968,22 @@ final class GpuBatchChunkSolver {
                                         dsSlackShift[s] = slackMoves;
                                     }
                                 }
+                                // OLF re-checks each moved generator's participation at its new target
+                                // (reApplyActivePowerControlChecks); the last action on a generator decides
+                                java.util.Map<Integer, Boolean> staysBySlot = new java.util.TreeMap<>();
                                 for (BatchContingency.GeneratorMove m : contingencies.get(group.get(chunkStart + s)).generatorActions()) {
                                     int g = dgSlotOf(gpuData, m.generator().getId());
                                     if (g >= 0) {
+                                        // its target before the action: its anchor plus where the parent left it
+                                        double before = config.dsParams().anchorTargetP(m.generator()) + dgAnchor[s * ngen + g];
+                                        staysBySlot.put(g, m.participatesAt() == null || m.participatesAt().test(m.newTargetP(before)));
                                         dgAnchor[s * ngen + g] = m.absolute() ? m.deltaP() : dgAnchor[s * ngen + g] + m.deltaP();
+                                    }
+                                }
+                                for (var e : staysBySlot.entrySet()) {
+                                    if (!e.getValue()) {             // out of the distribution: it keeps the action's target
+                                        dsOutList.add(s);
+                                        dsOutList.add(e.getKey());
                                     }
                                 }
                             }
@@ -2044,6 +2057,8 @@ final class GpuBatchChunkSolver {
                     GpuAcNewtonSolver.setBatchDsLostGenerators(handle,
                             dsLostGenList.isEmpty() ? null
                                     : dsLostGenList.stream().mapToInt(Integer::intValue).toArray());
+                    GpuAcNewtonSolver.setBatchDsOutGenerators(handle,
+                            dsOutList.isEmpty() ? null : dsOutList.stream().mapToInt(Integer::intValue).toArray());
                     GpuAcNewtonSolver.setBatchDqWeightOverrides(handle,
                             dqOvIdxList.isEmpty() ? null : dqOvIdxList.stream().mapToInt(Integer::intValue).toArray(),
                             dqOvWList.isEmpty() ? null : dqOvWList.stream().mapToDouble(Double::doubleValue).toArray());

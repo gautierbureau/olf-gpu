@@ -823,6 +823,11 @@ public final class GpuAcNewtonSolver {
      *  reads it, the reactive-capability curve channel above all. */
     public static native void setBatchDsLostGenerators(long handle, int[] slotGen);
 
+    /** The participants a strategy's GeneratorAction takes out of the slack distribution (OLF's
+     *  reApplyActivePowerControlChecks), as (scenario, DS generator slot) pairs: they keep the action's target and
+     *  take no share. Null clears the channel. */
+    public static native void setBatchDsOutGenerators(long handle, int[] slotGen);
+
     /** Rows an islanding outage froze to a flat identity state, as (scenario, row) pairs. Their targets
      *  are not the outer loops' to write — OLF removes an islanded bus's equations, so nothing there
      *  re-derives a target for them. */

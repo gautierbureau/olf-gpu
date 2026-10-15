@@ -7386,7 +7386,7 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
                                               const double* dgMarginUp, const double* dgMarginDown,
                                               const int* busGenStart, const int* busGenEnd,
                                               double* genCum, char* genCumValid, const double* dgAnchor, const double* dgStart, char* genRemoved, double* genFactorWork,
-                                              int nDsLostGen, const int* dsLostGen,
+                                              int nDsLostGen, const int* dsLostGen, int nDsOutGen, const int* dsOutGen,
                                               double* target, char* switched, char* dsResidual, double* retainApplied, double* gateLast, int dbgTrace) {
     int s = blockIdx.x * blockDim.x + threadIdx.x;
     if (s >= nScenarios) return;
@@ -7593,6 +7593,12 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
                     lost = true;
                     break;
                 }
+            }
+            // A GeneratorAction can also take a generator out of the participation (OLF's
+            // reApplyActivePowerControlChecks: its new target is outside its limits): it stays where the action
+            // put it and takes no share, like a lost one, but it is still there for everything else.
+            for (int k = 0; k < nDsOutGen && !lost; k++) {
+                lost = dsOutGen[2 * k] == s && dsOutGen[2 * k + 1] == g;
             }
             genRemoved[(size_t) s * ngen + g] = lost ? 1 : 0;
             double a = dgAnchor != nullptr ? dgAnchor[(size_t) s * ngen + g] : 0.0;   // a moved anchor eats headroom
@@ -8486,6 +8492,8 @@ struct BatchSolverContext {
     int nFrozenRow = 0;                                    // outage froze to a flat identity state
     DeviceBuf dDsLostGen;                                  // (scenario, DS generator slot) pairs: the
     int nDsLostGen = 0;                                    // generators an outage removes, by identity
+    DeviceBuf dDsOutGen;                                   // (scenario, DS generator slot) pairs: participants
+    int nDsOutGen = 0;                                     // a GeneratorAction took out of the distribution
     DeviceBuf dGenCumValid;                                // per scenario: the PER-GENERATOR water-fill ran, so
                                                            // dGenCum holds each generator's own movement. The
                                                            // anchored path distributes per BUS and leaves it zero,
@@ -13452,6 +13460,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                     ctx->dGenCum.as<double>(), ctx->ngen > 0 ? ctx->dGenCumValid.as<char>() : nullptr, ctx->hasDgAnchor ? ctx->dDgAnchor.as<double>() : nullptr, ctx->hasDgStart ? ctx->dDgStart.as<double>() : nullptr,
                     ctx->dGenRemoved.as<char>(), ctx->dGenFactorWork.as<double>(),
                     ctx->nDsLostGen, ctx->nDsLostGen > 0 ? ctx->dDsLostGen.as<int>() : nullptr,
+                    ctx->nDsOutGen, ctx->nDsOutGen > 0 ? ctx->dDsOutGen.as<int>() : nullptr,
                     ctx->dTarget.as<double>(), ctx->dRlSwitched.as<char>(), ctx->dDsResidual.as<char>(),
                     ctx->dDsRetainApplied.as<double>(),
                     ctx->dDsGateLast.p ? ctx->dDsGateLast.as<double>() : nullptr,
@@ -15937,6 +15946,24 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
     ctx->dDsLostGen.upload(sg, static_cast<size_t>(n2) * sizeof(int));
     env->ReleaseIntArrayElements(jSlotGen, sg, JNI_ABORT);
     ctx->nDsLostGen = n2 / 2;
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchDsOutGenerators(
+        JNIEnv* env, jclass, jlong handle, jintArray jSlotGen) {
+    auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
+    if (ctx == nullptr) {
+        return;
+    }
+    if (jSlotGen == nullptr || env->GetArrayLength(jSlotGen) == 0) {
+        ctx->nDsOutGen = 0;
+        return;
+    }
+    int n2 = env->GetArrayLength(jSlotGen);
+    jint* sg = env->GetIntArrayElements(jSlotGen, nullptr);
+    ctx->dDsOutGen.upload(sg, static_cast<size_t>(n2) * sizeof(int));
+    env->ReleaseIntArrayElements(jSlotGen, sg, JNI_ABORT);
+    ctx->nDsOutGen = n2 / 2;
 }
 
 extern "C" JNIEXPORT void JNICALL

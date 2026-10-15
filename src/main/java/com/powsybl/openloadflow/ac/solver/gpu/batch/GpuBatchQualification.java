@@ -1442,6 +1442,14 @@ final class GpuBatchQualification {
                 refuse(c, "PLAN:PAIR_ACTION_UNTRACKED_CURVE");
                 continue;
             }
+            // ...and re-checks its participation at the new target, which the device applies to the generator pack.
+            // A participant outside a non-empty pack (its bus has no active P balance row) has nowhere to sit out. (In
+            // a slack-only distribution there is no pack, and any action there moves the slack bus: SLACK_BUS.)
+            if (gpuData.dgGenId() != null && gpuData.dgGenId().length > 0 && c.generatorActions().stream()
+                    .anyMatch(m -> dsParams.factor(m.generator()) != 0 && !inGeneratorPack(gpuData, m.generator().getId()))) {
+                refuse(c, "PLAN:PAIR_ACTION_UNTRACKED_PARTICIPANT");
+                continue;
+            }
             LfBus newSlack = q.relocatedSlack();
             if (newSlack != null) {
                 // OLF moved the slack to newSlack (the base one is in the island): the new slack's P balance leaves

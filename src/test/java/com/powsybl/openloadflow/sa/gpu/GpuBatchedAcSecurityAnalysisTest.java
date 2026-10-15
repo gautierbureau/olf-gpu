@@ -7028,11 +7028,12 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
             for (int r = 0; r < cpu.getOperatorStrategyResults().size(); r++) {
                 var cpuS = cpu.getOperatorStrategyResults().get(r).getConditionalActionsResults().get(0);
                 var gpuS = gpu.getOperatorStrategyResults().get(r).getConditionalActionsResults().get(0);
-                assertEquals(cpuS.getStatus(), gpuS.getStatus());
+                String strategyId = cpu.getOperatorStrategyResults().get(r).getOperatorStrategy().getId();
+                assertEquals(cpuS.getStatus(), gpuS.getStatus(), "strategy status of " + strategyId);
                 assertEquals(cpuS.getLimitViolationsResult().getLimitViolations().size(),
-                        gpuS.getLimitViolationsResult().getLimitViolations().size(), "strategy violation count");
+                        gpuS.getLimitViolationsResult().getLimitViolations().size(), "strategy violation count of " + strategyId);
                 assertEquals(cpuS.getDistributedActivePower(), gpuS.getDistributedActivePower(), 1e-9,
-                        "strategy distributed active power");
+                        "strategy distributed active power of " + strategyId);
                 var cb = cpuS.getNetworkResult().getBusResults();
                 var gb = gpuS.getNetworkResult().getBusResults();
                 assertEquals(cb.size(), gb.size());
@@ -7508,6 +7509,96 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         assertGpuMatchesCpu(network5, List.of(new Contingency(loadId5,
                 new com.powsybl.contingency.LoadContingency(loadId5))));
         assertEquals(1, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(), "load loss on the device");
+    }
+
+    /** A GeneratorAction re-checks its generator's participation (OLF's reApplyActivePowerControlChecks): a target
+     *  outside [minP, maxP] takes it out of the distribution, a target back inside brings it in. B4's load loss
+     *  lowers generation; every generator has room, so only the actions decide who moves. */
+    private static Network participationRecheckNetwork() {
+        Network network = IeeeCdfNetworkFactory.create14();
+        network.getGenerator("B1-G").setMinP(0).setMaxP(400);
+        network.getGenerator("B2-G").setMinP(30).setMaxP(60);
+        network.getVoltageLevel("VL6").newGenerator().setId("B6-GP").setBus("B6").setConnectableBus("B6")
+                .setTargetP(20).setTargetQ(0).setVoltageRegulatorOn(false).setMinP(0).setMaxP(80).add();
+        // starts outside its limits: not a participant until an action puts it inside
+        network.getVoltageLevel("VL8").newGenerator().setId("B8-GP").setBus("B8").setConnectableBus("B8")
+                .setTargetP(5).setTargetQ(0).setVoltageRegulatorOn(false).setMinP(10).setMaxP(50).add();
+        return network;
+    }
+
+    private static List<com.powsybl.contingency.strategy.OperatorStrategy> strategiesOf(String ctgId, String... actionIds) {
+        List<com.powsybl.contingency.strategy.OperatorStrategy> out = new java.util.ArrayList<>();
+        for (String a : actionIds) {
+            out.add(new com.powsybl.contingency.strategy.OperatorStrategy("s-" + a,
+                    com.powsybl.contingency.ContingencyContext.specificContingency(ctgId),
+                    new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of(a)));
+        }
+        return out;
+    }
+
+    private static com.powsybl.action.Action genAction(String id, String gen, boolean relative, double value) {
+        return new com.powsybl.action.GeneratorActionBuilder().withId(id).withGeneratorId(gen)
+                .withActivePowerRelativeValue(relative).withActivePowerValue(value).build();
+    }
+
+    @Test
+    void generatorActionTakingAParticipantOutMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = participationRecheckNetwork();
+        String loadId = loadAtBus(network, "B4").getId();
+        List<Contingency> contingencies = List.of(new Contingency(loadId, new com.powsybl.contingency.LoadContingency(loadId)));
+        List<com.powsybl.action.Action> actions = List.of(
+                genAction("over2", "B2-G", false, 70),          // above its maxP 60
+                genAction("under2", "B2-G", true, -15),         // below its minP 30
+                genAction("over6", "B6-GP", true, 70),          // above its maxP 80
+                genAction("inside2", "B2-G", false, 50),        // stays a participant
+                // below its minP only from where the contingency left it (B2-G ends the parent near 31.6 MW)
+                genAction("nudge2", "B2-G", true, -4));
+        List<com.powsybl.contingency.strategy.OperatorStrategy> strategies = new java.util.ArrayList<>(
+                strategiesOf(loadId, "over2", "under2", "over6", "inside2", "nudge2"));
+        // two actions on one generator: OLF re-checks after each, the last one decides
+        strategies.add(new com.powsybl.contingency.strategy.OperatorStrategy("s-over-then-inside",
+                com.powsybl.contingency.ContingencyContext.specificContingency(loadId),
+                new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of("over2", "inside2")));
+        strategies.add(new com.powsybl.contingency.strategy.OperatorStrategy("s-inside-then-over",
+                com.powsybl.contingency.ContingencyContext.specificContingency(loadId),
+                new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of("inside2", "over2")));
+        assertStrategyMatchesCpu(network, contingencies, strategies, actions, 8);
+    }
+
+    /** Only the slack bus's generator participates. An absolute action above its maxP leaves OLF with no participant
+     *  at all, which the device's slack-only check cannot express. Any action on the slack bus of a slack-only
+     *  distribution stays on the CPU (SLACK_BUS); both pairs must still match. */
+    @Test
+    void generatorActionOnASlackOnlyParticipantMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = IeeeCdfNetworkFactory.create14();
+        network.getGenerator("B1-G").setMinP(0).setMaxP(400);
+        for (String id : List.of("B2-G", "B3-G", "B6-G", "B8-G")) {
+            network.getGenerator(id).newExtension(com.powsybl.iidm.network.extensions.ActivePowerControlAdder.class)
+                    .withParticipate(false).add();
+        }
+        String loadId = loadAtBus(network, "B4").getId();
+        List<Contingency> contingencies = List.of(new Contingency(loadId, new com.powsybl.contingency.LoadContingency(loadId)));
+        List<com.powsybl.action.Action> actions = List.of(
+                genAction("up1", "B1-G", true, 10),
+                genAction("over1", "B1-G", false, 450));
+        assertStrategyMatchesCpu(network, contingencies, strategiesOf(loadId, "up1", "over1"), actions, 1);
+    }
+
+    @Test
+    void generatorActionBringingAGeneratorInRunsOnCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = participationRecheckNetwork();
+        String loadId = loadAtBus(network, "B4").getId();
+        List<Contingency> contingencies = List.of(new Contingency(loadId, new com.powsybl.contingency.LoadContingency(loadId)));
+        List<com.powsybl.action.Action> actions = List.of(
+                genAction("start8", "B8-GP", false, 20),        // inside [10, 50]: it now participates
+                genAction("nudge8", "B8-GP", true, 1));         // still below its minP: stays out
+        assertStrategyMatchesCpu(network, contingencies, strategiesOf(loadId, "start8", "nudge8"), actions, 2);
     }
 
     /** Strategy pairs whose parent water-filled over a participating slack with a saturated peer: each pair starts

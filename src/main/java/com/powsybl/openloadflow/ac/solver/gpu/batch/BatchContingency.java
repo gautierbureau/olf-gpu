@@ -46,10 +46,19 @@ public record BatchContingency(String contingencyId, List<LfBranch> outagedBranc
 
     /** One GeneratorAction of a strategy pair: {@code deltaP} (pu) is the change of target P from the BASE
      *  target, which is the whole move for an absolute action and the change added to the parent's target
-     *  for a relative one. */
-    public record GeneratorMove(LfGenerator generator, double deltaP, boolean absolute) {
+     *  for a relative one. {@code change} is OLF's own GeneratorChange (pu): the new target of an absolute action,
+     *  the amount added to the current target of a relative one. {@code participatesAt} is OLF's participation
+     *  verdict at a target P (pu) once the action re-checks it (GpuGeneratorParticipation), null when the re-check
+     *  leaves it as it was. */
+    public record GeneratorMove(LfGenerator generator, double deltaP, boolean absolute, double change,
+                                java.util.function.DoublePredicate participatesAt) {
         public GeneratorMove {
             Objects.requireNonNull(generator);
+        }
+
+        /** OLF's new target P (pu) from the generator's {@code currentTargetP} (pu) before the action. */
+        public double newTargetP(double currentTargetP) {
+            return absolute ? change : currentTargetP + change;
         }
     }
 

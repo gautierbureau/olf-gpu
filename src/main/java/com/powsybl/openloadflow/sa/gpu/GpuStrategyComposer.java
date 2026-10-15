@@ -43,10 +43,9 @@ final class GpuStrategyComposer {
     /** Stage-1 applicability: single-stage strategy with a TrueCondition whose contingency context
      *  covers this contingency. Anything else stays on the CPU per-strategy path. */
     static boolean strategyApplies(OperatorStrategy strategy, String contingencyId) {
-        List<com.powsybl.contingency.strategy.ConditionalActions> stages = strategy.getConditionalActions();
-        if (stages.size() != 1) {
-            return false;                                    // multi-stage stays on the CPU path (stage-on-stage
-        }                                                    // semantics need intermediate-state evaluation)
+        if (candidateActionLists(strategy).isEmpty()) {
+            return false;                                    // too many conditional stages to speculate on
+        }
         // ANY single-stage condition qualifies — including the violation/threshold conditions: the
         // ENGINE evaluates the condition (AbstractSecurityAnalysis.checkCondition, on the CPU-detected
         // post-contingency violations) BEFORE our runActionSimulation override is invoked, so the pair
@@ -60,12 +59,58 @@ final class GpuStrategyComposer {
         };
     }
 
+    /** Conditional stages a strategy may carry and still be precomputed: every combination is one pair. */
+    static final int MAX_CONDITIONAL_STAGES = 3;
+
+    /**
+     * The action lists OLF may apply for this strategy. OLF evaluates EVERY stage's condition on the same post-contingency
+     * violations and applies the actions of the stages that hold, concatenated in stage order
+     * (AbstractSecurityAnalysis.checkCondition); none holding means no strategy result. The always-true stages are in
+     * every list; each combination of the conditional ones gives one list, precomputed speculatively. Empty when the
+     * strategy has more than {@link #MAX_CONDITIONAL_STAGES} conditional stages.
+     */
+    static List<List<String>> candidateActionLists(OperatorStrategy strategy) {
+        List<com.powsybl.contingency.strategy.ConditionalActions> stages = strategy.getConditionalActions();
+        List<Integer> conditional = new java.util.ArrayList<>();
+        for (int i = 0; i < stages.size(); i++) {
+            if (!(stages.get(i).getCondition() instanceof com.powsybl.contingency.strategy.condition.TrueCondition)) {
+                conditional.add(i);
+            }
+        }
+        if (conditional.size() > MAX_CONDITIONAL_STAGES) {
+            return List.of();
+        }
+        java.util.LinkedHashSet<List<String>> lists = new java.util.LinkedHashSet<>();
+        for (int mask = 0; mask < 1 << conditional.size(); mask++) {
+            List<String> ids = new java.util.ArrayList<>();
+            for (int i = 0; i < stages.size(); i++) {
+                int c = conditional.indexOf(i);
+                if (c < 0 || (mask & 1 << c) != 0) {
+                    ids.addAll(stages.get(i).getActionIds());
+                }
+            }
+            if (!ids.isEmpty()) {
+                lists.add(List.copyOf(ids));
+            }
+        }
+        return List.copyOf(lists);
+    }
+
+    /** The batch id of a (contingency, strategy) pair applying {@code actionIds}: a single-stage strategy has one
+     *  candidate list and keeps the plain id; a multi-stage one adds the list, which is what OLF hands
+     *  runActionSimulation once its conditions are evaluated. */
+    static String pairId(String contingencyId, OperatorStrategy strategy, List<String> actionIds) {
+        String id = contingencyId + GpuBatchStatus.STRATEGY_KEY_SEP + strategy.getId();
+        return strategy.getConditionalActions().size() == 1 ? id
+                : id + GpuBatchStatus.STRATEGY_KEY_SEP + String.join("\u0002", actionIds);
+    }
+
     /** Compile the strategy's actions onto the contingency's deltas into ONE extra batch scenario,
      *  or null when any action is out of stage-1 scope (branch open/RECLOSE, LoadAction,
      *  GeneratorAction — absolute or relative active power). {@code ctgLostLoadIds} are the loads the
      *  contingency itself loses, on which a load action is a no-op. */
     static BatchContingency composeStrategyScenario(Network network, LfNetwork net, String contingencyId,
-                                                    OperatorStrategy strategy, List<Action> currentActions,
+                                                    OperatorStrategy strategy, List<String> actionIds, List<Action> currentActions,
                                                     List<LfBranch> ctgZiOutages,
                                                     List<LfBranch> ctgBranches,
                                                     List<LfGenerator> ctgGens,
@@ -89,7 +134,7 @@ final class GpuStrategyComposer {
         for (Action a : currentActions) {
             actionById.put(a.getId(), a);
         }
-        for (String actionId : strategy.getConditionalActions().get(0).getActionIds()) {
+        for (String actionId : actionIds) {
             Action a = actionById.get(actionId);
             if (a instanceof com.powsybl.action.TerminalsConnectionAction tca) {
                 // OLF operates every LfBranch of the equipment (getBranchesByOriginalId): the three legs of a
@@ -279,7 +324,7 @@ final class GpuStrategyComposer {
             }
         }
         generatorNetMove.forEach((g, d) -> loads.add(new LoadLoss(g.getBus(), d, 0)));
-        return new BatchContingency(contingencyId + GpuBatchStatus.STRATEGY_KEY_SEP + strategy.getId(),
+        return new BatchContingency(pairId(contingencyId, strategy, actionIds),
                 // the parent's one-side openings and the zero-impedance tree OLF reaches the strategy with: the pair is
                 // the contingency's topology plus the actions (dropping them solved another network: 0.52 kV at B4 on a
                 // three-winding transformer outage)

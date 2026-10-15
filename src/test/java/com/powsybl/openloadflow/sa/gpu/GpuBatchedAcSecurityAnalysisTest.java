@@ -7543,13 +7543,13 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         // the pair on the device, the contingency reported from the device
         assertStrategyMatchesCpu(network, contingencies, strategiesOf(ctgId, "close"), actions, 1, true,
                 p -> p.setMaxNewtonRaphsonIterations(8));
-        // ...and with a second strategy the device does not compose (two stages), which OLF starts from its own failed
-        // run of the contingency: that run has to happen
+        // ...and with a second strategy the device does not compose (four conditional stages), which OLF starts from
+        // its own failed run of the contingency: that run has to happen
         List<com.powsybl.action.Action> actions2 = List.of(actions.get(0),
                 new com.powsybl.action.GeneratorActionBuilder().withId("closeAndUp2").withGeneratorId("B2-G")
                         .withActivePowerRelativeValue(true).withActivePowerValue(10).build());
         List<com.powsybl.contingency.strategy.OperatorStrategy> strategies2 = new java.util.ArrayList<>(strategiesOf(ctgId, "close"));
-        strategies2.add(twoStageStrategy("s-closeAndUp2", ctgId, "close", "closeAndUp2"));
+        strategies2.add(fourConditionalStageStrategy("s-closeAndUp2", ctgId, "close", "closeAndUp2"));
         assertStrategyMatchesCpu(network, contingencies, strategies2, actions2, 1, true,
                 p -> p.setMaxNewtonRaphsonIterations(8));
         // A contingency that CONVERGES four times (reactive-limit switches in between), then runs out of iterations:
@@ -7562,7 +7562,7 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         assertStrategyMatchesCpu(network2, contingencies2, strategiesOf("L1-2-1", "close"), actions, 1, true,
                 p -> p.setMaxNewtonRaphsonIterations(8));
         List<com.powsybl.contingency.strategy.OperatorStrategy> strategies3 = new java.util.ArrayList<>(strategiesOf("L1-2-1", "close"));
-        strategies3.add(twoStageStrategy("s-closeAndUp2", "L1-2-1", "close", "closeAndUp2"));
+        strategies3.add(fourConditionalStageStrategy("s-closeAndUp2", "L1-2-1", "close", "closeAndUp2"));
         assertStrategyMatchesCpu(network2, contingencies2, strategies3, actions2, 1, true,
                 p -> p.setMaxNewtonRaphsonIterations(8));
     }
@@ -7585,6 +7585,42 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         List<com.powsybl.action.Action> actions = List.of(new com.powsybl.action.LoadActionBuilder().withId("more9")
                 .withLoadId(load9).withRelativeValue(true).withActivePowerValue(47.8).build());
         assertStrategyMatchesCpu(network, contingencies, strategiesOf(loadId, "more9"), actions, 0);
+    }
+
+    /** A strategy in several stages: OLF evaluates every stage's condition on the post-contingency violations and
+     *  applies the actions of the stages that hold, in stage order (none holding: no result). The device precomputes
+     *  one pair per combination of the conditional stages and answers with the one OLF selects. ieee14 has no
+     *  violation after B4's load loss, so AnyViolationCondition fails and an empty AllViolationCondition holds. */
+    @Test
+    void multiStageStrategiesMatchCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = IeeeCdfNetworkFactory.create14();
+        String loadId = loadAtBus(network, "B4").getId();
+        List<Contingency> contingencies = List.of(new Contingency(loadId, new com.powsybl.contingency.LoadContingency(loadId)));
+        List<com.powsybl.action.Action> actions = List.of(
+                genAction("up2", "B2-G", true, 10),
+                new com.powsybl.action.TerminalsConnectionActionBuilder().withId("open1011")
+                        .withNetworkElementId("L10-11-1").withOpen(true).build());
+        var ctx = com.powsybl.contingency.ContingencyContext.specificContingency(loadId);
+        var always = new com.powsybl.contingency.strategy.condition.TrueCondition();
+        var anyViolation = new com.powsybl.contingency.strategy.condition.AnyViolationCondition();
+        List<com.powsybl.contingency.strategy.OperatorStrategy> strategies = List.of(
+                // both stages always: up2 then open1011
+                new com.powsybl.contingency.strategy.OperatorStrategy("sBoth", ctx,
+                        List.of(stage("a", always, "up2"), stage("b", always, "open1011"))),
+                // the second stage's condition fails: up2 alone
+                new com.powsybl.contingency.strategy.OperatorStrategy("sFirstOnly", ctx,
+                        List.of(stage("a", always, "up2"), stage("b", anyViolation, "open1011"))),
+                // a conditional stage that holds, one that does not, and the same action twice
+                new com.powsybl.contingency.strategy.OperatorStrategy("sMixed", ctx,
+                        List.of(stage("a", alwaysHolds(), "open1011", "up2"), stage("b", anyViolation, "up2"),
+                                stage("c", always, "up2"))),
+                // nothing holds: no result on either side
+                new com.powsybl.contingency.strategy.OperatorStrategy("sNone", ctx,
+                        List.of(stage("a", anyViolation, "up2"), stage("b", anyViolation, "open1011"))));
+        // the contingency, sBoth (1), sFirstOnly (2 combinations), sMixed (4), sNone (3)
+        assertStrategyMatchesCpu(network, contingencies, strategies, actions, 11);
     }
 
     /** An HvdcAction switching AC emulation off (OLF's LfHvdcAction): the link becomes two fixed converter set points
@@ -7719,15 +7755,24 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         return out;
     }
 
-    /** A strategy whose actions come in two always-applied stages: OLF applies both. */
-    private static com.powsybl.contingency.strategy.OperatorStrategy twoStageStrategy(String id, String ctgId,
-                                                                                    String action1, String action2) {
+    /** A condition that always holds without being a TrueCondition: every one of no element is violated. */
+    private static com.powsybl.contingency.strategy.condition.Condition alwaysHolds() {
+        return new com.powsybl.contingency.strategy.condition.AllViolationCondition(List.of());
+    }
+
+    private static com.powsybl.contingency.strategy.ConditionalActions stage(String id,
+                                                                           com.powsybl.contingency.strategy.condition.Condition condition,
+                                                                           String... actionIds) {
+        return new com.powsybl.contingency.strategy.ConditionalActions(id, condition, List.of(actionIds));
+    }
+
+    /** More conditional stages than the device speculates on (all holding): the strategy stays on the CPU. */
+    private static com.powsybl.contingency.strategy.OperatorStrategy fourConditionalStageStrategy(String id, String ctgId,
+                                                                                                String action1, String action2) {
         return new com.powsybl.contingency.strategy.OperatorStrategy(id,
                 com.powsybl.contingency.ContingencyContext.specificContingency(ctgId), List.of(
-                        new com.powsybl.contingency.strategy.ConditionalActions("stage1",
-                                new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of(action1)),
-                        new com.powsybl.contingency.strategy.ConditionalActions("stage2",
-                                new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of(action2))));
+                        stage("c1", alwaysHolds(), action1), stage("c2", alwaysHolds(), action2),
+                        stage("c3", alwaysHolds(), action1), stage("c4", alwaysHolds(), action1)));
     }
 
     private static com.powsybl.action.Action genAction(String id, String gen, boolean relative, double value) {

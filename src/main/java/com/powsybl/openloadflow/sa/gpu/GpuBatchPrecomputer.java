@@ -292,30 +292,33 @@ final class GpuBatchPrecomputer {
                                 && pairBt != com.powsybl.loadflow.LoadFlowParameters.BalanceType.PROPORTIONAL_TO_GENERATION_PARTICIPATION_FACTOR) {
                             continue;                        // pair handled by the CPU per-strategy path
                         }
-                        BatchContingency pair = GpuStrategyComposer.composeStrategyScenario(network, net, pc.getContingency().getId(), strategy, actions,
-                                ziOutages, branches, gens, loads, pc.getLoadIdsToLose().keySet(), shifts, hvdcs,
-                                sideOpens, ziNonTree, context.getParameters().getNetworkParameters(), pairBt);
-                        // An absolute GeneratorAction on a participant restarts that generator from the value, over
-                        // its share of the parent's distribution. The pair leg drops the parent's anchor shift of the
-                        // generator's BUS, which is that share only when no other participant sits on the bus.
-                        var pairDsParams = config.dsParams();
-                        if (pair != null && pair.absoluteTargetGenerators().stream()
-                                .filter(g -> pairDsParams.factor(g) != 0)
-                                .anyMatch(g -> g.getBus().getGenerators().stream()
-                                        .anyMatch(o -> o != g && pairDsParams.factor(o) != 0))) {
-                            pair = null;                     // the bus's split of the parent share is not known: CPU
-                        }
-                        // A GeneratorAction re-checks its generator's participation at the new target. A generator that
-                        // did not participate and now does would have to join the device's generator pack: CPU.
-                        if (pair != null && pair.generatorActions().stream().anyMatch(m -> pairDsParams.factor(m.generator()) == 0
-                                && m.participatesAt() != null
-                                && m.participatesAt().test(m.newTargetP(m.generator().getTargetP())))) {
-                            GpuBatchScopeCensus.record("PAIR:ACTION_STARTS_PARTICIPATION");
-                            pair = null;
-                        }
-                        if (pair != null) {
-                            pair = withPairTree(pair, pc, branches, ziOutages, ziTree);
-                            batch.add(pair);
+                        // one pair per action list OLF may apply (a multi-stage strategy's stage combinations)
+                        for (List<String> actionIds : GpuStrategyComposer.candidateActionLists(strategy)) {
+                            BatchContingency pair = GpuStrategyComposer.composeStrategyScenario(network, net, pc.getContingency().getId(), strategy, actionIds, actions,
+                                    ziOutages, branches, gens, loads, pc.getLoadIdsToLose().keySet(), shifts, hvdcs,
+                                    sideOpens, ziNonTree, context.getParameters().getNetworkParameters(), pairBt);
+                            // An absolute GeneratorAction on a participant restarts that generator from the value, over
+                            // its share of the parent's distribution. The pair leg drops the parent's anchor shift of the
+                            // generator's BUS, which is that share only when no other participant sits on the bus.
+                            var pairDsParams = config.dsParams();
+                            if (pair != null && pair.absoluteTargetGenerators().stream()
+                                    .filter(g -> pairDsParams.factor(g) != 0)
+                                    .anyMatch(g -> g.getBus().getGenerators().stream()
+                                            .anyMatch(o -> o != g && pairDsParams.factor(o) != 0))) {
+                                pair = null;                     // the bus's split of the parent share is not known: CPU
+                            }
+                            // A GeneratorAction re-checks its generator's participation at the new target. A generator that
+                            // did not participate and now does would have to join the device's generator pack: CPU.
+                            if (pair != null && pair.generatorActions().stream().anyMatch(m -> pairDsParams.factor(m.generator()) == 0
+                                    && m.participatesAt() != null
+                                    && m.participatesAt().test(m.newTargetP(m.generator().getTargetP())))) {
+                                GpuBatchScopeCensus.record("PAIR:ACTION_STARTS_PARTICIPATION");
+                                pair = null;
+                            }
+                            if (pair != null) {
+                                pair = withPairTree(pair, pc, branches, ziOutages, ziTree);
+                                batch.add(pair);
+                            }
                         }
                     }
                     continue;

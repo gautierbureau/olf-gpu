@@ -575,9 +575,20 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
     private static boolean everyStrategyAnsweredOnDevice(RunState rs, String contingencyId,
                                                          SecurityAnalysisParameters securityAnalysisParameters) {
         for (OperatorStrategy strategy : rs.operatorStrategies) {
-            if (targets(strategy, contingencyId) && pairDistributedOnDevice(rs.precomputed,
-                    contingencyId + STRATEGY_KEY_SEP + strategy.getId(), securityAnalysisParameters) == null) {
+            if (!targets(strategy, contingencyId)) {
+                continue;
+            }
+            // whichever of its action lists OLF ends up applying (the stages' conditions are evaluated later, on the
+            // post-contingency violations), the device must hold it
+            List<List<String>> candidates = GpuStrategyComposer.candidateActionLists(strategy);
+            if (candidates.isEmpty()) {
                 return false;
+            }
+            for (List<String> actionIds : candidates) {
+                if (pairDistributedOnDevice(rs.precomputed, GpuStrategyComposer.pairId(contingencyId, strategy, actionIds),
+                        securityAnalysisParameters) == null) {
+                    return false;
+                }
             }
         }
         return true;
@@ -1182,7 +1193,8 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                                                          com.powsybl.openloadflow.network.LfNetworkParameters networkParameters,
                                                          List<LimitReduction> limitReductions) {
         restoreStaleVoltages(runState.get(), null);         // an action simulation reads the network as it stands
-        String scId = contingency.getId() + STRATEGY_KEY_SEP + operatorStrategy.getId();
+        // the pair holding the actions OLF's condition check selected
+        String scId = GpuStrategyComposer.pairId(contingency.getId(), operatorStrategy, actionsIds);
         PrecomputedBatch precomputed = runState.get().precomputed;
         double[] state = precomputed.states().get(scId);
         Double distributed = pairDistributedOnDevice(precomputed, scId, securityAnalysisParameters);

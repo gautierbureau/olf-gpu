@@ -83,18 +83,20 @@ public class GpuDriverOuterLoopEngine extends AcloadFlowEngine {
 
     /**
      * A loop the device driver owns. While the solver runs on the device the driver has already
-     * made this loop's decisions inside the solve, so the check is STABLE and OLF's loop is never
-     * initialized (FreezingHvdcACEmulation.initialize would freeze every emulation on its own). The
-     * moment a solve FALLS BACK to the CPU Newton-Raphson (a device-broken shape, a forced-PV
-     * election the kernel does not run, a rejected extraction) the driver made no decision at all,
-     * and OLF's real loop must run exactly as it does without the GPU — initialized late, on the
-     * state the fallback left. Dropping the loop instead left the fallback base without any
+     * made this loop's decisions inside the solve, so the check is STABLE. The moment a solve FALLS
+     * BACK to the CPU Newton-Raphson (a device-broken shape, a forced-PV election the kernel does not
+     * run, a rejected extraction) the driver made no decision at all, and OLF's real loop must run
+     * exactly as it does without the GPU. Dropping the loop instead left the fallback base without any
      * DistributedSlack/ReactiveLimits (1.3e-4 kV on the zero-impedance member network).
+     *
+     * <p>OLF initialized the real loop when the engine created it (createOuterLoopsAndContexts), before
+     * it was wrapped here — the driver starts from that state too (FreezingHvdcACEmulation's frozen
+     * statuses, PhaseControl's enabled controls). It is not initialized again: a second initialize reset
+     * its state and re-froze the emulations the run had unfrozen.
      */
     static class DeviceDrivenLoop implements AcOuterLoop {
         protected final GpuDriverOuterLoopEngine engine;
         private final AcOuterLoop real;
-        private boolean initialized;
 
         DeviceDrivenLoop(GpuDriverOuterLoopEngine engine, AcOuterLoop real) {
             this.engine = engine;
@@ -118,14 +120,7 @@ public class GpuDriverOuterLoopEngine extends AcloadFlowEngine {
 
         @Override
         public void initialize(AcOuterLoopContext context) {
-            // OLF's initialize is part of the loop's contract and the device relies on it having run
-            // (PhaseControl.initialize ENABLES the continuous controls the first solve must see as
-            // row-mode-3 rows). The one exception is FreezingHvdcACEmulation: its initialize freezes
-            // every emulation on the network, which the driver replays itself from the warm state.
-            if (!"FreezingHvdcACEmulation".equals(real.getName())) {
-                real.initialize(context);
-                initialized = true;
-            }
+            real.initialize(context);
         }
 
         @Override
@@ -135,18 +130,12 @@ public class GpuDriverOuterLoopEngine extends AcloadFlowEngine {
                 return new com.powsybl.openloadflow.lf.outerloop.OuterLoopResult(this,
                         com.powsybl.openloadflow.lf.outerloop.OuterLoopStatus.STABLE);
             }
-            if (!initialized) {
-                real.initialize(context);
-                initialized = true;
-            }
             return real.check(context, reportNode);
         }
 
         @Override
         public void cleanup(AcOuterLoopContext context) {
-            if (initialized) {
-                real.cleanup(context);
-            }
+            real.cleanup(context);
         }
 
         @Override

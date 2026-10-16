@@ -6256,6 +6256,47 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         return network;
     }
 
+    /** A coupler opened by a SwitchContingency that islands nothing still SPLITS the merged voltage control of its two
+     *  sections: OLF re-merges per zero-impedance cluster, so g1 regulates bbs1 on its own, at its own target. The
+     *  device planned that re-homing only for outages that island a bus; here the entries stayed the base group's, and a
+     *  member the base pinned went back, once released, to the group's sharing row while the group's voltage identity
+     *  came back on bbs0, whose generator is still pinned: a system OLF does not have. Both sections pinned MAX_Q in the
+     *  base: the device diverged (MAX_ITERATION_REACHED) where OLF converges after releasing g1; both MIN_Q: the same;
+     *  g1 alone pinned MIN_Q: converged 5.6 kV off at vl3. */
+    @org.junit.jupiter.api.Test
+    void deviceCouplerOpeningSplitsABasePinnedMergedControlMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        for (double[] shape : new double[][] {{60, 200}, {60, 40}, {300, 200}}) {   // {g0/g1 max Q, ld0 Q}
+            Network network = splitGroupNetwork(2);
+            for (String g : List.of("g0", "g1")) {
+                network.getGenerator(g).setTargetV(398);
+                network.getGenerator(g).newMinMaxReactiveLimits().setMinQ(-5).setMaxQ(shape[0]).add();
+            }
+            network.getLoad("ld0").setQ0(shape[1]);
+            List<Contingency> ctgs = List.of(new Contingency("c01", new com.powsybl.contingency.SwitchContingency("c01")));
+            assertStrategyMatchesCpu(network, ctgs, List.of(), List.of(), 1, true,
+                    p -> p.setSlackBusSelectionMode(com.powsybl.openloadflow.network.SlackBusSelectionMode.NAME)
+                            .setSlackBusesIds(List.of("vl0_b")));
+        }
+    }
+
+    /** The same split in BREAKER mode, every member free: a busbar-section contingency in the list makes OLF model every
+     *  switch, so opening c01 separates the generator nodes of the coupled curve sections into two clusters, each with
+     *  its own control. Without the re-homing the device kept the merged control's layout and held bbs0 at 400.9745 kV
+     *  where OLF holds its 401.0 target (the section alone, in bus-breaker topology, happened to come out right). */
+    @org.junit.jupiter.api.Test
+    void deviceCouplerOpeningInBreakerModeMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = pilotSelfCurveNetwork(true, 100);
+        List<Contingency> ctgs = List.of(new Contingency("bus-0", new com.powsybl.contingency.BusbarSectionContingency("bbs0")),
+                new Contingency("c01", new com.powsybl.contingency.SwitchContingency("c01")));
+        assertStrategyMatchesCpu(network, ctgs, List.of(), List.of(), 2, true,
+                p -> p.setSlackBusSelectionMode(com.powsybl.openloadflow.network.SlackBusSelectionMode.NAME)
+                        .setSlackBusesIds(List.of("vl0_b")));
+    }
+
     /** splitGroupNetwork(2) with a reactive-capability curve on g0 (MAX_Q 60 -> 62 MVAr over 0..500 MW, so a
      *  slack move of a few hundred kW drifts the limit by ~1e-5 pu) and a 60 MVAr ceiling on g1. */
     private static Network pilotSelfCurveNetwork() {

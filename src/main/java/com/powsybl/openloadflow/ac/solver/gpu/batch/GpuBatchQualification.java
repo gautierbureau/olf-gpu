@@ -615,6 +615,11 @@ final class GpuBatchQualification {
                     *  (the new pilot's balance rides the first free one through its dependent-pilot pool) and their
                     *  reactive-limit check reads the new pilot's voltage against the new pilot's target. */
                    java.util.LinkedHashMap<LfBus, LfBus> reHomedRemoteControllers) {
+
+        /** Whether OLF's re-merge changes any control at all (or the device refuses the shape). */
+        boolean changesControls() {
+            return reject != null || !pvTargets.isEmpty() || !leftControllers.isEmpty() || !remoteMainTargets.isEmpty();
+        }
     }
 
     /**
@@ -1623,7 +1628,16 @@ final class GpuBatchQualification {
                         drOvCByIndex[i] = drOv[1];
                     }
                 }
-                if (!q.islandedBuses().isEmpty()) {
+                // A coupler opened WITHOUT islanding anything still splits a merged voltage control when it separates
+                // the control's sections: OLF re-merges per surviving zero-impedance cluster, and a separated section
+                // with a local control becomes a PV bus at its own target. The island tail below plans that re-homing
+                // (with an empty island nothing is frozen or masked). Without it the entries stayed the base group's:
+                // a member pinned in the base and released after the opening went back to the GROUP's sharing row and
+                // put the group's voltage identity back on the pinned main's section, an equation system OLF does not
+                // have (the split-group fixture: the device diverged where OLF converges in one release).
+                boolean splitsMergedControl = q.islandedBuses().isEmpty() && !c.outagedZiBranches().isEmpty()
+                        && reHomedControls(List.of(), c.outagedZiBranches(), c.contingencyId(), es).changesControls();
+                if (!q.islandedBuses().isEmpty() || splitsMergedControl) {
                     // An outage that ISLANDS buses while it also removes injections: a busbar section
                     // whose loss is expressed as a switch outage plus a side-open (busIdsToLose is
                     // EMPTY - the bus is lost by connectivity alone), and - since 2026-09-22 - a

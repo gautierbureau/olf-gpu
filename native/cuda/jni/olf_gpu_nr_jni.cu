@@ -7930,6 +7930,23 @@ __global__ void seedRlModeFromState(int nrl, int nScenarios, int n, const int* r
         }
         return;
     }
+    // ...and the same for a REMOTE member, as the reactive-limits pass releases one: its row goes back to its unpinned
+    // form - the DISTR_Q share (mode 1), whose target the DISTR_Q pass recomputes, or a self-controlling pilot's voltage
+    // identity (mode 0). Left pinned at the base limit, its group shared the pilot's reactive balance one member short
+    // (network.xiidm LLJP, the member on bus 5779: mode 4 at -0.2954 where the parent had released it, 5.46 kV).
+    if (lt == 0 && rlBaseLt != nullptr && rlBaseLt[i] >= 1 && rlBaseLt[i] <= 4 && rlRemote != nullptr && rlRemote[i]
+            && !isEnrolledPilot(psEntry, nQr, i)) {
+        int vrow = rlVrow[i];
+        int qrow = rlQrow != nullptr && rlQrow[i] >= 0 && rlQrow[i] != vrow && mode[(size_t) s * n + rlQrow[i]] != 0
+                ? rlQrow[i] : vrow;
+        size_t qidx = (size_t) s * n + qrow;
+        if (mode[qidx] == 4) {                               // still holding the base pin
+            mode[qidx] = rlRemote[i] == 2 ? 0 : 1;
+            target[qidx] = rlRemote[i] == 2
+                    ? rlTargetOf(nRlVtOv, rlVtOvSlotIdx, rlVtOvVal, svcRlVt, nrl, s, i, rlVtarget[i]) : 0.0;
+        }
+        return;
+    }
     // An entry that does not OWN the pin on its V row must not have one stamped there: its balance lives on
     // another row (or that row carries another bus's), and the row it does own was already set correctly by
     // the base activation. RL_LIMIT_FROZEN alone is not enough to skip on, because the run-time freeze uses

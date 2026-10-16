@@ -6208,6 +6208,54 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
                         .setSlackBusesIds(List.of("vl0_b")));
     }
 
+    /** A remote member pinned in the BASE that the contingency's reactive-limit pass RELEASES: g2's 40% key is far over
+     *  its 30 MVAr ceiling under the base need, so the base pins it MAX_Q; losing the reactive load lq leaves the group
+     *  absorbing, pins g1 and g3 at their -5 MVAr floor (g5 keeps the network a PV bus), the voltage climbs over its
+     *  target and g2 goes back on control. A pair starts from that state, g2 a DISTR_Q member again; the seed released
+     *  only LOCAL base pins, so the pair solved g2 at its base pin first (network.xiidm LLJP: a member at -0.2954 the
+     *  parent had released, 5.46 kV). */
+    @org.junit.jupiter.api.Test
+    void strategiesAfterTheReleaseOfABasePinnedRemoteMemberMatchCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = basePinnedRemoteMemberNetwork();
+        List<Contingency> ctgs = List.of(new Contingency("lq", new com.powsybl.contingency.LoadContingency("lq")));
+        List<com.powsybl.action.Action> actions = List.of(
+                new com.powsybl.action.LoadActionBuilder().withId("more4").withLoadId("l4").withRelativeValue(true)
+                        .withActivePowerValue(20).build(),
+                new com.powsybl.action.LoadActionBuilder().withId("same4").withLoadId("l4").withRelativeValue(true)
+                        .withActivePowerValue(0).build());
+        assertStrategyMatchesCpu(network, ctgs, strategiesOf("lq", "more4", "same4"), actions, 3, true);
+    }
+
+    private static Network basePinnedRemoteMemberNetwork() {
+        // g1, g2 and g3 regulate b4 (413.4 kV) remotely; g5 holds b5, behind a 60 Ohm line, on its own
+        Network network = com.powsybl.openloadflow.network.VoltageControlNetworkFactory.createWithGeneratorRemoteControl();
+        network.getLoad("l4").setQ0(-80);
+        network.getVoltageLevel("vl4").newLoad().setId("lq").setBus("b4").setConnectableBus("b4").setP0(0).setQ0(250).add();
+        double[] qPercent = {30, 40, 30};
+        for (int i = 1; i <= 3; i++) {
+            com.powsybl.iidm.network.Generator g = network.getGenerator("g" + i);
+            g.newExtension(com.powsybl.iidm.network.extensions.CoordinatedReactiveControlAdder.class)
+                    .withQPercent(qPercent[i - 1]).add();
+            if (i == 2) {
+                g.newMinMaxReactiveLimits().setMinQ(-30).setMaxQ(30).add();   // base share 95 MVar: pinned
+            } else {
+                g.newMinMaxReactiveLimits().setMinQ(-5).setMaxQ(300).add();   // base 105 MVar, -22 once lq is lost
+            }
+        }
+        com.powsybl.iidm.network.VoltageLevel vl5 = network.getSubstation("s").newVoltageLevel().setId("vl5").setNominalV(400)
+                .setTopologyKind(com.powsybl.iidm.network.TopologyKind.BUS_BREAKER).add();
+        vl5.getBusBreakerView().newBus().setId("b5").add();
+        vl5.newGenerator().setId("g5").setBus("b5").setConnectableBus("b5").setMinP(0).setMaxP(300).setTargetP(100)
+                .setTargetV(405).setVoltageRegulatorOn(true).add();
+        network.getGenerator("g5").newMinMaxReactiveLimits().setMinQ(-500).setMaxQ(500).add();
+        vl5.newLoad().setId("l5").setBus("b5").setConnectableBus("b5").setP0(100).setQ0(10).add();
+        network.newLine().setId("l45").setVoltageLevel1("vl4").setBus1("b4").setVoltageLevel2("vl5").setBus2("b5")
+                .setR(1).setX(60).setG1(0).setB1(0).setG2(0).setB2(0).add();
+        return network;
+    }
+
     /** splitGroupNetwork(2) with a reactive-capability curve on g0 (MAX_Q 60 -> 62 MVAr over 0..500 MW, so a
      *  slack move of a few hundred kW drifts the limit by ~1e-5 pu) and a 60 MVAr ceiling on g1. */
     private static Network pilotSelfCurveNetwork() {

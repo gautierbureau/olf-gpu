@@ -12626,15 +12626,11 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         //      batch non-singular) and are discarded by the scatter. dDx is zeroed first so
         //      inactive scenarios' frozen states are not perturbed by stale solutions (the
         //      full-width update kernel adds dx over ALL scenarios). ----
-        // OLF_GPU_COMPACT_FRAC=<f> (default 0.5): compact once at most f of the chunk is active. Above it every pass
-        // factorizes the full width, padded lanes included (network.xiidm: 278,144 lane-iterations for 234,088
-        // useful). OLF_GPU_COMPACT_TIER=<t> (default 0 = powers of two): compact widths rounded up to a multiple of
-        // t instead, so a width just past a power of two does not pay up to twice its lanes. A/B knobs.
-        static const double compactFrac = std::getenv("OLF_GPU_COMPACT_FRAC") != nullptr
-                ? std::atof(std::getenv("OLF_GPU_COMPACT_FRAC")) : 0.5;
-        static const int compactTier = std::getenv("OLF_GPU_COMPACT_TIER") != nullptr
-                ? std::atoi(std::getenv("OLF_GPU_COMPACT_TIER")) : 0;
-        const int compactLimit = std::max(1, std::min(nS, static_cast<int>(compactFrac * nS)));
+        // Compact once at most half of the chunk is active. Above it every pass factorizes the full width, padded
+        // lanes included (network.xiidm: 278,144 lane-iterations for 234,088 useful). Compact widths are powers of
+        // two, so a tier change re-analyzes rarely.
+        constexpr double COMPACT_FRAC = 0.5;
+        const int compactLimit = std::max(1, std::min(nS, static_cast<int>(COMPACT_FRAC * nS)));
         bool compactSolve = !deviceFixedIter && ctx->mode == 3 && nActive > 0 && nActive <= compactLimit
                 && nActive < nS;
         if (!compactSolve) {
@@ -12643,9 +12639,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         int iterLogWidth = nS;                               // OLF_GPU_ITER_LOG: the width this iteration factorized
         if (compactSolve) {
             if (ctx->compactCap == 0) {                       // lazy first-engage setup
-                ctx->compactCap = compactTier > 0
-                        ? std::min(nS, ((compactLimit + compactTier - 1) / compactTier) * compactTier)
-                        : std::max(1, compactLimit);
+                ctx->compactCap = std::max(1, compactLimit);
                 ctx->dValsC.alloc(static_cast<size_t>(nnz) * ctx->compactCap * sizeof(double));
                 ctx->dBC.alloc(static_cast<size_t>(n) * ctx->compactCap * sizeof(double));
                 ctx->dDxC.alloc(static_cast<size_t>(n) * ctx->compactCap * sizeof(double));
@@ -12675,12 +12669,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             }
             int nReal = static_cast<int>(cmap.size());
             int w = 1;
-            if (compactTier > 0) {
-                w = ((nReal + compactTier - 1) / compactTier) * compactTier;
-            } else {
-                while (w < nReal) {
-                    w <<= 1;
-                }
+            while (w < nReal) {
+                w <<= 1;
             }
             if (w > ctx->compactCap) {
                 w = ctx->compactCap;

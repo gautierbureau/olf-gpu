@@ -42,9 +42,6 @@ import java.util.Set;
  */
 public final class GpuStateStore extends AbstractMap<String, double[]> implements AutoCloseable {
 
-    /** Above this many bytes of states the precomputer stores them here rather than in a heap map. */
-    public static final String THRESHOLD_PROPERTY = "olf.gpu.sa.stateStoreBytes";
-    public static final long DEFAULT_THRESHOLD_BYTES = 2L << 30;
 
     private final int n;
     private final Path file;
@@ -70,9 +67,10 @@ public final class GpuStateStore extends AbstractMap<String, double[]> implement
         }
     }
 
-    /** The threshold the precomputer applies: {@value #THRESHOLD_PROPERTY}, or {@link #DEFAULT_THRESHOLD_BYTES}. */
+    /** Above this many bytes of states the precomputer stores them here rather than in a heap map: an eighth of
+     *  the heap the JVM may grow to (2 GiB at the 16 GB heap of the scale runs). */
     public static long thresholdBytes() {
-        return Long.getLong(THRESHOLD_PROPERTY, DEFAULT_THRESHOLD_BYTES);
+        return Runtime.getRuntime().maxMemory() / 8;
     }
 
     /** Whether {@code count} states of {@code n} entries belong here rather than in a heap map. */

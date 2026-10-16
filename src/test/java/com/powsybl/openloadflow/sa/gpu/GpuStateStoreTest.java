@@ -72,8 +72,8 @@ class GpuStateStoreTest {
 
     @Test
     void thresholdDecidesTheBacking() {
-        assertFalse(GpuStateStore.wanted(100, 1000, GpuStateStore.DEFAULT_THRESHOLD_BYTES), "100 states of 8 KB stay on the heap");
-        assertTrue(GpuStateStore.wanted(40_000, 35_000, GpuStateStore.DEFAULT_THRESHOLD_BYTES), "37k states of 280 KB go to the file");
+        assertFalse(GpuStateStore.wanted(100, 1000, 2L << 30), "100 states of 8 KB stay on the heap");
+        assertTrue(GpuStateStore.wanted(40_000, 35_000, 2L << 30), "37k states of 280 KB go to the file");
         GpuStateStore store = GpuStateStore.create(10);
         store.put("a", new double[10]);
         store.close();

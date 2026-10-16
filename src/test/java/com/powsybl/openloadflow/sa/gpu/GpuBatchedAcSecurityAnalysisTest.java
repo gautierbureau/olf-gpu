@@ -6393,6 +6393,47 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
                         .setSlackBusesIds(List.of("vl0_b")));
     }
 
+    /** OLF operates a branch's terminals only when its model has both ends (LfTerminalsConnectionAction: "has one
+     *  missing bus" otherwise, and the action changes nothing): a line connected at one end in the network stays as the
+     *  contingency left it, whether a strategy closes or opens it. The device composed the close as a reclose, putting
+     *  the line's dangling charging back (network.xiidm LJQY, LJRT, LNBF: open at one end, their reclose 2.03, 0.65 and
+     *  0.06 kV off, OLF's strategy equal to its contingency), and the open as an outage. */
+    @org.junit.jupiter.api.Test
+    void strategiesOperatingALineOpenAtOneEndMatchCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = Network.create("half-open-line", "code");
+        com.powsybl.iidm.network.Substation s = network.newSubstation().setId("s").add();
+        for (String vl : List.of("vl0", "vl1", "vl2")) {
+            s.newVoltageLevel().setId(vl).setNominalV(400).setTopologyKind(com.powsybl.iidm.network.TopologyKind.BUS_BREAKER)
+                    .add().getBusBreakerView().newBus().setId(vl + "_b").add();
+        }
+        network.getVoltageLevel("vl0").newGenerator().setId("gs").setBus("vl0_b").setConnectableBus("vl0_b")
+                .setMinP(0).setMaxP(2000).setTargetP(300).setTargetV(400).setVoltageRegulatorOn(true).add();
+        network.getVoltageLevel("vl1").newLoad().setId("ld1").setBus("vl1_b").setConnectableBus("vl1_b").setP0(250).setQ0(60).add();
+        network.getVoltageLevel("vl2").newLoad().setId("ld2").setBus("vl2_b").setConnectableBus("vl2_b").setP0(40).setQ0(10).add();
+        for (String id : List.of("l01a", "l01b")) {
+            network.newLine().setId(id).setVoltageLevel1("vl0").setBus1("vl0_b").setConnectableBus1("vl0_b")
+                    .setVoltageLevel2("vl1").setBus2("vl1_b").setConnectableBus2("vl1_b")
+                    .setR(2).setX(20).setG1(0).setB1(0).setG2(0).setB2(0).add();
+        }
+        network.newLine().setId("l02").setVoltageLevel1("vl0").setBus1("vl0_b").setConnectableBus1("vl0_b")
+                .setVoltageLevel2("vl2").setBus2("vl2_b").setConnectableBus2("vl2_b")
+                .setR(2).setX(20).setG1(0).setB1(0).setG2(0).setB2(0).add();
+        // lh: connected at vl1 only, charged - its dangling half is a reactive source at vl1
+        network.newLine().setId("lh").setVoltageLevel1("vl1").setBus1("vl1_b").setConnectableBus1("vl1_b")
+                .setVoltageLevel2("vl2").setConnectableBus2("vl2_b")
+                .setR(4).setX(40).setG1(0).setB1(5e-4).setG2(0).setB2(5e-4).add();
+        List<Contingency> ctgs = List.of(new Contingency("lh", new BranchContingency("lh")),
+                new Contingency("l01b", new BranchContingency("l01b")));
+        List<com.powsybl.action.Action> actions = List.of(
+                new com.powsybl.action.TerminalsConnectionActionBuilder().withId("close-lh").withNetworkElementId("lh").withOpen(false).build(),
+                new com.powsybl.action.TerminalsConnectionActionBuilder().withId("open-lh").withNetworkElementId("lh").withOpen(true).build());
+        List<com.powsybl.contingency.strategy.OperatorStrategy> strategies = new java.util.ArrayList<>(strategiesOf("lh", "close-lh"));
+        strategies.addAll(strategiesOf("l01b", "open-lh"));
+        assertStrategyMatchesCpu(network, ctgs, strategies, actions, 4, true);
+    }
+
     private static Network basePinnedRemoteMemberNetwork() {
         // g1, g2 and g3 regulate b4 (413.4 kV) remotely; g5 holds b5, behind a 60 Ohm line, on its own
         Network network = com.powsybl.openloadflow.network.VoltageControlNetworkFactory.createWithGeneratorRemoteControl();

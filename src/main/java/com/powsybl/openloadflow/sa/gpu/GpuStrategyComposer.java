@@ -169,6 +169,9 @@ final class GpuStrategyComposer {
                     continue;
                 }
                 for (LfBranch b : legs) {
+                    if (b.getBus1() == null || b.getBus2() == null) {
+                        continue;                            // OLF operates a branch with both ends only: as it is
+                    }
                     if (ctgSideOpens.stream().anyMatch(so -> so.branch() == b)) {
                         return null;                         // the contingency opened ONE side of it: CPU
                     }

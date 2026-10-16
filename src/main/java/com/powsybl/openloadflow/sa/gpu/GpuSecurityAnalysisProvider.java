@@ -83,10 +83,6 @@ public class GpuSecurityAnalysisProvider extends OpenSecurityAnalysisProvider {
         GpuBatchedAcSecurityAnalysis.LAST_TARGETED_RESTORE_COUNT.set(0);
     }
 
-    /** System property: allow the GPU provider to honour {@code threadCount > 1} again. Off by
-     *  default — see {@link #forceSinglePartition}. */
-    public static final String ALLOW_MULTI_THREAD_PROPERTY = "olf.gpu.sa.allowMultiThread";
-
     /**
      * Force the GPU security analysis onto ONE partition.
      *
@@ -103,15 +99,10 @@ public class GpuSecurityAnalysisProvider extends OpenSecurityAnalysisProvider {
      * reports VL-1512 zero times and threadCount 4 reports it 500 times. A threading option must not
      * change which violations a security analysis reports.
      *
-     * <p>So until the two paths are validated as equivalent, the GPU provider runs single-partition
-     * and keeps every solve on the device. The CPU provider is unaffected and remains the way to use
-     * many threads. Lift this with {@code -Dolf.gpu.sa.allowMultiThread=true} once parity is
-     * established.
+     * <p>So the GPU provider runs single-partition and keeps every solve on the device. The CPU provider
+     * is unaffected and remains the way to use many threads.
      */
     private static int forceSinglePartition(SecurityAnalysisParameters securityAnalysisParameters) {
-        if (Boolean.getBoolean(ALLOW_MULTI_THREAD_PROPERTY)) {
-            return -1;
-        }
         OpenSecurityAnalysisParameters ext =
                 securityAnalysisParameters.getExtension(OpenSecurityAnalysisParameters.class);
         if (ext == null || ext.getThreadCount() <= 1) {
@@ -120,8 +111,7 @@ public class GpuSecurityAnalysisProvider extends OpenSecurityAnalysisProvider {
         int requested = ext.getThreadCount();
         LOGGER.warn("GPU security analysis: threadCount {} ignored, running single-partition so the BASE "
                 + "load flow also runs on the device (a CPU-solved base and device-solved contingencies "
-                + "disagree about violations). Use the CPU provider for multi-threading, or set -D{}=true",
-                requested, ALLOW_MULTI_THREAD_PROPERTY);
+                + "disagree about violations). Use the CPU provider for multi-threading", requested);
         ext.setThreadCount(1);
         return requested;
     }

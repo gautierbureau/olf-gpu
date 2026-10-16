@@ -1763,8 +1763,6 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
      * back to {@link #updateNetworkAndCheckRealistic} unless the base system is exactly one BUS_V and one BUS_PHI
      * per bus.
      */
-    private static final boolean BUS_ARRAY_OFF = "0".equals(System.getenv("OLF_GPU_BUS_ARRAY"));
-
     private static boolean updateBusesFromState(double[] state, PrecomputedBatch precomputed, LfNetwork network,
                                                 AcLoadFlowParameters parameters, RunState rs) {
         Map<Variable<AcVariableType>, Integer> baseRows = precomputed.baseVariableRows();
@@ -1798,7 +1796,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
             rs.phiRowOfBus = phiRow;
             rs.busRowsUsable = usable;
         }
-        if (!rs.busRowsUsable || state == null || BUS_ARRAY_OFF) {   // OLF_GPU_BUS_ARRAY=0: the exact walk (A/B)
+        if (!rs.busRowsUsable || state == null) {
             return updateNetworkAndCheckRealistic(precomputed.equationSystem(), network, parameters, rs);
         }
         if (rs.realisticBandApplies == null || rs.realisticBandNetwork != network) {

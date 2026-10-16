@@ -49,9 +49,6 @@ final class GpuBatchChunkSolver {
      * results are discarded.
      */
 
-    /** OLF_GPU_X0_SEEDS=0: send islanded scenarios' starting state as full chunkSize * n arrays again (A/B). */
-    private static final boolean X0_SEEDS = !"0".equals(System.getenv("OLF_GPU_X0_SEEDS"));
-
     /** OLF starts EVERY solve with the zero-impedance branch flows at zero: AcSolverUtil.initStateVector
      *  has {@code case DUMMY_P, DUMMY_Q: x[v.getRow()] = 0}, and updateNetwork never writes them back
      *  (they have no network backing). So each post-contingency solve discards the coupler flows and
@@ -1876,21 +1873,11 @@ final class GpuBatchChunkSolver {
                         // its own tiling of the base, instead of chunkSize * n doubles (372 MB per chunk on rte6515,
                         // 1.5 GB for a single 14,260-scenario chunk). The HVDC freeze reads its warm start from the
                         // same seeds.
-                        if (X0_SEEDS) {
-                            x0SeedIdx = new int[frozenSeedSlot.size()];
-                            x0SeedVal = new double[frozenSeedSlot.size()];
-                            for (int k = 0; k < frozenSeedSlot.size(); k++) {
-                                x0SeedIdx[k] = frozenSeedSlot.get(k) * n + frozenSeedRow.get(k);
-                                x0SeedVal[k] = frozenSeedValue.get(k);
-                            }
-                        } else {
-                            x0Full = new double[chunkSize * n];
-                            for (int s = 0; s < chunkSize; s++) {
-                                System.arraycopy(baseState, 0, x0Full, s * n, n);
-                            }
-                            for (int k = 0; k < frozenSeedSlot.size(); k++) {
-                                x0Full[frozenSeedSlot.get(k) * n + frozenSeedRow.get(k)] = frozenSeedValue.get(k);
-                            }
+                        x0SeedIdx = new int[frozenSeedSlot.size()];
+                        x0SeedVal = new double[frozenSeedSlot.size()];
+                        for (int k = 0; k < frozenSeedSlot.size(); k++) {
+                            x0SeedIdx[k] = frozenSeedSlot.get(k) * n + frozenSeedRow.get(k);
+                            x0SeedVal[k] = frozenSeedValue.get(k);
                         }
                     }
                     // Strategy-leg DS re-anchoring: OLF's processContingency calls

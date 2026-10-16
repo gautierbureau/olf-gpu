@@ -13,7 +13,6 @@ correct fallback worth keeping for triage · **TUNING** = both modes legitimate 
 
 | switch | default | gates | disposition |
 |---|---|---|---|
-| `olf.gpu.pilotSelfRotation` | `true` | pilot-self group Q rotation | **VERIFY** — turned ON by default 2026-09-28; the OFF path should go once the rotation is trusted. |
 | `olf.gpu.sa.fixedInnerIters` | `0` | K fixed Newton steps instead of OLF's budget | **TUNING** — the fixed-iter bench needs it; never a production mode. |
 | `olf.gpu.lib` | — | native library path | **TUNING** (plumbing, not behaviour). |
 

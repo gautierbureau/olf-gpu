@@ -5370,12 +5370,6 @@ __device__ inline double rlTargetOf(int nRlVtOv, const int* rlVtOvSlotIdx, const
 #define RL_LIMIT_FROZEN 5
 #define RL_BASE_RELOCATED 6
 
-// Bisection of the pilot-self TABLE-ONLY enrolment (docs/tasks.md 2026-09-27): OLF_GPU_PS_MASK bit 1 skips
-// updateDistrQTargetsBatch's carrier hand-off for pilot-self groups, bit 2 skips updatePilotVeqBatch for them.
-static int psMaskEnv() {
-    static const int m = std::getenv("OLF_GPU_PS_MASK") != nullptr ? std::atoi(std::getenv("OLF_GPU_PS_MASK")) : 0;
-    return m;
-}
 template <typename Ctx>
 static const int* psEntryPtr(Ctx* ctx) {
     return ctx->hasPilotSelf && ctx->dPsPilotEntry.p != nullptr ? ctx->dPsPilotEntry.template as<int>() : nullptr;
@@ -6007,7 +6001,7 @@ __global__ void updateDistrQTargetsBatch(int nMembers, int nScenarios, int n, in
                                          int nFrozen, const int* frozenSlotRow,
                                          int nTqOv, const int* tqOvKey, const double* tqOvVal,
                                          const int* mTgtPtr, const int* mTgtPeer,
-                                         const int* psEntry, int psMask, const int* relocOwn,
+                                         const int* psEntry, const int* relocOwn,
                                 const char* dqSub, const int* qrMemberStart, const char* rlGenLost,
                                 const int* qrDepBase, const char* veqOff,
                                 const double* rlInitTgtQ, const int* rlQrow,
@@ -6018,9 +6012,6 @@ __global__ void updateDistrQTargetsBatch(int nMembers, int nScenarios, int n, in
     int s = tid / nMembers;
     if (!rlActive[s]) return;
     int qg = mQrGroup != nullptr ? mQrGroup[k] : -1;
-    // OLF_GPU_PS_MASK bit 1: for a PILOT-SELF group, behave as before its table existed — no carrier
-    // target hand-off (its Q is NOT re-routed, so the carrier row hosts no pilot balance to target).
-    if ((psMask & 1) && psEntry != nullptr && qg >= 0 && psEntry[qg] >= 0) qg = -1;
     if (!mHasRow[k] && qg < 0) return;                       // only members owning a packed DISTR_Q row
                                                              // (or linked to a relocation group, plan-B4)
     // STOCK PLACEMENT: this member's packed DISTR_Q row is its parent coupler's DUMMY_Q row, and a
@@ -6224,7 +6215,7 @@ __global__ void updatePilotVeqBatch(int nQr, int nScenarios, int n,
                                     char* veqOff, double* savedVTarget,
                                     const char* rlActive, char* switched,
                                     int nFrozen, const int* frozenSlotRow,
-                                    const int* psEntry, int psMask,
+                                    const int* psEntry,
                                     const char* limitType, int nrl, const double* rlMinQ, const double* rlMaxQ,
                                     const double* rlLoadQ, const double* rlInitTgtQ, int cvStride,
                                     const double* rlVtarget,
@@ -6247,9 +6238,6 @@ __global__ void updatePilotVeqBatch(int nQr, int nScenarios, int n,
     // (unpinned ⇒ psSkip): an empty row and a bad solve (rte6515 [5000,6000] BUS-6003_BBS_2, slot 797,
     // max-iter-bad-solve at RL#2).
     bool act = rlActive[s] != 0;
-    // OLF_GPU_PS_MASK bit 2: leave a PILOT-SELF group's V identity alone (bisection of the table-only
-    // enrolment: which group-keyed kernel breaks the middle-section DistrQ-target tests).
-    if ((psMask & 2) && psEntry != nullptr && psEntry[g] >= 0) return;
     int pilotRow = qrRows[qrPtr[g]];
     // A DEPENDENT pilot (qrDepBase): its identity sits on its own V row once its parent coupler is dead (the dummy
     // row an identity) and on the dummy row as a cross identity while the coupler lives; the group is live only
@@ -11193,7 +11181,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                         ctx->dQrVeqOff.as<char>(), ctx->dQrSavedVT.as<double>(),
                         ctx->dRlActive.as<char>(), ctx->dRlSwitched.as<char>(),
                         ctx->nFrozenRow, ctx->nFrozenRow ? ctx->dFrozenRow.as<int>() : nullptr,
-                        psEntryPtr(ctx), psMaskEnv(),
+                        psEntryPtr(ctx),
                     ctx->dRlLimitType.p ? ctx->dRlLimitType.as<char>() : nullptr, ctx->nrl,
                     useDyn ? ctx->dRlMinQDyn.as<double>() : ctx->dRlMinQ.as<double>(),
                     useDyn ? ctx->dRlMaxQDyn.as<double>() : ctx->dRlMaxQ.as<double>(),
@@ -11237,7 +11225,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                         ctx->nDqTqOv, ctx->nDqTqOv ? ctx->dDqTqOvKey.as<int>() : nullptr,
                         ctx->nDqTqOv ? ctx->dDqTqOvVal.as<double>() : nullptr,
                         ctx->dDqMemberTgtPtr.as<int>(), ctx->dDqMemberTgtPeer.as<int>(),
-                        psEntryPtr(ctx), psMaskEnv(),
+                        psEntryPtr(ctx),
                         std::getenv("OLF_GPU_NO_TGT_STOCK") == nullptr && ctx->st->dRelocOwn.p != nullptr
                                 ? ctx->st->dRelocOwn.as<int>() : nullptr,
                     ctx->hasDqSub ? ctx->dDqSub.as<char>() : nullptr, ctx->hasDqSub ? ctx->dQrMemberStart.as<int>() : nullptr,

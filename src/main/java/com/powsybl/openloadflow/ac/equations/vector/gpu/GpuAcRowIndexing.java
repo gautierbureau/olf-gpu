@@ -357,7 +357,7 @@ final class GpuAcRowIndexing {
             return false;
         }
         boolean pilotSelf = members.contains(pilot);
-        if (pilotSelf && (!pilotSelfRotationEnabled() || members.size() < 2)) {
+        if (pilotSelf && members.size() < 2) {
             return false;
         }
         return members.stream().allMatch(m -> col(es, m.getNum(), AcVariableType.BUS_V) >= 0);
@@ -389,9 +389,6 @@ final class GpuAcRowIndexing {
         }
         if (col(es, pilot.getNum(), AcVariableType.BUS_V) < 0) {
             return "pilot-no-vcol:" + pilot.getId();
-        }
-        if (members.contains(pilot) && !pilotSelfRotationEnabled()) {
-            return "pilot-self-rotation-off";
         }
         if (members.contains(pilot) && members.size() < 2) {
             return "pilot-self-single";
@@ -449,17 +446,6 @@ final class GpuAcRowIndexing {
         }
         return alt;
     }
-    /**
-     * {@code -Dolf.gpu.pilotSelfRotation} (default false while it lands): enrol PILOT-SELF voltage-control
-     * groups — a control whose merged controllers contain its own controlled bus — in the candidate-table
-     * relocation, so a reactive-limit pin of the pilot moves its Q balance to the first ENABLED member's row
-     * per scenario, which is OLF's own rule ({@code updateRemoteVoltageControlEquations}: DISTR_Q for every
-     * enabled controller except the FIRST, BUS_TARGET_Q for every pinned one).
-     */
-    static boolean pilotSelfRotationEnabled() {
-        return Boolean.parseBoolean(System.getProperty("olf.gpu.pilotSelfRotation", "true"));
-    }
-
     /**
      * The COUPLER-TREE RELOCATION, the general form of the dead-end case below: per zero-impedance spanning tree,
      * every non-root bus's two power equations move onto its PARENT coupler's {@code DUMMY_P} / {@code DUMMY_Q}

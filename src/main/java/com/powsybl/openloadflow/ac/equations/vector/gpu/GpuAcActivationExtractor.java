@@ -175,7 +175,7 @@ public final class GpuAcActivationExtractor {
                 // the carriers of VL-5997 and VL-6112 came in at mode 4, the scan fell back to the identity pilot
                 // rows, the raw q and the couplers' DUMMY_Q vanished (dead columns 13171/13207) and every
                 // scenario failed its first linear solve (976 x LINEAR_SOLVE_FAILED).
-                boolean enrolled = pilotSelf && GpuAcRowIndexing.pilotSelfRotationEnabled()
+                boolean enrolled = pilotSelf
                         && bus.getGeneratorVoltageControl()
                                 .filter(c -> c.getMergeStatus() == VoltageControl.MergeStatus.MAIN)
                                 .map(c -> c.getMergedControllerElements().size() >= 2

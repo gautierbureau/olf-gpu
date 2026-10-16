@@ -4385,8 +4385,7 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
     void deviceRobustModeRunsTheInKernelLoops() {
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
-        String before = System.getProperty(GpuBatchContextCache.BATCH_MODE_PROPERTY);
-        System.setProperty(GpuBatchContextCache.BATCH_MODE_PROPERTY, Integer.toString(GpuBatchContextCache.MODE_ROBUST));
+        GpuBatchContextCache.forceModeForTests(GpuBatchContextCache.MODE_ROBUST);
         try {
             deviceIncrementalTvcTapMovesInKernel();
             deviceIncrementalSharedTvcMatchesCpu();
@@ -4394,11 +4393,7 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
             deviceSecondaryVoltageControlMatchesCpu();
             deviceSecondaryVoltageControlRemoteMatchesCpu();
         } finally {
-            if (before == null) {
-                System.clearProperty(GpuBatchContextCache.BATCH_MODE_PROPERTY);
-            } else {
-                System.setProperty(GpuBatchContextCache.BATCH_MODE_PROPERTY, before);
-            }
+            GpuBatchContextCache.forceModeForTests(null);
         }
     }
 
@@ -5799,12 +5794,12 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
                 .setMaxVoltageChangeStateVectorScalingMaxDv(0.01)
                 .setMaxVoltageChangeStateVectorScalingMaxDphi(0.01)
                 .setMaxNewtonRaphsonIterations(100);              // the clamped base needs ~30 steps from flat angles
-        System.setProperty(GpuBatchContextCache.BATCH_MODE_PROPERTY, String.valueOf(GpuBatchContextCache.MODE_ROBUST));
+        GpuBatchContextCache.forceModeForTests(GpuBatchContextCache.MODE_ROBUST);
         try {
             assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
             assertEquals(ctgs.size(), GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get());
         } finally {
-            System.clearProperty(GpuBatchContextCache.BATCH_MODE_PROPERTY);
+            GpuBatchContextCache.forceModeForTests(null);
         }
     }
 

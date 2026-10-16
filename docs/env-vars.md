@@ -190,7 +190,6 @@ Each selects a different computation. Several disable an outer loop or loosen a 
 | variable | read at |
 |---|---|
 | `OLF_GPU_BASE_ON_GPU` | src/test/java/com/powsybl/openloadflow/ac/solver/gpu/batch/GpuBatchedN1FixedIterTest.java:149 +2 |
-| `OLF_GPU_BATCHMODE` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuVsCpuProductionSaBenchmarkTest.java:87 +5 |
 | `OLF_GPU_DBG_CONV_EPS` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuVsCpuRte6515SaTest.java:295 +2 |
 | `OLF_GPU_DBG_SLACK_TOL` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuBatchedAcSecurityAnalysisTest.java:3084 +1 |
 | `OLF_GPU_DISC_EPS` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuSingleSolveRejectReasonProbe.java:60 |

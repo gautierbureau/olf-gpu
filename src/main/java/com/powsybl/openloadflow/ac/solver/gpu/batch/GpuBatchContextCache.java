@@ -30,26 +30,12 @@ public final class GpuBatchContextCache {
     /** Fallback chunk size used when auto-sizing is unavailable (no GPU / memory-query failure). */
     public static final int DEFAULT_MAX_BATCH = 256;
     /**
-     * System property: the native batched-solve mode (cuDSS >= 0.8, all compiled in, runtime-selected).
-     * 0 = per-scenario refactor+solve loop (memory-light serial fallback; never benchmarked as best);
-     * 1 = uniform batched cuDSS API (one batched factorization+solve per iteration — faster per-iteration
-     * SOLVE, but its nS-block ANALYSIS costs ~1.6 s cold, the single-pass loser even with the context cache);
-     * 2 = block-diagonal single matrix, factorize-once + refactorize-every (the refactor-every strategy;
-     * measured ~parity with mode 1 since cuDSS refactorization is not cheaper than factorization);
-     * 3 = UBATCH (single per-block matrix + CUDSS_CONFIG_UBATCH_SIZE), the DEFAULT
-     * mechanism: a cheap one-block ANALYSIS (~150 ms vs mode 1's ~1.6 s) wins the PRIMARY single-cold-pass
-     * use case. The CHUNK SIZE is decisive on cuDSS 0.8: its UBATCH phases carry a per-launch fixed cost
-     * that amortizes with the batch (pegase9241, K=4, warm ms/scenario: chunk 32 = 17.8, 125 = 6.35,
-     * 500 = 4.87 — the fastest measured configuration on any mode/version; cuDSS 0.7.x is
-     * chunk-size-insensitive at ~8.3 instead). Keep mode 3 with LARGE chunks (the memory auto-sizing)
-     * on 0.8; mode 1 is the small-chunk alternative there (~6.2 at chunk 32).
-     * 4 = UBATCH + iter0-only (factor at each chunk's iter 0, SOLVE-only after) and
-     * 5 = UBATCH + refactorize-after: EXPERIMENTAL factor-skip probes, kept for retesting on other
-     * grids/formulations. Measured non-beneficial on case9241pegase (mode 5 = mode 3 exactly; mode 4 is
-     * ~2x faster per iter but needs ~3x more iters to converge, a net wash) — do NOT use in production.
+     * The native batched-solve mode: UBATCH (a single per-block matrix + CUDSS_CONFIG_UBATCH_SIZE). Its one-block
+     * ANALYSIS is cheap (~150 ms), and its per-launch fixed cost amortizes with the batch (pegase9241, warm
+     * ms/scenario: chunk 32 = 17.8, 125 = 6.35, 500 = 4.87), hence the memory auto-sizing of the chunk.
      */
-    public static final String BATCH_MODE_PROPERTY = "olf.gpu.batchMode";
-    /** 6 = the ROBUST single-matrix solve: mode 0's per-scenario loop with BTF-COLAMD ordering, global
+    public static final int MODE_UBATCH = 3;
+    /** 6 = the ROBUST single-matrix solve: a per-scenario loop with BTF-COLAMD ordering, global
      *  column pivoting and matching (cuDSS single-matrix API). What the batch-of-one retries in after a
      *  linear-solve reject: rte6515's full busbar structure does not factor in the uniform batch. */
     public static final int MODE_ROBUST = 6;
@@ -114,9 +100,18 @@ public final class GpuBatchContextCache {
         }
     }
 
-    /** Resolve the native batched-solve mode from {@value #BATCH_MODE_PROPERTY} (default 3, UBATCH). */
+    /** Test hook: a mode every context of this JVM is built in instead of {@link #MODE_UBATCH}, or null. */
+    private static volatile Integer modeForTests;
+
+    /** The native batched-solve mode: {@link #MODE_UBATCH}. */
     public static int resolveBatchMode() {
-        return Integer.getInteger(BATCH_MODE_PROPERTY, 3);
+        Integer forced = modeForTests;
+        return forced != null ? forced : MODE_UBATCH;
+    }
+
+    /** TESTS ONLY: build every context in {@code mode} (e.g. {@link #MODE_ROBUST}) until reset with null. */
+    public static void forceModeForTests(Integer mode) {
+        modeForTests = mode;
     }
 
     /** Acquire a batched native context for this (data, chunkSize, mode), reusing the cache when it matches. */

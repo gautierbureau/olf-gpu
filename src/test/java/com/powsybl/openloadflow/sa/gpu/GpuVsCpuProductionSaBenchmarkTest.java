@@ -83,10 +83,6 @@ class GpuVsCpuProductionSaBenchmarkTest extends AbstractOpenSecurityAnalysisTest
                 && System.getenv("OLF_GPU_MAXBATCH") != null) {
             System.setProperty(GpuBatchContextCache.MAX_BATCH_PROPERTY, System.getenv("OLF_GPU_MAXBATCH"));
         }
-        if (System.getProperty(GpuBatchContextCache.BATCH_MODE_PROPERTY) == null
-                && System.getenv("OLF_GPU_BATCHMODE") != null) {
-            System.setProperty(GpuBatchContextCache.BATCH_MODE_PROPERTY, System.getenv("OLF_GPU_BATCHMODE"));
-        }
         // SPARSE on both arms — the harness default (commonTestConfig.matrixFactory()) can be DENSE,
         // which at 9241 buses makes the base LF thrash for ~200 s and FAIL (measured), while the same
         // case + parameters converge in ~2 s / 10 iterations with a sparse factory.

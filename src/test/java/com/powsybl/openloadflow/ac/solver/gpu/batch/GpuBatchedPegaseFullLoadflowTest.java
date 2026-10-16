@@ -103,10 +103,6 @@ class GpuBatchedPegaseFullLoadflowTest {
                 && System.getenv("OLF_GPU_MAXBATCH") != null) {
             System.setProperty(GpuBatchContextCache.MAX_BATCH_PROPERTY, System.getenv("OLF_GPU_MAXBATCH"));
         }
-        if (System.getProperty(GpuBatchContextCache.BATCH_MODE_PROPERTY) == null
-                && System.getenv("OLF_GPU_BATCHMODE") != null) {
-            System.setProperty(GpuBatchContextCache.BATCH_MODE_PROPERTY, System.getenv("OLF_GPU_BATCHMODE"));
-        }
     }
 
     /** The GPU-scope OLF parameters — identical to the extractor's scope and reused for the CPU reference. */

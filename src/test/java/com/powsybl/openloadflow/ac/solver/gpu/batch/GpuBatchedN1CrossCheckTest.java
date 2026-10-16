@@ -68,11 +68,6 @@ class GpuBatchedN1CrossCheckTest {
     void checkGpu() {
         assumeTrue(GpuAcNewtonSolver.isAvailable(),
                 "GPU batched native lib not available (build it with native/build-gpu.sh + cuDSS)");
-        // Cross-check any batched solve mode (0/1/2) against OLF: OLF_GPU_BATCHMODE=<n> (env,
-        // inherited by the surefire fork). Default 0.
-        if (System.getProperty("olf.gpu.batchMode") == null) {
-            System.setProperty("olf.gpu.batchMode", System.getenv().getOrDefault("OLF_GPU_BATCHMODE", "0"));
-        }
     }
 
     /** A self-contained AC problem: the LfNetwork, its equation system, targets and state. */

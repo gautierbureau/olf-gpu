@@ -60,9 +60,6 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  * is no CPU comparison — this is a pure GPU-throughput measurement, not a speedup.
  *
  * <p>Machine-local: skipped unless the GPU lib is available AND the cases directory exists.
- * Select the native solve mode at runtime with {@code OLF_GPU_BATCHMODE=1} (uniform batched
- * cuDSS) or {@code 0} (per-scenario fallback, default);
- * both are compiled in (cuDSS >= 0.8 required).
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
@@ -107,17 +104,10 @@ class GpuBatchedN1FixedIterTest {
         assumeTrue(Files.isDirectory(CASES), "benchmark cases not found at " + CASES);
         assumeTrue(Files.exists(CASES.resolve(CASE)), CASE + " not found");
         // Env-to-property plumbing (env is inherited by the surefire fork, unlike -D). Only override
-        // when the env var IS set: a bare run measures the PRODUCTION defaults (mode 3 UBATCH,
-        // memory auto-sized chunk). Caveat kept from the old hardcoded cap: selecting mode 1
-        // (OLF_GPU_BATCHMODE=1) without an explicit OLF_GPU_MAXBATCH cap can over-commit device
-        // memory at PEGASE-9241 on a small card — mode 1's memory model is not auto-size-aware.
+        // when the env var IS set: a bare run measures the PRODUCTION defaults (memory auto-sized chunk).
         if (System.getProperty(GpuBatchContextCache.MAX_BATCH_PROPERTY) == null
                 && System.getenv("OLF_GPU_MAXBATCH") != null) {
             System.setProperty(GpuBatchContextCache.MAX_BATCH_PROPERTY, System.getenv("OLF_GPU_MAXBATCH"));
-        }
-        if (System.getProperty(GpuBatchContextCache.BATCH_MODE_PROPERTY) == null
-                && System.getenv("OLF_GPU_BATCHMODE") != null) {
-            System.setProperty(GpuBatchContextCache.BATCH_MODE_PROPERTY, System.getenv("OLF_GPU_BATCHMODE"));
         }
     }
 

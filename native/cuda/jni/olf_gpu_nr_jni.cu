@@ -8614,23 +8614,8 @@ struct BatchSolverContext {
                                                              // but the extra polish run must happen to match the CPU trajectory)
     CudssCtx ds;
     bool analyzed = false;
-    bool factored = false;                                   // first FACTORIZATION done (mode 2: then REFACTORIZE)
-    int mode = 0;                                            // 0 = per-scenario loop, 1 = batched API, 2 = block-diagonal, 3 = UBATCH, 6 = per-scenario loop, robust (pivoted) config
-    // Uniform batched cuDSS matrices (mode 1 only): A (CSR) shares the rowPtr/colIdx pattern
-    // across all scenarios with per-scenario value pointers; B/X are batched dense (n x 1).
-    // The host pointer + size arrays must outlive the matrix objects, so they live here.
-    cudssMatrix_t matABatch = nullptr, matBBatch = nullptr, matXBatch = nullptr;
-    cudssMatrix_t matRBatch = nullptr, matDeltaBatch = nullptr;   // adaptive refinement: residual and correction
-    DeviceBuf dR, dDelta, dRPtrs, dDeltaPtrs, dIrScore, dIrLane;   // dIrLane: per-lane refinement mask (refineLanes)
-    std::vector<void*> rPtrs, deltaPtrs;
-    std::vector<void*> valPtrs, rowStartPtrs, rowEndPtrs, colPtrs, bPtrs, xPtrs;   // host: arrays of device pointers
-    DeviceBuf dValPtrs, dRowStartPtrs, dRowEndPtrs, dColPtrs, dBPtrs, dXPtrs;       // device copies (cuDSS 0.8 wants device arrays)
-    std::vector<int> nrowsArr, ncolsArr, ncols1Arr, nnzArr, ldArr;                  // host size arrays: int32 + CUDSS_R_32I
-    // Block-diagonal single matrix (mode 2 only): one (n*nS) CSR = blkdiag of all scenarios,
-    // values = dVals (per-scenario contiguous), B/X = dB/dDx. Factorize once, REFACTORIZE after
-    // (reuse pivots — the refactor-every strategy; refactor IS cheap on a single matrix, unlike the batch API).
-    cudssMatrix_t matBig = nullptr, matBigB = nullptr, matBigX = nullptr;
-    DeviceBuf dBigRowPtr, dBigColIdx;
+    int mode = 0;                                            // 3 = UBATCH, 6 = per-scenario loop, robust (pivoted) config
+    DeviceBuf dR, dDelta, dIrScore, dIrLane;                 // adaptive refinement: residual, correction, lane scores/mask
     // UBATCH single matrices (mode 3 only): a SINGLE per-block CSR (n, nnz, shared rowPtr/colIdx)
     // whose value/RHS pointers are the batched buffers (dVals = nS*nnz, dB/dDx = nS*n); cuDSS
     // analyzes ONE block (cheap) and factorizes/solves all nS via CUDSS_CONFIG_UBATCH_SIZE.
@@ -8649,18 +8634,10 @@ struct BatchSolverContext {
             svcBlas = nullptr;
         }
         if (stream) cudaStreamDestroy(stream);
-        if (matABatch) cudssMatrixDestroy(matABatch);
-        if (matBBatch) cudssMatrixDestroy(matBBatch);
-        if (matXBatch) cudssMatrixDestroy(matXBatch);
-        if (matRBatch) cudssMatrixDestroy(matRBatch);
-        if (matDeltaBatch) cudssMatrixDestroy(matDeltaBatch);
         if (matUbR) cudssMatrixDestroy(matUbR);
         if (matUbDelta) cudssMatrixDestroy(matUbDelta);
         if (matUbCR) cudssMatrixDestroy(matUbCR);
         if (matUbCDelta) cudssMatrixDestroy(matUbCDelta);
-        if (matBig) cudssMatrixDestroy(matBig);
-        if (matBigB) cudssMatrixDestroy(matBigB);
-        if (matBigX) cudssMatrixDestroy(matBigX);
         if (matUb) cudssMatrixDestroy(matUb);
         if (matUbB) cudssMatrixDestroy(matUbB);
         if (matUbX) cudssMatrixDestroy(matUbX);
@@ -8718,108 +8695,6 @@ static void traceStepFactor(BatchSolverContext* ctx, int nS, int it, const std::
     }
 }
 
-
-static void setupBatchMatricesUniform(BatchSolverContext* ctx) {
-    int n = ctx->n;
-    int nScenarios = ctx->nScenarios;
-    // ---- uniform batched matrices: one A (CSR) per scenario sharing the pattern, batched
-    //      dense B/X. The host pointer + size arrays persist in the context. ----
-        int* rowPtrDev = ctx->st->dRowPtr.as<int>();
-        int* colDev = ctx->st->dColIdx.as<int>();
-        double* valsDev = ctx->dVals.as<double>();
-        double* bDev = ctx->dB.as<double>();
-        double* xDev = ctx->dDx.as<double>();
-        ctx->valPtrs.resize(nScenarios);
-        ctx->rowStartPtrs.resize(nScenarios);
-        ctx->rowEndPtrs.resize(nScenarios);
-        ctx->colPtrs.resize(nScenarios);
-        ctx->bPtrs.resize(nScenarios);
-        ctx->xPtrs.resize(nScenarios);
-        ctx->nrowsArr.assign(nScenarios, n);
-        ctx->ncolsArr.assign(nScenarios, n);
-        ctx->ncols1Arr.assign(nScenarios, 1);
-        ctx->nnzArr.assign(nScenarios, ctx->nnz);
-        ctx->ldArr.assign(nScenarios, n);
-        for (int s = 0; s < nScenarios; s++) {
-            ctx->valPtrs[s] = valsDev + (size_t) s * ctx->nnz;
-            ctx->rowStartPtrs[s] = rowPtrDev;                // shared CSR row offsets
-            ctx->rowEndPtrs[s] = rowPtrDev + 1;              // rowEnd = rowStart + 1
-            ctx->colPtrs[s] = colDev;                        // shared column indices
-            ctx->bPtrs[s] = bDev + (size_t) s * n;
-            ctx->xPtrs[s] = xDev + (size_t) s * n;
-        }
-        // cuDSS 0.8 batch API wants the pointer arrays in DEVICE memory (arrays of device
-        // pointers); the size arrays stay on the host. Upload the six host pointer arrays.
-        size_t ptrBytes = static_cast<size_t>(nScenarios) * sizeof(void*);
-        ctx->dValPtrs.upload(ctx->valPtrs.data(), ptrBytes);
-        ctx->dRowStartPtrs.upload(ctx->rowStartPtrs.data(), ptrBytes);
-        ctx->dRowEndPtrs.upload(ctx->rowEndPtrs.data(), ptrBytes);
-        ctx->dColPtrs.upload(ctx->colPtrs.data(), ptrBytes);
-        ctx->dBPtrs.upload(ctx->bPtrs.data(), ptrBytes);
-        ctx->dXPtrs.upload(ctx->xPtrs.data(), ptrBytes);
-        CUDSS_CHECK(cudssMatrixCreateBatchCsr(&ctx->matABatch, nScenarios,
-                ctx->nrowsArr.data(), ctx->ncolsArr.data(), ctx->nnzArr.data(),
-                ctx->dRowStartPtrs.as<void*>(), nullptr, ctx->dColPtrs.as<void*>(), ctx->dValPtrs.as<void*>(),
-                OLF_CUDSS_CSR_TYPES,
-                CUDSS_MTYPE_GENERAL, CUDSS_MVIEW_FULL, CUDSS_BASE_ZERO));
-        CUDSS_CHECK(cudssMatrixCreateBatchDn(&ctx->matBBatch, nScenarios,
-                ctx->nrowsArr.data(), ctx->ncols1Arr.data(), ctx->ldArr.data(),
-                ctx->dBPtrs.as<void*>(), OLF_CUDSS_BDN_TYPES, CUDSS_LAYOUT_COL_MAJOR));
-        CUDSS_CHECK(cudssMatrixCreateBatchDn(&ctx->matXBatch, nScenarios,
-                ctx->nrowsArr.data(), ctx->ncols1Arr.data(), ctx->ldArr.data(),
-                ctx->dXPtrs.as<void*>(), OLF_CUDSS_BDN_TYPES, CUDSS_LAYOUT_COL_MAJOR));
-        // the refinement residual and correction, same layout as B and X
-        ctx->dR.alloc(static_cast<size_t>(n) * nScenarios * sizeof(double));
-        ctx->dDelta.alloc(static_cast<size_t>(n) * nScenarios * sizeof(double));
-        ctx->dIrScore.alloc(static_cast<size_t>(nScenarios) * sizeof(double));
-        ctx->rPtrs.resize(nScenarios);
-        ctx->deltaPtrs.resize(nScenarios);
-        for (int s = 0; s < nScenarios; s++) {
-            ctx->rPtrs[s] = ctx->dR.as<double>() + (size_t) s * n;
-            ctx->deltaPtrs[s] = ctx->dDelta.as<double>() + (size_t) s * n;
-        }
-        ctx->dRPtrs.upload(ctx->rPtrs.data(), ptrBytes);
-        ctx->dDeltaPtrs.upload(ctx->deltaPtrs.data(), ptrBytes);
-        CUDSS_CHECK(cudssMatrixCreateBatchDn(&ctx->matRBatch, nScenarios,
-                ctx->nrowsArr.data(), ctx->ncols1Arr.data(), ctx->ldArr.data(),
-                ctx->dRPtrs.as<void*>(), OLF_CUDSS_BDN_TYPES, CUDSS_LAYOUT_COL_MAJOR));
-        CUDSS_CHECK(cudssMatrixCreateBatchDn(&ctx->matDeltaBatch, nScenarios,
-                ctx->nrowsArr.data(), ctx->ncols1Arr.data(), ctx->ldArr.data(),
-                ctx->dDeltaPtrs.as<void*>(), OLF_CUDSS_BDN_TYPES, CUDSS_LAYOUT_COL_MAJOR));
-}
-
-static void setupBatchMatricesBlockDiag(BatchSolverContext* ctx) {
-    int n = ctx->n;
-    int nScenarios = ctx->nScenarios;
-    const std::vector<int>& rowPtr = ctx->st->rowPtr;
-    const std::vector<int>& colIdx = ctx->st->colIdx;
-    // ---- block-diagonal single matrix: one (n*nS) CSR = blkdiag(J_1..J_nS). Its values array
-    //      IS dVals (per-scenario nnz contiguous); we only build the big rowPtr/colIdx (per-block
-    //      pattern with column offsets s*n). One ANALYZE+FACTORIZE, then REFACTORIZE every solve. ----
-    {
-        long bigN = (long) n * nScenarios;
-        long bigNnz = (long) ctx->nnz * nScenarios;
-        std::vector<int> bigRowPtr(bigN + 1), bigColIdx(bigNnz);
-        bigRowPtr[0] = 0;
-        for (int s = 0; s < nScenarios; s++) {
-            for (int r = 0; r < n; r++) {
-                long gRow = (long) s * n + r;
-                bigRowPtr[gRow + 1] = bigRowPtr[gRow] + (rowPtr[r + 1] - rowPtr[r]);
-                for (int k = rowPtr[r]; k < rowPtr[r + 1]; k++) {
-                    bigColIdx[(long) s * ctx->nnz + k] = colIdx[k] + s * n;   // shift cols into block s
-                }
-            }
-        }
-        ctx->dBigRowPtr.upload(bigRowPtr.data(), (bigN + 1) * sizeof(int));
-        ctx->dBigColIdx.upload(bigColIdx.data(), bigNnz * sizeof(int));
-        CUDSS_CHECK(cudssMatrixCreateCsr(&ctx->matBig, bigN, bigN, bigNnz,
-                ctx->dBigRowPtr.as<int>(), nullptr, ctx->dBigColIdx.as<int>(), ctx->dVals.as<double>(),
-                OLF_CUDSS_CSR_TYPES,
-                CUDSS_MTYPE_GENERAL, CUDSS_MVIEW_FULL, CUDSS_BASE_ZERO));
-        CUDSS_CHECK(cudssMatrixCreateDn(&ctx->matBigB, bigN, 1, bigN, ctx->dB.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
-        CUDSS_CHECK(cudssMatrixCreateDn(&ctx->matBigX, bigN, 1, bigN, ctx->dDx.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
-    }
-}
 
 static void setupBatchMatricesUbatch(BatchSolverContext* ctx) {
     int n = ctx->n;
@@ -9095,11 +8970,7 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& st, int nScenar
     }
     CUDSS_CHECK(cudssDataCreate(ctx->ds.handle, &ctx->ds.data));
 
-    if (mode == 1) {
-        setupBatchMatricesUniform(ctx.get());
-    } else if (mode == 2) {
-        setupBatchMatricesBlockDiag(ctx.get());
-    } else if (mode == 3 || mode == 4 || mode == 5) {
+    if (mode == 3) {
         setupBatchMatricesUbatch(ctx.get());
     } else {
         setupBatchMatricesFallback(ctx.get());
@@ -11808,7 +11679,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     //      (the JNI upload refuses shared buses, which stay on the host orchestrator). ----
     // One unit-right-hand-side sensitivity solve on every scenario's CURRENT Jacobian (dVals, filled for all
     // scenarios by the caller; dB = the right-hand sides, dDx = the solutions), for the in-kernel outer loops.
-    // The UBATCH modes (3/4/5) solve the whole batch in one call on the factors they hold - the analysis once per
+    // The UBATCH mode (3) solves the whole batch in one call on the factors they hold - the analysis once per
     // context, the factorization with the first controller's solve. The robust mode (6) holds ONE matrix object
     // repointed per scenario and keeps no factors from one scenario to the next, so it factors and solves scenario
     // by scenario - a refactorization per (scenario, controller), affordable at the robust retry's chunk sizes and
@@ -11845,9 +11716,9 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     auto tvcStep = [&]() {
         int nTvc = ctx->nTvc;
         if (nTvc <= 0) return;
-        if (ctx->mode != 3 && ctx->mode != 4 && ctx->mode != 5 && ctx->mode != 6) {
+        if (ctx->mode != 3 && ctx->mode != 6) {
             static bool warned = false;
-            if (!warned) { std::fprintf(stderr, "in-kernel TVC needs a UBATCH (3/4/5) or robust (6) mode; mode %d runs it as stable\n", ctx->mode); warned = true; }
+            if (!warned) { std::fprintf(stderr, "in-kernel TVC needs a UBATCH (3) or robust (6) mode; mode %d runs it as stable\n", ctx->mode); warned = true; }
             return;
         }
         size_t nst = static_cast<size_t>(nS) * nTvc;
@@ -11883,7 +11754,6 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             tvcGatherSensiBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(nS, n, c, nTvc, ctx->dTvcVRow.as<int>(),
                     ctx->dDx.as<double>(), ctx->dTvcSensi.as<double>());
         }
-        ctx->factored = true;
         CUDA_CHECK(cudaMemcpy(ctx->dActive.p, active.data(), nS, cudaMemcpyHostToDevice));   // as it was
         // Tap decision; a moved scenario is an UNSTABLE verdict (dRlSwitched), like every device loop.
         tvcGroupDecisionBatch<<<grid(ctx->nTvcGroups * nS), BLOCK, 0, ctx->stream>>>(ctx->nTvcGroups, nS, nTvc,
@@ -11932,9 +11802,9 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     auto shcStep = [&]() {
         int nShc = ctx->nShc;
         if (nShc <= 0) return;
-        if (ctx->mode != 3 && ctx->mode != 4 && ctx->mode != 5 && ctx->mode != 6) {
+        if (ctx->mode != 3 && ctx->mode != 6) {
             static bool warned = false;
-            if (!warned) { std::fprintf(stderr, "in-kernel shunt VC needs a UBATCH (3/4/5) or robust (6) mode; mode %d runs it as stable\n", ctx->mode); warned = true; }
+            if (!warned) { std::fprintf(stderr, "in-kernel shunt VC needs a UBATCH (3) or robust (6) mode; mode %d runs it as stable\n", ctx->mode); warned = true; }
             return;
         }
         int nG = ctx->nShcGroups;
@@ -11975,7 +11845,6 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             shcGatherSensiBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(nS, n, c, nShc, ctx->dShcVRow.as<int>(),
                     ctx->dDx.as<double>(), ctx->dShcSensi.as<double>());
         }
-        ctx->factored = true;
         CUDA_CHECK(cudaMemcpy(ctx->dActive.p, active.data(), nS, cudaMemcpyHostToDevice));
         shcAdjustBatch<<<grid(static_cast<int>(nsg)), BLOCK, 0, ctx->stream>>>(nG, nS, n, ctx->nElements, nShc, ctx->nShcSubs,
                 ctx->shcMaxSectionShift, ctx->dShcGroupPtr.as<int>(), ctx->dShcGroupCtrl.as<int>(), ctx->dShcSubPtr.as<int>(),
@@ -12006,9 +11875,9 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     auto flcStep = [&](int kindMask) {
         int nF = ctx->nFlc;
         if (nF <= 0) return;
-        if (ctx->mode != 3 && ctx->mode != 4 && ctx->mode != 5 && ctx->mode != 6) {
+        if (ctx->mode != 3 && ctx->mode != 6) {
             static bool warned = false;
-            if (!warned) { std::fprintf(stderr, "in-kernel flow control needs a UBATCH (3/4/5) or robust (6) mode; mode %d runs it as stable\n", ctx->mode); warned = true; }
+            if (!warned) { std::fprintf(stderr, "in-kernel flow control needs a UBATCH (3) or robust (6) mode; mode %d runs it as stable\n", ctx->mode); warned = true; }
             return;
         }
         size_t nst = static_cast<size_t>(nS) * nF;
@@ -12042,7 +11911,6 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                     ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>(),
                     ctx->dX.as<double>(), ctx->dDx.as<double>(), ctx->dFlcSensi.as<double>());
         }
-        ctx->factored = true;
         CUDA_CHECK(cudaMemcpy(ctx->dActive.p, active.data(), nS, cudaMemcpyHostToDevice));
         flcDecisionBatch<<<grid(static_cast<int>(nst)), BLOCK, 0, ctx->stream>>>(nF, nS, kindMask,
                 ctx->dFlcKind.as<int>(), ctx->dFlcPinCol.as<int>(), ctx->dFlcTapPtr.as<int>(), ctx->dFlcTapData.as<double>(), ctx->dFlcMaxShift.as<int>(),
@@ -12132,9 +12000,9 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     auto svcStep = [&]() {
         int nC = ctx->nSvc;
         if (nC <= 0) return;
-        if (ctx->mode != 3 && ctx->mode != 4 && ctx->mode != 5 && ctx->mode != 6) {
+        if (ctx->mode != 3 && ctx->mode != 6) {
             static bool warned = false;
-            if (!warned) { std::fprintf(stderr, "in-kernel SecondaryVc needs a UBATCH (3/4/5) or robust (6) mode; mode %d runs it as stable\n", ctx->mode); warned = true; }
+            if (!warned) { std::fprintf(stderr, "in-kernel SecondaryVc needs a UBATCH (3) or robust (6) mode; mode %d runs it as stable\n", ctx->mode); warned = true; }
             return;
         }
         CUDA_CHECK(cudaMemsetAsync(ctx->dSvcNeed.p, 0, nS, ctx->stream));
@@ -12166,7 +12034,6 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                     ctx->nShOv, ctx->dShOvSlotElem.as<int>(), ctx->dShOvGb.as<double>(),
                     ctx->dDisabled.as<char>(), ctx->dX.as<double>(), ctx->dDx.as<double>());
         }
-        ctx->factored = true;
         CUDA_CHECK(cudaMemcpy(ctx->dActive.p, active.data(), nS, cudaMemcpyHostToDevice));   // as it was
         // ---- the zone systems: assembled into device memory, solved by cuBLAS's BATCHED dense LU ----
         if (ctx->svcBlas == nullptr) {
@@ -12246,7 +12113,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     for (int it = 0; it <= maxIter && nActive > 0; it++) {
         gLastPassIters = it;
         gNewtonIters++;
-        bool fOnly = it == maxIter || (ctx->mode == 4 && it > 0);
+        bool fOnly = it == maxIter;
         fillActiveBatch(fOnly);
 
         // ---- residual check + retirement ----
@@ -12507,72 +12374,10 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             CUDA_CHECK(cudaMemcpyAsync(ctx->dXprevLs.p, ctx->dX.p, static_cast<size_t>(n) * nS * sizeof(double),
                                        cudaMemcpyDeviceToDevice, ctx->stream));
         }
-        if (ctx->mode == 1) {
-        // ---- UNIFORM BATCHED solve: one ANALYSIS on the shared pattern, then ONE batched
-        //      FACTORIZATION + SOLVE over every scenario's value set. Retired scenarios are
-        //      frozen to identity so the batch stays non-singular. ----
-        writeIdentityForInactive<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, nnz, ctx->st->dRowPtr.as<int>(),
-                ctx->st->dDiagPos.as<int>(), ctx->dActive.as<char>(), ctx->dVals.as<double>(), ctx->dF.as<double>());
-        negateIntoBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n * nS, ctx->dF.as<double>(), ctx->dB.as<double>());
-        hazRepairRightHandSide(ctx, nS, ctx->dB.as<double>());
-        if (!ctx->analyzed) {
-            gAnalysesMain++;
-            { AnalysisTimer at_(__LINE__); CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_ANALYSIS, ctx->ds.config, ctx->ds.data, ctx->matABatch, ctx->matXBatch, ctx->matBBatch)); }
-            traceLuNnz(ctx->ds.handle, ctx->ds.data, "batch-api", ctx->nScenarios);
-            ctx->analyzed = true;
-        }
-        { AnalysisTimer at_(__LINE__, 'F'); CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_FACTORIZATION | CUDSS_PHASE_SOLVE,
-                ctx->ds.config, ctx->ds.data, ctx->matABatch, ctx->matXBatch, ctx->matBBatch)); }
-        if (ctx->st->nzi > 0 && ctx->dR.p != nullptr) {
-            // adaptive refinement (see refineLanes): refine while an active lane's backward residual is above tol
-            refineLanes(ctx, nS, n, nnz, ctx->dVals.as<double>(), ctx->dDx.as<double>(), ctx->dB.as<double>(),
-                    ctx->dR.as<double>(), ctx->dDelta.as<double>(), ctx->dActive.as<char>(), [&]() {
-                AnalysisTimer at_(__LINE__, 'S');
-                CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_SOLVE, ctx->ds.config, ctx->ds.data, ctx->matABatch, ctx->matDeltaBatch, ctx->matRBatch));
-            });
-        }
-        if (ctx->clampStep) {
-            maxVoltageChangeFactorBatch<<<nS, BLOCK, 0, ctx->stream>>>(n, ctx->dDx.as<double>(), ctx->dVarType.as<int>(), ctx->dActive.as<char>(), ctx->maxDv, ctx->maxDphi, ctx->dStepFactor.as<double>());
-            traceStepFactor(ctx, nS, it, active);
-            axpy1BatchScaled<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, n * nS, ctx->dDx.as<double>(), ctx->dStepFactor.as<double>(), ctx->dX.as<double>());
-        } else {
-            axpy1Batch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n * nS, ctx->dDx.as<double>(), ctx->dX.as<double>());
-        }
-        if (!deviceFixedIter) CUDA_CHECK(cudaStreamSynchronize(ctx->stream));   // fixed-iter: no per-iter host sync (final readback syncs)
-        } else if (ctx->mode == 2) {
-        // ---- BLOCK-DIAGONAL solve: one big blkdiag matrix; ANALYZE+FACTORIZE once (ever, across
-        //      chunks), then REFACTORIZE every iteration reusing the pivot order (the
-        //      refactor-every strategy) — refactor IS cheap on a single matrix, unlike the batch API. ----
-        writeIdentityForInactive<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, nnz, ctx->st->dRowPtr.as<int>(),
-                ctx->st->dDiagPos.as<int>(), ctx->dActive.as<char>(), ctx->dVals.as<double>(), ctx->dF.as<double>());
-        negateIntoBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n * nS, ctx->dF.as<double>(), ctx->dB.as<double>());
-        hazRepairRightHandSide(ctx, nS, ctx->dB.as<double>());
-        if (!ctx->analyzed) {
-            gAnalysesMain++;
-            { AnalysisTimer at_(__LINE__); CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_ANALYSIS, ctx->ds.config, ctx->ds.data, ctx->matBig, ctx->matBigX, ctx->matBigB)); }
-            traceLuNnz(ctx->ds.handle, ctx->ds.data, "blkdiag", ctx->nScenarios);
-            ctx->analyzed = true;
-        }
-        { AnalysisTimer at_(__LINE__, 'F'); CUDSS_CHECK(cudssExecute(ctx->ds.handle,
-                (ctx->factored ? CUDSS_PHASE_REFACTORIZATION : CUDSS_PHASE_FACTORIZATION) | CUDSS_PHASE_SOLVE,
-                ctx->ds.config, ctx->ds.data, ctx->matBig, ctx->matBigX, ctx->matBigB)); }
-        ctx->factored = true;
-        if (ctx->clampStep) {
-            maxVoltageChangeFactorBatch<<<nS, BLOCK, 0, ctx->stream>>>(n, ctx->dDx.as<double>(), ctx->dVarType.as<int>(), ctx->dActive.as<char>(), ctx->maxDv, ctx->maxDphi, ctx->dStepFactor.as<double>());
-            traceStepFactor(ctx, nS, it, active);
-            axpy1BatchScaled<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, n * nS, ctx->dDx.as<double>(), ctx->dStepFactor.as<double>(), ctx->dX.as<double>());
-        } else {
-            axpy1Batch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n * nS, ctx->dDx.as<double>(), ctx->dX.as<double>());
-        }
-        if (!deviceFixedIter) CUDA_CHECK(cudaStreamSynchronize(ctx->stream));   // fixed-iter: no per-iter host sync (final readback syncs)
-        } else if (ctx->mode == 3 || ctx->mode == 4 || ctx->mode == 5) {
+        if (ctx->mode == 3) {
         // ---- UBATCH solve: ANALYZE one block once (cheap), then a linear solve over all nS systems
-        //      via CUDSS_CONFIG_UBATCH_SIZE on the single per-block matrix. The FACTORIZE policy varies:
-        //        mode 3 = FACTORIZE every iteration (honest Newton, DirectRefactorEvery analog);
-        //        mode 4 = FACTORIZE only at this chunk's iter 0, SOLVE-only after (DirectIter0Only:
-        //                 the J is frozen at the AC-hot-started point, the RHS/F is still fresh each iter);
-        //        mode 5 = FACTORIZE once (ever), REFACTORIZE after (DirectRefactorEvery on UBATCH:
-        //                 reuse the pivot order, recompute numeric values each iter). ----
+        //      via CUDSS_CONFIG_UBATCH_SIZE on the single per-block matrix, FACTORIZED every iteration
+        //      (honest Newton). ----
         writeIdentityForInactive<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, nnz, ctx->st->dRowPtr.as<int>(),
                 ctx->st->dDiagPos.as<int>(), ctx->dActive.as<char>(), ctx->dVals.as<double>(), ctx->dF.as<double>());
         negateIntoBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n * nS, ctx->dF.as<double>(), ctx->dB.as<double>());
@@ -12598,13 +12403,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         }
         // ONE cudssExecute per iteration (phases are OR-able bit flags): halves the per-iteration
         // host-side phase overhead vs separate FACTORIZATION + SOLVE calls.
-        int ubPhase = CUDSS_PHASE_SOLVE;
-        if (ctx->mode == 5) {
-            ubPhase |= ctx->factored ? CUDSS_PHASE_REFACTORIZATION : CUDSS_PHASE_FACTORIZATION;
-            ctx->factored = true;
-        } else if (ctx->mode == 3 || it == 0) {              // mode 3 every iter; mode 4 only at chunk iter 0
-            ubPhase |= CUDSS_PHASE_FACTORIZATION;
-        }
+        int ubPhase = CUDSS_PHASE_SOLVE | CUDSS_PHASE_FACTORIZATION;
         // ---- solve-only COMPACTION: when few scenarios remain active, gather their vals/B into
         //      compact buffers and solve a NARROWER ubatch on the dedicated dsC context, then
         //      scatter dx back. mode 3 only (factorizes every iteration — stateless across width
@@ -14930,11 +14729,11 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_readBatc
 // identity row (BRANCH_TARGET_RHO1 & co, storage row = rowMap[eqRow]); the requested variable
 // columns of each solution are gathered per scenario. MUST be called on a context that has just
 // completed solveBatchContext with the SAME per-scenario overrides/row modes — the fill reads
-// them from the live device buffers. UBATCH modes (3/4/5) only.
+// them from the live device buffers. UBATCH mode (3) only.
 std::vector<double> solveBatchSensitivities(BatchSolverContext* ctx, const double* states,
                                             int k, const int* unitEqRows, int m, const int* observeVarCols) {
-    if (ctx->mode != 3 && ctx->mode != 4 && ctx->mode != 5) {
-        throw std::runtime_error("solveBatchSensitivities: UBATCH modes (3/4/5) only");
+    if (ctx->mode != 3) {
+        throw std::runtime_error("solveBatchSensitivities: UBATCH mode (3) only");
     }
     int n = ctx->st->n;
     int nS = ctx->nScenarios;
@@ -15003,7 +14802,6 @@ std::vector<double> solveBatchSensitivities(BatchSolverContext* ctx, const doubl
         gatherSensiBatch<<<grid(nS * m), BLOCK, 0, ctx->stream>>>(n, nS, k, m, ki, dObs.as<int>(),
                 ctx->dDx.as<double>(), dOut.as<double>());
     }
-    ctx->factored = true;                                    // keep mode-5 REFACTORIZATION bookkeeping honest
     std::vector<double> out((size_t) nS * k * m);
     CUDA_CHECK(cudaMemcpyAsync(out.data(), dOut.p, out.size() * sizeof(double), cudaMemcpyDeviceToHost, ctx->stream));
     CUDA_CHECK(cudaStreamSynchronize(ctx->stream));

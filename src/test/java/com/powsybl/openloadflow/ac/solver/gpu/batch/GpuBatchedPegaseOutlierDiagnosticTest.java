@@ -88,7 +88,6 @@ class GpuBatchedPegaseOutlierDiagnosticTest {
     void localizeOutlier() {
         assumeTrue(GpuAcNewtonSolver.isAvailable(), "GPU native lib not available");
         assumeTrue(Files.exists(CASES.resolve(CASE)), CASE + " not found");
-        System.setProperty(GpuBatchContextCache.BATCH_MODE_PROPERTY, "3");
 
         Network iidm = Network.read(CASES.resolve(CASE));
         LoadFlowParameters lfp = gpuScopeParameters();

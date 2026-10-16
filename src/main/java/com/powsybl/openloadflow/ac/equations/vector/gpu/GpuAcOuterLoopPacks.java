@@ -349,12 +349,9 @@ public final class GpuAcOuterLoopPacks {
     /** The couplers whose {@code DUMMY_P} / {@code DUMMY_Q} rows host a bus's power equations under the
      *  coupler-tree relocation ({@link GpuAcRowIndexing#ziTreeRelocation}). A batched scenario has to know them:
      *  inside an island every row must become an identity, and under the relocation two of those rows belong to
-     *  the coupler, not to the bus. Empty when the relocation is off, so the default path is untouched. */
+     *  the coupler, not to the bus. */
     public static java.util.Set<LfBranch> relocatedCouplerBranches(LfNetwork network,
                                                                   EquationSystem<AcVariableType, AcEquationType> es) {
-        if (!GpuAcRowIndexing.ziTreeRelocationEnabled()) {
-            return java.util.Set.of();
-        }
         int[] childBusOfEdge = ExtractionColumns.of(network, es).ziChildBus();
         java.util.Set<LfBranch> relocated = new java.util.HashSet<>();
         for (LfBranch br : network.getBranches()) {

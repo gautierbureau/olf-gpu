@@ -13,8 +13,6 @@ correct fallback worth keeping for triage · **TUNING** = both modes legitimate 
 
 | switch | default | gates | disposition |
 |---|---|---|---|
-| `olf.gpu.ziTreeRelocation` | `false` | the coupler-tree relocation of bus power equations | **VERIFY** — cannot be deleted either way yet: OFF loses long coupler chains (first step wrong from 7 couplers on, 1.6e+04), ON is wrong at scale (network.xiidm branch scope: 10322 of 10538 contingencies differ, worst 89.18 MW). Both modes are wrong for some input, which is why it is still a switch. |
-| `olf.gpu.ziTreeRelocationMinCouplers` | `4` | minimum tree size to relocate | **VERIFY** — a NO-OP on network.xiidm (17 of 7745 buses at 4, 373 at 1). Tied to the switch above. |
 | `olf.gpu.pilotSelfRotation` | `true` | pilot-self group Q rotation | **VERIFY** — turned ON by default 2026-09-28; the OFF path should go once the rotation is trusted. |
 | `olf.gpu.sa.fixedInnerIters` | `0` | K fixed Newton steps instead of OLF's budget | **TUNING** — the fixed-iter bench needs it; never a production mode. |
 | `olf.gpu.lib` | — | native library path | **TUNING** (plumbing, not behaviour). |

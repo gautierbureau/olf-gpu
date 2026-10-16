@@ -37,7 +37,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /**
- * The COUPLER-TREE RELOCATION ({@code -Dolf.gpu.ziTreeRelocation=true}, see
+ * The COUPLER-TREE RELOCATION (see
  * {@link GpuAcRowIndexing#ziTreeRelocation}) on the shape that needs it: a chain of zero-impedance couplers with a
  * generator on every bus, so OLF merges their voltage controls and the numeric row repair is the only thing holding
  * the factorization together.
@@ -156,12 +156,6 @@ class GpuZiCouplerTreeRelocationTest extends AbstractLoadFlowNetworkFactory {
         assertTrue(ps.isZeroImpedance(LoadFlowModel.AC) && ps.isSpanningTreeEdge(LoadFlowModel.AC), "a zero-impedance tree edge");
         assertTrue(Math.abs(LfBranch.getA(ps)) > 1e-3, "with a phase shift: the ZERO_PHI target is not 0");
         assertFirstStepIsOlfs(zeroImpedancePhaseShifter(), "zero-impedance phase shifter, relocated");
-        System.setProperty("olf.gpu.ziTreeRelocation", "false");
-        try {
-            assertFirstStepIsOlfs(zeroImpedancePhaseShifter(), "zero-impedance phase shifter, stock");
-        } finally {
-            System.clearProperty("olf.gpu.ziTreeRelocation");
-        }
     }
 
     /** The plant's coupler stays stock (the fixture is what it claims to be): s0 is a stub with the identity, so
@@ -206,28 +200,7 @@ class GpuZiCouplerTreeRelocationTest extends AbstractLoadFlowNetworkFactory {
     @Test
     void relocatedCouplerChainStepsWithOlf() {
         assumeTrue(GpuAcNewtonSolver.isAvailable(), "GPU native lib not available");
-        System.setProperty("olf.gpu.ziTreeRelocation", "true");
-        try {
-            assertChainStepsMatchOlf();
-        } finally {
-            System.clearProperty("olf.gpu.ziTreeRelocation");
-        }
-    }
-
-    /** STOCK everywhere (relocation off), the same chains step exactly with OLF too: the numeric row repair holds
-     *  them once each zero equation sits on the dummy row whose donors carry its own columns (ZERO_V on the
-     *  DUMMY_Q row, ZERO_PHI on the DUMMY_P row - crosswise, native ziZeroVRow). With the placement the other way
-     *  round, every repaired pair was an exactly singular 2x2 block and the unpivoted factorization lost the chain
-     *  from 7 couplers on (1.6e+04 measured, against OLF's step). */
-    @Test
-    void stockCouplerChainStepsWithOlf() {
-        assumeTrue(GpuAcNewtonSolver.isAvailable(), "GPU native lib not available");
-        System.setProperty("olf.gpu.ziTreeRelocation", "false");
-        try {
-            assertChainStepsMatchOlf();
-        } finally {
-            System.clearProperty("olf.gpu.ziTreeRelocation");
-        }
+        assertChainStepsMatchOlf();
     }
 
     /** The two-section plant's coupler is stock even with the relocation on (neither section can be its child),

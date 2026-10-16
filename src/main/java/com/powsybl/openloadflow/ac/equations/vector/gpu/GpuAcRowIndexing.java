@@ -461,27 +461,6 @@ final class GpuAcRowIndexing {
     }
 
     /**
-     * {@code -Dolf.gpu.ziTreeRelocation=false} turns OFF the coupler-tree relocation, which relocates every
-     * non-root bus of a zero-impedance spanning tree (ON by default since 2026-09-29) and leaves only the
-     * dead-end stubs it generalises. It is what OLF's own equation layout does with a coupler chain, and
-     * without it a busbar-section network's rows have no diagonal to factor without pivoting, which cuDSS's
-     * uniform batch does not do: measured on rte6515's full busbar scope, 996 zero diagonals and a base load
-     * flow whose first factorization came back with a residual ratio of 2.1e+08, against an exact base and 2
-     * rejects of 6876 with the relocation on.
-     */
-    static boolean ziTreeRelocationEnabled() {
-        return Boolean.parseBoolean(System.getProperty("olf.gpu.ziTreeRelocation", "true"));
-    }
-
-    /** {@code -Dolf.gpu.ziTreeRelocationMinCouplers=<n>}: relocate only a tree with at least n couplers. Default 1,
-     *  i.e. every tree: the numeric row repair is exact on short chains (measured: 3 couplers at 2.8e-16) and loses
-     *  longer ones (1.6e+04 at 7), but the relocation is exact on both and one rule for every tree is one layout to
-     *  reason about. Raise it to fall back to the numeric repair on the short trees. */
-    private static int ziTreeMinCouplers() {
-        return Integer.getInteger("olf.gpu.ziTreeRelocationMinCouplers", 1);
-    }
-
-    /**
      * The COUPLER-TREE RELOCATION, the general form of the dead-end case below: per zero-impedance spanning tree,
      * every non-root bus's two power equations move onto its PARENT coupler's {@code DUMMY_P} / {@code DUMMY_Q}
      * columns, and every coupler's {@code ZERO_PHI} / {@code ZERO_V} move onto its CHILD bus's {@code PHI} / {@code V}.
@@ -508,20 +487,6 @@ final class GpuAcRowIndexing {
         int[] childBusOfEdge = new int[nBranches];
         java.util.Arrays.fill(parentEdgeOfBus, -1);
         java.util.Arrays.fill(childBusOfEdge, -1);
-        if (!ziTreeRelocationEnabled()) {                    // dead-end stubs only: the k=1 case, as before
-            for (LfBranch br : network.getBranches()) {
-                if (!br.isZeroImpedance(LoadFlowModel.AC)) {
-                    continue;
-                }
-                int side = ziDeadEndSide(es, br, phiCol, vCol, qRow);
-                if (side != 0) {
-                    LfBus stub = side == 1 ? br.getBus1() : br.getBus2();
-                    parentEdgeOfBus[stub.getNum()] = br.getNum();
-                    childBusOfEdge[br.getNum()] = stub.getNum();
-                }
-            }
-            return new int[][] {parentEdgeOfBus, childBusOfEdge};
-        }
         // Adjacency over the zero-impedance SPANNING-TREE edges only: a non-tree coupler carries no reactive flow
         // and no zero equations to relocate (OLF gives it no DUMMY variables either).
         java.util.Map<Integer, java.util.List<LfBranch>> treeEdges = new java.util.HashMap<>();
@@ -602,12 +567,6 @@ final class GpuAcRowIndexing {
             }
             if (System.getenv("OLF_GPU_ZITREE_TRACE") != null) {
                 System.err.println("ZITREE root=" + bus.getId() + " couplers=" + childrenOfThisTree.size());
-            }
-            if (childrenOfThisTree.size() < ziTreeMinCouplers()) {
-                for (int child : childrenOfThisTree) {        // short tree: the numeric repair handles it exactly
-                    childBusOfEdge[parentEdgeOfBus[child]] = -1;
-                    parentEdgeOfBus[child] = -1;
-                }
             }
         }
         for (LfBus bus : network.getBuses()) {

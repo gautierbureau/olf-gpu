@@ -312,12 +312,8 @@ record ExtractionColumns(int[] phiCol, int[] vCol, int[] branchRhoCol, int[] bra
         int[] pRow = phiCol.clone();
         if (System.getenv("OLF_GPU_ZI_RELOC_TRACE") != null) {
             long relocated = java.util.Arrays.stream(ziParentEdge).filter(x -> x >= 0).count();
-            System.err.printf("ZI_RELOC treeMode=%b minCouplers=%d relocatedBuses=%d of %d%n",
-                    GpuAcRowIndexing.ziTreeRelocationEnabled(),
-                    Integer.getInteger("olf.gpu.ziTreeRelocationMinCouplers", 4), relocated, nBuses);
-            // =ids: WHICH buses relocate, and what each one carries. Two runs at neighbouring
-            // minCouplers diff to the exact set a tree-size gate admits — which is how the
-            // network.xiidm branch-scope defect was narrowed to the buses of 3-coupler trees.
+            System.err.printf("ZI_RELOC relocatedBuses=%d of %d%n", relocated, nBuses);
+            // =ids: WHICH buses relocate, and what each one carries.
             if ("ids".equals(System.getenv("OLF_GPU_ZI_RELOC_TRACE"))) {
                 for (LfBus b : network.getBuses()) {
                     int pe = ziParentEdge[b.getNum()];

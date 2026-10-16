@@ -1929,25 +1929,6 @@ static void scanValsFinite(Ctx* ctx, int nS, int n, int nnz, int outer) {
     int it = seq++;                                          // fill sequence: orders these against LIN_RESID
     int sMax = std::min(nS, 2);
     CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
-    // OLF_GPU_VALS_SCAN_SLOT=<slot>: scan/dump THAT scenario by cloning its fill (vals, F, mode, x, target) over
-    // slot 0 first — slot 0 then behaves as the traced slot for the rest of the solve, which is fine for a
-    // diagnostic run and avoids copying nS x nnz values to the host. A batch-only defect (fine when run alone,
-    // since the single-contingency base retains other switches) is only readable this way.
-    static const char* scanSlotEnv = std::getenv("OLF_GPU_VALS_SCAN_SLOT");
-    static const int scanSlot = scanSlotEnv != nullptr ? std::atoi(scanSlotEnv) : -1;
-    if (scanSlot > 0 && scanSlot < nS) {
-        CUDA_CHECK(cudaMemcpy(ctx->dVals.p, static_cast<const double*>(ctx->dVals.p) + static_cast<size_t>(scanSlot) * nnz,
-                              static_cast<size_t>(nnz) * sizeof(double), cudaMemcpyDeviceToDevice));
-        CUDA_CHECK(cudaMemcpy(ctx->dF.p, static_cast<const double*>(ctx->dF.p) + static_cast<size_t>(scanSlot) * n,
-                              static_cast<size_t>(n) * sizeof(double), cudaMemcpyDeviceToDevice));
-        CUDA_CHECK(cudaMemcpy(ctx->dMode.p, static_cast<const int*>(ctx->dMode.p) + static_cast<size_t>(scanSlot) * n,
-                              static_cast<size_t>(n) * sizeof(int), cudaMemcpyDeviceToDevice));
-        CUDA_CHECK(cudaMemcpy(ctx->dX.p, static_cast<const double*>(ctx->dX.p) + static_cast<size_t>(scanSlot) * n,
-                              static_cast<size_t>(n) * sizeof(double), cudaMemcpyDeviceToDevice));
-        CUDA_CHECK(cudaMemcpy(ctx->dTarget.p, static_cast<const double*>(ctx->dTarget.p) + static_cast<size_t>(scanSlot) * n,
-                              static_cast<size_t>(n) * sizeof(double), cudaMemcpyDeviceToDevice));
-        sMax = 1;
-    }
     std::vector<double> hv(static_cast<size_t>(nnz) * sMax);
     CUDA_CHECK(cudaMemcpy(hv.data(), ctx->dVals.p, hv.size() * sizeof(double), cudaMemcpyDeviceToHost));
     std::vector<int> rowPtr(n + 1);
@@ -2384,7 +2365,7 @@ static void scanValsFinite(Ctx* ctx, int nS, int n, int nnz, int outer) {
         }
         // OLF_GPU_VALS_DUMP_ROW: every closed-branch output whose frozen or ALTERNATE dest is the row, with the
         // per-scenario facts the scatter decides on (the select row's mode, the element's disabled flag, its
-        // relocation group). For the scenario OLF_GPU_VALS_SCAN_SLOT names (else slot 0).
+        // relocation group), for slot 0.
         if (static const char* cbRowEnv = std::getenv("OLF_GPU_VALS_DUMP_ROW"); cbRowEnv != nullptr && s == 0 && ctx->st->cb.ne > 0) {
             // comma-separated rows: "12488,12490" replays both (the pilot row and the carrier of one group)
             std::vector<int> wantRows;
@@ -2394,7 +2375,7 @@ static void scanValsFinite(Ctx* ctx, int nS, int n, int nnz, int outer) {
                 if (*q == ',') q++;
             }
             for (int wantRow : wantRows) {
-            int slotDev = scanSlot > 0 && scanSlot < nS ? scanSlot : 0;
+            int slotDev = 0;
             size_t nOut = static_cast<size_t>(ctx->st->cb.ne) * CB_NOUT;
             std::vector<int> cdest(nOut), calt(nOut, -1), csel(nOut, -1), cgrp(nOut, -1);
             CUDA_CHECK(cudaMemcpy(cdest.data(), ctx->st->cb.dest.p, nOut * sizeof(int), cudaMemcpyDeviceToHost));
@@ -2679,7 +2660,7 @@ struct DeviceBuf {
             if (p) { cudaFree(p); p = nullptr; }
             CUDA_CHECK(cudaMalloc(&p, bytes));
             cap = bytes;
-            // Every fresh allocation is ZEROED (OLF_GPU_ZERO_ALLOC=0 disables, A/B). A buffer read before it is
+            // Every fresh allocation is ZEROED. A buffer read before it is
             // written holds whatever the previous owner of that device memory left: zeros in a fresh process,
             // stale content after other solves in the same one - which is how a read-before-write showed up
             // as an in-suite-only flake (2026-10-06: devicePilotLosingItsOwnGeneratorWithPinningSurvivor 3 of
@@ -2687,31 +2668,10 @@ struct DeviceBuf {
             // the seed launch of updatePilotVeqBatch, whose comment assumed "rlActive is still 0"). Zeroing
             // makes that assumption a guarantee instead of a property of the process's allocation history;
             // the cost is one memset per cudaMalloc, at context creation, not per iteration.
-            static const bool zero = std::getenv("OLF_GPU_ZERO_ALLOC") == nullptr
-                                     || std::string(std::getenv("OLF_GPU_ZERO_ALLOC")) != "0";
-            if (zero) {
-                CUDA_CHECK(cudaMemset(p, 0, bytes));
-            }
-            // OLF_GPU_POISON_ALLOC=all|<k>: fill every fresh allocation, or only the k-th one of the process,
-            // with OLF_GPU_POISON_BYTE (255 by default: NaN doubles, -1 ints) to make the read loud and bisect
-            // it; OLF_GPU_ALLOC_TRACE=1 prints each allocation's index and size.
+            CUDA_CHECK(cudaMemset(p, 0, bytes));
+            // OLF_GPU_ALLOC_TRACE=1 prints each allocation's index and size.
             static long allocIndex = -1;
             ++allocIndex;
-            static const char* poison = std::getenv("OLF_GPU_POISON_ALLOC");
-            static const int poisonByte = std::getenv("OLF_GPU_POISON_BYTE") != nullptr
-                                          ? std::atoi(std::getenv("OLF_GPU_POISON_BYTE")) : 255;
-            auto poisoned = [&]() {                          // all | <k> | <a>-<b> (inclusive)
-                if (poison == nullptr || *poison == '\0') return false;
-                std::string w(poison);
-                if (w == "all") return true;
-                size_t dash = w.find('-');
-                if (dash == std::string::npos) return std::atol(w.c_str()) == allocIndex;
-                return std::atol(w.substr(0, dash).c_str()) <= allocIndex
-                       && allocIndex <= std::atol(w.substr(dash + 1).c_str());
-            };
-            if (poisoned()) {
-                CUDA_CHECK(cudaMemset(p, poisonByte, bytes));
-            }
             static const char* trace = std::getenv("OLF_GPU_ALLOC_TRACE");
             if (trace != nullptr) {
                 std::fprintf(stderr, "ALLOC #%ld %zu bytes\n", allocIndex, bytes);
@@ -3134,9 +3094,7 @@ static void buildDistrQDest(SharedStructure* st, const CsrPattern& pos, const st
         for (int c = 0; c < ndq; c++) {
             int mappedRow = rowMap[dqRow[c]];
             int ownRow = relocOwn != nullptr && mappedRow >= 0 ? relocOwn[mappedRow] : -1;
-            // OLF_GPU_NO_DQ_STOCK=1: build the twin but never divert to it (bisection lever)
-            static const bool noDqStock = std::getenv("OLF_GPU_NO_DQ_STOCK") != nullptr;
-            if (ownRow >= 0 && !noDqStock) {
+            if (ownRow >= 0) {
                 dqSel[c] = mappedRow;
             }
             if (dqKind[c] == 3 && dqElem[c] >= 0) {
@@ -12238,10 +12196,6 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     auto svcStep = [&]() {
         int nC = ctx->nSvc;
         if (nC <= 0) return;
-        // DIAGNOSTIC: keep the slot in the sweep but do nothing in it, to separate "the extra slot moved
-        // the sweep" from "the phase body did". That probe is how the residual below was pinned down.
-        static const bool svcInert = std::getenv("OLF_GPU_SVC_INERT") != nullptr;
-        if (svcInert) return;
         if (ctx->mode != 3 && ctx->mode != 4 && ctx->mode != 5 && ctx->mode != 6) {
             static bool warned = false;
             if (!warned) { std::fprintf(stderr, "in-kernel SecondaryVc needs a UBATCH (3/4/5) or robust (6) mode; mode %d runs it as stable\n", ctx->mode); warned = true; }
@@ -12354,17 +12308,6 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     std::vector<char> lsHaveLast(lsMode == 1 ? nS : 0, 0);
     std::vector<double> hMu(lsMode == 1 ? nS : 0, -1.0);
 
-    // OLF_GPU_FORCE_FIRST_STEP=1 (diagnostic): mirror OLF's "always at least one Newton step".
-    const bool forceFirstStep = std::getenv("OLF_GPU_FORCE_FIRST_STEP") != nullptr;
-    // OLF_GPU_MAXITER=<n> (DIAGNOSTIC): override the inner Newton budget for this pass. One variable,
-    // to separate "the scenario needs more iterations" from "the scenario oscillates and more
-    // iterations buy nothing" on the non-batched tail (tasks #67) — both arms were measured taking the
-    // SAME clamped path and oscillating, so this says which of the two it is. Never for production: the
-    // budget is OLF's own maxNewtonRaphsonIterations and a run that needs more is not reproducing OLF.
-    static const char* maxIterEnv = std::getenv("OLF_GPU_MAXITER");
-    if (maxIterEnv != nullptr && *maxIterEnv != '\0') {
-        maxIter = std::atoi(maxIterEnv);
-    }
     for (int it = 0; it <= maxIter && nActive > 0; it++) {
         gLastPassIters = it;
         gNewtonIters++;
@@ -12486,15 +12429,6 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                 // PerEquationTypeStoppingCriteria — stop when EVERY row clears its type threshold.
                 bool converged = ctx->perRowCriteria ? (finite && maxRatio < 1.0)
                         : convEpsPerEq > 0.0 ? (std::sqrt(ssq) < thr2Of(s)) : (norm < tol);
-                // OLF's NewtonRaphson.run() computes the initial mismatch but only uses it to pick the
-                // step scaling — it then enters runIteration UNCONDITIONALLY, and runIteration steps
-                // FIRST and tests AFTER. So OLF always takes at least one step, even from a state that
-                // already satisfies the criterion. We test before stepping, so a solve re-entered with
-                // slightly moved targets (every outer-loop re-solve does exactly that) can retire
-                // having moved nothing, leaving the state one step behind OLF's.
-                if (forceFirstStep && it == 0) {
-                    converged = false;
-                }
                 if (iterLog) {
                     char line[192];
                     std::snprintf(line, sizeof line, "ITER_LOG outer=%d s=%d it=%d norm2=%.17e thr2=%.17e conv=%d",
@@ -12509,9 +12443,9 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                 static const int convTraceSlot = convTraceEnv == nullptr ? -1
                         : (std::string(convTraceEnv) == "all" ? -2 : std::atoi(convTraceEnv));
                 if (convTraceSlot == -2 || convTraceSlot == s) {
-                    std::fprintf(stderr, "CONV_TRACE s=%d it=%d norm2=%.17e thr2=%.17e nActive=%d inf=%.17e perRow=%d maxRatio=%.6e forceFirst=%d converged=%d\n",
+                    std::fprintf(stderr, "CONV_TRACE s=%d it=%d norm2=%.17e thr2=%.17e nActive=%d inf=%.17e perRow=%d maxRatio=%.6e converged=%d\n",
                                  s, it, std::sqrt(ssq), thr2Of(s), ctx->hNActive.empty() ? n : ctx->hNActive[s], norm,
-                                 ctx->perRowCriteria ? 1 : 0, maxRatio, (forceFirstStep && it == 0) ? 1 : 0, converged ? 1 : 0);
+                                 ctx->perRowCriteria ? 1 : 0, maxRatio, converged ? 1 : 0);
                     // the eight worst rows, by index: WHERE the residual sits, so a step that lands
                     // two orders of magnitude from the other arm's can be traced to its rows
                     std::vector<double> hFs(n);
@@ -12615,24 +12549,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                     }
                     res.status[s] = badSolve ? (nS == 1 ? -3 : -2) : (checkOnlyAtEnd ? -2 : 1);
                     active[s] = 0;
-                    // OLF_GPU_STALL_TO_OUTER=1: keep the scenario LIVE so its OUTER loops still run.
-                    //
-                    // Why this is the shape of the fix for the non-batched tail (tasks #67): both arms
-                    // were measured taking the SAME clamped Newton path (step factors agreeing to
-                    // 7.1e-06 over 30 steps) and both OSCILLATE — f alternating ~0.19 / ~0.018. More
-                    // inner iterations buy nothing (OLF_GPU_MAXITER=120 converted ZERO scenarios), so
-                    // the budget is not the constraint; what breaks OLF's cycle is that its OUTER loops
-                    // CHANGE the problem between NR solves (slack distribution, PV->PQ), which is why
-                    // its 31 scaled steps span at least two NR solves. Retiring the scenario here
-                    // denies the device that escape.
-                    //
-                    // Only the inner solve stops (active[s]); live[s] survives so the outer-loop budget
-                    // still bounds the work, exactly as OLF's maxOuterLoopIterations does. A scenario
-                    // that stalls again on the next pass lands back here and its status stands.
-                    static const bool stallToOuter = std::getenv("OLF_GPU_STALL_TO_OUTER") != nullptr;
-                    if (!stallToOuter || deviceFixedIter || nS == 1) {
-                        live[s] = 0;                         // did not converge: stop iterating its outer loops
-                    }
+                    live[s] = 0;                             // did not converge: stop iterating its outer loops
                     nActive--;
                     anyChanged = true;
                 }
@@ -13280,29 +13197,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
 
     // ---- REACTIVE LIMITS pass: switch any local PV controller over its Q limit to PQ ----
     // Only scenarios (re)solved this pass that converged can have new violations.
-    // OLF_GPU_RL_SKIP=<slot>:<outer>: make ONE scenario's reactive-limit check not happen at ONE
-    // pass - the shape of the failure being chased (a converged scenario that returns with an
-    // unpinned controller past its limit, i.e. the trajectory one check short). It reproduces that
-    // state deliberately so the end-of-solve audit and any repair can be tested against it, the way
-    // OLF_GPU_RL_NOPIN_ROW reproduces a pin that never fires.
-    static const char* rlSkipEnv = std::getenv("OLF_GPU_RL_SKIP");
-    static int rlSkipSlot = -1;
-    static int rlSkipOuter = -1;
-    static bool rlSkipParsed = false;
-    if (!rlSkipParsed) {
-        rlSkipParsed = true;
-        if (rlSkipEnv != nullptr) {
-            const char* colon = std::strchr(rlSkipEnv, ':');
-            rlSkipSlot = std::atoi(rlSkipEnv);
-            rlSkipOuter = colon != nullptr ? std::atoi(colon + 1) : -1;
-        }
-    }
     for (int s = 0; s < nS; s++) {
         rlActive[s] = (wasActive[s] && res.status[s] == 0) ? 1 : 0;
-        if (rlSkipSlot >= 0 && s == rlSkipSlot && outer == rlSkipOuter && loopOrder[loopIdx] == LOOP_RL) {
-            std::fprintf(stderr, "RL_SKIP s=%d outer=%d (check suppressed)\n", s, outer);
-            rlActive[s] = 0;
-        }
     }
     CUDA_CHECK(cudaMemcpy(ctx->dRlActive.p, rlActive.data(), nS * sizeof(char), cudaMemcpyHostToDevice));
     // generator Q per controller = (Σ branch q + shunt q) at its BUS_V row + load Q. Compute the first
@@ -13453,13 +13349,6 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                      outer, gLastPassIters, std::sqrt(ssq), inf, slackM, retain0, (int) rlActive[0]);
     }
     int loopKind = loopOrder[loopIdx];
-    // DIAGNOSTIC (OLF_GPU_HOST_LOOP_NOOP=1): keep the host slot in the sweep but treat it as an
-    // in-kernel STABLE loop — no break, no host round trip. Separates "the extra slot changed the
-    // sweep" from "splitting the call changed the sweep".
-    static const bool hostLoopNoop = std::getenv("OLF_GPU_HOST_LOOP_NOOP") != nullptr;
-    if (hostLoopNoop && loopKind >= LOOP_HOST_SVC && loopKind <= LOOP_HOST_SHUNT) {
-        loopKind = -1;                                       // falls through every branch: a STABLE check
-    }
     if (loopKind >= LOOP_HOST_SVC && loopKind <= LOOP_HOST_SHUNT) {   // any LOOP_HOST_* kind: pause for the host
         // Hand the sequence back. Everything the device holds — x, targets, row modes, RL pins,
         // monitoring activations, absorbed slack, HVDC statuses — stays put in the context; only

@@ -26,9 +26,6 @@ correct fallback worth keeping for triage · **TUNING** = both modes legitimate 
 | `OLF_GPU_PIVOT_TYPE`, `OLF_GPU_PIVOT_THRESHOLD` | cuDSS pivoting on the robust path | **TUNING** |
 | `OLF_GPU_STRAGGLER_FRAC` | straggler-exit fraction | **VERIFY** — off by default; the user's 2026-09-22 call was that the device should report MAX_ITER itself. Decide and delete the loser. |
 | `OLF_GPU_COMPACT_CACHE` | structure-cache compaction | **VERIFY** |
-| `OLF_GPU_RL_SKIP` | skip named reactive-limit entries | **DELETE** — a debugging amputation, not a mode. |
-| `OLF_GPU_FORCE_FIRST_STEP` | force a Newton step OLF's check said was unnecessary | **DELETE** — this is the spurious-step class (`gpu-sa-spurious-newton-step`); the correct behaviour is settled. |
-| `OLF_GPU_HOST_LOOP_NOOP` | make a host outer loop do nothing | **DELETE** — bisection scaffolding. |
 | `OLF_GPU_SA_BASE_ONLY` | solve the base and stop | **OPT-OUT** — genuinely useful for triage, keep. |
 | `OLF_GPU_PS_MASK`, `OLF_GPU_PSG_STEP` | pilot-self masks / step gating | **VERIFY** — bisection leftovers from the pilot-self work; likely DELETE now that the rotation is default-on. |
 | `OLF_GPU_CPU_ROUTED` | force named contingencies to the CPU | **OPT-OUT** — the escape hatch for a bad contingency in production. |

@@ -2461,6 +2461,75 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         return network;
     }
 
+    /** A lost section takes two of a merged control's four remote controllers with it: the contingency opens the
+     *  breakers of every feeder at bbs1, and the lines of g1a/g1b are left open at that end with their live end in
+     *  the island. OLF disables those buses and their branches; the device kept each line DANGLING (its charging moved
+     *  to the live end) at the island's frozen 1 pu, and the controllers' reactive injections reach every member's
+     *  sharing row: g0b's row, keys renormalized over g0a/g0b, took 0.25 x -0.64 pu per lost line and the survivors
+     *  split their reactive power apart (vg0a_b 406.77 kV against OLF's 406.30). Network.xiidm CXUL: CXSS_2/_4's
+     *  step-up transformers behind section CXUL, 4.3e-3 kV at CXSS_1/_3. */
+    @org.junit.jupiter.api.Test
+    void deviceLostSectionDropsTheFeedersItsIslandKeepsMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = Network.create("merged-pairs", "code");
+        com.powsybl.iidm.network.Substation s = network.newSubstation().setId("s").add();
+        java.util.function.Function<String, com.powsybl.iidm.network.VoltageLevel> bbVl = id -> {
+            com.powsybl.iidm.network.VoltageLevel v = s.newVoltageLevel().setId(id).setNominalV(400)
+                    .setTopologyKind(com.powsybl.iidm.network.TopologyKind.BUS_BREAKER).add();
+            v.getBusBreakerView().newBus().setId(id + "_b").add();
+            return v;
+        };
+        bbVl.apply("vl0");
+        bbVl.apply("vl3");
+        com.powsybl.iidm.network.VoltageLevel vl12 = s.newVoltageLevel().setId("vl12").setNominalV(400)
+                .setTopologyKind(com.powsybl.iidm.network.TopologyKind.NODE_BREAKER).add();
+        vl12.getNodeBreakerView().newBusbarSection().setId("bbs0").setNode(0).add();
+        vl12.getNodeBreakerView().newBusbarSection().setId("bbs1").setNode(1).add();
+        vl12.getNodeBreakerView().newBreaker().setId("c01").setNode1(0).setNode2(1).setRetained(true).setOpen(false).add();
+        int node = 100;
+        String[][] gens = {{"g0a", "0", "30"}, {"g0b", "0", "10"}, {"g1a", "1", "40"}, {"g1b", "1", "20"}};
+        for (String[] g : gens) {
+            int k = Integer.parseInt(g[1]);
+            com.powsybl.iidm.network.VoltageLevel vg = bbVl.apply("v" + g[0]);
+            vg.newGenerator().setId(g[0]).setBus("v" + g[0] + "_b").setConnectableBus("v" + g[0] + "_b")
+                    .setMinP(0).setMaxP(500).setTargetP(60).setTargetQ(0).setTargetV(405)
+                    .setVoltageRegulatorOn(true)
+                    .setRegulatingTerminal(vl12.getNodeBreakerView().getBusbarSection("bbs" + k).getTerminal()).add();
+            network.getGenerator(g[0]).newMinMaxReactiveLimits().setMinQ(-300).setMaxQ(300).add();
+            network.getGenerator(g[0]).newExtension(com.powsybl.iidm.network.extensions.CoordinatedReactiveControlAdder.class)
+                    .withQPercent(Double.parseDouble(g[2])).add();
+            int n = node++;
+            vl12.getNodeBreakerView().newDisconnector().setId("dl" + g[0]).setNode1(k).setNode2(n + 50).setOpen(false).add();
+            vl12.getNodeBreakerView().newBreaker().setId("bl" + g[0]).setNode1(n + 50).setNode2(n).setOpen(false).add();
+            network.newLine().setId("l" + g[0]).setVoltageLevel1("vl12").setNode1(n)   // charged: 0.32 pu a side
+                    .setVoltageLevel2("v" + g[0]).setBus2("v" + g[0] + "_b").setConnectableBus2("v" + g[0] + "_b")
+                    .setR(0.4).setX(6).setG1(0).setB1(2e-4).setG2(0).setB2(2e-4).add();
+        }
+        for (int k = 0; k < 2; k++) {
+            int n = node++;
+            String far = k == 0 ? "vl0" : "vl3";
+            vl12.getNodeBreakerView().newDisconnector().setId("dl" + k).setNode1(k).setNode2(n + 50).setOpen(false).add();
+            vl12.getNodeBreakerView().newBreaker().setId("bl" + k).setNode1(n + 50).setNode2(n).setOpen(false).add();
+            network.newLine().setId("l" + k).setVoltageLevel1("vl12").setNode1(n)
+                    .setVoltageLevel2(far).setBus2(far + "_b").setConnectableBus2(far + "_b")
+                    .setR(0.4).setX(10).setG1(0).setB1(0).setG2(0).setB2(0).add();
+        }
+        network.getVoltageLevel("vl0").newGenerator().setId("gs").setBus("vl0_b").setConnectableBus("vl0_b")
+                .setMinP(0).setMaxP(2000).setTargetP(500).setTargetV(400).setVoltageRegulatorOn(true).add();
+        network.getVoltageLevel("vl0").newLoad().setId("lds").setBus("vl0_b").setConnectableBus("vl0_b").setP0(500).setQ0(100).add();
+        network.getVoltageLevel("vl3").newLoad().setId("ld3").setBus("vl3_b").setConnectableBus("vl3_b").setP0(240).setQ0(160).add();
+        network.newLine().setId("l03").setVoltageLevel1("vl0").setBus1("vl0_b").setConnectableBus1("vl0_b")
+                .setVoltageLevel2("vl3").setBus2("vl3_b").setConnectableBus2("vl3_b").setR(0.4).setX(10).setG1(0).setB1(0).setG2(0).setB2(0).add();
+        List<Contingency> ctgs = List.of(new Contingency("bus-1", new com.powsybl.contingency.BusbarSectionContingency("bbs1")));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters();
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
+                .setSlackBusSelectionMode(com.powsybl.openloadflow.network.SlackBusSelectionMode.NAME)
+                .setSlackBusesIds(List.of("vl0"));
+        GpuBatchScopeCensus.reset();
+        assertGpuMatchesCpu(network, ctgs, 1e-12, lfp, true);
+    }
+
     private void assertRemoteMergedSectionsMatchCpu(int sections, java.util.Set<String> refused) {
         assertRemoteMergedSectionsMatchCpu(sections, refused, "PLAN:VC_REMERGE_REMOTE_SUBGROUP");
     }

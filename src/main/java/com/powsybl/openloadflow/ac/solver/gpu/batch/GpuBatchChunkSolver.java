@@ -800,7 +800,17 @@ final class GpuBatchChunkSolver {
                                 // kernel: this is the per-scenario pi-model override the tap channel
                                 // already uses, and the cb evaluation reads it through findTapOverride.
                                 double[] cbRow = GpuBatchSideOpen.danglingCbRow(so.branch(), so.side());
-                                if (cbRow == null) {         // not expressible -> keep the old behaviour
+                                // ...unless the live end is in the island the contingency cuts off: OLF disables that
+                                // bus and every branch on it, while the dangling shunt left live there fed a remote
+                                // member's reactive injection into its group's sharing rows at the frozen 1 pu
+                                // (network.xiidm CXUL: CXSS_2/_4's step-up transformers, 4.3e-3 kV at CXSS_1/_3)
+                                int soCb = elementMapper.getElementIndex(so.branch());
+                                int liveVCol = gpuData.cbIdx()[soCb * 12 + (so.side() == 1 ? 7 : 5)];
+                                if (cbRow != null && frozenRowsByIndex[ci] != null
+                                        && java.util.Arrays.stream(frozenRowsByIndex[ci]).anyMatch(r -> r == liveVCol)) {
+                                    cbRow = null;
+                                }
+                                if (cbRow == null) {         // not expressible, or dead -> mask the element
                                     int cbIdx2 = elementMapper.getElementIndex(so.branch());
                                     disabledMask[s][cbIdx2] = true;
                                     eis[ei++] = cbIdx2;

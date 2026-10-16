@@ -56,9 +56,8 @@ public final class GpuAcActivationExtractor {
      *
      * <p>This class of bug has occurred twice (a remote gen-VC pilot that is also a controller put
      * BUS_TARGET_V and DISTR_Q on the same row), which is why the check is unconditional rather than
-     * behind a debug switch. It must stay ALLOCATION-FREE on the happy path: the JAVA hybrid re-extracts
-     * per scenario per outer-loop step, so a remembered description per row (String[n]) or an eagerly
-     * built message per call is tens of thousands of array/string allocations on a 13040-row system.
+     * behind a debug switch. It must stay ALLOCATION-FREE on the happy path: no remembered description per
+     * row (String[n]) and no eagerly built message per call.
      */
     private static void assign(EquationSystem<AcVariableType, AcEquationType> es, int[] targetMap,
                                int row, int column, AcEquationType type, int elementNum) {
@@ -72,8 +71,7 @@ public final class GpuAcActivationExtractor {
 
     /** The equation occupying {@code column}, for the collision message. Walks the equation list, which
      *  is fine because it runs only on the way to throwing — the alternative, remembering a description
-     *  per row, costs a String[n] allocation on EVERY extraction, and this method runs per scenario per
-     *  outer-loop step on the hybrid path. */
+     *  per row, costs a String[n] allocation on EVERY extraction. */
     private static String describeColumn(EquationSystem<AcVariableType, AcEquationType> es, int column) {
         for (SingleEquation<AcVariableType, AcEquationType> e : es.getIndex().getSortedSingleEquationsToSolve()) {
             if (e.getColumn() == column) {

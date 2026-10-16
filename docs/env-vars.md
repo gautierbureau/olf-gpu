@@ -21,7 +21,6 @@ Anything in the third table should be treated as unverified until someone reads 
 |---|---|
 | `olf.gpu.sa.disableBatch` | batch nothing; OLF's engine drives every contingency sequentially |
 | `olf.gpu.sa.gpuSequentialLoadFlow` | keep the GPU solver for sequential fall-through solves (needs the run configured with `GPU_NEWTON_RAPHSON`; on its own it does nothing) |
-| `olf.gpu.sa.outerLoopMode` | `DEVICE` (default) or `JAVA` |
 | `olf.gpu.driverOuterLoops` | `false` puts OLF's Java engine back in charge of the base load flow |
 | `olf.cuda.path`, `olf.cudss.path`, `olf.gpu.lib` | native library locations |
 
@@ -62,7 +61,6 @@ Safe to add. These are the instruments; several are the only reason a defect was
 | `OLF_GPU_CENSUS_NO_TABLE_VIOL` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuRteScopeCensusTest.java:214 |
 | `OLF_GPU_CENSUS_NOFREEZE` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuRteScopeCensusTest.java:137 |
 | `OLF_GPU_CENSUS_ONLY` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuRteScopeCensusTest.java:152 |
-| `OLF_GPU_CENSUS_OUTER_MODE` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuRteScopeCensusTest.java:195 |
 | `OLF_GPU_CENSUS_SEQ_GPU` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuRteScopeCensusTest.java:204 |
 | `OLF_GPU_CENSUS_SVC` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuRteScopeCensusTest.java:229 |
 | `OLF_GPU_CENSUS_VIOL_TOL` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuRteScopeCensusTest.java:122 |
@@ -77,7 +75,6 @@ Safe to add. These are the instruments; several are the only reason a defect was
 | `OLF_GPU_DBG_REPORT` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuBatchedAcSecurityAnalysisTest.java:3100 +2 |
 | `OLF_GPU_DBG_RL` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuVsCpuRte6515SaTest.java:313 +2 |
 | `OLF_GPU_DBG_ROW` | src/main/java/com/powsybl/openloadflow/ac/equations/vector/gpu/GpuAcFamilyPacker.java — pack-time dump of the zero-impedance branch and both buses' vCol/qRow/qRowAlt behind a given row |
-| `OLF_GPU_DIRTY_PROBE` | src/main/java/com/powsybl/openloadflow/ac/solver/gpu/batch/GpuHybridBatchOuterLoopEngine.java:441 |
 | `OLF_GPU_DISTRQ_DUMP` | src/main/java/com/powsybl/openloadflow/ac/equations/vector/gpu/GpuAcActivationExtractor.java:35 |
 | `OLF_GPU_DQ3_TRACE` | GpuAcOuterLoopPacks — every DISTR_Q kind-3 (zero-impedance DUMMY_Q) contribution for one dummy-Q column, with gk/gj/qpk/side/row and the SIGNED weight, so the pack can be checked against what the matrix ends up holding |
 | `OLF_GPU_DQ_TRACE` | native/cuda/jni/olf_gpu_nr_jni.cu:2850 |
@@ -153,7 +150,6 @@ Safe to add. These are the instruments; several are the only reason a defect was
 | `OLF_GPU_TRACE` | native/cuda/jni/olf_gpu_nr_jni.cu:289 +2 |
 | `OLF_GPU_UNREALISTIC_TRACE` | src/main/java/com/powsybl/openloadflow/sa/gpu/GpuBatchedAcSecurityAnalysis.java:808 +1 |
 | `OLF_GPU_ZI_DEST_TRACE` | native/cuda/jni/olf_gpu_nr_jni.cu — one zero-impedance element's Q destinations and alternates (b1Q/b2Q/alt0/alt1/dd2/dd3/dd6/dd7); a suppressed Q row shows as -1 and the alternate is what must carry the coupling |
-| `OLF_OL_TRACE` | src/main/java/com/powsybl/openloadflow/ac/solver/gpu/batch/GpuHybridOuterLoopBridge.java:51 |
 | `OLF_RL_PROBE_BUS` | (OLF repo, branch olf-local-patches) src/main/java/com/powsybl/openloadflow/ac/outerloop/ReactiveLimitsOuterLoop.java |
 
 ## Test scope selectors (9)
@@ -212,7 +208,6 @@ Each selects a different computation. Several disable an outer loop or loosen a 
 
 | variable | read at |
 |---|---|
-| `OLF_BUSSTATE_PROFILE` | src/main/java/com/powsybl/openloadflow/ac/solver/gpu/batch/GpuHybridBatchOuterLoopEngine.java:1447 |
 | `OLF_GPU_BASE_ON_GPU` | src/test/java/com/powsybl/openloadflow/ac/solver/gpu/batch/GpuBatchedN1FixedIterTest.java:149 +2 |
 | `OLF_GPU_BATCHMODE` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuVsCpuProductionSaBenchmarkTest.java:87 +5 |
 | `OLF_GPU_DBG_CONV_EPS` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuVsCpuRte6515SaTest.java:295 +2 |
@@ -223,7 +218,6 @@ Each selects a different computation. Several disable an outer loop or loosen a 
 | `OLF_GPU_FIXED_ITERS` | src/test/java/com/powsybl/openloadflow/ac/solver/gpu/batch/GpuBatchedN1FixedIterTest.java:79 |
 | `OLF_GPU_FORCE_FIRST_STEP` | native/cuda/jni/olf_gpu_nr_jni.cu:7630 |
 | `OLF_GPU_HOST_LOOP_NOOP` | native/cuda/jni/olf_gpu_nr_jni.cu:8137 |
-| `OLF_GPU_HYBRID_N` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuHybridBatchValidationTest.java:132 |
 | `OLF_GPU_IR_STEPS` | native/cuda/jni/olf_gpu_nr_jni.cu (`irSteps`) — cuDSS iterative-refinement steps; default 4 when the structure has a zero-impedance branch (2 until 2026-09-28: the batched factorization's accuracy on the repaired zero-diagonal rows depends on which other matrices share the batch — network.xiidm/LLAX solved to 2.5e-06 in one chunk composition and 2.2e-08 in another; 4 steps give 1.1e-11), 0 otherwise. Re-measured 2026-09-21 after the zero-diagonal row repair and STILL needed: IR=0 leaves ‖J.dx−F‖∞ 3.8e-4 on the repaired coupler/controller rows (2.6e-8 kV vs 2.6e-9 with IR=2 on rte6515's 500 busbars) |
 | `OLF_GPU_MATCHING_ALG` | native/cuda/jni/olf_gpu_nr_jni.cu:250 |
 | `OLF_GPU_MAXBATCH` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuVsCpuProductionSaBenchmarkTest.java:83 +5 |

@@ -93,12 +93,6 @@ import java.util.Objects;
  */
 public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
 
-    /** System property selecting how the batched N-1 runs its OUTER loops: {@code DEVICE} (CUDA-kernel outer
-     *  loops folded into the device solve, the default) or {@code JAVA} (device inner solve only, OLF's Java
-     *  outer loops make the per-scenario decisions via {@code GpuHybridBatchOuterLoopEngine}). Matches the
-     *  module's other GPU toggles (there is no GPU parameters extension). Read in {@link GpuSaRunScope}. */
-    public static final String GPU_OUTER_LOOP_MODE_PROPERTY = "olf.gpu.sa.outerLoopMode";
-
     /** How many contingencies the run solved on the GPU device: {@code -1} when no batch was attempted
      *  at all (no device, nothing to batch), {@code 0+} otherwise. Test-visibility hook to assert the
      *  GPU actually engaged on a device-equipped machine (vs a silent CPU fallback), and the source of
@@ -1819,13 +1813,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
      * start contingencies with the AC emulation frozen (its default). So at precompute time the
      * parameters still carry the BASE loop list.
      *
-     * <p>That matters for the JAVA outer-loop mode, which drives OLF's own loop objects built from this
-     * list: without the freezing loop it runs a strictly shorter sequence than the CPU. Measured on
-     * rte6515 / LINE-2634-61, the CPU checks FreezingHvdcACEmulation, gets UNSTABLE, re-solves and then
-     * re-checks every loop; the hybrid never checked it at all, and its state came out 2.405e-04 off the
-     * CPU network-wide (23029 of 29832 buses over 1e-9) where the DEVICE mode was at 3.45e-13.
-     *
-     * <p>Recomputes the same list the SA is about to install, by the same call. The DEVICE mode does not
+     * <p>Recomputes the same list the SA is about to install, by the same call. The device does not
      * depend on it — it implements the freezing itself in {@code GpuBatchHvdcAcEmulation} — but the list
      * is what the run's own gates read, so aligning it early can only make them agree with the SA.
      */

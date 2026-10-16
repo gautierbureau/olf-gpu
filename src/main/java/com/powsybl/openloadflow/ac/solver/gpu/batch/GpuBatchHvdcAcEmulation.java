@@ -37,7 +37,7 @@ import java.util.Map;
  * </ul>
  *
  * <p>Device mechanics per (scenario, hvdc): a NON-LINEAR status sets the hv element's per-scenario
- * DISABLED bit (fillHvdcBatch drops the coupling terms — same channel the JAVA hybrid uses) and the
+ * DISABLED bit (fillHvdcBatch drops the coupling terms) and the
  * VSC injections land as CONVERTER-BUS target overrides (the stations' targetP is 0 in the base
  * linear extraction, so the bus-target delta IS the station targetP, generator convention). Flow
  * evaluations call OLF's OWN p1/p2 formulas directly on the scenario's state array (see

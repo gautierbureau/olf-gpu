@@ -25,7 +25,6 @@ import com.powsybl.openloadflow.ac.solver.gpu.batch.BatchScenarioResult;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchElementMapper;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchedSecurityAnalysisSolver;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.LoadLoss;
-import com.powsybl.openloadflow.ac.solver.gpu.batch.OuterLoopMode;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.ShuntShift;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.Variable;
@@ -380,20 +379,15 @@ final class GpuBatchPrecomputer {
             // them at once, the results are injected later in OLF's loop). Past GpuStateStore's threshold they go to
             // a temporary file as each chunk completes instead of the heap: network.xiidm's all-kinds + busbar list
             // is 37k states of 280 KB, 10.4 GB, more than this machine's heap can hold beside the rest of the run.
-            if (config.stateSink() == null && config.outerLoopMode() != OuterLoopMode.JAVA
-                    && com.powsybl.openloadflow.sa.gpu.GpuStateStore.wanted(batch.size(), baseState.length)) {
+            if (config.stateSink() == null && com.powsybl.openloadflow.sa.gpu.GpuStateStore.wanted(batch.size(), baseState.length)) {
                 config = config.withStateSink(com.powsybl.openloadflow.sa.gpu.GpuStateStore.create(baseState.length));
                 LOGGER.info("Batched N-1: {} states of {} entries go to a temporary file (over {} bytes)", batch.size(),
                         baseState.length, com.powsybl.openloadflow.sa.gpu.GpuStateStore.thresholdBytes());
             }
-            List<BatchScenarioResult> results = config.outerLoopMode() == OuterLoopMode.JAVA
-                    ? GpuBatchedSecurityAnalysisSolver.solveBatchN1JavaOuterLoops(
-                            net, context, baseState, batch, es, target,
-                            reactiveLimitTol, slackDistTol, convEpsPerEq, config, reportNode)
-                    : GpuBatchedSecurityAnalysisSolver.solveBatchN1(
-                            net, baseState, batch, es, target, deviceSolverParameters(context),
-                            distributedSlack, reactiveLimits,
-                            reactiveLimitTol, slackDistTol, convEpsPerEq, reportNode, config);
+            List<BatchScenarioResult> results = GpuBatchedSecurityAnalysisSolver.solveBatchN1(
+                    net, baseState, batch, es, target, deviceSolverParameters(context),
+                    distributedSlack, reactiveLimits,
+                    reactiveLimitTol, slackDistTol, convEpsPerEq, reportNode, config);
             results = retryRejectedOnDevice(results, batch, net, baseState, es, target, context,
                     distributedSlack, reactiveLimits, reactiveLimitTol, slackDistTol, convEpsPerEq,
                     reportNode, config);

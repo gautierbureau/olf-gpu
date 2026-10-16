@@ -190,14 +190,6 @@ class GpuRteScopeCensusTest extends AbstractOpenSecurityAnalysisTest {
         } else {
             System.clearProperty(GpuBatchedAcSecurityAnalysis.GPU_BASE_LOADFLOW_PROPERTY);
         }
-        // OLF_GPU_CENSUS_OUTER_MODE=DEVICE|JAVA: which batched outer-loop engine runs. Comparing the two
-        // against the CPU separates a device-kernel difference from an orchestration one.
-        String outerMode = System.getenv("OLF_GPU_CENSUS_OUTER_MODE");
-        if (outerMode != null) {
-            System.setProperty(GpuBatchedAcSecurityAnalysis.GPU_OUTER_LOOP_MODE_PROPERTY, outerMode);
-        } else {
-            System.clearProperty(GpuBatchedAcSecurityAnalysis.GPU_OUTER_LOOP_MODE_PROPERTY);
-        }
         // OLF_GPU_CENSUS_SEQ_GPU=1: no batch at all — OLF's engine runs each contingency sequentially
         // with the GPU solver underneath. The arm that prices BATCHING against the per-scenario
         // save/restore it forces the hybrid to pay.

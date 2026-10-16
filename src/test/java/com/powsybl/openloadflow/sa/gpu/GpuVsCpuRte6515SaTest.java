@@ -1789,6 +1789,14 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
         System.out.printf("  STRATEGIES: %d on %d contingencies (every %d-th), %d actions%n", strats.size(), chosen, every, acts.size());
     }
 
+    /** One violation's identity across the arms. The LOCATION is part of it: a voltage level split into several buses
+     *  reports a LOW_VOLTAGE per bus under one subject, and comparing their values crosswise reads two buses' distance
+     *  as an arm gap (rte6515 VL-4551 after BUS-595_BBS: 397.0019 and 397.0774 kV, a phantom 7.55e-2 kV). */
+    private static String violationKey(com.powsybl.contingency.violations.LimitViolation v) {
+        return v.getSubjectId() + "|" + v.getSide() + "|" + v.getLimitType() + "|" + v.getLimitName() + "|" + v.getAcceptableDuration()
+                + "|" + v.getViolationLocation().map(Object::toString).orElse("");
+    }
+
     /** Strategy by strategy: status, distributed active power, violation count. Returns the differing ones. */
     private static List<String> compareStrategies(SecurityAnalysisResult cpu, SecurityAnalysisResult gpu) {
         // (the parent's bus voltages are read from the same results: the GPU's post-contingency ones may be dropped)
@@ -1842,8 +1850,7 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
                         gs.getLimitViolationsResult().getLimitViolations().size());
                 // the violations one side has and the other does not, with value and limit (a knife edge shows as a
                 // value on its limit)
-                java.util.function.Function<com.powsybl.contingency.violations.LimitViolation, String> key = v -> v.getSubjectId() + "|"
-                        + v.getSide() + "|" + v.getLimitType() + "|" + v.getLimitName() + "|" + v.getAcceptableDuration();
+                java.util.function.Function<com.powsybl.contingency.violations.LimitViolation, String> key = GpuVsCpuRte6515SaTest::violationKey;
                 Map<String, com.powsybl.contingency.violations.LimitViolation> gByKey = new TreeMap<>();
                 gs.getLimitViolationsResult().getLimitViolations().forEach(v -> gByKey.put(key.apply(v), v));
                 Map<String, com.powsybl.contingency.violations.LimitViolation> cByKey = new TreeMap<>();
@@ -1864,13 +1871,11 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
             // the values of the violations both arms report (a flow or a voltage, in its own unit): what the strategy
             // tells without a monitor
             Map<String, Double> gViol = new java.util.HashMap<>();
-            gs.getLimitViolationsResult().getLimitViolations().forEach(v -> gViol.put(v.getSubjectId() + "|" + v.getSide() + "|"
-                    + v.getLimitType() + "|" + v.getLimitName() + "|" + v.getAcceptableDuration(), v.getValue()));
+            gs.getLimitViolationsResult().getLimitViolations().forEach(v -> gViol.put(violationKey(v), v.getValue()));
             double violWorst = -1;
             String violSubject = "";
             for (var v : cs.getLimitViolationsResult().getLimitViolations()) {
-                Double gvv = gViol.get(v.getSubjectId() + "|" + v.getSide() + "|" + v.getLimitType() + "|" + v.getLimitName()
-                        + "|" + v.getAcceptableDuration());
+                Double gvv = gViol.get(violationKey(v));
                 if (gvv != null && Math.abs(gvv - v.getValue()) > violWorst) {
                     violWorst = Math.abs(gvv - v.getValue());
                     violSubject = v.getSubjectId() + " " + v.getLimitType();

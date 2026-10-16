@@ -307,11 +307,6 @@ constexpr int BLOCK = 64;
 // solve - the library checked and stopped - while residualBatch measures the same product in 1.2 ms. With the
 // library step off the loop checks 794 times and refines 538 for 443 iterations: solve 93.2 s -> 69.4 s, cold
 // 139.7 s -> 116.2 s, identical statuses and Newton counts, rte6515 generator/branch kinds exact.
-// OLF_GPU_ZI_MASKS=0: the fill kernel's per-thread list scans instead of the dense per-scenario masks (A/B)
-inline bool ziMasksEnabled() {
-    static const bool off = std::getenv("OLF_GPU_ZI_MASKS") != nullptr && std::string(std::getenv("OLF_GPU_ZI_MASKS")) == "0";
-    return !off;
-}
 // BACK TO 1 (2026-10-06, same day): the step's cost was measured on network.xiidm WITHOUT busbar outages, and on
 // the full busbar scope - the structures whose repaired zero diagonals this refinement exists for - turning it off
 // cost most of the device share. Full network.xiidm busbar scope, GPU-only, same code: base without the step
@@ -9188,7 +9183,7 @@ static void uploadBatchOverrides(BatchSolverContext* ctx, int lsMode, double max
         int dummyZi[2] = {-1, -1};
         ctx->dZiOnSlotElem.upload(dummyZi, sizeof(dummyZi));
     }
-    if (ctx->nzi > 0 && ziMasksEnabled()) {                  // the dense (scenario, element) forms (see dZiOffMask)
+    if (ctx->nzi > 0) {                                      // the dense (scenario, element) forms (see dZiOffMask)
         size_t len = static_cast<size_t>(ctx->nScenarios) * ctx->nzi;
         std::vector<char> off(len, 0), on(len, 0);
         for (int k = 0; k < nZiOff; k++) {
@@ -15770,7 +15765,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
     // the caller's, and gating this one on hasZiMasks dropped every tree override of a chunk whose tree list
     // arrived first - the extraction-time tree then stood in for OLF's, and a coupler child like LLJ_2 on
     // network.xiidm lost its ZERO_V coupling in 2,308 scenarios (V 0.787, FAILED as unrealistic).
-    if (ctx->nzi > 0 && ziMasksEnabled()) {                  // the dense form (see dZiTreeMask)
+    if (ctx->nzi > 0) {                                      // the dense form (see dZiTreeMask)
         ctx->hasZiMasks = true;
         size_t mlen = static_cast<size_t>(ctx->nScenarios) * ctx->nzi;
         std::vector<char> tree(mlen, (char) -1);

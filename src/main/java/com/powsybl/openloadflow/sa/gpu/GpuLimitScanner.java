@@ -179,69 +179,6 @@ final class GpuLimitScanner {
         manager.detectVoltageAngleViolations(network);
     }
 
-    /**
-     * EXPERIMENTAL: report the violations the DEVICE decided ({@link GpuViolationScreen#decideAll}) — its records in
-     * table order, each with the value it computed — without reading any branch flow here. Buses compare the
-     * state's own V, which the device read too, so they are decided exactly as before; the branches the device
-     * model does not cover are still scanned on the host.
-     */
-    void reportDecided(LfNetwork network, LimitViolationManager manager, GpuViolationScreen.Decided decided,
-                       int[] uncoveredBranches, java.util.BitSet sideOpened) {
-        LfBranch[] branches = table.branches();
-        int busBase = table.limitCount();
-        int[] records = decided.records();
-        double[] values = decided.values();
-        int nextSideOpened = sideOpened != null ? sideOpened.nextSetBit(0) : -1;
-        for (int k = 0; k < records.length; k++) {
-            int record = records[k];
-            if (record >= busBase) {
-                for (; nextSideOpened >= 0; nextSideOpened = sideOpened.nextSetBit(nextSideOpened + 1)) {
-                    scanBranch(nextSideOpened, manager);   // every branch record is behind: the rest, before the buses
-                }
-            }
-            if (record < busBase) {
-                int group = table.limitGroup(record);
-                int b = table.groupBranch(group);
-                for (; nextSideOpened >= 0 && nextSideOpened <= b; nextSideOpened = sideOpened.nextSetBit(nextSideOpened + 1)) {
-                    scanBranch(nextSideOpened, manager);
-                }
-                LfBranch branch = branches[b];
-                if (branch.isDisabled() || sideOpened != null && sideOpened.get(b)) {
-                    continue;                                // taken out by the contingency, or scanned in full above
-                }
-                byte side = table.side(group);
-                manager.addBranchLimitViolation(LimitViolationManager.createLimitViolation(branch,
-                        table.groupId(group), table.limit(record), GpuLimitTable.violationType(table.quantity(group)),
-                        table.scale(group), values[k], side == 1 ? TwoSides.ONE : TwoSides.TWO));
-                continue;
-            }
-            int busIndex = GpuViolationScreen.busOf(table, record);
-            LfBus bus = table.buses()[busIndex];
-            if (bus.isDisabled()) {
-                continue;
-            }
-            double v = bus.getV();
-            if (GpuViolationScreen.isHighVoltage(table, record)) {
-                manager.addBusLimitViolation(LimitViolationManager.createBusLimitViolation(bus,
-                        com.powsybl.contingency.violations.LimitViolationType.HIGH_VOLTAGE,
-                        table.busHighLimit(busIndex) * table.busScale(busIndex), v * table.busScale(busIndex)), bus);
-            } else {
-                manager.addBusLimitViolation(LimitViolationManager.createBusLimitViolation(bus,
-                        com.powsybl.contingency.violations.LimitViolationType.LOW_VOLTAGE,
-                        table.busLowLimit(busIndex) * table.busScale(busIndex), v * table.busScale(busIndex)), bus);
-            }
-        }
-        for (; nextSideOpened >= 0; nextSideOpened = sideOpened.nextSetBit(nextSideOpened + 1)) {
-            scanBranch(nextSideOpened, manager);             // no bus record came after the last branch record
-        }
-        for (int b : uncoveredBranches) {
-            if (sideOpened == null || !sideOpened.get(b)) {
-                scanBranch(b, manager);
-            }
-        }
-        manager.detectVoltageAngleViolations(network);
-    }
-
     /** Re-test one candidate exactly and report it if it holds. */
     private boolean confirm(LfBranch branch, int group, int limit, LimitViolationManager manager) {
         byte side = table.side(group);

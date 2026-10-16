@@ -4026,10 +4026,6 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
     void deviceSecondaryVcWithAfterGeneratorTvcMatchesCpu() {
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
-        // the A/B fallback restores the after-the-sweep orchestrator, i.e. exactly the ordering this
-        // test exists to catch — it is expected to disagree there
-        org.junit.jupiter.api.Assumptions.assumeFalse(
-                "1".equals(System.getenv("OLF_GPU_SVC_HOST_ORCHESTRATOR")), "driver pause disabled");
         Network network = com.powsybl.openloadflow.network.VoltageControlNetworkFactory.createNetworkWithT2wt();
         var t2wt = network.getTwoWindingsTransformer("T2wT");
         t2wt.getRatioTapChanger().setTargetDeadband(0).setRegulating(true).setTapPosition(0)

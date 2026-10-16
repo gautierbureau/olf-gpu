@@ -2293,20 +2293,12 @@ final class GpuBatchChunkSolver {
                     // SecondaryVoltageControl, in OLF's order (order 4). Preferred form: an IN-KERNEL phase,
                     // the whole check on the device. Where the kernel refuses the zone set (wider than its
                     // dense system, or an observable on an unpacked element) the driver PAUSES at the same
-                    // slot and the same decision runs on the host instead. OLF_GPU_SVC_HOST_ORCHESTRATOR=1
-                    // falls all the way back to the pre-2026-09-15 after-the-sweep orchestrator for A/B.
-                    boolean svcHostFallback = "1".equals(System.getenv("OLF_GPU_SVC_HOST_ORCHESTRATOR"));
-                    // Three layers, most faithful first: the IN-KERNEL phase owns the loop; where it refuses
-                    // the tables (a zone set wider than its dense system, or an observable on an element the
-                    // batch does not pack) the driver PAUSES at the same slot and the same decision runs on
-                    // the host; OLF_GPU_SVC_HOST_ORCHESTRATOR=1 falls all the way back to the
-                    // pre-2026-09-15 after-the-sweep orchestrator, for A/B only.
-                    boolean svcInKernel = svcActive && !svcHostFallback
-                            && GpuBatchSecondaryVc.uploadToDevice(handle, phases.secondaryVc());
+                    // slot and the same decision runs on the host instead.
+                    boolean svcInKernel = svcActive && GpuBatchSecondaryVc.uploadToDevice(handle, phases.secondaryVc());
                     if (!svcInKernel) {
                         GpuBatchSecondaryVc.uploadToDevice(handle, null);   // clear a cached context's table
                     }
-                    boolean svcAsDriverPause = svcActive && rlStateOut != null && !svcHostFallback && !svcInKernel;
+                    boolean svcAsDriverPause = svcActive && rlStateOut != null && !svcInKernel;
                     GpuAcNewtonSolver.setBatchHostLoop(handle, svcAsDriverPause ? 1 : 0);
                     long solveCountBefore = GpuAcNewtonSolver.readBatchSolveCount(handle);
                     // Seeds only where no full per-scenario state goes (the pair phase builds its own from the parents).

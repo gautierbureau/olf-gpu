@@ -223,7 +223,6 @@ Each selects a different computation. Several disable an outer loop or loosen a 
 | `OLF_GPU_STRAGGLER_FRAC` | native/cuda/jni/olf_gpu_nr_jni.cu (`stragglerFrac`) — perf switch, default 0 = OFF since 2026-09-22: `<frac>` ejects the last `frac*nS` unconverged scenarios at maxIter/2 to the CPU replay; off, the device carries them to maxIter and reports MAX_ITERATION_REACHED itself (the precomputer's `exhausted` set). |
 | `OLF_GPU_SVC` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuVsCpuRte6515SaTest.java:310 |
 | `OLF_GPU_SVC_DBG` | native/cuda/jni/olf_gpu_nr_jni.cu:7527 |
-| `OLF_GPU_SVC_HOST_ORCHESTRATOR` | src/main/java/com/powsybl/openloadflow/ac/solver/gpu/batch/GpuBatchChunkSolver.java:998 +1 |
 | `OLF_GPU_SVC_INERT` | native/cuda/jni/olf_gpu_nr_jni.cu:7515 |
 | `OLF_GPU_SVC_PILOT_SHIFT` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuVsCpuRte6515SaTest.java:317 |
 | `OLF_GPU_TVD_REJECT_CARRIER_CLAMP` | native/cuda/jni/olf_gpu_nr_jni.cu:6208 |

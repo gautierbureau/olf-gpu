@@ -181,21 +181,6 @@ class GpuRteScopeCensusTest extends AbstractOpenSecurityAnalysisTest {
         // OLF_GPU_CENSUS_CHUNK: force the batch chunk size (the system property cannot be set from the
         // command line — the parent pom owns surefire's argLine — and chunk size is the knob a
         // throughput measurement most needs to sweep).
-        // OLF_GPU_CENSUS_NO_TABLE_VIOL=1: detect post-contingency violations through OLF's own walk
-        // instead of the flattened limit table — the A/B arm for the accelerated detection, which
-        // must report exactly the same violation set.
-        if ("1".equals(System.getenv("OLF_GPU_CENSUS_NO_TABLE_VIOL"))) {
-            System.setProperty(GpuBatchedAcSecurityAnalysis.GPU_TABLE_VIOLATIONS_PROPERTY, "false");
-        } else {
-            System.clearProperty(GpuBatchedAcSecurityAnalysis.GPU_TABLE_VIOLATIONS_PROPERTY);
-        }
-        // OLF_GPU_CENSUS_NO_SCREEN_VIOL=1: scan every limit on the host instead of screening the
-        // states on the device — the A/B arm for the violation kernel.
-        if ("1".equals(System.getenv("OLF_GPU_CENSUS_NO_SCREEN_VIOL"))) {
-            System.setProperty(GpuBatchedAcSecurityAnalysis.GPU_SCREEN_VIOLATIONS_PROPERTY, "false");
-        } else {
-            System.clearProperty(GpuBatchedAcSecurityAnalysis.GPU_SCREEN_VIOLATIONS_PROPERTY);
-        }
         // OLF_GPU_CENSUS_SVC=1: force SecondaryVoltageControl on. The RTE parameters leave it at
         // OLF's default (off) so the loop never fires here — but the case DOES carry control zones,
         // so this is the only way to exercise the loop against the CPU on production data.

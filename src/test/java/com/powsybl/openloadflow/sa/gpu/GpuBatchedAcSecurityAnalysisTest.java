@@ -6936,7 +6936,7 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         // load flow: a non-slack generator's P is its target). B8-G's outage carries no strategy and is
         // device-solved (its small loss spreads UP over B3/B6's headroom — a load outage here would drive
         // B3/B6/B8 to their minimum, and a saturating distribution is routed to the CPU by design). The replay
-        // must answer B8-G alone, and turning it off must change nothing.
+        // must answer B8-G alone, and give the CPU's results.
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
         java.util.function.Supplier<Network> fixture = () -> {
@@ -6990,18 +6990,9 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
             assertEquals(1, GpuBatchedAcSecurityAnalysis.LAST_REPLAYED_LOSS_COUNT.get(),
                     "the replay answers B8-G only: B2-G is targeted by a strategy");
             assertEquals(1, replayed.getOperatorStrategyResults().size(), "the strategy must fire on the GPU too");
-            SecurityAnalysisResult host;
-            System.setProperty(GpuBatchedAcSecurityAnalysis.REPLAY_LOSS_DISTRIBUTION_PROPERTY, "false");
-            try {
-                host = runSecurityAnalysis(network, contingencies, monitors, sap, strategies, actions,
-                        com.powsybl.commons.report.ReportNode.NO_OP);
-                assertEquals(0, GpuBatchedAcSecurityAnalysis.LAST_REPLAYED_LOSS_COUNT.get());
-            } finally {
-                System.clearProperty(GpuBatchedAcSecurityAnalysis.REPLAY_LOSS_DISTRIBUTION_PROPERTY);
-            }
             for (int c = 0; c < contingencies.size(); c++) {
                 var r = replayed.getPostContingencyResults().get(c);
-                var h = host.getPostContingencyResults().get(c);
+                var h = cpu.getPostContingencyResults().get(c);
                 assertEquals(h.getStatus(), r.getStatus());
                 org.junit.jupiter.api.Assertions.assertEquals(h.getDistributedActivePower(), r.getDistributedActivePower(), 1e-9,
                         "distributed active power of " + r.getContingency().getId());
@@ -7013,7 +7004,7 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
                             r.getContingency().getId() + " bus voltage " + hb.get(b).getBusId());
                 }
             }
-            var hs = host.getOperatorStrategyResults().get(0).getConditionalActionsResults().get(0).getNetworkResult().getBusResults();
+            var hs = cpu.getOperatorStrategyResults().get(0).getConditionalActionsResults().get(0).getNetworkResult().getBusResults();
             var rs = replayed.getOperatorStrategyResults().get(0).getConditionalActionsResults().get(0).getNetworkResult().getBusResults();
             for (int b = 0; b < hs.size(); b++) {
                 org.junit.jupiter.api.Assertions.assertEquals(hs.get(b).getV(), rs.get(b).getV(), 1e-10,

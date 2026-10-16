@@ -132,7 +132,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
     static final java.util.concurrent.atomic.AtomicInteger LAST_REPLAYED_LOSS_COUNT =
             new java.util.concurrent.atomic.AtomicInteger();
 
-    /** How many base-state restores of the last run were targeted ({@link #TARGETED_RESTORE_PROPERTY}). */
+    /** How many base-state restores of the last run were targeted (see restoreBaseState). */
     static final java.util.concurrent.atomic.AtomicInteger LAST_TARGETED_RESTORE_COUNT =
             new java.util.concurrent.atomic.AtomicInteger();
 
@@ -148,15 +148,6 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
      *  lfNetwork/context and LOAD STATES INTO B's equation system while B was mid-solve — one
      *  corrupted scenario (the 19/1 MAX_ITERATION flake) or an NPE inside B's JacobianMatrix on
      *  pure CPU stacks (both observed, threadCountAboveOneRunsSafelyOnGpuProvider). */
-    /** System property: answer OLF's per-contingency loss distribution from the batch's replay for
-     *  device-solved contingencies instead of running it on the host (default on). Set to false for the
-     *  A/B: the reported distributed active power must agree to rounding (see OLF_GPU_PRELOSS_CHECK). */
-    public static final String REPLAY_LOSS_DISTRIBUTION_PROPERTY = "olf.gpu.sa.replayLossDistribution";
-
-    private static boolean replayLossDistributionEnabled() {
-        return Boolean.parseBoolean(System.getProperty(REPLAY_LOSS_DISTRIBUTION_PROPERTY, "true"));
-    }
-
     /**
      * OLF's contingency loss distribution, answered from the batch where that is exact. For a device-solved
      * contingency the device state already embodies the distribution (the batch replays it to seed the
@@ -213,8 +204,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
     protected void restoreBaseState(com.powsybl.openloadflow.network.NetworkState networkState, LfNetwork network,
                                     com.powsybl.openloadflow.network.LfContingency lfContingency) {
         RunState rs = runState.get();
-        boolean targeted = targetedRestoreEnabled()
-                && lfContingency.getId().equals(rs.lossReplayedFor)
+        boolean targeted = lfContingency.getId().equals(rs.lossReplayedFor)
                 && lfContingency.getId().equals(rs.deviceStateInjectedFor)
                 && !(GpuRestoreCheck.ENABLED && !rs.restoreCheck.hasReference(network));   // the check's reference is a full restore
         rs.lossReplayedFor = null;
@@ -224,7 +214,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
             // the voltage loop over every bus is redundant when the next contingency is device-answered: its injection
             // writes every live bus (restoreStaleVoltages covers the rest); not under the restore check, whose
             // reference is a full restore
-            boolean lazy = lazyVoltagesEnabled() && !GpuRestoreCheck.ENABLED;
+            boolean lazy = !GpuRestoreCheck.ENABLED;
             networkState.restore(buses, lfContingency.getDisabledNetwork().getBranchesStatus().keySet(), !lazy);
             rs.staleVoltages = lazy ? networkState : null;
             LAST_TARGETED_RESTORE_COUNT.incrementAndGet();
@@ -240,12 +230,6 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                 check.setReference(network);                // the first restore is a full one
             }
         }
-    }
-
-    /** System property olf.gpu.sa.lazyVoltageRestore (default true): see RunState.staleVoltages. False restores
-     *  every bus voltage after each device-answered contingency, as before (A/B). */
-    private static boolean lazyVoltagesEnabled() {
-        return Boolean.parseBoolean(System.getProperty("olf.gpu.sa.lazyVoltageRestore", "true"));
     }
 
     /** Ends a lazy voltage restore: {@code onlyDisabled} null restores every bus voltage, otherwise only those buses
@@ -267,15 +251,6 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
             rs.staleVoltages.restoreVoltages(onlyDisabled);
         }
         rs.staleVoltages = null;
-    }
-
-    /** System property: after a contingency the device solved and whose loss distribution the replay answered,
-     *  restore only that contingency's own elements and the bus voltages instead of the whole network (default
-     *  on). Set to false for the A/B; OLF_GPU_RESTORE_CHECK proves the two leave the same network. */
-    public static final String TARGETED_RESTORE_PROPERTY = "olf.gpu.sa.targetedRestore";
-
-    private static boolean targetedRestoreEnabled() {
-        return Boolean.parseBoolean(System.getProperty(TARGETED_RESTORE_PROPERTY, "true"));
     }
 
     /**
@@ -315,10 +290,6 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         }
         return closed;
     }
-
-    /** System property: after injecting a device state, refresh only the flows of the branches the violation
-     *  detection will read (default on). Set to false for the A/B. */
-    public static final String PARTIAL_FLOWS_PROPERTY = "olf.gpu.sa.partialFlows";
 
     /** OLF_GPU_PARTIAL_FLOW_CHECK=1: after each partial-flow detection, detect again with every flow refreshed from
      *  the same state and require the same violations, bit for bit. */
@@ -430,10 +401,6 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         }
     }
 
-    private static boolean partialFlowsEnabled() {
-        return Boolean.parseBoolean(System.getProperty(PARTIAL_FLOWS_PROPERTY, "true"));
-    }
-
     /**
      * The branches whose flows anything reads after a device state is injected for {@code contingencyId}, or null
      * for "refresh them all". With the device violation screen on, the detection reads only the branches of the
@@ -444,7 +411,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
      * which runs the stock detection over EVERY branch.
      */
     private int[] flowReadSet(RunState rs, String contingencyId) {
-        if (!partialFlowsEnabled() || rs.violationScreen == null || rs.candidates == null || flowsMonitored()
+        if (rs.violationScreen == null || rs.candidates == null || flowsMonitored()
                 || targetedByOperatorStrategy(rs.operatorStrategies, contingencyId)
                 || System.getenv("OLF_GPU_Q_PROBE") != null || System.getenv("OLF_GPU_SA_RESID") != null
                 || System.getenv("OLF_GPU_VIOL_CROSSCHECK") != null) {
@@ -853,10 +820,8 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         ContingencyActivePowerLossDistribution lossDistribution;
         if (System.getenv("OLF_GPU_PRELOSS_CHECK") != null) {
             lossDistribution = new LossDistributionCheck(contingencyActivePowerLossDistribution);
-        } else if (replayLossDistributionEnabled()) {
-            lossDistribution = new ReplayedLossDistribution(contingencyActivePowerLossDistribution);
         } else {
-            lossDistribution = contingencyActivePowerLossDistribution;
+            lossDistribution = new ReplayedLossDistribution(contingencyActivePowerLossDistribution);
         }
         try {
             return super.runSimulations(lfNetwork, toSimulate, acParameters, securityAnalysisParameters,
@@ -908,29 +873,9 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         return new GpuDriverOuterLoopEngine(context);
     }
 
-    /** System property: detect post-contingency violations by scanning the run's limits as flat
-     *  arrays ({@link GpuLimitTable}) instead of walking OLF's per-call suppliers and lists
-     *  (default on). Set to false for the A/B — the two must report the SAME violations, since the
-     *  scan makes the same decisions on the same values. */
-    public static final String GPU_TABLE_VIOLATIONS_PROPERTY = "olf.gpu.sa.tableViolations";
-
     /** How many contingencies the cross-check actually compared — printed at the end of the run, so
      *  "no failures" cannot be confused with "never ran". */
     private static final java.util.concurrent.atomic.LongAdder CROSSCHECKED = new java.util.concurrent.atomic.LongAdder();
-
-    private static boolean tableViolationsEnabled() {
-        return Boolean.parseBoolean(System.getProperty(GPU_TABLE_VIOLATIONS_PROPERTY, "true"));
-    }
-
-    /** System property: SCREEN the post-contingency states on the DEVICE against the limit table
-     *  and confirm only the candidates on the host, instead of scanning every limit (default on).
-     *  Set to false for the A/B — the two must report the same violations, because the screen only
-     *  ever proposes and the host still decides with OLF's own value. */
-    public static final String GPU_SCREEN_VIOLATIONS_PROPERTY = "olf.gpu.sa.screenViolations";
-
-    private static boolean screenViolationsEnabled() {
-        return Boolean.parseBoolean(System.getProperty(GPU_SCREEN_VIOLATIONS_PROPERTY, "true"));
-    }
 
     /** The branches the screen cannot evaluate (zero-impedance, or absent from the packed model):
      *  they keep the full host scan, so coverage is a performance property and never a correctness one. */
@@ -958,16 +903,12 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
     private void detectViolations(LfNetwork network, LimitViolationManager manager, List<LimitReduction> limitReductions,
                                   LimitViolationManager reference, SecurityAnalysisParameters saParameters,
                                   String contingencyId) {
-        if (!tableViolationsEnabled()) {
-            manager.detectViolations(network);
-            return;
-        }
         RunState rs = runState.get();
         if (rs.limitScanner == null) {
             GpuLimitTable table = GpuLimitTable.build(network, LimitReductionManager.create(limitReductions));
             rs.limitScanner = new GpuLimitScanner(table);
             rs.limitTable = table;
-            if (screenViolationsEnabled() && rs.precomputed.gpuData() != null) {
+            if (rs.precomputed.gpuData() != null) {
                 rs.violationScreen = GpuViolationScreen.build(network, table, rs.precomputed.gpuData(),
                         rs.precomputed.elementMapper(), rs.precomputed.equationSystem(),
                         rs.precomputed.baseVariableRows());

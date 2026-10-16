@@ -45,8 +45,6 @@ Safe to add. These are the instruments; several are the only reason a defect was
 | `OLF_GPU_CENSUS_NO_ACTIVE_LIMITS` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuRteScopeCensusTest.java:108 |
 | `OLF_GPU_CENSUS_NO_DS` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuRteScopeCensusTest.java:100 |
 | `OLF_GPU_CENSUS_NO_RL` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuRteScopeCensusTest.java:97 |
-| `OLF_GPU_CENSUS_NO_SCREEN_VIOL` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuRteScopeCensusTest.java:221 |
-| `OLF_GPU_CENSUS_NO_TABLE_VIOL` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuRteScopeCensusTest.java:214 |
 | `OLF_GPU_CENSUS_NOFREEZE` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuRteScopeCensusTest.java:137 |
 | `OLF_GPU_CENSUS_ONLY` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuRteScopeCensusTest.java:152 |
 | `OLF_GPU_CENSUS_SVC` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuRteScopeCensusTest.java:229 |

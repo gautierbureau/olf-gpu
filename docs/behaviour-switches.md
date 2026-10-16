@@ -13,7 +13,6 @@ correct fallback worth keeping for triage · **TUNING** = both modes legitimate 
 
 | switch | default | gates | disposition |
 |---|---|---|---|
-| `olf.gpu.sa.fixedInnerIters` | `0` | K fixed Newton steps instead of OLF's budget | **TUNING** — the fixed-iter bench needs it; never a production mode. |
 | `olf.gpu.lib` | — | native library path | **TUNING** (plumbing, not behaviour). |
 
 ## Environment variables that change behaviour

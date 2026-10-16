@@ -287,9 +287,6 @@ public final class GpuAcNewtonSolver {
      *  value, written over the base state the device tiles; consumed by that solve. Null clears. */
     public static native void setBatchX0Seeds(long handle, int[] flatIndex, double[] value);
 
-    /** Fixed inner iterations for the context's batch solves: {@code k > 0} = exactly k Newton steps per inner solve,
-     *  the convergence criterion tested after the last one only (outer loops unchanged); 0 = test every iteration. */
-    public static native void setBatchFixedIter(long handle, int k);
 
     /** Per (scenario, coupler) spanning-tree flag, as flat {slot, ziElement, isTree} triples, for the
      *  scenarios where OLF's tree has moved away from the one the structure was extracted on. Empty

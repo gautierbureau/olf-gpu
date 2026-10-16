@@ -146,7 +146,7 @@ Full predicate list in Part II §F.
 
 | Capability | GPU | Notes |
 |---|---|---|
-| Base LF on GPU (absorbs CUDA init) | ✅ | `olf.gpu.sa.gpuBaseLoadFlow`, default on; FAILED base → no post-contingency results, same as stock |
+| Base LF on GPU (absorbs CUDA init) | ✅ | the device driver, a batch of one — the same engine as a plain load flow with `GPU_NEWTON_RAPHSON`; FAILED base → no post-contingency results, same as stock |
 | Limit-violation detection / IncreasedViolations filtering | ✅ | shared CPU code — identical by construction (`docs/increased-violations-thresholds.md`) |
 | State monitors (bus results) | ✅ | shared CPU code on the restored per-scenario states |
 | threadCount > 1 | ✅ **2026-09-07** | GPU batch mono-device **by design**: device work serialized on GPU_DEVICE_LOCK, no solver swap; CPU-fallback contingencies parallelize. RACE FIXED 2026-09-07: OLF invokes runSimulations CONCURRENTLY on the same analysis instance (one call per partition) and the per-run state lived in instance fields — partition A's precompute could load states into partition B's equation system MID-SOLVE (the recurring 19/1 MAX_ITERATION flake + the pure-CPU-stack JacobianMatrix NPE in threadCountAboveOneRunsSafelyOnGpuProvider). Per-run state is now a ThreadLocal RunState (hooks run on the partition's own thread), cleared in finally; BOTH partitions now batch (before, last-writer-wins silently un-batched one). 8/8 repeat runs green (was ~3 failures/10) |

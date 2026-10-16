@@ -19,18 +19,7 @@ Anything in the third table should be treated as unverified until someone reads 
 
 | property | effect |
 |---|---|
-| `olf.gpu.sa.disableBatch` | batch nothing; OLF's engine drives every contingency sequentially |
-| `olf.gpu.sa.gpuSequentialLoadFlow` | keep the GPU solver for sequential fall-through solves (needs the run configured with `GPU_NEWTON_RAPHSON`; on its own it does nothing) |
-| `olf.gpu.driverOuterLoops` | `false` puts OLF's Java engine back in charge of the base load flow |
 | `olf.cuda.path`, `olf.cudss.path`, `olf.gpu.lib` | native library locations |
-
-### The manual single-contingency debug path
-
-    -Dolf.gpu.sa.disableBatch=true  OLF_GPU_SA_SEQ_SOLVER=1  OLF_GPU_RESIDUAL_TRACE=1
-
-Solves one contingency as an ordinary load flow on the device, which is where the load-flow
-instruments live. A contingency wrong batched and right there is a BATCH defect.
-
 
 ## Diagnostics (98) — print only, cannot change a result
 
@@ -50,7 +39,6 @@ Safe to add. These are the instruments; several are the only reason a defect was
 | `OLF_GPU_CENSUS_CONNECTIVITY` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuRteScopeCensusTest.java:342 |
 | `OLF_GPU_CENSUS_CONV_EPS` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuRteScopeCensusTest.java:111 |
 | `OLF_GPU_CENSUS_CPU` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuRteScopeCensusTest.java:80 |
-| `OLF_GPU_CENSUS_CPU_BASE` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuRteScopeCensusTest.java:188 |
 | `OLF_GPU_CENSUS_MONITOR_ALL_VL` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuRteScopeCensusTest.java:253 |
 | `OLF_GPU_CENSUS_MONITOR_BRANCH` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuRteScopeCensusTest.java:257 |
 | `OLF_GPU_CENSUS_MONITOR_VL` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuRteScopeCensusTest.java:256 |
@@ -61,7 +49,6 @@ Safe to add. These are the instruments; several are the only reason a defect was
 | `OLF_GPU_CENSUS_NO_TABLE_VIOL` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuRteScopeCensusTest.java:214 |
 | `OLF_GPU_CENSUS_NOFREEZE` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuRteScopeCensusTest.java:137 |
 | `OLF_GPU_CENSUS_ONLY` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuRteScopeCensusTest.java:152 |
-| `OLF_GPU_CENSUS_SEQ_GPU` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuRteScopeCensusTest.java:204 |
 | `OLF_GPU_CENSUS_SVC` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuRteScopeCensusTest.java:229 |
 | `OLF_GPU_CENSUS_VIOL_TOL` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuRteScopeCensusTest.java:122 |
 | `OLF_GPU_CENSUS_VIOLATION_DUMP` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuRteScopeCensusTest.java:354 |
@@ -188,7 +175,6 @@ These set a tolerance for the GPU arm that the CPU arm does not get:
 | `OLF_GPU_SA_GPU_CONV_EPS` |
 | `OLF_GPU_SA_GPU_RL_TOL` |
 | `OLF_GPU_SA_GPU_SLACK_TOL` |
-| `OLF_GPU_SA_GPU_BASE` |
 
 A one-sided tolerance is the mechanism by which a GPU/CPU difference can be made to disappear without
 being fixed, which the project forbids: **a disagreement at the default tolerance is an orchestration
@@ -214,7 +200,6 @@ Each selects a different computation. Several disable an outer loop or loosen a 
 | `OLF_GPU_DBG_SLACK_TOL` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuBatchedAcSecurityAnalysisTest.java:3084 +1 |
 | `OLF_GPU_DISC_EPS` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuSingleSolveRejectReasonProbe.java:60 |
 | `OLF_GPU_DISC_SLACKTOL` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuSingleSolveRejectReasonProbe.java:64 |
-| `OLF_GPU_DRIVER_OUTER_LOOPS` | src/main/java/com/powsybl/openloadflow/sa/gpu/GpuBatchedAcSecurityAnalysis.java:319 +2 |
 | `OLF_GPU_FIXED_ITERS` | src/test/java/com/powsybl/openloadflow/ac/solver/gpu/batch/GpuBatchedN1FixedIterTest.java:79 |
 | `OLF_GPU_FORCE_FIRST_STEP` | native/cuda/jni/olf_gpu_nr_jni.cu:7630 |
 | `OLF_GPU_HOST_LOOP_NOOP` | native/cuda/jni/olf_gpu_nr_jni.cu:8137 |
@@ -227,7 +212,6 @@ Each selects a different computation. Several disable an outer loop or loosen a 
 | `OLF_GPU_REORDER_ALG` | native/cuda/jni/olf_gpu_nr_jni.cu (`applyReorderAlg`, `applyRobustSingleMatrixConfig`) — cuDSS reordering for the batched contexts (default per structure: AMD, ND when zero-impedance branches are present); the ROBUST single-matrix mode 6 (the batch-of-one retry after a linear-solve reject, status -3) keeps AMD unless set, and enables matching + pivoting only there (cuDSS 0.8 refuses matching under the COLAMD family) |
 | `OLF_GPU_SA_CONV_EPS` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuVsCpuProductionSaBenchmarkTest.java:197 |
 | `OLF_GPU_SA_CPU_SINGLE` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuVsCpuProductionSaBenchmarkTest.java:276 |
-| `OLF_GPU_SA_GPU_BASE` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuVsCpuProductionSaBenchmarkTest.java:92 |
 | `OLF_GPU_SA_GPU_CONV_EPS` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuVsCpuProductionSaBenchmarkTest.java:242 |
 | `OLF_GPU_SA_GPU_RL_TOL` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuVsCpuProductionSaBenchmarkTest.java:244 |
 | `OLF_GPU_SA_GPU_SLACK_TOL` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuVsCpuProductionSaBenchmarkTest.java:243 |
@@ -235,7 +219,6 @@ Each selects a different computation. Several disable an outer loop or loosen a 
 | `OLF_GPU_SA_NO_DS` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuVsCpuProductionSaBenchmarkTest.java:229 |
 | `OLF_GPU_SA_NO_RL` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuVsCpuProductionSaBenchmarkTest.java:226 |
 | `OLF_GPU_SA_RL_TOL` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuVsCpuProductionSaBenchmarkTest.java:211 |
-| `OLF_GPU_SA_SEQ_SOLVER` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuVsCpuRte6515SaTest.java:387 |
 | `OLF_GPU_SA_SLACK_TOL` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuVsCpuProductionSaBenchmarkTest.java:205 |
 | `OLF_GPU_STRAGGLER_FRAC` | native/cuda/jni/olf_gpu_nr_jni.cu (`stragglerFrac`) — perf switch, default 0 = OFF since 2026-09-22: `<frac>` ejects the last `frac*nS` unconverged scenarios at maxIter/2 to the CPU replay; off, the device carries them to maxIter and reports MAX_ITERATION_REACHED itself (the precomputer's `exhausted` set). |
 | `OLF_GPU_SVC` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuVsCpuRte6515SaTest.java:310 |

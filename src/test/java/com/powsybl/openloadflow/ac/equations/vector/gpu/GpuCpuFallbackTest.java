@@ -15,23 +15,24 @@ import com.powsybl.loadflow.LoadFlowResult;
 import com.powsybl.math.matrix.DenseMatrixFactory;
 import com.powsybl.openloadflow.OpenLoadFlowParameters;
 import com.powsybl.openloadflow.OpenLoadFlowProvider;
+import com.powsybl.openloadflow.ac.solver.gpu.GpuNewtonRaphson;
 import com.powsybl.openloadflow.ac.solver.gpu.GpuNewtonRaphsonFactory;
 import com.powsybl.openloadflow.network.EurostagFactory;
 import com.powsybl.openloadflow.network.SlackBusSelectionMode;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /**
- * The GPU solver as a SAFE DEFAULT: a network whose equation system the GPU extractor
- * rejects (here a ZIP load model — an unsupported variable-length equation term) must
- * still converge through {@link com.powsybl.openloadflow.ac.solver.gpu.GpuNewtonRaphson}'s
- * CPU fallback ({@code olf.gpu.cpuFallback}, default on), producing the same solution
- * as a plain CPU run — never wrong, only un-accelerated. This is what makes routing the
- * security analysis's base load flow to the GPU solver unconditionally safe.
+ * The GPU load flow as a SAFE DEFAULT: a load flow the device driver refuses goes, for the rest of the run,
+ * to OLF's own CPU Newton-Raphson and its own outer loops, and produces exactly the CPU solution — never
+ * wrong, only un-accelerated. The refused shape here is a slack distribution whose failure behaviour the
+ * device cannot apply ({@code FAIL}) with no participant row: the slack generator is the only one.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
@@ -47,33 +48,12 @@ class GpuCpuFallbackTest {
                 "GPU full-NR native lib not available (build it with native/build-gpu.sh + cuDSS)");
     }
 
-    private static Network zipLoadNetwork() {
-        // Eurostag + a ZIP-model load: the ZIP equation term (variable-length sum) is outside
-        // the GPU extractor's scope, so extraction rejects the system and the solver must
-        // fall back to the CPU Newton-Raphson.
-        Network network = EurostagFactory.fix(EurostagTutorialExample1Factory.create());
-        network.getVoltageLevel("VLLOAD").newLoad()
-                .setId("ZIPLOAD")
-                .setBus("NLOAD")
-                .setP0(50)
-                .setQ0(30)
-                .newZipModel()
-                    .setC0p(0.5)
-                    .setC0q(0.55)
-                    .setC1p(0.3)
-                    .setC1q(0.35)
-                    .setC2p(0.2)
-                    .setC2q(0.1)
-                    .add()
-                .add();
-        return network;
-    }
-
     private static LoadFlowParameters params(boolean gpu) {
-        LoadFlowParameters p = new LoadFlowParameters().setUseReactiveLimits(false).setDistributedSlack(false);
+        LoadFlowParameters p = new LoadFlowParameters().setUseReactiveLimits(false).setDistributedSlack(true);
         OpenLoadFlowParameters ext = OpenLoadFlowParameters.create(p)
-                .setSlackBusSelectionMode(SlackBusSelectionMode.FIRST)
-                .setUseLoadModel(true);   // makes the ZIP term real — the GPU extractor rejects it
+                .setSlackBusSelectionMode(SlackBusSelectionMode.NAME)
+                .setSlackBusesIds(List.of("VLGEN"))
+                .setSlackDistributionFailureBehavior(OpenLoadFlowParameters.SlackDistributionFailureBehavior.FAIL);
         if (gpu) {
             ext.setAcSolverType(GpuNewtonRaphsonFactory.NAME);
         }
@@ -81,24 +61,26 @@ class GpuCpuFallbackTest {
     }
 
     @Test
-    void gpuSolverFallsBackToCpuOnUnsupportedNetwork() {
+    void refusedLoadFlowRunsOnTheCpuNewtonRaphson() {
         LoadFlow.Runner runner = new LoadFlow.Runner(new OpenLoadFlowProvider(new DenseMatrixFactory()));
 
-        Network cpu = zipLoadNetwork();
+        Network cpu = EurostagFactory.fix(EurostagTutorialExample1Factory.create());
         LoadFlowResult cpuResult = runner.run(cpu, params(false));
         assertTrue(cpuResult.isFullyConverged());
 
-        Network gpu = zipLoadNetwork();
+        long fallbacksBefore = GpuNewtonRaphson.CPU_FALLBACK_COUNT.get();
+        Network gpu = EurostagFactory.fix(EurostagTutorialExample1Factory.create());
         LoadFlowResult gpuResult = runner.run(gpu, params(true));
-        assertTrue(gpuResult.isFullyConverged(), "GPU solver must fall back to CPU on an unsupported network");
+        assertTrue(gpuResult.isFullyConverged());
+        assertTrue(GpuNewtonRaphson.CPU_FALLBACK_COUNT.get() > fallbacksBefore, "the device must refuse this load flow");
 
-        // 1e-12: the fallback runs the SAME CPU Newton-Raphson; only numerical-zero noise
-        // (e.g. a 1e-18 slack angle) may differ from the direct CPU run.
+        assertEquals(cpuResult.getComponentResults().get(0).getDistributedActivePower(),
+                gpuResult.getComponentResults().get(0).getDistributedActivePower(), 0.0);
         for (String id : new String[]{"NGEN", "NHV1", "NHV2", "NLOAD"}) {
-            assertEquals(cpu.getBusBreakerView().getBus(id).getV(), gpu.getBusBreakerView().getBus(id).getV(), 1e-12,
-                    "fallback must produce the CPU solution (V @ " + id + ")");
-            assertEquals(cpu.getBusBreakerView().getBus(id).getAngle(), gpu.getBusBreakerView().getBus(id).getAngle(), 1e-12,
-                    "fallback must produce the CPU solution (angle @ " + id + ")");
+            assertEquals(cpu.getBusBreakerView().getBus(id).getV(), gpu.getBusBreakerView().getBus(id).getV(), 0.0,
+                    "the CPU Newton-Raphson's solution (V @ " + id + ")");
+            assertEquals(cpu.getBusBreakerView().getBus(id).getAngle(), gpu.getBusBreakerView().getBus(id).getAngle(), 0.0,
+                    "the CPU Newton-Raphson's solution (angle @ " + id + ")");
         }
     }
 }

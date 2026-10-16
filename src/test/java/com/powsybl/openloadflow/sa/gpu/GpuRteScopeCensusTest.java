@@ -181,25 +181,6 @@ class GpuRteScopeCensusTest extends AbstractOpenSecurityAnalysisTest {
         // OLF_GPU_CENSUS_CHUNK: force the batch chunk size (the system property cannot be set from the
         // command line — the parent pom owns surefire's argLine — and chunk size is the knob a
         // throughput measurement most needs to sweep).
-        // OLF_GPU_CENSUS_CPU_BASE=1: keep the batched contingency solves on the device but run the BASE
-        // load flow on the CPU solver. The reference filtering compares each contingency against the base,
-        // with zero tolerance, so a base that differs from the CPU's by a few ulps is enough to move
-        // violations. This isolates that.
-        if ("1".equals(System.getenv("OLF_GPU_CENSUS_CPU_BASE"))) {
-            System.setProperty(GpuBatchedAcSecurityAnalysis.GPU_BASE_LOADFLOW_PROPERTY, "false");
-        } else {
-            System.clearProperty(GpuBatchedAcSecurityAnalysis.GPU_BASE_LOADFLOW_PROPERTY);
-        }
-        // OLF_GPU_CENSUS_SEQ_GPU=1: no batch at all — OLF's engine runs each contingency sequentially
-        // with the GPU solver underneath. The arm that prices BATCHING against the per-scenario
-        // save/restore it forces the hybrid to pay.
-        if ("1".equals(System.getenv("OLF_GPU_CENSUS_SEQ_GPU"))) {
-            System.setProperty(GpuBatchedAcSecurityAnalysis.GPU_DISABLE_BATCH_PROPERTY, "true");
-            System.setProperty(GpuBatchedAcSecurityAnalysis.GPU_SEQUENTIAL_LOADFLOW_PROPERTY, "true");
-        } else {
-            System.clearProperty(GpuBatchedAcSecurityAnalysis.GPU_DISABLE_BATCH_PROPERTY);
-            System.clearProperty(GpuBatchedAcSecurityAnalysis.GPU_SEQUENTIAL_LOADFLOW_PROPERTY);
-        }
         // OLF_GPU_CENSUS_NO_TABLE_VIOL=1: detect post-contingency violations through OLF's own walk
         // instead of the flattened limit table — the A/B arm for the accelerated detection, which
         // must report exactly the same violation set.

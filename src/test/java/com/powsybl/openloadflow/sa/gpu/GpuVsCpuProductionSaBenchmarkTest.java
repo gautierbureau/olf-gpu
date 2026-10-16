@@ -87,11 +87,6 @@ class GpuVsCpuProductionSaBenchmarkTest extends AbstractOpenSecurityAnalysisTest
                 && System.getenv("OLF_GPU_BATCHMODE") != null) {
             System.setProperty(GpuBatchContextCache.BATCH_MODE_PROPERTY, System.getenv("OLF_GPU_BATCHMODE"));
         }
-        // OLF_GPU_SA_GPU_BASE=0: force the GPU arm's BASE load flow onto the CPU solver too (isolates
-        // base-trajectory differences from the batched contingency path in A/B debugging).
-        if ("0".equals(System.getenv("OLF_GPU_SA_GPU_BASE"))) {
-            System.setProperty(GpuBatchedAcSecurityAnalysis.GPU_BASE_LOADFLOW_PROPERTY, "false");
-        }
         // SPARSE on both arms — the harness default (commonTestConfig.matrixFactory()) can be DENSE,
         // which at 9241 buses makes the base LF thrash for ~200 s and FAIL (measured), while the same
         // case + parameters converge in ~2 s / 10 iterations with a sparse factory.

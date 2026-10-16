@@ -15,7 +15,6 @@ import com.powsybl.openloadflow.OpenLoadFlowParameters;
 import com.powsybl.openloadflow.ac.AcLoadFlowContext;
 import com.powsybl.openloadflow.ac.AcLoadFlowParameters;
 import com.powsybl.openloadflow.ac.AcLoadFlowResult;
-import com.powsybl.openloadflow.ac.AcloadFlowEngine;
 import com.powsybl.openloadflow.ac.solver.AcSolverStatus;
 import com.powsybl.openloadflow.ac.solver.gpu.GpuNewtonRaphson;
 import com.powsybl.openloadflow.ac.solver.gpu.GpuNewtonRaphsonFactory;
@@ -27,7 +26,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * A network that once needed the sequential solver's DEVICE-BROKEN safety net, and no longer does: a
+ * A network that once needed the GPU load flow's DEVICE-BROKEN safety net, and no longer does: a
  * remote gen-VC group, a zero-impedance branch at member b2 feeding a LOADED far bus b8, and a Q-heavy
  * area that PINS g2 during the run. The first device solve used to return an exploded state (phi ~1e22
  * at b8) while the same system solved fine on the CPU, and the safety net reran it on the CPU — never
@@ -80,7 +79,7 @@ class GpuSeqBaseFallbackTest {
         }
         LfNetwork lf = LfNetwork.load(network, new LfNetworkLoaderImpl(), acp.getNetworkParameters(), ReportNode.NO_OP).get(0);
         try (AcLoadFlowContext context = new AcLoadFlowContext(lf, acp)) {
-            AcLoadFlowResult r = new AcloadFlowEngine(context).run();
+            AcLoadFlowResult r = acp.getSolverFactory().createLoadFlowEngine(context).run();
             assertEquals(AcSolverStatus.CONVERGED, r.getSolverStatus(),
                     (gpu ? "GPU" : "CPU") + " engine run must converge");
             return lf.getBuses().stream().mapToDouble(b -> b.getV()).toArray();

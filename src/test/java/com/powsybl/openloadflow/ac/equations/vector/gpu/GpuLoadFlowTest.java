@@ -24,8 +24,10 @@ import com.powsybl.openloadflow.network.ShuntNetworkFactory;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
 import java.util.function.Supplier;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
@@ -186,7 +188,9 @@ class GpuLoadFlowTest extends com.powsybl.openloadflow.network.AbstractLoadFlowN
                     .withB0(-0.001f).withStandbyStatus(true).add();
             return network;
         }, "monitoring svc base activation",
-                p -> com.powsybl.openloadflow.OpenLoadFlowParameters.create(p).setSvcVoltageMonitoring(true), 1e-9);
+                // LEAVE_ON_SLACK_BUS: see GpuPhaseControlTest — the slack generator is the only participant
+                p -> com.powsybl.openloadflow.OpenLoadFlowParameters.create(p).setSvcVoltageMonitoring(true)
+                        .setSlackDistributionFailureBehavior(OpenLoadFlowParameters.SlackDistributionFailureBehavior.LEAVE_ON_SLACK_BUS), 1e-9);
         org.junit.jupiter.api.Assertions.assertEquals(before,
                 com.powsybl.openloadflow.ac.solver.gpu.GpuNewtonRaphson.CPU_FALLBACK_COUNT.get(),
                 "the monitoring-SVC base solve must run ON the GPU, not silently fall back");
@@ -285,11 +289,56 @@ class GpuLoadFlowTest extends com.powsybl.openloadflow.network.AbstractLoadFlowN
         compareWithParams(HvdcNetworkFactory::createHvdcInAcEmulationInSymetricNetwork, "hvdc frozen start",
                 p -> {
                     p.setHvdcAcEmulation(true).setDistributedSlack(true).setUseReactiveLimits(true);
-                    OpenLoadFlowParameters.create(p).setStartWithFrozenACEmulation(true);
+                    // LEAVE_ON_SLACK_BUS: see GpuPhaseControlTest — the slack generator is the only participant
+                    OpenLoadFlowParameters.create(p).setStartWithFrozenACEmulation(true)
+                            .setSlackDistributionFailureBehavior(OpenLoadFlowParameters.SlackDistributionFailureBehavior.LEAVE_ON_SLACK_BUS);
                 }, 1e-9);
         org.junit.jupiter.api.Assertions.assertEquals(before,
                 com.powsybl.openloadflow.ac.solver.gpu.GpuNewtonRaphson.CPU_FALLBACK_COUNT.get(),
                 "the frozen-start solves must stay on the GPU (no CPU fallback)");
+    }
+
+    /**
+     * Frozen start on a network whose angles are KNOWN (a second load flow on a solved network): OLF's
+     * FreezingHvdcACEmulation.initialize freezes the emulation at that flow and its first check unfreezes it and
+     * re-solves. On a fresh network (NaN angles, {@link #hvdcFrozenStartMatchesCpu}) it freezes nothing. The driver
+     * starts from that decision: it neither freezes what OLF left linear nor keeps OLF's frozen emulation frozen
+     * as if a contingency had outaged it — each of which cost iterations and 3e-10 against the CPU.
+     */
+    @Test
+    void hvdcFrozenStartOnSolvedNetworkMatchesCpu() {
+        LoadFlow.Runner runner = new LoadFlow.Runner(new OpenLoadFlowProvider(new DenseMatrixFactory()));
+        Network cpu = HvdcNetworkFactory.createHvdcInAcEmulationInSymetricNetwork();
+        Network gpu = HvdcNetworkFactory.createHvdcInAcEmulationInSymetricNetwork();
+        assertTrue(runner.run(cpu, frozenStartParameters(false)).isFullyConverged());
+        assertTrue(runner.run(gpu, frozenStartParameters(true)).isFullyConverged());
+        for (Network network : List.of(cpu, gpu)) {                   // something to solve, from known angles
+            var load = network.getLoadStream().findFirst().orElseThrow();
+            load.setP0(load.getP0() * 1.1);
+        }
+        long fallbacksBefore = com.powsybl.openloadflow.ac.solver.gpu.GpuNewtonRaphson.CPU_FALLBACK_COUNT.get();
+        LoadFlowResult cpuResult = runner.run(cpu, frozenStartParameters(false));
+        LoadFlowResult gpuResult = runner.run(gpu, frozenStartParameters(true));
+        assertEquals(fallbacksBefore, com.powsybl.openloadflow.ac.solver.gpu.GpuNewtonRaphson.CPU_FALLBACK_COUNT.get(),
+                "the frozen-start solve must stay on the GPU");
+        assertEquals(cpuResult.getComponentResults().get(0).getIterationCount(),
+                gpuResult.getComponentResults().get(0).getIterationCount(), "OLF's freeze, unfreeze and re-solve");
+        for (Bus bus : cpu.getBusView().getBuses()) {
+            Bus gpuBus = gpu.getBusView().getBus(bus.getId());
+            assertEquals(bus.getV(), gpuBus.getV(), 1e-12, "V @ " + bus.getId());
+            assertEquals(bus.getAngle(), gpuBus.getAngle(), 1e-12, "angle @ " + bus.getId());
+        }
+    }
+
+    private static LoadFlowParameters frozenStartParameters(boolean gpu) {
+        LoadFlowParameters p = new LoadFlowParameters().setHvdcAcEmulation(true).setDistributedSlack(true).setUseReactiveLimits(true);
+        // LEAVE_ON_SLACK_BUS: see GpuPhaseControlTest — the slack generator is the only participant
+        OpenLoadFlowParameters ext = OpenLoadFlowParameters.create(p).setStartWithFrozenACEmulation(true)
+                .setSlackDistributionFailureBehavior(OpenLoadFlowParameters.SlackDistributionFailureBehavior.LEAVE_ON_SLACK_BUS);
+        if (gpu) {
+            ext.setAcSolverType(GpuNewtonRaphsonFactory.NAME);
+        }
+        return p;
     }
 
     /** A REMOTE generator voltage-control group whose CONTROLLED (pilot) bus is ALSO one of its

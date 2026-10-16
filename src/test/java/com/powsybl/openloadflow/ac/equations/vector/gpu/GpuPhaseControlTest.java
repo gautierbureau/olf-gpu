@@ -78,8 +78,12 @@ class GpuPhaseControlTest {
         // the basin while the GPU iterates on, and the states differ by ~1e-8 pu (4.5e-3 kV on 400 kV)
         // for reasons that have nothing to do with phase control — tightening beats loosening the
         // assertion, which would hide a real term error of the same magnitude.
+        // LEAVE_ON_SLACK_BUS on both arms: the slack generator is these networks' only participant, and the device
+        // does not yet decide OLF's default FAIL behaviour for a slack-only distribution (it refuses the solve,
+        // which then runs on OLF's CPU Newton-Raphson). The subject here is not the slack distribution.
         OpenLoadFlowParameters cpuOlf = OpenLoadFlowParameters.create(cpuParameters)
-                .setNewtonRaphsonConvEpsPerEq(1e-8);
+                .setNewtonRaphsonConvEpsPerEq(1e-8)
+                .setSlackDistributionFailureBehavior(OpenLoadFlowParameters.SlackDistributionFailureBehavior.LEAVE_ON_SLACK_BUS);
         customizer.accept(cpuParameters, cpuOlf);
         LoadFlowResult cpuResult = runner.run(cpuNetwork, cpuParameters);
         assertTrue(cpuResult.isFullyConverged(), "CPU reference load flow must converge");
@@ -89,6 +93,7 @@ class GpuPhaseControlTest {
         long fallbacksBefore = com.powsybl.openloadflow.ac.solver.gpu.GpuNewtonRaphson.CPU_FALLBACK_COUNT.get();
         OpenLoadFlowParameters gpuOlf = OpenLoadFlowParameters.create(gpuParameters)
                 .setNewtonRaphsonConvEpsPerEq(1e-8)
+                .setSlackDistributionFailureBehavior(OpenLoadFlowParameters.SlackDistributionFailureBehavior.LEAVE_ON_SLACK_BUS)
                 .setAcSolverType(GpuNewtonRaphsonFactory.NAME);
         customizer.accept(gpuParameters, gpuOlf);
         LoadFlowResult gpuResult = runner.run(gpuNetwork, gpuParameters);

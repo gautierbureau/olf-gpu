@@ -29,7 +29,7 @@ import org.junit.jupiter.api.extension.ExtensionContext;
  *
  * <p>Auto-registered via {@code META-INF/services/org.junit.jupiter.api.extension.Extension}, with
  * autodetection enabled for surefire in the pom, so it applies to every test. The audit covers only
- * the SEQUENTIAL inner solver — the batched SA path has its own per-scenario CPU fallback (status −2),
+ * the batch-of-one load flow (GpuNewtonRaphson) — the batched SA path has its own per-scenario CPU fallback (status −2),
  * which this does not see.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}

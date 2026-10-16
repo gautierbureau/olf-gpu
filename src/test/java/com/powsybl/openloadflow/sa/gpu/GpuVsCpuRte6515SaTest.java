@@ -900,13 +900,6 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
             com.powsybl.openloadflow.OpenLoadFlowParameters.get(lfp)
                     .setNewtonRaphsonConvEpsPerEq(Double.parseDouble(convEpsEnv));
         }
-        // OLF_GPU_SA_SEQ_SOLVER=1: run the GPU arm's contingencies through the ORDINARY load flow on
-        // the GPU (the sequential GpuNewtonRaphson) instead of OLF's CPU solver. Paired with
-        // -Dolf.gpu.sa.disableBatch=true this is the manual-single-contingency debug path: it takes one
-        // contingency out of the batch and solves it like any other load flow, which is where the
-        // LF-level instruments live (OLF_GPU_RESIDUAL_TRACE above all). If a contingency is wrong
-        // batched and right here, the defect is in the BATCH; if it is wrong both ways it reproduces
-        // at load-flow level, which is a far cheaper thing to debug.
         // OLF_GPU_SVC=1: enable SecondaryVoltageControl — the RTE params default to off, but
         // the rte6515 case carries SVC zones. This is the path that differed between GPU and
         // CPU when SVC support was incomplete (the base LF didn't go through the chunk solver).
@@ -1142,24 +1135,7 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
         long gpuWarmMs;
         try {
             SecurityAnalysisParameters sapGpu = new SecurityAnalysisParameters();
-            // OLF_GPU_SA_SEQ_SOLVER=1: run the GPU arm's contingencies through the ORDINARY load flow
-            // on the GPU (the sequential GpuNewtonRaphson) instead of OLF's CPU solver. Paired with
-            // -Dolf.gpu.sa.disableBatch=true this is the manual-single-contingency debug path: it takes a
-            // contingency out of the batch and solves it like any other load flow, which is where the
-            // LF-level instruments live (OLF_GPU_RESIDUAL_TRACE above all). A contingency wrong batched
-            // and right here is a BATCH defect; wrong both ways reproduces at load-flow level.
-            //
-            // It MUST go on a COPY. The two arms share one LoadFlowParameters, so setting the solver on
-            // `lfp` puts the GPU solver on the CPU arm too and the run compares the device against
-            // itself — which agrees at 1e-11 and proves nothing, the same shape of trap as a contingency
-            // that "agrees" because both arms fell back to the CPU.
-            LoadFlowParameters lfpGpu = lfp;
-            if ("1".equals(System.getenv("OLF_GPU_SA_SEQ_SOLVER"))) {
-                lfpGpu = lfp.copy();
-                com.powsybl.openloadflow.OpenLoadFlowParameters.get(lfpGpu).setAcSolverType(
-                        com.powsybl.openloadflow.ac.solver.gpu.GpuNewtonRaphsonFactory.NAME);
-            }
-            sapGpu.setLoadFlowParameters(lfpGpu);
+            sapGpu.setLoadFlowParameters(lfp);
             sapGpu.setIncreasedViolationsParameters(sap.getIncreasedViolationsParameters());
             // GPU runs host-single-threaded (threadCount > 1 → SIGSEGV in cuLaunchKernel)
 

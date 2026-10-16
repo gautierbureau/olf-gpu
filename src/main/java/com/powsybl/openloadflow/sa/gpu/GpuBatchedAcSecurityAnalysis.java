@@ -24,6 +24,7 @@ import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.Variable;
 import com.powsybl.openloadflow.ac.solver.AcSolverUtil;
 import com.powsybl.openloadflow.ac.solver.NewtonRaphsonFactory;
+import com.powsybl.openloadflow.ac.solver.gpu.GpuDriverOuterLoopEngine;
 import com.powsybl.openloadflow.ac.solver.gpu.GpuNewtonRaphsonFactory;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.BatchConfig;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchStatus;
@@ -803,7 +804,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         // PER_EQUATION_TYPE stopping criteria run on the sequential path since the batch-of-1
         // route (2026-09-08): the batch-of-1 solve installs the per-row thresholds
         // (setBatchRowCriteria) and stops on the SAME decision as the CPU — no CPU-base condition.
-        if (!scope.batchDisabled() && !multiThread && gpuBaseLoadFlowEnabled()
+        if (!scope.batchDisabled() && !multiThread
                 && GpuAcNewtonSolver.isAvailable()
                 && acParameters.getSolverFactory().getClass() == NewtonRaphsonFactory.class) {
             LOGGER.info("GPU-batched SA: running the base load flow on the GPU Newton-Raphson "
@@ -833,11 +834,11 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         // then solves on-device and PRE-WARMS CUDA for the batched contingency pass (the one-time device init
         // is absorbed into the base phase, so the cold batch becomes warm — the base-case warm-up
         // strategy). Guarded by a GPU-support probe so an unsupported network degrades gracefully to the CPU
-        // solver. Toggle with -Dolf.gpu.sa.gpuBaseLoadFlow=false.
+        // solver.
         // When the batch is disabled by the outer-loop guard, ALSO skip the solver swap: the provider then
         // behaves exactly like the stock CPU AcSecurityAnalysis (the safety contract), and the sequential
         // per-contingency runs avoid the GPU-inner-solver + outer-loop-switching path (open CME bug there).
-        if (!scope.batchDisabled() && gpuBaseLoadFlowEnabled()
+        if (!scope.batchDisabled()
                 && GpuAcNewtonSolver.isAvailable() && GpuSaRunScope.gpuSupports(lfNetwork, acParameters)) {
             acParameters.setSolverFactory(new GpuNewtonRaphsonFactory(), securityAnalysisParameters.getLoadFlowParameters());
             LOGGER.info("GPU batched SA: base + fall-through load flows run on the GPU Newton-Raphson (CUDA pre-warm)");
@@ -898,40 +899,13 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         }
     }
 
-    /** True when the base load flow's batch-of-one drives OLF's outer loops on the DEVICE, so this
-     *  analysis must not also drive them in Java. DEFAULT since 2026-09-16: a batch of one is still a
-     *  batch, and running the base through the same driver as the chunks is what keeps the two on one
-     *  trajectory — rte6515 parity is identical either way (9040/9042, the same 2 knife-edge lines) and
-     *  the driver is never slower. {@code OLF_GPU_DRIVER_OUTER_LOOPS=0} or
-     *  {@code -Dolf.gpu.driverOuterLoops=false} puts OLF's Java engine back in charge of the base. */
-    static boolean driverOuterLoopsEnabled() {
-        return !"0".equals(System.getenv("OLF_GPU_DRIVER_OUTER_LOOPS"))
-                && !"false".equalsIgnoreCase(System.getProperty("olf.gpu.driverOuterLoops", "true"));
-    }
-
+    /** Every load flow of the analysis runs on the device driver's engine — the base as a batch of one,
+     *  the same driver as the chunks, which keeps the two on one trajectory. A solve with OLF's CPU
+     *  Newton-Raphson underneath (the fall-through contingencies) leaves the loops to OLF's own code. */
     @Override
     protected com.powsybl.openloadflow.ac.AcloadFlowEngine createLoadFlowEngine(
             com.powsybl.openloadflow.ac.AcLoadFlowContext context) {
-        return driverOuterLoopsEnabled() ? new GpuDriverOuterLoopEngine(context) : super.createLoadFlowEngine(context);
-    }
-
-    /** System property toggle for the GPU base/fall-through load flow (default on). */
-    public static final String GPU_BASE_LOADFLOW_PROPERTY = "olf.gpu.sa.gpuBaseLoadFlow";
-
-    /** System property: skip the batch entirely and let OLF's engine solve every contingency
-     *  sequentially — the A/B arm for "does batching pay for the multiplexing?". */
-    public static final String GPU_DISABLE_BATCH_PROPERTY = "olf.gpu.sa.disableBatch";
-
-    /** System property: keep the GPU solver for SEQUENTIAL fall-through contingency solves
-     *  (default off = revert to the CPU Newton-Raphson after the base LF). */
-    public static final String GPU_SEQUENTIAL_LOADFLOW_PROPERTY = "olf.gpu.sa.gpuSequentialLoadFlow";
-
-    private static boolean gpuSequentialLoadFlowEnabled() {
-        return Boolean.parseBoolean(System.getProperty(GPU_SEQUENTIAL_LOADFLOW_PROPERTY, "false"));
-    }
-
-    private static boolean gpuBaseLoadFlowEnabled() {
-        return Boolean.parseBoolean(System.getProperty(GPU_BASE_LOADFLOW_PROPERTY, "true"));
+        return new GpuDriverOuterLoopEngine(context);
     }
 
     /** System property: detect post-contingency violations by scanning the run's limits as flat
@@ -1137,13 +1111,6 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                 }
             }
         }
-        if (Boolean.getBoolean(GPU_DISABLE_BATCH_PROPERTY)) {
-            // A/B arm: OLF's own engine drives every contingency sequentially (its outer loops, its
-            // one-restore-per-contingency), with the GPU solver underneath if
-            // olf.gpu.sa.gpuSequentialLoadFlow is on. This is the comparison that says whether BATCHING
-            // pays for the multiplexing it forces on the hybrid.
-            return;
-        }
         long tPre = System.nanoTime();
         closeStateStore(rs);                                 // a previous batch's file-backed states
         rs.precomputed = GpuBatchPrecomputer.precompute(network, rs.lfNetwork, rs.context,
@@ -1157,14 +1124,10 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
             LAST_GPU_PRECOMPUTED_COUNT.updateAndGet(prev -> Math.max(prev, 0) + solved);
             LAST_GPU_PRECOMPUTED_IDS.addAll(rs.precomputed.states().keySet());
         }
-        // Sequential fall-through routing is an OPTION (2026-07-17): by DEFAULT the engine's
-        // solver reverts to the stock CPU Newton-Raphson after the base LF — single-system GPU
-        // solves are not where the device wins (its parallelism is the batch), and the CPU path
-        // parallelizes under threadCount. Set -Dolf.gpu.sa.gpuSequentialLoadFlow=true to keep
-        // the GPU solver for the sequential fall-through solves instead. The base LF has already
-        // run at this point (on the GPU when enabled, absorbing CUDA init).
-        if (!gpuSequentialLoadFlowEnabled()
-                && parameters.getSolverFactory() instanceof GpuNewtonRaphsonFactory && rs.loadFlowParameters != null) {
+        // The engine's solver reverts to the stock CPU Newton-Raphson after the base LF: single-system GPU
+        // solves are not where the device wins (its parallelism is the batch), and the CPU path parallelizes
+        // under threadCount. The base LF has already run at this point (on the GPU, absorbing CUDA init).
+        if (parameters.getSolverFactory() instanceof GpuNewtonRaphsonFactory && rs.loadFlowParameters != null) {
             parameters.setSolverFactory(new NewtonRaphsonFactory(), rs.loadFlowParameters);
         }
     }

@@ -14,7 +14,6 @@ import com.powsybl.math.matrix.SparseMatrixFactory;
 import com.powsybl.openloadflow.OpenLoadFlowParameters;
 import com.powsybl.openloadflow.ac.AcLoadFlowContext;
 import com.powsybl.openloadflow.ac.AcLoadFlowParameters;
-import com.powsybl.openloadflow.ac.AcloadFlowEngine;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
@@ -142,7 +141,7 @@ class GpuBatchedN1FixedIterTest {
         OpenLoadFlowParameters olfp = OpenLoadFlowParameters.create(lfp)
                 .setVoltageRemoteControl(false)
                 .setLowImpedanceBranchMode(OpenLoadFlowParameters.LowImpedanceBranchMode.REPLACE_BY_MIN_IMPEDANCE_LINE);
-        // OLF_GPU_BASE_ON_GPU: run the base/warm-up load flow on the GPU (the full GpuNewtonRaphson) instead
+        // OLF_GPU_BASE_ON_GPU: run the base/warm-up load flow on the GPU (the driver, a batch of one) instead
         // of the CPU. This is the base-case warm-up strategy — it both runs faster (~0.4 vs ~1.5 s) and
         // ABSORBS the one-time CUDA init into the base phase (same .so), so the cold contingency pass is then
         // warm. Moves CUDA init out of the SA phase, closing the cold-E2E gap.
@@ -194,7 +193,7 @@ class GpuBatchedN1FixedIterTest {
         GpuBatchContextCache.clearContextCache();
         GpuAcStructures.clear();
         long baseLfT0 = System.nanoTime();
-        new AcloadFlowEngine(context).run();
+        context.getParameters().getSolverFactory().createLoadFlowEngine(context).run();
         long baseLfMs = (System.nanoTime() - baseLfT0) / 1_000_000;
         AcSolverUtil.initStateVector(network, es, new PreviousValueVoltageInitializer());
         double[] baseState = es.getStateVector().get().clone();
@@ -266,7 +265,7 @@ class GpuBatchedN1FixedIterTest {
         // shape) — with OLF_GPU_BASE_ON_GPU the batch reuses the base's extraction and device
         // structure instead of rebuilding them.
         long baseLfT0 = System.nanoTime();
-        new AcloadFlowEngine(context).run();
+        context.getParameters().getSolverFactory().createLoadFlowEngine(context).run();
         long baseLfMs = (System.nanoTime() - baseLfT0) / 1_000_000;
         AcSolverUtil.initStateVector(network, es, new PreviousValueVoltageInitializer());
         double[] baseState = es.getStateVector().get().clone();

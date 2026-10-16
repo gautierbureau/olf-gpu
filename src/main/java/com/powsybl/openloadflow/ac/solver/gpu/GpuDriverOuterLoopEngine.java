@@ -5,7 +5,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/.
  * SPDX-License-Identifier: MPL-2.0
  */
-package com.powsybl.openloadflow.sa.gpu;
+package com.powsybl.openloadflow.ac.solver.gpu;
 
 import com.powsybl.openloadflow.ac.AcLoadFlowContext;
 import com.powsybl.openloadflow.ac.AcloadFlowEngine;
@@ -19,13 +19,10 @@ import org.apache.commons.lang3.tuple.Pair;
 import java.util.List;
 
 /**
- * The base load flow's engine when the DEVICE driver owns the outer loops.
- *
- * <p>The base LF goes through the batch code as a batch of one. With
- * {@code OLF_GPU_DRIVER_OUTER_LOOPS=1} the driver runs ALL outer loops: DS and RL as in-kernel
- * phases, and the remaining loops (SVC, TVC, Phase, TRPC, Shunt) as host-owned pause points
- * in their correct OLF positions. This engine suppresses those loops from OLF's standard
- * outer-loop cycle, or they would run twice.
+ * The engine of a GPU load flow — a plain load flow with {@link GpuNewtonRaphsonFactory} and the base
+ * load flow of the GPU security analysis alike: the device driver solves it as a batch of one and owns
+ * the outer loops, in-kernel or as host-owned pause points at their OLF positions. This engine
+ * suppresses those loops from OLF's standard outer-loop cycle, or they would run twice.
  *
  * <p>Dropping them HERE rather than from {@code parameters.getOuterLoops()} is deliberate: the GPU
  * security analysis derives its own batch configuration and qualification gates from that shared
@@ -243,6 +240,7 @@ public class GpuDriverOuterLoopEngine extends AcloadFlowEngine {
             return realDistribution.getSlackBusActivePowerMismatch(context);
         }
     }
+
 
     @Override
     protected List<Pair<AcOuterLoop, AcOuterLoopContext>> engineOuterLoopsAndContexts(AcLoadFlowContext context) {

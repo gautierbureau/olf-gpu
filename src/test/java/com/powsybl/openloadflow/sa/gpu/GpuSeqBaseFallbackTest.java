@@ -37,8 +37,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * device distributed reactive power with stale weights. {@code GpuNewtonRaphson} now watches the pinned
  * set ({@code GpuAcActivationExtractor.pinnedRemoteMembers}) and re-extracts when it changes, so this
  * run stays on the device from end to end. The test therefore asserts the OPPOSITE of what it once did —
- * no fallback — and keeps the CPU comparison that is the real contract. {@code olf.gpu.cpuFallback=false}
- * makes a regression LOUD: a device-broken state throws here instead of quietly reverting to the CPU.
+ * no fallback, counted by GpuNewtonRaphson.CPU_FALLBACK_COUNT — and keeps the CPU comparison that is the real
+ * contract.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
@@ -92,13 +92,7 @@ class GpuSeqBaseFallbackTest {
                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
         double[] cpu = run(ziMemberNetwork(), false);
         long fallbacksBefore = GpuNewtonRaphson.CPU_FALLBACK_COUNT.get();
-        System.setProperty("olf.gpu.cpuFallback", "false");      // a device-broken state must THROW, not hide
-        double[] gpu;
-        try {
-            gpu = run(ziMemberNetwork(), true);
-        } finally {
-            System.clearProperty("olf.gpu.cpuFallback");
-        }
+        double[] gpu = run(ziMemberNetwork(), true);
         assertEquals(fallbacksBefore, GpuNewtonRaphson.CPU_FALLBACK_COUNT.get(),
                 "the pinned remote gen-VC run must need no CPU fallback: its re-extracted qPct is OLF's");
         double worst = 0;

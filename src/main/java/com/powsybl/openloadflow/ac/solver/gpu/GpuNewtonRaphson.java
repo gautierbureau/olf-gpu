@@ -568,15 +568,10 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
         return 0.0;
     }
 
-    /** System property: fall back to the CPU Newton-Raphson when the GPU path rejects the
-     *  network or fails at runtime (default true). Set to false to fail loudly instead. */
-    public static final String CPU_FALLBACK_PROPERTY = "olf.gpu.cpuFallback";
-
     /**
      * Number of solves that bailed out of the GPU path since JVM start. Tests assert on it because a
      * silent fallback is INVISIBLE otherwise: results stay CPU-identical (that is the whole point of the
-     * contract), the warning is logged through a logger the test config does not attach an appender to,
-     * and {@link #CPU_FALLBACK_PROPERTY}=false only covers throws that reach the catch below. A GPU test
+     * contract) and the warning is logged through a logger the test config does not attach an appender to. A GPU test
      * that does not check this counter can pass while never touching the GPU at all — that is exactly how
      * the BRANCH_ALPHA1 packing looked "green but uncovered" until the counter existed.
      */
@@ -1507,19 +1502,13 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                 }
                 e.printStackTrace();
             }
-            if (Boolean.parseBoolean(System.getProperty(CPU_FALLBACK_PROPERTY, "true"))) {
-                // Graceful degradation: anything the GPU path cannot handle — an extractor
-                // validation rejection (unsupported variable/equation/term, remote control,
-                // zero-impedance shapes) or a native/device error — is re-run on the standard
-                // CPU Newton-Raphson with the SAME equation system and parameters. This makes
-                // the GPU solver safe as a DEFAULT (e.g. the SA base load flow): never wrong,
-                // only un-accelerated.
-                LOGGER.warn("GPU Newton-Raphson unavailable for this run ({}); falling back to the CPU Newton-Raphson",
-                        e.toString());
-                return cpuNewtonRaphson(voltageInitializer, reportNode);
-            }
-            LOGGER.error("GPU Newton-Raphson failed: {}", e.toString());
-            status = AcSolverStatus.SOLVER_FAILED;
+            // Graceful degradation: anything the GPU path cannot handle — an extractor validation rejection
+            // (unsupported variable/equation/term, remote control, zero-impedance shapes) or a native/device
+            // error — is re-run on the standard CPU Newton-Raphson with the SAME equation system and parameters:
+            // never wrong, only un-accelerated.
+            LOGGER.warn("GPU Newton-Raphson unavailable for this run ({}); falling back to the CPU Newton-Raphson",
+                    e.toString());
+            return cpuNewtonRaphson(voltageInitializer, reportNode);
         }
 
         if (status == AcSolverStatus.CONVERGED || parameters.isAlwaysUpdateNetwork()) {

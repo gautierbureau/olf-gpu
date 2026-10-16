@@ -90,18 +90,9 @@ class GpuSingleSolveRejectReasonProbe {
         return v;
     }
 
-    @org.junit.jupiter.api.AfterEach
-    void restoreFallbackProperty() {
-        // The probe's "fail loudly" setting must not leak into the classes surefire runs after it in
-        // the same JVM: with it, any later base solve the device rejects (a remote member pinned at
-        // base → row mode 4) turns into a whole-run failure instead of the CPU fallback those tests
-        // expect ("the batch must ENGAGE" on 11 remote-member tests, order-dependent).
-        System.clearProperty(GpuNewtonRaphson.CPU_FALLBACK_PROPERTY);
-    }
 
     @Test
     void probe() throws Exception {
-        System.setProperty(GpuNewtonRaphson.CPU_FALLBACK_PROPERTY, "false"); // ON DEVICE or throw
         String branchId = System.getenv().getOrDefault("OLF_GPU_DISC_CTG", "LINE-4985-165");
         System.out.printf("%n=== SINGLE-LF GPU-vs-CPU (on device) %s | eps=%s slackTol=%s ===%n", branchId,
                 System.getenv().getOrDefault("OLF_GPU_DISC_EPS", "prod"),

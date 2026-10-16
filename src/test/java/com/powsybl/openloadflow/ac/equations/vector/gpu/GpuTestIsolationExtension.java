@@ -18,8 +18,7 @@ import org.junit.jupiter.api.extension.ExtensionContext;
  *
  * <p>Why this exists: a GPU test that only compares against CPU results CANNOT detect that the GPU
  * never ran. CPU-identical results are the fallback CONTRACT, the fallback warning goes to a logger
- * the test logback config attaches no appender to, and {@code olf.gpu.cpuFallback=false} only covers
- * throws reaching that one catch. {@code GpuPhaseControlTest} passed for a whole session while the
+ * the test logback config attaches no appender to. {@code GpuPhaseControlTest} passed for a whole session while the
  * GPU never executed once.
  *
  * <p>This extension used to ALSO reset the batched solver's JVM-global config before each test, because

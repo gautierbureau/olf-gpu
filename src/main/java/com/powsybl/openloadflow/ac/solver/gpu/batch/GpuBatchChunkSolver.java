@@ -475,6 +475,24 @@ final class GpuBatchChunkSolver {
         boolean[][] disabledMask = new boolean[chunkSize][nElements];
 
         int[][] disabledIdx = new int[chunkSize][];      // element indices each slot currently disables (1-2), null = none
+        // bus V column -> the closed (P1 Q1 P2 Q2 ph1 v1 ph2 v2 ..., stride 12) and open (P1 Q1 P2 Q2 v1 v2, stride 6, after
+        // the closed ones in the element order) branch elements with an end there
+        java.util.Map<Integer, List<Integer>> elementsAtVCol = new java.util.HashMap<>();
+        int ncbElems = gpuData.cbIdx().length / 12;
+        for (int e = 0; e < ncbElems; e++) {
+            for (int col : new int[] {gpuData.cbIdx()[e * 12 + 5], gpuData.cbIdx()[e * 12 + 7]}) {
+                if (col >= 0) {
+                    elementsAtVCol.computeIfAbsent(col, k -> new ArrayList<>()).add(e);
+                }
+            }
+        }
+        for (int e = 0; e < gpuData.obIdx().length / 6; e++) {
+            for (int col : new int[] {gpuData.obIdx()[e * 6 + 4], gpuData.obIdx()[e * 6 + 5]}) {
+                if (col >= 0) {
+                    elementsAtVCol.computeIfAbsent(col, k -> new ArrayList<>()).add(ncbElems + e);
+                }
+            }
+        }
         int[][] rowModePerScenario = new int[chunkSize][];   // per-scenario row mode (re-assigned every chunk)
         // Per-scenario target overrides (generator contingencies): flat (dTargetIndex = slot*n + row, value)
         // lists rebuilt per chunk. Empty when no generator outage is in the chunk.
@@ -800,17 +818,7 @@ final class GpuBatchChunkSolver {
                                 // kernel: this is the per-scenario pi-model override the tap channel
                                 // already uses, and the cb evaluation reads it through findTapOverride.
                                 double[] cbRow = GpuBatchSideOpen.danglingCbRow(so.branch(), so.side());
-                                // ...unless the live end is in the island the contingency cuts off: OLF disables that
-                                // bus and every branch on it, while the dangling shunt left live there fed a remote
-                                // member's reactive injection into its group's sharing rows at the frozen 1 pu
-                                // (network.xiidm CXUL: CXSS_2/_4's step-up transformers, 4.3e-3 kV at CXSS_1/_3)
-                                int soCb = elementMapper.getElementIndex(so.branch());
-                                int liveVCol = gpuData.cbIdx()[soCb * 12 + (so.side() == 1 ? 7 : 5)];
-                                if (cbRow != null && frozenRowsByIndex[ci] != null
-                                        && java.util.Arrays.stream(frozenRowsByIndex[ci]).anyMatch(r -> r == liveVCol)) {
-                                    cbRow = null;
-                                }
-                                if (cbRow == null) {         // not expressible, or dead -> mask the element
+                                if (cbRow == null) {         // not expressible -> keep the old behaviour
                                     int cbIdx2 = elementMapper.getElementIndex(so.branch());
                                     disabledMask[s][cbIdx2] = true;
                                     eis[ei++] = cbIdx2;
@@ -861,6 +869,31 @@ final class GpuBatchChunkSolver {
                                 eis[ei++] = idx;
                             }
                             disabledIdx[s] = eis;
+                            // OLF disables every bus the contingency islands and every branch left on it. The island's
+                            // rows are frozen identities here, but such a branch stayed live at the frozen 1 pu, and a remote
+                            // voltage-control member's reactive injection reads it: the charging of a line inside the
+                            // island, or of a feeder left dangling INTO it, entered the group's sharing rows (network.xiidm
+                            // CXUL: CXSS_2/_4's step-up transformers, 4.3e-3 kV at CXSS_1/_3). A side-opened branch is
+                            // judged by its live end alone - its open end is the lost bus, frozen by design.
+                            java.util.Set<Integer> frozenCols = new java.util.HashSet<>();
+                            for (int r : frozenRowsByIndex[ci]) {
+                                frozenCols.add(r);
+                            }
+                            java.util.Set<Integer> sideOpenElems = new java.util.HashSet<>();
+                            for (BatchContingency.SideOpen so : sideOpens) {
+                                int e = elementMapper.getElementIndex(so.branch());
+                                sideOpenElems.add(e);
+                                if (frozenCols.contains(gpuData.cbIdx()[e * 12 + (so.side() == 1 ? 7 : 5)])) {
+                                    disabledMask[s][e] = true;
+                                }
+                            }
+                            for (int r : frozenRowsByIndex[ci]) {
+                                for (int e : elementsAtVCol.getOrDefault(r, List.of())) {
+                                    if (!sideOpenElems.contains(e)) {
+                                        disabledMask[s][e] = true;
+                                    }
+                                }
+                            }
                             nActive[s] -= frozenRowsByIndex[ci].length;  // islanded buses' equations leave the CPU index
                             if (System.getenv("OLF_GPU_SA_RESID") != null) {
                                 System.err.printf("DEV_NACTIVE ctg=%s n=%d frozen=%d nActive=%d%n",

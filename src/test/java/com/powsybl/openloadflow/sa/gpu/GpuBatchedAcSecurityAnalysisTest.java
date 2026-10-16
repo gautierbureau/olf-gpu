@@ -2530,6 +2530,63 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         assertGpuMatchesCpu(network, ctgs, 1e-12, lfp, true);
     }
 
+    /** A line outage islands one of a remote control's three controllers together with the bus it hangs from, so
+     *  the charged line between them is INSIDE the island. OLF disables both buses and the line; the device froze the
+     *  buses at 1 pu and kept the line, whose charging is part of gc's reactive injection and reached gb's sharing
+     *  row: 0.25 x -0.32 pu, the survivors' split 384.2 / 117.4 MVAr against OLF's 376.1 / 125.4 (their 30:10 keys). */
+    @org.junit.jupiter.api.Test
+    void deviceIslandedControllersChargedLineMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = Network.create("islanded-controller-line", "code");
+        com.powsybl.iidm.network.Substation s = network.newSubstation().setId("s").add();
+        java.util.function.Function<String, com.powsybl.iidm.network.VoltageLevel> bbVl = id -> {
+            com.powsybl.iidm.network.VoltageLevel v = s.newVoltageLevel().setId(id).setNominalV(400)
+                    .setTopologyKind(com.powsybl.iidm.network.TopologyKind.BUS_BREAKER).add();
+            v.getBusBreakerView().newBus().setId(id + "_b").add();
+            return v;
+        };
+        for (String vl : List.of("vl0", "vl3", "vp", "vx")) {
+            bbVl.apply(vl);
+        }
+        java.util.function.BiConsumer<String, String[]> line = (id, ends) -> network.newLine().setId(id)
+                .setVoltageLevel1(ends[0]).setBus1(ends[0] + "_b").setConnectableBus1(ends[0] + "_b")
+                .setVoltageLevel2(ends[1]).setBus2(ends[1] + "_b").setConnectableBus2(ends[1] + "_b")
+                .setR(0.4).setX(Double.parseDouble(ends[2])).setG1(0).setB1(Double.parseDouble(ends[3]))
+                .setG2(0).setB2(Double.parseDouble(ends[3])).add();
+        String[][] gens = {{"ga", "30"}, {"gb", "10"}, {"gc", "40"}};
+        for (String[] g : gens) {
+            com.powsybl.iidm.network.VoltageLevel vg = bbVl.apply("v" + g[0]);
+            vg.newGenerator().setId(g[0]).setBus("v" + g[0] + "_b").setConnectableBus("v" + g[0] + "_b")
+                    .setMinP(0).setMaxP(500).setTargetP(60).setTargetQ(0).setTargetV(405).setVoltageRegulatorOn(true).add();
+            network.getGenerator(g[0]).newMinMaxReactiveLimits().setMinQ(-3000).setMaxQ(3000).add();
+            network.getGenerator(g[0]).newExtension(com.powsybl.iidm.network.extensions.CoordinatedReactiveControlAdder.class)
+                    .withQPercent(Double.parseDouble(g[1])).add();
+        }
+        network.getVoltageLevel("vp").newLoad().setId("ldp").setBus("vp_b").setConnectableBus("vp_b").setP0(100).setQ0(150).add();
+        for (String[] g : gens) {                                          // all three regulate vp remotely
+            network.getGenerator(g[0]).setRegulatingTerminal(network.getLoad("ldp").getTerminal());
+        }
+        line.accept("lga", new String[] {"vga", "vp", "6", "0"});
+        line.accept("lgb", new String[] {"vgb", "vp", "6", "0"});
+        line.accept("lgc", new String[] {"vgc", "vx", "6", "2e-4"});    // inside the island once lx goes
+        line.accept("lx", new String[] {"vx", "vp", "6", "0"});
+        line.accept("lp0", new String[] {"vp", "vl0", "10", "0"});
+        line.accept("lp3", new String[] {"vp", "vl3", "10", "0"});
+        line.accept("l03", new String[] {"vl0", "vl3", "10", "0"});
+        network.getVoltageLevel("vl0").newGenerator().setId("gs").setBus("vl0_b").setConnectableBus("vl0_b")
+                .setMinP(0).setMaxP(2000).setTargetP(400).setTargetV(400).setVoltageRegulatorOn(true).add();
+        network.getVoltageLevel("vl0").newLoad().setId("lds").setBus("vl0_b").setConnectableBus("vl0_b").setP0(400).setQ0(100).add();
+        network.getVoltageLevel("vl3").newLoad().setId("ld3").setBus("vl3_b").setConnectableBus("vl3_b").setP0(180).setQ0(80).add();
+        List<Contingency> ctgs = List.of(new Contingency("lx", new BranchContingency("lx")));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters();
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
+                .setSlackBusSelectionMode(com.powsybl.openloadflow.network.SlackBusSelectionMode.NAME)
+                .setSlackBusesIds(List.of("vl0"));
+        GpuBatchScopeCensus.reset();
+        assertGpuMatchesCpu(network, ctgs, 1e-12, lfp, true);
+    }
+
     private void assertRemoteMergedSectionsMatchCpu(int sections, java.util.Set<String> refused) {
         assertRemoteMergedSectionsMatchCpu(sections, refused, "PLAN:VC_REMERGE_REMOTE_SUBGROUP");
     }

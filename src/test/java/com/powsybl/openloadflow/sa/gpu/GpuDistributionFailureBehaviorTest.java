@@ -206,4 +206,43 @@ class GpuDistributionFailureBehaviorTest extends AbstractOpenSecurityAnalysisTes
         assertEquals(1L, GpuBatchScopeCensus.snapshot().getOrDefault("RUNTIME:status=-2", 0L),
                 "the device must have rejected the scenario itself; census=" + GpuBatchScopeCensus.snapshot());
     }
+
+    /** A POST-CONTINGENCY slack-only distribution beyond the slack's rooms: the slack generator is the only
+     *  participant, at its minimum, and losing the load asks it to go down. OLF's water-fill places what the
+     *  slack generator's rooms allow and the behaviour decides on the rest. The device's slack-only check used
+     *  to place everything, unbounded: under FAIL the scenario converged on the device where OLF fails it, and
+     *  under LEAVE_ON_SLACK_BUS it reported more distributed power than OLF. */
+    @Test
+    void contingencySlackOnlyBeyondItsRoomsFailsLikeOlf() {
+        Network network = everyoneAtMinP();
+        network.getGenerator("gvl2").newExtension(ActivePowerControlAdder.class).withParticipate(false).add();
+        List<Contingency> contingencies = List.of(new Contingency("ld", new LoadContingency("ld")));
+        SecurityAnalysisResult cpu = run(false, network, contingencies, params(PROPORTIONAL_TO_GENERATION_P_MAX, LEAVE_ON_SLACK_BUS));
+        assertEquals(PostContingencyComputationStatus.CONVERGED, cpu.getPostContingencyResults().get(0).getStatus(),
+                "OLF leaves the mismatch at the slack");
+        GpuBatchScopeCensus.reset();
+        SecurityAnalysisResult gpu = run(true, network, contingencies, params(PROPORTIONAL_TO_GENERATION_P_MAX, LEAVE_ON_SLACK_BUS));
+        assertEquals(PostContingencyComputationStatus.CONVERGED, gpu.getPostContingencyResults().get(0).getStatus());
+        assertEquals(1, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(),
+                "the load outage must batch (or the test proves nothing); census=" + GpuBatchScopeCensus.snapshot());
+        assertEquals(cpu.getPostContingencyResults().get(0).getDistributedActivePower(),
+                gpu.getPostContingencyResults().get(0).getDistributedActivePower(), 1e-9,
+                "what the slack generator's rooms let OLF place");
+        var cpuBuses = cpu.getPostContingencyResults().get(0).getNetworkResult().getBusResults();
+        var gpuBuses = gpu.getPostContingencyResults().get(0).getNetworkResult().getBusResults();
+        for (int b = 0; b < cpuBuses.size(); b++) {
+            assertEquals(cpuBuses.get(b).getV(), gpuBuses.get(b).getV(), 1e-12, "bus voltage " + cpuBuses.get(b).getBusId());
+        }
+
+        cpu = run(false, network, contingencies, params(PROPORTIONAL_TO_GENERATION_P_MAX, FAIL));
+        assertEquals(CONVERGED, cpu.getPreContingencyResult().getStatus());
+        assertEquals(PostContingencyComputationStatus.FAILED, cpu.getPostContingencyResults().get(0).getStatus(),
+                "OLF: the failure behaviour FAIL fails the post-contingency load flow");
+        GpuBatchScopeCensus.reset();
+        gpu = run(true, network, contingencies, params(PROPORTIONAL_TO_GENERATION_P_MAX, FAIL));
+        assertEquals(CONVERGED, gpu.getPreContingencyResult().getStatus());
+        assertEquals(PostContingencyComputationStatus.FAILED, gpu.getPostContingencyResults().get(0).getStatus(), "device: same");
+        assertEquals(1L, GpuBatchScopeCensus.snapshot().getOrDefault("RUNTIME:status=-2", 0L),
+                "the device must have rejected the scenario itself; census=" + GpuBatchScopeCensus.snapshot());
+    }
 }

@@ -182,6 +182,7 @@ public final class GpuAcDataExtractor {
                 ds.dsPhiRow(), ds.dsFactor(), ds.dsSlackPhiRow(), ds.dsSlackTargetP(),
                 ds.dsBaseTargetP(), ds.dsMaxDelta(), ds.dsMinDelta(),
                 ds.dsMode(), ds.dsMarginUp(), ds.dsMarginDown(), ds.dsSlackMarginUp(), ds.dsSlackMarginDown(),
+                ds.dsSlackRoomUp(), ds.dsSlackRoomDown(),
                 ds.dgBus(), ds.dgFactor(), ds.dgMaxDelta(), ds.dgMinDelta(),
                 ds.dgMarginUp(), ds.dgMarginDown(), ds.busGenStart(), ds.busGenEnd(),
                 ds.dsBusNum(), ds.dgGenId(),

@@ -340,6 +340,7 @@ public final class GpuAcOuterLoopPacks {
                   double[] dsBaseTargetP, double[] dsMaxDelta, double[] dsMinDelta,
                   int dsMode, double[] dsMarginUp, double[] dsMarginDown,
                   double dsSlackMarginUp, double dsSlackMarginDown,
+                  double dsSlackRoomUp, double dsSlackRoomDown,
                   int[] dgBus, double[] dgFactor, double[] dgMaxDelta, double[] dgMinDelta,
                   double[] dgMarginUp, double[] dgMarginDown, int[] busGenStart, int[] busGenEnd,
                   int[] dsBusNum, String[] dgGenId) {
@@ -931,6 +932,8 @@ public final class GpuAcOuterLoopPacks {
         double dsSlackFactor = 0;                                       // slack's own participation (denominator only)
         double dsSlackMarginUp = 0;                                     // REMAINING_MARGIN: the slack's own margins
         double dsSlackMarginDown = 0;
+        double dsSlackRoomUp = Double.POSITIVE_INFINITY;                // the slack's participating generators' total
+        double dsSlackRoomDown = Double.NEGATIVE_INFINITY;              // rooms: what a slack-only distribution can place
         List<Integer> dsPhiRow = new ArrayList<>();
         List<Integer> dgBus = new ArrayList<>();
         List<Double> dgFactorRaw = new ArrayList<>();
@@ -972,8 +975,13 @@ public final class GpuAcOuterLoopPacks {
                 // pack with no row (dgBus -1); the slack's placement is the sum of their moves. Loads have no
                 // limits, so a load-based slack keeps its fixed share.
                 if (!dsParams.isLoadBased()) {
+                    dsSlackRoomUp = 0;
+                    dsSlackRoomDown = 0;
                     for (LfGenerator g : bus.getGenerators()) {
                         if (dsParams.factor(g) != 0) {
+                            double[] r = dsParams.rooms(g, dsParams.anchorTargetP(g));
+                            dsSlackRoomUp += r[0];
+                            dsSlackRoomDown += r[1];
                             addPackGenerator(g, -1, dsParams, dgBus, dgGenId, dgFactorRaw, dgMaxDelta, dgMinDelta,
                                     dgMarginUp, dgMarginDown);
                         }
@@ -1092,7 +1100,7 @@ public final class GpuAcOuterLoopPacks {
                 GpuAcArrays.toDoubleArray(dsMinDelta),
                 dsParams.isRemainingMargin() ? 1 : 0,
                 GpuAcArrays.toDoubleArray(dsMarginUp), GpuAcArrays.toDoubleArray(dsMarginDown),
-                dsSlackMarginUp, dsSlackMarginDown,
+                dsSlackMarginUp, dsSlackMarginDown, dsSlackRoomUp, dsSlackRoomDown,
                 GpuAcArrays.toIntArray(dgBus), dgFactor,
                 GpuAcArrays.toDoubleArray(dgMaxDelta), GpuAcArrays.toDoubleArray(dgMinDelta),
                 GpuAcArrays.toDoubleArray(dgMarginUp), GpuAcArrays.toDoubleArray(dgMarginDown),

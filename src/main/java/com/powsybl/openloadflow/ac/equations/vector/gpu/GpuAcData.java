@@ -90,6 +90,10 @@ public record GpuAcData(double[] cbIn, int[] cbIdx, int[] cbPcSide, double[] obI
                         double[] dsBaseTargetP, double[] dsMaxDelta, double[] dsMinDelta,
                         int dsMode, double[] dsMarginUp, double[] dsMarginDown,
                         double dsSlackMarginUp, double dsSlackMarginDown,
+                        /** The slack bus's participating generators' total rooms from their anchor targets: what a
+                         *  slack-only distribution can place before OLF's water-fill leaves a remaining mismatch
+                         *  (infinite for a load-based slack). */
+                        double dsSlackRoomUp, double dsSlackRoomDown,
                         int[] dgBus, double[] dgFactor, double[] dgMaxDelta, double[] dgMinDelta,
                         double[] dgMarginUp, double[] dgMarginDown, int[] busGenStart, int[] busGenEnd,
                         int[] dsBusNum, String[] dgGenId,
@@ -207,7 +211,8 @@ public record GpuAcData(double[] cbIn, int[] cbIdx, int[] cbPcSide, double[] obI
                 && java.util.Arrays.equals(cbPcSide, other.cbPcSide)
                 && dsMode == other.dsMode
                 && java.util.Arrays.equals(dsMarginUp, other.dsMarginUp) && java.util.Arrays.equals(dsMarginDown, other.dsMarginDown)
-                && dsSlackMarginUp == other.dsSlackMarginUp && dsSlackMarginDown == other.dsSlackMarginDown;
+                && dsSlackMarginUp == other.dsSlackMarginUp && dsSlackMarginDown == other.dsSlackMarginDown
+                && dsSlackRoomUp == other.dsSlackRoomUp && dsSlackRoomDown == other.dsSlackRoomDown;
     }
 
     public int getClosedBranchCount() {

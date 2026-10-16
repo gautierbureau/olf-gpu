@@ -683,6 +683,10 @@ public final class GpuAcNewtonSolver {
      * each at its own {@code minTargetP}/{@code maxTargetP} and removes it, so a bus-level aggregate
      * reproduces OLF only while nothing saturates.
      */
+    /** The slack bus's participating generators' total rooms (GpuAcData.dsSlackRoomUp/Down): the bound of a
+     *  slack-only distribution, beyond which the device flags OLF's remaining mismatch. */
+    public static native void setBatchDsSlackRooms(long handle, double roomUp, double roomDown);
+
     public static native void setBatchDsGenerators(long handle, int[] genBus, double[] genFactor,
                                                    double[] genMaxDelta, double[] genMinDelta,
                                                    double[] genMarginUp, double[] genMarginDown,

@@ -1268,11 +1268,13 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                 GpuAcNewtonSolver.setBatchDriverStartLoop(handle, restartLoopKind);
             }
             restartLoopKind = 0;
-            if (driverDsRejectResidual && driverDsLoop() != null && cachedData.dsPhiRow().length == 0) {
-                // No participant row: either nobody participates (the pack dropped the distribution, the
-                // mismatch simply stays at the slack) or the slack alone does (its absorbed total has no limit
-                // to decide a failure with). OLF's run is decided by its (possibly empty) participating set
-                // under this behaviour — the CPU fallback runs OLF's own loop.
+            if (driverDsRejectResidual && driverDsLoop() != null && cachedData.dsPhiRow().length == 0
+                    && (cachedData.dsSlackPhiRow() < 0 || Double.isInfinite(cachedData.dsSlackRoomUp()))) {
+                // No participant row and no slack generator to bound the slack's own share: either nobody
+                // participates (the pack dropped the distribution, the mismatch simply stays at the slack) or the
+                // slack's share has no generator limits (a load-based slack). The device cannot tell where OLF's
+                // water-fill leaves a remaining mismatch, so OLF's own loop decides this failure behaviour. A
+                // slack-only distribution over the slack's generators is bounded by their rooms on the device.
                 throw new PowsyblException("GPU driver: a distribution without participant rows cannot apply "
                         + "slackDistributionFailureBehavior " + acLoadFlowParameters.getSlackDistributionFailureBehavior()
                         + "; the solve goes to the CPU");

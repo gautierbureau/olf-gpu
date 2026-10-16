@@ -8,6 +8,7 @@
 package com.powsybl.openloadflow.ac.equations.vector.gpu;
 
 import com.powsybl.iidm.network.Network;
+import com.powsybl.iidm.network.extensions.ActivePowerControlAdder;
 import com.powsybl.iidm.network.test.EurostagTutorialExample1Factory;
 import com.powsybl.loadflow.LoadFlow;
 import com.powsybl.loadflow.LoadFlowParameters;
@@ -32,7 +33,8 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  * The GPU load flow as a SAFE DEFAULT: a load flow the device driver refuses goes, for the rest of the run,
  * to OLF's own CPU Newton-Raphson and its own outer loops, and produces exactly the CPU solution — never
  * wrong, only un-accelerated. The refused shape here is a slack distribution whose failure behaviour the
- * device cannot apply ({@code FAIL}) with no participant row: the slack generator is the only one.
+ * device cannot apply ({@code FAIL}) with nobody participating: the only generator does not participate, and
+ * the mismatch is inside OLF's slack band, so OLF converges without distributing.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
@@ -48,12 +50,19 @@ class GpuCpuFallbackTest {
                 "GPU full-NR native lib not available (build it with native/build-gpu.sh + cuDSS)");
     }
 
+    private static Network network() {
+        Network network = EurostagFactory.fix(EurostagTutorialExample1Factory.create());
+        network.getGenerator("GEN").newExtension(ActivePowerControlAdder.class).withParticipate(false).add();
+        return network;
+    }
+
     private static LoadFlowParameters params(boolean gpu) {
         LoadFlowParameters p = new LoadFlowParameters().setUseReactiveLimits(false).setDistributedSlack(true);
         OpenLoadFlowParameters ext = OpenLoadFlowParameters.create(p)
                 .setSlackBusSelectionMode(SlackBusSelectionMode.NAME)
                 .setSlackBusesIds(List.of("VLGEN"))
-                .setSlackDistributionFailureBehavior(OpenLoadFlowParameters.SlackDistributionFailureBehavior.FAIL);
+                .setSlackDistributionFailureBehavior(OpenLoadFlowParameters.SlackDistributionFailureBehavior.FAIL)
+                .setSlackBusPMaxMismatch(5);
         if (gpu) {
             ext.setAcSolverType(GpuNewtonRaphsonFactory.NAME);
         }
@@ -64,12 +73,12 @@ class GpuCpuFallbackTest {
     void refusedLoadFlowRunsOnTheCpuNewtonRaphson() {
         LoadFlow.Runner runner = new LoadFlow.Runner(new OpenLoadFlowProvider(new DenseMatrixFactory()));
 
-        Network cpu = EurostagFactory.fix(EurostagTutorialExample1Factory.create());
+        Network cpu = network();
         LoadFlowResult cpuResult = runner.run(cpu, params(false));
         assertTrue(cpuResult.isFullyConverged());
 
         long fallbacksBefore = GpuNewtonRaphson.CPU_FALLBACK_COUNT.get();
-        Network gpu = EurostagFactory.fix(EurostagTutorialExample1Factory.create());
+        Network gpu = network();
         LoadFlowResult gpuResult = runner.run(gpu, params(true));
         assertTrue(gpuResult.isFullyConverged());
         assertTrue(GpuNewtonRaphson.CPU_FALLBACK_COUNT.get() > fallbacksBefore, "the device must refuse this load flow");

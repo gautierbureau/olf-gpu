@@ -7250,9 +7250,13 @@ static int dsDebugTraceSlot() {
 // undoes the loss pre-distribution), the parent's absorbed total for a strategy pair (OLF re-anchors there).
 // OLF's ActivePowerDistribution resets to the anchor and places the whole remaining mismatch only above
 // P_RESIDUE_EPS: below it the generators stay at the anchor, and the outer loop still re-solves.
+// roomUp/roomDown: the slack generators' total rooms from their base targets. OLF's water-fill places at most
+// that, from the anchor; what is left is its remaining mismatch, flagged in residual (FAIL / THROW decide on it),
+// and a check that finds the generators already saturated moves nothing (movedBuses false: STABLE).
 __global__ void slackOnlyDsCheck(int nScenarios, int n, int slackPhiRowBase, const int* slackRowOv, double slackTargetP,
                                  double slackDistTol, double residueEps, const double* qBuf, const char* rlActive,
-                                 const double* anchor, double* absorbed, char* switched) {
+                                 const double* anchor, double roomUp, double roomDown,
+                                 double* absorbed, char* switched, char* residual) {
     int s = blockIdx.x * blockDim.x + threadIdx.x;
     if (s >= nScenarios || !rlActive[s]) return;
     int slackPhiRow = slackRowOv != nullptr && slackRowOv[s] >= 0 ? slackRowOv[s] : slackPhiRowBase;   // relocated slack
@@ -7260,8 +7264,15 @@ __global__ void slackOnlyDsCheck(int nScenarios, int n, int slackPhiRowBase, con
     if (fabs(m) > slackDistTol && fabs(m) > residueEps) {   // OLF's check: both bounds
         double a = anchor != nullptr ? anchor[s] : 0.0;
         double total = absorbed[s] + m - a;                  // this check's mismatch plus the undone previous move
-        absorbed[s] = a + (fabs(total) > residueEps ? total : 0.0);
-        switched[s] = 1;
+        double placed = fmin(fmax(total, roomDown - a), roomUp - a);
+        if (fabs(total - placed) > residueEps) {
+            residual[s] = 1;
+        }
+        double next = a + (fabs(placed) > residueEps ? placed : 0.0);
+        if (placed == total || next != absorbed[s]) {
+            switched[s] = 1;
+        }
+        absorbed[s] = next;
     }
 }
 
@@ -8661,6 +8672,10 @@ struct BatchSolverContext {
     DeviceBuf dHvStatus;                                     // per (scenario, hvdc): LINEAR/SAT_1_2/SAT_2_1/FROZEN
     DeviceBuf dHvAppliedD1, dHvAppliedD2;                    // the converter-row delta currently APPLIED
     DeviceBuf dDsResidual;                                   // nS chars: waterfill left an out-of-tolerance residual                                   // per scenario (nS): frozen slack-retained mismatch share
+    // The slack bus's own participating generators' total rooms from their anchor targets (setBatchDsSlackRooms):
+    // what a slack-only distribution can place before OLF's water-fill leaves a remaining mismatch. Unbounded until
+    // installed, and for a load-based slack.
+    double dsSlackRoomUp = INFINITY, dsSlackRoomDown = -INFINITY;
     bool dsSlackOnly = false;                                // DS enabled with the SLACK generator as the only participant:
     DeviceBuf dDsSlackAbsorbed;                              // nS doubles — mismatch absorbed into the slack's own target so far
     DeviceBuf dDsSlackAnchor;                                // nS doubles — slack-only strategy pairs: the parent's total
@@ -13533,11 +13548,14 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         }
     } else if (inDsPhase) {                                // distributed-slack outer loop: spread the slack mismatch
         if (ctx->dsSlackOnly) {
+            if (!ctx->dDsResidual.p) ctx->dDsResidual.alloc(nS * sizeof(char));
+            CUDA_CHECK(cudaMemsetAsync(ctx->dDsResidual.p, 0, nS * sizeof(char), ctx->stream));
             slackOnlyDsCheck<<<grid(nS), BLOCK, 0, ctx->stream>>>(nS, n, ctx->dsSlackPhiRow,
                     ctx->hasDsSlackRowOv ? ctx->dDsSlackRowOv.as<int>() : nullptr, ctx->dsSlackTargetP,
                     SLACK_DIST_TOL, P_RESIDUE_EPS, ctx->dQbuf.as<double>(), ctx->dRlActive.as<char>(),
                     ctx->dsSlackHasAnchor ? ctx->dDsSlackAnchor.as<double>() : nullptr,
-                    ctx->dDsSlackAbsorbed.as<double>(), ctx->dRlSwitched.as<char>());
+                    ctx->dsSlackRoomUp, ctx->dsSlackRoomDown,
+                    ctx->dDsSlackAbsorbed.as<double>(), ctx->dRlSwitched.as<char>(), ctx->dDsResidual.as<char>());
         }
         if (ctx->nds > 0) {
             // Recompute the slack's retained share from the CURRENT total imbalance every pass (NOT frozen at
@@ -14028,7 +14046,7 @@ psgStep(ctx, nS, n, outer, "afterDistrQ");
                     std::fabs(rem) > SLACK_DIST_TOL ? 1 : 0);
         }
     }
-    if (inDsPhase && ctx->nds > 0 && dsRejectResidual) {
+    if (inDsPhase && (ctx->nds > 0 || ctx->dsSlackOnly) && dsRejectResidual) {
         // slackDistributionFailureBehavior != LEAVE_ON_SLACK_BUS: a scenario whose participants all
         // saturated must NOT be reported converged with the residual absorbed at the slack — route it
         // to the CPU fallback (status -2), which replays it with the run's real failure behavior.
@@ -16194,6 +16212,17 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
 
 // Per-GENERATOR distributed-slack participants: the factors and limits OLF's water-fill actually
 // saturates on, grouped by bus (a bus's row value is the sum over its contiguous slice).
+// The slack bus's participating generators' total rooms: the bound of a slack-only distribution (slackOnlyDsCheck).
+extern "C" JNIEXPORT void JNICALL
+Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchDsSlackRooms(
+        JNIEnv*, jclass, jlong handle, jdouble roomUp, jdouble roomDown) {
+    auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
+    if (ctx != nullptr) {
+        ctx->dsSlackRoomUp = roomUp;
+        ctx->dsSlackRoomDown = roomDown;
+    }
+}
+
 extern "C" JNIEXPORT void JNICALL
 Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchDsGenerators(
         JNIEnv* env, jclass, jlong handle, jintArray jBus, jdoubleArray jFactor,

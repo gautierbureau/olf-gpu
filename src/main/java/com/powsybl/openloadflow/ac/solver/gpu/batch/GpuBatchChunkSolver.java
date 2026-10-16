@@ -1612,7 +1612,11 @@ final class GpuBatchChunkSolver {
                                 continue;
                             }
                             if (!hasDs) {
-                                preDistributedByIndex[preIdx] = preLossBySlot[s];   // the slack generator takes it all
+                                // the slack generators take what their rooms allow, as OLF's water-fill places it;
+                                // the rest stays for the DistributedSlack check, where the failure behaviour decides
+                                double placed = Math.min(Math.max(preLossBySlot[s], gpuData.dsSlackRoomDown()),
+                                        gpuData.dsSlackRoomUp());
+                                preDistributedByIndex[preIdx] = placed;
                                 // SLACK-ONLY (the slack bus is the only participant): OLF distributes
                                 // the whole scheduled loss into the slack generator's own target, so
                                 // its target for this scenario is base + loss. The device has no
@@ -1632,13 +1636,13 @@ final class GpuBatchChunkSolver {
                                 if (dsSlackShift == null) {
                                     dsSlackShift = new double[chunkSize];
                                 }
-                                dsSlackShift[s] = preLossBySlot[s];
+                                dsSlackShift[s] = placed;
                                 if (System.getenv("OLF_GPU_PRELOSS_TRACE") != null) {
                                     System.err.printf("PRELOSS_SLACKONLY ctg=%s loss=%s slackBase=%s -> slackTarget=%s%n",
                                             contingencies.get(group.get(chunkStart + s)).contingencyId(),
                                             Double.toString(preLossBySlot[s]),
                                             Double.toString(gpuData.dsSlackTargetP()),
-                                            Double.toString(gpuData.dsSlackTargetP() + preLossBySlot[s]));
+                                            Double.toString(gpuData.dsSlackTargetP() + placed));
                                 }
                                 continue;
                             }

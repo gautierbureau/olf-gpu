@@ -156,5 +156,6 @@ public final class GpuBatchOuterLoopTables {
                 gpuData.dgMaxDelta(), gpuData.dgMinDelta(),
                 gpuData.dgMarginUp(), gpuData.dgMarginDown(),
                 gpuData.busGenStart(), gpuData.busGenEnd());
+        GpuAcNewtonSolver.setBatchDsSlackRooms(handle, gpuData.dsSlackRoomUp(), gpuData.dsSlackRoomDown());
     }
 }

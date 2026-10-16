@@ -188,9 +188,7 @@ class GpuLoadFlowTest extends com.powsybl.openloadflow.network.AbstractLoadFlowN
                     .withB0(-0.001f).withStandbyStatus(true).add();
             return network;
         }, "monitoring svc base activation",
-                // LEAVE_ON_SLACK_BUS: see GpuPhaseControlTest — the slack generator is the only participant
-                p -> com.powsybl.openloadflow.OpenLoadFlowParameters.create(p).setSvcVoltageMonitoring(true)
-                        .setSlackDistributionFailureBehavior(OpenLoadFlowParameters.SlackDistributionFailureBehavior.LEAVE_ON_SLACK_BUS), 1e-9);
+                p -> com.powsybl.openloadflow.OpenLoadFlowParameters.create(p).setSvcVoltageMonitoring(true), 1e-9);
         org.junit.jupiter.api.Assertions.assertEquals(before,
                 com.powsybl.openloadflow.ac.solver.gpu.GpuNewtonRaphson.CPU_FALLBACK_COUNT.get(),
                 "the monitoring-SVC base solve must run ON the GPU, not silently fall back");
@@ -289,9 +287,7 @@ class GpuLoadFlowTest extends com.powsybl.openloadflow.network.AbstractLoadFlowN
         compareWithParams(HvdcNetworkFactory::createHvdcInAcEmulationInSymetricNetwork, "hvdc frozen start",
                 p -> {
                     p.setHvdcAcEmulation(true).setDistributedSlack(true).setUseReactiveLimits(true);
-                    // LEAVE_ON_SLACK_BUS: see GpuPhaseControlTest — the slack generator is the only participant
-                    OpenLoadFlowParameters.create(p).setStartWithFrozenACEmulation(true)
-                            .setSlackDistributionFailureBehavior(OpenLoadFlowParameters.SlackDistributionFailureBehavior.LEAVE_ON_SLACK_BUS);
+                    OpenLoadFlowParameters.create(p).setStartWithFrozenACEmulation(true);
                 }, 1e-9);
         org.junit.jupiter.api.Assertions.assertEquals(before,
                 com.powsybl.openloadflow.ac.solver.gpu.GpuNewtonRaphson.CPU_FALLBACK_COUNT.get(),
@@ -332,9 +328,7 @@ class GpuLoadFlowTest extends com.powsybl.openloadflow.network.AbstractLoadFlowN
 
     private static LoadFlowParameters frozenStartParameters(boolean gpu) {
         LoadFlowParameters p = new LoadFlowParameters().setHvdcAcEmulation(true).setDistributedSlack(true).setUseReactiveLimits(true);
-        // LEAVE_ON_SLACK_BUS: see GpuPhaseControlTest — the slack generator is the only participant
-        OpenLoadFlowParameters ext = OpenLoadFlowParameters.create(p).setStartWithFrozenACEmulation(true)
-                .setSlackDistributionFailureBehavior(OpenLoadFlowParameters.SlackDistributionFailureBehavior.LEAVE_ON_SLACK_BUS);
+        OpenLoadFlowParameters ext = OpenLoadFlowParameters.create(p).setStartWithFrozenACEmulation(true);
         if (gpu) {
             ext.setAcSolverType(GpuNewtonRaphsonFactory.NAME);
         }

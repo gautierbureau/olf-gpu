@@ -1011,10 +1011,16 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
         // puts 10540 x 13202 BusResults on the heap before anything can spill them and the arm dies at
         // its 14g ceiling. Scoping the monitor to a few ids keeps the full list, the full network and
         // the full chunking, and costs nothing.
-        java.util.Set<String> busDiffCtgs = System.getenv("OLF_GPU_SA_BUSDIFF_CTG") == null
+        java.util.Set<String> busDiffCtgs = new java.util.TreeSet<>(System.getenv("OLF_GPU_SA_BUSDIFF_CTG") == null
                 ? java.util.Set.of()
                 : java.util.Arrays.stream(System.getenv("OLF_GPU_SA_BUSDIFF_CTG").split(","))
-                        .map(String::trim).filter(x -> !x.isEmpty()).collect(Collectors.toSet());
+                        .map(String::trim).filter(x -> !x.isEmpty()).collect(Collectors.toSet()));
+        // OLF_GPU_SA_BUSDIFF_STRATEGIES=1: the same for every contingency a strategy starts from, whose monitor gives
+        // its strategies their bus results too (distributed power matched to 1e-9 MW on network.xiidm LLFP while a
+        // strategy's buses were 8.5e-4 kV apart)
+        if ("1".equals(System.getenv("OLF_GPU_SA_BUSDIFF_STRATEGIES"))) {
+            strategies.forEach(st -> busDiffCtgs.add(st.getContingencyContext().getContingencyId()));
+        }
         // OLF_GPU_SA_BUSDIFF=0 turns it off even with CTG_ONLY: a timing run on an id-selected list must not
         // pay one BusResult per bus per contingency on both arms (1000 rte6515 branches, cold GPU arm: 34.1 s with it, 9.8 s without).
         boolean busDiff = !"0".equals(System.getenv("OLF_GPU_SA_BUSDIFF"))
@@ -1029,8 +1035,12 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
                 ? java.util.Set.of()
                 : java.util.Arrays.stream(System.getenv("OLF_GPU_SA_MON_BRANCH").split(","))
                         .map(String::trim).collect(Collectors.toSet());
+        // OLF_GPU_SA_BUSDIFF_VL_STRIDE=<k>: every k-th voltage level in id order, so that thousands of monitored
+        // results fit the heap (network.xiidm: 4104 strategies x 13502 buses on each arm)
+        int vlStride = Integer.parseInt(System.getenv().getOrDefault("OLF_GPU_SA_BUSDIFF_VL_STRIDE", "1"));
+        List<String> vlIds = network.getVoltageLevelStream().map(com.powsybl.iidm.network.VoltageLevel::getId).sorted().toList();
         java.util.Set<String> monVls = busDiff
-                ? network.getVoltageLevelStream().map(com.powsybl.iidm.network.VoltageLevel::getId)
+                ? java.util.stream.IntStream.range(0, vlIds.size()).filter(i -> i % vlStride == 0).mapToObj(vlIds::get)
                         .collect(Collectors.toSet())
                 : java.util.Set.of();
         // TWO monitors, not one. ContingencyContext.all() left the PRE-contingency network result
@@ -1793,6 +1803,9 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
         String worstId = "-";
         int differingViolations = 0;
         int aboveFloor = 0;
+        List<Map.Entry<String, Double>> ranked = new ArrayList<>();   // strategies above the floor, for the worst list
+        List<Map.Entry<String, Double>> busRanked = new ArrayList<>();   // every bus-diffed strategy: its worst bus
+        List<Map.Entry<String, Double>> violRanked = new ArrayList<>();  // the worst value gap over matching violations
         for (var c : cpu.getOperatorStrategyResults()) {
             String id = c.getOperatorStrategy().getId();
             var r = g.remove(id);
@@ -1808,6 +1821,10 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
                 continue;
             }
             double d = Math.abs(cs.getDistributedActivePower() - gs.getDistributedActivePower());
+            if ("1".equals(System.getenv("OLF_GPU_SA_STRATEGY_DAP_PRINT"))) {   // every strategy's two totals
+                System.out.printf("    STRATEGY_DAP %s cpu=%.12f gpu=%.12f d=%.3e%n", id, cs.getDistributedActivePower(),
+                        gs.getDistributedActivePower(), d);
+            }
             if (Double.isFinite(d) && d > worstDap) {
                 worstDap = d;
                 worstId = id;
@@ -1817,6 +1834,7 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
             }
             if (Double.isFinite(d) && d > 1e-9) {
                 aboveFloor++;
+                ranked.add(java.util.Map.entry(id, d));
             }
             if (cs.getLimitViolationsResult().getLimitViolations().size() != gs.getLimitViolationsResult().getLimitViolations().size()) {
                 differingViolations++;
@@ -1843,26 +1861,54 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
                     }
                 });
             }
+            // the values of the violations both arms report (a flow or a voltage, in its own unit): what the strategy
+            // tells without a monitor
+            Map<String, Double> gViol = new java.util.HashMap<>();
+            gs.getLimitViolationsResult().getLimitViolations().forEach(v -> gViol.put(v.getSubjectId() + "|" + v.getSide() + "|"
+                    + v.getLimitType() + "|" + v.getLimitName() + "|" + v.getAcceptableDuration(), v.getValue()));
+            double violWorst = -1;
+            String violSubject = "";
+            for (var v : cs.getLimitViolationsResult().getLimitViolations()) {
+                Double gvv = gViol.get(v.getSubjectId() + "|" + v.getSide() + "|" + v.getLimitType() + "|" + v.getLimitName()
+                        + "|" + v.getAcceptableDuration());
+                if (gvv != null && Math.abs(gvv - v.getValue()) > violWorst) {
+                    violWorst = Math.abs(gvv - v.getValue());
+                    violSubject = v.getSubjectId() + " " + v.getLimitType();
+                }
+            }
+            if (violWorst >= 0) {
+                violRanked.add(java.util.Map.entry(id + "(" + violSubject + ")", violWorst));
+            }
             // bus voltages, when the run monitors them: the worst bus, and the few worst for the worst strategy
             Map<String, Double> gv = new TreeMap<>();
             gs.getNetworkResult().getBusResults().forEach(b -> gv.put(b.getBusId(), b.getV()));
             List<double[]> diffs = new ArrayList<>();
             List<String> busIds = new ArrayList<>();
+            Map<String, String> vlOfBus = new java.util.HashMap<>();   // a bus id that does not name its level
             for (var b : cs.getNetworkResult().getBusResults()) {
                 Double v = gv.get(b.getBusId());
                 if (v != null && Double.isFinite(v) && Double.isFinite(b.getV())) {
                     diffs.add(new double[] {Math.abs(v - b.getV()), busIds.size()});
                     busIds.add(b.getBusId());
+                    vlOfBus.put(b.getBusId(), b.getVoltageLevelId());
                 }
             }
             if (!diffs.isEmpty()) {
                 diffs.sort((x, y) -> Double.compare(y[0], x[0]));
                 StringBuilder top = new StringBuilder();
                 for (int k = 0; k < Math.min(5, diffs.size()); k++) {
-                    top.append(' ').append(busIds.get((int) diffs.get(k)[1])).append('=').append(String.format("%.2e", diffs.get(k)[0]));
+                    String bid = busIds.get((int) diffs.get(k)[1]);
+                    String vl = vlOfBus.get(bid);
+                    top.append(' ').append(bid).append(vl == null || bid.startsWith(vl) ? "" : "@" + vl)
+                            .append('=').append(String.format("%.2e", diffs.get(k)[0]));
+                }
+                String wb = busIds.get((int) diffs.get(0)[1]);
+                busRanked.add(java.util.Map.entry(id + "(" + wb + (vlOfBus.get(wb) == null || wb.startsWith(vlOfBus.get(wb))
+                        ? "" : "@" + vlOfBus.get(wb)) + ")", diffs.get(0)[0]));
+                if (!"1".equals(System.getenv("OLF_GPU_SA_STRATEGY_DAP_PRINT")) && diffs.get(0)[0] <= 1e-6) {
+                    continue;                                // the tail line below counts it; only the far ones print
                 }
                 System.out.printf("    STRATEGY_BUS %s worst %.3e kV over %d buses:%s%n", id, diffs.get(0)[0], diffs.size(), top);
-                String wb = busIds.get((int) diffs.get(0)[1]);
                 String ctgId = c.getOperatorStrategy().getContingencyContext().getContingencyId();
                 java.util.function.BiFunction<SecurityAnalysisResult, Boolean, Double> parentV = (res, x) -> res.getPostContingencyResults().stream()
                         .filter(pc -> pc.getContingency().getId().equals(ctgId)).findFirst()
@@ -1893,6 +1939,26 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
                 cpu.getOperatorStrategyResults().size(), gpu.getOperatorStrategyResults().size(), statuses,
                 worstDap, worstId, aboveFloor, differingViolations, mismatches.size());
         mismatches.stream().limit(30).forEach(m -> System.out.println("    STRATEGY_DIFF " + m));
+        // the worst strategies under the mismatch gate: a tail far above the parents' is a modelling gap, not slack
+        ranked.sort((x, y) -> Double.compare(y.getValue(), x.getValue()));
+        long above1e6 = ranked.stream().filter(e -> e.getValue() > 1e-6).count();
+        long above1e4 = ranked.stream().filter(e -> e.getValue() > 1e-4).count();
+        System.out.printf("  STRATEGY DAP TAIL: %d above 1e-6 MW, %d above 1e-4 MW; worst:%s%n", above1e6, above1e4,
+                ranked.stream().limit(12).map(e -> String.format(" %s=%.2e", e.getKey(), e.getValue()))
+                        .collect(java.util.stream.Collectors.joining()));
+        for (var tail : List.of(java.util.Map.entry("BUS", busRanked), java.util.Map.entry("VIOLATION VALUE", violRanked))) {
+            List<Map.Entry<String, Double>> l = new ArrayList<>(tail.getValue());
+            if (l.isEmpty()) {
+                continue;
+            }
+            l.sort((x, y) -> Double.compare(y.getValue(), x.getValue()));
+            System.out.printf("  STRATEGY %s TAIL: %d strategies compared, %d above 1e-9, %d above 1e-6, %d above 1e-4 (kV for buses,"
+                            + " the violation's unit otherwise); worst:%s%n", tail.getKey(), l.size(),
+                    l.stream().filter(e -> e.getValue() > 1e-9).count(), l.stream().filter(e -> e.getValue() > 1e-6).count(),
+                    l.stream().filter(e -> e.getValue() > 1e-4).count(),
+                    l.stream().limit(12).map(e -> String.format(" %s=%.2e", e.getKey(), e.getValue()))
+                            .collect(java.util.stream.Collectors.joining()));
+        }
         return mismatches;
     }
 

@@ -375,9 +375,7 @@ final class GpuBatchQualification {
                 updateMainReactiveKeys(bus);
             }
             double[] baseW = gpuData.dqWeight();
-            // OLF_GPU_DQ_REWEIGHT=extract: the whole-network re-extraction instead of the analytic reweight (A/B)
-            String reweightMode = System.getenv("OLF_GPU_DQ_REWEIGHT");
-            double[] newW = "extract".equals(reweightMode) ? null : reweightedDqWeights(es, gpuData, touched);
+            double[] newW = reweightedDqWeights(es, gpuData, touched);
             // The member KEYS after the loss (OLF's qPct on the touched groups' MAIN controls, just updated): the
             // kernels renormalize them over the members a pin leaves enabled, so the loss and an in-flight pin in the
             // same group compose - which fixed per-contribution weights cannot do (the fill applied them over its
@@ -409,31 +407,10 @@ final class GpuBatchQualification {
                 }
             }
             GpuAcData nd = null;
-            if (newW == null || "check".equals(reweightMode)) {
+            if (newW == null) {
                 // the free role of a table-less group may move with the loss: re-extract, as before
                 nd = com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcDataExtractor
                         .extract(network, es, false, false);
-                if ("check".equals(reweightMode) && newW != null) {
-                    // OLF_GPU_DQ_REWEIGHT=check: both, the extraction wins, every difference named
-                    double[] ex = nd.dqWeight();
-                    int nd0 = 0;
-                    StringBuilder sb = new StringBuilder();
-                    if (ex.length != newW.length) {
-                        sb.append(" LENGTH ").append(newW.length).append(" vs ").append(ex.length);
-                    } else {
-                        for (int k = 0; k < ex.length; k++) {
-                            if (ex[k] != newW[k]) {
-                                if (nd0++ < 8) {
-                                    sb.append(String.format(" k=%d row=%d kind=%d kM=%d jM=%d analytic=%.6f extract=%.6f base=%.6f",
-                                            k, gpuData.dqRow()[k], gpuData.dqKind()[k], gpuData.dqKMember()[k], gpuData.dqJMember()[k],
-                                            newW[k], ex[k], baseW[k]));
-                                }
-                            }
-                        }
-                    }
-                    System.err.println("DQ_REWEIGHT_CHECK lost=" + lost.stream().map(g -> g.getId()).toList()
-                            + " touched=" + touched.stream().map(LfBus::getId).toList() + " differing=" + nd0 + sb);
-                }
                 newW = nd.dqWeight();
             }
             if (newW.length != baseW.length) {

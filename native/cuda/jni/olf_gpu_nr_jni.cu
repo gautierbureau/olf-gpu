@@ -267,7 +267,6 @@ namespace {
 // cuDSS iterative-refinement steps. Default 0: the OUTER Newton loop self-corrects any
 // linear-solve inexactness, so refining each solve is redundant for NR — measured ~30% faster
 // on batched N-1 with IDENTICAL convergence (vs the old IR=2 inherited from powsybl-math-native).
-// Override per run with OLF_GPU_IR_STEPS=<n> (e.g. 2) if a stiff/near-singular Jacobian needs it.
 // NB reusing pivots via CUDSS_PHASE_REFACTORIZATION was also benchmarked and gives NO speedup in
 // cuDSS batched mode (its factorization cost is the numeric fill, not pivoting), so it is not used.
 constexpr int IR_N_STEPS = 0;
@@ -296,7 +295,7 @@ constexpr int BLOCK = 64;
 // The open lever, if the two refinement solves per iteration ever matter for wall time, is to SCALE
 // the borrowed row so the repaired diagonal is commensurate with the row's other entries rather than
 // to drop the refinement.
-// ADAPTIVE refinement (default when OLF_GPU_IR_STEPS is unset): cuDSS runs irBaseSteps internally, then the batch
+// ADAPTIVE refinement: cuDSS runs irBaseSteps internally, then the batch
 // loop measures every lane's backward residual ratio ||b - J dx||inf / ||b||inf and refines (r = b - J dx,
 // J d = r, dx += d) only while an active lane sits above OLF_GPU_IR_TOL, up to irMaxSteps in all. Measured on
 // network.xiidm (24,379 contingencies, 443 batched Newton iterations): the fixed 4 steps cost 5 forward/backward
@@ -312,10 +311,6 @@ constexpr int BLOCK = 64;
 inline bool ziMasksEnabled() {
     static const bool off = std::getenv("OLF_GPU_ZI_MASKS") != nullptr && std::string(std::getenv("OLF_GPU_ZI_MASKS")) == "0";
     return !off;
-}
-inline bool adaptiveIr() {
-    const char* e = std::getenv("OLF_GPU_IR_STEPS");
-    return e == nullptr || *e == '\0';
 }
 // BACK TO 1 (2026-10-06, same day): the step's cost was measured on network.xiidm WITHOUT busbar outages, and on
 // the full busbar scope - the structures whose repaired zero diagonals this refinement exists for - turning it off
@@ -340,10 +335,6 @@ static long gIrExtraSteps = 0;                               // adaptive refinem
 static long gIrChecks = 0;                                   // residual checks (one per batched iteration at least)
 
 inline int irSteps(bool hasZeroImpedance) {
-    const char* e = std::getenv("OLF_GPU_IR_STEPS");
-    if (e != nullptr && *e != '\0') {
-        return std::atoi(e);
-    }
     // 4, not 2, since 2026-09-28. The accuracy of the batched factorization on the repaired
     // zero-diagonal rows depends on which OTHER matrices share the batch: network.xiidm/LLAX (a
     // line whose loss islands three buses; its weak pivots are the DUMMY rows of couplers BDTG and
@@ -8231,7 +8222,7 @@ struct BatchSolverContext {
     DeviceBuf dRC, dDeltaC;
     int compactCap = 0;                                      // buffer capacity (nS/2)
     int compactWidth = 0;                                    // currently ANALYZED ubatch width (0 = none)
-    // One ANALYZED cuDSS data object per compact width (OLF_GPU_COMPACT_CACHE, default on): a data object's
+    // One ANALYZED cuDSS data object per compact width: a data object's
     // buffers belong to the batch size it was analyzed at, but a width seen before -- the next chunk walks the
     // same tiers, and so does the next run on this context -- can reuse its analysis instead of redoing it.
     std::map<int, cudssData_t> compactData;
@@ -9108,7 +9099,7 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& st, int nScenar
     CUDSS_CHECK(cudssCreate(&ctx->ds.handle));
     CUDSS_CHECK(cudssSetStream(ctx->ds.handle, ctx->stream));
     CUDSS_CHECK(cudssConfigCreate(&ctx->ds.config));
-    int ir = adaptiveIr() && ctx->st->nzi > 0 ? irBaseSteps() : irSteps(ctx->st->nzi > 0);
+    int ir = ctx->st->nzi > 0 ? irBaseSteps() : IR_N_STEPS;
     CUDSS_CHECK(cudssConfigSet(ctx->ds.config, CUDSS_CONFIG_IR_N_STEPS, &ir, sizeof(ir)));
     if (mode == 6) {
         applyRobustSingleMatrixConfig(ctx->ds.config);       // its own ordering: never set the ordering twice
@@ -10760,7 +10751,7 @@ static void launchForcedTargetQLimits(BatchSolverContext* ctx, int nS, int n) {
             ctx->dTarget.as<double>(), ctx->dRlMinQDyn.as<double>(), ctx->dRlMaxQDyn.as<double>());
 }
 
-// Adaptive iterative refinement (see adaptiveIr), decided PER LANE. Each lane refines (r = b - J dx, J d = r,
+// Adaptive iterative refinement (see irBaseSteps / irMaxSteps / irTol), decided PER LANE. Each lane refines (r = b - J dx, J d = r,
 // dx += d) while ITS OWN backward residual ratio is above tol and still falling, and undoes a step that did not
 // lower it - what the same scenario does in a batch of one. The batched solve still runs over every lane; a lane
 // that is done just does not take the correction. It used to be decided on the WORST lane and applied to all of
@@ -10986,28 +10977,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     // on the device with NO per-iteration host sync and NO convergence retirement" (the
     // a fixed-iteration NR loop). tol > 0 keeps the per-iteration retirement loop.
     bool deviceFixedIter = (tol <= 0.0);
-    // STRAGGLER EARLY-EXIT (tol > 0 only, OFF by default): once the active count falls to
-    // <= frac*nS (min 1), stop the batched loop and mark the remainder STATUS_REJECTED (-2) so the
-    // Java side routes them to the per-contingency fallback. Rationale (2026-07-17 tol>0 profile):
-    // retirement does NOT shrink cuDSS UBATCH cost — 499 retired identity systems still factorize
-    // at the full ~233 ms/iteration — so one never-converging scenario makes the whole chunk pay
-    // maxIter full-width iterations per outer pass. Off since 2026-09-22: a scenario that exhausts
-    // the budget is reported as MAX_ITERATION_REACHED by the device itself (the precomputer's
-    // exhausted set), which is OLF's own answer, and the replay it replaced cost about what the
-    // extra iterations do (rte6515, 500 busbar sections: +1.2 s of 16 warm, 5/5 statuses agree).
-    // OLF_GPU_STRAGGLER_FRAC=<frac> re-enables the exit as a perf switch.
-    int stragglerExit = 0;
-    // Not with fixed inner iterations either: the active count only drops after the last step, so a late outer pass
-    // re-solving a few dozen scenarios would trip it mid-solve and reject them all.
-    if (!deviceFixedIter && !checkOnlyAtEnd) {
-        double stragglerFrac = 0.0;
-        if (const char* e = std::getenv("OLF_GPU_STRAGGLER_FRAC")) {
-            stragglerFrac = std::atof(e);
-        }
-        if (stragglerFrac > 0.0) {
-            stragglerExit = std::max(1, static_cast<int>(stragglerFrac * nS));
-        }
-    }
+    // A scenario that exhausts the budget is reported as MAX_ITERATION_REACHED by the device itself (the
+    // precomputer's exhausted set), which is OLF's own answer: no early exit hands stragglers to the CPU.
 
     // Full-loadflow mode (tol > 0) with local PV controllers runs the reactive-limits (PV→PQ) OUTER loop:
     // converge the inner Newton, switch any generator over its Q limit, re-converge the switched scenarios,
@@ -12564,24 +12535,6 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             }
         } else if (nActive == 0) {
             break;
-        } else if (stragglerExit > 0 && nActive <= stragglerExit && it * 2 >= maxIter) {
-            // The few remaining unconverged scenarios would keep the FULL-width batch iterating;
-            // hand them to the sequential fallback instead (status -2 = STATUS_REJECTED on the
-            // Java side, same routing as an extractor rejection). Their outer loops stop here.
-            // BOTH gates matter: few actives AND deep into the iteration budget — someone is
-            // always last to retire in a healthy pass (it ~5-8), only cap-bound stragglers
-            // (it >= maxIter/2) get offloaded.
-            for (int s = 0; s < nS; s++) {
-                if (active[s]) {
-                    traceReject(s, "straggler-exit", outer, it);
-                    res.status[s] = -2;
-                    res.iters[s] = it;
-                    active[s] = 0;
-                    live[s] = 0;
-                    nActive--;
-                }
-            }
-            break;
         }
 
         // Scenarios still being FACTORIZED this iteration. Summed over iterations this is the batch's
@@ -12609,8 +12562,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         }
         { AnalysisTimer at_(__LINE__, 'F'); CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_FACTORIZATION | CUDSS_PHASE_SOLVE,
                 ctx->ds.config, ctx->ds.data, ctx->matABatch, ctx->matXBatch, ctx->matBBatch)); }
-        if (adaptiveIr() && ctx->st->nzi > 0 && ctx->dR.p != nullptr) {
-            // adaptive refinement (see adaptiveIr): refine while an active lane's backward residual is above tol
+        if (ctx->st->nzi > 0 && ctx->dR.p != nullptr) {
+            // adaptive refinement (see refineLanes): refine while an active lane's backward residual is above tol
             refineLanes(ctx, nS, n, nnz, ctx->dVals.as<double>(), ctx->dDx.as<double>(), ctx->dB.as<double>(),
                     ctx->dR.as<double>(), ctx->dDelta.as<double>(), ctx->dActive.as<char>(), [&]() {
                 AnalysisTimer at_(__LINE__, 'S');
@@ -12727,7 +12680,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                 CUDSS_CHECK(cudssSetStream(ctx->dsC.handle, ctx->stream));
                 CUDSS_CHECK(cudssConfigCreate(&ctx->dsC.config));
                 applyReorderAlg(ctx->dsC.config, ctx->st->nzi > 0);
-                int irC = adaptiveIr() && ctx->st->nzi > 0 ? irBaseSteps() : irSteps(ctx->st->nzi > 0);
+                int irC = ctx->st->nzi > 0 ? irBaseSteps() : IR_N_STEPS;
                 CUDSS_CHECK(cudssConfigSet(ctx->dsC.config, CUDSS_CONFIG_IR_N_STEPS, &irC, sizeof(irC)));
                 CUDSS_CHECK(cudssMatrixCreateCsr(&ctx->matUbC, n, n, nnz,
                         ctx->st->dRowPtr.as<int>(), nullptr, ctx->st->dColIdx.as<int>(), ctx->dValsC.as<double>(),
@@ -12773,10 +12726,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             // violation parity -- and then fails with an illegal memory access on a bigger network:
             // the data object's buffers are sized for the batch size it was analyzed at. The analysis
             // is cheap (~64 ms) and costs the same at any batch size, but its STATE belongs to one.
-            static const bool cacheCompact = std::getenv("OLF_GPU_COMPACT_CACHE") == nullptr
-                    || std::string(std::getenv("OLF_GPU_COMPACT_CACHE")) != "0";
             cudssData_t compactData = nullptr;
-            if (cacheCompact) {
+            {
                 // Tier change to a width analyzed before: its own data object, the batch size set back on the
                 // (shared) config. A new width: a fresh data object and its single-block ANALYSIS, kept.
                 cudssData_t& cached = ctx->compactData[w];
@@ -12790,22 +12741,9 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                 }
                 ctx->compactWidth = w;
                 compactData = cached;
-            } else {
-                if (w != ctx->compactWidth) {                 // tier change: fresh data + single-block ANALYSIS
-                    if (ctx->dsC.data) {
-                        CUDSS_CHECK(cudssDataDestroy(ctx->dsC.handle, ctx->dsC.data));
-                        ctx->dsC.data = nullptr;
-                    }
-                    CUDSS_CHECK(cudssDataCreate(ctx->dsC.handle, &ctx->dsC.data));
-                    CUDSS_CHECK(cudssConfigSet(ctx->dsC.config, CUDSS_CONFIG_UBATCH_SIZE, &w, sizeof(w)));
-                    gAnalysesCompact++;
-                    { AnalysisTimer at_(__LINE__); CUDSS_CHECK(cudssExecute(ctx->dsC.handle, CUDSS_PHASE_ANALYSIS, ctx->dsC.config, ctx->dsC.data, ctx->matUbC, ctx->matUbCX, ctx->matUbCB)); }
-                    ctx->compactWidth = w;
-                }
-                compactData = ctx->dsC.data;
             }
             { AnalysisTimer at_(__LINE__, 'F'); CUDSS_CHECK(cudssExecute(ctx->dsC.handle, CUDSS_PHASE_FACTORIZATION | CUDSS_PHASE_SOLVE, ctx->dsC.config, compactData, ctx->matUbC, ctx->matUbCX, ctx->matUbCB)); }
-            if (adaptiveIr() && ctx->st->nzi > 0 && ctx->dRC.p != nullptr && ctx->dIrScore.p != nullptr && ctx->dIrScore.cap >= static_cast<size_t>(w) * sizeof(double)) {
+            if (ctx->st->nzi > 0 && ctx->dRC.p != nullptr && ctx->dIrScore.p != nullptr && ctx->dIrScore.cap >= static_cast<size_t>(w) * sizeof(double)) {
                 // adaptive refinement on the compacted lanes (all w are real or a duplicate of a real one)
                 refineLanes(ctx, w, n, nnz, ctx->dValsC.as<double>(), ctx->dDxC.as<double>(), ctx->dBC.as<double>(),
                         ctx->dRC.as<double>(), ctx->dDeltaC.as<double>(), nullptr, [&]() {
@@ -12817,8 +12755,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             scatterScenarios<<<grid(n * nReal), BLOCK, 0, ctx->stream>>>(n, nReal, ctx->dMapC.as<int>(), ctx->dDxC.as<double>(), ctx->dDx.as<double>());
         } else {
             { AnalysisTimer at_(__LINE__, ((ubPhase) & (CUDSS_PHASE_FACTORIZATION | CUDSS_PHASE_REFACTORIZATION)) ? 'G' : ((ubPhase) & CUDSS_PHASE_ANALYSIS) ? 'A' : 'S'); CUDSS_CHECK(cudssExecute(ctx->ds.handle, ubPhase, ctx->ds.config, ctx->ds.data, ctx->matUb, ctx->matUbX, ctx->matUbB)); }
-            if (adaptiveIr() && ctx->st->nzi > 0 && ctx->dR.p != nullptr && ctx->matUbR != nullptr && ctx->dIrScore.p != nullptr) {
-                // adaptive refinement on the full-width UBATCH solve (see adaptiveIr)
+            if (ctx->st->nzi > 0 && ctx->dR.p != nullptr && ctx->matUbR != nullptr && ctx->dIrScore.p != nullptr) {
+                // adaptive refinement on the full-width UBATCH solve (see refineLanes)
                 refineLanes(ctx, nS, n, nnz, ctx->dVals.as<double>(), ctx->dDx.as<double>(), ctx->dB.as<double>(),
                         ctx->dR.as<double>(), ctx->dDelta.as<double>(), ctx->dActive.as<char>(), [&]() {
                     AnalysisTimer at_(__LINE__, 'S');

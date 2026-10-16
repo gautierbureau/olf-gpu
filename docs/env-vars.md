@@ -198,7 +198,6 @@ Each selects a different computation. Several disable an outer loop or loosen a 
 | `OLF_GPU_DISC_EPS` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuSingleSolveRejectReasonProbe.java:60 |
 | `OLF_GPU_DISC_SLACKTOL` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuSingleSolveRejectReasonProbe.java:64 |
 | `OLF_GPU_FIXED_ITERS` | src/test/java/com/powsybl/openloadflow/ac/solver/gpu/batch/GpuBatchedN1FixedIterTest.java:79 |
-| `OLF_GPU_IR_STEPS` | native/cuda/jni/olf_gpu_nr_jni.cu (`irSteps`) — cuDSS iterative-refinement steps; default 4 when the structure has a zero-impedance branch (2 until 2026-09-28: the batched factorization's accuracy on the repaired zero-diagonal rows depends on which other matrices share the batch — network.xiidm/LLAX solved to 2.5e-06 in one chunk composition and 2.2e-08 in another; 4 steps give 1.1e-11), 0 otherwise. Re-measured 2026-09-21 after the zero-diagonal row repair and STILL needed: IR=0 leaves ‖J.dx−F‖∞ 3.8e-4 on the repaired coupler/controller rows (2.6e-8 kV vs 2.6e-9 with IR=2 on rte6515's 500 busbars) |
 | `OLF_GPU_MATCHING_ALG` | native/cuda/jni/olf_gpu_nr_jni.cu:250 |
 | `OLF_GPU_MAXBATCH` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuVsCpuProductionSaBenchmarkTest.java:83 +5 |
 | `OLF_GPU_NO_DIST_SLACK` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuCpuOuterLoopTrajectoryProbe.java:55 |
@@ -215,7 +214,6 @@ Each selects a different computation. Several disable an outer loop or loosen a 
 | `OLF_GPU_SA_NO_RL` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuVsCpuProductionSaBenchmarkTest.java:226 |
 | `OLF_GPU_SA_RL_TOL` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuVsCpuProductionSaBenchmarkTest.java:211 |
 | `OLF_GPU_SA_SLACK_TOL` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuVsCpuProductionSaBenchmarkTest.java:205 |
-| `OLF_GPU_STRAGGLER_FRAC` | native/cuda/jni/olf_gpu_nr_jni.cu (`stragglerFrac`) — perf switch, default 0 = OFF since 2026-09-22: `<frac>` ejects the last `frac*nS` unconverged scenarios at maxIter/2 to the CPU replay; off, the device carries them to maxIter and reports MAX_ITERATION_REACHED itself (the precomputer's `exhausted` set). |
 | `OLF_GPU_SVC` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuVsCpuRte6515SaTest.java:310 |
 | `OLF_GPU_SVC_DBG` | native/cuda/jni/olf_gpu_nr_jni.cu:7527 |
 | `OLF_GPU_SVC_PILOT_SHIFT` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuVsCpuRte6515SaTest.java:317 |

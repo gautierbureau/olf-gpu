@@ -20,12 +20,9 @@ correct fallback worth keeping for triage · **TUNING** = both modes legitimate 
 
 | switch | gates | disposition |
 |---|---|---|
-| `OLF_GPU_IR_STEPS` | iterative-refinement step count (default 4 when zero-impedance) | **TUNING** — the default was decided by measurement (`gpu-ir2-default-after-diag-repair`); keep as an override, it is how that decision gets re-checked. |
 | `OLF_GPU_REORDER_ALG` | cuDSS fill-reducing ordering | **TUNING** — library knob, both modes legitimate. |
 | `OLF_GPU_MATCHING_ALG` | cuDSS matching (standalone solve only) | **TUNING** — and `0` is a known-wrong mode kept deliberately to reproduce the failure. Document, do not delete. |
 | `OLF_GPU_PIVOT_TYPE`, `OLF_GPU_PIVOT_THRESHOLD` | cuDSS pivoting on the robust path | **TUNING** |
-| `OLF_GPU_STRAGGLER_FRAC` | straggler-exit fraction | **VERIFY** — off by default; the user's 2026-09-22 call was that the device should report MAX_ITER itself. Decide and delete the loser. |
-| `OLF_GPU_COMPACT_CACHE` | structure-cache compaction | **VERIFY** |
 | `OLF_GPU_SA_BASE_ONLY` | solve the base and stop | **OPT-OUT** — genuinely useful for triage, keep. |
 | `OLF_GPU_PS_MASK`, `OLF_GPU_PSG_STEP` | pilot-self masks / step gating | **VERIFY** — bisection leftovers from the pilot-self work; likely DELETE now that the rotation is default-on. |
 | `OLF_GPU_CPU_ROUTED` | force named contingencies to the CPU | **OPT-OUT** — the escape hatch for a bad contingency in production. |

@@ -105,9 +105,8 @@ class GpuBatchedN1FixedIterTest {
         assumeTrue(Files.exists(CASES.resolve(CASE)), CASE + " not found");
         // Env-to-property plumbing (env is inherited by the surefire fork, unlike -D). Only override
         // when the env var IS set: a bare run measures the PRODUCTION defaults (memory auto-sized chunk).
-        if (System.getProperty(GpuBatchContextCache.MAX_BATCH_PROPERTY) == null
-                && System.getenv("OLF_GPU_MAXBATCH") != null) {
-            System.setProperty(GpuBatchContextCache.MAX_BATCH_PROPERTY, System.getenv("OLF_GPU_MAXBATCH"));
+        if (System.getenv("OLF_GPU_MAXBATCH") != null) {
+            GpuBatchContextCache.forceChunkSizeForTests(Integer.valueOf(System.getenv("OLF_GPU_MAXBATCH")));
         }
     }
 

@@ -50,7 +50,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  * as {@link GpuBenchmarkTest}) so the extractor accepts PEGASE, and through a SPARSE matrix
  * factory for the CPU reference (dense is infeasible at this scale). The comparison is solver
  * wall time only (both sides skip violation detection); the batch runs in memory-bounded chunks
- * ({@code olf.gpu.sa.maxBatch} / auto-sized). Machine-local: skipped unless the GPU lib is
+ * (auto-sized). Machine-local: skipped unless the GPU lib is
  * available AND the cases directory exists.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}

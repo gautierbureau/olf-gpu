@@ -26,7 +26,14 @@ public final class GpuBatchContextCache {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(GpuBatchContextCache.class);
 
-    public static final String MAX_BATCH_PROPERTY = "olf.gpu.sa.maxBatch";
+    /** Test hook: a chunk size every resolution of this JVM uses instead of the auto-sizing, or null. */
+    private static volatile Integer chunkSizeForTests;
+
+    /** TESTS ONLY: resolve every chunk to {@code size} (clamped to the scenario count) until reset with null. */
+    public static void forceChunkSizeForTests(Integer size) {
+        chunkSizeForTests = size;
+    }
+
     /** Fallback chunk size used when auto-sizing is unavailable (no GPU / memory-query failure). */
     public static final int DEFAULT_MAX_BATCH = 256;
     /**
@@ -160,8 +167,7 @@ public final class GpuBatchContextCache {
      * Resolve the GPU batch chunk size, bounding the resident device memory (the uniform
      * batched factorization holds an LU per scenario, so the footprint scales with the chunk).
      * <ul>
-     *   <li>{@value #MAX_BATCH_PROPERTY} set to a positive value — an explicit manual cap.</li>
-     *   <li>otherwise — AUTO-SIZED from free device memory via
+     *   <li>AUTO-SIZED from free device memory via
      *       {@link GpuAcNewtonSolver#recommendBatchSize} (real Jacobian nnz + heuristic LU
      *       estimate + safety margin).</li>
      *   <li>if auto-sizing is unavailable (no GPU / query error) — {@value #DEFAULT_MAX_BATCH}.</li>
@@ -194,7 +200,7 @@ public final class GpuBatchContextCache {
     }
 
     public static int resolveChunkSize(int nb, int n, GpuAcData gpuData) {
-        Integer explicit = Integer.getInteger(MAX_BATCH_PROPERTY);
+        Integer explicit = chunkSizeForTests;
         if (System.getenv("OLF_GPU_PHASE_TIME") != null) {
             System.err.printf("CHUNK_SIZING nb=%d explicit=%s%n", nb, explicit);
         }

@@ -16,9 +16,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeFalse;
 
 /**
- * CPU-only checks of the GPU batch chunk-size resolution ({@code olf.gpu.sa.maxBatch}),
- * which bounds the per-chunk device-memory footprint. An explicit positive property is a
- * manual cap; otherwise the chunk is auto-sized from free device memory by a native query,
+ * CPU-only checks of the GPU batch chunk-size resolution, which bounds the per-chunk device-memory
+ * footprint. A size forced by the test hook is honoured; otherwise the chunk is auto-sized from free device
+ * memory by a native query,
  * falling back to the default when no GPU is present. The auto path (and the native nnz /
  * cudaMemGetInfo estimate) is exercised by the device tests.
  *
@@ -51,13 +51,13 @@ class GpuBatchedSecurityAnalysisSolverTest {
 
     @Test
     void explicitCapIsHonouredAndClampedToCount() {
-        System.setProperty(GpuBatchContextCache.MAX_BATCH_PROPERTY, "64");
+        GpuBatchContextCache.forceChunkSizeForTests(64);
         try {
             assertEquals(64, GpuBatchContextCache.resolveChunkSize(1000, 10, EMPTY));
             assertEquals(10, GpuBatchContextCache.resolveChunkSize(10, 10, EMPTY),
                     "chunk is clamped to the scenario count");
         } finally {
-            System.clearProperty(GpuBatchContextCache.MAX_BATCH_PROPERTY);
+            GpuBatchContextCache.forceChunkSizeForTests(null);
         }
     }
 
@@ -65,7 +65,7 @@ class GpuBatchedSecurityAnalysisSolverTest {
     void autoSizeFallsBackToDefaultWhenNoGpu() {
         assumeFalse(GpuAcNewtonSolver.isAvailable(), "auto-size queries the device when a GPU is present");
         // No GPU: recommendBatchSize is unlinked, so resolveChunkSize falls back to the default.
-        System.clearProperty(GpuBatchContextCache.MAX_BATCH_PROPERTY);
+        GpuBatchContextCache.forceChunkSizeForTests(null);
         assertEquals(GpuBatchContextCache.DEFAULT_MAX_BATCH,
                 GpuBatchContextCache.resolveChunkSize(1000, 10, EMPTY));
     }
@@ -73,16 +73,16 @@ class GpuBatchedSecurityAnalysisSolverTest {
     @Test
     void chunkSizeAlwaysClampedToScenarioCount() {
         // Holds for every path (explicit cap, auto-size, or fallback): 1 <= chunk <= nb.
-        System.clearProperty(GpuBatchContextCache.MAX_BATCH_PROPERTY);
+        GpuBatchContextCache.forceChunkSizeForTests(null);
         int chunk = GpuBatchContextCache.resolveChunkSize(5, 10, EMPTY);
         assertTrue(chunk >= 1 && chunk <= 5, "chunk must be in [1, nb], was " + chunk);
 
-        System.setProperty(GpuBatchContextCache.MAX_BATCH_PROPERTY, "0");   // invalid -> auto/fallback
+        GpuBatchContextCache.forceChunkSizeForTests(0);   // invalid -> auto/fallback
         try {
             int c2 = GpuBatchContextCache.resolveChunkSize(5, 10, EMPTY);
             assertTrue(c2 >= 1 && c2 <= 5, "chunk must be in [1, nb], was " + c2);
         } finally {
-            System.clearProperty(GpuBatchContextCache.MAX_BATCH_PROPERTY);
+            GpuBatchContextCache.forceChunkSizeForTests(null);
         }
     }
 }

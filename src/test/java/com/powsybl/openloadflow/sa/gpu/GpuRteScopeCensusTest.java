@@ -178,9 +178,7 @@ class GpuRteScopeCensusTest extends AbstractOpenSecurityAnalysisTest {
             }
         }
 
-        // OLF_GPU_CENSUS_CHUNK: force the batch chunk size (the system property cannot be set from the
-        // command line — the parent pom owns surefire's argLine — and chunk size is the knob a
-        // throughput measurement most needs to sweep).
+        // OLF_GPU_CENSUS_CHUNK: force the batch chunk size (the knob a throughput measurement most needs to sweep).
         // OLF_GPU_CENSUS_SVC=1: force SecondaryVoltageControl on. The RTE parameters leave it at
         // OLF's default (off) so the loop never fires here — but the case DOES carry control zones,
         // so this is the only way to exercise the loop against the CPU on production data.
@@ -199,7 +197,7 @@ class GpuRteScopeCensusTest extends AbstractOpenSecurityAnalysisTest {
         }
         String chunk = System.getenv("OLF_GPU_CENSUS_CHUNK");
         if (chunk != null) {
-            System.setProperty(com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchContextCache.MAX_BATCH_PROPERTY, chunk);
+            com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchContextCache.forceChunkSizeForTests(Integer.valueOf(chunk));
         }
 
         // OLF_GPU_CENSUS_MONITOR_VL=<vl,vl,...>: monitor those voltage levels so BOTH arms report the

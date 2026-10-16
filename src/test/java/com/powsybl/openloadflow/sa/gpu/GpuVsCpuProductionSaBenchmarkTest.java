@@ -79,9 +79,8 @@ class GpuVsCpuProductionSaBenchmarkTest extends AbstractOpenSecurityAnalysisTest
         // env var IS set: a bare run must measure the PRODUCTION defaults (mode 3 UBATCH, memory
         // auto-sized chunk) — the old hardcoded 0/32 fallbacks made it read ~2x slower than what
         // any real provider user gets.
-        if (System.getProperty(GpuBatchContextCache.MAX_BATCH_PROPERTY) == null
-                && System.getenv("OLF_GPU_MAXBATCH") != null) {
-            System.setProperty(GpuBatchContextCache.MAX_BATCH_PROPERTY, System.getenv("OLF_GPU_MAXBATCH"));
+        if (System.getenv("OLF_GPU_MAXBATCH") != null) {
+            GpuBatchContextCache.forceChunkSizeForTests(Integer.valueOf(System.getenv("OLF_GPU_MAXBATCH")));
         }
         // SPARSE on both arms — the harness default (commonTestConfig.matrixFactory()) can be DENSE,
         // which at 9241 buses makes the base LF thrash for ~200 s and FAIL (measured), while the same

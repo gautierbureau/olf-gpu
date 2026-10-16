@@ -670,8 +670,7 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
                 new Contingency("B8-G", new com.powsybl.contingency.GeneratorContingency("B8-G")));
         com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
                 .setDistributedSlack(true).setUseReactiveLimits(true);
-        String prev = System.getProperty(GpuBatchContextCache.MAX_BATCH_PROPERTY);
-        System.setProperty(GpuBatchContextCache.MAX_BATCH_PROPERTY, "2");   // -> 4 chunks
+        GpuBatchContextCache.forceChunkSizeForTests(2);   // -> 4 chunks
         try {
             assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
             // > one chunk's worth proves the multi-chunk path ran (one generator outage is
@@ -679,11 +678,7 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
             assertTrue(GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get() > 2,
                     "the batch must span several chunks");
         } finally {
-            if (prev == null) {
-                System.clearProperty(GpuBatchContextCache.MAX_BATCH_PROPERTY);
-            } else {
-                System.setProperty(GpuBatchContextCache.MAX_BATCH_PROPERTY, prev);
-            }
+            GpuBatchContextCache.forceChunkSizeForTests(null);
         }
     }
 
@@ -2312,12 +2307,11 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
                 .collect(java.util.stream.Collectors.toSet());
         List<com.powsybl.security.monitor.StateMonitor> monitors = List.of(new com.powsybl.security.monitor.StateMonitor(
                 com.powsybl.contingency.ContingencyContext.all(), java.util.Set.of(), allVls, java.util.Set.of()));
-        String maxBatch = com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchContextCache.MAX_BATCH_PROPERTY;
         securityAnalysisProvider = new GpuSecurityAnalysisProvider(commonTestConfig.matrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>());
         try {
             SecurityAnalysisResult together = runSecurityAnalysis(network, ctgs, monitors, sap);
             long engagedTogether = GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get();
-            System.setProperty(maxBatch, "1");
+            com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchContextCache.forceChunkSizeForTests(1);
             SecurityAnalysisResult alone = runSecurityAnalysis(network, ctgs, monitors, sap);
             assertEquals(ctgs.size(), engagedTogether, "every tie outage on the device");
             assertEquals(engagedTogether, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(), "the same scenarios on the device");
@@ -2334,7 +2328,7 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
                 }
             }
         } finally {
-            System.clearProperty(maxBatch);
+            com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchContextCache.forceChunkSizeForTests(null);
             securityAnalysisProvider = new OpenSecurityAnalysisProvider(commonTestConfig.matrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>());
         }
     }

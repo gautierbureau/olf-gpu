@@ -3763,8 +3763,7 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
      *  re-solve trajectory sat 1.7e-9 off the CPU's, on a 1-MW DS knife edge — plan A6); the
      *  in-kernel TransformerVoltageControl phase (2026-09-15) runs OLF's exact check/re-solve
      *  sequence, the fills' mode scan re-picks the carrier, and the scenario BATCHES at 1e-12 —
-     *  the base itself clamps, so the base runs on the driver too. {@code
-     *  OLF_GPU_TVD_REJECT_CARRIER_CLAMP} restores the CPU route for diagnosis. */
+     *  the base itself clamps, so the base runs on the driver too. */
     @org.junit.jupiter.api.Test
     void deviceSharedCarrierClampBatchesAndMatches() {
         org.junit.jupiter.api.Assumptions.assumeTrue(

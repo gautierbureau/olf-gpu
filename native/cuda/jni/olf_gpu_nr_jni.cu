@@ -6680,7 +6680,7 @@ __global__ void reactiveLimitsBatch(const double* svcRlVt, int nrl, int nScenari
                                     const char* rlIslanded,
                                     const double* rlInitTgtQ, double vLoRobust, double vHiRobust,
                                     int robust,
-                                    int noPinRow, int swLogSlot, double* swLog, int* swLogCnt, int passId,
+                                    int swLogSlot, double* swLog, int* swLogCnt, int passId,
                                     const int* psEntry, int nQr,
                                     const char* rlLocalOv, const double* rlLocalVt,
                                     const char* rlNoUnpin, char* unpinBad, const char* rlMonitored,
@@ -6765,10 +6765,6 @@ __global__ void reactiveLimitsBatch(const double* svcRlVt, int nrl, int nScenari
         bool enrolledPilot = rlRemote[i] == 2 && isEnrolledPilot(psEntry, nQr, i);
         if (limitType[rst] == 0) {
             if (mode[qidx] != pvForm) return;                // islanded / frozen this scenario
-            // OLF_GPU_RL_NOPIN_ROW=<deviceRow>: never pin THIS row. Isolates one pin so the solve
-            // it would have interrupted can be compared against the CPU on its own - the only way
-            // to tell "the pin is wrong" from "the state the pin was taken at was already wrong".
-            if (ridx % n == (size_t) noPinRow) return;
             double q = qBuf[qidx] + rlLoadQ[rli];            // own q via fillRemoteMemberQBatch
             // voltageRemoteControlRobustMode (ReactiveLimitsOuterLoop.checkControllerBus): the criteria
             // below test this REMOTE controller's OWN voltage — the same x row the quadratic SVC delta
@@ -9941,7 +9937,7 @@ __global__ void rlUnpinBatch(int nPairs, int nS, int n, int nrl, const int* pair
 // fills' mode scan picks the same row), the others host DISTR_RHO (target 0), fixed/outaged members are
 // identity pins — so a member outage or a clamp re-forms the group exactly as OLF's "first enabled" rule.
 struct TvdTables {
-    int nG, nM, nDelta, mode, rejectCarrierClamp;
+    int nG, nM, nDelta, mode;
     const int* grpPtr; const int* grpVRow; const double* grpTargetV; const double* grpHalfDb; const int* grpUseInit;
     const int* deltaPtr; const int* deltaRow; const int* deltaModeOn; const int* deltaModeOff;
     const double* deltaTargetOn; const double* deltaTargetOff;
@@ -10218,21 +10214,6 @@ __global__ void tvdCheckBatch(TvdTables T, int nScenarios, int n, int nElements,
             double lo = useInit ? T.grpShMin[sg] : T.memMin[m];
             double hi = useInit ? T.grpShMax[sg] : T.memMax[m];
             if (!(r1 < lo || r1 > hi)) continue;
-            if (!useInit) {
-                // plan-A6 remaining: clamping the current CARRIER while another member stays continuous
-                // re-picks the pilot-Q role mid-flight — the CPU's 1-MW DS knife edge; route the scenario
-                bool isCarrier = true, otherAlive = false;
-                for (int mm = T.grpPtr[g]; mm < T.grpPtr[g + 1]; mm++) {
-                    if (mm == m || disabled[(size_t) s * nElements + T.memElem[mm]]
-                            || T.memState[(size_t) s * T.nM + mm] != 1) continue;
-                    if (mm < m) isCarrier = false;
-                    otherAlive = true;
-                }
-                if (isCarrier && otherAlive && T.rejectCarrierClamp) {
-                    T.reject[s] = 1;
-                    return;
-                }
-            }
             double v = r1 > hi ? hi : lo;
             T.memRoundFrom[sm] = v;
             int tap;
@@ -10409,7 +10390,6 @@ __global__ void svdCheckBatch(SvdTables T, int nScenarios, int n, int nElements,
 static TvdTables tvdTables(BatchSolverContext* ctx) {
     TvdTables T;
     T.nG = ctx->nTvdGroups; T.nM = ctx->nTvd; T.nDelta = ctx->nTvdDelta; T.mode = ctx->tvdMode;
-    T.rejectCarrierClamp = std::getenv("OLF_GPU_TVD_REJECT_CARRIER_CLAMP") != nullptr ? 1 : 0;
     T.grpPtr = ctx->dTvdGrpPtr.as<int>(); T.grpVRow = ctx->dTvdGrpVRow.as<int>();
     T.grpTargetV = ctx->dTvdGrpTargetV.as<double>(); T.grpHalfDb = ctx->dTvdGrpHalfDb.as<double>(); T.grpUseInit = ctx->dTvdGrpUseInit.as<int>();
     T.deltaPtr = ctx->dTvdDeltaPtr.as<int>(); T.deltaRow = ctx->dTvdDeltaRow.as<int>();
@@ -10479,7 +10459,7 @@ __device__ inline double svcQToK(double q, double minQ, double maxQ) {
 // the network before it decides.
 __global__ void svcTriggerBatch(SvcTables T, int nScenarios, int n, const char* rlActive,
                                 const double* qBuf, const double* x, char* limitType, const char* savedMode,
-                                int* mode, double* target, int svcDebug) {
+                                int* mode, double* target) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= T.nZones * nScenarios) return;
     int z = tid % T.nZones;
@@ -11155,7 +11135,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                         ctx->nDqTqOv ? ctx->dDqTqOvVal.as<double>() : nullptr,
                         ctx->dDqMemberTgtPtr.as<int>(), ctx->dDqMemberTgtPeer.as<int>(),
                         psEntryPtr(ctx),
-                        std::getenv("OLF_GPU_NO_TGT_STOCK") == nullptr && ctx->st->dRelocOwn.p != nullptr
+                        ctx->st->dRelocOwn.p != nullptr
                                 ? ctx->st->dRelocOwn.as<int>() : nullptr,
                     ctx->hasDqSub ? ctx->dDqSub.as<char>() : nullptr, ctx->hasDqSub ? ctx->dQrMemberStart.as<int>() : nullptr,
                     ctx->nRlGenLost > 0 ? ctx->dRlGenLost.as<char>() : nullptr,
@@ -12176,8 +12156,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         svcTriggerBatch<<<grid(ctx->nSvcZones * nS), BLOCK, 0, ctx->stream>>>(svcTables(ctx), nS, n,
                 ctx->dRlActive.as<char>(), ctx->dQbuf.as<double>(), ctx->dX.as<double>(),
                 ctx->dRlLimitType.as<char>(), ctx->dRlSavedMode.as<char>(),
-                ctx->dMode.as<int>(), ctx->dTarget.as<double>(),
-                std::getenv("OLF_GPU_SVC_DBG") != nullptr ? 1 : 0);
+                ctx->dMode.as<int>(), ctx->dTarget.as<double>());
         std::vector<char> need(nS);
         CUDA_CHECK(cudaMemcpyAsync(need.data(), ctx->dSvcNeed.p, nS, cudaMemcpyDeviceToHost, ctx->stream));
         CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
@@ -13470,8 +13449,6 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                 }
             }
             CUDA_CHECK(cudaMemsetAsync(ctx->dRlPassSwitched.p, 0, static_cast<size_t>(ctx->nrl) * nS, ctx->stream));
-            static const char* noPinEnv = std::getenv("OLF_GPU_RL_NOPIN_ROW");
-            int rlNoPinRow = noPinEnv != nullptr ? std::atoi(noPinEnv) : -1;
             reactiveLimitsBatch<<<grid(ctx->nrl * nS), BLOCK, 0, ctx->stream>>>(
                     ctx->nSvc > 0 ? ctx->dSvcRlVt.as<double>() : nullptr,
                     ctx->nrl, nS, n, REACTIVE_LIMIT_TOL, RL_MAX_SWITCH,
@@ -13493,7 +13470,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                     svcCoefDyn ? ctx->dRlSvcBminDyn.as<double>() : nullptr, svcCoefDyn ? ctx->dRlSvcBmaxDyn.as<double>() : nullptr,
                     ctx->nRlIslanded > 0 ? ctx->dRlIslanded.as<char>() : nullptr,
                     ctx->rlRobust ? ctx->dRlInitTgtQ.as<double>() : nullptr,
-                    ctx->rlVLoRobust, ctx->rlVHiRobust, ctx->rlRobust, rlNoPinRow,
+                    ctx->rlVLoRobust, ctx->rlVHiRobust, ctx->rlRobust,
                     swLogSlot, ctx->dSwLog.p ? ctx->dSwLog.as<double>() : nullptr,
                     ctx->dSwLogCnt.p ? ctx->dSwLogCnt.as<int>() : nullptr, outer,
                     psEntryPtr(ctx), ctx->st->nQr,
@@ -14077,7 +14054,7 @@ psgStep(ctx, nS, n, outer, "afterDistrQ");
                     svcCoefDyn ? ctx->dRlSvcBminDyn.as<double>() : nullptr, svcCoefDyn ? ctx->dRlSvcBmaxDyn.as<double>() : nullptr,
                 ctx->nRlIslanded > 0 ? ctx->dRlIslanded.as<char>() : nullptr,
                 ctx->rlRobust ? ctx->dRlInitTgtQ.as<double>() : nullptr,
-                ctx->rlVLoRobust, ctx->rlVHiRobust, ctx->rlRobust, -1,
+                ctx->rlVLoRobust, ctx->rlVHiRobust, ctx->rlRobust,
                 swLogSlot, ctx->dSwLog.p ? ctx->dSwLog.as<double>() : nullptr,
                 ctx->dSwLogCnt.p ? ctx->dSwLogCnt.as<int>() : nullptr, 999999,
                     psEntryPtr(ctx), ctx->st->nQr,

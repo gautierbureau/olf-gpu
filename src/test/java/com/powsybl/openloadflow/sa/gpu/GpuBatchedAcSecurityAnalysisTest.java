@@ -6228,6 +6228,45 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         assertStrategyMatchesCpu(network, ctgs, strategiesOf("lq", "more4", "same4"), actions, 3, true);
     }
 
+    /** OLF runs a strategy as a new load flow, and its reactive-limit loop counts PV -> PQ switches afresh in every
+     *  load flow. Losing the capacitor pins g1 at its 100 MVAr ceiling, its one switch allowed; the strategy takes the
+     *  reactive load off its bus, the voltage climbs over the target and OLF puts g1 back on control. The pair took
+     *  its parent's count along and kept g1 blocked at the ceiling (network.xiidm LLFP: IZSV_0 and IZTH_0/2 at three
+     *  switches each after the contingency's oscillation, 8.5e-4 kV at IZTK). */
+    @org.junit.jupiter.api.Test
+    void strategiesCountReactiveLimitSwitchesAfreshLikeCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = Network.create("pv-switch-count", "code");
+        com.powsybl.iidm.network.Substation s = network.newSubstation().setId("s").add();
+        for (String vl : List.of("vl0", "vlg")) {
+            s.newVoltageLevel().setId(vl).setNominalV(400).setTopologyKind(com.powsybl.iidm.network.TopologyKind.BUS_BREAKER)
+                    .add().getBusBreakerView().newBus().setId(vl + "_b").add();
+        }
+        network.getVoltageLevel("vl0").newGenerator().setId("gs").setBus("vl0_b").setConnectableBus("vl0_b")
+                .setMinP(0).setMaxP(2000).setTargetP(300).setTargetV(400).setVoltageRegulatorOn(true).add();
+        network.getVoltageLevel("vl0").newLoad().setId("ld0").setBus("vl0_b").setConnectableBus("vl0_b").setP0(100).setQ0(20).add();
+        network.getVoltageLevel("vlg").newGenerator().setId("g1").setBus("vlg_b").setConnectableBus("vlg_b")
+                .setMinP(0).setMaxP(500).setTargetP(100).setTargetV(400.5).setVoltageRegulatorOn(true).add();
+        network.getGenerator("g1").newMinMaxReactiveLimits().setMinQ(-50).setMaxQ(100).add();
+        network.getVoltageLevel("vlg").newLoad().setId("ldg").setBus("vlg_b").setConnectableBus("vlg_b").setP0(300).setQ0(60).add();
+        network.getVoltageLevel("vlg").newLoad().setId("cap").setBus("vlg_b").setConnectableBus("vlg_b").setP0(0).setQ0(-80).add();
+        for (String id : List.of("la", "lb")) {
+            network.newLine().setId(id).setVoltageLevel1("vl0").setBus1("vl0_b").setConnectableBus1("vl0_b")
+                    .setVoltageLevel2("vlg").setBus2("vlg_b").setConnectableBus2("vlg_b")
+                    .setR(2).setX(12).setG1(0).setB1(0).setG2(0).setB2(0).add();
+        }
+        List<Contingency> ctgs = List.of(new Contingency("cap", new com.powsybl.contingency.LoadContingency("cap")));
+        List<com.powsybl.action.Action> actions = List.of(
+                new com.powsybl.action.LoadActionBuilder().withId("lessQ").withLoadId("ldg").withRelativeValue(true)
+                        .withReactivePowerValue(-60).build(),
+                new com.powsybl.action.LoadActionBuilder().withId("sameQ").withLoadId("ldg").withRelativeValue(true)
+                        .withReactivePowerValue(0).build());
+        assertStrategyMatchesCpu(network, ctgs, strategiesOf("cap", "lessQ", "sameQ"), actions, 3, true,
+                p -> p.setReactiveLimitsMaxPqPvSwitch(1).setSlackBusSelectionMode(com.powsybl.openloadflow.network.SlackBusSelectionMode.NAME)
+                        .setSlackBusesIds(List.of("vl0_b")));
+    }
+
     private static Network basePinnedRemoteMemberNetwork() {
         // g1, g2 and g3 regulate b4 (413.4 kV) remotely; g5 holds b5, behind a 60 Ohm line, on its own
         Network network = com.powsybl.openloadflow.network.VoltageControlNetworkFactory.createWithGeneratorRemoteControl();

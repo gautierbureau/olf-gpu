@@ -11334,10 +11334,10 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             }
         }
         if (rlStateIn != nullptr && ctx->nrl > 0) {
-            // WARM CONTINUATION (operator strategies stage 2): seed each (controller, scenario)'s
-            // pinned limit type AND switch count from a previous solve's exported state, so the
-            // strategy scenario continues the contingency scenario's outer-loop trajectory exactly
-            // like the CPU's per-contingency action solve does.
+            // WARM CONTINUATION: seed each (controller, scenario)'s pinned limit type AND switch
+            // count from the state the caller passes. A re-solve inside one load flow passes both; a
+            // strategy pair passes its parent's pins with zero counts, since OLF's reactive-limit
+            // loop counts afresh in every load flow.
             std::vector<char> lt(static_cast<size_t>(ctx->nrl) * nS), sc(static_cast<size_t>(ctx->nrl) * nS);
             for (size_t k = 0; k < lt.size(); k++) {
                 lt[k] = static_cast<char>(rlStateIn[k] & 7);

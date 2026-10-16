@@ -1933,7 +1933,11 @@ final class GpuBatchChunkSolver {
                                 }
                             }
                             if (rlStateIn != null) {
-                                System.arraycopy(parentRl != null ? parentRl : baseRlSeed, 0, rlStateIn, s * nrl, nrl);
+                                // the parent's pins, not its switch counts: OLF runs the strategy as a new load flow,
+                                // whose reactive-limit loop counts PV -> PQ switches afresh
+                                for (int i = 0; i < nrl; i++) {
+                                    rlStateIn[s * nrl + i] = (parentRl != null ? parentRl : baseRlSeed)[i] & 7;
+                                }
                                 double[] pins = parentRl != null ? rlPinByIndex.get(pIdxOf(contingencies, group, chunkStart, s, indexById, realCount)) : null;
                                 if (pins != null) {
                                     if (rlPinIn == null) {

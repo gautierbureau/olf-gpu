@@ -148,7 +148,6 @@ Choose which contingencies a validation run covers. They change what is measured
 | `OLF_GPU_SA_MAX_CTG` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuVsCpuRte6515SaTest.java:233 |
 | `OLF_GPU_SA_CASE_FILE` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuVsCpuRte6515SaTest.java — path of the case to run instead of rte6515 (e.g. `network.xiidm` at the repo root); the other selectors apply unchanged |
 | `OLF_GPU_SA_CTG_RANGE` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuVsCpuRte6515SaTest.java — `from:to`: keep only that index window of the selected contingency list (after `OLF_GPU_SA_CTG_KINDS`); a window is ONE or a few chunks — always finish on the full width |
-| `OLF_GPU_SA_BASE_ONLY` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuVsCpuRte6515SaTest.java + GpuBatchedAcSecurityAnalysis — `1`: both arms run the BASE load flow only (the GPU arm hands an empty contingency list to the SA after its base) and the test stops after the base comparison; the lever that isolates a base-on-device failure from a 20-minute contingency sweep |
 
 ## Build / toolchain (4)
 

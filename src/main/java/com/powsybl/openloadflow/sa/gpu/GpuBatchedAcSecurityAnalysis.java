@@ -726,13 +726,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
             acParameters.setSolverFactory(new GpuNewtonRaphsonFactory(), securityAnalysisParameters.getLoadFlowParameters());
             LOGGER.info("GPU batched SA: base + fall-through load flows run on the GPU Newton-Raphson (CUDA pre-warm)");
         }
-        // OLF_GPU_SA_BASE_ONLY=1: solve the BASE and stop - no contingency simulated. The network
-        // was built for the whole contingency list (the retained switches, the structure the base
-        // has to factor), which is the point: the full busbar scope's base on the device without the
-        // 20 minutes of replays behind it. Debug lever for the base work; the result carries the
-        // pre-contingency state only.
-        List<PropagatedContingency> toSimulate = "1".equals(System.getenv("OLF_GPU_SA_BASE_ONLY"))
-                ? List.of() : propagatedContingencies;
+        List<PropagatedContingency> toSimulate = propagatedContingencies;
         ContingencyActivePowerLossDistribution lossDistribution;
         if (System.getenv("OLF_GPU_PRELOSS_CHECK") != null) {
             lossDistribution = new LossDistributionCheck(contingencyActivePowerLossDistribution);

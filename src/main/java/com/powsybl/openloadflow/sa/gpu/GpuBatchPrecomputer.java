@@ -531,8 +531,6 @@ final class GpuBatchPrecomputer {
      *
      * <p>Cost, NOT yet measured: switching mode evicts the single-entry context cache, so the pass
      * pays one cuDSS analysis plus a solve over the rejected scenarios on every run.
-     * {@code -Dolf.gpu.sa.robustRetry=false} disables it; {@code
-     * -Dolf.gpu.sa.robustRetryAcceptMaxIter=false} keeps the pass but accepts only CONVERGED.
      */
     private static List<BatchScenarioResult> retryRejectedOnDevice(
             List<BatchScenarioResult> results, List<BatchContingency> batch, LfNetwork net,
@@ -541,8 +539,7 @@ final class GpuBatchPrecomputer {
             AcLoadFlowContext context,
             boolean distributedSlack, boolean reactiveLimits, double reactiveLimitTol,
             double slackDistTol, double convEpsPerEq, ReportNode reportNode, BatchConfig config) {
-        if (!Boolean.parseBoolean(System.getProperty("olf.gpu.sa.robustRetry", "true"))
-                || config.robustSolveMode()) {
+        if (config.robustSolveMode()) {
             return results;
         }
         java.util.Set<String> rejected = new java.util.HashSet<>();
@@ -580,7 +577,7 @@ final class GpuBatchPrecomputer {
         // MAX_ITERATION (DEVICE:MAX_ITERATION_REACHED 4 -> 47) while device coverage stayed at
         // 6550/6667 — nothing gained and 43 CPU answers thrown away. A retried scenario that does not
         // CONVERGE keeps its reject and goes to the CPU exactly as before.
-        // -Dolf.gpu.sa.robustRetryAcceptMaxIter=true ALSO accepts STATUS_MAX_ITERATION from the retry.
+        // The retry ALSO accepts STATUS_MAX_ITERATION.
         //
         // That is not the contradiction of the comment above that it looks like. OLF ITSELF does not
         // converge a large part of this tail: on the full busbar scope its own statuses are
@@ -592,16 +589,13 @@ final class GpuBatchPrecomputer {
         // round: it counts precomputed device STATES, and a MAX_ITERATION result carries no state, so
         // it cannot rise for these by construction. The metric that moves is how many contingencies
         // LEAVE the device: measured 113 -> 70 (tasks #67).
-        boolean acceptMaxIter = Boolean.parseBoolean(
-                System.getProperty("olf.gpu.sa.robustRetryAcceptMaxIter", "true"));
         Map<String, BatchScenarioResult> better = new HashMap<>();
         java.util.Map<Integer, Integer> retriedStatus = new java.util.TreeMap<>();
         int recovered = 0;
         for (BatchScenarioResult r : retried) {
             retriedStatus.merge(r.convergenceStatus(), 1, Integer::sum);
             boolean ok = r.convergenceStatus() == com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchStatus.STATUS_CONVERGED
-                    || (acceptMaxIter
-                        && r.convergenceStatus() == com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchStatus.STATUS_MAX_ITERATION);
+                    || r.convergenceStatus() == com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchStatus.STATUS_MAX_ITERATION;
             if (ok) {
                 better.put(r.contingencyId(), r);
                 recovered++;

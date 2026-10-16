@@ -127,6 +127,8 @@ final class GpuStrategyComposer {
         List<ShuntShift> shifts = new java.util.ArrayList<>(ctgShifts);
         List<TapR1Override> taps = new java.util.ArrayList<>();
         List<LfBranch> reclosed = new java.util.ArrayList<>();
+        List<LfBranch> reenabled = new java.util.ArrayList<>();      // contingency outages a close puts back
+        List<LfBranch> opened = new java.util.ArrayList<>();         // branches an open takes out
         List<BatchContingency.GeneratorMove> generatorActions = new java.util.ArrayList<>();
         Map<LfGenerator, Double> generatorNetMove = new java.util.LinkedHashMap<>();
         List<com.powsybl.openloadflow.network.LfHvdc> acEmulationOff = new java.util.ArrayList<>();
@@ -178,9 +180,12 @@ final class GpuStrategyComposer {
                     if (tca.isOpen()) {
                         if (!branches.contains(b)) {
                             branches.add(b);
+                            opened.add(b);
                         }
                     } else {
-                        if (!branches.remove(b)) {
+                        if (branches.remove(b)) {
+                            reenabled.add(b);
+                        } else {
                             // close of a BASE-OPEN branch (retained disabled by LfTopoConfig): batched as a
                             // per-scenario mask CLEAR on the base-open packed element — dead-island
                             // reconnection (a disabled endpoint bus) is rejected at qualification.
@@ -329,6 +334,20 @@ final class GpuStrategyComposer {
             }
         }
         generatorNetMove.forEach((g, d) -> loads.add(new LoadLoss(g.getBus(), d, 0)));
+        if (!reenabled.isEmpty()) {
+            // OLF re-enables every branch at a bus its actions bring back into the main component that is not connected
+            // at both ends (AbstractLfBranchAction.updateBusesAndBranchStatus), even one the contingency outaged
+            List<LfBranch> ctgCut = new java.util.ArrayList<>(ctgZiOutages);
+            ctgBranches.stream().filter(b -> b.getBus1() != null && b.getBus2() != null).forEach(ctgCut::add);
+            ctgSideOpens.forEach(so -> ctgCut.add(so.branch()));
+            for (LfBus bus : busesBroughtBack(net, ctgCut, reenabled, opened)) {
+                for (LfBranch b : bus.getBranches()) {
+                    if (b.getBus1() == null || b.getBus2() == null) {
+                        branches.remove(b);
+                    }
+                }
+            }
+        }
         return new BatchContingency(pairId(contingencyId, strategy, actionIds),
                 // the parent's one-side openings and the zero-impedance tree OLF reaches the strategy with: the pair is
                 // the contingency's topology plus the actions (dropping them solved another network: 0.52 kV at B4 on a
@@ -341,6 +360,42 @@ final class GpuStrategyComposer {
      *  target tap's [y, g1, g2, b1, b2, ksi, r1, a1] replaces the branch's static inputs, so
      *  per-tap impedance changes are covered. Null when out of batch scope: unknown transformer /
      *  tap changer, no tap table, or out-of-range position. */
+    /**
+     * The buses OLF adds back to the main component when a strategy re-enables {@code reenabled} and takes out
+     * {@code opened}, as LfActionUtils.updateConnectivity finds them: the contingency's whole disabled network removed
+     * from the connectivity (its cut branches and every branch of the buses it lost), then the actions applied.
+     */
+    private static java.util.Set<LfBus> busesBroughtBack(LfNetwork net, List<LfBranch> ctgCut, List<LfBranch> reenabled,
+                                                         List<LfBranch> opened) {
+        com.powsybl.openloadflow.graph.GraphConnectivity<LfBus, LfBranch> connectivity = net.getConnectivity();
+        LfBus slack = net.getSynchronousNetworks().getFirst().getSlackBuses().getFirst();
+        connectivity.startTemporaryChanges();
+        try {
+            ctgCut.forEach(connectivity::removeEdge);
+            connectivity.setMainComponentVertex(slack);
+            java.util.Set<LfBranch> cut = new java.util.HashSet<>(ctgCut);
+            for (LfBus lost : connectivity.getVerticesRemovedFromMainComponent()) {
+                for (LfBranch b : lost.getBranches()) {
+                    if (b.getBus1() != null && b.getBus2() != null && !b.isDisabled() && cut.add(b)) {
+                        connectivity.removeEdge(b);
+                    }
+                }
+            }
+            connectivity.startTemporaryChanges();
+            try {
+                opened.stream().filter(b -> b.getBus1() != null && b.getBus2() != null && !cut.contains(b))
+                        .forEach(connectivity::removeEdge);
+                reenabled.forEach(b -> connectivity.addEdge(b.getBus1(), b.getBus2(), b));
+                return new java.util.HashSet<>(connectivity.getVerticesAddedToMainComponent());
+            } finally {
+                connectivity.undoTemporaryChanges();
+            }
+        } finally {
+            connectivity.undoTemporaryChanges();
+            connectivity.setMainComponentVertex(slack);
+        }
+    }
+
     private static TapR1Override tapOverride(LfNetwork net, String transformerId,
                                              com.powsybl.iidm.network.TapChanger<?, ?, ?, ?> tapChanger,
                                              boolean relative, int tapPosition) {

@@ -69,327 +69,16 @@
 #include "hvdc_scatter.h"
 #include "vdl.cuh"
 
-// OLF_GPU_PHASE_TIME accounting: how much of a solveBatchContext call is device outer-loop passes
-// vs Newton iterations. A pass that re-solves is the expensive one; a pass that only re-checks is not.
-long long gOuterPasses = 0;
 #include "common/loop_kinds.cuh"
-
-// OLF_GPU_PHASE_TIME: where the outer-loop driver's time goes. Index 0..16 = the DeviceLoopKind that TRIGGERED a
-// re-solve (the loop whose check changed something), or the loop being CHECKED; the first solve of a call is apart.
-double gOlFirstSolveMs = 0, gOlReSolveMs[OL_KINDS] = {0}, gOlCheckMs[OL_KINDS] = {0};
-long long gOlFirstSolveScen = 0, gOlReSolveScen[OL_KINDS] = {0}, gOlReSolvePasses[OL_KINDS] = {0};
-long long gOlFirstLaneIters = 0, gOlReSolveLaneIters[OL_KINDS] = {0}, gOlFirstWidthIters = 0, gOlReSolveWidthIters[OL_KINDS] = {0};
-long long gOlCheckPasses[OL_KINDS] = {0}, gOlFirstPasses = 0;
-// OLF_GPU_RL_REASONS=1: why each reactive-limits check was unstable, per checked scenario (bit 1 a pin PV->PQ, bit 2 an
-// unpin PQ->PV, bit 4 a limit refresh of a pinned entry; 0 with the scenario switched = a group re-stamp only), and
-// the entries behind it.
-long long gRlCheckScen[8] = {0}, gRlStableScen = 0, gRlEntryCodes[4] = {0};
-inline bool rlReasonsOn() {
-    static const bool on = std::getenv("OLF_GPU_RL_REASONS") != nullptr;
-    return on;
-}
-inline double olNowMs() {
-    return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count();
-}
-
-long long gNewtonIters = 0;
-int gLastPassIters = 0;   // debug: inner-Newton steps taken by the pass just finished
-long long gSolvePasses = 0;
-long long gActiveIterSum = 0;
-long long gWidthIterSum = 0;
-long long gCompactIters = 0;
-// OLF_GPU_PHASE_TIME: cuDSS symbolic analyses run — the main contexts (a batch, the base load flow) and the
-// straggler-compaction context (one per compact WIDTH it is analyzed at).
-// Per scenario at the end of a completed batch call: how many SOLVE PASSES it took part in (1 = the state came
-// right out of the first inner Newton; each further pass is an outer loop that changed something and
-// re-solved), the first pass's iterations and the total. Histogram key = passes (capped at 15).
-long long gOlHistCount[16] = {0}, gOlHistFirst[16] = {0}, gOlHistTotal[16] = {0};
-long long gOlNotConverged = 0, gOlNotConvergedIters = 0;
-long long gAnalysesMain = 0;
-long long gAnalysesCompact = 0;
-// Wall time of every symbolic analysis, per CALL SITE (source line), with a device sync on both sides so the
-// reordering's host work and its device kernels are both inside. Only under OLF_GPU_PHASE_TIME (the syncs are
-// not free); printed by the JNI_PHASE_TIME line as ANALYSIS_TIME.
-// Same for factorizations (F) and solves (S); key = phase letter * 100000 + line.
-std::map<int, std::pair<long long, double>> gAnalysisSites;   // key -> (count, ms)
-struct AnalysisTimer {
-    int line;
-    bool on;
-    std::chrono::steady_clock::time_point t0;
-    explicit AnalysisTimer(int l, char ph = 'A') : line(ph * 100000 + l), on(std::getenv("OLF_GPU_PHASE_TIME") != nullptr) {
-        if (on) {
-            cudaDeviceSynchronize();
-            t0 = std::chrono::steady_clock::now();
-        }
-    }
-    ~AnalysisTimer() {
-        if (on) {
-            cudaDeviceSynchronize();
-            auto& e = gAnalysisSites[line];
-            e.first++;
-            e.second += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
-        }
-    }
-};
+#include "common/stats.cuh"
 
 using namespace powsybl::openloadflow;
 
 #include "common/check.cuh"
+#include "common/launch.cuh"
+#include "solver/linear_solver_settings.cuh"
 
-namespace {
-
-// cuDSS iterative-refinement steps. Default 0: the OUTER Newton loop self-corrects any
-// linear-solve inexactness, so refining each solve is redundant for NR — measured ~30% faster
-// on batched N-1 with IDENTICAL convergence (vs the old IR=2 inherited from powsybl-math-native).
-// NB reusing pivots via CUDSS_PHASE_REFACTORIZATION was also benchmarked and gives NO speedup in
-// cuDSS batched mode (its factorization cost is the numeric fill, not pivoting), so it is not used.
-constexpr int IR_N_STEPS = 0;
-constexpr int BLOCK = 64;
-
-// IR IS REQUIRED WHEN THE SYSTEM HAS ZERO-IMPEDANCE BRANCHES. Each one puts ZERO_V / ZERO_PHI on
-// the DUMMY_P / DUMMY_Q rows carrying v1-v2 and phi1-phi2, never their own dummy — two zero
-// diagonals apiece — and AMD, a SYMMETRIC ordering that assumes a non-zero diagonal, then carries
-// real FORWARD error there. LIN_RESID stays ~1e-14 throughout, because that is the BACKWARD
-// residual; with kappa ~ 5e8 the forward error in dx is what moves, and two refinement steps
-// recover it. Measured on rte6515's busbar outages: base 1.225e-07 -> 3.831e-11 and BUS-1017
-// 2.302e-06 -> 2.454e-11, which is also exactly where nested dissection lands, two unrelated
-// mechanisms agreeing on the accurate answer.
-//
-// NESTED DISSECTION WAS TRIED FIRST AND IS NOT USABLE: it reaches the same accuracy but COLLAPSES
-// the batch at scale — 80 busbar outages give 0/80 scenarios batched against AMD's 60/80, most
-// blowing up to ~1e14. That regression was invisible on the 20-contingency window it was validated
-// on. IR keeps AMD's ordering, so batching share is unchanged (60/80 either way).
-// RE-MEASURED 2026-09-21 AFTER THE ZERO-DIAGONAL ROW REPAIR (hazRepairVals): still needed. The repair
-// makes every row nonsingular, but a borrowed +-1 diagonal sits among O(100) admittance entries and
-// static pivoting is still inaccurate there. rte6515, 500 busbar outages, same code either way:
-//   IR=2: worst ||J.dx-F||inf 1.5e-11 over every scenario and iteration; buses vs CPU worst 2.6e-9 kV,
-//         3 contingencies above 1e-9 kV.
-//   IR=0: worst ||J.dx-F||inf 3.8e-4 (ratio 1.5e-3 to ||F||), on the REPAIRED rows (VL-132_1,
-//         VL-1113_1/2/3, a coupler DUMMY_Q); buses worst 2.6e-8 kV, 12 above 1e-9 kV.
-// The open lever, if the two refinement solves per iteration ever matter for wall time, is to SCALE
-// the borrowed row so the repaired diagonal is commensurate with the row's other entries rather than
-// to drop the refinement.
-// ADAPTIVE refinement: cuDSS runs irBaseSteps internally, then the batch
-// loop measures every lane's backward residual ratio ||b - J dx||inf / ||b||inf and refines (r = b - J dx,
-// J d = r, dx += d) only while an active lane sits above OLF_GPU_IR_TOL, up to irMaxSteps in all. Measured on
-// network.xiidm (24,379 contingencies, 443 batched Newton iterations): the fixed 4 steps cost 5 forward/backward
-// solves per factorization, 64.7 s of the 126 s of kernels, and 2 fixed steps left two busbar scenarios at a
-// linear-solve failure (ratio ~1e-6 on a coupler-heavy chunk) - the count a lane needs depends on which other
-// matrices share its batch, so it is decided per iteration from the residual itself.
-// OLF_GPU_IR_BASE was 0 for part of 2026-10-06 (back to 1, see irBaseSteps): cuDSS's own single internal step cost a 16 ms spmv_ker per solve
-// (10.4 s of the 86 s of kernels on network.xiidm) and the launch counts showed it never went on to a second
-// solve - the library checked and stopped - while residualBatch measures the same product in 1.2 ms. With the
-// library step off the loop checks 794 times and refines 538 for 443 iterations: solve 93.2 s -> 69.4 s, cold
-// 139.7 s -> 116.2 s, identical statuses and Newton counts, rte6515 generator/branch kinds exact.
-// BACK TO 1 (2026-10-06, same day): the step's cost was measured on network.xiidm WITHOUT busbar outages, and on
-// the full busbar scope - the structures whose repaired zero diagonals this refinement exists for - turning it off
-// cost most of the device share. Full network.xiidm busbar scope, GPU-only, same code: base without the step
-// 5121 / 5422 of 12918 on device (two runs), 7339 with it before the change; with the parent-row repair, the step on
-// gave 12869 on device and 98 violations off the CPU against 12364-12621 and 196-1274 without. Only systems WITH
-// zero-impedance couplers ever read this (IR_N_STEPS = 0 otherwise): a coupler-free network is unaffected, but
-// network.xiidm's non-busbar scopes have couplers too and give back that measured speed-up (cold 116 s -> ~140 s).
-// The run's linear-solver settings (GpuLoadFlowParameters, installed by setLinearSolverSettings before the run's
-// contexts are built). -1 = AUTO: the per-context choice each apply* function documents; a NaN threshold = the
-// library's own. The defaults are what every context used before the settings were parameters.
-struct LinearSolverSettings {
-    int reorder = -1;                                        // index into REORDER_ALGS, -1 = AUTO (AMD on cuDSS 0.8)
-    int matching = 6;                                        // cudssMatchingAlg_t, CUDSS_MATCHING_ALG_AUTO
-    int pivotType = -1;                                      // cudssPivotType_t, -1 = derived from the ordering
-    double pivotThreshold = NAN;
-    int irBase = 1;                                          // cuDSS internal refinement steps (coupler systems)
-    int irMax = 4;                                           // adaptive refinement: at most this many solves
-    double irTol = 1e-12;                                    // adaptive refinement: backward-residual target
-};
-static LinearSolverSettings gLinearSolver;
-
-inline int irBaseSteps() {
-    return gLinearSolver.irBase;
-}
-inline int irMaxSteps() {
-    return gLinearSolver.irMax;
-}
-inline double irTol() {
-    return gLinearSolver.irTol;
-}
-static long gIrExtraSteps = 0;                               // adaptive refinement solves actually run
-static long gIrChecks = 0;                                   // residual checks (one per batched iteration at least)
-
-// ---------------------------------------------------------------------------------
-// cuDSS fill-reducing ordering knob (the reordering-alg SWEEP): factorize cost is
-// LU-fill-bound, and the fill is decided by the ordering cuDSS picks at ANALYSIS.
-// OLF_GPU_REORDER_ALG selects it explicitly on EVERY cuDSS config we create (base
-// context, batch context, chunk-size probe — one run = one ordering everywhere):
-//   default | btf_colamd | colamd | amd | nd | none
-// Unset on cuDSS >= 0.8.0 = AMD, the 2026-07-16 sweep winner on case9241pegase:
-// LU_NNZ 260076 vs 304772 for the library default (which measured identical to nd,
-// so the default IS nested dissection there), warm chunk -3.4% and warm SA -11% in
-// every interleaved A/B pair, convergence and the full suite unchanged; btf_colamd
-// and colamd are NOT_SUPPORTED (status 4) at the UBATCH ANALYSIS. Unset on 0.7.1 =
-// library default (unmeasured there). "none" is the natural order — expect
-// pathological fill on grid patterns; sweep it only with a small OLF_GPU_MAXBATCH.
-// Driver: native/cuda/sweep_reorder.sh, which compares the reported LU_NNZ (see
-// traceLuNnz) and the warm bench line per algorithm. cuDSS 0.7 names the same
-// ordinals CUDSS_ALG_1..5 (its docs map 1/2 to BTF_COLAMD/COLAMD).
-// ---------------------------------------------------------------------------------
-
-#if CUDSS_VERSION >= 800
-using OlfReorderAlg = cudssReorderingAlg_t;
-constexpr OlfReorderAlg REORDER_ALGS[] = {CUDSS_REORDERING_ALG_DEFAULT, CUDSS_REORDERING_ALG_BTF_COLAMD,
-                                          CUDSS_REORDERING_ALG_COLAMD, CUDSS_REORDERING_ALG_AMD,
-                                          CUDSS_REORDERING_ALG_NESTED_DISSECTION, CUDSS_REORDERING_ALG_NONE};
-#else
-using OlfReorderAlg = cudssAlgType_t;
-constexpr OlfReorderAlg REORDER_ALGS[] = {CUDSS_ALG_DEFAULT, CUDSS_ALG_1, CUDSS_ALG_2,
-                                          CUDSS_ALG_3, CUDSS_ALG_4, CUDSS_ALG_5};
-#endif
-
-// ---------------------------------------------------------------------------------
-// Matching (MC64-style) for the STANDALONE adjoint solve — NOT used by the batched NR.
-//
-// The batched NR path can skip this because it builds its own superset pattern with a
-// GUARANTEED nonzero diagonal (the diagonal-pairing row permutation), so cuDSS never
-// meets a zero pivot even though we configure no pivoting. A raw OLF Jacobian handed
-// over unpermuted has no such guarantee: measured on ieee14, 5 of 28 diagonal entries
-// are EXACTLY zero and 0 of 28 rows are diagonally dominant. cuDSS then substitutes a
-// static perturbation for the zero pivot and returns a wrong answer WITH A MATCHING
-// RESIDUAL — which reads as a correctness bug and is really a pivoting one. Measured
-// on that matrix, error vs KLU: AMD 7.2e-3, nested dissection 7.2e-2, natural order
-// 6.2e-15. Iterative refinement does NOT rescue it (IR=0 and IR=3 are bit-identical).
-//
-// Natural order is not a fix — fill explodes on grid patterns at real network sizes —
-// so we keep the fill-reducing ordering and give cuDSS a matching pass to permute
-// large entries onto the diagonal first. Override with OLF_GPU_MATCHING_ALG=<0..6>
-// (0 disables; see cudssMatchingAlg_t), mainly to reproduce the failure above.
-// ---------------------------------------------------------------------------------
-// MATCHING IS NOT AVAILABLE TO THE BATCHED NR: cuDSS 0.8.0 rejects it at the uniform-batch analysis
-// (status 4; the library string reads "Matching is not supported for uniform batches"), so the batched
-// path repairs its zero diagonals itself — see hazRepairVals. What follows is the standalone case.
-//
-// MATCHING IS NOT OPTIONAL ON THESE JACOBIANS. A bus fed ONLY through a zero-impedance branch
-// leaves four rows with a numerically ZERO diagonal — the branch's ZERO_V / ZERO_PHI (which carry
-// v1-v2 and phi1-phi2, never their own dummy) and the dead-end bus's P / Q balances (which carry
-// only -DUMMY_P / -DUMMY_Q). The matrix is non-singular, but factoring it needs the rows matched to
-// other columns. Without matching cuDSS perturbs the zero pivot and the reciprocal propagates:
-// measured on deviceRemoteZeroImpMemberPin as DUMMY_P = -1.220703125e+09 and, through the chained
-// second pivot, phi = -1.220703125e+22 (1.220703125e-04 is 2^-13, so these are 1e13 and (1e13)^2
-// scaled) where the exact answers are -0.05 and 0. The solve then "converges" somewhere else or
-// diverges, and on the base load flow it was masked by the device-broken-solve safety net.
-inline void applyMatchingAlg(cudssConfig_t config) {
-#if CUDSS_VERSION >= 800
-    // Never CUDSS_MATCHING_ALG_NONE: these Jacobians need matching (see above), so the parameter does not offer it.
-    cudssMatchingAlg_t alg = static_cast<cudssMatchingAlg_t>(gLinearSolver.matching);
-    CUDSS_CHECK(cudssConfigSet(config, CUDSS_CONFIG_MATCHING_ALG, &alg, sizeof(alg)));
-#else
-    (void) config;                                           // 0.7.1 has no matching knob
-#endif
-}
-
-inline void applyReorderAlg(cudssConfig_t config, bool hasZeroImpedance);   // defined below
-
-// MODE 6 = the ROBUST single-matrix solve: mode 0's per-scenario loop with matching and pivoting
-// on cuDSS's single-matrix API (the uniform batch supports none of the three). It is what a
-// factorization needs on rte6515's full busbar structure (366 retained couplers, 1e-18 pivots under
-// every unpivoted ordering): measured 2026-09-22, the batch-of-one base load flow that the uniform
-// batch could not solve converges on the device in this mode. The batch-of-one falls into it
-// automatically after a linear-solve reject (GpuNewtonRaphson); a context asks for it through
-// the test hook GpuBatchContextCache.forceModeForTests. The reordering setting still overrides the ordering.
-inline void applyRobustSingleMatrixConfig(cudssConfig_t config) {
-#if CUDSS_VERSION >= 800
-    const int reorder = gLinearSolver.reorder;
-    bool colamdFamily = true;                                // BTF_COLAMD / COLAMD: global column pivoting is defined
-    if (reorder < 0) {
-        // cuDSS 0.8 REFUSES matching under BTF_COLAMD / COLAMD (status 4 at factorization, every
-        // size); it accepts it under default / ND / AMD with automatic pivoting. AMD by default.
-        OlfReorderAlg amd = CUDSS_REORDERING_ALG_AMD;
-        CUDSS_CHECK(cudssConfigSet(config, CUDSS_CONFIG_REORDERING_ALG, &amd, sizeof(amd)));
-        colamdFamily = false;
-    } else {
-        applyReorderAlg(config, true);
-        colamdFamily = reorder == 1 || reorder == 2;          // REORDER_ALGS: btf_colamd, colamd
-    }
-    cudssPivotType_t pt = colamdFamily ? CUDSS_PIVOT_GLOBAL_COL : CUDSS_PIVOT_AUTO;
-    // The pivot type and threshold: the two knobs that make KLU work on the CPU. KLU pivots on ROWS with a threshold
-    // inside each BTF block; the default here is GLOBAL_COL under the COLAMD family and AUTO otherwise, with the
-    // library's own threshold.
-    if (gLinearSolver.pivotType >= 0) {
-        pt = static_cast<cudssPivotType_t>(gLinearSolver.pivotType);
-    }
-    CUDSS_CHECK(cudssConfigSet(config, CUDSS_CONFIG_PIVOT_TYPE, &pt, sizeof(pt)));
-    if (!std::isnan(gLinearSolver.pivotThreshold)) {
-        double thr = gLinearSolver.pivotThreshold;
-        CUDSS_CHECK(cudssConfigSet(config, CUDSS_CONFIG_PIVOT_THRESHOLD, &thr, sizeof(thr)));
-    }
-    if (std::getenv("OLF_GPU_BATCH_TRACE") != nullptr) {
-        std::fprintf(stderr, "ROBUST_CFG reorder=%d pivot=%d matching=%d threshold=%g\n",
-                     reorder, static_cast<int>(pt), gLinearSolver.matching, gLinearSolver.pivotThreshold);
-    }
-    // Matching is REQUIRED (measured: pivoting alone left the full-scope base at NaN). Its
-    // permutation is value-dependent and cuDSS accepts ONE analysis per data object (a second
-    // ANALYSIS returns status 4), so the analysis runs once on the first values of the run and the
-    // later factorizations reuse it - which is what converged the full-scope base. A system cuDSS
-    // refuses under this configuration (ieee14 in the cross-check test: status 4 at factorization)
-    // throws, and the batch-of-one falls back to the CPU as before - never wrong.
-    // Default AUTO, but the matching setting must reach HERE too, not only the standalone path: cuDSS
-    // REFUSES matching under BTF_COLAMD / COLAMD (status 4 at ANALYSIS), so while this hard-coded AUTO
-    // stood, the KLU-LIKE orderings could not be tested in robust mode at all — every attempt died in
-    // analysis before factoring anything, which is also why this mode silently runs AMD (the ordering
-    // its own comment does not claim) whenever the variable is unset.
-    applyMatchingAlg(config);
-#else
-    (void) config;
-#endif
-}
-
-// AMD IS NOT SAFE WHEN THE SYSTEM HAS ZERO-IMPEDANCE BRANCHES. AMD is a SYMMETRIC (approximate
-// minimum degree) ordering and assumes a non-zero diagonal; a zero-impedance branch always breaks
-// that, because ZERO_V / ZERO_PHI sit on the DUMMY_P / DUMMY_Q rows and carry v1-v2 and phi1-phi2,
-// never their own dummy. The DEAD-END STUB case, where four such rows chain, is repaired
-// structurally by the row relocation (GpuAcRowIndexing#ziDeadEndSide) — but the ordinary two per
-// branch remain, and AMD loses accuracy on them: on rte6515's busbar outages it left BUS-1017 at
-// 2.302e-06 kV and BUS-1003 at 1.142e-07 where nested dissection gives 4.074e-09 and 9.572e-11.
-// That those are ALSO the numbers cuDSS iterative refinement converges to (OLF_GPU_IR_STEPS=2 and
-// 4 both reproduce them, and the base likewise) is what identifies them as the accurate solve
-// rather than merely a different one: two unrelated mechanisms agreeing on an answer AMD misses.
-// AMD is kept where it is safe and was measured to pay — the 2026-07-16 sweep won on
-// case9241pegase (LU_NNZ 260076 vs 304772, warm SA -11%), a network with no retained switches and
-// therefore no zero-impedance branch, so it never exercised a zero diagonal.
-inline void applyReorderAlg(cudssConfig_t config, bool hasZeroImpedance) {
-    const int reorder = gLinearSolver.reorder;
-    if (reorder < 0) {
-#if CUDSS_VERSION >= 800
-            OlfReorderAlg amd = CUDSS_REORDERING_ALG_AMD;        // sweep winner; ND collapses the
-        CUDSS_CHECK(cudssConfigSet(config, CUDSS_CONFIG_REORDERING_ALG, &amd, sizeof(amd)));
-#endif
-        return;                                              // 0.7.1: library default, untouched
-    }
-    (void) hasZeroImpedance;
-    if (reorder >= static_cast<int>(sizeof(REORDER_ALGS) / sizeof(REORDER_ALGS[0]))) {
-        throw std::runtime_error("reordering algorithm index out of range: " + std::to_string(reorder));
-    }
-    OlfReorderAlg alg = REORDER_ALGS[reorder];
-    CUDSS_CHECK(cudssConfigSet(config, CUDSS_CONFIG_REORDERING_ALG, &alg, sizeof(alg)));
-}
-
-// Report the LU fill after an ANALYSIS when sweeping (or tracing): one stderr line the
-// sweep driver greps. Non-fatal — some (version, ordering) combinations may not expose
-// CUDSS_DATA_LU_NNZ; the sweep then judges on the bench timing alone.
-inline void traceLuNnz(cudssHandle_t handle, cudssData_t data, const char* where, int nScenarios = 0,
-                       double ms = -1.0) {
-    if (std::getenv("OLF_GPU_TRACE") == nullptr) {
-        return;
-    }
-#if OLF_GPU_CUDSS_LU_NNZ
-    int64_t luNnz = 0;
-    size_t written = 0;
-    if (cudssDataGet(handle, data, CUDSS_DATA_LU_NNZ, &luNnz, sizeof(luNnz), &written) == CUDSS_STATUS_SUCCESS
-            && luNnz > 0) {
-        std::fprintf(stderr, "OLF_GPU_CUDSS reorder=%d %s nScenarios=%d LU_NNZ=%lld analysis=%.1f ms\n",
-                     gLinearSolver.reorder, where, nScenarios, static_cast<long long>(luNnz), ms);
-        return;
-    }
-#endif
-    std::fprintf(stderr, "OLF_GPU_CUDSS %s LU_NNZ=unavailable\n", where);
-}
+namespace olfgpu {
 
 // ---------------------------------------------------------------------------------
 // Host: resolve each scatter-table row to (equation row, variable col) from one
@@ -12138,7 +11827,9 @@ psgStep(ctx, nS, n, outer, "afterDistrQ");
     return res;
 }
 
-}  // namespace
+}  // namespace olfgpu
+
+using namespace olfgpu;
 
 extern "C" JNIEXPORT jlong JNICALL
 Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_createStructure(
@@ -12392,15 +12083,6 @@ static long long nowNs() {
     return std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count();
 }
-
-extern long long gOuterPasses;
-extern long long gNewtonIters;
-extern long long gSolvePasses;
-extern long long gActiveIterSum;
-extern long long gWidthIterSum;
-extern long long gCompactIters;
-extern long long gAnalysesMain;
-extern long long gAnalysesCompact;
 
 static long long marshalNs = 0;
 static long long solveNs = 0;
@@ -13112,7 +12794,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
     ctx->perRowAlt = true;
 }
 
-namespace {   // the declaration sits in the anonymous namespace with the curve kernel
+namespace olfgpu {   // the declaration sits in the namespace with the curve kernel
 // The curve kernel's view of the AC-emulation loop state (see CvHvdc).
 CvHvdc cvHvdcView(BatchSolverContext* ctx) {
     CvHvdc c{};
@@ -13136,7 +12818,7 @@ CvHvdc cvHvdcView(BatchSolverContext* ctx) {
     }
     return c;
 }
-}  // namespace
+}  // namespace olfgpu
 
 // Reactive-capability CURVES at runtime P: install (or clear, with nulls) the per-gen curve channel
 // on a batch context — see rlCurveLimitsBatch. cvIdx stride 5 {rlIdx, pRow, ptsOff, npts, dsGenSlot}; cvIn

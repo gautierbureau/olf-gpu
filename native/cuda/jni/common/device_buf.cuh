@@ -1,8 +1,7 @@
 // Copyright (c) 2026, RTE (http://www.rte-france.com)
 // SPDX-License-Identifier: MPL-2.0
 //
-// DeviceBuf: a grow-only, zero-initialised device allocation freed by its destructor, and the launch
-// grid of a one-thread-per-element kernel.
+// DeviceBuf: a grow-only, zero-initialised device allocation freed by its destructor.
 #ifndef OLF_GPU_COMMON_DEVICE_BUF_CUH
 #define OLF_GPU_COMMON_DEVICE_BUF_CUH
 
@@ -12,8 +11,6 @@
 #include <cstdlib>
 
 #include "check.cuh"
-
-inline int grid(int n) { return (n + BLOCK - 1) / BLOCK; }
 
 struct DeviceBuf {
     void* p = nullptr;

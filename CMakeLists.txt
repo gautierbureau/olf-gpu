@@ -84,6 +84,8 @@ endif()
 add_library(olfgpu SHARED
     native/cuda/jni/olf_gpu_nr_jni.cu
     native/cuda/jni/olf_gpu_violations.cu
+    native/cuda/jni/common/stats.cu
+    native/cuda/jni/solver/linear_solver_settings.cu
 )
 target_include_directories(olfgpu
     PRIVATE
@@ -99,6 +101,8 @@ target_link_libraries(olfgpu PRIVATE ${CUDSS_LIBRARY} CUDA::cublas)
 # (static_assert in olf_gpu_nr_jni.cu); the cudssMatrixCreate* data-type args are shimmed by
 # CUDSS_VERSION so the same source builds against 0.7.x and 0.8 (CUDSS_ROOT picks the install).
 set_target_properties(olfgpu PROPERTIES CUDA_RUNTIME_LIBRARY Static)
+# Only the JNI entry points (JNIEXPORT) are exported; everything in namespace olfgpu stays internal to the library.
+set_target_properties(olfgpu PROPERTIES CXX_VISIBILITY_PRESET hidden CUDA_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN ON)
 # No implicit build-tree RUNPATH: the artifact is used straight from the build
 # output (never `cmake --install`ed), and a baked machine-local path would defeat
 # the distributable no-RPATH default. CUDSS_EMBED_RPATH adds it back explicitly.

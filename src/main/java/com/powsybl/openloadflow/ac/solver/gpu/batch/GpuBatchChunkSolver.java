@@ -1110,7 +1110,7 @@ final class GpuBatchChunkSolver {
                                                     contingencies.get(ci).outagedZiBranches(), ziElemByNumAll, gpuData.ziIdx(),
                                                     frozenForCtg);
                                     boolean childPinned = applied
-                                            && GpuBatchQualification.basePinned(gpuData, GpuBatchQualification.rlEntryOf(gpuData, child));
+                                            && RelocatedRows.basePinned(gpuData, RelocatedRows.rlEntryOf(gpuData, child));
                                     if (applied && childPinned) {
                                         // The child is PQ in the base (reactive limit): its balance comes home at
                                         // the pinned value, no identity (the qualification refused such a child as
@@ -2231,7 +2231,7 @@ final class GpuBatchChunkSolver {
                     GpuAcNewtonSolver.setBatchRlGenLost(handle,
                             rlGenLostList.isEmpty() ? null : rlGenLostList.stream().mapToInt(Integer::intValue).toArray());
                     GpuAcNewtonSolver.setBatchDqSubgroups(handle, anyDqSub ? dqSubDense : null,
-                            anyDqSub ? GpuBatchQualification.qrMemberStart(gpuData) : null);
+                            anyDqSub ? RelocatedRows.qrMemberStart(gpuData) : null);
                     GpuAcNewtonSolver.setBatchRlLocal(handle,
                             rlLocalList.isEmpty() ? null : rlLocalList.stream().mapToInt(Integer::intValue).toArray(),
                             rlLocalList.isEmpty() ? null : rlLocalVt.stream().mapToDouble(Double::doubleValue).toArray());

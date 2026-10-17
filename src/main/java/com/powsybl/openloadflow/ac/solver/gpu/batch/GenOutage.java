@@ -163,7 +163,7 @@ public record GenOutage(int pRow, double pTarget, int vRow, double qTarget, bool
     }
 
     /** {@code pqRowMode} value meaning "the V row becomes a VOLTAGE IDENTITY (mode 0)": a merged voltage
-     *  control re-homed to this bus by a zero-impedance split (see GpuBatchQualification.reHomedControls),
+     *  control re-homed to this bus by a zero-impedance split (see ControlReHoming.reHomedControls),
      *  with {@code qTarget} then carrying the bus's own voltage target. 0 is the "default" (1). */
     public static final int ROW_V_IDENTITY = -1;
     /** A re-homed control whose bus is PINNED at a reactive limit in the base: the row starts as its own

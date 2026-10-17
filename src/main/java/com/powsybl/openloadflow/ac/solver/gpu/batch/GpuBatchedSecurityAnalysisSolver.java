@@ -343,7 +343,7 @@ public final class GpuBatchedSecurityAnalysisSolver {
                         distributedSlack, baseTargets, baseActivation.rowMode(), config.rlCurveExtrapolate())
                 : null;
         // Couplers whose DUMMY rows host a bus's power equations under the tree relocation: an island has to
-        // freeze those rows too (see GpuBatchQualification.islandedFrozen). Empty when the relocation is off.
+        // freeze those rows too (see IslandedBuses.islandedFrozen). Empty when the relocation is off.
         Set<LfBranch> relocatedCouplers = GpuAcDataExtractor.relocatedCouplerBranches(network, equationSystem);
         GpuBatchQualification.ScenarioPlan plan = GpuBatchQualification.planScenarios(contingencies, qualifications,
                 elementMapper, gpuData, equationSystem, dsSum, slackParticipates, dsParams, distrRhoControllers,

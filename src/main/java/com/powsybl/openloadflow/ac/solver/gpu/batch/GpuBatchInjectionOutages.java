@@ -159,7 +159,7 @@ final class GpuBatchInjectionOutages {
                     // solved the renormalized WEIGHTS against a target built from the base keys: measured
                     // -13.3334 MVAr where OLF has -20.0001, one third of the pilot's 40 MVAr load instead
                     // of one half, and 0.32 kV on every bus behind it.
-                    r.add(GpuBatchQualification.unrelocQRow(mRow[m], relocDummyQRows, outagedZiNums));
+                    r.add(RelocatedRows.unrelocQRow(mRow[m], relocDummyQRows, outagedZiNums));
                     // targetQ over THIS member's peers — its own control's elements, as AcTargetVector sums them
                     double sumTargetQ = 0;
                     for (int t = gpuData.dqMemberTgtPtr()[m]; t < gpuData.dqMemberTgtPtr()[m + 1]; t++) {
@@ -177,7 +177,7 @@ final class GpuBatchInjectionOutages {
                     for (int m = gs; m < gs + gc; m++) {
                         sb.append(" m").append(m).append("[bus=").append(mBusNum[m])
                                 .append(" hasRow=").append(mHasRow[m]).append(" row=").append(mRow[m])
-                                .append(" reloc=").append(GpuBatchQualification.unrelocQRow(mRow[m],
+                                .append(" reloc=").append(RelocatedRows.unrelocQRow(mRow[m],
                                         relocDummyQRows, outagedZiNums))
                                 .append(" key=").append(mKey[m])
                                 .append(" targetQ=").append(baseTargetQ(any, mBusNum[m]))

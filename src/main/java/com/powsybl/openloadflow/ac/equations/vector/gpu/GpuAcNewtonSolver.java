@@ -7,6 +7,8 @@
  */
 package com.powsybl.openloadflow.ac.equations.vector.gpu;
 
+import com.powsybl.openloadflow.ac.solver.gpu.batch.ControlReHoming;
+
 /**
  * JNI binding: a FULL Newton-Raphson AC power flow run on the GPU behind one native call.
  * The native library libolfgpu (native/cuda/jni/olf_gpu_nr_jni.cu, built by the root
@@ -402,7 +404,7 @@ public final class GpuAcNewtonSolver {
      *  as "not enabled" by the pilot-self layout, and its reactive balance emitted through the pilot-self gate. */
     public static native void setBatchRlGenLost(long handle, int[] slotEntryPairs);
 
-    /** Re-homed voltage controls (GpuBatchQualification.reHomedControls): per (slot, entry) pair the entry is
+    /** Re-homed voltage controls (ControlReHoming.reHomedControls): per (slot, entry) pair the entry is
      *  checked by the reactive-limits pass as a LOCAL controller at {@code vTargets[k]} — the bus is a plain PV
      *  bus this scenario, whatever its base packing. Null clears the context's list. */
     public static native void setBatchRlLocal(long handle, int[] slotEntryPairs, double[] vTargets);

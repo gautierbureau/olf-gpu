@@ -64,7 +64,7 @@ public class GpuNewtonRaphsonFactory extends NewtonRaphsonFactory {
                            EquationVector<AcVariableType, AcEquationType> equationVector) {
         // A batch of one is still a batch: the device driver runs OLF's outer loops for it as it does for a
         // 600-scenario chunk, with the bands of the run's OWN configured loops, so it decides at OLF's thresholds.
-        double[] d = GpuNewtonRaphson.driverSettings(parameters);
+        double[] d = GpuSolveSettings.driverSettings(parameters);
         // NOTE: the loops the driver takes over must ALSO stop running in OLF's engine, or they run
         // twice — the device distributes into its own targets while the network still holds the
         // pre-distribution ones, so OLF's DistributedSlack measures the amount just distributed as a

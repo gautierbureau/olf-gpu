@@ -32,7 +32,6 @@ import com.powsybl.openloadflow.ac.solver.AbstractAcSolver;
 import com.powsybl.openloadflow.ac.solver.AcSolverResult;
 import com.powsybl.openloadflow.ac.solver.AcSolverStatus;
 import com.powsybl.openloadflow.ac.solver.AcSolverUtil;
-import com.powsybl.openloadflow.ac.solver.DefaultNewtonRaphsonStoppingCriteria;
 import com.powsybl.openloadflow.ac.solver.NewtonRaphson;
 import com.powsybl.openloadflow.ac.solver.NewtonRaphsonParameters;
 import com.powsybl.openloadflow.ac.solver.NewtonRaphsonStoppingCriteria;
@@ -46,7 +45,6 @@ import com.powsybl.openloadflow.equations.EquationVector;
 import com.powsybl.openloadflow.equations.JacobianMatrix;
 import com.powsybl.openloadflow.equations.TargetVector;
 import com.powsybl.openloadflow.network.LfBus;
-import com.powsybl.openloadflow.network.LfGenerator;
 import com.powsybl.openloadflow.network.LfHvdc;
 import com.powsybl.openloadflow.network.LfNetwork;
 import com.powsybl.openloadflow.network.LfNetworkListener;
@@ -165,25 +163,11 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
     private final List<com.powsybl.openloadflow.ac.outerloop.AcOuterLoop> hostOuterLoops;
     private final com.powsybl.openloadflow.ac.AcLoadFlowParameters acLoadFlowParameters;
 
-    /** Map an OLF outer loop name to the native {@code LOOP_HOST_*} kind, or -1 if it is an
-     *  in-kernel driver phase (DS, RL, HVDC, Monitoring) or unknown. */
-    public static int loopKindFor(String name) {
-        return switch (name) {
-            case "SecondaryVoltageControl" -> GpuAcNewtonSolver.HOST_LOOP_SVC;
-            case "PhaseControl", "IncrementalPhaseControl" -> GpuAcNewtonSolver.HOST_LOOP_PHASE;
-            case "TransformerVoltageControl", "SimpleTransformerVoltageControl",
-                 "IncrementalTransformerVoltageControl" -> GpuAcNewtonSolver.HOST_LOOP_TVC;
-            case "IncrementalTransformerReactivePowerControl" -> GpuAcNewtonSolver.HOST_LOOP_TRPC;
-            case "ShuntVoltageControl", "IncrementalShuntVoltageControl" -> GpuAcNewtonSolver.HOST_LOOP_SHUNT;
-            default -> -1;
-        };
-    }
-
     /** Build the bitmask for {@link GpuAcNewtonSolver#setBatchHostLoop} from the configured outer loops. */
     private int buildHostLoopMask() {
         int mask = 0;
         for (var loop : hostOuterLoops) {
-            int kind = loopKindFor(loop.getName());
+            int kind = GpuSolveSettings.loopKindFor(loop.getName());
             if (kind >= GpuAcNewtonSolver.HOST_LOOP_SVC) {
                 mask |= (1 << (kind - GpuAcNewtonSolver.HOST_LOOP_SVC));
             }
@@ -219,9 +203,10 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
             com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchSecondaryVc.writeBack(network, svcCtls,
                     GpuAcNewtonSolver.readBatchSecondaryVcTargets(handle));
         }
-        writeBackDistributedSlack(deviceTargets,
+        lastDistributedActivePower = DistributedSlackWriteBack.writeBack(network, equationSystem, handle, driverDsParams(),
+                loadAnchorTargetP, deviceTargets,
                 GpuAcNewtonSolver.readBatchDsGenCum(handle), GpuAcNewtonSolver.readBatchDsRetain(handle), data);
-        writeBackReactiveLimits(data, deviceTargets,
+        ReactiveLimitsWriteBack.writeBack(network, rlStateOut, data, deviceTargets,
                 data.rlRemote() != null ? GpuAcNewtonSolver.readBatchRowModes(handle) : null);
         if (tvcOwned && tvcCtls != null) {
             GpuBatchIncrementalTvc.writeBackTaps(network, tvcCtls, GpuAcNewtonSolver.readBatchTvcTaps(handle));
@@ -249,12 +234,6 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
         }
     }
 
-    /** DistributedSlack, exactly OLF's ActivePowerDistribution: every participating generator ends at
-     *  its ANCHOR target ({@code initialTargetP}) plus the cumulative share the water-fill gave it
-     *  ({@code genCum}, per generator — each saturates at its own limits); the slack bus's own
-     *  generators, which have no device row, split the slack's retained share by factor — the value
-     *  captured at the last check that actually DISTRIBUTED, not the sub-tolerance one a STABLE check
-     *  measures. A solve whose DistributedSlack phase never fired leaves the generators alone. */
     /** Active power the device's distributed-slack passes placed in the last solve, from the run's anchor (pu):
      *  what OLF's DistributedSlackOuterLoop would have accumulated. NaN when that solve distributed nothing —
      *  the targets then still hold an earlier solve's distribution, whose amount stands. */
@@ -264,309 +243,8 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
         return lastDistributedActivePower;
     }
 
-    private void writeBackDistributedSlack(double[] deviceTargets, double[] genCum, double[] retain, GpuAcData data) {
-        lastDistributedActivePower = Double.NaN;
-        if (deviceTargets == null || data == null) {
-            return;
-        }
-        var dsParams = driverDsParams();
-        LfBus slackBus = null;
-        if (data.dsSlackPhiRow() >= 0) {
-            for (LfBus bus : network.getBuses()) {
-                var v = equationSystem.getVariableSet().getVariable(bus.getNum(), AcVariableType.BUS_PHI);
-                if (v != null && v.getRow() == data.dsSlackPhiRow()) {
-                    slackBus = bus;
-                    break;
-                }
-            }
-            if (slackBus == null) {
-                // The COUPLER-TREE RELOCATION moved that bus's P balance onto its parent coupler's DUMMY_P row,
-                // which no BUS_PHI variable owns — the pack ships the relocated row (dsSlackPhiRow = pRow). Left
-                // unresolved, the slack's retained share was never written back and OLF measured the device's
-                // converged state against stale targets: on rte6515's full busbar scope the device's own norm was
-                // 9.45e-06 (OLF's own final 9.50e-06) while OLF re-evaluated 1.67 and called the base
-                // MAX_ITERATION_REACHED, which took the whole security analysis with it.
-                slackBus = relocatedChildOfPRow(data, data.dsSlackPhiRow());
-            }
-        }
-        if (data.dsPhiRow().length == 0) {
-            // slack-only participation: the whole distribution is the slack's absorbed total
-            double[] absorbed = GpuAcNewtonSolver.readBatchSlackAbsorbed(context.handle.get());
-            if (slackBus != null && absorbed != null && absorbed.length > 0 && absorbed[0] != 0) {
-                setAnchoredShare(slackBus, absorbed[0], dsParams);
-                lastDistributedActivePower = absorbed[0];
-            }
-            return;
-        }
-        boolean fired = retain != null && retain.length > 0 && !Double.isNaN(retain[0]);
-        if (!fired) {
-            return;
-        }
-        java.util.Map<String, LfGenerator> genById = new java.util.HashMap<>();
-        for (LfBus bus : network.getBuses()) {
-            for (LfGenerator g : bus.getGenerators()) {
-                genById.put(g.getId(), g);
-            }
-        }
-        double distributed = retain[0];                     // the slack's retained share + the participants' below
-        boolean slackInPack = false;                        // the slack's own generators listed (DS row -1)
-        if (genCum != null && data.dgGenId() != null && genCum.length >= data.dgGenId().length) {
-            for (int g = 0; g < data.dgGenId().length; g++) {
-                if (data.dgBus()[g] < 0) {
-                    slackInPack = true;                     // its move is the retained share already counted
-                } else {
-                    distributed += genCum[g];
-                }
-                LfGenerator gen = genById.get(data.dgGenId()[g]);
-                if (gen != null) {
-                    gen.setTargetP(dsParams.anchorTargetP(gen) + genCum[g]);
-                }
-            }
-        } else {
-            for (int i = 0; i < data.dsPhiRow().length; i++) {        // bus-level fallback: split by factor
-                int row = data.dsPhiRow()[i];
-                if (row < 0 || row >= deviceTargets.length) {
-                    continue;
-                }
-                LfBus bus = data.dsBusNum() != null && i < data.dsBusNum().length ? network.getBus(data.dsBusNum()[i]) : null;
-                distributed += deviceTargets[row] - data.dsBaseTargetP()[i];
-                if (bus != null) {
-                    if (dsParams.isLoadBased()) {
-                        moveLoads(bus, deviceTargets[row] - data.dsBaseTargetP()[i]);
-                    } else {
-                        setAnchoredShare(bus, deviceTargets[row] - data.dsBaseTargetP()[i], dsParams);
-                    }
-                }
-            }
-        }
-        lastDistributedActivePower = distributed;
-        if (slackBus != null && retain[0] != 0 && !slackInPack) {
-            if (dsParams.isLoadBased()) {
-                moveLoads(slackBus, retain[0]);
-            } else {
-                setAnchoredShare(slackBus, retain[0], dsParams);
-            }
-        }
-    }
-
     /** Each load's target P when the device's distribution anchor was extracted (load-based balance types). */
     private java.util.Map<com.powsybl.openloadflow.network.LfLoad, Double> loadAnchorTargetP = java.util.Map.of();
-
-    private void captureLoadAnchors() {
-        java.util.Map<com.powsybl.openloadflow.network.LfLoad, Double> anchors = new java.util.IdentityHashMap<>();
-        for (LfBus bus : network.getBuses()) {
-            for (com.powsybl.openloadflow.network.LfLoad load : bus.getLoads()) {
-                anchors.put(load, load.getTargetP());
-            }
-        }
-        loadAnchorTargetP = anchors;
-    }
-
-    /** A load-based distribution's bus-level amount on the bus's loads, as OLF's LoadActivePowerDistributionStep
-     *  moves them: from where they stood when the distribution started (the step is incremental, it has no initial
-     *  target to go back to), each in proportion to its variable active power. A bus injection rising by
-     *  {@code delta} is its loads consuming {@code delta} less. Moving only generators, as for the generation-based
-     *  types, left OLF's load targets where they were, and OLF measured the converged state against them: an ieee14
-     *  base whose slack bus carries a participating load came back MAX_ITERATION_REACHED. */
-    private void moveLoads(LfBus bus, double delta) {
-        double factorSum = 0;
-        for (com.powsybl.openloadflow.network.LfLoad load : bus.getLoads()) {
-            factorSum += load.getAbsVariableTargetP();
-        }
-        if (factorSum <= 0) {
-            return;
-        }
-        for (com.powsybl.openloadflow.network.LfLoad load : bus.getLoads()) {
-            double f = load.getAbsVariableTargetP();
-            if (f != 0) {
-                load.setTargetP(loadAnchorTargetP.getOrDefault(load, load.getTargetP()) - delta * f / factorSum);
-            }
-        }
-    }
-
-    /** Give a bus's participating generators {@code anchor + delta × f / Σf} — OLF's split of a
-     *  bus-level amount from the anchor, with the run's balance-type factors. */
-    private static void setAnchoredShare(LfBus bus, double delta, com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDsParams dsParams) {
-        double factorSum = 0;
-        for (LfGenerator g : bus.getGenerators()) {
-            factorSum += dsParams.factor(g);
-        }
-        if (factorSum <= 0) {
-            return;
-        }
-        for (LfGenerator g : bus.getGenerators()) {
-            double f = dsParams.factor(g);
-            if (f != 0) {
-                g.setTargetP(dsParams.anchorTargetP(g) + delta * f / factorSum);
-            }
-        }
-    }
-
-    /** ReactiveLimits: the device pins a controller at its limit (row mode V→Q, target the limit) where
-     *  OLF's loop freezes the bus's generation Q at that limit and disables its voltage control — the
-     *  same two calls, so OLF's equation system swaps BUS_TARGET_V for BUS_TARGET_Q on its own and the
-     *  target vector picks the limit up. A pin the device released (a PQ→PV switch-back) is undone the
-     *  way OLF undoes it. Limit types 3/4 are robust mode's MIN/MAX_REALISTIC_V freezes: the pin is the
-     *  same, only the recorded type differs (and OLF never re-freezes those at a moved Q limit). */
-    private void writeBackReactiveLimits(GpuAcData data, double[] deviceTargets, int[] devModes) {
-        if (rlStateOut == null || data == null || data.rlBusNum() == null) {
-            return;
-        }
-        int nrl = Math.min(rlStateOut.length, data.rlBusNum().length);
-        for (int i = 0; i < nrl; i++) {
-            int limitType = rlStateOut[i] & 7;
-            LfBus bus = network.getBus(data.rlBusNum()[i]);
-            if (bus == null) {
-                continue;
-            }
-            if (System.getenv("OLF_GPU_BATCH_TRACE") != null && (limitType != 0 || (rlStateOut[i] >> 3) != 0)) {
-                System.err.println("WB_RL bus=" + bus.getId() + " limitType=" + limitType + " switchCount=" + (rlStateOut[i] >> 3)
-                        + " vcEnabled=" + bus.isGeneratorVoltageControlEnabled() + " qLimitType=" + bus.getQLimitType().map(Object::toString).orElse("-")
-                        + " remote=" + data.rlRemote()[i]);
-            }
-            if (limitType == 5) {
-                // Frozen by the generator voltage control manager, not pinned at a reactive limit:
-                // writeBackFreeze owns that bus. A solve normally unfreezes at COMPLETE, so this only
-                // shows up when one ended mid-phase.
-                continue;
-            }
-            if (limitType != 0 && bus.isGeneratorVoltageControlEnabled()) {
-                // The limit the device pinned at — its row target is limit − loadQ, evaluated at the LIVE
-                // voltage for an SVC (OLF freezes at bus.getMinQ()/getMaxQ() read at the check, the same
-                // live value); the packed base-V aggregate is 1.3e-4 pu off on rte6515's VL-6226_0.
-                int vRow = data.rlVrow()[i];
-                // A pilot-self pilot enrolled in the candidate table keeps BUS_TARGET_V on its own row while
-                // pinned: its pinned balance rides the first enabled member's row (the carrier), or its own
-                // row only once the group lost control (flipped to a power row). Read the limit where the
-                // device put it — its own row's target here is the VOLTAGE target (measured: 1.055 + loadQ
-                // 1.218 = a 2.273 "limit" frozen on VL-6112_0 against the real 0.774, and the base judged
-                // MAX_ITERATION_REACHED on that residual).
-                int limitRow = pinnedBalanceRow(data, i, vRow, devModes);
-                double qLimit = deviceTargets != null && limitRow >= 0 && limitRow < deviceTargets.length
-                        ? deviceTargets[limitRow] + data.rlLoadQ()[i]
-                        : (limitType == 1 ? data.rlMinQ()[i]
-                           : limitType == 2 ? data.rlMaxQ()[i] : data.rlInitTargetQ()[i]);
-                bus.freezeGenerationTargetQAndDisableGeneratorVoltageControl(qLimit);
-                bus.setQLimitType(switch (limitType) {
-                    case 1 -> LfBus.QLimitType.MIN_Q;
-                    case 2 -> LfBus.QLimitType.MAX_Q;
-                    case 3 -> LfBus.QLimitType.MIN_REALISTIC_V;
-                    default -> LfBus.QLimitType.MAX_REALISTIC_V;
-                });
-            } else if (limitType == 0 && !bus.isGeneratorVoltageControlEnabled() && bus.getQLimitType().isPresent()
-                    && bus.getQLimitType().get() != LfBus.QLimitType.MIN_REALISTIC_V
-                    && bus.getQLimitType().get() != LfBus.QLimitType.MAX_REALISTIC_V) {
-                bus.setGeneratorVoltageControlEnabledAndRecomputeTargetQ(true);
-                bus.setQLimitType(null);
-            }
-        }
-    }
-
-    /** The row whose target holds RL entry {@code i}'s pinned balance ({@code target + loadQ = the limit}).
-     *  Its own V row, except for a pilot-self pilot enrolled in the candidate table (its V row is
-     *  candidate 0 of a group and still a V identity, mode 0, while pinned): then the same pick the
-     *  device's {@code relocChoose} makes — the first OTHER candidate whose row is neither identity nor
-     *  pinned (the carrier) — and its own row when none is live (the group lost control and the device
-     *  flipped that row to a power row, mode 1). */
-    private static int pinnedBalanceRow(GpuAcData data, int i, int vRow, int[] devModes) {
-        // First, the COUPLER-TREE RELOCATION: a relocated child's reactive balance — and so the target the pin
-        // wrote — lives on its parent coupler's DUMMY_Q row, which is exactly where the native pass put it
-        // (rlQrow). Reading the bus's own row instead read the coupler's ZERO_V target as a reactive limit and
-        // froze that on the bus. Mode 0 at the relocated row means the coupler is open here, so the equations
-        // are back home and the own row is right (the same per-scenario test the device makes).
-        int relocated = relocatedPinRow(data, vRow);
-        if (relocated != vRow && devModes != null && relocated < devModes.length && devModes[relocated] != 0) {
-            vRow = relocated;
-        }
-        if (devModes == null || data.rlRemote() == null || data.rlRemote()[i] != 2 || data.qrPtr() == null
-                || vRow < 0 || vRow >= devModes.length || devModes[vRow] != 0) {
-            return vRow;
-        }
-        int[] qrPtr = data.qrPtr();
-        int[] qrRows = data.qrRows();
-        for (int g = 0; g + 1 < qrPtr.length; g++) {
-            if (qrRows[qrPtr[g]] != vRow) {
-                continue;
-            }
-            for (int c = qrPtr[g] + 1; c < qrPtr[g + 1]; c++) {
-                int r = qrRows[c];
-                if (r == vRow) {
-                    continue;
-                }
-                int m = devModes[r];
-                if (m != 0 && m != 4) {
-                    return r;
-                }
-            }
-            return vRow;
-        }
-        return vRow;
-    }
-
-    /** The relocated {@code DUMMY_Q} row that hosts the reactive balance of the bus whose own {@code BUS_V} row
-     *  is {@code vRow}, or {@code vRow} itself when that bus is not a relocated coupler child. The Java twin of
-     *  the native {@code rlQrow} map, derived from the same zero-impedance pack. */
-    private static int relocatedPinRow(GpuAcData data, int vRow) {
-        int[] zi = data.ziIdx();
-        if (zi == null || vRow < 0) {
-            return vRow;
-        }
-        for (int e = 0; e < zi.length / 11; e++) {
-            int o = e * 11;
-            int childSide = (zi[o + 10] >> 1) & 3;
-            int ownV = childSide == 1 ? zi[o + 6] : (childSide == 2 ? zi[o + 7] : -1);
-            if (ownV == vRow && zi[o + 5] >= 0) {
-                return zi[o + 5];
-            }
-        }
-        return vRow;
-    }
-
-    /** The bus whose P balance the relocation moved onto the coupler {@code DUMMY_P} row {@code pRow}. */
-    private LfBus relocatedChildOfPRow(GpuAcData data, int pRow) {
-        int[] zi = data.ziIdx();
-        int[] nums = data.ziBranchNums();
-        if (zi == null || nums == null) {
-            return null;
-        }
-        for (int e = 0; e < zi.length / 11 && e < nums.length; e++) {
-            int o = e * 11;
-            int childSide = (zi[o + 10] >> 1) & 3;
-            if (childSide == 0 || zi[o + 4] != pRow || nums[e] < 0) {
-                continue;
-            }
-            com.powsybl.openloadflow.network.LfBranch br = network.getBranch(nums[e]);
-            return childSide == 1 ? br.getBus1() : br.getBus2();
-        }
-        return null;
-    }
-
-    /** Read the bands out of the run's OWN configured loops, so the device decides at OLF's threshold. */
-    static double[] driverSettings(com.powsybl.openloadflow.ac.AcLoadFlowParameters p) {
-        double slackTol = Double.MAX_VALUE;
-        double rlTol = 0;
-        int maxSwitch = 0;
-        for (var ol : p.getOuterLoops()) {
-            if (ol instanceof com.powsybl.openloadflow.ac.outerloop.DistributedSlackOuterLoop ds) {
-                slackTol = ds.getSlackBusPMaxMismatch() / com.powsybl.openloadflow.util.PerUnit.SB;
-            } else if (ol instanceof com.powsybl.openloadflow.ac.outerloop.ReactiveLimitsOuterLoop rl) {
-                // OLF builds the loop with its EFFECTIVE band, already in per unit
-                // (AbstractAcOuterLoopConfig: convEpsPerEq under UNIFORM_CRITERIA, maxReactivePowerMismatch / SB
-                // under PER_EQUATION_TYPE_CRITERIA), the same value GpuSaRunScope derives for the batched SA.
-                // Dividing it by SB again made the per-equation band 100 times too tight.
-                rlTol = rl.getMaxReactivePowerMismatch();
-                maxSwitch = rl.getMaxPqPvSwitch();
-            }
-        }
-        return new double[] {slackTol, rlTol, p.getMaxOuterLoopIterations(), maxSwitch};
-    }
-
-    private static double deviceConvEpsPerEq(NewtonRaphsonParameters parameters) {
-        if (parameters.getStoppingCriteria() instanceof DefaultNewtonRaphsonStoppingCriteria criteria) {
-            return criteria.getConvEpsPerEq();
-        }
-        return 0.0;
-    }
 
     /**
      * Number of solves that bailed out of the GPU path since JVM start. Tests assert on it because a
@@ -905,7 +583,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                     // OLF's forced-PV election keys are part of creating a context with RL entries.
                     GpuBatchOuterLoopTables.installRlElection(context.handle.get(), data);
                     cachedData = data;
-                    captureLoadAnchors();
+                    loadAnchorTargetP = DistributedSlackWriteBack.captureLoadAnchors(network);
                     rebuilt = true;
                     criteriaDirty = true;
                     tablesDirty = true;
@@ -917,7 +595,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                     // extraction so content matching never aliases it under the old one
                     GpuAcStructures.rebind(cachedData, data);
                     cachedData = data;
-                    captureLoadAnchors();
+                    loadAnchorTargetP = DistributedSlackWriteBack.captureLoadAnchors(network);
                     // The election keys are per-extraction (nominal V, live target P, id rank), so a
                     // value refresh re-installs them too.
                     GpuBatchOuterLoopTables.installRlElection(context.handle.get(), data);
@@ -1006,7 +684,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                 case MAX_VOLTAGE_CHANGE -> 2;
             };
             long t1 = System.nanoTime();
-            double convEpsPerEq = deviceConvEpsPerEq(parameters);
+            double convEpsPerEq = GpuSolveSettings.deviceConvEpsPerEq(parameters);
             if (tablesDirty) {
                 // The SAME run-constant outer-loop tables the batched SA installs on its chunk
                 // contexts — a batch of one drives the same loops as a batch of five hundred.
@@ -1516,7 +1194,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
     private java.util.Map<Integer, com.powsybl.openloadflow.ac.outerloop.AcOuterLoop> buildHostLoopMap() {
         var map = new java.util.HashMap<Integer, com.powsybl.openloadflow.ac.outerloop.AcOuterLoop>();
         for (var loop : hostOuterLoops) {
-            int kind = loopKindFor(loop.getName());
+            int kind = GpuSolveSettings.loopKindFor(loop.getName());
             if (kind >= GpuAcNewtonSolver.HOST_LOOP_SVC) {
                 map.put(kind, loop);
             }
@@ -1550,7 +1228,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
             if (engineContext != null) {
                 var pairs = com.powsybl.openloadflow.ac.AcloadFlowEngine.createOuterLoopsAndContexts(engineContext, false);
                 for (var pair : pairs) {
-                    int kind = loopKindFor(pair.getLeft().getName());
+                    int kind = GpuSolveSettings.loopKindFor(pair.getLeft().getName());
                     if (kind >= GpuAcNewtonSolver.HOST_LOOP_SVC && loopMap.containsKey(kind)
                             && (activeHostMask & (1 << (kind - GpuAcNewtonSolver.HOST_LOOP_SVC))) != 0) {
                         hostLoopPairs.put(kind, pair);
@@ -1698,7 +1376,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
         double[] target = activation.applyTargets(targetVector.getArray());
         double[] x0 = equationSystem.getStateVector().get().clone();
         boolean[][] elementMask = new boolean[1][cachedData.getTotalElementCount()];
-        double convEpsPerEq = deviceConvEpsPerEq(parameters);
+        double convEpsPerEq = GpuSolveSettings.deviceConvEpsPerEq(parameters);
         int lsMode = switch (parameters.getStateVectorScalingMode()) {
             case NONE -> 0;
             case LINE_SEARCH -> 1;

@@ -32,7 +32,7 @@ class GpuNewtonRaphsonDriverSettingsTest {
                 .setNewtonRaphsonConvEpsPerEq(1e-6);
         AcLoadFlowParameters acp = OpenLoadFlowParameters.createAcParameters(network, lfp, olfp,
                 new SparseMatrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>(), false, false);
-        return GpuNewtonRaphson.driverSettings(acp)[1];
+        return GpuSolveSettings.driverSettings(acp)[1];
     }
 
     /** OLF builds its reactive-limits loop with the band already in per unit (maxReactivePowerMismatch / SB under

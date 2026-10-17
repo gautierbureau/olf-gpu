@@ -16,6 +16,7 @@
 namespace olfgpu {
 
 struct DriverPass {
+    DeviceBuf dBaseMode;                                    // the contingency-free base row mode (length n)
     size_t nTot = 0;
     double tol = 0.0;
     int maxIter = 0;

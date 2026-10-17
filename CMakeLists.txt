@@ -96,6 +96,7 @@ add_library(olfgpu SHARED
     native/cuda/jni/outerloop/phase_control.cu
     native/cuda/jni/outerloop/voltage_monitoring.cu
     native/cuda/jni/outerloop/hvdc_ac_emulation.cu
+    native/cuda/jni/outerloop/forced_target_q.cu
 )
 target_include_directories(olfgpu
     PRIVATE

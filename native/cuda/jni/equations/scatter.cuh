@@ -35,7 +35,7 @@ __host__ __device__ inline int stockPairPick(int m, const int* pool, int p, int 
     return frozen;
 }
 
-__device__ void scatterAdd(int nout, const int* dest, const double* o, double* vals, double* F) {
+static __device__ void scatterAdd(int nout, const int* dest, const double* o, double* vals, double* F) {
     for (int k = 0; k < nout; k++) {
         int d = dest[k];
         if (d >= 0) {
@@ -187,7 +187,7 @@ __device__ inline int ziDynDest(int frozen, int slot, const int* alt, const int*
     return (sr >= 0 && (mode[sr] == 0 || mode[sr] == 4)) ? alt[slot] : frozen;
 }
 
-__device__ void scatterAddDyn(int nout, const int* dest, const int* altDest, const int* selRow,
+static __device__ void scatterAddDyn(int nout, const int* dest, const int* altDest, const int* selRow,
                               const int* mode, const double* o, double* vals, double* F,
                               RelocTables rt, int eOff) {
     for (int k = 0; k < nout; k++) {
@@ -238,7 +238,7 @@ __device__ inline int csrFind(const int* rowPtr, const int* colIdx, int row, int
     return (lo < rowPtr[row + 1] && colIdx[lo] == col) ? lo : -1;
 }
 
-__device__ void scatterAddF(int nres, const int* dest, const int* pos, const double* o, double* F) {
+static __device__ void scatterAddF(int nres, const int* dest, const int* pos, const double* o, double* F) {
     for (int k = 0; k < nres; k++) {
         int d = dest[pos[k]];
         if (d <= -2) {
@@ -250,7 +250,7 @@ __device__ void scatterAddF(int nres, const int* dest, const int* pos, const dou
 // Dynamic Q-relocation, residual-only variant: route each residual to its alternate F row when the
 // frozen row is an identity this scenario. dest/altDest/selRow are the element's per-output slices;
 // pos maps each of the nres residuals to its CB_NOUT output index.
-__device__ void scatterAddFDyn(int nres, const int* dest, const int* altDest, const int* selRow,
+static __device__ void scatterAddFDyn(int nres, const int* dest, const int* altDest, const int* selRow,
                                const int* pos, const int* mode, const double* o, double* F,
                                RelocTables rt, int eOff) {
     for (int k = 0; k < nres; k++) {

@@ -15,6 +15,13 @@
 namespace olfgpu {
 
 struct DriverPass {
+    double slackDistTol = 0.0;
+    double pResidueEps = 0.0;
+    bool hasDsOverride = false;
+    bool hasDsAnchor = false;
+    bool hasDsSlackShift = false;
+    DeviceBuf dDsOvBus, dDsOvFactorDelta, dDsOvBaseDelta, dDsOvMaxDelta, dDsOvMinDelta;
+    DeviceBuf dDsAnchorShift, dDsSlackShift;
     int n = 0;
     int nnz = 0;
     int nS = 0;

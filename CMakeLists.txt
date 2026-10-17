@@ -95,6 +95,7 @@ add_library(olfgpu SHARED
     native/cuda/jni/diagnostics/driver_traces.cu
     native/cuda/jni/outerloop/phase_control.cu
     native/cuda/jni/outerloop/voltage_monitoring.cu
+    native/cuda/jni/outerloop/hvdc_ac_emulation.cu
 )
 target_include_directories(olfgpu
     PRIVATE

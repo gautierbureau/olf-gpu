@@ -111,6 +111,7 @@ add_library(olfgpu SHARED
     native/cuda/jni/outerloop/reactive_limits_seed.cu
     native/cuda/jni/outerloop/reactive_limits.cu
     native/cuda/jni/equations/branch_fill.cu
+    native/cuda/jni/equations/bus_injection_fill.cu
 )
 target_include_directories(olfgpu
     PRIVATE

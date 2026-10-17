@@ -1,0 +1,48 @@
+// Copyright (c) 2026, RTE (http://www.rte-france.com)
+// SPDX-License-Identifier: MPL-2.0
+//
+// The bus-injection terms of the batched Jacobian and mismatch: shunts, HVDC AC-emulation links and the
+// voltage-dependent (ZIP) load model, full and F-only.
+#ifndef OLF_GPU_EQUATIONS_BUS_INJECTION_FILL_CUH
+#define OLF_GPU_EQUATIONS_BUS_INJECTION_FILL_CUH
+
+#include "../solver/driver_pass.cuh"
+
+namespace olfgpu {
+
+__global__ void fillShuntBatch(int ne, int nScenarios, int n, int nnz, int nElements, int elemOffset,
+                               const double* in, const int* ix, const int* dest,
+                               const double* x, double* vals, double* F,
+                               const char* disabled, const char* active,
+                               int nShOv, const int* shOvSlotElem, const double* shOvGb,
+                               const int* altDest, const int* selRow, const int* mode, int dynReloc,
+                               RelocTables rt);
+
+__global__ void fillHvdcBatch(int ne, int nScenarios, int n, int nnz, int nElements, int elemOffset,
+                              const double* in, const int* ix, const int* dest,
+                              const double* x, double* vals, double* F,
+                              const char* disabled, const char* active,
+                              const int* altDest, const int* selRow, const int* mode, int dynReloc);
+
+__global__ void fillVdlBatch(int ne, int nScenarios, int n, int nnz,
+                             const double* in, const int* ix, const int* dest,
+                             const double* x, double* vals, double* F,
+                             const int* altRow, const int* altDest, const int* mode);
+
+__global__ void fillShuntBatchF(int ne, int nScenarios, int n, int nnz, int nElements, int elemOffset,
+                                const double* in, const int* ix, const int* dest,
+                                const double* x, double* F,
+                                const char* disabled, const char* active,
+                                int nShOv, const int* shOvSlotElem, const double* shOvGb,
+                                const int* altDest, const int* selRow, const int* mode, int dynReloc,
+                               RelocTables rt);
+
+__global__ void fillHvdcBatchF(int ne, int nScenarios, int n, int nnz, int nElements, int elemOffset,
+                               const double* in, const int* ix, const int* dest,
+                               const double* x, double* F,
+                               const char* disabled, const char* active,
+                               const int* altDest, const int* selRow, const int* mode, int dynReloc);
+
+}  // namespace olfgpu
+
+#endif  // OLF_GPU_EQUATIONS_BUS_INJECTION_FILL_CUH

@@ -6,6 +6,20 @@
 #ifndef OLF_GPU_SOLVER_BATCH_CONTEXT_CUH
 #define OLF_GPU_SOLVER_BATCH_CONTEXT_CUH
 
+#include <cublas_v2.h>
+#include <cuda_runtime.h>
+#include <cudss.h>
+
+#include <map>
+#include <memory>
+#include <vector>
+
+#include "../common/device_buf.cuh"
+#include "../common/loop_kinds.cuh"
+#include "../structure/shared_structure.cuh"
+
+namespace olfgpu {
+
 // The batched solver context: the SHARED structure (pattern, families, destination arrays,
 // static trig — held by shared_ptr, see SharedStructure) + per-scenario value/state arrays and this consumer's own cuDSS
 // objects/analysis. Structure notes that are batch-specific:
@@ -513,5 +527,7 @@ struct BatchResult {
     std::vector<double> norm;                                // nScenarios
     std::vector<int> status;                                 // nScenarios: 0 conv, 1 maxiter, -1 diverged
 };
+
+}  // namespace olfgpu
 
 #endif  // OLF_GPU_SOLVER_BATCH_CONTEXT_CUH

@@ -91,6 +91,8 @@ add_library(olfgpu SHARED
     native/cuda/jni/structure/distribution_dests.cu
     native/cuda/jni/structure/zero_impedance_dests.cu
     native/cuda/jni/structure/shared_structure.cu
+    native/cuda/jni/diagnostics/matrix_scan.cu
+    native/cuda/jni/diagnostics/driver_traces.cu
 )
 target_include_directories(olfgpu
     PRIVATE

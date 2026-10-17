@@ -9,6 +9,8 @@
 
 #include <cuda_runtime.h>
 
+namespace olfgpu {
+
 // Per-scenario closed-branch TAP override (tap/PST actions on FIXED-tap transformers): entries
 // are (slot, cb elem) with the target tap's FULL static row (y g1 g2 b1 b2 ksi r1 a1)
 // replacing the element's cbIn row — per-tap r/x/g/b changes are first-class (y/ksi move).
@@ -89,5 +91,7 @@ __device__ inline double rlTargetOf(int nRlVtOv, const int* rlVtOvSlotIdx, const
     }
     return baseTarget;
 }
+
+}  // namespace olfgpu
 
 #endif  // OLF_GPU_EQUATIONS_SCENARIO_OVERRIDES_CUH

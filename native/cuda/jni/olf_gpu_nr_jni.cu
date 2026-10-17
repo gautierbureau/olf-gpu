@@ -509,65 +509,7 @@ inline void applyRobustSingleMatrixConfig(cudssConfig_t config) {
 // AMD is kept where it is safe and was measured to pay — the 2026-07-16 sweep won on
 // case9241pegase (LU_NNZ 260076 vs 304772, warm SA -11%), a network with no retained switches and
 // therefore no zero-impedance branch, so it never exercised a zero diagonal.
-// OLF_GPU_SOLVE_ALG / OLF_GPU_FACT_ALG: cuDSS's solve- and factorization-phase algorithm selectors,
-// reached from EVERY config this file builds (batch, compaction, robust single-matrix, adjoint). A/B knobs
-// for the 2026-10-06 network.xiidm profile, where the batched triangular solves (fwd 26.6 s + bwd 16.9 s)
-// were half the kernel time. 0.8.0 names them (solve: default|general; factorization:
-// default|multiblock|general); 0.7 only has the ordinals (default|1|2|3|4|5). Unset = library default.
-inline void applyAlgOverrides(cudssConfig_t config) {
-    const char* s = std::getenv("OLF_GPU_SOLVE_ALG");
-    const char* f = std::getenv("OLF_GPU_FACT_ALG");
-#if CUDSS_VERSION >= 800
-    if (s != nullptr && *s != '\0') {
-        std::string want(s);
-        cudssSolveAlg_t alg;
-        if (want == "default") {
-            alg = CUDSS_SOLVE_ALG_DEFAULT;
-        } else if (want == "general") {
-            alg = CUDSS_SOLVE_ALG_GENERAL;
-        } else {
-            throw std::runtime_error("OLF_GPU_SOLVE_ALG: unknown value '" + want + "' (default|general)");
-        }
-        CUDSS_CHECK(cudssConfigSet(config, CUDSS_CONFIG_SOLVE_ALG, &alg, sizeof(alg)));
-    }
-    if (f != nullptr && *f != '\0') {
-        std::string want(f);
-        cudssFactorizationAlg_t alg;
-        if (want == "default") {
-            alg = CUDSS_FACTORIZATION_ALG_DEFAULT;
-        } else if (want == "multiblock") {
-            alg = CUDSS_FACTORIZATION_ALG_MULTIBLOCK;
-        } else if (want == "general") {
-            alg = CUDSS_FACTORIZATION_ALG_GENERAL;
-        } else {
-            throw std::runtime_error("OLF_GPU_FACT_ALG: unknown value '" + want + "' (default|multiblock|general)");
-        }
-        CUDSS_CHECK(cudssConfigSet(config, CUDSS_CONFIG_FACTORIZATION_ALG, &alg, sizeof(alg)));
-    }
-#else
-    auto parse = [](const char* name, const char* value) {
-        std::string want(value);
-        if (want == "default") {
-            return CUDSS_ALG_DEFAULT;
-        }
-        if (want.size() == 1 && want[0] >= '1' && want[0] <= '5') {
-            return static_cast<cudssAlgType_t>(CUDSS_ALG_1 + (want[0] - '1'));
-        }
-        throw std::runtime_error(std::string(name) + ": unknown value '" + want + "' (default|1|2|3|4|5)");
-    };
-    if (s != nullptr && *s != '\0') {
-        cudssAlgType_t alg = parse("OLF_GPU_SOLVE_ALG", s);
-        CUDSS_CHECK(cudssConfigSet(config, CUDSS_CONFIG_SOLVE_ALG, &alg, sizeof(alg)));
-    }
-    if (f != nullptr && *f != '\0') {
-        cudssAlgType_t alg = parse("OLF_GPU_FACT_ALG", f);
-        CUDSS_CHECK(cudssConfigSet(config, CUDSS_CONFIG_FACTORIZATION_ALG, &alg, sizeof(alg)));
-    }
-#endif
-}
-
 inline void applyReorderAlg(cudssConfig_t config, bool hasZeroImpedance) {
-    applyAlgOverrides(config);
     const char* e = std::getenv("OLF_GPU_REORDER_ALG");
     if (e == nullptr || *e == '\0') {
 #if CUDSS_VERSION >= 800

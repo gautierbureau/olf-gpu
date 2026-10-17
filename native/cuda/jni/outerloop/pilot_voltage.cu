@@ -1,0 +1,344 @@
+// Copyright (c) 2026, RTE (http://www.rte-france.com)
+// SPDX-License-Identifier: MPL-2.0
+//
+// See pilot_voltage.cuh.
+#include <cuda_runtime.h>
+
+#include <algorithm>
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <string>
+#include <vector>
+
+#include "../common/check.cuh"
+#include "../common/launch.cuh"
+#include "../equations/scenario_overrides.cuh"
+#include "../solver/driver_steps.cuh"
+#include "pilot_voltage.cuh"
+
+
+namespace olfgpu {
+
+// PILOT-SELF gate, per (scenario, group): 1 = skip this group's relocated raw q because its pilot is one of
+// its own controllers and is NOT pinned this scenario. While the pilot controls, its q belongs in the
+// group's DISTR_Q rows WEIGHTED (it has no Q balance of its own), so emitting it raw at the carrier row
+// would double-count it. Once a reactive limit pins it, OLF activates its BUS_TARGET_Q and the carrier row
+// is exactly where that balance goes — the relocation the CPU does statically, here per scenario.
+__global__ void pilotSelfGateBatch(int nQr, int nScenarios, int nrl, const int* psPilotEntry,
+                                   const char* limitType, const char* rlIslanded, char* psSkip) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= nQr * nScenarios) return;
+    int g = tid % nQr;
+    int s = tid / nQr;
+    int e = psPilotEntry[g];
+    char skip;
+    if (e == PS_NO_ENTRY) {
+        skip = 1;                                            // pilot-self, never pinnable ⇒ always controlling
+    } else if (e >= 0 && e < nrl) {
+        // An ISLANDED pilot (its section lost with the contingency) has no balance anywhere — OLF removed
+        // the bus. Its limit type still reads its BASE pin (initRlLimitTypeBatch seeds an enrolled pilot's
+        // kind from the base), and "pinned" here means "its balance rides the carrier": the carrier's own
+        // DISTR_Q was suppressed for a balance that does not exist and the row went empty. Measured on
+        // rte6515 BUS-6194_BBS_1 (pilot VL-6194_0 base-pinned MAX_Q then islanded: FAILED where OLF
+        // converges with 60 violations) and BUS-6003_BBS_1 (0.473 MW of distributed active power).
+        // Unpinned or islanded ⇒ skip; pinned and alive ⇒ its balance rides the carrier.
+        bool islanded = rlIslanded != nullptr && rlIslanded[(size_t) s * nrl + e];
+        skip = (islanded || limitType[(size_t) s * nrl + e] == 0) ? 1 : 0;
+    } else {
+        skip = 0;                                            // not a pilot-self group
+    }
+    psSkip[(size_t) s * nQr + g] = skip;
+}
+
+// plan-B4: capture, per (scenario, relocation group), the pilot's Q target from the BASE carrier's
+// row — the base target upload and the per-scenario injection overrides both address the pilot's
+// reactive balance at that row (structure-time qRow). updateDistrQTargetsBatch hands the value to
+// whichever member row currently carries the relocated pilot Q. Runs BEFORE the RL mode seeding so
+// a warm-continuation pin cannot overwrite the value first.
+__global__ void capturePilotQBatch(int nQr, int nScenarios, int n, const int* qrPtr, const int* qrRows,
+                                   const int* baseMode, const double* targetBase, double* pilotQ,
+                                   const int* qrBaseTargetRow) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= nQr * nScenarios) return;
+    int g = tid % nQr;
+    int s = tid / nQr;
+    // a DEPENDENT pilot's target sits on its own base reactive row, not on a carrier
+    int row = qrBaseTargetRow != nullptr && qrBaseTargetRow[g] >= 0 ? qrBaseTargetRow[g]
+            : qrRows[qrPtr[g] + relocChoose(g, qrPtr, qrRows, baseMode)];
+    pilotQ[(size_t) s * nQr + g] = targetBase[row];          // the BASE carrier's BASE target (n, untiled)
+}
+
+// A scenario's outage that moves the PILOT's own reactive balance (a reactive load or a fixed-Q generator lost at
+// the pilot, GpuBatchInjectionOutages): the captured value moves with it, and so does the target of the row that
+// carries the balance at the first fill - whichever the scenario's modes pick, by the fill's own rule - because
+// updateDistrQTargetsBatch stamps the captured value only inside the outer-loop passes. An identity there (the
+// pilot's own row still holding its voltage target) carries no balance and keeps its target. One entry per
+// (scenario, group): the host merges them.
+__global__ void applyPilotQDeltasBatch(int nDelta, const int* key, const double* val, int nQr, int n,
+                                       const int* qrPtr, const int* qrRows, const int* mode,
+                                       const char* dqSub, int nDqMembers, const int* qrMemberStart,
+                                       double* pilotQ, double* target) {
+    int k = blockIdx.x * blockDim.x + threadIdx.x;
+    if (k >= nDelta) return;
+    int s = key[k] / nQr;
+    int g = key[k] % nQr;
+    pilotQ[key[k]] += val[k];
+    int c = relocChooseSub(g, qrPtr, qrRows, mode + (size_t) s * n,
+            dqSub != nullptr ? dqSub + (size_t) s * nDqMembers : nullptr, qrMemberStart);
+    int row = qrRows[qrPtr[g] + c];
+    int m = mode[(size_t) s * n + row];
+    if (m != 0 && m != 6) {
+        target[(size_t) s * n + row] += val[k];
+    }
+}
+
+// DEVICE all-pinned corner (plan-B4 follow-up): when the LAST live member of a remote gen-VC
+// relocation group pins (the mode-scan finds no candidate with mode not in {0, 4} and falls back
+// to candidate 0 = the pilot's own row), OLF deactivates the pilot's V equation — control lost.
+// Flip the pilot row to a POWER row carrying the group's captured pilot-Q target (the scatter
+// already lands the pilot's balance there via the same fallback); when a member unpins again,
+// restore the V identity and its saved target. Flag-guarded per (scenario, group): only rows
+// THIS kernel flipped are ever flipped back — with one exception. A group that lost control in the
+// BASE (every member pinned there) has its pilot row pushed as a power row with no flag, and when a
+// member unpins in a contingency OLF gives the pilot its V equation back IN THAT SAME PASS
+// (updateRemoteVoltageControlEquations runs on every switch). Nothing did that here: the pilot's own
+// local entry — an empty reactive range with a guessed pin type — restored the row on ITS OWN
+// voltage test, which is the wrong trigger and fires a pass late or never. Measured on
+// network.xiidm/LNER: the three members of IZUM_0's group unpinned on a 1.2e-6 pu knife-edge, the
+// device solved one pass with three sharing rows and no voltage identity, re-pinned two of the three
+// where OLF re-pinned all three, and the distributed slack ended 0.151 MW apart. The restore below
+// takes the group's V target from the pilot's local entry (qrPilotRlEntry), per-scenario overrides
+// included, and the local entry itself no longer decides anything. A flip (either direction) marks
+// the scenario switched: the row swap needs a re-solve even when it rides a no-switch
+// warm-continuation pass.
+__global__ void updatePilotVeqBatch(int nQr, int nScenarios, int n,
+                                    const int* qrPtr, const int* qrRows, const char* qrGenVc,
+                                    const double* pilotQ, int* mode, double* target,
+                                    char* veqOff, double* savedVTarget,
+                                    const char* rlActive, char* switched,
+                                    int nFrozen, const int* frozenSlotRow,
+                                    const int* psEntry,
+                                    const char* limitType, int nrl, const double* rlMinQ, const double* rlMaxQ,
+                                    const double* rlLoadQ, const double* rlInitTgtQ, int cvStride,
+                                    const double* rlVtarget,
+                                    const int* qrPilotRlEntry,
+                                    int nRlVtOv, const int* rlVtOvSlotIdx, const double* rlVtOvVal,
+                                    const double* svcRlVt,
+                                    int nDqMembers, const int* dqMemberQrGroup, const int* dqMemberRlEntry,
+                                    const char* rlIslandedMask,
+                                const char* dqSub, const int* qrMemberStart, double tol,
+                                const char* rlGenLost, const int* qrDepBase, const int* relocOwn,
+                                const double* pinTargetIn) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= nQr * nScenarios) return;
+    int g = tid % nQr;
+    int s = tid / nQr;
+    if (!qrGenVc[g]) return;
+    // The RL phase owns the flip/restore below (rlActive); the BOOKING of a group lost in the base runs at the
+    // post-seed launch too, when rlActive is still 0 — without it the unpin of such a pilot at its first RL pass
+    // found veqOff = 0, restored nothing, and the pilot's row stayed a power row with its raw q gated off
+    // (unpinned ⇒ psSkip): an empty row and a bad solve (rte6515 [5000,6000] BUS-6003_BBS_2, slot 797,
+    // max-iter-bad-solve at RL#2).
+    bool act = rlActive[s] != 0;
+    int pilotRow = qrRows[qrPtr[g]];
+    // A DEPENDENT pilot (qrDepBase): its identity sits on its own V row once its parent coupler is dead (the dummy
+    // row an identity) and on the dummy row as a cross identity while the coupler lives; the group is live only
+    // while that identity is there, or while this kernel holds it flipped.
+    const bool dependent = qrDepBase != nullptr && qrDepBase[g] >= 0;
+    if (dependent) {
+        if (relocOwn != nullptr && relocOwn[pilotRow] >= 0 && mode[(size_t) s * n + pilotRow] == 0) {
+            pilotRow = relocOwn[pilotRow];
+        }
+        int pm = mode[(size_t) s * n + pilotRow];
+        if (pm != 0 && pm != 6 && !veqOff[(size_t) s * nQr + g]) return;
+    }
+    // PILOT-SELF group (the pilot is merged controller #0, so its OWN row is also candidate 1): "control
+    // lost" is OLF's "no enabled controller" — every OTHER member pinned/off AND the pilot itself pinned.
+    // The candidate scan must skip the pilot's row: once flipped to a power row it reads as a live member
+    // and the next pass restores it — the kernel toggling its own verdict (rte6515 busbar base, groups 17
+    // and 19: mode 1/0 every pass to the outer-loop budget). And the flipped row hosts the pilot's
+    // BUS_TARGET_Q, whose target is its Q LIMIT (the RL pin's value), not the group's captured pilot-Q
+    // target (0 here — a pin with the wrong target moved V past the group target and unpinned it again).
+    int pe = psEntry != nullptr ? psEntry[g] : -1;
+    char plt = pe >= 0 && limitType != nullptr ? limitType[(size_t) s * nrl + pe] : 0;
+    double flipTarget = pilotQ[(size_t) s * nQr + g];
+    bool continuedFlip = false;
+    if (pe >= 0 && plt != 0) {
+        size_t li = cvStride ? (size_t) s * nrl + pe : (size_t) pe;
+        double lim = (plt == 3 || plt == 4) && rlInitTgtQ != nullptr ? rlInitTgtQ[pe]
+                   : (plt == 1 || plt == 3) ? rlMinQ[li] : rlMaxQ[li];
+        // A pilot whose bus LOST EVERY GENERATOR this scenario (seeded RL_LIMIT_FROZEN through setBatchRlGenLost)
+        // is not pinned at any limit: OLF's BUS_TARGET_Q there has no generator term at all, only the bus's
+        // load. Falling through to rlMaxQ asked the bus for its lost generator's MAXIMUM reactive output:
+        // rte6515 GEN-1251 with every busbar section in the list (VL-1251_0, the pilot of a two-section group
+        // whose other member is pinned), target 1.0 pu against OLF's 0.0, the bus driven from 0.572 to 0.94 pu
+        // for the first passes, 4.18 MW of slack read where OLF reads -0.33, and -0.384 MW distributed against 0.
+        if (plt == RL_LIMIT_FROZEN && rlGenLost != nullptr && rlGenLost[(size_t) s * nrl + pe]) {
+            lim = 0.0;
+        }
+        flipTarget = lim - rlLoadQ[li];
+        // A pilot whose group the PREVIOUS solve had already flipped (a strategy pair continuing its contingency):
+        // OLF restores that solve's frozen target Q and re-freezes it only past the reactive power mismatch. The
+        // seed launch reads the base limits, which a curve moved since (rte6515 BUS-6066_BBS_1, VL-6231_0: flipped
+        // at 0.576013 against the parent's 0.574331, then re-frozen at the pair's limit - 3.8e-5 kV on every
+        // strategy, even one changing nothing).
+        if (pinTargetIn != nullptr && plt >= 1 && plt <= 4 && !isnan(pinTargetIn[(size_t) s * nrl + pe])) {
+            flipTarget = pinTargetIn[(size_t) s * nrl + pe];
+            continuedFlip = true;
+        }
+    }
+    // An ISLANDED pilot has no equation at all on the CPU: OLF removes the bus. Its row here is
+    // frozen to a flat voltage identity, and every member row is frozen to identity too, so the
+    // mode scan below finds no carrier and reads that as "control lost" — flipping the frozen
+    // identity into a power row. The target override then re-stamps the frozen VOLTAGE value over
+    // that power row, leaving a residual of exactly 1.0 that no Newton step can ever clear, so
+    // every later re-solve buys iterations OLF does not run. Measured on LINE-3938-646: the whole
+    // network moved 8.8e-08 kV off the CPU answer with identical solve counts.
+    if (rowIsFrozen(nFrozen, frozenSlotRow, s, pilotRow)) return;
+    size_t pi = (size_t) s * n + pilotRow;
+    size_t fi = (size_t) s * nQr + g;
+    // OLF's own test for "this group has no controller": its ENABLED controllers
+    // (VoltageControl.isControllerEnabled -> isGeneratorVoltageControlEnabled). On the device that fact is the
+    // members' REACTIVE-LIMIT state, which is per (scenario, entry) and current from the seeding onwards —
+    // unlike the row modes this kernel used to infer it from, which at seed time are still ambiguous (a member
+    // row reads mode 0 both for a frozen island and for an identity that means the member controls). With the
+    // fact in hand the layout can follow it from the FIRST fill, which is where OLF has it: a pilot whose only
+    // sibling this contingency islands, and which the base itself pinned, has no BUS_TARGET_V at all in OLF,
+    // while the device used to hold that identity until its reactive-limits phase (rte6515 BUS-6112_BBS_2: the
+    // pilot VL-6112_0 sat at v = 1.055 through the whole slack phase, VL-6055_0's q read 1.474 against OLF's
+    // 1.902, and the run ended 3.7e-3 MW apart in distributed active power).
+    bool entryKnown = false;
+    bool anyEnabled = false;
+    if (pe >= 0 && dqMemberQrGroup != nullptr && dqMemberRlEntry != nullptr && limitType != nullptr && nrl > 0) {
+        for (int m = 0; m < nDqMembers; m++) {
+            if (dqMemberQrGroup[m] != g) continue;
+            if (dqSub != nullptr && dqSub[(size_t) s * nDqMembers + m] != 0) continue;   // another subgroup's controller (#71)
+            int re = dqMemberRlEntry[m];
+            if (re < 0 || re >= nrl) continue;
+            if (rlIslandedMask != nullptr && rlIslandedMask[(size_t) s * nrl + re]) continue;   // OLF disables it
+            entryKnown = true;
+            if (limitType[(size_t) s * nrl + re] == 0) {                                        // still controlling
+                anyEnabled = true;
+                break;
+            }
+        }
+    }
+    // Only with at least one member entry to read: a group whose members have none (reactive limits disabled for
+    // the run, an empty q range) cannot be judged this way, and its layout stays what the extraction gave it.
+    const bool factKnown = entryKnown;
+    bool lost;
+    if (factKnown) {
+        lost = !anyEnabled;
+    } else if (pe >= 0) {
+        lost = plt != 0;                                     // an unpinned pilot still controls its own bus
+        int p0 = qrPtr[g];
+        int cnt = qrPtr[g + 1] - p0;
+        for (int c = 1; lost && c < cnt; c++) {
+            int r = qrRows[p0 + c];
+            if (r == pilotRow) continue;
+            int m = mode[(size_t) s * n + r];
+            if (m != 0 && m != 4) lost = false;
+        }
+    } else {
+        lost = relocChooseSub(g, qrPtr, qrRows, mode + (size_t) s * n,
+                dqSub != nullptr ? dqSub + (size_t) s * nDqMembers : nullptr, qrMemberStart) == 0;
+    }
+    // With the fact known the layout is applied EVERY pass, the first fill included; otherwise it stays where it
+    // was — inside the reactive-limits phase, which is all the row-mode inference could support.
+    const bool layoutNow = factKnown || act;
+    if (layoutNow && lost && !veqOff[fi] && mode[pi] == 0) {
+        savedVTarget[fi] = target[pi];
+        mode[pi] = 1;
+        target[pi] = flipTarget;
+        veqOff[fi] = 1;
+        switched[s] = act ? 1 : switched[s];                 // only the RL phase drives the outer loop's stability
+    } else if (layoutNow && !lost && veqOff[fi]) {
+        mode[pi] = dependent && relocOwn != nullptr && relocOwn[pilotRow] >= 0 ? 6 : 0;   // a cross identity stays cross
+        target[pi] = savedVTarget[fi];
+        veqOff[fi] = 0;
+        switched[s] = act ? 1 : switched[s];
+    } else if (act && lost && veqOff[fi] && pe >= 0 && fabs(target[pi] - flipTarget) > tol) {
+        // The pinned pilot's limit moved (curve limits). OLF re-freezes a pinned bus at its moved limit only
+        // past maxReactivePowerMismatch (checkPqBusWithQLimitType: |maxQ - q| > tol), the same gate the member
+        // path above this kernel applies; a 1e-12 gate here re-stamped a pilot OLF leaves at its pin-time
+        // limit. Measured on rte6515 BUS-6029_BBS_1 (#73): VL-6231_0's curve moved 2.23e-5 pu with the second
+        // slack distribution, under the 1e-4 pu threshold - OLF kept 0.570780403, the device stamped
+        // 0.570758104 and the network sat 5.68e-5 kV off.
+        target[pi] = flipTarget;
+        switched[s] = 1;
+    } else if (lost && !veqOff[fi] && pe >= 0 && mode[pi] == 1 && rlVtarget != nullptr) {
+        // Lost already in the BASE: the activation laid the pilot's row out as its own Q balance (OLF's
+        // BUS_TARGET_V inactive, BUS_TARGET_Q active). Book it as flipped so a member switching back later
+        // restores the V identity at the group's target — without this the restore never fired and the
+        // pilot stayed a power row beside a member that had resumed control.
+        veqOff[fi] = 1;
+        savedVTarget[fi] = rlVtarget[pe];
+        // ...and if this scenario's outage took the pilot bus's every generator, its balance target loses the
+        // generator's pinned output NOW, from the first fill: OLF's BUS_TARGET_Q there has no generator term.
+        // The re-stamp branch above only runs inside the reactive-limits phase, so the slack phase solved with
+        // the lost generator's pin still injected - rte6515 GEN-6003 with every busbar section in the list:
+        // VL-6003_0 kept 0.7477 pu against OLF's 0.0 through the first passes, and the first slack read was
+        // 0.049 MW off (238.816 MW distributed against OLF's 238.865).
+        if (plt == RL_LIMIT_FROZEN && rlGenLost != nullptr && rlGenLost[(size_t) s * nrl + pe]) {
+            target[pi] = flipTarget;
+        }
+        // ...and a group the previous solve had flipped at another pin (a strategy pair continuing its
+        // contingency) holds THAT target, not the base one the activation laid out (rte6515 BUS-6230_BBS: VL-6229_0
+        // pinned at MAX_Q 0.0 in the base, at MIN_Q -0.06 after the contingency; the pair kept 0.0, 8.8e-5 kV)
+        if (continuedFlip) {
+            target[pi] = flipTarget;
+        }
+    } else if (!lost && pe < 0 && mode[pi] == 1 && qrPilotRlEntry != nullptr && qrPilotRlEntry[g] >= 0) {
+        // The same base-lost case for a PURE-TRANSIT pilot (not one of its own controllers, so no
+        // psEntry): the base carried no saved V target - the pilot's own local reactive-limit entry
+        // holds the group's target (per-scenario overrides included). A member just unpinned, and
+        // OLF gives the pilot its V equation back IN THAT PASS (network.xiidm/LNER: IZUM_0's three
+        // members unpinned on a 7.85e-07 pu margin; restoring a pass late cost 0.151 MW of slack).
+        int le = qrPilotRlEntry[g];
+        mode[pi] = 0;
+        target[pi] = rlTargetOf(nRlVtOv, rlVtOvSlotIdx, rlVtOvVal, svcRlVt, nrl, s, le, rlVtarget[le]);
+        switched[s] = 1;
+    }
+}
+
+void launchPilotVeqInner(BatchSolverContext* ctx, DriverPass& drv, bool staticLimits, bool continuedPins) {
+    const int& n = drv.n;
+    const int& nS = drv.nS;
+    const bool& useDynRlLimits = drv.useDynRlLimits;
+    const double& REACTIVE_LIMIT_TOL = drv.reactiveLimitTol;
+    const int& nRlVtOv = drv.nRlVtOv;
+    DeviceBuf& dRlVtOvSlotIdx = drv.dRlVtOvSlotIdx;
+    DeviceBuf& dRlVtOvVal = drv.dRlVtOvVal;
+    const bool useDyn = useDynRlLimits && !staticLimits;
+    if (ctx->hasDqQrGroups && ctx->st->nQr > 0) {
+        updatePilotVeqBatch<<<grid(ctx->st->nQr * nS), BLOCK, 0, ctx->stream>>>(
+                    ctx->st->nQr, nS, n,
+                    ctx->st->dQrPtr.as<int>(), ctx->st->dQrRows.as<int>(), ctx->dQrGenVc.as<char>(),
+                    ctx->dQrPilotQ.as<double>(), ctx->dMode.as<int>(), ctx->dTarget.as<double>(),
+                    ctx->dQrVeqOff.as<char>(), ctx->dQrSavedVT.as<double>(),
+                    ctx->dRlActive.as<char>(), ctx->dRlSwitched.as<char>(),
+                    ctx->nFrozenRow, ctx->nFrozenRow ? ctx->dFrozenRow.as<int>() : nullptr,
+                    psEntryPtr(ctx),
+                ctx->dRlLimitType.p ? ctx->dRlLimitType.as<char>() : nullptr, ctx->nrl,
+                useDyn ? ctx->dRlMinQDyn.as<double>() : ctx->dRlMinQ.as<double>(),
+                useDyn ? ctx->dRlMaxQDyn.as<double>() : ctx->dRlMaxQ.as<double>(),
+                useDyn ? ctx->dRlLoadQDyn.as<double>() : ctx->dRlLoadQ.as<double>(),
+                ctx->rlRobust ? ctx->dRlInitTgtQ.as<double>() : nullptr, useDyn ? 1 : 0,
+                ctx->dRlVtarget.p ? ctx->dRlVtarget.as<double>() : nullptr,
+                ctx->dQrPilotRlEntry.p ? ctx->dQrPilotRlEntry.as<int>() : nullptr,
+                nRlVtOv, nRlVtOv > 0 ? dRlVtOvSlotIdx.as<int>() : nullptr,
+                nRlVtOv > 0 ? dRlVtOvVal.as<double>() : nullptr,
+                ctx->nSvc > 0 ? ctx->dSvcRlVt.as<double>() : nullptr,
+                ctx->nDqMembers, ctx->dDqMemberQrGroup.p ? ctx->dDqMemberQrGroup.as<int>() : nullptr,
+                ctx->dDqMemberRlEntry.p ? ctx->dDqMemberRlEntry.as<int>() : nullptr,
+                ctx->nRlIslanded > 0 ? ctx->dRlIslanded.as<char>() : nullptr,
+                ctx->hasDqSub ? ctx->dDqSub.as<char>() : nullptr, ctx->hasDqSub ? ctx->dQrMemberStart.as<int>() : nullptr,
+                REACTIVE_LIMIT_TOL, ctx->nRlGenLost > 0 ? ctx->dRlGenLost.as<char>() : nullptr,
+                ctx->st->dQrDepBase.p ? ctx->st->dQrDepBase.as<int>() : nullptr,
+                ctx->st->dRelocOwn.p ? ctx->st->dRelocOwn.as<int>() : nullptr,
+                continuedPins && ctx->hasRlPinTgtIn ? ctx->dRlPinTgtIn.as<double>() : nullptr);
+    }
+}
+
+}  // namespace olfgpu

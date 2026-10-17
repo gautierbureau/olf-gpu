@@ -7,6 +7,7 @@
  */
 package com.powsybl.openloadflow.ac.solver.gpu.batch;
 
+import com.powsybl.openloadflow.ac.equations.vector.gpu.DistrRhoPacker;
 import com.powsybl.commons.report.ReportNode;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
@@ -318,7 +319,7 @@ public final class GpuBatchedSecurityAnalysisSolver {
         // which the fixed batch pattern cannot represent — route those to the CPU (the DISTR_Q pass IS
         // batched, so DISTR_RHO is the only family that needs a contributor-outage rejection).
         Set<LfBranch> distrRhoControllers = gpuData.getDistrRhoContributionCount() > 0
-                ? GpuAcOuterLoopPacks.distrRhoControllerBranches(network, equationSystem) : Set.of();
+                ? DistrRhoPacker.distrRhoControllerBranches(network, equationSystem) : Set.of();
         // Distributed-slack factor denominator (Σ maxP/droop over ALL participating gens, incl. the slack's)
         // and whether the slack itself participates: a generator at a DS-participant bus is batched with a
         // per-scenario reweight (computeGenOutage), but only when the slack does not participate.

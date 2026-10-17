@@ -7,6 +7,7 @@
  */
 package com.powsybl.openloadflow.ac.solver.gpu.batch;
 
+import com.powsybl.openloadflow.ac.equations.vector.gpu.RemoteMemberQPacker;
 import com.powsybl.commons.PowsyblException;
 import com.powsybl.iidm.network.ReactiveCapabilityCurve;
 import com.powsybl.iidm.network.ReactiveLimitsKind;
@@ -108,10 +109,10 @@ public final class GpuBatchRlCurves {
             // the SAME predicates as the reactive-limit pack (a local copy drifted on rte6515's full
             // busbar scope at VL-5_0: a pilot whose own control is merged is reached through the
             // main control there)
-            boolean remoteMember = com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcOuterLoopPacks.isRemoteMemberEntry(bus);
+            boolean remoteMember = com.powsybl.openloadflow.ac.equations.vector.gpu.RemoteMemberQPacker.isRemoteMemberEntry(bus);
             boolean pilotSelf = com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcOuterLoopPacks.isPilotSelfEntry(bus);
             if (remoteMember || pilotSelf) {
-                var vc = com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcOuterLoopPacks.mainGenVc(bus);
+                var vc = com.powsybl.openloadflow.ac.equations.vector.gpu.RemoteMemberQPacker.mainGenVc(bus);
                 var pilotVar = es.getVariableSet().getVariable(vc.getControlledBus().getNum(), AcVariableType.BUS_V);
                 if (vVar == null || pilotVar == null || !(bus.getMinQ() < bus.getMaxQ())) {
                     continue;                                // not packed

@@ -187,7 +187,7 @@ public final class GpuAcActivationExtractor {
                 // baseRowMode, which every scenario without an explicit per-scenario mode inherits. That is
                 // CORRECT for a genuine Q-limit pin (the 20 base-pinned fixtures rely on it). What used to
                 // reach here wrongly was a TRANSIENT MIN_REALISTIC_V freeze the device should never have
-                // made: see GpuAcOuterLoopPacks.isOlfRobustRemoteController (tasks #66), fixed at the SOURCE
+                // made: see RemoteMemberQPacker.isOlfRobustRemoteController (tasks #66), fixed at the SOURCE
                 // by exempting a merged member from robust mode as OLF's own predicate does, not here.
                 boolean mode4 = GpuAcRowIndexing.isRemoteGenVcControllerElement(bus)
                         && (pilotSelf || !GpuAcRowIndexing.isFreeRemoteGenVcMember(bus)) && !enrolled;

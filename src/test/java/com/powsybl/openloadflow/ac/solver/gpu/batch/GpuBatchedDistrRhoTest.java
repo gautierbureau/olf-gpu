@@ -7,6 +7,7 @@
  */
 package com.powsybl.openloadflow.ac.solver.gpu.batch;
 
+import com.powsybl.openloadflow.ac.equations.vector.gpu.DistrRhoPacker;
 import com.powsybl.commons.report.ReportNode;
 import com.powsybl.iidm.network.Branch;
 import com.powsybl.iidm.network.Line;
@@ -85,7 +86,7 @@ class GpuBatchedDistrRhoTest {
 
         GpuAcData d = GpuAcDataExtractor.extract(net, es);
         assertTrue(d.getDistrRhoContributionCount() > 0, "the test network must exercise DISTR_RHO rows");
-        Set<LfBranch> controllers = GpuAcOuterLoopPacks.distrRhoControllerBranches(net, es);
+        Set<LfBranch> controllers = DistrRhoPacker.distrRhoControllerBranches(net, es);
         assertTrue(!controllers.isEmpty(), "must have DISTR_RHO controller transformers");
 
         cpuReference(es, target, eq, sv);                    // converge the base case as the hot start

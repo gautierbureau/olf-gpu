@@ -127,10 +127,10 @@ public final class GpuAcDataExtractor {
         GpuAcFamilyPacker.Packs family = GpuAcFamilyPacker.pack(network, columns, baseOpenBranchIds, baseOpenZiBranchIds);
         GpuAcOuterLoopPacks.RlPack rl = GpuAcOuterLoopPacks.reactiveLimitsPack(network, es, columns, reactiveLimits);
         GpuAcOuterLoopPacks.DqPack dq = GpuAcOuterLoopPacks.distrQPack(network, es, columns, family, rl);
-        GpuAcOuterLoopPacks.DrPack dr = GpuAcOuterLoopPacks.distrRhoPack(network, es, columns);
-        GpuAcOuterLoopPacks.DsbPack dsb = GpuAcOuterLoopPacks.distrShuntBPack(network, es, columns);
+        DistrRhoPacker.DrPack dr = DistrRhoPacker.distrRhoPack(network, es, columns);
+        DistrShuntBPacker.DsbPack dsb = DistrShuntBPacker.distrShuntBPack(network, es, columns);
 
-        GpuAcOuterLoopPacks.RmqPack rmq = GpuAcOuterLoopPacks.remoteMemberQPack(network, es, columns, family, reactiveLimits);
+        RemoteMemberQPacker.RmqPack rmq = RemoteMemberQPacker.remoteMemberQPack(network, es, columns, family, reactiveLimits);
         GpuAcOuterLoopPacks.DsPack ds = GpuAcOuterLoopPacks.distributedSlackPack(network, es, columns, distributedSlack, dsParams);
         // SLOPE-SVC rows (V + slope*sumQ = target, row mode 2): per-row slope, 0 everywhere else
         double[] rowSlope = new double[es.getIndex().getSortedVariablesToFind().size()];

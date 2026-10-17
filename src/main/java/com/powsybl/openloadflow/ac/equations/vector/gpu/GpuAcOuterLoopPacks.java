@@ -65,15 +65,6 @@ public final class GpuAcOuterLoopPacks {
                                 List<List<Integer>> tgtPeers) {
     }
 
-    /** DISTR_RHO contributions in the flat device layout: {@code {drRow, drCol}} per row + coefficient. */
-    record DrPack(int[] drRow, int[] drCol, double[] drCoef) {
-    }
-
-    /** DISTR_SHUNT_B contributions in the flat device layout: {@code {dbRow, dbCol}} per row + coefficient —
-     *  the shunt-susceptance analogue of {@link DrPack} (structurally identical linear distribution rows). */
-    record DsbPack(int[] dbRow, int[] dbCol, double[] dbCoef) {
-    }
-
     /** Reactive-limits (PV↔PQ) pack: one entry per voltage-capable controller bus. {@code rlMonitored}
      *  flags a bus whose base-PQ state is a MONITORING_VOLTAGE SVC standing by — NOT a Q-limit switch:
      *  the device RL must seed it UNPINNED (no spontaneous switch-back; only the VoltageMonitoring
@@ -171,154 +162,10 @@ public final class GpuAcOuterLoopPacks {
                 GpuAcArrays.toIntArray(pilotRow), GpuAcArrays.toDoubleArray(vTarget));
     }
 
-    /** Remote-member OWN reactive-injection contributors (plan-B3): per contribution, the member's
-     *  own row ({@code row}), the family element + side + kind (same encoding as the DISTR_Q pack)
-     *  and a weight (1, or ±1 for a zero-impedance DUMMY_Q term). A twin of the DISTR_Q assembly
-     *  accumulates each member's own bus q into the diagnostic Q buffer at its own row — that slot
-     *  is free because the main qBuf fill suppresses member rows — so the RL kernel's
-     *  {@code q = qBuf[row] + loadQ} works verbatim for remote entries. */
-    record RmqPack(int[] row, int[] elem, int[] side, int[] kind, double[] weight) {
-    }
-
-    /** A REMOTE member entry of the reactive-limit pack: a controller of a MAIN remote group that is
-     *  not the group's controlled bus. Shared with GpuBatchRlCurves, which REPLAYS this enumeration
-     *  and must count exactly the same buses (a drift throws and the run falls to the CPU). */
-    public static boolean isRemoteMemberEntry(LfBus bus) {
-        GeneratorVoltageControl vc = mainGenVc(bus);
-        return vc != null && GpuAcRowIndexing.isRemoteGenVcControllerElement(bus) && vc.getControlledBus() != bus;
-    }
-
-    /**
-     * OLF's OWN test for "is this a remote controller", which gates robust mode's unrealistic-voltage
-     * PV→PQ freeze — copied verbatim from {@code ReactiveLimitsOuterLoop.isGeneratorRemoteController}:
-     *
-     * <pre>return controllerBus.getGeneratorVoltageControl().map(c -&gt; c.getControlledBus() != controllerBus).orElse(false);</pre>
-     *
-     * <p>Note which control it asks: the bus's OWN {@code getGeneratorVoltageControl()}, NOT
-     * {@link #mainGenVc}. For a MERGED group every member keeps its own DEPENDENT control whose
-     * controlled bus is ITSELF, so OLF reads every such member as a LOCAL controller and skips the
-     * whole {@code robustMode && generatorRemoteController && …} block for it — while the device's
-     * {@code rlRemote} class, built from the MAIN control, calls that member "remote" and applies the
-     * rule. That gap is [[#66]]: on rte6515 the device froze VL-2669_1..4 with
-     * {@code MIN_REALISTIC_V} (their shared target, 12.4 kV on a 20 kV level = 0.62 pu, is below the
-     * 0.816 pu trip point) where OLF froze nothing, so mode-4 own-Q balances replaced the DISTR_Q
-     * sharing in the STRUCTURE and DUMMY_Q ended 8.410878e-03 pu off. Entries that answer false here
-     * are packed as class 3 and the kernel's robust gate exempts them.
-     */
-    public static boolean isOlfRobustRemoteController(LfBus bus) {
-        return bus.getGeneratorVoltageControl().map(c -> c.getControlledBus() != bus).orElse(false);
-    }
-
     /** A class-2 entry: a pilot that is one of its own controllers (packed as a remote entry). */
     public static boolean isPilotSelfEntry(LfBus bus) {
-        GeneratorVoltageControl vc = mainGenVc(bus);
+        GeneratorVoltageControl vc = RemoteMemberQPacker.mainGenVc(bus);
         return vc != null && GpuAcRowIndexing.isRemoteGenVcControllerElement(bus) && vc.getControlledBus() == bus;
-    }
-
-    /**
-     * The bus's MAIN generator voltage control, which is the only one that can answer a question about the
-     * GROUP: who the controlled bus is, what the target is, which nominal V it refers to.
-     *
-     * <p>A merged group keeps ONE main control (on the bus OLF picked) and leaves every other member holding
-     * a DEPENDENT control that regulates ITSELF. Asking {@code bus.getGeneratorVoltageControl()} therefore
-     * answered "I control my own bus" for every member, so each one was classified as the pilot
-     * ({@code isPilotSelfEntry}) with its own row as the pilot row. Since class 2 means "unpinned, my row is
-     * the group's voltage IDENTITY (mode 0)" while a member's row actually carries DISTR_Q (mode 1), the
-     * reactive-limit kernel's {@code if (mode[ridx] != pvForm) return;} dropped every member before it ever
-     * looked at q: rte6515's base pinned 16 where OLF pinned 19 (VL-5997_1, VL-6003_1, VL-6003_2 missing,
-     * each with a correct q of 1.921012507 pu against a 0.7536 limit), then diverged at outer pass 7.
-     */
-    public static GeneratorVoltageControl mainGenVc(LfBus bus) {
-        return GpuAcRowIndexing.mainGenVc(bus);              // ONE definition, shared with the row indexing
-    }
-
-    static RmqPack remoteMemberQPack(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
-                                     ExtractionColumns columns, GpuAcFamilyPacker.Packs family, boolean reactiveLimits) {
-        List<int[]> out = new ArrayList<>();
-        List<Double> w = new ArrayList<>();
-        int[] vCol = columns.vCol();
-        if (reactiveLimits) {
-            for (LfBus bus : network.getBuses()) {
-                boolean member = GpuAcRowIndexing.isRemoteGenVcControllerElement(bus);   // incl. a pilot that is a controller
-                // OLF_GPU_RMQ_WHY=1: one line per REMOTE CONTROLLER bus saying whether it gets a diagnostic q
-                // and, when it does not, which gate dropped it. A member with no q source is invisible to the
-                // reactive-limit check — it can never pin, whatever its real q — which is how rte6515's base
-                // pinned 16 where OLF pinned 19 and then diverged.
-                if (member && System.getenv("OLF_GPU_RMQ_WHY") != null) {
-                    System.err.printf("RMQ_WHY bus=%s vCol=%d minQ=%.6f maxQ=%.6f qRange=%b skipped=%s%n",
-                            bus.getId(), vCol[bus.getNum()], bus.getMinQ(), bus.getMaxQ(),
-                            bus.getMinQ() < bus.getMaxQ(),
-                            vCol[bus.getNum()] < 0 ? "no-vCol" : !(bus.getMinQ() < bus.getMaxQ()) ? "empty-q-range" : "-");
-                }
-                if (!member || vCol[bus.getNum()] < 0 || !(bus.getMinQ() < bus.getMaxQ())) {
-                    continue;                                // mirror the RL pack's remote-entry condition
-                }
-                // A pilot-self pilot whose Q is RE-ROUTED through a candidate table (qRowAlt = -2-g) already gets
-                // its own injection at its own row from the diagnostic fill: patchFrozenGroupDests points the
-                // group's frozen role-0 dest at the table's FALLBACK row, which for such a pilot IS its own row.
-                // Adding the rmq twin on top counted it TWICE. Measured on rte6515 VL-6112_0 with the rotation
-                // property on: q read 0.603080467 where OLF has 0.910540234, and
-                // 1.218 (loadQ) + 2 * (0.910540234 - 1.218) = 0.603080 — the doubled injection, to six digits.
-                // The reactive-limit check then never saw the pilot beyond its limit and never pinned it, which
-                // is what kept the rotation path from ever reaching the pinned arrangement it exists for.
-                if (isPilotSelfEntry(bus) && columns.qRowAlt()[bus.getNum()] <= -2) {
-                    continue;
-                }
-                var vc = bus.getGeneratorVoltageControl().orElseThrow();
-                if (vCol[vc.getControlledBus().getNum()] < 0) {
-                    continue;
-                }
-                // The row the reactive-limit check READS (native rlQrow): for a relocated child that is the
-                // parent coupler's DUMMY_Q row, not its own V row, which now holds the coupler's ZERO_V. Filling
-                // the own row left the check reading ZERO for every relocated member, so it could never pin one —
-                // measured on rte6515's full busbar scope: the device's base stopped after its first
-                // ReactiveLimits pass where OLF takes three, and came back MAX_ITERATION_REACHED.
-                int row = GpuAcRowIndexing.relocatedQRow(bus.getNum(), columns.ziParentEdge(),
-                        columns.dummyQCol(), vCol);
-                if (bus.getShunt().isPresent()) {
-                    out.add(new int[] {row, family.shElemOf()[bus.getNum()], 0, 1});
-                    w.add(1.0);
-                }
-                for (LfBranch br : bus.getBranches()) {
-                    if (br.isDisabled()) {
-                        continue;
-                    }
-                    int side = br.getBus1() == bus ? 0 : 1;
-                    int e = family.cbElemOf()[br.getNum()];
-                    if (e >= 0) {
-                        out.add(new int[] {row, e, side, 0});
-                        w.add(1.0);
-                        continue;
-                    }
-                    int oe = family.obElemOf()[br.getNum()];
-                    if (oe >= 0) {
-                        out.add(new int[] {row, oe, side, 2});
-                        w.add(1.0);
-                        continue;
-                    }
-                    // every coupler, not just the base tree's: a coupler out of it is pinned at dummyQ = 0 and adds
-                    // nothing, and one a contingency brings into OLF's tree carries this member's reactive flow
-                    if (br.isZeroImpedance(LoadFlowModel.AC)) {
-                        int dqCol = columns.dummyQCol()[br.getNum()];
-                        if (dqCol >= 0) {
-                            out.add(new int[] {row, dqCol, side, 3});
-                            w.add(side == 0 ? 1.0 : -1.0);
-                        }
-                    }
-                }
-            }
-        }
-        int[] row = new int[out.size()];
-        int[] elem = new int[out.size()];
-        int[] side = new int[out.size()];
-        int[] kind = new int[out.size()];
-        for (int i = 0; i < out.size(); i++) {
-            row[i] = out.get(i)[0];
-            elem[i] = out.get(i)[1];
-            side[i] = out.get(i)[2];
-            kind[i] = out.get(i)[3];
-        }
-        return new RmqPack(row, elem, side, kind, GpuAcArrays.toDoubleArray(w));
     }
 
     /** Distributed-slack pack: per-participating-bus factor/headroom + the slack bus's own share.
@@ -484,38 +331,6 @@ public final class GpuAcOuterLoopPacks {
                 tgtPtr, GpuAcArrays.toIntArray(tgtPeer));
     }
 
-    static DrPack distrRhoPack(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
-                               ExtractionColumns columns) {
-        List<int[]> dr = new ArrayList<>();      // {drRow, drCol} per DISTR_RHO contribution
-        List<Double> drC = new ArrayList<>();    // coefficient per contribution
-        buildDistrRhoContributions(network, es, columns.branchRhoCol(), dr, drC);
-        int[] drRow = new int[dr.size()];
-        int[] drCol = new int[dr.size()];
-        double[] drCoef = new double[dr.size()];
-        for (int i = 0; i < dr.size(); i++) {
-            drRow[i] = dr.get(i)[0];
-            drCol[i] = dr.get(i)[1];
-            drCoef[i] = drC.get(i);
-        }
-        return new DrPack(drRow, drCol, drCoef);
-    }
-
-    static DsbPack distrShuntBPack(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
-                                   ExtractionColumns columns) {
-        List<int[]> db = new ArrayList<>();      // {dbRow, dbCol} per DISTR_SHUNT_B contribution
-        List<Double> dbC = new ArrayList<>();    // coefficient per contribution
-        buildDistrShuntBContributions(network, es, columns.shuntBCol(), db, dbC);
-        int[] dbRow = new int[db.size()];
-        int[] dbCol = new int[db.size()];
-        double[] dbCoef = new double[db.size()];
-        for (int i = 0; i < db.size(); i++) {
-            dbRow[i] = db.get(i)[0];
-            dbCol[i] = db.get(i)[1];
-            dbCoef[i] = dbC.get(i);
-        }
-        return new DsbPack(dbRow, dbCol, dbCoef);
-    }
-
     /** SVC reactive limits are VOLTAGE-DEPENDENT: {@code LfStaticVarCompensatorImpl} evaluates
      *  Bmin/Bmax*(v*nomV)^2 at the LIVE bus V on every CPU RL check, and a pinned bus re-freezes at
      *  the moved limit ({@code busesWithUpdatedQLimits}). Per RL entry, capture the quadratic
@@ -675,7 +490,7 @@ public final class GpuAcOuterLoopPacks {
                 int bn = bus.getNum();
                 boolean vActive = GpuAcRowIndexing.row(es, bn, AcEquationType.BUS_TARGET_V) >= 0;
                 boolean qActive = GpuAcRowIndexing.row(es, bn, AcEquationType.BUS_TARGET_Q) >= 0;
-                boolean remoteMember = isRemoteMemberEntry(bus);
+                boolean remoteMember = RemoteMemberQPacker.isRemoteMemberEntry(bus);
                 // A pilot that is one of its OWN controllers is packed as a remote entry of class 2: its
                 // q feeds the group's DISTR_Q rows like a remote member's (read through the remote q
                 // pack, not its row), a pin puts its own Q balance on its row (mode 4, alternate dest),
@@ -684,7 +499,7 @@ public final class GpuAcOuterLoopPacks {
                 // all-pinned-group fixture, 0.68 kV at the pilot.
                 boolean pilotSelf = isPilotSelfEntry(bus);
                 if ((remoteMember || pilotSelf) && vCol[bn] >= 0) {
-                    var vc = mainGenVc(bus);                   // the GROUP's control: the group identity, the pilot's V row
+                    var vc = RemoteMemberQPacker.mainGenVc(bus);                   // the GROUP's control: the group identity, the pilot's V row
                     // ...but the switch-back test is the member's OWN control's: OLF's ReactiveLimitsOuterLoop reads
                     // getBusV / getBusTargetV off bus.getGeneratorVoltageControl(), which for a control MERGED into
                     // the group (a dependent section) keeps its own controlled bus and its own target while the
@@ -707,7 +522,7 @@ public final class GpuAcOuterLoopPacks {
                         // other rlRemote site treats it exactly like class 1 — only the kernel's robust
                         // unrealistic-voltage gate and rlRobustVResetBatch (which tests == 1) single it out.
                         byte remoteClass = pilotSelf ? (byte) 2
-                                : isOlfRobustRemoteController(bus) ? (byte) 1 : (byte) 3;
+                                : RemoteMemberQPacker.isOlfRobustRemoteController(bus) ? (byte) 1 : (byte) 3;
                         rlRemote.add(remoteClass);
                         rlCmpVrow.add(pilotV);                 // switch conditions compare the PILOT's V
                         rlBusNum.add(bn);
@@ -1253,113 +1068,4 @@ public final class GpuAcOuterLoopPacks {
         }
     }
 
-    /**
-     * Build the LINEAR DISTR_RHO contributions (ratio distribution when several transformers control one
-     * bus). A controller branch {@code Gk} with an active DISTR_RHO equation gets, on its BRANCH_RHO1 row,
-     * {@code DISTR_RHO_k = (1/count)·Σ_j r1_j − r1_k}, i.e. each controller {@code Gj}'s ratio column
-     * contributes with coefficient {@code 1/count − (j==k ? 1 : 0)}, where {@code count} is the number of
-     * enabled controllers. The free controller (no DISTR_RHO) carries the pilot's Q balance via qRow.
-     */
-    private static void buildDistrRhoContributions(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
-                                                   int[] branchRhoCol, List<int[]> out, List<Double> coefs) {
-        for (LfBus pilot : network.getBuses()) {
-            // ACTIVATION-INDEPENDENT (plan-group-member-dynamics A1): pack the ALL-ENABLED
-            // configuration of every group whose DISTR_RHO equations EXIST — never key on
-            // isTransformerVoltageControlled()/getColumn(), which are false/-1 at a control-OFF
-            // base (AFTER_GENERATOR) and silently emptied the pack (the e82290f audit). The FREE
-            // member is the FIRST enabled one — OLF's updateRemoteVoltageControlEquations pick and
-            // computeQRowAlt's, so its row carries the relocated pilot Q, never DISTR_RHO. Rows
-            // inactive in a scenario are identity-wiped by the row-mode pass (superset principle).
-            TransformerVoltageControl tvc = pilot.getTransformerVoltageControl()
-                    .filter(c -> c.getMergeStatus() == VoltageControl.MergeStatus.MAIN)
-                    .orElse(null);
-            if (tvc == null) {
-                continue;
-            }
-            List<LfBranch> controllers = tvc.getMergedControllerElements().stream()
-                    .filter(c -> !c.isDisabled())
-                    .filter(c -> es.getEquation(c.getNum(), AcEquationType.DISTR_RHO).isPresent())
-                    .toList();
-            long count = controllers.size();
-            for (int k = 1; k < controllers.size(); k++) {   // k = 0 is the FREE member: no DISTR_RHO row
-                LfBranch gk = controllers.get(k);
-                int drRow = branchRhoCol[gk.getNum()];
-                for (LfBranch gj : controllers) {
-                    double coef = 1.0 / count - (gj == gk ? 1.0 : 0.0);
-                    out.add(new int[] {drRow, branchRhoCol[gj.getNum()]});
-                    coefs.add(coef);
-                }
-            }
-        }
-    }
-
-    /**
-     * DISTR_SHUNT_B linear-distribution rows — the shunt-susceptance analogue of
-     * {@link #buildDistrRhoContributions}. For each shunt-voltage-controlled pilot bus, every controller shunt
-     * with an ACTIVE DISTR_SHUNT_B equation gets a row {@code b_k = (1/count)·Σ_j b_j} rewritten as
-     * {@code 0 = (1/count − 1)·b_k + Σ_{j≠k} b_j/count} over the {@code count} enabled controllers. The free
-     * controller (no DISTR_SHUNT_B) carries the pilot's Q balance via qRow.
-     */
-    private static void buildDistrShuntBContributions(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
-                                                      int[] shuntBCol, List<int[]> out, List<Double> coefs) {
-        for (LfBus pilot : network.getBuses()) {
-            ShuntVoltageControl svc = pilot.getShuntVoltageControl()
-                    .filter(c -> c.getMergeStatus() == VoltageControl.MergeStatus.MAIN)
-                    .filter(c -> pilot.isShuntVoltageControlled())
-                    .orElse(null);
-            if (svc == null) {
-                continue;
-            }
-            List<LfShunt> controllers = svc.getMergedControllerElements();
-            long count = controllers.stream().filter(c -> !c.isDisabled()).count();
-            for (LfShunt gk : controllers) {
-                if (GpuAcRowIndexing.row(es, gk.getNum(), AcEquationType.DISTR_SHUNT_B) < 0) {
-                    continue;                                // the free controller carries the pilot's Q, no DISTR_SHUNT_B
-                }
-                int dbRow = shuntBCol[gk.getNum()];
-                for (LfShunt gj : controllers) {
-                    if (gj.isDisabled()) {
-                        continue;
-                    }
-                    double coef = 1.0 / count - (gj == gk ? 1.0 : 0.0);
-                    out.add(new int[] {dbRow, shuntBCol[gj.getNum()]});
-                    coefs.add(coef);
-                }
-            }
-        }
-    }
-
-    /**
-     * The transformers that participate in a ratio-distribution (DISTR_RHO) group. Outaging one of these
-     * REFORMS the {@code 1/count} coefficients (OLF redistributes the ratio across the remaining controllers),
-     * which the fixed batch pattern cannot represent — so the batched N-1 path rejects such a contingency to
-     * the CPU. Returns the controllers of every transformer-voltage-controlled pilot whose group has more than
-     * one enabled member (a single local controller is item 4, not DISTR_RHO, and is mask-safe).
-     */
-    public static Set<LfBranch> distrRhoControllerBranches(LfNetwork network,
-                                                           EquationSystem<AcVariableType, AcEquationType> es) {
-        Set<LfBranch> controllers = new java.util.HashSet<>();
-        for (LfBus pilot : network.getBuses()) {
-            // NOTE: keyed on the DISTR_RHO equations EXISTING, NOT on isTransformerVoltageControlled()
-            // — at an AFTER_GENERATOR base the control is DISABLED and that predicate is false, which
-            // silently emptied this set and let a member outage batch with the coupling missing
-            // (measured 3.7e-3 kV wrong, 2026-09-06).
-            TransformerVoltageControl tvc = pilot.getTransformerVoltageControl()
-                    .filter(c -> c.getMergeStatus() == VoltageControl.MergeStatus.MAIN)
-                    .orElse(null);
-            if (tvc == null) {
-                continue;
-            }
-            List<LfBranch> group = tvc.getMergedControllerElements();
-            // EXISTENCE-keyed (row()/getColumn() is -1 for INACTIVE equations — the same trap):
-            // a shared group's equations exist whether or not the control is on at base.
-            boolean distrRho = group.stream().filter(c -> !c.isDisabled())
-                    .filter(c -> es.getEquation(c.getNum(), AcEquationType.DISTR_RHO).isPresent())
-                    .count() > 1;
-            if (distrRho) {
-                controllers.addAll(group);
-            }
-        }
-        return controllers;
-    }
 }

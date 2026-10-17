@@ -7,6 +7,7 @@
  */
 package com.powsybl.openloadflow.ac.solver.gpu.batch;
 
+import com.powsybl.openloadflow.ac.equations.vector.gpu.RemoteMemberQPacker;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
@@ -328,7 +329,7 @@ final class GpuBatchInjectionOutages {
      *  (OLF_GPU_GENOUT_SHAPE: members=1 alive=0). See the merged-voltage-control note on GpuAcRowIndexing.mainGenVc. */
     private static java.util.Optional<com.powsybl.openloadflow.network.GeneratorVoltageControl> mainVcOf(LfBus bus) {
         return java.util.Optional.ofNullable(
-                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcOuterLoopPacks.mainGenVc(bus));
+                com.powsybl.openloadflow.ac.equations.vector.gpu.RemoteMemberQPacker.mainGenVc(bus));
     }
 
     private static GenOutage computeBusGenOutage(EquationSystem<AcVariableType, AcEquationType> es, GpuAcData gpuData,

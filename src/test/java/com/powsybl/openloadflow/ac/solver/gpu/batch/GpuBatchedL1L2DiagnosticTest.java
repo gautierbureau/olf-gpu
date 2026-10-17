@@ -92,10 +92,10 @@ class GpuBatchedL1L2DiagnosticTest {
         int n = baseState.length;
 
         List<BatchContingency> conts = List.of(new BatchContingency(LINE_1_2, net.getBranchById(LINE_1_2)));
-        List<BatchScenarioResult> results = GpuBatchedSecurityAnalysisSolver.solveBatchN1(net, baseState, conts,
-                es, target, new NewtonRaphsonParameters().setMaxIterations(MAX_ITER), 1e-10, true, true,
-                GpuBatchedSecurityAnalysisSolver.DEFAULT_REACTIVE_LIMIT_TOL,
-                GpuBatchedSecurityAnalysisSolver.DEFAULT_SLACK_DIST_TOL, ReportNode.NO_OP);
+        List<BatchScenarioResult> results = GpuBatchedSecurityAnalysisSolver.solveBatchN1(
+                BatchSolveRequest.of(net, baseState, conts, es, target,
+                        new NewtonRaphsonParameters().setMaxIterations(MAX_ITER), ReportNode.NO_OP)
+                        .withTol(1e-10));
         BatchScenarioResult r = results.get(0);
         assumeTrue(!r.needsCpuFallback() && r.hasConverged(),
                 "GPU must solve L1-2-1 on device (status=" + r.convergenceStatus() + ", ||F||=" + r.finalMismatch() + ")");

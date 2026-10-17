@@ -105,9 +105,11 @@ class GpuBatchedGenOverrideDiagnosticTest {
 
         // ---- (GPU) device solve of losing g2, no DS / no RL (the clean minimal repro) ----
         List<BatchContingency> conts = List.of(BatchContingency.generator("g2", g2));
-        List<BatchScenarioResult> results = GpuBatchedSecurityAnalysisSolver.solveBatchN1(net, baseState, conts,
-                es, target, new NewtonRaphsonParameters().setMaxIterations(MAX_ITER), 1e-12, false, false,
-                ReportNode.NO_OP);
+        List<BatchScenarioResult> results = GpuBatchedSecurityAnalysisSolver.solveBatchN1(
+                BatchSolveRequest.of(net, baseState, conts, es, target,
+                        new NewtonRaphsonParameters().setMaxIterations(MAX_ITER), ReportNode.NO_OP)
+                        .withTol(1e-12)
+                        .withOuterLoops(false, false));
         BatchScenarioResult rG2 = results.get(0);
         assumeTrue(!rG2.needsCpuFallback() && rG2.hasConverged(),
                 "GPU must solve losing g2 on device (status=" + rG2.convergenceStatus() + ")");

@@ -131,7 +131,7 @@ class GpuBatchedN1CrossCheckTest {
 
         // GPU batch on the pristine network + base state (no branch disabled yet).
         List<BatchScenarioResult> batch = GpuBatchedSecurityAnalysisSolver.solveBatchN1(
-                p.network(), xBase, contingencies, p.es(), p.target(), params, ReportNode.NO_OP);
+                BatchSolveRequest.of(p.network(), xBase, contingencies, p.es(), p.target(), params, ReportNode.NO_OP));
         assertTrue(batch.size() == contingencies.size(), "one result per contingency");
 
         int n = xBase.length;
@@ -190,10 +190,11 @@ class GpuBatchedN1CrossCheckTest {
         NewtonRaphsonParameters params = new NewtonRaphsonParameters();
 
         // Warm-up (CUDA context + JIT), then timed batch.
-        GpuBatchedSecurityAnalysisSolver.solveBatchN1(p.network(), xBase, contingencies, p.es(), p.target(), params, ReportNode.NO_OP);
+        GpuBatchedSecurityAnalysisSolver.solveBatchN1(
+                BatchSolveRequest.of(p.network(), xBase, contingencies, p.es(), p.target(), params, ReportNode.NO_OP));
         long t0 = System.nanoTime();
         List<BatchScenarioResult> batch = GpuBatchedSecurityAnalysisSolver.solveBatchN1(
-                p.network(), xBase, contingencies, p.es(), p.target(), params, ReportNode.NO_OP);
+                BatchSolveRequest.of(p.network(), xBase, contingencies, p.es(), p.target(), params, ReportNode.NO_OP));
         long batchMillis = (System.nanoTime() - t0) / 1_000_000;
 
         // Sequential reference: OLF Newton per contingency (disable / solve / restore). A

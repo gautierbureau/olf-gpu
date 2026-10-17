@@ -82,8 +82,11 @@ class GpuBatchedGeneratorContingencyTest {
                 BatchContingency.generator("g2", net.getGeneratorById("g2")),    // batchable: non-slack, non-DS
                 BatchContingency.generator("g1", net.getGeneratorById("g1")));    // slack source: must reject
 
-        List<BatchScenarioResult> results = GpuBatchedSecurityAnalysisSolver.solveBatchN1(net, baseState, conts,
-                es, target, new NewtonRaphsonParameters(), TOL, false, false, ReportNode.NO_OP);
+        List<BatchScenarioResult> results = GpuBatchedSecurityAnalysisSolver.solveBatchN1(
+                BatchSolveRequest.of(net, baseState, conts, es, target, new NewtonRaphsonParameters(),
+                        ReportNode.NO_OP)
+                        .withTol(TOL)
+                        .withOuterLoops(false, false));
 
         BatchScenarioResult rG2 = results.get(0);
         BatchScenarioResult rG1 = results.get(1);

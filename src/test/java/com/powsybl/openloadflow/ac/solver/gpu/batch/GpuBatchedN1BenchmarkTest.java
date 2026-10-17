@@ -136,10 +136,11 @@ class GpuBatchedN1BenchmarkTest {
         NewtonRaphsonParameters params = new NewtonRaphsonParameters();
 
         // GPU batch (warm-up the CUDA context, then time).
-        GpuBatchedSecurityAnalysisSolver.solveBatchN1(p.network(), xBase, contingencies, p.es(), p.target(), params, ReportNode.NO_OP);
+        GpuBatchedSecurityAnalysisSolver.solveBatchN1(
+                BatchSolveRequest.of(p.network(), xBase, contingencies, p.es(), p.target(), params, ReportNode.NO_OP));
         long t0 = System.nanoTime();
         List<BatchScenarioResult> batch = GpuBatchedSecurityAnalysisSolver.solveBatchN1(
-                p.network(), xBase, contingencies, p.es(), p.target(), params, ReportNode.NO_OP);
+                BatchSolveRequest.of(p.network(), xBase, contingencies, p.es(), p.target(), params, ReportNode.NO_OP));
         long batchMs = (System.nanoTime() - t0) / 1_000_000;
 
         // Sequential CPU: disable / re-solve / restore, per contingency. A fragmenting outage

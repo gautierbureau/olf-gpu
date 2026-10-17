@@ -93,8 +93,11 @@ class GpuBatchedGeneratorContingencyDsTest {
         // its P, flips b2 PV→PQ, and reweights the slack distribution onto g3.
         List<BatchContingency> conts = List.of(BatchContingency.generator("g2", net.getGeneratorById("g2")));
 
-        List<BatchScenarioResult> results = GpuBatchedSecurityAnalysisSolver.solveBatchN1(net, baseState, conts,
-                es, target, new NewtonRaphsonParameters(), 1e-10, true, false, ReportNode.NO_OP);
+        List<BatchScenarioResult> results = GpuBatchedSecurityAnalysisSolver.solveBatchN1(
+                BatchSolveRequest.of(net, baseState, conts, es, target, new NewtonRaphsonParameters(),
+                        ReportNode.NO_OP)
+                        .withTol(1e-10)
+                        .withOuterLoops(true, false));
 
         BatchScenarioResult rG2 = results.get(0);
         assertTrue(!rG2.needsCpuFallback() && rG2.hasConverged(),

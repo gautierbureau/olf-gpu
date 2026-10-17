@@ -79,8 +79,11 @@ class GpuBatchedShuntContingencyTest {
         // This network's CPU reference runs with distributedSlack=false and useReactiveLimits=false, so the
         // device must run NEITHER outer loop — declare both off (an enabled-by-capability outer loop would
         // retarget under the slack mismatch and diverge).
-        List<BatchScenarioResult> results = GpuBatchedSecurityAnalysisSolver.solveBatchN1(net, baseState, conts,
-                es, target, new NewtonRaphsonParameters(), TOL, false, false, ReportNode.NO_OP);
+        List<BatchScenarioResult> results = GpuBatchedSecurityAnalysisSolver.solveBatchN1(
+                BatchSolveRequest.of(net, baseState, conts, es, target, new NewtonRaphsonParameters(),
+                        ReportNode.NO_OP)
+                        .withTol(TOL)
+                        .withOuterLoops(false, false));
 
         BatchScenarioResult r = results.get(0);
         assertTrue(!r.needsCpuFallback() && r.hasConverged(),

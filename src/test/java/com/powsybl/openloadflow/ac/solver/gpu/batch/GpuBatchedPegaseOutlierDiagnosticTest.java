@@ -134,8 +134,11 @@ class GpuBatchedPegaseOutlierDiagnosticTest {
         double convEps = 1e-12;
         NewtonRaphsonParameters params = new NewtonRaphsonParameters().setMaxIterations(30);
         List<BatchScenarioResult> results = GpuBatchedSecurityAnalysisSolver.solveBatchN1(
-                network, baseState, conts, es, target, params, 1e-10, !NO_DS, !NO_RL,
-                convEps, SLACK_TOL_PU, convEps, ReportNode.NO_OP);
+                BatchSolveRequest.of(network, baseState, conts, es, target, params, ReportNode.NO_OP)
+                        .withTol(1e-10)
+                        .withOuterLoops(!NO_DS, !NO_RL)
+                        .withOuterLoopTolerances(convEps, SLACK_TOL_PU)
+                        .withConvEpsPerEq(convEps));
         BatchScenarioResult r = results.get(0);
         System.out.printf("%n=== %s === GPU status=%d, ||F||inf=%.2e, needsCpuFallback=%b%n",
                 CONT, r.convergenceStatus(), r.finalMismatch(), r.needsCpuFallback());

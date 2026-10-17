@@ -189,7 +189,8 @@ class GpuBatchedN1FixedIterTest {
         params.setMaxIterations(kE2E);
         long g0 = System.nanoTime();
         List<BatchScenarioResult> cold = GpuBatchedSecurityAnalysisSolver.solveBatchN1(
-                network, baseState, contingencies, es, target, params, TOL, ReportNode.NO_OP);
+                BatchSolveRequest.of(network, baseState, contingencies, es, target, params, ReportNode.NO_OP)
+                        .withTol(TOL));
         long gpuMs = (System.nanoTime() - g0) / 1_000_000;
         long cb = cold.stream().filter(b -> !b.needsCpuFallback()).count();
         String baseWhere = System.getenv("OLF_GPU_BASE_ON_GPU") != null ? "GPU" : "CPU";
@@ -276,7 +277,8 @@ class GpuBatchedN1FixedIterTest {
             GpuBatchContextCache.clearContextCache();
             long g0 = System.nanoTime();
             List<BatchScenarioResult> cold = GpuBatchedSecurityAnalysisSolver.solveBatchN1(
-                    network, baseState, contingencies, es, target, params, TOL, ReportNode.NO_OP);
+                    BatchSolveRequest.of(network, baseState, contingencies, es, target, params, ReportNode.NO_OP)
+                            .withTol(TOL));
             long gpuMs = (System.nanoTime() - g0) / 1_000_000;
             long cb = cold.stream().filter(b -> !b.needsCpuFallback()).count();
             String baseWhere = System.getenv("OLF_GPU_BASE_ON_GPU") != null ? "GPU" : "CPU";
@@ -291,11 +293,14 @@ class GpuBatchedN1FixedIterTest {
             params.setMaxIterations(k);
 
             // Warm-up (CUDA context + cuDSS analysis) so the timed run measures steady-state throughput.
-            GpuBatchedSecurityAnalysisSolver.solveBatchN1(network, baseState, contingencies, es, target, params, TOL, ReportNode.NO_OP);
+            GpuBatchedSecurityAnalysisSolver.solveBatchN1(
+                    BatchSolveRequest.of(network, baseState, contingencies, es, target, params, ReportNode.NO_OP)
+                            .withTol(TOL));
 
             long t0 = System.nanoTime();
             List<BatchScenarioResult> batch = GpuBatchedSecurityAnalysisSolver.solveBatchN1(
-                    network, baseState, contingencies, es, target, params, TOL, ReportNode.NO_OP);
+                    BatchSolveRequest.of(network, baseState, contingencies, es, target, params, ReportNode.NO_OP)
+                            .withTol(TOL));
             long ms = (System.nanoTime() - t0) / 1_000_000;
 
             long batched = batch.stream().filter(b -> !b.needsCpuFallback()).count();

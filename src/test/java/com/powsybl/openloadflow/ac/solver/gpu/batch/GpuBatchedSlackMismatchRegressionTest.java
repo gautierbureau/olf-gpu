@@ -74,8 +74,11 @@ class GpuBatchedSlackMismatchRegressionTest {
         List<BatchContingency> conts = List.of(new BatchContingency("l23", outaged));
         // distributedSlack=false, reactiveLimits=false: the free slack absorbs the whole mismatch; the device
         // must run NEITHER outer loop (the regressed bug ran distributed slack from participation alone).
-        List<BatchScenarioResult> results = GpuBatchedSecurityAnalysisSolver.solveBatchN1(net, baseState, conts,
-                es, target, new NewtonRaphsonParameters(), TOL, false, false, ReportNode.NO_OP);
+        List<BatchScenarioResult> results = GpuBatchedSecurityAnalysisSolver.solveBatchN1(
+                BatchSolveRequest.of(net, baseState, conts, es, target, new NewtonRaphsonParameters(),
+                        ReportNode.NO_OP)
+                        .withTol(TOL)
+                        .withOuterLoops(false, false));
         BatchScenarioResult r = results.get(0);
         assertTrue(!r.needsCpuFallback() && r.hasConverged(),
                 "the excess-generation branch contingency must solve on the device (status=" + r.convergenceStatus() + ")");

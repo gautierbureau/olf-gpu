@@ -172,8 +172,10 @@ class GpuBatchedPegaseFullLoadflowTest {
         // the slack tolerance stays slackBusPMaxMismatch/SB = 1e-2.
         double convEpsPerEq = 1e-12;
         List<BatchScenarioResult> results = GpuBatchedSecurityAnalysisSolver.solveBatchN1(
-                network, baseState, contingencies, es, target, params, TOL, true, true,
-                convEpsPerEq, SLACK_TOL_PU, convEpsPerEq, ReportNode.NO_OP);
+                BatchSolveRequest.of(network, baseState, contingencies, es, target, params, ReportNode.NO_OP)
+                        .withTol(TOL)
+                        .withOuterLoopTolerances(convEpsPerEq, SLACK_TOL_PU)
+                        .withConvEpsPerEq(convEpsPerEq));
 
         LoadFlow.Runner runner = new LoadFlow.Runner(new OpenLoadFlowProvider(new SparseMatrixFactory()));
 

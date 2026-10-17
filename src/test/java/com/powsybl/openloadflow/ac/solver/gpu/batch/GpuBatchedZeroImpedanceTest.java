@@ -93,8 +93,11 @@ class GpuBatchedZeroImpedanceTest {
             }
         }
 
-        List<BatchScenarioResult> results = GpuBatchedSecurityAnalysisSolver.solveBatchN1(net, baseState, conts,
-                es, target, new NewtonRaphsonParameters(), TOL, false, false, ReportNode.NO_OP);
+        List<BatchScenarioResult> results = GpuBatchedSecurityAnalysisSolver.solveBatchN1(
+                BatchSolveRequest.of(net, baseState, conts, es, target, new NewtonRaphsonParameters(),
+                        ReportNode.NO_OP)
+                        .withTol(TOL)
+                        .withOuterLoops(false, false));
 
         double worst = 0;
         int checked = 0;

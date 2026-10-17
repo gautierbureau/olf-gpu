@@ -23,6 +23,7 @@ import com.powsybl.openloadflow.ac.solver.gpu.batch.BatchConfig;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.BatchContingency;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.BatchScenarioResult;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchElementMapper;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.BatchSolveRequest;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchedSecurityAnalysisSolver;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.LoadLoss;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.ShuntShift;
@@ -390,9 +391,12 @@ final class GpuBatchPrecomputer {
                         baseState.length, com.powsybl.openloadflow.sa.gpu.GpuStateStore.thresholdBytes());
             }
             List<BatchScenarioResult> results = GpuBatchedSecurityAnalysisSolver.solveBatchN1(
-                    net, baseState, batch, es, target, deviceSolverParameters(context),
-                    distributedSlack, reactiveLimits,
-                    reactiveLimitTol, slackDistTol, convEpsPerEq, reportNode, config);
+                    BatchSolveRequest.of(net, baseState, batch, es, target, deviceSolverParameters(context),
+                            reportNode)
+                            .withOuterLoops(distributedSlack, reactiveLimits)
+                            .withOuterLoopTolerances(reactiveLimitTol, slackDistTol)
+                            .withConvEpsPerEq(convEpsPerEq)
+                            .withConfig(config));
             results = retryRejectedOnDevice(results, batch, net, baseState, es, target, context,
                     distributedSlack, reactiveLimits, reactiveLimitTol, slackDistTol, convEpsPerEq,
                     reportNode, config);
@@ -565,9 +569,12 @@ final class GpuBatchPrecomputer {
         List<BatchScenarioResult> retried;
         try {
             retried = GpuBatchedSecurityAnalysisSolver.solveBatchN1(
-                    net, baseState, retry, es, target, deviceSolverParameters(context),
-                    distributedSlack, reactiveLimits,
-                    reactiveLimitTol, slackDistTol, convEpsPerEq, reportNode, config.withRobustSolveMode());
+                    BatchSolveRequest.of(net, baseState, retry, es, target, deviceSolverParameters(context),
+                            reportNode)
+                            .withOuterLoops(distributedSlack, reactiveLimits)
+                            .withOuterLoopTolerances(reactiveLimitTol, slackDistTol)
+                            .withConvEpsPerEq(convEpsPerEq)
+                            .withConfig(config.withRobustSolveMode()));
         } catch (RuntimeException e) {
             // The retry is an OPTIONAL extra pass: a failure in it must not lose the first pass's
             // results, which are already correct for every scenario that converged.

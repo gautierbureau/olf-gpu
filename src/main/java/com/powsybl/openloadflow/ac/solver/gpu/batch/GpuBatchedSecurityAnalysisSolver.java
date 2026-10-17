@@ -17,7 +17,6 @@ import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcDataCache;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcDataExtractor;
 import com.powsybl.openloadflow.ac.solver.NewtonRaphsonParameters;
-import com.powsybl.openloadflow.ac.solver.gpu.GpuNewtonRaphson;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.TargetVector;
 import com.powsybl.openloadflow.network.LfBranch;
@@ -51,109 +50,6 @@ public final class GpuBatchedSecurityAnalysisSolver {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(GpuBatchedSecurityAnalysisSolver.class);
 
-    /**
-     * Solver for batched contingencies: given a base-case state and a list of
-     * single-branch contingencies, extract one batched GPU context and run all
-     * scenarios in a single Newton-Raphson loop.
-     *
-     * @param network         the AC network (base case)
-     * @param baseState       the converged base-case state vector
-     * @param contingencies   list of single-branch outages to analyze
-     * @param equationSystem  the base-case equation system
-     * @param targetVector    the base-case targets
-     * @param parameters      Newton-Raphson stopping criteria
-     * @param reportNode      for logging and diagnostics
-     * @return per-scenario results (state, iterations, convergence status)
-     */
-    public static List<BatchScenarioResult> solveBatchN1(LfNetwork network, double[] baseState,
-                                                         List<BatchContingency> contingencies,
-                                                         EquationSystem<AcVariableType, AcEquationType> equationSystem,
-                                                         TargetVector<AcVariableType, AcEquationType> targetVector,
-                                                         NewtonRaphsonParameters parameters,
-                                                         ReportNode reportNode) {
-        return solveBatchN1(network, baseState, contingencies, equationSystem, targetVector, parameters,
-                GpuNewtonRaphson.GPU_TOLERANCE, true, true, reportNode);
-    }
-
-    /**
-     * As {@link #solveBatchN1(LfNetwork, double[], List, EquationSystem, TargetVector, NewtonRaphsonParameters, ReportNode)}
-     * but with the run's actual outer loops declared. {@code distributedSlack} / {@code reactiveLimits} must
-     * match the outer loops OLF applied to the base case: the device runs the distributed-slack pass only when
-     * {@code distributedSlack} and the PV→PQ reactive-limits pass only when {@code reactiveLimits}, so a
-     * disabled outer loop is never run on the device. Passing the wrong flags diverges from the CPU under a
-     * non-trivial slack mismatch or a reactive-limit violation.
-     */
-    public static List<BatchScenarioResult> solveBatchN1(LfNetwork network, double[] baseState,
-                                                         List<BatchContingency> contingencies,
-                                                         EquationSystem<AcVariableType, AcEquationType> equationSystem,
-                                                         TargetVector<AcVariableType, AcEquationType> targetVector,
-                                                         NewtonRaphsonParameters parameters,
-                                                         boolean distributedSlack, boolean reactiveLimits,
-                                                         ReportNode reportNode) {
-        return solveBatchN1(network, baseState, contingencies, equationSystem, targetVector, parameters,
-                GpuNewtonRaphson.GPU_TOLERANCE, distributedSlack, reactiveLimits, reportNode);
-    }
-
-    /**
-     * As the {@code (distributedSlack, reactiveLimits)} overload but with the device outer-loop tolerances
-     * declared explicitly (per-unit) so the device aligns to the CPU loadflow's outer-loop criteria. Used by
-     * the production SA path, which reads them from the run's loadflow parameters.
-     */
-    public static List<BatchScenarioResult> solveBatchN1(LfNetwork network, double[] baseState,
-                                                         List<BatchContingency> contingencies,
-                                                         EquationSystem<AcVariableType, AcEquationType> equationSystem,
-                                                         TargetVector<AcVariableType, AcEquationType> targetVector,
-                                                         NewtonRaphsonParameters parameters,
-                                                         boolean distributedSlack, boolean reactiveLimits,
-                                                         double reactiveLimitTol, double slackDistTol,
-                                                         ReportNode reportNode) {
-        return solveBatchN1(network, baseState, contingencies, equationSystem, targetVector, parameters,
-                GpuNewtonRaphson.GPU_TOLERANCE, distributedSlack, reactiveLimits, reactiveLimitTol, slackDistTol,
-                reportNode);
-    }
-
-    /**
-     * As the {@code (reactiveLimitTol, slackDistTol)} overload but with an explicit {@code convEpsPerEq} for the
-     * device inner Newton (device tol defaults to {@link GpuNewtonRaphson#GPU_TOLERANCE} as the fixed-iter
-     * sentinel). {@code convEpsPerEq > 0} makes the device stop on OLF's exact {@code ‖F‖₂ < sqrt(convEpsPerEq²·n)}
-     * so its reactive-limit switch decisions are taken at the SAME convergence depth as the CPU — used by the
-     * production SA path so GPU and CPU agree beyond the outer-loop tolerance band.
-     */
-    public static List<BatchScenarioResult> solveBatchN1(LfNetwork network, double[] baseState,
-                                                         List<BatchContingency> contingencies,
-                                                         EquationSystem<AcVariableType, AcEquationType> equationSystem,
-                                                         TargetVector<AcVariableType, AcEquationType> targetVector,
-                                                         NewtonRaphsonParameters parameters,
-                                                         boolean distributedSlack, boolean reactiveLimits,
-                                                         double reactiveLimitTol, double slackDistTol,
-                                                         double convEpsPerEq, ReportNode reportNode) {
-        return solveBatchN1(network, baseState, contingencies, equationSystem, targetVector, parameters,
-                GpuNewtonRaphson.GPU_TOLERANCE, distributedSlack, reactiveLimits, reactiveLimitTol, slackDistTol,
-                convEpsPerEq, reportNode);
-    }
-
-    /**
-     * As {@link #solveBatchN1(LfNetwork, double[], List, EquationSystem, TargetVector, NewtonRaphsonParameters, ReportNode)}
-     * but with an explicit mismatch tolerance. Passing {@code tol <= 0} selects the native
-     * DEVICE-SIDE fixed-iteration mode: every scenario runs exactly {@code parameters.getMaxIterations()}
-     * Newton steps entirely on the device, with NO per-iteration mismatch copy back to the host and
-     * NO convergence retirement (the mismatch is read back once, at the end, only to report it).
-     * This is a fixed-iteration NR loop — it drops the per-iteration PCIe sync, so it is
-     * the fastest way to benchmark raw batched throughput. Tradeoff: a diverging scenario is not
-     * isolated and can poison a uniform-batched factorization, so use {@code tol > 0} when scenarios
-     * may diverge.
-     */
-    public static List<BatchScenarioResult> solveBatchN1(LfNetwork network, double[] baseState,
-                                                         List<BatchContingency> contingencies,
-                                                         EquationSystem<AcVariableType, AcEquationType> equationSystem,
-                                                         TargetVector<AcVariableType, AcEquationType> targetVector,
-                                                         NewtonRaphsonParameters parameters,
-                                                         double tol,
-                                                         ReportNode reportNode) {
-        return solveBatchN1(network, baseState, contingencies, equationSystem, targetVector, parameters,
-                tol, true, true, reportNode);
-    }
-
     /** OLF default outer-loop convergence tolerances (per-unit on the 100 MVA base): slackBusPMaxMismatch =
      *  1 MW → 1e-2 pu, maxReactivePowerMismatch = 1 MVAr → 1e-2/… → 1e-4 pu. The device uses these so its
      *  outer-loop fixed point matches the CPU loadflow's; a test wanting machine-precision agreement passes
@@ -162,97 +58,26 @@ public final class GpuBatchedSecurityAnalysisSolver {
     public static final double DEFAULT_SLACK_DIST_TOL = 1e-2;
 
     /**
-     * As {@link #solveBatchN1(LfNetwork, double[], List, EquationSystem, TargetVector, NewtonRaphsonParameters, double, boolean, boolean, ReportNode)}
-     * with the device outer-loop tolerances defaulting to OLF's ({@link #DEFAULT_REACTIVE_LIMIT_TOL} /
-     * {@link #DEFAULT_SLACK_DIST_TOL}).
+     * Solve the request's contingencies on the GPU: extract one batched context from the base case and run every
+     * scenario in one Newton-Raphson loop with the device outer loops the request declares.
+     *
+     * @return per-scenario results (state, iterations, convergence status)
      */
-    public static List<BatchScenarioResult> solveBatchN1(LfNetwork network, double[] baseState,
-                                                         List<BatchContingency> contingencies,
-                                                         EquationSystem<AcVariableType, AcEquationType> equationSystem,
-                                                         TargetVector<AcVariableType, AcEquationType> targetVector,
-                                                         NewtonRaphsonParameters parameters,
-                                                         double tol,
-                                                         boolean distributedSlack, boolean reactiveLimits,
-                                                         ReportNode reportNode) {
-        return solveBatchN1(network, baseState, contingencies, equationSystem, targetVector, parameters, tol,
-                distributedSlack, reactiveLimits, DEFAULT_REACTIVE_LIMIT_TOL, DEFAULT_SLACK_DIST_TOL, reportNode);
-    }
-
-    /**
-     * Lowest-level entry point. {@code reactiveLimitTol} / {@code slackDistTol} are the device outer-loop
-     * convergence tolerances (pu) — set them to the run's loadflow criteria (maxReactivePowerMismatch /
-     * slackBusPMaxMismatch, per-unitized) so the device runs the DS/RL outer loops to the SAME tolerance as
-     * the CPU. With matching parameters and the same equations the GPU and CPU outer-loop fixed points agree
-     * to the inner-Newton precision.
-     */
-    public static List<BatchScenarioResult> solveBatchN1(LfNetwork network, double[] baseState,
-                                                         List<BatchContingency> contingencies,
-                                                         EquationSystem<AcVariableType, AcEquationType> equationSystem,
-                                                         TargetVector<AcVariableType, AcEquationType> targetVector,
-                                                         NewtonRaphsonParameters parameters,
-                                                         double tol,
-                                                         boolean distributedSlack, boolean reactiveLimits,
-                                                         double reactiveLimitTol, double slackDistTol,
-                                                         ReportNode reportNode) {
-        return solveBatchN1(network, baseState, contingencies, equationSystem, targetVector, parameters, tol,
-                distributedSlack, reactiveLimits, reactiveLimitTol, slackDistTol, 0.0, reportNode);
-    }
-
-    /**
-     * As the lowest {@code (reactiveLimitTol, slackDistTol)} overload but with an explicit {@code convEpsPerEq}:
-     * when {@code > 0} the device inner-Newton stops on OLF's EXACT criterion
-     * ({@code DefaultNewtonRaphsonStoppingCriteria}: {@code ‖F‖₂ < sqrt(convEpsPerEq² · n)}) instead of the
-     * {@code tol} infinity-norm floor — so a batched SA can be run with the SAME stopping decision as the CPU
-     * loadflow for an apples-to-apples GPU-vs-CPU timing comparison. {@code convEpsPerEq <= 0} keeps the
-     * infinity-norm floor (the default the correctness/parity tests rely on).
-     */
-    public static List<BatchScenarioResult> solveBatchN1(LfNetwork network, double[] baseState,
-                                                         List<BatchContingency> contingencies,
-                                                         EquationSystem<AcVariableType, AcEquationType> equationSystem,
-                                                         TargetVector<AcVariableType, AcEquationType> targetVector,
-                                                         NewtonRaphsonParameters parameters,
-                                                         double tol,
-                                                         boolean distributedSlack, boolean reactiveLimits,
-                                                         double reactiveLimitTol, double slackDistTol,
-                                                         double convEpsPerEq,
-                                                         ReportNode reportNode) {
-        // Non-provider callers (tests, direct use) get the device defaults — the per-call BatchConfig
-        // replaces the former JVM-global statics, so no run can inherit another's config.
-        return solveBatchN1(network, baseState, contingencies, equationSystem, targetVector, parameters, tol,
-                distributedSlack, reactiveLimits, reactiveLimitTol, slackDistTol, convEpsPerEq, reportNode,
-                BatchConfig.DEVICE_DEFAULTS);
-    }
-
-    /** As the no-{@code tol} / {@code convEpsPerEq} overload but carrying the run's {@link BatchConfig}
-     *  (outer-loop parameterization). This is the entry point {@link
-     *  com.powsybl.openloadflow.sa.gpu.GpuBatchedAcSecurityAnalysis} uses; it defaults {@code tol} to the
-     *  GPU tolerance floor, exactly like the matching provider-facing overload without a config. */
-    public static List<BatchScenarioResult> solveBatchN1(LfNetwork network, double[] baseState,
-                                                         List<BatchContingency> contingencies,
-                                                         EquationSystem<AcVariableType, AcEquationType> equationSystem,
-                                                         TargetVector<AcVariableType, AcEquationType> targetVector,
-                                                         NewtonRaphsonParameters parameters,
-                                                         boolean distributedSlack, boolean reactiveLimits,
-                                                         double reactiveLimitTol, double slackDistTol,
-                                                         double convEpsPerEq, ReportNode reportNode,
-                                                         BatchConfig config) {
-        return solveBatchN1(network, baseState, contingencies, equationSystem, targetVector, parameters,
-                GpuNewtonRaphson.GPU_TOLERANCE, distributedSlack, reactiveLimits, reactiveLimitTol, slackDistTol,
-                convEpsPerEq, reportNode, config);
-    }
-
-    /** Terminal implementation carrying the per-call {@link BatchConfig}. */
-    public static List<BatchScenarioResult> solveBatchN1(LfNetwork network, double[] baseState,
-                                                         List<BatchContingency> contingencies,
-                                                         EquationSystem<AcVariableType, AcEquationType> equationSystem,
-                                                         TargetVector<AcVariableType, AcEquationType> targetVector,
-                                                         NewtonRaphsonParameters parameters,
-                                                         double tol,
-                                                         boolean distributedSlack, boolean reactiveLimits,
-                                                         double reactiveLimitTol, double slackDistTol,
-                                                         double convEpsPerEq,
-                                                         ReportNode reportNode,
-                                                         BatchConfig config) {
+    public static List<BatchScenarioResult> solveBatchN1(BatchSolveRequest request) {
+        LfNetwork network = request.network();
+        double[] baseState = request.baseState();
+        List<BatchContingency> contingencies = request.contingencies();
+        EquationSystem<AcVariableType, AcEquationType> equationSystem = request.equationSystem();
+        TargetVector<AcVariableType, AcEquationType> targetVector = request.targetVector();
+        NewtonRaphsonParameters parameters = request.parameters();
+        double tol = request.tol();
+        boolean distributedSlack = request.distributedSlack();
+        boolean reactiveLimits = request.reactiveLimits();
+        double reactiveLimitTol = request.reactiveLimitTol();
+        double slackDistTol = request.slackDistTol();
+        double convEpsPerEq = request.convEpsPerEq();
+        ReportNode reportNode = request.reportNode();
+        BatchConfig config = request.config();
         Objects.requireNonNull(network);
         Objects.requireNonNull(config);
         Objects.requireNonNull(baseState);

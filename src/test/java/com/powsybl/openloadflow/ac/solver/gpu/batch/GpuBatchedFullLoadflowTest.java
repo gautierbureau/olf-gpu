@@ -104,10 +104,10 @@ class GpuBatchedFullLoadflowTest {
         }
         // Drive the device inner Newton tight (1e-10); outer-loop tolerances stay at OLF defaults (1e-2 slack,
         // 1e-4 reactive) so the device and the CPU reference run the SAME outer loops.
-        List<BatchScenarioResult> results = GpuBatchedSecurityAnalysisSolver.solveBatchN1(net, baseState, conts,
-                es, target, new NewtonRaphsonParameters().setMaxIterations(MAX_ITER), 1e-10, true, true,
-                GpuBatchedSecurityAnalysisSolver.DEFAULT_REACTIVE_LIMIT_TOL,
-                GpuBatchedSecurityAnalysisSolver.DEFAULT_SLACK_DIST_TOL, ReportNode.NO_OP);
+        List<BatchScenarioResult> results = GpuBatchedSecurityAnalysisSolver.solveBatchN1(
+                BatchSolveRequest.of(net, baseState, conts, es, target,
+                        new NewtonRaphsonParameters().setMaxIterations(MAX_ITER), ReportNode.NO_OP)
+                        .withTol(1e-10));
 
         LoadFlow.Runner runner = new LoadFlow.Runner(new OpenLoadFlowProvider(new DenseMatrixFactory()));
         LoadFlowParameters lfp = new LoadFlowParameters().setUseReactiveLimits(true).setDistributedSlack(true);

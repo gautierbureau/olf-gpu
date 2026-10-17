@@ -82,8 +82,9 @@ class GpuBatchedIslandingTest {
         double[] baseState = sv.get().clone();
 
         LfBranch radial = net.getBranchById("l34");
-        List<BatchScenarioResult> results = GpuBatchedSecurityAnalysisSolver.solveBatchN1(net, baseState,
-                List.of(new BatchContingency("c-l34", radial)), es, target, new NewtonRaphsonParameters(), ReportNode.NO_OP);
+        List<BatchScenarioResult> results = GpuBatchedSecurityAnalysisSolver.solveBatchN1(
+                BatchSolveRequest.of(net, baseState, List.of(new BatchContingency("c-l34", radial)), es, target,
+                        new NewtonRaphsonParameters(), ReportNode.NO_OP));
 
         assertTrue(results.size() == 1, "one scenario");
         BatchScenarioResult r = results.get(0);

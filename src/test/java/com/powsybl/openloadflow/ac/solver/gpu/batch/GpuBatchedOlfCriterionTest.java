@@ -100,10 +100,11 @@ class GpuBatchedOlfCriterionTest {
     private static BatchScenarioResult solve(LfNetwork net, double[] baseState, List<BatchContingency> conts,
                                              EquationSystem<AcVariableType, AcEquationType> es,
                                              AcTargetVector target, double convEpsPerEq) {
-        List<BatchScenarioResult> r = GpuBatchedSecurityAnalysisSolver.solveBatchN1(net, baseState, conts, es, target,
-                new NewtonRaphsonParameters().setMaxIterations(MAX_ITER), 1e-10, true, true,
-                GpuBatchedSecurityAnalysisSolver.DEFAULT_REACTIVE_LIMIT_TOL,
-                GpuBatchedSecurityAnalysisSolver.DEFAULT_SLACK_DIST_TOL, convEpsPerEq, ReportNode.NO_OP);
+        List<BatchScenarioResult> r = GpuBatchedSecurityAnalysisSolver.solveBatchN1(
+                BatchSolveRequest.of(net, baseState, conts, es, target,
+                        new NewtonRaphsonParameters().setMaxIterations(MAX_ITER), ReportNode.NO_OP)
+                        .withTol(1e-10)
+                        .withConvEpsPerEq(convEpsPerEq));
         BatchScenarioResult res = r.get(0);
         assumeTrue(!res.needsCpuFallback(), "L1-2-1 must batch on the device");
         return res;

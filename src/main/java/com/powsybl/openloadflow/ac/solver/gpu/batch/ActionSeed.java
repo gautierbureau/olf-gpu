@@ -26,11 +26,11 @@ final class ActionSeed {
 
     /** Seed slot {@code s} (contingency index {@code ci}) with its recloses, tap overrides and shunt shifts. */
     static void seed(SlotSeeding ctx, int s, int ci) {
-        int[] baseRowMode = ctx.baseRowMode();
-        List<BatchContingency> contingencies = ctx.contingencies();
-        GpuBatchElementMapper elementMapper = ctx.elementMapper();
-        GpuAcData gpuData = ctx.gpuData();
-        RunScratch rs = ctx.rs();
+        final int[] baseRowMode = ctx.baseRowMode();
+        final List<BatchContingency> contingencies = ctx.contingencies();
+        final GpuBatchElementMapper elementMapper = ctx.elementMapper();
+        final GpuAcData gpuData = ctx.gpuData();
+        final RunScratch rs = ctx.rs();
         for (LfBranch reclosed : contingencies.get(ci).reclosedBranches()) {
             if (reclosed.isZeroImpedance(com.powsybl.openloadflow.network.LoadFlowModel.AC)) {
                 Integer ze = rs.ziElemByBranchNumChunk.get(reclosed.getNum());

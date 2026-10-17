@@ -27,16 +27,16 @@ final class GenOutageSeed {
     /** Seed slot {@code s} (contingency index {@code ci}) from its plan entries {@code slotGos}; the rows in
      *  {@code pilotBalanceRows} host a pilot's relocated reactive balance in this scenario. */
     static void seed(SlotSeeding ctx, int s, int ci, GenOutage[] slotGos, gnu.trove.set.hash.TIntHashSet pilotBalanceRows) {
-        int chunkSize = ctx.chunkSize();
-        int n = ctx.n();
-        GpuAcData gpuData = ctx.gpuData();
-        List<BatchContingency> contingencies = ctx.contingencies();
-        double[] baseTargets = ctx.baseTargets();
-        int[] baseRowMode = ctx.baseRowMode();
-        GpuBatchRlCurves.Channel rlCurves = ctx.rlCurves();
-        java.util.Map<Integer, int[]> curveEntriesByPRow = ctx.curveEntriesByPRow();
-        RunScratch rs = ctx.rs();
-        ChunkLists cl = ctx.cl();
+        final int chunkSize = ctx.chunkSize();
+        final int n = ctx.n();
+        final GpuAcData gpuData = ctx.gpuData();
+        final List<BatchContingency> contingencies = ctx.contingencies();
+        final double[] baseTargets = ctx.baseTargets();
+        final int[] baseRowMode = ctx.baseRowMode();
+        final GpuBatchRlCurves.Channel rlCurves = ctx.rlCurves();
+        final java.util.Map<Integer, int[]> curveEntriesByPRow = ctx.curveEntriesByPRow();
+        final RunScratch rs = ctx.rs();
+        final ChunkLists cl = ctx.cl();
         GenOutage[] gos = slotGos;
         if (gos != null) {               // generator loss(es): per-BUS target overrides (merged by bus;
             for (GenOutage go : gos) {   // at most one DS-participant bus per contingency by construction)

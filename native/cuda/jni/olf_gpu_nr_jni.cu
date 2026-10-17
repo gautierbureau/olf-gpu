@@ -80,6 +80,7 @@ using namespace powsybl::openloadflow;
 #include "solver/batch_context.cuh"
 #include "solver/driver_pass.cuh"
 #include "solver/driver_steps.cuh"
+#include "equations/branch_fill.cuh"
 #include "outerloop/reactive_limits.cuh"
 #include "outerloop/reactive_limits_seed.cuh"
 #include "outerloop/reactive_capability_curves.cuh"
@@ -369,140 +370,21 @@ static RelocTables ziRelocOf(SharedStructure* st) {
 // every row factorizable). Converged scenarios retire from the batch (an active mask),
 // so the per-iteration cost shrinks as scenarios finish.
 //
-// cuDSS (OLF_GPU_BATCHED_CUDSS, default on for cuDSS >= 0.3.0): the UNIFORM BATCHED API —
-// one batch CSR matrix whose scenarios share the rowPtr/colIdx pattern with per-scenario
-// value sets, batched dense B/X. ANALYSIS runs ONCE on the shared pattern; each Newton
-// iteration is ONE batched FACTORIZATION + ONE batched SOLVE over all scenarios. Retired
-// scenarios (converged/diverged) are frozen to an identity system so a singular sub-block
-// never fails the batch. On older cuDSS the fallback path repoints a single matrix and
-// refactorizes+solves per scenario. Either way the symbolic analysis — the dominant
-// per-case cost in sequential SA — is amortized over the entire contingency set.
+// cuDSS: in the default UBATCH mode one per-block CSR whose scenarios share the rowPtr/colIdx pattern with
+// per-scenario value sets. ANALYSIS runs ONCE per context on the shared pattern; each Newton iteration is ONE
+// batched FACTORIZATION + ONE batched SOLVE over all scenarios. Retired scenarios (converged/diverged) are frozen
+// to an identity system so a singular sub-block never fails the batch. The robust mode repoints a single matrix
+// and factorizes per scenario. Either way the symbolic analysis is amortized over the entire contingency set.
 // =================================================================================
 
-// Batched fill kernels: thread = element x scenario. Skip if the scenario has retired
-// (converged) or the element is outaged in that scenario. Values/mismatch are per-scenario.
 }  // namespace olfgpu
 
 #include "equations/scenario_overrides.cuh"
 
 namespace olfgpu {
 
-__global__ void fillClosedBranchBatch(int ne, int nScenarios, int n, int nnz, int nElements, int elemOffset,
-                                      const double* in, const int* ix, const int* dest,
-                                      const double* x, double* vals, double* F,
-                                      const char* disabled, const char* active,
-                                      int nR1Ov, const int* r1OvSlotElem, const double* r1OvVal,
-                                      const int* altDest, const int* selRow, const int* mode, int dynReloc,
-                                      const int* pcDest, const int* pcSel, RelocTables rt) {
-    int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= ne * nScenarios) return;
-    int e = tid % ne;
-    int s = tid / ne;
-    if (!active[s] || disabled[s * nElements + elemOffset + e]) return;
-    const double* p = in + e * 8;                            // y g1 g2 b1 b2 ksi r1 a1
-    const int* q = ix + e * 12;                              // P1 Q1 P2 Q2 ph1 v1 ph2 v2 a1col r1col
-    double pOv[8];
-    if (findTapOverride(nR1Ov, r1OvSlotElem, r1OvVal, s, e, pOv)) {
-        p = pOv;
-    }
-    const double* xs = x + s * n;
-    double v1 = xs[q[5]], v2 = xs[q[7]], ph1 = xs[q[4]], ph2 = xs[q[6]];
-    double r1 = q[9] >= 0 ? xs[q[9]] : p[6];
-    double a1 = q[8] >= 0 ? xs[q[8]] : p[7];
-    // OLF's own form (AcNetworkVector takes sin and cos of theta1 / theta2 directly). Every closed-branch fill -
-    // this one, the F-only fill and the bus-balance fill - goes through the same generated assembler, so their
-    // residuals agree bit for bit. The F-only fill used to derive the angles by angle addition from per-branch
-    // statics: faster, but another rounding than OLF's.
-    double o[CB_NOUT];
-    evalClosedBranch(p[0], p[1], p[2], p[3], p[4], v1, r1, v2, p[5], a1, ph1, ph2, 0,
-                     o + 0, o + 1, o + 2, o + 3, o + 4, o + 5, o + 6, o + 7, o + 8, o + 9,
-                     o + 10, o + 11, o + 12, o + 13, o + 14, o + 15, o + 16, o + 17, o + 18,
-                     o + 19, o + 20, o + 21, o + 22, o + 23, o + 24, o + 25, o + 26, o + 27);
-    if (dynReloc) {
-        scatterAddDyn(CB_NOUT, dest + e * CB_NOUT, altDest + e * CB_NOUT, selRow + e * CB_NOUT,
-                      mode + (size_t) s * n, o, vals + (size_t) s * nnz, F + (size_t) s * n,
-                      relocForScenario(rt, s), e * CB_NOUT);
-    } else {
-        scatterAdd(CB_NOUT, dest + e * CB_NOUT, o, vals + (size_t) s * nnz, F + (size_t) s * n);
-    }
-    if (pcDest != nullptr) {                                 // continuous phase control: emit the controlled
-        const int* pd = pcDest + e * CB_NOUT;                // side's P outputs AGAIN at the a1 row when this
-        const int* psl = pcSel + e * CB_NOUT;                // scenario has the control enabled (row mode 3)
-        for (int k = 0; k < CB_NOUT; k++) {
-            int d = pd[k];
-            if (d == -1 || mode[(size_t) s * n + psl[k]] != 3) {
-                continue;
-            }
-            if (d >= 0) {
-                atomicAdd(vals + (size_t) s * nnz + d, o[k]);
-            } else {
-                atomicAdd(F + (size_t) s * n + (-2 - d), o[k]);
-            }
-        }
-    }
-}
 
-// The fused fill's residual half alone, for the reactive-limit / slack Q buffer: evalClosedBranchF evaluates
-// p1 q1 p2 q2 from the SAME generated expressions and raw-angle trig as evalClosedBranch (bit-identical), with
-// the frozen routing (dynReloc 0, no phase-control re-emission) and no Jacobian at all - neither its 24
-// derivatives nor their atomics.
-__global__ void fillClosedBranchQbufBatch(int ne, int nScenarios, int n, int nElements, int elemOffset,
-                                          const double* in, const int* ix, const int* dest,
-                                          const double* x, double* F, const char* disabled, const char* active,
-                                          int nR1Ov, const int* r1OvSlotElem, const double* r1OvVal) {
-    int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= ne * nScenarios) return;
-    int e = tid % ne;
-    int s = tid / ne;
-    if (!active[s] || disabled[s * nElements + elemOffset + e]) return;
-    const double* p = in + e * 8;                            // y g1 g2 b1 b2 ksi r1 a1
-    const int* q = ix + e * 12;
-    double pOv[8];
-    if (findTapOverride(nR1Ov, r1OvSlotElem, r1OvVal, s, e, pOv)) {
-        p = pOv;
-    }
-    const double* xs = x + s * n;
-    double v1 = xs[q[5]], v2 = xs[q[7]], ph1 = xs[q[4]], ph2 = xs[q[6]];
-    double r1 = q[9] >= 0 ? xs[q[9]] : p[6];
-    double a1 = q[8] >= 0 ? xs[q[8]] : p[7];
-    double o[4];                                             // p1 q1 p2 q2: evalClosedBranch's own expressions
-    evalClosedBranchF(p[0], p[1], p[2], p[3], p[4], v1, r1, v2, p[5], a1, ph1, ph2, 0, o + 0, o + 1, o + 2, o + 3);
-    const int pos[4] = {0, 7, 14, 21};                       // their output slots (static_assert-pinned below)
-    const int* d = dest + e * CB_NOUT;
-    for (int k = 0; k < 4; k++) {
-        if (d[pos[k]] <= -2) {
-            atomicAdd(F + (size_t) s * n + (-2 - d[pos[k]]), o[k]);
-        }
-    }
-}
 
-__global__ void fillOpenBranchBatch(int ne, int nScenarios, int n, int nnz, int nElements, int elemOffset,
-                                    const double* in, const int* ix, const int* dest,
-                                    const double* x, double* vals, double* F,
-                                    const char* disabled, const char* active,
-                                    const int* altDest, const int* selRow, const int* mode, int dynReloc,
-                                    RelocTables rt) {
-    int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= ne * nScenarios) return;
-    int e = tid % ne;
-    int s = tid / ne;
-    if (!active[s] || disabled[s * nElements + elemOffset + e]) return;
-    const double* p = in + e * 7;                            // y ksi g1 b1 g2 b2 r1
-    const int* q = ix + e * 6;
-    const double* xs = x + s * n;
-    double v1 = q[4] >= 0 ? xs[q[4]] : 1.0;
-    double v2 = q[5] >= 0 ? xs[q[5]] : 1.0;
-    double o[OB_NOUT];
-    evalOpenBranch(p[0], p[1], p[2], p[3], p[4], p[5], v1, p[6], v2, 0,
-                   o + 0, o + 1, o + 2, o + 3, o + 4, o + 5, o + 6, o + 7);
-    if (dynReloc) {
-        scatterAddDyn(OB_NOUT, dest + e * OB_NOUT, altDest + e * OB_NOUT, selRow + e * OB_NOUT,
-                      mode + (size_t) s * n, o, vals + (size_t) s * nnz, F + (size_t) s * n,
-                      relocForScenario(rt, s), e * OB_NOUT);
-    } else {
-        scatterAdd(OB_NOUT, dest + e * OB_NOUT, o, vals + (size_t) s * nnz, F + (size_t) s * n);
-    }
-}
 
 __global__ void fillShuntBatch(int ne, int nScenarios, int n, int nnz, int nElements, int elemOffset,
                                const double* in, const int* ix, const int* dest,
@@ -560,100 +442,7 @@ __global__ void fillHvdcBatch(int ne, int nScenarios, int n, int nnz, int nEleme
     }
 }
 
-// Batched DISTR_Q fill: one thread per (contribution, scenario). Each contribution is a closed
-// branch's side-s reactive flow (value + the 5 derivatives), scaled by the controller weight; x/vals/F are
-// strided per scenario, and the kernel DROPS a contribution whose underlying closed (kind 0) / open (kind 2)
-// branch is outaged in this scenario — matching the CPU, which removes that branch's q from the controller's
-// reactive sum (the controller weight qPercent is unchanged, so only the term vanishes). kinds 1 (shunt) and
-// 3 (zero-imp dummy) cannot be a single-branch contingency in a qualified batched scenario, so no mask check.
-// ---------------------------------------------------------------------------------
-// F-ONLY batch fills: evaluate just the residual values (the generated eval<X>F
-// routines) and scatter only the F rows — for iterations that never consume the
-// Jacobian (the final residual/convergence fill, and mode 4's solve-only
-// iterations where the factors are frozen at iter 0). The residual positions in
-// each family's dest stride are pinned to the generated scatter tables by
-// static_asserts, so a codegen output-order change fails the build loudly.
-// ---------------------------------------------------------------------------------
 
-static_assert(CB_SCATTER[0].role == 0 && CB_SCATTER[7].role == 0
-           && CB_SCATTER[14].role == 0 && CB_SCATTER[21].role == 0,
-              "closed-branch residual outputs moved — update fillClosedBranchBatchF");
-static_assert(OB_SCATTER[0].role == 0 && OB_SCATTER[2].role == 0
-           && OB_SCATTER[4].role == 0 && OB_SCATTER[6].role == 0,
-              "open-branch residual outputs moved — update fillOpenBranchBatchF");
-static_assert(SH_SCATTER[0].role == 0 && SH_SCATTER[2].role == 0,
-              "shunt residual outputs moved — update fillShuntBatchF");
-static_assert(HVDC_SCATTER[0].role == 0 && HVDC_SCATTER[3].role == 0,
-              "hvdc residual outputs moved — update fillHvdcBatchF");
-
-__global__ void fillClosedBranchBatchF(int ne, int nScenarios, int n, int nnz, int nElements, int elemOffset,
-                                       const double* in, const int* ix, const int* dest,
-                                       const double* x, double* F,
-                                       const char* disabled, const char* active,
-                                       int nR1Ov, const int* r1OvSlotElem, const double* r1OvVal,
-                                       const int* altDest, const int* selRow, const int* mode, int dynReloc,
-                                       const int* pcDest, const int* pcSel, RelocTables rt) {
-    int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= ne * nScenarios) return;
-    int e = tid % ne;
-    int s = tid / ne;
-    if (!active[s] || disabled[s * nElements + elemOffset + e]) return;
-    const double* p = in + e * 8;                            // y g1 g2 b1 b2 ksi r1 a1
-    const int* q = ix + e * 12;                              // P1 Q1 P2 Q2 ph1 v1 ph2 v2 a1col r1col
-    double pOv[8];
-    bool tapOv = findTapOverride(nR1Ov, r1OvSlotElem, r1OvVal, s, e, pOv);
-    if (tapOv) {
-        p = pOv;
-    }
-    const double* xs = x + s * n;
-    double v1 = xs[q[5]], v2 = xs[q[7]], ph1 = xs[q[4]], ph2 = xs[q[6]];
-    double r1 = q[9] >= 0 ? xs[q[9]] : p[6];
-    double a1 = q[8] >= 0 ? xs[q[8]] : p[7];
-    double o[4];                                             // p1 q1 p2 q2: the fused fill's own expressions
-    evalClosedBranchF(p[0], p[1], p[2], p[3], p[4], v1, r1, v2, p[5], a1, ph1, ph2, 0, o + 0, o + 1, o + 2, o + 3);
-    const int pos[4] = {0, 7, 14, 21};
-    if (dynReloc) {
-        scatterAddFDyn(4, dest + e * CB_NOUT, altDest + e * CB_NOUT, selRow + e * CB_NOUT,
-                       pos, mode + (size_t) s * n, o, F + (size_t) s * n, rt, e * CB_NOUT);
-    } else {
-        scatterAddF(4, dest + e * CB_NOUT, pos, o, F + (size_t) s * n);
-    }
-    if (pcDest != nullptr) {                                 // continuous phase control: the P residual at a1
-        for (int j = 0; j < 4; j += 2) {                     // outputs 0 (p1) / 2 (p2) at table pos 0 / 14
-            int d = pcDest[e * CB_NOUT + pos[j]];
-            if (d < -1 && mode[(size_t) s * n + pcSel[e * CB_NOUT + pos[j]]] == 3) {
-                atomicAdd(F + (size_t) s * n + (-2 - d), o[j]);
-            }
-        }
-    }
-}
-
-__global__ void fillOpenBranchBatchF(int ne, int nScenarios, int n, int nnz, int nElements, int elemOffset,
-                                     const double* in, const int* ix, const int* dest,
-                                     const double* x, double* F,
-                                     const char* disabled, const char* active,
-                                     const int* altDest, const int* selRow, const int* mode, int dynReloc,
-                                     RelocTables rt) {
-    int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= ne * nScenarios) return;
-    int e = tid % ne;
-    int s = tid / ne;
-    if (!active[s] || disabled[s * nElements + elemOffset + e]) return;
-    const double* p = in + e * 7;                            // y ksi g1 b1 g2 b2 r1
-    const int* q = ix + e * 6;
-    const double* xs = x + s * n;
-    double v1 = q[4] >= 0 ? xs[q[4]] : 1.0;
-    double v2 = q[5] >= 0 ? xs[q[5]] : 1.0;
-    double o[4];
-    evalOpenBranchF(p[0], p[1], p[2], p[3], p[4], p[5], v1, p[6], v2, 0, o + 0, o + 1, o + 2, o + 3);
-    const int pos[4] = {0, 2, 4, 6};
-    if (dynReloc) {
-        scatterAddFDyn(4, dest + e * OB_NOUT, altDest + e * OB_NOUT, selRow + e * OB_NOUT,
-                       pos, mode + (size_t) s * n, o, F + (size_t) s * n, rt, e * OB_NOUT);
-    } else {
-        scatterAddF(4, dest + e * OB_NOUT, pos, o, F + (size_t) s * n);
-    }
-}
 
 // Voltage-dependent load model terms (OLF AbstractLoadModelEquationTerm): per entry e,
 // F[row] += coef*v^n and J[(row, vOwn)] += coef*n*v^(n-1), coef = c_n * load target (pu),

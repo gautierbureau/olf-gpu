@@ -120,6 +120,7 @@ add_library(olfgpu SHARED
     native/cuda/jni/solver/realistic_voltage_check.cu
     native/cuda/jni/solver/zero_diagonal_repair.cu
     native/cuda/jni/solver/iterative_refinement.cu
+    native/cuda/jni/solver/compact_solve.cu
 )
 target_include_directories(olfgpu
     PRIVATE

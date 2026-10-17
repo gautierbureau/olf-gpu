@@ -80,6 +80,7 @@ using namespace powsybl::openloadflow;
 #include "solver/batch_context.cuh"
 #include "solver/driver_pass.cuh"
 #include "solver/driver_steps.cuh"
+#include "solver/compact_solve.cuh"
 #include "solver/iterative_refinement.cuh"
 #include "solver/zero_diagonal_repair.cuh"
 #include "solver/realistic_voltage_check.cuh"
@@ -260,23 +261,7 @@ namespace olfgpu {
 
 
 
-// Batch COMPACTION (solve-only): gather the active scenarios' per-scenario blocks into a
-// contiguous compact buffer (dst[c*per+i] = src[map[c]*per+i]) so cuDSS runs a NARROWER ubatch,
-// then scatter the solution back to the full-width slots. Everything else (fills, norms,
-// updates) stays full-width — retirement already makes those cheap; cuDSS width was the cost.
-__global__ void gatherScenarios(long per, int nC, const int* map, const double* src, double* dst) {
-    long i = (long) blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= per * nC) return;
-    int c = (int) (i / per);
-    dst[i] = src[(long) map[c] * per + i % per];
-}
 
-__global__ void scatterScenarios(long per, int nReal, const int* map, const double* srcC, double* dst) {
-    long i = (long) blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= per * nReal) return;                             // pad slots (c >= nReal) are DISCARDED
-    int c = (int) (i / per);
-    dst[(long) map[c] * per + i % per] = srcC[i];
-}
 
 // Tile the base row (row 0, already in d[0..n)) across all nS scenarios: d[s*n+i] = d[i] for
 // s in 1..nS-1. The base state/targets/row-mode are identical for every contingency, so the host
@@ -289,14 +274,6 @@ __global__ void tileBaseRow(int total, int n, T* d) {
     }
 }
 
-// Put nRows compact rows (src, row-major, n each) at their scenario slots of a [nS][n] buffer.
-__global__ void scatterRowsInt(int nRows, int n, const int* slots, const int* src, int* dst) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < nRows * n) {
-        int r = idx / n;
-        dst[(size_t) slots[r] * n + idx % n] = src[idx];
-    }
-}
 
 
 }  // namespace olfgpu

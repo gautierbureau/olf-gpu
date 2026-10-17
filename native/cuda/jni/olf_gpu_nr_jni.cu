@@ -77,6 +77,9 @@ using namespace powsybl::openloadflow;
 #include "common/check.cuh"
 #include "common/launch.cuh"
 #include "solver/linear_solver_settings.cuh"
+#include "solver/batch_context.cuh"
+#include "solver/driver_pass.cuh"
+#include "solver/driver_steps.cuh"
 
 #include "structure/csr_pattern.cuh"
 
@@ -86,7 +89,9 @@ namespace olfgpu {
 // Device: the four family fill kernels + the loop helpers
 // ---------------------------------------------------------------------------------
 
+}  // namespace olfgpu
 #include "equations/scatter.cuh"
+namespace olfgpu {
 
 __global__ void fillVdlBatch(int ne, int nScenarios, int n, int nnz,
                              const double* in, const int* ix, const int* dest,
@@ -197,11 +202,9 @@ __global__ void hazRepairRhs(int nHaz, int nS, int n, const int* hazRow, const i
 // network.xiidm busbar ADNO re-couples three loop couplers of a hub, and two of their ZERO_V rows borrowed the hub's
 // P balance: the pivoted factorization of that repaired matrix failed as badly as the unpivoted one (ratio 5e21),
 // while the raw matrix converged to the CPU's answer.
-struct BatchSolverContext;
 static bool repairsZeroDiagonals(const BatchSolverContext* ctx);
 
-template <typename Ctx>
-static void hazRepairValues(Ctx* ctx, int nS, double* vals) {
+void hazRepairValues(BatchSolverContext* ctx, int nS, double* vals) {
     auto* st = ctx->st.get();
     if (st->nHaz == 0 || !repairsZeroDiagonals(ctx)) return;
     if (ctx->hazCap < nS) {
@@ -222,8 +225,7 @@ static void hazRepairValues(Ctx* ctx, int nS, double* vals) {
 
 /** The same combination on a right-hand side (nS scenarios from {@code B}, choices from the last
  *  hazRepairValues on this context; {@code sOff} selects the scenario block for a per-scenario call). */
-template <typename Ctx>
-static void hazRepairRightHandSide(Ctx* ctx, int nS, double* B, int sOff = 0) {
+void hazRepairRightHandSide(BatchSolverContext* ctx, int nS, double* B, int sOff) {
     auto* st = ctx->st.get();
     if (st->nHaz == 0 || ctx->hazCap < sOff + nS || !repairsZeroDiagonals(ctx)) return;
     int n = st->n;
@@ -234,15 +236,6 @@ static void hazRepairRightHandSide(Ctx* ctx, int nS, double* B, int sOff = 0) {
             ctx->dHazChoice.template as<int>() + (size_t) sOff * st->nHaz, bsnap, B);
 }
 
-// OLF_GPU_REJECT_TRACE=1: WHY a scenario left the batch for the CPU replay (status -2). The census
-// counts them under one tag ("RUNTIME:status=-2"); this names the gate, per slot, so the Java side
-// can pair it with the contingency id (GpuBatchPrecomputer prints the id under the same switch).
-static inline void traceReject(int slot, const char* reason, int outer, int it) {
-    static const bool on = std::getenv("OLF_GPU_REJECT_TRACE") != nullptr;
-    if (on) {
-        std::fprintf(stderr, "GPU_REJECT slot=%d reason=%s outer=%d it=%d\n", slot, reason, outer, it);
-    }
-}
 
 // A linear solve whose residual ratio ||J.dx-B|| / ||F|| exceeds this did NOT solve the system: the
 // factorization is wrong (unpivoted LU on a structure that needs pivoting), not merely inaccurate.
@@ -327,8 +320,7 @@ static RelocTables relocOf(Family& f, SharedStructure* st) {
 // The zi family's relocation tables, or all-null when it has none.
 // Attaches the PILOT-SELF gate to a structure-built RelocTables. Inert (and identical to before) on any
 // context without such a group, so every existing candidate-table group keeps its exact behavior.
-template <typename Ctx>
-static RelocTables withPilotSelf(RelocTables rt, Ctx* ctx) {
+RelocTables withPilotSelf(RelocTables rt, BatchSolverContext* ctx) {
     if (ctx->hasPilotSelf && ctx->dPsSkip.p != nullptr) {
         rt.psSkip = ctx->dPsSkip.template as<char>();
         rt.psGroups = ctx->st->nQr;
@@ -1161,8 +1153,7 @@ __global__ void initFBatch(int n, int nScenarios, const double* target, double* 
 #define RL_LIMIT_FROZEN 5
 #define RL_BASE_RELOCATED 6
 
-template <typename Ctx>
-static const int* psEntryPtr(Ctx* ctx) {
+const int* psEntryPtr(BatchSolverContext* ctx) {
     return ctx->hasPilotSelf && ctx->dPsPilotEntry.p != nullptr ? ctx->dPsPilotEntry.template as<int>() : nullptr;
 }
 
@@ -2570,39 +2561,7 @@ __global__ void rlForcedPvElectBatch(int nrl, int nScenarios, int n,
     switched[s] = any;
 }
 
-// Distributed-slack pass: thread = (participating bus, scenario). The slack mismatch is
-// qBuf[slackPhiRow] (= Σ branch p at the slack) − slackTargetP. If it exceeds the tolerance, each
-// participating bus takes factor·mismatch into its BUS_TARGET_P target (factor normalized to sum 1, so
-// the whole mismatch is absorbed), mirroring ActivePowerDistribution (one-shot, no Pmin/Pmax saturation
-// — exact vs OLF when no generator saturates). A distribution marks its scenario for another inner solve.
-// Freeze, on the FIRST distribution pass of a solve, the active-power share the slack/reference bus must
-// RETAIN when its own generators participate: retain = (1 − Σfactor)·mismatch0. Σfactor over the emitted
-// (non-slack) buses is < 1 exactly when the slack participates (its factor sits in the normalization
-// denominator but emits no row); 1 − Σfactor is the slack's participation fraction ρ. Without this the
-// geometric outer loop would drive the slack mismatch to 0 and leak the slack's whole share to the
-// non-slack buses. ρ = 0 (non-participating slack) ⇒ retain = 0 ⇒ the slack keeps nothing extra.
-// The slack/reference bus retains ρ = (1 − Σfactor) of the TOTAL active imbalance currently being shared,
-// where total = the slack's residual mismatch (qBuf at slackPhiRow − slackTargetP) PLUS what the non-slack
-// participating buses have already absorbed (Σ of their cumulative target deltas). Re-evaluated EVERY outer
-// pass: freezing ρ·mismatch0 at the first pass ignores the AC loss change during redistribution, so the
-// slack would keep ρ·mismatch0 and the non-slack side would over-absorb by ρ·Δlosses; tracking the current
-// total instead makes the non-slack buses absorb exactly (1 − ρ)·total_final, matching OLF's per-pass
-// distribution of the full mismatch. ρ = 0 (non-participating slack, incl. all batched gen-loss scenarios)
-// ⇒ retain = 0, so this is a no-op there.
-__global__ void setUnitRhsBatch(int n, int nScenarios, int unitRow, double* b) {
-    int t = blockIdx.x * blockDim.x + threadIdx.x;
-    if (t >= n * nScenarios) return;
-    b[t] = (t % n == unitRow) ? 1.0 : 0.0;
-}
 
-__global__ void gatherSensiBatch(int n, int nScenarios, int k, int m, int ki, const int* observeCols,
-                                 const double* dx, double* out) {
-    int t = blockIdx.x * blockDim.x + threadIdx.x;                     // t = s*m + mi
-    if (t >= nScenarios * m) return;
-    int sIdx = t / m;
-    int mi = t % m;
-    out[(size_t) sIdx * k * m + (size_t) ki * m + mi] = dx[(size_t) sIdx * n + observeCols[mi]];
-}
 
 
 
@@ -3027,7 +2986,6 @@ __global__ void writeIdentityForInactive(int n, int nScenarios, int nnz, const i
 
 }  // namespace olfgpu
 
-#include "solver/batch_context.cuh"
 #include "diagnostics/matrix_scan.cuh"
 #include "diagnostics/driver_traces.cuh"
 
@@ -4855,7 +4813,6 @@ static void refineLanes(BatchSolverContext* ctx, int lanes, int n, int nnz, cons
 
 }  // namespace olfgpu
 
-#include "solver/driver_pass.cuh"
 #include "outerloop/phase_control.cuh"
 
 namespace olfgpu {
@@ -4872,7 +4829,11 @@ namespace olfgpu {
 #include "outerloop/distributed_slack.cuh"
 namespace olfgpu {
 
-static auto launchPilotVeqInner(BatchSolverContext* ctx, DriverPass& drv, bool staticLimits = false, bool continuedPins = false) {
+}  // namespace olfgpu
+#include "outerloop/sensitivity.cuh"
+namespace olfgpu {
+
+void launchPilotVeqInner(BatchSolverContext* ctx, DriverPass& drv, bool staticLimits, bool continuedPins) {
     const int& n = drv.n;
     const int& nS = drv.nS;
     const bool& useDynRlLimits = drv.useDynRlLimits;
@@ -4911,7 +4872,7 @@ static auto launchPilotVeqInner(BatchSolverContext* ctx, DriverPass& drv, bool s
     }
 }
 
-static auto launchDistrQTargetsInner(BatchSolverContext* ctx, DriverPass& drv) {
+void launchDistrQTargetsInner(BatchSolverContext* ctx, DriverPass& drv) {
     const int& n = drv.n;
     const int& nS = drv.nS;
     const bool& useDynRlLimits = drv.useDynRlLimits;
@@ -4949,7 +4910,7 @@ static auto launchDistrQTargetsInner(BatchSolverContext* ctx, DriverPass& drv) {
     }
 }
 
-static auto fillActiveBatch(BatchSolverContext* ctx, DriverPass& drv, bool fOnly) {
+void fillActiveBatch(BatchSolverContext* ctx, DriverPass& drv, bool fOnly) {
     const int& n = drv.n;
     const int& nnz = drv.nnz;
     const int& nS = drv.nS;
@@ -5037,34 +4998,6 @@ if (ctx->ndq) fillDistrQBatch<<<grid(ctx->ndq * nS), BLOCK, 0, ctx->stream>>>(ct
     if (!deviceFixedIter) CUDA_CHECK(cudaStreamSynchronize(ctx->stream));   // fixed-iter: stream-ordered into the solve, no host sync
 }
 
-static auto sensitivitySolve(BatchSolverContext* ctx, DriverPass& drv, bool& first) {
-    const int& n = drv.n;
-    const int& nS = drv.nS;
-    if (ctx->mode == 6) {
-        for (int s2 = 0; s2 < nS; s2++) {
-            CUDSS_CHECK(cudssMatrixSetValues(ctx->ds.matA, ctx->dVals.as<double>() + (size_t) s2 * ctx->nnz));
-            CUDSS_CHECK(cudssMatrixSetValues(ctx->ds.matB, ctx->dB.as<double>() + (size_t) s2 * n));
-            CUDSS_CHECK(cudssMatrixSetValues(ctx->ds.matX, ctx->dDx.as<double>() + (size_t) s2 * n));
-            if (!ctx->analyzed) {
-                gAnalysesMain++;
-                { AnalysisTimer at_(__LINE__); CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_ANALYSIS, ctx->ds.config, ctx->ds.data, ctx->ds.matA, ctx->ds.matX, ctx->ds.matB)); }
-                ctx->analyzed = true;
-            }
-            { AnalysisTimer at_(__LINE__, 'G'); CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_FACTORIZATION | CUDSS_PHASE_SOLVE,
-                    ctx->ds.config, ctx->ds.data, ctx->ds.matA, ctx->ds.matX, ctx->ds.matB)); }
-        }
-        first = false;
-        return;
-    }
-    if (!ctx->analyzed) {
-        gAnalysesMain++;
-        { AnalysisTimer at_(__LINE__); CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_ANALYSIS, ctx->ds.config, ctx->ds.data, ctx->matUb, ctx->matUbX, ctx->matUbB)); }
-        ctx->analyzed = true;
-    }
-    int phase = CUDSS_PHASE_SOLVE | (first ? CUDSS_PHASE_FACTORIZATION : 0);
-    first = false;
-    { AnalysisTimer at_(__LINE__, ((phase) & (CUDSS_PHASE_FACTORIZATION | CUDSS_PHASE_REFACTORIZATION)) ? 'G' : ((phase) & CUDSS_PHASE_ANALYSIS) ? 'A' : 'S'); CUDSS_CHECK(cudssExecute(ctx->ds.handle, phase, ctx->ds.config, ctx->ds.data, ctx->matUb, ctx->matUbX, ctx->matUbB)); }
-}
 
 static auto tvcStep(BatchSolverContext* ctx, DriverPass& drv) {
     const int& n = drv.n;

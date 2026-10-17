@@ -9,6 +9,8 @@
 
 #include <cuda_runtime.h>
 
+namespace olfgpu {
+
 /**
  * Pool order of a stock pair: [0] = the bus's OWN row, [1] = the parent coupler's DUMMY_Q row. Which one takes
  * the bus's raw q depends on TWO modes, not one:
@@ -276,5 +278,7 @@ static __device__ void scatterAddFDyn(int nres, const int* dest, const int* altD
         }
     }
 }
+
+}  // namespace olfgpu
 
 #endif  // OLF_GPU_EQUATIONS_SCATTER_CUH

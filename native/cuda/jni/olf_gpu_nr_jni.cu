@@ -4492,7 +4492,7 @@ __global__ void tvcApplyRhoBatch(int nTvc, int nScenarios, int n,
  *  tap action on the same transformer must not shadow the loop's move. Runs after every pass that
  *  moved a tap, and on a driver RESUME (the caller's list is re-uploaded at solve entry and would
  *  otherwise erase the moves the paused sequence had already made). */
-static void tvcRebuildOverrides(BatchSolverContext* ctx) {
+void tvcRebuildOverrides(BatchSolverContext* ctx) {
     int nS = ctx->nScenarios;
     int nTvc = ctx->nTvc;
     std::vector<int> slot;
@@ -4566,71 +4566,9 @@ static void tvcRebuildOverrides(BatchSolverContext* ctx) {
     ctx->nR1Ov = nOv;
 }
 // ======================== FLOW-OBSERVED INCREMENTAL LOOPS (phase / RPC) ========================
-// The controlled branch's flow and its gradient at the current state: P/Q through the codegen'd
-// evalClosedBranch (the very functions the fill scatters), I through OLF's own reI/imI decomposition
-// (ClosedBranchSide{1,2}CurrentMagnitudeEquationTerm, incl. its one-sided rule at I = 0 and its
-// dr1-less sensitivity). g[0..5] = d/d(v1, v2, ph1, ph2, a1, r1).
-__device__ inline double flcFlowAndGrad(int side, int kind, const double* p, const double* xs, const int* q, double* g) {
-    double v1 = xs[q[5]], v2 = xs[q[7]], ph1 = xs[q[4]], ph2 = xs[q[6]];
-    double r1 = q[9] >= 0 ? xs[q[9]] : p[6];
-    double a1 = q[8] >= 0 ? xs[q[8]] : p[7];
-    double y = p[0], g1 = p[1], g2 = p[2], b1 = p[3], b2 = p[4], ksi = p[5];
-    if (kind != 2) {                                         // P or Q: the assembled outputs
-        double o[CB_NOUT];
-        evalClosedBranch(y, g1, g2, b1, b2, v1, r1, v2, ksi, a1, ph1, ph2, 0,
-                         o + 0, o + 1, o + 2, o + 3, o + 4, o + 5, o + 6, o + 7, o + 8, o + 9,
-                         o + 10, o + 11, o + 12, o + 13, o + 14, o + 15, o + 16, o + 17, o + 18,
-                         o + 19, o + 20, o + 21, o + 22, o + 23, o + 24, o + 25, o + 26, o + 27);
-        int blk = (kind == 0 ? 7 : 0) + (side == 1 ? 0 : 14);   // p1 0, q1 7, p2 14, q2 21: [val dv1 dv2 dph1 dph2 da1 dr1]
-        for (int k = 0; k < 6; k++) g[k] = o[blk + 1 + k];
-        return o[blk];
-    }
-    const double R2 = 1.0;
-    if (side == 1) {
-        double theta = ksi - a1 + ph2;                       // OLF: ksi - a1 + A2 + ph2, A2 = 0
-        double ire = g1 * cos(ph1) - b1 * sin(ph1) + y * sin(ph1 + ksi);
-        double iim = g1 * sin(ph1) + b1 * cos(ph1) - y * cos(ph1 + ksi);
-        double re = r1 * (r1 * v1 * ire - y * R2 * v2 * sin(theta));
-        double im = r1 * (r1 * v1 * iim + y * R2 * v2 * cos(theta));
-        double dre[6] = { r1 * r1 * ire, r1 * (-y * R2 * sin(theta)),
-                          r1 * r1 * v1 * (-g1 * sin(ph1) - b1 * cos(ph1) + y * cos(ph1 + ksi)),
-                          r1 * (-y * R2 * v2 * cos(theta)), 0.0, 0.0 };
-        double dim[6] = { r1 * r1 * iim, r1 * (y * R2 * cos(theta)),
-                          r1 * r1 * v1 * ire, r1 * (-y * R2 * v2 * sin(theta)), 0.0, 0.0 };
-        dre[4] = -dre[3];                                    // a1 enters theta with the opposite sign of ph2
-        dim[4] = -dim[3];
-        double i = hypot(re, im);
-        if (i == 0.0) {                                      // one-sided limit: the gradient's MAGNITUDE — the
-            for (int k = 0; k < 6; k++) g[k] = 0.0;          // dot with dx is done by the caller as hypot(dre·dx, dim·dx)
-            g[0] = 1e300;                                    // flag (see flcGatherSensiBatch)
-            for (int k = 0; k < 6; k++) { g[6 + k] = dre[k]; g[12 + k] = dim[k]; }
-            return 0.0;
-        }
-        for (int k = 0; k < 6; k++) g[k] = (re * dre[k] + im * dim[k]) / i;
-        return i;
-    }
-    double theta = ksi + a1 + ph1;                           // OLF: ksi + a1 - A2 + ph1
-    double ire = g2 * cos(ph2) - b2 * sin(ph2) + y * sin(ph2 + ksi);
-    double iim = g2 * sin(ph2) + b2 * cos(ph2) - y * cos(ph2 + ksi);
-    double re = R2 * (R2 * v2 * ire - y * r1 * v1 * sin(theta));
-    double im = R2 * (R2 * v2 * iim + y * r1 * v1 * cos(theta));
-    double dre[6] = { R2 * (-y * r1 * sin(theta)), R2 * R2 * ire,
-                      R2 * (-y * r1 * v1 * cos(theta)),
-                      R2 * R2 * v2 * (-g2 * sin(ph2) - b2 * cos(ph2) + y * cos(ph2 + ksi)), 0.0, 0.0 };
-    double dim[6] = { R2 * (y * r1 * cos(theta)), R2 * R2 * iim,
-                      R2 * (-y * r1 * v1 * sin(theta)), R2 * R2 * v2 * ire, 0.0, 0.0 };
-    dre[4] = dre[2];                                         // a1 enters theta like ph1
-    dim[4] = dim[2];
-    double i = hypot(re, im);
-    if (i == 0.0) {
-        for (int k = 0; k < 6; k++) g[k] = 0.0;
-        g[0] = 1e300;
-        for (int k = 0; k < 6; k++) { g[6 + k] = dre[k]; g[12 + k] = dim[k]; }
-        return 0.0;
-    }
-    for (int k = 0; k < 6; k++) g[k] = (re * dre[k] + im * dim[k]) / i;
-    return i;
-}
+}  // namespace olfgpu
+#include "outerloop/flow_observation.cuh"
+namespace olfgpu {
 
 // Per (scenario, controller): OLF's out-of-deadband test on the controlled flow (LIMITER: one-sided).
 __global__ void flcCheckBatch(int nFlc, int nScenarios, int n, int nElements, int cbOffset, int kindMask,
@@ -4770,63 +4708,6 @@ __global__ void flcApplyBatch(int nFlc, int nScenarios, int n, const int* pinRow
     target[(size_t) s * n + pinRow[c]] = v;
     x[(size_t) s * n + pinRow[c]] = v;
     prevTap[tid] = t;
-}
-// ======================== CONTINUOUS PHASE CONTROL (OLF PhaseControlOuterLoop) ========================
-// One thread per (scenario, controller). iter[s] = the loop's check count in this solve. First check:
-// every live CONTROLLER-mode control is switched OFF (row mode 3 -> 0, the identity pinned at the tap
-// closest to the solved a1) and the scenario is UNSTABLE when it has any live controller (OLF returns
-// UNSTABLE on a non-empty controller list, LIMITER-only included — a no-change re-solve). Later checks:
-// a live LIMITER whose current exceeds the limit shifts one tap against the sign of dI/da1
-// (shiftOneTapPositionToChangeA1). The tap's pi row follows through the shared r1 override rebuild.
-__global__ void cphCheckBatch(int nCph, int nScenarios, int n, int nElements, int cbOffset,
-                              const int* kind, const int* a1Row, const int* side, const double* limit, const int* elem,
-                              const int* tapPtr, const double* tapData,
-                              const double* cbIn, const int* cbIx, int nR1Ov, const int* r1OvSlotElem, const double* r1OvVal,
-                              const char* disabled, const char* rlActive, const int* iter,
-                              int* tap, int* mode, double* target, double* x, char* switched) {
-    int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= nCph * nScenarios) return;
-    int c = tid % nCph;
-    int s = tid / nCph;
-    if (!rlActive[s] || disabled[(size_t) s * nElements + elem[c]]) return;
-    size_t ar = (size_t) s * n + a1Row[c];
-    int base = tapPtr[c];
-    int nTaps = tapPtr[c + 1] - base;
-    if (iter[s] == 0) {
-        if (kind[c] == 0) {                                  // switch off + round a1 to the closest tap
-            double a1 = x[ar];
-            int best = tap[tid];
-            for (int t = 0; t < nTaps; t++) {
-                if (fabs(tapData[(size_t) (base + t) * 8 + 7] - a1) < fabs(tapData[(size_t) (base + best) * 8 + 7] - a1)) best = t;
-            }
-            tap[tid] = best;
-            mode[ar] = 0;
-            target[ar] = tapData[(size_t) (base + best) * 8 + 7];
-            x[ar] = target[ar];
-        }
-        switched[s] = 1;                                     // OLF: UNSTABLE whenever a controller exists
-        return;
-    }
-    if (kind[c] != 1) return;
-    int e = elem[c] - cbOffset;                              // LIMITER is local: the controlled branch is itself
-    const double* p = cbIn + e * 8;
-    double pOv[8];
-    if (findTapOverride(nR1Ov, r1OvSlotElem, r1OvVal, s, e, pOv)) p = pOv;
-    double g[18];
-    double i = flcFlowAndGrad(side[c], 2, p, x + (size_t) s * n, cbIx + e * 12, g);
-    if (!(i > limit[c])) return;
-    double dida1 = g[0] == 1e300 ? 0.0 : g[4];
-    int dir = dida1 > 0 ? -1 : 1;                            // reduce I: move a1 against the slope
-    int cur = tap[tid];
-    double a1 = tapData[(size_t) (base + cur) * 8 + 7];
-    int next = cur;
-    if (cur + 1 < nTaps && ((dir > 0) == (tapData[(size_t) (base + cur + 1) * 8 + 7] > a1))) next = cur + 1;
-    else if (cur - 1 >= 0 && ((dir > 0) == (tapData[(size_t) (base + cur - 1) * 8 + 7] > a1))) next = cur - 1;
-    if (next == cur) return;
-    tap[tid] = next;
-    target[ar] = tapData[(size_t) (base + next) * 8 + 7];
-    x[ar] = target[ar];
-    switched[s] = 1;
 }
 // ======================== INCREMENTAL SHUNT VC KERNELS ========================
 // Per (scenario, controlled-bus group): OLF isOutOfDeadband on the group's controlled bus, with at
@@ -5881,26 +5762,12 @@ static void refineLanes(BatchSolverContext* ctx, int lanes, int n, int nnz, cons
     }
 }
 
-// The state the outer-loop driver shares between solveBatchContext and its phase steps.
-struct DriverPass {
-    int n = 0;
-    int nnz = 0;
-    int nS = 0;
-    int outer = 0;
-    std::vector<char> active;
-    std::vector<char> live;
-    std::vector<char> rlActive;
-    std::vector<char> loopRejected;
-    int loopIdx = 0;
-    int loopOrder[MAX_DEVICE_LOOPS] = {};
-    BatchResult res;
-    bool useDynRlLimits = false;
-    bool deviceFixedIter = false;
-    double reactiveLimitTol = 0.0;
-    int nRlVtOv = 0;
-    DeviceBuf dRlVtOvSlotIdx;
-    DeviceBuf dRlVtOvVal;
-};
+}  // namespace olfgpu
+
+#include "solver/driver_pass.cuh"
+#include "outerloop/phase_control.cuh"
+
+namespace olfgpu {
 
 static auto launchPilotVeqInner(BatchSolverContext* ctx, DriverPass& drv, bool staticLimits = false, bool continuedPins = false) {
     const int& n = drv.n;
@@ -6315,36 +6182,6 @@ static auto flcStep(BatchSolverContext* ctx, DriverPass& drv, int kindMask) {
     }
 }
 
-static auto cphStep(BatchSolverContext* ctx, DriverPass& drv) {
-    const int& n = drv.n;
-    const int& nS = drv.nS;
-    std::vector<char>& rlActive = drv.rlActive;
-    int nC = ctx->nCph;
-    if (nC <= 0) return;
-    size_t nst = static_cast<size_t>(nS) * nC;
-    cphCheckBatch<<<grid(static_cast<int>(nst)), BLOCK, 0, ctx->stream>>>(nC, nS, n, ctx->nElements, ctx->cbOffset,
-            ctx->dCphKind.as<int>(), ctx->dCphA1Row.as<int>(), ctx->dCphSide.as<int>(), ctx->dCphLimit.as<double>(), ctx->dCphElem.as<int>(),
-            ctx->dCphTapPtr.as<int>(), ctx->dCphTapData.as<double>(),
-            ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>(),
-            ctx->dDisabled.as<char>(), ctx->dRlActive.as<char>(), ctx->dCphIter.as<int>(),
-            ctx->dCphTap.as<int>(), ctx->dMode.as<int>(), ctx->dTarget.as<double>(), ctx->dX.as<double>(), ctx->dRlSwitched.as<char>());
-    CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
-    {                                                    // the loop's check count, per checked scenario
-        std::vector<int> it(nS);
-        CUDA_CHECK(cudaMemcpy(it.data(), ctx->dCphIter.p, nS * sizeof(int), cudaMemcpyDeviceToHost));
-        for (int s2 = 0; s2 < nS; s2++) if (rlActive[s2]) it[s2]++;
-        CUDA_CHECK(cudaMemcpy(ctx->dCphIter.p, it.data(), nS * sizeof(int), cudaMemcpyHostToDevice));
-    }
-    tvcRebuildOverrides(ctx);
-    if (std::getenv("OLF_GPU_BATCH_TRACE") != nullptr) {
-        std::vector<int> cur(nst);
-        CUDA_CHECK(cudaMemcpy(cur.data(), ctx->dCphTap.p, nst * sizeof(int), cudaMemcpyDeviceToHost));
-        int nMoved = 0;
-        for (int s2 = 0; s2 < nS; s2++) for (int c = 0; c < nC; c++) if (cur[static_cast<size_t>(s2) * nC + c] != ctx->hCphBaseTap[c]) nMoved++;
-        std::fprintf(stderr, "CPHASE_KERNEL nS=%d nCtrl=%d pairsOffBaseTap=%d nR1Ov=%d\n", nS, nC, nMoved, ctx->nR1Ov);
-    }
-}
-
 static auto tvdStep(BatchSolverContext* ctx, DriverPass& drv) {
     const int& n = drv.n;
     const int& nS = drv.nS;
@@ -6557,17 +6394,6 @@ static void tvcResetSolve(BatchSolverContext* ctx, DriverPass& drv) {
     ctx->dTvcOutOfDb.ensure(nst * sizeof(char));
     ctx->dTvcDiffV.ensure(nst * sizeof(double));
     ctx->dTvcSensi.ensure(nst * sizeof(double));
-}
-
-// Per-solve reset. Continuous phase control: base taps, check count 0.
-static void cphResetSolve(BatchSolverContext* ctx, DriverPass& drv) {
-    const int& nS = drv.nS;
-    size_t nst = static_cast<size_t>(nS) * ctx->nCph;
-    std::vector<int> cur(nst);
-    for (int s2 = 0; s2 < nS; s2++) for (int c = 0; c < ctx->nCph; c++) cur[static_cast<size_t>(s2) * ctx->nCph + c] = ctx->hCphBaseTap[c];
-    CUDA_CHECK(cudaMemcpy(ctx->dCphTap.p, cur.data(), nst * sizeof(int), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(ctx->dCphPrevTap.p, cur.data(), nst * sizeof(int), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemset(ctx->dCphIter.p, 0, nS * sizeof(int)));
 }
 
 // Per-solve reset. Discrete TVC: every control at its entry state.

@@ -35,7 +35,7 @@ final class CouplerSeed {
         final double[] baseTargets = ctx.baseTargets();
         final ChunkLists cl = ctx.cl();
         final List<BatchContingency> contingencies = ctx.contingencies();
-        final int[][] frozenRowsByIndex = ctx.frozenRowsByIndex();
+        final int[][] frozenRowsByIndex = ctx.plan().frozenRowsByIndex();
         final GpuAcData gpuData = ctx.gpuData();
         final int n = ctx.n();
         final int nds = ctx.nds();

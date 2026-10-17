@@ -10,9 +10,7 @@ package com.powsybl.openloadflow.ac.solver.gpu.batch;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 import com.powsybl.openloadflow.ac.solver.NewtonRaphsonParameters;
-import com.powsybl.openloadflow.network.GeneratorVoltageControl;
 import com.powsybl.openloadflow.network.LfBranch;
-import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfShunt;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -318,56 +316,15 @@ final class GpuBatchChunkSolver {
                         GpuBatchTransformerControl.uploadFixMasks(handle, phases.freeze(), slotCtgs, chunkSize);
                     }
                     ChunkLists cl = new ChunkLists(chunkSize, n, gpuData, forcedTargetQ, ngen);
-                    SlotSeeding seeding = new SlotSeeding(chunkSize, n, gpuData, contingencies, baseTargets,
-                            baseRowMode, rlCurves, curveEntriesByPRow, rs, cl, elementMapper, baseNonTreeZi,
-                            frozenRowsByIndex, nds);
+                    SlotSeeding seeding = new SlotSeeding(chunkSize, pairPhase, n, gpuData, elementMapper, contingencies,
+                            plan, baseState, baseTargets, baseRowMode, hvdcElemIndex, baseNonTreeZi, nds, rlCurves,
+                            curveEntriesByPRow, rs, cl);
                     rs.resetChunk();
                     for (int s = 0; s < chunkSize; s++) {
                         rs.resetSlot(s);
                         if (s < realCount) {                 // real scenario: disable its outaged branch(es)
                             int ci = group.get(chunkStart + s);
-                            if (!pairPhase && activePowerLossByIndex != null) {
-                                cl.preLossBySlot[s] = activePowerLossByIndex[ci];
-                            }
-                            if (dqOvContribByIndex != null && dqOvContribByIndex[ci] != null) {
-                                for (int k = 0; k < dqOvContribByIndex[ci].length; k++) {
-                                    cl.dqOvIdxList.add(s);
-                                    cl.dqOvIdxList.add(dqOvContribByIndex[ci][k]);
-                                    cl.dqOvWList.add(dqOvWByIndex[ci][k]);
-                                }
-                            }
-                            if (dqKeyOvMemberByIndex != null && dqKeyOvMemberByIndex[ci] != null) {
-                                for (int k = 0; k < dqKeyOvMemberByIndex[ci].length; k++) {
-                                    cl.dqKeyOvIdxList.add(s);
-                                    cl.dqKeyOvIdxList.add(dqKeyOvMemberByIndex[ci][k]);
-                                    cl.dqKeyOvList.add(dqKeyOvByIndex[ci][k]);
-                                }
-                            }
-                            if (drOvContribByIndex != null && drOvContribByIndex[ci] != null) {
-                                for (int k = 0; k < drOvContribByIndex[ci].length; k++) {
-                                    cl.drOvIdxList.add(s);
-                                    cl.drOvIdxList.add(drOvContribByIndex[ci][k]);
-                                    cl.drOvCList.add(drOvCByIndex[ci][k]);
-                                }
-                            }
-                            if (islandedDsByIndex != null && islandedDsByIndex[ci] != null) {
-                                for (int participant : islandedDsByIndex[ci]) {
-                                    cl.dsIslandedList.add(s);
-                                    cl.dsIslandedList.add(participant);
-                                }
-                            }
-                            if (islandedRlByIndex != null && islandedRlByIndex[ci] != null) {
-                                for (int controller : islandedRlByIndex[ci]) {
-                                    cl.rlIslandedList.add(s);
-                                    cl.rlIslandedList.add(controller);
-                                }
-                            }
-                            if (dqSubByIndex != null && dqSubByIndex[ci] != null && cl.nDqMembersAll > 0) {
-                                for (int p = 0; p < dqSubByIndex[ci].length; p += 2) {
-                                    cl.dqSubDense[s * cl.nDqMembersAll + dqSubByIndex[ci][p]] = (byte) dqSubByIndex[ci][p + 1];
-                                }
-                                cl.anyDqSub = true;
-                            }
+                            PlanOverrideSeed.seed(seeding, s, ci);
                             List<LfBranch> branches = contingencies.get(ci).outagedBranches();
                             List<LfShunt> shunts = contingencies.get(ci).outagedShunts();
                             List<com.powsybl.openloadflow.network.LfHvdc> hvdcs = contingencies.get(ci).outagedHvdcs();
@@ -379,229 +336,12 @@ final class GpuBatchChunkSolver {
                                 hvdcs.addAll(islandedHvdcsByIndex[ci]);
                             }
                             List<BatchContingency.SideOpen> sideOpens = contingencies.get(ci).sideOpenBranches();
-                            int[] eis = new int[branches.size() + shunts.size() + hvdcs.size() + sideOpens.size()];
-                            int ei = 0;
-                            for (BatchContingency.SideOpen so : sideOpens) {
-                                // A side-opened branch is NOT fully out. OLF keeps it DANGLING, and the
-                                // dangling half's charging still injects at the connected bus — OLF's own
-                                // testLineOpenOneSideContingency measures -55.873 MVAr on exactly this
-                                // shape. Masking the element deletes that injection: measured on rte6515
-                                // BUS-1003_BBS as EXACTLY -2 x b_side x v^2 at every bus bordering the
-                                // opened side (six buses, ratios -1.994..-2.004), and on the 9-bus
-                                // reproducer as VL2 374.62 kV against the CPU's 379.85.
-                                //
-                                // A branch open at one end is, seen from the live bus, a PURE SHUNT: the
-                                // far side's series+shunt reduces to one equivalent admittance. So keep
-                                // the element LIVE and override its pi row to that shunt — y = 0 kills the
-                                // series coupling (so the frozen far bus contributes nothing and receives
-                                // nothing), and the connected side's g/b carry the equivalent. No new
-                                // kernel: this is the per-scenario pi-model override the tap channel
-                                // already uses, and the cb evaluation reads it through findTapOverride.
-                                double[] cbRow = GpuBatchSideOpen.danglingCbRow(so.branch(), so.side());
-                                if (cbRow == null) {         // not expressible -> keep the old behaviour
-                                    int cbIdx2 = elementMapper.getElementIndex(so.branch());
-                                    rs.disabledMask[s][cbIdx2] = true;
-                                    eis[ei++] = cbIdx2;
-                                } else {
-                                    int soElem = elementMapper.getElementIndex(so.branch());
-                                    if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {
-                                        // Does this branch also feed a DISTR_Q row? fillDistrQBatch reads
-                                        // cbIn with NO r1Ov parameters, so it cannot see the per-scenario
-                                        // pi override: a side-opened branch that contributes to a remote
-                                        // voltage-control group's reactive distribution would be counted
-                                        // there with its FULL series admittance instead of the dangling
-                                        // equivalent.
-                                        int hits = 0;
-                                        for (int k = 0; k < gpuData.dqElem().length; k++) {
-                                            if (gpuData.dqElem()[k] == soElem) {
-                                                hits++;
-                                            }
-                                        }
-                                        var sopi = so.branch().getPiModel();
-                                        System.err.printf("SIDEOPEN_DQ ctg=%s branch=%s side=%d elem=%d"
-                                                        + " dqContribs=%d base(g1=%.9e b1=%.9e g2=%.9e b2=%.9e)"
-                                                        + " eq(g1=%.9e b1=%.9e g2=%.9e b2=%.9e)%n",
-                                                contingencies.get(ci).contingencyId(), so.branch().getId(),
-                                                so.side(), soElem, hits,
-                                                sopi.getG1(), sopi.getB1(), sopi.getG2(), sopi.getB2(),
-                                                cbRow[1], cbRow[3], cbRow[2], cbRow[4]);
-                                    }
-                                    rs.r1OvSlotElemList.add(s);
-                                    rs.r1OvSlotElemList.add(soElem);
-                                    for (double v : cbRow) {
-                                        rs.r1OvValList.add(v);
-                                    }
-                                }
-                            }
-                            for (LfBranch branch : branches) {
-                                int idx = elementMapper.getElementIndex(branch);          // qualification guarantees >= 0
-                                rs.disabledMask[s][idx] = true;
-                                eis[ei++] = idx;
-                            }
-                            for (LfShunt shunt : shunts) {                                // fixed-shunt disconnection
-                                int idx = elementMapper.getElementIndex(shunt);          // qualification guarantees >= 0
-                                rs.disabledMask[s][idx] = true;
-                                eis[ei++] = idx;
-                            }
-                            for (com.powsybl.openloadflow.network.LfHvdc hvdc : hvdcs) { // AC-emulation HVDC outage
-                                int idx = hvdcElemIndex.get(hvdc);                       // composition guarantees packed
-                                rs.disabledMask[s][idx] = true;
-                                eis[ei++] = idx;
-                            }
-                            rs.disabledIdx[s] = eis;
-                            // OLF disables every bus the contingency islands and every branch left on it. The island's
-                            // rows are frozen identities here, but such a branch stayed live at the frozen 1 pu, and a remote
-                            // voltage-control member's reactive injection reads it: the charging of a line inside the
-                            // island, or of a feeder left dangling INTO it, entered the group's sharing rows (network.xiidm
-                            // CXUL: CXSS_2/_4's step-up transformers, 4.3e-3 kV at CXSS_1/_3). A side-opened branch is
-                            // judged by its live end alone - its open end is the lost bus, frozen by design.
-                            java.util.Set<Integer> frozenCols = new java.util.HashSet<>();
-                            for (int r : frozenRowsByIndex[ci]) {
-                                frozenCols.add(r);
-                            }
-                            java.util.Set<Integer> sideOpenElems = new java.util.HashSet<>();
-                            for (BatchContingency.SideOpen so : sideOpens) {
-                                int e = elementMapper.getElementIndex(so.branch());
-                                sideOpenElems.add(e);
-                                if (frozenCols.contains(gpuData.cbIdx()[e * 12 + (so.side() == 1 ? 7 : 5)])) {
-                                    rs.disabledMask[s][e] = true;
-                                }
-                            }
-                            for (int r : frozenRowsByIndex[ci]) {
-                                for (int e : rs.elementsAtVCol.getOrDefault(r, List.of())) {
-                                    if (!sideOpenElems.contains(e)) {
-                                        rs.disabledMask[s][e] = true;
-                                    }
-                                }
-                            }
-                            cl.nActive[s] -= frozenRowsByIndex[ci].length;  // islanded buses' equations leave the CPU index
-                            if (System.getenv("OLF_GPU_SA_RESID") != null) {
-                                System.err.printf("DEV_NACTIVE ctg=%s n=%d frozen=%d nActive=%d%n",
-                                        contingencies.get(ci).contingencyId(), n,
-                                        frozenRowsByIndex[ci].length, cl.nActive[s]);
-                            }
-                            for (LfBranch branch : branches) {           // var-carrying outaged branches: the CPU drops
-                                int eIdx = elementMapper.getElementIndex(branch);   // the rho/a1 identity equations too
-                                if (eIdx >= 0 && eIdx < elementMapper.getClosedBranchCount()) {
-                                    if (gpuData.cbIdx()[eIdx * 12 + 9] >= 0) {
-                                        cl.nActive[s]--;        // BRANCH_RHO1 variable + its identity leave the index
-                                    }
-                                    if (gpuData.cbIdx()[eIdx * 12 + 8] >= 0) {
-                                        cl.nActive[s]--;        // BRANCH_ALPHA1 variable + its identity leave the index
-                                    }
-                                }
-                            }
+                            OutageMaskSeed.seed(seeding, s, ci, branches, shunts, hvdcs, sideOpens);
                             // Rows that host a PILOT'S relocated reactive balance this scenario (the carrier a frozen base
-                            // carrier handed it to): a DISTR_Q target seed must not land on them, see the seed loop below.
+                            // carrier handed it to): a DISTR_Q target seed must not land on them, see GenOutageSeed.
                             gnu.trove.set.hash.TIntHashSet pilotBalanceRows = new gnu.trove.set.hash.TIntHashSet();
-                            int[] frozen = frozenRowsByIndex[ci];
-                            if (frozen.length > 0) {         // fragmenting outage: freeze the islanded buses' rows
-                                int[] row = baseRowMode.clone();
-                                double[] frozenTargets = frozenTargetsByIndex[ci];
-                                for (int k = 0; k < frozen.length; k++) {
-                                    row[frozen[k]] = 0;      // identity row — bus decoupled from the main component
-                                    // ...held at a CLEAN flat state (V=1, phi=0) via the target override, NOT the base
-                                    // equation target (a P/Q value that gives a nonsensical islanded voltage/angle).
-                                    rs.overrides.add(s * n + frozen[k], frozenTargets[k]);
-                                    // ...and START that row AT its target. It is an identity row, so its
-                                    // solution IS the target and seeding it costs nothing — but leaving it
-                                    // at the base state hands the convergence test a residual OLF never
-                                    // sees, because OLF REMOVES an islanded bus's equations rather than
-                                    // freezing them. Measured on rte6515 LINE-4413-5: the islanded bus's
-                                    // angle row sits at -1.050832654 rad against a frozen target of 0, and
-                                    // that 1.050832654 IS the device's whole initial |F|inf for the solve,
-                                    // against OLF's 0.1296557068. The device then needs an extra Newton
-                                    // iteration, lands at 1.68e-06 where OLF stops at 8.04e-04, and the
-                                    // distributed-slack loop reads a slack mismatch 7.43e-04 different —
-                                    // which is the entire branch-family error (8.328e-05 kV).
-                                    cl.frozenSeedSlot.add(s);
-                                    cl.frozenSeedRow.add(frozen[k]);
-                                    cl.frozenSeedValue.add(frozenTargets[k]);
-                                    if (System.getenv("OLF_GPU_SA_RESID") != null) {
-                                        System.err.printf("FROZEN ctg=%s row=%d target=%.9f base=%.9f |F0|=%.9f%n",
-                                                contingencies.get(ci).contingencyId(), frozen[k], frozenTargets[k],
-                                                baseState[frozen[k]], Math.abs(baseState[frozen[k]] - frozenTargets[k]));
-                                    }
-                                }
-                                // A frozen row that was a remote gen-VC group's BASE CARRIER (the free
-                                // member's row hosting the pilot's reactive balance): the device's mode scan
-                                // moves that balance to the next live member's row from the first Newton
-                                // solve on, but that row's TARGET is its own DISTR_Q one (0) - the kernel
-                                // that stamps the pilot's target on the carrier runs only inside the
-                                // outer-loop passes, and the host re-applies its overrides at every pass.
-                                // Stamp it here, by the kernel's own rule (relocChoose: first candidate
-                                // whose mode is neither identity nor pinned). Measured on the remote-control
-                                // fixture, b1 islanded: OLF's BUS_TARGET_Q at the pilot off by exactly its
-                                // load, b2 0.45 kV; rte6515: five busbar sections up to 1.3 kV.
-                                int[] qrPtr = gpuData.qrPtr();
-                                int[] qrRows = gpuData.qrRows();
-                                for (int g = 0; qrPtr != null && g + 1 < qrPtr.length; g++) {
-                                    int baseCarrier = -1;
-                                    int newCarrier = -1;
-                                    for (int c = qrPtr[g] + 1; c < qrPtr[g + 1]; c++) {
-                                        int r = qrRows[c];
-                                        if (baseCarrier < 0 && baseRowMode[r] != 0 && baseRowMode[r] != 4) {
-                                            baseCarrier = r;
-                                        }
-                                        if (newCarrier < 0 && row[r] != 0 && row[r] != 4) {
-                                            newCarrier = r;
-                                        }
-                                    }
-                                    // A PILOT-SELF group (rotation: the fallback row is itself a candidate) whose pilot is
-                                    // UNPINNED in the base carries no pilot balance on its carrier: that row hosts its OWN
-                                    // DISTR_Q, and the base carrier's target is that member's DISTR_Q target, not a pilot
-                                    // Q — stamping it on the next member overwrote the renormalized target the outage
-                                    // seeding had just put there (middle-section fixture: −0.1333 over −0.2, bus-mid
-                                    // 0.32 kV off). Only a PINNED pilot's balance travels with the carrier.
-                                    boolean unpinnedPilotSelf = false;
-                                    int fallbackRow = qrRows[qrPtr[g]];
-                                    for (int c = qrPtr[g] + 1; c < qrPtr[g + 1]; c++) {
-                                        if (qrRows[c] == fallbackRow) {
-                                            unpinnedPilotSelf = true;
-                                            break;
-                                        }
-                                    }
-                                    if (unpinnedPilotSelf && gpuData.rlVrow() != null && gpuData.rlRemote() != null) {
-                                        for (int e = 0; e < gpuData.rlVrow().length; e++) {
-                                            if (gpuData.rlVrow()[e] == fallbackRow && gpuData.rlRemote()[e] == 2) {
-                                                byte lt = gpuData.rlBaseQLimitType() != null ? gpuData.rlBaseQLimitType()[e] : 0;
-                                                unpinnedPilotSelf = lt < 1 || lt > 4;
-                                                break;
-                                            }
-                                        }
-                                    }
-                                    if (baseCarrier >= 0 && newCarrier >= 0 && newCarrier != baseCarrier
-                                            && row[baseCarrier] == 0 && baseRowMode[baseCarrier] != 0 && !unpinnedPilotSelf) {
-                                        rs.overrides.add(s * n + newCarrier, baseTargets[baseCarrier]);
-                                        pilotBalanceRows.add(newCarrier);
-                                        if (System.getenv("OLF_GPU_SA_RESID") != null) {
-                                            System.err.printf("CARRIER_MOVED ctg=%s group=%d from=%d to=%d pilotQ=%.9f%n",
-                                                    contingencies.get(ci).contingencyId(), g, baseCarrier, newCarrier,
-                                                    baseTargets[baseCarrier]);
-                                        }
-                                    }
-                                }
-                                rs.rowModePerScenario[s] = row;
-                            }
-                            // The outage isolates the base slack and OLF re-picked one in the main component: its P
-                            // balance leaves the system and its angle becomes the reference (BUS_TARGET_PHI, target 0).
-                            // The state starts from the base angles, as OLF's does - the first step shifts them all.
-                            int reference = slackRelocations.row(ci);
-                            if (reference >= 0) {
-                                int[] row = rs.rowModePerScenario[s] == baseRowMode ? baseRowMode.clone() : rs.rowModePerScenario[s];
-                                row[reference] = 0;
-                                rs.rowModePerScenario[s] = row;
-                                rs.overrides.add(s * n + reference, 0.0);
-                                if (cl.dsSlackRows == null) {
-                                    cl.dsSlackRows = new int[chunkSize];
-                                    java.util.Arrays.fill(cl.dsSlackRows, -1);
-                                }
-                                cl.dsSlackRows[s] = reference;
-                                if (cl.outageSlackShift == null) {
-                                    cl.outageSlackShift = new double[chunkSize];
-                                }
-                                cl.outageSlackShift[s] += slackRelocations.shiftByIndex()[ci];
-                            }
+                            IslandSeed.seed(seeding, s, ci, branches, sideOpens, pilotBalanceRows);
+                            SlackRelocationSeed.seed(seeding, s, ci);
                             // This scenario's plan entries, with the rows of every bus whose balances the structure
                             // moves HOME here (a relocated child whose coupler opens or leaves the tree) rewritten:
                             // the plan wrote them at the base's relocated rows, which turn into identities below.

@@ -116,6 +116,7 @@ add_library(olfgpu SHARED
     native/cuda/jni/equations/zero_impedance_fill.cu
     native/cuda/jni/equations/fill_launch.cu
     native/cuda/jni/solver/state_vector_scaling.cu
+    native/cuda/jni/solver/convergence.cu
 )
 target_include_directories(olfgpu
     PRIVATE

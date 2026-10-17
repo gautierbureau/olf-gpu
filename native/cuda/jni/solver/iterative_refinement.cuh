@@ -14,6 +14,10 @@
 
 namespace olfgpu {
 
+// A linear solve whose residual ratio ||J.dx-B|| / ||F|| exceeds this did NOT solve the system: the
+// factorization is wrong (unpivoted LU on a structure that needs pivoting), not merely inaccurate.
+static const double LIN_SOLVE_FAIL_RATIO = 1e-2;
+
 __global__ void linResidScoreBatch(int n, int nS, const double* rp, const double* rm, const double* F,
                                    double* score);
 

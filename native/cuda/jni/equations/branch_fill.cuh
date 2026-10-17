@@ -8,6 +8,7 @@
 #define OLF_GPU_EQUATIONS_BRANCH_FILL_CUH
 
 #include "../solver/driver_pass.cuh"
+#include "scatter.cuh"
 
 namespace olfgpu {
 

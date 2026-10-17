@@ -7,6 +7,7 @@
 #define OLF_GPU_EQUATIONS_ZERO_IMPEDANCE_FILL_CUH
 
 #include "../solver/driver_pass.cuh"
+#include "scatter.cuh"
 
 namespace olfgpu {
 

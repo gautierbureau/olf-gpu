@@ -122,6 +122,7 @@ add_library(olfgpu SHARED
     native/cuda/jni/solver/iterative_refinement.cu
     native/cuda/jni/solver/compact_solve.cu
     native/cuda/jni/solver/batch_context.cu
+    native/cuda/jni/solver/newton_iteration.cu
 )
 target_include_directories(olfgpu
     PRIVATE

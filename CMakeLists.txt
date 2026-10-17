@@ -103,6 +103,8 @@ add_library(olfgpu SHARED
     native/cuda/jni/outerloop/incremental_transformer_voltage_control.cu
     native/cuda/jni/outerloop/incremental_flow_control.cu
     native/cuda/jni/outerloop/incremental_shunt_voltage_control.cu
+    native/cuda/jni/outerloop/transformer_voltage_control.cu
+    native/cuda/jni/outerloop/shunt_voltage_control.cu
 )
 target_include_directories(olfgpu
     PRIVATE

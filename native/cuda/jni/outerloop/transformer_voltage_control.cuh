@@ -1,0 +1,21 @@
+// Copyright (c) 2026, RTE (http://www.rte-france.com)
+// SPDX-License-Identifier: MPL-2.0
+//
+// TransformerVoltageControlOuterLoop (AFTER_GENERATOR) and SimpleTransformerVoltageControlOuterLoop
+// (WITH_GENERATOR) as in-kernel driver phases: the discrete ratio controls.
+#ifndef OLF_GPU_OUTERLOOP_TRANSFORMER_VOLTAGE_CONTROL_CUH
+#define OLF_GPU_OUTERLOOP_TRANSFORMER_VOLTAGE_CONTROL_CUH
+
+#include "../solver/driver_pass.cuh"
+
+namespace olfgpu {
+
+// Per-solve reset: every control at its entry state.
+void tvdResetSolve(BatchSolverContext* ctx, DriverPass& drv);
+
+// One check of the loop on every live scenario (LOOP_TVD_KERNEL).
+void tvdStep(BatchSolverContext* ctx, DriverPass& drv);
+
+}  // namespace olfgpu
+
+#endif  // OLF_GPU_OUTERLOOP_TRANSFORMER_VOLTAGE_CONTROL_CUH

@@ -1,8 +1,8 @@
 // Copyright (c) 2026, RTE (http://www.rte-france.com)
 // SPDX-License-Identifier: MPL-2.0
 //
-// The outer loops the device driver runs, in OLF's order, and the HVDC AC-emulation status codes
-// shared with the host (GpuAcNewtonSolver / DeviceLoopKind mirror these values).
+// The outer loops the device driver runs, in OLF's order, the HVDC AC-emulation status codes and the
+// reactive-limit limit types, shared with the host (GpuAcNewtonSolver / DeviceLoopKind / GpuAcOuterLoopPacks mirror them).
 #ifndef OLF_GPU_COMMON_LOOP_KINDS_CUH
 #define OLF_GPU_COMMON_LOOP_KINDS_CUH
 
@@ -58,5 +58,14 @@ constexpr int HV_SAT_1_TO_2 = 1;
 constexpr int HV_SAT_2_TO_1 = 2;
 constexpr int HV_FROZEN = 3;
 constexpr int MAX_DEVICE_LOOPS = 16;
+
+// Reactive-limit limit types: 0 unpinned, 1 MIN_Q, 2 MAX_Q, 3 MIN_REALISTIC_V, 4 MAX_REALISTIC_V, and
+// 5 = frozen by OLF's GeneratorVoltageControlManager. 6 arrives only as a BASE code
+// (GpuAcOuterLoopPacks.RL_BASE_RELOCATED, keep the two in step): "this entry does not own the pin on its V
+// row", which the seeding turns into 5 so the pass leaves that row alone. The DISTR_Q key renormalization drops any member
+// whose type is non-zero, which is why the freeze needs one; the reactive-limits pass must then LEAVE
+// type 5 alone, because a bus whose voltage control is off is not one of its controllers at all.
+#define RL_LIMIT_FROZEN 5
+#define RL_BASE_RELOCATED 6
 
 #endif  // OLF_GPU_COMMON_LOOP_KINDS_CUH

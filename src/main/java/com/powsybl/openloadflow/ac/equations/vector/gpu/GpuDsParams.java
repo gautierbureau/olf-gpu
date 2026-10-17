@@ -49,7 +49,7 @@ public record GpuDsParams(LoadFlowParameters.BalanceType balanceType, boolean us
      * there — factors, sign rule and limits included. A base load flow driven on the device across
      * several checks and restarts must anchor there too ({@code anchorOnInitialTargetP}); the
      * batched SA anchors at the converged base's targets, which is equivalent while the factors do
-     * not depend on the target P (see the DsPack javadoc).
+     * not depend on the target P (see the DistributedSlackPacker.DsPack javadoc).
      */
     public double anchorTargetP(LfGenerator g) {
         return anchorOnInitialTargetP ? g.getInitialTargetP() : g.getTargetP();

@@ -103,7 +103,7 @@ class GpuPilotSelfGroupTest extends AbstractLoadFlowNetworkFactory {
         ExtractionColumns columns = ExtractionColumns.of(network, es);
         // Every controller bus is its own RL entry here, in bus order, which is what the real pack builds.
         int[] rlBusNum = network.getBuses().stream().mapToInt(LfBus::getNum).toArray();
-        GpuAcOuterLoopPacks.PilotSelfPack pack = GpuAcOuterLoopPacks.pilotSelfGroups(network, columns, rlBusNum);
+        PilotSelfPacker.PilotSelfPack pack = PilotSelfPacker.pilotSelfGroups(network, columns, rlBusNum);
 
         assertEquals(1, pack.groupCount(), "the one pilot-self group must be packed");
         assertEquals(members.size(), pack.ptr()[1] - pack.ptr()[0], "every controller must be a member entry");
@@ -132,7 +132,7 @@ class GpuPilotSelfGroupTest extends AbstractLoadFlowNetworkFactory {
                 new com.powsybl.openloadflow.network.util.UniformValueVoltageInitializer());
         ExtractionColumns columns = ExtractionColumns.of(lf, es);
         int[] rlBusNum = lf.getBuses().stream().mapToInt(LfBus::getNum).toArray();
-        GpuAcOuterLoopPacks.PilotSelfPack pack = GpuAcOuterLoopPacks.pilotSelfGroups(lf, columns, rlBusNum);
+        PilotSelfPacker.PilotSelfPack pack = PilotSelfPacker.pilotSelfGroups(lf, columns, rlBusNum);
         assertEquals(0, pack.groupCount(), "a pilot that is not one of its own controllers must not be packed");
     }
 }

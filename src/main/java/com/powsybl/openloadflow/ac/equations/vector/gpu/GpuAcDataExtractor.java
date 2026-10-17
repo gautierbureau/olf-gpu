@@ -11,6 +11,7 @@ import com.powsybl.commons.PowsyblException;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.equations.EquationSystem;
+import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfNetwork;
 
 /**
@@ -24,8 +25,8 @@ import com.powsybl.openloadflow.network.LfNetwork;
  * (PV→PQ switching). The extracted structure is therefore the FIXED SUPERSET pattern,
  * identical across outer-loop activation switching, so a cached GPU context survives
  * it. What activation actually decides is carried per solve instead:
- * {@link #extractRowMode} (power equation vs slack/PV identity per row, applied as a
- * device-side mask) and {@link #extractTargets} (targets re-ordered to the stable rows).
+ * {@link GpuAcActivationExtractor#extractActivation} (power equation vs slack/PV identity per row, applied as a
+ * device-side mask, and the targets re-ordered to the stable rows by {@link GpuAcActivation#applyTargets}).
  *
  * <p>VALIDATES first, and throws {@link PowsyblException} on anything the GPU path does
  * not cover — unsupported variable types (e.g. transformer controls), unsupported
@@ -125,13 +126,13 @@ public final class GpuAcDataExtractor {
         GpuAcValidation.validate(es);
         ExtractionColumns columns = ExtractionColumns.of(network, es);
         GpuAcFamilyPacker.Packs family = GpuAcFamilyPacker.pack(network, columns, baseOpenBranchIds, baseOpenZiBranchIds);
-        GpuAcOuterLoopPacks.RlPack rl = GpuAcOuterLoopPacks.reactiveLimitsPack(network, es, columns, reactiveLimits);
-        GpuAcOuterLoopPacks.DqPack dq = GpuAcOuterLoopPacks.distrQPack(network, es, columns, family, rl);
+        ReactiveLimitsPacker.RlPack rl = ReactiveLimitsPacker.reactiveLimitsPack(network, es, columns, reactiveLimits);
+        DistrQPacker.DqPack dq = DistrQPacker.distrQPack(network, es, columns, family, rl);
         DistrRhoPacker.DrPack dr = DistrRhoPacker.distrRhoPack(network, es, columns);
         DistrShuntBPacker.DsbPack dsb = DistrShuntBPacker.distrShuntBPack(network, es, columns);
 
         RemoteMemberQPacker.RmqPack rmq = RemoteMemberQPacker.remoteMemberQPack(network, es, columns, family, reactiveLimits);
-        GpuAcOuterLoopPacks.DsPack ds = GpuAcOuterLoopPacks.distributedSlackPack(network, es, columns, distributedSlack, dsParams);
+        DistributedSlackPacker.DsPack ds = DistributedSlackPacker.distributedSlackPack(network, es, columns, distributedSlack, dsParams);
         // SLOPE-SVC rows (V + slope*sumQ = target, row mode 2): per-row slope, 0 everywhere else
         double[] rowSlope = new double[es.getIndex().getSortedVariablesToFind().size()];
         for (com.powsybl.openloadflow.network.LfBus bus : network.getBuses()) {
@@ -194,5 +195,21 @@ public final class GpuAcDataExtractor {
                 columns.qrPtr(), columns.qrRows(),
                 GpuAcArrays.flatI(family.obQAlt(), 2), GpuAcArrays.flatI(family.ziQAlt(), 2), rl.rlBaseQLimitType(),
                 columns.qrDepBase(), columns.qrBaseTargetRow(), columns.depGroupOfRow());
+    }
+
+    /** The couplers whose {@code DUMMY_P} / {@code DUMMY_Q} rows host a bus's power equations under the
+     *  coupler-tree relocation ({@link GpuAcRowIndexing#ziTreeRelocation}). A batched scenario has to know them:
+     *  inside an island every row must become an identity, and under the relocation two of those rows belong to
+     *  the coupler, not to the bus. */
+    public static java.util.Set<LfBranch> relocatedCouplerBranches(LfNetwork network,
+                                                                  EquationSystem<AcVariableType, AcEquationType> es) {
+        int[] childBusOfEdge = ExtractionColumns.of(network, es).ziChildBus();
+        java.util.Set<LfBranch> relocated = new java.util.HashSet<>();
+        for (LfBranch br : network.getBranches()) {
+            if (childBusOfEdge[br.getNum()] >= 0) {
+                relocated.add(br);
+            }
+        }
+        return relocated;
     }
 }

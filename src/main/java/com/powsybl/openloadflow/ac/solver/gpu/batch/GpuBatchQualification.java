@@ -7,6 +7,7 @@
  */
 package com.powsybl.openloadflow.ac.solver.gpu.batch;
 
+import com.powsybl.openloadflow.ac.equations.vector.gpu.DistrQPacker;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
@@ -458,7 +459,7 @@ final class GpuBatchQualification {
     /**
      * The base DISTR_Q pack's weights after {@link #updateMainReactiveKeys} ran on the touched buses, WITHOUT
      * re-extracting the network: a contribution's weight is {@code qPct_k - (j == k ? 1 : 0)} for the row's
-     * controller k and the contributing controller j (GpuAcOuterLoopPacks.buildDistrQContributions), and the
+     * controller k and the contributing controller j (DistrQPacker.buildDistrQContributions), and the
      * toggle changes only the qPct of the touched groups' controllers. Measured on network.xiidm: the
      * whole-network extraction this replaces cost 18.8 s of a 207 s cold run (one per generator contingency at
      * a DISTR_Q member). Returns null when a touched bus is the free controller of a group WITHOUT a candidate

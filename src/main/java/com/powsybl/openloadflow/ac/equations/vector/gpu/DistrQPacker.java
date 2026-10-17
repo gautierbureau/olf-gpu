@@ -1,0 +1,298 @@
+/**
+ * Copyright (c) 2026, RTE (http://www.rte-france.com)
+ * This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ * SPDX-License-Identifier: MPL-2.0
+ */
+package com.powsybl.openloadflow.ac.equations.vector.gpu;
+
+import com.powsybl.commons.PowsyblException;
+import com.powsybl.openloadflow.ac.equations.AcEquationType;
+import com.powsybl.openloadflow.ac.equations.AcVariableType;
+import com.powsybl.openloadflow.equations.EquationSystem;
+import com.powsybl.openloadflow.network.GeneratorVoltageControl;
+import com.powsybl.openloadflow.network.LfBranch;
+import com.powsybl.openloadflow.network.LfBus;
+import com.powsybl.openloadflow.network.LfGenerator;
+import com.powsybl.openloadflow.network.LfNetwork;
+import com.powsybl.openloadflow.network.LoadFlowModel;
+import com.powsybl.openloadflow.network.VoltageControl;
+
+import java.util.ArrayList;
+import java.util.List;
+
+/**
+ * The DISTR_Q rows of remote generator voltage control: each controller's reactive share of its group, as the
+ * branch and shunt reactive-flow terms that sum to it (OLF DistributionReactivePowerEquationTerm).
+ *
+ * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
+ */
+public final class DistrQPacker {
+
+    private DistrQPacker() {
+    }
+
+    /** DISTR_Q contributions in the flat device layout: {@code {elem, side, dqRow, kind}} per row + weight. */
+    record DqPack(int[] dqElem, int[] dqSide, double[] dqWeight, int[] dqRow, int[] dqKind,
+                  int[] dqKMember, int[] dqJMember,
+                  double[] dqMemberKey, int[] dqMemberRlEntry, int[] dqMemberGroupStart, int[] dqMemberGroupCount,
+                  int[] dqMemberRow, byte[] dqMemberHasRow, int[] dqMemberQrGroup, double[] dqMemberTargetQ,
+                  int[] dqMemberBusNum, int[] dqMemberTgtPtr, int[] dqMemberTgtPeer) {
+    }
+
+    /** Per-group member table for the IN-KERNEL reactive-key renormalization on a remote RL pin
+     *  (plan-B3): OLF's updateReactiveKeys zeroes a controller-DISABLED member's key and
+     *  renormalizes over the survivors — so the DISTR_Q weights are PIN-STATE-DEPENDENT and the
+     *  kernel recomputes them per scenario from the RAW keys (Control.createReactiveKeys) and the
+     *  per-(entry, scenario) limitType, replicating the CPU's zero-then-sum-in-member-order
+     *  arithmetic bit-for-bit. dqKMember/dqJMember are −1 for non-group contributions. */
+    private record MemberTables(java.util.Map<Integer, Integer> memberIdxByBusNum,
+                                List<Double> key, List<Integer> rlEntry,
+                                List<Integer> groupStart, List<Integer> groupCount,
+                                List<Integer> row, List<Byte> hasRow, List<Double> targetQ,
+                                List<Integer> busNum,
+                                /** Per member, the members whose targetQ OLF sums into its DISTR_Q target: the
+                                 *  elements of the member's OWN voltage control, which for a control MERGED into
+                                 *  another (DEPENDENT) is just its own — see the peer CSR in {@link DqPack}. */
+                                List<List<Integer>> tgtPeers) {
+    }
+
+    static DqPack distrQPack(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
+                             ExtractionColumns columns, GpuAcFamilyPacker.Packs family, ReactiveLimitsPacker.RlPack rl) {
+        // member tables (plan-B3): raw keys + RL-entry mapping + group ranges, in group member order
+        MemberTables mt = new MemberTables(new java.util.HashMap<>(), new ArrayList<>(), new ArrayList<>(),
+                new ArrayList<>(), new ArrayList<>(), new ArrayList<>(), new ArrayList<>(), new ArrayList<>(),
+                new ArrayList<>(), new ArrayList<>());
+        java.util.Map<Integer, Integer> rlEntryByBusNum = new java.util.HashMap<>();
+        for (int i = 0; i < rl.rlBusNum().length; i++) {
+            rlEntryByBusNum.put(rl.rlBusNum()[i], i);
+        }
+        List<Integer> qrGroupList = new ArrayList<>();
+        for (LfBus pilot : network.getBuses()) {
+            GeneratorVoltageControl gvc = pilot.getGeneratorVoltageControl()
+                    .filter(c -> c.getMergeStatus() == VoltageControl.MergeStatus.MAIN)
+                    .filter(c -> pilot.isGeneratorVoltageControlled() && !c.isLocalControl())
+                    .orElse(null);
+            if (gvc == null) {
+                continue;
+            }
+            List<LfBus> controllers = gvc.getMergedControllerElements();
+            double[] rawKeys = com.powsybl.openloadflow.network.Control.createReactiveKeys(
+                    controllers, com.powsybl.openloadflow.network.LfGenerator.GeneratorControlType.VOLTAGE);
+            int start = mt.key().size();
+            LfBus freeMember = controllers.stream().filter(gvc::isControllerEnabled).findFirst().orElse(null);
+            // the pilot's relocation group: the kernels re-pick the pilot-Q carrier by mode-scan, so
+            // the CURRENT carrier's DISTR_Q row is suppressed and its target carries the pilot's Q
+            // instead. Read from qrGroupOfPilot, NOT decoded from qRowAlt: table membership and Q
+            // re-routing are separate facts that happened to share one encoding.
+            int qrGroup = columns.qrGroupOfPilot()[pilot.getNum()];
+            if (System.getenv("OLF_GPU_QR_TRACE") != null) {  // the raw reactive keys THIS extraction packs
+                StringBuilder sb = new StringBuilder("QR_TRACE keys pilot=" + pilot.getId() + " members=");
+                for (int i = 0; i < controllers.size(); i++) {
+                    sb.append(controllers.get(i).getId()).append(':').append(rawKeys[i])
+                            .append("(range=").append(controllers.get(i).getMaxQ() - controllers.get(i).getMinQ()).append(") ");
+                }
+                StackTraceElement[] st = new Throwable().getStackTrace();
+                sb.append(" caller=").append(st.length > 4 ? st[4].getClassName().replaceAll(".*\\.", "") + "." + st[4].getMethodName() + ":" + st[4].getLineNumber() : "?");
+                System.err.println(sb);
+            }
+            for (int i = 0; i < controllers.size(); i++) {
+                LfBus m = controllers.get(i);
+                mt.memberIdxByBusNum().put(m.getNum(), mt.key().size());
+                mt.key().add(rawKeys[i]);
+                mt.rlEntry().add(rlEntryByBusNum.getOrDefault(m.getNum(), -1));
+                // The member's DISTR_Q row, NOT simply its V column: under the coupler-tree relocation a
+                // relocated child's DISTR_Q lives on its parent coupler's DUMMY_Q (the same move
+                // buildDistrQContributions makes through distrQRow's tree overload), and its own V row
+                // carries that coupler's ZERO_V instead. Pointing this bookkeeping at the V row made the
+                // DISTR_Q target updater write there, which overwrote the BUS_TARGET_V target a scenario
+                // opening the coupler had just set - measured as row 12566 ending at target 0 instead of
+                // 1.142 on BUS-6014_BBS_2.
+                int mParent = columns.ziParentEdge()[m.getNum()];
+                mt.row().add(mParent >= 0 && columns.dummyQCol()[mParent] >= 0
+                        ? columns.dummyQCol()[mParent] : columns.vCol()[m.getNum()]);
+                // a member OWNS a DISTR_Q row when the equation EXISTS and it is not the FREE
+                // member (whose row carries the pilot's relocated Q)
+                mt.hasRow().add((byte) (m != freeMember
+                        && es.getEquation(m.getNum(), AcEquationType.DISTR_Q).isPresent() ? 1 : 0));
+                // the member's UNPINNED targetQ (generationTargetQ - loadTargetQ), which is what
+                // AcTargetVector reads for every member the RL loop has not frozen; a frozen
+                // member's targetQ is its q limit and the kernel derives that from the RL tables.
+                mt.targetQ().add(ReactiveLimitsPacker.unpinnedTargetQ(m));
+                mt.busNum().add(m.getNum());
+                // AcTargetVector reads the member's OWN control's merged elements, so a control merged INTO this
+                // group (DEPENDENT: its own list is just its controller) sums only its own targetQ. Recorded as bus
+                // numbers here and resolved to member indices once every member is known.
+                mt.tgtPeers().add(m.getGeneratorVoltageControl()
+                        .map(c -> c.getMergedControllerElements().stream().map(LfBus::getNum).toList())
+                        .orElse(List.of(m.getNum())));
+                qrGroupList.add(qrGroup);
+            }
+            for (int i = 0; i < controllers.size(); i++) {
+                mt.groupStart().add(start);
+                mt.groupCount().add(controllers.size());
+            }
+        }
+        List<int[]> dq = new ArrayList<>();      // {elem, side, dqRow, kind, kMember, jMember} per DISTR_Q contribution
+        List<Double> dqW = new ArrayList<>();    // weight per contribution
+        buildDistrQContributions(network, es, columns.vCol(), family.cbElemOf(), family.shElemOf(),
+                family.obElemOf(), columns.dummyQCol(), columns.ziParentEdge(), dq, dqW, mt.memberIdxByBusNum());
+        // dqKind: 0 = closed-branch q1/q2, 1 = shunt q, 2 = open-branch q,
+        // 3 = zero-impedance DUMMY_Q (linear, elem holds the var column)
+        int[] dqKind = new int[dq.size()];
+        int[] dqKMember = new int[dq.size()];
+        int[] dqJMember = new int[dq.size()];
+        int[] dqElem = new int[dq.size()];
+        int[] dqSide = new int[dq.size()];
+        int[] dqRow = new int[dq.size()];
+        double[] dqWeight = new double[dq.size()];
+        for (int i = 0; i < dq.size(); i++) {
+            dqElem[i] = dq.get(i)[0];
+            dqSide[i] = dq.get(i)[1];
+            dqRow[i] = dq.get(i)[2];
+            dqKind[i] = dq.get(i)[3];
+            dqKMember[i] = dq.get(i)[4];
+            dqJMember[i] = dq.get(i)[5];
+            dqWeight[i] = dqW.get(i);
+        }
+        byte[] hasRow = new byte[mt.hasRow().size()];
+        for (int i = 0; i < hasRow.length; i++) {
+            hasRow[i] = mt.hasRow().get(i);
+        }
+        int[] tgtPtr = new int[mt.tgtPeers().size() + 1];
+        List<Integer> tgtPeer = new ArrayList<>();
+        for (int i = 0; i < mt.tgtPeers().size(); i++) {
+            tgtPtr[i] = tgtPeer.size();
+            for (int busNum : mt.tgtPeers().get(i)) {
+                Integer peer = mt.memberIdxByBusNum().get(busNum);
+                if (peer != null) {                          // a peer outside the packed group cannot be summed
+                    tgtPeer.add(peer);
+                }
+            }
+        }
+        tgtPtr[tgtPtr.length - 1] = tgtPeer.size();
+        return new DqPack(dqElem, dqSide, dqWeight, dqRow, dqKind, dqKMember, dqJMember,
+                GpuAcArrays.toDoubleArray(mt.key()), GpuAcArrays.toIntArray(mt.rlEntry()),
+                GpuAcArrays.toIntArray(mt.groupStart()), GpuAcArrays.toIntArray(mt.groupCount()),
+                GpuAcArrays.toIntArray(mt.row()), hasRow, GpuAcArrays.toIntArray(qrGroupList),
+                GpuAcArrays.toDoubleArray(mt.targetQ()), GpuAcArrays.toIntArray(mt.busNum()),
+                tgtPtr, GpuAcArrays.toIntArray(tgtPeer));
+    }
+
+    /**
+     * Build the weighted closed-branch reactive contributions of every active DISTR_Q row (remote
+     * generator voltage control). For a control group, the row at controller {@code Gk}'s BUS_V row is
+     * {@code DISTR_Q_k = qPct_k·Σ_j q_Gj − q_Gk}, so each controller {@code Gj}'s reactive injection
+     * (the q1/q2 flow of each branch incident to {@code Gj}) contributes with weight
+     * {@code qPct_k − (j==k ? 1 : 0)}. A controller's reactive injection is its closed-branch q1/q2 (kind 0),
+     * a fixed shunt's q (kind 1), a half-open incident branch's connected-side q (kind 2), or a zero-impedance
+     * spanning-tree branch's linear DUMMY_Q variable term (kind 3) — mirroring the terms {@code createReactiveTerms}
+     * sums. The pilot bus's own reactive balance is handled by qRow (routed to the free controller's BUS_V row);
+     * the controllers' own per-bus Q scatter is suppressed there too.
+     */
+    private static void buildDistrQContributions(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
+                                                 int[] vCol, int[] cbElemOf, int[] shElemOf, int[] obElemOf,
+                                                 int[] dummyQCol, int[] ziParentEdge, List<int[]> out, List<Double> weights,
+                                                 java.util.Map<Integer, Integer> memberIdxByBusNum) {
+        for (LfBus pilot : network.getBuses()) {
+            GeneratorVoltageControl gvc = pilot.getGeneratorVoltageControl()
+                    .filter(c -> c.getMergeStatus() == VoltageControl.MergeStatus.MAIN)
+                    .filter(c -> pilot.isGeneratorVoltageControlled() && !c.isLocalControl())
+                    .orElse(null);
+            if (gvc == null) {
+                continue;
+            }
+            List<LfBus> controllers = gvc.getMergedControllerElements();
+            // CANONICAL for a group with a candidate table: the free (reference) controller is the FIRST
+            // member, as in the all-enabled state — the per-scenario row modes and the carrier gate decide
+            // which DISTR_Q rows are live. Else (no table) the extraction-time free member, as before.
+            LfBus freeCtl = GpuAcRowIndexing.hasCandidateTable(gvc, es)
+                    ? controllers.get(0)
+                    : controllers.stream().filter(b -> gvc.isControllerEnabled(b)).findFirst().orElse(null);
+            if (System.getenv("OLF_GPU_FREECTL_TRACE") != null) {
+                System.err.printf("FREECTL pilot=%s members=%s freeCtl=%s olfHasDistrQ=%s%n",
+                        gvc.getControlledBus().getId(),
+                        controllers.stream().map(LfBus::getId).toList(),
+                        freeCtl == null ? "-" : freeCtl.getId(),
+                        controllers.stream().map(b -> b.getId() + "="
+                                + !es.getEquation(b.getNum(), AcEquationType.DISTR_Q).isEmpty()).toList());
+            }
+            for (LfBus gk : controllers) {
+                // EXISTENCE-keyed (the A1 lesson): pack every non-free member whose DISTR_Q equation
+                // EXISTS — a base-PINNED member's row is inactive (mode 4, own Q) but an in-flight
+                // UNPIN re-activates it, and the union pattern must already hold its slots. The row-
+                // mode/fill gates decide per scenario which face the row shows.
+                if (gk == freeCtl || es.getEquation(gk.getNum(), AcEquationType.DISTR_Q).isEmpty()) {
+                    continue;                                // the free controller carries the pilot's Q
+                }
+                int dqRow = GpuAcRowIndexing.distrQRow(es, gk, ziParentEdge, dummyQCol);
+                double qpk = gk.getRemoteControlReactivePercent();
+                int kIdx = memberIdxByBusNum.getOrDefault(gk.getNum(), -1);
+                for (LfBus gj : controllers) {
+                    double weight = qpk - (gj == gk ? 1.0 : 0.0);
+                    int jIdx = memberIdxByBusNum.getOrDefault(gj.getNum(), -1);
+                    if (gj.getControllerShunt().isPresent()) {
+                        throw new PowsyblException("GPU AC solver: DISTR_Q controller " + gj.getId()
+                                + " has a voltage-controlling shunt (SHUNT_B) reactive contribution (not supported)");
+                    }
+                    if (gj.getShunt().isPresent()) {         // a fixed shunt's reactive joins the q sum
+                        out.add(new int[] {shElemOf[gj.getNum()], 0, dqRow, 1, kIdx, jIdx});
+                        weights.add(weight);
+                    }
+                    for (LfBranch brj : gj.getBranches()) {
+                        if (brj.isDisabled()) {
+                            continue;
+                        }
+                        int side = brj.getBus1() == gj ? 0 : 1;
+                        int e = cbElemOf[brj.getNum()];
+                        if (e >= 0) {                        // closed branch: weighted q1/q2 (kind 0)
+                            out.add(new int[] {e, side, dqRow, 0, kIdx, jIdx});
+                            weights.add(weight);
+                            continue;
+                        }
+                        int oe = obElemOf[brj.getNum()];
+                        if (oe >= 0) {                       // half-open branch incident on the controller:
+                            // its connected-side reactive flow (shunt + series) joins the q sum (kind 2)
+                            out.add(new int[] {oe, side, dqRow, 2, kIdx, jIdx});
+                            weights.add(weight);
+                            continue;
+                        }
+                        if (brj.isZeroImpedance(LoadFlowModel.AC)) {
+                            // a zero-impedance coupler: its reactive flow is the linear DUMMY_Q variable (+1 if the
+                            // controller is bus1, −1 if bus2) — the term createReactiveTerms adds for a spanning-tree
+                            // edge. EVERY coupler is packed, not just the base tree's: OLF re-elects its tree per
+                            // contingency, and a coupler out of the BASE tree that a contingency brings into it
+                            // carries flow there. The kernel drops the term in every scenario where the coupler's
+                            // dummy row is an identity (out of the tree, or opened), which is exactly the base tree's
+                            // own filter. Packing only the base tree left that flow out of every member's DISTR_Q:
+                            // network.xiidm busbar HFU re-trees HFT_1's couplers HHQ/HHS/HHO, and the reactive flow
+                            // circulating HFT_3 -> HFT_1 -> HFT_2 was in no equation at all (1.25e12 pu after the
+                            // first solve, its rounding moving the slack by +-0.058 MW from one run to the next).
+                            int dqCol = dummyQCol[brj.getNum()];
+                            if (dqCol < 0) {
+                                throw new PowsyblException("GPU AC solver: DISTR_Q controller " + gj.getId()
+                                        + " has a zero-impedance branch " + brj.getId() + " without a DUMMY_Q variable");
+                            }
+                            // Keyed by dummy-Q column OR, with a leading 'r', by dqROW - when the
+                            // question is "what lands in THIS equation" the column is not known yet.
+                            String dq3 = System.getenv("OLF_GPU_DQ3_TRACE");
+                            if (dq3 != null && (dq3.startsWith("r")
+                                    ? dqRow == Integer.parseInt(dq3.substring(1))
+                                    : dqCol == Integer.parseInt(dq3))) {
+                                System.err.printf("DQ3 gk=%s qpk=%.9f gj=%s side=%d dqRow=%d weight=%.9f"
+                                        + " signed=%.9f%n", gk.getId(), qpk, gj.getId(), side, dqRow,
+                                        weight, weight * (side == 0 ? 1.0 : -1.0));
+                            }
+                            out.add(new int[] {dqCol, side, dqRow, 3, kIdx, jIdx});  // elem = the DUMMY_Q var column
+                            weights.add(weight * (side == 0 ? 1.0 : -1.0));
+                            continue;
+                        }
+                        throw new PowsyblException("GPU AC solver: DISTR_Q controller " + gj.getId()
+                                + " has an unsupported branch " + brj.getId() + " reactive contribution");
+                    }
+                }
+            }
+        }
+    }
+}

@@ -7,6 +7,7 @@
  */
 package com.powsybl.openloadflow.ac.solver.gpu.batch;
 
+import com.powsybl.openloadflow.ac.equations.vector.gpu.ReactiveLimitsPacker;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.RemoteMemberQPacker;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
@@ -704,7 +705,7 @@ final class GpuBatchInjectionOutages {
         if (rlEntry >= 0 && !toPq) {
             minQDelta = -lost.stream().mapToDouble(g -> qContrib(g, LfGenerator::getMinQ)).sum();
             maxQDelta = -lost.stream().mapToDouble(g -> qContrib(g, LfGenerator::getMaxQ)).sum();
-            // the same SVCs GpuAcOuterLoopPacks.addSvcQuadratic folds into the entry's coefficients
+            // the same SVCs ReactiveLimitsPacker.addSvcQuadratic folds into the entry's coefficients
             double v2 = bus.getV() * bus.getV();
             for (LfGenerator g : lost) {
                 if (g instanceof com.powsybl.openloadflow.network.LfStaticVarCompensator

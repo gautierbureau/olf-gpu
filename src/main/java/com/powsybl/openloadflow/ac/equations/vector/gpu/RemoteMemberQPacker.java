@@ -114,7 +114,7 @@ public final class RemoteMemberQPacker {
                 // 1.218 (loadQ) + 2 * (0.910540234 - 1.218) = 0.603080 — the doubled injection, to six digits.
                 // The reactive-limit check then never saw the pilot beyond its limit and never pinned it, which
                 // is what kept the rotation path from ever reaching the pinned arrangement it exists for.
-                if (GpuAcOuterLoopPacks.isPilotSelfEntry(bus) && columns.qRowAlt()[bus.getNum()] <= -2) {
+                if (PilotSelfPacker.isPilotSelfEntry(bus) && columns.qRowAlt()[bus.getNum()] <= -2) {
                     continue;
                 }
                 var vc = bus.getGeneratorVoltageControl().orElseThrow();

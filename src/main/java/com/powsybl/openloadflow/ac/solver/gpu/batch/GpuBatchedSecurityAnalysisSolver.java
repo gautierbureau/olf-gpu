@@ -16,7 +16,6 @@ import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcActivationExtractor
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcDataCache;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcDataExtractor;
-import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcOuterLoopPacks;
 import com.powsybl.openloadflow.ac.solver.NewtonRaphsonParameters;
 import com.powsybl.openloadflow.ac.solver.gpu.GpuNewtonRaphson;
 import com.powsybl.openloadflow.equations.EquationSystem;
@@ -345,7 +344,7 @@ public final class GpuBatchedSecurityAnalysisSolver {
                 : null;
         // Couplers whose DUMMY rows host a bus's power equations under the tree relocation: an island has to
         // freeze those rows too (see GpuBatchQualification.islandedFrozen). Empty when the relocation is off.
-        Set<LfBranch> relocatedCouplers = GpuAcOuterLoopPacks.relocatedCouplerBranches(network, equationSystem);
+        Set<LfBranch> relocatedCouplers = GpuAcDataExtractor.relocatedCouplerBranches(network, equationSystem);
         GpuBatchQualification.ScenarioPlan plan = GpuBatchQualification.planScenarios(contingencies, qualifications,
                 elementMapper, gpuData, equationSystem, dsSum, slackParticipates, dsParams, distrRhoControllers,
                 relocatedCouplers, reactiveLimits, config.incrementalTransformerControl());

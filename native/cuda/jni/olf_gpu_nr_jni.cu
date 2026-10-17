@@ -5881,6 +5881,796 @@ static void refineLanes(BatchSolverContext* ctx, int lanes, int n, int nnz, cons
     }
 }
 
+// The state the outer-loop driver shares between solveBatchContext and its phase steps.
+struct DriverPass {
+    int n = 0;
+    int nnz = 0;
+    int nS = 0;
+    int outer = 0;
+    std::vector<char> active;
+    std::vector<char> live;
+    std::vector<char> rlActive;
+    std::vector<char> loopRejected;
+    int loopIdx = 0;
+    int loopOrder[MAX_DEVICE_LOOPS] = {};
+    BatchResult res;
+    bool useDynRlLimits = false;
+    bool deviceFixedIter = false;
+    double reactiveLimitTol = 0.0;
+    int nRlVtOv = 0;
+    DeviceBuf dRlVtOvSlotIdx;
+    DeviceBuf dRlVtOvVal;
+};
+
+static auto launchPilotVeqInner(BatchSolverContext* ctx, DriverPass& drv, bool staticLimits = false, bool continuedPins = false) {
+    const int& n = drv.n;
+    const int& nS = drv.nS;
+    const bool& useDynRlLimits = drv.useDynRlLimits;
+    const double& REACTIVE_LIMIT_TOL = drv.reactiveLimitTol;
+    const int& nRlVtOv = drv.nRlVtOv;
+    DeviceBuf& dRlVtOvSlotIdx = drv.dRlVtOvSlotIdx;
+    DeviceBuf& dRlVtOvVal = drv.dRlVtOvVal;
+    const bool useDyn = useDynRlLimits && !staticLimits;
+    if (ctx->hasDqQrGroups && ctx->st->nQr > 0) {
+        updatePilotVeqBatch<<<grid(ctx->st->nQr * nS), BLOCK, 0, ctx->stream>>>(
+                    ctx->st->nQr, nS, n,
+                    ctx->st->dQrPtr.as<int>(), ctx->st->dQrRows.as<int>(), ctx->dQrGenVc.as<char>(),
+                    ctx->dQrPilotQ.as<double>(), ctx->dMode.as<int>(), ctx->dTarget.as<double>(),
+                    ctx->dQrVeqOff.as<char>(), ctx->dQrSavedVT.as<double>(),
+                    ctx->dRlActive.as<char>(), ctx->dRlSwitched.as<char>(),
+                    ctx->nFrozenRow, ctx->nFrozenRow ? ctx->dFrozenRow.as<int>() : nullptr,
+                    psEntryPtr(ctx),
+                ctx->dRlLimitType.p ? ctx->dRlLimitType.as<char>() : nullptr, ctx->nrl,
+                useDyn ? ctx->dRlMinQDyn.as<double>() : ctx->dRlMinQ.as<double>(),
+                useDyn ? ctx->dRlMaxQDyn.as<double>() : ctx->dRlMaxQ.as<double>(),
+                useDyn ? ctx->dRlLoadQDyn.as<double>() : ctx->dRlLoadQ.as<double>(),
+                ctx->rlRobust ? ctx->dRlInitTgtQ.as<double>() : nullptr, useDyn ? 1 : 0,
+                ctx->dRlVtarget.p ? ctx->dRlVtarget.as<double>() : nullptr,
+                ctx->dQrPilotRlEntry.p ? ctx->dQrPilotRlEntry.as<int>() : nullptr,
+                nRlVtOv, nRlVtOv > 0 ? dRlVtOvSlotIdx.as<int>() : nullptr,
+                nRlVtOv > 0 ? dRlVtOvVal.as<double>() : nullptr,
+                ctx->nSvc > 0 ? ctx->dSvcRlVt.as<double>() : nullptr,
+                ctx->nDqMembers, ctx->dDqMemberQrGroup.p ? ctx->dDqMemberQrGroup.as<int>() : nullptr,
+                ctx->dDqMemberRlEntry.p ? ctx->dDqMemberRlEntry.as<int>() : nullptr,
+                ctx->nRlIslanded > 0 ? ctx->dRlIslanded.as<char>() : nullptr,
+                ctx->hasDqSub ? ctx->dDqSub.as<char>() : nullptr, ctx->hasDqSub ? ctx->dQrMemberStart.as<int>() : nullptr,
+                REACTIVE_LIMIT_TOL, ctx->nRlGenLost > 0 ? ctx->dRlGenLost.as<char>() : nullptr,
+                ctx->st->dQrDepBase.p ? ctx->st->dQrDepBase.as<int>() : nullptr,
+                ctx->st->dRelocOwn.p ? ctx->st->dRelocOwn.as<int>() : nullptr,
+                continuedPins && ctx->hasRlPinTgtIn ? ctx->dRlPinTgtIn.as<double>() : nullptr);
+    }
+}
+
+static auto launchDistrQTargetsInner(BatchSolverContext* ctx, DriverPass& drv) {
+    const int& n = drv.n;
+    const int& nS = drv.nS;
+    const bool& useDynRlLimits = drv.useDynRlLimits;
+    if (ctx->nRlRemote > 0 && ctx->nDqMembers > 0) {
+        updateDistrQTargetsBatch<<<grid(ctx->nDqMembers * nS), BLOCK, 0, ctx->stream>>>(
+                    ctx->nDqMembers, nS, n, ctx->nrl,
+                    ctx->dDqMemberKey.as<double>(), ctx->dDqMemberRlEntry.as<int>(),
+                    ctx->dDqMemberGroupStart.as<int>(), ctx->dDqMemberGroupCount.as<int>(),
+                    ctx->dDqMemberRow.as<int>(), ctx->dDqMemberHasRow.as<char>(),
+                    ctx->dRlVrow.as<int>(),
+                    useDynRlLimits ? ctx->dRlMinQDyn.as<double>() : ctx->dRlMinQ.as<double>(),
+                    useDynRlLimits ? ctx->dRlMaxQDyn.as<double>() : ctx->dRlMaxQ.as<double>(),
+                    useDynRlLimits ? ctx->dRlLoadQDyn.as<double>() : ctx->dRlLoadQ.as<double>(), ctx->dRlLimitType.as<char>(), useDynRlLimits ? 1 : 0,
+                    ctx->dTarget.as<double>(), ctx->dRlActive.as<char>(),
+                    ctx->dDqMemberTargetQ.as<double>(),
+                    ctx->hasDqQrGroups ? ctx->dDqMemberQrGroup.as<int>() : nullptr,
+                    ctx->st->nQr > 0 ? ctx->st->dQrPtr.as<int>() : nullptr,
+                    ctx->st->nQr > 0 ? ctx->st->dQrRows.as<int>() : nullptr,
+                    ctx->dMode.as<int>(),
+                    ctx->hasDqQrGroups ? ctx->dQrPilotQ.as<double>() : nullptr, ctx->st->nQr,
+                    ctx->nDqInact, ctx->nDqInact ? ctx->dDqInact.as<int>() : nullptr,
+                    ctx->nFrozenRow, ctx->nFrozenRow ? ctx->dFrozenRow.as<int>() : nullptr,
+                    ctx->nDqTqOv, ctx->nDqTqOv ? ctx->dDqTqOvKey.as<int>() : nullptr,
+                    ctx->nDqTqOv ? ctx->dDqTqOvVal.as<double>() : nullptr,
+                    ctx->dDqMemberTgtPtr.as<int>(), ctx->dDqMemberTgtPeer.as<int>(),
+                    psEntryPtr(ctx),
+                    ctx->st->dRelocOwn.p != nullptr
+                            ? ctx->st->dRelocOwn.as<int>() : nullptr,
+                ctx->hasDqSub ? ctx->dDqSub.as<char>() : nullptr, ctx->hasDqSub ? ctx->dQrMemberStart.as<int>() : nullptr,
+                ctx->nRlGenLost > 0 ? ctx->dRlGenLost.as<char>() : nullptr,
+                ctx->st->dQrDepBase.p ? ctx->st->dQrDepBase.as<int>() : nullptr,
+                ctx->dQrVeqOff.p ? ctx->dQrVeqOff.as<char>() : nullptr,
+                    ctx->dRlInitTgtQ.as<double>(), ctx->dRlQrow.as<int>(),
+                    ctx->nDqKeyOv, ctx->nDqKeyOv ? ctx->dDqKeyOvIdx.as<int>() : nullptr, ctx->nDqKeyOv ? ctx->dDqKeyOvKey.as<double>() : nullptr);
+    }
+}
+
+static auto fillActiveBatch(BatchSolverContext* ctx, DriverPass& drv, bool fOnly) {
+    const int& n = drv.n;
+    const int& nnz = drv.nnz;
+    const int& nS = drv.nS;
+    const int& outer = drv.outer;
+    const bool& deviceFixedIter = drv.deviceFixedIter;
+    if (ctx->hasPilotSelf && ctx->dPsSkip.p != nullptr && ctx->st->nQr > 0) {
+        // Recompute the PILOT-SELF gate from the CURRENT pin states BEFORE any family fill: such a pilot
+        // has a Q balance to relocate only once a reactive limit has pinned it, and the RL pass moves
+        // pins between passes. The closed/open-branch and shunt fills are what route the pilot's raw q
+        // through it (ziDynDest), so it must be current when THEY run — launched after them (before the
+        // DISTR_Q fill only) the FIRST fill of every context read an unset gate and put the unpinned
+        // pilot's raw q on the carrier row on top of its DISTR_Q terms: row 0 of the 4-bus
+        // pilot-as-controller fixture assembled -1.451 against OLF's -5.715 (= OLF + 1.0 * q_pilot), and
+        // rte6515's base started from |f(x0)| 117.908 against OLF's 117.845.
+        pilotSelfGateBatch<<<grid(ctx->st->nQr * nS), BLOCK, 0, ctx->stream>>>(
+                ctx->st->nQr, nS, ctx->nrl, ctx->dPsPilotEntry.as<int>(),
+                ctx->dRlLimitType.as<char>(),
+                ctx->nRlIslanded > 0 ? ctx->dRlIslanded.as<char>() : nullptr, ctx->dPsSkip.as<char>());
+    }
+    if (!fOnly) {
+        CUDA_CHECK(cudaMemsetAsync(ctx->dVals.p, 0, static_cast<size_t>(nnz) * nS * sizeof(double), ctx->stream));
+    }
+    initFBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, ctx->dTarget.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>());
+    if (ctx->st->cb.ne) {
+        if (fOnly) {
+            fillClosedBranchBatchF<<<grid(ctx->st->cb.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->cb.ne, nS, n, nnz, ctx->nElements, ctx->cbOffset, ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->cb.dest.as<int>(), ctx->dX.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>(), ctx->st->cb.altDest.as<int>(), ctx->st->cb.selRow.as<int>(), ctx->dMode.as<int>(), ctx->st->cb.dynReloc ? 1 : 0, ctx->st->cb.phaseCtl ? ctx->st->cb.pcDest.as<int>() : nullptr, ctx->st->cb.phaseCtl ? ctx->st->cb.pcSel.as<int>() : nullptr, withPilotSelf(relocOf(ctx->st->cb, ctx->st.get()), ctx));
+        } else {
+            fillClosedBranchBatch<<<grid(ctx->st->cb.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->cb.ne, nS, n, nnz, ctx->nElements, ctx->cbOffset, ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->cb.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>(), ctx->st->cb.altDest.as<int>(), ctx->st->cb.selRow.as<int>(), ctx->dMode.as<int>(), ctx->st->cb.dynReloc ? 1 : 0, ctx->st->cb.phaseCtl ? ctx->st->cb.pcDest.as<int>() : nullptr, ctx->st->cb.phaseCtl ? ctx->st->cb.pcSel.as<int>() : nullptr, withPilotSelf(relocOf(ctx->st->cb, ctx->st.get()), ctx));
+        }
+    }
+    {
+        static const char* cbProbe = std::getenv("OLF_GPU_CB_PROBE");
+        static bool cbProbed = false;
+        if (cbProbe != nullptr && !cbProbed && nS > 1 && ctx->st->cb.ne) {
+            cbProbed = true;
+            cbRowProbe<<<1, 1, 0, ctx->stream>>>(nS, std::atoi(cbProbe), ctx->st->cb.in.as<double>(),
+                    ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>(),
+                    ctx->nElements, ctx->cbOffset, ctx->dDisabled.as<char>(), ctx->dActive.as<char>());
+            CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+        }
+    }
+    if (ctx->st->ob.ne) {
+        if (fOnly) {
+            fillOpenBranchBatchF<<<grid(ctx->st->ob.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->ob.ne, nS, n, nnz, ctx->nElements, ctx->obOffset, ctx->st->ob.in.as<double>(), ctx->st->ob.ix.as<int>(), ctx->st->ob.dest.as<int>(), ctx->dX.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->st->ob.altDest.as<int>(), ctx->st->ob.selRow.as<int>(), ctx->dMode.as<int>(), ctx->st->ob.dynReloc ? 1 : 0, withPilotSelf(relocOf(ctx->st->ob, ctx->st.get()), ctx));
+        } else {
+            fillOpenBranchBatch<<<grid(ctx->st->ob.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->ob.ne, nS, n, nnz, ctx->nElements, ctx->obOffset, ctx->st->ob.in.as<double>(), ctx->st->ob.ix.as<int>(), ctx->st->ob.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->st->ob.altDest.as<int>(), ctx->st->ob.selRow.as<int>(), ctx->dMode.as<int>(), ctx->st->ob.dynReloc ? 1 : 0, withPilotSelf(relocOf(ctx->st->ob, ctx->st.get()), ctx));
+        }
+    }
+    if (ctx->st->sh.ne) {
+        if (fOnly) {
+            fillShuntBatchF<<<grid(ctx->st->sh.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->sh.ne, nS, n, nnz, ctx->nElements, ctx->shOffset, ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(), ctx->st->sh.dest.as<int>(), ctx->dX.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->nShOv, ctx->dShOvSlotElem.as<int>(), ctx->dShOvGb.as<double>(), ctx->st->sh.altDest.as<int>(), ctx->st->sh.selRow.as<int>(), ctx->dMode.as<int>(), ctx->st->sh.dynReloc ? 1 : 0, withPilotSelf(relocOf(ctx->st->sh, ctx->st.get()), ctx));
+        } else {
+            fillShuntBatch<<<grid(ctx->st->sh.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->sh.ne, nS, n, nnz, ctx->nElements, ctx->shOffset, ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(), ctx->st->sh.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->nShOv, ctx->dShOvSlotElem.as<int>(), ctx->dShOvGb.as<double>(), ctx->st->sh.altDest.as<int>(), ctx->st->sh.selRow.as<int>(), ctx->dMode.as<int>(), ctx->st->sh.dynReloc ? 1 : 0, withPilotSelf(relocOf(ctx->st->sh, ctx->st.get()), ctx));
+        }
+    }
+    // voltage-dependent load model: own guarded block (NOT inside the shunt guard — a modeled
+    // load needs no shunt present); residual always, Jacobian slot unless the F-only pass
+    if (ctx->st->nvdl) {
+        fillVdlBatch<<<grid(ctx->st->nvdl * nS), BLOCK, 0, ctx->stream>>>(ctx->st->nvdl, nS, n, nnz, ctx->st->dVdlIn.as<double>(), ctx->st->dVdlIdx.as<int>(), ctx->st->dVdlDest.as<int>(), ctx->dX.as<double>(), fOnly ? nullptr : ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->st->vdlDyn ? ctx->st->dVdlAltRow.as<int>() : nullptr, ctx->st->vdlDyn ? ctx->st->dVdlAltDest.as<int>() : nullptr, ctx->st->vdlDyn ? ctx->dMode.as<int>() : nullptr);
+    }
+    if (ctx->st->hv.ne) {
+        if (fOnly) {
+            fillHvdcBatchF<<<grid(ctx->st->hv.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->hv.ne, nS, n, nnz, ctx->nElements, ctx->hvOffset, ctx->st->hv.in.as<double>(), ctx->st->hv.ix.as<int>(), ctx->st->hv.dest.as<int>(), ctx->dX.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->st->hv.altDest.as<int>(), ctx->st->hv.selRow.as<int>(), ctx->dMode.as<int>(), ctx->st->hv.dynReloc ? 1 : 0);
+        } else {
+            fillHvdcBatch<<<grid(ctx->st->hv.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->hv.ne, nS, n, nnz, ctx->nElements, ctx->hvOffset, ctx->st->hv.in.as<double>(), ctx->st->hv.ix.as<int>(), ctx->st->hv.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->st->hv.altDest.as<int>(), ctx->st->hv.selRow.as<int>(), ctx->dMode.as<int>(), ctx->st->hv.dynReloc ? 1 : 0);
+        }
+    }
+int dqTraceRow = gpuDqTraceRow();
+if (ctx->ndq) fillDistrQBatch<<<grid(ctx->ndq * nS), BLOCK, 0, ctx->stream>>>(ctx->ndq, nS, n, nnz, ctx->nElements, ctx->cbOffset, ctx->obOffset, ctx->st->dDqElem.as<int>(), ctx->st->dDqSide.as<int>(), ctx->st->dDqKind.as<int>(), ctx->st->dDqWeight.as<double>(), ctx->st->dDqDest.as<int>(), ctx->st->dDqAlt.as<int>(), ctx->st->dDqSel.as<int>(), ctx->st->dDqZiRow.as<int>(), ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(), ctx->st->ob.in.as<double>(), ctx->st->ob.ix.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->nDqOv, ctx->nDqOv ? ctx->dDqOvIdx.as<int>() : nullptr, ctx->nDqOv ? ctx->dDqOvW.as<double>() : nullptr,
+            ctx->nDqKeyOv, ctx->nDqKeyOv ? ctx->dDqKeyOvIdx.as<int>() : nullptr, ctx->nDqKeyOv ? ctx->dDqKeyOvKey.as<double>() : nullptr, ctx->dMode.as<int>(), ctx->nDqInact,
+            ctx->nDqInact ? ctx->dDqInact.as<int>() : nullptr,
+            ctx->nDqDyn ? ctx->dDqKMember.as<int>() : nullptr, ctx->nDqDyn || ctx->hasDqQrGroups ? ctx->dDqJMember.as<int>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberKey.as<double>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberRlEntry.as<int>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberGroupStart.as<int>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberGroupCount.as<int>() : nullptr, ctx->dRlLimitType.as<char>(), ctx->nrl, ctx->hasPilotSelf && ctx->dPsSkip.p != nullptr ? ctx->dPsSkip.as<char>() : nullptr, ctx->st->nQr, ctx->hasDqQrGroups ? ctx->dDqMemberQrGroup.as<int>() : nullptr, ctx->st->nQr > 0 ? ctx->st->dQrPtr.as<int>() : nullptr, ctx->st->nQr > 0 ? ctx->st->dQrRows.as<int>() : nullptr, ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>(), ctx->nShOv, ctx->dShOvSlotElem.as<int>(), ctx->dShOvGb.as<double>(), dqTraceRow,
+                ctx->hasDqSub ? ctx->dDqSub.as<char>() : nullptr, ctx->hasDqSub ? ctx->dQrMemberStart.as<int>() : nullptr, ctx->nDqMembers);
+    if (ctx->ndr) fillDistrRhoBatch<<<grid(ctx->ndr * nS), BLOCK, 0, ctx->stream>>>(ctx->ndr, nS, n, nnz, ctx->st->dDrCol.as<int>(), ctx->st->dDrCoef.as<double>(), ctx->st->dDrDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->nDrOv, ctx->nDrOv ? ctx->dDrOvIdx.as<int>() : nullptr, ctx->nDrOv ? ctx->dDrOvC.as<double>() : nullptr, ctx->st->drQr ? ctx->st->dDrQrGroup.as<int>() : nullptr, ctx->dMode.as<int>(), ctx->st->dQrPtr.as<int>(), ctx->st->dQrRows.as<int>());
+    if (ctx->ndb) fillDistrShuntBBatch<<<grid(ctx->ndb * nS), BLOCK, 0, ctx->stream>>>(ctx->ndb, nS, n, nnz, ctx->st->dDbCol.as<int>(), ctx->st->dDbCoef.as<double>(), ctx->st->dDbDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>());
+    if (ctx->nzi) fillZeroImpBatch<<<grid(ctx->nzi * nS), BLOCK, 0, ctx->stream>>>(ctx->nzi, nS, n, nnz, ctx->st->dZiIn.as<double>(), ctx->st->dZiIdx.as<int>(), ctx->st->dZiDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->nziBase, ctx->nZiOn, ctx->dZiOnSlotElem.as<int>(), ctx->nZiOff, ctx->dZiOffSlotElem.as<int>(), ctx->st->dZiAltDest.as<int>(), ctx->st->dZiSelRow.as<int>(), ctx->dMode.as<int>(), ctx->st->ziDyn ? 1 : 0, withPilotSelf(ziRelocOf(ctx->st.get()), ctx), ctx->nZiTree, ctx->nZiTree ? ctx->dZiTreeSlotElemVal.as<int>() : nullptr, ctx->hasZiMasks ? ctx->dZiOffMask.as<char>() : nullptr, ctx->hasZiMasks ? ctx->dZiOnMask.as<char>() : nullptr, ctx->hasZiMasks ? ctx->dZiTreeMask.as<char>() : nullptr);
+    applyRowModeBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, nnz, ctx->dMode.as<int>(), ctx->st->dRowPtr.as<int>(), ctx->st->dDiagPos.as<int>(), ctx->dX.as<double>(), ctx->dTarget.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->dRowSlope.as<double>(),
+                ctx->st->dColIdx.as<int>(), ctx->st->dRelocOwn.p != nullptr ? ctx->st->dRelocOwn.as<int>() : nullptr);
+    // OLF_GPU_VALS_SCAN_PREREPAIR: scan/dump the fill BEFORE the zero-diagonal repair rewrites hazard rows
+    // (a row that reads as a borrowed donor after the repair was EMPTY before it — the defect is upstream).
+    static const bool scanPreRepair = std::getenv("OLF_GPU_VALS_SCAN_PREREPAIR") != nullptr;
+    if (scanPreRepair) scanValsFinite(ctx, nS, n, nnz, outer);
+    hazRepairValues(ctx, nS, ctx->dVals.as<double>());
+    if (!scanPreRepair) scanValsFinite(ctx, nS, n, nnz, outer);   // OLF_GPU_VALS_SCAN: is the matrix sound at all?
+    if (!deviceFixedIter) CUDA_CHECK(cudaStreamSynchronize(ctx->stream));   // fixed-iter: stream-ordered into the solve, no host sync
+}
+
+static auto sensitivitySolve(BatchSolverContext* ctx, DriverPass& drv, bool& first) {
+    const int& n = drv.n;
+    const int& nS = drv.nS;
+    if (ctx->mode == 6) {
+        for (int s2 = 0; s2 < nS; s2++) {
+            CUDSS_CHECK(cudssMatrixSetValues(ctx->ds.matA, ctx->dVals.as<double>() + (size_t) s2 * ctx->nnz));
+            CUDSS_CHECK(cudssMatrixSetValues(ctx->ds.matB, ctx->dB.as<double>() + (size_t) s2 * n));
+            CUDSS_CHECK(cudssMatrixSetValues(ctx->ds.matX, ctx->dDx.as<double>() + (size_t) s2 * n));
+            if (!ctx->analyzed) {
+                gAnalysesMain++;
+                { AnalysisTimer at_(__LINE__); CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_ANALYSIS, ctx->ds.config, ctx->ds.data, ctx->ds.matA, ctx->ds.matX, ctx->ds.matB)); }
+                ctx->analyzed = true;
+            }
+            { AnalysisTimer at_(__LINE__, 'G'); CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_FACTORIZATION | CUDSS_PHASE_SOLVE,
+                    ctx->ds.config, ctx->ds.data, ctx->ds.matA, ctx->ds.matX, ctx->ds.matB)); }
+        }
+        first = false;
+        return;
+    }
+    if (!ctx->analyzed) {
+        gAnalysesMain++;
+        { AnalysisTimer at_(__LINE__); CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_ANALYSIS, ctx->ds.config, ctx->ds.data, ctx->matUb, ctx->matUbX, ctx->matUbB)); }
+        ctx->analyzed = true;
+    }
+    int phase = CUDSS_PHASE_SOLVE | (first ? CUDSS_PHASE_FACTORIZATION : 0);
+    first = false;
+    { AnalysisTimer at_(__LINE__, ((phase) & (CUDSS_PHASE_FACTORIZATION | CUDSS_PHASE_REFACTORIZATION)) ? 'G' : ((phase) & CUDSS_PHASE_ANALYSIS) ? 'A' : 'S'); CUDSS_CHECK(cudssExecute(ctx->ds.handle, phase, ctx->ds.config, ctx->ds.data, ctx->matUb, ctx->matUbX, ctx->matUbB)); }
+}
+
+static auto tvcStep(BatchSolverContext* ctx, DriverPass& drv) {
+    const int& n = drv.n;
+    const int& nS = drv.nS;
+    std::vector<char>& active = drv.active;
+    int nTvc = ctx->nTvc;
+    if (nTvc <= 0) return;
+    if (ctx->mode != 3 && ctx->mode != 6) {
+        static bool warned = false;
+        if (!warned) { std::fprintf(stderr, "in-kernel TVC needs a UBATCH (3) or robust (6) mode; mode %d runs it as stable\n", ctx->mode); warned = true; }
+        return;
+    }
+    size_t nst = static_cast<size_t>(nS) * nTvc;
+    tvcDeadbandCheckBatch<<<grid(static_cast<int>(nst)), BLOCK, 0, ctx->stream>>>(nTvc, nS, n, ctx->nElements,
+            ctx->dTvcVRow.as<int>(), ctx->dTvcTargetV.as<double>(), ctx->dTvcHalfDb.as<double>(),
+            ctx->dTvcElemIndex.as<int>(), ctx->dDisabled.as<char>(), ctx->dX.as<double>(), ctx->dRlActive.as<char>(),
+            ctx->dTvcOutOfDb.as<char>(), ctx->dTvcDiffV.as<double>());
+    std::vector<char> outOfDb(nst);
+    CUDA_CHECK(cudaMemcpyAsync(outOfDb.data(), ctx->dTvcOutOfDb.p, nst, cudaMemcpyDeviceToHost, ctx->stream));
+    CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+    std::vector<char> needC(nTvc, 0);
+    bool any = false;
+    for (int s2 = 0; s2 < nS; s2++) {
+        for (int c = 0; c < nTvc; c++) {
+            if (outOfDb[static_cast<size_t>(s2) * nTvc + c]) { needC[c] = 1; any = true; }
+        }
+    }
+    if (!any) return;                                    // every bus inside its deadband: STABLE
+    // Sensitivities dV/drho at the CURRENT states: refill J for every scenario, factorize once,
+    // then one unit-RHS solve per controller that has an out-of-deadband scenario.
+    std::vector<char> ones(nS, 1);
+    CUDA_CHECK(cudaMemcpy(ctx->dActive.p, ones.data(), nS, cudaMemcpyHostToDevice));
+    fillActiveBatch(ctx, drv, false);
+    CUDA_CHECK(cudaMemsetAsync(ctx->dTvcSensi.p, 0, nst * sizeof(double), ctx->stream));
+    bool first = true;
+    for (int c = 0; c < nTvc; c++) {
+        if (!needC[c]) continue;
+        int row = ctx->st->rowMap[ctx->hTvcRhoRow[c]];
+        if (row < 0) continue;                           // rho row not an active equation: stays insensitive
+        setUnitRhsBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, row, ctx->dB.as<double>());
+        hazRepairRightHandSide(ctx, nS, ctx->dB.as<double>());
+        sensitivitySolve(ctx, drv, first);
+        tvcGatherSensiBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(nS, n, c, nTvc, ctx->dTvcVRow.as<int>(),
+                ctx->dDx.as<double>(), ctx->dTvcSensi.as<double>());
+    }
+    CUDA_CHECK(cudaMemcpy(ctx->dActive.p, active.data(), nS, cudaMemcpyHostToDevice));   // as it was
+    // Tap decision; a moved scenario is an UNSTABLE verdict (dRlSwitched), like every device loop.
+    tvcGroupDecisionBatch<<<grid(ctx->nTvcGroups * nS), BLOCK, 0, ctx->stream>>>(ctx->nTvcGroups, nS, nTvc,
+            ctx->dTvcGroupPtr.as<int>(), ctx->dTvcGroupCtrl.as<int>(),
+            ctx->dTvcOutOfDb.as<char>(), ctx->dTvcDiffV.as<double>(), ctx->dTvcSensi.as<double>(), ctx->dTvcHalfDb.as<double>(),
+            ctx->dTvcTapPtr.as<int>(), ctx->dTvcTapData.as<double>(),
+            ctx->dTvcCurTap.as<int>(), ctx->dTvcRatchetDir.as<int>(), ctx->dTvcRatchetCount.as<int>(),
+            ctx->dTvcRatchetAllowed.as<int>(), ctx->tvcMaxTapShift, 0.05, ctx->dRlSwitched.as<char>());
+    // Apply: rho target + state seed on the moved pairs, then the pi rows through the tap-override list.
+    tvcApplyRhoBatch<<<grid(static_cast<int>(nst)), BLOCK, 0, ctx->stream>>>(nTvc, nS, n,
+            ctx->dTvcRhoRow.as<int>(), ctx->dTvcTapPtr.as<int>(), ctx->dTvcTapData.as<double>(),
+            ctx->dTvcCurTap.as<int>(), ctx->dTvcPrevTap.as<int>(), ctx->dTarget.as<double>(), ctx->dX.as<double>());
+    CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+    tvcRebuildOverrides(ctx);
+    if (std::getenv("OLF_GPU_BATCH_TRACE") != nullptr) {
+        std::vector<int> cur(nst), base(ctx->hTvcBaseTap);
+        CUDA_CHECK(cudaMemcpy(cur.data(), ctx->dTvcCurTap.p, nst * sizeof(int), cudaMemcpyDeviceToHost));
+        int nOut = 0, nMoved = 0;
+        for (size_t k = 0; k < nst; k++) {
+            nOut += outOfDb[k] ? 1 : 0;
+        }
+        for (int s2 = 0; s2 < nS; s2++) {
+            for (int c = 0; c < nTvc; c++) {
+                if (cur[static_cast<size_t>(s2) * nTvc + c] != base[c]) nMoved++;
+            }
+        }
+        std::fprintf(stderr, "TVC_KERNEL nS=%d nCtrl=%d outOfDeadband=%d pairsOffBaseTap=%d nR1Ov=%d\n",
+                     nS, nTvc, nOut, nMoved, ctx->nR1Ov);
+        std::vector<double> dv(nst), se(nst);
+        CUDA_CHECK(cudaMemcpy(dv.data(), ctx->dTvcDiffV.p, nst * sizeof(double), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(se.data(), ctx->dTvcSensi.p, nst * sizeof(double), cudaMemcpyDeviceToHost));
+        for (size_t k = 0; k < nst; k++) {
+            if (outOfDb[k]) {
+                std::fprintf(stderr, "TVC_KERNEL_PAIR s=%d c=%d diffV=%.9e sensi=%.9e tap=%d base=%d rhoRowMapped=%d\n",
+                             (int) (k / nTvc), (int) (k % nTvc), dv[k], se[k], cur[k], base[k % nTvc],
+                             ctx->st->rowMap[ctx->hTvcRhoRow[k % nTvc]]);
+            }
+        }
+    }
+}
+
+static auto shcStep(BatchSolverContext* ctx, DriverPass& drv) {
+    const int& n = drv.n;
+    const int& nS = drv.nS;
+    std::vector<char>& active = drv.active;
+    int nShc = ctx->nShc;
+    if (nShc <= 0) return;
+    if (ctx->mode != 3 && ctx->mode != 6) {
+        static bool warned = false;
+        if (!warned) { std::fprintf(stderr, "in-kernel shunt VC needs a UBATCH (3) or robust (6) mode; mode %d runs it as stable\n", ctx->mode); warned = true; }
+        return;
+    }
+    int nG = ctx->nShcGroups;
+    size_t nsg = static_cast<size_t>(nS) * nG;
+    shcDeadbandCheckBatch<<<grid(static_cast<int>(nsg)), BLOCK, 0, ctx->stream>>>(nG, nS, n, ctx->nElements,
+            ctx->dShcGroupPtr.as<int>(), ctx->dShcGroupCtrl.as<int>(),
+            ctx->dShcVRow.as<int>(), ctx->dShcTargetV.as<double>(), ctx->dShcHalfDb.as<double>(), ctx->dShcElemAbs.as<int>(),
+            ctx->dDisabled.as<char>(), ctx->dX.as<double>(), ctx->dRlActive.as<char>(),
+            ctx->dShcOutOfDb.as<char>(), ctx->dShcDiffV.as<double>());
+    std::vector<char> outOfDb(nsg);
+    CUDA_CHECK(cudaMemcpyAsync(outOfDb.data(), ctx->dShcOutOfDb.p, nsg, cudaMemcpyDeviceToHost, ctx->stream));
+    CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+    std::vector<int> gPtr(nG + 1), gCtrl(ctx->nShc);
+    CUDA_CHECK(cudaMemcpy(gPtr.data(), ctx->dShcGroupPtr.p, gPtr.size() * sizeof(int), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(gCtrl.data(), ctx->dShcGroupCtrl.p, gCtrl.size() * sizeof(int), cudaMemcpyDeviceToHost));
+    std::vector<char> needC(nShc, 0);
+    bool any = false;
+    for (int s2 = 0; s2 < nS; s2++) {
+        for (int g = 0; g < nG; g++) {
+            if (!outOfDb[static_cast<size_t>(s2) * nG + g]) continue;
+            any = true;
+            for (int k = gPtr[g]; k < gPtr[g + 1]; k++) needC[gCtrl[k]] = 1;
+        }
+    }
+    if (!any) return;                                    // every controlled bus inside its deadband: STABLE
+    std::vector<char> ones(nS, 1);
+    CUDA_CHECK(cudaMemcpy(ctx->dActive.p, ones.data(), nS, cudaMemcpyHostToDevice));
+    fillActiveBatch(ctx, drv, false);
+    CUDA_CHECK(cudaMemsetAsync(ctx->dShcSensi.p, 0, static_cast<size_t>(nS) * nShc * sizeof(double), ctx->stream));
+    bool first = true;
+    for (int c = 0; c < nShc; c++) {
+        if (!needC[c]) continue;
+        int row = ctx->st->rowMap[ctx->hShcBRow[c]];
+        if (row < 0) continue;
+        setUnitRhsBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, row, ctx->dB.as<double>());
+        hazRepairRightHandSide(ctx, nS, ctx->dB.as<double>());
+        sensitivitySolve(ctx, drv, first);
+        shcGatherSensiBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(nS, n, c, nShc, ctx->dShcVRow.as<int>(),
+                ctx->dDx.as<double>(), ctx->dShcSensi.as<double>());
+    }
+    CUDA_CHECK(cudaMemcpy(ctx->dActive.p, active.data(), nS, cudaMemcpyHostToDevice));
+    shcAdjustBatch<<<grid(static_cast<int>(nsg)), BLOCK, 0, ctx->stream>>>(nG, nS, n, ctx->nElements, nShc, ctx->nShcSubs,
+            ctx->shcMaxSectionShift, ctx->dShcGroupPtr.as<int>(), ctx->dShcGroupCtrl.as<int>(), ctx->dShcSubPtr.as<int>(),
+            ctx->dShcSecPtr.as<int>(), ctx->dShcSecB.as<double>(), ctx->dShcSubMin.as<int>(),
+            ctx->dShcHalfDb.as<double>(), ctx->dShcElemAbs.as<int>(), ctx->dDisabled.as<char>(),
+            ctx->dShcOutOfDb.as<char>(), ctx->dShcDiffV.as<double>(), ctx->dShcSensi.as<double>(),
+            ctx->dShcPos.as<int>(), ctx->dShcRatDir.as<int>(), ctx->dShcRatCount.as<int>(), ctx->dShcRatAllowed.as<int>(),
+            ctx->dShcShift.as<int>(), ctx->dRlSwitched.as<char>());
+    shcApplyBatch<<<grid(nShc * nS), BLOCK, 0, ctx->stream>>>(nShc, nS, n, ctx->dShcBRow.as<int>(), ctx->dShcSubPtr.as<int>(),
+            ctx->dShcSecPtr.as<int>(), ctx->dShcSecB.as<double>(), ctx->dShcSubBase.as<int>(), ctx->dShcPos.as<int>(),
+            ctx->nShcSubs, ctx->dShcBaseB.as<double>(), ctx->dShcAppliedDb.as<double>(), ctx->dTarget.as<double>(), ctx->dX.as<double>());
+    CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+    shcRebuildOverrides(ctx);
+    if (std::getenv("OLF_GPU_BATCH_TRACE") != nullptr) {
+        std::vector<int> pos(static_cast<size_t>(nS) * ctx->nShcSubs);
+        CUDA_CHECK(cudaMemcpy(pos.data(), ctx->dShcPos.p, pos.size() * sizeof(int), cudaMemcpyDeviceToHost));
+        int nOut = 0, nMoved = 0;
+        for (char c : outOfDb) nOut += c ? 1 : 0;
+        for (int s2 = 0; s2 < nS; s2++) for (int u = 0; u < ctx->nShcSubs; u++) if (pos[static_cast<size_t>(s2) * ctx->nShcSubs + u] != ctx->hShcSubBase[u]) nMoved++;
+        std::fprintf(stderr, "SHUNT_KERNEL nS=%d nCtrl=%d nGroups=%d outOfDeadband=%d subsOffBase=%d nShOv=%d\n", nS, nShc, nG, nOut, nMoved, ctx->nShOv);
+    }
+}
+
+static auto flcStep(BatchSolverContext* ctx, DriverPass& drv, int kindMask) {
+    const int& n = drv.n;
+    const int& nS = drv.nS;
+    std::vector<char>& active = drv.active;
+    int nF = ctx->nFlc;
+    if (nF <= 0) return;
+    if (ctx->mode != 3 && ctx->mode != 6) {
+        static bool warned = false;
+        if (!warned) { std::fprintf(stderr, "in-kernel flow control needs a UBATCH (3) or robust (6) mode; mode %d runs it as stable\n", ctx->mode); warned = true; }
+        return;
+    }
+    size_t nst = static_cast<size_t>(nS) * nF;
+    flcCheckBatch<<<grid(static_cast<int>(nst)), BLOCK, 0, ctx->stream>>>(nF, nS, n, ctx->nElements, ctx->cbOffset, kindMask,
+            ctx->dFlcKind.as<int>(), ctx->dFlcSide.as<int>(), ctx->dFlcTargetValue.as<double>(), ctx->dFlcHalfDb.as<double>(),
+            ctx->dFlcElem.as<int>(), ctx->dFlcCtlPack.as<int>(),
+            ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>(),
+            ctx->dDisabled.as<char>(), ctx->dX.as<double>(), ctx->dRlActive.as<char>(),
+            ctx->dFlcOutOfDb.as<char>(), ctx->dFlcDiff.as<double>());
+    std::vector<char> outOfDb(nst);
+    CUDA_CHECK(cudaMemcpyAsync(outOfDb.data(), ctx->dFlcOutOfDb.p, nst, cudaMemcpyDeviceToHost, ctx->stream));
+    CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+    std::vector<char> needC(nF, 0);
+    bool any = false;
+    for (int s2 = 0; s2 < nS; s2++) for (int c = 0; c < nF; c++) if (outOfDb[static_cast<size_t>(s2) * nF + c]) { needC[c] = 1; any = true; }
+    if (!any) return;
+    std::vector<char> ones(nS, 1);
+    CUDA_CHECK(cudaMemcpy(ctx->dActive.p, ones.data(), nS, cudaMemcpyHostToDevice));
+    fillActiveBatch(ctx, drv, false);
+    CUDA_CHECK(cudaMemsetAsync(ctx->dFlcSensi.p, 0, nst * sizeof(double), ctx->stream));
+    bool first = true;
+    for (int c = 0; c < nF; c++) {
+        if (!needC[c]) continue;
+        int row = ctx->st->rowMap[ctx->hFlcPinRow[c]];
+        if (row < 0) continue;
+        setUnitRhsBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, row, ctx->dB.as<double>());
+        hazRepairRightHandSide(ctx, nS, ctx->dB.as<double>());
+        sensitivitySolve(ctx, drv, first);
+        flcGatherSensiBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(nS, n, c, nF, ctx->cbOffset,
+                ctx->dFlcKind.as<int>(), ctx->dFlcSide.as<int>(), ctx->dFlcCtlPack.as<int>(),
+                ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>(),
+                ctx->dX.as<double>(), ctx->dDx.as<double>(), ctx->dFlcSensi.as<double>());
+    }
+    CUDA_CHECK(cudaMemcpy(ctx->dActive.p, active.data(), nS, cudaMemcpyHostToDevice));
+    flcDecisionBatch<<<grid(static_cast<int>(nst)), BLOCK, 0, ctx->stream>>>(nF, nS, kindMask,
+            ctx->dFlcKind.as<int>(), ctx->dFlcPinCol.as<int>(), ctx->dFlcTapPtr.as<int>(), ctx->dFlcTapData.as<double>(), ctx->dFlcMaxShift.as<int>(),
+            ctx->dFlcOutOfDb.as<char>(), ctx->dFlcDiff.as<double>(), ctx->dFlcSensi.as<double>(),
+            ctx->dFlcCurTap.as<int>(), ctx->dFlcRatDir.as<int>(), ctx->dFlcRatCount.as<int>(), ctx->dFlcRatAllowed.as<int>(), ctx->dRlSwitched.as<char>());
+    flcApplyBatch<<<grid(static_cast<int>(nst)), BLOCK, 0, ctx->stream>>>(nF, nS, n, ctx->dFlcPinRow.as<int>(), ctx->dFlcPinCol.as<int>(),
+            ctx->dFlcTapPtr.as<int>(), ctx->dFlcTapData.as<double>(), ctx->dFlcCurTap.as<int>(), ctx->dFlcPrevTap.as<int>(),
+            ctx->dTarget.as<double>(), ctx->dX.as<double>());
+    CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+    tvcRebuildOverrides(ctx);
+    if (std::getenv("OLF_GPU_BATCH_TRACE") != nullptr) {
+        std::vector<int> cur(nst);
+        CUDA_CHECK(cudaMemcpy(cur.data(), ctx->dFlcCurTap.p, nst * sizeof(int), cudaMemcpyDeviceToHost));
+        int nOut = 0, nMoved = 0;
+        for (char c : outOfDb) nOut += c ? 1 : 0;
+        for (int s2 = 0; s2 < nS; s2++) for (int c = 0; c < nF; c++) if (cur[static_cast<size_t>(s2) * nF + c] != ctx->hFlcBaseTap[c]) nMoved++;
+        std::fprintf(stderr, "FLOW_KERNEL kindMask=%d nS=%d nCtrl=%d outOfDeadband=%d pairsOffBaseTap=%d nR1Ov=%d\n", kindMask, nS, nF, nOut, nMoved, ctx->nR1Ov);
+    }
+}
+
+static auto cphStep(BatchSolverContext* ctx, DriverPass& drv) {
+    const int& n = drv.n;
+    const int& nS = drv.nS;
+    std::vector<char>& rlActive = drv.rlActive;
+    int nC = ctx->nCph;
+    if (nC <= 0) return;
+    size_t nst = static_cast<size_t>(nS) * nC;
+    cphCheckBatch<<<grid(static_cast<int>(nst)), BLOCK, 0, ctx->stream>>>(nC, nS, n, ctx->nElements, ctx->cbOffset,
+            ctx->dCphKind.as<int>(), ctx->dCphA1Row.as<int>(), ctx->dCphSide.as<int>(), ctx->dCphLimit.as<double>(), ctx->dCphElem.as<int>(),
+            ctx->dCphTapPtr.as<int>(), ctx->dCphTapData.as<double>(),
+            ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>(),
+            ctx->dDisabled.as<char>(), ctx->dRlActive.as<char>(), ctx->dCphIter.as<int>(),
+            ctx->dCphTap.as<int>(), ctx->dMode.as<int>(), ctx->dTarget.as<double>(), ctx->dX.as<double>(), ctx->dRlSwitched.as<char>());
+    CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+    {                                                    // the loop's check count, per checked scenario
+        std::vector<int> it(nS);
+        CUDA_CHECK(cudaMemcpy(it.data(), ctx->dCphIter.p, nS * sizeof(int), cudaMemcpyDeviceToHost));
+        for (int s2 = 0; s2 < nS; s2++) if (rlActive[s2]) it[s2]++;
+        CUDA_CHECK(cudaMemcpy(ctx->dCphIter.p, it.data(), nS * sizeof(int), cudaMemcpyHostToDevice));
+    }
+    tvcRebuildOverrides(ctx);
+    if (std::getenv("OLF_GPU_BATCH_TRACE") != nullptr) {
+        std::vector<int> cur(nst);
+        CUDA_CHECK(cudaMemcpy(cur.data(), ctx->dCphTap.p, nst * sizeof(int), cudaMemcpyDeviceToHost));
+        int nMoved = 0;
+        for (int s2 = 0; s2 < nS; s2++) for (int c = 0; c < nC; c++) if (cur[static_cast<size_t>(s2) * nC + c] != ctx->hCphBaseTap[c]) nMoved++;
+        std::fprintf(stderr, "CPHASE_KERNEL nS=%d nCtrl=%d pairsOffBaseTap=%d nR1Ov=%d\n", nS, nC, nMoved, ctx->nR1Ov);
+    }
+}
+
+static auto tvdStep(BatchSolverContext* ctx, DriverPass& drv) {
+    const int& n = drv.n;
+    const int& nS = drv.nS;
+    const int& outer = drv.outer;
+    std::vector<char>& loopRejected = drv.loopRejected;
+    if (ctx->nTvd <= 0) return;
+    tvdCheckBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(tvdTables(ctx), nS, n, ctx->nElements, ctx->dDisabled.as<char>(),
+            ctx->dRlActive.as<char>(), ctx->dQbuf.as<double>(), ctx->dMode.as<int>(), ctx->dTarget.as<double>(), ctx->dX.as<double>(),
+            ctx->dRlSwitched.as<char>());
+    // Freezing a REMOTE controller can take the LAST live member of its group, and then the group
+    // controls nothing: OLF's freeze disables the voltage control, so the CONTROLLED bus stops
+    // carrying a V identity. That flip lives in its own kernel, which the reactive-limits phase runs
+    // after its pins; the freeze happens two loops later and would otherwise leave the pilot holding
+    // a target for a control that no longer exists until the next sweep reached RL again (measured
+    // 0.6 kV). Same kernel, run again here — it restores the identity at COMPLETE on the same rule.
+    if (ctx->hasDqQrGroups && ctx->st->nQr > 0 && ctx->nTvdFz > 0) {
+        launchPilotVeqInner(ctx, drv);
+    }
+    CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+    std::vector<char> rej(nS);
+    CUDA_CHECK(cudaMemcpy(rej.data(), ctx->dTvdReject.p, nS, cudaMemcpyDeviceToHost));
+    for (int s2 = 0; s2 < nS; s2++) if (rej[s2]) { loopRejected[s2] = 1; traceReject(s2, "tvd-kernel-reject", outer, 0); }
+    tvcRebuildOverrides(ctx);
+    if (std::getenv("OLF_GPU_BATCH_TRACE") != nullptr) {
+        size_t nsm = static_cast<size_t>(nS) * ctx->nTvd;
+        std::vector<int> st(nsm), step(nS);
+        CUDA_CHECK(cudaMemcpy(st.data(), ctx->dTvdMemState.p, nsm * sizeof(int), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(step.data(), ctx->dTvdScnStep.p, nS * sizeof(int), cudaMemcpyDeviceToHost));
+        int nCont = 0, nFixed = 0, nRej = 0;
+        for (size_t k = 0; k < nsm; k++) { nCont += st[k] == 1; nFixed += st[k] == 2; }
+        for (int s2 = 0; s2 < nS; s2++) nRej += rej[s2] ? 1 : 0;
+        std::fprintf(stderr, "TVD_KERNEL mode=%d nS=%d nMembers=%d continuous=%d fixed=%d rejected=%d step0=%d nR1Ov=%d\n",
+                     ctx->tvdMode, nS, ctx->nTvd, nCont, nFixed, nRej, step[0], ctx->nR1Ov);
+    }
+}
+
+static auto svcStep(BatchSolverContext* ctx, DriverPass& drv) {
+    const int& n = drv.n;
+    const int& nS = drv.nS;
+    const int& outer = drv.outer;
+    std::vector<char>& active = drv.active;
+    std::vector<char>& loopRejected = drv.loopRejected;
+    int nC = ctx->nSvc;
+    if (nC <= 0) return;
+    if (ctx->mode != 3 && ctx->mode != 6) {
+        static bool warned = false;
+        if (!warned) { std::fprintf(stderr, "in-kernel SecondaryVc needs a UBATCH (3) or robust (6) mode; mode %d runs it as stable\n", ctx->mode); warned = true; }
+        return;
+    }
+    CUDA_CHECK(cudaMemsetAsync(ctx->dSvcNeed.p, 0, nS, ctx->stream));
+    svcTriggerBatch<<<grid(ctx->nSvcZones * nS), BLOCK, 0, ctx->stream>>>(svcTables(ctx), nS, n,
+            ctx->dRlActive.as<char>(), ctx->dQbuf.as<double>(), ctx->dX.as<double>(),
+            ctx->dRlLimitType.as<char>(), ctx->dRlSavedMode.as<char>(),
+            ctx->dMode.as<int>(), ctx->dTarget.as<double>());
+    std::vector<char> need(nS);
+    CUDA_CHECK(cudaMemcpyAsync(need.data(), ctx->dSvcNeed.p, nS, cudaMemcpyDeviceToHost, ctx->stream));
+    CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+    bool any = false;
+    for (char c : need) any |= c != 0;
+    if (!any) return;                                    // every zone inside its bands: OLF's STABLE
+    std::vector<char> ones(nS, 1);
+    CUDA_CHECK(cudaMemcpy(ctx->dActive.p, ones.data(), nS, cudaMemcpyHostToDevice));
+    fillActiveBatch(ctx, drv, false);
+    bool first = true;
+    for (int i = 0; i < nC; i++) {
+        int row = ctx->st->rowMap[ctx->hSvcCtldVRow[i]];
+        if (row < 0) continue;                           // controlled bus not a live identity: insensitive
+        setUnitRhsBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, row, ctx->dB.as<double>());
+        hazRepairRightHandSide(ctx, nS, ctx->dB.as<double>());
+        sensitivitySolve(ctx, drv, first);
+        svcGatherBatch<<<grid(nC * nS), BLOCK, 0, ctx->stream>>>(svcTables(ctx), nS, n, i,
+                ctx->nElements, ctx->cbOffset, ctx->shOffset,
+                ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(),
+                ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(),
+                ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>(),
+                ctx->nShOv, ctx->dShOvSlotElem.as<int>(), ctx->dShOvGb.as<double>(),
+                ctx->dDisabled.as<char>(), ctx->dX.as<double>(), ctx->dDx.as<double>());
+    }
+    CUDA_CHECK(cudaMemcpy(ctx->dActive.p, active.data(), nS, cudaMemcpyHostToDevice));   // as it was
+    // ---- the zone systems: assembled into device memory, solved by cuBLAS's BATCHED dense LU ----
+    if (ctx->svcBlas == nullptr) {
+        CUBLAS_CHECK(cublasCreate(&ctx->svcBlas));
+    }
+    CUBLAS_CHECK(cublasSetStream(ctx->svcBlas, ctx->stream));
+    svcAssembleBatch<<<grid(nC * nS), BLOCK, 0, ctx->stream>>>(svcTables(ctx), nS, n,
+            ctx->dRlActive.as<char>(), ctx->dSvcCtlZone.as<int>(), ctx->dX.as<double>(),
+            ctx->dSvcMat.as<double>(), ctx->dSvcRhs.as<double>());
+    svcPointersBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(nS, nC,
+            ctx->dSvcMat.as<double>(), ctx->dSvcRhs.as<double>(),
+            reinterpret_cast<double**>(ctx->dSvcMatPtr.p), reinterpret_cast<double**>(ctx->dSvcRhsPtr.p));
+    CUBLAS_CHECK(cublasDgetrfBatched(ctx->svcBlas, nC,
+            reinterpret_cast<double**>(ctx->dSvcMatPtr.p), nC,
+            ctx->dSvcPiv.as<int>(), ctx->dSvcInfo.as<int>(), nS));
+    int trsInfo = 0;
+    CUBLAS_CHECK(cublasDgetrsBatched(ctx->svcBlas, CUBLAS_OP_N, nC, 1,
+            reinterpret_cast<const double* const*>(ctx->dSvcMatPtr.p), nC,
+            ctx->dSvcPiv.as<int>(),
+            reinterpret_cast<double**>(ctx->dSvcRhsPtr.p), nC, &trsInfo, nS));
+    if (trsInfo != 0) {
+        throw std::runtime_error("cublasDgetrsBatched rejected its arguments");
+    }
+    svcCommitBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(svcTables(ctx), nS,
+            ctx->dRlActive.as<char>(), ctx->dSvcInfo.as<int>(), ctx->dSvcRhs.as<double>(),
+            ctx->dRlSwitched.as<char>());
+    svcApplyBatch<<<grid(nC * nS), BLOCK, 0, ctx->stream>>>(svcTables(ctx), nS, n,
+            ctx->dRlActive.as<char>(), ctx->dRlLimitType.as<char>(), ctx->dTarget.as<double>());
+    CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+    std::vector<char> rej(nS);
+    CUDA_CHECK(cudaMemcpy(rej.data(), ctx->dSvcReject.p, nS, cudaMemcpyDeviceToHost));
+    int nRej = 0;
+    for (int s2 = 0; s2 < nS; s2++) {
+        if (rej[s2]) { loopRejected[s2] = 1; nRej++; traceReject(s2, "svc-kernel-reject", outer, 0); }
+    }
+    if (std::getenv("OLF_GPU_BATCH_TRACE") != nullptr) {
+        int nNeed = 0;
+        for (char c : need) nNeed += c ? 1 : 0;
+        std::fprintf(stderr, "SVC_KERNEL nS=%d nCtl=%d nZones=%d adjusting=%d rejected=%d\n",
+                     nS, nC, ctx->nSvcZones, nNeed, nRej);
+    }
+}
+
+static auto svdStep(BatchSolverContext* ctx, DriverPass& drv) {
+    const int& n = drv.n;
+    const int& nS = drv.nS;
+    if (ctx->nSvd <= 0) return;
+    svdCheckBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(svdTables(ctx), nS, n, ctx->nElements, ctx->dDisabled.as<char>(),
+            ctx->dRlActive.as<char>(), ctx->dMode.as<int>(), ctx->dTarget.as<double>(), ctx->dX.as<double>(), ctx->dRlSwitched.as<char>());
+    CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+    if (std::getenv("OLF_GPU_BATCH_TRACE") != nullptr) {
+        size_t nsm = static_cast<size_t>(nS) * ctx->nSvd;
+        std::vector<int> st(nsm);
+        CUDA_CHECK(cudaMemcpy(st.data(), ctx->dSvdMemState.p, nsm * sizeof(int), cudaMemcpyDeviceToHost));
+        int nCont = 0, nFixed = 0;
+        for (size_t k = 0; k < nsm; k++) { nCont += st[k] == 1; nFixed += st[k] == 2; }
+        std::fprintf(stderr, "SVD_KERNEL nS=%d nMembers=%d continuous=%d dispatched=%d\n", nS, ctx->nSvd, nCont, nFixed);
+    }
+}
+
+static auto readNormsBatch(BatchSolverContext* ctx, DriverPass& drv, std::vector<double>& hn) {
+    const int& n = drv.n;
+    const int& nS = drv.nS;
+    residualNormsBatch<<<nS, BLOCK, 0, ctx->stream>>>(n, ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->dNorms.as<double>(),
+            ctx->perRowCriteria ? ctx->dThrIdent.as<double>() : nullptr,
+            ctx->perRowCriteria ? ctx->dThrPower.as<double>() : nullptr, ctx->dMode.as<int>(),
+            ctx->perRowCriteria && ctx->perRowAlt ? ctx->dThrAlt.as<double>() : nullptr,
+            ctx->perRowCriteria && ctx->perRowAlt ? ctx->dThrSel.as<int>() : nullptr);
+    hn.resize(static_cast<size_t>(nS) * 4);
+    CUDA_CHECK(cudaMemcpy(hn.data(), ctx->dNorms.p, hn.size() * sizeof(double), cudaMemcpyDeviceToHost));
+}
+
+static auto rejectUnrealistic(BatchSolverContext* ctx, DriverPass& drv, const std::vector<char>& gate) {
+    const int& n = drv.n;
+    const int& nS = drv.nS;
+    const int& outer = drv.outer;
+    std::vector<char>& active = drv.active;
+    std::vector<char>& live = drv.live;
+    int& loopIdx = drv.loopIdx;
+    int (&loopOrder)[MAX_DEVICE_LOOPS] = drv.loopOrder;
+    BatchResult& res = drv.res;
+    if (!ctx->dRealisticGate.p) ctx->dRealisticGate.alloc(nS * sizeof(char));
+    if (!ctx->dRealisticBad.p) ctx->dRealisticBad.alloc(nS * sizeof(char));
+    CUDA_CHECK(cudaMemcpyAsync(ctx->dRealisticGate.p, gate.data(), nS * sizeof(char),
+                               cudaMemcpyHostToDevice, ctx->stream));
+    CUDA_CHECK(cudaMemsetAsync(ctx->dRealisticBad.p, 0, nS * sizeof(char), ctx->stream));
+    realisticCheckBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, ctx->dRealisticRow.as<char>(),
+            ctx->dX.as<double>(), ctx->dRealisticGate.as<char>(),
+            ctx->realisticMinV, ctx->realisticMaxV, ctx->dRealisticBad.as<char>());
+    std::vector<char> bad(nS);
+    CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+    CUDA_CHECK(cudaMemcpy(bad.data(), ctx->dRealisticBad.p, nS * sizeof(char), cudaMemcpyDeviceToHost));
+    static const bool traceUnrealistic = std::getenv("OLF_GPU_UNREALISTIC_TRACE") != nullptr;
+    for (int s = 0; s < nS; s++) {
+        if (bad[s]) {
+            if (traceUnrealistic) {
+                std::fprintf(stderr, "GPU_UNREALISTIC_SWEEP slot=%d outer=%d loop=%d band=[%.4f, %.4f]\n",
+                             s, outer, loopOrder[loopIdx], ctx->realisticMinV, ctx->realisticMaxV);
+            }
+            traceReject(s, "unrealistic-state", outer, 0);
+            res.status[s] = -2;                          // STATUS_REJECTED -> the CPU replays it
+            live[s] = 0;
+            active[s] = 0;
+        }
+    }
+}
+// Per-solve reset. MonitoringVoltage: nothing has fired yet in this solve.
+static void monitoringResetSolve(BatchSolverContext* ctx, DriverPass& drv) {
+    const int& nS = drv.nS;
+    std::vector<double> nan(static_cast<size_t>(ctx->nmon) * nS, std::nan(""));
+    CUDA_CHECK(cudaMemcpyAsync(ctx->dMonActivated.p, nan.data(),
+            nan.size() * sizeof(double), cudaMemcpyHostToDevice, ctx->stream));
+    CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+}
+
+// Per-solve reset. Incremental TVC: every scenario starts at the base tap with a fresh ratchet.
+static void tvcResetSolve(BatchSolverContext* ctx, DriverPass& drv) {
+    const int& nS = drv.nS;
+    size_t nst = static_cast<size_t>(nS) * ctx->nTvc;
+    std::vector<int> cur(nst);
+    for (int s2 = 0; s2 < nS; s2++) {
+        for (int c = 0; c < ctx->nTvc; c++) {
+            cur[static_cast<size_t>(s2) * ctx->nTvc + c] = ctx->hTvcBaseTap[c];
+        }
+    }
+    ctx->dTvcPrevTap.ensure(nst * sizeof(int));
+    CUDA_CHECK(cudaMemcpy(ctx->dTvcCurTap.p, cur.data(), nst * sizeof(int), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(ctx->dTvcPrevTap.p, cur.data(), nst * sizeof(int), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemset(ctx->dTvcRatchetDir.p, 0, nst * sizeof(int)));
+    CUDA_CHECK(cudaMemset(ctx->dTvcRatchetCount.p, 0, nst * sizeof(int)));
+    CUDA_CHECK(cudaMemset(ctx->dTvcRatchetAllowed.p, 0, nst * sizeof(int)));
+    ctx->dTvcOutOfDb.ensure(nst * sizeof(char));
+    ctx->dTvcDiffV.ensure(nst * sizeof(double));
+    ctx->dTvcSensi.ensure(nst * sizeof(double));
+}
+
+// Per-solve reset. Continuous phase control: base taps, check count 0.
+static void cphResetSolve(BatchSolverContext* ctx, DriverPass& drv) {
+    const int& nS = drv.nS;
+    size_t nst = static_cast<size_t>(nS) * ctx->nCph;
+    std::vector<int> cur(nst);
+    for (int s2 = 0; s2 < nS; s2++) for (int c = 0; c < ctx->nCph; c++) cur[static_cast<size_t>(s2) * ctx->nCph + c] = ctx->hCphBaseTap[c];
+    CUDA_CHECK(cudaMemcpy(ctx->dCphTap.p, cur.data(), nst * sizeof(int), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(ctx->dCphPrevTap.p, cur.data(), nst * sizeof(int), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemset(ctx->dCphIter.p, 0, nS * sizeof(int)));
+}
+
+// Per-solve reset. Discrete TVC: every control at its entry state.
+static void tvdResetSolve(BatchSolverContext* ctx, DriverPass& drv) {
+    const int& n = drv.n;
+    const int& nS = drv.nS;
+    size_t nsm = static_cast<size_t>(nS) * ctx->nTvd;
+    size_t nsg = static_cast<size_t>(nS) * ctx->nTvdGroups;
+    size_t nsd = static_cast<size_t>(nS) * std::max(ctx->nTvdDelta, 1);
+    std::vector<int> tap(nsm);
+    for (int s2 = 0; s2 < nS; s2++) for (int m = 0; m < ctx->nTvd; m++) tap[static_cast<size_t>(s2) * ctx->nTvd + m] = ctx->hTvdMemBaseTap[m];
+    std::vector<double> nanv(std::max(nsm, nsd), std::nan(""));
+    CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+    CUDA_CHECK(cudaMemcpy(ctx->dTvdMemTap.p, tap.data(), nsm * sizeof(int), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemset(ctx->dTvdMemState.p, 0, nsm * sizeof(int)));
+    CUDA_CHECK(cudaMemcpy(ctx->dTvdMemRoundFrom.p, nanv.data(), nsm * sizeof(double), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(ctx->dTvdSaved.p, nanv.data(), nsd * sizeof(double), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemset(ctx->dTvdScnStep.p, 0, nS * sizeof(int)));
+    CUDA_CHECK(cudaMemset(ctx->dTvdGrpStep.p, 0, nsg * sizeof(int)));
+    CUDA_CHECK(cudaMemset(ctx->dTvdGrpShMin.p, 0, nsg * sizeof(double)));
+    CUDA_CHECK(cudaMemset(ctx->dTvdGrpShMax.p, 0, nsg * sizeof(double)));
+    CUDA_CHECK(cudaMemset(ctx->dTvdGrpShInit.p, 0, nsg * sizeof(double)));
+    CUDA_CHECK(cudaMemset(ctx->dTvdReject.p, 0, nS * sizeof(char)));
+    if (ctx->nTvdFz > 0) CUDA_CHECK(cudaMemset(ctx->dTvdFzFrozen.p, 0, static_cast<size_t>(nS) * ctx->nTvdFz * sizeof(int)));
+    tvdEntryBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(tvdTables(ctx), nS, n, ctx->nElements, ctx->tvdEntryOn,
+            ctx->dDisabled.as<char>(), ctx->dMode.as<int>(), ctx->dTarget.as<double>(), ctx->dX.as<double>());
+    CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+}
+
+// Per-solve reset. Secondary voltage control: zone targets back at the network's own, nothing adjusted yet.
+static void svcResetSolve(BatchSolverContext* ctx, DriverPass& drv) {
+    const int& nS = drv.nS;
+    size_t nsc = static_cast<size_t>(nS) * ctx->nSvc;
+    std::vector<double> tv(nsc);
+    for (int s2 = 0; s2 < nS; s2++) {
+        for (int c = 0; c < ctx->nSvc; c++) tv[static_cast<size_t>(s2) * ctx->nSvc + c] = ctx->hSvcBaseTargetV[c];
+    }
+    CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+    CUDA_CHECK(cudaMemcpy(ctx->dSvcTargetV.p, tv.data(), nsc * sizeof(double), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemset(ctx->dSvcNeed.p, 0, nS));
+    CUDA_CHECK(cudaMemset(ctx->dSvcReject.p, 0, nS));
+    CUDA_CHECK(cudaMemset(ctx->dSvcEnabled.p, 1, nsc));
+}
+
+// Per-solve reset. Discrete shunt VC: every control at its entry state.
+static void svdResetSolve(BatchSolverContext* ctx, DriverPass& drv) {
+    const int& n = drv.n;
+    const int& nS = drv.nS;
+    size_t nsm = static_cast<size_t>(nS) * ctx->nSvd;
+    size_t nsg = static_cast<size_t>(nS) * ctx->nSvdGroups;
+    size_t nsd = static_cast<size_t>(nS) * std::max(ctx->nSvdDelta, 1);
+    size_t nsu = static_cast<size_t>(nS) * std::max(ctx->nSvdSubs, 1);
+    std::vector<int> pos(nsu);
+    for (int s2 = 0; s2 < nS; s2++) for (int u = 0; u < ctx->nSvdSubs; u++) pos[static_cast<size_t>(s2) * ctx->nSvdSubs + u] = 0;
+    std::vector<double> nanv(std::max(nsm, nsd), std::nan(""));
+    CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+    CUDA_CHECK(cudaMemcpy(ctx->dSvdSubPos.p, pos.data(), nsu * sizeof(int), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemset(ctx->dSvdMemState.p, 0, nsm * sizeof(int)));
+    CUDA_CHECK(cudaMemcpy(ctx->dSvdMemContB.p, nanv.data(), nsm * sizeof(double), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(ctx->dSvdSaved.p, nanv.data(), nsd * sizeof(double), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemset(ctx->dSvdGrpStep.p, 0, nsg * sizeof(int)));
+    svdEntryBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(svdTables(ctx), nS, n, ctx->nElements, ctx->svdEntryOn,
+            ctx->dDisabled.as<char>(), ctx->dMode.as<int>(), ctx->dTarget.as<double>(), ctx->dX.as<double>());
+    CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+}
+
+// Per-solve reset. Incremental flow control: base taps, fresh ratchets.
+static void flcResetSolve(BatchSolverContext* ctx, DriverPass& drv) {
+    const int& nS = drv.nS;
+    size_t nst = static_cast<size_t>(nS) * ctx->nFlc;
+    std::vector<int> cur(nst);
+    for (int s2 = 0; s2 < nS; s2++) for (int c = 0; c < ctx->nFlc; c++) cur[static_cast<size_t>(s2) * ctx->nFlc + c] = ctx->hFlcBaseTap[c];
+    CUDA_CHECK(cudaMemcpy(ctx->dFlcCurTap.p, cur.data(), nst * sizeof(int), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(ctx->dFlcPrevTap.p, cur.data(), nst * sizeof(int), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemset(ctx->dFlcRatDir.p, 0, nst * sizeof(int)));
+    CUDA_CHECK(cudaMemset(ctx->dFlcRatCount.p, 0, nst * sizeof(int)));
+    CUDA_CHECK(cudaMemset(ctx->dFlcRatAllowed.p, 0, nst * sizeof(int)));
+}
+
+// Per-solve reset. Incremental shunt VC: base sections, fresh ratchets, the identity row's target as the base b.
+static void shcResetSolve(BatchSolverContext* ctx, DriverPass& drv) {
+    const int& n = drv.n;
+    const int& nS = drv.nS;
+    size_t nsu = static_cast<size_t>(nS) * ctx->nShcSubs;
+    std::vector<int> pos(nsu);
+    for (int s2 = 0; s2 < nS; s2++) {
+        for (int u = 0; u < ctx->nShcSubs; u++) pos[static_cast<size_t>(s2) * ctx->nShcSubs + u] = ctx->hShcSubBase[u];
+    }
+    CUDA_CHECK(cudaMemcpy(ctx->dShcPos.p, pos.data(), nsu * sizeof(int), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemset(ctx->dShcRatDir.p, 0, nsu * sizeof(int)));
+    CUDA_CHECK(cudaMemset(ctx->dShcRatCount.p, 0, nsu * sizeof(int)));
+    CUDA_CHECK(cudaMemset(ctx->dShcRatAllowed.p, 0, nsu * sizeof(int)));
+    size_t nsc = static_cast<size_t>(nS) * ctx->nShc;
+    CUDA_CHECK(cudaMemset(ctx->dShcAppliedDb.p, 0, nsc * sizeof(double)));
+    std::vector<double> tgt(static_cast<size_t>(n) * nS), bb(nsc);
+    CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+    CUDA_CHECK(cudaMemcpy(tgt.data(), ctx->dTarget.p, tgt.size() * sizeof(double), cudaMemcpyDeviceToHost));
+    for (int s2 = 0; s2 < nS; s2++) {
+        for (int c = 0; c < ctx->nShc; c++) bb[static_cast<size_t>(s2) * ctx->nShc + c] = tgt[static_cast<size_t>(s2) * n + ctx->hShcBRow[c]];
+    }
+    CUDA_CHECK(cudaMemcpy(ctx->dShcBaseB.p, bb.data(), nsc * sizeof(double), cudaMemcpyHostToDevice));
+}
+
 BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const double* target,
                               const int* rowMode, const int* rowModeSlots, int nRowModeSlots,
                               const int* baseRowMode, const char* disabled,
@@ -5900,9 +6690,14 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                               int maxOuterProductive, int rlMaxSwitch, int dsRejectResidual, int skipRlPhase,
                               int nziBase, int nZiOn, const int* ziOnSlotElem,
                               int nZiOff, const int* ziOffSlotElem) {
-    int n = ctx->n;
-    int nnz = ctx->nnz;
-    int nS = ctx->nScenarios;
+    DriverPass drv;
+    drv.n = ctx->n;
+    drv.nnz = ctx->nnz;
+    drv.nS = ctx->nScenarios;
+    drv.nRlVtOv = nRlVtOv;
+    const int& n = drv.n;
+    const int& nnz = drv.nnz;
+    const int& nS = drv.nS;
     // MAX_VOLTAGE_CHANGE (lsMode 2): per-scenario step clamp, same rule as the base solver's
     // (varType 1 = V vs maxDv, 0 = PHI vs maxDphi; whole step scaled). Buffers allocated lazily.
     uploadBatchOverrides(ctx, lsMode, maxDv, maxDphi, varType, nShOv, shOvSlotElem, shOvGb,
@@ -5921,7 +6716,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     // minus the extraction-time base — re-anchors the water-fill's cumulative reference at the PARENT
     // contingency's distribution, mirroring OLF's setGeneratorsInitialTargetPToTargetP before a strategy
     // re-solve. nullptr = anchored at the base (plain contingencies).
-    DeviceBuf dRlVtOvSlotIdx, dRlVtOvVal;
+    DeviceBuf& dRlVtOvSlotIdx = drv.dRlVtOvSlotIdx;
+    DeviceBuf& dRlVtOvVal = drv.dRlVtOvVal;
     if (nRlVtOv > 0) {
         dRlVtOvSlotIdx.upload(rlVtOvSlotIdx, 2L * nRlVtOv * sizeof(int));
         dRlVtOvVal.upload(rlVtOvVal, (size_t) nRlVtOv * sizeof(double));
@@ -6029,9 +6825,10 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                               static_cast<size_t>(ctx->nElements) * nS * sizeof(char), cudaMemcpyHostToDevice));
     }
 
-    std::vector<char> active(nS, 1);
+    std::vector<char>& active = drv.active;
+    active.assign(nS, 1);
 
-    BatchResult res;
+    BatchResult& res = drv.res;
     res.x.resize(nTot);
     res.iters.assign(nS, 0);
     res.norm.assign(nS, 0.0);
@@ -6042,7 +6839,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     // Device-side fixed-iteration mode: tol <= 0 means "run exactly maxIter Newton steps
     // on the device with NO per-iteration host sync and NO convergence retirement" (the
     // a fixed-iteration NR loop). tol > 0 keeps the per-iteration retirement loop.
-    bool deviceFixedIter = (tol <= 0.0);
+    drv.deviceFixedIter = (tol <= 0.0);
+    const bool& deviceFixedIter = drv.deviceFixedIter;
     // A scenario that exhausts the budget is reported as MAX_ITERATION_REACHED by the device itself (the
     // precomputer's exhausted set), which is OLF's own answer: no early exit hands stragglers to the CPU.
 
@@ -6072,7 +6870,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     // hardcoded constants. With matching parameters and the same equations the GPU outer-loop fixed point
     // matches the CPU's to the inner-Newton precision; a loose tolerance (e.g. the 1 MW slack default) leaves
     // a redistribution band, so a test wanting machine-precision agreement passes tight values on both sides.
-    const double REACTIVE_LIMIT_TOL = reactiveLimitTol;
+    drv.reactiveLimitTol = reactiveLimitTol;
+    const double& REACTIVE_LIMIT_TOL = drv.reactiveLimitTol;
     const double SLACK_DIST_TOL = slackDistTol;
     const double P_RESIDUE_EPS = 1e-5;                       // OLF ActivePowerDistribution.P_RESIDUE_EPS: the
                                                             // water-filling distributes the mismatch down to this
@@ -6147,7 +6946,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         dCvOvEntry.upload(entry.data(), entry.size() * sizeof(int));
         dCvOvVal.upload(val.data(), val.size() * sizeof(double));
     }
-    bool useDynRlLimits = ctx->nrl > 0 && (ctx->ncv > 0 || nRlQOv > 0 || ctx->nfqLim > 0);
+    drv.useDynRlLimits = ctx->nrl > 0 && (ctx->ncv > 0 || nRlQOv > 0 || ctx->nfqLim > 0);
+    const bool& useDynRlLimits = drv.useDynRlLimits;
     if (useDynRlLimits && (!ctx->dRlMinQDyn.p || !ctx->dRlLoadQDyn.p)) {   // curves allocate these on their own
                                                             // table upload; a Q override alone must too, and a
                                                             // guard that names only ONE of them silently leaves
@@ -6166,72 +6966,9 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     // measured on rte6515 BUS-6112_BBS_2: row 12834 converged at target 0 through outer 32, then the RL phase
     // re-stamped -0.444 and the solve had to catch up, one pass behind OLF. The re-stamp branch in the kernel
     // keeps the value current once the curve limits exist, so the static value is a correct starting point.
-    auto launchPilotVeqInner = [&](bool staticLimits = false, bool continuedPins = false) {
-        const bool useDyn = useDynRlLimits && !staticLimits;
-        if (ctx->hasDqQrGroups && ctx->st->nQr > 0) {
-            updatePilotVeqBatch<<<grid(ctx->st->nQr * nS), BLOCK, 0, ctx->stream>>>(
-                        ctx->st->nQr, nS, n,
-                        ctx->st->dQrPtr.as<int>(), ctx->st->dQrRows.as<int>(), ctx->dQrGenVc.as<char>(),
-                        ctx->dQrPilotQ.as<double>(), ctx->dMode.as<int>(), ctx->dTarget.as<double>(),
-                        ctx->dQrVeqOff.as<char>(), ctx->dQrSavedVT.as<double>(),
-                        ctx->dRlActive.as<char>(), ctx->dRlSwitched.as<char>(),
-                        ctx->nFrozenRow, ctx->nFrozenRow ? ctx->dFrozenRow.as<int>() : nullptr,
-                        psEntryPtr(ctx),
-                    ctx->dRlLimitType.p ? ctx->dRlLimitType.as<char>() : nullptr, ctx->nrl,
-                    useDyn ? ctx->dRlMinQDyn.as<double>() : ctx->dRlMinQ.as<double>(),
-                    useDyn ? ctx->dRlMaxQDyn.as<double>() : ctx->dRlMaxQ.as<double>(),
-                    useDyn ? ctx->dRlLoadQDyn.as<double>() : ctx->dRlLoadQ.as<double>(),
-                    ctx->rlRobust ? ctx->dRlInitTgtQ.as<double>() : nullptr, useDyn ? 1 : 0,
-                    ctx->dRlVtarget.p ? ctx->dRlVtarget.as<double>() : nullptr,
-                    ctx->dQrPilotRlEntry.p ? ctx->dQrPilotRlEntry.as<int>() : nullptr,
-                    nRlVtOv, nRlVtOv > 0 ? dRlVtOvSlotIdx.as<int>() : nullptr,
-                    nRlVtOv > 0 ? dRlVtOvVal.as<double>() : nullptr,
-                    ctx->nSvc > 0 ? ctx->dSvcRlVt.as<double>() : nullptr,
-                    ctx->nDqMembers, ctx->dDqMemberQrGroup.p ? ctx->dDqMemberQrGroup.as<int>() : nullptr,
-                    ctx->dDqMemberRlEntry.p ? ctx->dDqMemberRlEntry.as<int>() : nullptr,
-                    ctx->nRlIslanded > 0 ? ctx->dRlIslanded.as<char>() : nullptr,
-                    ctx->hasDqSub ? ctx->dDqSub.as<char>() : nullptr, ctx->hasDqSub ? ctx->dQrMemberStart.as<int>() : nullptr,
-                    REACTIVE_LIMIT_TOL, ctx->nRlGenLost > 0 ? ctx->dRlGenLost.as<char>() : nullptr,
-                    ctx->st->dQrDepBase.p ? ctx->st->dQrDepBase.as<int>() : nullptr,
-                    ctx->st->dRelocOwn.p ? ctx->st->dRelocOwn.as<int>() : nullptr,
-                    continuedPins && ctx->hasRlPinTgtIn ? ctx->dRlPinTgtIn.as<double>() : nullptr);
-        }
-    };
-    auto launchDistrQTargetsInner = [&]() {
-        if (ctx->nRlRemote > 0 && ctx->nDqMembers > 0) {
-            updateDistrQTargetsBatch<<<grid(ctx->nDqMembers * nS), BLOCK, 0, ctx->stream>>>(
-                        ctx->nDqMembers, nS, n, ctx->nrl,
-                        ctx->dDqMemberKey.as<double>(), ctx->dDqMemberRlEntry.as<int>(),
-                        ctx->dDqMemberGroupStart.as<int>(), ctx->dDqMemberGroupCount.as<int>(),
-                        ctx->dDqMemberRow.as<int>(), ctx->dDqMemberHasRow.as<char>(),
-                        ctx->dRlVrow.as<int>(),
-                        useDynRlLimits ? ctx->dRlMinQDyn.as<double>() : ctx->dRlMinQ.as<double>(),
-                        useDynRlLimits ? ctx->dRlMaxQDyn.as<double>() : ctx->dRlMaxQ.as<double>(),
-                        useDynRlLimits ? ctx->dRlLoadQDyn.as<double>() : ctx->dRlLoadQ.as<double>(), ctx->dRlLimitType.as<char>(), useDynRlLimits ? 1 : 0,
-                        ctx->dTarget.as<double>(), ctx->dRlActive.as<char>(),
-                        ctx->dDqMemberTargetQ.as<double>(),
-                        ctx->hasDqQrGroups ? ctx->dDqMemberQrGroup.as<int>() : nullptr,
-                        ctx->st->nQr > 0 ? ctx->st->dQrPtr.as<int>() : nullptr,
-                        ctx->st->nQr > 0 ? ctx->st->dQrRows.as<int>() : nullptr,
-                        ctx->dMode.as<int>(),
-                        ctx->hasDqQrGroups ? ctx->dQrPilotQ.as<double>() : nullptr, ctx->st->nQr,
-                        ctx->nDqInact, ctx->nDqInact ? ctx->dDqInact.as<int>() : nullptr,
-                        ctx->nFrozenRow, ctx->nFrozenRow ? ctx->dFrozenRow.as<int>() : nullptr,
-                        ctx->nDqTqOv, ctx->nDqTqOv ? ctx->dDqTqOvKey.as<int>() : nullptr,
-                        ctx->nDqTqOv ? ctx->dDqTqOvVal.as<double>() : nullptr,
-                        ctx->dDqMemberTgtPtr.as<int>(), ctx->dDqMemberTgtPeer.as<int>(),
-                        psEntryPtr(ctx),
-                        ctx->st->dRelocOwn.p != nullptr
-                                ? ctx->st->dRelocOwn.as<int>() : nullptr,
-                    ctx->hasDqSub ? ctx->dDqSub.as<char>() : nullptr, ctx->hasDqSub ? ctx->dQrMemberStart.as<int>() : nullptr,
-                    ctx->nRlGenLost > 0 ? ctx->dRlGenLost.as<char>() : nullptr,
-                    ctx->st->dQrDepBase.p ? ctx->st->dQrDepBase.as<int>() : nullptr,
-                    ctx->dQrVeqOff.p ? ctx->dQrVeqOff.as<char>() : nullptr,
-                        ctx->dRlInitTgtQ.as<double>(), ctx->dRlQrow.as<int>(),
-                        ctx->nDqKeyOv, ctx->nDqKeyOv ? ctx->dDqKeyOvIdx.as<int>() : nullptr, ctx->nDqKeyOv ? ctx->dDqKeyOvKey.as<double>() : nullptr);
-        }
-    };
-    std::vector<char> rlActive(nS), rlSwitched(nS), wasActive(nS);
+    std::vector<char>& rlActive = drv.rlActive;
+    rlActive.assign(nS, 0);
+    std::vector<char> rlSwitched(nS), wasActive(nS);
     // OLF_GPU_RL_AUDIT: per-scenario decision history, kept in memory and printed only for the
     // scenarios the end-of-solve audit flags. The failing scenario is not known until the solve is
     // over and the flip is rare, so the only way to see its trajectory is to record every scenario's
@@ -6460,8 +7197,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                     ctx->dRlLoadQDyn.as<double>(), cvProbeEntry, cvProbeSlotByCtg ? ctx->loopTraceSlot : cvProbeSlot);
             launchForcedTargetQLimits(ctx, nS, n);
         }
-        launchPilotVeqInner(true, true);                     // seed: base limits, or the previous solve's flip
-        launchDistrQTargetsInner();
+        launchPilotVeqInner(ctx, drv, true, true);                     // seed: base limits, or the previous solve's flip
+        launchDistrQTargetsInner(ctx, drv);
         if (ctx->nds > 0) {                                  // slack-retained share: 0 until frozen at the first pass
             CUDA_CHECK(cudaMemsetAsync(ctx->dDsRetain.p, 0, nS * sizeof(double), ctx->stream));
             {
@@ -6478,120 +7215,29 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                         ctx->dTarget.as<double>(), ctx->dFqApplied.as<double>());
             }
         }
-        if (ctx->nmon > 0) {                                 // per-SOLVE state, like the RL limit types:
-            std::vector<double> nan(static_cast<size_t>(ctx->nmon) * nS, std::nan(""));   // nothing has
-            CUDA_CHECK(cudaMemcpyAsync(ctx->dMonActivated.p, nan.data(),   // fired yet in this solve
-                    nan.size() * sizeof(double), cudaMemcpyHostToDevice, ctx->stream));
-            CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+        if (ctx->nmon > 0) {
+            monitoringResetSolve(ctx, drv);
         }
-        if (ctx->nTvc > 0) {                                 // per-SOLVE state: every scenario starts at the
-            size_t nst = static_cast<size_t>(nS) * ctx->nTvc;   // base tap with a fresh ratchet
-            std::vector<int> cur(nst);
-            for (int s2 = 0; s2 < nS; s2++) {
-                for (int c = 0; c < ctx->nTvc; c++) {
-                    cur[static_cast<size_t>(s2) * ctx->nTvc + c] = ctx->hTvcBaseTap[c];
-                }
-            }
-            ctx->dTvcPrevTap.ensure(nst * sizeof(int));
-            CUDA_CHECK(cudaMemcpy(ctx->dTvcCurTap.p, cur.data(), nst * sizeof(int), cudaMemcpyHostToDevice));
-            CUDA_CHECK(cudaMemcpy(ctx->dTvcPrevTap.p, cur.data(), nst * sizeof(int), cudaMemcpyHostToDevice));
-            CUDA_CHECK(cudaMemset(ctx->dTvcRatchetDir.p, 0, nst * sizeof(int)));
-            CUDA_CHECK(cudaMemset(ctx->dTvcRatchetCount.p, 0, nst * sizeof(int)));
-            CUDA_CHECK(cudaMemset(ctx->dTvcRatchetAllowed.p, 0, nst * sizeof(int)));
-            ctx->dTvcOutOfDb.ensure(nst * sizeof(char));
-            ctx->dTvcDiffV.ensure(nst * sizeof(double));
-            ctx->dTvcSensi.ensure(nst * sizeof(double));
+        if (ctx->nTvc > 0) {
+            tvcResetSolve(ctx, drv);
         }
-        if (ctx->nCph > 0) {                                 // per-SOLVE state: base taps, check count 0
-            size_t nst = static_cast<size_t>(nS) * ctx->nCph;
-            std::vector<int> cur(nst);
-            for (int s2 = 0; s2 < nS; s2++) for (int c = 0; c < ctx->nCph; c++) cur[static_cast<size_t>(s2) * ctx->nCph + c] = ctx->hCphBaseTap[c];
-            CUDA_CHECK(cudaMemcpy(ctx->dCphTap.p, cur.data(), nst * sizeof(int), cudaMemcpyHostToDevice));
-            CUDA_CHECK(cudaMemcpy(ctx->dCphPrevTap.p, cur.data(), nst * sizeof(int), cudaMemcpyHostToDevice));
-            CUDA_CHECK(cudaMemset(ctx->dCphIter.p, 0, nS * sizeof(int)));
+        if (ctx->nCph > 0) {
+            cphResetSolve(ctx, drv);
         }
-        if (ctx->nTvd > 0) {                                 // per-SOLVE state: every control at its entry state
-            size_t nsm = static_cast<size_t>(nS) * ctx->nTvd;
-            size_t nsg = static_cast<size_t>(nS) * ctx->nTvdGroups;
-            size_t nsd = static_cast<size_t>(nS) * std::max(ctx->nTvdDelta, 1);
-            std::vector<int> tap(nsm);
-            for (int s2 = 0; s2 < nS; s2++) for (int m = 0; m < ctx->nTvd; m++) tap[static_cast<size_t>(s2) * ctx->nTvd + m] = ctx->hTvdMemBaseTap[m];
-            std::vector<double> nanv(std::max(nsm, nsd), std::nan(""));
-            CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
-            CUDA_CHECK(cudaMemcpy(ctx->dTvdMemTap.p, tap.data(), nsm * sizeof(int), cudaMemcpyHostToDevice));
-            CUDA_CHECK(cudaMemset(ctx->dTvdMemState.p, 0, nsm * sizeof(int)));
-            CUDA_CHECK(cudaMemcpy(ctx->dTvdMemRoundFrom.p, nanv.data(), nsm * sizeof(double), cudaMemcpyHostToDevice));
-            CUDA_CHECK(cudaMemcpy(ctx->dTvdSaved.p, nanv.data(), nsd * sizeof(double), cudaMemcpyHostToDevice));
-            CUDA_CHECK(cudaMemset(ctx->dTvdScnStep.p, 0, nS * sizeof(int)));
-            CUDA_CHECK(cudaMemset(ctx->dTvdGrpStep.p, 0, nsg * sizeof(int)));
-            CUDA_CHECK(cudaMemset(ctx->dTvdGrpShMin.p, 0, nsg * sizeof(double)));
-            CUDA_CHECK(cudaMemset(ctx->dTvdGrpShMax.p, 0, nsg * sizeof(double)));
-            CUDA_CHECK(cudaMemset(ctx->dTvdGrpShInit.p, 0, nsg * sizeof(double)));
-            CUDA_CHECK(cudaMemset(ctx->dTvdReject.p, 0, nS * sizeof(char)));
-            if (ctx->nTvdFz > 0) CUDA_CHECK(cudaMemset(ctx->dTvdFzFrozen.p, 0, static_cast<size_t>(nS) * ctx->nTvdFz * sizeof(int)));
-            tvdEntryBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(tvdTables(ctx), nS, n, ctx->nElements, ctx->tvdEntryOn,
-                    ctx->dDisabled.as<char>(), ctx->dMode.as<int>(), ctx->dTarget.as<double>(), ctx->dX.as<double>());
-            CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+        if (ctx->nTvd > 0) {
+            tvdResetSolve(ctx, drv);
         }
-        if (ctx->nSvc > 0) {                                 // per-SOLVE state: zone targets back at the
-            size_t nsc = static_cast<size_t>(nS) * ctx->nSvc;   // network's own, nothing adjusted yet
-            std::vector<double> tv(nsc);
-            for (int s2 = 0; s2 < nS; s2++) {
-                for (int c = 0; c < ctx->nSvc; c++) tv[static_cast<size_t>(s2) * ctx->nSvc + c] = ctx->hSvcBaseTargetV[c];
-            }
-            CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
-            CUDA_CHECK(cudaMemcpy(ctx->dSvcTargetV.p, tv.data(), nsc * sizeof(double), cudaMemcpyHostToDevice));
-            CUDA_CHECK(cudaMemset(ctx->dSvcNeed.p, 0, nS));
-            CUDA_CHECK(cudaMemset(ctx->dSvcReject.p, 0, nS));
-            CUDA_CHECK(cudaMemset(ctx->dSvcEnabled.p, 1, nsc));
+        if (ctx->nSvc > 0) {
+            svcResetSolve(ctx, drv);
         }
-        if (ctx->nSvd > 0) {                                 // per-SOLVE state, same shape
-            size_t nsm = static_cast<size_t>(nS) * ctx->nSvd;
-            size_t nsg = static_cast<size_t>(nS) * ctx->nSvdGroups;
-            size_t nsd = static_cast<size_t>(nS) * std::max(ctx->nSvdDelta, 1);
-            size_t nsu = static_cast<size_t>(nS) * std::max(ctx->nSvdSubs, 1);
-            std::vector<int> pos(nsu);
-            for (int s2 = 0; s2 < nS; s2++) for (int u = 0; u < ctx->nSvdSubs; u++) pos[static_cast<size_t>(s2) * ctx->nSvdSubs + u] = 0;
-            std::vector<double> nanv(std::max(nsm, nsd), std::nan(""));
-            CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
-            CUDA_CHECK(cudaMemcpy(ctx->dSvdSubPos.p, pos.data(), nsu * sizeof(int), cudaMemcpyHostToDevice));
-            CUDA_CHECK(cudaMemset(ctx->dSvdMemState.p, 0, nsm * sizeof(int)));
-            CUDA_CHECK(cudaMemcpy(ctx->dSvdMemContB.p, nanv.data(), nsm * sizeof(double), cudaMemcpyHostToDevice));
-            CUDA_CHECK(cudaMemcpy(ctx->dSvdSaved.p, nanv.data(), nsd * sizeof(double), cudaMemcpyHostToDevice));
-            CUDA_CHECK(cudaMemset(ctx->dSvdGrpStep.p, 0, nsg * sizeof(int)));
-            svdEntryBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(svdTables(ctx), nS, n, ctx->nElements, ctx->svdEntryOn,
-                    ctx->dDisabled.as<char>(), ctx->dMode.as<int>(), ctx->dTarget.as<double>(), ctx->dX.as<double>());
-            CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+        if (ctx->nSvd > 0) {
+            svdResetSolve(ctx, drv);
         }
-        if (ctx->nFlc > 0) {                                 // per-SOLVE state: base taps, fresh ratchets
-            size_t nst = static_cast<size_t>(nS) * ctx->nFlc;
-            std::vector<int> cur(nst);
-            for (int s2 = 0; s2 < nS; s2++) for (int c = 0; c < ctx->nFlc; c++) cur[static_cast<size_t>(s2) * ctx->nFlc + c] = ctx->hFlcBaseTap[c];
-            CUDA_CHECK(cudaMemcpy(ctx->dFlcCurTap.p, cur.data(), nst * sizeof(int), cudaMemcpyHostToDevice));
-            CUDA_CHECK(cudaMemcpy(ctx->dFlcPrevTap.p, cur.data(), nst * sizeof(int), cudaMemcpyHostToDevice));
-            CUDA_CHECK(cudaMemset(ctx->dFlcRatDir.p, 0, nst * sizeof(int)));
-            CUDA_CHECK(cudaMemset(ctx->dFlcRatCount.p, 0, nst * sizeof(int)));
-            CUDA_CHECK(cudaMemset(ctx->dFlcRatAllowed.p, 0, nst * sizeof(int)));
+        if (ctx->nFlc > 0) {
+            flcResetSolve(ctx, drv);
         }
-        if (ctx->nShc > 0) {                                 // per-SOLVE state: base sections, fresh ratchets,
-            size_t nsu = static_cast<size_t>(nS) * ctx->nShcSubs;   // the identity row's target as the base b
-            std::vector<int> pos(nsu);
-            for (int s2 = 0; s2 < nS; s2++) {
-                for (int u = 0; u < ctx->nShcSubs; u++) pos[static_cast<size_t>(s2) * ctx->nShcSubs + u] = ctx->hShcSubBase[u];
-            }
-            CUDA_CHECK(cudaMemcpy(ctx->dShcPos.p, pos.data(), nsu * sizeof(int), cudaMemcpyHostToDevice));
-            CUDA_CHECK(cudaMemset(ctx->dShcRatDir.p, 0, nsu * sizeof(int)));
-            CUDA_CHECK(cudaMemset(ctx->dShcRatCount.p, 0, nsu * sizeof(int)));
-            CUDA_CHECK(cudaMemset(ctx->dShcRatAllowed.p, 0, nsu * sizeof(int)));
-            size_t nsc = static_cast<size_t>(nS) * ctx->nShc;
-            CUDA_CHECK(cudaMemset(ctx->dShcAppliedDb.p, 0, nsc * sizeof(double)));
-            std::vector<double> tgt(static_cast<size_t>(n) * nS), bb(nsc);
-            CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
-            CUDA_CHECK(cudaMemcpy(tgt.data(), ctx->dTarget.p, tgt.size() * sizeof(double), cudaMemcpyDeviceToHost));
-            for (int s2 = 0; s2 < nS; s2++) {
-                for (int c = 0; c < ctx->nShc; c++) bb[static_cast<size_t>(s2) * ctx->nShc + c] = tgt[static_cast<size_t>(s2) * n + ctx->hShcBRow[c]];
-            }
-            CUDA_CHECK(cudaMemcpy(ctx->dShcBaseB.p, bb.data(), nsc * sizeof(double), cudaMemcpyHostToDevice));
+        if (ctx->nShc > 0) {
+            shcResetSolve(ctx, drv);
         }
         if (ctx->dsSlackOnly) {
             if (dsSlackShift != nullptr) {                   // strategy pairs: seed with the parent contingency's
@@ -6608,7 +7254,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     // (distribute + re-solve until balanced), and repeat the whole RL->DS sequence until a full sequence
     // triggers no inner Newton re-solve. Running RL and DS in the SAME pass converges to a different (still
     // in-tolerance) point when switching interacts with slack distribution. phase 0 = reactive limits, 1 = slack.
-    std::vector<char> live(active);                          // scenarios still iterating outer loops (dropped on failure)
+    std::vector<char>& live = drv.live;
+    live = active;                          // scenarios still iterating outer loops (dropped on failure)
     // OLF's DefaultAcOuterLoopConfig orders DistributedSlack BEFORE ReactiveLimits (innermost first), and the
     // engine stabilizes them in that order. Match it: phase 0 = distributed slack, phase 1 = reactive limits.
     // (Switching PV->PQ before the slack is balanced leaves a large active imbalance that the undamped device
@@ -6628,7 +7275,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     // are still host orchestrators: their position relative to RL is right, but OLF restarts the
     // WHOLE sweep whenever one of them changes something, so an earlier loop is re-checked and here
     // it is not. Folding them needs the discrete tap/section tables on the device.
-    int loopOrder[MAX_DEVICE_LOOPS];
+    int (&loopOrder)[MAX_DEVICE_LOOPS] = drv.loopOrder;
     int nLoops = 0;
     if (ctx->nds > 0 || ctx->dsSlackOnly) {
         loopOrder[nLoops++] = LOOP_DS;
@@ -6696,7 +7343,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             realisticFixingIdx = i;
         }
     }
-    int loopIdx = 0;
+    int& loopIdx = drv.loopIdx;
+    loopIdx = 0;
     bool seqChanged = false;                                 // did any outer loop re-solve during the current RL->DS sequence
     if (!resume && ctx->startLoopKind >= 0) {
         // Restart after a host loop mutated the system: the first pass solves, then the sweep picks
@@ -6796,7 +7444,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     int olPassSolved = 0;
     bool olFirstSolveDone = resume;                          // a resumed call's passes are all re-solves
     int olTriggerKind = resume ? ctx->pausedLoopKind : -1;  // the loop whose check made the next pass re-solve
-    for (int outer = 0; outer < maxOuter && loopIdx < nLoops; outer++) {
+    int& outer = drv.outer;
+    for (outer = 0; outer < maxOuter && loopIdx < nLoops; outer++) {
     gOuterPasses++;
     if (olTime) CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
     const double olT0 = olTime ? olNowMs() : 0.0;
@@ -6815,88 +7464,6 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     //      mode 4's solve-only iterations evaluate just the residual and skip the vals memset —
     //      the J buffer is never read before the next full fill re-zeroes it). A lambda so the
     //      LINE_SEARCH backtrack below can re-evaluate at a reduced step. ----
-    auto fillActiveBatch = [&](bool fOnly) {
-        if (ctx->hasPilotSelf && ctx->dPsSkip.p != nullptr && ctx->st->nQr > 0) {
-            // Recompute the PILOT-SELF gate from the CURRENT pin states BEFORE any family fill: such a pilot
-            // has a Q balance to relocate only once a reactive limit has pinned it, and the RL pass moves
-            // pins between passes. The closed/open-branch and shunt fills are what route the pilot's raw q
-            // through it (ziDynDest), so it must be current when THEY run — launched after them (before the
-            // DISTR_Q fill only) the FIRST fill of every context read an unset gate and put the unpinned
-            // pilot's raw q on the carrier row on top of its DISTR_Q terms: row 0 of the 4-bus
-            // pilot-as-controller fixture assembled -1.451 against OLF's -5.715 (= OLF + 1.0 * q_pilot), and
-            // rte6515's base started from |f(x0)| 117.908 against OLF's 117.845.
-            pilotSelfGateBatch<<<grid(ctx->st->nQr * nS), BLOCK, 0, ctx->stream>>>(
-                    ctx->st->nQr, nS, ctx->nrl, ctx->dPsPilotEntry.as<int>(),
-                    ctx->dRlLimitType.as<char>(),
-                    ctx->nRlIslanded > 0 ? ctx->dRlIslanded.as<char>() : nullptr, ctx->dPsSkip.as<char>());
-        }
-        if (!fOnly) {
-            CUDA_CHECK(cudaMemsetAsync(ctx->dVals.p, 0, static_cast<size_t>(nnz) * nS * sizeof(double), ctx->stream));
-        }
-        initFBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, ctx->dTarget.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>());
-        if (ctx->st->cb.ne) {
-            if (fOnly) {
-                fillClosedBranchBatchF<<<grid(ctx->st->cb.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->cb.ne, nS, n, nnz, ctx->nElements, ctx->cbOffset, ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->cb.dest.as<int>(), ctx->dX.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>(), ctx->st->cb.altDest.as<int>(), ctx->st->cb.selRow.as<int>(), ctx->dMode.as<int>(), ctx->st->cb.dynReloc ? 1 : 0, ctx->st->cb.phaseCtl ? ctx->st->cb.pcDest.as<int>() : nullptr, ctx->st->cb.phaseCtl ? ctx->st->cb.pcSel.as<int>() : nullptr, withPilotSelf(relocOf(ctx->st->cb, ctx->st.get()), ctx));
-            } else {
-                fillClosedBranchBatch<<<grid(ctx->st->cb.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->cb.ne, nS, n, nnz, ctx->nElements, ctx->cbOffset, ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->cb.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>(), ctx->st->cb.altDest.as<int>(), ctx->st->cb.selRow.as<int>(), ctx->dMode.as<int>(), ctx->st->cb.dynReloc ? 1 : 0, ctx->st->cb.phaseCtl ? ctx->st->cb.pcDest.as<int>() : nullptr, ctx->st->cb.phaseCtl ? ctx->st->cb.pcSel.as<int>() : nullptr, withPilotSelf(relocOf(ctx->st->cb, ctx->st.get()), ctx));
-            }
-        }
-        {
-            static const char* cbProbe = std::getenv("OLF_GPU_CB_PROBE");
-            static bool cbProbed = false;
-            if (cbProbe != nullptr && !cbProbed && nS > 1 && ctx->st->cb.ne) {
-                cbProbed = true;
-                cbRowProbe<<<1, 1, 0, ctx->stream>>>(nS, std::atoi(cbProbe), ctx->st->cb.in.as<double>(),
-                        ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>(),
-                        ctx->nElements, ctx->cbOffset, ctx->dDisabled.as<char>(), ctx->dActive.as<char>());
-                CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
-            }
-        }
-        if (ctx->st->ob.ne) {
-            if (fOnly) {
-                fillOpenBranchBatchF<<<grid(ctx->st->ob.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->ob.ne, nS, n, nnz, ctx->nElements, ctx->obOffset, ctx->st->ob.in.as<double>(), ctx->st->ob.ix.as<int>(), ctx->st->ob.dest.as<int>(), ctx->dX.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->st->ob.altDest.as<int>(), ctx->st->ob.selRow.as<int>(), ctx->dMode.as<int>(), ctx->st->ob.dynReloc ? 1 : 0, withPilotSelf(relocOf(ctx->st->ob, ctx->st.get()), ctx));
-            } else {
-                fillOpenBranchBatch<<<grid(ctx->st->ob.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->ob.ne, nS, n, nnz, ctx->nElements, ctx->obOffset, ctx->st->ob.in.as<double>(), ctx->st->ob.ix.as<int>(), ctx->st->ob.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->st->ob.altDest.as<int>(), ctx->st->ob.selRow.as<int>(), ctx->dMode.as<int>(), ctx->st->ob.dynReloc ? 1 : 0, withPilotSelf(relocOf(ctx->st->ob, ctx->st.get()), ctx));
-            }
-        }
-        if (ctx->st->sh.ne) {
-            if (fOnly) {
-                fillShuntBatchF<<<grid(ctx->st->sh.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->sh.ne, nS, n, nnz, ctx->nElements, ctx->shOffset, ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(), ctx->st->sh.dest.as<int>(), ctx->dX.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->nShOv, ctx->dShOvSlotElem.as<int>(), ctx->dShOvGb.as<double>(), ctx->st->sh.altDest.as<int>(), ctx->st->sh.selRow.as<int>(), ctx->dMode.as<int>(), ctx->st->sh.dynReloc ? 1 : 0, withPilotSelf(relocOf(ctx->st->sh, ctx->st.get()), ctx));
-            } else {
-                fillShuntBatch<<<grid(ctx->st->sh.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->sh.ne, nS, n, nnz, ctx->nElements, ctx->shOffset, ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(), ctx->st->sh.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->nShOv, ctx->dShOvSlotElem.as<int>(), ctx->dShOvGb.as<double>(), ctx->st->sh.altDest.as<int>(), ctx->st->sh.selRow.as<int>(), ctx->dMode.as<int>(), ctx->st->sh.dynReloc ? 1 : 0, withPilotSelf(relocOf(ctx->st->sh, ctx->st.get()), ctx));
-            }
-        }
-        // voltage-dependent load model: own guarded block (NOT inside the shunt guard — a modeled
-        // load needs no shunt present); residual always, Jacobian slot unless the F-only pass
-        if (ctx->st->nvdl) {
-            fillVdlBatch<<<grid(ctx->st->nvdl * nS), BLOCK, 0, ctx->stream>>>(ctx->st->nvdl, nS, n, nnz, ctx->st->dVdlIn.as<double>(), ctx->st->dVdlIdx.as<int>(), ctx->st->dVdlDest.as<int>(), ctx->dX.as<double>(), fOnly ? nullptr : ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->st->vdlDyn ? ctx->st->dVdlAltRow.as<int>() : nullptr, ctx->st->vdlDyn ? ctx->st->dVdlAltDest.as<int>() : nullptr, ctx->st->vdlDyn ? ctx->dMode.as<int>() : nullptr);
-        }
-        if (ctx->st->hv.ne) {
-            if (fOnly) {
-                fillHvdcBatchF<<<grid(ctx->st->hv.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->hv.ne, nS, n, nnz, ctx->nElements, ctx->hvOffset, ctx->st->hv.in.as<double>(), ctx->st->hv.ix.as<int>(), ctx->st->hv.dest.as<int>(), ctx->dX.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->st->hv.altDest.as<int>(), ctx->st->hv.selRow.as<int>(), ctx->dMode.as<int>(), ctx->st->hv.dynReloc ? 1 : 0);
-            } else {
-                fillHvdcBatch<<<grid(ctx->st->hv.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->hv.ne, nS, n, nnz, ctx->nElements, ctx->hvOffset, ctx->st->hv.in.as<double>(), ctx->st->hv.ix.as<int>(), ctx->st->hv.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->st->hv.altDest.as<int>(), ctx->st->hv.selRow.as<int>(), ctx->dMode.as<int>(), ctx->st->hv.dynReloc ? 1 : 0);
-            }
-        }
-    int dqTraceRow = gpuDqTraceRow();
-    if (ctx->ndq) fillDistrQBatch<<<grid(ctx->ndq * nS), BLOCK, 0, ctx->stream>>>(ctx->ndq, nS, n, nnz, ctx->nElements, ctx->cbOffset, ctx->obOffset, ctx->st->dDqElem.as<int>(), ctx->st->dDqSide.as<int>(), ctx->st->dDqKind.as<int>(), ctx->st->dDqWeight.as<double>(), ctx->st->dDqDest.as<int>(), ctx->st->dDqAlt.as<int>(), ctx->st->dDqSel.as<int>(), ctx->st->dDqZiRow.as<int>(), ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(), ctx->st->ob.in.as<double>(), ctx->st->ob.ix.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->nDqOv, ctx->nDqOv ? ctx->dDqOvIdx.as<int>() : nullptr, ctx->nDqOv ? ctx->dDqOvW.as<double>() : nullptr,
-                ctx->nDqKeyOv, ctx->nDqKeyOv ? ctx->dDqKeyOvIdx.as<int>() : nullptr, ctx->nDqKeyOv ? ctx->dDqKeyOvKey.as<double>() : nullptr, ctx->dMode.as<int>(), ctx->nDqInact,
-                ctx->nDqInact ? ctx->dDqInact.as<int>() : nullptr,
-                ctx->nDqDyn ? ctx->dDqKMember.as<int>() : nullptr, ctx->nDqDyn || ctx->hasDqQrGroups ? ctx->dDqJMember.as<int>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberKey.as<double>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberRlEntry.as<int>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberGroupStart.as<int>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberGroupCount.as<int>() : nullptr, ctx->dRlLimitType.as<char>(), ctx->nrl, ctx->hasPilotSelf && ctx->dPsSkip.p != nullptr ? ctx->dPsSkip.as<char>() : nullptr, ctx->st->nQr, ctx->hasDqQrGroups ? ctx->dDqMemberQrGroup.as<int>() : nullptr, ctx->st->nQr > 0 ? ctx->st->dQrPtr.as<int>() : nullptr, ctx->st->nQr > 0 ? ctx->st->dQrRows.as<int>() : nullptr, ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>(), ctx->nShOv, ctx->dShOvSlotElem.as<int>(), ctx->dShOvGb.as<double>(), dqTraceRow,
-                    ctx->hasDqSub ? ctx->dDqSub.as<char>() : nullptr, ctx->hasDqSub ? ctx->dQrMemberStart.as<int>() : nullptr, ctx->nDqMembers);
-        if (ctx->ndr) fillDistrRhoBatch<<<grid(ctx->ndr * nS), BLOCK, 0, ctx->stream>>>(ctx->ndr, nS, n, nnz, ctx->st->dDrCol.as<int>(), ctx->st->dDrCoef.as<double>(), ctx->st->dDrDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->nDrOv, ctx->nDrOv ? ctx->dDrOvIdx.as<int>() : nullptr, ctx->nDrOv ? ctx->dDrOvC.as<double>() : nullptr, ctx->st->drQr ? ctx->st->dDrQrGroup.as<int>() : nullptr, ctx->dMode.as<int>(), ctx->st->dQrPtr.as<int>(), ctx->st->dQrRows.as<int>());
-        if (ctx->ndb) fillDistrShuntBBatch<<<grid(ctx->ndb * nS), BLOCK, 0, ctx->stream>>>(ctx->ndb, nS, n, nnz, ctx->st->dDbCol.as<int>(), ctx->st->dDbCoef.as<double>(), ctx->st->dDbDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>());
-        if (ctx->nzi) fillZeroImpBatch<<<grid(ctx->nzi * nS), BLOCK, 0, ctx->stream>>>(ctx->nzi, nS, n, nnz, ctx->st->dZiIn.as<double>(), ctx->st->dZiIdx.as<int>(), ctx->st->dZiDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->nziBase, ctx->nZiOn, ctx->dZiOnSlotElem.as<int>(), ctx->nZiOff, ctx->dZiOffSlotElem.as<int>(), ctx->st->dZiAltDest.as<int>(), ctx->st->dZiSelRow.as<int>(), ctx->dMode.as<int>(), ctx->st->ziDyn ? 1 : 0, withPilotSelf(ziRelocOf(ctx->st.get()), ctx), ctx->nZiTree, ctx->nZiTree ? ctx->dZiTreeSlotElemVal.as<int>() : nullptr, ctx->hasZiMasks ? ctx->dZiOffMask.as<char>() : nullptr, ctx->hasZiMasks ? ctx->dZiOnMask.as<char>() : nullptr, ctx->hasZiMasks ? ctx->dZiTreeMask.as<char>() : nullptr);
-        applyRowModeBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, nnz, ctx->dMode.as<int>(), ctx->st->dRowPtr.as<int>(), ctx->st->dDiagPos.as<int>(), ctx->dX.as<double>(), ctx->dTarget.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->dRowSlope.as<double>(),
-                    ctx->st->dColIdx.as<int>(), ctx->st->dRelocOwn.p != nullptr ? ctx->st->dRelocOwn.as<int>() : nullptr);
-        // OLF_GPU_VALS_SCAN_PREREPAIR: scan/dump the fill BEFORE the zero-diagonal repair rewrites hazard rows
-        // (a row that reads as a borrowed donor after the repair was EMPTY before it — the defect is upstream).
-        static const bool scanPreRepair = std::getenv("OLF_GPU_VALS_SCAN_PREREPAIR") != nullptr;
-        if (scanPreRepair) scanValsFinite(ctx, nS, n, nnz, outer);
-        hazRepairValues(ctx, nS, ctx->dVals.as<double>());
-        if (!scanPreRepair) scanValsFinite(ctx, nS, n, nnz, outer);   // OLF_GPU_VALS_SCAN: is the matrix sound at all?
-        if (!deviceFixedIter) CUDA_CHECK(cudaStreamSynchronize(ctx->stream));   // fixed-iter: stream-ordered into the solve, no host sync
-    };
     // ---- IncrementalTransformerVoltageControl as a DRIVER PHASE (OLF order 8). OLF's own rule, per
     //      controlled bus: if |targetV - V| > halfDeadband, take dV/drho from the Jacobian at the converged
     //      state (unit RHS at the rho identity row, read the bus V entry), deltaR1 = diffV / sensi, move to
@@ -6915,421 +7482,30 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     // the price of the loops running there at all: they used to report themselves STABLE in mode 6, so a scenario
     // retried in it (or a base load flow that fell into it) with a transformer, shunt, flow or secondary voltage
     // control out of its deadband got a wrong answer and nothing flagged it.
-    auto sensitivitySolve = [&](bool& first) {
-        if (ctx->mode == 6) {
-            for (int s2 = 0; s2 < nS; s2++) {
-                CUDSS_CHECK(cudssMatrixSetValues(ctx->ds.matA, ctx->dVals.as<double>() + (size_t) s2 * ctx->nnz));
-                CUDSS_CHECK(cudssMatrixSetValues(ctx->ds.matB, ctx->dB.as<double>() + (size_t) s2 * n));
-                CUDSS_CHECK(cudssMatrixSetValues(ctx->ds.matX, ctx->dDx.as<double>() + (size_t) s2 * n));
-                if (!ctx->analyzed) {
-                    gAnalysesMain++;
-                    { AnalysisTimer at_(__LINE__); CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_ANALYSIS, ctx->ds.config, ctx->ds.data, ctx->ds.matA, ctx->ds.matX, ctx->ds.matB)); }
-                    ctx->analyzed = true;
-                }
-                { AnalysisTimer at_(__LINE__, 'G'); CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_FACTORIZATION | CUDSS_PHASE_SOLVE,
-                        ctx->ds.config, ctx->ds.data, ctx->ds.matA, ctx->ds.matX, ctx->ds.matB)); }
-            }
-            first = false;
-            return;
-        }
-        if (!ctx->analyzed) {
-            gAnalysesMain++;
-            { AnalysisTimer at_(__LINE__); CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_ANALYSIS, ctx->ds.config, ctx->ds.data, ctx->matUb, ctx->matUbX, ctx->matUbB)); }
-            ctx->analyzed = true;
-        }
-        int phase = CUDSS_PHASE_SOLVE | (first ? CUDSS_PHASE_FACTORIZATION : 0);
-        first = false;
-        { AnalysisTimer at_(__LINE__, ((phase) & (CUDSS_PHASE_FACTORIZATION | CUDSS_PHASE_REFACTORIZATION)) ? 'G' : ((phase) & CUDSS_PHASE_ANALYSIS) ? 'A' : 'S'); CUDSS_CHECK(cudssExecute(ctx->ds.handle, phase, ctx->ds.config, ctx->ds.data, ctx->matUb, ctx->matUbX, ctx->matUbB)); }
-    };
-    std::vector<char> loopRejected(nS, 0);                   // a device loop routed the scenario to the CPU this pass
-    auto tvcStep = [&]() {
-        int nTvc = ctx->nTvc;
-        if (nTvc <= 0) return;
-        if (ctx->mode != 3 && ctx->mode != 6) {
-            static bool warned = false;
-            if (!warned) { std::fprintf(stderr, "in-kernel TVC needs a UBATCH (3) or robust (6) mode; mode %d runs it as stable\n", ctx->mode); warned = true; }
-            return;
-        }
-        size_t nst = static_cast<size_t>(nS) * nTvc;
-        tvcDeadbandCheckBatch<<<grid(static_cast<int>(nst)), BLOCK, 0, ctx->stream>>>(nTvc, nS, n, ctx->nElements,
-                ctx->dTvcVRow.as<int>(), ctx->dTvcTargetV.as<double>(), ctx->dTvcHalfDb.as<double>(),
-                ctx->dTvcElemIndex.as<int>(), ctx->dDisabled.as<char>(), ctx->dX.as<double>(), ctx->dRlActive.as<char>(),
-                ctx->dTvcOutOfDb.as<char>(), ctx->dTvcDiffV.as<double>());
-        std::vector<char> outOfDb(nst);
-        CUDA_CHECK(cudaMemcpyAsync(outOfDb.data(), ctx->dTvcOutOfDb.p, nst, cudaMemcpyDeviceToHost, ctx->stream));
-        CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
-        std::vector<char> needC(nTvc, 0);
-        bool any = false;
-        for (int s2 = 0; s2 < nS; s2++) {
-            for (int c = 0; c < nTvc; c++) {
-                if (outOfDb[static_cast<size_t>(s2) * nTvc + c]) { needC[c] = 1; any = true; }
-            }
-        }
-        if (!any) return;                                    // every bus inside its deadband: STABLE
-        // Sensitivities dV/drho at the CURRENT states: refill J for every scenario, factorize once,
-        // then one unit-RHS solve per controller that has an out-of-deadband scenario.
-        std::vector<char> ones(nS, 1);
-        CUDA_CHECK(cudaMemcpy(ctx->dActive.p, ones.data(), nS, cudaMemcpyHostToDevice));
-        fillActiveBatch(false);
-        CUDA_CHECK(cudaMemsetAsync(ctx->dTvcSensi.p, 0, nst * sizeof(double), ctx->stream));
-        bool first = true;
-        for (int c = 0; c < nTvc; c++) {
-            if (!needC[c]) continue;
-            int row = ctx->st->rowMap[ctx->hTvcRhoRow[c]];
-            if (row < 0) continue;                           // rho row not an active equation: stays insensitive
-            setUnitRhsBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, row, ctx->dB.as<double>());
-            hazRepairRightHandSide(ctx, nS, ctx->dB.as<double>());
-            sensitivitySolve(first);
-            tvcGatherSensiBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(nS, n, c, nTvc, ctx->dTvcVRow.as<int>(),
-                    ctx->dDx.as<double>(), ctx->dTvcSensi.as<double>());
-        }
-        CUDA_CHECK(cudaMemcpy(ctx->dActive.p, active.data(), nS, cudaMemcpyHostToDevice));   // as it was
-        // Tap decision; a moved scenario is an UNSTABLE verdict (dRlSwitched), like every device loop.
-        tvcGroupDecisionBatch<<<grid(ctx->nTvcGroups * nS), BLOCK, 0, ctx->stream>>>(ctx->nTvcGroups, nS, nTvc,
-                ctx->dTvcGroupPtr.as<int>(), ctx->dTvcGroupCtrl.as<int>(),
-                ctx->dTvcOutOfDb.as<char>(), ctx->dTvcDiffV.as<double>(), ctx->dTvcSensi.as<double>(), ctx->dTvcHalfDb.as<double>(),
-                ctx->dTvcTapPtr.as<int>(), ctx->dTvcTapData.as<double>(),
-                ctx->dTvcCurTap.as<int>(), ctx->dTvcRatchetDir.as<int>(), ctx->dTvcRatchetCount.as<int>(),
-                ctx->dTvcRatchetAllowed.as<int>(), ctx->tvcMaxTapShift, 0.05, ctx->dRlSwitched.as<char>());
-        // Apply: rho target + state seed on the moved pairs, then the pi rows through the tap-override list.
-        tvcApplyRhoBatch<<<grid(static_cast<int>(nst)), BLOCK, 0, ctx->stream>>>(nTvc, nS, n,
-                ctx->dTvcRhoRow.as<int>(), ctx->dTvcTapPtr.as<int>(), ctx->dTvcTapData.as<double>(),
-                ctx->dTvcCurTap.as<int>(), ctx->dTvcPrevTap.as<int>(), ctx->dTarget.as<double>(), ctx->dX.as<double>());
-        CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
-        tvcRebuildOverrides(ctx);
-        if (std::getenv("OLF_GPU_BATCH_TRACE") != nullptr) {
-            std::vector<int> cur(nst), base(ctx->hTvcBaseTap);
-            CUDA_CHECK(cudaMemcpy(cur.data(), ctx->dTvcCurTap.p, nst * sizeof(int), cudaMemcpyDeviceToHost));
-            int nOut = 0, nMoved = 0;
-            for (size_t k = 0; k < nst; k++) {
-                nOut += outOfDb[k] ? 1 : 0;
-            }
-            for (int s2 = 0; s2 < nS; s2++) {
-                for (int c = 0; c < nTvc; c++) {
-                    if (cur[static_cast<size_t>(s2) * nTvc + c] != base[c]) nMoved++;
-                }
-            }
-            std::fprintf(stderr, "TVC_KERNEL nS=%d nCtrl=%d outOfDeadband=%d pairsOffBaseTap=%d nR1Ov=%d\n",
-                         nS, nTvc, nOut, nMoved, ctx->nR1Ov);
-            std::vector<double> dv(nst), se(nst);
-            CUDA_CHECK(cudaMemcpy(dv.data(), ctx->dTvcDiffV.p, nst * sizeof(double), cudaMemcpyDeviceToHost));
-            CUDA_CHECK(cudaMemcpy(se.data(), ctx->dTvcSensi.p, nst * sizeof(double), cudaMemcpyDeviceToHost));
-            for (size_t k = 0; k < nst; k++) {
-                if (outOfDb[k]) {
-                    std::fprintf(stderr, "TVC_KERNEL_PAIR s=%d c=%d diffV=%.9e sensi=%.9e tap=%d base=%d rhoRowMapped=%d\n",
-                                 (int) (k / nTvc), (int) (k % nTvc), dv[k], se[k], cur[k], base[k % nTvc],
-                                 ctx->st->rowMap[ctx->hTvcRhoRow[k % nTvc]]);
-                }
-            }
-        }
-    };
+    std::vector<char>& loopRejected = drv.loopRejected;
+    loopRejected.assign(nS, 0);                   // a device loop routed the scenario to the CPU this pass
     // ---- IncrementalShuntVoltageControl as a DRIVER PHASE (OLF order 10): deadband per controlled bus,
     //      dV/dB from a unit RHS at each needed controller's SHUNT_B identity row (the driver's own
     //      factors), OLF's adjustB round-robin per group, the section total pinned at the identity row
     //      and the static (dG, dB) through the shunt-override list. Groups with several controller
     //      shunts ARE handled (the round-robin runs in the group kernel). ----
-    auto shcStep = [&]() {
-        int nShc = ctx->nShc;
-        if (nShc <= 0) return;
-        if (ctx->mode != 3 && ctx->mode != 6) {
-            static bool warned = false;
-            if (!warned) { std::fprintf(stderr, "in-kernel shunt VC needs a UBATCH (3) or robust (6) mode; mode %d runs it as stable\n", ctx->mode); warned = true; }
-            return;
-        }
-        int nG = ctx->nShcGroups;
-        size_t nsg = static_cast<size_t>(nS) * nG;
-        shcDeadbandCheckBatch<<<grid(static_cast<int>(nsg)), BLOCK, 0, ctx->stream>>>(nG, nS, n, ctx->nElements,
-                ctx->dShcGroupPtr.as<int>(), ctx->dShcGroupCtrl.as<int>(),
-                ctx->dShcVRow.as<int>(), ctx->dShcTargetV.as<double>(), ctx->dShcHalfDb.as<double>(), ctx->dShcElemAbs.as<int>(),
-                ctx->dDisabled.as<char>(), ctx->dX.as<double>(), ctx->dRlActive.as<char>(),
-                ctx->dShcOutOfDb.as<char>(), ctx->dShcDiffV.as<double>());
-        std::vector<char> outOfDb(nsg);
-        CUDA_CHECK(cudaMemcpyAsync(outOfDb.data(), ctx->dShcOutOfDb.p, nsg, cudaMemcpyDeviceToHost, ctx->stream));
-        CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
-        std::vector<int> gPtr(nG + 1), gCtrl(ctx->nShc);
-        CUDA_CHECK(cudaMemcpy(gPtr.data(), ctx->dShcGroupPtr.p, gPtr.size() * sizeof(int), cudaMemcpyDeviceToHost));
-        CUDA_CHECK(cudaMemcpy(gCtrl.data(), ctx->dShcGroupCtrl.p, gCtrl.size() * sizeof(int), cudaMemcpyDeviceToHost));
-        std::vector<char> needC(nShc, 0);
-        bool any = false;
-        for (int s2 = 0; s2 < nS; s2++) {
-            for (int g = 0; g < nG; g++) {
-                if (!outOfDb[static_cast<size_t>(s2) * nG + g]) continue;
-                any = true;
-                for (int k = gPtr[g]; k < gPtr[g + 1]; k++) needC[gCtrl[k]] = 1;
-            }
-        }
-        if (!any) return;                                    // every controlled bus inside its deadband: STABLE
-        std::vector<char> ones(nS, 1);
-        CUDA_CHECK(cudaMemcpy(ctx->dActive.p, ones.data(), nS, cudaMemcpyHostToDevice));
-        fillActiveBatch(false);
-        CUDA_CHECK(cudaMemsetAsync(ctx->dShcSensi.p, 0, static_cast<size_t>(nS) * nShc * sizeof(double), ctx->stream));
-        bool first = true;
-        for (int c = 0; c < nShc; c++) {
-            if (!needC[c]) continue;
-            int row = ctx->st->rowMap[ctx->hShcBRow[c]];
-            if (row < 0) continue;
-            setUnitRhsBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, row, ctx->dB.as<double>());
-            hazRepairRightHandSide(ctx, nS, ctx->dB.as<double>());
-            sensitivitySolve(first);
-            shcGatherSensiBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(nS, n, c, nShc, ctx->dShcVRow.as<int>(),
-                    ctx->dDx.as<double>(), ctx->dShcSensi.as<double>());
-        }
-        CUDA_CHECK(cudaMemcpy(ctx->dActive.p, active.data(), nS, cudaMemcpyHostToDevice));
-        shcAdjustBatch<<<grid(static_cast<int>(nsg)), BLOCK, 0, ctx->stream>>>(nG, nS, n, ctx->nElements, nShc, ctx->nShcSubs,
-                ctx->shcMaxSectionShift, ctx->dShcGroupPtr.as<int>(), ctx->dShcGroupCtrl.as<int>(), ctx->dShcSubPtr.as<int>(),
-                ctx->dShcSecPtr.as<int>(), ctx->dShcSecB.as<double>(), ctx->dShcSubMin.as<int>(),
-                ctx->dShcHalfDb.as<double>(), ctx->dShcElemAbs.as<int>(), ctx->dDisabled.as<char>(),
-                ctx->dShcOutOfDb.as<char>(), ctx->dShcDiffV.as<double>(), ctx->dShcSensi.as<double>(),
-                ctx->dShcPos.as<int>(), ctx->dShcRatDir.as<int>(), ctx->dShcRatCount.as<int>(), ctx->dShcRatAllowed.as<int>(),
-                ctx->dShcShift.as<int>(), ctx->dRlSwitched.as<char>());
-        shcApplyBatch<<<grid(nShc * nS), BLOCK, 0, ctx->stream>>>(nShc, nS, n, ctx->dShcBRow.as<int>(), ctx->dShcSubPtr.as<int>(),
-                ctx->dShcSecPtr.as<int>(), ctx->dShcSecB.as<double>(), ctx->dShcSubBase.as<int>(), ctx->dShcPos.as<int>(),
-                ctx->nShcSubs, ctx->dShcBaseB.as<double>(), ctx->dShcAppliedDb.as<double>(), ctx->dTarget.as<double>(), ctx->dX.as<double>());
-        CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
-        shcRebuildOverrides(ctx);
-        if (std::getenv("OLF_GPU_BATCH_TRACE") != nullptr) {
-            std::vector<int> pos(static_cast<size_t>(nS) * ctx->nShcSubs);
-            CUDA_CHECK(cudaMemcpy(pos.data(), ctx->dShcPos.p, pos.size() * sizeof(int), cudaMemcpyDeviceToHost));
-            int nOut = 0, nMoved = 0;
-            for (char c : outOfDb) nOut += c ? 1 : 0;
-            for (int s2 = 0; s2 < nS; s2++) for (int u = 0; u < ctx->nShcSubs; u++) if (pos[static_cast<size_t>(s2) * ctx->nShcSubs + u] != ctx->hShcSubBase[u]) nMoved++;
-            std::fprintf(stderr, "SHUNT_KERNEL nS=%d nCtrl=%d nGroups=%d outOfDeadband=%d subsOffBase=%d nShOv=%d\n", nS, nShc, nG, nOut, nMoved, ctx->nShOv);
-        }
-    };
     // ---- the FLOW-OBSERVED incremental loops as DRIVER PHASES: kindMask selects the phase controllers
     //      (OLF order 7: kinds 1+2) or the RPC controllers (OLF order 9: kind 0). Same skeleton as the
     //      voltage-observed phases; the observable is the controlled branch's flow gradient dotted with
     //      the unit-RHS solution (OLF's EquationTerm.calculateSensi), evaluated by the codegen'd branch
     //      functions on the device. ----
-    auto flcStep = [&](int kindMask) {
-        int nF = ctx->nFlc;
-        if (nF <= 0) return;
-        if (ctx->mode != 3 && ctx->mode != 6) {
-            static bool warned = false;
-            if (!warned) { std::fprintf(stderr, "in-kernel flow control needs a UBATCH (3) or robust (6) mode; mode %d runs it as stable\n", ctx->mode); warned = true; }
-            return;
-        }
-        size_t nst = static_cast<size_t>(nS) * nF;
-        flcCheckBatch<<<grid(static_cast<int>(nst)), BLOCK, 0, ctx->stream>>>(nF, nS, n, ctx->nElements, ctx->cbOffset, kindMask,
-                ctx->dFlcKind.as<int>(), ctx->dFlcSide.as<int>(), ctx->dFlcTargetValue.as<double>(), ctx->dFlcHalfDb.as<double>(),
-                ctx->dFlcElem.as<int>(), ctx->dFlcCtlPack.as<int>(),
-                ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>(),
-                ctx->dDisabled.as<char>(), ctx->dX.as<double>(), ctx->dRlActive.as<char>(),
-                ctx->dFlcOutOfDb.as<char>(), ctx->dFlcDiff.as<double>());
-        std::vector<char> outOfDb(nst);
-        CUDA_CHECK(cudaMemcpyAsync(outOfDb.data(), ctx->dFlcOutOfDb.p, nst, cudaMemcpyDeviceToHost, ctx->stream));
-        CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
-        std::vector<char> needC(nF, 0);
-        bool any = false;
-        for (int s2 = 0; s2 < nS; s2++) for (int c = 0; c < nF; c++) if (outOfDb[static_cast<size_t>(s2) * nF + c]) { needC[c] = 1; any = true; }
-        if (!any) return;
-        std::vector<char> ones(nS, 1);
-        CUDA_CHECK(cudaMemcpy(ctx->dActive.p, ones.data(), nS, cudaMemcpyHostToDevice));
-        fillActiveBatch(false);
-        CUDA_CHECK(cudaMemsetAsync(ctx->dFlcSensi.p, 0, nst * sizeof(double), ctx->stream));
-        bool first = true;
-        for (int c = 0; c < nF; c++) {
-            if (!needC[c]) continue;
-            int row = ctx->st->rowMap[ctx->hFlcPinRow[c]];
-            if (row < 0) continue;
-            setUnitRhsBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, row, ctx->dB.as<double>());
-            hazRepairRightHandSide(ctx, nS, ctx->dB.as<double>());
-            sensitivitySolve(first);
-            flcGatherSensiBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(nS, n, c, nF, ctx->cbOffset,
-                    ctx->dFlcKind.as<int>(), ctx->dFlcSide.as<int>(), ctx->dFlcCtlPack.as<int>(),
-                    ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>(),
-                    ctx->dX.as<double>(), ctx->dDx.as<double>(), ctx->dFlcSensi.as<double>());
-        }
-        CUDA_CHECK(cudaMemcpy(ctx->dActive.p, active.data(), nS, cudaMemcpyHostToDevice));
-        flcDecisionBatch<<<grid(static_cast<int>(nst)), BLOCK, 0, ctx->stream>>>(nF, nS, kindMask,
-                ctx->dFlcKind.as<int>(), ctx->dFlcPinCol.as<int>(), ctx->dFlcTapPtr.as<int>(), ctx->dFlcTapData.as<double>(), ctx->dFlcMaxShift.as<int>(),
-                ctx->dFlcOutOfDb.as<char>(), ctx->dFlcDiff.as<double>(), ctx->dFlcSensi.as<double>(),
-                ctx->dFlcCurTap.as<int>(), ctx->dFlcRatDir.as<int>(), ctx->dFlcRatCount.as<int>(), ctx->dFlcRatAllowed.as<int>(), ctx->dRlSwitched.as<char>());
-        flcApplyBatch<<<grid(static_cast<int>(nst)), BLOCK, 0, ctx->stream>>>(nF, nS, n, ctx->dFlcPinRow.as<int>(), ctx->dFlcPinCol.as<int>(),
-                ctx->dFlcTapPtr.as<int>(), ctx->dFlcTapData.as<double>(), ctx->dFlcCurTap.as<int>(), ctx->dFlcPrevTap.as<int>(),
-                ctx->dTarget.as<double>(), ctx->dX.as<double>());
-        CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
-        tvcRebuildOverrides(ctx);
-        if (std::getenv("OLF_GPU_BATCH_TRACE") != nullptr) {
-            std::vector<int> cur(nst);
-            CUDA_CHECK(cudaMemcpy(cur.data(), ctx->dFlcCurTap.p, nst * sizeof(int), cudaMemcpyDeviceToHost));
-            int nOut = 0, nMoved = 0;
-            for (char c : outOfDb) nOut += c ? 1 : 0;
-            for (int s2 = 0; s2 < nS; s2++) for (int c = 0; c < nF; c++) if (cur[static_cast<size_t>(s2) * nF + c] != ctx->hFlcBaseTap[c]) nMoved++;
-            std::fprintf(stderr, "FLOW_KERNEL kindMask=%d nS=%d nCtrl=%d outOfDeadband=%d pairsOffBaseTap=%d nR1Ov=%d\n", kindMask, nS, nF, nOut, nMoved, ctx->nR1Ov);
-        }
-    };
     // ---- CONTINUOUS PhaseControl as a DRIVER PHASE (OLF order 7), see cphCheckBatch. ----
-    auto cphStep = [&]() {
-        int nC = ctx->nCph;
-        if (nC <= 0) return;
-        size_t nst = static_cast<size_t>(nS) * nC;
-        cphCheckBatch<<<grid(static_cast<int>(nst)), BLOCK, 0, ctx->stream>>>(nC, nS, n, ctx->nElements, ctx->cbOffset,
-                ctx->dCphKind.as<int>(), ctx->dCphA1Row.as<int>(), ctx->dCphSide.as<int>(), ctx->dCphLimit.as<double>(), ctx->dCphElem.as<int>(),
-                ctx->dCphTapPtr.as<int>(), ctx->dCphTapData.as<double>(),
-                ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>(),
-                ctx->dDisabled.as<char>(), ctx->dRlActive.as<char>(), ctx->dCphIter.as<int>(),
-                ctx->dCphTap.as<int>(), ctx->dMode.as<int>(), ctx->dTarget.as<double>(), ctx->dX.as<double>(), ctx->dRlSwitched.as<char>());
-        CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
-        {                                                    // the loop's check count, per checked scenario
-            std::vector<int> it(nS);
-            CUDA_CHECK(cudaMemcpy(it.data(), ctx->dCphIter.p, nS * sizeof(int), cudaMemcpyDeviceToHost));
-            for (int s2 = 0; s2 < nS; s2++) if (rlActive[s2]) it[s2]++;
-            CUDA_CHECK(cudaMemcpy(ctx->dCphIter.p, it.data(), nS * sizeof(int), cudaMemcpyHostToDevice));
-        }
-        tvcRebuildOverrides(ctx);
-        if (std::getenv("OLF_GPU_BATCH_TRACE") != nullptr) {
-            std::vector<int> cur(nst);
-            CUDA_CHECK(cudaMemcpy(cur.data(), ctx->dCphTap.p, nst * sizeof(int), cudaMemcpyDeviceToHost));
-            int nMoved = 0;
-            for (int s2 = 0; s2 < nS; s2++) for (int c = 0; c < nC; c++) if (cur[static_cast<size_t>(s2) * nC + c] != ctx->hCphBaseTap[c]) nMoved++;
-            std::fprintf(stderr, "CPHASE_KERNEL nS=%d nCtrl=%d pairsOffBaseTap=%d nR1Ov=%d\n", nS, nC, nMoved, ctx->nR1Ov);
-        }
-    };
     // ---- the DISCRETE voltage-control loops as DRIVER PHASES: TransformerVoltageControl (AFTER_GENERATOR /
     //      WITH_GENERATOR, OLF order 8) and ShuntVoltageControl (WITH_GENERATOR, OLF order 10). No sensitivities:
     //      OLF's decisions read the converged state only (deadband, clamp bounds, closest tap / section). ----
-    auto tvdStep = [&]() {
-        if (ctx->nTvd <= 0) return;
-        tvdCheckBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(tvdTables(ctx), nS, n, ctx->nElements, ctx->dDisabled.as<char>(),
-                ctx->dRlActive.as<char>(), ctx->dQbuf.as<double>(), ctx->dMode.as<int>(), ctx->dTarget.as<double>(), ctx->dX.as<double>(),
-                ctx->dRlSwitched.as<char>());
-        // Freezing a REMOTE controller can take the LAST live member of its group, and then the group
-        // controls nothing: OLF's freeze disables the voltage control, so the CONTROLLED bus stops
-        // carrying a V identity. That flip lives in its own kernel, which the reactive-limits phase runs
-        // after its pins; the freeze happens two loops later and would otherwise leave the pilot holding
-        // a target for a control that no longer exists until the next sweep reached RL again (measured
-        // 0.6 kV). Same kernel, run again here — it restores the identity at COMPLETE on the same rule.
-        if (ctx->hasDqQrGroups && ctx->st->nQr > 0 && ctx->nTvdFz > 0) {
-            launchPilotVeqInner();
-        }
-        CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
-        std::vector<char> rej(nS);
-        CUDA_CHECK(cudaMemcpy(rej.data(), ctx->dTvdReject.p, nS, cudaMemcpyDeviceToHost));
-        for (int s2 = 0; s2 < nS; s2++) if (rej[s2]) { loopRejected[s2] = 1; traceReject(s2, "tvd-kernel-reject", outer, 0); }
-        tvcRebuildOverrides(ctx);
-        if (std::getenv("OLF_GPU_BATCH_TRACE") != nullptr) {
-            size_t nsm = static_cast<size_t>(nS) * ctx->nTvd;
-            std::vector<int> st(nsm), step(nS);
-            CUDA_CHECK(cudaMemcpy(st.data(), ctx->dTvdMemState.p, nsm * sizeof(int), cudaMemcpyDeviceToHost));
-            CUDA_CHECK(cudaMemcpy(step.data(), ctx->dTvdScnStep.p, nS * sizeof(int), cudaMemcpyDeviceToHost));
-            int nCont = 0, nFixed = 0, nRej = 0;
-            for (size_t k = 0; k < nsm; k++) { nCont += st[k] == 1; nFixed += st[k] == 2; }
-            for (int s2 = 0; s2 < nS; s2++) nRej += rej[s2] ? 1 : 0;
-            std::fprintf(stderr, "TVD_KERNEL mode=%d nS=%d nMembers=%d continuous=%d fixed=%d rejected=%d step0=%d nR1Ov=%d\n",
-                         ctx->tvdMode, nS, ctx->nTvd, nCont, nFixed, nRej, step[0], ctx->nR1Ov);
-        }
-    };
     // ---- SecondaryVoltageControl as a DRIVER PHASE (OLF order 4). The whole loop: the re-enable step and
     //      the per-zone trigger on the paused state's own qBuf, one unit-RHS solve per controlled bus on the
     //      driver's own factors for the K and pilot sensitivities, the small dense zone system per scenario,
     //      and the moved targets applied to the controlled buses' V rows (plus the switch-back comparison
     //      target for a pinned controller). Nothing goes back to the host, so the loop sits in OLF's order
     //      instead of after the sweep. ----
-    auto svcStep = [&]() {
-        int nC = ctx->nSvc;
-        if (nC <= 0) return;
-        if (ctx->mode != 3 && ctx->mode != 6) {
-            static bool warned = false;
-            if (!warned) { std::fprintf(stderr, "in-kernel SecondaryVc needs a UBATCH (3) or robust (6) mode; mode %d runs it as stable\n", ctx->mode); warned = true; }
-            return;
-        }
-        CUDA_CHECK(cudaMemsetAsync(ctx->dSvcNeed.p, 0, nS, ctx->stream));
-        svcTriggerBatch<<<grid(ctx->nSvcZones * nS), BLOCK, 0, ctx->stream>>>(svcTables(ctx), nS, n,
-                ctx->dRlActive.as<char>(), ctx->dQbuf.as<double>(), ctx->dX.as<double>(),
-                ctx->dRlLimitType.as<char>(), ctx->dRlSavedMode.as<char>(),
-                ctx->dMode.as<int>(), ctx->dTarget.as<double>());
-        std::vector<char> need(nS);
-        CUDA_CHECK(cudaMemcpyAsync(need.data(), ctx->dSvcNeed.p, nS, cudaMemcpyDeviceToHost, ctx->stream));
-        CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
-        bool any = false;
-        for (char c : need) any |= c != 0;
-        if (!any) return;                                    // every zone inside its bands: OLF's STABLE
-        std::vector<char> ones(nS, 1);
-        CUDA_CHECK(cudaMemcpy(ctx->dActive.p, ones.data(), nS, cudaMemcpyHostToDevice));
-        fillActiveBatch(false);
-        bool first = true;
-        for (int i = 0; i < nC; i++) {
-            int row = ctx->st->rowMap[ctx->hSvcCtldVRow[i]];
-            if (row < 0) continue;                           // controlled bus not a live identity: insensitive
-            setUnitRhsBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, row, ctx->dB.as<double>());
-            hazRepairRightHandSide(ctx, nS, ctx->dB.as<double>());
-            sensitivitySolve(first);
-            svcGatherBatch<<<grid(nC * nS), BLOCK, 0, ctx->stream>>>(svcTables(ctx), nS, n, i,
-                    ctx->nElements, ctx->cbOffset, ctx->shOffset,
-                    ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(),
-                    ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(),
-                    ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>(),
-                    ctx->nShOv, ctx->dShOvSlotElem.as<int>(), ctx->dShOvGb.as<double>(),
-                    ctx->dDisabled.as<char>(), ctx->dX.as<double>(), ctx->dDx.as<double>());
-        }
-        CUDA_CHECK(cudaMemcpy(ctx->dActive.p, active.data(), nS, cudaMemcpyHostToDevice));   // as it was
-        // ---- the zone systems: assembled into device memory, solved by cuBLAS's BATCHED dense LU ----
-        if (ctx->svcBlas == nullptr) {
-            CUBLAS_CHECK(cublasCreate(&ctx->svcBlas));
-        }
-        CUBLAS_CHECK(cublasSetStream(ctx->svcBlas, ctx->stream));
-        svcAssembleBatch<<<grid(nC * nS), BLOCK, 0, ctx->stream>>>(svcTables(ctx), nS, n,
-                ctx->dRlActive.as<char>(), ctx->dSvcCtlZone.as<int>(), ctx->dX.as<double>(),
-                ctx->dSvcMat.as<double>(), ctx->dSvcRhs.as<double>());
-        svcPointersBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(nS, nC,
-                ctx->dSvcMat.as<double>(), ctx->dSvcRhs.as<double>(),
-                reinterpret_cast<double**>(ctx->dSvcMatPtr.p), reinterpret_cast<double**>(ctx->dSvcRhsPtr.p));
-        CUBLAS_CHECK(cublasDgetrfBatched(ctx->svcBlas, nC,
-                reinterpret_cast<double**>(ctx->dSvcMatPtr.p), nC,
-                ctx->dSvcPiv.as<int>(), ctx->dSvcInfo.as<int>(), nS));
-        int trsInfo = 0;
-        CUBLAS_CHECK(cublasDgetrsBatched(ctx->svcBlas, CUBLAS_OP_N, nC, 1,
-                reinterpret_cast<const double* const*>(ctx->dSvcMatPtr.p), nC,
-                ctx->dSvcPiv.as<int>(),
-                reinterpret_cast<double**>(ctx->dSvcRhsPtr.p), nC, &trsInfo, nS));
-        if (trsInfo != 0) {
-            throw std::runtime_error("cublasDgetrsBatched rejected its arguments");
-        }
-        svcCommitBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(svcTables(ctx), nS,
-                ctx->dRlActive.as<char>(), ctx->dSvcInfo.as<int>(), ctx->dSvcRhs.as<double>(),
-                ctx->dRlSwitched.as<char>());
-        svcApplyBatch<<<grid(nC * nS), BLOCK, 0, ctx->stream>>>(svcTables(ctx), nS, n,
-                ctx->dRlActive.as<char>(), ctx->dRlLimitType.as<char>(), ctx->dTarget.as<double>());
-        CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
-        std::vector<char> rej(nS);
-        CUDA_CHECK(cudaMemcpy(rej.data(), ctx->dSvcReject.p, nS, cudaMemcpyDeviceToHost));
-        int nRej = 0;
-        for (int s2 = 0; s2 < nS; s2++) {
-            if (rej[s2]) { loopRejected[s2] = 1; nRej++; traceReject(s2, "svc-kernel-reject", outer, 0); }
-        }
-        if (std::getenv("OLF_GPU_BATCH_TRACE") != nullptr) {
-            int nNeed = 0;
-            for (char c : need) nNeed += c ? 1 : 0;
-            std::fprintf(stderr, "SVC_KERNEL nS=%d nCtl=%d nZones=%d adjusting=%d rejected=%d\n",
-                         nS, nC, ctx->nSvcZones, nNeed, nRej);
-        }
-    };
-    auto svdStep = [&]() {
-        if (ctx->nSvd <= 0) return;
-        svdCheckBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(svdTables(ctx), nS, n, ctx->nElements, ctx->dDisabled.as<char>(),
-                ctx->dRlActive.as<char>(), ctx->dMode.as<int>(), ctx->dTarget.as<double>(), ctx->dX.as<double>(), ctx->dRlSwitched.as<char>());
-        CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
-        if (std::getenv("OLF_GPU_BATCH_TRACE") != nullptr) {
-            size_t nsm = static_cast<size_t>(nS) * ctx->nSvd;
-            std::vector<int> st(nsm);
-            CUDA_CHECK(cudaMemcpy(st.data(), ctx->dSvdMemState.p, nsm * sizeof(int), cudaMemcpyDeviceToHost));
-            int nCont = 0, nFixed = 0;
-            for (size_t k = 0; k < nsm; k++) { nCont += st[k] == 1; nFixed += st[k] == 2; }
-            std::fprintf(stderr, "SVD_KERNEL nS=%d nMembers=%d continuous=%d dispatched=%d\n", nS, ctx->nSvd, nCont, nFixed);
-        }
-    };
     if (solvePass) {
 
-    auto readNormsBatch = [&](std::vector<double>& hn) {
-        residualNormsBatch<<<nS, BLOCK, 0, ctx->stream>>>(n, ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->dNorms.as<double>(),
-                ctx->perRowCriteria ? ctx->dThrIdent.as<double>() : nullptr,
-                ctx->perRowCriteria ? ctx->dThrPower.as<double>() : nullptr, ctx->dMode.as<int>(),
-                ctx->perRowCriteria && ctx->perRowAlt ? ctx->dThrAlt.as<double>() : nullptr,
-                ctx->perRowCriteria && ctx->perRowAlt ? ctx->dThrSel.as<int>() : nullptr);
-        hn.resize(static_cast<size_t>(nS) * 4);
-        CUDA_CHECK(cudaMemcpy(hn.data(), ctx->dNorms.p, hn.size() * sizeof(double), cudaMemcpyDeviceToHost));
-    };
     // LINE_SEARCH per-scenario backtracking state (lastNorm2 / haveLast, per pass — a phase re-entry retargets the system, voiding the step relation)
     // Per scenario, the linear-solve residual ratio of this pass's LAST solve — scored only when the pass runs
     // its Newton budget out (see the it == maxIter branch), so a healthy run never pays for it.
@@ -7342,7 +7518,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         gLastPassIters = it;
         gNewtonIters++;
         bool fOnly = it == maxIter;
-        fillActiveBatch(fOnly);
+        fillActiveBatch(ctx, drv, fOnly);
 
         // ---- residual check + retirement ----
         // Normal mode (tol > 0): every iteration copies the batched mismatch to the host (the
@@ -7357,7 +7533,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             std::vector<double> hNorms;
             if (!deviceFixedIter) {
                 // Device-side reduction: read back nS*4 norms, not the 70-MB mismatch.
-                readNormsBatch(hNorms);
+                readNormsBatch(ctx, drv, hNorms);
                 // ---- LINE_SEARCH backtrack (per scenario): the full step applied at it-1 may have
                 //      RAISED that scenario's ||F||2 — walk it back to x = xPrev + mu*dx with
                 //      mu = stepFold^-k until the 2-norm improves, mirroring
@@ -7379,8 +7555,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                         CUDA_CHECK(cudaMemcpyAsync(ctx->dStepFactor.p, hMu.data(), nS * sizeof(double), cudaMemcpyHostToDevice, ctx->stream));
                         stepFromPrevBatchMasked<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, n * nS,
                                 ctx->dXprevLs.as<double>(), ctx->dDx.as<double>(), ctx->dStepFactor.as<double>(), ctx->dX.as<double>());
-                        fillActiveBatch(false);              // full fill: J must sit at the accepted x (like the seq path)
-                        readNormsBatch(hNorms);
+                        fillActiveBatch(ctx, drv, false);              // full fill: J must sit at the accepted x (like the seq path)
+                        readNormsBatch(ctx, drv, hNorms);
                         anyBt = false;
                         for (int s2 = 0; s2 < nS; s2++) {
                             if (needsBt(s2)) anyBt = true;
@@ -8073,38 +8249,12 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     // stricter than OLF (a state it would have let a later loop fix also leaves the batch), so it
     // can cost batching share and can never change an answer.
     // One check over the scenarios gate selects: any whose state leaves the band goes to the CPU replay.
-    auto rejectUnrealistic = [&](const std::vector<char>& gate) {
-        if (!ctx->dRealisticGate.p) ctx->dRealisticGate.alloc(nS * sizeof(char));
-        if (!ctx->dRealisticBad.p) ctx->dRealisticBad.alloc(nS * sizeof(char));
-        CUDA_CHECK(cudaMemcpyAsync(ctx->dRealisticGate.p, gate.data(), nS * sizeof(char),
-                                   cudaMemcpyHostToDevice, ctx->stream));
-        CUDA_CHECK(cudaMemsetAsync(ctx->dRealisticBad.p, 0, nS * sizeof(char), ctx->stream));
-        realisticCheckBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, ctx->dRealisticRow.as<char>(),
-                ctx->dX.as<double>(), ctx->dRealisticGate.as<char>(),
-                ctx->realisticMinV, ctx->realisticMaxV, ctx->dRealisticBad.as<char>());
-        std::vector<char> bad(nS);
-        CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
-        CUDA_CHECK(cudaMemcpy(bad.data(), ctx->dRealisticBad.p, nS * sizeof(char), cudaMemcpyDeviceToHost));
-        static const bool traceUnrealistic = std::getenv("OLF_GPU_UNREALISTIC_TRACE") != nullptr;
-        for (int s = 0; s < nS; s++) {
-            if (bad[s]) {
-                if (traceUnrealistic) {
-                    std::fprintf(stderr, "GPU_UNREALISTIC_SWEEP slot=%d outer=%d loop=%d band=[%.4f, %.4f]\n",
-                                 s, outer, loopOrder[loopIdx], ctx->realisticMinV, ctx->realisticMaxV);
-                }
-                traceReject(s, "unrealistic-state", outer, 0);
-                res.status[s] = -2;                          // STATUS_REJECTED -> the CPU replays it
-                live[s] = 0;
-                active[s] = 0;
-            }
-        }
-    };
     if (ctx->realisticCheck && solvePass && loopIdx > realisticFixingIdx) {
         std::vector<char> gate(nS);
         for (int s = 0; s < nS; s++) {
             gate[s] = (wasActive[s] && res.status[s] == 0 && live[s]) ? 1 : 0;
         }
-        rejectUnrealistic(gate);
+        rejectUnrealistic(ctx, drv, gate);
     }
 
     if (!fullLoadflow) {
@@ -8280,19 +8430,19 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         break;
     }
     if (loopKind == LOOP_TVC_KERNEL) {
-        tvcStep();
+        tvcStep(ctx, drv);
     } else if (loopKind == LOOP_SHUNT_KERNEL) {
-        shcStep();
+        shcStep(ctx, drv);
     } else if (loopKind == LOOP_PHASE_KERNEL) {
-        if (ctx->nCph > 0) cphStep(); else flcStep(6);       // continuous, or incremental kinds 1 + 2
+        if (ctx->nCph > 0) cphStep(ctx, drv); else flcStep(ctx, drv, 6);       // continuous, or incremental kinds 1 + 2
     } else if (loopKind == LOOP_TRPC_KERNEL) {
-        flcStep(1);                                          // kind 0 (RPC)
+        flcStep(ctx, drv, 1);                                          // kind 0 (RPC)
     } else if (loopKind == LOOP_TVD_KERNEL) {
-        tvdStep();
+        tvdStep(ctx, drv);
     } else if (loopKind == LOOP_SVD_KERNEL) {
-        svdStep();
+        svdStep(ctx, drv);
     } else if (loopKind == LOOP_SVC_KERNEL) {
-        svcStep();
+        svcStep(ctx, drv);
     } else if (loopKind == LOOP_MONITORING) {
         monitoringLoopBatch<<<grid(ctx->nmon * nS), BLOCK, 0, ctx->stream>>>(
                 ctx->nmon, nS, n, ctx->dMonVRow.as<int>(), ctx->dMonBand.as<double>(),
@@ -8560,12 +8710,12 @@ psgStep(ctx, nS, n, outer, "afterElect");
             }
 psgStep(ctx, nS, n, outer, "afterAllPinned");
             if (ctx->hasDqQrGroups && ctx->st->nQr > 0) {    // all-pinned corner: pilot vEq flip/restore
-                launchPilotVeqInner();
+                launchPilotVeqInner(ctx, drv);
             }
 psgStep(ctx, nS, n, outer, "afterPilotVeq");
             if (ctx->nRlRemote > 0 && ctx->nDqMembers > 0) {
                 // keep the survivors' DISTR_Q row targets in step with the pin states (plan-B3)
-                launchDistrQTargetsInner();
+                launchDistrQTargetsInner(ctx, drv);
             }
 psgStep(ctx, nS, n, outer, "afterDistrQ");
         }
@@ -8921,7 +9071,7 @@ psgStep(ctx, nS, n, outer, "afterDistrQ");
             for (int s = 0; s < nS; s++) {
                 gate[s] = (res.status[s] == 0 && live[s]) ? 1 : 0;
             }
-            rejectUnrealistic(gate);
+            rejectUnrealistic(ctx, drv, gate);
         }
         if (++loopIdx >= nLoops) {                          // ...move to the next loop in OLF's order
             if (!seqChanged) {

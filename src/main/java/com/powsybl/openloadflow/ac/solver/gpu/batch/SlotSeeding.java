@@ -18,7 +18,8 @@ import java.util.Map;
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
-record SlotSeeding(int chunkSize, int n, GpuAcData gpuData, List<BatchContingency> contingencies, double[] baseTargets,
-                   int[] baseRowMode, GpuBatchRlCurves.Channel rlCurves, Map<Integer, int[]> curveEntriesByPRow,
-                   RunScratch rs, ChunkLists cl) {
+record SlotSeeding(int chunkSize, int n, GpuAcData gpuData, List<BatchContingency> contingencies,
+                   double[] baseTargets, int[] baseRowMode, GpuBatchRlCurves.Channel rlCurves,
+                   Map<Integer, int[]> curveEntriesByPRow, RunScratch rs, ChunkLists cl,
+                   GpuBatchElementMapper elementMapper) {
 }

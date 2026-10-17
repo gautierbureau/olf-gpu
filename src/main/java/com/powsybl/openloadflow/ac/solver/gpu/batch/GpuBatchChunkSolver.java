@@ -318,8 +318,8 @@ final class GpuBatchChunkSolver {
                         GpuBatchTransformerControl.uploadFixMasks(handle, phases.freeze(), slotCtgs, chunkSize);
                     }
                     ChunkLists cl = new ChunkLists(chunkSize, n, gpuData, forcedTargetQ, ngen);
-                    SlotSeeding seeding = new SlotSeeding(chunkSize, n, gpuData, contingencies, baseTargets, baseRowMode,
-                            rlCurves, curveEntriesByPRow, rs, cl);
+                    SlotSeeding seeding = new SlotSeeding(chunkSize, n, gpuData, contingencies, baseTargets,
+                            baseRowMode, rlCurves, curveEntriesByPRow, rs, cl, elementMapper);
                     rs.resetChunk();
                     for (int s = 0; s < chunkSize; s++) {
                         rs.resetSlot(s);
@@ -864,36 +864,7 @@ final class GpuBatchChunkSolver {
                                     rs.rowModePerScenario[s] = r2;
                                 }
                             }
-                            for (LfBranch reclosed : contingencies.get(ci).reclosedBranches()) {
-                                if (reclosed.isZeroImpedance(com.powsybl.openloadflow.network.LoadFlowModel.AC)) {
-                                    Integer ze = rs.ziElemByBranchNumChunk.get(reclosed.getNum());
-                                    rs.ziOnSlotElemList.add(s);
-                                    rs.ziOnSlotElemList.add(ze);
-                                    // flip the two dummy rows from identity (pinned 0) to the ZERO_V/ZERO_PHI
-                                    // coupling; targets stay 0 (switch: rho=1, phase shift 0)
-                                    int dpRow = gpuData.ziIdx()[ze * 11 + 4];
-                                    int dqRow = gpuData.ziIdx()[ze * 11 + 5];
-                                    int[] row = rs.rowModePerScenario[s] == baseRowMode ? baseRowMode.clone() : rs.rowModePerScenario[s];
-                                    row[dpRow] = 1;
-                                    row[dqRow] = 1;
-                                    rs.rowModePerScenario[s] = row;
-                                } else {
-                                    rs.disabledMask[s][elementMapper.getElementIndex(reclosed)] = false;
-                                }
-                            }
-                            for (TapR1Override tap : contingencies.get(ci).tapOverrides()) {
-                                rs.r1OvSlotElemList.add(s);
-                                rs.r1OvSlotElemList.add(elementMapper.getElementIndex(tap.branch()));   // cb pack index == element index
-                                for (double v : tap.cbRow()) {
-                                    rs.r1OvValList.add(v);
-                                }
-                            }
-                            for (ShuntShift sh : contingencies.get(ci).shuntShifts()) {
-                                rs.shOvSlotElemList.add(s);
-                                rs.shOvSlotElemList.add(elementMapper.getElementIndex(sh.shunt()) - rs.shPackOffset);
-                                rs.shOvGbList.add(sh.dg());
-                                rs.shOvGbList.add(sh.db());
-                            }
+                            ActionSeed.seed(seeding, s, ci);
                             GenOutageSeed.seed(seeding, s, ci, slotGos, pilotBalanceRows);
                         }
                         // else: padding scenario = base case (no element disabled), discarded below

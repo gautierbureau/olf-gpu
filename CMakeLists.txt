@@ -114,6 +114,7 @@ add_library(olfgpu SHARED
     native/cuda/jni/equations/bus_injection_fill.cu
     native/cuda/jni/equations/distribution_fill.cu
     native/cuda/jni/equations/zero_impedance_fill.cu
+    native/cuda/jni/equations/fill_launch.cu
 )
 target_include_directories(olfgpu
     PRIVATE

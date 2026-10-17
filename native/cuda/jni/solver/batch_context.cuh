@@ -528,6 +528,25 @@ struct BatchResult {
     std::vector<int> status;                                 // nScenarios: 0 conv, 1 maxiter, -1 diverged
 };
 
+
+// Build a batched context of nScenarios on a shared structure (the createBatchContext JNI entry).
+BatchSolverContext* createBatchContext(const SharedStructurePtr& st, int nScenarios, int mode,
+                                       int nrl, const int* rlVrow, const double* rlMinQ,
+                                       const double* rlMaxQ, const double* rlLoadQ, const double* rlVtarget,
+                                       const signed char* rlMonitored, const double* rowSlope,
+                                       int nds, const int* dsPhiRow, const double* dsFactor,
+                                       int dsSlackPhiRow, double dsSlackTargetP,
+                                       const double* dsBaseTargetP, const double* dsMaxDelta, const double* dsMinDelta,
+                                       int dsMode, const double* dsMarginUp, const double* dsMarginDown,
+                                       double dsSlackMarginUp, double dsSlackMarginDown);
+
+// Upload the call's step-scaling parameters and per-scenario shunt, coupler and tap overrides.
+void uploadBatchOverrides(BatchSolverContext* ctx, int lsMode, double maxDv, double maxDphi,
+                          const int* varType, int nShOv, const int* shOvSlotElem, const double* shOvGb,
+                          int nziBase, int nZiOff, const int* ziOffSlotElem,
+                          int nZiOn, const int* ziOnSlotElem,
+                          int nR1Ov, const int* r1OvSlotElem, const double* r1OvVal);
+
 }  // namespace olfgpu
 
 #endif  // OLF_GPU_SOLVER_BATCH_CONTEXT_CUH

@@ -348,842 +348,29 @@ namespace olfgpu {
 
 
 
-BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const double* target,
-                              const int* rowMode, const int* rowModeSlots, int nRowModeSlots,
-                              const int* baseRowMode, const char* disabled,
-                              int nOv, const int* ovIndex, const double* ovValue,
-                              const int* dsOvBus, const double* dsOvFactorDelta, const double* dsOvBaseDelta,
-                              const double* dsOvMaxDelta, const double* dsOvMinDelta, const double* dsAnchorShift,
-                              const double* dsSlackShift,
-                              int nRlVtOv, const int* rlVtOvSlotIdx, const double* rlVtOvVal,
-                              int nRlQOv, const int* rlQOvSlotEntry, const double* rlQOvMinMax,
-                              int nCvOv, const int* cvOvSlotEntry, const double* cvOvStepScale,
-                              int maxIter, double tol,
-                              double reactiveLimitTol, double slackDistTol, double convEpsPerEq,
-                              int lsMode, double maxDv, double maxDphi, const int* varType,
-                              const double* x0Full, int nShOv, const int* shOvSlotElem, const double* shOvGb,
-                              const int* rlStateIn, int* rlStateOut,
-                              int nR1Ov, const int* r1OvSlotElem, const double* r1OvVal,
-                              int maxOuterProductive, int rlMaxSwitch, int dsRejectResidual, int skipRlPhase,
-                              int nziBase, int nZiOn, const int* ziOnSlotElem,
-                              int nZiOff, const int* ziOffSlotElem) {
-    DriverPass drv;
-    drv.n = ctx->n;
-    drv.nnz = ctx->nnz;
-    drv.nS = ctx->nScenarios;
-    drv.nRlVtOv = nRlVtOv;
-    drv.nRlQOv = nRlQOv;
-    drv.nCvOv = nCvOv;
-    drv.skipRlPhase = skipRlPhase;
+// The inner Newton-Raphson of one outer pass on every active scenario: fill, factorize, solve, refine, scale and
+// update until each scenario converges, diverges or exhausts its iterations (OLF NewtonRaphson.run).
+static void newtonSolve(BatchSolverContext* ctx, DriverPass& drv) {
     const int& n = drv.n;
     const int& nnz = drv.nnz;
     const int& nS = drv.nS;
-    // MAX_VOLTAGE_CHANGE (lsMode 2): per-scenario step clamp, same rule as the base solver's
-    // (varType 1 = V vs maxDv, 0 = PHI vs maxDphi; whole step scaled). Buffers allocated lazily.
-    uploadBatchOverrides(ctx, lsMode, maxDv, maxDphi, varType, nShOv, shOvSlotElem, shOvGb,
-                         nziBase, nZiOff, ziOffSlotElem, nZiOn, ziOnSlotElem, nR1Ov, r1OvSlotElem, r1OvVal);
-    size_t nTot = static_cast<size_t>(n) * nS;
-    DeviceBuf dOvIndex, dOvValue;                            // function-scoped: outlive the async override kernel
-    DeviceBuf dBaseMode;                                     // the contingency-free base row mode (length n)
-    DeviceBuf dModeSlots, dModeRows;                         // compact row modes: the scenarios that differ from the base
-    DeviceBuf dX0SeedIdx, dX0SeedVal;                        // setBatchX0Seeds, function-scoped like the overrides
-    // Per-scenario distributed-slack reweight (generator loss at a DS-participant bus): one affected DS bus per
-    // scenario (dsOvBus[s], -1 if none) whose factor/base/headroom/footroom shrink by the lost gen's share, and
-    // a per-scenario factor-sum drop so the other buses pick up that share. nullptr when no DS scenarios.
-    DeviceBuf& dDsOvBus = drv.dDsOvBus;
-    DeviceBuf& dDsOvFactorDelta = drv.dDsOvFactorDelta;
-    DeviceBuf& dDsOvBaseDelta = drv.dDsOvBaseDelta;
-    DeviceBuf& dDsOvMaxDelta = drv.dDsOvMaxDelta;
-    DeviceBuf& dDsOvMinDelta = drv.dDsOvMinDelta;
-    drv.hasDsOverride = (dsOvBus != nullptr && ctx->nds > 0);
-    const bool& hasDsOverride = drv.hasDsOverride;
-    // Per-scenario DS ANCHOR SHIFT (pair/strategy legs): shift_i = parent's final target at participant i
-    // minus the extraction-time base — re-anchors the water-fill's cumulative reference at the PARENT
-    // contingency's distribution, mirroring OLF's setGeneratorsInitialTargetPToTargetP before a strategy
-    // re-solve. nullptr = anchored at the base (plain contingencies).
-    DeviceBuf& dRlVtOvSlotIdx = drv.dRlVtOvSlotIdx;
-    DeviceBuf& dRlVtOvVal = drv.dRlVtOvVal;
-    if (nRlVtOv > 0) {
-        dRlVtOvSlotIdx.upload(rlVtOvSlotIdx, 2L * nRlVtOv * sizeof(int));
-        dRlVtOvVal.upload(rlVtOvVal, (size_t) nRlVtOv * sizeof(double));
-    }
-    DeviceBuf& dDsAnchorShift = drv.dDsAnchorShift;
-    DeviceBuf& dDsSlackShift = drv.dDsSlackShift;
-    drv.hasDsAnchor = (dsAnchorShift != nullptr && ctx->nds > 0);
-    const bool& hasDsAnchor = drv.hasDsAnchor;
-    if (hasDsAnchor) {
-        dDsAnchorShift.upload(dsAnchorShift, static_cast<size_t>(nS) * ctx->nds * sizeof(double));
-    }
-    // The slack's own target move, independent of the participants' anchors: a strategy pair's parent share,
-    // and also a contingency's load lost at the slack (a plain scenario, no anchor shift).
-    drv.hasDsSlackShift = (dsSlackShift != nullptr && ctx->nds > 0);
-    const bool& hasDsSlackShift = drv.hasDsSlackShift;
-    if (hasDsSlackShift) {
-        dDsSlackShift.upload(dsSlackShift, static_cast<size_t>(nS) * sizeof(double));
-    }
-
-    // x0/target are the BASE row (length n), identical for every scenario: upload once and tile across
-    // nS on-device. rowMode is PER-SCENARIO (length n*nS): a contingency can freeze islanded buses
-    // (Phase 0b) or flip PV↔PQ via reactive limits (Phase 1), so it is NOT tiled — uploaded as-is and
-    // mutated in place on-device by the outer-loop kernels. Only the disabled mask is also per-scenario.
-    // x0: either the BASE row tiled across nS (default), or a FULL per-scenario n*nS state
-    // (x0Full != null) — the warm-restart hook for multi-call outer sequencing (e.g. the
-    // transformer voltage-control orchestrator re-solving scenarios from their previous states).
-    // RESUME: the driver is continuing from a LOOP_HOST pause, so x/targets/modes already hold the
-    // sequence's current state on the device — re-uploading the base rows would throw away the
-    // distributed slack, the HVDC deltas and the monitoring activations it has accumulated.
-    const bool resume = ctx->driverResume != 0;
-    if (!resume || ctx->olPasses.size() != static_cast<size_t>(nS)) {
-        ctx->olFirst.assign(nS, 0);
-        ctx->olIters.assign(nS, 0);
-        ctx->olPasses.assign(nS, 0);
-    }
-    ctx->driverResume = 0;
-    ctx->driverPaused = 0;
-    if (resume && (ctx->nTvc > 0 || ctx->nFlc > 0 || ctx->nCph > 0 || ctx->nTvd > 0)) {
-        tvcRebuildOverrides(ctx);                            // uploadBatchOverrides just erased the moves
-    }
-    if (resume && ctx->nShc > 0) {
-        shcRebuildOverrides(ctx);
-    }
-    dBaseMode.upload(baseRowMode, n * sizeof(int));         // base (contingency-free) row mode for the RL limit-type seed
-    if (!resume) {
-        if (x0Full != nullptr) {
-            CUDA_CHECK(cudaMemcpy(ctx->dX.p, x0Full, (size_t) nTot * sizeof(double), cudaMemcpyHostToDevice));
-        } else {
-            CUDA_CHECK(cudaMemcpy(ctx->dX.p, x0, n * sizeof(double), cudaMemcpyHostToDevice));
-        }
-        CUDA_CHECK(cudaMemcpy(ctx->dTarget.p, target, n * sizeof(double), cudaMemcpyHostToDevice));
-        // The BASE targets, kept aside before tiling and the per-scenario overrides: the pilot-Q
-        // capture below reads the base carrier's row, and a scenario may have overridden that row
-        // (a member islanded by a bus loss freezes it to a flat voltage identity). Capturing from the
-        // base keeps the captured value the pilot's reactive target whatever the scenario did to the
-        // row. (The carrier's target itself is stamped host-side when the base carrier is frozen -
-        // GpuBatchChunkSolver - because the device stamp runs only inside the outer-loop passes.)
-        if (!ctx->dTargetBase.p) ctx->dTargetBase.alloc((size_t) n * sizeof(double));
-        CUDA_CHECK(cudaMemcpy(ctx->dTargetBase.p, target, n * sizeof(double), cudaMemcpyHostToDevice));
-        if (rowModeSlots == nullptr) {
-            CUDA_CHECK(cudaMemcpy(ctx->dMode.p, rowMode, nTot * sizeof(int), cudaMemcpyHostToDevice));
-        } else {
-            // COMPACT: every scenario starts from the base row mode, then only those that differ (islanded buses,
-            // switch outages, ...) get their own row — a few rows instead of nS * n ints through PCIe.
-            CUDA_CHECK(cudaMemcpy(ctx->dMode.p, baseRowMode, n * sizeof(int), cudaMemcpyHostToDevice));
-            tileBaseRow<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n * nS, n, ctx->dMode.as<int>());
-            if (nRowModeSlots > 0) {
-                dModeSlots.upload(rowModeSlots, nRowModeSlots * sizeof(int));
-                dModeRows.upload(rowMode, (size_t) nRowModeSlots * n * sizeof(int));
-                scatterRowsInt<<<grid(nRowModeSlots * n), BLOCK, 0, ctx->stream>>>(nRowModeSlots, n,
-                        dModeSlots.as<int>(), dModeRows.as<int>(), ctx->dMode.as<int>());
-            }
-        }
-        if (x0Full == nullptr) {
-            tileBaseRow<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n * nS, n, ctx->dX.as<double>());
-            int nSeeds = static_cast<int>(ctx->x0SeedIdx.size());
-            if (nSeeds > 0) {                                // a few per-scenario starting values over the base
-                dX0SeedIdx.upload(ctx->x0SeedIdx.data(), nSeeds * sizeof(int));
-                dX0SeedVal.upload(ctx->x0SeedVal.data(), nSeeds * sizeof(double));
-                applyTargetOverrideBatch<<<grid(nSeeds), BLOCK, 0, ctx->stream>>>(nSeeds, dX0SeedIdx.as<int>(),
-                        dX0SeedVal.as<double>(), ctx->dX.as<double>());
-            }
-        }
-        ctx->x0SeedIdx.clear();                              // consumed by this solve either way
-        ctx->x0SeedVal.clear();
-        tileBaseRow<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n * nS, n, ctx->dTarget.as<double>());
-        if (nOv > 0) {                                       // per-scenario target overrides (generator loss)
-            dOvIndex.upload(ovIndex, nOv * sizeof(int));
-            dOvValue.upload(ovValue, nOv * sizeof(double));
-            applyTargetOverrideBatch<<<grid(nOv), BLOCK, 0, ctx->stream>>>(nOv, dOvIndex.as<int>(), dOvValue.as<double>(), ctx->dTarget.as<double>());
-        }
-    }
-    if (hasDsOverride) {                                     // per-scenario generator-loss DS reweight
-        dDsOvBus.upload(dsOvBus, nS * sizeof(int));
-        dDsOvFactorDelta.upload(dsOvFactorDelta, nS * sizeof(double));
-        dDsOvBaseDelta.upload(dsOvBaseDelta, nS * sizeof(double));
-        dDsOvMaxDelta.upload(dsOvMaxDelta, nS * sizeof(double));
-        dDsOvMinDelta.upload(dsOvMinDelta, nS * sizeof(double));
-    }
-    if (!resume) {
-        // NOT on a resume: the HVDC AC-emulation driver phases MUTATE element bits on the device during
-        // the paused sweep (a frozen or saturated emulation has its coupling deactivated), and the host's
-        // mirror of the mask is the pre-solve one. Re-uploading it mid-sequence silently undoes those
-        // loops' work — measured on a 400-contingency rte6515 slice: 5 differing violations against 1,
-        // with NO host decision involved at all (the split alone did it). Contingency outages do not
-        // change during a sweep, so the device copy stays authoritative across the pause.
-        CUDA_CHECK(cudaMemcpy(ctx->dDisabled.p, disabled,
-                              static_cast<size_t>(ctx->nElements) * nS * sizeof(char), cudaMemcpyHostToDevice));
-    }
-
-    std::vector<char>& active = drv.active;
-    active.assign(nS, 1);
-
-    BatchResult& res = drv.res;
-    res.x.resize(nTot);
-    res.iters.assign(nS, 0);
-    res.norm.assign(nS, 0.0);
-    res.status.assign(nS, 1);                                // default: max_iter (overwritten on converge/diverge)
-
-    std::vector<double> hF(nTot);
-
-    // Device-side fixed-iteration mode: tol <= 0 means "run exactly maxIter Newton steps
-    // on the device with NO per-iteration host sync and NO convergence retirement" (the
-    // a fixed-iteration NR loop). tol > 0 keeps the per-iteration retirement loop.
-    drv.deviceFixedIter = (tol <= 0.0);
+    const size_t& nTot = drv.nTot;
+    const int& outer = drv.outer;
+    const double& tol = drv.tol;
+    const int& maxIter = drv.maxIter;
+    const int& lsMode = drv.lsMode;
+    const double& convEpsPerEq = drv.convEpsPerEq;
     const bool& deviceFixedIter = drv.deviceFixedIter;
-    // A scenario that exhausts the budget is reported as MAX_ITERATION_REACHED by the device itself (the
-    // precomputer's exhausted set), which is OLF's own answer: no early exit hands stragglers to the CPU.
-
-    // Full-loadflow mode (tol > 0) with local PV controllers runs the reactive-limits (PV→PQ) OUTER loop:
-    // converge the inner Newton, switch any generator over its Q limit, re-converge the switched scenarios,
-    // repeat until a pass switches nothing. Fixed-iter mode (tol <= 0, the throughput benchmark) and
-    // family-free networks with no controllers do ONE pass (no outer loop) — byte-identical to before.
-    bool fullLoadflow = !deviceFixedIter && (ctx->nrl > 0 || ctx->nds > 0 || ctx->dsSlackOnly
-                                             || ctx->nmon > 0 || ctx->nTvc > 0 || ctx->nShc > 0 || ctx->nFlc > 0 || ctx->nCph > 0
-                                             || ctx->nTvd > 0 || ctx->nSvd > 0 || ctx->nSvc > 0);
-    const int RL_MAX_OUTER = maxOuterProductive > 0 ? maxOuterProductive : 20;   // OLF maxOuterLoopIterations
-    // per-bus PV→PQ count cap (OLF maxPqPvSwitch): 0 is OLF's "never switch back" and is honoured as such;
-    // only a negative value (no cap given) takes OLF's default of 3.
-    drv.rlMaxSwitch = rlMaxSwitch >= 0 ? rlMaxSwitch : 3;
-    const int& RL_MAX_SWITCH = drv.rlMaxSwitch;
-    static const char* swLogEnv = std::getenv("OLF_GPU_SW_LOG");
-    drv.swLogSlot = swLogEnv == nullptr ? -1 : (std::string(swLogEnv) == "all" ? -2 : std::atoi(swLogEnv));
-    const int& swLogSlot = drv.swLogSlot;
-    // OLF_GPU_ITER_LOG=1: EVERY scenario's stopping decision at every Newton iteration (ITER_LOG), the score of
-    // every step's linear solve (LIN_LOG, and LIN_WORST where it is poor) and its record at the end of every outer
-    // pass (PASS_LOG: loop, re-solve, switch, iterations, status, DS gate), printed once when the driver returns.
-    // Built from the norms the host already reads each iteration, the pass-0 guard's two scoring kernels run on
-    // every step (one 3*nS copy) and ONE copy of the DS gate records per pass - none of the whole-vector copies
-    // the slot traces make: a run-to-run divergence of one scenario among hundreds is found by diffing two logs.
-    static const bool iterLog = std::getenv("OLF_GPU_ITER_LOG") != nullptr;
-    std::vector<std::string> iterLogLines;
-    // Outer-loop convergence tolerances (pu) — passed in so the device uses the SAME criteria as the CPU
-    // loadflow that built the base case (maxReactivePowerMismatch / slackBusPMaxMismatch, per-unitized), NOT
-    // hardcoded constants. With matching parameters and the same equations the GPU outer-loop fixed point
-    // matches the CPU's to the inner-Newton precision; a loose tolerance (e.g. the 1 MW slack default) leaves
-    // a redistribution band, so a test wanting machine-precision agreement passes tight values on both sides.
-    drv.reactiveLimitTol = reactiveLimitTol;
-    const double& REACTIVE_LIMIT_TOL = drv.reactiveLimitTol;
-    drv.slackDistTol = slackDistTol;
-    const double& SLACK_DIST_TOL = drv.slackDistTol;
-    drv.pResidueEps = 1e-5;                                  // OLF ActivePowerDistribution.P_RESIDUE_EPS: the
-                                                            // water-filling distributes the mismatch down to this
-    // RL_MAX_OUTER bounds the PRODUCTIVE outer iterations (an outer loop that re-solved), matching OLF's
-    // outerLoopTotalIterations budget. The raw pass loop gets a generous safety bound on top, because the
-    // sequential driver also spends non-productive passes (phase transitions / stability re-checks) that OLF
-    // does not count.
-    // The reactive-limit limits become PER-SCENARIO as soon as either channel is live: curve limits at
-    // the runtime P, or a generator lost at a bus that keeps voltage control taking its capability away.
-    DeviceBuf& dRlQOvSlotEntry = drv.dRlQOvSlotEntry;
-    DeviceBuf& dRlQOvMinMax = drv.dRlQOvMinMax;
-    DeviceBuf& dRlQOvPtr = drv.dRlQOvPtr;
-    DeviceBuf& dRlQOvList = drv.dRlQOvList;
-    if (nRlQOv > 0) {
-        dRlQOvSlotEntry.upload(rlQOvSlotEntry, static_cast<size_t>(nRlQOv) * 2 * sizeof(int));
-        dRlQOvMinMax.upload(rlQOvMinMax, static_cast<size_t>(nRlQOv) * 5 * sizeof(double));   // {dMinQ, dMaxQ, dLoadQ, dBmin, dBmax}
-        // ...indexed by slot (CSR, entry order kept), so the dynamic-limits kernel reads its scenario's own
-        // overrides instead of scanning the chunk's.
-        std::vector<int> qPtr(nS + 1, 0);
-        std::vector<int> qList(nRlQOv);
-        for (int k = 0; k < nRlQOv; k++) qPtr[rlQOvSlotEntry[2 * k] + 1]++;
-        for (int t = 0; t < nS; t++) qPtr[t + 1] += qPtr[t];
-        std::vector<int> qCursor(qPtr.begin(), qPtr.end() - 1);
-        for (int k = 0; k < nRlQOv; k++) qList[qCursor[rlQOvSlotEntry[2 * k]]++] = k;
-        dRlQOvPtr.upload(qPtr.data(), qPtr.size() * sizeof(int));
-        dRlQOvList.upload(qList.data(), qList.size() * sizeof(int));
-    }
-    // A lost voltage-controlling SVC also takes its share of the entry's quadratic limit coefficients (an SVC's
-    // limit is its susceptance times v^2): per (scenario, entry) coefficients, read by the reactive-limits check
-    // in place of the run-constant ones. Built only when some override carries such a share.
-    bool& svcCoefDyn = drv.svcCoefDyn;
-    svcCoefDyn = false;
-    for (int k = 0; k < nRlQOv && !svcCoefDyn; k++) {
-        svcCoefDyn = rlQOvMinMax[5 * k + 3] != 0.0 || rlQOvMinMax[5 * k + 4] != 0.0;
-    }
-    if (svcCoefDyn && ctx->nrl > 0) {
-        size_t nrl = static_cast<size_t>(ctx->nrl);
-        std::vector<double> bmin(nrl), bmax(nrl);
-        CUDA_CHECK(cudaMemcpy(bmin.data(), ctx->dRlSvcBmin.p, nrl * sizeof(double), cudaMemcpyDeviceToHost));
-        CUDA_CHECK(cudaMemcpy(bmax.data(), ctx->dRlSvcBmax.p, nrl * sizeof(double), cudaMemcpyDeviceToHost));
-        std::vector<double> dynMin(static_cast<size_t>(nS) * nrl), dynMax(static_cast<size_t>(nS) * nrl);
-        for (int t = 0; t < nS; t++) {
-            std::copy(bmin.begin(), bmin.end(), dynMin.begin() + static_cast<size_t>(t) * nrl);
-            std::copy(bmax.begin(), bmax.end(), dynMax.begin() + static_cast<size_t>(t) * nrl);
-        }
-        for (int k = 0; k < nRlQOv; k++) {
-            size_t at = static_cast<size_t>(rlQOvSlotEntry[2 * k]) * nrl + rlQOvSlotEntry[2 * k + 1];
-            dynMin[at] += rlQOvMinMax[5 * k + 3];
-            dynMax[at] += rlQOvMinMax[5 * k + 4];
-        }
-        if (!ctx->dRlSvcBminDyn.p) {
-            ctx->dRlSvcBminDyn.alloc(static_cast<size_t>(ctx->nScenarios) * nrl * sizeof(double));
-            ctx->dRlSvcBmaxDyn.alloc(static_cast<size_t>(ctx->nScenarios) * nrl * sizeof(double));
-        }
-        CUDA_CHECK(cudaMemcpy(ctx->dRlSvcBminDyn.p, dynMin.data(), dynMin.size() * sizeof(double), cudaMemcpyHostToDevice));
-        CUDA_CHECK(cudaMemcpy(ctx->dRlSvcBmaxDyn.p, dynMax.data(), dynMax.size() * sizeof(double), cudaMemcpyHostToDevice));
-    }
-    // Per-scenario curve repairs, CSR by scenario: the dynamic-limits kernel runs one thread per
-    // (reactive-limit entry, scenario) and walks the curve entries inside, so a flat {slot, entry}
-    // scan would be paid ncv times per thread. Bucketing by slot makes it a handful of comparisons.
-    DeviceBuf& dCvOvPtr = drv.dCvOvPtr;
-    DeviceBuf& dCvOvEntry = drv.dCvOvEntry;
-    DeviceBuf& dCvOvVal = drv.dCvOvVal;
-    if (nCvOv > 0) {
-        std::vector<int> ptr(nS + 1, 0);
-        for (int k = 0; k < nCvOv; k++) ptr[cvOvSlotEntry[2 * k] + 1]++;
-        for (int t = 0; t < nS; t++) ptr[t + 1] += ptr[t];
-        std::vector<int> cursor(ptr.begin(), ptr.end() - 1);
-        std::vector<int> entry(nCvOv);
-        std::vector<double> val(static_cast<size_t>(nCvOv) * 2);
-        for (int k = 0; k < nCvOv; k++) {
-            int at = cursor[cvOvSlotEntry[2 * k]]++;
-            entry[at] = cvOvSlotEntry[2 * k + 1];
-            val[2 * at] = cvOvStepScale[2 * k];
-            val[2 * at + 1] = cvOvStepScale[2 * k + 1];
-        }
-        dCvOvPtr.upload(ptr.data(), ptr.size() * sizeof(int));
-        dCvOvEntry.upload(entry.data(), entry.size() * sizeof(int));
-        dCvOvVal.upload(val.data(), val.size() * sizeof(double));
-    }
-    drv.useDynRlLimits = ctx->nrl > 0 && (ctx->ncv > 0 || nRlQOv > 0 || ctx->nfqLim > 0);
-    const bool& useDynRlLimits = drv.useDynRlLimits;
-    if (useDynRlLimits && (!ctx->dRlMinQDyn.p || !ctx->dRlLoadQDyn.p)) {   // curves allocate these on their own
-                                                            // table upload; a Q override alone must too, and a
-                                                            // guard that names only ONE of them silently leaves
-                                                            // the others null on a curve network (measured: the
-                                                            // whole precompute fell back to the CPU)
-        ctx->dRlLoadQDyn.alloc(static_cast<size_t>(ctx->nScenarios) * ctx->nrl * sizeof(double));
-        ctx->dRlMinQDyn.alloc(static_cast<size_t>(ctx->nScenarios) * ctx->nrl * sizeof(double));
-        ctx->dRlMaxQDyn.alloc(static_cast<size_t>(ctx->nScenarios) * ctx->nrl * sizeof(double));
-    }
-    int maxOuter = fullLoadflow ? 8 * RL_MAX_OUTER : 1;
-    // The two kernels that lay a group's rows out from the CURRENT pin states (the RL pass runs them after
-    // its pins; the seeding below runs them once so the FIRST fill sees the seeded pins on the rows).
-    // `staticLimits`: use the STATIC reactive-limit arrays rather than the curve-evaluated ones. At SEED time the
-    // dynamic arrays are still zero (rlCurveLimitsBatch runs in the reactive-limits phase), so a seed-time flip
-    // stamped the pilot's own-Q target as 0 instead of (limit - loadQ) and the whole slack phase ran against it —
-    // measured on rte6515 BUS-6112_BBS_2: row 12834 converged at target 0 through outer 32, then the RL phase
-    // re-stamped -0.444 and the solve had to catch up, one pass behind OLF. The re-stamp branch in the kernel
-    // keeps the value current once the curve limits exist, so the static value is a correct starting point.
-    std::vector<char>& rlActive = drv.rlActive;
-    rlActive.assign(nS, 0);
-    std::vector<char> rlSwitched(nS), wasActive(nS);
-    // OLF_GPU_RL_AUDIT: per-scenario decision history, kept in memory and printed only for the
-    // scenarios the end-of-solve audit flags. The failing scenario is not known until the solve is
-    // over and the flip is rare, so the only way to see its trajectory is to record every scenario's
-    // and throw away the rest.
-    const bool rlAuditOn = std::getenv("OLF_GPU_RL_AUDIT") != nullptr;
-    std::vector<std::vector<std::string>> auditLog(rlAuditOn ? nS : 0);
-    // ...but NOT on a resume: these are per-SOLVE state, and a resumed driver is continuing the SAME
-    // solve. Re-seeding here would discard the RL pins, monitoring activations and absorbed slack the
-    // sequence has already established — which is exactly what makes a resume cheaper than the
-    // orchestrator pattern it replaces: that one resets and re-runs the whole driver every round.
-    if (std::getenv("OLF_GPU_BATCH_TRACE") != nullptr && nS == 1) {
-        std::fprintf(stderr, "CTX_FLAGS nS=1 nrl=%d nRlRemote=%d hasDqQrGroups=%d nQr=%d ndq=%d nds=%d ngen=%d nzi=%d nziBase=%d nRmq=%d resume=%d fullLoadflow=%d\n",
-                     ctx->nrl, ctx->nRlRemote, ctx->hasDqQrGroups ? 1 : 0, ctx->st->nQr, ctx->ndq, ctx->nds, ctx->ngen, ctx->nzi, ctx->nziBase, ctx->nRmq, resume ? 1 : 0, fullLoadflow ? 1 : 0);
-    }
-    if (fullLoadflow && !resume && ctx->nSvc > 0) {
-        // BEFORE the reactive-limit seeding below, which consults it: no zone has moved a target yet.
-        std::vector<double> nanv(static_cast<size_t>(nS) * std::max(ctx->nrl, 1), std::nan(""));
-        CUDA_CHECK(cudaMemcpy(ctx->dSvcRlVt.p, nanv.data(), nanv.size() * sizeof(double), cudaMemcpyHostToDevice));
-    }
-    if (!resume) {                                           // no inner solve has converged yet: the start
-        CUDA_CHECK(cudaMemcpyAsync(ctx->dXLastConv.p, ctx->dX.p, static_cast<size_t>(nS) * n * sizeof(double),
-                                   cudaMemcpyDeviceToDevice, ctx->stream));
-    }
-    if (fullLoadflow && !resume) {                           // per-solve PV↔PQ state: 0 switches, limitType from base
-        // Each generator's own slack move is per-solve state, cleared before ANYTHING reads it: the seed-time curve
-        // limits below evaluate a curve at base + genCum wherever genCumValid is set. Cleared only after the seed,
-        // a reused context evaluated scenario slot s at the move of the contingency the PREVIOUS chunk solved in
-        // that slot. The write-back also reads it when the DS phase never fires (NaN targetP otherwise).
-        if (ctx->ngen > 0 && ctx->dGenCum.p) {
-            CUDA_CHECK(cudaMemsetAsync(ctx->dGenCum.p, 0, static_cast<size_t>(ctx->ngen) * nS * sizeof(double), ctx->stream));
-            CUDA_CHECK(cudaMemsetAsync(ctx->dGenCumValid.p, 0, (size_t) nS * sizeof(char), ctx->stream));
-        }
-        if (ctx->hasDqQrGroups && ctx->st->nQr > 0) {        // plan-B4: capture each group's pilot-Q target from
-            size_t need = static_cast<size_t>(ctx->st->nQr) * nS * sizeof(double);   // the BASE carrier's row,
-            if (!ctx->dQrPilotQ.p) ctx->dQrPilotQ.alloc(need);   // BEFORE any RL mode seeding rewrites it
-            if (!ctx->dQrSavedVT.p) ctx->dQrSavedVT.alloc(need);
-            if (!ctx->dQrVeqOff.p) ctx->dQrVeqOff.alloc(static_cast<size_t>(ctx->st->nQr) * nS * sizeof(char));
-            CUDA_CHECK(cudaMemsetAsync(ctx->dQrVeqOff.p, 0,      // per-solve state, like limitType
-                    static_cast<size_t>(ctx->st->nQr) * nS * sizeof(char), ctx->stream));
-            capturePilotQBatch<<<grid(ctx->st->nQr * nS), BLOCK, 0, ctx->stream>>>(ctx->st->nQr, nS, n,
-                    ctx->st->dQrPtr.as<int>(), ctx->st->dQrRows.as<int>(), dBaseMode.as<int>(),
-                    ctx->dTargetBase.as<double>(), ctx->dQrPilotQ.as<double>(),
-                    ctx->st->dQrBaseTargetRow.p ? ctx->st->dQrBaseTargetRow.as<int>() : nullptr);
-            if (ctx->nQrPqDelta > 0) {
-                applyPilotQDeltasBatch<<<grid(ctx->nQrPqDelta), BLOCK, 0, ctx->stream>>>(ctx->nQrPqDelta,
-                        ctx->dQrPqDeltaKey.as<int>(), ctx->dQrPqDeltaVal.as<double>(), ctx->st->nQr, n,
-                        ctx->st->dQrPtr.as<int>(), ctx->st->dQrRows.as<int>(), ctx->dMode.as<int>(),
-                        ctx->hasDqSub ? ctx->dDqSub.as<char>() : nullptr, ctx->nDqMembers,
-                        ctx->hasDqSub ? ctx->dQrMemberStart.as<int>() : nullptr,
-                        ctx->dQrPilotQ.as<double>(), ctx->dTarget.as<double>());
-            }
-            if (!ctx->dQrPilotRlEntry.p) {
-                // Per group, the pilot's own LOCAL reactive-limit entry: a pilot whose group lost control
-                // in the BASE (every member pinned there) enters the pack as a local entry with an empty
-                // reactive range, and that entry carries the group's V target — the value the pilot row
-                // takes back when a member unpins (updatePilotVeqBatch). Built once per context.
-                int nQr = ctx->st->nQr;
-                std::vector<int> ptr(nQr + 1);
-                CUDA_CHECK(cudaMemcpy(ptr.data(), ctx->st->dQrPtr.p, ptr.size() * sizeof(int), cudaMemcpyDeviceToHost));
-                std::vector<int> rows(std::max(ptr[nQr], 1));
-                CUDA_CHECK(cudaMemcpy(rows.data(), ctx->st->dQrRows.p, static_cast<size_t>(ptr[nQr]) * sizeof(int), cudaMemcpyDeviceToHost));
-                std::vector<int> vrow(std::max(ctx->nrl, 1));
-                std::vector<char> rem(std::max(ctx->nrl, 1), 0);
-                if (ctx->nrl > 0) {
-                    CUDA_CHECK(cudaMemcpy(vrow.data(), ctx->dRlVrow.p, static_cast<size_t>(ctx->nrl) * sizeof(int), cudaMemcpyDeviceToHost));
-                    if (ctx->dRlRemote.p) {
-                        CUDA_CHECK(cudaMemcpy(rem.data(), ctx->dRlRemote.p, static_cast<size_t>(ctx->nrl), cudaMemcpyDeviceToHost));
-                    }
-                }
-                std::vector<int> pe(std::max(nQr, 1), -1);
-                for (int g = 0; g < nQr; g++) {
-                    int pilotRow = rows[ptr[g]];
-                    for (int i = 0; i < ctx->nrl; i++) {
-                        if (!rem[i] && vrow[i] == pilotRow) { pe[g] = i; break; }
-                    }
-                }
-                ctx->dQrPilotRlEntry.upload(pe.data(), pe.size() * sizeof(int));
-            }
-            if (nS == 1 && std::getenv("OLF_GPU_BATCH_TRACE") != nullptr) {
-                CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
-                int nQr = ctx->st->nQr;
-                std::vector<int> ptr(nQr + 1);
-                CUDA_CHECK(cudaMemcpy(ptr.data(), ctx->st->dQrPtr.p, ptr.size() * sizeof(int), cudaMemcpyDeviceToHost));
-                std::vector<int> rows(ptr[nQr]);
-                CUDA_CHECK(cudaMemcpy(rows.data(), ctx->st->dQrRows.p, rows.size() * sizeof(int), cudaMemcpyDeviceToHost));
-                std::vector<double> pq(nQr), tg(n);
-                std::vector<int> md(n);
-                CUDA_CHECK(cudaMemcpy(pq.data(), ctx->dQrPilotQ.p, nQr * sizeof(double), cudaMemcpyDeviceToHost));
-                CUDA_CHECK(cudaMemcpy(tg.data(), ctx->dTarget.p, n * sizeof(double), cudaMemcpyDeviceToHost));
-                CUDA_CHECK(cudaMemcpy(md.data(), dBaseMode.p, n * sizeof(int), cudaMemcpyDeviceToHost));
-                for (int g = 0; g < nQr; g++) {
-                    std::fprintf(stderr, "PILOTQ_CAPTURE group=%d captured=%.9f candidates:", g, pq[g]);
-                    for (int c = ptr[g]; c < ptr[g + 1]; c++) {
-                        std::fprintf(stderr, " row%d(mode=%d,target=%.9f)", rows[c], md[rows[c]], tg[rows[c]]);
-                    }
-                    std::fprintf(stderr, "\n");
-                }
-            }
-        }
-        if (rlStateIn != nullptr && ctx->nrl > 0) {
-            // WARM CONTINUATION: seed each (controller, scenario)'s pinned limit type AND switch
-            // count from the state the caller passes. A re-solve inside one load flow passes both; a
-            // strategy pair passes its parent's pins with zero counts, since OLF's reactive-limit
-            // loop counts afresh in every load flow.
-            std::vector<char> lt(static_cast<size_t>(ctx->nrl) * nS), sc(static_cast<size_t>(ctx->nrl) * nS);
-            for (size_t k = 0; k < lt.size(); k++) {
-                lt[k] = static_cast<char>(rlStateIn[k] & 7);
-                sc[k] = static_cast<char>(rlStateIn[k] >> 3);
-            }
-            CUDA_CHECK(cudaMemcpyAsync(ctx->dRlLimitType.p, lt.data(), lt.size(), cudaMemcpyHostToDevice, ctx->stream));
-            CUDA_CHECK(cudaMemcpy(ctx->dRlSwitchCount.p, sc.data(), sc.size(), cudaMemcpyHostToDevice));
-            // The limits the continued pins are STAMPED at: OLF restores each pinned bus's generation target Q from
-            // the parent's end, and a GeneratorAction only invalidates the bus's target P, so the first solve keeps
-            // the limit at the parent's P (dgSeedAnchor) and the reactive-limit check refreshes it afterwards.
-            if (useDynRlLimits) {                            // curve limits at the CURRENT (seeded) targets,
-                rlCurveLimitsBatch<<<grid(ctx->nrl * nS), BLOCK, 0, ctx->stream>>>(ctx->nrl, nS, ctx->ncv, n, ctx->cvExtrapolate,
-                        ctx->dCvIdx.as<int>(), ctx->dCvIn.as<double>(), ctx->dCvPts.as<double>(),
-                        ctx->dCvPtr.as<int>(), ctx->dCvList.as<int>(), cvHvdcView(ctx),
-                        ctx->dRlMinQ.as<double>(), ctx->dRlMaxQ.as<double>(), ctx->dRlLoadQ.as<double>(),
-                        ctx->dTarget.as<double>(),
-                        nRlQOv, nRlQOv > 0 ? dRlQOvSlotEntry.as<int>() : nullptr,
-                        nRlQOv > 0 ? dRlQOvMinMax.as<double>() : nullptr,
-                        nRlQOv > 0 ? dRlQOvPtr.as<int>() : nullptr, nRlQOv > 0 ? dRlQOvList.as<int>() : nullptr,
-                        nCvOv > 0 ? dCvOvPtr.as<int>() : nullptr,
-                        nCvOv > 0 ? dCvOvEntry.as<int>() : nullptr,
-                        nCvOv > 0 ? dCvOvVal.as<double>() : nullptr,
-                        ctx->ngen > 0 ? ctx->dGenCum.as<double>() : nullptr,
-                        ctx->ngen > 0 ? ctx->dGenCumValid.as<char>() : nullptr, ctx->hasDgSeedAnchor ? ctx->dDgSeedAnchor.as<double>()
-                                : (ctx->hasDgAnchor ? ctx->dDgAnchor.as<double>() : nullptr),
-                        ctx->hasDgStart ? ctx->dDgStart.as<double>() : nullptr, ctx->ngen,
-                        ctx->nds > 0 ? ctx->dDsPhiRow.as<int>() : nullptr,
-                        ctx->nDsRowOv > 0 ? ctx->dDsRowOv.as<int>() : nullptr, ctx->nds,
-                        ctx->ngen > 0 ? ctx->dgBus.as<int>() : nullptr,
-                        ctx->dRlMinQDyn.as<double>(), ctx->dRlMaxQDyn.as<double>(),
-                        ctx->dRlLoadQDyn.as<double>(), cvProbeEntry, cvProbeSlotByCtg ? ctx->loopTraceSlot : cvProbeSlot);
-                launchForcedTargetQLimits(ctx, nS, n);
-            }
-            seedRlModeFromState<<<grid(ctx->nrl * nS), BLOCK, 0, ctx->stream>>>(ctx->nrl, nS, n,
-                    ctx->dRlVrow.as<int>(), ctx->dRlQrow.p ? ctx->dRlQrow.as<int>() : nullptr,
-                    useDynRlLimits ? ctx->dRlMinQDyn.as<double>() : ctx->dRlMinQ.as<double>(),
-                    useDynRlLimits ? ctx->dRlMaxQDyn.as<double>() : ctx->dRlMaxQ.as<double>(),
-                    useDynRlLimits ? ctx->dRlLoadQDyn.as<double>() : ctx->dRlLoadQ.as<double>(), ctx->dRlLimitType.as<char>(),
-                    ctx->dMode.as<int>(), ctx->dTarget.as<double>(), useDynRlLimits ? 1 : 0,
-                    ctx->nRlRemote > 0 ? ctx->dRlRemote.as<char>() : nullptr,
-                    ctx->dRlSavedTarget.as<double>(), ctx->dRlSavedMode.as<char>(),
-                    ctx->hasRlBaseLt ? ctx->dRlBaseLimitType.as<char>() : nullptr,
-                    psEntryPtr(ctx), ctx->st->nQr,
-                    ctx->dRlVtarget.as<double>(), nRlVtOv, nRlVtOv > 0 ? dRlVtOvSlotIdx.as<int>() : nullptr,
-                    nRlVtOv > 0 ? dRlVtOvVal.as<double>() : nullptr, ctx->nSvc > 0 ? ctx->dSvcRlVt.as<double>() : nullptr,
-                    ctx->nRlLocal > 0 ? ctx->dRlLocalOv.as<char>() : nullptr,
-                    ctx->nRlLocal > 0 ? ctx->dRlLocalVt.as<double>() : nullptr,
-                    ctx->hasRlPinTgtIn ? ctx->dRlPinTgtIn.as<double>() : nullptr,
-                    ctx->nRlIslanded > 0 ? ctx->dRlIslanded.as<char>() : nullptr);
-        } else {
-            CUDA_CHECK(cudaMemsetAsync(ctx->dRlSwitchCount.p, 0, static_cast<size_t>(ctx->nrl) * nS * sizeof(char), ctx->stream));
-            if (ctx->nrl > 0) {                              // seed the pinned limit for base-PQ controllers (else all PV)
-                initRlLimitTypeBatch<<<grid(ctx->nrl * nS), BLOCK, 0, ctx->stream>>>(ctx->nrl, nS, n, ctx->dRlVrow.as<int>(),
-                        ctx->dRlQrow.p ? ctx->dRlQrow.as<int>() : nullptr,
-                        ctx->dRlVtarget.as<double>(), ctx->dRlMonitored.as<char>(), dBaseMode.as<int>(), ctx->dX.as<double>(),
-                        ctx->dRlLimitType.as<char>(),
-                        nRlVtOv, nRlVtOv > 0 ? dRlVtOvSlotIdx.as<int>() : nullptr,
-                        nRlVtOv > 0 ? dRlVtOvVal.as<double>() : nullptr,
-                        ctx->nSvc > 0 ? ctx->dSvcRlVt.as<double>() : nullptr,
-                        ctx->nRlRemote > 0 ? ctx->dRlRemote.as<char>() : nullptr,
-                        ctx->nRlRemote > 0 ? ctx->dRlCmpVrow.as<int>() : nullptr,
-                        ctx->dTarget.as<double>(), ctx->dRlMinQ.as<double>(), ctx->dRlMaxQ.as<double>(),
-                        ctx->dRlLoadQ.as<double>(),
-                        ctx->hasRlBaseLt ? ctx->dRlBaseLimitType.as<char>() : nullptr,
-                        psEntryPtr(ctx), ctx->st->nQr,
-                        ctx->nRlGenLost > 0 ? ctx->dRlGenLost.as<char>() : nullptr);
-                if (ctx->nRlGenLost > 0 && std::getenv("OLF_GPU_GENLOST_TRACE") != nullptr) {
-                    // the seeded types of the lost-generator entries, read back (device printf is not captured)
-                    CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
-                    std::vector<char> hm((size_t) nS * ctx->nrl), hl((size_t) nS * ctx->nrl);
-                    CUDA_CHECK(cudaMemcpy(hm.data(), ctx->dRlGenLost.p, hm.size(), cudaMemcpyDeviceToHost));
-                    CUDA_CHECK(cudaMemcpy(hl.data(), ctx->dRlLimitType.p, hl.size(), cudaMemcpyDeviceToHost));
-                    for (size_t k = 0; k < hm.size(); k++) {
-                        if (hm[k]) {
-                            std::fprintf(stderr, "GENLOST_SEED slot=%d entry=%d limitType=%d nS=%d nrl=%d\n",
-                                         (int) (k / ctx->nrl), (int) (k % ctx->nrl), (int) hl[k], nS, ctx->nrl);
-                        }
-                    }
-                }
-            }
-        }
-        // The seeded pin states must reach the ROWS before the first fill: a pinned enrolled pilot's balance
-        // goes on the carrier's target (its DISTR_Q target otherwise), and a group that lost control in the
-        // base has its pilot row flipped already. Both kernels are idempotent; the RL pass runs them again.
-        // Every scenario takes the seed stamps: updateDistrQTargetsBatch returns on !rlActive[s], and rlActive is
-        // only written by the outer-loop passes - at seed time it still held the context's zeros (or the previous
-        // chunk's last pass), so the carrier stamp below never ran before the FIRST solve. A pilot-self pilot that
-        // lost every generator with two live survivors then solved its carrier row against the plan's renormalized
-        // DISTR_Q seed (0.5 x its -0.6 balance = -0.3) instead of its balance: measured as 0.258 kV at b2 on
-        // devicePilotControllerLosingItsOwnGeneratorMatchesCpu (OLF's BUS_TARGET_Q of the pilot 0.3 pu off at the
-        // device state), and rte6515's 50 refused pilot outages. One survivor hid it: its seed degenerates to the
-        // pilot's own target. The passes upload their own rlActive before they run.
-        {
-            std::vector<char> allOn(nS, 1);
-            CUDA_CHECK(cudaMemcpyAsync(ctx->dRlActive.p, allOn.data(), nS, cudaMemcpyHostToDevice, ctx->stream));
-            CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
-        }
-        // The dynamic reactive limits BEFORE the seed stamps, on the cold path too. They were first computed in the
-        // reactive-limit pass, after the first solve, so the stamps read the arrays unfilled: a gen-lost pilot's
-        // carrier target came out 0 - 0 instead of 0 - loadQ, and a survivor's sharing target summed a pinned
-        // peer's (limit - loadQ) as 0 - 0 - measured on devicePilotControllerLosingItsOwnGeneratorMatchesCpu
-        // as rows 2 and 4 both at target 0 during the solve (OLF: -0.6 and -0.3). The warm path already ran
-        // this before seeding; here it runs after initRlLimitTypeBatch has set the scenario's limit types.
-        if (useDynRlLimits) {                            // curve limits at the CURRENT (seeded) targets,
-            rlCurveLimitsBatch<<<grid(ctx->nrl * nS), BLOCK, 0, ctx->stream>>>(ctx->nrl, nS, ctx->ncv, n, ctx->cvExtrapolate,
-                    ctx->dCvIdx.as<int>(), ctx->dCvIn.as<double>(), ctx->dCvPts.as<double>(),
-                        ctx->dCvPtr.as<int>(), ctx->dCvList.as<int>(), cvHvdcView(ctx),
-                    ctx->dRlMinQ.as<double>(), ctx->dRlMaxQ.as<double>(), ctx->dRlLoadQ.as<double>(),
-                    ctx->dTarget.as<double>(),
-                    nRlQOv, nRlQOv > 0 ? dRlQOvSlotEntry.as<int>() : nullptr,
-                    nRlQOv > 0 ? dRlQOvMinMax.as<double>() : nullptr,
-                        nRlQOv > 0 ? dRlQOvPtr.as<int>() : nullptr, nRlQOv > 0 ? dRlQOvList.as<int>() : nullptr,
-                    nCvOv > 0 ? dCvOvPtr.as<int>() : nullptr,
-                    nCvOv > 0 ? dCvOvEntry.as<int>() : nullptr,
-                    nCvOv > 0 ? dCvOvVal.as<double>() : nullptr,
-                    ctx->ngen > 0 ? ctx->dGenCum.as<double>() : nullptr,
-                    ctx->ngen > 0 ? ctx->dGenCumValid.as<char>() : nullptr, ctx->hasDgAnchor ? ctx->dDgAnchor.as<double>() : nullptr, ctx->hasDgStart ? ctx->dDgStart.as<double>() : nullptr, ctx->ngen,
-                    ctx->nds > 0 ? ctx->dDsPhiRow.as<int>() : nullptr,
-                    ctx->nDsRowOv > 0 ? ctx->dDsRowOv.as<int>() : nullptr, ctx->nds,
-                    ctx->ngen > 0 ? ctx->dgBus.as<int>() : nullptr,
-                    ctx->dRlMinQDyn.as<double>(), ctx->dRlMaxQDyn.as<double>(),
-                    ctx->dRlLoadQDyn.as<double>(), cvProbeEntry, cvProbeSlotByCtg ? ctx->loopTraceSlot : cvProbeSlot);
-            launchForcedTargetQLimits(ctx, nS, n);
-        }
-        launchPilotVeqInner(ctx, drv, true, true);                     // seed: base limits, or the previous solve's flip
-        launchDistrQTargetsInner(ctx, drv);
-        if (ctx->nds > 0) {
-            dsResetSolve(ctx, drv);
-        }
-        if (ctx->nmon > 0) {
-            monitoringResetSolve(ctx, drv);
-        }
-        if (ctx->nTvc > 0) {
-            tvcResetSolve(ctx, drv);
-        }
-        if (ctx->nCph > 0) {
-            cphResetSolve(ctx, drv);
-        }
-        if (ctx->nTvd > 0) {
-            tvdResetSolve(ctx, drv);
-        }
-        if (ctx->nSvc > 0) {
-            svcResetSolve(ctx, drv);
-        }
-        if (ctx->nSvd > 0) {
-            svdResetSolve(ctx, drv);
-        }
-        if (ctx->nFlc > 0) {
-            flcResetSolve(ctx, drv);
-        }
-        if (ctx->nShc > 0) {
-            shcResetSolve(ctx, drv);
-        }
-        if (ctx->dsSlackOnly) {
-            dsSlackOnlyResetSolve(ctx, drv, dsSlackShift);
-        }
-    }
-
-    // SEQUENTIAL outer loops, exactly like OLF's AcloadFlowEngine: fully stabilize the reactive-limits loop
-    // (switch + re-solve until it switches nothing), THEN fully stabilize the distributed-slack loop
-    // (distribute + re-solve until balanced), and repeat the whole RL->DS sequence until a full sequence
-    // triggers no inner Newton re-solve. Running RL and DS in the SAME pass converges to a different (still
-    // in-tolerance) point when switching interacts with slack distribution. phase 0 = reactive limits, 1 = slack.
+    const bool& iterLog = drv.iterLog;
+    const bool& olTime = drv.olTime;
+    int& olPassSolved = drv.olPassSolved;
+    int& nActive = drv.nActive;
+    std::vector<char>& active = drv.active;
     std::vector<char>& live = drv.live;
-    live = active;                          // scenarios still iterating outer loops (dropped on failure)
-    // OLF's DefaultAcOuterLoopConfig orders DistributedSlack BEFORE ReactiveLimits (innermost first), and the
-    // engine stabilizes them in that order. Match it: phase 0 = distributed slack, phase 1 = reactive limits.
-    // (Switching PV->PQ before the slack is balanced leaves a large active imbalance that the undamped device
-    // Newton diverges on — DS must stabilize first.)
-    // The outer loops this solve drives, IN OLF'S CONFIGURED ORDER. OLF's engine
-    // (AcloadFlowEngine.runOuterLoops) walks its configured list in order, drives each loop to
-    // STABLE — re-solving after every unstable check — then moves to the next, restarts from the
-    // top, and stops when a full sweep changes nothing. The driver below already has exactly those
-    // semantics; what it lacked was the LIST: it hard-coded two loops, so every other loop had to be
-    // bolted on as a host orchestrator running AFTER the whole solve, landing out of order. Naming
-    // the order explicitly is what lets the remaining loops move into their proper slot.
-    //
-    // OLF's contingency order: DistributedSlack(1), FreezingHvdcACEmulation(2),
-    // AcHvdcAcEmulationLimits(3), SecondaryVoltageControl(5), MonitoringVoltage(6),
-    // ReactiveLimits(7). All but SecondaryVoltageControl are driver phases here, in that order.
-    // The loops OLF runs AFTER ReactiveLimits (PhaseControl, transformer and shunt voltage control)
-    // are still host orchestrators: their position relative to RL is right, but OLF restarts the
-    // WHOLE sweep whenever one of them changes something, so an earlier loop is re-checked and here
-    // it is not. Folding them needs the discrete tap/section tables on the device.
-    int (&loopOrder)[MAX_DEVICE_LOOPS] = drv.loopOrder;
-    int nLoops = 0;
-    if (ctx->nds > 0 || ctx->dsSlackOnly) {
-        loopOrder[nLoops++] = LOOP_DS;
-    }
-    if (ctx->nhv > 0) {
-        loopOrder[nLoops++] = LOOP_HVDC_FREEZE;              // OLF: FreezingHvdcACEmulation
-        if (ctx->hvLimitsActive) {
-            loopOrder[nLoops++] = LOOP_HVDC_LIMITS;          // OLF: AcHvdcAcEmulationLimits
-        }
-    }
-    if (ctx->nSvc > 0) {
-        loopOrder[nLoops++] = LOOP_SVC_KERNEL;               // OLF order 4: SecondaryVoltageControl, IN-KERNEL
-    } else if (ctx->hostLoopMask & (1 << 0)) {
-        loopOrder[nLoops++] = LOOP_HOST_SVC;                 // OLF order 4: SecondaryVoltageControl, host pause
-    }
-    if (ctx->nmon > 0) {
-        loopOrder[nLoops++] = LOOP_MONITORING;               // OLF order 5: MonitoringVoltage
-    }
-    if (ctx->nrl > 0) {
-        loopOrder[nLoops++] = LOOP_RL;                       // OLF order 6: ReactiveLimits
-    }
-    if (ctx->nFlcPhase > 0 || ctx->nCph > 0) {
-        loopOrder[nLoops++] = LOOP_PHASE_KERNEL;             // OLF order 7: (Incremental)PhaseControl, IN-KERNEL
-    } else if (ctx->hostLoopMask & (1 << 1)) {
-        loopOrder[nLoops++] = LOOP_HOST_PHASE;               // OLF order 7: PhaseControl
-    }
-    if (ctx->nTvc > 0) {
-        loopOrder[nLoops++] = LOOP_TVC_KERNEL;               // OLF order 8: TransformerVoltageControl, IN-KERNEL
-    } else if (ctx->nTvd > 0) {
-        loopOrder[nLoops++] = LOOP_TVD_KERNEL;               // OLF order 8: AFTER_GENERATOR / Simple TVC, IN-KERNEL
-    } else if (ctx->hostLoopMask & (1 << 2)) {
-        loopOrder[nLoops++] = LOOP_HOST_TVC;                 // OLF order 8: TransformerVoltageControl, host pause
-    }
-    if (ctx->nFlcRpc > 0) {
-        loopOrder[nLoops++] = LOOP_TRPC_KERNEL;              // OLF order 9: TransformerReactivePowerControl, IN-KERNEL
-    } else if (ctx->hostLoopMask & (1 << 3)) {
-        loopOrder[nLoops++] = LOOP_HOST_TRPC;                // OLF order 9: TransformerReactivePowerControl
-    }
-    if (ctx->nShc > 0) {
-        loopOrder[nLoops++] = LOOP_SHUNT_KERNEL;             // OLF order 10: ShuntVoltageControl, IN-KERNEL
-    } else if (ctx->nSvd > 0) {
-        loopOrder[nLoops++] = LOOP_SVD_KERNEL;               // OLF order 10: WITH_GENERATOR shunt VC, IN-KERNEL
-    } else if (ctx->hostLoopMask & (1 << 4)) {
-        loopOrder[nLoops++] = LOOP_HOST_SHUNT;               // OLF order 10: ShuntVoltageControl
-    }
-    if (nLoops == 0) {
-        loopOrder[nLoops++] = LOOP_RL;                       // nothing to drive: the old code's phase-1 fallback
-    }
-    // Where the realistic-voltage check STARTS applying in this sweep. AcloadFlowEngine keeps
-    // checkUnrealisticStates false up to and including the last loop that can fix an unrealistic state
-    // (that is the whole point of robust mode: give ReactiveLimits / the discrete
-    // TransformerVoltageControl a chance to repair the state instead of failing the run on it), then
-    // turns it on for the rest of the sweep and resets it at the top of the next one. A device pass at
-    // index i applies loopOrder[i] to the state its solve produced, so "past the fixing loop" is
-    // i > realisticFixingIdx. Not found, or no fixing loop at all, means check every solve — the
-    // conservative direction, since a check that fires too early only routes to the CPU.
-    int realisticFixingIdx = -1;
-    for (int i = 0; i < nLoops; i++) {
-        bool isFixing = ctx->realisticFixingLoop == 0
-                ? loopOrder[i] == LOOP_RL
-                : (ctx->realisticFixingLoop == 1
-                        && (loopOrder[i] == LOOP_HOST_TVC
-                            || (loopOrder[i] == LOOP_TVD_KERNEL && ctx->tvdMode != 1)));
-        if (isFixing) {
-            realisticFixingIdx = i;
-        }
-    }
-    int& loopIdx = drv.loopIdx;
-    loopIdx = 0;
-    bool seqChanged = false;                                 // did any outer loop re-solve during the current RL->DS sequence
-    if (!resume && ctx->startLoopKind >= 0) {
-        // Restart after a host loop mutated the system: the first pass solves, then the sweep picks
-        // up at THAT loop's slot (OLF's runOuterLoop re-checks it until STABLE, and only then does
-        // the sweep restart from the first loop — seqChanged makes that restart happen).
-        for (int i = 0; i < nLoops; i++) {
-            if (loopOrder[i] == ctx->startLoopKind) {
-                loopIdx = i;
-                seqChanged = true;
-            }
-        }
-        ctx->startLoopKind = -1;
-    }
-    std::vector<int> prodIters(nS, 0);                       // PER-SCENARIO productive outer iterations: OLF's
-                                                             // maxOuterLoopIterations is a per-RUN budget — a global
-                                                             // counter capped busy chunks collectively (violation-diff
-                                                             // root cause: a scenario solved solo matched the CPU
-                                                             // exactly but diverged inside a full 500-chunk)
-    // A phase transition after a NO-SWITCH pass must NOT re-solve: OLF's runOuterLoop re-solves only on an
-    // UNSTABLE check — a STABLE loop is followed by checking the NEXT loop against the SAME state. The device
-    // Newton forces >=1 iteration per solve (matching OLF's per-run behavior), so an extra no-op pass would
-    // move an already-converged state off the CPU's by ~the stopping residual (measured 4e-4 kV on the
-    // DS->RL transition with a distributed base). solvePass=false skips the inner Newton for such a pass.
-    bool solvePass = true;
-    if (resume) {
-        // Continue the paused sequence: the loop the host owned has just run, so step PAST it and
-        // let its verdict drive the pass exactly as a device loop's would — UNSTABLE re-solves only
-        // the scenarios it changed, STABLE advances without a solve (OLF's rule).
-        loopIdx = ctx->pausedLoopIdx;
-        seqChanged = ctx->pausedSeqChanged != 0;
-        prodIters = ctx->pausedProdIters;
-        live = ctx->pausedLive;
-        if (ctx->pausedStatus.size() == res.status.size()) {
-            res.status = ctx->pausedStatus;                  // the state is the converged one the pause left: a
-        }                                                    // STABLE host verdict then re-CHECKS RL on it (rlActive)
-        bool anyChanged = false;
-        for (int s = 0; s < nS; s++) {
-            char ch = s < (int) ctx->hostChanged.size() ? ctx->hostChanged[s] : 0;
-            active[s] = ch ? 1 : 0;
-            anyChanged |= ch != 0;
-        }
-        if (anyChanged) {
-            seqChanged = true;
-            solvePass = true;                                // the host loop moved targets -> re-solve
-            // ...and it CONSUMES the outer-iteration budget, exactly as a device loop's change does.
-            // Without this a host loop that keeps going UNSTABLE never retires a scenario: each resume
-            // starts a fresh `outer` budget, so the pause/resume cycle spins forever (measured: a
-            // 2000-contingency rte6515 slice with SecondaryVoltageControl did not finish in 28 min).
-            for (int s = 0; s < nS; s++) {
-                if (active[s] && ++prodIters[s] >= RL_MAX_OUTER) {
-                    traceReject(s, "host-loop-outer-budget", -1, 0);
-                    res.status[s] = -2;                      // budget exhausted -> CPU replays it
-                    live[s] = 0;
-                    active[s] = 0;
-                }
-            }
-        } else {
-            solvePass = false;
-            for (int s = 0; s < nS; s++) {
-                active[s] = live[s];                         // stable: re-CHECK every live scenario
-            }
-            if (++loopIdx >= nLoops) {                       // ...and advance, as the stable branch does
-                if (!seqChanged) {
-                    loopIdx = nLoops;                        // a full sweep changed nothing -> converged
-                } else {
-                    seqChanged = false;
-                    loopIdx = 0;
-                }
-            }
-        }
-    }
-    // OLF_GPU_SLOT_DUMP=<prefix>: the traced scenario's (OLF_GPU_LOOP_TRACE_CTG) row targets, initial state and row
-    // modes as the driver starts - after every host override and every device seed - one file per solve
-    // (<prefix>.<k>), "<row> <target> <x> <mode>" with every double exact. Two runs of one scenario that should be
-    // identical are diffed row by row: the rows that differ name the writer.
-    if (!resume && ctx->loopTraceSlot >= 0 && ctx->loopTraceSlot < nS) {
-        static const char* slotDump = std::getenv("OLF_GPU_SLOT_DUMP");
-        static int slotDumps = 0;
-        if (slotDump != nullptr) {
-            const size_t off = static_cast<size_t>(ctx->loopTraceSlot) * n;
-            std::vector<double> ht(n), hx(n);
-            std::vector<int> hm(n);
-            CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
-            CUDA_CHECK(cudaMemcpy(ht.data(), ctx->dTarget.as<double>() + off, n * sizeof(double), cudaMemcpyDeviceToHost));
-            CUDA_CHECK(cudaMemcpy(hx.data(), ctx->dX.as<double>() + off, n * sizeof(double), cudaMemcpyDeviceToHost));
-            CUDA_CHECK(cudaMemcpy(hm.data(), ctx->dMode.as<int>() + off, n * sizeof(int), cudaMemcpyDeviceToHost));
-            std::string path = std::string(slotDump) + "." + std::to_string(slotDumps++);
-            if (FILE* f = std::fopen(path.c_str(), "w")) {
-                for (int r = 0; r < n; r++) {
-                    std::fprintf(f, "%d %.17g %.17g %d\n", r, ht[r], hx[r], hm[r]);
-                }
-                std::fclose(f);
-            }
-        }
-    }
-    static const bool olTime = std::getenv("OLF_GPU_PHASE_TIME") != nullptr || rlReasonsOn();
-    int olPassSolved = 0;
-    bool olFirstSolveDone = resume;                          // a resumed call's passes are all re-solves
-    int olTriggerKind = resume ? ctx->pausedLoopKind : -1;  // the loop whose check made the next pass re-solve
-    int& outer = drv.outer;
-    for (outer = 0; outer < maxOuter && loopIdx < nLoops; outer++) {
-    gOuterPasses++;
-    if (olTime) CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
-    const double olT0 = olTime ? olNowMs() : 0.0;
-    const long long olAI0 = gActiveIterSum, olWI0 = gWidthIterSum, olNI0 = gNewtonIters;
-    const bool olSolving = solvePass;
-    if (solvePass) {
-        gSolvePasses++;
-    }
-    std::copy(active.begin(), active.end(), wasActive.begin());   // scenarios (re)solved in this inner pass
-    CUDA_CHECK(cudaMemcpy(ctx->dActive.p, active.data(), nS * sizeof(char), cudaMemcpyHostToDevice));
-    int nActive = 0;
-    for (char a : active) {
-        if (a) nActive++;
-    }
-    // ---- batched fill for all active scenarios (J + F, or F-ONLY: the final residual fill and
-    //      mode 4's solve-only iterations evaluate just the residual and skip the vals memset —
-    //      the J buffer is never read before the next full fill re-zeroes it). A lambda so the
-    //      LINE_SEARCH backtrack below can re-evaluate at a reduced step. ----
-    // ---- IncrementalTransformerVoltageControl as a DRIVER PHASE (OLF order 8). OLF's own rule, per
-    //      controlled bus: if |targetV - V| > halfDeadband, take dV/drho from the Jacobian at the converged
-    //      state (unit RHS at the rho identity row, read the bus V entry), deltaR1 = diffV / sensi, move to
-    //      the tap whose r1 is closest to r1 + deltaR1 within maxTapShift and the ratchet's allowed
-    //      direction (MAX_DIRECTION_CHANGE 3), skip controllers with |sensi| < MIN_SENSI_FILTER (0.05).
-    //      The sensitivity is the same forward solve GpuBatchIncrementalTvc used to make through
-    //      solveBatchSensitivities — one host round trip per round — done here against the factors the
-    //      driver already holds, with no host copy of the states. Single controller per controlled bus
-    //      (the JNI upload refuses shared buses, which stay on the host orchestrator). ----
-    // One unit-right-hand-side sensitivity solve on every scenario's CURRENT Jacobian (dVals, filled for all
-    // scenarios by the caller; dB = the right-hand sides, dDx = the solutions), for the in-kernel outer loops.
-    // The UBATCH mode (3) solves the whole batch in one call on the factors they hold - the analysis once per
-    // context, the factorization with the first controller's solve. The robust mode (6) holds ONE matrix object
-    // repointed per scenario and keeps no factors from one scenario to the next, so it factors and solves scenario
-    // by scenario - a refactorization per (scenario, controller), affordable at the robust retry's chunk sizes and
-    // the price of the loops running there at all: they used to report themselves STABLE in mode 6, so a scenario
-    // retried in it (or a base load flow that fell into it) with a transformer, shunt, flow or secondary voltage
-    // control out of its deadband got a wrong answer and nothing flagged it.
-    std::vector<char>& loopRejected = drv.loopRejected;
-    loopRejected.assign(nS, 0);                   // a device loop routed the scenario to the CPU this pass
-    // ---- IncrementalShuntVoltageControl as a DRIVER PHASE (OLF order 10): deadband per controlled bus,
-    //      dV/dB from a unit RHS at each needed controller's SHUNT_B identity row (the driver's own
-    //      factors), OLF's adjustB round-robin per group, the section total pinned at the identity row
-    //      and the static (dG, dB) through the shunt-override list. Groups with several controller
-    //      shunts ARE handled (the round-robin runs in the group kernel). ----
-    // ---- the FLOW-OBSERVED incremental loops as DRIVER PHASES: kindMask selects the phase controllers
-    //      (OLF order 7: kinds 1+2) or the RPC controllers (OLF order 9: kind 0). Same skeleton as the
-    //      voltage-observed phases; the observable is the controlled branch's flow gradient dotted with
-    //      the unit-RHS solution (OLF's EquationTerm.calculateSensi), evaluated by the codegen'd branch
-    //      functions on the device. ----
-    // ---- CONTINUOUS PhaseControl as a DRIVER PHASE (OLF order 7), see cphCheckBatch. ----
-    // ---- the DISCRETE voltage-control loops as DRIVER PHASES: TransformerVoltageControl (AFTER_GENERATOR /
-    //      WITH_GENERATOR, OLF order 8) and ShuntVoltageControl (WITH_GENERATOR, OLF order 10). No sensitivities:
-    //      OLF's decisions read the converged state only (deadband, clamp bounds, closest tap / section). ----
-    // ---- SecondaryVoltageControl as a DRIVER PHASE (OLF order 4). The whole loop: the re-enable step and
-    //      the per-zone trigger on the paused state's own qBuf, one unit-RHS solve per controlled bus on the
-    //      driver's own factors for the K and pilot sensitivities, the small dense zone system per scenario,
-    //      and the moved targets applied to the controlled buses' V rows (plus the switch-back comparison
-    //      target for a pinned controller). Nothing goes back to the host, so the loop sits in OLF's order
-    //      instead of after the sweep. ----
-    if (solvePass) {
+    std::vector<char>& wasActive = drv.wasActive;
+    std::vector<double>& hF = drv.hF;
+    std::vector<std::string>& iterLogLines = drv.iterLogLines;
+    BatchResult& res = drv.res;
 
     // LINE_SEARCH per-scenario backtracking state (lastNorm2 / haveLast, per pass — a phase re-entry retargets the system, voiding the step relation)
     // Per scenario, the linear-solve residual ratio of this pass's LAST solve — scored only when the pass runs
@@ -1889,6 +1076,859 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             ctx->olPasses[s]++;
         }
     }
+}
+
+BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const double* target,
+                              const int* rowMode, const int* rowModeSlots, int nRowModeSlots,
+                              const int* baseRowMode, const char* disabled,
+                              int nOv, const int* ovIndex, const double* ovValue,
+                              const int* dsOvBus, const double* dsOvFactorDelta, const double* dsOvBaseDelta,
+                              const double* dsOvMaxDelta, const double* dsOvMinDelta, const double* dsAnchorShift,
+                              const double* dsSlackShift,
+                              int nRlVtOv, const int* rlVtOvSlotIdx, const double* rlVtOvVal,
+                              int nRlQOv, const int* rlQOvSlotEntry, const double* rlQOvMinMax,
+                              int nCvOv, const int* cvOvSlotEntry, const double* cvOvStepScale,
+                              int maxIter, double tol,
+                              double reactiveLimitTol, double slackDistTol, double convEpsPerEq,
+                              int lsMode, double maxDv, double maxDphi, const int* varType,
+                              const double* x0Full, int nShOv, const int* shOvSlotElem, const double* shOvGb,
+                              const int* rlStateIn, int* rlStateOut,
+                              int nR1Ov, const int* r1OvSlotElem, const double* r1OvVal,
+                              int maxOuterProductive, int rlMaxSwitch, int dsRejectResidual, int skipRlPhase,
+                              int nziBase, int nZiOn, const int* ziOnSlotElem,
+                              int nZiOff, const int* ziOffSlotElem) {
+    DriverPass drv;
+    drv.n = ctx->n;
+    drv.nnz = ctx->nnz;
+    drv.nS = ctx->nScenarios;
+    drv.nRlVtOv = nRlVtOv;
+    drv.nRlQOv = nRlQOv;
+    drv.nCvOv = nCvOv;
+    drv.skipRlPhase = skipRlPhase;
+    const int& n = drv.n;
+    const int& nnz = drv.nnz;
+    const int& nS = drv.nS;
+    // MAX_VOLTAGE_CHANGE (lsMode 2): per-scenario step clamp, same rule as the base solver's
+    // (varType 1 = V vs maxDv, 0 = PHI vs maxDphi; whole step scaled). Buffers allocated lazily.
+    uploadBatchOverrides(ctx, lsMode, maxDv, maxDphi, varType, nShOv, shOvSlotElem, shOvGb,
+                         nziBase, nZiOff, ziOffSlotElem, nZiOn, ziOnSlotElem, nR1Ov, r1OvSlotElem, r1OvVal);
+    drv.nTot = static_cast<size_t>(n) * nS;
+    const size_t& nTot = drv.nTot;
+    drv.tol = tol;
+    drv.maxIter = maxIter;
+    drv.lsMode = lsMode;
+    drv.convEpsPerEq = convEpsPerEq;
+    DeviceBuf dOvIndex, dOvValue;                            // function-scoped: outlive the async override kernel
+    DeviceBuf dBaseMode;                                     // the contingency-free base row mode (length n)
+    DeviceBuf dModeSlots, dModeRows;                         // compact row modes: the scenarios that differ from the base
+    DeviceBuf dX0SeedIdx, dX0SeedVal;                        // setBatchX0Seeds, function-scoped like the overrides
+    // Per-scenario distributed-slack reweight (generator loss at a DS-participant bus): one affected DS bus per
+    // scenario (dsOvBus[s], -1 if none) whose factor/base/headroom/footroom shrink by the lost gen's share, and
+    // a per-scenario factor-sum drop so the other buses pick up that share. nullptr when no DS scenarios.
+    DeviceBuf& dDsOvBus = drv.dDsOvBus;
+    DeviceBuf& dDsOvFactorDelta = drv.dDsOvFactorDelta;
+    DeviceBuf& dDsOvBaseDelta = drv.dDsOvBaseDelta;
+    DeviceBuf& dDsOvMaxDelta = drv.dDsOvMaxDelta;
+    DeviceBuf& dDsOvMinDelta = drv.dDsOvMinDelta;
+    drv.hasDsOverride = (dsOvBus != nullptr && ctx->nds > 0);
+    const bool& hasDsOverride = drv.hasDsOverride;
+    // Per-scenario DS ANCHOR SHIFT (pair/strategy legs): shift_i = parent's final target at participant i
+    // minus the extraction-time base — re-anchors the water-fill's cumulative reference at the PARENT
+    // contingency's distribution, mirroring OLF's setGeneratorsInitialTargetPToTargetP before a strategy
+    // re-solve. nullptr = anchored at the base (plain contingencies).
+    DeviceBuf& dRlVtOvSlotIdx = drv.dRlVtOvSlotIdx;
+    DeviceBuf& dRlVtOvVal = drv.dRlVtOvVal;
+    if (nRlVtOv > 0) {
+        dRlVtOvSlotIdx.upload(rlVtOvSlotIdx, 2L * nRlVtOv * sizeof(int));
+        dRlVtOvVal.upload(rlVtOvVal, (size_t) nRlVtOv * sizeof(double));
+    }
+    DeviceBuf& dDsAnchorShift = drv.dDsAnchorShift;
+    DeviceBuf& dDsSlackShift = drv.dDsSlackShift;
+    drv.hasDsAnchor = (dsAnchorShift != nullptr && ctx->nds > 0);
+    const bool& hasDsAnchor = drv.hasDsAnchor;
+    if (hasDsAnchor) {
+        dDsAnchorShift.upload(dsAnchorShift, static_cast<size_t>(nS) * ctx->nds * sizeof(double));
+    }
+    // The slack's own target move, independent of the participants' anchors: a strategy pair's parent share,
+    // and also a contingency's load lost at the slack (a plain scenario, no anchor shift).
+    drv.hasDsSlackShift = (dsSlackShift != nullptr && ctx->nds > 0);
+    const bool& hasDsSlackShift = drv.hasDsSlackShift;
+    if (hasDsSlackShift) {
+        dDsSlackShift.upload(dsSlackShift, static_cast<size_t>(nS) * sizeof(double));
+    }
+
+    // x0/target are the BASE row (length n), identical for every scenario: upload once and tile across
+    // nS on-device. rowMode is PER-SCENARIO (length n*nS): a contingency can freeze islanded buses
+    // (Phase 0b) or flip PV↔PQ via reactive limits (Phase 1), so it is NOT tiled — uploaded as-is and
+    // mutated in place on-device by the outer-loop kernels. Only the disabled mask is also per-scenario.
+    // x0: either the BASE row tiled across nS (default), or a FULL per-scenario n*nS state
+    // (x0Full != null) — the warm-restart hook for multi-call outer sequencing (e.g. the
+    // transformer voltage-control orchestrator re-solving scenarios from their previous states).
+    // RESUME: the driver is continuing from a LOOP_HOST pause, so x/targets/modes already hold the
+    // sequence's current state on the device — re-uploading the base rows would throw away the
+    // distributed slack, the HVDC deltas and the monitoring activations it has accumulated.
+    const bool resume = ctx->driverResume != 0;
+    if (!resume || ctx->olPasses.size() != static_cast<size_t>(nS)) {
+        ctx->olFirst.assign(nS, 0);
+        ctx->olIters.assign(nS, 0);
+        ctx->olPasses.assign(nS, 0);
+    }
+    ctx->driverResume = 0;
+    ctx->driverPaused = 0;
+    if (resume && (ctx->nTvc > 0 || ctx->nFlc > 0 || ctx->nCph > 0 || ctx->nTvd > 0)) {
+        tvcRebuildOverrides(ctx);                            // uploadBatchOverrides just erased the moves
+    }
+    if (resume && ctx->nShc > 0) {
+        shcRebuildOverrides(ctx);
+    }
+    dBaseMode.upload(baseRowMode, n * sizeof(int));         // base (contingency-free) row mode for the RL limit-type seed
+    if (!resume) {
+        if (x0Full != nullptr) {
+            CUDA_CHECK(cudaMemcpy(ctx->dX.p, x0Full, (size_t) nTot * sizeof(double), cudaMemcpyHostToDevice));
+        } else {
+            CUDA_CHECK(cudaMemcpy(ctx->dX.p, x0, n * sizeof(double), cudaMemcpyHostToDevice));
+        }
+        CUDA_CHECK(cudaMemcpy(ctx->dTarget.p, target, n * sizeof(double), cudaMemcpyHostToDevice));
+        // The BASE targets, kept aside before tiling and the per-scenario overrides: the pilot-Q
+        // capture below reads the base carrier's row, and a scenario may have overridden that row
+        // (a member islanded by a bus loss freezes it to a flat voltage identity). Capturing from the
+        // base keeps the captured value the pilot's reactive target whatever the scenario did to the
+        // row. (The carrier's target itself is stamped host-side when the base carrier is frozen -
+        // GpuBatchChunkSolver - because the device stamp runs only inside the outer-loop passes.)
+        if (!ctx->dTargetBase.p) ctx->dTargetBase.alloc((size_t) n * sizeof(double));
+        CUDA_CHECK(cudaMemcpy(ctx->dTargetBase.p, target, n * sizeof(double), cudaMemcpyHostToDevice));
+        if (rowModeSlots == nullptr) {
+            CUDA_CHECK(cudaMemcpy(ctx->dMode.p, rowMode, nTot * sizeof(int), cudaMemcpyHostToDevice));
+        } else {
+            // COMPACT: every scenario starts from the base row mode, then only those that differ (islanded buses,
+            // switch outages, ...) get their own row — a few rows instead of nS * n ints through PCIe.
+            CUDA_CHECK(cudaMemcpy(ctx->dMode.p, baseRowMode, n * sizeof(int), cudaMemcpyHostToDevice));
+            tileBaseRow<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n * nS, n, ctx->dMode.as<int>());
+            if (nRowModeSlots > 0) {
+                dModeSlots.upload(rowModeSlots, nRowModeSlots * sizeof(int));
+                dModeRows.upload(rowMode, (size_t) nRowModeSlots * n * sizeof(int));
+                scatterRowsInt<<<grid(nRowModeSlots * n), BLOCK, 0, ctx->stream>>>(nRowModeSlots, n,
+                        dModeSlots.as<int>(), dModeRows.as<int>(), ctx->dMode.as<int>());
+            }
+        }
+        if (x0Full == nullptr) {
+            tileBaseRow<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n * nS, n, ctx->dX.as<double>());
+            int nSeeds = static_cast<int>(ctx->x0SeedIdx.size());
+            if (nSeeds > 0) {                                // a few per-scenario starting values over the base
+                dX0SeedIdx.upload(ctx->x0SeedIdx.data(), nSeeds * sizeof(int));
+                dX0SeedVal.upload(ctx->x0SeedVal.data(), nSeeds * sizeof(double));
+                applyTargetOverrideBatch<<<grid(nSeeds), BLOCK, 0, ctx->stream>>>(nSeeds, dX0SeedIdx.as<int>(),
+                        dX0SeedVal.as<double>(), ctx->dX.as<double>());
+            }
+        }
+        ctx->x0SeedIdx.clear();                              // consumed by this solve either way
+        ctx->x0SeedVal.clear();
+        tileBaseRow<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n * nS, n, ctx->dTarget.as<double>());
+        if (nOv > 0) {                                       // per-scenario target overrides (generator loss)
+            dOvIndex.upload(ovIndex, nOv * sizeof(int));
+            dOvValue.upload(ovValue, nOv * sizeof(double));
+            applyTargetOverrideBatch<<<grid(nOv), BLOCK, 0, ctx->stream>>>(nOv, dOvIndex.as<int>(), dOvValue.as<double>(), ctx->dTarget.as<double>());
+        }
+    }
+    if (hasDsOverride) {                                     // per-scenario generator-loss DS reweight
+        dDsOvBus.upload(dsOvBus, nS * sizeof(int));
+        dDsOvFactorDelta.upload(dsOvFactorDelta, nS * sizeof(double));
+        dDsOvBaseDelta.upload(dsOvBaseDelta, nS * sizeof(double));
+        dDsOvMaxDelta.upload(dsOvMaxDelta, nS * sizeof(double));
+        dDsOvMinDelta.upload(dsOvMinDelta, nS * sizeof(double));
+    }
+    if (!resume) {
+        // NOT on a resume: the HVDC AC-emulation driver phases MUTATE element bits on the device during
+        // the paused sweep (a frozen or saturated emulation has its coupling deactivated), and the host's
+        // mirror of the mask is the pre-solve one. Re-uploading it mid-sequence silently undoes those
+        // loops' work — measured on a 400-contingency rte6515 slice: 5 differing violations against 1,
+        // with NO host decision involved at all (the split alone did it). Contingency outages do not
+        // change during a sweep, so the device copy stays authoritative across the pause.
+        CUDA_CHECK(cudaMemcpy(ctx->dDisabled.p, disabled,
+                              static_cast<size_t>(ctx->nElements) * nS * sizeof(char), cudaMemcpyHostToDevice));
+    }
+
+    std::vector<char>& active = drv.active;
+    active.assign(nS, 1);
+
+    BatchResult& res = drv.res;
+    res.x.resize(nTot);
+    res.iters.assign(nS, 0);
+    res.norm.assign(nS, 0.0);
+    res.status.assign(nS, 1);                                // default: max_iter (overwritten on converge/diverge)
+
+    std::vector<double>& hF = drv.hF;
+    hF.assign(nTot, 0.0);
+
+    // Device-side fixed-iteration mode: tol <= 0 means "run exactly maxIter Newton steps
+    // on the device with NO per-iteration host sync and NO convergence retirement" (the
+    // a fixed-iteration NR loop). tol > 0 keeps the per-iteration retirement loop.
+    drv.deviceFixedIter = (tol <= 0.0);
+    const bool& deviceFixedIter = drv.deviceFixedIter;
+    // A scenario that exhausts the budget is reported as MAX_ITERATION_REACHED by the device itself (the
+    // precomputer's exhausted set), which is OLF's own answer: no early exit hands stragglers to the CPU.
+
+    // Full-loadflow mode (tol > 0) with local PV controllers runs the reactive-limits (PV→PQ) OUTER loop:
+    // converge the inner Newton, switch any generator over its Q limit, re-converge the switched scenarios,
+    // repeat until a pass switches nothing. Fixed-iter mode (tol <= 0, the throughput benchmark) and
+    // family-free networks with no controllers do ONE pass (no outer loop) — byte-identical to before.
+    bool fullLoadflow = !deviceFixedIter && (ctx->nrl > 0 || ctx->nds > 0 || ctx->dsSlackOnly
+                                             || ctx->nmon > 0 || ctx->nTvc > 0 || ctx->nShc > 0 || ctx->nFlc > 0 || ctx->nCph > 0
+                                             || ctx->nTvd > 0 || ctx->nSvd > 0 || ctx->nSvc > 0);
+    const int RL_MAX_OUTER = maxOuterProductive > 0 ? maxOuterProductive : 20;   // OLF maxOuterLoopIterations
+    // per-bus PV→PQ count cap (OLF maxPqPvSwitch): 0 is OLF's "never switch back" and is honoured as such;
+    // only a negative value (no cap given) takes OLF's default of 3.
+    drv.rlMaxSwitch = rlMaxSwitch >= 0 ? rlMaxSwitch : 3;
+    const int& RL_MAX_SWITCH = drv.rlMaxSwitch;
+    static const char* swLogEnv = std::getenv("OLF_GPU_SW_LOG");
+    drv.swLogSlot = swLogEnv == nullptr ? -1 : (std::string(swLogEnv) == "all" ? -2 : std::atoi(swLogEnv));
+    const int& swLogSlot = drv.swLogSlot;
+    // OLF_GPU_ITER_LOG=1: EVERY scenario's stopping decision at every Newton iteration (ITER_LOG), the score of
+    // every step's linear solve (LIN_LOG, and LIN_WORST where it is poor) and its record at the end of every outer
+    // pass (PASS_LOG: loop, re-solve, switch, iterations, status, DS gate), printed once when the driver returns.
+    // Built from the norms the host already reads each iteration, the pass-0 guard's two scoring kernels run on
+    // every step (one 3*nS copy) and ONE copy of the DS gate records per pass - none of the whole-vector copies
+    // the slot traces make: a run-to-run divergence of one scenario among hundreds is found by diffing two logs.
+    static const bool iterLogEnv = std::getenv("OLF_GPU_ITER_LOG") != nullptr;
+    drv.iterLog = iterLogEnv;
+    const bool& iterLog = drv.iterLog;
+    std::vector<std::string>& iterLogLines = drv.iterLogLines;
+    // Outer-loop convergence tolerances (pu) — passed in so the device uses the SAME criteria as the CPU
+    // loadflow that built the base case (maxReactivePowerMismatch / slackBusPMaxMismatch, per-unitized), NOT
+    // hardcoded constants. With matching parameters and the same equations the GPU outer-loop fixed point
+    // matches the CPU's to the inner-Newton precision; a loose tolerance (e.g. the 1 MW slack default) leaves
+    // a redistribution band, so a test wanting machine-precision agreement passes tight values on both sides.
+    drv.reactiveLimitTol = reactiveLimitTol;
+    const double& REACTIVE_LIMIT_TOL = drv.reactiveLimitTol;
+    drv.slackDistTol = slackDistTol;
+    const double& SLACK_DIST_TOL = drv.slackDistTol;
+    drv.pResidueEps = 1e-5;                                  // OLF ActivePowerDistribution.P_RESIDUE_EPS: the
+                                                            // water-filling distributes the mismatch down to this
+    // RL_MAX_OUTER bounds the PRODUCTIVE outer iterations (an outer loop that re-solved), matching OLF's
+    // outerLoopTotalIterations budget. The raw pass loop gets a generous safety bound on top, because the
+    // sequential driver also spends non-productive passes (phase transitions / stability re-checks) that OLF
+    // does not count.
+    // The reactive-limit limits become PER-SCENARIO as soon as either channel is live: curve limits at
+    // the runtime P, or a generator lost at a bus that keeps voltage control taking its capability away.
+    DeviceBuf& dRlQOvSlotEntry = drv.dRlQOvSlotEntry;
+    DeviceBuf& dRlQOvMinMax = drv.dRlQOvMinMax;
+    DeviceBuf& dRlQOvPtr = drv.dRlQOvPtr;
+    DeviceBuf& dRlQOvList = drv.dRlQOvList;
+    if (nRlQOv > 0) {
+        dRlQOvSlotEntry.upload(rlQOvSlotEntry, static_cast<size_t>(nRlQOv) * 2 * sizeof(int));
+        dRlQOvMinMax.upload(rlQOvMinMax, static_cast<size_t>(nRlQOv) * 5 * sizeof(double));   // {dMinQ, dMaxQ, dLoadQ, dBmin, dBmax}
+        // ...indexed by slot (CSR, entry order kept), so the dynamic-limits kernel reads its scenario's own
+        // overrides instead of scanning the chunk's.
+        std::vector<int> qPtr(nS + 1, 0);
+        std::vector<int> qList(nRlQOv);
+        for (int k = 0; k < nRlQOv; k++) qPtr[rlQOvSlotEntry[2 * k] + 1]++;
+        for (int t = 0; t < nS; t++) qPtr[t + 1] += qPtr[t];
+        std::vector<int> qCursor(qPtr.begin(), qPtr.end() - 1);
+        for (int k = 0; k < nRlQOv; k++) qList[qCursor[rlQOvSlotEntry[2 * k]]++] = k;
+        dRlQOvPtr.upload(qPtr.data(), qPtr.size() * sizeof(int));
+        dRlQOvList.upload(qList.data(), qList.size() * sizeof(int));
+    }
+    // A lost voltage-controlling SVC also takes its share of the entry's quadratic limit coefficients (an SVC's
+    // limit is its susceptance times v^2): per (scenario, entry) coefficients, read by the reactive-limits check
+    // in place of the run-constant ones. Built only when some override carries such a share.
+    bool& svcCoefDyn = drv.svcCoefDyn;
+    svcCoefDyn = false;
+    for (int k = 0; k < nRlQOv && !svcCoefDyn; k++) {
+        svcCoefDyn = rlQOvMinMax[5 * k + 3] != 0.0 || rlQOvMinMax[5 * k + 4] != 0.0;
+    }
+    if (svcCoefDyn && ctx->nrl > 0) {
+        size_t nrl = static_cast<size_t>(ctx->nrl);
+        std::vector<double> bmin(nrl), bmax(nrl);
+        CUDA_CHECK(cudaMemcpy(bmin.data(), ctx->dRlSvcBmin.p, nrl * sizeof(double), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(bmax.data(), ctx->dRlSvcBmax.p, nrl * sizeof(double), cudaMemcpyDeviceToHost));
+        std::vector<double> dynMin(static_cast<size_t>(nS) * nrl), dynMax(static_cast<size_t>(nS) * nrl);
+        for (int t = 0; t < nS; t++) {
+            std::copy(bmin.begin(), bmin.end(), dynMin.begin() + static_cast<size_t>(t) * nrl);
+            std::copy(bmax.begin(), bmax.end(), dynMax.begin() + static_cast<size_t>(t) * nrl);
+        }
+        for (int k = 0; k < nRlQOv; k++) {
+            size_t at = static_cast<size_t>(rlQOvSlotEntry[2 * k]) * nrl + rlQOvSlotEntry[2 * k + 1];
+            dynMin[at] += rlQOvMinMax[5 * k + 3];
+            dynMax[at] += rlQOvMinMax[5 * k + 4];
+        }
+        if (!ctx->dRlSvcBminDyn.p) {
+            ctx->dRlSvcBminDyn.alloc(static_cast<size_t>(ctx->nScenarios) * nrl * sizeof(double));
+            ctx->dRlSvcBmaxDyn.alloc(static_cast<size_t>(ctx->nScenarios) * nrl * sizeof(double));
+        }
+        CUDA_CHECK(cudaMemcpy(ctx->dRlSvcBminDyn.p, dynMin.data(), dynMin.size() * sizeof(double), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(ctx->dRlSvcBmaxDyn.p, dynMax.data(), dynMax.size() * sizeof(double), cudaMemcpyHostToDevice));
+    }
+    // Per-scenario curve repairs, CSR by scenario: the dynamic-limits kernel runs one thread per
+    // (reactive-limit entry, scenario) and walks the curve entries inside, so a flat {slot, entry}
+    // scan would be paid ncv times per thread. Bucketing by slot makes it a handful of comparisons.
+    DeviceBuf& dCvOvPtr = drv.dCvOvPtr;
+    DeviceBuf& dCvOvEntry = drv.dCvOvEntry;
+    DeviceBuf& dCvOvVal = drv.dCvOvVal;
+    if (nCvOv > 0) {
+        std::vector<int> ptr(nS + 1, 0);
+        for (int k = 0; k < nCvOv; k++) ptr[cvOvSlotEntry[2 * k] + 1]++;
+        for (int t = 0; t < nS; t++) ptr[t + 1] += ptr[t];
+        std::vector<int> cursor(ptr.begin(), ptr.end() - 1);
+        std::vector<int> entry(nCvOv);
+        std::vector<double> val(static_cast<size_t>(nCvOv) * 2);
+        for (int k = 0; k < nCvOv; k++) {
+            int at = cursor[cvOvSlotEntry[2 * k]]++;
+            entry[at] = cvOvSlotEntry[2 * k + 1];
+            val[2 * at] = cvOvStepScale[2 * k];
+            val[2 * at + 1] = cvOvStepScale[2 * k + 1];
+        }
+        dCvOvPtr.upload(ptr.data(), ptr.size() * sizeof(int));
+        dCvOvEntry.upload(entry.data(), entry.size() * sizeof(int));
+        dCvOvVal.upload(val.data(), val.size() * sizeof(double));
+    }
+    drv.useDynRlLimits = ctx->nrl > 0 && (ctx->ncv > 0 || nRlQOv > 0 || ctx->nfqLim > 0);
+    const bool& useDynRlLimits = drv.useDynRlLimits;
+    if (useDynRlLimits && (!ctx->dRlMinQDyn.p || !ctx->dRlLoadQDyn.p)) {   // curves allocate these on their own
+                                                            // table upload; a Q override alone must too, and a
+                                                            // guard that names only ONE of them silently leaves
+                                                            // the others null on a curve network (measured: the
+                                                            // whole precompute fell back to the CPU)
+        ctx->dRlLoadQDyn.alloc(static_cast<size_t>(ctx->nScenarios) * ctx->nrl * sizeof(double));
+        ctx->dRlMinQDyn.alloc(static_cast<size_t>(ctx->nScenarios) * ctx->nrl * sizeof(double));
+        ctx->dRlMaxQDyn.alloc(static_cast<size_t>(ctx->nScenarios) * ctx->nrl * sizeof(double));
+    }
+    int maxOuter = fullLoadflow ? 8 * RL_MAX_OUTER : 1;
+    // The two kernels that lay a group's rows out from the CURRENT pin states (the RL pass runs them after
+    // its pins; the seeding below runs them once so the FIRST fill sees the seeded pins on the rows).
+    // `staticLimits`: use the STATIC reactive-limit arrays rather than the curve-evaluated ones. At SEED time the
+    // dynamic arrays are still zero (rlCurveLimitsBatch runs in the reactive-limits phase), so a seed-time flip
+    // stamped the pilot's own-Q target as 0 instead of (limit - loadQ) and the whole slack phase ran against it —
+    // measured on rte6515 BUS-6112_BBS_2: row 12834 converged at target 0 through outer 32, then the RL phase
+    // re-stamped -0.444 and the solve had to catch up, one pass behind OLF. The re-stamp branch in the kernel
+    // keeps the value current once the curve limits exist, so the static value is a correct starting point.
+    std::vector<char>& rlActive = drv.rlActive;
+    rlActive.assign(nS, 0);
+    std::vector<char> rlSwitched(nS);
+    std::vector<char>& wasActive = drv.wasActive;
+    wasActive.assign(nS, 0);
+    // OLF_GPU_RL_AUDIT: per-scenario decision history, kept in memory and printed only for the
+    // scenarios the end-of-solve audit flags. The failing scenario is not known until the solve is
+    // over and the flip is rare, so the only way to see its trajectory is to record every scenario's
+    // and throw away the rest.
+    const bool rlAuditOn = std::getenv("OLF_GPU_RL_AUDIT") != nullptr;
+    std::vector<std::vector<std::string>> auditLog(rlAuditOn ? nS : 0);
+    // ...but NOT on a resume: these are per-SOLVE state, and a resumed driver is continuing the SAME
+    // solve. Re-seeding here would discard the RL pins, monitoring activations and absorbed slack the
+    // sequence has already established — which is exactly what makes a resume cheaper than the
+    // orchestrator pattern it replaces: that one resets and re-runs the whole driver every round.
+    if (std::getenv("OLF_GPU_BATCH_TRACE") != nullptr && nS == 1) {
+        std::fprintf(stderr, "CTX_FLAGS nS=1 nrl=%d nRlRemote=%d hasDqQrGroups=%d nQr=%d ndq=%d nds=%d ngen=%d nzi=%d nziBase=%d nRmq=%d resume=%d fullLoadflow=%d\n",
+                     ctx->nrl, ctx->nRlRemote, ctx->hasDqQrGroups ? 1 : 0, ctx->st->nQr, ctx->ndq, ctx->nds, ctx->ngen, ctx->nzi, ctx->nziBase, ctx->nRmq, resume ? 1 : 0, fullLoadflow ? 1 : 0);
+    }
+    if (fullLoadflow && !resume && ctx->nSvc > 0) {
+        // BEFORE the reactive-limit seeding below, which consults it: no zone has moved a target yet.
+        std::vector<double> nanv(static_cast<size_t>(nS) * std::max(ctx->nrl, 1), std::nan(""));
+        CUDA_CHECK(cudaMemcpy(ctx->dSvcRlVt.p, nanv.data(), nanv.size() * sizeof(double), cudaMemcpyHostToDevice));
+    }
+    if (!resume) {                                           // no inner solve has converged yet: the start
+        CUDA_CHECK(cudaMemcpyAsync(ctx->dXLastConv.p, ctx->dX.p, static_cast<size_t>(nS) * n * sizeof(double),
+                                   cudaMemcpyDeviceToDevice, ctx->stream));
+    }
+    if (fullLoadflow && !resume) {                           // per-solve PV↔PQ state: 0 switches, limitType from base
+        // Each generator's own slack move is per-solve state, cleared before ANYTHING reads it: the seed-time curve
+        // limits below evaluate a curve at base + genCum wherever genCumValid is set. Cleared only after the seed,
+        // a reused context evaluated scenario slot s at the move of the contingency the PREVIOUS chunk solved in
+        // that slot. The write-back also reads it when the DS phase never fires (NaN targetP otherwise).
+        if (ctx->ngen > 0 && ctx->dGenCum.p) {
+            CUDA_CHECK(cudaMemsetAsync(ctx->dGenCum.p, 0, static_cast<size_t>(ctx->ngen) * nS * sizeof(double), ctx->stream));
+            CUDA_CHECK(cudaMemsetAsync(ctx->dGenCumValid.p, 0, (size_t) nS * sizeof(char), ctx->stream));
+        }
+        if (ctx->hasDqQrGroups && ctx->st->nQr > 0) {        // plan-B4: capture each group's pilot-Q target from
+            size_t need = static_cast<size_t>(ctx->st->nQr) * nS * sizeof(double);   // the BASE carrier's row,
+            if (!ctx->dQrPilotQ.p) ctx->dQrPilotQ.alloc(need);   // BEFORE any RL mode seeding rewrites it
+            if (!ctx->dQrSavedVT.p) ctx->dQrSavedVT.alloc(need);
+            if (!ctx->dQrVeqOff.p) ctx->dQrVeqOff.alloc(static_cast<size_t>(ctx->st->nQr) * nS * sizeof(char));
+            CUDA_CHECK(cudaMemsetAsync(ctx->dQrVeqOff.p, 0,      // per-solve state, like limitType
+                    static_cast<size_t>(ctx->st->nQr) * nS * sizeof(char), ctx->stream));
+            capturePilotQBatch<<<grid(ctx->st->nQr * nS), BLOCK, 0, ctx->stream>>>(ctx->st->nQr, nS, n,
+                    ctx->st->dQrPtr.as<int>(), ctx->st->dQrRows.as<int>(), dBaseMode.as<int>(),
+                    ctx->dTargetBase.as<double>(), ctx->dQrPilotQ.as<double>(),
+                    ctx->st->dQrBaseTargetRow.p ? ctx->st->dQrBaseTargetRow.as<int>() : nullptr);
+            if (ctx->nQrPqDelta > 0) {
+                applyPilotQDeltasBatch<<<grid(ctx->nQrPqDelta), BLOCK, 0, ctx->stream>>>(ctx->nQrPqDelta,
+                        ctx->dQrPqDeltaKey.as<int>(), ctx->dQrPqDeltaVal.as<double>(), ctx->st->nQr, n,
+                        ctx->st->dQrPtr.as<int>(), ctx->st->dQrRows.as<int>(), ctx->dMode.as<int>(),
+                        ctx->hasDqSub ? ctx->dDqSub.as<char>() : nullptr, ctx->nDqMembers,
+                        ctx->hasDqSub ? ctx->dQrMemberStart.as<int>() : nullptr,
+                        ctx->dQrPilotQ.as<double>(), ctx->dTarget.as<double>());
+            }
+            if (!ctx->dQrPilotRlEntry.p) {
+                // Per group, the pilot's own LOCAL reactive-limit entry: a pilot whose group lost control
+                // in the BASE (every member pinned there) enters the pack as a local entry with an empty
+                // reactive range, and that entry carries the group's V target — the value the pilot row
+                // takes back when a member unpins (updatePilotVeqBatch). Built once per context.
+                int nQr = ctx->st->nQr;
+                std::vector<int> ptr(nQr + 1);
+                CUDA_CHECK(cudaMemcpy(ptr.data(), ctx->st->dQrPtr.p, ptr.size() * sizeof(int), cudaMemcpyDeviceToHost));
+                std::vector<int> rows(std::max(ptr[nQr], 1));
+                CUDA_CHECK(cudaMemcpy(rows.data(), ctx->st->dQrRows.p, static_cast<size_t>(ptr[nQr]) * sizeof(int), cudaMemcpyDeviceToHost));
+                std::vector<int> vrow(std::max(ctx->nrl, 1));
+                std::vector<char> rem(std::max(ctx->nrl, 1), 0);
+                if (ctx->nrl > 0) {
+                    CUDA_CHECK(cudaMemcpy(vrow.data(), ctx->dRlVrow.p, static_cast<size_t>(ctx->nrl) * sizeof(int), cudaMemcpyDeviceToHost));
+                    if (ctx->dRlRemote.p) {
+                        CUDA_CHECK(cudaMemcpy(rem.data(), ctx->dRlRemote.p, static_cast<size_t>(ctx->nrl), cudaMemcpyDeviceToHost));
+                    }
+                }
+                std::vector<int> pe(std::max(nQr, 1), -1);
+                for (int g = 0; g < nQr; g++) {
+                    int pilotRow = rows[ptr[g]];
+                    for (int i = 0; i < ctx->nrl; i++) {
+                        if (!rem[i] && vrow[i] == pilotRow) { pe[g] = i; break; }
+                    }
+                }
+                ctx->dQrPilotRlEntry.upload(pe.data(), pe.size() * sizeof(int));
+            }
+            if (nS == 1 && std::getenv("OLF_GPU_BATCH_TRACE") != nullptr) {
+                CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+                int nQr = ctx->st->nQr;
+                std::vector<int> ptr(nQr + 1);
+                CUDA_CHECK(cudaMemcpy(ptr.data(), ctx->st->dQrPtr.p, ptr.size() * sizeof(int), cudaMemcpyDeviceToHost));
+                std::vector<int> rows(ptr[nQr]);
+                CUDA_CHECK(cudaMemcpy(rows.data(), ctx->st->dQrRows.p, rows.size() * sizeof(int), cudaMemcpyDeviceToHost));
+                std::vector<double> pq(nQr), tg(n);
+                std::vector<int> md(n);
+                CUDA_CHECK(cudaMemcpy(pq.data(), ctx->dQrPilotQ.p, nQr * sizeof(double), cudaMemcpyDeviceToHost));
+                CUDA_CHECK(cudaMemcpy(tg.data(), ctx->dTarget.p, n * sizeof(double), cudaMemcpyDeviceToHost));
+                CUDA_CHECK(cudaMemcpy(md.data(), dBaseMode.p, n * sizeof(int), cudaMemcpyDeviceToHost));
+                for (int g = 0; g < nQr; g++) {
+                    std::fprintf(stderr, "PILOTQ_CAPTURE group=%d captured=%.9f candidates:", g, pq[g]);
+                    for (int c = ptr[g]; c < ptr[g + 1]; c++) {
+                        std::fprintf(stderr, " row%d(mode=%d,target=%.9f)", rows[c], md[rows[c]], tg[rows[c]]);
+                    }
+                    std::fprintf(stderr, "\n");
+                }
+            }
+        }
+        if (rlStateIn != nullptr && ctx->nrl > 0) {
+            // WARM CONTINUATION: seed each (controller, scenario)'s pinned limit type AND switch
+            // count from the state the caller passes. A re-solve inside one load flow passes both; a
+            // strategy pair passes its parent's pins with zero counts, since OLF's reactive-limit
+            // loop counts afresh in every load flow.
+            std::vector<char> lt(static_cast<size_t>(ctx->nrl) * nS), sc(static_cast<size_t>(ctx->nrl) * nS);
+            for (size_t k = 0; k < lt.size(); k++) {
+                lt[k] = static_cast<char>(rlStateIn[k] & 7);
+                sc[k] = static_cast<char>(rlStateIn[k] >> 3);
+            }
+            CUDA_CHECK(cudaMemcpyAsync(ctx->dRlLimitType.p, lt.data(), lt.size(), cudaMemcpyHostToDevice, ctx->stream));
+            CUDA_CHECK(cudaMemcpy(ctx->dRlSwitchCount.p, sc.data(), sc.size(), cudaMemcpyHostToDevice));
+            // The limits the continued pins are STAMPED at: OLF restores each pinned bus's generation target Q from
+            // the parent's end, and a GeneratorAction only invalidates the bus's target P, so the first solve keeps
+            // the limit at the parent's P (dgSeedAnchor) and the reactive-limit check refreshes it afterwards.
+            if (useDynRlLimits) {                            // curve limits at the CURRENT (seeded) targets,
+                rlCurveLimitsBatch<<<grid(ctx->nrl * nS), BLOCK, 0, ctx->stream>>>(ctx->nrl, nS, ctx->ncv, n, ctx->cvExtrapolate,
+                        ctx->dCvIdx.as<int>(), ctx->dCvIn.as<double>(), ctx->dCvPts.as<double>(),
+                        ctx->dCvPtr.as<int>(), ctx->dCvList.as<int>(), cvHvdcView(ctx),
+                        ctx->dRlMinQ.as<double>(), ctx->dRlMaxQ.as<double>(), ctx->dRlLoadQ.as<double>(),
+                        ctx->dTarget.as<double>(),
+                        nRlQOv, nRlQOv > 0 ? dRlQOvSlotEntry.as<int>() : nullptr,
+                        nRlQOv > 0 ? dRlQOvMinMax.as<double>() : nullptr,
+                        nRlQOv > 0 ? dRlQOvPtr.as<int>() : nullptr, nRlQOv > 0 ? dRlQOvList.as<int>() : nullptr,
+                        nCvOv > 0 ? dCvOvPtr.as<int>() : nullptr,
+                        nCvOv > 0 ? dCvOvEntry.as<int>() : nullptr,
+                        nCvOv > 0 ? dCvOvVal.as<double>() : nullptr,
+                        ctx->ngen > 0 ? ctx->dGenCum.as<double>() : nullptr,
+                        ctx->ngen > 0 ? ctx->dGenCumValid.as<char>() : nullptr, ctx->hasDgSeedAnchor ? ctx->dDgSeedAnchor.as<double>()
+                                : (ctx->hasDgAnchor ? ctx->dDgAnchor.as<double>() : nullptr),
+                        ctx->hasDgStart ? ctx->dDgStart.as<double>() : nullptr, ctx->ngen,
+                        ctx->nds > 0 ? ctx->dDsPhiRow.as<int>() : nullptr,
+                        ctx->nDsRowOv > 0 ? ctx->dDsRowOv.as<int>() : nullptr, ctx->nds,
+                        ctx->ngen > 0 ? ctx->dgBus.as<int>() : nullptr,
+                        ctx->dRlMinQDyn.as<double>(), ctx->dRlMaxQDyn.as<double>(),
+                        ctx->dRlLoadQDyn.as<double>(), cvProbeEntry, cvProbeSlotByCtg ? ctx->loopTraceSlot : cvProbeSlot);
+                launchForcedTargetQLimits(ctx, nS, n);
+            }
+            seedRlModeFromState<<<grid(ctx->nrl * nS), BLOCK, 0, ctx->stream>>>(ctx->nrl, nS, n,
+                    ctx->dRlVrow.as<int>(), ctx->dRlQrow.p ? ctx->dRlQrow.as<int>() : nullptr,
+                    useDynRlLimits ? ctx->dRlMinQDyn.as<double>() : ctx->dRlMinQ.as<double>(),
+                    useDynRlLimits ? ctx->dRlMaxQDyn.as<double>() : ctx->dRlMaxQ.as<double>(),
+                    useDynRlLimits ? ctx->dRlLoadQDyn.as<double>() : ctx->dRlLoadQ.as<double>(), ctx->dRlLimitType.as<char>(),
+                    ctx->dMode.as<int>(), ctx->dTarget.as<double>(), useDynRlLimits ? 1 : 0,
+                    ctx->nRlRemote > 0 ? ctx->dRlRemote.as<char>() : nullptr,
+                    ctx->dRlSavedTarget.as<double>(), ctx->dRlSavedMode.as<char>(),
+                    ctx->hasRlBaseLt ? ctx->dRlBaseLimitType.as<char>() : nullptr,
+                    psEntryPtr(ctx), ctx->st->nQr,
+                    ctx->dRlVtarget.as<double>(), nRlVtOv, nRlVtOv > 0 ? dRlVtOvSlotIdx.as<int>() : nullptr,
+                    nRlVtOv > 0 ? dRlVtOvVal.as<double>() : nullptr, ctx->nSvc > 0 ? ctx->dSvcRlVt.as<double>() : nullptr,
+                    ctx->nRlLocal > 0 ? ctx->dRlLocalOv.as<char>() : nullptr,
+                    ctx->nRlLocal > 0 ? ctx->dRlLocalVt.as<double>() : nullptr,
+                    ctx->hasRlPinTgtIn ? ctx->dRlPinTgtIn.as<double>() : nullptr,
+                    ctx->nRlIslanded > 0 ? ctx->dRlIslanded.as<char>() : nullptr);
+        } else {
+            CUDA_CHECK(cudaMemsetAsync(ctx->dRlSwitchCount.p, 0, static_cast<size_t>(ctx->nrl) * nS * sizeof(char), ctx->stream));
+            if (ctx->nrl > 0) {                              // seed the pinned limit for base-PQ controllers (else all PV)
+                initRlLimitTypeBatch<<<grid(ctx->nrl * nS), BLOCK, 0, ctx->stream>>>(ctx->nrl, nS, n, ctx->dRlVrow.as<int>(),
+                        ctx->dRlQrow.p ? ctx->dRlQrow.as<int>() : nullptr,
+                        ctx->dRlVtarget.as<double>(), ctx->dRlMonitored.as<char>(), dBaseMode.as<int>(), ctx->dX.as<double>(),
+                        ctx->dRlLimitType.as<char>(),
+                        nRlVtOv, nRlVtOv > 0 ? dRlVtOvSlotIdx.as<int>() : nullptr,
+                        nRlVtOv > 0 ? dRlVtOvVal.as<double>() : nullptr,
+                        ctx->nSvc > 0 ? ctx->dSvcRlVt.as<double>() : nullptr,
+                        ctx->nRlRemote > 0 ? ctx->dRlRemote.as<char>() : nullptr,
+                        ctx->nRlRemote > 0 ? ctx->dRlCmpVrow.as<int>() : nullptr,
+                        ctx->dTarget.as<double>(), ctx->dRlMinQ.as<double>(), ctx->dRlMaxQ.as<double>(),
+                        ctx->dRlLoadQ.as<double>(),
+                        ctx->hasRlBaseLt ? ctx->dRlBaseLimitType.as<char>() : nullptr,
+                        psEntryPtr(ctx), ctx->st->nQr,
+                        ctx->nRlGenLost > 0 ? ctx->dRlGenLost.as<char>() : nullptr);
+                if (ctx->nRlGenLost > 0 && std::getenv("OLF_GPU_GENLOST_TRACE") != nullptr) {
+                    // the seeded types of the lost-generator entries, read back (device printf is not captured)
+                    CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+                    std::vector<char> hm((size_t) nS * ctx->nrl), hl((size_t) nS * ctx->nrl);
+                    CUDA_CHECK(cudaMemcpy(hm.data(), ctx->dRlGenLost.p, hm.size(), cudaMemcpyDeviceToHost));
+                    CUDA_CHECK(cudaMemcpy(hl.data(), ctx->dRlLimitType.p, hl.size(), cudaMemcpyDeviceToHost));
+                    for (size_t k = 0; k < hm.size(); k++) {
+                        if (hm[k]) {
+                            std::fprintf(stderr, "GENLOST_SEED slot=%d entry=%d limitType=%d nS=%d nrl=%d\n",
+                                         (int) (k / ctx->nrl), (int) (k % ctx->nrl), (int) hl[k], nS, ctx->nrl);
+                        }
+                    }
+                }
+            }
+        }
+        // The seeded pin states must reach the ROWS before the first fill: a pinned enrolled pilot's balance
+        // goes on the carrier's target (its DISTR_Q target otherwise), and a group that lost control in the
+        // base has its pilot row flipped already. Both kernels are idempotent; the RL pass runs them again.
+        // Every scenario takes the seed stamps: updateDistrQTargetsBatch returns on !rlActive[s], and rlActive is
+        // only written by the outer-loop passes - at seed time it still held the context's zeros (or the previous
+        // chunk's last pass), so the carrier stamp below never ran before the FIRST solve. A pilot-self pilot that
+        // lost every generator with two live survivors then solved its carrier row against the plan's renormalized
+        // DISTR_Q seed (0.5 x its -0.6 balance = -0.3) instead of its balance: measured as 0.258 kV at b2 on
+        // devicePilotControllerLosingItsOwnGeneratorMatchesCpu (OLF's BUS_TARGET_Q of the pilot 0.3 pu off at the
+        // device state), and rte6515's 50 refused pilot outages. One survivor hid it: its seed degenerates to the
+        // pilot's own target. The passes upload their own rlActive before they run.
+        {
+            std::vector<char> allOn(nS, 1);
+            CUDA_CHECK(cudaMemcpyAsync(ctx->dRlActive.p, allOn.data(), nS, cudaMemcpyHostToDevice, ctx->stream));
+            CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+        }
+        // The dynamic reactive limits BEFORE the seed stamps, on the cold path too. They were first computed in the
+        // reactive-limit pass, after the first solve, so the stamps read the arrays unfilled: a gen-lost pilot's
+        // carrier target came out 0 - 0 instead of 0 - loadQ, and a survivor's sharing target summed a pinned
+        // peer's (limit - loadQ) as 0 - 0 - measured on devicePilotControllerLosingItsOwnGeneratorMatchesCpu
+        // as rows 2 and 4 both at target 0 during the solve (OLF: -0.6 and -0.3). The warm path already ran
+        // this before seeding; here it runs after initRlLimitTypeBatch has set the scenario's limit types.
+        if (useDynRlLimits) {                            // curve limits at the CURRENT (seeded) targets,
+            rlCurveLimitsBatch<<<grid(ctx->nrl * nS), BLOCK, 0, ctx->stream>>>(ctx->nrl, nS, ctx->ncv, n, ctx->cvExtrapolate,
+                    ctx->dCvIdx.as<int>(), ctx->dCvIn.as<double>(), ctx->dCvPts.as<double>(),
+                        ctx->dCvPtr.as<int>(), ctx->dCvList.as<int>(), cvHvdcView(ctx),
+                    ctx->dRlMinQ.as<double>(), ctx->dRlMaxQ.as<double>(), ctx->dRlLoadQ.as<double>(),
+                    ctx->dTarget.as<double>(),
+                    nRlQOv, nRlQOv > 0 ? dRlQOvSlotEntry.as<int>() : nullptr,
+                    nRlQOv > 0 ? dRlQOvMinMax.as<double>() : nullptr,
+                        nRlQOv > 0 ? dRlQOvPtr.as<int>() : nullptr, nRlQOv > 0 ? dRlQOvList.as<int>() : nullptr,
+                    nCvOv > 0 ? dCvOvPtr.as<int>() : nullptr,
+                    nCvOv > 0 ? dCvOvEntry.as<int>() : nullptr,
+                    nCvOv > 0 ? dCvOvVal.as<double>() : nullptr,
+                    ctx->ngen > 0 ? ctx->dGenCum.as<double>() : nullptr,
+                    ctx->ngen > 0 ? ctx->dGenCumValid.as<char>() : nullptr, ctx->hasDgAnchor ? ctx->dDgAnchor.as<double>() : nullptr, ctx->hasDgStart ? ctx->dDgStart.as<double>() : nullptr, ctx->ngen,
+                    ctx->nds > 0 ? ctx->dDsPhiRow.as<int>() : nullptr,
+                    ctx->nDsRowOv > 0 ? ctx->dDsRowOv.as<int>() : nullptr, ctx->nds,
+                    ctx->ngen > 0 ? ctx->dgBus.as<int>() : nullptr,
+                    ctx->dRlMinQDyn.as<double>(), ctx->dRlMaxQDyn.as<double>(),
+                    ctx->dRlLoadQDyn.as<double>(), cvProbeEntry, cvProbeSlotByCtg ? ctx->loopTraceSlot : cvProbeSlot);
+            launchForcedTargetQLimits(ctx, nS, n);
+        }
+        launchPilotVeqInner(ctx, drv, true, true);                     // seed: base limits, or the previous solve's flip
+        launchDistrQTargetsInner(ctx, drv);
+        if (ctx->nds > 0) {
+            dsResetSolve(ctx, drv);
+        }
+        if (ctx->nmon > 0) {
+            monitoringResetSolve(ctx, drv);
+        }
+        if (ctx->nTvc > 0) {
+            tvcResetSolve(ctx, drv);
+        }
+        if (ctx->nCph > 0) {
+            cphResetSolve(ctx, drv);
+        }
+        if (ctx->nTvd > 0) {
+            tvdResetSolve(ctx, drv);
+        }
+        if (ctx->nSvc > 0) {
+            svcResetSolve(ctx, drv);
+        }
+        if (ctx->nSvd > 0) {
+            svdResetSolve(ctx, drv);
+        }
+        if (ctx->nFlc > 0) {
+            flcResetSolve(ctx, drv);
+        }
+        if (ctx->nShc > 0) {
+            shcResetSolve(ctx, drv);
+        }
+        if (ctx->dsSlackOnly) {
+            dsSlackOnlyResetSolve(ctx, drv, dsSlackShift);
+        }
+    }
+
+    // SEQUENTIAL outer loops, exactly like OLF's AcloadFlowEngine: fully stabilize the reactive-limits loop
+    // (switch + re-solve until it switches nothing), THEN fully stabilize the distributed-slack loop
+    // (distribute + re-solve until balanced), and repeat the whole RL->DS sequence until a full sequence
+    // triggers no inner Newton re-solve. Running RL and DS in the SAME pass converges to a different (still
+    // in-tolerance) point when switching interacts with slack distribution. phase 0 = reactive limits, 1 = slack.
+    std::vector<char>& live = drv.live;
+    live = active;                          // scenarios still iterating outer loops (dropped on failure)
+    // OLF's DefaultAcOuterLoopConfig orders DistributedSlack BEFORE ReactiveLimits (innermost first), and the
+    // engine stabilizes them in that order. Match it: phase 0 = distributed slack, phase 1 = reactive limits.
+    // (Switching PV->PQ before the slack is balanced leaves a large active imbalance that the undamped device
+    // Newton diverges on — DS must stabilize first.)
+    // The outer loops this solve drives, IN OLF'S CONFIGURED ORDER. OLF's engine
+    // (AcloadFlowEngine.runOuterLoops) walks its configured list in order, drives each loop to
+    // STABLE — re-solving after every unstable check — then moves to the next, restarts from the
+    // top, and stops when a full sweep changes nothing. The driver below already has exactly those
+    // semantics; what it lacked was the LIST: it hard-coded two loops, so every other loop had to be
+    // bolted on as a host orchestrator running AFTER the whole solve, landing out of order. Naming
+    // the order explicitly is what lets the remaining loops move into their proper slot.
+    //
+    // OLF's contingency order: DistributedSlack(1), FreezingHvdcACEmulation(2),
+    // AcHvdcAcEmulationLimits(3), SecondaryVoltageControl(5), MonitoringVoltage(6),
+    // ReactiveLimits(7). All but SecondaryVoltageControl are driver phases here, in that order.
+    // The loops OLF runs AFTER ReactiveLimits (PhaseControl, transformer and shunt voltage control)
+    // are still host orchestrators: their position relative to RL is right, but OLF restarts the
+    // WHOLE sweep whenever one of them changes something, so an earlier loop is re-checked and here
+    // it is not. Folding them needs the discrete tap/section tables on the device.
+    int (&loopOrder)[MAX_DEVICE_LOOPS] = drv.loopOrder;
+    int nLoops = 0;
+    if (ctx->nds > 0 || ctx->dsSlackOnly) {
+        loopOrder[nLoops++] = LOOP_DS;
+    }
+    if (ctx->nhv > 0) {
+        loopOrder[nLoops++] = LOOP_HVDC_FREEZE;              // OLF: FreezingHvdcACEmulation
+        if (ctx->hvLimitsActive) {
+            loopOrder[nLoops++] = LOOP_HVDC_LIMITS;          // OLF: AcHvdcAcEmulationLimits
+        }
+    }
+    if (ctx->nSvc > 0) {
+        loopOrder[nLoops++] = LOOP_SVC_KERNEL;               // OLF order 4: SecondaryVoltageControl, IN-KERNEL
+    } else if (ctx->hostLoopMask & (1 << 0)) {
+        loopOrder[nLoops++] = LOOP_HOST_SVC;                 // OLF order 4: SecondaryVoltageControl, host pause
+    }
+    if (ctx->nmon > 0) {
+        loopOrder[nLoops++] = LOOP_MONITORING;               // OLF order 5: MonitoringVoltage
+    }
+    if (ctx->nrl > 0) {
+        loopOrder[nLoops++] = LOOP_RL;                       // OLF order 6: ReactiveLimits
+    }
+    if (ctx->nFlcPhase > 0 || ctx->nCph > 0) {
+        loopOrder[nLoops++] = LOOP_PHASE_KERNEL;             // OLF order 7: (Incremental)PhaseControl, IN-KERNEL
+    } else if (ctx->hostLoopMask & (1 << 1)) {
+        loopOrder[nLoops++] = LOOP_HOST_PHASE;               // OLF order 7: PhaseControl
+    }
+    if (ctx->nTvc > 0) {
+        loopOrder[nLoops++] = LOOP_TVC_KERNEL;               // OLF order 8: TransformerVoltageControl, IN-KERNEL
+    } else if (ctx->nTvd > 0) {
+        loopOrder[nLoops++] = LOOP_TVD_KERNEL;               // OLF order 8: AFTER_GENERATOR / Simple TVC, IN-KERNEL
+    } else if (ctx->hostLoopMask & (1 << 2)) {
+        loopOrder[nLoops++] = LOOP_HOST_TVC;                 // OLF order 8: TransformerVoltageControl, host pause
+    }
+    if (ctx->nFlcRpc > 0) {
+        loopOrder[nLoops++] = LOOP_TRPC_KERNEL;              // OLF order 9: TransformerReactivePowerControl, IN-KERNEL
+    } else if (ctx->hostLoopMask & (1 << 3)) {
+        loopOrder[nLoops++] = LOOP_HOST_TRPC;                // OLF order 9: TransformerReactivePowerControl
+    }
+    if (ctx->nShc > 0) {
+        loopOrder[nLoops++] = LOOP_SHUNT_KERNEL;             // OLF order 10: ShuntVoltageControl, IN-KERNEL
+    } else if (ctx->nSvd > 0) {
+        loopOrder[nLoops++] = LOOP_SVD_KERNEL;               // OLF order 10: WITH_GENERATOR shunt VC, IN-KERNEL
+    } else if (ctx->hostLoopMask & (1 << 4)) {
+        loopOrder[nLoops++] = LOOP_HOST_SHUNT;               // OLF order 10: ShuntVoltageControl
+    }
+    if (nLoops == 0) {
+        loopOrder[nLoops++] = LOOP_RL;                       // nothing to drive: the old code's phase-1 fallback
+    }
+    // Where the realistic-voltage check STARTS applying in this sweep. AcloadFlowEngine keeps
+    // checkUnrealisticStates false up to and including the last loop that can fix an unrealistic state
+    // (that is the whole point of robust mode: give ReactiveLimits / the discrete
+    // TransformerVoltageControl a chance to repair the state instead of failing the run on it), then
+    // turns it on for the rest of the sweep and resets it at the top of the next one. A device pass at
+    // index i applies loopOrder[i] to the state its solve produced, so "past the fixing loop" is
+    // i > realisticFixingIdx. Not found, or no fixing loop at all, means check every solve — the
+    // conservative direction, since a check that fires too early only routes to the CPU.
+    int realisticFixingIdx = -1;
+    for (int i = 0; i < nLoops; i++) {
+        bool isFixing = ctx->realisticFixingLoop == 0
+                ? loopOrder[i] == LOOP_RL
+                : (ctx->realisticFixingLoop == 1
+                        && (loopOrder[i] == LOOP_HOST_TVC
+                            || (loopOrder[i] == LOOP_TVD_KERNEL && ctx->tvdMode != 1)));
+        if (isFixing) {
+            realisticFixingIdx = i;
+        }
+    }
+    int& loopIdx = drv.loopIdx;
+    loopIdx = 0;
+    bool seqChanged = false;                                 // did any outer loop re-solve during the current RL->DS sequence
+    if (!resume && ctx->startLoopKind >= 0) {
+        // Restart after a host loop mutated the system: the first pass solves, then the sweep picks
+        // up at THAT loop's slot (OLF's runOuterLoop re-checks it until STABLE, and only then does
+        // the sweep restart from the first loop — seqChanged makes that restart happen).
+        for (int i = 0; i < nLoops; i++) {
+            if (loopOrder[i] == ctx->startLoopKind) {
+                loopIdx = i;
+                seqChanged = true;
+            }
+        }
+        ctx->startLoopKind = -1;
+    }
+    std::vector<int> prodIters(nS, 0);                       // PER-SCENARIO productive outer iterations: OLF's
+                                                             // maxOuterLoopIterations is a per-RUN budget — a global
+                                                             // counter capped busy chunks collectively (violation-diff
+                                                             // root cause: a scenario solved solo matched the CPU
+                                                             // exactly but diverged inside a full 500-chunk)
+    // A phase transition after a NO-SWITCH pass must NOT re-solve: OLF's runOuterLoop re-solves only on an
+    // UNSTABLE check — a STABLE loop is followed by checking the NEXT loop against the SAME state. The device
+    // Newton forces >=1 iteration per solve (matching OLF's per-run behavior), so an extra no-op pass would
+    // move an already-converged state off the CPU's by ~the stopping residual (measured 4e-4 kV on the
+    // DS->RL transition with a distributed base). solvePass=false skips the inner Newton for such a pass.
+    bool solvePass = true;
+    if (resume) {
+        // Continue the paused sequence: the loop the host owned has just run, so step PAST it and
+        // let its verdict drive the pass exactly as a device loop's would — UNSTABLE re-solves only
+        // the scenarios it changed, STABLE advances without a solve (OLF's rule).
+        loopIdx = ctx->pausedLoopIdx;
+        seqChanged = ctx->pausedSeqChanged != 0;
+        prodIters = ctx->pausedProdIters;
+        live = ctx->pausedLive;
+        if (ctx->pausedStatus.size() == res.status.size()) {
+            res.status = ctx->pausedStatus;                  // the state is the converged one the pause left: a
+        }                                                    // STABLE host verdict then re-CHECKS RL on it (rlActive)
+        bool anyChanged = false;
+        for (int s = 0; s < nS; s++) {
+            char ch = s < (int) ctx->hostChanged.size() ? ctx->hostChanged[s] : 0;
+            active[s] = ch ? 1 : 0;
+            anyChanged |= ch != 0;
+        }
+        if (anyChanged) {
+            seqChanged = true;
+            solvePass = true;                                // the host loop moved targets -> re-solve
+            // ...and it CONSUMES the outer-iteration budget, exactly as a device loop's change does.
+            // Without this a host loop that keeps going UNSTABLE never retires a scenario: each resume
+            // starts a fresh `outer` budget, so the pause/resume cycle spins forever (measured: a
+            // 2000-contingency rte6515 slice with SecondaryVoltageControl did not finish in 28 min).
+            for (int s = 0; s < nS; s++) {
+                if (active[s] && ++prodIters[s] >= RL_MAX_OUTER) {
+                    traceReject(s, "host-loop-outer-budget", -1, 0);
+                    res.status[s] = -2;                      // budget exhausted -> CPU replays it
+                    live[s] = 0;
+                    active[s] = 0;
+                }
+            }
+        } else {
+            solvePass = false;
+            for (int s = 0; s < nS; s++) {
+                active[s] = live[s];                         // stable: re-CHECK every live scenario
+            }
+            if (++loopIdx >= nLoops) {                       // ...and advance, as the stable branch does
+                if (!seqChanged) {
+                    loopIdx = nLoops;                        // a full sweep changed nothing -> converged
+                } else {
+                    seqChanged = false;
+                    loopIdx = 0;
+                }
+            }
+        }
+    }
+    // OLF_GPU_SLOT_DUMP=<prefix>: the traced scenario's (OLF_GPU_LOOP_TRACE_CTG) row targets, initial state and row
+    // modes as the driver starts - after every host override and every device seed - one file per solve
+    // (<prefix>.<k>), "<row> <target> <x> <mode>" with every double exact. Two runs of one scenario that should be
+    // identical are diffed row by row: the rows that differ name the writer.
+    if (!resume && ctx->loopTraceSlot >= 0 && ctx->loopTraceSlot < nS) {
+        static const char* slotDump = std::getenv("OLF_GPU_SLOT_DUMP");
+        static int slotDumps = 0;
+        if (slotDump != nullptr) {
+            const size_t off = static_cast<size_t>(ctx->loopTraceSlot) * n;
+            std::vector<double> ht(n), hx(n);
+            std::vector<int> hm(n);
+            CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+            CUDA_CHECK(cudaMemcpy(ht.data(), ctx->dTarget.as<double>() + off, n * sizeof(double), cudaMemcpyDeviceToHost));
+            CUDA_CHECK(cudaMemcpy(hx.data(), ctx->dX.as<double>() + off, n * sizeof(double), cudaMemcpyDeviceToHost));
+            CUDA_CHECK(cudaMemcpy(hm.data(), ctx->dMode.as<int>() + off, n * sizeof(int), cudaMemcpyDeviceToHost));
+            std::string path = std::string(slotDump) + "." + std::to_string(slotDumps++);
+            if (FILE* f = std::fopen(path.c_str(), "w")) {
+                for (int r = 0; r < n; r++) {
+                    std::fprintf(f, "%d %.17g %.17g %d\n", r, ht[r], hx[r], hm[r]);
+                }
+                std::fclose(f);
+            }
+        }
+    }
+    static const bool olTimeEnv = std::getenv("OLF_GPU_PHASE_TIME") != nullptr || rlReasonsOn();
+    drv.olTime = olTimeEnv;
+    const bool& olTime = drv.olTime;
+    int& olPassSolved = drv.olPassSolved;
+    olPassSolved = 0;
+    bool olFirstSolveDone = resume;                          // a resumed call's passes are all re-solves
+    int olTriggerKind = resume ? ctx->pausedLoopKind : -1;  // the loop whose check made the next pass re-solve
+    int& outer = drv.outer;
+    for (outer = 0; outer < maxOuter && loopIdx < nLoops; outer++) {
+    gOuterPasses++;
+    if (olTime) CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+    const double olT0 = olTime ? olNowMs() : 0.0;
+    const long long olAI0 = gActiveIterSum, olWI0 = gWidthIterSum, olNI0 = gNewtonIters;
+    const bool olSolving = solvePass;
+    if (solvePass) {
+        gSolvePasses++;
+    }
+    std::copy(active.begin(), active.end(), wasActive.begin());   // scenarios (re)solved in this inner pass
+    CUDA_CHECK(cudaMemcpy(ctx->dActive.p, active.data(), nS * sizeof(char), cudaMemcpyHostToDevice));
+    int& nActive = drv.nActive;
+    nActive = 0;
+    for (char a : active) {
+        if (a) nActive++;
+    }
+    // ---- batched fill for all active scenarios (J + F, or F-ONLY: the final residual fill and
+    //      mode 4's solve-only iterations evaluate just the residual and skip the vals memset —
+    //      the J buffer is never read before the next full fill re-zeroes it). A lambda so the
+    //      LINE_SEARCH backtrack below can re-evaluate at a reduced step. ----
+    // ---- IncrementalTransformerVoltageControl as a DRIVER PHASE (OLF order 8). OLF's own rule, per
+    //      controlled bus: if |targetV - V| > halfDeadband, take dV/drho from the Jacobian at the converged
+    //      state (unit RHS at the rho identity row, read the bus V entry), deltaR1 = diffV / sensi, move to
+    //      the tap whose r1 is closest to r1 + deltaR1 within maxTapShift and the ratchet's allowed
+    //      direction (MAX_DIRECTION_CHANGE 3), skip controllers with |sensi| < MIN_SENSI_FILTER (0.05).
+    //      The sensitivity is the same forward solve GpuBatchIncrementalTvc used to make through
+    //      solveBatchSensitivities — one host round trip per round — done here against the factors the
+    //      driver already holds, with no host copy of the states. Single controller per controlled bus
+    //      (the JNI upload refuses shared buses, which stay on the host orchestrator). ----
+    // One unit-right-hand-side sensitivity solve on every scenario's CURRENT Jacobian (dVals, filled for all
+    // scenarios by the caller; dB = the right-hand sides, dDx = the solutions), for the in-kernel outer loops.
+    // The UBATCH mode (3) solves the whole batch in one call on the factors they hold - the analysis once per
+    // context, the factorization with the first controller's solve. The robust mode (6) holds ONE matrix object
+    // repointed per scenario and keeps no factors from one scenario to the next, so it factors and solves scenario
+    // by scenario - a refactorization per (scenario, controller), affordable at the robust retry's chunk sizes and
+    // the price of the loops running there at all: they used to report themselves STABLE in mode 6, so a scenario
+    // retried in it (or a base load flow that fell into it) with a transformer, shunt, flow or secondary voltage
+    // control out of its deadband got a wrong answer and nothing flagged it.
+    std::vector<char>& loopRejected = drv.loopRejected;
+    loopRejected.assign(nS, 0);                   // a device loop routed the scenario to the CPU this pass
+    // ---- IncrementalShuntVoltageControl as a DRIVER PHASE (OLF order 10): deadband per controlled bus,
+    //      dV/dB from a unit RHS at each needed controller's SHUNT_B identity row (the driver's own
+    //      factors), OLF's adjustB round-robin per group, the section total pinned at the identity row
+    //      and the static (dG, dB) through the shunt-override list. Groups with several controller
+    //      shunts ARE handled (the round-robin runs in the group kernel). ----
+    // ---- the FLOW-OBSERVED incremental loops as DRIVER PHASES: kindMask selects the phase controllers
+    //      (OLF order 7: kinds 1+2) or the RPC controllers (OLF order 9: kind 0). Same skeleton as the
+    //      voltage-observed phases; the observable is the controlled branch's flow gradient dotted with
+    //      the unit-RHS solution (OLF's EquationTerm.calculateSensi), evaluated by the codegen'd branch
+    //      functions on the device. ----
+    // ---- CONTINUOUS PhaseControl as a DRIVER PHASE (OLF order 7), see cphCheckBatch. ----
+    // ---- the DISCRETE voltage-control loops as DRIVER PHASES: TransformerVoltageControl (AFTER_GENERATOR /
+    //      WITH_GENERATOR, OLF order 8) and ShuntVoltageControl (WITH_GENERATOR, OLF order 10). No sensitivities:
+    //      OLF's decisions read the converged state only (deadband, clamp bounds, closest tap / section). ----
+    // ---- SecondaryVoltageControl as a DRIVER PHASE (OLF order 4). The whole loop: the re-enable step and
+    //      the per-zone trigger on the paused state's own qBuf, one unit-RHS solve per controlled bus on the
+    //      driver's own factors for the K and pilot sensitivities, the small dense zone system per scenario,
+    //      and the moved targets applied to the controlled buses' V rows (plus the switch-back comparison
+    //      target for a pinned controller). Nothing goes back to the host, so the loop sits in OLF's order
+    //      instead of after the sweep. ----
+    if (solvePass) {
+        newtonSolve(ctx, drv);
     }   // ---- end if (solvePass) ----
     if (olTime) {
         CUDA_CHECK(cudaStreamSynchronize(ctx->stream));

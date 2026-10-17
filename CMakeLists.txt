@@ -93,6 +93,7 @@ add_library(olfgpu SHARED
     native/cuda/jni/structure/shared_structure.cu
     native/cuda/jni/diagnostics/matrix_scan.cu
     native/cuda/jni/diagnostics/driver_traces.cu
+    native/cuda/jni/solver/outer_loop_driver.cu
     native/cuda/jni/outerloop/phase_control.cu
     native/cuda/jni/outerloop/voltage_monitoring.cu
     native/cuda/jni/outerloop/hvdc_ac_emulation.cu

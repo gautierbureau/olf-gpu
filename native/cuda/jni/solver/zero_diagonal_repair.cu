@@ -18,6 +18,21 @@
 
 namespace olfgpu {
 
+// The zero-diagonal repair is for a factorization that cannot pivot. The robust mode (6) matches and pivots, which
+// puts a nonzero on every diagonal by itself, so it factors the raw Jacobian; a borrowed row there only adds the
+// cancellation the repair is prone to. A ZERO row that borrows a balance row which keeps its own diagonal forms,
+// with that donor, a 2x2 principal block that is singular (the ZERO row has nothing on the donor's diagonal column).
+// network.xiidm busbar ADNO re-couples three loop couplers of a hub, and two of their ZERO_V rows borrowed the hub's
+// P balance: the pivoted factorization of that repaired matrix failed as badly as the unpivoted one (ratio 5e21),
+// while the raw matrix converged to the CPU's answer.
+
+
+
+
+
+
+
+
 bool repairsZeroDiagonals(const BatchSolverContext* ctx) {
     return ctx->mode != 6;
 }

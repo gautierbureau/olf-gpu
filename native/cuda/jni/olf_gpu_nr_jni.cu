@@ -72,55 +72,14 @@
 // OLF_GPU_PHASE_TIME accounting: how much of a solveBatchContext call is device outer-loop passes
 // vs Newton iterations. A pass that re-solves is the expensive one; a pass that only re-checks is not.
 long long gOuterPasses = 0;
-// The outer loops the device driver can run, in OLF's configured order.
-enum DeviceLoopKind {
-    LOOP_DS = 0,             // DistributedSlack                         (OLF order 0)
-    LOOP_HVDC_FREEZE = 1,    // FreezingHvdcACEmulation                  (OLF order 1)
-    LOOP_HVDC_LIMITS = 2,    // AcHvdcAcEmulationLimits                  (OLF order 2)
-    LOOP_MONITORING = 3,     // MonitoringVoltage — the standby-SVC automaton (OLF order 5)
-    LOOP_RL = 4,             // ReactiveLimits                           (OLF order 6)
-    LOOP_HOST_SVC = 5,       // SecondaryVoltageControl — host pause     (OLF order 4, pre-RL)
-    LOOP_HOST_PHASE = 6,     // PhaseControl — host pause                (OLF order 7, post-RL)
-    LOOP_HOST_TVC = 7,       // TransformerVoltageControl — host pause   (OLF order 8, post-RL)
-    LOOP_HOST_TRPC = 8,      // TransformerReactivePowerControl — host   (OLF order 9, post-RL)
-    LOOP_HOST_SHUNT = 9,     // ShuntVoltageControl — host pause         (OLF order 10, post-RL)
-    LOOP_TVC_KERNEL = 10,    // IncrementalTransformerVoltageControl — IN-KERNEL (OLF order 8)
-    LOOP_SHUNT_KERNEL = 11,  // IncrementalShuntVoltageControl — IN-KERNEL (OLF order 10)
-    LOOP_PHASE_KERNEL = 12,  // IncrementalPhaseControl (CONTROLLER + LIMITER) — IN-KERNEL (OLF order 7)
-    LOOP_TRPC_KERNEL = 13,   // IncrementalTransformerReactivePowerControl — IN-KERNEL (OLF order 9)
-    LOOP_TVD_KERNEL = 14,    // TransformerVoltageControl AFTER_GENERATOR / Simple (WITH_GENERATOR) — IN-KERNEL (OLF order 8)
-    LOOP_SVD_KERNEL = 15,    // ShuntVoltageControl WITH_GENERATOR — IN-KERNEL (OLF order 10)
-    LOOP_SVC_KERNEL = 16     // SecondaryVoltageControl — IN-KERNEL (OLF order 4)
-};
+#include "common/loop_kinds.cuh"
+
 // OLF_GPU_PHASE_TIME: where the outer-loop driver's time goes. Index 0..16 = the DeviceLoopKind that TRIGGERED a
 // re-solve (the loop whose check changed something), or the loop being CHECKED; the first solve of a call is apart.
-constexpr int OL_KINDS = 17;
 double gOlFirstSolveMs = 0, gOlReSolveMs[OL_KINDS] = {0}, gOlCheckMs[OL_KINDS] = {0};
 long long gOlFirstSolveScen = 0, gOlReSolveScen[OL_KINDS] = {0}, gOlReSolvePasses[OL_KINDS] = {0};
 long long gOlFirstLaneIters = 0, gOlReSolveLaneIters[OL_KINDS] = {0}, gOlFirstWidthIters = 0, gOlReSolveWidthIters[OL_KINDS] = {0};
 long long gOlCheckPasses[OL_KINDS] = {0}, gOlFirstPasses = 0;
-inline const char* olKindName(int k) {
-    switch (k) {
-        case 0: return "DistributedSlack";
-        case 1: return "FreezingHvdcACEmulation";
-        case 2: return "AcHvdcAcEmulationLimits";
-        case 3: return "MonitoringVoltage";
-        case 4: return "ReactiveLimits";
-        case 5: return "HOST:SecondaryVoltageControl";
-        case 6: return "HOST:PhaseControl";
-        case 7: return "HOST:TransformerVoltageControl";
-        case 8: return "HOST:TransformerReactivePowerControl";
-        case 9: return "HOST:ShuntVoltageControl";
-        case 10: return "TransformerVoltageControl";
-        case 11: return "ShuntVoltageControl";
-        case 12: return "PhaseControl";
-        case 13: return "TransformerReactivePowerControl";
-        case 14: return "TransformerVoltageControl(after-gen)";
-        case 15: return "ShuntVoltageControl(with-gen)";
-        case 16: return "SecondaryVoltageControl";
-        default: return "?";
-    }
-}
 // OLF_GPU_RL_REASONS=1: why each reactive-limits check was unstable, per checked scenario (bit 1 a pin PV->PQ, bit 2 an
 // unpin PQ->PV, bit 4 a limit refresh of a pinned entry; 0 with the scenario switched = a group re-stamp only), and
 // the entries behind it.
@@ -132,13 +91,6 @@ inline bool rlReasonsOn() {
 inline double olNowMs() {
     return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
-
-// GpuBatchHvdcAcEmulation's status codes, shared with the host.
-constexpr int HV_LINEAR = 0;
-constexpr int HV_SAT_1_TO_2 = 1;
-constexpr int HV_SAT_2_TO_1 = 2;
-constexpr int HV_FROZEN = 3;
-constexpr int MAX_DEVICE_LOOPS = 16;
 
 long long gNewtonIters = 0;
 int gLastPassIters = 0;   // debug: inner-Newton steps taken by the pass just finished
@@ -182,85 +134,7 @@ struct AnalysisTimer {
 
 using namespace powsybl::openloadflow;
 
-#define CUDA_CHECK(x) do { cudaError_t e_ = (x); if (e_ != cudaSuccess) { \
-    throw std::runtime_error(std::string("CUDA error: ") + cudaGetErrorString(e_)); } } while (0)
-#define CUBLAS_CHECK(call)                                                                       \
-    do {                                                                                         \
-        cublasStatus_t st_ = (call);                                                             \
-        if (st_ != CUBLAS_STATUS_SUCCESS) {                                                      \
-            throw std::runtime_error("cuBLAS error " + std::to_string(static_cast<int>(st_)));    \
-        }                                                                                        \
-    } while (0)
-
-#define CUDSS_CHECK(x) do { cudssStatus_t s_ = (x); if (s_ != CUDSS_STATUS_SUCCESS) { \
-    throw std::runtime_error(std::string("cuDSS error, status ") + std::to_string((int) s_) \
-        + " at " __FILE__ ":" + std::to_string(__LINE__) + " [" #x "]"); } } while (0)
-
-// Batched N-1 solve path. BOTH implementations of the per-iteration linear solve are
-// compiled in; the batch context picks one at RUNTIME from its `mode` field (set by the
-// Java caller via -Dolf.gpu.batchMode, default 0):
-//
-//   mode 1 : the UNIFORM BATCHED cuDSS API (cudssMatrixCreateBatchCsr/Dn) — one ANALYSIS on
-//     the shared pattern, then ONE batched FACTORIZATION + SOLVE over every scenario's value
-//     set. Fastest where it fits; holds ~one factorization per scenario, so chunk it on small
-//     GPUs (olf.gpu.sa.maxBatch).
-//
-//   mode 2 : BLOCK-DIAGONAL single matrix — assemble blkdiag(J_1..J_nS) as ONE (n*nS) CSR and
-//     ANALYZE+FACTORIZE once, then REFACTORIZE every iteration (reuse pivots — a
-//     refactor-every-iteration strategy). Measured ~parity with mode 1 (cuDSS refactorization ≈ factorization;
-//     unlike CPU KLU it is not pivot-dominated). Same memory profile as mode 1 (chunk it).
-//
-//   mode 3 : UBATCH — a SINGLE per-block CSR with value/RHS pointers aimed at the batched buffers
-//     + CUDSS_CONFIG_UBATCH_SIZE=nS. cuDSS analyzes ONE block (cheap: ~74 ms vs ~1.6 s for mode 1's
-//     all-blocks analysis — a cheap single-block analysis). The CHUNK SIZE (olf.gpu.sa.maxBatch)
-//     is decisive on cuDSS 0.8: its UBATCH phases carry a high per-launch fixed cost that
-//     amortizes with batch size — measured on pegase9241 (500 ctg, K=4, RTX A1000, warm
-//     ms/scenario): maxBatch=32 17.8, 125 6.35, 500 4.87 — the FASTEST configuration measured
-//     on any mode/version, and 0.8's memory handling holds 500 blocks where 0.7.1's mode 1
-//     ALLOC_FAILs. On cuDSS 0.7.x UBATCH is batch-size-INSENSITIVE instead (~8.3 at any chunk).
-//     So: 0.8 + large chunks -> best known; 0.8 + small chunks (32) is a ~2x NET LOSS vs
-//     mode 1 — an earlier note here calling 0.8's UBATCH "~4x slower than the batch API"
-//     measured only that small-chunk regime. DEFAULT mode.
-//
-//   mode 4 : UBATCH + DirectIter0Only — same setup as mode 3 but FACTORIZE only at each chunk's
-//     iter 0, SOLVE-only for the remaining iters (the Jacobian is frozen at the AC-hot-started
-//     point, the mismatch/RHS is still recomputed every iter). Skips ~75% of the factorizations
-//     at K=4 — the factorization is ~39% of GPU time. EXPERIMENTAL (convergence bet: a single-branch
-//     N-1 is a small perturbation so the frozen J still converges from the warm start).
-//
-//   mode 5 : UBATCH + DirectRefactorEvery — same setup as mode 3 but FACTORIZE once (ever) then
-//     REFACTORIZE after (reuse pivot order, recompute values). The UBATCH analog of mode 2;
-//     EXPERIMENTAL probe of whether cuDSS refactorization is cheaper than factorization on the
-//     UBATCH path (mode 2 showed ~parity on the block-diagonal path).
-//
-//   mode 0 (DEFAULT) : the per-scenario loop — repoint a single matrix and refactorize+solve
-//     each scenario. Analysis is still amortized over the set; memory-light, scales to large
-//     cases on small GPUs.
-//
-// cuDSS >= 0.7.1 is required. The cudssMatrixCreate{Csr,Dn,BatchCsr,BatchDn} data-type
-// arguments differ between 0.7.x and 0.8 (0.8 added a separate `offsetType` and renamed the
-// enum cudaDataType_t -> cudssDataType_t with CUDSS_R_* aliasing CUDA_R_*), so the type-arg
-// groups are shimmed by CUDSS_VERSION below and the same source builds against either.
-static_assert(CUDSS_VERSION >= 701,
-              "libolfgpu requires cuDSS >= 0.7.1 (CUDSS_VERSION >= 701)");
-#if CUDSS_VERSION >= 800
-#  define OLF_CUDSS_CSR_TYPES  CUDSS_R_32I, CUDSS_R_32I, CUDSS_R_64F   // offsetType, indexType, valueType
-#  define OLF_CUDSS_DN_TYPE    CUDSS_R_64F                             // valueType
-#  define OLF_CUDSS_BDN_TYPES  CUDSS_R_32I, CUDSS_R_64F                // integerType, valueType
-#else
-#  define OLF_CUDSS_CSR_TYPES  CUDA_R_32I, CUDA_R_64F                  // indexType, valueType (no offsetType)
-#  define OLF_CUDSS_DN_TYPE    CUDA_R_64F
-#  define OLF_CUDSS_BDN_TYPES  CUDA_R_32I, CUDA_R_64F
-#endif
-
-// Auto-sizing the batch chunk: query cuDSS's reported LU fill (CUDSS_DATA_LU_NNZ) via a
-// cheap single-matrix probe analysis on the shared pattern, instead of guessing the fill
-// with a heuristic multiplier. CUDSS_DATA_LU_NNZ has been in cuDSS since early versions;
-// set -DOLF_GPU_CUDSS_LU_NNZ=0 if the installed headers lack the enum (the heuristic is
-// then used). Even with it on, a runtime query failure falls back to the heuristic.
-#ifndef OLF_GPU_CUDSS_LU_NNZ
-#  define OLF_GPU_CUDSS_LU_NNZ 1
-#endif
+#include "common/check.cuh"
 
 namespace {
 
@@ -522,7 +396,7 @@ inline void traceLuNnz(cudssHandle_t handle, cudssData_t data, const char* where
 // element's packed index array. Role 2 (skip) resolves to absent.
 // ---------------------------------------------------------------------------------
 
-struct RC { int row = -1; int col = -1; };
+#include "structure/csr_pattern.cuh"
 
 RC resolveCb(const CbScatter& s, const int* ix) {            // P1 Q1 P2 Q2 ph1 v1 ph2 v2 a1col r1col
     RC rc;
@@ -579,27 +453,6 @@ void collectPattern(int ne, const int* idx, int stride, const S* table, int nout
 // std::sort of (row, col) pairs, so colIdx within each row is ascending — a binary search over
 // colIdx[rowPtr[row] .. rowPtr[row+1]) resolves (row, col) -> slot with no extra memory (replaces
 // a std::map<pair,int> tree, which was pure overhead on an already-sorted pattern).
-struct CsrPattern {
-    const int* rowPtr;
-    const int* colIdx;
-    int at(int row, int col) const {
-        int lo = rowPtr[row];
-        int hi = rowPtr[row + 1];
-        while (lo < hi) {
-            int mid = (lo + hi) >> 1;
-            if (colIdx[mid] < col) {
-                lo = mid + 1;
-            } else {
-                hi = mid;
-            }
-        }
-        if (lo >= rowPtr[row + 1] || colIdx[lo] != col) {
-            throw std::runtime_error("CSR pattern lookup miss");
-        }
-        return lo;
-    }
-};
-
 // Second pass: the per-(element, output) destination with the role folded in:
 //   role 1 -> CSR values slot (>= 0);  role 0 -> -2 - F row;  absent/skip -> -1.
 template <typename S, typename F>
@@ -1225,204 +1078,13 @@ void buildObDynDest(int nob, const int* obIdx, const int* obQAlt, const int* rel
 // Device: the four family fill kernels + the loop helpers
 // ---------------------------------------------------------------------------------
 
-__device__ void scatterAdd(int nout, const int* dest, const double* o, double* vals, double* F) {
-    for (int k = 0; k < nout; k++) {
-        int d = dest[k];
-        if (d >= 0) {
-            atomicAdd(&vals[d], o[k]);
-        } else if (d <= -2) {
-            atomicAdd(&F[-2 - d], o[k]);
-        }
-    }
-}
-
-// Dynamic Q-relocation scatter: when an output's frozen Q row is an identity this scenario
-// (mode[selRow] == 0), route it to the alternate candidate row instead. mode is this scenario's
-// row-mode slice (length n). dest/altDest/selRow share the per-output layout of scatterAdd.
-// Mode 4 ("pinned remote gen-VC member" — the member row hosts its OWN Q balance, plan-B2) also
-// selects the alternate: those entries carry a SUPPRESSED frozen dest and their own row as the
-// alternate, with selRow = the member row itself. TVC/shunt select rows never carry mode 4.
-// GROUP pilot-Q relocation tables (plan-A6), bundled to keep the fill signatures stable. All
-// nullptr when the structure has no relocation groups.
-struct RelocTables {
-    const int* group = nullptr;                              // per output: group id, -1 = not grouped
-    const int* off = nullptr;                                // per output: offset into pool
-    const int* pool = nullptr;                               // one slot (or -2-row) per (output, candidate)
-    const int* qrPtr = nullptr;                              // group -> candidate range
-    const int* qrRows = nullptr;                             // candidate DEVICE rows ([0] = fallback)
-    // PILOT-SELF gate: per (scenario, group), 1 = this group's pilot is one of its OWN controllers and is
-    // NOT pinned this scenario, so it has no Q balance to relocate (its q feeds the DISTR_Q rows weighted)
-    // and its raw q must NOT be emitted at the carrier row. Null = no such group, every pick as before.
-    const char* psSkip = nullptr;
-    int psGroups = 0;                                        // stride of psSkip (= nQr)
-    // Per row: the relocated child's OWN row for a coupler dummy row, -1 elsewhere. A stock pair needs it to
-    // tell "the coupler is dead AND this bus is PINNED at home" (its own q belongs on its own row) from
-    // "the coupler is dead and it still SHARES" (its DISTR_Q, diverted home, carries its q).
-    const int* relocOwn = nullptr;
-    // Per (scenario, dq member): the member's SUBGROUP this scenario (0 = the base pilot's group). A contingency
-    // that splits a merged group behind its surviving main leaves two OLF groups on ONE candidate table (tasks
-    // #71): keys and q contributions pair only within a subgroup, and the base pilot's carrier is picked among
-    // subgroup-0 members only. Null = no split anywhere in the batch.
-    const char* dqSub = nullptr;
-    const int* qrMemberStart = nullptr;                      // qr group -> its first dq member (candidate 1)
-    int nDqMembers = 0;
-    const char* dep = nullptr;                               // per output: dependent-pilot routing (see depPick)
-};
-
-// GROUP pilot-Q relocation (plan-A6): candidates = [fallback row, member rows in merged order];
-// pick the FIRST member row whose per-scenario mode is neither identity (0: outaged/clamped/off)
-// nor pinned (4) — exactly OLF's "first enabled" free-role rule — else the fallback (control off).
-// psSkip is per (scenario, group); the picks read it for the current scenario, exactly as they read `mode`
-// already offset. Offset a by-value copy rather than indexing with s inside every pick.
-__device__ inline RelocTables relocForScenario(RelocTables rt, int s) {
-    if (rt.psSkip != nullptr) {
-        rt.psSkip += (size_t) s * rt.psGroups;
-    }
-    if (rt.dqSub != nullptr) {
-        rt.dqSub += (size_t) s * rt.nDqMembers;
-    }
-    return rt;
-}
-
-__device__ inline int relocChoose(int g, const int* qrPtr, const int* qrRows, const int* mode) {
-    int p0 = qrPtr[g];
-    int cnt = qrPtr[g + 1] - p0;
-    for (int c = 1; c < cnt; c++) {
-        int m = mode[qrRows[p0 + c]];
-        if (m != 0 && m != 4 && m != 6) {
-            return c;
-        }
-    }
-    return 0;
-}
-
-// relocChoose restricted to the base pilot's SUBGROUP (tasks #71): candidate c is member qrMemberStart[g] + c - 1,
-// and a member the scenario moved to another subgroup can host neither the pilot's balance nor be its carrier.
-// sub is already offset to the scenario (relocForScenario / the caller).
-__device__ inline int relocChooseSub(int g, const int* qrPtr, const int* qrRows, const int* mode,
-                                     const char* sub, const int* qrMemberStart) {
-    if (sub == nullptr || qrMemberStart == nullptr || qrMemberStart[g] < 0) {
-        return relocChoose(g, qrPtr, qrRows, mode);
-    }
-    int p0 = qrPtr[g];
-    int cnt = qrPtr[g + 1] - p0;
-    for (int c = 1; c < cnt; c++) {
-        if (sub[qrMemberStart[g] + c - 1] != 0) continue;
-        int m = mode[qrRows[p0 + c]];
-        if (m != 0 && m != 4 && m != 6) {
-            return c;
-        }
-    }
-    return 0;
-}
-
-// The pilot of an ENROLLED pilot-self group (rotation property): its Q is re-routed through the candidate
-// table, so a pin must NOT turn its own row into a Q balance — the row keeps BUS_TARGET_V while the pinned
-// balance rides the carrier (updateDistrQTargetsBatch puts the pin limit there). Measured before this:
-// the pilot's row went mode 4 with target -0.444 and NO q content (its q had gone to the carrier), F = -target.
-// psPilotEntry marker: a PILOT-SELF group whose pilot has no reactive-limit entry (see pilotSelfGateBatch).
-// Distinct from -1 ("not a pilot-self group"), and negative so every `pe >= 0` test still reads it as "no entry".
-static constexpr int PS_NO_ENTRY = -2;
-
-__device__ inline bool isEnrolledPilot(const int* psEntry, int nQr, int i) {
-    if (psEntry == nullptr) return false;
-    for (int g = 0; g < nQr; g++) {
-        if (psEntry[g] == i) return true;
-    }
-    return false;
-}
-
-// DEPENDENT-PILOT routing (ExtractionColumns: a merged remote group's dependent controlled bus has a candidate
-// group of its own, the same member rows as its base group's). The bus keeps its two-way reactive row - its
-// parent coupler's dummy row while that coupler lives, its own row once the coupler is dead - UNLESS its own
-// row has become the voltage identity (OLF re-elected it the main of the survivors): then its balance rides the
-// first free member row of its group, exactly as the base pilot's does, and so does a cross identity on the
-// dummy row (mode 6, the main under a live coupler). A root (no relocation) reads its own row the same way.
-__device__ inline int depPick(int slot, int frozen, int altDest, int selRow, const int* mode, RelocTables rt) {
-    int fr = selRow <= -2 ? -2 - selRow : selRow;
-    int mf = mode[fr];
-    if (selRow <= -2) {                                      // a relocated child: fr is the parent's dummy row
-        if (mf == 1 || mf == 4) return frozen;               // the coupler lives (or the pin sits there)
-        if (mf == 0) {                                       // the coupler is dead: home, unless home is the identity
-            int mo = mode[rt.relocOwn[fr]];
-            if (mo != 0 && mo != 6) return altDest;
-        }
-    } else if (mf != 0 && mf != 6) {                         // a root: its own row, unless that is the identity
-        return frozen;
-    }
-    return rt.pool[rt.off[slot] + relocChooseSub(rt.group[slot], rt.qrPtr, rt.qrRows, mode, rt.dqSub, rt.qrMemberStart)];
-}
-
-// zi q-slot dynamic pick (F/J slots {0..3} per element): group -> mode-scan candidate slot,
-// two-way -> alt when the select row is identity/pinned this scenario, else the frozen dest.
-__device__ inline int ziDynDest(int frozen, int slot, const int* alt, const int* sel,
-                                const int* mode, RelocTables rt) {
-    int rg = rt.group != nullptr ? rt.group[slot] : -1;
-    if (rg >= 0) {
-        if (rt.dep != nullptr && rt.dep[slot]) {
-            return depPick(slot, frozen, alt[slot], sel[slot], mode, rt);
-        }
-        if (rt.off[slot] < 0) {                              // STOCK PAIR: group slot holds the dummy ROW
-            return stockPairPick(mode[rg], rt.pool, -rt.off[slot] - 1, frozen, mode, rt.relocOwn, rg);
-        }
-        if (rt.psSkip != nullptr && rt.psSkip[rg]) {
-            return -1;                                       // pilot-self group, pilot unpinned: no raw q
-        }
-        return rt.pool[rt.off[slot] + relocChooseSub(rg, rt.qrPtr, rt.qrRows, mode, rt.dqSub, rt.qrMemberStart)];
-    }
-    int sr = sel != nullptr ? sel[slot] : -1;
-    if (sr <= -2) {
-        return mode[-2 - sr] == 0 ? alt[slot] : frozen;       // stock-placement: identity only (see stockAltRow)
-    }
-    return (sr >= 0 && (mode[sr] == 0 || mode[sr] == 4)) ? alt[slot] : frozen;
-}
-
-__device__ void scatterAddDyn(int nout, const int* dest, const int* altDest, const int* selRow,
-                              const int* mode, const double* o, double* vals, double* F,
-                              RelocTables rt, int eOff) {
-    for (int k = 0; k < nout; k++) {
-        int d;
-        int rg = rt.group != nullptr ? rt.group[eOff + k] : -1;
-        if (rg >= 0 && rt.dep != nullptr && rt.dep[eOff + k]) {
-            d = depPick(eOff + k, dest[k], altDest[k], selRow[k], mode, rt);
-        } else if (rg >= 0 && rt.off[eOff + k] < 0) {        // STOCK PAIR: group slot holds the dummy ROW
-            d = stockPairPick(mode[rg], rt.pool, -rt.off[eOff + k] - 1, dest[k], mode, rt.relocOwn, rg);
-        } else if (rg >= 0 && rt.psSkip != nullptr && rt.psSkip[rg]) {
-            continue;                                        // pilot-self group, pilot unpinned: no raw q
-        } else if (rg >= 0) {
-            d = rt.pool[rt.off[eOff + k] + relocChooseSub(rg, rt.qrPtr, rt.qrRows, mode, rt.dqSub, rt.qrMemberStart)];
-        } else {
-            int sr = selRow[k];
-            bool useAlt = sr >= 0 ? (mode[sr] == 0 || mode[sr] == 4)
-                                  : (sr <= -2 && mode[-2 - sr] == 0);   // stock-placement: identity only
-            d = useAlt ? altDest[k] : dest[k];
-        }
-        if (d >= 0) {
-            atomicAdd(&vals[d], o[k]);
-        } else if (d <= -2) {
-            atomicAdd(&F[-2 - d], o[k]);
-        }
-    }
-}
+#include "equations/scatter.cuh"
 
 __global__ void fillVdlBatch(int ne, int nScenarios, int n, int nnz,
                              const double* in, const int* ix, const int* dest,
                              const double* x, double* vals, double* F,
                              const int* altRow, const int* altDest, const int* mode);
 
-// Scatter one (dest, value): dest >= 0 -> J slot, dest <= -2 -> F row, -1 -> skip.
-__device__ inline void addAt(int dest, double val, double* vals, double* F) {
-    if (dest >= 0) {
-        atomicAdd(&vals[dest], val);
-    } else if (dest <= -2) {
-        atomicAdd(&F[-2 - dest], val);
-    }
-}
-
-// How accurately did the LINEAR solve actually solve? Per row, r_i = (J.dx)_i -/+ F_i, per scenario: every
-// scenario has its OWN values block (stride nnz) and its own dx / F block (stride n), over the SHARED sparsity
-// pattern. ||r|| at round-off relative to ||F|| means the solve is exact; a large ||r|| is what iterative
-// refinement corrects (this is also refinement's own first step).
 // ---------------------------------------------------------------------------------------------
 // ZERO-DIAGONAL ROW REPAIR. The batched solve runs cuDSS without pivoting or matching (neither is
 // supported for uniform batches), on the promise that the diagonal-pairing row permutation leaves
@@ -1448,20 +1110,6 @@ __device__ inline void addAt(int dest, double val, double* vals, double* F) {
 // those factors goes through the same combination (the unit vectors of the sensitivity solves too).
 // The pattern carries the union of each row with its candidates so the addition lands in place.
 // ---------------------------------------------------------------------------------------------
-__device__ inline int csrFind(const int* rowPtr, const int* colIdx, int row, int col) {
-    int lo = rowPtr[row];
-    int hi = rowPtr[row + 1];
-    while (lo < hi) {
-        int mid = (lo + hi) >> 1;
-        if (colIdx[mid] < col) {
-            lo = mid + 1;
-        } else {
-            hi = mid;
-        }
-    }
-    return (lo < rowPtr[row + 1] && colIdx[lo] == col) ? lo : -1;
-}
-
 __global__ void hazSnapshotVals(int nHaz, int nS, int nnz, int hazTot, const int* hazRow, const int* hazOff,
                                 const int* rowPtr, const double* vals, double* snap) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -2198,6 +1846,10 @@ __global__ void linResidScoreBatch(int n, int nS, const double* rp, const double
     score[3 * s + 2] = (mf > 0.0 && isfinite(mp) && isfinite(mm)) ? fmin(mp, mm) / mf : 1e300;
 }
 
+// How accurately did the LINEAR solve actually solve? Per row, r_i = (J.dx)_i -/+ F_i, per scenario: every
+// scenario has its OWN values block (stride nnz) and its own dx / F block (stride n), over the SHARED sparsity
+// pattern. ||r|| at round-off relative to ||F|| means the solve is exact; a large ||r|| is what iterative
+// refinement corrects (this is also refinement's own first step).
 __global__ void linResidRowBatch(int n, int nS, int nnz, const int* rowPtr, const int* colIdx,
                                  const double* vals, const double* dx, const double* F,
                                  double* rPlus, double* rMinus) {
@@ -2226,81 +1878,9 @@ __global__ void stepFromPrevBatchMasked(int n, int total, const double* xPrev, c
     }
 }
 
-inline int grid(int n) { return (n + BLOCK - 1) / BLOCK; }
+#include "common/device_buf.cuh"
 
-// ---------------------------------------------------------------------------------
-// The solver context: every device buffer + the cuDSS objects, freed by destructor.
-// ---------------------------------------------------------------------------------
-
-struct DeviceBuf {
-    void* p = nullptr;
-    size_t cap = 0;                                          // bytes currently allocated
-    ~DeviceBuf() { if (p) cudaFree(p); }
-    template <typename T> T* as() { return static_cast<T*>(p); }
-    /** Grow-only: keeps the buffer when it is already big enough, frees and reallocates when it is
-     *  not. The old alloc() cudaMalloc'd over a live pointer on every call and leaked the previous
-     *  allocation — any per-pass re-upload (the in-kernel TVC loop rebuilds the tap-override list
-     *  every time a tap moves) needs a buffer that can be refilled without leaking. */
-    void ensure(size_t bytes) {
-        if (bytes > cap) {
-            if (p) { cudaFree(p); p = nullptr; }
-            CUDA_CHECK(cudaMalloc(&p, bytes));
-            cap = bytes;
-            // Every fresh allocation is ZEROED. A buffer read before it is
-            // written holds whatever the previous owner of that device memory left: zeros in a fresh process,
-            // stale content after other solves in the same one - which is how a read-before-write showed up
-            // as an in-suite-only flake (2026-10-06: devicePilotLosingItsOwnGeneratorWithPinningSurvivor 3 of
-            // 7 class runs, 2e-6 kV or a device failure, 0 of 5 with this on; the culprit was dRlActive read by
-            // the seed launch of updatePilotVeqBatch, whose comment assumed "rlActive is still 0"). Zeroing
-            // makes that assumption a guarantee instead of a property of the process's allocation history;
-            // the cost is one memset per cudaMalloc, at context creation, not per iteration.
-            CUDA_CHECK(cudaMemset(p, 0, bytes));
-            // OLF_GPU_ALLOC_TRACE=1 prints each allocation's index and size.
-            static long allocIndex = -1;
-            ++allocIndex;
-            static const char* trace = std::getenv("OLF_GPU_ALLOC_TRACE");
-            if (trace != nullptr) {
-                std::fprintf(stderr, "ALLOC #%ld %zu bytes\n", allocIndex, bytes);
-                if (std::atol(trace) == allocIndex) {        // OLF_GPU_ALLOC_TRACE=<k>: host backtrace of that one
-                    void* frames[24];
-                    int nf = backtrace(frames, 24);
-                    backtrace_symbols_fd(frames, nf, 2);
-                }
-            }
-        }
-    }
-    void alloc(size_t bytes) { ensure(bytes); }
-    void upload(const void* host, size_t bytes) {
-        alloc(bytes);
-        CUDA_CHECK(cudaMemcpy(p, host, bytes, cudaMemcpyHostToDevice));
-    }
-};
-
-struct CudssCtx {
-    cudssHandle_t handle = nullptr;
-    cudssConfig_t config = nullptr;
-    cudssData_t data = nullptr;
-    cudssMatrix_t matA = nullptr, matB = nullptr, matX = nullptr;
-    ~CudssCtx() {
-        if (matA) cudssMatrixDestroy(matA);
-        if (matB) cudssMatrixDestroy(matB);
-        if (matX) cudssMatrixDestroy(matX);
-        if (data && handle) cudssDataDestroy(handle, data);
-        if (config) cudssConfigDestroy(config);
-        if (handle) cudssDestroy(handle);
-    }
-};
-
-struct Family {
-    int ne = 0, instride = 0, ixstride = 0, nout = 0;
-    DeviceBuf in, ix, dest;
-    DeviceBuf altDest, selRow;                               // Dynamic Q-relocation (cb only); empty when disabled
-    DeviceBuf relocGroup, relocOff, relocPool;               // GROUP relocation (plan-A6): per-output group id +
-    DeviceBuf relocDep;                                      // per output: 1 = dependent-pilot routing (depPick)
-    bool dynReloc = false;                                   // slot-pool offset; pool = one slot per candidate
-    DeviceBuf pcDest, pcSel;                                 // Continuous phase control (cb only): P-flow row at a1
-    bool phaseCtl = false;                                   // pcDest/pcSel populated (mode-3 gated emission)
-};
+#include "structure/shared_structure.cuh"
 
 // Build one family's device-side data (inputs, indices, role-folded destinations).
 template <typename S, typename R>
@@ -2325,34 +1905,6 @@ void setupFamily(Family& f, int ne, const double* in, int instride, const int* i
 // Choosing the ordering ourselves — a bus-ordered J — fixes any
 // numbering. The mismatch/targets are permuted the same way; columns are untouched, so
 // the solution dx needs no back-permutation.
-// ziIdx slot 10 packs two things: bit 0 = spanning-tree edge, bits 1-2 = which side is a DEAD-END
-// STUB (0 = none, see GpuAcRowIndexing#ziDeadEndSide). On a stub the four rows around the branch
-// would all have a ZERO DIAGONAL — ZERO_V and ZERO_PHI never depend on their own dummy, and the
-// stub's P/Q balances carry only -DUMMY_P / -DUMMY_Q — and cuDSS's symmetric AMD ordering
-// mis-factors that chain, perturbing the zero pivot and propagating its reciprocal. The Java packer
-// therefore moves the stub's P/Q balances onto the dummy rows (slots 0..3 already carry them) and
-// ZERO_V / ZERO_PHI onto the stub's own v / phi rows, which is what these two derive. Slots 4/5
-// stay the dummy COLUMNS, because the kernel reads the dummy values through them.
-inline int ziSpan(const int* z) { return z[10] & 1; }
-inline int ziDeadSide(const int* z) { return (z[10] >> 1) & 3; }
-// STOCK placement (no child): ZERO_V on the DUMMY_Q row and ZERO_PHI on the DUMMY_P row - CROSSWISE. Neither
-// equation holds a dummy, so either way both rows are zero-diagonal hazards the numeric repair fills from a
-// donor row carrying that dummy: a Q row for DUMMY_Q, a P row for DUMMY_P. The repaired row is then
-// row_h + s*row_d, and the 2x2 principal block of (row_d, row_h') on (donor diagonal, dummy) is singular
-// unless row_h has an entry of its own in the donor's diagonal column: ZERO_V (v_a - rho*v_b) has one in a
-// Q row's V diagonal, ZERO_PHI (phi_a - phi_b) in a P row's PHI diagonal. The other way round (ZERO_V on the
-// DUMMY_P row, repaired from a P row) the block is {[955.8, 1], [-955.8, -1]} exactly - measured on
-// network.xiidm's cut trees, 35 such pairs in one dump, and the unpivoted uniform-batch factorization lost
-// them (rte6515: 37 stock couplers in every scenario's matrix). Crosswise, det = -+1 on every such block.
-inline int ziZeroVRow(const int* z) {
-    int d = ziDeadSide(z);
-    return d == 0 ? z[5] : (d == 1 ? z[6] : z[7]);           // the child's own v row
-}
-inline int ziZeroPhiRow(const int* z) {
-    int d = ziDeadSide(z);
-    return d == 0 ? z[4] : (d == 1 ? z[8] : z[9]);           // the child's own phi row
-}
-
 std::vector<int> buildRowMap(int n, int ncb, const int* cbIdx, int nob, const int* obIdx,
                              int nsh, const int* shIdx, int nhv, const int* hvIdx,
                              int ndq, const int* dqRow, int nzi, const int* ziIdx) {
@@ -2587,68 +2139,6 @@ void collectFamilyPattern(const std::vector<int>& rowMap,
         }
     }
 }
-
-// ---------------------------------------------------------------------------------
-// The SHARED STRUCTURE: everything the two solver contexts derive from ONE extraction
-// (GpuAcData) — the diagonal-pairing row permutation, the CSR pattern (host + device),
-// the per-family device data with role-folded destination arrays, the DISTR_Q /
-// DISTR_RHO / zero-impedance packs, the per-element static trig. It is built ONCE per
-// extraction (cached Java-side per GpuAcData by GpuAcStructures) and held by shared_ptr
-// — a batched context outliving the Java-side owner keeps the structure alive.
-// ---------------------------------------------------------------------------------
-
-struct SharedStructure {
-    int n = 0;
-    int nnz = 0;
-    int nElements = 0;                                       // ncb + nob + nsh + nhv (disabled-mask layout)
-    int cbOffset = 0, obOffset = 0, shOffset = 0, hvOffset = 0;
-    std::vector<int> rowMap;                                 // eq row -> paired variable col
-    std::vector<int> rowPtr, colIdx;                         // host CSR pattern (mode-2 blkdiag build)
-    Family cb, ob, sh, hv;
-    int ndq = 0;                                             // DISTR_Q weighted reactive contributions
-    DeviceBuf dDqElem, dDqSide, dDqKind, dDqWeight, dDqDest; // ndq each (dDqDest is ndq*6)
-    DeviceBuf dRelocOwn;                                     // per row: the relocated child's OWN row for a
-                                                             // coupler DUMMY row, -1 elsewhere (stock placement)
-    DeviceBuf dDqZiRow;                                      // per contribution: a kind-3 coupler dummy
-                                                             // column's device ROW, -1 otherwise
-    DeviceBuf dDqAlt, dDqSel;                                // the STOCK-placement twin of dDqDest
-                                                             // (ndq*6) and the dummy row it keys on (ndq)
-    int nzi = 0;                                             // zero-impedance branches
-    DeviceBuf dZiIn, dZiIdx, dZiDest;                        // nzi (dZiIn) / nzi*11 (dZiIdx) / nzi*14 (dZiDest)
-    DeviceBuf dDrQrGroup;                                    // per DISTR_RHO contribution: the qr relocation group
-    int drQr = 0;                                            // whose candidates contain its row (-1 none) — the seq
-                                                             // fill suppresses the CURRENT carrier's row in-kernel
-    DeviceBuf dZiAltDest;                                    // zi dynamic Q-routing (ob/zi channels): per element,
-    DeviceBuf dZiSelRow;                                     // 4 q slots {F1,F2,J1,J2} alt dests + select rows, and
-    DeviceBuf dZiRelocGroup;                                 // the GROUP relocation tables (same encodings as the
-    DeviceBuf dZiRelocOff;                                   // cb/sh families)
-    DeviceBuf dZiRelocPool;
-    bool ziDyn = false;
-    int ndr = 0;                                             // DISTR_RHO linear contributions
-    DeviceBuf dDrCol, dDrCoef, dDrDest;                      // ndr each (dDrDest is ndr*2)
-    int ndb = 0;                                             // DISTR_SHUNT_B linear contributions
-    DeviceBuf dDbCol, dDbCoef, dDbDest;                      // ndb each (dDbDest is ndb*2)
-    int nvdl = 0;                                            // voltage-dependent load model terms (ZIP/exp)
-    DeviceBuf dVdlIn, dVdlIdx, dVdlDest;                     // nvdl*3 (c, n, target — verbatim OLF) / nvdl*2 (row, vCol) / nvdl
-    DeviceBuf dVdlAltRow, dVdlAltDest;                       // nvdl each: a relocated child's home row and slot (-1: none)
-    bool vdlDyn = false;
-    int nQr = 0;                                             // pilot-Q relocation GROUPS (plan-A6): candidate
-    std::vector<int> hQrPtr, hQrRows;                        // tables [fallback row, member rows...] per group
-    DeviceBuf dQrPtr, dQrRows;                               // (rows in DEVICE row space, rowMap applied)
-    std::vector<int> hQrDepBase, hQrBaseTargetRow;          // DEPENDENT pilots (a merged remote group's dependent
-    std::vector<int> hDepGroupOfRow;                         // controlled bus): per group its base group (-1 = a base
-    DeviceBuf dQrDepBase, dQrBaseTargetRow;                  // group) and the base row of its reactive target; per
-    DeviceBuf dZiRelocDep;                                   // DEVICE row the dependent group of its owner bus
-    DeviceBuf dRowPtr, dColIdx, dDiagPos;                    // device CSR pattern + guaranteed-diagonal slots
-    int nHaz = 0, hazTot = 0;                                // zero-diagonal repair: hazard rows and their
-    std::vector<int> hHazRow;                                // donor candidates (see hazRepairVals)
-    DeviceBuf dHazRow, dHazOff, dHazDonorPtr, dHazDonor, dHazDonorHaz, dHazSign;
-    double luBytes = 0.0;                                    // cached LU-probe footprint (0 = not probed yet)
-};
-
-// The native handle Java holds (GpuAcStructures) is a heap-allocated shared_ptr; each
-// context copies it, so destroyStructure only drops the Java-side reference.
-using SharedStructurePtr = std::shared_ptr<SharedStructure>;
 
 static void buildDistrQDest(SharedStructure* st, const CsrPattern& pos, const std::vector<int>& rowMap,
                             int ndq, const int* dqElem, const int* dqSide, const int* dqKind,
@@ -3689,25 +3179,7 @@ void refreshStructureValues(SharedStructure& st, int ncb, const double* cbIn, in
 
 // Batched fill kernels: thread = element x scenario. Skip if the scenario has retired
 // (converged) or the element is outaged in that scenario. Values/mismatch are per-scenario.
-// Per-scenario closed-branch TAP override (tap/PST actions on FIXED-tap transformers): entries
-// are (slot, cb elem) with the target tap's FULL static row (y g1 g2 b1 b2 ksi r1 a1)
-// replacing the element's cbIn row — per-tap r/x/g/b changes are first-class (y/ksi move).
-// Java guards that the branch's ratio/phase are NOT state variables (r1col/a1col == -1), so
-// the state path never conflicts. An override invalidates the element's precomputed trig
-// statics (ksi/a1 may differ) — the caller must take the raw-sincos path (same fallback as
-// a state-variable a1). Returns true when out8 holds the replacement row.
-__device__ inline bool findTapOverride(int nTapOv, const int* tapOvSlotElem, const double* tapOvVal,
-                                       int s, int e, double* out8) {
-    for (int k = 0; k < nTapOv; k++) {
-        if (tapOvSlotElem[2 * k] == s && tapOvSlotElem[2 * k + 1] == e) {
-            for (int c = 0; c < 8; c++) {
-                out8[c] = tapOvVal[8 * k + c];
-            }
-            return true;
-        }
-    }
-    return false;
-}
+#include "equations/scenario_overrides.cuh"
 
 // OLF_GPU_CB_PROBE=<cb element index>: the pi row the device ACTUALLY evaluates for that closed
 // branch in EVERY slot, after findTapOverride, alongside its disabled/active bits. The host knows
@@ -3861,19 +3333,6 @@ __global__ void fillOpenBranchBatch(int ne, int nScenarios, int n, int nnz, int 
     }
 }
 
-// Per-scenario shunt admittance override (section shifts / reconnection): entries are
-// (slot, PACK elem) pairs with (dG, dB) deltas added onto the static per-element g/b. Linear
-// scan per thread — the list is a handful of entries per run.
-__device__ inline void applyShuntOverride(int nShOv, const int* shOvSlotElem, const double* shOvGb,
-                                          int s, int e, double& g, double& b) {
-    for (int k = 0; k < nShOv; k++) {
-        if (shOvSlotElem[2 * k] == s && shOvSlotElem[2 * k + 1] == e) {
-            g += shOvGb[2 * k];
-            b += shOvGb[2 * k + 1];
-        }
-    }
-}
-
 __global__ void fillShuntBatch(int ne, int nScenarios, int n, int nnz, int nElements, int elemOffset,
                                const double* in, const int* ix, const int* dest,
                                const double* x, double* vals, double* F,
@@ -3955,45 +3414,6 @@ static_assert(SH_SCATTER[0].role == 0 && SH_SCATTER[2].role == 0,
               "shunt residual outputs moved — update fillShuntBatchF");
 static_assert(HVDC_SCATTER[0].role == 0 && HVDC_SCATTER[3].role == 0,
               "hvdc residual outputs moved — update fillHvdcBatchF");
-
-__device__ void scatterAddF(int nres, const int* dest, const int* pos, const double* o, double* F) {
-    for (int k = 0; k < nres; k++) {
-        int d = dest[pos[k]];
-        if (d <= -2) {
-            atomicAdd(&F[-2 - d], o[k]);
-        }
-    }
-}
-
-// Dynamic Q-relocation, residual-only variant: route each residual to its alternate F row when the
-// frozen row is an identity this scenario. dest/altDest/selRow are the element's per-output slices;
-// pos maps each of the nres residuals to its CB_NOUT output index.
-__device__ void scatterAddFDyn(int nres, const int* dest, const int* altDest, const int* selRow,
-                               const int* pos, const int* mode, const double* o, double* F,
-                               RelocTables rt, int eOff) {
-    for (int k = 0; k < nres; k++) {
-        int idx = pos[k];
-        int d;
-        int rg = rt.group != nullptr ? rt.group[eOff + idx] : -1;
-        if (rg >= 0 && rt.dep != nullptr && rt.dep[eOff + idx]) {
-            d = depPick(eOff + idx, dest[idx], altDest[idx], selRow[idx], mode, rt);
-        } else if (rg >= 0 && rt.off[eOff + idx] < 0) {      // STOCK PAIR: group slot holds the dummy ROW
-            d = stockPairPick(mode[rg], rt.pool, -rt.off[eOff + idx] - 1, dest[idx], mode, rt.relocOwn, rg);
-        } else if (rg >= 0 && rt.psSkip != nullptr && rt.psSkip[rg]) {
-            continue;                                        // pilot-self group, pilot unpinned: no raw q
-        } else if (rg >= 0) {
-            d = rt.pool[rt.off[eOff + idx] + relocChooseSub(rg, rt.qrPtr, rt.qrRows, mode, rt.dqSub, rt.qrMemberStart)];
-        } else {
-            int sr = selRow[idx];
-            bool useAlt = sr >= 0 ? (mode[sr] == 0 || mode[sr] == 4)
-                                  : (sr <= -2 && mode[-2 - sr] == 0);   // stock-placement: identity only
-            d = useAlt ? altDest[idx] : dest[idx];
-        }
-        if (d <= -2) {
-            atomicAdd(&F[-2 - d], o[k]);
-        }
-    }
-}
 
 __global__ void fillClosedBranchBatchF(int ne, int nScenarios, int n, int nnz, int nElements, int elemOffset,
                                        const double* in, const int* ix, const int* dest,
@@ -4161,41 +3581,11 @@ __global__ void fillHvdcBatchF(int ne, int nScenarios, int n, int nnz, int nElem
 // generator while the group's other controllers survive). OLF's updateReactiveKeys zeroes its key
 // and renormalizes over the rest — the same treatment a PINNED member gets, except its target
 // contribution stays its own targetQ instead of a reactive limit.
-// A row an islanding outage FROZE to a flat identity state. Its target is not the outer loops' to
-// write: OLF removes an islanded bus's equations altogether, so nothing there re-derives a target.
-// Measured on rte6515 LINE-1525-590: the DISTR_Q target writer stamped 0.0 over a frozen voltage row
-// still holding 1.0, which is an exact 1.0 residual on an identity row and the whole 1.192e-06 kV.
-__device__ __forceinline__ bool rowIsFrozen(int nFrozen, const int* frozenSlotRow, int s, int row) {
-    for (int k = 0; k < nFrozen; k++) {
-        if (frozenSlotRow[2 * k] == s && frozenSlotRow[2 * k + 1] == row) return true;
-    }
-    return false;
-}
-
-__device__ __forceinline__ bool dqMemberInactive(int nInact, const int* inactSlotMember, int s, int m) {
-    for (int k = 0; k < nInact; k++) {
-        if (inactSlotMember[2 * k] == s && inactSlotMember[2 * k + 1] == m) {
-            return true;
-        }
-    }
-    return false;
-}
-
 static int gpuDqTraceRow() {
     // OLF_GPU_DQ_TRACE=<deviceRow>: every DISTR_Q residual contribution landing in that row.
     static const char* e = std::getenv("OLF_GPU_DQ_TRACE");
     static int v = e != nullptr ? std::atoi(e) : -1;
     return v;
-}
-
-// A member's reactive key this scenario: the per-scenario override (OLF's updateReactiveKeys after the scenario's
-// generator losses) when the plan wrote one, else the base pack's. Tiny lists, a linear scan per lookup.
-__device__ inline double dqKeyOf(int nKeyOv, const int* keyOvIdx, const double* keyOvKey, int s, int m,
-                                 const double* mKey) {
-    for (int i = 0; i < nKeyOv; i++) {
-        if (keyOvIdx[2 * i] == s && keyOvIdx[2 * i + 1] == m) return keyOvKey[i];
-    }
-    return mKey[m];
 }
 
 __global__ void fillDistrQBatch(int ndq, int nScenarios, int n, int nnz, int nElements,
@@ -4594,24 +3984,6 @@ __global__ void initFBatch(int n, int nScenarios, const double* target, double* 
 // controller (mode 0) starts at limitType 0. For a base-PQ controller, v below its target ⇒ it is producing
 // max reactive yet cannot reach target ⇒ maxQ-pinned (2); v above target ⇒ minQ-pinned (1). switchCount
 // starts at 0 either way (a separate memset).
-// Per-scenario RL V-target override (secondary voltage control moves generator-VC targets): entries are
-// (slot, rl index) pairs with the REPLACEMENT target. Linear scan — the list is a handful of entries.
-__device__ inline double rlTargetOf(int nRlVtOv, const int* rlVtOvSlotIdx, const double* rlVtOvVal,
-                                    const double* svcRlVt, int nrl, int s, int i, double baseTarget) {
-    if (svcRlVt != nullptr) {                                // a zone moved this controller's target: the
-        double v = svcRlVt[(size_t) s * nrl + i];            // switch-back must compare against the MOVED one
-        if (!isnan(v)) {
-            return v;
-        }
-    }
-    for (int k = 0; k < nRlVtOv; k++) {
-        if (rlVtOvSlotIdx[2 * k] == s && rlVtOvSlotIdx[2 * k + 1] == i) {
-            return rlVtOvVal[k];
-        }
-    }
-    return baseTarget;
-}
-
 // Reactive-limit limit types: 0 unpinned, 1 MIN_Q, 2 MAX_Q, 3 MIN_REALISTIC_V, 4 MAX_REALISTIC_V, and
 // 5 = frozen by OLF's GeneratorVoltageControlManager. 6 arrives only as a BASE code
 // (GpuAcOuterLoopPacks.RL_BASE_RELOCATED, keep the two in step): "this entry does not own the pin on its V
@@ -7456,506 +6828,7 @@ __global__ void writeIdentityForInactive(int n, int nScenarios, int nnz, const i
     F[(size_t) s * n + r] = 0.0;
 }
 
-// The batched solver context: the SHARED structure (pattern, families, destination arrays,
-// static trig — held by shared_ptr, see SharedStructure) + per-scenario value/state arrays and this consumer's own cuDSS
-// objects/analysis. Structure notes that are batch-specific:
-// - DISTR_Q: the controller structure is fixed across scenarios; the per-scenario disable
-//   mask drops an outaged contributor's term (kinds 0/2 = closed/open).
-// - DISTR_RHO: no per-scenario mask — a contingency that outages a controlling transformer
-//   is rejected to the CPU (the 1/count coefficients would reform).
-// - Zero-impedance: no per-scenario mask — a zero-imp outage is auto-rejected (the element
-//   mapper maps it to -1), so the fill just replicates the base.
-struct BatchSolverContext {
-    int loopTraceSlot = -1;                                  // OLF_GPU_LOOP_TRACE by CONTINGENCY: the slot the host resolved for this chunk
-    SharedStructurePtr st;                                   // built once per extraction, see SharedStructure
-    int n = 0;
-    int nnz = 0;
-    int nScenarios = 0;
-    int nElements = 0;
-    int cbOffset = 0, obOffset = 0, shOffset = 0, hvOffset = 0;   // element-mask offsets per family
-    int ndq = 0, ndr = 0, ndb = 0, nzi = 0;                  // copies of the structure counts
-    DeviceBuf dX, dTarget, dF, dB, dDx, dVals, dMode;        // per-scenario (n or nnz strided)
-    // per scenario: the state at its last CONVERGED inner solve (its starting state before any): what OLF's network
-    // holds when a run fails (NewtonRaphson updates the buses only on convergence), and so where OLF starts the
-    // strategies of a contingency that ran out of iterations (PreviousValueVoltageInitializer)
-    DeviceBuf dXLastConv;
-    DeviceBuf dTargetBase;                                   // the base targets (n), before tiling/overrides
-    DeviceBuf dHazSnap, dHazBSnap, dHazChoice;               // zero-diagonal repair scratch (lazy)
-    int hazCap = 0;
-    bool clampStep = false;                                  // MAX_VOLTAGE_CHANGE per-scenario step clamp (set per solve)
-    double maxDv = 0.0, maxDphi = 0.0;
-    DeviceBuf dVarType, dStepFactor;                         // n ints / nS factors (lazy, first clamped solve)
-    DeviceBuf dXprevLs;                                      // n*nS pre-step iterates (lazy, LINE_SEARCH solves)
-    int lsMaxIter = 10;                                      // LINE_SEARCH backtracks (setBatchLineSearch)
-    double lsStepFold = 4.0 / 3.0;
-    DeviceBuf dNorms;                                        // nS*4 device-side convergence norms (see residualNormsBatch)
-    DeviceBuf dThrIdent, dThrPower;                          // n each: per-row PER_EQUATION_TYPE thresholds (empty = 2-norm/infnorm criterion)
-    bool perRowCriteria = false;
-    DeviceBuf dThrAlt, dThrSel;                              // n each: the alternate threshold and its selector row (see residualNormsBatch)
-    bool perRowAlt = false;
-    int nShOv = 0;                                           // per-scenario shunt admittance overrides (set per solve)
-    DeviceBuf dShOvSlotElem, dShOvGb;                        // nShOv*2 ints (slot, PACK elem) / nShOv*2 doubles (dG, dB)
-    int nziBase = 0;                                         // zi elements [0,nziBase) always enabled; [nziBase,nzi) are
-                                                             // base-open closable switches gated by the ziOn list
-    int nZiOn = 0;
-    int nZiOff = 0;
-    DeviceBuf dZiTreeSlotElemVal;                          // per (scenario, coupler) OLF tree flag where it differs from extraction
-    int nZiTree = 0;
-    DeviceBuf dZiOffSlotElem;                                // nZiOff*2 ints (slot, zi elem) — scenarios that OPEN a switch
-    DeviceBuf dZiOnSlotElem;                                 // nZiOn*2 ints (slot, zi elem) — scenarios that CLOSE a switch
-    // DENSE (scenario, zi element) forms of the three lists above and of the tree overrides, nScenarios*nzi chars
-    // each: the fill kernel read them as linear scans PER THREAD, O(nzi * nS * (nZiOff + nZiOn + nZiTree)) - on
-    // network.xiidm's full non-busbar scope fillZeroImpBatch was the top kernel, 32 s of 126 s (45 ms a launch).
-    DeviceBuf dZiOffMask, dZiOnMask, dZiTreeMask;            // off/on: 1 = listed; tree: -1 = no override, else 0/1
-    bool hasZiMasks = false;
-    int nR1Ov = 0;                                           // per-scenario closed-branch tap overrides (tap/PST actions)
-    DeviceBuf dR1OvSlotElem, dR1OvVal;                       // nR1Ov*2 ints / nR1Ov*8 doubles (full cbIn row per entry)
-    // ---- solve-only batch compaction (mode 3, tol > 0): lazily allocated on first engage ----
-    DeviceBuf dValsC, dBC, dDxC, dMapC;                      // nnz*cap / n*cap / n*cap / cap ints
-    CudssCtx dsC;                                            // dedicated handle/config/data for the compact width
-    cudssMatrix_t matUbC = nullptr, matUbCB = nullptr, matUbCX = nullptr;
-    cudssMatrix_t matUbCR = nullptr, matUbCDelta = nullptr;   // adaptive refinement on the compacted solve
-    cudssMatrix_t matUbR = nullptr, matUbDelta = nullptr;     // ...and on the full-width UBATCH solve
-    DeviceBuf dRC, dDeltaC;
-    int compactCap = 0;                                      // buffer capacity (nS/2)
-    int compactWidth = 0;                                    // currently ANALYZED ubatch width (0 = none)
-    // One ANALYZED cuDSS data object per compact width: a data object's
-    // buffers belong to the batch size it was analyzed at, but a width seen before -- the next chunk walks the
-    // same tiers, and so does the next run on this context -- can reuse its analysis instead of redoing it.
-    std::map<int, cudssData_t> compactData;
-    // setBatchX0Seeds: per-scenario starting values (flat s*n+row -> value) written over the tiled BASE state by
-    // the next solve that is given no full per-scenario state; consumed (cleared) by that solve.
-    std::vector<int> x0SeedIdx;
-    std::vector<double> x0SeedVal;
-    DeviceBuf dDisabled, dActive;                            // per-scenario masks
-    // Reactive limits (full-loadflow PV→PQ outer loop): per local-PV controller bus, its (rowMap-mapped)
-    // BUS_V row + reactive limits + load Q. dQbuf holds Σ branch q at every row (a fill into a zeroed
-    // buffer); dRlActive marks which scenarios to RL-check this pass; dRlSwitched flags scenarios that switched.
-    int nrl = 0;
-    DeviceBuf dRlVrow, dRlMinQ, dRlMaxQ, dRlLoadQ, dRlVtarget;   // per controller (nrl)
-    DeviceBuf dRlQrow;                                       // per controller: the row its reactive BALANCE and its
-                                                             // pin live on — its own V row, or, when the coupler-tree
-                                                             // relocation moved its power equations onto the parent
-                                                             // coupler's dummy columns, that coupler's DUMMY_Q row
-    // PILOT-SELF rotation: per qr group, the RL entry of a pilot that is one of its OWN controllers (-1 when
-    // the group is not of that shape), and the per-(scenario, group) gate the fills read. Both are DERIVED,
-    // so no new host table: a group is pilot-self exactly when its fallback row (candidate 0 = the pilot's
-    // own row) also appears among its member rows, and the pilot's entry is the RL entry sitting on that row.
-    DeviceBuf dPsPilotEntry;                                 // nQr ints
-    DeviceBuf dPsSkip;                                       // nQr * nScenarios chars
-    bool hasPilotSelf = false;
-    DeviceBuf dRlLoadQDyn;                                       // per (scenario, controller) — shed load Q
-    int nDqInact = 0;                                            // {slot, dqMember} pairs: a controller
-    DeviceBuf dDqInact;                                          // that stops controlling in ONE scenario
-    bool hasDqSub = false;                                       // tasks #71: per (scenario, dq member) subgroup
-    DeviceBuf dDqSub;                                            // labels (char, dense nS x nDqMembers) and the
-    DeviceBuf dQrMemberStart;                                    // qr group -> first dq member map
-    // Reactive capability CURVES at runtime P (setBatchRlCurves): per participating curve gen —
-    // cvIdx {rlIdx, pRow, ptsOff, npts, dsGenSlot}, cvIn {basePpu, share, baseRowTargetP, baseEvalMinPu, baseEvalMaxPu},
-    // cvPts {p_MW, minQ_MW, maxQ_MW} sorted by p; dRlMinQDyn/dRlMaxQDyn = nS*nrl evaluated limits.
-    int ncv = 0;
-    int cvExtrapolate = 0;                                 // OLF extrapolateReactiveLimits for curve gens
-    DeviceBuf dCvIdx, dCvIn, dCvPts, dRlMinQDyn, dRlMaxQDyn;
-    DeviceBuf dCvHv;                                         // per curve entry {hvdc, side}, see CvHvdc
-    bool cvHasHvdc = false;
-    DeviceBuf dCvPtr, dCvList;                             // the curves of each reactive-limit entry, CSR
-                                                           // (cvPtr[nrl + 1] into cvList[ncv], pack order kept)
-    // forceTargetQInReactiveLimits (GpuBatchForcedTargetQ): generators whose IIDM target Q OLF clamps into their
-    // curve limits at their CURRENT target P - on a bus whose Q balance carries it (qRow), or in a voltage-controlled
-    // bus's reactive limits (rlIdx). fqIdx stride 7 {qRow, dsGenSlot, ptsOff, npts, dsBusIdx, baseQRowMode, rlIdx}; fqIn stride 5 {basePpu, rawTargetQPu, baseClampedPu, share,
-    // baseRowTargetP}; dFqApplied [nS * nfq] = the clamped value the scenario's Q target carries now; dFqPre
-    // [nS * nfq] = each generator's loss pre-distribution move (pu), absent when no scenario pre-distributes.
-    int nfq = 0;
-    int nfqLim = 0;                                        // of which limit entries (voltage-controlled bus)
-    int fqExtrapolate = 0;
-    bool fqHasPre = false;
-    DeviceBuf dFqIdx, dFqIn, dFqPts, dFqApplied, dFqPre;
-    // DISTR_Q weight overrides (setBatchDqWeightOverrides): a gen outage at a remote-VC controller
-    // bus renormalizes the group's qPct keys per scenario — {s, contrib} pairs + the new weight.
-    int nDqOv = 0;
-    DeviceBuf dDqOvIdx, dDqOvW;
-    // Per-scenario member reactive KEYS (setBatchDqKeyOverrides, {slot, member} -> OLF's qPct after the scenario's
-    // generator losses): the DISTR_Q fill and the target kernel renormalize these over the members a pin leaves
-    // enabled, so an outage and an in-flight pin in one group compose. The per-contribution weight overrides stay
-    // for what keys cannot express (a re-extracted pack whose free role moved).
-    int nDqKeyOv = 0;
-    DeviceBuf dDqKeyOvIdx, dDqKeyOvKey;
-    // DISTR_RHO coefficient overrides (setBatchDrCoefOverrides): a member outage renormalizes the
-    // group's 1/count coefficients per scenario — {s, contrib} pairs + the new coefficient.
-    int nDrOv = 0;
-    DeviceBuf dDrOvIdx, dDrOvC;
-    // Per-scenario ACTIVE equation counts (setBatchActiveRowCounts): OLF's L2 stopping threshold is
-    // sqrt(eps^2 * nActive) and the CPU REMOVES equations for outaged elements carrying variables
-    // (rho/a1 identities) and islanded buses — the padded device n over-counts by those rows, a ~%
-    // threshold skew that lands stops up to the criterion apart. Empty = use n for every scenario.
-    std::vector<int> hNActive;
-    DeviceBuf dRlMonitored;                                // per controller: 1 = MONITORING_VOLTAGE SVC standing by
-    int allPvPinnable = 0;                                 // every non-monitored RL entry has finite limits — the
-                                                           // ONLY networks where OLF's global "strongest stays PV"
-                                                           // rule (remainingPvBusCount 0) is reachable
-    DeviceBuf dRowSlope;                                   // per row: SLOPE-SVC slope (mode-2 V rows), 0 elsewhere
-    int nRlRemote = 0;                                     // remote-member RL entries present (plan-B1/B3)
-    int nRlPilotSelf = 0;                                  // rlRemote == 2 entries (a pilot that is its own controller)
-    DeviceBuf dRlMixedBad;                                 // nS chars: rlPilotSelfMixedGate flags
-    DeviceBuf dRlRemote;                                   // per-entry remote kind (1 = remote group member)
-    DeviceBuf dRlBaseLimitType;                            // OLF's base pin kind per entry (0..4); see hasRlBaseLt
-    int hasRlBaseLt = 0;
-    DeviceBuf dRlCmpVrow;                                  // per-entry compare row (PILOT v col for remote members)
-    DeviceBuf dRlSvcBminDyn, dRlSvcBmaxDyn;                // per (scenario, entry) coefs when a lost SVC takes its share
-    DeviceBuf dRlSvcBmin, dRlSvcBmax, dRlV2Base;           // per-entry SVC quadratic limit coefs + packed base v^2
-                                                           // (limit(v) = static + b*(v^2 - v2Base)); zeroed default
-    int nDqDyn = 0;                                        // dynamic reactive keys (plan-B3): an RL pin zeroes the
-    DeviceBuf dDqKMember;                                  // pinned member's key and renormalizes the DISTR_Q
-    DeviceBuf dDqJMember;                                  // weights over the survivors (updateReactiveKeys) — the
-    DeviceBuf dDqMemberKey;                                // kernel recomputes each contribution's weight from the
-    DeviceBuf dDqMemberRlEntry;                            // RAW keys + the per-(entry, scenario) limitType,
-    DeviceBuf dDqMemberGroupStart;                         // zero-then-sum in member order (bit-exact vs OLF)
-    DeviceBuf dDqMemberGroupCount;
-    DeviceBuf dDqMemberRow;                                // per member: its own row (vCol) + whether it OWNS a
-    DeviceBuf dDqMemberHasRow;                             // packed DISTR_Q row (non-free with existing equation)
-    DeviceBuf dDqMemberTargetQ;                            // per member: its UNPINNED targetQ (generationTargetQ -
-                                                           // loadTargetQ), the value AcTargetVector reads for every
-                                                           // member the RL loop has not frozen
-    DeviceBuf dLinRp, dLinRm, dLinSc;                      // linear-solve guard scratch, reused across passes
-    DeviceBuf dDqMemberTgtPtr;                             // per member (CSR): the members whose targetQ OLF sums
-    DeviceBuf dDqMemberTgtPeer;                            // into its DISTR_Q target — its OWN control's elements,
-                                                           // just itself for a control MERGED into the group
-    int nDqMembers = 0;
-    int hasDqQrGroups = 0;                                 // plan-B4: any member linked to a pilot-Q relocation group
-    DeviceBuf dDqMemberQrGroup;                            // per member: the pilot's qr candidate group id, -1 = none
-    DeviceBuf dQrPilotQ;                                   // per (scenario, qr group): the pilot's Q target, captured
-                                                           // at solve init from the BASE carrier's row and handed to
-                                                           // the CURRENT carrier's row on every re-pick
-    DeviceBuf dQrGenVc;                                    // per qr group: 1 = remote gen-VC group (vs TVC — only
-                                                           // those get the all-pinned pilot-vEq flip)
-    DeviceBuf dQrVeqOff;                                   // per (scenario, qr group): 1 = the pilot's V equation was
-    DeviceBuf dQrSavedVT;                                  // flipped OFF by updatePilotVeqBatch (+ the saved V target)
-    DeviceBuf dQrPilotRlEntry;                             // per qr group: the pilot's own LOCAL reactive-limit entry
-                                                           // (its row + the group's V target), -1 = none
-    int nRmq = 0;                                          // remote-member OWN-q contributions (plan-B3): a twin
-    DeviceBuf dRmqRow;                                     // of the DISTR_Q assembly accumulating each member's own
-    DeviceBuf dRmqElem;                                    // bus q into dQbuf at its own row (that slot is free —
-    DeviceBuf dRmqSide;                                    // the main qBuf fill suppresses member rows)
-    DeviceBuf dRmqKind;
-    DeviceBuf dRmqWeight;
-    DeviceBuf dRlSavedTarget;                              // per (controller, scenario): the row target saved at a
-                                                           // PV->PQ pin, restored on switch-back for mode-2 rows
-    DeviceBuf dQbuf, dRlActive, dRlSwitched;               // dQbuf nS*n, dRlActive/dRlSwitched nS
-    DeviceBuf dRlLimitType, dRlSwitchCount;               // per (controller, scenario): 0 PV / 1 minQ / 2 maxQ; PV→PQ count
-    // OLF's GLOBAL forced-PV election ("all PV buses should switch — the strongest stays PV"): what each
-    // entry did THIS pass (1 = pinned PV→PQ, 2 = switched back, 3 = limit re-freeze), the row mode a pin
-    // replaced (to undo the elected one), and the static election keys (controlled bus nominal V, the
-    // bus's P row for its LIVE target P, the static target P when it has no row, the id rank).
-    DeviceBuf dRlPassSwitched, dRlSavedMode;
-    DeviceBuf dSwLog, dSwLogCnt;                           // OLF_GPU_SW_LOG: on-DEVICE decision log for one slot
-    DeviceBuf dRlElectNomV, dRlElectPRow, dRlElectStaticP, dRlElectIdRank;
-    int hasRlElection = 0;
-    // voltageRemoteControlRobustMode (OLF default TRUE): a REMOTE voltage controller whose OWN bus
-    // voltage leaves the realistic band is reseeded at 1 pu, and — when its Q is still inside its
-    // limits — frozen at its initial generation target Q with a MIN/MAX_REALISTIC_V limit type.
-    DeviceBuf dRlInitTgtQ;                                 // per entry: Σ generator targetQ (pu)
-    int rlRobust = 0;
-    double rlVLoRobust = 0.0, rlVHiRobust = 0.0;           // minRealisticV·1.02 and maxRealisticV/1.02
-    // AcloadFlowEngine's realistic-voltage check, run on the INTERMEDIATE states of the driver's
-    // sweep: per row, 1 = a non-fictitious bus's BUS_V at or above minNominalVoltageRealisticVoltageCheck.
-    DeviceBuf dRealisticRow, dRealisticGate, dRealisticBad;
-    int realisticCheck = 0;
-    double realisticMinV = 0.0, realisticMaxV = 0.0;
-    // AcloadFlowEngine DEFERS the check until the last outer loop that can FIX an unrealistic state
-    // has run (voltageRemoteControlRobustMode; ReactiveLimits and the discrete TransformerVoltageControl
-    // are the two loops that declare canFixUnrealisticState). -1 = no such loop, check every solve.
-    // 0 = ReactiveLimits is the last one, 1 = the discrete TransformerVoltageControl.
-    int realisticFixingLoop = -1;
-    // Distributed slack: the (mapped) slack BUS_PHI row + its scheduled targetP give the per-scenario
-    // mismatch (read from dQbuf); dDsPhiRow/dDsFactor are the participating buses' P-target rows + normalized
-    // participation factors. Reuses dRlActive/dRlSwitched (same outer schedule as reactive limits).
-    int nds = 0, dsSlackPhiRow = -1;
-    double dsSlackTargetP = 0.0;
-    DeviceBuf dDsPhiRow, dDsFactor;                        // per participating bus (nds)
-    DeviceBuf dDsBaseTargetP, dDsMaxDelta, dDsMinDelta;   // per participating bus (nds): base P target + headroom/footroom
-    double dsFactorSum = 1.0;                              // Σ emitted factors (< 1 ⇒ slack participates, keeps 1−Σ)
-    int dsMode = 0;                                        // 0 = static factors; 1 = REMAINING_MARGIN (direction-
-    DeviceBuf dDsMarginUp, dDsMarginDown;                  //   dependent per-bus margins, normalized in-kernel)
-    double dsSlackMarginUp = 0.0, dsSlackMarginDown = 0.0; //   the slack's own margins (its retained share)
-    DeviceBuf dDsRetain;
-    DeviceBuf dDsGateLast;                                   // per scenario {rem, fired} at the last DS gate (LOOP_TRACE reads it)
-    DeviceBuf dDsRetainApplied;                              // per scenario: dsRetain at the last check that FIRED,
-                                                             // NaN while no distribution happened in this solve
-    long long solveCount = 0;                                // solveBatchContext calls on this context: the DS
-                                                             // read-backs above describe the LAST solve only
-    // Per-GENERATOR participants (setBatchDsGenerators). OLF's water-fill participates and saturates
-    // per generator — ParticipatingElement wraps an LfGenerator and step.run clamps each at its OWN
-    // limits and REMOVES it — so a bus-level aggregate only reproduces OLF while nothing saturates.
-    // The bus arrays keep owning the equation row and the anchor; these own the factors and limits.
-    int ngen = 0;
-    DeviceBuf dgBus, dgFactor, dgMaxDelta, dgMinDelta, dgMarginUp, dgMarginDown;
-    DeviceBuf dBusGenStart, dBusGenEnd;
-    // Per (scenario, generator): its cumulative delta from the anchor, and whether the water-fill has
-    // REMOVED it. Removal is not the same as "sitting at its bound": OLF removes an element only when
-    // it strictly OVERSHOOTS, so one that lands exactly on its limit stays in the normalization for
-    // another iteration — where it absorbs weight and moves nothing.
-    // MonitoringVoltage (OLF order 6): the standby-SVC automaton, as a DRIVER PHASE. Per controller:
-    // the monitored V row, its band and the two setpoints; plus a CSR list of (row, mode, target) the
-    // activation writes. dMonActivated holds the chosen target per (controller, scenario), NaN until
-    // it fires — OLF never re-checks a controller it has already switched.
-    // DRIVER PAUSE/RESUME. Some of OLF's outer loops cannot run on the device without RE-DERIVING
-    // what OLF already computes in Java (SecondaryVoltageControl's sensitivity observables; the
-    // discrete tap/section tables of the transformer and shunt loops). Rather than port that maths —
-    // a wrong target converges cleanly and nothing flags it — the driver PAUSES at their slot in
-    // OLF's order, hands control back, and RESUMES where it stopped. The per-solve device state
-    // (RL pins, monitoring activations, DS absorbed totals, HVDC statuses, x/targets/modes) simply
-    // stays in the context across the pause; only the host-side driver locals need saving.
-    int hostLoopMask = 0;                                    // bitmask of enabled host-owned loops
-                                                             // bit 0 = LOOP_HOST_SVC, 1 = PHASE, 2 = TVC, 3 = TRPC, 4 = SHUNT
-    int driverResume = 0;                                    // this call continues a paused driver
-    int driverPaused = 0;                                    // the last call stopped at a LOOP_HOST_*
-    int pausedLoopKind = 0;                                  // WHICH host loop the driver stopped at
-    std::vector<int> pausedStatus;                           // per-scenario solve status at the pause: the resumed
-                                                             // call's checks (rlActive = converged) need it back
-    int startLoopKind = -1;                                  // a RESTARTED sequence resumes its sweep AT this
-                                                             // loop (OLF re-checks the loop that went UNSTABLE
-                                                             // after the re-solve, before restarting the sweep)
-    int pausedLoopIdx = 0;
-    int pausedSeqChanged = 0;
-    std::vector<int> pausedProdIters;
-    std::vector<int> olFirst, olIters, olPasses;              // OLF_GPU_PHASE_TIME: per-scenario Newton work by
-                                                             // solve pass (kept across a host-loop pause)
-    std::vector<char> pausedLive, pausedActive;
-    std::vector<char> hostChanged;                           // per scenario: the host loop was UNSTABLE
-    int nmon = 0;
-    DeviceBuf dMonVRow, dMonBand, dMonDeltaPtr, dMonDeltaRow, dMonDeltaMode, dMonDeltaTarget, dMonActivated;
-    // INCREMENTAL TRANSFORMER VOLTAGE CONTROL — in-kernel outer loop (LOOP_TVC_KERNEL).
-    // Per-controller static data uploaded once; per-(scenario, controller) mutable state allocated
-    // at first use. Tap tables are CSR-packed: tapData[tapPtr[c]..tapPtr[c+1]) holds nTaps rows of
-    // 8 doubles [y, g1, g2, b1, b2, ksi, r1, a1] for controller c.
-    int nTvc = 0;                                            // number of incremental TVC controllers
-    DeviceBuf dTvcRhoRow, dTvcVRow;                          // [nTvc] int: rho identity row, controlled bus V row
-    DeviceBuf dTvcTargetV, dTvcHalfDb;                       // [nTvc] double: target voltage, half deadband
-    DeviceBuf dTvcElemIndex;                                 // [nTvc] int: element index for disabled-mask check
-    DeviceBuf dTvcTapPtr;                                    // [nTvc+1] int: CSR pointer into flat tap table
-    DeviceBuf dTvcTapData;                                   // [totalTaps * 8] double: flat tap rows
-    DeviceBuf dTvcBaseTap;                                   // [nTvc] int: base (extraction-time) tap index
-    // Per-(scenario, controller) mutable state:
-    DeviceBuf dTvcCurTap;                                    // [nS * nTvc] int: current tap position
-    DeviceBuf dTvcRatchetDir, dTvcRatchetCount, dTvcRatchetAllowed; // [nS * nTvc] int: ratchet state
-    // Per-controller group structure (CSR): controllers sharing a controlled bus are grouped for
-    // the one-tap-at-a-time round-robin (OLF's adjustWithSeveralControllers).
-    DeviceBuf dTvcGroupPtr, dTvcGroupCtrl;                   // CSR: groupPtr[nGroups+1], groupCtrl[nTvc]
-    int nTvcGroups = 0;
-    int tvcMaxTapShift = 1;                                  // OLF incrementalTransformerRatioTapControlOuterLoopMaxTapShift
-    // Per-pass scratch and the previous tap (to apply only the pairs that moved this pass).
-    DeviceBuf dTvcOutOfDb, dTvcDiffV, dTvcSensi, dTvcPrevTap;
-    // Host mirrors of the static tables, for the tap-override rebuild and the rho-row lookup.
-    std::vector<int> hTvcRhoRow, hTvcElemIndex, hTvcBaseTap, hTvcTapPtr;
-    std::vector<double> hTvcTapData;
-    // Host copy of the CALLER's tap overrides (contingency tap actions) as uploaded at solve entry:
-    // the TVC loop's moves are merged IN FRONT of them (findTapOverride takes the first match).
-    std::vector<int> hR1OvBaseSlotElem;
-    std::vector<double> hR1OvBaseVal;
-    // INCREMENTAL SHUNT VOLTAGE CONTROL — in-kernel outer loop (LOOP_SHUNT_KERNEL). Controllers are
-    // grouped per controlled bus (OLF adjustB round-robin, |b|-descending); each controller shunt has
-    // sub-controllers (OLF LfShunt.Controller) with their own section B/G tables and ratchet.
-    int nShc = 0, nShcGroups = 0, nShcSubs = 0, shcMaxSectionShift = 3;
-    DeviceBuf dShcBRow, dShcVRow, dShcTargetV, dShcHalfDb, dShcElemAbs, dShcShOvElem;   // per controller
-    DeviceBuf dShcGroupPtr, dShcGroupCtrl;                   // CSR: group -> controllers (sorted)
-    DeviceBuf dShcSubPtr;                                    // CSR: controller -> subs
-    DeviceBuf dShcSecPtr, dShcSecB, dShcSecG, dShcSubMin, dShcSubBase;   // per sub: section tables
-    DeviceBuf dShcPos, dShcRatDir, dShcRatCount, dShcRatAllowed, dShcShift;   // per (scenario, sub)
-    DeviceBuf dShcSensi, dShcBaseB, dShcAppliedDb;           // per (scenario, controller)
-    DeviceBuf dShcOutOfDb, dShcDiffV;                        // per (scenario, group)
-    std::vector<int> hShcBRow, hShcShOvElem, hShcSubPtr, hShcSecPtr, hShcSubBase;
-    std::vector<double> hShcSecB, hShcSecG;
-    // FLOW-OBSERVED incremental loops (LOOP_PHASE_KERNEL / LOOP_TRPC_KERNEL): a rho (RPC) or a1 (phase)
-    // tap driving a CONTROLLED branch's Q, P or I. kind 0 = RPC (rho -> Q, closest-r1), 1 = phase
-    // CONTROLLER (a1 -> P, closest-a1), 2 = phase LIMITER (a1 -> I, first-above-a1, one-sided).
-    int nFlc = 0, nFlcPhase = 0, nFlcRpc = 0;
-    DeviceBuf dFlcKind, dFlcPinRow, dFlcPinCol, dFlcSide, dFlcTargetValue, dFlcHalfDb, dFlcElem, dFlcCtlPack,
-              dFlcTapPtr, dFlcTapData, dFlcBaseTap, dFlcMaxShift;
-    DeviceBuf dFlcCurTap, dFlcPrevTap, dFlcRatDir, dFlcRatCount, dFlcRatAllowed, dFlcSensi, dFlcDiff, dFlcOutOfDb;
-    std::vector<int> hFlcKind, hFlcPinRow, hFlcElem, hFlcTapPtr, hFlcBaseTap;
-    std::vector<double> hFlcTapData;
-    // CONTINUOUS phase control (OLF PhaseControlOuterLoop, CONTINUOUS_WITH_DISCRETISATION), sharing the
-    // phase slot: kind 0 = CONTROLLER (a1 solved free under row mode 3 for the first solve, then switched
-    // off and rounded to the closest tap at the loop's first check), kind 1 = LIMITER (from the second
-    // check on, one tap per check against the sign of dI/da1 while I exceeds the limit — local only).
-    int nCph = 0;
-    DeviceBuf dCphKind, dCphA1Row, dCphSide, dCphLimit, dCphElem, dCphTapPtr, dCphTapData, dCphBaseTap;
-    DeviceBuf dCphTap, dCphPrevTap, dCphIter;                // per (scenario, controller) tap; per scenario check count
-    std::vector<int> hCphElem, hCphTapPtr, hCphBaseTap;
-    std::vector<double> hCphTapData;
-    std::vector<int> hShOvBaseSlotElem;                      // the caller's shunt overrides at solve entry
-    std::vector<double> hShOvBaseGb;
-    // DISCRETE (non-incremental) TRANSFORMER VOLTAGE CONTROL — LOOP_TVD_KERNEL (OLF order 8): OLF's
-    // TransformerVoltageControlOuterLoop (tvdMode 0, AFTER_GENERATOR: INITIAL/CONTROL/COMPLETE) or
-    // SimpleTransformerVoltageControlOuterLoop (tvdMode 1, WITH_GENERATOR). One group per controlled bus
-    // (CSR over members); the group's ON/OFF activations are the toggle-diffed row deltas (CSR).
-    int nTvd = 0, nTvdGroups = 0, nTvdDelta = 0, tvdMode = 0, tvdEntryOn = 0;
-    DeviceBuf dTvdGrpPtr, dTvdGrpVRow, dTvdGrpTargetV, dTvdGrpHalfDb, dTvdGrpUseInit;
-    DeviceBuf dTvdDeltaPtr, dTvdDeltaRow, dTvdDeltaModeOn, dTvdDeltaModeOff, dTvdDeltaTargetOn, dTvdDeltaTargetOff;
-    DeviceBuf dTvdMemRhoRow, dTvdMemElem, dTvdMemBaseTap, dTvdMemTapPtr, dTvdMemMin, dTvdMemMax, dTvdMemInit, dTvdTapData;
-    DeviceBuf dTvdScnStep, dTvdGrpStep, dTvdGrpShMin, dTvdGrpShMax, dTvdGrpShInit;   // per scenario / per (scenario, group)
-    DeviceBuf dTvdMemState, dTvdMemTap, dTvdMemRoundFrom;                          // per (scenario, member)
-    DeviceBuf dTvdSaved, dTvdReject;                                               // per (scenario, delta row) / per scenario
-    // SECONDARY VOLTAGE CONTROL — LOOP_SVC_KERNEL (OLF order 4). Zones of controller buses regulating a
-    // pilot point: run entirely on the device, the small dense zone system included.
-    int nSvc = 0, nSvcZones = 0;
-    DeviceBuf dSvcCtldVRow, dSvcBusVRow, dSvcRlIdx, dSvcBaseTargetV, dSvcMinQ, dSvcMaxQ, dSvcLoadQ;
-    DeviceBuf dSvcQPtr, dSvcQKind, dSvcQElem, dSvcQBRow;
-    DeviceBuf dSvcZonePtr, dSvcZoneCtl, dSvcZonePilotRow, dSvcZoneTargetV;
-    DeviceBuf dSvcTargetV, dSvcK0, dSvcJk, dSvcJvpp, dSvcEnabled, dSvcNeed, dSvcReject, dSvcRlVt;
-    // Batched dense LU workspaces: the zone systems live in DEVICE memory, one N*N column-major matrix
-    // and one RHS per scenario, plus the pointer/pivot/info arrays cuBLAS's batched API takes.
-    DeviceBuf dSvcMat, dSvcRhs, dSvcMatPtr, dSvcRhsPtr, dSvcPiv, dSvcInfo, dSvcCtlZone;
-    cublasHandle_t svcBlas = nullptr;
-    std::vector<int> hSvcCtldVRow;
-    std::vector<double> hSvcBaseTargetV;
-    double svcMinPlausibleV = 0.8, svcMaxPlausibleV = 1.2;
-
-    std::vector<int> hTvdMemElem, hTvdMemBaseTap, hTvdMemTapPtr;
-    std::vector<double> hTvdTapData;
-    // GeneratorVoltageControlManager (AFTER_GENERATOR): generator VC controller buses under the max
-    // transformer-controlled nominal voltage are FROZEN at their current Q while the transformers act
-    // (freezeGenerationTargetQAndDisableGeneratorVoltageControl(q.eval()) — OLF's generation target is
-    // the NET injection, so the row target is eval − loadQ), re-enabled at COMPLETE; plus
-    // fixTransformerVoltageControls' PV-bus lists per member (the not-controlled side's component).
-    int nTvdFz = 0;
-    DeviceBuf dTvdFzVRow, dTvdFzLoadQ;                       // per candidate
-    DeviceBuf dTvdFzFrozen, dTvdFzSavedMode, dTvdFzSavedTarget;   // per (scenario, candidate)
-    DeviceBuf dTvdFzRlEntry;                                 // per candidate: RL entry of a REMOTE one, else -1
-    DeviceBuf dTvdFixPvRow;                                  // the fix universe: every gen-VC bus's V row
-    DeviceBuf dTvdFixMinMask, dTvdFixMaxMask;                // per (scenario, member): fixWords ints each
-    int tvdFixWords = 0;
-    bool tvdFixTables = false;
-    // DISCRETE SHUNT VOLTAGE CONTROL — LOOP_SVD_KERNEL (OLF order 10): ShuntVoltageControlOuterLoop
-    // (WITH_GENERATOR): control ON for the first solve, LfShuntImpl.dispatchB at the first check.
-    int nSvd = 0, nSvdGroups = 0, nSvdDelta = 0, nSvdSubs = 0, svdEntryOn = 0;
-    DeviceBuf dSvdGrpPtr, dSvdDeltaPtr, dSvdDeltaRow, dSvdDeltaModeOn, dSvdDeltaModeOff, dSvdDeltaTargetOn, dSvdDeltaTargetOff;
-    DeviceBuf dSvdMemBRow, dSvdMemElem, dSvdMemSubPtr, dSvdSecPtr, dSvdSecB, dSvdSubMin, dSvdSubBase;
-    DeviceBuf dSvdGrpStep, dSvdMemState, dSvdMemContB, dSvdSubPos, dSvdSaved;
-
-    DeviceBuf dGenCum, dGenRemoved;
-    DeviceBuf dFrozenRow;                                  // (scenario, row) pairs: rows an islanding
-    int nFrozenRow = 0;                                    // outage froze to a flat identity state
-    DeviceBuf dDsLostGen;                                  // (scenario, DS generator slot) pairs: the
-    int nDsLostGen = 0;                                    // generators an outage removes, by identity
-    DeviceBuf dRlPinTgtIn;                                 // per (scenario, entry): the pinned target a continued
-    bool hasRlPinTgtIn = false;                            // solve restores (setBatchRlPinTargets), NaN = the limit
-    DeviceBuf dDsOutGen;                                   // (scenario, DS generator slot) pairs: participants
-    int nDsOutGen = 0;                                     // a GeneratorAction took out of the distribution
-    DeviceBuf dGenCumValid;                                // per scenario: the PER-GENERATOR water-fill ran, so
-                                                           // dGenCum holds each generator's own movement. The
-                                                           // anchored path distributes per BUS and leaves it zero,
-                                                           // which a reader cannot tell from "nothing moved".
-
-    // The WORKING factors, normalized IN PLACE each iteration exactly as OLF's
-    // normalizeParticipationFactors mutates ParticipatingElement.factor: by iteration k a survivor's
-    // factor has been divided k times. f/Sigma_survivors(raw) is the same number algebraically and a
-    // different one in floating point, which is enough to flip a clamp decision at a knife-edge.
-    DeviceBuf dGenFactorWork;
-    // Per (scenario, participant) chars, 1 = this participant is in ANOTHER synchronous component in
-    // this scenario. OLF distributes over getSynchronousNetworks().getFirst(), so an islanded
-    // participant is simply not a participant: its share must not be computed, and — decisively — the
-    // set it is renormalized against must shrink with it. Empty = every participant participates.
-    int nDsIslanded = 0;
-    DeviceBuf dDsIslanded;
-    int nDsRowOv = 0;                                        // per-scenario DS participant row diversions
-    DeviceBuf dDsRowOv;                                      // nScenarios * nds ints, -1 = use dsPhiRow
-    // Same idea for the reactive-limits pass: per (scenario, controller), 1 = its bus is in another
-    // synchronous component in this scenario, so the loop must not look at it.
-    int nRlIslanded = 0;
-    DeviceBuf dRlNoUnpin, dRlUnpinBad;                       // (scenario, entry) unpin forbidden; per-scenario flag
-    int nRlNoUnpin = 0;
-    DeviceBuf dRlGenLost;                                    // (scenario, entry): the bus lost every generator this
-    int nRlGenLost = 0;                                      // scenario — not a controller, seeded FROZEN
-    DeviceBuf dRlLocalOv, dRlLocalVt;                        // re-homed PV buses: (scenario, entry) mask + own V target
-    int nRlLocal = 0;
-    DeviceBuf dRlCmpOv;                                      // remote controllers re-homed onto a NEW pilot: (scenario,
-    int nRlCmp = 0;                                          // entry) -> the new pilot's V row, -1 = the base pilot's
-    DeviceBuf dRlIslanded;
-    int nDqTqOv = 0;                                       // per-scenario member targetQ overrides
-    DeviceBuf dDqTqOvKey;
-    DeviceBuf dDqTqOvVal;
-    int hasDsSlackRowOv = 0;                               // per-slot slack row (a relocated slack), device rows
-    DeviceBuf dDsSlackRowOv;                               // -1 = the base slack row
-    int nQrPqDelta = 0;                                    // per-scenario moves of a pilot's captured Q target
-    DeviceBuf dQrPqDeltaKey;                               // slot * nQr + group
-    DeviceBuf dQrPqDeltaVal;
-    int nPilotFlip = 0;                                    // pilot-row flip entries (all-survivors-pinned)
-    DeviceBuf dPfSlot;
-    DeviceBuf dPfRow;
-    DeviceBuf dPfQTarget;
-    DeviceBuf dPfOff;
-    DeviceBuf dPfCount;
-    DeviceBuf dPfRlPool;
-    DeviceBuf dPfFlipped;
-    DeviceBuf dPfSavedVT;
-    // HVDC AC-emulation outer loops (FreezingHvdcACEmulation + AcHvdcAcEmulationLimits) as DRIVER
-    // PHASES rather than host orchestrators. OLF runs both BETWEEN DistributedSlack and
-    // ReactiveLimits; run from the host after the whole solve they land after RL instead, which is
-    // what put the device's last DS check on a pre-pin state.
-    int nhv = 0;                                             // AC-emulation HVDCs in the loop tables
-    int hvLimitsActive = 0;                                  // AcHvdcAcEmulationLimits configured
-    DeviceBuf dHvElem, dHvBus1Row, dHvBus2Row;               // per hvdc: the rows the P TARGETS are written to
-    DeviceBuf dHvBus1Phi, dHvBus2Phi;                        // per hvdc: the angle COLUMNS the emulation reads (#68)
-    DeviceBuf dHvIn;                                         // per hvdc x9: p0 k pMax12 pMax21 loss1 loss2 r baseD1 baseD2
-    DeviceBuf dHvCtgOut;                                     // per (scenario, hvdc): outaged BY the contingency
-    DeviceBuf dHvStatus;                                     // per (scenario, hvdc): LINEAR/SAT_1_2/SAT_2_1/FROZEN
-    DeviceBuf dHvAppliedD1, dHvAppliedD2;                    // the converter-row delta currently APPLIED
-    DeviceBuf dDsResidual;                                   // nS chars: waterfill left an out-of-tolerance residual                                   // per scenario (nS): frozen slack-retained mismatch share
-    // The slack bus's own participating generators' total rooms from their anchor targets (setBatchDsSlackRooms):
-    // what a slack-only distribution can place before OLF's water-fill leaves a remaining mismatch. Unbounded until
-    // installed, and for a load-based slack.
-    double dsSlackRoomUp = INFINITY, dsSlackRoomDown = -INFINITY;
-    bool dsSlackOnly = false;                                // DS enabled with the SLACK generator as the only participant:
-    DeviceBuf dDsSlackAbsorbed;                              // nS doubles — mismatch absorbed into the slack's own target so far
-    DeviceBuf dDsSlackAnchor;                                // nS doubles — slack-only strategy pairs: the parent's total
-    bool dsSlackHasAnchor = false;                           // (setBatchSlackOnlyAnchor; zero anchor when unset)
-    DeviceBuf dDgAnchor;                                     // nS * ngen doubles — strategy pairs: each participating
-    bool hasDgAnchor = false;                                // generator's target at the parent's end (setBatchGenAnchor)
-    DeviceBuf dDgStart;                                      // nS * ngen doubles — each participating generator's move
-    bool hasDgStart = false;                                 // from its anchor at the solve's start (setBatchGenAnchor)
-    DeviceBuf dDgSeedAnchor;                                 // nS * ngen doubles — strategy pairs: the parent's own end,
-    bool hasDgSeedAnchor = false;                            // without the actions (the continued pins' stamps)
-                                                             // (OLF distributes into the slack gen and re-solves; no flow change,
-                                                             // but the extra polish run must happen to match the CPU trajectory)
-    CudssCtx ds;
-    bool analyzed = false;
-    int mode = 0;                                            // 3 = UBATCH, 6 = per-scenario loop, robust (pivoted) config
-    DeviceBuf dR, dDelta, dIrScore, dIrLane;                 // adaptive refinement: residual, correction, lane scores/mask
-    // UBATCH single matrices (mode 3 only): a SINGLE per-block CSR (n, nnz, shared rowPtr/colIdx)
-    // whose value/RHS pointers are the batched buffers (dVals = nS*nnz, dB/dDx = nS*n); cuDSS
-    // analyzes ONE block (cheap) and factorizes/solves all nS via CUDSS_CONFIG_UBATCH_SIZE.
-    cudssMatrix_t matUb = nullptr, matUbB = nullptr, matUbX = nullptr;
-    // Dedicated stream for the WHOLE batch solve (every kernel/memset/async copy + cuDSS via
-    // cudssSetStream): keeps the per-iteration launch sequence off the legacy default stream,
-    // whose implicit device-wide serialization stitched the timeline with sync points (the
-    // ~25 ms/iter host/launch gaps of the 2026-07-15 nsys attribution — a loop kept on one
-    // explicit stream shows none). Created BLOCKING (default flags), so any
-    // op left on the legacy stream still orders correctly against it — safety over speed for
-    // whatever this conversion misses.
-    cudaStream_t stream = nullptr;
-    ~BatchSolverContext() {
-        if (svcBlas != nullptr) {
-            cublasDestroy(svcBlas);
-            svcBlas = nullptr;
-        }
-        if (stream) cudaStreamDestroy(stream);
-        if (matUbR) cudssMatrixDestroy(matUbR);
-        if (matUbDelta) cudssMatrixDestroy(matUbDelta);
-        if (matUbCR) cudssMatrixDestroy(matUbCR);
-        if (matUbCDelta) cudssMatrixDestroy(matUbCDelta);
-        if (matUb) cudssMatrixDestroy(matUb);
-        if (matUbB) cudssMatrixDestroy(matUbB);
-        if (matUbX) cudssMatrixDestroy(matUbX);
-        for (auto& e : compactData) {
-            if (e.second && dsC.handle) cudssDataDestroy(dsC.handle, e.second);
-        }
-        compactData.clear();
-        if (matUbC) cudssMatrixDestroy(matUbC);
-        if (matUbCB) cudssMatrixDestroy(matUbCB);
-        if (matUbCX) cudssMatrixDestroy(matUbCX);
-    }
-};
+#include "solver/batch_context.cuh"
 
 static bool repairsZeroDiagonals(const BatchSolverContext* ctx) {
     return ctx->mode != 6;
@@ -8283,13 +7156,6 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& st, int nScenar
     }
     return ctx.release();
 }
-
-struct BatchResult {
-    std::vector<double> x;                                   // nScenarios * n
-    std::vector<int> iters;                                  // nScenarios
-    std::vector<double> norm;                                // nScenarios
-    std::vector<int> status;                                 // nScenarios: 0 conv, 1 maxiter, -1 diverged
-};
 
 // Per-scenario target overrides: each entry writes target[ovIndex[k]] = ovValue[k], where ovIndex is the
 // FLAT dTarget index (scenarioSlot*n + row). Used by generator contingencies to set a scenario's bus P/Q

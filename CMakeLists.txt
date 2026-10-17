@@ -27,10 +27,9 @@
 # libcudss.so itself may not. cudart is linked STATICALLY; cuDSS is linked
 # DYNAMICALLY (a NEEDED reference, never bundled — the same licensing posture as
 # powsybl-math-native's libmathcudss). The default build is location-independent
-# (no RPATH): at runtime the Java loader (GpuAcNewtonSolver) PRELOADS
-# libcublasLt/libcublas/libcudss from the user's install (olf.cudss.path /
-# CUDSS_ROOT, olf.cuda.path / CUDA_HOME), which satisfies the NEEDED resolution
-# from the process link map. CUDSS_EMBED_RPATH instead bakes an absolute DT_RPATH
+# (no RPATH): the dynamic loader resolves libcudss/libcublas through LD_LIBRARY_PATH
+# or the ldconfig cache when GpuNativeLoader loads libolfgpu from the classpath.
+# CUDSS_EMBED_RPATH instead bakes an absolute DT_RPATH
 # (--disable-new-dtags) to the cuDSS + CUDA toolkit lib dirs — only for non-JVM
 # consumers of a LOCAL build, never for a jar meant to leave this machine.
 
@@ -96,8 +95,7 @@ target_include_directories(olfgpu
 # systems with (cublasDgetrfBatched/cublasDgetrsBatched) — many small matrices is exactly its case, and
 # no linear algebra is written by hand. It is already present wherever cuDSS is (cuDSS links it).
 target_link_libraries(olfgpu PRIVATE ${CUDSS_LIBRARY} CUDA::cublas)
-# Both batched N-1 solve modes (per-scenario loop + uniform batched cuDSS API) are compiled
-# in and selected at RUNTIME via -Dolf.gpu.batchMode (default 0). cuDSS >= 0.7.1 is required
+# cuDSS >= 0.7.1 is required
 # (static_assert in olf_gpu_nr_jni.cu); the cudssMatrixCreate* data-type args are shimmed by
 # CUDSS_VERSION so the same source builds against 0.7.x and 0.8 (CUDSS_ROOT picks the install).
 set_target_properties(olfgpu PROPERTIES CUDA_RUNTIME_LIBRARY Static)

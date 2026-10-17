@@ -68,4 +68,9 @@ constexpr int MAX_DEVICE_LOOPS = 16;
 #define RL_LIMIT_FROZEN 5
 #define RL_BASE_RELOCATED 6
 
+
+// on-device reactive-limit decision log (OLF_GPU_SW_LOG): capacity in records, width in doubles
+#define SW_LOG_CAP 1048576
+#define SW_LOG_W 12
+
 #endif  // OLF_GPU_COMMON_LOOP_KINDS_CUH

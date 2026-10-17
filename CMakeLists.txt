@@ -86,6 +86,11 @@ add_library(olfgpu SHARED
     native/cuda/jni/olf_gpu_violations.cu
     native/cuda/jni/common/stats.cu
     native/cuda/jni/solver/linear_solver_settings.cu
+    native/cuda/jni/structure/csr_pattern.cu
+    native/cuda/jni/structure/q_relocation_pattern.cu
+    native/cuda/jni/structure/distribution_dests.cu
+    native/cuda/jni/structure/zero_impedance_dests.cu
+    native/cuda/jni/structure/shared_structure.cu
 )
 target_include_directories(olfgpu
     PRIVATE

@@ -9,6 +9,32 @@
 
 #include <cuda_runtime.h>
 
+/**
+ * Pool order of a stock pair: [0] = the bus's OWN row, [1] = the parent coupler's DUMMY_Q row. Which one takes
+ * the bus's raw q depends on TWO modes, not one:
+ *   dummy row mode 4                      -> the dummy row: a reactive limit pins it there, coupler alive;
+ *   dummy row mode 0 and own row mode 4   -> the OWN row: the coupler is dead, so the equations are back home
+ *                                            and the pin is there (measured: rte6515 BUS-11_BBS_1 put mode 4 on
+ *                                            BUS_V(VL-11_1), which holds zi#1's ZERO_V, and writing nothing left
+ *                                            that row with a zero diagonal — 20 of the 6667 scenarios failed
+ *                                            their linear solve exactly this way, all of them _BBS_1 outages);
+ *   anything else                         -> nothing: while it SHARES, its DISTR_Q row (diverted home when the
+ *                                            coupler dies) carries its q, and writing the raw q too double-counts.
+ */
+__host__ __device__ inline int stockPairPick(int m, const int* pool, int p, int frozen,
+                                             const int* mode, const int* relocOwn, int dummyRow) {
+    if (m == 4) {
+        return pool[p + 1];
+    }
+    if (m == 0 && relocOwn != nullptr) {
+        int own = relocOwn[dummyRow];
+        if (own >= 0 && mode[own] == 4) {
+            return pool[p];
+        }
+    }
+    return frozen;
+}
+
 __device__ void scatterAdd(int nout, const int* dest, const double* o, double* vals, double* F) {
     for (int k = 0; k < nout; k++) {
         int d = dest[k];

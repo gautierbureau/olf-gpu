@@ -13,6 +13,9 @@
 #include <vector>
 
 #include "../common/device_buf.cuh"
+#include "csr_pattern.cuh"
+
+namespace olfgpu {
 
 struct CudssCtx {
     cudssHandle_t handle = nullptr;
@@ -127,5 +130,32 @@ struct SharedStructure {
 // The native handle Java holds (GpuAcStructures) is a heap-allocated shared_ptr; each
 // context copies it, so destroyStructure only drops the Java-side reference.
 using SharedStructurePtr = std::shared_ptr<SharedStructure>;
+
+// Built once per extraction (the createStructure JNI entry), see structure_build.cu.
+SharedStructure* buildStructure(int n,
+                                int ncb, const double* cbIn, const int* cbIdx,
+                                int nob, const double* obIn, const int* obIdx,
+                                int nsh, const double* shIn, const int* shIdx,
+                                int nhv, const double* hvIn, const int* hvIdx,
+                                int ndq, const int* dqElem, const int* dqSide, const double* dqWeight,
+                                const int* dqRow, const int* dqKind,
+                                int nzi, const double* ziIn, const int* ziIdx,
+                                int ndr, const int* drRow, const int* drCol, const double* drCoef,
+                                int ndb, const int* dbRow, const int* dbCol, const double* dbCoef,
+                                const int* cbPcSide,
+                                int nvdl, const double* vdlIn, const int* vdlIdx,
+                                int nQr, const int* qrPtr, const int* qrRowsIn,
+                                const int* obQAltIn, const int* ziQAltIn,
+                                const int* qrDepBaseIn, const int* qrBaseTargetRowIn, const int* depGroupOfRowIn);
+
+// The device bytes one scenario's LU factors take, from a cuDSS probe analysis (cached on the structure).
+double luBytesPerScenario(SharedStructure& st);
+
+// Re-upload the per-element parameter packs in place (a tap or shunt-susceptance move): same pattern, new values.
+void refreshStructureValues(SharedStructure& st, int ncb, const double* cbIn, int nob, const double* obIn,
+                            int nsh, const double* shIn, int nhv, const double* hvIn,
+                            int nzi, const double* ziIn);
+
+}  // namespace olfgpu
 
 #endif  // OLF_GPU_STRUCTURE_SHARED_STRUCTURE_CUH

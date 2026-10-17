@@ -12,6 +12,8 @@
 
 #include "check.cuh"
 
+namespace olfgpu {
+
 struct DeviceBuf {
     void* p = nullptr;
     size_t cap = 0;                                          // bytes currently allocated
@@ -55,5 +57,7 @@ struct DeviceBuf {
         CUDA_CHECK(cudaMemcpy(p, host, bytes, cudaMemcpyHostToDevice));
     }
 };
+
+}  // namespace olfgpu
 
 #endif  // OLF_GPU_COMMON_DEVICE_BUF_CUH

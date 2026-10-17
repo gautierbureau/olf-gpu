@@ -6,6 +6,10 @@
 #ifndef OLF_GPU_STRUCTURE_CSR_PATTERN_CUH
 #define OLF_GPU_STRUCTURE_CSR_PATTERN_CUH
 
+#include <stdexcept>
+
+namespace olfgpu {
+
 struct RC { int row = -1; int col = -1; };
 
 struct CsrPattern {
@@ -28,5 +32,7 @@ struct CsrPattern {
         return lo;
     }
 };
+
+}  // namespace olfgpu
 
 #endif  // OLF_GPU_STRUCTURE_CSR_PATTERN_CUH

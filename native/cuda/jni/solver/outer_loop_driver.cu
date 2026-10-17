@@ -74,6 +74,11 @@ namespace olfgpu {
 // batched FACTORIZATION + ONE batched SOLVE over all scenarios. Retired scenarios (converged/diverged) are frozen
 // to an identity system so a singular sub-block never fails the batch. The robust mode repoints a single matrix
 // and factorizes per scenario. Either way the symbolic analysis is amortized over the entire contingency set.
+//
+// Orientation: J is true CSR with row = equation, col = variable (OLF's indices), so cuDSS solves J dx = -F
+// directly. The destination arrays built with the structure fold each scatter output's ROLE in, so the fill kernels
+// never index the generated scatter tables: dest >= 0 -> J values slot; dest == -1 -> skip; dest <= -2 -> mismatch
+// row (-2 - dest).
 // =================================================================================
 
 

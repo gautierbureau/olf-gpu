@@ -82,7 +82,23 @@ endif()
 # cannot perturb the solver's codegen (adding a parameter to a solve kernel has flipped a 1e-12
 # test before).
 add_library(olfgpu SHARED
-    native/cuda/jni/olf_gpu_nr_jni.cu
+    native/cuda/jni/jni/structure_jni.cu
+    native/cuda/jni/jni/batch_solve_jni.cu
+    native/cuda/jni/jni/batch_readback_jni.cu
+    native/cuda/jni/jni/newton_settings_jni.cu
+    native/cuda/jni/jni/driver_jni.cu
+    native/cuda/jni/jni/distributed_slack_jni.cu
+    native/cuda/jni/jni/reactive_limits_jni.cu
+    native/cuda/jni/jni/remote_voltage_control_jni.cu
+    native/cuda/jni/jni/zero_impedance_jni.cu
+    native/cuda/jni/jni/hvdc_jni.cu
+    native/cuda/jni/jni/voltage_monitoring_jni.cu
+    native/cuda/jni/jni/secondary_voltage_control_jni.cu
+    native/cuda/jni/jni/transformer_voltage_control_jni.cu
+    native/cuda/jni/jni/shunt_voltage_control_jni.cu
+    native/cuda/jni/jni/phase_control_jni.cu
+    native/cuda/jni/jni/sensitivity_jni.cu
+    native/cuda/jni/jni/transposed_solve_jni.cu
     native/cuda/jni/olf_gpu_violations.cu
     native/cuda/jni/common/stats.cu
     native/cuda/jni/solver/linear_solver_settings.cu

@@ -8,6 +8,8 @@
 
 #include "../solver/driver_pass.cuh"
 
+#include <vector>
+
 namespace olfgpu {
 
 // Kernels the incremental loops launch around the solve.
@@ -18,6 +20,11 @@ __global__ void gatherSensiBatch(int n, int nScenarios, int k, int m, int ki, co
 
 // One unit-right-hand-side solve on every scenario's current Jacobian (dVals -> dB/dDx).
 void sensitivitySolve(BatchSolverContext* ctx, DriverPass& drv, bool& first);
+
+
+// Sensitivities of every scenario's converged state (the SVC and diagnostics callers).
+std::vector<double> solveBatchSensitivities(BatchSolverContext* ctx, const double* states,
+                                            int k, const int* unitEqRows, int m, const int* observeVarCols);
 
 }  // namespace olfgpu
 

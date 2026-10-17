@@ -108,6 +108,7 @@ add_library(olfgpu SHARED
     native/cuda/jni/outerloop/remote_voltage_control.cu
     native/cuda/jni/outerloop/pilot_voltage.cu
     native/cuda/jni/outerloop/reactive_capability_curves.cu
+    native/cuda/jni/outerloop/reactive_limits_seed.cu
 )
 target_include_directories(olfgpu
     PRIVATE

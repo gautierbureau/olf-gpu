@@ -73,6 +73,13 @@ public final class ReactiveLimitsPacker {
         return out;
     }
 
+    /** SVC reactive limits are VOLTAGE-DEPENDENT: {@code LfStaticVarCompensatorImpl} evaluates
+     *  Bmin/Bmax*(v*nomV)^2 at the LIVE bus V on every CPU RL check, and a pinned bus re-freezes at
+     *  the moved limit ({@code busesWithUpdatedQLimits}). Per RL entry, capture the quadratic
+     *  coefficients (pu: SVC limit contribution = b*v^2) and the base v^2, so the kernel evaluates
+     *  limit(v) = packedLimit + b*(v^2 - v2Base) — exact for the SVC part, identically zero on
+     *  SVC-less buses. Must run under the SAME control-type view as the min/max capture (the
+     *  monitoring flip). */
     private static void addSvcQuadratic(LfBus bus, List<Double> rlSvcBmin, List<Double> rlSvcBmax,
                                         List<Double> rlV2Base) {
         double v2 = bus.getV() * bus.getV();

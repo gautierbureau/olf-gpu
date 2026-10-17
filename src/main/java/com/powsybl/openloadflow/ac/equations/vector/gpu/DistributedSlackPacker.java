@@ -31,8 +31,8 @@ final class DistributedSlackPacker {
     /** Distributed-slack pack: per-participating-bus factor/headroom + the slack bus's own share.
      *  {@code dsMode} 0 = static factors ({@code dsFactor}); 1 = REMAINING_MARGIN (factors are the
      *  direction-dependent per-bus margins {@code dsMarginUp}/{@code dsMarginDown} + the slack's own
-     *  {@code dsSlackMarginUp}/{@code Down}, normalized in-kernel per scenario and pass). */
-    /**
+     *  {@code dsSlackMarginUp}/{@code Down}, normalized in-kernel per scenario and pass).
+     *
      * @param dgBus       per participating GENERATOR, the index of its bus in {@code dsPhiRow}
      * @param dgFactor    per generator, its RAW participation factor (same normalization as dsFactor)
      * @param dgMaxDelta  per generator, {@code maxTargetP - targetP} under OLF's no-sign-change rule
@@ -53,13 +53,6 @@ final class DistributedSlackPacker {
                   int[] dsBusNum, String[] dgGenId) {
     }
 
-    /** SVC reactive limits are VOLTAGE-DEPENDENT: {@code LfStaticVarCompensatorImpl} evaluates
-     *  Bmin/Bmax*(v*nomV)^2 at the LIVE bus V on every CPU RL check, and a pinned bus re-freezes at
-     *  the moved limit ({@code busesWithUpdatedQLimits}). Per RL entry, capture the quadratic
-     *  coefficients (pu: SVC limit contribution = b*v^2) and the base v^2, so the kernel evaluates
-     *  limit(v) = packedLimit + b*(v^2 - v2Base) — exact for the SVC part, identically zero on
-     *  SVC-less buses. Must run under the SAME control-type view as the min/max capture (the
-     *  monitoring flip). */
     /** Σ over the bus's participating generators of (current − anchor target P): what OLF's
      *  resetToInitialState undoes and adds back as previousMismatch. 0 when anchoring at the current
      *  targets. The anchor row target = the row's current target minus this. */

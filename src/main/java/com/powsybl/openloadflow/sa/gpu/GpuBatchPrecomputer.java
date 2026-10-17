@@ -65,6 +65,11 @@ final class GpuBatchPrecomputer {
     private GpuBatchPrecomputer() {
     }
 
+    /**
+     * Solve the qualified single-branch contingencies in one GPU batch, from the converged
+     * base state. Failures (no GPU, an out-of-scope network the extractor rejects, a device
+     * error) leave the cache empty so every contingency falls back to the CPU path.
+     */
     static PrecomputedBatch precompute(Network network, LfNetwork net, AcLoadFlowContext context,
                                        List<PropagatedContingency> contingencies, List<OperatorStrategy> strategies,
                                        List<Action> actions, boolean distributedSlack, boolean reactiveLimits,

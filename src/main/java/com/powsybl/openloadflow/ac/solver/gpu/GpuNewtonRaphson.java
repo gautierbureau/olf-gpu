@@ -1126,8 +1126,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
             } else {
                 GpuBatchHvdcAcEmulation.installDriverLoops(handle, null, 1, null, null, null, null, false);
             }
-            // MonitoringVoltage (OLF order 6) as a driver phase. The builder probes each standby bus
-            // with a VC-on/off round trip that fires network events — keep our dirty flags as they were.
+            // MonitoringVoltage (OLF order 6) as a driver phase.
             monCtls = phases.monitoring();
             GpuBatchVoltageMonitoring.installDriverLoop(handle, monCtls);
             int hostMask = buildHostLoopMask();
@@ -1168,9 +1167,6 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
             var rpcLoop = driverLoop("IncrementalTransformerReactivePowerControl");
             boolean incPhase = driverLoop("IncrementalPhaseControl") != null;
             if (rpcLoop != null || incPhase) {
-                var mapper = new com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchElementMapper(network);
-                int rpcShift = rpcLoop instanceof com.powsybl.openloadflow.ac.outerloop.IncrementalTransformerReactivePowerControlOuterLoop r
-                        ? r.getMaxTapShift() : 1;
                 flowCtls = phases.flow();
                 flowOwned = GpuBatchIncrementalFlowControl.uploadToDevice(handle, flowCtls);
                 if (flowOwned) {
@@ -1188,7 +1184,6 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
             // (the engine proxy ran it), so the activation carries the row-mode-3 rows; the driver's
             // first check switches them off and rounds, later checks run the LIMITER.
             if (driverLoop("PhaseControl") != null && !incPhase) {
-                var mapper = new com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchElementMapper(network);
                 cphCtls = phases.continuousPhase();
                 cphOwned = GpuBatchContinuousPhase.uploadToDevice(handle, cphCtls);
                 if (cphOwned) {
@@ -1201,17 +1196,10 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
             // control off (OLF's initialize, run by the engine proxy) and the driver's INITIAL/CONTROL/
             // COMPLETE machine enables, clamps and rounds; WITH_GENERATOR (Simple) starts with the controls
             // ON (initialize enabled them — the activation carries it, entryOn) and the first check rounds.
-            // The builders probe the controls with VC toggles that fire network events — keep our flags.
             var tvcAfterGen = driverLoop("TransformerVoltageControl");
             var tvcSimple = driverLoop("SimpleTransformerVoltageControl");
             if ((tvcAfterGen != null || tvcSimple != null) && !tvcOwned) {
-                boolean sd = invalidation.structureDirty;
-                boolean ad = invalidation.activationDirty;
-                boolean useInitial = tvcAfterGen instanceof com.powsybl.openloadflow.ac.outerloop.TransformerVoltageControlOuterLoop t
-                        && t.isUseInitialTapPosition();
                 tvdCtls = phases.discreteTvc();
-                invalidation.structureDirty = sd;
-                invalidation.activationDirty = ad;
                 tvdOwned = com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchTransformerControl.uploadToDevice(
                         handle, tvdCtls, tvcSimple != null ? 1 : 0, tvcSimple != null);
                 if (tvdOwned && tvcAfterGen instanceof com.powsybl.openloadflow.ac.outerloop.TransformerVoltageControlOuterLoop tag) {
@@ -1239,12 +1227,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
             // WITH_GENERATOR ShuntVoltageControl (OLF order 10) IN-KERNEL: the controls are ON at entry
             // (initialize), the first check dispatches every continuous b to its sections.
             if (driverLoop("ShuntVoltageControl") != null && !shuntOwned) {
-                boolean sd = invalidation.structureDirty;
-                boolean ad = invalidation.activationDirty;
-                var mapper = new com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchElementMapper(network);
                 svdGroups = phases.simpleShunt();
-                invalidation.structureDirty = sd;
-                invalidation.activationDirty = ad;
                 svdOwned = com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchSimpleShuntVc.uploadToDevice(handle, svdGroups, true);
                 if (svdOwned) {
                     hostMask &= ~(1 << (GpuAcNewtonSolver.HOST_LOOP_SHUNT - GpuAcNewtonSolver.HOST_LOOP_SVC));

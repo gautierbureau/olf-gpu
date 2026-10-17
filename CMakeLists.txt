@@ -117,6 +117,7 @@ add_library(olfgpu SHARED
     native/cuda/jni/equations/fill_launch.cu
     native/cuda/jni/solver/state_vector_scaling.cu
     native/cuda/jni/solver/convergence.cu
+    native/cuda/jni/solver/realistic_voltage_check.cu
 )
 target_include_directories(olfgpu
     PRIVATE

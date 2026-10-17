@@ -7,6 +7,8 @@
  */
 package com.powsybl.openloadflow.ac.solver.gpu.batch;
 
+import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
+
 /**
  * The per-scenario target/row-mode changes a generator loss applies on the device: remove the lost
  * generator's P from its bus's P target ({@code pRow}→{@code pTarget}); if the loss un-controls the bus
@@ -249,5 +251,46 @@ public record GenOutage(int pRow, double pTarget, int vRow, double qTarget, bool
      *  q are both measured against. */
     public boolean shrinksReactiveLimits() {
         return rlEntry >= 0 && (minQDelta != 0 || maxQDelta != 0 || loadQDelta != 0 || svcBminDelta != 0 || svcBmaxDelta != 0);
+    }
+
+    /** The base load flow PINNED this reactive-limit entry (MIN_Q / MAX_Q / a realistic-V freeze): its row
+     *  hosts its own reactive balance from the start. */
+    static boolean basePinned(GpuAcData gpuData, int entry) {
+        byte[] lt = gpuData.rlBaseQLimitType();
+        return lt != null && entry >= 0 && entry < lt.length && lt[entry] >= 1 && lt[entry] <= 4;
+    }
+
+    /** Does the plan write a TARGET at {@code row} for this scenario? Then the structural DEFAULT targets of the
+     *  coupler-opening and tree-replay paths (the child's base balances brought home) yield to it. Every row a
+     *  GenOutage entry writes: its P balance row, its Q target row (own V row, or the relocated one) on a flip or a
+     *  Q override, its seeded DISTR_Q targets and a killed pilot's identity row. */
+    static boolean planSeedsRow(GenOutage[] gos, int row) {
+        for (GenOutage go : gos == null ? new GenOutage[0] : gos) {
+            if (go.pRow() == row
+                    || (go.toPq() || go.qOverride()) && go.qTargetRowOrV() == row
+                    || go.toPq() && go.vRow() == row
+                    || go.seedsDqTargets() && ChunkArrays.contains(go.dqTargetRows(), row)
+                    || go.killsPilotVoltageIdentity() && go.deadPilotVRow() == row) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Does the plan change the MODE of {@code row} this scenario - a flip to a reactive balance (the bus lost its
+     *  last controller), a re-homed identity of its own, a killed pilot's identity? Only then does the opening path
+     *  leave the killed coupler's child WITHOUT the voltage identity it holds for its cluster. A plan entry that only
+     *  writes a target there - a merged group's DISTR_Q seed brought home onto the child's own row, exactly the
+     *  elected main of a re-homed cluster - must not: measured on rte6515 BUS-6066_BBS_1 / BUS-2341_BBS_1 /
+     *  BUS-6002_BBS_1 when the seed gated the identity, 6.7 / 2.3 / 0.03 kV and 1.27 / 1.21 MW against OLF,
+     *  and BUS-246_BBS_2 singular. */
+    static boolean planFlipsRow(GenOutage[] gos, int row) {
+        for (GenOutage go : gos == null ? new GenOutage[0] : gos) {
+            if (go.toPq() && go.vRow() == row
+                    || go.killsPilotVoltageIdentity() && go.deadPilotVRow() == row) {
+                return true;
+            }
+        }
+        return false;
     }
 }

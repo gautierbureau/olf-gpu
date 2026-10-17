@@ -38,28 +38,28 @@ class GpuBatchChunkSolverGateTest {
     void aDistrQSeedWritesTheRowButDoesNotFlipIt() {
         GenOutage[] seed = {entry(-1, -1, false, false, new int[] {ROW, 14433}, -1)};
         assertTrue(seed[0].seedsDqTargets());
-        assertTrue(GpuBatchChunkSolver.planSeedsRow(seed, ROW), "the default Q target yields to the seed");
-        assertFalse(GpuBatchChunkSolver.planFlipsRow(seed, ROW), "the voltage identity stays");
-        assertFalse(GpuBatchChunkSolver.planSeedsRow(seed, ROW + 1));
+        assertTrue(GenOutage.planSeedsRow(seed, ROW), "the default Q target yields to the seed");
+        assertFalse(GenOutage.planFlipsRow(seed, ROW), "the voltage identity stays");
+        assertFalse(GenOutage.planSeedsRow(seed, ROW + 1));
     }
 
     @Test
     void aFlipOrAKilledPilotWithholdsTheIdentity() {
         GenOutage[] flip = {entry(-1, ROW, true, true, new int[0], -1)};
-        assertTrue(GpuBatchChunkSolver.planFlipsRow(flip, ROW));
-        assertTrue(GpuBatchChunkSolver.planSeedsRow(flip, ROW));
+        assertTrue(GenOutage.planFlipsRow(flip, ROW));
+        assertTrue(GenOutage.planSeedsRow(flip, ROW));
         GenOutage[] dead = {entry(-1, -1, false, false, new int[0], ROW)};
         assertTrue(dead[0].killsPilotVoltageIdentity());
-        assertTrue(GpuBatchChunkSolver.planFlipsRow(dead, ROW));
-        assertFalse(GpuBatchChunkSolver.planFlipsRow(dead, ROW + 1));
+        assertTrue(GenOutage.planFlipsRow(dead, ROW));
+        assertFalse(GenOutage.planFlipsRow(dead, ROW + 1));
     }
 
     @Test
     void anInjectionTargetYieldsThePDefaultOnly() {
         GenOutage[] load = {entry(7945, 7944, false, true, new int[0], -1)};   // a lost load brought home (rowsHome)
-        assertTrue(GpuBatchChunkSolver.planSeedsRow(load, 7945), "the P default yields");
-        assertTrue(GpuBatchChunkSolver.planSeedsRow(load, 7944), "the Q default yields to the Q override");
-        assertFalse(GpuBatchChunkSolver.planFlipsRow(load, 7944), "a PQ bus's Q override is not a flip");
-        assertFalse(GpuBatchChunkSolver.planSeedsRow(null, 7945));
+        assertTrue(GenOutage.planSeedsRow(load, 7945), "the P default yields");
+        assertTrue(GenOutage.planSeedsRow(load, 7944), "the Q default yields to the Q override");
+        assertFalse(GenOutage.planFlipsRow(load, 7944), "a PQ bus's Q override is not a flip");
+        assertFalse(GenOutage.planSeedsRow(null, 7945));
     }
 }

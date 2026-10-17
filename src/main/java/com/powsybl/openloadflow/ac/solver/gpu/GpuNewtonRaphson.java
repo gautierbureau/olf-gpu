@@ -820,6 +820,8 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
         hostLoopPairs = null;
         rlCarry = null;
         restartIterations = 0;
+        (parameters instanceof GpuNewtonRaphsonParameters gpu ? gpu.getGpuParameters() : new GpuLoadFlowParameters())
+                .install();
         try {
             return runImpl(voltageInitializer, reportNode, false);
         } finally {

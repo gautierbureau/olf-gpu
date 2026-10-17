@@ -18,9 +18,6 @@ correct fallback worth keeping for triage · **TUNING** = both modes legitimate 
 
 | switch | gates | disposition |
 |---|---|---|
-| `OLF_GPU_REORDER_ALG` | cuDSS fill-reducing ordering | **TUNING** — library knob, both modes legitimate. |
-| `OLF_GPU_MATCHING_ALG` | cuDSS matching (standalone solve only) | **TUNING** — and `0` is a known-wrong mode kept deliberately to reproduce the failure. Document, do not delete. |
-| `OLF_GPU_PIVOT_TYPE`, `OLF_GPU_PIVOT_THRESHOLD` | cuDSS pivoting on the robust path | **TUNING** |
 | `OLF_GPU_PS_MASK`, `OLF_GPU_PSG_STEP` | pilot-self masks / step gating | **VERIFY** — bisection leftovers from the pilot-self work; likely DELETE now that the rotation is default-on. |
 | `OLF_GPU_CPU_ROUTED` | force named contingencies to the CPU | **OPT-OUT** — the escape hatch for a bad contingency in production. |
 

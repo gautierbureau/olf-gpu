@@ -13,7 +13,9 @@ import com.powsybl.openloadflow.ac.AcLoadFlowParameters;
 import com.powsybl.openloadflow.ac.AcloadFlowEngine;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
+import com.powsybl.loadflow.LoadFlowParameters;
 import com.powsybl.openloadflow.ac.solver.AcSolver;
+import com.powsybl.openloadflow.ac.solver.AcSolverParameters;
 import com.powsybl.openloadflow.ac.solver.AcSolverFactory;
 import com.powsybl.openloadflow.ac.solver.NewtonRaphsonFactory;
 import com.powsybl.openloadflow.ac.solver.NewtonRaphsonParameters;
@@ -38,6 +40,22 @@ public class GpuNewtonRaphsonFactory extends NewtonRaphsonFactory {
     @Override
     public String getName() {
         return NAME;
+    }
+
+    /** OLF's Newton-Raphson parameters, plus the run's {@link GpuLoadFlowParameters}. */
+    @Override
+    public AcSolverParameters createParameters(LoadFlowParameters parameters) {
+        NewtonRaphsonParameters nr = (NewtonRaphsonParameters) super.createParameters(parameters);
+        GpuNewtonRaphsonParameters gpu = new GpuNewtonRaphsonParameters();
+        gpu.setStoppingCriteria(nr.getStoppingCriteria())
+                .setMaxIterations(nr.getMaxIterations())
+                .setStateVectorScalingMode(nr.getStateVectorScalingMode())
+                .setLineSearchStateVectorScalingMaxIteration(nr.getLineSearchStateVectorScalingMaxIteration())
+                .setLineSearchStateVectorScalingStepFold(nr.getLineSearchStateVectorScalingStepFold())
+                .setMaxVoltageChangeStateVectorScalingMaxDv(nr.getMaxVoltageChangeStateVectorScalingMaxDv())
+                .setMaxVoltageChangeStateVectorScalingMaxDphi(nr.getMaxVoltageChangeStateVectorScalingMaxDphi())
+                .setAlwaysUpdateNetwork(nr.isAlwaysUpdateNetwork());
+        return gpu.setGpuParameters(GpuLoadFlowParameters.get(parameters));
     }
 
     @Override

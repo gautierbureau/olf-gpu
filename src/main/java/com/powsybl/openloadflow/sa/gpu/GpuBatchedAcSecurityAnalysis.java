@@ -638,6 +638,9 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         // base/fall-through GPU solver swap is ALSO skipped — concurrent partition load flows on
         // the single-device sequential solver would race in native code (SIGSEGV in cuLaunchKernel,
         // measured 2026-07-17).
+        // The run's GPU parameters, for the batched solves (the base load flow installs the same ones).
+        com.powsybl.openloadflow.ac.solver.gpu.GpuLoadFlowParameters.get(securityAnalysisParameters.getLoadFlowParameters())
+                .install();
         RUN_START_NS.set(System.nanoTime());
         boolean multiThread = OpenSecurityAnalysisParameters.getOrDefault(securityAnalysisParameters).getThreadCount() > 1;
         RunState rs = new RunState();

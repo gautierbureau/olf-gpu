@@ -676,6 +676,14 @@ public final class GpuAcNewtonSolver {
      *  slack-only distribution, beyond which the device flags OLF's remaining mismatch. */
     public static native void setBatchDsSlackRooms(long handle, double roomUp, double roomDown);
 
+    /** The run's linear-solver settings (GpuLoadFlowParameters.install): -1 reorder / pivot type = AUTO, NaN threshold =
+     *  cuDSS's own. Read by every context built afterwards and by every solve's iterative refinement. */
+    public static native void setLinearSolverSettings(int reorder, int matching, int pivotType, double pivotThreshold,
+                                                      int irBase, int irMax, double irTol);
+
+    /** The installed linear-solver settings, in {@link #setLinearSolverSettings}'s order. */
+    public static native double[] readLinearSolverSettings();
+
     public static native void setBatchDsGenerators(long handle, int[] genBus, double[] genFactor,
                                                    double[] genMaxDelta, double[] genMinDelta,
                                                    double[] genMarginUp, double[] genMarginDown,

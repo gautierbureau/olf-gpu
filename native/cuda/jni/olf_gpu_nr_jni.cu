@@ -314,17 +314,28 @@ constexpr int BLOCK = 64;
 // gave 12869 on device and 98 violations off the CPU against 12364-12621 and 196-1274 without. Only systems WITH
 // zero-impedance couplers ever read this (irSteps(false) = 0 otherwise): a coupler-free network is unaffected, but
 // network.xiidm's non-busbar scopes have couplers too and give back that measured speed-up (cold 116 s -> ~140 s).
+// The run's linear-solver settings (GpuLoadFlowParameters, installed by setLinearSolverSettings before the run's
+// contexts are built). -1 = AUTO: the per-context choice each apply* function documents; a NaN threshold = the
+// library's own. The defaults are what every context used before the settings were parameters.
+struct LinearSolverSettings {
+    int reorder = -1;                                        // index into REORDER_ALGS, -1 = AUTO (AMD on cuDSS 0.8)
+    int matching = 6;                                        // cudssMatchingAlg_t, CUDSS_MATCHING_ALG_AUTO
+    int pivotType = -1;                                      // cudssPivotType_t, -1 = derived from the ordering
+    double pivotThreshold = NAN;
+    int irBase = 1;                                          // cuDSS internal refinement steps (coupler systems)
+    int irMax = 4;                                           // adaptive refinement: at most this many solves
+    double irTol = 1e-12;                                    // adaptive refinement: backward-residual target
+};
+static LinearSolverSettings gLinearSolver;
+
 inline int irBaseSteps() {
-    const char* e = std::getenv("OLF_GPU_IR_BASE");
-    return e != nullptr && *e != '\0' ? std::atoi(e) : 1;
+    return gLinearSolver.irBase;
 }
 inline int irMaxSteps() {
-    const char* e = std::getenv("OLF_GPU_IR_MAX");
-    return e != nullptr && *e != '\0' ? std::atoi(e) : 4;
+    return gLinearSolver.irMax;
 }
 inline double irTol() {
-    const char* e = std::getenv("OLF_GPU_IR_TOL");
-    return e != nullptr && *e != '\0' ? std::atof(e) : 1e-12;
+    return gLinearSolver.irTol;
 }
 static long gIrExtraSteps = 0;                               // adaptive refinement solves actually run
 static long gIrChecks = 0;                                   // residual checks (one per batched iteration at least)
@@ -404,13 +415,8 @@ constexpr OlfReorderAlg REORDER_ALGS[] = {CUDSS_ALG_DEFAULT, CUDSS_ALG_1, CUDSS_
 // diverges, and on the base load flow it was masked by the device-broken-solve safety net.
 inline void applyMatchingAlg(cudssConfig_t config) {
 #if CUDSS_VERSION >= 800
-    const char* e = std::getenv("OLF_GPU_MATCHING_ALG");
-    // Treat an EMPTY value as unset, like applyReorderAlg: atoi("") is 0, which is
-    // CUDSS_MATCHING_ALG_NONE, so `VAR= cmd` would silently disable matching instead of
-    // selecting the default — a trap that cost a whole misread sweep row.
-    const bool unset = e == nullptr || *e == '\0';
-    cudssMatchingAlg_t alg = unset ? CUDSS_MATCHING_ALG_AUTO
-                                   : static_cast<cudssMatchingAlg_t>(std::atoi(e));
+    // Never CUDSS_MATCHING_ALG_NONE: these Jacobians need matching (see above), so the parameter does not offer it.
+    cudssMatchingAlg_t alg = static_cast<cudssMatchingAlg_t>(gLinearSolver.matching);
     CUDSS_CHECK(cudssConfigSet(config, CUDSS_CONFIG_MATCHING_ALG, &alg, sizeof(alg)));
 #else
     (void) config;                                           // 0.7.1 has no matching knob
@@ -425,13 +431,12 @@ inline void applyReorderAlg(cudssConfig_t config, bool hasZeroImpedance);   // d
 // every unpivoted ordering): measured 2026-09-22, the batch-of-one base load flow that the uniform
 // batch could not solve converges on the device in this mode. The batch-of-one falls into it
 // automatically after a linear-solve reject (GpuNewtonRaphson); a context asks for it through
-// olf.gpu.batchMode=6. Mode 0 itself is untouched (the JAVA hybrid builds mode-0 contexts and its
-// 1e-12 fixtures sit on the last ulp of AMD's roundoff). OLF_GPU_REORDER_ALG still overrides the ordering.
+// the test hook GpuBatchContextCache.forceModeForTests. The reordering setting still overrides the ordering.
 inline void applyRobustSingleMatrixConfig(cudssConfig_t config) {
 #if CUDSS_VERSION >= 800
-    const char* e = std::getenv("OLF_GPU_REORDER_ALG");
+    const int reorder = gLinearSolver.reorder;
     bool colamdFamily = true;                                // BTF_COLAMD / COLAMD: global column pivoting is defined
-    if (e == nullptr || *e == '\0') {
+    if (reorder < 0) {
         // cuDSS 0.8 REFUSES matching under BTF_COLAMD / COLAMD (status 4 at factorization, every
         // size); it accepts it under default / ND / AMD with automatic pivoting. AMD by default.
         OlfReorderAlg amd = CUDSS_REORDERING_ALG_AMD;
@@ -439,45 +444,23 @@ inline void applyRobustSingleMatrixConfig(cudssConfig_t config) {
         colamdFamily = false;
     } else {
         applyReorderAlg(config, true);
-        colamdFamily = std::string(e) == "btf_colamd" || std::string(e) == "colamd";
+        colamdFamily = reorder == 1 || reorder == 2;          // REORDER_ALGS: btf_colamd, colamd
     }
     cudssPivotType_t pt = colamdFamily ? CUDSS_PIVOT_GLOBAL_COL : CUDSS_PIVOT_AUTO;
-    // OLF_GPU_PIVOT_TYPE / OLF_GPU_PIVOT_THRESHOLD: reach the two knobs that make KLU work on the CPU.
-    // KLU pivots on ROWS with a threshold inside each BTF block; this config only ever asked for
-    // GLOBAL_COL (or AUTO) and never set a threshold at all, so cuDSS used its own default and a tiny
-    // pivot could be accepted — which is what a finite, well-scaled matrix solved to a 1e9 residual
-    // looks like. Defaults are unchanged when neither variable is set.
-    const char* ptEnv = std::getenv("OLF_GPU_PIVOT_TYPE");
-    if (ptEnv != nullptr && *ptEnv != '\0') {
-        std::string want(ptEnv);
-        if (want == "global_row") {
-            pt = CUDSS_PIVOT_GLOBAL_ROW;
-        } else if (want == "global_col") {
-            pt = CUDSS_PIVOT_GLOBAL_COL;
-        } else if (want == "diagonal") {
-            pt = CUDSS_PIVOT_DIAGONAL;
-        } else if (want == "auto") {
-            pt = CUDSS_PIVOT_AUTO;
-        } else if (want == "none") {
-            pt = CUDSS_PIVOT_NONE;
-        } else {
-            throw std::runtime_error("OLF_GPU_PIVOT_TYPE: unknown value '" + want
-                                     + "' (auto|global_row|global_col|diagonal|none)");
-        }
+    // The pivot type and threshold: the two knobs that make KLU work on the CPU. KLU pivots on ROWS with a threshold
+    // inside each BTF block; the default here is GLOBAL_COL under the COLAMD family and AUTO otherwise, with the
+    // library's own threshold.
+    if (gLinearSolver.pivotType >= 0) {
+        pt = static_cast<cudssPivotType_t>(gLinearSolver.pivotType);
     }
     CUDSS_CHECK(cudssConfigSet(config, CUDSS_CONFIG_PIVOT_TYPE, &pt, sizeof(pt)));
-    const char* thrEnv = std::getenv("OLF_GPU_PIVOT_THRESHOLD");
-    if (thrEnv != nullptr && *thrEnv != '\0') {
-        double thr = std::atof(thrEnv);
+    if (!std::isnan(gLinearSolver.pivotThreshold)) {
+        double thr = gLinearSolver.pivotThreshold;
         CUDSS_CHECK(cudssConfigSet(config, CUDSS_CONFIG_PIVOT_THRESHOLD, &thr, sizeof(thr)));
     }
     if (std::getenv("OLF_GPU_BATCH_TRACE") != nullptr) {
-        const char* m = std::getenv("OLF_GPU_MATCHING_ALG");
-        const char* thr = std::getenv("OLF_GPU_PIVOT_THRESHOLD");
-        std::fprintf(stderr, "ROBUST_CFG reorder=%s pivot=%s matching=%s threshold=%s\n",
-                     e == nullptr || *e == '\0' ? "amd" : e,
-                     ptEnv != nullptr && *ptEnv != '\0' ? ptEnv : (colamdFamily ? "global_col" : "auto"),
-                     m == nullptr || *m == '\0' ? "auto" : m, thr == nullptr || *thr == '\0' ? "default" : thr);
+        std::fprintf(stderr, "ROBUST_CFG reorder=%d pivot=%d matching=%d threshold=%g\n",
+                     reorder, static_cast<int>(pt), gLinearSolver.matching, gLinearSolver.pivotThreshold);
     }
     // Matching is REQUIRED (measured: pivoting alone left the full-scope base at NaN). Its
     // permutation is value-dependent and cuDSS accepts ONE analysis per data object (a second
@@ -485,7 +468,7 @@ inline void applyRobustSingleMatrixConfig(cudssConfig_t config) {
     // later factorizations reuse it - which is what converged the full-scope base. A system cuDSS
     // refuses under this configuration (ieee14 in the cross-check test: status 4 at factorization)
     // throws, and the batch-of-one falls back to the CPU as before - never wrong.
-    // Default AUTO, but OLF_GPU_MATCHING_ALG must reach HERE too, not only the standalone path: cuDSS
+    // Default AUTO, but the matching setting must reach HERE too, not only the standalone path: cuDSS
     // REFUSES matching under BTF_COLAMD / COLAMD (status 4 at ANALYSIS), so while this hard-coded AUTO
     // stood, the KLU-LIKE orderings could not be tested in robust mode at all — every attempt died in
     // analysis before factoring anything, which is also why this mode silently runs AMD (the ordering
@@ -510,8 +493,8 @@ inline void applyRobustSingleMatrixConfig(cudssConfig_t config) {
 // case9241pegase (LU_NNZ 260076 vs 304772, warm SA -11%), a network with no retained switches and
 // therefore no zero-impedance branch, so it never exercised a zero diagonal.
 inline void applyReorderAlg(cudssConfig_t config, bool hasZeroImpedance) {
-    const char* e = std::getenv("OLF_GPU_REORDER_ALG");
-    if (e == nullptr || *e == '\0') {
+    const int reorder = gLinearSolver.reorder;
+    if (reorder < 0) {
 #if CUDSS_VERSION >= 800
             OlfReorderAlg amd = CUDSS_REORDERING_ALG_AMD;        // sweep winner; ND collapses the
         CUDSS_CHECK(cudssConfigSet(config, CUDSS_CONFIG_REORDERING_ALG, &amd, sizeof(amd)));
@@ -519,16 +502,11 @@ inline void applyReorderAlg(cudssConfig_t config, bool hasZeroImpedance) {
         return;                                              // 0.7.1: library default, untouched
     }
     (void) hasZeroImpedance;
-    static const char* const NAMES[] = {"default", "btf_colamd", "colamd", "amd", "nd", "none"};
-    for (size_t i = 0; i < sizeof(NAMES) / sizeof(NAMES[0]); i++) {
-        if (std::string(e) == NAMES[i]) {
-            OlfReorderAlg alg = REORDER_ALGS[i];
-            CUDSS_CHECK(cudssConfigSet(config, CUDSS_CONFIG_REORDERING_ALG, &alg, sizeof(alg)));
-            return;
-        }
+    if (reorder >= static_cast<int>(sizeof(REORDER_ALGS) / sizeof(REORDER_ALGS[0]))) {
+        throw std::runtime_error("reordering algorithm index out of range: " + std::to_string(reorder));
     }
-    throw std::runtime_error(std::string("OLF_GPU_REORDER_ALG: unknown value '") + e
-                             + "' (default|btf_colamd|colamd|amd|nd|none)");
+    OlfReorderAlg alg = REORDER_ALGS[reorder];
+    CUDSS_CHECK(cudssConfigSet(config, CUDSS_CONFIG_REORDERING_ALG, &alg, sizeof(alg)));
 }
 
 // Report the LU fill after an ANALYSIS when sweeping (or tracing): one stderr line the
@@ -536,7 +514,7 @@ inline void applyReorderAlg(cudssConfig_t config, bool hasZeroImpedance) {
 // CUDSS_DATA_LU_NNZ; the sweep then judges on the bench timing alone.
 inline void traceLuNnz(cudssHandle_t handle, cudssData_t data, const char* where, int nScenarios = 0,
                        double ms = -1.0) {
-    if (std::getenv("OLF_GPU_REORDER_ALG") == nullptr && std::getenv("OLF_GPU_TRACE") == nullptr) {
+    if (std::getenv("OLF_GPU_TRACE") == nullptr) {
         return;
     }
 #if OLF_GPU_CUDSS_LU_NNZ
@@ -544,14 +522,8 @@ inline void traceLuNnz(cudssHandle_t handle, cudssData_t data, const char* where
     size_t written = 0;
     if (cudssDataGet(handle, data, CUDSS_DATA_LU_NNZ, &luNnz, sizeof(luNnz), &written) == CUDSS_STATUS_SUCCESS
             && luNnz > 0) {
-        const char* alg = std::getenv("OLF_GPU_REORDER_ALG");
-#if CUDSS_VERSION >= 800
-        const char* unsetName = "amd(default)";
-#else
-        const char* unsetName = "default";
-#endif
-        std::fprintf(stderr, "OLF_GPU_CUDSS reorder=%s %s nScenarios=%d LU_NNZ=%lld analysis=%.1f ms\n",
-                     alg != nullptr ? alg : unsetName, where, nScenarios, static_cast<long long>(luNnz), ms);
+        std::fprintf(stderr, "OLF_GPU_CUDSS reorder=%d %s nScenarios=%d LU_NNZ=%lld analysis=%.1f ms\n",
+                     gLinearSolver.reorder, where, nScenarios, static_cast<long long>(luNnz), ms);
         return;
     }
 #endif
@@ -10545,9 +10517,9 @@ static void launchForcedTargetQLimits(BatchSolverContext* ctx, int nS, int n) {
 template <typename SolveFn>
 static void refineLanes(BatchSolverContext* ctx, int lanes, int n, int nnz, const double* vals, double* dx,
                         const double* b, double* r, const double* delta, const char* active, SolveFn solve) {
-    static const int irMax = irMaxSteps();
-    static const int irBase = irBaseSteps();
-    static const double tol = irTol();
+    const int irMax = irMaxSteps();
+    const int irBase = irBaseSteps();
+    const double tol = irTol();
     std::vector<double> prev(lanes), sc(lanes);
     std::vector<char> lane(lanes), undo(lanes);
     auto scores = [&](std::vector<double>& out) {
@@ -14901,6 +14873,33 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
     ctx->x0SeedVal.resize(k);
     env->GetIntArrayRegion(jIdx, 0, k, ctx->x0SeedIdx.data());
     env->GetDoubleArrayRegion(jVal, 0, k, ctx->x0SeedVal.data());
+}
+
+// The linear-solver settings of the run (GpuLoadFlowParameters): read by every context built after this call and by
+// the adaptive refinement of every solve. -1 reorder / pivotType = AUTO; NaN threshold = the library's.
+extern "C" JNIEXPORT void JNICALL
+Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setLinearSolverSettings(
+        JNIEnv*, jclass, jint reorder, jint matching, jint pivotType, jdouble pivotThreshold,
+        jint irBase, jint irMax, jdouble irTol) {
+    gLinearSolver.reorder = reorder;
+    gLinearSolver.matching = matching;
+    gLinearSolver.pivotType = pivotType;
+    gLinearSolver.pivotThreshold = pivotThreshold;
+    gLinearSolver.irBase = irBase;
+    gLinearSolver.irMax = irMax;
+    gLinearSolver.irTol = irTol;
+}
+
+// The installed linear-solver settings, in setLinearSolverSettings's order (tests: the parameters reach the device).
+extern "C" JNIEXPORT jdoubleArray JNICALL
+Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_readLinearSolverSettings(JNIEnv* env, jclass) {
+    const double v[7] = {static_cast<double>(gLinearSolver.reorder), static_cast<double>(gLinearSolver.matching),
+                         static_cast<double>(gLinearSolver.pivotType), gLinearSolver.pivotThreshold,
+                         static_cast<double>(gLinearSolver.irBase), static_cast<double>(gLinearSolver.irMax),
+                         gLinearSolver.irTol};
+    jdoubleArray out = env->NewDoubleArray(7);
+    env->SetDoubleArrayRegion(out, 0, 7, v);
+    return out;
 }
 
 extern "C" JNIEXPORT void JNICALL

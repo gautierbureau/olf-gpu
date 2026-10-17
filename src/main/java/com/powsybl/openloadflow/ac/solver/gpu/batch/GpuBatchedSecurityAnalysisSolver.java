@@ -397,20 +397,20 @@ public final class GpuBatchedSecurityAnalysisSolver {
             // only PARTIALLY would have the device drive a SUBSET of it, and this path has no host-pause
             // slot to hand it back to, so the whole run goes to the CPU (resultsByIndex stays null).
             if (GpuBatchPhaseOwnership.batchable()) {
-                GpuBatchChunkSolver.solveQualifiedInChunks(batchedIndices, contingencies, elementMapper, gpuData, baseState,
-                        baseTargets, baseActivation.rowMode(), plan.frozenRowsByIndex(), plan.frozenTargetsByIndex(), plan.genOutagesByIndex(),
-                        plan.activePowerLossByIndex(),
-                        GpuBatchHvdcAcEmulation.elementIndices(network, nElements), rowCriteria, rlCurves, forcedTargetQ,
-                        plan.dqOvContribByIndex(), plan.dqOvWByIndex(), plan.dqKeyOvMemberByIndex(), plan.dqKeyOvByIndex(),
-                        plan.drOvContribByIndex(), plan.drOvCByIndex(), plan.islandedDsByIndex(),
-                        plan.islandedRlByIndex(), plan.islandedHvdcsByIndex(), plan.dqSubByIndex(), plan.slackRelocations(),
-                        n, nElements, parameters, tol, reactiveLimitTol, slackDistTol, convEpsPerEq, resultsByIndex,
-                        preDistributedByIndex, distributedByIndex, config.lsMode() == 2 ? GpuAcActivationExtractor.extractVarType(equationSystem, n) : null,
-                        phases,
-                        config.hvdcFreezing() || config.hvdcLimits()
-                                ? GpuBatchHvdcAcEmulation.buildControllers(network, equationSystem, nElements, gpuData)
-                                : null,
-                        config);
+                // built in the order the call evaluated them when they were its arguments
+                var hvdcElemIndex = GpuBatchHvdcAcEmulation.elementIndices(network, nElements);
+                int[] varType = config.lsMode() == 2 ? GpuAcActivationExtractor.extractVarType(equationSystem, n) : null;
+                List<GpuBatchHvdcAcEmulation.Ctl> hvdcControllers = config.hvdcFreezing() || config.hvdcLimits()
+                        ? GpuBatchHvdcAcEmulation.buildControllers(network, equationSystem, nElements, gpuData)
+                        : null;
+                GpuBatchChunkSolver.solveQualifiedInChunks(new ChunkInputs(contingencies,
+                        new ChunkInputs.BaseCase(elementMapper, gpuData, baseState, baseTargets, baseActivation.rowMode(),
+                                n, nElements, varType, hvdcElemIndex),
+                        plan,
+                        new ChunkInputs.SolveSettings(parameters, tol, reactiveLimitTol, slackDistTol, convEpsPerEq, rowCriteria),
+                        new ChunkInputs.DevicePhaseInputs(phases, hvdcControllers, rlCurves, forcedTargetQ),
+                        new ChunkInputs.ResultSinks(resultsByIndex, preDistributedByIndex, distributedByIndex),
+                        config));
             }
         }
 

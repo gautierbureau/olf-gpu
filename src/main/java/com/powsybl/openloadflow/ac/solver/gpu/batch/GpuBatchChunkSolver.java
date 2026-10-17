@@ -48,29 +48,12 @@ final class GpuBatchChunkSolver {
      * with base-case scenarios (no element disabled): they converge at iteration 0 and their
      * results are discarded.
      */
-
-    static void solveQualifiedInChunks(List<Integer> batchedIndices, List<BatchContingency> contingencies,
-                                               GpuBatchElementMapper elementMapper, GpuAcData gpuData,
-                                               double[] baseStateIn, double[] baseTargets, int[] baseRowMode,
-                                               int[][] frozenRowsByIndex, double[][] frozenTargetsByIndex,
-                                               GenOutage[][] genOutagesByIndex, double[] activePowerLossByIndex,
-                                               java.util.Map<com.powsybl.openloadflow.network.LfHvdc, Integer> hvdcElemIndex,
-                                               double[][] rowCriteria, GpuBatchRlCurves.Channel rlCurves,
-                                               GpuBatchForcedTargetQ.Channel forcedTargetQ,
-                                               int[][] dqOvContribByIndex, double[][] dqOvWByIndex,
-                                               int[][] dqKeyOvMemberByIndex, double[][] dqKeyOvByIndex,
-                                               int[][] drOvContribByIndex, double[][] drOvCByIndex,
-                                               int[][] islandedDsByIndex, int[][] islandedRlByIndex,
-                                               List<com.powsybl.openloadflow.network.LfHvdc>[] islandedHvdcsByIndex,
-                                               int[][] dqSubByIndex,
-                                               GpuBatchQualification.SlackRelocations slackRelocations,
-                                               int n, int nElements, NewtonRaphsonParameters parameters,
-                                               double tol, double reactiveLimitTol, double slackDistTol,
-                                               double convEpsPerEq, double[][] resultsByIndex, double[] preDistributedByIndex,
-                                               double[] distributedByIndex, int[] varType, GpuBatchPhases.Built phases,
-                                               List<GpuBatchHvdcAcEmulation.Ctl> hvdcControllers,
-                                               BatchConfig config) {
-        double[] baseState = ZeroImpedanceClusters.zeroZiFlows(gpuData, baseStateIn);
+    static void solveQualifiedInChunks(ChunkInputs inputs) {
+        GpuAcData gpuData = inputs.base().gpuData();
+        ChunkInputs in = inputs.withBaseState(ZeroImpedanceClusters.zeroZiFlows(gpuData, inputs.base().baseState()));
+        List<Integer> batchedIndices = in.plan().batchedIndices();
+        int n = in.base().n();
+        double[][] resultsByIndex = in.sinks().resultsByIndex();
         int nb = batchedIndices.size();
         // Chunk sizing is a device-memory ESTIMATE (a cuDSS probe on the shared structure). When it
         // is too optimistic the factorization fails to allocate mid-solve, and a thrown batch means
@@ -81,13 +64,7 @@ final class GpuBatchChunkSolver {
         List<Integer> remaining = batchedIndices;
         while (true) {
             try {
-                solveQualifiedInChunksAt(chunkSize, remaining, contingencies, elementMapper, gpuData, baseState,
-                        baseTargets, baseRowMode, frozenRowsByIndex, frozenTargetsByIndex, genOutagesByIndex,
-                        activePowerLossByIndex, hvdcElemIndex, rowCriteria, rlCurves, forcedTargetQ,
-                        dqOvContribByIndex, dqOvWByIndex, dqKeyOvMemberByIndex, dqKeyOvByIndex, drOvContribByIndex, drOvCByIndex, islandedDsByIndex,
-                        islandedRlByIndex, islandedHvdcsByIndex, dqSubByIndex, slackRelocations,
-                        n, nElements, parameters, tol, reactiveLimitTol, slackDistTol, convEpsPerEq, resultsByIndex,
-                        preDistributedByIndex, distributedByIndex, varType, phases, hvdcControllers, config);
+                solveQualifiedInChunksAt(chunkSize, remaining, in);
                 return;
             } catch (RuntimeException e) {
                 if (chunkSize <= 1 || !isDeviceAllocFailure(e)) {
@@ -151,28 +128,47 @@ final class GpuBatchChunkSolver {
     }
 
     @SuppressWarnings({"java:S107", "java:S3776"})
-    private static void solveQualifiedInChunksAt(int chunkCap,
-                                               List<Integer> batchedIndices, List<BatchContingency> contingencies,
-                                               GpuBatchElementMapper elementMapper, GpuAcData gpuData,
-                                               double[] baseState, double[] baseTargets, int[] baseRowMode,
-                                               int[][] frozenRowsByIndex, double[][] frozenTargetsByIndex,
-                                               GenOutage[][] genOutagesByIndex, double[] activePowerLossByIndex,
-                                               java.util.Map<com.powsybl.openloadflow.network.LfHvdc, Integer> hvdcElemIndex,
-                                               double[][] rowCriteria, GpuBatchRlCurves.Channel rlCurves,
-                                               GpuBatchForcedTargetQ.Channel forcedTargetQ,
-                                               int[][] dqOvContribByIndex, double[][] dqOvWByIndex,
-                                               int[][] dqKeyOvMemberByIndex, double[][] dqKeyOvByIndex,
-                                               int[][] drOvContribByIndex, double[][] drOvCByIndex,
-                                               int[][] islandedDsByIndex, int[][] islandedRlByIndex,
-                                               List<com.powsybl.openloadflow.network.LfHvdc>[] islandedHvdcsByIndex,
-                                               int[][] dqSubByIndex,
-                                               GpuBatchQualification.SlackRelocations slackRelocations,
-                                               int n, int nElements, NewtonRaphsonParameters parameters,
-                                               double tol, double reactiveLimitTol, double slackDistTol,
-                                               double convEpsPerEq, double[][] resultsByIndex, double[] preDistributedByIndex,
-                                               double[] distributedByIndex, int[] varType, GpuBatchPhases.Built phases,
-                                               List<GpuBatchHvdcAcEmulation.Ctl> hvdcControllers,
-                                               BatchConfig config) {
+    private static void solveQualifiedInChunksAt(int chunkCap, List<Integer> batchedIndices, ChunkInputs in) {
+        List<BatchContingency> contingencies = in.contingencies();
+        GpuBatchElementMapper elementMapper = in.base().elementMapper();
+        GpuAcData gpuData = in.base().gpuData();
+        double[] baseState = in.base().baseState();
+        double[] baseTargets = in.base().baseTargets();
+        int[] baseRowMode = in.base().baseRowMode();
+        int n = in.base().n();
+        int nElements = in.base().nElements();
+        int[] varType = in.base().varType();
+        java.util.Map<com.powsybl.openloadflow.network.LfHvdc, Integer> hvdcElemIndex = in.base().hvdcElemIndex();
+        GpuBatchQualification.ScenarioPlan plan = in.plan();
+        int[][] frozenRowsByIndex = plan.frozenRowsByIndex();
+        double[][] frozenTargetsByIndex = plan.frozenTargetsByIndex();
+        GenOutage[][] genOutagesByIndex = plan.genOutagesByIndex();
+        double[] activePowerLossByIndex = plan.activePowerLossByIndex();
+        int[][] dqOvContribByIndex = plan.dqOvContribByIndex();
+        double[][] dqOvWByIndex = plan.dqOvWByIndex();
+        int[][] dqKeyOvMemberByIndex = plan.dqKeyOvMemberByIndex();
+        double[][] dqKeyOvByIndex = plan.dqKeyOvByIndex();
+        int[][] drOvContribByIndex = plan.drOvContribByIndex();
+        double[][] drOvCByIndex = plan.drOvCByIndex();
+        int[][] islandedDsByIndex = plan.islandedDsByIndex();
+        int[][] islandedRlByIndex = plan.islandedRlByIndex();
+        List<com.powsybl.openloadflow.network.LfHvdc>[] islandedHvdcsByIndex = plan.islandedHvdcsByIndex();
+        int[][] dqSubByIndex = plan.dqSubByIndex();
+        GpuBatchQualification.SlackRelocations slackRelocations = plan.slackRelocations();
+        NewtonRaphsonParameters parameters = in.settings().parameters();
+        double tol = in.settings().tol();
+        double reactiveLimitTol = in.settings().reactiveLimitTol();
+        double slackDistTol = in.settings().slackDistTol();
+        double convEpsPerEq = in.settings().convEpsPerEq();
+        double[][] rowCriteria = in.settings().rowCriteria();
+        GpuBatchPhases.Built phases = in.phases().phases();
+        List<GpuBatchHvdcAcEmulation.Ctl> hvdcControllers = in.phases().hvdcControllers();
+        GpuBatchRlCurves.Channel rlCurves = in.phases().rlCurves();
+        GpuBatchForcedTargetQ.Channel forcedTargetQ = in.phases().forcedTargetQ();
+        double[][] resultsByIndex = in.sinks().resultsByIndex();
+        double[] preDistributedByIndex = in.sinks().preDistributedByIndex();
+        double[] distributedByIndex = in.sinks().distributedByIndex();
+        BatchConfig config = in.config();
         int nb = batchedIndices.size();
         int nChunks = (nb + chunkCap - 1) / chunkCap;
         // BALANCE the chunks over that count instead of filling each to the cap and leaving a ragged

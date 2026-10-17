@@ -62,9 +62,6 @@ class GpuBatchedPegaseOutlierDiagnosticTest {
     private static final String CONT = System.getenv().getOrDefault("OLF_GPU_OUTLIER", "TWT-14-2925");
     private static final double PV_EPS = 1e-6;                  // |V - targetV| below this ⇒ still voltage-controlled
 
-    static {
-        GpuTestPaths.init();
-    }
 
     private static final boolean NO_DS = System.getenv("OLF_GPU_NO_DS") != null;
     private static final boolean NO_RL = System.getenv("OLF_GPU_NO_RL") != null;

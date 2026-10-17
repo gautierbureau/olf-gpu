@@ -45,9 +45,6 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  */
 class GpuLoadFlowTest extends com.powsybl.openloadflow.network.AbstractLoadFlowNetworkFactory {
 
-    static {
-        GpuTestPaths.init();
-    }
 
     @BeforeEach
     void checkGpu() {

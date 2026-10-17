@@ -48,9 +48,6 @@ class GpuShuntVoltageControlTest {
     private static final int MAX_ITER = 30;
     private static final double TOL = 1e-8;
 
-    static {
-        GpuTestPaths.init();
-    }
 
     @BeforeEach
     void checkGpu() {

@@ -12,8 +12,9 @@
 #                         (per-version cmake build dir, EMBED_RPATH=ON so it also
 #                         loads standalone), installed into the tmp/m2
 #                         powsybl-math-native jar.
-#   3. exports CUDSS_ROOT so the JVM loader (GpuAcNewtonSolver) preloads the SAME
-#      version — that is why this must be SOURCED, not executed.
+#   3. exports CUDSS_ROOT and puts its lib directory first on LD_LIBRARY_PATH, so the
+#      JVM's dynamic loader resolves the SAME version — that is why this must be
+#      SOURCED, not executed.
 #
 # BOTH natives must always match the loaded libcudss.so.0 (same soname across
 # versions, first-load wins process-wide) — that is exactly what this enforces.
@@ -61,9 +62,12 @@ _cudss_swap() {
     (cd "$stage" && jar uf "$jar" natives/linux_64/libmathcudss.so) || return 1
     rm -rf "$stage"
 
-    # 3. the loader must preload the same version
+    # 3. the dynamic loader must resolve the same version
     export CUDSS_ROOT="$root"
-    echo "cuDSS $ver ACTIVE: libolfgpu + libmathcudss installed, CUDSS_ROOT=$root"
+    local cleaned
+    cleaned="$(printf '%s' "${LD_LIBRARY_PATH:-}" | tr ':' '\n' | grep -v '/cuda/cudss' | paste -sd: -)"
+    export LD_LIBRARY_PATH="$root/lib${cleaned:+:$cleaned}"
+    echo "cuDSS $ver ACTIVE: libolfgpu + libmathcudss installed, CUDSS_ROOT=$root (first on LD_LIBRARY_PATH)"
     echo "  (libolfgpu -> target/classes/natives/linux_64, libmathcudss -> tmp/m2 jar)"
 }
 

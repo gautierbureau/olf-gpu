@@ -36,9 +36,6 @@ class GpuCpuOuterLoopTrajectoryProbe {
     private static final Path CASES = GpuTestPaths.caseDir();
     private static final String CASE = "case9241pegase.xiidm.gz";
 
-    static {
-        GpuTestPaths.init();
-    }
 
     @Test
     void cpuOuterLoopTrajectory() throws Exception {

@@ -94,9 +94,6 @@ class GpuBatchedN1FixedIterTest {
 
     private static final int MAX_CONTINGENCIES = 1000;
 
-    static {
-        GpuTestPaths.init();
-    }
 
     @BeforeEach
     void check() {

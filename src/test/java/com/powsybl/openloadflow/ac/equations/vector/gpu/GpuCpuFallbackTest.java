@@ -40,9 +40,6 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  */
 class GpuCpuFallbackTest {
 
-    static {
-        GpuTestPaths.init();
-    }
 
     @BeforeEach
     void checkGpu() {

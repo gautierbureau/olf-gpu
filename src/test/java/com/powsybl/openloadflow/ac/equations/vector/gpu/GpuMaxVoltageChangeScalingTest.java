@@ -48,9 +48,6 @@ class GpuMaxVoltageChangeScalingTest {
     private static final double MAX_DV = 0.05;        // pu — tight, to force the clamp on the first steps
     private static final double MAX_DPHI = 0.05;      // rad
 
-    static {
-        GpuTestPaths.init();
-    }
 
     @BeforeEach
     void checkGpu() {

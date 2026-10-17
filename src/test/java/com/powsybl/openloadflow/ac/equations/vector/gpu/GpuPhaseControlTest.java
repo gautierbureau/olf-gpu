@@ -52,9 +52,6 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  */
 class GpuPhaseControlTest {
 
-    static {
-        GpuTestPaths.init();
-    }
 
     @BeforeEach
     void checkGpu() {

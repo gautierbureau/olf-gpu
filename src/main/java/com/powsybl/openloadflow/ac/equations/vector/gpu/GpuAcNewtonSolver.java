@@ -17,18 +17,10 @@ package com.powsybl.openloadflow.ac.equations.vector.gpu;
  *
  * <p>Distribution: libolfgpu is OUR wrapper (MPL) and is bundled in the jar, built
  * location-independent (no RPATH); what is NOT redistributable is NVIDIA's cuDSS, which
- * the wrapper only references dynamically ({@code NEEDED libcudss.so.0}). At load time
- * this class therefore PRELOADS the NVIDIA chain (libcublasLt → libcublas → libcudss)
- * from the user's install — {@code olf.cudss.path} system property or {@code CUDSS_ROOT}
- * env for cuDSS, {@code olf.cuda.path} property or {@code CUDA_HOME}/{@code CUDA_PATH}/
- * {@code CUDA_TOOLKIT} env for the toolkit libs — so the dynamic linker resolves the
- * bundled wrapper's dependency from the already-loaded sonames, with no RPATH and no
- * LD_LIBRARY_PATH. If cuDSS is already resolvable (ldconfig, LD_LIBRARY_PATH, or a local
- * RPATH-embedded build), the preload is simply unnecessary and load succeeds anyway.
- *
- * <p>The {@code olf.gpu.lib} system property overrides the classpath lookup with an
- * explicit path (dev builds). {@link #isAvailable()} is false when the library or its
- * cuDSS dependency cannot be loaded, so CUDA-free builds are unaffected.
+ * the wrapper only references dynamically ({@code NEEDED libcudss.so.0}): the system loader
+ * resolves it ({@code LD_LIBRARY_PATH} or ldconfig, see GpuNativeLoader). {@link #isAvailable()}
+ * is false when the library or its cuDSS dependency cannot be loaded, so CUDA-free builds are
+ * unaffected.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */

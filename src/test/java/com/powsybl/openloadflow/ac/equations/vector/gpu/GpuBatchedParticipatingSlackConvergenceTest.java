@@ -56,9 +56,6 @@ class GpuBatchedParticipatingSlackConvergenceTest {
     private static final int MAX_ITER = 60;
     private static final double TOL = 1e-12;
 
-    static {
-        GpuTestPaths.init();
-    }
 
     @Test
     void participatingSlackResidualVsDsTolerance() {

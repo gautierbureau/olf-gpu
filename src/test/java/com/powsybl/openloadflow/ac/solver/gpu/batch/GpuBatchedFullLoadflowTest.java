@@ -23,7 +23,6 @@ import com.powsybl.openloadflow.ac.equations.AcEquationSystemCreator;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
-import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuTestPaths;
 import com.powsybl.openloadflow.ac.solver.AcSolverUtil;
 import com.powsybl.openloadflow.ac.solver.NewtonRaphsonParameters;
 import com.powsybl.openloadflow.equations.EquationSystem;
@@ -67,9 +66,6 @@ class GpuBatchedFullLoadflowTest {
     private static final int MAX_ITER = 30;
     private static final double TOL = 1e-8;
 
-    static {
-        GpuTestPaths.init();
-    }
 
     @BeforeEach
     void checkGpu() {

@@ -49,9 +49,6 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  */
 class GpuSecondaryVoltageControlTest {
 
-    static {
-        GpuTestPaths.init();
-    }
 
     @BeforeEach
     void checkGpu() {

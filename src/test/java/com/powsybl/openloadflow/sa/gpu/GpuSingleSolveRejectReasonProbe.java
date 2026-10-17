@@ -44,9 +44,6 @@ class GpuSingleSolveRejectReasonProbe {
     private static final Path CASES = GpuTestPaths.caseDir();
     private static final String CASE = "case9241pegase.xiidm.gz";
 
-    static {
-        GpuTestPaths.init();
-    }
 
     @BeforeEach
     void check() {

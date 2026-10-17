@@ -40,9 +40,6 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  */
 class GpuAcStructuresTest {
 
-    static {
-        GpuTestPaths.init();
-    }
 
     @BeforeEach
     void checkGpu() {

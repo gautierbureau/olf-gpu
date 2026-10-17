@@ -34,9 +34,6 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  */
 class GpuTransposedSolveTest {
 
-    static {
-        GpuTestPaths.init();
-    }
 
     @BeforeEach
     void checkGpu() {

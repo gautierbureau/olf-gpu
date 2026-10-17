@@ -16,9 +16,9 @@
 #   EMBED_RPATH   set to 1 to bake a machine-local RPATH into libolfgpu (then the
 #                 .so loads outside the JVM without any env). Default OFF: the bundled
 #                 artifact stays location-independent (DISTRIBUTABLE — only NVIDIA's
-#                 own .so may not ship in the jar, never our wrapper), and the Java
-#                 loader (GpuAcNewtonSolver) preloads libcublasLt/libcublas/libcudss
-#                 from olf.cudss.path/CUDSS_ROOT + olf.cuda.path/CUDA_HOME instead.
+#                 own .so may not ship in the jar, never our wrapper), and the system
+#                 loader resolves libcublas/libcudss at run time: put $CUDSS_ROOT/lib and
+#                 the CUDA lib64 directory on LD_LIBRARY_PATH (or in the ldconfig cache).
 #
 # The cmake cache lives in native/build/ (survives `mvn clean`); the .so output
 # lands under target/classes/, so after a `mvn clean` just re-run this script

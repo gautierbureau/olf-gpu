@@ -31,9 +31,6 @@ class RteProdBaseLfProbeTest {
     private static final Path CASES = GpuTestPaths.caseDir();
     private static final String CASE = "case9241pegase.xiidm.gz";
 
-    static {
-        GpuTestPaths.init();
-    }
 
     /** Is VL-3632 (the dominant violation-diff bus) remotely voltage-controlled, and how much remote control
      *  does the case carry at all? (The batch RL pass covers LOCAL controllers only — DISTR_Q rows carry the

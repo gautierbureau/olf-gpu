@@ -14,7 +14,6 @@ import com.powsybl.iidm.network.Network;
 import com.powsybl.openloadflow.CommonTestConfig;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcStructures;
-import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuTestPaths;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchContextCache;
 import com.powsybl.openloadflow.graph.EvenShiloachGraphDecrementalConnectivityFactory;
 import com.powsybl.openloadflow.sa.AbstractOpenSecurityAnalysisTest;
@@ -43,9 +42,6 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  */
 class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest {
 
-    static {
-        GpuTestPaths.init();
-    }
 
     GpuBatchedAcSecurityAnalysisTest(CommonTestConfig commonTestConfig) {
         super(commonTestConfig);

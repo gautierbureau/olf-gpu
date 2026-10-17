@@ -45,7 +45,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  * branch, a shunt compensator, and HVDC AC emulation.
  *
  * Skipped unless the native lib is available (classpath natives/&lt;arch&gt;/libolfgpu,
- * built by native/build-gpu.sh with cuDSS present, or -Dolf.gpu.lib).
+ * built by native/build-gpu.sh with cuDSS present).
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
@@ -54,9 +54,6 @@ class GpuFullNewtonTest {
     private static final int MAX_ITER = 20;
     private static final double TOL = 1e-8;
 
-    static {
-        GpuTestPaths.init();
-    }
 
     @BeforeEach
     void checkGpu() {

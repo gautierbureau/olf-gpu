@@ -55,9 +55,6 @@ class GpuZeroImpedanceControllerChainTest extends AbstractLoadFlowNetworkFactory
 
     private static final double TOL = 1e-10;
 
-    static {
-        GpuTestPaths.init();
-    }
 
     @BeforeEach
     void checkGpu() {

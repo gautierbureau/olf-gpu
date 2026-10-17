@@ -16,7 +16,6 @@ import com.powsybl.openloadflow.ac.equations.AcEquationSystemCreator;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
-import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuTestPaths;
 import com.powsybl.openloadflow.ac.solver.AcSolverUtil;
 import com.powsybl.openloadflow.ac.solver.NewtonRaphsonParameters;
 import com.powsybl.openloadflow.equations.EquationSystem;
@@ -54,9 +53,6 @@ class GpuBatchedOlfCriterionTest {
     private static final double TOL = 1e-12;
     private static final String LINE_1_2 = "L1-2-1";
 
-    static {
-        GpuTestPaths.init();
-    }
 
     @Test
     void convEpsPerEqSelectsOlfStoppingCriterion() {

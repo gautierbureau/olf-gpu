@@ -46,7 +46,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  * plumbing reaches the kernels.
  *
  * <p>Skipped unless the native lib is available (classpath natives/&lt;arch&gt;/libolfgpu,
- * built by native/build-gpu.sh with cuDSS present, or -Dolf.gpu.lib).
+ * built by native/build-gpu.sh with cuDSS present).
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
@@ -55,9 +55,6 @@ class GpuBatchedN1Test {
     private static final int MAX_ITER = 20;
     private static final double TOL = 1e-12;
 
-    static {
-        GpuTestPaths.init();
-    }
 
     @BeforeEach
     void checkGpu() {

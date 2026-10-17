@@ -46,9 +46,6 @@ class GpuBenchmarkTest {
 
     private static final Path CASES = GpuTestPaths.caseDir();
 
-    static {
-        GpuTestPaths.init();
-    }
 
     @BeforeEach
     void checkGpu() {

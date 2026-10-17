@@ -88,9 +88,6 @@ class GpuBatchedPegaseFullLoadflowTest {
     // (= SLACK_TOL_PU * SB). Tight so DS agrees to inner-Newton precision, not the loose 1-MW default band.
     private static final double SLACK_TOL_PU = Double.parseDouble(System.getenv().getOrDefault("OLF_GPU_SLACK_TOL", "1e-8"));
 
-    static {
-        GpuTestPaths.init();
-    }
 
     @BeforeEach
     void check() {

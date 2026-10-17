@@ -13,7 +13,6 @@ correct fallback worth keeping for triage · **TUNING** = both modes legitimate 
 
 | switch | default | gates | disposition |
 |---|---|---|---|
-| `olf.gpu.lib` | — | native library path | **TUNING** (plumbing, not behaviour). |
 
 ## Environment variables that change behaviour
 

@@ -19,7 +19,6 @@ Anything in the third table should be treated as unverified until someone reads 
 
 | property | effect |
 |---|---|
-| `olf.cuda.path`, `olf.cudss.path`, `olf.gpu.lib` | native library locations |
 
 ## Diagnostics (98) — print only, cannot change a result
 
@@ -155,10 +154,6 @@ Paths, set by `native/local-env.sh`.
 
 | variable | read at |
 |---|---|
-| `CUDA_HOME` | src/main/java/com/powsybl/openloadflow/ac/equations/vector/gpu/GpuNativeLoader.java:75 +1 |
-| `CUDA_PATH` | src/main/java/com/powsybl/openloadflow/ac/equations/vector/gpu/GpuNativeLoader.java:76 +1 |
-| `CUDA_TOOLKIT` | src/main/java/com/powsybl/openloadflow/ac/equations/vector/gpu/GpuNativeLoader.java:77 +1 |
-| `CUDSS_ROOT` | src/main/java/com/powsybl/openloadflow/ac/equations/vector/gpu/GpuNativeLoader.java:80 |
 
 ## Highest risk: tolerances that apply to the GPU ARM ONLY
 

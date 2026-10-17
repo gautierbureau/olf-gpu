@@ -55,9 +55,6 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  */
 class GpuAdjointOnRealJacobianTest {
 
-    static {
-        GpuTestPaths.init();
-    }
 
     @BeforeEach
     void checkGpu() {

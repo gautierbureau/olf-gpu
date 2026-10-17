@@ -16,7 +16,6 @@ import com.powsybl.loadflow.json.JsonLoadFlowParameters;
 import com.powsybl.math.matrix.SparseMatrixFactory;
 import com.powsybl.openloadflow.CommonTestConfig;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
-import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuTestPaths;
 import com.powsybl.openloadflow.graph.EvenShiloachGraphDecrementalConnectivityFactory;
 import com.powsybl.openloadflow.sa.AbstractOpenSecurityAnalysisTest;
 import com.powsybl.openloadflow.sa.OpenSecurityAnalysisParameters;
@@ -63,9 +62,6 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
     private static final Path CASE_FILE = Path.of(System.getenv().getOrDefault("OLF_GPU_SA_CASE_FILE", "rte6515_full.xiidm.gz"));
     private static final Path PARAMS_FILE = Path.of("rte-loadflow-default-parameters.json");
 
-    static {
-        GpuTestPaths.init();
-    }
 
     GpuVsCpuRte6515SaTest(CommonTestConfig commonTestConfig) {
         super(commonTestConfig);

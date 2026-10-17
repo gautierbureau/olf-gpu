@@ -40,10 +40,9 @@ public final class GpuAcNewtonSolver {
      * permutation, the fixed SUPERSET CSR pattern (every row carries its full power-equation
      * entries + a guaranteed diagonal), the per-family device data with role-folded destination
      * arrays, the DISTR_Q / DISTR_RHO / zero-impedance packs and the per-element static trig.
-     * This is everything BOTH solver contexts (single-solve and batched N-1) derive from one
-     * {@link GpuAcData} — build it once and pass the handle to {@link #createContext} and
-     * {@link #createBatchContext}, so the base load flow and the batched security analysis
-     * sharing one extraction share one device-resident structure (see {@link GpuAcStructures}
+     * This is everything a batched context derives from one {@link GpuAcData} — build it once
+     * and pass the handle to {@link #createBatchContext}, so the base load flow and the batched
+     * security analysis sharing one extraction share one device-resident structure (see {@link GpuAcStructures}
      * for the per-extraction cache). Rows use the STABLE indexing (the diagonal-paired variable
      * row, see GpuAcDataExtractor), so the structure survives activation switching; element
      * counts are implied by the index array lengths and -1 marks an absent branch side.
@@ -105,62 +104,6 @@ public final class GpuAcNewtonSolver {
     public static native void destroyStructure(long handle);
 
     /**
-     * Build a CACHED solver context on a shared structure: the per-solve device buffers and the
-     * cuDSS objects persist in it, and cuDSS's symbolic ANALYSIS is done once — subsequent
-     * {@link #solveContext} calls only refactorize. The pattern / families / destination arrays
-     * are NOT duplicated: they live in the structure, shared with any batched context built from
-     * the same handle.
-     *
-     * @param structureHandle a structure from {@link #createStructure}
-     * @return an opaque native handle; release it with {@link #destroyContext}
-     */
-    public static native long createContext(long structureHandle);
-
-    /**
-     * Run a full Newton-Raphson AC power flow on the GPU against a cached context — only
-     * the initial state, the targets and the activation mask cross JNI.
-     *
-     * @param handle  a context from {@link #createContext}
-     * @param x0      initial state, indexed by variable row (length n)
-     * @param target  targets in the STABLE row order (GpuAcDataExtractor#extractTargets)
-     * @param rowMode per row: 1 = power equation, 0 = slack/PV identity (the device mask
-     *                zeroes the row, sets the diagonal to 1 and F = x - target)
-     * @param maxIter maximum Newton iterations
-     * @param tol     convergence tolerance on the mismatch infinity norm
-     * @param convEpsPerEq if {@code > 0}, the device inner-Newton uses OLF's exact
-     *                     {@code DefaultNewtonRaphsonStoppingCriteria} rule
-     *                     ({@code ‖F‖₂ < sqrt(convEpsPerEq² · n)}) instead of the
-     *                     infinity-norm floor
-     * @param lsMode  device step scaling: 0 = none, 1 = line search, 2 = max voltage change
-     * @param maxDv   MAX_VOLTAGE_CHANGE (lsMode 2): clamp on |Δv| per iteration (BUS_V rows)
-     * @param maxDphi MAX_VOLTAGE_CHANGE (lsMode 2): clamp on |Δφ| per iteration (BUS_PHI rows, radians)
-     * @param varType per row, the variable kind for the maxVoltageChange clamp (0 = BUS_PHI,
-     *                1 = BUS_V, 2 = other); see GpuAcActivationExtractor#extractVarType. Unused for lsMode 0/1.
-     * @return {@code double[n + 2]}: the converged state, then iterations, then the final
-     *         mismatch infinity norm
-     */
-    public static native double[] solveContext(long handle, double[] x0, double[] target,
-                                               int[] rowMode, int maxIter, double tol, double convEpsPerEq,
-                                               int lsMode, int lsMaxIter, double lsStepFold,
-                                               double maxDv, double maxDphi, int[] varType);
-
-    /**
-     * VALUES-level refresh: re-upload only the per-element parameter packs (families + zero-impedance
-     * rho) into the context's SHARED structure, keeping its CSR pattern and the context's cuDSS
-     * symbolic analysis; the per-element static trig is re-derived on device. Valid only when the
-     * element counts / index packs are unchanged (a transformer tap or shunt-susceptance move) — the
-     * caller guarantees this by taking this path only when {@link GpuAcData#sameStructureAs} holds,
-     * and must then re-key the structure cache to the new extraction ({@link GpuAcStructures#rebind})
-     * so content matching never aliases the refreshed structure under its old values. Far cheaper
-     * than a rebuild.
-     */
-    public static native void refreshContextValues(long handle, double[] cbIn, double[] obIn,
-                                                   double[] shIn, double[] hvIn, double[] ziIn);
-
-    /** Release a context from {@link #createContext} (idempotent for handle 0). */
-    public static native void destroyContext(long handle);
-
-    /**
      * Recommend how many scenarios fit in one GPU batch chunk for this structure, from the
      * free device memory ({@code cudaMemGetInfo}) and the per-scenario footprint. The
      * dominant term, cuDSS's LU numeric factors, is sized from a cheap single-matrix probe
@@ -177,9 +120,11 @@ public final class GpuAcNewtonSolver {
     public static native int recommendBatchSize(long structureHandle, int maxCap);
 
     /**
-     * One-shot convenience: {@link #createStructure} + {@link #createContext} + {@link #solveContext}
-     * + destroy both. For repeated solves on the same structure (outer loops), cache the context
-     * instead — see GpuNewtonRaphson.
+     * One-shot undamped pure Newton-Raphson: {@link #createStructure} + {@link #solveOnStructure}, then the
+     * structure is destroyed.
+     *
+     * @return {@code double[n + 3]}: the state, then iterations, the final mismatch infinity norm and the
+     *         convergence status (see {@link #solveBatchContext})
      */
     public static double[] solve(double[] x0, double[] target, int[] rowMode, int maxIter, double tol,
                                  double[] cbIn, int[] cbIdx, double[] obIn, int[] obIdx,
@@ -210,15 +155,39 @@ public final class GpuAcNewtonSolver {
                 noPcSide(cbIdx.length / 12), new double[0], new int[0], qrPtr, qrRows, obQAlt, ziQAlt,
                 noDepGroups(qrPtr), noDepGroups(qrPtr), noDepRows(x0.length));
         try {
-            long handle = createContext(structure);
-            try {
-                // undamped (no device step scaling): lsMode 0 ignores maxDv/maxDphi/varType
-                return solveContext(handle, x0, target, rowMode, maxIter, tol, 0.0, 0, 0, 0.0, 0.0, 0.0, new int[x0.length]);
-            } finally {
-                destroyContext(handle);
-            }
+            return solveOnStructure(structure, x0, target, rowMode, maxIter, tol, 0, 0.0, 0.0, new int[x0.length]);
         } finally {
             destroyStructure(structure);
+        }
+    }
+
+    /**
+     * One-shot pure Newton-Raphson on an existing structure: a batch-of-one {@link #createBatchContext}
+     * without any outer-loop pack, one {@link #solveBatchContext}, then the context is destroyed.
+     *
+     * @param lsMode  device step scaling: 0 = none, 1 = line search, 2 = max voltage change
+     * @param maxDv   MAX_VOLTAGE_CHANGE (lsMode 2): clamp on |dv| per iteration (BUS_V rows)
+     * @param maxDphi MAX_VOLTAGE_CHANGE (lsMode 2): clamp on |dphi| per iteration (BUS_PHI rows, radians)
+     * @param varType per row, the variable kind for the clamp, see GpuAcActivationExtractor#extractVarType
+     * @return {@code double[n + 3]}: the state, then iterations, the final mismatch infinity norm and the
+     *         convergence status (see {@link #solveBatchContext})
+     */
+    @SuppressWarnings("java:S107")
+    public static double[] solveOnStructure(long structure, double[] x0, double[] target, int[] rowMode,
+                                            int maxIter, double tol, int lsMode, double maxDv, double maxDphi,
+                                            int[] varType) {
+        long handle = createBatchContext(structure, 1, com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchContextCache.MODE_UBATCH,
+                new int[0], new double[0], new double[0], new double[0], new double[0], new byte[0], new double[x0.length],
+                new int[0], new double[0], -1, 0.0, new double[0], new double[0], new double[0],
+                0, new double[0], new double[0], 0, 0);
+        try {
+            return solveBatchContext(handle, x0, target, new int[][] {rowMode}, rowMode, new boolean[1][0],
+                    new int[0], new double[0], new int[0], new double[0], new double[0], new double[0], new double[0], null, null, null, null, null, null, null, null,
+                    maxIter, tol, 0.0, 0.0, 0.0, lsMode, maxDv, maxDphi, varType, null, null, null, null, null, null, null, 0,
+                    com.powsybl.openloadflow.ac.outerloop.ReactiveLimitsOuterLoop.MAX_SWITCH_PQ_PV_DEFAULT_VALUE,
+                    0, 0, 0, null, null)[0];
+        } finally {
+            destroyBatchContext(handle);
         }
     }
 
@@ -228,8 +197,7 @@ public final class GpuAcNewtonSolver {
      * superset pattern. Per-scenario element disablement is encoded as device masks; converged
      * scenarios can stop early. cuDSS's symbolic analysis is done once over the superset
      * pattern. The pattern / families / destination arrays are NOT duplicated: they live in
-     * the structure, shared with any single-solve context built from the same handle (the
-     * base-case load flow) — only the per-scenario state and the reactive-limits /
+     * the structure, built once per extraction — only the per-scenario state and the reactive-limits /
      * distributed-slack outer-loop packs are owned here.
      *
      * @param structureHandle a structure from {@link #createStructure}
@@ -279,7 +247,6 @@ public final class GpuAcNewtonSolver {
      *  value, written over the base state the device tiles; consumed by that solve. Null clears. */
     public static native void setBatchX0Seeds(long handle, int[] flatIndex, double[] value);
 
-
     /** Per (scenario, coupler) spanning-tree flag, as flat {slot, ziElement, isTree} triples, for the
      *  scenarios where OLF's tree has moved away from the one the structure was extracted on. Empty
      *  clears. */
@@ -320,7 +287,7 @@ public final class GpuAcNewtonSolver {
     public static native int[] readBatchRowModes(long handle);
 
     /** VALUES refresh addressed by the SHARED STRUCTURE handle: same semantics as
-     *  {@link #refreshContextValues} (tap r1/a1 or shunt-b moves with an unchanged pattern), but
+     *  {@link #refreshStructureValues} (tap r1/a1 or shunt-b moves with an unchanged pattern), but
      *  usable when the caller holds a BATCH context — one extraction has ONE value set, every
      *  context sharing the structure sees the update. */
     public static native void refreshStructureValues(long structureHandle, double[] cbIn, double[] obIn,

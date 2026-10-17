@@ -82,16 +82,11 @@ class GpuAcStructuresTest {
         assertEquals(first, GpuAcStructures.handle(n, none));
         assertEquals(hits + 3, GpuAcStructures.hitCount());
 
-        // A context built on the aliased handle solves normally.
+        // A solve on the aliased handle converges normally.
         GpuAcActivation act = GpuAcActivationExtractor.extractActivation(network, es, n);
         double[] targets = act.applyTargets(target.getArray());
-        long ctx = GpuAcNewtonSolver.createContext(aliased);
-        try {
-            double[] out = GpuAcNewtonSolver.solveContext(ctx, es.getStateVector().get().clone(), targets,
-                    act.rowMode(), 30, 1e-10, 0.0, 0, 0, 0.0, 0.0, 0.0, new int[n]);
-            assertTrue(out[n + 1] < 1e-10, "the solve on the cross-flavor-shared structure must converge");
-        } finally {
-            GpuAcNewtonSolver.destroyContext(ctx);
-        }
+        double[] out = GpuAcNewtonSolver.solveOnStructure(aliased, es.getStateVector().get().clone(), targets,
+                act.rowMode(), 30, 1e-10, 0, 0.0, 0.0, new int[n]);
+        assertTrue(out[n + 1] < 1e-10, "the solve on the cross-flavor-shared structure must converge");
     }
 }

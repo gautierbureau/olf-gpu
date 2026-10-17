@@ -30,11 +30,11 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /**
  * Validates the VALUES level of the GPU invalidation taxonomy: when only element PARAMETERS change
- * (a transformer tap / shunt-susceptance move) but the CSR pattern is unchanged, the cached context's
- * parameter packs are re-uploaded in place ({@link GpuAcNewtonSolver#refreshContextValues}) reusing the
- * cuDSS symbolic analysis — instead of a full rebuild.
+ * (a transformer tap / shunt-susceptance move) but the CSR pattern is unchanged, the cached structure's
+ * parameter packs are re-uploaded in place ({@link GpuAcNewtonSolver#refreshStructureValues}) reusing the
+ * CSR pattern — instead of a full rebuild.
  *
- * <p>The substantive property: a values-REFRESHED context must solve BYTE-IDENTICALLY to one built from
+ * <p>The substantive property: a values-REFRESHED structure must solve BYTE-IDENTICALLY to one built from
  * scratch on the new values. Driven via a transformer {@code r1} (ratio/tap) change on eurostag, which is
  * {@link GpuAcData#sameStructureAs} (idx packs unchanged) but not {@link GpuAcData#sameAs} (cbIn changed).
  *
@@ -67,8 +67,8 @@ class GpuValuesRefreshTest {
         int[] rowMode = act.rowMode();
         double[] targets = act.applyTargets(target.getArray());          // structure/activation unchanged by an r1 move
 
-        long h1 = GpuAcNewtonSolver.createContext(GpuAcStructures.handle(n, d1));
-        double[] out1 = GpuAcNewtonSolver.solveContext(h1, x0, targets, rowMode, MAX_ITER, TOL, 0.0, 0, 0, 0.0, 0.0, 0.0, new int[n]);
+        long s1 = GpuAcStructures.handle(n, d1);
+        double[] out1 = GpuAcNewtonSolver.solveOnStructure(s1, x0, targets, rowMode, MAX_ITER, TOL, 0, 0.0, 0.0, new int[n]);
 
         // Values-only change: move the NHV2_NLOAD transformer's ratio. Same topology -> same CSR pattern.
         LfBranch trafo = network.getBranchById("NHV2_NLOAD");
@@ -78,19 +78,19 @@ class GpuValuesRefreshTest {
         assertTrue(d1.sameStructureAs(d2), "an r1 (tap) move must keep the CSR pattern (sameStructureAs)");
         assertFalse(d1.sameAs(d2), "an r1 move must change the element parameter packs (not sameAs)");
 
-        // Reference: a context built FROM SCRATCH on the new values - built BEFORE the refresh below, so the
+        // Reference: a structure built FROM SCRATCH on the new values - built BEFORE the refresh below, so the
         // structure cache cannot alias it onto the refreshed one (the two extractions differ in values).
-        long h2 = GpuAcNewtonSolver.createContext(GpuAcStructures.handle(n, d2));
-        double[] outRebuilt = GpuAcNewtonSolver.solveContext(h2, x0, targets, rowMode, MAX_ITER, TOL, 0.0, 0, 0, 0.0, 0.0, 0.0, new int[n]);
+        double[] outRebuilt = GpuAcNewtonSolver.solveOnStructure(GpuAcStructures.handle(n, d2), x0, targets, rowMode,
+                MAX_ITER, TOL, 0, 0.0, 0.0, new int[n]);
 
-        // VALUES path: re-upload the packs into the existing context (no rebuild, no re-analysis). The
-        // context's structure is the SHARED one keyed by d1: a refresh writes its device values, so the
+        // VALUES path: re-upload the packs into the existing structure (no rebuild). The structure is the
+        // SHARED one keyed by d1: a refresh writes its device values, so the
         // key must move with them (GpuAcStructures.rebind, what GpuNewtonRaphson does after its own
         // refresh) - left keyed by d1, the next stock-Eurostag extraction content-matches d1 and solves
         // the tap-moved system (measured: a later load flow returned a state at OLF residual 8.79).
-        GpuAcNewtonSolver.refreshContextValues(h1, d2.cbIn(), d2.obIn(), d2.shIn(), d2.hvIn(), d2.ziIn());
+        GpuAcNewtonSolver.refreshStructureValues(s1, d2.cbIn(), d2.obIn(), d2.shIn(), d2.hvIn(), d2.ziIn());
         GpuAcStructures.rebind(d1, d2);
-        double[] outRefreshed = GpuAcNewtonSolver.solveContext(h1, x0, targets, rowMode, MAX_ITER, TOL, 0.0, 0, 0, 0.0, 0.0, 0.0, new int[n]);
+        double[] outRefreshed = GpuAcNewtonSolver.solveOnStructure(s1, x0, targets, rowMode, MAX_ITER, TOL, 0, 0.0, 0.0, new int[n]);
 
         double worst = 0;
         double moved = 0;
@@ -100,8 +100,6 @@ class GpuValuesRefreshTest {
         }
         System.out.printf("GPU VALUES refresh [eurostag r1 move]: refresh-vs-rebuild max diff = %.2e, "
                 + "solution moved by %.2e%n", worst, moved);
-        GpuAcNewtonSolver.destroyContext(h1);
-        GpuAcNewtonSolver.destroyContext(h2);
 
         assertTrue(outRefreshed[n + 1] < TOL, "the refreshed solve must converge");
         assertEquals(0.0, worst, 1e-12, "a VALUES refresh must solve identically to a from-scratch rebuild");

@@ -38,7 +38,7 @@ import java.util.concurrent.atomic.AtomicLong;
  * context built from the handle holds shared native ownership, so the structure lives until the
  * last context is destroyed.
  *
- * <p>VALUES refresh: {@code refreshContextValues} mutates the shared structure's device values in
+ * <p>VALUES refresh: {@code refreshStructureValues} mutates the shared structure's device values in
  * place (tap/shunt moves). The refresher must then call {@link #rebind} so the cache maps the NEW
  * extraction (whose arrays match the device state) and drops the stale one — otherwise a later
  * extraction content-equal to the OLD values could alias a structure that no longer holds them.

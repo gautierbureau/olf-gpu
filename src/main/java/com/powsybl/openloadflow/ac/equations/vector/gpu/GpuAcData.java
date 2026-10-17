@@ -53,7 +53,7 @@ package com.powsybl.openloadflow.ac.equations.vector.gpu;
  * {@code rlMaxQ} its reactive limits (pu/SB), {@code rlLoadQ} its load target Q and {@code rlVtarget} its
  * controlled voltage target (pu). The calculated generator Q is {@code Σ branch q + shunt q + rlLoadQ}, the
  * first part read from the bus's BUS_V row after a fill into a zeroed buffer. Empty when no PV control (or
- * consumed only by the batched full-loadflow path; the single-solve path runs outer loops on the CPU).
+ * consumed only by the batched full-loadflow path).
  *
  * <p>Distributed slack (the batched full-loadflow outer loop): {@code dsSlackPhiRow} the slack bus's stable
  * BUS_PHI row (-1 if none) and {@code dsSlackTargetP} its scheduled active target (pu) give the mismatch
@@ -160,7 +160,7 @@ public record GpuAcData(double[] cbIn, int[] cbIdx, int[] cbPcSide, double[] obI
      * Structural equality over the INDEX packs ONLY (the variable columns each element touches, hence
      * the CSR pattern + diagonal pairing). True means a cached context's pattern and cuDSS symbolic
      * analysis are still valid and only the element PARAMETER packs may differ — the VALUES invalidation
-     * level: a cheap in-place re-upload (refreshContextValues) instead of a full rebuild + re-analysis.
+     * level: a cheap in-place re-upload (refreshStructureValues) instead of a full rebuild + re-analysis.
      * A transformer tap or shunt-susceptance move changes {@code cbIn}/{@code shIn} values but not the
      * indices, so it is {@code sameStructureAs} but not {@code sameAs}.
      */

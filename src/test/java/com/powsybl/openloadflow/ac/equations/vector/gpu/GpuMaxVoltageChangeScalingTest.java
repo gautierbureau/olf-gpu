@@ -32,7 +32,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /**
- * Verifies the GPU MAX_VOLTAGE_CHANGE state-vector scaling (lsMode 2 in solveContext): each Newton
+ * Verifies the GPU MAX_VOLTAGE_CHANGE state-vector scaling (lsMode 2 of the batched solve): each Newton
  * step is scaled by one global factor so the largest |Δv| / |Δφ| stays within maxDv / maxDphi. The
  * reference is OLF's own {@link MaxVoltageChangeStateVectorScaling} applied per iteration to a
  * JacobianMatrix Newton on the SAME equation system. maxDv / maxDphi are set small enough that the
@@ -90,21 +90,14 @@ class GpuMaxVoltageChangeScalingTest {
         int[] varType = GpuAcActivationExtractor.extractVarType(es, n);
         double[] stableTargets = activation.applyTargets(target.getArray());
 
-        long handle = GpuAcNewtonSolver.createContext(GpuAcStructures.handle(n, d));
-        int clampedIters;
-        int undampedIters;
-        double[] clamped;
-        try {
-            clamped = GpuAcNewtonSolver.solveContext(handle, x0, stableTargets, activation.rowMode(),
-                    MAX_ITER, TOL, 0.0, 2, 0, 0.0, MAX_DV, MAX_DPHI, varType);
-            clampedIters = (int) clamped[n];
-            // same start, no clamp (lsMode 0) — the clamp must cost extra iterations, else the test is vacuous
-            double[] undamped = GpuAcNewtonSolver.solveContext(handle, x0, stableTargets, activation.rowMode(),
-                    MAX_ITER, TOL, 0.0, 0, 0, 0.0, 0.0, 0.0, varType);
-            undampedIters = (int) undamped[n];
-        } finally {
-            GpuAcNewtonSolver.destroyContext(handle);
-        }
+        long structure = GpuAcStructures.handle(n, d);
+        double[] clamped = GpuAcNewtonSolver.solveOnStructure(structure, x0, stableTargets, activation.rowMode(),
+                MAX_ITER, TOL, 2, MAX_DV, MAX_DPHI, varType);
+        int clampedIters = (int) clamped[n];
+        // same start, no clamp (lsMode 0) — the clamp must cost extra iterations, else the test is vacuous
+        double[] undamped = GpuAcNewtonSolver.solveOnStructure(structure, x0, stableTargets, activation.rowMode(),
+                MAX_ITER, TOL, 0, 0.0, 0.0, varType);
+        int undampedIters = (int) undamped[n];
 
         double[] xRef = cpuClampedReference(es, target, eq, sv);   // mutates sv AFTER the GPU ran on x0
 

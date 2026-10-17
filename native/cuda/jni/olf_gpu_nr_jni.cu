@@ -312,7 +312,7 @@ constexpr int BLOCK = 64;
 // cost most of the device share. Full network.xiidm busbar scope, GPU-only, same code: base without the step
 // 5121 / 5422 of 12918 on device (two runs), 7339 with it before the change; with the parent-row repair, the step on
 // gave 12869 on device and 98 violations off the CPU against 12364-12621 and 196-1274 without. Only systems WITH
-// zero-impedance couplers ever read this (irSteps(false) = 0 otherwise): a coupler-free network is unaffected, but
+// zero-impedance couplers ever read this (IR_N_STEPS = 0 otherwise): a coupler-free network is unaffected, but
 // network.xiidm's non-busbar scopes have couplers too and give back that measured speed-up (cold 116 s -> ~140 s).
 // The run's linear-solver settings (GpuLoadFlowParameters, installed by setLinearSolverSettings before the run's
 // contexts are built). -1 = AUTO: the per-context choice each apply* function documents; a NaN threshold = the
@@ -339,19 +339,6 @@ inline double irTol() {
 }
 static long gIrExtraSteps = 0;                               // adaptive refinement solves actually run
 static long gIrChecks = 0;                                   // residual checks (one per batched iteration at least)
-
-inline int irSteps(bool hasZeroImpedance) {
-    // 4, not 2, since 2026-09-28. The accuracy of the batched factorization on the repaired
-    // zero-diagonal rows depends on which OTHER matrices share the batch: network.xiidm/LLAX (a
-    // line whose loss islands three buses; its weak pivots are the DUMMY rows of couplers BDTG and
-    // BDXR) solved to a linear residual of 2.5e-06 (ratio 3.1e-06) in one chunk composition and
-    // 2.2e-08 in another, for the same matrix and the same right-hand side. The inaccurate step
-    // stopped the first solve at a slightly different iterate, the slack pass read it, and 22
-    // large-loss islanding contingencies ended 2-4e-06 MW off where the same scope at another
-    // chunk size had them at 1e-08. Two more refinement steps take that residual to 1.1e-11 in the
-    // bad composition and leave no contingency worse by 1e-07 than before (99 better).
-    return hasZeroImpedance ? 4 : IR_N_STEPS;
-}
 
 // ---------------------------------------------------------------------------------
 // cuDSS fill-reducing ordering knob (the reordering-alg SWEEP): factorize cost is
@@ -1418,175 +1405,10 @@ __device__ void scatterAddDyn(int nout, const int* dest, const int* altDest, con
     }
 }
 
-__global__ void fillClosedBranch(int ne, const double* in, const int* ix, const int* dest,
-                                 const double* x, double* vals, double* F,
-                                 const int* altDest, const int* selRow, const int* mode, int dynReloc,
-                                 RelocTables rt) {
-    int e = blockIdx.x * blockDim.x + threadIdx.x;
-    if (e >= ne) return;
-    const double* p = in + e * 8;                            // y g1 g2 b1 b2 ksi r1 a1
-    const int* q = ix + e * 12;                              // P1 Q1 P2 Q2 ph1 v1 ph2 v2 a1col r1col
-    double v1 = x[q[5]], v2 = x[q[7]], ph1 = x[q[4]], ph2 = x[q[6]];
-    // a controlling transformer's ratio/shift are STATE variables — read them from x at their
-    // column; otherwise the fixed pi-model value from the input pack (q[8]/q[9] are -1 then).
-    double r1 = q[9] >= 0 ? x[q[9]] : p[6];
-    double a1 = q[8] >= 0 ? x[q[8]] : p[7];
-    double o[CB_NOUT];
-    evalClosedBranch(p[0], p[1], p[2], p[3], p[4], v1, r1, v2, p[5], a1, ph1, ph2, 0,
-                     o + 0, o + 1, o + 2, o + 3, o + 4, o + 5, o + 6, o + 7, o + 8, o + 9,
-                     o + 10, o + 11, o + 12, o + 13, o + 14, o + 15, o + 16, o + 17, o + 18,
-                     o + 19, o + 20, o + 21, o + 22, o + 23, o + 24, o + 25, o + 26, o + 27);
-    if (dynReloc) {
-        scatterAddDyn(CB_NOUT, dest + e * CB_NOUT, altDest + e * CB_NOUT, selRow + e * CB_NOUT, mode, o, vals, F,
-                      rt, e * CB_NOUT);
-    } else {
-        scatterAdd(CB_NOUT, dest + e * CB_NOUT, o, vals, F);
-    }
-}
-
-__global__ void fillOpenBranch(int ne, const double* in, const int* ix, const int* dest,
-                               const double* x, double* vals, double* F,
-                               const int* altDest, const int* selRow, const int* mode, int dynReloc,
-                               RelocTables rt) {
-    int e = blockIdx.x * blockDim.x + threadIdx.x;
-    if (e >= ne) return;
-    const double* p = in + e * 7;                            // y ksi g1 b1 g2 b2 r1
-    const int* q = ix + e * 6;
-    double v1 = q[4] >= 0 ? x[q[4]] : 1.0;                   // absent side: value discarded
-    double v2 = q[5] >= 0 ? x[q[5]] : 1.0;                   // (its outputs have dest -1)
-    double o[OB_NOUT];
-    evalOpenBranch(p[0], p[1], p[2], p[3], p[4], p[5], v1, p[6], v2, 0,
-                   o + 0, o + 1, o + 2, o + 3, o + 4, o + 5, o + 6, o + 7);
-    if (dynReloc) {
-        scatterAddDyn(OB_NOUT, dest + e * OB_NOUT, altDest + e * OB_NOUT, selRow + e * OB_NOUT, mode, o, vals, F,
-                      rt, e * OB_NOUT);
-    } else {
-        scatterAdd(OB_NOUT, dest + e * OB_NOUT, o, vals, F);
-    }
-}
-
 __global__ void fillVdlBatch(int ne, int nScenarios, int n, int nnz,
                              const double* in, const int* ix, const int* dest,
                              const double* x, double* vals, double* F,
                              const int* altRow, const int* altDest, const int* mode);
-
-__global__ void fillShunt(int ne, const double* in, const int* ix, const int* dest,
-                          const double* x, double* vals, double* F,
-                          const int* altDest, const int* selRow, const int* mode, int dynReloc,
-                          RelocTables rt) {
-    int e = blockIdx.x * blockDim.x + threadIdx.x;
-    if (e >= ne) return;
-    const double* p = in + e * 2;                            // g b
-    // b is the SHUNT_B state variable when the shunt derives voltage control (bcol = ix[e*5+3] >= 0),
-    // else the fixed packed susceptance — exactly like a closed branch reads r1 from x[r1col] or cbIn.
-    double b = ix[e * 5 + 3] >= 0 ? x[ix[e * 5 + 3]] : p[1];
-    double v = x[ix[e * 5 + 2]];
-    double o[SH_NOUT];
-    evalShunt(v, p[0], b, 0, o + 0, o + 1, o + 2, o + 3, o + 4);
-    if (dynReloc) {
-        scatterAddDyn(SH_NOUT, dest + e * SH_NOUT, altDest + e * SH_NOUT, selRow + e * SH_NOUT, mode, o, vals, F,
-                      rt, e * SH_NOUT);
-    } else {
-        scatterAdd(SH_NOUT, dest + e * SH_NOUT, o, vals, F);
-    }
-}
-
-__global__ void fillHvdc(int ne, const double* in, const int* ix, const int* dest,
-                         const double* x, double* vals, double* F,
-                         const int* altDest, const int* selRow, const int* mode, int dynReloc) {
-    int e = blockIdx.x * blockDim.x + threadIdx.x;
-    if (e >= ne) return;
-    const double* p = in + e * 5;                            // p0 k lf1 lf2 r
-    const int* q = ix + e * 4;
-    double ph1 = x[q[2]], ph2 = x[q[3]];
-    double o[HVDC_NOUT];
-    evalHvdc(p[0], p[1], p[2], p[3], p[4], ph1, ph2, 0, o + 0, o + 1, o + 2, o + 3, o + 4, o + 5);
-    if (dynReloc) {
-        scatterAddDyn(HVDC_NOUT, dest + e * HVDC_NOUT, altDest + e * HVDC_NOUT, selRow + e * HVDC_NOUT, mode, o, vals, F,
-                      RelocTables{}, e * HVDC_NOUT);
-    } else {
-        scatterAdd(HVDC_NOUT, dest + e * HVDC_NOUT, o, vals, F);
-    }
-}
-
-// DISTR_Q (remote generator voltage control) reactive-distribution rows: one thread per weighted
-// contribution. Each is a closed branch's side-s reactive flow (q1 or q2, value + the 5 derivatives
-// dq/d{v1,v2,φ1,φ2,r1}) re-evaluated from the SAME closed-branch params/state and scattered, scaled
-// by the controller weight, into a DISTR_Q row. dest[6] = {F-row, the 5 J slots} (built like buildDest;
-// dq/dr1 slot is -1 when the branch derives no ratio). The DISTR_Q row is a power row (mode 1), so
-// applyRowMode leaves it; the controllers' own per-bus Q scatter was suppressed (qRow=-1) on the host.
-__global__ void fillDistrQ(int ndq, const int* dqElem, const int* dqSide, const int* dqKind,
-                           const double* dqWeight, const int* dqDest,
-                           const int* dqAlt, const int* dqSel, const int* dqZiRow,
-                           const double* cbIn, const int* cbIx, const double* shIn, const int* shIx,
-                           const double* obIn, const int* obIx,
-                           const double* x, double* vals, double* F, const int* mode) {
-    int c = blockIdx.x * blockDim.x + threadIdx.x;
-    if (c >= ndq) return;
-    // the same STOCK placement the batched fill makes: an identity on the relocated row means that
-    // coupler is gone and the sharing equation belongs on the bus's own row (see buildDistrQDest)
-    if (dqSel != nullptr && dqSel[c] >= 0 && dqAlt != nullptr && mode[dqSel[c]] == 0
-            && dqAlt[c * 6] <= -2) {
-        dqDest = dqAlt;
-    }
-    int e = dqElem[c];
-    double w = dqWeight[c];
-    const int* dst = dqDest + c * 6;
-    // an RL-PINNED remote member's row (mode 4) hosts its OWN Q balance — its DISTR_Q emissions
-    // stop (the CPU deactivates only that member's DISTR_Q equation; the others keep its q terms)
-    if (mode != nullptr && dst[0] <= -2 && mode[-2 - dst[0]] == 4) return;
-    if (dqKind[c] == 1) {                                    // shunt q: {q value -> F, dq/dv -> J(row, vcol)}
-        const double* sp = shIn + e * 2;                     // g b (a DISTR_Q shunt contributor is always fixed)
-        int vcol = shIx[e * 5 + 2];
-        double so[SH_NOUT];
-        evalShunt(x[vcol], sp[0], sp[1], 0, so + 0, so + 1, so + 2, so + 3, so + 4);
-        if (dst[0] <= -2) atomicAdd(&F[-2 - dst[0]], w * so[2]);    // q
-        if (dst[1] >= 0) atomicAdd(&vals[dst[1]], w * so[3]);       // dq/dv
-        return;
-    }
-    if (dqKind[c] == 3) {                                    // zero-impedance DUMMY_Q: linear w·dummyQ term
-        int col = e;                                         // dqElem holds the DUMMY_Q variable column directly
-        if (dst[0] <= -2) atomicAdd(&F[-2 - dst[0]], w * x[col]);
-        if (dst[1] >= 0) atomicAdd(&vals[dst[1]], w);        // d(w·dummyQ)/d(dummyQ) = w
-        return;
-    }
-    if (dqKind[c] == 2) {                                    // half-open branch: connected-side q + dq/dv
-        const double* op = obIn + e * 7;                     // y ksi g1 b1 g2 b2 r1
-        const int* oq = obIx + e * 6;                        // P1 Q1 P2 Q2 v1col v2col
-        int vcol = dqSide[c] == 0 ? oq[4] : oq[5];           // the controller's (connected) side V column
-        double v1 = dqSide[c] == 0 ? x[vcol] : 1.0;
-        double v2 = dqSide[c] == 1 ? x[vcol] : 1.0;          // absent side: value discarded
-        double oo[OB_NOUT];
-        evalOpenBranch(op[0], op[1], op[2], op[3], op[4], op[5], v1, op[6], v2, 0,
-                       oo + 0, oo + 1, oo + 2, oo + 3, oo + 4, oo + 5, oo + 6, oo + 7);
-        int qi = dqSide[c] == 0 ? 6 : 2;                     // side-1 q1[6]/dq1dv1[7], side-2 q2[2]/dq2dv2[3]
-        if (dst[0] <= -2) atomicAdd(&F[-2 - dst[0]], w * oo[qi]);
-        if (dst[1] >= 0) atomicAdd(&vals[dst[1]], w * oo[qi + 1]);
-        return;
-    }
-    const double* p = cbIn + e * 8;                          // y g1 g2 b1 b2 ksi r1 a1
-    const int* q = cbIx + e * 12;                            // P1 Q1 P2 Q2 ph1 v1 ph2 v2 a1col r1col
-    double v1 = x[q[5]], v2 = x[q[7]], ph1 = x[q[4]], ph2 = x[q[6]];
-    double r1 = q[9] >= 0 ? x[q[9]] : p[6];
-    double a1 = q[8] >= 0 ? x[q[8]] : p[7];
-    double o[CB_NOUT];
-    evalClosedBranch(p[0], p[1], p[2], p[3], p[4], v1, r1, v2, p[5], a1, ph1, ph2, 0,
-                     o + 0, o + 1, o + 2, o + 3, o + 4, o + 5, o + 6, o + 7, o + 8, o + 9,
-                     o + 10, o + 11, o + 12, o + 13, o + 14, o + 15, o + 16, o + 17, o + 18,
-                     o + 19, o + 20, o + 21, o + 22, o + 23, o + 24, o + 25, o + 26, o + 27);
-    // side 1 q outputs: q1[7] dq1dv1[8] dq1dv2[9] dq1dph1[10] dq1dph2[11] dq1dr1[13];  side 2: +14 (dr1 +14)
-    int qi = dqSide[c] == 0 ? 7 : 21;
-    double out6[6] = {o[qi], o[qi + 1], o[qi + 2], o[qi + 3], o[qi + 4], o[qi + 6]};
-    for (int m = 0; m < 6; m++) {
-        int d = dst[m];
-        double val = w * out6[m];
-        if (d >= 0) {
-            atomicAdd(&vals[d], val);
-        } else if (d <= -2) {
-            atomicAdd(&F[-2 - d], val);
-        }
-    }
-}
 
 // Scatter one (dest, value): dest >= 0 -> J slot, dest <= -2 -> F row, -1 -> skip.
 __device__ inline void addAt(int dest, double val, double* vals, double* F) {
@@ -1597,110 +1419,10 @@ __device__ inline void addAt(int dest, double val, double* vals, double* F) {
     }
 }
 
-// Zero-impedance branch (bus coupler): a LINEAR family. ix (NOT row-mapped — it carries the variable
-// COLUMNS the kernel reads; the mapped rows live in dest): dpCol dqCol v1 v2 ph1 ph2 tree at ix[4..10].
-// dest[14] (built host-side through the CSR pattern): the dummy ±1 couplings into both buses' P/Q
-// balances [0..7], then, for a spanning-tree edge, ZERO_V (v1−rho·v2) on the DUMMY_P row and ZERO_PHI
-// (ph1−ph2) on the DUMMY_Q row [8..13] (−1/skip on a non-tree edge, whose dummy rows are mode-0 identities
-// the row-mode mask handles). The Jacobian entries are constants; only F depends on the state.
-__global__ void fillZeroImp(int nzi, const double* in, const int* ix, const int* dest,
-                            const double* x, double* vals, double* F,
-                            const int* ziAlt, const int* ziSel, const int* mode, int ziDyn,
-                            RelocTables rt) {
-    int e = blockIdx.x * blockDim.x + threadIdx.x;
-    if (e >= nzi) return;
-    double rho = in[e];
-    const int* q = ix + e * 11;
-    double dummyP = x[q[4]], dummyQ = x[q[5]];
-    const int* d = dest + e * 14;
-    int d2 = d[2], d3 = d[3], d6 = d[6], d7 = d[7];
-    int d0 = d[0], d1 = d[1], d4 = d[4], d5 = d[5];
-    if (ziDyn) {                                             // dynamic Q-routing (ob/zi channels)
-        d2 = ziDynDest(d2, e * 8 + 0, ziAlt, ziSel, mode, rt);
-        d3 = ziDynDest(d3, e * 8 + 1, ziAlt, ziSel, mode, rt);
-        d6 = ziDynDest(d6, e * 8 + 2, ziAlt, ziSel, mode, rt);
-        d7 = ziDynDest(d7, e * 8 + 3, ziAlt, ziSel, mode, rt);
-        d0 = ziDynDest(d0, e * 8 + 4, ziAlt, ziSel, mode, rt);
-        d1 = ziDynDest(d1, e * 8 + 5, ziAlt, ziSel, mode, rt);
-        d4 = ziDynDest(d4, e * 8 + 6, ziAlt, ziSel, mode, rt);
-        d5 = ziDynDest(d5, e * 8 + 7, ziAlt, ziSel, mode, rt);
-    }
-    addAt(d0, dummyP, vals, F);                            // F[bus1 P] += dummyP
-    addAt(d1, -dummyP, vals, F);                           // F[bus2 P] -= dummyP
-    addAt(d2, dummyQ, vals, F);                              // F[bus1 Q] += dummyQ
-    addAt(d3, -dummyQ, vals, F);                             // F[bus2 Q] -= dummyQ
-    addAt(d4, 1.0, vals, F);                               // J(bus1 P, dummyP)
-    addAt(d5, -1.0, vals, F);                              // J(bus2 P, dummyP)
-    addAt(d6, 1.0, vals, F);                                 // J(bus1 Q, dummyQ)
-    addAt(d7, -1.0, vals, F);                                // J(bus2 Q, dummyQ)
-    if (q[10] & 1) {                                         // spanning-tree edge: voltage/angle coupling
-        double v1 = x[q[6]], v2 = x[q[7]], ph1 = x[q[8]], ph2 = x[q[9]];
-        addAt(d[8], v1 - rho * v2, vals, F);                 // F[ZERO_V row] += v1 - rho*v2
-        addAt(d[9], 1.0, vals, F);                           // J(ZERO_V, v1)
-        addAt(d[10], -rho, vals, F);                         // J(ZERO_V, v2)
-        addAt(d[11], ph1 - ph2, vals, F);                    // F[ZERO_PHI row] += ph1 - ph2
-        addAt(d[12], 1.0, vals, F);                          // J(ZERO_PHI, ph1)
-        addAt(d[13], -1.0, vals, F);                         // J(ZERO_PHI, ph2)
-    }
-}
-
-// DISTR_RHO (transformer ratio distribution): one thread per linear contribution. A controller's
-// DISTR_RHO row = (1/count)·Σ r1 − r1_k, so each is coef·r1_j into the row's F + a constant coef in
-// J(row, r1_j). dest[2] = {F row, J slot} (built host-side through the CSR pattern).
-__global__ void fillDistrRho(int ndr, const int* drCol, const double* drCoef, const int* drDest,
-                             const double* x, double* vals, double* F,
-                             const int* drQrGroup, const int* mode, const int* qrPtr, const int* qrRows) {
-    int c = blockIdx.x * blockDim.x + threadIdx.x;
-    if (c >= ndr) return;
-    // the CURRENT pilot-Q carrier's row (the free role re-picked to this member after a clamp)
-    // hosts the relocated pilot balance — its DISTR_RHO row is inactive (the clamp-in-the-BASE
-    // sequential failure: the leftover emissions solved a MIXED equation 7.4e-3 off the CPU's)
-    if (drQrGroup != nullptr && drQrGroup[c] >= 0) {
-        int g = drQrGroup[c];
-        if (-2 - drDest[c * 2] == qrRows[qrPtr[g] + relocChoose(g, qrPtr, qrRows, mode)]) return;
-    }
-    double coef = drCoef[c];
-    addAt(drDest[c * 2 + 0], coef * x[drCol[c]], vals, F);   // F[DISTR_RHO row] += coef * r1
-    addAt(drDest[c * 2 + 1], coef, vals, F);                 // J(DISTR_RHO row, r1) += coef
-}
-
-// DISTR_SHUNT_B (shunt susceptance distribution): the SHUNT_B analogue of fillDistrRho. A controller's
-// DISTR_SHUNT_B row = (1/count)·Σ b − b_k, so each contribution is coef·b_j into the row's F + a constant
-// coef in J(row, b_j). dest[2] = {F row, J slot} (built host-side through the CSR pattern).
-__global__ void fillDistrShuntB(int ndb, const int* dbCol, const double* dbCoef, const int* dbDest,
-                                const double* x, double* vals, double* F) {
-    int c = blockIdx.x * blockDim.x + threadIdx.x;
-    if (c >= ndb) return;
-    double coef = dbCoef[c];
-    addAt(dbDest[c * 2 + 0], coef * x[dbCol[c]], vals, F);   // F[DISTR_SHUNT_B row] += coef * b
-    addAt(dbDest[c * 2 + 1], coef, vals, F);                 // J(DISTR_SHUNT_B row, b) += coef
-}
-
-// Slack/PV target identity rows, applied as a PER-SOLVE mask over the fixed superset
-// pattern: a row in identity mode (mode 0) is zeroed, its diagonal set to 1, and its
-// mismatch overwritten with x - target. The fill kernels may have scattered into it —
-// this runs after them and overwrites, which is what keeps the structure (and cuDSS's
-// analysis) immutable across PV->PQ activation switching.
-// OLF_GPU_LIN_RESID=1: how accurately did the LINEAR solve actually solve? Per row,
-// r_i = (J.dx)_i -/+ F_i. This is the measurement that separates "the two arms assemble DIFFERENT
-// Jacobians" from "they assemble the same one and the SOLVER lands elsewhere": if ||r|| is at
-// round-off relative to ||F||, the solve is exact and any step difference must come from J itself;
-// if ||r|| is large, the solve is inaccurate and iterative refinement is the remedy. It is also
-// refinement's own first step, so the cost buys both answers.
-__global__ void linResidRow(int n, const int* rowPtr, const int* colIdx, const double* vals,
-                            const double* dx, const double* F, double* rPlus, double* rMinus) {
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= n) return;
-    double acc = 0.0;
-    for (int k = rowPtr[i]; k < rowPtr[i + 1]; k++) {
-        acc += vals[k] * dx[colIdx[k]];
-    }
-    rPlus[i] = acc - F[i];                                   // sign convention settled by taking the
-    rMinus[i] = acc + F[i];                                  // smaller of the two on the host
-}
-
-// Batched twin of linResidRow: every scenario has its OWN values block (stride nnz) and its own
-// dx / F block (stride n), over the SHARED sparsity pattern.
+// How accurately did the LINEAR solve actually solve? Per row, r_i = (J.dx)_i -/+ F_i, per scenario: every
+// scenario has its OWN values block (stride nnz) and its own dx / F block (stride n), over the SHARED sparsity
+// pattern. ||r|| at round-off relative to ||F|| means the solve is exact; a large ||r|| is what iterative
+// refinement corrects (this is also refinement's own first step).
 // ---------------------------------------------------------------------------------------------
 // ZERO-DIAGONAL ROW REPAIR. The batched solve runs cuDSS without pivoting or matching (neither is
 // supported for uniform batches), on the promise that the diagonal-pairing row permutation leaves
@@ -2364,11 +2086,7 @@ static void scanValsFinite(Ctx* ctx, int nS, int n, int nnz, int outer) {
 // network.xiidm busbar ADNO re-couples three loop couplers of a hub, and two of their ZERO_V rows borrowed the hub's
 // P balance: the pivoted factorization of that repaired matrix failed as badly as the unpivoted one (ratio 5e21),
 // while the raw matrix converged to the CPU's answer.
-struct SolverContext;
 struct BatchSolverContext;
-static bool repairsZeroDiagonals(const SolverContext*) {
-    return true;
-}
 static bool repairsZeroDiagonals(const BatchSolverContext* ctx);
 
 template <typename Ctx>
@@ -2497,38 +2215,6 @@ __global__ void linResidRowBatch(int n, int nS, int nnz, const int* rowPtr, cons
     rMinus[t] = acc + F[t];
 }
 
-__global__ void applyRowMode(int n, const int* mode, const int* rowPtr, const int* diagPos,
-                             const double* x, const double* target, double* vals, double* F) {
-    int r = blockIdx.x * blockDim.x + threadIdx.x;
-    if (r >= n || mode[r] != 0) return;
-    for (int k = rowPtr[r]; k < rowPtr[r + 1]; k++) {
-        vals[k] = 0.0;
-    }
-    vals[diagPos[r]] = 1.0;
-    F[r] = x[r] - target[r];                                 // row r is variable r's row
-}
-
-__global__ void initF(int n, const double* target, double* F) {
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < n) F[i] = -target[i];                            // F = eval - target
-}
-
-__global__ void negateInto(int n, const double* F, double* b) {
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < n) b[i] = -F[i];                                 // rhs of J dx = -F
-}
-
-__global__ void axpy1(int n, const double* dx, double* x) {
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < n) x[i] += dx[i];
-}
-
-// Line-search backtrack: x = xPrev + mu*dx (mu in (0,1]; mu==1 reproduces the full step).
-__global__ void stepFromPrev(int n, const double* xPrev, const double* dx, double mu, double* x) {
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < n) x[i] = xPrev[i] + mu * dx[i];
-}
-
 // Per-scenario masked backtrack step: x = xPrev + mu[s]*dx for scenarios with mu[s] >= 0;
 // mu[s] < 0 leaves the scenario's state untouched (not backtracking this pass).
 __global__ void stepFromPrevBatchMasked(int n, int total, const double* xPrev, const double* dx,
@@ -2628,12 +2314,6 @@ void setupFamily(Family& f, int ne, const double* in, int instride, const int* i
     std::vector<int> dest = buildDest(ne, idx, ixstride, table, nout, resolve, pos);
     f.dest.upload(dest.data(), dest.size() * sizeof(int));
 }
-
-struct Result {
-    std::vector<double> x;
-    int iters = 0;
-    double norm = 0.0;
-};
 
 // Row permutation: pair each equation row with its dominant-diagonal variable column —
 // P rows with their own bus's PHI column (dP/dθ self term), Q rows with the bus's V
@@ -2912,11 +2592,9 @@ void collectFamilyPattern(const std::vector<int>& rowMap,
 // The SHARED STRUCTURE: everything the two solver contexts derive from ONE extraction
 // (GpuAcData) — the diagonal-pairing row permutation, the CSR pattern (host + device),
 // the per-family device data with role-folded destination arrays, the DISTR_Q /
-// DISTR_RHO / zero-impedance packs, the per-element static trig. The base-case solver
-// (SolverContext) and the batched N-1 solver (BatchSolverContext) previously each
-// rebuilt all of this from the same extraction; it is now built ONCE (cached Java-side
-// per GpuAcData by GpuAcStructures) and held by shared_ptr — a context outliving the
-// Java-side owner keeps the structure alive.
+// DISTR_RHO / zero-impedance packs, the per-element static trig. It is built ONCE per
+// extraction (cached Java-side per GpuAcData by GpuAcStructures) and held by shared_ptr
+// — a batched context outliving the Java-side owner keeps the structure alive.
 // ---------------------------------------------------------------------------------
 
 struct SharedStructure {
@@ -3953,299 +3631,11 @@ double luBytesPerScenario(SharedStructure& st) {
 }
 
 
-// ---------------------------------------------------------------------------------
-// The CACHED solver context: the SHARED structure (pattern, families, destination
-// arrays — see SharedStructure) plus this consumer's OWN state — the per-solve device
-// buffers, the cuDSS objects and its ANALYSIS — built once and reused across solver
-// runs (outer loops re-run the solver many times with only targets / state changing).
-// Per solve, only x0 and the targets cross JNI; cuDSS keeps its symbolic factorization
-// and REFACTORIZES on the in-place-filled values. Java owns the lifetime
-// (GpuNewtonRaphson caches the handle, a Cleaner frees it).
-// ---------------------------------------------------------------------------------
-
-struct SolverContext {
-    SharedStructurePtr st;                                   // shared with any batch context on the same extraction
-    // The PILOT-SELF gate never engages on this path (the base load flow solves as a batch of one), but
-    // withPilotSelf is shared with the batch context, so the fields exist and stay inert here.
-    DeviceBuf dPsPilotEntry;
-    DeviceBuf dPsSkip;
-    bool hasPilotSelf = false;
-    bool hasDqSub = false;                                   // never set on the base context (tasks #71 is batch-only)
-    DeviceBuf dDqSub, dQrMemberStart;
-    int nDqMembers = 0;
-    int n = 0;
-    int nnz = 0;
-    int ndq = 0, nzi = 0, ndr = 0, ndb = 0;                  // copies of the structure counts
-    std::vector<double> hF;                                  // host mismatch buffer
-    DeviceBuf dX, dTarget, dF, dB, dDx, dVals, dMode;
-    DeviceBuf dHazSnap, dHazBSnap, dHazChoice;               // zero-diagonal repair scratch (lazy)
-    int hazCap = 0;
-    DeviceBuf dXprev;                                        // state before the last full step (line search)
-    CudssCtx ds;
-    bool analyzed = false;                                   // ANALYSIS+first FACTORIZATION done
-    // Dedicated BLOCKING stream for the solve (kernels/memsets/D2D + cuDSS via cudssSetStream),
-    // same rationale as BatchSolverContext::stream: keep the iteration off the legacy default
-    // stream's implicit device-wide serialization; missed ops still order correctly.
-    cudaStream_t stream = nullptr;
-    ~SolverContext() {
-        if (stream) cudaStreamDestroy(stream);
-    }
-};
-
-SolverContext* createContext(const SharedStructurePtr& st) {
-    auto ctx = std::make_unique<SolverContext>();
-    ctx->st = st;
-    int n = st->n;
-    ctx->n = n;
-    ctx->nnz = st->nnz;
-    ctx->ndq = st->ndq;
-    ctx->nzi = st->nzi;
-    ctx->ndr = st->ndr;
-    ctx->ndb = st->ndb;
-    ctx->hF.resize(n);
-    // PILOT-SELF groups (rotation), read off the candidate table alone: the fallback row (candidate 0) is itself
-    // one of the member candidates. This path has no reactive-limits pass, so such a pilot stays UNPINNED for
-    // the whole solve and its raw q must never be routed to the carrier (it feeds the DISTR_Q rows) — the batch
-    // path's psSkip, here a constant 1 per such group. Without it the one-step harnesses double-counted the
-    // pilot's q (GpuZiCouplerTreeRelocationTest: 1.9e-3 off OLF's first step; the same network through the
-    // LoadFlow path, which has the gate, steps exactly).
-    if (st->nQr > 0 && !st->hQrPtr.empty()) {
-        std::vector<char> skip(st->nQr, 0);
-        bool any = false;
-        for (int g = 0; g < st->nQr; g++) {
-            int p0 = st->hQrPtr[g];
-            for (int c = p0 + 1; c < st->hQrPtr[g + 1]; c++) {
-                if (st->hQrRows[c] == st->hQrRows[p0]) {
-                    skip[g] = 1;
-                    any = true;
-                    break;
-                }
-            }
-        }
-        if (any) {
-            ctx->dPsSkip.alloc(skip.size() * sizeof(char));
-            ctx->dPsSkip.upload(skip.data(), skip.size() * sizeof(char));
-            ctx->hasPilotSelf = true;
-        }
-    }
-
-    // ---- device state (persists across solves) ----
-    ctx->dX.alloc(n * sizeof(double));
-    ctx->dTarget.alloc(n * sizeof(double));
-    ctx->dF.alloc(n * sizeof(double));
-    ctx->dB.alloc(n * sizeof(double));
-    ctx->dDx.alloc(n * sizeof(double));
-    ctx->dXprev.alloc(n * sizeof(double));
-    ctx->dVals.alloc(static_cast<size_t>(ctx->nnz) * sizeof(double));
-    ctx->dMode.alloc(n * sizeof(int));
-
-    // ---- cuDSS objects: J as true CSR; kernels fill d_ax in place; ANALYSIS lazy ----
-    CUDA_CHECK(cudaStreamCreate(&ctx->stream));
-    CUDSS_CHECK(cudssCreate(&ctx->ds.handle));
-    CUDSS_CHECK(cudssSetStream(ctx->ds.handle, ctx->stream));
-    CUDSS_CHECK(cudssConfigCreate(&ctx->ds.config));
-    int ir = irSteps(ctx->st->nzi > 0);
-    CUDSS_CHECK(cudssConfigSet(ctx->ds.config, CUDSS_CONFIG_IR_N_STEPS, &ir, sizeof(ir)));
-    applyReorderAlg(ctx->ds.config, ctx->st->nzi > 0);
-    CUDSS_CHECK(cudssDataCreate(ctx->ds.handle, &ctx->ds.data));
-    CUDSS_CHECK(cudssMatrixCreateCsr(&ctx->ds.matA, n, n, ctx->nnz,
-                                     st->dRowPtr.as<int>(), nullptr, st->dColIdx.as<int>(), ctx->dVals.as<double>(),
-                                     OLF_CUDSS_CSR_TYPES,
-                                     CUDSS_MTYPE_GENERAL, CUDSS_MVIEW_FULL, CUDSS_BASE_ZERO));
-    CUDSS_CHECK(cudssMatrixCreateDn(&ctx->ds.matB, n, 1, n, ctx->dB.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
-    CUDSS_CHECK(cudssMatrixCreateDn(&ctx->ds.matX, n, 1, n, ctx->dDx.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
-    return ctx.release();
-}
-
-Result solveContext(SolverContext* ctx, const double* x0, const double* target, const int* rowMode,
-                    int maxIter, double tol, double convEpsPerEq, int lsMode, int lsMaxIter, double lsStepFold,
-                    double maxDv, double maxDphi, const int* varType) {
-    int n = ctx->n;
-    CUDA_CHECK(cudaMemcpy(ctx->dX.p, x0, n * sizeof(double), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(ctx->dTarget.p, target, n * sizeof(double), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(ctx->dMode.p, rowMode, n * sizeof(int), cudaMemcpyHostToDevice));
-
-    // Fill J values + mismatch F at the current dX, read F back, and return its infnorm (for the
-    // convergence test). Also sets curNorm2 to the EUCLIDEAN 2-norm — the quantity OLF's line search
-    // compares (DefaultNewtonRaphsonStoppingCriteria uses Vectors.norm2): the Newton direction is a
-    // descent direction for ‖F‖₂ but NOT for ‖F‖∞, so backtracking must judge on the 2-norm or it
-    // stalls. Both norms are set to HUGE_VAL when any mismatch entry is non-finite.
-    double curNorm2 = 0.0;
-    auto fillAndNorm = [&]() -> double {
-        CUDA_CHECK(cudaMemsetAsync(ctx->dVals.p, 0, ctx->nnz * sizeof(double), ctx->stream));
-        initF<<<grid(n), BLOCK, 0, ctx->stream>>>(n, ctx->dTarget.as<double>(), ctx->dF.as<double>());
-        if (ctx->st->cb.ne) fillClosedBranch<<<grid(ctx->st->cb.ne), BLOCK, 0, ctx->stream>>>(ctx->st->cb.ne, ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->cb.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->st->cb.altDest.as<int>(), ctx->st->cb.selRow.as<int>(), ctx->dMode.as<int>(), ctx->st->cb.dynReloc ? 1 : 0, withPilotSelf(relocOf(ctx->st->cb, ctx->st.get()), ctx));
-        if (ctx->st->ob.ne) fillOpenBranch<<<grid(ctx->st->ob.ne), BLOCK, 0, ctx->stream>>>(ctx->st->ob.ne, ctx->st->ob.in.as<double>(), ctx->st->ob.ix.as<int>(), ctx->st->ob.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->st->ob.altDest.as<int>(), ctx->st->ob.selRow.as<int>(), ctx->dMode.as<int>(), ctx->st->ob.dynReloc ? 1 : 0, withPilotSelf(relocOf(ctx->st->ob, ctx->st.get()), ctx));
-        if (ctx->st->sh.ne) fillShunt<<<grid(ctx->st->sh.ne), BLOCK, 0, ctx->stream>>>(ctx->st->sh.ne, ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(), ctx->st->sh.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->st->sh.altDest.as<int>(), ctx->st->sh.selRow.as<int>(), ctx->dMode.as<int>(), ctx->st->sh.dynReloc ? 1 : 0, withPilotSelf(relocOf(ctx->st->sh, ctx->st.get()), ctx));
-        if (ctx->st->nvdl) fillVdlBatch<<<grid(ctx->st->nvdl), BLOCK, 0, ctx->stream>>>(ctx->st->nvdl, 1, ctx->st->n, ctx->st->nnz, ctx->st->dVdlIn.as<double>(), ctx->st->dVdlIdx.as<int>(), ctx->st->dVdlDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), nullptr, nullptr, nullptr);
-        if (ctx->st->hv.ne) fillHvdc<<<grid(ctx->st->hv.ne), BLOCK, 0, ctx->stream>>>(ctx->st->hv.ne, ctx->st->hv.in.as<double>(), ctx->st->hv.ix.as<int>(), ctx->st->hv.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->st->hv.altDest.as<int>(), ctx->st->hv.selRow.as<int>(), ctx->dMode.as<int>(), ctx->st->hv.dynReloc ? 1 : 0);
-        if (ctx->ndq) fillDistrQ<<<grid(ctx->ndq), BLOCK, 0, ctx->stream>>>(ctx->ndq, ctx->st->dDqElem.as<int>(), ctx->st->dDqSide.as<int>(), ctx->st->dDqKind.as<int>(), ctx->st->dDqWeight.as<double>(), ctx->st->dDqDest.as<int>(), ctx->st->dDqAlt.as<int>(), ctx->st->dDqSel.as<int>(), ctx->st->dDqZiRow.as<int>(), ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(), ctx->st->ob.in.as<double>(), ctx->st->ob.ix.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dMode.as<int>());
-        if (ctx->nzi) fillZeroImp<<<grid(ctx->nzi), BLOCK, 0, ctx->stream>>>(ctx->nzi, ctx->st->dZiIn.as<double>(), ctx->st->dZiIdx.as<int>(), ctx->st->dZiDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->st->dZiAltDest.as<int>(), ctx->st->dZiSelRow.as<int>(), ctx->dMode.as<int>(), ctx->st->ziDyn ? 1 : 0, withPilotSelf(ziRelocOf(ctx->st.get()), ctx));
-        if (ctx->ndr) fillDistrRho<<<grid(ctx->ndr), BLOCK, 0, ctx->stream>>>(ctx->ndr, ctx->st->dDrCol.as<int>(), ctx->st->dDrCoef.as<double>(), ctx->st->dDrDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->st->drQr ? ctx->st->dDrQrGroup.as<int>() : nullptr, ctx->dMode.as<int>(), ctx->st->dQrPtr.as<int>(), ctx->st->dQrRows.as<int>());
-        if (ctx->ndb) fillDistrShuntB<<<grid(ctx->ndb), BLOCK, 0, ctx->stream>>>(ctx->ndb, ctx->st->dDbCol.as<int>(), ctx->st->dDbCoef.as<double>(), ctx->st->dDbDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>());
-        applyRowMode<<<grid(n), BLOCK, 0, ctx->stream>>>(n, ctx->dMode.as<int>(), ctx->st->dRowPtr.as<int>(), ctx->st->dDiagPos.as<int>(), ctx->dX.as<double>(), ctx->dTarget.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>());
-        hazRepairValues(ctx, 1, ctx->dVals.as<double>());
-        CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
-        CUDA_CHECK(cudaMemcpy(ctx->hF.data(), ctx->dF.p, n * sizeof(double), cudaMemcpyDeviceToHost));
-        double infn = 0.0;
-        double sumsq = 0.0;
-        for (double v : ctx->hF) {
-            if (!std::isfinite(v)) {
-                curNorm2 = HUGE_VAL;
-                return HUGE_VAL;
-            }
-            infn = std::max(infn, std::fabs(v));
-            sumsq += v * v;
-        }
-        curNorm2 = std::sqrt(sumsq);
-        return infn;
-    };
-
-    Result res;
-    res.x.resize(n);
-    std::vector<double> hDx(lsMode == 2 ? n : 0);            // host step buffer for MAX_VOLTAGE_CHANGE clamp
-    const bool trace = std::getenv("OLF_GPU_TRACE") != nullptr;   // per-iteration diagnostic
-    const double olf2NormThreshold = convEpsPerEq > 0.0 ? std::sqrt(convEpsPerEq * convEpsPerEq * n) : 0.0;
-    double lastNorm2 = 0.0;
-    bool haveLast = false;                                   // a full step was applied at the previous iteration
-    int it = 0;
-    for (; it <= maxIter; it++) {
-        // fill J + F; res.norm is the infnorm (convergence test), norm2 the 2-norm (line search)
-        res.norm = fillAndNorm();
-        double norm2 = curNorm2;
-
-        // Line search (LINE_SEARCH mode): the full step applied at it-1 may have RAISED ‖F‖₂;
-        // backtrack x = xPrev + mu*dx with mu = stepFold^-k (k=1..lsMaxIter) until the 2-norm
-        // improves, mirroring OLF's LineSearchStateVectorScaling. mu==1 (step already improved)
-        // means no backtrack — the undamped path stays bit-identical. The re-fill leaves J at the
-        // accepted x, so the next solve uses the correct Jacobian.
-        if (lsMode == 1 && haveLast && norm2 >= lastNorm2) {
-            for (int k = 1; k <= lsMaxIter && norm2 >= lastNorm2; k++) {
-                double mu = 1.0 / std::pow(lsStepFold, k);
-                stepFromPrev<<<grid(n), BLOCK, 0, ctx->stream>>>(n, ctx->dXprev.as<double>(), ctx->dDx.as<double>(), mu, ctx->dX.as<double>());
-                CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
-                res.norm = fillAndNorm();
-                norm2 = curNorm2;
-            }
-        }
-        if (!std::isfinite(res.norm)) {
-            throw std::runtime_error("mismatch diverged to NaN/Inf at iteration " + std::to_string(it));
-        }
-        if (trace) {
-            std::fprintf(stderr, "OLF_GPU_TRACE it=%d infnorm=%.17e norm2=%.17e\n", it, res.norm, norm2);
-        }
-        lastNorm2 = norm2;
-        haveLast = true;
-        bool converged = convEpsPerEq > 0.0 ? (norm2 < olf2NormThreshold) : (res.norm < tol);
-        // Mirror CPU NewtonRaphson.run: x0 may already satisfy the stopping criterion after an outer-loop
-        // retarget, but the CPU still performs one Newton step before it is allowed to stop. If we early-exit
-        // here on it==0, distributed-slack target changes can be accepted without any state update and the
-        // outer loop sees the same slack mismatch again.
-        if ((converged && it > 0) || it == maxIter) break;
-
-        // J dx = -F on the device (analyze ONCE per structure, refactorize after —
-        // including across solver runs reusing this context)
-        negateInto<<<grid(n), BLOCK, 0, ctx->stream>>>(n, ctx->dF.as<double>(), ctx->dB.as<double>());
-        hazRepairRightHandSide(ctx, 1, ctx->dB.as<double>());
-        if (!ctx->analyzed) {
-            gAnalysesMain++;
-            { AnalysisTimer at_(__LINE__); CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_ANALYSIS, ctx->ds.config, ctx->ds.data, ctx->ds.matA, ctx->ds.matX, ctx->ds.matB)); }
-            traceLuNnz(ctx->ds.handle, ctx->ds.data, "base");
-        }
-        // ONE cudssExecute per iteration (phases are OR-able bit flags): first pass factorizes,
-        // later ones refactorize reusing the pivot order — fused with the solve either way.
-        { AnalysisTimer at_(__LINE__, 'F'); CUDSS_CHECK(cudssExecute(ctx->ds.handle,
-                (ctx->analyzed ? CUDSS_PHASE_REFACTORIZATION : CUDSS_PHASE_FACTORIZATION) | CUDSS_PHASE_SOLVE,
-                ctx->ds.config, ctx->ds.data, ctx->ds.matA, ctx->ds.matX, ctx->ds.matB)); }
-        ctx->analyzed = true;
-        static const bool linResidSeqOn = std::getenv("OLF_GPU_LIN_RESID") != nullptr;
-        if (linResidSeqOn) {
-            DeviceBuf rp;
-            DeviceBuf rm;
-            std::vector<double> hrp(n);
-            std::vector<double> hrm(n);
-            std::vector<double> hf(n);
-            rp.alloc(n * sizeof(double));
-            rm.alloc(n * sizeof(double));
-            linResidRow<<<grid(n), BLOCK, 0, ctx->stream>>>(n, ctx->st->dRowPtr.as<int>(),
-                    ctx->st->dColIdx.as<int>(), ctx->dVals.as<double>(), ctx->dDx.as<double>(),
-                    ctx->dB.as<double>(), rp.as<double>(), rm.as<double>());   // B = the (repaired) RHS
-            CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
-            CUDA_CHECK(cudaMemcpy(hrp.data(), rp.p, n * sizeof(double), cudaMemcpyDeviceToHost));
-            CUDA_CHECK(cudaMemcpy(hrm.data(), rm.p, n * sizeof(double), cudaMemcpyDeviceToHost));
-            CUDA_CHECK(cudaMemcpy(hf.data(), ctx->dF.p, n * sizeof(double), cudaMemcpyDeviceToHost));
-            double mp = 0;
-            double mm = 0;
-            double mf = 0;
-            int argw = -1;
-            for (int i = 0; i < n; i++) {
-                mp = std::max(mp, std::fabs(hrp[i]));
-                if (std::fabs(hrm[i]) > mm) {
-                    mm = std::fabs(hrm[i]);
-                    argw = i;
-                }
-                mf = std::max(mf, std::fabs(hf[i]));
-            }
-            double best = std::min(mp, mm);
-            std::fprintf(stderr, "LIN_RESID n=%d ||J.dx-F||inf=%.6e ||F||inf=%.6e ratio=%.3e worstRow=%d\n",
-                         n, best, mf, mf > 0 ? best / mf : 0.0, argw);
-        }
-        if (it == 1) {                                       // same guard as the batched loop, batch of one
-            DeviceBuf rp;
-            DeviceBuf rm;
-            DeviceBuf sc;
-            rp.alloc(n * sizeof(double));
-            rm.alloc(n * sizeof(double));
-            sc.alloc(3 * sizeof(double));
-            linResidRow<<<grid(n), BLOCK, 0, ctx->stream>>>(n, ctx->st->dRowPtr.as<int>(),
-                    ctx->st->dColIdx.as<int>(), ctx->dVals.as<double>(), ctx->dDx.as<double>(),
-                    ctx->dB.as<double>(), rp.as<double>(), rm.as<double>());
-            linResidScoreBatch<<<1, BLOCK, 0, ctx->stream>>>(n, 1, rp.as<double>(), rm.as<double>(),
-                    ctx->dF.as<double>(), sc.as<double>());
-            double hsc[3];
-            CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
-            CUDA_CHECK(cudaMemcpy(hsc, sc.p, 3 * sizeof(double), cudaMemcpyDeviceToHost));
-            if (!(hsc[2] <= LIN_SOLVE_FAIL_RATIO)) {
-                throw std::runtime_error("device linear solve failed (||J.dx-B||/||F|| = " + std::to_string(hsc[2])
-                                         + "): the structure does not factor unpivoted - CPU fallback");
-            }
-        }
-        CUDA_CHECK(cudaMemcpyAsync(ctx->dXprev.p, ctx->dX.p, n * sizeof(double), cudaMemcpyDeviceToDevice, ctx->stream));
-        if (lsMode == 2) {
-            // MAX_VOLTAGE_CHANGE: one global step factor so the largest |Δv| / |Δφ| stays within
-            // maxDv / maxDphi (mirrors MaxVoltageChangeStateVectorScaling). Read dx back (same per-iter
-            // cost as the mismatch readback) and reduce on the host; the whole step is then scaled —
-            // including non-V/φ rows like BRANCH_RHO1 — via stepFromPrev(x = xPrev + s*dx).
-            CUDA_CHECK(cudaMemcpy(hDx.data(), ctx->dDx.p, n * sizeof(double), cudaMemcpyDeviceToHost));
-            double stepSize = 1.0;
-            for (int r = 0; r < n; r++) {
-                double a = std::fabs(hDx[r]);
-                if (varType[r] == 1) {
-                    if (a > maxDv) stepSize = std::min(stepSize, maxDv / a);
-                } else if (varType[r] == 0) {
-                    if (a > maxDphi) stepSize = std::min(stepSize, maxDphi / a);
-                }
-            }
-            stepFromPrev<<<grid(n), BLOCK, 0, ctx->stream>>>(n, ctx->dXprev.as<double>(), ctx->dDx.as<double>(), stepSize, ctx->dX.as<double>());
-        } else {
-            axpy1<<<grid(n), BLOCK, 0, ctx->stream>>>(n, ctx->dDx.as<double>(), ctx->dX.as<double>());
-        }
-        CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
-    }
-    res.iters = it;
-    // Return the LAST iterate (res.norm is its ‖F‖∞, set by the final fillAndNorm), matching the CPU
-    // NewtonRaphson, which returns whatever state it holds when its loop exits. The final
-    // CONVERGED / MAX_ITERATION_REACHED verdict is decided by the configured stopping criteria on the
-    // CPU from this written-back state (see GpuNewtonRaphson), so no on-device best-iterate selection.
-    CUDA_CHECK(cudaMemcpy(res.x.data(), ctx->dX.p, n * sizeof(double), cudaMemcpyDeviceToHost));
-    return res;
-}
-
 // VALUES-level refresh: re-upload only the per-element PARAMETER packs (cbIn/obIn/shIn/hvIn/ziIn)
 // into the SHARED structure, in place. The CSR pattern, the diagonal pairing, the index/dest packs and
 // cuDSS's symbolic ANALYSIS are UNCHANGED — they depend on the index packs and structure, not on these
 // values (a transformer tap or shunt-b move changes r1/a1/b — or a coupler's rho, ziIn — only). The
-// fill kernels read in[] every iteration, so the next solveContext refactorizes on the fresh values.
+// fill kernels read in[] every iteration, so the next batched solve refactorizes on the fresh values.
 // Element COUNTS must match the cached structure (the Java side only takes this path when the index
 // packs are identical), so we copy into the EXISTING device buffers (no realloc — DeviceBuf::alloc
 // would leak the old pointer). The static trig is re-derived (a tap move can change ksi/a1). Mutating
@@ -4257,7 +3647,7 @@ void refreshStructureValues(SharedStructure& st, int ncb, const double* cbIn, in
                             int nzi, const double* ziIn) {
     auto refresh = [](Family& f, int ne, const double* in) {
         if (ne != f.ne) {
-            throw std::runtime_error("refreshContextValues: element count changed (not a VALUES event)");
+            throw std::runtime_error("refreshStructureValues: element count changed (not a VALUES event)");
         }
         if (ne) {
             CUDA_CHECK(cudaMemcpy(f.in.p, in, static_cast<size_t>(ne) * f.instride * sizeof(double),
@@ -4269,7 +3659,7 @@ void refreshStructureValues(SharedStructure& st, int ncb, const double* cbIn, in
     refresh(st.sh, nsh, shIn);
     refresh(st.hv, nhv, hvIn);
     if (nzi != st.nzi) {
-        throw std::runtime_error("refreshContextValues: zero-impedance count changed (not a VALUES event)");
+        throw std::runtime_error("refreshStructureValues: zero-impedance count changed (not a VALUES event)");
     }
     if (nzi) {
         CUDA_CHECK(cudaMemcpy(st.dZiIn.p, ziIn, static_cast<size_t>(nzi) * sizeof(double), cudaMemcpyHostToDevice));
@@ -4540,8 +3930,9 @@ __global__ void fillHvdcBatch(int ne, int nScenarios, int n, int nnz, int nEleme
     }
 }
 
-// Batched DISTR_Q fill: one thread per (contribution, scenario). Mirrors the single-solve fillDistrQ but
-// strides x/vals/F per scenario and DROPS a contribution whose underlying closed (kind 0) / open (kind 2)
+// Batched DISTR_Q fill: one thread per (contribution, scenario). Each contribution is a closed
+// branch's side-s reactive flow (value + the 5 derivatives), scaled by the controller weight; x/vals/F are
+// strided per scenario, and the kernel DROPS a contribution whose underlying closed (kind 0) / open (kind 2)
 // branch is outaged in this scenario — matching the CPU, which removes that branch's q from the controller's
 // reactive sum (the controller weight qPercent is unchanged, so only the term vanishes). kinds 1 (shunt) and
 // 3 (zero-imp dummy) cannot be a single-branch contingency in a qualified batched scenario, so no mask check.
@@ -4676,7 +4067,7 @@ __global__ void fillOpenBranchBatchF(int ne, int nScenarios, int n, int nnz, int
 // Voltage-dependent load model terms (OLF AbstractLoadModelEquationTerm): per entry e,
 // F[row] += coef*v^n and J[(row, vOwn)] += coef*n*v^(n-1), coef = c_n * load target (pu),
 // exactly OLF's f()/dfdv() (the n = 0 constant part lives in the target vector, not here).
-// Identity rows are wiped by applyRowMode afterwards, so a PV bus's Q-row term vanishes
+// Identity rows are wiped by applyRowModeBatch afterwards, so a PV bus's Q-row term vanishes
 // exactly like every other Q fill (and reappears when RL flips the bus PQ). vals == nullptr
 // makes it the residual-only (line-search) variant.
 __global__ void fillVdlBatch(int ne, int nScenarios, int n, int nnz,
@@ -5017,7 +4408,7 @@ __global__ void fillDistrRhoBatch(int ndr, int nScenarios, int n, int nnz,
     int s = tid / ndr;
     if (!active[s]) return;
     // the CURRENT pilot-Q carrier's row hosts the relocated pilot balance — its DISTR_RHO row is
-    // inactive PER SCENARIO (same rule as the sequential fillDistrRho and fillDistrQBatch; the
+    // inactive PER SCENARIO (same rule as fillDistrQBatch; the
     // machine's drOv zeroing covers machine steps, but a bare batch solve — the batch-of-1
     // sequential route on a clamp-in-the-base network — has no drOv and needs the in-kernel skip)
     if (drQrGroup != nullptr && drQrGroup[c] >= 0) {
@@ -5053,8 +4444,8 @@ __global__ void fillDistrShuntBBatch(int ndb, int nScenarios, int n, int nnz,
     if (dJ >= 0) atomicAdd(&vals[(size_t) s * nnz + dJ], coef);
 }
 
-// Batched zero-impedance fill: one thread per (branch, scenario). Mirrors the single-solve fillZeroImp with
-// per-scenario striding — DUMMY_P/Q ±1 couplings into both buses' P/Q balances and, on a spanning-tree edge,
+// Batched zero-impedance fill: one thread per (branch, scenario). The Jacobian entries are
+// constants, only F depends on the state — DUMMY_P/Q ±1 couplings into both buses' P/Q balances and, on a spanning-tree edge,
 // the ZERO_V (v1−rho·v2) / ZERO_PHI (ph1−ph2) coupling. Active-gated, no mask (bus-coupler outage is rejected).
 __global__ void fillZeroImpBatch(int nzi, int nScenarios, int n, int nnz,
                                  const double* in, const int* ix, const int* dest,
@@ -5148,7 +4539,9 @@ __global__ void fillZeroImpBatch(int nzi, int nScenarios, int n, int nnz,
 }
 
 // Per-scenario slack/PV identity rows (rowMode is per scenario: a contingency can change
-// which buses are PV/slack). Same mask semantics as the single-solve applyRowMode.
+// which buses are PV/slack): a row in identity mode (mode 0) is zeroed, its diagonal set to 1 and its
+// mismatch overwritten with x - target. It runs after the fills and overwrites them, which keeps the
+// structure (and cuDSS's analysis) immutable across PV->PQ switching.
 __global__ void applyRowModeBatch(int n, int nScenarios, int nnz, const int* mode, const int* rowPtr,
                                   const int* diagPos, const double* x, const double* target,
                                   double* vals, double* F, const char* active, const double* rowSlope,
@@ -8064,8 +7457,7 @@ __global__ void writeIdentityForInactive(int n, int nScenarios, int nnz, const i
 }
 
 // The batched solver context: the SHARED structure (pattern, families, destination arrays,
-// static trig — shared by shared_ptr with any single-solve context on the same extraction,
-// see SharedStructure) + per-scenario value/state arrays and this consumer's own cuDSS
+// static trig — held by shared_ptr, see SharedStructure) + per-scenario value/state arrays and this consumer's own cuDSS
 // objects/analysis. Structure notes that are batch-specific:
 // - DISTR_Q: the controller structure is fixed across scenarios; the per-scenario disable
 //   mask drops an outaged contributor's term (kinds 0/2 = closed/open).
@@ -8075,7 +7467,7 @@ __global__ void writeIdentityForInactive(int n, int nScenarios, int nnz, const i
 //   mapper maps it to -1), so the fill just replicates the base.
 struct BatchSolverContext {
     int loopTraceSlot = -1;                                  // OLF_GPU_LOOP_TRACE by CONTINGENCY: the slot the host resolved for this chunk
-    SharedStructurePtr st;                                   // shared with any single-solve context on the same extraction
+    SharedStructurePtr st;                                   // built once per extraction, see SharedStructure
     int n = 0;
     int nnz = 0;
     int nScenarios = 0;
@@ -11498,8 +10890,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     // ---- batched fill for all active scenarios (J + F, or F-ONLY: the final residual fill and
     //      mode 4's solve-only iterations evaluate just the residual and skip the vals memset —
     //      the J buffer is never read before the next full fill re-zeroes it). A lambda so the
-    //      LINE_SEARCH backtrack below can re-evaluate at a reduced step, like the sequential
-    //      solveContext's fillAndNorm. ----
+    //      LINE_SEARCH backtrack below can re-evaluate at a reduced step. ----
     auto fillActiveBatch = [&](bool fOnly) {
         if (ctx->hasPilotSelf && ctx->dPsSkip.p != nullptr && ctx->st->nQr > 0) {
             // Recompute the PILOT-SELF gate from the CURRENT pin states BEFORE any family fill: such a pilot
@@ -12015,8 +11406,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         hn.resize(static_cast<size_t>(nS) * 4);
         CUDA_CHECK(cudaMemcpy(hn.data(), ctx->dNorms.p, hn.size() * sizeof(double), cudaMemcpyDeviceToHost));
     };
-    // LINE_SEARCH per-scenario backtracking state (mirrors the sequential solveContext: lastNorm2 /
-    // haveLast, per pass — a phase re-entry retargets the system, voiding the step relation)
+    // LINE_SEARCH per-scenario backtracking state (lastNorm2 / haveLast, per pass — a phase re-entry retargets the system, voiding the step relation)
     // Per scenario, the linear-solve residual ratio of this pass's LAST solve — scored only when the pass runs
     // its Newton budget out (see the it == maxIter branch), so a healthy run never pays for it.
     std::vector<double> lastSolveRatio(nS, 0.0);
@@ -12046,8 +11436,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                 readNormsBatch(hNorms);
                 // ---- LINE_SEARCH backtrack (per scenario): the full step applied at it-1 may have
                 //      RAISED that scenario's ||F||2 — walk it back to x = xPrev + mu*dx with
-                //      mu = stepFold^-k until the 2-norm improves, mirroring the sequential
-                //      solveContext / OLF's LineSearchStateVectorScaling. Judged on the 2-norm
+                //      mu = stepFold^-k until the 2-norm improves, mirroring
+                //      OLF's LineSearchStateVectorScaling. Judged on the 2-norm
                 //      (ssq, monotonic-equivalent); a non-finite mismatch backtracks too. Scenarios
                 //      not backtracking keep their state (mu sentinel -1 masks the step kernel). ----
                 if (lsMode == 1) {
@@ -12228,7 +11618,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                     nActive--;
                     anyChanged = true;
                 } else if (converged && it > 0 && it < maxIter) {
-                    // Force >=1 iteration, like CPU NewtonRaphson / solveContext (line ~1227): a warm-started
+                    // Force >=1 iteration, like CPU NewtonRaphson: a warm-started
                     // state may already meet the global 2-norm threshold yet leave a just-flipped identity row
                     // (PV target) unpinned — one Newton step pins it. Retiring at it==0 skips that solve.
                     // And NOT at the budget: OLF's NewtonRaphson.run counts a step before testing it and
@@ -12804,7 +12194,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     }
     CUDA_CHECK(cudaMemcpy(ctx->dRlActive.p, rlActive.data(), nS * sizeof(char), cudaMemcpyHostToDevice));
     // generator Q per controller = (Σ branch q + shunt q) at its BUS_V row + load Q. Compute the first
-    // part by a fill into a ZEROED buffer: no initF (−target), no applyRowMode, so qBuf[row] is the raw
+    // part by a fill into a ZEROED buffer: no −target init, no applyRowModeBatch, so qBuf[row] is the raw
     // bus reactive balance. Disabled branches are skipped (outage); dVals is scratch (the next inner
     // iteration memsets and refills it).
     CUDA_CHECK(cudaMemsetAsync(ctx->dQbuf.p, 0, nTot * sizeof(double), ctx->stream));
@@ -14052,113 +13442,6 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_destroyS
     // Drops the Java-side owner reference only: contexts hold their own shared_ptr copies,
     // so the device-resident structure lives until the last context is destroyed.
     delete reinterpret_cast<SharedStructurePtr*>(handle);
-}
-
-extern "C" JNIEXPORT jlong JNICALL
-Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_createContext(
-        JNIEnv* env, jclass, jlong structureHandle) {
-    auto* st = reinterpret_cast<SharedStructurePtr*>(structureHandle);
-    std::string error;
-    SolverContext* ctx = nullptr;
-    try {
-        if (st == nullptr || !*st) {
-            throw std::runtime_error("invalid structure handle");
-        }
-        ctx = createContext(*st);
-    } catch (const std::exception& e) {
-        error = e.what();
-    } catch (...) {
-        error = "unknown native error";
-    }
-    if (!error.empty()) {
-        env->ThrowNew(env->FindClass("java/lang/RuntimeException"),
-                      ("GPU Newton-Raphson context creation failed: " + error).c_str());
-        return 0;
-    }
-    return reinterpret_cast<jlong>(ctx);
-}
-
-extern "C" JNIEXPORT jdoubleArray JNICALL
-Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_solveContext(
-        JNIEnv* env, jclass, jlong handle, jdoubleArray jx0, jdoubleArray jtarget,
-        jintArray jrowMode, jint maxIter, jdouble tol, jdouble convEpsPerEq, jint lsMode, jint lsMaxIter, jdouble lsStepFold,
-        jdouble maxDv, jdouble maxDphi, jintArray jvarType) {
-    auto* ctx = reinterpret_cast<SolverContext*>(handle);
-    jdouble* x0 = env->GetDoubleArrayElements(jx0, nullptr);
-    jdouble* target = env->GetDoubleArrayElements(jtarget, nullptr);
-    jint* rowMode = env->GetIntArrayElements(jrowMode, nullptr);
-    jint* varType = env->GetIntArrayElements(jvarType, nullptr);
-    int n = env->GetArrayLength(jx0);
-
-    std::string error;
-    Result res;
-    try {
-        if (ctx == nullptr || n != ctx->n) {
-            throw std::runtime_error("invalid solver context or state size");
-        }
-        res = solveContext(ctx, x0, target, rowMode, maxIter, tol, convEpsPerEq, lsMode, lsMaxIter, lsStepFold,
-                           maxDv, maxDphi, varType);
-    } catch (const std::exception& e) {
-        error = e.what();
-    } catch (...) {
-        error = "unknown native error";
-    }
-
-    env->ReleaseDoubleArrayElements(jx0, x0, JNI_ABORT);
-    env->ReleaseDoubleArrayElements(jtarget, target, JNI_ABORT);
-    env->ReleaseIntArrayElements(jrowMode, rowMode, JNI_ABORT);
-    env->ReleaseIntArrayElements(jvarType, varType, JNI_ABORT);
-
-    if (!error.empty()) {
-        env->ThrowNew(env->FindClass("java/lang/RuntimeException"),
-                      ("GPU Newton-Raphson failed: " + error).c_str());
-        return nullptr;
-    }
-    jdoubleArray out = env->NewDoubleArray(n + 2);
-    env->SetDoubleArrayRegion(out, 0, n, res.x.data());
-    double tail[2] = {static_cast<double>(res.iters), res.norm};
-    env->SetDoubleArrayRegion(out, n, 2, tail);
-    return out;
-}
-
-extern "C" JNIEXPORT void JNICALL
-Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_destroyContext(
-        JNIEnv*, jclass, jlong handle) {
-    delete reinterpret_cast<SolverContext*>(handle);
-}
-
-extern "C" JNIEXPORT void JNICALL
-Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_refreshContextValues(
-        JNIEnv* env, jclass, jlong handle, jdoubleArray jcbIn, jdoubleArray jobIn,
-        jdoubleArray jshIn, jdoubleArray jhvIn, jdoubleArray jziIn) {
-    auto* ctx = reinterpret_cast<SolverContext*>(handle);
-    jdouble* cbIn = env->GetDoubleArrayElements(jcbIn, nullptr);
-    jdouble* obIn = env->GetDoubleArrayElements(jobIn, nullptr);
-    jdouble* shIn = env->GetDoubleArrayElements(jshIn, nullptr);
-    jdouble* hvIn = env->GetDoubleArrayElements(jhvIn, nullptr);
-    jdouble* ziIn = env->GetDoubleArrayElements(jziIn, nullptr);
-    std::string error;
-    try {
-        if (ctx == nullptr) {
-            throw std::runtime_error("invalid solver context");
-        }
-        refreshStructureValues(*ctx->st, env->GetArrayLength(jcbIn) / 8, cbIn, env->GetArrayLength(jobIn) / 7, obIn,
-                               env->GetArrayLength(jshIn) / 2, shIn, env->GetArrayLength(jhvIn) / 5, hvIn,
-                               env->GetArrayLength(jziIn), ziIn);
-    } catch (const std::exception& e) {
-        error = e.what();
-    } catch (...) {
-        error = "unknown native error";
-    }
-    env->ReleaseDoubleArrayElements(jcbIn, cbIn, JNI_ABORT);
-    env->ReleaseDoubleArrayElements(jobIn, obIn, JNI_ABORT);
-    env->ReleaseDoubleArrayElements(jshIn, shIn, JNI_ABORT);
-    env->ReleaseDoubleArrayElements(jhvIn, hvIn, JNI_ABORT);
-    env->ReleaseDoubleArrayElements(jziIn, ziIn, JNI_ABORT);
-    if (!error.empty()) {
-        env->ThrowNew(env->FindClass("java/lang/RuntimeException"),
-                      ("GPU values refresh failed: " + error).c_str());
-    }
 }
 
 extern "C" JNIEXPORT jlong JNICALL
@@ -15496,29 +14779,6 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
     if (ctx != nullptr) {
         ctx->loopTraceSlot = slot;
     }
-}
-
-extern "C" JNIEXPORT void JNICALL
-Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchDqQrSuppression(
-        JNIEnv* env, jclass, jlong handle, jintArray jDqJMember, jintArray jMQrGroup) {
-    auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
-    if (ctx == nullptr) {
-        return;
-    }
-    if (jDqJMember == nullptr || jMQrGroup == nullptr
-            || env->GetArrayLength(jDqJMember) == 0 || env->GetArrayLength(jMQrGroup) == 0) {
-        ctx->hasDqQrGroups = 0;
-        return;
-    }
-    int ndqc = env->GetArrayLength(jDqJMember);
-    int nm = env->GetArrayLength(jMQrGroup);
-    jint* jm = env->GetIntArrayElements(jDqJMember, nullptr);
-    jint* mqg = env->GetIntArrayElements(jMQrGroup, nullptr);
-    ctx->dDqJMember.upload(jm, static_cast<size_t>(ndqc) * sizeof(int));
-    ctx->dDqMemberQrGroup.upload(mqg, static_cast<size_t>(nm) * sizeof(int));
-    env->ReleaseIntArrayElements(jDqJMember, jm, JNI_ABORT);
-    env->ReleaseIntArrayElements(jMQrGroup, mqg, JNI_ABORT);
-    ctx->hasDqQrGroups = 1;
 }
 
 // DISTR_Q weight overrides: install (or clear, with nulls) the per-scenario qPct renormalization

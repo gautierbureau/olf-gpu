@@ -46,7 +46,7 @@ public final class GpuAcDataExtractor {
     public static GpuAcData extract(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es) {
         // Default to OLF's own defaults (slack distribution + reactive limits ON). The batched SA path passes
         // the RUN's actual outer-loop set so a disabled outer loop is never run on the device (an outer loop
-        // must not run unconditionally); the single-solve path ignores the DS/RL packs entirely.
+        // must not run unconditionally).
         return extract(network, es, true, true);
     }
 

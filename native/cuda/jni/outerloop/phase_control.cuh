@@ -7,6 +7,7 @@
 #define OLF_GPU_OUTERLOOP_PHASE_CONTROL_CUH
 
 #include "../solver/driver_pass.cuh"
+#include "incremental_transformer_voltage_control.cuh"
 
 namespace olfgpu {
 
@@ -15,10 +16,6 @@ void cphResetSolve(BatchSolverContext* ctx, DriverPass& drv);
 
 // One check of the loop on every live scenario (LOOP_PHASE_KERNEL).
 void cphStep(BatchSolverContext* ctx, DriverPass& drv);
-
-// Rebuild the per-scenario r1 overrides from every tap-moving loop's current taps (defined with the incremental
-// transformer voltage control).
-void tvcRebuildOverrides(BatchSolverContext* ctx);
 
 }  // namespace olfgpu
 

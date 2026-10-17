@@ -36,6 +36,18 @@ __device__ inline double cvHvdcActivePower(const CvHvdc& c, int s, int n, int h,
     return side == 1 ? c.d1[sh] + p[7] : c.d2[sh] + p[8];
 }
 
+// Evaluate the per-scenario DYNAMIC reactive limits (OLF: bus.getMinQ()/getMaxQ() re-read each RL
+// check, curve gens at their CURRENT targetP): start from the static pack values and add each
+// participating curve gen's delta eval(p_now) - eval(p_base). p_now = basePpu + share * (the bus's
+// DS-moved row target - its base) — exact while intra-bus proportionality holds (the pack's DS
+// model). At the base point the delta is bit-zero (same formula both sides).
+// rlCurveLimitsBatch reads each generator's OWN cumulative P from the distributed-slack water-fill
+// (dGenCum), which clamps PER GENERATOR, instead of splitting its bus's movement by a share fixed at
+// pack time. The share is exact only while the intra-bus split stays proportional, and a clamp breaks
+// that: on rte6515 GEN-6172 at VL-6139_0 the 451 MW unit takes +0.0442 where its share says +0.0890,
+// which puts the bus's Q box out by 2.67 MVAr and the bus 0.0379 kV off. The share reconstruction
+// survives ONLY as the fallback for entries genCum cannot serve (no DS slot, the per-generator
+// water-fill did not run, or the outaged bus's own entries) — there is no switch back to it.
 __global__ void rlCurveLimitsBatch(int nrl, int nScenarios, int ncv, int n, int cvExtrapolate,
                                    const int* cvIdx, const double* cvIn, const double* cvPts,
                                    const int* cvPtr, const int* cvList, CvHvdc cvHv,

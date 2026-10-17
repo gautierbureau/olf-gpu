@@ -6,6 +6,10 @@
 #ifndef OLF_GPU_OUTERLOOP_REACTIVE_CAPABILITY_CURVES_CUH
 #define OLF_GPU_OUTERLOOP_REACTIVE_CAPABILITY_CURVES_CUH
 
+#include <cstdlib>
+#include <string>
+#include <vector>
+
 #include "../solver/driver_pass.cuh"
 
 namespace olfgpu {
@@ -41,6 +45,33 @@ __global__ void rlCurveLimitsBatch(int nrl, int nScenarios, int ncv, int n, int 
                                    const double* genCum, const char* genCumValid, const double* dgAnchor, const double* dgStart, int ngen,
                                    const int* dsPhiRow, const int* dsRowOv, int nds, const int* dgBus,
                                    double* minQDyn, double* maxQDyn, double* loadQDyn, int cvProbeEntry, int cvProbeSlot);
+
+// OLF_GPU_CV_PROBE=<rl entry>: trace the curve-limit evaluation for that entry (device printf).
+static const int cvProbeEntry = std::getenv("OLF_GPU_CV_PROBE") == nullptr ? -1
+        : (std::string(std::getenv("OLF_GPU_CV_PROBE")) == "all" ? -2
+           : std::atoi(std::getenv("OLF_GPU_CV_PROBE")));
+// The host readback ([CV-HOST]) takes a COMMA list of entries (the device printf keeps the first).
+static std::vector<int> cvProbeEntries() {
+    std::vector<int> v;
+    const char* e = std::getenv("OLF_GPU_CV_PROBE");
+    if (e == nullptr || std::string(e) == "all") return v;
+    std::string str(e);
+    size_t pos = 0;
+    while (pos <= str.size()) {
+        size_t c = str.find(',', pos);
+        if (c == std::string::npos) c = str.size();
+        if (c > pos) v.push_back(std::atoi(str.substr(pos, c - pos).c_str()));
+        pos = c + 1;
+    }
+    return v;
+}
+// OLF_GPU_CV_PROBE_SLOT=<slot>: the scenario the probe prints for (default 0 — the base load flow's single slot).
+// "ctg" resolves to the chunk-LOCAL slot the host set for OLF_GPU_LOOP_TRACE_CTG (kernel scenario indices
+// are chunk-local; a global contingency index never matches one).
+static const bool cvProbeSlotByCtg = std::getenv("OLF_GPU_CV_PROBE_SLOT") != nullptr
+        && std::string(std::getenv("OLF_GPU_CV_PROBE_SLOT")) == "ctg";
+static const int cvProbeSlot = std::getenv("OLF_GPU_CV_PROBE_SLOT") == nullptr || cvProbeSlotByCtg ? 0
+        : std::atoi(std::getenv("OLF_GPU_CV_PROBE_SLOT"));
 
 }  // namespace olfgpu
 

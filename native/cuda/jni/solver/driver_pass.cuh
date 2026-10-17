@@ -15,6 +15,14 @@
 namespace olfgpu {
 
 struct DriverPass {
+    int rlMaxSwitch = 0;
+    int swLogSlot = -1;
+    int skipRlPhase = 0;
+    bool svcCoefDyn = false;
+    int nRlQOv = 0;
+    int nCvOv = 0;
+    DeviceBuf dRlQOvSlotEntry, dRlQOvMinMax, dRlQOvPtr, dRlQOvList;
+    DeviceBuf dCvOvPtr, dCvOvEntry, dCvOvVal;
     double slackDistTol = 0.0;
     double pResidueEps = 0.0;
     bool hasDsOverride = false;

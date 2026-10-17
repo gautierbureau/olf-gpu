@@ -49,6 +49,10 @@ __global__ void rlPilotSelfMixedGate(int nrl, int nScenarios, const char* rlRemo
 __global__ void rlUnpinBatch(int nPairs, int nS, int n, int nrl, const int* pairs, const double* newTarget,
                              const int* rlVrow, char* limitType, const char* savedMode, int* mode, double* target);
 
+
+// One check of ReactiveLimitsOuterLoop on every live scenario (loopKind LOOP_RL).
+void rlCheck(BatchSolverContext* ctx, DriverPass& drv, int loopKind);
+
 }  // namespace olfgpu
 
 #endif  // OLF_GPU_OUTERLOOP_REACTIVE_LIMITS_CUH

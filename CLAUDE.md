@@ -123,7 +123,7 @@ own) then `codegen/regenerate.sh` + commit kernels (+ golden if math changed).
   and the refresher then calls `GpuAcStructures.rebind(old, new)`, which drops EVERY
   key aliased to the refreshed structure and re-keys it to the new extraction, so
   content matching never aliases stale values. The hand-off is ASSERTED in
-  `GpuBatchedAcSecurityAnalysisTest#gpuBatchedEngagesAndMatchesCpuOnDevice` via
+  `GpuSaSolverTest#gpuBatchedEngagesAndMatchesCpuOnDevice` via
   `GpuAcStructures.hitCount()`. Sharing is instance-first with a CROSS-FLAVOR content
   fallback: the base always extracts DS_RL while an SA run with DS or RL disabled
   extracts another flavor (a different `GpuAcData` instance) — the flags only select

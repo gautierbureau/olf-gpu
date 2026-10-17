@@ -80,6 +80,7 @@ using namespace powsybl::openloadflow;
 #include "solver/batch_context.cuh"
 #include "solver/driver_pass.cuh"
 #include "solver/driver_steps.cuh"
+#include "solver/iterative_refinement.cuh"
 #include "solver/zero_diagonal_repair.cuh"
 #include "solver/realistic_voltage_check.cuh"
 #include "solver/convergence.cuh"
@@ -132,48 +133,7 @@ namespace olfgpu {
 // factorization is wrong (unpivoted LU on a structure that needs pivoting), not merely inaccurate.
 static const double LIN_SOLVE_FAIL_RATIO = 1e-2;
 
-// Per-scenario score of the linear solve just done: max|J.dx-B| under both sign conventions and
-// max|F|, one thread per scenario (n serial reads each; a few thousand per scenario, once per solve).
-__global__ void linResidScoreBatch(int n, int nS, const double* rp, const double* rm, const double* F,
-                                   double* score) {
-    int s = blockIdx.x * blockDim.x + threadIdx.x;
-    if (s >= nS) return;
-    double mp = 0.0;
-    double mm = 0.0;
-    double mf = 0.0;
-    const double* rps = rp + (size_t) s * n;
-    const double* rms = rm + (size_t) s * n;
-    const double* fs = F + (size_t) s * n;
-    for (int i = 0; i < n; i++) {
-        mp = fmax(mp, fabs(rps[i]));
-        mm = fmax(mm, fabs(rms[i]));
-        mf = fmax(mf, fabs(fs[i]));
-    }
-    score[3 * s] = fmin(mp, mm);
-    score[3 * s + 1] = mf;
-    score[3 * s + 2] = (mf > 0.0 && isfinite(mp) && isfinite(mm)) ? fmin(mp, mm) / mf : 1e300;
-}
 
-// How accurately did the LINEAR solve actually solve? Per row, r_i = (J.dx)_i -/+ F_i, per scenario: every
-// scenario has its OWN values block (stride nnz) and its own dx / F block (stride n), over the SHARED sparsity
-// pattern. ||r|| at round-off relative to ||F|| means the solve is exact; a large ||r|| is what iterative
-// refinement corrects (this is also refinement's own first step).
-__global__ void linResidRowBatch(int n, int nS, int nnz, const int* rowPtr, const int* colIdx,
-                                 const double* vals, const double* dx, const double* F,
-                                 double* rPlus, double* rMinus) {
-    int t = blockIdx.x * blockDim.x + threadIdx.x;
-    if (t >= n * nS) return;
-    int s = t / n;
-    int i = t - s * n;
-    const double* v = vals + (size_t) s * nnz;
-    const double* d = dx + (size_t) s * n;
-    double acc = 0.0;
-    for (int k = rowPtr[i]; k < rowPtr[i + 1]; k++) {
-        acc += v[k] * d[colIdx[k]];
-    }
-    rPlus[t] = acc - F[t];
-    rMinus[t] = acc + F[t];
-}
 
 
 }  // namespace olfgpu
@@ -288,44 +248,8 @@ namespace olfgpu {
 
 
 
-// r = b - J dx per scenario (the refinement residual; the right-hand side as SOLVED, row repairs included)
-__global__ void residualBatch(int n, int nS, int nnz, const int* rowPtr, const int* colIdx,
-                              const double* vals, const double* dx, const double* b, double* r) {
-    int t = blockIdx.x * blockDim.x + threadIdx.x;
-    if (t >= n * nS) return;
-    int s = t / n;
-    int i = t - s * n;
-    const double* v = vals + (size_t) s * nnz;
-    const double* d = dx + (size_t) s * n;
-    double acc = 0.0;
-    for (int k = rowPtr[i]; k < rowPtr[i + 1]; k++) {
-        acc += v[k] * d[colIdx[k]];
-    }
-    r[t] = b[t] - acc;
-}
 
-// per scenario: ||r||inf / ||b||inf (0 for an inactive lane or a zero right-hand side)
-__global__ void irScoreBatch(int n, int nS, const double* r, const double* b, const char* active, double* score) {
-    int s = blockIdx.x * blockDim.x + threadIdx.x;
-    if (s >= nS) return;
-    if (active != nullptr && !active[s]) {
-        score[s] = 0.0;
-        return;
-    }
-    const double* rs = r + (size_t) s * n;
-    const double* bs = b + (size_t) s * n;
-    double mr = 0.0, mb = 0.0;
-    for (int i = 0; i < n; i++) {
-        mr = fmax(mr, fabs(rs[i]));
-        mb = fmax(mb, fabs(bs[i]));
-    }
-    score[s] = mb > 0.0 ? (isfinite(mr) ? mr / mb : 1e300) : 0.0;
-}
 
-__global__ void axpyLaneMaskBatch(int n, int total, double sign, const double* d, const char* lane, double* x) {
-    int t = blockIdx.x * blockDim.x + threadIdx.x;   // x += sign * d on the lanes whose mask is set
-    if (t < total && lane[t / n]) x[t] += sign * d[t];
-}
 
 
 
@@ -782,63 +706,6 @@ static void uploadBatchOverrides(BatchSolverContext* ctx, int lsMode, double max
 
 
 
-// Adaptive iterative refinement (see irBaseSteps / irMaxSteps / irTol), decided PER LANE. Each lane refines (r = b - J dx, J d = r,
-// dx += d) while ITS OWN backward residual ratio is above tol and still falling, and undoes a step that did not
-// lower it - what the same scenario does in a batch of one. The batched solve still runs over every lane; a lane
-// that is done just does not take the correction. It used to be decided on the WORST lane and applied to all of
-// them, so a scenario's dx depended on which matrices shared its batch: network.xiidm busbar JZDQ's first pass
-// differed by 1.2e-8 pu between a 700- and a 175-wide chunk of the same full topology, and the outer loops carried
-// that over the 1 MW slack-balance threshold - 0.125 MW off the CPU in one chunk, 1.7e-8 MW in another.
-template <typename SolveFn>
-static void refineLanes(BatchSolverContext* ctx, int lanes, int n, int nnz, const double* vals, double* dx,
-                        const double* b, double* r, const double* delta, const char* active, SolveFn solve) {
-    const int irMax = irMaxSteps();
-    const int irBase = irBaseSteps();
-    const double tol = irTol();
-    std::vector<double> prev(lanes), sc(lanes);
-    std::vector<char> lane(lanes), undo(lanes);
-    auto scores = [&](std::vector<double>& out) {
-        residualBatch<<<grid(n * lanes), BLOCK, 0, ctx->stream>>>(n, lanes, nnz, ctx->st->dRowPtr.as<int>(),
-                ctx->st->dColIdx.as<int>(), vals, dx, b, r);
-        irScoreBatch<<<grid(lanes), BLOCK, 0, ctx->stream>>>(n, lanes, r, b, active, ctx->dIrScore.as<double>());
-        CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
-        CUDA_CHECK(cudaMemcpy(out.data(), ctx->dIrScore.as<double>(), lanes * sizeof(double), cudaMemcpyDeviceToHost));
-        gIrChecks++;
-    };
-    scores(prev);
-    int nLane = 0;
-    for (int s = 0; s < lanes; s++) {
-        lane[s] = prev[s] > tol;
-        nLane += lane[s];
-    }
-    ctx->dIrLane.ensure(static_cast<size_t>(lanes));
-    for (int step = irBase; step < irMax && nLane > 0; step++) {
-        CUDA_CHECK(cudaMemcpy(ctx->dIrLane.p, lane.data(), lanes, cudaMemcpyHostToDevice));
-        solve();                                              // delta = J^-1 r on every lane
-        axpyLaneMaskBatch<<<grid(n * lanes), BLOCK, 0, ctx->stream>>>(n, n * lanes, 1.0, delta, ctx->dIrLane.as<char>(), dx);
-        gIrExtraSteps++;
-        scores(sc);
-        int nUndo = 0;
-        nLane = 0;
-        for (int s = 0; s < lanes; s++) {
-            undo[s] = 0;
-            if (!lane[s]) continue;
-            if (!(sc[s] < prev[s])) {                         // no progress on this lane: undo its step, it is done
-                undo[s] = 1;
-                lane[s] = 0;
-                nUndo++;
-            } else {
-                prev[s] = sc[s];
-                lane[s] = sc[s] > tol;
-                nLane += lane[s];
-            }
-        }
-        if (nUndo > 0) {
-            CUDA_CHECK(cudaMemcpy(ctx->dIrLane.p, undo.data(), lanes, cudaMemcpyHostToDevice));
-            axpyLaneMaskBatch<<<grid(n * lanes), BLOCK, 0, ctx->stream>>>(n, n * lanes, -1.0, delta, ctx->dIrLane.as<char>(), dx);
-        }
-    }
-}
 
 }  // namespace olfgpu
 

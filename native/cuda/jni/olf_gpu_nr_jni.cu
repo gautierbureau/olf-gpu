@@ -2896,47 +2896,6 @@ __global__ void gatherSensiBatch(int n, int nScenarios, int k, int m, int ki, co
     out[(size_t) sIdx * k * m + (size_t) ki * m + mi] = dx[(size_t) sIdx * n + observeCols[mi]];
 }
 
-// Slack-only distributed slack: the slack generator is the ONLY participant, so OLF's distribution
-// puts the whole mismatch into the slack gen's own target — no flow change, but the outer loop reports
-// UNSTABLE and triggers a re-solve that polishes the state by one more Newton run. Mirror it exactly:
-// track the absorbed total, flag a switch while the residual mismatch stays above the outer gate.
-/** MonitoringVoltage (OLF MonitoringVoltageOuterLoop): a standby SVC whose monitored bus leaves its
- *  band switches to voltage control at the corresponding setpoint. One-way — once a controller has
- *  fired for a scenario it is never re-checked, exactly as OLF's activatedTargetV bookkeeping. */
-__global__ void monitoringLoopBatch(int nmon, int nScenarios, int n,
-                                    const int* monVRow, const double* monBand,
-                                    const int* deltaPtr, const int* deltaRow,
-                                    const int* deltaMode, const double* deltaTarget,
-                                    const double* x, double* target, int* mode,
-                                    double* activated, const char* rlActive, char* switched) {
-    int k = blockIdx.x * blockDim.x + threadIdx.x;
-    if (k >= nmon * nScenarios) return;
-    int c = k % nmon;
-    int s = k / nmon;
-    if (!rlActive[s]) return;
-    size_t slot = (size_t) s * nmon + c;
-    if (!isnan(activated[slot])) return;                     // already switched — a normal PV bus now
-    double v = x[(size_t) s * n + monVRow[c]];
-    double lowThr = monBand[c * 4];
-    double highThr = monBand[c * 4 + 1];
-    double lowTgt = monBand[c * 4 + 2];
-    double highTgt = monBand[c * 4 + 3];
-    double chosen;
-    if (v > highThr) {
-        chosen = highTgt;
-    } else if (v < lowThr) {
-        chosen = lowTgt;
-    } else {
-        return;
-    }
-    activated[slot] = chosen;
-    for (int d = deltaPtr[c]; d < deltaPtr[c + 1]; d++) {
-        int row = deltaRow[d];
-        mode[(size_t) s * n + row] = deltaMode[d];
-        target[(size_t) s * n + row] = row == monVRow[c] ? chosen : deltaTarget[d];
-    }
-    switched[s] = 1;
-}
 
 // OLF_GPU_DS_DEBUG: the kernel-level water-fill prints ([DS-GATE]/[DS-WF]/[DS-SAT]) follow ONE slot,
 // OLF_GPU_DS_DEBUG_SLOT (default 0); returns slot+1, 0 = off.
@@ -2946,6 +2905,10 @@ static int dsDebugTraceSlot() {
     return (e != nullptr ? std::atoi(e) : 0) + 1;
 }
 
+// Slack-only distributed slack: the slack generator is the ONLY participant, so OLF's distribution
+// puts the whole mismatch into the slack gen's own target — no flow change, but the outer loop reports
+// UNSTABLE and triggers a re-solve that polishes the state by one more Newton run. Mirror it exactly:
+// track the absorbed total, flag a switch while the residual mismatch stays above the outer gate.
 // anchor: the slack generators' INITIAL target, relative to slackTargetP - 0 for a contingency (OLF's first pass
 // undoes the loss pre-distribution), the parent's absorbed total for a strategy pair (OLF re-anchors there).
 // OLF's ActivePowerDistribution resets to the anchor and places the whole remaining mismatch only above
@@ -5769,6 +5732,10 @@ static void refineLanes(BatchSolverContext* ctx, int lanes, int n, int nnz, cons
 
 namespace olfgpu {
 
+}  // namespace olfgpu
+#include "outerloop/voltage_monitoring.cuh"
+namespace olfgpu {
+
 static auto launchPilotVeqInner(BatchSolverContext* ctx, DriverPass& drv, bool staticLimits = false, bool continuedPins = false) {
     const int& n = drv.n;
     const int& nS = drv.nS;
@@ -6365,14 +6332,6 @@ static auto rejectUnrealistic(BatchSolverContext* ctx, DriverPass& drv, const st
             active[s] = 0;
         }
     }
-}
-// Per-solve reset. MonitoringVoltage: nothing has fired yet in this solve.
-static void monitoringResetSolve(BatchSolverContext* ctx, DriverPass& drv) {
-    const int& nS = drv.nS;
-    std::vector<double> nan(static_cast<size_t>(ctx->nmon) * nS, std::nan(""));
-    CUDA_CHECK(cudaMemcpyAsync(ctx->dMonActivated.p, nan.data(),
-            nan.size() * sizeof(double), cudaMemcpyHostToDevice, ctx->stream));
-    CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
 }
 
 // Per-solve reset. Incremental TVC: every scenario starts at the base tap with a fresh ratchet.
@@ -8270,12 +8229,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     } else if (loopKind == LOOP_SVC_KERNEL) {
         svcStep(ctx, drv);
     } else if (loopKind == LOOP_MONITORING) {
-        monitoringLoopBatch<<<grid(ctx->nmon * nS), BLOCK, 0, ctx->stream>>>(
-                ctx->nmon, nS, n, ctx->dMonVRow.as<int>(), ctx->dMonBand.as<double>(),
-                ctx->dMonDeltaPtr.as<int>(), ctx->dMonDeltaRow.as<int>(),
-                ctx->dMonDeltaMode.as<int>(), ctx->dMonDeltaTarget.as<double>(),
-                ctx->dX.as<double>(), ctx->dTarget.as<double>(), ctx->dMode.as<int>(),
-                ctx->dMonActivated.as<double>(), ctx->dRlActive.as<char>(), ctx->dRlSwitched.as<char>());
+        monitoringStep(ctx, drv);
     } else if (loopKind == LOOP_HVDC_FREEZE || loopKind == LOOP_HVDC_LIMITS) {
         // OLF_GPU_HVDC_LOOP_TRACE=<slot>: the status of every link of that scenario before and after this pass,
         // read back on the host (device printf is not relied on), beside the kernel's own per-link print.

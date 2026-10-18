@@ -200,7 +200,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
      */
     private void writeBackDriverMutations(GpuAcData data) {
         long handle = context.handle.get();
-        double[] deviceTargets = GpuAcNewtonSolver.readBatchTargets(handle);
+        double[] deviceTargets = BatchReadbackNative.readBatchTargets(handle);
         if (hvdcCtls != null && !hvdcCtls.isEmpty()) {
             HvdcAcEmulation.writeBack(network, hvdcCtls, HvdcNative.readBatchHvdcStatus(handle),
                     data.getTotalElementCount());
@@ -215,9 +215,9 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
         }
         lastDistributedActivePower = DistributedSlackWriteBack.writeBack(network, equationSystem, handle, driverDsParams(),
                 loadAnchorTargetP, deviceTargets,
-                GpuAcNewtonSolver.readBatchDsGenCum(handle), GpuAcNewtonSolver.readBatchDsRetain(handle), data);
+                BatchReadbackNative.readBatchDsGenCum(handle), BatchReadbackNative.readBatchDsRetain(handle), data);
         ReactiveLimitsWriteBack.writeBack(network, rlStateOut, data, deviceTargets,
-                data.rlRemote() != null ? GpuAcNewtonSolver.readBatchRowModes(handle) : null);
+                data.rlRemote() != null ? BatchReadbackNative.readBatchRowModes(handle) : null);
         if (tvcOwned && tvcCtls != null) {
             IncrementalTransformerVoltageControl.writeBackTaps(network, tvcCtls, TransformerVoltageControlNative.readBatchTvcTaps(handle));
         }
@@ -377,7 +377,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
      * is positive, so the count of the last pass alone (0 for a resume that only confirmed) lost results.
      */
     private int runNewtonIterations(int lastCallIterations) {
-        int[] stats = GpuAcNewtonSolver.readBatchOlStats(context.handle.get());
+        int[] stats = BatchReadbackNative.readBatchOlStats(context.handle.get());
         return restartIterations + (stats != null && stats.length >= 3 ? stats[2] : lastCallIterations);
     }
 
@@ -1041,7 +1041,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                     }
                 }
                 System.err.println("RESID_TRACE rows over 1e-4 by type=" + byType + " max=" + maxByType);
-                double[] devT = GpuAcNewtonSolver.readBatchTargets(context.handle.get());
+                double[] devT = BatchReadbackNative.readBatchTargets(context.handle.get());
                 double[] olfT = targetVector.getArray();
                 for (int i2 = 0; i2 < fx.length; i2++) {
                     if (Math.abs(fx[i2]) <= 1e-4) {

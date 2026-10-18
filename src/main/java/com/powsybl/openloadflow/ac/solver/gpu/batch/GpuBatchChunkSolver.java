@@ -26,6 +26,7 @@ import com.powsybl.openloadflow.ac.outerloop.gpu.SecondaryVoltageControlLoop;
 import com.powsybl.openloadflow.ac.outerloop.gpu.VoltageMonitoring;
 import com.powsybl.openloadflow.ac.outerloop.gpu.VoltageMonitoringNative;
 import com.powsybl.openloadflow.ac.solver.NewtonRaphsonParameters;
+import com.powsybl.openloadflow.ac.solver.gpu.BatchReadbackNative;
 import com.powsybl.openloadflow.ac.solver.gpu.BatchSolveNative;
 import com.powsybl.openloadflow.ac.solver.gpu.NewtonSettingsNative;
 import com.powsybl.openloadflow.network.LfBranch;
@@ -1019,7 +1020,7 @@ final class GpuBatchChunkSolver {
                     }
                     boolean svcAsDriverPause = svcActive && rlStateOut != null && !svcInKernel;
                     GpuAcNewtonSolver.setBatchHostLoop(handle, svcAsDriverPause ? 1 : 0);
-                    long solveCountBefore = GpuAcNewtonSolver.readBatchSolveCount(handle);
+                    long solveCountBefore = BatchReadbackNative.readBatchSolveCount(handle);
                     // Seeds only where no full per-scenario state goes (the pair phase builds its own from the parents).
                     NewtonSettingsNative.setBatchX0Seeds(handle, x0Full == null ? x0SeedIdx : null, x0Full == null ? x0SeedVal : null);
                     long tSolve0 = System.nanoTime();
@@ -1241,7 +1242,7 @@ final class GpuBatchChunkSolver {
                     if (OL_STATS) {
                         // OLF_OL_STATS: the device's per-contingency Newton work, in the same shape as OLF's
                         // CPU_OL_STATS lines, so the two arms can be matched contingency by contingency.
-                        int[] ol = GpuAcNewtonSolver.readBatchOlStats(handle);
+                        int[] ol = BatchReadbackNative.readBatchOlStats(handle);
                         if (ol != null) {
                             for (int s2 = 0; s2 < realCount; s2++) {
                                 int st = chunkResults[s2] == null ? Integer.MIN_VALUE : (int) chunkResults[s2][n + 2];
@@ -1324,7 +1325,7 @@ final class GpuBatchChunkSolver {
                         // anchor the water-fill resets to. Two water-fills that move the same TOTAL can
                         // still split it differently, and only the per-participant deltas say so (the
                         // CPU counterpart is OLF's DS_GEN trace under OLF_DS_TRACE).
-                        double[] ftd = GpuAcNewtonSolver.readBatchTargets(handle);
+                        double[] ftd = BatchReadbackNative.readBatchTargets(handle);
                         for (int i = 0; i < nds; i++) {
                             // slot 0's row, diverted like the kernels' — reading the structural row for a
                             // participant this scenario moved reports the PINNED dummy row's target, which
@@ -1344,7 +1345,7 @@ final class GpuBatchChunkSolver {
                         // pre-distribution? The CPU's loop should see only the loss-nonlinearity
                         // residual and stay inside the slack band; if ours redistributes again, the
                         // two land at different points inside that band.
-                        double[] ft = GpuAcNewtonSolver.readBatchTargets(handle);
+                        double[] ft = BatchReadbackNative.readBatchTargets(handle);
                         for (int s = 0; s < realCount; s++) {
                             if (cl.preLossBySlot[s] == 0) {
                                 continue;
@@ -1385,7 +1386,7 @@ final class GpuBatchChunkSolver {
                         // The FINAL distributed target on every participant row, after every
                         // orchestrator. Both arms are converged, so if their reported states differ
                         // their TARGETS must differ — this is the only direct way to see where.
-                        double[] ft = GpuAcNewtonSolver.readBatchTargets(handle);
+                        double[] ft = BatchReadbackNative.readBatchTargets(handle);
                         for (int s = 0; s < realCount; s++) {
                             String id = contingencies.get(group.get(chunkStart + s)).contingencyId();
                             for (int i = 0; i < nds; i++) {
@@ -1466,7 +1467,7 @@ final class GpuBatchChunkSolver {
                     }
                     if (!pairPhase && dsSlackOnly && !pairIdxList.isEmpty()) {
                         // capture each ctg's slack-only-DS absorbed total for its pairs' seeding
-                        double[] absorbed = GpuAcNewtonSolver.readBatchSlackAbsorbed(handle);
+                        double[] absorbed = BatchReadbackNative.readBatchSlackAbsorbed(handle);
                         if (absorbed != null) {
                             for (int s = 0; s < realCount; s++) {
                                 slackAbsorbedByIndex.put(group.get(chunkStart + s), absorbed[s]);
@@ -1479,8 +1480,8 @@ final class GpuBatchChunkSolver {
                     // together they say, row by row, which equation each side has where.
                     String rmCtg = System.getenv("OLF_GPU_ROWMODE_DUMP_CTG");
                     if (rmCtg != null && !rmCtg.isEmpty()) {
-                        int[] devModes = GpuAcNewtonSolver.readBatchRowModes(handle);
-                        double[] devTargets = GpuAcNewtonSolver.readBatchTargets(handle);
+                        int[] devModes = BatchReadbackNative.readBatchRowModes(handle);
+                        double[] devTargets = BatchReadbackNative.readBatchTargets(handle);
                         for (int s = 0; s < realCount; s++) {
                             if (!rmCtg.equals(contingencies.get(group.get(chunkStart + s)).contingencyId())) {
                                 continue;
@@ -1511,7 +1512,7 @@ final class GpuBatchChunkSolver {
                         for (int s = 0; s < realCount; s++) {
                             if ((int) chunkResults[s][n + 2] == GpuBatchStatus.STATUS_MAX_ITERATION) {
                                 exhaustedStartByIndex.put(group.get(chunkStart + s),
-                                        GpuAcNewtonSolver.readBatchLastConvergedState(handle, s));
+                                        BatchReadbackNative.readBatchLastConvergedState(handle, s));
                             }
                         }
                     }
@@ -1520,7 +1521,7 @@ final class GpuBatchChunkSolver {
                         // effective base per DS row) plus its factor sum, for its pairs' re-anchoring —
                         // the device analogue of OLF's setGeneratorsInitialTargetPToTargetP before a
                         // strategy re-solve.
-                        double[] finalTargets = GpuAcNewtonSolver.readBatchTargets(handle);
+                        double[] finalTargets = BatchReadbackNative.readBatchTargets(handle);
                         for (int s = 0; s < realCount; s++) {
                             double[] slice = new double[nds + 1];
                             double fs = 0;
@@ -1555,8 +1556,8 @@ final class GpuBatchChunkSolver {
                             // really keeps: the bus absorption above does not say how a bus's generators split it once
                             // one of them saturates. A slack pass re-derives the whole distribution from the base
                             // targets, so genCum holds it all when one fired; otherwise the pre-distribution alone moved.
-                            double[] genCum = GpuAcNewtonSolver.readBatchDsGenCum(handle);
-                            double[] retain = GpuAcNewtonSolver.readBatchDsRetain(handle);
+                            double[] genCum = BatchReadbackNative.readBatchDsGenCum(handle);
+                            double[] retain = BatchReadbackNative.readBatchDsRetain(handle);
                             for (int s = 0; s < realCount; s++) {
                                 double[] moves = new double[ngen];
                                 if (genCum != null && retain != null && !Double.isNaN(retain[s])) {
@@ -1579,8 +1580,8 @@ final class GpuBatchChunkSolver {
                     if (System.getenv("OLF_GPU_FINAL_TARGET_ROW") != null) {
                         // Comma-separated rows, so a shape that spans a group (pilot + its members)
                         // is read in ONE run instead of one run per row.
-                        double[] ftp = GpuAcNewtonSolver.readBatchTargets(handle);
-                        int[] fmode = GpuAcNewtonSolver.readBatchRowModes(handle);
+                        double[] ftp = BatchReadbackNative.readBatchTargets(handle);
+                        int[] fmode = BatchReadbackNative.readBatchRowModes(handle);
                         for (String tok : System.getenv("OLF_GPU_FINAL_TARGET_ROW").split(",")) {
                             int probe = Integer.parseInt(tok.trim());
                             for (int s = 0; s < realCount; s++) {
@@ -1603,7 +1604,7 @@ final class GpuBatchChunkSolver {
                     // whether the device and OLF put the same power on the same machine — the question
                     // the per-bus totals cannot answer.
                     if (System.getenv("OLF_GPU_GENCUM_DUMP") != null && gpuData.dgGenId() != null) {
-                        double[] gc = GpuAcNewtonSolver.readBatchDsGenCum(handle);
+                        double[] gc = BatchReadbackNative.readBatchDsGenCum(handle);
                         String[] ids = gpuData.dgGenId();
                         if (gc != null && ids.length > 0) {
                             try (java.io.PrintWriter w = new java.io.PrintWriter(
@@ -1635,7 +1636,7 @@ final class GpuBatchChunkSolver {
                         // The FINAL distributed target on every participant row, after every
                         // orchestrator. Both arms are converged, so if their reported states differ
                         // their TARGETS must differ — this is the only direct way to see where.
-                        double[] ft = GpuAcNewtonSolver.readBatchTargets(handle);
+                        double[] ft = BatchReadbackNative.readBatchTargets(handle);
                         for (int s = 0; s < realCount; s++) {
                             String id = contingencies.get(group.get(chunkStart + s)).contingencyId();
                             double tot = 0;
@@ -1680,7 +1681,7 @@ final class GpuBatchChunkSolver {
                         }
                     }
                     if ((rs.hasDs || dsSlackOnly)
-                            && GpuAcNewtonSolver.readBatchSolveCount(handle) - solveCountBefore == 1) {
+                            && BatchReadbackNative.readBatchSolveCount(handle) - solveCountBefore == 1) {
                         recordDistributedActivePower(handle, gpuData, realCount, chunkSize, n, group, chunkStart,
                                 dsSlackOnly, rs.dsOvBus, rs.dsOvBaseDelta, pairPhase ? dsAnchorShift : null,
                                 pairPhase ? pairSlackAbsorbedSeed : null, pairPhase ? null : preSlackSeed,
@@ -1765,13 +1766,13 @@ final class GpuBatchChunkSolver {
                                                      double[] preDistributedByIndex, double[] distributedByIndex) {
         boolean pair = anchorShift != null || slackAbsorbedSeed != null;
         if (dsSlackOnly) {
-            double[] absorbed = GpuAcNewtonSolver.readBatchSlackAbsorbed(handle);
+            double[] absorbed = BatchReadbackNative.readBatchSlackAbsorbed(handle);
             for (int s = 0; s < realCount && absorbed != null; s++) {
                 distributedByIndex[group.get(chunkStart + s)] = absorbed[s] - (slackAbsorbedSeed != null ? slackAbsorbedSeed[s] : 0.0);
             }
             return;
         }
-        double[] retain = GpuAcNewtonSolver.readBatchDsRetain(handle);
+        double[] retain = BatchReadbackNative.readBatchDsRetain(handle);
         if (retain == null) {
             return;
         }
@@ -1794,7 +1795,7 @@ final class GpuBatchChunkSolver {
             }
             if (ngen > 0 && (!anchored || genAnchored)) {
                 if (genCum == null) {
-                    genCum = GpuAcNewtonSolver.readBatchDsGenCum(handle);
+                    genCum = BatchReadbackNative.readBatchDsGenCum(handle);
                 }
                 if (genCum == null) {
                     continue;
@@ -1806,7 +1807,7 @@ final class GpuBatchChunkSolver {
                 }
             } else {                                         // bus-level participants: targets from the anchor
                 if (targets == null) {
-                    targets = GpuAcNewtonSolver.readBatchTargets(handle);
+                    targets = BatchReadbackNative.readBatchTargets(handle);
                 }
                 int ov = dsOvBus != null && dsOvBus.length > 0 ? dsOvBus[s] : -1;
                 for (int i = 0; i < gpuData.dsPhiRow().length; i++) {

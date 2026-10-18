@@ -12,6 +12,7 @@ import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDsParams;
+import com.powsybl.openloadflow.ac.solver.gpu.BatchReadbackNative;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
@@ -68,7 +69,7 @@ public final class DistributedSlackWriteBack {
         }
         if (data.dsPhiRow().length == 0) {
             // slack-only participation: the whole distribution is the slack's absorbed total
-            double[] absorbed = GpuAcNewtonSolver.readBatchSlackAbsorbed(handle);
+            double[] absorbed = BatchReadbackNative.readBatchSlackAbsorbed(handle);
             if (slackBus != null && absorbed != null && absorbed.length > 0 && absorbed[0] != 0) {
                 setAnchoredShare(slackBus, absorbed[0], dsParams);
                 lastDistributedActivePower = absorbed[0];

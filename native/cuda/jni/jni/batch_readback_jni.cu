@@ -9,7 +9,7 @@
 // the PARENT contingency's final distributed targets to re-anchor its own distribution (OLF's
 // setGeneratorsInitialTargetPToTargetP semantics).
 extern "C" JNIEXPORT jdoubleArray JNICALL
-Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_readBatchTargets(
+OLF_JNI(ac_solver_gpu, BatchReadbackNative, readBatchTargets)(
         JNIEnv* env, jclass, jlong handle) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx == nullptr) {
@@ -30,7 +30,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_readBatc
 // the whole failure shape of the device-target-writer class, where a wrong row converges cleanly and
 // nothing flags it.
 extern "C" JNIEXPORT jintArray JNICALL
-Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_readBatchRowModes(
+OLF_JNI(ac_solver_gpu, BatchReadbackNative, readBatchRowModes)(
         JNIEnv* env, jclass, jlong handle) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx == nullptr) {
@@ -48,7 +48,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_readBatc
 // seeds its scenarios with the parent contingency's value (the device analogue of OLF's
 // setGeneratorsInitialTargetPToTargetP before a strategy re-solve). Null when not slack-only.
 extern "C" JNIEXPORT jdoubleArray JNICALL
-Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_readBatchSlackAbsorbed(
+OLF_JNI(ac_solver_gpu, BatchReadbackNative, readBatchSlackAbsorbed)(
         JNIEnv* env, jclass, jlong handle) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx == nullptr || !ctx->dsSlackOnly) {
@@ -62,7 +62,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_readBatc
 }
 
 extern "C" JNIEXPORT jdoubleArray JNICALL
-Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_readBatchDsGenCum(
+OLF_JNI(ac_solver_gpu, BatchReadbackNative, readBatchDsGenCum)(
         JNIEnv* env, jclass, jlong handle) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx == nullptr || ctx->ngen <= 0 || !ctx->dGenCum.p) {
@@ -80,7 +80,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_readBatc
 // Newton iterations, total Newton iterations}, flattened s*3. The per-contingency counterpart of
 // GPU_OL_HIST, for matching OLF's CPU_OL_STATS contingency by contingency.
 extern "C" JNIEXPORT jintArray JNICALL
-Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_readBatchOlStats(
+OLF_JNI(ac_solver_gpu, BatchReadbackNative, readBatchOlStats)(
         JNIEnv* env, jclass, jlong handle) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx == nullptr || ctx->olPasses.size() != static_cast<size_t>(ctx->nScenarios)) {
@@ -100,7 +100,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_readBatc
 // How many solveBatchContext calls this context has run. The per-solve DS read-backs (retain, genCum,
 // slack absorbed) are reset at every solve, so a caller summing them must know they span its solve.
 extern "C" JNIEXPORT jlong JNICALL
-Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_readBatchSolveCount(
+OLF_JNI(ac_solver_gpu, BatchReadbackNative, readBatchSolveCount)(
         JNIEnv*, jclass, jlong handle) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     return ctx == nullptr ? -1 : static_cast<jlong>(ctx->solveCount);
@@ -108,7 +108,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_readBatc
 
 // One scenario's state at its last converged inner solve of the last solve (its starting state if none converged).
 extern "C" JNIEXPORT jdoubleArray JNICALL
-Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_readBatchLastConvergedState(
+OLF_JNI(ac_solver_gpu, BatchReadbackNative, readBatchLastConvergedState)(
         JNIEnv* env, jclass, jlong handle, jint slot) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx == nullptr || !ctx->dXLastConv.p || slot < 0 || slot >= ctx->nScenarios) {
@@ -125,7 +125,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_readBatc
 }
 
 extern "C" JNIEXPORT jdoubleArray JNICALL
-Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_readBatchDsRetain(
+OLF_JNI(ac_solver_gpu, BatchReadbackNative, readBatchDsRetain)(
         JNIEnv* env, jclass, jlong handle) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx == nullptr || !ctx->dDsRetainApplied.p) {

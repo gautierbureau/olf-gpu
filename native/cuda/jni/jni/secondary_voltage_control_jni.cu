@@ -11,7 +11,7 @@
  *  CSR slice of controllers. Returns 1 when the kernel loop owns them — it refuses a zone set wider than
  *  the in-kernel dense system, or an observable on an element the batch does not pack. */
 extern "C" JNIEXPORT jint JNICALL
-Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchSecondaryVc(
+OLF_JNI(ac_outerloop_gpu, SecondaryVoltageControlNative, setBatchSecondaryVc)(
         JNIEnv* env, jclass, jlong handle,
         jintArray jCtldVRow, jintArray jBusVRow, jintArray jRlIdx, jdoubleArray jBaseTargetV,
         jdoubleArray jMinQ, jdoubleArray jMaxQ, jdoubleArray jLoadQ,
@@ -130,7 +130,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
 // (scenario, controller) — what OLF's SecondaryVoltageControlOuterLoop leaves on the network. The
 // batched SA restores per scenario and needs none of this; the base load flow has to give them back.
 extern "C" JNIEXPORT jdoubleArray JNICALL
-Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_readBatchSecondaryVcTargets(
+OLF_JNI(ac_outerloop_gpu, SecondaryVoltageControlNative, readBatchSecondaryVcTargets)(
         JNIEnv* env, jclass, jlong handle) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx == nullptr || ctx->nSvc <= 0 || !ctx->dSvcTargetV.p) {

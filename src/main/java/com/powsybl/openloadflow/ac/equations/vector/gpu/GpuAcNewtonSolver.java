@@ -416,10 +416,6 @@ public final class GpuAcNewtonSolver {
     /** Absolute target writes at flat {@code (scenario * n + row)} positions, for a host-owned loop. */
     public static native void setBatchTargetDeltas(long handle, int[] rows, double[] values);
 
-    /** The zone-regulated generator voltage control targets the SecondaryVoltageControl phase settled
-     *  on, per {@code (scenario, controller)} — what OLF's own loop leaves on the network. */
-    public static native double[] readBatchSecondaryVcTargets(long handle);
-
     /** Per (scenario, incremental TVC controller): the tap index the driver's TransformerVoltageControl
      *  phase left — null without the table. Layout {@code s * nTvc + c}. */
     public static native int[] readBatchTvcTaps(long handle);
@@ -503,17 +499,6 @@ public final class GpuAcNewtonSolver {
 
     /** Per (scenario, sub-controller): the dispatched section, layout {@code s * nSubs + u}. */
     public static native int[] readBatchDiscreteShuntPositions(long handle);
-
-    /** Install the SecondaryVoltageControl zones for the in-kernel phase (OLF order 4); see
-     *  SecondaryVoltageControlLoop.uploadToDevice. Returns 1 when the kernel loop owns them — it refuses a zone
-     *  set wider than the in-kernel dense system, or an observable on an element the batch does not pack. */
-    @SuppressWarnings("java:S107")
-    public static native int setBatchSecondaryVc(long handle,
-            int[] ctldVRow, int[] busVRow, int[] rlIdx, double[] baseTargetV,
-            double[] minQ, double[] maxQ, double[] loadQ,
-            int[] qPtr, int[] qKind, int[] qElem, int[] qBRow,
-            int[] zonePtr, int[] zoneCtl, int[] zonePilotRow, double[] zoneTargetV,
-            double minPlausibleV, double maxPlausibleV);
 
     /** The run's linear-solver settings (GpuLoadFlowParameters.install): -1 reorder / pivot type = AUTO, NaN threshold =
      *  cuDSS's own. Read by every context built afterwards and by every solve's iterative refinement. */

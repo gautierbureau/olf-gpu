@@ -31,6 +31,7 @@ import com.powsybl.openloadflow.ac.outerloop.gpu.IncrementalShuntVoltageControl;
 import com.powsybl.openloadflow.ac.outerloop.gpu.IncrementalTransformerVoltageControl;
 import com.powsybl.openloadflow.ac.outerloop.gpu.ReactiveCapabilityCurves;
 import com.powsybl.openloadflow.ac.outerloop.gpu.ReactiveLimitsWriteBack;
+import com.powsybl.openloadflow.ac.outerloop.gpu.SecondaryVoltageControlNative;
 import com.powsybl.openloadflow.ac.outerloop.gpu.VoltageMonitoring;
 import com.powsybl.openloadflow.ac.outerloop.gpu.VoltageMonitoringNative;
 import com.powsybl.openloadflow.ac.solver.AbstractAcSolver;
@@ -206,7 +207,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
         }
         if (svcCtls != null) {
             com.powsybl.openloadflow.ac.outerloop.gpu.SecondaryVoltageControlLoop.writeBack(network, svcCtls,
-                    GpuAcNewtonSolver.readBatchSecondaryVcTargets(handle));
+                    SecondaryVoltageControlNative.readBatchSecondaryVcTargets(handle));
         }
         lastDistributedActivePower = DistributedSlackWriteBack.writeBack(network, equationSystem, handle, driverDsParams(),
                 loadAnchorTargetP, deviceTargets,

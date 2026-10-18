@@ -242,7 +242,7 @@ public final class SecondaryVoltageControlLoop {
      *  inside the sweep at OLF's position, with no host round trip and no orchestrator after it. */
     public static boolean uploadToDevice(long handle, Controllers controllers) {
         if (controllers == null || controllers.ctls().isEmpty() || controllers.zones().isEmpty()) {
-            GpuAcNewtonSolver.setBatchSecondaryVc(handle, null, null, null, null, null, null, null,
+            SecondaryVoltageControlNative.setBatchSecondaryVc(handle, null, null, null, null, null, null, null,
                     null, null, null, null, null, null, null, null, 0, 0);
             return false;
         }
@@ -291,7 +291,7 @@ public final class SecondaryVoltageControlLoop {
             zoneTargetV[z] = zone.pilotTargetV();
         }
         zonePtr[nz] = zoneCtl.size();
-        boolean owned = GpuAcNewtonSolver.setBatchSecondaryVc(handle, ctldVRow, busVRow, rlIdx, baseTargetV,
+        boolean owned = SecondaryVoltageControlNative.setBatchSecondaryVc(handle, ctldVRow, busVRow, rlIdx, baseTargetV,
                 minQ, maxQ, loadQ, qPtr,
                 qKind.stream().mapToInt(Integer::intValue).toArray(),
                 qElem.stream().mapToInt(Integer::intValue).toArray(),

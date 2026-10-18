@@ -6,7 +6,7 @@
 
 /** MonitoringVoltage controller table (OLF order 6). Empty array clears it. */
 extern "C" JNIEXPORT void JNICALL
-Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchMonitoringLoops(
+OLF_JNI(ac_outerloop_gpu, VoltageMonitoringNative, setBatchMonitoringLoops)(
         JNIEnv* env, jclass, jlong handle, jintArray jVRow, jdoubleArray jBand,
         jintArray jDeltaPtr, jintArray jDeltaRow, jintArray jDeltaMode, jdoubleArray jDeltaTarget) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
@@ -41,7 +41,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
  *  the ACTIVATIONS counter meaningful now that the loop is a driver phase rather than an
  *  orchestrator — it is the coverage guard that a test case really exercises an activation. */
 extern "C" JNIEXPORT jint JNICALL
-Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_readBatchMonitoringActivations(
+OLF_JNI(ac_outerloop_gpu, VoltageMonitoringNative, readBatchMonitoringActivations)(
         JNIEnv*, jclass, jlong handle) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx == nullptr || ctx->nmon == 0 || !ctx->dMonActivated.p) {
@@ -60,7 +60,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_readBatc
 }
 
 extern "C" JNIEXPORT jdoubleArray JNICALL
-Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_readBatchMonitoringTargets(
+OLF_JNI(ac_outerloop_gpu, VoltageMonitoringNative, readBatchMonitoringTargets)(
         JNIEnv* env, jclass, jlong handle) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx == nullptr || ctx->nmon == 0 || !ctx->dMonActivated.p) {

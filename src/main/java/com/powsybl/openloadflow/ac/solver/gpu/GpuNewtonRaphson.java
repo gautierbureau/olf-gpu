@@ -32,6 +32,7 @@ import com.powsybl.openloadflow.ac.outerloop.gpu.IncrementalTransformerVoltageCo
 import com.powsybl.openloadflow.ac.outerloop.gpu.ReactiveCapabilityCurves;
 import com.powsybl.openloadflow.ac.outerloop.gpu.ReactiveLimitsWriteBack;
 import com.powsybl.openloadflow.ac.outerloop.gpu.VoltageMonitoring;
+import com.powsybl.openloadflow.ac.outerloop.gpu.VoltageMonitoringNative;
 import com.powsybl.openloadflow.ac.solver.AbstractAcSolver;
 import com.powsybl.openloadflow.ac.solver.AcSolverResult;
 import com.powsybl.openloadflow.ac.solver.AcSolverStatus;
@@ -200,7 +201,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                     data.getTotalElementCount());
         }
         if (monCtls != null && !monCtls.isEmpty()) {
-            VoltageMonitoring.writeBack(network, monCtls, GpuAcNewtonSolver.readBatchMonitoringTargets(handle),
+            VoltageMonitoring.writeBack(network, monCtls, VoltageMonitoringNative.readBatchMonitoringTargets(handle),
                     data.rlBusNum());
         }
         if (svcCtls != null) {

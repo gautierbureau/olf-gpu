@@ -377,16 +377,6 @@ public final class GpuAcNewtonSolver {
     public static native void setBatchPilotAllPinnedFlip(long handle, int[] slots, int[] rows,
                                                          double[] qTargets, int[] rlCounts, int[] rlPool);
 
-    /**
-     * MonitoringVoltage controller table (OLF outer-loop order 6) for the DRIVER phase: per
-     * controller its monitored V row and {@code band = {lowThreshold, highThreshold, lowTargetV,
-     * highTargetV}}, plus the CSR list ({@code deltaPtr}) of (row, mode, target) writes its
-     * activation applies. A null/empty {@code vRow} clears the table.
-     */
-    public static native void setBatchMonitoringLoops(long handle, int[] vRow, double[] band,
-                                                      int[] deltaPtr, int[] deltaRow,
-                                                      int[] deltaMode, double[] deltaTarget);
-
     /** Enable HOST-owned outer-loop slots via a bitmask.
      *  Bit 0 = SecondaryVoltageControl (OLF order 4, pre-RL),
      *  Bit 1 = PhaseControl (OLF order 7, post-RL),
@@ -425,13 +415,6 @@ public final class GpuAcNewtonSolver {
 
     /** Absolute target writes at flat {@code (scenario * n + row)} positions, for a host-owned loop. */
     public static native void setBatchTargetDeltas(long handle, int[] rows, double[] values);
-
-    /** How many (controller, scenario) monitoring automatons fired in the last solve. */
-    public static native int readBatchMonitoringActivations(long handle);
-
-    /** Per (scenario, monitoring controller): the target the driver's MonitoringVoltage phase activated
-     *  (pu), NaN while standing by — null without the table. Layout {@code s * nmon + c}. */
-    public static native double[] readBatchMonitoringTargets(long handle);
 
     /** The zone-regulated generator voltage control targets the SecondaryVoltageControl phase settled
      *  on, per {@code (scenario, controller)} — what OLF's own loop leaves on the network. */

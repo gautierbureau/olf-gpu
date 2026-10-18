@@ -23,6 +23,7 @@ import com.powsybl.openloadflow.ac.outerloop.gpu.ReactiveCapabilityCurves;
 import com.powsybl.openloadflow.ac.outerloop.gpu.ReactiveLimitsNative;
 import com.powsybl.openloadflow.ac.outerloop.gpu.SecondaryVoltageControlLoop;
 import com.powsybl.openloadflow.ac.outerloop.gpu.VoltageMonitoring;
+import com.powsybl.openloadflow.ac.outerloop.gpu.VoltageMonitoringNative;
 import com.powsybl.openloadflow.ac.solver.NewtonRaphsonParameters;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfShunt;
@@ -1251,7 +1252,7 @@ final class GpuBatchChunkSolver {
                         // Keep ACTIVATIONS meaningful with the loop in the driver: it is the guard
                         // that a case really exercises the automaton, not orchestrator bookkeeping.
                         VoltageMonitoring.ACTIVATIONS.add(
-                                GpuAcNewtonSolver.readBatchMonitoringActivations(handle));
+                                VoltageMonitoringNative.readBatchMonitoringActivations(handle));
                     }
                     if (hasHvdcDriverLoops) {
                         // The driver phases mutated the hv element bits and the converter-bus targets

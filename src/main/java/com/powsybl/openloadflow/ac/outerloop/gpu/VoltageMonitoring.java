@@ -198,7 +198,7 @@ public final class VoltageMonitoring {
      *  Shared by the batched SA's chunk contexts and the base load flow's batch-of-one. */
     public static void installDriverLoop(long handle, List<Ctl> ctls) {
         if (ctls == null || ctls.isEmpty()) {
-            GpuAcNewtonSolver.setBatchMonitoringLoops(handle, null, null, null, null, null, null);
+            VoltageMonitoringNative.setBatchMonitoringLoops(handle, null, null, null, null, null, null);
             return;
         }
         int nc = ctls.size();
@@ -223,7 +223,7 @@ public final class VoltageMonitoring {
             }
         }
         deltaPtr[nc] = dRow.size();
-        GpuAcNewtonSolver.setBatchMonitoringLoops(handle, monVRow, monBand, deltaPtr,
+        VoltageMonitoringNative.setBatchMonitoringLoops(handle, monVRow, monBand, deltaPtr,
                 dRow.stream().mapToInt(Integer::intValue).toArray(),
                 dMode.stream().mapToInt(Integer::intValue).toArray(),
                 dTgt.stream().mapToDouble(Double::doubleValue).toArray());

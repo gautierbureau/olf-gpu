@@ -17,9 +17,9 @@ import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcDataExtractor;
 import com.powsybl.openloadflow.ac.outerloop.AcOuterLoop;
 import com.powsybl.openloadflow.ac.outerloop.DistributedSlackOuterLoop;
 import com.powsybl.openloadflow.ac.outerloop.ReactiveLimitsOuterLoop;
+import com.powsybl.openloadflow.ac.outerloop.gpu.DiscreteTransformerVoltageControl;
 import com.powsybl.openloadflow.ac.outerloop.gpu.IncrementalTransformerVoltageControl;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.BatchConfig;
-import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchTransformerControl;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.network.LfNetwork;
 import com.powsybl.openloadflow.util.PerUnit;
@@ -75,8 +75,8 @@ final class GpuSaRunScope {
         // transformer controller has a tap table (generatorFreezeSupported).
         boolean transformerControlBatchable =
                 olfGuardParams.getTransformerVoltageControlMode() == OpenLoadFlowParameters.TransformerVoltageControlMode.AFTER_GENERATOR_VOLTAGE_CONTROL
-                && (GpuBatchTransformerControl.transformerControlSupported(lfNetwork)
-                        || GpuBatchTransformerControl.generatorFreezeSupported(lfNetwork,
+                && (DiscreteTransformerVoltageControl.transformerControlSupported(lfNetwork)
+                        || DiscreteTransformerVoltageControl.generatorFreezeSupported(lfNetwork,
                                 olfGuardParams.getGeneratorVoltageControlMinNominalVoltage()));
         // INCREMENTAL (OLF's default TVC mode): an in-kernel driver phase (LOOP_TVC_KERNEL). The loop never
         // freezes generators (no GeneratorVoltageControlManager), so the gen-under-the-controlled-level

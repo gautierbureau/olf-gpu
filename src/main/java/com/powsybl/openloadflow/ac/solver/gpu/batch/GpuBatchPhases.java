@@ -11,6 +11,7 @@ import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcActivation;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DiscreteShuntVoltageControl;
+import com.powsybl.openloadflow.ac.outerloop.gpu.DiscreteTransformerVoltageControl;
 import com.powsybl.openloadflow.ac.outerloop.gpu.IncrementalShuntVoltageControl;
 import com.powsybl.openloadflow.ac.outerloop.gpu.IncrementalTransformerVoltageControl;
 import com.powsybl.openloadflow.equations.EquationSystem;
@@ -66,8 +67,8 @@ public final class GpuBatchPhases {
                         List<DiscreteShuntVoltageControl.Group> simpleShunt,
                         List<GpuBatchIncrementalFlowControl.Controller> flow,
                         List<GpuBatchContinuousPhase.Ctl> continuousPhase,
-                        List<GpuBatchTransformerControl.TransformerController> discreteTvc,
-                        GpuBatchTransformerControl.FreezeTables freeze,
+                        List<DiscreteTransformerVoltageControl.TransformerController> discreteTvc,
+                        DiscreteTransformerVoltageControl.FreezeTables freeze,
                         GpuBatchSecondaryVc.Controllers secondaryVc,
                         GpuBatchIncrementalFlowControl.EsContext esContext) {
     }
@@ -88,8 +89,8 @@ public final class GpuBatchPhases {
         GpuBatchSkips.reset();
         GpuBatchElementMapper mapper = new GpuBatchElementMapper(network);
         int shuntOffset = mapper.getClosedBranchCount() + mapper.getOpenBranchCount();
-        List<GpuBatchTransformerControl.TransformerController> discreteTvc = request.discreteTvc()
-                ? GpuBatchTransformerControl.buildTransformerControllers(network, es, targetVector, activation,
+        List<DiscreteTransformerVoltageControl.TransformerController> discreteTvc = request.discreteTvc()
+                ? DiscreteTransformerVoltageControl.buildTransformerControllers(network, es, targetVector, activation,
                         targets, mapper, request.tvcUseInitialTapPosition())
                 : null;
         return new Built(
@@ -114,7 +115,7 @@ public final class GpuBatchPhases {
                         : null,
                 discreteTvc,
                 discreteTvc != null
-                        ? GpuBatchTransformerControl.buildFreezeTables(network, es, discreteTvc,
+                        ? DiscreteTransformerVoltageControl.buildFreezeTables(network, es, discreteTvc,
                                 request.genVcMinNominalV(), rlBusNum)
                         : null,
                 request.secondaryVc() && GpuBatchSecondaryVc.supported(network)

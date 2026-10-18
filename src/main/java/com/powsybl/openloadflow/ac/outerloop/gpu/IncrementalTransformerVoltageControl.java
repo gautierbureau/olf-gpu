@@ -13,7 +13,6 @@ import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 import com.powsybl.openloadflow.ac.solver.NewtonRaphsonParameters;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchElementMapper;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchSkips;
-import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchTransformerControl;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.Variable;
 import com.powsybl.openloadflow.network.LfBranch;
@@ -125,7 +124,7 @@ public final class IncrementalTransformerVoltageControl {
                 }
                 Integer rhoRow = branchRhoRows.get(branch.getNum());
                 int elemIndex = elementMapper.getElementIndex(branch);
-                double[][] tapRows = GpuBatchTransformerControl.tapModels(branch.getPiModel());
+                double[][] tapRows = DiscreteTransformerVoltageControl.tapModels(branch.getPiModel());
                 if (rhoRow == null || vRow == null || elemIndex < 0 || tapRows.length == 0) {
                     GpuBatchSkips.record(GpuBatchSkips.Slot.TVC, LOGGER,
                             "Incremental transformer controller {} not representable on the GPU batch — skipped", branch.getId());

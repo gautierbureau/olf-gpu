@@ -69,7 +69,7 @@ public final class DiscreteShuntVoltageControl {
 
     /** Build the groups by TOGGLING each controlled bus's merged controller shunts on the shared
      *  equation system and diffing the activation — the ON recipe is exactly what the engine itself
-     *  would produce (same pattern as {@code GpuBatchTransformerControl.buildTransformerControllers}).
+     *  would produce (same pattern as {@code DiscreteTransformerVoltageControl.buildTransformerControllers}).
      *  The network is restored before returning. */
     public static List<Group> buildGroups(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
                                    TargetVector<AcVariableType, AcEquationType> targetVector,

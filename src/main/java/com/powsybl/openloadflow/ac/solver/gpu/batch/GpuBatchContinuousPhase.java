@@ -12,6 +12,7 @@ import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcActivation;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
+import com.powsybl.openloadflow.ac.outerloop.gpu.DiscreteTransformerVoltageControl;
 import com.powsybl.openloadflow.ac.solver.NewtonRaphsonParameters;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.EquationTerm;
@@ -82,7 +83,7 @@ public final class GpuBatchContinuousPhase {
             TransformerPhaseControl pc = pcOpt.orElseThrow();
             Integer a1Row = a1Rows.get(branch.getNum());
             int elemIndex = elementMapper.getElementIndex(branch);
-            double[][] tapRows = GpuBatchTransformerControl.tapModels(branch.getPiModel());
+            double[][] tapRows = DiscreteTransformerVoltageControl.tapModels(branch.getPiModel());
             // REMOTE control is fine in BOTH modes. CONTROLLER: the activation diff + tap rounding live
             // on the CONTROLLER and the P row re-emission is keyed by cbPcSide on the controlled
             // element. LIMITER: OLF's loop is local BY CONSTRUCTION, not by restriction —

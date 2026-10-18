@@ -12,6 +12,7 @@ import com.powsybl.math.matrix.DenseMatrix;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
+import com.powsybl.openloadflow.ac.outerloop.gpu.DiscreteTransformerVoltageControl;
 import com.powsybl.openloadflow.ac.outerloop.gpu.IncrementalTransformerVoltageControl;
 import com.powsybl.openloadflow.ac.solver.NewtonRaphsonParameters;
 import com.powsybl.openloadflow.equations.EquationSystem;
@@ -117,7 +118,7 @@ public final class GpuBatchIncrementalFlowControl {
                 Integer pinRow = rhoRows.get(controller.getNum());
                 int elemIndex = elementMapper.getElementIndex(controller);
                 int ctlElemIndex = elementMapper.getElementIndex(controlled);
-                double[][] tapRows = GpuBatchTransformerControl.tapModels(controller.getPiModel());
+                double[][] tapRows = DiscreteTransformerVoltageControl.tapModels(controller.getPiModel());
                 if (pinRow == null || elemIndex < 0 || ctlElemIndex < 0 || tapRows.length == 0) {
                     GpuBatchSkips.record(GpuBatchSkips.Slot.RPC, LOGGER,
                             "Incremental RPC controller {} not representable on the GPU batch — skipped", controller.getId());
@@ -154,7 +155,7 @@ public final class GpuBatchIncrementalFlowControl {
                 Integer pinRow = a1Rows.get(controller.getNum());
                 int elemIndex = elementMapper.getElementIndex(controller);
                 int ctlElemIndex = elementMapper.getElementIndex(controlled);
-                double[][] tapRows = GpuBatchTransformerControl.tapModels(controller.getPiModel());
+                double[][] tapRows = DiscreteTransformerVoltageControl.tapModels(controller.getPiModel());
                 if (pinRow == null || elemIndex < 0 || ctlElemIndex < 0 || tapRows.length == 0) {
                     GpuBatchSkips.record(GpuBatchSkips.Slot.PHASE, LOGGER,
                             "Incremental phase controller {} not representable on the GPU batch — skipped", controller.getId());

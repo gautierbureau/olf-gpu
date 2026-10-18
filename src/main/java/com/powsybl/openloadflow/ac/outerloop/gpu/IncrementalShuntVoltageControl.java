@@ -244,7 +244,7 @@ public final class IncrementalShuntVoltageControl {
 
     public static double shuntSectionG(LfShunt.Controller c, int pos) {
         // no public accessor for the per-section G table (only getG() at the current position) —
-        // read-only reflection, same pattern as GpuBatchTransformerControl.tapModels
+        // read-only reflection, same pattern as DiscreteTransformerVoltageControl.tapModels
         try {
             java.lang.reflect.Field fld = LfShunt.Controller.class.getDeclaredField("sectionsG");
             fld.setAccessible(true);

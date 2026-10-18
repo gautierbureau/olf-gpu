@@ -5,7 +5,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/.
  * SPDX-License-Identifier: MPL-2.0
  */
-package com.powsybl.openloadflow.ac.solver.gpu.batch;
+package com.powsybl.openloadflow.ac.outerloop.gpu;
 
 import com.powsybl.commons.report.ReportNode;
 import com.powsybl.iidm.network.Network;
@@ -38,7 +38,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
-class GpuBatchTvcFixMaskTest {
+class DiscreteTransformerVoltageControlFixMaskTest {
 
     /** BUS_2 is the not-controlled side of both transformers and reaches the only generator, at BUS_1,
      *  over LINE_12 alone. A 33 kV loop back to BUS_1 through a NON-regulating transformer keeps the
@@ -88,7 +88,7 @@ class GpuBatchTvcFixMaskTest {
         assertEquals(2, controllerBranches.size(), "both transformers control BUS_3");
 
         int words = 1;                                      // one PV bus
-        var builder = new GpuBatchTransformerControl.FixMaskBuilder(network,
+        var builder = new DiscreteTransformerVoltageControl.FixMaskBuilder(network,
                 controllerBranches.stream().mapToInt(Integer::intValue).toArray(), pvBuses, words);
         int nm = controllerBranches.size();
 

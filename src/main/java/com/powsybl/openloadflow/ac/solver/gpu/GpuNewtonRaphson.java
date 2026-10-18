@@ -221,10 +221,10 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
             GpuBatchContinuousPhase.writeBack(network, cphCtls, GpuAcNewtonSolver.readBatchContinuousPhaseTaps(handle));
         }
         if (tvdOwned && tvdCtls != null) {
-            com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchTransformerControl.writeBack(network, tvdCtls,
+            com.powsybl.openloadflow.ac.outerloop.gpu.DiscreteTransformerVoltageControl.writeBack(network, tvdCtls,
                     GpuAcNewtonSolver.readBatchDiscreteTvcState(handle));
             if (tvdFreeze != null && tvdFreeze.hasCandidates()) {
-                com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchTransformerControl.writeBackFreeze(network, tvdFreeze,
+                com.powsybl.openloadflow.ac.outerloop.gpu.DiscreteTransformerVoltageControl.writeBackFreeze(network, tvdFreeze,
                         GpuAcNewtonSolver.readBatchDiscreteTvcFreeze(handle));
             }
         }
@@ -336,9 +336,9 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
     private boolean flowOwned;
     private List<GpuBatchContinuousPhase.Ctl> cphCtls;
     private boolean cphOwned;
-    private List<com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchTransformerControl.TransformerController> tvdCtls;
+    private List<com.powsybl.openloadflow.ac.outerloop.gpu.DiscreteTransformerVoltageControl.TransformerController> tvdCtls;
     private boolean tvdOwned;
-    private com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchTransformerControl.FreezeTables tvdFreeze;
+    private com.powsybl.openloadflow.ac.outerloop.gpu.DiscreteTransformerVoltageControl.FreezeTables tvdFreeze;
     /** SecondaryVoltageControl's in-kernel tables — the same phase the batched SA drives by default. */
     private com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchSecondaryVc.Controllers svcCtls;
     private List<com.powsybl.openloadflow.ac.outerloop.gpu.DiscreteShuntVoltageControl.Group> svdGroups;
@@ -870,7 +870,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                 // Batch of one on the live network: its own topology IS the scenario, so the
                 // connectivity masks come from an empty contingency.
                 tvdFreeze = phases.freeze();
-                com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchTransformerControl.uploadFixMasks(
+                com.powsybl.openloadflow.ac.outerloop.gpu.DiscreteTransformerVoltageControl.uploadFixMasks(
                         handle, tvdFreeze, java.util.List.of(), 1);
             }
             if (tvcOwned || tvdOwned) {

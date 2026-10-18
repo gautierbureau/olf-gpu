@@ -9,6 +9,7 @@ package com.powsybl.openloadflow.ac.solver.gpu.batch;
 
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
+import com.powsybl.openloadflow.ac.outerloop.gpu.DiscreteTransformerVoltageControl;
 import com.powsybl.openloadflow.ac.solver.NewtonRaphsonParameters;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfShunt;
@@ -318,7 +319,7 @@ final class GpuBatchChunkSolver {
                         for (int s = 0; s < realCount; s++) {
                             slotCtgs.add(contingencies.get(group.get(chunkStart + s)));
                         }
-                        GpuBatchTransformerControl.uploadFixMasks(handle, phases.freeze(), slotCtgs, chunkSize);
+                        DiscreteTransformerVoltageControl.uploadFixMasks(handle, phases.freeze(), slotCtgs, chunkSize);
                     }
                     ChunkLists cl = new ChunkLists(chunkSize, n, gpuData, forcedTargetQ, ngen);
                     SlotSeeding seeding = new SlotSeeding(chunkSize, pairPhase, n, gpuData, elementMapper, contingencies,

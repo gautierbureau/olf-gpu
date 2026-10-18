@@ -9,6 +9,7 @@ package com.powsybl.openloadflow.ac.solver.gpu.batch;
 
 
 import com.powsybl.openloadflow.ac.outerloop.gpu.DiscreteShuntVoltageControl;
+import com.powsybl.openloadflow.ac.outerloop.gpu.DiscreteTransformerVoltageControl;
 import com.powsybl.openloadflow.ac.outerloop.gpu.IncrementalShuntVoltageControl;
 import com.powsybl.openloadflow.ac.outerloop.gpu.IncrementalTransformerVoltageControl;
 
@@ -36,8 +37,8 @@ public final class DevicePhaseInstaller {
                           List<GpuBatchIncrementalFlowControl.Controller> flow,
                           List<GpuBatchContinuousPhase.Ctl> continuousPhase,
                           List<IncrementalShuntVoltageControl.Controller> incrementalShunt, int incShuntMaxSectionShift,
-                          List<GpuBatchTransformerControl.TransformerController> discreteTvc, boolean simpleTvc,
-                          boolean afterGenerator, GpuBatchTransformerControl.FreezeTables freeze,
+                          List<DiscreteTransformerVoltageControl.TransformerController> discreteTvc, boolean simpleTvc,
+                          boolean afterGenerator, DiscreteTransformerVoltageControl.FreezeTables freeze,
                           List<DiscreteShuntVoltageControl.Group> simpleShunt, boolean entryOn) {
     }
 
@@ -71,23 +72,23 @@ public final class DevicePhaseInstaller {
         // without a tap table) is not owned.
         boolean tvdInKernel = false;
         if (r.discreteTvc() != null) {
-            tvdInKernel = GpuBatchTransformerControl.uploadToDevice(handle, r.discreteTvc(), r.simpleTvc() ? 1 : 0,
+            tvdInKernel = DiscreteTransformerVoltageControl.uploadToDevice(handle, r.discreteTvc(), r.simpleTvc() ? 1 : 0,
                     r.entryOn() && r.simpleTvc());
             if (tvdInKernel && r.afterGenerator()) {
                 // AFTER_GENERATOR: OLF's GeneratorVoltageControlManager freezes the generator controls under the
                 // transformer-controlled level while the transformers act. Without the freeze tables (a candidate
                 // the kernel cannot represent) the device does not own the loop.
                 if (r.freeze() == null) {
-                    GpuBatchTransformerControl.uploadToDevice(handle, null, 0, false);
+                    DiscreteTransformerVoltageControl.uploadToDevice(handle, null, 0, false);
                     tvdInKernel = false;
                 } else {
-                    GpuBatchTransformerControl.uploadFreeze(handle, r.freeze());
+                    DiscreteTransformerVoltageControl.uploadFreeze(handle, r.freeze());
                 }
             } else if (tvdInKernel) {
-                GpuBatchTransformerControl.uploadFreeze(handle, null);   // WITH_GENERATOR freezes nothing
+                DiscreteTransformerVoltageControl.uploadFreeze(handle, null);   // WITH_GENERATOR freezes nothing
             }
         } else {
-            GpuBatchTransformerControl.uploadToDevice(handle, null, 0, false);   // clears a cached context's table
+            DiscreteTransformerVoltageControl.uploadToDevice(handle, null, 0, false);   // clears a cached context's table
         }
         boolean svdInKernel = DiscreteShuntVoltageControl.uploadToDevice(handle, r.simpleShunt(), r.entryOn());
 

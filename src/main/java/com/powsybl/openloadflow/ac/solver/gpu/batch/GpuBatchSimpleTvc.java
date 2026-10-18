@@ -8,6 +8,7 @@
 package com.powsybl.openloadflow.ac.solver.gpu.batch;
 
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
+import com.powsybl.openloadflow.ac.outerloop.gpu.DiscreteTransformerVoltageControl;
 import com.powsybl.openloadflow.ac.solver.NewtonRaphsonParameters;
 
 import java.util.ArrayList;
@@ -22,7 +23,7 @@ import java.util.List;
  *       controller BEFORE the first solve: the scenario's first batch pass therefore runs with each
  *       controller's VC-ON activation deltas applied ({@link #applyVcOn} mutates the per-scenario
  *       row modes and targets, reusing the activation-diff rows captured by
- *       {@code GpuBatchTransformerControl.buildTransformerControllers});</li>
+ *       {@code DiscreteTransformerVoltageControl.buildTransformerControllers});</li>
  *   <li>the loop's first check ({@code roundVoltageRatios}) disables VC and rounds each continuous
  *       rho to the CLOSEST TAP → one warm re-solve with the VC-OFF (base) activation and the rho
  *       identity rows pinned at the rounded taps ({@link #roundAndResolve}); further checks are
@@ -44,13 +45,13 @@ final class GpuBatchSimpleTvc {
     /** Pre-solve mutation: apply every live controller's VC-ON activation deltas to each real
      *  scenario's row modes and target overrides (OLF's initialize() enables VC before the first
      *  solve). Returns the extended override lists to hand to the first batch pass. */
-    static void applyVcOn(int realCount, int n, List<GpuBatchTransformerControl.TransformerController> tcs,
+    static void applyVcOn(int realCount, int n, List<DiscreteTransformerVoltageControl.TransformerController> tcs,
                           int[][] rowModePerScenario, int[] baseRowMode, boolean[][] disabledMask,
                           double[] baseState, List<Integer> ovIndexList, List<Double> ovValueList) {
         for (int slot = 0; slot < realCount; slot++) {
-            for (GpuBatchTransformerControl.TransformerController tc : tcs) {
+            for (DiscreteTransformerVoltageControl.TransformerController tc : tcs) {
                 boolean anySurvivor = false;                 // plan-A6: free-member outages re-pick on-device
-                for (GpuBatchTransformerControl.Member m : tc.members()) {
+                for (DiscreteTransformerVoltageControl.Member m : tc.members()) {
                     anySurvivor |= !disabledMask[slot][m.elemIndex()];
                 }
                 if (!anySurvivor) {
@@ -61,7 +62,7 @@ final class GpuBatchSimpleTvc {
                 // rows owned by an OUTAGED member get their own override below — the same row must
                 // NEVER carry two target overrides (parallel scatter, no ordering)
                 java.util.Set<Integer> ownRows = new java.util.HashSet<>();
-                for (GpuBatchTransformerControl.Member m : tc.members()) {
+                for (DiscreteTransformerVoltageControl.Member m : tc.members()) {
                     if (disabledMask[slot][m.elemIndex()]) {
                         ownRows.add(m.rhoRow());
                     }
@@ -74,7 +75,7 @@ final class GpuBatchSimpleTvc {
                     ovIndexList.add(slot * n + tc.deltaRows()[k]);
                     ovValueList.add(tc.deltaTargetsOn()[k]);
                 }
-                for (GpuBatchTransformerControl.Member m : tc.members()) {
+                for (DiscreteTransformerVoltageControl.Member m : tc.members()) {
                     if (!disabledMask[slot][m.elemIndex()]) {
                         continue;
                     }

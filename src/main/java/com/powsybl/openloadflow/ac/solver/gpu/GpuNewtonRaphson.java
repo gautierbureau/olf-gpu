@@ -819,99 +819,71 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
             } else {
                 svcCtls = null;                          // refused: OLF's own loop runs at the pause
             }
-            // IncrementalTransformerVoltageControl (OLF order 8) IN-KERNEL, shared groups included.
-            if (driverLoop("IncrementalTransformerVoltageControl")
-                    instanceof com.powsybl.openloadflow.ac.outerloop.IncrementalTransformerVoltageControlOuterLoop itvc) {
-                tvcCtls = phases.incrementalTvc();
-                tvcOwned = GpuBatchIncrementalTvc.uploadToDevice(handle, tvcCtls, itvc.getMaxTapShift());
-                if (tvcOwned) {
-                    hostMask &= ~(1 << (GpuAcNewtonSolver.HOST_LOOP_TVC - GpuAcNewtonSolver.HOST_LOOP_SVC));
-                }
-            } else {
-                GpuBatchIncrementalTvc.uploadToDevice(handle, null, 1);
-            }
-            // IncrementalShuntVoltageControl (OLF order 10) IN-KERNEL, groups included.
-            if (driverLoop("IncrementalShuntVoltageControl")
-                    instanceof com.powsybl.openloadflow.ac.outerloop.IncrementalShuntVoltageControlOuterLoop isvc) {
-                shuntCtls = phases.incrementalShunt();
-                shuntOwned = GpuBatchIncrementalShuntVc.uploadToDevice(handle, shuntCtls, isvc.getMaxSectionShift());
-                if (shuntOwned) {
-                    hostMask &= ~(1 << (GpuAcNewtonSolver.HOST_LOOP_SHUNT - GpuAcNewtonSolver.HOST_LOOP_SVC));
-                }
-            } else {
-                GpuBatchIncrementalShuntVc.uploadToDevice(handle, null, 3);
-            }
-            // The flow-observed incremental loops: RPC (OLF order 9) and incremental phase (order 7).
+            // The incremental and discrete transformer, shunt and phase loops (OLF orders 7 to 10) IN-KERNEL,
+            // installed exactly as for a security analysis chunk. The controls OLF's initialize enabled on the
+            // network are in the activation already (entryOn): AFTER_GENERATOR starts with every control off
+            // and the driver's INITIAL/CONTROL/COMPLETE machine enables, clamps and rounds; WITH_GENERATOR
+            // starts with the controls ON and the first check rounds or dispatches.
+            var itvc = driverLoop("IncrementalTransformerVoltageControl")
+                    instanceof com.powsybl.openloadflow.ac.outerloop.IncrementalTransformerVoltageControlOuterLoop l ? l : null;
+            var isvc = driverLoop("IncrementalShuntVoltageControl")
+                    instanceof com.powsybl.openloadflow.ac.outerloop.IncrementalShuntVoltageControlOuterLoop l ? l : null;
             var rpcLoop = driverLoop("IncrementalTransformerReactivePowerControl");
             boolean incPhase = driverLoop("IncrementalPhaseControl") != null;
-            if (rpcLoop != null || incPhase) {
-                flowCtls = phases.flow();
-                flowOwned = GpuBatchIncrementalFlowControl.uploadToDevice(handle, flowCtls);
-                if (flowOwned) {
-                    if (rpcLoop != null) {
-                        hostMask &= ~(1 << (GpuAcNewtonSolver.HOST_LOOP_TRPC - GpuAcNewtonSolver.HOST_LOOP_SVC));
-                    }
-                    if (incPhase) {
-                        hostMask &= ~(1 << (GpuAcNewtonSolver.HOST_LOOP_PHASE - GpuAcNewtonSolver.HOST_LOOP_SVC));
-                    }
-                }
-            } else {
-                GpuBatchIncrementalFlowControl.uploadToDevice(handle, null);
-            }
-            // CONTINUOUS PhaseControl (OLF order 7): OLF's initialize enabled the controls on the network
-            // (the engine proxy ran it), so the activation carries the row-mode-3 rows; the driver's
-            // first check switches them off and rounds, later checks run the LIMITER.
-            if (driverLoop("PhaseControl") != null && !incPhase) {
-                cphCtls = phases.continuousPhase();
-                cphOwned = GpuBatchContinuousPhase.uploadToDevice(handle, cphCtls);
-                if (cphOwned) {
-                    hostMask &= ~(1 << (GpuAcNewtonSolver.HOST_LOOP_PHASE - GpuAcNewtonSolver.HOST_LOOP_SVC));
-                }
-            } else {
-                GpuBatchContinuousPhase.uploadToDevice(handle, null);
-            }
-            // DISCRETE TransformerVoltageControl (OLF order 8) IN-KERNEL: AFTER_GENERATOR starts with every
-            // control off (OLF's initialize, run by the engine proxy) and the driver's INITIAL/CONTROL/
-            // COMPLETE machine enables, clamps and rounds; WITH_GENERATOR (Simple) starts with the controls
-            // ON (initialize enabled them — the activation carries it, entryOn) and the first check rounds.
+            boolean cph = driverLoop("PhaseControl") != null;
             var tvcAfterGen = driverLoop("TransformerVoltageControl");
             var tvcSimple = driverLoop("SimpleTransformerVoltageControl");
-            if ((tvcAfterGen != null || tvcSimple != null) && !tvcOwned) {
-                tvdCtls = phases.discreteTvc();
-                tvdOwned = com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchTransformerControl.uploadToDevice(
-                        handle, tvdCtls, tvcSimple != null ? 1 : 0, tvcSimple != null);
-                if (tvdOwned && tvcAfterGen instanceof com.powsybl.openloadflow.ac.outerloop.TransformerVoltageControlOuterLoop tag) {
-                    // GeneratorVoltageControlManager: the generator controls under the transformer-controlled
-                    // level freeze while the transformers act; a REMOTE candidate is out of the kernel's
-                    // scope — the host-paused OLF loop keeps the slot then
-                    tvdFreeze = phases.freeze();
-                    if (tvdFreeze == null) {
-                        com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchTransformerControl.uploadToDevice(handle, null, 0, false);
-                        tvdOwned = false;
-                    } else {
-                        com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchTransformerControl.uploadFreeze(handle, tvdFreeze);
-                        // Batch of one on the live network: its own topology IS the scenario, so the
-                        // masks come from an empty contingency.
-                        com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchTransformerControl.uploadFixMasks(
-                                handle, tvdFreeze, java.util.List.of(), 1);
-                    }
-                }
-                if (tvdOwned) {
-                    hostMask &= ~(1 << (GpuAcNewtonSolver.HOST_LOOP_TVC - GpuAcNewtonSolver.HOST_LOOP_SVC));
-                }
-            } else {
-                com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchTransformerControl.uploadToDevice(handle, null, 0, false);
+            boolean afterGen = tvcAfterGen instanceof com.powsybl.openloadflow.ac.outerloop.TransformerVoltageControlOuterLoop;
+            boolean svd = driverLoop("ShuntVoltageControl") != null;
+            var installed = com.powsybl.openloadflow.ac.solver.gpu.batch.DevicePhaseInstaller.install(handle,
+                    new com.powsybl.openloadflow.ac.solver.gpu.batch.DevicePhaseInstaller.Request(
+                            itvc != null ? phases.incrementalTvc() : null, itvc != null ? itvc.getMaxTapShift() : 1,
+                            rpcLoop != null || incPhase ? phases.flow() : null, cph ? phases.continuousPhase() : null,
+                            isvc != null ? phases.incrementalShunt() : null, isvc != null ? isvc.getMaxSectionShift() : 3,
+                            tvcAfterGen != null || tvcSimple != null ? phases.discreteTvc() : null, tvcSimple != null,
+                            afterGen, phases.freeze(), svd ? phases.simpleShunt() : null, true));
+            if (itvc != null) {
+                tvcCtls = phases.incrementalTvc();
             }
-            // WITH_GENERATOR ShuntVoltageControl (OLF order 10) IN-KERNEL: the controls are ON at entry
-            // (initialize), the first check dispatches every continuous b to its sections.
-            if (driverLoop("ShuntVoltageControl") != null && !shuntOwned) {
+            if (isvc != null) {
+                shuntCtls = phases.incrementalShunt();
+            }
+            if (rpcLoop != null || incPhase) {
+                flowCtls = phases.flow();
+            }
+            if (cph) {
+                cphCtls = phases.continuousPhase();
+            }
+            if (tvcAfterGen != null || tvcSimple != null) {
+                tvdCtls = phases.discreteTvc();
+            }
+            if (svd) {
                 svdGroups = phases.simpleShunt();
-                svdOwned = com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchSimpleShuntVc.uploadToDevice(handle, svdGroups, true);
-                if (svdOwned) {
-                    hostMask &= ~(1 << (GpuAcNewtonSolver.HOST_LOOP_SHUNT - GpuAcNewtonSolver.HOST_LOOP_SVC));
-                }
-            } else {
-                com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchSimpleShuntVc.uploadToDevice(handle, null, false);
+            }
+            tvcOwned = installed.incrementalTvc();
+            shuntOwned = installed.incrementalShunt();
+            flowOwned = installed.flow();
+            cphOwned = installed.continuousPhase();
+            tvdOwned = installed.discreteTvc();
+            svdOwned = installed.simpleShunt();
+            if (tvdOwned && afterGen) {
+                // Batch of one on the live network: its own topology IS the scenario, so the
+                // connectivity masks come from an empty contingency.
+                tvdFreeze = phases.freeze();
+                com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchTransformerControl.uploadFixMasks(
+                        handle, tvdFreeze, java.util.List.of(), 1);
+            }
+            if (tvcOwned || tvdOwned) {
+                hostMask &= ~(1 << (GpuAcNewtonSolver.HOST_LOOP_TVC - GpuAcNewtonSolver.HOST_LOOP_SVC));
+            }
+            if (shuntOwned || svdOwned) {
+                hostMask &= ~(1 << (GpuAcNewtonSolver.HOST_LOOP_SHUNT - GpuAcNewtonSolver.HOST_LOOP_SVC));
+            }
+            if (flowOwned && rpcLoop != null) {
+                hostMask &= ~(1 << (GpuAcNewtonSolver.HOST_LOOP_TRPC - GpuAcNewtonSolver.HOST_LOOP_SVC));
+            }
+            if (flowOwned && incPhase || cphOwned) {
+                hostMask &= ~(1 << (GpuAcNewtonSolver.HOST_LOOP_PHASE - GpuAcNewtonSolver.HOST_LOOP_SVC));
             }
             // Host-owned outer-loop slots: the driver pauses at their OLF positions and the
             // pause/resume cycle after solveBatchContext runs OLF's loop there. 0 clears a cached mask.

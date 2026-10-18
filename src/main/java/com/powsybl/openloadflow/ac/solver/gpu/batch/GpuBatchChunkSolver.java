@@ -212,7 +212,12 @@ final class GpuBatchChunkSolver {
         // two of them in a chain discard each other's target moves (measured 2.4e-1 kV). Un-accelerated is
         // the only honest alternative to wrong, so the whole group goes to the CPU: leaving resultsByIndex
         // null is exactly how the caller routes a contingency to the stock per-contingency path.
-        DevicePhaseInstaller.InstalledPhases installed = DevicePhaseInstaller.install(handle, phases, config);
+        DevicePhaseInstaller.InstalledPhases installed = DevicePhaseInstaller.install(handle, new DevicePhaseInstaller.Request(
+                phases.incrementalTvc(), config.incTvcMaxTapShift(), phases.flow(), phases.continuousPhase(),
+                phases.incrementalShunt(), config.incShuntMaxSectionShift(),
+                config.transformerControl() || config.simpleTransformerControl() ? phases.discreteTvc() : null,
+                config.simpleTransformerControl(), config.transformerControl(), phases.freeze(),
+                config.simpleShuntControl() ? phases.simpleShunt() : null, false));
         if (!installed.refused().isEmpty()) {
             LOGGER.warn("GPU batched N-1 disabled for this run: the device cannot own {} — every contingency "
                     + "runs on the CPU rather than through a host orchestrator out of OLF's loop order", installed.refused());

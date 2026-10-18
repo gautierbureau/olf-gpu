@@ -92,10 +92,10 @@ class GpuLoadFlowParametersTest {
         try {
             assertTrue(new LoadFlow.Runner(new OpenLoadFlowProvider(new DenseMatrixFactory())).run(network, parameters)
                     .isFullyConverged());
-            assertArrayEquals(new double[] {4, 4, 3, 0.25, 2, 5, 1e-11}, GpuAcNewtonSolver.readLinearSolverSettings());
+            assertArrayEquals(new double[] {4, 4, 3, 0.25, 2, 5, 1e-11}, NewtonSettingsNative.readLinearSolverSettings());
         } finally {
             new GpuLoadFlowParameters().install();               // the next tests run with the defaults
         }
-        assertArrayEquals(new double[] {-1, 6, -1, Double.NaN, 1, 4, 1e-12}, GpuAcNewtonSolver.readLinearSolverSettings());
+        assertArrayEquals(new double[] {-1, 6, -1, Double.NaN, 1, 4, 1e-12}, NewtonSettingsNative.readLinearSolverSettings());
     }
 }

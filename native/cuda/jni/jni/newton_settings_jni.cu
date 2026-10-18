@@ -7,7 +7,7 @@
 // The linear-solver settings of the run (GpuLoadFlowParameters): read by every context built after this call and by
 // the adaptive refinement of every solve. -1 reorder / pivotType = AUTO; NaN threshold = the library's.
 extern "C" JNIEXPORT void JNICALL
-Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setLinearSolverSettings(
+OLF_JNI(ac_solver_gpu, NewtonSettingsNative, setLinearSolverSettings)(
         JNIEnv*, jclass, jint reorder, jint matching, jint pivotType, jdouble pivotThreshold,
         jint irBase, jint irMax, jdouble irTol) {
     gLinearSolver.reorder = reorder;
@@ -21,7 +21,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setLinea
 
 // The installed linear-solver settings, in setLinearSolverSettings's order (tests: the parameters reach the device).
 extern "C" JNIEXPORT jdoubleArray JNICALL
-Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_readLinearSolverSettings(JNIEnv* env, jclass) {
+OLF_JNI(ac_solver_gpu, NewtonSettingsNative, readLinearSolverSettings)(JNIEnv* env, jclass) {
     const double v[7] = {static_cast<double>(gLinearSolver.reorder), static_cast<double>(gLinearSolver.matching),
                          static_cast<double>(gLinearSolver.pivotType), gLinearSolver.pivotThreshold,
                          static_cast<double>(gLinearSolver.irBase), static_cast<double>(gLinearSolver.irMax),
@@ -38,7 +38,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_readLine
 // written over the base state tiled on the device. Replaces sending nScenarios * n doubles when only a few rows
 // differ (the frozen rows of islanded buses). Null or empty arrays clear them.
 extern "C" JNIEXPORT void JNICALL
-Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchX0Seeds(
+OLF_JNI(ac_solver_gpu, NewtonSettingsNative, setBatchX0Seeds)(
         JNIEnv* env, jclass, jlong handle, jintArray jIdx, jdoubleArray jVal) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx == nullptr) {
@@ -57,7 +57,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchLineSearch(
+OLF_JNI(ac_solver_gpu, NewtonSettingsNative, setBatchLineSearch)(
         JNIEnv*, jclass, jlong handle, jint lsMaxIter, jdouble lsStepFold) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx == nullptr) {
@@ -72,7 +72,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
 // length n. The convergence test then requires EVERY row's |F| under its threshold (OLF's
 // PerEquationTypeStoppingCriteria), replacing the 2-norm/infnorm rule for this context.
 extern "C" JNIEXPORT void JNICALL
-Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchRowCriteria(
+OLF_JNI(ac_solver_gpu, NewtonSettingsNative, setBatchRowCriteria)(
         JNIEnv* env, jclass, jlong handle, jdoubleArray jThrIdent, jdoubleArray jThrPower) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx == nullptr) {
@@ -97,7 +97,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
 // residualNormsBatch for a cross identity (mode 6) and for a relocated child's row once its coupler's dummy row
 // is an identity. Nulls clear them. Install after setBatchRowCriteria, which clears them too.
 extern "C" JNIEXPORT void JNICALL
-Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchRowCriteriaAlt(
+OLF_JNI(ac_solver_gpu, NewtonSettingsNative, setBatchRowCriteriaAlt)(
         JNIEnv* env, jclass, jlong handle, jdoubleArray jThrAlt, jintArray jThrSel) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx == nullptr) {
@@ -119,7 +119,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
 
 // Per-scenario ACTIVE equation counts for the L2 stopping threshold (see hNActive). Per-chunk state.
 extern "C" JNIEXPORT void JNICALL
-Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchActiveRowCounts(
+OLF_JNI(ac_solver_gpu, NewtonSettingsNative, setBatchActiveRowCounts)(
         JNIEnv* env, jclass, jlong handle, jintArray jNActive) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx == nullptr) {
@@ -136,7 +136,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
 /** Write absolute target values at (scenario, row) positions — how a host-owned loop applies its
  *  decision without disturbing the device-side targets the sequence has already accumulated. */
 extern "C" JNIEXPORT void JNICALL
-Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchTargetDeltas(
+OLF_JNI(ac_solver_gpu, NewtonSettingsNative, setBatchTargetDeltas)(
         JNIEnv* env, jclass, jlong handle, jintArray jRows, jdoubleArray jVals) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx == nullptr || jRows == nullptr) {
@@ -160,7 +160,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchFrozenRows(
+OLF_JNI(ac_solver_gpu, NewtonSettingsNative, setBatchFrozenRows)(
         JNIEnv* env, jclass, jlong handle, jintArray jSlotRow) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx == nullptr) {
@@ -178,7 +178,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchLoopTraceSlot(
+OLF_JNI(ac_solver_gpu, NewtonSettingsNative, setBatchLoopTraceSlot)(
         JNIEnv*, jclass, jlong handle, jint slot) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx != nullptr) {

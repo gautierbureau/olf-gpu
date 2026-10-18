@@ -109,7 +109,7 @@ public class GpuLoadFlowParameters extends AbstractExtension<LoadFlowParameters>
             if (sameSettings(installed)) {
                 return;
             }
-            GpuAcNewtonSolver.setLinearSolverSettings(reorderingAlgorithm.nativeCode(), matchingAlgorithm.nativeCode(),
+            NewtonSettingsNative.setLinearSolverSettings(reorderingAlgorithm.nativeCode(), matchingAlgorithm.nativeCode(),
                     pivotType.nativeCode(), pivotThreshold, iterativeRefinementBaseSteps, iterativeRefinementMaxSteps,
                     iterativeRefinementTolerance);
             GpuBatchContextCache.clearContextCache();

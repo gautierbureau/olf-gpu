@@ -13,6 +13,7 @@ import com.powsybl.openloadflow.ac.equations.vector.gpu.RemoteVoltageControlNati
 import com.powsybl.openloadflow.ac.outerloop.gpu.DistributedSlackNative;
 import com.powsybl.openloadflow.ac.outerloop.gpu.ForcedTargetQ;
 import com.powsybl.openloadflow.ac.outerloop.gpu.ReactiveLimitsNative;
+import com.powsybl.openloadflow.ac.solver.gpu.NewtonSettingsNative;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -134,7 +135,7 @@ final class ChunkLists {
         // controller's key back in the denominator, clobbering the right target).
         RemoteVoltageControlNative.setBatchDqInactiveMembers(handle,
                 ChunkArrays.intsOrNull(dqInactList));
-        GpuAcNewtonSolver.setBatchFrozenRows(handle,
+        NewtonSettingsNative.setBatchFrozenRows(handle,
                 frozenSeedSlot.isEmpty() ? null : java.util.stream.IntStream
                         .range(0, frozenSeedSlot.size())
                         .flatMap(k -> java.util.stream.IntStream.of(
@@ -153,7 +154,7 @@ final class ChunkLists {
         RemoteVoltageControlNative.setBatchDrCoefOverrides(handle,
                 ChunkArrays.intsOrNull(drOvIdxList),
                 ChunkArrays.doublesOrNull(drOvCList));
-        GpuAcNewtonSolver.setBatchActiveRowCounts(handle, nActive);
+        NewtonSettingsNative.setBatchActiveRowCounts(handle, nActive);
         // Cleared when the chunk strands nobody, so a chunk never inherits the previous
         // chunk's participant mask through the reused context.
         DistributedSlackNative.setBatchDsIslanded(handle,

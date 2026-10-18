@@ -441,7 +441,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                     c.getMaxDefaultSusceptanceMismatch(), c.getConvEpsPerEq());
             GpuAcNewtonSolver.installRowCriteria(context.handle.get(), thr);
         } else {
-            GpuAcNewtonSolver.setBatchRowCriteria(context.handle.get(), null, null);
+            NewtonSettingsNative.setBatchRowCriteria(context.handle.get(), null, null);
         }
     }
 
@@ -718,7 +718,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                 tablesDirty = false;
             }
             if (lsMode == 1) {                               // batch loop LINE_SEARCH (ported 2026-09-08)
-                GpuAcNewtonSolver.setBatchLineSearch(context.handle.get(),
+                NewtonSettingsNative.setBatchLineSearch(context.handle.get(),
                         parameters.getLineSearchStateVectorScalingMaxIteration(),
                         parameters.getLineSearchStateVectorScalingStepFold());
             }
@@ -1307,7 +1307,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                         }
                     }
                     if (!deltaRows.isEmpty()) {
-                        GpuAcNewtonSolver.setBatchTargetDeltas(handle,
+                        NewtonSettingsNative.setBatchTargetDeltas(handle,
                                 deltaRows.stream().mapToInt(Integer::intValue).toArray(),
                                 deltaVals.stream().mapToDouble(Double::doubleValue).toArray());
                     }

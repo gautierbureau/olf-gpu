@@ -26,6 +26,7 @@ import com.powsybl.openloadflow.ac.outerloop.gpu.SecondaryVoltageControlLoop;
 import com.powsybl.openloadflow.ac.outerloop.gpu.VoltageMonitoring;
 import com.powsybl.openloadflow.ac.outerloop.gpu.VoltageMonitoringNative;
 import com.powsybl.openloadflow.ac.solver.NewtonRaphsonParameters;
+import com.powsybl.openloadflow.ac.solver.gpu.NewtonSettingsNative;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfShunt;
 import org.slf4j.Logger;
@@ -205,7 +206,7 @@ final class GpuBatchChunkSolver {
         // context — or CLEAR a previous run's thresholds under UNIFORM_CRITERIA.
         GpuAcNewtonSolver.installRowCriteria(handle, rowCriteria);
         // LINE_SEARCH: OLF's backtracking budget and step fold, on the (possibly cached) context; read only in lsMode 1.
-        GpuAcNewtonSolver.setBatchLineSearch(handle, parameters.getLineSearchStateVectorScalingMaxIteration(),
+        NewtonSettingsNative.setBatchLineSearch(handle, parameters.getLineSearchStateVectorScalingMaxIteration(),
                 parameters.getLineSearchStateVectorScalingStepFold());
         // The run-constant outer-loop tables, shared with the base load flow's batch-of-one.
         DeviceLoopTables.install(handle, gpuData, rlCurves, forcedTargetQ,
@@ -1019,7 +1020,7 @@ final class GpuBatchChunkSolver {
                     GpuAcNewtonSolver.setBatchHostLoop(handle, svcAsDriverPause ? 1 : 0);
                     long solveCountBefore = GpuAcNewtonSolver.readBatchSolveCount(handle);
                     // Seeds only where no full per-scenario state goes (the pair phase builds its own from the parents).
-                    GpuAcNewtonSolver.setBatchX0Seeds(handle, x0Full == null ? x0SeedIdx : null, x0Full == null ? x0SeedVal : null);
+                    NewtonSettingsNative.setBatchX0Seeds(handle, x0Full == null ? x0SeedIdx : null, x0Full == null ? x0SeedVal : null);
                     long tSolve0 = System.nanoTime();
                     // OLF_GPU_LOOP_TRACE_CTG=<id>: trace that contingency's slot in THIS chunk (a fixed slot number
                     // follows the chunk composition, which moves with the resolved chunk size).
@@ -1040,7 +1041,7 @@ final class GpuBatchChunkSolver {
                                 System.err.println("LOOP_TRACE_CTG ctg=" + traceCtg + " slot=" + traceSlot);
                             }
                         }
-                        GpuAcNewtonSolver.setBatchLoopTraceSlot(handle, traceSlot);
+                        NewtonSettingsNative.setBatchLoopTraceSlot(handle, traceSlot);
                     }
                     // OLF_GPU_CHUNK_DUMP=<file>: every chunk's members in slot order, appended one line per chunk
                     // ("<pairPhase> <chunkStart> <chunkSize> <id> <id> ..."). A scenario whose answer moves with
@@ -1192,7 +1193,7 @@ final class GpuBatchChunkSolver {
                             var dec = SecondaryVoltageControlLoop.decideAtPause(handle, chunkSize, realCount, n, nrl,
                                     chunkResults, phases.secondaryVc(), rlStateOut, svcTargetV, baseState);
                             if (dec.targetRows() != null && dec.targetRows().length > 0) {
-                                GpuAcNewtonSolver.setBatchTargetDeltas(handle, dec.targetRows(), dec.targetValues());
+                                NewtonSettingsNative.setBatchTargetDeltas(handle, dec.targetRows(), dec.targetValues());
                             }
                             if (dec.unpinPairs() != null && dec.unpinPairs().length > 0) {
                                 ReactiveLimitsNative.setBatchRlUnpin(handle, dec.unpinPairs(), dec.unpinTargets());

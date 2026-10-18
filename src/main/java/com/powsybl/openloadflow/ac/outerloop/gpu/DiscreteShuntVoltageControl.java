@@ -173,7 +173,7 @@ public final class DiscreteShuntVoltageControl {
      *  itself. Returns true when the kernel loop owns them. */
     public static boolean uploadToDevice(long handle, List<Group> groups, boolean entryOn) {
         if (groups == null || groups.isEmpty()) {
-            GpuAcNewtonSolver.setBatchDiscreteShunt(handle, 0, null, null, null, null, null, null, null,
+            ShuntVoltageControlNative.setBatchDiscreteShunt(handle, 0, null, null, null, null, null, null, null,
                     null, null, null, null, null, null, null);
             return false;
         }
@@ -221,7 +221,7 @@ public final class DiscreteShuntVoltageControl {
         deltaPtr[nG] = dRow.size();
         memSubPtr.add(subBase.size());
         secPtr.add(secB.size());
-        boolean owned = GpuAcNewtonSolver.setBatchDiscreteShunt(handle, entryOn ? 1 : 0, grpPtr, deltaPtr,
+        boolean owned = ShuntVoltageControlNative.setBatchDiscreteShunt(handle, entryOn ? 1 : 0, grpPtr, deltaPtr,
                 dRow.stream().mapToInt(Integer::intValue).toArray(),
                 dModeOn.stream().mapToInt(Integer::intValue).toArray(), dModeOff.stream().mapToInt(Integer::intValue).toArray(),
                 dTgtOn.stream().mapToDouble(Double::doubleValue).toArray(), dTgtOff.stream().mapToDouble(Double::doubleValue).toArray(),

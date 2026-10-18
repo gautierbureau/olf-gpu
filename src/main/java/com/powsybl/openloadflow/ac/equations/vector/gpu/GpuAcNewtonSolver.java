@@ -404,17 +404,6 @@ public final class GpuAcNewtonSolver {
     /** Absolute target writes at flat {@code (scenario * n + row)} positions, for a host-owned loop. */
     public static native void setBatchTargetDeltas(long handle, int[] rows, double[] values);
 
-    /** Install the incremental SHUNT voltage-control tables for the in-kernel loop (OLF order 10);
-     *  see IncrementalShuntVoltageControl.uploadToDevice. Returns 1 when the kernel loop owns them. */
-    public static native int setBatchShuntControllers(long handle,
-            int[] bRow, int[] vRow, double[] targetV, double[] halfDb, int[] elemAbs, int[] shOvElem,
-            int[] groupPtr, int[] groupCtrl, int[] subPtr, int[] secPtr, double[] secB, double[] secG,
-            int[] subMin, int[] subBase, int maxSectionShift);
-
-    /** Per (scenario, sub-controller): the section the driver's ShuntVoltageControl phase left —
-     *  null without the table. Layout {@code s * nSubs + u}, subs in upload order. */
-    public static native int[] readBatchShuntPositions(long handle);
-
     /** Install the FLOW-OBSERVED incremental controllers (RPC / incremental phase) for the in-kernel
      *  loops (OLF orders 7 and 9); see IncrementalFlowControl.uploadToDevice. Returns 1 when
      *  the kernel loops own them. */
@@ -432,21 +421,6 @@ public final class GpuAcNewtonSolver {
 
     /** Per (scenario, continuous phase controller): the tap the driver left — null without the table. */
     public static native int[] readBatchContinuousPhaseTaps(long handle);
-
-    /** Install the WITH_GENERATOR shunt voltage-control tables for the in-kernel ShuntVoltageControl phase
-     *  (OLF order 10); see DiscreteShuntVoltageControl.uploadToDevice. Returns 1 when the kernel loop owns them. */
-    @SuppressWarnings("java:S107")
-    public static native int setBatchDiscreteShunt(long handle, int entryOn,
-            int[] grpPtr, int[] deltaPtr, int[] deltaRow, int[] deltaModeOn, int[] deltaModeOff,
-            double[] deltaTargetOn, double[] deltaTargetOff,
-            int[] memBRow, int[] memElem, int[] memSubPtr, int[] secPtr, double[] secB, int[] subMin, int[] subBase);
-
-    /** Per (scenario, member shunt): {state (0 off, 1 continuous, 2 dispatched), the continuous b the
-     *  dispatch started from}, layout {@code (s * nMembers + m) * 2} — null without the table. */
-    public static native double[] readBatchDiscreteShuntState(long handle);
-
-    /** Per (scenario, sub-controller): the dispatched section, layout {@code s * nSubs + u}. */
-    public static native int[] readBatchDiscreteShuntPositions(long handle);
 
     /** The run's linear-solver settings (GpuLoadFlowParameters.install): -1 reorder / pivot type = AUTO, NaN threshold =
      *  cuDSS's own. Read by every context built afterwards and by every solve's iterative refinement. */

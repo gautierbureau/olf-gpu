@@ -32,6 +32,7 @@ import com.powsybl.openloadflow.ac.outerloop.gpu.IncrementalTransformerVoltageCo
 import com.powsybl.openloadflow.ac.outerloop.gpu.ReactiveCapabilityCurves;
 import com.powsybl.openloadflow.ac.outerloop.gpu.ReactiveLimitsWriteBack;
 import com.powsybl.openloadflow.ac.outerloop.gpu.SecondaryVoltageControlNative;
+import com.powsybl.openloadflow.ac.outerloop.gpu.ShuntVoltageControlNative;
 import com.powsybl.openloadflow.ac.outerloop.gpu.TransformerVoltageControlNative;
 import com.powsybl.openloadflow.ac.outerloop.gpu.VoltageMonitoring;
 import com.powsybl.openloadflow.ac.outerloop.gpu.VoltageMonitoringNative;
@@ -219,7 +220,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
             IncrementalTransformerVoltageControl.writeBackTaps(network, tvcCtls, TransformerVoltageControlNative.readBatchTvcTaps(handle));
         }
         if (shuntOwned && shuntCtls != null) {
-            IncrementalShuntVoltageControl.writeBackPositions(network, shuntCtls, GpuAcNewtonSolver.readBatchShuntPositions(handle));
+            IncrementalShuntVoltageControl.writeBackPositions(network, shuntCtls, ShuntVoltageControlNative.readBatchShuntPositions(handle));
         }
         if (flowOwned && flowCtls != null) {
             IncrementalFlowControl.writeBackTaps(network, flowCtls, GpuAcNewtonSolver.readBatchFlowTaps(handle));
@@ -237,7 +238,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
         }
         if (svdOwned && svdGroups != null) {
             com.powsybl.openloadflow.ac.outerloop.gpu.DiscreteShuntVoltageControl.writeBack(network, svdGroups,
-                    GpuAcNewtonSolver.readBatchDiscreteShuntState(handle), GpuAcNewtonSolver.readBatchDiscreteShuntPositions(handle));
+                    ShuntVoltageControlNative.readBatchDiscreteShuntState(handle), ShuntVoltageControlNative.readBatchDiscreteShuntPositions(handle));
         }
     }
 

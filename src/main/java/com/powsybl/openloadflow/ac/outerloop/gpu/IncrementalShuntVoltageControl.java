@@ -155,7 +155,7 @@ public final class IncrementalShuntVoltageControl {
      *  true when the kernel loop OWNS them (the host orchestrator must then stay off). */
     public static boolean uploadToDevice(long handle, List<Controller> ctrls, int maxSectionShift) {
         if (ctrls == null || ctrls.isEmpty()) {
-            com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.setBatchShuntControllers(handle,
+            ShuntVoltageControlNative.setBatchShuntControllers(handle,
                     null, null, null, null, null, null, null, null, null, null, null, null, null, null, maxSectionShift);
             return false;
         }
@@ -209,7 +209,7 @@ public final class IncrementalShuntVoltageControl {
         }
         subPtr[nc] = subMin.size();
         secPtr.add(secB.size());
-        boolean owned = com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.setBatchShuntControllers(handle,
+        boolean owned = ShuntVoltageControlNative.setBatchShuntControllers(handle,
                 bRow, vRow, targetV, halfDb, elemAbs, shOvElem, groupPtr, groupCtrl, subPtr,
                 secPtr.stream().mapToInt(Integer::intValue).toArray(),
                 secB.stream().mapToDouble(Double::doubleValue).toArray(),

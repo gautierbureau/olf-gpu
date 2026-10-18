@@ -10,7 +10,7 @@
  *  groupCtrl (controllers, |b|-descending); subs: subPtr[nCtrl+1] -> per sub secPtr[nSubs+1] into
  *  secB/secG, subMin, subBase. Returns 1 when the kernel loop owns them, 0 when there are none. */
 extern "C" JNIEXPORT jint JNICALL
-Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchShuntControllers(
+OLF_JNI(ac_outerloop_gpu, ShuntVoltageControlNative, setBatchShuntControllers)(
         JNIEnv* env, jclass, jlong handle,
         jintArray jBRow, jintArray jVRow, jdoubleArray jTargetV, jdoubleArray jHalfDb, jintArray jElemAbs, jintArray jShOvElem,
         jintArray jGroupPtr, jintArray jGroupCtrl, jintArray jSubPtr, jintArray jSecPtr, jdoubleArray jSecB, jdoubleArray jSecG,
@@ -84,7 +84,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
 }
 
 extern "C" JNIEXPORT jintArray JNICALL
-Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_readBatchShuntPositions(
+OLF_JNI(ac_outerloop_gpu, ShuntVoltageControlNative, readBatchShuntPositions)(
         JNIEnv* env, jclass, jlong handle) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx == nullptr || ctx->nShc <= 0 || !ctx->dShcPos.p) {
@@ -103,7 +103,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_readBatc
  *  SHUNT_B row, element (-1 = unpacked, never outaged) and sub-controllers (CSR) whose section-B tables,
  *  min and base positions drive LfShuntImpl.dispatchB. Returns 1 when the kernel loop owns them. */
 extern "C" JNIEXPORT jint JNICALL
-Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchDiscreteShunt(
+OLF_JNI(ac_outerloop_gpu, ShuntVoltageControlNative, setBatchDiscreteShunt)(
         JNIEnv* env, jclass, jlong handle, jint entryOn,
         jintArray jGrpPtr, jintArray jDeltaPtr, jintArray jDeltaRow, jintArray jDeltaModeOn, jintArray jDeltaModeOff,
         jdoubleArray jDeltaTargetOn, jdoubleArray jDeltaTargetOff,
@@ -176,7 +176,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
 /** Per (scenario, member shunt): {state (0 off, 1 continuous, 2 dispatched), the continuous b the
  *  dispatch started from} — layout {@code (s * nM + m) * 2}; null without the table. */
 extern "C" JNIEXPORT jdoubleArray JNICALL
-Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_readBatchDiscreteShuntState(
+OLF_JNI(ac_outerloop_gpu, ShuntVoltageControlNative, readBatchDiscreteShuntState)(
         JNIEnv* env, jclass, jlong handle) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx == nullptr || ctx->nSvd <= 0 || !ctx->dSvdMemState.p) {
@@ -198,7 +198,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_readBatc
 
 /** Per (scenario, sub-controller): the dispatched section — layout {@code s * nSubs + u}. */
 extern "C" JNIEXPORT jintArray JNICALL
-Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_readBatchDiscreteShuntPositions(
+OLF_JNI(ac_outerloop_gpu, ShuntVoltageControlNative, readBatchDiscreteShuntPositions)(
         JNIEnv* env, jclass, jlong handle) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx == nullptr || ctx->nSvd <= 0 || ctx->nSvdSubs <= 0 || !ctx->dSvdSubPos.p) {

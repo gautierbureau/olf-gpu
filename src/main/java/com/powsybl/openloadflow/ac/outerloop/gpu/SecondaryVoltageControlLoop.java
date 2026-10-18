@@ -487,7 +487,7 @@ public final class SecondaryVoltageControlLoop {
             double[] src = s < realCount && chunkResults[s] != null ? chunkResults[s] : baseState;
             System.arraycopy(src, 0, statesFlat, s * n, n);
         }
-        double[] dxAtObs = GpuAcNewtonSolver.solveBatchSensitivities(handle, statesFlat, unit, obs);
+        double[] dxAtObs = SensitivityNative.solveBatchSensitivities(handle, statesFlat, unit, obs);
 
         // ---- OLF processSecondaryVoltageControl per adjusting scenario ----
         boolean[] affected = new boolean[chunkSize];

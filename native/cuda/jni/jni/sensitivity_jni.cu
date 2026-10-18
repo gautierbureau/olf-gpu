@@ -5,7 +5,7 @@
 #include "jni_common.cuh"
 
 extern "C" JNIEXPORT jdoubleArray JNICALL
-Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_solveBatchSensitivities(
+OLF_JNI(ac_outerloop_gpu, SensitivityNative, solveBatchSensitivities)(
         JNIEnv* env, jclass, jlong handle, jdoubleArray jstates, jintArray junitRows, jintArray jobserveCols) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx == nullptr) {

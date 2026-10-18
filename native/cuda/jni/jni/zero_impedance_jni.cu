@@ -10,7 +10,7 @@
 // Does NOT touch nDqDyn: the hybrid's weights stay static-pack + dqOv (OLF renormalizes and the
 // engine pushes live values). Nulls clear.
 extern "C" JNIEXPORT void JNICALL
-Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchZiTreeOverrides(
+OLF_JNI(ac_equations_vector_gpu, ZeroImpedanceNative, setBatchZiTreeOverrides)(
         JNIEnv* env, jclass, jlong handle, jintArray jSlotElemVal) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx == nullptr) {

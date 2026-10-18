@@ -9,6 +9,7 @@ package com.powsybl.openloadflow.ac.solver.gpu.batch;
 
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
+import com.powsybl.openloadflow.ac.equations.vector.gpu.ZeroImpedanceNative;
 import com.powsybl.openloadflow.ac.outerloop.gpu.ContinuousPhaseControl;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DeviceLoopKind;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DeviceLoopTables;
@@ -1024,7 +1025,7 @@ final class GpuBatchChunkSolver {
                     // follows the chunk composition, which moves with the resolved chunk size).
                     // OLF's tree for the scenarios of this chunk, where it has moved from the one the
                     // structure was extracted on (empty clears the previous chunk's list).
-                    GpuAcNewtonSolver.setBatchZiTreeOverrides(handle,
+                    ZeroImpedanceNative.setBatchZiTreeOverrides(handle,
                             rs.ziTreeSlotElemValList.stream().mapToInt(Integer::intValue).toArray());
                     {
                         String traceCtg = System.getenv("OLF_GPU_LOOP_TRACE_CTG");

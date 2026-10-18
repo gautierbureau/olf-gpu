@@ -8,6 +8,7 @@
 package com.powsybl.openloadflow.ac.solver.gpu.batch;
 
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
+import com.powsybl.openloadflow.ac.outerloop.gpu.IncrementalTransformerVoltageControl;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -42,7 +43,7 @@ public final class GpuBatchPhaseOwnership {
     public static int enforceComplete(long handle, int hostMask) {
         int mask = hostMask;
         if (!GpuBatchSkips.complete(GpuBatchSkips.Slot.TVC)) {
-            GpuBatchIncrementalTvc.uploadToDevice(handle, null, 1);
+            IncrementalTransformerVoltageControl.uploadToDevice(handle, null, 1);
             GpuBatchTransformerControl.uploadToDevice(handle, null, 0, false);
             GpuBatchTransformerControl.uploadFreeze(handle, null);
             mask |= 1 << (GpuAcNewtonSolver.HOST_LOOP_TVC - GpuAcNewtonSolver.HOST_LOOP_SVC);

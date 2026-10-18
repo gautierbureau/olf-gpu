@@ -15,19 +15,11 @@ import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcActivation;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcActivationExtractor;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcDataCache;
-import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuEquationDump;
-import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchHvdcAcEmulation;
-import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchContinuousPhase;
-import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchIncrementalFlowControl;
-import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchIncrementalShuntVc;
-import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchIncrementalTvc;
-import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchForcedTargetQ;
-import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchOuterLoopTables;
-import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchVoltageMonitoring;
-import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchRlCurves;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcDataExtractor;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcStructures;
+import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuEquationDump;
+import com.powsybl.openloadflow.ac.outerloop.gpu.IncrementalTransformerVoltageControl;
 import com.powsybl.openloadflow.ac.solver.AbstractAcSolver;
 import com.powsybl.openloadflow.ac.solver.AcSolverResult;
 import com.powsybl.openloadflow.ac.solver.AcSolverStatus;
@@ -37,7 +29,15 @@ import com.powsybl.openloadflow.ac.solver.NewtonRaphsonParameters;
 import com.powsybl.openloadflow.ac.solver.NewtonRaphsonStoppingCriteria;
 import com.powsybl.openloadflow.ac.solver.PerEquationTypeStoppingCriteria;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchContextCache;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchContinuousPhase;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchForcedTargetQ;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchHvdcAcEmulation;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchIncrementalFlowControl;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchIncrementalShuntVc;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchOuterLoopTables;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchRlCurves;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchStatus;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchVoltageMonitoring;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.EquationSystemIndex;
 import com.powsybl.openloadflow.equations.EquationSystemIndexListener;
@@ -209,7 +209,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
         ReactiveLimitsWriteBack.writeBack(network, rlStateOut, data, deviceTargets,
                 data.rlRemote() != null ? GpuAcNewtonSolver.readBatchRowModes(handle) : null);
         if (tvcOwned && tvcCtls != null) {
-            GpuBatchIncrementalTvc.writeBackTaps(network, tvcCtls, GpuAcNewtonSolver.readBatchTvcTaps(handle));
+            IncrementalTransformerVoltageControl.writeBackTaps(network, tvcCtls, GpuAcNewtonSolver.readBatchTvcTaps(handle));
         }
         if (shuntOwned && shuntCtls != null) {
             GpuBatchIncrementalShuntVc.writeBackPositions(network, shuntCtls, GpuAcNewtonSolver.readBatchShuntPositions(handle));
@@ -328,7 +328,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
     // incremental TVC): built at every solve from the network as it stands, written back after it.
     private List<GpuBatchHvdcAcEmulation.Ctl> hvdcCtls;
     private List<GpuBatchVoltageMonitoring.Ctl> monCtls;
-    private List<GpuBatchIncrementalTvc.Controller> tvcCtls;
+    private List<IncrementalTransformerVoltageControl.Controller> tvcCtls;
     private boolean tvcOwned;
     private List<GpuBatchIncrementalShuntVc.Controller> shuntCtls;
     private boolean shuntOwned;

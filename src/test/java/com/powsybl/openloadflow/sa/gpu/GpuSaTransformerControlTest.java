@@ -166,7 +166,7 @@ class GpuSaTransformerControlTest extends AbstractGpuSaTest {
     }
 
     /** DEVICE-mode IncrementalTransformerVoltageControl (OLF's DEFAULT TVC mode): the device runs the
-     *  loop's decisions per scenario with in-kernel dV/drho sensitivities (GpuBatchIncrementalTvc);
+     *  loop's decisions per scenario with in-kernel dV/drho sensitivities (IncrementalTransformerVoltageControl);
      *  the tap-moving strong-line outage plus a weak clone outage, GPU SA == CPU SA at 1e-12. */
     @Test
     void deviceIncrementalTransformerVoltageControlMatchesCpu() {
@@ -203,7 +203,7 @@ class GpuSaTransformerControlTest extends AbstractGpuSaTest {
     /** INCREMENTAL mode over a SHARED 3-member group (gate lifted 2026-09-07): the loop keeps every
      *  branch VC disabled (no DISTR_RHO ever activates), so the shared group is purely OLF's
      *  one-tap-at-a-time round-robin over the merged controllers (adjustWithSeveralControllers) —
-     *  ported in GpuBatchIncrementalTvc, grouped by the MAIN control's controlled bus. Weak line,
+     *  ported in IncrementalTransformerVoltageControl, grouped by the MAIN control's controlled bus. Weak line,
      *  strong (tap-moving) line and a MEMBER outage, all batched at 1e-12. */
     @Test
     void deviceIncrementalSharedTvcMatchesCpu() {

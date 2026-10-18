@@ -5,12 +5,15 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/.
  * SPDX-License-Identifier: MPL-2.0
  */
-package com.powsybl.openloadflow.ac.solver.gpu.batch;
+package com.powsybl.openloadflow.ac.outerloop.gpu;
 
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 import com.powsybl.openloadflow.ac.solver.NewtonRaphsonParameters;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchElementMapper;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchSkips;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchTransformerControl;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.Variable;
 import com.powsybl.openloadflow.network.LfBranch;
@@ -51,15 +54,15 @@ import java.util.Map;
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
-public final class GpuBatchIncrementalTvc {
+public final class IncrementalTransformerVoltageControl {
 
-    private static final Logger LOGGER = LoggerFactory.getLogger(GpuBatchIncrementalTvc.class);
+    private static final Logger LOGGER = LoggerFactory.getLogger(IncrementalTransformerVoltageControl.class);
 
     private static final int MAX_DIRECTION_CHANGE = 3;       // OLF IncrementalTransformerVoltageControlOuterLoop
     private static final double MIN_SENSI_FILTER = 0.05;
     private static final double MIN_TARGET_DEADBAND_KV = 0.1;
 
-    private GpuBatchIncrementalTvc() {
+    private IncrementalTransformerVoltageControl() {
     }
 
     /** One incremental controller: the rho variable row (pinned identity — unit-RHS row, target index

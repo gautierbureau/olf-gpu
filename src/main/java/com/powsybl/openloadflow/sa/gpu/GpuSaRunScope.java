@@ -17,6 +17,7 @@ import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcDataExtractor;
 import com.powsybl.openloadflow.ac.outerloop.AcOuterLoop;
 import com.powsybl.openloadflow.ac.outerloop.DistributedSlackOuterLoop;
 import com.powsybl.openloadflow.ac.outerloop.ReactiveLimitsOuterLoop;
+import com.powsybl.openloadflow.ac.outerloop.gpu.IncrementalTransformerVoltageControl;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.BatchConfig;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchTransformerControl;
 import com.powsybl.openloadflow.equations.EquationSystem;
@@ -67,7 +68,7 @@ final class GpuSaRunScope {
         // INCREMENTAL shared groups run since 2026-09-07 too: the loop keeps every branch VC
         // DISABLED (no DISTR_RHO coupling ever activates), so a shared group is purely the
         // one-tap-at-a-time round-robin over the merged controllers — ported in
-        // GpuBatchIncrementalTvc.orchestrate, grouped by the MAIN control's controlled bus.
+        // IncrementalTransformerVoltageControl.orchestrate, grouped by the MAIN control's controlled bus.
         // 2026-09-15: generator voltage controls UNDER the transformer-controlled level no longer gate the
         // run — the in-kernel phase runs OLF's GeneratorVoltageControlManager freeze/unfreeze and the
         // fixTransformerVoltageControls check, as long as every candidate is a LOCAL controller and every

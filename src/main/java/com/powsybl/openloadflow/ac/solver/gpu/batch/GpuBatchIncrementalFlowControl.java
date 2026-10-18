@@ -12,6 +12,7 @@ import com.powsybl.math.matrix.DenseMatrix;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
+import com.powsybl.openloadflow.ac.outerloop.gpu.IncrementalTransformerVoltageControl;
 import com.powsybl.openloadflow.ac.solver.NewtonRaphsonParameters;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.EquationTerm;
@@ -32,7 +33,7 @@ import java.util.Map;
  * {@code IncrementalTransformerReactivePowerControlOuterLoop} (rho taps driving a branch Q flow) and
  * {@code AcIncrementalPhaseControlOuterLoop} (a1 taps driving a branch P flow in CONTROLLER mode, or
  * capping a branch current in LIMITER mode). Same skeleton as the voltage-observed ports
- * ({@link GpuBatchIncrementalTvc}): batched in-kernel sensitivities with a unit RHS at each
+ * ({@link IncrementalTransformerVoltageControl}): batched in-kernel sensitivities with a unit RHS at each
  * controller's pinned identity row (BRANCH_TARGET_RHO1 / BRANCH_TARGET_ALPHA1), but the observable
  * is a BRANCH FLOW: OLF's own {@code EquationTerm.calculateSensi} evaluates the flow gradient dotted
  * with the sensitivity column — the orchestrator loads each scenario's state into the shared

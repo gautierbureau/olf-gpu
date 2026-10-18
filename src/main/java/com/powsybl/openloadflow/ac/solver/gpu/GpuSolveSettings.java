@@ -8,6 +8,7 @@
 package com.powsybl.openloadflow.ac.solver.gpu;
 
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
+import com.powsybl.openloadflow.ac.outerloop.gpu.IncrementalTransformerVoltageControl;
 import com.powsybl.openloadflow.ac.solver.DefaultNewtonRaphsonStoppingCriteria;
 import com.powsybl.openloadflow.ac.solver.NewtonRaphsonParameters;
 

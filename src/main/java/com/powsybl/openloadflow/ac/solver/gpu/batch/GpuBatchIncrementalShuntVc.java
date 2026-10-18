@@ -10,6 +10,7 @@ package com.powsybl.openloadflow.ac.solver.gpu.batch;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
+import com.powsybl.openloadflow.ac.outerloop.gpu.IncrementalTransformerVoltageControl;
 import com.powsybl.openloadflow.ac.solver.NewtonRaphsonParameters;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.Variable;
@@ -26,7 +27,7 @@ import java.util.Map;
 
 /**
  * DEVICE port of OLF's {@code IncrementalShuntVoltageControlOuterLoop}, sharing the incremental-family
- * machinery with {@link GpuBatchIncrementalTvc}: batched in-kernel dV/dB sensitivities (unit RHS at
+ * machinery with {@link IncrementalTransformerVoltageControl}: batched in-kernel dV/dB sensitivities (unit RHS at
  * each controller shunt's pinned {@code SHUNT_TARGET_B} identity row), then OLF's section decisions
  * replicated verbatim per scenario — the |B|-magnitude-descending shunt ordering, the per-round
  * {@code maxSectionShift} cap (OLF's {@code > maxSectionShift} guard, checked BEFORE the increment),

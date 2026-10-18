@@ -7,6 +7,9 @@
  */
 package com.powsybl.openloadflow.ac.solver.gpu.batch;
 
+
+import com.powsybl.openloadflow.ac.outerloop.gpu.IncrementalTransformerVoltageControl;
+
 import java.util.ArrayList;
 import java.util.List;
 
@@ -27,7 +30,7 @@ public final class DevicePhaseInstaller {
      *  most one loop of each type (ExplicitAcOuterLoopConfig.checkTypeUnicity), so an incremental loop and its
      *  discrete twin are never both present. {@code entryOn}: the activation the solve starts from already carries
      *  the controls OLF's initialize switched ON (the base load flow); a chunk applies them at solve entry itself. */
-    public record Request(List<GpuBatchIncrementalTvc.Controller> incrementalTvc, int incTvcMaxTapShift,
+    public record Request(List<IncrementalTransformerVoltageControl.Controller> incrementalTvc, int incTvcMaxTapShift,
                           List<GpuBatchIncrementalFlowControl.Controller> flow,
                           List<GpuBatchContinuousPhase.Ctl> continuousPhase,
                           List<GpuBatchIncrementalShuntVc.Controller> incrementalShunt, int incShuntMaxSectionShift,
@@ -51,7 +54,7 @@ public final class DevicePhaseInstaller {
         // Every table upload also CLEARS when the run has none: the context is cached across runs on the
         // same network, and a stale table from a previous run selects the wrong driver phase (a Simple
         // TVC run after an INCREMENTAL one ran LOOP_TVC_KERNEL on its controls — 3.6e-7 kV).
-        boolean tvcInKernel = GpuBatchIncrementalTvc.uploadToDevice(handle, r.incrementalTvc(),
+        boolean tvcInKernel = IncrementalTransformerVoltageControl.uploadToDevice(handle, r.incrementalTvc(),
                 r.incrementalTvc() != null ? r.incTvcMaxTapShift() : 1);
         // The flow-observed incremental loops (RPC at OLF order 9, incremental phase at order 7) as DRIVER PHASES.
         boolean flowInKernel = GpuBatchIncrementalFlowControl.uploadToDevice(handle, r.flow());

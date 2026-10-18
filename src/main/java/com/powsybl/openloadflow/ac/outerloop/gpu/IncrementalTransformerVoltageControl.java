@@ -151,7 +151,7 @@ public final class IncrementalTransformerVoltageControl {
      *  (shared controlled buses included), false when there are none. */
     public static boolean uploadToDevice(long handle, List<Controller> ctrls, int maxTapShift) {
         if (ctrls == null || ctrls.isEmpty()) {
-            com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.setBatchTvcControllers(
+            TransformerVoltageControlNative.setBatchTvcControllers(
                     handle, null, null, null, null, null, null, null, null, null, null, maxTapShift);   // clears a cached context
             return false;
         }
@@ -204,7 +204,7 @@ public final class IncrementalTransformerVoltageControl {
             gi++;
         }
         groupPtr[nGroups] = ci;
-        boolean owned = com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.setBatchTvcControllers(
+        boolean owned = TransformerVoltageControlNative.setBatchTvcControllers(
                 handle, rhoRow, vRow, targetV, halfDb, elemIndex, tapPtr, tapData, baseTap,
                 groupPtr, groupCtrl, maxTapShift) != 0;
         LOGGER.info("Uploaded {} incremental TVC controllers to device ({} taps, {} groups): {}",

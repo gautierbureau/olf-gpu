@@ -483,10 +483,10 @@ public final class DiscreteTransformerVoltageControl {
      *  installed (AFTER_GENERATOR only). */
     public static void uploadFreeze(long handle, FreezeTables fz) {
         if (fz == null) {
-            GpuAcNewtonSolver.setBatchDiscreteTvcFreeze(handle, null, null, null, null);
+            TransformerVoltageControlNative.setBatchDiscreteTvcFreeze(handle, null, null, null, null);
             return;
         }
-        GpuAcNewtonSolver.setBatchDiscreteTvcFreeze(handle, fz.vRow(), fz.loadQ(), fz.rlEntry(), fz.fixPvRow());
+        TransformerVoltageControlNative.setBatchDiscreteTvcFreeze(handle, fz.vRow(), fz.loadQ(), fz.rlEntry(), fz.fixPvRow());
         if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
             System.err.printf("TVD_FREEZE_UPLOAD nCandidates=%d fixPvBuses=%d members=%d%n",
                     fz.vRow().length, fz.fixPvRow().length, fz.nMembers());
@@ -501,7 +501,7 @@ public final class DiscreteTransformerVoltageControl {
      */
     public static void uploadFixMasks(long handle, FreezeTables fz, List<BatchContingency> scenarios, int chunkSize) {
         if (fz == null || !fz.hasFix()) {
-            GpuAcNewtonSolver.setBatchDiscreteTvcFixMasks(handle, null, null, 0);
+            TransformerVoltageControlNative.setBatchDiscreteTvcFixMasks(handle, null, null, 0);
             return;
         }
         int stride = fz.nMembers() * fz.fixWords();
@@ -517,7 +517,7 @@ public final class DiscreteTransformerVoltageControl {
                 System.arraycopy(fz.maxMask(), 0, maxMask, s * stride, stride);
             }
         }
-        GpuAcNewtonSolver.setBatchDiscreteTvcFixMasks(handle, minMask, maxMask, fz.fixWords());
+        TransformerVoltageControlNative.setBatchDiscreteTvcFixMasks(handle, minMask, maxMask, fz.fixWords());
     }
 
     /** Give the freeze state back to the network (batch-of-one): a frozen candidate is
@@ -676,7 +676,7 @@ public final class DiscreteTransformerVoltageControl {
      *  network). Returns true when the kernel loop owns them (every member has a tap table). */
     public static boolean uploadToDevice(long handle, List<TransformerController> tcs, int mode, boolean entryOn) {
         if (tcs == null || tcs.isEmpty()) {
-            GpuAcNewtonSolver.setBatchDiscreteTvc(handle, 0, 0, null, null, null, null, null, null, null, null, null,
+            TransformerVoltageControlNative.setBatchDiscreteTvc(handle, 0, 0, null, null, null, null, null, null, null, null, null,
                     null, null, null, null, null, null, null, null, null, null);
             return false;
         }
@@ -735,7 +735,7 @@ public final class DiscreteTransformerVoltageControl {
         grpPtr[nG] = memRhoRow.size();
         deltaPtr[nG] = dRow.size();
         memTapPtr.add(tapData.size() / 8);
-        boolean owned = tables && GpuAcNewtonSolver.setBatchDiscreteTvc(handle, mode, entryOn ? 1 : 0,
+        boolean owned = tables && TransformerVoltageControlNative.setBatchDiscreteTvc(handle, mode, entryOn ? 1 : 0,
                 grpPtr, grpVRow, grpTargetV, grpHalfDb, grpUseInit,
                 deltaPtr, dRow.stream().mapToInt(Integer::intValue).toArray(),
                 dModeOn.stream().mapToInt(Integer::intValue).toArray(), dModeOff.stream().mapToInt(Integer::intValue).toArray(),
@@ -746,7 +746,7 @@ public final class DiscreteTransformerVoltageControl {
                 memInit.stream().mapToDouble(Double::doubleValue).toArray(),
                 tapData.stream().mapToDouble(Double::doubleValue).toArray()) != 0;
         if (!owned) {
-            GpuAcNewtonSolver.setBatchDiscreteTvc(handle, 0, 0, null, null, null, null, null, null, null, null, null,
+            TransformerVoltageControlNative.setBatchDiscreteTvc(handle, 0, 0, null, null, null, null, null, null, null, null, null,
                     null, null, null, null, null, null, null, null, null, null);
         }
         LOGGER.info("Uploaded {} discrete transformer voltage controls ({} members, mode {}) to device: {}",

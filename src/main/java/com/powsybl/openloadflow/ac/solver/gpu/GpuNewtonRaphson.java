@@ -32,6 +32,7 @@ import com.powsybl.openloadflow.ac.outerloop.gpu.IncrementalTransformerVoltageCo
 import com.powsybl.openloadflow.ac.outerloop.gpu.ReactiveCapabilityCurves;
 import com.powsybl.openloadflow.ac.outerloop.gpu.ReactiveLimitsWriteBack;
 import com.powsybl.openloadflow.ac.outerloop.gpu.SecondaryVoltageControlNative;
+import com.powsybl.openloadflow.ac.outerloop.gpu.TransformerVoltageControlNative;
 import com.powsybl.openloadflow.ac.outerloop.gpu.VoltageMonitoring;
 import com.powsybl.openloadflow.ac.outerloop.gpu.VoltageMonitoringNative;
 import com.powsybl.openloadflow.ac.solver.AbstractAcSolver;
@@ -215,7 +216,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
         ReactiveLimitsWriteBack.writeBack(network, rlStateOut, data, deviceTargets,
                 data.rlRemote() != null ? GpuAcNewtonSolver.readBatchRowModes(handle) : null);
         if (tvcOwned && tvcCtls != null) {
-            IncrementalTransformerVoltageControl.writeBackTaps(network, tvcCtls, GpuAcNewtonSolver.readBatchTvcTaps(handle));
+            IncrementalTransformerVoltageControl.writeBackTaps(network, tvcCtls, TransformerVoltageControlNative.readBatchTvcTaps(handle));
         }
         if (shuntOwned && shuntCtls != null) {
             IncrementalShuntVoltageControl.writeBackPositions(network, shuntCtls, GpuAcNewtonSolver.readBatchShuntPositions(handle));
@@ -228,10 +229,10 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
         }
         if (tvdOwned && tvdCtls != null) {
             com.powsybl.openloadflow.ac.outerloop.gpu.DiscreteTransformerVoltageControl.writeBack(network, tvdCtls,
-                    GpuAcNewtonSolver.readBatchDiscreteTvcState(handle));
+                    TransformerVoltageControlNative.readBatchDiscreteTvcState(handle));
             if (tvdFreeze != null && tvdFreeze.hasCandidates()) {
                 com.powsybl.openloadflow.ac.outerloop.gpu.DiscreteTransformerVoltageControl.writeBackFreeze(network, tvdFreeze,
-                        GpuAcNewtonSolver.readBatchDiscreteTvcFreeze(handle));
+                        TransformerVoltageControlNative.readBatchDiscreteTvcFreeze(handle));
             }
         }
         if (svdOwned && svdGroups != null) {

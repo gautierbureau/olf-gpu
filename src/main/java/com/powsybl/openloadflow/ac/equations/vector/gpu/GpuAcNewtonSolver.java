@@ -386,18 +386,6 @@ public final class GpuAcNewtonSolver {
      *  0 disables all; the driver behaves exactly as before. */
     public static native void setBatchHostLoop(long handle, int mask);
 
-    /** Upload incremental TVC controller data for the in-kernel outer loop.
-     *  rhoRow/vRow/elemIndex: per-controller int arrays; targetV/halfDb: per-controller doubles;
-     *  tapPtr: CSR pointers [nCtrl+1] into tapData; tapData: flat [totalTaps*8] (y,g1,g2,b1,b2,ksi,r1,a1);
-     *  baseTap: per-controller initial tap index; groupPtr/groupCtrl: CSR grouping of controllers
-     *  sharing a controlled bus (for the one-tap-at-a-time round-robin). */
-    /** Returns 1 when the in-kernel TVC loop owns these controllers, 0 when it refused them (a
-     *  controlled bus shared by several transformers stays on the host orchestrator). */
-    public static native int setBatchTvcControllers(long handle,
-            int[] rhoRow, int[] vRow, double[] targetV, double[] halfDb, int[] elemIndex,
-            int[] tapPtr, double[] tapData, int[] baseTap, int[] groupPtr, int[] groupCtrl,
-            int maxTapShift);
-
     /** Did the last solve stop at a host-owned slot? Returns 0 if not paused, or the
      *  {@code DeviceLoopKind.HOST_LOOP_*} constant identifying WHICH host loop was reached. */
     public static native int readBatchDriverPaused(long handle);
@@ -415,10 +403,6 @@ public final class GpuAcNewtonSolver {
 
     /** Absolute target writes at flat {@code (scenario * n + row)} positions, for a host-owned loop. */
     public static native void setBatchTargetDeltas(long handle, int[] rows, double[] values);
-
-    /** Per (scenario, incremental TVC controller): the tap index the driver's TransformerVoltageControl
-     *  phase left — null without the table. Layout {@code s * nTvc + c}. */
-    public static native int[] readBatchTvcTaps(long handle);
 
     /** Install the incremental SHUNT voltage-control tables for the in-kernel loop (OLF order 10);
      *  see IncrementalShuntVoltageControl.uploadToDevice. Returns 1 when the kernel loop owns them. */
@@ -448,42 +432,6 @@ public final class GpuAcNewtonSolver {
 
     /** Per (scenario, continuous phase controller): the tap the driver left — null without the table. */
     public static native int[] readBatchContinuousPhaseTaps(long handle);
-
-    /** Install the DISCRETE transformer voltage-control tables for the in-kernel TransformerVoltageControl
-     *  phase (OLF order 8): {@code mode} 0 = AFTER_GENERATOR (TransformerVoltageControlOuterLoop), 1 =
-     *  WITH_GENERATOR (SimpleTransformerVoltageControlOuterLoop); {@code entryOn} = the uploaded activation
-     *  already carries the control ON (a base load flow whose network OLF's initialize switched on). Groups
-     *  are controlled buses (CSR over members) with their toggle-diffed ON/OFF row deltas (CSR); see
-     *  DiscreteTransformerVoltageControl.uploadToDevice. Returns 1 when the kernel loop owns them. */
-    @SuppressWarnings("java:S107")
-    public static native int setBatchDiscreteTvc(long handle, int mode, int entryOn,
-            int[] grpPtr, int[] grpVRow, double[] grpTargetV, double[] grpHalfDb, int[] grpUseInit,
-            int[] deltaPtr, int[] deltaRow, int[] deltaModeOn, int[] deltaModeOff, double[] deltaTargetOn, double[] deltaTargetOff,
-            int[] memRhoRow, int[] memElem, int[] memBaseTap, int[] memTapPtr, double[] memMin, double[] memMax, double[] memInit,
-            double[] tapData);
-
-    /** Per (scenario, member): {state (0 off, 1 continuous, 2 fixed), tap index, the r1 fed to the rounding},
-     *  layout {@code (s * nMembers + m) * 3} — null without the table. */
-    public static native double[] readBatchDiscreteTvcState(long handle);
-
-    /** GeneratorVoltageControlManager tables for the AFTER_GENERATOR phase (after setBatchDiscreteTvc): the
-     *  freeze candidates (controller-bus V row, load Q, and the reactive-limit entry of a REMOTE
-     *  controller or −1) and the UNIVERSE of
-     *  fixTransformerVoltageControls — the {@code BUS_V} row of every generator-voltage-controlled bus,
-     *  which the per-scenario masks index. Returns 1 when installed. */
-    public static native int setBatchDiscreteTvcFreeze(long handle, int[] fzVRow, double[] fzLoadQ, int[] fzRlEntry,
-                                                      int[] fixPvRow);
-
-    /** fixTransformerVoltageControls' per-(scenario, member) connectivity masks over the
-     *  {@code fixPvRow} universe, {@code words} ints each: {@code minMask} cuts every controller branch
-     *  (a subset of OLF's component), {@code maxMask} cuts none (a superset). A PV bus in min means keep
-     *  the control, no PV bus in max means disable it, anything between routes the scenario to the CPU.
-     *  Null clears the channel. */
-    public static native void setBatchDiscreteTvcFixMasks(long handle, int[] minMask, int[] maxMask, int words);
-
-    /** Per (scenario, freeze candidate): {frozen (0/1), the row target while frozen (generation − load Q)},
-     *  layout {@code (s * nFz + c) * 2} — null without candidates. */
-    public static native double[] readBatchDiscreteTvcFreeze(long handle);
 
     /** Install the WITH_GENERATOR shunt voltage-control tables for the in-kernel ShuntVoltageControl phase
      *  (OLF order 10); see DiscreteShuntVoltageControl.uploadToDevice. Returns 1 when the kernel loop owns them. */

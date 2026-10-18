@@ -12,7 +12,7 @@
  *  Returns 1 when the kernel loop OWNS the controllers (shared controlled buses included — the
  *  one-tap-at-a-time round robin runs in tvcGroupDecisionBatch), 0 when there are none. */
 extern "C" JNIEXPORT jint JNICALL
-Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchTvcControllers(
+OLF_JNI(ac_outerloop_gpu, TransformerVoltageControlNative, setBatchTvcControllers)(
         JNIEnv* env, jclass, jlong handle,
         jintArray jRhoRow, jintArray jVRow, jdoubleArray jTargetV, jdoubleArray jHalfDb,
         jintArray jElemIndex, jintArray jTapPtr, jdoubleArray jTapData, jintArray jBaseTap,
@@ -70,7 +70,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
 }
 
 extern "C" JNIEXPORT jintArray JNICALL
-Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_readBatchTvcTaps(
+OLF_JNI(ac_outerloop_gpu, TransformerVoltageControlNative, readBatchTvcTaps)(
         JNIEnv* env, jclass, jlong handle) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx == nullptr || ctx->nTvc <= 0 || !ctx->dTvcCurTap.p) {
@@ -91,7 +91,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_readBatc
  *  diffed ON/OFF row deltas (CSR); members with rho row, element, base tap, tap table, r1 range and
  *  initial r1. Returns 1 when the kernel loop owns them. */
 extern "C" JNIEXPORT jint JNICALL
-Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchDiscreteTvc(
+OLF_JNI(ac_outerloop_gpu, TransformerVoltageControlNative, setBatchDiscreteTvc)(
         JNIEnv* env, jclass, jlong handle, jint mode, jint entryOn,
         jintArray jGrpPtr, jintArray jGrpVRow, jdoubleArray jGrpTargetV, jdoubleArray jGrpHalfDb, jintArray jGrpUseInit,
         jintArray jDeltaPtr, jintArray jDeltaRow, jintArray jDeltaModeOn, jintArray jDeltaModeOff,
@@ -188,7 +188,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
  *  the freeze candidates (controller bus V row, load Q) and fixTransformerVoltageControls' per-member
  *  PV-candidate row lists (CSR, [nM+1]; null = no connectivity fix). Returns 1 when installed. */
 extern "C" JNIEXPORT jint JNICALL
-Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchDiscreteTvcFreeze(
+OLF_JNI(ac_outerloop_gpu, TransformerVoltageControlNative, setBatchDiscreteTvcFreeze)(
         JNIEnv* env, jclass, jlong handle, jintArray jFzVRow, jdoubleArray jFzLoadQ, jintArray jFzRlEntry,
         jintArray jFixPvRow) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
@@ -239,7 +239,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
 // unlike the tables above: OLF re-runs the check on the POST-CONTINGENCY network, so the component of a
 // not-controlled side is a property of the scenario, not of the run.
 extern "C" JNIEXPORT void JNICALL
-Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchDiscreteTvcFixMasks(
+OLF_JNI(ac_outerloop_gpu, TransformerVoltageControlNative, setBatchDiscreteTvcFixMasks)(
         JNIEnv* env, jclass, jlong handle, jintArray jMin, jintArray jMax, jint words) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx == nullptr || ctx->nTvd <= 0) {
@@ -269,7 +269,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
 /** Per (scenario, freeze candidate): {frozen (0/1), the row target while frozen (gen − load)} — layout
  *  {@code (s * nFz + c) * 2}; null without candidates. */
 extern "C" JNIEXPORT jdoubleArray JNICALL
-Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_readBatchDiscreteTvcFreeze(
+OLF_JNI(ac_outerloop_gpu, TransformerVoltageControlNative, readBatchDiscreteTvcFreeze)(
         JNIEnv* env, jclass, jlong handle) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx == nullptr || ctx->nTvd <= 0 || ctx->nTvdFz <= 0 || !ctx->dTvdFzFrozen.p) {
@@ -297,7 +297,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_readBatc
 /** Per (scenario, member): {state (0 off, 1 continuous, 2 fixed), tap index, the r1 fed to the
  *  rounding} — layout {@code (s * nM + m) * 3}; null without the table. */
 extern "C" JNIEXPORT jdoubleArray JNICALL
-Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_readBatchDiscreteTvcState(
+OLF_JNI(ac_outerloop_gpu, TransformerVoltageControlNative, readBatchDiscreteTvcState)(
         JNIEnv* env, jclass, jlong handle) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx == nullptr || ctx->nTvd <= 0 || !ctx->dTvdMemState.p) {

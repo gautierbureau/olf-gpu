@@ -10,6 +10,7 @@ package com.powsybl.openloadflow.ac.solver.gpu.batch;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 import com.powsybl.openloadflow.ac.outerloop.gpu.ForcedTargetQ;
+import com.powsybl.openloadflow.ac.outerloop.gpu.ReactiveLimitsNative;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -157,18 +158,18 @@ final class ChunkLists {
                 ChunkArrays.intsOrNull(dsIslandedList));
         GpuAcNewtonSolver.setBatchDsRowOverrides(handle,
                 ChunkArrays.intsOrNull(dsRowOvList));
-        GpuAcNewtonSolver.setBatchRlIslanded(handle,
+        ReactiveLimitsNative.setBatchRlIslanded(handle,
                 ChunkArrays.intsOrNull(rlIslandedList));
-        GpuAcNewtonSolver.setBatchRlNoUnpin(handle,
+        ReactiveLimitsNative.setBatchRlNoUnpin(handle,
                 ChunkArrays.intsOrNull(rlNoUnpinList));
-        GpuAcNewtonSolver.setBatchRlGenLost(handle,
+        ReactiveLimitsNative.setBatchRlGenLost(handle,
                 ChunkArrays.intsOrNull(rlGenLostList));
         GpuAcNewtonSolver.setBatchDqSubgroups(handle, anyDqSub ? dqSubDense : null,
                 anyDqSub ? RelocatedRows.qrMemberStart(gpuData) : null);
-        GpuAcNewtonSolver.setBatchRlLocal(handle,
+        ReactiveLimitsNative.setBatchRlLocal(handle,
                 ChunkArrays.intsOrNull(rlLocalList),
                 rlLocalList.isEmpty() ? null : rlLocalVt.stream().mapToDouble(Double::doubleValue).toArray());
-        GpuAcNewtonSolver.setBatchRlCmpOverrides(handle,
+        ReactiveLimitsNative.setBatchRlCmpOverrides(handle,
                 ChunkArrays.intsOrNull(rlCmpList),
                 rlCmpList.isEmpty() ? null : rlCmpRows.stream().mapToInt(Integer::intValue).toArray());
         GpuAcNewtonSolver.setBatchDqMemberTargetQOverrides(handle,

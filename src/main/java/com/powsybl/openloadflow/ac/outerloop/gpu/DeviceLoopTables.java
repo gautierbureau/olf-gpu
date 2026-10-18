@@ -67,7 +67,7 @@ public final class DeviceLoopTables {
      * is why {@code solveBatchContext} now refuses a context that reaches it without them.
      */
     public static void installRlElection(long handle, GpuAcData gpuData) {
-        GpuAcNewtonSolver.setBatchRlElection(handle, gpuData.rlNominalV(), gpuData.rlPRow(),
+        ReactiveLimitsNative.setBatchRlElection(handle, gpuData.rlNominalV(), gpuData.rlPRow(),
                 gpuData.rlTargetP(), gpuData.rlIdRank());
     }
 
@@ -84,10 +84,10 @@ public final class DeviceLoopTables {
             rowChecked[r] = rowNominalV[r] > 0 && rowNominalV[r] >= minNominalVoltageRealisticVoltageCheck
                     ? (byte) 1 : (byte) 0;
         }
-        GpuAcNewtonSolver.setBatchRealisticCheck(handle, rowChecked, minRealisticVoltage, maxRealisticVoltage, 1,
+        ReactiveLimitsNative.setBatchRealisticCheck(handle, rowChecked, minRealisticVoltage, maxRealisticVoltage, 1,
                 realisticFixingLoop);
         // Curve limits at runtime P: install (or clear, for cached contexts) the per-gen curve channel.
-        GpuAcNewtonSolver.setBatchRlCurves(handle,
+        ReactiveLimitsNative.setBatchRlCurves(handle,
                 rlCurves != null ? rlCurves.cvIdx() : null,
                 rlCurves != null ? rlCurves.cvIn() : null,
                 rlCurves != null ? rlCurves.cvPts() : null,
@@ -97,15 +97,15 @@ public final class DeviceLoopTables {
         ForcedTargetQ.install(handle, forcedTargetQ);
         // Voltage-dependent SVC reactive limits: install the quadratic coefficients (zero on
         // SVC-less entries — the kernel's limit(v) then degenerates to the packed static limit).
-        GpuAcNewtonSolver.setBatchRlSvcLimits(handle,
+        ReactiveLimitsNative.setBatchRlSvcLimits(handle,
                 gpuData.rlSvcBmin(), gpuData.rlSvcBmax(), gpuData.rlV2Base());
         // OLF's global forced-PV election keys — the RL pass keeps the strongest bus PV when every
         // PV bus would switch, instead of rejecting the scenario to the CPU.
-        GpuAcNewtonSolver.setBatchRlElection(handle, gpuData.rlNominalV(), gpuData.rlPRow(), gpuData.rlTargetP(), gpuData.rlIdRank());
+        ReactiveLimitsNative.setBatchRlElection(handle, gpuData.rlNominalV(), gpuData.rlPRow(), gpuData.rlTargetP(), gpuData.rlIdRank());
         // voltageRemoteControlRobustMode: install (or clear, for a cached context whose run has the
         // mode off) the realistic-V criteria the RL pass applies to REMOTE voltage controllers.
         // REALISTIC_VOLTAGE_MARGIN = 1.02, straight out of ReactiveLimitsOuterLoop.
-        GpuAcNewtonSolver.setBatchRlRobust(handle, gpuData.rlInitTargetQ(),
+        ReactiveLimitsNative.setBatchRlRobust(handle, gpuData.rlInitTargetQ(),
                 minRealisticVoltage * REALISTIC_VOLTAGE_MARGIN, maxRealisticVoltage / REALISTIC_VOLTAGE_MARGIN,
                 rlRobustMode ? 1 : 0);
         // OLF's own base pin kinds, so a realistic-voltage pin is not re-seeded as a Q-limit pin.
@@ -127,13 +127,13 @@ public final class DeviceLoopTables {
                     + " anyBaseLt=" + anyBaseLt + " kinds:" + ks + " caller="
                     + Thread.currentThread().getStackTrace()[2].getClassName().replaceAll(".*\\.", ""));
         }
-        GpuAcNewtonSolver.setBatchRlBaseLimitType(handle, anyBaseLt ? gpuData.rlBaseQLimitType() : null);
+        ReactiveLimitsNative.setBatchRlBaseLimitType(handle, anyBaseLt ? gpuData.rlBaseQLimitType() : null);
         // Remote-member RL entries (plan-B1): install (or clear, on a cached context) the kinds.
         boolean anyRlRemote = false;
         for (byte b : gpuData.rlRemote()) {
             anyRlRemote |= b != 0;
         }
-        GpuAcNewtonSolver.setBatchRlRemote(handle,
+        ReactiveLimitsNative.setBatchRlRemote(handle,
                 anyRlRemote ? gpuData.rlRemote() : null,
                 anyRlRemote ? gpuData.rlCmpVrow() : null,
                 anyRlRemote ? gpuData.rmqRow() : null,

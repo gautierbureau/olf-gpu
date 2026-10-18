@@ -83,6 +83,10 @@
 #include "../structure/shared_structure.cuh"
 #include "../solver/outer_loop_driver.cuh"
 
+// The exported name of a native method of class cls in package com.powsybl.openloadflow.<pkg> (dots as
+// underscores): the JNI mangling in one place, so moving natives to a facade renames their symbols in one token.
+#define OLF_JNI(pkg, cls, m) Java_com_powsybl_openloadflow_##pkg##_##cls##_##m
+
 using namespace powsybl::openloadflow;
 using namespace olfgpu;
 

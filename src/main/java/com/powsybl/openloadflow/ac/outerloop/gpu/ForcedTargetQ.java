@@ -167,7 +167,7 @@ public final class ForcedTargetQ {
 
     /** Install the channel, or clear it (a cached context reused by a run without it). */
     public static void install(long handle, Channel channel) {
-        com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.setBatchForcedTargetQ(handle,
+        ReactiveLimitsNative.setBatchForcedTargetQ(handle,
                 channel != null ? channel.fqIdx() : null,
                 channel != null ? channel.fqIn() : null,
                 channel != null ? channel.fqPts() : null,

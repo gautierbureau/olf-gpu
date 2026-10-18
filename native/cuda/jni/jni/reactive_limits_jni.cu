@@ -9,7 +9,7 @@
 // stride 5 {basePpu, share, baseRowTargetP, baseEvalMinPu, baseEvalMaxPu}; cvPts stride 3
 // {p_MW, minQ_MW, maxQ_MW} sorted by p; cvHv (null when no entry is an AC-emulation VSC) stride 2 {hvdc, side}.
 extern "C" JNIEXPORT void JNICALL
-Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchRlCurves(
+OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchRlCurves)(
         JNIEnv* env, jclass, jlong handle, jintArray jCvIdx, jdoubleArray jCvIn, jdoubleArray jCvPts,
         jintArray jCvHv, jint extrapolate) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
@@ -77,7 +77,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
 // stride 3 {p_MW, minQ_MW, maxQ_MW} sorted by p. Null clears the channel (a cached context reused by a run
 // without it).
 extern "C" JNIEXPORT void JNICALL
-Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchForcedTargetQ(
+OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchForcedTargetQ)(
         JNIEnv* env, jclass, jlong handle, jintArray jIdx, jdoubleArray jIn, jdoubleArray jPts, jint extrapolate) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx == nullptr) {
@@ -112,7 +112,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
 // Per-chunk loss pre-distribution moves of the forced generators ([nS * nfq], pu), or null when no scenario of the
 // chunk pre-distributes. Set before each solve that carries contingencies.
 extern "C" JNIEXPORT void JNICALL
-Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchForcedTargetQPre(
+OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchForcedTargetQPre)(
         JNIEnv* env, jclass, jlong handle, jdoubleArray jPre) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx == nullptr) {
@@ -129,7 +129,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchRlElection(
+OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchRlElection)(
         JNIEnv* env, jclass, jlong handle, jdoubleArray jNomV, jintArray jPRow, jdoubleArray jStaticP, jintArray jIdRank) {
     BatchSolverContext* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx == nullptr) {
@@ -165,7 +165,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
 // REALISTIC_VOLTAGE_MARGIN and maxRealisticVoltage / REALISTIC_VOLTAGE_MARGIN, margin 1.02). robust = 0
 // clears the channel, so a cached context reused by a run with the mode off stops applying it.
 extern "C" JNIEXPORT void JNICALL
-Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchRlRobust(
+OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchRlRobust)(
         JNIEnv* env, jclass, jlong handle, jdoubleArray jInitTgtQ, jdouble vLo, jdouble vHi, jint robust) {
     BatchSolverContext* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx == nullptr) {
@@ -190,7 +190,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
 // AcloadFlowEngine's realistic-voltage check: install (or clear) the per-row "this row is a
 // checked bus voltage" mask and the two bounds. enabled = 0 clears it on a cached context.
 extern "C" JNIEXPORT void JNICALL
-Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchRealisticCheck(
+OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchRealisticCheck)(
         JNIEnv* env, jclass, jlong handle, jbyteArray jRowChecked, jdouble minV, jdouble maxV, jint enabled,
         jint fixingLoop) {
     BatchSolverContext* ctx = reinterpret_cast<BatchSolverContext*>(handle);
@@ -215,7 +215,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchRlSvcLimits(
+OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchRlSvcLimits)(
         JNIEnv* env, jclass, jlong handle, jdoubleArray jBmin, jdoubleArray jBmax, jdoubleArray jV2Base) {
     BatchSolverContext* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx == nullptr || ctx->nrl == 0) {
@@ -239,7 +239,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchRlBaseLimitType(
+OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchRlBaseLimitType)(
         JNIEnv* env, jclass, jlong handle, jbyteArray jKinds) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx == nullptr) {
@@ -262,7 +262,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchRlRemote(
+OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchRlRemote)(
         JNIEnv* env, jclass, jlong handle, jbyteArray jRemote, jintArray jCmpVrow,
         jintArray jRmqRow, jintArray jRmqElem, jintArray jRmqSide, jintArray jRmqKind, jdoubleArray jRmqWeight,
         jintArray jDqKMember, jintArray jDqJMember, jdoubleArray jMKey, jintArray jMRlEntry,
@@ -409,7 +409,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchRlPinTargets(
+OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchRlPinTargets)(
         JNIEnv* env, jclass, jlong handle, jdoubleArray jTargets) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx == nullptr) {
@@ -427,7 +427,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
 }
 
 extern "C" JNIEXPORT jdoubleArray JNICALL
-Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_readBatchRlPinTargets(
+OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, readBatchRlPinTargets)(
         JNIEnv* env, jclass, jlong handle) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx == nullptr || ctx->nrl <= 0) {
@@ -457,7 +457,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_readBatc
  *  {@code pairs} is (scenario, RL entry) flattened, {@code newTarget} the voltage target each row goes
  *  back to. No-op for an entry that is not pinned. */
 extern "C" JNIEXPORT void JNICALL
-Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchRlUnpin(
+OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchRlUnpin)(
         JNIEnv* env, jclass, jlong handle, jintArray jPairs, jdoubleArray jTargets) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx == nullptr || ctx->nrl <= 0 || jPairs == nullptr || jTargets == nullptr) {
@@ -484,7 +484,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
 // Reactive-limits controllers STRANDED in another synchronous component: install (or clear, with
 // null) the per-scenario mask as {slot, controller} pairs.
 extern "C" JNIEXPORT void JNICALL
-Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchRlNoUnpin(
+OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchRlNoUnpin)(
         JNIEnv* env, jclass, jlong handle, jintArray jPairs) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx == nullptr) {
@@ -514,7 +514,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
 
 // (scenario, entry) pairs whose bus lost EVERY generator this scenario: seeded FROZEN by initRlLimitTypeBatch.
 extern "C" JNIEXPORT void JNICALL
-Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchRlGenLost(
+OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchRlGenLost)(
         JNIEnv* env, jclass, jlong handle, jintArray jPairs) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx == nullptr) {
@@ -546,7 +546,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchRlIslanded(
+OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchRlIslanded)(
         JNIEnv* env, jclass, jlong handle, jintArray jPairs) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx == nullptr) {
@@ -576,7 +576,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
 // checked by the reactive-limits pass as a LOCAL controller at the given voltage target (pu) — the bus is
 // a plain PV bus this scenario, whatever its base packing. Null clears the context's list.
 extern "C" JNIEXPORT void JNICALL
-Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchRlLocal(
+OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchRlLocal)(
         JNIEnv* env, jclass, jlong handle, jintArray jPairs, jdoubleArray jVt) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx == nullptr) {
@@ -611,7 +611,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
 // the reactive-limit switch-back compares against the (per-scenario) group target - the new pilot's, not the base
 // pilot's whose row is frozen with its island. Null or empty clears the context's list.
 extern "C" JNIEXPORT void JNICALL
-Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchRlCmpOverrides(
+OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchRlCmpOverrides)(
         JNIEnv* env, jclass, jlong handle, jintArray jPairs, jintArray jCmp) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx == nullptr) {

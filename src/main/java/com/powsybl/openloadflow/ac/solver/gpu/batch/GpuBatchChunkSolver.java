@@ -7,10 +7,10 @@
  */
 package com.powsybl.openloadflow.ac.solver.gpu.batch;
 
-import com.powsybl.openloadflow.ac.outerloop.gpu.DeviceLoopKind;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 import com.powsybl.openloadflow.ac.outerloop.gpu.ContinuousPhaseControl;
+import com.powsybl.openloadflow.ac.outerloop.gpu.DeviceLoopKind;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DeviceLoopTables;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DevicePhaseInstaller;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DevicePhases;
@@ -18,6 +18,7 @@ import com.powsybl.openloadflow.ac.outerloop.gpu.DiscreteTransformerVoltageContr
 import com.powsybl.openloadflow.ac.outerloop.gpu.ForcedTargetQ;
 import com.powsybl.openloadflow.ac.outerloop.gpu.HvdcAcEmulation;
 import com.powsybl.openloadflow.ac.outerloop.gpu.ReactiveCapabilityCurves;
+import com.powsybl.openloadflow.ac.outerloop.gpu.ReactiveLimitsNative;
 import com.powsybl.openloadflow.ac.outerloop.gpu.SecondaryVoltageControlLoop;
 import com.powsybl.openloadflow.ac.outerloop.gpu.VoltageMonitoring;
 import com.powsybl.openloadflow.ac.solver.NewtonRaphsonParameters;
@@ -1083,7 +1084,7 @@ final class GpuBatchChunkSolver {
                     }
                     if (forcedTargetQ != null) {                 // where each slot's pre-distribution put the clamping gens
                         // a pair starts each generator at its anchor, a contingency at its pre-distributed target
-                        GpuAcNewtonSolver.setBatchForcedTargetQPre(handle, forcedTargetQ.preMoves(
+                        ReactiveLimitsNative.setBatchForcedTargetQPre(handle, forcedTargetQ.preMoves(
                                 pairPhase && dgAnchor != null ? ChunkArrays.perSlot(dgAnchor, chunkSize, ngen) : cl.genPreMovesBySlot));
                     }
                     if (cl.outageSlackShift != null && rs.hasDs) {     // on top of whatever the pre-distribution or the pair's
@@ -1098,7 +1099,7 @@ final class GpuBatchChunkSolver {
                         GpuAcNewtonSolver.setBatchSlackOnlyAnchor(handle, pairPhase ? pairSlackAbsorbedSeed : null);
                     }
                     if (nrl > 0) {
-                        GpuAcNewtonSolver.setBatchRlPinTargets(handle, pairPhase ? rlPinIn : null);
+                        ReactiveLimitsNative.setBatchRlPinTargets(handle, pairPhase ? rlPinIn : null);
                     }
                     if (ngen > 0) {
                         GpuAcNewtonSolver.setBatchGenAnchor(handle, pairPhase ? dgAnchor : null,
@@ -1190,7 +1191,7 @@ final class GpuBatchChunkSolver {
                                 GpuAcNewtonSolver.setBatchTargetDeltas(handle, dec.targetRows(), dec.targetValues());
                             }
                             if (dec.unpinPairs() != null && dec.unpinPairs().length > 0) {
-                                GpuAcNewtonSolver.setBatchRlUnpin(handle, dec.unpinPairs(), dec.unpinTargets());
+                                ReactiveLimitsNative.setBatchRlUnpin(handle, dec.unpinPairs(), dec.unpinTargets());
                             }
                             GpuAcNewtonSolver.setBatchDriverResume(handle, dec.hostChanged());
                             chunkResults = GpuAcNewtonSolver.solveBatchContext(handle, baseState, baseTargets,
@@ -1447,7 +1448,7 @@ final class GpuBatchChunkSolver {
                     if (rlStateOut != null && !pairPhase) {      // capture each ctg's final RL pinning for its pairs
                         // ...and the targets its pins ENDED with, which its pairs restore (OLF restores the parent's
                         // generation target Q; a limit that moved by less than the re-freeze tolerance kept the old one)
-                        double[] pins = GpuAcNewtonSolver.readBatchRlPinTargets(handle);
+                        double[] pins = ReactiveLimitsNative.readBatchRlPinTargets(handle);
                         for (int s = 0; s < realCount; s++) {
                             if (pins != null) {
                                 rlPinByIndex.put(group.get(chunkStart + s), java.util.Arrays.copyOfRange(pins, s * nrl, (s + 1) * nrl));

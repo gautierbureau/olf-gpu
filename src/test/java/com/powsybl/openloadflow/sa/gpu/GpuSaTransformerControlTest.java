@@ -487,7 +487,7 @@ class GpuSaTransformerControlTest extends AbstractGpuSaTest {
 
     /** DEVICE-mode SimpleTransformerVoltageControl (WITH_GENERATOR): the first solve runs with the
      *  VC-ON activation deltas (continuous rho), then one round-to-closest-tap re-solve
-     *  (GpuBatchSimpleTvc); GPU SA == CPU SA at 1e-12, tap-moving strong outage included. */
+     *  (SimpleTransformerVoltageControl); GPU SA == CPU SA at 1e-12, tap-moving strong outage included. */
     @Test
     void deviceSimpleTransformerVoltageControlMatchesCpu() {
         org.junit.jupiter.api.Assumptions.assumeTrue(

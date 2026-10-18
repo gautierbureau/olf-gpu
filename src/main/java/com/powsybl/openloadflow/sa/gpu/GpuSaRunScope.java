@@ -96,7 +96,7 @@ final class GpuSaRunScope {
         // and compose fine).
 
         // SIMPLE (WITH_GENERATOR) TVC: continuous first solve (VC-on activation deltas) then a single
-        // round-to-closest-tap re-solve (GpuBatchSimpleTvc); same stage-1 structural scope.
+        // round-to-closest-tap re-solve (SimpleTransformerVoltageControl); same stage-1 structural scope.
         // HVDC AC-emulation loops WITH HVDCs present (GpuBatchHvdcAcEmulation). A SATURATED/FROZEN
         // base is representable since 2026-09-08 (the orchestrator's base-frame overrides:
         // baseTargets - baseD + d(status), base statuses seeded with the hv bits) — but ONLY the

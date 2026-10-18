@@ -30,7 +30,7 @@ import java.util.List;
 /**
  * DEVICE port of OLF's {@code ShuntVoltageControlOuterLoop} (the WITH_GENERATOR mode — OLF's
  * DEFAULT {@code shuntVoltageControlMode}): the same fixed two-phase flow as
- * {@link GpuBatchSimpleTvc} —
+ * {@link SimpleTransformerVoltageControl} —
  *
  * <ol>
  *   <li>{@code initialize()} enables CONTINUOUS voltage control on every controller shunt BEFORE

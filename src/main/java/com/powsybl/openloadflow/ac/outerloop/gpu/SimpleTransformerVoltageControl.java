@@ -5,7 +5,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/.
  * SPDX-License-Identifier: MPL-2.0
  */
-package com.powsybl.openloadflow.ac.solver.gpu.batch;
+package com.powsybl.openloadflow.ac.outerloop.gpu;
 
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DiscreteTransformerVoltageControl;
@@ -37,9 +37,9 @@ import java.util.List;
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
-final class GpuBatchSimpleTvc {
+final class SimpleTransformerVoltageControl {
 
-    private GpuBatchSimpleTvc() {
+    private SimpleTransformerVoltageControl() {
     }
 
     /** Pre-solve mutation: apply every live controller's VC-ON activation deltas to each real

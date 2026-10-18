@@ -183,7 +183,7 @@ public final class ReactiveLimitsPacker {
         // needs an entry not for its limits (no RL loop runs, so they are dormant) but for the pin machinery the
         // VoltageMonitoring phase activates it through: VoltageMonitoring maps a bus to its rl entry and,
         // finding none, recorded a SKIP for every monitored controller — which the all-or-nothing phase gate
-        // (GpuBatchPhaseOwnership.batchable) turns into "route the whole run to the CPU". Measured with
+        // (DevicePhaseOwnership.batchable) turns into "route the whole run to the CPU". Measured with
         // OLF_GPU_SA_NO_RL=1 on rte6515's busbar window: 976 of 976 batchable contingencies CPU-replayed
         // (RUNTIME:status=-2=976, 0/1000 on device) while the run's own loop list HAS VoltageMonitoring.
         if (reactiveLimits || anyMonitoringSvc(network)) {

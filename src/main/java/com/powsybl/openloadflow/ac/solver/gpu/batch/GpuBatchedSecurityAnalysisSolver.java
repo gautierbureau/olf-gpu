@@ -16,6 +16,7 @@ import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcActivationExtractor
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcDataCache;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcDataExtractor;
+import com.powsybl.openloadflow.ac.outerloop.gpu.DevicePhaseOwnership;
 import com.powsybl.openloadflow.ac.outerloop.gpu.ForcedTargetQ;
 import com.powsybl.openloadflow.ac.outerloop.gpu.HvdcAcEmulation;
 import com.powsybl.openloadflow.ac.outerloop.gpu.ReactiveCapabilityCurves;
@@ -224,7 +225,7 @@ public final class GpuBatchedSecurityAnalysisSolver {
             // All-or-nothing, the same rule the base load flow applies: a loop the builders represented
             // only PARTIALLY would have the device drive a SUBSET of it, and this path has no host-pause
             // slot to hand it back to, so the whole run goes to the CPU (resultsByIndex stays null).
-            if (GpuBatchPhaseOwnership.batchable()) {
+            if (DevicePhaseOwnership.batchable()) {
                 // built in the order the call evaluated them when they were its arguments
                 var hvdcElemIndex = HvdcAcEmulation.elementIndices(network, nElements);
                 int[] varType = config.lsMode() == 2 ? GpuAcActivationExtractor.extractVarType(equationSystem, n) : null;

@@ -11,6 +11,7 @@ import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcActivation;
 import com.powsybl.openloadflow.ac.outerloop.gpu.ContinuousPhaseControl;
+import com.powsybl.openloadflow.ac.outerloop.gpu.DevicePhaseOwnership;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DiscreteShuntVoltageControl;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DiscreteTransformerVoltageControl;
 import com.powsybl.openloadflow.ac.outerloop.gpu.IncrementalFlowControl;
@@ -36,7 +37,7 @@ import java.util.List;
  *
  * <p>Building is shared; INSTALLING is not, and cannot be. The base load flow uploads straight onto its
  * batch-of-one context, while the analysis builds before its chunk context exists and uploads per chunk.
- * What both then apply to the result is {@link GpuBatchPhaseOwnership}.
+ * What both then apply to the result is {@link DevicePhaseOwnership}.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
@@ -79,7 +80,7 @@ public final class GpuBatchPhases {
 
     /**
      * Build every configured phase's tables. Resets {@link GpuBatchSkips} first, so the caller can ask
-     * {@link GpuBatchPhaseOwnership} afterwards whether each loop came out COMPLETE.
+     * {@link DevicePhaseOwnership} afterwards whether each loop came out COMPLETE.
      *
      * <p>{@code rlVrow} is the reactive-limit row pack the monitoring and secondary-voltage phases index
      * against, {@code rlBusNum} its bus numbers (the generator freeze needs them to find a REMOTE

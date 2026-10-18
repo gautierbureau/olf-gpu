@@ -5,7 +5,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/.
  * SPDX-License-Identifier: MPL-2.0
  */
-package com.powsybl.openloadflow.ac.solver.gpu.batch;
+package com.powsybl.openloadflow.ac.outerloop.gpu;
 
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 import com.powsybl.openloadflow.ac.outerloop.gpu.ContinuousPhaseControl;
@@ -15,6 +15,7 @@ import com.powsybl.openloadflow.ac.outerloop.gpu.IncrementalFlowControl;
 import com.powsybl.openloadflow.ac.outerloop.gpu.IncrementalShuntVoltageControl;
 import com.powsybl.openloadflow.ac.outerloop.gpu.IncrementalTransformerVoltageControl;
 import com.powsybl.openloadflow.ac.outerloop.gpu.SecondaryVoltageControlLoop;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchSkips;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -34,11 +35,11 @@ import org.slf4j.LoggerFactory;
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
-public final class GpuBatchPhaseOwnership {
+public final class DevicePhaseOwnership {
 
-    private static final Logger LOGGER = LoggerFactory.getLogger(GpuBatchPhaseOwnership.class);
+    private static final Logger LOGGER = LoggerFactory.getLogger(DevicePhaseOwnership.class);
 
-    private GpuBatchPhaseOwnership() {
+    private DevicePhaseOwnership() {
     }
 
     /**

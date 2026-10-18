@@ -892,7 +892,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
             // All-or-nothing, the same rule the batched SA applies: a loop the builders represented only
             // PARTIALLY goes back to OLF's engine at its own slot, rather than the device driving a
             // subset of it while the pause bit says nobody has to.
-            hostMask = com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchPhaseOwnership.enforceComplete(
+            hostMask = com.powsybl.openloadflow.ac.outerloop.gpu.DevicePhaseOwnership.enforceComplete(
                     handle, hostMask);
             activeHostMask = hostMask;
             GpuAcNewtonSolver.setBatchHostLoop(handle, hostMask);

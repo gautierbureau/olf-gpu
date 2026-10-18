@@ -7,7 +7,6 @@
  */
 package com.powsybl.openloadflow.ac.solver.gpu;
 
-import com.powsybl.openloadflow.ac.outerloop.gpu.DeviceLoopKind;
 import com.powsybl.commons.PowsyblException;
 import com.powsybl.commons.report.ReportNode;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
@@ -21,10 +20,12 @@ import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcStructures;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuEquationDump;
 import com.powsybl.openloadflow.ac.outerloop.gpu.ContinuousPhaseControl;
+import com.powsybl.openloadflow.ac.outerloop.gpu.DeviceLoopKind;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DeviceLoopTables;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DistributedSlackWriteBack;
 import com.powsybl.openloadflow.ac.outerloop.gpu.ForcedTargetQ;
 import com.powsybl.openloadflow.ac.outerloop.gpu.HvdcAcEmulation;
+import com.powsybl.openloadflow.ac.outerloop.gpu.HvdcNative;
 import com.powsybl.openloadflow.ac.outerloop.gpu.IncrementalFlowControl;
 import com.powsybl.openloadflow.ac.outerloop.gpu.IncrementalShuntVoltageControl;
 import com.powsybl.openloadflow.ac.outerloop.gpu.IncrementalTransformerVoltageControl;
@@ -195,7 +196,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
         long handle = context.handle.get();
         double[] deviceTargets = GpuAcNewtonSolver.readBatchTargets(handle);
         if (hvdcCtls != null && !hvdcCtls.isEmpty()) {
-            HvdcAcEmulation.writeBack(network, hvdcCtls, GpuAcNewtonSolver.readBatchHvdcStatus(handle),
+            HvdcAcEmulation.writeBack(network, hvdcCtls, HvdcNative.readBatchHvdcStatus(handle),
                     data.getTotalElementCount());
         }
         if (monCtls != null && !monCtls.isEmpty()) {

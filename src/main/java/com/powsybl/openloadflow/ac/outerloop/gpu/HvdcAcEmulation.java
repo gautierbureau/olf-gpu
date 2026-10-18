@@ -473,7 +473,7 @@ public final class HvdcAcEmulation {
                                             boolean[][] disabledMask, double[] appliedD1, double[] appliedD2,
                                             boolean limits) {
         if (ctls == null || ctls.isEmpty()) {
-            GpuAcNewtonSolver.setBatchHvdcLoops(handle, null, null, null, null, null, null, null, null, null, null, 0);
+            HvdcNative.setBatchHvdcLoops(handle, null, null, null, null, null, null, null, null, null, null, 0);
             return null;
         }
         int nh = ctls.size();
@@ -510,7 +510,7 @@ public final class HvdcAcEmulation {
                         && disabledMask[s2][ctls.get(h).hvElemIndex()] ? 1 : 0);
             }
         }
-        GpuAcNewtonSolver.setBatchHvdcLoops(handle, hvElem, hvB1, hvB2, hvPhi1, hvPhi2, hvIn, ctgOut,
+        HvdcNative.setBatchHvdcLoops(handle, hvElem, hvB1, hvB2, hvPhi1, hvPhi2, hvIn, ctgOut,
                 flatStatus, appliedD1, appliedD2, limits ? 1 : 0);
         return ctgOut;
     }

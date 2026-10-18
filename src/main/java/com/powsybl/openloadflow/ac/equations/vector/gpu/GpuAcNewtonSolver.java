@@ -378,22 +378,6 @@ public final class GpuAcNewtonSolver {
                                                          double[] qTargets, int[] rlCounts, int[] rlPool);
 
     /**
-     * Install the HVDC AC-emulation outer loops' tables and their per-scenario starting state, so
-     * FreezingHvdcACEmulation and AcHvdcAcEmulationLimits run as DRIVER PHASES in OLF's order —
-     * between DistributedSlack and ReactiveLimits — instead of as host orchestrators after the whole
-     * solve. Pass a null/empty {@code elem} to leave them to the host orchestrator.
-     *
-     * @param in per hvdc x9: {@code p0 k pMax12 pMax21 loss1 loss2 r baseD1 baseD2}
-     * @param ctgOut per (scenario, hvdc): the contingency itself outaged it, so the loops leave it alone
-     * @param status per (scenario, hvdc) starting status, and {@code appliedD1/D2} the converter-row
-     *        deltas the pre-solve freeze already applied — transitions are applied incrementally
-     */
-    public static native void setBatchHvdcLoops(long handle, int[] elem, int[] bus1Row, int[] bus2Row,
-                                                int[] bus1Phi, int[] bus2Phi,
-                                                double[] in, byte[] ctgOut, int[] status,
-                                                double[] appliedD1, double[] appliedD2, int limitsActive);
-
-    /**
      * MonitoringVoltage controller table (OLF outer-loop order 6) for the DRIVER phase: per
      * controller its monitored V row and {@code band = {lowThreshold, highThreshold, lowTargetV,
      * highTargetV}}, plus the CSR list ({@code deltaPtr}) of (row, mode, target) writes its
@@ -444,9 +428,6 @@ public final class GpuAcNewtonSolver {
 
     /** How many (controller, scenario) monitoring automatons fired in the last solve. */
     public static native int readBatchMonitoringActivations(long handle);
-
-    /** The HVDC statuses after a solve, {@code nScenarios * nHvdc}, or null when none are installed. */
-    public static native int[] readBatchHvdcStatus(long handle);
 
     /** Per (scenario, monitoring controller): the target the driver's MonitoringVoltage phase activated
      *  (pu), NaN while standing by — null without the table. Layout {@code s * nmon + c}. */

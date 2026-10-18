@@ -18,6 +18,7 @@ import com.powsybl.openloadflow.ac.outerloop.gpu.DiscreteTransformerVoltageContr
 import com.powsybl.openloadflow.ac.outerloop.gpu.DistributedSlackNative;
 import com.powsybl.openloadflow.ac.outerloop.gpu.ForcedTargetQ;
 import com.powsybl.openloadflow.ac.outerloop.gpu.HvdcAcEmulation;
+import com.powsybl.openloadflow.ac.outerloop.gpu.HvdcNative;
 import com.powsybl.openloadflow.ac.outerloop.gpu.ReactiveCapabilityCurves;
 import com.powsybl.openloadflow.ac.outerloop.gpu.ReactiveLimitsNative;
 import com.powsybl.openloadflow.ac.outerloop.gpu.SecondaryVoltageControlLoop;
@@ -1257,7 +1258,7 @@ final class GpuBatchChunkSolver {
                         // ON THE DEVICE. The host keeps mirrors of both, and the orchestrators that
                         // run next re-upload them — so without this sync they would clobber the loops'
                         // work with the pre-solve state.
-                        int[] devStatus = GpuAcNewtonSolver.readBatchHvdcStatus(handle);
+                        int[] devStatus = HvdcNative.readBatchHvdcStatus(handle);
                         int nh = hvdcControllers.size();
                         if (devStatus != null) {
                             for (int s2 = 0; s2 < chunkSize; s2++) {

@@ -8,7 +8,7 @@
 // applied converter-row deltas the host's pre-solve freeze produced). Install to run those loops as
 // DRIVER PHASES in OLF's order; clear (null) to leave them to the host orchestrator.
 extern "C" JNIEXPORT void JNICALL
-Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchHvdcLoops(
+OLF_JNI(ac_outerloop_gpu, HvdcNative, setBatchHvdcLoops)(
         JNIEnv* env, jclass, jlong handle, jintArray jElem, jintArray jBus1Row, jintArray jBus2Row,
         jintArray jBus1Phi, jintArray jBus2Phi,
         jdoubleArray jIn, jbyteArray jCtgOut, jintArray jStatus,
@@ -50,7 +50,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
 
 /** Read the HVDC statuses back after a solve, so the host keeps its own view in step. */
 extern "C" JNIEXPORT jintArray JNICALL
-Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_readBatchHvdcStatus(
+OLF_JNI(ac_outerloop_gpu, HvdcNative, readBatchHvdcStatus)(
         JNIEnv* env, jclass, jlong handle) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx == nullptr || ctx->nhv == 0) {

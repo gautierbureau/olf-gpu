@@ -20,6 +20,7 @@ import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcStructures;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuEquationDump;
 import com.powsybl.openloadflow.ac.outerloop.gpu.ContinuousPhaseControl;
+import com.powsybl.openloadflow.ac.outerloop.gpu.ForcedTargetQ;
 import com.powsybl.openloadflow.ac.outerloop.gpu.HvdcAcEmulation;
 import com.powsybl.openloadflow.ac.outerloop.gpu.IncrementalFlowControl;
 import com.powsybl.openloadflow.ac.outerloop.gpu.IncrementalShuntVoltageControl;
@@ -35,7 +36,6 @@ import com.powsybl.openloadflow.ac.solver.NewtonRaphsonParameters;
 import com.powsybl.openloadflow.ac.solver.NewtonRaphsonStoppingCriteria;
 import com.powsybl.openloadflow.ac.solver.PerEquationTypeStoppingCriteria;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchContextCache;
-import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchForcedTargetQ;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchOuterLoopTables;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchStatus;
 import com.powsybl.openloadflow.equations.EquationSystem;
@@ -695,8 +695,8 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                         : null;
                 // forceTargetQInReactiveLimits: the base load flow's slack moves P too, and OLF re-clamps.
                 var lfNetworkParameters = acLoadFlowParameters.getNetworkParameters();
-                GpuBatchForcedTargetQ.Channel forcedTargetQ = driverRlLoop() != null && dsLoop != null
-                        ? GpuBatchForcedTargetQ.build(network, equationSystem, cachedData, driverDsParams(),
+                ForcedTargetQ.Channel forcedTargetQ = driverRlLoop() != null && dsLoop != null
+                        ? ForcedTargetQ.build(network, equationSystem, cachedData, driverDsParams(),
                                 lfNetworkParameters.isForceTargetQInReactiveLimits() && lfNetworkParameters.isReactiveLimits(),
                                 true, target, activation.rowMode(), lfNetworkParameters.isExtrapolateReactiveLimits())
                         : null;

@@ -16,6 +16,7 @@ import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcActivationExtractor
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcDataCache;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcDataExtractor;
+import com.powsybl.openloadflow.ac.outerloop.gpu.ForcedTargetQ;
 import com.powsybl.openloadflow.ac.outerloop.gpu.HvdcAcEmulation;
 import com.powsybl.openloadflow.ac.outerloop.gpu.ReactiveCapabilityCurves;
 import com.powsybl.openloadflow.ac.solver.NewtonRaphsonParameters;
@@ -165,8 +166,8 @@ public final class GpuBatchedSecurityAnalysisSolver {
                         config.rlCurveExtrapolate())
                 : null;
         // forceTargetQInReactiveLimits: the curve generators whose clamped Q target follows their P (null = none).
-        GpuBatchForcedTargetQ.Channel forcedTargetQ = reactiveLimits
-                ? GpuBatchForcedTargetQ.build(network, equationSystem, gpuData, config.dsParams(), config.forceTargetQ(),
+        ForcedTargetQ.Channel forcedTargetQ = reactiveLimits
+                ? ForcedTargetQ.build(network, equationSystem, gpuData, config.dsParams(), config.forceTargetQ(),
                         distributedSlack, baseTargets, baseActivation.rowMode(), config.rlCurveExtrapolate())
                 : null;
         // Couplers whose DUMMY rows host a bus's power equations under the tree relocation: an island has to

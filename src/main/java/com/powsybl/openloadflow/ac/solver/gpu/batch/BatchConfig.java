@@ -32,7 +32,7 @@ package com.powsybl.openloadflow.ac.solver.gpu.batch;
  *       makes a saturated distribution REJECT the scenario (CPU fallback replays it with the real
  *       behavior) instead of silently leaving the residual at the slack.</li>
  *   <li>{@code forceTargetQ}: OLF's forceTargetQInReactiveLimits with reactive limits on - curve generators'
- *       target Q follows their P (GpuBatchForcedTargetQ).</li>
+ *       target Q follows their P (ForcedTargetQ).</li>
  * </ul>
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}

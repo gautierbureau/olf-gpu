@@ -695,7 +695,7 @@ public final class GpuAcNewtonSolver {
                                                int[] cvHv, int extrapolate);
 
     /** Install (or clear, with nulls) the forceTargetQInReactiveLimits channel on a batch context: the Q
-     *  targets of generators OLF clamps into their curve limits at their current P (see GpuBatchForcedTargetQ). */
+     *  targets of generators OLF clamps into their curve limits at their current P (see ForcedTargetQ). */
     public static native void setBatchForcedTargetQ(long handle, int[] fqIdx, double[] fqIn, double[] fqPts,
                                                     int extrapolate);
 

@@ -11,6 +11,7 @@ import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 import com.powsybl.openloadflow.ac.outerloop.gpu.ContinuousPhaseControl;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DiscreteTransformerVoltageControl;
+import com.powsybl.openloadflow.ac.outerloop.gpu.ForcedTargetQ;
 import com.powsybl.openloadflow.ac.outerloop.gpu.HvdcAcEmulation;
 import com.powsybl.openloadflow.ac.outerloop.gpu.ReactiveCapabilityCurves;
 import com.powsybl.openloadflow.ac.outerloop.gpu.SecondaryVoltageControlLoop;
@@ -168,7 +169,7 @@ final class GpuBatchChunkSolver {
         GpuBatchPhases.Built phases = in.phases().phases();
         List<HvdcAcEmulation.Ctl> hvdcControllers = in.phases().hvdcControllers();
         ReactiveCapabilityCurves.Channel rlCurves = in.phases().rlCurves();
-        GpuBatchForcedTargetQ.Channel forcedTargetQ = in.phases().forcedTargetQ();
+        ForcedTargetQ.Channel forcedTargetQ = in.phases().forcedTargetQ();
         double[][] resultsByIndex = in.sinks().resultsByIndex();
         double[] preDistributedByIndex = in.sinks().preDistributedByIndex();
         double[] distributedByIndex = in.sinks().distributedByIndex();

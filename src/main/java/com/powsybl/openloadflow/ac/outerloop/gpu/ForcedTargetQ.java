@@ -5,7 +5,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/.
  * SPDX-License-Identifier: MPL-2.0
  */
-package com.powsybl.openloadflow.ac.solver.gpu.batch;
+package com.powsybl.openloadflow.ac.outerloop.gpu;
 
 import com.powsybl.commons.PowsyblException;
 import com.powsybl.iidm.network.ReactiveCapabilityCurve;
@@ -47,9 +47,9 @@ import java.util.List;
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
-public final class GpuBatchForcedTargetQ {
+public final class ForcedTargetQ {
 
-    private GpuBatchForcedTargetQ() {
+    private ForcedTargetQ() {
     }
 
     /** The packed channel; {@code genSlot} is each entry's generator slot in the distributed-slack generator pack

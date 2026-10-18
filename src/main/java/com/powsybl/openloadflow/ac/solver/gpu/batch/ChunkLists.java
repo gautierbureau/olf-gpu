@@ -9,6 +9,7 @@ package com.powsybl.openloadflow.ac.solver.gpu.batch;
 
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
+import com.powsybl.openloadflow.ac.equations.vector.gpu.RemoteVoltageControlNative;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DistributedSlackNative;
 import com.powsybl.openloadflow.ac.outerloop.gpu.ForcedTargetQ;
 import com.powsybl.openloadflow.ac.outerloop.gpu.ReactiveLimitsNative;
@@ -131,7 +132,7 @@ final class ChunkLists {
         // re-solve on this context must not drop it (as a solve PARAMETER it did — the
         // re-solve passed null and the DISTR_Q target was recomputed with the dead
         // controller's key back in the denominator, clobbering the right target).
-        GpuAcNewtonSolver.setBatchDqInactiveMembers(handle,
+        RemoteVoltageControlNative.setBatchDqInactiveMembers(handle,
                 ChunkArrays.intsOrNull(dqInactList));
         GpuAcNewtonSolver.setBatchFrozenRows(handle,
                 frozenSeedSlot.isEmpty() ? null : java.util.stream.IntStream
@@ -143,13 +144,13 @@ final class ChunkLists {
                 ChunkArrays.intsOrNull(dsLostGenList));
         DistributedSlackNative.setBatchDsOutGenerators(handle,
                 ChunkArrays.intsOrNull(dsOutList));
-        GpuAcNewtonSolver.setBatchDqWeightOverrides(handle,
+        RemoteVoltageControlNative.setBatchDqWeightOverrides(handle,
                 ChunkArrays.intsOrNull(dqOvIdxList),
                 ChunkArrays.doublesOrNull(dqOvWList));
-        GpuAcNewtonSolver.setBatchDqKeyOverrides(handle,
+        RemoteVoltageControlNative.setBatchDqKeyOverrides(handle,
                 ChunkArrays.intsOrNull(dqKeyOvIdxList),
                 ChunkArrays.doublesOrNull(dqKeyOvList));
-        GpuAcNewtonSolver.setBatchDrCoefOverrides(handle,
+        RemoteVoltageControlNative.setBatchDrCoefOverrides(handle,
                 ChunkArrays.intsOrNull(drOvIdxList),
                 ChunkArrays.doublesOrNull(drOvCList));
         GpuAcNewtonSolver.setBatchActiveRowCounts(handle, nActive);
@@ -165,7 +166,7 @@ final class ChunkLists {
                 ChunkArrays.intsOrNull(rlNoUnpinList));
         ReactiveLimitsNative.setBatchRlGenLost(handle,
                 ChunkArrays.intsOrNull(rlGenLostList));
-        GpuAcNewtonSolver.setBatchDqSubgroups(handle, anyDqSub ? dqSubDense : null,
+        RemoteVoltageControlNative.setBatchDqSubgroups(handle, anyDqSub ? dqSubDense : null,
                 anyDqSub ? RelocatedRows.qrMemberStart(gpuData) : null);
         ReactiveLimitsNative.setBatchRlLocal(handle,
                 ChunkArrays.intsOrNull(rlLocalList),
@@ -173,14 +174,14 @@ final class ChunkLists {
         ReactiveLimitsNative.setBatchRlCmpOverrides(handle,
                 ChunkArrays.intsOrNull(rlCmpList),
                 rlCmpList.isEmpty() ? null : rlCmpRows.stream().mapToInt(Integer::intValue).toArray());
-        GpuAcNewtonSolver.setBatchDqMemberTargetQOverrides(handle,
+        RemoteVoltageControlNative.setBatchDqMemberTargetQOverrides(handle,
                 ChunkArrays.intsOrNull(dqTqOvKey),
                 dqTqOvKey.isEmpty() ? null : dqTqOvVal.stream().mapToDouble(Double::doubleValue).toArray());
         DistributedSlackNative.setBatchDsSlackRows(handle, dsSlackRows);
-        GpuAcNewtonSolver.setBatchPilotQDeltas(handle,
+        RemoteVoltageControlNative.setBatchPilotQDeltas(handle,
                 pilotQDeltas.isEmpty() ? null : pilotQDeltas.keySet().stream().mapToInt(Integer::intValue).toArray(),
                 pilotQDeltas.isEmpty() ? null : pilotQDeltas.values().stream().mapToDouble(Double::doubleValue).toArray());
-        GpuAcNewtonSolver.setBatchPilotAllPinnedFlip(handle,
+        RemoteVoltageControlNative.setBatchPilotAllPinnedFlip(handle,
                 ChunkArrays.intsOrNull(pfSlot),
                 pfSlot.isEmpty() ? null : pfRow.stream().mapToInt(Integer::intValue).toArray(),
                 pfSlot.isEmpty() ? null : pfQTarget.stream().mapToDouble(Double::doubleValue).toArray(),

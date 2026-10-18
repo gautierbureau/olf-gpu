@@ -7,7 +7,7 @@
 // DISTR_Q weight overrides: install (or clear, with nulls) the per-scenario qPct renormalization
 // pairs {s, contrib} + new weights on a batch context (gen outage at a remote-VC controller bus).
 extern "C" JNIEXPORT void JNICALL
-Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchDqInactiveMembers(
+OLF_JNI(ac_equations_vector_gpu, RemoteVoltageControlNative, setBatchDqInactiveMembers)(
         JNIEnv* env, jclass, jlong handle, jintArray jSlotMember) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx == nullptr) {
@@ -25,7 +25,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchDqSubgroups(
+OLF_JNI(ac_equations_vector_gpu, RemoteVoltageControlNative, setBatchDqSubgroups)(
         JNIEnv* env, jclass, jlong handle, jbyteArray jDense, jintArray jQrMemberStart) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx == nullptr) {
@@ -45,7 +45,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchDqWeightOverrides(
+OLF_JNI(ac_equations_vector_gpu, RemoteVoltageControlNative, setBatchDqWeightOverrides)(
         JNIEnv* env, jclass, jlong handle, jintArray jIdx, jdoubleArray jW) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx == nullptr) {
@@ -66,7 +66,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchDqKeyOverrides(
+OLF_JNI(ac_equations_vector_gpu, RemoteVoltageControlNative, setBatchDqKeyOverrides)(
         JNIEnv* env, jclass, jlong handle, jintArray jIdx, jdoubleArray jKey) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx == nullptr) {
@@ -90,7 +90,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
 // slot * nDqMembers + memberIndex. Set when an outaged bus is a packed group member whose own targetQ
 // moved (a reactive LOAD loss). Nulls clear.
 extern "C" JNIEXPORT void JNICALL
-Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchDqMemberTargetQOverrides(
+OLF_JNI(ac_equations_vector_gpu, RemoteVoltageControlNative, setBatchDqMemberTargetQOverrides)(
         JNIEnv* env, jclass, jlong handle, jintArray jKeys, jdoubleArray jVals) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx == nullptr) {
@@ -113,7 +113,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
 // Per-scenario moves of a pilot's captured reactive target (applyPilotQDeltasBatch): {key, delta} with key
 // slot * nQr + group, one entry per key. Nulls clear.
 extern "C" JNIEXPORT void JNICALL
-Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchPilotQDeltas(
+OLF_JNI(ac_equations_vector_gpu, RemoteVoltageControlNative, setBatchPilotQDeltas)(
         JNIEnv* env, jclass, jlong handle, jintArray jKeys, jdoubleArray jVals) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx == nullptr) {
@@ -139,7 +139,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
 // Nulls clear. Flip state (flipped/savedVTarget) is allocated zeroed here, so each solve starts with
 // every pilot row unflipped.
 extern "C" JNIEXPORT void JNICALL
-Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchPilotAllPinnedFlip(
+OLF_JNI(ac_equations_vector_gpu, RemoteVoltageControlNative, setBatchPilotAllPinnedFlip)(
         JNIEnv* env, jclass, jlong handle, jintArray jSlots, jintArray jRows, jdoubleArray jQTargets,
         jintArray jRlCounts, jintArray jRlPool) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
@@ -185,7 +185,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
 // renormalization pairs {s, contrib} + new coefficients on a batch context (a shared-TVC group
 // member outaged in that scenario — plan-group-member-dynamics A5).
 extern "C" JNIEXPORT void JNICALL
-Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchDrCoefOverrides(
+OLF_JNI(ac_equations_vector_gpu, RemoteVoltageControlNative, setBatchDrCoefOverrides)(
         JNIEnv* env, jclass, jlong handle, jintArray jIdx, jdoubleArray jC) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx == nullptr) {

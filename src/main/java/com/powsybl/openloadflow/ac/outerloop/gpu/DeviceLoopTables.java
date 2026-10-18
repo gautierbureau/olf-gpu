@@ -8,9 +8,6 @@
 package com.powsybl.openloadflow.ac.outerloop.gpu;
 
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
-import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
-import com.powsybl.openloadflow.ac.outerloop.gpu.ForcedTargetQ;
-import com.powsybl.openloadflow.ac.outerloop.gpu.ReactiveCapabilityCurves;
 
 /**
  * The run-constant outer-loop tables EVERY batch context needs before its driver runs — the batched

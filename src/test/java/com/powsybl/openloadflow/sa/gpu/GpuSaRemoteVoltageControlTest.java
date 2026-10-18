@@ -11,7 +11,6 @@ import com.powsybl.contingency.BranchContingency;
 import com.powsybl.contingency.Contingency;
 import com.powsybl.iidm.network.Network;
 import com.powsybl.openloadflow.CommonTestConfig;
-import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -19,7 +18,6 @@ import java.util.List;
 import static com.powsybl.openloadflow.sa.gpu.GpuSaTestNetworks.*;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /**
  * GPU-batched security analysis against the CPU: remote and merged generator voltage controls: member pins, pilots, split and re-homed groups.

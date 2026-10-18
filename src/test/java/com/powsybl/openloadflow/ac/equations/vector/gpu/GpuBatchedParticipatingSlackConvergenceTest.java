@@ -56,7 +56,6 @@ class GpuBatchedParticipatingSlackConvergenceTest {
     private static final int MAX_ITER = 60;
     private static final double TOL = 1e-12;
 
-
     @Test
     void participatingSlackResidualVsDsTolerance() {
         assumeTrue(GpuAcNewtonSolver.isAvailable(), "GPU batched native lib not available");

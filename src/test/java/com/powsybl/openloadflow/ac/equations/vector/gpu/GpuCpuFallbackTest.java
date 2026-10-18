@@ -40,7 +40,6 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  */
 class GpuCpuFallbackTest {
 
-
     @BeforeEach
     void checkGpu() {
         assumeTrue(GpuAcNewtonSolver.isAvailable(),

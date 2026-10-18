@@ -16,7 +16,6 @@ import com.powsybl.openloadflow.network.LfBus;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Set;
 
 /**
  * Voltage controls re-homed by an islanding contingency: which controllers survive, which pilot or main generator

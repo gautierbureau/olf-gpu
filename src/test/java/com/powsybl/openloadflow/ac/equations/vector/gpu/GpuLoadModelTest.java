@@ -36,7 +36,6 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  */
 class GpuLoadModelTest {
 
-
     @BeforeEach
     void checkGpu() {
         assumeTrue(GpuAcNewtonSolver.isAvailable(),

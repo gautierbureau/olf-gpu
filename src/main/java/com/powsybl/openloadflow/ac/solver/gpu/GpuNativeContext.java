@@ -7,8 +7,6 @@
  */
 package com.powsybl.openloadflow.ac.solver.gpu;
 
-import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
-
 import java.util.concurrent.atomic.AtomicLong;
 
 /**

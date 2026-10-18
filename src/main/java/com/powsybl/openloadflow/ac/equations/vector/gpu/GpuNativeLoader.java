@@ -11,7 +11,6 @@ import org.scijava.nativelib.NativeLoader;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-
 /**
  * Loads the OLF GPU native library (libolfgpu) for {@link GpuAcNewtonSolver}, from the classpath
  * ({@code natives/<arch>/libolfgpu}).

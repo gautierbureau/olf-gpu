@@ -688,6 +688,7 @@ final class GpuBatchPrecomputer {
      * <p>{@code getMaxIterations()} is the only field the batched path reads, so any Newton-family
      * solver's budget carries over; there is deliberately no silent default left.
      */
+
     private static NewtonRaphsonParameters deviceSolverParameters(AcLoadFlowContext context) {
         NewtonRaphsonParameters nrp = new NewtonRaphsonParameters();
         if (context.getParameters().getAcSolverParameters() instanceof AbstractNewtonParameters<?> run) {

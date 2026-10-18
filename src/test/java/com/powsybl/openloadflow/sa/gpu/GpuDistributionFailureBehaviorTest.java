@@ -17,7 +17,6 @@ import com.powsybl.iidm.network.TopologyKind;
 import com.powsybl.iidm.network.VoltageLevel;
 import com.powsybl.iidm.network.extensions.ActivePowerControlAdder;
 import com.powsybl.loadflow.LoadFlowParameters;
-import com.powsybl.loadflow.LoadFlowResult;
 import com.powsybl.openloadflow.CommonTestConfig;
 import com.powsybl.openloadflow.OpenLoadFlowParameters;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
@@ -59,7 +58,6 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
 class GpuDistributionFailureBehaviorTest extends AbstractOpenSecurityAnalysisTest {
-
 
     GpuDistributionFailureBehaviorTest(CommonTestConfig commonTestConfig) {
         super(commonTestConfig);

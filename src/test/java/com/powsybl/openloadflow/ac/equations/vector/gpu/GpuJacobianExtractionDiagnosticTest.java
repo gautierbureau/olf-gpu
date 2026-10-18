@@ -47,7 +47,6 @@ import org.junit.jupiter.api.Test;
  */
 class GpuJacobianExtractionDiagnosticTest {
 
-
     private record Sys(EquationSystem<AcVariableType, AcEquationType> es, LfNetwork network, int n) { }
 
     private static Sys build() {

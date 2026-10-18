@@ -10,7 +10,6 @@ package com.powsybl.openloadflow.ac.outerloop.gpu;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
-import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDsParams;
 import com.powsybl.openloadflow.ac.solver.gpu.BatchReadbackNative;
 import com.powsybl.openloadflow.equations.EquationSystem;
@@ -125,7 +124,7 @@ public final class DistributedSlackWriteBack {
                 setAnchoredShare(slackBus, retain[0], dsParams);
             }
         }
-    
+
         return lastDistributedActivePower;
     }
 

@@ -62,7 +62,6 @@ class GpuVsCpuProductionSaBenchmarkTest extends AbstractOpenSecurityAnalysisTest
     private static final Path CASES = GpuTestPaths.caseDir();
     private static final String CASE = "case9241pegase.xiidm.gz";
 
-
     GpuVsCpuProductionSaBenchmarkTest(CommonTestConfig commonTestConfig) {
         super(commonTestConfig);
     }

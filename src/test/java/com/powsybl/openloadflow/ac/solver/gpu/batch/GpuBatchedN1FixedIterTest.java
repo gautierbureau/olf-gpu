@@ -94,7 +94,6 @@ class GpuBatchedN1FixedIterTest {
 
     private static final int MAX_CONTINGENCIES = 1000;
 
-
     @BeforeEach
     void check() {
         assumeTrue(GpuAcNewtonSolver.isAvailable(), "GPU native lib not available");

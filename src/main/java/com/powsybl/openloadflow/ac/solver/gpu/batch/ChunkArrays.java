@@ -9,7 +9,6 @@ package com.powsybl.openloadflow.ac.solver.gpu.batch;
 
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
 
-import java.util.ArrayList;
 import java.util.List;
 
 /**

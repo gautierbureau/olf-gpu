@@ -46,7 +46,6 @@ class GpuBenchmarkTest {
 
     private static final Path CASES = GpuTestPaths.caseDir();
 
-
     @BeforeEach
     void checkGpu() {
         assumeTrue(GpuAcNewtonSolver.isAvailable(),

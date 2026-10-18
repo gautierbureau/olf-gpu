@@ -54,15 +54,12 @@ final class GpuBatchQualification {
         return true;
     }
 
-
     /** A plan refusal, counted in the census AND named by contingency id: the census counts are per attempt and
      *  carry no id, which made 19 refusals read as device failures (tasks #70). */
     static void refuse(BatchContingency c, String tag) {
         com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record(tag);
         com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.planRefused(c.contingencyId(), tag);
     }
-
-
 
     /** The batched-scenario plan: which contingencies qualified ({@code batchedIndices}) and, per
      *  contingency, the frozen islanded-bus rows/targets, the islanded LfBus nums (excluded from result

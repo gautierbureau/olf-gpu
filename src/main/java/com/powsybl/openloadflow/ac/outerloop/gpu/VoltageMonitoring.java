@@ -10,7 +10,6 @@ package com.powsybl.openloadflow.ac.outerloop.gpu;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcActivation;
-import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 import com.powsybl.openloadflow.ac.solver.NewtonRaphsonParameters;
 import com.powsybl.openloadflow.ac.solver.gpu.BatchSolveNative;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.BatchConfig;
@@ -147,9 +146,6 @@ public final class VoltageMonitoring {
         }
         return out;
     }
-
-
-
 
     @SuppressWarnings("java:S107")
     private static double[][] resolve(long handle, int chunkSize, int n, int nrl, List<Ctl> ctls,

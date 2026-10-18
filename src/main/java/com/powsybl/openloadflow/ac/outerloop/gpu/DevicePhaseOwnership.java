@@ -7,13 +7,6 @@
  */
 package com.powsybl.openloadflow.ac.outerloop.gpu;
 
-import com.powsybl.openloadflow.ac.outerloop.gpu.ContinuousPhaseControl;
-import com.powsybl.openloadflow.ac.outerloop.gpu.DiscreteShuntVoltageControl;
-import com.powsybl.openloadflow.ac.outerloop.gpu.DiscreteTransformerVoltageControl;
-import com.powsybl.openloadflow.ac.outerloop.gpu.IncrementalFlowControl;
-import com.powsybl.openloadflow.ac.outerloop.gpu.IncrementalShuntVoltageControl;
-import com.powsybl.openloadflow.ac.outerloop.gpu.IncrementalTransformerVoltageControl;
-import com.powsybl.openloadflow.ac.outerloop.gpu.SecondaryVoltageControlLoop;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchSkips;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;

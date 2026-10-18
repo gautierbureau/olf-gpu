@@ -7,11 +7,6 @@
  */
 package com.powsybl.openloadflow.ac.outerloop.gpu;
 
-import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
-import com.powsybl.openloadflow.ac.outerloop.gpu.DiscreteTransformerVoltageControl;
-import com.powsybl.openloadflow.ac.solver.NewtonRaphsonParameters;
-
-import java.util.ArrayList;
 import java.util.List;
 
 /**

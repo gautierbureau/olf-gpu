@@ -10,7 +10,6 @@ package com.powsybl.openloadflow.ac.equations.vector.gpu;
 import com.powsybl.openloadflow.ac.outerloop.gpu.ReactiveLimitsNative;
 import com.powsybl.openloadflow.ac.solver.gpu.BatchSolveNative;
 import com.powsybl.openloadflow.ac.solver.gpu.NewtonSettingsNative;
-import com.powsybl.openloadflow.ac.solver.gpu.batch.ControlReHoming;
 
 /**
  * JNI binding: a FULL Newton-Raphson AC power flow run on the GPU behind one native call.

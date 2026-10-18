@@ -19,7 +19,6 @@ import com.powsybl.openloadflow.OpenLoadFlowParameters;
 import com.powsybl.openloadflow.OpenLoadFlowProvider;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuTestPaths;
-import com.powsybl.openloadflow.ac.solver.gpu.GpuNewtonRaphson;
 import com.powsybl.openloadflow.ac.solver.gpu.GpuNewtonRaphsonFactory;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -43,7 +42,6 @@ class GpuSingleSolveRejectReasonProbe {
 
     private static final Path CASES = GpuTestPaths.caseDir();
     private static final String CASE = "case9241pegase.xiidm.gz";
-
 
     @BeforeEach
     void check() {
@@ -86,7 +84,6 @@ class GpuSingleSolveRejectReasonProbe {
         }
         return v;
     }
-
 
     @Test
     void probe() throws Exception {

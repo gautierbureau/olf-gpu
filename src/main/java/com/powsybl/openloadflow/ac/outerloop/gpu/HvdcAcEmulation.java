@@ -12,8 +12,6 @@ import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.equations.HvdcAcEmulationSide1ActiveFlowEquationTerm;
 import com.powsybl.openloadflow.ac.equations.HvdcAcEmulationSide2ActiveFlowEquationTerm;
-import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
-import com.powsybl.openloadflow.ac.solver.NewtonRaphsonParameters;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchOverrides;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.Variable;
@@ -462,7 +460,6 @@ public final class HvdcAcEmulation {
             }
         }
     }
-
 
     /** Install the two AC-emulation driver phases (freeze, limits) on a batch context: the controller
      *  tables, each scenario's starting status, the "outaged by the contingency" bits and the deltas the

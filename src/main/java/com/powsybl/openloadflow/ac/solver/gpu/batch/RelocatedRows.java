@@ -10,8 +10,6 @@ package com.powsybl.openloadflow.ac.solver.gpu.batch;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
 import com.powsybl.openloadflow.network.LfBus;
 
-import java.util.Set;
-
 /**
  * Rows that move under relocation, read per scenario: the pilot-Q relocation candidates, the coupler-tree children's
  * rows, the reactive-limit entry of a bus and whether it is pinned in the base.

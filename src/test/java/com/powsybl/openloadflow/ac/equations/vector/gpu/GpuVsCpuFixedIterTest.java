@@ -62,7 +62,6 @@ class GpuVsCpuFixedIterTest {
     private static final String CASE = "case9241pegase.xiidm.gz";
     private static final int[] FIXED_ITERS = {1, 2, 3, 4, 5, 6, 8, 10, 12};
 
-
     @BeforeEach
     void check() {
         assumeTrue(GpuAcNewtonSolver.isAvailable(), "GPU native lib not available");

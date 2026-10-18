@@ -56,7 +56,6 @@ class GpuGeneratorRemoteControlTest {
     private static final int MAX_ITER = 30;
     private static final double TOL = 1e-8;
 
-
     @BeforeEach
     void checkGpu() {
         assumeTrue(GpuAcNewtonSolver.isAvailable(),

@@ -12,8 +12,6 @@ import com.powsybl.math.matrix.LUDecomposition;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
-import com.powsybl.openloadflow.ac.outerloop.gpu.IncrementalFlowControl;
-import com.powsybl.openloadflow.ac.solver.NewtonRaphsonParameters;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchElementMapper;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchSkips;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchStatus;
@@ -407,7 +405,6 @@ public final class SecondaryVoltageControlLoop {
                 unpinT.stream().mapToDouble(Double::doubleValue).toArray(),
                 hostChanged, affected != null);
     }
-
 
     /** ONE decision round of OLF's processSecondaryVoltageControl over the chunk: the per-zone trigger
      *  (pilot deadband, K spread), tryToReEnableHelpfulControllerBuses, the batched device sensitivities

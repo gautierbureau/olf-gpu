@@ -7,8 +7,6 @@
  */
 package com.powsybl.openloadflow.ac.solver.gpu.batch;
 
-import com.powsybl.openloadflow.ac.equations.vector.gpu.ReactiveLimitsPacker;
-import com.powsybl.openloadflow.ac.equations.vector.gpu.RemoteMemberQPacker;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;

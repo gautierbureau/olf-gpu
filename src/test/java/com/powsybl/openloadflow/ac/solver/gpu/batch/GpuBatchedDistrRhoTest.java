@@ -7,7 +7,6 @@
  */
 package com.powsybl.openloadflow.ac.solver.gpu.batch;
 
-import com.powsybl.openloadflow.ac.equations.vector.gpu.DistrRhoPacker;
 import com.powsybl.commons.report.ReportNode;
 import com.powsybl.iidm.network.Branch;
 import com.powsybl.iidm.network.Line;
@@ -18,6 +17,7 @@ import com.powsybl.openloadflow.ac.AcTargetVector;
 import com.powsybl.openloadflow.ac.equations.AcEquationSystemCreator;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
+import com.powsybl.openloadflow.ac.equations.vector.gpu.DistrRhoPacker;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcDataExtractor;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
@@ -63,7 +63,6 @@ class GpuBatchedDistrRhoTest {
 
     private static final int MAX_ITER = 30;
     private static final double TOL = 1e-12;
-
 
     @BeforeEach
     void checkGpu() {

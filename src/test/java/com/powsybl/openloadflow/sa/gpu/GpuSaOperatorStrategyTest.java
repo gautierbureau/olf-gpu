@@ -12,9 +12,8 @@ import com.powsybl.contingency.Contingency;
 import com.powsybl.ieeecdf.converter.IeeeCdfNetworkFactory;
 import com.powsybl.iidm.network.Network;
 import com.powsybl.openloadflow.CommonTestConfig;
-import com.powsybl.openloadflow.network.gpu.ZeroImpedanceTreeReplayTest;
-import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 import com.powsybl.openloadflow.graph.EvenShiloachGraphDecrementalConnectivityFactory;
+import com.powsybl.openloadflow.network.gpu.ZeroImpedanceTreeReplayTest;
 import com.powsybl.openloadflow.sa.OpenSecurityAnalysisProvider;
 import com.powsybl.security.SecurityAnalysisResult;
 import org.junit.jupiter.api.Test;
@@ -23,7 +22,6 @@ import java.util.List;
 
 import static com.powsybl.openloadflow.sa.gpu.GpuSaTestNetworks.*;
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /**
  * GPU-batched security analysis against the CPU: operator strategies and their actions.

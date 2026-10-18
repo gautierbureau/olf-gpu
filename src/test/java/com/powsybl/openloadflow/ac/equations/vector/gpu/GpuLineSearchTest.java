@@ -43,7 +43,6 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  */
 class GpuLineSearchTest {
 
-
     @BeforeEach
     void checkGpu() {
         assumeTrue(GpuAcNewtonSolver.isAvailable(),

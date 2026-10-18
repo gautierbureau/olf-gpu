@@ -62,7 +62,6 @@ public record GenOutage(int pRow, double pTarget, int vRow, double qTarget, bool
         return qTargetRow >= 0 ? qTargetRow : vRow;
     }
 
-
     /** This entry with its P balance row and its Q target row moved: the rows the coupler-tree relocation put a
      *  bus's balances on belong to a coupler, and a scenario that OPENS that coupler puts the balances back on the
      *  bus's own rows (the chunk solver's opening path); the targets this entry writes must land there too.

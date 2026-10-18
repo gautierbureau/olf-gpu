@@ -8,15 +8,15 @@
 package com.powsybl.openloadflow.ac.solver.gpu;
 
 import com.google.auto.service.AutoService;
+import com.powsybl.loadflow.LoadFlowParameters;
 import com.powsybl.openloadflow.ac.AcLoadFlowContext;
 import com.powsybl.openloadflow.ac.AcLoadFlowParameters;
 import com.powsybl.openloadflow.ac.AcloadFlowEngine;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
-import com.powsybl.loadflow.LoadFlowParameters;
 import com.powsybl.openloadflow.ac.solver.AcSolver;
-import com.powsybl.openloadflow.ac.solver.AcSolverParameters;
 import com.powsybl.openloadflow.ac.solver.AcSolverFactory;
+import com.powsybl.openloadflow.ac.solver.AcSolverParameters;
 import com.powsybl.openloadflow.ac.solver.NewtonRaphsonFactory;
 import com.powsybl.openloadflow.ac.solver.NewtonRaphsonParameters;
 import com.powsybl.openloadflow.equations.EquationSystem;

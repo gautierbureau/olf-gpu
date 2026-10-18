@@ -69,7 +69,6 @@ class GpuBatchedL1L2DiagnosticTest {
     private static final double TOL = 1e-12;
     private static final String LINE_1_2 = "L1-2-1";
 
-
     @Test
     void l1l2GapIsLoadFlowInnerNewtonSlack() {
         assumeTrue(GpuAcNewtonSolver.isAvailable(),

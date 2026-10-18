@@ -13,7 +13,6 @@ import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfGenerator;
 import com.powsybl.openloadflow.network.LfNetwork;
-import com.powsybl.openloadflow.network.VoltageControl;
 
 import java.util.ArrayList;
 import java.util.List;

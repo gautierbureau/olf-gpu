@@ -62,7 +62,6 @@ class GpuBatchedN1BenchmarkTest {
     private static final double TOL = 1e-8;
     private static final int MAX_CONTINGENCIES = 1000;     // cap so the sequential baseline stays tractable
 
-
     @BeforeEach
     void check() {
         assumeTrue(GpuAcNewtonSolver.isAvailable(), "GPU native lib not available");

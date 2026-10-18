@@ -314,7 +314,7 @@ final class InjectionOutagePlanner {
                 return;
             }
             if (live == null) {
-                GpuBatchQualification.refuse(c, 
+                GpuBatchQualification.refuse(c,
                         pinnedMain ? "PLAN:VC_REMERGE_PINNED_MAIN"
                                 : relocIdentity ? "PLAN:VC_REMERGE_RELOC_VROW" : "PLAN:VC_REMERGE_NO_VROW");
                 return;

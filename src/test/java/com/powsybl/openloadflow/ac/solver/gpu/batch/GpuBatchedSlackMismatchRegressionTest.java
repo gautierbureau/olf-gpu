@@ -54,7 +54,6 @@ class GpuBatchedSlackMismatchRegressionTest {
     private static final int MAX_ITER = 30;
     private static final double TOL = 1e-12;
 
-
     @Test
     void excessGenerationBranchContingencyMatchesCpu() {
         assumeTrue(GpuAcNewtonSolver.isAvailable(), "GPU native lib not available");

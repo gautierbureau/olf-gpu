@@ -36,7 +36,6 @@ class GpuCpuOuterLoopTrajectoryProbe {
     private static final Path CASES = GpuTestPaths.caseDir();
     private static final String CASE = "case9241pegase.xiidm.gz";
 
-
     @Test
     void cpuOuterLoopTrajectory() throws Exception {
         assumeTrue(Files.exists(CASES.resolve(CASE)), CASE + " not found");

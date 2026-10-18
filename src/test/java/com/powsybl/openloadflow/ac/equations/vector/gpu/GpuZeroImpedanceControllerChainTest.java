@@ -55,7 +55,6 @@ class GpuZeroImpedanceControllerChainTest extends AbstractLoadFlowNetworkFactory
 
     private static final double TOL = 1e-10;
 
-
     @BeforeEach
     void checkGpu() {
         assumeTrue(GpuAcNewtonSolver.isAvailable(),

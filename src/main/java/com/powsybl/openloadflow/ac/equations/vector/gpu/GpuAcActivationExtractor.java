@@ -15,8 +15,8 @@ import com.powsybl.openloadflow.equations.SingleEquation;
 import com.powsybl.openloadflow.equations.Variable;
 import com.powsybl.openloadflow.network.GeneratorVoltageControl;
 import com.powsybl.openloadflow.network.LfBus;
-import com.powsybl.openloadflow.network.VoltageControl;
 import com.powsybl.openloadflow.network.LfNetwork;
+import com.powsybl.openloadflow.network.VoltageControl;
 
 /**
  * Extracts what ACTIVATION decides — the per-row power-equation/identity mode, the

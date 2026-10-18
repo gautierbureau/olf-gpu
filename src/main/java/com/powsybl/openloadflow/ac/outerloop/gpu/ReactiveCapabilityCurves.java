@@ -7,9 +7,6 @@
  */
 package com.powsybl.openloadflow.ac.outerloop.gpu;
 
-import com.powsybl.openloadflow.ac.equations.vector.gpu.ReactiveLimitsPacker;
-import com.powsybl.openloadflow.ac.equations.vector.gpu.PilotSelfPacker;
-import com.powsybl.openloadflow.ac.equations.vector.gpu.RemoteMemberQPacker;
 import com.powsybl.commons.PowsyblException;
 import com.powsybl.iidm.network.ReactiveCapabilityCurve;
 import com.powsybl.iidm.network.ReactiveLimitsKind;

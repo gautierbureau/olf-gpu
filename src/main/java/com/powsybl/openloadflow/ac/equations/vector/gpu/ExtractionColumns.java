@@ -365,5 +365,4 @@ record ExtractionColumns(int[] phiCol, int[] vCol, int[] branchRhoCol, int[] bra
                 pRow, ziParentEdge, ziChildBus);
     }
 
-
 }

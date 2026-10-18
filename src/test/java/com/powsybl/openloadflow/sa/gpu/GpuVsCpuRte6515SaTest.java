@@ -62,7 +62,6 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
     private static final Path CASE_FILE = Path.of(System.getenv().getOrDefault("OLF_GPU_SA_CASE_FILE", "rte6515_full.xiidm.gz"));
     private static final Path PARAMS_FILE = Path.of("rte-loadflow-default-parameters.json");
 
-
     GpuVsCpuRte6515SaTest(CommonTestConfig commonTestConfig) {
         super(commonTestConfig);
     }

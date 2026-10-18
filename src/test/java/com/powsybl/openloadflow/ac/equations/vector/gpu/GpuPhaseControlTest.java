@@ -52,7 +52,6 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  */
 class GpuPhaseControlTest {
 
-
     @BeforeEach
     void checkGpu() {
         assumeTrue(GpuAcNewtonSolver.isAvailable(),

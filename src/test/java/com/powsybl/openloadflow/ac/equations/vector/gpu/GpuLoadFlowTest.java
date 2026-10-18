@@ -45,7 +45,6 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  */
 class GpuLoadFlowTest extends com.powsybl.openloadflow.network.AbstractLoadFlowNetworkFactory {
 
-
     @BeforeEach
     void checkGpu() {
         assumeTrue(GpuAcNewtonSolver.isAvailable(),

@@ -42,7 +42,6 @@ import java.util.Set;
  */
 public final class GpuStateStore extends AbstractMap<String, double[]> implements AutoCloseable {
 
-
     private final int n;
     private final Path file;
     private final FileChannel channel;

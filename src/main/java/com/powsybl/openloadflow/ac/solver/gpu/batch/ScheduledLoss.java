@@ -12,7 +12,6 @@ import com.powsybl.openloadflow.network.LfBus;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Set;
 
 /**
  * The active power a contingency takes out of the balance (the scheduled loss OLF distributes before the

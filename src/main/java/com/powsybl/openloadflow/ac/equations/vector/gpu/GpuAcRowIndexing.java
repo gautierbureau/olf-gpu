@@ -7,8 +7,6 @@
  */
 package com.powsybl.openloadflow.ac.equations.vector.gpu;
 
-import java.util.List;
-
 import com.powsybl.commons.PowsyblException;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
@@ -23,6 +21,8 @@ import com.powsybl.openloadflow.network.LoadFlowModel;
 import com.powsybl.openloadflow.network.ShuntVoltageControl;
 import com.powsybl.openloadflow.network.TransformerVoltageControl;
 import com.powsybl.openloadflow.network.VoltageControl;
+
+import java.util.List;
 
 /**
  * The STABLE row-indexing policy shared by the whole GPU extraction: variable/equation
@@ -465,6 +465,7 @@ final class GpuAcRowIndexing {
      *         (-1 = a root, or not in a relocated tree), and {@code childBusOfEdge[branchNum]} = the bus whose
      *         {@code PHI} / {@code V} host that coupler's zero equations (-1 = not relocated).
      */
+
     static int[][] ziTreeRelocation(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
                                     int[] phiCol, int[] vCol, int[] qRow, int[] dummyPCol, int[] dummyQCol) {
         int nBuses = network.getBuses().size();

@@ -8,7 +8,6 @@
 package com.powsybl.openloadflow.ac.outerloop.gpu;
 
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
-import com.powsybl.openloadflow.ac.solver.gpu.batch.ControlReHoming;
 
 /**
  * The device's reactive-limit tables and per-scenario overrides (ReactiveLimitsOuterLoop): the pin entries,

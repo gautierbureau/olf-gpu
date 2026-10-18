@@ -49,7 +49,6 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  */
 class GpuSecondaryVoltageControlTest {
 
-
     @BeforeEach
     void checkGpu() {
         assumeTrue(GpuAcNewtonSolver.isAvailable(),

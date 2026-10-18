@@ -7,14 +7,6 @@
  */
 package com.powsybl.openloadflow.ac.outerloop.gpu;
 
-
-import com.powsybl.openloadflow.ac.outerloop.gpu.ContinuousPhaseControl;
-import com.powsybl.openloadflow.ac.outerloop.gpu.DiscreteShuntVoltageControl;
-import com.powsybl.openloadflow.ac.outerloop.gpu.DiscreteTransformerVoltageControl;
-import com.powsybl.openloadflow.ac.outerloop.gpu.IncrementalFlowControl;
-import com.powsybl.openloadflow.ac.outerloop.gpu.IncrementalShuntVoltageControl;
-import com.powsybl.openloadflow.ac.outerloop.gpu.IncrementalTransformerVoltageControl;
-
 import java.util.ArrayList;
 import java.util.List;
 

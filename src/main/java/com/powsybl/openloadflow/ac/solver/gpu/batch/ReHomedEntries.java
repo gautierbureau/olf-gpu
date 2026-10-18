@@ -15,7 +15,6 @@ import com.powsybl.openloadflow.network.LfBus;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Set;
 
 /**
  * The per-scenario reactive-limit and DISTR_Q entries of re-homed voltage controls: the split sub-groups, the

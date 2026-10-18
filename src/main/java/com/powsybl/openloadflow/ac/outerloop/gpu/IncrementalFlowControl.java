@@ -8,13 +8,8 @@
 package com.powsybl.openloadflow.ac.outerloop.gpu;
 
 import com.powsybl.iidm.network.TwoSides;
-import com.powsybl.math.matrix.DenseMatrix;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
-import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
-import com.powsybl.openloadflow.ac.outerloop.gpu.DiscreteTransformerVoltageControl;
-import com.powsybl.openloadflow.ac.outerloop.gpu.IncrementalTransformerVoltageControl;
-import com.powsybl.openloadflow.ac.solver.NewtonRaphsonParameters;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchElementMapper;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchSkips;
 import com.powsybl.openloadflow.equations.EquationSystem;
@@ -259,9 +254,6 @@ public final class IncrementalFlowControl {
         }
         return best;
     }
-
-
-
 
     private static boolean descending(Controller c, int n1, int n2, double shift) {
         return shift > 0 ? c.pin(n1) < c.pin(n2) : c.pin(n1) > c.pin(n2);

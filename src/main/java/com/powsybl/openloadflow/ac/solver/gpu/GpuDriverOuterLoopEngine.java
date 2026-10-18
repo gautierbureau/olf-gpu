@@ -7,14 +7,14 @@
  */
 package com.powsybl.openloadflow.ac.solver.gpu;
 
-import com.powsybl.openloadflow.ac.outerloop.gpu.DeviceLoopKind;
 import com.powsybl.openloadflow.ac.AcLoadFlowContext;
+import com.powsybl.openloadflow.ac.AcOuterLoopContext;
 import com.powsybl.openloadflow.ac.AcloadFlowEngine;
 import com.powsybl.openloadflow.ac.outerloop.AcActivePowerDistributionOuterLoop;
 import com.powsybl.openloadflow.ac.outerloop.AcOuterLoop;
-import com.powsybl.openloadflow.ac.AcOuterLoopContext;
 import com.powsybl.openloadflow.ac.outerloop.DistributedSlackOuterLoop;
 import com.powsybl.openloadflow.ac.outerloop.ReactiveLimitsOuterLoop;
+import com.powsybl.openloadflow.ac.outerloop.gpu.DeviceLoopKind;
 import org.apache.commons.lang3.tuple.Pair;
 
 import java.util.List;
@@ -230,7 +230,6 @@ public class GpuDriverOuterLoopEngine extends AcloadFlowEngine {
             return realDistribution.getSlackBusActivePowerMismatch(context);
         }
     }
-
 
     @Override
     protected List<Pair<AcOuterLoop, AcOuterLoopContext>> engineOuterLoopsAndContexts(AcLoadFlowContext context) {

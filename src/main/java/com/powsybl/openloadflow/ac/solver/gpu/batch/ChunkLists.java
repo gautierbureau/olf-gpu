@@ -8,7 +8,6 @@
 package com.powsybl.openloadflow.ac.solver.gpu.batch;
 
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
-import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.RemoteVoltageControlNative;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DistributedSlackNative;
 import com.powsybl.openloadflow.ac.outerloop.gpu.ForcedTargetQ;

@@ -12,18 +12,15 @@ import com.powsybl.contingency.Contingency;
 import com.powsybl.openloadflow.ac.AcLoadFlowContext;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
-import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.Variable;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfContingency;
 import com.powsybl.openloadflow.network.LfGenerator;
 import com.powsybl.openloadflow.network.LfNetwork;
-import com.powsybl.openloadflow.network.LoadFlowModel;
 import com.powsybl.openloadflow.sa.LimitViolationManager;
 import com.powsybl.security.SecurityAnalysisParameters;
 import com.powsybl.security.limitreduction.LimitReduction;
-
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 

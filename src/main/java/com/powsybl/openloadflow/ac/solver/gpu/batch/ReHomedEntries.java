@@ -238,8 +238,8 @@ final class ReHomedEntries {
     static GenOutage reHomedCrossEntry(int dummyQRow, double vTarget, int rlEntry, boolean pinned, double qTarget) {
         return pinned ? reHomedPinnedPvEntry(dummyQRow, qTarget, vTarget, rlEntry)
                 : new GenOutage(-1, 0, dummyQRow, vTarget, true, true,
-                -1, 0, 0, 0, 0, rlEntry, 0, 0, false, java.util.Set.of(), 0, 0, 0, -1, new int[0],
-                new int[0], new double[0], GenOutage.ROW_CROSS_V_IDENTITY, -1, 0, -1, 0, -1, 0, -1, -1, 0, false, -1, 0, 0);
+                    -1, 0, 0, 0, 0, rlEntry, 0, 0, false, java.util.Set.of(), 0, 0, 0, -1, new int[0],
+                    new int[0], new double[0], GenOutage.ROW_CROSS_V_IDENTITY, -1, 0, -1, 0, -1, 0, -1, -1, 0, false, -1, 0, 0);
     }
 
     /** A base-pinned member of a re-homed cluster with no enabled controller: no row change, unpin forbidden. */

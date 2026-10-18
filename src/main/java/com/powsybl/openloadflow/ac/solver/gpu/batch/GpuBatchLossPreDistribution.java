@@ -237,37 +237,37 @@ final class GpuBatchLossPreDistribution {
                 cum[i] = sum;
             }
         } else {
-        for (int iter = 0; iter < nds && Math.abs(rem) > P_RESIDUE_EPS; iter++) {
-            double fsumActive = 0.0;                         // re-normalize over the still-unsaturated buses
-            for (int i = 0; i < nds; i++) {
-                double f = effFactor(gpuData, dirUp, i, ovBus, ovFactorDelta, islanded);
-                double maxD = gpuData.dsMaxDelta()[i] - (ovBus == i ? ovMaxDelta : 0.0);
-                double minD = gpuData.dsMinDelta()[i] - (ovBus == i ? ovMinDelta : 0.0);
-                boolean sat = rem > 0 ? cum[i] >= maxD : cum[i] <= minD;
-                if (!sat) {
-                    fsumActive += f;
+            for (int iter = 0; iter < nds && Math.abs(rem) > P_RESIDUE_EPS; iter++) {
+                double fsumActive = 0.0;                         // re-normalize over the still-unsaturated buses
+                for (int i = 0; i < nds; i++) {
+                    double f = effFactor(gpuData, dirUp, i, ovBus, ovFactorDelta, islanded);
+                    double maxD = gpuData.dsMaxDelta()[i] - (ovBus == i ? ovMaxDelta : 0.0);
+                    double minD = gpuData.dsMinDelta()[i] - (ovBus == i ? ovMinDelta : 0.0);
+                    boolean sat = rem > 0 ? cum[i] >= maxD : cum[i] <= minD;
+                    if (!sat) {
+                        fsumActive += f;
+                    }
                 }
-            }
-            if (fsumActive <= 0.0) {
-                break;                                       // every participant saturated — residual stays at the slack
-            }
-            double done = 0.0;
-            for (int i = 0; i < nds; i++) {
-                double f = effFactor(gpuData, dirUp, i, ovBus, ovFactorDelta, islanded);
-                double maxD = gpuData.dsMaxDelta()[i] - (ovBus == i ? ovMaxDelta : 0.0);
-                double minD = gpuData.dsMinDelta()[i] - (ovBus == i ? ovMinDelta : 0.0);
-                boolean sat = rem > 0 ? cum[i] >= maxD : cum[i] <= minD;
-                if (sat) {
-                    continue;
+                if (fsumActive <= 0.0) {
+                    break;                                       // every participant saturated — residual stays at the slack
                 }
-                double newCum = Math.min(Math.max(cum[i] + rem * (f / fsumActive), minD), maxD);
-                if (newCum != cum[i]) {
-                    done += newCum - cum[i];
-                    cum[i] = newCum;
+                double done = 0.0;
+                for (int i = 0; i < nds; i++) {
+                    double f = effFactor(gpuData, dirUp, i, ovBus, ovFactorDelta, islanded);
+                    double maxD = gpuData.dsMaxDelta()[i] - (ovBus == i ? ovMaxDelta : 0.0);
+                    double minD = gpuData.dsMinDelta()[i] - (ovBus == i ? ovMinDelta : 0.0);
+                    boolean sat = rem > 0 ? cum[i] >= maxD : cum[i] <= minD;
+                    if (sat) {
+                        continue;
+                    }
+                    double newCum = Math.min(Math.max(cum[i] + rem * (f / fsumActive), minD), maxD);
+                    if (newCum != cum[i]) {
+                        done += newCum - cum[i];
+                        cum[i] = newCum;
+                    }
                 }
+                rem -= done;
             }
-            rem -= done;
-        }
         }
         double absorbed = 0;
         for (double c : cum) {

@@ -178,138 +178,138 @@ public final class ReactiveLimitsPacker {
             }
         }
         try {
-        // Reactive limits OFF: the pack is empty EXCEPT for standby-automaton MONITORING SVC buses. Such a bus
-        // needs an entry not for its limits (no RL loop runs, so they are dormant) but for the pin machinery the
-        // VoltageMonitoring phase activates it through: VoltageMonitoring maps a bus to its rl entry and,
-        // finding none, recorded a SKIP for every monitored controller — which the all-or-nothing phase gate
-        // (DevicePhaseOwnership.batchable) turns into "route the whole run to the CPU". Measured with
-        // OLF_GPU_SA_NO_RL=1 on rte6515's busbar window: 976 of 976 batchable contingencies CPU-replayed
-        // (RUNTIME:status=-2=976, 0/1000 on device) while the run's own loop list HAS VoltageMonitoring.
-        if (reactiveLimits || anyMonitoringSvc(network)) {
-            // This enumeration is WIDER than OLF's, on purpose but knowingly:
-            // ReactiveLimitsOuterLoop walks getControllerElements(GENERATOR) and nothing else, while
-            // getGeneratorVoltageControl().isPresent() also answers yes on the CONTROLLED (pilot)
-            // bus of a remote group. A pilot with no generators of its own therefore enters as a
-            // local entry whose limits are a sum over ZERO generators - minQ = maxQ = 0 - and whose
-            // q is the bus's own reactive balance, zero up to rounding on a transit node. Its PIN is
-            // refused in the kernel (reactiveLimitsBatch, degenerate range) because at convEps 1e-12
-            // it fired on the last bits; its entry is kept because a pilot row that came in PINNED
-            // from the base still needs the switch-back to hand the group's voltage identity back.
-            // 7 such buses here: CQHT_0/1/3/5, HMDR_0, IZUM_0, KUNQ_3.
-            for (LfBus bus : network.getBuses()) {
-                if (!reactiveLimits && !isMonitoringSvcBus(bus)) {
-                    continue;                                  // limits off: monitored buses only (see above)
-                }
-                int bn = bus.getNum();
-                boolean vActive = GpuAcRowIndexing.row(es, bn, AcEquationType.BUS_TARGET_V) >= 0;
-                boolean qActive = GpuAcRowIndexing.row(es, bn, AcEquationType.BUS_TARGET_Q) >= 0;
-                boolean remoteMember = RemoteMemberQPacker.isRemoteMemberEntry(bus);
-                // A pilot that is one of its OWN controllers is packed as a remote entry of class 2: its
-                // q feeds the group's DISTR_Q rows like a remote member's (read through the remote q
-                // pack, not its row), a pin puts its own Q balance on its row (mode 4, alternate dest),
-                // and an UNPIN gives the row back its voltage IDENTITY (mode 0), not a DISTR_Q form. As
-                // a LOCAL entry its pin used to land on mode 1, an EMPTY row: measured on the
-                // all-pinned-group fixture, 0.68 kV at the pilot.
-                boolean pilotSelf = PilotSelfPacker.isPilotSelfEntry(bus);
-                if ((remoteMember || pilotSelf) && vCol[bn] >= 0) {
-                    var vc = RemoteMemberQPacker.mainGenVc(bus);                   // the GROUP's control: the group identity, the pilot's V row
-                    // ...but the switch-back test is the member's OWN control's: OLF's ReactiveLimitsOuterLoop reads
-                    // getBusV / getBusTargetV off bus.getGeneratorVoltageControl(), which for a control MERGED into
-                    // the group (a dependent section) keeps its own controlled bus and its own target while the
-                    // cluster sits at the main's. Compared against the main's target a base-pinned dependent at
-                    // 405 kV in a 406 kV cluster never saw its "voltage above target" and stayed pinned where OLF
-                    // unpins it (deviceMergedDependentSwitchesBackAgainstItsOwnTargetMatchesCpu).
-                    var own = bus.getGeneratorVoltageControl().orElse(vc);
-                    int pilotV = vCol[own.getControlledBus().getNum()];
-                    if (pilotV >= 0 && bus.getMinQ() < bus.getMaxQ()) {
-                        rlVrow.add(vCol[bn]);                  // transition WRITE row: the member's own bus row
-                        rlMinQ.add(bus.getMinQ());
-                        rlMaxQ.add(bus.getMaxQ());
-                        rlLoadQ.add(bus.getLoadTargetQ());
-                        rlVtarget.add(own.getTargetValue());   // the member's own control's target
-                        addSvcQuadratic(bus, rlSvcBmin, rlSvcBmax, rlV2Base);
-                        rlMonitored.add((byte) 0);
-                        // 2 = pilot-self; 1 = a remote member OLF's robust rule APPLIES to;
-                        // 3 = a remote member OLF's robust rule EXEMPTS, because the bus's OWN control is
-                        // local (see isOlfRobustRemoteController). Class 3 is truthy and not 2, so every
-                        // other rlRemote site treats it exactly like class 1 — only the kernel's robust
-                        // unrealistic-voltage gate and rlRobustVResetBatch (which tests == 1) single it out.
-                        byte remoteClass = pilotSelf ? (byte) 2
-                                : RemoteMemberQPacker.isOlfRobustRemoteController(bus) ? (byte) 1 : (byte) 3;
-                        rlRemote.add(remoteClass);
-                        rlCmpVrow.add(pilotV);                 // switch conditions compare the PILOT's V
-                        rlBusNum.add(bn);
-                        if (System.getenv("OLF_GPU_RL_TRACE") != null) {
-                            System.err.println("GPU_RL_ENTRY idx=" + (rlVrow.size() - 1) + " vRow=" + vCol[bn]
-                                    + " bus=" + bus.getId() + " remote=" + remoteClass + " pilotVRow=" + pilotV);
+            // Reactive limits OFF: the pack is empty EXCEPT for standby-automaton MONITORING SVC buses. Such a bus
+            // needs an entry not for its limits (no RL loop runs, so they are dormant) but for the pin machinery the
+            // VoltageMonitoring phase activates it through: VoltageMonitoring maps a bus to its rl entry and,
+            // finding none, recorded a SKIP for every monitored controller — which the all-or-nothing phase gate
+            // (DevicePhaseOwnership.batchable) turns into "route the whole run to the CPU". Measured with
+            // OLF_GPU_SA_NO_RL=1 on rte6515's busbar window: 976 of 976 batchable contingencies CPU-replayed
+            // (RUNTIME:status=-2=976, 0/1000 on device) while the run's own loop list HAS VoltageMonitoring.
+            if (reactiveLimits || anyMonitoringSvc(network)) {
+                // This enumeration is WIDER than OLF's, on purpose but knowingly:
+                // ReactiveLimitsOuterLoop walks getControllerElements(GENERATOR) and nothing else, while
+                // getGeneratorVoltageControl().isPresent() also answers yes on the CONTROLLED (pilot)
+                // bus of a remote group. A pilot with no generators of its own therefore enters as a
+                // local entry whose limits are a sum over ZERO generators - minQ = maxQ = 0 - and whose
+                // q is the bus's own reactive balance, zero up to rounding on a transit node. Its PIN is
+                // refused in the kernel (reactiveLimitsBatch, degenerate range) because at convEps 1e-12
+                // it fired on the last bits; its entry is kept because a pilot row that came in PINNED
+                // from the base still needs the switch-back to hand the group's voltage identity back.
+                // 7 such buses here: CQHT_0/1/3/5, HMDR_0, IZUM_0, KUNQ_3.
+                for (LfBus bus : network.getBuses()) {
+                    if (!reactiveLimits && !isMonitoringSvcBus(bus)) {
+                        continue;                                  // limits off: monitored buses only (see above)
+                    }
+                    int bn = bus.getNum();
+                    boolean vActive = GpuAcRowIndexing.row(es, bn, AcEquationType.BUS_TARGET_V) >= 0;
+                    boolean qActive = GpuAcRowIndexing.row(es, bn, AcEquationType.BUS_TARGET_Q) >= 0;
+                    boolean remoteMember = RemoteMemberQPacker.isRemoteMemberEntry(bus);
+                    // A pilot that is one of its OWN controllers is packed as a remote entry of class 2: its
+                    // q feeds the group's DISTR_Q rows like a remote member's (read through the remote q
+                    // pack, not its row), a pin puts its own Q balance on its row (mode 4, alternate dest),
+                    // and an UNPIN gives the row back its voltage IDENTITY (mode 0), not a DISTR_Q form. As
+                    // a LOCAL entry its pin used to land on mode 1, an EMPTY row: measured on the
+                    // all-pinned-group fixture, 0.68 kV at the pilot.
+                    boolean pilotSelf = PilotSelfPacker.isPilotSelfEntry(bus);
+                    if ((remoteMember || pilotSelf) && vCol[bn] >= 0) {
+                        var vc = RemoteMemberQPacker.mainGenVc(bus);                   // the GROUP's control: the group identity, the pilot's V row
+                        // ...but the switch-back test is the member's OWN control's: OLF's ReactiveLimitsOuterLoop reads
+                        // getBusV / getBusTargetV off bus.getGeneratorVoltageControl(), which for a control MERGED into
+                        // the group (a dependent section) keeps its own controlled bus and its own target while the
+                        // cluster sits at the main's. Compared against the main's target a base-pinned dependent at
+                        // 405 kV in a 406 kV cluster never saw its "voltage above target" and stayed pinned where OLF
+                        // unpins it (deviceMergedDependentSwitchesBackAgainstItsOwnTargetMatchesCpu).
+                        var own = bus.getGeneratorVoltageControl().orElse(vc);
+                        int pilotV = vCol[own.getControlledBus().getNum()];
+                        if (pilotV >= 0 && bus.getMinQ() < bus.getMaxQ()) {
+                            rlVrow.add(vCol[bn]);                  // transition WRITE row: the member's own bus row
+                            rlMinQ.add(bus.getMinQ());
+                            rlMaxQ.add(bus.getMaxQ());
+                            rlLoadQ.add(bus.getLoadTargetQ());
+                            rlVtarget.add(own.getTargetValue());   // the member's own control's target
+                            addSvcQuadratic(bus, rlSvcBmin, rlSvcBmax, rlV2Base);
+                            rlMonitored.add((byte) 0);
+                            // 2 = pilot-self; 1 = a remote member OLF's robust rule APPLIES to;
+                            // 3 = a remote member OLF's robust rule EXEMPTS, because the bus's OWN control is
+                            // local (see isOlfRobustRemoteController). Class 3 is truthy and not 2, so every
+                            // other rlRemote site treats it exactly like class 1 — only the kernel's robust
+                            // unrealistic-voltage gate and rlRobustVResetBatch (which tests == 1) single it out.
+                            byte remoteClass = pilotSelf ? (byte) 2
+                                    : RemoteMemberQPacker.isOlfRobustRemoteController(bus) ? (byte) 1 : (byte) 3;
+                            rlRemote.add(remoteClass);
+                            rlCmpVrow.add(pilotV);                 // switch conditions compare the PILOT's V
+                            rlBusNum.add(bn);
+                            if (System.getenv("OLF_GPU_RL_TRACE") != null) {
+                                System.err.println("GPU_RL_ENTRY idx=" + (rlVrow.size() - 1) + " vRow=" + vCol[bn]
+                                        + " bus=" + bus.getId() + " remote=" + remoteClass + " pilotVRow=" + pilotV);
+                            }
+                            rlNominalV.add(own.getControlledBus().getNominalV());
+                            rlPRow.add(GpuAcRowIndexing.row(es, bn, AcEquationType.BUS_TARGET_P) >= 0 ? columns.pRow()[bn] : -1);
+                            rlTargetP.add(bus.getTargetP());
+                            rlBusId.add(bus.getId());
+                            rlInitTargetQ.add(initialGenerationTargetQ(bus));
+                            rlBaseQLimitType.add(relocatedPinCode(bus, bn, columns, hostsRelocatedBalance));
                         }
-                        rlNominalV.add(own.getControlledBus().getNominalV());
+                        continue;                                  // never let a base-pinned remote member
+                    }                                              // masquerade as a LOCAL basePqCapable entry
+                    boolean basePv = vActive && !qActive;          // voltage-controlling in the base case
+                    boolean basePqCapable = qActive && !vActive    // switched to PQ in the base case but still capable
+                            && !bus.isGeneratorVoltageControlEnabled();
+                    if (vCol[bn] >= 0 && bus.getGeneratorVoltageControl().isPresent() && (basePv || basePqCapable)) {
+                        LfGenerator monitoringSvc = bus.getGenerators().stream()
+                                .filter(g -> g.getGeneratorControlType() == LfGenerator.GeneratorControlType.MONITORING_VOLTAGE)
+                                .findFirst().orElse(null);
+                        double minQ;
+                        double maxQ;
+                        if (monitoringSvc != null) {
+                            // A standing-by monitored bus never reads its RL limits (mode 1, seeded unpinned) —
+                            // it reads them only AFTER the VoltageMonitoring activation turns it PV, when the
+                            // CPU evaluates them with the SVC in VOLTAGE control. Capture the ACTIVATED limits
+                            // (a standby capture of ~[0,0] would pin the bus right back, undoing the activation).
+                            monitoringSvc.setGeneratorControlType(LfGenerator.GeneratorControlType.VOLTAGE);
+                            minQ = bus.getMinQ();
+                            maxQ = bus.getMaxQ();
+                            addSvcQuadratic(bus, rlSvcBmin, rlSvcBmax, rlV2Base);
+                            monitoringSvc.setGeneratorControlType(LfGenerator.GeneratorControlType.MONITORING_VOLTAGE);
+                        } else {
+                            minQ = bus.getMinQ();
+                            maxQ = bus.getMaxQ();
+                            addSvcQuadratic(bus, rlSvcBmin, rlSvcBmax, rlV2Base);
+                        }
+                        rlVrow.add(vCol[bn]);
+                        if (System.getenv("OLF_GPU_RL_TRACE") != null) {
+                            // entry -> bus, so a device pin can be named and lined up against OLF's RL_SWITCH
+                            System.err.println("GPU_RL_ENTRY idx=" + (rlVrow.size() - 1) + " vRow=" + vCol[bn]
+                                    + " bus=" + bus.getId() + " minQ=" + minQ + " maxQ=" + maxQ
+                                    + " loadQ=" + bus.getLoadTargetQ() + " basePv=" + basePv
+                                    + " basePqCapable=" + basePqCapable + " vcEnabled=" + bus.isGeneratorVoltageControlEnabled()
+                                    + " gens=" + bus.getGenerators().size());
+                        }
+                        rlMinQ.add(minQ);
+                        rlMaxQ.add(maxQ);
+                        rlLoadQ.add(bus.getLoadTargetQ());
+                        rlVtarget.add(bus.getGeneratorVoltageControl().orElseThrow().getTargetValue());
+                        // bit 1: a MONITORING_VOLTAGE SVC standing by; bit 2: this bus is NOT one of its voltage control's
+                        // controller elements (a controlled pilot with no generators of its own) - the only entries the
+                        // device's degenerate-range guard may skip, because OLF's loop walks controller elements and a real
+                        // generator bus with a [0, 0] curve at its current P is still one of them (network.xiidm/FBQV).
+                        com.powsybl.openloadflow.network.VoltageControl<LfBus> mainVc =
+                                bus.getGeneratorVoltageControl().orElseThrow().getMainVoltageControl();
+                        boolean ownController = mainVc.getMergedControllerElements().contains(bus)
+                                || bus.getGeneratorVoltageControl().orElseThrow().getControllerElements().contains(bus);
+                        rlMonitored.add((byte) ((monitoringSvc != null ? 1 : 0) | (ownController ? 0 : 2)));
+                        rlRemote.add((byte) 0);
+                        rlCmpVrow.add(vCol[bn]);                   // local: compare row = own row
+                        rlBusNum.add(bn);
+                        rlNominalV.add(bus.getGeneratorVoltageControl().map(c -> c.getControlledBus().getNominalV()).orElse(bus.getNominalV()));
                         rlPRow.add(GpuAcRowIndexing.row(es, bn, AcEquationType.BUS_TARGET_P) >= 0 ? columns.pRow()[bn] : -1);
                         rlTargetP.add(bus.getTargetP());
                         rlBusId.add(bus.getId());
                         rlInitTargetQ.add(initialGenerationTargetQ(bus));
-                        rlBaseQLimitType.add(relocatedPinCode(bus, bn, columns, hostsRelocatedBalance));
-                    }
-                    continue;                                  // never let a base-pinned remote member
-                }                                              // masquerade as a LOCAL basePqCapable entry
-                boolean basePv = vActive && !qActive;          // voltage-controlling in the base case
-                boolean basePqCapable = qActive && !vActive    // switched to PQ in the base case but still capable
-                        && !bus.isGeneratorVoltageControlEnabled();
-                if (vCol[bn] >= 0 && bus.getGeneratorVoltageControl().isPresent() && (basePv || basePqCapable)) {
-                    LfGenerator monitoringSvc = bus.getGenerators().stream()
-                            .filter(g -> g.getGeneratorControlType() == LfGenerator.GeneratorControlType.MONITORING_VOLTAGE)
-                            .findFirst().orElse(null);
-                    double minQ;
-                    double maxQ;
-                    if (monitoringSvc != null) {
-                        // A standing-by monitored bus never reads its RL limits (mode 1, seeded unpinned) —
-                        // it reads them only AFTER the VoltageMonitoring activation turns it PV, when the
-                        // CPU evaluates them with the SVC in VOLTAGE control. Capture the ACTIVATED limits
-                        // (a standby capture of ~[0,0] would pin the bus right back, undoing the activation).
-                        monitoringSvc.setGeneratorControlType(LfGenerator.GeneratorControlType.VOLTAGE);
-                        minQ = bus.getMinQ();
-                        maxQ = bus.getMaxQ();
-                        addSvcQuadratic(bus, rlSvcBmin, rlSvcBmax, rlV2Base);
-                        monitoringSvc.setGeneratorControlType(LfGenerator.GeneratorControlType.MONITORING_VOLTAGE);
-                    } else {
-                        minQ = bus.getMinQ();
-                        maxQ = bus.getMaxQ();
-                        addSvcQuadratic(bus, rlSvcBmin, rlSvcBmax, rlV2Base);
-                    }
-                    rlVrow.add(vCol[bn]);
-                    if (System.getenv("OLF_GPU_RL_TRACE") != null) {
-                        // entry -> bus, so a device pin can be named and lined up against OLF's RL_SWITCH
-                        System.err.println("GPU_RL_ENTRY idx=" + (rlVrow.size() - 1) + " vRow=" + vCol[bn]
-                                + " bus=" + bus.getId() + " minQ=" + minQ + " maxQ=" + maxQ
-                                + " loadQ=" + bus.getLoadTargetQ() + " basePv=" + basePv
-                                + " basePqCapable=" + basePqCapable + " vcEnabled=" + bus.isGeneratorVoltageControlEnabled()
-                                + " gens=" + bus.getGenerators().size());
-                    }
-                    rlMinQ.add(minQ);
-                    rlMaxQ.add(maxQ);
-                    rlLoadQ.add(bus.getLoadTargetQ());
-                    rlVtarget.add(bus.getGeneratorVoltageControl().orElseThrow().getTargetValue());
-                    // bit 1: a MONITORING_VOLTAGE SVC standing by; bit 2: this bus is NOT one of its voltage control's
-                    // controller elements (a controlled pilot with no generators of its own) - the only entries the
-                    // device's degenerate-range guard may skip, because OLF's loop walks controller elements and a real
-                    // generator bus with a [0, 0] curve at its current P is still one of them (network.xiidm/FBQV).
-                    com.powsybl.openloadflow.network.VoltageControl<LfBus> mainVc =
-                            bus.getGeneratorVoltageControl().orElseThrow().getMainVoltageControl();
-                    boolean ownController = mainVc.getMergedControllerElements().contains(bus)
-                            || bus.getGeneratorVoltageControl().orElseThrow().getControllerElements().contains(bus);
-                    rlMonitored.add((byte) ((monitoringSvc != null ? 1 : 0) | (ownController ? 0 : 2)));
-                    rlRemote.add((byte) 0);
-                    rlCmpVrow.add(vCol[bn]);                   // local: compare row = own row
-                    rlBusNum.add(bn);
-                    rlNominalV.add(bus.getGeneratorVoltageControl().map(c -> c.getControlledBus().getNominalV()).orElse(bus.getNominalV()));
-                    rlPRow.add(GpuAcRowIndexing.row(es, bn, AcEquationType.BUS_TARGET_P) >= 0 ? columns.pRow()[bn] : -1);
-                    rlTargetP.add(bus.getTargetP());
-                    rlBusId.add(bus.getId());
-                    rlInitTargetQ.add(initialGenerationTargetQ(bus));
                         rlBaseQLimitType.add(qLimitTypeCode(bus));
+                    }
                 }
             }
-        }
         } finally {
             for (LfBus bus : flatVBuses) {
                 bus.setV(Double.NaN);

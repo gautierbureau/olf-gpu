@@ -7,6 +7,7 @@
  */
 package com.powsybl.openloadflow.ac.equations.vector.gpu;
 
+import com.powsybl.openloadflow.ac.solver.gpu.TransposedSolveNative;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -129,7 +130,7 @@ class GpuTransposedSolveTest {
             b[i] = rnd.nextDouble() * 2 - 1;
         }
 
-        double[] gpu = GpuAcNewtonSolver.solveTransposedExplicit(n, rowPtr, colIdx, vals, b);
+        double[] gpu = TransposedSolveNative.solveTransposedExplicit(n, rowPtr, colIdx, vals, b);
         double[] ref = denseSolveTransposed(n, dense, b);
 
         double worst = 0;

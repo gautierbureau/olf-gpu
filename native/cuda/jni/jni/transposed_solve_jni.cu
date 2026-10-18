@@ -27,7 +27,7 @@
 // prefix-sum into row pointers, then scatter. O(nnz + n), host-side, and for a FIXED pattern
 // the resulting scatter is a permutation that can be computed once and reused per solve.
 extern "C" JNIEXPORT jdoubleArray JNICALL
-Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_solveTransposedExplicit(
+OLF_JNI(ac_solver_gpu, TransposedSolveNative, solveTransposedExplicit)(
         JNIEnv* env, jclass, jint n, jintArray jRowPtr, jintArray jColIdx,
         jdoubleArray jVals, jdoubleArray jB) {
     try {

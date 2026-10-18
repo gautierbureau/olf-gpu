@@ -16,6 +16,7 @@ import com.powsybl.openloadflow.ac.equations.AcEquationSystemCreator;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.solver.AcSolverUtil;
+import com.powsybl.openloadflow.ac.solver.gpu.TransposedSolveNative;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.EquationVector;
 import com.powsybl.openloadflow.equations.JacobianMatrix;
@@ -287,7 +288,7 @@ class GpuJacobianExtractionDiagnosticTest {
                     + "%d/%d rows NOT diagonally dominant%n", zeroDiag, minAbsDiag, notDominant, n);
 
             // RAW route: powsybl's own arrays, untouched.
-            double[] gpuRaw = GpuAcNewtonSolver.solveTransposedExplicit(n,
+            double[] gpuRaw = TransposedSolveNative.solveTransposedExplicit(n,
                     java.util.Arrays.copyOf(cs, n + 1),
                     java.util.Arrays.copyOf(ri, nnz),
                     java.util.Arrays.copyOf(vs, nnz), b.clone());
@@ -315,7 +316,7 @@ class GpuJacobianExtractionDiagnosticTest {
                     }
                 }
             }
-            double[] gpuDense = GpuAcNewtonSolver.solveTransposedExplicit(n, tRowPtr, tColIdx, tVals, b.clone());
+            double[] gpuDense = TransposedSolveNative.solveTransposedExplicit(n, tRowPtr, tColIdx, tVals, b.clone());
 
             System.out.printf("GPU ROUTES n=%d nnz(raw)=%d nnz(dense)=%d ||ref||inf=%.3e%n",
                     n, nnz, cnt, maxAbs(ref));

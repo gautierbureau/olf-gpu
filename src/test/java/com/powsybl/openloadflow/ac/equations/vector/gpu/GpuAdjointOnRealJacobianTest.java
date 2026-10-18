@@ -16,6 +16,7 @@ import com.powsybl.openloadflow.ac.equations.AcEquationSystemCreator;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.solver.AcSolverUtil;
+import com.powsybl.openloadflow.ac.solver.gpu.TransposedSolveNative;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.EquationVector;
 import com.powsybl.openloadflow.equations.JacobianMatrix;
@@ -141,7 +142,7 @@ class GpuAdjointOnRealJacobianTest {
             int[] colIdx = java.util.Arrays.copyOf(sm.getRowIndices(), nnz);
             double[] vals = java.util.Arrays.copyOf(sm.getValues(), nnz);
 
-            double[] gpu = GpuAcNewtonSolver.solveTransposedExplicit(n, rowPtr, colIdx, vals, b);
+            double[] gpu = TransposedSolveNative.solveTransposedExplicit(n, rowPtr, colIdx, vals, b);
 
             double[] cpuSolve = b.clone();
             jac.solve(cpuSolve);                             // M⁻¹ b, and M = Jᵀ ⇒ the ADJOINT direction

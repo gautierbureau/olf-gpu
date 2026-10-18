@@ -10,6 +10,7 @@ package com.powsybl.openloadflow.ac.solver.gpu.batch;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 import com.powsybl.openloadflow.ac.outerloop.gpu.ContinuousPhaseControl;
+import com.powsybl.openloadflow.ac.outerloop.gpu.DeviceLoopTables;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DiscreteTransformerVoltageControl;
 import com.powsybl.openloadflow.ac.outerloop.gpu.ForcedTargetQ;
 import com.powsybl.openloadflow.ac.outerloop.gpu.HvdcAcEmulation;
@@ -199,7 +200,7 @@ final class GpuBatchChunkSolver {
         GpuAcNewtonSolver.setBatchLineSearch(handle, parameters.getLineSearchStateVectorScalingMaxIteration(),
                 parameters.getLineSearchStateVectorScalingStepFold());
         // The run-constant outer-loop tables, shared with the base load flow's batch-of-one.
-        GpuBatchOuterLoopTables.install(handle, gpuData, rlCurves, forcedTargetQ,
+        DeviceLoopTables.install(handle, gpuData, rlCurves, forcedTargetQ,
                 config.rlRobustMode(), config.minRealisticVoltage(), config.maxRealisticVoltage(),
                 config.minNominalVoltageRealisticVoltageCheck(), config.realisticFixingLoop());
 

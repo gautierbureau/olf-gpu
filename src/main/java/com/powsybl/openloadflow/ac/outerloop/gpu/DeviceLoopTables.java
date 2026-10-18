@@ -5,7 +5,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/.
  * SPDX-License-Identifier: MPL-2.0
  */
-package com.powsybl.openloadflow.ac.solver.gpu.batch;
+package com.powsybl.openloadflow.ac.outerloop.gpu;
 
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
@@ -24,7 +24,7 @@ import com.powsybl.openloadflow.ac.outerloop.gpu.ReactiveCapabilityCurves;
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
-public final class GpuBatchOuterLoopTables {
+public final class DeviceLoopTables {
 
     /** ReactiveLimitsOuterLoop.REALISTIC_VOLTAGE_MARGIN. */
     private static final double REALISTIC_VOLTAGE_MARGIN = 1.02;
@@ -51,7 +51,7 @@ public final class GpuBatchOuterLoopTables {
         return last instanceof com.powsybl.openloadflow.ac.outerloop.ReactiveLimitsOuterLoop ? 0 : 1;
     }
 
-    private GpuBatchOuterLoopTables() {
+    private DeviceLoopTables() {
     }
 
     /**

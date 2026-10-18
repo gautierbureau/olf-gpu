@@ -20,6 +20,7 @@ import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcStructures;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuEquationDump;
 import com.powsybl.openloadflow.ac.outerloop.gpu.ContinuousPhaseControl;
+import com.powsybl.openloadflow.ac.outerloop.gpu.DeviceLoopTables;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DistributedSlackWriteBack;
 import com.powsybl.openloadflow.ac.outerloop.gpu.ForcedTargetQ;
 import com.powsybl.openloadflow.ac.outerloop.gpu.HvdcAcEmulation;
@@ -38,7 +39,6 @@ import com.powsybl.openloadflow.ac.solver.NewtonRaphsonParameters;
 import com.powsybl.openloadflow.ac.solver.NewtonRaphsonStoppingCriteria;
 import com.powsybl.openloadflow.ac.solver.PerEquationTypeStoppingCriteria;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchContextCache;
-import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchOuterLoopTables;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchStatus;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.EquationSystemIndex;
@@ -323,7 +323,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
     // and after any activation change (the thresholds follow the variables at each row)
     private boolean criteriaDirty = true;
 
-    /** The shared outer-loop tables ({@link GpuBatchOuterLoopTables}) follow the extraction. */
+    /** The shared outer-loop tables ({@link DeviceLoopTables}) follow the extraction. */
     private boolean tablesDirty = true;
 
     // The driver phases with their own per-run tables (HVDC AC emulation, MonitoringVoltage, in-kernel
@@ -583,7 +583,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                             data.dsMode(), data.dsMarginUp(), data.dsMarginDown(),
                             data.dsSlackMarginUp(), data.dsSlackMarginDown()));
                     // OLF's forced-PV election keys are part of creating a context with RL entries.
-                    GpuBatchOuterLoopTables.installRlElection(context.handle.get(), data);
+                    DeviceLoopTables.installRlElection(context.handle.get(), data);
                     cachedData = data;
                     loadAnchorTargetP = DistributedSlackWriteBack.captureLoadAnchors(network);
                     rebuilt = true;
@@ -600,7 +600,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                     loadAnchorTargetP = DistributedSlackWriteBack.captureLoadAnchors(network);
                     // The election keys are per-extraction (nominal V, live target P, id rank), so a
                     // value refresh re-installs them too.
-                    GpuBatchOuterLoopTables.installRlElection(context.handle.get(), data);
+                    DeviceLoopTables.installRlElection(context.handle.get(), data);
                     tablesDirty = true;
                     VALUE_REFRESHES.incrementAndGet();
                 }
@@ -702,11 +702,11 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                                 lfNetworkParameters.isForceTargetQInReactiveLimits() && lfNetworkParameters.isReactiveLimits(),
                                 true, target, activation.rowMode(), lfNetworkParameters.isExtrapolateReactiveLimits())
                         : null;
-                GpuBatchOuterLoopTables.install(context.handle.get(), cachedData, rlCurves, forcedTargetQ,
+                DeviceLoopTables.install(context.handle.get(), cachedData, rlCurves, forcedTargetQ,
                         acLoadFlowParameters.isVoltageRemoteControlRobustMode(),
                         acLoadFlowParameters.getMinRealisticVoltage(), acLoadFlowParameters.getMaxRealisticVoltage(),
                         acLoadFlowParameters.getMinNominalVoltageRealisticVoltageCheck(),
-                        GpuBatchOuterLoopTables.realisticFixingLoop(acLoadFlowParameters));
+                        DeviceLoopTables.realisticFixingLoop(acLoadFlowParameters));
                 tablesDirty = false;
             }
             if (lsMode == 1) {                               // batch loop LINE_SEARCH (ported 2026-09-08)

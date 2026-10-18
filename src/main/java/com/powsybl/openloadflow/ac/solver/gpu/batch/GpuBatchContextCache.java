@@ -10,6 +10,7 @@ package com.powsybl.openloadflow.ac.solver.gpu.batch;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcStructures;
+import com.powsybl.openloadflow.ac.outerloop.gpu.DeviceLoopTables;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -147,7 +148,7 @@ public final class GpuBatchContextCache {
                 data.dsBaseTargetP(), data.dsMaxDelta(), data.dsMinDelta(),
                 data.dsMode(), data.dsMarginUp(), data.dsMarginDown(),
                 data.dsSlackMarginUp(), data.dsSlackMarginDown());
-        GpuBatchOuterLoopTables.installRlElection(handle, data);
+        DeviceLoopTables.installRlElection(handle, data);
         cachedContext = new CachedBatchContext(handle, data, chunkSize, mode, structure);
         BUILDS.incrementAndGet();
         return handle;

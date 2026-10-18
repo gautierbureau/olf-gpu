@@ -137,74 +137,7 @@ record ExtractionColumns(int[] phiCol, int[] vCol, int[] branchRhoCol, int[] bra
         // IS the all-pinned corner (updatePilotVeqBatch flips the pilot's V identity) — this
         // retired the last remote-pin-dynamics whole-run gate (table-less pinnable free member).
         java.util.Set<Integer> qrPilotBuses = new java.util.HashSet<>();
-        for (LfBus bus : network.getBuses()) {
-            var gvc = bus.getGeneratorVoltageControl()
-                    .filter(c -> c.getMergeStatus() == VoltageControl.MergeStatus.MAIN)
-                    .filter(c -> bus.isGeneratorVoltageControlled() && !c.isLocalControl())
-                    .orElse(null);
-            // A pilot that is ALSO one of its controllers has NO Q balance of its own to relocate —
-            // its q feeds the group's DISTR_Q rows instead (GpuAcRowIndexing.distrQRow), and leaving
-            // it in this table double-counted that q on top of the DISTR_Q terms.
-            // ...but only WHILE IT CONTROLS. Once a reactive limit PINS such a pilot, OLF activates its
-            // BUS_TARGET_Q, which needs a row, and its own row still carries BUS_TARGET_V because a sibling
-            // controller keeps the voltage — so the group DOES need the table, with the pilot's raw-q
-            // emission GATED on it being pinned (psPilotPinned in olf_gpu_nr_jni.cu). Property-gated while
-            // this lands; without it such a group keeps a relocation frozen at extraction, which is what
-            // leaves rte6515's busbar base rank-deficient.
-            boolean pilotSelf = gvc != null && gvc.getMergedControllerElements().contains(bus);
-            // the ONE enrolment predicate (GpuAcRowIndexing.hasCandidateTable): the same answer decides the
-            // canonical, pin-state-independent encoding of the group's q rows and DISTR_Q pack
-            if (!GpuAcRowIndexing.hasCandidateTable(gvc, es)) {
-                continue;
-            }
-            // Each member's row is the one that HOSTS its reactive balance, which the coupler-tree relocation can
-            // move to the parent coupler's DUMMY_Q column (exactly as GpuAcRowIndexing.distrQRow's tree overload
-            // already moves its DISTR_Q). Naming its own V row instead sent a pinned pilot's raw q onto a row the
-            // relocation had given to the coupler's ZERO_V, and left the pilot's own row empty: measured on
-            // rte6515's [5000,6000) window with the relocation on, the failing slot's residual sat on
-            // BUS_V(VL-6003_1) at 6.5e+02 and on the empty pilot row BUS_V(VL-6003_0) at 1.09e+02, every iteration.
-            List<Integer> memberRows = new ArrayList<>();
-            for (LfBus m : gvc.getMergedControllerElements()) {
-                memberRows.add(GpuAcRowIndexing.relocatedQRow(m.getNum(), ziTreeEdges[0], dummyQCol, vCol));
-            }
-            int g = qrPtr.size();
-            qrPtr.add(qrRows.size());
-            // candidate 0 = the FALLBACK (control lost), the pilot's own reactive row — relocated like any other
-            qrRows.add(GpuAcRowIndexing.relocatedQRow(bus.getNum(), ziTreeEdges[0], dummyQCol, vCol));
-            qrRows.addAll(memberRows);
-            qRowAlt[bus.getNum()] = -2 - g;
-            qrPilotBuses.add(bus.getNum());
-            qrDepBase.add(-1);
-            qrBaseTargetRow.add(-1);
-            // DEPENDENT PILOTS. OLF merges the controls of one zero-impedance network into this MAIN; a contingency
-            // that cuts a dependent controlled bus from the main re-merges the survivors and elects a new main among
-            // them (LfZeroImpedanceNetwork.updateVoltageControlMergeStatus), whose BUS_TARGET_V comes back and whose
-            // reactive balance must ride a FREE controller's row - the same member rows as this table, with that
-            // bus's own reactive terms in the pattern. Each such bus gets a group of its own: candidate 0 its own
-            // reactive row (the fallback when the re-merged control is lost), then the base members in merged order,
-            // so its carrier pick coincides with the base group's on the same modes. A dependent bus that is itself
-            // one of the controllers has no balance of its own to host (pilot-self) and is left out.
-            for (var dvc : gvc.getMergedDependentVoltageControls()) {
-                LfBus dep = dvc.getControlledBus();
-                int dn = dep.getNum();
-                if (vCol[dn] < 0 || gvc.getMergedControllerElements().contains(dep) || depGroupOfRow[vCol[dn]] >= 0) {
-                    continue;
-                }
-                int dg = qrPtr.size();
-                qrPtr.add(qrRows.size());
-                int depQRow = GpuAcRowIndexing.relocatedQRow(dn, ziTreeEdges[0], dummyQCol, vCol);
-                qrRows.add(depQRow);
-                qrRows.addAll(memberRows);
-                qrDepBase.add(g);
-                qrBaseTargetRow.add(depQRow);
-                depGroupOfRow[vCol[dn]] = dg;
-            }
-            if (pilotSelf && System.getenv("OLF_GPU_RL_TRACE") != null) {
-                System.err.println("PILOTSELF_ENROL group=" + g + " pilot=" + bus.getId()
-                        + " members=" + gvc.getMergedControllerElements().size()
-                        + " fallbackRow=" + vCol[bus.getNum()]);
-            }
-        }
+        addRemoteVoltageControlGroups(network, es, ziTreeEdges, qrPilotBuses, dummyQCol, vCol, qrPtr, qrRows, qRowAlt, qrDepBase, qrBaseTargetRow, depGroupOfRow);
         qrPtr.add(qrRows.size());
         if (System.getenv("OLF_GPU_QR_TRACE") != null) {   // every relocation group of THIS extraction
             for (int g = 0; g + 1 < qrPtr.size(); g++) {
@@ -363,6 +296,86 @@ record ExtractionColumns(int[] phiCol, int[] vCol, int[] branchRhoCol, int[] bra
                 GpuAcArrays.toIntArray(qrPtr), GpuAcArrays.toIntArray(qrRows), qrGroupOfPilot, ziDeadEnd,
                 GpuAcArrays.toIntArray(qrDepBase), GpuAcArrays.toIntArray(qrBaseTargetRow), depGroupOfRow,
                 pRow, ziParentEdge, ziChildBus);
+    }
+
+    /** Remote generator voltage-control pilot-Q relocation groups (plan-B4): one candidate table per remote group, [pilot V row, member V columns in merged order]; adds each group's pilot to {@code qrPilotBuses}. */
+    private static void addRemoteVoltageControlGroups(final LfNetwork network,
+                                                       final EquationSystem<AcVariableType, AcEquationType> es,
+                                                       final int[][] ziTreeEdges,
+                                                       final java.util.Set<Integer> qrPilotBuses,
+                                                       final int[] dummyQCol, final int[] vCol,
+                                                       final List<Integer> qrPtr, final List<Integer> qrRows,
+                                                       final int[] qRowAlt, final List<Integer> qrDepBase,
+                                                       final List<Integer> qrBaseTargetRow,
+                                                       final int[] depGroupOfRow) {
+        for (LfBus bus : network.getBuses()) {
+            var gvc = bus.getGeneratorVoltageControl()
+                    .filter(c -> c.getMergeStatus() == VoltageControl.MergeStatus.MAIN)
+                    .filter(c -> bus.isGeneratorVoltageControlled() && !c.isLocalControl())
+                    .orElse(null);
+            // A pilot that is ALSO one of its controllers has NO Q balance of its own to relocate —
+            // its q feeds the group's DISTR_Q rows instead (GpuAcRowIndexing.distrQRow), and leaving
+            // it in this table double-counted that q on top of the DISTR_Q terms.
+            // ...but only WHILE IT CONTROLS. Once a reactive limit PINS such a pilot, OLF activates its
+            // BUS_TARGET_Q, which needs a row, and its own row still carries BUS_TARGET_V because a sibling
+            // controller keeps the voltage — so the group DOES need the table, with the pilot's raw-q
+            // emission GATED on it being pinned (psPilotPinned in olf_gpu_nr_jni.cu). Property-gated while
+            // this lands; without it such a group keeps a relocation frozen at extraction, which is what
+            // leaves rte6515's busbar base rank-deficient.
+            boolean pilotSelf = gvc != null && gvc.getMergedControllerElements().contains(bus);
+            // the ONE enrolment predicate (GpuAcRowIndexing.hasCandidateTable): the same answer decides the
+            // canonical, pin-state-independent encoding of the group's q rows and DISTR_Q pack
+            if (!GpuAcRowIndexing.hasCandidateTable(gvc, es)) {
+                continue;
+            }
+            // Each member's row is the one that HOSTS its reactive balance, which the coupler-tree relocation can
+            // move to the parent coupler's DUMMY_Q column (exactly as GpuAcRowIndexing.distrQRow's tree overload
+            // already moves its DISTR_Q). Naming its own V row instead sent a pinned pilot's raw q onto a row the
+            // relocation had given to the coupler's ZERO_V, and left the pilot's own row empty: measured on
+            // rte6515's [5000,6000) window with the relocation on, the failing slot's residual sat on
+            // BUS_V(VL-6003_1) at 6.5e+02 and on the empty pilot row BUS_V(VL-6003_0) at 1.09e+02, every iteration.
+            List<Integer> memberRows = new ArrayList<>();
+            for (LfBus m : gvc.getMergedControllerElements()) {
+                memberRows.add(GpuAcRowIndexing.relocatedQRow(m.getNum(), ziTreeEdges[0], dummyQCol, vCol));
+            }
+            int g = qrPtr.size();
+            qrPtr.add(qrRows.size());
+            // candidate 0 = the FALLBACK (control lost), the pilot's own reactive row — relocated like any other
+            qrRows.add(GpuAcRowIndexing.relocatedQRow(bus.getNum(), ziTreeEdges[0], dummyQCol, vCol));
+            qrRows.addAll(memberRows);
+            qRowAlt[bus.getNum()] = -2 - g;
+            qrPilotBuses.add(bus.getNum());
+            qrDepBase.add(-1);
+            qrBaseTargetRow.add(-1);
+            // DEPENDENT PILOTS. OLF merges the controls of one zero-impedance network into this MAIN; a contingency
+            // that cuts a dependent controlled bus from the main re-merges the survivors and elects a new main among
+            // them (LfZeroImpedanceNetwork.updateVoltageControlMergeStatus), whose BUS_TARGET_V comes back and whose
+            // reactive balance must ride a FREE controller's row - the same member rows as this table, with that
+            // bus's own reactive terms in the pattern. Each such bus gets a group of its own: candidate 0 its own
+            // reactive row (the fallback when the re-merged control is lost), then the base members in merged order,
+            // so its carrier pick coincides with the base group's on the same modes. A dependent bus that is itself
+            // one of the controllers has no balance of its own to host (pilot-self) and is left out.
+            for (var dvc : gvc.getMergedDependentVoltageControls()) {
+                LfBus dep = dvc.getControlledBus();
+                int dn = dep.getNum();
+                if (vCol[dn] < 0 || gvc.getMergedControllerElements().contains(dep) || depGroupOfRow[vCol[dn]] >= 0) {
+                    continue;
+                }
+                int dg = qrPtr.size();
+                qrPtr.add(qrRows.size());
+                int depQRow = GpuAcRowIndexing.relocatedQRow(dn, ziTreeEdges[0], dummyQCol, vCol);
+                qrRows.add(depQRow);
+                qrRows.addAll(memberRows);
+                qrDepBase.add(g);
+                qrBaseTargetRow.add(depQRow);
+                depGroupOfRow[vCol[dn]] = dg;
+            }
+            if (pilotSelf && System.getenv("OLF_GPU_RL_TRACE") != null) {
+                System.err.println("PILOTSELF_ENROL group=" + g + " pilot=" + bus.getId()
+                        + " members=" + gvc.getMergedControllerElements().size()
+                        + " fallbackRow=" + vCol[bus.getNum()]);
+            }
+        }
     }
 
 }

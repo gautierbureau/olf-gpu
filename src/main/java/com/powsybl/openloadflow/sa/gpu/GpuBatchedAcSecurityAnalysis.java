@@ -869,19 +869,17 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                                                                  SecurityAnalysisParameters securityAnalysisParameters,
                                                                  PreContingencyNetworkResult preContingencyNetworkResult, boolean createResultExtension,
                                                                  List<LimitReduction> limitReductions, double preDistributedActivePower) {
-        {
-            GpuSaRunState rsv = runState.get();
-            if (rsv.staleVoltages != null) {
-                PrecomputedBatch pc = rsv.precomputed;
-                // the same test as the injection below: a contingency with a device state still runs on OLF's own path
-                // when one of its strategies is not answered on the device, and OLF then starts from every bus's voltage
-                // (rte6515 LINE-2349-694 after LINE-2348-693: started from the previous injection's voltages, 1.44 MW off)
-                boolean devicePath = pc.isReady() && !pc.exhausted().contains(contingency.getId())
-                        && pc.states().get(contingency.getId()) != null
-                        && everyStrategyAnsweredOnDevice(rsv, contingency.getId(), securityAnalysisParameters);
-                // device-answered: the injection writes every live bus, so only the disabled ones need their base back
-                restoreStaleVoltages(rsv, devicePath ? lfContingency.getDisabledNetwork().getBuses() : null);
-            }
+        GpuSaRunState rsv = runState.get();
+        if (rsv.staleVoltages != null) {
+            PrecomputedBatch pc = rsv.precomputed;
+            // the same test as the injection below: a contingency with a device state still runs on OLF's own path
+            // when one of its strategies is not answered on the device, and OLF then starts from every bus's voltage
+            // (rte6515 LINE-2349-694 after LINE-2348-693: started from the previous injection's voltages, 1.44 MW off)
+            boolean devicePath = pc.isReady() && !pc.exhausted().contains(contingency.getId())
+                    && pc.states().get(contingency.getId()) != null
+                    && everyStrategyAnsweredOnDevice(rsv, contingency.getId(), securityAnalysisParameters);
+            // device-answered: the injection writes every live bus, so only the disabled ones need their base back
+            restoreStaleVoltages(rsv, devicePath ? lfContingency.getDisabledNetwork().getBuses() : null);
         }
         GpuSaDiagnostics.dumpPostContingencyEquations(context, contingency, lfContingency, network);
         // OLF_GPU_ZI_TREE_CTG=1: the zero-impedance branches OLF has OUT of its spanning tree for THIS

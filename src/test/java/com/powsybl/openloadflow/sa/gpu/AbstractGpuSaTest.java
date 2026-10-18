@@ -115,23 +115,21 @@ abstract class AbstractGpuSaTest extends AbstractOpenSecurityAnalysisTest {
     void runTvcGeneratorUnderLevel(com.powsybl.openloadflow.OpenLoadFlowParameters.TransformerVoltageControlMode mode) {
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
-        {
-            Network network = com.powsybl.openloadflow.network.FourBusNetworkFactory.createWithSeveralTransformerVoltageControls();
-            com.powsybl.iidm.network.Line l0 = network.getLines().iterator().next();
-            String bis = l0.getId() + "_BIS";
-            network.newLine().setId(bis)
-                    .setVoltageLevel1(l0.getTerminal1().getVoltageLevel().getId()).setBus1(l0.getTerminal1().getBusBreakerView().getBus().getId())
-                    .setVoltageLevel2(l0.getTerminal2().getVoltageLevel().getId()).setBus2(l0.getTerminal2().getBusBreakerView().getBus().getId())
-                    .setR(l0.getR() * 2).setX(l0.getX() * 2).setG1(l0.getG1()).setB1(l0.getB1()).setG2(l0.getG2()).setB2(l0.getB2()).add();
-            List<Contingency> ctgs = List.of(new Contingency(bis, new BranchContingency(bis)),
-                    new Contingency(l0.getId(), new BranchContingency(l0.getId())));
-            com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
-                    .setTransformerVoltageControlOn(true).setDistributedSlack(true).setUseReactiveLimits(true);
-            com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp).setTransformerVoltageControlMode(mode);
-            assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
-            assertEquals(2, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(),
-                    "generators under the controlled level must not gate " + mode);
-        }
+        Network network = com.powsybl.openloadflow.network.FourBusNetworkFactory.createWithSeveralTransformerVoltageControls();
+        com.powsybl.iidm.network.Line l0 = network.getLines().iterator().next();
+        String bis = l0.getId() + "_BIS";
+        network.newLine().setId(bis)
+                .setVoltageLevel1(l0.getTerminal1().getVoltageLevel().getId()).setBus1(l0.getTerminal1().getBusBreakerView().getBus().getId())
+                .setVoltageLevel2(l0.getTerminal2().getVoltageLevel().getId()).setBus2(l0.getTerminal2().getBusBreakerView().getBus().getId())
+                .setR(l0.getR() * 2).setX(l0.getX() * 2).setG1(l0.getG1()).setB1(l0.getB1()).setG2(l0.getG2()).setB2(l0.getB2()).add();
+        List<Contingency> ctgs = List.of(new Contingency(bis, new BranchContingency(bis)),
+                new Contingency(l0.getId(), new BranchContingency(l0.getId())));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setTransformerVoltageControlOn(true).setDistributedSlack(true).setUseReactiveLimits(true);
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp).setTransformerVoltageControlMode(mode);
+        assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
+        assertEquals(2, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(),
+                "generators under the controlled level must not gate " + mode);
     }
 
     void assertAllPinnedCornerSemantics(Network network, List<Contingency> ctgs) {

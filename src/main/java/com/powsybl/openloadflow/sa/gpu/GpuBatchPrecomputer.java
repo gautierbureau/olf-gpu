@@ -95,7 +95,8 @@ final class GpuBatchPrecomputer {
                                                      List<PropagatedContingency> contingencies, List<OperatorStrategy> strategies,
                                                      List<Action> actions, boolean distributedSlack, boolean reactiveLimits,
                                                      double reactiveLimitTol, double slackDistTol, double convEpsPerEq,
-                                                     BatchConfig config, ReportNode reportNode) {
+                                                     BatchConfig configIn, ReportNode reportNode) {
+        BatchConfig config = configIn;
         if (!GpuAcNewtonSolver.isAvailable() || net == null || context == null || contingencies.isEmpty()) {
             if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
                 System.err.println("PRECOMP_BAIL avail=" + GpuAcNewtonSolver.isAvailable() + " net=" + (net != null)

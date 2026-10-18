@@ -239,6 +239,7 @@ public final class IncrementalShuntVoltageControl {
         }
     }
 
+    @SuppressWarnings("checkstyle:IllegalCatchError") // no section G table: the sections are pure B
     public static double shuntSectionG(LfShunt.Controller c, int pos) {
         // no public accessor for the per-section G table (only getG() at the current position) —
         // read-only reflection, same pattern as DiscreteTransformerVoltageControl.tapModels

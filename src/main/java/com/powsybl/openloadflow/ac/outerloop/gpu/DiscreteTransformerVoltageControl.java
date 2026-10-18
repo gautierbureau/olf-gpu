@@ -468,6 +468,7 @@ public final class DiscreteTransformerVoltageControl {
             }
         }
 
+        @SuppressWarnings("checkstyle:IllegalCatchError") // a bus outside the graph (disabled) has no component
         private static Integer componentOf(com.powsybl.openloadflow.graph.GraphConnectivity<LfBus, LfBranch> c, LfBus bus) {
             try {
                 return c.getComponentNumber(bus);

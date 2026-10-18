@@ -29,7 +29,8 @@ final class CouplerSeed {
 
     /** Seed slot {@code s} (contingency index {@code ci}); returns its plan entries with the rows of every bus whose
      *  balances come home here rewritten to the bus's own rows. */
-    static GenOutage[] seed(SlotSeeding ctx, int s, int ci, GenOutage[] slotGos) {
+    static GenOutage[] seed(SlotSeeding ctx, int s, int ci, GenOutage[] slotGosIn) {
+        GenOutage[] slotGos = slotGosIn;
         final int[] baseNonTreeZi = ctx.baseNonTreeZi();
         final int[] baseRowMode = ctx.baseRowMode();
         final double[] baseTargets = ctx.baseTargets();

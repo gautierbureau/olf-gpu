@@ -108,4 +108,24 @@ final class ZeroImpedanceClusters {
                 .map(vc -> vc.getControlledBus() == child)
                 .orElse(true);
     }
+
+    /** The zero-impedance elements OUT of the base spanning tree (ziIdx slot 10 is 0), in element order. */
+    static int[] baseNonTreeElements(GpuAcData gpuData) {
+        int[] zIdx = gpuData.ziIdx();
+        int nz = gpuData.ziBranchNums() == null ? 0 : gpuData.ziBranchNums().length;
+        int cnt = 0;
+        for (int zb = 0; zb < nz; zb++) {
+            if (zIdx[zb * 11 + 10] == 0) {
+                cnt++;
+            }
+        }
+        int[] baseNonTreeZi = new int[cnt];
+        cnt = 0;
+        for (int zb = 0; zb < nz; zb++) {
+            if (zIdx[zb * 11 + 10] == 0) {
+                baseNonTreeZi[cnt++] = zb;
+            }
+        }
+        return baseNonTreeZi;
+    }
 }

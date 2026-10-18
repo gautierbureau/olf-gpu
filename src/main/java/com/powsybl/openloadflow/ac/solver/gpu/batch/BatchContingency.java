@@ -57,41 +57,6 @@ public record BatchContingency(String contingencyId, List<LfBranch> outagedBranc
                 reclosedBranches, outagedZiBranches, outagedHvdcs, sideOpenBranches, stickyNonTreeZi, generatorActions, List.of());
     }
 
-    /** One GeneratorAction of a strategy pair: {@code deltaP} (pu) is the change of target P from the BASE
-     *  target, which is the whole move for an absolute action and the change added to the parent's target
-     *  for a relative one. {@code change} is OLF's own GeneratorChange (pu): the new target of an absolute action,
-     *  the amount added to the current target of a relative one. {@code participatesAt} is OLF's participation
-     *  verdict at a target P (pu) once the action re-checks it (GpuGeneratorParticipation), null when the re-check
-     *  leaves it as it was. */
-    public record GeneratorMove(LfGenerator generator, double deltaP, boolean absolute, double change,
-                                java.util.function.DoublePredicate participatesAt) {
-        public GeneratorMove {
-            Objects.requireNonNull(generator);
-        }
-
-        /** OLF's new target P (pu) from the generator's {@code currentTargetP} (pu) before the action. */
-        public double newTargetP(double currentTargetP) {
-            return absolute ? change : currentTargetP + change;
-        }
-    }
-
-    /** The generators an absolute GeneratorAction sets: the pair does not re-anchor their bus on the parent. */
-    public List<LfGenerator> absoluteTargetGenerators() {
-        return generatorActions.stream().filter(GeneratorMove::absolute).map(GeneratorMove::generator).toList();
-    }
-
-    /** A branch opened on ONE side by the contingency (node-breaker propagation): the closed-branch
-     *  element is masked and the pre-packed side-open OB view enabled — {@code side} is the OPEN
-     *  side (1 or 2), i.e. the remaining flow terms sit at the OTHER bus. */
-    public record SideOpen(LfBranch branch, int side) {
-        public SideOpen {
-            Objects.requireNonNull(branch);
-            if (side != 1 && side != 2) {
-                throw new IllegalArgumentException("side must be 1 or 2");
-            }
-        }
-    }
-
     /** 12-arg compatibility constructor (no absolute generator target). */
     @SuppressWarnings("java:S107")
     public BatchContingency(String contingencyId, List<LfBranch> outagedBranches, List<LfGenerator> lostGenerators,
@@ -175,6 +140,41 @@ public record BatchContingency(String contingencyId, List<LfBranch> outagedBranc
     /** Convenience for the common single-branch (N-1) case. */
     public BatchContingency(String contingencyId, LfBranch outagedBranch) {
         this(contingencyId, List.of(Objects.requireNonNull(outagedBranch)), List.of(), List.of(), List.of(), List.of(), List.of(), List.of(), List.of(), List.of());
+    }
+
+    /** One GeneratorAction of a strategy pair: {@code deltaP} (pu) is the change of target P from the BASE
+     *  target, which is the whole move for an absolute action and the change added to the parent's target
+     *  for a relative one. {@code change} is OLF's own GeneratorChange (pu): the new target of an absolute action,
+     *  the amount added to the current target of a relative one. {@code participatesAt} is OLF's participation
+     *  verdict at a target P (pu) once the action re-checks it (GpuGeneratorParticipation), null when the re-check
+     *  leaves it as it was. */
+    public record GeneratorMove(LfGenerator generator, double deltaP, boolean absolute, double change,
+                                java.util.function.DoublePredicate participatesAt) {
+        public GeneratorMove {
+            Objects.requireNonNull(generator);
+        }
+
+        /** OLF's new target P (pu) from the generator's {@code currentTargetP} (pu) before the action. */
+        public double newTargetP(double currentTargetP) {
+            return absolute ? change : currentTargetP + change;
+        }
+    }
+
+    /** The generators an absolute GeneratorAction sets: the pair does not re-anchor their bus on the parent. */
+    public List<LfGenerator> absoluteTargetGenerators() {
+        return generatorActions.stream().filter(GeneratorMove::absolute).map(GeneratorMove::generator).toList();
+    }
+
+    /** A branch opened on ONE side by the contingency (node-breaker propagation): the closed-branch
+     *  element is masked and the pre-packed side-open OB view enabled — {@code side} is the OPEN
+     *  side (1 or 2), i.e. the remaining flow terms sit at the OTHER bus. */
+    public record SideOpen(LfBranch branch, int side) {
+        public SideOpen {
+            Objects.requireNonNull(branch);
+            if (side != 1 && side != 2) {
+                throw new IllegalArgumentException("side must be 1 or 2");
+            }
+        }
     }
 
     /** A combined branch + generator/load contingency. */

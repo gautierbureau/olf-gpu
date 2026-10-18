@@ -88,7 +88,8 @@ public final class ReactiveLimitsWriteBack {
      *  device's {@code relocChoose} makes — the first OTHER candidate whose row is neither identity nor
      *  pinned (the carrier) — and its own row when none is live (the group lost control and the device
      *  flipped that row to a power row, mode 1). */
-    private static int pinnedBalanceRow(GpuAcData data, int i, int vRow, int[] devModes) {
+    private static int pinnedBalanceRow(GpuAcData data, int i, int vRowIn, int[] devModes) {
+        int vRow = vRowIn;
         // First, the COUPLER-TREE RELOCATION: a relocated child's reactive balance — and so the target the pin
         // wrote — lives on its parent coupler's DUMMY_Q row, which is exactly where the native pass put it
         // (rlQrow). Reading the bus's own row instead read the coupler's ZERO_V target as a reactive limit and

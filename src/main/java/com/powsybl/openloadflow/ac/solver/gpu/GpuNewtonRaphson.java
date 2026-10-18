@@ -1192,8 +1192,9 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
      * converged state when no more loops fire).
      */
     @SuppressWarnings("java:S3776")
-    private double[] handleDriverPauses(double[] out, int n, double[] target,
+    private double[] handleDriverPauses(double[] outIn, int n, double[] target,
                                          boolean[][] elementMask, int lsMode, double convEpsPerEq) {
+        double[] out = outIn;
         long handle = context.handle.get();
         int pausedKind = DriverNative.readBatchDriverPaused(handle);
         if (pausedKind == 0) {

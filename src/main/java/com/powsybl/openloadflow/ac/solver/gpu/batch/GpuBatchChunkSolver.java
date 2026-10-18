@@ -307,24 +307,7 @@ final class GpuBatchChunkSolver {
             // The zero-impedance elements OUT of the base tree, once: a scenario with sticky non-tree couplers puts
             // every one of them back except its still-out set, and scanning all ziBranchNums per scenario with a
             // boxed set was 1.4 s of host time on network.xiidm (2653 elements x every such scenario).
-            int[] baseNonTreeZi;
-            {
-                int[] zIdx = gpuData.ziIdx();
-                int nz = gpuData.ziBranchNums() == null ? 0 : gpuData.ziBranchNums().length;
-                int cnt = 0;
-                for (int zb = 0; zb < nz; zb++) {
-                    if (zIdx[zb * 11 + 10] == 0) {
-                        cnt++;
-                    }
-                }
-                baseNonTreeZi = new int[cnt];
-                cnt = 0;
-                for (int zb = 0; zb < nz; zb++) {
-                    if (zIdx[zb * 11 + 10] == 0) {
-                        baseNonTreeZi[cnt++] = zb;
-                    }
-                }
-            }
+            int[] baseNonTreeZi = ZeroImpedanceClusters.baseNonTreeElements(gpuData);
             for (List<Integer> group : List.of(ctgIdxList, pairIdxList)) {
                 boolean pairPhase = group == pairIdxList;
                 int nbg = group.size();
@@ -1031,21 +1014,19 @@ final class GpuBatchChunkSolver {
                     // structure was extracted on (empty clears the previous chunk's list).
                     ZeroImpedanceNative.setBatchZiTreeOverrides(handle,
                             rs.ziTreeSlotElemValList.stream().mapToInt(Integer::intValue).toArray());
-                    {
-                        String traceCtg = System.getenv("OLF_GPU_LOOP_TRACE_CTG");
-                        int traceSlot = -1;
-                        if (traceCtg != null) {
-                            for (int s = 0; s < realCount; s++) {
-                                if (traceCtg.equals(contingencies.get(group.get(chunkStart + s)).contingencyId())) {
-                                    traceSlot = s;
-                                }
-                            }
-                            if (traceSlot >= 0) {
-                                System.err.println("LOOP_TRACE_CTG ctg=" + traceCtg + " slot=" + traceSlot);
+                    String traceCtg = System.getenv("OLF_GPU_LOOP_TRACE_CTG");
+                    int traceSlot = -1;
+                    if (traceCtg != null) {
+                        for (int s = 0; s < realCount; s++) {
+                            if (traceCtg.equals(contingencies.get(group.get(chunkStart + s)).contingencyId())) {
+                                traceSlot = s;
                             }
                         }
-                        NewtonSettingsNative.setBatchLoopTraceSlot(handle, traceSlot);
+                        if (traceSlot >= 0) {
+                            System.err.println("LOOP_TRACE_CTG ctg=" + traceCtg + " slot=" + traceSlot);
+                        }
                     }
+                    NewtonSettingsNative.setBatchLoopTraceSlot(handle, traceSlot);
                     // OLF_GPU_CHUNK_DUMP=<file>: every chunk's members in slot order, appended one line per chunk
                     // ("<pairPhase> <chunkStart> <chunkSize> <id> <id> ..."). A scenario whose answer moves with
                     // its chunk mates can only be reproduced in the chunk it was solved in.

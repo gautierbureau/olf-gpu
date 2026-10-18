@@ -219,59 +219,57 @@ class GpuZiCouplerTreeRelocationTest extends AbstractLoadFlowNetworkFactory {
 
     /** The device's FIRST Newton step from the flat start against OLF's own (KLU on the same system), at 1e-12. */
     private static void assertFirstStepIsOlfs(Network iidm, String what) {
-        {
-            LfNetwork network = Networks.load(iidm,
-                    new LfNetworkParameters().setSlackBusSelector(new FirstSlackBusSelector())).get(0);
-            EquationSystem<AcVariableType, AcEquationType> es = new AcEquationSystemCreator(network).create();
-            AcSolverUtil.initStateVector(network, es, new UniformValueVoltageInitializer());
-            AcTargetVector target = new AcTargetVector(network, es);
-            EquationVector<AcVariableType, AcEquationType> eq = new EquationVector<>(es);
-            int n = es.getIndex().getSortedVariablesToFind().size();
-            double[] x0 = es.getStateVector().get().clone();
+        LfNetwork network = Networks.load(iidm,
+                new LfNetworkParameters().setSlackBusSelector(new FirstSlackBusSelector())).get(0);
+        EquationSystem<AcVariableType, AcEquationType> es = new AcEquationSystemCreator(network).create();
+        AcSolverUtil.initStateVector(network, es, new UniformValueVoltageInitializer());
+        AcTargetVector target = new AcTargetVector(network, es);
+        EquationVector<AcVariableType, AcEquationType> eq = new EquationVector<>(es);
+        int n = es.getIndex().getSortedVariablesToFind().size();
+        double[] x0 = es.getStateVector().get().clone();
 
-            GpuAcData d = GpuAcDataExtractor.extract(network, es);
-            GpuAcActivation activation = GpuAcActivationExtractor.extractActivation(network, es, n);
-            double[] stableTargets = activation.applyTargets(target.getArray());
-            double[] gpu = GpuAcNewtonSolver.solve(x0, stableTargets, activation.rowMode(), 1, 0.0,
-                    d.cbIn(), d.cbIdx(), d.obIn(), d.obIdx(), d.shIn(), d.shIdx(), d.hvIn(), d.hvIdx(),
-                    d.dqElem(), d.dqSide(), d.dqWeight(), d.dqRow(), d.dqKind(),
-                    d.ziIn(), d.ziIdx(),
-                    d.drRow(), d.drCol(), d.drCoef(), d.dbRow(), d.dbCol(), d.dbCoef(),
-                // the group tables + ob/zi alternates travel with the packs: a pilot-self group enrolled
-                // in the candidate table (rotation) encodes -2-g in the q alternates, refused without them
-                d.qrPtr(), d.qrRows(), d.obQAlt(), d.ziQAlt());
+        GpuAcData d = GpuAcDataExtractor.extract(network, es);
+        GpuAcActivation activation = GpuAcActivationExtractor.extractActivation(network, es, n);
+        double[] stableTargets = activation.applyTargets(target.getArray());
+        double[] gpu = GpuAcNewtonSolver.solve(x0, stableTargets, activation.rowMode(), 1, 0.0,
+                d.cbIn(), d.cbIdx(), d.obIn(), d.obIdx(), d.shIn(), d.shIdx(), d.hvIn(), d.hvIdx(),
+                d.dqElem(), d.dqSide(), d.dqWeight(), d.dqRow(), d.dqKind(),
+                d.ziIn(), d.ziIdx(),
+                d.drRow(), d.drCol(), d.drCoef(), d.dbRow(), d.dbCol(), d.dbCoef(),
+            // the group tables + ob/zi alternates travel with the packs: a pilot-self group enrolled
+            // in the candidate table (rotation) encodes -2-g in the q alternates, refused without them
+            d.qrPtr(), d.qrRows(), d.obQAlt(), d.ziQAlt());
 
-            StateVector sv = es.getStateVector();
-            sv.set(x0.clone());
-            try (JacobianMatrix<AcVariableType, AcEquationType> j = new JacobianMatrix<>(es, new DenseMatrixFactory())) {
-                eq.minus(target);
-                if (System.getenv("OLF_GPU_F0_TRACE") != null) {
-                    // OLF's own f(x0) - target per equation, beside the device's first fill (OLF_GPU_VALS_DUMP_ANY):
-                    // the row the two arms evaluate differently, before any step blurs it (see GpuNewtonRaphson)
-                    double[] f0 = eq.getArray();
-                    for (int c = 0; c < f0.length; c++) {
-                        var e = es.getIndex().getEquationAtColumn(c);
-                        System.err.println("F0_TRACE " + what + " col=" + c + " " + e.getType() + " elem=" + e.getElementNum()
-                                + " f0=" + f0[c]);
-                    }
-                    try (java.io.Writer w = java.nio.file.Files.newBufferedWriter(java.nio.file.Path.of(
-                            System.getenv("OLF_GPU_F0_TRACE") + "." + what.replace(' ', '_') + ".eq"))) {
-                        GpuEquationDump.write(w, network, es, d, activation.rowMode());
-                    } catch (java.io.IOException ex) {
-                        throw new java.io.UncheckedIOException(ex);
-                    }
+        StateVector sv = es.getStateVector();
+        sv.set(x0.clone());
+        try (JacobianMatrix<AcVariableType, AcEquationType> j = new JacobianMatrix<>(es, new DenseMatrixFactory())) {
+            eq.minus(target);
+            if (System.getenv("OLF_GPU_F0_TRACE") != null) {
+                // OLF's own f(x0) - target per equation, beside the device's first fill (OLF_GPU_VALS_DUMP_ANY):
+                // the row the two arms evaluate differently, before any step blurs it (see GpuNewtonRaphson)
+                double[] f0 = eq.getArray();
+                for (int c = 0; c < f0.length; c++) {
+                    var e = es.getIndex().getEquationAtColumn(c);
+                    System.err.println("F0_TRACE " + what + " col=" + c + " " + e.getType() + " elem=" + e.getElementNum()
+                            + " f0=" + f0[c]);
                 }
-                double[] dx = eq.getArray().clone();
-                j.solveTransposed(dx);
-                sv.minus(dx);
+                try (java.io.Writer w = java.nio.file.Files.newBufferedWriter(java.nio.file.Path.of(
+                        System.getenv("OLF_GPU_F0_TRACE") + "." + what.replace(' ', '_') + ".eq"))) {
+                    GpuEquationDump.write(w, network, es, d, activation.rowMode());
+                } catch (java.io.IOException ex) {
+                    throw new java.io.UncheckedIOException(ex);
+                }
             }
-            double[] cpu = sv.get().clone();
-            double worst = 0;
-            for (int i = 0; i < n; i++) {
-                worst = Math.max(worst, Math.abs(gpu[i] - cpu[i]));
-            }
-            assertTrue(worst < 1e-12, what + ": the device's first step must be OLF's,"
-                    + " worst difference " + worst);
+            double[] dx = eq.getArray().clone();
+            j.solveTransposed(dx);
+            sv.minus(dx);
         }
+        double[] cpu = sv.get().clone();
+        double worst = 0;
+        for (int i = 0; i < n; i++) {
+            worst = Math.max(worst, Math.abs(gpu[i] - cpu[i]));
+        }
+        assertTrue(worst < 1e-12, what + ": the device's first step must be OLF's,"
+                + " worst difference " + worst);
     }
 }

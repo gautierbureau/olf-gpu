@@ -215,41 +215,39 @@ final class GpuSaDiagnostics {
             // device's state. A bus with no branches and no shunt should have a Q balance with no
             // terms at all; when it evaluates to a round non-zero number something IS in there, and
             // only the term list says what.
-            {
-                int shown = 0;
-                for (var t : eq.<com.powsybl.openloadflow.equations.EquationTerm<AcVariableType,
-                        AcEquationType>>getTerms()) {
-                    if (!t.isActive() || shown++ >= 12) {
-                        continue;
-                    }
-                    double termVal;
-                    try {
-                        termVal = t.eval();
-                    } catch (RuntimeException ex) {
-                        termVal = Double.NaN;
-                    }
-                    // Name the term by its VARIABLES. The element number of an
-                    // EquationTermArrayElementImpl is the array wrapper's, not the branch's, so it
-                    // identifies nothing; the variable list distinguishes a branch flow (v/phi of
-                    // two buses) from a zero-impedance DUMMY_Q, which is the whole question when a
-                    // bus has no branches left.
-                    StringBuilder vars = new StringBuilder();
-                    try {
-                        for (var vv : t.getVariables()) {
-                            vars.append(' ').append(vv.getType()).append('#').append(vv.getElementNum());
-                            if (vv.getType() == AcVariableType.BUS_V || vv.getType() == AcVariableType.BUS_PHI) {
-                                LfBus vb = context.getNetwork().getBus(vv.getElementNum());
-                                vars.append('(').append(vb == null ? "?" : vb.getId())
-                                        .append(vb != null && vb.isDisabled() ? ",DISABLED" : "").append(')');
-                            }
-                        }
-                    } catch (RuntimeException ex) {
-                        vars.append(" <unavailable>");
-                    }
-                    System.err.printf("SA_RESID_TERM ctg=%s row=%d term=%s elemType=%s value=%.9f vars:%s%n",
-                            contingencyId, row, t.getClass().getSimpleName(),
-                            t.getElementType(), termVal, vars);
+            int shown = 0;
+            for (var t : eq.<com.powsybl.openloadflow.equations.EquationTerm<AcVariableType,
+                    AcEquationType>>getTerms()) {
+                if (!t.isActive() || shown++ >= 12) {
+                    continue;
                 }
+                double termVal;
+                try {
+                    termVal = t.eval();
+                } catch (RuntimeException ex) {
+                    termVal = Double.NaN;
+                }
+                // Name the term by its VARIABLES. The element number of an
+                // EquationTermArrayElementImpl is the array wrapper's, not the branch's, so it
+                // identifies nothing; the variable list distinguishes a branch flow (v/phi of
+                // two buses) from a zero-impedance DUMMY_Q, which is the whole question when a
+                // bus has no branches left.
+                StringBuilder vars = new StringBuilder();
+                try {
+                    for (var vv : t.getVariables()) {
+                        vars.append(' ').append(vv.getType()).append('#').append(vv.getElementNum());
+                        if (vv.getType() == AcVariableType.BUS_V || vv.getType() == AcVariableType.BUS_PHI) {
+                            LfBus vb = context.getNetwork().getBus(vv.getElementNum());
+                            vars.append('(').append(vb == null ? "?" : vb.getId())
+                                    .append(vb != null && vb.isDisabled() ? ",DISABLED" : "").append(')');
+                        }
+                    }
+                } catch (RuntimeException ex) {
+                    vars.append(" <unavailable>");
+                }
+                System.err.printf("SA_RESID_TERM ctg=%s row=%d term=%s elemType=%s value=%.9f vars:%s%n",
+                        contingencyId, row, t.getClass().getSimpleName(),
+                        t.getElementType(), termVal, vars);
             }
             // For a violated DISTR_Q, OLF's own q for EVERY member of the group, evaluated at the
             // DEVICE's state. The device believes its sharing equation is satisfied there; if OLF

@@ -412,7 +412,8 @@ public final class SecondaryVoltageControlLoop {
      *  {@code rlState} (re-enabled controllers lose their pin); returns the scenarios that moved, or
      *  {@code null} when nothing did. Shared by the host orchestrator and the driver-pause path so the
      *  two can never drift. */
-    @SuppressWarnings({"java:S107", "java:S3776"})
+    // a zone system that does not solve leaves that scenario unadjusted
+    @SuppressWarnings({"java:S107", "java:S3776", "checkstyle:IllegalCatchError"})
     private static boolean[] decideRound(long handle, int chunkSize, int realCount, int n, int nrl,
             double[][] chunkResults, Controllers controllers, int[] rlState, double[][] targetV,
             double[] baseState, int[] unit, int[] obs, int round) {

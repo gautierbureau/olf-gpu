@@ -10,6 +10,7 @@ package com.powsybl.openloadflow.ac.solver.gpu.batch;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcActivation;
+import com.powsybl.openloadflow.ac.outerloop.gpu.ContinuousPhaseControl;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DiscreteShuntVoltageControl;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DiscreteTransformerVoltageControl;
 import com.powsybl.openloadflow.ac.outerloop.gpu.IncrementalFlowControl;
@@ -67,7 +68,7 @@ public final class GpuBatchPhases {
                         List<IncrementalShuntVoltageControl.Controller> incrementalShunt,
                         List<DiscreteShuntVoltageControl.Group> simpleShunt,
                         List<IncrementalFlowControl.Controller> flow,
-                        List<GpuBatchContinuousPhase.Ctl> continuousPhase,
+                        List<ContinuousPhaseControl.Ctl> continuousPhase,
                         List<DiscreteTransformerVoltageControl.TransformerController> discreteTvc,
                         DiscreteTransformerVoltageControl.FreezeTables freeze,
                         GpuBatchSecondaryVc.Controllers secondaryVc,
@@ -112,7 +113,7 @@ public final class GpuBatchPhases {
                                 request.rpcMaxTapShift(), request.rpc(), request.incrementalPhase())
                         : null,
                 request.continuousPhase()
-                        ? GpuBatchContinuousPhase.buildControllers(network, es, targetVector, activation, targets, mapper)
+                        ? ContinuousPhaseControl.buildControllers(network, es, targetVector, activation, targets, mapper)
                         : null,
                 discreteTvc,
                 discreteTvc != null

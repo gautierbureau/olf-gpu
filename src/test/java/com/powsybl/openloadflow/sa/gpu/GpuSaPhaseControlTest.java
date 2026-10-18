@@ -113,7 +113,7 @@ class GpuSaPhaseControlTest extends AbstractGpuSaTest {
     /** DEVICE-mode CONTINUOUS phase control (CONTINUOUS_WITH_DISCRETISATION, CONTROLLER): the first
      *  solve runs with the a1 row flipped to the controlled P-flow equation (row mode 3), then the
      *  loop rounds a1 to the closest tap and re-solves with the tap's full pi row pinned
-     *  (GpuBatchContinuousPhase); GPU SA == CPU SA at 1e-12. */
+     *  (ContinuousPhaseControl); GPU SA == CPU SA at 1e-12. */
     @Test
     void deviceContinuousPhaseControlMatchesCpu() {
         org.junit.jupiter.api.Assumptions.assumeTrue(
@@ -140,7 +140,7 @@ class GpuSaPhaseControlTest extends AbstractGpuSaTest {
 
     /** DEVICE-mode CONTINUOUS phase control in CURRENT_LIMITER mode: one tap shift per round while
      *  I exceeds the limit, direction from the sign of dI/da1 on OLF's own current term
-     *  (GpuBatchContinuousPhase LIMITER branch); GPU SA == CPU SA at 1e-12. */
+     *  (ContinuousPhaseControl LIMITER branch); GPU SA == CPU SA at 1e-12. */
     @Test
     void deviceContinuousPhaseControlCurrentLimiterMatchesCpu() {
         org.junit.jupiter.api.Assumptions.assumeTrue(

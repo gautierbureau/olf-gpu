@@ -9,6 +9,7 @@ package com.powsybl.openloadflow.ac.solver.gpu.batch;
 
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
+import com.powsybl.openloadflow.ac.outerloop.gpu.ContinuousPhaseControl;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DiscreteTransformerVoltageControl;
 import com.powsybl.openloadflow.ac.solver.NewtonRaphsonParameters;
 import com.powsybl.openloadflow.network.LfBranch;
@@ -567,7 +568,7 @@ final class GpuBatchChunkSolver {
                     // BEFORE the first solve. This is the loop's initialize(), not an orchestrator — the
                     // in-kernel phase expects the activation to already carry it.
                     if (phases.continuousPhase() != null && !phases.continuousPhase().isEmpty()) {
-                        GpuBatchContinuousPhase.applyPhaseOn(realCount, n, phases.continuousPhase(),
+                        ContinuousPhaseControl.applyPhaseOn(realCount, n, phases.continuousPhase(),
                                 rs.rowModePerScenario, baseRowMode, rs.disabledMask, rs.overrides);
                     }
                     int[] targetOverrideIndex = rs.overrides.indexArray();

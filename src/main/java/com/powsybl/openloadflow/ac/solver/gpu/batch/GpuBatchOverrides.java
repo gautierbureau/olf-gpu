@@ -36,7 +36,7 @@ import gnu.trove.map.hash.TIntIntHashMap;
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
-final class GpuBatchOverrides {
+public final class GpuBatchOverrides {
 
     private final TIntArrayList index = new TIntArrayList();
     private final TDoubleArrayList value = new TDoubleArrayList();
@@ -105,7 +105,7 @@ final class GpuBatchOverrides {
      *  +197 violations against OLF) and won in a 3-contingency batch (slot 0, bit-identical to OLF). The
      *  entries handed to the device now never hold a row twice; a conflicting duplicate is still COUNTED
      *  (always, one compare on a rare path) so the chunk solver can name it. */
-    void add(int flat, double v) {
+    public void add(int flat, double v) {
         if (WATCH.contains(flat)) {                          // OLF_GPU_OV_WATCH=<flat>[,<flat>]: who writes it
             System.err.println("OV_WATCH flat=" + flat + " v=" + v + " at " + java.util.Arrays.stream(new Throwable().getStackTrace())
                     .filter(f -> f.getClassName().startsWith("com.powsybl.openloadflow")).limit(4)

@@ -8,6 +8,7 @@
 package com.powsybl.openloadflow.ac.solver.gpu.batch;
 
 
+import com.powsybl.openloadflow.ac.outerloop.gpu.ContinuousPhaseControl;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DiscreteShuntVoltageControl;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DiscreteTransformerVoltageControl;
 import com.powsybl.openloadflow.ac.outerloop.gpu.IncrementalFlowControl;
@@ -36,7 +37,7 @@ public final class DevicePhaseInstaller {
      *  the controls OLF's initialize switched ON (the base load flow); a chunk applies them at solve entry itself. */
     public record Request(List<IncrementalTransformerVoltageControl.Controller> incrementalTvc, int incTvcMaxTapShift,
                           List<IncrementalFlowControl.Controller> flow,
-                          List<GpuBatchContinuousPhase.Ctl> continuousPhase,
+                          List<ContinuousPhaseControl.Ctl> continuousPhase,
                           List<IncrementalShuntVoltageControl.Controller> incrementalShunt, int incShuntMaxSectionShift,
                           List<DiscreteTransformerVoltageControl.TransformerController> discreteTvc, boolean simpleTvc,
                           boolean afterGenerator, DiscreteTransformerVoltageControl.FreezeTables freeze,
@@ -63,7 +64,7 @@ public final class DevicePhaseInstaller {
         // The flow-observed incremental loops (RPC at OLF order 9, incremental phase at order 7) as DRIVER PHASES.
         boolean flowInKernel = IncrementalFlowControl.uploadToDevice(handle, r.flow());
         // CONTINUOUS PhaseControl as a DRIVER PHASE (OLF order 7); the pre-solve control-ON activation stays host-side.
-        boolean cphInKernel = GpuBatchContinuousPhase.uploadToDevice(handle, r.continuousPhase());
+        boolean cphInKernel = ContinuousPhaseControl.uploadToDevice(handle, r.continuousPhase());
         // IncrementalShuntVoltageControl as a DRIVER PHASE (OLF order 10).
         boolean shuntInKernel = IncrementalShuntVoltageControl.uploadToDevice(handle, r.incrementalShunt(),
                 r.incrementalShunt() != null ? r.incShuntMaxSectionShift() : 3);

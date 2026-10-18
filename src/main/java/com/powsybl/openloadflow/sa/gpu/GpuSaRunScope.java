@@ -117,7 +117,7 @@ final class GpuSaRunScope {
         // monitoring SVC is local with an automaton — slope-less plain-VOLTAGE SVCs need no loop support
         // (ordinary generator-VC buses on the device).
         boolean monitoringBatchable = com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchVoltageMonitoring.supported(lfNetwork);
-        // CONTINUOUS phase control (GpuBatchContinuousPhase): both modes batch LOCAL and REMOTE.
+        // CONTINUOUS phase control (ContinuousPhaseControl): both modes batch LOCAL and REMOTE.
         // CONTROLLER since 2026-09-05 (cbPcSide carries the controller's a1 column); LIMITER since
         // 2026-09-16 — OLF's PhaseControlOuterLoop is local BY CONSTRUCTION there, reading the
         // CONTROLLER branch's own I terms and differentiating them, so the controlled branch never

@@ -19,6 +19,7 @@ import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcDataExtractor;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcStructures;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuEquationDump;
+import com.powsybl.openloadflow.ac.outerloop.gpu.ContinuousPhaseControl;
 import com.powsybl.openloadflow.ac.outerloop.gpu.IncrementalFlowControl;
 import com.powsybl.openloadflow.ac.outerloop.gpu.IncrementalShuntVoltageControl;
 import com.powsybl.openloadflow.ac.outerloop.gpu.IncrementalTransformerVoltageControl;
@@ -31,7 +32,6 @@ import com.powsybl.openloadflow.ac.solver.NewtonRaphsonParameters;
 import com.powsybl.openloadflow.ac.solver.NewtonRaphsonStoppingCriteria;
 import com.powsybl.openloadflow.ac.solver.PerEquationTypeStoppingCriteria;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchContextCache;
-import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchContinuousPhase;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchForcedTargetQ;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchHvdcAcEmulation;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchOuterLoopTables;
@@ -218,7 +218,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
             IncrementalFlowControl.writeBackTaps(network, flowCtls, GpuAcNewtonSolver.readBatchFlowTaps(handle));
         }
         if (cphOwned && cphCtls != null) {
-            GpuBatchContinuousPhase.writeBack(network, cphCtls, GpuAcNewtonSolver.readBatchContinuousPhaseTaps(handle));
+            ContinuousPhaseControl.writeBack(network, cphCtls, GpuAcNewtonSolver.readBatchContinuousPhaseTaps(handle));
         }
         if (tvdOwned && tvdCtls != null) {
             com.powsybl.openloadflow.ac.outerloop.gpu.DiscreteTransformerVoltageControl.writeBack(network, tvdCtls,
@@ -334,7 +334,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
     private boolean shuntOwned;
     private List<IncrementalFlowControl.Controller> flowCtls;
     private boolean flowOwned;
-    private List<GpuBatchContinuousPhase.Ctl> cphCtls;
+    private List<ContinuousPhaseControl.Ctl> cphCtls;
     private boolean cphOwned;
     private List<com.powsybl.openloadflow.ac.outerloop.gpu.DiscreteTransformerVoltageControl.TransformerController> tvdCtls;
     private boolean tvdOwned;

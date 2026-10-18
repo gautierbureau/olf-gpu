@@ -5,7 +5,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/.
  * SPDX-License-Identifier: MPL-2.0
  */
-package com.powsybl.openloadflow.ac.solver.gpu.batch;
+package com.powsybl.openloadflow.ac.outerloop.gpu;
 
 import com.powsybl.iidm.network.TwoSides;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
@@ -14,6 +14,9 @@ import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcActivation;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DiscreteTransformerVoltageControl;
 import com.powsybl.openloadflow.ac.solver.NewtonRaphsonParameters;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchElementMapper;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchOverrides;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchSkips;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.EquationTerm;
 import com.powsybl.openloadflow.equations.TargetVector;
@@ -50,11 +53,11 @@ import java.util.Map;
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
-public final class GpuBatchContinuousPhase {
+public final class ContinuousPhaseControl {
 
-    private static final Logger LOGGER = LoggerFactory.getLogger(GpuBatchContinuousPhase.class);
+    private static final Logger LOGGER = LoggerFactory.getLogger(ContinuousPhaseControl.class);
 
-    private GpuBatchContinuousPhase() {
+    private ContinuousPhaseControl() {
     }
 
     /** kind 0 = CONTROLLER (continuous then discretized), 1 = LIMITER (one-tap current capping). */
@@ -137,7 +140,7 @@ public final class GpuBatchContinuousPhase {
 
     /** Pre-solve (OLF initialize): enable every live CONTROLLER-mode phase control — the a1 row
      *  becomes the P-flow equation (row mode 3) for the first solve. */
-    static void applyPhaseOn(int realCount, int n, List<Ctl> ctls,
+    public static void applyPhaseOn(int realCount, int n, List<Ctl> ctls,
                              int[][] rowModePerScenario, int[] baseRowMode, boolean[][] disabledMask,
                              GpuBatchOverrides overrides) {
         for (int slot = 0; slot < realCount; slot++) {

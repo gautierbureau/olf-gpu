@@ -24,6 +24,7 @@ import com.powsybl.openloadflow.ac.outerloop.gpu.HvdcAcEmulation;
 import com.powsybl.openloadflow.ac.outerloop.gpu.IncrementalFlowControl;
 import com.powsybl.openloadflow.ac.outerloop.gpu.IncrementalShuntVoltageControl;
 import com.powsybl.openloadflow.ac.outerloop.gpu.IncrementalTransformerVoltageControl;
+import com.powsybl.openloadflow.ac.outerloop.gpu.ReactiveCapabilityCurves;
 import com.powsybl.openloadflow.ac.outerloop.gpu.VoltageMonitoring;
 import com.powsybl.openloadflow.ac.solver.AbstractAcSolver;
 import com.powsybl.openloadflow.ac.solver.AcSolverResult;
@@ -36,7 +37,6 @@ import com.powsybl.openloadflow.ac.solver.PerEquationTypeStoppingCriteria;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchContextCache;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchForcedTargetQ;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchOuterLoopTables;
-import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchRlCurves;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchStatus;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.EquationSystemIndex;
@@ -689,8 +689,8 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                 // The SAME run-constant outer-loop tables the batched SA installs on its chunk
                 // contexts — a batch of one drives the same loops as a batch of five hundred.
                 var dsLoop = driverDsLoop();
-                GpuBatchRlCurves.Channel rlCurves = driverRlLoop() != null
-                        ? GpuBatchRlCurves.build(network, equationSystem, cachedData, driverDsParams(), dsLoop != null, target,
+                ReactiveCapabilityCurves.Channel rlCurves = driverRlLoop() != null
+                        ? ReactiveCapabilityCurves.build(network, equationSystem, cachedData, driverDsParams(), dsLoop != null, target,
                                 acLoadFlowParameters.getNetworkParameters().isExtrapolateReactiveLimits())
                         : null;
                 // forceTargetQInReactiveLimits: the base load flow's slack moves P too, and OLF re-clamps.

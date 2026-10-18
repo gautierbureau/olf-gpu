@@ -40,7 +40,7 @@ public final class RemoteMemberQPacker {
     }
 
     /** A REMOTE member entry of the reactive-limit pack: a controller of a MAIN remote group that is
-     *  not the group's controlled bus. Shared with GpuBatchRlCurves, which REPLAYS this enumeration
+     *  not the group's controlled bus. Shared with ReactiveCapabilityCurves, which REPLAYS this enumeration
      *  and must count exactly the same buses (a drift throws and the run falls to the CPU). */
     public static boolean isRemoteMemberEntry(LfBus bus) {
         GeneratorVoltageControl vc = mainGenVc(bus);

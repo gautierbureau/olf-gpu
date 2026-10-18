@@ -5,7 +5,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/.
  * SPDX-License-Identifier: MPL-2.0
  */
-package com.powsybl.openloadflow.ac.solver.gpu.batch;
+package com.powsybl.openloadflow.ac.outerloop.gpu;
 
 import com.powsybl.openloadflow.ac.equations.vector.gpu.ReactiveLimitsPacker;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.PilotSelfPacker;
@@ -47,9 +47,9 @@ import java.util.List;
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
-public final class GpuBatchRlCurves {
+public final class ReactiveCapabilityCurves {
 
-    private GpuBatchRlCurves() {
+    private ReactiveCapabilityCurves() {
     }
 
     /** The packed channel, null when the network needs none (no participating curve gen).

@@ -17,6 +17,7 @@ import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcDataCache;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcDataExtractor;
 import com.powsybl.openloadflow.ac.outerloop.gpu.HvdcAcEmulation;
+import com.powsybl.openloadflow.ac.outerloop.gpu.ReactiveCapabilityCurves;
 import com.powsybl.openloadflow.ac.solver.NewtonRaphsonParameters;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.TargetVector;
@@ -157,10 +158,10 @@ public final class GpuBatchedSecurityAnalysisSolver {
             }
         }
         boolean slackParticipates = java.util.Arrays.stream(gpuData.dsFactor()).sum() < 1 - 1e-9;
-        // Reactive capability CURVES at runtime P (GpuBatchRlCurves): each tracked generator is evaluated at its own
+        // Reactive capability CURVES at runtime P (ReactiveCapabilityCurves): each tracked generator is evaluated at its own
         // P (its anchor plus its own slack move); a strategy pair moving an untracked curve generator -> CPU.
-        GpuBatchRlCurves.Channel rlCurves = reactiveLimits
-                ? GpuBatchRlCurves.build(network, equationSystem, gpuData, config.dsParams(), distributedSlack, baseTargets,
+        ReactiveCapabilityCurves.Channel rlCurves = reactiveLimits
+                ? ReactiveCapabilityCurves.build(network, equationSystem, gpuData, config.dsParams(), distributedSlack, baseTargets,
                         config.rlCurveExtrapolate())
                 : null;
         // forceTargetQInReactiveLimits: the curve generators whose clamped Q target follows their P (null = none).

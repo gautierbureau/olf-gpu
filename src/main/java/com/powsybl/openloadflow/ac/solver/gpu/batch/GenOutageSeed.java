@@ -8,6 +8,7 @@
 package com.powsybl.openloadflow.ac.solver.gpu.batch;
 
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
+import com.powsybl.openloadflow.ac.outerloop.gpu.ReactiveCapabilityCurves;
 
 import java.util.List;
 
@@ -33,7 +34,7 @@ final class GenOutageSeed {
         final List<BatchContingency> contingencies = ctx.contingencies();
         final double[] baseTargets = ctx.baseTargets();
         final int[] baseRowMode = ctx.baseRowMode();
-        final GpuBatchRlCurves.Channel rlCurves = ctx.rlCurves();
+        final ReactiveCapabilityCurves.Channel rlCurves = ctx.rlCurves();
         final java.util.Map<Integer, int[]> curveEntriesByPRow = ctx.curveEntriesByPRow();
         final RunScratch rs = ctx.rs();
         final ChunkLists cl = ctx.cl();

@@ -9,6 +9,7 @@ package com.powsybl.openloadflow.ac.solver.gpu.batch;
 
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
+import com.powsybl.openloadflow.ac.outerloop.gpu.ReactiveCapabilityCurves;
 
 /**
  * The run-constant outer-loop tables EVERY batch context needs before its driver runs — the batched
@@ -69,7 +70,7 @@ public final class GpuBatchOuterLoopTables {
                 gpuData.rlTargetP(), gpuData.rlIdRank());
     }
 
-    public static void install(long handle, GpuAcData gpuData, GpuBatchRlCurves.Channel rlCurves,
+    public static void install(long handle, GpuAcData gpuData, ReactiveCapabilityCurves.Channel rlCurves,
                                GpuBatchForcedTargetQ.Channel forcedTargetQ,
                                boolean rlRobustMode, double minRealisticVoltage, double maxRealisticVoltage,
                                double minNominalVoltageRealisticVoltageCheck, int realisticFixingLoop) {

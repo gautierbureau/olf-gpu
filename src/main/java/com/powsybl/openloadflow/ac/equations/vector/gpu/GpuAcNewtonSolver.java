@@ -690,7 +690,7 @@ public final class GpuAcNewtonSolver {
     public static native void setBatchLineSearch(long handle, int lsMaxIter, double lsStepFold);
 
     /** Install (or clear, with nulls) the reactive-capability-CURVE channel on a batch context —
-     *  per-scenario dynamic RL limits evaluated at the current targets (see GpuBatchRlCurves). */
+     *  per-scenario dynamic RL limits evaluated at the current targets (see ReactiveCapabilityCurves). */
     public static native void setBatchRlCurves(long handle, int[] cvIdx, double[] cvIn, double[] cvPts,
                                                int[] cvHv, int extrapolate);
 

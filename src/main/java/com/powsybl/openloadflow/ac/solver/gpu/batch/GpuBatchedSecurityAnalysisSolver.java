@@ -17,6 +17,7 @@ import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcDataCache;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcDataExtractor;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DevicePhaseOwnership;
+import com.powsybl.openloadflow.ac.outerloop.gpu.DevicePhases;
 import com.powsybl.openloadflow.ac.outerloop.gpu.ForcedTargetQ;
 import com.powsybl.openloadflow.ac.outerloop.gpu.HvdcAcEmulation;
 import com.powsybl.openloadflow.ac.outerloop.gpu.ReactiveCapabilityCurves;
@@ -210,7 +211,7 @@ public final class GpuBatchedSecurityAnalysisSolver {
                     : null;
             // Every phase's tables, built by the SAME function the base load flow calls (#58): a phase
             // added there reaches both routes or neither.
-            GpuBatchPhases.Built phases = GpuBatchPhases.build(new GpuBatchPhases.Request(
+            DevicePhases.Built phases = DevicePhases.build(new DevicePhases.Request(
                     config.voltageMonitoring(),
                     config.incrementalTransformerControl(),
                     config.incrementalShuntControl(),

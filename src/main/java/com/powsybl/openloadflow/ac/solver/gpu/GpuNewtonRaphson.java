@@ -757,8 +757,8 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
             var incShuntLoop = driverLoop("IncrementalShuntVoltageControl");
             boolean sdAll = invalidation.structureDirty;
             boolean adAll = invalidation.activationDirty;
-            var phases = com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchPhases.build(
-                    new com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchPhases.Request(
+            var phases = com.powsybl.openloadflow.ac.outerloop.gpu.DevicePhases.build(
+                    new com.powsybl.openloadflow.ac.outerloop.gpu.DevicePhases.Request(
                             driverLoop("VoltageMonitoring") != null,
                             incTvcLoop != null,
                             incShuntLoop != null,

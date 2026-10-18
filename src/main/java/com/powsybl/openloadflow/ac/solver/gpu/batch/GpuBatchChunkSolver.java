@@ -11,6 +11,7 @@ import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 import com.powsybl.openloadflow.ac.outerloop.gpu.ContinuousPhaseControl;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DeviceLoopTables;
+import com.powsybl.openloadflow.ac.outerloop.gpu.DevicePhases;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DiscreteTransformerVoltageControl;
 import com.powsybl.openloadflow.ac.outerloop.gpu.ForcedTargetQ;
 import com.powsybl.openloadflow.ac.outerloop.gpu.HvdcAcEmulation;
@@ -167,7 +168,7 @@ final class GpuBatchChunkSolver {
         double slackDistTol = in.settings().slackDistTol();
         double convEpsPerEq = in.settings().convEpsPerEq();
         double[][] rowCriteria = in.settings().rowCriteria();
-        GpuBatchPhases.Built phases = in.phases().phases();
+        DevicePhases.Built phases = in.phases().phases();
         List<HvdcAcEmulation.Ctl> hvdcControllers = in.phases().hvdcControllers();
         ReactiveCapabilityCurves.Channel rlCurves = in.phases().rlCurves();
         ForcedTargetQ.Channel forcedTargetQ = in.phases().forcedTargetQ();

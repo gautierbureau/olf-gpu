@@ -31,7 +31,7 @@ class GpuSaPhaseControlTest extends AbstractGpuSaTest {
     }
 
     /** DEVICE-mode IncrementalPhaseControl (ACTIVE_POWER_CONTROL): a1 taps drive the controlled branch's
-     *  P via in-kernel dP/da1 sensitivities + OLF's own flow terms (GpuBatchIncrementalFlowControl);
+     *  P via in-kernel dP/da1 sensitivities + OLF's own flow terms (IncrementalFlowControl);
      *  the tap-moving strong-line outage included, GPU SA == CPU SA at 1e-12. */
     @Test
     void deviceIncrementalPhaseControlMatchesCpu() {

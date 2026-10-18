@@ -5,7 +5,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/.
  * SPDX-License-Identifier: MPL-2.0
  */
-package com.powsybl.openloadflow.ac.solver.gpu.batch;
+package com.powsybl.openloadflow.ac.outerloop.gpu;
 
 import com.powsybl.iidm.network.TwoSides;
 import com.powsybl.math.matrix.DenseMatrix;
@@ -15,6 +15,8 @@ import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DiscreteTransformerVoltageControl;
 import com.powsybl.openloadflow.ac.outerloop.gpu.IncrementalTransformerVoltageControl;
 import com.powsybl.openloadflow.ac.solver.NewtonRaphsonParameters;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchElementMapper;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchSkips;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.EquationTerm;
 import com.powsybl.openloadflow.equations.StateVector;
@@ -48,9 +50,9 @@ import java.util.Map;
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
-public final class GpuBatchIncrementalFlowControl {
+public final class IncrementalFlowControl {
 
-    private static final Logger LOGGER = LoggerFactory.getLogger(GpuBatchIncrementalFlowControl.class);
+    private static final Logger LOGGER = LoggerFactory.getLogger(IncrementalFlowControl.class);
 
     private static final int MAX_DIRECTION_CHANGE = 3;       // both OLF loops
     private static final double MIN_TARGET_DEADBAND_MVAR = 0.1;      // RPC (per-unit, OLF literal)
@@ -61,7 +63,7 @@ public final class GpuBatchIncrementalFlowControl {
     static final int KIND_PHASE_P = 1;                       // a1 -> branch P (closest-A1 taps)
     static final int KIND_PHASE_I = 2;                       // a1 -> branch I (exceed-A1 taps, one-sided)
 
-    private GpuBatchIncrementalFlowControl() {
+    private IncrementalFlowControl() {
     }
 
     public record Controller(int kind, int pinRow, int pinTapCol, EquationTerm<AcVariableType, AcEquationType> flowTerm,

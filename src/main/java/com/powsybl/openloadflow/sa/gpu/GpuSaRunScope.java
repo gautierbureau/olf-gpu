@@ -241,7 +241,7 @@ final class GpuSaRunScope {
                 && acParameters.getOuterLoops().stream().anyMatch(ol -> "IncrementalShuntVoltageControl".equals(ol.getName()));
         boolean cfgSimpleShunt = simpleShuntVcBatchable
                 && acParameters.getOuterLoops().stream().anyMatch(ol -> "ShuntVoltageControl".equals(ol.getName()));
-        // The flow-observed incremental family (GpuBatchIncrementalFlowControl): rho -> branch Q, and
+        // The flow-observed incremental family (IncrementalFlowControl): rho -> branch Q, and
         // a1 -> branch P / I. Both are decision-only loops over pinned identity rows — always batchable
         // when their loop is configured (continuous "PhaseControl" stays CPU via the extraction guard).
         boolean cfgIncrementalRpc = acParameters.getOuterLoops().stream().anyMatch(ol -> "IncrementalTransformerReactivePowerControl".equals(ol.getName()));

@@ -12,6 +12,7 @@ import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcActivation;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DiscreteShuntVoltageControl;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DiscreteTransformerVoltageControl;
+import com.powsybl.openloadflow.ac.outerloop.gpu.IncrementalFlowControl;
 import com.powsybl.openloadflow.ac.outerloop.gpu.IncrementalShuntVoltageControl;
 import com.powsybl.openloadflow.ac.outerloop.gpu.IncrementalTransformerVoltageControl;
 import com.powsybl.openloadflow.equations.EquationSystem;
@@ -65,12 +66,12 @@ public final class GpuBatchPhases {
                         List<IncrementalTransformerVoltageControl.Controller> incrementalTvc,
                         List<IncrementalShuntVoltageControl.Controller> incrementalShunt,
                         List<DiscreteShuntVoltageControl.Group> simpleShunt,
-                        List<GpuBatchIncrementalFlowControl.Controller> flow,
+                        List<IncrementalFlowControl.Controller> flow,
                         List<GpuBatchContinuousPhase.Ctl> continuousPhase,
                         List<DiscreteTransformerVoltageControl.TransformerController> discreteTvc,
                         DiscreteTransformerVoltageControl.FreezeTables freeze,
                         GpuBatchSecondaryVc.Controllers secondaryVc,
-                        GpuBatchIncrementalFlowControl.EsContext esContext) {
+                        IncrementalFlowControl.EsContext esContext) {
     }
 
     /**
@@ -107,7 +108,7 @@ public final class GpuBatchPhases {
                         ? DiscreteShuntVoltageControl.buildGroups(network, es, targetVector, activation, targets, mapper, shuntOffset)
                         : null,
                 request.rpc() || request.incrementalPhase()
-                        ? GpuBatchIncrementalFlowControl.buildControllers(network, es, mapper,
+                        ? IncrementalFlowControl.buildControllers(network, es, mapper,
                                 request.rpcMaxTapShift(), request.rpc(), request.incrementalPhase())
                         : null,
                 request.continuousPhase()
@@ -120,9 +121,9 @@ public final class GpuBatchPhases {
                         : null,
                 request.secondaryVc() && GpuBatchSecondaryVc.supported(network)
                         ? GpuBatchSecondaryVc.build(network, es, rlVrow,
-                                new GpuBatchIncrementalFlowControl.EsContext(es.getStateVector(), n),
+                                new IncrementalFlowControl.EsContext(es.getStateVector(), n),
                                 request.minPlausibleTargetV(), request.maxPlausibleTargetV(), mapper)
                         : null,
-                new GpuBatchIncrementalFlowControl.EsContext(es.getStateVector(), n));
+                new IncrementalFlowControl.EsContext(es.getStateVector(), n));
     }
 }

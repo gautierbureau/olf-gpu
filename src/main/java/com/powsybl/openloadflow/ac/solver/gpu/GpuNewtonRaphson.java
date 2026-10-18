@@ -19,6 +19,7 @@ import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcDataExtractor;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcStructures;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuEquationDump;
+import com.powsybl.openloadflow.ac.outerloop.gpu.IncrementalFlowControl;
 import com.powsybl.openloadflow.ac.outerloop.gpu.IncrementalShuntVoltageControl;
 import com.powsybl.openloadflow.ac.outerloop.gpu.IncrementalTransformerVoltageControl;
 import com.powsybl.openloadflow.ac.solver.AbstractAcSolver;
@@ -33,7 +34,6 @@ import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchContextCache;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchContinuousPhase;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchForcedTargetQ;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchHvdcAcEmulation;
-import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchIncrementalFlowControl;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchOuterLoopTables;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchRlCurves;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchStatus;
@@ -215,7 +215,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
             IncrementalShuntVoltageControl.writeBackPositions(network, shuntCtls, GpuAcNewtonSolver.readBatchShuntPositions(handle));
         }
         if (flowOwned && flowCtls != null) {
-            GpuBatchIncrementalFlowControl.writeBackTaps(network, flowCtls, GpuAcNewtonSolver.readBatchFlowTaps(handle));
+            IncrementalFlowControl.writeBackTaps(network, flowCtls, GpuAcNewtonSolver.readBatchFlowTaps(handle));
         }
         if (cphOwned && cphCtls != null) {
             GpuBatchContinuousPhase.writeBack(network, cphCtls, GpuAcNewtonSolver.readBatchContinuousPhaseTaps(handle));
@@ -332,7 +332,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
     private boolean tvcOwned;
     private List<IncrementalShuntVoltageControl.Controller> shuntCtls;
     private boolean shuntOwned;
-    private List<GpuBatchIncrementalFlowControl.Controller> flowCtls;
+    private List<IncrementalFlowControl.Controller> flowCtls;
     private boolean flowOwned;
     private List<GpuBatchContinuousPhase.Ctl> cphCtls;
     private boolean cphOwned;

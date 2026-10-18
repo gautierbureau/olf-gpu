@@ -12,6 +12,7 @@ import com.powsybl.math.matrix.LUDecomposition;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
+import com.powsybl.openloadflow.ac.outerloop.gpu.IncrementalFlowControl;
 import com.powsybl.openloadflow.ac.solver.NewtonRaphsonParameters;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.EquationTerm;
@@ -19,8 +20,8 @@ import com.powsybl.openloadflow.equations.Variable;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfNetwork;
-import com.powsybl.openloadflow.network.LfShunt;
 import com.powsybl.openloadflow.network.LfSecondaryVoltageControl;
+import com.powsybl.openloadflow.network.LfShunt;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -90,7 +91,7 @@ public final class GpuBatchSecondaryVc {
     }
 
     public record Controllers(List<CtlBus> ctls, List<Zone> zones,
-                       GpuBatchIncrementalFlowControl.EsContext esCtx,
+                       IncrementalFlowControl.EsContext esCtx,
                        double minPlausibleTargetV, double maxPlausibleTargetV) {
     }
 
@@ -121,7 +122,7 @@ public final class GpuBatchSecondaryVc {
 
     @SuppressWarnings("unchecked")
     public static Controllers build(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
-                             int[] rlVrow, GpuBatchIncrementalFlowControl.EsContext esCtx,
+                             int[] rlVrow, IncrementalFlowControl.EsContext esCtx,
                              double minPlausibleTargetV, double maxPlausibleTargetV,
                              GpuBatchElementMapper elementMapper) {
         Map<Integer, Integer> busVRows = new LinkedHashMap<>();

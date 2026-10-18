@@ -10,6 +10,7 @@ package com.powsybl.openloadflow.ac.solver.gpu.batch;
 
 import com.powsybl.openloadflow.ac.outerloop.gpu.DiscreteShuntVoltageControl;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DiscreteTransformerVoltageControl;
+import com.powsybl.openloadflow.ac.outerloop.gpu.IncrementalFlowControl;
 import com.powsybl.openloadflow.ac.outerloop.gpu.IncrementalShuntVoltageControl;
 import com.powsybl.openloadflow.ac.outerloop.gpu.IncrementalTransformerVoltageControl;
 
@@ -34,7 +35,7 @@ public final class DevicePhaseInstaller {
      *  discrete twin are never both present. {@code entryOn}: the activation the solve starts from already carries
      *  the controls OLF's initialize switched ON (the base load flow); a chunk applies them at solve entry itself. */
     public record Request(List<IncrementalTransformerVoltageControl.Controller> incrementalTvc, int incTvcMaxTapShift,
-                          List<GpuBatchIncrementalFlowControl.Controller> flow,
+                          List<IncrementalFlowControl.Controller> flow,
                           List<GpuBatchContinuousPhase.Ctl> continuousPhase,
                           List<IncrementalShuntVoltageControl.Controller> incrementalShunt, int incShuntMaxSectionShift,
                           List<DiscreteTransformerVoltageControl.TransformerController> discreteTvc, boolean simpleTvc,
@@ -60,7 +61,7 @@ public final class DevicePhaseInstaller {
         boolean tvcInKernel = IncrementalTransformerVoltageControl.uploadToDevice(handle, r.incrementalTvc(),
                 r.incrementalTvc() != null ? r.incTvcMaxTapShift() : 1);
         // The flow-observed incremental loops (RPC at OLF order 9, incremental phase at order 7) as DRIVER PHASES.
-        boolean flowInKernel = GpuBatchIncrementalFlowControl.uploadToDevice(handle, r.flow());
+        boolean flowInKernel = IncrementalFlowControl.uploadToDevice(handle, r.flow());
         // CONTINUOUS PhaseControl as a DRIVER PHASE (OLF order 7); the pre-solve control-ON activation stays host-side.
         boolean cphInKernel = GpuBatchContinuousPhase.uploadToDevice(handle, r.continuousPhase());
         // IncrementalShuntVoltageControl as a DRIVER PHASE (OLF order 10).

@@ -189,30 +189,6 @@ public final class GpuAcNewtonSolver {
     public static native int[] screenViolationsBatch(long tableHandle, double[] states, int nScenarios,
                                                      int n, double band, int capacity);
 
-    /** Enable HOST-owned outer-loop slots via a bitmask.
-     *  Bit 0 = SecondaryVoltageControl (OLF order 4, pre-RL),
-     *  Bit 1 = PhaseControl (OLF order 7, post-RL),
-     *  Bit 2 = TransformerVoltageControl (OLF order 8),
-     *  Bit 3 = TransformerReactivePowerControl (OLF order 9),
-     *  Bit 4 = ShuntVoltageControl (OLF order 10).
-     *  0 disables all; the driver behaves exactly as before. */
-    public static native void setBatchHostLoop(long handle, int mask);
-
-    /** Did the last solve stop at a host-owned slot? Returns 0 if not paused, or the
-     *  {@code DeviceLoopKind.HOST_LOOP_*} constant identifying WHICH host loop was reached. */
-    public static native int readBatchDriverPaused(long handle);
-
-    /** Resume the paused driver; {@code hostChanged[s] != 0} is the host loop's UNSTABLE verdict. */
-    public static native void setBatchDriverResume(long handle, byte[] hostChanged);
-
-    /** Drop a paused driver sequence without resuming it (the host loop changed the equation layout
-     *  or the row modes): the next solveBatchContext starts over on the re-extracted system. */
-    public static native void cancelBatchDriverPause(long handle);
-
-    /** The next fresh solve resumes its sweep at this LOOP_HOST_* kind after its first solve — the
-     *  restarted sequence re-checks the loop that went UNSTABLE, as OLF's runOuterLoop does. */
-    public static native void setBatchDriverStartLoop(long handle, int kind);
-
     /** Release a violation table (idempotent for handle 0). */
     public static native void destroyViolationTable(long tableHandle);
 

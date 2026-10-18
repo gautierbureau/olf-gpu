@@ -538,7 +538,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
         // setBatchTargetDeltas — just re-enter solveBatchContext (the native side reads
         // driverResume=1 and continues from its paused position). Skip initStateVector and
         // the context rebuild — the state is on the device where we left it.
-        boolean resuming = GpuAcNewtonSolver.readBatchDriverPaused(context.handle.get()) != 0;
+        boolean resuming = DriverNative.readBatchDriverPaused(context.handle.get()) != 0;
         if (resuming) {
             return runResume(reportNode);
         }
@@ -903,9 +903,9 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
             hostMask = com.powsybl.openloadflow.ac.outerloop.gpu.DevicePhaseOwnership.enforceComplete(
                     handle, hostMask);
             activeHostMask = hostMask;
-            GpuAcNewtonSolver.setBatchHostLoop(handle, hostMask);
+            DriverNative.setBatchHostLoop(handle, hostMask);
             if (restart && restartLoopKind > 0) {        // re-check the loop that went UNSTABLE first
-                GpuAcNewtonSolver.setBatchDriverStartLoop(handle, restartLoopKind);
+                DriverNative.setBatchDriverStartLoop(handle, restartLoopKind);
             }
             restartLoopKind = 0;
             if (driverDsRejectResidual && driverDsLoop() != null && cachedData.dsPhiRow().length == 0
@@ -1194,7 +1194,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
     private double[] handleDriverPauses(double[] out, int n, double[] target,
                                          boolean[][] elementMask, int lsMode, double convEpsPerEq) {
         long handle = context.handle.get();
-        int pausedKind = GpuAcNewtonSolver.readBatchDriverPaused(handle);
+        int pausedKind = DriverNative.readBatchDriverPaused(handle);
         if (pausedKind == 0) {
             return out;   // driver completed without pausing
         }
@@ -1224,7 +1224,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
             var pair = ctxMap.get(pausedKind);
             if (pair == null) {
                 LOGGER.warn("Driver paused at host loop kind {} with no registered handler — resuming as STABLE", pausedKind);
-                GpuAcNewtonSolver.setBatchDriverResume(handle, new byte[]{0});
+                DriverNative.setBatchDriverResume(handle, new byte[]{0});
             } else {
                 var loop = pair.getLeft();
                 var loopCtx = pair.getRight();
@@ -1288,7 +1288,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                                 rlCarry.put(cachedData.rlBusNum()[i], rlStateOut[i]);
                             }
                         }
-                        GpuAcNewtonSolver.cancelBatchDriverPause(handle);
+                        DriverNative.cancelBatchDriverPause(handle);
                         restartLoopKind = pausedKind;
                         invalidation.structureDirty = true;
                         invalidation.activationDirty = true;
@@ -1313,10 +1313,10 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                     }
                     // Update our local target copy for the next round's diff
                     System.arraycopy(newTargets, 0, target, 0, n);
-                    GpuAcNewtonSolver.setBatchDriverResume(handle, new byte[]{1});
+                    DriverNative.setBatchDriverResume(handle, new byte[]{1});
                     loopCtx.setIteration(loopCtx.getIteration() + 1);
                 } else {
-                    GpuAcNewtonSolver.setBatchDriverResume(handle, new byte[]{0});
+                    DriverNative.setBatchDriverResume(handle, new byte[]{0});
                 }
             }
             // Resume the driver — solveBatchContext continues from its paused position
@@ -1336,7 +1336,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                     null, null, null, rlStateOut, null, null,
                     driverMaxOuterIterations, driverMaxPqPvSwitch, driverDsRejectResidual ? 1 : 0, 0,
                     0, null, null)[0];
-            pausedKind = GpuAcNewtonSolver.readBatchDriverPaused(handle);
+            pausedKind = DriverNative.readBatchDriverPaused(handle);
         }
         return out;
     }
@@ -1387,7 +1387,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
         equationVector.minus(targetVector);
         NewtonRaphsonStoppingCriteria.TestResult result =
                 parameters.getStoppingCriteria().test(equationVector.getArray(), equationSystem);
-        if (GpuAcNewtonSolver.readBatchDriverPaused(context.handle.get()) == 0) {
+        if (DriverNative.readBatchDriverPaused(context.handle.get()) == 0) {
             writeBackDriverMutations(cachedData);
             equationVector.minus(targetVector);               // re-measure against the written-back targets
             result = parameters.getStoppingCriteria().test(equationVector.getArray(), equationSystem);

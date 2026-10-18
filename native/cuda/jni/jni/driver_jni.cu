@@ -12,7 +12,7 @@
  *  Bit 4 = ShuntVoltageControl (OLF order 10).
  *  0 disables all host loops; the driver behaves exactly as if the mechanism did not exist. */
 extern "C" JNIEXPORT void JNICALL
-Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchHostLoop(
+OLF_JNI(ac_solver_gpu, DriverNative, setBatchHostLoop)(
         JNIEnv*, jclass, jlong handle, jint mask) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx != nullptr) {
@@ -23,7 +23,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
 /** Did the last solve stop at a host-owned slot? Returns 0 if not paused, or the
  *  DeviceLoopKind value (LOOP_HOST_SVC=5, LOOP_HOST_PHASE=6, ...) of the paused slot. */
 extern "C" JNIEXPORT jint JNICALL
-Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_readBatchDriverPaused(
+OLF_JNI(ac_solver_gpu, DriverNative, readBatchDriverPaused)(
         JNIEnv*, jclass, jlong handle) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     return (ctx == nullptr || !ctx->driverPaused) ? 0 : ctx->pausedLoopKind;
@@ -32,7 +32,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_readBatc
 /** Resume the paused driver: {@code hostChanged[s] != 0} is the host loop's UNSTABLE verdict for
  *  that scenario, which drives the next pass exactly as a device loop's verdict would. */
 extern "C" JNIEXPORT void JNICALL
-Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchDriverResume(
+OLF_JNI(ac_solver_gpu, DriverNative, setBatchDriverResume)(
         JNIEnv* env, jclass, jlong handle, jbyteArray jHostChanged) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx == nullptr) {
@@ -49,7 +49,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
 /** Drop a paused driver sequence without resuming it: the host loop changed the equation layout or
  *  the row modes, so the next solveBatchContext must START OVER on the re-extracted system. */
 extern "C" JNIEXPORT void JNICALL
-Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_cancelBatchDriverPause(
+OLF_JNI(ac_solver_gpu, DriverNative, cancelBatchDriverPause)(
         JNIEnv*, jclass, jlong handle) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx == nullptr) {
@@ -64,7 +64,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_cancelBa
  *  sequence: OLF re-checks the loop that went UNSTABLE before restarting the sweep). The context may
  *  have been rebuilt since the pause, so the Java side carries the kind across. */
 extern "C" JNIEXPORT void JNICALL
-Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchDriverStartLoop(
+OLF_JNI(ac_solver_gpu, DriverNative, setBatchDriverStartLoop)(
         JNIEnv*, jclass, jlong handle, jint kind) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx == nullptr) {

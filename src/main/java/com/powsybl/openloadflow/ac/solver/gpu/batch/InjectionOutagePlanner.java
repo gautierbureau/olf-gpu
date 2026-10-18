@@ -86,7 +86,8 @@ final class InjectionOutagePlanner {
             islandedNumSet.add(ib.getNum());
         }
         if (!c.shuntShifts().isEmpty()
-                && !GpuBatchQualification.canBatchShuntOutage(c.shuntShifts().stream().map(ShuntShift::shunt).toList(), elementMapper, gpuData)) {
+                && !GpuBatchQualification.canBatchShuntOutage(c.shuntShifts().stream().map(ShuntShift::shunt).toList(),
+                                                              elementMapper, gpuData)) {
             GpuBatchQualification.refuse(c, "PLAN:SHUNT_UNPACKED");
             return;                                // unpacked shunt (controller / SVC) — CPU
         }
@@ -126,7 +127,8 @@ final class InjectionOutagePlanner {
         }
         List<LfBus> islandLostVcControllers = new ArrayList<>();   // filled by the island-injection path
         if (!c.outagedBranches().isEmpty()) {        // COMBO: the branch part must also qualify
-            double[][] drOv = VoltageControlOverrides.distrRhoOverrides(es, gpuData, distrRhoControllers, c.outagedBranches(), incrementalTvc);
+            double[][] drOv = VoltageControlOverrides.distrRhoOverrides(es, gpuData, distrRhoControllers,
+                    c.outagedBranches(), incrementalTvc);
             if (drOv == null) {
                 if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
                     System.err.println("QUAL_REJECT drOv " + c.contingencyId());
@@ -147,7 +149,73 @@ final class InjectionOutagePlanner {
         // put the group's voltage identity back on the pinned main's section, an equation system OLF does not
         // have (the split-group fixture: the device diverged where OLF converges in one release).
         boolean splitsMergedControl = q.islandedBuses().isEmpty() && !c.outagedZiBranches().isEmpty()
-                && ControlReHoming.reHomedControls(List.of(), c.outagedZiBranches(), c.contingencyId(), es).changesControls();
+                && ControlReHoming.reHomedControls(List.of(), c.outagedZiBranches(), c.contingencyId(),
+                                                   es).changesControls();
+        gos = planIslandTail(q, splitsMergedControl, es, c, pb, i, gpuData, islandLostVcControllers,
+                             relocatedCouplers, gos, outagedZiNums);
+        if (gos == null) {
+            return;
+        }
+        // Reactive-key rediff over EVERY controller this scenario removes from its group: the
+        // lost generators the composer saw AND the controllers the island took (RENORMALIZE,
+        // the tail's channel). One call, so the two compose instead of one excluding the other.
+        List<com.powsybl.openloadflow.network.LfGenerator> goneForKeys = new ArrayList<>(c.lostGenerators());
+        for (LfBus lb : islandLostVcControllers) {
+            goneForKeys.addAll(lb.getGenerators());
+        }
+        if (goneForKeys.stream().anyMatch(g -> g.getBus() != null
+                && es.getEquation(g.getBus().getNum(), AcEquationType.DISTR_Q).isPresent())) {
+            double[][] ov = ReHomedEntries.withoutSplitGroups(VoltageControlOverrides.distrQWeightOverrides(es, gpuData, goneForKeys),
+                                                              pb.dqSubByIndex[i], gpuData);
+            if (ov == null) {
+                GpuBatchQualification.refuse(c, "PLAN:DISTR_Q_WEIGHT_REDIFF");
+                return;                            // weight rediff unavailable — CPU
+            }
+            pb.dqOvContribByIndex[i] = java.util.Arrays.stream(ov[0]).mapToInt(d -> (int) d).toArray();
+            pb.dqOvWByIndex[i] = ov[1];
+            pb.dqKeyOvMemberByIndex[i] = java.util.Arrays.stream(ov[2]).mapToInt(d -> (int) d).toArray();
+            pb.dqKeyOvByIndex[i] = ov[3];
+            String dqOvTrace = System.getenv("OLF_GPU_DQOV_TRACE");   // <contingency id>: every reweighted entry
+            if (dqOvTrace != null && dqOvTrace.equals(c.contingencyId())) {
+                int[] mBus = gpuData.dqMemberBusNum();
+                for (int k = 0; k < ov[0].length; k++) {
+                    int cc = (int) ov[0][k];
+                    int kM = gpuData.dqKMember() != null ? gpuData.dqKMember()[cc] : -1;
+                    int jM = gpuData.dqJMember() != null ? gpuData.dqJMember()[cc] : -1;
+                    System.err.printf("DQOV_TRACE ctg=%s c=%d row=%d kind=%d elem=%d oldW=%.6f newW=%.6f kMember=%s jMember=%s%n",
+                            c.contingencyId(), cc, gpuData.dqRow()[cc], gpuData.dqKind()[cc], gpuData.dqElem()[cc],
+                            gpuData.dqWeight()[cc], ov[1][k],
+                            kM >= 0 && mBus != null ? goneForKeys.get(0).getBus().getNetwork().getBus(mBus[kM]).getId() : "?",
+                            jM >= 0 && mBus != null ? goneForKeys.get(0).getBus().getNetwork().getBus(mBus[jM]).getId() : "?");
+                }
+                System.err.println("DQOV_TRACE ctg=" + c.contingencyId() + " total=" + ov[0].length
+                        + " lostGens=" + goneForKeys.stream().map(g -> g.getId()).toList());
+            }
+        }
+        if (pb.relocatedSlackRow[i] >= 0 && gos != null) {
+            int reference = pb.relocatedSlackRow[i];
+            if (java.util.Arrays.stream(gos).anyMatch(go -> go.pRow() == reference)) {
+                GpuBatchQualification.refuse(c, "PLAN:SLACK_RELOCATION_SHAPE");   // an injection lost AT the new slack: unmeasured
+                return;
+            }
+        }
+        pb.genOutagesByIndex[i] = gos;
+        pb.activePowerLossByIndex[i] = ScheduledLoss.scheduledActivePowerLoss(c, q.islandedBuses());
+        ScheduledLoss.traceScheduledLoss(c, q.islandedBuses(), pb.activePowerLossByIndex[i]);
+        pb.batchedIndices.add(i);
+    }
+
+    /** The island and split-control tail of an injection or topology-change outage: the islanded rows frozen, the
+     *  voltage controls the island cuts or re-homes, and the participants it strands; false when a shape refuses
+     *  the contingency. */
+    private static GenOutage[] planIslandTail(final GpuBatchContingencyValidator.Qualification q,
+                                              final boolean splitsMergedControl,
+                                              final EquationSystem<AcVariableType, AcEquationType> es,
+                                              final BatchContingency c, final ScenarioPlanBuilder pb, final int i,
+                                              final GpuAcData gpuData, final List<LfBus> islandLostVcControllers,
+                                              final Set<LfBranch> relocatedCouplers, final GenOutage[] gosIn,
+                                              final java.util.Set<Integer> outagedZiNums) {
+        GenOutage[] gos = gosIn;
         if (!q.islandedBuses().isEmpty() || splitsMergedControl) {
             // An outage that ISLANDS buses while it also removes injections: a busbar section
             // whose loss is expressed as a switch outage plus a side-open (busIdsToLose is
@@ -171,16 +239,17 @@ final class InjectionOutagePlanner {
             List<com.powsybl.openloadflow.network.LfHvdc> islandedHvdcs = new ArrayList<>();
             VoltageControlOverrides.VcSplit vcSplit = VoltageControlOverrides.classifyVcSplit(es, q.islandedBuses(), lostVcControllers, deadControlBuses,
                     islandedHvdcs);
-            ControlReHoming.ReHomed reHomed = ControlReHoming.reHomedControls(q.islandedBuses(), c.outagedZiBranches(), c.contingencyId(), es);
+            ControlReHoming.ReHomed reHomed = ControlReHoming.reHomedControls(q.islandedBuses(),
+                    c.outagedZiBranches(), c.contingencyId(), es);
             if (reHomed.reject() != null) {
                 GpuBatchQualification.refuse(c, "PLAN:" + reHomed.reject());
-                return;
+                return null;
             }
             String[] subReject = new String[1];
             pb.dqSubByIndex[i] = ReHomedEntries.subgroupPairs(reHomed, gpuData, subReject);
             if (subReject[0] != null) {
                 GpuBatchQualification.refuse(c, subReject[0]);
-                return;
+                return null;
             }
             deadControlBuses.removeAll(reHomed.pvTargets().keySet());
             deadControlBuses.removeAll(reHomed.remoteClusterBuses());   // a surviving remote cluster, not dead   // re-homed, not dead
@@ -201,7 +270,7 @@ final class InjectionOutagePlanner {
                             lostVcControllers.stream().map(LfBus::getId).toList());
                 }
                 GpuBatchQualification.refuse(c, "PLAN:ISLANDS_REMOTE_VC_MEMBER");
-                return;
+                return null;
             }
             IslandedBuses.FrozenIsland fi = IslandedBuses.islandedFrozen(es, q.islandedBuses(), relocatedCouplers);
             pb.islandedNumsByIndex[i] = q.islandedBuses().stream().mapToInt(LfBus::getNum).toArray();
@@ -231,7 +300,8 @@ final class InjectionOutagePlanner {
                     }
                     live.add(new GenOutage(-1, 0, qFlipRow, sb.getTargetQ(), true, true,
                             -1, 0, 0, 0, 0, -1, 0, 0, false, java.util.Set.of(), 0, 0, 0, -1, new int[0],
-                            new int[0], new double[0], RelocatedRows.deadControlRowMode(gpuData, sb), -1, 0, -1, 0, -1, 0, -1, -1, 0, false, -1, 0, 0));
+                            new int[0], new double[0], RelocatedRows.deadControlRowMode(gpuData,
+                                    sb), -1, 0, -1, 0, -1, 0, -1, -1, 0, false, -1, 0, 0));
                 }
                 if (live == null) {
                     if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {
@@ -239,7 +309,7 @@ final class InjectionOutagePlanner {
                                 + " deadControl=%s%n", c.contingencyId(), deadControlBuses.stream().map(LfBus::getId).toList());
                     }
                     GpuBatchQualification.refuse(c, "PLAN:ISLANDS_REMOTE_VC_MEMBER");
-                    return;
+                    return null;
                 }
             }
             boolean relocIdentity = false;
@@ -301,7 +371,8 @@ final class InjectionOutagePlanner {
                     live = null;
                 } else {
                     live.addAll(remoteIds);
-                    List<GenOutage> reHomedCtl = ReHomedEntries.reHomedRemoteControllerEntries(reHomed, es, gpuData, remoteReject);
+                    List<GenOutage> reHomedCtl = ReHomedEntries.reHomedRemoteControllerEntries(reHomed, es, gpuData,
+                            remoteReject);
                     if (reHomedCtl == null) {
                         live = null;
                     } else {
@@ -311,13 +382,13 @@ final class InjectionOutagePlanner {
             }
             if (live == null && remoteReject[0] != null) {
                 GpuBatchQualification.refuse(c, remoteReject[0]);
-                return;
+                return null;
             }
             if (live == null) {
                 GpuBatchQualification.refuse(c,
                         pinnedMain ? "PLAN:VC_REMERGE_PINNED_MAIN"
                                 : relocIdentity ? "PLAN:VC_REMERGE_RELOC_VROW" : "PLAN:VC_REMERGE_NO_VROW");
-                return;
+                return null;
             }
             if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {
                 System.err.printf("QUALIFY_TRACE island-outage %s: split=%s frozenRows=%d dropped=%d"
@@ -366,51 +437,6 @@ final class InjectionOutagePlanner {
             pb.frozenRowsByIndex[i] = IslandedBuses.NO_FROZEN_ROWS;
             pb.frozenTargetsByIndex[i] = IslandedBuses.NO_FROZEN_TARGETS;
         }
-        // Reactive-key rediff over EVERY controller this scenario removes from its group: the
-        // lost generators the composer saw AND the controllers the island took (RENORMALIZE,
-        // the tail's channel). One call, so the two compose instead of one excluding the other.
-        List<com.powsybl.openloadflow.network.LfGenerator> goneForKeys = new ArrayList<>(c.lostGenerators());
-        for (LfBus lb : islandLostVcControllers) {
-            goneForKeys.addAll(lb.getGenerators());
-        }
-        if (goneForKeys.stream().anyMatch(g -> g.getBus() != null
-                && es.getEquation(g.getBus().getNum(), AcEquationType.DISTR_Q).isPresent())) {
-            double[][] ov = ReHomedEntries.withoutSplitGroups(VoltageControlOverrides.distrQWeightOverrides(es, gpuData, goneForKeys), pb.dqSubByIndex[i], gpuData);
-            if (ov == null) {
-                GpuBatchQualification.refuse(c, "PLAN:DISTR_Q_WEIGHT_REDIFF");
-                return;                            // weight rediff unavailable — CPU
-            }
-            pb.dqOvContribByIndex[i] = java.util.Arrays.stream(ov[0]).mapToInt(d -> (int) d).toArray();
-            pb.dqOvWByIndex[i] = ov[1];
-            pb.dqKeyOvMemberByIndex[i] = java.util.Arrays.stream(ov[2]).mapToInt(d -> (int) d).toArray();
-            pb.dqKeyOvByIndex[i] = ov[3];
-            String dqOvTrace = System.getenv("OLF_GPU_DQOV_TRACE");   // <contingency id>: every reweighted entry
-            if (dqOvTrace != null && dqOvTrace.equals(c.contingencyId())) {
-                int[] mBus = gpuData.dqMemberBusNum();
-                for (int k = 0; k < ov[0].length; k++) {
-                    int cc = (int) ov[0][k];
-                    int kM = gpuData.dqKMember() != null ? gpuData.dqKMember()[cc] : -1;
-                    int jM = gpuData.dqJMember() != null ? gpuData.dqJMember()[cc] : -1;
-                    System.err.printf("DQOV_TRACE ctg=%s c=%d row=%d kind=%d elem=%d oldW=%.6f newW=%.6f kMember=%s jMember=%s%n",
-                            c.contingencyId(), cc, gpuData.dqRow()[cc], gpuData.dqKind()[cc], gpuData.dqElem()[cc],
-                            gpuData.dqWeight()[cc], ov[1][k],
-                            kM >= 0 && mBus != null ? goneForKeys.get(0).getBus().getNetwork().getBus(mBus[kM]).getId() : "?",
-                            jM >= 0 && mBus != null ? goneForKeys.get(0).getBus().getNetwork().getBus(mBus[jM]).getId() : "?");
-                }
-                System.err.println("DQOV_TRACE ctg=" + c.contingencyId() + " total=" + ov[0].length
-                        + " lostGens=" + goneForKeys.stream().map(g -> g.getId()).toList());
-            }
-        }
-        if (pb.relocatedSlackRow[i] >= 0 && gos != null) {
-            int reference = pb.relocatedSlackRow[i];
-            if (java.util.Arrays.stream(gos).anyMatch(go -> go.pRow() == reference)) {
-                GpuBatchQualification.refuse(c, "PLAN:SLACK_RELOCATION_SHAPE");   // an injection lost AT the new slack: unmeasured
-                return;
-            }
-        }
-        pb.genOutagesByIndex[i] = gos;
-        pb.activePowerLossByIndex[i] = ScheduledLoss.scheduledActivePowerLoss(c, q.islandedBuses());
-        ScheduledLoss.traceScheduledLoss(c, q.islandedBuses(), pb.activePowerLossByIndex[i]);
-        pb.batchedIndices.add(i);
+        return gos;
     }
 }

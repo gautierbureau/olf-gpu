@@ -49,7 +49,8 @@ final class BranchOutagePlanner {
         List<com.powsybl.openloadflow.network.LfHvdc> islandedHvdcs = new ArrayList<>();
         VoltageControlOverrides.VcSplit vcSplit = VoltageControlOverrides.classifyVcSplit(es, q.islandedBuses(), lostVcControllers, deadControlBuses,
                 islandedHvdcs);
-        ControlReHoming.ReHomed reHomed = ControlReHoming.reHomedControls(q.islandedBuses(), c.outagedZiBranches(), c.contingencyId(), es);
+        ControlReHoming.ReHomed reHomed = ControlReHoming.reHomedControls(q.islandedBuses(), c.outagedZiBranches(),
+                c.contingencyId(), es);
         if (reHomed.reject() != null) {
             GpuBatchQualification.refuse(c, "PLAN:" + reHomed.reject());
             return;
@@ -99,7 +100,8 @@ final class BranchOutagePlanner {
                 vcOff.add(new GenOutage(-1, 0, RelocatedRows.relocQRow(vVar.getRow(), pb.relocRows, outagedZiNums),
                         sb.getTargetQ(), true, true,
                         -1, 0, 0, 0, 0, -1, 0, 0, false, java.util.Set.of(), 0, 0, 0, -1, new int[0],
-                        new int[0], new double[0], RelocatedRows.deadControlRowMode(gpuData, sb), -1, 0, -1, 0, -1, 0, -1, -1, 0, false, -1, 0, 0));
+                        new int[0], new double[0], RelocatedRows.deadControlRowMode(gpuData,
+                                sb), -1, 0, -1, 0, -1, 0, -1, -1, 0, false, -1, 0, 0));
             }
             if (vcOff == null) {
                 if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {
@@ -130,59 +132,8 @@ final class BranchOutagePlanner {
             merged.addAll(java.util.Arrays.asList(st));
             pb.genOutagesByIndex[i] = merged.toArray(new GenOutage[0]);
         }
-        if (!reHomed.pvTargets().isEmpty() || !reHomed.remoteMainTargets().isEmpty()) {
-            List<GenOutage> pvOn = new ArrayList<>();
-            if (pb.genOutagesByIndex[i] != null) {
-                pvOn.addAll(java.util.Arrays.asList(pb.genOutagesByIndex[i]));
-            }
-            boolean ok = true;
-            boolean relocIdentity = false;
-            boolean pinnedMain = false;
-            for (var e : reHomed.pvTargets().entrySet()) {
-                var vVar = es.getVariableSet().getVariable(e.getKey().getNum(), AcVariableType.BUS_V);
-                if (vVar == null || vVar.getRow() < 0) {
-                    ok = false;
-                    break;
-                }
-                int reHomedRl = RelocatedRows.rlEntryOf(gpuData, e.getKey());
-                int crossRow = RelocatedRows.relocQRow(vVar.getRow(), pb.relocRows, outagedZiNums);
-                if (crossRow != vVar.getRow()) {
-                    pvOn.add(ReHomedEntries.reHomedCrossEntry(crossRow, e.getValue(), reHomedRl,
-                            RelocatedRows.basePinned(gpuData, reHomedRl), e.getKey().getTargetQ()));
-                    continue;
-                }
-                // Same rule as the island site above: a bus PINNED at its reactive limit in the base
-                // cannot hold a voltage identity (OLF has it PQ). This site lacked the check, so a
-                // middle-section loss whose surviving section is base-pinned batched with the
-                // identity: rte6515 BUS-6157_BBS_1 (VL-6157_1, baseLimitType=1), BUS-6194_BBS_2
-                // (VL-6194_2, 2) and BUS-6229_BBS_1 (VL-6229_1, 2) — three device failures on
-                // systems OLF converges, replayed on the CPU.
-                if (RelocatedRows.basePinned(gpuData, reHomedRl)) {
-                    pvOn.add(ReHomedEntries.reHomedPinnedPvEntry(vVar.getRow(), e.getKey().getTargetQ(), e.getValue(), reHomedRl));
-                    continue;
-                }
-                pvOn.add(ReHomedEntries.reHomedPvEntry(vVar.getRow(), e.getValue(), reHomedRl));
-            }
-            if (!ok) {
-                GpuBatchQualification.refuse(c,
-                        pinnedMain ? "PLAN:VC_REMERGE_PINNED_MAIN"
-                                : relocIdentity ? "PLAN:VC_REMERGE_RELOC_VROW" : "PLAN:VC_REMERGE_NO_VROW");
-                return;
-            }
-            if (!reHomed.remoteMainTargets().isEmpty()) {
-                String[] remoteReject = new String[1];
-                List<GenOutage> remoteIds = ReHomedEntries.remoteMainIdentityEntries(reHomed, es, gpuData, pb.relocRows,
-                        outagedZiNums, java.util.Set.of(), remoteReject);
-                List<GenOutage> reHomedCtl = remoteIds == null ? null
-                        : ReHomedEntries.reHomedRemoteControllerEntries(reHomed, es, gpuData, remoteReject);
-                if (remoteIds == null || reHomedCtl == null) {
-                    GpuBatchQualification.refuse(c, remoteReject[0]);
-                    return;
-                }
-                pvOn.addAll(remoteIds);
-                pvOn.addAll(reHomedCtl);
-            }
-            pb.genOutagesByIndex[i] = pvOn.toArray(new GenOutage[0]);
+        if (!planReHomedControls(reHomed, pb, i, es, gpuData, outagedZiNums, c)) {
+            return;
         }
         if (vcSplit == VoltageControlOverrides.VcSplit.RENORMALIZE) {
             // The group survives without its islanded controller(s). Renormalize its reactive
@@ -192,7 +143,8 @@ final class BranchOutagePlanner {
             List<com.powsybl.openloadflow.network.LfGenerator> goneControllers = lostVcControllers.stream()
                     .flatMap(b -> b.getGenerators().stream())
                     .toList();
-            double[][] vcOv = ReHomedEntries.withoutSplitGroups(VoltageControlOverrides.distrQWeightOverrides(es, gpuData, goneControllers), pb.dqSubByIndex[i], gpuData);
+            double[][] vcOv = ReHomedEntries.withoutSplitGroups(VoltageControlOverrides.distrQWeightOverrides(es, gpuData, goneControllers),
+                                                                pb.dqSubByIndex[i], gpuData);
             if (vcOv == null) {
                 GpuBatchQualification.refuse(c, "PLAN:DISTR_Q_WEIGHT_REDIFF");
                 return;
@@ -213,7 +165,8 @@ final class BranchOutagePlanner {
                 pb.genOutagesByIndex[i] = merged.toArray(new GenOutage[0]);
             }
         }
-        double[][] drOv = VoltageControlOverrides.distrRhoOverrides(es, gpuData, distrRhoControllers, c.outagedBranches(), incrementalTvc);
+        double[][] drOv = VoltageControlOverrides.distrRhoOverrides(es, gpuData, distrRhoControllers,
+                                                                    c.outagedBranches(), incrementalTvc);
         if (drOv == null) {
             if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
                 System.err.println("QUAL_REJECT drOv2 " + c.contingencyId());
@@ -293,5 +246,69 @@ final class BranchOutagePlanner {
         if (pb.frozenRowsByIndex[i].length > 0) {
             pb.islandingCount++;
         }
+    }
+
+    /** The re-homed voltage controls of an islanding branch outage: the PV entries of the controllers re-homed by
+     *  the island, the remote mains turned identities, and their reactive-limit entries; false when a shape refuses
+     *  the contingency. */
+    private static boolean planReHomedControls(final ControlReHoming.ReHomed reHomed, final ScenarioPlanBuilder pb,
+                                               final int i, final EquationSystem<AcVariableType, AcEquationType> es,
+                                               final GpuAcData gpuData, final java.util.Set<Integer> outagedZiNums,
+                                               final BatchContingency c) {
+        if (!reHomed.pvTargets().isEmpty() || !reHomed.remoteMainTargets().isEmpty()) {
+            List<GenOutage> pvOn = new ArrayList<>();
+            if (pb.genOutagesByIndex[i] != null) {
+                pvOn.addAll(java.util.Arrays.asList(pb.genOutagesByIndex[i]));
+            }
+            boolean ok = true;
+            boolean relocIdentity = false;
+            boolean pinnedMain = false;
+            for (var e : reHomed.pvTargets().entrySet()) {
+                var vVar = es.getVariableSet().getVariable(e.getKey().getNum(), AcVariableType.BUS_V);
+                if (vVar == null || vVar.getRow() < 0) {
+                    ok = false;
+                    break;
+                }
+                int reHomedRl = RelocatedRows.rlEntryOf(gpuData, e.getKey());
+                int crossRow = RelocatedRows.relocQRow(vVar.getRow(), pb.relocRows, outagedZiNums);
+                if (crossRow != vVar.getRow()) {
+                    pvOn.add(ReHomedEntries.reHomedCrossEntry(crossRow, e.getValue(), reHomedRl,
+                            RelocatedRows.basePinned(gpuData, reHomedRl), e.getKey().getTargetQ()));
+                    continue;
+                }
+                // Same rule as the island site above: a bus PINNED at its reactive limit in the base
+                // cannot hold a voltage identity (OLF has it PQ). This site lacked the check, so a
+                // middle-section loss whose surviving section is base-pinned batched with the
+                // identity: rte6515 BUS-6157_BBS_1 (VL-6157_1, baseLimitType=1), BUS-6194_BBS_2
+                // (VL-6194_2, 2) and BUS-6229_BBS_1 (VL-6229_1, 2) — three device failures on
+                // systems OLF converges, replayed on the CPU.
+                if (RelocatedRows.basePinned(gpuData, reHomedRl)) {
+                    pvOn.add(ReHomedEntries.reHomedPinnedPvEntry(vVar.getRow(), e.getKey().getTargetQ(), e.getValue(), reHomedRl));
+                    continue;
+                }
+                pvOn.add(ReHomedEntries.reHomedPvEntry(vVar.getRow(), e.getValue(), reHomedRl));
+            }
+            if (!ok) {
+                GpuBatchQualification.refuse(c,
+                        pinnedMain ? "PLAN:VC_REMERGE_PINNED_MAIN"
+                                : relocIdentity ? "PLAN:VC_REMERGE_RELOC_VROW" : "PLAN:VC_REMERGE_NO_VROW");
+                return false;
+            }
+            if (!reHomed.remoteMainTargets().isEmpty()) {
+                String[] remoteReject = new String[1];
+                List<GenOutage> remoteIds = ReHomedEntries.remoteMainIdentityEntries(reHomed, es, gpuData, pb.relocRows,
+                        outagedZiNums, java.util.Set.of(), remoteReject);
+                List<GenOutage> reHomedCtl = remoteIds == null ? null
+                        : ReHomedEntries.reHomedRemoteControllerEntries(reHomed, es, gpuData, remoteReject);
+                if (remoteIds == null || reHomedCtl == null) {
+                    GpuBatchQualification.refuse(c, remoteReject[0]);
+                    return false;
+                }
+                pvOn.addAll(remoteIds);
+                pvOn.addAll(reHomedCtl);
+            }
+            pb.genOutagesByIndex[i] = pvOn.toArray(new GenOutage[0]);
+        }
+        return true;
     }
 }

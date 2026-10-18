@@ -5,7 +5,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/.
  * SPDX-License-Identifier: MPL-2.0
  */
-package com.powsybl.openloadflow.sa.gpu;
+package com.powsybl.openloadflow.network.gpu;
 
 import com.powsybl.contingency.BranchContingency;
 import com.powsybl.contingency.Contingency;
@@ -37,7 +37,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
-class GpuZiTreeReplayTest extends AbstractLoadFlowNetworkFactory {
+public class ZeroImpedanceTreeReplayTest extends AbstractLoadFlowNetworkFactory {
 
     /** The slack s hangs on the rest of the network by one line l0; the rest is the hub m, its coupler c1 to n, and
      *  the leaves a (on m) and c (on n). Losing l0 isolates the slack: the largest component is the other side. */
@@ -93,7 +93,7 @@ class GpuZiTreeReplayTest extends AbstractLoadFlowNetworkFactory {
         Set<String> otherSide = Set.of("m_vl_0", "n_vl_0", "a_vl_0", "c_vl_0");
         assertEquals(otherSide, lostWhenCut(network, "l0"), "before: the main component is the slack's");
 
-        GpuZiTreeReplay replay = new GpuZiTreeReplay(network);
+        ZeroImpedanceTreeReplay replay = new ZeroImpedanceTreeReplay(network);
         List<String> base = replay.nonTree().stream().map(LfBranch::getId).toList();
         assertEquals(List.of(), base, "c1 is the only coupler, in the tree");
         assertEquals(base, ids(replay.applyAndRevert(pcs.get("l0"))), "losing the slack's line disables no coupler");
@@ -120,7 +120,7 @@ class GpuZiTreeReplayTest extends AbstractLoadFlowNetworkFactory {
                 new LfTopoConfig(), new PropagatedContingencyCreationParameters()).stream()
                 .collect(Collectors.toMap(pc -> pc.getContingency().getId(), Function.identity()));
 
-        GpuZiTreeReplay replay = new GpuZiTreeReplay(network);
+        ZeroImpedanceTreeReplay replay = new ZeroImpedanceTreeReplay(network);
         assertEquals(List.of("z23"), ids(replay.nonTree()), "z23 closes the loop");
         assertEquals(List.of("z12"), ids(replay.applyAndRevert(pcs.get("z12"))), "z12 opened, z23 in the tree");
         assertEquals(List.of("z23"), ids(replay.applyAndRevert(pcs.get("l34"))), "the next contingency starts from the base tree");
@@ -136,7 +136,7 @@ class GpuZiTreeReplayTest extends AbstractLoadFlowNetworkFactory {
     }
 
     /** Three couplers in a loop (z12, z23, z13; z23 out of the base tree) feeding a load over two lines. */
-    static Network couplerLoop() {
+    public static Network couplerLoop() {
         Network iidm = Network.create("coupler-loop", "code");
         Bus b1 = createBus(iidm, "y", "b1");
         createGenerator(b1, "g1", 2, 1.0);

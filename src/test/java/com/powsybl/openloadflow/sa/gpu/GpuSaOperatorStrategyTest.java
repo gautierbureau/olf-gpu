@@ -12,6 +12,7 @@ import com.powsybl.contingency.Contingency;
 import com.powsybl.ieeecdf.converter.IeeeCdfNetworkFactory;
 import com.powsybl.iidm.network.Network;
 import com.powsybl.openloadflow.CommonTestConfig;
+import com.powsybl.openloadflow.network.gpu.ZeroImpedanceTreeReplayTest;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 import com.powsybl.openloadflow.graph.EvenShiloachGraphDecrementalConnectivityFactory;
 import com.powsybl.openloadflow.sa.OpenSecurityAnalysisProvider;
@@ -902,7 +903,7 @@ class GpuSaOperatorStrategyTest extends AbstractGpuSaTest {
     void strategyPairKeepsItsContingencysCouplerTreeMatchesCpu() {
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
-        Network network = GpuZiTreeReplayTest.couplerLoop();
+        Network network = ZeroImpedanceTreeReplayTest.couplerLoop();
         network.getBusBreakerView().getBus("b2").getVoltageLevel().newLoad().setId("l2").setBus("b2").setConnectableBus("b2")
                 .setP0(0.5).setQ0(0.2).add();
         List<Contingency> contingencies = List.of(new Contingency("z12", new BranchContingency("z12")));

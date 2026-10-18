@@ -235,7 +235,7 @@ public final class GpuBatchContingencyValidator {
             // (OLF's own toLfContingency for the contingencies the CPU replays, the tree replay), and OLF restores
             // it only with the slack, through its NetworkState. Left on the relocated slack, a later contingency
             // losing that bus reads the whole network as lost (the replay's version of this leak decoupled all 366
-            // of rte6515's couplers in one random busbar scenario per run - GpuZiTreeReplay).
+            // of rte6515's couplers in one random busbar scenario per run - ZeroImpedanceTreeReplay).
             connectivity.setMainComponentVertex(slack);
         }
     }

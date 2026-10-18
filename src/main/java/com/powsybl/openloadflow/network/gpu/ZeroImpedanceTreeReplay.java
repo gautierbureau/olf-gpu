@@ -5,7 +5,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/.
  * SPDX-License-Identifier: MPL-2.0
  */
-package com.powsybl.openloadflow.sa.gpu;
+package com.powsybl.openloadflow.network.gpu;
 
 import com.powsybl.openloadflow.graph.GraphConnectivity;
 import com.powsybl.openloadflow.network.DisabledBranchStatus;
@@ -53,7 +53,7 @@ import java.util.Set;
  * cycles has several, and every forgotten one was re-coupled by the device, putting a duplicate zero
  * equation on a zero-diagonal dummy row (network.xiidm busbar scope: 0 of 150 on device).
  */
-final class GpuZiTreeReplay {
+public final class ZeroImpedanceTreeReplay {
 
     private static final LoadFlowModel AC = LoadFlowModel.AC;
 
@@ -62,7 +62,7 @@ final class GpuZiTreeReplay {
     private final Set<LfBranch> inTree = new HashSet<>();
     private final List<LfBranch> ziBranches;
 
-    GpuZiTreeReplay(LfNetwork network) {
+    public ZeroImpedanceTreeReplay(LfNetwork network) {
         this.network = network;
         for (LfZeroImpedanceNetwork zn : network.getZeroImpedanceNetworks(AC)) {
             Graph<LfBus, LfBranch> copy = new Pseudograph<>(LfBranch.class);
@@ -90,7 +90,7 @@ final class GpuZiTreeReplay {
      * window: the pre-apply tree left AATX/AATY 4.8/2.5 MW and ADJN/ADJO 32 MW off the CPU - exactly
      * the four contingencies whose apply re-elects.
      */
-    List<LfBranch> applyAndRevert(PropagatedContingency pc) {
+    public List<LfBranch> applyAndRevert(PropagatedContingency pc) {
         return applyAndRevert(pc, List.of(), List.of());
     }
 
@@ -99,8 +99,8 @@ final class GpuZiTreeReplay {
      * closings ({@code closed}: a coupler the contingency opened, or one open at base), the tree read, everything
      * reverted. A pair otherwise inherits its contingency's tree, which still holds a reclosed coupler out of it.
      */
-    List<LfBranch> applyAndRevert(PropagatedContingency pc, List<LfBranch> opened, List<LfBranch> closed) {
-        Optional<LfContingency> lfc = pc.toLfContingency(network, false, GpuZiTreeReplay::connectivityLoss);
+    public List<LfBranch> applyAndRevert(PropagatedContingency pc, List<LfBranch> opened, List<LfBranch> closed) {
+        Optional<LfContingency> lfc = pc.toLfContingency(network, false, ZeroImpedanceTreeReplay::connectivityLoss);
         if (lfc.isEmpty() && opened.isEmpty() && closed.isEmpty()) {
             return nonTree();                                // no impact: OLF never applies it
         }

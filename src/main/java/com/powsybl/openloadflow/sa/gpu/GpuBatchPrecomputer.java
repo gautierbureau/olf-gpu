@@ -22,8 +22,8 @@ import com.powsybl.openloadflow.ac.solver.NewtonRaphsonParameters;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.BatchConfig;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.BatchContingency;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.BatchScenarioResult;
-import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchElementMapper;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.BatchSolveRequest;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchElementMapper;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchedSecurityAnalysisSolver;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.LoadLoss;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.ShuntShift;
@@ -33,6 +33,7 @@ import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfGenerator;
 import com.powsybl.openloadflow.network.LfNetwork;
 import com.powsybl.openloadflow.network.LfShunt;
+import com.powsybl.openloadflow.network.gpu.ZeroImpedanceTreeReplay;
 import com.powsybl.openloadflow.network.impl.PropagatedContingency;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -159,10 +160,10 @@ final class GpuBatchPrecomputer {
             var target = context.getTargetVector();
 
             List<BatchContingency> batch = new ArrayList<>();
-            // OLF's zero-impedance spanning trees, replayed contingency by contingency (GpuZiTreeReplay):
+            // OLF's zero-impedance spanning trees, replayed contingency by contingency (ZeroImpedanceTreeReplay):
             // the device extracted its structure on the base tree, and every coupler OLF has out of its
             // tree when it reaches a contingency must be pinned there, ALL of them, not one per network.
-            GpuZiTreeReplay ziTree = new GpuZiTreeReplay(net);
+            ZeroImpedanceTreeReplay ziTree = new ZeroImpedanceTreeReplay(net);
             for (PropagatedContingency pc : contingencies) {
                 java.util.Set<String> lostLfBusIds = GpuContingencyMapper.lostLfBusIds(net, network, pc);
                 List<LfGenerator> gens = pc.getGeneratorIdsToLose().isEmpty() ? List.of() : GpuContingencyMapper.generatorOutages(net, pc, lostLfBusIds);
@@ -628,7 +629,7 @@ final class GpuBatchPrecomputer {
     /** A pair whose actions open or close couplers is solved on the tree OLF elects after those actions, not on its
      *  contingency's: a coupler the strategy recloses (open at base, or opened by the contingency) goes back in it. */
     private static BatchContingency withPairTree(BatchContingency pair, PropagatedContingency pc, List<LfBranch> ctgBranches,
-                                                 List<LfBranch> ctgZiOutages, GpuZiTreeReplay ziTree) {
+                                                 List<LfBranch> ctgZiOutages, ZeroImpedanceTreeReplay ziTree) {
         java.util.Set<LfBranch> ctgOut = new java.util.HashSet<>(ctgBranches);
         ctgOut.addAll(ctgZiOutages);
         java.util.Set<LfBranch> pairOut = new java.util.HashSet<>(pair.outagedBranches());

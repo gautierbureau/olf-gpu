@@ -33,6 +33,17 @@ final class GpuStateInjector {
     private GpuStateInjector() {
     }
 
+    /** OLF_GPU_INJECT_DIAG=1: tally which variable kinds the contingencies add or remove (printed at JVM exit). */
+    private static final boolean INJECT_DIAG = System.getenv("OLF_GPU_INJECT_DIAG") != null;
+    private static final java.util.Map<String, java.util.concurrent.atomic.LongAdder> DIAG =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
+    private static void printDiag() {
+        DIAG.entrySet().stream()
+                .sorted((a, b) -> Long.compare(b.getValue().sum(), a.getValue().sum())).limit(30)
+                .forEach(e -> System.err.println("INJECT_DIAG " + e.getValue().sum() + " " + e.getKey()));
+    }
+
     /**
      * The row remap, kept across contingencies instead of rebuilt for each one.
      *
@@ -51,17 +62,6 @@ final class GpuStateInjector {
      * <p>Owned by the partition's RunState, never static: partitions run concurrently on their own
      * equation systems, and a shared cache would hand one partition another's permutation.
      */
-    /** OLF_GPU_INJECT_DIAG=1: tally which variable kinds the contingencies add or remove (printed at JVM exit). */
-    private static final boolean INJECT_DIAG = System.getenv("OLF_GPU_INJECT_DIAG") != null;
-    private static final java.util.Map<String, java.util.concurrent.atomic.LongAdder> DIAG =
-            new java.util.concurrent.ConcurrentHashMap<>();
-
-    private static void printDiag() {
-        DIAG.entrySet().stream()
-                .sorted((a, b) -> Long.compare(b.getValue().sum(), a.getValue().sum())).limit(30)
-                .forEach(e -> System.err.println("INJECT_DIAG " + e.getValue().sum() + " " + e.getKey()));
-    }
-
     static final class Remap {
         private List<Variable<AcVariableType>> vars;         // identity of the list the permutation was built from
         private int[] baseRowOf;                             // current row -> base row, -1 = variable absent at base

@@ -172,19 +172,6 @@ final class GpuAcRowIndexing {
         return qRow;
     }
 
-    /**
-     * The ALTERNATE Q-balance-row candidate for each control-capable bus, for Dynamic Q-relocation
-     * (see the production-design doc §11). A transformer/shunt voltage-controlled bus has exactly two
-     * possible reactive-balance rows across the outer loop: its own BUS_V row (control OFF, the ratio /
-     * susceptance held constant) and the free controller's BRANCH_RHO1 / SHUNT_B row (control ON, Q
-     * relocated onto the control variable). {@link #computeQRow} bakes whichever one is active at
-     * extraction; this returns the OTHER one so the fill kernel can follow a per-scenario control
-     * toggle on the shared structure. {@code -1} for a bus that is not transformer/shunt voltage
-     * controlled (no second candidate — its Q row is fixed). The control-var COLUMN persists whether
-     * the control is on or off (pinned by BRANCH_TARGET_RHO1 / SHUNT_TARGET_B when off), so the row is
-     * always resolvable. The free controller is selected identically to {@link #computeQRow}: the one
-     * whose distribution equation is inactive (with all inactive, the first — stable across states).
-     */
     /** True when {@code bus} is a member of a MAIN remote generator voltage-control group (its
      *  controlled bus is another bus). The FREE member (first controller-ENABLED, matching
      *  updateRemoteVoltageControlEquations) is the group's pilot-Q carrier and keeps the
@@ -242,14 +229,6 @@ final class GpuAcRowIndexing {
                 .orElse(false);
     }
 
-    /** The device row that carries a controller's DISTR_Q equation. Normally the controller's own
-     *  BUS_V row — but when the controller IS the group's CONTROLLED bus, that row already carries
-     *  the pilot's BUS_TARGET_V identity, so the DISTR_Q moves to the FREE controller's row: the
-     *  row that hosts the pilot bus's reactive equation in every other form too (its Q balance when
-     *  the pilot is a plain bus, or when this member is RL-pinned). Without this the two equations
-     *  collide on one row — one silently overwrites the other and the group's reactive sharing is
-     *  left unsatisfied (measured on a richer-modelling RTE-like network: the device "converged"
-     *  with a 0.45 pu DISTR_Q residual and OLF's own re-test then failed the load flow). */
     /** As below, following the coupler-tree relocation: a relocated CHILD's DISTR_Q moves onto its parent
      *  coupler's DUMMY_Q column, which its own reactive terms already carry (the kind-3 contribution), leaving
      *  its V row free for that coupler's ZERO_V. */
@@ -262,6 +241,14 @@ final class GpuAcRowIndexing {
         return distrQRow(es, controller);
     }
 
+    /** The device row that carries a controller's DISTR_Q equation. Normally the controller's own
+     *  BUS_V row — but when the controller IS the group's CONTROLLED bus, that row already carries
+     *  the pilot's BUS_TARGET_V identity, so the DISTR_Q moves to the FREE controller's row: the
+     *  row that hosts the pilot bus's reactive equation in every other form too (its Q balance when
+     *  the pilot is a plain bus, or when this member is RL-pinned). Without this the two equations
+     *  collide on one row — one silently overwrites the other and the group's reactive sharing is
+     *  left unsatisfied (measured on a richer-modelling RTE-like network: the device "converged"
+     *  with a 0.45 pu DISTR_Q residual and OLF's own re-test then failed the load flow). */
     static int distrQRow(EquationSystem<AcVariableType, AcEquationType> es, LfBus controller) {
         var vc = controller.getGeneratorVoltageControl()
                 .filter(c -> c.getMergeStatus() == VoltageControl.MergeStatus.MAIN)
@@ -406,6 +393,19 @@ final class GpuAcRowIndexing {
                         .filter(vc::isControllerEnabled).findFirst().map(m -> m == bus).orElse(false);
     }
 
+    /**
+     * The ALTERNATE Q-balance-row candidate for each control-capable bus, for Dynamic Q-relocation
+     * (see the production-design doc §11). A transformer/shunt voltage-controlled bus has exactly two
+     * possible reactive-balance rows across the outer loop: its own BUS_V row (control OFF, the ratio /
+     * susceptance held constant) and the free controller's BRANCH_RHO1 / SHUNT_B row (control ON, Q
+     * relocated onto the control variable). {@link #computeQRow} bakes whichever one is active at
+     * extraction; this returns the OTHER one so the fill kernel can follow a per-scenario control
+     * toggle on the shared structure. {@code -1} for a bus that is not transformer/shunt voltage
+     * controlled (no second candidate — its Q row is fixed). The control-var COLUMN persists whether
+     * the control is on or off (pinned by BRANCH_TARGET_RHO1 / SHUNT_TARGET_B when off), so the row is
+     * always resolvable. The free controller is selected identically to {@link #computeQRow}: the one
+     * whose distribution equation is inactive (with all inactive, the first — stable across states).
+     */
     static int[] computeQRowAlt(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
                                 int[] vCol, int[] branchRhoCol, int[] shuntBCol, int[] qRow) {
         int[] alt = new int[vCol.length];

@@ -225,10 +225,6 @@ final class GpuContingencyMapper {
         return shunt != null && !shunt.isDisabled() && shunt.getOriginalIds().size() == 1 ? shunt : null;
     }
 
-    /** The contingency's closed-branch outages (0-N, BOTH_SIDES only — the <=2 cap was lifted
-     *  2026-09-08; the per-element mask carries any count and the validator rejects fragmenting
-     *  sets), or null when the branch part is out of batch scope. Generators are allowed alongside
-     *  (branch+generator combos batch since 2026-07-17); buses and loads are not. */
     /** The contingency's SINGLE-SIDE branch openings (node-breaker propagation opening one breaker):
      *  each becomes a masked closed-branch element plus the pre-packed side-open OB view for the
      *  surviving terminal, or null when a one-sided shape is out of scope (zero-impedance). */
@@ -317,6 +313,10 @@ final class GpuContingencyMapper {
         }
     }
 
+    /** The contingency's closed-branch outages (0-N, BOTH_SIDES only — the <=2 cap was lifted
+     *  2026-09-08; the per-element mask carries any count and the validator rejects fragmenting
+     *  sets), or null when the branch part is out of batch scope. Generators are allowed alongside
+     *  (branch+generator combos batch since 2026-07-17); buses and loads are not. */
     static List<LfBranch> closedBranchOutages(LfNetwork net, PropagatedContingency pc, List<LfBranch> ziOutages) {
         java.util.Set<String> ziIds = ziOutages.stream().map(LfBranch::getId)
                 .collect(java.util.stream.Collectors.toSet());

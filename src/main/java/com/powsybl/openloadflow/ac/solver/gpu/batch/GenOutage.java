@@ -25,6 +25,13 @@ import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
  * and the per-scenario factor sum drops by {@code dsFactorDelta} so the other buses absorb that share.
  * This is only valid when the slack itself does not participate (otherwise the loss is rejected).
  *
+ * <p>A bus that KEEPS voltage control after losing a generator still has that generator's reactive
+ * capability in the device's aggregate: {@code rlMinQ}/{@code rlMaxQ} are run-constant while OLF's
+ * {@code bus.getMinQ()} sums the generators that are still there. {@code rlEntry} names the
+ * reactive-limit entry to correct and the two deltas are what to add to it (negative: the lost
+ * generator's own share). {@code rlEntry < 0} when there is nothing to correct — the bus goes to PQ,
+ * or it is not a reactive-limit controller at all.
+ *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
 public record GenOutage(int pRow, double pTarget, int vRow, double qTarget, boolean toPq, boolean qOverride,
@@ -111,14 +118,6 @@ public record GenOutage(int pRow, double pTarget, int vRow, double qTarget, bool
     // the base loadflow's slack distribution.
 
     /**
-     * A bus that KEEPS voltage control after losing a generator still has that generator's reactive
-     * capability in the device's aggregate: {@code rlMinQ}/{@code rlMaxQ} are run-constant while OLF's
-     * {@code bus.getMinQ()} sums the generators that are still there. {@code rlEntry} names the
-     * reactive-limit entry to correct and the two deltas are what to add to it (negative: the lost
-     * generator's own share). {@code rlEntry < 0} when there is nothing to correct — the bus goes to PQ,
-     * or it is not a reactive-limit controller at all.
-     */
-    /**
      * This bus was a DISTR_Q controller and stops being one in this scenario, while the group's OTHER
      * controllers survive. Its reactive key must leave the renormalization denominator on the TARGET
      * side too — {@code fillDistrQBatch} gets that from the qPct override channel, but
@@ -130,27 +129,6 @@ public record GenOutage(int pRow, double pTarget, int vRow, double qTarget, bool
         return inactiveDqMember >= 0;
     }
 
-    /**
-     * Deactivating a DISTR_Q member renormalizes qPct over the survivors, and the row's TARGET
-     * (qPct_k * sum_j targetQ_j - targetQ_k, AcTargetVector.getGeneratorReactivePowerDistributionTarget)
-     * moves with it. {@code fillDistrQBatch} applies the mask to the MATRIX unconditionally, but the
-     * kernel that maintains the targets runs only inside the reactive-limits phase and only for a
-     * scenario the limits are live on — so a scenario with no pin left the renormalized row solving
-     * against the BASE target. Measured on rte6515 GEN-1263/GEN-1264: the surviving row solved against
-     * 0.016 where OLF's is -0.060 and 0.092, and OLF's own residual at the device's state was 0.076 on
-     * exactly one equation, the deactivated member's reactive balance. These (row, target) pairs seed
-     * every member row of the group with the renormalized value; when the reactive-limits kernel does
-     * run it recomputes the same expression from the live pin states and supersedes them.
-     */
-    /**
-     * The row mode the PV-&gt;PQ flip installs on this bus's BUS_V row: 1 (a plain reactive-power
-     * equation) for an ordinary bus, 4 for a REMOTE GROUP MEMBER whose control dies with it. Mode 4
-     * means "this row hosts its own Q balance", which is what OLF re-activates there — and it is also
-     * what makes the group's relocation mode-scan skip the row, so the pilot's own reactive balance
-     * falls back to the pilot's row and {@code updatePilotVeqBatch} drops its now-meaningless voltage
-     * identity. Installing mode 1 instead would leave the row looking like a live carrier, and the
-     * pilot's balance would land on top of the member's own.
-     */
     /**
      * When this outage kills the group's control, the PILOT loses its voltage identity and goes back
      * to solving its own reactive balance — {@code deadPilotVRow} is its BUS_V row and
@@ -187,6 +165,15 @@ public record GenOutage(int pRow, double pTarget, int vRow, double qTarget, bool
      *  check compares the new pilot's voltage ({@link #reHomePilotVRow}) against the new pilot's target. */
     public static final int ROW_REMOTE_REHOME = -8;
 
+    /**
+     * The row mode the PV-&gt;PQ flip installs on this bus's BUS_V row: 1 (a plain reactive-power
+     * equation) for an ordinary bus, 4 for a REMOTE GROUP MEMBER whose control dies with it. Mode 4
+     * means "this row hosts its own Q balance", which is what OLF re-activates there — and it is also
+     * what makes the group's relocation mode-scan skip the row, so the pilot's own reactive balance
+     * falls back to the pilot's row and {@code updatePilotVeqBatch} drops its now-meaningless voltage
+     * identity. Installing mode 1 instead would leave the row looking like a live carrier, and the
+     * pilot's balance would land on top of the member's own.
+     */
     public int pqRowModeOrDefault() {
         return pqRowMode == 0 ? 1 : pqRowMode == ROW_PINNED_V ? 4 : pqRowMode == ROW_CROSS_V_IDENTITY ? 6
                 : pqRowMode < 0 ? 0 : pqRowMode;
@@ -202,6 +189,18 @@ public record GenOutage(int pRow, double pTarget, int vRow, double qTarget, bool
         return pqRowMode == ROW_PINNED_NO_UNPIN && rlEntry >= 0;
     }
 
+    /**
+     * Deactivating a DISTR_Q member renormalizes qPct over the survivors, and the row's TARGET
+     * (qPct_k * sum_j targetQ_j - targetQ_k, AcTargetVector.getGeneratorReactivePowerDistributionTarget)
+     * moves with it. {@code fillDistrQBatch} applies the mask to the MATRIX unconditionally, but the
+     * kernel that maintains the targets runs only inside the reactive-limits phase and only for a
+     * scenario the limits are live on — so a scenario with no pin left the renormalized row solving
+     * against the BASE target. Measured on rte6515 GEN-1263/GEN-1264: the surviving row solved against
+     * 0.016 where OLF's is -0.060 and 0.092, and OLF's own residual at the device's state was 0.076 on
+     * exactly one equation, the deactivated member's reactive balance. These (row, target) pairs seed
+     * every member row of the group with the renormalized value; when the reactive-limits kernel does
+     * run it recomputes the same expression from the live pin states and supersedes them.
+     */
     public boolean seedsDqTargets() {
         return dqTargetRows.length > 0;
     }
@@ -228,7 +227,6 @@ public record GenOutage(int pRow, double pTarget, int vRow, double qTarget, bool
         return dqTargetQOvMember >= 0;
     }
 
-    /** The bus keeps NO generator: its reactive-limit entry is not a controller in this scenario. */
     /** A re-homed voltage control (see {@link #ROW_V_IDENTITY}): its bus is a plain PV bus this scenario, so its
      *  reactive-limit entry — packed as a remote member of the base group — is checked as a LOCAL controller
      *  (pin on its own row, switch back on its own voltage) at the target {@code qTarget} carries. */
@@ -241,6 +239,7 @@ public record GenOutage(int pRow, double pTarget, int vRow, double qTarget, bool
         return pqRowMode == ROW_REMOTE_REHOME && rlEntry >= 0 && reHomePilotVRow >= 0;
     }
 
+    /** The bus keeps NO generator: its reactive-limit entry is not a controller in this scenario. */
     public boolean silencesReactiveLimitEntry() {
         return rlEntry >= 0 && allGensLost;
     }

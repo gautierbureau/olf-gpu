@@ -39,29 +39,6 @@ public final class GpuAcNewtonSolver {
         return LOADED;
     }
 
-    /**
-     * Build the SHARED STRUCTURE for one equation-system extraction: the diagonal-pairing row
-     * permutation, the fixed SUPERSET CSR pattern (every row carries its full power-equation
-     * entries + a guaranteed diagonal), the per-family device data with role-folded destination
-     * arrays, the DISTR_Q / DISTR_RHO / zero-impedance packs and the per-element static trig.
-     * This is everything a batched context derives from one {@link GpuAcData} — build it once
-     * and pass the handle to {@link #createBatchContext}, so the base load flow and the batched
-     * security analysis sharing one extraction share one device-resident structure (see {@link GpuAcStructures}
-     * for the per-extraction cache). Rows use the STABLE indexing (the diagonal-paired variable
-     * row, see GpuAcDataExtractor), so the structure survives activation switching; element
-     * counts are implied by the index array lengths and -1 marks an absent branch side.
-     *
-     * @param n     number of variables / equations
-     * @param cbIn  closed branches, {@code ncb*8}: (y g1 g2 b1 b2 ksi r1 a1)
-     * @param cbIdx closed branches, {@code ncb*12}: (Prow1 Qrow1 Prow2 Qrow2 ph1col v1col ph2col v2col a1col r1col qAlt1 qAlt2)
-     * @param obIn  open branches, {@code nob*7}: (y ksi g1 b1 g2 b2 r1)
-     * @param obIdx open branches, {@code nob*6}: (Prow1 Qrow1 Prow2 Qrow2 v1col v2col)
-     * @param shIn  shunts, {@code nsh*2}: (g b)
-     * @param shIdx shunts, {@code nsh*3}: (Prow Qrow vcol)
-     * @param hvIn  HVDC AC emulation, {@code nhv*5}: (p0 k lossFactor1 lossFactor2 r)
-     * @param hvIdx HVDC AC emulation, {@code nhv*4}: (Prow1 Prow2 ph1col ph2col)
-     * @return an opaque native handle; release it with {@link #destroyStructure}
-     */
     /** No dependent-pilot group for any candidate group (the raw-row entry points have no merged controls). */
     private static int[] noDepGroups(int[] qrPtr) {
         int[] a = new int[Math.max(0, qrPtr.length - 1)];

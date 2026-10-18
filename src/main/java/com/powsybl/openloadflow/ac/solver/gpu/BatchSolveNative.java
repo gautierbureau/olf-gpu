@@ -34,7 +34,7 @@ public final class BatchSolveNative {
      * the structure, built once per extraction — only the per-scenario state and the reactive-limits /
      * distributed-slack outer-loop packs are owned here.
      *
-     * @param structureHandle a structure from {@link #createStructure}
+     * @param structureHandle a structure from {@code StructureNative.createStructure}
      * @param nScenarios      number of contingency scenarios to solve in parallel
      * @return an opaque native handle for batched solves; release with {@link #destroyBatchContext}
      */
@@ -47,8 +47,39 @@ public final class BatchSolveNative {
                                                   int dsMode, double[] dsMarginUp, double[] dsMarginDown,
                                                   double dsSlackMarginUp, double dsSlackMarginDown);
 
+    /** Release a batch context from {@link #createBatchContext} (idempotent for handle 0). */
     public static native void destroyBatchContext(long handle);
 
+    /**
+     * Run batched Newton-Raphson AC power flow on the GPU: one iteration loop over all
+     * scenarios, with per-scenario convergence retirement (stop filling/solving once
+     * converged). Scenarios remain in the batch until they converge or hit maxIter.
+     *
+     * <p>The base state/targets are SHARED by every scenario (a single-branch N-1 starts from the same
+     * converged base operating point): they are passed as single length-{@code n} rows and tiled across
+     * the batch on-device. The row-mode is PER-SCENARIO ({@code [nScenarios][n]}) so a contingency can
+     * freeze islanded buses or flip PV↔PQ (reactive limits) independently; it is uploaded as-is and
+     * mutated in place on-device by the outer-loop kernels. The disabled-element mask is also
+     * per-scenario. {@code nScenarios} is {@code disabledElementMask.length}.
+     *
+     * @param handle              a batch context from {@link #createBatchContext}
+     * @param x0Base              shared initial state, {@code [n]}: tiled to every scenario on-device
+     * @param targetBase          shared targets, {@code [n]}: in STABLE row order, tiled per scenario
+     * @param rowMode             per-scenario row modes, {@code [nScenarios][n]}: 1 = equation, 0 = identity
+     *                            (islanded buses frozen, slack/PV identity rows)
+     * @param disabledElementMask per-scenario disabled elements, {@code [nScenarios][nElements]}: bit-packed
+     *                            (true if that element is outaged in this scenario; elements enumerated
+     *                            as: first ncb closed branches, then nob open branches, then nsh shunts, then nhv HVDCs)
+     * @param maxIter             maximum Newton iterations per scenario
+     * @param tol                 convergence tolerance on mismatch infinity norm (the device floor)
+     * @param convEpsPerEq        if {@code > 0}, the inner-Newton convergence test uses OLF's EXACT criterion
+     *                            ({@code DefaultNewtonRaphsonStoppingCriteria}: {@code ‖F‖₂ < sqrt(convEpsPerEq² · n)})
+     *                            instead of the infinity-norm floor — so a batched SA can stop on the SAME
+     *                            decision as the CPU loadflow (apples-to-apples timing). {@code <= 0} keeps the
+     *                            {@code tol} infinity-norm floor.
+     * @return {@code [nScenarios][n + 3]}: per-scenario [state(n), iterations, finalMismatch, convergenceStatus]
+     *         where convergenceStatus is: 0 = converged, 1 = max_iter, -1 = diverged/NaN
+     */
     public static native double[][] solveBatchContext(long handle, double[] x0Base, double[] targetBase,
                                                        int[][] rowMode, int[] baseRowMode, boolean[][] disabledElementMask,
                                                        int[] targetOverrideIndex, double[] targetOverrideValue,

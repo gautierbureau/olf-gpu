@@ -65,12 +65,11 @@ public final class TransformerVoltageControlNative {
     public static native int setBatchDiscreteTvcFreeze(long handle, int[] fzVRow, double[] fzLoadQ, int[] fzRlEntry,
                                                       int[] fixPvRow);
 
-    /** Upload incremental TVC controller data for the in-kernel outer loop.
-     *  rhoRow/vRow/elemIndex: per-controller int arrays; targetV/halfDb: per-controller doubles;
-     *  tapPtr: CSR pointers [nCtrl+1] into tapData; tapData: flat [totalTaps*8] (y,g1,g2,b1,b2,ksi,r1,a1);
-     *  baseTap: per-controller initial tap index; groupPtr/groupCtrl: CSR grouping of controllers
-     *  sharing a controlled bus (for the one-tap-at-a-time round-robin). */
-    /** Returns 1 when the in-kernel TVC loop owns these controllers, 0 when it refused them (a
+    /** Upload incremental TVC controller data for the in-kernel outer loop. rhoRow/vRow/elemIndex: per-controller
+     *  int arrays; targetV/halfDb: per-controller doubles; tapPtr: CSR pointers [nCtrl+1] into tapData; tapData:
+     *  flat [totalTaps*8] (y,g1,g2,b1,b2,ksi,r1,a1); baseTap: per-controller initial tap index; groupPtr/groupCtrl:
+     *  CSR grouping of controllers sharing a controlled bus (for the one-tap-at-a-time round-robin).
+     *  Returns 1 when the in-kernel TVC loop owns these controllers, 0 when it refused them (a
      *  controlled bus shared by several transformers stays on the host orchestrator). */
     public static native int setBatchTvcControllers(long handle,
             int[] rhoRow, int[] vRow, double[] targetV, double[] halfDb, int[] elemIndex,

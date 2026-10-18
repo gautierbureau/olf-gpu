@@ -165,17 +165,6 @@ public final class GpuBatchContextCache {
         recommendedChunk = 0;
     }
 
-    /**
-     * Resolve the GPU batch chunk size, bounding the resident device memory (the uniform
-     * batched factorization holds an LU per scenario, so the footprint scales with the chunk).
-     * <ul>
-     *   <li>AUTO-SIZED from free device memory via
-     *       {@link GpuAcNewtonSolver#recommendBatchSize} (real Jacobian nnz + heuristic LU
-     *       estimate + safety margin).</li>
-     *   <li>if auto-sizing is unavailable (no GPU / query error) — {@value #DEFAULT_MAX_BATCH}.</li>
-     * </ul>
-     * The result is always clamped to {@code [1, nb]}.
-     */
     /** Chunk sizes this JVM has SEEN fail to allocate on the device: the auto-size probe is an
      *  estimate, and on a small card it can recommend a chunk whose LU factors do not fit. Each
      *  failed attempt costs a cuDSS analysis, so once the chunk solver has discovered a ceiling we
@@ -201,6 +190,17 @@ public final class GpuBatchContextCache {
         return recommendedChunk;
     }
 
+    /**
+     * Resolve the GPU batch chunk size, bounding the resident device memory (the uniform
+     * batched factorization holds an LU per scenario, so the footprint scales with the chunk).
+     * <ul>
+     *   <li>AUTO-SIZED from free device memory via
+     *       {@link GpuAcNewtonSolver#recommendBatchSize} (real Jacobian nnz + heuristic LU
+     *       estimate + safety margin).</li>
+     *   <li>if auto-sizing is unavailable (no GPU / query error) — {@value #DEFAULT_MAX_BATCH}.</li>
+     * </ul>
+     * The result is always clamped to {@code [1, nb]}.
+     */
     public static int resolveChunkSize(int nb, int n, GpuAcData gpuData) {
         Integer explicit = chunkSizeForTests;
         if (System.getenv("OLF_GPU_PHASE_TIME") != null) {

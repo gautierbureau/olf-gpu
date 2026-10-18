@@ -132,12 +132,6 @@ public final class GpuAcStructures {
     }
 
     /**
-     * Re-key after a VALUES-level device refresh: the structure mapped from {@code from} now holds
-     * {@code to}'s element values, so EVERY key aliased to it is dropped (their arrays no longer
-     * describe the device state — leaving any would let a later content-equal extraction alias
-     * wrong values) and {@code to} becomes its key (unless it already has its own structure).
-     */
-    /**
      * Test/bench hook: drop every cached mapping, so the next lookups rebuild instead of
      * instance- or content-matching an earlier extraction. Java-side only — a structure still
      * referenced by a live context keeps its native ownership until that context is destroyed.
@@ -149,6 +143,12 @@ public final class GpuAcStructures {
         CACHE.clear();
     }
 
+    /**
+     * Re-key after a VALUES-level device refresh: the structure mapped from {@code from} now holds
+     * {@code to}'s element values, so EVERY key aliased to it is dropped (their arrays no longer
+     * describe the device state — leaving any would let a later content-equal extraction alias
+     * wrong values) and {@code to} becomes its key (unless it already has its own structure).
+     */
     public static synchronized void rebind(GpuAcData from, GpuAcData to) {
         Structure structure = CACHE.remove(from);
         if (structure != null) {

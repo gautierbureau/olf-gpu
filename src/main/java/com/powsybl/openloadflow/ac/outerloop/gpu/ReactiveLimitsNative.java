@@ -60,14 +60,6 @@ public final class ReactiveLimitsNative {
     public static native void setBatchRlCurves(long handle, int[] cvIdx, double[] cvIn, double[] cvPts,
                                                int[] cvHv, int extrapolate);
 
-    /** Remote-member RL entries (plan-B1): per-entry remote kinds + compare rows (PILOT v column for
-     *  remote group members — both RL switch conditions test the pilot's V against the GROUP target).
-     *  {@code dqMemberQrGroup} (plan-B4) links each group member to its pilot's relocation candidate
-     *  group (−1 = none) so the kernels suppress the CURRENT carrier's DISTR_Q row and hand its
-     *  target the pilot's Q when the free role re-picks. Nulls clear. */
-    /** Install the voltage-dependent SVC reactive-limit coefficients on a batch context:
-     *  per RL entry, limit(v) = packed base limit + svcB*(v^2 - v2Base) — exactly OLF's live
-     *  Bmin/Bmax*(v*nomV)^2 evaluation (and the pinned re-freeze via busesWithUpdatedQLimits). */
     /** OLF's GLOBAL forced-PV election keys per RL entry (ReactiveLimitsOuterLoop.switchPvPq: when every
      *  PV bus would switch, the strongest stays PV — highest controlled-bus nominal V, then highest bus
      *  target P, then lowest id): the nominal V, the bus's BUS_TARGET_P row (−1 = none, use staticP)
@@ -102,6 +94,11 @@ public final class ReactiveLimitsNative {
      *  parent's, as OLF restores the parent's target Q), NaN = stamp the pin at its limit. Null clears it. */
     public static native void setBatchRlPinTargets(long handle, double[] targets);
 
+    /** Remote-member RL entries (plan-B1): per-entry remote kinds + compare rows (PILOT v column for
+     *  remote group members — both RL switch conditions test the pilot's V against the GROUP target).
+     *  {@code dqMemberQrGroup} (plan-B4) links each group member to its pilot's relocation candidate
+     *  group (−1 = none) so the kernels suppress the CURRENT carrier's DISTR_Q row and hand its
+     *  target the pilot's Q when the free role re-picks. Nulls clear. */
     public static native void setBatchRlRemote(long handle, byte[] rlRemote, int[] rlCmpVrow,
                                                int[] rmqRow, int[] rmqElem, int[] rmqSide, int[] rmqKind,
                                                double[] rmqWeight,
@@ -117,6 +114,9 @@ public final class ReactiveLimitsNative {
      *  {@code robust = 0} clears the channel on a cached context. */
     public static native void setBatchRlRobust(long handle, double[] rlInitTargetQ, double vLo, double vHi, int robust);
 
+    /** Install the voltage-dependent SVC reactive-limit coefficients on a batch context:
+     *  per RL entry, limit(v) = packed base limit + svcB*(v^2 - v2Base) — exactly OLF's live
+     *  Bmin/Bmax*(v*nomV)^2 evaluation (and the pinned re-freeze via busesWithUpdatedQLimits). */
     public static native void setBatchRlSvcLimits(long handle, double[] svcBmin, double[] svcBmax,
                                                   double[] v2Base);
 

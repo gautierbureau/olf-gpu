@@ -68,11 +68,6 @@ public final class SecondaryVoltageControlLoop {
     private SecondaryVoltageControlLoop() {
     }
 
-    /** One (controller, controlled) PAIR — a bijection under {@link #supported}: {@code vRow} is
-     *  the CONTROLLER bus's V row (keys its RL entry — for a REMOTE controller that is the
-     *  rlRemote member entry), {@code ctldVRow} the CONTROLLED bus's pinned BUS_TARGET_V row (the
-     *  sensitivity unit row and the row the moved zone target lands on — OLF adjusts the
-     *  CONTROLLED bus's VC target). Local control collapses the two. */
     /** One Q observable of a controller bus, as the DEVICE sees it: {@code kind} 0/1 = the CLOSED
      *  BRANCH's side-1/side-2 reactive flow, whose gradient comes from the codegen'd evalClosedBranch
      *  (the very function the fill scatters); 2 = a SHUNT's q = -b*v^2, i.e. OLF's
@@ -81,6 +76,11 @@ public final class SecondaryVoltageControlLoop {
     public record QObs(int kind, int elem, int bRow) {
     }
 
+    /** One (controller, controlled) PAIR — a bijection under {@link #supported}: {@code vRow} is
+     *  the CONTROLLER bus's V row (keys its RL entry — for a REMOTE controller that is the
+     *  rlRemote member entry), {@code ctldVRow} the CONTROLLED bus's pinned BUS_TARGET_V row (the
+     *  sensitivity unit row and the row the moved zone target lands on — OLF adjusts the
+     *  CONTROLLED bus's VC target). Local control collapses the two. */
     public record CtlBus(int vRow, int ctldVRow, int ctldBusNum, int rlIdx, double baseTargetV, double minQ, double maxQ,
                   double loadTargetQ,
                   com.powsybl.openloadflow.util.Evaluable busQ,

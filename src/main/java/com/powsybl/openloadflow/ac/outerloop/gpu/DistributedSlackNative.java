@@ -25,6 +25,15 @@ public final class DistributedSlackNative {
     private DistributedSlackNative() {
     }
 
+    /**
+     * Install the PER-GENERATOR distributed-slack participants: the factors and limits OLF's
+     * water-fill actually saturates on, grouped by bus ({@code busGenStart}/{@code busGenEnd} slice
+     * the generator arrays, so a bus's row value is the sum over its slice).
+     *
+     * <p>OLF's {@code ParticipatingElement} wraps an {@code LfGenerator} and {@code step.run} clamps
+     * each at its own {@code minTargetP}/{@code maxTargetP} and removes it, so a bus-level aggregate
+     * reproduces OLF only while nothing saturates.
+     */
     public static native void setBatchDsGenerators(long handle, int[] genBus, double[] genFactor,
                                                    double[] genMaxDelta, double[] genMinDelta,
                                                    double[] genMarginUp, double[] genMarginDown,
@@ -70,15 +79,6 @@ public final class DistributedSlackNative {
      */
     public static native void setBatchDsRowOverrides(long handle, int[] slotParticipantRowTriples);
 
-    /**
-     * Install the PER-GENERATOR distributed-slack participants: the factors and limits OLF's
-     * water-fill actually saturates on, grouped by bus ({@code busGenStart}/{@code busGenEnd} slice
-     * the generator arrays, so a bus's row value is the sum over its slice).
-     *
-     * <p>OLF's {@code ParticipatingElement} wraps an {@code LfGenerator} and {@code step.run} clamps
-     * each at its own {@code minTargetP}/{@code maxTargetP} and removes it, so a bus-level aggregate
-     * reproduces OLF only while nothing saturates.
-     */
     /** The slack bus's participating generators' total rooms (GpuAcData.dsSlackRoomUp/Down): the bound of a
      *  slack-only distribution, beyond which the device flags OLF's remaining mismatch. */
     public static native void setBatchDsSlackRooms(long handle, double roomUp, double roomDown);

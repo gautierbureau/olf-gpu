@@ -347,13 +347,6 @@ public final class GpuAcActivationExtractor {
         return new GpuAcActivation(mode, targetMap);
     }
 
-    /**
-     * Per-row variable kind for the MAX_VOLTAGE_CHANGE device step scaling: {@code 0} = BUS_PHI (clamp
-     * the angle step to maxDphi), {@code 1} = BUS_V (clamp the magnitude step to maxDv), {@code 2} = any
-     * other variable (BRANCH_RHO1, …) — scaled by the global step factor but never itself a clamp source,
-     * mirroring {@code MaxVoltageChangeStateVectorScaling} (which only inspects BUS_V / BUS_PHI). Indexed by
-     * the variable row, which is the column index of the Newton step.
-     */
     /** PER_EQUATION_TYPE stopping thresholds per paired row, from the VARIABLE at each column (the
      *  batch pairs every equation with its dominant variable): {@code [0][r]} = the identity/slope-row
      *  threshold, {@code [1][r]} = the power-row threshold — mirroring OLF's
@@ -503,6 +496,13 @@ public final class GpuAcActivationExtractor {
         return new double[][] {thrIdent, thrPower, thrAlt, thrSel};
     }
 
+    /**
+     * Per-row variable kind for the MAX_VOLTAGE_CHANGE device step scaling: {@code 0} = BUS_PHI (clamp
+     * the angle step to maxDphi), {@code 1} = BUS_V (clamp the magnitude step to maxDv), {@code 2} = any
+     * other variable (BRANCH_RHO1, …) — scaled by the global step factor but never itself a clamp source,
+     * mirroring {@code MaxVoltageChangeStateVectorScaling} (which only inspects BUS_V / BUS_PHI). Indexed by
+     * the variable row, which is the column index of the Newton step.
+     */
     public static int[] extractVarType(EquationSystem<AcVariableType, AcEquationType> es, int n) {
         int[] varType = new int[n];
         java.util.Arrays.fill(varType, 2);

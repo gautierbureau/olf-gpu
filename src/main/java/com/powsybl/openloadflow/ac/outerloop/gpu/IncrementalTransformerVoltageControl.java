@@ -143,10 +143,8 @@ public final class IncrementalTransformerVoltageControl {
         return out;
     }
 
-    /** Upload the controller data to the native batch context for an in-kernel TVC loop.
-     *  Flattens the Controller list into the CSR-packed arrays that
-     *  {@link GpuAcNewtonSolver#setBatchTvcControllers} expects. */
-    /** Install the controllers for the in-kernel loop. Returns true when the kernel loop OWNS them
+    /** Install the controllers for the in-kernel loop, flattened into the CSR-packed arrays
+     *  {@link TransformerVoltageControlNative#setBatchTvcControllers} expects. Returns true when the kernel loop OWNS them
      *  (shared controlled buses included), false when there are none. */
     public static boolean uploadToDevice(long handle, List<Controller> ctrls, int maxTapShift) {
         if (ctrls == null || ctrls.isEmpty()) {

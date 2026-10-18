@@ -251,6 +251,10 @@ final class GpuStrategyComposer {
             } else if (a instanceof com.powsybl.action.RatioTapChangerTapPositionAction rtca) {
                 var tapChanger = network.getTwoWindingsTransformer(rtca.getTransformerId()) != null
                         ? network.getTwoWindingsTransformer(rtca.getTransformerId()).getRatioTapChanger() : null;
+                /** Compiles a tap-position action (RTC or PST) into a per-scenario full-row override — the
+                 *  target tap's [y, g1, g2, b1, b2, ksi, r1, a1] replaces the branch's static inputs, so
+                 *  per-tap impedance changes are covered. Null when out of batch scope: unknown transformer /
+                 *  tap changer, no tap table, or out-of-range position. */
                 TapR1Override ov = tapOverride(net, rtca.getTransformerId(),
                         tapChanger, rtca.isRelativeValue(), rtca.getTapPosition());
                 if (ov == null) {
@@ -356,10 +360,6 @@ final class GpuStrategyComposer {
                 ctgStickyNonTreeZi, generatorActions, acEmulationOff);
     }
 
-    /** Compiles a tap-position action (RTC or PST) into a per-scenario full-row override — the
-     *  target tap's [y, g1, g2, b1, b2, ksi, r1, a1] replaces the branch's static inputs, so
-     *  per-tap impedance changes are covered. Null when out of batch scope: unknown transformer /
-     *  tap changer, no tap table, or out-of-range position. */
     /**
      * The buses OLF adds back to the main component when a strategy re-enables {@code reenabled} and takes out
      * {@code opened}, as LfActionUtils.updateConnectivity finds them: the contingency's whole disabled network removed

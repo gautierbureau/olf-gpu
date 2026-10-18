@@ -48,9 +48,6 @@ final class GpuBatchInjectionOutages {
                 ? limit.applyAsDouble(g) : g.getTargetQ();
     }
 
-    /** OLF's {@code updateReactiveKeys} rule, plus THIS scenario's loss: a controller that is
-     *  disabled, has its voltage control off, or is the member the outage deactivates takes no share
-     *  of the group's reactive dispatch, and its key leaves the renormalization denominator. */
     /** The bus's own slot in the device's packed DISTR_Q member tables, or -1 when it is not a member
      *  of any group. Used both to locate the group for target seeding and to decide whether a load
      *  loss on it is expressible as a per-scenario member targetQ override. */
@@ -130,6 +127,9 @@ final class GpuBatchInjectionOutages {
                 java.util.Map<Integer, Double> keySumByLabel = new java.util.HashMap<>();
                 for (int m = gs; m < gs + gc; m++) {         // live keys over the whole merged group, per subgroup
                     int lbl = labelOf != null ? labelOf.getOrDefault(m, 0) : 0;
+                    /** OLF's {@code updateReactiveKeys} rule, plus THIS scenario's loss: a controller that is
+                     *  disabled, has its voltage control off, or is the member the outage deactivates takes no share
+                     *  of the group's reactive dispatch, and its key leaves the renormalization denominator. */
                     double kk = !inactive.contains(m) && memberKeepsKey(any, mBusNum[m], m, -1) ? mKey[m] : 0;
                     keySumByLabel.merge(lbl, kk, Double::sum);
                 }

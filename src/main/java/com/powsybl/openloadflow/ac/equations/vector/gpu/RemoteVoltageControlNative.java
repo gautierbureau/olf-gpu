@@ -23,9 +23,6 @@ public final class RemoteVoltageControlNative {
     private RemoteVoltageControlNative() {
     }
 
-    /** Install (or clear, with nulls) per-scenario DISTR_Q weight overrides on a batch context —
-     *  {@code idx} = flat {scenario, contribution} pairs, {@code w} = the renormalized weight (a gen
-     *  outage at a remote-VC controller bus re-runs updateReactiveKeys on the CPU). Per-chunk state. */
     /** {@code {slot, dqMember}} pairs: DISTR_Q controllers a scenario DEACTIVATES (their bus lost its
      *  last voltage generator while the group survives). Context state, not a solve parameter — a
      *  monitoring or secondary-VC re-solve on the same context must not silently drop it, which is
@@ -50,6 +47,9 @@ public final class RemoteVoltageControlNative {
      *  dq member map the kernels use to pair candidates with members. Null clears the channel. */
     public static native void setBatchDqSubgroups(long handle, byte[] dense, int[] qrMemberStart);
 
+    /** Install (or clear, with nulls) per-scenario DISTR_Q weight overrides on a batch context —
+     *  {@code idx} = flat {scenario, contribution} pairs, {@code w} = the renormalized weight (a gen
+     *  outage at a remote-VC controller bus re-runs updateReactiveKeys on the CPU). Per-chunk state. */
     public static native void setBatchDqWeightOverrides(long handle, int[] idx, double[] w);
 
     /** Install (or clear, with nulls) per-scenario DISTR_RHO coefficient overrides on a batch

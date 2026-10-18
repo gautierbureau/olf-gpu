@@ -46,7 +46,6 @@ public final class NewtonSettingsNative {
     /** OLF_GPU_LOOP_TRACE by contingency: the slot to trace in the next solve of this context, -1 = none. */
     public static native void setBatchLoopTraceSlot(long handle, int slot);
 
-    /** Release a batch context from {@link #createBatchContext} (idempotent for handle 0). */
     /** Install (or clear, with nulls) the PER_EQUATION_TYPE per-row stopping thresholds on a batch
      *  context: {@code thrIdent[r]} for identity/slope rows, {@code thrPower[r]} for power rows —
      *  the convergence test then requires EVERY row's |F| under its threshold (OLF's
@@ -61,36 +60,6 @@ public final class NewtonSettingsNative {
     /** Absolute target writes at flat {@code (scenario * n + row)} positions, for a host-owned loop. */
     public static native void setBatchTargetDeltas(long handle, int[] rows, double[] values);
 
-    /**
-     * Run batched Newton-Raphson AC power flow on the GPU: one iteration loop over all
-     * scenarios, with per-scenario convergence retirement (stop filling/solving once
-     * converged). Scenarios remain in the batch until they converge or hit maxIter.
-     *
-     * <p>The base state/targets are SHARED by every scenario (a single-branch N-1 starts from the same
-     * converged base operating point): they are passed as single length-{@code n} rows and tiled across
-     * the batch on-device. The row-mode is PER-SCENARIO ({@code [nScenarios][n]}) so a contingency can
-     * freeze islanded buses or flip PV↔PQ (reactive limits) independently; it is uploaded as-is and
-     * mutated in place on-device by the outer-loop kernels. The disabled-element mask is also
-     * per-scenario. {@code nScenarios} is {@code disabledElementMask.length}.
-     *
-     * @param handle              a batch context from {@link #createBatchContext}
-     * @param x0Base              shared initial state, {@code [n]}: tiled to every scenario on-device
-     * @param targetBase          shared targets, {@code [n]}: in STABLE row order, tiled per scenario
-     * @param rowMode             per-scenario row modes, {@code [nScenarios][n]}: 1 = equation, 0 = identity
-     *                            (islanded buses frozen, slack/PV identity rows)
-     * @param disabledElementMask per-scenario disabled elements, {@code [nScenarios][nElements]}: bit-packed
-     *                            (true if that element is outaged in this scenario; elements enumerated
-     *                            as: first ncb closed branches, then nob open branches, then nsh shunts, then nhv HVDCs)
-     * @param maxIter             maximum Newton iterations per scenario
-     * @param tol                 convergence tolerance on mismatch infinity norm (the device floor)
-     * @param convEpsPerEq        if {@code > 0}, the inner-Newton convergence test uses OLF's EXACT criterion
-     *                            ({@code DefaultNewtonRaphsonStoppingCriteria}: {@code ‖F‖₂ < sqrt(convEpsPerEq² · n)})
-     *                            instead of the infinity-norm floor — so a batched SA can stop on the SAME
-     *                            decision as the CPU loadflow (apples-to-apples timing). {@code <= 0} keeps the
-     *                            {@code tol} infinity-norm floor.
-     * @return {@code [nScenarios][n + 3]}: per-scenario [state(n), iterations, finalMismatch, convergenceStatus]
-     *         where convergenceStatus is: 0 = converged, 1 = max_iter, -1 = diverged/NaN
-     */
     /** Starting values for the next batch solve that is given no full per-scenario state: {@code s * n + row} ->
      *  value, written over the base state the device tiles; consumed by that solve. Null clears. */
     public static native void setBatchX0Seeds(long handle, int[] flatIndex, double[] value);

@@ -5,7 +5,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/.
  * SPDX-License-Identifier: MPL-2.0
  */
-package com.powsybl.openloadflow.ac.solver.gpu.batch;
+package com.powsybl.openloadflow.ac.outerloop.gpu;
 
 import com.powsybl.math.matrix.DenseMatrix;
 import com.powsybl.math.matrix.LUDecomposition;
@@ -14,6 +14,9 @@ import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 import com.powsybl.openloadflow.ac.outerloop.gpu.IncrementalFlowControl;
 import com.powsybl.openloadflow.ac.solver.NewtonRaphsonParameters;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchElementMapper;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchSkips;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchStatus;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.EquationTerm;
 import com.powsybl.openloadflow.equations.Variable;
@@ -57,14 +60,14 @@ import java.util.Map;
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
-public final class GpuBatchSecondaryVc {
+public final class SecondaryVoltageControlLoop {
 
-    private static final Logger LOGGER = LoggerFactory.getLogger(GpuBatchSecondaryVc.class);
+    private static final Logger LOGGER = LoggerFactory.getLogger(SecondaryVoltageControlLoop.class);
 
     private static final double DV_EPS = 1E-4;               // OLF SecondaryVoltageControlOuterLoop
     private static final double DK_DIFF_MAX_EPS = 1E-3;
 
-    private GpuBatchSecondaryVc() {
+    private SecondaryVoltageControlLoop() {
     }
 
     /** One (controller, controlled) PAIR — a bijection under {@link #supported}: {@code vRow} is

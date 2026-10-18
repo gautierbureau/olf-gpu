@@ -11,6 +11,7 @@ import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 import com.powsybl.openloadflow.ac.outerloop.gpu.ContinuousPhaseControl;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DiscreteTransformerVoltageControl;
+import com.powsybl.openloadflow.ac.outerloop.gpu.SecondaryVoltageControlLoop;
 import com.powsybl.openloadflow.ac.solver.NewtonRaphsonParameters;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfShunt;
@@ -997,9 +998,9 @@ final class GpuBatchChunkSolver {
                     // the whole check on the device. Where the kernel refuses the zone set (wider than its
                     // dense system, or an observable on an unpacked element) the driver PAUSES at the same
                     // slot and the same decision runs on the host instead.
-                    boolean svcInKernel = svcActive && GpuBatchSecondaryVc.uploadToDevice(handle, phases.secondaryVc());
+                    boolean svcInKernel = svcActive && SecondaryVoltageControlLoop.uploadToDevice(handle, phases.secondaryVc());
                     if (!svcInKernel) {
-                        GpuBatchSecondaryVc.uploadToDevice(handle, null);   // clear a cached context's table
+                        SecondaryVoltageControlLoop.uploadToDevice(handle, null);   // clear a cached context's table
                     }
                     boolean svcAsDriverPause = svcActive && rlStateOut != null && !svcInKernel;
                     GpuAcNewtonSolver.setBatchHostLoop(handle, svcAsDriverPause ? 1 : 0);
@@ -1175,7 +1176,7 @@ final class GpuBatchChunkSolver {
                         int svcRounds = 0;
                         while (GpuAcNewtonSolver.readBatchDriverPaused(handle) == GpuAcNewtonSolver.HOST_LOOP_SVC
                                 && svcRounds++ < maxSvcRounds) {
-                            var dec = GpuBatchSecondaryVc.decideAtPause(handle, chunkSize, realCount, n, nrl,
+                            var dec = SecondaryVoltageControlLoop.decideAtPause(handle, chunkSize, realCount, n, nrl,
                                     chunkResults, phases.secondaryVc(), rlStateOut, svcTargetV, baseState);
                             if (dec.targetRows() != null && dec.targetRows().length > 0) {
                                 GpuAcNewtonSolver.setBatchTargetDeltas(handle, dec.targetRows(), dec.targetValues());

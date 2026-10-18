@@ -622,7 +622,7 @@ public final class GpuAcNewtonSolver {
     public static native void setBatchRlUnpin(long handle, int[] pairs, double[] newTargets);
 
     /** Install the SecondaryVoltageControl zones for the in-kernel phase (OLF order 4); see
-     *  GpuBatchSecondaryVc.uploadToDevice. Returns 1 when the kernel loop owns them — it refuses a zone
+     *  SecondaryVoltageControlLoop.uploadToDevice. Returns 1 when the kernel loop owns them — it refuses a zone
      *  set wider than the in-kernel dense system, or an observable on an element the batch does not pack. */
     @SuppressWarnings("java:S107")
     public static native int setBatchSecondaryVc(long handle,

@@ -14,6 +14,7 @@ import com.powsybl.openloadflow.ac.outerloop.gpu.DiscreteTransformerVoltageContr
 import com.powsybl.openloadflow.ac.outerloop.gpu.IncrementalFlowControl;
 import com.powsybl.openloadflow.ac.outerloop.gpu.IncrementalShuntVoltageControl;
 import com.powsybl.openloadflow.ac.outerloop.gpu.IncrementalTransformerVoltageControl;
+import com.powsybl.openloadflow.ac.outerloop.gpu.SecondaryVoltageControlLoop;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -65,7 +66,7 @@ public final class GpuBatchPhaseOwnership {
             mask |= 1 << (GpuAcNewtonSolver.HOST_LOOP_TRPC - GpuAcNewtonSolver.HOST_LOOP_SVC);
         }
         if (!GpuBatchSkips.complete(GpuBatchSkips.Slot.SVC)) {
-            GpuBatchSecondaryVc.uploadToDevice(handle, null);
+            SecondaryVoltageControlLoop.uploadToDevice(handle, null);
             mask |= 1;                                        // bit 0 = HOST_LOOP_SVC
         }
         if (mask != hostMask) {

@@ -110,9 +110,9 @@ final class GpuSaRunScope {
         boolean hvdcBatchable = noHvdc
                 || com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchHvdcAcEmulation.allLinearAtBase(lfNetwork)
                 || hvdcLoopsRun;
-        // Secondary voltage control (GpuBatchSecondaryVc): batched device sensitivities + the zone
+        // Secondary voltage control (SecondaryVoltageControlLoop): batched device sensitivities + the zone
         // system replayed per scenario on the host; stage-1 scope is LOCAL generator VC only.
-        boolean svcBatchable = com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchSecondaryVc.supported(lfNetwork);
+        boolean svcBatchable = com.powsybl.openloadflow.ac.outerloop.gpu.SecondaryVoltageControlLoop.supported(lfNetwork);
         // Voltage monitoring (SVC stand-by automatons, GpuBatchVoltageMonitoring): batchable when every
         // monitoring SVC is local with an automaton — slope-less plain-VOLTAGE SVCs need no loop support
         // (ordinary generator-VC buses on the device).

@@ -200,7 +200,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                     data.rlBusNum());
         }
         if (svcCtls != null) {
-            com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchSecondaryVc.writeBack(network, svcCtls,
+            com.powsybl.openloadflow.ac.outerloop.gpu.SecondaryVoltageControlLoop.writeBack(network, svcCtls,
                     GpuAcNewtonSolver.readBatchSecondaryVcTargets(handle));
         }
         lastDistributedActivePower = DistributedSlackWriteBack.writeBack(network, equationSystem, handle, driverDsParams(),
@@ -340,7 +340,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
     private boolean tvdOwned;
     private com.powsybl.openloadflow.ac.outerloop.gpu.DiscreteTransformerVoltageControl.FreezeTables tvdFreeze;
     /** SecondaryVoltageControl's in-kernel tables — the same phase the batched SA drives by default. */
-    private com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchSecondaryVc.Controllers svcCtls;
+    private com.powsybl.openloadflow.ac.outerloop.gpu.SecondaryVoltageControlLoop.Controllers svcCtls;
     private List<com.powsybl.openloadflow.ac.outerloop.gpu.DiscreteShuntVoltageControl.Group> svdGroups;
     private boolean svdOwned;
     /** The host-loop bits the CURRENT solve actually pauses for (in-kernel phases clear theirs). */
@@ -814,7 +814,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
             // ran it on device; a pause whose mutation dirties the structure is also what forces the
             // driver RESTART, so the divergence was not only a throughput one.
             svcCtls = phases.secondaryVc();
-            if (com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchSecondaryVc.uploadToDevice(handle, svcCtls)) {
+            if (com.powsybl.openloadflow.ac.outerloop.gpu.SecondaryVoltageControlLoop.uploadToDevice(handle, svcCtls)) {
                 hostMask &= ~1;                          // bit 0 = HOST_LOOP_SVC
             } else {
                 svcCtls = null;                          // refused: OLF's own loop runs at the pause

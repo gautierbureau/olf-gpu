@@ -16,6 +16,7 @@ import com.powsybl.openloadflow.ac.outerloop.gpu.DiscreteTransformerVoltageContr
 import com.powsybl.openloadflow.ac.outerloop.gpu.IncrementalFlowControl;
 import com.powsybl.openloadflow.ac.outerloop.gpu.IncrementalShuntVoltageControl;
 import com.powsybl.openloadflow.ac.outerloop.gpu.IncrementalTransformerVoltageControl;
+import com.powsybl.openloadflow.ac.outerloop.gpu.SecondaryVoltageControlLoop;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.TargetVector;
 import com.powsybl.openloadflow.network.LfNetwork;
@@ -71,7 +72,7 @@ public final class GpuBatchPhases {
                         List<ContinuousPhaseControl.Ctl> continuousPhase,
                         List<DiscreteTransformerVoltageControl.TransformerController> discreteTvc,
                         DiscreteTransformerVoltageControl.FreezeTables freeze,
-                        GpuBatchSecondaryVc.Controllers secondaryVc,
+                        SecondaryVoltageControlLoop.Controllers secondaryVc,
                         IncrementalFlowControl.EsContext esContext) {
     }
 
@@ -120,8 +121,8 @@ public final class GpuBatchPhases {
                         ? DiscreteTransformerVoltageControl.buildFreezeTables(network, es, discreteTvc,
                                 request.genVcMinNominalV(), rlBusNum)
                         : null,
-                request.secondaryVc() && GpuBatchSecondaryVc.supported(network)
-                        ? GpuBatchSecondaryVc.build(network, es, rlVrow,
+                request.secondaryVc() && SecondaryVoltageControlLoop.supported(network)
+                        ? SecondaryVoltageControlLoop.build(network, es, rlVrow,
                                 new IncrementalFlowControl.EsContext(es.getStateVector(), n),
                                 request.minPlausibleTargetV(), request.maxPlausibleTargetV(), mapper)
                         : null,

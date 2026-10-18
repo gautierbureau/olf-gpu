@@ -165,7 +165,7 @@ public final class GpuBatchOverrides {
 
     /** The HVDC freeze's update: the row's current override (or {@code baseTarget}) minus {@code baseD} plus
      *  {@code d}, in that order — the arithmetic its list-based form used. */
-    void merge(int flat, double baseTarget, double baseD, double d) {
+    public void merge(int flat, double baseTarget, double baseD, double d) {
         int at = positionOf.get(flat);
         double from = at >= 0 ? value.getQuick(at) : baseTarget;
         if (at >= 0) {
@@ -175,15 +175,15 @@ public final class GpuBatchOverrides {
         }
     }
 
-    int size() {
+    public int size() {
         return index.size();
     }
 
-    int indexAt(int k) {
+    public int indexAt(int k) {
         return index.getQuick(k);
     }
 
-    double valueAt(int k) {
+    public double valueAt(int k) {
         return value.getQuick(k);
     }
 

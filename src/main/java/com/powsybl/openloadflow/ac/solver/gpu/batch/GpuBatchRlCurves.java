@@ -43,7 +43,7 @@ import java.util.List;
  * <p>An AC-emulation VSC station is an entry too, whatever the slack distribution: OLF evaluates its curve at the
  * live flow of its link in the linear mode, and at its target P otherwise
  * (LfVscConverterStationImpl.getReactiveLimitsActivePower). Its {hvdc, side} points the kernel at the link's state
- * in the HVDC loop tables (the same enumeration as GpuBatchHvdcAcEmulation.buildControllers).
+ * in the HVDC loop tables (the same enumeration as HvdcAcEmulation.buildControllers).
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */

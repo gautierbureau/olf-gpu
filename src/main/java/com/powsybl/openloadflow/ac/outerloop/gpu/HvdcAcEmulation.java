@@ -5,7 +5,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/.
  * SPDX-License-Identifier: MPL-2.0
  */
-package com.powsybl.openloadflow.ac.solver.gpu.batch;
+package com.powsybl.openloadflow.ac.outerloop.gpu;
 
 import com.powsybl.openloadflow.ac.equations.AbstractHvdcAcEmulationFlowEquationTerm;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
@@ -14,6 +14,7 @@ import com.powsybl.openloadflow.ac.equations.HvdcAcEmulationSide1ActiveFlowEquat
 import com.powsybl.openloadflow.ac.equations.HvdcAcEmulationSide2ActiveFlowEquationTerm;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 import com.powsybl.openloadflow.ac.solver.NewtonRaphsonParameters;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchOverrides;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.Variable;
 import com.powsybl.openloadflow.network.LfHvdc;
@@ -46,9 +47,9 @@ import java.util.Map;
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
-public final class GpuBatchHvdcAcEmulation {
+public final class HvdcAcEmulation {
 
-    private GpuBatchHvdcAcEmulation() {
+    private HvdcAcEmulation() {
     }
 
     public static final int LINEAR = 0;
@@ -307,7 +308,7 @@ public final class GpuBatchHvdcAcEmulation {
 
     /** @param rowModePerScenario the per-scenario row modes (null = base layout everywhere): a converter bus whose
      *  parent coupler the scenario opens takes its P target on its OWN row (see Ctl.bus1WriteRow). */
-    static int[][] applyFreeze(int chunkSize, int realCount, int n, List<Ctl> ctls,
+    public static int[][] applyFreeze(int chunkSize, int realCount, int n, List<Ctl> ctls,
                                double[] baseState, double[] x0PerScenario, int[] seedIdx, double[] seedVal,
                                boolean[][] disabledMask, double[] baseTargets, GpuBatchOverrides overrides,
                                double[] appliedD1, double[] appliedD2, int[][] rowModePerScenario) {
@@ -395,7 +396,7 @@ public final class GpuBatchHvdcAcEmulation {
      * with what they did on the device — otherwise the orchestrators that run next re-upload a
      * pre-freeze override list and re-apply a freeze the kernel already lifted.
      */
-    static void applyStatusOverrides(int chunkSize, int realCount, int n, List<Ctl> ctls,
+    public static void applyStatusOverrides(int chunkSize, int realCount, int n, List<Ctl> ctls,
                                      int[][] status, byte[] ctgOut, boolean[][] disabledMask,
                                      double[] baseTargets, GpuBatchOverrides overrides,
                                      double[] appliedD1, double[] appliedD2, int[][] rowModePerScenario) {

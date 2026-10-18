@@ -20,6 +20,7 @@ import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcStructures;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuEquationDump;
 import com.powsybl.openloadflow.ac.outerloop.gpu.ContinuousPhaseControl;
+import com.powsybl.openloadflow.ac.outerloop.gpu.HvdcAcEmulation;
 import com.powsybl.openloadflow.ac.outerloop.gpu.IncrementalFlowControl;
 import com.powsybl.openloadflow.ac.outerloop.gpu.IncrementalShuntVoltageControl;
 import com.powsybl.openloadflow.ac.outerloop.gpu.IncrementalTransformerVoltageControl;
@@ -34,7 +35,6 @@ import com.powsybl.openloadflow.ac.solver.NewtonRaphsonStoppingCriteria;
 import com.powsybl.openloadflow.ac.solver.PerEquationTypeStoppingCriteria;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchContextCache;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchForcedTargetQ;
-import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchHvdcAcEmulation;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchOuterLoopTables;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchRlCurves;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchStatus;
@@ -192,7 +192,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
         long handle = context.handle.get();
         double[] deviceTargets = GpuAcNewtonSolver.readBatchTargets(handle);
         if (hvdcCtls != null && !hvdcCtls.isEmpty()) {
-            GpuBatchHvdcAcEmulation.writeBack(network, hvdcCtls, GpuAcNewtonSolver.readBatchHvdcStatus(handle),
+            HvdcAcEmulation.writeBack(network, hvdcCtls, GpuAcNewtonSolver.readBatchHvdcStatus(handle),
                     data.getTotalElementCount());
         }
         if (monCtls != null && !monCtls.isEmpty()) {
@@ -326,7 +326,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
 
     // The driver phases with their own per-run tables (HVDC AC emulation, MonitoringVoltage, in-kernel
     // incremental TVC): built at every solve from the network as it stands, written back after it.
-    private List<GpuBatchHvdcAcEmulation.Ctl> hvdcCtls;
+    private List<HvdcAcEmulation.Ctl> hvdcCtls;
     private List<VoltageMonitoring.Ctl> monCtls;
     private List<IncrementalTransformerVoltageControl.Controller> tvcCtls;
     private boolean tvcOwned;
@@ -788,7 +788,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
             boolean hvdcLimits = driverLoop("AcHvdcAcEmulationLimits") != null;
             boolean hvdcFreeze = driverLoop("FreezingHvdcACEmulation") != null;
             if (hvdcLimits || hvdcFreeze) {
-                hvdcCtls = GpuBatchHvdcAcEmulation.buildControllers(network, equationSystem, nElements, cachedData);
+                hvdcCtls = HvdcAcEmulation.buildControllers(network, equationSystem, nElements, cachedData);
             }
             if (hvdcCtls != null && !hvdcCtls.isEmpty()) {
                 int nh = hvdcCtls.size();
@@ -798,11 +798,11 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                 for (var ctl : hvdcCtls) {
                     elementMask[0][ctl.hvElemIndex()] = false;   // set back below from the status, as a BASE status
                 }
-                GpuBatchHvdcAcEmulation.seedBaseStatuses(1, 1, hvdcCtls, hvStatus, elementMask);
-                GpuBatchHvdcAcEmulation.installDriverLoops(handle, hvdcCtls, 1, hvStatus, elementMask,
+                HvdcAcEmulation.seedBaseStatuses(1, 1, hvdcCtls, hvStatus, elementMask);
+                HvdcAcEmulation.installDriverLoops(handle, hvdcCtls, 1, hvStatus, elementMask,
                         appliedD1, appliedD2, hvdcLimits);
             } else {
-                GpuBatchHvdcAcEmulation.installDriverLoops(handle, null, 1, null, null, null, null, false);
+                HvdcAcEmulation.installDriverLoops(handle, null, 1, null, null, null, null, false);
             }
             // MonitoringVoltage (OLF order 6) as a driver phase.
             monCtls = phases.monitoring();

@@ -7,15 +7,16 @@
  */
 package com.powsybl.openloadflow.ac.solver.gpu.batch;
 
-import com.powsybl.openloadflow.ac.equations.vector.gpu.DistrRhoPacker;
 import com.powsybl.commons.report.ReportNode;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
+import com.powsybl.openloadflow.ac.equations.vector.gpu.DistrRhoPacker;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcActivation;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcActivationExtractor;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcDataCache;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcDataExtractor;
+import com.powsybl.openloadflow.ac.outerloop.gpu.HvdcAcEmulation;
 import com.powsybl.openloadflow.ac.solver.NewtonRaphsonParameters;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.TargetVector;
@@ -223,10 +224,10 @@ public final class GpuBatchedSecurityAnalysisSolver {
             // slot to hand it back to, so the whole run goes to the CPU (resultsByIndex stays null).
             if (GpuBatchPhaseOwnership.batchable()) {
                 // built in the order the call evaluated them when they were its arguments
-                var hvdcElemIndex = GpuBatchHvdcAcEmulation.elementIndices(network, nElements);
+                var hvdcElemIndex = HvdcAcEmulation.elementIndices(network, nElements);
                 int[] varType = config.lsMode() == 2 ? GpuAcActivationExtractor.extractVarType(equationSystem, n) : null;
-                List<GpuBatchHvdcAcEmulation.Ctl> hvdcControllers = config.hvdcFreezing() || config.hvdcLimits()
-                        ? GpuBatchHvdcAcEmulation.buildControllers(network, equationSystem, nElements, gpuData)
+                List<HvdcAcEmulation.Ctl> hvdcControllers = config.hvdcFreezing() || config.hvdcLimits()
+                        ? HvdcAcEmulation.buildControllers(network, equationSystem, nElements, gpuData)
                         : null;
                 GpuBatchChunkSolver.solveQualifiedInChunks(new ChunkInputs(contingencies,
                         new ChunkInputs.BaseCase(elementMapper, gpuData, baseState, baseTargets, baseActivation.rowMode(),

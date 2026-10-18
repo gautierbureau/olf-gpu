@@ -87,41 +87,6 @@ public final class GpuAcNewtonSolver {
         return a;
     }
 
-    public static native long createStructure(int n,
-                                              double[] cbIn, int[] cbIdx, double[] obIn, int[] obIdx,
-                                              double[] shIn, int[] shIdx, double[] hvIn, int[] hvIdx,
-                                              int[] dqElem, int[] dqSide, double[] dqWeight, int[] dqRow, int[] dqKind,
-                                              double[] ziIn, int[] ziIdx,
-                                              int[] drRow, int[] drCol, double[] drCoef,
-                                              int[] dbRow, int[] dbCol, double[] dbCoef, int[] cbPcSide,
-                                              double[] vdlIn, int[] vdlIdx, int[] qrPtr, int[] qrRows,
-                                              int[] obQAlt, int[] ziQAlt,
-                                              int[] qrDepBase, int[] qrBaseTargetRow, int[] depGroupOfRow);
-
-    /**
-     * Release a structure handle from {@link #createStructure} (idempotent for handle 0). Contexts
-     * built from it keep the device-resident structure alive natively (shared ownership) — this only
-     * drops the Java-side reference, so it is always safe to call once the handle is no longer used
-     * to create new contexts.
-     */
-    public static native void destroyStructure(long handle);
-
-    /**
-     * Recommend how many scenarios fit in one GPU batch chunk for this structure, from the
-     * free device memory ({@code cudaMemGetInfo}) and the per-scenario footprint. The
-     * dominant term, cuDSS's LU numeric factors, is sized from a cheap single-matrix probe
-     * ANALYSIS on the structure's device pattern that reads cuDSS's reported
-     * {@code CUDSS_DATA_LU_NNZ} (the exact fill-in), falling back to a heuristic multiplier
-     * over the Jacobian nnz only if that query is unavailable — and CACHED on the structure,
-     * so only the first query per extraction pays the probe. The value/state arrays are added
-     * and a safety margin applied; the result is clamped to {@code [1, maxCap]}.
-     *
-     * @param structureHandle a structure from {@link #createStructure}
-     * @param maxCap          absolute upper bound on the returned chunk size
-     * @return a recommended chunk size in {@code [1, maxCap]}
-     */
-    public static native int recommendBatchSize(long structureHandle, int maxCap);
-
     /**
      * One-shot undamped pure Newton-Raphson: {@link #createStructure} + {@link #solveOnStructure}, then the
      * structure is destroyed.
@@ -153,14 +118,14 @@ public final class GpuAcNewtonSolver {
                                  int[] drRow, int[] drCol, double[] drCoef,
                                  int[] dbRow, int[] dbCol, double[] dbCoef, int[] qrPtr, int[] qrRows,
                                  int[] obQAlt, int[] ziQAlt) {
-        long structure = createStructure(x0.length, cbIn, cbIdx, obIn, obIdx, shIn, shIdx, hvIn, hvIdx,
+        long structure = StructureNative.createStructure(x0.length, cbIn, cbIdx, obIn, obIdx, shIn, shIdx, hvIn, hvIdx,
                 dqElem, dqSide, dqWeight, dqRow, dqKind, ziIn, ziIdx, drRow, drCol, drCoef, dbRow, dbCol, dbCoef,
                 noPcSide(cbIdx.length / 12), new double[0], new int[0], qrPtr, qrRows, obQAlt, ziQAlt,
                 noDepGroups(qrPtr), noDepGroups(qrPtr), noDepRows(x0.length));
         try {
             return solveOnStructure(structure, x0, target, rowMode, maxIter, tol, 0, 0.0, 0.0, new int[x0.length]);
         } finally {
-            destroyStructure(structure);
+            StructureNative.destroyStructure(structure);
         }
     }
 
@@ -288,13 +253,6 @@ public final class GpuAcNewtonSolver {
      *  {@code rowModePerScenario} is only what setup asked for. Reading a target without its final mode
      *  can say "the target is right" about a row that is no longer the equation it was set up to be. */
     public static native int[] readBatchRowModes(long handle);
-
-    /** VALUES refresh addressed by the SHARED STRUCTURE handle: same semantics as
-     *  {@link #refreshStructureValues} (tap r1/a1 or shunt-b moves with an unchanged pattern), but
-     *  usable when the caller holds a BATCH context — one extraction has ONE value set, every
-     *  context sharing the structure sees the update. */
-    public static native void refreshStructureValues(long structureHandle, double[] cbIn, double[] obIn,
-                                                     double[] shIn, double[] hvIn, double[] ziIn);
 
     /** Per-scenario slack-only-DS absorbed totals after a solve, or null when the context is not
      *  slack-only — the pair phase seeds its scenarios with the parent contingency's value. */
@@ -522,7 +480,7 @@ public final class GpuAcNewtonSolver {
                                          int[] dbRow, int[] dbCol, double[] dbCoef, double[] ziIn, int[] ziIdx) {
         int n = x0Base.length;
         int nScenarios = disabledElementMask.length;
-        long structure = createStructure(n, cbIn, cbIdx, obIn, obIdx, shIn, shIdx, hvIn, hvIdx,
+        long structure = StructureNative.createStructure(n, cbIn, cbIdx, obIn, obIdx, shIn, shIdx, hvIn, hvIdx,
                 dqElem, dqSide, dqWeight, dqRow, dqKind, ziIn, ziIdx, drRow, drCol, drCoef, dbRow, dbCol, dbCoef,
                 noPcSide(cbIdx.length / 12), new double[0], new int[0], new int[] {0}, new int[0],
                 noQAlt(obIdx.length / 6), noQAlt(ziIdx.length / 11), new int[0], new int[0], noDepRows(n));
@@ -555,7 +513,7 @@ public final class GpuAcNewtonSolver {
                 destroyBatchContext(handle);
             }
         } finally {
-            destroyStructure(structure);
+            StructureNative.destroyStructure(structure);
         }
     }
 }

@@ -5,7 +5,7 @@
 #include "jni_common.cuh"
 
 extern "C" JNIEXPORT jlong JNICALL
-Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_createStructure(
+OLF_JNI(ac_equations_vector_gpu, StructureNative, createStructure)(
         JNIEnv* env, jclass, jint n,
         jdoubleArray jcbIn, jintArray jcbIdx, jdoubleArray jobIn, jintArray jobIdx,
         jdoubleArray jshIn, jintArray jshIdx, jdoubleArray jhvIn, jintArray jhvIdx,
@@ -167,7 +167,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_createSt
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_destroyStructure(
+OLF_JNI(ac_equations_vector_gpu, StructureNative, destroyStructure)(
         JNIEnv*, jclass, jlong handle) {
     // Drops the Java-side owner reference only: contexts hold their own shared_ptr copies,
     // so the device-resident structure lives until the last context is destroyed.
@@ -178,7 +178,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_destroyS
 // sequential batch-of-1 path reconciles tap/shunt moves the same way the seq context did —
 // one extraction has ONE value set, and every context sharing the structure sees the update.
 extern "C" JNIEXPORT void JNICALL
-Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_refreshStructureValues(
+OLF_JNI(ac_equations_vector_gpu, StructureNative, refreshStructureValues)(
         JNIEnv* env, jclass, jlong structureHandle, jdoubleArray jcbIn, jdoubleArray jobIn,
         jdoubleArray jshIn, jdoubleArray jhvIn, jdoubleArray jziIn) {
     auto* stp = reinterpret_cast<SharedStructurePtr*>(structureHandle);
@@ -212,7 +212,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_refreshS
 }
 
 extern "C" JNIEXPORT jint JNICALL
-Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_recommendBatchSize(
+OLF_JNI(ac_equations_vector_gpu, StructureNative, recommendBatchSize)(
         JNIEnv* env, jclass, jlong structureHandle, jint maxCap) {
     auto* stp = reinterpret_cast<SharedStructurePtr*>(structureHandle);
     int rec = 1;

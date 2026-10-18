@@ -67,7 +67,7 @@ public final class GpuAcStructures {
         private Structure(long handle, int n) {
             this.handle = handle;
             this.n = n;
-            CLEANER.register(this, () -> GpuAcNewtonSolver.destroyStructure(handle));
+            CLEANER.register(this, () -> StructureNative.destroyStructure(handle));
         }
     }
 
@@ -111,7 +111,7 @@ public final class GpuAcStructures {
                 }
             }
             if (structure == null) {
-                structure = new Structure(GpuAcNewtonSolver.createStructure(n,
+                structure = new Structure(StructureNative.createStructure(n,
                         data.cbIn(), data.cbIdx(), data.obIn(), data.obIdx(),
                         data.shIn(), data.shIdx(), data.hvIn(), data.hvIdx(),
                         data.dqElem(), data.dqSide(), data.dqWeight(), data.dqRow(), data.dqKind(),

@@ -88,7 +88,7 @@ class GpuValuesRefreshTest {
         // key must move with them (GpuAcStructures.rebind, what GpuNewtonRaphson does after its own
         // refresh) - left keyed by d1, the next stock-Eurostag extraction content-matches d1 and solves
         // the tap-moved system (measured: a later load flow returned a state at OLF residual 8.79).
-        GpuAcNewtonSolver.refreshStructureValues(s1, d2.cbIn(), d2.obIn(), d2.shIn(), d2.hvIn(), d2.ziIn());
+        StructureNative.refreshStructureValues(s1, d2.cbIn(), d2.obIn(), d2.shIn(), d2.hvIn(), d2.ziIn());
         GpuAcStructures.rebind(d1, d2);
         double[] outRefreshed = GpuAcNewtonSolver.solveOnStructure(s1, x0, targets, rowMode, MAX_ITER, TOL, 0, 0.0, 0.0, new int[n]);
 

@@ -19,6 +19,7 @@ import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcDataExtractor;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcStructures;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuEquationDump;
+import com.powsybl.openloadflow.ac.equations.vector.gpu.StructureNative;
 import com.powsybl.openloadflow.ac.outerloop.gpu.ContinuousPhaseControl;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DeviceLoopKind;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DeviceLoopTables;
@@ -598,7 +599,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                     tablesDirty = true;
                     CONTEXT_REBUILDS.incrementAndGet();
                 } else if (!data.sameAs(cachedData)) {
-                    GpuAcNewtonSolver.refreshStructureValues(GpuAcStructures.handle(n, cachedData),
+                    StructureNative.refreshStructureValues(GpuAcStructures.handle(n, cachedData),
                             data.cbIn(), data.obIn(), data.shIn(), data.hvIn(), data.ziIn());
                     // the SHARED structure now holds the new values — re-key it to the new
                     // extraction so content matching never aliases it under the old one

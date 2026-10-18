@@ -15,6 +15,7 @@ import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcDataExtractor;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcStructures;
+import com.powsybl.openloadflow.ac.equations.vector.gpu.StructureNative;
 import com.powsybl.openloadflow.ac.solver.AcSolverUtil;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.network.EurostagFactory;
@@ -76,7 +77,7 @@ class GpuBatchContextCacheTest {
         GpuAcData after = GpuAcDataExtractor.extract(network, es, true, true);
         assertTrue(before.sameStructureAs(after));
         assertFalse(before.sameAs(after));
-        GpuAcNewtonSolver.refreshStructureValues(GpuAcStructures.handle(n, before),
+        StructureNative.refreshStructureValues(GpuAcStructures.handle(n, before),
                 after.cbIn(), after.obIn(), after.shIn(), after.hvIn(), after.ziIn());
         GpuAcStructures.rebind(before, after);
 

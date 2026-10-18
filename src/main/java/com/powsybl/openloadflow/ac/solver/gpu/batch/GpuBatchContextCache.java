@@ -10,6 +10,7 @@ package com.powsybl.openloadflow.ac.solver.gpu.batch;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcStructures;
+import com.powsybl.openloadflow.ac.equations.vector.gpu.StructureNative;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DeviceLoopTables;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -195,7 +196,7 @@ public final class GpuBatchContextCache {
         }
         // sized on the shared structure (its exact nnz + a cuDSS LU probe cached there, so
         // only the first query per extraction pays the probe analysis)
-        recommendedChunk = GpuAcNewtonSolver.recommendBatchSize(GpuAcStructures.handle(n, gpuData), AUTO_MAX_CHUNK);
+        recommendedChunk = StructureNative.recommendBatchSize(GpuAcStructures.handle(n, gpuData), AUTO_MAX_CHUNK);
         recommendedFor = gpuData;
         return recommendedChunk;
     }

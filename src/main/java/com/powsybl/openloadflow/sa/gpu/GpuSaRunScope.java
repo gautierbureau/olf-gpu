@@ -88,7 +88,7 @@ final class GpuSaRunScope {
         boolean incrementalShuntBatchable =
                 olfGuardParams.getShuntVoltageControlMode() == OpenLoadFlowParameters.ShuntVoltageControlMode.INCREMENTAL_VOLTAGE_CONTROL;
         // CONTINUOUS shunt VC (WITH_GENERATOR — OLF's DEFAULT shunt mode): the SimpleTvc two-phase
-        // flow for shunts (GpuBatchSimpleShuntVc: VC-on first solve + dispatchB round + re-solve).
+        // flow for shunts (DiscreteShuntVoltageControl: VC-on first solve + dispatchB round + re-solve).
         // Stage-1 scope: standalone of the other DECISION orchestrators — the CPU interleaves
         // simultaneously-unstable loops per outer iteration, which the sequential orchestrator
         // chain does not model; co-presence with any transformer/phase/RPC/SecondaryVc/monitoring
@@ -141,7 +141,7 @@ final class GpuSaRunScope {
                 .flatMap(b -> b.getGenerators().stream())
                 .noneMatch(g -> g instanceof com.powsybl.openloadflow.network.LfStaticVarCompensator);
         // CONTINUOUS shunt VC (WITH_GENERATOR — OLF's DEFAULT shunt mode): the SimpleTvc two-phase
-        // flow for shunts (GpuBatchSimpleShuntVc: VC-on first solve + dispatchB round + re-solve).
+        // flow for shunts (DiscreteShuntVoltageControl: VC-on first solve + dispatchB round + re-solve).
         // Stage-1 scope: standalone of the other DECISION orchestrators — the CPU interleaves
         // simultaneously-unstable loops per outer iteration, which the sequential orchestrator
         // chain does not model; co-presence with a transformer/phase/RPC/SecondaryVc loop (or

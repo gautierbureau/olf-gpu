@@ -96,7 +96,7 @@ class GpuSaShuntControlTest extends AbstractGpuSaTest {
     }
 
     /** DEVICE-mode CONTINUOUS shunt VC (WITH_GENERATOR — OLF's DEFAULT shuntVoltageControlMode):
-     *  the SimpleTvc two-phase flow for shunts (GpuBatchSimpleShuntVc) — per scenario, the VC-ON
+     *  the SimpleTvc two-phase flow for shunts (DiscreteShuntVoltageControl) — per scenario, the VC-ON
      *  toggle-diff activation solves the continuous b (the controlled bus V pinned, the bus Q
      *  relocated onto the SHUNT_B row), then OLF's dispatchB rounds b to the closest sections and
      *  the VC-OFF re-solve runs with the identity pinned there + the section (dG,dB) applied.

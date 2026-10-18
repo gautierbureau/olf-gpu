@@ -229,7 +229,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
             }
         }
         if (svdOwned && svdGroups != null) {
-            com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchSimpleShuntVc.writeBack(network, svdGroups,
+            com.powsybl.openloadflow.ac.outerloop.gpu.DiscreteShuntVoltageControl.writeBack(network, svdGroups,
                     GpuAcNewtonSolver.readBatchDiscreteShuntState(handle), GpuAcNewtonSolver.readBatchDiscreteShuntPositions(handle));
         }
     }
@@ -341,7 +341,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
     private com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchTransformerControl.FreezeTables tvdFreeze;
     /** SecondaryVoltageControl's in-kernel tables — the same phase the batched SA drives by default. */
     private com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchSecondaryVc.Controllers svcCtls;
-    private List<com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchSimpleShuntVc.Group> svdGroups;
+    private List<com.powsybl.openloadflow.ac.outerloop.gpu.DiscreteShuntVoltageControl.Group> svdGroups;
     private boolean svdOwned;
     /** The host-loop bits the CURRENT solve actually pauses for (in-kernel phases clear theirs). */
     private int activeHostMask;

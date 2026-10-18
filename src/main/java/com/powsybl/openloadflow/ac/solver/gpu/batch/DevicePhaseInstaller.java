@@ -8,6 +8,7 @@
 package com.powsybl.openloadflow.ac.solver.gpu.batch;
 
 
+import com.powsybl.openloadflow.ac.outerloop.gpu.DiscreteShuntVoltageControl;
 import com.powsybl.openloadflow.ac.outerloop.gpu.IncrementalShuntVoltageControl;
 import com.powsybl.openloadflow.ac.outerloop.gpu.IncrementalTransformerVoltageControl;
 
@@ -37,7 +38,7 @@ public final class DevicePhaseInstaller {
                           List<IncrementalShuntVoltageControl.Controller> incrementalShunt, int incShuntMaxSectionShift,
                           List<GpuBatchTransformerControl.TransformerController> discreteTvc, boolean simpleTvc,
                           boolean afterGenerator, GpuBatchTransformerControl.FreezeTables freeze,
-                          List<GpuBatchSimpleShuntVc.Group> simpleShunt, boolean entryOn) {
+                          List<DiscreteShuntVoltageControl.Group> simpleShunt, boolean entryOn) {
     }
 
     /** Which of the run's discrete and incremental control loops the device owns, and the ones it refused. */
@@ -88,7 +89,7 @@ public final class DevicePhaseInstaller {
         } else {
             GpuBatchTransformerControl.uploadToDevice(handle, null, 0, false);   // clears a cached context's table
         }
-        boolean svdInKernel = GpuBatchSimpleShuntVc.uploadToDevice(handle, r.simpleShunt(), r.entryOn());
+        boolean svdInKernel = DiscreteShuntVoltageControl.uploadToDevice(handle, r.simpleShunt(), r.entryOn());
 
         List<String> refusedLoops = new ArrayList<>();
         if (present(r.incrementalTvc()) && !tvcInKernel) {

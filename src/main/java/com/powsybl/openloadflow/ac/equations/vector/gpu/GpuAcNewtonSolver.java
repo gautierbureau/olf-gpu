@@ -601,7 +601,7 @@ public final class GpuAcNewtonSolver {
     public static native double[] readBatchDiscreteTvcFreeze(long handle);
 
     /** Install the WITH_GENERATOR shunt voltage-control tables for the in-kernel ShuntVoltageControl phase
-     *  (OLF order 10); see GpuBatchSimpleShuntVc.uploadToDevice. Returns 1 when the kernel loop owns them. */
+     *  (OLF order 10); see DiscreteShuntVoltageControl.uploadToDevice. Returns 1 when the kernel loop owns them. */
     @SuppressWarnings("java:S107")
     public static native int setBatchDiscreteShunt(long handle, int entryOn,
             int[] grpPtr, int[] deltaPtr, int[] deltaRow, int[] deltaModeOn, int[] deltaModeOff,

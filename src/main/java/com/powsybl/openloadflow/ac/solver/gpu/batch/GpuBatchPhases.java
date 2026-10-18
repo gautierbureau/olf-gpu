@@ -10,6 +10,7 @@ package com.powsybl.openloadflow.ac.solver.gpu.batch;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcActivation;
+import com.powsybl.openloadflow.ac.outerloop.gpu.DiscreteShuntVoltageControl;
 import com.powsybl.openloadflow.ac.outerloop.gpu.IncrementalShuntVoltageControl;
 import com.powsybl.openloadflow.ac.outerloop.gpu.IncrementalTransformerVoltageControl;
 import com.powsybl.openloadflow.equations.EquationSystem;
@@ -62,7 +63,7 @@ public final class GpuBatchPhases {
     public record Built(List<GpuBatchVoltageMonitoring.Ctl> monitoring,
                         List<IncrementalTransformerVoltageControl.Controller> incrementalTvc,
                         List<IncrementalShuntVoltageControl.Controller> incrementalShunt,
-                        List<GpuBatchSimpleShuntVc.Group> simpleShunt,
+                        List<DiscreteShuntVoltageControl.Group> simpleShunt,
                         List<GpuBatchIncrementalFlowControl.Controller> flow,
                         List<GpuBatchContinuousPhase.Ctl> continuousPhase,
                         List<GpuBatchTransformerControl.TransformerController> discreteTvc,
@@ -102,7 +103,7 @@ public final class GpuBatchPhases {
                         ? IncrementalShuntVoltageControl.buildControllers(network, es, mapper, shuntOffset)
                         : null,
                 request.simpleShunt()
-                        ? GpuBatchSimpleShuntVc.buildGroups(network, es, targetVector, activation, targets, mapper, shuntOffset)
+                        ? DiscreteShuntVoltageControl.buildGroups(network, es, targetVector, activation, targets, mapper, shuntOffset)
                         : null,
                 request.rpc() || request.incrementalPhase()
                         ? GpuBatchIncrementalFlowControl.buildControllers(network, es, mapper,

@@ -88,8 +88,7 @@ final class GenOutageSeed {
                 }
                 if (go.toPq()) {
                     int[] row = rs.rowModePerScenario[s] == baseRowMode ? baseRowMode.clone() : rs.rowModePerScenario[s];
-                    row[go.vRow()] = go.pqRowModeOrDefault();   // BUS_V row becomes the
-                                                                // reactive-power equation (PV→PQ)
+                    row[go.vRow()] = go.pqRowModeOrDefault();   // BUS_V row becomes the reactive-power equation (PV→PQ)
                     rs.rowModePerScenario[s] = row;
                 }
                 if (go.reHomesRlEntry()) {

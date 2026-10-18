@@ -276,9 +276,10 @@ public final class ReactiveCapabilityCurves {
                 gen.getMinQ(), gen.getMaxQ()});              // base evals AT base targetP (bit-zero delta at base)
             cvHv.add(-1);
             cvHv.add(-1);
-            cvGenId.add(gen.getId());                        // host-side only: which generator this entry is,
-            cvBusFactor.add(busFactor);                      // and the denominator its share was built on, so a
-                                                             // scenario losing a sibling can renormalize it
+            // host-side only: which generator this entry is, and the denominator its share was built on, so a
+            // scenario losing a sibling can renormalize it
+            cvGenId.add(gen.getId());
+            cvBusFactor.add(busFactor);
         }
     }
 }

@@ -343,7 +343,7 @@ final class GpuBatchInjectionOutages {
         // participation, and a slack-only distribution reports what it absorbed through that same accumulator: both
         // stay on the CPU.
         boolean slackBus = es.getEquation(busNum, AcEquationType.BUS_TARGET_PHI).isPresent();
-        if (slackBus && (!lost.isEmpty() || (gpuData.dsPhiRow().length == 0 && gpuData.dsSlackPhiRow() >= 0))) {
+        if (slackBus && (!lost.isEmpty() || gpuData.dsPhiRow().length == 0 && gpuData.dsSlackPhiRow() >= 0)) {
             return reject("SLACK_BUS", bus);
         }
         // DISTR_Q controller bus (remote/distributed VC): the qPct weights are BAKED into the
@@ -445,7 +445,7 @@ final class GpuBatchInjectionOutages {
                 }
                 deadPilotVRow = pilotV.getRow();
                 deadPilotQTarget = pilot.getTargetQ();
-            } else if ((!keepsController && !vcSurvives) || !lostLoads.isEmpty()) {
+            } else if (!keepsController && !vcSurvives || !lostLoads.isEmpty()) {
                 // BOTH halves are load-bearing, and 2026-09-17 they turned out to be ONE root cause.
                 // Lifting them on rte6515's full sets: the 9 generator cases land wrong (0.067 up to
                 // 3.157 kV at GEN-1522) and LOAD-1263 lands 0.105 kV out.
@@ -534,7 +534,7 @@ final class GpuBatchInjectionOutages {
         // 4183 of 7494 wrong totals, worst 148 MW, 12640 of 13338 buses off by up to 1.03 kV.
         int pRow = slackBus ? -1 : busRows[0][busNum];       // the slack's row is its angle reference
         int vRow = es.getVariableSet().getVariable(busNum, AcVariableType.BUS_V).getRow();
-        if ((pRow < 0 && !slackBus) || vRow < 0) {
+        if (pRow < 0 && !slackBus || vRow < 0) {
             return reject("NO_P_OR_V_ROW", bus);
         }
         // Is this bus a distributed-slack participant? Matters for BOTH shapes: lost generators
@@ -599,7 +599,7 @@ final class GpuBatchInjectionOutages {
         // bus that the base pinned PV->PQ also has busPv false, and its V row DOES solve the reactive
         // equation, so it must keep shedding the lost Q. Suppressing it there moves
         // devicePinnedBusLosingReactiveLoadMatchesCpu's B4 by 1.0e-08 kV.
-        boolean qOverride = toPq || (!busPv && !remotelyControlled);
+        boolean qOverride = toPq || !busPv && !remotelyControlled;
         // ...but a remotely controlled bus still HAS a reactive balance - OLF keeps its BUS_TARGET_Q, generation
         // minus load like any PQ bus - and the extraction moved it onto the relocation group's CARRIER (qRowAlt =
         // -2-g: the free member's row), whose target the device captures from the BASE targets at solve start
@@ -727,7 +727,8 @@ final class GpuBatchInjectionOutages {
         boolean allGensLost = bus.getGenerators().stream().allMatch(lostSet::contains);
         if (System.getenv("OLF_GPU_GENOUT_TRACE") != null) {
             System.err.printf("GENOUT bus=%s busPv=%b frozenQ=%b toPq=%b qOverride=%b lost=%s busGens=%d rlEntry=%d "
-                    + "dMinQ=%.6f dMaxQ=%.6f busMinQ=%.6f busMaxQ=%.6f distrQ=%b ctrlBus=%s dsBus=%d dFactor=%.9f dBase=%.9f lostLoadQ=%.9f dLoadQ=%.9f vcCtl=%d vcCtlAlive=%d local=%b pilotIsCtl=%b vRow=%d members=%s free=%s pilotLoadQ=%.9f deadOwnsRow=%b%n",
+                    + "dMinQ=%.6f dMaxQ=%.6f busMinQ=%.6f busMaxQ=%.6f distrQ=%b ctrlBus=%s dsBus=%d dFactor=%.9f dBase=%.9f lostLoadQ=%.9f dLoadQ=%.9f "
+                    + "vcCtl=%d vcCtlAlive=%d local=%b pilotIsCtl=%b vRow=%d members=%s free=%s pilotLoadQ=%.9f deadOwnsRow=%b%n",
                     bus.getId(), busPv, bus.isGenerationTargetQFrozen(), toPq, qOverride,
                     lost.stream().map(LfGenerator::getId).toList(), bus.getGenerators().size(),
                     rlEntry, minQDelta, maxQDelta, bus.getMinQ(), bus.getMaxQ(), distrQBus,

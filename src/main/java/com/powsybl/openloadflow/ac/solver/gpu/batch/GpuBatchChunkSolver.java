@@ -385,8 +385,8 @@ final class GpuBatchChunkSolver {
                     boolean[] rejectAfterSolve = null;       // pairs whose parent the device did not answer: CPU
                     boolean[] pairParentConverged = new boolean[chunkSize];
                     double[] rlPinIn = null;                 // pairs: each parent's final pinned targets (NaN = none)
-                    double[] preSlackSeed = null;            // the loss pre-distribution's share on the slack generators,
-                                                             // when nobody else is left to participate
+                    // the loss pre-distribution's share on the slack generators, when nobody else is left to participate
+                    double[] preSlackSeed = null;
                     if (!pairPhase && (rs.hasDs || dsSlackOnly) && config.contingencyLossPreDistribution()) {
                         // CPU parity (DefaultContingencyActivePowerLossDistribution): with DS on, the
                         // contingency's SCHEDULED lost active power is distributed ONCE over the
@@ -1653,8 +1653,7 @@ final class GpuBatchChunkSolver {
                             // cumulative amount from the INITIAL target P on every pass, so this total is
                             // directly comparable to the LAST `effective` OLF_DS_TRACE reports for the
                             // same contingency.
-                            System.err.printf("GPU_DS_TOTAL ctg=%s distributed=%.9f%n", id, tot)
-;
+                            System.err.printf("GPU_DS_TOTAL ctg=%s distributed=%.9f%n", id, tot);
                         }
                     }
                     if (System.getenv("OLF_GPU_RL_TRACE") != null && rlStateOut != null) {

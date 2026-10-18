@@ -333,7 +333,7 @@ public final class HvdcAcEmulation {
                     continue;                                // outaged hvdc — stays as the contingency left it
                 }
                 double[] d = frozenDeltas(c, c.p1At(warm), c.p2At(warm));
-                if (HVDC_TRACE_ROW == -2 || (HVDC_TRACE_ROW >= 0 && (c.bus1PhiRow() == HVDC_TRACE_ROW || c.bus2PhiRow() == HVDC_TRACE_ROW))) {
+                if (HVDC_TRACE_ROW == -2 || HVDC_TRACE_ROW >= 0 && (c.bus1PhiRow() == HVDC_TRACE_ROW || c.bus2PhiRow() == HVDC_TRACE_ROW)) {
                     // OLF_GPU_HVDC_TRACE=<phiRow>: what this scenario's freeze fixed the hvdc at - the
                     // flows read at the warm-start state and the deltas that go into the two converter
                     // rows. OLF freezes each contingency at its own restored base angles; a scenario

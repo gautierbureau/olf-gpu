@@ -64,7 +64,7 @@ class JacobianDumpCompareTest {
                         // (eqRow, varCol). Normalise both to (eqRow, varCol).
                         int row = transpose ? b : a;
                         int col = transpose ? a : b;
-                        j.merge(((long) row << 32) | (col & 0xffffffffL), Double.parseDouble(t[3]), Double::sum);
+                        j.merge(((long) row << 32) | (col & 0xFFFFFFFFL), Double.parseDouble(t[3]), Double::sum);
                     }
                     default -> { }
                 }

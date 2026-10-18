@@ -1046,8 +1046,9 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
                         com.powsybl.contingency.ContingencyContext.all(), monBranches,
                         monVls, java.util.Set.of()));
             } else {
-                for (String id : busDiffCtgs) {           // one scoped monitor per id, so the heap holds
-                    ms.add(new com.powsybl.security.monitor.StateMonitor(   // a handful of results, not 10540
+                // one scoped monitor per id, so the heap holds a handful of results, not 10540
+                for (String id : busDiffCtgs) {
+                    ms.add(new com.powsybl.security.monitor.StateMonitor(
                             com.powsybl.contingency.ContingencyContext.specificContingency(id),
                             monBranches, monVls, java.util.Set.of()));
                 }
@@ -1556,8 +1557,9 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
         // ASSERTIONS
         // after every per-contingency diff line, so a failing run still says whether the STATES agree
         reportTriple();
+        // before any assertion: a failing run is exactly when the joined table is wanted
         assertTrue(strategyMismatches.isEmpty(), "operator strategy results must match the CPU: " + strategyMismatches.size()
-                + " differ " + strategyMismatches.subList(0, Math.min(20, strategyMismatches.size())));                                      // before any assertion: a failing run is exactly when the joined table is wanted
+                + " differ " + strategyMismatches.subList(0, Math.min(20, strategyMismatches.size())));
         assertTrue(worstDistributed < 1e-3, "distributed active power must match the CPU: worst " + worstDistributed + " MW");
         assertEquals(statusCounts(cpu), statusCounts(gpuCold),
                 "post-contingency status counts must match CPU");

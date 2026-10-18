@@ -497,7 +497,7 @@ final class GpuSaTestNetworks {
             // pilotPinned: g0 cannot cover its share of the base reactive need, so the BASE load flow pins it at
             // MAX_Q while g1/g2 keep holding 406 kV (OLF: BUS_TARGET_V stays on the main, g0 PQ at its limit).
             network.getGenerator(g).newMinMaxReactiveLimits().setMinQ(-300)
-                    .setMaxQ(pilotPinned && g.equals("g0") ? 5 : 300).add();
+                    .setMaxQ(pilotPinned && "g0".equals(g) ? 5 : 300).add();
         }
         network.getVoltageLevel("vl0").newGenerator().setId("gs").setBus("vl0_b").setConnectableBus("vl0_b")
                 .setMinP(0).setMaxP(2000).setTargetP(500).setTargetV(400).setVoltageRegulatorOn(true).add();
@@ -1173,7 +1173,7 @@ final class GpuSaTestNetworks {
             network.getVoltageLevel("vl_h").newVscConverterStation().setId("cs2" + link).setBus("h").setConnectableBus("h")
                     .setVoltageRegulatorOn(false).setVoltageSetpoint(400).setReactivePowerSetpoint(0).setLossFactor(1.1f).add();
             network.newHvdcLine().setId("hvdc" + link).setConverterStationId1("cs1" + link).setConverterStationId2("cs2" + link)
-                    .setNominalV(400).setR(1).setActivePowerSetpoint(link.equals("a") ? 60 : 40)
+                    .setNominalV(400).setR(1).setActivePowerSetpoint("a".equals(link) ? 60 : 40)
                     .setConvertersMode(com.powsybl.iidm.network.HvdcLine.ConvertersMode.SIDE_1_RECTIFIER_SIDE_2_INVERTER)
                     .setMaxP(500).add();
         }

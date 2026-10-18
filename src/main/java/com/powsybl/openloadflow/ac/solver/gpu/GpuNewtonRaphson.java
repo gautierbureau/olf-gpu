@@ -26,6 +26,7 @@ import com.powsybl.openloadflow.ac.outerloop.gpu.IncrementalFlowControl;
 import com.powsybl.openloadflow.ac.outerloop.gpu.IncrementalShuntVoltageControl;
 import com.powsybl.openloadflow.ac.outerloop.gpu.IncrementalTransformerVoltageControl;
 import com.powsybl.openloadflow.ac.outerloop.gpu.ReactiveCapabilityCurves;
+import com.powsybl.openloadflow.ac.outerloop.gpu.ReactiveLimitsWriteBack;
 import com.powsybl.openloadflow.ac.outerloop.gpu.VoltageMonitoring;
 import com.powsybl.openloadflow.ac.solver.AbstractAcSolver;
 import com.powsybl.openloadflow.ac.solver.AcSolverResult;

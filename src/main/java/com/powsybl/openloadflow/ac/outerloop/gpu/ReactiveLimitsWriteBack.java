@@ -5,7 +5,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/.
  * SPDX-License-Identifier: MPL-2.0
  */
-package com.powsybl.openloadflow.ac.solver.gpu;
+package com.powsybl.openloadflow.ac.outerloop.gpu;
 
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
 import com.powsybl.openloadflow.network.LfBus;
@@ -17,7 +17,7 @@ import com.powsybl.openloadflow.network.LfNetwork;
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
-final class ReactiveLimitsWriteBack {
+public final class ReactiveLimitsWriteBack {
 
     private ReactiveLimitsWriteBack() {
     }
@@ -28,7 +28,7 @@ final class ReactiveLimitsWriteBack {
      *  target vector picks the limit up. A pin the device released (a PQ→PV switch-back) is undone the
      *  way OLF undoes it. Limit types 3/4 are robust mode's MIN/MAX_REALISTIC_V freezes: the pin is the
      *  same, only the recorded type differs (and OLF never re-freezes those at a moved Q limit). */
-    static void writeBack(LfNetwork network, int[] rlStateOut, GpuAcData data, double[] deviceTargets, int[] devModes) {
+    public static void writeBack(LfNetwork network, int[] rlStateOut, GpuAcData data, double[] deviceTargets, int[] devModes) {
         if (rlStateOut == null || data == null || data.rlBusNum() == null) {
             return;
         }

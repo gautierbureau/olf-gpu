@@ -837,8 +837,8 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
             var tvcSimple = driverLoop("SimpleTransformerVoltageControl");
             boolean afterGen = tvcAfterGen instanceof com.powsybl.openloadflow.ac.outerloop.TransformerVoltageControlOuterLoop;
             boolean svd = driverLoop("ShuntVoltageControl") != null;
-            var installed = com.powsybl.openloadflow.ac.solver.gpu.batch.DevicePhaseInstaller.install(handle,
-                    new com.powsybl.openloadflow.ac.solver.gpu.batch.DevicePhaseInstaller.Request(
+            var installed = com.powsybl.openloadflow.ac.outerloop.gpu.DevicePhaseInstaller.install(handle,
+                    new com.powsybl.openloadflow.ac.outerloop.gpu.DevicePhaseInstaller.Request(
                             itvc != null ? phases.incrementalTvc() : null, itvc != null ? itvc.getMaxTapShift() : 1,
                             rpcLoop != null || incPhase ? phases.flow() : null, cph ? phases.continuousPhase() : null,
                             isvc != null ? phases.incrementalShunt() : null, isvc != null ? isvc.getMaxSectionShift() : 3,

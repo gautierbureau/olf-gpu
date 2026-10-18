@@ -137,7 +137,8 @@ record ExtractionColumns(int[] phiCol, int[] vCol, int[] branchRhoCol, int[] bra
         // IS the all-pinned corner (updatePilotVeqBatch flips the pilot's V identity) — this
         // retired the last remote-pin-dynamics whole-run gate (table-less pinnable free member).
         java.util.Set<Integer> qrPilotBuses = new java.util.HashSet<>();
-        addRemoteVoltageControlGroups(network, es, ziTreeEdges, qrPilotBuses, dummyQCol, vCol, qrPtr, qrRows, qRowAlt, qrDepBase, qrBaseTargetRow, depGroupOfRow);
+        addRemoteVoltageControlGroups(network, es, ziTreeEdges, qrPilotBuses, dummyQCol, vCol, qrPtr, qrRows,
+                                      qRowAlt, qrDepBase, qrBaseTargetRow, depGroupOfRow);
         qrPtr.add(qrRows.size());
         if (System.getenv("OLF_GPU_QR_TRACE") != null) {   // every relocation group of THIS extraction
             for (int g = 0; g + 1 < qrPtr.size(); g++) {
@@ -298,7 +299,8 @@ record ExtractionColumns(int[] phiCol, int[] vCol, int[] branchRhoCol, int[] bra
                 pRow, ziParentEdge, ziChildBus);
     }
 
-    /** Remote generator voltage-control pilot-Q relocation groups (plan-B4): one candidate table per remote group, [pilot V row, member V columns in merged order]; adds each group's pilot to {@code qrPilotBuses}. */
+    /** Remote generator voltage-control pilot-Q relocation groups (plan-B4): one candidate table per remote group,
+     *  [pilot V row, member V columns in merged order]; adds each group's pilot to {@code qrPilotBuses}. */
     private static void addRemoteVoltageControlGroups(final LfNetwork network,
                                                        final EquationSystem<AcVariableType, AcEquationType> es,
                                                        final int[][] ziTreeEdges,

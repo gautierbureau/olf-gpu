@@ -181,14 +181,16 @@ final class GpuAcFamilyPacker {
                 cbPcSide.add(pcCode);
             } else if (b2 != null) {                       // side 1 open: p2/q2 at bus2, variable v2
                 obElemOf[br.getNum()] = obIn.size();
-                obIn.add(new double[] {pi.getY(), pi.getKsi(), pi.getG1(), pi.getB1(), pi.getG2(), pi.getB2(), pi.getR1()});
+                obIn.add(new double[] {pi.getY(), pi.getKsi(), pi.getG1(), pi.getB1(), pi.getG2(), pi.getB2(),
+                         pi.getR1()});
                 obIdx.add(new int[] {-1, -1,
                     pRow[b2.getNum()], qRow[b2.getNum()],
                     -1, vCol[b2.getNum()]});
                 obQAlt.add(new int[] {-1, qRowAlt[b2.getNum()]});
             } else if (b1 != null) {                       // side 2 open: p1/q1 at bus1, variable v1
                 obElemOf[br.getNum()] = obIn.size();
-                obIn.add(new double[] {pi.getY(), pi.getKsi(), pi.getG1(), pi.getB1(), pi.getG2(), pi.getB2(), pi.getR1()});
+                obIn.add(new double[] {pi.getY(), pi.getKsi(), pi.getG1(), pi.getB1(), pi.getG2(), pi.getB2(),
+                         pi.getR1()});
                 obIdx.add(new int[] {
                     pRow[b1.getNum()], qRow[b1.getNum()],
                     -1, -1,
@@ -200,34 +202,8 @@ final class GpuAcFamilyPacker {
         // BASE-OPEN closable branches (batch SA only): appended AFTER the normal closed branches so
         // every normal element index is unchanged; the element mapper mirrors this enumeration.
         List<Integer> baseOpenCb = new ArrayList<>();
-        if (!baseOpenBranchIds.isEmpty()) {
-            for (LfBranch br : network.getBranches()) {
-                if (!br.isDisabled() || !baseOpenBranchIds.contains(br.getId())
-                        || br.isZeroImpedance(LoadFlowModel.AC)) {
-                    continue;
-                }
-                LfBus b1 = br.getBus1();
-                LfBus b2 = br.getBus2();
-                if (b1 == null || b2 == null || b1.isDisabled() || b2.isDisabled()) {
-                    continue;                                // dead-island reconnection — CPU scope
-                }
-                PiModel pi = br.getPiModel();
-                int ph1 = phiCol[b1.getNum()];
-                int v1 = vCol[b1.getNum()];
-                int ph2 = phiCol[b2.getNum()];
-                int v2 = vCol[b2.getNum()];
-                baseOpenCb.add(cbIn.size());
-                cbIn.add(new double[] {pi.getY(), pi.getG1(), pi.getG2(), pi.getB1(), pi.getB2(),
-                    pi.getKsi(), pi.getR1(), pi.getA1()});
-                cbIdx.add(new int[] {pRow[b1.getNum()], qRow[b1.getNum()], pRow[b2.getNum()], qRow[b2.getNum()],
-                    ph1, v1, ph2, v2, -1, -1,                // no control columns on a disabled branch
-                    qRowAlt[b1.getNum()], qRowAlt[b2.getNum()]});    // [10],[11]: alternate Q rows (dyn reloc)
-                cbPcSide.add(-1);                            // EVERY cb element needs its entry: this list
-                // was NOT appended here when cbPcSide landed (d131ec7), so base-open runs read PAST
-                // the array in native code — the 4x SIGSEGV-at-buildStructure+0xe43 root cause,
-                // caught 2026-09-06 by the JNI input validation ("bad cbPcSide at elem 4")
-            }
-        }
+        packBaseOpenClosedBranches(baseOpenBranchIds, network, phiCol, vCol, baseOpenCb, cbIn, pRow, qRow, qRowAlt,
+                                   cbIdx, cbPcSide);
 
         // BASE-OPEN closable ZERO-IMPEDANCE branches (retained-open switches, batch SA only): a
         // DISABLED zi branch keeps its DUMMY_TARGET_P/Q identity rows ACTIVE (dummies pinned 0) and
@@ -239,33 +215,8 @@ final class GpuAcFamilyPacker {
         // per-scenario target override needed.
         List<Integer> baseOpenZi = new ArrayList<>();
         List<Integer> baseOpenZiNums = new ArrayList<>();
-        if (!baseOpenZiBranchIds.isEmpty()) {
-            for (LfBranch br : network.getBranches()) {
-                if (!br.isDisabled() || !baseOpenZiBranchIds.contains(br.getId())
-                        || !br.isZeroImpedance(LoadFlowModel.AC)) {
-                    continue;
-                }
-                LfBus b1 = br.getBus1();
-                LfBus b2 = br.getBus2();
-                if (b1 == null || b2 == null || b1.isDisabled() || b2.isDisabled()) {
-                    continue;                                // dead-island reconnection — CPU scope
-                }
-                int dpRow = dummyPCol[br.getNum()];
-                int dqRow = dummyQCol[br.getNum()];
-                if (dpRow < 0 || dqRow < 0) {
-                    continue;                                // no dummy rows — CPU scope
-                }
-                int b1n = b1.getNum();
-                int b2n = b2.getNum();
-                baseOpenZi.add(ziIn.size());
-                baseOpenZiNums.add(br.getNum());
-                ziNums.add(br.getNum());
-                ziIn.add(new double[] {PiModel.R2 / br.getPiModel().getR1()});
-                ziIdx.add(new int[] {phiCol[b1n], qRow[b1n], phiCol[b2n], qRow[b2n], dpRow, dqRow,
-                    vCol[b1n], vCol[b2n], phiCol[b1n], phiCol[b2n], 1});
-                ziQAlt.add(new int[] {qRowAlt[b1n], qRowAlt[b2n]});
-            }
-        }
+        packBaseOpenZeroImpedanceBranches(baseOpenZiBranchIds, network, dummyPCol, dummyQCol, baseOpenZi, ziIn,
+                                          baseOpenZiNums, ziNums, phiCol, qRow, vCol, ziIdx, qRowAlt, ziQAlt);
 
         List<double[]> shIn = new ArrayList<>();
         List<int[]> shIdx = new ArrayList<>();
@@ -324,6 +275,81 @@ final class GpuAcFamilyPacker {
         return new Packs(cbIn, cbIdx, obIn, obIdx, shIn, shIdx, hvIn, hvIdx, ziIn, ziIdx, ziNums,
                 baseOpenCb, baseOpenZi, baseOpenZiNums, cbElemOf, obElemOf, shElemOf, cbPcSide,
                 vdlIn, vdlIdx, obQAlt, ziQAlt);
+    }
+
+    /** BASE-OPEN closable branches (batch SA only), appended after the normal closed branches so every normal element index is unchanged. */
+    private static void packBaseOpenClosedBranches(final Set<String> baseOpenBranchIds, final LfNetwork network,
+                                                   final int[] phiCol, final int[] vCol,
+                                                   final List<Integer> baseOpenCb, final List<double[]> cbIn,
+                                                   final int[] pRow, final int[] qRow, final int[] qRowAlt,
+                                                   final List<int[]> cbIdx, final List<Integer> cbPcSide) {
+        if (!baseOpenBranchIds.isEmpty()) {
+            for (LfBranch br : network.getBranches()) {
+                if (!br.isDisabled() || !baseOpenBranchIds.contains(br.getId())
+                        || br.isZeroImpedance(LoadFlowModel.AC)) {
+                    continue;
+                }
+                LfBus b1 = br.getBus1();
+                LfBus b2 = br.getBus2();
+                if (b1 == null || b2 == null || b1.isDisabled() || b2.isDisabled()) {
+                    continue;                                // dead-island reconnection — CPU scope
+                }
+                PiModel pi = br.getPiModel();
+                int ph1 = phiCol[b1.getNum()];
+                int v1 = vCol[b1.getNum()];
+                int ph2 = phiCol[b2.getNum()];
+                int v2 = vCol[b2.getNum()];
+                baseOpenCb.add(cbIn.size());
+                cbIn.add(new double[] {pi.getY(), pi.getG1(), pi.getG2(), pi.getB1(), pi.getB2(),
+                    pi.getKsi(), pi.getR1(), pi.getA1()});
+                cbIdx.add(new int[] {pRow[b1.getNum()], qRow[b1.getNum()], pRow[b2.getNum()], qRow[b2.getNum()],
+                    ph1, v1, ph2, v2, -1, -1,                // no control columns on a disabled branch
+                    qRowAlt[b1.getNum()], qRowAlt[b2.getNum()]});    // [10],[11]: alternate Q rows (dyn reloc)
+                cbPcSide.add(-1);                            // EVERY cb element needs its entry: this list
+                // was NOT appended here when cbPcSide landed (d131ec7), so base-open runs read PAST
+                // the array in native code — the 4x SIGSEGV-at-buildStructure+0xe43 root cause,
+                // caught 2026-09-06 by the JNI input validation ("bad cbPcSide at elem 4")
+            }
+        }
+    }
+
+    /** BASE-OPEN closable zero-impedance branches (retained-open switches, batch SA only), appended after the base couplers. */
+    private static void packBaseOpenZeroImpedanceBranches(final Set<String> baseOpenZiBranchIds,
+                                                          final LfNetwork network, final int[] dummyPCol,
+                                                          final int[] dummyQCol, final List<Integer> baseOpenZi,
+                                                          final List<double[]> ziIn,
+                                                          final List<Integer> baseOpenZiNums,
+                                                          final List<Integer> ziNums, final int[] phiCol,
+                                                          final int[] qRow, final int[] vCol,
+                                                          final List<int[]> ziIdx, final int[] qRowAlt,
+                                                          final List<int[]> ziQAlt) {
+        if (!baseOpenZiBranchIds.isEmpty()) {
+            for (LfBranch br : network.getBranches()) {
+                if (!br.isDisabled() || !baseOpenZiBranchIds.contains(br.getId())
+                        || !br.isZeroImpedance(LoadFlowModel.AC)) {
+                    continue;
+                }
+                LfBus b1 = br.getBus1();
+                LfBus b2 = br.getBus2();
+                if (b1 == null || b2 == null || b1.isDisabled() || b2.isDisabled()) {
+                    continue;                                // dead-island reconnection — CPU scope
+                }
+                int dpRow = dummyPCol[br.getNum()];
+                int dqRow = dummyQCol[br.getNum()];
+                if (dpRow < 0 || dqRow < 0) {
+                    continue;                                // no dummy rows — CPU scope
+                }
+                int b1n = b1.getNum();
+                int b2n = b2.getNum();
+                baseOpenZi.add(ziIn.size());
+                baseOpenZiNums.add(br.getNum());
+                ziNums.add(br.getNum());
+                ziIn.add(new double[] {PiModel.R2 / br.getPiModel().getR1()});
+                ziIdx.add(new int[] {phiCol[b1n], qRow[b1n], phiCol[b2n], qRow[b2n], dpRow, dqRow,
+                    vCol[b1n], vCol[b2n], phiCol[b1n], phiCol[b2n], 1});
+                ziQAlt.add(new int[] {qRowAlt[b1n], qRowAlt[b2n]});
+            }
+        }
     }
 
     /** Voltage-dependent load model (ZIP/exponential): one vdl entry per NON-CONSTANT exp term,

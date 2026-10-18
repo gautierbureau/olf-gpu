@@ -12,6 +12,7 @@ import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcActivation;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 import com.powsybl.openloadflow.ac.solver.NewtonRaphsonParameters;
+import com.powsybl.openloadflow.ac.solver.gpu.BatchSolveNative;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.BatchConfig;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchSkips;
 import com.powsybl.openloadflow.equations.EquationSystem;
@@ -174,7 +175,7 @@ public final class VoltageMonitoring {
             }
         }
         int[] rlStateOut = new int[chunkSize * nrl];
-        double[][] r2 = GpuAcNewtonSolver.solveBatchContext(handle, baseState, baseTargets,
+        double[][] r2 = BatchSolveNative.solveBatchContext(handle, baseState, baseTargets,
                 rowModePerScenario, baseRowMode, disabledMask,
                 ovIdx.stream().mapToInt(Integer::intValue).toArray(),
                 ovVal.stream().mapToDouble(Double::doubleValue).toArray(),

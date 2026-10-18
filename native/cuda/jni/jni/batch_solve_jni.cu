@@ -24,7 +24,7 @@ static long long packNs = 0;
 static long long calls = 0;
 
 extern "C" JNIEXPORT jlong JNICALL
-Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_createBatchContext(
+OLF_JNI(ac_solver_gpu, BatchSolveNative, createBatchContext)(
         JNIEnv* env, jclass, jlong structureHandle, jint nScenarios, jint mode,
         jintArray jrlVrow, jdoubleArray jrlMinQ, jdoubleArray jrlMaxQ, jdoubleArray jrlLoadQ,
         jdoubleArray jrlVtarget, jbyteArray jrlMonitored, jdoubleArray jrowSlope,
@@ -93,7 +93,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_createBa
 }
 
 extern "C" JNIEXPORT jobjectArray JNICALL
-Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_solveBatchContext(
+OLF_JNI(ac_solver_gpu, BatchSolveNative, solveBatchContext)(
         JNIEnv* env, jclass, jlong handle, jdoubleArray jx0Base, jdoubleArray jtargetBase,
         jobjectArray jrowMode, jintArray jbaseRowMode, jobjectArray jdisabledMask,
         jintArray jtargetOverrideIndex, jdoubleArray jtargetOverrideValue,
@@ -431,7 +431,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_solveBat
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_destroyBatchContext(
+OLF_JNI(ac_solver_gpu, BatchSolveNative, destroyBatchContext)(
         JNIEnv*, jclass, jlong handle) {
     delete reinterpret_cast<BatchSolverContext*>(handle);
 }

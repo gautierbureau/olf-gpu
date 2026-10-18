@@ -26,6 +26,7 @@ import com.powsybl.openloadflow.ac.outerloop.gpu.SecondaryVoltageControlLoop;
 import com.powsybl.openloadflow.ac.outerloop.gpu.VoltageMonitoring;
 import com.powsybl.openloadflow.ac.outerloop.gpu.VoltageMonitoringNative;
 import com.powsybl.openloadflow.ac.solver.NewtonRaphsonParameters;
+import com.powsybl.openloadflow.ac.solver.gpu.BatchSolveNative;
 import com.powsybl.openloadflow.ac.solver.gpu.NewtonSettingsNative;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfShunt;
@@ -1110,7 +1111,7 @@ final class GpuBatchChunkSolver {
                         DistributedSlackNative.setBatchGenAnchor(handle, pairPhase ? dgAnchor : null,
                                 pairPhase ? null : ChunkArrays.flat(cl.genPreMovesBySlot, chunkSize, ngen), pairPhase ? dgSeedAnchor : null);
                     }
-                    double[][] chunkResults = GpuAcNewtonSolver.solveBatchContext(handle, baseState, baseTargets,
+                    double[][] chunkResults = BatchSolveNative.solveBatchContext(handle, baseState, baseTargets,
                             rs.rowModePerScenario, baseRowMode, rs.disabledMask, targetOverrideIndex, targetOverrideValue,
                             rs.dsOvBus, rs.dsOvFactorDelta, rs.dsOvBaseDelta, rs.dsOvMaxDelta, rs.dsOvMinDelta, dsAnchorShift, dsSlackShift,
                             ChunkArrays.intsOrNull(cl.rlVtOvIdx),
@@ -1199,7 +1200,7 @@ final class GpuBatchChunkSolver {
                                 ReactiveLimitsNative.setBatchRlUnpin(handle, dec.unpinPairs(), dec.unpinTargets());
                             }
                             GpuAcNewtonSolver.setBatchDriverResume(handle, dec.hostChanged());
-                            chunkResults = GpuAcNewtonSolver.solveBatchContext(handle, baseState, baseTargets,
+                            chunkResults = BatchSolveNative.solveBatchContext(handle, baseState, baseTargets,
                                     rs.rowModePerScenario, baseRowMode, rs.disabledMask, targetOverrideIndex, targetOverrideValue,
                                     rs.dsOvBus, rs.dsOvFactorDelta, rs.dsOvBaseDelta, rs.dsOvMaxDelta, rs.dsOvMinDelta, dsAnchorShift, dsSlackShift,
                                     ChunkArrays.concatInts(cl.rlVtOvIdx, dec.rlVtSlotIdx()), ChunkArrays.concatDoubles(cl.rlVtOvVal, dec.rlVtValues()),

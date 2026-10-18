@@ -576,13 +576,13 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                 // only changed element PARAMETERS (tap r1/a1, shunt b) is VALUES -> a cheap in-place
                 // pack re-upload reusing the analysis; an unchanged data is a no-op (context reused).
                 if (!data.sameStructureAs(cachedData)) {
-                    GpuAcNewtonSolver.destroyBatchContext(context.handle.getAndSet(0));
+                    BatchSolveNative.destroyBatchContext(context.handle.getAndSet(0));
                     // BATCH-OF-1: the load flow runs on a BATCH context of one scenario, so per-row
                     // PER_EQUATION_TYPE criteria, slope-SVC (mode 2), continuous phase (mode 3) and
                     // the vdl/ZIP fills come from the batch pipeline instead of being ported twice.
                     // The shared structure comes from the per-extraction cache — the batched SA
                     // building its context from the SAME extraction reuses it device-side.
-                    context.handle.set(GpuAcNewtonSolver.createBatchContext(GpuAcStructures.handle(n, data), 1,
+                    context.handle.set(BatchSolveNative.createBatchContext(GpuAcStructures.handle(n, data), 1,
                             robustModeForRun ? GpuBatchContextCache.MODE_ROBUST : GpuBatchContextCache.resolveBatchMode(),
                             data.rlVrow(), data.rlMinQ(), data.rlMaxQ(), data.rlLoadQ(), data.rlVtarget(),
                             data.rlMonitored(), data.rowSlope(),
@@ -919,7 +919,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                         + "slackDistributionFailureBehavior " + acLoadFlowParameters.getSlackDistributionFailureBehavior()
                         + "; the solve goes to the CPU");
             }
-            double[] out = GpuAcNewtonSolver.solveBatchContext(context.handle.get(),
+            double[] out = BatchSolveNative.solveBatchContext(context.handle.get(),
                     x0, target, new int[][] {activation.rowMode()}, activation.rowMode(),
                     elementMask,
                     ovIdx, ovVal,
@@ -951,7 +951,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                     System.err.println("GPU_BASE_ROBUST_RETRY status=-2 -> mode 6 (pivoted single matrix)");
                 }
                 robustModeForRun = true;
-                GpuAcNewtonSolver.destroyBatchContext(context.handle.getAndSet(0));
+                BatchSolveNative.destroyBatchContext(context.handle.getAndSet(0));
                 cachedData = null;
                 invalidation.structureDirty = true;
                 return runImpl(voltageInitializer, reportNode, true);
@@ -1124,7 +1124,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
             lastRunOnDevice = false;
             driverFallbackForRun = true;
             // the native context may be mid-iteration inconsistent — rebuild next run
-            GpuAcNewtonSolver.destroyBatchContext(context.handle.getAndSet(0));
+            BatchSolveNative.destroyBatchContext(context.handle.getAndSet(0));
             cachedData = null;
             invalidation.structureDirty = true;
             if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
@@ -1320,7 +1320,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                 }
             }
             // Resume the driver — solveBatchContext continues from its paused position
-            out = GpuAcNewtonSolver.solveBatchContext(context.handle.get(),
+            out = BatchSolveNative.solveBatchContext(context.handle.get(),
                     equationSystem.getStateVector().get().clone(), target,
                     new int[][] {activation.rowMode()}, activation.rowMode(),
                     elementMask,
@@ -1364,7 +1364,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
             case LINE_SEARCH -> 1;
             case MAX_VOLTAGE_CHANGE -> 2;
         };
-        double[] out = GpuAcNewtonSolver.solveBatchContext(context.handle.get(),
+        double[] out = BatchSolveNative.solveBatchContext(context.handle.get(),
                 x0, target, new int[][] {activation.rowMode()}, activation.rowMode(),
                 elementMask,
                 new int[0], new double[0],

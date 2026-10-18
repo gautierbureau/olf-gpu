@@ -12,6 +12,7 @@ import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcStructures;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.StructureNative;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DeviceLoopTables;
+import com.powsybl.openloadflow.ac.solver.gpu.BatchSolveNative;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -138,12 +139,12 @@ public final class GpuBatchContextCache {
                 System.err.printf("CONTEXT_EVICT cached chunk=%d -> requested chunk=%d (a cuDSS ANALYSIS is "
                         + "paid again)%n", cachedContext.chunkSize, chunkSize);
             }
-            GpuAcNewtonSolver.destroyBatchContext(cachedContext.handle);
+            BatchSolveNative.destroyBatchContext(cachedContext.handle);
             cachedContext = null;
         }
         // the shared structure comes from the per-extraction cache — when the base load flow ran
         // on the GPU with the same extraction (GpuAcDataCache hand-off), this is a device-side hit
-        long handle = GpuAcNewtonSolver.createBatchContext(structure, chunkSize, mode,
+        long handle = BatchSolveNative.createBatchContext(structure, chunkSize, mode,
                 data.rlVrow(), data.rlMinQ(), data.rlMaxQ(), data.rlLoadQ(), data.rlVtarget(), data.rlMonitored(), data.rowSlope(),
                 data.dsPhiRow(), data.dsFactor(), data.dsSlackPhiRow(), data.dsSlackTargetP(),
                 data.dsBaseTargetP(), data.dsMaxDelta(), data.dsMinDelta(),
@@ -158,7 +159,7 @@ public final class GpuBatchContextCache {
     /** Free the cached batched native context, if any. Safe to call repeatedly. */
     public static synchronized void clearContextCache() {
         if (cachedContext != null) {
-            GpuAcNewtonSolver.destroyBatchContext(cachedContext.handle);
+            BatchSolveNative.destroyBatchContext(cachedContext.handle);
             cachedContext = null;
         }
         recommendedFor = null;                               // a failed solve may have been the size's fault

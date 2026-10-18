@@ -8,6 +8,7 @@
 package com.powsybl.openloadflow.ac.equations.vector.gpu;
 
 import com.powsybl.openloadflow.ac.outerloop.gpu.ReactiveLimitsNative;
+import com.powsybl.openloadflow.ac.solver.gpu.BatchSolveNative;
 import com.powsybl.openloadflow.ac.solver.gpu.NewtonSettingsNative;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.ControlReHoming;
 
@@ -145,62 +146,20 @@ public final class GpuAcNewtonSolver {
     public static double[] solveOnStructure(long structure, double[] x0, double[] target, int[] rowMode,
                                             int maxIter, double tol, int lsMode, double maxDv, double maxDphi,
                                             int[] varType) {
-        long handle = createBatchContext(structure, 1, com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchContextCache.MODE_UBATCH,
+        long handle = BatchSolveNative.createBatchContext(structure, 1, com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchContextCache.MODE_UBATCH,
                 new int[0], new double[0], new double[0], new double[0], new double[0], new byte[0], new double[x0.length],
                 new int[0], new double[0], -1, 0.0, new double[0], new double[0], new double[0],
                 0, new double[0], new double[0], 0, 0);
         try {
-            return solveBatchContext(handle, x0, target, new int[][] {rowMode}, rowMode, new boolean[1][0],
+            return BatchSolveNative.solveBatchContext(handle, x0, target, new int[][] {rowMode}, rowMode, new boolean[1][0],
                     new int[0], new double[0], new int[0], new double[0], new double[0], new double[0], new double[0], null, null, null, null, null, null, null, null,
                     maxIter, tol, 0.0, 0.0, 0.0, lsMode, maxDv, maxDphi, varType, null, null, null, null, null, null, null, 0,
                     com.powsybl.openloadflow.ac.outerloop.ReactiveLimitsOuterLoop.MAX_SWITCH_PQ_PV_DEFAULT_VALUE,
                     0, 0, 0, null, null)[0];
         } finally {
-            destroyBatchContext(handle);
+            BatchSolveNative.destroyBatchContext(handle);
         }
     }
-
-    /**
-     * Build a CACHED solver context for BATCHED N-1 security analysis on a shared structure:
-     * multiple scenarios (post-contingency states) against the same network STRUCTURE and
-     * superset pattern. Per-scenario element disablement is encoded as device masks; converged
-     * scenarios can stop early. cuDSS's symbolic analysis is done once over the superset
-     * pattern. The pattern / families / destination arrays are NOT duplicated: they live in
-     * the structure, built once per extraction — only the per-scenario state and the reactive-limits /
-     * distributed-slack outer-loop packs are owned here.
-     *
-     * @param structureHandle a structure from {@link #createStructure}
-     * @param nScenarios      number of contingency scenarios to solve in parallel
-     * @return an opaque native handle for batched solves; release with {@link #destroyBatchContext}
-     */
-    public static native long createBatchContext(long structureHandle, int nScenarios, int mode,
-                                                  int[] rlVrow, double[] rlMinQ, double[] rlMaxQ, double[] rlLoadQ,
-                                                  double[] rlVtarget, byte[] rlMonitored, double[] rowSlope,
-                                                  int[] dsPhiRow, double[] dsFactor,
-                                                  int dsSlackPhiRow, double dsSlackTargetP,
-                                                  double[] dsBaseTargetP, double[] dsMaxDelta, double[] dsMinDelta,
-                                                  int dsMode, double[] dsMarginUp, double[] dsMarginDown,
-                                                  double dsSlackMarginUp, double dsSlackMarginDown);
-
-    public static native double[][] solveBatchContext(long handle, double[] x0Base, double[] targetBase,
-                                                       int[][] rowMode, int[] baseRowMode, boolean[][] disabledElementMask,
-                                                       int[] targetOverrideIndex, double[] targetOverrideValue,
-                                                       int[] dsOverrideBus, double[] dsOverrideFactorDelta,
-                                                       double[] dsOverrideBaseDelta, double[] dsOverrideMaxDelta,
-                                                       double[] dsOverrideMinDelta, double[] dsAnchorShift,
-                                                       double[] dsSlackShift,
-                                                       int[] rlVtOvSlotIdx, double[] rlVtOvVal,
-                                                       int[] rlQOvSlotEntry, double[] rlQOvMinMax,
-                                                       int[] cvOvSlotEntry, double[] cvOvStepScale,
-                                                       int maxIter, double tol,
-                                                       double reactiveLimitTol, double slackDistTol, double convEpsPerEq,
-                                                       int lsMode, double maxDv, double maxDphi, int[] varType,
-                                                       double[] x0PerScenario,
-                                                       int[] shuntOvSlotElem, double[] shuntOvGb,
-                                                       int[] rlStateIn, int[] rlStateOut,
-                                                       int[] r1OvSlotElem, double[] r1OvVal,
-                                                       int maxOuterIterations, int maxPqPvSwitch, int dsRejectResidual, int skipRlPhase,
-                                                       int nziBase, int[] ziOnSlotElem, int[] ziOffSlotElem);
 
     /** Read back the batch context's per-scenario TARGET buffer (n * nScenarios) after a solve — the device
      *  outer loops mutate targets in place; the strategy/pair phase re-anchors its slack distribution at the
@@ -305,8 +264,6 @@ public final class GpuAcNewtonSolver {
         }
     }
 
-    public static native void destroyBatchContext(long handle);
-
     /**
      * Solves {@code Aᵀ x = b} for an explicit CSR matrix {@code A}, by building the transpose and
      * factorizing it. Validation / measurement entry for the batched-adjoint work (docs/tasks.md #40
@@ -358,7 +315,7 @@ public final class GpuAcNewtonSolver {
                 noPcSide(cbIdx.length / 12), new double[0], new int[0], new int[] {0}, new int[0],
                 noQAlt(obIdx.length / 6), noQAlt(ziIdx.length / 11), new int[0], new int[0], noDepRows(n));
         try {
-            long handle = createBatchContext(structure, nScenarios, mode,
+            long handle = BatchSolveNative.createBatchContext(structure, nScenarios, mode,
                     rlVrow, rlMinQ, rlMaxQ, rlLoadQ, rlVtarget, new byte[rlVrow.length], new double[x0Base.length],
                     dsPhiRow, dsFactor, dsSlackPhiRow, dsSlackTargetP,
                     dsBaseTargetP, dsMaxDelta, dsMinDelta, 0, new double[0], new double[0], 0, 0);
@@ -377,13 +334,13 @@ public final class GpuAcNewtonSolver {
                 }
                 ReactiveLimitsNative.setBatchRlElection(handle, new double[rlVrow.length], pRow, new double[rlVrow.length], idRank);
                 // one-shot: no per-scenario gen-override flips, so any scenario's row mode IS the base row mode
-                return solveBatchContext(handle, x0Base, targetBase, rowMode, rowMode[0], disabledElementMask,
+                return BatchSolveNative.solveBatchContext(handle, x0Base, targetBase, rowMode, rowMode[0], disabledElementMask,
                         new int[0], new double[0], new int[0], new double[0], new double[0], new double[0], new double[0], null, null, null, null, null, null, null, null,
                         maxIter, tol, reactiveLimitTol, slackDistTol, 0.0, 0, 0.0, 0.0, null, null, null, null, null, null, null, null, 0,
                         com.powsybl.openloadflow.ac.outerloop.ReactiveLimitsOuterLoop.MAX_SWITCH_PQ_PV_DEFAULT_VALUE,   // OLF's cap: 0 means never switch back
                         0, 0, 0, null, null);
             } finally {
-                destroyBatchContext(handle);
+                BatchSolveNative.destroyBatchContext(handle);
             }
         } finally {
             StructureNative.destroyStructure(structure);

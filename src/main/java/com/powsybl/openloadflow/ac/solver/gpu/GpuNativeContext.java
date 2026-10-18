@@ -27,7 +27,7 @@ final class GpuNativeContext implements Runnable {
 
     @Override
     public void run() {
-        GpuAcNewtonSolver.destroyBatchContext(handle.getAndSet(0));
+        BatchSolveNative.destroyBatchContext(handle.getAndSet(0));
         if (removeListeners != null) {
             removeListeners.run();                       // dead-flags only — never mutates listener lists
         }

@@ -22,6 +22,7 @@
 // i = hypot(p, q) / v but s = sqrt(p*p + q*q), which are not the same function in floating point.
 #include <cuda_runtime.h>
 #include <jni.h>
+#include "jni/olf_jni.h"
 #include <cstdio>
 #include <cstdlib>
 #include <vector>
@@ -216,7 +217,7 @@ __global__ void screenBuses(int nBuses, int nScenarios, int n, int capacity, dou
 extern "C" {
 
 JNIEXPORT jlong JNICALL
-Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_uploadViolationTable(
+OLF_JNI(sa_gpu, ViolationScreenNative, uploadViolationTable)(
         JNIEnv* env, jclass,
         jintArray jBrFamily, jintArray jBrElem, jintArray jBrGroupStart, jintArray jBrGroupEnd,
         jintArray jGrpSide, jintArray jGrpQty, jintArray jGrpLimStart, jintArray jGrpLimEnd,
@@ -258,7 +259,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_uploadVi
 }
 
 JNIEXPORT void JNICALL
-Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_destroyViolationTable(
+OLF_JNI(sa_gpu, ViolationScreenNative, destroyViolationTable)(
         JNIEnv*, jclass, jlong handle) {
     delete reinterpret_cast<ViolationTable*>(handle);
 }
@@ -319,7 +320,7 @@ static bool runChunk(JNIEnv* env, ViolationTable* t, jdoubleArray jStates, jint 
  * a count ABOVE the capacity means the scenario overflowed and the host must scan it in full.
  */
 JNIEXPORT jintArray JNICALL
-Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_screenViolationsBatch(
+OLF_JNI(sa_gpu, ViolationScreenNative, screenViolationsBatch)(
         JNIEnv* env, jclass, jlong handle, jdoubleArray jStates, jint nScenarios, jint n,
         jdouble band, jint capacity) {
     auto* t = reinterpret_cast<ViolationTable*>(handle);

@@ -191,7 +191,7 @@ final class GpuViolationScreen {
                     double[] state = states.get(ids.get(from + i));
                     System.arraycopy(state, 0, flat, i * n, Math.min(n, state.length));
                 }
-                int[] result = GpuAcNewtonSolver.screenViolationsBatch(table, flat, count, n, BAND, DEVICE_CAPACITY);
+                int[] result = ViolationScreenNative.screenViolationsBatch(table, flat, count, n, BAND, DEVICE_CAPACITY);
                 if (result == null) {
                     for (int i = from; i < to; i++) {        // device refused the chunk — host screen
                         out.put(ids.get(i), screen(states.get(ids.get(i))));
@@ -217,7 +217,7 @@ final class GpuViolationScreen {
                 }
             }
         } finally {
-            GpuAcNewtonSolver.destroyViolationTable(table);
+            ViolationScreenNative.destroyViolationTable(table);
             deviceTable = 0;
         }
         return out;
@@ -277,7 +277,7 @@ final class GpuViolationScreen {
             busHigh[i] = table.busHighLimit(i);
             busLow[i] = table.busLowLimit(i);
         }
-        deviceTable = GpuAcNewtonSolver.uploadViolationTable(family, branchElem, groupStart, groupEnd,
+        deviceTable = ViolationScreenNative.uploadViolationTable(family, branchElem, groupStart, groupEnd,
                 groupSide, groupQuantity, groupLimitStart, groupLimitEnd, thresholds,
                 busVRow, busHigh, busLow, cbIn, cbIdx, obIn, obIdx);
         return deviceTable;

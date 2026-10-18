@@ -161,37 +161,6 @@ public final class GpuAcNewtonSolver {
         }
     }
 
-    /**
-     * Upload the run's limit thresholds and the branch model they are compared against, once per
-     * run: a contingency cannot change a threshold, so this outlives every chunk. Returns 0 when the
-     * upload failed (the caller then screens on the host).
-     *
-     * <p>Groups and limits are flat, in the host table's order, so a record is simply the limit's
-     * index. See {@code GpuViolationScreen} for the layout and {@code olf_gpu_violations.cu} for
-     * why the kernel screens rather than decides.
-     */
-    public static native long uploadViolationTable(
-            int[] branchFamily, int[] branchElem, int[] branchGroupStart, int[] branchGroupEnd,
-            int[] groupSide, int[] groupQuantity, int[] groupLimitStart, int[] groupLimitEnd,
-            double[] limitThreshold,
-            int[] busVRow, double[] busHighLimit, double[] busLowLimit,
-            double[] cbIn, int[] cbIdx, double[] obIn, int[] obIdx);
-
-    /**
-     * Screen a chunk of post-contingency states against an uploaded table.
-     *
-     * @param states {@code nScenarios * n} states, scenario-major
-     * @param band relative slack on every threshold, so the screen can only over-emit
-     * @param capacity records per scenario
-     * @return {@code nScenarios} counts, then {@code nScenarios * capacity} records; a count ABOVE
-     *         the capacity means that scenario overflowed and must be scanned on the host
-     */
-    public static native int[] screenViolationsBatch(long tableHandle, double[] states, int nScenarios,
-                                                     int n, double band, int capacity);
-
-    /** Release a violation table (idempotent for handle 0). */
-    public static native void destroyViolationTable(long tableHandle);
-
     /** Installs the four arrays of GpuAcActivationExtractor.extractRowCriteria, or clears every threshold. */
     public static void installRowCriteria(long handle, double[][] rowCriteria) {
         NewtonSettingsNative.setBatchRowCriteria(handle, rowCriteria != null ? rowCriteria[0] : null, rowCriteria != null ? rowCriteria[1] : null);

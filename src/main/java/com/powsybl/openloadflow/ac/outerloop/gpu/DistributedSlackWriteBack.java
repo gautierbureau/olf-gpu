@@ -5,7 +5,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/.
  * SPDX-License-Identifier: MPL-2.0
  */
-package com.powsybl.openloadflow.ac.solver.gpu;
+package com.powsybl.openloadflow.ac.outerloop.gpu;
 
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
@@ -27,7 +27,7 @@ import java.util.Map;
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
-final class DistributedSlackWriteBack {
+public final class DistributedSlackWriteBack {
 
     private DistributedSlackWriteBack() {
     }
@@ -39,7 +39,7 @@ final class DistributedSlackWriteBack {
      *  captured at the last check that actually DISTRIBUTED, not the sub-tolerance one a STABLE check
      *  measures. A solve whose DistributedSlack phase never fired leaves the generators alone.
      *  Returns what it distributed (pu, see GpuNewtonRaphson#lastDistributedActivePower), NaN when nothing. */
-    static double writeBack(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> equationSystem, long handle,
+    public static double writeBack(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> equationSystem, long handle,
                             GpuDsParams dsParams,
                             Map<LfLoad, Double> loadAnchorTargetP,
                             double[] deviceTargets, double[] genCum, double[] retain, GpuAcData data) {
@@ -129,7 +129,7 @@ final class DistributedSlackWriteBack {
     }
 
     /** Each load's target P now: the anchor a load-based distribution moves the loads from. */
-    static Map<LfLoad, Double> captureLoadAnchors(LfNetwork network) {
+    public static Map<LfLoad, Double> captureLoadAnchors(LfNetwork network) {
         Map<LfLoad, Double> anchors = new java.util.IdentityHashMap<>();
         for (LfBus bus : network.getBuses()) {
             for (LfLoad load : bus.getLoads()) {

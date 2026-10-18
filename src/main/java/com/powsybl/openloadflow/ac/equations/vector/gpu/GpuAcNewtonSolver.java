@@ -404,24 +404,6 @@ public final class GpuAcNewtonSolver {
     /** Absolute target writes at flat {@code (scenario * n + row)} positions, for a host-owned loop. */
     public static native void setBatchTargetDeltas(long handle, int[] rows, double[] values);
 
-    /** Install the FLOW-OBSERVED incremental controllers (RPC / incremental phase) for the in-kernel
-     *  loops (OLF orders 7 and 9); see IncrementalFlowControl.uploadToDevice. Returns 1 when
-     *  the kernel loops own them. */
-    public static native int setBatchFlowControllers(long handle, int[] kind, int[] pinRow, int[] pinCol, int[] side,
-            double[] targetValue, double[] halfDb, int[] elem, int[] ctlElem, int[] tapPtr, double[] tapData,
-            int[] baseTap, int[] maxShift);
-
-    /** Per (scenario, flow controller): the tap the driver left — null without the table. */
-    public static native int[] readBatchFlowTaps(long handle);
-
-    /** Install the CONTINUOUS phase controllers for the in-kernel PhaseControl phase (OLF order 7);
-     *  see ContinuousPhaseControl.uploadToDevice. Returns 1 when the kernel loop owns them. */
-    public static native int setBatchContinuousPhase(long handle, int[] kind, int[] a1Row, int[] side, double[] limit,
-            int[] elem, int[] tapPtr, double[] tapData, int[] baseTap);
-
-    /** Per (scenario, continuous phase controller): the tap the driver left — null without the table. */
-    public static native int[] readBatchContinuousPhaseTaps(long handle);
-
     /** The run's linear-solver settings (GpuLoadFlowParameters.install): -1 reorder / pivot type = AUTO, NaN threshold =
      *  cuDSS's own. Read by every context built afterwards and by every solve's iterative refinement. */
     public static native void setLinearSolverSettings(int reorder, int matching, int pivotType, double pivotThreshold,

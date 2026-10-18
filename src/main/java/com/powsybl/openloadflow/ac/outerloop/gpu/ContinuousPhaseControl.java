@@ -163,7 +163,7 @@ public final class ContinuousPhaseControl {
      *  kernel loop OWNS them (the host orchestrator must then stay off). */
     public static boolean uploadToDevice(long handle, List<Ctl> ctls) {
         if (ctls == null || ctls.isEmpty()) {
-            com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.setBatchContinuousPhase(handle,
+            PhaseControlNative.setBatchContinuousPhase(handle,
                     null, null, null, null, null, null, null, null);
             return false;
         }
@@ -192,7 +192,7 @@ public final class ContinuousPhaseControl {
             baseTap[c] = ctl.baseTapIdx();
         }
         tapPtr[nc] = tapData.size() / 8;
-        boolean owned = com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.setBatchContinuousPhase(handle,
+        boolean owned = PhaseControlNative.setBatchContinuousPhase(handle,
                 kind, a1Row, side, limit, elem, tapPtr, tapData.stream().mapToDouble(Double::doubleValue).toArray(), baseTap) != 0;
         LOGGER.info("Uploaded {} continuous phase controllers to device: {}", nc, owned ? "in-kernel loop" : "host orchestrator");
         if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {

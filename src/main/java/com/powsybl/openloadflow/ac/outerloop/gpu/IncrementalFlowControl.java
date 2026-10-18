@@ -185,7 +185,7 @@ public final class IncrementalFlowControl {
      *  not a closed branch (the host orchestrator then runs). */
     public static boolean uploadToDevice(long handle, List<Controller> ctrls) {
         if (ctrls == null || ctrls.isEmpty()) {
-            com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.setBatchFlowControllers(handle,
+            PhaseControlNative.setBatchFlowControllers(handle,
                     null, null, null, null, null, null, null, null, null, null, null, null);
             return false;
         }
@@ -222,7 +222,7 @@ public final class IncrementalFlowControl {
             maxShift[c] = ctl.maxTapShift() == Integer.MAX_VALUE ? 1 << 20 : ctl.maxTapShift();
         }
         tapPtr[nc] = tapData.size() / 8;
-        boolean owned = com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.setBatchFlowControllers(handle,
+        boolean owned = PhaseControlNative.setBatchFlowControllers(handle,
                 kind, pinRow, pinCol, side, targetValue, halfDb, elem, ctlElem, tapPtr,
                 tapData.stream().mapToDouble(Double::doubleValue).toArray(), baseTap, maxShift) != 0;
         LOGGER.info("Uploaded {} flow-observed incremental controllers to device: {}", nc, owned ? "in-kernel loops" : "host orchestrator");

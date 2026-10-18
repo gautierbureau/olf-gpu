@@ -8,6 +8,7 @@
 package com.powsybl.openloadflow.ac.solver.gpu.batch;
 
 
+import com.powsybl.openloadflow.ac.outerloop.gpu.IncrementalShuntVoltageControl;
 import com.powsybl.openloadflow.ac.outerloop.gpu.IncrementalTransformerVoltageControl;
 
 import java.util.ArrayList;
@@ -33,7 +34,7 @@ public final class DevicePhaseInstaller {
     public record Request(List<IncrementalTransformerVoltageControl.Controller> incrementalTvc, int incTvcMaxTapShift,
                           List<GpuBatchIncrementalFlowControl.Controller> flow,
                           List<GpuBatchContinuousPhase.Ctl> continuousPhase,
-                          List<GpuBatchIncrementalShuntVc.Controller> incrementalShunt, int incShuntMaxSectionShift,
+                          List<IncrementalShuntVoltageControl.Controller> incrementalShunt, int incShuntMaxSectionShift,
                           List<GpuBatchTransformerControl.TransformerController> discreteTvc, boolean simpleTvc,
                           boolean afterGenerator, GpuBatchTransformerControl.FreezeTables freeze,
                           List<GpuBatchSimpleShuntVc.Group> simpleShunt, boolean entryOn) {
@@ -61,7 +62,7 @@ public final class DevicePhaseInstaller {
         // CONTINUOUS PhaseControl as a DRIVER PHASE (OLF order 7); the pre-solve control-ON activation stays host-side.
         boolean cphInKernel = GpuBatchContinuousPhase.uploadToDevice(handle, r.continuousPhase());
         // IncrementalShuntVoltageControl as a DRIVER PHASE (OLF order 10).
-        boolean shuntInKernel = GpuBatchIncrementalShuntVc.uploadToDevice(handle, r.incrementalShunt(),
+        boolean shuntInKernel = IncrementalShuntVoltageControl.uploadToDevice(handle, r.incrementalShunt(),
                 r.incrementalShunt() != null ? r.incShuntMaxSectionShift() : 3);
         // The DISCRETE TransformerVoltageControl (AFTER_GENERATOR / WITH_GENERATOR, OLF order 8) and the
         // WITH_GENERATOR ShuntVoltageControl (order 10) as DRIVER PHASES: the control-ON entry (OLF's

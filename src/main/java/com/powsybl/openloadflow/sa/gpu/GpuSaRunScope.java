@@ -83,7 +83,7 @@ final class GpuSaRunScope {
         // gate that the AFTER_GENERATOR port needed never applied here — lifted 2026-09-15.
         boolean incrementalTvcBatchable =
                 olfGuardParams.getTransformerVoltageControlMode() == OpenLoadFlowParameters.TransformerVoltageControlMode.INCREMENTAL_VOLTAGE_CONTROL;
-        // INCREMENTAL shunt VC: same per-scenario orchestrator pattern (GpuBatchIncrementalShuntVc)
+        // INCREMENTAL shunt VC: same per-scenario orchestrator pattern (IncrementalShuntVoltageControl)
         // with in-kernel dV/dB sensitivities.
         boolean incrementalShuntBatchable =
                 olfGuardParams.getShuntVoltageControlMode() == OpenLoadFlowParameters.ShuntVoltageControlMode.INCREMENTAL_VOLTAGE_CONTROL;

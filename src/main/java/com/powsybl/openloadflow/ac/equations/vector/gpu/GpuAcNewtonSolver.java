@@ -536,7 +536,7 @@ public final class GpuAcNewtonSolver {
     public static native int[] readBatchTvcTaps(long handle);
 
     /** Install the incremental SHUNT voltage-control tables for the in-kernel loop (OLF order 10);
-     *  see GpuBatchIncrementalShuntVc.uploadToDevice. Returns 1 when the kernel loop owns them. */
+     *  see IncrementalShuntVoltageControl.uploadToDevice. Returns 1 when the kernel loop owns them. */
     public static native int setBatchShuntControllers(long handle,
             int[] bRow, int[] vRow, double[] targetV, double[] halfDb, int[] elemAbs, int[] shOvElem,
             int[] groupPtr, int[] groupCtrl, int[] subPtr, int[] secPtr, double[] secB, double[] secG,

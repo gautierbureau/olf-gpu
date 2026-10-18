@@ -11,6 +11,7 @@ import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcActivation;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
+import com.powsybl.openloadflow.ac.outerloop.gpu.IncrementalShuntVoltageControl;
 import com.powsybl.openloadflow.ac.solver.NewtonRaphsonParameters;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.TargetVector;
@@ -56,7 +57,7 @@ public final class GpuBatchSimpleShuntVc {
     }
 
     /** One controller shunt of a group: its SHUNT_B row and per-section tables (dispatch targets). */
-    public record Member(int bRow, List<GpuBatchIncrementalShuntVc.Sub> subs, int shOvElem, int elemIndexAbs, int shuntNum) {
+    public record Member(int bRow, List<IncrementalShuntVoltageControl.Sub> subs, int shOvElem, int elemIndexAbs, int shuntNum) {
     }
 
     /** One controlled bus's shunt VC group: the toggle-diff VC-ON activation + its member shunts. */
@@ -101,16 +102,16 @@ public final class GpuBatchSimpleShuntVc {
             List<Member> members = new ArrayList<>();
             boolean ok = true;
             for (LfShunt sh : memberShunts) {
-                List<GpuBatchIncrementalShuntVc.Sub> subs = new ArrayList<>();
+                List<IncrementalShuntVoltageControl.Sub> subs = new ArrayList<>();
                 boolean gVaries = false;
                 for (LfShunt.Controller c : sh.getControllers()) {
                     double[] sb = c.getSectionsB().stream().mapToDouble(Double::doubleValue).toArray();
                     double[] sg = new double[sb.length];
                     for (int i = 0; i < sb.length; i++) {
-                        sg[i] = GpuBatchIncrementalShuntVc.shuntSectionG(c, i);
+                        sg[i] = IncrementalShuntVoltageControl.shuntSectionG(c, i);
                         gVaries |= sg[i] != sg[0];
                     }
-                    subs.add(new GpuBatchIncrementalShuntVc.Sub(sb, sg, c.getPosition(), c.getMinPosition()));
+                    subs.add(new IncrementalShuntVoltageControl.Sub(sb, sg, c.getPosition(), c.getMinPosition()));
                 }
                 int elemIndex = elementMapper.getElementIndex(sh);
                 if (elemIndex < 0 && gVaries) {              // static G follows the section: needs a packed element
@@ -204,7 +205,7 @@ public final class GpuBatchSimpleShuntVc {
                 memBRow.add(m.bRow());
                 memElem.add(m.elemIndexAbs());
                 memSubPtr.add(subBase.size());
-                for (GpuBatchIncrementalShuntVc.Sub sub : m.subs()) {
+                for (IncrementalShuntVoltageControl.Sub sub : m.subs()) {
                     secPtr.add(secB.size());
                     for (double b : sub.sectionsB()) {
                         secB.add(b);
@@ -319,7 +320,7 @@ public final class GpuBatchSimpleShuntVc {
         double bSum = 0;
         for (int k = 0; k < m.subs().size(); k++) {
             double toDispatch = residue / remaining--;
-            GpuBatchIncrementalShuntVc.Sub sub = m.subs().get(k);
+            IncrementalShuntVoltageControl.Sub sub = m.subs().get(k);
             int best = sub.basePos();
             double smallest = Math.abs(toDispatch - sub.b(sub.basePos()));
             for (int p = sub.minPos(); p < sub.sectionsB().length; p++) {

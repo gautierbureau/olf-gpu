@@ -89,7 +89,7 @@ class GpuSaShuntControlTest extends AbstractGpuSaTest {
     }
 
     /** DEVICE-mode IncrementalShuntVoltageControl: in-kernel dV/dB sensitivities + OLF's section
-     *  decisions per scenario (GpuBatchIncrementalShuntVc); GPU SA == CPU SA at 1e-12. */
+     *  decisions per scenario (IncrementalShuntVoltageControl); GPU SA == CPU SA at 1e-12. */
     @Test
     void deviceIncrementalShuntVoltageControlMatchesCpu() {
         assertIncrementalShuntVoltageControlMatchesCpu();

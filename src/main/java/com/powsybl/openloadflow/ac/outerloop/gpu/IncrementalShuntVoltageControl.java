@@ -5,13 +5,15 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/.
  * SPDX-License-Identifier: MPL-2.0
  */
-package com.powsybl.openloadflow.ac.solver.gpu.batch;
+package com.powsybl.openloadflow.ac.outerloop.gpu;
 
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 import com.powsybl.openloadflow.ac.outerloop.gpu.IncrementalTransformerVoltageControl;
 import com.powsybl.openloadflow.ac.solver.NewtonRaphsonParameters;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchElementMapper;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchSkips;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.Variable;
 import com.powsybl.openloadflow.network.LfNetwork;
@@ -40,19 +42,19 @@ import java.util.Map;
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
-public final class GpuBatchIncrementalShuntVc {
+public final class IncrementalShuntVoltageControl {
 
-    private static final Logger LOGGER = LoggerFactory.getLogger(GpuBatchIncrementalShuntVc.class);
+    private static final Logger LOGGER = LoggerFactory.getLogger(IncrementalShuntVoltageControl.class);
 
     private static final int MAX_DIRECTION_CHANGE = 3;       // OLF IncrementalShuntVoltageControlOuterLoop
     private static final double MIN_TARGET_DEADBAND_KV = 0.1;
 
-    private GpuBatchIncrementalShuntVc() {
+    private IncrementalShuntVoltageControl() {
     }
 
     /** One SUB-controller (OLF LfShunt.Controller): per-section B/G tables + the ratchet identity. */
-    record Sub(double[] sectionsB, double[] sectionsG, int basePos, int minPos) {
-        double b(int pos) {
+    public record Sub(double[] sectionsB, double[] sectionsG, int basePos, int minPos) {
+        public double b(int pos) {
             return sectionsB[pos];
         }
 
@@ -240,7 +242,7 @@ public final class GpuBatchIncrementalShuntVc {
         }
     }
 
-    static double shuntSectionG(LfShunt.Controller c, int pos) {
+    public static double shuntSectionG(LfShunt.Controller c, int pos) {
         // no public accessor for the per-section G table (only getG() at the current position) —
         // read-only reflection, same pattern as GpuBatchTransformerControl.tapModels
         try {

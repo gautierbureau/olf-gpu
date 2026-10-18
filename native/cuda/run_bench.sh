@@ -19,7 +19,6 @@ cd "$REPO"
 export CUDA_HOME="${CUDA_HOME:-$HOME/Projects/Software/cuda-toolkit}"
 export CUDSS_ROOT="${CUDSS_ROOT:-$HOME/Projects/powsybl/cuda/cudss}"   # 0.8.0 = the pinned cuDSS version (UBATCH scales with batch size there)
 export OLF_GPU_CONT_FILE="${OLF_GPU_CONT_FILE:-$HOME/Projects/powsybl/cuda/matched_contingencies/matched_test6_ids.txt}"
-export OLF_GPU_BATCHMODE="${OLF_GPU_BATCHMODE:-3}"   # 3 = UBATCH (single shared-block analysis)
 export OLF_GPU_MAXBATCH="${OLF_GPU_MAXBATCH:-500}"    # 0.8.0 UBATCH amortizes per-launch cost with batch size
 export OLF_GPU_E2E="${OLF_GPU_E2E:-1}"               # also print cold end-to-end (CPU base LF + cold GPU SA)
 export OLF_GPU_E2E_K="${OLF_GPU_E2E_K:-4}"

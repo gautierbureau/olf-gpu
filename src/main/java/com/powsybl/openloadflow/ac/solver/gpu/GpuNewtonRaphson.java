@@ -23,6 +23,7 @@ import com.powsybl.openloadflow.ac.outerloop.gpu.ContinuousPhaseControl;
 import com.powsybl.openloadflow.ac.outerloop.gpu.IncrementalFlowControl;
 import com.powsybl.openloadflow.ac.outerloop.gpu.IncrementalShuntVoltageControl;
 import com.powsybl.openloadflow.ac.outerloop.gpu.IncrementalTransformerVoltageControl;
+import com.powsybl.openloadflow.ac.outerloop.gpu.VoltageMonitoring;
 import com.powsybl.openloadflow.ac.solver.AbstractAcSolver;
 import com.powsybl.openloadflow.ac.solver.AcSolverResult;
 import com.powsybl.openloadflow.ac.solver.AcSolverStatus;
@@ -37,7 +38,6 @@ import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchHvdcAcEmulation;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchOuterLoopTables;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchRlCurves;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchStatus;
-import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchVoltageMonitoring;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.EquationSystemIndex;
 import com.powsybl.openloadflow.equations.EquationSystemIndexListener;
@@ -196,7 +196,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                     data.getTotalElementCount());
         }
         if (monCtls != null && !monCtls.isEmpty()) {
-            GpuBatchVoltageMonitoring.writeBack(network, monCtls, GpuAcNewtonSolver.readBatchMonitoringTargets(handle),
+            VoltageMonitoring.writeBack(network, monCtls, GpuAcNewtonSolver.readBatchMonitoringTargets(handle),
                     data.rlBusNum());
         }
         if (svcCtls != null) {
@@ -327,7 +327,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
     // The driver phases with their own per-run tables (HVDC AC emulation, MonitoringVoltage, in-kernel
     // incremental TVC): built at every solve from the network as it stands, written back after it.
     private List<GpuBatchHvdcAcEmulation.Ctl> hvdcCtls;
-    private List<GpuBatchVoltageMonitoring.Ctl> monCtls;
+    private List<VoltageMonitoring.Ctl> monCtls;
     private List<IncrementalTransformerVoltageControl.Controller> tvcCtls;
     private boolean tvcOwned;
     private List<IncrementalShuntVoltageControl.Controller> shuntCtls;
@@ -806,7 +806,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
             }
             // MonitoringVoltage (OLF order 6) as a driver phase.
             monCtls = phases.monitoring();
-            GpuBatchVoltageMonitoring.installDriverLoop(handle, monCtls);
+            VoltageMonitoring.installDriverLoop(handle, monCtls);
             int hostMask = buildHostLoopMask();
             // SecondaryVoltageControl (OLF order 4) IN-KERNEL — the same phase, built the same way,
             // as the batched security analysis. It used to be the one loop the base load flow never

@@ -65,7 +65,7 @@ class GpuSaVoltageMonitoringTest extends AbstractGpuSaTest {
     }
 
     /** A monitoring SVC and an AC-emulation HVDC in the SAME network — the only shape in which
-     *  {@code GpuBatchVoltageMonitoring} can skip its phase-B confirmation solve, and therefore the
+     *  {@code VoltageMonitoring} can skip its phase-B confirmation solve, and therefore the
      *  only shape that covers the skip at all.
      *
      *  <p>The two arms differ ONLY in the automaton's threshold band:
@@ -83,10 +83,10 @@ class GpuSaVoltageMonitoringTest extends AbstractGpuSaTest {
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
         Network network = hvdcWithStandbySvcNetwork(390, 399);   // a band neither scenario's b4 leaves
-        long activatedBefore = com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchVoltageMonitoring.ACTIVATIONS.sum();
+        long activatedBefore = com.powsybl.openloadflow.ac.outerloop.gpu.VoltageMonitoring.ACTIVATIONS.sum();
         assertGpuMatchesCpu(network, hvdcWithStandbySvcContingencies(), 1e-12, hvdcWithStandbySvcParameters());
         assertEquals(activatedBefore,
-                com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchVoltageMonitoring.ACTIVATIONS.sum(),
+                com.powsybl.openloadflow.ac.outerloop.gpu.VoltageMonitoring.ACTIVATIONS.sum(),
                 "the wide band must leave the automaton standing by");
         // (There is no confirmation solve to skip any more: MonitoringVoltage is a DRIVER phase in
         // OLF's own slot, so the main solve leaves every scenario monitoring- AND RL-stable and the
@@ -105,9 +105,9 @@ class GpuSaVoltageMonitoringTest extends AbstractGpuSaTest {
         // voltage control, so a base activation would leave no monitoring SVC for the batch to pack —
         // and takes exactly one scenario out of it.
         Network network = hvdcWithStandbySvcNetwork(397.8, 500);
-        long activatedBefore = com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchVoltageMonitoring.ACTIVATIONS.sum();
+        long activatedBefore = com.powsybl.openloadflow.ac.outerloop.gpu.VoltageMonitoring.ACTIVATIONS.sum();
         assertGpuMatchesCpu(network, hvdcWithStandbySvcContingencies(), 1e-12, hvdcWithStandbySvcParameters());
-        assertTrue(com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchVoltageMonitoring.ACTIVATIONS.sum() > activatedBefore,
+        assertTrue(com.powsybl.openloadflow.ac.outerloop.gpu.VoltageMonitoring.ACTIVATIONS.sum() > activatedBefore,
                 "the automaton must switch PQ -> PV in this arm");
         // No phase-B bookkeeping to assert: the loop runs in the driver now. What matters is above —
         // the automaton fired, and the state still matches the CPU at 1e-12.
@@ -133,7 +133,7 @@ class GpuSaVoltageMonitoringTest extends AbstractGpuSaTest {
 
     /** DEVICE-mode VoltageMonitoring with a MONITORING SVC (stand-by automaton): the standing-by bus
      *  seeds UNPINNED in the device RL pack (rlMonitored) and activates PQ->PV at the automaton
-     *  setpoint when a contingency pushes its V outside the threshold band (GpuBatchVoltageMonitoring);
+     *  setpoint when a contingency pushes its V outside the threshold band (VoltageMonitoring);
      *  GPU SA == CPU SA at 1e-12. */
     @Test
     void deviceSvcVoltageMonitoringMatchesCpu() {

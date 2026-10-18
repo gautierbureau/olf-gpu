@@ -127,7 +127,7 @@ public record BatchConfig(int lsMode, double maxDv, double maxDphi, boolean tran
                 minNominalVoltageRealisticVoltageCheck, realisticFixingLoop, robustSolveMode, slackRelocation, sink);
     }
 
-    int dsRejectResidualFlag() {
+    public int dsRejectResidualFlag() {
         return dsRejectResidual ? 1 : 0;
     }
 }

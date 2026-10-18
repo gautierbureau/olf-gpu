@@ -181,7 +181,7 @@ public final class ReactiveLimitsPacker {
         try {
         // Reactive limits OFF: the pack is empty EXCEPT for standby-automaton MONITORING SVC buses. Such a bus
         // needs an entry not for its limits (no RL loop runs, so they are dormant) but for the pin machinery the
-        // VoltageMonitoring phase activates it through: GpuBatchVoltageMonitoring maps a bus to its rl entry and,
+        // VoltageMonitoring phase activates it through: VoltageMonitoring maps a bus to its rl entry and,
         // finding none, recorded a SKIP for every monitored controller — which the all-or-nothing phase gate
         // (GpuBatchPhaseOwnership.batchable) turns into "route the whole run to the CPU". Measured with
         // OLF_GPU_SA_NO_RL=1 on rte6515's busbar window: 976 of 976 batchable contingencies CPU-replayed

@@ -5,13 +5,15 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/.
  * SPDX-License-Identifier: MPL-2.0
  */
-package com.powsybl.openloadflow.ac.solver.gpu.batch;
+package com.powsybl.openloadflow.ac.outerloop.gpu;
 
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcActivation;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 import com.powsybl.openloadflow.ac.solver.NewtonRaphsonParameters;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.BatchConfig;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchSkips;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.Variable;
 import com.powsybl.openloadflow.network.LfBus;
@@ -41,9 +43,9 @@ import java.util.Map;
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
-public final class GpuBatchVoltageMonitoring {
+public final class VoltageMonitoring {
 
-    private static final Logger LOGGER = LoggerFactory.getLogger(GpuBatchVoltageMonitoring.class);
+    private static final Logger LOGGER = LoggerFactory.getLogger(VoltageMonitoring.class);
 
     /** Phase-B confirmation solves this JVM has skipped, and monitored buses it has switched PQ -&gt; PV.
      *  Test-visible: the skip is only reachable when a monitoring SVC and an orchestrator that
@@ -58,7 +60,7 @@ public final class GpuBatchVoltageMonitoring {
      *  OLF's monitoring loop, leaving nothing for the batch to monitor. */
     private static final boolean MON_TRACE = System.getenv("OLF_GPU_MON_TRACE") != null;
 
-    private GpuBatchVoltageMonitoring() {
+    private VoltageMonitoring() {
     }
 
     /** One monitored bus: its V row, RL pack index, the automaton band + setpoints, and the VC-ON

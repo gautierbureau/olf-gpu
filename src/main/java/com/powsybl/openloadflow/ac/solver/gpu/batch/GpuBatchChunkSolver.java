@@ -12,6 +12,7 @@ import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 import com.powsybl.openloadflow.ac.outerloop.gpu.ContinuousPhaseControl;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DiscreteTransformerVoltageControl;
 import com.powsybl.openloadflow.ac.outerloop.gpu.SecondaryVoltageControlLoop;
+import com.powsybl.openloadflow.ac.outerloop.gpu.VoltageMonitoring;
 import com.powsybl.openloadflow.ac.solver.NewtonRaphsonParameters;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfShunt;
@@ -986,7 +987,7 @@ final class GpuBatchChunkSolver {
                     // HVDC loops and ReactiveLimits) instead of as a host orchestrator after the whole
                     // solve. Run-constant table, but the context is per chunk.
                     boolean monInKernel = monActive;
-                    GpuBatchVoltageMonitoring.installDriverLoop(handle, monInKernel ? phases.monitoring() : null);
+                    VoltageMonitoring.installDriverLoop(handle, monInKernel ? phases.monitoring() : null);
                     // SecondaryVoltageControl as a DRIVER PAUSE at its OLF slot (order 4). Run as a host
                     // orchestrator it executed AFTER the whole device sweep — i.e. after the control loops
                     // OLF puts at orders 7-10 — so each decided on a state the other had already moved
@@ -1239,7 +1240,7 @@ final class GpuBatchChunkSolver {
                     if (monInKernel) {
                         // Keep ACTIVATIONS meaningful with the loop in the driver: it is the guard
                         // that a case really exercises the automaton, not orchestrator bookkeeping.
-                        GpuBatchVoltageMonitoring.ACTIVATIONS.add(
+                        VoltageMonitoring.ACTIVATIONS.add(
                                 GpuAcNewtonSolver.readBatchMonitoringActivations(handle));
                     }
                     if (hasHvdcDriverLoops) {

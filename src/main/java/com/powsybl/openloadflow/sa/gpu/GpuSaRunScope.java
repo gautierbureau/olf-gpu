@@ -113,10 +113,10 @@ final class GpuSaRunScope {
         // Secondary voltage control (SecondaryVoltageControlLoop): batched device sensitivities + the zone
         // system replayed per scenario on the host; stage-1 scope is LOCAL generator VC only.
         boolean svcBatchable = com.powsybl.openloadflow.ac.outerloop.gpu.SecondaryVoltageControlLoop.supported(lfNetwork);
-        // Voltage monitoring (SVC stand-by automatons, GpuBatchVoltageMonitoring): batchable when every
+        // Voltage monitoring (SVC stand-by automatons, VoltageMonitoring): batchable when every
         // monitoring SVC is local with an automaton — slope-less plain-VOLTAGE SVCs need no loop support
         // (ordinary generator-VC buses on the device).
-        boolean monitoringBatchable = com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchVoltageMonitoring.supported(lfNetwork);
+        boolean monitoringBatchable = com.powsybl.openloadflow.ac.outerloop.gpu.VoltageMonitoring.supported(lfNetwork);
         // CONTINUOUS phase control (ContinuousPhaseControl): both modes batch LOCAL and REMOTE.
         // CONTROLLER since 2026-09-05 (cbPcSide carries the controller's a1 column); LIMITER since
         // 2026-09-16 — OLF's PhaseControlOuterLoop is local BY CONSTRUCTION there, reading the

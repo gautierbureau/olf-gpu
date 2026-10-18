@@ -7,6 +7,7 @@
  */
 package com.powsybl.openloadflow.ac.solver.gpu;
 
+import com.powsybl.openloadflow.ac.outerloop.gpu.DeviceLoopKind;
 import com.powsybl.openloadflow.ac.AcLoadFlowContext;
 import com.powsybl.openloadflow.ac.AcloadFlowEngine;
 import com.powsybl.openloadflow.ac.outerloop.AcActivePowerDistributionOuterLoop;
@@ -77,8 +78,8 @@ public class GpuDriverOuterLoopEngine extends AcloadFlowEngine {
             default -> { }
         }
         // Host-paused loops: anything with a LOOP_HOST_* kind
-        return com.powsybl.openloadflow.ac.solver.gpu.GpuSolveSettings.loopKindFor(outerLoop.getName())
-                >= com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.HOST_LOOP_SVC;
+        return DeviceLoopKind.loopKindFor(outerLoop.getName())
+                >= DeviceLoopKind.HOST_LOOP_SVC;
     }
 
     /**

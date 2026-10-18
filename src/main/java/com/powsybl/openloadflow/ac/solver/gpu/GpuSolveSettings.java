@@ -7,8 +7,6 @@
  */
 package com.powsybl.openloadflow.ac.solver.gpu;
 
-import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
-import com.powsybl.openloadflow.ac.outerloop.gpu.IncrementalTransformerVoltageControl;
 import com.powsybl.openloadflow.ac.solver.DefaultNewtonRaphsonStoppingCriteria;
 import com.powsybl.openloadflow.ac.solver.NewtonRaphsonParameters;
 
@@ -50,17 +48,4 @@ final class GpuSolveSettings {
         return 0.0;
     }
 
-    /** Map an OLF outer loop name to the native {@code LOOP_HOST_*} kind, or -1 if it is an
-     *  in-kernel driver phase (DS, RL, HVDC, Monitoring) or unknown. */
-    public static int loopKindFor(String name) {
-        return switch (name) {
-            case "SecondaryVoltageControl" -> GpuAcNewtonSolver.HOST_LOOP_SVC;
-            case "PhaseControl", "IncrementalPhaseControl" -> GpuAcNewtonSolver.HOST_LOOP_PHASE;
-            case "TransformerVoltageControl", "SimpleTransformerVoltageControl",
-                 "IncrementalTransformerVoltageControl" -> GpuAcNewtonSolver.HOST_LOOP_TVC;
-            case "IncrementalTransformerReactivePowerControl" -> GpuAcNewtonSolver.HOST_LOOP_TRPC;
-            case "ShuntVoltageControl", "IncrementalShuntVoltageControl" -> GpuAcNewtonSolver.HOST_LOOP_SHUNT;
-            default -> -1;
-        };
-    }
 }

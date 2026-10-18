@@ -7,6 +7,7 @@
  */
 package com.powsybl.openloadflow.ac.solver.gpu;
 
+import com.powsybl.openloadflow.ac.outerloop.gpu.DeviceLoopKind;
 import com.powsybl.commons.PowsyblException;
 import com.powsybl.commons.report.ReportNode;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
@@ -169,9 +170,9 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
     private int buildHostLoopMask() {
         int mask = 0;
         for (var loop : hostOuterLoops) {
-            int kind = GpuSolveSettings.loopKindFor(loop.getName());
-            if (kind >= GpuAcNewtonSolver.HOST_LOOP_SVC) {
-                mask |= (1 << (kind - GpuAcNewtonSolver.HOST_LOOP_SVC));
+            int kind = DeviceLoopKind.loopKindFor(loop.getName());
+            if (kind >= DeviceLoopKind.HOST_LOOP_SVC) {
+                mask |= DeviceLoopKind.hostMaskBit(kind);
             }
         }
         return mask;
@@ -876,16 +877,16 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                         handle, tvdFreeze, java.util.List.of(), 1);
             }
             if (tvcOwned || tvdOwned) {
-                hostMask &= ~(1 << (GpuAcNewtonSolver.HOST_LOOP_TVC - GpuAcNewtonSolver.HOST_LOOP_SVC));
+                hostMask &= ~(DeviceLoopKind.hostMaskBit(DeviceLoopKind.HOST_LOOP_TVC));
             }
             if (shuntOwned || svdOwned) {
-                hostMask &= ~(1 << (GpuAcNewtonSolver.HOST_LOOP_SHUNT - GpuAcNewtonSolver.HOST_LOOP_SVC));
+                hostMask &= ~(DeviceLoopKind.hostMaskBit(DeviceLoopKind.HOST_LOOP_SHUNT));
             }
             if (flowOwned && rpcLoop != null) {
-                hostMask &= ~(1 << (GpuAcNewtonSolver.HOST_LOOP_TRPC - GpuAcNewtonSolver.HOST_LOOP_SVC));
+                hostMask &= ~(DeviceLoopKind.hostMaskBit(DeviceLoopKind.HOST_LOOP_TRPC));
             }
             if (flowOwned && incPhase || cphOwned) {
-                hostMask &= ~(1 << (GpuAcNewtonSolver.HOST_LOOP_PHASE - GpuAcNewtonSolver.HOST_LOOP_SVC));
+                hostMask &= ~(DeviceLoopKind.hostMaskBit(DeviceLoopKind.HOST_LOOP_PHASE));
             }
             // Host-owned outer-loop slots: the driver pauses at their OLF positions and the
             // pause/resume cycle after solveBatchContext runs OLF's loop there. 0 clears a cached mask.
@@ -1168,8 +1169,8 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
     private java.util.Map<Integer, com.powsybl.openloadflow.ac.outerloop.AcOuterLoop> buildHostLoopMap() {
         var map = new java.util.HashMap<Integer, com.powsybl.openloadflow.ac.outerloop.AcOuterLoop>();
         for (var loop : hostOuterLoops) {
-            int kind = GpuSolveSettings.loopKindFor(loop.getName());
-            if (kind >= GpuAcNewtonSolver.HOST_LOOP_SVC) {
+            int kind = DeviceLoopKind.loopKindFor(loop.getName());
+            if (kind >= DeviceLoopKind.HOST_LOOP_SVC) {
                 map.put(kind, loop);
             }
         }
@@ -1202,9 +1203,9 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
             if (engineContext != null) {
                 var pairs = com.powsybl.openloadflow.ac.AcloadFlowEngine.createOuterLoopsAndContexts(engineContext, false);
                 for (var pair : pairs) {
-                    int kind = GpuSolveSettings.loopKindFor(pair.getLeft().getName());
-                    if (kind >= GpuAcNewtonSolver.HOST_LOOP_SVC && loopMap.containsKey(kind)
-                            && (activeHostMask & (1 << (kind - GpuAcNewtonSolver.HOST_LOOP_SVC))) != 0) {
+                    int kind = DeviceLoopKind.loopKindFor(pair.getLeft().getName());
+                    if (kind >= DeviceLoopKind.HOST_LOOP_SVC && loopMap.containsKey(kind)
+                            && (activeHostMask & DeviceLoopKind.hostMaskBit(kind)) != 0) {
                         hostLoopPairs.put(kind, pair);
                         pair.getLeft().initialize(pair.getRight());
                     }

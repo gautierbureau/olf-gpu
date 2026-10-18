@@ -7,6 +7,7 @@
  */
 package com.powsybl.openloadflow.ac.solver.gpu.batch;
 
+import com.powsybl.openloadflow.ac.outerloop.gpu.DeviceLoopKind;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 import com.powsybl.openloadflow.ac.outerloop.gpu.ContinuousPhaseControl;
@@ -1181,7 +1182,7 @@ final class GpuBatchChunkSolver {
                         // early would leave the context PAUSED and the chunk holding mid-sweep states.
                         int maxSvcRounds = 16 * (config.maxOuterIterations() > 0 ? config.maxOuterIterations() : 20);
                         int svcRounds = 0;
-                        while (GpuAcNewtonSolver.readBatchDriverPaused(handle) == GpuAcNewtonSolver.HOST_LOOP_SVC
+                        while (GpuAcNewtonSolver.readBatchDriverPaused(handle) == DeviceLoopKind.HOST_LOOP_SVC
                                 && svcRounds++ < maxSvcRounds) {
                             var dec = SecondaryVoltageControlLoop.decideAtPause(handle, chunkSize, realCount, n, nrl,
                                     chunkResults, phases.secondaryVc(), rlStateOut, svcTargetV, baseState);

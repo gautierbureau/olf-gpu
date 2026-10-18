@@ -7,7 +7,6 @@
  */
 package com.powsybl.openloadflow.ac.outerloop.gpu;
 
-import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 import com.powsybl.openloadflow.ac.outerloop.gpu.ContinuousPhaseControl;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DiscreteShuntVoltageControl;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DiscreteTransformerVoltageControl;
@@ -53,18 +52,18 @@ public final class DevicePhaseOwnership {
             IncrementalTransformerVoltageControl.uploadToDevice(handle, null, 1);
             DiscreteTransformerVoltageControl.uploadToDevice(handle, null, 0, false);
             DiscreteTransformerVoltageControl.uploadFreeze(handle, null);
-            mask |= 1 << (GpuAcNewtonSolver.HOST_LOOP_TVC - GpuAcNewtonSolver.HOST_LOOP_SVC);
+            mask |= DeviceLoopKind.hostMaskBit(DeviceLoopKind.HOST_LOOP_TVC);
         }
         if (!GpuBatchSkips.complete(GpuBatchSkips.Slot.SHUNT)) {
             IncrementalShuntVoltageControl.uploadToDevice(handle, null, 3);
             DiscreteShuntVoltageControl.uploadToDevice(handle, null, true);
-            mask |= 1 << (GpuAcNewtonSolver.HOST_LOOP_SHUNT - GpuAcNewtonSolver.HOST_LOOP_SVC);
+            mask |= DeviceLoopKind.hostMaskBit(DeviceLoopKind.HOST_LOOP_SHUNT);
         }
         if (!GpuBatchSkips.complete(GpuBatchSkips.Slot.PHASE) || !GpuBatchSkips.complete(GpuBatchSkips.Slot.RPC)) {
             IncrementalFlowControl.uploadToDevice(handle, null);
             ContinuousPhaseControl.uploadToDevice(handle, null);
-            mask |= 1 << (GpuAcNewtonSolver.HOST_LOOP_PHASE - GpuAcNewtonSolver.HOST_LOOP_SVC);
-            mask |= 1 << (GpuAcNewtonSolver.HOST_LOOP_TRPC - GpuAcNewtonSolver.HOST_LOOP_SVC);
+            mask |= DeviceLoopKind.hostMaskBit(DeviceLoopKind.HOST_LOOP_PHASE);
+            mask |= DeviceLoopKind.hostMaskBit(DeviceLoopKind.HOST_LOOP_TRPC);
         }
         if (!GpuBatchSkips.complete(GpuBatchSkips.Slot.SVC)) {
             SecondaryVoltageControlLoop.uploadToDevice(handle, null);

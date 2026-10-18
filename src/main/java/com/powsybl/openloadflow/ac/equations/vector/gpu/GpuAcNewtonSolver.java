@@ -473,13 +473,6 @@ public final class GpuAcNewtonSolver {
      *  0 disables all; the driver behaves exactly as before. */
     public static native void setBatchHostLoop(long handle, int mask);
 
-    /** Host loop kind constants matching the native {@code DeviceLoopKind} enum. */
-    public static final int HOST_LOOP_SVC = 5;
-    public static final int HOST_LOOP_PHASE = 6;
-    public static final int HOST_LOOP_TVC = 7;
-    public static final int HOST_LOOP_TRPC = 8;
-    public static final int HOST_LOOP_SHUNT = 9;
-
     /** Upload incremental TVC controller data for the in-kernel outer loop.
      *  rhoRow/vRow/elemIndex: per-controller int arrays; targetV/halfDb: per-controller doubles;
      *  tapPtr: CSR pointers [nCtrl+1] into tapData; tapData: flat [totalTaps*8] (y,g1,g2,b1,b2,ksi,r1,a1);
@@ -492,15 +485,8 @@ public final class GpuAcNewtonSolver {
             int[] tapPtr, double[] tapData, int[] baseTap, int[] groupPtr, int[] groupCtrl,
             int maxTapShift);
 
-    /** Host loop enable mask bits — use with {@link #setBatchHostLoop}. */
-    public static final int HOST_MASK_SVC = 1 << 0;
-    public static final int HOST_MASK_PHASE = 1 << 1;
-    public static final int HOST_MASK_TVC = 1 << 2;
-    public static final int HOST_MASK_TRPC = 1 << 3;
-    public static final int HOST_MASK_SHUNT = 1 << 4;
-
     /** Did the last solve stop at a host-owned slot? Returns 0 if not paused, or the
-     *  {@code HOST_LOOP_*} constant identifying WHICH host loop was reached. */
+     *  {@code DeviceLoopKind.HOST_LOOP_*} constant identifying WHICH host loop was reached. */
     public static native int readBatchDriverPaused(long handle);
 
     /** Resume the paused driver; {@code hostChanged[s] != 0} is the host loop's UNSTABLE verdict. */

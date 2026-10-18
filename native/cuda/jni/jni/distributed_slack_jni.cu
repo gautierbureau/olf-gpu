@@ -9,7 +9,7 @@
 // Slack-only distribution: the slack generators' initial target per scenario (relative to the slack's target P)
 // for the next solves - a strategy pair's parent total; null clears it (zero: a contingency's base).
 extern "C" JNIEXPORT void JNICALL
-Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchSlackOnlyAnchor(
+OLF_JNI(ac_outerloop_gpu, DistributedSlackNative, setBatchSlackOnlyAnchor)(
         JNIEnv* env, jclass, jlong handle, jdoubleArray jAnchor) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx == nullptr) {
@@ -31,7 +31,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
 // The curve and forced-target-Q channels evaluate a generator at anchor + (genCum once a pass ran, else start).
 // seedAnchor (pairs): the anchor WITHOUT the strategy's GeneratorActions - where the continued pins are stamped.
 extern "C" JNIEXPORT void JNICALL
-Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchGenAnchor(
+OLF_JNI(ac_outerloop_gpu, DistributedSlackNative, setBatchGenAnchor)(
         JNIEnv* env, jclass, jlong handle, jdoubleArray jAnchor, jdoubleArray jStart, jdoubleArray jSeedAnchor) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx == nullptr) {
@@ -59,7 +59,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchDsLostGenerators(
+OLF_JNI(ac_outerloop_gpu, DistributedSlackNative, setBatchDsLostGenerators)(
         JNIEnv* env, jclass, jlong handle, jintArray jSlotGen) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx == nullptr) {
@@ -77,7 +77,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchDsOutGenerators(
+OLF_JNI(ac_outerloop_gpu, DistributedSlackNative, setBatchDsOutGenerators)(
         JNIEnv* env, jclass, jlong handle, jintArray jSlotGen) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx == nullptr) {
@@ -98,7 +98,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
 // saturates on, grouped by bus (a bus's row value is the sum over its contiguous slice).
 // The slack bus's participating generators' total rooms: the bound of a slack-only distribution (slackOnlyDsCheck).
 extern "C" JNIEXPORT void JNICALL
-Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchDsSlackRooms(
+OLF_JNI(ac_outerloop_gpu, DistributedSlackNative, setBatchDsSlackRooms)(
         JNIEnv*, jclass, jlong handle, jdouble roomUp, jdouble roomDown) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx != nullptr) {
@@ -108,7 +108,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchDsGenerators(
+OLF_JNI(ac_outerloop_gpu, DistributedSlackNative, setBatchDsGenerators)(
         JNIEnv* env, jclass, jlong handle, jintArray jBus, jdoubleArray jFactor,
         jdoubleArray jMaxDelta, jdoubleArray jMinDelta, jdoubleArray jMarginUp, jdoubleArray jMarginDown,
         jintArray jBusGenStart, jintArray jBusGenEnd) {
@@ -152,7 +152,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
 // Per slot, the row the distributed-slack kernels read the slack on (host row, -1 = the base slack row): a
 // contingency that isolates the base slack makes OLF re-pick one, whose angle row becomes the reference. Null clears.
 extern "C" JNIEXPORT void JNICALL
-Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchDsSlackRows(
+OLF_JNI(ac_outerloop_gpu, DistributedSlackNative, setBatchDsSlackRows)(
         JNIEnv* env, jclass, jlong handle, jintArray jRows) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx == nullptr) {
@@ -177,7 +177,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
 // leaves some participating buses outside the main component; OLF drops them from the participant
 // set, so the device must renormalize over the survivors — see distributeSlackBatch.
 extern "C" JNIEXPORT void JNICALL
-Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchDsIslanded(
+OLF_JNI(ac_outerloop_gpu, DistributedSlackNative, setBatchDsIslanded)(
         JNIEnv* env, jclass, jlong handle, jintArray jPairs) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx == nullptr) {
@@ -212,7 +212,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
 // rowMap here, exactly as createBatchContext maps dsPhiRow itself — so the two are always in one
 // space whatever rowMap is.
 extern "C" JNIEXPORT void JNICALL
-Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchDsRowOverrides(
+OLF_JNI(ac_outerloop_gpu, DistributedSlackNative, setBatchDsRowOverrides)(
         JNIEnv* env, jclass, jlong handle, jintArray jTriples) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx == nullptr) {

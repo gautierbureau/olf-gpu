@@ -9,6 +9,7 @@ package com.powsybl.openloadflow.ac.solver.gpu.batch;
 
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
+import com.powsybl.openloadflow.ac.outerloop.gpu.DistributedSlackNative;
 import com.powsybl.openloadflow.ac.outerloop.gpu.ForcedTargetQ;
 import com.powsybl.openloadflow.ac.outerloop.gpu.ReactiveLimitsNative;
 
@@ -138,9 +139,9 @@ final class ChunkLists {
                         .flatMap(k -> java.util.stream.IntStream.of(
                                 frozenSeedSlot.get(k), frozenSeedRow.get(k)))
                         .toArray());
-        GpuAcNewtonSolver.setBatchDsLostGenerators(handle,
+        DistributedSlackNative.setBatchDsLostGenerators(handle,
                 ChunkArrays.intsOrNull(dsLostGenList));
-        GpuAcNewtonSolver.setBatchDsOutGenerators(handle,
+        DistributedSlackNative.setBatchDsOutGenerators(handle,
                 ChunkArrays.intsOrNull(dsOutList));
         GpuAcNewtonSolver.setBatchDqWeightOverrides(handle,
                 ChunkArrays.intsOrNull(dqOvIdxList),
@@ -154,9 +155,9 @@ final class ChunkLists {
         GpuAcNewtonSolver.setBatchActiveRowCounts(handle, nActive);
         // Cleared when the chunk strands nobody, so a chunk never inherits the previous
         // chunk's participant mask through the reused context.
-        GpuAcNewtonSolver.setBatchDsIslanded(handle,
+        DistributedSlackNative.setBatchDsIslanded(handle,
                 ChunkArrays.intsOrNull(dsIslandedList));
-        GpuAcNewtonSolver.setBatchDsRowOverrides(handle,
+        DistributedSlackNative.setBatchDsRowOverrides(handle,
                 ChunkArrays.intsOrNull(dsRowOvList));
         ReactiveLimitsNative.setBatchRlIslanded(handle,
                 ChunkArrays.intsOrNull(rlIslandedList));
@@ -175,7 +176,7 @@ final class ChunkLists {
         GpuAcNewtonSolver.setBatchDqMemberTargetQOverrides(handle,
                 ChunkArrays.intsOrNull(dqTqOvKey),
                 dqTqOvKey.isEmpty() ? null : dqTqOvVal.stream().mapToDouble(Double::doubleValue).toArray());
-        GpuAcNewtonSolver.setBatchDsSlackRows(handle, dsSlackRows);
+        DistributedSlackNative.setBatchDsSlackRows(handle, dsSlackRows);
         GpuAcNewtonSolver.setBatchPilotQDeltas(handle,
                 pilotQDeltas.isEmpty() ? null : pilotQDeltas.keySet().stream().mapToInt(Integer::intValue).toArray(),
                 pilotQDeltas.isEmpty() ? null : pilotQDeltas.values().stream().mapToDouble(Double::doubleValue).toArray());

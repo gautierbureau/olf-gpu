@@ -15,6 +15,7 @@ import com.powsybl.openloadflow.ac.outerloop.gpu.DeviceLoopTables;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DevicePhaseInstaller;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DevicePhases;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DiscreteTransformerVoltageControl;
+import com.powsybl.openloadflow.ac.outerloop.gpu.DistributedSlackNative;
 import com.powsybl.openloadflow.ac.outerloop.gpu.ForcedTargetQ;
 import com.powsybl.openloadflow.ac.outerloop.gpu.HvdcAcEmulation;
 import com.powsybl.openloadflow.ac.outerloop.gpu.ReactiveCapabilityCurves;
@@ -1096,13 +1097,13 @@ final class GpuBatchChunkSolver {
                         }
                     }
                     if (dsSlackOnly) {
-                        GpuAcNewtonSolver.setBatchSlackOnlyAnchor(handle, pairPhase ? pairSlackAbsorbedSeed : null);
+                        DistributedSlackNative.setBatchSlackOnlyAnchor(handle, pairPhase ? pairSlackAbsorbedSeed : null);
                     }
                     if (nrl > 0) {
                         ReactiveLimitsNative.setBatchRlPinTargets(handle, pairPhase ? rlPinIn : null);
                     }
                     if (ngen > 0) {
-                        GpuAcNewtonSolver.setBatchGenAnchor(handle, pairPhase ? dgAnchor : null,
+                        DistributedSlackNative.setBatchGenAnchor(handle, pairPhase ? dgAnchor : null,
                                 pairPhase ? null : ChunkArrays.flat(cl.genPreMovesBySlot, chunkSize, ngen), pairPhase ? dgSeedAnchor : null);
                     }
                     double[][] chunkResults = GpuAcNewtonSolver.solveBatchContext(handle, baseState, baseTargets,

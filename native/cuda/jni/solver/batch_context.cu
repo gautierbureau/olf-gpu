@@ -19,6 +19,7 @@
 #include "../common/stats.cuh"
 #include "../common/codes/gpu_state_vector_scaling_mode.cuh"
 #include "../common/codes/gpu_distributed_slack_factor_mode.cuh"
+#include "../common/codes/gpu_reactive_limits_entry_flag.cuh"
 #include "batch_context.cuh"
 #include "driver_steps.cuh"
 #include "linear_solver_settings.cuh"
@@ -226,7 +227,7 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& st, int nScenar
         ctx->dRlMonitored.upload(rlMonitored, nrl * sizeof(char));
         ctx->allPvPinnable = 1;
         for (int i = 0; i < nrl; i++) {
-            if (!(rlMonitored[i] & 1) && !((rlMinQ[i] > -1e7 || rlMaxQ[i] < 1e7) && rlMinQ[i] < rlMaxQ[i])) {
+            if (!(rlMonitored[i] & GpuReactiveLimitsEntryFlag::STAND_BY_AUTOMATON) && !((rlMinQ[i] > -1e7 || rlMaxQ[i] < 1e7) && rlMinQ[i] < rlMaxQ[i])) {
                 ctx->allPvPinnable = 0;                      // an unlimited PV bus: the rule never fires
             }
         }

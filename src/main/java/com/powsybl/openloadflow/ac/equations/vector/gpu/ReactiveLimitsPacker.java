@@ -10,6 +10,7 @@ package com.powsybl.openloadflow.ac.equations.vector.gpu;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuQLimitType;
+import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuReactiveLimitsEntryFlag;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuVoltageControlRole;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.network.LfBus;
@@ -269,7 +270,8 @@ public final class ReactiveLimitsPacker {
                                 bus.getGeneratorVoltageControl().orElseThrow().getMainVoltageControl();
                         boolean ownController = mainVc.getMergedControllerElements().contains(bus)
                                 || bus.getGeneratorVoltageControl().orElseThrow().getControllerElements().contains(bus);
-                        rlMonitored.add((byte) ((monitoringSvc != null ? 1 : 0) | (ownController ? 0 : 2)));
+                        rlMonitored.add((byte) ((monitoringSvc != null ? GpuReactiveLimitsEntryFlag.STAND_BY_AUTOMATON : 0)
+                                | (ownController ? 0 : GpuReactiveLimitsEntryFlag.NOT_CONTROLLER_ELEMENT)));
                         rlRemote.add((byte) GpuVoltageControlRole.LOCAL);
                         rlCmpVrow.add(vCol[bn]);                   // local: compare row = own row
                         rlBusNum.add(bn);

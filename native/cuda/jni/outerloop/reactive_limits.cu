@@ -21,6 +21,7 @@
 #include "../common/codes/gpu_outer_loop_kind.cuh"
 #include "../common/codes/gpu_q_limit_type.cuh"
 #include "../common/codes/gpu_voltage_control_role.cuh"
+#include "../common/codes/gpu_reactive_limits_entry_flag.cuh"
 #include "../diagnostics/driver_traces.cuh"
 #include "forced_target_q.cuh"
 #include "pilot_voltage.cuh"
@@ -277,7 +278,7 @@ __global__ void reactiveLimitsBatch(const double* svcRlVt, int nrl, int nScenari
     // network.xiidm/FBQV, FBQF_0 pinned MIN_Q at 0 with V 1.009793 under its 1.010221 target - OLF switched it
     // back to PV at the first reactive-limit pass, the device never tested it, and CQEM_0 then pinned a pass late
     // (the one contingency of 24,376 whose outer-loop sequence differed from the 1-thread CPU's).
-    if (liMin >= liMax && (rlMonitored == nullptr || (rlMonitored[i] & 2) != 0)) {
+    if (liMin >= liMax && (rlMonitored == nullptr || (rlMonitored[i] & GpuReactiveLimitsEntryFlag::NOT_CONTROLLER_ELEMENT) != 0)) {
         swLogPut(passSwitched[st], qBuf[qIdx] + rlLoadQ[li], liMin, liMax, x[idx], x[idx],
                  rlTargetOf(nRlVtOv, rlVtOvSlotIdx, rlVtOvVal, svcRlVt, nrl, s, i, rlVtarget[i]));
         return;

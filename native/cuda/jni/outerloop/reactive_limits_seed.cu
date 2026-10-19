@@ -15,6 +15,7 @@
 #include "../common/launch.cuh"
 #include "../common/codes/gpu_q_limit_type.cuh"
 #include "../common/codes/gpu_voltage_control_role.cuh"
+#include "../common/codes/gpu_reactive_limits_entry_flag.cuh"
 #include "../equations/scatter.cuh"
 #include "../equations/scenario_overrides.cuh"
 #include "reactive_limits_seed.cuh"
@@ -86,7 +87,7 @@ __global__ void initRlLimitTypeBatch(int nrl, int nScenarios, int n, const int* 
     // PQ by a per-scenario gen-loss OVERRIDE (its generator is gone) has base mode 0 and must get limitType 0 so
     // the reactive-limits switch-back leaves it PQ. Only a controller that is PQ in the BASE (an actual Q-limit
     // switch during the base loadflow) gets a pinned limit type so a relieving contingency can switch it back.
-    if (baseMode[qrow] == 1 && (rlMonitored[i] & 1) == 0) {       // PQ in the base case (a real Q-limit switch —
+    if (baseMode[qrow] == 1 && (rlMonitored[i] & GpuReactiveLimitsEntryFlag::STAND_BY_AUTOMATON) == 0) {       // PQ in the base case (a real Q-limit switch —
         // NOT a monitoring SVC standing by: that one seeds UNPINNED so only the VoltageMonitoring
         // orchestrator may activate it, exactly like the CPU's null qLimitType)
         double vt = rlTargetOf(nRlVtOv, rlVtOvSlotIdx, rlVtOvVal, svcRlVt, nrl, s, i, rlVtarget[i]);

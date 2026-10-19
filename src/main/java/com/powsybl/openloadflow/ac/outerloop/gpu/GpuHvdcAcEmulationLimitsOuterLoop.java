@@ -29,7 +29,7 @@ import java.util.Map;
  * limits returns to linear, and an over-reversed one switches saturation side. The transitions run in the kernel
  * (hvdc_ac_emulation.cu); this class holds the per-(scenario, hvdc) status machinery they drive, which
  * {@link GpuFreezingHvdcACEmulationOuterloop} also uses: the controllers, the statuses (FROZEN included), the
- * converter-bus overrides, the driver install and the write-back.
+ * converter-bus overrides, the driver install and applyToNetwork.
  *
  * <p>Device mechanics per (scenario, hvdc): a NON-LINEAR status sets the hv element's per-scenario
  * DISABLED bit (fillHvdcBatch drops the coupling terms) and the
@@ -342,7 +342,7 @@ public final class GpuHvdcAcEmulationLimitsOuterLoop {
     /** Give the driver's final AC-emulation statuses (scenario 0) back to the network the way OLF's own
      *  loops do — the same {@code AcEmulationControl} switches, which set the converter stations'
      *  targetP and re-activate/deactivate the emulation terms through OLF's listeners. */
-    public static void writeBack(LfNetwork network, List<Ctl> ctls, int[] deviceStatus, int nElements) {
+    public static void applyToNetwork(LfNetwork network, List<Ctl> ctls, int[] deviceStatus, int nElements) {
         if (ctls == null || ctls.isEmpty() || deviceStatus == null) {
             return;
         }

@@ -355,7 +355,7 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
         return;
     }
     if (retainApplied != nullptr) {
-        retainApplied[s] = dsRetain[s];                      // the slack's share of THIS distribution (write-back)
+        retainApplied[s] = dsRetain[s];                      // the slack's share of THIS distribution (applied to the network)
     }
     // OLF's ActivePowerDistribution.run RESETS every participant to its INITIAL target
     // (step.resetToInitialState) and adds back what that undid (previousStateInfo.previousMismatch()),
@@ -548,7 +548,7 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
             rem -= done;
         }
         if (slackInPack && retainApplied != nullptr) {
-            double placed = 0.0;                             // the slack's share of THIS distribution (write-back)
+            double placed = 0.0;                             // the slack's share of THIS distribution (applied to the network)
             for (int g = 0; g < ngen; g++) {
                 if (dgBus[g] < 0) {
                     placed += genCum[(size_t) s * ngen + g];

@@ -524,7 +524,7 @@ public final class GpuTransformerVoltageControlOuterLoop {
      *  generation target is the net injection), an unfrozen one whose network state still shows OUR
      *  freeze (control off, target frozen, no reactive-limit type) is re-enabled like
      *  {@code enableGeneratorVoltageControlsUnderMaxControlledNominalVoltage}. */
-    public static void writeBackFreeze(LfNetwork network, FreezeTables fz, double[] state) {
+    public static void applyFreezeToNetwork(LfNetwork network, FreezeTables fz, double[] state) {
         if (fz == null || state == null) {
             return;
         }
@@ -760,7 +760,7 @@ public final class GpuTransformerVoltageControlOuterLoop {
      *  OLF's own loop leaves it: a FIXED member had {@code setR1(roundFrom); roundR1ToClosestTap()} and
      *  its control disabled ({@code roundR1ToExtremeTapPosition} / {@code roundVoltageRatios}); a member
      *  never enabled keeps its base tap. {@code state} is readBatchDiscreteTvcState's layout. */
-    public static void writeBack(LfNetwork network, List<TransformerController> tcs, double[] state) {
+    public static void applyToNetwork(LfNetwork network, List<TransformerController> tcs, double[] state) {
         if (tcs == null || tcs.isEmpty() || state == null) {
             return;
         }

@@ -238,7 +238,7 @@ public final class GpuShuntVoltageControlOuterLoop {
      *  OLF's loop leaves it: every dispatched controller shunt has its control disabled and
      *  {@code dispatchB()} run from the continuous b the device rounded ({@code state} =
      *  readBatchDiscreteShuntState, {@code positions} = readBatchDiscreteShuntPositions). */
-    public static void writeBack(LfNetwork network, List<Group> groups, double[] state, int[] positions) {
+    public static void applyToNetwork(LfNetwork network, List<Group> groups, double[] state, int[] positions) {
         if (groups == null || groups.isEmpty() || state == null) {
             return;
         }

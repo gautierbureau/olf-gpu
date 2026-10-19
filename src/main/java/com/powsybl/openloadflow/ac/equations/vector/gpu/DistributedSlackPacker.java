@@ -102,7 +102,7 @@ final class DistributedSlackPacker {
         List<Double> dgMarginDown = new ArrayList<>();
         List<Integer> busGenStart = new ArrayList<>();
         List<Integer> busGenEnd = new ArrayList<>();
-        List<Integer> dsBusNum = new ArrayList<>();                     // WHICH bus each row is (write-back)
+        List<Integer> dsBusNum = new ArrayList<>();                     // WHICH bus each row is (applyToNetwork)
         List<String> dgGenId = new ArrayList<>();                       // WHICH generator each slot is
         List<Double> dsFactorRaw = new ArrayList<>();
         List<Double> dsBaseTargetP = new ArrayList<>();                 // each bus's initial BUS_TARGET_P

@@ -56,7 +56,7 @@ void seedSolve(BatchSolverContext* ctx, DriverPass& drv, const int* rlStateIn, c
     // Each generator's own slack move is per-solve state, cleared before ANYTHING reads it: the seed-time curve
     // limits below evaluate a curve at base + genCum wherever genCumValid is set. Cleared only after the seed,
     // a reused context evaluated scenario slot s at the move of the contingency the PREVIOUS chunk solved in
-    // that slot. The write-back also reads it when the DS phase never fires (NaN targetP otherwise).
+    // that slot. applyToNetwork also reads it when the DS phase never fires (NaN targetP otherwise).
     if (ctx->ngen > 0 && ctx->dGenCum.p) {
         CUDA_CHECK(cudaMemsetAsync(ctx->dGenCum.p, 0, static_cast<size_t>(ctx->ngen) * nS * sizeof(double), ctx->stream));
         CUDA_CHECK(cudaMemsetAsync(ctx->dGenCumValid.p, 0, (size_t) nS * sizeof(char), ctx->stream));

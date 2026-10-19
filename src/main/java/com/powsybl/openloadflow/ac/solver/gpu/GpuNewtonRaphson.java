@@ -23,17 +23,17 @@ import com.powsybl.openloadflow.ac.equations.vector.gpu.StructureNative;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DeviceFlowControllers;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DeviceLoopKind;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DeviceLoopTables;
-import com.powsybl.openloadflow.ac.outerloop.gpu.DistributedSlackWriteBack;
 import com.powsybl.openloadflow.ac.outerloop.gpu.ForceTargetQInReactiveLimits;
+import com.powsybl.openloadflow.ac.outerloop.gpu.GpuDistributedSlackOuterLoop;
 import com.powsybl.openloadflow.ac.outerloop.gpu.GpuHvdcAcEmulationLimitsOuterLoop;
 import com.powsybl.openloadflow.ac.outerloop.gpu.GpuIncrementalShuntVoltageControlOuterLoop;
 import com.powsybl.openloadflow.ac.outerloop.gpu.GpuIncrementalTransformerVoltageControlOuterLoop;
 import com.powsybl.openloadflow.ac.outerloop.gpu.GpuMonitoringVoltageOuterLoop;
 import com.powsybl.openloadflow.ac.outerloop.gpu.GpuPhaseControlOuterLoop;
+import com.powsybl.openloadflow.ac.outerloop.gpu.GpuReactiveLimitsOuterLoop;
 import com.powsybl.openloadflow.ac.outerloop.gpu.HvdcNative;
 import com.powsybl.openloadflow.ac.outerloop.gpu.PhaseControlNative;
 import com.powsybl.openloadflow.ac.outerloop.gpu.ReactiveCapabilityCurves;
-import com.powsybl.openloadflow.ac.outerloop.gpu.ReactiveLimitsWriteBack;
 import com.powsybl.openloadflow.ac.outerloop.gpu.SecondaryVoltageControlNative;
 import com.powsybl.openloadflow.ac.outerloop.gpu.ShuntVoltageControlNative;
 import com.powsybl.openloadflow.ac.outerloop.gpu.TransformerVoltageControlNative;
@@ -198,50 +198,50 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
      * rte6515 where the same solve with the driver off leaves none), and everything downstream —
      * the batched SA's base targets, the CPU-routed contingencies — starts from the wrong network.
      */
-    private void writeBackDriverMutations(GpuAcData data) {
+    private void applyDeviceDecisionsToNetwork(GpuAcData data) {
         long handle = context.handle.get();
         double[] deviceTargets = BatchReadbackNative.readBatchTargets(handle);
         if (hvdcCtls != null && !hvdcCtls.isEmpty()) {
-            GpuHvdcAcEmulationLimitsOuterLoop.writeBack(network, hvdcCtls, HvdcNative.readBatchHvdcStatus(handle),
+            GpuHvdcAcEmulationLimitsOuterLoop.applyToNetwork(network, hvdcCtls, HvdcNative.readBatchHvdcStatus(handle),
                     data.getTotalElementCount());
         }
         if (monCtls != null && !monCtls.isEmpty()) {
-            GpuMonitoringVoltageOuterLoop.writeBack(network, monCtls, VoltageMonitoringNative.readBatchMonitoringTargets(handle),
+            GpuMonitoringVoltageOuterLoop.applyToNetwork(network, monCtls, VoltageMonitoringNative.readBatchMonitoringTargets(handle),
                     data.rlBusNum());
         }
         if (svcCtls != null) {
-            com.powsybl.openloadflow.ac.outerloop.gpu.GpuSecondaryVoltageControlOuterLoop.writeBack(network, svcCtls,
+            com.powsybl.openloadflow.ac.outerloop.gpu.GpuSecondaryVoltageControlOuterLoop.applyToNetwork(network, svcCtls,
                     SecondaryVoltageControlNative.readBatchSecondaryVcTargets(handle));
         }
-        lastDistributedActivePower = DistributedSlackWriteBack.writeBack(network, equationSystem, handle, driverDsParams(),
+        lastDistributedActivePower = GpuDistributedSlackOuterLoop.applyToNetwork(network, equationSystem, handle, driverDsParams(),
                 loadAnchorTargetP, deviceTargets,
                 BatchReadbackNative.readBatchDsGenCum(handle), BatchReadbackNative.readBatchDsRetain(handle), data);
-        ReactiveLimitsWriteBack.writeBack(network, rlStateOut, data, deviceTargets,
+        GpuReactiveLimitsOuterLoop.applyToNetwork(network, rlStateOut, data, deviceTargets,
                 data.rlRemote() != null ? BatchReadbackNative.readBatchRowModes(handle) : null);
         if (tvcOwned && tvcCtls != null) {
-            GpuIncrementalTransformerVoltageControlOuterLoop.writeBackTaps(network, tvcCtls,
+            GpuIncrementalTransformerVoltageControlOuterLoop.applyToNetwork(network, tvcCtls,
                                                                TransformerVoltageControlNative.readBatchTvcTaps(handle));
         }
         if (shuntOwned && shuntCtls != null) {
-            GpuIncrementalShuntVoltageControlOuterLoop.writeBackPositions(network, shuntCtls,
+            GpuIncrementalShuntVoltageControlOuterLoop.applyToNetwork(network, shuntCtls,
                                                               ShuntVoltageControlNative.readBatchShuntPositions(handle));
         }
         if (flowOwned && flowCtls != null) {
-            DeviceFlowControllers.writeBackTaps(network, flowCtls, PhaseControlNative.readBatchFlowTaps(handle));
+            DeviceFlowControllers.applyToNetwork(network, flowCtls, PhaseControlNative.readBatchFlowTaps(handle));
         }
         if (cphOwned && cphCtls != null) {
-            GpuPhaseControlOuterLoop.writeBack(network, cphCtls, PhaseControlNative.readBatchContinuousPhaseTaps(handle));
+            GpuPhaseControlOuterLoop.applyToNetwork(network, cphCtls, PhaseControlNative.readBatchContinuousPhaseTaps(handle));
         }
         if (tvdOwned && tvdCtls != null) {
-            com.powsybl.openloadflow.ac.outerloop.gpu.GpuTransformerVoltageControlOuterLoop.writeBack(network, tvdCtls,
+            com.powsybl.openloadflow.ac.outerloop.gpu.GpuTransformerVoltageControlOuterLoop.applyToNetwork(network, tvdCtls,
                     TransformerVoltageControlNative.readBatchDiscreteTvcState(handle));
             if (tvdFreeze != null && tvdFreeze.hasCandidates()) {
-                com.powsybl.openloadflow.ac.outerloop.gpu.GpuTransformerVoltageControlOuterLoop.writeBackFreeze(network, tvdFreeze,
+                com.powsybl.openloadflow.ac.outerloop.gpu.GpuTransformerVoltageControlOuterLoop.applyFreezeToNetwork(network, tvdFreeze,
                         TransformerVoltageControlNative.readBatchDiscreteTvcFreeze(handle));
             }
         }
         if (svdOwned && svdGroups != null) {
-            com.powsybl.openloadflow.ac.outerloop.gpu.GpuShuntVoltageControlOuterLoop.writeBack(network, svdGroups,
+            com.powsybl.openloadflow.ac.outerloop.gpu.GpuShuntVoltageControlOuterLoop.applyToNetwork(network, svdGroups,
                     ShuntVoltageControlNative.readBatchDiscreteShuntState(handle), ShuntVoltageControlNative.readBatchDiscreteShuntPositions(handle));
         }
     }
@@ -756,7 +756,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
             // 170 BUS_TARGET_P rows and 14 BUS_TARGET_V rows over 1e-4, where the same solve with
             // the driver off leaves none. Give the distribution back to the network, exactly as
             // OLF's own DistributedSlack does by setting generator targetP.
-            writeBackDriverMutations(cachedData);
+            applyDeviceDecisionsToNetwork(cachedData);
             // write the device solution back; the equation vector re-evaluates from it
             equationSystem.getStateVector().set(Arrays.copyOf(out, n));
             equationVector.minus(targetVector);
@@ -985,7 +985,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                 // OLF's forced-PV election keys are part of creating a context with RL entries.
                 DeviceLoopTables.installRlElection(context.handle.get(), data);
                 cachedData = data;
-                loadAnchorTargetP = DistributedSlackWriteBack.captureLoadAnchors(network);
+                loadAnchorTargetP = GpuDistributedSlackOuterLoop.captureLoadAnchors(network);
                 rebuilt = true;
                 criteriaDirty = true;
                 tablesDirty = true;
@@ -997,7 +997,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                 // extraction so content matching never aliases it under the old one
                 GpuAcStructures.rebind(cachedData, data);
                 cachedData = data;
-                loadAnchorTargetP = DistributedSlackWriteBack.captureLoadAnchors(network);
+                loadAnchorTargetP = GpuDistributedSlackOuterLoop.captureLoadAnchors(network);
                 // The election keys are per-extraction (nominal V, live target P, id rank), so a
                 // value refresh re-installs them too.
                 DeviceLoopTables.installRlElection(context.handle.get(), data);
@@ -1300,7 +1300,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                 // OLF's loop reads them from the network (SecondaryVoltageControl skips the RL-pinned
                 // controllers of a zone; a check that still saw them enabled went UNSTABLE where OLF's
                 // said STABLE, one extra adjust round, 2.5e-8 kV).
-                writeBackDriverMutations(cachedData);
+                applyDeviceDecisionsToNetwork(cachedData);
                 equationSystem.getStateVector().set(Arrays.copyOf(out, n));
                 AcSolverUtil.updateNetwork(network, equationSystem);
                 // Run OLF's own outer loop check
@@ -1348,7 +1348,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                         // from the NETWORK, so hand them back first or the restarted solve starts
                         // from the original targets and undoes the distribution (4.3e-3 kV on the
                         // AFTER_GENERATOR transformer-VC base).
-                        writeBackDriverMutations(cachedData);
+                        applyDeviceDecisionsToNetwork(cachedData);
                         rlCarry = new java.util.HashMap<>();
                         if (rlStateOut != null && cachedData.rlBusNum() != null) {
                             for (int i = 0; i < rlStateOut.length && i < cachedData.rlBusNum().length; i++) {
@@ -1455,7 +1455,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
         NewtonRaphsonStoppingCriteria.TestResult result =
                 parameters.getStoppingCriteria().test(equationVector.getArray(), equationSystem);
         if (DriverNative.readBatchDriverPaused(context.handle.get()) == 0) {
-            writeBackDriverMutations(cachedData);
+            applyDeviceDecisionsToNetwork(cachedData);
             equationVector.minus(targetVector);               // re-measure against the written-back targets
             result = parameters.getStoppingCriteria().test(equationVector.getArray(), equationSystem);
         }

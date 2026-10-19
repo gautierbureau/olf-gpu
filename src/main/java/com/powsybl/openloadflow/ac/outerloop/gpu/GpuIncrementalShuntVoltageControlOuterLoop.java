@@ -223,7 +223,7 @@ public final class GpuIncrementalShuntVoltageControlOuterLoop {
 
     /** Give the driver's final sections (scenario 0) back to the network — what OLF's own loop leaves
      *  through LfShunt.Controller.updateSectionB; the shunt's b follows through OLF's listeners. */
-    public static void writeBackPositions(LfNetwork network, List<Controller> ctrls, int[] positions) {
+    public static void applyToNetwork(LfNetwork network, List<Controller> ctrls, int[] positions) {
         if (ctrls == null || ctrls.isEmpty() || positions == null) {
             return;
         }

@@ -22,14 +22,15 @@ import com.powsybl.openloadflow.network.LfNetwork;
 import java.util.Map;
 
 /**
- * The device's distributed-slack decisions given back to the network, as OLF's ActivePowerDistribution leaves
+ * DEVICE port of OLF's {@code DistributedSlackOuterLoop}, Java side: the loop runs in the kernel
+ * (distributed_slack.cu); this class applies its decisions to the network, as OLF's ActivePowerDistribution leaves
  * them: generator targets from their anchor plus their share, or the loads moved for a load-based balance type.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
-public final class DistributedSlackWriteBack {
+public final class GpuDistributedSlackOuterLoop {
 
-    private DistributedSlackWriteBack() {
+    private GpuDistributedSlackOuterLoop() {
     }
 
     /** DistributedSlack, exactly OLF's ActivePowerDistribution: every participating generator ends at
@@ -39,7 +40,7 @@ public final class DistributedSlackWriteBack {
      *  captured at the last check that actually DISTRIBUTED, not the sub-tolerance one a STABLE check
      *  measures. A solve whose DistributedSlack phase never fired leaves the generators alone.
      *  Returns what it distributed (pu, see GpuNewtonRaphson#lastDistributedActivePower), NaN when nothing. */
-    public static double writeBack(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> equationSystem, long handle,
+    public static double applyToNetwork(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> equationSystem, long handle,
                             GpuDsParams dsParams,
                             Map<LfLoad, Double> loadAnchorTargetP,
                             double[] deviceTargets, double[] genCum, double[] retain, GpuAcData data) {

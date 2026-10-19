@@ -12,14 +12,15 @@ import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfNetwork;
 
 /**
- * The device's reactive-limit pins given back to the network, the way OLF's ReactiveLimitsOuterLoop leaves a bus:
- * generation Q frozen at the limit and voltage control disabled, or a released pin undone.
+ * DEVICE port of OLF's {@code ReactiveLimitsOuterLoop}, Java side: the loop runs in the kernel (reactive_limits.cu);
+ * this class applies its pins to the network, the way OLF's loop leaves a bus: generation Q frozen at the limit and
+ * voltage control disabled, or a released pin undone.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
-public final class ReactiveLimitsWriteBack {
+public final class GpuReactiveLimitsOuterLoop {
 
-    private ReactiveLimitsWriteBack() {
+    private GpuReactiveLimitsOuterLoop() {
     }
 
     /** ReactiveLimits: the device pins a controller at its limit (row mode V→Q, target the limit) where
@@ -28,7 +29,7 @@ public final class ReactiveLimitsWriteBack {
      *  target vector picks the limit up. A pin the device released (a PQ→PV switch-back) is undone the
      *  way OLF undoes it. Limit types 3/4 are robust mode's MIN/MAX_REALISTIC_V freezes: the pin is the
      *  same, only the recorded type differs (and OLF never re-freezes those at a moved Q limit). */
-    public static void writeBack(LfNetwork network, int[] rlStateOut, GpuAcData data, double[] deviceTargets, int[] devModes) {
+    public static void applyToNetwork(LfNetwork network, int[] rlStateOut, GpuAcData data, double[] deviceTargets, int[] devModes) {
         if (rlStateOut == null || data == null || data.rlBusNum() == null) {
             return;
         }
@@ -46,7 +47,7 @@ public final class ReactiveLimitsWriteBack {
             }
             if (limitType == 5) {
                 // Frozen by the generator voltage control manager, not pinned at a reactive limit:
-                // writeBackFreeze owns that bus. A solve normally unfreezes at COMPLETE, so this only
+                // applyFreezeToNetwork owns that bus. A solve normally unfreezes at COMPLETE, so this only
                 // shows up when one ended mid-phase.
                 continue;
             }

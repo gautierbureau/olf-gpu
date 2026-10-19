@@ -229,7 +229,7 @@ public final class GpuMonitoringVoltageOuterLoop {
     /** Give the driver's activations (scenario 0: the chosen target per controller, NaN = standing by)
      *  back to the network exactly as OLF's MonitoringVoltageOuterLoop.switchPqPv does: voltage control
      *  on with the recomputed Q target, the SVC in VOLTAGE control, the automaton's target as setpoint. */
-    public static void writeBack(LfNetwork network, List<Ctl> ctls, double[] activated, int[] rlBusNum) {
+    public static void applyToNetwork(LfNetwork network, List<Ctl> ctls, double[] activated, int[] rlBusNum) {
         if (ctls == null || ctls.isEmpty() || activated == null || rlBusNum == null) {
             return;
         }

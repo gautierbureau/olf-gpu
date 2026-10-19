@@ -1726,7 +1726,7 @@ final class GpuBatchChunkSolver {
      * <p>Each device pass re-derives the WHOLE distribution from the anchor (OLF's resetToInitialState), so
      * after the last pass that fired the participants carry it in their per-generator cumulative shares and
      * the slack its retained share: Σ genCum + retain — the same two read-backs the base load flow writes
-     * back as targets ({@code GpuNewtonRaphson.writeBackDistributedSlack}). When no pass fired the
+     * back as targets ({@code GpuDistributedSlackOuterLoop.applyToNetwork}). When no pass fired the
      * distribution is the pre-distribution alone. Slack-only participation keeps everything in the slack's
      * absorbed total. Only valid when ONE solve covered the chunk (the read-backs are per solve): the caller
      * checks; a scenario left NaN reports the pre-distribution as before.

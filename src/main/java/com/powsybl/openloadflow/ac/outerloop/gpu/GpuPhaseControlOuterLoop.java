@@ -200,7 +200,7 @@ public final class GpuPhaseControlOuterLoop {
 
     /** Give the driver's decisions (scenario 0) back to the network the way OLF's loop leaves it: every
      *  CONTROLLER-mode control switched off, every tap at the rounded / shifted position. */
-    public static void writeBack(LfNetwork network, List<Ctl> ctls, int[] taps) {
+    public static void applyToNetwork(LfNetwork network, List<Ctl> ctls, int[] taps) {
         if (ctls == null || ctls.isEmpty() || taps == null) {
             return;
         }

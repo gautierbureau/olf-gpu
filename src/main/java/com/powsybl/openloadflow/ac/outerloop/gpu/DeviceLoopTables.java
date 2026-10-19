@@ -114,7 +114,7 @@ public final class DeviceLoopTables {
         if (System.getenv("OLF_GPU_RL_TRACE") != null) {
             // Which install carries which kinds: the base solve's context and the batch's both come
             // through here, with packs that may differ (the batch's is extracted after the base
-            // solve's write-back). A kind the batch never receives cannot be what seeds it.
+            // solve's applyToNetwork). A kind the batch never receives cannot be what seeds it.
             StringBuilder ks = new StringBuilder();
             for (int i = 0; i < baseLimitTypes.length; i++) {
                 if (baseLimitTypes[i] != 0) {

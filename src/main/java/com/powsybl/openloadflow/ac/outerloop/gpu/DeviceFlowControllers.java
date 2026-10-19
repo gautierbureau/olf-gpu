@@ -101,7 +101,7 @@ public final class DeviceFlowControllers {
     }
 
     /** Give the driver's final taps (scenario 0) back to the network through the pi model. */
-    public static void writeBackTaps(LfNetwork network, List<Controller> ctrls, int[] taps) {
+    public static void applyToNetwork(LfNetwork network, List<Controller> ctrls, int[] taps) {
         if (ctrls == null || ctrls.isEmpty() || taps == null) {
             return;
         }

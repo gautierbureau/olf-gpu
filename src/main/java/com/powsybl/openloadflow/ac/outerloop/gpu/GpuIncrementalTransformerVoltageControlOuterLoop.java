@@ -214,7 +214,7 @@ public final class GpuIncrementalTransformerVoltageControlOuterLoop {
 
     /** Give the driver's final taps (scenario 0) back to the network — the tap position OLF's own loop
      *  would have left through updateTapPositionToReachNewR1; the pi model's listeners refresh r1. */
-    public static void writeBackTaps(LfNetwork network, List<Controller> ctrls, int[] taps) {
+    public static void applyToNetwork(LfNetwork network, List<Controller> ctrls, int[] taps) {
         if (ctrls == null || ctrls.isEmpty() || taps == null) {
             return;
         }

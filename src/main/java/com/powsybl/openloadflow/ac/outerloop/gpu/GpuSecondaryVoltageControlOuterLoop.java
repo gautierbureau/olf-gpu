@@ -207,7 +207,7 @@ public final class GpuSecondaryVoltageControlOuterLoop {
      * shared-distribution member, and writing 0.165 pu in as a target voltage puts the control outside
      * the plausible band and OLF drops it.
      */
-    public static void writeBack(LfNetwork network, Controllers controllers, double[] movedTargetV) {
+    public static void applyToNetwork(LfNetwork network, Controllers controllers, double[] movedTargetV) {
         if (controllers == null || movedTargetV == null) {
             return;
         }

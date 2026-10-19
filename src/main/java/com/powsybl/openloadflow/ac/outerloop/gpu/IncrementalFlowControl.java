@@ -13,7 +13,6 @@ import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchElementMapper;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchSkips;
 import com.powsybl.openloadflow.equations.EquationSystem;
-import com.powsybl.openloadflow.equations.EquationTerm;
 import com.powsybl.openloadflow.equations.StateVector;
 import com.powsybl.openloadflow.equations.Variable;
 import com.powsybl.openloadflow.network.LfBranch;
@@ -30,18 +29,15 @@ import java.util.Map;
  * DEVICE port of the FLOW-OBSERVED incremental loops — OLF's
  * {@code IncrementalTransformerReactivePowerControlOuterLoop} (rho taps driving a branch Q flow) and
  * {@code AcIncrementalPhaseControlOuterLoop} (a1 taps driving a branch P flow in CONTROLLER mode, or
- * capping a branch current in LIMITER mode). Same skeleton as the voltage-observed ports
- * ({@link GpuIncrementalTransformerVoltageControlOuterLoop}): batched in-kernel sensitivities with a unit RHS at each
- * controller's pinned identity row (BRANCH_TARGET_RHO1 / BRANCH_TARGET_ALPHA1), but the observable
- * is a BRANCH FLOW: OLF's own {@code EquationTerm.calculateSensi} evaluates the flow gradient dotted
- * with the sensitivity column — the orchestrator loads each scenario's state into the shared
- * equation-system state vector and calls the very same terms ({@code getQ1/getP1/getI1} & co), with
- * the device solution injected at the term's variable rows of a sparse-filled DenseMatrix, so the
- * observable math is OLF's code, not a re-derivation.
+ * capping a branch current in LIMITER mode). This class builds and uploads the controller tables; the
+ * loops run in the kernel (incremental_flow_control.cu): batched sensitivities with a unit RHS at each
+ * controller's pinned identity row (BRANCH_TARGET_RHO1 / BRANCH_TARGET_ALPHA1), the controlled branch
+ * flow and its gradient through the codegen'd closed-branch terms (flow_observation.cuh), OLF's tap
+ * decisions and its direction ratchet.
  *
  * <p>Phase sensitivities: OLF's RHS is {@code toRadians(1)} (per-degree); with the device's unit RHS
  * the tap shift collapses to {@code da = diff / rawSensi} (radians), and the {@code SENSI_EPS} gate
- * applies to the per-degree value ({@code rawSensi * toRadians(1)}).
+ * (in incremental_flow_control.cu) applies to the per-degree value ({@code rawSensi * toRadians(1)}).
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
@@ -49,10 +45,8 @@ public final class IncrementalFlowControl {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(IncrementalFlowControl.class);
 
-    private static final int MAX_DIRECTION_CHANGE = 3;       // both OLF loops
     private static final double MIN_TARGET_DEADBAND_MVAR = 0.1;      // RPC (per-unit, OLF literal)
     private static final double MIN_TARGET_DEADBAND_P = 1.0 / 100.0; // phase: 1 MW in per-unit
-    private static final double SENSI_EPS = 1e-6;            // phase loops only (RPC has no gate)
 
     static final int KIND_RPC = 0;                           // rho -> branch Q (closest-R1 taps)
     static final int KIND_PHASE_P = 1;                       // a1 -> branch P (closest-A1 taps)
@@ -61,29 +55,8 @@ public final class IncrementalFlowControl {
     private IncrementalFlowControl() {
     }
 
-    public record Controller(int kind, int pinRow, int pinTapCol, EquationTerm<AcVariableType, AcEquationType> flowTerm,
-                      double targetValue, double halfDeadband, double[][] tapRows, int baseTapIdx,
+    public record Controller(int kind, int pinRow, int pinTapCol, double targetValue, double halfDeadband, double[][] tapRows, int baseTapIdx,
                       int elemIndex, int controlledElemIndex, int maxTapShift, int controlledSide, int branchNum) {
-        double pin(int tap) {
-            return tapRows[tap][pinTapCol];
-        }
-    }
-
-    private static final class Ratchet {
-        int dirChangeCount;
-        int currentDirection;
-        int allowedDirection;
-
-        void update(int direction) {                         // OLF ControllerContext.updateAllowedDirection
-            if (dirChangeCount < MAX_DIRECTION_CHANGE) {
-                if (currentDirection != 0 && currentDirection != direction) {
-                    dirChangeCount++;
-                }
-                currentDirection = direction;
-            } else {
-                allowedDirection = direction;
-            }
-        }
     }
 
     /** The observable-evaluation context captured at build time: the shared es state vector (scenario
@@ -91,7 +64,6 @@ public final class IncrementalFlowControl {
     public record EsContext(StateVector stateVector, int n) {
     }
 
-    @SuppressWarnings("unchecked")
     public static List<Controller> buildControllers(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
                                              GpuBatchElementMapper elementMapper, int rpcMaxTapShift,
                                              boolean rpc, boolean phase) {
@@ -121,14 +93,12 @@ public final class IncrementalFlowControl {
                             "Incremental RPC controller {} not representable on the GPU batch — skipped", controller.getId());
                     continue;
                 }
-                var term = (EquationTerm<AcVariableType, AcEquationType>) (rc.getControlledSide() == TwoSides.ONE
-                        ? controlled.getQ1() : controlled.getQ2());
                 // OLF getHighestPriorityReactivePowerTarget: a generator reactive power control wins
                 double target = controlled.getGeneratorReactivePowerControl()
                         .map(com.powsybl.openloadflow.network.GeneratorReactivePowerControl::getTargetValue)
                         .orElse(rc.getTargetValue());
                 double halfDb = rc.getTargetDeadband().orElse(MIN_TARGET_DEADBAND_MVAR) / 2;
-                out.add(new Controller(KIND_RPC, pinRow, 6, term, target, halfDb,
+                out.add(new Controller(KIND_RPC, pinRow, 6, target, halfDb,
                         tapRows, closestTap(tapRows, 6, controller.getPiModel().getR1()),
                         elemIndex, ctlElemIndex, rpcMaxTapShift, rc.getControlledSide() == TwoSides.ONE ? 1 : 2, controller.getNum()));
             }
@@ -158,16 +128,8 @@ public final class IncrementalFlowControl {
                             "Incremental phase controller {} not representable on the GPU batch — skipped", controller.getId());
                     continue;
                 }
-                EquationTerm<AcVariableType, AcEquationType> term;
-                if (kind == KIND_PHASE_P) {
-                    term = (EquationTerm<AcVariableType, AcEquationType>) (pc.getControlledSide() == TwoSides.ONE
-                            ? controlled.getP1() : controlled.getP2());
-                } else {
-                    term = (EquationTerm<AcVariableType, AcEquationType>) (pc.getControlledSide() == TwoSides.ONE
-                            ? controlled.getI1() : controlled.getI2());
-                }
                 double halfDb = Math.max(pc.getTargetDeadband(), MIN_TARGET_DEADBAND_P) / 2;
-                out.add(new Controller(kind, pinRow, 7, term, pc.getTargetValue(), halfDb,
+                out.add(new Controller(kind, pinRow, 7, pc.getTargetValue(), halfDb,
                         tapRows, closestTap(tapRows, 7, controller.getPiModel().getA1()),
                         elemIndex, ctlElemIndex, Integer.MAX_VALUE, pc.getControlledSide() == TwoSides.ONE ? 1 : 2, controller.getNum()));
             }
@@ -253,10 +215,6 @@ public final class IncrementalFlowControl {
             }
         }
         return best;
-    }
-
-    private static boolean descending(Controller c, int n1, int n2, double shift) {
-        return shift > 0 ? c.pin(n1) < c.pin(n2) : c.pin(n1) > c.pin(n2);
     }
 
 }

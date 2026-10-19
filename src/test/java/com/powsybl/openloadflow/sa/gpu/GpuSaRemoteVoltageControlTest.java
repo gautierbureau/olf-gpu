@@ -128,7 +128,7 @@ class GpuSaRemoteVoltageControlTest extends AbstractGpuSaTest {
      *  balance on its coupler's DUMMY_Q row - gets OLF's recomputed target (no generator left: -loadQ = 0) on that
      *  row; losing g1 kills the control (the survivor b2 is pinned) and b1's own balance takes over. */
     @Test
-    void deviceMergedControlBasePinnedMemberLosesItsGeneratorWhileTheSurvivorControlsMatchesCpu() {
+    void deviceMergedControlSwitchedToPqInBaseMemberLosesItsGeneratorWhileTheSurvivorControlsMatchesCpu() {
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
         Network network = Network.create("merged-gen-vc-sa", "code");
@@ -520,7 +520,7 @@ class GpuSaRemoteVoltageControlTest extends AbstractGpuSaTest {
      *  it suppressed the carrier member's own DISTR_Q for a balance OLF had removed with the bus. rte6515
      *  BUS-6194_BBS_1 (FAILED where OLF converges, 60 violations lost) and BUS-6003_BBS_1 (0.473 MW). */
     @Test
-    void deviceLostBasePinnedPilotSectionMatchesCpu() {
+    void deviceLostSwitchedToPqInBasePilotSectionMatchesCpu() {
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
         GpuBatchScopeCensus.reset();
@@ -649,7 +649,7 @@ class GpuSaRemoteVoltageControlTest extends AbstractGpuSaTest {
      *  is no curve, so without the fix the flipped target stands to the end. GPU SA == CPU SA at 1e-12,
      *  and the contingency must batch. */
     @Test
-    void deviceBasePinnedMemberKeepsItsQWhenASiblingIsIslandedMatchesCpu() {
+    void deviceSwitchedToPqInBaseMemberKeepsItsQWhenASiblingIsIslandedMatchesCpu() {
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
         Network network = Network.create("pinned-member-sibling-islanded", "code");
@@ -807,7 +807,7 @@ class GpuSaRemoteVoltageControlTest extends AbstractGpuSaTest {
      *  the survivors' DISTR_Q rows (qPct x frozen targetQ). A decisive remote UNPIN requires the
      *  group to lose control margin, which the B4 pre-gate keeps on the CPU (free member pinnable). */
     @Test
-    void deviceRemoteMemberBasePinnedReliefMatchesCpu() {
+    void deviceRemoteMemberSwitchedToPqInBaseReliefMatchesCpu() {
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
         Network network = remotePinNetwork("g2", 180.0);
@@ -950,7 +950,7 @@ class GpuSaRemoteVoltageControlTest extends AbstractGpuSaTest {
      *  group further and g1 STAYS pinned. Exercises the base-mode-keyed carrier select and the
      *  frozen-free-member target compensation on the survivors. 1e-12. */
     @Test
-    void deviceRemoteFreeMemberBasePinnedMatchesCpu() {
+    void deviceRemoteFreeMemberSwitchedToPqInBaseMatchesCpu() {
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
         Network network = remotePinNetwork("g1", 180.0);
@@ -1052,7 +1052,7 @@ class GpuSaRemoteVoltageControlTest extends AbstractGpuSaTest {
     /** Base-pinned continuation, branch-outage flavor: g2 pinned in the base, the l45b outage loads
      *  the group further and the member STAYS pinned on both sides. 1e-12. */
     @Test
-    void remoteMemberBasePinnedMatchesCpu() {
+    void remoteMemberSwitchedToPqInBaseMatchesCpu() {
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
         Network network = remotePinNetwork("g2", 180.0);

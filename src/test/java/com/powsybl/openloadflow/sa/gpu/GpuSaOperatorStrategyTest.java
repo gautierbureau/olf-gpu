@@ -101,10 +101,10 @@ class GpuSaOperatorStrategyTest extends AbstractGpuSaTest {
      *  only LOCAL base pins, so the pair solved g2 at its base pin first (network.xiidm LLJP: a member at -0.2954 the
      *  parent had released, 5.46 kV). */
     @Test
-    void strategiesAfterTheReleaseOfABasePinnedRemoteMemberMatchCpu() {
+    void strategiesAfterTheReleaseOfASwitchedToPqInBaseRemoteMemberMatchCpu() {
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
-        Network network = basePinnedRemoteMemberNetwork();
+        Network network = switchedToPqInBaseRemoteMemberNetwork();
         List<Contingency> ctgs = List.of(new Contingency("lq", new com.powsybl.contingency.LoadContingency("lq")));
         List<com.powsybl.action.Action> actions = List.of(
                 new com.powsybl.action.LoadActionBuilder().withId("more4").withLoadId("l4").withRelativeValue(true)

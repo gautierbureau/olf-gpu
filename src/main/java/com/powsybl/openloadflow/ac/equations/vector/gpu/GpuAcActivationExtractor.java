@@ -141,7 +141,7 @@ public final class GpuAcActivationExtractor {
                     // member's own V row (mode 4 below, its alternate dest); the pilot's balance on the first
                     // ENABLED member's V row (the carrier), or on its own V row once every controller is pinned
                     // (its V identity gone, the row is a power row). Measured: the canonical row collided with the
-                    // pinned first member's own Q (deviceRemoteFreeMemberBasePinnedMatchesCpu & co., 12 tests).
+                    // pinned first member's own Q (deviceRemoteFreeMemberSwitchedToPqInBaseMatchesCpu & co., 12 tests).
                     qr = GpuAcRowIndexing.stateQRow(bus, vCol, stubBranchOfBus, dummyQCol);
                 }
                 assign(es, targetMap, qr, q, AcEquationType.BUS_TARGET_Q, bus.getNum());

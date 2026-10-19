@@ -144,7 +144,7 @@ final class GenOutageSeed {
                     // contingency of 24,376 whose outer-loop sequence differed from the 1-thread CPU's.
                     // Its limits already collapse with the outage (minQDelta/maxQDelta, the curve channel),
                     // so the entry is simply left live (fixture:
-                    // deviceBasePinnedBusLosingItsOnlyGeneratorIsStillCheckedMatchesCpu).
+                    // deviceSwitchedToPqInBaseBusLosingItsOnlyGeneratorIsStillCheckedMatchesCpu).
                     boolean liveDeadLocal = (gpuData.rlRemote() == null || gpuData.rlRemote().length <= go.rlEntry()
                                     || gpuData.rlRemote()[go.rlEntry()] == 0)
                             && gpuData.switchedPvToPqInBase(go.rlEntry());

@@ -476,10 +476,10 @@ class GpuSaReactiveLimitsTest extends AbstractGpuSaTest {
      *  channel and never checked it: one solve fewer than OLF, and a state that stops elsewhere.
      *  GPU SA == CPU SA at 1e-12, and the outage must BATCH. */
     @Test
-    void deviceBasePinnedBusLosingItsOnlyGeneratorIsStillCheckedMatchesCpu() {
+    void deviceSwitchedToPqInBaseBusLosingItsOnlyGeneratorIsStillCheckedMatchesCpu() {
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
-        Network network = basePinnedDeadBusNetwork();
+        Network network = switchedToPqInBaseDeadBusNetwork();
         List<Contingency> ctgs = List.of(
                 new Contingency("g1", new com.powsybl.contingency.GeneratorContingency("g1")));
         com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()

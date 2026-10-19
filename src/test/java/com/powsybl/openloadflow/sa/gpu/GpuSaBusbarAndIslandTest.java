@@ -594,7 +594,7 @@ class GpuSaBusbarAndIslandTest extends AbstractGpuSaTest {
      *  base: the device diverged (MAX_ITERATION_REACHED) where OLF converges after releasing g1; both MIN_Q: the same;
      *  g1 alone pinned MIN_Q: converged 5.6 kV off at vl3. */
     @Test
-    void deviceCouplerOpeningSplitsABasePinnedMergedControlMatchesCpu() {
+    void deviceCouplerOpeningSplitsASwitchedToPqInBaseMergedControlMatchesCpu() {
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
         for (double[] shape : new double[][] {{60, 200}, {60, 40}, {300, 200}}) {   // {g0/g1 max Q, ld0 Q}

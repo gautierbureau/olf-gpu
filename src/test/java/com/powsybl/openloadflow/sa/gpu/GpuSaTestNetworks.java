@@ -99,7 +99,7 @@ final class GpuSaTestNetworks {
         return network;
     }
 
-    static Network basePinnedDeadBusNetwork() {
+    static Network switchedToPqInBaseDeadBusNetwork() {
         // A 400 kV mesh: gs at vl0 is the slack; g1 at vlb (250 MW, Q range [0, 20] MVar) regulates vlb locally at
         // 399.646 kV, under the 399.797 kV the bus reaches at Q = 0, so the base pins it at its MIN_Q; with g1 lost
         // vlb falls to 399.496 kV, under the target, which is what makes OLF switch the dead bus back to PV.
@@ -1359,7 +1359,7 @@ final class GpuSaTestNetworks {
         return network;
     }
 
-    static Network basePinnedRemoteMemberNetwork() {
+    static Network switchedToPqInBaseRemoteMemberNetwork() {
         // g1, g2 and g3 regulate b4 (413.4 kV) remotely; g5 holds b5, behind a 60 Ohm line, on its own
         Network network = com.powsybl.openloadflow.network.VoltageControlNetworkFactory.createWithGeneratorRemoteControl();
         network.getLoad("l4").setQ0(-80);

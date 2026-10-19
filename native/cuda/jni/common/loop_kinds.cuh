@@ -1,10 +1,11 @@
 // Copyright (c) 2026, RTE (http://www.rte-france.com)
 // SPDX-License-Identifier: MPL-2.0
 //
-// The outer loops' display names, the HVDC AC-emulation status codes and the reactive-limit limit types.
+// The outer loops' display names and the reactive-limit limit types.
 #ifndef OLF_GPU_COMMON_LOOP_KINDS_CUH
 #define OLF_GPU_COMMON_LOOP_KINDS_CUH
 
+#include "codes/gpu_ac_emulation_status.cuh"
 #include "codes/gpu_outer_loop_kind.cuh"
 
 // The outer loops the device driver can run: codes/gpu_outer_loop_kind.cuh.
@@ -31,11 +32,6 @@ inline const char* olKindName(int k) {
     }
 }
 
-// GpuBatchHvdcAcEmulation's status codes, shared with the host.
-constexpr int HV_LINEAR = 0;
-constexpr int HV_SAT_1_TO_2 = 1;
-constexpr int HV_SAT_2_TO_1 = 2;
-constexpr int HV_FROZEN = 3;
 constexpr int MAX_DEVICE_LOOPS = 16;
 
 // Reactive-limit limit types: 0 unpinned, 1 MIN_Q, 2 MAX_Q, 3 MIN_REALISTIC_V, 4 MAX_REALISTIC_V (OLF's QLimitType),

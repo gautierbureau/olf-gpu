@@ -13,6 +13,7 @@ import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.equations.HvdcAcEmulationSide1ActiveFlowEquationTerm;
 import com.powsybl.openloadflow.ac.equations.HvdcAcEmulationSide2ActiveFlowEquationTerm;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchOverrides;
+import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuAcEmulationStatus;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.Variable;
 import com.powsybl.openloadflow.network.LfHvdc;
@@ -48,11 +49,6 @@ public final class GpuHvdcAcEmulationLimitsOuterLoop {
 
     static final int HVDC_TRACE_ROW = System.getenv("OLF_GPU_HVDC_TRACE") == null ? -1
             : "all".equals(System.getenv("OLF_GPU_HVDC_TRACE")) ? -2 : Integer.parseInt(System.getenv("OLF_GPU_HVDC_TRACE"));
-
-    public static final int LINEAR = 0;
-    public static final int SAT_1_TO_2 = 1;
-    public static final int SAT_2_TO_1 = 2;
-    public static final int FROZEN = 3;
 
     /** One packed AC-emulation HVDC: the hv element index (per-scenario disabled bit), the two
      *  converter buses' P-target rows, OLF's own linear p1/p2 terms, the emulation limits, and the
@@ -135,12 +131,7 @@ public final class GpuHvdcAcEmulationLimitsOuterLoop {
         for (int h = 0; h < packed.size(); h++) {
             LfHvdc hvdc = packed.get(h);
             var ac = hvdc.getAcEmulationControl();
-            int baseStatus = switch (ac.getAcEmulationStatus()) {
-                case LINEAR_MODE -> LINEAR;
-                case SATURATION_MODE_FROM_CS1_TO_CS2 -> SAT_1_TO_2;
-                case SATURATION_MODE_FROM_CS2_TO_CS1 -> SAT_2_TO_1;
-                case FROZEN -> FROZEN;
-            };
+            int baseStatus = GpuAcEmulationStatus.of(ac.getAcEmulationStatus());
             // The bus's own BUS_PHI column (the angle the emulation reads) and, SEPARATELY, the row its
             // P equation actually lives on — the parent coupler's DUMMY_P when the relocation moved it
             // (tasks #68). Resolved through the zero-impedance pack so it cannot drift from the kernels.
@@ -175,8 +166,8 @@ public final class GpuHvdcAcEmulationLimitsOuterLoop {
                     hvdc.getConverterStation1().getLossFactor() / 100,
                     hvdc.getConverterStation2().getLossFactor() / 100, hvdc.getR(),
                     baseStatus,
-                    baseStatus == LINEAR ? 0 : hvdc.getConverterStation1().getTargetP(),
-                    baseStatus == LINEAR ? 0 : hvdc.getConverterStation2().getTargetP()));
+                    baseStatus == GpuAcEmulationStatus.LINEAR_MODE ? 0 : hvdc.getConverterStation1().getTargetP(),
+                    baseStatus == GpuAcEmulationStatus.LINEAR_MODE ? 0 : hvdc.getConverterStation2().getTargetP()));
         }
         return out;
     }
@@ -233,9 +224,9 @@ public final class GpuHvdcAcEmulationLimitsOuterLoop {
                 if (ctgOut[s * nh + h] != 0) {
                     continue;                                // the contingency owns that bit
                 }
-                if (status[s][h] == LINEAR) {
+                if (status[s][h] == GpuAcEmulationStatus.LINEAR_MODE) {
                     disabledMask[s][c.hvElemIndex()] = false;
-                    if (c.baseStatus() != LINEAR) {          // strip the base injections from the targets
+                    if (c.baseStatus() != GpuAcEmulationStatus.LINEAR_MODE) {  // strip the base injections from the targets
                         if (c.bus1PActive()) {
                             overrides.merge(s * n + c.bus1WriteRow(rm), baseTargets[c.bus1WriteRow(rm)], c.baseD1(), 0);
                         }
@@ -250,8 +241,8 @@ public final class GpuHvdcAcEmulationLimitsOuterLoop {
                     // impossible (it was taken at the warm-start flows), but it is exactly what the
                     // applied-delta arrays hold. Seeding the list PRE-freeze and skipping this entry
                     // silently dropped its override.
-                    double[] d = status[s][h] == SAT_1_TO_2 ? saturationDeltas(c, true)
-                            : status[s][h] == SAT_2_TO_1 ? saturationDeltas(c, false)
+                    double[] d = status[s][h] == GpuAcEmulationStatus.SATURATION_MODE_FROM_CS1_TO_CS2 ? saturationDeltas(c, true)
+                            : status[s][h] == GpuAcEmulationStatus.SATURATION_MODE_FROM_CS2_TO_CS1 ? saturationDeltas(c, false)
                             : new double[] {appliedD1[s * nh + h] + c.baseD1(),
                                             appliedD2[s * nh + h] + c.baseD2()};
                     if (c.bus1PActive()) {
@@ -274,13 +265,13 @@ public final class GpuHvdcAcEmulationLimitsOuterLoop {
                                  int[][] status, boolean[][] disabledMask) {
         for (int h = 0; h < ctls.size(); h++) {
             Ctl c = ctls.get(h);
-            if (c.baseStatus() == LINEAR) {
+            if (c.baseStatus() == GpuAcEmulationStatus.LINEAR_MODE) {
                 continue;
             }
             for (int s = 0; s < chunkSize; s++) {
                 if (s >= realCount) {
                     disabledMask[s][c.hvElemIndex()] = true;
-                } else if (status[s][h] == LINEAR && !disabledMask[s][c.hvElemIndex()]) {
+                } else if (status[s][h] == GpuAcEmulationStatus.LINEAR_MODE && !disabledMask[s][c.hvElemIndex()]) {
                     status[s][h] = c.baseStatus();
                     disabledMask[s][c.hvElemIndex()] = true;
                 }
@@ -330,7 +321,7 @@ public final class GpuHvdcAcEmulationLimitsOuterLoop {
             for (int h = 0; h < nh; h++) {
                 flatStatus[s2 * nh + h] = hvdcStatus[s2][h];
                 // "the contingency outaged it" is the bit set on a LINEAR entry
-                ctgOut[s2 * nh + h] = (byte) (hvdcStatus[s2][h] == LINEAR
+                ctgOut[s2 * nh + h] = (byte) (hvdcStatus[s2][h] == GpuAcEmulationStatus.LINEAR_MODE
                         && disabledMask[s2][ctls.get(h).hvElemIndex()] ? 1 : 0);
             }
         }
@@ -356,22 +347,22 @@ public final class GpuHvdcAcEmulationLimitsOuterLoop {
             var control = hvdc.getAcEmulationControl();
             var now = control.getAcEmulationStatus();
             switch (deviceStatus[h]) {
-                case LINEAR -> {
+                case GpuAcEmulationStatus.LINEAR_MODE -> {
                     if (now != LfHvdc.AcEmulationControl.AcEmulationStatus.LINEAR_MODE) {
                         control.switchToLinearMode();
                     }
                 }
-                case SAT_1_TO_2 -> {
+                case GpuAcEmulationStatus.SATURATION_MODE_FROM_CS1_TO_CS2 -> {
                     if (now != LfHvdc.AcEmulationControl.AcEmulationStatus.SATURATION_MODE_FROM_CS1_TO_CS2) {
                         control.switchToSaturationFromCS1toCS2(true);
                     }
                 }
-                case SAT_2_TO_1 -> {
+                case GpuAcEmulationStatus.SATURATION_MODE_FROM_CS2_TO_CS1 -> {
                     if (now != LfHvdc.AcEmulationControl.AcEmulationStatus.SATURATION_MODE_FROM_CS2_TO_CS1) {
                         control.switchToSaturationFromCS2toCS1(true);
                     }
                 }
-                case FROZEN -> {
+                case GpuAcEmulationStatus.FROZEN -> {
                     if (now != LfHvdc.AcEmulationControl.AcEmulationStatus.FROZEN) {
                         control.switchToFrozenState(true);
                     }

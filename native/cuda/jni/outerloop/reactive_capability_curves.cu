@@ -13,6 +13,7 @@
 
 #include "../common/check.cuh"
 #include "../common/launch.cuh"
+#include "../common/codes/gpu_ac_emulation_status.cuh"
 #include "hvdc.cuh"
 #include "reactive_capability_curve.cuh"
 #include "slack_participants.cuh"
@@ -26,7 +27,7 @@ __device__ inline double cvHvdcActivePower(const CvHvdc& c, int s, int n, int h,
     size_t sh = (size_t) s * c.nhv + h;
     const double* p = c.in + (size_t) h * 9;
     bool off = c.ctgOut[sh] || c.disabled[(size_t) s * c.nElements + c.elem[h]];
-    if (c.status[sh] == HV_LINEAR && !off) {
+    if (c.status[sh] == GpuAcEmulationStatus::LINEAR_MODE && !off) {
         const double* xs = c.x + (size_t) s * n;
         double ph1 = xs[c.phi1[h]];
         double ph2 = xs[c.phi2[h]];

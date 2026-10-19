@@ -8,6 +8,7 @@
 package com.powsybl.openloadflow.ac.outerloop.gpu;
 
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchOverrides;
+import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuAcEmulationStatus;
 
 import java.util.List;
 
@@ -40,7 +41,7 @@ public final class GpuFreezingHvdcACEmulationOuterloop {
     /**
      * Pre-solve freeze (OLF FreezingHvdcACEmulation.initialize): every live hvdc frozen at its scenario's WARM-START
      * flows — hv disabled bits set, converter-bus targets pinned, on the batch's own override list. Returns the
-     * per-(scenario, hvdc) status matrix seeded GpuHvdcAcEmulationLimitsOuterLoop.FROZEN (or GpuHvdcAcEmulationLimitsOuterLoop.LINEAR where the freeze cannot apply), and records in
+     * per-(scenario, hvdc) status matrix seeded GpuAcEmulationStatus.FROZEN (or GpuAcEmulationStatus.LINEAR_MODE where the freeze cannot apply), and records in
      * {@code appliedD1}/{@code appliedD2} the converter-row delta each freeze APPLIED (relative to the base-status
      * delta), which the in-kernel loops need to keep applying transitions incrementally.
      *
@@ -94,7 +95,7 @@ public final class GpuFreezingHvdcACEmulationOuterloop {
                     appliedD1[s * ctls.size() + h] = d[0] - c.baseD1();
                     appliedD2[s * ctls.size() + h] = d[1] - c.baseD2();
                 }
-                status[s][h] = GpuHvdcAcEmulationLimitsOuterLoop.FROZEN;
+                status[s][h] = GpuAcEmulationStatus.FROZEN;
                 disabledMask[s][c.hvElemIndex()] = true;
                 // base frame: baseTargets (or the row's existing override — e.g. a lost load on the
                 // converter bus) already carry the base injections

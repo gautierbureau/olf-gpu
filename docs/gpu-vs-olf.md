@@ -167,3 +167,4 @@ constants carry OLF's constant names.
 | `GpuDistributedSlackFactorMode` | `ParticipationType.REMAINING_MARGIN` vs every other balance type | `STATIC` 0, `REMAINING_MARGIN` 1 |
 | `GpuAcSolverStatus` | `AcSolverStatus` | `CONVERGED` 0, `MAX_ITERATION_REACHED` 1; device only: `DIVERGED` -1 (NaN/Inf mismatch), `REJECTED` -2 (replayed by the CPU), `LINEAR_SOLVE_FAILED` -3 (first linear solve failed, retried in robust mode; closest OLF notion `SOLVER_FAILED`) |
 | `GpuOuterLoopKind` | the outer loops, by OLF loop name | `NONE` -1; `DISTRIBUTED_SLACK` 0 … `SECONDARY_VOLTAGE_CONTROL` 16 (in-kernel); `HOST_*` 5-9: a loop the driver pauses at for OLF to run; `COUNT` 17 |
+| `GpuAcEmulationStatus` | `LfHvdc.AcEmulationControl.AcEmulationStatus` | `LINEAR_MODE` 0, `SATURATION_MODE_FROM_CS1_TO_CS2` 1, `SATURATION_MODE_FROM_CS2_TO_CS1` 2, `FROZEN` 3 (OLF ordinals) |

@@ -17,6 +17,7 @@
 #include "../common/launch.cuh"
 #include "../common/codes/gpu_distributed_slack_factor_mode.cuh"
 #include "../common/codes/gpu_outer_loop_kind.cuh"
+#include "../common/codes/gpu_ac_emulation_status.cuh"
 #include "hvdc.cuh"
 #include "forced_target_q.cuh"
 #include "slack_participants.cuh"
@@ -59,7 +60,7 @@ __global__ void hvdcSlackBalanceBatch(int nS, int nh, int n, int nElements, int 
         if (r1 != slackRow && r2 != slackRow) continue;
         size_t sh = (size_t) s * nh + h;
         const double* p = hvIn + (size_t) h * 9;
-        bool live = status[sh] == HV_LINEAR && !ctgOut[sh] && !disabled[(size_t) s * nElements + hvElem[h]];
+        bool live = status[sh] == GpuAcEmulationStatus::LINEAR_MODE && !ctgOut[sh] && !disabled[(size_t) s * nElements + hvElem[h]];
         double ph1 = xs[hvBus1Phi[h]];
         double ph2 = xs[hvBus2Phi[h]];
         if (r1 == slackRow) {

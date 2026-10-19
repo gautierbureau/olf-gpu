@@ -27,13 +27,13 @@ public final class DevicePhaseInstaller {
      *  most one loop of each type (ExplicitAcOuterLoopConfig.checkTypeUnicity), so an incremental loop and its
      *  discrete twin are never both present. {@code entryOn}: the activation the solve starts from already carries
      *  the controls OLF's initialize switched ON (the base load flow); a chunk applies them at solve entry itself. */
-    public record Request(List<IncrementalTransformerVoltageControl.Controller> incrementalTvc, int incTvcMaxTapShift,
+    public record Request(List<GpuIncrementalTransformerVoltageControlOuterLoop.Controller> incrementalTvc, int incTvcMaxTapShift,
                           List<IncrementalFlowControl.Controller> flow,
-                          List<ContinuousPhaseControl.Ctl> continuousPhase,
-                          List<IncrementalShuntVoltageControl.Controller> incrementalShunt, int incShuntMaxSectionShift,
-                          List<DiscreteTransformerVoltageControl.TransformerController> discreteTvc, boolean simpleTvc,
-                          boolean afterGenerator, DiscreteTransformerVoltageControl.FreezeTables freeze,
-                          List<DiscreteShuntVoltageControl.Group> simpleShunt, boolean entryOn) {
+                          List<GpuPhaseControlOuterLoop.Ctl> continuousPhase,
+                          List<GpuIncrementalShuntVoltageControlOuterLoop.Controller> incrementalShunt, int incShuntMaxSectionShift,
+                          List<GpuTransformerVoltageControlOuterLoop.TransformerController> discreteTvc, boolean simpleTvc,
+                          boolean afterGenerator, GpuTransformerVoltageControlOuterLoop.FreezeTables freeze,
+                          List<GpuShuntVoltageControlOuterLoop.Group> simpleShunt, boolean entryOn) {
     }
 
     /** Which of the run's discrete and incremental control loops the device owns, and the ones it refused. */
@@ -51,14 +51,14 @@ public final class DevicePhaseInstaller {
         // Every table upload also CLEARS when the run has none: the context is cached across runs on the
         // same network, and a stale table from a previous run selects the wrong driver phase (a Simple
         // TVC run after an INCREMENTAL one ran LOOP_TVC_KERNEL on its controls — 3.6e-7 kV).
-        boolean tvcInKernel = IncrementalTransformerVoltageControl.uploadToDevice(handle, r.incrementalTvc(),
+        boolean tvcInKernel = GpuIncrementalTransformerVoltageControlOuterLoop.uploadToDevice(handle, r.incrementalTvc(),
                 r.incrementalTvc() != null ? r.incTvcMaxTapShift() : 1);
         // The flow-observed incremental loops (RPC at OLF order 9, incremental phase at order 7) as DRIVER PHASES.
         boolean flowInKernel = IncrementalFlowControl.uploadToDevice(handle, r.flow());
         // CONTINUOUS PhaseControl as a DRIVER PHASE (OLF order 7); the pre-solve control-ON activation stays host-side.
-        boolean cphInKernel = ContinuousPhaseControl.uploadToDevice(handle, r.continuousPhase());
+        boolean cphInKernel = GpuPhaseControlOuterLoop.uploadToDevice(handle, r.continuousPhase());
         // IncrementalShuntVoltageControl as a DRIVER PHASE (OLF order 10).
-        boolean shuntInKernel = IncrementalShuntVoltageControl.uploadToDevice(handle, r.incrementalShunt(),
+        boolean shuntInKernel = GpuIncrementalShuntVoltageControlOuterLoop.uploadToDevice(handle, r.incrementalShunt(),
                 r.incrementalShunt() != null ? r.incShuntMaxSectionShift() : 3);
         // The DISCRETE TransformerVoltageControl (AFTER_GENERATOR / WITH_GENERATOR, OLF order 8) and the
         // WITH_GENERATOR ShuntVoltageControl (order 10) as DRIVER PHASES: the control-ON entry (OLF's
@@ -66,25 +66,25 @@ public final class DevicePhaseInstaller {
         // without a tap table) is not owned.
         boolean tvdInKernel = false;
         if (r.discreteTvc() != null) {
-            tvdInKernel = DiscreteTransformerVoltageControl.uploadToDevice(handle, r.discreteTvc(), r.simpleTvc() ? 1 : 0,
+            tvdInKernel = GpuTransformerVoltageControlOuterLoop.uploadToDevice(handle, r.discreteTvc(), r.simpleTvc() ? 1 : 0,
                     r.entryOn() && r.simpleTvc());
             if (tvdInKernel && r.afterGenerator()) {
                 // AFTER_GENERATOR: OLF's GeneratorVoltageControlManager freezes the generator controls under the
                 // transformer-controlled level while the transformers act. Without the freeze tables (a candidate
                 // the kernel cannot represent) the device does not own the loop.
                 if (r.freeze() == null) {
-                    DiscreteTransformerVoltageControl.uploadToDevice(handle, null, 0, false);
+                    GpuTransformerVoltageControlOuterLoop.uploadToDevice(handle, null, 0, false);
                     tvdInKernel = false;
                 } else {
-                    DiscreteTransformerVoltageControl.uploadFreeze(handle, r.freeze());
+                    GpuTransformerVoltageControlOuterLoop.uploadFreeze(handle, r.freeze());
                 }
             } else if (tvdInKernel) {
-                DiscreteTransformerVoltageControl.uploadFreeze(handle, null);   // WITH_GENERATOR freezes nothing
+                GpuTransformerVoltageControlOuterLoop.uploadFreeze(handle, null);   // WITH_GENERATOR freezes nothing
             }
         } else {
-            DiscreteTransformerVoltageControl.uploadToDevice(handle, null, 0, false);   // clears a cached context's table
+            GpuTransformerVoltageControlOuterLoop.uploadToDevice(handle, null, 0, false);   // clears a cached context's table
         }
-        boolean svdInKernel = DiscreteShuntVoltageControl.uploadToDevice(handle, r.simpleShunt(), r.entryOn());
+        boolean svdInKernel = GpuShuntVoltageControlOuterLoop.uploadToDevice(handle, r.simpleShunt(), r.entryOn());
 
         List<String> refusedLoops = new ArrayList<>();
         if (present(r.incrementalTvc()) && !tvcInKernel) {

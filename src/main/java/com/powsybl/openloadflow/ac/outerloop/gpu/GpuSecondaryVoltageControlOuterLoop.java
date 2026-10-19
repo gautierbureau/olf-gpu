@@ -58,14 +58,14 @@ import java.util.Map;
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
-public final class SecondaryVoltageControlLoop {
+public final class GpuSecondaryVoltageControlOuterLoop {
 
-    private static final Logger LOGGER = LoggerFactory.getLogger(SecondaryVoltageControlLoop.class);
+    private static final Logger LOGGER = LoggerFactory.getLogger(GpuSecondaryVoltageControlOuterLoop.class);
 
     private static final double DV_EPS = 1E-4;               // OLF SecondaryVoltageControlOuterLoop
     private static final double DK_DIFF_MAX_EPS = 1E-3;
 
-    private SecondaryVoltageControlLoop() {
+    private GpuSecondaryVoltageControlOuterLoop() {
     }
 
     /** One Q observable of a controller bus, as the DEVICE sees it: {@code kind} 0/1 = the CLOSED

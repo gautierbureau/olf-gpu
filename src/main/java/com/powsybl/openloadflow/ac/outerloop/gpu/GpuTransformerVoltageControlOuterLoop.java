@@ -39,11 +39,11 @@ import java.util.List;
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
-public final class DiscreteTransformerVoltageControl {
+public final class GpuTransformerVoltageControlOuterLoop {
 
-    private static final Logger LOGGER = LoggerFactory.getLogger(DiscreteTransformerVoltageControl.class);
+    private static final Logger LOGGER = LoggerFactory.getLogger(GpuTransformerVoltageControlOuterLoop.class);
 
-    private DiscreteTransformerVoltageControl() {
+    private GpuTransformerVoltageControlOuterLoop() {
     }
 
     /** One member transformer of a (possibly shared) voltage control: rho row (== r1 col,

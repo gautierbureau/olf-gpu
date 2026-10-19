@@ -20,23 +20,23 @@ import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcStructures;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuEquationDump;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.StructureNative;
-import com.powsybl.openloadflow.ac.outerloop.gpu.ContinuousPhaseControl;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DeviceLoopKind;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DeviceLoopTables;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DistributedSlackWriteBack;
 import com.powsybl.openloadflow.ac.outerloop.gpu.ForcedTargetQ;
+import com.powsybl.openloadflow.ac.outerloop.gpu.GpuIncrementalShuntVoltageControlOuterLoop;
+import com.powsybl.openloadflow.ac.outerloop.gpu.GpuIncrementalTransformerVoltageControlOuterLoop;
+import com.powsybl.openloadflow.ac.outerloop.gpu.GpuMonitoringVoltageOuterLoop;
+import com.powsybl.openloadflow.ac.outerloop.gpu.GpuPhaseControlOuterLoop;
 import com.powsybl.openloadflow.ac.outerloop.gpu.HvdcAcEmulation;
 import com.powsybl.openloadflow.ac.outerloop.gpu.HvdcNative;
 import com.powsybl.openloadflow.ac.outerloop.gpu.IncrementalFlowControl;
-import com.powsybl.openloadflow.ac.outerloop.gpu.IncrementalShuntVoltageControl;
-import com.powsybl.openloadflow.ac.outerloop.gpu.IncrementalTransformerVoltageControl;
 import com.powsybl.openloadflow.ac.outerloop.gpu.PhaseControlNative;
 import com.powsybl.openloadflow.ac.outerloop.gpu.ReactiveCapabilityCurves;
 import com.powsybl.openloadflow.ac.outerloop.gpu.ReactiveLimitsWriteBack;
 import com.powsybl.openloadflow.ac.outerloop.gpu.SecondaryVoltageControlNative;
 import com.powsybl.openloadflow.ac.outerloop.gpu.ShuntVoltageControlNative;
 import com.powsybl.openloadflow.ac.outerloop.gpu.TransformerVoltageControlNative;
-import com.powsybl.openloadflow.ac.outerloop.gpu.VoltageMonitoring;
 import com.powsybl.openloadflow.ac.outerloop.gpu.VoltageMonitoringNative;
 import com.powsybl.openloadflow.ac.solver.AbstractAcSolver;
 import com.powsybl.openloadflow.ac.solver.AcSolverResult;
@@ -206,11 +206,11 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                     data.getTotalElementCount());
         }
         if (monCtls != null && !monCtls.isEmpty()) {
-            VoltageMonitoring.writeBack(network, monCtls, VoltageMonitoringNative.readBatchMonitoringTargets(handle),
+            GpuMonitoringVoltageOuterLoop.writeBack(network, monCtls, VoltageMonitoringNative.readBatchMonitoringTargets(handle),
                     data.rlBusNum());
         }
         if (svcCtls != null) {
-            com.powsybl.openloadflow.ac.outerloop.gpu.SecondaryVoltageControlLoop.writeBack(network, svcCtls,
+            com.powsybl.openloadflow.ac.outerloop.gpu.GpuSecondaryVoltageControlOuterLoop.writeBack(network, svcCtls,
                     SecondaryVoltageControlNative.readBatchSecondaryVcTargets(handle));
         }
         lastDistributedActivePower = DistributedSlackWriteBack.writeBack(network, equationSystem, handle, driverDsParams(),
@@ -219,29 +219,29 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
         ReactiveLimitsWriteBack.writeBack(network, rlStateOut, data, deviceTargets,
                 data.rlRemote() != null ? BatchReadbackNative.readBatchRowModes(handle) : null);
         if (tvcOwned && tvcCtls != null) {
-            IncrementalTransformerVoltageControl.writeBackTaps(network, tvcCtls,
+            GpuIncrementalTransformerVoltageControlOuterLoop.writeBackTaps(network, tvcCtls,
                                                                TransformerVoltageControlNative.readBatchTvcTaps(handle));
         }
         if (shuntOwned && shuntCtls != null) {
-            IncrementalShuntVoltageControl.writeBackPositions(network, shuntCtls,
+            GpuIncrementalShuntVoltageControlOuterLoop.writeBackPositions(network, shuntCtls,
                                                               ShuntVoltageControlNative.readBatchShuntPositions(handle));
         }
         if (flowOwned && flowCtls != null) {
             IncrementalFlowControl.writeBackTaps(network, flowCtls, PhaseControlNative.readBatchFlowTaps(handle));
         }
         if (cphOwned && cphCtls != null) {
-            ContinuousPhaseControl.writeBack(network, cphCtls, PhaseControlNative.readBatchContinuousPhaseTaps(handle));
+            GpuPhaseControlOuterLoop.writeBack(network, cphCtls, PhaseControlNative.readBatchContinuousPhaseTaps(handle));
         }
         if (tvdOwned && tvdCtls != null) {
-            com.powsybl.openloadflow.ac.outerloop.gpu.DiscreteTransformerVoltageControl.writeBack(network, tvdCtls,
+            com.powsybl.openloadflow.ac.outerloop.gpu.GpuTransformerVoltageControlOuterLoop.writeBack(network, tvdCtls,
                     TransformerVoltageControlNative.readBatchDiscreteTvcState(handle));
             if (tvdFreeze != null && tvdFreeze.hasCandidates()) {
-                com.powsybl.openloadflow.ac.outerloop.gpu.DiscreteTransformerVoltageControl.writeBackFreeze(network, tvdFreeze,
+                com.powsybl.openloadflow.ac.outerloop.gpu.GpuTransformerVoltageControlOuterLoop.writeBackFreeze(network, tvdFreeze,
                         TransformerVoltageControlNative.readBatchDiscreteTvcFreeze(handle));
             }
         }
         if (svdOwned && svdGroups != null) {
-            com.powsybl.openloadflow.ac.outerloop.gpu.DiscreteShuntVoltageControl.writeBack(network, svdGroups,
+            com.powsybl.openloadflow.ac.outerloop.gpu.GpuShuntVoltageControlOuterLoop.writeBack(network, svdGroups,
                     ShuntVoltageControlNative.readBatchDiscreteShuntState(handle), ShuntVoltageControlNative.readBatchDiscreteShuntPositions(handle));
         }
     }
@@ -339,21 +339,21 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
     // The driver phases with their own per-run tables (HVDC AC emulation, MonitoringVoltage, in-kernel
     // incremental TVC): built at every solve from the network as it stands, written back after it.
     private List<HvdcAcEmulation.Ctl> hvdcCtls;
-    private List<VoltageMonitoring.Ctl> monCtls;
-    private List<IncrementalTransformerVoltageControl.Controller> tvcCtls;
+    private List<GpuMonitoringVoltageOuterLoop.Ctl> monCtls;
+    private List<GpuIncrementalTransformerVoltageControlOuterLoop.Controller> tvcCtls;
     private boolean tvcOwned;
-    private List<IncrementalShuntVoltageControl.Controller> shuntCtls;
+    private List<GpuIncrementalShuntVoltageControlOuterLoop.Controller> shuntCtls;
     private boolean shuntOwned;
     private List<IncrementalFlowControl.Controller> flowCtls;
     private boolean flowOwned;
-    private List<ContinuousPhaseControl.Ctl> cphCtls;
+    private List<GpuPhaseControlOuterLoop.Ctl> cphCtls;
     private boolean cphOwned;
-    private List<com.powsybl.openloadflow.ac.outerloop.gpu.DiscreteTransformerVoltageControl.TransformerController> tvdCtls;
+    private List<com.powsybl.openloadflow.ac.outerloop.gpu.GpuTransformerVoltageControlOuterLoop.TransformerController> tvdCtls;
     private boolean tvdOwned;
-    private com.powsybl.openloadflow.ac.outerloop.gpu.DiscreteTransformerVoltageControl.FreezeTables tvdFreeze;
+    private com.powsybl.openloadflow.ac.outerloop.gpu.GpuTransformerVoltageControlOuterLoop.FreezeTables tvdFreeze;
     /** SecondaryVoltageControl's in-kernel tables — the same phase the batched SA drives by default. */
-    private com.powsybl.openloadflow.ac.outerloop.gpu.SecondaryVoltageControlLoop.Controllers svcCtls;
-    private List<com.powsybl.openloadflow.ac.outerloop.gpu.DiscreteShuntVoltageControl.Group> svdGroups;
+    private com.powsybl.openloadflow.ac.outerloop.gpu.GpuSecondaryVoltageControlOuterLoop.Controllers svcCtls;
+    private List<com.powsybl.openloadflow.ac.outerloop.gpu.GpuShuntVoltageControlOuterLoop.Group> svdGroups;
     private boolean svdOwned;
     /** The host-loop bits the CURRENT solve actually pauses for (in-kernel phases clear theirs). */
     private int activeHostMask;
@@ -654,7 +654,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
             installHvdcDriverLoops(nElements, elementMask, handle);
             // MonitoringVoltage (OLF order 6) as a driver phase.
             monCtls = phases.monitoring();
-            VoltageMonitoring.installDriverLoop(handle, monCtls);
+            GpuMonitoringVoltageOuterLoop.installDriverLoop(handle, monCtls);
             int hostMask = buildHostLoopMask();
             // SecondaryVoltageControl (OLF order 4) IN-KERNEL — the same phase, built the same way,
             // as the batched security analysis. It used to be the one loop the base load flow never
@@ -662,7 +662,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
             // ran it on device; a pause whose mutation dirties the structure is also what forces the
             // driver RESTART, so the divergence was not only a throughput one.
             svcCtls = phases.secondaryVc();
-            if (com.powsybl.openloadflow.ac.outerloop.gpu.SecondaryVoltageControlLoop.uploadToDevice(handle, svcCtls)) {
+            if (com.powsybl.openloadflow.ac.outerloop.gpu.GpuSecondaryVoltageControlOuterLoop.uploadToDevice(handle, svcCtls)) {
                 hostMask &= ~1;                          // bit 0 = HOST_LOOP_SVC
             } else {
                 svcCtls = null;                          // refused: OLF's own loop runs at the pause
@@ -1214,7 +1214,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
             // Batch of one on the live network: its own topology IS the scenario, so the
             // connectivity masks come from an empty contingency.
             tvdFreeze = phases.freeze();
-            com.powsybl.openloadflow.ac.outerloop.gpu.DiscreteTransformerVoltageControl.uploadFixMasks(
+            com.powsybl.openloadflow.ac.outerloop.gpu.GpuTransformerVoltageControlOuterLoop.uploadFixMasks(
                     handle, tvdFreeze, java.util.List.of(), 1);
         }
         if (tvcOwned || tvdOwned) {

@@ -153,7 +153,7 @@ public final class ReactiveLimitsPacker {
             // finding none, recorded a SKIP for every monitored controller — which the all-or-nothing phase gate
             // (DevicePhaseOwnership.batchable) turns into "route the whole run to the CPU". Measured with
             // OLF_GPU_SA_NO_RL=1 on rte6515's busbar window: 976 of 976 batchable contingencies CPU-replayed
-            // (RUNTIME:status=-2=976, 0/1000 on device) while the run's own loop list HAS VoltageMonitoring.
+            // (RUNTIME:status=-2=976, 0/1000 on device) while the run's own loop list HAS GpuMonitoringVoltageOuterLoop.
             if (reactiveLimits || anyMonitoringSvc(network)) {
                 // This enumeration is WIDER than OLF's, on purpose but knowingly:
                 // ReactiveLimitsOuterLoop walks getControllerElements(GENERATOR) and nothing else, while

@@ -10,20 +10,20 @@ package com.powsybl.openloadflow.ac.solver.gpu.batch;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.ZeroImpedanceNative;
-import com.powsybl.openloadflow.ac.outerloop.gpu.ContinuousPhaseControl;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DeviceLoopKind;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DeviceLoopTables;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DevicePhaseInstaller;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DevicePhases;
-import com.powsybl.openloadflow.ac.outerloop.gpu.DiscreteTransformerVoltageControl;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DistributedSlackNative;
 import com.powsybl.openloadflow.ac.outerloop.gpu.ForcedTargetQ;
+import com.powsybl.openloadflow.ac.outerloop.gpu.GpuMonitoringVoltageOuterLoop;
+import com.powsybl.openloadflow.ac.outerloop.gpu.GpuPhaseControlOuterLoop;
+import com.powsybl.openloadflow.ac.outerloop.gpu.GpuSecondaryVoltageControlOuterLoop;
+import com.powsybl.openloadflow.ac.outerloop.gpu.GpuTransformerVoltageControlOuterLoop;
 import com.powsybl.openloadflow.ac.outerloop.gpu.HvdcAcEmulation;
 import com.powsybl.openloadflow.ac.outerloop.gpu.HvdcNative;
 import com.powsybl.openloadflow.ac.outerloop.gpu.ReactiveCapabilityCurves;
 import com.powsybl.openloadflow.ac.outerloop.gpu.ReactiveLimitsNative;
-import com.powsybl.openloadflow.ac.outerloop.gpu.SecondaryVoltageControlLoop;
-import com.powsybl.openloadflow.ac.outerloop.gpu.VoltageMonitoring;
 import com.powsybl.openloadflow.ac.outerloop.gpu.VoltageMonitoringNative;
 import com.powsybl.openloadflow.ac.solver.NewtonRaphsonParameters;
 import com.powsybl.openloadflow.ac.solver.gpu.BatchReadbackNative;
@@ -322,7 +322,7 @@ final class GpuBatchChunkSolver {
                         for (int s = 0; s < realCount; s++) {
                             slotCtgs.add(contingencies.get(group.get(chunkStart + s)));
                         }
-                        DiscreteTransformerVoltageControl.uploadFixMasks(handle, phases.freeze(), slotCtgs, chunkSize);
+                        GpuTransformerVoltageControlOuterLoop.uploadFixMasks(handle, phases.freeze(), slotCtgs, chunkSize);
                     }
                     ChunkLists cl = new ChunkLists(chunkSize, n, gpuData, forcedTargetQ, ngen);
                     SlotSeeding seeding = new SlotSeeding(chunkSize, pairPhase, n, gpuData, elementMapper, contingencies,
@@ -570,7 +570,7 @@ final class GpuBatchChunkSolver {
                     // BEFORE the first solve. This is the loop's initialize(), not an orchestrator — the
                     // in-kernel phase expects the activation to already carry it.
                     if (phases.continuousPhase() != null && !phases.continuousPhase().isEmpty()) {
-                        ContinuousPhaseControl.applyPhaseOn(realCount, n, phases.continuousPhase(),
+                        GpuPhaseControlOuterLoop.applyPhaseOn(realCount, n, phases.continuousPhase(),
                                 rs.rowModePerScenario, baseRowMode, rs.disabledMask, rs.overrides);
                     }
                     int[] targetOverrideIndex = rs.overrides.indexArray();
@@ -987,7 +987,7 @@ final class GpuBatchChunkSolver {
                     // HVDC loops and ReactiveLimits) instead of as a host orchestrator after the whole
                     // solve. Run-constant table, but the context is per chunk.
                     boolean monInKernel = monActive;
-                    VoltageMonitoring.installDriverLoop(handle, monInKernel ? phases.monitoring() : null);
+                    GpuMonitoringVoltageOuterLoop.installDriverLoop(handle, monInKernel ? phases.monitoring() : null);
                     // SecondaryVoltageControl as a DRIVER PAUSE at its OLF slot (order 4). Run as a host
                     // orchestrator it executed AFTER the whole device sweep — i.e. after the control loops
                     // OLF puts at orders 7-10 — so each decided on a state the other had already moved
@@ -999,9 +999,9 @@ final class GpuBatchChunkSolver {
                     // the whole check on the device. Where the kernel refuses the zone set (wider than its
                     // dense system, or an observable on an unpacked element) the driver PAUSES at the same
                     // slot and the same decision runs on the host instead.
-                    boolean svcInKernel = svcActive && SecondaryVoltageControlLoop.uploadToDevice(handle, phases.secondaryVc());
+                    boolean svcInKernel = svcActive && GpuSecondaryVoltageControlOuterLoop.uploadToDevice(handle, phases.secondaryVc());
                     if (!svcInKernel) {
-                        SecondaryVoltageControlLoop.uploadToDevice(handle, null);   // clear a cached context's table
+                        GpuSecondaryVoltageControlOuterLoop.uploadToDevice(handle, null);   // clear a cached context's table
                     }
                     boolean svcAsDriverPause = svcActive && rlStateOut != null && !svcInKernel;
                     DriverNative.setBatchHostLoop(handle, svcAsDriverPause ? 1 : 0);
@@ -1175,7 +1175,7 @@ final class GpuBatchChunkSolver {
                         int svcRounds = 0;
                         while (DriverNative.readBatchDriverPaused(handle) == DeviceLoopKind.HOST_LOOP_SVC
                                 && svcRounds++ < maxSvcRounds) {
-                            var dec = SecondaryVoltageControlLoop.decideAtPause(handle, chunkSize, realCount, n, nrl,
+                            var dec = GpuSecondaryVoltageControlOuterLoop.decideAtPause(handle, chunkSize, realCount, n, nrl,
                                     chunkResults, phases.secondaryVc(), rlStateOut, svcTargetV, baseState);
                             if (dec.targetRows() != null && dec.targetRows().length > 0) {
                                 NewtonSettingsNative.setBatchTargetDeltas(handle, dec.targetRows(), dec.targetValues());
@@ -1238,7 +1238,7 @@ final class GpuBatchChunkSolver {
                     if (monInKernel) {
                         // Keep ACTIVATIONS meaningful with the loop in the driver: it is the guard
                         // that a case really exercises the automaton, not orchestrator bookkeeping.
-                        VoltageMonitoring.ACTIVATIONS.add(
+                        GpuMonitoringVoltageOuterLoop.ACTIVATIONS.add(
                                 VoltageMonitoringNative.readBatchMonitoringActivations(handle));
                     }
                     if (hasHvdcDriverLoops) {

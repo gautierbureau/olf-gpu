@@ -88,7 +88,7 @@ class DiscreteTransformerVoltageControlFixMaskTest {
         assertEquals(2, controllerBranches.size(), "both transformers control BUS_3");
 
         int words = 1;                                      // one PV bus
-        var builder = new DiscreteTransformerVoltageControl.FixMaskBuilder(network,
+        var builder = new GpuTransformerVoltageControlOuterLoop.FixMaskBuilder(network,
                 controllerBranches.stream().mapToInt(Integer::intValue).toArray(), pvBuses, words);
         int nm = controllerBranches.size();
 

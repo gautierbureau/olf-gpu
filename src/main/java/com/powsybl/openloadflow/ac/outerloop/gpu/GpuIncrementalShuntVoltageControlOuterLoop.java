@@ -26,7 +26,7 @@ import java.util.Map;
 
 /**
  * DEVICE port of OLF's {@code IncrementalShuntVoltageControlOuterLoop}, sharing the incremental-family
- * machinery with {@link IncrementalTransformerVoltageControl}: batched in-kernel dV/dB sensitivities (unit RHS at
+ * machinery with {@link GpuIncrementalTransformerVoltageControlOuterLoop}: batched in-kernel dV/dB sensitivities (unit RHS at
  * each controller shunt's pinned {@code SHUNT_TARGET_B} identity row), then OLF's section decisions
  * replicated verbatim per scenario — the |B|-magnitude-descending shunt ordering, the per-round
  * {@code maxSectionShift} cap (OLF's {@code > maxSectionShift} guard, checked BEFORE the increment),
@@ -39,14 +39,14 @@ import java.util.Map;
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
-public final class IncrementalShuntVoltageControl {
+public final class GpuIncrementalShuntVoltageControlOuterLoop {
 
-    private static final Logger LOGGER = LoggerFactory.getLogger(IncrementalShuntVoltageControl.class);
+    private static final Logger LOGGER = LoggerFactory.getLogger(GpuIncrementalShuntVoltageControlOuterLoop.class);
 
     private static final int MAX_DIRECTION_CHANGE = 3;       // OLF IncrementalShuntVoltageControlOuterLoop
     private static final double MIN_TARGET_DEADBAND_KV = 0.1;
 
-    private IncrementalShuntVoltageControl() {
+    private GpuIncrementalShuntVoltageControlOuterLoop() {
     }
 
     /** One SUB-controller (OLF LfShunt.Controller): per-section B/G tables + the ratchet identity. */
@@ -242,7 +242,7 @@ public final class IncrementalShuntVoltageControl {
     @SuppressWarnings("checkstyle:IllegalCatchError") // no section G table: the sections are pure B
     public static double shuntSectionG(LfShunt.Controller c, int pos) {
         // no public accessor for the per-section G table (only getG() at the current position) —
-        // read-only reflection, same pattern as DiscreteTransformerVoltageControl.tapModels
+        // read-only reflection, same pattern as GpuTransformerVoltageControlOuterLoop.tapModels
         try {
             java.lang.reflect.Field fld = LfShunt.Controller.class.getDeclaredField("sectionsG");
             fld.setAccessible(true);

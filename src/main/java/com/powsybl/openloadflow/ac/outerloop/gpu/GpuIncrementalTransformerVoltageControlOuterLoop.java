@@ -52,15 +52,15 @@ import java.util.Map;
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
-public final class IncrementalTransformerVoltageControl {
+public final class GpuIncrementalTransformerVoltageControlOuterLoop {
 
-    private static final Logger LOGGER = LoggerFactory.getLogger(IncrementalTransformerVoltageControl.class);
+    private static final Logger LOGGER = LoggerFactory.getLogger(GpuIncrementalTransformerVoltageControlOuterLoop.class);
 
     private static final int MAX_DIRECTION_CHANGE = 3;       // OLF IncrementalTransformerVoltageControlOuterLoop
     private static final double MIN_SENSI_FILTER = 0.05;
     private static final double MIN_TARGET_DEADBAND_KV = 0.1;
 
-    private IncrementalTransformerVoltageControl() {
+    private GpuIncrementalTransformerVoltageControlOuterLoop() {
     }
 
     /** One incremental controller: the rho variable row (pinned identity — unit-RHS row, target index
@@ -123,7 +123,7 @@ public final class IncrementalTransformerVoltageControl {
                 }
                 Integer rhoRow = branchRhoRows.get(branch.getNum());
                 int elemIndex = elementMapper.getElementIndex(branch);
-                double[][] tapRows = DiscreteTransformerVoltageControl.tapModels(branch.getPiModel());
+                double[][] tapRows = GpuTransformerVoltageControlOuterLoop.tapModels(branch.getPiModel());
                 if (rhoRow == null || vRow == null || elemIndex < 0 || tapRows.length == 0) {
                     GpuBatchSkips.record(GpuBatchSkips.Slot.TVC, LOGGER,
                             "Incremental transformer controller {} not representable on the GPU batch — skipped", branch.getId());

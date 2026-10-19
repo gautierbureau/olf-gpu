@@ -27,7 +27,7 @@ import java.util.List;
 /**
  * DEVICE port of OLF's {@code ShuntVoltageControlOuterLoop} (the WITH_GENERATOR mode — OLF's
  * DEFAULT {@code shuntVoltageControlMode}): the same fixed two-phase flow as
- * {@link SimpleTransformerVoltageControl} —
+ * {@link GpuSimpleTransformerVoltageControlOuterLoop} —
  *
  * <ol>
  *   <li>{@code initialize()} enables CONTINUOUS voltage control on every controller shunt BEFORE
@@ -48,15 +48,15 @@ import java.util.List;
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
-public final class DiscreteShuntVoltageControl {
+public final class GpuShuntVoltageControlOuterLoop {
 
-    private static final Logger LOGGER = LoggerFactory.getLogger(DiscreteShuntVoltageControl.class);
+    private static final Logger LOGGER = LoggerFactory.getLogger(GpuShuntVoltageControlOuterLoop.class);
 
-    private DiscreteShuntVoltageControl() {
+    private GpuShuntVoltageControlOuterLoop() {
     }
 
     /** One controller shunt of a group: its SHUNT_B row and per-section tables (dispatch targets). */
-    public record Member(int bRow, List<IncrementalShuntVoltageControl.Sub> subs, int shOvElem, int elemIndexAbs, int shuntNum) {
+    public record Member(int bRow, List<GpuIncrementalShuntVoltageControlOuterLoop.Sub> subs, int shOvElem, int elemIndexAbs, int shuntNum) {
     }
 
     /** One controlled bus's shunt VC group: the toggle-diff VC-ON activation + its member shunts. */
@@ -66,7 +66,7 @@ public final class DiscreteShuntVoltageControl {
 
     /** Build the groups by TOGGLING each controlled bus's merged controller shunts on the shared
      *  equation system and diffing the activation — the ON recipe is exactly what the engine itself
-     *  would produce (same pattern as {@code DiscreteTransformerVoltageControl.buildTransformerControllers}).
+     *  would produce (same pattern as {@code GpuTransformerVoltageControlOuterLoop.buildTransformerControllers}).
      *  The network is restored before returning. */
     public static List<Group> buildGroups(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
                                    TargetVector<AcVariableType, AcEquationType> targetVector,
@@ -101,16 +101,16 @@ public final class DiscreteShuntVoltageControl {
             List<Member> members = new ArrayList<>();
             boolean ok = true;
             for (LfShunt sh : memberShunts) {
-                List<IncrementalShuntVoltageControl.Sub> subs = new ArrayList<>();
+                List<GpuIncrementalShuntVoltageControlOuterLoop.Sub> subs = new ArrayList<>();
                 boolean gVaries = false;
                 for (LfShunt.Controller c : sh.getControllers()) {
                     double[] sb = c.getSectionsB().stream().mapToDouble(Double::doubleValue).toArray();
                     double[] sg = new double[sb.length];
                     for (int i = 0; i < sb.length; i++) {
-                        sg[i] = IncrementalShuntVoltageControl.shuntSectionG(c, i);
+                        sg[i] = GpuIncrementalShuntVoltageControlOuterLoop.shuntSectionG(c, i);
                         gVaries |= sg[i] != sg[0];
                     }
-                    subs.add(new IncrementalShuntVoltageControl.Sub(sb, sg, c.getPosition(), c.getMinPosition()));
+                    subs.add(new GpuIncrementalShuntVoltageControlOuterLoop.Sub(sb, sg, c.getPosition(), c.getMinPosition()));
                 }
                 int elemIndex = elementMapper.getElementIndex(sh);
                 if (elemIndex < 0 && gVaries) {              // static G follows the section: needs a packed element
@@ -204,7 +204,7 @@ public final class DiscreteShuntVoltageControl {
                 memBRow.add(m.bRow());
                 memElem.add(m.elemIndexAbs());
                 memSubPtr.add(subBase.size());
-                for (IncrementalShuntVoltageControl.Sub sub : m.subs()) {
+                for (GpuIncrementalShuntVoltageControlOuterLoop.Sub sub : m.subs()) {
                     secPtr.add(secB.size());
                     for (double b : sub.sectionsB()) {
                         secB.add(b);
@@ -319,7 +319,7 @@ public final class DiscreteShuntVoltageControl {
         double bSum = 0;
         for (int k = 0; k < m.subs().size(); k++) {
             double toDispatch = residue / remaining--;
-            IncrementalShuntVoltageControl.Sub sub = m.subs().get(k);
+            GpuIncrementalShuntVoltageControlOuterLoop.Sub sub = m.subs().get(k);
             int best = sub.basePos();
             double smallest = Math.abs(toDispatch - sub.b(sub.basePos()));
             for (int p = sub.minPos(); p < sub.sectionsB().length; p++) {

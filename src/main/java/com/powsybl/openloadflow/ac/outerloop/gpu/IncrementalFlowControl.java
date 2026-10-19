@@ -31,7 +31,7 @@ import java.util.Map;
  * {@code IncrementalTransformerReactivePowerControlOuterLoop} (rho taps driving a branch Q flow) and
  * {@code AcIncrementalPhaseControlOuterLoop} (a1 taps driving a branch P flow in CONTROLLER mode, or
  * capping a branch current in LIMITER mode). Same skeleton as the voltage-observed ports
- * ({@link IncrementalTransformerVoltageControl}): batched in-kernel sensitivities with a unit RHS at each
+ * ({@link GpuIncrementalTransformerVoltageControlOuterLoop}): batched in-kernel sensitivities with a unit RHS at each
  * controller's pinned identity row (BRANCH_TARGET_RHO1 / BRANCH_TARGET_ALPHA1), but the observable
  * is a BRANCH FLOW: OLF's own {@code EquationTerm.calculateSensi} evaluates the flow gradient dotted
  * with the sensitivity column — the orchestrator loads each scenario's state into the shared
@@ -115,7 +115,7 @@ public final class IncrementalFlowControl {
                 Integer pinRow = rhoRows.get(controller.getNum());
                 int elemIndex = elementMapper.getElementIndex(controller);
                 int ctlElemIndex = elementMapper.getElementIndex(controlled);
-                double[][] tapRows = DiscreteTransformerVoltageControl.tapModels(controller.getPiModel());
+                double[][] tapRows = GpuTransformerVoltageControlOuterLoop.tapModels(controller.getPiModel());
                 if (pinRow == null || elemIndex < 0 || ctlElemIndex < 0 || tapRows.length == 0) {
                     GpuBatchSkips.record(GpuBatchSkips.Slot.RPC, LOGGER,
                             "Incremental RPC controller {} not representable on the GPU batch — skipped", controller.getId());
@@ -152,7 +152,7 @@ public final class IncrementalFlowControl {
                 Integer pinRow = a1Rows.get(controller.getNum());
                 int elemIndex = elementMapper.getElementIndex(controller);
                 int ctlElemIndex = elementMapper.getElementIndex(controlled);
-                double[][] tapRows = DiscreteTransformerVoltageControl.tapModels(controller.getPiModel());
+                double[][] tapRows = GpuTransformerVoltageControlOuterLoop.tapModels(controller.getPiModel());
                 if (pinRow == null || elemIndex < 0 || ctlElemIndex < 0 || tapRows.length == 0) {
                     GpuBatchSkips.record(GpuBatchSkips.Slot.PHASE, LOGGER,
                             "Incremental phase controller {} not representable on the GPU batch — skipped", controller.getId());

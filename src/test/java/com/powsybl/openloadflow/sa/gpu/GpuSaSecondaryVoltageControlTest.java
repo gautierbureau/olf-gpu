@@ -104,7 +104,7 @@ class GpuSaSecondaryVoltageControlTest extends AbstractGpuSaTest {
         }
     }
 
-    /** DEVICE-mode SecondaryVoltageControl (SecondaryVoltageControlLoop): device-batched dV/dVtarget
+    /** DEVICE-mode SecondaryVoltageControl (GpuSecondaryVoltageControlOuterLoop): device-batched dV/dVtarget
      *  sensitivities + OLF's zone system (A/K0/Jk/Jvpp + tiny LU) replayed per scenario on the host;
      *  GPU SA == CPU SA (1e-11: the SVC math amplifies inner-solve ULP noise to ~1e-12). */
     @Test

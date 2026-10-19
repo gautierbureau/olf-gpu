@@ -42,7 +42,7 @@ public final class TransformerVoltageControlNative {
      *  WITH_GENERATOR (SimpleTransformerVoltageControlOuterLoop); {@code entryOn} = the uploaded activation
      *  already carries the control ON (a base load flow whose network OLF's initialize switched on). Groups
      *  are controlled buses (CSR over members) with their toggle-diffed ON/OFF row deltas (CSR); see
-     *  DiscreteTransformerVoltageControl.uploadToDevice. Returns 1 when the kernel loop owns them. */
+     *  GpuTransformerVoltageControlOuterLoop.uploadToDevice. Returns 1 when the kernel loop owns them. */
     @SuppressWarnings("java:S107")
     public static native int setBatchDiscreteTvc(long handle, int mode, int entryOn,
             int[] grpPtr, int[] grpVRow, double[] grpTargetV, double[] grpHalfDb, int[] grpUseInit,

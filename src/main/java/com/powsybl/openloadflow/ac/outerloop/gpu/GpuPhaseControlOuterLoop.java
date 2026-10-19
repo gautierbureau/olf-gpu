@@ -50,11 +50,11 @@ import java.util.Map;
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
-public final class ContinuousPhaseControl {
+public final class GpuPhaseControlOuterLoop {
 
-    private static final Logger LOGGER = LoggerFactory.getLogger(ContinuousPhaseControl.class);
+    private static final Logger LOGGER = LoggerFactory.getLogger(GpuPhaseControlOuterLoop.class);
 
-    private ContinuousPhaseControl() {
+    private GpuPhaseControlOuterLoop() {
     }
 
     /** kind 0 = CONTROLLER (continuous then discretized), 1 = LIMITER (one-tap current capping). */
@@ -83,7 +83,7 @@ public final class ContinuousPhaseControl {
             TransformerPhaseControl pc = pcOpt.orElseThrow();
             Integer a1Row = a1Rows.get(branch.getNum());
             int elemIndex = elementMapper.getElementIndex(branch);
-            double[][] tapRows = DiscreteTransformerVoltageControl.tapModels(branch.getPiModel());
+            double[][] tapRows = GpuTransformerVoltageControlOuterLoop.tapModels(branch.getPiModel());
             // REMOTE control is fine in BOTH modes. CONTROLLER: the activation diff + tap rounding live
             // on the CONTROLLER and the P row re-emission is keyed by cbPcSide on the controlled
             // element. LIMITER: OLF's loop is local BY CONSTRUCTION, not by restriction —

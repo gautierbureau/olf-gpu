@@ -163,7 +163,7 @@ class GpuSaTransformerControlTest extends AbstractGpuSaTest {
         }
     }
 
-    /** DEVICE-mode IncrementalTransformerVoltageControl (OLF's DEFAULT TVC mode): the device runs the
+    /** DEVICE-mode GpuIncrementalTransformerVoltageControlOuterLoop (OLF's DEFAULT TVC mode): the device runs the
      *  loop's decisions per scenario with in-kernel dV/drho sensitivities (IncrementalTransformerVoltageControl);
      *  the tap-moving strong-line outage plus a weak clone outage, GPU SA == CPU SA at 1e-12. */
     @Test
@@ -483,7 +483,7 @@ class GpuSaTransformerControlTest extends AbstractGpuSaTest {
         assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
     }
 
-    /** DEVICE-mode SimpleTransformerVoltageControl (WITH_GENERATOR): the first solve runs with the
+    /** DEVICE-mode GpuSimpleTransformerVoltageControlOuterLoop (WITH_GENERATOR): the first solve runs with the
      *  VC-ON activation deltas (continuous rho), then one round-to-closest-tap re-solve
      *  (SimpleTransformerVoltageControl); GPU SA == CPU SA at 1e-12, tap-moving strong outage included. */
     @Test

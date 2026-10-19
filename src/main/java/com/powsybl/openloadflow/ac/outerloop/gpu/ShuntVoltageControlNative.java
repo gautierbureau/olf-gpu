@@ -37,7 +37,7 @@ public final class ShuntVoltageControlNative {
     public static native int[] readBatchShuntPositions(long handle);
 
     /** Install the WITH_GENERATOR shunt voltage-control tables for the in-kernel ShuntVoltageControl phase
-     *  (OLF order 10); see DiscreteShuntVoltageControl.uploadToDevice. Returns 1 when the kernel loop owns them. */
+     *  (OLF order 10); see GpuShuntVoltageControlOuterLoop.uploadToDevice. Returns 1 when the kernel loop owns them. */
     @SuppressWarnings("java:S107")
     public static native int setBatchDiscreteShunt(long handle, int entryOn,
             int[] grpPtr, int[] deltaPtr, int[] deltaRow, int[] deltaModeOn, int[] deltaModeOff,
@@ -45,7 +45,7 @@ public final class ShuntVoltageControlNative {
             int[] memBRow, int[] memElem, int[] memSubPtr, int[] secPtr, double[] secB, int[] subMin, int[] subBase);
 
     /** Install the incremental SHUNT voltage-control tables for the in-kernel loop (OLF order 10);
-     *  see IncrementalShuntVoltageControl.uploadToDevice. Returns 1 when the kernel loop owns them. */
+     *  see GpuIncrementalShuntVoltageControlOuterLoop.uploadToDevice. Returns 1 when the kernel loop owns them. */
     public static native int setBatchShuntControllers(long handle,
             int[] bRow, int[] vRow, double[] targetV, double[] halfDb, int[] elemAbs, int[] shOvElem,
             int[] groupPtr, int[] groupCtrl, int[] subPtr, int[] secPtr, double[] secB, double[] secG,

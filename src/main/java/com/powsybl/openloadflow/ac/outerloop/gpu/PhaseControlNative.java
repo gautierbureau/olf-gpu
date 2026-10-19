@@ -32,7 +32,7 @@ public final class PhaseControlNative {
     public static native int[] readBatchFlowTaps(long handle);
 
     /** Install the CONTINUOUS phase controllers for the in-kernel PhaseControl phase (OLF order 7);
-     *  see ContinuousPhaseControl.uploadToDevice. Returns 1 when the kernel loop owns them. */
+     *  see GpuPhaseControlOuterLoop.uploadToDevice. Returns 1 when the kernel loop owns them. */
     public static native int setBatchContinuousPhase(long handle, int[] kind, int[] a1Row, int[] side, double[] limit,
             int[] elem, int[] tapPtr, double[] tapData, int[] baseTap);
 

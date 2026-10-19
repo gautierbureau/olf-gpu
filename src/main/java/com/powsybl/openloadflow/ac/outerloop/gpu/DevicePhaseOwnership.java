@@ -42,24 +42,24 @@ public final class DevicePhaseOwnership {
     public static int enforceComplete(long handle, int hostMask) {
         int mask = hostMask;
         if (!GpuBatchSkips.complete(GpuBatchSkips.Slot.TVC)) {
-            IncrementalTransformerVoltageControl.uploadToDevice(handle, null, 1);
-            DiscreteTransformerVoltageControl.uploadToDevice(handle, null, 0, false);
-            DiscreteTransformerVoltageControl.uploadFreeze(handle, null);
+            GpuIncrementalTransformerVoltageControlOuterLoop.uploadToDevice(handle, null, 1);
+            GpuTransformerVoltageControlOuterLoop.uploadToDevice(handle, null, 0, false);
+            GpuTransformerVoltageControlOuterLoop.uploadFreeze(handle, null);
             mask |= DeviceLoopKind.hostMaskBit(DeviceLoopKind.HOST_LOOP_TVC);
         }
         if (!GpuBatchSkips.complete(GpuBatchSkips.Slot.SHUNT)) {
-            IncrementalShuntVoltageControl.uploadToDevice(handle, null, 3);
-            DiscreteShuntVoltageControl.uploadToDevice(handle, null, true);
+            GpuIncrementalShuntVoltageControlOuterLoop.uploadToDevice(handle, null, 3);
+            GpuShuntVoltageControlOuterLoop.uploadToDevice(handle, null, true);
             mask |= DeviceLoopKind.hostMaskBit(DeviceLoopKind.HOST_LOOP_SHUNT);
         }
         if (!GpuBatchSkips.complete(GpuBatchSkips.Slot.PHASE) || !GpuBatchSkips.complete(GpuBatchSkips.Slot.RPC)) {
             IncrementalFlowControl.uploadToDevice(handle, null);
-            ContinuousPhaseControl.uploadToDevice(handle, null);
+            GpuPhaseControlOuterLoop.uploadToDevice(handle, null);
             mask |= DeviceLoopKind.hostMaskBit(DeviceLoopKind.HOST_LOOP_PHASE);
             mask |= DeviceLoopKind.hostMaskBit(DeviceLoopKind.HOST_LOOP_TRPC);
         }
         if (!GpuBatchSkips.complete(GpuBatchSkips.Slot.SVC)) {
-            SecondaryVoltageControlLoop.uploadToDevice(handle, null);
+            GpuSecondaryVoltageControlOuterLoop.uploadToDevice(handle, null);
             mask |= 1;                                        // bit 0 = HOST_LOOP_SVC
         }
         if (mask != hostMask) {

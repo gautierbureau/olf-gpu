@@ -43,9 +43,9 @@ import java.util.Map;
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
-public final class VoltageMonitoring {
+public final class GpuMonitoringVoltageOuterLoop {
 
-    private static final Logger LOGGER = LoggerFactory.getLogger(VoltageMonitoring.class);
+    private static final Logger LOGGER = LoggerFactory.getLogger(GpuMonitoringVoltageOuterLoop.class);
 
     /** Phase-B confirmation solves this JVM has skipped, and monitored buses it has switched PQ -&gt; PV.
      *  Test-visible: the skip is only reachable when a monitoring SVC and an orchestrator that
@@ -60,7 +60,7 @@ public final class VoltageMonitoring {
      *  OLF's monitoring loop, leaving nothing for the batch to monitor. */
     private static final boolean MON_TRACE = System.getenv("OLF_GPU_MON_TRACE") != null;
 
-    private VoltageMonitoring() {
+    private GpuMonitoringVoltageOuterLoop() {
     }
 
     /** One monitored bus: its V row, RL pack index, the automaton band + setpoints, and the VC-ON

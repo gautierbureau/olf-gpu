@@ -59,15 +59,15 @@ public final class DevicePhases {
     }
 
     /** Every phase's controllers, null where the run does not configure the loop. */
-    public record Built(List<VoltageMonitoring.Ctl> monitoring,
-                        List<IncrementalTransformerVoltageControl.Controller> incrementalTvc,
-                        List<IncrementalShuntVoltageControl.Controller> incrementalShunt,
-                        List<DiscreteShuntVoltageControl.Group> simpleShunt,
+    public record Built(List<GpuMonitoringVoltageOuterLoop.Ctl> monitoring,
+                        List<GpuIncrementalTransformerVoltageControlOuterLoop.Controller> incrementalTvc,
+                        List<GpuIncrementalShuntVoltageControlOuterLoop.Controller> incrementalShunt,
+                        List<GpuShuntVoltageControlOuterLoop.Group> simpleShunt,
                         List<IncrementalFlowControl.Controller> flow,
-                        List<ContinuousPhaseControl.Ctl> continuousPhase,
-                        List<DiscreteTransformerVoltageControl.TransformerController> discreteTvc,
-                        DiscreteTransformerVoltageControl.FreezeTables freeze,
-                        SecondaryVoltageControlLoop.Controllers secondaryVc,
+                        List<GpuPhaseControlOuterLoop.Ctl> continuousPhase,
+                        List<GpuTransformerVoltageControlOuterLoop.TransformerController> discreteTvc,
+                        GpuTransformerVoltageControlOuterLoop.FreezeTables freeze,
+                        GpuSecondaryVoltageControlOuterLoop.Controllers secondaryVc,
                         IncrementalFlowControl.EsContext esContext) {
     }
 
@@ -87,37 +87,37 @@ public final class DevicePhases {
         GpuBatchSkips.reset();
         GpuBatchElementMapper mapper = new GpuBatchElementMapper(network);
         int shuntOffset = mapper.getClosedBranchCount() + mapper.getOpenBranchCount();
-        List<DiscreteTransformerVoltageControl.TransformerController> discreteTvc = request.discreteTvc()
-                ? DiscreteTransformerVoltageControl.buildTransformerControllers(network, es, targetVector, activation,
+        List<GpuTransformerVoltageControlOuterLoop.TransformerController> discreteTvc = request.discreteTvc()
+                ? GpuTransformerVoltageControlOuterLoop.buildTransformerControllers(network, es, targetVector, activation,
                         targets, mapper, request.tvcUseInitialTapPosition())
                 : null;
         return new Built(
                 request.monitoring()
-                        ? VoltageMonitoring.buildControllers(network, es, targetVector, activation, targets, rlVrow)
+                        ? GpuMonitoringVoltageOuterLoop.buildControllers(network, es, targetVector, activation, targets, rlVrow)
                         : null,
                 request.incrementalTvc()
-                        ? IncrementalTransformerVoltageControl.buildControllers(network, es, mapper)
+                        ? GpuIncrementalTransformerVoltageControlOuterLoop.buildControllers(network, es, mapper)
                         : null,
                 request.incrementalShunt()
-                        ? IncrementalShuntVoltageControl.buildControllers(network, es, mapper, shuntOffset)
+                        ? GpuIncrementalShuntVoltageControlOuterLoop.buildControllers(network, es, mapper, shuntOffset)
                         : null,
                 request.simpleShunt()
-                        ? DiscreteShuntVoltageControl.buildGroups(network, es, targetVector, activation, targets, mapper, shuntOffset)
+                        ? GpuShuntVoltageControlOuterLoop.buildGroups(network, es, targetVector, activation, targets, mapper, shuntOffset)
                         : null,
                 request.rpc() || request.incrementalPhase()
                         ? IncrementalFlowControl.buildControllers(network, es, mapper,
                                 request.rpcMaxTapShift(), request.rpc(), request.incrementalPhase())
                         : null,
                 request.continuousPhase()
-                        ? ContinuousPhaseControl.buildControllers(network, es, targetVector, activation, targets, mapper)
+                        ? GpuPhaseControlOuterLoop.buildControllers(network, es, targetVector, activation, targets, mapper)
                         : null,
                 discreteTvc,
                 discreteTvc != null
-                        ? DiscreteTransformerVoltageControl.buildFreezeTables(network, es, discreteTvc,
+                        ? GpuTransformerVoltageControlOuterLoop.buildFreezeTables(network, es, discreteTvc,
                                 request.genVcMinNominalV(), rlBusNum)
                         : null,
-                request.secondaryVc() && SecondaryVoltageControlLoop.supported(network)
-                        ? SecondaryVoltageControlLoop.build(network, es, rlVrow,
+                request.secondaryVc() && GpuSecondaryVoltageControlOuterLoop.supported(network)
+                        ? GpuSecondaryVoltageControlOuterLoop.build(network, es, rlVrow,
                                 new IncrementalFlowControl.EsContext(es.getStateVector(), n),
                                 request.minPlausibleTargetV(), request.maxPlausibleTargetV(), mapper)
                         : null,

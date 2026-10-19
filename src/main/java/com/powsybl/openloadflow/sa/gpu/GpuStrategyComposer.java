@@ -10,7 +10,7 @@ package com.powsybl.openloadflow.sa.gpu;
 import com.powsybl.action.Action;
 import com.powsybl.contingency.strategy.OperatorStrategy;
 import com.powsybl.iidm.network.Network;
-import com.powsybl.openloadflow.ac.outerloop.gpu.DiscreteTransformerVoltageControl;
+import com.powsybl.openloadflow.ac.outerloop.gpu.GpuTransformerVoltageControlOuterLoop;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.BatchContingency;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchStatus;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.LoadLoss;
@@ -403,7 +403,7 @@ final class GpuStrategyComposer {
         if (b == null || tapChanger == null) {
             return null;
         }
-        double[][] table = DiscreteTransformerVoltageControl.tapModels(b.getPiModel());
+        double[][] table = GpuTransformerVoltageControlOuterLoop.tapModels(b.getPiModel());
         int low = tapChanger.getLowTapPosition();
         int idx = (relative ? tapChanger.getTapPosition() + tapPosition : tapPosition) - low;
         if (table.length == 0 || idx < 0 || idx >= table.length) {

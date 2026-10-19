@@ -17,7 +17,7 @@ import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcDataExtractor;
 import com.powsybl.openloadflow.ac.outerloop.AcOuterLoop;
 import com.powsybl.openloadflow.ac.outerloop.DistributedSlackOuterLoop;
 import com.powsybl.openloadflow.ac.outerloop.ReactiveLimitsOuterLoop;
-import com.powsybl.openloadflow.ac.outerloop.gpu.DiscreteTransformerVoltageControl;
+import com.powsybl.openloadflow.ac.outerloop.gpu.GpuTransformerVoltageControlOuterLoop;
 import com.powsybl.openloadflow.ac.solver.gpu.GpuLoadFlowParameters;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.BatchConfig;
 import com.powsybl.openloadflow.equations.EquationSystem;
@@ -68,15 +68,15 @@ final class GpuSaRunScope {
         // INCREMENTAL shared groups run since 2026-09-07 too: the loop keeps every branch VC
         // DISABLED (no DISTR_RHO coupling ever activates), so a shared group is purely the
         // one-tap-at-a-time round-robin over the merged controllers — ported in
-        // IncrementalTransformerVoltageControl.orchestrate, grouped by the MAIN control's controlled bus.
+        // GpuIncrementalTransformerVoltageControlOuterLoop.orchestrate, grouped by the MAIN control's controlled bus.
         // 2026-09-15: generator voltage controls UNDER the transformer-controlled level no longer gate the
         // run — the in-kernel phase runs OLF's GeneratorVoltageControlManager freeze/unfreeze and the
         // fixTransformerVoltageControls check, as long as every candidate is a LOCAL controller and every
         // transformer controller has a tap table (generatorFreezeSupported).
         boolean transformerControlBatchable =
                 olfGuardParams.getTransformerVoltageControlMode() == OpenLoadFlowParameters.TransformerVoltageControlMode.AFTER_GENERATOR_VOLTAGE_CONTROL
-                && (DiscreteTransformerVoltageControl.transformerControlSupported(lfNetwork)
-                        || DiscreteTransformerVoltageControl.generatorFreezeSupported(lfNetwork,
+                && (GpuTransformerVoltageControlOuterLoop.transformerControlSupported(lfNetwork)
+                        || GpuTransformerVoltageControlOuterLoop.generatorFreezeSupported(lfNetwork,
                                 olfGuardParams.getGeneratorVoltageControlMinNominalVoltage()));
         // INCREMENTAL (OLF's default TVC mode): an in-kernel driver phase (LOOP_TVC_KERNEL). The loop never
         // freezes generators (no GeneratorVoltageControlManager), so the gen-under-the-controlled-level
@@ -88,7 +88,7 @@ final class GpuSaRunScope {
         boolean incrementalShuntBatchable =
                 olfGuardParams.getShuntVoltageControlMode() == OpenLoadFlowParameters.ShuntVoltageControlMode.INCREMENTAL_VOLTAGE_CONTROL;
         // CONTINUOUS shunt VC (WITH_GENERATOR — OLF's DEFAULT shunt mode): the SimpleTvc two-phase
-        // flow for shunts (DiscreteShuntVoltageControl: VC-on first solve + dispatchB round + re-solve).
+        // flow for shunts (GpuShuntVoltageControlOuterLoop: VC-on first solve + dispatchB round + re-solve).
         // Stage-1 scope: standalone of the other DECISION orchestrators — the CPU interleaves
         // simultaneously-unstable loops per outer iteration, which the sequential orchestrator
         // chain does not model; co-presence with any transformer/phase/RPC/SecondaryVc/monitoring
@@ -110,14 +110,14 @@ final class GpuSaRunScope {
         boolean hvdcBatchable = noHvdc
                 || com.powsybl.openloadflow.ac.outerloop.gpu.HvdcAcEmulation.allLinearAtBase(lfNetwork)
                 || hvdcLoopsRun;
-        // Secondary voltage control (SecondaryVoltageControlLoop): batched device sensitivities + the zone
+        // Secondary voltage control (GpuSecondaryVoltageControlOuterLoop): batched device sensitivities + the zone
         // system replayed per scenario on the host; stage-1 scope is LOCAL generator VC only.
-        boolean svcBatchable = com.powsybl.openloadflow.ac.outerloop.gpu.SecondaryVoltageControlLoop.supported(lfNetwork);
+        boolean svcBatchable = com.powsybl.openloadflow.ac.outerloop.gpu.GpuSecondaryVoltageControlOuterLoop.supported(lfNetwork);
         // Voltage monitoring (SVC stand-by automatons, VoltageMonitoring): batchable when every
         // monitoring SVC is local with an automaton — slope-less plain-VOLTAGE SVCs need no loop support
         // (ordinary generator-VC buses on the device).
-        boolean monitoringBatchable = com.powsybl.openloadflow.ac.outerloop.gpu.VoltageMonitoring.supported(lfNetwork);
-        // CONTINUOUS phase control (ContinuousPhaseControl): both modes batch LOCAL and REMOTE.
+        boolean monitoringBatchable = com.powsybl.openloadflow.ac.outerloop.gpu.GpuMonitoringVoltageOuterLoop.supported(lfNetwork);
+        // CONTINUOUS phase control (GpuPhaseControlOuterLoop): both modes batch LOCAL and REMOTE.
         // CONTROLLER since 2026-09-05 (cbPcSide carries the controller's a1 column); LIMITER since
         // 2026-09-16 — OLF's PhaseControlOuterLoop is local BY CONSTRUCTION there, reading the
         // CONTROLLER branch's own I terms and differentiating them, so the controlled branch never
@@ -141,7 +141,7 @@ final class GpuSaRunScope {
                 .flatMap(b -> b.getGenerators().stream())
                 .noneMatch(g -> g instanceof com.powsybl.openloadflow.network.LfStaticVarCompensator);
         // CONTINUOUS shunt VC (WITH_GENERATOR — OLF's DEFAULT shunt mode): the SimpleTvc two-phase
-        // flow for shunts (DiscreteShuntVoltageControl: VC-on first solve + dispatchB round + re-solve).
+        // flow for shunts (GpuShuntVoltageControlOuterLoop: VC-on first solve + dispatchB round + re-solve).
         // Stage-1 scope: standalone of the other DECISION orchestrators — the CPU interleaves
         // simultaneously-unstable loops per outer iteration, which the sequential orchestrator
         // chain does not model; co-presence with a transformer/phase/RPC/SecondaryVc loop (or

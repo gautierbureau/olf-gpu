@@ -14,6 +14,7 @@ import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcActivation;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcElementMapper;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchOverrides;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchSkips;
+import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuPhaseControlMode;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.EquationTerm;
 import com.powsybl.openloadflow.equations.TargetVector;
@@ -123,12 +124,12 @@ public final class GpuPhaseControlOuterLoop {
                     deltaModesOn[k] = onAct.rowMode()[deltaRows[k]];
                     deltaTargetsOn[k] = onTargets[deltaRows[k]];
                 }
-                out.add(new Ctl(0, a1Row, null, 0, tapRows, baseTap, elemIndex,
+                out.add(new Ctl(GpuPhaseControlMode.CONTROLLER, a1Row, null, 0, tapRows, baseTap, elemIndex,
                         deltaRows, deltaModesOn, deltaTargetsOn, pc.getControlledSide() == TwoSides.ONE ? 1 : 2, branch.getNum()));
             } else if (pc.getMode() == TransformerPhaseControl.Mode.LIMITER) {
                 var iTerm = (EquationTerm<AcVariableType, AcEquationType>) (pc.getControlledSide() == TwoSides.ONE
                         ? branch.getI1() : branch.getI2());
-                out.add(new Ctl(1, a1Row, iTerm, pc.getTargetValue(), tapRows, baseTap, elemIndex,
+                out.add(new Ctl(GpuPhaseControlMode.LIMITER, a1Row, iTerm, pc.getTargetValue(), tapRows, baseTap, elemIndex,
                         new int[0], new int[0], new double[0], pc.getControlledSide() == TwoSides.ONE ? 1 : 2, branch.getNum()));
             }
         }
@@ -142,7 +143,7 @@ public final class GpuPhaseControlOuterLoop {
                              GpuBatchOverrides overrides) {
         for (int slot = 0; slot < realCount; slot++) {
             for (Ctl c : ctls) {
-                if (c.kind() != 0 || disabledMask[slot][c.elemIndex()]) {
+                if (c.kind() != GpuPhaseControlMode.CONTROLLER || disabledMask[slot][c.elemIndex()]) {
                     continue;
                 }
                 int[] row = rowModePerScenario[slot] == baseRowMode
@@ -210,7 +211,7 @@ public final class GpuPhaseControlOuterLoop {
             if (branch == null) {
                 continue;
             }
-            if (ctl.kind() == 0 && branch.isPhaseControlEnabled()) {
+            if (ctl.kind() == GpuPhaseControlMode.CONTROLLER && branch.isPhaseControlEnabled()) {
                 branch.setPhaseControlEnabled(false);
             }
             var pm = branch.getPiModel();

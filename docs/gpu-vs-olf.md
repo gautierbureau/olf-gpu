@@ -177,3 +177,4 @@ constants carry OLF's constant names.
 | `GpuRealisticVoltageFixingLoop` | the last loop whose `canFixUnrealisticState()` is true (robust mode) | `NONE` -1, `REACTIVE_LIMITS` 0, `TRANSFORMER_VOLTAGE_CONTROL` 1 |
 | `GpuLinearSolveMode` | device only (OLF factors one KLU matrix per solve) | `UBATCH` 3, `ROBUST` 6 |
 | `GpuControlledFlow` | the flow a flow-observed controller acts on: IncrementalTransformerReactivePowerControl, IncrementalPhaseControl CONTROLLER / LIMITER | `REACTIVE_POWER` 0, `ACTIVE_POWER` 1, `CURRENT` 2; the driver selects kinds with `controlledFlowMaskBit` |
+| `GpuPhaseControlMode` | `TransformerPhaseControl.Mode` of a continuous phase control (OLF ordinals) | `CONTROLLER` 0, `LIMITER` 1 |

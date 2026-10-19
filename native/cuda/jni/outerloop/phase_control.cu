@@ -12,6 +12,7 @@
 #include "../common/check.cuh"
 #include "../common/launch.cuh"
 #include "../common/codes/gpu_controlled_flow.cuh"
+#include "../common/codes/gpu_phase_control_mode.cuh"
 #include "../equations/scenario_overrides.cuh"
 #include "flow_observation.cuh"
 #include "phase_control.cuh"
@@ -39,7 +40,7 @@ __global__ void cphCheckBatch(int nCph, int nScenarios, int n, int nElements, in
     int base = tapPtr[c];
     int nTaps = tapPtr[c + 1] - base;
     if (iter[s] == 0) {
-        if (kind[c] == 0) {                                  // switch off + round a1 to the closest tap
+        if (kind[c] == GpuPhaseControlMode::CONTROLLER) {  // switch off + round a1 to the closest tap
             double a1 = x[ar];
             int best = tap[tid];
             for (int t = 0; t < nTaps; t++) {
@@ -53,7 +54,7 @@ __global__ void cphCheckBatch(int nCph, int nScenarios, int n, int nElements, in
         switched[s] = 1;                                     // OLF: UNSTABLE whenever a controller exists
         return;
     }
-    if (kind[c] != 1) return;
+    if (kind[c] != GpuPhaseControlMode::LIMITER) return;
     int e = elem[c] - cbOffset;                              // LIMITER is local: the controlled branch is itself
     const double* p = cbIn + e * 8;
     double pOv[8];

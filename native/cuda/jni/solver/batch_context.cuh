@@ -333,9 +333,10 @@ struct BatchSolverContext {
     DeviceBuf dShcOutOfDb, dShcDiffV;                        // per (scenario, group)
     std::vector<int> hShcBRow, hShcShOvElem, hShcSubPtr, hShcSecPtr, hShcSubBase;
     std::vector<double> hShcSecB, hShcSecG;
-    // FLOW-OBSERVED incremental loops (GpuOuterLoopKind::INCREMENTAL_PHASE_CONTROL / GpuOuterLoopKind::INCREMENTAL_TRANSFORMER_REACTIVE_POWER_CONTROL): a rho (RPC) or a1 (phase)
-    // tap driving a CONTROLLED branch's Q, P or I. kind 0 = RPC (rho -> Q, closest-r1), 1 = phase
-    // CONTROLLER (a1 -> P, closest-a1), 2 = phase LIMITER (a1 -> I, first-above-a1, one-sided).
+    // FLOW-OBSERVED incremental loops (GpuOuterLoopKind::INCREMENTAL_PHASE_CONTROL /
+    // INCREMENTAL_TRANSFORMER_REACTIVE_POWER_CONTROL): a rho (RPC) or a1 (phase) tap driving a CONTROLLED
+    // branch's flow; kind = the GpuControlledFlow: REACTIVE_POWER (rho, closest-r1), ACTIVE_POWER (phase
+    // CONTROLLER, closest-a1), CURRENT (phase LIMITER, first-above-a1, one-sided).
     int nFlc = 0, nFlcPhase = 0, nFlcRpc = 0;
     DeviceBuf dFlcKind, dFlcPinRow, dFlcPinCol, dFlcSide, dFlcTargetValue, dFlcHalfDb, dFlcElem, dFlcCtlPack,
               dFlcTapPtr, dFlcTapData, dFlcBaseTap, dFlcMaxShift;
@@ -343,8 +344,8 @@ struct BatchSolverContext {
     std::vector<int> hFlcKind, hFlcPinRow, hFlcElem, hFlcTapPtr, hFlcBaseTap;
     std::vector<double> hFlcTapData;
     // CONTINUOUS phase control (OLF PhaseControlOuterLoop, CONTINUOUS_WITH_DISCRETISATION), sharing the
-    // phase slot: kind 0 = CONTROLLER (a1 solved free under row mode 3 for the first solve, then switched
-    // off and rounded to the closest tap at the loop's first check), kind 1 = LIMITER (from the second
+    // phase slot: kind = the GpuPhaseControlMode: CONTROLLER (a1 solved free under row mode 3 for the first
+    // solve, then switched off and rounded to the closest tap at the loop's first check), LIMITER (from the second
     // check on, one tap per check against the sign of dI/da1 while I exceeds the limit — local only).
     int nCph = 0;
     DeviceBuf dCphKind, dCphA1Row, dCphSide, dCphLimit, dCphElem, dCphTapPtr, dCphTapData, dCphBaseTap;

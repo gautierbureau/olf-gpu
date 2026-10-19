@@ -17,6 +17,7 @@
 #include "../common/check.cuh"
 #include "../common/launch.cuh"
 #include "../common/stats.cuh"
+#include "../common/codes/gpu_state_vector_scaling_mode.cuh"
 #include "batch_context.cuh"
 #include "driver_steps.cuh"
 #include "linear_solver_settings.cuh"
@@ -312,12 +313,12 @@ void uploadBatchOverrides(BatchSolverContext* ctx, int lsMode, double maxDv, dou
                           int nR1Ov, const int* r1OvSlotElem, const double* r1OvVal) {
     int n = ctx->n;
     int nS = ctx->nScenarios;
-    bool clampStep = lsMode == 2 && varType != nullptr;
+    bool clampStep = lsMode == GpuStateVectorScalingMode::MAX_VOLTAGE_CHANGE && varType != nullptr;
     if (clampStep && !ctx->dVarType.p) {
         ctx->dVarType.upload(varType, static_cast<size_t>(n) * sizeof(int));
         ctx->dStepFactor.alloc(static_cast<size_t>(nS) * sizeof(double));
     }
-    if (lsMode == 1) {                                       // LINE_SEARCH backtracking buffers
+    if (lsMode == GpuStateVectorScalingMode::LINE_SEARCH) {                                       // LINE_SEARCH backtracking buffers
         if (!ctx->dXprevLs.p) ctx->dXprevLs.alloc(static_cast<size_t>(n) * nS * sizeof(double));
         if (!ctx->dStepFactor.p) ctx->dStepFactor.alloc(static_cast<size_t>(nS) * sizeof(double));
     }

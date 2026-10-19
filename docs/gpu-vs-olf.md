@@ -153,3 +153,14 @@ Only notions with no OLF counterpart. Everything else uses OLF's name.
 | scenario, chunk, compaction | the batch | 3 |
 | pass, driver phase | one solve plus one loop check for a whole chunk | 4 |
 | refusal | a contingency handed back to OLF before any solve | 5 |
+
+## 7. Codes shared with the device
+
+Java and the native library exchange some OLF notions as integers. Each code family has one definition per side,
+under the same name: a class in `ac.solver.gpu.codes` and a header in `native/cuda/jni/common/codes`
+(`GpuCodesMirrorTest` checks they agree). Where OLF has the notion, the family is named `Gpu` + OLF's name and its
+constants carry OLF's constant names.
+
+| family | OLF notion | values |
+|---|---|---|
+| `GpuStateVectorScalingMode` | `StateVectorScalingMode` | `NONE` 0, `LINE_SEARCH` 1, `MAX_VOLTAGE_CHANGE` 2 |

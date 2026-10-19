@@ -10,6 +10,7 @@ package com.powsybl.openloadflow.ac.solver.gpu.batch;
 import com.powsybl.commons.config.PlatformConfig;
 import com.powsybl.openloadflow.ac.solver.gpu.GpuLoadFlowParameters;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.SlackRelocation;
+import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuStateVectorScalingMode;
 
 /**
  * The run's outer-loop parameterization for the batched device path — a PER-CALL value, threaded
@@ -74,7 +75,7 @@ public record BatchConfig(int lsMode, double maxDv, double maxDphi, boolean tran
 
     /** The device defaults — no state-vector scaling, no transformer control, device outer-loop
      *  constants and LEAVE_ON_SLACK_BUS behavior (never reject a saturated scenario). This is what every non-provider entry point (tests, direct callers) uses. */
-    public static final BatchConfig DEVICE_DEFAULTS = new BatchConfig(0, 0, 0, false, 0,
+    public static final BatchConfig DEVICE_DEFAULTS = new BatchConfig(GpuStateVectorScalingMode.NONE, 0, 0, false, 0,
             com.powsybl.openloadflow.ac.outerloop.ReactiveLimitsOuterLoop.MAX_SWITCH_PQ_PV_DEFAULT_VALUE,   // OLF's cap: 0 means never switch back
             false,
             com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDsParams.DEFAULT, false, 3, false, 3, false, false, false, false, false, false, false,

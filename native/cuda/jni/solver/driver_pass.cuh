@@ -11,6 +11,7 @@
 
 #include "../common/device_buf.cuh"
 #include "../common/loop_kinds.cuh"
+#include "../common/codes/gpu_state_vector_scaling_mode.cuh"
 #include "batch_context.cuh"
 
 namespace olfgpu {
@@ -20,7 +21,7 @@ struct DriverPass {
     size_t nTot = 0;
     double tol = 0.0;
     int maxIter = 0;
-    int lsMode = 0;
+    int lsMode = GpuStateVectorScalingMode::NONE;
     double convEpsPerEq = 0.0;
     bool iterLog = false;
     bool olTime = false;

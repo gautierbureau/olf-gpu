@@ -14,6 +14,7 @@
 #include "../common/check.cuh"
 #include "../common/launch.cuh"
 #include "../common/stats.cuh"
+#include "../common/codes/gpu_state_vector_scaling_mode.cuh"
 #include "../diagnostics/driver_traces.cuh"
 #include "../diagnostics/matrix_scan.cuh"
 #include "../equations/fill_launch.cuh"
@@ -57,9 +58,9 @@ void newtonSolve(BatchSolverContext* ctx, DriverPass& drv) {
     // Per scenario, the linear-solve residual ratio of this pass's LAST solve — scored only when the pass runs
     // its Newton budget out (see the it == maxIter branch), so a healthy run never pays for it.
     std::vector<double> lastSolveRatio(nS, 0.0);
-    std::vector<double> lsLastSsq(lsMode == 1 ? nS : 0, 0.0);
-    std::vector<char> lsHaveLast(lsMode == 1 ? nS : 0, 0);
-    std::vector<double> hMu(lsMode == 1 ? nS : 0, -1.0);
+    std::vector<double> lsLastSsq(lsMode == GpuStateVectorScalingMode::LINE_SEARCH ? nS : 0, 0.0);
+    std::vector<char> lsHaveLast(lsMode == GpuStateVectorScalingMode::LINE_SEARCH ? nS : 0, 0);
+    std::vector<double> hMu(lsMode == GpuStateVectorScalingMode::LINE_SEARCH ? nS : 0, -1.0);
 
     for (int it = 0; it <= maxIter && nActive > 0; it++) {
         gLastPassIters = it;
@@ -87,7 +88,7 @@ void newtonSolve(BatchSolverContext* ctx, DriverPass& drv) {
                 //      OLF's LineSearchStateVectorScaling. Judged on the 2-norm
                 //      (ssq, monotonic-equivalent); a non-finite mismatch backtracks too. Scenarios
                 //      not backtracking keep their state (mu sentinel -1 masks the step kernel). ----
-                if (lsMode == 1) {
+                if (lsMode == GpuStateVectorScalingMode::LINE_SEARCH) {
                     auto needsBt = [&](int s2) {
                         return active[s2] && lsHaveLast[s2]
                                 && (hNorms[s2 * 4 + 2] == 0.0 || hNorms[s2 * 4 + 1] >= lsLastSsq[s2]);
@@ -321,7 +322,7 @@ void newtonSolve(BatchSolverContext* ctx, DriverPass& drv) {
         // as efficient as its retirement — a batch that keeps every scenario alive until the last
         // straggler converges pays the WORST case for all of them.
         gActiveIterSum += nActive;
-        if (lsMode == 1) {                                   // LINE_SEARCH: remember the pre-step iterates
+        if (lsMode == GpuStateVectorScalingMode::LINE_SEARCH) {                                   // LINE_SEARCH: remember the pre-step iterates
             CUDA_CHECK(cudaMemcpyAsync(ctx->dXprevLs.p, ctx->dX.p, static_cast<size_t>(n) * nS * sizeof(double),
                                        cudaMemcpyDeviceToDevice, ctx->stream));
         }

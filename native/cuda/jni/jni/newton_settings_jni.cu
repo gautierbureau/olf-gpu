@@ -32,7 +32,7 @@ OLF_JNI(ac_solver_gpu, NewtonSettingsNative, readLinearSolverSettings)(JNIEnv* e
 }
 
 // LINE_SEARCH backtracking parameters for a batch context (OLF LineSearchStateVectorScaling's
-// maxIteration and stepFold): consumed by solves called with lsMode == 1. Context-scoped like
+// maxIteration and stepFold): consumed by solves called with lsMode == GpuStateVectorScalingMode::LINE_SEARCH. Context-scoped like
 // setBatchRowCriteria, so the solveBatchContext signature stays unchanged.
 // Per-scenario starting values for the next solve given no full per-scenario state: flat index s*n+row -> value,
 // written over the base state tiled on the device. Replaces sending nScenarios * n doubles when only a few rows

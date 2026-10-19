@@ -26,6 +26,7 @@ import com.powsybl.openloadflow.ac.solver.NewtonRaphsonParameters;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.BatchContingency;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.GpuBatchContingencyValidator;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.GpuBatchQualification;
+import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuStateVectorScalingMode;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.TargetVector;
 import com.powsybl.openloadflow.network.LfBranch;
@@ -234,7 +235,7 @@ public final class GpuBatchedSecurityAnalysisSolver {
             if (DevicePhaseOwnership.batchable()) {
                 // built in the order the call evaluated them when they were its arguments
                 var hvdcElemIndex = GpuHvdcAcEmulationLimitsOuterLoop.elementIndices(network, nElements);
-                int[] varType = config.lsMode() == 2 ? GpuAcActivationExtractor.extractVarType(equationSystem, n) : null;
+                int[] varType = config.lsMode() == GpuStateVectorScalingMode.MAX_VOLTAGE_CHANGE ? GpuAcActivationExtractor.extractVarType(equationSystem, n) : null;
                 List<GpuHvdcAcEmulationLimitsOuterLoop.Ctl> hvdcControllers = config.hvdcFreezing() || config.hvdcLimits()
                         ? GpuHvdcAcEmulationLimitsOuterLoop.buildControllers(network, equationSystem, nElements, gpuData)
                         : null;

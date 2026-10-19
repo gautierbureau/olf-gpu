@@ -36,6 +36,7 @@ import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.BatchContingency;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.GenOutage;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.GpuBatchLossPreDistribution;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.GpuBatchQualification;
+import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuStateVectorScalingMode;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfShunt;
 import org.slf4j.Logger;
@@ -1112,7 +1113,7 @@ final class GpuBatchChunkSolver {
                             cl.cvOvVal.stream().mapToDouble(Double::doubleValue).toArray(),
                                                         parameters.getMaxIterations(), tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
                             config.lsMode(), config.maxDv(), config.maxDphi(),
-                            config.lsMode() == 2 ? varType : null, x0Full,
+                            config.lsMode() == GpuStateVectorScalingMode.MAX_VOLTAGE_CHANGE ? varType : null, x0Full,
                             rs.shOvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
                             rs.shOvGbList.stream().mapToDouble(Double::doubleValue).toArray(),
                             rlStateIn, rlStateOut,
@@ -1200,7 +1201,7 @@ final class GpuBatchChunkSolver {
                                     cl.cvOvVal.stream().mapToDouble(Double::doubleValue).toArray(),
                                                                         parameters.getMaxIterations(), tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
                                     config.lsMode(), config.maxDv(), config.maxDphi(),
-                                    config.lsMode() == 2 ? varType : null, x0Full,
+                                    config.lsMode() == GpuStateVectorScalingMode.MAX_VOLTAGE_CHANGE ? varType : null, x0Full,
                                     rs.shOvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
                                     rs.shOvGbList.stream().mapToDouble(Double::doubleValue).toArray(),
                                     null, rlStateOut,

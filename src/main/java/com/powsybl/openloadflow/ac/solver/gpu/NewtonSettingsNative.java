@@ -40,7 +40,7 @@ public final class NewtonSettingsNative {
     public static native void setBatchFrozenRows(long handle, int[] slotRow);
 
     /** LINE_SEARCH backtracking parameters for a batch context (OLF LineSearchStateVectorScaling's
-     *  maxIteration and stepFold) — consumed by solves called with {@code lsMode == 1}. */
+     *  maxIteration and stepFold) — consumed by solves called with {@code lsMode == GpuStateVectorScalingMode.LINE_SEARCH}. */
     public static native void setBatchLineSearch(long handle, int lsMaxIter, double lsStepFold);
 
     /** OLF_GPU_LOOP_TRACE by contingency: the slot to trace in the next solve of this context, -1 = none. */

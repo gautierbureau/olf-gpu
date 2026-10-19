@@ -48,6 +48,7 @@ import com.powsybl.openloadflow.ac.solver.NewtonRaphsonStoppingCriteria;
 import com.powsybl.openloadflow.ac.solver.PerEquationTypeStoppingCriteria;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchContextCache;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchStatus;
+import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuStateVectorScalingMode;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.EquationSystemIndex;
 import com.powsybl.openloadflow.equations.EquationSystemIndexListener;
@@ -612,11 +613,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
             // Device-side state-vector scaling: NONE = undamped Newton; LINE_SEARCH backtracks on the
             // device (mirrors LineSearchStateVectorScaling); MAX_VOLTAGE_CHANGE clamps each step so the
             // largest |Δv|/|Δφ| stays within maxDv/maxDphi (mirrors MaxVoltageChangeStateVectorScaling).
-            int lsMode = switch (parameters.getStateVectorScalingMode()) {
-                case NONE -> 0;
-                case LINE_SEARCH -> 1;
-                case MAX_VOLTAGE_CHANGE -> 2;
-            };
+            int lsMode = GpuStateVectorScalingMode.of(parameters.getStateVectorScalingMode());
             long t1 = System.nanoTime();
             double convEpsPerEq = GpuSolveSettings.deviceConvEpsPerEq(parameters);
             installTablesAndLineSearch(target, lsMode);
@@ -864,7 +861,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                     DeviceLoopTables.realisticFixingLoop(acLoadFlowParameters));
             tablesDirty = false;
         }
-        if (lsMode == 1) {                               // batch loop LINE_SEARCH (ported 2026-09-08)
+        if (lsMode == GpuStateVectorScalingMode.LINE_SEARCH) {   // batch loop LINE_SEARCH (ported 2026-09-08)
             NewtonSettingsNative.setBatchLineSearch(context.handle.get(),
                     parameters.getLineSearchStateVectorScalingMaxIteration(),
                     parameters.getLineSearchStateVectorScalingStepFold());
@@ -1426,11 +1423,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
         double[] x0 = equationSystem.getStateVector().get().clone();
         boolean[][] elementMask = new boolean[1][cachedData.getTotalElementCount()];
         double convEpsPerEq = GpuSolveSettings.deviceConvEpsPerEq(parameters);
-        int lsMode = switch (parameters.getStateVectorScalingMode()) {
-            case NONE -> 0;
-            case LINE_SEARCH -> 1;
-            case MAX_VOLTAGE_CHANGE -> 2;
-        };
+        int lsMode = GpuStateVectorScalingMode.of(parameters.getStateVectorScalingMode());
         double[] out = BatchSolveNative.solveBatchContext(context.handle.get(),
                 x0, target, new int[][] {activation.rowMode()}, activation.rowMode(),
                 elementMask,

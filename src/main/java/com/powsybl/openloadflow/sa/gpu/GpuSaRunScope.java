@@ -21,6 +21,7 @@ import com.powsybl.openloadflow.ac.outerloop.gpu.GpuTransformerVoltageControlOut
 import com.powsybl.openloadflow.ac.solver.gpu.GpuLoadFlowParameters;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.BatchConfig;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.SlackRelocation;
+import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuStateVectorScalingMode;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.network.LfNetwork;
 import com.powsybl.openloadflow.util.PerUnit;
@@ -293,16 +294,14 @@ final class GpuSaRunScope {
         // solve as the CPU per-contingency Newton (per scenario). Without this the batch takes raw full
         // steps, PV/PQ switch decisions read different intermediate states, and converged states drift
         // (measured 2026-07-17 under the RTE parameters: 6,137 one-sided violation diffs).
-        int cfgLsMode = 0;
+        // LINE_SEARCH backtracks per lane on the device (the chunk solver installs OLF's max iteration and step fold).
+        int cfgLsMode = GpuStateVectorScalingMode.of(olfParams.getStateVectorScalingMode());
         double cfgMaxDv = 0.0;
         double cfgMaxDphi = 0.0;
-        if (olfParams.getStateVectorScalingMode() == com.powsybl.openloadflow.ac.solver.StateVectorScalingMode.MAX_VOLTAGE_CHANGE) {
-            cfgLsMode = 2;
+        if (cfgLsMode == GpuStateVectorScalingMode.MAX_VOLTAGE_CHANGE) {
             cfgMaxDv = olfParams.getMaxVoltageChangeStateVectorScalingMaxDv();
             cfgMaxDphi = olfParams.getMaxVoltageChangeStateVectorScalingMaxDphi();
-        } else if (olfParams.getStateVectorScalingMode() == com.powsybl.openloadflow.ac.solver.StateVectorScalingMode.LINE_SEARCH) {
-            cfgLsMode = 1;                                   // per-lane backtracking on the device (the chunk solver
-        }                                                    // installs OLF's max iteration and step fold)
+        }
         // Assemble the run's per-call batched config (replaces the solver's former JVM-global statics).
         BatchConfig batchConfig = new BatchConfig(cfgLsMode, cfgMaxDv, cfgMaxDphi,
                 cfgTransformerControl, cfgMaxOuterIterations, cfgMaxPqPvSwitch, cfgDsRejectResidual,

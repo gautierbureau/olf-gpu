@@ -7,11 +7,11 @@
  */
 /**
  * The batched N-1 GPU security-analysis solver: {@link com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchedSecurityAnalysisSolver}
- * runs hundreds to thousands of post-contingency AC power flows in one batched Newton-Raphson. The
- * orchestrator delegates to the qualification ({@code GpuBatchQualification} / {@code GpuBatchContingencyValidator}),
- * the injection-outage and transformer-control mappers, the context cache and the chunk driver
- * ({@code GpuBatchChunkSolver}); the DTO records ({@code BatchContingency}, {@code BatchScenarioResult},
- * {@code BatchConfig}, {@code GenOutage}, …) and {@code GpuBatchStatus} constants are the shared vocabulary.
+ * runs hundreds to thousands of post-contingency AC power flows in one batched Newton-Raphson. This package holds
+ * the solve side: the chunk driver ({@code GpuBatchChunkSolver}) with its per-scenario seeds, the context cache, the
+ * run configuration ({@code BatchConfig}), the results and the {@code GpuBatchStatus} constants. What each scenario
+ * changes and whether it can be batched is decided in {@link com.powsybl.openloadflow.ac.solver.gpu.batch.plan},
+ * which this package reads and which never reads this one.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */

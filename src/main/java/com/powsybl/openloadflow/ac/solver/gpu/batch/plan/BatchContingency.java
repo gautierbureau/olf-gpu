@@ -5,7 +5,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/.
  * SPDX-License-Identifier: MPL-2.0
  */
-package com.powsybl.openloadflow.ac.solver.gpu.batch;
+package com.powsybl.openloadflow.ac.solver.gpu.batch.plan;
 
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfGenerator;
@@ -46,6 +46,10 @@ public record BatchContingency(String contingencyId, List<LfBranch> outagedBranc
                                /** Strategy pairs: the AC-emulation links an HvdcAction switches to fixed set points (OLF's
                                 *  LfHvdcAction: each station's target becomes the flow at the strategy's starting state). */
                                List<LfHvdc> acEmulationOffHvdcs) {
+
+    /** Separator inside a (contingency, strategy) pair's BatchContingency id — pairs are solved in a
+     *  SECOND phase, WARM-CONTINUED from their parent contingency's state and reactive-limits pinning. */
+    public static final char STRATEGY_KEY_SEP = '\u0001';
 
     @SuppressWarnings("java:S107")
     public BatchContingency(String contingencyId, List<LfBranch> outagedBranches, List<LfGenerator> lostGenerators,
@@ -115,7 +119,7 @@ public record BatchContingency(String contingencyId, List<LfBranch> outagedBranc
         // A strategy pair may compose to NOTHING: an action reclosing the contingency's only branch leaves the base
         // topology, solved from where the contingency left the network. It used to throw here and take the whole
         // precompute down with it (every contingency of the run then went to the CPU).
-        boolean emptyPair = !isInjection && !isShunt && !isBranch && contingencyId.indexOf(GpuBatchStatus.STRATEGY_KEY_SEP) >= 0;
+        boolean emptyPair = !isInjection && !isShunt && !isBranch && contingencyId.indexOf(BatchContingency.STRATEGY_KEY_SEP) >= 0;
         if (!emptyPair && !isInjection && !isShunt && !isBranch
                 || isShunt && (isInjection || isBranch)) {
             throw new IllegalArgumentException(

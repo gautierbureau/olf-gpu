@@ -7,6 +7,7 @@
  */
 package com.powsybl.openloadflow.ac.solver.gpu.batch;
 
+import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.GenOutage;
 import org.junit.jupiter.api.Test;
 
 import java.util.Set;

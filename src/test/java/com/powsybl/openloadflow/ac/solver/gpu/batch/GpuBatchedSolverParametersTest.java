@@ -23,6 +23,7 @@ import com.powsybl.openloadflow.ac.solver.gpu.GpuMatchingAlgorithm;
 import com.powsybl.openloadflow.ac.solver.gpu.GpuPivotType;
 import com.powsybl.openloadflow.ac.solver.gpu.GpuReorderingAlgorithm;
 import com.powsybl.openloadflow.ac.solver.gpu.NewtonSettingsNative;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.BatchContingency;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.EquationVector;
 import com.powsybl.openloadflow.equations.JacobianMatrix;

@@ -9,6 +9,7 @@ package com.powsybl.openloadflow.ac.solver.gpu.batch;
 
 import com.powsybl.commons.config.PlatformConfig;
 import com.powsybl.openloadflow.ac.solver.gpu.GpuLoadFlowParameters;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.SlackRelocation;
 
 /**
  * The run's outer-loop parameterization for the batched device path — a PER-CALL value, threaded
@@ -65,24 +66,6 @@ public record BatchConfig(int lsMode, double maxDv, double maxDphi, boolean tran
                            *  null for the configuration module's, which is what a run without them gets. Installed on the
                            *  device by every batched solve, so a direct caller cannot inherit another run's. */
                           GpuLoadFlowParameters gpuParameters) {
-
-    /** How OLF re-picks the slack when a contingency isolates it (PropagatedContingency: every bus outside the
-     *  largest connected component becomes ineligible, LfSynchronousNetworkImpl re-runs the RUN's slack-bus
-     *  selector over the rest). The selector is the run's own instance (the network wrapper OLF hands the
-     *  network), so the device's pick is OLF's. Null when the device cannot follow a relocation: more than one
-     *  slack bus, or a reference bus that is not the first slack. */
-    public record SlackRelocation(com.powsybl.openloadflow.network.SlackBusSelector selector, int maxSlackBusCount) {
-
-        /** The bus OLF makes the slack once only {@code eligible} may hold it, or null when the selector does not
-         *  pick exactly one (OLF then falls back to its own default selector, which is not followed here). */
-        public com.powsybl.openloadflow.network.LfBus select(com.powsybl.openloadflow.network.LfNetwork network,
-                                                             java.util.Set<com.powsybl.openloadflow.network.LfBus> eligible) {
-            java.util.List<com.powsybl.openloadflow.network.LfBus> selectable = network.getSynchronousNetworks().getFirst()
-                    .getBuses().stream().filter(eligible::contains).toList();
-            java.util.List<com.powsybl.openloadflow.network.LfBus> picked = selector.select(selectable, maxSlackBusCount).getBuses();
-            return picked.size() == 1 ? picked.get(0) : null;
-        }
-    }
 
     /** PER_EQUATION_TYPE stopping thresholds (OLF PerEquationTypeStoppingCriteria ctor order;
      *  p/q in MW/MVAr, the rest pu/rad); null = UNIFORM_CRITERIA. */

@@ -5,7 +5,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/.
  * SPDX-License-Identifier: MPL-2.0
  */
-package com.powsybl.openloadflow.ac.solver.gpu.batch;
+package com.powsybl.openloadflow.ac.solver.gpu.batch.plan;
 
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
 
@@ -28,7 +28,7 @@ import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
-final class GpuBatchLossPreDistribution {
+public final class GpuBatchLossPreDistribution {
 
     /** OLF ActivePowerDistribution.P_RESIDUE_EPS (pu) — the water-fill's inner stop. */
     private static final double P_RESIDUE_EPS = 1e-5;
@@ -55,7 +55,7 @@ final class GpuBatchLossPreDistribution {
      *         followed by the slack bus's own absorbed share, or {@code null} when nothing can move
      *         (no participants, zero mismatch).
      */
-    static double[] distribute(GpuAcData gpuData, double mismatch,
+    public static double[] distribute(GpuAcData gpuData, double mismatch,
                                int ovBus, double ovFactorDelta, double ovBaseDelta,
                                double ovMaxDelta, double ovMinDelta, boolean[] islanded,
                                int[] lostGenSlots, double[] genMovesOut) {
@@ -281,7 +281,7 @@ final class GpuBatchLossPreDistribution {
     }
 
     /** Whether the slack bus's own participating generators are in the generator pack (DS row -1). */
-    static boolean slackInPack(GpuAcData gpuData) {
+    public static boolean slackInPack(GpuAcData gpuData) {
         int[] dgBus = gpuData.dgBus();
         for (int g = 0; dgBus != null && g < dgBus.length; g++) {
             if (dgBus[g] < 0) {

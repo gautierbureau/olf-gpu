@@ -11,11 +11,10 @@ import com.powsybl.action.Action;
 import com.powsybl.contingency.strategy.OperatorStrategy;
 import com.powsybl.iidm.network.Network;
 import com.powsybl.openloadflow.ac.outerloop.gpu.GpuTransformerVoltageControlOuterLoop;
-import com.powsybl.openloadflow.ac.solver.gpu.batch.BatchContingency;
-import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchStatus;
-import com.powsybl.openloadflow.ac.solver.gpu.batch.LoadLoss;
-import com.powsybl.openloadflow.ac.solver.gpu.batch.ShuntShift;
-import com.powsybl.openloadflow.ac.solver.gpu.batch.TapR1Override;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.BatchContingency;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.LoadLoss;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.ShuntShift;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.TapR1Override;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfGenerator;
@@ -100,9 +99,9 @@ final class GpuStrategyComposer {
      *  candidate list and keeps the plain id; a multi-stage one adds the list, which is what OLF hands
      *  runActionSimulation once its conditions are evaluated. */
     static String pairId(String contingencyId, OperatorStrategy strategy, List<String> actionIds) {
-        String id = contingencyId + GpuBatchStatus.STRATEGY_KEY_SEP + strategy.getId();
+        String id = contingencyId + BatchContingency.STRATEGY_KEY_SEP + strategy.getId();
         return strategy.getConditionalActions().size() == 1 ? id
-                : id + GpuBatchStatus.STRATEGY_KEY_SEP + String.join("\u0002", actionIds);
+                : id + BatchContingency.STRATEGY_KEY_SEP + String.join("\u0002", actionIds);
     }
 
     /** Compile the strategy's actions onto the contingency's deltas into ONE extra batch scenario,

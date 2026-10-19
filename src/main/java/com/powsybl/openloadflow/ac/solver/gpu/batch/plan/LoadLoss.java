@@ -5,15 +5,14 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/.
  * SPDX-License-Identifier: MPL-2.0
  */
-package com.powsybl.openloadflow.ac.solver.gpu.batch;
+package com.powsybl.openloadflow.ac.solver.gpu.batch.plan;
 
-import com.powsybl.openloadflow.network.LfShunt;
+import com.powsybl.openloadflow.network.LfBus;
 
 /**
- * A per-scenario shunt admittance change (pu deltas ADDED to the packed g/b): section shifts
- * in either direction; full disconnection = minus the section admittance; reconnection = plus.
+ * A lost load's per-bus injection deltas (pu): removing it RAISES the bus P/Q targets.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
-public record ShuntShift(LfShunt shunt, double dg, double db) {
+public record LoadLoss(LfBus bus, double p, double q) {
 }

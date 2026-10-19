@@ -5,7 +5,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/.
  * SPDX-License-Identifier: MPL-2.0
  */
-package com.powsybl.openloadflow.ac.solver.gpu.batch;
+package com.powsybl.openloadflow.ac.solver.gpu.batch.plan;
 
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
 import com.powsybl.openloadflow.network.LfBus;
@@ -16,7 +16,7 @@ import com.powsybl.openloadflow.network.LfBus;
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
-final class RelocatedRows {
+public final class RelocatedRows {
 
     private RelocatedRows() {
     }
@@ -47,7 +47,7 @@ final class RelocatedRows {
     }
 
     /** qr group -> its first dq member, -1 for a group without packed members. */
-    static int[] qrMemberStart(GpuAcData gpuData) {
+    public static int[] qrMemberStart(GpuAcData gpuData) {
         int[] mQrGroup = gpuData.dqMemberQrGroup();
         int[] qrPtr = gpuData.qrPtr();
         if (mQrGroup == null || qrPtr == null || qrPtr.length < 2) {
@@ -67,7 +67,7 @@ final class RelocatedRows {
     /** The bus's reactive-limit entry, or -1: a re-homed bus is checked as a LOCAL controller by the device
      *  (OLF checks it as the PV bus it now is; BUS-6113_BBS_1 pinned VL-6113_1 at RL#1, the device never
      *  looked — 7.1 kV). */
-    static int rlEntryOf(GpuAcData gpuData, LfBus bus) {
+    public static int rlEntryOf(GpuAcData gpuData, LfBus bus) {
         int[] rlBusNum = gpuData.rlBusNum();
         if (rlBusNum != null) {
             for (int e = 0; e < rlBusNum.length; e++) {

@@ -21,12 +21,12 @@ import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 import com.powsybl.openloadflow.ac.solver.AbstractNewtonParameters;
 import com.powsybl.openloadflow.ac.solver.NewtonRaphsonParameters;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.BatchConfig;
-import com.powsybl.openloadflow.ac.solver.gpu.batch.BatchContingency;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.BatchScenarioResult;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.BatchSolveRequest;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchedSecurityAnalysisSolver;
-import com.powsybl.openloadflow.ac.solver.gpu.batch.LoadLoss;
-import com.powsybl.openloadflow.ac.solver.gpu.batch.ShuntShift;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.BatchContingency;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.LoadLoss;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.ShuntShift;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.Variable;
 import com.powsybl.openloadflow.network.LfBranch;
@@ -246,7 +246,7 @@ final class GpuBatchPrecomputer {
                         islandedBuses.put(r.contingencyId(), r.islandedBusNums());
                     }
                 } else if (r.convergenceStatus() == com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchStatus.STATUS_MAX_ITERATION
-                        && r.contingencyId().indexOf(com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchStatus.STRATEGY_KEY_SEP) < 0) {
+                        && r.contingencyId().indexOf(BatchContingency.STRATEGY_KEY_SEP) < 0) {
                     // The device ran OLF's full Newton budget (deviceSolverParameters carries the
                     // run's maxIterations) and the scenario did not converge: that IS the answer OLF
                     // gives - MAX_ITERATION_REACHED, no network result - so it is reported from here

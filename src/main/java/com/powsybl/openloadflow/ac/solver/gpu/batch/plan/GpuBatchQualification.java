@@ -5,7 +5,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/.
  * SPDX-License-Identifier: MPL-2.0
  */
-package com.powsybl.openloadflow.ac.solver.gpu.batch;
+package com.powsybl.openloadflow.ac.solver.gpu.batch.plan;
 
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
@@ -27,7 +27,7 @@ import java.util.Set;
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
-final class GpuBatchQualification {
+public final class GpuBatchQualification {
 
     private GpuBatchQualification() {
     }
@@ -65,7 +65,7 @@ final class GpuBatchQualification {
     /** The batched-scenario plan: which contingencies qualified ({@code batchedIndices}) and, per
      *  contingency, the frozen islanded-bus rows/targets, the islanded LfBus nums (excluded from result
      *  building), the merged per-bus generator outages (else null), and the count of on-GPU frozen islands. */
-    record ScenarioPlan(List<Integer> batchedIndices, int[][] frozenRowsByIndex,
+    public record ScenarioPlan(List<Integer> batchedIndices, int[][] frozenRowsByIndex,
                         int[][] islandedNumsByIndex, double[][] frozenTargetsByIndex,
                         GenOutage[][] genOutagesByIndex, int islandingCount,
                         double[] activePowerLossByIndex,
@@ -93,9 +93,9 @@ final class GpuBatchQualification {
     /** Per contingency index: the angle row of the bus OLF makes the slack when the outage isolates the base one
      *  (-1 = the base slack stays), which becomes the reference identity, and how far that bus's anchor target sits
      *  from the base slack's (the distributed-slack check reads the new slack's balance against it). */
-    record SlackRelocations(int[] rowByIndex, double[] shiftByIndex) {
+    public record SlackRelocations(int[] rowByIndex, double[] shiftByIndex) {
 
-        int row(int index) {
+        public int row(int index) {
             return rowByIndex[index];
         }
     }
@@ -106,7 +106,7 @@ final class GpuBatchQualification {
      * islanded buses frozen to identity; injection/shift/tap/reclose/switch shapes are checked against the
      * packed pattern and the on-device retain math, and anything unrepresentable is left out (CPU fallback).
      */
-    static ScenarioPlan planScenarios(List<BatchContingency> contingencies,
+    public static ScenarioPlan planScenarios(List<BatchContingency> contingencies,
             List<GpuBatchContingencyValidator.Qualification> qualifications,
             GpuAcElementMapper elementMapper, GpuAcData gpuData,
             EquationSystem<AcVariableType, AcEquationType> es,
@@ -136,7 +136,7 @@ final class GpuBatchQualification {
             // 154.7 MW of the island's load, OLF nothing, 3 kV at VL-1812). A pair that brings back any other bus: CPU.
             Set<Integer> islandedHere = new java.util.HashSet<>();
             q.islandedBuses().forEach(b -> islandedHere.add(b.getNum()));
-            int strategySep = c.contingencyId().indexOf(GpuBatchStatus.STRATEGY_KEY_SEP);
+            int strategySep = c.contingencyId().indexOf(BatchContingency.STRATEGY_KEY_SEP);
             if (strategySep < 0) {
                 pb.islandedByContingency.put(c.contingencyId(), islandedHere);
                 pb.openedByContingency.put(c.contingencyId(), c.outagedBranches());

@@ -34,10 +34,6 @@ public final class GpuBatchStatus {
      *  in the robust single-matrix mode before any CPU fallback; every other reject goes to the CPU. */
     public static final int STATUS_LINEAR_SOLVE_FAILED = -3;
 
-    /** Separator inside a (contingency, strategy) pair's BatchContingency id — pairs are solved in a
-     *  SECOND phase, WARM-CONTINUED from their parent contingency's state and reactive-limits pinning. */
-    public static final char STRATEGY_KEY_SEP = '\u0001';
-
     private GpuBatchStatus() {
     }
 }

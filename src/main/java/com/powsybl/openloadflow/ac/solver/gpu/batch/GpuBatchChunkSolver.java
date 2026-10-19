@@ -32,6 +32,10 @@ import com.powsybl.openloadflow.ac.solver.gpu.BatchReadbackNative;
 import com.powsybl.openloadflow.ac.solver.gpu.BatchSolveNative;
 import com.powsybl.openloadflow.ac.solver.gpu.DriverNative;
 import com.powsybl.openloadflow.ac.solver.gpu.NewtonSettingsNative;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.BatchContingency;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.GenOutage;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.GpuBatchLossPreDistribution;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.GpuBatchQualification;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfShunt;
 import org.slf4j.Logger;
@@ -255,7 +259,7 @@ final class GpuBatchChunkSolver {
         List<Integer> ctgIdxList = new ArrayList<>();
         List<Integer> pairIdxList = new ArrayList<>();
         for (int idx : batchedIndices) {
-            (contingencies.get(idx).contingencyId().indexOf(GpuBatchStatus.STRATEGY_KEY_SEP) >= 0 ? pairIdxList : ctgIdxList).add(idx);
+            (contingencies.get(idx).contingencyId().indexOf(BatchContingency.STRATEGY_KEY_SEP) >= 0 ? pairIdxList : ctgIdxList).add(idx);
         }
         java.util.Map<String, Integer> indexById = new java.util.HashMap<>();
         for (int i = 0; i < contingencies.size(); i++) {
@@ -632,7 +636,7 @@ final class GpuBatchChunkSolver {
                     if (pairPhase && "1".equals(System.getenv("OLF_GPU_DBG_PAIR_OV"))) {
                         for (int s2 = 0; s2 < realCount; s2++) {
                             StringBuilder sb = new StringBuilder("GPU-PAIR-OV "
-                                    + contingencies.get(group.get(chunkStart + s2)).contingencyId().replace(GpuBatchStatus.STRATEGY_KEY_SEP, '|'));
+                                    + contingencies.get(group.get(chunkStart + s2)).contingencyId().replace(BatchContingency.STRATEGY_KEY_SEP, '|'));
                             for (int k2 = 0; k2 < targetOverrideIndex.length; k2++) {
                                 if (targetOverrideIndex[k2] / n == s2) {
                                     int row = targetOverrideIndex[k2] % n;
@@ -696,7 +700,7 @@ final class GpuBatchChunkSolver {
                             Double parentSlackAbs = null;
                             if (s < realCount) {
                                 String pairId = contingencies.get(group.get(chunkStart + s)).contingencyId();
-                                Integer pIdx = indexById.get(pairId.substring(0, pairId.indexOf(GpuBatchStatus.STRATEGY_KEY_SEP)));
+                                Integer pIdx = indexById.get(pairId.substring(0, pairId.indexOf(BatchContingency.STRATEGY_KEY_SEP)));
                                 int parentStatus = pIdx != null && resultsByIndex[pIdx] != null
                                         ? ChunkArrays.rowStatus(resultsByIndex[pIdx], n) : GpuBatchStatus.STATUS_REJECTED;
                                 if (parentStatus == GpuBatchStatus.STATUS_CONVERGED) {
@@ -814,7 +818,7 @@ final class GpuBatchChunkSolver {
                                 // GeneratorAction the action's value (LfGeneratorAction sets the target AND the initial
                                 // target): the parent's target plus the change, or the value itself.
                                 String pairId = contingencies.get(group.get(chunkStart + s)).contingencyId();
-                                Integer pIdx = indexById.get(pairId.substring(0, pairId.indexOf(GpuBatchStatus.STRATEGY_KEY_SEP)));
+                                Integer pIdx = indexById.get(pairId.substring(0, pairId.indexOf(BatchContingency.STRATEGY_KEY_SEP)));
                                 double[] parentMoves = parentDs != null && pIdx != null ? genMovesByIndex.get(pIdx) : null;
                                 if (parentMoves != null) {
                                     System.arraycopy(parentMoves, 0, dgAnchor, s * ngen, ngen);
@@ -1427,7 +1431,7 @@ final class GpuBatchChunkSolver {
                     java.util.Arrays.fill(rlSolvedPerScenario, true);
                     if (dbgPairRl) {
                         for (int s2 = 0; s2 < realCount; s2++) {
-                            StringBuilder sb = new StringBuilder("GPU-PAIR-RL " + contingencies.get(group.get(chunkStart + s2)).contingencyId().replace(GpuBatchStatus.STRATEGY_KEY_SEP, '|'));
+                            StringBuilder sb = new StringBuilder("GPU-PAIR-RL " + contingencies.get(group.get(chunkStart + s2)).contingencyId().replace(BatchContingency.STRATEGY_KEY_SEP, '|'));
                             for (int i2 = 0; i2 < nrl; i2++) {
                                 int v = rlStateOut[s2 * nrl + i2];
                                 if ((v & 7) != 0) {

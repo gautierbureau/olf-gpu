@@ -5,7 +5,9 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/.
  * SPDX-License-Identifier: MPL-2.0
  */
-package com.powsybl.openloadflow.ac.solver.gpu.batch;
+package com.powsybl.openloadflow.ac.solver.gpu.batch.plan;
+
+import java.util.Arrays;
 
 /**
  * The per-scenario target/row-mode changes a generator loss applies on the device: remove the lost
@@ -253,12 +255,12 @@ public record GenOutage(int pRow, double pTarget, int vRow, double qTarget, bool
      *  coupler-opening and tree-replay paths (the child's base balances brought home) yield to it. Every row a
      *  GenOutage entry writes: its P balance row, its Q target row (own V row, or the relocated one) on a flip or a
      *  Q override, its seeded DISTR_Q targets and a killed pilot's identity row. */
-    static boolean planSeedsRow(GenOutage[] gos, int row) {
+    public static boolean planSeedsRow(GenOutage[] gos, int row) {
         for (GenOutage go : gos == null ? new GenOutage[0] : gos) {
             if (go.pRow() == row
                     || (go.toPq() || go.qOverride()) && go.qTargetRowOrV() == row
                     || go.toPq() && go.vRow() == row
-                    || go.seedsDqTargets() && ChunkArrays.contains(go.dqTargetRows(), row)
+                    || go.seedsDqTargets() && Arrays.stream(go.dqTargetRows()).anyMatch(r -> r == row)
                     || go.killsPilotVoltageIdentity() && go.deadPilotVRow() == row) {
                 return true;
             }
@@ -273,7 +275,7 @@ public record GenOutage(int pRow, double pTarget, int vRow, double qTarget, bool
      *  elected main of a re-homed cluster - must not: measured on rte6515 BUS-6066_BBS_1 / BUS-2341_BBS_1 /
      *  BUS-6002_BBS_1 when the seed gated the identity, 6.7 / 2.3 / 0.03 kV and 1.27 / 1.21 MW against OLF,
      *  and BUS-246_BBS_2 singular. */
-    static boolean planFlipsRow(GenOutage[] gos, int row) {
+    public static boolean planFlipsRow(GenOutage[] gos, int row) {
         for (GenOutage go : gos == null ? new GenOutage[0] : gos) {
             if (go.toPq() && go.vRow() == row
                     || go.killsPilotVoltageIdentity() && go.deadPilotVRow() == row) {

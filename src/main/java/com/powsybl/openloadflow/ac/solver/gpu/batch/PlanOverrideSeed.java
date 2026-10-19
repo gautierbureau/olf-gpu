@@ -7,6 +7,8 @@
  */
 package com.powsybl.openloadflow.ac.solver.gpu.batch;
 
+import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.GpuBatchQualification;
+
 /**
  * The seeding of one slot's entries of the scenario plan: its scheduled active power loss, its DISTR_Q weight and key
  * overrides, its DISTR_RHO coefficients, the distributed-slack participants and reactive-limit controllers it

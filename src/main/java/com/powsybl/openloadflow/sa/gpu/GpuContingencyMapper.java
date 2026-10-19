@@ -8,8 +8,8 @@
 package com.powsybl.openloadflow.sa.gpu;
 
 import com.powsybl.iidm.network.Network;
-import com.powsybl.openloadflow.ac.solver.gpu.batch.LoadLoss;
-import com.powsybl.openloadflow.ac.solver.gpu.batch.ShuntShift;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.LoadLoss;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.ShuntShift;
 import com.powsybl.openloadflow.network.DisabledBranchStatus;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
@@ -228,9 +228,9 @@ final class GpuContingencyMapper {
     /** The contingency's SINGLE-SIDE branch openings (node-breaker propagation opening one breaker):
      *  each becomes a masked closed-branch element plus the pre-packed side-open OB view for the
      *  surviving terminal, or null when a one-sided shape is out of scope (zero-impedance). */
-    static List<com.powsybl.openloadflow.ac.solver.gpu.batch.BatchContingency.SideOpen> sideOpens(
+    static List<com.powsybl.openloadflow.ac.solver.gpu.batch.plan.BatchContingency.SideOpen> sideOpens(
             LfNetwork net, PropagatedContingency pc) {
-        List<com.powsybl.openloadflow.ac.solver.gpu.batch.BatchContingency.SideOpen> out = new ArrayList<>();
+        List<com.powsybl.openloadflow.ac.solver.gpu.batch.plan.BatchContingency.SideOpen> out = new ArrayList<>();
         for (Map.Entry<String, DisabledBranchStatus> e : pc.getBranchIdsToOpen().entrySet()) {
             if (e.getValue() == DisabledBranchStatus.BOTH_SIDES) {
                 continue;
@@ -255,7 +255,7 @@ final class GpuContingencyMapper {
                 trace(pc, "one-side open zero-impedance " + e.getKey());
                 return null;                                 // zi one-side: spanning-tree re-pick — CPU
             }
-            out.add(new com.powsybl.openloadflow.ac.solver.gpu.batch.BatchContingency.SideOpen(branch,
+            out.add(new com.powsybl.openloadflow.ac.solver.gpu.batch.plan.BatchContingency.SideOpen(branch,
                     e.getValue() == DisabledBranchStatus.SIDE_1 ? 1 : 2));
         }
         // BUS/BUSBAR LOSS: OLF's findBranchToOpenDirectlyImpactedByContingency opens every branch
@@ -282,7 +282,7 @@ final class GpuContingencyMapper {
                     trace(pc, "branch between two lost buses " + branch.getId());
                     return null;                             // fully dead branch between lost buses — CPU (rare)
                 }
-                out.add(new com.powsybl.openloadflow.ac.solver.gpu.batch.BatchContingency.SideOpen(branch,
+                out.add(new com.powsybl.openloadflow.ac.solver.gpu.batch.plan.BatchContingency.SideOpen(branch,
                         branch.getBus1() == bus ? 1 : 2));
             }
         }

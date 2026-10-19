@@ -8,6 +8,10 @@
 package com.powsybl.openloadflow.ac.solver.gpu.batch;
 
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.BatchContingency;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.GenOutage;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.GpuBatchInjectionOutages;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.RelocatedRows;
 import com.powsybl.openloadflow.network.GeneratorVoltageControl;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;

@@ -5,7 +5,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/.
  * SPDX-License-Identifier: MPL-2.0
  */
-package com.powsybl.openloadflow.ac.solver.gpu.batch;
+package com.powsybl.openloadflow.ac.solver.gpu.batch.plan;
 
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcElementMapper;
 import com.powsybl.openloadflow.graph.GraphConnectivity;
@@ -103,7 +103,7 @@ public final class GpuBatchContingencyValidator {
                                               List<BatchContingency> contingencies,
                                               GpuAcElementMapper elementMapper,
                                               boolean handleIslanding,
-                                              BatchConfig.SlackRelocation relocation) {
+                                              SlackRelocation relocation) {
         Objects.requireNonNull(network);
         Objects.requireNonNull(contingencies);
         Objects.requireNonNull(elementMapper);
@@ -122,7 +122,7 @@ public final class GpuBatchContingencyValidator {
                                            BatchContingency contingency,
                                            GpuAcElementMapper elementMapper,
                                            boolean handleIslanding,
-                                           BatchConfig.SlackRelocation relocation) {
+                                           SlackRelocation relocation) {
         List<LfBranch> branches = contingency.outagedBranches();
 
         // The GPU disabled mask can only mask branches the element pack contains — the SIDE-OPENED
@@ -167,7 +167,7 @@ public final class GpuBatchContingencyValidator {
             // main one: PropagatedContingency RELOCATES the slack ("leads to an isolated slack bus:
             // relocate slack bus inside main component"), excluding every bus outside the largest
             // connected component from slack eligibility and re-picking a slack there with the run's own
-            // selector. The device follows that pick (BatchConfig.SlackRelocation): the new slack's angle row
+            // selector. The device follows that pick (SlackRelocation): the new slack's angle row
             // becomes the reference and the distributed-slack check reads its balance. Anchoring on the
             // isolated slack instead reports the LIVE side as removed (measured: {BBS2, BBS3}), which would
             // freeze the whole energized network instead of the stub.

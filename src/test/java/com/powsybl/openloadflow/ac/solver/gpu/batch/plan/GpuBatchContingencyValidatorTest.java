@@ -5,13 +5,13 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/.
  * SPDX-License-Identifier: MPL-2.0
  */
-package com.powsybl.openloadflow.ac.solver.gpu.batch;
+package com.powsybl.openloadflow.ac.solver.gpu.batch.plan;
 
 import com.powsybl.iidm.network.Network;
 import com.powsybl.iidm.network.test.EurostagTutorialExample1Factory;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcElementMapper;
-import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchContingencyValidator.Disqualification;
-import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchContingencyValidator.Qualification;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.GpuBatchContingencyValidator.Disqualification;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.GpuBatchContingencyValidator.Qualification;
 import com.powsybl.openloadflow.network.EurostagFactory;
 import com.powsybl.openloadflow.network.FirstSlackBusSelector;
 import com.powsybl.openloadflow.network.LfBranch;
@@ -141,7 +141,7 @@ class GpuBatchContingencyValidatorTest extends com.powsybl.openloadflow.network.
         assertEquals(otherSide, lostWhenCut(network, "l0"), "before: the main component is the slack's");
         GpuAcElementMapper mapper = new GpuAcElementMapper(network);
         List<Qualification> q = GpuBatchContingencyValidator.qualify(network, List.of(contingency(network, "l0")), mapper, true,
-                new BatchConfig.SlackRelocation(new FirstSlackBusSelector(), 1));
+                new SlackRelocation(new FirstSlackBusSelector(), 1));
         assertTrue(q.get(0).qualified(), "the slack is relocated inside the largest component");
         assertEquals("m_vl_0", q.get(0).relocatedSlack().getId());
         assertEquals(otherSide, lostWhenCut(network, "l0"), "after: the main component is still the slack's");

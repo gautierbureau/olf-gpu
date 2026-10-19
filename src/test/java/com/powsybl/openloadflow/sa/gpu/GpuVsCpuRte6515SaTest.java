@@ -16,6 +16,7 @@ import com.powsybl.loadflow.json.JsonLoadFlowParameters;
 import com.powsybl.math.matrix.SparseMatrixFactory;
 import com.powsybl.openloadflow.CommonTestConfig;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.BatchContingency;
 import com.powsybl.openloadflow.graph.EvenShiloachGraphDecrementalConnectivityFactory;
 import com.powsybl.openloadflow.sa.AbstractOpenSecurityAnalysisTest;
 import com.powsybl.openloadflow.sa.OpenSecurityAnalysisParameters;
@@ -1771,10 +1772,10 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
         List<String> deviceFailures = cpu.getOperatorStrategyResults().stream()
                 .filter(r -> r.getConditionalActionsResults().get(0).getStatus() == PostContingencyComputationStatus.CONVERGED)
                 .map(r -> r.getOperatorStrategy().getContingencyContext().getContingencyId()
-                        + com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchStatus.STRATEGY_KEY_SEP + r.getOperatorStrategy().getId())
+                        + BatchContingency.STRATEGY_KEY_SEP + r.getOperatorStrategy().getId())
                 .filter(id -> failed.stream().anyMatch(f -> f.equals(id)
-                        || f.startsWith(id + com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchStatus.STRATEGY_KEY_SEP)))
-                .map(id -> id.replace(com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchStatus.STRATEGY_KEY_SEP, '|'))
+                        || f.startsWith(id + BatchContingency.STRATEGY_KEY_SEP)))
+                .map(id -> id.replace(BatchContingency.STRATEGY_KEY_SEP, '|'))
                 .toList();
         System.out.printf("  STRATEGY DEVICE FAILURES on a strategy OLF converges: %d %s%n", deviceFailures.size(),
                 deviceFailures.subList(0, Math.min(20, deviceFailures.size())));

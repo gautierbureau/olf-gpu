@@ -5,7 +5,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/.
  * SPDX-License-Identifier: MPL-2.0
  */
-package com.powsybl.openloadflow.ac.solver.gpu.batch;
+package com.powsybl.openloadflow.ac.solver.gpu.batch.plan;
 
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
@@ -29,7 +29,7 @@ import java.util.List;
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
-final class GpuBatchInjectionOutages {
+public final class GpuBatchInjectionOutages {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(GpuBatchInjectionOutages.class);
 
@@ -296,7 +296,7 @@ final class GpuBatchInjectionOutages {
      *  size on DBIE_0, the tree's root) matched at 2e-10 kV. The DS participant index ({@code dsBus}) keeps naming
      *  the structural row: the chunk solver re-points that participant's row the same way. {@code toQ} equal to the
      *  entry's own V row becomes "no relocated Q row" (-1), the entry's Q target then goes to {@code vRow}. */
-    static GenOutage[] rowsHome(GenOutage[] gos, int fromP, int toP, int fromQ, int toQ) {
+    public static GenOutage[] rowsHome(GenOutage[] gos, int fromP, int toP, int fromQ, int toQ) {
         if (gos == null || gos.length == 0) {
             return gos;
         }

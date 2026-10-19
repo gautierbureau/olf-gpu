@@ -7,6 +7,8 @@
  */
 package com.powsybl.openloadflow.ac.solver.gpu.batch;
 
+import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.GpuBatchQualification;
+
 /**
  * The seeding of a slot whose contingency isolates the base slack: OLF re-picks a slack in the main component, whose
  * angle becomes the reference and whose scheduled P the distributed slack reads from its shifted anchor.

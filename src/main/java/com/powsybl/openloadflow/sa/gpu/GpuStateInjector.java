@@ -9,7 +9,7 @@ package com.powsybl.openloadflow.sa.gpu;
 
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
-import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchStatus;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.BatchContingency;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.Variable;
 import com.powsybl.openloadflow.network.LfBus;
@@ -250,7 +250,7 @@ final class GpuStateInjector {
         }
         var filtered = result.getBusResults().stream().filter(br -> !islandedBusIds.contains(br.getBusId())).toList();
         if (dbg) {
-            System.err.println("FILTER-ISLANDED '" + scenarioId.replace(GpuBatchStatus.STRATEGY_KEY_SEP, '|')
+            System.err.println("FILTER-ISLANDED '" + scenarioId.replace(BatchContingency.STRATEGY_KEY_SEP, '|')
                     + "' ids=" + islandedBusIds + " " + result.getBusResults().size() + "->" + filtered.size());
         }
         return new NetworkResult(result.getBranchResults(), filtered,

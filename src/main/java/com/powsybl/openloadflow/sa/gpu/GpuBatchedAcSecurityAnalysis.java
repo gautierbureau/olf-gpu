@@ -23,8 +23,8 @@ import com.powsybl.openloadflow.ac.solver.AcSolverUtil;
 import com.powsybl.openloadflow.ac.solver.NewtonRaphsonFactory;
 import com.powsybl.openloadflow.ac.solver.gpu.GpuDriverOuterLoopEngine;
 import com.powsybl.openloadflow.ac.solver.gpu.GpuNewtonRaphsonFactory;
-import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchStatus;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchedSecurityAnalysisSolver;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.BatchContingency;
 import com.powsybl.openloadflow.graph.GraphConnectivityFactory;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
@@ -59,7 +59,7 @@ import java.util.Objects;
 /**
  * Prototype integration of the batched GPU N-1 ({@link GpuBatchedSecurityAnalysisSolver})
  * into OLF's AC security-analysis engine. Single-branch contingencies whose post-contingency
- * states the GPU batch can solve (qualified by {@link com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchContingencyValidator})
+ * states the GPU batch can solve (qualified by {@link com.powsybl.openloadflow.ac.solver.gpu.batch.plan.GpuBatchContingencyValidator})
  * are solved ALL AT ONCE, once, right after the pre-contingency load flow; the engine's
  * per-contingency loop then INJECTS each precomputed state instead of running its own
  * Newton-Raphson, and reuses the existing violation-detection and result-building machinery
@@ -134,7 +134,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
 
     /** Separator inside the precomputed-state key of a (contingency, strategy) pair — the SOLVER's
      *  constant, which also drives its two-phase warm-continuation ordering. */
-    private static final char STRATEGY_KEY_SEP = GpuBatchStatus.STRATEGY_KEY_SEP;
+    private static final char STRATEGY_KEY_SEP = BatchContingency.STRATEGY_KEY_SEP;
 
     /**
      * OLF's contingency loss distribution, answered from the batch where that is exact. For a device-solved

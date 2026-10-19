@@ -9,6 +9,9 @@ package com.powsybl.openloadflow.ac.solver.gpu.batch;
 
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcElementMapper;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.BatchContingency;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.ShuntShift;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.TapR1Override;
 import com.powsybl.openloadflow.network.LfBranch;
 
 import java.util.List;

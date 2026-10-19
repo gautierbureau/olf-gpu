@@ -20,6 +20,7 @@ import com.powsybl.openloadflow.ac.outerloop.ReactiveLimitsOuterLoop;
 import com.powsybl.openloadflow.ac.outerloop.gpu.GpuTransformerVoltageControlOuterLoop;
 import com.powsybl.openloadflow.ac.solver.gpu.GpuLoadFlowParameters;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.BatchConfig;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.SlackRelocation;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.network.LfNetwork;
 import com.powsybl.openloadflow.util.PerUnit;
@@ -339,13 +340,13 @@ final class GpuSaRunScope {
 
     /** The run's slack re-pick for contingencies that isolate the slack, when the device can follow it: one slack
      *  bus, and the reference bus being that slack (what the security analysis configures). */
-    private static BatchConfig.SlackRelocation slackRelocation(AcLoadFlowParameters acParameters) {
+    private static SlackRelocation slackRelocation(AcLoadFlowParameters acParameters) {
         var np = acParameters.getNetworkParameters();
         if (np.getMaxSlackBusCount() != 1
                 || !(np.getReferenceBusSelector() instanceof com.powsybl.openloadflow.network.ReferenceBusFirstSlackSelector)) {
             return null;
         }
-        return new BatchConfig.SlackRelocation(np.getSlackBusSelector(), 1);
+        return new SlackRelocation(np.getSlackBusSelector(), 1);
     }
 
     /** The remote-group pin-dynamics residual gate — RETIRED 2026-09-08: singleton remote groups

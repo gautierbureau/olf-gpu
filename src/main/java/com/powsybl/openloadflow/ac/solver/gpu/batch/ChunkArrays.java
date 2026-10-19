@@ -8,6 +8,7 @@
 package com.powsybl.openloadflow.ac.solver.gpu.batch;
 
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.BatchContingency;
 
 import java.util.List;
 
@@ -114,7 +115,7 @@ final class ChunkArrays {
             return -1;
         }
         String pairId = contingencies.get(group.get(chunkStart + s)).contingencyId();
-        int sep = pairId.indexOf(GpuBatchStatus.STRATEGY_KEY_SEP);
+        int sep = pairId.indexOf(BatchContingency.STRATEGY_KEY_SEP);
         Integer p = sep < 0 ? null : indexById.get(pairId.substring(0, sep));
         return p == null ? -1 : p;
     }

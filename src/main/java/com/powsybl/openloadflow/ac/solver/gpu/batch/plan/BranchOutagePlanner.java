@@ -5,7 +5,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/.
  * SPDX-License-Identifier: MPL-2.0
  */
-package com.powsybl.openloadflow.ac.solver.gpu.batch;
+package com.powsybl.openloadflow.ac.solver.gpu.batch.plan;
 
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
@@ -235,7 +235,7 @@ final class BranchOutagePlanner {
         pb.batchedIndices.add(i);
         pb.islandedNumsByIndex[i] = q.islandedBuses().stream().mapToInt(LfBus::getNum).toArray();
         if ("1".equals(System.getenv("OLF_GPU_DBG_BUSDUMP"))) {
-            System.err.println("FROZEN-ISLAND '" + c.contingencyId().replace(GpuBatchStatus.STRATEGY_KEY_SEP, '|') + "' buses="
+            System.err.println("FROZEN-ISLAND '" + c.contingencyId().replace(BatchContingency.STRATEGY_KEY_SEP, '|') + "' buses="
                     + q.islandedBuses().stream().map(b -> b.getId() + "#" + b.getNum()).toList()
                     + " rows=" + java.util.Arrays.toString(fi.rows()));
         }

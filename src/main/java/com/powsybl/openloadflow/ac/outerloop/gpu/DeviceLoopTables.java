@@ -9,6 +9,7 @@ package com.powsybl.openloadflow.ac.outerloop.gpu;
 
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuQLimitType;
+import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuRealisticVoltageFixingLoop;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuVoltageControlRole;
 
 /**
@@ -31,12 +32,11 @@ public final class DeviceLoopTables {
     /** {@code AcloadFlowEngine.runOuterLoops}: under {@code voltageRemoteControlRobustMode} the
      *  realistic-voltage check is DEFERRED until the last configured loop that declares
      *  {@code canFixUnrealisticState()} has run, so that loop gets its chance to repair the state
-     *  instead of the run failing on it. Returns which loop that is, as the device's hint:
-     *  −1 = none, so every solve is checked (robust mode off, or no such loop is configured);
-     *  0 = ReactiveLimits; 1 = the discrete TransformerVoltageControl. */
+     *  instead of the run failing on it. Returns which loop that is, as the device's hint: a
+     *  GpuRealisticVoltageFixingLoop (NONE: every solve is checked). */
     public static int realisticFixingLoop(com.powsybl.openloadflow.ac.AcLoadFlowParameters p) {
         if (!p.isVoltageRemoteControlRobustMode()) {
-            return -1;
+            return GpuRealisticVoltageFixingLoop.NONE;
         }
         com.powsybl.openloadflow.ac.outerloop.AcOuterLoop last = null;
         for (var ol : p.getOuterLoops()) {
@@ -45,9 +45,10 @@ public final class DeviceLoopTables {
             }
         }
         if (last == null) {
-            return -1;
+            return GpuRealisticVoltageFixingLoop.NONE;
         }
-        return last instanceof com.powsybl.openloadflow.ac.outerloop.ReactiveLimitsOuterLoop ? 0 : 1;
+        return last instanceof com.powsybl.openloadflow.ac.outerloop.ReactiveLimitsOuterLoop
+                ? GpuRealisticVoltageFixingLoop.REACTIVE_LIMITS : GpuRealisticVoltageFixingLoop.TRANSFORMER_VOLTAGE_CONTROL;
     }
 
     private DeviceLoopTables() {

@@ -17,6 +17,7 @@
 #include "../common/codes/gpu_ac_solver_status.cuh"
 #include "../common/codes/gpu_outer_loop_kind.cuh"
 #include "../common/codes/gpu_reactive_limits_state.cuh"
+#include "../common/codes/gpu_realistic_voltage_fixing_loop.cuh"
 #include "../diagnostics/driver_traces.cuh"
 #include "../diagnostics/matrix_scan.cuh"
 #include "../equations/branch_fill.cuh"
@@ -532,9 +533,9 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     // conservative direction, since a check that fires too early only routes to the CPU.
     int realisticFixingIdx = -1;
     for (int i = 0; i < nLoops; i++) {
-        bool isFixing = ctx->realisticFixingLoop == 0
+        bool isFixing = ctx->realisticFixingLoop == GpuRealisticVoltageFixingLoop::REACTIVE_LIMITS
                 ? loopOrder[i] == GpuOuterLoopKind::REACTIVE_LIMITS
-                : (ctx->realisticFixingLoop == 1
+                : (ctx->realisticFixingLoop == GpuRealisticVoltageFixingLoop::TRANSFORMER_VOLTAGE_CONTROL
                         && (loopOrder[i] == GpuOuterLoopKind::HOST_TRANSFORMER_VOLTAGE_CONTROL
                             || (loopOrder[i] == GpuOuterLoopKind::TRANSFORMER_VOLTAGE_CONTROL && ctx->tvdMode != 1)));
         if (isFixing) {

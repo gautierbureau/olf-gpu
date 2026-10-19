@@ -19,6 +19,7 @@
 #include "../common/codes/gpu_distributed_slack_factor_mode.cuh"
 #include "../common/codes/gpu_ac_solver_status.cuh"
 #include "../common/codes/gpu_outer_loop_kind.cuh"
+#include "../common/codes/gpu_realistic_voltage_fixing_loop.cuh"
 #include "../structure/shared_structure.cuh"
 
 namespace olfgpu {
@@ -232,7 +233,7 @@ struct BatchSolverContext {
     // has run (voltageRemoteControlRobustMode; ReactiveLimits and the discrete TransformerVoltageControl
     // are the two loops that declare canFixUnrealisticState). -1 = no such loop, check every solve.
     // 0 = ReactiveLimits is the last one, 1 = the discrete TransformerVoltageControl.
-    int realisticFixingLoop = -1;
+    int realisticFixingLoop = GpuRealisticVoltageFixingLoop::NONE;
     // Distributed slack: the (mapped) slack BUS_PHI row + its scheduled targetP give the per-scenario
     // mismatch (read from dQbuf); dDsPhiRow/dDsFactor are the participating buses' P-target rows + normalized
     // participation factors. Reuses dRlActive/dRlSwitched (same outer schedule as reactive limits).

@@ -10,7 +10,7 @@ package com.powsybl.openloadflow.ac.solver.gpu.batch;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.RemoteVoltageControlNative;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DistributedSlackNative;
-import com.powsybl.openloadflow.ac.outerloop.gpu.ForcedTargetQ;
+import com.powsybl.openloadflow.ac.outerloop.gpu.ForceTargetQInReactiveLimits;
 import com.powsybl.openloadflow.ac.outerloop.gpu.ReactiveLimitsNative;
 import com.powsybl.openloadflow.ac.solver.gpu.NewtonSettingsNative;
 
@@ -113,7 +113,7 @@ final class ChunkLists {
     // the slack's retained share, which is not a device defect.
     final double[] preAbsorbedBySlot;
 
-    ChunkLists(int chunkSize, int n, GpuAcData gpuData, ForcedTargetQ.Channel forcedTargetQ, int ngen) {
+    ChunkLists(int chunkSize, int n, GpuAcData gpuData, ForceTargetQInReactiveLimits.Channel forcedTargetQ, int ngen) {
         this.dsRowOvBySlot = new int[chunkSize][];
         this.nDqMembersAll = gpuData.dqMemberBusNum() != null ? gpuData.dqMemberBusNum().length : 0;
         this.dqSubDense = new byte[chunkSize * nDqMembersAll];

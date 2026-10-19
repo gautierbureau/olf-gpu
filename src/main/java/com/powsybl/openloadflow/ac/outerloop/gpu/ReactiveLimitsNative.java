@@ -30,7 +30,7 @@ public final class ReactiveLimitsNative {
     public static native double[] readBatchRlPinTargets(long handle);
 
     /** Install (or clear, with nulls) the forceTargetQInReactiveLimits channel on a batch context: the Q
-     *  targets of generators OLF clamps into their curve limits at their current P (see ForcedTargetQ). */
+     *  targets of generators OLF clamps into their curve limits at their current P (see ForceTargetQInReactiveLimits). */
     public static native void setBatchForcedTargetQ(long handle, int[] fqIdx, double[] fqIn, double[] fqPts,
                                                     int extrapolate);
 

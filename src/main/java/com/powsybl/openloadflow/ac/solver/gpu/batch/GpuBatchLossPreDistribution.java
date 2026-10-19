@@ -50,7 +50,7 @@ final class GpuBatchLossPreDistribution {
      * flip apparent-power violations.
      *
      * @param genMovesOut when not null ({@code double[ngen]}), receives each generator's own move - what the
-     *        forced-target-Q channel clamps at (ForcedTargetQ); left at zero when nothing moves
+     *        forced-target-Q channel clamps at (ForceTargetQInReactiveLimits); left at zero when nothing moves
      * @return {@code double[nds + 1]}: the participant shares (target/anchor deltas per DS row)
      *         followed by the slack bus's own absorbed share, or {@code null} when nothing can move
      *         (no participants, zero mismatch).

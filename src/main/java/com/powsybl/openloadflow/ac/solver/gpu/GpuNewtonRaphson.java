@@ -24,7 +24,7 @@ import com.powsybl.openloadflow.ac.outerloop.gpu.DeviceFlowControllers;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DeviceLoopKind;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DeviceLoopTables;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DistributedSlackWriteBack;
-import com.powsybl.openloadflow.ac.outerloop.gpu.ForcedTargetQ;
+import com.powsybl.openloadflow.ac.outerloop.gpu.ForceTargetQInReactiveLimits;
 import com.powsybl.openloadflow.ac.outerloop.gpu.GpuHvdcAcEmulationLimitsOuterLoop;
 import com.powsybl.openloadflow.ac.outerloop.gpu.GpuIncrementalShuntVoltageControlOuterLoop;
 import com.powsybl.openloadflow.ac.outerloop.gpu.GpuIncrementalTransformerVoltageControlOuterLoop;
@@ -852,8 +852,8 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                     : null;
             // forceTargetQInReactiveLimits: the base load flow's slack moves P too, and OLF re-clamps.
             var lfNetworkParameters = acLoadFlowParameters.getNetworkParameters();
-            ForcedTargetQ.Channel forcedTargetQ = driverRlLoop() != null && dsLoop != null
-                    ? ForcedTargetQ.build(network, equationSystem, cachedData, driverDsParams(),
+            ForceTargetQInReactiveLimits.Channel forcedTargetQ = driverRlLoop() != null && dsLoop != null
+                    ? ForceTargetQInReactiveLimits.build(network, equationSystem, cachedData, driverDsParams(),
                             lfNetworkParameters.isForceTargetQInReactiveLimits() && lfNetworkParameters.isReactiveLimits(),
                             true, target, activation.rowMode(), lfNetworkParameters.isExtrapolateReactiveLimits())
                     : null;

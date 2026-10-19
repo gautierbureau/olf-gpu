@@ -15,7 +15,7 @@ import com.powsybl.openloadflow.ac.outerloop.gpu.DeviceLoopTables;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DevicePhaseInstaller;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DevicePhases;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DistributedSlackNative;
-import com.powsybl.openloadflow.ac.outerloop.gpu.ForcedTargetQ;
+import com.powsybl.openloadflow.ac.outerloop.gpu.ForceTargetQInReactiveLimits;
 import com.powsybl.openloadflow.ac.outerloop.gpu.GpuFreezingHvdcACEmulationOuterloop;
 import com.powsybl.openloadflow.ac.outerloop.gpu.GpuHvdcAcEmulationLimitsOuterLoop;
 import com.powsybl.openloadflow.ac.outerloop.gpu.GpuMonitoringVoltageOuterLoop;
@@ -183,7 +183,7 @@ final class GpuBatchChunkSolver {
         DevicePhases.Built phases = in.phases().phases();
         List<GpuHvdcAcEmulationLimitsOuterLoop.Ctl> hvdcControllers = in.phases().hvdcControllers();
         ReactiveCapabilityCurves.Channel rlCurves = in.phases().rlCurves();
-        ForcedTargetQ.Channel forcedTargetQ = in.phases().forcedTargetQ();
+        ForceTargetQInReactiveLimits.Channel forcedTargetQ = in.phases().forcedTargetQ();
         double[][] resultsByIndex = in.sinks().resultsByIndex();
         double[] preDistributedByIndex = in.sinks().preDistributedByIndex();
         double[] distributedByIndex = in.sinks().distributedByIndex();

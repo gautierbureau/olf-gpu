@@ -47,9 +47,9 @@ import java.util.List;
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
-public final class ForcedTargetQ {
+public final class ForceTargetQInReactiveLimits {
 
-    private ForcedTargetQ() {
+    private ForceTargetQInReactiveLimits() {
     }
 
     /** The packed channel; {@code genSlot} is each entry's generator slot in the distributed-slack generator pack

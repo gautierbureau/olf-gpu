@@ -282,7 +282,7 @@ __global__ void pilotRowAllPinnedBatch(int nEntries, int nScenarios, int n, int 
         }
         if (rlBaseLt != nullptr && rlBaseLt[rl] == RL_BASE_RELOCATED) {
             // This member's pin state is not ours to read: its reactive balance does not live on the row the
-            // RL bookkeeping keys on (GpuAcOuterLoopPacks.RL_BASE_RELOCATED), and it is seeded FROZEN — a
+            // RL bookkeeping keys on (ReactiveLimitsPacker.RL_BASE_RELOCATED), and it is seeded FROZEN — a
             // non-zero type that would otherwise read here as "pinned" and fire the flip. The flip only
             // works when the pilot's q can be ROUTED to the flipped row by an alternate dest, which this
             // shape has none of, so flipping would empty the row and lose BUS_TARGET_V with it.

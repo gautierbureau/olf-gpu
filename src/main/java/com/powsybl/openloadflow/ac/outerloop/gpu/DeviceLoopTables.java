@@ -105,9 +105,11 @@ public final class DeviceLoopTables {
         ReactiveLimitsNative.setBatchRlRobust(handle, gpuData.rlInitTargetQ(),
                 minRealisticVoltage * REALISTIC_VOLTAGE_MARGIN, maxRealisticVoltage / REALISTIC_VOLTAGE_MARGIN,
                 rlRobustMode ? 1 : 0);
-        // OLF's own base pin kinds, so a realistic-voltage pin is not re-seeded as a Q-limit pin.
+        // OLF's own base QLimitTypes, so a realistic-voltage switch is not re-seeded as a Q-limit one, merged with
+        // the device's relocated-row code.
+        byte[] baseLimitTypes = gpuData.rlBaseLimitTypeForDevice();
         boolean anyBaseLt = false;
-        for (byte b : gpuData.rlBaseQLimitType()) {
+        for (byte b : baseLimitTypes) {
             anyBaseLt |= b != 0;
         }
         if (System.getenv("OLF_GPU_RL_TRACE") != null) {
@@ -115,16 +117,16 @@ public final class DeviceLoopTables {
             // through here, with packs that may differ (the batch's is extracted after the base
             // solve's write-back). A kind the batch never receives cannot be what seeds it.
             StringBuilder ks = new StringBuilder();
-            for (int i = 0; i < gpuData.rlBaseQLimitType().length; i++) {
-                if (gpuData.rlBaseQLimitType()[i] != 0) {
-                    ks.append(' ').append(i).append(':').append(gpuData.rlBaseQLimitType()[i]);
+            for (int i = 0; i < baseLimitTypes.length; i++) {
+                if (baseLimitTypes[i] != 0) {
+                    ks.append(' ').append(i).append(':').append(baseLimitTypes[i]);
                 }
             }
             System.err.println("GPU_RL_KINDS install handle=" + handle + " nrl=" + gpuData.rlVrow().length
                     + " anyBaseLt=" + anyBaseLt + " kinds:" + ks + " caller="
                     + Thread.currentThread().getStackTrace()[2].getClassName().replaceAll(".*\\.", ""));
         }
-        ReactiveLimitsNative.setBatchRlBaseLimitType(handle, anyBaseLt ? gpuData.rlBaseQLimitType() : null);
+        ReactiveLimitsNative.setBatchRlBaseLimitType(handle, anyBaseLt ? baseLimitTypes : null);
         // Remote-member RL entries (plan-B1): install (or clear, on a cached context) the kinds.
         boolean anyRlRemote = false;
         for (byte b : gpuData.rlRemote()) {

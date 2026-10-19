@@ -79,7 +79,7 @@ __global__ void initRlLimitTypeBatch(int nrl, int nScenarios, int n, const int* 
                     : (fabs(tgt - (rlMaxQb[i] - rlLoadQb[i])) <= fabs(tgt - (rlMinQb[i] - rlLoadQb[i])) ? 2 : 1);
         }
         if (olfKind == RL_BASE_RELOCATED) {
-            // This entry does NOT own the pin on its V row (GpuAcOuterLoopPacks.RL_BASE_RELOCATED): either its
+            // This entry does NOT own the pin on its V row (ReactiveLimitsPacker.RL_BASE_RELOCATED): either its
             // own reactive balance was relocated off that row, or the row carries ANOTHER bus's relocated
             // balance. Both happen on a pilot that is one of its own controllers while a sibling still holds
             // the voltage. Freeze the entry: the reactive-limits pass and the switch-back both key on the V

@@ -29,10 +29,11 @@ public final class ReactiveLimitsPacker {
     }
 
     /**
-     * The {@code rlBaseQLimitType} code that means "this entry's pin bookkeeping row is NOT its own", so the
-     * device must leave the entry to OLF instead of pinning or unpinning a row it does not own. It is not one
-     * of OLF's {@code QLimitType}s — those are 1..4 — and the seeding kernel turns it into
-     * {@code RL_LIMIT_FROZEN} (keep it in step with {@code RL_BASE_RELOCATED} in olf_gpu_nr_jni.cu).
+     * The device's base code for an entry whose PV/PQ state is NOT on its own V row ({@code rlPvPqRowRelocated}), so
+     * the device must leave the entry to OLF instead of switching or switching back a row it does not own. It is not
+     * one of OLF's {@code QLimitType}s — those are 1..4 — and only exists on the device:
+     * {@link GpuAcData#rlBaseLimitTypeForDevice()} merges it over OLF's code at the upload, and the seeding kernel
+     * turns it into {@code RL_LIMIT_FROZEN} (keep it in step with {@code RL_BASE_RELOCATED} in common/loop_kinds.cuh).
      *
      * <p>Two shapes need it, both on a PILOT that is one of its own controllers while a SIBLING controller
      * still holds the voltage. The pilot's own V row must keep {@code BUS_TARGET_V}, so {@code computeQRow}
@@ -54,7 +55,7 @@ public final class ReactiveLimitsPacker {
                   double[] rlSvcBmin, double[] rlSvcBmax, double[] rlV2Base,
                   byte[] rlMonitored, byte[] rlRemote, int[] rlCmpVrow, int[] rlBusNum,
                   double[] rlNominalV, int[] rlPRow, double[] rlTargetP, int[] rlIdRank,
-                  double[] rlInitTargetQ, byte[] rlBaseQLimitType) {
+                  double[] rlInitTargetQ, byte[] rlBaseQLimitType, byte[] rlPvPqRowRelocated) {
     }
 
     /** Rank of each id in lexicographic order — OLF's BY_ID_COMPARATOR tie-break, as an int the kernel can compare. */
@@ -165,6 +166,7 @@ public final class ReactiveLimitsPacker {
         // then legitimately re-freezes that "limit pin" AT the limit. rte6515 VL-1251_1: OLF pins it
         // at -0.0035 (V < 16 kV), the device at -1.0000, in every one of 366 contingencies.
         List<Byte> rlBaseQLimitType = new ArrayList<>();
+        List<Byte> rlPvPqRowRelocated = new ArrayList<>();
         // A never-solved network has NaN bus voltages, and an SVC's reactive limits are Bmin/Bmax·V²:
         // packing them (and the quadratic reference v²) at NaN left the entry's limits NaN and the
         // device never pinned it (the base load flow on the driver; a chunk extracts after a solve).
@@ -248,7 +250,8 @@ public final class ReactiveLimitsPacker {
                             rlTargetP.add(bus.getTargetP());
                             rlBusId.add(bus.getId());
                             rlInitTargetQ.add(initialGenerationTargetQ(bus));
-                            rlBaseQLimitType.add(relocatedPinCode(bus, bn, columns, hostsRelocatedBalance));
+                            rlBaseQLimitType.add(qLimitTypeCode(bus));
+                            rlPvPqRowRelocated.add(pvPqRowRelocated(bn, columns, hostsRelocatedBalance) ? (byte) 1 : (byte) 0);
                         }
                         continue;                                  // never let a base-pinned remote member
                     }                                              // masquerade as a LOCAL basePqCapable entry
@@ -307,6 +310,7 @@ public final class ReactiveLimitsPacker {
                         rlBusId.add(bus.getId());
                         rlInitTargetQ.add(initialGenerationTargetQ(bus));
                         rlBaseQLimitType.add(qLimitTypeCode(bus));
+                        rlPvPqRowRelocated.add((byte) 0);
                     }
                 }
             }
@@ -338,16 +342,18 @@ public final class ReactiveLimitsPacker {
                 // member alone is often the pilot's V. loadQ and vTarget complete the pin target
                 // (OLF pins at limit - loadTargetQ), which is the other half of any pin mismatch.
                 System.err.printf("RL_PACK entry=%d bus=%s vRow=%d minQ=%.9f maxQ=%.9f remote=%d"
-                        + " monitored=%d cmpVrow=%d loadQ=%.9f vTarget=%.9f baseQLimitType=%d%n",
+                        + " monitored=%d cmpVrow=%d loadQ=%.9f vTarget=%.9f baseQLimitType=%d pvPqRowRelocated=%d%n",
                         i, network.getBus(rlBusNum.get(i)).getId(), rlVrow.get(i), rlMinQ.get(i), rlMaxQ.get(i),
                         rlRemote.get(i), rlMonitored.get(i), rlCmpVrow.get(i), rlLoadQ.get(i),
-                        rlVtarget.get(i), rlBaseQLimitType.get(i));
+                        rlVtarget.get(i), rlBaseQLimitType.get(i), rlPvPqRowRelocated.get(i));
             }
         }
 
         byte[] baseLt = new byte[rlBaseQLimitType.size()];
+        byte[] relocated = new byte[rlPvPqRowRelocated.size()];
         for (int i = 0; i < baseLt.length; i++) {
             baseLt[i] = rlBaseQLimitType.get(i);
+            relocated[i] = rlPvPqRowRelocated.get(i);
         }
         return new RlPack(GpuAcArrays.toIntArray(rlVrow), GpuAcArrays.toDoubleArray(rlMinQ),
                 GpuAcArrays.toDoubleArray(rlMaxQ), GpuAcArrays.toDoubleArray(rlLoadQ),
@@ -356,7 +362,7 @@ public final class ReactiveLimitsPacker {
                 mon, rem, GpuAcArrays.toIntArray(rlCmpVrow),
                 GpuAcArrays.toIntArray(rlBusNum),
                 GpuAcArrays.toDoubleArray(rlNominalV), GpuAcArrays.toIntArray(rlPRow), GpuAcArrays.toDoubleArray(rlTargetP),
-                idRanks(rlBusId), GpuAcArrays.toDoubleArray(rlInitTargetQ), baseLt);
+                idRanks(rlBusId), GpuAcArrays.toDoubleArray(rlInitTargetQ), baseLt, relocated);
     }
 
     /** The targetQ OLF gives a member once the reactive-limits loop UNPINS it. A member pinned in the
@@ -380,13 +386,13 @@ public final class ReactiveLimitsPacker {
         return generationTargetQ - m.getLoadTargetQ();
     }
 
-    /** OLF's base limit type, or {@link #RL_BASE_RELOCATED} when this entry does not own its V row's pin. */
-    private static byte relocatedPinCode(LfBus bus, int bn, ExtractionColumns columns, boolean[] hostsRelocated) {
+    /** The bus's PV/PQ state is not on its own V row: its reactive balance lives elsewhere, or its V row hosts another's. */
+    private static boolean pvPqRowRelocated(int bn, ExtractionColumns columns, boolean[] hostsRelocated) {
         int qr = columns.qRow()[bn];
         int vr = columns.vCol()[bn];
-        boolean pinLivesElsewhere = qr >= 0 && qr != vr && columns.qRowAlt()[bn] == -1;
+        boolean balanceLivesElsewhere = qr >= 0 && qr != vr && columns.qRowAlt()[bn] == -1;
         boolean rowHoldsAnothersBalance = vr >= 0 && vr < hostsRelocated.length && hostsRelocated[vr];
-        return pinLivesElsewhere || rowHoldsAnothersBalance ? RL_BASE_RELOCATED : qLimitTypeCode(bus);
+        return balanceLivesElsewhere || rowHoldsAnothersBalance;
     }
 
     static byte qLimitTypeCode(LfBus bus) {

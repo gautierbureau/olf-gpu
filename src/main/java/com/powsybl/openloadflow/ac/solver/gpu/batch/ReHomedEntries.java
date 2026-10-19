@@ -131,10 +131,11 @@ final class ReHomedEntries {
             int[] reloc = relocRows.get(vVar.getRow());
             boolean blockCovers = reloc != null && outagedZiNums.contains(reloc[0]);
             int rl = RelocatedRows.rlEntryOf(gpuData, e.getKey());
-            boolean basePinned = gpuData.rlBaseQLimitType() != null && rl >= 0 && gpuData.rlBaseQLimitType()[rl] != 0;
+            boolean pqInBaseOrRowRelocated = gpuData.switchedPvToPqInBase(rl) || gpuData.pvPqRowRelocated(rl);
             if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {
-                System.err.printf("QUALIFY_TRACE remoteMain bus=%s vRow=%d target=%.6f blockCovers=%b basePinned=%b%n",
-                        e.getKey().getId(), vVar.getRow(), e.getValue(), blockCovers, basePinned);
+                System.err.printf("QUALIFY_TRACE remoteMain bus=%s vRow=%d target=%.6f blockCovers=%b switchedPvToPqInBase=%b"
+                        + " pvPqRowRelocated=%b%n", e.getKey().getId(), vVar.getRow(), e.getValue(), blockCovers,
+                        gpuData.switchedPvToPqInBase(rl), gpuData.pvPqRowRelocated(rl));
             }
             // A main PINNED at its reactive limit in the base cannot hold a voltage identity in EITHER placement.
             // This test used to sit below the blockCovers exit, so the killed-coupler block installed the identity on
@@ -143,7 +144,7 @@ final class ReHomedEntries {
             // FAILED where OLF converges with 60 violations; BUS-6003_BBS_1 (VL-6003_1, base MAX_Q) 0.27 kV and
             // 0.457 MW. OLF has the pinned main PQ with BUS_TARGET_V off until it unpins — a per-scenario pilot the
             // device does not host yet (tasks #70), so the scenario is the CPU's.
-            if (basePinned) {
+            if (pqInBaseOrRowRelocated) {
                 // The elected main is PQ in OLF. If EVERY controller of its cluster is pinned too, OLF's re-merged
                 // group has no enabled controller: BUS_TARGET_V stays off and the cluster is plain PQ at the
                 // limits — the stock placement's layout already (mode 4 rows at the pinned targets), so no
@@ -162,7 +163,7 @@ final class ReHomedEntries {
                     List<LfBus> ctl = cvc != null ? cvc.getControllerElements() : List.of(cb);
                     for (LfBus ce : ctl) {
                         int ceRl = RelocatedRows.rlEntryOf(gpuData, ce);
-                        if (!RelocatedRows.basePinned(gpuData, ceRl)) {
+                        if (!(gpuData.switchedPvToPqInBase(ceRl) || gpuData.pvPqRowRelocated(ceRl))) {
                             reject[0] = "PLAN:VC_REMERGE_PINNED_MAIN";
                             return null;
                         }

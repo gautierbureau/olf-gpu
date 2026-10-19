@@ -64,10 +64,6 @@ final class RelocatedRows {
         return start;
     }
 
-    static boolean basePinned(GpuAcData gpuData, int rlEntry) {
-        return gpuData.rlBaseQLimitType() != null && rlEntry >= 0 && gpuData.rlBaseQLimitType()[rlEntry] != 0;
-    }
-
     /** The bus's reactive-limit entry, or -1: a re-homed bus is checked as a LOCAL controller by the device
      *  (OLF checks it as the PV bus it now is; BUS-6113_BBS_1 pinned VL-6113_1 at RL#1, the device never
      *  looked — 7.1 kV). */

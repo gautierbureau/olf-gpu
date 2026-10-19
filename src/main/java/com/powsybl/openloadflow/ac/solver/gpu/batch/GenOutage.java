@@ -7,8 +7,6 @@
  */
 package com.powsybl.openloadflow.ac.solver.gpu.batch;
 
-import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
-
 /**
  * The per-scenario target/row-mode changes a generator loss applies on the device: remove the lost
  * generator's P from its bus's P target ({@code pRow}→{@code pTarget}); if the loss un-controls the bus
@@ -249,13 +247,6 @@ public record GenOutage(int pRow, double pTarget, int vRow, double qTarget, bool
      *  q are both measured against. */
     public boolean shrinksReactiveLimits() {
         return rlEntry >= 0 && (minQDelta != 0 || maxQDelta != 0 || loadQDelta != 0 || svcBminDelta != 0 || svcBmaxDelta != 0);
-    }
-
-    /** The base load flow PINNED this reactive-limit entry (MIN_Q / MAX_Q / a realistic-V freeze): its row
-     *  hosts its own reactive balance from the start. */
-    static boolean basePinned(GpuAcData gpuData, int entry) {
-        byte[] lt = gpuData.rlBaseQLimitType();
-        return lt != null && entry >= 0 && entry < lt.length && lt[entry] >= 1 && lt[entry] <= 4;
     }
 
     /** Does the plan write a TARGET at {@code row} for this scenario? Then the structural DEFAULT targets of the

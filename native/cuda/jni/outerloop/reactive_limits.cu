@@ -232,7 +232,7 @@ __global__ void reactiveLimitsBatch(const double* svcRlVt, int nrl, int nScenari
     size_t idx = (size_t) s * n + vrow;
     // The q this check READS is accumulated by fillRemoteMemberQBatch at rlQrow, which for a relocated
     // child is the parent coupler's DUMMY_Q row and NOT its own V row (see the rlQrow comment in
-    // GpuAcOuterLoopPacks: filling the own row "left the check reading ZERO for every relocated member,
+    // ReactiveLimitsPacker: filling the own row "left the check reading ZERO for every relocated member,
     // so it could never pin one"). That pack is STRUCTURAL -- it keeps writing there even in a scenario
     // that pins the dummy to a DUMMY_TARGET identity -- and qBuf is a separate accumulator, so reading it
     // there is valid whatever the row's equation MODE. Only the pin WRITE belongs on the live row, which
@@ -267,7 +267,7 @@ __global__ void reactiveLimitsBatch(const double* svcRlVt, int nrl, int nScenari
     // included. Blocking both directions used to leave network.xiidm/LKPH 0.32 kV off because
     // nothing restored the row then; now something does, in the same pass OLF does it, and this
     // entry's own voltage test (a pin type guessed for an empty range) fired a pass late on LNER.
-    // ...but ONLY such a bus: rlMonitored bit 2 (GpuAcOuterLoopPacks) marks an entry that is NOT one of its voltage
+    // ...but ONLY such a bus: rlMonitored bit 2 (ReactiveLimitsPacker) marks an entry that is NOT one of its voltage
     // control's controller elements, the set OLF iterates (LfNetwork.getControllerElements(GENERATOR)). A real
     // generator bus whose capability curve collapses to [0, 0] at its current P is a controller OLF still checks:
     // network.xiidm/FBQV, FBQF_0 pinned MIN_Q at 0 with V 1.009793 under its 1.010221 target - OLF switched it

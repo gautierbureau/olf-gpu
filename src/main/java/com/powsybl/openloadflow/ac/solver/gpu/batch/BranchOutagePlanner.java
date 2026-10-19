@@ -273,7 +273,8 @@ final class BranchOutagePlanner {
                 int crossRow = RelocatedRows.relocQRow(vVar.getRow(), pb.relocRows, outagedZiNums);
                 if (crossRow != vVar.getRow()) {
                     pvOn.add(ReHomedEntries.reHomedCrossEntry(crossRow, e.getValue(), reHomedRl,
-                            RelocatedRows.basePinned(gpuData, reHomedRl), e.getKey().getTargetQ()));
+                            gpuData.switchedPvToPqInBase(reHomedRl) || gpuData.pvPqRowRelocated(reHomedRl),
+                            e.getKey().getTargetQ()));
                     continue;
                 }
                 // Same rule as the island site above: a bus PINNED at its reactive limit in the base
@@ -282,7 +283,7 @@ final class BranchOutagePlanner {
                 // identity: rte6515 BUS-6157_BBS_1 (VL-6157_1, baseLimitType=1), BUS-6194_BBS_2
                 // (VL-6194_2, 2) and BUS-6229_BBS_1 (VL-6229_1, 2) — three device failures on
                 // systems OLF converges, replayed on the CPU.
-                if (RelocatedRows.basePinned(gpuData, reHomedRl)) {
+                if (gpuData.switchedPvToPqInBase(reHomedRl) || gpuData.pvPqRowRelocated(reHomedRl)) {
                     pvOn.add(ReHomedEntries.reHomedPinnedPvEntry(vVar.getRow(), e.getKey().getTargetQ(), e.getValue(), reHomedRl));
                     continue;
                 }

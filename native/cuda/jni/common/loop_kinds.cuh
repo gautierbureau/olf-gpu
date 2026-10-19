@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MPL-2.0
 //
 // The outer loops the device driver runs, in OLF's order, the HVDC AC-emulation status codes and the
-// reactive-limit limit types, shared with the host (GpuAcNewtonSolver / DeviceLoopKind / GpuAcOuterLoopPacks mirror them).
+// reactive-limit limit types, shared with the host (GpuAcNewtonSolver / DeviceLoopKind / ReactiveLimitsPacker mirror them).
 #ifndef OLF_GPU_COMMON_LOOP_KINDS_CUH
 #define OLF_GPU_COMMON_LOOP_KINDS_CUH
 
@@ -61,8 +61,8 @@ constexpr int MAX_DEVICE_LOOPS = 16;
 
 // Reactive-limit limit types: 0 unpinned, 1 MIN_Q, 2 MAX_Q, 3 MIN_REALISTIC_V, 4 MAX_REALISTIC_V, and
 // 5 = frozen by OLF's GeneratorVoltageControlManager. 6 arrives only as a BASE code
-// (GpuAcOuterLoopPacks.RL_BASE_RELOCATED, keep the two in step): "this entry does not own the pin on its V
-// row", which the seeding turns into 5 so the pass leaves that row alone. The DISTR_Q key renormalization drops any member
+// (ReactiveLimitsPacker.RL_BASE_RELOCATED, keep the two in step; GpuAcData.rlBaseLimitTypeForDevice merges it
+// over OLF's QLimitType when rlPvPqRowRelocated): "this entry's PV/PQ state is not on its own V row", which the seeding turns into 5 so the pass leaves that row alone. The DISTR_Q key renormalization drops any member
 // whose type is non-zero, which is why the freeze needs one; the reactive-limits pass must then LEAVE
 // type 5 alone, because a bus whose voltage control is off is not one of its controllers at all.
 #define RL_LIMIT_FROZEN 5

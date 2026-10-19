@@ -327,7 +327,8 @@ final class InjectionOutagePlanner {
                         // its own row carries a LIVE coupler's ZERO_V: cross identity on the parent's
                         // DUMMY_Q row (rte6515 BUS-6014_BBS_1/2 VL-6014_3, BUS-6029_BBS_4 VL-6029_2)
                         live.add(ReHomedEntries.reHomedCrossEntry(crossRow, e.getValue(), reHomedRl,
-                                RelocatedRows.basePinned(gpuData, reHomedRl), e.getKey().getTargetQ()));
+                                gpuData.switchedPvToPqInBase(reHomedRl) || gpuData.pvPqRowRelocated(reHomedRl),
+                                e.getKey().getTargetQ()));
                         continue;
                     }
                     if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {
@@ -339,8 +340,9 @@ final class InjectionOutagePlanner {
                         byte baseLt = gpuData.rlBaseQLimitType() != null && reHomedRl >= 0
                                 ? gpuData.rlBaseQLimitType()[reHomedRl] : (byte) -1;
                         System.err.printf("QUALIFY_TRACE reHomePv bus=%s vRow=%d target=%.6f"
-                                        + " rlEntry=%d baseLimitType=%d%n",
-                                e.getKey().getId(), vVar.getRow(), e.getValue(), reHomedRl, baseLt);
+                                        + " rlEntry=%d baseLimitType=%d pvPqRowRelocated=%b%n",
+                                e.getKey().getId(), vVar.getRow(), e.getValue(), reHomedRl, baseLt,
+                                gpuData.pvPqRowRelocated(reHomedRl));
                     }
                     // A bus PINNED at its reactive limit cannot also hold its voltage: OLF has it
                     // as PQ, and giving it a V identity here is a state the device cannot represent.
@@ -353,7 +355,7 @@ final class InjectionOutagePlanner {
                     // loadQ), outside the realistic band [0.8, 1.2] — the run reported FAILED where
                     // OLF reports CONVERGED, losing all 71 of its violations, the WHOLE violation
                     // gap of the full busbar scope.
-                    if (RelocatedRows.basePinned(gpuData, reHomedRl)) {
+                    if (gpuData.switchedPvToPqInBase(reHomedRl) || gpuData.pvPqRowRelocated(reHomedRl)) {
                         // Base-pinned: start as the reactive balance at the pinned value, checked as a
                         // LOCAL PV bus at the re-homed voltage target (ROW_PINNED_V). rte6515
                         // BUS-6157_BBS_1 (unpins, re-pins MAX_Q), BUS-6194_BBS_2 (unpins), BUS-6229_BBS_1.

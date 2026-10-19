@@ -25,11 +25,11 @@ import com.powsybl.openloadflow.ac.outerloop.gpu.DeviceLoopKind;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DeviceLoopTables;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DistributedSlackWriteBack;
 import com.powsybl.openloadflow.ac.outerloop.gpu.ForcedTargetQ;
+import com.powsybl.openloadflow.ac.outerloop.gpu.GpuHvdcAcEmulationLimitsOuterLoop;
 import com.powsybl.openloadflow.ac.outerloop.gpu.GpuIncrementalShuntVoltageControlOuterLoop;
 import com.powsybl.openloadflow.ac.outerloop.gpu.GpuIncrementalTransformerVoltageControlOuterLoop;
 import com.powsybl.openloadflow.ac.outerloop.gpu.GpuMonitoringVoltageOuterLoop;
 import com.powsybl.openloadflow.ac.outerloop.gpu.GpuPhaseControlOuterLoop;
-import com.powsybl.openloadflow.ac.outerloop.gpu.HvdcAcEmulation;
 import com.powsybl.openloadflow.ac.outerloop.gpu.HvdcNative;
 import com.powsybl.openloadflow.ac.outerloop.gpu.PhaseControlNative;
 import com.powsybl.openloadflow.ac.outerloop.gpu.ReactiveCapabilityCurves;
@@ -202,7 +202,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
         long handle = context.handle.get();
         double[] deviceTargets = BatchReadbackNative.readBatchTargets(handle);
         if (hvdcCtls != null && !hvdcCtls.isEmpty()) {
-            HvdcAcEmulation.writeBack(network, hvdcCtls, HvdcNative.readBatchHvdcStatus(handle),
+            GpuHvdcAcEmulationLimitsOuterLoop.writeBack(network, hvdcCtls, HvdcNative.readBatchHvdcStatus(handle),
                     data.getTotalElementCount());
         }
         if (monCtls != null && !monCtls.isEmpty()) {
@@ -338,7 +338,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
 
     // The driver phases with their own per-run tables (HVDC AC emulation, MonitoringVoltage, in-kernel
     // incremental TVC): built at every solve from the network as it stands, written back after it.
-    private List<HvdcAcEmulation.Ctl> hvdcCtls;
+    private List<GpuHvdcAcEmulationLimitsOuterLoop.Ctl> hvdcCtls;
     private List<GpuMonitoringVoltageOuterLoop.Ctl> monCtls;
     private List<GpuIncrementalTransformerVoltageControlOuterLoop.Controller> tvcCtls;
     private boolean tvcOwned;
@@ -934,7 +934,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
         boolean hvdcLimits = driverLoop("AcHvdcAcEmulationLimits") != null;
         boolean hvdcFreeze = driverLoop("FreezingHvdcACEmulation") != null;
         if (hvdcLimits || hvdcFreeze) {
-            hvdcCtls = HvdcAcEmulation.buildControllers(network, equationSystem, nElements, cachedData);
+            hvdcCtls = GpuHvdcAcEmulationLimitsOuterLoop.buildControllers(network, equationSystem, nElements, cachedData);
         }
         if (hvdcCtls != null && !hvdcCtls.isEmpty()) {
             int nh = hvdcCtls.size();
@@ -944,11 +944,11 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
             for (var ctl : hvdcCtls) {
                 elementMask[0][ctl.hvElemIndex()] = false;   // set back below from the status, as a BASE status
             }
-            HvdcAcEmulation.seedBaseStatuses(1, 1, hvdcCtls, hvStatus, elementMask);
-            HvdcAcEmulation.installDriverLoops(handle, hvdcCtls, 1, hvStatus, elementMask,
+            GpuHvdcAcEmulationLimitsOuterLoop.seedBaseStatuses(1, 1, hvdcCtls, hvStatus, elementMask);
+            GpuHvdcAcEmulationLimitsOuterLoop.installDriverLoops(handle, hvdcCtls, 1, hvStatus, elementMask,
                     appliedD1, appliedD2, hvdcLimits);
         } else {
-            HvdcAcEmulation.installDriverLoops(handle, null, 1, null, null, null, null, false);
+            GpuHvdcAcEmulationLimitsOuterLoop.installDriverLoops(handle, null, 1, null, null, null, null, false);
         }
     }
 

@@ -257,7 +257,7 @@ public record GpuAcData(double[] cbIn, int[] cbIdx, int[] cbPcSide, double[] obI
      *
      * <p>Derived from the same zero-impedance pack as the reactive twin, so the two cannot drift.
      *
-     * <p>Used by {@code HvdcAcEmulation} for the converter buses' P-target rows since 2026-10-05. The
+     * <p>Used by {@code GpuHvdcAcEmulationLimitsOuterLoop} for the converter buses' P-target rows since 2026-10-05. The
      * first attempt (2026-10-02) was measured "catastrophic" (max-iter-bad-solve 108 -> 13194) and blamed the
      * premise; the premise was right — a relocated child's P balance DOES live on the parent's {@code DUMMY_P}
      * row, the child's own PHI row hosting the coupler's {@code ZERO_PHI} — and the failure was the kernel

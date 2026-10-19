@@ -19,7 +19,7 @@ import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcDataExtractor;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DevicePhaseOwnership;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DevicePhases;
 import com.powsybl.openloadflow.ac.outerloop.gpu.ForcedTargetQ;
-import com.powsybl.openloadflow.ac.outerloop.gpu.HvdcAcEmulation;
+import com.powsybl.openloadflow.ac.outerloop.gpu.GpuHvdcAcEmulationLimitsOuterLoop;
 import com.powsybl.openloadflow.ac.outerloop.gpu.ReactiveCapabilityCurves;
 import com.powsybl.openloadflow.ac.solver.NewtonRaphsonParameters;
 import com.powsybl.openloadflow.equations.EquationSystem;
@@ -229,10 +229,10 @@ public final class GpuBatchedSecurityAnalysisSolver {
             // slot to hand it back to, so the whole run goes to the CPU (resultsByIndex stays null).
             if (DevicePhaseOwnership.batchable()) {
                 // built in the order the call evaluated them when they were its arguments
-                var hvdcElemIndex = HvdcAcEmulation.elementIndices(network, nElements);
+                var hvdcElemIndex = GpuHvdcAcEmulationLimitsOuterLoop.elementIndices(network, nElements);
                 int[] varType = config.lsMode() == 2 ? GpuAcActivationExtractor.extractVarType(equationSystem, n) : null;
-                List<HvdcAcEmulation.Ctl> hvdcControllers = config.hvdcFreezing() || config.hvdcLimits()
-                        ? HvdcAcEmulation.buildControllers(network, equationSystem, nElements, gpuData)
+                List<GpuHvdcAcEmulationLimitsOuterLoop.Ctl> hvdcControllers = config.hvdcFreezing() || config.hvdcLimits()
+                        ? GpuHvdcAcEmulationLimitsOuterLoop.buildControllers(network, equationSystem, nElements, gpuData)
                         : null;
                 GpuBatchChunkSolver.solveQualifiedInChunks(new ChunkInputs(contingencies,
                         new ChunkInputs.BaseCase(elementMapper, gpuData, baseState, baseTargets, baseActivation.rowMode(),

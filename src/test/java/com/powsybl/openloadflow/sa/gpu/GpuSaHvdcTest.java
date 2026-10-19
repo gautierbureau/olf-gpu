@@ -59,7 +59,8 @@ class GpuSaHvdcTest extends AbstractGpuSaTest {
         assertEquals(1, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(), "census=" + GpuBatchScopeCensus.snapshot());
     }
 
-    /** DEVICE-mode HVDC AC emulation WITH HVDCs present (HvdcAcEmulation): the freeze /
+    /** DEVICE-mode HVDC AC emulation WITH HVDCs present (GpuFreezingHvdcACEmulationOuterloop,
+     *  GpuHvdcAcEmulationLimitsOuterLoop): the freeze /
      *  unfreeze phases and the linear<->saturation limit transitions run per scenario around batched
      *  solves — coupling via the hv disabled bit, VSC injections via converter-bus target overrides;
      *  GPU SA == CPU SA at 1e-12. */

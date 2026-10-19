@@ -97,7 +97,8 @@ final class GpuSaRunScope {
 
         // SIMPLE (WITH_GENERATOR) TVC: continuous first solve (VC-on activation deltas) then a single
         // round-to-closest-tap re-solve (SimpleTransformerVoltageControl); same stage-1 structural scope.
-        // HVDC AC-emulation loops WITH HVDCs present (HvdcAcEmulation). A SATURATED/FROZEN
+        // HVDC AC-emulation loops WITH HVDCs present (GpuFreezingHvdcACEmulationOuterloop,
+        // GpuHvdcAcEmulationLimitsOuterLoop). A SATURATED/FROZEN
         // base is representable since 2026-09-08 (the orchestrator's base-frame overrides:
         // baseTargets - baseD + d(status), base statuses seeded with the hv bits) — but ONLY the
         // orchestrator seeds those bits, so a non-linear base still requires the freeze or limits
@@ -108,7 +109,7 @@ final class GpuSaRunScope {
                 || acParameters.getOuterLoops().stream().anyMatch(ol ->
                         "AcHvdcAcEmulationLimits".equals(ol.getName()) || "FreezingHvdcACEmulation".equals(ol.getName()));
         boolean hvdcBatchable = noHvdc
-                || com.powsybl.openloadflow.ac.outerloop.gpu.HvdcAcEmulation.allLinearAtBase(lfNetwork)
+                || com.powsybl.openloadflow.ac.outerloop.gpu.GpuHvdcAcEmulationLimitsOuterLoop.allLinearAtBase(lfNetwork)
                 || hvdcLoopsRun;
         // Secondary voltage control (GpuSecondaryVoltageControlOuterLoop): batched device sensitivities + the zone
         // system replayed per scenario on the host; stage-1 scope is LOCAL generator VC only.

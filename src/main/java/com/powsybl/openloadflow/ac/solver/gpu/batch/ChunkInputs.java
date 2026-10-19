@@ -10,7 +10,7 @@ package com.powsybl.openloadflow.ac.solver.gpu.batch;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DevicePhases;
 import com.powsybl.openloadflow.ac.outerloop.gpu.ForcedTargetQ;
-import com.powsybl.openloadflow.ac.outerloop.gpu.HvdcAcEmulation;
+import com.powsybl.openloadflow.ac.outerloop.gpu.GpuHvdcAcEmulationLimitsOuterLoop;
 import com.powsybl.openloadflow.ac.outerloop.gpu.ReactiveCapabilityCurves;
 import com.powsybl.openloadflow.ac.solver.NewtonRaphsonParameters;
 import com.powsybl.openloadflow.network.LfHvdc;
@@ -44,7 +44,7 @@ record ChunkInputs(List<BatchContingency> contingencies, ChunkInputs.BaseCase ba
 
     /** The run's driver phases, its AC-emulation HVDC controllers (null without the HVDC loops) and the
      *  reactive-capability curve and forced-target-Q channels. */
-    record DevicePhaseInputs(DevicePhases.Built phases, List<HvdcAcEmulation.Ctl> hvdcControllers,
+    record DevicePhaseInputs(DevicePhases.Built phases, List<GpuHvdcAcEmulationLimitsOuterLoop.Ctl> hvdcControllers,
                              ReactiveCapabilityCurves.Channel rlCurves, ForcedTargetQ.Channel forcedTargetQ) {
     }
 

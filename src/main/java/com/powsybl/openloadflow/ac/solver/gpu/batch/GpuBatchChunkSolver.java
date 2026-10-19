@@ -16,11 +16,12 @@ import com.powsybl.openloadflow.ac.outerloop.gpu.DevicePhaseInstaller;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DevicePhases;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DistributedSlackNative;
 import com.powsybl.openloadflow.ac.outerloop.gpu.ForcedTargetQ;
+import com.powsybl.openloadflow.ac.outerloop.gpu.GpuFreezingHvdcACEmulationOuterloop;
+import com.powsybl.openloadflow.ac.outerloop.gpu.GpuHvdcAcEmulationLimitsOuterLoop;
 import com.powsybl.openloadflow.ac.outerloop.gpu.GpuMonitoringVoltageOuterLoop;
 import com.powsybl.openloadflow.ac.outerloop.gpu.GpuPhaseControlOuterLoop;
 import com.powsybl.openloadflow.ac.outerloop.gpu.GpuSecondaryVoltageControlOuterLoop;
 import com.powsybl.openloadflow.ac.outerloop.gpu.GpuTransformerVoltageControlOuterLoop;
-import com.powsybl.openloadflow.ac.outerloop.gpu.HvdcAcEmulation;
 import com.powsybl.openloadflow.ac.outerloop.gpu.HvdcNative;
 import com.powsybl.openloadflow.ac.outerloop.gpu.ReactiveCapabilityCurves;
 import com.powsybl.openloadflow.ac.outerloop.gpu.ReactiveLimitsNative;
@@ -180,7 +181,7 @@ final class GpuBatchChunkSolver {
         double convEpsPerEq = in.settings().convEpsPerEq();
         double[][] rowCriteria = in.settings().rowCriteria();
         DevicePhases.Built phases = in.phases().phases();
-        List<HvdcAcEmulation.Ctl> hvdcControllers = in.phases().hvdcControllers();
+        List<GpuHvdcAcEmulationLimitsOuterLoop.Ctl> hvdcControllers = in.phases().hvdcControllers();
         ReactiveCapabilityCurves.Channel rlCurves = in.phases().rlCurves();
         ForcedTargetQ.Channel forcedTargetQ = in.phases().forcedTargetQ();
         double[][] resultsByIndex = in.sinks().resultsByIndex();
@@ -899,7 +900,7 @@ final class GpuBatchChunkSolver {
                         boolean ok = pairParentConverged[s] && x0Full != null && hvdcControllers != null;
                         for (com.powsybl.openloadflow.network.LfHvdc hv : off) {
                             Integer elem = hvdcElemIndex.get(hv);
-                            HvdcAcEmulation.Ctl c = !ok || elem == null ? null : hvdcControllers.stream()
+                            GpuHvdcAcEmulationLimitsOuterLoop.Ctl c = !ok || elem == null ? null : hvdcControllers.stream()
                                     .filter(ctl -> ctl.hvElemIndex() == elem).findFirst().orElse(null);
                             if (c == null) {
                                 ok = false;
@@ -936,7 +937,7 @@ final class GpuBatchChunkSolver {
                                         + contingencies.get(group.get(chunkStart + s)).contingencyId());
                                 // the PRE-freeze override entries on this slot's converter-bus P rows: the freeze
                                 // composes on top of them, so a stale one here is a double count downstream
-                                for (HvdcAcEmulation.Ctl c : hvdcControllers) {
+                                for (GpuHvdcAcEmulationLimitsOuterLoop.Ctl c : hvdcControllers) {
                                     for (int k = 0; k < preHvdcOverrides.index().length; k++) {
                                         int r = preHvdcOverrides.index()[k] - s * n;
                                         if (r == c.bus1PRow() || r == c.bus2PRow()) {
@@ -948,7 +949,7 @@ final class GpuBatchChunkSolver {
                             }
                         }
                         if (config.hvdcFreezing()) {
-                            hvdcStatus = HvdcAcEmulation.applyFreeze(chunkSize, realCount, n, hvdcControllers,
+                            hvdcStatus = GpuFreezingHvdcACEmulationOuterloop.applyFreeze(chunkSize, realCount, n, hvdcControllers,
                                     baseState, x0Full, x0Full == null ? x0SeedIdx : null, x0Full == null ? x0SeedVal : null,
                                     rs.disabledMask, baseTargets, rs.overrides, hvAppliedD1, hvAppliedD2, rs.rowModePerScenario);
                             targetOverrideIndex = rs.overrides.indexArray();
@@ -960,7 +961,7 @@ final class GpuBatchChunkSolver {
                         // gate): entries the freeze did not claim keep the base status + hv bit
                         // (no override, baseTargets already carry the base injections); padding
                         // slots get the base bits so they converge at iteration 0.
-                        HvdcAcEmulation.seedBaseStatuses(chunkSize, realCount, hvdcControllers,
+                        GpuHvdcAcEmulationLimitsOuterLoop.seedBaseStatuses(chunkSize, realCount, hvdcControllers,
                                 hvdcStatus, rs.disabledMask);
                     }
                     boolean dbgPairRl = pairPhase && nrl > 0 && "1".equals(System.getenv("OLF_GPU_DBG_PAIR_RL"));
@@ -980,7 +981,7 @@ final class GpuBatchChunkSolver {
                     }
                     byte[] ctgOutOf = null;
                     boolean hasHvdcDriverLoops = hvdcControllers != null && !hvdcControllers.isEmpty();
-                    ctgOutOf = HvdcAcEmulation.installDriverLoops(handle,
+                    ctgOutOf = GpuHvdcAcEmulationLimitsOuterLoop.installDriverLoops(handle,
                             hasHvdcDriverLoops ? hvdcControllers : null, chunkSize, hvdcStatus, rs.disabledMask,
                             hvAppliedD1, hvAppliedD2, config.hvdcLimits());
                     // MonitoringVoltage as a DRIVER PHASE, in OLF's own slot (order 6, between the
@@ -1269,7 +1270,7 @@ final class GpuBatchChunkSolver {
                             // stale post-freeze list re-applies a freeze the kernel already lifted
                             // (measured: 566 differing lines over 2000 with only the bits synced).
                             rs.overrides.restore(preHvdcOverrides);
-                            HvdcAcEmulation.applyStatusOverrides(chunkSize, realCount, n,
+                            GpuHvdcAcEmulationLimitsOuterLoop.applyStatusOverrides(chunkSize, realCount, n,
                                     hvdcControllers, hvdcStatus, ctgOutOf, rs.disabledMask, baseTargets, rs.overrides,
                                     hvAppliedD1, hvAppliedD2, rs.rowModePerScenario);
                             targetOverrideIndex = rs.overrides.indexArray();

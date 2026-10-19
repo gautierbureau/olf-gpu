@@ -1120,7 +1120,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
      * parameters still carry the BASE loop list.
      *
      * <p>Recomputes the same list the SA is about to install, by the same call. The device does not
-     * depend on it — it implements the freezing itself in {@code HvdcAcEmulation} — but the list
+     * depend on it — it implements the freezing itself in {@code GpuFreezingHvdcACEmulationOuterloop} — but the list
      * is what the run's own gates read, so aligning it early can only make them agree with the SA.
      */
     private void applyContingencyOuterLoops(AcLoadFlowParameters parameters) {

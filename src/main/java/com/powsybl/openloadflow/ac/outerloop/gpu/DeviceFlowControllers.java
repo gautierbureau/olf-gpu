@@ -37,10 +37,6 @@ public final class DeviceFlowControllers {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(DeviceFlowControllers.class);
 
-    static final int KIND_RPC = 0;                           // rho -> branch Q (closest-R1 taps)
-    static final int KIND_PHASE_P = 1;                       // a1 -> branch P (closest-A1 taps)
-    static final int KIND_PHASE_I = 2;                       // a1 -> branch I (exceed-A1 taps, one-sided)
-
     private DeviceFlowControllers() {
     }
 

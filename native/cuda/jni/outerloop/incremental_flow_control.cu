@@ -14,6 +14,7 @@
 #include "../common/check.cuh"
 #include "../common/launch.cuh"
 #include "../common/codes/gpu_linear_solve_mode.cuh"
+#include "../common/codes/gpu_controlled_flow.cuh"
 #include "../solver/driver_steps.cuh"
 #include "incremental_transformer_voltage_control.cuh"
 #include "../equations/scenario_overrides.cuh"
@@ -35,7 +36,7 @@ __global__ void flcCheckBatch(int nFlc, int nScenarios, int n, int nElements, in
     int c = tid % nFlc;
     int s = tid / nFlc;
     outOfDb[tid] = 0;
-    if (!rlActive[s] || !((kindMask >> kind[c]) & 1)) return;
+    if (!rlActive[s] || !(kindMask & controlledFlowMaskBit(kind[c]))) return;
     int e = ctlPack[c];
     if (disabled[(size_t) s * nElements + elem[c]] || disabled[(size_t) s * nElements + cbOffset + e]) return;
     const double* p = cbIn + e * 8;
@@ -45,7 +46,7 @@ __global__ void flcCheckBatch(int nFlc, int nScenarios, int n, int nElements, in
     double flow = flcFlowAndGrad(side[c], kind[c], p, x + (size_t) s * n, cbIx + e * 12, g);
     double d = targetValue[c] - flow;
     diff[tid] = d;
-    outOfDb[tid] = (kind[c] == 2 ? flow > targetValue[c] : fabs(d) > halfDb[c]) ? 1 : 0;
+    outOfDb[tid] = (kind[c] == GpuControlledFlow::CURRENT ? flow > targetValue[c] : fabs(d) > halfDb[c]) ? 1 : 0;
 }
 
 // Per scenario, for controller c: the controlled flow's gradient dotted with the unit-RHS solution at
@@ -66,13 +67,13 @@ __global__ void flcGatherSensiBatch(int nScenarios, int n, int c, int nFlc, int 
     flcFlowAndGrad(side[c], kind[c], p, x + (size_t) s * n, q, g);
     double d[6] = { dxs[q[5]], dxs[q[7]], dxs[q[4]], dxs[q[6]], q[8] >= 0 ? dxs[q[8]] : 0.0, q[9] >= 0 ? dxs[q[9]] : 0.0 };
     double sv;
-    if (kind[c] == 2 && g[0] == 1e300) {                     // I = 0: hypot(dre·dx, dim·dx) (OLF's one-sided rule)
+    if (kind[c] == GpuControlledFlow::CURRENT && g[0] == 1e300) {  // I = 0: hypot(dre·dx, dim·dx) (OLF's one-sided rule)
         double a = 0.0, b = 0.0;
         for (int k = 0; k < 5; k++) { a += g[6 + k] * d[k]; b += g[12 + k] * d[k]; }
         sv = hypot(a, b);
     } else {
         sv = 0.0;
-        int nk = kind[c] == 2 ? 5 : 6;                       // OLF's current sensitivity has no dr1 term
+        int nk = kind[c] == GpuControlledFlow::CURRENT ? 5 : 6;  // OLF's current sensitivity has no dr1 term
         for (int k = 0; k < nk; k++) sv += g[k] * d[k];
     }
     sensi[(size_t) s * nFlc + c] = sv;
@@ -91,9 +92,9 @@ __global__ void flcDecisionBatch(int nFlc, int nScenarios, int kindMask,
     if (tid >= nFlc * nScenarios) return;
     int c = tid % nFlc;
     int s = tid / nFlc;
-    if (!outOfDb[tid] || !((kindMask >> kind[c]) & 1)) return;
+    if (!outOfDb[tid] || !(kindMask & controlledFlowMaskBit(kind[c]))) return;
     double sv = sensi[tid];
-    if (kind[c] != 0 && fabs(sv * 0.017453292519943295) <= 1e-6) return;   // SENSI_EPS on the per-degree value
+    if (kind[c] != GpuControlledFlow::REACTIVE_POWER && fabs(sv * 0.017453292519943295) <= 1e-6) return;  // SENSI_EPS on the per-degree value
     if (sv == 0.0) return;
     double delta = diff[tid] / sv;
     int cur = curTap[tid];
@@ -103,7 +104,7 @@ __global__ void flcDecisionBatch(int nFlc, int nScenarios, int kindMask,
     int lo = ratAllowed[tid] > 0 ? cur : 0;
     int hi = ratAllowed[tid] < 0 ? cur : nTaps - 1;
     int best = cur;
-    if (kind[c] != 2) {                                      // ClosestTapPositionFinder
+    if (kind[c] != GpuControlledFlow::CURRENT) {  // ClosestTapPositionFinder
         double newV = tapData[(size_t) (base + cur) * 8 + col] + delta;
         double bestDist = fabs(delta);
         for (int i = lo; i <= hi; i++) {

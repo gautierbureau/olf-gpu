@@ -18,6 +18,7 @@
 #include "../common/codes/gpu_outer_loop_kind.cuh"
 #include "../common/codes/gpu_reactive_limits_state.cuh"
 #include "../common/codes/gpu_realistic_voltage_fixing_loop.cuh"
+#include "../common/codes/gpu_controlled_flow.cuh"
 #include "../diagnostics/driver_traces.cuh"
 #include "../diagnostics/matrix_scan.cuh"
 #include "../equations/branch_fill.cuh"
@@ -860,9 +861,9 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     } else if (loopKind == GpuOuterLoopKind::INCREMENTAL_SHUNT_VOLTAGE_CONTROL) {
         shcStep(ctx, drv);
     } else if (loopKind == GpuOuterLoopKind::INCREMENTAL_PHASE_CONTROL) {
-        if (ctx->nCph > 0) cphStep(ctx, drv); else flcStep(ctx, drv, 6);       // continuous, or incremental kinds 1 + 2
+        if (ctx->nCph > 0) cphStep(ctx, drv); else flcStep(ctx, drv, controlledFlowMaskBit(GpuControlledFlow::ACTIVE_POWER) | controlledFlowMaskBit(GpuControlledFlow::CURRENT));  // continuous, or incremental phase
     } else if (loopKind == GpuOuterLoopKind::INCREMENTAL_TRANSFORMER_REACTIVE_POWER_CONTROL) {
-        flcStep(ctx, drv, 1);                                          // kind 0 (RPC)
+        flcStep(ctx, drv, controlledFlowMaskBit(GpuControlledFlow::REACTIVE_POWER));
     } else if (loopKind == GpuOuterLoopKind::TRANSFORMER_VOLTAGE_CONTROL) {
         tvdStep(ctx, drv);
     } else if (loopKind == GpuOuterLoopKind::SHUNT_VOLTAGE_CONTROL) {

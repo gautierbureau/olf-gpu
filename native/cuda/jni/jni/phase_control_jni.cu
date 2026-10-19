@@ -3,6 +3,7 @@
 //
 // JNI entry points of GpuAcNewtonSolver: Phase control and transformer reactive power control, incremental and continuous.
 #include "jni_common.cuh"
+#include "../common/codes/gpu_controlled_flow.cuh"
 
 /** Upload the FLOW-OBSERVED incremental controllers (RPC / incremental phase). Per controller: kind
  *  (0 RPC, 1 phase CONTROLLER, 2 phase LIMITER), pinRow (the rho/a1 identity row), pinCol (6 r1 / 7 a1),
@@ -53,7 +54,7 @@ OLF_JNI(ac_outerloop_gpu, PhaseControlNative, setBatchFlowControllers)(
         if (ctlPack[c] < 0 || ctlPack[c] >= ctx->st->cb.ne) {
             return 0;                                        // not a closed branch: the host orchestrator keeps it
         }
-        if (ctx->hFlcKind[c] == 0) ctx->nFlcRpc++; else ctx->nFlcPhase++;
+        if (ctx->hFlcKind[c] == GpuControlledFlow::REACTIVE_POWER) ctx->nFlcRpc++; else ctx->nFlcPhase++;
     }
     ctx->dFlcKind.upload(ctx->hFlcKind.data(), nc * sizeof(int));
     ctx->dFlcPinRow.upload(ctx->hFlcPinRow.data(), nc * sizeof(int));

@@ -11,6 +11,7 @@
 
 #include "../common/check.cuh"
 #include "../common/launch.cuh"
+#include "../common/codes/gpu_controlled_flow.cuh"
 #include "../equations/scenario_overrides.cuh"
 #include "flow_observation.cuh"
 #include "phase_control.cuh"
@@ -58,7 +59,7 @@ __global__ void cphCheckBatch(int nCph, int nScenarios, int n, int nElements, in
     double pOv[8];
     if (findTapOverride(nR1Ov, r1OvSlotElem, r1OvVal, s, e, pOv)) p = pOv;
     double g[18];
-    double i = flcFlowAndGrad(side[c], 2, p, x + (size_t) s * n, cbIx + e * 12, g);
+    double i = flcFlowAndGrad(side[c], GpuControlledFlow::CURRENT, p, x + (size_t) s * n, cbIx + e * 12, g);
     if (!(i > limit[c])) return;
     double dida1 = g[0] == 1e300 ? 0.0 : g[4];
     int dir = dida1 > 0 ? -1 : 1;                            // reduce I: move a1 against the slope

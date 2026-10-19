@@ -10,6 +10,7 @@
 
 #include "closed_branch.cuh"
 #include "closed_branch_scatter.h"
+#include "../common/codes/gpu_controlled_flow.cuh"
 
 namespace olfgpu {
 
@@ -24,13 +25,13 @@ __device__ inline double flcFlowAndGrad(int side, int kind, const double* p, con
     double r1 = q[9] >= 0 ? xs[q[9]] : p[6];
     double a1 = q[8] >= 0 ? xs[q[8]] : p[7];
     double y = p[0], g1 = p[1], g2 = p[2], b1 = p[3], b2 = p[4], ksi = p[5];
-    if (kind != 2) {                                         // P or Q: the assembled outputs
+    if (kind != GpuControlledFlow::CURRENT) {  // P or Q: the assembled outputs
         double o[CB_NOUT];
         evalClosedBranch(y, g1, g2, b1, b2, v1, r1, v2, ksi, a1, ph1, ph2, 0,
                          o + 0, o + 1, o + 2, o + 3, o + 4, o + 5, o + 6, o + 7, o + 8, o + 9,
                          o + 10, o + 11, o + 12, o + 13, o + 14, o + 15, o + 16, o + 17, o + 18,
                          o + 19, o + 20, o + 21, o + 22, o + 23, o + 24, o + 25, o + 26, o + 27);
-        int blk = (kind == 0 ? 7 : 0) + (side == 1 ? 0 : 14);   // p1 0, q1 7, p2 14, q2 21: [val dv1 dv2 dph1 dph2 da1 dr1]
+        int blk = (kind == GpuControlledFlow::REACTIVE_POWER ? 7 : 0) + (side == 1 ? 0 : 14);  // p1 0, q1 7, p2 14, q2 21: [val dv1 dv2 dph1 dph2 da1 dr1]
         for (int k = 0; k < 6; k++) g[k] = o[blk + 1 + k];
         return o[blk];
     }

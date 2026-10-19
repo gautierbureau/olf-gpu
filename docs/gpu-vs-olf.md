@@ -176,3 +176,4 @@ constants carry OLF's constant names.
 | `GpuReactiveTermKind` | the terms `createReactiveTerms` sums (DISTR_Q `dqKind`, remote member `rmqKind`) | `CLOSED_BRANCH_REACTIVE_FLOW` 0, `SHUNT_COMPENSATOR_REACTIVE_FLOW` 1, `OPEN_BRANCH_REACTIVE_FLOW` 2, `DUMMY_Q` 3 |
 | `GpuRealisticVoltageFixingLoop` | the last loop whose `canFixUnrealisticState()` is true (robust mode) | `NONE` -1, `REACTIVE_LIMITS` 0, `TRANSFORMER_VOLTAGE_CONTROL` 1 |
 | `GpuLinearSolveMode` | device only (OLF factors one KLU matrix per solve) | `UBATCH` 3, `ROBUST` 6 |
+| `GpuControlledFlow` | the flow a flow-observed controller acts on: IncrementalTransformerReactivePowerControl, IncrementalPhaseControl CONTROLLER / LIMITER | `REACTIVE_POWER` 0, `ACTIVE_POWER` 1, `CURRENT` 2; the driver selects kinds with `controlledFlowMaskBit` |

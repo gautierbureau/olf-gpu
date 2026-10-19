@@ -12,6 +12,7 @@ import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcElementMapper;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchSkips;
+import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuControlledFlow;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.Variable;
 import com.powsybl.openloadflow.network.LfBranch;
@@ -71,7 +72,7 @@ public final class GpuIncrementalTransformerReactivePowerControlOuterLoop {
                     .map(com.powsybl.openloadflow.network.GeneratorReactivePowerControl::getTargetValue)
                     .orElse(rc.getTargetValue());
             double halfDb = rc.getTargetDeadband().orElse(MIN_TARGET_DEADBAND_MVAR) / 2;
-            out.add(new DeviceFlowControllers.Controller(DeviceFlowControllers.KIND_RPC, pinRow, 6, target, halfDb,
+            out.add(new DeviceFlowControllers.Controller(GpuControlledFlow.REACTIVE_POWER, pinRow, 6, target, halfDb,
                     tapRows, DeviceFlowControllers.closestTap(tapRows, 6, controller.getPiModel().getR1()),
                     elemIndex, ctlElemIndex, rpcMaxTapShift, rc.getControlledSide() == TwoSides.ONE ? 1 : 2, controller.getNum()));
         }

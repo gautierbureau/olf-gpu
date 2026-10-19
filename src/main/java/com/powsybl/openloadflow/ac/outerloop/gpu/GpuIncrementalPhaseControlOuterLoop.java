@@ -12,6 +12,7 @@ import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcElementMapper;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchSkips;
+import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuControlledFlow;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.Variable;
 import com.powsybl.openloadflow.network.LfBranch;
@@ -58,8 +59,8 @@ public final class GpuIncrementalPhaseControlOuterLoop {
             }
             var pc = pcOpt.orElseThrow();
             int kind = switch (pc.getMode()) {
-                case CONTROLLER -> DeviceFlowControllers.KIND_PHASE_P;
-                case LIMITER -> DeviceFlowControllers.KIND_PHASE_I;
+                case CONTROLLER -> GpuControlledFlow.ACTIVE_POWER;
+                case LIMITER -> GpuControlledFlow.CURRENT;
                 default -> -1;
             };
             if (kind < 0) {

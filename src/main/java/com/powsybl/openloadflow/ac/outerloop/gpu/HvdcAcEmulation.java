@@ -215,11 +215,11 @@ public final class HvdcAcEmulation {
         return new double[] {pAbs, -c.pMax21()};
     }
 
-    /** OLF switchToFrozenState at the given (warm-start) evaluation point: pMax-clamped when the
-     *  linear flows overpass the limits, else pinned at the current flows. */
     private static final int HVDC_TRACE_ROW = System.getenv("OLF_GPU_HVDC_TRACE") == null ? -1
             : "all".equals(System.getenv("OLF_GPU_HVDC_TRACE")) ? -2 : Integer.parseInt(System.getenv("OLF_GPU_HVDC_TRACE"));
 
+    /** OLF switchToFrozenState at the given (warm-start) evaluation point: pMax-clamped when the
+     *  linear flows overpass the limits, else pinned at the current flows. */
     private static double[] frozenDeltas(Ctl c, double p1, double p2) {
         if (p1 > c.pMax12()) {
             return saturationDeltas(c, true);
@@ -227,35 +227,6 @@ public final class HvdcAcEmulation {
             return saturationDeltas(c, false);
         }
         return new double[] {-p1, -p2};
-    }
-
-    /** OLF checkAcEmulationMode: the next status (or the current one if stable) at the given flows. */
-    private static int nextStatus(Ctl c, int status, double p1, double p2) {
-        switch (status) {
-            case LINEAR -> {
-                if (p1 >= 0) {
-                    if (p1 > c.pMax12()) {
-                        return SAT_1_TO_2;
-                    }
-                } else if (p2 > c.pMax21()) {
-                    return SAT_2_TO_1;
-                }
-                return LINEAR;
-            }
-            case SAT_1_TO_2, SAT_2_TO_1 -> {
-                if (p1 > 0 && p1 < c.pMax12() || p2 > 0 && p2 < c.pMax21()) {
-                    return LINEAR;
-                } else if (p1 < 0 && status == SAT_1_TO_2) {
-                    return SAT_2_TO_1;
-                } else if (p2 < 0 && status == SAT_2_TO_1) {
-                    return SAT_1_TO_2;
-                }
-                return status;
-            }
-            default -> {
-                return status;                               // FROZEN transitions are the freezing loop's
-            }
-        }
     }
 
     /** Pre-solve freeze (OLF FreezingHvdcACEmulation.initialize): every live hvdc frozen at its

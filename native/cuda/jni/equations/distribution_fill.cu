@@ -13,6 +13,7 @@
 
 #include "../common/check.cuh"
 #include "../common/launch.cuh"
+#include "../common/codes/gpu_q_limit_type.cuh"
 #include "closed_branch.cuh"
 #include "closed_branch_scatter.h"
 #include "open_branch.cuh"
@@ -123,7 +124,7 @@ __global__ void fillDistrQBatch(int ndq, int nScenarios, int n, int nnz, int nEl
         double sum = 0.0;
         for (int m = gs; m < gs + gc; m++) {
             int re = mRlEntry[m];
-            bool pinned = re >= 0 && limitType[(size_t) s * nrl + re] != 0;
+            bool pinned = re >= 0 && limitType[(size_t) s * nrl + re] != GpuQLimitType::NONE;
             bool otherSub = subS != nullptr && subS[m] != subK;
             sum += (pinned || otherSub || dqMemberInactive(nDqInact, dqInactSlotMember, s, m))
                     ? 0.0 : dqKeyOf(nDqKeyOv, dqKeyOvIdx, dqKeyOvKey, s, m, mKey);
@@ -133,7 +134,7 @@ __global__ void fillDistrQBatch(int ndq, int nScenarios, int n, int nnz, int nEl
         // getGeneratorReactivePowerDistributionTarget adds qPct_k * targetQ_j for each frozen j
         // (updateDistrQTargetsBatch keeps the per-scenario targets in step with the pin states)
         int reK = mRlEntry[kM];
-        bool kPinned = reK >= 0 && limitType[(size_t) s * nrl + reK] != 0;
+        bool kPinned = reK >= 0 && limitType[(size_t) s * nrl + reK] != GpuQLimitType::NONE;
         double qpk = (sum == 0.0 || kPinned || dqMemberInactive(nDqInact, dqInactSlotMember, s, kM))
                 ? 0.0 : dqKeyOf(nDqKeyOv, dqKeyOvIdx, dqKeyOvKey, s, kM, mKey) / sum;
         w = qpk - (dqJMember[c] == kM ? 1.0 : 0.0);

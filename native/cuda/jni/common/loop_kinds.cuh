@@ -1,7 +1,7 @@
 // Copyright (c) 2026, RTE (http://www.rte-france.com)
 // SPDX-License-Identifier: MPL-2.0
 //
-// The outer loops' display names and the reactive-limit limit types.
+// The outer loops' display names and the device's decision-log capacity.
 #ifndef OLF_GPU_COMMON_LOOP_KINDS_CUH
 #define OLF_GPU_COMMON_LOOP_KINDS_CUH
 
@@ -34,11 +34,6 @@ inline const char* olKindName(int k) {
 
 constexpr int MAX_DEVICE_LOOPS = 16;
 
-// Reactive-limit limit types: 0 unpinned, 1 MIN_Q, 2 MAX_Q, 3 MIN_REALISTIC_V, 4 MAX_REALISTIC_V (OLF's QLimitType),
-// and 5 = frozen by OLF's GeneratorVoltageControlManager. The DISTR_Q key renormalization drops any member whose
-// type is non-zero, which is why the freeze needs one; the reactive-limits pass must then LEAVE type 5 alone,
-// because a bus whose voltage control is off is not one of its controllers at all.
-#define RL_LIMIT_FROZEN 5
 
 
 // on-device reactive-limit decision log (OLF_GPU_SW_LOG): capacity in records, width in doubles

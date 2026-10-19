@@ -8,6 +8,7 @@
 package com.powsybl.openloadflow.ac.outerloop.gpu;
 
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
+import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuQLimitType;
 import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfNetwork;
 
@@ -40,18 +41,18 @@ public final class GpuReactiveLimitsOuterLoop {
             if (bus == null) {
                 continue;
             }
-            if (System.getenv("OLF_GPU_BATCH_TRACE") != null && (limitType != 0 || (rlStateOut[i] >> 3) != 0)) {
+            if (System.getenv("OLF_GPU_BATCH_TRACE") != null && (limitType != GpuQLimitType.NONE || (rlStateOut[i] >> 3) != 0)) {
                 System.err.println("WB_RL bus=" + bus.getId() + " limitType=" + limitType + " switchCount=" + (rlStateOut[i] >> 3)
                         + " vcEnabled=" + bus.isGeneratorVoltageControlEnabled() + " qLimitType=" + bus.getQLimitType().map(Object::toString).orElse("-")
                         + " remote=" + data.rlRemote()[i]);
             }
-            if (limitType == 5) {
+            if (limitType == GpuQLimitType.FROZEN) {
                 // Frozen by the generator voltage control manager, not pinned at a reactive limit:
                 // applyFreezeToNetwork owns that bus. A solve normally unfreezes at COMPLETE, so this only
                 // shows up when one ended mid-phase.
                 continue;
             }
-            if (limitType != 0 && bus.isGeneratorVoltageControlEnabled()) {
+            if (limitType != GpuQLimitType.NONE && bus.isGeneratorVoltageControlEnabled()) {
                 // The limit the device pinned at — its row target is limit − loadQ, evaluated at the LIVE
                 // voltage for an SVC (OLF freezes at bus.getMinQ()/getMaxQ() read at the check, the same
                 // live value); the packed base-V aggregate is 1.3e-4 pu off on rte6515's VL-6226_0.
@@ -65,16 +66,11 @@ public final class GpuReactiveLimitsOuterLoop {
                 int limitRow = pinnedBalanceRow(data, i, vRow, devModes);
                 double qLimit = deviceTargets != null && limitRow >= 0 && limitRow < deviceTargets.length
                         ? deviceTargets[limitRow] + data.rlLoadQ()[i]
-                        : (limitType == 1 ? data.rlMinQ()[i]
-                           : limitType == 2 ? data.rlMaxQ()[i] : data.rlInitTargetQ()[i]);
+                        : (limitType == GpuQLimitType.MIN_Q ? data.rlMinQ()[i]
+                           : limitType == GpuQLimitType.MAX_Q ? data.rlMaxQ()[i] : data.rlInitTargetQ()[i]);
                 bus.freezeGenerationTargetQAndDisableGeneratorVoltageControl(qLimit);
-                bus.setQLimitType(switch (limitType) {
-                    case 1 -> LfBus.QLimitType.MIN_Q;
-                    case 2 -> LfBus.QLimitType.MAX_Q;
-                    case 3 -> LfBus.QLimitType.MIN_REALISTIC_V;
-                    default -> LfBus.QLimitType.MAX_REALISTIC_V;
-                });
-            } else if (limitType == 0 && !bus.isGeneratorVoltageControlEnabled() && bus.getQLimitType().isPresent()
+                bus.setQLimitType(GpuQLimitType.toOlf(limitType));
+            } else if (limitType == GpuQLimitType.NONE && !bus.isGeneratorVoltageControlEnabled() && bus.getQLimitType().isPresent()
                     && bus.getQLimitType().get() != LfBus.QLimitType.MIN_REALISTIC_V
                     && bus.getQLimitType().get() != LfBus.QLimitType.MAX_REALISTIC_V) {
                 bus.setGeneratorVoltageControlEnabledAndRecomputeTargetQ(true);

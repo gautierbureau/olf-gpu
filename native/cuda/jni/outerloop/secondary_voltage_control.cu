@@ -13,6 +13,7 @@
 
 #include "../common/check.cuh"
 #include "../common/launch.cuh"
+#include "../common/codes/gpu_q_limit_type.cuh"
 #include <cublas_v2.h>
 #include "closed_branch.cuh"
 #include "../solver/driver_steps.cuh"
@@ -64,18 +65,18 @@ __global__ void svcTriggerBatch(SvcTables T, int nScenarios, int n, const char* 
     // ---- tryToReEnableHelpfulControllerBuses ----
     int nPinned = 0;
     for (int k = lo; k < hi; k++) {
-        if (limitType[(size_t) s * T.nrl + T.rlIdx[T.zoneCtl[k]]] != 0) nPinned++;
+        if (limitType[(size_t) s * T.nrl + T.rlIdx[T.zoneCtl[k]]] != GpuQLimitType::NONE) nPinned++;
     }
     if (nPinned > 0 && nPinned < hi - lo) {
         for (int k = lo; k < hi; k++) {
             int c = T.zoneCtl[k];
             size_t st = (size_t) s * T.nrl + T.rlIdx[c];
-            if (limitType[st] == 0) continue;
+            if (limitType[st] == GpuQLimitType::NONE) continue;
             size_t idx = (size_t) s * n + T.busVRow[c];
             char sm = savedMode[st];
             mode[idx] = (sm == 2) ? 2 : 0;                   // back to its PV form
             target[idx] = T.targetV[(size_t) s * T.nCtl + c];
-            limitType[st] = 0;
+            limitType[st] = GpuQLimitType::NONE;
         }
     }
     // ---- the zone's trigger: pilot deadband, or K spread while not all controllers are at a limit ----
@@ -93,7 +94,7 @@ __global__ void svcTriggerBatch(SvcTables T, int nScenarios, int n, const char* 
         kMax = fmax(kMax, kk);
         allAbove &= kk > 1.0;
         allBelow &= kk < -1.0;
-        T.enabled[(size_t) s * T.nCtl + c] = limitType[(size_t) s * T.nrl + T.rlIdx[c]] == 0 ? 1 : 0;
+        T.enabled[(size_t) s * T.nCtl + c] = limitType[(size_t) s * T.nrl + T.rlIdx[c]] == GpuQLimitType::NONE ? 1 : 0;
     }
     // OLF filters the zone OUT of the check when it has no controller whose voltage control is enabled
     // (findAnyControlledBusWithAtLeastOneControllerBusWithVoltageControlEnabled): every controller at a
@@ -287,7 +288,7 @@ __global__ void svcApplyBatch(SvcTables T, int nScenarios, int n, const char* rl
     double tv = T.targetV[(size_t) s * T.nCtl + c];
     if (tv == T.baseTargetV[c]) return;
     T.rlVt[(size_t) s * T.nrl + T.rlIdx[c]] = tv;
-    if (limitType[(size_t) s * T.nrl + T.rlIdx[c]] == 0) {
+    if (limitType[(size_t) s * T.nrl + T.rlIdx[c]] == GpuQLimitType::NONE) {
         target[(size_t) s * n + T.ctldVRow[c]] = tv;
     }
 }

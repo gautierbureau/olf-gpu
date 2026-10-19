@@ -13,6 +13,7 @@
 
 #include "../common/check.cuh"
 #include "../common/launch.cuh"
+#include "../common/codes/gpu_q_limit_type.cuh"
 #include "../solver/driver_steps.cuh"
 #include "incremental_transformer_voltage_control.cuh"
 #include "transformer_voltage_control.cuh"
@@ -242,16 +243,16 @@ __global__ void tvdCheckBatch(TvdTables T, int nScenarios, int n, int nElements,
                 // group's DISTR_Q SHARE, not a V identity — so the freeze is the reactive-limit remote
                 // PIN (mode 4, "the row hosts its own Q balance") with the CURRENT injection as the
                 // target instead of a Q limit. The limit type is what the DISTR_Q key renormalization
-                // reads to drop a member, so it has to be set, and RL_LIMIT_FROZEN keeps it
+                // reads to drop a member, so it has to be set, and GpuQLimitType::FROZEN keeps it
                 // distinguishable from a real Q-limit pin (which the switch-back may undo; this must
                 // not be, OLF's reactive-limits loop never sees a bus whose voltage control is off).
                 size_t st = (size_t) s * T.nrl + re;
-                if (mode[sr] != 1 || T.rlLimitType[st] != 0) continue;   // pinned already, or not live
+                if (mode[sr] != 1 || T.rlLimitType[st] != GpuQLimitType::NONE) continue;   // pinned already, or not live
                 T.fzSavedMode[sc] = mode[sr];
                 T.fzSavedTarget[sc] = target[sr];
                 mode[sr] = 4;
                 target[sr] = qBuf[sr] - T.fzLoadQ[c];
-                T.rlLimitType[st] = RL_LIMIT_FROZEN;
+                T.rlLimitType[st] = GpuQLimitType::FROZEN;
                 T.fzFrozen[sc] = 1;
                 continue;
             }
@@ -358,7 +359,7 @@ __global__ void tvdCheckBatch(TvdTables T, int nScenarios, int n, int nElements,
         mode[sr] = T.fzSavedMode[sc];
         target[sr] = T.fzSavedTarget[sc];
         if (T.fzRlEntry[c] >= 0) {                           // a remote member rejoins the DISTR_Q shares
-            T.rlLimitType[(size_t) s * T.nrl + T.fzRlEntry[c]] = 0;
+            T.rlLimitType[(size_t) s * T.nrl + T.fzRlEntry[c]] = GpuQLimitType::NONE;
         }
         T.fzFrozen[sc] = 0;
     }

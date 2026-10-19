@@ -37,6 +37,7 @@ import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.GpuBatchLossPreDistribu
 import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.GpuBatchQualification;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuAcSolverStatus;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuOuterLoopKind;
+import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuQLimitType;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuStateVectorScalingMode;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfShunt;
@@ -292,17 +293,19 @@ final class GpuBatchChunkSolver {
             // The pilot's V equals the group target at the base (degenerate) — key the direction on
             // WHICH limit the extracted BUS_TARGET_Q target equals instead.
             boolean remote = gpuData.rlRemote().length > i && gpuData.rlRemote()[i] != 0;
-            byte olfKind = baseLimitTypes.length > i ? baseLimitTypes[i] : 0;
+            byte olfKind = baseLimitTypes.length > i ? baseLimitTypes[i] : GpuQLimitType.NONE;
             if (remote) {
                 double tgt = baseTargets[vrow];
                 baseRlSeed[i] = baseRowMode[vrow] == 4
-                        ? (olfKind != 0 ? olfKind
+                        ? (olfKind != GpuQLimitType.NONE ? olfKind
                            : (Math.abs(tgt - (gpuData.rlMaxQ()[i] - gpuData.rlLoadQ()[i]))
-                              <= Math.abs(tgt - (gpuData.rlMinQ()[i] - gpuData.rlLoadQ()[i])) ? 2 : 1))
-                        : 0;
+                              <= Math.abs(tgt - (gpuData.rlMinQ()[i] - gpuData.rlLoadQ()[i])) ? GpuQLimitType.MAX_Q : GpuQLimitType.MIN_Q))
+                        : GpuQLimitType.NONE;
             } else {
                 baseRlSeed[i] = baseRowMode[vrow] == 1
-                        ? (olfKind != 0 ? olfKind : (baseState[vrow] < gpuData.rlVtarget()[i] ? 2 : 1)) : 0;
+                        ? (olfKind != GpuQLimitType.NONE ? olfKind
+                           : (baseState[vrow] < gpuData.rlVtarget()[i] ? GpuQLimitType.MAX_Q : GpuQLimitType.MIN_Q))
+                        : GpuQLimitType.NONE;
             }
         }
         try {

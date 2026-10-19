@@ -13,6 +13,7 @@
 
 #include "../common/check.cuh"
 #include "../common/launch.cuh"
+#include "../common/codes/gpu_q_limit_type.cuh"
 #include "closed_branch.cuh"
 #include "closed_branch_scatter.h"
 #include "open_branch.cuh"
@@ -79,9 +80,9 @@ __device__ inline double pinnedTargetQ(int s, int e, int n, int nrl, const int* 
     }
     char lt = limitType[(size_t) s * nrl + e];
     size_t li = cvStride ? (size_t) s * nrl + e : (size_t) e;
-    double lim = (lt == 3 || lt == 4) && rlInitTgtQ != nullptr ? rlInitTgtQ[e]
-               : (lt == 1 || lt == 3) ? rlMinQ[li] : rlMaxQ[li];
-    if (lt == RL_LIMIT_FROZEN && rlGenLost != nullptr && rlGenLost[(size_t) s * nrl + e]) {
+    double lim = (lt == GpuQLimitType::MIN_REALISTIC_V || lt == GpuQLimitType::MAX_REALISTIC_V) && rlInitTgtQ != nullptr ? rlInitTgtQ[e]
+               : isMinLimit(lt) ? rlMinQ[li] : rlMaxQ[li];
+    if (lt == GpuQLimitType::FROZEN && rlGenLost != nullptr && rlGenLost[(size_t) s * nrl + e]) {
         lim = 0.0;                                       // every generator lost: no generation term at all
     }
     return lim - rlLoadQ[li];
@@ -143,7 +144,7 @@ __global__ void updateDistrQTargetsBatch(int nMembers, int nScenarios, int n, in
         return;
     }
     int reK = mRlEntry[k];
-    if (reK >= 0 && limitType[(size_t) s * nrl + reK] != 0) return;   // pinned: the RL kernel owns its row
+    if (reK >= 0 && limitType[(size_t) s * nrl + reK] != GpuQLimitType::NONE) return;  // pinned: the RL kernel owns its row
     if (qg >= 0) {
         // plan-B4: the member whose row CURRENTLY hosts the relocated pilot Q carries the pilot's
         // Q target (captured at solve init); its DISTR_Q compensation does not apply. A non-carrier
@@ -183,7 +184,7 @@ __global__ void updateDistrQTargetsBatch(int nMembers, int nScenarios, int n, in
                 return;
             }
             char plt = limitType[(size_t) s * nrl + pe];
-            if (plt != 0) {
+            if (plt != GpuQLimitType::NONE) {
                 // pilot-self, pilot PINNED: the carrier hosts the pilot's own balance at OLF's frozen targetQ (the RL
                 // kernel leaves the pilot's row a V identity in this case, so pinnedTargetQ takes the pin rule: the
                 // limit, the initial generation target Q of a realistic-voltage freeze, nothing for a bus whose every
@@ -207,7 +208,7 @@ __global__ void updateDistrQTargetsBatch(int nMembers, int nScenarios, int n, in
     char subK = subS != nullptr ? subS[k] : 0;
     for (int m = gs; m < gs + gc; m++) {                     // live keys over the WHOLE merged group (updateReactiveKeys)
         int re = mRlEntry[m];
-        bool pinned = re >= 0 && limitType[(size_t) s * nrl + re] != 0;
+        bool pinned = re >= 0 && limitType[(size_t) s * nrl + re] != GpuQLimitType::NONE;
         bool inactive = dqMemberInactive(nDqInact, dqInactSlotMember, s, m);
         bool otherSub = subS != nullptr && subS[m] != subK;  // a split group's other subgroup (tasks #71)
         sum += (pinned || inactive || otherSub) ? 0.0 : dqKeyOf(nDqKeyOv, dqKeyOvIdx, dqKeyOvKey, s, m, mKey);
@@ -221,7 +222,7 @@ __global__ void updateDistrQTargetsBatch(int nMembers, int nScenarios, int n, in
     for (int t = mTgtPtr[k]; t < mTgtPtr[k + 1]; t++) {
         int m = mTgtPeer[t];
         int re = mRlEntry[m];
-        bool pinned = re >= 0 && limitType[(size_t) s * nrl + re] != 0;
+        bool pinned = re >= 0 && limitType[(size_t) s * nrl + re] != GpuQLimitType::NONE;
         if (pinned) {
             // a FROZEN member's targetQ is what OLF froze it at (freezeGenerationTargetQ...: the limit on a
             // reactive-limit switch, the INITIAL generation target Q on a realistic-voltage freeze), minus its
@@ -276,7 +277,7 @@ __global__ void pilotRowAllPinnedBatch(int nEntries, int nScenarios, int n, int 
     bool allPinned = entCount[e] > 0;
     for (int k = 0; k < entCount[e]; k++) {
         int rl = entRlPool[entOff[e] + k];
-        if (rl < 0 || rl >= nrl || limitType[(size_t) s * nrl + rl] == 0) {
+        if (rl < 0 || rl >= nrl || limitType[(size_t) s * nrl + rl] == GpuQLimitType::NONE) {
             allPinned = false;                              // this one still carries its DISTR_Q row
             break;
         }

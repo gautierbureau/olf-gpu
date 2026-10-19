@@ -8,6 +8,7 @@
 package com.powsybl.openloadflow.ac.outerloop.gpu;
 
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
+import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuQLimitType;
 
 /**
  * The run-constant outer-loop tables EVERY batch context needs before its driver runs — the batched
@@ -109,7 +110,7 @@ public final class DeviceLoopTables {
         byte[] baseLimitTypes = gpuData.rlBaseQLimitType();
         boolean anyBaseLt = false;
         for (byte b : baseLimitTypes) {
-            anyBaseLt |= b != 0;
+            anyBaseLt |= b != GpuQLimitType.NONE;
         }
         if (System.getenv("OLF_GPU_RL_TRACE") != null) {
             // Which install carries which kinds: the base solve's context and the batch's both come
@@ -117,7 +118,7 @@ public final class DeviceLoopTables {
             // solve's applyToNetwork). A kind the batch never receives cannot be what seeds it.
             StringBuilder ks = new StringBuilder();
             for (int i = 0; i < baseLimitTypes.length; i++) {
-                if (baseLimitTypes[i] != 0) {
+                if (baseLimitTypes[i] != GpuQLimitType.NONE) {
                     ks.append(' ').append(i).append(':').append(baseLimitTypes[i]);
                 }
             }

@@ -9,6 +9,7 @@ package com.powsybl.openloadflow.ac.equations.vector.gpu;
 
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
+import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuQLimitType;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfGenerator;
@@ -217,7 +218,7 @@ public final class ReactiveLimitsPacker {
                             rlTargetP.add(bus.getTargetP());
                             rlBusId.add(bus.getId());
                             rlInitTargetQ.add(initialGenerationTargetQ(bus));
-                            rlBaseQLimitType.add(qLimitTypeCode(bus));
+                            rlBaseQLimitType.add(GpuQLimitType.of(bus));
                         }
                         continue;                                  // never let a base-pinned remote member
                     }                                              // masquerade as a LOCAL basePqCapable entry
@@ -275,7 +276,7 @@ public final class ReactiveLimitsPacker {
                         rlTargetP.add(bus.getTargetP());
                         rlBusId.add(bus.getId());
                         rlInitTargetQ.add(initialGenerationTargetQ(bus));
-                        rlBaseQLimitType.add(qLimitTypeCode(bus));
+                        rlBaseQLimitType.add(GpuQLimitType.of(bus));
                     }
                 }
             }
@@ -347,15 +348,6 @@ public final class ReactiveLimitsPacker {
                 .filter(d -> !Double.isNaN(d))
                 .sum();
         return generationTargetQ - m.getLoadTargetQ();
-    }
-
-    static byte qLimitTypeCode(LfBus bus) {
-        return bus.getQLimitType().map(t -> switch (t) {
-            case MIN_Q -> (byte) 1;
-            case MAX_Q -> (byte) 2;
-            case MIN_REALISTIC_V -> (byte) 3;
-            case MAX_REALISTIC_V -> (byte) 4;
-        }).orElse((byte) 0);
     }
 
     /** {@code ReactiveLimitsOuterLoop.getInitialGenerationTargetQ}, verbatim. */

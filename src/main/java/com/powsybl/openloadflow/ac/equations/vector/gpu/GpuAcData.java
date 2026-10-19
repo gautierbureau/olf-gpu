@@ -7,6 +7,8 @@
  */
 package com.powsybl.openloadflow.ac.equations.vector.gpu;
 
+import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuQLimitType;
+
 /**
  * The flat per-family element data the GPU Newton-Raphson consumes, extracted from an
  * OLF equation system by {@link GpuAcDataExtractor}. Rows use the STABLE indexing (a
@@ -297,7 +299,7 @@ public record GpuAcData(double[] cbIn, int[] cbIdx, int[] cbPcSide, double[] obI
      * the four {@code LfBus.QLimitType}s? False for no entry ({@code rlEntry < 0}).
      */
     public boolean switchedPvToPqInBase(int rlEntry) {
-        return rlBaseQLimitType != null && rlEntry >= 0 && rlEntry < rlBaseQLimitType.length && rlBaseQLimitType[rlEntry] != 0;
+        return rlBaseQLimitType != null && rlEntry >= 0 && rlEntry < rlBaseQLimitType.length && rlBaseQLimitType[rlEntry] != GpuQLimitType.NONE;
     }
 
     /** Number of participating buses in the batched distributed-slack outer loop (0 = no distribution). */

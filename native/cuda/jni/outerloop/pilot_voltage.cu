@@ -13,6 +13,7 @@
 
 #include "../common/check.cuh"
 #include "../common/launch.cuh"
+#include "../common/codes/gpu_q_limit_type.cuh"
 #include "../equations/scenario_overrides.cuh"
 #include "../solver/driver_steps.cuh"
 #include "pilot_voltage.cuh"
@@ -44,7 +45,7 @@ __global__ void pilotSelfGateBatch(int nQr, int nScenarios, int nrl, const int* 
         // converges with 60 violations) and BUS-6003_BBS_1 (0.473 MW of distributed active power).
         // Unpinned or islanded ⇒ skip; pinned and alive ⇒ its balance rides the carrier.
         bool islanded = rlIslanded != nullptr && rlIslanded[(size_t) s * nrl + e];
-        skip = (islanded || limitType[(size_t) s * nrl + e] == 0) ? 1 : 0;
+        skip = (islanded || limitType[(size_t) s * nrl + e] == GpuQLimitType::NONE) ? 1 : 0;
     } else {
         skip = 0;                                            // not a pilot-self group
     }
@@ -164,17 +165,17 @@ __global__ void updatePilotVeqBatch(int nQr, int nScenarios, int n,
     char plt = pe >= 0 && limitType != nullptr ? limitType[(size_t) s * nrl + pe] : 0;
     double flipTarget = pilotQ[(size_t) s * nQr + g];
     bool continuedFlip = false;
-    if (pe >= 0 && plt != 0) {
+    if (pe >= 0 && plt != GpuQLimitType::NONE) {
         size_t li = cvStride ? (size_t) s * nrl + pe : (size_t) pe;
-        double lim = (plt == 3 || plt == 4) && rlInitTgtQ != nullptr ? rlInitTgtQ[pe]
-                   : (plt == 1 || plt == 3) ? rlMinQ[li] : rlMaxQ[li];
-        // A pilot whose bus LOST EVERY GENERATOR this scenario (seeded RL_LIMIT_FROZEN through setBatchRlGenLost)
+        double lim = (plt == GpuQLimitType::MIN_REALISTIC_V || plt == GpuQLimitType::MAX_REALISTIC_V) && rlInitTgtQ != nullptr ? rlInitTgtQ[pe]
+                   : isMinLimit(plt) ? rlMinQ[li] : rlMaxQ[li];
+        // A pilot whose bus LOST EVERY GENERATOR this scenario (seeded GpuQLimitType::FROZEN through setBatchRlGenLost)
         // is not pinned at any limit: OLF's BUS_TARGET_Q there has no generator term at all, only the bus's
         // load. Falling through to rlMaxQ asked the bus for its lost generator's MAXIMUM reactive output:
         // rte6515 GEN-1251 with every busbar section in the list (VL-1251_0, the pilot of a two-section group
         // whose other member is pinned), target 1.0 pu against OLF's 0.0, the bus driven from 0.572 to 0.94 pu
         // for the first passes, 4.18 MW of slack read where OLF reads -0.33, and -0.384 MW distributed against 0.
-        if (plt == RL_LIMIT_FROZEN && rlGenLost != nullptr && rlGenLost[(size_t) s * nrl + pe]) {
+        if (plt == GpuQLimitType::FROZEN && rlGenLost != nullptr && rlGenLost[(size_t) s * nrl + pe]) {
             lim = 0.0;
         }
         flipTarget = lim - rlLoadQ[li];
@@ -218,7 +219,7 @@ __global__ void updatePilotVeqBatch(int nQr, int nScenarios, int n,
             if (re < 0 || re >= nrl) continue;
             if (rlIslandedMask != nullptr && rlIslandedMask[(size_t) s * nrl + re]) continue;   // OLF disables it
             entryKnown = true;
-            if (limitType[(size_t) s * nrl + re] == 0) {                                        // still controlling
+            if (limitType[(size_t) s * nrl + re] == GpuQLimitType::NONE) {  // still controlling
                 anyEnabled = true;
                 break;
             }
@@ -231,7 +232,7 @@ __global__ void updatePilotVeqBatch(int nQr, int nScenarios, int n,
     if (factKnown) {
         lost = !anyEnabled;
     } else if (pe >= 0) {
-        lost = plt != 0;                                     // an unpinned pilot still controls its own bus
+        lost = plt != GpuQLimitType::NONE;  // an unpinned pilot still controls its own bus
         int p0 = qrPtr[g];
         int cnt = qrPtr[g + 1] - p0;
         for (int c = 1; lost && c < cnt; c++) {
@@ -280,7 +281,7 @@ __global__ void updatePilotVeqBatch(int nQr, int nScenarios, int n,
         // the lost generator's pin still injected - rte6515 GEN-6003 with every busbar section in the list:
         // VL-6003_0 kept 0.7477 pu against OLF's 0.0 through the first passes, and the first slack read was
         // 0.049 MW off (238.816 MW distributed against OLF's 238.865).
-        if (plt == RL_LIMIT_FROZEN && rlGenLost != nullptr && rlGenLost[(size_t) s * nrl + pe]) {
+        if (plt == GpuQLimitType::FROZEN && rlGenLost != nullptr && rlGenLost[(size_t) s * nrl + pe]) {
             target[pi] = flipTarget;
         }
         // ...and a group the previous solve had flipped at another pin (a strategy pair continuing its

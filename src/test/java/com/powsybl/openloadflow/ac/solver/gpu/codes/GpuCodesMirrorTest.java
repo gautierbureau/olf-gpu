@@ -70,7 +70,7 @@ class GpuCodesMirrorTest {
     }
 
     private static Map<String, Integer> nativeConstants(String family) throws IOException {
-        String snake = family.replaceAll("([a-z0-9])([A-Z])", "$1_$2").toLowerCase();
+        String snake = family.replaceAll("([A-Z])([A-Z][a-z])", "$1_$2").replaceAll("([a-z0-9])([A-Z])", "$1_$2").toLowerCase();
         Matcher ns = NAMESPACE.matcher(Files.readString(NATIVE_DIR.resolve(snake + ".cuh")));
         assertTrue(ns.find(), family + ": no namespace in " + snake + ".cuh");
         assertEquals(family, ns.group(1), snake + ".cuh");

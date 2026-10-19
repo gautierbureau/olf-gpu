@@ -29,13 +29,13 @@
 
 // The batched linear solve. The batch context's `mode` (GpuBatchContextCache) picks one of two setups:
 //
-//   mode 3 (UBATCH, the default): a SINGLE per-block CSR with value/RHS pointers aimed at the batched
+//   GpuLinearSolveMode::UBATCH (the default): a SINGLE per-block CSR with value/RHS pointers aimed at the batched
 //     buffers + CUDSS_CONFIG_UBATCH_SIZE = nScenarios. cuDSS analyzes ONE block, then factorizes and
 //     solves every scenario in one call. The chunk size is decisive on cuDSS 0.8: its UBATCH phases carry
 //     a high per-launch fixed cost that amortizes with batch size (pegase9241, 500 ctg, warm ms/scenario:
 //     chunk 32 = 17.8, 125 = 6.35, 500 = 4.87), hence the memory auto-sizing of the chunk.
 //
-//   mode 6 (ROBUST): a per-scenario loop over a single matrix with BTF-COLAMD ordering, global column
+//   GpuLinearSolveMode::ROBUST: a per-scenario loop over a single matrix with BTF-COLAMD ordering, global column
 //     pivoting and matching. What a batch of one retries in after a linear-solve reject (rte6515's full
 //     busbar structure does not factor in the uniform batch).
 //

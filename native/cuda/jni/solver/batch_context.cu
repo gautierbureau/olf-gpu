@@ -20,6 +20,7 @@
 #include "../common/codes/gpu_state_vector_scaling_mode.cuh"
 #include "../common/codes/gpu_distributed_slack_factor_mode.cuh"
 #include "../common/codes/gpu_reactive_limits_entry_flag.cuh"
+#include "../common/codes/gpu_linear_solve_mode.cuh"
 #include "batch_context.cuh"
 #include "driver_steps.cuh"
 #include "linear_solver_settings.cuh"
@@ -30,9 +31,7 @@ void setupBatchMatricesUbatch(BatchSolverContext* ctx) {
     int n = ctx->n;
     int nScenarios = ctx->nScenarios;
     // ---- UBATCH: ONE per-block CSR (n, nnz, shared rowPtr/colIdx) with batched value/RHS pointers;
-    //      cuDSS analyzes a single block (cheap) and factorizes/solves all nS via UBATCH_SIZE.
-    //      Modes 4/5 share this exact setup and differ only in the per-iteration factorize policy
-    //      (mode 4 = factor at chunk iter 0 only; mode 5 = factor once + refactorize after). ----
+    //      cuDSS analyzes a single block (cheap) and factorizes/solves all nS via UBATCH_SIZE. ----
     {
         int ub = nScenarios;
         CUDSS_CHECK(cudssConfigSet(ctx->ds.config, CUDSS_CONFIG_UBATCH_SIZE, &ub, sizeof(ub)));
@@ -293,14 +292,14 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& st, int nScenar
     CUDSS_CHECK(cudssConfigCreate(&ctx->ds.config));
     int ir = ctx->st->nzi > 0 ? irBaseSteps() : IR_N_STEPS;
     CUDSS_CHECK(cudssConfigSet(ctx->ds.config, CUDSS_CONFIG_IR_N_STEPS, &ir, sizeof(ir)));
-    if (mode == 6) {
+    if (mode == GpuLinearSolveMode::ROBUST) {
         applyRobustSingleMatrixConfig(ctx->ds.config);       // its own ordering: never set the ordering twice
     } else {
         applyReorderAlg(ctx->ds.config, ctx->st->nzi > 0);
     }
     CUDSS_CHECK(cudssDataCreate(ctx->ds.handle, &ctx->ds.data));
 
-    if (mode == 3) {
+    if (mode == GpuLinearSolveMode::UBATCH) {
         setupBatchMatricesUbatch(ctx.get());
     } else {
         setupBatchMatricesFallback(ctx.get());

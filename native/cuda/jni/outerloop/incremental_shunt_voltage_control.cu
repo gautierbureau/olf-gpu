@@ -13,6 +13,7 @@
 
 #include "../common/check.cuh"
 #include "../common/launch.cuh"
+#include "../common/codes/gpu_linear_solve_mode.cuh"
 #include "../solver/driver_steps.cuh"
 #include "sensitivity.cuh"
 #include "incremental_shunt_voltage_control.cuh"
@@ -208,7 +209,7 @@ void shcStep(BatchSolverContext* ctx, DriverPass& drv) {
     std::vector<char>& active = drv.active;
     int nShc = ctx->nShc;
     if (nShc <= 0) return;
-    if (ctx->mode != 3 && ctx->mode != 6) {
+    if (ctx->mode != GpuLinearSolveMode::UBATCH && ctx->mode != GpuLinearSolveMode::ROBUST) {
         static bool warned = false;
         if (!warned) { std::fprintf(stderr, "in-kernel shunt VC needs a UBATCH (3) or robust (6) mode; mode %d runs it as stable\n", ctx->mode); warned = true; }
         return;

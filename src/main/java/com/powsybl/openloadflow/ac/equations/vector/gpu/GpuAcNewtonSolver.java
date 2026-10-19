@@ -11,6 +11,7 @@ import com.powsybl.openloadflow.ac.outerloop.gpu.ReactiveLimitsNative;
 import com.powsybl.openloadflow.ac.solver.gpu.BatchSolveNative;
 import com.powsybl.openloadflow.ac.solver.gpu.NewtonSettingsNative;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuDistributedSlackFactorMode;
+import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuLinearSolveMode;
 
 /**
  * JNI binding: a FULL Newton-Raphson AC power flow run on the GPU behind one native call.
@@ -123,7 +124,7 @@ public final class GpuAcNewtonSolver {
     public static double[] solveOnStructure(long structure, double[] x0, double[] target, int[] rowMode,
                                             int maxIter, double tol, int lsMode, double maxDv, double maxDphi,
                                             int[] varType) {
-        long handle = BatchSolveNative.createBatchContext(structure, 1, com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchContextCache.MODE_UBATCH,
+        long handle = BatchSolveNative.createBatchContext(structure, 1, GpuLinearSolveMode.UBATCH,
                 new int[0], new double[0], new double[0], new double[0], new double[0], new byte[0], new double[x0.length],
                 new int[0], new double[0], -1, 0.0, new double[0], new double[0], new double[0],
                 0, new double[0], new double[0], 0, 0);

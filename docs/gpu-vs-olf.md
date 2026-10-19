@@ -175,3 +175,4 @@ constants carry OLF's constant names.
 | `GpuReactiveLimitsEntryFlag` | bit flags of a reactive-limit entry | `STAND_BY_AUTOMATON` 1 (an SVC under OLF's `StandByAutomaton`), `NOT_CONTROLLER_ELEMENT` 2 |
 | `GpuReactiveTermKind` | the terms `createReactiveTerms` sums (DISTR_Q `dqKind`, remote member `rmqKind`) | `CLOSED_BRANCH_REACTIVE_FLOW` 0, `SHUNT_COMPENSATOR_REACTIVE_FLOW` 1, `OPEN_BRANCH_REACTIVE_FLOW` 2, `DUMMY_Q` 3 |
 | `GpuRealisticVoltageFixingLoop` | the last loop whose `canFixUnrealisticState()` is true (robust mode) | `NONE` -1, `REACTIVE_LIMITS` 0, `TRANSFORMER_VOLTAGE_CONTROL` 1 |
+| `GpuLinearSolveMode` | device only (OLF factors one KLU matrix per solve) | `UBATCH` 3, `ROBUST` 6 |

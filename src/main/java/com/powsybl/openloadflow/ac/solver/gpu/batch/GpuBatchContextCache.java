@@ -12,6 +12,7 @@ import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcStructures;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.StructureNative;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DeviceLoopTables;
 import com.powsybl.openloadflow.ac.solver.gpu.BatchSolveNative;
+import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuLinearSolveMode;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -38,17 +39,6 @@ public final class GpuBatchContextCache {
 
     /** Fallback chunk size used when auto-sizing is unavailable (no GPU / memory-query failure). */
     public static final int DEFAULT_MAX_BATCH = 256;
-    /**
-     * The native batched-solve mode: UBATCH (a single per-block matrix + CUDSS_CONFIG_UBATCH_SIZE). Its one-block
-     * ANALYSIS is cheap (~150 ms), and its per-launch fixed cost amortizes with the batch (pegase9241, warm
-     * ms/scenario: chunk 32 = 17.8, 125 = 6.35, 500 = 4.87), hence the memory auto-sizing of the chunk.
-     */
-    public static final int MODE_UBATCH = 3;
-    /** 6 = the ROBUST single-matrix solve: a per-scenario loop with BTF-COLAMD ordering, global
-     *  column pivoting and matching (cuDSS single-matrix API). What the batch-of-one retries in after a
-     *  linear-solve reject: rte6515's full busbar structure does not factor in the uniform batch. */
-    public static final int MODE_ROBUST = 6;
-
     static final int AUTO_MAX_CHUNK = 4096;
 
     private static CachedBatchContext cachedContext;
@@ -109,16 +99,16 @@ public final class GpuBatchContextCache {
         }
     }
 
-    /** Test hook: a mode every context of this JVM is built in instead of {@link #MODE_UBATCH}, or null. */
+    /** Test hook: a mode every context of this JVM is built in instead of {@link GpuLinearSolveMode#UBATCH}, or null. */
     private static volatile Integer modeForTests;
 
-    /** The native batched-solve mode: {@link #MODE_UBATCH}. */
+    /** The native batched-solve mode: {@link GpuLinearSolveMode#UBATCH}. */
     public static int resolveBatchMode() {
         Integer forced = modeForTests;
-        return forced != null ? forced : MODE_UBATCH;
+        return forced != null ? forced : GpuLinearSolveMode.UBATCH;
     }
 
-    /** TESTS ONLY: build every context in {@code mode} (e.g. {@link #MODE_ROBUST}) until reset with null. */
+    /** TESTS ONLY: build every context in {@code mode} (e.g. {@link GpuLinearSolveMode#ROBUST}) until reset with null. */
     public static void forceModeForTests(Integer mode) {
         modeForTests = mode;
     }

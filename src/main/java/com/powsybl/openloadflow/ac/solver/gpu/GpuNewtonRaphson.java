@@ -47,6 +47,7 @@ import com.powsybl.openloadflow.ac.solver.NewtonRaphsonStoppingCriteria;
 import com.powsybl.openloadflow.ac.solver.PerEquationTypeStoppingCriteria;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchContextCache;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuAcSolverStatus;
+import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuLinearSolveMode;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuOuterLoopKind;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuStateVectorScalingMode;
 import com.powsybl.openloadflow.equations.EquationSystem;
@@ -972,7 +973,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                 // The shared structure comes from the per-extraction cache — the batched SA
                 // building its context from the SAME extraction reuses it device-side.
                 context.handle.set(BatchSolveNative.createBatchContext(GpuAcStructures.handle(n, data), 1,
-                        robustModeForRun ? GpuBatchContextCache.MODE_ROBUST : GpuBatchContextCache.resolveBatchMode(),
+                        robustModeForRun ? GpuLinearSolveMode.ROBUST : GpuBatchContextCache.resolveBatchMode(),
                         data.rlVrow(), data.rlMinQ(), data.rlMaxQ(), data.rlLoadQ(), data.rlVtarget(),
                         data.rlMonitored(), data.rowSlope(),
                         data.dsPhiRow(), data.dsFactor(), data.dsSlackPhiRow(), data.dsSlackTargetP(),

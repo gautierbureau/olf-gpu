@@ -36,6 +36,7 @@ import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.GenOutage;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.GpuBatchLossPreDistribution;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.GpuBatchQualification;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuAcSolverStatus;
+import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuLinearSolveMode;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuOuterLoopKind;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuQLimitType;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuReactiveLimitsState;
@@ -215,7 +216,7 @@ final class GpuBatchChunkSolver {
         // busbar structure needs to factor at all. Switching mode EVICTS the single-entry context cache,
         // so the retry pays one cuDSS analysis; that is the price of keeping the scenarios on device.
         long handle = GpuBatchContextCache.acquireBatchContext(gpuData, chunkSize,
-                config.robustSolveMode() ? GpuBatchContextCache.MODE_ROBUST : GpuBatchContextCache.resolveBatchMode(), n);
+                config.robustSolveMode() ? GpuLinearSolveMode.ROBUST : GpuBatchContextCache.resolveBatchMode(), n);
         // PER_EQUATION_TYPE criterion: install the per-row thresholds on the (possibly cached)
         // context — or CLEAR a previous run's thresholds under UNIFORM_CRITERIA.
         GpuAcNewtonSolver.installRowCriteria(handle, rowCriteria);

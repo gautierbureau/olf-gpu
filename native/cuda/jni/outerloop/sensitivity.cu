@@ -14,6 +14,7 @@
 #include "../common/check.cuh"
 #include "../common/launch.cuh"
 #include "../common/stats.cuh"
+#include "../common/codes/gpu_linear_solve_mode.cuh"
 #include "../equations/branch_fill.cuh"
 #include "../equations/bus_injection_fill.cuh"
 #include "../equations/distribution_fill.cuh"
@@ -63,7 +64,7 @@ __global__ void gatherSensiBatch(int n, int nScenarios, int k, int m, int ki, co
 void sensitivitySolve(BatchSolverContext* ctx, DriverPass& drv, bool& first) {
     const int& n = drv.n;
     const int& nS = drv.nS;
-    if (ctx->mode == 6) {
+    if (ctx->mode == GpuLinearSolveMode::ROBUST) {
         for (int s2 = 0; s2 < nS; s2++) {
             CUDSS_CHECK(cudssMatrixSetValues(ctx->ds.matA, ctx->dVals.as<double>() + (size_t) s2 * ctx->nnz));
             CUDSS_CHECK(cudssMatrixSetValues(ctx->ds.matB, ctx->dB.as<double>() + (size_t) s2 * n));
@@ -99,7 +100,7 @@ void sensitivitySolve(BatchSolverContext* ctx, DriverPass& drv, bool& first) {
 // them from the live device buffers. UBATCH mode (3) only.
 std::vector<double> solveBatchSensitivities(BatchSolverContext* ctx, const double* states,
                                             int k, const int* unitEqRows, int m, const int* observeVarCols) {
-    if (ctx->mode != 3) {
+    if (ctx->mode != GpuLinearSolveMode::UBATCH) {
         throw std::runtime_error("solveBatchSensitivities: UBATCH mode (3) only");
     }
     int n = ctx->st->n;

@@ -13,6 +13,7 @@
 
 #include "../common/check.cuh"
 #include "../common/launch.cuh"
+#include "../common/codes/gpu_linear_solve_mode.cuh"
 #include "../solver/driver_steps.cuh"
 #include "zero_diagonal_repair.cuh"
 
@@ -34,7 +35,7 @@ namespace olfgpu {
 
 
 bool repairsZeroDiagonals(const BatchSolverContext* ctx) {
-    return ctx->mode != 6;
+    return ctx->mode != GpuLinearSolveMode::ROBUST;
 }
 
 // ---------------------------------------------------------------------------------------------

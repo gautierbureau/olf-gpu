@@ -16,6 +16,7 @@
 #include "../common/stats.cuh"
 #include "../common/codes/gpu_state_vector_scaling_mode.cuh"
 #include "../common/codes/gpu_ac_solver_status.cuh"
+#include "../common/codes/gpu_linear_solve_mode.cuh"
 #include "../diagnostics/driver_traces.cuh"
 #include "../diagnostics/matrix_scan.cuh"
 #include "../equations/fill_launch.cuh"
@@ -328,7 +329,7 @@ void newtonSolve(BatchSolverContext* ctx, DriverPass& drv) {
             CUDA_CHECK(cudaMemcpyAsync(ctx->dXprevLs.p, ctx->dX.p, static_cast<size_t>(n) * nS * sizeof(double),
                                        cudaMemcpyDeviceToDevice, ctx->stream));
         }
-        if (ctx->mode == 3) {
+        if (ctx->mode == GpuLinearSolveMode::UBATCH) {
         // ---- UBATCH solve: ANALYZE one block once (cheap), then a linear solve over all nS systems
         //      via CUDSS_CONFIG_UBATCH_SIZE on the single per-block matrix, FACTORIZED every iteration
         //      (honest Newton). ----
@@ -371,7 +372,7 @@ void newtonSolve(BatchSolverContext* ctx, DriverPass& drv) {
         // two, so a tier change re-analyzes rarely.
         constexpr double COMPACT_FRAC = 0.5;
         const int compactLimit = std::max(1, std::min(nS, static_cast<int>(COMPACT_FRAC * nS)));
-        bool compactSolve = !deviceFixedIter && ctx->mode == 3 && nActive > 0 && nActive <= compactLimit
+        bool compactSolve = !deviceFixedIter && ctx->mode == GpuLinearSolveMode::UBATCH && nActive > 0 && nActive <= compactLimit
                 && nActive < nS;
         if (!compactSolve) {
             gWidthIterSum += nS;                             // full-width factorization this iteration

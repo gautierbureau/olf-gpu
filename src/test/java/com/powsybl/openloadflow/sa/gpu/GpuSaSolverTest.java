@@ -20,6 +20,7 @@ import com.powsybl.openloadflow.ac.solver.gpu.GpuPivotType;
 import com.powsybl.openloadflow.ac.solver.gpu.GpuReorderingAlgorithm;
 import com.powsybl.openloadflow.ac.solver.gpu.NewtonSettingsNative;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchContextCache;
+import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuLinearSolveMode;
 import com.powsybl.openloadflow.graph.EvenShiloachGraphDecrementalConnectivityFactory;
 import com.powsybl.openloadflow.sa.AcSecurityAnalysis;
 import com.powsybl.openloadflow.sa.OpenSecurityAnalysisProvider;
@@ -204,7 +205,7 @@ class GpuSaSolverTest extends AbstractGpuSaTest {
     void deviceRobustModeRunsTheInKernelLoops() {
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
-        GpuBatchContextCache.forceModeForTests(GpuBatchContextCache.MODE_ROBUST);
+        GpuBatchContextCache.forceModeForTests(GpuLinearSolveMode.ROBUST);
         try {
             assertIncrementalTvcTapMovesInKernel();
             assertIncrementalSharedTvcMatchesCpu();
@@ -259,7 +260,7 @@ class GpuSaSolverTest extends AbstractGpuSaTest {
                 .setMaxVoltageChangeStateVectorScalingMaxDv(0.01)
                 .setMaxVoltageChangeStateVectorScalingMaxDphi(0.01)
                 .setMaxNewtonRaphsonIterations(100);              // the clamped base needs ~30 steps from flat angles
-        GpuBatchContextCache.forceModeForTests(GpuBatchContextCache.MODE_ROBUST);
+        GpuBatchContextCache.forceModeForTests(GpuLinearSolveMode.ROBUST);
         try {
             assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
             assertEquals(ctgs.size(), GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get());

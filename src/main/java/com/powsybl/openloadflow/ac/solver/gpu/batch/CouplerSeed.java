@@ -129,7 +129,7 @@ final class CouplerSeed {
                                 frozenForCtg);
                 int childRl = RelocatedRows.rlEntryOf(gpuData, child);
                 boolean childPinned = applied
-                        && (gpuData.switchedPvToPqInBase(childRl) || gpuData.pvPqRowRelocated(childRl));
+                        && gpuData.switchedPvToPqInBase(childRl);
                 if (applied && childPinned) {
                     // The child is PQ in the base (reactive limit): its balance comes home at
                     // the pinned value, no identity (the qualification refused such a child as

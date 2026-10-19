@@ -63,7 +63,7 @@ __global__ void initRlLimitTypeBatch(int nrl, int nScenarios, int n, const int* 
         // DEGENERATE here — key the direction on WHICH limit the extracted BUS_TARGET_Q target
         // equals instead (target = limit − loadQ was written by the base activation).
         limitType[st] = 0;
-        if (isEnrolledPilot(psEntry, nQr, i) && olfKind != RL_BASE_RELOCATED) {
+        if (isEnrolledPilot(psEntry, nQr, i)) {
             // An ENROLLED pilot-self pilot (rotation) keeps its V row an identity while PINNED: the pin's
             // balance rides the carrier (or its own row flipped to a power row once the group lost control),
             // so the mode-4 marker below never appears on its row. OLF's own kind is the only record of its
@@ -77,14 +77,6 @@ __global__ void initRlLimitTypeBatch(int nrl, int nScenarios, int n, const int* 
             double tgt = target[qix];
             limitType[st] = olfKind != 0 ? olfKind
                     : (fabs(tgt - (rlMaxQb[i] - rlLoadQb[i])) <= fabs(tgt - (rlMinQb[i] - rlLoadQb[i])) ? 2 : 1);
-        }
-        if (olfKind == RL_BASE_RELOCATED) {
-            // This entry does NOT own the pin on its V row (ReactiveLimitsPacker.RL_BASE_RELOCATED): either its
-            // own reactive balance was relocated off that row, or the row carries ANOTHER bus's relocated
-            // balance. Both happen on a pilot that is one of its own controllers while a sibling still holds
-            // the voltage. Freeze the entry: the reactive-limits pass and the switch-back both key on the V
-            // row, and pinning or unpinning a row this entry does not own left the Jacobian rank-deficient.
-            limitType[st] = RL_LIMIT_FROZEN;
         }
         return;
     }
@@ -161,11 +153,6 @@ __global__ void seedRlModeFromState(int nrl, int nScenarios, int n, const int* r
         }
         return;
     }
-    // An entry that does not OWN the pin on its V row must not have one stamped there: its balance lives on
-    // another row (or that row carries another bus's), and the row it does own was already set correctly by
-    // the base activation. RL_LIMIT_FROZEN alone is not enough to skip on, because the run-time freeze uses
-    // the same type on entries that DO own their row and must be restored here on a resumed solve.
-    if (rlBaseLt != nullptr && rlBaseLt[i] == RL_BASE_RELOCATED) return;
     if (isEnrolledPilot(psEntry, nQr, i)) return;           // its pin never lives on its own V row (rotation)
     if (lt != 0) {
         // the pin's row (see dRlQrow), with the relocation's per-scenario diversion: mode 0 at the relocated row

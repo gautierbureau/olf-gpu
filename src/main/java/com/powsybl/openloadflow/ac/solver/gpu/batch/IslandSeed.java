@@ -151,7 +151,7 @@ final class IslandSeed {
                 if (unpinnedPilotSelf && gpuData.rlVrow() != null && gpuData.rlRemote() != null) {
                     for (int e = 0; e < gpuData.rlVrow().length; e++) {
                         if (gpuData.rlVrow()[e] == fallbackRow && gpuData.rlRemote()[e] == 2) {
-                            unpinnedPilotSelf = !(gpuData.switchedPvToPqInBase(e) && !gpuData.pvPqRowRelocated(e));
+                            unpinnedPilotSelf = !gpuData.switchedPvToPqInBase(e);
                             break;
                         }
                     }

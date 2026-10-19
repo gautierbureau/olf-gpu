@@ -16,7 +16,7 @@ __global__ void pilotRowAllPinnedBatch(int nEntries, int nScenarios, int n, int 
                                        const int* entOff, const int* entCount, const int* entRlPool,
                                        const char* limitType, int* mode, double* target,
                                        char* flipped, double* savedVTarget,
-                                       const char* rlActive, char* switched, const char* rlBaseLt);
+                                       const char* rlActive, char* switched);
 
 __global__ void fillRemoteMemberQBatch(int nrmq, int nScenarios, int n, int nElements,
                                        int cbOffset, int obOffset,

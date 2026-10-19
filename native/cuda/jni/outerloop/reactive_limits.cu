@@ -669,8 +669,7 @@ psgStep(ctx, nS, n, outer, "afterElect");
                     ctx->dPfOff.as<int>(), ctx->dPfCount.as<int>(), ctx->dPfRlPool.as<int>(),
                     ctx->dRlLimitType.as<char>(), ctx->dMode.as<int>(), ctx->dTarget.as<double>(),
                     ctx->dPfFlipped.as<char>(), ctx->dPfSavedVT.as<double>(),
-                    ctx->dRlActive.as<char>(), ctx->dRlSwitched.as<char>(),
-                    ctx->hasRlBaseLt ? ctx->dRlBaseLimitType.as<char>() : nullptr);
+                    ctx->dRlActive.as<char>(), ctx->dRlSwitched.as<char>());
         }
 psgStep(ctx, nS, n, outer, "afterAllPinned");
         if (ctx->hasDqQrGroups && ctx->st->nQr > 0) {    // all-pinned corner: pilot vEq flip/restore

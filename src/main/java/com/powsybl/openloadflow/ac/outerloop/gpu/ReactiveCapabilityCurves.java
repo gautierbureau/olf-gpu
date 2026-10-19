@@ -113,7 +113,9 @@ public final class ReactiveCapabilityCurves {
             if (remoteMember || pilotSelf) {
                 var vc = com.powsybl.openloadflow.ac.equations.vector.gpu.RemoteMemberQPacker.mainGenVc(bus);
                 var pilotVar = es.getVariableSet().getVariable(vc.getControlledBus().getNum(), AcVariableType.BUS_V);
-                if (vVar == null || pilotVar == null || !(bus.getMinQ() < bus.getMaxQ())) {
+                // a row < 0 is a bus a contingency disabled: the pack skips it (vCol < 0) and so must the replay
+                if (vVar == null || vVar.getRow() < 0 || pilotVar == null || pilotVar.getRow() < 0
+                        || !(bus.getMinQ() < bus.getMaxQ())) {
                     continue;                                // not packed
                 }
                 if (rlIdx >= gpuData.rlVrow().length || gpuData.rlVrow()[rlIdx] != vVar.getRow()) {
@@ -132,7 +134,7 @@ public final class ReactiveCapabilityCurves {
             boolean qActive = es.getEquation(bn, AcEquationType.BUS_TARGET_Q).map(e -> e.isActive()).orElse(false);
             boolean basePv = vActive && !qActive;
             boolean basePqCapable = qActive && !vActive && !bus.isGeneratorVoltageControlEnabled();
-            if (vVar == null || bus.getGeneratorVoltageControl().isEmpty() || !(basePv || basePqCapable)) {
+            if (vVar == null || vVar.getRow() < 0 || bus.getGeneratorVoltageControl().isEmpty() || !(basePv || basePqCapable)) {
                 continue;
             }
             if (rlIdx >= gpuData.rlVrow().length || gpuData.rlVrow()[rlIdx] != vVar.getRow()) {

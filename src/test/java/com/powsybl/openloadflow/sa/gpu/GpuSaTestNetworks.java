@@ -777,6 +777,16 @@ final class GpuSaTestNetworks {
                 .setP0(p0).setQ0(q0).setR(1.5).setX(12.0).setG(0).setB(0).add();
     }
 
+    /** OLF's three-generator remote voltage control (g1/g2/g3 behind tr1/tr2/tr3 regulating b4), every generator
+     *  limited to [-maxQ, maxQ]. Losing tr2 or tr3 islands one controller: its bus is disabled after the contingency. */
+    static Network limitedRemoteControlGroupNetwork(double maxQ) {
+        Network network = com.powsybl.openloadflow.network.VoltageControlNetworkFactory.createWithGeneratorRemoteControl();
+        for (String g : new String[] {"g1", "g2", "g3"}) {
+            network.getGenerator(g).newMinMaxReactiveLimits().setMinQ(-maxQ).setMaxQ(maxQ).add();
+        }
+        return network;
+    }
+
     /** Every PV-capable bus limited (the three remote members are the network's ONLY PV buses),
      *  plus an L14 outage strong enough to drive all of them over their limits. */
     static Network forcedPvNetwork() {

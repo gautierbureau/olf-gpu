@@ -277,7 +277,7 @@ final class GpuBatchChunkSolver {
         boolean dsSlackOnly = gpuData.dsPhiRow().length == 0 && gpuData.dsSlackPhiRow() >= 0;
         // Host-side base RL seed (mirrors initRlLimitTypeBatch) for PADDING slots of pair chunks.
         int[] baseRlSeed = new int[nrl];
-        byte[] baseLimitTypes = gpuData.rlBaseLimitTypeForDevice();
+        byte[] baseLimitTypes = gpuData.rlBaseQLimitType();
         for (int i = 0; i < nrl; i++) {
             int vrow = gpuData.rlVrow()[i];
             // remote entries (plan-B3): base mode 1 = UNPINNED DISTR_Q share; only mode 4 is a pin.

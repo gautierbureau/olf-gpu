@@ -105,9 +105,8 @@ public final class DeviceLoopTables {
         ReactiveLimitsNative.setBatchRlRobust(handle, gpuData.rlInitTargetQ(),
                 minRealisticVoltage * REALISTIC_VOLTAGE_MARGIN, maxRealisticVoltage / REALISTIC_VOLTAGE_MARGIN,
                 rlRobustMode ? 1 : 0);
-        // OLF's own base QLimitTypes, so a realistic-voltage switch is not re-seeded as a Q-limit one, merged with
-        // the device's relocated-row code.
-        byte[] baseLimitTypes = gpuData.rlBaseLimitTypeForDevice();
+        // OLF's own base QLimitTypes, so a realistic-voltage switch is not re-seeded as a Q-limit one.
+        byte[] baseLimitTypes = gpuData.rlBaseQLimitType();
         boolean anyBaseLt = false;
         for (byte b : baseLimitTypes) {
             anyBaseLt |= b != 0;

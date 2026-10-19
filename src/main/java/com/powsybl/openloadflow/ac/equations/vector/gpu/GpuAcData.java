@@ -103,10 +103,6 @@ public record GpuAcData(double[] cbIn, int[] cbIdx, int[] cbPcSide, double[] obI
                         /** Per reactive-limit entry, OLF's {@code LfBus.getQLimitType()} after the base load flow:
                          *  0 none, 1 MIN_Q, 2 MAX_Q, 3 MIN_REALISTIC_V, 4 MAX_REALISTIC_V. */
                         byte[] rlBaseQLimitType,
-                        /** Per reactive-limit entry, 1 when the bus's PV/PQ state does not sit on its own V row
-                         *  (device only, docs/gpu-vs-olf.md): its reactive balance was placed on another bus's row,
-                         *  or its V row hosts another bus's balance. */
-                        byte[] rlPvPqRowRelocated,
                         /** Dependent-pilot candidate groups (ExtractionColumns): per group its base group or -1, per
                          *  group the base row of the pilot's reactive target or -1, per device row the dependent group
                          *  of the bus owning that V row or -1. Structure inputs: they build relocation pools. */
@@ -198,7 +194,6 @@ public record GpuAcData(double[] cbIn, int[] cbIdx, int[] cbPcSide, double[] obI
                 && java.util.Arrays.equals(rlMonitored, other.rlMonitored)
                 && java.util.Arrays.equals(rlRemote, other.rlRemote)
                 && java.util.Arrays.equals(rlBaseQLimitType, other.rlBaseQLimitType)
-                && java.util.Arrays.equals(rlPvPqRowRelocated, other.rlPvPqRowRelocated)
                 && java.util.Arrays.equals(rlCmpVrow, other.rlCmpVrow)
                 && java.util.Arrays.equals(rlInitTargetQ, other.rlInitTargetQ)
                 && java.util.Arrays.equals(dqKMember, other.dqKMember) && java.util.Arrays.equals(dqJMember, other.dqJMember)
@@ -303,26 +298,6 @@ public record GpuAcData(double[] cbIn, int[] cbIdx, int[] cbPcSide, double[] obI
      */
     public boolean switchedPvToPqInBase(int rlEntry) {
         return rlBaseQLimitType != null && rlEntry >= 0 && rlEntry < rlBaseQLimitType.length && rlBaseQLimitType[rlEntry] != 0;
-    }
-
-    /**
-     * Does this entry's PV/PQ state sit on another row than its own V row ({@link #rlPvPqRowRelocated})? The device
-     * then leaves the entry frozen: it neither switches nor switches back a row it does not own.
-     */
-    public boolean pvPqRowRelocated(int rlEntry) {
-        return rlPvPqRowRelocated != null && rlEntry >= 0 && rlEntry < rlPvPqRowRelocated.length && rlPvPqRowRelocated[rlEntry] != 0;
-    }
-
-    /**
-     * The base code the device's reactive-limit seeding reads, per entry: OLF's {@link #rlBaseQLimitType}, or
-     * {@link ReactiveLimitsPacker#RL_BASE_RELOCATED} when {@link #pvPqRowRelocated}. The one place the two are merged.
-     */
-    public byte[] rlBaseLimitTypeForDevice() {
-        byte[] codes = new byte[rlBaseQLimitType.length];
-        for (int i = 0; i < codes.length; i++) {
-            codes[i] = pvPqRowRelocated(i) ? ReactiveLimitsPacker.RL_BASE_RELOCATED : rlBaseQLimitType[i];
-        }
-        return codes;
     }
 
     /** Number of participating buses in the batched distributed-slack outer loop (0 = no distribution). */

@@ -147,11 +147,10 @@ final class GenOutageSeed {
                     // deviceBasePinnedBusLosingItsOnlyGeneratorIsStillCheckedMatchesCpu).
                     boolean liveDeadLocal = (gpuData.rlRemote() == null || gpuData.rlRemote().length <= go.rlEntry()
                                     || gpuData.rlRemote()[go.rlEntry()] == 0)
-                            && gpuData.switchedPvToPqInBase(go.rlEntry()) && !gpuData.pvPqRowRelocated(go.rlEntry());
+                            && gpuData.switchedPvToPqInBase(go.rlEntry());
                     if (liveDeadLocal) {
                         // left live: no channel
-                    } else if (go.flipsPilotRowWhenAllPinned()
-                            || gpuData.switchedPvToPqInBase(go.rlEntry()) && !gpuData.pvPqRowRelocated(go.rlEntry())) {
+                    } else if (go.flipsPilotRowWhenAllPinned() || gpuData.switchedPvToPqInBase(go.rlEntry())) {
                         // ...and a MEMBER the base PINNED: its reactive balance already sits on
                         // its own mode-4 row (its pin row), and OLF recomputes that balance's
                         // target over the generators left - none - the moment the last one goes

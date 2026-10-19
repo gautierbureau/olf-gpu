@@ -1133,4 +1133,60 @@ class GpuSaRemoteVoltageControlTest extends AbstractGpuSaTest {
                 .setDistributedSlack(true).setUseReactiveLimits(true);
         assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
     }
+
+    /** OLF's security analysis with the GPU Newton-Raphson as its AC solver, a contingency islanding one controller of
+     *  a remote voltage control. The post-contingency extraction sees that controller's bus disabled: no V column, a
+     *  DISTR_Q equation disabled with it, a key OLF set to 0. The DISTR_Q pack still packed it and the device refused
+     *  the structure ("bad dqRow ... -1"); then the reactive-capability channel's replay of the reactive-limit pack
+     *  kept it where the pack skips it ("RL-pack enumeration drift"). Every post-contingency solve fell back to the
+     *  CPU: right, but not on the device. Once on the device, the surviving controller that carries the pilot's
+     *  reactive balance was FROZEN (the device-only base code 6, "PV/PQ state not on its own row"): OLF applies its
+     *  reactive limits like any other's, and the device ran out of iterations where OLF converges, with limits
+     *  reached (maxQ 60) or not (1000). */
+    @Test
+    void sequentialSolveWithAnIslandedRemoteControllerRunsOnTheDevice() {
+        assertSequentialGpuSaMatchesCpu(limitedRemoteControlGroupNetwork(1000));
+        assertSequentialGpuSaMatchesCpu(limitedRemoteControlGroupNetwork(60));
+    }
+
+    private void assertSequentialGpuSaMatchesCpu(Network network) {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        List<Contingency> ctgs = List.of(new Contingency("tr3", new BranchContingency("tr3")),
+                new Contingency("tr2", new BranchContingency("tr2")));
+        List<com.powsybl.security.monitor.StateMonitor> monitors = List.of(new com.powsybl.security.monitor.StateMonitor(
+                com.powsybl.contingency.ContingencyContext.all(), java.util.Set.of(),
+                java.util.Set.of("vl1", "vl2", "vl3", "vl4"), java.util.Set.of()));
+        com.powsybl.security.SecurityAnalysisResult cpu = runSecurityAnalysis(network, ctgs, monitors, sequentialSaParameters(false));
+        long fallbacksBefore = com.powsybl.openloadflow.ac.solver.gpu.GpuNewtonRaphson.CPU_FALLBACK_COUNT.get();
+        com.powsybl.security.SecurityAnalysisResult gpu = runSecurityAnalysis(network, ctgs, monitors, sequentialSaParameters(true));
+        assertEquals(0, com.powsybl.openloadflow.ac.solver.gpu.GpuNewtonRaphson.CPU_FALLBACK_COUNT.get() - fallbacksBefore,
+                "every solve on the device");
+        assertEquals(cpu.getPreContingencyResult().getStatus(), gpu.getPreContingencyResult().getStatus());
+        for (int i = 0; i < ctgs.size(); i++) {
+            var c = cpu.getPostContingencyResults().get(i);
+            var g = gpu.getPostContingencyResults().get(i);
+            assertEquals(c.getStatus(), g.getStatus(), c.getContingency().getId());
+            var cb = c.getNetworkResult().getBusResults();
+            var gb = g.getNetworkResult().getBusResults();
+            assertEquals(cb.size(), gb.size());
+            for (int b = 0; b < cb.size(); b++) {
+                assertEquals(cb.get(b).getV(), gb.get(b).getV(), 1e-12,
+                        "bus voltage " + cb.get(b).getBusId() + " for " + c.getContingency().getId());
+            }
+        }
+    }
+
+    private static com.powsybl.security.SecurityAnalysisParameters sequentialSaParameters(boolean gpu) {
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setDistributedSlack(true).setUseReactiveLimits(true);
+        com.powsybl.openloadflow.OpenLoadFlowParameters ext = com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
+                .setVoltageRemoteControl(true);
+        if (gpu) {
+            ext.setAcSolverType(com.powsybl.openloadflow.ac.solver.gpu.GpuNewtonRaphsonFactory.NAME);
+        }
+        com.powsybl.security.SecurityAnalysisParameters sap = new com.powsybl.security.SecurityAnalysisParameters();
+        sap.setLoadFlowParameters(lfp);
+        return sap;
+    }
 }

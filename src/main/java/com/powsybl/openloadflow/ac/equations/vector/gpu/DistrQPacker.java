@@ -79,8 +79,17 @@ public final class DistrQPacker {
             List<LfBus> controllers = gvc.getMergedControllerElements();
             double[] rawKeys = com.powsybl.openloadflow.network.Control.createReactiveKeys(
                     controllers, com.powsybl.openloadflow.network.LfGenerator.GeneratorControlType.VOLTAGE);
+            // A controller bus a contingency disabled takes no share (GeneratorVoltageControl.updateReactiveKeys sets
+            // its key to 0) and is never the reference controller (updateRemoteVoltageControlEquations discards
+            // disabled controller elements before picking the first enabled one).
+            for (int i = 0; i < controllers.size(); i++) {
+                if (controllers.get(i).isDisabled()) {
+                    rawKeys[i] = 0;
+                }
+            }
             int start = mt.key().size();
-            LfBus freeMember = controllers.stream().filter(gvc::isControllerEnabled).findFirst().orElse(null);
+            LfBus freeMember = controllers.stream().filter(b -> !b.isDisabled() && gvc.isControllerEnabled(b))
+                    .findFirst().orElse(null);
             // the pilot's relocation group: the kernels re-pick the pilot-Q carrier by mode-scan, so
             // the CURRENT carrier's DISTR_Q row is suppressed and its target carries the pilot's Q
             // instead. Read from qrGroupOfPilot, NOT decoded from qRowAlt: table membership and Q
@@ -113,7 +122,7 @@ public final class DistrQPacker {
                         ? columns.dummyQCol()[mParent] : columns.vCol()[m.getNum()]);
                 // a member OWNS a DISTR_Q row when the equation EXISTS and it is not the FREE
                 // member (whose row carries the pilot's relocated Q)
-                mt.hasRow().add((byte) (m != freeMember
+                mt.hasRow().add((byte) (m != freeMember && !m.isDisabled()
                         && es.getEquation(m.getNum(), AcEquationType.DISTR_Q).isPresent() ? 1 : 0));
                 // the member's UNPINNED targetQ (generationTargetQ - loadTargetQ), which is what
                 // AcTargetVector reads for every member the RL loop has not frozen; a frozen
@@ -208,7 +217,7 @@ public final class DistrQPacker {
             // which DISTR_Q rows are live. Else (no table) the extraction-time free member, as before.
             LfBus freeCtl = GpuAcRowIndexing.hasCandidateTable(gvc, es)
                     ? controllers.get(0)
-                    : controllers.stream().filter(b -> gvc.isControllerEnabled(b)).findFirst().orElse(null);
+                    : controllers.stream().filter(b -> !b.isDisabled() && gvc.isControllerEnabled(b)).findFirst().orElse(null);
             if (System.getenv("OLF_GPU_FREECTL_TRACE") != null) {
                 System.err.printf("FREECTL pilot=%s members=%s freeCtl=%s olfHasDistrQ=%s%n",
                         gvc.getControlledBus().getId(),
@@ -222,13 +231,16 @@ public final class DistrQPacker {
                 // EXISTS — a base-PINNED member's row is inactive (mode 4, own Q) but an in-flight
                 // UNPIN re-activates it, and the union pattern must already hold its slots. The row-
                 // mode/fill gates decide per scenario which face the row shows.
-                if (gk == freeCtl || es.getEquation(gk.getNum(), AcEquationType.DISTR_Q).isEmpty()) {
-                    continue;                                // the free controller carries the pilot's Q
-                }
+                if (gk == freeCtl || gk.isDisabled() || es.getEquation(gk.getNum(), AcEquationType.DISTR_Q).isEmpty()) {
+                    continue;                                // the free controller carries the pilot's Q; a disabled
+                }                                            // controller's DISTR_Q is disabled with its bus
                 int dqRow = GpuAcRowIndexing.distrQRow(es, gk, ziParentEdge, dummyQCol);
                 double qpk = gk.getRemoteControlReactivePercent();
                 int kIdx = memberIdxByBusNum.getOrDefault(gk.getNum(), -1);
                 for (LfBus gj : controllers) {
+                    if (gj.isDisabled()) {
+                        continue;                            // its reactive terms are disabled with its branches
+                    }
                     double weight = qpk - (gj == gk ? 1.0 : 0.0);
                     int jIdx = memberIdxByBusNum.getOrDefault(gj.getNum(), -1);
                     if (gj.getControllerShunt().isPresent()) {

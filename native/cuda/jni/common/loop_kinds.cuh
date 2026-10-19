@@ -59,14 +59,11 @@ constexpr int HV_SAT_2_TO_1 = 2;
 constexpr int HV_FROZEN = 3;
 constexpr int MAX_DEVICE_LOOPS = 16;
 
-// Reactive-limit limit types: 0 unpinned, 1 MIN_Q, 2 MAX_Q, 3 MIN_REALISTIC_V, 4 MAX_REALISTIC_V, and
-// 5 = frozen by OLF's GeneratorVoltageControlManager. 6 arrives only as a BASE code
-// (ReactiveLimitsPacker.RL_BASE_RELOCATED, keep the two in step; GpuAcData.rlBaseLimitTypeForDevice merges it
-// over OLF's QLimitType when rlPvPqRowRelocated): "this entry's PV/PQ state is not on its own V row", which the seeding turns into 5 so the pass leaves that row alone. The DISTR_Q key renormalization drops any member
-// whose type is non-zero, which is why the freeze needs one; the reactive-limits pass must then LEAVE
-// type 5 alone, because a bus whose voltage control is off is not one of its controllers at all.
+// Reactive-limit limit types: 0 unpinned, 1 MIN_Q, 2 MAX_Q, 3 MIN_REALISTIC_V, 4 MAX_REALISTIC_V (OLF's QLimitType),
+// and 5 = frozen by OLF's GeneratorVoltageControlManager. The DISTR_Q key renormalization drops any member whose
+// type is non-zero, which is why the freeze needs one; the reactive-limits pass must then LEAVE type 5 alone,
+// because a bus whose voltage control is off is not one of its controllers at all.
 #define RL_LIMIT_FROZEN 5
-#define RL_BASE_RELOCATED 6
 
 
 // on-device reactive-limit decision log (OLF_GPU_SW_LOG): capacity in records, width in doubles

@@ -624,7 +624,7 @@ final class GpuBatchInjectionOutages {
         // measured on the merged-control fixture as 0.36 kV at b1, row 7 ending at 0.05 against OLF's 0.
         if (qTargetRow < 0 && busRows[2][busNum] >= 0 && busRows.length > 3 && busRows[3][busNum] >= 0
                 && busRows[3][busNum] != vRow && allGensLost && rlEntry >= 0
-                && gpuData.switchedPvToPqInBase(rlEntry) && !gpuData.pvPqRowRelocated(rlEntry)) {
+                && gpuData.switchedPvToPqInBase(rlEntry)) {
             qTargetRow = busRows[3][busNum];
         }
         return new GenOutage(pRow, pTarget, vRow, qTarget, toPq, qOverride, dsBus, dsFactorDelta, dsBaseDelta,

@@ -8,6 +8,7 @@
 package com.powsybl.openloadflow.ac.solver.gpu.batch;
 
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
+import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcElementMapper;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfShunt;
 
@@ -28,7 +29,7 @@ final class OutageMaskSeed {
     static void seed(SlotSeeding ctx, int s, int ci, List<LfBranch> branches, List<LfShunt> shunts,
                      List<com.powsybl.openloadflow.network.LfHvdc> hvdcs, List<BatchContingency.SideOpen> sideOpens) {
         final List<BatchContingency> contingencies = ctx.contingencies();
-        final GpuBatchElementMapper elementMapper = ctx.elementMapper();
+        final GpuAcElementMapper elementMapper = ctx.elementMapper();
         final GpuAcData gpuData = ctx.gpuData();
         final java.util.Map<com.powsybl.openloadflow.network.LfHvdc, Integer> hvdcElemIndex = ctx.hvdcElemIndex();
         final RunScratch rs = ctx.rs();

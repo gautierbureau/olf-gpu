@@ -10,6 +10,7 @@ package com.powsybl.openloadflow.ac.solver.gpu.batch;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
+import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcElementMapper;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDsParams;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.network.LfBranch;
@@ -25,7 +26,7 @@ import java.util.Set;
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
 record PlanContext(List<BatchContingency> contingencies, List<GpuBatchContingencyValidator.Qualification> qualifications,
-                   GpuBatchElementMapper elementMapper, GpuAcData gpuData,
+                   GpuAcElementMapper elementMapper, GpuAcData gpuData,
                    EquationSystem<AcVariableType, AcEquationType> es, double dsSum, boolean slackParticipates,
                    GpuDsParams dsParams, Set<LfBranch> distrRhoControllers, Set<LfBranch> relocatedCouplers,
                    boolean reactiveLimits, boolean incrementalTvc) {

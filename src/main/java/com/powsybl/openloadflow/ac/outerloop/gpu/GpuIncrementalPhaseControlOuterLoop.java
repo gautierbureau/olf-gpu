@@ -10,7 +10,7 @@ package com.powsybl.openloadflow.ac.outerloop.gpu;
 import com.powsybl.iidm.network.TwoSides;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
-import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchElementMapper;
+import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcElementMapper;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchSkips;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.Variable;
@@ -43,7 +43,7 @@ public final class GpuIncrementalPhaseControlOuterLoop {
 
     public static List<DeviceFlowControllers.Controller> buildControllers(LfNetwork network,
                                                                           EquationSystem<AcVariableType, AcEquationType> es,
-                                                                          GpuBatchElementMapper elementMapper) {
+                                                                          GpuAcElementMapper elementMapper) {
         List<DeviceFlowControllers.Controller> out = new ArrayList<>();
         Map<Integer, Integer> a1Rows = new LinkedHashMap<>();
         for (Variable<AcVariableType> v : es.getIndex().getSortedVariablesToFind()) {

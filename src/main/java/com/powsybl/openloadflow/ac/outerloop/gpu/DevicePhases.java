@@ -10,7 +10,7 @@ package com.powsybl.openloadflow.ac.outerloop.gpu;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcActivation;
-import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchElementMapper;
+import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcElementMapper;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchSkips;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.StateVector;
@@ -92,7 +92,7 @@ public final class DevicePhases {
                               TargetVector<AcVariableType, AcEquationType> targetVector,
                               GpuAcActivation activation, double[] targets, int[] rlVrow, int[] rlBusNum, int n) {
         GpuBatchSkips.reset();
-        GpuBatchElementMapper mapper = new GpuBatchElementMapper(network);
+        GpuAcElementMapper mapper = new GpuAcElementMapper(network);
         int shuntOffset = mapper.getClosedBranchCount() + mapper.getOpenBranchCount();
         List<GpuTransformerVoltageControlOuterLoop.TransformerController> discreteTvc = request.discreteTvc()
                 ? GpuTransformerVoltageControlOuterLoop.buildTransformerControllers(network, es, targetVector, activation,
@@ -131,7 +131,7 @@ public final class DevicePhases {
     /** One table for the two flow-observed loops, reactive power controllers first: the kernel indexes it. */
     private static List<DeviceFlowControllers.Controller> flowControllers(Request request, LfNetwork network,
                                                                           EquationSystem<AcVariableType, AcEquationType> es,
-                                                                          GpuBatchElementMapper mapper) {
+                                                                          GpuAcElementMapper mapper) {
         List<DeviceFlowControllers.Controller> flow = new ArrayList<>();
         if (request.rpc()) {
             flow.addAll(GpuIncrementalTransformerReactivePowerControlOuterLoop.buildControllers(network, es, mapper,

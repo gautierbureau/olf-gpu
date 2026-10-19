@@ -10,7 +10,7 @@ package com.powsybl.openloadflow.ac.outerloop.gpu;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcActivation;
-import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchElementMapper;
+import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcElementMapper;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchSkips;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.TargetVector;
@@ -71,7 +71,7 @@ public final class GpuShuntVoltageControlOuterLoop {
     public static List<Group> buildGroups(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
                                    TargetVector<AcVariableType, AcEquationType> targetVector,
                                    GpuAcActivation baseActivation, double[] baseTargets,
-                                   GpuBatchElementMapper elementMapper, int shPackOffset) {
+                                   GpuAcElementMapper elementMapper, int shPackOffset) {
         List<Group> out = new ArrayList<>();
         java.util.Map<Integer, Integer> shuntBRows = new java.util.HashMap<>();
         for (Variable<AcVariableType> v : es.getIndex().getSortedVariablesToFind()) {

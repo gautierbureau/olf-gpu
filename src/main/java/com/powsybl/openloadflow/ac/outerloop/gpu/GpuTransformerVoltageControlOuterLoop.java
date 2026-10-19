@@ -10,8 +10,8 @@ package com.powsybl.openloadflow.ac.outerloop.gpu;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcActivation;
+import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcElementMapper;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.BatchContingency;
-import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchElementMapper;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchSkips;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.TargetVector;
@@ -551,7 +551,7 @@ public final class GpuTransformerVoltageControlOuterLoop {
     public static List<TransformerController> buildTransformerControllers(
             LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
             TargetVector<AcVariableType, AcEquationType> targetVector,
-            GpuAcActivation baseActivation, double[] baseTargets, GpuBatchElementMapper elementMapper,
+            GpuAcActivation baseActivation, double[] baseTargets, GpuAcElementMapper elementMapper,
             boolean useInitialTapPosition) {
         List<TransformerController> out = new ArrayList<>();
         java.util.Map<Integer, Integer> busVCols = new java.util.HashMap<>();

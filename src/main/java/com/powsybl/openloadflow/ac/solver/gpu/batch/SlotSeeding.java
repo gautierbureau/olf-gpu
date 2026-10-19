@@ -8,6 +8,7 @@
 package com.powsybl.openloadflow.ac.solver.gpu.batch;
 
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
+import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcElementMapper;
 import com.powsybl.openloadflow.ac.outerloop.gpu.ReactiveCapabilityCurves;
 import com.powsybl.openloadflow.network.LfHvdc;
 
@@ -21,7 +22,7 @@ import java.util.Map;
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
-record SlotSeeding(int chunkSize, boolean pairPhase, int n, GpuAcData gpuData, GpuBatchElementMapper elementMapper,
+record SlotSeeding(int chunkSize, boolean pairPhase, int n, GpuAcData gpuData, GpuAcElementMapper elementMapper,
                    List<BatchContingency> contingencies, GpuBatchQualification.ScenarioPlan plan, double[] baseState,
                    double[] baseTargets, int[] baseRowMode, Map<LfHvdc, Integer> hvdcElemIndex, int[] baseNonTreeZi,
                    int nds, ReactiveCapabilityCurves.Channel rlCurves, Map<Integer, int[]> curveEntriesByPRow, RunScratch rs,

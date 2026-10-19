@@ -16,6 +16,7 @@ import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcDataCache;
+import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcElementMapper;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 import com.powsybl.openloadflow.ac.solver.AbstractNewtonParameters;
 import com.powsybl.openloadflow.ac.solver.NewtonRaphsonParameters;
@@ -23,7 +24,6 @@ import com.powsybl.openloadflow.ac.solver.gpu.batch.BatchConfig;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.BatchContingency;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.BatchScenarioResult;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.BatchSolveRequest;
-import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchElementMapper;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchedSecurityAnalysisSolver;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.LoadLoss;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.ShuntShift;
@@ -201,7 +201,7 @@ final class GpuBatchPrecomputer {
                     }
                 }
             }
-            GpuBatchElementMapper screenMapper = new GpuBatchElementMapper(net);
+            GpuAcElementMapper screenMapper = new GpuAcElementMapper(net);
 
             // Every batched scenario's state is held until the analysis ends (the violation screen decides on all of
             // them at once, the results are injected later in OLF's loop). Past GpuStateStore's threshold they go to

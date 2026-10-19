@@ -10,6 +10,7 @@ package com.powsybl.openloadflow.ac.solver.gpu.batch;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
+import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcElementMapper;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
@@ -38,7 +39,7 @@ final class GpuBatchQualification {
      * batched DISTR_Q fill (it ignores the disabled mask), so masking it would leave the sum stale. Such a shunt
      * outage is routed to the CPU instead.
      */
-    static boolean canBatchShuntOutage(List<LfShunt> shunts, GpuBatchElementMapper elementMapper,
+    static boolean canBatchShuntOutage(List<LfShunt> shunts, GpuAcElementMapper elementMapper,
                                                GpuAcData gpuData) {
         // A shunt that feeds a DISTR_Q sum used to be refused here ("a mask would not update the
         // sum"): fillDistrQBatch and the reactive-limits family evaluation both read the shunt's
@@ -107,7 +108,7 @@ final class GpuBatchQualification {
      */
     static ScenarioPlan planScenarios(List<BatchContingency> contingencies,
             List<GpuBatchContingencyValidator.Qualification> qualifications,
-            GpuBatchElementMapper elementMapper, GpuAcData gpuData,
+            GpuAcElementMapper elementMapper, GpuAcData gpuData,
             EquationSystem<AcVariableType, AcEquationType> es,
             double dsSum, boolean slackParticipates,
             com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDsParams dsParams, Set<LfBranch> distrRhoControllers,

@@ -9,6 +9,7 @@ package com.powsybl.openloadflow.ac.solver.gpu.batch;
 
 import com.powsybl.iidm.network.Network;
 import com.powsybl.iidm.network.test.EurostagTutorialExample1Factory;
+import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcElementMapper;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchContingencyValidator.Disqualification;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchContingencyValidator.Qualification;
 import com.powsybl.openloadflow.network.EurostagFactory;
@@ -48,7 +49,7 @@ class GpuBatchContingencyValidatorTest extends com.powsybl.openloadflow.network.
     @Test
     void parallelLineOutageQualifies() {
         LfNetwork network = eurostag();
-        GpuBatchElementMapper mapper = new GpuBatchElementMapper(network);
+        GpuAcElementMapper mapper = new GpuAcElementMapper(network);
         List<Qualification> q = GpuBatchContingencyValidator.qualify(network,
                 List.of(contingency(network, "NHV1_NHV2_1")), mapper, false, null);
 
@@ -59,7 +60,7 @@ class GpuBatchContingencyValidatorTest extends com.powsybl.openloadflow.network.
     @Test
     void bridgeOutageIsRejected() {
         LfNetwork network = eurostag();
-        GpuBatchElementMapper mapper = new GpuBatchElementMapper(network);
+        GpuAcElementMapper mapper = new GpuAcElementMapper(network);
         // NGEN_NHV1 is the only path to the generator bus NGEN — a bridge. With islanding handling OFF
         // (fixed-iter mode) it is rejected to the CPU path.
         List<Qualification> q = GpuBatchContingencyValidator.qualify(network,
@@ -73,7 +74,7 @@ class GpuBatchContingencyValidatorTest extends com.powsybl.openloadflow.network.
     @Test
     void mixedListPartitionsCorrectly() {
         LfNetwork network = eurostag();
-        GpuBatchElementMapper mapper = new GpuBatchElementMapper(network);
+        GpuAcElementMapper mapper = new GpuAcElementMapper(network);
         List<Qualification> q = GpuBatchContingencyValidator.qualify(network, List.of(
                 contingency(network, "NHV1_NHV2_1"),    // meshed → qualify
                 contingency(network, "NGEN_NHV1"),       // bridge → reject
@@ -138,7 +139,7 @@ class GpuBatchContingencyValidatorTest extends com.powsybl.openloadflow.network.
         LfNetwork network = Networks.load(slackOnAStub(), new FirstSlackBusSelector()).get(0);
         java.util.Set<String> otherSide = java.util.Set.of("m_vl_0", "n_vl_0", "a_vl_0", "c_vl_0");
         assertEquals(otherSide, lostWhenCut(network, "l0"), "before: the main component is the slack's");
-        GpuBatchElementMapper mapper = new GpuBatchElementMapper(network);
+        GpuAcElementMapper mapper = new GpuAcElementMapper(network);
         List<Qualification> q = GpuBatchContingencyValidator.qualify(network, List.of(contingency(network, "l0")), mapper, true,
                 new BatchConfig.SlackRelocation(new FirstSlackBusSelector(), 1));
         assertTrue(q.get(0).qualified(), "the slack is relocated inside the largest component");
@@ -149,7 +150,7 @@ class GpuBatchContingencyValidatorTest extends com.powsybl.openloadflow.network.
     @Test
     void bridgeOutageWithIslandingHandlingQualifies() {
         LfNetwork network = eurostag();
-        GpuBatchElementMapper mapper = new GpuBatchElementMapper(network);
+        GpuAcElementMapper mapper = new GpuAcElementMapper(network);
         // NHV2_NLOAD bridges the load bus NLOAD (a leaf, not the slack). With islanding handling ON
         // (full-loadflow mode) the outage QUALIFIES and carries its islanded bus(es), to be frozen
         // per scenario rather than routed to the CPU.

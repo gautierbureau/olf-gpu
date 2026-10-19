@@ -8,6 +8,7 @@
 package com.powsybl.openloadflow.ac.solver.gpu.batch;
 
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
+import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcElementMapper;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.ZeroImpedanceNative;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DeviceLoopKind;
@@ -149,7 +150,7 @@ final class GpuBatchChunkSolver {
     @SuppressWarnings({"java:S107", "java:S3776"})
     private static void solveQualifiedInChunksAt(int chunkCap, List<Integer> batchedIndices, ChunkInputs in) {
         List<BatchContingency> contingencies = in.contingencies();
-        GpuBatchElementMapper elementMapper = in.base().elementMapper();
+        GpuAcElementMapper elementMapper = in.base().elementMapper();
         GpuAcData gpuData = in.base().gpuData();
         double[] baseState = in.base().baseState();
         double[] baseTargets = in.base().baseTargets();

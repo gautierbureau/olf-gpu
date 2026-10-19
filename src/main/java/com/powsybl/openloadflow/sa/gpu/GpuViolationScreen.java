@@ -9,8 +9,8 @@ package com.powsybl.openloadflow.sa.gpu;
 
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
+import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcElementMapper;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
-import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchElementMapper;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.Variable;
 import com.powsybl.openloadflow.network.LfBranch;
@@ -98,7 +98,7 @@ final class GpuViolationScreen {
      * out of another bus's row, so both sides must come from the base snapshot.
      */
     static GpuViolationScreen build(LfNetwork network, GpuLimitTable table, GpuAcData data,
-                                    GpuBatchElementMapper mapper, EquationSystem<AcVariableType, ?> equationSystem,
+                                    GpuAcElementMapper mapper, EquationSystem<AcVariableType, ?> equationSystem,
                                     Map<Variable<AcVariableType>, Integer> baseVariableRows) {
         LfBranch[] branches = table.branches();
         byte[] family = new byte[branches.length];

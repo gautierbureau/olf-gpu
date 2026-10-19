@@ -5,7 +5,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/.
  * SPDX-License-Identifier: MPL-2.0
  */
-package com.powsybl.openloadflow.ac.solver.gpu.batch;
+package com.powsybl.openloadflow.ac.equations.vector.gpu;
 
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
@@ -22,12 +22,12 @@ import java.util.Objects;
 /**
  * Maps LfBranches and fixed LfShunts to their position in the GPU element packs
  * (closed branches, then open branches, then shunts — the same order
- * {@link com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcDataExtractor} enumerates them).
+ * {@link GpuAcDataExtractor} enumerates them).
  * Used to build per-scenario disabled element masks for batched N-1 security analysis.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
-public class GpuBatchElementMapper {
+public class GpuAcElementMapper {
 
     private final Map<LfBranch, Integer> branchToElementIndex;
     private final Map<LfShunt, Integer> shuntToElementIndex;
@@ -39,13 +39,13 @@ public class GpuBatchElementMapper {
      * Build the mapping from a network by re-enumerating branches in the same order
      * as GpuAcDataExtractor: first all closed branches, then all open branches.
      */
-    public GpuBatchElementMapper(LfNetwork network) {
+    public GpuAcElementMapper(LfNetwork network) {
         this(network, java.util.Set.of());
     }
 
     /** Batch-SA flavor: BASE-OPEN closable branches (see the extractor's matching overload) are
      *  appended AFTER the normal closed branches — identical enumeration on both sides. */
-    public GpuBatchElementMapper(LfNetwork network, java.util.Set<String> baseOpenBranchIds) {
+    public GpuAcElementMapper(LfNetwork network, java.util.Set<String> baseOpenBranchIds) {
         Objects.requireNonNull(network);
         this.branchToElementIndex = new HashMap<>();
         List<LfBranch> closedBranches = new ArrayList<>();

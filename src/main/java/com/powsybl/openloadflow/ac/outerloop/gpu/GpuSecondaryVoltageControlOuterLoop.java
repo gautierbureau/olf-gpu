@@ -11,8 +11,8 @@ import com.powsybl.math.matrix.DenseMatrix;
 import com.powsybl.math.matrix.LUDecomposition;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
+import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcElementMapper;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
-import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchElementMapper;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchSkips;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchStatus;
 import com.powsybl.openloadflow.equations.EquationSystem;
@@ -125,7 +125,7 @@ public final class GpuSecondaryVoltageControlOuterLoop {
     public static Controllers build(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
                              int[] rlVrow, DevicePhases.EsContext esCtx,
                              double minPlausibleTargetV, double maxPlausibleTargetV,
-                             GpuBatchElementMapper elementMapper) {
+                             GpuAcElementMapper elementMapper) {
         Map<Integer, Integer> busVRows = new LinkedHashMap<>();
         Map<Integer, Integer> shuntBRows = new LinkedHashMap<>();
         for (Variable<AcVariableType> v : es.getIndex().getSortedVariablesToFind()) {

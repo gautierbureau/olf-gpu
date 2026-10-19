@@ -8,6 +8,7 @@
 package com.powsybl.openloadflow.ac.solver.gpu.batch;
 
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
+import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcElementMapper;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DevicePhases;
 import com.powsybl.openloadflow.ac.outerloop.gpu.ForceTargetQInReactiveLimits;
 import com.powsybl.openloadflow.ac.outerloop.gpu.GpuHvdcAcEmulationLimitsOuterLoop;
@@ -32,7 +33,7 @@ record ChunkInputs(List<BatchContingency> contingencies, ChunkInputs.BaseCase ba
     /** The base case every scenario starts from: the extraction, its element numbering, the base state, targets
      *  and row modes, the state size, the element count, the variable types (line search mode 2 only, else
      *  null) and each HVDC's element index. */
-    record BaseCase(GpuBatchElementMapper elementMapper, GpuAcData gpuData, double[] baseState, double[] baseTargets,
+    record BaseCase(GpuAcElementMapper elementMapper, GpuAcData gpuData, double[] baseState, double[] baseTargets,
                     int[] baseRowMode, int n, int nElements, int[] varType, Map<LfHvdc, Integer> hvdcElemIndex) {
     }
 

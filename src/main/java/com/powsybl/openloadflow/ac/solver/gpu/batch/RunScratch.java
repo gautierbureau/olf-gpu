@@ -8,6 +8,7 @@
 package com.powsybl.openloadflow.ac.solver.gpu.batch;
 
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
+import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcElementMapper;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -64,7 +65,7 @@ final class RunScratch {
     private final int[] baseRowMode;
     private final int[] baseOpenCbElements;
 
-    RunScratch(int chunkSize, int nElements, GpuAcData gpuData, GpuBatchElementMapper elementMapper, int[] baseRowMode) {
+    RunScratch(int chunkSize, int nElements, GpuAcData gpuData, GpuAcElementMapper elementMapper, int[] baseRowMode) {
         this.disabledMask = new boolean[chunkSize][nElements];
         this.disabledIdx = new int[chunkSize][];
         this.elementsAtVCol = new java.util.HashMap<>();

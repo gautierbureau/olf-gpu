@@ -7,6 +7,7 @@
  */
 package com.powsybl.openloadflow.ac.solver.gpu.batch;
 
+import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcElementMapper;
 import com.powsybl.openloadflow.graph.GraphConnectivity;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
@@ -100,7 +101,7 @@ public final class GpuBatchContingencyValidator {
      */
     public static List<Qualification> qualify(LfNetwork network,
                                               List<BatchContingency> contingencies,
-                                              GpuBatchElementMapper elementMapper,
+                                              GpuAcElementMapper elementMapper,
                                               boolean handleIslanding,
                                               BatchConfig.SlackRelocation relocation) {
         Objects.requireNonNull(network);
@@ -119,7 +120,7 @@ public final class GpuBatchContingencyValidator {
     private static Qualification qualifyOne(LfNetwork network, GraphConnectivity<LfBus, LfBranch> connectivity,
                                            Set<LfBus> slackBuses,
                                            BatchContingency contingency,
-                                           GpuBatchElementMapper elementMapper,
+                                           GpuAcElementMapper elementMapper,
                                            boolean handleIslanding,
                                            BatchConfig.SlackRelocation relocation) {
         List<LfBranch> branches = contingency.outagedBranches();

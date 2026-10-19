@@ -8,6 +8,7 @@
 package com.powsybl.openloadflow.ac.solver.gpu.batch;
 
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
+import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcElementMapper;
 import com.powsybl.openloadflow.network.LfBranch;
 
 import java.util.List;
@@ -33,7 +34,7 @@ final class IslandSeed {
         final double[] baseTargets = ctx.baseTargets();
         final ChunkLists cl = ctx.cl();
         final List<BatchContingency> contingencies = ctx.contingencies();
-        final GpuBatchElementMapper elementMapper = ctx.elementMapper();
+        final GpuAcElementMapper elementMapper = ctx.elementMapper();
         final int[][] frozenRowsByIndex = ctx.plan().frozenRowsByIndex();
         final double[][] frozenTargetsByIndex = ctx.plan().frozenTargetsByIndex();
         final GpuAcData gpuData = ctx.gpuData();

@@ -16,6 +16,7 @@ import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcActivationExtractor
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcDataCache;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcDataExtractor;
+import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcElementMapper;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DevicePhaseOwnership;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DevicePhases;
 import com.powsybl.openloadflow.ac.outerloop.gpu.ForceTargetQInReactiveLimits;
@@ -130,7 +131,7 @@ public final class GpuBatchedSecurityAnalysisSolver {
                 LOGGER.warn("OLF_GPU_SA_EQ_DUMP failed: {}", e.toString());
             }
         }
-        GpuBatchElementMapper elementMapper = new GpuBatchElementMapper(network, baseOpenIds);
+        GpuAcElementMapper elementMapper = new GpuAcElementMapper(network, baseOpenIds);
 
         int n = baseState.length;
         int nElements = gpuData.getTotalElementCount();

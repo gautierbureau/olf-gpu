@@ -9,6 +9,7 @@ package com.powsybl.openloadflow.sa.gpu;
 
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
+import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcElementMapper;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.Variable;
 
@@ -38,7 +39,7 @@ record PrecomputedBatch(Map<String, double[]> states, Map<String, int[]> islande
                         Map<Variable<AcVariableType>, Integer> baseVariableRows,
                         EquationSystem<AcVariableType, AcEquationType> equationSystem,
                         com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData gpuData,
-                        com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchElementMapper elementMapper,
+                        GpuAcElementMapper elementMapper,
                         Map<String, Double> preDistributedActivePower, Map<String, Double> distributedActivePower) {
 
     /** Nothing precomputed — every contingency falls back to the sequential CPU path. */

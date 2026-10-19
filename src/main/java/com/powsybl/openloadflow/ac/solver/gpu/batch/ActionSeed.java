@@ -8,6 +8,7 @@
 package com.powsybl.openloadflow.ac.solver.gpu.batch;
 
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
+import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcElementMapper;
 import com.powsybl.openloadflow.network.LfBranch;
 
 import java.util.List;
@@ -28,7 +29,7 @@ final class ActionSeed {
     static void seed(SlotSeeding ctx, int s, int ci) {
         final int[] baseRowMode = ctx.baseRowMode();
         final List<BatchContingency> contingencies = ctx.contingencies();
-        final GpuBatchElementMapper elementMapper = ctx.elementMapper();
+        final GpuAcElementMapper elementMapper = ctx.elementMapper();
         final GpuAcData gpuData = ctx.gpuData();
         final RunScratch rs = ctx.rs();
         for (LfBranch reclosed : contingencies.get(ci).reclosedBranches()) {

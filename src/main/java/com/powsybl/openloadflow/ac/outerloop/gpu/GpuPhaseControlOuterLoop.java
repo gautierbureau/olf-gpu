@@ -11,7 +11,7 @@ import com.powsybl.iidm.network.TwoSides;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcActivation;
-import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchElementMapper;
+import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcElementMapper;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchOverrides;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchSkips;
 import com.powsybl.openloadflow.equations.EquationSystem;
@@ -67,7 +67,7 @@ public final class GpuPhaseControlOuterLoop {
     public static List<Ctl> buildControllers(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
                                       TargetVector<AcVariableType, AcEquationType> targetVector,
                                       GpuAcActivation baseActivation, double[] baseTargets,
-                                      GpuBatchElementMapper elementMapper) {
+                                      GpuAcElementMapper elementMapper) {
         Map<Integer, Integer> a1Rows = new LinkedHashMap<>();
         for (Variable<AcVariableType> v : es.getIndex().getSortedVariablesToFind()) {
             if (v.getType() == AcVariableType.BRANCH_ALPHA1) {

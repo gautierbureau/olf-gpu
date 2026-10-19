@@ -56,7 +56,7 @@ class GpuSaVoltageMonitoringTest extends AbstractGpuSaTest {
                 .setDistributedSlack(true).setUseReactiveLimits(true);
         // Non-vacuity: both SVCs sit at their maximum in the base (10 MVar each), below their voltage target
         Network base = net.get();
-        assertTrue(com.powsybl.loadflow.LoadFlow.run(base, lfp).isFullyConverged());
+        assertTrue(com.powsybl.loadflow.LoadFlow.find("OpenLoadFlow").run(base, lfp).isFullyConverged());
         assertTrue(base.getBusBreakerView().getBus("B9").getV() < base.getStaticVarCompensator("svc1").getVoltageSetpoint() - 0.1);
         GpuBatchScopeCensus.reset();
         assertGpuMatchesCpu(net.get(), ctgs, 1e-12, lfp, true);

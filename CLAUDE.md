@@ -1,8 +1,8 @@
 # CLAUDE.md — powsybl-open-loadflow-gpu
 
 Context for sessions on this repo: a STANDALONE Maven extension for stock
-powsybl-open-loadflow — the GPU Newton-Raphson (AcSolver SPI `GPU_NEWTON_RAPHSON`),
-the GPU-batched N-1 security analysis (`OpenLoadFlowGpu` provider), and the
+powsybl-open-loadflow — the GPU load flow (`OpenLoadFlowGpu` LoadFlowProvider, over the AcSolver SPI
+`GPU_NEWTON_RAPHSON`), the GPU-batched N-1 security analysis (`OpenLoadFlowGpu` provider), and the
 **java2cuda equation codegen**. Full design: **`codegen/README.md`** +
 **`codegen/java2cuda/README.md`**; deltas vs stock dependencies: **`README.md`**.
 
@@ -103,8 +103,10 @@ own) then `codegen/regenerate.sh` + commit kernels (+ golden if math changed).
   host-built dest arrays (`>=0` J slot, `-2-row` F row, `-1` skip) so kernels never index
   the constexpr tables. Slack/PV `BUS_TARGET_V/PHI` rows are identity entries.
 - **AcSolver SPI**: `GpuNewtonRaphsonFactory` (`@AutoService`, name `GPU_NEWTON_RAPHSON`)
-  → a plain `LoadFlow.run` selects the GPU via
-  `OpenLoadFlowParameters.create(p).setAcSolverType(GpuNewtonRaphsonFactory.NAME)`.
+  → `LoadFlow.find("OpenLoadFlowGpu")` (`GpuLoadFlowProvider`) selects it on a copy of the run's parameters;
+  `OpenLoadFlowParameters.create(p).setAcSolverType(GpuNewtonRaphsonFactory.NAME)` does too under OLF's provider.
+  The GPU solver's own settings are `GpuLoadFlowParameters`, the provider's specific parameters (JSON, name/value,
+  config module `open-loadflow-gpu-default-parameters`).
   `GpuNewtonRaphson` re-extracts per run (outer loops work: distributed slack, PV→PQ)
   and CACHES the native solver context (per-solve device buffers + cuDSS analysis, via
   `createContext(structHandle)`/`solveContext`/`destroyContext`, freed by a `Cleaner`).

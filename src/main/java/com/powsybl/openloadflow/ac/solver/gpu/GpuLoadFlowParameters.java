@@ -9,10 +9,17 @@ package com.powsybl.openloadflow.ac.solver.gpu;
 
 import com.powsybl.commons.config.PlatformConfig;
 import com.powsybl.commons.extensions.AbstractExtension;
+import com.powsybl.commons.parameters.Parameter;
+import com.powsybl.commons.parameters.ParameterScope;
+import com.powsybl.commons.parameters.ParameterType;
 import com.powsybl.loadflow.LoadFlowParameters;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchContextCache;
 
+import java.util.Arrays;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 
 /**
@@ -21,6 +28,9 @@ import java.util.Objects;
  * solver parameters and by the GPU security analysis for its batched solves. They configure cuDSS's linear solve
  * and the iterative refinement on systems with zero-impedance couplers; the defaults are what the device has
  * always used. When a run's parameters carry none, the {@value #MODULE} configuration module provides them.
+ * They are the specific parameters of the {@code OpenLoadFlowGpu} load flow provider, next to OLF's own
+ * {@code OpenLoadFlowParameters}, so a parameters JSON file, a name/value map or the configuration module can
+ * set them like any other provider parameter.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
@@ -45,6 +55,29 @@ public class GpuLoadFlowParameters extends AbstractExtension<LoadFlowParameters>
     public static final int ITERATIVE_REFINEMENT_BASE_STEPS_DEFAULT_VALUE = 1;
     public static final int ITERATIVE_REFINEMENT_MAX_STEPS_DEFAULT_VALUE = 4;
     public static final double ITERATIVE_REFINEMENT_TOLERANCE_DEFAULT_VALUE = 1e-12;
+
+    private static final String SOLVER_CATEGORY_KEY = "Solver";
+
+    public static final List<Parameter> SPECIFIC_PARAMETERS = List.of(
+        new Parameter(REORDERING_ALGORITHM_PARAM_NAME, ParameterType.STRING, "cuDSS fill-reducing ordering",
+            REORDERING_ALGORITHM_DEFAULT_VALUE.name(), names(GpuReorderingAlgorithm.values()), ParameterScope.TECHNICAL, SOLVER_CATEGORY_KEY),
+        new Parameter(MATCHING_ALGORITHM_PARAM_NAME, ParameterType.STRING, "cuDSS matching algorithm (robust single-matrix solve)",
+            MATCHING_ALGORITHM_DEFAULT_VALUE.name(), names(GpuMatchingAlgorithm.values()), ParameterScope.TECHNICAL, SOLVER_CATEGORY_KEY),
+        new Parameter(PIVOT_TYPE_PARAM_NAME, ParameterType.STRING, "cuDSS pivoting (robust single-matrix solve)",
+            PIVOT_TYPE_DEFAULT_VALUE.name(), names(GpuPivotType.values()), ParameterScope.TECHNICAL, SOLVER_CATEGORY_KEY),
+        new Parameter(PIVOT_THRESHOLD_PARAM_NAME, ParameterType.DOUBLE, "cuDSS pivot threshold in [0, 1], NaN for cuDSS's own",
+            PIVOT_THRESHOLD_DEFAULT_VALUE, ParameterScope.TECHNICAL, SOLVER_CATEGORY_KEY),
+        new Parameter(ITERATIVE_REFINEMENT_BASE_STEPS_PARAM_NAME, ParameterType.INTEGER, "Iterative refinement steps of every linear solve",
+            ITERATIVE_REFINEMENT_BASE_STEPS_DEFAULT_VALUE, ParameterScope.TECHNICAL, SOLVER_CATEGORY_KEY),
+        new Parameter(ITERATIVE_REFINEMENT_MAX_STEPS_PARAM_NAME, ParameterType.INTEGER, "Iterative refinement steps at most",
+            ITERATIVE_REFINEMENT_MAX_STEPS_DEFAULT_VALUE, ParameterScope.TECHNICAL, SOLVER_CATEGORY_KEY),
+        new Parameter(ITERATIVE_REFINEMENT_TOLERANCE_PARAM_NAME, ParameterType.DOUBLE, "Iterative refinement relative residual target",
+            ITERATIVE_REFINEMENT_TOLERANCE_DEFAULT_VALUE, ParameterScope.TECHNICAL, SOLVER_CATEGORY_KEY)
+    );
+
+    private static List<Object> names(Enum<?>[] values) {
+        return Arrays.stream(values).map(Enum::name).map(Object.class::cast).toList();
+    }
 
     private GpuReorderingAlgorithm reorderingAlgorithm = REORDERING_ALGORITHM_DEFAULT_VALUE;
     private GpuMatchingAlgorithm matchingAlgorithm = MATCHING_ALGORITHM_DEFAULT_VALUE;
@@ -79,22 +112,77 @@ public class GpuLoadFlowParameters extends AbstractExtension<LoadFlowParameters>
     }
 
     public static GpuLoadFlowParameters load(PlatformConfig platformConfig) {
-        GpuLoadFlowParameters parameters = new GpuLoadFlowParameters();
+        return new GpuLoadFlowParameters().update(platformConfig);
+    }
+
+    public static GpuLoadFlowParameters load(Map<String, String> properties) {
+        return new GpuLoadFlowParameters().update(properties);
+    }
+
+    /** Sets the parameters the {@value #MODULE} configuration module holds; the others are unchanged. */
+    public GpuLoadFlowParameters update(PlatformConfig platformConfig) {
         platformConfig.getOptionalModuleConfig(MODULE).ifPresent(config -> {
             config.getOptionalEnumProperty(REORDERING_ALGORITHM_PARAM_NAME, GpuReorderingAlgorithm.class)
-                    .ifPresent(parameters::setReorderingAlgorithm);
+                    .ifPresent(this::setReorderingAlgorithm);
             config.getOptionalEnumProperty(MATCHING_ALGORITHM_PARAM_NAME, GpuMatchingAlgorithm.class)
-                    .ifPresent(parameters::setMatchingAlgorithm);
-            config.getOptionalEnumProperty(PIVOT_TYPE_PARAM_NAME, GpuPivotType.class).ifPresent(parameters::setPivotType);
-            config.getOptionalDoubleProperty(PIVOT_THRESHOLD_PARAM_NAME).ifPresent(parameters::setPivotThreshold);
+                    .ifPresent(this::setMatchingAlgorithm);
+            config.getOptionalEnumProperty(PIVOT_TYPE_PARAM_NAME, GpuPivotType.class).ifPresent(this::setPivotType);
+            config.getOptionalDoubleProperty(PIVOT_THRESHOLD_PARAM_NAME).ifPresent(this::setPivotThreshold);
             config.getOptionalIntProperty(ITERATIVE_REFINEMENT_BASE_STEPS_PARAM_NAME)
-                    .ifPresent(parameters::setIterativeRefinementBaseSteps);
+                    .ifPresent(this::setIterativeRefinementBaseSteps);
             config.getOptionalIntProperty(ITERATIVE_REFINEMENT_MAX_STEPS_PARAM_NAME)
-                    .ifPresent(parameters::setIterativeRefinementMaxSteps);
+                    .ifPresent(this::setIterativeRefinementMaxSteps);
             config.getOptionalDoubleProperty(ITERATIVE_REFINEMENT_TOLERANCE_PARAM_NAME)
-                    .ifPresent(parameters::setIterativeRefinementTolerance);
+                    .ifPresent(this::setIterativeRefinementTolerance);
         });
-        return parameters;
+        return this;
+    }
+
+    /** Sets the parameters named in {@code properties}; the others are unchanged. */
+    public GpuLoadFlowParameters update(Map<String, String> properties) {
+        Objects.requireNonNull(properties);
+        String value = properties.get(REORDERING_ALGORITHM_PARAM_NAME);
+        if (value != null) {
+            setReorderingAlgorithm(GpuReorderingAlgorithm.valueOf(value));
+        }
+        value = properties.get(MATCHING_ALGORITHM_PARAM_NAME);
+        if (value != null) {
+            setMatchingAlgorithm(GpuMatchingAlgorithm.valueOf(value));
+        }
+        value = properties.get(PIVOT_TYPE_PARAM_NAME);
+        if (value != null) {
+            setPivotType(GpuPivotType.valueOf(value));
+        }
+        value = properties.get(PIVOT_THRESHOLD_PARAM_NAME);
+        if (value != null) {
+            setPivotThreshold(Double.parseDouble(value));
+        }
+        value = properties.get(ITERATIVE_REFINEMENT_BASE_STEPS_PARAM_NAME);
+        if (value != null) {
+            setIterativeRefinementBaseSteps(Integer.parseInt(value));
+        }
+        value = properties.get(ITERATIVE_REFINEMENT_MAX_STEPS_PARAM_NAME);
+        if (value != null) {
+            setIterativeRefinementMaxSteps(Integer.parseInt(value));
+        }
+        value = properties.get(ITERATIVE_REFINEMENT_TOLERANCE_PARAM_NAME);
+        if (value != null) {
+            setIterativeRefinementTolerance(Double.parseDouble(value));
+        }
+        return this;
+    }
+
+    /** Every parameter by name, in {@link #SPECIFIC_PARAMETERS} order. */
+    public Map<String, Object> toMap() {
+        Map<String, Object> map = new LinkedHashMap<>();
+        map.put(REORDERING_ALGORITHM_PARAM_NAME, reorderingAlgorithm);
+        map.put(MATCHING_ALGORITHM_PARAM_NAME, matchingAlgorithm);
+        map.put(PIVOT_TYPE_PARAM_NAME, pivotType);
+        map.put(PIVOT_THRESHOLD_PARAM_NAME, pivotThreshold);
+        map.put(ITERATIVE_REFINEMENT_BASE_STEPS_PARAM_NAME, iterativeRefinementBaseSteps);
+        map.put(ITERATIVE_REFINEMENT_MAX_STEPS_PARAM_NAME, iterativeRefinementMaxSteps);
+        map.put(ITERATIVE_REFINEMENT_TOLERANCE_PARAM_NAME, iterativeRefinementTolerance);
+        return map;
     }
 
     /**

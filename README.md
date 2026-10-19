@@ -2,12 +2,17 @@
 
 GPU extension for [powsybl-open-loadflow](https://github.com/powsybl/powsybl-open-loadflow) (OLF):
 
-- **`GPU_NEWTON_RAPHSON`** — a cuDSS-backed full-Newton-Raphson AC solver, plugged in
-  through OLF's `AcSolver` SPI: put this jar on the classpath and select it with
-  `OpenLoadFlowParameters.setAcSolverType(GpuNewtonRaphsonFactory.NAME)`. One JNI call
+- **`OpenLoadFlowGpu`** (load flow) — a `LoadFlowProvider` extending OLF's: OLF's load flow with the
+  AC Newton-Raphson on the GPU. Select it by provider name; OLF's own parameters apply unchanged, and
+  the GPU solver's parameters (`GpuLoadFlowParameters`: ordering, matching, pivoting, iterative
+  refinement) are its specific parameters, settable in a parameters JSON file, by name/value or in the
+  `open-loadflow-gpu-default-parameters` configuration module.
+- **`GPU_NEWTON_RAPHSON`** — the cuDSS-backed full-Newton-Raphson AC solver behind it, plugged in
+  through OLF's `AcSolver` SPI (`OpenLoadFlowParameters.setAcSolverType(GpuNewtonRaphsonFactory.NAME)`
+  also selects it under OLF's own provider). One JNI call
   runs the whole NR loop on the device (fixed-pattern CSR Jacobian, fused fill kernels,
   cuDSS solves); reruns reuse the cached device context.
-- **`OpenLoadFlowGpu`** — a `SecurityAnalysisProvider` running single-branch N-1
+- **`OpenLoadFlowGpu`** (security analysis) — a `SecurityAnalysisProvider` running single-branch N-1
   contingencies as one GPU batch (`GpuBatchedAcSecurityAnalysis`), degrading to the
   standard AC path when no GPU is present. Best measured: pegase9241, 500 contingencies,
   K=4 — ~4.8 ms/scenario warm on an RTX A1000 (cuDSS 0.8.0, uniform batch).

@@ -291,7 +291,7 @@ class GpuSaHvdcTest extends AbstractGpuSaTest {
                 .setSlackBusesIds(List.of("vl_a"));
         // Non-vacuity: the base saturates both links (rectifier at maxP, off the droop line)
         Network base = saturated.get();
-        assertTrue(com.powsybl.loadflow.LoadFlow.run(base, lfp).isFullyConverged());
+        assertTrue(com.powsybl.loadflow.LoadFlow.find("OpenLoadFlow").run(base, lfp).isFullyConverged());
         for (String link : List.of("a", "b")) {
             assertEquals(45, base.getVscConverterStation("cs1" + link).getTerminal().getP(), 1e-9, "link " + link + " saturated");
         }
@@ -313,7 +313,7 @@ class GpuSaHvdcTest extends AbstractGpuSaTest {
                 .setDistributedSlack(true).setUseReactiveLimits(true).setHvdcAcEmulation(true);
         // Non-vacuity: cs2 sits at its curve maximum at the power it delivers
         Network base = acEmulationCurveLimitedVscNetwork();
-        assertTrue(com.powsybl.loadflow.LoadFlow.run(base, lfp).isFullyConverged());
+        assertTrue(com.powsybl.loadflow.LoadFlow.find("OpenLoadFlow").run(base, lfp).isFullyConverged());
         com.powsybl.iidm.network.Terminal t2 = base.getVscConverterStation("cs2").getTerminal();
         assertEquals(5 + 55 * -t2.getP() / 100, -t2.getQ(), 1e-6);
         GpuBatchScopeCensus.reset();

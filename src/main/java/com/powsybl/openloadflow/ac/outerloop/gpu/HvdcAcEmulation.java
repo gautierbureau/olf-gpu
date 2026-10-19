@@ -229,54 +229,21 @@ public final class HvdcAcEmulation {
         return new double[] {-p1, -p2};
     }
 
-    /** Pre-solve freeze (OLF FreezingHvdcACEmulation.initialize): every live hvdc frozen at its
-     *  scenario's WARM-START flows — hv disabled bits set, converter-bus targets pinned. Returns the
-     *  per-(scenario, hvdc) status matrix seeded FROZEN (or LINEAR where the freeze cannot apply). */
-    static int[][] applyFreeze(int chunkSize, int realCount, int n, List<Ctl> ctls,
-                               double[] baseState, double[] x0PerScenario, boolean[][] disabledMask,
-                               double[] baseTargets, List<Integer> ovIndexList, List<Double> ovValueList) {
-        return applyFreeze(chunkSize, realCount, n, ctls, baseState, x0PerScenario, disabledMask,
-                baseTargets, ovIndexList, ovValueList, null, null);
-    }
-
-    /** As above, additionally recording the converter-row delta each freeze APPLIED (relative to the
-     *  base-status delta), which is what the in-kernel loops need to keep applying transitions
-     *  incrementally instead of rebuilding the override list. */
-    public static int[][] applyFreeze(int chunkSize, int realCount, int n, List<Ctl> ctls,
-                               double[] baseState, double[] x0PerScenario, boolean[][] disabledMask,
-                               double[] baseTargets, List<Integer> ovIndexList, List<Double> ovValueList,
-                               double[] appliedD1, double[] appliedD2) {
-        GpuBatchOverrides overrides = new GpuBatchOverrides();   // the base load flow's plain lists, same order
-        for (int k = 0; k < ovIndexList.size(); k++) {
-            overrides.add(ovIndexList.get(k), ovValueList.get(k));
-        }
-        int[][] status = applyFreeze(chunkSize, realCount, n, ctls, baseState, x0PerScenario, null, null, disabledMask,
-                baseTargets, overrides, appliedD1, appliedD2);
-        ovIndexList.clear();
-        ovValueList.clear();
-        for (int k = 0; k < overrides.size(); k++) {
-            ovIndexList.add(overrides.indexAt(k));
-            ovValueList.add(overrides.valueAt(k));
-        }
-        return status;
-    }
-
     /**
-     * As above, on the batch's own override list (its index is kept, not rebuilt per call). A scenario's warm start is
-     * {@code x0PerScenario}'s slice when given; otherwise the base state with the scenario's seeds written over it
-     * ({@code seedIdx} flat {@code s * n + row}, the start state the device builds from the same seeds) — applied to
-     * one shared copy and put back after, so a chunk never materializes {@code chunkSize * n} doubles for it.
+     * Pre-solve freeze (OLF FreezingHvdcACEmulation.initialize): every live hvdc frozen at its scenario's WARM-START
+     * flows — hv disabled bits set, converter-bus targets pinned, on the batch's own override list. Returns the
+     * per-(scenario, hvdc) status matrix seeded FROZEN (or LINEAR where the freeze cannot apply), and records in
+     * {@code appliedD1}/{@code appliedD2} the converter-row delta each freeze APPLIED (relative to the base-status
+     * delta), which the in-kernel loops need to keep applying transitions incrementally.
+     *
+     * <p>A scenario's warm start is {@code x0PerScenario}'s slice when given; otherwise the base state with the
+     * scenario's seeds written over it ({@code seedIdx} flat {@code s * n + row}, the start state the device builds
+     * from the same seeds) — applied to one shared copy and put back after, so a chunk never materializes
+     * {@code chunkSize * n} doubles for it.
+     *
+     * @param rowModePerScenario the per-scenario row modes (null = base layout everywhere): a converter bus whose
+     *  parent coupler the scenario opens takes its P target on its OWN row (see Ctl.bus1WriteRow).
      */
-    static int[][] applyFreeze(int chunkSize, int realCount, int n, List<Ctl> ctls,
-                               double[] baseState, double[] x0PerScenario, int[] seedIdx, double[] seedVal,
-                               boolean[][] disabledMask, double[] baseTargets, GpuBatchOverrides overrides,
-                               double[] appliedD1, double[] appliedD2) {
-        return applyFreeze(chunkSize, realCount, n, ctls, baseState, x0PerScenario, seedIdx, seedVal, disabledMask,
-                baseTargets, overrides, appliedD1, appliedD2, null);
-    }
-
-    /** @param rowModePerScenario the per-scenario row modes (null = base layout everywhere): a converter bus whose
-     *  parent coupler the scenario opens takes its P target on its OWN row (see Ctl.bus1WriteRow). */
     public static int[][] applyFreeze(int chunkSize, int realCount, int n, List<Ctl> ctls,
                                double[] baseState, double[] x0PerScenario, int[] seedIdx, double[] seedVal,
                                boolean[][] disabledMask, double[] baseTargets, GpuBatchOverrides overrides,

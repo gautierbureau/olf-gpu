@@ -7,6 +7,7 @@
  */
 package com.powsybl.openloadflow.ac.outerloop.gpu;
 
+import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuPiModelColumn;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfNetwork;
 import org.slf4j.Logger;
@@ -76,7 +77,7 @@ public final class DeviceFlowControllers {
             halfDb[c] = ctl.halfDeadband();
             elem[c] = ctl.elemIndex();
             ctlElem[c] = ctl.controlledElemIndex();
-            tapPtr[c] = tapData.size() / 8;
+            tapPtr[c] = tapData.size() / GpuPiModelColumn.COUNT;
             for (double[] row : ctl.tapRows()) {
                 for (double d : row) {
                     tapData.add(d);
@@ -85,7 +86,7 @@ public final class DeviceFlowControllers {
             baseTap[c] = ctl.baseTapIdx();
             maxShift[c] = ctl.maxTapShift() == Integer.MAX_VALUE ? 1 << 20 : ctl.maxTapShift();
         }
-        tapPtr[nc] = tapData.size() / 8;
+        tapPtr[nc] = tapData.size() / GpuPiModelColumn.COUNT;
         boolean owned = PhaseControlNative.setBatchFlowControllers(handle,
                 kind, pinRow, pinCol, side, targetValue, halfDb, elem, ctlElem, tapPtr,
                 tapData.stream().mapToDouble(Double::doubleValue).toArray(), baseTap, maxShift) != 0;

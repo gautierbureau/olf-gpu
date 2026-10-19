@@ -12,6 +12,7 @@ import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcElementMapper;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchSkips;
+import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuPiModelColumn;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.Variable;
 import com.powsybl.openloadflow.network.LfBranch;
@@ -69,7 +70,7 @@ public final class GpuIncrementalTransformerVoltageControlOuterLoop {
     public record Controller(int rhoRow, int vRow, int ctrlBusNum, int branchNum, double targetV, double halfDeadband,
                       double[][] tapRows, int baseTapIdx, int elemIndex) {
         double r1(int tap) {
-            return tapRows[tap][6];
+            return tapRows[tap][GpuPiModelColumn.R1];
         }
     }
 
@@ -132,7 +133,7 @@ public final class GpuIncrementalTransformerVoltageControlOuterLoop {
                 double r1Now = branch.getPiModel().getR1();
                 int baseTap = 0;
                 for (int t = 1; t < tapRows.length; t++) {
-                    if (Math.abs(tapRows[t][6] - r1Now) < Math.abs(tapRows[baseTap][6] - r1Now)) {
+                    if (Math.abs(tapRows[t][GpuPiModelColumn.R1] - r1Now) < Math.abs(tapRows[baseTap][GpuPiModelColumn.R1] - r1Now)) {
                         baseTap = t;
                     }
                 }
@@ -174,13 +175,13 @@ public final class GpuIncrementalTransformerVoltageControlOuterLoop {
             totalTaps += ctl.tapRows().length;
         }
         tapPtr[nc] = totalTaps;
-        // Flat tap data: [totalTaps * 8] doubles, row-major [y, g1, g2, b1, b2, ksi, r1, a1]
-        double[] tapData = new double[totalTaps * 8];
+        // Flat tap data: totalTaps pi model rows (GpuPiModelColumn), row-major
+        double[] tapData = new double[totalTaps * GpuPiModelColumn.COUNT];
         int off = 0;
         for (Controller ctl : ctrls) {
             for (double[] row : ctl.tapRows()) {
-                System.arraycopy(row, 0, tapData, off, 8);
-                off += 8;
+                System.arraycopy(row, 0, tapData, off, GpuPiModelColumn.COUNT);
+                off += GpuPiModelColumn.COUNT;
             }
         }
         // Group structure: controllers sharing a controlled bus (keyed by ctrlBusNum)

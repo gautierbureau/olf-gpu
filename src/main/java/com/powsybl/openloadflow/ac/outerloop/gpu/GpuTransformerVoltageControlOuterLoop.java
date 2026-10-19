@@ -13,6 +13,7 @@ import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcActivation;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcElementMapper;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchSkips;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.BatchContingency;
+import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuPiModelColumn;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.TargetVector;
 import com.powsybl.openloadflow.equations.Variable;
@@ -648,7 +649,7 @@ public final class GpuTransformerVoltageControlOuterLoop {
                 double[][] tapRows = tapModels(branch.getPiModel());
                 int baseTap = 0;
                 for (int t = 1; t < tapRows.length; t++) {   // the CURRENT tap: OLF's rounding starts there
-                    if (Math.abs(tapRows[t][6] - branch.getPiModel().getR1()) < Math.abs(tapRows[baseTap][6] - branch.getPiModel().getR1())) {
+                    if (Math.abs(tapRows[t][GpuPiModelColumn.R1] - branch.getPiModel().getR1()) < Math.abs(tapRows[baseTap][GpuPiModelColumn.R1] - branch.getPiModel().getR1())) {
                         baseTap = t;
                     }
                 }
@@ -719,7 +720,7 @@ public final class GpuTransformerVoltageControlOuterLoop {
                 memRhoRow.add(m.rhoRow());
                 memElem.add(m.elemIndex());
                 memBaseTap.add(m.baseTapIdx());
-                memTapPtr.add(tapData.size() / 8);
+                memTapPtr.add(tapData.size() / GpuPiModelColumn.COUNT);
                 memMin.add(m.minR1());
                 memMax.add(m.maxR1());
                 memInit.add(m.initialR1());
@@ -733,7 +734,7 @@ public final class GpuTransformerVoltageControlOuterLoop {
         }
         grpPtr[nG] = memRhoRow.size();
         deltaPtr[nG] = dRow.size();
-        memTapPtr.add(tapData.size() / 8);
+        memTapPtr.add(tapData.size() / GpuPiModelColumn.COUNT);
         boolean owned = tables && TransformerVoltageControlNative.setBatchDiscreteTvc(handle, mode, entryOn ? 1 : 0,
                 grpPtr, grpVRow, grpTargetV, grpHalfDb, grpUseInit,
                 deltaPtr, dRow.stream().mapToInt(Integer::intValue).toArray(),
@@ -797,7 +798,7 @@ public final class GpuTransformerVoltageControlOuterLoop {
         double[][] models = tapModels(piModel);
         double[] taps = new double[models.length];
         for (int i = 0; i < models.length; i++) {
-            taps[i] = models[i][6];
+            taps[i] = models[i][GpuPiModelColumn.R1];
         }
         return taps;
     }
@@ -815,7 +816,7 @@ public final class GpuTransformerVoltageControlOuterLoop {
             return new double[0][];
         }
         List<PiModel> models = array.getModels();
-        double[][] taps = new double[models.size()][8];
+        double[][] taps = new double[models.size()][GpuPiModelColumn.COUNT];
         for (int i = 0; i < models.size(); i++) {
             PiModel m = models.get(i);
             taps[i] = new double[] {m.getY(), m.getG1(), m.getG2(), m.getB1(), m.getB2(),

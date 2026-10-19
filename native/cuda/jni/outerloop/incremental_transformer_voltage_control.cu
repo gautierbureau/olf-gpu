@@ -14,6 +14,7 @@
 #include "../common/check.cuh"
 #include "../common/launch.cuh"
 #include "../common/codes/gpu_linear_solve_mode.cuh"
+#include "../common/codes/gpu_pi_model_column.cuh"
 #include "../solver/driver_steps.cuh"
 #include "sensitivity.cuh"
 #include "incremental_transformer_voltage_control.cuh"
@@ -67,7 +68,7 @@ __device__ inline int tvcMoveTap(const int* tapPtr, const double* tapData, size_
     int cur = curTap[st];
     int nTaps = tapPtr[c + 1] - tapPtr[c];
     int base = tapPtr[c];
-    double curR1 = tapData[(size_t) (base + cur) * 8 + 6];
+    double curR1 = tapData[(size_t) (base + cur) * GpuPiModelColumn::COUNT + GpuPiModelColumn::R1];
     double targetR1 = curR1 + deltaR1;
     int lo = ratchetAllowed[st] > 0 ? cur : 0;
     int hi = ratchetAllowed[st] < 0 ? cur : nTaps - 1;
@@ -75,7 +76,7 @@ __device__ inline int tvcMoveTap(const int* tapPtr, const double* tapData, size_
     double bestDist = fabs(targetR1 - curR1);
     for (int i = lo; i <= hi; i++) {
         if (abs(i - cur) > maxShift) continue;
-        double dist = fabs(targetR1 - tapData[(size_t) (base + i) * 8 + 6]);
+        double dist = fabs(targetR1 - tapData[(size_t) (base + i) * GpuPiModelColumn::COUNT + GpuPiModelColumn::R1]);
         if (dist < bestDist) { best = i; bestDist = dist; }
     }
     if (best == cur) return 0;
@@ -143,10 +144,10 @@ __global__ void tvcGroupDecisionBatch(int nGroups, int nScenarios, int nTvc,
             if (fabs(remaining) <= hdb) continue;
             double sv = sensi[st];
             if (fabs(sv) < minSensiFilter) continue;
-            double prevR1 = tapData[(size_t) (tapPtr[c] + curTap[st]) * 8 + 6];
+            double prevR1 = tapData[(size_t) (tapPtr[c] + curTap[st]) * GpuPiModelColumn::COUNT + GpuPiModelColumn::R1];
             if (tvcMoveTap(tapPtr, tapData, st, c, remaining / sv, 1,
                            curTap, ratchetDir, ratchetCount, ratchetAllowed) != 0) {
-                remaining -= (tapData[(size_t) (tapPtr[c] + curTap[st]) * 8 + 6] - prevR1) * sv;
+                remaining -= (tapData[(size_t) (tapPtr[c] + curTap[st]) * GpuPiModelColumn::COUNT + GpuPiModelColumn::R1] - prevR1) * sv;
                 changed = true;
                 any = true;
             }
@@ -175,7 +176,7 @@ __global__ void tvcApplyRhoBatch(int nTvc, int nScenarios, int n,
     int s = tid / nTvc;
     int t = curTap[tid];
     if (t == prevTap[tid]) return;
-    double r1 = tapData[(size_t) (tapPtr[c] + t) * 8 + 6];
+    double r1 = tapData[(size_t) (tapPtr[c] + t) * GpuPiModelColumn::COUNT + GpuPiModelColumn::R1];
     target[(size_t) s * n + tvcRhoRow[c]] = r1;
     x[(size_t) s * n + tvcRhoRow[c]] = r1;
     prevTap[tid] = t;
@@ -201,8 +202,8 @@ void tvcRebuildOverrides(BatchSolverContext* ctx) {
                 if (t == ctx->hTvcBaseTap[c]) continue;
                 slot.push_back(s);
                 slot.push_back(ctx->hTvcElemIndex[c]);
-                const double* row = &ctx->hTvcTapData[static_cast<size_t>(ctx->hTvcTapPtr[c] + t) * 8];
-                val.insert(val.end(), row, row + 8);
+                const double* row = &ctx->hTvcTapData[static_cast<size_t>(ctx->hTvcTapPtr[c] + t) * GpuPiModelColumn::COUNT];
+                val.insert(val.end(), row, row + GpuPiModelColumn::COUNT);
             }
         }
     }
@@ -215,8 +216,8 @@ void tvcRebuildOverrides(BatchSolverContext* ctx) {
                 if (t == ctx->hCphBaseTap[c]) continue;
                 slot.push_back(s);
                 slot.push_back(ctx->hCphElem[c]);
-                const double* row = &ctx->hCphTapData[static_cast<size_t>(ctx->hCphTapPtr[c] + t) * 8];
-                val.insert(val.end(), row, row + 8);
+                const double* row = &ctx->hCphTapData[static_cast<size_t>(ctx->hCphTapPtr[c] + t) * GpuPiModelColumn::COUNT];
+                val.insert(val.end(), row, row + GpuPiModelColumn::COUNT);
             }
         }
     }
@@ -229,8 +230,8 @@ void tvcRebuildOverrides(BatchSolverContext* ctx) {
                 if (t == ctx->hFlcBaseTap[c]) continue;
                 slot.push_back(s);
                 slot.push_back(ctx->hFlcElem[c]);
-                const double* row = &ctx->hFlcTapData[static_cast<size_t>(ctx->hFlcTapPtr[c] + t) * 8];
-                val.insert(val.end(), row, row + 8);
+                const double* row = &ctx->hFlcTapData[static_cast<size_t>(ctx->hFlcTapPtr[c] + t) * GpuPiModelColumn::COUNT];
+                val.insert(val.end(), row, row + GpuPiModelColumn::COUNT);
             }
         }
     }
@@ -244,8 +245,8 @@ void tvcRebuildOverrides(BatchSolverContext* ctx) {
                 if (st[sm] != 2 || cur[sm] == ctx->hTvdMemBaseTap[m]) continue;
                 slot.push_back(s);
                 slot.push_back(ctx->hTvdMemElem[m]);
-                const double* row = &ctx->hTvdTapData[static_cast<size_t>(ctx->hTvdMemTapPtr[m] + cur[sm]) * 8];
-                val.insert(val.end(), row, row + 8);
+                const double* row = &ctx->hTvdTapData[static_cast<size_t>(ctx->hTvdMemTapPtr[m] + cur[sm]) * GpuPiModelColumn::COUNT];
+                val.insert(val.end(), row, row + GpuPiModelColumn::COUNT);
             }
         }
     }

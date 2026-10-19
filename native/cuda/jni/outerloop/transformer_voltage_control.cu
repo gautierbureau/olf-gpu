@@ -14,6 +14,7 @@
 #include "../common/check.cuh"
 #include "../common/launch.cuh"
 #include "../common/codes/gpu_q_limit_type.cuh"
+#include "../common/codes/gpu_pi_model_column.cuh"
 #include "../solver/driver_steps.cuh"
 #include "incremental_transformer_voltage_control.cuh"
 #include "transformer_voltage_control.cuh"
@@ -73,10 +74,10 @@ __device__ inline double tvdRoundToTap(const TvdTables& T, int m, double r1, int
     int nTaps = T.memTapPtr[m + 1] - base;
     int best = T.memBaseTap[m];
     for (int t = 0; t < nTaps; t++) {
-        if (fabs(T.tapData[(size_t) (base + t) * 8 + 6] - r1) < fabs(T.tapData[(size_t) (base + best) * 8 + 6] - r1)) best = t;
+        if (fabs(T.tapData[(size_t) (base + t) * GpuPiModelColumn::COUNT + GpuPiModelColumn::R1] - r1) < fabs(T.tapData[(size_t) (base + best) * GpuPiModelColumn::COUNT + GpuPiModelColumn::R1] - r1)) best = t;
     }
     *tapOut = best;
-    return T.tapData[(size_t) (base + best) * 8 + 6];
+    return T.tapData[(size_t) (base + best) * GpuPiModelColumn::COUNT + GpuPiModelColumn::R1];
 }
 
 // Lay out one group's rows for one scenario from its members' states: ON (any alive continuous member)
@@ -133,7 +134,7 @@ __device__ inline void tvdLayoutGroup(const TvdTables& T, int s, int n, int nEle
             carrier = true;
         } else if (st == 2) {                                // FIXED: identity pin at the rounded tap's r1
             int tap = T.memTap[(size_t) s * T.nM + m];
-            double r1 = T.tapData[(size_t) (T.memTapPtr[m] + tap) * 8 + 6];
+            double r1 = T.tapData[(size_t) (T.memTapPtr[m] + tap) * GpuPiModelColumn::COUNT + GpuPiModelColumn::R1];
             mode[mr] = 0;
             target[mr] = r1;
             x[mr] = r1;

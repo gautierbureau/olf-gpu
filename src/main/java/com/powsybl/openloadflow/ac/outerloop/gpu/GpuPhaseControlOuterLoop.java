@@ -15,6 +15,7 @@ import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcElementMapper;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchOverrides;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchSkips;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuPhaseControlMode;
+import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuPiModelColumn;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.EquationTerm;
 import com.powsybl.openloadflow.equations.TargetVector;
@@ -100,7 +101,7 @@ public final class GpuPhaseControlOuterLoop {
             double a1Now = branch.getPiModel().getA1();
             int baseTap = 0;
             for (int t = 1; t < tapRows.length; t++) {
-                if (Math.abs(tapRows[t][7] - a1Now) < Math.abs(tapRows[baseTap][7] - a1Now)) {
+                if (Math.abs(tapRows[t][GpuPiModelColumn.A1] - a1Now) < Math.abs(tapRows[baseTap][GpuPiModelColumn.A1] - a1Now)) {
                     baseTap = t;
                 }
             }
@@ -181,7 +182,7 @@ public final class GpuPhaseControlOuterLoop {
             side[c] = ctl.controlledSide();
             limit[c] = ctl.iLimit();
             elem[c] = ctl.elemIndex();
-            tapPtr[c] = tapData.size() / 8;
+            tapPtr[c] = tapData.size() / GpuPiModelColumn.COUNT;
             for (double[] row : ctl.tapRows()) {
                 for (double d : row) {
                     tapData.add(d);
@@ -189,7 +190,7 @@ public final class GpuPhaseControlOuterLoop {
             }
             baseTap[c] = ctl.baseTapIdx();
         }
-        tapPtr[nc] = tapData.size() / 8;
+        tapPtr[nc] = tapData.size() / GpuPiModelColumn.COUNT;
         boolean owned = PhaseControlNative.setBatchContinuousPhase(handle,
                 kind, a1Row, side, limit, elem, tapPtr, tapData.stream().mapToDouble(Double::doubleValue).toArray(), baseTap) != 0;
         LOGGER.info("Uploaded {} continuous phase controllers to device: {}", nc, owned ? "in-kernel loop" : "host orchestrator");

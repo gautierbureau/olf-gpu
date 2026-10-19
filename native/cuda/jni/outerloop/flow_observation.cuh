@@ -11,6 +11,7 @@
 #include "closed_branch.cuh"
 #include "closed_branch_scatter.h"
 #include "../common/codes/gpu_controlled_flow.cuh"
+#include "../common/codes/gpu_pi_model_column.cuh"
 
 namespace olfgpu {
 
@@ -22,9 +23,10 @@ using namespace powsybl::openloadflow;
 // dr1-less sensitivity). g[0..5] = d/d(v1, v2, ph1, ph2, a1, r1).
 __device__ inline double flcFlowAndGrad(int side, int kind, const double* p, const double* xs, const int* q, double* g) {
     double v1 = xs[q[5]], v2 = xs[q[7]], ph1 = xs[q[4]], ph2 = xs[q[6]];
-    double r1 = q[9] >= 0 ? xs[q[9]] : p[6];
-    double a1 = q[8] >= 0 ? xs[q[8]] : p[7];
-    double y = p[0], g1 = p[1], g2 = p[2], b1 = p[3], b2 = p[4], ksi = p[5];
+    double r1 = q[9] >= 0 ? xs[q[9]] : p[GpuPiModelColumn::R1];
+    double a1 = q[8] >= 0 ? xs[q[8]] : p[GpuPiModelColumn::A1];
+    double y = p[GpuPiModelColumn::Y], g1 = p[GpuPiModelColumn::G1], g2 = p[GpuPiModelColumn::G2], b1 = p[GpuPiModelColumn::B1], b2 = p[GpuPiModelColumn::B2];
+    double ksi = p[GpuPiModelColumn::KSI];
     if (kind != GpuControlledFlow::CURRENT) {  // P or Q: the assembled outputs
         double o[CB_NOUT];
         evalClosedBranch(y, g1, g2, b1, b2, v1, r1, v2, ksi, a1, ph1, ph2, 0,

@@ -13,6 +13,7 @@
 #include "../common/launch.cuh"
 #include "../common/codes/gpu_controlled_flow.cuh"
 #include "../common/codes/gpu_phase_control_mode.cuh"
+#include "../common/codes/gpu_pi_model_column.cuh"
 #include "../equations/scenario_overrides.cuh"
 #include "flow_observation.cuh"
 #include "phase_control.cuh"
@@ -44,11 +45,11 @@ __global__ void cphCheckBatch(int nCph, int nScenarios, int n, int nElements, in
             double a1 = x[ar];
             int best = tap[tid];
             for (int t = 0; t < nTaps; t++) {
-                if (fabs(tapData[(size_t) (base + t) * 8 + 7] - a1) < fabs(tapData[(size_t) (base + best) * 8 + 7] - a1)) best = t;
+                if (fabs(tapData[(size_t) (base + t) * GpuPiModelColumn::COUNT + GpuPiModelColumn::A1] - a1) < fabs(tapData[(size_t) (base + best) * GpuPiModelColumn::COUNT + GpuPiModelColumn::A1] - a1)) best = t;
             }
             tap[tid] = best;
             mode[ar] = 0;
-            target[ar] = tapData[(size_t) (base + best) * 8 + 7];
+            target[ar] = tapData[(size_t) (base + best) * GpuPiModelColumn::COUNT + GpuPiModelColumn::A1];
             x[ar] = target[ar];
         }
         switched[s] = 1;                                     // OLF: UNSTABLE whenever a controller exists
@@ -56,7 +57,7 @@ __global__ void cphCheckBatch(int nCph, int nScenarios, int n, int nElements, in
     }
     if (kind[c] != GpuPhaseControlMode::LIMITER) return;
     int e = elem[c] - cbOffset;                              // LIMITER is local: the controlled branch is itself
-    const double* p = cbIn + e * 8;
+    const double* p = cbIn + e * GpuPiModelColumn::COUNT;
     double pOv[8];
     if (findTapOverride(nR1Ov, r1OvSlotElem, r1OvVal, s, e, pOv)) p = pOv;
     double g[18];
@@ -65,13 +66,13 @@ __global__ void cphCheckBatch(int nCph, int nScenarios, int n, int nElements, in
     double dida1 = g[0] == 1e300 ? 0.0 : g[4];
     int dir = dida1 > 0 ? -1 : 1;                            // reduce I: move a1 against the slope
     int cur = tap[tid];
-    double a1 = tapData[(size_t) (base + cur) * 8 + 7];
+    double a1 = tapData[(size_t) (base + cur) * GpuPiModelColumn::COUNT + GpuPiModelColumn::A1];
     int next = cur;
-    if (cur + 1 < nTaps && ((dir > 0) == (tapData[(size_t) (base + cur + 1) * 8 + 7] > a1))) next = cur + 1;
-    else if (cur - 1 >= 0 && ((dir > 0) == (tapData[(size_t) (base + cur - 1) * 8 + 7] > a1))) next = cur - 1;
+    if (cur + 1 < nTaps && ((dir > 0) == (tapData[(size_t) (base + cur + 1) * GpuPiModelColumn::COUNT + GpuPiModelColumn::A1] > a1))) next = cur + 1;
+    else if (cur - 1 >= 0 && ((dir > 0) == (tapData[(size_t) (base + cur - 1) * GpuPiModelColumn::COUNT + GpuPiModelColumn::A1] > a1))) next = cur - 1;
     if (next == cur) return;
     tap[tid] = next;
-    target[ar] = tapData[(size_t) (base + next) * 8 + 7];
+    target[ar] = tapData[(size_t) (base + next) * GpuPiModelColumn::COUNT + GpuPiModelColumn::A1];
     x[ar] = target[ar];
     switched[s] = 1;
 }

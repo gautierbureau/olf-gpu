@@ -15,6 +15,7 @@
 #include "../common/launch.cuh"
 #include "../common/codes/gpu_linear_solve_mode.cuh"
 #include "../common/codes/gpu_controlled_flow.cuh"
+#include "../common/codes/gpu_pi_model_column.cuh"
 #include "../solver/driver_steps.cuh"
 #include "incremental_transformer_voltage_control.cuh"
 #include "../equations/scenario_overrides.cuh"
@@ -39,7 +40,7 @@ __global__ void flcCheckBatch(int nFlc, int nScenarios, int n, int nElements, in
     if (!rlActive[s] || !(kindMask & controlledFlowMaskBit(kind[c]))) return;
     int e = ctlPack[c];
     if (disabled[(size_t) s * nElements + elem[c]] || disabled[(size_t) s * nElements + cbOffset + e]) return;
-    const double* p = cbIn + e * 8;
+    const double* p = cbIn + e * GpuPiModelColumn::COUNT;
     double pOv[8];
     if (findTapOverride(nR1Ov, r1OvSlotElem, r1OvVal, s, e, pOv)) p = pOv;
     double g[18];
@@ -58,7 +59,7 @@ __global__ void flcGatherSensiBatch(int nScenarios, int n, int c, int nFlc, int 
     int s = blockIdx.x * blockDim.x + threadIdx.x;
     if (s >= nScenarios) return;
     int e = ctlPack[c];
-    const double* p = cbIn + e * 8;
+    const double* p = cbIn + e * GpuPiModelColumn::COUNT;
     double pOv[8];
     if (findTapOverride(nR1Ov, r1OvSlotElem, r1OvVal, s, e, pOv)) p = pOv;
     const int* q = cbIx + e * 12;
@@ -105,11 +106,11 @@ __global__ void flcDecisionBatch(int nFlc, int nScenarios, int kindMask,
     int hi = ratAllowed[tid] < 0 ? cur : nTaps - 1;
     int best = cur;
     if (kind[c] != GpuControlledFlow::CURRENT) {  // ClosestTapPositionFinder
-        double newV = tapData[(size_t) (base + cur) * 8 + col] + delta;
+        double newV = tapData[(size_t) (base + cur) * GpuPiModelColumn::COUNT + col] + delta;
         double bestDist = fabs(delta);
         for (int i = lo; i <= hi; i++) {
             if (abs(i - cur) > maxShift[c]) continue;
-            double dist = fabs(newV - tapData[(size_t) (base + i) * 8 + col]);
+            double dist = fabs(newV - tapData[(size_t) (base + i) * GpuPiModelColumn::COUNT + col]);
             if (dist < bestDist) { best = i; bestDist = dist; }
         }
     } else {                                                 // FirstTapPositionAboveFinder
@@ -118,9 +119,9 @@ __global__ void flcDecisionBatch(int nFlc, int nScenarios, int kindMask,
         while (true) {
             int next = -1;                                   // OLF nextTapPositionIndex
             if (remaining != 0.0) {
-                double vc = tapData[(size_t) (base + best) * 8 + col];
+                double vc = tapData[(size_t) (base + best) * GpuPiModelColumn::COUNT + col];
                 auto descending = [&](int n1, int n2) {
-                    double a = tapData[(size_t) (base + n1) * 8 + col], b = tapData[(size_t) (base + n2) * 8 + col];
+                    double a = tapData[(size_t) (base + n1) * GpuPiModelColumn::COUNT + col], b = tapData[(size_t) (base + n2) * GpuPiModelColumn::COUNT + col];
                     return remaining > 0 ? a < b : a > b;
                 };
                 (void) vc;
@@ -129,8 +130,8 @@ __global__ void flcDecisionBatch(int nFlc, int nScenarios, int kindMask,
                 else if (best < last && descending(best, best + 1)) next = best + 1;
             }
             if (next < 0 || next < lo || next > hi) break;
-            double value = tapData[(size_t) (base + best) * 8 + col];
-            double nextValue = tapData[(size_t) (base + next) * 8 + col];
+            double value = tapData[(size_t) (base + best) * GpuPiModelColumn::COUNT + col];
+            double nextValue = tapData[(size_t) (base + next) * GpuPiModelColumn::COUNT + col];
             best = next;
             if ((remaining < 0 && value + remaining > nextValue) || (remaining > 0 && value + remaining < nextValue)) break;
             remaining -= nextValue - value;
@@ -158,7 +159,7 @@ __global__ void flcApplyBatch(int nFlc, int nScenarios, int n, const int* pinRow
     int s = tid / nFlc;
     int t = curTap[tid];
     if (t == prevTap[tid]) return;
-    double v = tapData[(size_t) (tapPtr[c] + t) * 8 + pinCol[c]];
+    double v = tapData[(size_t) (tapPtr[c] + t) * GpuPiModelColumn::COUNT + pinCol[c]];
     target[(size_t) s * n + pinRow[c]] = v;
     x[(size_t) s * n + pinRow[c]] = v;
     prevTap[tid] = t;

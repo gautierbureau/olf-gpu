@@ -13,6 +13,7 @@ import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcElementMapper;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchSkips;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuControlledFlow;
+import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuPiModelColumn;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.Variable;
 import com.powsybl.openloadflow.network.LfBranch;
@@ -77,8 +78,8 @@ public final class GpuIncrementalPhaseControlOuterLoop {
                 continue;
             }
             double halfDb = Math.max(pc.getTargetDeadband(), MIN_TARGET_DEADBAND_P) / 2;
-            out.add(new DeviceFlowControllers.Controller(kind, pinRow, 7, pc.getTargetValue(), halfDb,
-                    tapRows, DeviceFlowControllers.closestTap(tapRows, 7, controller.getPiModel().getA1()),
+            out.add(new DeviceFlowControllers.Controller(kind, pinRow, GpuPiModelColumn.A1, pc.getTargetValue(), halfDb,
+                    tapRows, DeviceFlowControllers.closestTap(tapRows, GpuPiModelColumn.A1, controller.getPiModel().getA1()),
                     elemIndex, ctlElemIndex, Integer.MAX_VALUE, pc.getControlledSide() == TwoSides.ONE ? 1 : 2, controller.getNum()));
         }
         return out;

@@ -14,6 +14,7 @@
 #include "../common/check.cuh"
 #include "../common/launch.cuh"
 #include "../common/codes/gpu_q_limit_type.cuh"
+#include "../common/codes/gpu_reactive_term_kind.cuh"
 #include "closed_branch.cuh"
 #include "closed_branch_scatter.h"
 #include "open_branch.cuh"
@@ -318,13 +319,13 @@ __global__ void fillRemoteMemberQBatch(int nrmq, int nScenarios, int n, int nEle
     if (!rlActive[s]) return;
     int e = rmqElem[c];
     int kind = rmqKind[c];
-    if (kind == 0 && disabled[s * nElements + cbOffset + e]) {
+    if (kind == GpuReactiveTermKind::CLOSED_BRANCH_REACTIVE_FLOW && disabled[s * nElements + cbOffset + e]) {
         if (rmqRow[c] == traceRow) {
             printf("RMQ s=%d c=%d kind=0(closed) elem=%d SKIPPED disabled\n", s, c, e);
         }
         return;
     }
-    if (kind == 2 && disabled[s * nElements + obOffset + e]) {
+    if (kind == GpuReactiveTermKind::OPEN_BRANCH_REACTIVE_FLOW && disabled[s * nElements + obOffset + e]) {
         if (rmqRow[c] == traceRow) {
             printf("RMQ s=%d c=%d kind=2(halfOpen) elem=%d SKIPPED disabled\n", s, c, e);
         }
@@ -333,7 +334,7 @@ __global__ void fillRemoteMemberQBatch(int nrmq, int nScenarios, int n, int nEle
     double w = rmqWeight[c];
     const double* xs = x + (size_t) s * n;
     double* q = qBuf + (size_t) s * n + rmqRow[c];
-    if (kind == 1) {                                         // fixed shunt q at the member bus
+    if (kind == GpuReactiveTermKind::SHUNT_COMPENSATOR_REACTIVE_FLOW) {  // fixed shunt q at the member bus
         const double* sp = shIn + e * 2;
         double g = sp[0];
         double b = sp[1];
@@ -347,7 +348,7 @@ __global__ void fillRemoteMemberQBatch(int nrmq, int nScenarios, int n, int nEle
         atomicAdd(q, w * so[2]);
         return;
     }
-    if (kind == 3) {                                         // zero-impedance DUMMY_Q linear term
+    if (kind == GpuReactiveTermKind::DUMMY_Q) {  // zero-impedance DUMMY_Q linear term
         if (rmqRow[c] == traceRow) {
             printf("RMQ s=%d c=%d kind=3(ziDummyQ) dqCol=%d w=%.6f dummyQ=%.9f contrib=%.9f\n",
                    s, c, e, w, xs[e], w * xs[e]);
@@ -355,7 +356,7 @@ __global__ void fillRemoteMemberQBatch(int nrmq, int nScenarios, int n, int nEle
         atomicAdd(q, w * xs[e]);
         return;
     }
-    if (kind == 2) {                                         // half-open branch, connected side
+    if (kind == GpuReactiveTermKind::OPEN_BRANCH_REACTIVE_FLOW) {  // half-open branch, connected side
         const double* op = obIn + e * 7;
         const int* oq = obIx + e * 6;
         int vcol = rmqSide[c] == 0 ? oq[4] : oq[5];

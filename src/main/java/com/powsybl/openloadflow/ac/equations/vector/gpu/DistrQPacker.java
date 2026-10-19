@@ -10,6 +10,7 @@ package com.powsybl.openloadflow.ac.equations.vector.gpu;
 import com.powsybl.commons.PowsyblException;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
+import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuReactiveTermKind;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.network.GeneratorVoltageControl;
 import com.powsybl.openloadflow.network.LfBranch;
@@ -146,8 +147,7 @@ public final class DistrQPacker {
         List<Double> dqW = new ArrayList<>();    // weight per contribution
         buildDistrQContributions(network, es, columns.vCol(), family.cbElemOf(), family.shElemOf(),
                 family.obElemOf(), columns.dummyQCol(), columns.ziParentEdge(), dq, dqW, mt.memberIdxByBusNum());
-        // dqKind: 0 = closed-branch q1/q2, 1 = shunt q, 2 = open-branch q,
-        // 3 = zero-impedance DUMMY_Q (linear, elem holds the var column)
+        // dqKind: a GpuReactiveTermKind (for DUMMY_Q, elem holds the var column)
         int[] dqKind = new int[dq.size()];
         int[] dqKMember = new int[dq.size()];
         int[] dqJMember = new int[dq.size()];
@@ -248,7 +248,7 @@ public final class DistrQPacker {
                                 + " has a voltage-controlling shunt (SHUNT_B) reactive contribution (not supported)");
                     }
                     if (gj.getShunt().isPresent()) {         // a fixed shunt's reactive joins the q sum
-                        out.add(new int[] {shElemOf[gj.getNum()], 0, dqRow, 1, kIdx, jIdx});
+                        out.add(new int[] {shElemOf[gj.getNum()], 0, dqRow, GpuReactiveTermKind.SHUNT_COMPENSATOR_REACTIVE_FLOW, kIdx, jIdx});
                         weights.add(weight);
                     }
                     for (LfBranch brj : gj.getBranches()) {
@@ -258,14 +258,14 @@ public final class DistrQPacker {
                         int side = brj.getBus1() == gj ? 0 : 1;
                         int e = cbElemOf[brj.getNum()];
                         if (e >= 0) {                        // closed branch: weighted q1/q2 (kind 0)
-                            out.add(new int[] {e, side, dqRow, 0, kIdx, jIdx});
+                            out.add(new int[] {e, side, dqRow, GpuReactiveTermKind.CLOSED_BRANCH_REACTIVE_FLOW, kIdx, jIdx});
                             weights.add(weight);
                             continue;
                         }
                         int oe = obElemOf[brj.getNum()];
                         if (oe >= 0) {                       // half-open branch incident on the controller:
                             // its connected-side reactive flow (shunt + series) joins the q sum (kind 2)
-                            out.add(new int[] {oe, side, dqRow, 2, kIdx, jIdx});
+                            out.add(new int[] {oe, side, dqRow, GpuReactiveTermKind.OPEN_BRANCH_REACTIVE_FLOW, kIdx, jIdx});
                             weights.add(weight);
                             continue;
                         }
@@ -295,7 +295,7 @@ public final class DistrQPacker {
                                         + " signed=%.9f%n", gk.getId(), qpk, gj.getId(), side, dqRow,
                                         weight, weight * (side == 0 ? 1.0 : -1.0));
                             }
-                            out.add(new int[] {dqCol, side, dqRow, 3, kIdx, jIdx});  // elem = the DUMMY_Q var column
+                            out.add(new int[] {dqCol, side, dqRow, GpuReactiveTermKind.DUMMY_Q, kIdx, jIdx});  // elem = the DUMMY_Q var column
                             weights.add(weight * (side == 0 ? 1.0 : -1.0));
                             continue;
                         }

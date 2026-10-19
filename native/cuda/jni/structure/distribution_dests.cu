@@ -25,6 +25,7 @@
 
 #include "../common/check.cuh"
 #include "../common/stats.cuh"
+#include "../common/codes/gpu_reactive_term_kind.cuh"
 #include "../solver/linear_solver_settings.cuh"
 #include "structure_build.cuh"
 
@@ -57,7 +58,7 @@ void buildDistrQDest(SharedStructure* st, const CsrPattern& pos, const std::vect
             if (ownRow >= 0) {
                 dqSel[c] = mappedRow;
             }
-            if (dqKind[c] == 3 && dqElem[c] >= 0) {
+            if (dqKind[c] == GpuReactiveTermKind::DUMMY_Q && dqElem[c] >= 0) {
                 dqZiRow[c] = rowMap[dqElem[c]];
             }
             for (int pass = 0; pass < 2; pass++) {           // pass 0 = the real row, pass 1 = the stock row
@@ -67,12 +68,12 @@ void buildDistrQDest(SharedStructure* st, const CsrPattern& pos, const std::vect
                     continue;
                 }
                 d[0] = -2 - row;                             // q value -> F row
-                if (dqKind[c] == 1) {                        // shunt: dq/dv on the bus V column
+                if (dqKind[c] == GpuReactiveTermKind::SHUNT_COMPENSATOR_REACTIVE_FLOW) {  // shunt: dq/dv on the bus V column
                     d[1] = pos.at(row, shIdx[static_cast<size_t>(dqElem[c]) * 5 + 2]);
-                } else if (dqKind[c] == 2) {                 // half-open: dq/dv on the connected-side V col
+                } else if (dqKind[c] == GpuReactiveTermKind::OPEN_BRANCH_REACTIVE_FLOW) {  // half-open: dq/dv on the connected-side V col
                     const int* oq = obIdx + static_cast<size_t>(dqElem[c]) * 6;
                     d[1] = pos.at(row, dqSide[c] == 0 ? oq[4] : oq[5]);
-                } else if (dqKind[c] == 3) {                 // zero-impedance: J slot on the dummyQ column
+                } else if (dqKind[c] == GpuReactiveTermKind::DUMMY_Q) {  // zero-impedance: J slot on the dummyQ column
                     d[1] = pos.at(row, dqElem[c]);
                 } else {                                     // closed branch
                     const int* q = cbIdx + static_cast<size_t>(dqElem[c]) * 12;

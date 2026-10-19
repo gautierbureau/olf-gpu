@@ -25,6 +25,7 @@
 
 #include "../common/check.cuh"
 #include "../common/stats.cuh"
+#include "../common/codes/gpu_reactive_term_kind.cuh"
 #include "../solver/linear_solver_settings.cuh"
 #include "structure_build.cuh"
 
@@ -254,12 +255,12 @@ void collectFamilyPattern(const std::vector<int>& rowMap,
             if (pass == 1) {
                 pat.emplace_back(mappedRow, mappedRow);      // the stock row's own diagonal
             }
-            if (dqKind[c] == 1) {                            // shunt q: bus V column
+            if (dqKind[c] == GpuReactiveTermKind::SHUNT_COMPENSATOR_REACTIVE_FLOW) {  // shunt q: bus V column
                 pat.emplace_back(mappedRow, shIdx[static_cast<size_t>(dqElem[c]) * 5 + 2]);
-            } else if (dqKind[c] == 2) {                     // half-open: connected-side V column
+            } else if (dqKind[c] == GpuReactiveTermKind::OPEN_BRANCH_REACTIVE_FLOW) {  // half-open: connected-side V column
                 const int* oq = obIdx + static_cast<size_t>(dqElem[c]) * 6;
                 pat.emplace_back(mappedRow, dqSide[c] == 0 ? oq[4] : oq[5]);
-            } else if (dqKind[c] == 3) {                     // zero-imp DUMMY_Q column
+            } else if (dqKind[c] == GpuReactiveTermKind::DUMMY_Q) {  // zero-imp DUMMY_Q column
                 pat.emplace_back(mappedRow, dqElem[c]);
             } else {                                         // closed branch: v1 v2 ph1 ph2 r1
                 const int* q = cbIdx + static_cast<size_t>(dqElem[c]) * 12;

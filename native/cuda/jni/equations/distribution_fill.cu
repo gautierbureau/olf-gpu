@@ -14,6 +14,7 @@
 #include "../common/check.cuh"
 #include "../common/launch.cuh"
 #include "../common/codes/gpu_q_limit_type.cuh"
+#include "../common/codes/gpu_reactive_term_kind.cuh"
 #include "closed_branch.cuh"
 #include "closed_branch_scatter.h"
 #include "open_branch.cuh"
@@ -100,14 +101,14 @@ __global__ void fillDistrQBatch(int ndq, int nScenarios, int n, int nnz, int nEl
     }
     int e = dqElem[c];
     int kind = dqKind[c];
-    if (kind == 0 && disabled[s * nElements + cbOffset + e]) return;   // outaged closed contributor
-    if (kind == 2 && disabled[s * nElements + obOffset + e]) return;   // outaged open contributor
+    if (kind == GpuReactiveTermKind::CLOSED_BRANCH_REACTIVE_FLOW && disabled[s * nElements + cbOffset + e]) return;  // outaged closed contributor
+    if (kind == GpuReactiveTermKind::OPEN_BRANCH_REACTIVE_FLOW && disabled[s * nElements + obOffset + e]) return;  // outaged open contributor
     // kind 3 is a COUPLER's DUMMY_Q as part of this controller's reactive injection, and its element index
     // IS that dummy column (= its row). A scenario that kills the coupler pins that row to an identity, and
     // the coupler then carries no reactive flow at all — the contribution has to go with it. Measured on the
     // middle-section-loss fixtures: the surviving section's DISTR_Q row kept a coefficient 1 on the dead
     // coupler's DUMMY_Q and the solve landed 0.34 kV off (bus vl3_b 401.35 against OLF's 401.69).
-    if (kind == 3 && dqZiRow != nullptr && dqZiRow[c] >= 0 && mode[(size_t) s * n + dqZiRow[c]] == 0) return;
+    if (kind == GpuReactiveTermKind::DUMMY_Q && dqZiRow != nullptr && dqZiRow[c] >= 0 && mode[(size_t) s * n + dqZiRow[c]] == 0) return;
     double w = dqWeight[c];
     int kM = dqKMember != nullptr ? dqKMember[c] : -1;
     if (kM >= 0) {
@@ -138,7 +139,7 @@ __global__ void fillDistrQBatch(int ndq, int nScenarios, int n, int nnz, int nEl
         double qpk = (sum == 0.0 || kPinned || dqMemberInactive(nDqInact, dqInactSlotMember, s, kM))
                 ? 0.0 : dqKeyOf(nDqKeyOv, dqKeyOvIdx, dqKeyOvKey, s, kM, mKey) / sum;
         w = qpk - (dqJMember[c] == kM ? 1.0 : 0.0);
-        if (kind == 3 && dqSide[c] != 0) {
+        if (kind == GpuReactiveTermKind::DUMMY_Q && dqSide[c] != 0) {
             // The host folds the SIDE SIGN into a kind-3 weight (+dummyQ where the controller is
             // bus1, -dummyQ where it is bus2 — exactly createReactiveTerms' term); this live
             // recomputation rebuilds qPct_k - delta_jk and must put that sign back. Without it a
@@ -159,7 +160,7 @@ __global__ void fillDistrQBatch(int ndq, int nScenarios, int n, int nnz, int nEl
     double* valsS = vals + (size_t) s * nnz;
     double* FS = F + (size_t) s * n;
 
-    if (kind == 1) {                             // shunt q: {q -> F, dq/dv -> J(row, vcol)}
+    if (kind == GpuReactiveTermKind::SHUNT_COMPENSATOR_REACTIVE_FLOW) {  // shunt q: {q -> F, dq/dv -> J(row, vcol)}
         const double* sp = shIn + e * 2;
         int vcol = shIx[e * 5 + 2];
         double g = sp[0];
@@ -174,7 +175,7 @@ __global__ void fillDistrQBatch(int ndq, int nScenarios, int n, int nnz, int nEl
         if (dst[1] >= 0) atomicAdd(&valsS[dst[1]], w * so[3]);
         return;
     }
-    if (kind == 3) {                             // zero-impedance DUMMY_Q: linear w*dummyQ
+    if (kind == GpuReactiveTermKind::DUMMY_Q) {  // zero-impedance DUMMY_Q: linear w*dummyQ
         if (dst[0] <= -2 && (-2 - dst[0]) == dqTraceRow) {
             printf("DQF kind=3(ziDummyQ) col=%d w=%.6f contrib=%.9f\n", e, w, w * xs[e]);
         }
@@ -182,7 +183,7 @@ __global__ void fillDistrQBatch(int ndq, int nScenarios, int n, int nnz, int nEl
         if (dst[1] >= 0) atomicAdd(&valsS[dst[1]], w);
         return;
     }
-    if (kind == 2) {                             // half-open branch: connected-side q + dq/dv
+    if (kind == GpuReactiveTermKind::OPEN_BRANCH_REACTIVE_FLOW) {  // half-open branch: connected-side q + dq/dv
         const double* op = obIn + e * 7;
         const int* oq = obIx + e * 6;
         int vcol = dqSide[c] == 0 ? oq[4] : oq[5];

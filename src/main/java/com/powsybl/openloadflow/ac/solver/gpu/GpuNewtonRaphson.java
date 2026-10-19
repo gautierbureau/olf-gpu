@@ -47,7 +47,7 @@ import com.powsybl.openloadflow.ac.solver.NewtonRaphsonParameters;
 import com.powsybl.openloadflow.ac.solver.NewtonRaphsonStoppingCriteria;
 import com.powsybl.openloadflow.ac.solver.PerEquationTypeStoppingCriteria;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchContextCache;
-import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchStatus;
+import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuAcSolverStatus;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuStateVectorScalingMode;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.EquationSystemIndex;
@@ -706,7 +706,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                     0,                                       // skipRlPhase: the driver owns RL
                     0, null, null)[0];
             long t2 = System.nanoTime();
-            if (out.length > n + 2 && (int) out[n + 2] == GpuBatchStatus.STATUS_LINEAR_SOLVE_FAILED && !robustModeForRun) {
+            if (out.length > n + 2 && (int) out[n + 2] == GpuAcSolverStatus.LINEAR_SOLVE_FAILED && !robustModeForRun) {
                 // A FAILED LINEAR SOLVE (status -3, and only that: every other reject names a state
                 // the device cannot lay out or OLF's own budget, and goes to the CPU as before -
                 // retrying those on the device re-solved bases OLF's loops had to decide, 2.6e-3 kV on
@@ -726,7 +726,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                 invalidation.structureDirty = true;
                 return runImpl(voltageInitializer, reportNode, true);
             }
-            if (out.length > n + 2 && (int) out[n + 2] <= GpuBatchStatus.STATUS_REJECTED) {
+            if (out.length > n + 2 && (int) out[n + 2] <= GpuAcSolverStatus.REJECTED) {
                 // The kernel rejected the scenario (status -2, or -3 when the robust retry failed too): a linear solve that did not solve (the
                 // structure does not factor unpivoted), the straggler exit, the outer-loop budget, an
                 // unrealistic state or a device-loop reject. The chunk solver routes such a scenario
@@ -768,7 +768,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
             // OLF's NewtonRaphson.run reports MAX_ITERATION_REACHED whenever iterations >= maxIterations, a
             // test passing after the last allowed step included; the device applies the same rule and its
             // verdict is kept. OLF's own criterion on the returned state decides the rest.
-            boolean deviceBudgetOut = out.length > n + 2 && (int) out[n + 2] == GpuBatchStatus.STATUS_MAX_ITERATION;
+            boolean deviceBudgetOut = out.length > n + 2 && (int) out[n + 2] == GpuAcSolverStatus.MAX_ITERATION_REACHED;
             status = result.isStop() && !deviceBudgetOut ? AcSolverStatus.CONVERGED : AcSolverStatus.MAX_ITERATION_REACHED;
             lastRunOnDevice = true;                          // the DRIVER decided the loops of this solve
 
@@ -1452,7 +1452,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
             equationVector.minus(targetVector);               // re-measure against the written-back targets
             result = parameters.getStoppingCriteria().test(equationVector.getArray(), equationSystem);
         }
-        boolean deviceBudgetOut = out.length > n + 2 && (int) out[n + 2] == GpuBatchStatus.STATUS_MAX_ITERATION;
+        boolean deviceBudgetOut = out.length > n + 2 && (int) out[n + 2] == GpuAcSolverStatus.MAX_ITERATION_REACHED;
         AcSolverStatus status = result.isStop() && !deviceBudgetOut ? AcSolverStatus.CONVERGED : AcSolverStatus.MAX_ITERATION_REACHED;
         LOGGER.debug("GPU Newton-Raphson resume: {} iterations, |f(x)|={}, {}", iterations, result.getNorm(), status);
         Map<Integer, Double> slackBusActivePowerMismatch = new TreeMap<>();

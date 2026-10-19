@@ -15,6 +15,7 @@
 #include "../equations/scenario_overrides.cuh"
 #include "../common/launch.cuh"
 #include "../common/stats.cuh"
+#include "../common/codes/gpu_ac_solver_status.cuh"
 #include "../equations/branch_fill.cuh"
 #include "../equations/bus_injection_fill.cuh"
 #include "../equations/distribution_fill.cuh"
@@ -649,7 +650,7 @@ void traceRlAudit(BatchSolverContext* ctx, DriverPass& drv, std::vector<std::vec
         double auditTol = std::atof(std::getenv("OLF_GPU_RL_AUDIT"));
         if (auditTol <= 0.0) auditTol = 1e-6;
         std::vector<char> allLive(nS), auditDumped(nS, 0);
-        for (int s = 0; s < nS; s++) allLive[s] = (res.status[s] == 0) ? 1 : 0;
+        for (int s = 0; s < nS; s++) allLive[s] = (res.status[s] == GpuAcSolverStatus::CONVERGED) ? 1 : 0;
         CUDA_CHECK(cudaMemcpy(ctx->dRlActive.p, allLive.data(), nS * sizeof(char), cudaMemcpyHostToDevice));
         CUDA_CHECK(cudaMemsetAsync(ctx->dQbuf.p, 0, nTot * sizeof(double), ctx->stream));
         if (ctx->st->cb.ne) fillClosedBranchBatch<<<grid(ctx->st->cb.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->cb.ne, nS, n, nnz, ctx->nElements, ctx->cbOffset, ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->cb.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dQbuf.as<double>(), ctx->dDisabled.as<char>(), ctx->dRlActive.as<char>(), ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>(), nullptr, nullptr, nullptr, 0, nullptr, nullptr, RelocTables{});
@@ -862,7 +863,7 @@ void tracePhaseTime(BatchSolverContext* ctx, DriverPass& drv) {
     if (!ctx->driverPaused && std::getenv("OLF_GPU_PHASE_TIME") != nullptr && ctx->olPasses.size() == static_cast<size_t>(nS)) {
         for (int s = 0; s < nS; s++) {
             if (ctx->olPasses[s] == 0) continue;
-            if (res.status[s] != 0) {                         // not finished converged on device (CPU replay,
+            if (res.status[s] != GpuAcSolverStatus::CONVERGED) {                         // not finished converged on device (CPU replay,
                 gOlNotConverged++;                           // max-iter, ...): its work is counted apart
                 gOlNotConvergedIters += ctx->olIters[s];
                 continue;

@@ -14,7 +14,7 @@ import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcElementMapper;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchSkips;
-import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchStatus;
+import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuAcSolverStatus;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.EquationTerm;
 import com.powsybl.openloadflow.equations.Variable;
@@ -427,7 +427,7 @@ public final class GpuSecondaryVoltageControlOuterLoop {
         boolean anyAdjusts = false;
         for (int s = 0; s < realCount; s++) {
             double[] r = chunkResults[s];
-            if (r == null || (int) r[n + 2] != GpuBatchStatus.STATUS_CONVERGED) {
+            if (r == null || (int) r[n + 2] != GpuAcSolverStatus.CONVERGED) {
                 continue;
             }
             esCtx.stateVector().set(java.util.Arrays.copyOf(r, n));

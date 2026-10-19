@@ -17,6 +17,7 @@
 #include "../equations/scenario_overrides.cuh"
 #include "../solver/driver_steps.cuh"
 #include "../common/stats.cuh"
+#include "../common/codes/gpu_ac_solver_status.cuh"
 #include "../diagnostics/driver_traces.cuh"
 #include "forced_target_q.cuh"
 #include "pilot_voltage.cuh"
@@ -610,7 +611,7 @@ psgStep(ctx, nS, n, outer, "afterRL");
             for (int s = 0; s < nS; s++) {
                 if (mixed[s] && live[s]) {
                     traceReject(s, "pilot-self-mixed-pin", outer, 0);
-                    res.status[s] = -2;
+                    res.status[s] = GpuAcSolverStatus::REJECTED;
                     active[s] = 0;
                     live[s] = 0;
                 }
@@ -623,7 +624,7 @@ psgStep(ctx, nS, n, outer, "afterRL");
             for (int s = 0; s < nS; s++) {
                 if (ub[s] && live[s]) {
                     traceReject(s, "unpin-unrepresentable", outer, 0);
-                    res.status[s] = -2;
+                    res.status[s] = GpuAcSolverStatus::REJECTED;
                     active[s] = 0;
                     live[s] = 0;
                 }

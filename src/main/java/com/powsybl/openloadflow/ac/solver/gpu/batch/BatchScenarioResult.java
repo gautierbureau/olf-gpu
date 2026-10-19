@@ -7,11 +7,12 @@
  */
 package com.powsybl.openloadflow.ac.solver.gpu.batch;
 
+import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuAcSolverStatus;
 import java.util.Objects;
 
 /**
  * The per-scenario outcome: the converged state, iteration count, final mismatch and
- * the convergence status (see the {@code STATUS_*} constants in {@link GpuBatchStatus}), and the
+ * the convergence status (see the constants in {@link com.powsybl.openloadflow.ac.solver.gpu.codes.GpuAcSolverStatus}), and the
  * contingency's active power loss pre-distribution as the batch replayed it ({@code preDistributedActivePower},
  * pu, what OLF's {@code DefaultContingencyActivePowerLossDistribution} returns; NaN when not replayed), and the
  * active power the device distributed in all ({@code distributedActivePower}, pu: that pre-distribution plus its own
@@ -40,12 +41,12 @@ public record BatchScenarioResult(String contingencyId, double[] state, int iter
     }
 
     public boolean hasConverged() {
-        return convergenceStatus == GpuBatchStatus.STATUS_CONVERGED;
+        return convergenceStatus == GpuAcSolverStatus.CONVERGED;
     }
 
     /** True if this contingency must fall back to the sequential CPU path. */
     public boolean needsCpuFallback() {
-        return convergenceStatus == GpuBatchStatus.STATUS_REJECTED
-                || convergenceStatus == GpuBatchStatus.STATUS_LINEAR_SOLVE_FAILED;
+        return convergenceStatus == GpuAcSolverStatus.REJECTED
+                || convergenceStatus == GpuAcSolverStatus.LINEAR_SOLVE_FAILED;
     }
 }

@@ -15,6 +15,7 @@
 #include "../common/launch.cuh"
 #include "../common/stats.cuh"
 #include "../common/codes/gpu_state_vector_scaling_mode.cuh"
+#include "../common/codes/gpu_ac_solver_status.cuh"
 #include "../diagnostics/driver_traces.cuh"
 #include "../diagnostics/matrix_scan.cuh"
 #include "../equations/fill_launch.cuh"
@@ -258,9 +259,9 @@ void newtonSolve(BatchSolverContext* ctx, DriverPass& drv) {
                 res.iters[s] = it;
                 res.norm[s] = norm;
                 if (deviceFixedIter) {
-                    res.status[s] = finite ? 1 : -1;         // ran maxIter; no convergence test
+                    res.status[s] = finite ? GpuAcSolverStatus::MAX_ITERATION_REACHED : GpuAcSolverStatus::DIVERGED;  // ran maxIter; no convergence test
                 } else if (!finite) {                        // a diverged scenario must not poison the batch
-                    res.status[s] = -1;
+                    res.status[s] = GpuAcSolverStatus::DIVERGED;
                     active[s] = 0;
                     live[s] = 0;                             // failed: stop iterating its outer loops
                     nActive--;
@@ -273,7 +274,7 @@ void newtonSolve(BatchSolverContext* ctx, DriverPass& drv) {
                     // reports MAX_ITERATION_REACHED whenever iterations >= maxIterations, so a test that
                     // passes after the LAST allowed step is not CONVERGED there — the it == maxIter branch
                     // below reports it at OLF's budget (with a sound last solve).
-                    res.status[s] = 0;
+                    res.status[s] = GpuAcSolverStatus::CONVERGED;
                     active[s] = 0;
                     nActive--;
                     anyChanged = true;
@@ -298,7 +299,8 @@ void newtonSolve(BatchSolverContext* ctx, DriverPass& drv) {
                                          s, lastSolveRatio[s], norm);
                         }
                     }
-                    res.status[s] = badSolve ? (nS == 1 ? -3 : -2) : 1;
+                    res.status[s] = badSolve ? (nS == 1 ? GpuAcSolverStatus::LINEAR_SOLVE_FAILED : GpuAcSolverStatus::REJECTED)
+                                            : GpuAcSolverStatus::MAX_ITERATION_REACHED;
                     active[s] = 0;
                     live[s] = 0;                             // did not converge: stop iterating its outer loops
                     nActive--;
@@ -624,7 +626,7 @@ void newtonSolve(BatchSolverContext* ctx, DriverPass& drv) {
                         dumpSlotSystem(ctx, n, nnz, s, p.c_str());
                     }
                     traceReject(s, "linear-solve", outer, it);
-                    res.status[s] = -3;                      // STATUS_LINEAR_SOLVE_FAILED: the one reject a pivoted retry can fix
+                    res.status[s] = GpuAcSolverStatus::LINEAR_SOLVE_FAILED;  // the one reject a pivoted retry can fix
                     res.iters[s] = it;
                     active[s] = 0;
                     live[s] = 0;

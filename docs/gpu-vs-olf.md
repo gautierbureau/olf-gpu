@@ -165,3 +165,4 @@ constants carry OLF's constant names.
 |---|---|---|
 | `GpuStateVectorScalingMode` | `StateVectorScalingMode` | `NONE` 0, `LINE_SEARCH` 1, `MAX_VOLTAGE_CHANGE` 2 |
 | `GpuDistributedSlackFactorMode` | `ParticipationType.REMAINING_MARGIN` vs every other balance type | `STATIC` 0, `REMAINING_MARGIN` 1 |
+| `GpuAcSolverStatus` | `AcSolverStatus` | `CONVERGED` 0, `MAX_ITERATION_REACHED` 1; device only: `DIVERGED` -1 (NaN/Inf mismatch), `REJECTED` -2 (replayed by the CPU), `LINEAR_SOLVE_FAILED` -3 (first linear solve failed, retried in robust mode; closest OLF notion `SOLVER_FAILED`) |

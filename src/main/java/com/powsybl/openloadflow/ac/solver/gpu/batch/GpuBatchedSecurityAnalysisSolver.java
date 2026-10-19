@@ -26,6 +26,7 @@ import com.powsybl.openloadflow.ac.solver.NewtonRaphsonParameters;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.BatchContingency;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.GpuBatchContingencyValidator;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.GpuBatchQualification;
+import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuAcSolverStatus;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuStateVectorScalingMode;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.TargetVector;
@@ -251,7 +252,7 @@ public final class GpuBatchedSecurityAnalysisSolver {
         }
 
         // Assemble results in the original contingency order: batched scenarios carry their
-        // GPU outcome; rejected ones carry the base state with GpuBatchStatus.STATUS_REJECTED.
+        // GPU outcome; rejected ones carry the base state with GpuAcSolverStatus.REJECTED.
         List<BatchScenarioResult> results = new ArrayList<>(contingencies.size());
         for (int i = 0; i < contingencies.size(); i++) {
             String id = contingencies.get(i).contingencyId();
@@ -266,10 +267,10 @@ public final class GpuBatchedSecurityAnalysisSolver {
                         preDistributedByIndex[i], distributedByIndex[i]));
             } else {
                 // Never batched: the plan refused it. Named by id for the harness, because the same
-                // STATUS_REJECTED also comes back for a scenario the device TRIED and threw away, and the
+                // GpuAcSolverStatus.REJECTED also comes back for a scenario the device TRIED and threw away, and the
                 // census counts cannot tell the two apart per contingency.
                 com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.planRefused(id);
-                results.add(new BatchScenarioResult(id, baseState.clone(), 0, Double.NaN, GpuBatchStatus.STATUS_REJECTED, new int[0],
+                results.add(new BatchScenarioResult(id, baseState.clone(), 0, Double.NaN, GpuAcSolverStatus.REJECTED, new int[0],
                         Double.NaN, Double.NaN));
             }
         }

@@ -27,6 +27,7 @@ import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchedSecurityAnalysisSo
 import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.BatchContingency;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.LoadLoss;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.ShuntShift;
+import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuAcSolverStatus;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.Variable;
 import com.powsybl.openloadflow.network.LfBranch;
@@ -245,7 +246,7 @@ final class GpuBatchPrecomputer {
                     if (r.islandedBusNums().length > 0) {
                         islandedBuses.put(r.contingencyId(), r.islandedBusNums());
                     }
-                } else if (r.convergenceStatus() == com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchStatus.STATUS_MAX_ITERATION
+                } else if (r.convergenceStatus() == GpuAcSolverStatus.MAX_ITERATION_REACHED
                         && r.contingencyId().indexOf(BatchContingency.STRATEGY_KEY_SEP) < 0) {
                     // The device ran OLF's full Newton budget (deviceSolverParameters carries the
                     // run's maxIterations) and the scenario did not converge: that IS the answer OLF
@@ -534,12 +535,12 @@ final class GpuBatchPrecomputer {
      *
      * <p>Only scenarios that would otherwise LEAVE the device are retried, so the pass cannot change
      * an answer the device already gave: a CONVERGED result is kept, and so is a
-     * {@code STATUS_MAX_ITERATION} one, which IS OLF's answer (MAX_ITERATION_REACHED, no network
+     * {@code GpuAcSolverStatus.MAX_ITERATION_REACHED} one, which IS OLF's answer (MAX_ITERATION_REACHED, no network
      * result) rather than a reject. A retried scenario that still fails falls back to the CPU exactly
      * as before.
      *
      * <p><b>DEFAULT ON since 2026-10-02, and what it actually buys:</b> mode 6 turns 39 of the 113
-     * from a bad solve into {@code STATUS_MAX_ITERATION} with a SOUND last solve
+     * from a bad solve into {@code GpuAcSolverStatus.MAX_ITERATION_REACHED} with a SOUND last solve
      * ({@code GPU_ROBUST_RETRY attempted=113 recovered=39 statuses={-2=74, 1=39}}), taking CPU
      * replays from 113 to 74. None of them CONVERGE — but that is the right answer: OLF does not
      * converge them either. On the full busbar scope OLF's own statuses are
@@ -597,14 +598,14 @@ final class GpuBatchPrecomputer {
                     e.toString());
             return results;
         }
-        // CONVERGED ONLY. Accepting !needsCpuFallback() also accepts STATUS_MAX_ITERATION, and that is a
+        // CONVERGED ONLY. Accepting !needsCpuFallback() also accepts GpuAcSolverStatus.MAX_ITERATION_REACHED, and that is a
         // REGRESSION, not a recovery: the precomputer reports such a result as OLF's own
         // MAX_ITERATION_REACHED with no network result, replacing a CPU replay that may well have
         // converged. Measured 2026-10-01 on the full busbar scope: 43 of 113 retried came back
         // MAX_ITERATION (DEVICE:MAX_ITERATION_REACHED 4 -> 47) while device coverage stayed at
         // 6550/6667 — nothing gained and 43 CPU answers thrown away. A retried scenario that does not
         // CONVERGE keeps its reject and goes to the CPU exactly as before.
-        // The retry ALSO accepts STATUS_MAX_ITERATION.
+        // The retry ALSO accepts GpuAcSolverStatus.MAX_ITERATION_REACHED.
         //
         // That is not the contradiction of the comment above that it looks like. OLF ITSELF does not
         // converge a large part of this tail: on the full busbar scope its own statuses are
@@ -621,8 +622,8 @@ final class GpuBatchPrecomputer {
         int recovered = 0;
         for (BatchScenarioResult r : retried) {
             retriedStatus.merge(r.convergenceStatus(), 1, Integer::sum);
-            boolean ok = r.convergenceStatus() == com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchStatus.STATUS_CONVERGED
-                    || r.convergenceStatus() == com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchStatus.STATUS_MAX_ITERATION;
+            boolean ok = r.convergenceStatus() == GpuAcSolverStatus.CONVERGED
+                    || r.convergenceStatus() == GpuAcSolverStatus.MAX_ITERATION_REACHED;
             if (ok) {
                 better.put(r.contingencyId(), r);
                 recovered++;

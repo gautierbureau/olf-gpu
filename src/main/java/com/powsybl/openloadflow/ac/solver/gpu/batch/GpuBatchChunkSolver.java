@@ -36,6 +36,7 @@ import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.BatchContingency;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.GenOutage;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.GpuBatchLossPreDistribution;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.GpuBatchQualification;
+import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuAcSolverStatus;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuStateVectorScalingMode;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfShunt;
@@ -703,12 +704,12 @@ final class GpuBatchChunkSolver {
                                 String pairId = contingencies.get(group.get(chunkStart + s)).contingencyId();
                                 Integer pIdx = indexById.get(pairId.substring(0, pairId.indexOf(BatchContingency.STRATEGY_KEY_SEP)));
                                 int parentStatus = pIdx != null && resultsByIndex[pIdx] != null
-                                        ? ChunkArrays.rowStatus(resultsByIndex[pIdx], n) : GpuBatchStatus.STATUS_REJECTED;
-                                if (parentStatus == GpuBatchStatus.STATUS_CONVERGED) {
+                                        ? ChunkArrays.rowStatus(resultsByIndex[pIdx], n) : GpuAcSolverStatus.REJECTED;
+                                if (parentStatus == GpuAcSolverStatus.CONVERGED) {
                                     parent = ChunkArrays.fullRow(resultsByIndex[pIdx], n, config.stateSink(),
                                             contingencies.get(pIdx).contingencyId());
                                     pairParentConverged[s] = true;
-                                } else if (parentStatus == GpuBatchStatus.STATUS_MAX_ITERATION) {
+                                } else if (parentStatus == GpuAcSolverStatus.MAX_ITERATION_REACHED) {
                                     parent = exhaustedStartByIndex.get(pIdx);   // OLF's network after the failed run
                                 }
                                 if (parent != null) {
@@ -1131,7 +1132,7 @@ final class GpuBatchChunkSolver {
                         // GPU_REJECT lines name slots, and a slot only means something with the chunk's composition.
                         for (int s = 0; s < realCount; s++) {
                             int st = chunkResults[s].length > n + 2 ? (int) chunkResults[s][n + 2] : 0;
-                            if (st <= GpuBatchStatus.STATUS_REJECTED) {
+                            if (st <= GpuAcSolverStatus.REJECTED) {
                                 System.err.println("CHUNK_REJECT slot=" + s + " ctg=" + contingencies.get(group.get(chunkStart + s)).contingencyId()
                                         + " status=" + st);
                             }
@@ -1219,7 +1220,7 @@ final class GpuBatchChunkSolver {
                             DriverNative.cancelBatchDriverPause(handle);
                             for (int s2 = 0; s2 < realCount; s2++) {
                                 if (chunkResults[s2] != null) {
-                                    chunkResults[s2][n + 2] = GpuBatchStatus.STATUS_REJECTED;
+                                    chunkResults[s2][n + 2] = GpuAcSolverStatus.REJECTED;
                                 }
                             }
                         }
@@ -1500,7 +1501,7 @@ final class GpuBatchChunkSolver {
                         // converged solve (NewtonRaphson updates the network only then), and the targets and bus
                         // types its outer loops had moved, which the captures below read as they read a converged one.
                         for (int s = 0; s < realCount; s++) {
-                            if ((int) chunkResults[s][n + 2] == GpuBatchStatus.STATUS_MAX_ITERATION) {
+                            if ((int) chunkResults[s][n + 2] == GpuAcSolverStatus.MAX_ITERATION_REACHED) {
                                 exhaustedStartByIndex.put(group.get(chunkStart + s),
                                         BatchReadbackNative.readBatchLastConvergedState(handle, s));
                             }
@@ -1679,13 +1680,13 @@ final class GpuBatchChunkSolver {
                     for (int s = 0; s < realCount; s++) {
                         double[] row = chunkResults[s];
                         if (rejectAfterSolve != null && rejectAfterSolve[s]) {
-                            row[n + 2] = GpuBatchStatus.STATUS_REJECTED;   // the census names the reason where it is decided
-                        } else if (pairPhase && (int) row[n + 2] != GpuBatchStatus.STATUS_CONVERGED) {
+                            row[n + 2] = GpuAcSolverStatus.REJECTED;   // the census names the reason where it is decided
+                        } else if (pairPhase && (int) row[n + 2] != GpuAcSolverStatus.CONVERGED) {
                             // a pair the device solved and did not converge: a device failure wherever OLF converges it
                             com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.pairDeviceFailed(
                                     contingencies.get(group.get(chunkStart + s)).contingencyId());
                         }
-                        if (config.stateSink() != null && (int) row[n + 2] == GpuBatchStatus.STATUS_CONVERGED) {
+                        if (config.stateSink() != null && (int) row[n + 2] == GpuAcSolverStatus.CONVERGED) {
                             // the state leaves the heap now, as its chunk completes; the result keeps the tail
                             // (iterations, norm, status) - see sunkTail / fullRow
                             config.stateSink().put(contingencies.get(group.get(chunkStart + s)).contingencyId(),
@@ -1697,7 +1698,7 @@ final class GpuBatchChunkSolver {
                         // the status that decided it (-2 rejected, -1 diverged, 1 max-iter). The aggregate
                         // "precomputed on device: N / M" says how many, never which.
                         if (System.getenv("OLF_GPU_CPU_ROUTED") != null && chunkResults[s] != null
-                                && (int) chunkResults[s][n + 2] != GpuBatchStatus.STATUS_CONVERGED) {
+                                && (int) chunkResults[s][n + 2] != GpuAcSolverStatus.CONVERGED) {
                             System.err.printf("GPU_CPU_ROUTED ctg=%s status=%d%n",
                                     contingencies.get(group.get(chunkStart + s)).contingencyId(),
                                     (int) chunkResults[s][n + 2]);

@@ -17,6 +17,7 @@
 #include "../common/device_buf.cuh"
 #include "../common/loop_kinds.cuh"
 #include "../common/codes/gpu_distributed_slack_factor_mode.cuh"
+#include "../common/codes/gpu_ac_solver_status.cuh"
 #include "../structure/shared_structure.cuh"
 
 namespace olfgpu {
@@ -526,7 +527,7 @@ struct BatchResult {
     std::vector<double> x;                                   // nScenarios * n
     std::vector<int> iters;                                  // nScenarios
     std::vector<double> norm;                                // nScenarios
-    std::vector<int> status;                                 // nScenarios: 0 conv, 1 maxiter, -1 diverged
+    std::vector<int> status;                                 // nScenarios: a GpuAcSolverStatus
 };
 
 

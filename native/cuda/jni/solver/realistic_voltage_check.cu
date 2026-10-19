@@ -13,6 +13,7 @@
 
 #include "../common/check.cuh"
 #include "../common/launch.cuh"
+#include "../common/codes/gpu_ac_solver_status.cuh"
 #include "../solver/driver_steps.cuh"
 #include "realistic_voltage_check.cuh"
 
@@ -69,7 +70,7 @@ void rejectUnrealistic(BatchSolverContext* ctx, DriverPass& drv, const std::vect
                              s, outer, loopOrder[loopIdx], ctx->realisticMinV, ctx->realisticMaxV);
             }
             traceReject(s, "unrealistic-state", outer, 0);
-            res.status[s] = -2;                          // STATUS_REJECTED -> the CPU replays it
+            res.status[s] = GpuAcSolverStatus::REJECTED;          // the CPU replays it
             live[s] = 0;
             active[s] = 0;
         }

@@ -14,6 +14,7 @@
 #include "../common/check.cuh"
 #include "../common/launch.cuh"
 #include "../common/stats.cuh"
+#include "../common/codes/gpu_ac_solver_status.cuh"
 #include "../diagnostics/driver_traces.cuh"
 #include "../diagnostics/matrix_scan.cuh"
 #include "../equations/branch_fill.cuh"
@@ -270,7 +271,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     res.x.resize(nTot);
     res.iters.assign(nS, 0);
     res.norm.assign(nS, 0.0);
-    res.status.assign(nS, 1);                                // default: max_iter (overwritten on converge/diverge)
+    res.status.assign(nS, GpuAcSolverStatus::MAX_ITERATION_REACHED);  // default (overwritten on converge/diverge)
 
     std::vector<double>& hF = drv.hF;
     hF.assign(nTot, 0.0);
@@ -591,7 +592,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             for (int s = 0; s < nS; s++) {
                 if (active[s] && ++prodIters[s] >= RL_MAX_OUTER) {
                     traceReject(s, "host-loop-outer-budget", -1, 0);
-                    res.status[s] = -2;                      // budget exhausted -> CPU replays it
+                    res.status[s] = GpuAcSolverStatus::REJECTED;                      // budget exhausted -> CPU replays it
                     live[s] = 0;
                     active[s] = 0;
                 }
@@ -747,7 +748,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     if (ctx->realisticCheck && solvePass && loopIdx > realisticFixingIdx) {
         std::vector<char> gate(nS);
         for (int s = 0; s < nS; s++) {
-            gate[s] = (wasActive[s] && res.status[s] == 0 && live[s]) ? 1 : 0;
+            gate[s] = (wasActive[s] && res.status[s] == GpuAcSolverStatus::CONVERGED && live[s]) ? 1 : 0;
         }
         rejectUnrealistic(ctx, drv, gate);
     }
@@ -759,7 +760,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     // ---- REACTIVE LIMITS pass: switch any local PV controller over its Q limit to PQ ----
     // Only scenarios (re)solved this pass that converged can have new violations.
     for (int s = 0; s < nS; s++) {
-        rlActive[s] = (wasActive[s] && res.status[s] == 0) ? 1 : 0;
+        rlActive[s] = (wasActive[s] && res.status[s] == GpuAcSolverStatus::CONVERGED) ? 1 : 0;
     }
     CUDA_CHECK(cudaMemcpy(ctx->dRlActive.p, rlActive.data(), nS * sizeof(char), cudaMemcpyHostToDevice));
     // generator Q per controller = (Σ branch q + shunt q) at its BUS_V row + load Q. Compute the first
@@ -880,7 +881,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     for (int s = 0; s < nS; s++) {
         if (loopRejected[s]) {                              // a device loop routed the scenario to the CPU fallback
             traceReject(s, "device-loop-routed", outer, 0);
-            res.status[s] = -2;
+            res.status[s] = GpuAcSolverStatus::REJECTED;
             live[s] = 0;
             active[s] = 0;
             rlSwitched[s] = 0;
@@ -912,7 +913,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         for (int s = 0; s < nS; s++) {
             if (dsResidual[s] && live[s]) {
                 traceReject(s, "ds-residual-saturated", outer, 0);
-                res.status[s] = -2;
+                res.status[s] = GpuAcSolverStatus::REJECTED;
                 active[s] = 0;
                 live[s] = 0;
                 rlSwitched[s] = 0;
@@ -942,7 +943,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                 // converged on a half-finished RL/DS fixpoint — reject to the CPU fallback, which
                 // replays it under OLF's own maxOuterLoopIterations/UNSTABLE handling.
                 traceReject(s, "outer-loop-budget", outer, 0);
-                res.status[s] = -2;
+                res.status[s] = GpuAcSolverStatus::REJECTED;
                 rlSwitched[s] = 0;
                 live[s] = 0;
             }
@@ -958,7 +959,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         if (ctx->realisticCheck && realisticFixingIdx >= 0 && loopIdx == realisticFixingIdx) {
             std::vector<char> gate(nS);
             for (int s = 0; s < nS; s++) {
-                gate[s] = (res.status[s] == 0 && live[s]) ? 1 : 0;
+                gate[s] = (res.status[s] == GpuAcSolverStatus::CONVERGED && live[s]) ? 1 : 0;
             }
             rejectUnrealistic(ctx, drv, gate);
         }

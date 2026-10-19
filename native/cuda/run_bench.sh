@@ -7,6 +7,8 @@
 #   native/cuda/run_bench.sh                 # K=4 regression check (builds vs the pinned cuDSS first)
 #   native/cuda/run_bench.sh --no-build      # skip the native rebuild (lib already vs the pinned cuDSS)
 #   OLF_GPU_FIXED_ITERS="4,6,10" native/cuda/run_bench.sh   # K-sweep instead of just K=4
+#   native/cuda/run_bench.sh --no-build -Dpowsybl.config.dirs=<dir>   # further arguments go to mvn (here: the
+#                                            # GPU solver parameters of <dir>/config.yml, see sweep_ordering.sh)
 #
 # Recorded baseline (RTX A1000, cuDSS 0.8.0, UBATCH, K=4, maxBatch=500): warm ~4.9 ms/scn (205 scn/s);
 # 499/500 reached 1e-6, med ||F||inf ~3.5e-12. Old 0.7.1/maxBatch=32 baseline was ~8.2 ms/scn.
@@ -24,7 +26,12 @@ export OLF_GPU_E2E="${OLF_GPU_E2E:-1}"               # also print cold end-to-en
 export OLF_GPU_E2E_K="${OLF_GPU_E2E_K:-4}"
 export OLF_GPU_FIXED_ITERS="${OLF_GPU_FIXED_ITERS:-4}"
 
-if [[ "${1:-}" != "--no-build" ]]; then
+BUILD=1
+if [[ "${1:-}" == "--no-build" ]]; then
+    BUILD=0
+    shift
+fi
+if (( BUILD )); then
     echo ">> building libolfgpu against cuDSS at $CUDSS_ROOT"
     native/build-gpu.sh >/dev/null 2>&1 || { echo "native build FAILED — re-run native/build-gpu.sh to see the error"; exit 1; }
 fi
@@ -32,7 +39,7 @@ fi
 LOG="$(mktemp)"
 echo ">> running GpuBatchedN1FixedIterTest#pegase9241FixedIterations (UBATCH, K=$OLF_GPU_FIXED_ITERS, 500 matched ctg)"
 MVN_STATUS=0
-mvn -s "$HOME/Projects/powsybl/tmp/settings.xml" test -Dcheckstyle.skip -Dtest='GpuBatchedN1FixedIterTest#pegase9241FixedIterations' -DfailIfNoTests=false >"$LOG" 2>&1 || MVN_STATUS=$?
+mvn -s "$HOME/Projects/powsybl/tmp/settings.xml" test -Dcheckstyle.skip -Dtest='GpuBatchedN1FixedIterTest#pegase9241FixedIterations' -DfailIfNoTests=false "$@" >"$LOG" 2>&1 || MVN_STATUS=$?
 
 echo "=================== RESULT ==================="
 grep -aE "OLF_GPU_CUDSS|BARE-FIXED-ITER|E2E[^ ]* K=|K=[0-9]+ +:|Tests run: [0-9]" "$LOG" || { echo "no result lines — full log:"; tail -40 "$LOG"; }

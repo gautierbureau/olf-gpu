@@ -39,6 +39,7 @@
     </licenses>
 
     <properties>
+        <powsybl.config.dirs>${project.build.directory}</powsybl.config.dirs>
         <java.version>21</java.version>
         <powsybl-open-loadflow.version>2.4.0-SNAPSHOT-gpu</powsybl-open-loadflow.version>
         <!-- The cuDSS-enabled core/math-native forks this extension currently builds against
@@ -113,6 +114,13 @@
             <artifactId>powsybl-commons-test</artifactId>
             <scope>test</scope>
         </dependency>
+        <!-- Reads the configuration modules (open-loadflow-gpu-default-parameters...) from powsybl.config.dirs, which
+             surefire sets: an empty directory by default, so the suite reads no configuration, or the one a run names. -->
+        <dependency>
+            <groupId>com.powsybl</groupId>
+            <artifactId>powsybl-config-classic</artifactId>
+            <scope>test</scope>
+        </dependency>
         <dependency>
             <groupId>org.mockito</groupId>
             <artifactId>mockito-core</artifactId>
@@ -155,6 +163,12 @@
                          solver's JVM-GLOBAL configuration between tests (a provider-driven run leaves
                          dsRejectResidual/maxOuterIterations set, poisoning any later test that drives the
                          solver DIRECTLY) and reports silent CPU fallbacks. -->
+                    <!-- The platform configuration the tests read: none by default (target/ holds no config.yml);
+                         -Dpowsybl.config.dirs=<dir> runs the whole suite under that directory's config.yml, e.g. one
+                         GPU solver ordering (open-loadflow-gpu-default-parameters). -->
+                    <systemPropertyVariables>
+                        <powsybl.config.dirs>${powsybl.config.dirs}</powsybl.config.dirs>
+                    </systemPropertyVariables>
                     <properties>
                         <configurationParameters>
                             junit.jupiter.extensions.autodetection.enabled = true

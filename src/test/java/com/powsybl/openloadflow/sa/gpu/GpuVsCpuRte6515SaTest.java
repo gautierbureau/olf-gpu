@@ -342,48 +342,7 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
         // N-2. OLF_GPU_SA_N2_BRANCH / _N2_GEN = how many PAIRS to build. Pairs are drawn from a fixed
         // seed so a differing pair reproduces, and preferentially from elements sharing a voltage level
         // — the double-circuit shape that actually islands things, which is the point of running N-2.
-        int n2Branch = Integer.parseInt(System.getenv().getOrDefault("OLF_GPU_SA_N2_BRANCH", "0"));
-        if (n2Branch > 0) {
-            List<String> brIds = network.getBranchStream().map(Branch::getId).sorted().toList();
-            java.util.Random rnd = new java.util.Random(20260917L);
-            int added = 0;
-            for (int t = 0; t < n2Branch * 50 && added < n2Branch; t++) {
-                String aId = brIds.get(rnd.nextInt(brIds.size()));
-                var a = network.getBranch(aId);
-                String vl = a.getTerminal1().getVoltageLevel().getId();
-                List<String> nb = brIds.stream().filter(id -> !id.equals(aId))
-                        .filter(id -> {
-                            var b = network.getBranch(id);
-                            return b.getTerminal1().getVoltageLevel().getId().equals(vl)
-                                    || b.getTerminal2().getVoltageLevel().getId().equals(vl);
-                        }).toList();
-                if (nb.isEmpty()) {
-                    continue;
-                }
-                String bId = nb.get(rnd.nextInt(nb.size()));
-                all.add(new Contingency(aId + "+" + bId,
-                        List.of(new BranchContingency(aId), new BranchContingency(bId))));
-                added++;
-            }
-            System.out.printf("  + %d N-2 branch pairs (same voltage level)%n", added);
-        }
-        int n2Gen = Integer.parseInt(System.getenv().getOrDefault("OLF_GPU_SA_N2_GEN", "0"));
-        if (n2Gen > 0) {
-            List<String> gs = network.getGeneratorStream().map(com.powsybl.iidm.network.Generator::getId)
-                    .sorted().toList();
-            java.util.Random rnd = new java.util.Random(20260917L);
-            for (int t = 0; t < n2Gen; t++) {
-                String a = gs.get(rnd.nextInt(gs.size()));
-                String b = gs.get(rnd.nextInt(gs.size()));
-                if (a.equals(b)) {
-                    continue;
-                }
-                all.add(new Contingency(a + "+" + b,
-                        List.of(new com.powsybl.contingency.GeneratorContingency(a),
-                                new com.powsybl.contingency.GeneratorContingency(b))));
-            }
-            System.out.printf("  + %d N-2 generator pairs%n", n2Gen);
-        }
+        addN2Contingencies(network, all);
         // OLF_GPU_SA_INVENTORY=1: what the case actually CONTAINS, per contingency element type. The
         // answer to "which kinds are we not testing" is a property of the network, not of memory.
         if ("1".equals(System.getenv("OLF_GPU_SA_INVENTORY"))) {
@@ -489,6 +448,53 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
             }
         }
         return all;
+    }
+
+    /** N-2: OLF_GPU_SA_N2_BRANCH / _N2_GEN pairs, drawn from a fixed seed and preferentially from elements sharing
+     *  a voltage level. */
+    private static void addN2Contingencies(final Network network, final List<Contingency> all) {
+        int n2Branch = Integer.parseInt(System.getenv().getOrDefault("OLF_GPU_SA_N2_BRANCH", "0"));
+        if (n2Branch > 0) {
+            List<String> brIds = network.getBranchStream().map(Branch::getId).sorted().toList();
+            java.util.Random rnd = new java.util.Random(20260917L);
+            int added = 0;
+            for (int t = 0; t < n2Branch * 50 && added < n2Branch; t++) {
+                String aId = brIds.get(rnd.nextInt(brIds.size()));
+                var a = network.getBranch(aId);
+                String vl = a.getTerminal1().getVoltageLevel().getId();
+                List<String> nb = brIds.stream().filter(id -> !id.equals(aId))
+                        .filter(id -> {
+                            var b = network.getBranch(id);
+                            return b.getTerminal1().getVoltageLevel().getId().equals(vl)
+                                    || b.getTerminal2().getVoltageLevel().getId().equals(vl);
+                        }).toList();
+                if (nb.isEmpty()) {
+                    continue;
+                }
+                String bId = nb.get(rnd.nextInt(nb.size()));
+                all.add(new Contingency(aId + "+" + bId,
+                        List.of(new BranchContingency(aId), new BranchContingency(bId))));
+                added++;
+            }
+            System.out.printf("  + %d N-2 branch pairs (same voltage level)%n", added);
+        }
+        int n2Gen = Integer.parseInt(System.getenv().getOrDefault("OLF_GPU_SA_N2_GEN", "0"));
+        if (n2Gen > 0) {
+            List<String> gs = network.getGeneratorStream().map(com.powsybl.iidm.network.Generator::getId)
+                    .sorted().toList();
+            java.util.Random rnd = new java.util.Random(20260917L);
+            for (int t = 0; t < n2Gen; t++) {
+                String a = gs.get(rnd.nextInt(gs.size()));
+                String b = gs.get(rnd.nextInt(gs.size()));
+                if (a.equals(b)) {
+                    continue;
+                }
+                all.add(new Contingency(a + "+" + b,
+                        List.of(new com.powsybl.contingency.GeneratorContingency(a),
+                                new com.powsybl.contingency.GeneratorContingency(b))));
+            }
+            System.out.printf("  + %d N-2 generator pairs%n", n2Gen);
+        }
     }
 
     /** What kind of bus a generator contingency lands on — the facts that decide which reactive-limit
@@ -707,7 +713,8 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
         System.out.printf("  distributedActivePower base: cpu=%.9f gpu=%.9f MW%n",
                 cpu.getPreContingencyResult().getDistributedActivePower(), gpu.getPreContingencyResult().getDistributedActivePower());
         Map<String, Double> gpuDap = new TreeMap<>();
-        gpu.getPostContingencyResults().forEach(p -> gpuDap.put(p.getContingency().getId(), p.getDistributedActivePower()));
+        gpu.getPostContingencyResults().forEach(p -> gpuDap.put(p.getContingency().getId(),
+                                      p.getDistributedActivePower()));
         java.util.Set<String> convergedBoth = new java.util.HashSet<>();
         gpu.getPostContingencyResults().stream()
                 .filter(p -> p.getStatus() == PostContingencyComputationStatus.CONVERGED)
@@ -771,19 +778,7 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
         // taken out of the measurement.
         String ctgFirst = System.getenv("OLF_GPU_SA_CTG_FIRST");
         if (ctgFirst != null && !ctgFirst.isEmpty()) {
-            List<String> wanted = java.util.Arrays.stream(ctgFirst.split(",")).map(String::trim).toList();
-            List<Contingency> head = new ArrayList<>();
-            for (String w : wanted) {
-                contingencies.stream().filter(c -> c.getId().equals(w)).findFirst().ifPresent(head::add);
-            }
-            List<Contingency> reordered = new ArrayList<>(head);
-            for (Contingency c : contingencies) {
-                if (head.stream().noneMatch(h -> h.getId().equals(c.getId()))) {
-                    reordered.add(c);
-                }
-            }
-            contingencies = reordered;
-            System.out.printf("  CTG_FIRST: %s moved to the front (list otherwise unchanged)%n", head.stream().map(Contingency::getId).toList());
+            contingencies = moveToFront(contingencies, ctgFirst);
         }
         System.out.printf("%s: %d branches → %d N-1 contingencies%n", CASE_FILE,
                 network.getBranchCount(), contingencies.size());
@@ -815,68 +810,8 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
         // this is the only direct way to see WHERE the two trajectories part at the DEFAULT criterion,
         // which is the question: the two arms must take the same iterates, not merely land in the same
         // tolerance ball. Tightening the tolerance hides this instead of answering it.
-        if (System.getenv("OLF_GPU_DBG_NR") != null) {
-            ch.qos.logback.classic.encoder.PatternLayoutEncoder nrEnc =
-                    new ch.qos.logback.classic.encoder.PatternLayoutEncoder();
-            ch.qos.logback.classic.Logger nrRoot = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory
-                    .getLogger(org.slf4j.Logger.ROOT_LOGGER_NAME);
-            nrEnc.setContext(nrRoot.getLoggerContext());
-            nrEnc.setPattern("CPU_NR %logger{0} %msg%n");
-            nrEnc.start();
-            ch.qos.logback.core.ConsoleAppender<ch.qos.logback.classic.spi.ILoggingEvent> nrApp =
-                    new ch.qos.logback.core.ConsoleAppender<>();
-            nrApp.setContext(nrRoot.getLoggerContext());
-            nrApp.setEncoder(nrEnc);
-            nrApp.start();
-            // AcloadFlowEngine logs "Start outer loop '<name>' iteration <n>", the CPU counterpart of the
-            // device's OLF_GPU_BATCH_TRACE pass line: the two SEQUENCES are what say whether the device ran
-            // the same loop, in the same order, the same number of times.
-            for (String n : new String[] {"com.powsybl.openloadflow.ac.solver.NewtonRaphson",
-                                          "com.powsybl.openloadflow.ac.solver.MaxVoltageChangeStateVectorScaling",
-                                          "com.powsybl.openloadflow.ac.AcloadFlowEngine",
-                                          // "Contingency '<id>' impact on network ..." (DEBUG): heads each
-                                          // post-contingency block, so a block can be addressed by id inside
-                                          // the full window (with OLF_GPU_SA_CPU_THREADS=1 they do not interleave)
-                                          "com.powsybl.openloadflow.sa.AbstractSecurityAnalysis"}) {
-                ch.qos.logback.classic.Logger lg = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(n);
-                lg.setLevel(ch.qos.logback.classic.Level.DEBUG);
-                lg.setAdditive(false);
-                lg.addAppender(nrApp);
-            }
-        }
-        if (System.getenv("OLF_GPU_DBG_RL") != null) {
-            ch.qos.logback.classic.Logger rlLog = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory
-                    .getLogger("com.powsybl.openloadflow.ac.outerloop.ReactiveLimitsOuterLoop");
-            rlLog.setLevel(ch.qos.logback.classic.Level.TRACE);
-            // The voltage-MONITORING loop too (standby SVC automata): its PQ->PV activations are the
-            // other per-contingency DECISION the two arms can disagree on, and like a pin they leave
-            // no residual - only the two decision logs tell them apart.
-            ch.qos.logback.classic.Logger monLog = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory
-                    .getLogger("com.powsybl.openloadflow.ac.outerloop.MonitoringVoltageOuterLoop");
-            monLog.setLevel(ch.qos.logback.classic.Level.TRACE);
-            // ...and the HVDC AC-emulation freeze: its per-contingency setpoint (Reports.reportFreezeHvdc,
-            // INFO) is the third decision that leaves no residual - the frozen P IS the equation.
-            ch.qos.logback.classic.Logger hvLog = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory
-                    .getLogger("com.powsybl.openloadflow.ac.outerloop.FreezingHvdcACEmulationOuterloop");
-            hvLog.setLevel(ch.qos.logback.classic.Level.TRACE);
-            ch.qos.logback.classic.Logger root = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory
-                    .getLogger(org.slf4j.Logger.ROOT_LOGGER_NAME);
-            if (!root.iteratorForAppenders().hasNext()) {
-                ch.qos.logback.classic.encoder.PatternLayoutEncoder enc =
-                        new ch.qos.logback.classic.encoder.PatternLayoutEncoder();
-                enc.setContext(root.getLoggerContext());
-                enc.setPattern("CPU_RL %msg%n");
-                enc.start();
-                ch.qos.logback.core.ConsoleAppender<ch.qos.logback.classic.spi.ILoggingEvent> ca =
-                        new ch.qos.logback.core.ConsoleAppender<>();
-                ca.setContext(root.getLoggerContext());
-                ca.setEncoder(enc);
-                ca.start();
-                rlLog.addAppender(ca);
-                monLog.addAppender(ca);
-                hvLog.addAppender(ca);
-            }
-        }
+        applyNewtonDebug();
+        applyReactiveLimitsDebug();
         // OLF_GPU_SA_NO_RL / OLF_GPU_SA_NO_DS: disable an outer loop on BOTH arms. Stage isolation -
         // inner Newton only, vs +DS, vs +DS+RL - to find which stage first introduces a divergence.
         // Decisive for a suspected PIN mismatch: if the arms agree with reactive limits OFF, the
@@ -898,25 +833,7 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
         // OLF_GPU_SVC=1: enable SecondaryVoltageControl — the RTE params default to off, but
         // the rte6515 case carries SVC zones. This is the path that differed between GPU and
         // CPU when SVC support was incomplete (the base LF didn't go through the chunk solver).
-        if ("1".equals(System.getenv("OLF_GPU_SVC"))) {
-            com.powsybl.openloadflow.OpenLoadFlowParameters.get(lfp).setSecondaryVoltageControl(true);
-            System.out.println("  SVC enabled (OLF_GPU_SVC=1)");
-            // OLF_GPU_SVC_PILOT_SHIFT=<kV>: move EVERY zone's pilot-point target so the loop actually
-            // FIRES (with the case's own targets it is stable at the base and on every contingency).
-            // rte6515 carries two zones — shifting only one leaves the other's controllers idle and the
-            // run then exercises half the zone systems.
-            String shift = System.getenv("OLF_GPU_SVC_PILOT_SHIFT");
-            var svc = network.getExtension(com.powsybl.iidm.network.extensions.SecondaryVoltageControl.class);
-            if (shift != null && svc != null) {
-                for (var zone : svc.getControlZones()) {
-                    var pilot = zone.getPilotPoint();
-                    double before = pilot.getTargetV();
-                    pilot.setTargetV(before + Double.parseDouble(shift));
-                    System.out.printf("  SVC pilot '%s' target %.3f -> %.3f kV (%d control units)%n",
-                            zone.getName(), before, pilot.getTargetV(), zone.getControlUnits().size());
-                }
-            }
-        }
+        applySvcScope(lfp, network);
         // Non-zero increased-violations thresholds to avoid ulp-level flicker
         SecurityAnalysisParameters sap = new SecurityAnalysisParameters();
         sap.setLoadFlowParameters(lfp);
@@ -948,17 +865,7 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
         // distributed-power worst goes from 1.4e-05 MW to 1.93 MW. That reads exactly like a GPU
         // regression and cost a full bisect to clear. Ask OLF instead of guessing.
         // OLF_GPU_SA_CPU_THREADS still overrides.
-        com.powsybl.openloadflow.network.LfTopoConfig probeTopoConfig =
-                new com.powsybl.openloadflow.network.LfTopoConfig();
-        com.powsybl.openloadflow.network.impl.PropagatedContingency.createList(network, contingencies, probeTopoConfig,
-                new com.powsybl.openloadflow.network.impl.PropagatedContingencyCreationParameters()
-                        .setContingencyPropagation(true)
-                        .setShuntCompensatorVoltageControlOn(lfp.isShuntCompensatorVoltageControlOn())
-                        .setSlackDistributionOnConformLoad(lfp.getBalanceType()
-                                == com.powsybl.loadflow.LoadFlowParameters.BalanceType.PROPORTIONAL_TO_CONFORM_LOAD)
-                        .setHvdcAcEmulation(lfp.isHvdcAcEmulation()));
-        String defaultThreads = probeTopoConfig.isBreaker() ? "1" : "8";
-        int cpuThreads = Integer.parseInt(System.getenv().getOrDefault("OLF_GPU_SA_CPU_THREADS", defaultThreads));
+        int cpuThreads = cpuThreadCount(network, contingencies, lfp);
         sap.addExtension(OpenSecurityAnalysisParameters.class,
                 new OpenSecurityAnalysisParameters().setThreadCount(cpuThreads));
 
@@ -1023,41 +930,7 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
                 ? java.util.Set.of()
                 : java.util.Arrays.stream(System.getenv("OLF_GPU_SA_MON_BRANCH").split(","))
                         .map(String::trim).collect(Collectors.toSet());
-        // OLF_GPU_SA_BUSDIFF_VL_STRIDE=<k>: every k-th voltage level in id order, so that thousands of monitored
-        // results fit the heap (network.xiidm: 4104 strategies x 13502 buses on each arm)
-        int vlStride = Integer.parseInt(System.getenv().getOrDefault("OLF_GPU_SA_BUSDIFF_VL_STRIDE", "1"));
-        List<String> vlIds = network.getVoltageLevelStream().map(com.powsybl.iidm.network.VoltageLevel::getId).sorted().toList();
-        java.util.Set<String> monVls = busDiff
-                ? java.util.stream.IntStream.range(0, vlIds.size()).filter(i -> i % vlStride == 0).mapToObj(vlIds::get)
-                        .collect(Collectors.toSet())
-                : java.util.Set.of();
-        // TWO monitors, not one. ContingencyContext.all() left the PRE-contingency network result
-        // EMPTY, so "BASE BUSDIFF buses>1e-12kV=0 of 0 | uncompared: cpu-only=0 gpu-only=0" was not
-        // a clean base - it was no base compared at all, in every run this test has ever done. A
-        // post-contingency difference cannot be attributed to the contingency until the BASE states
-        // are known to agree, so add an explicit N-state monitor.
-        List<com.powsybl.security.monitor.StateMonitor> monitors;
-        if (!busDiff && monBranches.isEmpty()) {
-            monitors = Collections.emptyList();
-        } else {
-            List<com.powsybl.security.monitor.StateMonitor> ms = new ArrayList<>();
-            if (busDiffCtgs.isEmpty()) {
-                ms.add(new com.powsybl.security.monitor.StateMonitor(
-                        com.powsybl.contingency.ContingencyContext.all(), monBranches,
-                        monVls, java.util.Set.of()));
-            } else {
-                // one scoped monitor per id, so the heap holds a handful of results, not 10540
-                for (String id : busDiffCtgs) {
-                    ms.add(new com.powsybl.security.monitor.StateMonitor(
-                            com.powsybl.contingency.ContingencyContext.specificContingency(id),
-                            monBranches, monVls, java.util.Set.of()));
-                }
-            }
-            ms.add(new com.powsybl.security.monitor.StateMonitor(
-                    com.powsybl.contingency.ContingencyContext.none(), monBranches,
-                    monVls, java.util.Set.of()));
-            monitors = List.copyOf(ms);
-        }
+        List<com.powsybl.security.monitor.StateMonitor> monitors = buildMonitors(network, busDiff, busDiffCtgs, monBranches);
         System.out.printf("  JVM max heap: %d MB%n", Runtime.getRuntime().maxMemory() >> 20);
         // Each arm's post-contingency bus voltages are streamed out of the heap before the next arm
         // runs (BusVoltageSpill); the raw result lives in a block so nothing keeps it reachable.
@@ -1070,45 +943,16 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
         // (sorted ids), so the two runs see the same network.
         String cpuArmDir = System.getenv("OLF_GPU_SA_CPU_ARM_DIR");
         String cpuArmMode = System.getenv().getOrDefault("OLF_GPU_SA_CPU_ARM_MODE", "");
-        BusVoltageSpill cpuSpill = null;
         // OLF_GPU_SA_NO_SPILL=1: keep every bus result in the result objects (a small list, read back afterwards)
         boolean spill = busDiff && !"1".equals(System.getenv("OLF_GPU_SA_NO_SPILL"));
         BusVoltageSpill gpuSpill = spill ? new BusVoltageSpill("gpu") : null;
-        SecurityAnalysisResult cpu;
-        long cpuMs;
-        if ("load".equals(cpuArmMode)) {
-            java.nio.file.Path dir = java.nio.file.Path.of(cpuArmDir);
-            cpu = com.powsybl.security.json.SecurityAnalysisResultDeserializer.read(dir.resolve("cpu.json"));
-            if (busDiff) {
-                cpuSpill = BusVoltageSpill.open(dir.resolve("cpu-busv.bin"), dir.resolve("cpu-busv.idx"));
-            }
-            cpuMs = Long.parseLong(java.nio.file.Files.readString(dir.resolve("cpu-ms.txt")).trim());
-            System.out.printf("  CPU arm loaded from %s (%d post-contingency results)%n", dir, cpu.getPostContingencyResults().size());
-        } else {
-            cpuSpill = spill ? new BusVoltageSpill("cpu") : null;
-            // OLF_GPU_SA_GPU_ONLY=1: debug lever - skip the CPU arm (run it on an EMPTY contingency
-            // list) so the GPU arm's own behaviour on a large scope can be traced in minutes.
-            // Every comparison below is then meaningless; only the GPU arm's lines are.
-            List<Contingency> cpuCtgs = "1".equals(System.getenv("OLF_GPU_SA_GPU_ONLY")) ? List.of() : contingencies;
-            SecurityAnalysisResult raw = runSa(network, cpuCtgs, monitors, sap);
-            cpuMs = (System.nanoTime() - cpuT0) / 1_000_000;
-            cpu = cpuSpill != null ? cpuSpill.spill(raw) : raw;
-            raw = null;                                          // the block alone did not free it: 6876 x 6877
-            System.gc();                                         // BusResult objects stayed reachable from the frame
-            if ("save".equals(cpuArmMode)) {
-                java.nio.file.Path dir = java.nio.file.Files.createDirectories(java.nio.file.Path.of(cpuArmDir));
-                try (java.io.Writer w = java.nio.file.Files.newBufferedWriter(dir.resolve("cpu.json"))) {
-                    com.powsybl.security.json.SecurityAnalysisResultSerializer.write(cpu, w);
-                }
-                if (cpuSpill != null) {
-                    cpuSpill.saveTo(dir.resolve("cpu-busv.bin"), dir.resolve("cpu-busv.idx"));
-                    cpuSpill.close();
-                }
-                java.nio.file.Files.writeString(dir.resolve("cpu-ms.txt"), Long.toString(cpuMs));
-                System.out.printf("  CPU_ARM_SAVED %s | %d ms | statuses %s%n", dir, cpuMs, statusCounts(cpu));
-                return;
-            }
+        CpuArm cpuArm = runCpuArm(cpuArmMode, cpuArmDir, busDiff, spill, network, contingencies, monitors, sap, cpuT0);
+        if (cpuArm == null) {
+            return;
         }
+        BusVoltageSpill cpuSpill = cpuArm.cpuSpill();
+        SecurityAnalysisResult cpu = cpuArm.cpu();
+        long cpuMs = cpuArm.cpuMs();
         // OLF_GPU_SA_CPU_WARM=1: time the CPU arm TWICE, like the GPU arm. The first CPU run is the JVM's first SA
         // and pays JIT compilation the GPU arms never see, so the cold-vs-cold ratio flatters the GPU. The ratios
         // are quoted against CPU warm. Not available with a loaded (separate-JVM) CPU arm.
@@ -1125,91 +969,12 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
         // GPU arm: single-thread, cold + warm runs
         securityAnalysisProvider = new GpuSecurityAnalysisProvider(new SparseMatrixFactory(),
                 new EvenShiloachGraphDecrementalConnectivityFactory<>());
-        SecurityAnalysisResult gpuCold;
-        SecurityAnalysisResult gpuWarm;
-        long gpuColdMs;
-        long gpuWarmMs;
-        try {
-            SecurityAnalysisParameters sapGpu = new SecurityAnalysisParameters();
-            sapGpu.setLoadFlowParameters(lfp);
-            sapGpu.setIncreasedViolationsParameters(sap.getIncreasedViolationsParameters());
-            // GPU runs host-single-threaded (threadCount > 1 → SIGSEGV in cuLaunchKernel)
-
-            GpuBatchScopeCensus.reset();
-            // OLF_GPU_SA_JFR=<file.jfr>: a Flight Recorder profile of the COLD GPU run only — network
-            // reading, the CPU arm and the warm run stay out of the samples.
-            String jfrOut = System.getenv("OLF_GPU_SA_JFR");
-            jdk.jfr.Recording jfr = null;
-            if (jfrOut != null) {
-                jfr = new jdk.jfr.Recording(jdk.jfr.Configuration.getConfiguration("profile"));
-                // OLF_GPU_SA_JFR_PERIOD_MS=<n>: sample Java AND native stacks every n ms ("profile" takes Java
-                // stacks every 10-20 ms and native ones apart, too coarse to split a ~1 s difference by method)
-                String period = System.getenv("OLF_GPU_SA_JFR_PERIOD_MS");
-                if (period != null) {
-                    java.time.Duration every = java.time.Duration.ofMillis(Long.parseLong(period));
-                    jfr.enable("jdk.ExecutionSample").withPeriod(every);
-                    jfr.enable("jdk.NativeMethodSample").withPeriod(every);
-                }
-                jfr.start();
-            }
-            armMark("gpu cold start");
-            long g0 = System.nanoTime();
-            {
-                SecurityAnalysisResult raw = runSa(networkGpuCold, contingencies, monitors, sapGpu);
-                gpuColdMs = (System.nanoTime() - g0) / 1_000_000;
-                gpuCold = gpuSpill != null ? gpuSpill.spill(raw) : raw;
-                raw = null;
-                System.gc();
-            }
-            armMark("gpu cold end");
-            if (jfr != null) {
-                jfr.stop();
-                jfr.dump(Path.of(jfrOut));
-                jfr.close();
-                System.out.printf("  JFR profile of the cold GPU run written to %s%n", jfrOut);
-            }
-
-            // Check census: how many contingencies fell back to CPU?
-            Map<String, Long> census = GpuBatchScopeCensus.snapshot();
-            System.out.printf("  GPU CENSUS (cold): %s%n", census);
-            int gpuPrecomputed = GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get();
-            // Two denominators, because they differ: the LIST, and the contingencies OLF actually simulates.
-            // A contingency OLF drops as having no impact has no result on either arm, so counting it against
-            // the batching share reports a GPU limitation that does not exist (209 of rte6515's 6876 busbar
-            // sections). The CPU arm's result count IS the simulated population.
-            int simulated = cpu.getPostContingencyResults().size();
-            if (simulated > 0) {                             // 0 under OLF_GPU_SA_GPU_ONLY: no CPU arm to count
-                System.out.printf("  GPU precomputed on device: %d / %d contingencies (%d of %d simulated;"
-                        + " %d simulated by neither arm)%n",
-                        gpuPrecomputed, contingencies.size(), gpuPrecomputed, simulated,
-                        contingencies.size() - simulated);
-            } else {
-                System.out.printf("  GPU precomputed on device: %d / %d contingencies%n",
-                        gpuPrecomputed, contingencies.size());
-            }
-
-            // OLF_GPU_SA_COLD_ONLY=1: no warm run (a profile of the cold run alone; "warm" then repeats cold).
-            if ("1".equals(System.getenv("OLF_GPU_SA_COLD_ONLY"))) {
-                gpuWarm = gpuCold;
-                gpuWarmMs = gpuColdMs;
-            } else {
-                GpuBatchScopeCensus.reset();
-                long g1 = System.nanoTime();
-                {
-                    SecurityAnalysisResult raw = runSa(networkGpuWarm, contingencies, monitors, sapGpu);
-                    gpuWarmMs = (System.nanoTime() - g1) / 1_000_000;
-                    gpuWarm = busDiff ? BusVoltageSpill.dropPostBusResults(raw) : raw;   // only its BASE is compared
-                    raw = null;
-                    System.gc();
-                }
-                Map<String, Long> censusWarm = GpuBatchScopeCensus.snapshot();
-                System.out.printf("  GPU CENSUS (warm): %s%n", censusWarm);
-                reportGpuSelfSpread(gpuCold, gpuWarm);
-            }
-        } finally {
-            securityAnalysisProvider = new OpenSecurityAnalysisProvider(new SparseMatrixFactory(),
-                    new EvenShiloachGraphDecrementalConnectivityFactory<>());
-        }
+        GpuArms runGpuArmsOut = runGpuArms(lfp, sap, networkGpuCold, contingencies, monitors, gpuSpill, cpu,
+                                           networkGpuWarm, busDiff);
+        SecurityAnalysisResult gpuCold = runGpuArmsOut.gpuCold();
+        SecurityAnalysisResult gpuWarm = runGpuArmsOut.gpuWarm();
+        long gpuColdMs = runGpuArmsOut.gpuColdMs();
+        long gpuWarmMs = runGpuArmsOut.gpuWarmMs();
 
         // Report timing
         int n = contingencies.size();
@@ -1232,77 +997,7 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
         // anchors its reactive-capability CURVE pack BEFORE the base load flow's own slack
         // distribution, which on rte6515 moves -28.26 pu, the same size as the contingency
         // redistributions that break the pack's proportional-share model.
-        {
-            Map<String, Double> gpuBaseV = new TreeMap<>();
-            gpuCold.getPreContingencyResult().getNetworkResult().getBusResults()
-                    .forEach(b -> gpuBaseV.put(b.getBusId(), b.getV()));
-            var cpuBase = cpu.getPreContingencyResult().getNetworkResult().getBusResults().stream()
-                    .filter(b -> gpuBaseV.containsKey(b.getBusId())).toList();
-            long above = cpuBase.stream().filter(b -> Math.abs(b.getV() - gpuBaseV.get(b.getBusId())) > 1e-12).count();
-            double worst = cpuBase.stream()
-                    .mapToDouble(b -> Math.abs(b.getV() - gpuBaseV.get(b.getBusId()))).max().orElse(0);
-            // The comparison can only cover buses BOTH arms reported. Say so out loud: a run whose two
-            // arms name their buses differently (busbar-section outages re-split the bus view) used to
-            // print "0 of 1" and read like a clean result, when it meant 29831 buses went uncompared.
-            // OLF_GPU_SA_MON_BUS also applies to the BASE. A post-contingency value that equals the
-            // base one to the last bit is a variable that never MOVED - which is what an
-            // unconstrained column looks like, and is indistinguishable from a solved value unless
-            // the base is printed next to it.
-            String monBase = System.getenv("OLF_GPU_SA_MON_BUS");
-            if (monBase != null) {
-                java.util.Set<String> wantBase = java.util.Set.of(monBase.split(","));
-                cpu.getPreContingencyResult().getNetworkResult().getBusResults().stream()
-                        .filter(b -> wantBase.contains(b.getBusId()) && gpuBaseV.containsKey(b.getBusId()))
-                        .forEach(b -> System.out.printf("  MONBUS-BASE bus=%s cpu=%.9f gpu=%.9f d=%.3e%n",
-                                b.getBusId(), b.getV(), gpuBaseV.get(b.getBusId()),
-                                b.getV() - gpuBaseV.get(b.getBusId())));
-            }
-            int cpuAll = cpu.getPreContingencyResult().getNetworkResult().getBusResults().size();
-            System.out.printf("  BASE BUSDIFF buses>1e-12kV=%d of %d | worst abs=%.3e kV"
-                            + " | uncompared: cpu-only=%d gpu-only=%d%n",
-                    above, cpuBase.size(), worst, cpuAll - cpuBase.size(), gpuBaseV.size() - cpuBase.size());
-            if (cpuAll != cpuBase.size() || gpuBaseV.size() != cpuBase.size()) {
-                // NOT APPLES TO APPLES. OLF's multi-threaded SA builds a partitionTopoConfig PER
-                // PARTITION and takes the pre-contingency result from one of them ("all pre contingency
-                // are the same" — which does not hold when the partitions retain different switches).
-                // The GPU arm is forced single-threaded (threadCount > 1 SIGSEGVs in cuLaunchKernel), so
-                // with busbar-section contingencies the two arms can end up on DIFFERENT bus
-                // decompositions entirely: measured at 60 busbar outages, CPU 29832 buses vs GPU 6877
-                // with ONE in common, which the intersection-only print rendered as a clean 1.4e-13.
-                // At matched thread counts the same cases agree BIT-IDENTICALLY (worst 0.0e+00).
-                System.out.printf("  BASE BUSDIFF: *** NOT COMPARABLE *** the arms disagree on the bus "
-                        + "decomposition (cpu=%d gpu=%d buses). Re-run with OLF_GPU_SA_CPU_THREADS=1 "
-                        + "before reading any number above.%n", cpuAll, gpuBaseV.size());
-            }
-            cpuBase.stream()
-                    .sorted(java.util.Comparator.comparingDouble(
-                            (com.powsybl.security.results.BusResult b) -> -Math.abs(b.getV() - gpuBaseV.get(b.getBusId()))))
-                    .limit(4)
-                    .forEach(b -> System.out.printf("      %s %.9f vs %.9f (%.3e)%n", b.getBusId(), b.getV(),
-                            gpuBaseV.get(b.getBusId()), b.getV() - gpuBaseV.get(b.getBusId())));
-
-            // The SAME arm against ITSELF. The cold and warm GPU runs solve the identical problem on
-            // identical fresh networks, so any difference between them is the device's own
-            // reproducibility floor — the fill kernels scatter with atomicAdd, whose summation order
-            // is not fixed, and on rte6515 with switches retained the Jacobian carries diagonals of
-            // 3.3e+04 (a retained switch is x ~ 3e-05 pu), where one ulp is 4e-12 absolute. Print it
-            // next to the CPU-vs-GPU number: a CPU-vs-GPU gap NO LARGER than the GPU-vs-GPU gap is
-            // arithmetic noise and there is no defect underneath it to find. A gap that is larger is
-            // a real disagreement and must be chased.
-            Map<String, Double> warmBaseV = new TreeMap<>();
-            gpuWarm.getPreContingencyResult().getNetworkResult().getBusResults()
-                    .forEach(b -> warmBaseV.put(b.getBusId(), b.getV()));
-            var selfPairs = gpuCold.getPreContingencyResult().getNetworkResult().getBusResults().stream()
-                    .filter(b -> warmBaseV.containsKey(b.getBusId())).toList();
-            double selfWorst = selfPairs.stream()
-                    .mapToDouble(b -> Math.abs(b.getV() - warmBaseV.get(b.getBusId()))).max().orElse(0);
-            long selfAbove = selfPairs.stream()
-                    .filter(b -> Math.abs(b.getV() - warmBaseV.get(b.getBusId())) > 1e-12).count();
-            System.out.printf("  BASE GPU-vs-GPU (cold vs warm, same arm) buses>1e-12kV=%d of %d"
-                            + " | worst abs=%.3e kV%n", selfAbove, selfPairs.size(), selfWorst);
-        }
-        {
-        }
+        reportBaseVoltages(gpuCold, cpu, gpuWarm);
 
         // OLF_GPU_SA_GPU_RESULT_DUMP=<file.json>: the cold GPU arm's result, in the same powsybl JSON as a saved CPU
         // arm's cpu.json, so the two can be compared value by value (the "violations" line below compares counts).
@@ -1338,6 +1033,249 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
         // and validates nothing. Split the two populations and name the one that IS a device failure: a
         // contingency the device declined and OLF converged.
         java.util.Set<String> onDevice = GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_IDS;
+        reportOnDeviceScope(onDevice, cpu);
+        if (!mismatched.isEmpty()) {
+            System.out.printf("  STATUS MISMATCHES (%d): %s%n", mismatched.size(),
+                    mismatched.subList(0, Math.min(20, mismatched.size())));
+        }
+
+        // Per-contingency violation diff: identify WHICH contingencies have differing violation counts
+        Map<String, List<com.powsybl.contingency.violations.LimitViolation>> cpuViolByCtg = new TreeMap<>();
+        Map<String, List<com.powsybl.contingency.violations.LimitViolation>> gpuViolByCtg = new TreeMap<>();
+        cpu.getPostContingencyResults().forEach(p -> cpuViolByCtg.put(p.getContingency().getId(),
+                p.getLimitViolationsResult().getLimitViolations()));
+        gpuCold.getPostContingencyResults().forEach(p -> gpuViolByCtg.put(p.getContingency().getId(),
+                p.getLimitViolationsResult().getLimitViolations()));
+        reportMonitoredBranches(monBranches, gpuWarm, cpu);
+        reportBusVoltageDiffs(busDiff, spill, cpu, gpuCold, gpuSpill, cpuSpill);
+        if (cpuSpill != null) {
+            cpuSpill.close();
+        }
+        if (gpuSpill != null) {
+            gpuSpill.close();
+        }
+        // The UNION of both key sets, not just the CPU's. The violation-diff metric is a TOTAL
+        // (|cpuViolations - gpuViolations|), so a contingency present in ONE arm's results and not
+        // the other contributes to it while an iteration over cpuViolByCtg alone never visits it —
+        // measured at 500 busbar sections as "violation diff: 1" with no VIOL-DIFF line printed,
+        // which reads as "nothing differs" and is the same intersection-only trap the bus diff's
+        // uncompared counters exist to close.
+        java.util.Set<String> allCtgIds = new TreeSet<>(cpuViolByCtg.keySet());
+        allCtgIds.addAll(gpuViolByCtg.keySet());
+        reportViolationDiffs(allCtgIds, cpuViolByCtg, gpuViolByCtg, cpu, network);
+
+        List<String> strategyMismatches = compareStrategies(cpu, gpuCold);
+
+        // ASSERTIONS
+        // after every per-contingency diff line, so a failing run still says whether the STATES agree
+        reportTriple();
+        // before any assertion: a failing run is exactly when the joined table is wanted
+        assertTrue(strategyMismatches.isEmpty(), "operator strategy results must match the CPU: " + strategyMismatches.size()
+                + " differ " + strategyMismatches.subList(0, Math.min(20, strategyMismatches.size())));
+        assertTrue(worstDistributed < 1e-3, "distributed active power must match the CPU: worst " + worstDistributed + " MW");
+        assertEquals(statusCounts(cpu), statusCounts(gpuCold),
+                "post-contingency status counts must match CPU");
+        // per contingency, not only the counts: a device convergence where OLF fails and a device failure where
+        // OLF converges cancel in the counts, and either one alone is a bug
+        assertTrue(mismatched.isEmpty(), "post-contingency status must match CPU per contingency: " + mismatched.size()
+                + " differ " + mismatched.subList(0, Math.min(20, mismatched.size())));
+        // Violation count: allow a small tolerance for border flips (ulp-level value near limit).
+        // With powsybl's 0-default thresholds every solver-tolerance flicker re-reports; the
+        // increased-violations thresholds above suppress most, but a few (measured: 2 out of 583k)
+        // remain at the criterion's slack. Assert the diff is under 0.01% of the total.
+        // |cpuViolations - gpuViolations| is a SIGNED NET over the whole run and lets real
+        // disagreements CANCEL: measured at 500 busbar sections as "violation diff: 1 (0.0027%)",
+        // which reads as clean, while the per-contingency lines showed TEN differing contingencies
+        // including one at +6. Sum the ABSOLUTE per-contingency deltas instead, so nothing cancels,
+        // and report the differing-contingency count next to it - the same lesson as the
+        // intersection-only bus diff, one level up.
+        long violDiff = 0;
+        int differingCtg = 0;
+        for (String ctgId : allCtgIds) {
+            int d = gpuViolByCtg.getOrDefault(ctgId, List.of()).size()
+                    - cpuViolByCtg.getOrDefault(ctgId, List.of()).size();
+            if (d != 0) {
+                violDiff += Math.abs(d);
+                differingCtg++;
+            }
+        }
+        long netDiff = Math.abs(cpuViolations - gpuViolations);
+        double violDiffPct = cpuViolations > 0 ? 100.0 * violDiff / cpuViolations : 0;
+        System.out.printf("  violation diff: %d over %d contingencies (%.4f%%) | signed net %d%n",
+                violDiff, differingCtg, violDiffPct, netDiff);
+        assertTrue(violDiffPct < 0.01,
+                "violation diff " + violDiff + " over " + differingCtg + " contingencies ("
+                        + violDiffPct + "%) exceeds 0.01% threshold");
+    }
+
+    /** OLF_GPU_DBG_NR: the Newton-Raphson debug parameters. */
+    private void applyNewtonDebug() {
+        if (System.getenv("OLF_GPU_DBG_NR") != null) {
+            ch.qos.logback.classic.encoder.PatternLayoutEncoder nrEnc =
+                    new ch.qos.logback.classic.encoder.PatternLayoutEncoder();
+            ch.qos.logback.classic.Logger nrRoot = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory
+                    .getLogger(org.slf4j.Logger.ROOT_LOGGER_NAME);
+            nrEnc.setContext(nrRoot.getLoggerContext());
+            nrEnc.setPattern("CPU_NR %logger{0} %msg%n");
+            nrEnc.start();
+            ch.qos.logback.core.ConsoleAppender<ch.qos.logback.classic.spi.ILoggingEvent> nrApp =
+                    new ch.qos.logback.core.ConsoleAppender<>();
+            nrApp.setContext(nrRoot.getLoggerContext());
+            nrApp.setEncoder(nrEnc);
+            nrApp.start();
+            // AcloadFlowEngine logs "Start outer loop '<name>' iteration <n>", the CPU counterpart of the
+            // device's OLF_GPU_BATCH_TRACE pass line: the two SEQUENCES are what say whether the device ran
+            // the same loop, in the same order, the same number of times.
+            for (String n : new String[] {"com.powsybl.openloadflow.ac.solver.NewtonRaphson",
+                                          "com.powsybl.openloadflow.ac.solver.MaxVoltageChangeStateVectorScaling",
+                                          "com.powsybl.openloadflow.ac.AcloadFlowEngine",
+                                          // "Contingency '<id>' impact on network ..." (DEBUG): heads each
+                                          // post-contingency block, so a block can be addressed by id inside
+                                          // the full window (with OLF_GPU_SA_CPU_THREADS=1 they do not interleave)
+                                          "com.powsybl.openloadflow.sa.AbstractSecurityAnalysis"}) {
+                ch.qos.logback.classic.Logger lg = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(n);
+                lg.setLevel(ch.qos.logback.classic.Level.DEBUG);
+                lg.setAdditive(false);
+                lg.addAppender(nrApp);
+            }
+        }
+    }
+
+    /** OLF_GPU_DBG_RL: the reactive-limit loop's debug parameters. */
+    private void applyReactiveLimitsDebug() {
+        if (System.getenv("OLF_GPU_DBG_RL") != null) {
+            ch.qos.logback.classic.Logger rlLog = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory
+                    .getLogger("com.powsybl.openloadflow.ac.outerloop.ReactiveLimitsOuterLoop");
+            rlLog.setLevel(ch.qos.logback.classic.Level.TRACE);
+            // The voltage-MONITORING loop too (standby SVC automata): its PQ->PV activations are the
+            // other per-contingency DECISION the two arms can disagree on, and like a pin they leave
+            // no residual - only the two decision logs tell them apart.
+            ch.qos.logback.classic.Logger monLog = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory
+                    .getLogger("com.powsybl.openloadflow.ac.outerloop.MonitoringVoltageOuterLoop");
+            monLog.setLevel(ch.qos.logback.classic.Level.TRACE);
+            // ...and the HVDC AC-emulation freeze: its per-contingency setpoint (Reports.reportFreezeHvdc,
+            // INFO) is the third decision that leaves no residual - the frozen P IS the equation.
+            ch.qos.logback.classic.Logger hvLog = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory
+                    .getLogger("com.powsybl.openloadflow.ac.outerloop.FreezingHvdcACEmulationOuterloop");
+            hvLog.setLevel(ch.qos.logback.classic.Level.TRACE);
+            ch.qos.logback.classic.Logger root = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory
+                    .getLogger(org.slf4j.Logger.ROOT_LOGGER_NAME);
+            if (!root.iteratorForAppenders().hasNext()) {
+                ch.qos.logback.classic.encoder.PatternLayoutEncoder enc =
+                        new ch.qos.logback.classic.encoder.PatternLayoutEncoder();
+                enc.setContext(root.getLoggerContext());
+                enc.setPattern("CPU_RL %msg%n");
+                enc.start();
+                ch.qos.logback.core.ConsoleAppender<ch.qos.logback.classic.spi.ILoggingEvent> ca =
+                        new ch.qos.logback.core.ConsoleAppender<>();
+                ca.setContext(root.getLoggerContext());
+                ca.setEncoder(enc);
+                ca.start();
+                rlLog.addAppender(ca);
+                monLog.addAppender(ca);
+                hvLog.addAppender(ca);
+            }
+        }
+    }
+
+    /** OLF_GPU_SVC=1: the secondary voltage control scope (the parameters and the network settings it needs). */
+    private void applySvcScope(final LoadFlowParameters lfp, final Network network) {
+        if ("1".equals(System.getenv("OLF_GPU_SVC"))) {
+            com.powsybl.openloadflow.OpenLoadFlowParameters.get(lfp).setSecondaryVoltageControl(true);
+            System.out.println("  SVC enabled (OLF_GPU_SVC=1)");
+            // OLF_GPU_SVC_PILOT_SHIFT=<kV>: move EVERY zone's pilot-point target so the loop actually
+            // FIRES (with the case's own targets it is stable at the base and on every contingency).
+            // rte6515 carries two zones — shifting only one leaves the other's controllers idle and the
+            // run then exercises half the zone systems.
+            String shift = System.getenv("OLF_GPU_SVC_PILOT_SHIFT");
+            var svc = network.getExtension(com.powsybl.iidm.network.extensions.SecondaryVoltageControl.class);
+            if (shift != null && svc != null) {
+                for (var zone : svc.getControlZones()) {
+                    var pilot = zone.getPilotPoint();
+                    double before = pilot.getTargetV();
+                    pilot.setTargetV(before + Double.parseDouble(shift));
+                    System.out.printf("  SVC pilot '%s' target %.3f -> %.3f kV (%d control units)%n",
+                            zone.getName(), before, pilot.getTargetV(), zone.getControlUnits().size());
+                }
+            }
+        }
+    }
+
+    /** The BASE load flow, bus by bus: every post-contingency state is computed from the base, so a base that
+     *  differs puts a floor under every contingency, which post-contingency comparisons cannot see. */
+    private void reportBaseVoltages(final SecurityAnalysisResult gpuCold, final SecurityAnalysisResult cpu,
+                                    final SecurityAnalysisResult gpuWarm) {
+        Map<String, Double> gpuBaseV = new TreeMap<>();
+        gpuCold.getPreContingencyResult().getNetworkResult().getBusResults()
+                .forEach(b -> gpuBaseV.put(b.getBusId(), b.getV()));
+        var cpuBase = cpu.getPreContingencyResult().getNetworkResult().getBusResults().stream()
+                .filter(b -> gpuBaseV.containsKey(b.getBusId())).toList();
+        long above = cpuBase.stream().filter(b -> Math.abs(b.getV() - gpuBaseV.get(b.getBusId())) > 1e-12).count();
+        double worst = cpuBase.stream()
+                .mapToDouble(b -> Math.abs(b.getV() - gpuBaseV.get(b.getBusId()))).max().orElse(0);
+        // The comparison can only cover buses BOTH arms reported. Say so out loud: a run whose two
+        // arms name their buses differently (busbar-section outages re-split the bus view) used to
+        // print "0 of 1" and read like a clean result, when it meant 29831 buses went uncompared.
+        // OLF_GPU_SA_MON_BUS also applies to the BASE. A post-contingency value that equals the
+        // base one to the last bit is a variable that never MOVED - which is what an
+        // unconstrained column looks like, and is indistinguishable from a solved value unless
+        // the base is printed next to it.
+        String monBase = System.getenv("OLF_GPU_SA_MON_BUS");
+        if (monBase != null) {
+            java.util.Set<String> wantBase = java.util.Set.of(monBase.split(","));
+            cpu.getPreContingencyResult().getNetworkResult().getBusResults().stream()
+                    .filter(b -> wantBase.contains(b.getBusId()) && gpuBaseV.containsKey(b.getBusId()))
+                    .forEach(b -> System.out.printf("  MONBUS-BASE bus=%s cpu=%.9f gpu=%.9f d=%.3e%n",
+                            b.getBusId(), b.getV(), gpuBaseV.get(b.getBusId()),
+                            b.getV() - gpuBaseV.get(b.getBusId())));
+        }
+        int cpuAll = cpu.getPreContingencyResult().getNetworkResult().getBusResults().size();
+        System.out.printf("  BASE BUSDIFF buses>1e-12kV=%d of %d | worst abs=%.3e kV"
+                        + " | uncompared: cpu-only=%d gpu-only=%d%n",
+                above, cpuBase.size(), worst, cpuAll - cpuBase.size(), gpuBaseV.size() - cpuBase.size());
+        if (cpuAll != cpuBase.size() || gpuBaseV.size() != cpuBase.size()) {
+            // NOT APPLES TO APPLES. OLF's multi-threaded SA builds a partitionTopoConfig PER
+            // PARTITION and takes the pre-contingency result from one of them ("all pre contingency
+            // are the same" — which does not hold when the partitions retain different switches).
+            // The GPU arm is forced single-threaded (threadCount > 1 SIGSEGVs in cuLaunchKernel), so
+            // with busbar-section contingencies the two arms can end up on DIFFERENT bus
+            // decompositions entirely: measured at 60 busbar outages, CPU 29832 buses vs GPU 6877
+            // with ONE in common, which the intersection-only print rendered as a clean 1.4e-13.
+            // At matched thread counts the same cases agree BIT-IDENTICALLY (worst 0.0e+00).
+            System.out.printf("  BASE BUSDIFF: *** NOT COMPARABLE *** the arms disagree on the bus "
+                    + "decomposition (cpu=%d gpu=%d buses). Re-run with OLF_GPU_SA_CPU_THREADS=1 "
+                    + "before reading any number above.%n", cpuAll, gpuBaseV.size());
+        }
+        cpuBase.stream()
+                .sorted(java.util.Comparator.comparingDouble(
+                        (com.powsybl.security.results.BusResult b) -> -Math.abs(b.getV() - gpuBaseV.get(b.getBusId()))))
+                .limit(4)
+                .forEach(b -> System.out.printf("      %s %.9f vs %.9f (%.3e)%n", b.getBusId(), b.getV(),
+                        gpuBaseV.get(b.getBusId()), b.getV() - gpuBaseV.get(b.getBusId())));
+
+        // The SAME arm against ITSELF. The cold and warm GPU runs solve the identical problem on
+        // identical fresh networks, so any difference between them is the device's own
+        // reproducibility floor — the fill kernels scatter with atomicAdd, whose summation order
+        // is not fixed, and on rte6515 with switches retained the Jacobian carries diagonals of
+        // 3.3e+04 (a retained switch is x ~ 3e-05 pu), where one ulp is 4e-12 absolute. Print it
+        // next to the CPU-vs-GPU number: a CPU-vs-GPU gap NO LARGER than the GPU-vs-GPU gap is
+        // arithmetic noise and there is no defect underneath it to find. A gap that is larger is
+        // a real disagreement and must be chased.
+        Map<String, Double> warmBaseV = new TreeMap<>();
+        gpuWarm.getPreContingencyResult().getNetworkResult().getBusResults()
+                .forEach(b -> warmBaseV.put(b.getBusId(), b.getV()));
+        var selfPairs = gpuCold.getPreContingencyResult().getNetworkResult().getBusResults().stream()
+                .filter(b -> warmBaseV.containsKey(b.getBusId())).toList();
+        double selfWorst = selfPairs.stream()
+                .mapToDouble(b -> Math.abs(b.getV() - warmBaseV.get(b.getBusId()))).max().orElse(0);
+        long selfAbove = selfPairs.stream()
+                .filter(b -> Math.abs(b.getV() - warmBaseV.get(b.getBusId())) > 1e-12).count();
+        System.out.printf("  BASE GPU-vs-GPU (cold vs warm, same arm) buses>1e-12kV=%d of %d"
+                        + " | worst abs=%.3e kV%n", selfAbove, selfPairs.size(), selfWorst);
+    }
+
+    /** The contingencies the device answered: how many, and which of the mismatched ones were among them. */
+    private void reportOnDeviceScope(final java.util.Set<String> onDevice, final SecurityAnalysisResult cpu) {
         if (!onDevice.isEmpty()) {
             List<String> declinedButOlfConverged = cpu.getPostContingencyResults().stream()
                     .filter(p -> !onDevice.contains(p.getContingency().getId()))
@@ -1373,18 +1311,11 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
             System.out.printf("  STATUS COMPARISON covers the %d device-solved contingencies; for the rest both"
                     + " arms report the SAME CPU computation%n", onDevice.size());
         }
-        if (!mismatched.isEmpty()) {
-            System.out.printf("  STATUS MISMATCHES (%d): %s%n", mismatched.size(),
-                    mismatched.subList(0, Math.min(20, mismatched.size())));
-        }
+    }
 
-        // Per-contingency violation diff: identify WHICH contingencies have differing violation counts
-        Map<String, List<com.powsybl.contingency.violations.LimitViolation>> cpuViolByCtg = new TreeMap<>();
-        Map<String, List<com.powsybl.contingency.violations.LimitViolation>> gpuViolByCtg = new TreeMap<>();
-        cpu.getPostContingencyResults().forEach(p -> cpuViolByCtg.put(p.getContingency().getId(),
-                p.getLimitViolationsResult().getLimitViolations()));
-        gpuCold.getPostContingencyResults().forEach(p -> gpuViolByCtg.put(p.getContingency().getId(),
-                p.getLimitViolationsResult().getLimitViolations()));
+    /** The monitored branches' flows in both arms (OLF_GPU_SA_MON_BRANCH). */
+    private void reportMonitoredBranches(final java.util.Set<String> monBranches,
+                                         final SecurityAnalysisResult gpuWarm, final SecurityAnalysisResult cpu) {
         if (!monBranches.isEmpty()) {
             Map<String, com.powsybl.security.results.BranchResult> gpuBr = new TreeMap<>();
             for (var gp : gpuWarm.getPostContingencyResults()) {
@@ -1412,6 +1343,13 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
                 }
             }
         }
+    }
+
+    /** The post-contingency bus voltages of both arms, compared contingency by contingency from the spilled
+     *  results. */
+    private void reportBusVoltageDiffs(final boolean busDiff, final boolean spill, final SecurityAnalysisResult cpu,
+                                       final SecurityAnalysisResult gpuCold, final BusVoltageSpill gpuSpill,
+                                       final BusVoltageSpill cpuSpill) throws java.io.IOException {
         if (busDiff && spill) {
             for (var cp : cpu.getPostContingencyResults()) {
                 var gp = gpuCold.getPostContingencyResults().stream()
@@ -1478,20 +1416,14 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
                 }
             }
         }
-        if (cpuSpill != null) {
-            cpuSpill.close();
-        }
-        if (gpuSpill != null) {
-            gpuSpill.close();
-        }
-        // The UNION of both key sets, not just the CPU's. The violation-diff metric is a TOTAL
-        // (|cpuViolations - gpuViolations|), so a contingency present in ONE arm's results and not
-        // the other contributes to it while an iteration over cpuViolByCtg alone never visits it —
-        // measured at 500 busbar sections as "violation diff: 1" with no VIOL-DIFF line printed,
-        // which reads as "nothing differs" and is the same intersection-only trap the bus diff's
-        // uncompared counters exist to close.
-        java.util.Set<String> allCtgIds = new TreeSet<>(cpuViolByCtg.keySet());
-        allCtgIds.addAll(gpuViolByCtg.keySet());
+    }
+
+    /** Every contingency whose violations differ between the arms, over the union of both arms' ids (a contingency
+     *  present in one arm only is listed too). */
+    private void reportViolationDiffs(final java.util.Set<String> allCtgIds,
+                                      final Map<String, List<com.powsybl.contingency.violations.LimitViolation>> cpuViolByCtg,
+                                      final Map<String, List<com.powsybl.contingency.violations.LimitViolation>> gpuViolByCtg,
+                                      final SecurityAnalysisResult cpu, final Network network) {
         for (String ctgId : allCtgIds) {
             boolean cpuHas = cpuViolByCtg.containsKey(ctgId);
             boolean gpuHas = gpuViolByCtg.containsKey(ctgId);
@@ -1551,49 +1483,6 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
                 }
             }
         }
-
-        List<String> strategyMismatches = compareStrategies(cpu, gpuCold);
-
-        // ASSERTIONS
-        // after every per-contingency diff line, so a failing run still says whether the STATES agree
-        reportTriple();
-        // before any assertion: a failing run is exactly when the joined table is wanted
-        assertTrue(strategyMismatches.isEmpty(), "operator strategy results must match the CPU: " + strategyMismatches.size()
-                + " differ " + strategyMismatches.subList(0, Math.min(20, strategyMismatches.size())));
-        assertTrue(worstDistributed < 1e-3, "distributed active power must match the CPU: worst " + worstDistributed + " MW");
-        assertEquals(statusCounts(cpu), statusCounts(gpuCold),
-                "post-contingency status counts must match CPU");
-        // per contingency, not only the counts: a device convergence where OLF fails and a device failure where
-        // OLF converges cancel in the counts, and either one alone is a bug
-        assertTrue(mismatched.isEmpty(), "post-contingency status must match CPU per contingency: " + mismatched.size()
-                + " differ " + mismatched.subList(0, Math.min(20, mismatched.size())));
-        // Violation count: allow a small tolerance for border flips (ulp-level value near limit).
-        // With powsybl's 0-default thresholds every solver-tolerance flicker re-reports; the
-        // increased-violations thresholds above suppress most, but a few (measured: 2 out of 583k)
-        // remain at the criterion's slack. Assert the diff is under 0.01% of the total.
-        // |cpuViolations - gpuViolations| is a SIGNED NET over the whole run and lets real
-        // disagreements CANCEL: measured at 500 busbar sections as "violation diff: 1 (0.0027%)",
-        // which reads as clean, while the per-contingency lines showed TEN differing contingencies
-        // including one at +6. Sum the ABSOLUTE per-contingency deltas instead, so nothing cancels,
-        // and report the differing-contingency count next to it - the same lesson as the
-        // intersection-only bus diff, one level up.
-        long violDiff = 0;
-        int differingCtg = 0;
-        for (String ctgId : allCtgIds) {
-            int d = gpuViolByCtg.getOrDefault(ctgId, List.of()).size()
-                    - cpuViolByCtg.getOrDefault(ctgId, List.of()).size();
-            if (d != 0) {
-                violDiff += Math.abs(d);
-                differingCtg++;
-            }
-        }
-        long netDiff = Math.abs(cpuViolations - gpuViolations);
-        double violDiffPct = cpuViolations > 0 ? 100.0 * violDiff / cpuViolations : 0;
-        System.out.printf("  violation diff: %d over %d contingencies (%.4f%%) | signed net %d%n",
-                violDiff, differingCtg, violDiffPct, netDiff);
-        assertTrue(violDiffPct < 0.01,
-                "violation diff " + violDiff + " over " + differingCtg + " contingencies ("
-                        + violDiffPct + "%) exceeds 0.01% threshold");
     }
 
     private List<com.powsybl.contingency.strategy.OperatorStrategy> strategies = List.of();
@@ -1602,7 +1491,8 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
     private SecurityAnalysisResult runSa(Network n, List<Contingency> ctgs, List<com.powsybl.security.monitor.StateMonitor> monitors,
                                          SecurityAnalysisParameters sap) {
         return strategies.isEmpty() ? runSecurityAnalysis(n, ctgs, monitors, sap)
-                : runSecurityAnalysis(n, ctgs, monitors, sap, strategies, actions, com.powsybl.commons.report.ReportNode.NO_OP);
+                : runSecurityAnalysis(n, ctgs, monitors, sap, strategies, actions,
+                                      com.powsybl.commons.report.ReportNode.NO_OP);
     }
 
     /**
@@ -1928,5 +1818,220 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
             System.out.printf("  ARM_MARK %s uptime=%d ms live heap=%d MB%n", what, uptime,
                     (rt.totalMemory() - rt.freeMemory()) >> 20);
         }
+    }
+
+    /** {@code contingencies} with the listed ids moved to the front, in the listed order; the rest keep theirs. */
+    private static List<Contingency> moveToFront(List<Contingency> contingencies, String ctgFirst) {
+        List<String> wanted = java.util.Arrays.stream(ctgFirst.split(",")).map(String::trim).toList();
+        List<Contingency> head = new ArrayList<>();
+        for (String w : wanted) {
+            contingencies.stream().filter(c -> c.getId().equals(w)).findFirst().ifPresent(head::add);
+        }
+        List<Contingency> reordered = new ArrayList<>(head);
+        for (Contingency c : contingencies) {
+            if (head.stream().noneMatch(h -> h.getId().equals(c.getId()))) {
+                reordered.add(c);
+            }
+        }
+        System.out.printf("  CTG_FIRST: %s moved to the front (list otherwise unchanged)%n", head.stream().map(Contingency::getId).toList());
+        return reordered;
+    }
+
+    /** The CPU arm's thread count: one in breaker mode (see the call site), eight otherwise; OLF_GPU_SA_CPU_THREADS overrides. */
+    private static int cpuThreadCount(Network network, List<Contingency> contingencies, LoadFlowParameters lfp) {
+        com.powsybl.openloadflow.network.LfTopoConfig probeTopoConfig =
+                new com.powsybl.openloadflow.network.LfTopoConfig();
+        com.powsybl.openloadflow.network.impl.PropagatedContingency.createList(network, contingencies, probeTopoConfig,
+                new com.powsybl.openloadflow.network.impl.PropagatedContingencyCreationParameters()
+                        .setContingencyPropagation(true)
+                        .setShuntCompensatorVoltageControlOn(lfp.isShuntCompensatorVoltageControlOn())
+                        .setSlackDistributionOnConformLoad(lfp.getBalanceType()
+                                == com.powsybl.loadflow.LoadFlowParameters.BalanceType.PROPORTIONAL_TO_CONFORM_LOAD)
+                        .setHvdcAcEmulation(lfp.isHvdcAcEmulation()));
+        String defaultThreads = probeTopoConfig.isBreaker() ? "1" : "8";
+        return Integer.parseInt(System.getenv().getOrDefault("OLF_GPU_SA_CPU_THREADS", defaultThreads));
+    }
+
+    /** The state monitors: bus voltages under OLF_GPU_SA_BUSDIFF*, the OLF_GPU_SA_MON_BRANCH flows, and the N state. */
+    private static List<com.powsybl.security.monitor.StateMonitor> buildMonitors(Network network, boolean busDiff,
+                                                                              java.util.Set<String> busDiffCtgs,
+                                                                              java.util.Set<String> monBranches) {
+        if (!busDiff && monBranches.isEmpty()) {
+            return Collections.emptyList();
+        }
+        // OLF_GPU_SA_BUSDIFF_VL_STRIDE=<k>: every k-th voltage level in id order, so that thousands of monitored
+        // results fit the heap (network.xiidm: 4104 strategies x 13502 buses on each arm)
+        int vlStride = Integer.parseInt(System.getenv().getOrDefault("OLF_GPU_SA_BUSDIFF_VL_STRIDE", "1"));
+        List<String> vlIds = network.getVoltageLevelStream().map(com.powsybl.iidm.network.VoltageLevel::getId).sorted().toList();
+        java.util.Set<String> monVls = busDiff
+                ? java.util.stream.IntStream.range(0, vlIds.size()).filter(i -> i % vlStride == 0).mapToObj(vlIds::get)
+                        .collect(Collectors.toSet())
+                : java.util.Set.of();
+        // TWO monitors, not one. ContingencyContext.all() left the PRE-contingency network result
+        // EMPTY, so "BASE BUSDIFF buses>1e-12kV=0 of 0 | uncompared: cpu-only=0 gpu-only=0" was not
+        // a clean base - it was no base compared at all, in every run this test has ever done. A
+        // post-contingency difference cannot be attributed to the contingency until the BASE states
+        // are known to agree, so add an explicit N-state monitor.
+        List<com.powsybl.security.monitor.StateMonitor> ms = new ArrayList<>();
+        if (busDiffCtgs.isEmpty()) {
+            ms.add(new com.powsybl.security.monitor.StateMonitor(
+                    com.powsybl.contingency.ContingencyContext.all(), monBranches,
+                    monVls, java.util.Set.of()));
+        } else {
+            // one scoped monitor per id, so the heap holds a handful of results, not 10540
+            for (String id : busDiffCtgs) {
+                ms.add(new com.powsybl.security.monitor.StateMonitor(
+                        com.powsybl.contingency.ContingencyContext.specificContingency(id),
+                        monBranches, monVls, java.util.Set.of()));
+            }
+        }
+        ms.add(new com.powsybl.security.monitor.StateMonitor(
+                com.powsybl.contingency.ContingencyContext.none(), monBranches,
+                monVls, java.util.Set.of()));
+        return List.copyOf(ms);
+    }
+
+    /**
+     * The CPU arm: run now, or loaded from a saved arm (OLF_GPU_SA_CPU_ARM_DIR / _MODE). Null once the arm was
+     * saved, which ends the test.
+     */
+    private CpuArm runCpuArm(String cpuArmMode, String cpuArmDir, boolean busDiff, boolean spill, Network network,
+                             List<Contingency> contingencies, List<com.powsybl.security.monitor.StateMonitor> monitors,
+                             SecurityAnalysisParameters sap, long cpuT0) throws java.io.IOException {
+        BusVoltageSpill cpuSpill = null;
+        SecurityAnalysisResult cpu;
+        long cpuMs;
+        if ("load".equals(cpuArmMode)) {
+            java.nio.file.Path dir = java.nio.file.Path.of(cpuArmDir);
+            cpu = com.powsybl.security.json.SecurityAnalysisResultDeserializer.read(dir.resolve("cpu.json"));
+            if (busDiff) {
+                cpuSpill = BusVoltageSpill.open(dir.resolve("cpu-busv.bin"), dir.resolve("cpu-busv.idx"));
+            }
+            cpuMs = Long.parseLong(java.nio.file.Files.readString(dir.resolve("cpu-ms.txt")).trim());
+            System.out.printf("  CPU arm loaded from %s (%d post-contingency results)%n", dir, cpu.getPostContingencyResults().size());
+        } else {
+            cpuSpill = spill ? new BusVoltageSpill("cpu") : null;
+            // OLF_GPU_SA_GPU_ONLY=1: debug lever - skip the CPU arm (run it on an EMPTY contingency
+            // list) so the GPU arm's own behaviour on a large scope can be traced in minutes.
+            // Every comparison below is then meaningless; only the GPU arm's lines are.
+            List<Contingency> cpuCtgs = "1".equals(System.getenv("OLF_GPU_SA_GPU_ONLY")) ? List.of() : contingencies;
+            SecurityAnalysisResult raw = runSa(network, cpuCtgs, monitors, sap);
+            cpuMs = (System.nanoTime() - cpuT0) / 1_000_000;
+            cpu = cpuSpill != null ? cpuSpill.spill(raw) : raw;
+            raw = null;                                          // the block alone did not free it: 6876 x 6877
+            System.gc();                                         // BusResult objects stayed reachable from the frame
+            if ("save".equals(cpuArmMode)) {
+                java.nio.file.Path dir = java.nio.file.Files.createDirectories(java.nio.file.Path.of(cpuArmDir));
+                try (java.io.Writer w = java.nio.file.Files.newBufferedWriter(dir.resolve("cpu.json"))) {
+                    com.powsybl.security.json.SecurityAnalysisResultSerializer.write(cpu, w);
+                }
+                if (cpuSpill != null) {
+                    cpuSpill.saveTo(dir.resolve("cpu-busv.bin"), dir.resolve("cpu-busv.idx"));
+                    cpuSpill.close();
+                }
+                java.nio.file.Files.writeString(dir.resolve("cpu-ms.txt"), Long.toString(cpuMs));
+                System.out.printf("  CPU_ARM_SAVED %s | %d ms | statuses %s%n", dir, cpuMs, statusCounts(cpu));
+                return null;
+            }
+        }
+        return new CpuArm(cpuSpill, cpu, cpuMs);
+    }
+
+    private record CpuArm(BusVoltageSpill cpuSpill, SecurityAnalysisResult cpu, long cpuMs) {
+    }
+
+    /** The two GPU arms, cold then warm (the warm one only when asked), each timed, with the scope census between
+     *  them. */
+    private GpuArms runGpuArms(final LoadFlowParameters lfp, final SecurityAnalysisParameters sap,
+                               final Network networkGpuCold, final List<Contingency> contingencies,
+                               final List<com.powsybl.security.monitor.StateMonitor> monitors, final BusVoltageSpill gpuSpill,
+                               final SecurityAnalysisResult cpu, final Network networkGpuWarm, final boolean busDiff)
+                               throws java.io.IOException, java.text.ParseException {
+        SecurityAnalysisResult gpuCold;
+        SecurityAnalysisResult gpuWarm;
+        long gpuColdMs;
+        long gpuWarmMs;
+        try {
+            SecurityAnalysisParameters sapGpu = new SecurityAnalysisParameters();
+            sapGpu.setLoadFlowParameters(lfp);
+            sapGpu.setIncreasedViolationsParameters(sap.getIncreasedViolationsParameters());
+            // GPU runs host-single-threaded (threadCount > 1 → SIGSEGV in cuLaunchKernel)
+
+            GpuBatchScopeCensus.reset();
+            // OLF_GPU_SA_JFR=<file.jfr>: a Flight Recorder profile of the COLD GPU run only — network
+            // reading, the CPU arm and the warm run stay out of the samples.
+            String jfrOut = System.getenv("OLF_GPU_SA_JFR");
+            jdk.jfr.Recording jfr = null;
+            if (jfrOut != null) {
+                jfr = new jdk.jfr.Recording(jdk.jfr.Configuration.getConfiguration("profile"));
+                // OLF_GPU_SA_JFR_PERIOD_MS=<n>: sample Java AND native stacks every n ms ("profile" takes Java
+                // stacks every 10-20 ms and native ones apart, too coarse to split a ~1 s difference by method)
+                String period = System.getenv("OLF_GPU_SA_JFR_PERIOD_MS");
+                if (period != null) {
+                    java.time.Duration every = java.time.Duration.ofMillis(Long.parseLong(period));
+                    jfr.enable("jdk.ExecutionSample").withPeriod(every);
+                    jfr.enable("jdk.NativeMethodSample").withPeriod(every);
+                }
+                jfr.start();
+            }
+            armMark("gpu cold start");
+            long g0 = System.nanoTime();
+            SecurityAnalysisResult rawCold = runSa(networkGpuCold, contingencies, monitors, sapGpu);
+            gpuColdMs = (System.nanoTime() - g0) / 1_000_000;
+            gpuCold = gpuSpill != null ? gpuSpill.spill(rawCold) : rawCold;
+            rawCold = null;
+            System.gc();
+            armMark("gpu cold end");
+            if (jfr != null) {
+                jfr.stop();
+                jfr.dump(Path.of(jfrOut));
+                jfr.close();
+                System.out.printf("  JFR profile of the cold GPU run written to %s%n", jfrOut);
+            }
+
+            // Check census: how many contingencies fell back to CPU?
+            Map<String, Long> census = GpuBatchScopeCensus.snapshot();
+            System.out.printf("  GPU CENSUS (cold): %s%n", census);
+            int gpuPrecomputed = GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get();
+            // Two denominators, because they differ: the LIST, and the contingencies OLF actually simulates.
+            // A contingency OLF drops as having no impact has no result on either arm, so counting it against
+            // the batching share reports a GPU limitation that does not exist (209 of rte6515's 6876 busbar
+            // sections). The CPU arm's result count IS the simulated population.
+            int simulated = cpu.getPostContingencyResults().size();
+            if (simulated > 0) {                             // 0 under OLF_GPU_SA_GPU_ONLY: no CPU arm to count
+                System.out.printf("  GPU precomputed on device: %d / %d contingencies (%d of %d simulated;"
+                        + " %d simulated by neither arm)%n",
+                        gpuPrecomputed, contingencies.size(), gpuPrecomputed, simulated,
+                        contingencies.size() - simulated);
+            } else {
+                System.out.printf("  GPU precomputed on device: %d / %d contingencies%n",
+                        gpuPrecomputed, contingencies.size());
+            }
+
+            // OLF_GPU_SA_COLD_ONLY=1: no warm run (a profile of the cold run alone; "warm" then repeats cold).
+            if ("1".equals(System.getenv("OLF_GPU_SA_COLD_ONLY"))) {
+                gpuWarm = gpuCold;
+                gpuWarmMs = gpuColdMs;
+            } else {
+                GpuBatchScopeCensus.reset();
+                long g1 = System.nanoTime();
+                SecurityAnalysisResult rawWarm = runSa(networkGpuWarm, contingencies, monitors, sapGpu);
+                gpuWarmMs = (System.nanoTime() - g1) / 1_000_000;
+                gpuWarm = busDiff ? BusVoltageSpill.dropPostBusResults(rawWarm) : rawWarm;   // only its BASE is compared
+                rawWarm = null;
+                System.gc();
+                Map<String, Long> censusWarm = GpuBatchScopeCensus.snapshot();
+                System.out.printf("  GPU CENSUS (warm): %s%n", censusWarm);
+                reportGpuSelfSpread(gpuCold, gpuWarm);
+            }
+        } finally {
+            securityAnalysisProvider = new OpenSecurityAnalysisProvider(new SparseMatrixFactory(),
+                    new EvenShiloachGraphDecrementalConnectivityFactory<>());
+        }
+        return new GpuArms(gpuCold, gpuWarm, gpuColdMs, gpuWarmMs);
+    }
+
+    private record GpuArms(SecurityAnalysisResult gpuCold, SecurityAnalysisResult gpuWarm, long gpuColdMs,
+                           long gpuWarmMs) {
     }
 }

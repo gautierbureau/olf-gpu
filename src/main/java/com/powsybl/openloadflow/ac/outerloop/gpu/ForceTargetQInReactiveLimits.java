@@ -14,6 +14,7 @@ import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDsParams;
+import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuVoltageControlRole;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfGenerator;
@@ -184,7 +185,7 @@ public final class ForceTargetQInReactiveLimits {
             return -1;
         }
         for (int i = 0; i < busNums.length; i++) {
-            if (busNums[i] == bus.getNum() && (gpuData.rlRemote() == null || gpuData.rlRemote()[i] == 0)) {
+            if (busNums[i] == bus.getNum() && (gpuData.rlRemote() == null || gpuData.rlRemote()[i] == GpuVoltageControlRole.LOCAL)) {
                 return i;
             }
         }

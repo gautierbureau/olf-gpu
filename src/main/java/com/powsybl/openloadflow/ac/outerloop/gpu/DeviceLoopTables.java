@@ -9,6 +9,7 @@ package com.powsybl.openloadflow.ac.outerloop.gpu;
 
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuQLimitType;
+import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuVoltageControlRole;
 
 /**
  * The run-constant outer-loop tables EVERY batch context needs before its driver runs — the batched
@@ -130,7 +131,7 @@ public final class DeviceLoopTables {
         // Remote-member RL entries (plan-B1): install (or clear, on a cached context) the kinds.
         boolean anyRlRemote = false;
         for (byte b : gpuData.rlRemote()) {
-            anyRlRemote |= b != 0;
+            anyRlRemote |= b != GpuVoltageControlRole.LOCAL;
         }
         ReactiveLimitsNative.setBatchRlRemote(handle,
                 anyRlRemote ? gpuData.rlRemote() : null,

@@ -20,6 +20,7 @@
 #include "../common/codes/gpu_ac_solver_status.cuh"
 #include "../common/codes/gpu_outer_loop_kind.cuh"
 #include "../common/codes/gpu_q_limit_type.cuh"
+#include "../common/codes/gpu_voltage_control_role.cuh"
 #include "../diagnostics/driver_traces.cuh"
 #include "forced_target_q.cuh"
 #include "pilot_voltage.cuh"
@@ -93,7 +94,7 @@ __global__ void reactiveLimitsBatch(const double* svcRlVt, int nrl, int nScenari
     // bus, so its entry — packed as a remote member of the base group — takes the LOCAL path below, at its
     // own voltage target. OLF checks it as the PV bus it now is (BUS-6113_BBS_1: VL-6113_1 pinned at RL#1).
     bool localOv = rlLocalOv != nullptr && rlLocalOv[(size_t) s * nrl + i];
-    if (rlRemote != nullptr && rlRemote[i] && !localOv) {
+    if (rlRemote != nullptr && rlRemote[i] != GpuVoltageControlRole::LOCAL && !localOv) {
         // REMOTE group member (plan-B3). Unpinned = its DISTR_Q row (mode 1, limitType 0);
         // pinned = mode 4 ("row hosts its own Q balance"). BOTH switch conditions test the
         // PILOT's voltage (rlCmpVrow) against the GROUP target — B0-verified CPU semantics.
@@ -124,8 +125,8 @@ __global__ void reactiveLimitsBatch(const double* svcRlVt, int nrl, int nScenari
         // voltage IDENTITY (mode 0), not a DISTR_Q share; pinned, its own Q balance (mode 4, the
         // alternate dest). Everything else (q via the remote q pack, the pilot's V as compare row)
         // is a remote member's. As a LOCAL entry its pin landed on mode 1, an EMPTY row.
-        int pvForm = rlRemote[i] == 2 ? 0 : 1;
-        bool enrolledPilot = rlRemote[i] == 2 && isEnrolledPilot(psEntry, nQr, i);
+        int pvForm = rlRemote[i] == GpuVoltageControlRole::PILOT_SELF ? 0 : 1;
+        bool enrolledPilot = rlRemote[i] == GpuVoltageControlRole::PILOT_SELF && isEnrolledPilot(psEntry, nQr, i);
         if (limitType[rst] == GpuQLimitType::NONE) {
             if (mode[qidx] != pvForm) return;                // islanded / frozen this scenario
             double q = qBuf[qidx] + rlLoadQ[rli];            // own q via fillRemoteMemberQBatch
@@ -140,7 +141,7 @@ __global__ void reactiveLimitsBatch(const double* svcRlVt, int nrl, int nScenari
             //       every merged member — OLF skips the whole robust block for them (tasks #66; the
             //       device used to freeze rte6515's VL-2669_1..4 with MIN_REALISTIC_V where OLF froze
             //       nothing, replacing the DISTR_Q sharing with mode-4 own-Q balances in the STRUCTURE).
-            bool robustRemote = rlRemote[i] != 2 && rlRemote[i] != 3;
+            bool robustRemote = rlRemote[i] != GpuVoltageControlRole::PILOT_SELF && rlRemote[i] != GpuVoltageControlRole::REMOTE_ROBUST_MODE_EXEMPT;
             bool unrealisticLo = robust && robustRemote && x[ridx] < vLoRobust;
             bool unrealisticHi = robust && robustRemote && x[ridx] > vHiRobust;
             if (q < rliMin - tol) {
@@ -367,7 +368,7 @@ __global__ void rlRobustVResetBatch(int nrl, int nScenarios, int n, const int* r
     if (!rlActive[s]) return;
     // robust mode is remote-controller only, in OLF's sense: not a class-2 pilot and not a class-3
     // merged member whose own control is local (both are exempt from the gate that sets 3/4 at all)
-    if (rlRemote == nullptr || rlRemote[i] != 1) return;
+    if (rlRemote == nullptr || rlRemote[i] != GpuVoltageControlRole::REMOTE) return;
     if (passSwitched[(size_t) s * nrl + i] != 1) return;     // switched PV -> PQ in THIS check
     size_t idx = (size_t) s * n + rlVrow[i];
     if (x[idx] < vLoRobust || x[idx] > vHiRobust) {
@@ -400,7 +401,7 @@ __global__ void rlForcedPvElectBatch(int nrl, int nScenarios, int n,
     for (int i = 0; i < nrl; i++) {
         size_t st = (size_t) s * nrl + i;
         if (rlIslanded != nullptr && rlIslanded[st]) continue;   // not a controller in this component
-        bool remote = rlRemote != nullptr && rlRemote[i];
+        bool remote = rlRemote != nullptr && rlRemote[i] != GpuVoltageControlRole::LOCAL;
         int m = mode[(size_t) s * n + rlVrow[i]];
         if (passSwitched[st] == 1) {
             cand++;
@@ -414,7 +415,7 @@ __global__ void rlForcedPvElectBatch(int nrl, int nScenarios, int n,
                 bestP = p;
                 bestId = idRank[i];
             }
-        } else if (limitType[st] == GpuQLimitType::NONE && (rlRemote != nullptr && rlRemote[i] == 2 ? m == 0
+        } else if (limitType[st] == GpuQLimitType::NONE && (rlRemote != nullptr && rlRemote[i] == GpuVoltageControlRole::PILOT_SELF ? m == 0
                                           : remote ? m == 1 : (m == 0 || m == 2))) {
             remaining++;                                     // still PV after this pass
         }
@@ -422,8 +423,8 @@ __global__ void rlForcedPvElectBatch(int nrl, int nScenarios, int n,
     if (cand == 0 || remaining > 0 || best < 0) return;
     size_t st = (size_t) s * nrl + best;
     size_t idx = (size_t) s * n + rlVrow[best];
-    mode[idx] = (rlRemote != nullptr && rlRemote[best] == 2) ? 0
-              : (rlRemote != nullptr && rlRemote[best]) ? 1 : savedMode[st];
+    mode[idx] = (rlRemote != nullptr && rlRemote[best] == GpuVoltageControlRole::PILOT_SELF) ? 0
+              : (rlRemote != nullptr && rlRemote[best] != GpuVoltageControlRole::LOCAL) ? 1 : savedMode[st];
     target[idx] = savedTarget[st];
     limitType[st] = GpuQLimitType::NONE;
     switchCount[st]--;
@@ -452,13 +453,13 @@ __global__ void rlPilotSelfMixedGate(int nrl, int nScenarios, const char* rlRemo
     if (t >= nrl * nScenarios) return;
     int i = t % nrl;
     int s = t / nrl;
-    if (rlRemote[i] != 2 || limitType[(size_t) s * nrl + i] == GpuQLimitType::NONE) return;  // only a PINNED pilot
+    if (rlRemote[i] != GpuVoltageControlRole::PILOT_SELF || limitType[(size_t) s * nrl + i] == GpuQLimitType::NONE) return;  // only a PINNED pilot
     // ...that is still ON this component: an islanded pilot keeps its base limit type but has no pin and no
     // balance (OLF removed the bus), and an islanded member is not "still controlling" either.
     if (rlIslanded != nullptr && rlIslanded[(size_t) s * nrl + i]) return;
     if (isEnrolledPilot(psEntry, nQr, i)) return;            // enrolled (rotation): the carrier hosts its balance
     for (int j = 0; j < nrl; j++) {                          // ... with a member still controlling
-        if (j != i && rlCmpVrow[j] == rlCmpVrow[i] && rlRemote[j] != 0
+        if (j != i && rlCmpVrow[j] == rlCmpVrow[i] && rlRemote[j] != GpuVoltageControlRole::LOCAL
                 && limitType[(size_t) s * nrl + j] == GpuQLimitType::NONE
                 && !(rlIslanded != nullptr && rlIslanded[(size_t) s * nrl + j])) {
             if (dqSub != nullptr && dqMemberRlEntry != nullptr) {   // a member of ANOTHER subgroup is not this

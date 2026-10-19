@@ -14,6 +14,7 @@
 #include "../common/check.cuh"
 #include "../common/launch.cuh"
 #include "../common/codes/gpu_q_limit_type.cuh"
+#include "../common/codes/gpu_voltage_control_role.cuh"
 #include "../equations/scatter.cuh"
 #include "../equations/scenario_overrides.cuh"
 #include "reactive_limits_seed.cuh"
@@ -57,7 +58,7 @@ __global__ void initRlLimitTypeBatch(int nrl, int nScenarios, int n, const int* 
     // the limit). The nearest-limit guess below turns the former into the latter, and the
     // curve-limit drift then re-freezes it AT the limit (rte6515 VL-1251_1: -0.0035 -> -1.0000).
     char olfKind = rlBaseLt != nullptr ? rlBaseLt[i] : 0;
-    if (rlRemote != nullptr && rlRemote[i]) {
+    if (rlRemote != nullptr && rlRemote[i] != GpuVoltageControlRole::LOCAL) {
         // REMOTE group member (plan-B3): base mode 1 at its row is the UNPINNED DISTR_Q share —
         // only the canonical mode 4 marks a base pin. The pilot's V equals the group target at the
         // base solution (the survivors keep controlling), so the v-vs-target heuristic is
@@ -118,7 +119,7 @@ __global__ void seedRlModeFromState(int nrl, int nScenarios, int n, const int* r
     // the reactive-limit switch-back left it - the PV form (6 on a cross row) at its voltage target. Left alone it
     // stayed pinned at the base limit: a strategy pair of rte6515 LINE-3273-1812 solved two generators the parent had
     // released at their base Q limits, 0.016 kV at VL-2968 even for a strategy that changes nothing.
-    if (lt == GpuQLimitType::NONE && rlBaseLt != nullptr && rlBaseLt[i] >= GpuQLimitType::MIN_Q && rlBaseLt[i] <= GpuQLimitType::MAX_REALISTIC_V && (rlRemote == nullptr || !rlRemote[i])
+    if (lt == GpuQLimitType::NONE && rlBaseLt != nullptr && rlBaseLt[i] >= GpuQLimitType::MIN_Q && rlBaseLt[i] <= GpuQLimitType::MAX_REALISTIC_V && (rlRemote == nullptr || rlRemote[i] == GpuVoltageControlRole::LOCAL)
             && !isEnrolledPilot(psEntry, nQr, i)) {
         size_t st = (size_t) s * nrl + i;
         bool localOv = rlLocalOv != nullptr && rlLocalOv[st];
@@ -141,15 +142,15 @@ __global__ void seedRlModeFromState(int nrl, int nScenarios, int n, const int* r
     // form - the DISTR_Q share (mode 1), whose target the DISTR_Q pass recomputes, or a self-controlling pilot's voltage
     // identity (mode 0). Left pinned at the base limit, its group shared the pilot's reactive balance one member short
     // (network.xiidm LLJP, the member on bus 5779: mode 4 at -0.2954 where the parent had released it, 5.46 kV).
-    if (lt == GpuQLimitType::NONE && rlBaseLt != nullptr && rlBaseLt[i] >= GpuQLimitType::MIN_Q && rlBaseLt[i] <= GpuQLimitType::MAX_REALISTIC_V && rlRemote != nullptr && rlRemote[i]
+    if (lt == GpuQLimitType::NONE && rlBaseLt != nullptr && rlBaseLt[i] >= GpuQLimitType::MIN_Q && rlBaseLt[i] <= GpuQLimitType::MAX_REALISTIC_V && rlRemote != nullptr && rlRemote[i] != GpuVoltageControlRole::LOCAL
             && !isEnrolledPilot(psEntry, nQr, i)) {
         int vrow = rlVrow[i];
         int qrow = rlQrow != nullptr && rlQrow[i] >= 0 && rlQrow[i] != vrow && mode[(size_t) s * n + rlQrow[i]] != 0
                 ? rlQrow[i] : vrow;
         size_t qidx = (size_t) s * n + qrow;
         if (mode[qidx] == 4) {                               // still holding the base pin
-            mode[qidx] = rlRemote[i] == 2 ? 0 : 1;
-            target[qidx] = rlRemote[i] == 2
+            mode[qidx] = rlRemote[i] == GpuVoltageControlRole::PILOT_SELF ? 0 : 1;
+            target[qidx] = rlRemote[i] == GpuVoltageControlRole::PILOT_SELF
                     ? rlTargetOf(nRlVtOv, rlVtOvSlotIdx, rlVtOvVal, svcRlVt, nrl, s, i, rlVtarget[i]) : 0.0;
         }
         return;
@@ -174,7 +175,7 @@ __global__ void seedRlModeFromState(int nrl, int nScenarios, int n, const int* r
         savedTarget[(size_t) s * nrl + i] = target[idx];
         savedMode[(size_t) s * nrl + i] = static_cast<char>(mode[idx]);
         // a pinned REMOTE member's row is mode 4 (own Q balance), a pinned local one mode 1
-        mode[idx] = (rlRemote != nullptr && rlRemote[i]) ? 4 : 1;
+        mode[idx] = (rlRemote != nullptr && rlRemote[i] != GpuVoltageControlRole::LOCAL) ? 4 : 1;
         // the pinned target the previous solve ENDED with, when it exported one: OLF restores the bus's generation
         // target Q from the parent's end, which is not the current limit when that limit moved by less than the
         // re-freeze tolerance (rte6515 LINE-3273-1812, VL-6095: 0.7518298 frozen, the curve at 0.7518918)

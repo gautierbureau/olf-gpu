@@ -3,6 +3,7 @@
 //
 // JNI entry points of GpuAcNewtonSolver: ReactiveLimitsOuterLoop tables, curves, forced target Q and per-scenario overrides.
 #include "jni_common.cuh"
+#include "../common/codes/gpu_voltage_control_role.cuh"
 
 // Reactive-capability CURVES at runtime P: install (or clear, with nulls) the per-gen curve channel
 // on a batch context — see rlCurveLimitsBatch. cvIdx stride 5 {rlIdx, pRow, ptsOff, npts, dsGenSlot}; cvIn
@@ -290,10 +291,10 @@ OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchRlRemote)(
     int count = 0;
     int selfCount = 0;
     for (int i = 0; i < nr; i++) {
-        if (rem[i]) {
+        if (rem[i] != GpuVoltageControlRole::LOCAL) {
             count++;
         }
-        if (rem[i] == 2) {
+        if (rem[i] == GpuVoltageControlRole::PILOT_SELF) {
             selfCount++;
         }
     }

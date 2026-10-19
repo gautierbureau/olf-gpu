@@ -10,6 +10,7 @@ package com.powsybl.openloadflow.ac.solver.gpu.batch;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcElementMapper;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.BatchContingency;
+import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuVoltageControlRole;
 import com.powsybl.openloadflow.network.LfBranch;
 
 import java.util.List;
@@ -152,7 +153,7 @@ final class IslandSeed {
                 }
                 if (unpinnedPilotSelf && gpuData.rlVrow() != null && gpuData.rlRemote() != null) {
                     for (int e = 0; e < gpuData.rlVrow().length; e++) {
-                        if (gpuData.rlVrow()[e] == fallbackRow && gpuData.rlRemote()[e] == 2) {
+                        if (gpuData.rlVrow()[e] == fallbackRow && gpuData.rlRemote()[e] == GpuVoltageControlRole.PILOT_SELF) {
                             unpinnedPilotSelf = !gpuData.switchedPvToPqInBase(e);
                             break;
                         }

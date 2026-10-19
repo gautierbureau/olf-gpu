@@ -11,6 +11,7 @@ import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
 import com.powsybl.openloadflow.ac.outerloop.gpu.ReactiveCapabilityCurves;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.BatchContingency;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.GenOutage;
+import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuVoltageControlRole;
 
 import java.util.List;
 
@@ -148,7 +149,7 @@ final class GenOutageSeed {
                     // so the entry is simply left live (fixture:
                     // deviceSwitchedToPqInBaseBusLosingItsOnlyGeneratorIsStillCheckedMatchesCpu).
                     boolean liveDeadLocal = (gpuData.rlRemote() == null || gpuData.rlRemote().length <= go.rlEntry()
-                                    || gpuData.rlRemote()[go.rlEntry()] == 0)
+                                    || gpuData.rlRemote()[go.rlEntry()] == GpuVoltageControlRole.LOCAL)
                             && gpuData.switchedPvToPqInBase(go.rlEntry());
                     if (liveDeadLocal) {
                         // left live: no channel

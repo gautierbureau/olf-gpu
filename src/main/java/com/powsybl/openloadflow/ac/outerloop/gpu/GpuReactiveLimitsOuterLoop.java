@@ -10,6 +10,7 @@ package com.powsybl.openloadflow.ac.outerloop.gpu;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuQLimitType;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuReactiveLimitsState;
+import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuVoltageControlRole;
 import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfNetwork;
 
@@ -97,7 +98,7 @@ public final class GpuReactiveLimitsOuterLoop {
         if (relocated != vRow && devModes != null && relocated < devModes.length && devModes[relocated] != 0) {
             vRow = relocated;
         }
-        if (devModes == null || data.rlRemote() == null || data.rlRemote()[i] != 2 || data.qrPtr() == null
+        if (devModes == null || data.rlRemote() == null || data.rlRemote()[i] != GpuVoltageControlRole.PILOT_SELF || data.qrPtr() == null
                 || vRow < 0 || vRow >= devModes.length || devModes[vRow] != 0) {
             return vRow;
         }

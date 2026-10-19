@@ -10,6 +10,7 @@ package com.powsybl.openloadflow.ac.equations.vector.gpu;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuQLimitType;
+import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuVoltageControlRole;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfGenerator;
@@ -204,8 +205,9 @@ public final class ReactiveLimitsPacker {
                             // local (see isOlfRobustRemoteController). Class 3 is truthy and not 2, so every
                             // other rlRemote site treats it exactly like class 1 — only the kernel's robust
                             // unrealistic-voltage gate and rlRobustVResetBatch (which tests == 1) single it out.
-                            byte remoteClass = pilotSelf ? (byte) 2
-                                    : RemoteMemberQPacker.isOlfRobustRemoteController(bus) ? (byte) 1 : (byte) 3;
+                            byte remoteClass = (byte) (pilotSelf ? GpuVoltageControlRole.PILOT_SELF
+                                    : RemoteMemberQPacker.isOlfRobustRemoteController(bus) ? GpuVoltageControlRole.REMOTE
+                                    : GpuVoltageControlRole.REMOTE_ROBUST_MODE_EXEMPT);
                             rlRemote.add(remoteClass);
                             rlCmpVrow.add(pilotV);                 // switch conditions compare the PILOT's V
                             rlBusNum.add(bn);
@@ -268,7 +270,7 @@ public final class ReactiveLimitsPacker {
                         boolean ownController = mainVc.getMergedControllerElements().contains(bus)
                                 || bus.getGeneratorVoltageControl().orElseThrow().getControllerElements().contains(bus);
                         rlMonitored.add((byte) ((monitoringSvc != null ? 1 : 0) | (ownController ? 0 : 2)));
-                        rlRemote.add((byte) 0);
+                        rlRemote.add((byte) GpuVoltageControlRole.LOCAL);
                         rlCmpVrow.add(vCol[bn]);                   // local: compare row = own row
                         rlBusNum.add(bn);
                         rlNominalV.add(bus.getGeneratorVoltageControl().map(c -> c.getControlledBus().getNominalV()).orElse(bus.getNominalV()));

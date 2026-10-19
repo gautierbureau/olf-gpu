@@ -40,6 +40,7 @@ import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuOuterLoopKind;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuQLimitType;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuReactiveLimitsState;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuStateVectorScalingMode;
+import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuVoltageControlRole;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfShunt;
 import org.slf4j.Logger;
@@ -293,7 +294,7 @@ final class GpuBatchChunkSolver {
             // remote entries (plan-B3): base mode 1 = UNPINNED DISTR_Q share; only mode 4 is a pin.
             // The pilot's V equals the group target at the base (degenerate) — key the direction on
             // WHICH limit the extracted BUS_TARGET_Q target equals instead.
-            boolean remote = gpuData.rlRemote().length > i && gpuData.rlRemote()[i] != 0;
+            boolean remote = gpuData.rlRemote().length > i && gpuData.rlRemote()[i] != GpuVoltageControlRole.LOCAL;
             byte olfKind = baseLimitTypes.length > i ? baseLimitTypes[i] : GpuQLimitType.NONE;
             if (remote) {
                 double tgt = baseTargets[vrow];

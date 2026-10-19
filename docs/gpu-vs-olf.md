@@ -153,6 +153,7 @@ Only notions with no OLF counterpart. Everything else uses OLF's name.
 | scenario, chunk, compaction | the batch | 3 |
 | pass, driver phase | one solve plus one loop check for a whole chunk | 4 |
 | refusal | a contingency handed back to OLF before any solve | 5 |
+| pilot-self | the controlled bus of a remote voltage control that is also one of its own controllers (`GpuVoltageControlRole.PILOT_SELF`) | 2.3 |
 
 ## 7. Codes shared with the device
 
@@ -170,3 +171,4 @@ constants carry OLF's constant names.
 | `GpuAcEmulationStatus` | `LfHvdc.AcEmulationControl.AcEmulationStatus` | `LINEAR_MODE` 0, `SATURATION_MODE_FROM_CS1_TO_CS2` 1, `SATURATION_MODE_FROM_CS2_TO_CS1` 2, `FROZEN` 3 (OLF ordinals) |
 | `GpuQLimitType` | `LfBus.QLimitType` (ordinal + 1) | `NONE` 0 (not pinned), `MIN_Q` 1, `MAX_Q` 2, `MIN_REALISTIC_V` 3, `MAX_REALISTIC_V` 4; device only: `FROZEN` 5 (voltage control frozen or all generators lost). Native helpers `isMinLimit` / `isMaxLimit` are OLF's |
 | `GpuReactiveLimitsState` | a bus's QLimitType + `pvPqSwitchCount` | `LIMIT_TYPE_MASK` 7 (a `GpuQLimitType`), `PV_PQ_SWITCH_COUNT_SHIFT` 3 |
+| `GpuVoltageControlRole` | a bus's place in its `GeneratorVoltageControl` | `LOCAL` 0, `REMOTE` 1 (robust mode rule applies), `PILOT_SELF` 2 (device term, section 6), `REMOTE_ROBUST_MODE_EXEMPT` 3 (own control local) |

@@ -15,6 +15,8 @@ import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcElementMapper;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchSkips;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuAcSolverStatus;
+import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuQLimitType;
+import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuReactiveLimitsState;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.EquationTerm;
 import com.powsybl.openloadflow.equations.Variable;
@@ -376,7 +378,7 @@ public final class GpuSecondaryVoltageControlOuterLoop {
             for (int c = 0; c < nc; c++) {
                 CtlBus ctl = ctls.get(c);
                 int e = s * nrl + ctl.rlIdx();
-                if ((pinnedBefore[e] & 7) != 0 && (rlState[e] & 7) == 0) {
+                if (GpuReactiveLimitsState.limitType(pinnedBefore[e]) != GpuQLimitType.NONE && GpuReactiveLimitsState.limitType(rlState[e]) == GpuQLimitType.NONE) {
                     unpin.add(s);                            // OLF's re-enable: back to PV at the zone's target
                     unpin.add(ctl.rlIdx());
                     unpinT.add(targetV[s][c]);
@@ -388,7 +390,7 @@ public final class GpuSecondaryVoltageControlOuterLoop {
                 if (targetV[s][c] == ctl.baseTargetV()) {
                     continue;
                 }
-                if ((rlState[e] & 7) == 0) {
+                if (GpuReactiveLimitsState.limitType(rlState[e]) == GpuQLimitType.NONE) {
                     rows.add(s * n + ctl.ctldVRow());        // the CONTROLLED bus's V target moves now
                     vals.add(targetV[s][c]);
                 }                                            // pinned row: the Q pin stays; the override below
@@ -435,13 +437,13 @@ public final class GpuSecondaryVoltageControlOuterLoop {
             for (Zone z : zones) {
                 int pinned = 0;
                 for (int c : z.ctls()) {
-                    if ((rlState[s * nrl + ctls.get(c).rlIdx()] & 7) != 0) {
+                    if (GpuReactiveLimitsState.limitType(rlState[s * nrl + ctls.get(c).rlIdx()]) != GpuQLimitType.NONE) {
                         pinned++;
                     }
                 }
                 if (pinned > 0 && pinned < z.ctls().length) {
                     for (int c : z.ctls()) {
-                        if ((rlState[s * nrl + ctls.get(c).rlIdx()] & 7) != 0) {
+                        if (GpuReactiveLimitsState.limitType(rlState[s * nrl + ctls.get(c).rlIdx()]) != GpuQLimitType.NONE) {
                             reEnabled[s][c] = true;
                         }
                     }
@@ -504,7 +506,7 @@ public final class GpuSecondaryVoltageControlOuterLoop {
             // enabled controllers this scenario: unpinned or just re-enabled
             List<Integer> enabled = new ArrayList<>();
             for (int c = 0; c < nc; c++) {
-                if ((rlState[s * nrl + ctls.get(c).rlIdx()] & 7) == 0 || reEnabled[s][c]) {
+                if (GpuReactiveLimitsState.limitType(rlState[s * nrl + ctls.get(c).rlIdx()]) == GpuQLimitType.NONE || reEnabled[s][c]) {
                     enabled.add(c);
                 }
             }

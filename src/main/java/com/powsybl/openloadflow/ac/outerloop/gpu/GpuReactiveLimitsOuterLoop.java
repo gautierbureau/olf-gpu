@@ -9,6 +9,7 @@ package com.powsybl.openloadflow.ac.outerloop.gpu;
 
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuQLimitType;
+import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuReactiveLimitsState;
 import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfNetwork;
 
@@ -36,13 +37,13 @@ public final class GpuReactiveLimitsOuterLoop {
         }
         int nrl = Math.min(rlStateOut.length, data.rlBusNum().length);
         for (int i = 0; i < nrl; i++) {
-            int limitType = rlStateOut[i] & 7;
+            int limitType = GpuReactiveLimitsState.limitType(rlStateOut[i]);
             LfBus bus = network.getBus(data.rlBusNum()[i]);
             if (bus == null) {
                 continue;
             }
-            if (System.getenv("OLF_GPU_BATCH_TRACE") != null && (limitType != GpuQLimitType.NONE || (rlStateOut[i] >> 3) != 0)) {
-                System.err.println("WB_RL bus=" + bus.getId() + " limitType=" + limitType + " switchCount=" + (rlStateOut[i] >> 3)
+            if (System.getenv("OLF_GPU_BATCH_TRACE") != null && (limitType != GpuQLimitType.NONE || GpuReactiveLimitsState.pvPqSwitchCount(rlStateOut[i]) != 0)) {
+                System.err.println("WB_RL bus=" + bus.getId() + " limitType=" + limitType + " switchCount=" + GpuReactiveLimitsState.pvPqSwitchCount(rlStateOut[i])
                         + " vcEnabled=" + bus.isGeneratorVoltageControlEnabled() + " qLimitType=" + bus.getQLimitType().map(Object::toString).orElse("-")
                         + " remote=" + data.rlRemote()[i]);
             }

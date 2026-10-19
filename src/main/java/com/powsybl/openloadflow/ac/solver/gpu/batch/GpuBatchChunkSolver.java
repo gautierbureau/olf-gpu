@@ -38,6 +38,7 @@ import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.GpuBatchQualification;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuAcSolverStatus;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuOuterLoopKind;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuQLimitType;
+import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuReactiveLimitsState;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuStateVectorScalingMode;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfShunt;
@@ -760,7 +761,7 @@ final class GpuBatchChunkSolver {
                                 // the parent's pins, not its switch counts: OLF runs the strategy as a new load flow,
                                 // whose reactive-limit loop counts PV -> PQ switches afresh
                                 for (int i = 0; i < nrl; i++) {
-                                    rlStateIn[s * nrl + i] = (parentRl != null ? parentRl : baseRlSeed)[i] & 7;
+                                    rlStateIn[s * nrl + i] = GpuReactiveLimitsState.limitType((parentRl != null ? parentRl : baseRlSeed)[i]);
                                 }
                                 double[] pins = parentRl != null ? rlPinByIndex.get(ChunkArrays.pIdxOf(contingencies, group, chunkStart, s, indexById, realCount)) : null;
                                 if (pins != null) {
@@ -1392,7 +1393,7 @@ final class GpuBatchChunkSolver {
                         }
                     }
                     if (System.getenv("OLF_GPU_RL_TRACE") != null && rlStateOut != null) {
-                        // rlStateOut packs (limitType & 7) | (switchCount << 3) per (controller, scenario):
+                        // rlStateOut packs a GpuReactiveLimitsState per (controller, scenario):
                         // switchCount > 0 means the DEVICE switched that controller during THIS solve, which
                         // is exactly the decision OLF's ReactiveLimitsOuterLoop makes (and logs) on the CPU.
                         for (int s = 0; s < realCount; s++) {
@@ -1401,20 +1402,20 @@ final class GpuBatchChunkSolver {
                             StringBuilder ids = new StringBuilder();
                             for (int i = 0; i < nrl; i++) {
                                 int v = rlStateOut[s * nrl + i];
-                                if ((v & 7) != 0) {
+                                if (GpuReactiveLimitsState.limitType(v) != GpuQLimitType.NONE) {
                                     pinned++;
                                     if (ids.length() < 4000) {
                                         // vRow identifies WHICH controller: it is the bus's stable device
                                         // row, the same number the DISTR_Q / target dumps print.
                                         ids.append(" p").append(i).append("(vRow=").append(gpuData.rlVrow()[i])
-                                           .append(",lt=").append(v & 7).append(')');
+                                           .append(",lt=").append(GpuReactiveLimitsState.limitType(v)).append(')');
                                     }
                                 }
-                                if ((v >> 3) > 0) {
+                                if (GpuReactiveLimitsState.pvPqSwitchCount(v) > 0) {
                                     switched++;
                                     if (ids.length() < 300) {
                                         ids.append(" rl").append(i).append("(vRow=")
-                                           .append(gpuData.rlVrow()[i]).append(",lt=").append(v & 7).append(')');
+                                           .append(gpuData.rlVrow()[i]).append(",lt=").append(GpuReactiveLimitsState.limitType(v)).append(')');
                                     }
                                 }
                             }
@@ -1440,8 +1441,8 @@ final class GpuBatchChunkSolver {
                             StringBuilder sb = new StringBuilder("GPU-PAIR-RL " + contingencies.get(group.get(chunkStart + s2)).contingencyId().replace(BatchContingency.STRATEGY_KEY_SEP, '|'));
                             for (int i2 = 0; i2 < nrl; i2++) {
                                 int v = rlStateOut[s2 * nrl + i2];
-                                if ((v & 7) != 0) {
-                                    sb.append(" ctl").append(i2).append("=lt").append(v & 7).append("/sc").append(v >> 3);
+                                if (GpuReactiveLimitsState.limitType(v) != GpuQLimitType.NONE) {
+                                    sb.append(" ctl").append(i2).append("=lt").append(GpuReactiveLimitsState.limitType(v)).append("/sc").append(GpuReactiveLimitsState.pvPqSwitchCount(v));
                                 }
                             }
                             System.err.println(sb);
@@ -1659,15 +1660,15 @@ final class GpuBatchChunkSolver {
                         for (int s = 0; s < realCount; s++) {
                             int pinned = 0;
                             for (int i = 0; i < nrl; i++) {
-                                if ((rlStateOut[s * nrl + i] & 7) != 0) {
+                                if (GpuReactiveLimitsState.limitType(rlStateOut[s * nrl + i]) != GpuQLimitType.NONE) {
                                     pinned++;
                                 }
                             }
                             StringBuilder ids = new StringBuilder();
                             for (int i = 0; i < nrl; i++) {
-                                if ((rlStateOut[s * nrl + i] & 7) != 0) {
+                                if (GpuReactiveLimitsState.limitType(rlStateOut[s * nrl + i]) != GpuQLimitType.NONE) {
                                     ids.append(' ').append(i).append("(vRow=").append(gpuData.rlVrow()[i])
-                                       .append(",lt=").append(rlStateOut[s * nrl + i] & 7).append(')');
+                                       .append(",lt=").append(GpuReactiveLimitsState.limitType(rlStateOut[s * nrl + i])).append(')');
                                 }
                             }
                             System.err.printf("GPU_RL_FINAL ctg=%s pinnedTotal=%d%s%n",

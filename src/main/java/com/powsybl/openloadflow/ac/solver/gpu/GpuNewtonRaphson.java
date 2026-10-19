@@ -186,8 +186,8 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
         return mask;
     }
 
-    /** The driver's per-controller reactive-limit state after the last solve ({@code (limitType & 7) |
-     *  (switchCount << 3)}), read back so the PV↔PQ decisions can be given to the network. The limit
+    /** The driver's per-controller reactive-limit state after the last solve (a GpuReactiveLimitsState: limit
+     *  type and PV -> PQ switch count), read back so the PV↔PQ decisions can be given to the network. The limit
      *  type takes three bits because robust mode adds MIN/MAX_REALISTIC_V to MIN_Q/MAX_Q. */
     private int[] rlStateOut;
 

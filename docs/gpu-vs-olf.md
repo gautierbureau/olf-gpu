@@ -169,3 +169,4 @@ constants carry OLF's constant names.
 | `GpuOuterLoopKind` | the outer loops, by OLF loop name | `NONE` -1; `DISTRIBUTED_SLACK` 0 … `SECONDARY_VOLTAGE_CONTROL` 16 (in-kernel); `HOST_*` 5-9: a loop the driver pauses at for OLF to run; `COUNT` 17 |
 | `GpuAcEmulationStatus` | `LfHvdc.AcEmulationControl.AcEmulationStatus` | `LINEAR_MODE` 0, `SATURATION_MODE_FROM_CS1_TO_CS2` 1, `SATURATION_MODE_FROM_CS2_TO_CS1` 2, `FROZEN` 3 (OLF ordinals) |
 | `GpuQLimitType` | `LfBus.QLimitType` (ordinal + 1) | `NONE` 0 (not pinned), `MIN_Q` 1, `MAX_Q` 2, `MIN_REALISTIC_V` 3, `MAX_REALISTIC_V` 4; device only: `FROZEN` 5 (voltage control frozen or all generators lost). Native helpers `isMinLimit` / `isMaxLimit` are OLF's |
+| `GpuReactiveLimitsState` | a bus's QLimitType + `pvPqSwitchCount` | `LIMIT_TYPE_MASK` 7 (a `GpuQLimitType`), `PV_PQ_SWITCH_COUNT_SHIFT` 3 |

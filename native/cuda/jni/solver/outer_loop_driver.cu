@@ -16,6 +16,7 @@
 #include "../common/stats.cuh"
 #include "../common/codes/gpu_ac_solver_status.cuh"
 #include "../common/codes/gpu_outer_loop_kind.cuh"
+#include "../common/codes/gpu_reactive_limits_state.cuh"
 #include "../diagnostics/driver_traces.cuh"
 #include "../diagnostics/matrix_scan.cuh"
 #include "../equations/branch_fill.cuh"
@@ -1001,7 +1002,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         CUDA_CHECK(cudaMemcpy(lt.data(), ctx->dRlLimitType.p, lt.size(), cudaMemcpyDeviceToHost));
         CUDA_CHECK(cudaMemcpy(sc.data(), ctx->dRlSwitchCount.p, sc.size(), cudaMemcpyDeviceToHost));
         for (size_t k = 0; k < lt.size(); k++) {
-            rlStateOut[k] = (lt[k] & 7) | (sc[k] << 3);
+            rlStateOut[k] = rlState(lt[k], sc[k]);
         }
     }
     tracePhaseTime(ctx, drv);

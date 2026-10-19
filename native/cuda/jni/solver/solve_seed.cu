@@ -14,6 +14,7 @@
 #include "../common/check.cuh"
 #include "../common/launch.cuh"
 #include "../common/stats.cuh"
+#include "../common/codes/gpu_reactive_limits_state.cuh"
 #include "../outerloop/distributed_slack.cuh"
 #include "../outerloop/forced_target_q.cuh"
 #include "../outerloop/incremental_flow_control.cuh"
@@ -135,8 +136,8 @@ void seedSolve(BatchSolverContext* ctx, DriverPass& drv, const int* rlStateIn, c
         // loop counts afresh in every load flow.
         std::vector<char> lt(static_cast<size_t>(ctx->nrl) * nS), sc(static_cast<size_t>(ctx->nrl) * nS);
         for (size_t k = 0; k < lt.size(); k++) {
-            lt[k] = static_cast<char>(rlStateIn[k] & 7);
-            sc[k] = static_cast<char>(rlStateIn[k] >> 3);
+            lt[k] = static_cast<char>(rlStateLimitType(rlStateIn[k]));
+            sc[k] = static_cast<char>(rlStatePvPqSwitchCount(rlStateIn[k]));
         }
         CUDA_CHECK(cudaMemcpyAsync(ctx->dRlLimitType.p, lt.data(), lt.size(), cudaMemcpyHostToDevice, ctx->stream));
         CUDA_CHECK(cudaMemcpy(ctx->dRlSwitchCount.p, sc.data(), sc.size(), cudaMemcpyHostToDevice));

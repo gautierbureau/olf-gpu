@@ -7,6 +7,7 @@
 #define OLF_GPU_OUTERLOOP_REACTIVE_LIMITS_CUH
 
 #include "../solver/driver_pass.cuh"
+#include "../common/codes/gpu_outer_loop_kind.cuh"
 
 namespace olfgpu {
 
@@ -50,7 +51,7 @@ __global__ void rlUnpinBatch(int nPairs, int nS, int n, int nrl, const int* pair
                              const int* rlVrow, char* limitType, const char* savedMode, int* mode, double* target);
 
 
-// One check of ReactiveLimitsOuterLoop on every live scenario (loopKind LOOP_RL).
+// One check of ReactiveLimitsOuterLoop on every live scenario (loopKind GpuOuterLoopKind::REACTIVE_LIMITS).
 void rlCheck(BatchSolverContext* ctx, DriverPass& drv, int loopKind);
 
 }  // namespace olfgpu

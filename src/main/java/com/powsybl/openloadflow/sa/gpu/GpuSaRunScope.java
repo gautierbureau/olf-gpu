@@ -80,7 +80,7 @@ final class GpuSaRunScope {
                 && (GpuTransformerVoltageControlOuterLoop.transformerControlSupported(lfNetwork)
                         || GpuTransformerVoltageControlOuterLoop.generatorFreezeSupported(lfNetwork,
                                 olfGuardParams.getGeneratorVoltageControlMinNominalVoltage()));
-        // INCREMENTAL (OLF's default TVC mode): an in-kernel driver phase (LOOP_TVC_KERNEL). The loop never
+        // INCREMENTAL (OLF's default TVC mode): an in-kernel driver phase (INCREMENTAL_TRANSFORMER_VOLTAGE_CONTROL). The loop never
         // freezes generators (no GeneratorVoltageControlManager), so the gen-under-the-controlled-level
         // gate that the AFTER_GENERATOR port needed never applied here — lifted 2026-09-15.
         boolean incrementalTvcBatchable =
@@ -245,8 +245,9 @@ final class GpuSaRunScope {
         boolean cfgSimpleShunt = simpleShuntVcBatchable
                 && acParameters.getOuterLoops().stream().anyMatch(ol -> "ShuntVoltageControl".equals(ol.getName()));
         // The flow-observed incremental family (GpuIncrementalTransformerReactivePowerControlOuterLoop,
-        // GpuIncrementalPhaseControlOuterLoop): rho -> branch Q, and a1 -> branch P / I. Both are decision-only loops over pinned identity rows — always batchable
-        // when their loop is configured (continuous "PhaseControl" stays CPU via the extraction guard).
+        // GpuIncrementalPhaseControlOuterLoop): rho -> branch Q, and a1 -> branch P / I. Both are decision-only loops
+        // over pinned identity rows — always batchable when their loop is configured (continuous "PhaseControl" stays
+        // CPU via the extraction guard).
         boolean cfgIncrementalRpc = acParameters.getOuterLoops().stream().anyMatch(ol -> "IncrementalTransformerReactivePowerControl".equals(ol.getName()));
         boolean cfgIncrementalPhase = acParameters.getOuterLoops().stream().anyMatch(ol -> "IncrementalPhaseControl".equals(ol.getName()));
         boolean cfgSimpleTvc = simpleTvcBatchable

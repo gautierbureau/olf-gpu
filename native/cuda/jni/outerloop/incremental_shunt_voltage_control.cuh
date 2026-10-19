@@ -7,6 +7,7 @@
 #define OLF_GPU_OUTERLOOP_INCREMENTAL_SHUNT_VOLTAGE_CONTROL_CUH
 
 #include "../solver/driver_pass.cuh"
+#include "../common/codes/gpu_outer_loop_kind.cuh"
 
 namespace olfgpu {
 
@@ -16,7 +17,7 @@ void shcRebuildOverrides(BatchSolverContext* ctx);
 // Per-solve reset: base sections, fresh ratchets, the identity row's target as the base b.
 void shcResetSolve(BatchSolverContext* ctx, DriverPass& drv);
 
-// One check of the loop on every live scenario (LOOP_SHUNT_KERNEL).
+// One check of the loop on every live scenario (GpuOuterLoopKind::INCREMENTAL_SHUNT_VOLTAGE_CONTROL).
 void shcStep(BatchSolverContext* ctx, DriverPass& drv);
 
 }  // namespace olfgpu

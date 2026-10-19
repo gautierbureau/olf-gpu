@@ -8,6 +8,7 @@
 package com.powsybl.openloadflow.ac.outerloop.gpu;
 
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchSkips;
+import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuOuterLoopKind;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -45,22 +46,22 @@ public final class DevicePhaseOwnership {
             GpuIncrementalTransformerVoltageControlOuterLoop.uploadToDevice(handle, null, 1);
             GpuTransformerVoltageControlOuterLoop.uploadToDevice(handle, null, 0, false);
             GpuTransformerVoltageControlOuterLoop.uploadFreeze(handle, null);
-            mask |= DeviceLoopKind.hostMaskBit(DeviceLoopKind.HOST_LOOP_TVC);
+            mask |= GpuOuterLoopKind.hostMaskBit(GpuOuterLoopKind.HOST_TRANSFORMER_VOLTAGE_CONTROL);
         }
         if (!GpuBatchSkips.complete(GpuBatchSkips.Slot.SHUNT)) {
             GpuIncrementalShuntVoltageControlOuterLoop.uploadToDevice(handle, null, 3);
             GpuShuntVoltageControlOuterLoop.uploadToDevice(handle, null, true);
-            mask |= DeviceLoopKind.hostMaskBit(DeviceLoopKind.HOST_LOOP_SHUNT);
+            mask |= GpuOuterLoopKind.hostMaskBit(GpuOuterLoopKind.HOST_SHUNT_VOLTAGE_CONTROL);
         }
         if (!GpuBatchSkips.complete(GpuBatchSkips.Slot.PHASE) || !GpuBatchSkips.complete(GpuBatchSkips.Slot.RPC)) {
             DeviceFlowControllers.uploadToDevice(handle, null);
             GpuPhaseControlOuterLoop.uploadToDevice(handle, null);
-            mask |= DeviceLoopKind.hostMaskBit(DeviceLoopKind.HOST_LOOP_PHASE);
-            mask |= DeviceLoopKind.hostMaskBit(DeviceLoopKind.HOST_LOOP_TRPC);
+            mask |= GpuOuterLoopKind.hostMaskBit(GpuOuterLoopKind.HOST_PHASE_CONTROL);
+            mask |= GpuOuterLoopKind.hostMaskBit(GpuOuterLoopKind.HOST_TRANSFORMER_REACTIVE_POWER_CONTROL);
         }
         if (!GpuBatchSkips.complete(GpuBatchSkips.Slot.SVC)) {
             GpuSecondaryVoltageControlOuterLoop.uploadToDevice(handle, null);
-            mask |= 1;                                        // bit 0 = HOST_LOOP_SVC
+            mask |= GpuOuterLoopKind.hostMaskBit(GpuOuterLoopKind.HOST_SECONDARY_VOLTAGE_CONTROL);
         }
         if (mask != hostMask) {
             LOGGER.warn("GPU base load flow: handing loops back to OLF's engine, the phase builders could not "

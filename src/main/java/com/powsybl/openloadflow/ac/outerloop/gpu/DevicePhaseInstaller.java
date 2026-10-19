@@ -50,7 +50,7 @@ public final class DevicePhaseInstaller {
         // buses included (the one-tap-at-a-time round robin runs in the group kernel).
         // Every table upload also CLEARS when the run has none: the context is cached across runs on the
         // same network, and a stale table from a previous run selects the wrong driver phase (a Simple
-        // TVC run after an INCREMENTAL one ran LOOP_TVC_KERNEL on its controls — 3.6e-7 kV).
+        // TVC run after an INCREMENTAL one ran INCREMENTAL_TRANSFORMER_VOLTAGE_CONTROL on its controls — 3.6e-7 kV).
         boolean tvcInKernel = GpuIncrementalTransformerVoltageControlOuterLoop.uploadToDevice(handle, r.incrementalTvc(),
                 r.incrementalTvc() != null ? r.incTvcMaxTapShift() : 1);
         // The flow-observed incremental loops (RPC at OLF order 9, incremental phase at order 7) as DRIVER PHASES.

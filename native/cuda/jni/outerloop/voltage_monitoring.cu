@@ -13,6 +13,7 @@
 
 #include "../common/check.cuh"
 #include "../common/launch.cuh"
+#include "../common/codes/gpu_outer_loop_kind.cuh"
 
 #include "voltage_monitoring.cuh"
 
@@ -65,7 +66,7 @@ void monitoringResetSolve(BatchSolverContext* ctx, DriverPass& drv) {
     CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
 }
 
-// One check of the loop on every live scenario (LOOP_MONITORING).
+// One check of the loop on every live scenario (GpuOuterLoopKind::MONITORING_VOLTAGE).
 void monitoringStep(BatchSolverContext* ctx, DriverPass& drv) {
     const int& n = drv.n;
     const int& nS = drv.nS;

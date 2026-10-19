@@ -7,13 +7,14 @@
 #define OLF_GPU_OUTERLOOP_VOLTAGE_MONITORING_CUH
 
 #include "../solver/driver_pass.cuh"
+#include "../common/codes/gpu_outer_loop_kind.cuh"
 
 namespace olfgpu {
 
 // Per-solve reset: nothing has fired yet.
 void monitoringResetSolve(BatchSolverContext* ctx, DriverPass& drv);
 
-// One check of the loop on every live scenario (LOOP_MONITORING).
+// One check of the loop on every live scenario (GpuOuterLoopKind::MONITORING_VOLTAGE).
 void monitoringStep(BatchSolverContext* ctx, DriverPass& drv);
 
 }  // namespace olfgpu

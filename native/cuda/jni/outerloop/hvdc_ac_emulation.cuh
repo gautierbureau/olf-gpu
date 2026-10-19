@@ -7,10 +7,11 @@
 #define OLF_GPU_OUTERLOOP_HVDC_AC_EMULATION_CUH
 
 #include "../solver/driver_pass.cuh"
+#include "../common/codes/gpu_outer_loop_kind.cuh"
 
 namespace olfgpu {
 
-// One check of FreezingHvdcACEmulation (LOOP_HVDC_FREEZE) or AcHvdcAcEmulationLimits (LOOP_HVDC_LIMITS).
+// One check of FreezingHvdcACEmulation (GpuOuterLoopKind::FREEZING_HVDC_AC_EMULATION) or AcHvdcAcEmulationLimits (GpuOuterLoopKind::HVDC_AC_EMULATION_LIMITS).
 void hvdcStep(BatchSolverContext* ctx, DriverPass& drv, int loopKind);
 
 }  // namespace olfgpu

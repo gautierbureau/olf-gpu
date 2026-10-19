@@ -8,6 +8,7 @@
 #define OLF_GPU_OUTERLOOP_SECONDARY_VOLTAGE_CONTROL_CUH
 
 #include "../solver/driver_pass.cuh"
+#include "../common/codes/gpu_outer_loop_kind.cuh"
 
 namespace olfgpu {
 
@@ -17,7 +18,7 @@ constexpr double SVC_MAT_BUDGET_BYTES = 512.0 * 1024 * 1024;   // zone-system wo
 // Per-solve reset: zone targets back at the network's own, nothing adjusted yet.
 void svcResetSolve(BatchSolverContext* ctx, DriverPass& drv);
 
-// One check of the loop on every live scenario (LOOP_SVC_KERNEL).
+// One check of the loop on every live scenario (GpuOuterLoopKind::SECONDARY_VOLTAGE_CONTROL).
 void svcStep(BatchSolverContext* ctx, DriverPass& drv);
 
 }  // namespace olfgpu

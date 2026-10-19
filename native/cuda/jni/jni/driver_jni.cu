@@ -3,6 +3,7 @@
 //
 // JNI entry points of GpuAcNewtonSolver: The outer-loop driver: host-owned loops and the pause/resume cycle.
 #include "jni_common.cuh"
+#include "../common/codes/gpu_outer_loop_kind.cuh"
 
 /** Enable HOST-owned outer-loop slots via a bitmask.
  *  Bit 0 = SecondaryVoltageControl (OLF order 4, pre-RL),
@@ -20,13 +21,13 @@ OLF_JNI(ac_solver_gpu, DriverNative, setBatchHostLoop)(
     }
 }
 
-/** Did the last solve stop at a host-owned slot? Returns 0 if not paused, or the
- *  DeviceLoopKind value (LOOP_HOST_SVC=5, LOOP_HOST_PHASE=6, ...) of the paused slot. */
+/** Did the last solve stop at a host-owned slot? Returns GpuOuterLoopKind::NOT_PAUSED if not paused, or the
+ *  GpuOuterLoopKind::HOST_* kind of the paused slot. */
 extern "C" JNIEXPORT jint JNICALL
 OLF_JNI(ac_solver_gpu, DriverNative, readBatchDriverPaused)(
         JNIEnv*, jclass, jlong handle) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
-    return (ctx == nullptr || !ctx->driverPaused) ? 0 : ctx->pausedLoopKind;
+    return (ctx == nullptr || !ctx->driverPaused) ? GpuOuterLoopKind::NOT_PAUSED : ctx->pausedLoopKind;
 }
 
 /** Resume the paused driver: {@code hostChanged[s] != 0} is the host loop's UNSTABLE verdict for
@@ -57,7 +58,7 @@ OLF_JNI(ac_solver_gpu, DriverNative, cancelBatchDriverPause)(
     }
     ctx->driverPaused = 0;
     ctx->driverResume = 0;
-    ctx->pausedLoopKind = 0;
+    ctx->pausedLoopKind = GpuOuterLoopKind::NOT_PAUSED;
 }
 
 /** The next FRESH solve resumes its sweep at this loop kind after its first solve (a restarted

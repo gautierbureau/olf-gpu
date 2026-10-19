@@ -7,6 +7,7 @@
 #define OLF_GPU_OUTERLOOP_DISTRIBUTED_SLACK_CUH
 
 #include "../solver/driver_pass.cuh"
+#include "../common/codes/gpu_outer_loop_kind.cuh"
 
 namespace olfgpu {
 
@@ -21,7 +22,7 @@ __global__ void hvdcSlackBalanceBatch(int nS, int nh, int n, int nElements, int 
 void dsResetSolve(BatchSolverContext* ctx, DriverPass& drv);
 void dsSlackOnlyResetSolve(BatchSolverContext* ctx, DriverPass& drv, const double* dsSlackShift);
 
-// One check of DistributedSlackOuterLoop on every live scenario (LOOP_DS).
+// One check of DistributedSlackOuterLoop on every live scenario (GpuOuterLoopKind::DISTRIBUTED_SLACK).
 void dsCheck(BatchSolverContext* ctx, DriverPass& drv);
 
 }  // namespace olfgpu

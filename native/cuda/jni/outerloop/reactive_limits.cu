@@ -18,6 +18,7 @@
 #include "../solver/driver_steps.cuh"
 #include "../common/stats.cuh"
 #include "../common/codes/gpu_ac_solver_status.cuh"
+#include "../common/codes/gpu_outer_loop_kind.cuh"
 #include "../diagnostics/driver_traces.cuh"
 #include "forced_target_q.cuh"
 #include "pilot_voltage.cuh"
@@ -498,7 +499,7 @@ __global__ void rlUnpinBatch(int nPairs, int nS, int n, int nrl, const int* pair
     limitType[st] = 0;
 }
 
-// One check of ReactiveLimitsOuterLoop on every live scenario (LOOP_RL): the curve limits at the current
+// One check of ReactiveLimitsOuterLoop on every live scenario (GpuOuterLoopKind::REACTIVE_LIMITS): the curve limits at the current
 // targets, the PV->PQ pins and releases, robust mode's realistic-voltage pins and the forced-PV election.
 void rlCheck(BatchSolverContext* ctx, DriverPass& drv, int loopKind) {
     const int& n = drv.n;
@@ -525,7 +526,7 @@ void rlCheck(BatchSolverContext* ctx, DriverPass& drv, int loopKind) {
     DeviceBuf& dCvOvPtr = drv.dCvOvPtr;
     DeviceBuf& dCvOvEntry = drv.dCvOvEntry;
     DeviceBuf& dCvOvVal = drv.dCvOvVal;
-    if (loopKind == LOOP_RL && ctx->nrl > 0 && !skipRlPhase) {                  // skipRlPhase: a monitoring interleave solve — the
+    if (loopKind == GpuOuterLoopKind::REACTIVE_LIMITS && ctx->nrl > 0 && !skipRlPhase) {                  // skipRlPhase: a monitoring interleave solve — the
         if (useDynRlLimits) {                            // curve limits at the CURRENT (post-DS) targets,
             rlCurveLimitsBatch<<<grid(ctx->nrl * nS), BLOCK, 0, ctx->stream>>>(ctx->nrl, nS, ctx->ncv, n, ctx->cvExtrapolate,
                     ctx->dCvIdx.as<int>(), ctx->dCvIn.as<double>(), ctx->dCvPts.as<double>(),

@@ -18,6 +18,7 @@
 #include "../common/loop_kinds.cuh"
 #include "../common/codes/gpu_distributed_slack_factor_mode.cuh"
 #include "../common/codes/gpu_ac_solver_status.cuh"
+#include "../common/codes/gpu_outer_loop_kind.cuh"
 #include "../structure/shared_structure.cuh"
 
 namespace olfgpu {
@@ -272,13 +273,13 @@ struct BatchSolverContext {
     // (RL pins, monitoring activations, DS absorbed totals, HVDC statuses, x/targets/modes) simply
     // stays in the context across the pause; only the host-side driver locals need saving.
     int hostLoopMask = 0;                                    // bitmask of enabled host-owned loops
-                                                             // bit 0 = LOOP_HOST_SVC, 1 = PHASE, 2 = TVC, 3 = TRPC, 4 = SHUNT
+                                                             // one hostLoopMaskBit per GpuOuterLoopKind::HOST_* kind
     int driverResume = 0;                                    // this call continues a paused driver
-    int driverPaused = 0;                                    // the last call stopped at a LOOP_HOST_*
-    int pausedLoopKind = 0;                                  // WHICH host loop the driver stopped at
+    int driverPaused = 0;                                    // the last call stopped at a GpuOuterLoopKind::HOST_*
+    int pausedLoopKind = GpuOuterLoopKind::NOT_PAUSED;       // WHICH host loop the driver stopped at
     std::vector<int> pausedStatus;                           // per-scenario solve status at the pause: the resumed
                                                              // call's checks (rlActive = converged) need it back
-    int startLoopKind = -1;                                  // a RESTARTED sequence resumes its sweep AT this
+    int startLoopKind = GpuOuterLoopKind::NONE;              // a RESTARTED sequence resumes its sweep AT this
                                                              // loop (OLF re-checks the loop that went UNSTABLE
                                                              // after the re-solve, before restarting the sweep)
     int pausedLoopIdx = 0;
@@ -290,7 +291,7 @@ struct BatchSolverContext {
     std::vector<char> hostChanged;                           // per scenario: the host loop was UNSTABLE
     int nmon = 0;
     DeviceBuf dMonVRow, dMonBand, dMonDeltaPtr, dMonDeltaRow, dMonDeltaMode, dMonDeltaTarget, dMonActivated;
-    // INCREMENTAL TRANSFORMER VOLTAGE CONTROL — in-kernel outer loop (LOOP_TVC_KERNEL).
+    // INCREMENTAL TRANSFORMER VOLTAGE CONTROL — in-kernel outer loop (GpuOuterLoopKind::INCREMENTAL_TRANSFORMER_VOLTAGE_CONTROL).
     // Per-controller static data uploaded once; per-(scenario, controller) mutable state allocated
     // at first use. Tap tables are CSR-packed: tapData[tapPtr[c]..tapPtr[c+1]) holds nTaps rows of
     // 8 doubles [y, g1, g2, b1, b2, ksi, r1, a1] for controller c.
@@ -318,7 +319,7 @@ struct BatchSolverContext {
     // the TVC loop's moves are merged IN FRONT of them (findTapOverride takes the first match).
     std::vector<int> hR1OvBaseSlotElem;
     std::vector<double> hR1OvBaseVal;
-    // INCREMENTAL SHUNT VOLTAGE CONTROL — in-kernel outer loop (LOOP_SHUNT_KERNEL). Controllers are
+    // INCREMENTAL SHUNT VOLTAGE CONTROL — in-kernel outer loop (GpuOuterLoopKind::INCREMENTAL_SHUNT_VOLTAGE_CONTROL). Controllers are
     // grouped per controlled bus (OLF adjustB round-robin, |b|-descending); each controller shunt has
     // sub-controllers (OLF LfShunt.Controller) with their own section B/G tables and ratchet.
     int nShc = 0, nShcGroups = 0, nShcSubs = 0, shcMaxSectionShift = 3;
@@ -331,7 +332,7 @@ struct BatchSolverContext {
     DeviceBuf dShcOutOfDb, dShcDiffV;                        // per (scenario, group)
     std::vector<int> hShcBRow, hShcShOvElem, hShcSubPtr, hShcSecPtr, hShcSubBase;
     std::vector<double> hShcSecB, hShcSecG;
-    // FLOW-OBSERVED incremental loops (LOOP_PHASE_KERNEL / LOOP_TRPC_KERNEL): a rho (RPC) or a1 (phase)
+    // FLOW-OBSERVED incremental loops (GpuOuterLoopKind::INCREMENTAL_PHASE_CONTROL / GpuOuterLoopKind::INCREMENTAL_TRANSFORMER_REACTIVE_POWER_CONTROL): a rho (RPC) or a1 (phase)
     // tap driving a CONTROLLED branch's Q, P or I. kind 0 = RPC (rho -> Q, closest-r1), 1 = phase
     // CONTROLLER (a1 -> P, closest-a1), 2 = phase LIMITER (a1 -> I, first-above-a1, one-sided).
     int nFlc = 0, nFlcPhase = 0, nFlcRpc = 0;
@@ -351,7 +352,7 @@ struct BatchSolverContext {
     std::vector<double> hCphTapData;
     std::vector<int> hShOvBaseSlotElem;                      // the caller's shunt overrides at solve entry
     std::vector<double> hShOvBaseGb;
-    // DISCRETE (non-incremental) TRANSFORMER VOLTAGE CONTROL — LOOP_TVD_KERNEL (OLF order 8): OLF's
+    // DISCRETE (non-incremental) TRANSFORMER VOLTAGE CONTROL — GpuOuterLoopKind::TRANSFORMER_VOLTAGE_CONTROL (OLF order 8): OLF's
     // TransformerVoltageControlOuterLoop (tvdMode 0, AFTER_GENERATOR: INITIAL/CONTROL/COMPLETE) or
     // SimpleTransformerVoltageControlOuterLoop (tvdMode 1, WITH_GENERATOR). One group per controlled bus
     // (CSR over members); the group's ON/OFF activations are the toggle-diffed row deltas (CSR).
@@ -362,7 +363,7 @@ struct BatchSolverContext {
     DeviceBuf dTvdScnStep, dTvdGrpStep, dTvdGrpShMin, dTvdGrpShMax, dTvdGrpShInit;   // per scenario / per (scenario, group)
     DeviceBuf dTvdMemState, dTvdMemTap, dTvdMemRoundFrom;                          // per (scenario, member)
     DeviceBuf dTvdSaved, dTvdReject;                                               // per (scenario, delta row) / per scenario
-    // SECONDARY VOLTAGE CONTROL — LOOP_SVC_KERNEL (OLF order 4). Zones of controller buses regulating a
+    // SECONDARY VOLTAGE CONTROL — GpuOuterLoopKind::SECONDARY_VOLTAGE_CONTROL (OLF order 4). Zones of controller buses regulating a
     // pilot point: run entirely on the device, the small dense zone system included.
     int nSvc = 0, nSvcZones = 0;
     DeviceBuf dSvcCtldVRow, dSvcBusVRow, dSvcRlIdx, dSvcBaseTargetV, dSvcMinQ, dSvcMaxQ, dSvcLoadQ;
@@ -392,7 +393,7 @@ struct BatchSolverContext {
     DeviceBuf dTvdFixMinMask, dTvdFixMaxMask;                // per (scenario, member): fixWords ints each
     int tvdFixWords = 0;
     bool tvdFixTables = false;
-    // DISCRETE SHUNT VOLTAGE CONTROL — LOOP_SVD_KERNEL (OLF order 10): ShuntVoltageControlOuterLoop
+    // DISCRETE SHUNT VOLTAGE CONTROL — GpuOuterLoopKind::SHUNT_VOLTAGE_CONTROL (OLF order 10): ShuntVoltageControlOuterLoop
     // (WITH_GENERATOR): control ON for the first solve, LfShuntImpl.dispatchB at the first check.
     int nSvd = 0, nSvdGroups = 0, nSvdDelta = 0, nSvdSubs = 0, svdEntryOn = 0;
     DeviceBuf dSvdGrpPtr, dSvdDeltaPtr, dSvdDeltaRow, dSvdDeltaModeOn, dSvdDeltaModeOff, dSvdDeltaTargetOn, dSvdDeltaTargetOff;

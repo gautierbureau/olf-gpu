@@ -14,17 +14,18 @@
 #include <utility>
 
 #include "loop_kinds.cuh"
+#include "codes/gpu_outer_loop_kind.cuh"
 
 // OLF_GPU_PHASE_TIME accounting: how much of a solveBatchContext call is device outer-loop passes
 // vs Newton iterations. A pass that re-solves is the expensive one; a pass that only re-checks is not.
 extern long long gOuterPasses;
 
-// OLF_GPU_PHASE_TIME: where the outer-loop driver's time goes. Index 0..16 = the DeviceLoopKind that TRIGGERED a
+// OLF_GPU_PHASE_TIME: where the outer-loop driver's time goes. Index = the GpuOuterLoopKind that TRIGGERED a
 // re-solve (the loop whose check changed something), or the loop being CHECKED; the first solve of a call is apart.
-extern double gOlFirstSolveMs, gOlReSolveMs[OL_KINDS], gOlCheckMs[OL_KINDS];
-extern long long gOlFirstSolveScen, gOlReSolveScen[OL_KINDS], gOlReSolvePasses[OL_KINDS];
-extern long long gOlFirstLaneIters, gOlReSolveLaneIters[OL_KINDS], gOlFirstWidthIters, gOlReSolveWidthIters[OL_KINDS];
-extern long long gOlCheckPasses[OL_KINDS], gOlFirstPasses;
+extern double gOlFirstSolveMs, gOlReSolveMs[GpuOuterLoopKind::COUNT], gOlCheckMs[GpuOuterLoopKind::COUNT];
+extern long long gOlFirstSolveScen, gOlReSolveScen[GpuOuterLoopKind::COUNT], gOlReSolvePasses[GpuOuterLoopKind::COUNT];
+extern long long gOlFirstLaneIters, gOlReSolveLaneIters[GpuOuterLoopKind::COUNT], gOlFirstWidthIters, gOlReSolveWidthIters[GpuOuterLoopKind::COUNT];
+extern long long gOlCheckPasses[GpuOuterLoopKind::COUNT], gOlFirstPasses;
 
 // OLF_GPU_RL_REASONS=1: why each reactive-limits check was unstable, per checked scenario (bit 1 a pin PV->PQ, bit 2 an
 // unpin PQ->PV, bit 4 a limit refresh of a pinned entry; 0 with the scenario switched = a group re-stamp only), and

@@ -13,6 +13,7 @@
 
 #include "../common/check.cuh"
 #include "../common/launch.cuh"
+#include "../common/codes/gpu_outer_loop_kind.cuh"
 #include "hvdc.cuh"
 
 #include "hvdc_ac_emulation.cuh"
@@ -131,7 +132,7 @@ __global__ void hvdcAcEmulationLoopBatch(int nh, int nScenarios, int n, int nEle
     switched[s] = 1;                                         // this outer loop is UNSTABLE for s
 }
 
-// One check of FreezingHvdcACEmulation (loopKind LOOP_HVDC_FREEZE) or AcHvdcAcEmulationLimits (LOOP_HVDC_LIMITS)
+// One check of FreezingHvdcACEmulation (loopKind GpuOuterLoopKind::FREEZING_HVDC_AC_EMULATION) or AcHvdcAcEmulationLimits (GpuOuterLoopKind::HVDC_AC_EMULATION_LIMITS)
 // on every live scenario.
 void hvdcStep(BatchSolverContext* ctx, DriverPass& drv, int loopKind) {
     const int& n = drv.n;
@@ -150,7 +151,7 @@ void hvdcStep(BatchSolverContext* ctx, DriverPass& drv, int loopKind) {
     }
     hvdcAcEmulationLoopBatch<<<grid(ctx->nhv * nS), BLOCK, 0, ctx->stream>>>(
             ctx->nhv, nS, n, ctx->nElements, ctx->hvOffset,
-            loopKind == LOOP_HVDC_FREEZE ? 0 : 1,
+            loopKind == GpuOuterLoopKind::FREEZING_HVDC_AC_EMULATION ? 0 : 1,
             ctx->dHvElem.as<int>(), ctx->dHvBus1Row.as<int>(), ctx->dHvBus2Row.as<int>(),
             ctx->dHvBus1Phi.as<int>(), ctx->dHvBus2Phi.as<int>(),
             ctx->dMode.as<int>(), ctx->st->dRelocOwn.p != nullptr ? ctx->st->dRelocOwn.as<int>() : nullptr,

@@ -3,6 +3,7 @@
 //
 // JNI entry points of GpuAcNewtonSolver: The batched context and its solve.
 #include "jni_common.cuh"
+#include "../common/codes/gpu_outer_loop_kind.cuh"
 
 // OLF_GPU_PHASE_TIME: split one solveBatchContext JNI call into the three things it does —
 // marshalling the Java arrays in, the solve itself, and packing the per-scenario result arrays out.
@@ -404,13 +405,13 @@ OLF_JNI(ac_solver_gpu, BatchSolveNative, solveBatchContext)(
         fprintf(stderr, "GPU_OL_HIST notConvergedOnDevice=%lld iters=%lld\n", gOlNotConverged, gOlNotConvergedIters);
         fprintf(stderr, "GPU_OL_TIME first-solve passes=%lld ms=%.1f scenarioSolves=%lld laneIters=%lld widthIters=%lld\n",
                 gOlFirstPasses, gOlFirstSolveMs, gOlFirstSolveScen, gOlFirstLaneIters, gOlFirstWidthIters);
-        for (int k = 0; k < OL_KINDS; k++) {
+        for (int k = 0; k < GpuOuterLoopKind::COUNT; k++) {
             if (gOlReSolvePasses[k] > 0) {
                 fprintf(stderr, "GPU_OL_TIME re-solve trigger=%s passes=%lld ms=%.1f scenarioSolves=%lld laneIters=%lld widthIters=%lld\n",
                         olKindName(k), gOlReSolvePasses[k], gOlReSolveMs[k], gOlReSolveScen[k], gOlReSolveLaneIters[k], gOlReSolveWidthIters[k]);
             }
         }
-        for (int k = 0; k < OL_KINDS; k++) {
+        for (int k = 0; k < GpuOuterLoopKind::COUNT; k++) {
             if (gOlCheckPasses[k] > 0) {
                 fprintf(stderr, "GPU_OL_TIME check loop=%s passes=%lld ms=%.1f\n", olKindName(k), gOlCheckPasses[k], gOlCheckMs[k]);
             }

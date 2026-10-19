@@ -8,6 +8,7 @@
 #define OLF_GPU_OUTERLOOP_INCREMENTAL_TRANSFORMER_VOLTAGE_CONTROL_CUH
 
 #include "../solver/driver_pass.cuh"
+#include "../common/codes/gpu_outer_loop_kind.cuh"
 
 namespace olfgpu {
 
@@ -17,7 +18,7 @@ void tvcRebuildOverrides(BatchSolverContext* ctx);
 // Per-solve reset: every scenario at the base tap with a fresh ratchet.
 void tvcResetSolve(BatchSolverContext* ctx, DriverPass& drv);
 
-// One check of the loop on every live scenario (LOOP_TVC_KERNEL).
+// One check of the loop on every live scenario (GpuOuterLoopKind::INCREMENTAL_TRANSFORMER_VOLTAGE_CONTROL).
 void tvcStep(BatchSolverContext* ctx, DriverPass& drv);
 
 }  // namespace olfgpu

@@ -11,7 +11,6 @@ import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcElementMapper;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.ZeroImpedanceNative;
-import com.powsybl.openloadflow.ac.outerloop.gpu.DeviceLoopKind;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DeviceLoopTables;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DevicePhaseInstaller;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DevicePhases;
@@ -37,6 +36,7 @@ import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.GenOutage;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.GpuBatchLossPreDistribution;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.GpuBatchQualification;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuAcSolverStatus;
+import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuOuterLoopKind;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuStateVectorScalingMode;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfShunt;
@@ -1012,7 +1012,8 @@ final class GpuBatchChunkSolver {
                         GpuSecondaryVoltageControlOuterLoop.uploadToDevice(handle, null);   // clear a cached context's table
                     }
                     boolean svcAsDriverPause = svcActive && rlStateOut != null && !svcInKernel;
-                    DriverNative.setBatchHostLoop(handle, svcAsDriverPause ? 1 : 0);
+                    DriverNative.setBatchHostLoop(handle, svcAsDriverPause
+                            ? GpuOuterLoopKind.hostMaskBit(GpuOuterLoopKind.HOST_SECONDARY_VOLTAGE_CONTROL) : 0);
                     long solveCountBefore = BatchReadbackNative.readBatchSolveCount(handle);
                     // Seeds only where no full per-scenario state goes (the pair phase builds its own from the parents).
                     NewtonSettingsNative.setBatchX0Seeds(handle, x0Full == null ? x0SeedIdx : null, x0Full == null ? x0SeedVal : null);
@@ -1181,7 +1182,7 @@ final class GpuBatchChunkSolver {
                         // early would leave the context PAUSED and the chunk holding mid-sweep states.
                         int maxSvcRounds = 16 * (config.maxOuterIterations() > 0 ? config.maxOuterIterations() : 20);
                         int svcRounds = 0;
-                        while (DriverNative.readBatchDriverPaused(handle) == DeviceLoopKind.HOST_LOOP_SVC
+                        while (DriverNative.readBatchDriverPaused(handle) == GpuOuterLoopKind.HOST_SECONDARY_VOLTAGE_CONTROL
                                 && svcRounds++ < maxSvcRounds) {
                             var dec = GpuSecondaryVoltageControlOuterLoop.decideAtPause(handle, chunkSize, realCount, n, nrl,
                                     chunkResults, phases.secondaryVc(), rlStateOut, svcTargetV, baseState);
@@ -1212,7 +1213,7 @@ final class GpuBatchChunkSolver {
                                     rs.nziBase, rs.ziOnSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
                                     rs.ziOffSlotElemList.stream().mapToInt(Integer::intValue).toArray());
                         }
-                        if (DriverNative.readBatchDriverPaused(handle) != 0) {
+                        if (DriverNative.readBatchDriverPaused(handle) != GpuOuterLoopKind.NOT_PAUSED) {
                             // Safety net only: the budget bookkeeping above should always end the cycle.
                             // Mid-sweep states must never be reported — cancel and let the CPU replay them.
                             LOGGER.warn("Secondary VC driver pause did not settle in {} rounds — chunk routed to the CPU",

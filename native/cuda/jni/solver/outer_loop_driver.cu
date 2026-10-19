@@ -15,6 +15,7 @@
 #include "../common/launch.cuh"
 #include "../common/stats.cuh"
 #include "../common/codes/gpu_ac_solver_status.cuh"
+#include "../common/codes/gpu_outer_loop_kind.cuh"
 #include "../diagnostics/driver_traces.cuh"
 #include "../diagnostics/matrix_scan.cuh"
 #include "../equations/branch_fill.cuh"
@@ -474,51 +475,51 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     int (&loopOrder)[MAX_DEVICE_LOOPS] = drv.loopOrder;
     int nLoops = 0;
     if (ctx->nds > 0 || ctx->dsSlackOnly) {
-        loopOrder[nLoops++] = LOOP_DS;
+        loopOrder[nLoops++] = GpuOuterLoopKind::DISTRIBUTED_SLACK;
     }
     if (ctx->nhv > 0) {
-        loopOrder[nLoops++] = LOOP_HVDC_FREEZE;              // OLF: FreezingHvdcACEmulation
+        loopOrder[nLoops++] = GpuOuterLoopKind::FREEZING_HVDC_AC_EMULATION;  // OLF: FreezingHvdcACEmulation
         if (ctx->hvLimitsActive) {
-            loopOrder[nLoops++] = LOOP_HVDC_LIMITS;          // OLF: AcHvdcAcEmulationLimits
+            loopOrder[nLoops++] = GpuOuterLoopKind::HVDC_AC_EMULATION_LIMITS;  // OLF: AcHvdcAcEmulationLimits
         }
     }
     if (ctx->nSvc > 0) {
-        loopOrder[nLoops++] = LOOP_SVC_KERNEL;               // OLF order 4: SecondaryVoltageControl, IN-KERNEL
-    } else if (ctx->hostLoopMask & (1 << 0)) {
-        loopOrder[nLoops++] = LOOP_HOST_SVC;                 // OLF order 4: SecondaryVoltageControl, host pause
+        loopOrder[nLoops++] = GpuOuterLoopKind::SECONDARY_VOLTAGE_CONTROL;  // OLF order 4: SecondaryVoltageControl, IN-KERNEL
+    } else if (ctx->hostLoopMask & hostLoopMaskBit(GpuOuterLoopKind::HOST_SECONDARY_VOLTAGE_CONTROL)) {
+        loopOrder[nLoops++] = GpuOuterLoopKind::HOST_SECONDARY_VOLTAGE_CONTROL;  // OLF order 4: SecondaryVoltageControl, host pause
     }
     if (ctx->nmon > 0) {
-        loopOrder[nLoops++] = LOOP_MONITORING;               // OLF order 5: MonitoringVoltage
+        loopOrder[nLoops++] = GpuOuterLoopKind::MONITORING_VOLTAGE;  // OLF order 5: MonitoringVoltage
     }
     if (ctx->nrl > 0) {
-        loopOrder[nLoops++] = LOOP_RL;                       // OLF order 6: ReactiveLimits
+        loopOrder[nLoops++] = GpuOuterLoopKind::REACTIVE_LIMITS;  // OLF order 6: ReactiveLimits
     }
     if (ctx->nFlcPhase > 0 || ctx->nCph > 0) {
-        loopOrder[nLoops++] = LOOP_PHASE_KERNEL;             // OLF order 7: (Incremental)PhaseControl, IN-KERNEL
-    } else if (ctx->hostLoopMask & (1 << 1)) {
-        loopOrder[nLoops++] = LOOP_HOST_PHASE;               // OLF order 7: PhaseControl
+        loopOrder[nLoops++] = GpuOuterLoopKind::INCREMENTAL_PHASE_CONTROL;  // OLF order 7: (Incremental)PhaseControl, IN-KERNEL
+    } else if (ctx->hostLoopMask & hostLoopMaskBit(GpuOuterLoopKind::HOST_PHASE_CONTROL)) {
+        loopOrder[nLoops++] = GpuOuterLoopKind::HOST_PHASE_CONTROL;  // OLF order 7: PhaseControl
     }
     if (ctx->nTvc > 0) {
-        loopOrder[nLoops++] = LOOP_TVC_KERNEL;               // OLF order 8: TransformerVoltageControl, IN-KERNEL
+        loopOrder[nLoops++] = GpuOuterLoopKind::INCREMENTAL_TRANSFORMER_VOLTAGE_CONTROL;  // OLF order 8: TransformerVoltageControl, IN-KERNEL
     } else if (ctx->nTvd > 0) {
-        loopOrder[nLoops++] = LOOP_TVD_KERNEL;               // OLF order 8: AFTER_GENERATOR / Simple TVC, IN-KERNEL
-    } else if (ctx->hostLoopMask & (1 << 2)) {
-        loopOrder[nLoops++] = LOOP_HOST_TVC;                 // OLF order 8: TransformerVoltageControl, host pause
+        loopOrder[nLoops++] = GpuOuterLoopKind::TRANSFORMER_VOLTAGE_CONTROL;  // OLF order 8: AFTER_GENERATOR / Simple TVC, IN-KERNEL
+    } else if (ctx->hostLoopMask & hostLoopMaskBit(GpuOuterLoopKind::HOST_TRANSFORMER_VOLTAGE_CONTROL)) {
+        loopOrder[nLoops++] = GpuOuterLoopKind::HOST_TRANSFORMER_VOLTAGE_CONTROL;  // OLF order 8: TransformerVoltageControl, host pause
     }
     if (ctx->nFlcRpc > 0) {
-        loopOrder[nLoops++] = LOOP_TRPC_KERNEL;              // OLF order 9: TransformerReactivePowerControl, IN-KERNEL
-    } else if (ctx->hostLoopMask & (1 << 3)) {
-        loopOrder[nLoops++] = LOOP_HOST_TRPC;                // OLF order 9: TransformerReactivePowerControl
+        loopOrder[nLoops++] = GpuOuterLoopKind::INCREMENTAL_TRANSFORMER_REACTIVE_POWER_CONTROL;  // OLF order 9: TransformerReactivePowerControl, IN-KERNEL
+    } else if (ctx->hostLoopMask & hostLoopMaskBit(GpuOuterLoopKind::HOST_TRANSFORMER_REACTIVE_POWER_CONTROL)) {
+        loopOrder[nLoops++] = GpuOuterLoopKind::HOST_TRANSFORMER_REACTIVE_POWER_CONTROL;  // OLF order 9: TransformerReactivePowerControl
     }
     if (ctx->nShc > 0) {
-        loopOrder[nLoops++] = LOOP_SHUNT_KERNEL;             // OLF order 10: ShuntVoltageControl, IN-KERNEL
+        loopOrder[nLoops++] = GpuOuterLoopKind::INCREMENTAL_SHUNT_VOLTAGE_CONTROL;  // OLF order 10: ShuntVoltageControl, IN-KERNEL
     } else if (ctx->nSvd > 0) {
-        loopOrder[nLoops++] = LOOP_SVD_KERNEL;               // OLF order 10: WITH_GENERATOR shunt VC, IN-KERNEL
-    } else if (ctx->hostLoopMask & (1 << 4)) {
-        loopOrder[nLoops++] = LOOP_HOST_SHUNT;               // OLF order 10: ShuntVoltageControl
+        loopOrder[nLoops++] = GpuOuterLoopKind::SHUNT_VOLTAGE_CONTROL;  // OLF order 10: WITH_GENERATOR shunt VC, IN-KERNEL
+    } else if (ctx->hostLoopMask & hostLoopMaskBit(GpuOuterLoopKind::HOST_SHUNT_VOLTAGE_CONTROL)) {
+        loopOrder[nLoops++] = GpuOuterLoopKind::HOST_SHUNT_VOLTAGE_CONTROL;  // OLF order 10: ShuntVoltageControl
     }
     if (nLoops == 0) {
-        loopOrder[nLoops++] = LOOP_RL;                       // nothing to drive: the old code's phase-1 fallback
+        loopOrder[nLoops++] = GpuOuterLoopKind::REACTIVE_LIMITS;  // nothing to drive: the old code's phase-1 fallback
     }
     // Where the realistic-voltage check STARTS applying in this sweep. AcloadFlowEngine keeps
     // checkUnrealisticStates false up to and including the last loop that can fix an unrealistic state
@@ -531,10 +532,10 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     int realisticFixingIdx = -1;
     for (int i = 0; i < nLoops; i++) {
         bool isFixing = ctx->realisticFixingLoop == 0
-                ? loopOrder[i] == LOOP_RL
+                ? loopOrder[i] == GpuOuterLoopKind::REACTIVE_LIMITS
                 : (ctx->realisticFixingLoop == 1
-                        && (loopOrder[i] == LOOP_HOST_TVC
-                            || (loopOrder[i] == LOOP_TVD_KERNEL && ctx->tvdMode != 1)));
+                        && (loopOrder[i] == GpuOuterLoopKind::HOST_TRANSFORMER_VOLTAGE_CONTROL
+                            || (loopOrder[i] == GpuOuterLoopKind::TRANSFORMER_VOLTAGE_CONTROL && ctx->tvdMode != 1)));
         if (isFixing) {
             realisticFixingIdx = i;
         }
@@ -542,7 +543,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     int& loopIdx = drv.loopIdx;
     loopIdx = 0;
     bool seqChanged = false;                                 // did any outer loop re-solve during the current RL->DS sequence
-    if (!resume && ctx->startLoopKind >= 0) {
+    if (!resume && ctx->startLoopKind != GpuOuterLoopKind::NONE) {
         // Restart after a host loop mutated the system: the first pass solves, then the sweep picks
         // up at THAT loop's slot (OLF's runOuterLoop re-checks it until STABLE, and only then does
         // the sweep restart from the first loop — seqChanged makes that restart happen).
@@ -552,7 +553,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                 seqChanged = true;
             }
         }
-        ctx->startLoopKind = -1;
+        ctx->startLoopKind = GpuOuterLoopKind::NONE;
     }
     std::vector<int> prodIters(nS, 0);                       // PER-SCENARIO productive outer iterations: OLF's
                                                              // maxOuterLoopIterations is a per-RUN budget — a global
@@ -642,7 +643,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     int& olPassSolved = drv.olPassSolved;
     olPassSolved = 0;
     bool olFirstSolveDone = resume;                          // a resumed call's passes are all re-solves
-    int olTriggerKind = resume ? ctx->pausedLoopKind : -1;  // the loop whose check made the next pass re-solve
+    int olTriggerKind = resume ? ctx->pausedLoopKind : GpuOuterLoopKind::NONE;  // the loop whose check made the next pass re-solve
     int& outer = drv.outer;
     for (outer = 0; outer < maxOuter && loopIdx < nLoops; outer++) {
     gOuterPasses++;
@@ -716,10 +717,10 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             gOlFirstPasses++;
             olFirstSolveDone = true;
         } else if (olSolving) {
-            int k = olTriggerKind >= 0 && olTriggerKind < OL_KINDS ? olTriggerKind : 0;
+            int k = olTriggerKind >= 0 && olTriggerKind < GpuOuterLoopKind::COUNT ? olTriggerKind : 0;
             gOlReSolveMs[k] += ms; gOlReSolveScen[k] += olPassSolved; gOlReSolveLaneIters[k] += ai;
             gOlReSolveWidthIters[k] += wi; gOlReSolvePasses[k]++;
-            if (rlReasonsOn() && k == LOOP_RL) {
+            if (rlReasonsOn() && k == GpuOuterLoopKind::REACTIVE_LIMITS) {
                 std::fprintf(stderr, "GPU_RL_PASS outer=%d width=%d active=%d ms=%.1f batchIters=%lld laneIters=%lld widthIters=%lld\n",
                              outer, nS, olPassSolved, ms, gNewtonIters - olNI0, ai, wi);
             }
@@ -729,7 +730,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     struct OlCheckTimer {
         bool on; double t0; int kind;
         ~OlCheckTimer() {
-            if (on && kind >= 0 && kind < OL_KINDS) {
+            if (on && kind >= 0 && kind < GpuOuterLoopKind::COUNT) {
                 gOlCheckMs[kind] += olNowMs() - t0;
                 gOlCheckPasses[kind]++;
             }
@@ -832,13 +833,13 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         }
     }
     // Apply ONLY the current phase's outer loop this pass (sequential, like OLF) — never both at once.
-    bool inDsPhase = (loopOrder[loopIdx] == LOOP_DS);
+    bool inDsPhase = (loopOrder[loopIdx] == GpuOuterLoopKind::DISTRIBUTED_SLACK);
     olCheck.kind = loopOrder[loopIdx];
     olTriggerKind = loopOrder[loopIdx];                     // a re-solve in the next pass was triggered by this check
     traceBatchPass(ctx, drv, nLoops, solvePass);
     traceDsConvergence(ctx, drv, inDsPhase);
     int loopKind = loopOrder[loopIdx];
-    if (loopKind >= LOOP_HOST_SVC && loopKind <= LOOP_HOST_SHUNT) {   // any LOOP_HOST_* kind: pause for the host
+    if (loopKind >= GpuOuterLoopKind::HOST_SECONDARY_VOLTAGE_CONTROL && loopKind <= GpuOuterLoopKind::HOST_SHUNT_VOLTAGE_CONTROL) {   // any LOOP_HOST_* kind: pause for the host
         // Hand the sequence back. Everything the device holds — x, targets, row modes, RL pins,
         // monitoring activations, absorbed slack, HVDC statuses — stays put in the context; only
         // these host-side locals need saving.
@@ -852,23 +853,23 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         ctx->pausedLoopKind = loopKind;                      // WHICH host loop to run
         break;
     }
-    if (loopKind == LOOP_TVC_KERNEL) {
+    if (loopKind == GpuOuterLoopKind::INCREMENTAL_TRANSFORMER_VOLTAGE_CONTROL) {
         tvcStep(ctx, drv);
-    } else if (loopKind == LOOP_SHUNT_KERNEL) {
+    } else if (loopKind == GpuOuterLoopKind::INCREMENTAL_SHUNT_VOLTAGE_CONTROL) {
         shcStep(ctx, drv);
-    } else if (loopKind == LOOP_PHASE_KERNEL) {
+    } else if (loopKind == GpuOuterLoopKind::INCREMENTAL_PHASE_CONTROL) {
         if (ctx->nCph > 0) cphStep(ctx, drv); else flcStep(ctx, drv, 6);       // continuous, or incremental kinds 1 + 2
-    } else if (loopKind == LOOP_TRPC_KERNEL) {
+    } else if (loopKind == GpuOuterLoopKind::INCREMENTAL_TRANSFORMER_REACTIVE_POWER_CONTROL) {
         flcStep(ctx, drv, 1);                                          // kind 0 (RPC)
-    } else if (loopKind == LOOP_TVD_KERNEL) {
+    } else if (loopKind == GpuOuterLoopKind::TRANSFORMER_VOLTAGE_CONTROL) {
         tvdStep(ctx, drv);
-    } else if (loopKind == LOOP_SVD_KERNEL) {
+    } else if (loopKind == GpuOuterLoopKind::SHUNT_VOLTAGE_CONTROL) {
         svdStep(ctx, drv);
-    } else if (loopKind == LOOP_SVC_KERNEL) {
+    } else if (loopKind == GpuOuterLoopKind::SECONDARY_VOLTAGE_CONTROL) {
         svcStep(ctx, drv);
-    } else if (loopKind == LOOP_MONITORING) {
+    } else if (loopKind == GpuOuterLoopKind::MONITORING_VOLTAGE) {
         monitoringStep(ctx, drv);
-    } else if (loopKind == LOOP_HVDC_FREEZE || loopKind == LOOP_HVDC_LIMITS) {
+    } else if (loopKind == GpuOuterLoopKind::FREEZING_HVDC_AC_EMULATION || loopKind == GpuOuterLoopKind::HVDC_AC_EMULATION_LIMITS) {
         hvdcStep(ctx, drv, loopKind);
     } else if (inDsPhase) {                                // distributed-slack outer loop: spread the slack mismatch
         dsCheck(ctx, drv);

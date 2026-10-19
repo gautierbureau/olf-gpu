@@ -14,7 +14,7 @@ import com.powsybl.openloadflow.ac.outerloop.AcActivePowerDistributionOuterLoop;
 import com.powsybl.openloadflow.ac.outerloop.AcOuterLoop;
 import com.powsybl.openloadflow.ac.outerloop.DistributedSlackOuterLoop;
 import com.powsybl.openloadflow.ac.outerloop.ReactiveLimitsOuterLoop;
-import com.powsybl.openloadflow.ac.outerloop.gpu.DeviceLoopKind;
+import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuOuterLoopKind;
 import org.apache.commons.lang3.tuple.Pair;
 
 import java.util.List;
@@ -78,8 +78,8 @@ public class GpuDriverOuterLoopEngine extends AcloadFlowEngine {
             default -> { }
         }
         // Host-paused loops: anything with a LOOP_HOST_* kind
-        return DeviceLoopKind.loopKindFor(outerLoop.getName())
-                >= DeviceLoopKind.HOST_LOOP_SVC;
+        return GpuOuterLoopKind.hostKindOf(outerLoop.getName())
+                >= GpuOuterLoopKind.HOST_SECONDARY_VOLTAGE_CONTROL;
     }
 
     /**

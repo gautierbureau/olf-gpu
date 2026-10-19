@@ -16,6 +16,7 @@
 #include "../common/launch.cuh"
 #include "../common/stats.cuh"
 #include "../common/codes/gpu_ac_solver_status.cuh"
+#include "../common/codes/gpu_outer_loop_kind.cuh"
 #include "../equations/branch_fill.cuh"
 #include "../equations/bus_injection_fill.cuh"
 #include "../equations/distribution_fill.cuh"
@@ -190,23 +191,23 @@ void traceBatchPass(BatchSolverContext* ctx, DriverPass& drv, int nLoops, bool s
     if (std::getenv("OLF_GPU_BATCH_TRACE") != nullptr) {
         const char* kindName = "?";
         switch (loopOrder[loopIdx]) {
-            case LOOP_DS:           kindName = "DistributedSlack"; break;
-            case LOOP_HVDC_FREEZE:  kindName = "FreezingHvdcACEmulation"; break;
-            case LOOP_HVDC_LIMITS:  kindName = "AcHvdcAcEmulationLimits"; break;
-            case LOOP_HOST_SVC:     kindName = "HOST:SecondaryVoltageControl"; break;
-            case LOOP_MONITORING:   kindName = "MonitoringVoltage"; break;
-            case LOOP_RL:           kindName = "ReactiveLimits"; break;
-            case LOOP_HOST_PHASE:   kindName = "HOST:PhaseControl"; break;
-            case LOOP_HOST_TVC:     kindName = "HOST:TransformerVoltageControl"; break;
-            case LOOP_HOST_TRPC:    kindName = "HOST:TransformerReactivePowerControl"; break;
-            case LOOP_HOST_SHUNT:   kindName = "HOST:ShuntVoltageControl"; break;
-            case LOOP_TVC_KERNEL:   kindName = "TransformerVoltageControl"; break;
-            case LOOP_SHUNT_KERNEL: kindName = "ShuntVoltageControl"; break;
-            case LOOP_PHASE_KERNEL: kindName = ctx->nCph > 0 ? "PhaseControl" : "IncrementalPhaseControl"; break;
-            case LOOP_TRPC_KERNEL:  kindName = "TransformerReactivePowerControl"; break;
-            case LOOP_TVD_KERNEL:   kindName = ctx->tvdMode == 1 ? "SimpleTransformerVoltageControl" : "TransformerVoltageControl"; break;
-            case LOOP_SVD_KERNEL:   kindName = "ShuntVoltageControl"; break;
-            case LOOP_SVC_KERNEL:   kindName = "SecondaryVoltageControl"; break;
+            case GpuOuterLoopKind::DISTRIBUTED_SLACK:           kindName = "DistributedSlack"; break;
+            case GpuOuterLoopKind::FREEZING_HVDC_AC_EMULATION:  kindName = "FreezingHvdcACEmulation"; break;
+            case GpuOuterLoopKind::HVDC_AC_EMULATION_LIMITS:  kindName = "AcHvdcAcEmulationLimits"; break;
+            case GpuOuterLoopKind::HOST_SECONDARY_VOLTAGE_CONTROL:     kindName = "HOST:SecondaryVoltageControl"; break;
+            case GpuOuterLoopKind::MONITORING_VOLTAGE:   kindName = "MonitoringVoltage"; break;
+            case GpuOuterLoopKind::REACTIVE_LIMITS:           kindName = "ReactiveLimits"; break;
+            case GpuOuterLoopKind::HOST_PHASE_CONTROL:   kindName = "HOST:PhaseControl"; break;
+            case GpuOuterLoopKind::HOST_TRANSFORMER_VOLTAGE_CONTROL:     kindName = "HOST:TransformerVoltageControl"; break;
+            case GpuOuterLoopKind::HOST_TRANSFORMER_REACTIVE_POWER_CONTROL:    kindName = "HOST:TransformerReactivePowerControl"; break;
+            case GpuOuterLoopKind::HOST_SHUNT_VOLTAGE_CONTROL:   kindName = "HOST:ShuntVoltageControl"; break;
+            case GpuOuterLoopKind::INCREMENTAL_TRANSFORMER_VOLTAGE_CONTROL:   kindName = "TransformerVoltageControl"; break;
+            case GpuOuterLoopKind::INCREMENTAL_SHUNT_VOLTAGE_CONTROL: kindName = "ShuntVoltageControl"; break;
+            case GpuOuterLoopKind::INCREMENTAL_PHASE_CONTROL: kindName = ctx->nCph > 0 ? "PhaseControl" : "IncrementalPhaseControl"; break;
+            case GpuOuterLoopKind::INCREMENTAL_TRANSFORMER_REACTIVE_POWER_CONTROL:  kindName = "TransformerReactivePowerControl"; break;
+            case GpuOuterLoopKind::TRANSFORMER_VOLTAGE_CONTROL:   kindName = ctx->tvdMode == 1 ? "SimpleTransformerVoltageControl" : "TransformerVoltageControl"; break;
+            case GpuOuterLoopKind::SHUNT_VOLTAGE_CONTROL:   kindName = "ShuntVoltageControl"; break;
+            case GpuOuterLoopKind::SECONDARY_VOLTAGE_CONTROL:   kindName = "SecondaryVoltageControl"; break;
         }
         int nSw = 0;
         {
@@ -278,7 +279,7 @@ void traceRlReasons(BatchSolverContext* ctx, DriverPass& drv, const std::vector<
     int& loopIdx = drv.loopIdx;
     int (&loopOrder)[MAX_DEVICE_LOOPS] = drv.loopOrder;
     std::vector<char>& rlActive = drv.rlActive;
-    if (rlReasonsOn() && loopOrder[loopIdx] == LOOP_RL && ctx->nrl > 0 && ctx->dRlPassSwitched.p) {
+    if (rlReasonsOn() && loopOrder[loopIdx] == GpuOuterLoopKind::REACTIVE_LIMITS && ctx->nrl > 0 && ctx->dRlPassSwitched.p) {
         std::vector<char> ps(static_cast<size_t>(ctx->nrl) * nS);
         CUDA_CHECK(cudaMemcpy(ps.data(), ctx->dRlPassSwitched.p, ps.size(), cudaMemcpyDeviceToHost));
         for (int s = 0; s < nS; s++) {
@@ -308,7 +309,7 @@ void traceRlSwitches(BatchSolverContext* ctx, DriverPass& drv, std::vector<std::
     int& loopIdx = drv.loopIdx;
     int (&loopOrder)[MAX_DEVICE_LOOPS] = drv.loopOrder;
     std::vector<char>& rlActive = drv.rlActive;
-    if (loopOrder[loopIdx] == LOOP_RL && (rlAuditOn || (swTraceSlot >= 0 && swTraceSlot < nS)) && ctx->nrl > 0) {
+    if (loopOrder[loopIdx] == GpuOuterLoopKind::REACTIVE_LIMITS && (rlAuditOn || (swTraceSlot >= 0 && swTraceSlot < nS)) && ctx->nrl > 0) {
         std::vector<char> ps(static_cast<size_t>(ctx->nrl) * nS), lt2(static_cast<size_t>(ctx->nrl) * nS);
         std::vector<int> vr2(ctx->nrl);
         std::vector<double> qb2(static_cast<size_t>(n) * nS), lq2(ctx->nrl), x2(static_cast<size_t>(n) * nS);

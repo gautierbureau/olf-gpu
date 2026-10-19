@@ -16,6 +16,7 @@
 #include "../common/check.cuh"
 #include "../common/launch.cuh"
 #include "../common/codes/gpu_distributed_slack_factor_mode.cuh"
+#include "../common/codes/gpu_outer_loop_kind.cuh"
 #include "hvdc.cuh"
 #include "forced_target_q.cuh"
 #include "slack_participants.cuh"
@@ -621,7 +622,7 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
     }                                                        // decides per the run's slackDistributionFailureBehavior
 }
 
-// One check of DistributedSlackOuterLoop on every live scenario (LOOP_DS): slack-only, or the participants
+// One check of DistributedSlackOuterLoop on every live scenario (GpuOuterLoopKind::DISTRIBUTED_SLACK): slack-only, or the participants
 // sharing the mismatch by water-filling.
 void dsCheck(BatchSolverContext* ctx, DriverPass& drv) {
     const int& n = drv.n;

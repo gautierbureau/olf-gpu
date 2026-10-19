@@ -29,8 +29,8 @@ public final class DriverNative {
      *  or the row modes): the next solveBatchContext starts over on the re-extracted system. */
     public static native void cancelBatchDriverPause(long handle);
 
-    /** Did the last solve stop at a host-owned slot? Returns 0 if not paused, or the
-     *  {@code DeviceLoopKind.HOST_LOOP_*} constant identifying WHICH host loop was reached. */
+    /** Did the last solve stop at a host-owned slot? Returns {@code GpuOuterLoopKind.NOT_PAUSED} if not paused, or the
+     *  {@code GpuOuterLoopKind.HOST_*} constant identifying WHICH host loop was reached. */
     public static native int readBatchDriverPaused(long handle);
 
     /** Resume the paused driver; {@code hostChanged[s] != 0} is the host loop's UNSTABLE verdict. */

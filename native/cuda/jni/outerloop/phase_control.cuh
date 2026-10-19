@@ -8,13 +8,14 @@
 
 #include "../solver/driver_pass.cuh"
 #include "incremental_transformer_voltage_control.cuh"
+#include "../common/codes/gpu_outer_loop_kind.cuh"
 
 namespace olfgpu {
 
 // Per-solve reset: base taps, check count 0.
 void cphResetSolve(BatchSolverContext* ctx, DriverPass& drv);
 
-// One check of the loop on every live scenario (LOOP_PHASE_KERNEL).
+// One check of the loop on every live scenario (GpuOuterLoopKind::INCREMENTAL_PHASE_CONTROL).
 void cphStep(BatchSolverContext* ctx, DriverPass& drv);
 
 }  // namespace olfgpu

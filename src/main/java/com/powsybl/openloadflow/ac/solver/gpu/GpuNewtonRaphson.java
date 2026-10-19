@@ -21,7 +21,6 @@ import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcStructures;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuEquationDump;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.StructureNative;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DeviceFlowControllers;
-import com.powsybl.openloadflow.ac.outerloop.gpu.DeviceLoopKind;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DeviceLoopTables;
 import com.powsybl.openloadflow.ac.outerloop.gpu.ForceTargetQInReactiveLimits;
 import com.powsybl.openloadflow.ac.outerloop.gpu.GpuDistributedSlackOuterLoop;
@@ -48,6 +47,7 @@ import com.powsybl.openloadflow.ac.solver.NewtonRaphsonStoppingCriteria;
 import com.powsybl.openloadflow.ac.solver.PerEquationTypeStoppingCriteria;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchContextCache;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuAcSolverStatus;
+import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuOuterLoopKind;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuStateVectorScalingMode;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.EquationSystemIndex;
@@ -178,9 +178,9 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
     private int buildHostLoopMask() {
         int mask = 0;
         for (var loop : hostOuterLoops) {
-            int kind = DeviceLoopKind.loopKindFor(loop.getName());
-            if (kind >= DeviceLoopKind.HOST_LOOP_SVC) {
-                mask |= DeviceLoopKind.hostMaskBit(kind);
+            int kind = GpuOuterLoopKind.hostKindOf(loop.getName());
+            if (kind >= GpuOuterLoopKind.HOST_SECONDARY_VOLTAGE_CONTROL) {
+                mask |= GpuOuterLoopKind.hostMaskBit(kind);
             }
         }
         return mask;
@@ -385,7 +385,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
     }
 
     /** On a restart, the host loop the sequence resumes at (the one that went UNSTABLE). */
-    private int restartLoopKind;
+    private int restartLoopKind = GpuOuterLoopKind.NOT_PAUSED;  // else the paused host kind to restart at
 
     private com.powsybl.openloadflow.ac.outerloop.AcOuterLoop driverLoop(String name) {
         if (acLoadFlowParameters == null) {
@@ -541,7 +541,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
         // setBatchTargetDeltas — just re-enter solveBatchContext (the native side reads
         // driverResume=1 and continues from its paused position). Skip initStateVector and
         // the context rebuild — the state is on the device where we left it.
-        boolean resuming = DriverNative.readBatchDriverPaused(context.handle.get()) != 0;
+        boolean resuming = DriverNative.readBatchDriverPaused(context.handle.get()) != GpuOuterLoopKind.NOT_PAUSED;
         if (resuming) {
             return runResume(reportNode);
         }
@@ -660,7 +660,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
             // driver RESTART, so the divergence was not only a throughput one.
             svcCtls = phases.secondaryVc();
             if (com.powsybl.openloadflow.ac.outerloop.gpu.GpuSecondaryVoltageControlOuterLoop.uploadToDevice(handle, svcCtls)) {
-                hostMask &= ~1;                          // bit 0 = HOST_LOOP_SVC
+                hostMask &= ~GpuOuterLoopKind.hostMaskBit(GpuOuterLoopKind.HOST_SECONDARY_VOLTAGE_CONTROL);
             } else {
                 svcCtls = null;                          // refused: OLF's own loop runs at the pause
             }
@@ -674,10 +674,10 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                     handle, hostMask);
             activeHostMask = hostMask;
             DriverNative.setBatchHostLoop(handle, hostMask);
-            if (restart && restartLoopKind > 0) {        // re-check the loop that went UNSTABLE first
+            if (restart && restartLoopKind != GpuOuterLoopKind.NOT_PAUSED) {        // re-check the loop that went UNSTABLE first
                 DriverNative.setBatchDriverStartLoop(handle, restartLoopKind);
             }
-            restartLoopKind = 0;
+            restartLoopKind = GpuOuterLoopKind.NOT_PAUSED;
             if (driverDsRejectResidual && driverDsLoop() != null && cachedData.dsPhiRow().length == 0
                     && (cachedData.dsSlackPhiRow() < 0 || Double.isInfinite(cachedData.dsSlackRoomUp()))) {
                 // No participant row and no slack generator to bound the slack's own share: either nobody
@@ -1215,16 +1215,16 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                     handle, tvdFreeze, java.util.List.of(), 1);
         }
         if (tvcOwned || tvdOwned) {
-            hostMask &= ~(DeviceLoopKind.hostMaskBit(DeviceLoopKind.HOST_LOOP_TVC));
+            hostMask &= ~(GpuOuterLoopKind.hostMaskBit(GpuOuterLoopKind.HOST_TRANSFORMER_VOLTAGE_CONTROL));
         }
         if (shuntOwned || svdOwned) {
-            hostMask &= ~(DeviceLoopKind.hostMaskBit(DeviceLoopKind.HOST_LOOP_SHUNT));
+            hostMask &= ~(GpuOuterLoopKind.hostMaskBit(GpuOuterLoopKind.HOST_SHUNT_VOLTAGE_CONTROL));
         }
         if (flowOwned && rpcLoop != null) {
-            hostMask &= ~(DeviceLoopKind.hostMaskBit(DeviceLoopKind.HOST_LOOP_TRPC));
+            hostMask &= ~(GpuOuterLoopKind.hostMaskBit(GpuOuterLoopKind.HOST_TRANSFORMER_REACTIVE_POWER_CONTROL));
         }
         if (flowOwned && incPhase || cphOwned) {
-            hostMask &= ~(DeviceLoopKind.hostMaskBit(DeviceLoopKind.HOST_LOOP_PHASE));
+            hostMask &= ~(GpuOuterLoopKind.hostMaskBit(GpuOuterLoopKind.HOST_PHASE_CONTROL));
         }
         return hostMask;
     }
@@ -1234,12 +1234,12 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                 .run(voltageInitializer, reportNode);
     }
 
-    /** Build a map from HOST_LOOP_* kind to the OLF outer loop instance. */
+    /** Build a map from GpuOuterLoopKind.HOST_* kind to the OLF outer loop instance. */
     private java.util.Map<Integer, com.powsybl.openloadflow.ac.outerloop.AcOuterLoop> buildHostLoopMap() {
         var map = new java.util.HashMap<Integer, com.powsybl.openloadflow.ac.outerloop.AcOuterLoop>();
         for (var loop : hostOuterLoops) {
-            int kind = DeviceLoopKind.loopKindFor(loop.getName());
-            if (kind >= DeviceLoopKind.HOST_LOOP_SVC) {
+            int kind = GpuOuterLoopKind.hostKindOf(loop.getName());
+            if (kind >= GpuOuterLoopKind.HOST_SECONDARY_VOLTAGE_CONTROL) {
                 map.put(kind, loop);
             }
         }
@@ -1258,7 +1258,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
         double[] out = outIn;
         long handle = context.handle.get();
         int pausedKind = DriverNative.readBatchDriverPaused(handle);
-        if (pausedKind == 0) {
+        if (pausedKind == GpuOuterLoopKind.NOT_PAUSED) {
             return out;   // driver completed without pausing
         }
         var loopMap = buildHostLoopMap();
@@ -1274,9 +1274,9 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                 var pairs = com.powsybl.openloadflow.ac.AcloadFlowEngine.createOuterLoopsAndContexts(engineContext,
                         false);
                 for (var pair : pairs) {
-                    int kind = DeviceLoopKind.loopKindFor(pair.getLeft().getName());
-                    if (kind >= DeviceLoopKind.HOST_LOOP_SVC && loopMap.containsKey(kind)
-                            && (activeHostMask & DeviceLoopKind.hostMaskBit(kind)) != 0) {
+                    int kind = GpuOuterLoopKind.hostKindOf(pair.getLeft().getName());
+                    if (kind >= GpuOuterLoopKind.HOST_SECONDARY_VOLTAGE_CONTROL && loopMap.containsKey(kind)
+                            && (activeHostMask & GpuOuterLoopKind.hostMaskBit(kind)) != 0) {
                         hostLoopPairs.put(kind, pair);
                         pair.getLeft().initialize(pair.getRight());
                     }
@@ -1284,7 +1284,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
             }
         }
         var ctxMap = hostLoopPairs;
-        while (pausedKind != 0) {
+        while (pausedKind != GpuOuterLoopKind.NOT_PAUSED) {
             var pair = ctxMap.get(pausedKind);
             if (pair == null) {
                 LOGGER.warn("Driver paused at host loop kind {} with no registered handler — resuming as STABLE", pausedKind);
@@ -1447,7 +1447,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
         equationVector.minus(targetVector);
         NewtonRaphsonStoppingCriteria.TestResult result =
                 parameters.getStoppingCriteria().test(equationVector.getArray(), equationSystem);
-        if (DriverNative.readBatchDriverPaused(context.handle.get()) == 0) {
+        if (DriverNative.readBatchDriverPaused(context.handle.get()) == GpuOuterLoopKind.NOT_PAUSED) {
             applyDeviceDecisionsToNetwork(cachedData);
             equationVector.minus(targetVector);               // re-measure against the written-back targets
             result = parameters.getStoppingCriteria().test(equationVector.getArray(), equationSystem);

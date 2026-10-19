@@ -3,13 +3,14 @@
 //
 // The single definition of every run-wide counter declared in stats.cuh.
 #include "stats.cuh"
+#include "codes/gpu_outer_loop_kind.cuh"
 
 long long gOuterPasses = 0;
 
-double gOlFirstSolveMs = 0, gOlReSolveMs[OL_KINDS] = {0}, gOlCheckMs[OL_KINDS] = {0};
-long long gOlFirstSolveScen = 0, gOlReSolveScen[OL_KINDS] = {0}, gOlReSolvePasses[OL_KINDS] = {0};
-long long gOlFirstLaneIters = 0, gOlReSolveLaneIters[OL_KINDS] = {0}, gOlFirstWidthIters = 0, gOlReSolveWidthIters[OL_KINDS] = {0};
-long long gOlCheckPasses[OL_KINDS] = {0}, gOlFirstPasses = 0;
+double gOlFirstSolveMs = 0, gOlReSolveMs[GpuOuterLoopKind::COUNT] = {0}, gOlCheckMs[GpuOuterLoopKind::COUNT] = {0};
+long long gOlFirstSolveScen = 0, gOlReSolveScen[GpuOuterLoopKind::COUNT] = {0}, gOlReSolvePasses[GpuOuterLoopKind::COUNT] = {0};
+long long gOlFirstLaneIters = 0, gOlReSolveLaneIters[GpuOuterLoopKind::COUNT] = {0}, gOlFirstWidthIters = 0, gOlReSolveWidthIters[GpuOuterLoopKind::COUNT] = {0};
+long long gOlCheckPasses[GpuOuterLoopKind::COUNT] = {0}, gOlFirstPasses = 0;
 
 long long gRlCheckScen[8] = {0}, gRlStableScen = 0, gRlEntryCodes[4] = {0};
 

@@ -14,6 +14,11 @@ import com.powsybl.iidm.network.Network;
 import com.powsybl.openloadflow.CommonTestConfig;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcStructures;
+import com.powsybl.openloadflow.ac.solver.gpu.GpuLoadFlowParameters;
+import com.powsybl.openloadflow.ac.solver.gpu.GpuMatchingAlgorithm;
+import com.powsybl.openloadflow.ac.solver.gpu.GpuPivotType;
+import com.powsybl.openloadflow.ac.solver.gpu.GpuReorderingAlgorithm;
+import com.powsybl.openloadflow.ac.solver.gpu.NewtonSettingsNative;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchContextCache;
 import com.powsybl.openloadflow.graph.EvenShiloachGraphDecrementalConnectivityFactory;
 import com.powsybl.openloadflow.sa.AcSecurityAnalysis;
@@ -25,6 +30,7 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 
 import static com.powsybl.openloadflow.sa.gpu.GpuSaTestNetworks.*;
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
@@ -420,6 +426,32 @@ class GpuSaSolverTest extends AbstractGpuSaTest {
             assertEquals(s.getLimitViolationsResult().getLimitViolations().size(),
                     b.getLimitViolationsResult().getLimitViolations().size(),
                     "violation count must match for " + s.getContingency().getId());
+        }
+    }
+
+    /** The batched contingency solves run with the GPU solver parameters of the security analysis's own load flow
+     *  parameters, not the configuration module's nor a previous run's. */
+    @Test
+    void batchedSolvesUseTheRunsGpuParameters() {
+        assumeTrue(GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters();
+        GpuLoadFlowParameters.create(lfp)
+                .setReorderingAlgorithm(GpuReorderingAlgorithm.NESTED_DISSECTION)
+                .setMatchingAlgorithm(GpuMatchingAlgorithm.MAX_DIAG_SUM)
+                .setPivotType(GpuPivotType.GLOBAL_ROW)
+                .setPivotThreshold(0.25)
+                .setIterativeRefinementBaseSteps(2)
+                .setIterativeRefinementMaxSteps(5)
+                .setIterativeRefinementTolerance(1e-11);
+        List<Contingency> ctgs = List.of(new Contingency("L1-2-1", new BranchContingency("L1-2-1")));
+        securityAnalysisProvider = new GpuSecurityAnalysisProvider(commonTestConfig.matrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>());
+        try {
+            runSecurityAnalysis(IeeeCdfNetworkFactory.create14(), ctgs, List.of(), lfp);
+            assertEquals(1, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(), "solved on the device");
+            assertArrayEquals(new double[] {4, 4, 3, 0.25, 2, 5, 1e-11}, NewtonSettingsNative.readLinearSolverSettings());
+        } finally {
+            securityAnalysisProvider = new OpenSecurityAnalysisProvider(commonTestConfig.matrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>());
+            new GpuLoadFlowParameters().install();
         }
     }
 }

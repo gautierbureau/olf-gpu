@@ -7,6 +7,9 @@
  */
 package com.powsybl.openloadflow.ac.solver.gpu.batch;
 
+import com.powsybl.commons.config.PlatformConfig;
+import com.powsybl.openloadflow.ac.solver.gpu.GpuLoadFlowParameters;
+
 /**
  * The run's outer-loop parameterization for the batched device path — a PER-CALL value, threaded
  * from {@link com.powsybl.openloadflow.sa.gpu.GpuBatchedAcSecurityAnalysis} into
@@ -57,7 +60,11 @@ public record BatchConfig(int lsMode, double maxDv, double maxDphi, boolean tran
                           /** Where the chunk solver puts every CONVERGED scenario's state as its chunk completes, keyed by
                            *  contingency id, instead of carrying it in its result - a run whose states would not fit the
                            *  heap gives a disk-backed map (GpuStateStore); null keeps the states in the results. */
-                          java.util.Map<String, double[]> stateSink) {
+                          java.util.Map<String, double[]> stateSink,
+                          /** The GPU solver's parameters (ordering, matching, pivoting, iterative refinement): the run's;
+                           *  null for the configuration module's, which is what a run without them gets. Installed on the
+                           *  device by every batched solve, so a direct caller cannot inherit another run's. */
+                          GpuLoadFlowParameters gpuParameters) {
 
     /** How OLF re-picks the slack when a contingency isolates it (PropagatedContingency: every bus outside the
      *  largest connected component becomes ineligible, LfSynchronousNetworkImpl re-runs the RUN's slack-bus
@@ -92,7 +99,7 @@ public record BatchConfig(int lsMode, double maxDv, double maxDphi, boolean tran
             true, com.powsybl.openloadflow.ac.AcLoadFlowParameters.DEFAULT_MIN_REALISTIC_VOLTAGE,
             com.powsybl.openloadflow.ac.AcLoadFlowParameters.DEFAULT_MAX_REALISTIC_VOLTAGE,
             com.powsybl.openloadflow.ac.AcLoadFlowParameters.DEFAULT_MIN_NOMINAL_VOLTAGE_REALISTIC_VOLTAGE_CHECK, -1,
-            false, null, null);
+            false, null, null, null);
 
     /**
      * This config with the ROBUST single-matrix solve (mode 6) selected, for the SECOND device pass over
@@ -112,7 +119,8 @@ public record BatchConfig(int lsMode, double maxDv, double maxDphi, boolean tran
                 hvdcLimits, secondaryVoltageControl, minPlausibleTargetV, maxPlausibleTargetV, voltageMonitoring,
                 continuousPhaseControl, contingencyLossPreDistribution, rlCurveExtrapolate, forceTargetQ, perEqCriteria,
                 genVcMinNominalV, rlRobustMode, minRealisticVoltage, maxRealisticVoltage,
-                minNominalVoltageRealisticVoltageCheck, realisticFixingLoop, true, slackRelocation, stateSink);
+                minNominalVoltageRealisticVoltageCheck, realisticFixingLoop, true, slackRelocation, stateSink,
+                gpuParameters);
     }
 
     /** This config with the given state sink (see {@link #stateSink()}). */
@@ -124,7 +132,26 @@ public record BatchConfig(int lsMode, double maxDv, double maxDphi, boolean tran
                 hvdcLimits, secondaryVoltageControl, minPlausibleTargetV, maxPlausibleTargetV, voltageMonitoring,
                 continuousPhaseControl, contingencyLossPreDistribution, rlCurveExtrapolate, forceTargetQ, perEqCriteria,
                 genVcMinNominalV, rlRobustMode, minRealisticVoltage, maxRealisticVoltage,
-                minNominalVoltageRealisticVoltageCheck, realisticFixingLoop, robustSolveMode, slackRelocation, sink);
+                minNominalVoltageRealisticVoltageCheck, realisticFixingLoop, robustSolveMode, slackRelocation, sink,
+                gpuParameters);
+    }
+
+    /** This config with the given GPU solver parameters (see {@link #gpuParameters()}). */
+    public BatchConfig withGpuParameters(GpuLoadFlowParameters parameters) {
+        return new BatchConfig(lsMode, maxDv, maxDphi, transformerControl, maxOuterIterations, maxPqPvSwitch,
+                dsRejectResidual, dsParams, incrementalTransformerControl, incTvcMaxTapShift,
+                incrementalShuntControl, incShuntMaxSectionShift, simpleShuntControl, incrementalRpcControl,
+                incrementalPhaseControl, simpleTransformerControl, tvcUseInitialTapPosition, hvdcFreezing,
+                hvdcLimits, secondaryVoltageControl, minPlausibleTargetV, maxPlausibleTargetV, voltageMonitoring,
+                continuousPhaseControl, contingencyLossPreDistribution, rlCurveExtrapolate, forceTargetQ, perEqCriteria,
+                genVcMinNominalV, rlRobustMode, minRealisticVoltage, maxRealisticVoltage,
+                minNominalVoltageRealisticVoltageCheck, realisticFixingLoop, robustSolveMode, slackRelocation, stateSink,
+                parameters);
+    }
+
+    /** The GPU solver's parameters the device runs with: the run's, or the configuration module's. */
+    public GpuLoadFlowParameters resolvedGpuParameters() {
+        return gpuParameters != null ? gpuParameters : GpuLoadFlowParameters.load(PlatformConfig.defaultConfig());
     }
 
     public int dsRejectResidualFlag() {

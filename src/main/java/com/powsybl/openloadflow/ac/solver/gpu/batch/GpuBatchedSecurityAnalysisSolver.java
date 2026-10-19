@@ -83,6 +83,7 @@ public final class GpuBatchedSecurityAnalysisSolver {
         double convEpsPerEq = request.convEpsPerEq();
         ReportNode reportNode = request.reportNode();
         BatchConfig config = request.config();
+        config.resolvedGpuParameters().install();            // this solve's linear solver, never a previous run's
         Objects.requireNonNull(network);
         Objects.requireNonNull(config);
         Objects.requireNonNull(baseState);

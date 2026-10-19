@@ -18,6 +18,7 @@ import com.powsybl.openloadflow.ac.outerloop.AcOuterLoop;
 import com.powsybl.openloadflow.ac.outerloop.DistributedSlackOuterLoop;
 import com.powsybl.openloadflow.ac.outerloop.ReactiveLimitsOuterLoop;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DiscreteTransformerVoltageControl;
+import com.powsybl.openloadflow.ac.solver.gpu.GpuLoadFlowParameters;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.BatchConfig;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.network.LfNetwork;
@@ -329,7 +330,8 @@ final class GpuSaRunScope {
                 com.powsybl.openloadflow.ac.outerloop.gpu.DeviceLoopTables.realisticFixingLoop(acParameters),
                 false,                                       // the robust retry pass derives its own config
                 slackRelocation(acParameters),
-                null);                                       // the precomputer picks the state sink per run
+                null,                                        // the precomputer picks the state sink per run
+                GpuLoadFlowParameters.get(securityAnalysisParameters.getLoadFlowParameters()));
         return new Scope(batchDisabled, unsupportedOuterLoops, distributedSlack, reactiveLimits,
                 slackDistTol, reactiveLimitTol, convEpsPerEq, batchConfig);
     }

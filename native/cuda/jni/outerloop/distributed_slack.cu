@@ -15,6 +15,7 @@
 
 #include "../common/check.cuh"
 #include "../common/launch.cuh"
+#include "../common/codes/gpu_distributed_slack_factor_mode.cuh"
 #include "hvdc.cuh"
 #include "forced_target_q.cuh"
 #include "slack_participants.cuh"
@@ -171,7 +172,7 @@ __global__ void computeSlackRetain(int nScenarios, int n, int nds, int slackPhiR
     double slackTgt = slackTargetP + (dsSlackShift != nullptr ? dsSlackShift[s] : 0.0);
     double tot = (qBuf[(size_t) s * n + slackPhiRow] - slackTgt) + absorbed;   // total-from-anchor, OLF's
     double rho = oneMinusFactorSum;                                            // remainingMismatch at run() start
-    if (fsActive != fsAll && dsMode != 1) {
+    if (fsActive != fsAll && dsMode != GpuDistributedSlackFactorMode::REMAINING_MARGIN) {
         // The factors were normalized over ALL participants (W), so rho = w_slack/W. Dropping the
         // stranded or lost ones renormalizes over W' = W - Σ_dropped w, and w_slack/W' = rho/(Σ_active f + rho).
         // Leaving rho global is exactly what made the first attempt at this fail: the participants
@@ -179,7 +180,7 @@ __global__ void computeSlackRetain(int nScenarios, int n, int nds, int slackPhiR
         // were still in, so the pass retired with most of the mismatch undistributed.
         rho = fsActive + rho > 0 ? rho / (fsActive + rho) : 0.0;
     }
-    if (dsMode == 1) {
+    if (dsMode == GpuDistributedSlackFactorMode::REMAINING_MARGIN) {
         // REMAINING_MARGIN: the slack's retained share is its own margin share in the DIRECTION of the
         // total-from-anchor (OLF evaluates the direction-dependent factors once per run at the anchor).
         // Margins shift with a moved anchor: +delta of anchor target eats headroom, frees footroom.
@@ -254,7 +255,7 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
     // a gen-outage scenario with a non-participating slack and adds a round the CPU never runs (3.9e-4).
     double fsGlobal = 0.0;
     bool noCapacity = false;                                 // nobody — the slack included — can move this way
-    if (dsMode == 1) {
+    if (dsMode == GpuDistributedSlackFactorMode::REMAINING_MARGIN) {
         double sumM = 0.0;
         for (int i = 0; i < nds; i++) {
             if (dsIslanded != nullptr && dsIslanded[(size_t) s * nds + i]) {
@@ -444,7 +445,7 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
             genRemoved[(size_t) s * ngen + g] = lost ? 1 : 0;
             double a = dgAnchor != nullptr ? dgAnchor[(size_t) s * ngen + g] : 0.0;   // a moved anchor eats headroom
             genFactorWork[(size_t) s * ngen + g] = lost ? 0.0
-                    : (dsMode == 1 ? fmax(0.0, dirUp ? dgMarginUp[g] - a : dgMarginDown[g] + a) : dgFactor[g]);
+                    : (dsMode == GpuDistributedSlackFactorMode::REMAINING_MARGIN ? fmax(0.0, dirUp ? dgMarginUp[g] - a : dgMarginDown[g] + a) : dgFactor[g]);
         }
         for (int iter = 0; iter < ngen && fabs(rem) > residueEps; iter++) {
             double fsumActive = 0.0;                         // normalizeParticipationFactors, over the remaining
@@ -469,7 +470,7 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
                 ovBase = dsBaseTargetP[ov] - dsOvBaseDelta[s];
                 ovMaxD = dsMaxDelta[ov] - dsOvMaxDelta[s];
                 ovMinD = dsMinDelta[ov] - dsOvMinDelta[s];
-                ovF = dsMode == 1 ? fmax(0.0, dirUp ? dsMarginUp[ov] : dsMarginDown[ov])
+                ovF = dsMode == GpuDistributedSlackFactorMode::REMAINING_MARGIN ? fmax(0.0, dirUp ? dsMarginUp[ov] : dsMarginDown[ov])
                                   : dsFactor[ov] - dsOvFactorDelta[s];
                 double ovCum = target[(size_t) s * n + dsRowOf(dsPhiRow, dsRowOv, s, nds, ov)] - ovBase;
                 ovActive = ovF > 0 && !((rem > 0) ? (ovCum >= ovMaxD) : (ovCum <= ovMinD));
@@ -566,7 +567,7 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
             double f = dsFactor[i], base = dsBaseTargetP[i], maxD = dsMaxDelta[i], minD = dsMinDelta[i];
             double sh = dsAnchorShift != nullptr ? dsAnchorShift[(size_t) s * nds + i] : 0.0;
             if (dsAnchorShift != nullptr) { base += sh; maxD -= sh; minD -= sh; }
-            if (dsMode == 1) { f = fmax(0.0, (dirUp ? dsMarginUp[i] : dsMarginDown[i]) - (dirUp ? sh : -sh)); }
+            if (dsMode == GpuDistributedSlackFactorMode::REMAINING_MARGIN) { f = fmax(0.0, (dirUp ? dsMarginUp[i] : dsMarginDown[i]) - (dirUp ? sh : -sh)); }
             if (ov == i) { f -= dsOvFactorDelta[s]; base -= dsOvBaseDelta[s]; maxD -= dsOvMaxDelta[s]; minD -= dsOvMinDelta[s]; }
             double cum = target[(size_t) s * n + dsRowOf(dsPhiRow, dsRowOv, s, nds, i)] - base;
             bool sat = (rem > 0) ? (cum >= maxD) : (cum <= minD);
@@ -585,7 +586,7 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
             double f = dsFactor[i], base = dsBaseTargetP[i], maxD = dsMaxDelta[i], minD = dsMinDelta[i];
             double sh = dsAnchorShift != nullptr ? dsAnchorShift[(size_t) s * nds + i] : 0.0;
             if (dsAnchorShift != nullptr) { base += sh; maxD -= sh; minD -= sh; }
-            if (dsMode == 1) { f = fmax(0.0, (dirUp ? dsMarginUp[i] : dsMarginDown[i]) - (dirUp ? sh : -sh)); }
+            if (dsMode == GpuDistributedSlackFactorMode::REMAINING_MARGIN) { f = fmax(0.0, (dirUp ? dsMarginUp[i] : dsMarginDown[i]) - (dirUp ? sh : -sh)); }
             if (ov == i) { f -= dsOvFactorDelta[s]; base -= dsOvBaseDelta[s]; maxD -= dsOvMaxDelta[s]; minD -= dsOvMinDelta[s]; }
             size_t idx = (size_t) s * n + dsRowOf(dsPhiRow, dsRowOv, s, nds, i);
             double cum = target[idx] - base;
@@ -659,8 +660,8 @@ void dsCheck(BatchSolverContext* ctx, DriverPass& drv) {
                 hasDsOverride ? dDsOvBus.as<int>() : nullptr, dDsOvBaseDelta.as<double>(),
                 hasDsAnchor ? dDsAnchorShift.as<double>() : nullptr,
                 hasDsSlackShift ? dDsSlackShift.as<double>() : nullptr,
-                ctx->dsMode, ctx->dsMode == 1 ? ctx->dDsMarginUp.as<double>() : nullptr,
-                ctx->dsMode == 1 ? ctx->dDsMarginDown.as<double>() : nullptr,
+                ctx->dsMode, ctx->dsMode == GpuDistributedSlackFactorMode::REMAINING_MARGIN ? ctx->dDsMarginUp.as<double>() : nullptr,
+                ctx->dsMode == GpuDistributedSlackFactorMode::REMAINING_MARGIN ? ctx->dDsMarginDown.as<double>() : nullptr,
                 ctx->dsSlackMarginUp, ctx->dsSlackMarginDown,
                 ctx->nDsIslanded > 0 ? ctx->dDsIslanded.as<char>() : nullptr,
                 ctx->dDsFactor.as<double>(), hasDsOverride ? dDsOvFactorDelta.as<double>() : nullptr,
@@ -678,8 +679,8 @@ void dsCheck(BatchSolverContext* ctx, DriverPass& drv) {
                 ctx->dQbuf.as<double>(), ctx->dRlActive.as<char>(),
                 hasDsOverride ? dDsOvBus.as<int>() : nullptr, dDsOvFactorDelta.as<double>(),
                 dDsOvBaseDelta.as<double>(), dDsOvMaxDelta.as<double>(), dDsOvMinDelta.as<double>(),
-                ctx->dsMode, ctx->dsMode == 1 ? ctx->dDsMarginUp.as<double>() : nullptr,
-                ctx->dsMode == 1 ? ctx->dDsMarginDown.as<double>() : nullptr,
+                ctx->dsMode, ctx->dsMode == GpuDistributedSlackFactorMode::REMAINING_MARGIN ? ctx->dDsMarginUp.as<double>() : nullptr,
+                ctx->dsMode == GpuDistributedSlackFactorMode::REMAINING_MARGIN ? ctx->dDsMarginDown.as<double>() : nullptr,
                 ctx->dsSlackMarginUp, ctx->dsSlackMarginDown,
                 ctx->nDsIslanded > 0 ? ctx->dDsIslanded.as<char>() : nullptr,
                 ctx->ngen, ctx->dgBus.as<int>(), ctx->dgFactor.as<double>(),

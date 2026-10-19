@@ -9,6 +9,7 @@ package com.powsybl.openloadflow.ac.equations.vector.gpu;
 
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
+import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuDistributedSlackFactorMode;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfGenerator;
@@ -29,7 +30,7 @@ final class DistributedSlackPacker {
     }
 
     /** Distributed-slack pack: per-participating-bus factor/headroom + the slack bus's own share.
-     *  {@code dsMode} 0 = static factors ({@code dsFactor}); 1 = REMAINING_MARGIN (factors are the
+     *  {@code dsMode} GpuDistributedSlackFactorMode: STATIC ({@code dsFactor}) or REMAINING_MARGIN (factors are the
      *  direction-dependent per-bus margins {@code dsMarginUp}/{@code dsMarginDown} + the slack's own
      *  {@code dsSlackMarginUp}/{@code Down}, normalized in-kernel per scenario and pass).
      *
@@ -257,7 +258,7 @@ final class DistributedSlackPacker {
         return new DsPack(GpuAcArrays.toIntArray(dsPhiRow), dsFactor, dsSlackPhiRow, dsSlackTargetP,
                 GpuAcArrays.toDoubleArray(dsBaseTargetP), GpuAcArrays.toDoubleArray(dsMaxDelta),
                 GpuAcArrays.toDoubleArray(dsMinDelta),
-                dsParams.isRemainingMargin() ? 1 : 0,
+                GpuDistributedSlackFactorMode.of(dsParams.isRemainingMargin()),
                 GpuAcArrays.toDoubleArray(dsMarginUp), GpuAcArrays.toDoubleArray(dsMarginDown),
                 dsSlackMarginUp, dsSlackMarginDown, dsSlackRoomUp, dsSlackRoomDown,
                 GpuAcArrays.toIntArray(dgBus), dgFactor,

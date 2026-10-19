@@ -10,6 +10,7 @@ package com.powsybl.openloadflow.ac.equations.vector.gpu;
 import com.powsybl.openloadflow.ac.outerloop.gpu.ReactiveLimitsNative;
 import com.powsybl.openloadflow.ac.solver.gpu.BatchSolveNative;
 import com.powsybl.openloadflow.ac.solver.gpu.NewtonSettingsNative;
+import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuDistributedSlackFactorMode;
 
 /**
  * JNI binding: a FULL Newton-Raphson AC power flow run on the GPU behind one native call.
@@ -177,7 +178,7 @@ public final class GpuAcNewtonSolver {
             long handle = BatchSolveNative.createBatchContext(structure, nScenarios, mode,
                     rlVrow, rlMinQ, rlMaxQ, rlLoadQ, rlVtarget, new byte[rlVrow.length], new double[x0Base.length],
                     dsPhiRow, dsFactor, dsSlackPhiRow, dsSlackTargetP,
-                    dsBaseTargetP, dsMaxDelta, dsMinDelta, 0, new double[0], new double[0], 0, 0);
+                    dsBaseTargetP, dsMaxDelta, dsMinDelta, GpuDistributedSlackFactorMode.STATIC, new double[0], new double[0], 0, 0);
             try {
                 // OLF's forced-PV election keys. This one-shot entry point has no network behind it
                 // (the caller hands raw rows), so the keys are NEUTRAL: equal nominal voltage, no

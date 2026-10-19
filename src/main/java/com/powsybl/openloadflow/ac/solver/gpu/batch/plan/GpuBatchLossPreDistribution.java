@@ -8,6 +8,7 @@
 package com.powsybl.openloadflow.ac.solver.gpu.batch.plan;
 
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
+import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuDistributedSlackFactorMode;
 
 /**
  * Host-side replay of OLF's {@code DefaultContingencyActivePowerLossDistribution}: with distributed
@@ -77,7 +78,7 @@ public final class GpuBatchLossPreDistribution {
         // trajectory: the device then re-derived 13.481 where OLF re-derived 13.477, and the two
         // arms converged to different in-band points 5.7e-3 kV apart.
         double fs;
-        if (gpuData.dsMode() == 1) {                        // REMAINING_MARGIN: direction-dependent margins
+        if (gpuData.dsMode() == GpuDistributedSlackFactorMode.REMAINING_MARGIN) {                        // REMAINING_MARGIN: direction-dependent margins
             double sumM = 0;
             for (int i = 0; i < nds; i++) {
                 if (islanded != null && islanded[i]) {
@@ -162,7 +163,7 @@ public final class GpuBatchLossPreDistribution {
                     // The kernel does NOT take the factor delta off a REMAINING_MARGIN factor; mirror
                     // it rather than "improve" on it (that shape is CPU-routed upstream anyway, and
                     // the seed must be the same function as the fill it seeds).
-                    ovF = gpuData.dsMode() == 1
+                    ovF = gpuData.dsMode() == GpuDistributedSlackFactorMode.REMAINING_MARGIN
                             ? Math.max(0.0, dirUp ? gpuData.dsMarginUp()[ovBus] : gpuData.dsMarginDown()[ovBus])
                             : gpuData.dsFactor()[ovBus] - ovFactorDelta;
                     ovActive = ovF > 0 && !(rem > 0 ? ovCum >= ovMaxD : ovCum <= ovMinD);
@@ -299,7 +300,7 @@ public final class GpuBatchLossPreDistribution {
 
     /** A generator's factor under the run's balance type — the margins are direction-dependent. */
     private static double genFactor(GpuAcData gpuData, boolean dirUp, int g) {
-        return gpuData.dsMode() == 1
+        return gpuData.dsMode() == GpuDistributedSlackFactorMode.REMAINING_MARGIN
                 ? (dirUp ? gpuData.dgMarginUp()[g] : gpuData.dgMarginDown()[g])
                 : gpuData.dgFactor()[g];
     }
@@ -309,7 +310,7 @@ public final class GpuBatchLossPreDistribution {
         if (islanded != null && islanded[i]) {
             return 0.0;                                      // excluded: it is not in this component any more
         }
-        double f = gpuData.dsMode() == 1
+        double f = gpuData.dsMode() == GpuDistributedSlackFactorMode.REMAINING_MARGIN
                 ? Math.max(0.0, dirUp ? gpuData.dsMarginUp()[i] : gpuData.dsMarginDown()[i])
                 : gpuData.dsFactor()[i];
         if (ovBus == i) {

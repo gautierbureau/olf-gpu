@@ -16,6 +16,7 @@
 
 #include "../common/device_buf.cuh"
 #include "../common/loop_kinds.cuh"
+#include "../common/codes/gpu_distributed_slack_factor_mode.cuh"
 #include "../structure/shared_structure.cuh"
 
 namespace olfgpu {
@@ -238,8 +239,8 @@ struct BatchSolverContext {
     DeviceBuf dDsPhiRow, dDsFactor;                        // per participating bus (nds)
     DeviceBuf dDsBaseTargetP, dDsMaxDelta, dDsMinDelta;   // per participating bus (nds): base P target + headroom/footroom
     double dsFactorSum = 1.0;                              // Σ emitted factors (< 1 ⇒ slack participates, keeps 1−Σ)
-    int dsMode = 0;                                        // 0 = static factors; 1 = REMAINING_MARGIN (direction-
-    DeviceBuf dDsMarginUp, dDsMarginDown;                  //   dependent per-bus margins, normalized in-kernel)
+    int dsMode = GpuDistributedSlackFactorMode::STATIC;    // REMAINING_MARGIN: direction-dependent
+    DeviceBuf dDsMarginUp, dDsMarginDown;                  //   per-bus margins, normalized in-kernel
     double dsSlackMarginUp = 0.0, dsSlackMarginDown = 0.0; //   the slack's own margins (its retained share)
     DeviceBuf dDsRetain;
     DeviceBuf dDsGateLast;                                   // per scenario {rem, fired} at the last DS gate (LOOP_TRACE reads it)

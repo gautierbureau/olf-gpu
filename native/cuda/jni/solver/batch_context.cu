@@ -18,6 +18,7 @@
 #include "../common/launch.cuh"
 #include "../common/stats.cuh"
 #include "../common/codes/gpu_state_vector_scaling_mode.cuh"
+#include "../common/codes/gpu_distributed_slack_factor_mode.cuh"
 #include "batch_context.cuh"
 #include "driver_steps.cuh"
 #include "linear_solver_settings.cuh"
@@ -255,7 +256,7 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& st, int nScenar
     ctx->dsMode = dsMode;
     ctx->dsSlackMarginUp = dsSlackMarginUp;
     ctx->dsSlackMarginDown = dsSlackMarginDown;
-    if (dsMode == 1 && nds > 0) {
+    if (dsMode == GpuDistributedSlackFactorMode::REMAINING_MARGIN && nds > 0) {
         ctx->dDsMarginUp.upload(dsMarginUp, nds * sizeof(double));
         ctx->dDsMarginDown.upload(dsMarginDown, nds * sizeof(double));
     }

@@ -28,7 +28,7 @@ public final class DevicePhaseInstaller {
      *  discrete twin are never both present. {@code entryOn}: the activation the solve starts from already carries
      *  the controls OLF's initialize switched ON (the base load flow); a chunk applies them at solve entry itself. */
     public record Request(List<GpuIncrementalTransformerVoltageControlOuterLoop.Controller> incrementalTvc, int incTvcMaxTapShift,
-                          List<IncrementalFlowControl.Controller> flow,
+                          List<DeviceFlowControllers.Controller> flow,
                           List<GpuPhaseControlOuterLoop.Ctl> continuousPhase,
                           List<GpuIncrementalShuntVoltageControlOuterLoop.Controller> incrementalShunt, int incShuntMaxSectionShift,
                           List<GpuTransformerVoltageControlOuterLoop.TransformerController> discreteTvc, boolean simpleTvc,
@@ -54,7 +54,7 @@ public final class DevicePhaseInstaller {
         boolean tvcInKernel = GpuIncrementalTransformerVoltageControlOuterLoop.uploadToDevice(handle, r.incrementalTvc(),
                 r.incrementalTvc() != null ? r.incTvcMaxTapShift() : 1);
         // The flow-observed incremental loops (RPC at OLF order 9, incremental phase at order 7) as DRIVER PHASES.
-        boolean flowInKernel = IncrementalFlowControl.uploadToDevice(handle, r.flow());
+        boolean flowInKernel = DeviceFlowControllers.uploadToDevice(handle, r.flow());
         // CONTINUOUS PhaseControl as a DRIVER PHASE (OLF order 7); the pre-solve control-ON activation stays host-side.
         boolean cphInKernel = GpuPhaseControlOuterLoop.uploadToDevice(handle, r.continuousPhase());
         // IncrementalShuntVoltageControl as a DRIVER PHASE (OLF order 10).

@@ -92,7 +92,7 @@ public final class GpuSecondaryVoltageControlOuterLoop {
     }
 
     public record Controllers(List<CtlBus> ctls, List<Zone> zones,
-                       IncrementalFlowControl.EsContext esCtx,
+                       DevicePhases.EsContext esCtx,
                        double minPlausibleTargetV, double maxPlausibleTargetV) {
     }
 
@@ -123,7 +123,7 @@ public final class GpuSecondaryVoltageControlOuterLoop {
 
     @SuppressWarnings("unchecked")
     public static Controllers build(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
-                             int[] rlVrow, IncrementalFlowControl.EsContext esCtx,
+                             int[] rlVrow, DevicePhases.EsContext esCtx,
                              double minPlausibleTargetV, double maxPlausibleTargetV,
                              GpuBatchElementMapper elementMapper) {
         Map<Integer, Integer> busVRows = new LinkedHashMap<>();

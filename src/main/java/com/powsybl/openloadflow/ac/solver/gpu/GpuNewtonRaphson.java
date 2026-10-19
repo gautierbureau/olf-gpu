@@ -20,6 +20,7 @@ import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcStructures;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuEquationDump;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.StructureNative;
+import com.powsybl.openloadflow.ac.outerloop.gpu.DeviceFlowControllers;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DeviceLoopKind;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DeviceLoopTables;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DistributedSlackWriteBack;
@@ -30,7 +31,6 @@ import com.powsybl.openloadflow.ac.outerloop.gpu.GpuMonitoringVoltageOuterLoop;
 import com.powsybl.openloadflow.ac.outerloop.gpu.GpuPhaseControlOuterLoop;
 import com.powsybl.openloadflow.ac.outerloop.gpu.HvdcAcEmulation;
 import com.powsybl.openloadflow.ac.outerloop.gpu.HvdcNative;
-import com.powsybl.openloadflow.ac.outerloop.gpu.IncrementalFlowControl;
 import com.powsybl.openloadflow.ac.outerloop.gpu.PhaseControlNative;
 import com.powsybl.openloadflow.ac.outerloop.gpu.ReactiveCapabilityCurves;
 import com.powsybl.openloadflow.ac.outerloop.gpu.ReactiveLimitsWriteBack;
@@ -227,7 +227,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                                                               ShuntVoltageControlNative.readBatchShuntPositions(handle));
         }
         if (flowOwned && flowCtls != null) {
-            IncrementalFlowControl.writeBackTaps(network, flowCtls, PhaseControlNative.readBatchFlowTaps(handle));
+            DeviceFlowControllers.writeBackTaps(network, flowCtls, PhaseControlNative.readBatchFlowTaps(handle));
         }
         if (cphOwned && cphCtls != null) {
             GpuPhaseControlOuterLoop.writeBack(network, cphCtls, PhaseControlNative.readBatchContinuousPhaseTaps(handle));
@@ -344,7 +344,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
     private boolean tvcOwned;
     private List<GpuIncrementalShuntVoltageControlOuterLoop.Controller> shuntCtls;
     private boolean shuntOwned;
-    private List<IncrementalFlowControl.Controller> flowCtls;
+    private List<DeviceFlowControllers.Controller> flowCtls;
     private boolean flowOwned;
     private List<GpuPhaseControlOuterLoop.Ctl> cphCtls;
     private boolean cphOwned;

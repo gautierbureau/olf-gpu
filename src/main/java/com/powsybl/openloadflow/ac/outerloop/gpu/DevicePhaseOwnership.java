@@ -53,7 +53,7 @@ public final class DevicePhaseOwnership {
             mask |= DeviceLoopKind.hostMaskBit(DeviceLoopKind.HOST_LOOP_SHUNT);
         }
         if (!GpuBatchSkips.complete(GpuBatchSkips.Slot.PHASE) || !GpuBatchSkips.complete(GpuBatchSkips.Slot.RPC)) {
-            IncrementalFlowControl.uploadToDevice(handle, null);
+            DeviceFlowControllers.uploadToDevice(handle, null);
             GpuPhaseControlOuterLoop.uploadToDevice(handle, null);
             mask |= DeviceLoopKind.hostMaskBit(DeviceLoopKind.HOST_LOOP_PHASE);
             mask |= DeviceLoopKind.hostMaskBit(DeviceLoopKind.HOST_LOOP_TRPC);

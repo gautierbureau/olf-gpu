@@ -13,9 +13,11 @@ import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcActivation;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchElementMapper;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchSkips;
 import com.powsybl.openloadflow.equations.EquationSystem;
+import com.powsybl.openloadflow.equations.StateVector;
 import com.powsybl.openloadflow.equations.TargetVector;
 import com.powsybl.openloadflow.network.LfNetwork;
 
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -63,12 +65,17 @@ public final class DevicePhases {
                         List<GpuIncrementalTransformerVoltageControlOuterLoop.Controller> incrementalTvc,
                         List<GpuIncrementalShuntVoltageControlOuterLoop.Controller> incrementalShunt,
                         List<GpuShuntVoltageControlOuterLoop.Group> simpleShunt,
-                        List<IncrementalFlowControl.Controller> flow,
+                        List<DeviceFlowControllers.Controller> flow,
                         List<GpuPhaseControlOuterLoop.Ctl> continuousPhase,
                         List<GpuTransformerVoltageControlOuterLoop.TransformerController> discreteTvc,
                         GpuTransformerVoltageControlOuterLoop.FreezeTables freeze,
                         GpuSecondaryVoltageControlOuterLoop.Controllers secondaryVc,
-                        IncrementalFlowControl.EsContext esContext) {
+                        EsContext esContext) {
+    }
+
+    /** The observable-evaluation context captured at build time: the shared es state vector (scenario
+     *  states are loaded into it so OLF's own terms evaluate/differentiate at the right point). */
+    public record EsContext(StateVector stateVector, int n) {
     }
 
     /**
@@ -104,10 +111,7 @@ public final class DevicePhases {
                 request.simpleShunt()
                         ? GpuShuntVoltageControlOuterLoop.buildGroups(network, es, targetVector, activation, targets, mapper, shuntOffset)
                         : null,
-                request.rpc() || request.incrementalPhase()
-                        ? IncrementalFlowControl.buildControllers(network, es, mapper,
-                                request.rpcMaxTapShift(), request.rpc(), request.incrementalPhase())
-                        : null,
+                request.rpc() || request.incrementalPhase() ? flowControllers(request, network, es, mapper) : null,
                 request.continuousPhase()
                         ? GpuPhaseControlOuterLoop.buildControllers(network, es, targetVector, activation, targets, mapper)
                         : null,
@@ -118,9 +122,24 @@ public final class DevicePhases {
                         : null,
                 request.secondaryVc() && GpuSecondaryVoltageControlOuterLoop.supported(network)
                         ? GpuSecondaryVoltageControlOuterLoop.build(network, es, rlVrow,
-                                new IncrementalFlowControl.EsContext(es.getStateVector(), n),
+                                new EsContext(es.getStateVector(), n),
                                 request.minPlausibleTargetV(), request.maxPlausibleTargetV(), mapper)
                         : null,
-                new IncrementalFlowControl.EsContext(es.getStateVector(), n));
+                new EsContext(es.getStateVector(), n));
+    }
+
+    /** One table for the two flow-observed loops, reactive power controllers first: the kernel indexes it. */
+    private static List<DeviceFlowControllers.Controller> flowControllers(Request request, LfNetwork network,
+                                                                          EquationSystem<AcVariableType, AcEquationType> es,
+                                                                          GpuBatchElementMapper mapper) {
+        List<DeviceFlowControllers.Controller> flow = new ArrayList<>();
+        if (request.rpc()) {
+            flow.addAll(GpuIncrementalTransformerReactivePowerControlOuterLoop.buildControllers(network, es, mapper,
+                    request.rpcMaxTapShift()));
+        }
+        if (request.incrementalPhase()) {
+            flow.addAll(GpuIncrementalPhaseControlOuterLoop.buildControllers(network, es, mapper));
+        }
+        return flow;
     }
 }

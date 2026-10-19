@@ -37,7 +37,7 @@ public final class PhaseControlNative {
             int[] elem, int[] tapPtr, double[] tapData, int[] baseTap);
 
     /** Install the FLOW-OBSERVED incremental controllers (RPC / incremental phase) for the in-kernel
-     *  loops (OLF orders 7 and 9); see IncrementalFlowControl.uploadToDevice. Returns 1 when
+     *  loops (OLF orders 7 and 9); see DeviceFlowControllers.uploadToDevice. Returns 1 when
      *  the kernel loops own them. */
     public static native int setBatchFlowControllers(long handle, int[] kind, int[] pinRow, int[] pinCol, int[] side,
             double[] targetValue, double[] halfDb, int[] elem, int[] ctlElem, int[] tapPtr, double[] tapData,

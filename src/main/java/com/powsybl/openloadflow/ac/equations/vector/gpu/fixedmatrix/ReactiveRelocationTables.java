@@ -250,16 +250,18 @@ public record ReactiveRelocationTables(ReactiveRelocationCandidates candidates, 
 
     /**
      * The carrier of candidate group {@code g} under the row modes {@code modes}: the first member candidate (after
-     * candidate 0, the fallback) whose row is neither an identity ({@code FIXED_VARIABLE}) nor pinned
+     * candidate 0, the fallback) whose row holds neither a fixed variable ({@code FIXED_VARIABLE}, or
+     * {@code CROSS_FIXED_VARIABLE}: a re-merged control's identity on its coupler's row) nor a pinned balance
      * ({@code BUS_TARGET_Q}), or -1 when none is. The Java twin of the native {@code chooseCarrierRow}
-     * (fixedmatrix/reactive_relocation.cuh), which also skips {@code CROSS_FIXED_VARIABLE}: this twin does not.
+     * (fixedmatrix/reactive_relocation.cuh): the host must pick the row the device reads.
      */
     public static int chooseCarrierRow(ReactiveRelocationCandidates candidates, int g, int[] modes) {
         int[] reactiveRelocationGroupStart = candidates.groupStart();
         int[] reactiveRelocationCandidateRows = candidates.candidateRows();
         for (int c = reactiveRelocationGroupStart[g] + 1; c < reactiveRelocationGroupStart[g + 1]; c++) {
             int r = reactiveRelocationCandidateRows[c];
-            if (modes[r] != GpuRowMode.FIXED_VARIABLE && modes[r] != GpuRowMode.BUS_TARGET_Q) {
+            if (modes[r] != GpuRowMode.FIXED_VARIABLE && modes[r] != GpuRowMode.BUS_TARGET_Q
+                    && modes[r] != GpuRowMode.CROSS_FIXED_VARIABLE) {
                 return r;
             }
         }

@@ -17,6 +17,7 @@
 #include "../common/codes/gpu_linear_solve_mode.cuh"
 #include "../common/codes/gpu_controlled_flow.cuh"
 #include "../common/codes/gpu_row_mode.cuh"
+#include "../common/codes/gpu_two_sides.cuh"
 #include <cublas_v2.h>
 #include "closed_branch.cuh"
 #include "../solver/driver_steps.cuh"
@@ -152,7 +153,7 @@ __global__ void secondaryVoltageControlGatherSensitivityBatch(SecondaryVoltageCo
             if (findTapOverride(nClosedBranchParameterOverrides, closedBranchParameterOverrideScenarioElement, closedBranchParameterOverrideValues, s, e, pOv)) p = pOv;
             const int* q = closedBranchIndices + e * 12;
             double g[18];
-            controlledFlowAndGradient(T.reactiveTermKind[k] == 0 ? 1 : 2, GpuControlledFlow::REACTIVE_POWER, p, xs, q, g);  // the reactive flow on side 1 / 2
+            controlledFlowAndGradient(T.reactiveTermKind[k] == 0 ? GpuTwoSides::ONE : GpuTwoSides::TWO, GpuControlledFlow::REACTIVE_POWER, p, xs, q, g);  // the reactive flow on side 1 / 2
             double d[6] = { dxs[q[5]], dxs[q[7]], dxs[q[4]], dxs[q[6]],
                             q[8] >= 0 ? dxs[q[8]] : 0.0, q[9] >= 0 ? dxs[q[9]] : 0.0 };
             for (int m = 0; m < 6; m++) sq += g[m] * d[m];

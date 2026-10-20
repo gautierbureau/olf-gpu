@@ -13,6 +13,7 @@ import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.BatchContingency;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.GenOutage;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.GpuBatchInjectionOutages;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuRowMode;
+import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuTwoSides;
 import com.powsybl.openloadflow.network.GeneratorVoltageControl;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
@@ -52,9 +53,9 @@ final class CouplerSeed {
             // moved rows onto? Such a scenario deactivates the coupler's ZERO_V/ZERO_PHI,
             // which the relocation put on the CHILD bus's rows, and pins its dummies with
             // DUMMY_TARGET identities those rows no longer host — the per-scenario gap.
-            // childSide (zeroImpedanceBranchIndices slot 10, bits 1-2) is nonzero exactly when rows moved.
+            // childSide (zeroImpedanceBranchIndices slot 10, bits 1-2) is not NONE exactly when rows moved.
             if (System.getenv("OLF_GPU_ZITREE_TRACE") != null
-                    && CouplerTreeReHoming.childSide(gpuData.zeroImpedanceBranch().indices()[ze * 11 + 10]) != 0) {
+                    && CouplerTreeReHoming.childSide(gpuData.zeroImpedanceBranch().indices()[ze * 11 + 10]) != GpuTwoSides.NONE) {
                 System.err.println("ZITREE_OPEN ctg=" + contingencies.get(ci).contingencyId()
                         + " coupler=" + outagedZeroImpedanceBranchOfContingency.getId()
                         + " childSide=" + CouplerTreeReHoming.childSide(gpuData.zeroImpedanceBranch().indices()[ze * 11 + 10]));
@@ -80,9 +81,9 @@ final class CouplerSeed {
             // balance returns to this row through that same fallback instead.
             int spanningTreeFlags = gpuData.zeroImpedanceBranch().indices()[ze * 11 + 10];
             int childSide = CouplerTreeReHoming.childSide(spanningTreeFlags);
-            if ((spanningTreeFlags & 8) != 0 && childSide != 0) {
-                LfBus child = childSide == 1 ? outagedZeroImpedanceBranchOfContingency.getBus1() : outagedZeroImpedanceBranchOfContingency.getBus2();
-                int childVRow = gpuData.zeroImpedanceBranch().indices()[ze * 11 + (childSide == 1 ? 6 : 7)];
+            if ((spanningTreeFlags & 8) != 0 && childSide != GpuTwoSides.NONE) {
+                LfBus child = childSide == GpuTwoSides.ONE ? outagedZeroImpedanceBranchOfContingency.getBus1() : outagedZeroImpedanceBranchOfContingency.getBus2();
+                int childVRow = gpuData.zeroImpedanceBranch().indices()[ze * 11 + (childSide == GpuTwoSides.ONE ? 6 : 7)];
                 var childVc = child == null ? java.util.Optional.<GeneratorVoltageControl>empty()
                         : child.getGeneratorVoltageControl();
                 // The TARGET must travel with the equation. The child's P balance lives on
@@ -94,7 +95,7 @@ final class CouplerSeed {
                 // DUMMY_TARGET identity, and the slack absorbs it — measured on
                 // BUS-6014_BBS_2 as 7.386 MW of distributed active power against the CPU
                 // and every bus shifted 2-4e-2 kV in one direction.
-                int childPhiRow = childSide == 1 ? gpuData.zeroImpedanceBranch().indices()[ze * 11 + 8]
+                int childPhiRow = childSide == GpuTwoSides.ONE ? gpuData.zeroImpedanceBranch().indices()[ze * 11 + 8]
                         : gpuData.zeroImpedanceBranch().indices()[ze * 11 + 9];
                 // ...unless the child is in the ISLAND this outage created. Then the
                 // freeze already holds its rows at a clean flat state (V=1, phi=0) and
@@ -248,12 +249,12 @@ final class CouplerSeed {
             // and its voltage is not its own to set.
             int treeBits = gpuData.zeroImpedanceBranch().indices()[ze * 11 + 10];
             int treeChildSide = CouplerTreeReHoming.childSide(treeBits);
-            if ((treeBits & 8) == 0 || treeChildSide == 0) {
+            if ((treeBits & 8) == 0 || treeChildSide == GpuTwoSides.NONE) {
                 continue;                // not a relocated coupler: nothing moved onto it
             }
-            int childPhiRow = treeChildSide == 1 ? gpuData.zeroImpedanceBranch().indices()[ze * 11 + 8]
+            int childPhiRow = treeChildSide == GpuTwoSides.ONE ? gpuData.zeroImpedanceBranch().indices()[ze * 11 + 8]
                     : gpuData.zeroImpedanceBranch().indices()[ze * 11 + 9];
-            int childVRow = gpuData.zeroImpedanceBranch().indices()[ze * 11 + (treeChildSide == 1 ? 6 : 7)];
+            int childVRow = gpuData.zeroImpedanceBranch().indices()[ze * 11 + (treeChildSide == GpuTwoSides.ONE ? 6 : 7)];
             boolean childFrozen = false;
             for (int fr : frozenRowsByIndex[ci]) {
                 if (fr == childPhiRow || fr == childVRow) {

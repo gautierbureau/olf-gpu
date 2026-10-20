@@ -26,6 +26,7 @@
 #include "../common/check.cuh"
 #include "../common/stats.cuh"
 #include "../common/codes/gpu_reactive_term_kind.cuh"
+#include "../common/codes/gpu_two_sides.cuh"
 #include "../solver/linear_solver_settings.cuh"
 #include "structure_build.cuh"
 
@@ -178,7 +179,7 @@ std::vector<int> buildRowMap(int n, int nClosedBranch, const int* closedBranchIn
         // remote-voltage-control bus (rte6515: row 2200 of 13048, appearing ONLY in zero-impedance[slot 6]).
         claimMovedV(ix[1], ix[6]);
         claimMovedV(ix[3], ix[7]);
-        if (zeroImpedanceDeadEndSideOf(ix)) {
+        if (zeroImpedanceDeadEndSideOf(ix) != GpuTwoSides::NONE) {
             // The stub's P/Q balances already sit on the dummy rows, where slots 0..3 self-pair and
             // -DUMMY_P / -DUMMY_Q is the diagonal. ZERO_V landed on the stub's v row, which
             // claimMovedV has just claimed (slot 1/3 no longer equals slot 6/7). ZERO_PHI's row is
@@ -259,7 +260,7 @@ void collectFamilyPattern(const std::vector<int>& rowMap,
                 pat.emplace_back(mappedRow, shuntIndices[static_cast<size_t>(distrQElement[c]) * 5 + 2]);
             } else if (distrQKind[c] == GpuReactiveTermKind::OPEN_BRANCH_REACTIVE_FLOW) {  // half-open: connected-side V column
                 const int* openBranch = openBranchIndices + static_cast<size_t>(distrQElement[c]) * 6;
-                pat.emplace_back(mappedRow, distrQSide[c] == 0 ? openBranch[4] : openBranch[5]);
+                pat.emplace_back(mappedRow, distrQSide[c] == GpuTwoSides::ONE ? openBranch[4] : openBranch[5]);
             } else if (distrQKind[c] == GpuReactiveTermKind::DUMMY_Q) {  // zero-imp DUMMY_Q column
                 pat.emplace_back(mappedRow, distrQElement[c]);
             } else {                                         // closed branch: v1 v2 ph1 ph2 r1

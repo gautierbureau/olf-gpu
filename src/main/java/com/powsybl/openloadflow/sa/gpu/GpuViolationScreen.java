@@ -11,6 +11,7 @@ import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcElementMapper;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
+import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuTwoSides;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.Variable;
 import com.powsybl.openloadflow.network.LfBranch;
@@ -326,9 +327,9 @@ final class GpuViolationScreen {
                 }
                 byte side = table.side(g);
                 byte quantity = table.quantity(g);
-                double p = side == 1 ? p1 : p2;
-                double q = side == 1 ? q1 : q2;
-                double v = side == 1 ? v1 : v2;
+                double p = side == GpuTwoSides.ONE ? p1 : p2;
+                double q = side == GpuTwoSides.ONE ? q1 : q2;
+                double v = side == GpuTwoSides.ONE ? v1 : v2;
                 double value = switch (quantity) {
                     case GpuLimitTable.QTY_I -> Math.hypot(p, q) / v;
                     case GpuLimitTable.QTY_P -> Math.abs(p);

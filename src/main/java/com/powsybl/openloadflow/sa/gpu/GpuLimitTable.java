@@ -64,7 +64,7 @@ final class GpuLimitTable {
     private final int[] branchGroupEnd;
 
     // --- one entry per (branch, side, limit type, operational limits group) ---
-    private final byte[] groupSide;                          // 1 or 2
+    private final byte[] groupSide;                          // a GpuTwoSides
     private final byte[] groupQuantity;
     private final double[] groupScale;                       // per-unit -> reported unit
     private final String[] groupId;
@@ -286,7 +286,7 @@ final class GpuLimitTable {
             if (sortedLimits.isEmpty()) {
                 continue;                                    // nothing to compare — the stock loop would find nothing
             }
-            sides.add((byte) (side == TwoSides.ONE ? 1 : 2));
+            sides.add((byte) side.ordinal());
             quantities.add(quantity);
             scales.add(scale);
             ids.add(group.getOperationalLimitsGroupId());

@@ -11,6 +11,7 @@ import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.fixedmatrix.ReactiveRelocation;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuReactiveTermKind;
+import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuTwoSides;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.network.GeneratorVoltageControl;
 import com.powsybl.openloadflow.network.LfBranch;
@@ -113,14 +114,14 @@ public final class RemoteMemberQPacker {
                 int row = ReactiveRelocation.relocatedQRow(bus.getNum(), columns.spanningTreeParentBranch(),
                         columns.dummyQCol(), vCol);
                 if (bus.getShunt().isPresent()) {
-                    out.add(new int[] {row, family.shuntElementOf()[bus.getNum()], 0, GpuReactiveTermKind.SHUNT_COMPENSATOR_REACTIVE_FLOW});
+                    out.add(new int[] {row, family.shuntElementOf()[bus.getNum()], GpuTwoSides.NONE, GpuReactiveTermKind.SHUNT_COMPENSATOR_REACTIVE_FLOW});
                     w.add(1.0);
                 }
                 for (LfBranch br : bus.getBranches()) {
                     if (br.isDisabled()) {
                         continue;
                     }
-                    int side = br.getBus1() == bus ? 0 : 1;
+                    int side = br.getBus1() == bus ? GpuTwoSides.ONE : GpuTwoSides.TWO;
                     int e = family.closedBranchElementOf()[br.getNum()];
                     if (e >= 0) {
                         out.add(new int[] {row, e, side, GpuReactiveTermKind.CLOSED_BRANCH_REACTIVE_FLOW});
@@ -139,7 +140,7 @@ public final class RemoteMemberQPacker {
                         int dummyQColumn = columns.dummyQCol()[br.getNum()];
                         if (dummyQColumn >= 0) {
                             out.add(new int[] {row, dummyQColumn, side, GpuReactiveTermKind.DUMMY_Q});
-                            w.add(side == 0 ? 1.0 : -1.0);
+                            w.add(side == GpuTwoSides.ONE ? 1.0 : -1.0);
                         }
                     }
                 }

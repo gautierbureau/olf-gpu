@@ -9,6 +9,7 @@ package com.powsybl.openloadflow.ac.equations.vector.gpu;
 
 import com.powsybl.commons.PowsyblException;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.fixedmatrix.CouplerTreeReHoming;
+import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuTwoSides;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfHvdc;
@@ -120,13 +121,13 @@ final class GpuAcFamilyPacker {
                 // reads the dummy values through them), so the relocated ZERO_V/ZERO_PHI ROWS are derived natively
                 // from the child side encoded in slot 10 — the same encoding the stub case used.
                 int child = columns.spanningTreeChildBus()[br.getNum()];
-                int childSide = child == b1n ? 1 : (child == b2n ? 2 : 0);
+                int childSide = child == b1n ? GpuTwoSides.ONE : (child == b2n ? GpuTwoSides.TWO : GpuTwoSides.NONE);
                 zeroImpedanceBranchIndices.add(new int[] {pRow[b1n], qRow[b1n], pRow[b2n], qRow[b2n], dpRow, distrQRow,
                     vCol[b1n], vCol[b2n], phiCol[b1n], phiCol[b2n],
-                    (br.isSpanningTreeEdge(LoadFlowModel.AC) ? CouplerTreeReHoming.FLAG_SPANNING_TREE_EDGE : 0) | (childSide << CouplerTreeReHoming.CHILD_SIDE_SHIFT)
+                    (br.isSpanningTreeEdge(LoadFlowModel.AC) ? CouplerTreeReHoming.FLAG_SPANNING_TREE_EDGE : 0) | CouplerTreeReHoming.encodeChildSide(childSide)
                         // bit 3: the child side came from the COUPLER-TREE walk; these need the per-scenario
                         // stock-placement fallback (native stockPlacementAlternateRow)
-                        | (childSide != 0 ? CouplerTreeReHoming.FLAG_TREE_WALK : 0)});
+                        | (childSide != GpuTwoSides.NONE ? CouplerTreeReHoming.FLAG_TREE_WALK : 0)});
                 zeroImpedanceBranchAlternateReactiveDestination.add(new int[] {alternateQRow[b1n], alternateQRow[b2n]});
                 continue;
             }
@@ -148,7 +149,7 @@ final class GpuAcFamilyPacker {
                     alternateQRow[b1.getNum()], alternateQRow[b2.getNum()]});    // [10],[11]: alternate Q rows (dyn reloc)
                 // CONTINUOUS phase control (CONTROLLER mode, LOCAL): the controlled side whose P-flow is
                 // re-emitted at the CONTROLLER's a1 row when the control is enabled per scenario
-                // (row mode 3). Encoding: -1 = none, else (controllerA1Col << 1) | controlledSide —
+                // (row mode 3). Encoding: -1 = none, else (controllerA1Col << 1) | controlledSide (a GpuTwoSides) —
                 // the entry sits on the CONTROLLED element (which, for REMOTE control, has no a1 of
                 // its own), and the emission row is the controller's a1-paired row.
                 int pcCode = -1;
@@ -159,7 +160,7 @@ final class GpuAcFamilyPacker {
                     int ctlA1Col = branchAlphaCol[pcOpt.orElseThrow().getControllerBranch().getNum()];
                     if (ctlA1Col >= 0) {
                         pcCode = (ctlA1Col << 1)
-                                | (pcOpt.orElseThrow().getControlledSide() == com.powsybl.iidm.network.TwoSides.ONE ? 0 : 1);
+                                | pcOpt.orElseThrow().getControlledSide().ordinal();
                     }
                 }
                 closedBranchPhaseControlSide.add(pcCode);

@@ -7,7 +7,7 @@
 
 /** Upload the FLOW-OBSERVED incremental controllers (RPC / incremental phase). Per controller: kind
  *  (0 RPC, 1 phase CONTROLLER, 2 phase LIMITER), pinRow (the rho/a1 identity row), tapColumn (6 r1 / 7 a1),
- *  side (1/2) of the controlled flow, targetValue, halfTargetDeadband, elem (controller's global element),
+ *  side (a GpuTwoSides) of the controlled flow, targetValue, halfTargetDeadband, elem (controller's global element),
  *  controlledElement (controlled branch's global element — a closed branch), tapStart/tapRows ([y g1 g2 b1 b2 ksi r1
  *  a1] per tap), baseTap, maxShift. Returns 1 when the kernel loops own them. */
 extern "C" JNIEXPORT jint JNICALL
@@ -97,7 +97,7 @@ OLF_JNI(ac_outerloop_gpu, PhaseControlNative, readBatchFlowTaps)(
 }
 
 /** Upload the CONTINUOUS phase controllers (kind 0 CONTROLLER / 1 LIMITER, a1 identity row, controlled
- *  side, current limit, global element, tap rows, base tap). Returns 1 when the kernel loop owns them. */
+ *  side (a GpuTwoSides), current limit, global element, tap rows, base tap). Returns 1 when the kernel loop owns them. */
 extern "C" JNIEXPORT jint JNICALL
 OLF_JNI(ac_outerloop_gpu, PhaseControlNative, setBatchContinuousPhase)(
         JNIEnv* env, jclass, jlong handle,

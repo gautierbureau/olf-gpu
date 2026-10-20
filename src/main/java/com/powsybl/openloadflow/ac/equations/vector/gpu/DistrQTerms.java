@@ -11,7 +11,7 @@ import java.util.Arrays;
 
 /**
  * The DISTR_Q rows of remote generator voltage control as terms (OLF's DistributionReactivePowerEquationTerm,
- * {@code DISTR_Q_k = qPct_k * sum_j q_Gj - q_Gk}): per term, the family {@code element} and {@code side} of a
+ * {@code DISTR_Q_k = qPct_k * sum_j q_Gj - q_Gk}): per term, the family {@code element} and {@code side} (a GpuTwoSides, NONE for a shunt) of a
  * reactive injection of controller {@code injectionMember} (j), its {@link com.powsybl.openloadflow.ac.solver.gpu.codes.GpuReactiveTermKind},
  * the stable DISTR_Q {@code row} of controller {@code rowMember} (k, a controller's BUS_V row) and the {@code weight}
  * {@code qPct_k - (j == k ? 1 : 0)}.

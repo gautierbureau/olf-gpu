@@ -126,12 +126,12 @@ public final class GpuPhaseControlOuterLoop {
                     deltaTargetsOn[k] = onTargets[deltaRows[k]];
                 }
                 out.add(new Controller(GpuPhaseControlMode.CONTROLLER, a1Row, null, 0, tapRows, baseTap, elemIndex,
-                        deltaRows, deltaModesOn, deltaTargetsOn, phaseControl.getControlledSide() == TwoSides.ONE ? 1 : 2, branch.getNum()));
+                        deltaRows, deltaModesOn, deltaTargetsOn, phaseControl.getControlledSide().ordinal(), branch.getNum()));
             } else if (phaseControl.getMode() == TransformerPhaseControl.Mode.LIMITER) {
                 var iTerm = (EquationTerm<AcVariableType, AcEquationType>) (phaseControl.getControlledSide() == TwoSides.ONE
                         ? branch.getI1() : branch.getI2());
                 out.add(new Controller(GpuPhaseControlMode.LIMITER, a1Row, iTerm, phaseControl.getTargetValue(), tapRows, baseTap, elemIndex,
-                        new int[0], new int[0], new double[0], phaseControl.getControlledSide() == TwoSides.ONE ? 1 : 2, branch.getNum()));
+                        new int[0], new int[0], new double[0], phaseControl.getControlledSide().ordinal(), branch.getNum()));
             }
         }
         return out;

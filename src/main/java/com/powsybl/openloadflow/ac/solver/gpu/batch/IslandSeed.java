@@ -12,6 +12,7 @@ import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcElementMapper;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.fixedmatrix.ReactiveRelocationTables;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.BatchContingency;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuRowMode;
+import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuTwoSides;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuVoltageControlRole;
 import com.powsybl.openloadflow.network.LfBranch;
 
@@ -58,7 +59,7 @@ final class IslandSeed {
         for (BatchContingency.SideOpen so : sideOpens) {
             int e = elementMapper.getElementIndex(so.branch());
             sideOpenElems.add(e);
-            if (frozenCols.contains(gpuData.closedBranch().indices()[e * 12 + (so.side() == 1 ? 7 : 5)])) {
+            if (frozenCols.contains(gpuData.closedBranch().indices()[e * 12 + (so.side() == GpuTwoSides.ONE ? 7 : 5)])) {
                 rs.disabledMask[s][e] = true;
             }
         }

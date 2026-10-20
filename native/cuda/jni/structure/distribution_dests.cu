@@ -26,6 +26,7 @@
 #include "../common/check.cuh"
 #include "../common/stats.cuh"
 #include "../common/codes/gpu_reactive_term_kind.cuh"
+#include "../common/codes/gpu_two_sides.cuh"
 #include "../solver/linear_solver_settings.cuh"
 #include "structure_build.cuh"
 
@@ -72,7 +73,7 @@ void buildDistrQDest(SharedStructure* structure, const CsrPattern& pos, const st
                     d[1] = pos.at(row, shuntIndices[static_cast<size_t>(distrQElement[c]) * 5 + 2]);
                 } else if (distrQKind[c] == GpuReactiveTermKind::OPEN_BRANCH_REACTIVE_FLOW) {  // half-open: dq/dv on the connected-side V col
                     const int* openBranch = openBranchIndices + static_cast<size_t>(distrQElement[c]) * 6;
-                    d[1] = pos.at(row, distrQSide[c] == 0 ? openBranch[4] : openBranch[5]);
+                    d[1] = pos.at(row, distrQSide[c] == GpuTwoSides::ONE ? openBranch[4] : openBranch[5]);
                 } else if (distrQKind[c] == GpuReactiveTermKind::DUMMY_Q) {  // zero-impedance: J slot on the dummyQ column
                     d[1] = pos.at(row, distrQElement[c]);
                 } else {                                     // closed branch

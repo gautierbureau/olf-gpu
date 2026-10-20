@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <vector>
 
+#include "../common/codes/gpu_two_sides.cuh"
 #include "../structure/shared_structure.cuh"
 #include "relocated_rows.cuh"
 
@@ -23,12 +24,12 @@ std::vector<int> buildRelocatedChildOwnRows(SharedStructure* structure, int n, i
     anyRelocatedChild = false;
     for (int e = 0; e < nZeroImpedanceBranch; e++) {
         const int* z = zeroImpedanceBranchIndices + static_cast<size_t>(e) * 11;
-        int childSide = (z[10] >> 1) & 3;
-        if (childSide == 0 || (z[10] & 8) == 0) {
+        int childSide = zeroImpedanceDeadEndSideOf(z);
+        if (childSide == GpuTwoSides::NONE || (z[10] & 8) == 0) {
             continue;                                        // dead-end stub (bit 3 clear): long-standing case
         }
-        int ownPhiCol = childSide == 1 ? z[8] : z[9];
-        int ownVCol = childSide == 1 ? z[6] : z[7];
+        int ownPhiCol = childSide == GpuTwoSides::ONE ? z[8] : z[9];
+        int ownVCol = childSide == GpuTwoSides::ONE ? z[6] : z[7];
         if (z[4] >= 0 && ownPhiCol >= 0) {
             relocatedChildOwnRows[rowMap[z[4]]] = rowMap[ownPhiCol];
             anyRelocatedChild = true;

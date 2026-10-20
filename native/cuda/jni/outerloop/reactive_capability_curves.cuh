@@ -19,7 +19,7 @@ namespace olfgpu {
 // and at its target P otherwise (saturated, frozen, disabled link), which the HVDC loop holds as baseD + appliedD.
 // hv == nullptr: no such entry. nHvdcAcEmulation == 0: the HVDC loops are not on this context (then nothing was packed).
 struct CurveHvdcAcEmulationView {
-    const int* hvdcStation;            // per curve entry {hvdc index in the loop pack, side 1|2}, -1 for a plain generator
+    const int* hvdcStation;            // per curve entry {hvdc index in the loop pack, GpuTwoSides side}, -1 / NONE for a plain generator
     int nHvdcAcEmulation;
     const int* status;        // per (scenario, hvdc)
     const double* appliedDelta1;

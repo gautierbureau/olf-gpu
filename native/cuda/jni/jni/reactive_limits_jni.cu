@@ -27,7 +27,7 @@ OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchReactiveCapabilityCurves
         ctx->nReactiveCapabilityCurves = 0;
         return;
     }
-    if (jReactiveCapabilityCurveHvdcStation != nullptr) {                      // stride 2 per entry: {hvdc, side}, -1 for a plain generator
+    if (jReactiveCapabilityCurveHvdcStation != nullptr) {                      // stride 2 per entry: {hvdc, GpuTwoSides side}, -1 / NONE for a plain generator
         jint* reactiveCapabilityCurveHvdcStation = env->GetIntArrayElements(jReactiveCapabilityCurveHvdcStation, nullptr);
         ctx->dReactiveCapabilityCurveHvdcStation.upload(reactiveCapabilityCurveHvdcStation, static_cast<size_t>(nReactiveCapabilityCurves) * 2 * sizeof(int));
         env->ReleaseIntArrayElements(jReactiveCapabilityCurveHvdcStation, reactiveCapabilityCurveHvdcStation, JNI_ABORT);

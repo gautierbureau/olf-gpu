@@ -11,7 +11,7 @@ import java.util.Arrays;
 
 /**
  * A remote voltage control member's OWN reactive injection, term by term (plan-B3): per term, the member's own row,
- * the family element, its side, its {@code GpuReactiveTermKind} (as in the DISTR_Q pack) and a weight (1, or +-1
+ * the family element, its side (a GpuTwoSides, NONE for a shunt), its {@code GpuReactiveTermKind} (as in the DISTR_Q pack) and a weight (1, or +-1
  * for a zero-impedance DUMMY_Q term). A twin of the DISTR_Q assembly accumulates each member's own bus q into the
  * diagnostic Q buffer at its own row (free, because the main fill suppresses member rows), so the reactive limits
  * kernel's {@code q = qBuf[row] + loadQ} works verbatim for remote entries.

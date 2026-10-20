@@ -16,6 +16,7 @@
 #include "../common/codes/gpu_q_limit_type.cuh"
 #include "../common/codes/gpu_reactive_term_kind.cuh"
 #include "../common/codes/gpu_row_mode.cuh"
+#include "../common/codes/gpu_two_sides.cuh"
 #include "closed_branch.cuh"
 #include "closed_branch_scatter.h"
 #include "open_branch.cuh"
@@ -141,7 +142,7 @@ __global__ void fillDistrQBatch(int nDistrQ, int nScenarios, int n, int nnz, int
         double qpk = (sum == 0.0 || kPinned || distrQMemberInactive(nDistrQInactiveMembers, distrQInactiveScenarioMember, s, kM))
                 ? 0.0 : distrQKeyOf(nDistrQKeyOverrides, distrQKeyOverrideScenarioMember, distrQKeyOverrideKey, s, kM, mKey) / sum;
         w = qpk - (distrQInjectionMember[c] == kM ? 1.0 : 0.0);
-        if (kind == GpuReactiveTermKind::DUMMY_Q && distrQSide[c] != 0) {
+        if (kind == GpuReactiveTermKind::DUMMY_Q && distrQSide[c] == GpuTwoSides::TWO) {
             // The host folds the SIDE SIGN into a kind-3 weight (+dummyQ where the controller is
             // bus1, -dummyQ where it is bus2 — exactly createReactiveTerms' term); this live
             // recomputation rebuilds qPct_k - delta_jk and must put that sign back. Without it a
@@ -188,13 +189,13 @@ __global__ void fillDistrQBatch(int nDistrQ, int nScenarios, int n, int nnz, int
     if (kind == GpuReactiveTermKind::OPEN_BRANCH_REACTIVE_FLOW) {  // half-open branch: connected-side q + dq/dv
         const double* op = openBranchParameters + e * 7;
         const int* openBranch = openBranchIndices + e * 6;
-        int vcol = distrQSide[c] == 0 ? openBranch[4] : openBranch[5];
-        double v1 = distrQSide[c] == 0 ? xs[vcol] : 1.0;
-        double v2 = distrQSide[c] == 1 ? xs[vcol] : 1.0;
+        int vcol = distrQSide[c] == GpuTwoSides::ONE ? openBranch[4] : openBranch[5];
+        double v1 = distrQSide[c] == GpuTwoSides::ONE ? xs[vcol] : 1.0;
+        double v2 = distrQSide[c] == GpuTwoSides::TWO ? xs[vcol] : 1.0;
         double oo[OB_NOUT];
         evalOpenBranch(op[0], op[1], op[2], op[3], op[4], op[5], v1, op[6], v2, 0,
                        oo + 0, oo + 1, oo + 2, oo + 3, oo + 4, oo + 5, oo + 6, oo + 7);
-        int qi = distrQSide[c] == 0 ? 6 : 2;
+        int qi = distrQSide[c] == GpuTwoSides::ONE ? 6 : 2;
         if (dst[0] <= -2 && (-2 - dst[0]) == distrQTraceRow) {
             printf("DQF kind=2(halfOpen) elem=%d w=%.6f contrib=%.9f\n", e, w, w * oo[qi]);
         }
@@ -229,7 +230,7 @@ __global__ void fillDistrQBatch(int nDistrQ, int nScenarios, int n, int nnz, int
                      o + 0, o + 1, o + 2, o + 3, o + 4, o + 5, o + 6, o + 7, o + 8, o + 9,
                      o + 10, o + 11, o + 12, o + 13, o + 14, o + 15, o + 16, o + 17, o + 18,
                      o + 19, o + 20, o + 21, o + 22, o + 23, o + 24, o + 25, o + 26, o + 27);
-    int qi = distrQSide[c] == 0 ? 7 : 21;            // side-1 q1[7]..dq1dr1[13]; side-2 q2[21]..dq2dr1[27]
+    int qi = distrQSide[c] == GpuTwoSides::ONE ? 7 : 21;  // side-1 q1[7]..dq1dr1[13]; side-2 q2[21]..dq2dr1[27]
     double out6[6] = {o[qi], o[qi + 1], o[qi + 2], o[qi + 3], o[qi + 4], o[qi + 6]};
     for (int m = 0; m < 6; m++) {
         int d = dst[m];

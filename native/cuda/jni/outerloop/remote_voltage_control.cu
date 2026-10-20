@@ -16,6 +16,7 @@
 #include "../common/codes/gpu_q_limit_type.cuh"
 #include "../common/codes/gpu_reactive_term_kind.cuh"
 #include "../common/codes/gpu_row_mode.cuh"
+#include "../common/codes/gpu_two_sides.cuh"
 #include "closed_branch.cuh"
 #include "closed_branch_scatter.h"
 #include "open_branch.cuh"
@@ -347,13 +348,13 @@ __global__ void fillRemoteMemberQBatch(int nRemoteMemberReactiveTerms, int nScen
     if (kind == GpuReactiveTermKind::OPEN_BRANCH_REACTIVE_FLOW) {  // half-open branch, connected side
         const double* op = openBranchParameters + e * 7;
         const int* openBranch = openBranchIndices + e * 6;
-        int vcol = remoteMemberReactiveTermSide[c] == 0 ? openBranch[4] : openBranch[5];
-        double v1 = remoteMemberReactiveTermSide[c] == 0 ? xs[vcol] : 1.0;
-        double v2 = remoteMemberReactiveTermSide[c] == 1 ? xs[vcol] : 1.0;
+        int vcol = remoteMemberReactiveTermSide[c] == GpuTwoSides::ONE ? openBranch[4] : openBranch[5];
+        double v1 = remoteMemberReactiveTermSide[c] == GpuTwoSides::ONE ? xs[vcol] : 1.0;
+        double v2 = remoteMemberReactiveTermSide[c] == GpuTwoSides::TWO ? xs[vcol] : 1.0;
         double oo[OB_NOUT];
         evalOpenBranch(op[0], op[1], op[2], op[3], op[4], op[5], v1, op[6], v2, 0,
                        oo + 0, oo + 1, oo + 2, oo + 3, oo + 4, oo + 5, oo + 6, oo + 7);
-        atomicAdd(q, w * oo[remoteMemberReactiveTermSide[c] == 0 ? 6 : 2]);
+        atomicAdd(q, w * oo[remoteMemberReactiveTermSide[c] == GpuTwoSides::ONE ? 6 : 2]);
         return;
     }
     // kind 0: closed branch q at the member's side (full pi row honors the tap override channel)
@@ -380,7 +381,7 @@ __global__ void fillRemoteMemberQBatch(int nRemoteMemberReactiveTerms, int nScen
                      o + 0, o + 1, o + 2, o + 3, o + 4, o + 5, o + 6, o + 7, o + 8, o + 9,
                      o + 10, o + 11, o + 12, o + 13, o + 14, o + 15, o + 16, o + 17, o + 18,
                      o + 19, o + 20, o + 21, o + 22, o + 23, o + 24, o + 25, o + 26, o + 27);
-    atomicAdd(q, w * o[remoteMemberReactiveTermSide[c] == 0 ? 7 : 21]);           // q1 / q2 residual outputs
+    atomicAdd(q, w * o[remoteMemberReactiveTermSide[c] == GpuTwoSides::ONE ? 7 : 21]);           // q1 / q2 residual outputs
     return;
 }
 

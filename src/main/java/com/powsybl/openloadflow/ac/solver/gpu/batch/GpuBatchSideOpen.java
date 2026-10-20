@@ -7,6 +7,7 @@
  */
 package com.powsybl.openloadflow.ac.solver.gpu.batch;
 
+import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuTwoSides;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.PiModel;
 
@@ -37,7 +38,7 @@ final class GpuBatchSideOpen {
 
     /**
      * The cb pi row {@code {y, g1, g2, b1, b2, ksi, r1, a1}} that makes {@code branch} behave as if
-     * {@code openSide} were disconnected, or {@code null} when the shape is not expressible this way
+     * {@code openSide} (a GpuTwoSides) were disconnected, or {@code null} when the shape is not expressible this way
      * and the caller should fall back to masking the element.
      *
      * <p>The RATIO needs no special handling, which is worth stating because it looks like it should.
@@ -57,10 +58,10 @@ final class GpuBatchSideOpen {
         // OLF's series admittance from (y, ksi): G = y sin(ksi), B = -y cos(ksi).
         double gs = pi.getY() * Math.sin(pi.getKsi());
         double bs = -pi.getY() * Math.cos(pi.getKsi());
-        double gOpen = openSide == 1 ? pi.getG1() : pi.getG2();
-        double bOpen = openSide == 1 ? pi.getB1() : pi.getB2();
-        double gLive = openSide == 1 ? pi.getG2() : pi.getG1();
-        double bLive = openSide == 1 ? pi.getB2() : pi.getB1();
+        double gOpen = openSide == GpuTwoSides.ONE ? pi.getG1() : pi.getG2();
+        double bOpen = openSide == GpuTwoSides.ONE ? pi.getB1() : pi.getB2();
+        double gLive = openSide == GpuTwoSides.ONE ? pi.getG2() : pi.getG1();
+        double bLive = openSide == GpuTwoSides.ONE ? pi.getB2() : pi.getB1();
         // Y_series (+) Y_open, i.e. (Ys * Yo) / (Ys + Yo) in complex arithmetic.
         double sumG = gs + gOpen;
         double sumB = bs + bOpen;
@@ -77,7 +78,7 @@ final class GpuBatchSideOpen {
         double bEq = bLive + combB;
         //     y    g1                    g2                    b1                    b2                 ksi r1 a1
         // r1/a1 carried through: the cb evaluation applies r1^2 to the live side exactly as OLF does.
-        return openSide == 1
+        return openSide == GpuTwoSides.ONE
                 ? new double[] {0, 0, gEq, 0, bEq, 0, pi.getR1(), pi.getA1()}
                 : new double[] {0, gEq, 0, bEq, 0, 0, pi.getR1(), pi.getA1()};
     }

@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "../common/device_buf.cuh"
+#include "../common/codes/gpu_two_sides.cuh"
 #include "csr_pattern.cuh"
 
 namespace olfgpu {
@@ -46,7 +47,8 @@ struct Family {
 };
 
 // zeroImpedanceBranchIndices slot 10 packs two things: bit 0 = spanning-tree edge, bits 1-2 = which side is a DEAD-END
-// STUB (0 = none, see GpuAcRowIndexing#zeroImpedanceDeadEndSide). On a stub the four rows around the branch
+// STUB, stored as side + 1 so 0 is none (CouplerTreeReHoming.encodeChildSide; zeroImpedanceDeadEndSideOf decodes it to a
+// GpuTwoSides, NONE when none). On a stub the four rows around the branch
 // would all have a ZERO DIAGONAL — ZERO_V and ZERO_PHI never depend on their own dummy, and the
 // stub's P/Q balances carry only -DUMMY_P / -DUMMY_Q — and cuDSS's symmetric AMD ordering
 // mis-factors that chain, perturbing the zero pivot and propagating its reciprocal. The Java packer
@@ -54,7 +56,7 @@ struct Family {
 // ZERO_V / ZERO_PHI onto the stub's own v / phi rows, which is what these two derive. Slots 4/5
 // stay the dummy COLUMNS, because the kernel reads the dummy values through them.
 inline int isSpanningTreeEdge(const int* z) { return z[10] & 1; }
-inline int zeroImpedanceDeadEndSideOf(const int* z) { return (z[10] >> 1) & 3; }
+inline int zeroImpedanceDeadEndSideOf(const int* z) { return ((z[10] >> 1) & 3) - 1; }
 // STOCK placement (no child): ZERO_V on the DUMMY_Q row and ZERO_PHI on the DUMMY_P row - CROSSWISE. Neither
 // equation holds a dummy, so either way both rows are zero-diagonal hazards the numeric repair fills from a
 // donor row carrying that dummy: a Q row for DUMMY_Q, a P row for DUMMY_P. The repaired row is then
@@ -66,11 +68,11 @@ inline int zeroImpedanceDeadEndSideOf(const int* z) { return (z[10] >> 1) & 3; }
 // them (rte6515: 37 stock couplers in every scenario's matrix). Crosswise, det = -+1 on every such block.
 inline int zeroVRowOf(const int* z) {
     int d = zeroImpedanceDeadEndSideOf(z);
-    return d == 0 ? z[5] : (d == 1 ? z[6] : z[7]);           // the child's own v row
+    return d == GpuTwoSides::NONE ? z[5] : (d == GpuTwoSides::ONE ? z[6] : z[7]);  // the child's own v row
 }
 inline int zeroPhiRowOf(const int* z) {
     int d = zeroImpedanceDeadEndSideOf(z);
-    return d == 0 ? z[4] : (d == 1 ? z[8] : z[9]);           // the child's own phi row
+    return d == GpuTwoSides::NONE ? z[4] : (d == GpuTwoSides::ONE ? z[8] : z[9]);  // the child's own phi row
 }
 
 // The SHARED STRUCTURE: everything a batched context derives from ONE extraction

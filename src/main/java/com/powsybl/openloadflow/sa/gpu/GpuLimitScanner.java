@@ -8,6 +8,7 @@
 package com.powsybl.openloadflow.sa.gpu;
 
 import com.powsybl.iidm.network.TwoSides;
+import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuTwoSides;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfNetwork;
@@ -193,7 +194,7 @@ final class GpuLimitScanner {
         }
         manager.addBranchLimitViolation(LimitViolationManager.createLimitViolation(branch,
                 table.groupId(group), table.limit(limit), GpuLimitTable.violationType(quantity),
-                table.scale(group), value, side == 1 ? TwoSides.ONE : TwoSides.TWO));
+                table.scale(group), value, side == GpuTwoSides.ONE ? TwoSides.ONE : TwoSides.TWO));
         return true;
     }
 
@@ -221,19 +222,19 @@ final class GpuLimitScanner {
             if (compared > table.threshold(l)) {
                 manager.addBranchLimitViolation(LimitViolationManager.createLimitViolation(branch,
                         table.groupId(group), table.limit(l), GpuLimitTable.violationType(quantity),
-                        table.scale(group), value, side == 1 ? TwoSides.ONE : TwoSides.TWO));
+                        table.scale(group), value, side == GpuTwoSides.ONE ? TwoSides.ONE : TwoSides.TWO));
                 return;                                      // most serious one only
             }
         }
     }
 
     private double quantity(LfBranch branch, byte side, byte quantity) {
-        int slot = (side - 1) * 3 + quantity;
+        int slot = side * 3 + quantity;
         if (quantityCached[slot]) {
             return quantityCache[slot];
         }
         double value;
-        if (side == 1) {
+        if (side == GpuTwoSides.ONE) {
             value = switch (quantity) {
                 case GpuLimitTable.QTY_I -> branch.getI1().eval();
                 case GpuLimitTable.QTY_P -> branch.getP1().eval();

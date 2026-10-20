@@ -11,6 +11,7 @@ import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuReactiveTermKind;
+import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuTwoSides;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
@@ -388,7 +389,7 @@ final class VoltageControlOverrides {
             // a zero-impedance spanning-tree edge's DUMMY_Q term (kind 3) enters with the coupler side's sign,
             // +1 at bus1 and -1 at bus2 (buildDistrQContributions) - measured without it: every such weight
             // came out sign-flipped and seven busbar-section fixtures failed
-            if (kind != null && side != null && kind[i] == GpuReactiveTermKind.DUMMY_Q && side[i] != 0) {
+            if (kind != null && side != null && kind[i] == GpuReactiveTermKind.DUMMY_Q && side[i] == GpuTwoSides.TWO) {
                 weight = -weight;
             }
             w[i] = weight;

@@ -7,7 +7,6 @@
  */
 package com.powsybl.openloadflow.ac.outerloop.gpu;
 
-import com.powsybl.iidm.network.TwoSides;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcElementMapper;
@@ -75,7 +74,7 @@ public final class GpuIncrementalTransformerReactivePowerControlOuterLoop {
             double halfTargetDeadband = rc.getTargetDeadband().orElse(MIN_TARGET_DEADBAND_MVAR) / 2;
             out.add(new DeviceFlowControllers.Controller(GpuControlledFlow.REACTIVE_POWER, pinRow, GpuPiModelColumn.R1, target, halfTargetDeadband,
                     tapRows, DeviceFlowControllers.closestTap(tapRows, GpuPiModelColumn.R1, controller.getPiModel().getR1()),
-                    elemIndex, controlledElementIndex, incrementalTransformerReactivePowerControlMaxTapShift, rc.getControlledSide() == TwoSides.ONE ? 1 : 2, controller.getNum()));
+                    elemIndex, controlledElementIndex, incrementalTransformerReactivePowerControlMaxTapShift, rc.getControlledSide().ordinal(), controller.getNum()));
         }
         return out;
     }

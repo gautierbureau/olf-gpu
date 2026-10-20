@@ -11,6 +11,7 @@
 #include <utility>
 #include <vector>
 
+#include "../common/codes/gpu_two_sides.cuh"
 #include "../structure/shared_structure.cuh"
 #include "zero_diagonal_repair_tables.cuh"
 
@@ -45,7 +46,7 @@ void collectZeroDiagonalRepairRows(const SharedStructure* structure, int n, int 
         // out of the set left them unrepaired: network.xiidm's 1000-section busbar window, ALWQ re-coupled
         // when its loop's tree coupler ALVS opened - 189 linear-solve rejects. Only a relocated edge (its
         // ZERO rows already sit on a child's own rows, which have a diagonal) is still skipped here.
-        if (zeroImpedanceDeadEndSideOf(z) != 0) {
+        if (zeroImpedanceDeadEndSideOf(z) != GpuTwoSides::NONE) {
             // A RELOCATED edge (stub or tree): its own rows already have a diagonal - the child's balance on the
             // dummy rows, the ZERO rows on the child's own V / PHI rows. But the PARENT end still carries this
             // edge's dummies in its balance, and a section whose every coupler is relocated has nothing BUT
@@ -53,8 +54,8 @@ void collectZeroDiagonalRepairRows(const SharedStructure* structure, int n, int 
             // no diagonal and no registered donor. Register them, borrowing this edge's ZERO rows, which carry
             // the parent's phi / v columns (network.xiidm's full busbar scope: IBAJ_0, 1375 scenario solves).
             int child = zeroImpedanceDeadEndSideOf(z);
-            int parPhi = child == 1 ? z[9] : z[8];
-            int parV = child == 1 ? z[7] : z[6];
+            int parPhi = child == GpuTwoSides::ONE ? z[9] : z[8];
+            int parV = child == GpuTwoSides::ONE ? z[7] : z[6];
             int zPhi = rowMap[zeroPhiRowOf(z)];
             int zV = rowMap[zeroVRowOf(z)];
             if (parPhi >= 0) addDonor(repairEntryOf(rowMap[parPhi], 1), zPhi);
@@ -131,7 +132,7 @@ void collectZeroDiagonalRepairRows(const SharedStructure* structure, int n, int 
         std::map<int, int> spanningTreeDegree;                        // bus row -> incident tree couplers
         for (int e = 0; e < nZeroImpedanceBranch; e++) {
             const int* z = zeroImpedanceBranchIndices + static_cast<size_t>(e) * 11;
-            if (!isSpanningTreeEdge(z) || zeroImpedanceDeadEndSideOf(z) != 0) continue;
+            if (!isSpanningTreeEdge(z) || zeroImpedanceDeadEndSideOf(z) != GpuTwoSides::NONE) continue;
             for (int slot : {z[0], z[2], z[1] >= 0 ? z[1] : z[6], z[3] >= 0 ? z[3] : z[7]}) {
                 if (slot >= 0) spanningTreeDegree[rowMap[slot]]++;
             }

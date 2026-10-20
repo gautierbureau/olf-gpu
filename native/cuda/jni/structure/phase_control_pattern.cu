@@ -9,6 +9,7 @@
 #include "closed_branch_scatter.h"
 
 #include "structure_build.cuh"
+#include "../common/codes/gpu_two_sides.cuh"
 
 using namespace powsybl::openloadflow;
 
@@ -17,7 +18,7 @@ namespace olfgpu {
 // CONTINUOUS PHASE CONTROL (BRANCH_TARGET_P): when a phase-controller branch's control is enabled
 // per scenario (row mode 3 on the CONTROLLER's a1-paired row), the controlled side's P-flow outputs
 // are emitted AGAIN at that row — the p-flow equation replacing the a1 identity. Union those
-// (a1Row, col) positions into the pattern; closedBranchPhaseControlSide[e] = -1 none, else (controllerA1Col << 1) | side
+// (a1Row, col) positions into the pattern; closedBranchPhaseControlSide[e] = -1 none, else (controllerA1Col << 1) | side (a GpuTwoSides)
 // — the entry sits on the CONTROLLED element, whose own a1 may be absent (REMOTE control).
 void collectClosedBranchPhaseControlPattern(int nClosedBranch, const int* closedBranchIndices, const int* closedBranchPhaseControlSide,
                            const std::vector<int>& rowMap, std::vector<std::pair<int, int>>& pat) {
@@ -29,7 +30,7 @@ void collectClosedBranchPhaseControlPattern(int nClosedBranch, const int* closed
         int a1Col = closedBranchPhaseControlSide[e] >> 1;
         const int* ix = closedBranchIndices + static_cast<size_t>(e) * 12;
         int pcRow = rowMap[a1Col];
-        int k0 = side == 0 ? 0 : 14;                         // p1 block / p2 block of CB_SCATTER
+        int k0 = side == GpuTwoSides::ONE ? 0 : 14;          // p1 block / p2 block of CB_SCATTER
         for (int k = k0 + 1; k <= k0 + 6; k++) {             // the 6 derivative outputs
             RC rc = resolveClosedBranch(CB_SCATTER[k], ix);
             if (rc.col >= 0) {
@@ -53,7 +54,7 @@ void buildClosedBranchPhaseControlDestination(int nClosedBranch, const int* clos
         int a1Col = closedBranchPhaseControlSide[e] >> 1;
         const int* ix = closedBranchIndices + static_cast<size_t>(e) * 12;
         int pcRow = rowMap[a1Col];
-        int k0 = side == 0 ? 0 : 14;
+        int k0 = side == GpuTwoSides::ONE ? 0 : 14;
         phaseControlDestination[static_cast<size_t>(e) * CB_NOUT + k0] = -2 - pcRow;    // the P residual
         phaseControlSelector[static_cast<size_t>(e) * CB_NOUT + k0] = a1Col;          // mode-3 gate lives at the CONTROLLER's a1 row
         for (int k = k0 + 1; k <= k0 + 6; k++) {

@@ -12,6 +12,7 @@ import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.fixedmatrix.ReactiveRelocation;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuReactiveTermKind;
+import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuTwoSides;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.network.GeneratorVoltageControl;
 import com.powsybl.openloadflow.network.LfBranch;
@@ -227,14 +228,14 @@ public final class DistrQPacker {
                                 + " has a voltage-controlling shunt (SHUNT_B) reactive contribution (not supported)");
                     }
                     if (gj.getShunt().isPresent()) {         // a fixed shunt's reactive joins the q sum
-                        out.add(new int[] {shuntElementOf[gj.getNum()], 0, distrQRow, GpuReactiveTermKind.SHUNT_COMPENSATOR_REACTIVE_FLOW, kIdx, jIdx});
+                        out.add(new int[] {shuntElementOf[gj.getNum()], GpuTwoSides.NONE, distrQRow, GpuReactiveTermKind.SHUNT_COMPENSATOR_REACTIVE_FLOW, kIdx, jIdx});
                         weights.add(weight);
                     }
                     for (LfBranch brj : gj.getBranches()) {
                         if (brj.isDisabled()) {
                             continue;
                         }
-                        int side = brj.getBus1() == gj ? 0 : 1;
+                        int side = brj.getBus1() == gj ? GpuTwoSides.ONE : GpuTwoSides.TWO;
                         int e = closedBranchElementOf[brj.getNum()];
                         if (e >= 0) {                        // closed branch: weighted q1/q2 (kind 0)
                             out.add(new int[] {e, side, distrQRow, GpuReactiveTermKind.CLOSED_BRANCH_REACTIVE_FLOW, kIdx, jIdx});
@@ -265,7 +266,7 @@ public final class DistrQPacker {
                                         + " has a zero-impedance branch " + brj.getId() + " without a DUMMY_Q variable");
                             }
                             out.add(new int[] {dummyQColumn, side, distrQRow, GpuReactiveTermKind.DUMMY_Q, kIdx, jIdx});  // elem = the DUMMY_Q var column
-                            weights.add(weight * (side == 0 ? 1.0 : -1.0));
+                            weights.add(weight * (side == GpuTwoSides.ONE ? 1.0 : -1.0));
                             continue;
                         }
                         throw new PowsyblException("GPU AC solver: DISTR_Q controller " + gj.getId()

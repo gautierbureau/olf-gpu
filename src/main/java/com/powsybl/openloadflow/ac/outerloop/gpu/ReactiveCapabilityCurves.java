@@ -14,6 +14,7 @@ import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDistributedSlackParameters;
+import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuTwoSides;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfGenerator;
@@ -36,7 +37,7 @@ import java.util.List;
  * <p>Channel layout (setBatchReactiveCapabilityCurves): reactiveCapabilityCurveIndices stride 5 {reactiveLimitEntry,
          pRow, ptsOff, npts, distributedSlackGeneratorIndex}; reactiveCapabilityCurveParameters stride 5
  * {basePpu, share, baseRowTargetP, baseEvalMinPu, baseEvalMaxPu}; reactiveCapabilityCurvePoints stride 3
- * {p_MW, minQ_MW, maxQ_MW} sorted by p; reactiveCapabilityCurveHvdcStation stride 2 {hvdc, side} (null when no entry is one).
+ * {p_MW, minQ_MW, maxQ_MW} sorted by p; reactiveCapabilityCurveHvdcStation stride 2 {hvdc, side (a GpuTwoSides)} (null when no entry is one).
  *
  * <p>An AC-emulation VSC station is an entry too, whatever the slack distribution: OLF evaluates its curve at the
  * live flow of its link in the linear mode, and at its target P otherwise
@@ -83,8 +84,8 @@ public final class ReactiveCapabilityCurves {
                 .filter(h -> h.getBus1() != null && h.getBus2() != null && h.isAcEmulation())
                 .toList();
         for (int h = 0; h < packedHvdcs.size(); h++) {
-            hvdcSides.put(packedHvdcs.get(h).getConverterStation1(), new int[] {h, 1});
-            hvdcSides.put(packedHvdcs.get(h).getConverterStation2(), new int[] {h, 2});
+            hvdcSides.put(packedHvdcs.get(h).getConverterStation1(), new int[] {h, GpuTwoSides.ONE});
+            hvdcSides.put(packedHvdcs.get(h).getConverterStation2(), new int[] {h, GpuTwoSides.TWO});
         }
         List<Integer> reactiveCapabilityCurveHvdcStation = new ArrayList<>();
         List<int[]> reactiveCapabilityCurveIndices = new ArrayList<>();
@@ -256,7 +257,7 @@ public final class ReactiveCapabilityCurves {
             reactiveCapabilityCurveParameters.add(new double[] {gen.getTargetP(), distributedSlackParameters.factor(gen) / busFactor, baseTargets[pRow],
                 gen.getMinQ(), gen.getMaxQ()});              // base evals AT base targetP (bit-zero delta at base)
             reactiveCapabilityCurveHvdcStation.add(-1);
-            reactiveCapabilityCurveHvdcStation.add(-1);
+            reactiveCapabilityCurveHvdcStation.add(GpuTwoSides.NONE);
             // host-side only: which generator this entry is, and the denominator its share was built on, so a
             // scenario losing a sibling can renormalize it
             reactiveCapabilityCurveGeneratorId.add(gen.getId());

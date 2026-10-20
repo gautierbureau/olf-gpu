@@ -29,6 +29,7 @@
 
 #include "../closed_branch.cuh"
 #include "../open_branch.cuh"
+#include "common/codes/gpu_two_sides.cuh"
 
 using namespace powsybl::openloadflow;
 
@@ -160,9 +161,9 @@ __global__ void screenBranches(int nBranches, int nScenarios, int n, int capacit
     }
 
     for (int g = brGroupStart[b]; g < brGroupEnd[b]; g++) {
-        double p = grpSide[g] == 1 ? p1 : p2;
-        double q = grpSide[g] == 1 ? q1 : q2;
-        double v = grpSide[g] == 1 ? v1 : v2;
+        double p = grpSide[g] == GpuTwoSides::ONE ? p1 : p2;
+        double q = grpSide[g] == GpuTwoSides::ONE ? q1 : q2;
+        double v = grpSide[g] == GpuTwoSides::ONE ? v1 : v2;
         double value;
         switch (grpQty[g]) {
             case QTY_I: value = hypot(p, q) / v; break;

@@ -10,6 +10,7 @@ package com.powsybl.openloadflow.ac.equations.vector.gpu;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.fixedmatrix.CouplerTreeReHoming;
+import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuTwoSides;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.Variable;
 import com.powsybl.openloadflow.network.LfBranch;
@@ -125,8 +126,8 @@ public final class GpuEquationDump {
             if ((zeroImpedanceBranchIndices[o + 10] & 1) != 0) {
                 int childSide = CouplerTreeReHoming.childSide(zeroImpedanceBranchIndices[o + 10]);
                 // stock: crosswise, ZERO_V on the DUMMY_Q row and ZERO_PHI on the DUMMY_P row (native zeroVRowOf)
-                int zv = childSide == 0 ? zeroImpedanceBranchIndices[o + 5] : (childSide == 1 ? zeroImpedanceBranchIndices[o + 6] : zeroImpedanceBranchIndices[o + 7]);
-                int zp = childSide == 0 ? zeroImpedanceBranchIndices[o + 4] : (childSide == 1 ? zeroImpedanceBranchIndices[o + 8] : zeroImpedanceBranchIndices[o + 9]);
+                int zv = childSide == GpuTwoSides.NONE ? zeroImpedanceBranchIndices[o + 5] : (childSide == GpuTwoSides.ONE ? zeroImpedanceBranchIndices[o + 6] : zeroImpedanceBranchIndices[o + 7]);
+                int zp = childSide == GpuTwoSides.NONE ? zeroImpedanceBranchIndices[o + 4] : (childSide == GpuTwoSides.ONE ? zeroImpedanceBranchIndices[o + 8] : zeroImpedanceBranchIndices[o + 9]);
                 add(terms, zv, tag + ".ZERO_V");
                 add(terms, zp, tag + ".ZERO_PHI");
             }

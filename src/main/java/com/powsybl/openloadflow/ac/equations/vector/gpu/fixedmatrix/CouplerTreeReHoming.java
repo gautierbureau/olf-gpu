@@ -7,6 +7,7 @@
  */
 package com.powsybl.openloadflow.ac.equations.vector.gpu.fixedmatrix;
 
+import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuTwoSides;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfNetwork;
@@ -19,7 +20,7 @@ import com.powsybl.openloadflow.network.LfNetwork;
  *
  * <p>The pack's slot layout (written by {@code GpuAcFamilyPacker}): 0-3 the endpoint P / Q rows, {@link #DUMMY_P}
  * / {@link #DUMMY_Q} the coupler's dummy columns, {@link #V1} / {@link #V2} and {@link #PHI1} / {@link #PHI2} the
- * endpoints' own rows, {@link #FLAGS} = bit 0 spanning-tree edge, bits 1-2 the child side (0 none, 1 or 2), bit 3
+ * endpoints' own rows, {@link #FLAGS} = bit 0 spanning-tree edge, bits 1-2 the child side ({@link #encodeChildSide}), bit 3
  * the child side came from the coupler-tree walk.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
@@ -42,7 +43,7 @@ public final class CouplerTreeReHoming {
     public static final int FLAGS = 10;
     /** Flag bit 0: the branch is a zero-impedance spanning-tree edge. */
     public static final int FLAG_SPANNING_TREE_EDGE = 1;
-    /** Flags bits 1-2: the child side, shifted by this. */
+    /** Flags bits 1-2: the child side, shifted by this (see {@link #encodeChildSide}). */
     public static final int CHILD_SIDE_SHIFT = 1;
     /** Flag bit 3: the child side came from the COUPLER-TREE walk (per-scenario stock-placement fallback). */
     public static final int FLAG_TREE_WALK = 8;
@@ -50,23 +51,29 @@ public final class CouplerTreeReHoming {
     private CouplerTreeReHoming() {
     }
 
-    /** The child side encoded in a branch's flags: 0 none, 1 or 2. */
+    /** A {@link GpuTwoSides} child side (NONE, ONE or TWO) as flags bits 1-2: side + 1, so 0 is none. The native
+     *  zeroImpedanceDeadEndSideOf (shared_structure.cuh) decodes it as {@link #childSide} does. */
+    public static int encodeChildSide(int childSide) {
+        return (childSide + 1) << CHILD_SIDE_SHIFT;
+    }
+
+    /** The child side encoded in a branch's flags: a {@link GpuTwoSides}, NONE when there is none. */
     public static int childSide(int flags) {
-        return (flags >> CHILD_SIDE_SHIFT) & 3;
+        return ((flags >> CHILD_SIDE_SHIFT) & 3) - 1;
     }
 
     /** The relocated child's own {@code BUS_V} row of zero-impedance element {@code e}, -1 for none. */
     public static int childOwnVRow(int[] zeroImpedanceBranchIndices, int e) {
         int o = e * STRIDE;
         int childSide = childSide(zeroImpedanceBranchIndices[o + FLAGS]);
-        return childSide == 1 ? zeroImpedanceBranchIndices[o + V1] : (childSide == 2 ? zeroImpedanceBranchIndices[o + V2] : -1);
+        return childSide == GpuTwoSides.ONE ? zeroImpedanceBranchIndices[o + V1] : (childSide == GpuTwoSides.TWO ? zeroImpedanceBranchIndices[o + V2] : -1);
     }
 
     /** The relocated child's own {@code BUS_PHI} row of zero-impedance element {@code e}, -1 for none. */
     public static int childOwnPhiRow(int[] zeroImpedanceBranchIndices, int e) {
         int o = e * STRIDE;
         int childSide = childSide(zeroImpedanceBranchIndices[o + FLAGS]);
-        return childSide == 1 ? zeroImpedanceBranchIndices[o + PHI1] : (childSide == 2 ? zeroImpedanceBranchIndices[o + PHI2] : -1);
+        return childSide == GpuTwoSides.ONE ? zeroImpedanceBranchIndices[o + PHI1] : (childSide == GpuTwoSides.TWO ? zeroImpedanceBranchIndices[o + PHI2] : -1);
     }
 
     /**
@@ -134,11 +141,11 @@ public final class CouplerTreeReHoming {
         for (int e = 0; e < zeroImpedanceBranchIndices.length / STRIDE && e < nums.length; e++) {
             int o = e * STRIDE;
             int childSide = childSide(zeroImpedanceBranchIndices[o + FLAGS]);
-            if (childSide == 0 || zeroImpedanceBranchIndices[o + DUMMY_P] != pRow || nums[e] < 0) {
+            if (childSide == GpuTwoSides.NONE || zeroImpedanceBranchIndices[o + DUMMY_P] != pRow || nums[e] < 0) {
                 continue;
             }
             LfBranch br = network.getBranch(nums[e]);
-            return childSide == 1 ? br.getBus1() : br.getBus2();
+            return childSide == GpuTwoSides.ONE ? br.getBus1() : br.getBus2();
         }
         return null;
     }

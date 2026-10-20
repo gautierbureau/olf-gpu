@@ -7,7 +7,6 @@
  */
 package com.powsybl.openloadflow.ac.outerloop.gpu;
 
-import com.powsybl.iidm.network.TwoSides;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcElementMapper;
@@ -80,7 +79,7 @@ public final class GpuIncrementalPhaseControlOuterLoop {
             double halfTargetDeadband = Math.max(phaseControl.getTargetDeadband(), MIN_TARGET_DEADBAND_P) / 2;
             out.add(new DeviceFlowControllers.Controller(kind, pinRow, GpuPiModelColumn.A1, phaseControl.getTargetValue(), halfTargetDeadband,
                     tapRows, DeviceFlowControllers.closestTap(tapRows, GpuPiModelColumn.A1, controller.getPiModel().getA1()),
-                    elemIndex, controlledElementIndex, Integer.MAX_VALUE, phaseControl.getControlledSide() == TwoSides.ONE ? 1 : 2, controller.getNum()));
+                    elemIndex, controlledElementIndex, Integer.MAX_VALUE, phaseControl.getControlledSide().ordinal(), controller.getNum()));
         }
         return out;
     }

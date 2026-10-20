@@ -10,6 +10,7 @@ package com.powsybl.openloadflow.sa.gpu;
 import com.powsybl.iidm.network.Network;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.LoadLoss;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.ShuntShift;
+import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuTwoSides;
 import com.powsybl.openloadflow.network.DisabledBranchStatus;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
@@ -256,7 +257,7 @@ final class GpuContingencyMapper {
                 return null;                                 // zero-impedance one-side: spanning-tree re-pick — CPU
             }
             out.add(new com.powsybl.openloadflow.ac.solver.gpu.batch.plan.BatchContingency.SideOpen(branch,
-                    e.getValue() == DisabledBranchStatus.SIDE_1 ? 1 : 2));
+                    e.getValue() == DisabledBranchStatus.SIDE_1 ? GpuTwoSides.ONE : GpuTwoSides.TWO));
         }
         // BUS/BUSBAR LOSS: OLF's findBranchToOpenDirectlyImpactedByContingency opens every branch
         // INCIDENT to a lost bus on the LOST side (SIDE_1 when bus1 is the lost bus) — replicate.
@@ -283,7 +284,7 @@ final class GpuContingencyMapper {
                     return null;                             // fully dead branch between lost buses — CPU (rare)
                 }
                 out.add(new com.powsybl.openloadflow.ac.solver.gpu.batch.plan.BatchContingency.SideOpen(branch,
-                        branch.getBus1() == bus ? 1 : 2));
+                        branch.getBus1() == bus ? GpuTwoSides.ONE : GpuTwoSides.TWO));
             }
         }
         // Does the side-open set actually COVER the disconnection? Freezing a lost bus's rows makes

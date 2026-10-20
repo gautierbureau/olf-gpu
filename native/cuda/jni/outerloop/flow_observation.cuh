@@ -12,6 +12,7 @@
 #include "closed_branch_scatter.h"
 #include "../common/codes/gpu_controlled_flow.cuh"
 #include "../common/codes/gpu_pi_model_column.cuh"
+#include "../common/codes/gpu_two_sides.cuh"
 
 namespace olfgpu {
 
@@ -20,7 +21,7 @@ using namespace powsybl::openloadflow;
 // The controlled branch's flow and its gradient at the current state: P/Q through the codegen'd
 // evalClosedBranch (the very functions the fill scatters), I through OLF's own reI/imI decomposition
 // (ClosedBranchSide{1,2}CurrentMagnitudeEquationTerm, incl. its one-sided rule at I = 0 and its
-// dr1-less sensitivity). g[0..5] = d/d(v1, v2, ph1, ph2, a1, r1).
+// dr1-less sensitivity). side is a GpuTwoSides. g[0..5] = d/d(v1, v2, ph1, ph2, a1, r1).
 __device__ inline double controlledFlowAndGradient(int side, int kind, const double* p, const double* xs, const int* q, double* g) {
     double v1 = xs[q[5]], v2 = xs[q[7]], ph1 = xs[q[4]], ph2 = xs[q[6]];
     double r1 = q[9] >= 0 ? xs[q[9]] : p[GpuPiModelColumn::R1];
@@ -33,12 +34,12 @@ __device__ inline double controlledFlowAndGradient(int side, int kind, const dou
                          o + 0, o + 1, o + 2, o + 3, o + 4, o + 5, o + 6, o + 7, o + 8, o + 9,
                          o + 10, o + 11, o + 12, o + 13, o + 14, o + 15, o + 16, o + 17, o + 18,
                          o + 19, o + 20, o + 21, o + 22, o + 23, o + 24, o + 25, o + 26, o + 27);
-        int blk = (kind == GpuControlledFlow::REACTIVE_POWER ? 7 : 0) + (side == 1 ? 0 : 14);  // p1 0, q1 7, p2 14, q2 21: [val dv1 dv2 dph1 dph2 da1 dr1]
+        int blk = (kind == GpuControlledFlow::REACTIVE_POWER ? 7 : 0) + (side == GpuTwoSides::ONE ? 0 : 14);  // p1 0, q1 7, p2 14, q2 21: [val dv1 dv2 dph1 dph2 da1 dr1]
         for (int k = 0; k < 6; k++) g[k] = o[blk + 1 + k];
         return o[blk];
     }
     const double R2 = 1.0;
-    if (side == 1) {
+    if (side == GpuTwoSides::ONE) {
         double theta = ksi - a1 + ph2;                       // OLF: ksi - a1 + A2 + ph2, A2 = 0
         double ire = g1 * cos(ph1) - b1 * sin(ph1) + y * sin(ph1 + ksi);
         double iim = g1 * sin(ph1) + b1 * cos(ph1) - y * cos(ph1 + ksi);

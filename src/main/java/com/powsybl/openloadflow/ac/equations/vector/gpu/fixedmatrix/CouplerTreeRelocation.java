@@ -9,6 +9,7 @@ package com.powsybl.openloadflow.ac.equations.vector.gpu.fixedmatrix;
 
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
+import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuTwoSides;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
@@ -238,8 +239,8 @@ public final class CouplerTreeRelocation {
     /**
      * Which side of a zero-impedance branch is a DEAD-END STUB that is SAFE to relocate: a bus whose
      * only branch is this one, with no shunt, no generator and no voltage-dependent load, and with a
-     * plain P/Q balance of its own. 1 = side 1, 2 = side 2, 0 = neither (or both, which would be a
-     * two-bus island and is left alone).
+     * plain P/Q balance of its own. A {@link GpuTwoSides}: ONE, TWO, or NONE for neither (or both, which would be
+     * a two-bus island and is left alone).
      *
      * <p>Why relocate at all: a zero-impedance branch puts ZERO_V (v1−rho·v2) on the DUMMY_P row and
      * ZERO_PHI (ph1−ph2) on the DUMMY_Q row, and neither depends on its own dummy — two structurally
@@ -264,14 +265,14 @@ public final class CouplerTreeRelocation {
     public static int zeroImpedanceDeadEndSide(EquationSystem<AcVariableType, AcEquationType> es, LfBranch br,
                              int[] phiCol, int[] vCol, int[] qRow) {
         if (!br.isSpanningTreeEdge(LoadFlowModel.AC)) {
-            return 0;                                        // no ZERO_V/ZERO_PHI to relocate
+            return GpuTwoSides.NONE;                         // no ZERO_V/ZERO_PHI to relocate
         }
         boolean s1 = isZeroImpedanceDeadEnd(es, br.getBus1(), br, phiCol, vCol, qRow);
         boolean s2 = isZeroImpedanceDeadEnd(es, br.getBus2(), br, phiCol, vCol, qRow);
         if (s1 == s2) {
-            return 0;                                        // neither, or a two-bus island
+            return GpuTwoSides.NONE;                         // neither, or a two-bus island
         }
-        return s1 ? 1 : 2;
+        return s1 ? GpuTwoSides.ONE : GpuTwoSides.TWO;
     }
 
     private static boolean isZeroImpedanceDeadEnd(EquationSystem<AcVariableType, AcEquationType> es, LfBus bus,
@@ -314,10 +315,11 @@ public final class CouplerTreeRelocation {
                                           int[] phiCol, int[] vCol, int[] dummyPCol, int[] dummyQCol,
                                           int[] qRow, int[] alternateQRow, int[][] spanningTreeEdges) {
         int nBranches = network.getBranches().size();
-        // Per zero-impedance branch, which side is a DEAD-END STUB safe to relocate (0 = none):
+        // Per zero-impedance branch, which side is a DEAD-END STUB safe to relocate (a GpuTwoSides, NONE = none):
         // CouplerTreeRelocation#zeroImpedanceDeadEndSide. GpuAcActivationExtractor derives the same answer from the
         // same helper, so the scatter destinations and the target map name the same rows.
         int[] zeroImpedanceDeadEndSides = new int[nBranches];
+        java.util.Arrays.fill(zeroImpedanceDeadEndSides, GpuTwoSides.NONE);
         for (LfBranch br : network.getBranches()) {
             if (br.isZeroImpedance(LoadFlowModel.AC)) {
                 zeroImpedanceDeadEndSides[br.getNum()] = CouplerTreeRelocation.zeroImpedanceDeadEndSide(es, br, phiCol, vCol, qRow);
@@ -360,7 +362,7 @@ public final class CouplerTreeRelocation {
 
     /**
      * The rows {@link #applyToRows} computes: each bus's P-balance row ({@code pRow}) and each zero-impedance
-     * branch's dead-end side ({@code zeroImpedanceDeadEndSides}, 0 = none).
+     * branch's dead-end side ({@code zeroImpedanceDeadEndSides}, a GpuTwoSides, NONE = none).
      */
     public record AppliedRows(int[] pRow, int[] zeroImpedanceDeadEndSides) {
     }

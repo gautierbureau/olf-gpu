@@ -21,6 +21,7 @@
 #include "../common/codes/gpu_distributed_slack_factor_mode.cuh"
 #include "../common/codes/gpu_reactive_limits_entry_flag.cuh"
 #include "../common/codes/gpu_linear_solve_mode.cuh"
+#include "../common/codes/gpu_two_sides.cuh"
 #include "batch_context.cuh"
 #include "driver_steps.cuh"
 #include "linear_solver_settings.cuh"
@@ -199,9 +200,9 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& structure, int 
             std::map<int, int> qRowOfVRow;
             for (int e = 0; e < ctx->nZeroImpedanceBranch; e++) {
                 const int* z = zidx.data() + static_cast<size_t>(e) * 11;
-                int childSide = (z[10] >> 1) & 3;
-                int ownVCol = childSide == 1 ? z[6] : (childSide == 2 ? z[7] : -1);
-                if (childSide == 0 || z[5] < 0 || ownVCol < 0) {
+                int childSide = zeroImpedanceDeadEndSideOf(z);
+                int ownVCol = childSide == GpuTwoSides::ONE ? z[6] : (childSide == GpuTwoSides::TWO ? z[7] : -1);
+                if (childSide == GpuTwoSides::NONE || z[5] < 0 || ownVCol < 0) {
                     continue;
                 }
                 qRowOfVRow[rowMap[ownVCol]] = rowMap[z[5]];

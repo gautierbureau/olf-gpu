@@ -7,6 +7,7 @@
  */
 package com.powsybl.openloadflow.ac.solver.gpu.batch.plan;
 
+import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuTwoSides;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfGenerator;
 import com.powsybl.openloadflow.network.LfHvdc;
@@ -171,12 +172,12 @@ public record BatchContingency(String contingencyId, List<LfBranch> outagedBranc
 
     /** A branch opened on ONE side by the contingency (node-breaker propagation): the closed-branch
      *  element is masked and the pre-packed side-open OB view enabled — {@code side} is the OPEN
-     *  side (1 or 2), i.e. the remaining flow terms sit at the OTHER bus. */
+     *  side (a GpuTwoSides), i.e. the remaining flow terms sit at the OTHER bus. */
     public record SideOpen(LfBranch branch, int side) {
         public SideOpen {
             Objects.requireNonNull(branch);
-            if (side != 1 && side != 2) {
-                throw new IllegalArgumentException("side must be 1 or 2");
+            if (side != GpuTwoSides.ONE && side != GpuTwoSides.TWO) {
+                throw new IllegalArgumentException("side must be GpuTwoSides.ONE or GpuTwoSides.TWO");
             }
         }
     }

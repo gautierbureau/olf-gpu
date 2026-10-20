@@ -54,7 +54,7 @@ public final class DevicePhases {
                           boolean incrementalTransformerVoltageControllers,
                           boolean incrementalShunt,
                           boolean simpleShunt,
-                          boolean rpc, boolean incrementalPhase, int incrementalTransformerReactivePowerControlMaxTapShift,
+                          boolean reactivePowerControl, boolean incrementalPhase, int incrementalTransformerReactivePowerControlMaxTapShift,
                           boolean continuousPhase,
                           boolean discreteTransformerVoltageControl, boolean transformerVoltageControlUseInitialTapPosition, double genVcMinNominalV,
                           boolean secondaryVoltageControlControllers, double minPlausibleTargetV, double maxPlausibleTargetV) {
@@ -111,7 +111,7 @@ public final class DevicePhases {
                 request.simpleShunt()
                         ? GpuShuntVoltageControlOuterLoop.buildGroups(network, es, targetVector, activation, targets, mapper, shuntOffset)
                         : null,
-                request.rpc() || request.incrementalPhase() ? flowControllers(request, network, es, mapper) : null,
+                request.reactivePowerControl() || request.incrementalPhase() ? flowControllers(request, network, es, mapper) : null,
                 request.continuousPhase()
                         ? GpuPhaseControlOuterLoop.buildControllers(network, es, targetVector, activation, targets, mapper)
                         : null,
@@ -133,7 +133,7 @@ public final class DevicePhases {
                                                                           EquationSystem<AcVariableType, AcEquationType> es,
                                                                           GpuAcElementMapper mapper) {
         List<DeviceFlowControllers.Controller> flow = new ArrayList<>();
-        if (request.rpc()) {
+        if (request.reactivePowerControl()) {
             flow.addAll(GpuIncrementalTransformerReactivePowerControlOuterLoop.buildControllers(network, es, mapper,
                     request.incrementalTransformerReactivePowerControlMaxTapShift()));
         }

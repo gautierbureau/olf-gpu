@@ -31,7 +31,7 @@ struct DriverPass {
     int maxPqPvSwitch = 0;
     int reactiveLimitsDecisionLogScenario = -1;
     int skipReactiveLimitsPhase = 0;
-    bool svcCoefDyn = false;
+    bool hasPerScenarioSvcSusceptanceLimits = false;
     int nReactiveLimitDeltaOverrides = 0;
     int nReactiveCapabilityCurveOverrides = 0;
     DeviceBuf dReactiveLimitDeltaOverrideScenarioEntry, dReactiveLimitDeltaOverrideValues, dReactiveLimitDeltaOverrideStart, dReactiveLimitDeltaOverrideList;

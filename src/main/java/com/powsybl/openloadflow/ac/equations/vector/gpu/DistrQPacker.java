@@ -43,7 +43,7 @@ public final class DistrQPacker {
      *  kernel recomputes them per scenario from the RAW keys (Control.createReactiveKeys) and the
      *  per-(entry, scenario) limitType, replicating the CPU's zero-then-sum-in-member-order
      *  arithmetic bit-for-bit. distrQRowMember/distrQInjectionMember are −1 for non-group contributions. */
-    private record MemberTables(java.util.Map<Integer, Integer> memberIdxByBusNum,
+    private record MemberTables(java.util.Map<Integer, Integer> memberIndexByBusNum,
                                 List<Double> key, List<Integer> reactiveLimitEntry,
                                 List<Integer> groupStart, List<Integer> groupCount,
                                 List<Integer> row, List<Byte> hasRow, List<Double> targetQ,
@@ -51,7 +51,7 @@ public final class DistrQPacker {
                                 /** Per member, the members whose targetQ OLF sums into its DISTR_Q target: the
                                  *  elements of the member's OWN voltage control, which for a control MERGED into
                                  *  another (DEPENDENT) is just its own — see the peer CSR in {@link DistrQPack}. */
-                                List<List<Integer>> tgtPeers) {
+                                List<List<Integer>> targetPeers) {
     }
 
     static Pack distrQPack(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
@@ -94,7 +94,7 @@ public final class DistrQPacker {
             int pilotRelocationGroup = columns.reactiveRelocationGroupOfPilot()[pilot.getNum()];
             for (int i = 0; i < controllers.size(); i++) {
                 LfBus m = controllers.get(i);
-                memberTables.memberIdxByBusNum().put(m.getNum(), memberTables.key().size());
+                memberTables.memberIndexByBusNum().put(m.getNum(), memberTables.key().size());
                 memberTables.key().add(rawKeys[i]);
                 memberTables.reactiveLimitEntry().add(reactiveLimitEntryByBusNum.getOrDefault(m.getNum(), -1));
                 // The member's DISTR_Q row, NOT simply its V column: under the coupler-tree relocation a
@@ -119,7 +119,7 @@ public final class DistrQPacker {
                 // AcTargetVector reads the member's OWN control's merged elements, so a control merged INTO this
                 // group (DEPENDENT: its own list is just its controller) sums only its own targetQ. Recorded as bus
                 // numbers here and resolved to member indices once every member is known.
-                memberTables.tgtPeers().add(m.getGeneratorVoltageControl()
+                memberTables.targetPeers().add(m.getGeneratorVoltageControl()
                         .map(c -> c.getMergedControllerElements().stream().map(LfBus::getNum).toList())
                         .orElse(List.of(m.getNum())));
                 relocationGroupList.add(pilotRelocationGroup);
@@ -132,7 +132,7 @@ public final class DistrQPacker {
         List<int[]> distrQContributions = new ArrayList<>();      // {elem, side, distrQRow, kind, kMember, jMember} per DISTR_Q contribution
         List<Double> distrQWeights = new ArrayList<>();    // weight per contribution
         buildDistrQContributions(network, es, columns.vCol(), family.closedBranchElementOf(), family.shuntElementOf(),
-                family.openBranchElementOf(), columns.dummyQCol(), columns.spanningTreeParentBranch(), distrQContributions, distrQWeights, memberTables.memberIdxByBusNum());
+                family.openBranchElementOf(), columns.dummyQCol(), columns.spanningTreeParentBranch(), distrQContributions, distrQWeights, memberTables.memberIndexByBusNum());
         // distrQKind: a GpuReactiveTermKind (for DUMMY_Q, elem holds the var column)
         int[] distrQKind = new int[distrQContributions.size()];
         int[] distrQRowMember = new int[distrQContributions.size()];
@@ -154,12 +154,12 @@ public final class DistrQPacker {
         for (int i = 0; i < hasRow.length; i++) {
             hasRow[i] = memberTables.hasRow().get(i);
         }
-        int[] tgtPtr = new int[memberTables.tgtPeers().size() + 1];
+        int[] tgtPtr = new int[memberTables.targetPeers().size() + 1];
         List<Integer> tgtPeer = new ArrayList<>();
-        for (int i = 0; i < memberTables.tgtPeers().size(); i++) {
+        for (int i = 0; i < memberTables.targetPeers().size(); i++) {
             tgtPtr[i] = tgtPeer.size();
-            for (int busNum : memberTables.tgtPeers().get(i)) {
-                Integer peer = memberTables.memberIdxByBusNum().get(busNum);
+            for (int busNum : memberTables.targetPeers().get(i)) {
+                Integer peer = memberTables.memberIndexByBusNum().get(busNum);
                 if (peer != null) {                          // a peer outside the packed group cannot be summed
                     tgtPeer.add(peer);
                 }
@@ -188,7 +188,7 @@ public final class DistrQPacker {
     private static void buildDistrQContributions(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
                                                  int[] vCol, int[] closedBranchElementOf, int[] shuntElementOf, int[] openBranchElementOf,
                                                  int[] dummyQCol, int[] spanningTreeParentBranch, List<int[]> out, List<Double> weights,
-                                                 java.util.Map<Integer, Integer> memberIdxByBusNum) {
+                                                 java.util.Map<Integer, Integer> memberIndexByBusNum) {
         for (LfBus pilot : network.getBuses()) {
             GeneratorVoltageControl voltageControl = pilot.getGeneratorVoltageControl()
                     .filter(c -> c.getMergeStatus() == VoltageControl.MergeStatus.MAIN)
@@ -214,13 +214,13 @@ public final class DistrQPacker {
                 }                                            // controller's DISTR_Q is disabled with its bus
                 int distrQRow = GpuAcRowIndexing.distrQRow(es, gk, spanningTreeParentBranch, dummyQCol);
                 double qpk = gk.getRemoteControlReactivePercent();
-                int kIdx = memberIdxByBusNum.getOrDefault(gk.getNum(), -1);
+                int kIdx = memberIndexByBusNum.getOrDefault(gk.getNum(), -1);
                 for (LfBus gj : controllers) {
                     if (gj.isDisabled()) {
                         continue;                            // its reactive terms are disabled with its branches
                     }
                     double weight = qpk - (gj == gk ? 1.0 : 0.0);
-                    int jIdx = memberIdxByBusNum.getOrDefault(gj.getNum(), -1);
+                    int jIdx = memberIndexByBusNum.getOrDefault(gj.getNum(), -1);
                     if (gj.getControllerShunt().isPresent()) {
                         throw new PowsyblException("GPU AC solver: DISTR_Q controller " + gj.getId()
                                 + " has a voltage-controlling shunt (SHUNT_B) reactive contribution (not supported)");

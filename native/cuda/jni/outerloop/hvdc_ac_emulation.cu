@@ -135,7 +135,7 @@ void hvdcStep(BatchSolverContext* ctx, DriverPass& drv, int loopKind) {
             loopKind == GpuOuterLoopKind::FREEZING_HVDC_AC_EMULATION ? 0 : 1,
             ctx->dHvdcElement.as<int>(), ctx->dHvdcBus1PRow.as<int>(), ctx->dHvdcBus2PRow.as<int>(),
             ctx->dHvdcBus1PhiColumn.as<int>(), ctx->dHvdcBus2PhiColumn.as<int>(),
-            ctx->dMode.as<int>(), ctx->st->dRelocatedChildOwnRow.p != nullptr ? ctx->st->dRelocatedChildOwnRow.as<int>() : nullptr,
+            ctx->dMode.as<int>(), ctx->structure->dRelocatedChildOwnRow.p != nullptr ? ctx->structure->dRelocatedChildOwnRow.as<int>() : nullptr,
             ctx->dHvdcAcEmulationParameters.as<double>(), ctx->dHvdcContingencyOutage.as<char>(),
             ctx->dX.as<double>(), ctx->dTarget.as<double>(), ctx->dDisabled.as<char>(),
             ctx->dHvdcAcEmulationStatus.as<int>(), ctx->dHvdcAppliedDelta1.as<double>(), ctx->dHvdcAppliedDelta2.as<double>(),

@@ -25,16 +25,16 @@ namespace olfgpu {
 
 __device__ inline double hvdcStationReactiveLimitsActivePower(const CurveHvdcAcEmulationView& c, int s, int n, int h, int side) {
     size_t scenarioHvdc = (size_t) s * c.nHvdcAcEmulation + h;
-    const double* p = c.in + (size_t) h * 9;
-    bool off = c.ctgOut[scenarioHvdc] || c.disabled[(size_t) s * c.nElements + c.elem[h]];
+    const double* p = c.hvdcAcEmulationParameters + (size_t) h * 9;
+    bool off = c.contingencyOutage[scenarioHvdc] || c.disabled[(size_t) s * c.nElements + c.hvdcElement[h]];
     if (c.status[scenarioHvdc] == GpuAcEmulationStatus::LINEAR_MODE && !off) {
         const double* xs = c.x + (size_t) s * n;
-        double ph1 = xs[c.phi1[h]];
-        double ph2 = xs[c.phi2[h]];
+        double ph1 = xs[c.bus1PhiColumn[h]];
+        double ph2 = xs[c.bus2PhiColumn[h]];
         return side == 1 ? -hvdc::p1(p[0], p[1], p[4], p[5], p[6], ph1, ph2)
                          : -hvdc::p2(p[0], p[1], p[4], p[5], p[6], ph1, ph2);
     }
-    return side == 1 ? c.d1[scenarioHvdc] + p[7] : c.d2[scenarioHvdc] + p[8];
+    return side == 1 ? c.appliedDelta1[scenarioHvdc] + p[7] : c.appliedDelta2[scenarioHvdc] + p[8];
 }
 
 // Evaluate the per-scenario DYNAMIC reactive limits (OLF: bus.getMinQ()/getMaxQ() re-read each RL
@@ -121,9 +121,9 @@ __global__ void reactiveCapabilityCurveLimitsBatch(int nReactiveLimitEntries, in
         // generator's OWN entry never reaches here (shareScale < 0 continues above). An AC-emulation
         // VSC is not in the slack distribution: its P is its link's (CurveHvdcAcEmulationView).
         double pNow;
-        int hvdcIndex = reactiveCapabilityCurveHvdcStation.hv != nullptr ? reactiveCapabilityCurveHvdcStation.hv[2 * g] : -1;
+        int hvdcIndex = reactiveCapabilityCurveHvdcStation.hvdcStation != nullptr ? reactiveCapabilityCurveHvdcStation.hvdcStation[2 * g] : -1;
         if (hvdcIndex >= 0 && reactiveCapabilityCurveHvdcStation.nHvdcAcEmulation > 0) {
-            pNow = hvdcStationReactiveLimitsActivePower(reactiveCapabilityCurveHvdcStation, s, n, hvdcIndex, reactiveCapabilityCurveHvdcStation.hv[2 * g + 1]);
+            pNow = hvdcStationReactiveLimitsActivePower(reactiveCapabilityCurveHvdcStation, s, n, hvdcIndex, reactiveCapabilityCurveHvdcStation.hvdcStation[2 * g + 1]);
         } else if (distributedSlackGenerator >= 0 && (distributedSlackGeneratorAnchor != nullptr || distributedSlackGeneratorInitialMove != nullptr
                                  || distributedSlackGeneratorMove != nullptr && distributedSlackGeneratorMoveValid != nullptr && distributedSlackGeneratorMoveValid[s])) {
             // the generator's own P: its anchor, plus this solve's water-fill or, before any pass, where the
@@ -163,19 +163,19 @@ CurveHvdcAcEmulationView curveHvdcAcEmulationView(BatchSolverContext* ctx) {
     if (!ctx->reactiveCapabilityCurveHasHvdc) {
         return c;
     }
-    c.hv = ctx->dReactiveCapabilityCurveHvdcStation.as<int>();
+    c.hvdcStation = ctx->dReactiveCapabilityCurveHvdcStation.as<int>();
     c.nHvdcAcEmulation = ctx->nHvdcAcEmulation;
     if (ctx->nHvdcAcEmulation > 0) {
         c.status = ctx->dHvdcAcEmulationStatus.as<int>();
-        c.d1 = ctx->dHvdcAppliedDelta1.as<double>();
-        c.d2 = ctx->dHvdcAppliedDelta2.as<double>();
-        c.in = ctx->dHvdcAcEmulationParameters.as<double>();
-        c.phi1 = ctx->dHvdcBus1PhiColumn.as<int>();
-        c.phi2 = ctx->dHvdcBus2PhiColumn.as<int>();
-        c.elem = ctx->dHvdcElement.as<int>();
+        c.appliedDelta1 = ctx->dHvdcAppliedDelta1.as<double>();
+        c.appliedDelta2 = ctx->dHvdcAppliedDelta2.as<double>();
+        c.hvdcAcEmulationParameters = ctx->dHvdcAcEmulationParameters.as<double>();
+        c.bus1PhiColumn = ctx->dHvdcBus1PhiColumn.as<int>();
+        c.bus2PhiColumn = ctx->dHvdcBus2PhiColumn.as<int>();
+        c.hvdcElement = ctx->dHvdcElement.as<int>();
         c.disabled = ctx->dDisabled.as<char>();
         c.nElements = ctx->nElements;
-        c.ctgOut = ctx->dHvdcContingencyOutage.as<char>();
+        c.contingencyOutage = ctx->dHvdcContingencyOutage.as<char>();
         c.x = ctx->dX.as<double>();
     }
     return c;

@@ -246,7 +246,7 @@ void incrementalShuntVoltageControlStep(BatchSolverContext* ctx, DriverPass& drv
     bool first = true;
     for (int c = 0; c < nIncrementalShuntVoltageControlControllerShunts; c++) {
         if (!needC[c]) continue;
-        int row = ctx->st->rowMap[ctx->hIncrementalShuntVoltageControlShuntBRow[c]];
+        int row = ctx->structure->rowMap[ctx->hIncrementalShuntVoltageControlShuntBRow[c]];
         if (row < 0) continue;
         setUnitRhsBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, row, ctx->dB.as<double>());
         repairZeroDiagonalRightHandSide(ctx, nS, ctx->dB.as<double>());

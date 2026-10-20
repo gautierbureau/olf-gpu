@@ -117,7 +117,7 @@ public final class GpuAcActivationExtractor {
             if (q >= 0) {
                 // Q row = V row, the controlling rho row, or the DUMMY_Q row on a dead-end stub
                 int targetQRow = stubBr >= 0 ? dummyQCol[stubBr] : qRow[bus.getNum()];
-                GeneratorVoltageControl mainVc = GpuAcRowIndexing.mainGenVc(bus);
+                GeneratorVoltageControl mainVc = GpuAcRowIndexing.mainGeneratorVoltageControl(bus);
                 if (stubBr < 0 && mainVc != null && GpuAcRowIndexing.hasCandidateTable(mainVc, es)) {
                     // A group with a candidate table is extracted CANONICALLY (pin-state independent: every
                     // controller's frozen q row suppressed, the pilot's on the FIRST member), but this target map
@@ -133,7 +133,7 @@ public final class GpuAcActivationExtractor {
                 // row mode 4, so the family fills route the member's own q here (the frozen dest is
                 // canonically SUPPRESSED) and the DISTR_Q emissions at this row gate off (plan-B2).
                 // The SAME predicate computeQRow used to hand this bus its own Q row. It used
-                // isRemoteGenVcControllerElement, which INCLUDES a controller that is also the
+                // isRemoteGeneratorVoltageControlControllerElement, which INCLUDES a controller that is also the
                 // group's controlled bus (its javadoc says so); this used isRemoteGenVcMember,
                 // which is controlledBus != bus and therefore EXCLUDES the pilot. For a PINNED
                 // pilot-that-is-also-a-controller the two disagreed: computeQRow gave it its own Q
@@ -166,15 +166,15 @@ public final class GpuAcActivationExtractor {
                                         && c.getMergedControllerElements().stream().allMatch(m -> vCol[m.getNum()] >= 0))
                                 .orElse(false);
                 // `enrolled` requires pilotSelf, so for a MEMBER mode4 reduces to
-                // !isFreeRemoteGenVcMember, and "free" is the FIRST ENABLED member — a group whose members
+                // !isFreeRemoteGeneratorVoltageControlMember, and "free" is the FIRST ENABLED member — a group whose members
                 // are all pinned has no free member and every member's row is stamped mode 4 into
                 // baseRowMode, which every scenario without an explicit per-scenario mode inherits. That is
                 // CORRECT for a genuine Q-limit pin (the 20 base-pinned fixtures rely on it). What used to
                 // reach here wrongly was a TRANSIENT MIN_REALISTIC_V freeze the device should never have
                 // made: see RemoteMemberQPacker.isOlfRobustRemoteController (tasks #66), fixed at the SOURCE
                 // by exempting a merged member from robust mode as OLF's own predicate does, not here.
-                boolean mode4 = GpuAcRowIndexing.isRemoteGenVcControllerElement(bus)
-                        && (pilotSelf || !GpuAcRowIndexing.isFreeRemoteGenVcMember(bus)) && !enrolled;
+                boolean mode4 = GpuAcRowIndexing.isRemoteGeneratorVoltageControlControllerElement(bus)
+                        && (pilotSelf || !GpuAcRowIndexing.isFreeRemoteGeneratorVoltageControlMember(bus)) && !enrolled;
                 if (mode4) {
                     mode[targetQRow] = GpuRowMode.BUS_TARGET_Q;
                 }
@@ -449,8 +449,8 @@ public final class GpuAcActivationExtractor {
             boolean pilotSelf = bus.getGeneratorVoltageControl()
                     .filter(c -> c.getMergeStatus() == VoltageControl.MergeStatus.MAIN)
                     .map(c -> c.getControlledBus() == bus).orElse(false);
-            if (GpuAcRowIndexing.isRemoteGenVcControllerElement(bus)
-                    && (pilotSelf || !GpuAcRowIndexing.isFreeRemoteGenVcMember(bus))) {
+            if (GpuAcRowIndexing.isRemoteGeneratorVoltageControlControllerElement(bus)
+                    && (pilotSelf || !GpuAcRowIndexing.isFreeRemoteGeneratorVoltageControlMember(bus))) {
                 pinned.set(bus.getNum());
             }
         }

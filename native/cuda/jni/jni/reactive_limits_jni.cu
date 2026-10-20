@@ -388,16 +388,16 @@ OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchReactiveLimitRemoteEntri
         ctx->hasDistrQRelocationGroups = 0;
         if (jDistrQMemberRelocationGroup != nullptr && env->GetArrayLength(jDistrQMemberRelocationGroup) == nDistrQMembers) {
             jint* distrQMemberRelocationGroup = env->GetIntArrayElements(jDistrQMemberRelocationGroup, nullptr);
-            std::vector<char> isGeneratorVoltageControl(ctx->st->nReactiveRelocationGroups > 0 ? ctx->st->nReactiveRelocationGroups : 1, 0);
+            std::vector<char> isGeneratorVoltageControl(ctx->structure->nReactiveRelocationGroups > 0 ? ctx->structure->nReactiveRelocationGroups : 1, 0);
             for (int i = 0; i < nDistrQMembers; i++) {
                 if (distrQMemberRelocationGroup[i] >= 0) {
                     ctx->hasDistrQRelocationGroups = 1;                  // plan-B4: relocation-linked group present
                     isGeneratorVoltageControl[distrQMemberRelocationGroup[i]] = 1;   // this relocation group is a remote generator voltage control
                 }
             }
-            for (int g = 0; g < ctx->st->nReactiveRelocationGroups; g++) {         // a DEPENDENT pilot's group is as generator-controlled
-                if (g < static_cast<int>(ctx->st->hReactiveRelocationDependentBaseGroup.size()) && ctx->st->hReactiveRelocationDependentBaseGroup[g] >= 0) {   // as its base
-                    isGeneratorVoltageControl[g] = isGeneratorVoltageControl[ctx->st->hReactiveRelocationDependentBaseGroup[g]];
+            for (int g = 0; g < ctx->structure->nReactiveRelocationGroups; g++) {         // a DEPENDENT pilot's group is as generator-controlled
+                if (g < static_cast<int>(ctx->structure->hReactiveRelocationDependentBaseGroup.size()) && ctx->structure->hReactiveRelocationDependentBaseGroup[g] >= 0) {   // as its base
+                    isGeneratorVoltageControl[g] = isGeneratorVoltageControl[ctx->structure->hReactiveRelocationDependentBaseGroup[g]];
                 }
             }
             ctx->dDistrQMemberRelocationGroup.upload(distrQMemberRelocationGroup, static_cast<size_t>(nDistrQMembers) * sizeof(int));
@@ -435,17 +435,17 @@ OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, readBatchReactiveLimitTargetQ)(
         return nullptr;
     }
     int nS = ctx->nScenarios;
-    int n = ctx->st->n;
+    int n = ctx->structure->n;
     DeviceBuf out;
     out.alloc(static_cast<size_t>(ctx->nReactiveLimitEntries) * nS * sizeof(double));
     exportReactiveLimitTargetQ<<<grid(ctx->nReactiveLimitEntries * nS), BLOCK, 0, ctx->stream>>>(ctx->nReactiveLimitEntries, nS, n, ctx->dReactiveLimitVoltageRow.as<int>(),
             ctx->dReactiveLimitReactivePowerRow.p ? ctx->dReactiveLimitReactivePowerRow.as<int>() : nullptr, ctx->dReactiveLimitQLimitType.as<char>(), ctx->dMode.as<int>(),
             ctx->dTarget.as<double>(), ctx->nReactiveLimitIslanded > 0 ? ctx->dReactiveLimitIslanded.as<char>() : nullptr,
-            ctx->hasDistrQRelocationGroups ? ctx->st->nReactiveRelocationGroups : 0, pilotSelfReactiveLimitEntryOrNull(ctx),
-            ctx->hasDistrQRelocationGroups && ctx->st->nReactiveRelocationGroups > 0 ? ctx->st->dReactiveRelocationGroupStart.as<int>() : nullptr,
-            ctx->hasDistrQRelocationGroups && ctx->st->nReactiveRelocationGroups > 0 ? ctx->st->dReactiveRelocationCandidateRows.as<int>() : nullptr,
-            ctx->hasDistrQRelocationGroups && ctx->st->nReactiveRelocationGroups > 0 ? ctx->dReactiveRelocationPilotTargetVDeactivated.as<char>() : nullptr,
-            ctx->st->dReactiveRelocationDependentBaseGroup.p ? ctx->st->dReactiveRelocationDependentBaseGroup.as<int>() : nullptr, out.as<double>());
+            ctx->hasDistrQRelocationGroups ? ctx->structure->nReactiveRelocationGroups : 0, pilotSelfReactiveLimitEntryOrNull(ctx),
+            ctx->hasDistrQRelocationGroups && ctx->structure->nReactiveRelocationGroups > 0 ? ctx->structure->dReactiveRelocationGroupStart.as<int>() : nullptr,
+            ctx->hasDistrQRelocationGroups && ctx->structure->nReactiveRelocationGroups > 0 ? ctx->structure->dReactiveRelocationCandidateRows.as<int>() : nullptr,
+            ctx->hasDistrQRelocationGroups && ctx->structure->nReactiveRelocationGroups > 0 ? ctx->dReactiveRelocationPilotTargetVDeactivated.as<char>() : nullptr,
+            ctx->structure->dReactiveRelocationDependentBaseGroup.p ? ctx->structure->dReactiveRelocationDependentBaseGroup.as<int>() : nullptr, out.as<double>());
     std::vector<double> host(static_cast<size_t>(ctx->nReactiveLimitEntries) * nS);
     CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
     CUDA_CHECK(cudaMemcpy(host.data(), out.p, host.size() * sizeof(double), cudaMemcpyDeviceToHost));

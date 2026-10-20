@@ -114,7 +114,7 @@ OLF_JNI(ac_solver_gpu, BatchReadbackNative, readBatchLastConvergedState)(
     if (ctx == nullptr || !ctx->dXLastConv.p || slot < 0 || slot >= ctx->nScenarios) {
         return nullptr;
     }
-    int n = ctx->st->n;
+    int n = ctx->structure->n;
     std::vector<double> host(n);
     CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
     CUDA_CHECK(cudaMemcpy(host.data(), ctx->dXLastConv.as<double>() + (size_t) slot * n, n * sizeof(double),

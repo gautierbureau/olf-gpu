@@ -96,7 +96,7 @@ public final class BatchSolveNative {
                                                        double[] x0PerScenario,
                                                        int[] shuntOvSlotElem, double[] shuntOvGb,
                                                        int[] reactiveLimitsSeedState, int[] reactiveLimitsFinalState,
-                                                       int[] r1OvSlotElem, double[] r1OvVal,
+                                                       int[] closedBranchParameterOverrideScenarioElement, double[] closedBranchParameterOverrideValues,
                                                        int maxOuterIterations, int maxPqPvSwitch, int rejectSlackDistributionFailure, int skipReactiveLimitsPhase,
                                                        int nBaseClosedZeroImpedanceBranches, int[] zeroImpedanceBranchCloseScenarioElement, int[] zeroImpedanceBranchOpenScenarioElement);
 }

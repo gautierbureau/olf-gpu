@@ -168,7 +168,7 @@ class GpuMergedGenVoltageControlTest extends AbstractLoadFlowNetworkFactory {
         assertEquals(dep, own.getControlledBus(), "...regulating its own bus, in isolation");
 
         // What is actually true of this bus, resolved on the MAIN control.
-        assertTrue(GpuAcRowIndexing.isRemoteGenVcControllerElement(dep),
+        assertTrue(GpuAcRowIndexing.isRemoteGeneratorVoltageControlControllerElement(dep),
                 "a merged controller element must be recognised through its MAIN control");
 
         // Its reactive injection feeds the group's DISTR_Q row, so it must NOT also scatter to a Q row

@@ -310,7 +310,7 @@ __global__ void fillRemoteMemberQBatch(int nRemoteMemberReactiveTerms, int nScen
                                        const double* openBranchParameters, const int* openBranchIndices,
                                        const double* x, double* qBuf,
                                        const char* disabled, const char* outerLoopCheckActive,
-                                       int nR1Ov, const int* r1OvSlotElem, const double* r1OvVal,
+                                       int nClosedBranchParameterOverrides, const int* closedBranchParameterOverrideScenarioElement, const double* closedBranchParameterOverrideValues,
                                        int nShuntAdmittanceOverrides, const int* shuntAdmittanceOverrideScenarioElement, const double* shuntAdmittanceOverrideDelta) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nRemoteMemberReactiveTerms * nScenarios) return;
@@ -362,7 +362,7 @@ __global__ void fillRemoteMemberQBatch(int nRemoteMemberReactiveTerms, int nScen
         p[i] = p0[i];
     }
     double pOv[8];
-    if (findTapOverride(nR1Ov, r1OvSlotElem, r1OvVal, s, e, pOv)) {
+    if (findTapOverride(nClosedBranchParameterOverrides, closedBranchParameterOverrideScenarioElement, closedBranchParameterOverrideValues, s, e, pOv)) {
         for (int i = 0; i < 8; i++) {
             p[i] = pOv[i];
         }
@@ -400,21 +400,21 @@ void launchDistrQTargetsInner(BatchSolverContext* ctx, DriverPass& drv) {
                     ctx->dTarget.as<double>(), ctx->dOuterLoopCheckActive.as<char>(),
                     ctx->dDistrQMemberTargetQ.as<double>(),
                     ctx->hasDistrQRelocationGroups ? ctx->dDistrQMemberRelocationGroup.as<int>() : nullptr,
-                    ctx->st->nReactiveRelocationGroups > 0 ? ctx->st->dReactiveRelocationGroupStart.as<int>() : nullptr,
-                    ctx->st->nReactiveRelocationGroups > 0 ? ctx->st->dReactiveRelocationCandidateRows.as<int>() : nullptr,
+                    ctx->structure->nReactiveRelocationGroups > 0 ? ctx->structure->dReactiveRelocationGroupStart.as<int>() : nullptr,
+                    ctx->structure->nReactiveRelocationGroups > 0 ? ctx->structure->dReactiveRelocationCandidateRows.as<int>() : nullptr,
                     ctx->dMode.as<int>(),
-                    ctx->hasDistrQRelocationGroups ? ctx->dReactiveRelocationPilotTargetQ.as<double>() : nullptr, ctx->st->nReactiveRelocationGroups,
+                    ctx->hasDistrQRelocationGroups ? ctx->dReactiveRelocationPilotTargetQ.as<double>() : nullptr, ctx->structure->nReactiveRelocationGroups,
                     ctx->nDistrQInactiveMembers, ctx->nDistrQInactiveMembers ? ctx->dDistrQInactiveMembers.as<int>() : nullptr,
                     ctx->nFrozenRow, ctx->nFrozenRow ? ctx->dFrozenRow.as<int>() : nullptr,
                     ctx->nDistrQMemberTargetQOverrides, ctx->nDistrQMemberTargetQOverrides ? ctx->dDistrQMemberTargetQOverrideKey.as<int>() : nullptr,
                     ctx->nDistrQMemberTargetQOverrides ? ctx->dDistrQMemberTargetQOverrideValue.as<double>() : nullptr,
                     ctx->dDistrQMemberTargetPeerStart.as<int>(), ctx->dDistrQMemberTargetPeer.as<int>(),
                     pilotSelfReactiveLimitEntryOrNull(ctx),
-                    ctx->st->dRelocatedChildOwnRow.p != nullptr
-                            ? ctx->st->dRelocatedChildOwnRow.as<int>() : nullptr,
+                    ctx->structure->dRelocatedChildOwnRow.p != nullptr
+                            ? ctx->structure->dRelocatedChildOwnRow.as<int>() : nullptr,
                 ctx->hasDistrQSubgroups ? ctx->dDistrQSubgroup.as<char>() : nullptr, ctx->hasDistrQSubgroups ? ctx->dReactiveRelocationDistrQMemberStart.as<int>() : nullptr,
                 ctx->nReactiveLimitGeneratorsLost > 0 ? ctx->dReactiveLimitGeneratorsLost.as<char>() : nullptr,
-                ctx->st->dReactiveRelocationDependentBaseGroup.p ? ctx->st->dReactiveRelocationDependentBaseGroup.as<int>() : nullptr,
+                ctx->structure->dReactiveRelocationDependentBaseGroup.p ? ctx->structure->dReactiveRelocationDependentBaseGroup.as<int>() : nullptr,
                 ctx->dReactiveRelocationPilotTargetVDeactivated.p ? ctx->dReactiveRelocationPilotTargetVDeactivated.as<char>() : nullptr,
                     ctx->dReactiveLimitInitialTargetQ.as<double>(), ctx->dReactiveLimitReactivePowerRow.as<int>(),
                     ctx->nDistrQKeyOverrides, ctx->nDistrQKeyOverrides ? ctx->dDistrQKeyOverrideScenarioMember.as<int>() : nullptr, ctx->nDistrQKeyOverrides ? ctx->dDistrQKeyOverrideKey.as<double>() : nullptr);

@@ -298,10 +298,10 @@ public final class GpuBatchInjectionOutages {
     /** The bus's generator voltage control as the GROUP sees it: the MAIN control of a zero-impedance merge.
      *  A section's own control is DEPENDENT there, and asking it reads a one-member group (its own controller)
      *  with no survivors - which refused 285 of rte6515's full-list generator outages as the last controller
-     *  (members=1 alive=0). See the merged-voltage-control note on GpuAcRowIndexing.mainGenVc. */
+     *  (members=1 alive=0). See the merged-voltage-control note on GpuAcRowIndexing.mainGeneratorVoltageControl. */
     private static java.util.Optional<com.powsybl.openloadflow.network.GeneratorVoltageControl> mainVcOf(LfBus bus) {
         return java.util.Optional.ofNullable(
-                com.powsybl.openloadflow.ac.equations.vector.gpu.RemoteMemberQPacker.mainGenVc(bus));
+                com.powsybl.openloadflow.ac.equations.vector.gpu.RemoteMemberQPacker.mainGeneratorVoltageControl(bus));
     }
 
     private static GenOutage computeBusGenOutage(EquationSystem<AcVariableType, AcEquationType> es, GpuAcData gpuData,

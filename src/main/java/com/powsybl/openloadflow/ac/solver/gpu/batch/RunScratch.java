@@ -50,8 +50,8 @@ final class RunScratch {
     final List<Integer> spanningTreeOverrideScenarioElementValueList;   // {slot, zeroImpedanceElement, isTree} where OLF's tree moved
     final List<Integer> shuntAdmittanceOverrideScenarioElementList;  // per-scenario shunt admittance overrides
     final List<Double> shuntAdmittanceOverrideDeltaList;
-    final List<Integer> r1OvSlotElemList;  // per-scenario fixed-ratio tap overrides
-    final List<Double> r1OvValList;
+    final List<Integer> closedBranchParameterOverrideScenarioElementList;  // per-scenario fixed-ratio tap overrides
+    final List<Double> closedBranchParameterOverrideValueList;
     final int shuntPackOffset;
     // Per-scenario distributed-slack reweight (a generator loss at a DS-participant bus): one affected DS
     // bus per slot (distributedSlackOverrideBus[s] = its DS-pack index, -1 = none) whose factor/base/headroom/footroom and the
@@ -97,8 +97,8 @@ final class RunScratch {
         this.spanningTreeOverrideScenarioElementValueList = new ArrayList<>();
         this.shuntAdmittanceOverrideScenarioElementList = new ArrayList<>();
         this.shuntAdmittanceOverrideDeltaList = new ArrayList<>();
-        this.r1OvSlotElemList = new ArrayList<>();
-        this.r1OvValList = new ArrayList<>();
+        this.closedBranchParameterOverrideScenarioElementList = new ArrayList<>();
+        this.closedBranchParameterOverrideValueList = new ArrayList<>();
         this.shuntPackOffset = elementMapper.getClosedBranchCount() + elementMapper.getOpenBranchCount();
         this.hasDistributedSlack = gpuData.distributedSlack().busPhiRow().length > 0;
         this.distributedSlackOverrideBus = hasDistributedSlack ? new int[chunkSize] : new int[0];
@@ -117,8 +117,8 @@ final class RunScratch {
         zeroImpedanceBranchCloseScenarioElementList.clear();
         shuntAdmittanceOverrideScenarioElementList.clear();
         shuntAdmittanceOverrideDeltaList.clear();
-        r1OvSlotElemList.clear();
-        r1OvValList.clear();
+        closedBranchParameterOverrideScenarioElementList.clear();
+        closedBranchParameterOverrideValueList.clear();
         if (hasDistributedSlack) {
             java.util.Arrays.fill(distributedSlackOverrideBus, -1);
             java.util.Arrays.fill(distributedSlackOverrideFactorDelta, 0);

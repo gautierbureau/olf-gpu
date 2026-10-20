@@ -132,7 +132,7 @@ __global__ void repairZeroDiagonalRightHandSideBatch(int nZeroDiagonalRows, int 
 }
 
 void repairZeroDiagonalRows(BatchSolverContext* ctx, int nS, double* vals) {
-    auto* structure = ctx->st.get();
+    auto* structure = ctx->structure.get();
     if (structure->nZeroDiagonalRows == 0 || !repairsZeroDiagonals(ctx)) return;
     if (ctx->zeroDiagonalRepairCapacity < nS) {
         ctx->dZeroDiagonalRowSnapshot.alloc((size_t) nS * structure->nZeroDiagonalRowValues * sizeof(double));
@@ -155,7 +155,7 @@ void repairZeroDiagonalRows(BatchSolverContext* ctx, int nS, double* vals) {
 /** The same combination on a right-hand side (nS scenarios from {@code B}, choices from the last
  *  repairZeroDiagonalRows on this context; {@code sOff} selects the scenario block for a per-scenario call). */
 void repairZeroDiagonalRightHandSide(BatchSolverContext* ctx, int nS, double* B, int sOff) {
-    auto* structure = ctx->st.get();
+    auto* structure = ctx->structure.get();
     if (structure->nZeroDiagonalRows == 0 || ctx->zeroDiagonalRepairCapacity < sOff + nS || !repairsZeroDiagonals(ctx)) return;
     int n = structure->n;
     double* bsnap = ctx->dZeroDiagonalRightHandSideSnapshot.template as<double>() + (size_t) sOff * structure->nZeroDiagonalRows;

@@ -64,7 +64,7 @@ __global__ void fillDistrQBatch(int nDistrQ, int nScenarios, int n, int nnz, int
                                 const char* limitType, int nReactiveLimitEntries,
                                 const char* pilotSelfCarrierSkip, int pilotSelfCarrierSkipStride,
                                 const int* memberRelocationGroup, const int* reactiveRelocationGroupStart, const int* reactiveRelocationCandidateRows,
-                                int nR1Ov, const int* r1OvSlotElem, const double* r1OvVal,
+                                int nClosedBranchParameterOverrides, const int* closedBranchParameterOverrideScenarioElement, const double* closedBranchParameterOverrideValues,
                                 int nShuntAdmittanceOverrides, const int* shuntAdmittanceOverrideScenarioElement, const double* shuntAdmittanceOverrideDelta,
                                 int distrQTraceRow,
                                 const char* distrQSubgroup, const int* reactiveRelocationDistrQMemberStart, int nDistrQMembersAll) {
@@ -214,7 +214,7 @@ __global__ void fillDistrQBatch(int nDistrQ, int nScenarios, int n, int nnz, int
         p[i] = p0[i];
     }
     double pOv[8];
-    if (findTapOverride(nR1Ov, r1OvSlotElem, r1OvVal, s, e, pOv)) {
+    if (findTapOverride(nClosedBranchParameterOverrides, closedBranchParameterOverrideScenarioElement, closedBranchParameterOverrideValues, s, e, pOv)) {
         for (int i = 0; i < 8; i++) {
             p[i] = pOv[i];
         }

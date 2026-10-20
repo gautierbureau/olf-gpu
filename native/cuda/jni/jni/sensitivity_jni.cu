@@ -20,7 +20,7 @@ OLF_JNI(ac_outerloop_gpu, SensitivityNative, solveBatchSensitivities)(
     std::string error;
     std::vector<double> out;
     try {
-        if (states.size() != (size_t) ctx->st->n * ctx->nScenarios) {
+        if (states.size() != (size_t) ctx->structure->n * ctx->nScenarios) {
             throw std::runtime_error("states size mismatch");
         }
         out = solveBatchSensitivities(ctx, states.data(),

@@ -35,8 +35,8 @@ public final class RemoteMemberQPacker {
      *  not the group's controlled bus. Shared with ReactiveCapabilityCurves, which REPLAYS this enumeration
      *  and must count exactly the same buses (a drift throws and the run falls to the CPU). */
     public static boolean isRemoteMemberEntry(LfBus bus) {
-        GeneratorVoltageControl voltageControl = mainGenVc(bus);
-        return voltageControl != null && GpuAcRowIndexing.isRemoteGenVcControllerElement(bus) && voltageControl.getControlledBus() != bus;
+        GeneratorVoltageControl voltageControl = mainGeneratorVoltageControl(bus);
+        return voltageControl != null && GpuAcRowIndexing.isRemoteGeneratorVoltageControlControllerElement(bus) && voltageControl.getControlledBus() != bus;
     }
 
     /**
@@ -46,7 +46,7 @@ public final class RemoteMemberQPacker {
      * <pre>return controllerBus.getGeneratorVoltageControl().map(c -&gt; c.getControlledBus() != controllerBus).orElse(false);</pre>
      *
      * <p>Note which control it asks: the bus's OWN {@code getGeneratorVoltageControl()}, NOT
-     * {@link #mainGenVc}. For a MERGED group every member keeps its own DEPENDENT control whose
+     * {@link #mainGeneratorVoltageControl}. For a MERGED group every member keeps its own DEPENDENT control whose
      * controlled bus is ITSELF, so OLF reads every such member as a LOCAL controller and skips the
      * whole {@code robustMode && generatorRemoteController && …} block for it — while the device's
      * {@code reactiveLimitVoltageControlRole} class, built from the MAIN control, calls that member "remote" and applies the
@@ -73,8 +73,8 @@ public final class RemoteMemberQPacker {
      * looked at q: rte6515's base pinned 16 where OLF pinned 19 (VL-5997_1, VL-6003_1, VL-6003_2 missing,
      * each with a correct q of 1.921012507 pu against a 0.7536 limit), then diverged at outer pass 7.
      */
-    public static GeneratorVoltageControl mainGenVc(LfBus bus) {
-        return GpuAcRowIndexing.mainGenVc(bus);              // ONE definition, shared with the row indexing
+    public static GeneratorVoltageControl mainGeneratorVoltageControl(LfBus bus) {
+        return GpuAcRowIndexing.mainGeneratorVoltageControl(bus);              // ONE definition, shared with the row indexing
     }
 
     static RemoteMemberReactiveTerms remoteMemberQPack(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
@@ -84,7 +84,7 @@ public final class RemoteMemberQPacker {
         int[] vCol = columns.vCol();
         if (reactiveLimits) {
             for (LfBus bus : network.getBuses()) {
-                boolean member = GpuAcRowIndexing.isRemoteGenVcControllerElement(bus);   // incl. a pilot that is a controller
+                boolean member = GpuAcRowIndexing.isRemoteGeneratorVoltageControlControllerElement(bus);   // incl. a pilot that is a controller
                 if (!member || vCol[bus.getNum()] < 0 || !(bus.getMinQ() < bus.getMaxQ())) {
                     continue;                                // mirror the RL pack's remote-entry condition
                 }

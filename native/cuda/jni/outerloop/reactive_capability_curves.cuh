@@ -19,18 +19,18 @@ namespace olfgpu {
 // and at its target P otherwise (saturated, frozen, disabled link), which the HVDC loop holds as baseD + appliedD.
 // hv == nullptr: no such entry. nHvdcAcEmulation == 0: the HVDC loops are not on this context (then nothing was packed).
 struct CurveHvdcAcEmulationView {
-    const int* hv;            // per curve entry {hvdc index in the loop pack, side 1|2}, -1 for a plain generator
+    const int* hvdcStation;            // per curve entry {hvdc index in the loop pack, side 1|2}, -1 for a plain generator
     int nHvdcAcEmulation;
     const int* status;        // per (scenario, hvdc)
-    const double* d1;
-    const double* d2;
-    const double* in;         // per hvdc x9: p0 k pMax12 pMax21 loss1 loss2 r baseD1 baseD2
-    const int* phi1;
-    const int* phi2;
-    const int* elem;
+    const double* appliedDelta1;
+    const double* appliedDelta2;
+    const double* hvdcAcEmulationParameters;         // per hvdc x9: p0 k pMax12 pMax21 loss1 loss2 r baseD1 baseD2
+    const int* bus1PhiColumn;
+    const int* bus2PhiColumn;
+    const int* hvdcElement;
     const char* disabled;
     int nElements;
-    const char* ctgOut;
+    const char* contingencyOutage;
     const double* x;
 };
 

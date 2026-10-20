@@ -151,7 +151,7 @@ public final class GpuMonitoringVoltageOuterLoop {
             double[] distributedSlackOverrideBaseTargetPDelta, double[] distributedSlackOverrideMaxDelta,
             double[] distributedSlackOverrideMinDelta,
             double[] distributedSlackBusAnchorCarry, double[] slackBusAnchorCarry,
-            int[] r1OvSlotElem, double[] r1OvVal, int[] shuntAdmittanceOverrideScenarioElement, double[] shuntAdmittanceOverrideDelta,
+            int[] closedBranchParameterOverrideScenarioElement, double[] closedBranchParameterOverrideValues, int[] shuntAdmittanceOverrideScenarioElement, double[] shuntAdmittanceOverrideDelta,
             int nBaseClosedZeroImpedanceBranches, int[] zeroImpedanceBranchCloseScenarioElement, int[] zeroImpedanceBranchOpenScenarioElement,
             double[] baseState, double[] baseTargets, NewtonRaphsonParameters parameters,
             double tol, double reactiveLimitTol, double slackDistTol, double convEpsPerEq, int[] varType,
@@ -183,7 +183,7 @@ public final class GpuMonitoringVoltageOuterLoop {
                 config.stateVectorScalingMode(), config.maxDv(), config.maxDphi(),
                 config.stateVectorScalingMode() == GpuStateVectorScalingMode.MAX_VOLTAGE_CHANGE ? varType : null, x0Full,
                 shuntAdmittanceOverrideScenarioElement, shuntAdmittanceOverrideDelta, reactiveLimitsState, reactiveLimitsFinalState,
-                r1OvSlotElem, r1OvVal,
+                closedBranchParameterOverrideScenarioElement, closedBranchParameterOverrideValues,
                 config.maxOuterIterations(), config.maxPqPvSwitch(), config.rejectSlackDistributionFailureFlag(), skipReactiveLimits,
                 nBaseClosedZeroImpedanceBranches, zeroImpedanceBranchCloseScenarioElement, zeroImpedanceBranchOpenScenarioElement);
         System.arraycopy(reactiveLimitsFinalState, 0, reactiveLimitsState, 0, reactiveLimitsFinalState.length);

@@ -49,8 +49,8 @@ void refineLanes(BatchSolverContext* ctx, int lanes, int n, int nnz, const doubl
     std::vector<double> prev(lanes), sc(lanes);
     std::vector<char> lane(lanes), undo(lanes);
     auto scores = [&](std::vector<double>& out) {
-        residualBatch<<<grid(n * lanes), BLOCK, 0, ctx->stream>>>(n, lanes, nnz, ctx->st->dRowPtr.as<int>(),
-                ctx->st->dColIdx.as<int>(), vals, dx, b, r);
+        residualBatch<<<grid(n * lanes), BLOCK, 0, ctx->stream>>>(n, lanes, nnz, ctx->structure->dRowPtr.as<int>(),
+                ctx->structure->dColIdx.as<int>(), vals, dx, b, r);
         iterativeRefinementScoreBatch<<<grid(lanes), BLOCK, 0, ctx->stream>>>(n, lanes, r, b, active, ctx->dIterativeRefinementScore.as<double>());
         CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
         CUDA_CHECK(cudaMemcpy(out.data(), ctx->dIterativeRefinementScore.as<double>(), lanes * sizeof(double), cudaMemcpyDeviceToHost));

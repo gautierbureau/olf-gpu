@@ -28,8 +28,8 @@ void dumpSlotSystem(BatchSolverContext* ctx, int n, int nnz, int scenario, const
     CUDA_CHECK(cudaMemcpy(jacobianValues.data(), ctx->dVals.template as<double>() + (size_t) scenario * nnz, (size_t) nnz * sizeof(double), cudaMemcpyDeviceToHost));
     CUDA_CHECK(cudaMemcpy(dx.data(), ctx->dDx.template as<double>() + (size_t) scenario * n, (size_t) n * sizeof(double), cudaMemcpyDeviceToHost));
     CUDA_CHECK(cudaMemcpy(mismatch.data(), ctx->dF.template as<double>() + (size_t) scenario * n, (size_t) n * sizeof(double), cudaMemcpyDeviceToHost));
-    CUDA_CHECK(cudaMemcpy(rowStart.data(), ctx->st->dRowPtr.p, (size_t) (n + 1) * sizeof(int), cudaMemcpyDeviceToHost));
-    CUDA_CHECK(cudaMemcpy(columnIndex.data(), ctx->st->dColIdx.p, (size_t) nnz * sizeof(int), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(rowStart.data(), ctx->structure->dRowPtr.p, (size_t) (n + 1) * sizeof(int), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(columnIndex.data(), ctx->structure->dColIdx.p, (size_t) nnz * sizeof(int), cudaMemcpyDeviceToHost));
     CUDA_CHECK(cudaMemcpy(mode.data(), ctx->dMode.template as<int>() + (size_t) scenario * n, (size_t) n * sizeof(int), cudaMemcpyDeviceToHost));
     FILE* f = std::fopen(path, "w");
     if (f == nullptr) {

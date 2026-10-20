@@ -114,7 +114,7 @@ public final class PilotSelfPacker {
 
     /** A class-2 entry: a pilot that is one of its own controllers (packed as a remote entry). */
     public static boolean isPilotSelfEntry(LfBus bus) {
-        GeneratorVoltageControl voltageControl = RemoteMemberQPacker.mainGenVc(bus);
-        return voltageControl != null && GpuAcRowIndexing.isRemoteGenVcControllerElement(bus) && voltageControl.getControlledBus() == bus;
+        GeneratorVoltageControl voltageControl = RemoteMemberQPacker.mainGeneratorVoltageControl(bus);
+        return voltageControl != null && GpuAcRowIndexing.isRemoteGeneratorVoltageControlControllerElement(bus) && voltageControl.getControlledBus() == bus;
     }
 }

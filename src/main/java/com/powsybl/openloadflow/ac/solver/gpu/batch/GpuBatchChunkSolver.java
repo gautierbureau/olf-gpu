@@ -893,7 +893,7 @@ final class GpuBatchChunkSolver {
                         GpuHvdcAcEmulationLimitsOuterLoop.seedBaseStatuses(chunkSize, realCount, hvdcControllers,
                                 hvdcStatus, rs.disabledMask);
                     }
-                    boolean secondaryVoltageControlActive = phases.secondaryVoltageControlControllers() != null && !phases.secondaryVoltageControlControllers().ctls().isEmpty();
+                    boolean secondaryVoltageControlActive = phases.secondaryVoltageControlControllers() != null && !phases.secondaryVoltageControlControllers().controllerBuses().isEmpty();
                     boolean monitoringVoltageActive = phases.monitoring() != null && !phases.monitoring().isEmpty();
                     int[] reactiveLimitsFinalState = (!pairPhase && !pairIdxList.isEmpty() || secondaryVoltageControlActive || monitoringVoltageActive
                             || System.getenv("OLF_GPU_RL_TRACE") != null) && nReactiveLimitEntries > 0 ? new int[chunkSize * nReactiveLimitEntries] : null;
@@ -1016,8 +1016,8 @@ final class GpuBatchChunkSolver {
                             rs.shuntAdmittanceOverrideScenarioElementList.stream().mapToInt(Integer::intValue).toArray(),
                             rs.shuntAdmittanceOverrideDeltaList.stream().mapToDouble(Double::doubleValue).toArray(),
                             reactiveLimitsSeedState, reactiveLimitsFinalState,
-                            rs.r1OvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
-                            rs.r1OvValList.stream().mapToDouble(Double::doubleValue).toArray(),
+                            rs.closedBranchParameterOverrideScenarioElementList.stream().mapToInt(Integer::intValue).toArray(),
+                            rs.closedBranchParameterOverrideValueList.stream().mapToDouble(Double::doubleValue).toArray(),
                             config.maxOuterIterations(), config.maxPqPvSwitch(), config.rejectSlackDistributionFailureFlag(),
                             // monitoring active: OLF checks VoltageMonitoring BEFORE ReactiveLimits — the main
                             // solve surfaces the DS-stable / pre-RL state; the orchestrator then interleaves
@@ -1039,11 +1039,11 @@ final class GpuBatchChunkSolver {
                     tMainSolveNs += System.nanoTime() - tSolve0;
                     if (secondaryVoltageControlAsDriverPause) {
                         long secondaryVoltageControlStartNanos = System.nanoTime();
-                        int nSecondaryVoltageControlControllerBuses = phases.secondaryVoltageControlControllers().ctls().size();
+                        int nSecondaryVoltageControlControllerBuses = phases.secondaryVoltageControlControllers().controllerBuses().size();
                         double[][] secondaryVoltageControlTargetV = new double[chunkSize][nSecondaryVoltageControlControllerBuses];
                         for (int s2 = 0; s2 < chunkSize; s2++) {
                             for (int c = 0; c < nSecondaryVoltageControlControllerBuses; c++) {
-                                secondaryVoltageControlTargetV[s2][c] = phases.secondaryVoltageControlControllers().ctls().get(c).baseTargetV();
+                                secondaryVoltageControlTargetV[s2][c] = phases.secondaryVoltageControlControllers().controllerBuses().get(c).baseTargetV();
                             }
                         }
                         // The driver re-pauses at the SVC slot on EVERY sweep restart, and a reactive-limit
@@ -1083,8 +1083,8 @@ final class GpuBatchChunkSolver {
                                     rs.shuntAdmittanceOverrideScenarioElementList.stream().mapToInt(Integer::intValue).toArray(),
                                     rs.shuntAdmittanceOverrideDeltaList.stream().mapToDouble(Double::doubleValue).toArray(),
                                     null, reactiveLimitsFinalState,
-                                    rs.r1OvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
-                                    rs.r1OvValList.stream().mapToDouble(Double::doubleValue).toArray(),
+                                    rs.closedBranchParameterOverrideScenarioElementList.stream().mapToInt(Integer::intValue).toArray(),
+                                    rs.closedBranchParameterOverrideValueList.stream().mapToDouble(Double::doubleValue).toArray(),
                                     config.maxOuterIterations(), config.maxPqPvSwitch(), config.rejectSlackDistributionFailureFlag(), 0,
                                     rs.nBaseClosedZeroImpedanceBranches, rs.zeroImpedanceBranchCloseScenarioElementList.stream().mapToInt(Integer::intValue).toArray(),
                                     rs.zeroImpedanceBranchOpenScenarioElementList.stream().mapToInt(Integer::intValue).toArray());

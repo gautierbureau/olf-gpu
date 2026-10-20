@@ -30,7 +30,7 @@ namespace olfgpu {
 __global__ void phaseControlCheckBatch(int nPhaseControlControllerBranches, int nScenarios, int n, int nElements, int closedBranchOffset,
                               const int* kind, const int* a1Row, const int* side, const double* limit, const int* elem,
                               const int* tapStart, const double* tapRows,
-                              const double* closedBranchParameters, const int* closedBranchIndices, int nR1Ov, const int* r1OvSlotElem, const double* r1OvVal,
+                              const double* closedBranchParameters, const int* closedBranchIndices, int nClosedBranchParameterOverrides, const int* closedBranchParameterOverrideScenarioElement, const double* closedBranchParameterOverrideValues,
                               const char* disabled, const char* outerLoopCheckActive, const int* iter,
                               int* tap, int* mode, double* target, double* x, char* switched) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -60,7 +60,7 @@ __global__ void phaseControlCheckBatch(int nPhaseControlControllerBranches, int 
     int e = elem[c] - closedBranchOffset;                              // LIMITER is local: the controlled branch is itself
     const double* p = closedBranchParameters + e * GpuPiModelColumn::COUNT;
     double pOv[8];
-    if (findTapOverride(nR1Ov, r1OvSlotElem, r1OvVal, s, e, pOv)) p = pOv;
+    if (findTapOverride(nClosedBranchParameterOverrides, closedBranchParameterOverrideScenarioElement, closedBranchParameterOverrideValues, s, e, pOv)) p = pOv;
     double g[18];
     double i = controlledFlowAndGradient(side[c], GpuControlledFlow::CURRENT, p, x + (size_t) s * n, closedBranchIndices + e * 12, g);
     if (!(i > limit[c])) return;
@@ -99,7 +99,7 @@ void phaseControlStep(BatchSolverContext* ctx, DriverPass& drv) {
     phaseControlCheckBatch<<<grid(static_cast<int>(nst)), BLOCK, 0, ctx->stream>>>(nC, nS, n, ctx->nElements, ctx->closedBranchOffset,
             ctx->dPhaseControlMode.as<int>(), ctx->dPhaseControlA1Row.as<int>(), ctx->dPhaseControlControlledSide.as<int>(), ctx->dPhaseControlCurrentLimit.as<double>(), ctx->dPhaseControlElement.as<int>(),
             ctx->dPhaseControlTapStart.as<int>(), ctx->dPhaseControlTapRows.as<double>(),
-            ctx->st->closedBranch.parameters.as<double>(), ctx->st->closedBranch.indices.as<int>(), ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>(),
+            ctx->structure->closedBranch.parameters.as<double>(), ctx->structure->closedBranch.indices.as<int>(), ctx->nClosedBranchParameterOverrides, ctx->dClosedBranchParameterOverrideScenarioElement.as<int>(), ctx->dClosedBranchParameterOverrideValues.as<double>(),
             ctx->dDisabled.as<char>(), ctx->dOuterLoopCheckActive.as<char>(), ctx->dPhaseControlCheckCount.as<int>(),
             ctx->dPhaseControlTap.as<int>(), ctx->dMode.as<int>(), ctx->dTarget.as<double>(), ctx->dX.as<double>(), ctx->dOuterLoopUnstable.as<char>());
     CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
@@ -115,7 +115,7 @@ void phaseControlStep(BatchSolverContext* ctx, DriverPass& drv) {
         CUDA_CHECK(cudaMemcpy(cur.data(), ctx->dPhaseControlTap.p, nst * sizeof(int), cudaMemcpyDeviceToHost));
         int nMoved = 0;
         for (int s2 = 0; s2 < nS; s2++) for (int c = 0; c < nC; c++) if (cur[static_cast<size_t>(s2) * nC + c] != ctx->hPhaseControlBaseTap[c]) nMoved++;
-        std::fprintf(stderr, "CPHASE_KERNEL nS=%d nControllers=%d pairsOffBaseTap=%d nR1Ov=%d\n", nS, nC, nMoved, ctx->nR1Ov);
+        std::fprintf(stderr, "CPHASE_KERNEL nS=%d nControllers=%d pairsOffBaseTap=%d nClosedBranchParameterOverrides=%d\n", nS, nC, nMoved, ctx->nClosedBranchParameterOverrides);
     }
 }
 

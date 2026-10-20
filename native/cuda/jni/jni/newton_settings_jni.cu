@@ -83,7 +83,7 @@ OLF_JNI(ac_solver_gpu, NewtonSettingsNative, setBatchRowCriteria)(
         ctx->perRowAlternateCriteria = false;
         return;
     }
-    int n = ctx->st->n;
+    int n = ctx->structure->n;
     jdouble* fixedVariableRowMaxMismatch = env->GetDoubleArrayElements(jFixedVariableRowMaxMismatch, nullptr);
     jdouble* equationRowMaxMismatch = env->GetDoubleArrayElements(jEquationRowMaxMismatch, nullptr);
     ctx->dFixedVariableRowMaxMismatch.upload(fixedVariableRowMaxMismatch, static_cast<size_t>(n) * sizeof(double));
@@ -107,7 +107,7 @@ OLF_JNI(ac_solver_gpu, NewtonSettingsNative, setBatchRowCriteriaAlternate)(
         ctx->perRowAlternateCriteria = false;
         return;
     }
-    int n = ctx->st->n;
+    int n = ctx->structure->n;
     jdouble* alternateRowMaxMismatch = env->GetDoubleArrayElements(jAlternateRowMaxMismatch, nullptr);
     jint* alternateRowMaxMismatchSelector = env->GetIntArrayElements(jAlternateRowMaxMismatchSelector, nullptr);
     ctx->dAlternateRowMaxMismatch.upload(alternateRowMaxMismatch, static_cast<size_t>(n) * sizeof(double));

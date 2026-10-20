@@ -129,14 +129,14 @@ OLF_JNI(ac_solver_gpu, BatchSolveNative, solveBatchContext)(
         return nullptr;
     }
     long long tMarshal0 = jniPhaseTime() ? nowNs() : 0;
-    std::vector<int> r1OvSlotElemVec;
-    std::vector<double> r1OvValVec;
+    std::vector<int> closedBranchParameterOverrideScenarioElementVec;
+    std::vector<double> closedBranchParameterOverrideValueVec;
     if (jR1OvSlotElem != nullptr) {
         jsize rn = env->GetArrayLength(jR1OvSlotElem);
-        r1OvSlotElemVec.resize(rn);
-        env->GetIntArrayRegion(jR1OvSlotElem, 0, rn, r1OvSlotElemVec.data());
-        r1OvValVec.resize(static_cast<size_t>(rn) * 4);      // full 8-double closedBranchParameters row per (slot, elem) entry
-        env->GetDoubleArrayRegion(jR1OvVal, 0, rn * 4, r1OvValVec.data());
+        closedBranchParameterOverrideScenarioElementVec.resize(rn);
+        env->GetIntArrayRegion(jR1OvSlotElem, 0, rn, closedBranchParameterOverrideScenarioElementVec.data());
+        closedBranchParameterOverrideValueVec.resize(static_cast<size_t>(rn) * 4);      // full 8-double closedBranchParameters row per (slot, elem) entry
+        env->GetDoubleArrayRegion(jR1OvVal, 0, rn * 4, closedBranchParameterOverrideValueVec.data());
     }
     std::vector<int> zeroImpedanceBranchOpenScenarioElementVec;
     if (jZeroImpedanceBranchOpenScenarioElement != nullptr) {
@@ -329,9 +329,9 @@ OLF_JNI(ac_solver_gpu, BatchSolveNative, solveBatchContext)(
                                 shuntAdmittanceOverrideDeltaVec.empty() ? nullptr : shuntAdmittanceOverrideDeltaVec.data(),
                                 reactiveLimitsSeedStateVec.empty() ? nullptr : reactiveLimitsSeedStateVec.data(),
                                 reactiveLimitsFinalStateVec.empty() ? nullptr : reactiveLimitsFinalStateVec.data(),
-                                static_cast<int>(r1OvSlotElemVec.size() / 2),
-                                r1OvSlotElemVec.empty() ? nullptr : r1OvSlotElemVec.data(),
-                                r1OvValVec.empty() ? nullptr : r1OvValVec.data(),
+                                static_cast<int>(closedBranchParameterOverrideScenarioElementVec.size() / 2),
+                                closedBranchParameterOverrideScenarioElementVec.empty() ? nullptr : closedBranchParameterOverrideScenarioElementVec.data(),
+                                closedBranchParameterOverrideValueVec.empty() ? nullptr : closedBranchParameterOverrideValueVec.data(),
                                 maxOuterProductive, maxPqPvSwitch, rejectSlackDistributionFailure, skipReactiveLimitsPhase,
                                 nBaseClosedZeroImpedanceBranches, static_cast<int>(zeroImpedanceBranchCloseScenarioElementVec.size() / 2),
                                 zeroImpedanceBranchCloseScenarioElementVec.empty() ? nullptr : zeroImpedanceBranchCloseScenarioElementVec.data(),

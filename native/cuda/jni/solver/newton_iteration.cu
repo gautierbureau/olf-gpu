@@ -130,8 +130,8 @@ void newtonSolve(BatchSolverContext* ctx, DriverPass& drv) {
                     ctx->dLinRm.alloc((size_t) n * nS * sizeof(double));
                     ctx->dLinSc.alloc((size_t) 3 * nS * sizeof(double));
                 }
-                linResidRowBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, nnz, ctx->st->dRowPtr.as<int>(),
-                        ctx->st->dColIdx.as<int>(), ctx->dVals.as<double>(), ctx->dDx.as<double>(),
+                linResidRowBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, nnz, ctx->structure->dRowPtr.as<int>(),
+                        ctx->structure->dColIdx.as<int>(), ctx->dVals.as<double>(), ctx->dDx.as<double>(),
                         ctx->dB.as<double>(), ctx->dLinRp.as<double>(), ctx->dLinRm.as<double>());
                 linResidScoreBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(n, nS, ctx->dLinRp.as<double>(),
                         ctx->dLinRm.as<double>(), ctx->dF.as<double>(), ctx->dLinSc.as<double>());
@@ -294,8 +294,8 @@ void newtonSolve(BatchSolverContext* ctx, DriverPass& drv) {
         // ---- UBATCH solve: ANALYZE one block once (cheap), then a linear solve over all nS systems
         //      via CUDSS_CONFIG_UBATCH_SIZE on the single per-block matrix, FACTORIZED every iteration
         //      (honest Newton). ----
-        writeIdentityForInactive<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, nnz, ctx->st->dRowPtr.as<int>(),
-                ctx->st->dDiagPos.as<int>(), ctx->dActive.as<char>(), ctx->dVals.as<double>(), ctx->dF.as<double>());
+        writeIdentityForInactive<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, nnz, ctx->structure->dRowPtr.as<int>(),
+                ctx->structure->dDiagPos.as<int>(), ctx->dActive.as<char>(), ctx->dVals.as<double>(), ctx->dF.as<double>());
         negateIntoBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n * nS, ctx->dF.as<double>(), ctx->dB.as<double>());
         repairZeroDiagonalRightHandSide(ctx, nS, ctx->dB.as<double>());
         if (!ctx->analyzed) {
@@ -348,11 +348,11 @@ void newtonSolve(BatchSolverContext* ctx, DriverPass& drv) {
                 CUDSS_CHECK(cudssCreate(&ctx->compactedSolver.handle));
                 CUDSS_CHECK(cudssSetStream(ctx->compactedSolver.handle, ctx->stream));
                 CUDSS_CHECK(cudssConfigCreate(&ctx->compactedSolver.config));
-                applyReorderAlg(ctx->compactedSolver.config, ctx->st->nZeroImpedanceBranch > 0);
-                int compactedIterativeRefinementSteps = ctx->st->nZeroImpedanceBranch > 0 ? configuredIterativeRefinementBaseSteps() : ITERATIVE_REFINEMENT_STEPS_WITHOUT_COUPLERS;
+                applyReorderAlg(ctx->compactedSolver.config, ctx->structure->nZeroImpedanceBranch > 0);
+                int compactedIterativeRefinementSteps = ctx->structure->nZeroImpedanceBranch > 0 ? configuredIterativeRefinementBaseSteps() : ITERATIVE_REFINEMENT_STEPS_WITHOUT_COUPLERS;
                 CUDSS_CHECK(cudssConfigSet(ctx->compactedSolver.config, CUDSS_CONFIG_IR_N_STEPS, &compactedIterativeRefinementSteps, sizeof(compactedIterativeRefinementSteps)));
                 CUDSS_CHECK(cudssMatrixCreateCsr(&ctx->compactedUniformBatchSystemMatrix, n, n, nnz,
-                        ctx->st->dRowPtr.as<int>(), nullptr, ctx->st->dColIdx.as<int>(), ctx->dValsCompacted.as<double>(),
+                        ctx->structure->dRowPtr.as<int>(), nullptr, ctx->structure->dColIdx.as<int>(), ctx->dValsCompacted.as<double>(),
                         OLF_CUDSS_CSR_TYPES, CUDSS_MTYPE_GENERAL, CUDSS_MVIEW_FULL, CUDSS_BASE_ZERO));
                 CUDSS_CHECK(cudssMatrixCreateDn(&ctx->compactedUniformBatchRightHandSideMatrix, n, 1, n, ctx->dBCompacted.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
                 CUDSS_CHECK(cudssMatrixCreateDn(&ctx->compactedUniformBatchSolutionMatrix, n, 1, n, ctx->dDxCompacted.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
@@ -407,7 +407,7 @@ void newtonSolve(BatchSolverContext* ctx, DriverPass& drv) {
                 compactData = cached;
             }
             { AnalysisTimer at_(__LINE__, 'F'); CUDSS_CHECK(cudssExecute(ctx->compactedSolver.handle, CUDSS_PHASE_FACTORIZATION | CUDSS_PHASE_SOLVE, ctx->compactedSolver.config, compactData, ctx->compactedUniformBatchSystemMatrix, ctx->compactedUniformBatchSolutionMatrix, ctx->compactedUniformBatchRightHandSideMatrix)); }
-            if (ctx->st->nZeroImpedanceBranch > 0 && ctx->dRCompacted.p != nullptr && ctx->dIterativeRefinementScore.p != nullptr && ctx->dIterativeRefinementScore.cap >= static_cast<size_t>(w) * sizeof(double)) {
+            if (ctx->structure->nZeroImpedanceBranch > 0 && ctx->dRCompacted.p != nullptr && ctx->dIterativeRefinementScore.p != nullptr && ctx->dIterativeRefinementScore.cap >= static_cast<size_t>(w) * sizeof(double)) {
                 // adaptive refinement on the compacted lanes (all w are real or a duplicate of a real one)
                 refineLanes(ctx, w, n, nnz, ctx->dValsCompacted.as<double>(), ctx->dDxCompacted.as<double>(), ctx->dBCompacted.as<double>(),
                         ctx->dRCompacted.as<double>(), ctx->dDeltaCompacted.as<double>(), nullptr, [&]() {
@@ -419,7 +419,7 @@ void newtonSolve(BatchSolverContext* ctx, DriverPass& drv) {
             scatterScenarios<<<grid(n * nReal), BLOCK, 0, ctx->stream>>>(n, nReal, ctx->dCompactedScenarioMap.as<int>(), ctx->dDxCompacted.as<double>(), ctx->dDx.as<double>());
         } else {
             { AnalysisTimer at_(__LINE__, ((ubPhase) & (CUDSS_PHASE_FACTORIZATION | CUDSS_PHASE_REFACTORIZATION)) ? 'G' : ((ubPhase) & CUDSS_PHASE_ANALYSIS) ? 'A' : 'S'); CUDSS_CHECK(cudssExecute(ctx->solver.handle, ubPhase, ctx->solver.config, ctx->solver.data, ctx->uniformBatchSystemMatrix, ctx->uniformBatchSolutionMatrix, ctx->uniformBatchRightHandSideMatrix)); }
-            if (ctx->st->nZeroImpedanceBranch > 0 && ctx->dR.p != nullptr && ctx->uniformBatchResidualMatrix != nullptr && ctx->dIterativeRefinementScore.p != nullptr) {
+            if (ctx->structure->nZeroImpedanceBranch > 0 && ctx->dR.p != nullptr && ctx->uniformBatchResidualMatrix != nullptr && ctx->dIterativeRefinementScore.p != nullptr) {
                 // adaptive refinement on the full-width UBATCH solve (see refineLanes)
                 refineLanes(ctx, nS, n, nnz, ctx->dVals.as<double>(), ctx->dDx.as<double>(), ctx->dB.as<double>(),
                         ctx->dR.as<double>(), ctx->dDelta.as<double>(), ctx->dActive.as<char>(), [&]() {
@@ -453,8 +453,8 @@ void newtonSolve(BatchSolverContext* ctx, DriverPass& drv) {
             DeviceBuf& rp = ctx->dLinRp;
             DeviceBuf& rm = ctx->dLinRm;
             DeviceBuf& sc = ctx->dLinSc;
-            linResidRowBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, nnz, ctx->st->dRowPtr.as<int>(),
-                    ctx->st->dColIdx.as<int>(), ctx->dVals.as<double>(), ctx->dDx.as<double>(),
+            linResidRowBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, nnz, ctx->structure->dRowPtr.as<int>(),
+                    ctx->structure->dColIdx.as<int>(), ctx->dVals.as<double>(), ctx->dDx.as<double>(),
                     ctx->dB.as<double>(), rp.as<double>(), rm.as<double>());
             linResidScoreBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(n, nS, rp.as<double>(), rm.as<double>(),
                     ctx->dF.as<double>(), sc.as<double>());

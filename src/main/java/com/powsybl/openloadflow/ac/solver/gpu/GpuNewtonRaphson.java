@@ -828,14 +828,14 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
         if (tablesDirty) {
             // The SAME run-constant outer-loop tables the batched SA installs on its chunk
             // contexts — a batch of one drives the same loops as a batch of five hundred.
-            var distributedSlackLoop = driverDistributedSlackLoop();
+            var distributedSlackOuterLoop = driverDistributedSlackLoop();
             ReactiveCapabilityCurves.Channel reactiveCapabilityCurves = driverReactiveLimitsOuterLoop() != null
-                    ? ReactiveCapabilityCurves.build(network, equationSystem, cachedData, driverDistributedSlackParameters(), distributedSlackLoop != null, target,
+                    ? ReactiveCapabilityCurves.build(network, equationSystem, cachedData, driverDistributedSlackParameters(), distributedSlackOuterLoop != null, target,
                             acLoadFlowParameters.getNetworkParameters().isExtrapolateReactiveLimits())
                     : null;
             // forceTargetQInReactiveLimits: the base load flow's slack moves P too, and OLF re-clamps.
             var lfNetworkParameters = acLoadFlowParameters.getNetworkParameters();
-            ForceTargetQInReactiveLimits.Channel forcedTargetQ = driverReactiveLimitsOuterLoop() != null && distributedSlackLoop != null
+            ForceTargetQInReactiveLimits.Channel forcedTargetQ = driverReactiveLimitsOuterLoop() != null && distributedSlackOuterLoop != null
                     ? ForceTargetQInReactiveLimits.build(network, equationSystem, cachedData, driverDistributedSlackParameters(),
                             lfNetworkParameters.isForceTargetQInReactiveLimits() && lfNetworkParameters.isReactiveLimits(),
                             true, target, activation.rowMode(), lfNetworkParameters.isExtrapolateReactiveLimits())

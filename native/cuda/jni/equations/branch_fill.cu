@@ -37,7 +37,7 @@ __global__ void fillClosedBranchBatch(int elementCount, int nScenarios, int n, i
                                       const double* in, const int* ix, const int* dest,
                                       const double* x, double* vals, double* F,
                                       const char* disabled, const char* active,
-                                      int nR1Ov, const int* r1OvSlotElem, const double* r1OvVal,
+                                      int nClosedBranchParameterOverrides, const int* closedBranchParameterOverrideScenarioElement, const double* closedBranchParameterOverrideValues,
                                       const int* alternateDestination, const int* selectorRow, const int* mode, int dynamicRelocation,
                                       const int* phaseControlDestination, const int* phaseControlSelector, ReactiveRelocationTables rt) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -48,7 +48,7 @@ __global__ void fillClosedBranchBatch(int elementCount, int nScenarios, int n, i
     const double* p = in + e * 8;                            // y g1 g2 b1 b2 ksi r1 a1
     const int* q = ix + e * 12;                              // P1 Q1 P2 Q2 ph1 v1 ph2 v2 a1col r1col
     double pOv[8];
-    if (findTapOverride(nR1Ov, r1OvSlotElem, r1OvVal, s, e, pOv)) {
+    if (findTapOverride(nClosedBranchParameterOverrides, closedBranchParameterOverrideScenarioElement, closedBranchParameterOverrideValues, s, e, pOv)) {
         p = pOv;
     }
     const double* xs = x + s * n;
@@ -95,7 +95,7 @@ __global__ void fillClosedBranchBatch(int elementCount, int nScenarios, int n, i
 __global__ void fillClosedBranchQbufBatch(int elementCount, int nScenarios, int n, int nElements, int elemOffset,
                                           const double* in, const int* ix, const int* dest,
                                           const double* x, double* F, const char* disabled, const char* active,
-                                          int nR1Ov, const int* r1OvSlotElem, const double* r1OvVal) {
+                                          int nClosedBranchParameterOverrides, const int* closedBranchParameterOverrideScenarioElement, const double* closedBranchParameterOverrideValues) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= elementCount * nScenarios) return;
     int e = tid % elementCount;
@@ -104,7 +104,7 @@ __global__ void fillClosedBranchQbufBatch(int elementCount, int nScenarios, int 
     const double* p = in + e * 8;                            // y g1 g2 b1 b2 ksi r1 a1
     const int* q = ix + e * 12;
     double pOv[8];
-    if (findTapOverride(nR1Ov, r1OvSlotElem, r1OvVal, s, e, pOv)) {
+    if (findTapOverride(nClosedBranchParameterOverrides, closedBranchParameterOverrideScenarioElement, closedBranchParameterOverrideValues, s, e, pOv)) {
         p = pOv;
     }
     const double* xs = x + s * n;
@@ -173,7 +173,7 @@ __global__ void fillClosedBranchBatchF(int elementCount, int nScenarios, int n, 
                                        const double* in, const int* ix, const int* dest,
                                        const double* x, double* F,
                                        const char* disabled, const char* active,
-                                       int nR1Ov, const int* r1OvSlotElem, const double* r1OvVal,
+                                       int nClosedBranchParameterOverrides, const int* closedBranchParameterOverrideScenarioElement, const double* closedBranchParameterOverrideValues,
                                        const int* alternateDestination, const int* selectorRow, const int* mode, int dynamicRelocation,
                                        const int* phaseControlDestination, const int* phaseControlSelector, ReactiveRelocationTables rt) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -184,7 +184,7 @@ __global__ void fillClosedBranchBatchF(int elementCount, int nScenarios, int n, 
     const double* p = in + e * 8;                            // y g1 g2 b1 b2 ksi r1 a1
     const int* q = ix + e * 12;                              // P1 Q1 P2 Q2 ph1 v1 ph2 v2 a1col r1col
     double pOv[8];
-    bool tapOv = findTapOverride(nR1Ov, r1OvSlotElem, r1OvVal, s, e, pOv);
+    bool tapOv = findTapOverride(nClosedBranchParameterOverrides, closedBranchParameterOverrideScenarioElement, closedBranchParameterOverrideValues, s, e, pOv);
     if (tapOv) {
         p = pOv;
     }

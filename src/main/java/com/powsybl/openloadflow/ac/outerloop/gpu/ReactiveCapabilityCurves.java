@@ -112,7 +112,7 @@ public final class ReactiveCapabilityCurves {
             boolean remoteMember = com.powsybl.openloadflow.ac.equations.vector.gpu.RemoteMemberQPacker.isRemoteMemberEntry(bus);
             boolean pilotSelf = com.powsybl.openloadflow.ac.equations.vector.gpu.PilotSelfPacker.isPilotSelfEntry(bus);
             if (remoteMember || pilotSelf) {
-                var voltageControl = com.powsybl.openloadflow.ac.equations.vector.gpu.RemoteMemberQPacker.mainGenVc(bus);
+                var voltageControl = com.powsybl.openloadflow.ac.equations.vector.gpu.RemoteMemberQPacker.mainGeneratorVoltageControl(bus);
                 var pilotVar = es.getVariableSet().getVariable(voltageControl.getControlledBus().getNum(), AcVariableType.BUS_V);
                 // a row < 0 is a bus a contingency disabled: the pack skips it (vCol < 0) and so must the replay
                 if (vVar == null || vVar.getRow() < 0 || pilotVar == null || pilotVar.getRow() < 0

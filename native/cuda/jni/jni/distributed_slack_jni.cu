@@ -166,7 +166,7 @@ OLF_JNI(ac_outerloop_gpu, DistributedSlackNative, setBatchSlackBusRows)(
     std::vector<int> rows(ne);
     env->GetIntArrayRegion(jRows, 0, ne, rows.data());
     for (int& r : rows) {
-        r = r >= 0 ? ctx->st->rowMap[r] : -1;
+        r = r >= 0 ? ctx->structure->rowMap[r] : -1;
     }
     ctx->dSlackBusRowOverride.upload(rows.data(), static_cast<size_t>(ne) * sizeof(int));
     ctx->hasSlackBusRowOverride = 1;
@@ -226,7 +226,7 @@ OLF_JNI(ac_outerloop_gpu, DistributedSlackNative, setBatchDistributedSlackBusRow
     std::vector<int> rows(len, -1);
     int nTriples = env->GetArrayLength(jTriples) / 3;
     jint* t = env->GetIntArrayElements(jTriples, nullptr);
-    const std::vector<int>& rowMap = ctx->st->rowMap;
+    const std::vector<int>& rowMap = ctx->structure->rowMap;
     int nOk = 0;
     for (int k = 0; k < nTriples; k++) {
         int s = t[3 * k];

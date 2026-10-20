@@ -61,7 +61,7 @@ final class OutageMaskSeed {
                 int soElem = elementMapper.getElementIndex(so.branch());
                 if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {
                     // Does this branch also feed a DISTR_Q row? fillDistrQBatch reads
-                    // closedBranchParameters with NO r1Ov parameters, so it cannot see the per-scenario
+                    // closedBranchParameters with NO closedBranchParameterOverrides parameters, so it cannot see the per-scenario
                     // pi override: a side-opened branch that contributes to a remote
                     // voltage-control group's reactive distribution would be counted
                     // there with its FULL series admittance instead of the dangling
@@ -81,10 +81,10 @@ final class OutageMaskSeed {
                             sopi.getG1(), sopi.getB1(), sopi.getG2(), sopi.getB2(),
                             closedBranchParameterRow[1], closedBranchParameterRow[3], closedBranchParameterRow[2], closedBranchParameterRow[4]);
                 }
-                rs.r1OvSlotElemList.add(s);
-                rs.r1OvSlotElemList.add(soElem);
+                rs.closedBranchParameterOverrideScenarioElementList.add(s);
+                rs.closedBranchParameterOverrideScenarioElementList.add(soElem);
                 for (double v : closedBranchParameterRow) {
-                    rs.r1OvValList.add(v);
+                    rs.closedBranchParameterOverrideValueList.add(v);
                 }
             }
         }

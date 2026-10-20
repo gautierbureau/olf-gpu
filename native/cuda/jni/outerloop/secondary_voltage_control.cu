@@ -119,7 +119,7 @@ __global__ void secondaryVoltageControlTriggerBatch(SecondaryVoltageControlTable
 // which is dx_i at the zone's pilot row.
 __global__ void secondaryVoltageControlGatherSensitivityBatch(SecondaryVoltageControlTables T, int nScenarios, int n, int i, int nElements, int closedBranchOffset, int shuntOffset,
                                const double* closedBranchParameters, const int* closedBranchIndices, const double* shuntParameters, const int* shuntIndices,
-                               int nR1Ov, const int* r1OvSlotElem, const double* r1OvVal,
+                               int nClosedBranchParameterOverrides, const int* closedBranchParameterOverrideScenarioElement, const double* closedBranchParameterOverrideValues,
                                int nShuntAdmittanceOverrides, const int* shuntAdmittanceOverrideScenarioElement, const double* shuntAdmittanceOverrideDelta,
                                const char* disabled, const double* x, const double* dx) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -149,7 +149,7 @@ __global__ void secondaryVoltageControlGatherSensitivityBatch(SecondaryVoltageCo
             if (e < 0) continue;
             const double* p = closedBranchParameters + e * 8;
             double pOv[8];
-            if (findTapOverride(nR1Ov, r1OvSlotElem, r1OvVal, s, e, pOv)) p = pOv;
+            if (findTapOverride(nClosedBranchParameterOverrides, closedBranchParameterOverrideScenarioElement, closedBranchParameterOverrideValues, s, e, pOv)) p = pOv;
             const int* q = closedBranchIndices + e * 12;
             double g[18];
             controlledFlowAndGradient(T.reactiveTermKind[k] == 0 ? 1 : 2, GpuControlledFlow::REACTIVE_POWER, p, xs, q, g);  // the reactive flow on side 1 / 2
@@ -357,16 +357,16 @@ void secondaryVoltageControlStep(BatchSolverContext* ctx, DriverPass& drv) {
     fillActiveBatch(ctx, drv, false);
     bool first = true;
     for (int i = 0; i < nC; i++) {
-        int row = ctx->st->rowMap[ctx->hSecondaryVoltageControlControlledBusVRow[i]];
+        int row = ctx->structure->rowMap[ctx->hSecondaryVoltageControlControlledBusVRow[i]];
         if (row < 0) continue;                           // controlled bus not a live identity: insensitive
         setUnitRhsBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, row, ctx->dB.as<double>());
         repairZeroDiagonalRightHandSide(ctx, nS, ctx->dB.as<double>());
         sensitivitySolve(ctx, drv, first);
         secondaryVoltageControlGatherSensitivityBatch<<<grid(nC * nS), BLOCK, 0, ctx->stream>>>(secondaryVoltageControlTables(ctx), nS, n, i,
                 ctx->nElements, ctx->closedBranchOffset, ctx->shuntOffset,
-                ctx->st->closedBranch.parameters.as<double>(), ctx->st->closedBranch.indices.as<int>(),
-                ctx->st->shunt.parameters.as<double>(), ctx->st->shunt.indices.as<int>(),
-                ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>(),
+                ctx->structure->closedBranch.parameters.as<double>(), ctx->structure->closedBranch.indices.as<int>(),
+                ctx->structure->shunt.parameters.as<double>(), ctx->structure->shunt.indices.as<int>(),
+                ctx->nClosedBranchParameterOverrides, ctx->dClosedBranchParameterOverrideScenarioElement.as<int>(), ctx->dClosedBranchParameterOverrideValues.as<double>(),
                 ctx->nShuntAdmittanceOverrides, ctx->dShuntAdmittanceOverrideScenarioElement.as<int>(), ctx->dShuntAdmittanceOverrideDelta.as<double>(),
                 ctx->dDisabled.as<char>(), ctx->dX.as<double>(), ctx->dDx.as<double>());
     }

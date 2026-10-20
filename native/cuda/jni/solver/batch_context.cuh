@@ -36,7 +36,7 @@ namespace olfgpu {
 //   its per-scenario on/off overrides (zeroImpedanceBranchOpenOverrides / zeroImpedanceBranchCloseOverrides).
 struct BatchSolverContext {
     int loopTraceSlot = -1;                                  // OLF_GPU_LOOP_TRACE by CONTINGENCY: the slot the host resolved for this chunk
-    SharedStructurePtr st;                                   // built once per extraction, see SharedStructure
+    SharedStructurePtr structure;                                   // built once per extraction, see SharedStructure
     int n = 0;
     int nnz = 0;
     int nScenarios = 0;
@@ -77,8 +77,8 @@ struct BatchSolverContext {
     // network.xiidm's full non-busbar scope fillZeroImpBatch was the top kernel, 32 s of 126 s (45 ms a launch).
     DeviceBuf dZeroImpedanceBranchOpenMask, dZeroImpedanceBranchCloseMask, dSpanningTreeOverrideMask;            // off/on: 1 = listed; tree: -1 = no override, else 0/1
     bool hasZeroImpedanceBranchMasks = false;
-    int nR1Ov = 0;                                           // per-scenario closed-branch tap overrides (tap/PST actions)
-    DeviceBuf dR1OvSlotElem, dR1OvVal;                       // nR1Ov*2 ints / nR1Ov*8 doubles (full closedBranchParameters row per entry)
+    int nClosedBranchParameterOverrides = 0;                                           // per-scenario closed-branch tap overrides (tap/PST actions)
+    DeviceBuf dClosedBranchParameterOverrideScenarioElement, dClosedBranchParameterOverrideValues;                       // nClosedBranchParameterOverrides*2 ints / nClosedBranchParameterOverrides*8 doubles (full closedBranchParameters row per entry)
     // ---- solve-only batch compaction (mode 3, tol > 0): lazily allocated on first engage ----
     DeviceBuf dValsCompacted, dBCompacted, dDxCompacted, dCompactedScenarioMap;                      // nnz*cap / n*cap / n*cap / cap ints
     CudssCtx compactedSolver;                                            // dedicated handle/config/data for the compact width
@@ -319,8 +319,8 @@ struct BatchSolverContext {
     std::vector<double> hIncrementalTransformerVoltageControlTapRows;
     // Host copy of the CALLER's tap overrides (contingency tap actions) as uploaded at solve entry:
     // the TVC loop's moves are merged IN FRONT of them (findTapOverride takes the first match).
-    std::vector<int> hR1OvBaseSlotElem;
-    std::vector<double> hR1OvBaseVal;
+    std::vector<int> hClosedBranchParameterOverrideBaseScenarioElement;
+    std::vector<double> hClosedBranchParameterOverrideBaseValues;
     // INCREMENTAL SHUNT VOLTAGE CONTROL — in-kernel outer loop (GpuOuterLoopKind::INCREMENTAL_SHUNT_VOLTAGE_CONTROL). Controllers are
     // grouped per controlled bus (OLF adjustB round-robin, |b|-descending); each controller shunt has
     // sub-controllers (OLF LfShunt.Controller) with their own section B/G tables and ratchet.
@@ -551,7 +551,7 @@ void uploadBatchOverrides(BatchSolverContext* ctx, int stateVectorScalingMode, d
                           const int* varType, int nShuntAdmittanceOverrides, const int* shuntAdmittanceOverrideScenarioElement, const double* shuntAdmittanceOverrideDelta,
                           int nBaseClosedZeroImpedanceBranches, int nZeroImpedanceBranchOpenOverrides, const int* zeroImpedanceBranchOpenScenarioElement,
                           int nZeroImpedanceBranchCloseOverrides, const int* zeroImpedanceBranchCloseScenarioElement,
-                          int nR1Ov, const int* r1OvSlotElem, const double* r1OvVal);
+                          int nClosedBranchParameterOverrides, const int* closedBranchParameterOverrideScenarioElement, const double* closedBranchParameterOverrideValues);
 
 }  // namespace olfgpu
 

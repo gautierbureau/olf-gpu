@@ -306,12 +306,12 @@ final class GpuBatchPrecomputer {
                 System.err.printf("QUALIFY_TRACE   load bus=%s p=%.9f q=%.9f%n",
                         loadLoss.bus() == null ? "?" : loadLoss.bus().getId(), loadLoss.p(), loadLoss.q());
             }
-            // Each shunt shift as the DEVICE will apply it (dg/db added to the packed g/b) next to
+            // Each shunt shift as the DEVICE will apply it (deltaG / deltaB added to the packed g / b) next to
             // the RAW AdmittanceShift the propagation carries and the shunt's CURRENT admittance:
             // "shifts=1" does not say whether the two arms remove the same susceptance.
             for (var shift : shifts == null ? List.<ShuntShift>of() : shifts) {
                 System.err.printf("QUALIFY_TRACE   shunt=%s dg=%.9f db=%.9f baseG=%.9f baseB=%.9f bus=%s%n",
-                        shift.shunt().getId(), shift.dg(), shift.db(), shift.shunt().getG(), shift.shunt().getB(),
+                        shift.shunt().getId(), shift.deltaG(), shift.deltaB(), shift.shunt().getG(), shift.shunt().getB(),
                         "n/a");
             }
             for (var e : propagatedContingency.getShuntIdsToShift().entrySet()) {

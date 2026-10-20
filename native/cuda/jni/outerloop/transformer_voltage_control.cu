@@ -411,7 +411,7 @@ void transformerVoltageControlStep(BatchSolverContext* ctx, DriverPass& drv) {
     // after its pins; the freeze happens two loops later and would otherwise leave the pilot holding
     // a target for a control that no longer exists until the next sweep reached RL again (measured
     // 0.6 kV). Same kernel, run again here — it restores the identity at COMPLETE on the same rule.
-    if (ctx->hasDistrQRelocationGroups && ctx->st->nReactiveRelocationGroups > 0 && ctx->nGeneratorVoltageControlFreezeCandidates > 0) {
+    if (ctx->hasDistrQRelocationGroups && ctx->structure->nReactiveRelocationGroups > 0 && ctx->nGeneratorVoltageControlFreezeCandidates > 0) {
         launchPilotTargetVEquationUpdate(ctx, drv);
     }
     CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
@@ -427,8 +427,8 @@ void transformerVoltageControlStep(BatchSolverContext* ctx, DriverPass& drv) {
         int nCont = 0, nFixed = 0, nRej = 0;
         for (size_t k = 0; k < nsm; k++) { nCont += memberState[k] == GpuDiscreteControlMemberState::CONTINUOUS; nFixed += memberState[k] == GpuDiscreteControlMemberState::ROUNDED; }
         for (int s2 = 0; s2 < nS; s2++) nRej += rej[s2] ? 1 : 0;
-        std::fprintf(stderr, "TVD_KERNEL mode=%d nS=%d nMembers=%d continuous=%d fixed=%d rejected=%d step0=%d nR1Ov=%d\n",
-                     ctx->transformerVoltageControlMode, nS, ctx->nTransformerVoltageControlMembers, nCont, nFixed, nRej, step[0], ctx->nR1Ov);
+        std::fprintf(stderr, "TVD_KERNEL mode=%d nS=%d nMembers=%d continuous=%d fixed=%d rejected=%d step0=%d nClosedBranchParameterOverrides=%d\n",
+                     ctx->transformerVoltageControlMode, nS, ctx->nTransformerVoltageControlMembers, nCont, nFixed, nRej, step[0], ctx->nClosedBranchParameterOverrides);
     }
 }
 

@@ -250,16 +250,16 @@ void rebuildTapOverrides(BatchSolverContext* ctx) {
             }
         }
     }
-    scenarioElement.insert(scenarioElement.end(), ctx->hR1OvBaseSlotElem.begin(), ctx->hR1OvBaseSlotElem.end());
-    piModelRows.insert(piModelRows.end(), ctx->hR1OvBaseVal.begin(), ctx->hR1OvBaseVal.end());
+    scenarioElement.insert(scenarioElement.end(), ctx->hClosedBranchParameterOverrideBaseScenarioElement.begin(), ctx->hClosedBranchParameterOverrideBaseScenarioElement.end());
+    piModelRows.insert(piModelRows.end(), ctx->hClosedBranchParameterOverrideBaseValues.begin(), ctx->hClosedBranchParameterOverrideBaseValues.end());
     int nOverrides = static_cast<int>(scenarioElement.size() / 2);
     if (nOverrides > 0) {
-        ctx->dR1OvSlotElem.ensure(scenarioElement.size() * sizeof(int));
-        ctx->dR1OvVal.ensure(piModelRows.size() * sizeof(double));
-        CUDA_CHECK(cudaMemcpy(ctx->dR1OvSlotElem.p, scenarioElement.data(), scenarioElement.size() * sizeof(int), cudaMemcpyHostToDevice));
-        CUDA_CHECK(cudaMemcpy(ctx->dR1OvVal.p, piModelRows.data(), piModelRows.size() * sizeof(double), cudaMemcpyHostToDevice));
+        ctx->dClosedBranchParameterOverrideScenarioElement.ensure(scenarioElement.size() * sizeof(int));
+        ctx->dClosedBranchParameterOverrideValues.ensure(piModelRows.size() * sizeof(double));
+        CUDA_CHECK(cudaMemcpy(ctx->dClosedBranchParameterOverrideScenarioElement.p, scenarioElement.data(), scenarioElement.size() * sizeof(int), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(ctx->dClosedBranchParameterOverrideValues.p, piModelRows.data(), piModelRows.size() * sizeof(double), cudaMemcpyHostToDevice));
     }
-    ctx->nR1Ov = nOverrides;
+    ctx->nClosedBranchParameterOverrides = nOverrides;
 }
 
 // Per-solve reset. Incremental TVC: every scenario starts at the base tap with a fresh ratchet.
@@ -319,7 +319,7 @@ void incrementalTransformerVoltageControlStep(BatchSolverContext* ctx, DriverPas
     bool first = true;
     for (int c = 0; c < nIncrementalTransformerVoltageControlControllerBranches; c++) {
         if (!needC[c]) continue;
-        int row = ctx->st->rowMap[ctx->hIncrementalTransformerVoltageControlRhoRow[c]];
+        int row = ctx->structure->rowMap[ctx->hIncrementalTransformerVoltageControlRhoRow[c]];
         if (row < 0) continue;                           // rho row not an active equation: stays insensitive
         setUnitRhsBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, row, ctx->dB.as<double>());
         repairZeroDiagonalRightHandSide(ctx, nS, ctx->dB.as<double>());
@@ -353,8 +353,8 @@ void incrementalTransformerVoltageControlStep(BatchSolverContext* ctx, DriverPas
                 if (cur[static_cast<size_t>(s2) * nIncrementalTransformerVoltageControlControllerBranches + c] != base[c]) nMoved++;
             }
         }
-        std::fprintf(stderr, "TVC_KERNEL nS=%d nControllers=%d outOfDeadband=%d pairsOffBaseTap=%d nR1Ov=%d\n",
-                     nS, nIncrementalTransformerVoltageControlControllerBranches, nOut, nMoved, ctx->nR1Ov);
+        std::fprintf(stderr, "TVC_KERNEL nS=%d nControllers=%d outOfDeadband=%d pairsOffBaseTap=%d nClosedBranchParameterOverrides=%d\n",
+                     nS, nIncrementalTransformerVoltageControlControllerBranches, nOut, nMoved, ctx->nClosedBranchParameterOverrides);
         std::vector<double> dv(nst), se(nst);
         CUDA_CHECK(cudaMemcpy(dv.data(), ctx->dIncrementalTransformerVoltageControlDiffV.p, nst * sizeof(double), cudaMemcpyDeviceToHost));
         CUDA_CHECK(cudaMemcpy(se.data(), ctx->dIncrementalTransformerVoltageControlSensitivity.p, nst * sizeof(double), cudaMemcpyDeviceToHost));
@@ -362,7 +362,7 @@ void incrementalTransformerVoltageControlStep(BatchSolverContext* ctx, DriverPas
             if (outOfDeadband[k]) {
                 std::fprintf(stderr, "TVC_KERNEL_PAIR s=%d c=%d diffV=%.9e sensitivity=%.9e tap=%d base=%d rhoRowMapped=%d\n",
                              (int) (k / nIncrementalTransformerVoltageControlControllerBranches), (int) (k % nIncrementalTransformerVoltageControlControllerBranches), dv[k], se[k], cur[k], base[k % nIncrementalTransformerVoltageControlControllerBranches],
-                             ctx->st->rowMap[ctx->hIncrementalTransformerVoltageControlRhoRow[k % nIncrementalTransformerVoltageControlControllerBranches]]);
+                             ctx->structure->rowMap[ctx->hIncrementalTransformerVoltageControlRhoRow[k % nIncrementalTransformerVoltageControlControllerBranches]]);
             }
         }
     }

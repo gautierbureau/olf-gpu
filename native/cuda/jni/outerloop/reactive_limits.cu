@@ -516,7 +516,7 @@ void reactiveLimitsCheck(BatchSolverContext* ctx, DriverPass& drv, int loopKind)
     const int& MAX_PQ_PV_SWITCH = drv.maxPqPvSwitch;
     const int& reactiveLimitsDecisionLogScenario = drv.reactiveLimitsDecisionLogScenario;
     const int& skipReactiveLimitsPhase = drv.skipReactiveLimitsPhase;
-    const bool& svcCoefDyn = drv.svcCoefDyn;
+    const bool& hasPerScenarioSvcSusceptanceLimits = drv.hasPerScenarioSvcSusceptanceLimits;
     const int& nReactiveLimitTargetVOverrides = drv.nReactiveLimitTargetVOverrides;
     const int& nReactiveLimitDeltaOverrides = drv.nReactiveLimitDeltaOverrides;
     const int& nReactiveCapabilityCurveOverrides = drv.nReactiveCapabilityCurveOverrides;
@@ -570,13 +570,13 @@ void reactiveLimitsCheck(BatchSolverContext* ctx, DriverPass& drv, int loopKind)
                 ctx->nReactiveLimitRemoteEntries > 0 ? ctx->dReactiveLimitVoltageControlRole.as<char>() : nullptr,
                 ctx->nReactiveLimitRemoteEntries > 0 ? ctx->dReactiveLimitComparedVoltageRow.as<int>() : nullptr,
                 ctx->dReactiveLimitSvcMinB.as<double>(), ctx->dReactiveLimitSvcMaxB.as<double>(), ctx->dReactiveLimitBaseVSquared.as<double>(),
-                svcCoefDyn ? ctx->dReactiveLimitSvcMinBPerScenario.as<double>() : nullptr, svcCoefDyn ? ctx->dReactiveLimitSvcMaxBPerScenario.as<double>() : nullptr,
+                hasPerScenarioSvcSusceptanceLimits ? ctx->dReactiveLimitSvcMinBPerScenario.as<double>() : nullptr, hasPerScenarioSvcSusceptanceLimits ? ctx->dReactiveLimitSvcMaxBPerScenario.as<double>() : nullptr,
                 ctx->nReactiveLimitIslanded > 0 ? ctx->dReactiveLimitIslanded.as<char>() : nullptr,
                 ctx->reactiveLimitsRobustMode ? ctx->dReactiveLimitInitialTargetQ.as<double>() : nullptr,
                 ctx->reactiveLimitsRobustMinRealisticVoltage, ctx->reactiveLimitsRobustMaxRealisticVoltage, ctx->reactiveLimitsRobustMode,
                 reactiveLimitsDecisionLogScenario, ctx->dReactiveLimitsDecisionLog.p ? ctx->dReactiveLimitsDecisionLog.as<double>() : nullptr,
                 ctx->dReactiveLimitsDecisionLogCount.p ? ctx->dReactiveLimitsDecisionLogCount.as<int>() : nullptr, outer,
-                pilotSelfReactiveLimitEntryOrNull(ctx), ctx->st->nReactiveRelocationGroups,
+                pilotSelfReactiveLimitEntryOrNull(ctx), ctx->structure->nReactiveRelocationGroups,
                 ctx->nReactiveLimitLocalOverrides > 0 ? ctx->dReactiveLimitLocalOverride.as<char>() : nullptr,
                 ctx->nReactiveLimitLocalOverrides > 0 ? ctx->dReactiveLimitLocalTargetV.as<double>() : nullptr,
                 ctx->nReactiveLimitPqPvSwitchForbidden > 0 ? ctx->dReactiveLimitPqPvSwitchForbidden.as<char>() : nullptr, ctx->nReactiveLimitPqPvSwitchForbidden > 0 ? ctx->dReactiveLimitPqPvSwitchRejected.as<char>() : nullptr,
@@ -591,7 +591,7 @@ void reactiveLimitsCheck(BatchSolverContext* ctx, DriverPass& drv, int loopKind)
                     ctx->dReactiveLimitVoltageControlRole.as<char>(), ctx->dReactiveLimitComparedVoltageRow.as<int>(), ctx->dReactiveLimitQLimitType.as<char>(),
                     ctx->nReactiveLimitIslanded > 0 ? ctx->dReactiveLimitIslanded.as<char>() : nullptr,
                     ctx->dPilotSelfMixedPvPqRejected.as<char>(),
-                    pilotSelfReactiveLimitEntryOrNull(ctx), ctx->st->nReactiveRelocationGroups,
+                    pilotSelfReactiveLimitEntryOrNull(ctx), ctx->structure->nReactiveRelocationGroups,
                 ctx->nDistrQMembers, ctx->dDistrQMemberReactiveLimitEntry.p != nullptr ? ctx->dDistrQMemberReactiveLimitEntry.as<int>() : nullptr, ctx->hasDistrQSubgroups ? ctx->dDistrQSubgroup.as<char>() : nullptr);
             std::vector<char> mixed(nS);
             CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
@@ -657,7 +657,7 @@ void reactiveLimitsCheck(BatchSolverContext* ctx, DriverPass& drv, int loopKind)
                     ctx->dPfFlipped.as<char>(), ctx->dPfSavedVT.as<double>(),
                     ctx->dOuterLoopCheckActive.as<char>(), ctx->dOuterLoopUnstable.as<char>());
         }
-        if (ctx->hasDistrQRelocationGroups && ctx->st->nReactiveRelocationGroups > 0) {    // all-pinned corner: pilot vEq flip/restore
+        if (ctx->hasDistrQRelocationGroups && ctx->structure->nReactiveRelocationGroups > 0) {    // all-pinned corner: pilot vEq flip/restore
             launchPilotTargetVEquationUpdate(ctx, drv);
         }
         if (ctx->nReactiveLimitRemoteEntries > 0 && ctx->nDistrQMembers > 0) {

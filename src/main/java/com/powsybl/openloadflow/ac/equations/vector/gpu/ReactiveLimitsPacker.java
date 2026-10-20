@@ -173,7 +173,7 @@ public final class ReactiveLimitsPacker {
                     // all-pinned-group fixture, 0.68 kV at the pilot.
                     boolean pilotSelf = PilotSelfPacker.isPilotSelfEntry(bus);
                     if ((remoteMember || pilotSelf) && vCol[bn] >= 0) {
-                        var groupVoltageControl = RemoteMemberQPacker.mainGenVc(bus);                   // the GROUP's control: the group identity, the pilot's V row
+                        var groupVoltageControl = RemoteMemberQPacker.mainGeneratorVoltageControl(bus);                   // the GROUP's control: the group identity, the pilot's V row
                         // ...but the switch-back test is the member's OWN control's: OLF's ReactiveLimitsOuterLoop reads
                         // getBusV / getBusTargetV off bus.getGeneratorVoltageControl(), which for a control MERGED into
                         // the group (a dependent section) keeps its own controlled bus and its own target while the

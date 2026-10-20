@@ -54,17 +54,17 @@ final class ActionSeed {
             }
         }
         for (TapR1Override tap : contingencies.get(ci).tapOverrides()) {
-            rs.r1OvSlotElemList.add(s);
-            rs.r1OvSlotElemList.add(elementMapper.getElementIndex(tap.branch()));   // cb pack index == element index
+            rs.closedBranchParameterOverrideScenarioElementList.add(s);
+            rs.closedBranchParameterOverrideScenarioElementList.add(elementMapper.getElementIndex(tap.branch()));   // cb pack index == element index
             for (double v : tap.closedBranchParameterRow()) {
-                rs.r1OvValList.add(v);
+                rs.closedBranchParameterOverrideValueList.add(v);
             }
         }
         for (ShuntShift shuntShift : contingencies.get(ci).shuntShifts()) {
             rs.shuntAdmittanceOverrideScenarioElementList.add(s);
             rs.shuntAdmittanceOverrideScenarioElementList.add(elementMapper.getElementIndex(shuntShift.shunt()) - rs.shuntPackOffset);
-            rs.shuntAdmittanceOverrideDeltaList.add(shuntShift.dg());
-            rs.shuntAdmittanceOverrideDeltaList.add(shuntShift.db());
+            rs.shuntAdmittanceOverrideDeltaList.add(shuntShift.deltaG());
+            rs.shuntAdmittanceOverrideDeltaList.add(shuntShift.deltaB());
         }
     }
 }

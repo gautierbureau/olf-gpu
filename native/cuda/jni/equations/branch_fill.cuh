@@ -16,14 +16,14 @@ __global__ void fillClosedBranchBatch(int elementCount, int nScenarios, int n, i
                                       const double* in, const int* ix, const int* dest,
                                       const double* x, double* vals, double* F,
                                       const char* disabled, const char* active,
-                                      int nR1Ov, const int* r1OvSlotElem, const double* r1OvVal,
+                                      int nClosedBranchParameterOverrides, const int* closedBranchParameterOverrideScenarioElement, const double* closedBranchParameterOverrideValues,
                                       const int* alternateDestination, const int* selectorRow, const int* mode, int dynamicRelocation,
                                       const int* phaseControlDestination, const int* phaseControlSelector, ReactiveRelocationTables rt);
 
 __global__ void fillClosedBranchQbufBatch(int elementCount, int nScenarios, int n, int nElements, int elemOffset,
                                           const double* in, const int* ix, const int* dest,
                                           const double* x, double* F, const char* disabled, const char* active,
-                                          int nR1Ov, const int* r1OvSlotElem, const double* r1OvVal);
+                                          int nClosedBranchParameterOverrides, const int* closedBranchParameterOverrideScenarioElement, const double* closedBranchParameterOverrideValues);
 
 __global__ void fillOpenBranchBatch(int elementCount, int nScenarios, int n, int nnz, int nElements, int elemOffset,
                                     const double* in, const int* ix, const int* dest,
@@ -36,7 +36,7 @@ __global__ void fillClosedBranchBatchF(int elementCount, int nScenarios, int n, 
                                        const double* in, const int* ix, const int* dest,
                                        const double* x, double* F,
                                        const char* disabled, const char* active,
-                                       int nR1Ov, const int* r1OvSlotElem, const double* r1OvVal,
+                                       int nClosedBranchParameterOverrides, const int* closedBranchParameterOverrideScenarioElement, const double* closedBranchParameterOverrideValues,
                                        const int* alternateDestination, const int* selectorRow, const int* mode, int dynamicRelocation,
                                        const int* phaseControlDestination, const int* phaseControlSelector, ReactiveRelocationTables rt);
 

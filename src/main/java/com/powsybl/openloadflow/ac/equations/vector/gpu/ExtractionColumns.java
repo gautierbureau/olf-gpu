@@ -155,10 +155,10 @@ record ExtractionColumns(int[] phiCol, int[] vCol, int[] branchRhoCol, int[] bra
         for (LfBus bus : network.getBuses()) {
             int bn = bus.getNum();
             if (vCol[bn] >= 0 && GpuAcRowIndexing.isRemoteGenVcMember(bus)
-                    && (!GpuAcRowIndexing.isFreeRemoteGenVcMember(bus)
+                    && (!GpuAcRowIndexing.isFreeRemoteGeneratorVoltageControlMember(bus)
                         // the MAIN control's pilot: on a member's own (merged, dependent) control the
                         // controlled bus is the member itself, which is never in the pilot set
-                        || reactiveRelocationPilotBuses.contains(GpuAcRowIndexing.mainGenVc(bus).getControlledBus().getNum()))) {
+                        || reactiveRelocationPilotBuses.contains(GpuAcRowIndexing.mainGeneratorVoltageControl(bus).getControlledBus().getNum()))) {
                 qRow[bn] = -1;
                 alternateQRow[bn] = vCol[bn];
             }
@@ -183,7 +183,7 @@ record ExtractionColumns(int[] phiCol, int[] vCol, int[] branchRhoCol, int[] bra
             // DISTR_Q contributions still reported pilotRelocationGroup=-1, so the carrier gate in fillDistrQBatch could
             // never fire and the re-picked free member kept a DISTR_Q equation OLF had deactivated.
             if (vCol[bn] >= 0 && qRow[bn] < 0 && alternateQRow[bn] == -1
-                    && GpuAcRowIndexing.isRemoteGenVcControllerElement(bus)
+                    && GpuAcRowIndexing.isRemoteGeneratorVoltageControlControllerElement(bus)
                     && bus.getGeneratorVoltageControl()
                             .filter(c -> c.getMergeStatus() == VoltageControl.MergeStatus.MAIN)
                             .map(c -> c.getControlledBus() == bus).orElse(false)) {

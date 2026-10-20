@@ -36,7 +36,7 @@ void setupBatchMatricesUbatch(BatchSolverContext* ctx) {
         int ub = nScenarios;
         CUDSS_CHECK(cudssConfigSet(ctx->solver.config, CUDSS_CONFIG_UBATCH_SIZE, &ub, sizeof(ub)));
         CUDSS_CHECK(cudssMatrixCreateCsr(&ctx->uniformBatchSystemMatrix, n, n, ctx->nnz,
-                ctx->st->dRowPtr.as<int>(), nullptr, ctx->st->dColIdx.as<int>(), ctx->dVals.as<double>(),
+                ctx->structure->dRowPtr.as<int>(), nullptr, ctx->structure->dColIdx.as<int>(), ctx->dVals.as<double>(),
                 OLF_CUDSS_CSR_TYPES,
                 CUDSS_MTYPE_GENERAL, CUDSS_MVIEW_FULL, CUDSS_BASE_ZERO));
         CUDSS_CHECK(cudssMatrixCreateDn(&ctx->uniformBatchRightHandSideMatrix, n, 1, n, ctx->dB.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
@@ -62,7 +62,7 @@ void setupBatchMatricesFallback(BatchSolverContext* ctx) {
     int n = ctx->n;
     // ---- fallback: a single matrix repointed per scenario inside the solve loop ----
     CUDSS_CHECK(cudssMatrixCreateCsr(&ctx->solver.systemMatrix, n, n, ctx->nnz,
-                                     ctx->st->dRowPtr.as<int>(), nullptr, ctx->st->dColIdx.as<int>(), ctx->dVals.as<double>(),
+                                     ctx->structure->dRowPtr.as<int>(), nullptr, ctx->structure->dColIdx.as<int>(), ctx->dVals.as<double>(),
                                      OLF_CUDSS_CSR_TYPES,
                                      CUDSS_MTYPE_GENERAL, CUDSS_MVIEW_FULL, CUDSS_BASE_ZERO));
     CUDSS_CHECK(cudssMatrixCreateDn(&ctx->solver.rightHandSideMatrix, n, 1, n, ctx->dB.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
@@ -79,7 +79,7 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& structure, int 
                                        int distributedSlackFactorMode, const double* distributedSlackBusMarginUp, const double* distributedSlackBusMarginDown,
                                        double slackBusMarginUp, double slackBusMarginDown) {
     auto ctx = std::make_unique<BatchSolverContext>();
-    ctx->st = structure;
+    ctx->structure = structure;
     int n = structure->n;
     ctx->n = n;
     ctx->nnz = structure->nnz;
@@ -133,16 +133,16 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& structure, int 
     // member rows means the controlled bus is one of its own controllers. The pilot's RL entry is the one
     // whose (row-mapped) V row is that row; without an entry the pilot can never pin and the group needs
     // no gate. nReactiveRelocationGroups is small (groups), nReactiveLimitEntries a few thousand, and this runs once per context.
-    int nRelocationGroups = ctx->st != nullptr ? ctx->st->nReactiveRelocationGroups : 0;
+    int nRelocationGroups = ctx->structure != nullptr ? ctx->structure->nReactiveRelocationGroups : 0;
     if (nRelocationGroups > 0) {
         std::vector<int> pilotSelfReactiveLimitEntry(nRelocationGroups, -1);
         for (int g = 0; g < nRelocationGroups; g++) {
-            int p0 = ctx->st->hReactiveRelocationGroupStart[g];
-            int count = ctx->st->hReactiveRelocationGroupStart[g + 1] - p0;
-            int fallbackRow = ctx->st->hReactiveRelocationCandidateRows[p0];
+            int p0 = ctx->structure->hReactiveRelocationGroupStart[g];
+            int count = ctx->structure->hReactiveRelocationGroupStart[g + 1] - p0;
+            int fallbackRow = ctx->structure->hReactiveRelocationCandidateRows[p0];
             bool pilotSelf = false;
             for (int c = 1; c < count; c++) {
-                if (ctx->st->hReactiveRelocationCandidateRows[p0 + c] == fallbackRow) {
+                if (ctx->structure->hReactiveRelocationCandidateRows[p0 + c] == fallbackRow) {
                     pilotSelf = true;
                     break;
                 }
@@ -193,9 +193,9 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& structure, int 
         // with the relocation enabled, entries read -78.0 and 4767.3 MVAr and 20 buses were pinned that OLF never
         // pins, after which the pinned solve burned all 30 iterations.
         std::vector<int> reactiveLimitReactivePowerRowMapped(reactiveLimitVoltageRowMapped);
-        if (ctx->nZeroImpedanceBranch > 0 && ctx->st->dZeroImpedanceBranchIndices.p != nullptr) {
+        if (ctx->nZeroImpedanceBranch > 0 && ctx->structure->dZeroImpedanceBranchIndices.p != nullptr) {
             std::vector<int> zidx(static_cast<size_t>(ctx->nZeroImpedanceBranch) * 11);
-            CUDA_CHECK(cudaMemcpy(zidx.data(), ctx->st->dZeroImpedanceBranchIndices.p, zidx.size() * sizeof(int), cudaMemcpyDeviceToHost));
+            CUDA_CHECK(cudaMemcpy(zidx.data(), ctx->structure->dZeroImpedanceBranchIndices.p, zidx.size() * sizeof(int), cudaMemcpyDeviceToHost));
             std::map<int, int> qRowOfVRow;
             for (int e = 0; e < ctx->nZeroImpedanceBranch; e++) {
                 const int* z = zidx.data() + static_cast<size_t>(e) * 11;
@@ -290,12 +290,12 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& structure, int 
     CUDSS_CHECK(cudssCreate(&ctx->solver.handle));
     CUDSS_CHECK(cudssSetStream(ctx->solver.handle, ctx->stream));
     CUDSS_CHECK(cudssConfigCreate(&ctx->solver.config));
-    int ir = ctx->st->nZeroImpedanceBranch > 0 ? configuredIterativeRefinementBaseSteps() : ITERATIVE_REFINEMENT_STEPS_WITHOUT_COUPLERS;
+    int ir = ctx->structure->nZeroImpedanceBranch > 0 ? configuredIterativeRefinementBaseSteps() : ITERATIVE_REFINEMENT_STEPS_WITHOUT_COUPLERS;
     CUDSS_CHECK(cudssConfigSet(ctx->solver.config, CUDSS_CONFIG_IR_N_STEPS, &ir, sizeof(ir)));
     if (mode == GpuLinearSolveMode::ROBUST) {
         applyRobustSingleMatrixConfig(ctx->solver.config);       // its own ordering: never set the ordering twice
     } else {
-        applyReorderAlg(ctx->solver.config, ctx->st->nZeroImpedanceBranch > 0);
+        applyReorderAlg(ctx->solver.config, ctx->structure->nZeroImpedanceBranch > 0);
     }
     CUDSS_CHECK(cudssDataCreate(ctx->solver.handle, &ctx->solver.data));
 
@@ -311,7 +311,7 @@ void uploadBatchOverrides(BatchSolverContext* ctx, int stateVectorScalingMode, d
                           const int* varType, int nShuntAdmittanceOverrides, const int* shuntAdmittanceOverrideScenarioElement, const double* shuntAdmittanceOverrideDelta,
                           int nBaseClosedZeroImpedanceBranches, int nZeroImpedanceBranchOpenOverrides, const int* zeroImpedanceBranchOpenScenarioElement,
                           int nZeroImpedanceBranchCloseOverrides, const int* zeroImpedanceBranchCloseScenarioElement,
-                          int nR1Ov, const int* r1OvSlotElem, const double* r1OvVal) {
+                          int nClosedBranchParameterOverrides, const int* closedBranchParameterOverrideScenarioElement, const double* closedBranchParameterOverrideValues) {
     int n = ctx->n;
     int nS = ctx->nScenarios;
     bool clampStep = stateVectorScalingMode == GpuStateVectorScalingMode::MAX_VOLTAGE_CHANGE && varType != nullptr;
@@ -384,25 +384,25 @@ void uploadBatchOverrides(BatchSolverContext* ctx, int stateVectorScalingMode, d
             std::fprintf(stderr, "ZI_LISTS nZeroImpedanceBranch=%d nScenarios=%d nZeroImpedanceBranchOpenOverrides=%d nZeroImpedanceBranchCloseOverrides=%d\n", ctx->nZeroImpedanceBranch, ctx->nScenarios, nZeroImpedanceBranchOpenOverrides, nZeroImpedanceBranchCloseOverrides);
         }
     }
-    ctx->nR1Ov = nR1Ov;
-    ctx->hR1OvBaseSlotElem.assign(r1OvSlotElem, r1OvSlotElem + (size_t) nR1Ov * 2);
-    ctx->hR1OvBaseVal.assign(r1OvVal, r1OvVal + (size_t) nR1Ov * 8);
-    if (nR1Ov > 0 || ctx->nIncrementalTransformerVoltageControlControllerBranches > 0 || ctx->nIncrementalFlowControlControllerBranches > 0 || ctx->nPhaseControlControllerBranches > 0) {
+    ctx->nClosedBranchParameterOverrides = nClosedBranchParameterOverrides;
+    ctx->hClosedBranchParameterOverrideBaseScenarioElement.assign(closedBranchParameterOverrideScenarioElement, closedBranchParameterOverrideScenarioElement + (size_t) nClosedBranchParameterOverrides * 2);
+    ctx->hClosedBranchParameterOverrideBaseValues.assign(closedBranchParameterOverrideValues, closedBranchParameterOverrideValues + (size_t) nClosedBranchParameterOverrides * 8);
+    if (nClosedBranchParameterOverrides > 0 || ctx->nIncrementalTransformerVoltageControlControllerBranches > 0 || ctx->nIncrementalFlowControlControllerBranches > 0 || ctx->nPhaseControlControllerBranches > 0) {
         // Room for the in-kernel TVC loop to merge one moved tap per (scenario, controller) in
         // front of the caller's list without reallocating mid-solve.
-        size_t capEntries = static_cast<size_t>(nR1Ov) + static_cast<size_t>(nS) * (ctx->nIncrementalTransformerVoltageControlControllerBranches + ctx->nIncrementalFlowControlControllerBranches + ctx->nPhaseControlControllerBranches + ctx->nTransformerVoltageControlMembers);
+        size_t capEntries = static_cast<size_t>(nClosedBranchParameterOverrides) + static_cast<size_t>(nS) * (ctx->nIncrementalTransformerVoltageControlControllerBranches + ctx->nIncrementalFlowControlControllerBranches + ctx->nPhaseControlControllerBranches + ctx->nTransformerVoltageControlMembers);
         capEntries = std::max<size_t>(capEntries, 1);
-        ctx->dR1OvSlotElem.ensure(capEntries * 2 * sizeof(int));
-        ctx->dR1OvVal.ensure(capEntries * 8 * sizeof(double));
-        if (nR1Ov > 0) {
-            CUDA_CHECK(cudaMemcpy(ctx->dR1OvSlotElem.p, r1OvSlotElem, static_cast<size_t>(nR1Ov) * 2 * sizeof(int), cudaMemcpyHostToDevice));
-            CUDA_CHECK(cudaMemcpy(ctx->dR1OvVal.p, r1OvVal, static_cast<size_t>(nR1Ov) * 8 * sizeof(double), cudaMemcpyHostToDevice));
+        ctx->dClosedBranchParameterOverrideScenarioElement.ensure(capEntries * 2 * sizeof(int));
+        ctx->dClosedBranchParameterOverrideValues.ensure(capEntries * 8 * sizeof(double));
+        if (nClosedBranchParameterOverrides > 0) {
+            CUDA_CHECK(cudaMemcpy(ctx->dClosedBranchParameterOverrideScenarioElement.p, closedBranchParameterOverrideScenarioElement, static_cast<size_t>(nClosedBranchParameterOverrides) * 2 * sizeof(int), cudaMemcpyHostToDevice));
+            CUDA_CHECK(cudaMemcpy(ctx->dClosedBranchParameterOverrideValues.p, closedBranchParameterOverrideValues, static_cast<size_t>(nClosedBranchParameterOverrides) * 8 * sizeof(double), cudaMemcpyHostToDevice));
         }
-    } else if (!ctx->dR1OvSlotElem.p) {
+    } else if (!ctx->dClosedBranchParameterOverrideScenarioElement.p) {
         int dummyI[2] = {-1, -1};
         double dummyD[1] = {0};
-        ctx->dR1OvSlotElem.upload(dummyI, sizeof(dummyI));
-        ctx->dR1OvVal.upload(dummyD, sizeof(dummyD));
+        ctx->dClosedBranchParameterOverrideScenarioElement.upload(dummyI, sizeof(dummyI));
+        ctx->dClosedBranchParameterOverrideValues.upload(dummyD, sizeof(dummyD));
     }
 }
 

@@ -90,9 +90,9 @@ final class GpuAcRowIndexing {
             // was pinned at SA extraction, so its q was frozen onto the member VL-5997_1's row and the member
             // lost its own alternate — the member's pin then assembled an EMPTY row (slot 893, BUS-6088_BBS)
             // while the base extraction (taken before any pin) had the layout the kernels are built for.
-            GeneratorVoltageControl mainVc = mainGenVc(bus);
+            GeneratorVoltageControl mainVc = mainGeneratorVoltageControl(bus);
             boolean canonical = mainVc != null && hasCandidateTable(mainVc, es);
-            if (isRemoteGenVcControllerElement(bus) && (!qActive || canonical)) {
+            if (isRemoteGeneratorVoltageControlControllerElement(bus) && (!qActive || canonical)) {
                 qRow[bn] = -1;                               // includes a controller that is ALSO the pilot
                 continue;
             }
@@ -177,12 +177,12 @@ final class GpuAcRowIndexing {
      *  updateRemoteVoltageControlEquations) is the group's pilot-Q carrier and keeps the
      *  structure-frozen encoding; the others take the canonical suppressed-dest/mode-4 one. */
     static boolean isRemoteGenVcMember(LfBus bus) {
-        GeneratorVoltageControl voltageControl = mainGenVc(bus);
-        return voltageControl != null && isRemoteGenVcControllerElement(bus) && voltageControl.getControlledBus() != bus;
+        GeneratorVoltageControl voltageControl = mainGeneratorVoltageControl(bus);
+        return voltageControl != null && isRemoteGeneratorVoltageControlControllerElement(bus) && voltageControl.getControlledBus() != bus;
     }
 
     /**
-     * The bus's MAIN generator voltage control, resolved the way {@link #isRemoteGenVcControllerElement}
+     * The bus's MAIN generator voltage control, resolved the way {@link #isRemoteGeneratorVoltageControlControllerElement}
      * already resolves it and for the same reason: a control MERGED into another is DEPENDENT, and on the
      * dependent object the controlled bus is the member ITSELF, so a {@code getMergeStatus() == MAIN} filter
      * answers "not a member" for every member of a merged group but one.
@@ -193,7 +193,7 @@ final class GpuAcRowIndexing {
      * exactly on both members of a pilot-self group, two identical rows and a dead DUMMY_Q column — a
      * singular matrix KLU refuses to factor.
      */
-    static GeneratorVoltageControl mainGenVc(LfBus bus) {
+    static GeneratorVoltageControl mainGeneratorVoltageControl(LfBus bus) {
         return bus.getGeneratorVoltageControl()
                 .<GeneratorVoltageControl>map(VoltageControl::getMainVoltageControl)
                 .orElse(null);
@@ -221,7 +221,7 @@ final class GpuAcRowIndexing {
      *  <p>Generator voltage controls merge exactly when their buses are joined by ZERO-IMPEDANCE
      *  branches, which is why the whole population is busbar couplers and why the defect only
      *  appears once enough busbar-section contingencies retain enough switches. */
-    static boolean isRemoteGenVcControllerElement(LfBus bus) {
+    static boolean isRemoteGeneratorVoltageControlControllerElement(LfBus bus) {
         return bus.getGeneratorVoltageControl()
                 .<GeneratorVoltageControl>map(VoltageControl::getMainVoltageControl)
                 .filter(c -> !c.isLocalControl())
@@ -318,7 +318,7 @@ final class GpuAcRowIndexing {
      *  candidate-table group — the first ENABLED member (the carrier), falling back to itself when every
      *  controller is pinned. */
     private static LfBus stateQCarrier(LfBus bus) {
-        GeneratorVoltageControl voltageControl = mainGenVc(bus);
+        GeneratorVoltageControl voltageControl = mainGeneratorVoltageControl(bus);
         if (voltageControl != null && voltageControl.getControlledBus() == bus) {
             return voltageControl.getMergedControllerElements().stream()
                     .filter(voltageControl::isControllerEnabled).findFirst().orElse(bus);
@@ -351,9 +351,9 @@ final class GpuAcRowIndexing {
     }
 
     /** The FREE member: the first ENABLED merged controller. None when every controller is pinned. */
-    static boolean isFreeRemoteGenVcMember(LfBus bus) {
-        GeneratorVoltageControl voltageControl = mainGenVc(bus);
-        return voltageControl != null && isRemoteGenVcControllerElement(bus)
+    static boolean isFreeRemoteGeneratorVoltageControlMember(LfBus bus) {
+        GeneratorVoltageControl voltageControl = mainGeneratorVoltageControl(bus);
+        return voltageControl != null && isRemoteGeneratorVoltageControlControllerElement(bus)
                 && voltageControl.getMergedControllerElements().stream()
                         .filter(voltageControl::isControllerEnabled).findFirst().map(m -> m == bus).orElse(false);
     }
@@ -484,7 +484,7 @@ final class GpuAcRowIndexing {
             int bn = bus.getNum();
             if (treeEdges.containsKey(bn) && hasImpedantBranch(bus) && !hostsPhiIdentity(bus, es)
                     && (hostsVoltageIdentity(bus, es) || hostsAnotherReactiveRow[bn]
-                        || !(qRow[bn] == vCol[bn] || isRemoteGenVcControllerElement(bus)))) {
+                        || !(qRow[bn] == vCol[bn] || isRemoteGeneratorVoltageControlControllerElement(bus)))) {
                 rootOrder.add(bus);
             }
         }
@@ -534,7 +534,7 @@ final class GpuAcRowIndexing {
             // security analysis relocate DIFFERENTLY (measured: 44 of 47 couplers in the base extraction against
             // 41 in the SA's, the three differing ones exactly the pilot-self groups the base load flow pins), so
             // the two ran on different structures and every scenario failed.
-            boolean ownReactiveOnItsVRow = qRow[bn] == vCol[bn] || isRemoteGenVcControllerElement(bus);
+            boolean ownReactiveOnItsVRow = qRow[bn] == vCol[bn] || isRemoteGeneratorVoltageControlControllerElement(bus);
             if (dummyPCol[parent] < 0 || dummyQCol[parent] < 0 || hostsAnotherReactiveRow[bn]
                     || !ownReactiveOnItsVRow) {
                 parentEdgeOfBus[bn] = -1;
@@ -572,7 +572,7 @@ final class GpuAcRowIndexing {
                 + (hostsPhiIdentity(bus, es) ? ",phiId" : "")
                 + (hostsVoltageIdentity(bus, es) ? ",vId" : "")
                 + (hostsAnotherReactiveRow[bn] ? ",hostsOtherQ" : "")
-                + (qRow[bn] == vCol[bn] ? ",ownQ" : isRemoteGenVcControllerElement(bus) ? ",remoteCtl" : ",qElsewhere")
+                + (qRow[bn] == vCol[bn] ? ",ownQ" : isRemoteGeneratorVoltageControlControllerElement(bus) ? ",remoteCtl" : ",qElsewhere")
                 + (hasImpedantBranch(bus) ? ",imp" : ",noImp") + "}";
     }
 

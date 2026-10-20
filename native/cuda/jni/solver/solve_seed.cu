@@ -62,21 +62,21 @@ void seedSolve(BatchSolverContext* ctx, DriverPass& drv, const int* reactiveLimi
         CUDA_CHECK(cudaMemsetAsync(ctx->dDistributedSlackGeneratorMove.p, 0, static_cast<size_t>(ctx->nDistributedSlackGenerators) * nS * sizeof(double), ctx->stream));
         CUDA_CHECK(cudaMemsetAsync(ctx->dDistributedSlackGeneratorMoveValid.p, 0, (size_t) nS * sizeof(char), ctx->stream));
     }
-    if (ctx->hasDistrQRelocationGroups && ctx->st->nReactiveRelocationGroups > 0) {        // plan-B4: capture each group's pilot-Q target from
-        size_t need = static_cast<size_t>(ctx->st->nReactiveRelocationGroups) * nS * sizeof(double);   // the BASE carrier's row,
+    if (ctx->hasDistrQRelocationGroups && ctx->structure->nReactiveRelocationGroups > 0) {        // plan-B4: capture each group's pilot-Q target from
+        size_t need = static_cast<size_t>(ctx->structure->nReactiveRelocationGroups) * nS * sizeof(double);   // the BASE carrier's row,
         if (!ctx->dReactiveRelocationPilotTargetQ.p) ctx->dReactiveRelocationPilotTargetQ.alloc(need);   // BEFORE any RL mode seeding rewrites it
         if (!ctx->dReactiveRelocationSavedPilotTargetV.p) ctx->dReactiveRelocationSavedPilotTargetV.alloc(need);
-        if (!ctx->dReactiveRelocationPilotTargetVDeactivated.p) ctx->dReactiveRelocationPilotTargetVDeactivated.alloc(static_cast<size_t>(ctx->st->nReactiveRelocationGroups) * nS * sizeof(char));
+        if (!ctx->dReactiveRelocationPilotTargetVDeactivated.p) ctx->dReactiveRelocationPilotTargetVDeactivated.alloc(static_cast<size_t>(ctx->structure->nReactiveRelocationGroups) * nS * sizeof(char));
         CUDA_CHECK(cudaMemsetAsync(ctx->dReactiveRelocationPilotTargetVDeactivated.p, 0,      // per-solve state, like limitType
-                static_cast<size_t>(ctx->st->nReactiveRelocationGroups) * nS * sizeof(char), ctx->stream));
-        capturePilotQBatch<<<grid(ctx->st->nReactiveRelocationGroups * nS), BLOCK, 0, ctx->stream>>>(ctx->st->nReactiveRelocationGroups, nS, n,
-                ctx->st->dReactiveRelocationGroupStart.as<int>(), ctx->st->dReactiveRelocationCandidateRows.as<int>(), dBaseMode.as<int>(),
+                static_cast<size_t>(ctx->structure->nReactiveRelocationGroups) * nS * sizeof(char), ctx->stream));
+        capturePilotQBatch<<<grid(ctx->structure->nReactiveRelocationGroups * nS), BLOCK, 0, ctx->stream>>>(ctx->structure->nReactiveRelocationGroups, nS, n,
+                ctx->structure->dReactiveRelocationGroupStart.as<int>(), ctx->structure->dReactiveRelocationCandidateRows.as<int>(), dBaseMode.as<int>(),
                 ctx->dTargetBase.as<double>(), ctx->dReactiveRelocationPilotTargetQ.as<double>(),
-                ctx->st->dReactiveRelocationBaseTargetRow.p ? ctx->st->dReactiveRelocationBaseTargetRow.as<int>() : nullptr);
+                ctx->structure->dReactiveRelocationBaseTargetRow.p ? ctx->structure->dReactiveRelocationBaseTargetRow.as<int>() : nullptr);
         if (ctx->nReactiveRelocationPilotTargetQDeltas > 0) {
             applyPilotQDeltasBatch<<<grid(ctx->nReactiveRelocationPilotTargetQDeltas), BLOCK, 0, ctx->stream>>>(ctx->nReactiveRelocationPilotTargetQDeltas,
-                    ctx->dReactiveRelocationPilotTargetQDeltaKey.as<int>(), ctx->dReactiveRelocationPilotTargetQDeltaValue.as<double>(), ctx->st->nReactiveRelocationGroups, n,
-                    ctx->st->dReactiveRelocationGroupStart.as<int>(), ctx->st->dReactiveRelocationCandidateRows.as<int>(), ctx->dMode.as<int>(),
+                    ctx->dReactiveRelocationPilotTargetQDeltaKey.as<int>(), ctx->dReactiveRelocationPilotTargetQDeltaValue.as<double>(), ctx->structure->nReactiveRelocationGroups, n,
+                    ctx->structure->dReactiveRelocationGroupStart.as<int>(), ctx->structure->dReactiveRelocationCandidateRows.as<int>(), ctx->dMode.as<int>(),
                     ctx->hasDistrQSubgroups ? ctx->dDistrQSubgroup.as<char>() : nullptr, ctx->nDistrQMembers,
                     ctx->hasDistrQSubgroups ? ctx->dReactiveRelocationDistrQMemberStart.as<int>() : nullptr,
                     ctx->dReactiveRelocationPilotTargetQ.as<double>(), ctx->dTarget.as<double>());
@@ -86,11 +86,11 @@ void seedSolve(BatchSolverContext* ctx, DriverPass& drv, const int* reactiveLimi
             // in the BASE (every member pinned there) enters the pack as a local entry with an empty
             // reactive range, and that entry carries the group's V target — the value the pilot row
             // takes back when a member unpins (updatePilotTargetVEquationBatch). Built once per context.
-            int nReactiveRelocationGroups = ctx->st->nReactiveRelocationGroups;
+            int nReactiveRelocationGroups = ctx->structure->nReactiveRelocationGroups;
             std::vector<int> ptr(nReactiveRelocationGroups + 1);
-            CUDA_CHECK(cudaMemcpy(ptr.data(), ctx->st->dReactiveRelocationGroupStart.p, ptr.size() * sizeof(int), cudaMemcpyDeviceToHost));
+            CUDA_CHECK(cudaMemcpy(ptr.data(), ctx->structure->dReactiveRelocationGroupStart.p, ptr.size() * sizeof(int), cudaMemcpyDeviceToHost));
             std::vector<int> rows(std::max(ptr[nReactiveRelocationGroups], 1));
-            CUDA_CHECK(cudaMemcpy(rows.data(), ctx->st->dReactiveRelocationCandidateRows.p, static_cast<size_t>(ptr[nReactiveRelocationGroups]) * sizeof(int), cudaMemcpyDeviceToHost));
+            CUDA_CHECK(cudaMemcpy(rows.data(), ctx->structure->dReactiveRelocationCandidateRows.p, static_cast<size_t>(ptr[nReactiveRelocationGroups]) * sizeof(int), cudaMemcpyDeviceToHost));
             std::vector<int> vrow(std::max(ctx->nReactiveLimitEntries, 1));
             std::vector<char> rem(std::max(ctx->nReactiveLimitEntries, 1), 0);
             if (ctx->nReactiveLimitEntries > 0) {
@@ -110,11 +110,11 @@ void seedSolve(BatchSolverContext* ctx, DriverPass& drv, const int* reactiveLimi
         }
         if (nS == 1 && std::getenv("OLF_GPU_BATCH_TRACE") != nullptr) {
             CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
-            int nReactiveRelocationGroups = ctx->st->nReactiveRelocationGroups;
+            int nReactiveRelocationGroups = ctx->structure->nReactiveRelocationGroups;
             std::vector<int> ptr(nReactiveRelocationGroups + 1);
-            CUDA_CHECK(cudaMemcpy(ptr.data(), ctx->st->dReactiveRelocationGroupStart.p, ptr.size() * sizeof(int), cudaMemcpyDeviceToHost));
+            CUDA_CHECK(cudaMemcpy(ptr.data(), ctx->structure->dReactiveRelocationGroupStart.p, ptr.size() * sizeof(int), cudaMemcpyDeviceToHost));
             std::vector<int> rows(ptr[nReactiveRelocationGroups]);
-            CUDA_CHECK(cudaMemcpy(rows.data(), ctx->st->dReactiveRelocationCandidateRows.p, rows.size() * sizeof(int), cudaMemcpyDeviceToHost));
+            CUDA_CHECK(cudaMemcpy(rows.data(), ctx->structure->dReactiveRelocationCandidateRows.p, rows.size() * sizeof(int), cudaMemcpyDeviceToHost));
             std::vector<double> pq(nReactiveRelocationGroups), tg(n);
             std::vector<int> md(n);
             CUDA_CHECK(cudaMemcpy(pq.data(), ctx->dReactiveRelocationPilotTargetQ.p, nReactiveRelocationGroups * sizeof(double), cudaMemcpyDeviceToHost));
@@ -176,7 +176,7 @@ void seedSolve(BatchSolverContext* ctx, DriverPass& drv, const int* reactiveLimi
                 ctx->nReactiveLimitRemoteEntries > 0 ? ctx->dReactiveLimitVoltageControlRole.as<char>() : nullptr,
                 ctx->dReactiveLimitSavedTarget.as<double>(), ctx->dReactiveLimitSavedRowMode.as<char>(),
                 ctx->hasReactiveLimitBaseQLimitType ? ctx->dReactiveLimitBaseQLimitType.as<char>() : nullptr,
-                pilotSelfReactiveLimitEntryOrNull(ctx), ctx->st->nReactiveRelocationGroups,
+                pilotSelfReactiveLimitEntryOrNull(ctx), ctx->structure->nReactiveRelocationGroups,
                 ctx->dReactiveLimitTargetV.as<double>(), nReactiveLimitTargetVOverrides, nReactiveLimitTargetVOverrides > 0 ? dReactiveLimitTargetVOverrideScenarioEntry.as<int>() : nullptr,
                 nReactiveLimitTargetVOverrides > 0 ? dReactiveLimitTargetVOverrideValue.as<double>() : nullptr, ctx->nSecondaryVoltageControlControllerBuses > 0 ? ctx->dSecondaryVoltageControlReactiveLimitTargetV.as<double>() : nullptr,
                 ctx->nReactiveLimitLocalOverrides > 0 ? ctx->dReactiveLimitLocalOverride.as<char>() : nullptr,
@@ -198,7 +198,7 @@ void seedSolve(BatchSolverContext* ctx, DriverPass& drv, const int* reactiveLimi
                     ctx->dTarget.as<double>(), ctx->dReactiveLimitMinQ.as<double>(), ctx->dReactiveLimitMaxQ.as<double>(),
                     ctx->dReactiveLimitLoadQ.as<double>(),
                     ctx->hasReactiveLimitBaseQLimitType ? ctx->dReactiveLimitBaseQLimitType.as<char>() : nullptr,
-                    pilotSelfReactiveLimitEntryOrNull(ctx), ctx->st->nReactiveRelocationGroups,
+                    pilotSelfReactiveLimitEntryOrNull(ctx), ctx->structure->nReactiveRelocationGroups,
                     ctx->nReactiveLimitGeneratorsLost > 0 ? ctx->dReactiveLimitGeneratorsLost.as<char>() : nullptr);
         }
     }

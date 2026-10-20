@@ -313,10 +313,10 @@ void launchPilotTargetVEquationUpdate(BatchSolverContext* ctx, DriverPass& drv, 
     DeviceBuf& dReactiveLimitTargetVOverrideScenarioEntry = drv.dReactiveLimitTargetVOverrideScenarioEntry;
     DeviceBuf& dReactiveLimitTargetVOverrideValue = drv.dReactiveLimitTargetVOverrideValue;
     const bool useDyn = usePerScenarioReactiveLimits && !staticLimits;
-    if (ctx->hasDistrQRelocationGroups && ctx->st->nReactiveRelocationGroups > 0) {
-        updatePilotTargetVEquationBatch<<<grid(ctx->st->nReactiveRelocationGroups * nS), BLOCK, 0, ctx->stream>>>(
-                    ctx->st->nReactiveRelocationGroups, nS, n,
-                    ctx->st->dReactiveRelocationGroupStart.as<int>(), ctx->st->dReactiveRelocationCandidateRows.as<int>(), ctx->dReactiveRelocationIsGeneratorVoltageControl.as<char>(),
+    if (ctx->hasDistrQRelocationGroups && ctx->structure->nReactiveRelocationGroups > 0) {
+        updatePilotTargetVEquationBatch<<<grid(ctx->structure->nReactiveRelocationGroups * nS), BLOCK, 0, ctx->stream>>>(
+                    ctx->structure->nReactiveRelocationGroups, nS, n,
+                    ctx->structure->dReactiveRelocationGroupStart.as<int>(), ctx->structure->dReactiveRelocationCandidateRows.as<int>(), ctx->dReactiveRelocationIsGeneratorVoltageControl.as<char>(),
                     ctx->dReactiveRelocationPilotTargetQ.as<double>(), ctx->dMode.as<int>(), ctx->dTarget.as<double>(),
                     ctx->dReactiveRelocationPilotTargetVDeactivated.as<char>(), ctx->dReactiveRelocationSavedPilotTargetV.as<double>(),
                     ctx->dOuterLoopCheckActive.as<char>(), ctx->dOuterLoopUnstable.as<char>(),
@@ -337,8 +337,8 @@ void launchPilotTargetVEquationUpdate(BatchSolverContext* ctx, DriverPass& drv, 
                 ctx->nReactiveLimitIslanded > 0 ? ctx->dReactiveLimitIslanded.as<char>() : nullptr,
                 ctx->hasDistrQSubgroups ? ctx->dDistrQSubgroup.as<char>() : nullptr, ctx->hasDistrQSubgroups ? ctx->dReactiveRelocationDistrQMemberStart.as<int>() : nullptr,
                 REACTIVE_LIMIT_TOL, ctx->nReactiveLimitGeneratorsLost > 0 ? ctx->dReactiveLimitGeneratorsLost.as<char>() : nullptr,
-                ctx->st->dReactiveRelocationDependentBaseGroup.p ? ctx->st->dReactiveRelocationDependentBaseGroup.as<int>() : nullptr,
-                ctx->st->dRelocatedChildOwnRow.p ? ctx->st->dRelocatedChildOwnRow.as<int>() : nullptr,
+                ctx->structure->dReactiveRelocationDependentBaseGroup.p ? ctx->structure->dReactiveRelocationDependentBaseGroup.as<int>() : nullptr,
+                ctx->structure->dRelocatedChildOwnRow.p ? ctx->structure->dRelocatedChildOwnRow.as<int>() : nullptr,
                 continuedPins && ctx->hasReactiveLimitSeedTargetQ ? ctx->dReactiveLimitSeedTargetQ.as<double>() : nullptr);
     }
 }

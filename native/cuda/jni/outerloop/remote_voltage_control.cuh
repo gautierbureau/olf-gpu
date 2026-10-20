@@ -26,7 +26,7 @@ __global__ void fillRemoteMemberQBatch(int nRemoteMemberReactiveTerms, int nScen
                                        const double* openBranchParameters, const int* openBranchIndices,
                                        const double* x, double* qBuf,
                                        const char* disabled, const char* outerLoopCheckActive,
-                                       int nR1Ov, const int* r1OvSlotElem, const double* r1OvVal,
+                                       int nClosedBranchParameterOverrides, const int* closedBranchParameterOverrideScenarioElement, const double* closedBranchParameterOverrideValues,
                                        int nShuntAdmittanceOverrides, const int* shuntAdmittanceOverrideScenarioElement, const double* shuntAdmittanceOverrideDelta);
 
 }  // namespace olfgpu

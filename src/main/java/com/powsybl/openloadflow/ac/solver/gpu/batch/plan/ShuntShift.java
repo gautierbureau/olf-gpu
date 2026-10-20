@@ -15,5 +15,5 @@ import com.powsybl.openloadflow.network.LfShunt;
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
-public record ShuntShift(LfShunt shunt, double dg, double db) {
+public record ShuntShift(LfShunt shunt, double deltaG, double deltaB) {
 }

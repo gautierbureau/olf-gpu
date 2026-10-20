@@ -9,7 +9,7 @@ package com.powsybl.openloadflow.ac.solver.gpu.codes;
 
 /**
  * The kind of a reactive injection term in a DISTR_Q contribution (dqKind) or a remote member's own Q balance
- * (rmqKind): the terms OLF's {@code AcEquationSystemCreator.createReactiveTerms} sums for a bus. Mirrored by
+ * (RemoteMemberReactiveTerms.kind): the terms OLF's {@code AcEquationSystemCreator.createReactiveTerms} sums for a bus. Mirrored by
  * native/cuda/jni/common/codes/gpu_reactive_term_kind.cuh.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}

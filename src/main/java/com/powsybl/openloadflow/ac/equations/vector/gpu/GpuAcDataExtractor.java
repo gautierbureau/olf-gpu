@@ -131,7 +131,7 @@ public final class GpuAcDataExtractor {
         DistrRhoPacker.DrPack dr = DistrRhoPacker.distrRhoPack(network, es, columns);
         DistrShuntBPacker.DsbPack dsb = DistrShuntBPacker.distrShuntBPack(network, es, columns);
 
-        RemoteMemberQPacker.RmqPack rmq = RemoteMemberQPacker.remoteMemberQPack(network, es, columns, family, reactiveLimits);
+        RemoteMemberReactiveTerms rmq = RemoteMemberQPacker.remoteMemberQPack(network, es, columns, family, reactiveLimits);
         DistributedSlackPacker.DsPack ds = DistributedSlackPacker.distributedSlackPack(network, es, columns, distributedSlack, dsParams);
         // SLOPE-SVC rows (V + slope*sumQ = target, row mode 2): per-row slope, 0 everywhere else
         double[] rowSlope = new double[es.getIndex().getSortedVariablesToFind().size()];
@@ -179,7 +179,7 @@ public final class GpuAcDataExtractor {
                 rl.rlSvcBmin(), rl.rlSvcBmax(), rl.rlV2Base(), rl.rlMonitored(),
                 rl.rlRemote(), rl.rlCmpVrow(), rl.rlBusNum(),
                 rl.rlNominalV(), rl.rlPRow(), rl.rlTargetP(), rl.rlIdRank(), rl.rlInitTargetQ(),
-                rmq.row(), rmq.elem(), rmq.side(), rmq.kind(), rmq.weight(), rowSlope, rowNominalV,
+                rmq, rowSlope, rowNominalV,
                 ds.dsPhiRow(), ds.dsFactor(), ds.dsSlackPhiRow(), ds.dsSlackTargetP(),
                 ds.dsBaseTargetP(), ds.dsMaxDelta(), ds.dsMinDelta(),
                 ds.dsMode(), ds.dsMarginUp(), ds.dsMarginDown(), ds.dsSlackMarginUp(), ds.dsSlackMarginDown(),

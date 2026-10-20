@@ -31,15 +31,6 @@ public final class RemoteMemberQPacker {
     private RemoteMemberQPacker() {
     }
 
-    /** Remote-member OWN reactive-injection contributors (plan-B3): per contribution, the member's
-     *  own row ({@code row}), the family element + side + kind (same encoding as the DISTR_Q pack)
-     *  and a weight (1, or ±1 for a zero-impedance DUMMY_Q term). A twin of the DISTR_Q assembly
-     *  accumulates each member's own bus q into the diagnostic Q buffer at its own row — that slot
-     *  is free because the main qBuf fill suppresses member rows — so the RL kernel's
-     *  {@code q = qBuf[row] + loadQ} works verbatim for remote entries. */
-    record RmqPack(int[] row, int[] elem, int[] side, int[] kind, double[] weight) {
-    }
-
     /** A REMOTE member entry of the reactive-limit pack: a controller of a MAIN remote group that is
      *  not the group's controlled bus. Shared with ReactiveCapabilityCurves, which REPLAYS this enumeration
      *  and must count exactly the same buses (a drift throws and the run falls to the CPU). */
@@ -86,7 +77,7 @@ public final class RemoteMemberQPacker {
         return GpuAcRowIndexing.mainGenVc(bus);              // ONE definition, shared with the row indexing
     }
 
-    static RmqPack remoteMemberQPack(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
+    static RemoteMemberReactiveTerms remoteMemberQPack(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
                                      ExtractionColumns columns, GpuAcFamilyPacker.Packs family, boolean reactiveLimits) {
         List<int[]> out = new ArrayList<>();
         List<Double> w = new ArrayList<>();
@@ -172,6 +163,6 @@ public final class RemoteMemberQPacker {
             side[i] = out.get(i)[2];
             kind[i] = out.get(i)[3];
         }
-        return new RmqPack(row, elem, side, kind, GpuAcArrays.toDoubleArray(w));
+        return new RemoteMemberReactiveTerms(row, elem, side, kind, GpuAcArrays.toDoubleArray(w));
     }
 }

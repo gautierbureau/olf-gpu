@@ -935,6 +935,7 @@ final class GpuBatchChunkSolver {
                     boolean secondaryVoltageControlAsDriverPause = secondaryVoltageControlActive && reactiveLimitsFinalState != null && !secondaryVoltageControlInKernel;
                     DriverNative.setBatchHostLoop(handle, secondaryVoltageControlAsDriverPause
                             ? GpuOuterLoopKind.hostMaskBit(GpuOuterLoopKind.HOST_SECONDARY_VOLTAGE_CONTROL) : 0);
+                    DriverNative.setBatchOuterLoops(handle, in.settings().distributedSlackOuterLoop(), in.settings().reactiveLimitsOuterLoop());
                     long solveCountBefore = BatchReadbackNative.readBatchSolveCount(handle);
                     // Seeds only where no full per-scenario state goes (the pair phase builds its own from the parents).
                     NewtonSettingsNative.setBatchX0Seeds(handle, x0Full == null ? x0SeedIdx : null, x0Full == null ? x0SeedVal : null);

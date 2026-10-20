@@ -21,6 +21,19 @@ OLF_JNI(ac_solver_gpu, DriverNative, setBatchHostLoop)(
     }
 }
 
+/** The run's own outer loops: does its loop list hold OLF's DistributedSlackOuterLoop, its
+ *  ReactiveLimitsOuterLoop? The driver installs the DISTRIBUTED_SLACK / REACTIVE_LIMITS phases only for
+ *  a loop the run has (and a table to drive it). */
+extern "C" JNIEXPORT void JNICALL
+OLF_JNI(ac_solver_gpu, DriverNative, setBatchOuterLoops)(
+        JNIEnv*, jclass, jlong handle, jboolean distributedSlackOuterLoop, jboolean reactiveLimitsOuterLoop) {
+    auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
+    if (ctx != nullptr) {
+        ctx->distributedSlackOuterLoop = distributedSlackOuterLoop == JNI_TRUE;
+        ctx->reactiveLimitsOuterLoop = reactiveLimitsOuterLoop == JNI_TRUE;
+    }
+}
+
 /** Did the last solve stop at a host-owned slot? Returns GpuOuterLoopKind::NOT_PAUSED if not paused, or the
  *  GpuOuterLoopKind::HOST_* kind of the paused slot. */
 extern "C" JNIEXPORT jint JNICALL

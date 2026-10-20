@@ -667,6 +667,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                     handle, hostMask);
             activeHostMask = hostMask;
             DriverNative.setBatchHostLoop(handle, hostMask);
+            DriverNative.setBatchOuterLoops(handle, driverDistributedSlackLoop() != null, driverReactiveLimitsOuterLoop() != null);
             if (restart && restartLoopKind != GpuOuterLoopKind.NOT_PAUSED) {        // re-check the loop that went UNSTABLE first
                 DriverNative.setBatchDriverStartLoop(handle, restartLoopKind);
             }

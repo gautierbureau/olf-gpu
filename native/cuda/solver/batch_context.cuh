@@ -267,6 +267,13 @@ struct BatchSolverContext {
     // the monitored V row, its band and the two setpoints; plus a CSR list of (row, mode, target) the
     // activation writes. dMonitoringVoltageActivatedTargetV holds the chosen target per (controller, scenario), NaN until
     // it fires — OLF never re-checks a controller it has already switched.
+    // The run's outer-loop list holds OLF's DistributedSlackOuterLoop / ReactiveLimitsOuterLoop
+    // (setBatchOuterLoops). The driver installs those phases only when the run has the loop, whatever
+    // the packed tables hold: the reactive-limit pack also carries the stand-by automaton SVC buses the
+    // MonitoringVoltage phase activates, with no ReactiveLimitsOuterLoop in the run. Never set = on, the
+    // tables alone decide.
+    bool distributedSlackOuterLoop = true;
+    bool reactiveLimitsOuterLoop = true;
     // DRIVER PAUSE/RESUME. Some of OLF's outer loops cannot run on the device without RE-DERIVING
     // what OLF already computes in Java (SecondaryVoltageControl's sensitivity observables; the
     // discrete tap/section tables of the transformer and shunt loops). Rather than port that maths —

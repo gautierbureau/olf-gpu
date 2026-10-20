@@ -161,6 +161,73 @@ class GpuSaVoltageMonitoringTest extends AbstractGpuSaTest {
         assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
     }
 
+    /** Reactive limits OFF with MONITORING SVCs (stand-by automaton): the device packs a reactive-limit entry for each
+     *  monitored bus (the VoltageMonitoring phase activates it through the pin machinery), but the run has no
+     *  ReactiveLimitsOuterLoop, so nothing may pin it. The outage takes b2 and b3 below the automaton's low threshold, both
+     *  SVCs go PV at their low setpoint, and svc1 then needs more reactive power than its Bmax gives: OLF holds the
+     *  setpoint, a ReactiveLimits phase run on the packed entries pins svc1 at its limit. svc2 stays inside its limits,
+     *  so that pin is not the "last PV bus" OLF's loop would keep PV. GPU SA == CPU SA at 1e-12. */
+    @Test
+    void deviceMonitoringSvcBeyondItsLimitsWithoutReactiveLimitsMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        double svc1Bmax = 0.0005;
+        List<Contingency> ctgs = List.of(new Contingency("l1", new BranchContingency("l1")));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setDistributedSlack(true).setUseReactiveLimits(false);
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp).setSvcVoltageMonitoring(true);
+        // Non-vacuity, on the CPU: the base stands by, and after the outage both automata hold their low setpoint,
+        // svc1 beyond Bmax * V^2 and svc2 inside its limits
+        Network base = monitoringSvcsNetwork(svc1Bmax);
+        assertTrue(com.powsybl.loadflow.LoadFlow.find("OpenLoadFlow").run(base, lfp).isFullyConverged());
+        assertTrue(base.getBusBreakerView().getBus("b2").getV() > 388 && base.getBusBreakerView().getBus("b3").getV() > 388,
+                "the base must stand by");
+        Network post = monitoringSvcsNetwork(svc1Bmax);
+        post.getLine("l1").remove();
+        assertTrue(com.powsybl.loadflow.LoadFlow.find("OpenLoadFlow").run(post, lfp).isFullyConverged());
+        double v2 = post.getBusBreakerView().getBus("b2").getV();
+        double v3 = post.getBusBreakerView().getBus("b3").getV();
+        assertEquals(389, v2, 1e-3, "svc1 must hold its low setpoint");
+        assertEquals(389, v3, 1e-3, "svc2 must hold its low setpoint");
+        double q1 = -post.getStaticVarCompensator("svc1").getTerminal().getQ();
+        double q2 = -post.getStaticVarCompensator("svc2").getTerminal().getQ();
+        assertTrue(q1 > svc1Bmax * v2 * v2 * 1.1, "svc1 must deliver more than its limit: q=" + q1);
+        assertTrue(Math.abs(q2) < 0.008 * v3 * v3, "svc2 must stay inside its limits: q=" + q2);
+        assertGpuMatchesCpu(monitoringSvcsNetwork(svc1Bmax), ctgs, 1e-12, lfp);
+        assertEquals(1, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(),
+                "the outage must batch (or the test proves nothing)");
+    }
+
+    /** b1 (g1) feeds b2 over l1 and l1_BIS, and b3 behind b2 over l23; standing-by MONITORING SVCs at b2 (svc1, Bmax
+     *  {@code svc1Bmax}) and b3 (svc2, a wide range). */
+    private static Network monitoringSvcsNetwork(double svc1Bmax) {
+        Network n = com.powsybl.openloadflow.network.VoltageControlNetworkFactory.createWithStaticVarCompensator();
+        n.getGenerator("g1").setTargetP(n.getGenerator("g1").getTargetP() + 20);   // feeds ld3 as well
+        com.powsybl.iidm.network.StaticVarCompensator svc1 = n.getStaticVarCompensator("svc1");
+        svc1.setBmin(-svc1Bmax).setBmax(svc1Bmax)
+                .setVoltageSetpoint(385).setRegulationMode(com.powsybl.iidm.network.StaticVarCompensator.RegulationMode.VOLTAGE)
+                .setRegulating(true);
+        svc1.newExtension(com.powsybl.iidm.network.extensions.StandbyAutomatonAdder.class)
+                .withHighVoltageThreshold(400).withLowVoltageThreshold(388)
+                .withLowVoltageSetpoint(389).withHighVoltageSetpoint(395)
+                .withB0((float) -svc1Bmax).withStandbyStatus(true).add();
+        n.newLine().setId("l1_BIS").setBus1("b1").setBus2("b2").setR(2).setX(6).add();
+        com.powsybl.iidm.network.VoltageLevel vl3 = n.getSubstation("S2").newVoltageLevel().setId("vl3").setNominalV(400)
+                .setTopologyKind(com.powsybl.iidm.network.TopologyKind.BUS_BREAKER).add();
+        vl3.getBusBreakerView().newBus().setId("b3").add();
+        vl3.newLoad().setId("ld3").setBus("b3").setConnectableBus("b3").setP0(20).setQ0(10).add();
+        vl3.newStaticVarCompensator().setId("svc2").setBus("b3").setConnectableBus("b3")
+                .setBmin(-0.008).setBmax(0.008)
+                .setVoltageSetpoint(385).setRegulationMode(com.powsybl.iidm.network.StaticVarCompensator.RegulationMode.VOLTAGE)
+                .setRegulating(true).add()
+                .newExtension(com.powsybl.iidm.network.extensions.StandbyAutomatonAdder.class)
+                .withHighVoltageThreshold(400).withLowVoltageThreshold(388)
+                .withLowVoltageSetpoint(389).withHighVoltageSetpoint(395)
+                .withB0(0f).withStandbyStatus(true).add();
+        n.newLine().setId("l23").setBus1("b2").setBus2("b3").setR(1.0 / 3).setX(1).add();
+        return n;
+    }
+
     /** DEVICE-mode SLOPE SVC pinned at a limit stays PQ like the CPU: OLF's ReactiveLimitsOuterLoop
      *  runs checkPqBus with canSwitchToPv = !hasGeneratorsWithSlope() ("we don't support switching
      *  PQ to PV for bus with one controller with slope"), so a pinned slope bus NEVER back-switches.

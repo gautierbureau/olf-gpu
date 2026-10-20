@@ -529,7 +529,7 @@ void reactiveLimitsCheck(BatchSolverContext* ctx, DriverPass& drv, int loopKind)
     DeviceBuf& dReactiveCapabilityCurveOverrideStart = drv.dReactiveCapabilityCurveOverrideStart;
     DeviceBuf& dReactiveCapabilityCurveOverrideCurve = drv.dReactiveCapabilityCurveOverrideCurve;
     DeviceBuf& dReactiveCapabilityCurveOverrideStepScale = drv.dReactiveCapabilityCurveOverrideStepScale;
-    if (loopKind == GpuOuterLoopKind::REACTIVE_LIMITS && ctx->nReactiveLimitEntries > 0 && !skipReactiveLimitsPhase) {                  // skipReactiveLimitsPhase: a monitoring interleave solve — the
+    if (loopKind == GpuOuterLoopKind::REACTIVE_LIMITS && ctx->reactiveLimitsOuterLoop && ctx->nReactiveLimitEntries > 0 && !skipReactiveLimitsPhase) {                  // skipReactiveLimitsPhase: a monitoring interleave solve — the
         if (usePerScenarioReactiveLimits) {                            // curve limits at the CURRENT (post-DS) targets,
             reactiveCapabilityCurveLimitsBatch<<<grid(ctx->nReactiveLimitEntries * nS), BLOCK, 0, ctx->stream>>>(ctx->nReactiveLimitEntries, nS, ctx->nReactiveCapabilityCurves, n, ctx->reactiveCapabilityCurveExtrapolate,
                     ctx->dReactiveCapabilityCurveIndices.as<int>(), ctx->dReactiveCapabilityCurveParameters.as<double>(), ctx->dReactiveCapabilityCurvePoints.as<double>(),

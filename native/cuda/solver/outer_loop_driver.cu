@@ -468,7 +468,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     // it is not. Folding them needs the discrete tap/section tables on the device.
     int (&loopOrder)[MAX_DEVICE_LOOPS] = drv.loopOrder;
     int nLoops = 0;
-    if (ctx->nDistributedSlackBuses > 0 || ctx->slackOnlyDistribution) {
+    if (ctx->distributedSlackOuterLoop && (ctx->nDistributedSlackBuses > 0 || ctx->slackOnlyDistribution)) {
         loopOrder[nLoops++] = GpuOuterLoopKind::DISTRIBUTED_SLACK;
     }
     if (ctx->nHvdcAcEmulation > 0) {
@@ -485,7 +485,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     if (ctx->nMonitoringVoltageControllers > 0) {
         loopOrder[nLoops++] = GpuOuterLoopKind::MONITORING_VOLTAGE;  // OLF order 5: MonitoringVoltage
     }
-    if (ctx->nReactiveLimitEntries > 0) {
+    // the run's loop, not the table alone: the table also holds the stand-by SVCs MonitoringVoltage activates
+    if (ctx->reactiveLimitsOuterLoop && ctx->nReactiveLimitEntries > 0) {
         loopOrder[nLoops++] = GpuOuterLoopKind::REACTIVE_LIMITS;  // OLF order 6: ReactiveLimits
     }
     if (ctx->nIncrementalPhaseControlControllerBranches > 0 || ctx->nPhaseControlControllerBranches > 0) {
@@ -513,7 +514,9 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         loopOrder[nLoops++] = GpuOuterLoopKind::HOST_SHUNT_VOLTAGE_CONTROL;  // OLF order 10: ShuntVoltageControl
     }
     if (nLoops == 0) {
-        loopOrder[nLoops++] = GpuOuterLoopKind::REACTIVE_LIMITS;  // nothing to drive: the old code's phase-1 fallback
+        // nothing to drive: one slot so the sweep runs its first solve. Its check is a ReactiveLimits one only
+        // when the run has that loop (reactiveLimitsCheck tests reactiveLimitsOuterLoop); otherwise it is STABLE.
+        loopOrder[nLoops++] = GpuOuterLoopKind::REACTIVE_LIMITS;
     }
     // Where the realistic-voltage check STARTS applying in this sweep. AcloadFlowEngine keeps
     // checkUnrealisticStates false up to and including the last loop that can fix an unrealistic state

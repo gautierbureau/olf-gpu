@@ -9,6 +9,7 @@ package com.powsybl.openloadflow.ac.equations.vector.gpu;
 
 import com.powsybl.openloadflow.ac.outerloop.gpu.ReactiveLimitsNative;
 import com.powsybl.openloadflow.ac.solver.gpu.BatchSolveNative;
+import com.powsybl.openloadflow.ac.solver.gpu.DriverNative;
 import com.powsybl.openloadflow.ac.solver.gpu.NewtonSettingsNative;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuDistributedSlackFactorMode;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuLinearSolveMode;
@@ -139,6 +140,7 @@ public final class GpuAcNewtonSolver {
                 new int[0], new double[0], -1, 0.0, new double[0], new double[0], new double[0],
                 0, new double[0], new double[0], 0, 0);
         try {
+            DriverNative.setBatchOuterLoops(handle, false, false);           // pure Newton-Raphson: no outer loop
             return BatchSolveNative.solveBatchContext(handle, x0, target, new int[][] {rowMode}, rowMode, new boolean[1][0],
                     new int[0], new double[0], new int[0], new double[0], new double[0], new double[0], new double[0], null, null, null, null, null, null, null, null,
                     maxIter, tol, 0.0, 0.0, 0.0, stateVectorScalingMode, maxDv, maxDphi, varType, null, null, null, null, null, null, null, 0,
@@ -208,6 +210,8 @@ public final class GpuAcNewtonSolver {
                     pRow[i] = -1;
                 }
                 ReactiveLimitsNative.setBatchReactiveLimitStrongestPvKeys(handle, new double[reactiveLimitVoltageRow.length], pRow, new double[reactiveLimitVoltageRow.length], idRank);
+                // no loop list behind this entry point either: the caller asks for the two loops by handing their tables
+                DriverNative.setBatchOuterLoops(handle, true, true);
                 // one-shot: no per-scenario gen-override flips, so any scenario's row mode IS the base row mode
                 return BatchSolveNative.solveBatchContext(handle, x0Base, targetBase, rowMode, rowMode[0], disabledElementMask,
                         new int[0], new double[0], new int[0], new double[0], new double[0], new double[0], new double[0], null, null, null, null, null, null, null, null,

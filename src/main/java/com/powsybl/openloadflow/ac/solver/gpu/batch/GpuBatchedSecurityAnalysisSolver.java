@@ -244,7 +244,8 @@ public final class GpuBatchedSecurityAnalysisSolver {
                         new ChunkInputs.BaseCase(elementMapper, gpuData, baseState, baseTargets, baseActivation.rowMode(),
                                 n, nElements, varType, hvdcElemIndex),
                         plan,
-                        new ChunkInputs.SolveSettings(parameters, tol, reactiveLimitTol, slackDistTol, convEpsPerEq, rowCriteria),
+                        new ChunkInputs.SolveSettings(parameters, distributedSlack, reactiveLimits, tol, reactiveLimitTol, slackDistTol,
+                                convEpsPerEq, rowCriteria),
                         new ChunkInputs.DevicePhaseInputs(phases, hvdcControllers, reactiveCapabilityCurves, forcedTargetQ),
                         new ChunkInputs.ResultSinks(resultsByIndex, preDistributedByIndex, distributedByIndex),
                         config));

@@ -39,10 +39,10 @@ record ChunkInputs(List<BatchContingency> contingencies, ChunkInputs.BaseCase ba
                     int[] baseRowMode, int n, int nElements, int[] varType, Map<LfHvdc, Integer> hvdcElemIndex) {
     }
 
-    /** The run's Newton-Raphson parameters, its convergence thresholds and the per-row criteria (null under
-     *  UNIFORM_CRITERIA). */
-    record SolveSettings(NewtonRaphsonParameters parameters, double tol, double reactiveLimitTol, double slackDistTol,
-                         double convEpsPerEq, double[][] rowCriteria) {
+    /** The run's Newton-Raphson parameters, whether its outer loops hold OLF's DistributedSlackOuterLoop and
+     *  ReactiveLimitsOuterLoop, its convergence thresholds and the per-row criteria (null under UNIFORM_CRITERIA). */
+    record SolveSettings(NewtonRaphsonParameters parameters, boolean distributedSlackOuterLoop, boolean reactiveLimitsOuterLoop,
+                         double tol, double reactiveLimitTol, double slackDistTol, double convEpsPerEq, double[][] rowCriteria) {
     }
 
     /** The run's driver phases, its AC-emulation HVDC controllers (null without the HVDC loops) and the

@@ -48,4 +48,9 @@ public final class DriverNative {
      *  Bit 4 = ShuntVoltageControl (OLF order 10).
      *  0 disables all; the driver behaves exactly as before. */
     public static native void setBatchHostLoop(long handle, int mask);
+
+    /** The run's own outer loops: does its loop list hold OLF's DistributedSlackOuterLoop, its ReactiveLimitsOuterLoop?
+     *  The driver installs the DISTRIBUTED_SLACK / REACTIVE_LIMITS phases only for a loop the run has (and a table to
+     *  drive it), never from the packed tables alone. A context never told runs both, as far as its tables go. */
+    public static native void setBatchOuterLoops(long handle, boolean distributedSlackOuterLoop, boolean reactiveLimitsOuterLoop);
 }

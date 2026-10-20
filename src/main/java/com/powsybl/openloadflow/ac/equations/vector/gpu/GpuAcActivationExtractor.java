@@ -10,6 +10,7 @@ package com.powsybl.openloadflow.ac.equations.vector.gpu;
 import com.powsybl.commons.PowsyblException;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
+import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuRowMode;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuStepClampVariable;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.SingleEquation;
@@ -92,7 +93,7 @@ public final class GpuAcActivationExtractor {
     public static GpuAcActivation extractActivation(LfNetwork network,
                                                     EquationSystem<AcVariableType, AcEquationType> es, int n) {
         int[] mode = new int[n];
-        java.util.Arrays.fill(mode, 1);
+        java.util.Arrays.fill(mode, GpuRowMode.EQUATION);
         int[] targetMap = new int[n];
         java.util.Arrays.fill(targetMap, -1);
         // ONE pass number for both traces, taken before either writes, so a QROW_CLAIM and a
@@ -248,7 +249,7 @@ public final class GpuAcActivationExtractor {
                     }
                 }
                 if (mode4) {
-                    mode[qr] = 4;
+                    mode[qr] = GpuRowMode.BUS_TARGET_Q;
                 }
             }
         }
@@ -311,7 +312,7 @@ public final class GpuAcActivationExtractor {
                         .filter(b -> b.getNum() == e.getElementNum()).findFirst().orElseThrow().getId());
                 var pc = branch.getPhaseControl().orElseThrow();
                 int a1r = GpuAcRowIndexing.col(es, pc.getControllerBranch().getNum(), AcVariableType.BRANCH_ALPHA1);
-                mode[a1r] = 3;
+                mode[a1r] = GpuRowMode.BRANCH_TARGET_P;
                 assign(es, targetMap, a1r, e.getColumn(), AcEquationType.BRANCH_TARGET_P, e.getElementNum());
                 continue;
             }
@@ -341,7 +342,7 @@ public final class GpuAcActivationExtractor {
                 // scaled by the slope and completed with the +v diagonal (row mode 2) — not an identity.
                 boolean slopeRow = e.getType() == AcEquationType.BUS_TARGET_V
                         && network.getBus(e.getElementNum()).hasGeneratorsWithSlope();
-                mode[r] = slopeRow ? 2 : 0;
+                mode[r] = slopeRow ? GpuRowMode.BUS_TARGET_V_WITH_SLOPE : GpuRowMode.FIXED_VARIABLE;
                 assign(es, targetMap, r, e.getColumn(), e.getType(), e.getElementNum());
             }
         }

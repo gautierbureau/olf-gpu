@@ -12,6 +12,7 @@ import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcElementMapper;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.BatchContingency;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.ShuntShift;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.TapR1Override;
+import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuRowMode;
 import com.powsybl.openloadflow.network.LfBranch;
 
 import java.util.List;
@@ -45,8 +46,8 @@ final class ActionSeed {
                 int dpRow = gpuData.ziIdx()[ze * 11 + 4];
                 int dqRow = gpuData.ziIdx()[ze * 11 + 5];
                 int[] row = rs.rowModePerScenario[s] == baseRowMode ? baseRowMode.clone() : rs.rowModePerScenario[s];
-                row[dpRow] = 1;
-                row[dqRow] = 1;
+                row[dpRow] = GpuRowMode.EQUATION;
+                row[dqRow] = GpuRowMode.EQUATION;
                 rs.rowModePerScenario[s] = row;
             } else {
                 rs.disabledMask[s][elementMapper.getElementIndex(reclosed)] = false;

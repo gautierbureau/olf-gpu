@@ -11,6 +11,7 @@ import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
 import com.powsybl.openloadflow.ac.outerloop.gpu.ReactiveCapabilityCurves;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.BatchContingency;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.GenOutage;
+import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuRowMode;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuVoltageControlRole;
 
 import java.util.List;
@@ -85,7 +86,7 @@ final class GenOutageSeed {
                     // the same fill.
                     int[] row = rs.rowModePerScenario[s] == baseRowMode
                             ? baseRowMode.clone() : rs.rowModePerScenario[s];
-                    row[go.deadPilotVRow()] = 1;
+                    row[go.deadPilotVRow()] = GpuRowMode.EQUATION;
                     rs.rowModePerScenario[s] = row;
                     rs.overrides.add(s * n + go.deadPilotVRow(), go.deadPilotQTarget());
                 }
@@ -216,7 +217,7 @@ final class GenOutageSeed {
                         // OLF). The earlier "mode 0 is NOT skipped: skipping it moved
                         // deviceMultiChunkMatchesCpu by 1.06e-12 kV" was the race's own
                         // noise being guarded.
-                        if (dqMode == 4 || dqMode == 0 || dqMode == 6) {
+                        if (dqMode == GpuRowMode.BUS_TARGET_Q || dqMode == GpuRowMode.FIXED_VARIABLE || dqMode == GpuRowMode.CROSS_FIXED_VARIABLE) {
                             continue;
                         }
                         // ...nor on the row that HOSTS A PILOT'S BALANCE this scenario: a frozen base

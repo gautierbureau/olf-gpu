@@ -8,6 +8,7 @@
 package com.powsybl.openloadflow.ac.solver.gpu.batch;
 
 import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.GpuBatchQualification;
+import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuRowMode;
 
 /**
  * The seeding of a slot whose contingency isolates the base slack: OLF re-picks a slack in the main component, whose
@@ -34,7 +35,7 @@ final class SlackRelocationSeed {
         int reference = slackRelocations.row(ci);
         if (reference >= 0) {
             int[] row = rs.rowModePerScenario[s] == baseRowMode ? baseRowMode.clone() : rs.rowModePerScenario[s];
-            row[reference] = 0;
+            row[reference] = GpuRowMode.FIXED_VARIABLE;
             rs.rowModePerScenario[s] = row;
             rs.overrides.add(s * n + reference, 0.0);
             if (cl.dsSlackRows == null) {

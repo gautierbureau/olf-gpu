@@ -10,6 +10,7 @@ package com.powsybl.openloadflow.ac.solver.gpu.batch.plan;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
+import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuRowMode;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfGenerator;
@@ -630,7 +631,7 @@ public final class GpuBatchInjectionOutages {
         return new GenOutage(pRow, pTarget, vRow, qTarget, toPq, qOverride, dsBus, dsFactorDelta, dsBaseDelta,
                 dsMaxDelta, dsMinDelta, rlEntry, minQDelta, maxQDelta, allGensLost, lostGenIds, lostFactorSum,
                 lostLoadP - lostP, loadQDelta, inactiveDqMember, pilotSurvivorRlEntries,
-                dqTargetRows, dqTargetValues, deadRemoteMember ? 4 : 1,
+                dqTargetRows, dqTargetValues, deadRemoteMember ? GpuRowMode.BUS_TARGET_Q : GpuRowMode.EQUATION,
                 deadPilotVRow, deadPilotQTarget, pinnedPilotVRow, pinnedPilotQTarget,
                 dqTargetQOvMember, dqTargetQOvValue, qTargetRow, pilotQGroup, pilotQDelta, slackBus, -1, svcBminDelta, svcBmaxDelta);
     }

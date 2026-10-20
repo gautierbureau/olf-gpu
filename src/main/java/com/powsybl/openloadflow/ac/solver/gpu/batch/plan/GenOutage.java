@@ -7,6 +7,7 @@
  */
 package com.powsybl.openloadflow.ac.solver.gpu.batch.plan;
 
+import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuRowMode;
 import java.util.Arrays;
 
 /**
@@ -175,8 +176,8 @@ public record GenOutage(int pRow, double pTarget, int vRow, double qTarget, bool
      * pilot's balance would land on top of the member's own.
      */
     public int pqRowModeOrDefault() {
-        return pqRowMode == 0 ? 1 : pqRowMode == ROW_PINNED_V ? 4 : pqRowMode == ROW_CROSS_V_IDENTITY ? 6
-                : pqRowMode < 0 ? 0 : pqRowMode;
+        return pqRowMode == 0 ? GpuRowMode.EQUATION : pqRowMode == ROW_PINNED_V ? GpuRowMode.BUS_TARGET_Q : pqRowMode == ROW_CROSS_V_IDENTITY ? GpuRowMode.CROSS_FIXED_VARIABLE
+                : pqRowMode < 0 ? GpuRowMode.FIXED_VARIABLE : pqRowMode;
     }
 
     /** The voltage target a re-homed control is checked against ({@link #ROW_V_IDENTITY}: the row target itself;

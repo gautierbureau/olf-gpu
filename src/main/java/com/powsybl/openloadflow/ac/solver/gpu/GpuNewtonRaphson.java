@@ -49,6 +49,7 @@ import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchContextCache;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuAcSolverStatus;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuLinearSolveMode;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuOuterLoopKind;
+import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuRowMode;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuStateVectorScalingMode;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.EquationSystemIndex;
@@ -306,7 +307,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
         equationsDumped = true;
         StringBuilder m4 = new StringBuilder();
         for (int r = 0; r < rowMode.length; r++) {
-            if (rowMode[r] == 4) {
+            if (rowMode[r] == GpuRowMode.BUS_TARGET_Q) {
                 m4.append(' ').append(r);
             }
         }

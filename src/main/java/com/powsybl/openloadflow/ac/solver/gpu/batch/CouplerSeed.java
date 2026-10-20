@@ -12,6 +12,7 @@ import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.BatchContingency;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.GenOutage;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.GpuBatchInjectionOutages;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.RelocatedRows;
+import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuRowMode;
 import com.powsybl.openloadflow.network.GeneratorVoltageControl;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
@@ -65,8 +66,8 @@ final class CouplerSeed {
             int dpRow = gpuData.ziIdx()[ze * 11 + 4];
             int dqRow = gpuData.ziIdx()[ze * 11 + 5];
             int[] rowZi = rs.rowModePerScenario[s] == baseRowMode ? baseRowMode.clone() : rs.rowModePerScenario[s];
-            rowZi[dpRow] = 0;
-            rowZi[dqRow] = 0;
+            rowZi[dpRow] = GpuRowMode.FIXED_VARIABLE;
+            rowZi[dqRow] = GpuRowMode.FIXED_VARIABLE;
             rs.overrides.add(s * n + dpRow, 0.0);
             rs.overrides.add(s * n + dqRow, 0.0);
             // The RELOCATION gave this coupler's ZERO_V the CHILD bus's own V row. With the
@@ -138,10 +139,10 @@ final class CouplerSeed {
                     // The child is PQ in the base (reactive limit): its balance comes home at
                     // the pinned value, no identity (the qualification refused such a child as
                     // VC_REMERGE_PINNED_MAIN until the entry channels below existed).
-                    rowZi[childVRow] = 4;
+                    rowZi[childVRow] = GpuRowMode.BUS_TARGET_Q;
                     rs.overrides.add(s * n + childVRow, child.getTargetQ());
                 } else if (applied) {
-                    rowZi[childVRow] = 0;
+                    rowZi[childVRow] = GpuRowMode.FIXED_VARIABLE;
                     rs.overrides.add(s * n + childVRow, childVc.orElseThrow().getTargetValue());
                 }
                 if (childPhiRow >= 0 && dpRow >= 0) {
@@ -225,8 +226,8 @@ final class CouplerSeed {
             int dpRow = gpuData.ziIdx()[ze * 11 + 4];
             int dqRow = gpuData.ziIdx()[ze * 11 + 5];
             int[] row = rs.rowModePerScenario[s] == baseRowMode ? baseRowMode.clone() : rs.rowModePerScenario[s];
-            row[dpRow] = 0;              // identity rows, target 0
-            row[dqRow] = 0;
+            row[dpRow] = GpuRowMode.FIXED_VARIABLE;              // identity rows, target 0
+            row[dqRow] = GpuRowMode.FIXED_VARIABLE;
             rs.overrides.add(s * n + dpRow, 0.0);
             rs.overrides.add(s * n + dqRow, 0.0);
             rs.rowModePerScenario[s] = row;

@@ -40,6 +40,7 @@ import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuLinearSolveMode;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuOuterLoopKind;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuQLimitType;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuReactiveLimitsState;
+import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuRowMode;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuStateVectorScalingMode;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuVoltageControlRole;
 import com.powsybl.openloadflow.network.LfBranch;
@@ -299,13 +300,13 @@ final class GpuBatchChunkSolver {
             byte olfKind = baseLimitTypes.length > i ? baseLimitTypes[i] : GpuQLimitType.NONE;
             if (remote) {
                 double tgt = baseTargets[vrow];
-                baseRlSeed[i] = baseRowMode[vrow] == 4
+                baseRlSeed[i] = baseRowMode[vrow] == GpuRowMode.BUS_TARGET_Q
                         ? (olfKind != GpuQLimitType.NONE ? olfKind
                            : (Math.abs(tgt - (gpuData.rlMaxQ()[i] - gpuData.rlLoadQ()[i]))
                               <= Math.abs(tgt - (gpuData.rlMinQ()[i] - gpuData.rlLoadQ()[i])) ? GpuQLimitType.MAX_Q : GpuQLimitType.MIN_Q))
                         : GpuQLimitType.NONE;
             } else {
-                baseRlSeed[i] = baseRowMode[vrow] == 1
+                baseRlSeed[i] = baseRowMode[vrow] == GpuRowMode.EQUATION
                         ? (olfKind != GpuQLimitType.NONE ? olfKind
                            : (baseState[vrow] < gpuData.rlVtarget()[i] ? GpuQLimitType.MAX_Q : GpuQLimitType.MIN_Q))
                         : GpuQLimitType.NONE;

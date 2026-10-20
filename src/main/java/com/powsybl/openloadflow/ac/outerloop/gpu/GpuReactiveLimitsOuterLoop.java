@@ -10,6 +10,7 @@ package com.powsybl.openloadflow.ac.outerloop.gpu;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuQLimitType;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuReactiveLimitsState;
+import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuRowMode;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuVoltageControlRole;
 import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfNetwork;
@@ -95,11 +96,11 @@ public final class GpuReactiveLimitsOuterLoop {
         // froze that on the bus. Mode 0 at the relocated row means the coupler is open here, so the equations
         // are back home and the own row is right (the same per-scenario test the device makes).
         int relocated = relocatedPinRow(data, vRow);
-        if (relocated != vRow && devModes != null && relocated < devModes.length && devModes[relocated] != 0) {
+        if (relocated != vRow && devModes != null && relocated < devModes.length && devModes[relocated] != GpuRowMode.FIXED_VARIABLE) {
             vRow = relocated;
         }
         if (devModes == null || data.rlRemote() == null || data.rlRemote()[i] != GpuVoltageControlRole.PILOT_SELF || data.qrPtr() == null
-                || vRow < 0 || vRow >= devModes.length || devModes[vRow] != 0) {
+                || vRow < 0 || vRow >= devModes.length || devModes[vRow] != GpuRowMode.FIXED_VARIABLE) {
             return vRow;
         }
         int[] qrPtr = data.qrPtr();
@@ -114,7 +115,7 @@ public final class GpuReactiveLimitsOuterLoop {
                     continue;
                 }
                 int m = devModes[r];
-                if (m != 0 && m != 4) {
+                if (m != GpuRowMode.FIXED_VARIABLE && m != GpuRowMode.BUS_TARGET_Q) {
                     return r;
                 }
             }

@@ -14,6 +14,7 @@ import com.powsybl.openloadflow.ac.equations.HvdcAcEmulationSide1ActiveFlowEquat
 import com.powsybl.openloadflow.ac.equations.HvdcAcEmulationSide2ActiveFlowEquationTerm;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchOverrides;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuAcEmulationStatus;
+import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuRowMode;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.Variable;
 import com.powsybl.openloadflow.network.LfHvdc;
@@ -87,11 +88,11 @@ public final class GpuHvdcAcEmulationLimitsOuterLoop {
          *  once the scenario has opened the parent coupler (that dummy row is then a mode-0 identity and the
          *  balance is back home — the stock placement the kernels follow through relocOwn). */
         public int bus1WriteRow(int[] rowMode) {
-            return bus1PRow >= 0 && rowMode != null && bus1PRow != bus1PhiCol && rowMode[bus1PRow] == 0 ? bus1PhiCol : bus1PRow;
+            return bus1PRow >= 0 && rowMode != null && bus1PRow != bus1PhiCol && rowMode[bus1PRow] == GpuRowMode.FIXED_VARIABLE ? bus1PhiCol : bus1PRow;
         }
 
         public int bus2WriteRow(int[] rowMode) {
-            return bus2PRow >= 0 && rowMode != null && bus2PRow != bus2PhiCol && rowMode[bus2PRow] == 0 ? bus2PhiCol : bus2PRow;
+            return bus2PRow >= 0 && rowMode != null && bus2PRow != bus2PhiCol && rowMode[bus2PRow] == GpuRowMode.FIXED_VARIABLE ? bus2PhiCol : bus2PRow;
         }
 
         public boolean bus2PActive() {

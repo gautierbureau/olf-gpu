@@ -57,17 +57,18 @@ In the code: "stable indexing", the `...Row` / `...Col` fields of the extracted 
 ### 2.2 Row state: which OLF equation is active on a row
 
 Since a row is permanent, "OLF activates equation X" becomes "the row now holds X", per lane. The code keeps one
-small integer per row and per lane (today called the row *mode*; named constants are planned):
+small integer per row and per lane, the row *mode* (`GpuRowMode`, section 7):
 
 | code | the row holds | OLF situation |
 |---|---|---|
-| 0 | `x = target`: a fixed variable | slack angle (`BUS_TARGET_PHI`), the voltage of a PV bus (`BUS_TARGET_V`), the flows of an open coupler (`DUMMY_TARGET_P/Q`), a fixed tap |
-| 1 | the ordinary equation of that row | `BUS_TARGET_P`, `BUS_TARGET_Q`, `DISTR_Q`, `ZERO_V`, `ZERO_PHI`... |
-| 2 | `BUS_TARGET_V` with the slope terms | a static var compensator with a voltage slope |
-| 4 | the bus's own `BUS_TARGET_Q`, target = the limit | after `ReactiveLimitsOuterLoop` switched the bus PV -> PQ (its `QLimitType` is set) |
-| 6 | a fixed variable written on *another* row | device-only, see 2.4 |
+| 0 `FIXED_VARIABLE` | `x = target`: a fixed variable | slack angle (`BUS_TARGET_PHI`), the voltage of a PV bus (`BUS_TARGET_V`), the flows of an open coupler (`DUMMY_TARGET_P/Q`), a fixed tap |
+| 1 `EQUATION` | the ordinary equation of that row | `BUS_TARGET_P`, `BUS_TARGET_Q`, `DISTR_Q`, `ZERO_V`, `ZERO_PHI`... |
+| 2 `BUS_TARGET_V_WITH_SLOPE` | `BUS_TARGET_V` with the slope terms | a static var compensator with a voltage slope |
+| 3 `BRANCH_TARGET_P` | the controlled branch's `BRANCH_TARGET_P`, on a phase controller's a1 row | continuous `PhaseControl`, CONTROLLER mode |
+| 4 `BUS_TARGET_Q` | the bus's own `BUS_TARGET_Q`, target = the limit | after `ReactiveLimitsOuterLoop` switched the bus PV -> PQ (its `QLimitType` is set) |
+| 6 `CROSS_FIXED_VARIABLE` | a fixed variable written on *another* row | device-only, see 2.4 |
 
-A PV -> PQ switch is therefore "row mode 0 -> 4" on the device, and the switch back is "4 -> 0".
+A PV -> PQ switch is therefore `FIXED_VARIABLE` -> `BUS_TARGET_Q` on the device, and the switch back is the reverse.
 
 ### 2.3 Equations placed on another bus's row
 
@@ -182,3 +183,4 @@ constants carry OLF's constant names.
 | `GpuDiscreteControlMemberState` | a discrete transformer / shunt voltage control member: continuous first, then rounded and disabled | `DISABLED` 0, `CONTINUOUS` 1, `ROUNDED` 2 |
 | `GpuTransformerVoltageControlMode` | `TransformerVoltageControlMode` (device numbering) | `AFTER_GENERATOR_VOLTAGE_CONTROL` 0, `WITH_GENERATOR_VOLTAGE_CONTROL` 1 |
 | `GpuStepClampVariable` | `AcVariableType` as `MaxVoltageChangeStateVectorScaling` sees it (device numbering) | `BUS_PHI` 0, `BUS_V` 1, `OTHER` 2 |
+| `GpuRowMode` | which equation a stable row holds (section 2.2) | `FIXED_VARIABLE` 0, `EQUATION` 1, `BUS_TARGET_V_WITH_SLOPE` 2, `BRANCH_TARGET_P` 3, `BUS_TARGET_Q` 4, `CROSS_FIXED_VARIABLE` 6 |

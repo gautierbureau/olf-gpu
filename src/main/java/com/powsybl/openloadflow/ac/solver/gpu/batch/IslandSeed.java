@@ -10,6 +10,7 @@ package com.powsybl.openloadflow.ac.solver.gpu.batch;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcElementMapper;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.BatchContingency;
+import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuRowMode;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuVoltageControlRole;
 import com.powsybl.openloadflow.network.LfBranch;
 
@@ -89,7 +90,7 @@ final class IslandSeed {
             int[] row = baseRowMode.clone();
             double[] frozenTargets = frozenTargetsByIndex[ci];
             for (int k = 0; k < frozen.length; k++) {
-                row[frozen[k]] = 0;      // identity row — bus decoupled from the main component
+                row[frozen[k]] = GpuRowMode.FIXED_VARIABLE;      // identity row — bus decoupled from the main component
                 // ...held at a CLEAN flat state (V=1, phi=0) via the target override, NOT the base
                 // equation target (a P/Q value that gives a nonsensical islanded voltage/angle).
                 rs.overrides.add(s * n + frozen[k], frozenTargets[k]);
@@ -130,10 +131,10 @@ final class IslandSeed {
                 int newCarrier = -1;
                 for (int c = qrPtr[g] + 1; c < qrPtr[g + 1]; c++) {
                     int r = qrRows[c];
-                    if (baseCarrier < 0 && baseRowMode[r] != 0 && baseRowMode[r] != 4) {
+                    if (baseCarrier < 0 && baseRowMode[r] != GpuRowMode.FIXED_VARIABLE && baseRowMode[r] != GpuRowMode.BUS_TARGET_Q) {
                         baseCarrier = r;
                     }
-                    if (newCarrier < 0 && row[r] != 0 && row[r] != 4) {
+                    if (newCarrier < 0 && row[r] != GpuRowMode.FIXED_VARIABLE && row[r] != GpuRowMode.BUS_TARGET_Q) {
                         newCarrier = r;
                     }
                 }
@@ -160,7 +161,7 @@ final class IslandSeed {
                     }
                 }
                 if (baseCarrier >= 0 && newCarrier >= 0 && newCarrier != baseCarrier
-                        && row[baseCarrier] == 0 && baseRowMode[baseCarrier] != 0 && !unpinnedPilotSelf) {
+                        && row[baseCarrier] == GpuRowMode.FIXED_VARIABLE && baseRowMode[baseCarrier] != GpuRowMode.FIXED_VARIABLE && !unpinnedPilotSelf) {
                     rs.overrides.add(s * n + newCarrier, baseTargets[baseCarrier]);
                     pilotBalanceRows.add(newCarrier);
                     if (System.getenv("OLF_GPU_SA_RESID") != null) {

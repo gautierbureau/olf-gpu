@@ -43,7 +43,7 @@ final class VoltageControlOverrides {
      *  and the remaining survivors renormalize over c'. */
     static double[][] distrRhoOverrides(EquationSystem<AcVariableType, AcEquationType> es,
                                                 GpuAcData gpuData, Set<LfBranch> distrRhoControllers,
-                                                List<LfBranch> outaged, boolean incrementalTvc) {
+                                                List<LfBranch> outaged, boolean incrementalTransformerVoltageControllers) {
         List<LfBranch> members = outaged.stream().filter(distrRhoControllers::contains).toList();
         if (members.isEmpty()) {
             return new double[][] {new double[0], new double[0]};
@@ -60,9 +60,9 @@ final class VoltageControlOverrides {
                 .filter(b -> !b.isDisabled()).toList();
         // The INCREMENTAL transformer mode never activates a DISTR_RHO equation (each tap is a fixed ratio the outer
         // loop moves), so an outage has no sharing coefficient to renormalize and no free role to re-pick: the
-        // survivors' tap moves are the in-kernel loop's business (tvcGroupDecisionBatch decides on the live members).
+        // survivors' tap moves are the in-kernel loop's business (incrementalTransformerVoltageControlGroupDecisionBatch decides on the live members).
         // Not "inactive at plan time": the other modes start with the sharing off and switch it on during the run.
-        if (incrementalTvc) {
+        if (incrementalTransformerVoltageControllers) {
             return new double[][] {new double[0], new double[0]};
         }
         if (group.size() < 2) {

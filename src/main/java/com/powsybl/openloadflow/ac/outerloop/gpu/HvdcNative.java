@@ -36,11 +36,11 @@ public final class HvdcNative {
      *
      * @param in per hvdc x9: {@code p0 k pMax12 pMax21 loss1 loss2 r baseD1 baseD2}
      * @param ctgOut per (scenario, hvdc): the contingency itself outaged it, so the loops leave it alone
-     * @param status per (scenario, hvdc) starting status, and {@code appliedD1/D2} the converter-row
+     * @param status per (scenario, hvdc) starting status, and {@code appliedDelta1/D2} the converter-row
      *        deltas the pre-solve freeze already applied — transitions are applied incrementally
      */
     public static native void setBatchHvdcLoops(long handle, int[] elem, int[] bus1Row, int[] bus2Row,
                                                 int[] bus1Phi, int[] bus2Phi,
                                                 double[] in, byte[] ctgOut, int[] status,
-                                                double[] appliedD1, double[] appliedD2, int limitsActive);
+                                                double[] appliedDelta1, double[] appliedDelta2, int limitsActive);
 }

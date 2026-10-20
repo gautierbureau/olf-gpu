@@ -45,7 +45,7 @@ public final class GpuIncrementalTransformerReactivePowerControlOuterLoop {
 
     public static List<DeviceFlowControllers.Controller> buildControllers(LfNetwork network,
                                                                           EquationSystem<AcVariableType, AcEquationType> es,
-                                                                          GpuAcElementMapper elementMapper, int rpcMaxTapShift) {
+                                                                          GpuAcElementMapper elementMapper, int incrementalTransformerReactivePowerControlMaxTapShift) {
         List<DeviceFlowControllers.Controller> out = new ArrayList<>();
         Map<Integer, Integer> rhoRows = new LinkedHashMap<>();
         for (Variable<AcVariableType> v : es.getIndex().getSortedVariablesToFind()) {
@@ -61,9 +61,9 @@ public final class GpuIncrementalTransformerReactivePowerControlOuterLoop {
             LfBranch controller = rc.getControllerBranch();
             Integer pinRow = rhoRows.get(controller.getNum());
             int elemIndex = elementMapper.getElementIndex(controller);
-            int ctlElemIndex = elementMapper.getElementIndex(controlled);
+            int controlledElementIndex = elementMapper.getElementIndex(controlled);
             double[][] tapRows = GpuTransformerVoltageControlOuterLoop.tapModels(controller.getPiModel());
-            if (pinRow == null || elemIndex < 0 || ctlElemIndex < 0 || tapRows.length == 0) {
+            if (pinRow == null || elemIndex < 0 || controlledElementIndex < 0 || tapRows.length == 0) {
                 GpuBatchSkips.record(GpuBatchSkips.Slot.RPC, LOGGER,
                         "Incremental RPC controller {} not representable on the GPU batch — skipped", controller.getId());
                 continue;
@@ -72,10 +72,10 @@ public final class GpuIncrementalTransformerReactivePowerControlOuterLoop {
             double target = controlled.getGeneratorReactivePowerControl()
                     .map(com.powsybl.openloadflow.network.GeneratorReactivePowerControl::getTargetValue)
                     .orElse(rc.getTargetValue());
-            double halfDb = rc.getTargetDeadband().orElse(MIN_TARGET_DEADBAND_MVAR) / 2;
-            out.add(new DeviceFlowControllers.Controller(GpuControlledFlow.REACTIVE_POWER, pinRow, GpuPiModelColumn.R1, target, halfDb,
+            double halfTargetDeadband = rc.getTargetDeadband().orElse(MIN_TARGET_DEADBAND_MVAR) / 2;
+            out.add(new DeviceFlowControllers.Controller(GpuControlledFlow.REACTIVE_POWER, pinRow, GpuPiModelColumn.R1, target, halfTargetDeadband,
                     tapRows, DeviceFlowControllers.closestTap(tapRows, GpuPiModelColumn.R1, controller.getPiModel().getR1()),
-                    elemIndex, ctlElemIndex, rpcMaxTapShift, rc.getControlledSide() == TwoSides.ONE ? 1 : 2, controller.getNum()));
+                    elemIndex, controlledElementIndex, incrementalTransformerReactivePowerControlMaxTapShift, rc.getControlledSide() == TwoSides.ONE ? 1 : 2, controller.getNum()));
         }
         return out;
     }

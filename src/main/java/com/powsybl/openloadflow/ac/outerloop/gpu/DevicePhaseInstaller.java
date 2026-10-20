@@ -28,18 +28,18 @@ public final class DevicePhaseInstaller {
      *  most one loop of each type (ExplicitAcOuterLoopConfig.checkTypeUnicity), so an incremental loop and its
      *  discrete twin are never both present. {@code entryOn}: the activation the solve starts from already carries
      *  the controls OLF's initialize switched ON (the base load flow); a chunk applies them at solve entry itself. */
-    public record Request(List<GpuIncrementalTransformerVoltageControlOuterLoop.Controller> incrementalTvc, int incTvcMaxTapShift,
+    public record Request(List<GpuIncrementalTransformerVoltageControlOuterLoop.Controller> incrementalTransformerVoltageControllers, int incrementalTransformerVoltageControlMaxTapShift,
                           List<DeviceFlowControllers.Controller> flow,
-                          List<GpuPhaseControlOuterLoop.Ctl> continuousPhase,
-                          List<GpuIncrementalShuntVoltageControlOuterLoop.Controller> incrementalShunt, int incShuntMaxSectionShift,
-                          List<GpuTransformerVoltageControlOuterLoop.TransformerController> discreteTvc, boolean simpleTvc,
+                          List<GpuPhaseControlOuterLoop.Controller> continuousPhase,
+                          List<GpuIncrementalShuntVoltageControlOuterLoop.Controller> incrementalShunt, int incrementalShuntVoltageControlMaxSectionShift,
+                          List<GpuTransformerVoltageControlOuterLoop.TransformerController> discreteTransformerVoltageControl, boolean simpleTransformerVoltageControl,
                           boolean afterGenerator, GpuTransformerVoltageControlOuterLoop.FreezeTables freeze,
                           List<GpuShuntVoltageControlOuterLoop.Group> simpleShunt, boolean entryOn) {
     }
 
     /** Which of the run's discrete and incremental control loops the device owns, and the ones it refused. */
-    public record InstalledPhases(boolean incrementalTvc, boolean flow, boolean continuousPhase, boolean incrementalShunt,
-                                  boolean discreteTvc, boolean simpleShunt, List<String> refused) {
+    public record InstalledPhases(boolean incrementalTransformerVoltageControllers, boolean flow, boolean continuousPhase, boolean incrementalShunt,
+                                  boolean discreteTransformerVoltageControl, boolean simpleShunt, List<String> refused) {
     }
 
     /** Install every control-loop table of the run on the (possibly cached) context, or clear it when the run has
@@ -52,62 +52,62 @@ public final class DevicePhaseInstaller {
         // Every table upload also CLEARS when the run has none: the context is cached across runs on the
         // same network, and a stale table from a previous run selects the wrong driver phase (a Simple
         // TVC run after an INCREMENTAL one ran INCREMENTAL_TRANSFORMER_VOLTAGE_CONTROL on its controls — 3.6e-7 kV).
-        boolean tvcInKernel = GpuIncrementalTransformerVoltageControlOuterLoop.uploadToDevice(handle, r.incrementalTvc(),
-                r.incrementalTvc() != null ? r.incTvcMaxTapShift() : 1);
+        boolean incrementalTransformerVoltageControlInKernel = GpuIncrementalTransformerVoltageControlOuterLoop.uploadToDevice(handle, r.incrementalTransformerVoltageControllers(),
+                r.incrementalTransformerVoltageControllers() != null ? r.incrementalTransformerVoltageControlMaxTapShift() : 1);
         // The flow-observed incremental loops (RPC at OLF order 9, incremental phase at order 7) as DRIVER PHASES.
         boolean flowInKernel = DeviceFlowControllers.uploadToDevice(handle, r.flow());
         // CONTINUOUS PhaseControl as a DRIVER PHASE (OLF order 7); the pre-solve control-ON activation stays host-side.
-        boolean cphInKernel = GpuPhaseControlOuterLoop.uploadToDevice(handle, r.continuousPhase());
+        boolean phaseControlInKernel = GpuPhaseControlOuterLoop.uploadToDevice(handle, r.continuousPhase());
         // IncrementalShuntVoltageControl as a DRIVER PHASE (OLF order 10).
         boolean shuntInKernel = GpuIncrementalShuntVoltageControlOuterLoop.uploadToDevice(handle, r.incrementalShunt(),
-                r.incrementalShunt() != null ? r.incShuntMaxSectionShift() : 3);
+                r.incrementalShunt() != null ? r.incrementalShuntVoltageControlMaxSectionShift() : 3);
         // The DISCRETE TransformerVoltageControl (AFTER_GENERATOR / WITH_GENERATOR, OLF order 8) and the
         // WITH_GENERATOR ShuntVoltageControl (order 10) as DRIVER PHASES: the control-ON entry (OLF's
         // initialize) and the rounding/dispatch checks run in-kernel. A control the upload refuses (a member
         // without a tap table) is not owned.
-        boolean tvdInKernel = false;
-        if (r.discreteTvc() != null) {
-            tvdInKernel = GpuTransformerVoltageControlOuterLoop.uploadToDevice(handle, r.discreteTvc(), r.simpleTvc()
+        boolean transformerVoltageControlInKernel = false;
+        if (r.discreteTransformerVoltageControl() != null) {
+            transformerVoltageControlInKernel = GpuTransformerVoltageControlOuterLoop.uploadToDevice(handle, r.discreteTransformerVoltageControl(), r.simpleTransformerVoltageControl()
                     ? GpuTransformerVoltageControlMode.WITH_GENERATOR_VOLTAGE_CONTROL : GpuTransformerVoltageControlMode.AFTER_GENERATOR_VOLTAGE_CONTROL,
-                    r.entryOn() && r.simpleTvc());
-            if (tvdInKernel && r.afterGenerator()) {
+                    r.entryOn() && r.simpleTransformerVoltageControl());
+            if (transformerVoltageControlInKernel && r.afterGenerator()) {
                 // AFTER_GENERATOR: OLF's GeneratorVoltageControlManager freezes the generator controls under the
                 // transformer-controlled level while the transformers act. Without the freeze tables (a candidate
                 // the kernel cannot represent) the device does not own the loop.
                 if (r.freeze() == null) {
                     GpuTransformerVoltageControlOuterLoop.uploadToDevice(handle, null, GpuTransformerVoltageControlMode.AFTER_GENERATOR_VOLTAGE_CONTROL, false);
-                    tvdInKernel = false;
+                    transformerVoltageControlInKernel = false;
                 } else {
                     GpuTransformerVoltageControlOuterLoop.uploadFreeze(handle, r.freeze());
                 }
-            } else if (tvdInKernel) {
+            } else if (transformerVoltageControlInKernel) {
                 GpuTransformerVoltageControlOuterLoop.uploadFreeze(handle, null);   // WITH_GENERATOR freezes nothing
             }
         } else {
             GpuTransformerVoltageControlOuterLoop.uploadToDevice(handle, null, GpuTransformerVoltageControlMode.AFTER_GENERATOR_VOLTAGE_CONTROL, false);   // clears a cached context's table
         }
-        boolean svdInKernel = GpuShuntVoltageControlOuterLoop.uploadToDevice(handle, r.simpleShunt(), r.entryOn());
+        boolean shuntVoltageControlInKernel = GpuShuntVoltageControlOuterLoop.uploadToDevice(handle, r.simpleShunt(), r.entryOn());
 
         List<String> refusedLoops = new ArrayList<>();
-        if (present(r.incrementalTvc()) && !tvcInKernel) {
+        if (present(r.incrementalTransformerVoltageControllers()) && !incrementalTransformerVoltageControlInKernel) {
             refusedLoops.add("IncrementalTransformerVoltageControl");
         }
         if (present(r.flow()) && !flowInKernel) {
             refusedLoops.add("IncrementalTransformerReactivePowerControl/IncrementalPhaseControl");
         }
-        if (present(r.continuousPhase()) && !cphInKernel) {
+        if (present(r.continuousPhase()) && !phaseControlInKernel) {
             refusedLoops.add("PhaseControl");
         }
         if (present(r.incrementalShunt()) && !shuntInKernel) {
             refusedLoops.add("IncrementalShuntVoltageControl");
         }
-        if (present(r.discreteTvc()) && !tvdInKernel) {
+        if (present(r.discreteTransformerVoltageControl()) && !transformerVoltageControlInKernel) {
             refusedLoops.add("TransformerVoltageControl");
         }
-        if (present(r.simpleShunt()) && !svdInKernel) {
+        if (present(r.simpleShunt()) && !shuntVoltageControlInKernel) {
             refusedLoops.add("ShuntVoltageControl");
         }
-        return new InstalledPhases(tvcInKernel, flowInKernel, cphInKernel, shuntInKernel, tvdInKernel, svdInKernel,
+        return new InstalledPhases(incrementalTransformerVoltageControlInKernel, flowInKernel, phaseControlInKernel, shuntInKernel, transformerVoltageControlInKernel, shuntVoltageControlInKernel,
                 refusedLoops);
     }
 

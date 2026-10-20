@@ -1,7 +1,7 @@
 // Copyright (c) 2026, RTE (http://www.rte-france.com)
 // SPDX-License-Identifier: MPL-2.0
 //
-// The branch flow a flow-observed controller acts on, which is also its kind; the observable of flcFlowAndGrad.
+// The branch flow a flow-observed controller acts on, which is also its kind; the observable of controlledFlowAndGradient.
 // Mirrors com.powsybl.openloadflow.ac.solver.gpu.codes.GpuControlledFlow (GpuCodesMirrorTest checks they agree).
 #ifndef OLF_GPU_COMMON_CODES_GPU_CONTROLLED_FLOW_CUH
 #define OLF_GPU_COMMON_CODES_GPU_CONTROLLED_FLOW_CUH

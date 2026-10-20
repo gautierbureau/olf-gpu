@@ -331,7 +331,7 @@ void launchPilotVeqInner(BatchSolverContext* ctx, DriverPass& drv, bool staticLi
                 ctx->dReactiveRelocationPilotReactiveLimitEntry.p ? ctx->dReactiveRelocationPilotReactiveLimitEntry.as<int>() : nullptr,
                 nReactiveLimitTargetVOverrides, nReactiveLimitTargetVOverrides > 0 ? dReactiveLimitTargetVOverrideScenarioEntry.as<int>() : nullptr,
                 nReactiveLimitTargetVOverrides > 0 ? dReactiveLimitTargetVOverrideValue.as<double>() : nullptr,
-                ctx->nSvc > 0 ? ctx->dSecondaryVoltageControlReactiveLimitTargetV.as<double>() : nullptr,
+                ctx->nSecondaryVoltageControlControllerBuses > 0 ? ctx->dSecondaryVoltageControlReactiveLimitTargetV.as<double>() : nullptr,
                 ctx->nDistrQMembers, ctx->dDistrQMemberRelocationGroup.p ? ctx->dDistrQMemberRelocationGroup.as<int>() : nullptr,
                 ctx->dDistrQMemberReactiveLimitEntry.p ? ctx->dDistrQMemberReactiveLimitEntry.as<int>() : nullptr,
                 ctx->nReactiveLimitIslanded > 0 ? ctx->dReactiveLimitIslanded.as<char>() : nullptr,

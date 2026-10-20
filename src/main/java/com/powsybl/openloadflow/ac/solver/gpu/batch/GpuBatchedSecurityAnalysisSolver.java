@@ -223,10 +223,10 @@ public final class GpuBatchedSecurityAnalysisSolver {
                     config.incrementalTransformerControl(),
                     config.incrementalShuntControl(),
                     config.simpleShuntControl(),
-                    config.incrementalRpcControl(), config.incrementalPhaseControl(), config.incTvcMaxTapShift(),
+                    config.incrementalTransformerReactivePowerControl(), config.incrementalPhaseControl(), config.incrementalTransformerVoltageControlMaxTapShift(),
                     config.continuousPhaseControl(),
                     config.transformerControl() || config.simpleTransformerControl(),
-                    config.tvcUseInitialTapPosition(), config.genVcMinNominalV(),
+                    config.transformerVoltageControlUseInitialTapPosition(), config.genVcMinNominalV(),
                     config.secondaryVoltageControl(), config.minPlausibleTargetV(), config.maxPlausibleTargetV()),
                     network, equationSystem, targetVector, baseActivation, baseTargets,
                     gpuData.reactiveLimits().voltageRow(), gpuData.reactiveLimits().busNum(), n);
@@ -237,7 +237,7 @@ public final class GpuBatchedSecurityAnalysisSolver {
                 // built in the order the call evaluated them when they were its arguments
                 var hvdcElemIndex = GpuHvdcAcEmulationLimitsOuterLoop.elementIndices(network, nElements);
                 int[] varType = config.lsMode() == GpuStateVectorScalingMode.MAX_VOLTAGE_CHANGE ? GpuAcActivationExtractor.extractVarType(equationSystem, n) : null;
-                List<GpuHvdcAcEmulationLimitsOuterLoop.Ctl> hvdcControllers = config.hvdcFreezing() || config.hvdcLimits()
+                List<GpuHvdcAcEmulationLimitsOuterLoop.Controller> hvdcControllers = config.hvdcFreezing() || config.hvdcLimits()
                         ? GpuHvdcAcEmulationLimitsOuterLoop.buildControllers(network, equationSystem, nElements, gpuData)
                         : null;
                 GpuBatchChunkSolver.solveQualifiedInChunks(new ChunkInputs(contingencies,

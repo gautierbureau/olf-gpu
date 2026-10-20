@@ -8,7 +8,7 @@
 package com.powsybl.openloadflow.ac.solver.gpu.codes;
 
 /**
- * Which of OLF's discrete transformer voltage control loops the device runs (setBatchDiscreteTvc mode), named after
+ * Which of OLF's discrete transformer voltage control loops the device runs (setBatchTransformerVoltageControl mode), named after
  * OLF's {@code TransformerVoltageControlMode} constants. The device numbering is its own (OLF's ordinals put
  * WITH_GENERATOR first); INCREMENTAL_VOLTAGE_CONTROL runs as its own loop. Mirrored by
  * native/cuda/jni/common/codes/gpu_transformer_voltage_control_mode.cuh.

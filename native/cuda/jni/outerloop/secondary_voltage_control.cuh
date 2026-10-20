@@ -12,14 +12,14 @@
 
 namespace olfgpu {
 
-// The batched LU holds an nCtl x nCtl matrix per scenario: a zone system that would not fit this is refused.
-constexpr double SVC_MAT_BUDGET_BYTES = 512.0 * 1024 * 1024;   // zone-system workspace ceiling
+// The batched LU holds an nControllerBuses x nControllerBuses matrix per scenario: a zone system that would not fit this is refused.
+constexpr double SECONDARY_VOLTAGE_CONTROL_MATRIX_BUDGET_BYTES = 512.0 * 1024 * 1024;   // zone-system workspace ceiling
 
 // Per-solve reset: zone targets back at the network's own, nothing adjusted yet.
-void svcResetSolve(BatchSolverContext* ctx, DriverPass& drv);
+void secondaryVoltageControlResetSolve(BatchSolverContext* ctx, DriverPass& drv);
 
 // One check of the loop on every live scenario (GpuOuterLoopKind::SECONDARY_VOLTAGE_CONTROL).
-void svcStep(BatchSolverContext* ctx, DriverPass& drv);
+void secondaryVoltageControlStep(BatchSolverContext* ctx, DriverPass& drv);
 
 }  // namespace olfgpu
 

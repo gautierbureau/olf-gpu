@@ -29,16 +29,16 @@ public final class VoltageMonitoringNative {
     public static native int readBatchMonitoringActivations(long handle);
 
     /** Per (scenario, monitoring controller): the target the driver's MonitoringVoltage phase activated
-     *  (pu), NaN while standing by — null without the table. Layout {@code s * nmon + c}. */
+     *  (pu), NaN while standing by — null without the table. Layout {@code s * nMonitoringVoltageControllers + c}. */
     public static native double[] readBatchMonitoringTargets(long handle);
 
     /**
      * MonitoringVoltage controller table (OLF outer-loop order 6) for the DRIVER phase: per
      * controller its monitored V row and {@code band = {lowThreshold, highThreshold, lowTargetV,
-     * highTargetV}}, plus the CSR list ({@code deltaPtr}) of (row, mode, target) writes its
+     * highTargetV}}, plus the CSR list ({@code deltaStart}) of (row, mode, target) writes its
      * activation applies. A null/empty {@code vRow} clears the table.
      */
     public static native void setBatchMonitoringLoops(long handle, int[] vRow, double[] band,
-                                                      int[] deltaPtr, int[] deltaRow,
+                                                      int[] deltaStart, int[] deltaRow,
                                                       int[] deltaMode, double[] deltaTarget);
 }

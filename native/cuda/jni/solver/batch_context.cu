@@ -332,9 +332,9 @@ void uploadBatchOverrides(BatchSolverContext* ctx, int lsMode, double maxDv, dou
     ctx->nShuntAdmittanceOverrides = nShuntAdmittanceOverrides;
     ctx->hShuntAdmittanceOverrideBaseScenarioElement.assign(shuntAdmittanceOverrideScenarioElement, shuntAdmittanceOverrideScenarioElement + (size_t) nShuntAdmittanceOverrides * 2);
     ctx->hShuntAdmittanceOverrideBaseDelta.assign(shuntAdmittanceOverrideDelta, shuntAdmittanceOverrideDelta + (size_t) nShuntAdmittanceOverrides * 2);
-    if (nShuntAdmittanceOverrides > 0 || ctx->nShc > 0) {
+    if (nShuntAdmittanceOverrides > 0 || ctx->nIncrementalShuntVoltageControlControllerShunts > 0) {
         // room for the in-kernel shunt loop to append one (dG, dB) per (scenario, controller)
-        size_t capEntries = std::max<size_t>(static_cast<size_t>(nShuntAdmittanceOverrides) + (ctx->nShc > 0 ? static_cast<size_t>(nS) * ctx->nShc : 0), 1);
+        size_t capEntries = std::max<size_t>(static_cast<size_t>(nShuntAdmittanceOverrides) + (ctx->nIncrementalShuntVoltageControlControllerShunts > 0 ? static_cast<size_t>(nS) * ctx->nIncrementalShuntVoltageControlControllerShunts : 0), 1);
         ctx->dShuntAdmittanceOverrideScenarioElement.ensure(capEntries * 2 * sizeof(int));
         ctx->dShuntAdmittanceOverrideDelta.ensure(capEntries * 2 * sizeof(double));
         if (nShuntAdmittanceOverrides > 0) {
@@ -387,10 +387,10 @@ void uploadBatchOverrides(BatchSolverContext* ctx, int lsMode, double maxDv, dou
     ctx->nR1Ov = nR1Ov;
     ctx->hR1OvBaseSlotElem.assign(r1OvSlotElem, r1OvSlotElem + (size_t) nR1Ov * 2);
     ctx->hR1OvBaseVal.assign(r1OvVal, r1OvVal + (size_t) nR1Ov * 8);
-    if (nR1Ov > 0 || ctx->nTvc > 0 || ctx->nFlc > 0 || ctx->nCph > 0) {
+    if (nR1Ov > 0 || ctx->nIncrementalTransformerVoltageControlControllerBranches > 0 || ctx->nIncrementalFlowControlControllerBranches > 0 || ctx->nPhaseControlControllerBranches > 0) {
         // Room for the in-kernel TVC loop to merge one moved tap per (scenario, controller) in
         // front of the caller's list without reallocating mid-solve.
-        size_t capEntries = static_cast<size_t>(nR1Ov) + static_cast<size_t>(nS) * (ctx->nTvc + ctx->nFlc + ctx->nCph + ctx->nTvd);
+        size_t capEntries = static_cast<size_t>(nR1Ov) + static_cast<size_t>(nS) * (ctx->nIncrementalTransformerVoltageControlControllerBranches + ctx->nIncrementalFlowControlControllerBranches + ctx->nPhaseControlControllerBranches + ctx->nTransformerVoltageControlMembers);
         capEntries = std::max<size_t>(capEntries, 1);
         ctx->dR1OvSlotElem.ensure(capEntries * 2 * sizeof(int));
         ctx->dR1OvVal.ensure(capEntries * 8 * sizeof(double));

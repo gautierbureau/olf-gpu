@@ -46,30 +46,30 @@ public final class DevicePhases {
      * fills it from its {@code BatchConfig}, the base load flow from the run's configured outer loops;
      * both then get the same tables out.
      *
-     * <p>{@code rpcMaxTapShift} belongs to the incremental transformer REACTIVE POWER loop, not to the
+     * <p>{@code incrementalTransformerReactivePowerControlMaxTapShift} belongs to the incremental transformer REACTIVE POWER loop, not to the
      * transformer voltage one — the config field it comes from is named after the ratio tap control and
      * reads like the latter. Feeding it the wrong loop's shift moved a bus by 1.3e-4 kV.
      */
     public record Request(boolean monitoring,
-                          boolean incrementalTvc,
+                          boolean incrementalTransformerVoltageControllers,
                           boolean incrementalShunt,
                           boolean simpleShunt,
-                          boolean rpc, boolean incrementalPhase, int rpcMaxTapShift,
+                          boolean rpc, boolean incrementalPhase, int incrementalTransformerReactivePowerControlMaxTapShift,
                           boolean continuousPhase,
-                          boolean discreteTvc, boolean tvcUseInitialTapPosition, double genVcMinNominalV,
-                          boolean secondaryVc, double minPlausibleTargetV, double maxPlausibleTargetV) {
+                          boolean discreteTransformerVoltageControl, boolean transformerVoltageControlUseInitialTapPosition, double genVcMinNominalV,
+                          boolean secondaryVoltageControlControllers, double minPlausibleTargetV, double maxPlausibleTargetV) {
     }
 
     /** Every phase's controllers, null where the run does not configure the loop. */
-    public record Built(List<GpuMonitoringVoltageOuterLoop.Ctl> monitoring,
-                        List<GpuIncrementalTransformerVoltageControlOuterLoop.Controller> incrementalTvc,
+    public record Built(List<GpuMonitoringVoltageOuterLoop.Controller> monitoring,
+                        List<GpuIncrementalTransformerVoltageControlOuterLoop.Controller> incrementalTransformerVoltageControllers,
                         List<GpuIncrementalShuntVoltageControlOuterLoop.Controller> incrementalShunt,
                         List<GpuShuntVoltageControlOuterLoop.Group> simpleShunt,
                         List<DeviceFlowControllers.Controller> flow,
-                        List<GpuPhaseControlOuterLoop.Ctl> continuousPhase,
-                        List<GpuTransformerVoltageControlOuterLoop.TransformerController> discreteTvc,
+                        List<GpuPhaseControlOuterLoop.Controller> continuousPhase,
+                        List<GpuTransformerVoltageControlOuterLoop.TransformerController> discreteTransformerVoltageControl,
                         GpuTransformerVoltageControlOuterLoop.FreezeTables freeze,
-                        GpuSecondaryVoltageControlOuterLoop.Controllers secondaryVc,
+                        GpuSecondaryVoltageControlOuterLoop.Controllers secondaryVoltageControlControllers,
                         EsContext esContext) {
     }
 
@@ -94,15 +94,15 @@ public final class DevicePhases {
         GpuBatchSkips.reset();
         GpuAcElementMapper mapper = new GpuAcElementMapper(network);
         int shuntOffset = mapper.getClosedBranchCount() + mapper.getOpenBranchCount();
-        List<GpuTransformerVoltageControlOuterLoop.TransformerController> discreteTvc = request.discreteTvc()
+        List<GpuTransformerVoltageControlOuterLoop.TransformerController> discreteTransformerVoltageControl = request.discreteTransformerVoltageControl()
                 ? GpuTransformerVoltageControlOuterLoop.buildTransformerControllers(network, es, targetVector, activation,
-                        targets, mapper, request.tvcUseInitialTapPosition())
+                        targets, mapper, request.transformerVoltageControlUseInitialTapPosition())
                 : null;
         return new Built(
                 request.monitoring()
                         ? GpuMonitoringVoltageOuterLoop.buildControllers(network, es, targetVector, activation, targets, reactiveLimitVoltageRow)
                         : null,
-                request.incrementalTvc()
+                request.incrementalTransformerVoltageControllers()
                         ? GpuIncrementalTransformerVoltageControlOuterLoop.buildControllers(network, es, mapper)
                         : null,
                 request.incrementalShunt()
@@ -115,12 +115,12 @@ public final class DevicePhases {
                 request.continuousPhase()
                         ? GpuPhaseControlOuterLoop.buildControllers(network, es, targetVector, activation, targets, mapper)
                         : null,
-                discreteTvc,
-                discreteTvc != null
-                        ? GpuTransformerVoltageControlOuterLoop.buildFreezeTables(network, es, discreteTvc,
+                discreteTransformerVoltageControl,
+                discreteTransformerVoltageControl != null
+                        ? GpuTransformerVoltageControlOuterLoop.buildFreezeTables(network, es, discreteTransformerVoltageControl,
                                 request.genVcMinNominalV(), reactiveLimitBusNum)
                         : null,
-                request.secondaryVc() && GpuSecondaryVoltageControlOuterLoop.supported(network)
+                request.secondaryVoltageControlControllers() && GpuSecondaryVoltageControlOuterLoop.supported(network)
                         ? GpuSecondaryVoltageControlOuterLoop.build(network, es, reactiveLimitVoltageRow,
                                 new EsContext(es.getStateVector(), n),
                                 request.minPlausibleTargetV(), request.maxPlausibleTargetV(), mapper)
@@ -135,7 +135,7 @@ public final class DevicePhases {
         List<DeviceFlowControllers.Controller> flow = new ArrayList<>();
         if (request.rpc()) {
             flow.addAll(GpuIncrementalTransformerReactivePowerControlOuterLoop.buildControllers(network, es, mapper,
-                    request.rpcMaxTapShift()));
+                    request.incrementalTransformerReactivePowerControlMaxTapShift()));
         }
         if (request.incrementalPhase()) {
             flow.addAll(GpuIncrementalPhaseControlOuterLoop.buildControllers(network, es, mapper));

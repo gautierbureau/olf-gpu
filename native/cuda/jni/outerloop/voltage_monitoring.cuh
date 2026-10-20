@@ -12,10 +12,10 @@
 namespace olfgpu {
 
 // Per-solve reset: nothing has fired yet.
-void monitoringResetSolve(BatchSolverContext* ctx, DriverPass& drv);
+void monitoringVoltageResetSolve(BatchSolverContext* ctx, DriverPass& drv);
 
 // One check of the loop on every live scenario (GpuOuterLoopKind::MONITORING_VOLTAGE).
-void monitoringStep(BatchSolverContext* ctx, DriverPass& drv);
+void monitoringVoltageStep(BatchSolverContext* ctx, DriverPass& drv);
 
 }  // namespace olfgpu
 

@@ -26,28 +26,29 @@ public final class ShuntVoltageControlNative {
     }
 
     /** Per (scenario, sub-controller): the dispatched section, layout {@code s * nSubs + u}. */
-    public static native int[] readBatchDiscreteShuntPositions(long handle);
+    public static native int[] readBatchShuntVoltageControlPositions(long handle);
 
     /** Per (scenario, member shunt): {state (0 off, 1 continuous, 2 dispatched), the continuous b the
      *  dispatch started from}, layout {@code (s * nMembers + m) * 2} — null without the table. */
-    public static native double[] readBatchDiscreteShuntState(long handle);
+    public static native double[] readBatchShuntVoltageControlState(long handle);
 
     /** Per (scenario, sub-controller): the section the driver's ShuntVoltageControl phase left —
      *  null without the table. Layout {@code s * nSubs + u}, subs in upload order. */
-    public static native int[] readBatchShuntPositions(long handle);
+    public static native int[] readBatchIncrementalShuntVoltageControlPositions(long handle);
 
     /** Install the WITH_GENERATOR shunt voltage-control tables for the in-kernel ShuntVoltageControl phase
      *  (OLF order 10); see GpuShuntVoltageControlOuterLoop.uploadToDevice. Returns 1 when the kernel loop owns them. */
     @SuppressWarnings("java:S107")
-    public static native int setBatchDiscreteShunt(long handle, int entryOn,
-            int[] grpPtr, int[] deltaPtr, int[] deltaRow, int[] deltaModeOn, int[] deltaModeOff,
+    public static native int setBatchShuntVoltageControl(long handle, int entryOn,
+            int[] groupMemberStart, int[] deltaStart, int[] deltaRow, int[] deltaModeOn, int[] deltaModeOff,
             double[] deltaTargetOn, double[] deltaTargetOff,
-            int[] memBRow, int[] memElem, int[] memSubPtr, int[] secPtr, double[] secB, int[] subMin, int[] subBase);
+            int[] memberShuntBRow, int[] memberElement, int[] memberShuntCompensatorStart, int[] sectionStart,
+            double[] sectionB, int[] shuntCompensatorMinPosition, int[] shuntCompensatorBasePosition);
 
     /** Install the incremental SHUNT voltage-control tables for the in-kernel loop (OLF order 10);
      *  see GpuIncrementalShuntVoltageControlOuterLoop.uploadToDevice. Returns 1 when the kernel loop owns them. */
-    public static native int setBatchShuntControllers(long handle,
-            int[] bRow, int[] vRow, double[] targetV, double[] halfDb, int[] elemAbs, int[] shuntAdmittanceOverrideElement,
-            int[] groupPtr, int[] groupCtrl, int[] subPtr, int[] secPtr, double[] secB, double[] secG,
-            int[] subMin, int[] subBase, int maxSectionShift);
+    public static native int setBatchIncrementalShuntVoltageControl(long handle,
+            int[] bRow, int[] vRow, double[] targetV, double[] halfTargetDeadband, int[] controllerElement, int[] shuntAdmittanceOverrideElement,
+            int[] groupControllerStart, int[] groupController, int[] shuntCompensatorStart, int[] sectionStart, double[] sectionB, double[] sectionG,
+            int[] shuntCompensatorMinPosition, int[] shuntCompensatorBasePosition, int maxSectionShift);
 }

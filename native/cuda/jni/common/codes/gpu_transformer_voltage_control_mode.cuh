@@ -1,7 +1,7 @@
 // Copyright (c) 2026, RTE (http://www.rte-france.com)
 // SPDX-License-Identifier: MPL-2.0
 //
-// Which of OLF's discrete transformer voltage control loops the device runs (tvdMode), named after OLF's
+// Which of OLF's discrete transformer voltage control loops the device runs (transformerVoltageControlMode), named after OLF's
 // TransformerVoltageControlMode constants. Mirrors
 // com.powsybl.openloadflow.ac.solver.gpu.codes.GpuTransformerVoltageControlMode (GpuCodesMirrorTest checks they agree).
 #ifndef OLF_GPU_COMMON_CODES_GPU_TRANSFORMER_VOLTAGE_CONTROL_MODE_CUH

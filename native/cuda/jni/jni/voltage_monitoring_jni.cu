@@ -8,13 +8,13 @@
 extern "C" JNIEXPORT void JNICALL
 OLF_JNI(ac_outerloop_gpu, VoltageMonitoringNative, setBatchMonitoringLoops)(
         JNIEnv* env, jclass, jlong handle, jintArray jVRow, jdoubleArray jBand,
-        jintArray jDeltaPtr, jintArray jDeltaRow, jintArray jDeltaMode, jdoubleArray jDeltaTarget) {
+        jintArray jDeltaStart, jintArray jDeltaRow, jintArray jDeltaMode, jdoubleArray jDeltaTarget) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx == nullptr) {
         return;
     }
     if (jVRow == nullptr || env->GetArrayLength(jVRow) == 0) {
-        ctx->nmon = 0;
+        ctx->nMonitoringVoltageControllers = 0;
         return;
     }
     auto upI = [&](jintArray a, DeviceBuf& b) {
@@ -27,14 +27,14 @@ OLF_JNI(ac_outerloop_gpu, VoltageMonitoringNative, setBatchMonitoringLoops)(
         b.upload(q, (size_t) env->GetArrayLength(a) * sizeof(double));
         env->ReleaseDoubleArrayElements(a, q, JNI_ABORT);
     };
-    upI(jVRow, ctx->dMonVRow);
-    upD(jBand, ctx->dMonBand);
-    upI(jDeltaPtr, ctx->dMonDeltaPtr);
-    upI(jDeltaRow, ctx->dMonDeltaRow);
-    upI(jDeltaMode, ctx->dMonDeltaMode);
-    upD(jDeltaTarget, ctx->dMonDeltaTarget);
-    ctx->nmon = env->GetArrayLength(jVRow);
-    ctx->dMonActivated.alloc(static_cast<size_t>(ctx->nmon) * ctx->nScenarios * sizeof(double));
+    upI(jVRow, ctx->dMonitoringVoltageBusVRow);
+    upD(jBand, ctx->dMonitoringVoltageBand);
+    upI(jDeltaStart, ctx->dMonitoringVoltageDeltaStart);
+    upI(jDeltaRow, ctx->dMonitoringVoltageDeltaRow);
+    upI(jDeltaMode, ctx->dMonitoringVoltageDeltaMode);
+    upD(jDeltaTarget, ctx->dMonitoringVoltageDeltaTarget);
+    ctx->nMonitoringVoltageControllers = env->GetArrayLength(jVRow);
+    ctx->dMonitoringVoltageActivatedTargetV.alloc(static_cast<size_t>(ctx->nMonitoringVoltageControllers) * ctx->nScenarios * sizeof(double));
 }
 
 /** How many (controller, scenario) monitoring automatons FIRED in the last solve. The host keeps
@@ -44,12 +44,12 @@ extern "C" JNIEXPORT jint JNICALL
 OLF_JNI(ac_outerloop_gpu, VoltageMonitoringNative, readBatchMonitoringActivations)(
         JNIEnv*, jclass, jlong handle) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
-    if (ctx == nullptr || ctx->nmon == 0 || !ctx->dMonActivated.p) {
+    if (ctx == nullptr || ctx->nMonitoringVoltageControllers == 0 || !ctx->dMonitoringVoltageActivatedTargetV.p) {
         return 0;
     }
-    size_t cnt = static_cast<size_t>(ctx->nmon) * ctx->nScenarios;
+    size_t cnt = static_cast<size_t>(ctx->nMonitoringVoltageControllers) * ctx->nScenarios;
     std::vector<double> host(cnt);
-    cudaMemcpy(host.data(), ctx->dMonActivated.p, cnt * sizeof(double), cudaMemcpyDeviceToHost);
+    cudaMemcpy(host.data(), ctx->dMonitoringVoltageActivatedTargetV.p, cnt * sizeof(double), cudaMemcpyDeviceToHost);
     jint fired = 0;
     for (double v : host) {
         if (!std::isnan(v)) {
@@ -63,12 +63,12 @@ extern "C" JNIEXPORT jdoubleArray JNICALL
 OLF_JNI(ac_outerloop_gpu, VoltageMonitoringNative, readBatchMonitoringTargets)(
         JNIEnv* env, jclass, jlong handle) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
-    if (ctx == nullptr || ctx->nmon == 0 || !ctx->dMonActivated.p) {
+    if (ctx == nullptr || ctx->nMonitoringVoltageControllers == 0 || !ctx->dMonitoringVoltageActivatedTargetV.p) {
         return nullptr;
     }
-    size_t cnt = static_cast<size_t>(ctx->nmon) * ctx->nScenarios;
+    size_t cnt = static_cast<size_t>(ctx->nMonitoringVoltageControllers) * ctx->nScenarios;
     std::vector<double> host(cnt);
-    cudaMemcpy(host.data(), ctx->dMonActivated.p, cnt * sizeof(double), cudaMemcpyDeviceToHost);
+    cudaMemcpy(host.data(), ctx->dMonitoringVoltageActivatedTargetV.p, cnt * sizeof(double), cudaMemcpyDeviceToHost);
     jdoubleArray out = env->NewDoubleArray(static_cast<jsize>(cnt));
     env->SetDoubleArrayRegion(out, 0, static_cast<jsize>(cnt), host.data());
     return out;

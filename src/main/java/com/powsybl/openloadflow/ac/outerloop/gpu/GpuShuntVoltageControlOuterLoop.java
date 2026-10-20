@@ -171,29 +171,29 @@ public final class GpuShuntVoltageControlOuterLoop {
      *  itself. Returns true when the kernel loop owns them. */
     public static boolean uploadToDevice(long handle, List<Group> groups, boolean entryOn) {
         if (groups == null || groups.isEmpty()) {
-            ShuntVoltageControlNative.setBatchDiscreteShunt(handle, 0, null, null, null, null, null, null, null,
+            ShuntVoltageControlNative.setBatchShuntVoltageControl(handle, 0, null, null, null, null, null, null, null,
                     null, null, null, null, null, null, null);
             return false;
         }
         int nG = groups.size();
-        int[] grpPtr = new int[nG + 1];
-        int[] deltaPtr = new int[nG + 1];
+        int[] groupMemberStart = new int[nG + 1];
+        int[] deltaStart = new int[nG + 1];
         List<Integer> dRow = new ArrayList<>();
         List<Integer> dModeOn = new ArrayList<>();
         List<Integer> dModeOff = new ArrayList<>();
         List<Double> dTgtOn = new ArrayList<>();
         List<Double> dTgtOff = new ArrayList<>();
-        List<Integer> memBRow = new ArrayList<>();
-        List<Integer> memElem = new ArrayList<>();
-        List<Integer> memSubPtr = new ArrayList<>();
-        List<Integer> secPtr = new ArrayList<>();
-        List<Double> secB = new ArrayList<>();
-        List<Integer> subMin = new ArrayList<>();
-        List<Integer> subBase = new ArrayList<>();
+        List<Integer> memberShuntBRow = new ArrayList<>();
+        List<Integer> memberElement = new ArrayList<>();
+        List<Integer> memberShuntCompensatorStart = new ArrayList<>();
+        List<Integer> sectionStart = new ArrayList<>();
+        List<Double> sectionB = new ArrayList<>();
+        List<Integer> shuntCompensatorMinPosition = new ArrayList<>();
+        List<Integer> shuntCompensatorBasePosition = new ArrayList<>();
         for (int g = 0; g < nG; g++) {
             Group grp = groups.get(g);
-            grpPtr[g] = memBRow.size();
-            deltaPtr[g] = dRow.size();
+            groupMemberStart[g] = memberShuntBRow.size();
+            deltaStart[g] = dRow.size();
             for (int k = 0; k < grp.deltaRows().length; k++) {
                 dRow.add(grp.deltaRows()[k]);
                 dModeOn.add(grp.deltaModesOn()[k]);
@@ -202,35 +202,35 @@ public final class GpuShuntVoltageControlOuterLoop {
                 dTgtOff.add(grp.deltaTargetsOff()[k]);
             }
             for (Member m : grp.members()) {
-                memBRow.add(m.bRow());
-                memElem.add(m.elemIndexAbs());
-                memSubPtr.add(subBase.size());
+                memberShuntBRow.add(m.bRow());
+                memberElement.add(m.elemIndexAbs());
+                memberShuntCompensatorStart.add(shuntCompensatorBasePosition.size());
                 for (GpuIncrementalShuntVoltageControlOuterLoop.Sub sub : m.subs()) {
-                    secPtr.add(secB.size());
+                    sectionStart.add(sectionB.size());
                     for (double b : sub.sectionsB()) {
-                        secB.add(b);
+                        sectionB.add(b);
                     }
-                    subMin.add(sub.minPos());
-                    subBase.add(sub.basePos());
+                    shuntCompensatorMinPosition.add(sub.minPos());
+                    shuntCompensatorBasePosition.add(sub.basePos());
                 }
             }
         }
-        grpPtr[nG] = memBRow.size();
-        deltaPtr[nG] = dRow.size();
-        memSubPtr.add(subBase.size());
-        secPtr.add(secB.size());
-        boolean owned = ShuntVoltageControlNative.setBatchDiscreteShunt(handle, entryOn ? 1 : 0, grpPtr, deltaPtr,
+        groupMemberStart[nG] = memberShuntBRow.size();
+        deltaStart[nG] = dRow.size();
+        memberShuntCompensatorStart.add(shuntCompensatorBasePosition.size());
+        sectionStart.add(sectionB.size());
+        boolean owned = ShuntVoltageControlNative.setBatchShuntVoltageControl(handle, entryOn ? 1 : 0, groupMemberStart, deltaStart,
                 dRow.stream().mapToInt(Integer::intValue).toArray(),
                 dModeOn.stream().mapToInt(Integer::intValue).toArray(), dModeOff.stream().mapToInt(Integer::intValue).toArray(),
                 dTgtOn.stream().mapToDouble(Double::doubleValue).toArray(), dTgtOff.stream().mapToDouble(Double::doubleValue).toArray(),
-                memBRow.stream().mapToInt(Integer::intValue).toArray(), memElem.stream().mapToInt(Integer::intValue).toArray(),
-                memSubPtr.stream().mapToInt(Integer::intValue).toArray(), secPtr.stream().mapToInt(Integer::intValue).toArray(),
-                secB.stream().mapToDouble(Double::doubleValue).toArray(),
-                subMin.stream().mapToInt(Integer::intValue).toArray(), subBase.stream().mapToInt(Integer::intValue).toArray()) != 0;
+                memberShuntBRow.stream().mapToInt(Integer::intValue).toArray(), memberElement.stream().mapToInt(Integer::intValue).toArray(),
+                memberShuntCompensatorStart.stream().mapToInt(Integer::intValue).toArray(), sectionStart.stream().mapToInt(Integer::intValue).toArray(),
+                sectionB.stream().mapToDouble(Double::doubleValue).toArray(),
+                shuntCompensatorMinPosition.stream().mapToInt(Integer::intValue).toArray(), shuntCompensatorBasePosition.stream().mapToInt(Integer::intValue).toArray()) != 0;
         LOGGER.info("Uploaded {} shunt voltage-control groups ({} shunts, {} sub-controllers) to device: {}",
-                nG, memBRow.size(), subBase.size(), owned ? "in-kernel loop" : "host orchestrator");
+                nG, memberShuntBRow.size(), shuntCompensatorBasePosition.size(), owned ? "in-kernel loop" : "host orchestrator");
         if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
-            System.err.printf("SVD_UPLOAD entryOn=%b nGroups=%d nMembers=%d nSubs=%d kernel=%b%n", entryOn, nG, memBRow.size(), subBase.size(), owned);
+            System.err.printf("SVD_UPLOAD entryOn=%b nGroups=%d nMembers=%d nSubs=%d kernel=%b%n", entryOn, nG, memberShuntBRow.size(), shuntCompensatorBasePosition.size(), owned);
         }
         return owned;
     }
@@ -238,7 +238,7 @@ public final class GpuShuntVoltageControlOuterLoop {
     /** Give the in-kernel phase's decisions back to the network (batch-of-one base load flow), exactly as
      *  OLF's loop leaves it: every dispatched controller shunt has its control disabled and
      *  {@code dispatchB()} run from the continuous b the device rounded ({@code state} =
-     *  readBatchDiscreteShuntState, {@code positions} = readBatchDiscreteShuntPositions). */
+     *  readBatchShuntVoltageControlState, {@code positions} = readBatchShuntVoltageControlPositions). */
     public static void applyToNetwork(LfNetwork network, List<Group> groups, double[] state, int[] positions) {
         if (groups == null || groups.isEmpty() || state == null) {
             return;

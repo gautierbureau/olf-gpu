@@ -12,10 +12,10 @@
 namespace olfgpu {
 
 // Per-solve reset: every control at its entry state.
-void tvdResetSolve(BatchSolverContext* ctx, DriverPass& drv);
+void transformerVoltageControlResetSolve(BatchSolverContext* ctx, DriverPass& drv);
 
 // One check of the loop on every live scenario (GpuOuterLoopKind::TRANSFORMER_VOLTAGE_CONTROL).
-void tvdStep(BatchSolverContext* ctx, DriverPass& drv);
+void transformerVoltageControlStep(BatchSolverContext* ctx, DriverPass& drv);
 
 }  // namespace olfgpu
 

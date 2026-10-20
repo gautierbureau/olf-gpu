@@ -29,5 +29,5 @@ record PlanContext(List<BatchContingency> contingencies, List<GpuBatchContingenc
                    GpuAcElementMapper elementMapper, GpuAcData gpuData,
                    EquationSystem<AcVariableType, AcEquationType> es, double distributedSlackRawFactorSum, boolean slackParticipates,
                    GpuDsParams distributedSlackParameters, Set<LfBranch> distrRhoControllers, Set<LfBranch> relocatedCouplers,
-                   boolean reactiveLimits, boolean incrementalTvc) {
+                   boolean reactiveLimits, boolean incrementalTransformerVoltageControllers) {
 }

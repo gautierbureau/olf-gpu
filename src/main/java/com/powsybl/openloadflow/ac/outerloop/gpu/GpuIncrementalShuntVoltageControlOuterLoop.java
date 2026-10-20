@@ -62,19 +62,19 @@ public final class GpuIncrementalShuntVoltageControlOuterLoop {
 
     /** One controller shunt: the SHUNT_B variable row (pinned identity — unit-RHS row, target index and
      *  state index coincide), the controlled bus V row, and its sub-controllers. */
-    public record Controller(int bRow, int vRow, int ctrlBusNum, double targetV, double halfDeadband,
+    public record Controller(int bRow, int vRow, int controlledBusNum, double targetV, double halfDeadband,
                       List<Sub> subs, double bMagnitude, int shuntAdmittanceOverrideElement, int elemIndexAbs, int shuntNum) {
     }
 
-    private static final class Ratchet {
-        int dirChangeCount;
+    private static final class ControllerContext {
+        int directionChangeCount;
         int currentDirection;
         int allowedDirection;
 
         void update(int direction) {                         // OLF ControllerContext.updateAllowedDirection
-            if (dirChangeCount < MAX_DIRECTION_CHANGE) {
+            if (directionChangeCount < MAX_DIRECTION_CHANGE) {
                 if (currentDirection != 0 && currentDirection != direction) {
-                    dirChangeCount++;
+                    directionChangeCount++;
                 }
                 currentDirection = direction;
             } else {
@@ -152,71 +152,71 @@ public final class GpuIncrementalShuntVoltageControlOuterLoop {
      *  true when the kernel loop OWNS them (the host orchestrator must then stay off). */
     public static boolean uploadToDevice(long handle, List<Controller> ctrls, int maxSectionShift) {
         if (ctrls == null || ctrls.isEmpty()) {
-            ShuntVoltageControlNative.setBatchShuntControllers(handle,
+            ShuntVoltageControlNative.setBatchIncrementalShuntVoltageControl(handle,
                     null, null, null, null, null, null, null, null, null, null, null, null, null, null, maxSectionShift);
             return false;
         }
         int nc = ctrls.size();
         Map<Integer, List<Integer>> byBus = new LinkedHashMap<>();
         for (int c = 0; c < nc; c++) {
-            byBus.computeIfAbsent(ctrls.get(c).ctrlBusNum(), k -> new ArrayList<>()).add(c);
+            byBus.computeIfAbsent(ctrls.get(c).controlledBusNum(), k -> new ArrayList<>()).add(c);
         }
-        int[] groupPtr = new int[byBus.size() + 1];
-        int[] groupCtrl = new int[nc];
+        int[] groupControllerStart = new int[byBus.size() + 1];
+        int[] groupController = new int[nc];
         int g = 0;
         int k = 0;
         for (List<Integer> group : byBus.values()) {
             group.sort(Comparator.comparingDouble((Integer ci) -> ctrls.get(ci).bMagnitude()).reversed());
-            groupPtr[g++] = k;
+            groupControllerStart[g++] = k;
             for (int ci : group) {
-                groupCtrl[k++] = ci;
+                groupController[k++] = ci;
             }
         }
-        groupPtr[g] = k;
+        groupControllerStart[g] = k;
         int[] bRow = new int[nc];
         int[] vRow = new int[nc];
         double[] targetV = new double[nc];
-        double[] halfDb = new double[nc];
-        int[] elemAbs = new int[nc];
+        double[] halfTargetDeadband = new double[nc];
+        int[] controllerElement = new int[nc];
         int[] shuntAdmittanceOverrideElement = new int[nc];
-        int[] subPtr = new int[nc + 1];
-        List<Integer> secPtr = new ArrayList<>();
-        List<Double> secB = new ArrayList<>();
-        List<Double> secG = new ArrayList<>();
-        List<Integer> subMin = new ArrayList<>();
-        List<Integer> subBase = new ArrayList<>();
+        int[] shuntCompensatorStart = new int[nc + 1];
+        List<Integer> sectionStart = new ArrayList<>();
+        List<Double> sectionB = new ArrayList<>();
+        List<Double> sectionG = new ArrayList<>();
+        List<Integer> shuntCompensatorMinPosition = new ArrayList<>();
+        List<Integer> shuntCompensatorBasePosition = new ArrayList<>();
         for (int c = 0; c < nc; c++) {
             Controller ctl = ctrls.get(c);
             bRow[c] = ctl.bRow();
             vRow[c] = ctl.vRow();
             targetV[c] = ctl.targetV();
-            halfDb[c] = ctl.halfDeadband();
-            elemAbs[c] = ctl.elemIndexAbs();
+            halfTargetDeadband[c] = ctl.halfDeadband();
+            controllerElement[c] = ctl.elemIndexAbs();
             shuntAdmittanceOverrideElement[c] = ctl.elemIndexAbs() >= 0 ? ctl.shuntAdmittanceOverrideElement() : -1;
-            subPtr[c] = subMin.size();
+            shuntCompensatorStart[c] = shuntCompensatorMinPosition.size();
             for (Sub sub : ctl.subs()) {
-                secPtr.add(secB.size());
+                sectionStart.add(sectionB.size());
                 for (int i = 0; i < sub.sectionsB().length; i++) {
-                    secB.add(sub.sectionsB()[i]);
-                    secG.add(sub.sectionsG()[i]);
+                    sectionB.add(sub.sectionsB()[i]);
+                    sectionG.add(sub.sectionsG()[i]);
                 }
-                subMin.add(sub.minPos());
-                subBase.add(sub.basePos());
+                shuntCompensatorMinPosition.add(sub.minPos());
+                shuntCompensatorBasePosition.add(sub.basePos());
             }
         }
-        subPtr[nc] = subMin.size();
-        secPtr.add(secB.size());
-        boolean owned = ShuntVoltageControlNative.setBatchShuntControllers(handle,
-                bRow, vRow, targetV, halfDb, elemAbs, shuntAdmittanceOverrideElement, groupPtr, groupCtrl, subPtr,
-                secPtr.stream().mapToInt(Integer::intValue).toArray(),
-                secB.stream().mapToDouble(Double::doubleValue).toArray(),
-                secG.stream().mapToDouble(Double::doubleValue).toArray(),
-                subMin.stream().mapToInt(Integer::intValue).toArray(),
-                subBase.stream().mapToInt(Integer::intValue).toArray(), maxSectionShift) != 0;
+        shuntCompensatorStart[nc] = shuntCompensatorMinPosition.size();
+        sectionStart.add(sectionB.size());
+        boolean owned = ShuntVoltageControlNative.setBatchIncrementalShuntVoltageControl(handle,
+                bRow, vRow, targetV, halfTargetDeadband, controllerElement, shuntAdmittanceOverrideElement, groupControllerStart, groupController, shuntCompensatorStart,
+                sectionStart.stream().mapToInt(Integer::intValue).toArray(),
+                sectionB.stream().mapToDouble(Double::doubleValue).toArray(),
+                sectionG.stream().mapToDouble(Double::doubleValue).toArray(),
+                shuntCompensatorMinPosition.stream().mapToInt(Integer::intValue).toArray(),
+                shuntCompensatorBasePosition.stream().mapToInt(Integer::intValue).toArray(), maxSectionShift) != 0;
         LOGGER.info("Uploaded {} incremental shunt controllers to device ({} groups, {} subs): {}",
-                nc, byBus.size(), subMin.size(), owned ? "in-kernel loop" : "host orchestrator");
+                nc, byBus.size(), shuntCompensatorMinPosition.size(), owned ? "in-kernel loop" : "host orchestrator");
         if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
-            System.err.printf("SHUNT_UPLOAD nCtrl=%d nGroups=%d nSubs=%d kernel=%b%n", nc, byBus.size(), subMin.size(), owned);
+            System.err.printf("SHUNT_UPLOAD nControllers=%d nGroups=%d nSubs=%d kernel=%b%n", nc, byBus.size(), shuntCompensatorMinPosition.size(), owned);
         }
         return owned;
     }

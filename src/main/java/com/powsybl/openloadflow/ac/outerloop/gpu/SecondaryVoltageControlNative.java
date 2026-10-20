@@ -27,16 +27,16 @@ public final class SecondaryVoltageControlNative {
 
     /** The zone-regulated generator voltage control targets the SecondaryVoltageControl phase settled
      *  on, per {@code (scenario, controller)} — what OLF's own loop leaves on the network. */
-    public static native double[] readBatchSecondaryVcTargets(long handle);
+    public static native double[] readBatchSecondaryVoltageControlTargets(long handle);
 
     /** Install the SecondaryVoltageControl zones for the in-kernel phase (OLF order 4); see
      *  GpuSecondaryVoltageControlOuterLoop.uploadToDevice. Returns 1 when the kernel loop owns them — it refuses a zone
      *  set wider than the in-kernel dense system, or an observable on an element the batch does not pack. */
     @SuppressWarnings("java:S107")
-    public static native int setBatchSecondaryVc(long handle,
-            int[] ctldVRow, int[] busVRow, int[] reactiveLimitEntry, double[] baseTargetV,
+    public static native int setBatchSecondaryVoltageControl(long handle,
+            int[] controlledBusVRow, int[] busVRow, int[] reactiveLimitEntry, double[] baseTargetV,
             double[] minQ, double[] maxQ, double[] loadQ,
-            int[] qPtr, int[] qKind, int[] qElem, int[] qBRow,
-            int[] zonePtr, int[] zoneCtl, int[] zonePilotRow, double[] zoneTargetV,
+            int[] qPtr, int[] reactiveTermKind, int[] reactiveTermElement, int[] reactiveTermShuntBRow,
+            int[] zoneStart, int[] zoneControllerBus, int[] zonePilotBusVRow, double[] zoneTargetV,
             double minPlausibleV, double maxPlausibleV);
 }

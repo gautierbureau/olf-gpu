@@ -9,10 +9,10 @@
 // DRIVER PHASES in OLF's order; clear (null) to leave them to the host orchestrator.
 extern "C" JNIEXPORT void JNICALL
 OLF_JNI(ac_outerloop_gpu, HvdcNative, setBatchHvdcLoops)(
-        JNIEnv* env, jclass, jlong handle, jintArray jElem, jintArray jBus1Row, jintArray jBus2Row,
-        jintArray jBus1Phi, jintArray jBus2Phi,
-        jdoubleArray jIn, jbyteArray jCtgOut, jintArray jStatus,
-        jdoubleArray jAppliedD1, jdoubleArray jAppliedD2, jint limitsActive) {
+        JNIEnv* env, jclass, jlong handle, jintArray jElem, jintArray jHvdcBus1PRow, jintArray jHvdcBus2PRow,
+        jintArray jHvdcBus1PhiColumn, jintArray jHvdcBus2PhiColumn,
+        jdoubleArray jIn, jbyteArray jHvdcContingencyOutage, jintArray jHvdcAcEmulationStatus,
+        jdoubleArray jHvdcAppliedDelta1, jdoubleArray jHvdcAppliedDelta2, jint limitsActive) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx == nullptr) {
         return;
@@ -33,17 +33,17 @@ OLF_JNI(ac_outerloop_gpu, HvdcNative, setBatchHvdcLoops)(
         env->ReleaseDoubleArrayElements(a, q, JNI_ABORT);
     };
     upI(jElem, ctx->dHvdcElement);
-    upI(jBus1Row, ctx->dHvdcBus1PRow);
-    upI(jBus2Row, ctx->dHvdcBus2PRow);
-    upI(jBus1Phi, ctx->dHvdcBus1PhiColumn);
-    upI(jBus2Phi, ctx->dHvdcBus2PhiColumn);
+    upI(jHvdcBus1PRow, ctx->dHvdcBus1PRow);
+    upI(jHvdcBus2PRow, ctx->dHvdcBus2PRow);
+    upI(jHvdcBus1PhiColumn, ctx->dHvdcBus1PhiColumn);
+    upI(jHvdcBus2PhiColumn, ctx->dHvdcBus2PhiColumn);
     upD(jIn, ctx->dHvdcAcEmulationParameters);
-    upI(jStatus, ctx->dHvdcAcEmulationStatus);
-    upD(jAppliedD1, ctx->dHvdcAppliedDelta1);
-    upD(jAppliedD2, ctx->dHvdcAppliedDelta2);
-    jbyte* co = env->GetByteArrayElements(jCtgOut, nullptr);
-    ctx->dHvdcContingencyOutage.upload(co, (size_t) env->GetArrayLength(jCtgOut));
-    env->ReleaseByteArrayElements(jCtgOut, co, JNI_ABORT);
+    upI(jHvdcAcEmulationStatus, ctx->dHvdcAcEmulationStatus);
+    upD(jHvdcAppliedDelta1, ctx->dHvdcAppliedDelta1);
+    upD(jHvdcAppliedDelta2, ctx->dHvdcAppliedDelta2);
+    jbyte* co = env->GetByteArrayElements(jHvdcContingencyOutage, nullptr);
+    ctx->dHvdcContingencyOutage.upload(co, (size_t) env->GetArrayLength(jHvdcContingencyOutage));
+    env->ReleaseByteArrayElements(jHvdcContingencyOutage, co, JNI_ABORT);
     ctx->nHvdcAcEmulation = nh;
     ctx->hvdcAcEmulationLimitsActive = limitsActive;
 }

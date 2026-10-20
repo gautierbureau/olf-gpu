@@ -112,10 +112,10 @@ public final class GpuBatchQualification {
             EquationSystem<AcVariableType, AcEquationType> es,
             double distributedSlackRawFactorSum, boolean slackParticipates,
             com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDsParams distributedSlackParameters, Set<LfBranch> distrRhoControllers,
-            Set<LfBranch> relocatedCouplers, boolean reactiveLimits, boolean incrementalTvc) {
+            Set<LfBranch> relocatedCouplers, boolean reactiveLimits, boolean incrementalTransformerVoltageControllers) {
         ScenarioPlanBuilder pb = new ScenarioPlanBuilder(contingencies.size(), gpuData);
         PlanContext ctx = new PlanContext(contingencies, qualifications, elementMapper, gpuData, es, distributedSlackRawFactorSum,
-                slackParticipates, distributedSlackParameters, distrRhoControllers, relocatedCouplers, reactiveLimits, incrementalTvc);
+                slackParticipates, distributedSlackParameters, distrRhoControllers, relocatedCouplers, reactiveLimits, incrementalTransformerVoltageControllers);
         for (int i = 0; i < qualifications.size(); i++) {
             GpuBatchContingencyValidator.Qualification q = qualifications.get(i);
             if (!q.qualified()) {

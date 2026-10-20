@@ -26,46 +26,46 @@
 namespace olfgpu {
 
 // Per (scenario, controller): OLF's out-of-deadband test on the controlled flow (LIMITER: one-sided).
-__global__ void flcCheckBatch(int nFlc, int nScenarios, int n, int nElements, int closedBranchOffset, int kindMask,
-                              const int* kind, const int* side, const double* targetValue, const double* halfDb,
-                              const int* elem, const int* ctlPack,
+__global__ void incrementalFlowControlCheckBatch(int nIncrementalFlowControlControllerBranches, int nScenarios, int n, int nElements, int closedBranchOffset, int kindMask,
+                              const int* kind, const int* side, const double* targetValue, const double* halfTargetDeadband,
+                              const int* elem, const int* controlledClosedBranch,
                               const double* closedBranchParameters, const int* closedBranchIndices, int nR1Ov, const int* r1OvSlotElem, const double* r1OvVal,
                               const char* disabled, const double* x, const char* outerLoopCheckActive,
-                              char* outOfDb, double* diff) {
+                              char* outOfDeadband, double* diff) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= nFlc * nScenarios) return;
-    int c = tid % nFlc;
-    int s = tid / nFlc;
-    outOfDb[tid] = 0;
+    if (tid >= nIncrementalFlowControlControllerBranches * nScenarios) return;
+    int c = tid % nIncrementalFlowControlControllerBranches;
+    int s = tid / nIncrementalFlowControlControllerBranches;
+    outOfDeadband[tid] = 0;
     if (!outerLoopCheckActive[s] || !(kindMask & controlledFlowMaskBit(kind[c]))) return;
-    int e = ctlPack[c];
+    int e = controlledClosedBranch[c];
     if (disabled[(size_t) s * nElements + elem[c]] || disabled[(size_t) s * nElements + closedBranchOffset + e]) return;
     const double* p = closedBranchParameters + e * GpuPiModelColumn::COUNT;
     double pOv[8];
     if (findTapOverride(nR1Ov, r1OvSlotElem, r1OvVal, s, e, pOv)) p = pOv;
     double g[18];
-    double flow = flcFlowAndGrad(side[c], kind[c], p, x + (size_t) s * n, closedBranchIndices + e * 12, g);
+    double flow = controlledFlowAndGradient(side[c], kind[c], p, x + (size_t) s * n, closedBranchIndices + e * 12, g);
     double d = targetValue[c] - flow;
     diff[tid] = d;
-    outOfDb[tid] = (kind[c] == GpuControlledFlow::CURRENT ? flow > targetValue[c] : fabs(d) > halfDb[c]) ? 1 : 0;
+    outOfDeadband[tid] = (kind[c] == GpuControlledFlow::CURRENT ? flow > targetValue[c] : fabs(d) > halfTargetDeadband[c]) ? 1 : 0;
 }
 
 // Per scenario, for controller c: the controlled flow's gradient dotted with the unit-RHS solution at
 // the controlled branch's variable columns (a non-variable r1/a1 column contributes nothing).
-__global__ void flcGatherSensiBatch(int nScenarios, int n, int c, int nFlc, int closedBranchOffset,
-                                    const int* kind, const int* side, const int* ctlPack,
+__global__ void incrementalFlowControlGatherSensitivityBatch(int nScenarios, int n, int c, int nIncrementalFlowControlControllerBranches, int closedBranchOffset,
+                                    const int* kind, const int* side, const int* controlledClosedBranch,
                                     const double* closedBranchParameters, const int* closedBranchIndices, int nR1Ov, const int* r1OvSlotElem, const double* r1OvVal,
-                                    const double* x, const double* dx, double* sensi) {
+                                    const double* x, const double* dx, double* sensitivity) {
     int s = blockIdx.x * blockDim.x + threadIdx.x;
     if (s >= nScenarios) return;
-    int e = ctlPack[c];
+    int e = controlledClosedBranch[c];
     const double* p = closedBranchParameters + e * GpuPiModelColumn::COUNT;
     double pOv[8];
     if (findTapOverride(nR1Ov, r1OvSlotElem, r1OvVal, s, e, pOv)) p = pOv;
     const int* q = closedBranchIndices + e * 12;
     const double* dxs = dx + (size_t) s * n;
     double g[18];
-    flcFlowAndGrad(side[c], kind[c], p, x + (size_t) s * n, q, g);
+    controlledFlowAndGradient(side[c], kind[c], p, x + (size_t) s * n, q, g);
     double d[6] = { dxs[q[5]], dxs[q[7]], dxs[q[4]], dxs[q[6]], q[8] >= 0 ? dxs[q[8]] : 0.0, q[9] >= 0 ? dxs[q[9]] : 0.0 };
     double sv;
     if (kind[c] == GpuControlledFlow::CURRENT && g[0] == 1e300) {  // I = 0: hypot(dre·dx, dim·dx) (OLF's one-sided rule)
@@ -77,40 +77,40 @@ __global__ void flcGatherSensiBatch(int nScenarios, int n, int c, int nFlc, int 
         int nk = kind[c] == GpuControlledFlow::CURRENT ? 5 : 6;  // OLF's current sensitivity has no dr1 term
         for (int k = 0; k < nk; k++) sv += g[k] * d[k];
     }
-    sensi[(size_t) s * nFlc + c] = sv;
+    sensitivity[(size_t) s * nIncrementalFlowControlControllerBranches + c] = sv;
 }
 
-// OLF's tap decisions per (scenario, controller): RPC — deltaR1 = diffQ / sensi, closest r1 within
-// maxTapShift (no sensitivity gate); phase CONTROLLER — |sensi·toRadians(1)| > SENSI_EPS, da = dp / sensi,
-// closest a1 (MAX_TAP_SHIFT unbounded); phase LIMITER — same gate, da = (target − i) / sensi, then
+// OLF's tap decisions per (scenario, controller): RPC — deltaR1 = diffQ / sensitivity, closest r1 within
+// maxTapShift (no sensitivity gate); phase CONTROLLER — |sensitivity·toRadians(1)| > SENSI_EPS, da = dp / sensitivity,
+// closest a1 (MAX_TAP_SHIFT unbounded); phase LIMITER — same gate, da = (target − i) / sensitivity, then
 // FirstTapPositionAboveFinder: walk tap by tap in the shift's direction while the remaining shift still
-// reaches past the next tap's a1. Ratchet as everywhere (updateAllowedDirection, MAX_DIRECTION_CHANGE 3).
-__global__ void flcDecisionBatch(int nFlc, int nScenarios, int kindMask,
-                                 const int* kind, const int* pinCol, const int* tapPtr, const double* tapData, const int* maxShift,
-                                 const char* outOfDb, const double* diff, const double* sensi,
-                                 int* curTap, int* ratDir, int* ratCount, int* ratAllowed, char* moved) {
+// reaches past the next tap's a1. ControllerContext as everywhere (updateAllowedDirection, MAX_DIRECTION_CHANGE 3).
+__global__ void incrementalFlowControlDecisionBatch(int nIncrementalFlowControlControllerBranches, int nScenarios, int kindMask,
+                                 const int* kind, const int* tapColumn, const int* tapStart, const double* tapRows, const int* maxShift,
+                                 const char* outOfDeadband, const double* diff, const double* sensitivity,
+                                 int* currentTap, int* currentDirection, int* directionChangeCount, int* allowedDirection, char* moved) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= nFlc * nScenarios) return;
-    int c = tid % nFlc;
-    int s = tid / nFlc;
-    if (!outOfDb[tid] || !(kindMask & controlledFlowMaskBit(kind[c]))) return;
-    double sv = sensi[tid];
+    if (tid >= nIncrementalFlowControlControllerBranches * nScenarios) return;
+    int c = tid % nIncrementalFlowControlControllerBranches;
+    int s = tid / nIncrementalFlowControlControllerBranches;
+    if (!outOfDeadband[tid] || !(kindMask & controlledFlowMaskBit(kind[c]))) return;
+    double sv = sensitivity[tid];
     if (kind[c] != GpuControlledFlow::REACTIVE_POWER && fabs(sv * 0.017453292519943295) <= 1e-6) return;  // SENSI_EPS on the per-degree value
     if (sv == 0.0) return;
     double delta = diff[tid] / sv;
-    int cur = curTap[tid];
-    int base = tapPtr[c];
-    int nTaps = tapPtr[c + 1] - base;
-    int col = pinCol[c];
-    int lo = ratAllowed[tid] > 0 ? cur : 0;
-    int hi = ratAllowed[tid] < 0 ? cur : nTaps - 1;
+    int cur = currentTap[tid];
+    int base = tapStart[c];
+    int nTaps = tapStart[c + 1] - base;
+    int col = tapColumn[c];
+    int lo = allowedDirection[tid] > 0 ? cur : 0;
+    int hi = allowedDirection[tid] < 0 ? cur : nTaps - 1;
     int best = cur;
     if (kind[c] != GpuControlledFlow::CURRENT) {  // ClosestTapPositionFinder
-        double newV = tapData[(size_t) (base + cur) * GpuPiModelColumn::COUNT + col] + delta;
+        double newV = tapRows[(size_t) (base + cur) * GpuPiModelColumn::COUNT + col] + delta;
         double bestDist = fabs(delta);
         for (int i = lo; i <= hi; i++) {
             if (abs(i - cur) > maxShift[c]) continue;
-            double dist = fabs(newV - tapData[(size_t) (base + i) * GpuPiModelColumn::COUNT + col]);
+            double dist = fabs(newV - tapRows[(size_t) (base + i) * GpuPiModelColumn::COUNT + col]);
             if (dist < bestDist) { best = i; bestDist = dist; }
         }
     } else {                                                 // FirstTapPositionAboveFinder
@@ -119,9 +119,9 @@ __global__ void flcDecisionBatch(int nFlc, int nScenarios, int kindMask,
         while (true) {
             int next = -1;                                   // OLF nextTapPositionIndex
             if (remaining != 0.0) {
-                double vc = tapData[(size_t) (base + best) * GpuPiModelColumn::COUNT + col];
+                double vc = tapRows[(size_t) (base + best) * GpuPiModelColumn::COUNT + col];
                 auto descending = [&](int n1, int n2) {
-                    double a = tapData[(size_t) (base + n1) * GpuPiModelColumn::COUNT + col], b = tapData[(size_t) (base + n2) * GpuPiModelColumn::COUNT + col];
+                    double a = tapRows[(size_t) (base + n1) * GpuPiModelColumn::COUNT + col], b = tapRows[(size_t) (base + n2) * GpuPiModelColumn::COUNT + col];
                     return remaining > 0 ? a < b : a > b;
                 };
                 (void) vc;
@@ -130,59 +130,59 @@ __global__ void flcDecisionBatch(int nFlc, int nScenarios, int kindMask,
                 else if (best < last && descending(best, best + 1)) next = best + 1;
             }
             if (next < 0 || next < lo || next > hi) break;
-            double value = tapData[(size_t) (base + best) * GpuPiModelColumn::COUNT + col];
-            double nextValue = tapData[(size_t) (base + next) * GpuPiModelColumn::COUNT + col];
+            double value = tapRows[(size_t) (base + best) * GpuPiModelColumn::COUNT + col];
+            double nextValue = tapRows[(size_t) (base + next) * GpuPiModelColumn::COUNT + col];
             best = next;
             if ((remaining < 0 && value + remaining > nextValue) || (remaining > 0 && value + remaining < nextValue)) break;
             remaining -= nextValue - value;
         }
     }
     if (best == cur) return;
-    curTap[tid] = best;
+    currentTap[tid] = best;
     int direction = best > cur ? 1 : -1;
-    if (ratCount[tid] < 3) {
-        if (ratDir[tid] != 0 && ratDir[tid] != direction) ratCount[tid]++;
-        ratDir[tid] = direction;
+    if (directionChangeCount[tid] < 3) {
+        if (currentDirection[tid] != 0 && currentDirection[tid] != direction) directionChangeCount[tid]++;
+        currentDirection[tid] = direction;
     } else {
-        ratAllowed[tid] = direction;
+        allowedDirection[tid] = direction;
     }
     moved[s] = 1;
 }
 
 // Per (scenario, controller) whose tap moved: pin the identity row (rho or a1) at the tap's value.
-__global__ void flcApplyBatch(int nFlc, int nScenarios, int n, const int* pinRow, const int* pinCol,
-                              const int* tapPtr, const double* tapData, const int* curTap, int* prevTap,
+__global__ void incrementalFlowControlApplyBatch(int nIncrementalFlowControlControllerBranches, int nScenarios, int n, const int* pinRow, const int* tapColumn,
+                              const int* tapStart, const double* tapRows, const int* currentTap, int* appliedTap,
                               double* target, double* x) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= nFlc * nScenarios) return;
-    int c = tid % nFlc;
-    int s = tid / nFlc;
-    int t = curTap[tid];
-    if (t == prevTap[tid]) return;
-    double v = tapData[(size_t) (tapPtr[c] + t) * GpuPiModelColumn::COUNT + pinCol[c]];
+    if (tid >= nIncrementalFlowControlControllerBranches * nScenarios) return;
+    int c = tid % nIncrementalFlowControlControllerBranches;
+    int s = tid / nIncrementalFlowControlControllerBranches;
+    int t = currentTap[tid];
+    if (t == appliedTap[tid]) return;
+    double v = tapRows[(size_t) (tapStart[c] + t) * GpuPiModelColumn::COUNT + tapColumn[c]];
     target[(size_t) s * n + pinRow[c]] = v;
     x[(size_t) s * n + pinRow[c]] = v;
-    prevTap[tid] = t;
+    appliedTap[tid] = t;
 }
 
 // Per-solve reset. Incremental flow control: base taps, fresh ratchets.
-void flcResetSolve(BatchSolverContext* ctx, DriverPass& drv) {
+void incrementalFlowControlResetSolve(BatchSolverContext* ctx, DriverPass& drv) {
     const int& nS = drv.nS;
-    size_t nst = static_cast<size_t>(nS) * ctx->nFlc;
+    size_t nst = static_cast<size_t>(nS) * ctx->nIncrementalFlowControlControllerBranches;
     std::vector<int> cur(nst);
-    for (int s2 = 0; s2 < nS; s2++) for (int c = 0; c < ctx->nFlc; c++) cur[static_cast<size_t>(s2) * ctx->nFlc + c] = ctx->hFlcBaseTap[c];
-    CUDA_CHECK(cudaMemcpy(ctx->dFlcCurTap.p, cur.data(), nst * sizeof(int), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(ctx->dFlcPrevTap.p, cur.data(), nst * sizeof(int), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemset(ctx->dFlcRatDir.p, 0, nst * sizeof(int)));
-    CUDA_CHECK(cudaMemset(ctx->dFlcRatCount.p, 0, nst * sizeof(int)));
-    CUDA_CHECK(cudaMemset(ctx->dFlcRatAllowed.p, 0, nst * sizeof(int)));
+    for (int s2 = 0; s2 < nS; s2++) for (int c = 0; c < ctx->nIncrementalFlowControlControllerBranches; c++) cur[static_cast<size_t>(s2) * ctx->nIncrementalFlowControlControllerBranches + c] = ctx->hIncrementalFlowControlBaseTap[c];
+    CUDA_CHECK(cudaMemcpy(ctx->dIncrementalFlowControlCurrentTap.p, cur.data(), nst * sizeof(int), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(ctx->dIncrementalFlowControlAppliedTap.p, cur.data(), nst * sizeof(int), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemset(ctx->dIncrementalFlowControlCurrentDirection.p, 0, nst * sizeof(int)));
+    CUDA_CHECK(cudaMemset(ctx->dIncrementalFlowControlDirectionChangeCount.p, 0, nst * sizeof(int)));
+    CUDA_CHECK(cudaMemset(ctx->dIncrementalFlowControlAllowedDirection.p, 0, nst * sizeof(int)));
 }
 
-void flcStep(BatchSolverContext* ctx, DriverPass& drv, int kindMask) {
+void incrementalFlowControlStep(BatchSolverContext* ctx, DriverPass& drv, int kindMask) {
     const int& n = drv.n;
     const int& nS = drv.nS;
     std::vector<char>& active = drv.active;
-    int nF = ctx->nFlc;
+    int nF = ctx->nIncrementalFlowControlControllerBranches;
     if (nF <= 0) return;
     if (ctx->mode != GpuLinearSolveMode::UBATCH && ctx->mode != GpuLinearSolveMode::ROBUST) {
         static bool warned = false;
@@ -190,53 +190,53 @@ void flcStep(BatchSolverContext* ctx, DriverPass& drv, int kindMask) {
         return;
     }
     size_t nst = static_cast<size_t>(nS) * nF;
-    flcCheckBatch<<<grid(static_cast<int>(nst)), BLOCK, 0, ctx->stream>>>(nF, nS, n, ctx->nElements, ctx->closedBranchOffset, kindMask,
-            ctx->dFlcKind.as<int>(), ctx->dFlcSide.as<int>(), ctx->dFlcTargetValue.as<double>(), ctx->dFlcHalfDb.as<double>(),
-            ctx->dFlcElem.as<int>(), ctx->dFlcCtlPack.as<int>(),
+    incrementalFlowControlCheckBatch<<<grid(static_cast<int>(nst)), BLOCK, 0, ctx->stream>>>(nF, nS, n, ctx->nElements, ctx->closedBranchOffset, kindMask,
+            ctx->dIncrementalFlowControlControlledFlow.as<int>(), ctx->dIncrementalFlowControlControlledSide.as<int>(), ctx->dIncrementalFlowControlTargetValue.as<double>(), ctx->dIncrementalFlowControlHalfTargetDeadband.as<double>(),
+            ctx->dIncrementalFlowControlElement.as<int>(), ctx->dIncrementalFlowControlControlledClosedBranch.as<int>(),
             ctx->st->closedBranch.parameters.as<double>(), ctx->st->closedBranch.indices.as<int>(), ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>(),
             ctx->dDisabled.as<char>(), ctx->dX.as<double>(), ctx->dOuterLoopCheckActive.as<char>(),
-            ctx->dFlcOutOfDb.as<char>(), ctx->dFlcDiff.as<double>());
-    std::vector<char> outOfDb(nst);
-    CUDA_CHECK(cudaMemcpyAsync(outOfDb.data(), ctx->dFlcOutOfDb.p, nst, cudaMemcpyDeviceToHost, ctx->stream));
+            ctx->dIncrementalFlowControlOutOfDeadband.as<char>(), ctx->dIncrementalFlowControlDiff.as<double>());
+    std::vector<char> outOfDeadband(nst);
+    CUDA_CHECK(cudaMemcpyAsync(outOfDeadband.data(), ctx->dIncrementalFlowControlOutOfDeadband.p, nst, cudaMemcpyDeviceToHost, ctx->stream));
     CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
     std::vector<char> needC(nF, 0);
     bool any = false;
-    for (int s2 = 0; s2 < nS; s2++) for (int c = 0; c < nF; c++) if (outOfDb[static_cast<size_t>(s2) * nF + c]) { needC[c] = 1; any = true; }
+    for (int s2 = 0; s2 < nS; s2++) for (int c = 0; c < nF; c++) if (outOfDeadband[static_cast<size_t>(s2) * nF + c]) { needC[c] = 1; any = true; }
     if (!any) return;
     std::vector<char> ones(nS, 1);
     CUDA_CHECK(cudaMemcpy(ctx->dActive.p, ones.data(), nS, cudaMemcpyHostToDevice));
     fillActiveBatch(ctx, drv, false);
-    CUDA_CHECK(cudaMemsetAsync(ctx->dFlcSensi.p, 0, nst * sizeof(double), ctx->stream));
+    CUDA_CHECK(cudaMemsetAsync(ctx->dIncrementalFlowControlSensitivity.p, 0, nst * sizeof(double), ctx->stream));
     bool first = true;
     for (int c = 0; c < nF; c++) {
         if (!needC[c]) continue;
-        int row = ctx->st->rowMap[ctx->hFlcPinRow[c]];
+        int row = ctx->st->rowMap[ctx->hIncrementalFlowControlPinRow[c]];
         if (row < 0) continue;
         setUnitRhsBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, row, ctx->dB.as<double>());
         hazRepairRightHandSide(ctx, nS, ctx->dB.as<double>());
         sensitivitySolve(ctx, drv, first);
-        flcGatherSensiBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(nS, n, c, nF, ctx->closedBranchOffset,
-                ctx->dFlcKind.as<int>(), ctx->dFlcSide.as<int>(), ctx->dFlcCtlPack.as<int>(),
+        incrementalFlowControlGatherSensitivityBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(nS, n, c, nF, ctx->closedBranchOffset,
+                ctx->dIncrementalFlowControlControlledFlow.as<int>(), ctx->dIncrementalFlowControlControlledSide.as<int>(), ctx->dIncrementalFlowControlControlledClosedBranch.as<int>(),
                 ctx->st->closedBranch.parameters.as<double>(), ctx->st->closedBranch.indices.as<int>(), ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>(),
-                ctx->dX.as<double>(), ctx->dDx.as<double>(), ctx->dFlcSensi.as<double>());
+                ctx->dX.as<double>(), ctx->dDx.as<double>(), ctx->dIncrementalFlowControlSensitivity.as<double>());
     }
     CUDA_CHECK(cudaMemcpy(ctx->dActive.p, active.data(), nS, cudaMemcpyHostToDevice));
-    flcDecisionBatch<<<grid(static_cast<int>(nst)), BLOCK, 0, ctx->stream>>>(nF, nS, kindMask,
-            ctx->dFlcKind.as<int>(), ctx->dFlcPinCol.as<int>(), ctx->dFlcTapPtr.as<int>(), ctx->dFlcTapData.as<double>(), ctx->dFlcMaxShift.as<int>(),
-            ctx->dFlcOutOfDb.as<char>(), ctx->dFlcDiff.as<double>(), ctx->dFlcSensi.as<double>(),
-            ctx->dFlcCurTap.as<int>(), ctx->dFlcRatDir.as<int>(), ctx->dFlcRatCount.as<int>(), ctx->dFlcRatAllowed.as<int>(), ctx->dOuterLoopUnstable.as<char>());
-    flcApplyBatch<<<grid(static_cast<int>(nst)), BLOCK, 0, ctx->stream>>>(nF, nS, n, ctx->dFlcPinRow.as<int>(), ctx->dFlcPinCol.as<int>(),
-            ctx->dFlcTapPtr.as<int>(), ctx->dFlcTapData.as<double>(), ctx->dFlcCurTap.as<int>(), ctx->dFlcPrevTap.as<int>(),
+    incrementalFlowControlDecisionBatch<<<grid(static_cast<int>(nst)), BLOCK, 0, ctx->stream>>>(nF, nS, kindMask,
+            ctx->dIncrementalFlowControlControlledFlow.as<int>(), ctx->dIncrementalFlowControlTapColumn.as<int>(), ctx->dIncrementalFlowControlTapStart.as<int>(), ctx->dIncrementalFlowControlTapRows.as<double>(), ctx->dIncrementalFlowControlMaxTapShift.as<int>(),
+            ctx->dIncrementalFlowControlOutOfDeadband.as<char>(), ctx->dIncrementalFlowControlDiff.as<double>(), ctx->dIncrementalFlowControlSensitivity.as<double>(),
+            ctx->dIncrementalFlowControlCurrentTap.as<int>(), ctx->dIncrementalFlowControlCurrentDirection.as<int>(), ctx->dIncrementalFlowControlDirectionChangeCount.as<int>(), ctx->dIncrementalFlowControlAllowedDirection.as<int>(), ctx->dOuterLoopUnstable.as<char>());
+    incrementalFlowControlApplyBatch<<<grid(static_cast<int>(nst)), BLOCK, 0, ctx->stream>>>(nF, nS, n, ctx->dIncrementalFlowControlPinRow.as<int>(), ctx->dIncrementalFlowControlTapColumn.as<int>(),
+            ctx->dIncrementalFlowControlTapStart.as<int>(), ctx->dIncrementalFlowControlTapRows.as<double>(), ctx->dIncrementalFlowControlCurrentTap.as<int>(), ctx->dIncrementalFlowControlAppliedTap.as<int>(),
             ctx->dTarget.as<double>(), ctx->dX.as<double>());
     CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
-    tvcRebuildOverrides(ctx);
+    rebuildTapOverrides(ctx);
     if (std::getenv("OLF_GPU_BATCH_TRACE") != nullptr) {
         std::vector<int> cur(nst);
-        CUDA_CHECK(cudaMemcpy(cur.data(), ctx->dFlcCurTap.p, nst * sizeof(int), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(cur.data(), ctx->dIncrementalFlowControlCurrentTap.p, nst * sizeof(int), cudaMemcpyDeviceToHost));
         int nOut = 0, nMoved = 0;
-        for (char c : outOfDb) nOut += c ? 1 : 0;
-        for (int s2 = 0; s2 < nS; s2++) for (int c = 0; c < nF; c++) if (cur[static_cast<size_t>(s2) * nF + c] != ctx->hFlcBaseTap[c]) nMoved++;
-        std::fprintf(stderr, "FLOW_KERNEL kindMask=%d nS=%d nCtrl=%d outOfDeadband=%d pairsOffBaseTap=%d nR1Ov=%d\n", kindMask, nS, nF, nOut, nMoved, ctx->nR1Ov);
+        for (char c : outOfDeadband) nOut += c ? 1 : 0;
+        for (int s2 = 0; s2 < nS; s2++) for (int c = 0; c < nF; c++) if (cur[static_cast<size_t>(s2) * nF + c] != ctx->hIncrementalFlowControlBaseTap[c]) nMoved++;
+        std::fprintf(stderr, "FLOW_KERNEL kindMask=%d nS=%d nControllers=%d outOfDeadband=%d pairsOffBaseTap=%d nR1Ov=%d\n", kindMask, nS, nF, nOut, nMoved, ctx->nR1Ov);
     }
 }
 

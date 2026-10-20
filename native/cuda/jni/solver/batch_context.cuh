@@ -265,7 +265,7 @@ struct BatchSolverContext {
     // another iteration — where it absorbs weight and moves nothing.
     // MonitoringVoltage (OLF order 6): the standby-SVC automaton, as a DRIVER PHASE. Per controller:
     // the monitored V row, its band and the two setpoints; plus a CSR list of (row, mode, target) the
-    // activation writes. dMonActivated holds the chosen target per (controller, scenario), NaN until
+    // activation writes. dMonitoringVoltageActivatedTargetV holds the chosen target per (controller, scenario), NaN until
     // it fires — OLF never re-checks a controller it has already switched.
     // DRIVER PAUSE/RESUME. Some of OLF's outer loops cannot run on the device without RE-DERIVING
     // what OLF already computes in Java (SecondaryVoltageControl's sensitivity observables; the
@@ -291,32 +291,32 @@ struct BatchSolverContext {
                                                              // solve pass (kept across a host-loop pause)
     std::vector<char> pausedLive, pausedActive;
     std::vector<char> hostChanged;                           // per scenario: the host loop was UNSTABLE
-    int nmon = 0;
-    DeviceBuf dMonVRow, dMonBand, dMonDeltaPtr, dMonDeltaRow, dMonDeltaMode, dMonDeltaTarget, dMonActivated;
+    int nMonitoringVoltageControllers = 0;
+    DeviceBuf dMonitoringVoltageBusVRow, dMonitoringVoltageBand, dMonitoringVoltageDeltaStart, dMonitoringVoltageDeltaRow, dMonitoringVoltageDeltaMode, dMonitoringVoltageDeltaTarget, dMonitoringVoltageActivatedTargetV;
     // INCREMENTAL TRANSFORMER VOLTAGE CONTROL — in-kernel outer loop (GpuOuterLoopKind::INCREMENTAL_TRANSFORMER_VOLTAGE_CONTROL).
     // Per-controller static data uploaded once; per-(scenario, controller) mutable state allocated
-    // at first use. Tap tables are CSR-packed: tapData[tapPtr[c]..tapPtr[c+1]) holds nTaps rows of
+    // at first use. Tap tables are CSR-packed: tapRows[tapStart[c]..tapStart[c+1]) holds nTaps rows of
     // 8 doubles [y, g1, g2, b1, b2, ksi, r1, a1] for controller c.
-    int nTvc = 0;                                            // number of incremental TVC controllers
-    DeviceBuf dTvcRhoRow, dTvcVRow;                          // [nTvc] int: rho identity row, controlled bus V row
-    DeviceBuf dTvcTargetV, dTvcHalfDb;                       // [nTvc] double: target voltage, half deadband
-    DeviceBuf dTvcElemIndex;                                 // [nTvc] int: element index for disabled-mask check
-    DeviceBuf dTvcTapPtr;                                    // [nTvc+1] int: CSR pointer into flat tap table
-    DeviceBuf dTvcTapData;                                   // [totalTaps * 8] double: flat tap rows
-    DeviceBuf dTvcBaseTap;                                   // [nTvc] int: base (extraction-time) tap index
+    int nIncrementalTransformerVoltageControlControllerBranches = 0;                                            // number of incremental TVC controllers
+    DeviceBuf dIncrementalTransformerVoltageControlRhoRow, dIncrementalTransformerVoltageControlControlledBusVRow;                          // [nIncrementalTransformerVoltageControlControllerBranches] int: rho identity row, controlled bus V row
+    DeviceBuf dIncrementalTransformerVoltageControlTargetV, dIncrementalTransformerVoltageControlHalfTargetDeadband;                       // [nIncrementalTransformerVoltageControlControllerBranches] double: target voltage, half deadband
+    DeviceBuf dIncrementalTransformerVoltageControlElement;                                 // [nIncrementalTransformerVoltageControlControllerBranches] int: element index for disabled-mask check
+    DeviceBuf dIncrementalTransformerVoltageControlTapStart;                                    // [nIncrementalTransformerVoltageControlControllerBranches+1] int: CSR pointer into flat tap table
+    DeviceBuf dIncrementalTransformerVoltageControlTapRows;                                   // [totalTaps * 8] double: flat tap rows
+    DeviceBuf dIncrementalTransformerVoltageControlBaseTap;                                   // [nIncrementalTransformerVoltageControlControllerBranches] int: base (extraction-time) tap index
     // Per-(scenario, controller) mutable state:
-    DeviceBuf dTvcCurTap;                                    // [nS * nTvc] int: current tap position
-    DeviceBuf dTvcRatchetDir, dTvcRatchetCount, dTvcRatchetAllowed; // [nS * nTvc] int: ratchet state
+    DeviceBuf dIncrementalTransformerVoltageControlCurrentTap;                                    // [nS * nIncrementalTransformerVoltageControlControllerBranches] int: current tap position
+    DeviceBuf dIncrementalTransformerVoltageControlCurrentDirection, dIncrementalTransformerVoltageControlDirectionChangeCount, dIncrementalTransformerVoltageControlAllowedDirection; // [nS * nIncrementalTransformerVoltageControlControllerBranches] int: ratchet state
     // Per-controller group structure (CSR): controllers sharing a controlled bus are grouped for
     // the one-tap-at-a-time round-robin (OLF's adjustWithSeveralControllers).
-    DeviceBuf dTvcGroupPtr, dTvcGroupCtrl;                   // CSR: groupPtr[nGroups+1], groupCtrl[nTvc]
-    int nTvcGroups = 0;
-    int tvcMaxTapShift = 1;                                  // OLF incrementalTransformerRatioTapControlOuterLoopMaxTapShift
+    DeviceBuf dIncrementalTransformerVoltageControlGroupControllerStart, dIncrementalTransformerVoltageControlGroupController;                   // CSR: groupControllerStart[nGroups+1], groupController[nIncrementalTransformerVoltageControlControllerBranches]
+    int nIncrementalTransformerVoltageControlGroups = 0;
+    int incrementalTransformerVoltageControlMaxTapShift = 1;                                  // OLF incrementalTransformerRatioTapControlOuterLoopMaxTapShift
     // Per-pass scratch and the previous tap (to apply only the pairs that moved this pass).
-    DeviceBuf dTvcOutOfDb, dTvcDiffV, dTvcSensi, dTvcPrevTap;
+    DeviceBuf dIncrementalTransformerVoltageControlOutOfDeadband, dIncrementalTransformerVoltageControlDiffV, dIncrementalTransformerVoltageControlSensitivity, dIncrementalTransformerVoltageControlAppliedTap;
     // Host mirrors of the static tables, for the tap-override rebuild and the rho-row lookup.
-    std::vector<int> hTvcRhoRow, hTvcElemIndex, hTvcBaseTap, hTvcTapPtr;
-    std::vector<double> hTvcTapData;
+    std::vector<int> hIncrementalTransformerVoltageControlRhoRow, hIncrementalTransformerVoltageControlElement, hIncrementalTransformerVoltageControlBaseTap, hIncrementalTransformerVoltageControlTapStart;
+    std::vector<double> hIncrementalTransformerVoltageControlTapRows;
     // Host copy of the CALLER's tap overrides (contingency tap actions) as uploaded at solve entry:
     // the TVC loop's moves are merged IN FRONT of them (findTapOverride takes the first match).
     std::vector<int> hR1OvBaseSlotElem;
@@ -324,84 +324,84 @@ struct BatchSolverContext {
     // INCREMENTAL SHUNT VOLTAGE CONTROL — in-kernel outer loop (GpuOuterLoopKind::INCREMENTAL_SHUNT_VOLTAGE_CONTROL). Controllers are
     // grouped per controlled bus (OLF adjustB round-robin, |b|-descending); each controller shunt has
     // sub-controllers (OLF LfShunt.Controller) with their own section B/G tables and ratchet.
-    int nShc = 0, nShcGroups = 0, nShcSubs = 0, shcMaxSectionShift = 3;
-    DeviceBuf dShcBRow, dShcVRow, dShcTargetV, dShcHalfDb, dShcElemAbs, dShcShOvElem;   // per controller
-    DeviceBuf dShcGroupPtr, dShcGroupCtrl;                   // CSR: group -> controllers (sorted)
-    DeviceBuf dShcSubPtr;                                    // CSR: controller -> subs
-    DeviceBuf dShcSecPtr, dShcSecB, dShcSecG, dShcSubMin, dShcSubBase;   // per sub: section tables
-    DeviceBuf dShcPos, dShcRatDir, dShcRatCount, dShcRatAllowed, dShcShift;   // per (scenario, sub)
-    DeviceBuf dShcSensi, dShcBaseB, dShcAppliedDb;           // per (scenario, controller)
-    DeviceBuf dShcOutOfDb, dShcDiffV;                        // per (scenario, group)
-    std::vector<int> hShcBRow, hShcShOvElem, hShcSubPtr, hShcSecPtr, hShcSubBase;
-    std::vector<double> hShcSecB, hShcSecG;
+    int nIncrementalShuntVoltageControlControllerShunts = 0, nIncrementalShuntVoltageControlGroups = 0, nIncrementalShuntVoltageControlShuntCompensators = 0, incrementalShuntVoltageControlMaxSectionShift = 3;
+    DeviceBuf dIncrementalShuntVoltageControlShuntBRow, dIncrementalShuntVoltageControlControlledBusVRow, dIncrementalShuntVoltageControlTargetV, dIncrementalShuntVoltageControlHalfTargetDeadband, dIncrementalShuntVoltageControlElement, dIncrementalShuntVoltageControlShuntAdmittanceOverrideElement;   // per controller
+    DeviceBuf dIncrementalShuntVoltageControlGroupControllerStart, dIncrementalShuntVoltageControlGroupController;                   // CSR: group -> controllers (sorted)
+    DeviceBuf dIncrementalShuntVoltageControlShuntCompensatorStart;                                    // CSR: controller -> subs
+    DeviceBuf dIncrementalShuntVoltageControlSectionStart, dIncrementalShuntVoltageControlSectionB, dIncrementalShuntVoltageControlSectionG, dIncrementalShuntVoltageControlShuntCompensatorMinPosition, dIncrementalShuntVoltageControlShuntCompensatorBasePosition;   // per sub: section tables
+    DeviceBuf dIncrementalShuntVoltageControlPosition, dIncrementalShuntVoltageControlCurrentDirection, dIncrementalShuntVoltageControlDirectionChangeCount, dIncrementalShuntVoltageControlAllowedDirection, dIncrementalShuntVoltageControlSectionShift;   // per (scenario, sub)
+    DeviceBuf dIncrementalShuntVoltageControlSensitivity, dIncrementalShuntVoltageControlBaseB, dIncrementalShuntVoltageControlAppliedDeltaB;           // per (scenario, controller)
+    DeviceBuf dIncrementalShuntVoltageControlOutOfDeadband, dIncrementalShuntVoltageControlDiffV;                        // per (scenario, group)
+    std::vector<int> hIncrementalShuntVoltageControlShuntBRow, hIncrementalShuntVoltageControlShuntAdmittanceOverrideElement, hIncrementalShuntVoltageControlShuntCompensatorStart, hIncrementalShuntVoltageControlSectionStart, hIncrementalShuntVoltageControlShuntCompensatorBasePosition;
+    std::vector<double> hIncrementalShuntVoltageControlSectionB, hIncrementalShuntVoltageControlSectionG;
     // FLOW-OBSERVED incremental loops (GpuOuterLoopKind::INCREMENTAL_PHASE_CONTROL /
     // INCREMENTAL_TRANSFORMER_REACTIVE_POWER_CONTROL): a rho (RPC) or a1 (phase) tap driving a CONTROLLED
     // branch's flow; kind = the GpuControlledFlow: REACTIVE_POWER (rho, closest-r1), ACTIVE_POWER (phase
     // CONTROLLER, closest-a1), CURRENT (phase LIMITER, first-above-a1, one-sided).
-    int nFlc = 0, nFlcPhase = 0, nFlcRpc = 0;
-    DeviceBuf dFlcKind, dFlcPinRow, dFlcPinCol, dFlcSide, dFlcTargetValue, dFlcHalfDb, dFlcElem, dFlcCtlPack,
-              dFlcTapPtr, dFlcTapData, dFlcBaseTap, dFlcMaxShift;
-    DeviceBuf dFlcCurTap, dFlcPrevTap, dFlcRatDir, dFlcRatCount, dFlcRatAllowed, dFlcSensi, dFlcDiff, dFlcOutOfDb;
-    std::vector<int> hFlcKind, hFlcPinRow, hFlcElem, hFlcTapPtr, hFlcBaseTap;
-    std::vector<double> hFlcTapData;
+    int nIncrementalFlowControlControllerBranches = 0, nIncrementalPhaseControlControllerBranches = 0, nIncrementalTransformerReactivePowerControlControllerBranches = 0;
+    DeviceBuf dIncrementalFlowControlControlledFlow, dIncrementalFlowControlPinRow, dIncrementalFlowControlTapColumn, dIncrementalFlowControlControlledSide, dIncrementalFlowControlTargetValue, dIncrementalFlowControlHalfTargetDeadband, dIncrementalFlowControlElement, dIncrementalFlowControlControlledClosedBranch,
+              dIncrementalFlowControlTapStart, dIncrementalFlowControlTapRows, dIncrementalFlowControlBaseTap, dIncrementalFlowControlMaxTapShift;
+    DeviceBuf dIncrementalFlowControlCurrentTap, dIncrementalFlowControlAppliedTap, dIncrementalFlowControlCurrentDirection, dIncrementalFlowControlDirectionChangeCount, dIncrementalFlowControlAllowedDirection, dIncrementalFlowControlSensitivity, dIncrementalFlowControlDiff, dIncrementalFlowControlOutOfDeadband;
+    std::vector<int> hIncrementalFlowControlControlledFlow, hIncrementalFlowControlPinRow, hIncrementalFlowControlElement, hIncrementalFlowControlTapStart, hIncrementalFlowControlBaseTap;
+    std::vector<double> hIncrementalFlowControlTapRows;
     // CONTINUOUS phase control (OLF PhaseControlOuterLoop, CONTINUOUS_WITH_DISCRETISATION), sharing the
     // phase slot: kind = the GpuPhaseControlMode: CONTROLLER (a1 solved free under row mode 3 for the first
     // solve, then switched off and rounded to the closest tap at the loop's first check), LIMITER (from the second
     // check on, one tap per check against the sign of dI/da1 while I exceeds the limit — local only).
-    int nCph = 0;
-    DeviceBuf dCphKind, dCphA1Row, dCphSide, dCphLimit, dCphElem, dCphTapPtr, dCphTapData, dCphBaseTap;
-    DeviceBuf dCphTap, dCphPrevTap, dCphIter;                // per (scenario, controller) tap; per scenario check count
-    std::vector<int> hCphElem, hCphTapPtr, hCphBaseTap;
-    std::vector<double> hCphTapData;
+    int nPhaseControlControllerBranches = 0;
+    DeviceBuf dPhaseControlMode, dPhaseControlA1Row, dPhaseControlControlledSide, dPhaseControlCurrentLimit, dPhaseControlElement, dPhaseControlTapStart, dPhaseControlTapRows, dPhaseControlBaseTap;
+    DeviceBuf dPhaseControlTap, dPhaseControlAppliedTap, dPhaseControlCheckCount;                // per (scenario, controller) tap; per scenario check count
+    std::vector<int> hPhaseControlElement, hPhaseControlTapStart, hPhaseControlBaseTap;
+    std::vector<double> hPhaseControlTapRows;
     std::vector<int> hShuntAdmittanceOverrideBaseScenarioElement;                      // the caller's shunt overrides at solve entry
     std::vector<double> hShuntAdmittanceOverrideBaseDelta;
     // DISCRETE (non-incremental) TRANSFORMER VOLTAGE CONTROL — GpuOuterLoopKind::TRANSFORMER_VOLTAGE_CONTROL (OLF order 8): OLF's
     // TransformerVoltageControlOuterLoop (AFTER_GENERATOR_VOLTAGE_CONTROL: INITIAL/CONTROL/COMPLETE) or
     // SimpleTransformerVoltageControlOuterLoop (WITH_GENERATOR_VOLTAGE_CONTROL). One group per controlled bus
     // (CSR over members); the group's ON/OFF activations are the toggle-diffed row deltas (CSR).
-    int nTvd = 0, nTvdGroups = 0, nTvdDelta = 0, tvdMode = GpuTransformerVoltageControlMode::AFTER_GENERATOR_VOLTAGE_CONTROL, tvdEntryOn = 0;
-    DeviceBuf dTvdGrpPtr, dTvdGrpVRow, dTvdGrpTargetV, dTvdGrpHalfDb, dTvdGrpUseInit;
-    DeviceBuf dTvdDeltaPtr, dTvdDeltaRow, dTvdDeltaModeOn, dTvdDeltaModeOff, dTvdDeltaTargetOn, dTvdDeltaTargetOff;
-    DeviceBuf dTvdMemRhoRow, dTvdMemElem, dTvdMemBaseTap, dTvdMemTapPtr, dTvdMemMin, dTvdMemMax, dTvdMemInit, dTvdTapData;
-    DeviceBuf dTvdScnStep, dTvdGrpStep, dTvdGrpShMin, dTvdGrpShMax, dTvdGrpShInit;   // per scenario / per (scenario, group)
-    DeviceBuf dTvdMemState, dTvdMemTap, dTvdMemRoundFrom;                          // per (scenario, member)
-    DeviceBuf dTvdSaved, dTvdReject;                                               // per (scenario, delta row) / per scenario
+    int nTransformerVoltageControlMembers = 0, nTransformerVoltageControlGroups = 0, nTransformerVoltageControlDeltaRows = 0, transformerVoltageControlMode = GpuTransformerVoltageControlMode::AFTER_GENERATOR_VOLTAGE_CONTROL, transformerVoltageControlEntryOn = 0;
+    DeviceBuf dTransformerVoltageControlGroupMemberStart, dTransformerVoltageControlGroupControlledBusVRow, dTransformerVoltageControlGroupTargetV, dTransformerVoltageControlGroupHalfTargetDeadband, dTransformerVoltageControlGroupUseInitialTapPosition;
+    DeviceBuf dTransformerVoltageControlDeltaStart, dTransformerVoltageControlDeltaRow, dTransformerVoltageControlDeltaModeOn, dTransformerVoltageControlDeltaModeOff, dTransformerVoltageControlDeltaTargetOn, dTransformerVoltageControlDeltaTargetOff;
+    DeviceBuf dTransformerVoltageControlMemberRhoRow, dTransformerVoltageControlMemberElement, dTransformerVoltageControlMemberBaseTap, dTransformerVoltageControlMemberTapStart, dTransformerVoltageControlMemberMinR1, dTransformerVoltageControlMemberMaxR1, dTransformerVoltageControlMemberInitialR1, dTransformerVoltageControlTapRows;
+    DeviceBuf dTransformerVoltageControlStep, dTransformerVoltageControlGroupStep, dTransformerVoltageControlGroupSharedMinR1, dTransformerVoltageControlGroupSharedMaxR1, dTransformerVoltageControlGroupSharedInitialR1;   // per scenario / per (scenario, group)
+    DeviceBuf dTransformerVoltageControlMemberState, dTransformerVoltageControlMemberTap, dTransformerVoltageControlMemberRoundingR1;                          // per (scenario, member)
+    DeviceBuf dTransformerVoltageControlSavedDeltaTarget, dTransformerVoltageControlRejected;                                               // per (scenario, delta row) / per scenario
     // SECONDARY VOLTAGE CONTROL — GpuOuterLoopKind::SECONDARY_VOLTAGE_CONTROL (OLF order 4). Zones of controller buses regulating a
     // pilot point: run entirely on the device, the small dense zone system included.
-    int nSvc = 0, nSvcZones = 0;
-    DeviceBuf dSvcCtldVRow, dSvcBusVRow, dSecondaryVoltageControlReactiveLimitEntry, dSvcBaseTargetV, dSvcMinQ, dSvcMaxQ, dSvcLoadQ;
-    DeviceBuf dSvcQPtr, dSvcQKind, dSvcQElem, dSvcQBRow;
-    DeviceBuf dSvcZonePtr, dSvcZoneCtl, dSvcZonePilotRow, dSvcZoneTargetV;
-    DeviceBuf dSvcTargetV, dSvcK0, dSvcJk, dSvcJvpp, dSvcEnabled, dSvcNeed, dSvcReject, dSecondaryVoltageControlReactiveLimitTargetV;
+    int nSecondaryVoltageControlControllerBuses = 0, nSecondaryVoltageControlZones = 0;
+    DeviceBuf dSecondaryVoltageControlControlledBusVRow, dSecondaryVoltageControlControllerBusVRow, dSecondaryVoltageControlReactiveLimitEntry, dSecondaryVoltageControlBaseTargetV, dSecondaryVoltageControlMinQ, dSecondaryVoltageControlMaxQ, dSecondaryVoltageControlLoadTargetQ;
+    DeviceBuf dSecondaryVoltageControlReactiveTermStart, dSecondaryVoltageControlReactiveTermKind, dSecondaryVoltageControlReactiveTermElement, dSecondaryVoltageControlReactiveTermShuntBRow;
+    DeviceBuf dSecondaryVoltageControlZoneStart, dSecondaryVoltageControlZoneControllerBus, dSecondaryVoltageControlZonePilotBusVRow, dSecondaryVoltageControlZoneTargetV;
+    DeviceBuf dSecondaryVoltageControlTargetV, dSecondaryVoltageControlK0, dSecondaryVoltageControlJk, dSecondaryVoltageControlJvpp, dSecondaryVoltageControlControllerBusEnabled, dSecondaryVoltageControlNeedsAdjustment, dSecondaryVoltageControlRejected, dSecondaryVoltageControlReactiveLimitTargetV;
     // Batched dense LU workspaces: the zone systems live in DEVICE memory, one N*N column-major matrix
     // and one RHS per scenario, plus the pointer/pivot/info arrays cuBLAS's batched API takes.
-    DeviceBuf dSvcMat, dSvcRhs, dSvcMatPtr, dSvcRhsPtr, dSvcPiv, dSvcInfo, dSvcCtlZone;
-    cublasHandle_t svcBlas = nullptr;
-    std::vector<int> hSvcCtldVRow;
-    std::vector<double> hSvcBaseTargetV;
-    double svcMinPlausibleV = 0.8, svcMaxPlausibleV = 1.2;
+    DeviceBuf dSecondaryVoltageControlZoneMatrix, dSecondaryVoltageControlZoneRightHandSide, dSecondaryVoltageControlZoneMatrixPointers, dSecondaryVoltageControlZoneRightHandSidePointers, dSecondaryVoltageControlZonePivots, dSecondaryVoltageControlZoneFactorizationInfo, dSecondaryVoltageControlControllerBusZone;
+    cublasHandle_t secondaryVoltageControlBlasHandle = nullptr;
+    std::vector<int> hSecondaryVoltageControlControlledBusVRow;
+    std::vector<double> hSecondaryVoltageControlBaseTargetV;
+    double secondaryVoltageControlMinPlausibleTargetV = 0.8, secondaryVoltageControlMaxPlausibleTargetV = 1.2;
 
-    std::vector<int> hTvdMemElem, hTvdMemBaseTap, hTvdMemTapPtr;
-    std::vector<double> hTvdTapData;
+    std::vector<int> hTransformerVoltageControlMemberElement, hTransformerVoltageControlMemberBaseTap, hTransformerVoltageControlMemberTapStart;
+    std::vector<double> hTransformerVoltageControlTapRows;
     // GeneratorVoltageControlManager (AFTER_GENERATOR): generator VC controller buses under the max
     // transformer-controlled nominal voltage are FROZEN at their current Q while the transformers act
     // (freezeGenerationTargetQAndDisableGeneratorVoltageControl(q.eval()) — OLF's generation target is
     // the NET injection, so the row target is eval − loadQ), re-enabled at COMPLETE; plus
     // fixTransformerVoltageControls' PV-bus lists per member (the not-controlled side's component).
-    int nTvdFz = 0;
-    DeviceBuf dTvdFzVRow, dTvdFzLoadQ;                       // per candidate
-    DeviceBuf dTvdFzFrozen, dTvdFzSavedMode, dTvdFzSavedTarget;   // per (scenario, candidate)
-    DeviceBuf dTvdFzRlEntry;                                 // per candidate: RL entry of a REMOTE one, else -1
-    DeviceBuf dTvdFixPvRow;                                  // the fix universe: every gen-VC bus's V row
-    DeviceBuf dTvdFixMinMask, dTvdFixMaxMask;                // per (scenario, member): fixWords ints each
-    int tvdFixWords = 0;
-    bool tvdFixTables = false;
+    int nGeneratorVoltageControlFreezeCandidates = 0;
+    DeviceBuf dGeneratorVoltageControlFreezeVRow, dGeneratorVoltageControlFreezeLoadTargetQ;                       // per candidate
+    DeviceBuf dGeneratorVoltageControlFrozen, dGeneratorVoltageControlFreezeSavedMode, dGeneratorVoltageControlFreezeSavedTarget;   // per (scenario, candidate)
+    DeviceBuf dGeneratorVoltageControlFreezeReactiveLimitEntry;                                 // per candidate: RL entry of a REMOTE one, else -1
+    DeviceBuf dTransformerVoltageControlFixPvRow;                                  // the fix universe: every gen-VC bus's V row
+    DeviceBuf dTransformerVoltageControlFixMinMask, dTransformerVoltageControlFixMaxMask;                // per (scenario, member): fixWords ints each
+    int transformerVoltageControlFixWords = 0;
+    bool hasTransformerVoltageControlFixMasks = false;
     // DISCRETE SHUNT VOLTAGE CONTROL — GpuOuterLoopKind::SHUNT_VOLTAGE_CONTROL (OLF order 10): ShuntVoltageControlOuterLoop
     // (WITH_GENERATOR): control ON for the first solve, LfShuntImpl.dispatchB at the first check.
-    int nSvd = 0, nSvdGroups = 0, nSvdDelta = 0, nSvdSubs = 0, svdEntryOn = 0;
-    DeviceBuf dSvdGrpPtr, dSvdDeltaPtr, dSvdDeltaRow, dSvdDeltaModeOn, dSvdDeltaModeOff, dSvdDeltaTargetOn, dSvdDeltaTargetOff;
-    DeviceBuf dSvdMemBRow, dSvdMemElem, dSvdMemSubPtr, dSvdSecPtr, dSvdSecB, dSvdSubMin, dSvdSubBase;
-    DeviceBuf dSvdGrpStep, dSvdMemState, dSvdMemContB, dSvdSubPos, dSvdSaved;
+    int nShuntVoltageControlMembers = 0, nShuntVoltageControlGroups = 0, nShuntVoltageControlDeltaRows = 0, nShuntVoltageControlShuntCompensators = 0, shuntVoltageControlEntryOn = 0;
+    DeviceBuf dShuntVoltageControlGroupMemberStart, dShuntVoltageControlDeltaStart, dShuntVoltageControlDeltaRow, dShuntVoltageControlDeltaModeOn, dShuntVoltageControlDeltaModeOff, dShuntVoltageControlDeltaTargetOn, dShuntVoltageControlDeltaTargetOff;
+    DeviceBuf dShuntVoltageControlMemberShuntBRow, dShuntVoltageControlMemberElement, dShuntVoltageControlMemberShuntCompensatorStart, dShuntVoltageControlSectionStart, dShuntVoltageControlSectionB, dShuntVoltageControlShuntCompensatorMinPosition, dShuntVoltageControlShuntCompensatorBasePosition;
+    DeviceBuf dShuntVoltageControlGroupStep, dShuntVoltageControlMemberState, dShuntVoltageControlMemberContinuousB, dShuntVoltageControlShuntCompensatorPosition, dShuntVoltageControlSavedDeltaTarget;
 
     DeviceBuf dDistributedSlackGeneratorMove, dDistributedSlackGeneratorRemoved;
     DeviceBuf dFrozenRow;                                  // (scenario, row) pairs: rows an islanding
@@ -505,9 +505,9 @@ struct BatchSolverContext {
     // whatever this conversion misses.
     cudaStream_t stream = nullptr;
     ~BatchSolverContext() {
-        if (svcBlas != nullptr) {
-            cublasDestroy(svcBlas);
-            svcBlas = nullptr;
+        if (secondaryVoltageControlBlasHandle != nullptr) {
+            cublasDestroy(secondaryVoltageControlBlasHandle);
+            secondaryVoltageControlBlasHandle = nullptr;
         }
         if (stream) cudaStreamDestroy(stream);
         if (matUbR) cudssMatrixDestroy(matUbR);

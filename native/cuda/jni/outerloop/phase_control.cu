@@ -27,30 +27,30 @@ namespace olfgpu {
 // UNSTABLE on a non-empty controller list, LIMITER-only included — a no-change re-solve). Later checks:
 // a live LIMITER whose current exceeds the limit shifts one tap against the sign of dI/da1
 // (shiftOneTapPositionToChangeA1). The tap's pi row follows through the shared r1 override rebuild.
-__global__ void cphCheckBatch(int nCph, int nScenarios, int n, int nElements, int closedBranchOffset,
+__global__ void phaseControlCheckBatch(int nPhaseControlControllerBranches, int nScenarios, int n, int nElements, int closedBranchOffset,
                               const int* kind, const int* a1Row, const int* side, const double* limit, const int* elem,
-                              const int* tapPtr, const double* tapData,
+                              const int* tapStart, const double* tapRows,
                               const double* closedBranchParameters, const int* closedBranchIndices, int nR1Ov, const int* r1OvSlotElem, const double* r1OvVal,
                               const char* disabled, const char* outerLoopCheckActive, const int* iter,
                               int* tap, int* mode, double* target, double* x, char* switched) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= nCph * nScenarios) return;
-    int c = tid % nCph;
-    int s = tid / nCph;
+    if (tid >= nPhaseControlControllerBranches * nScenarios) return;
+    int c = tid % nPhaseControlControllerBranches;
+    int s = tid / nPhaseControlControllerBranches;
     if (!outerLoopCheckActive[s] || disabled[(size_t) s * nElements + elem[c]]) return;
     size_t ar = (size_t) s * n + a1Row[c];
-    int base = tapPtr[c];
-    int nTaps = tapPtr[c + 1] - base;
+    int base = tapStart[c];
+    int nTaps = tapStart[c + 1] - base;
     if (iter[s] == 0) {
         if (kind[c] == GpuPhaseControlMode::CONTROLLER) {  // switch off + round a1 to the closest tap
             double a1 = x[ar];
             int best = tap[tid];
             for (int t = 0; t < nTaps; t++) {
-                if (fabs(tapData[(size_t) (base + t) * GpuPiModelColumn::COUNT + GpuPiModelColumn::A1] - a1) < fabs(tapData[(size_t) (base + best) * GpuPiModelColumn::COUNT + GpuPiModelColumn::A1] - a1)) best = t;
+                if (fabs(tapRows[(size_t) (base + t) * GpuPiModelColumn::COUNT + GpuPiModelColumn::A1] - a1) < fabs(tapRows[(size_t) (base + best) * GpuPiModelColumn::COUNT + GpuPiModelColumn::A1] - a1)) best = t;
             }
             tap[tid] = best;
             mode[ar] = GpuRowMode::FIXED_VARIABLE;
-            target[ar] = tapData[(size_t) (base + best) * GpuPiModelColumn::COUNT + GpuPiModelColumn::A1];
+            target[ar] = tapRows[(size_t) (base + best) * GpuPiModelColumn::COUNT + GpuPiModelColumn::A1];
             x[ar] = target[ar];
         }
         switched[s] = 1;                                     // OLF: UNSTABLE whenever a controller exists
@@ -62,60 +62,60 @@ __global__ void cphCheckBatch(int nCph, int nScenarios, int n, int nElements, in
     double pOv[8];
     if (findTapOverride(nR1Ov, r1OvSlotElem, r1OvVal, s, e, pOv)) p = pOv;
     double g[18];
-    double i = flcFlowAndGrad(side[c], GpuControlledFlow::CURRENT, p, x + (size_t) s * n, closedBranchIndices + e * 12, g);
+    double i = controlledFlowAndGradient(side[c], GpuControlledFlow::CURRENT, p, x + (size_t) s * n, closedBranchIndices + e * 12, g);
     if (!(i > limit[c])) return;
     double dida1 = g[0] == 1e300 ? 0.0 : g[4];
     int dir = dida1 > 0 ? -1 : 1;                            // reduce I: move a1 against the slope
     int cur = tap[tid];
-    double a1 = tapData[(size_t) (base + cur) * GpuPiModelColumn::COUNT + GpuPiModelColumn::A1];
+    double a1 = tapRows[(size_t) (base + cur) * GpuPiModelColumn::COUNT + GpuPiModelColumn::A1];
     int next = cur;
-    if (cur + 1 < nTaps && ((dir > 0) == (tapData[(size_t) (base + cur + 1) * GpuPiModelColumn::COUNT + GpuPiModelColumn::A1] > a1))) next = cur + 1;
-    else if (cur - 1 >= 0 && ((dir > 0) == (tapData[(size_t) (base + cur - 1) * GpuPiModelColumn::COUNT + GpuPiModelColumn::A1] > a1))) next = cur - 1;
+    if (cur + 1 < nTaps && ((dir > 0) == (tapRows[(size_t) (base + cur + 1) * GpuPiModelColumn::COUNT + GpuPiModelColumn::A1] > a1))) next = cur + 1;
+    else if (cur - 1 >= 0 && ((dir > 0) == (tapRows[(size_t) (base + cur - 1) * GpuPiModelColumn::COUNT + GpuPiModelColumn::A1] > a1))) next = cur - 1;
     if (next == cur) return;
     tap[tid] = next;
-    target[ar] = tapData[(size_t) (base + next) * GpuPiModelColumn::COUNT + GpuPiModelColumn::A1];
+    target[ar] = tapRows[(size_t) (base + next) * GpuPiModelColumn::COUNT + GpuPiModelColumn::A1];
     x[ar] = target[ar];
     switched[s] = 1;
 }
 
 // Per-solve reset. Continuous phase control: base taps, check count 0.
-void cphResetSolve(BatchSolverContext* ctx, DriverPass& drv) {
+void phaseControlResetSolve(BatchSolverContext* ctx, DriverPass& drv) {
     const int& nS = drv.nS;
-    size_t nst = static_cast<size_t>(nS) * ctx->nCph;
+    size_t nst = static_cast<size_t>(nS) * ctx->nPhaseControlControllerBranches;
     std::vector<int> cur(nst);
-    for (int s2 = 0; s2 < nS; s2++) for (int c = 0; c < ctx->nCph; c++) cur[static_cast<size_t>(s2) * ctx->nCph + c] = ctx->hCphBaseTap[c];
-    CUDA_CHECK(cudaMemcpy(ctx->dCphTap.p, cur.data(), nst * sizeof(int), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(ctx->dCphPrevTap.p, cur.data(), nst * sizeof(int), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemset(ctx->dCphIter.p, 0, nS * sizeof(int)));
+    for (int s2 = 0; s2 < nS; s2++) for (int c = 0; c < ctx->nPhaseControlControllerBranches; c++) cur[static_cast<size_t>(s2) * ctx->nPhaseControlControllerBranches + c] = ctx->hPhaseControlBaseTap[c];
+    CUDA_CHECK(cudaMemcpy(ctx->dPhaseControlTap.p, cur.data(), nst * sizeof(int), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(ctx->dPhaseControlAppliedTap.p, cur.data(), nst * sizeof(int), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemset(ctx->dPhaseControlCheckCount.p, 0, nS * sizeof(int)));
 }
 
-void cphStep(BatchSolverContext* ctx, DriverPass& drv) {
+void phaseControlStep(BatchSolverContext* ctx, DriverPass& drv) {
     const int& n = drv.n;
     const int& nS = drv.nS;
     std::vector<char>& outerLoopCheckActive = drv.outerLoopCheckActive;
-    int nC = ctx->nCph;
+    int nC = ctx->nPhaseControlControllerBranches;
     if (nC <= 0) return;
     size_t nst = static_cast<size_t>(nS) * nC;
-    cphCheckBatch<<<grid(static_cast<int>(nst)), BLOCK, 0, ctx->stream>>>(nC, nS, n, ctx->nElements, ctx->closedBranchOffset,
-            ctx->dCphKind.as<int>(), ctx->dCphA1Row.as<int>(), ctx->dCphSide.as<int>(), ctx->dCphLimit.as<double>(), ctx->dCphElem.as<int>(),
-            ctx->dCphTapPtr.as<int>(), ctx->dCphTapData.as<double>(),
+    phaseControlCheckBatch<<<grid(static_cast<int>(nst)), BLOCK, 0, ctx->stream>>>(nC, nS, n, ctx->nElements, ctx->closedBranchOffset,
+            ctx->dPhaseControlMode.as<int>(), ctx->dPhaseControlA1Row.as<int>(), ctx->dPhaseControlControlledSide.as<int>(), ctx->dPhaseControlCurrentLimit.as<double>(), ctx->dPhaseControlElement.as<int>(),
+            ctx->dPhaseControlTapStart.as<int>(), ctx->dPhaseControlTapRows.as<double>(),
             ctx->st->closedBranch.parameters.as<double>(), ctx->st->closedBranch.indices.as<int>(), ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>(),
-            ctx->dDisabled.as<char>(), ctx->dOuterLoopCheckActive.as<char>(), ctx->dCphIter.as<int>(),
-            ctx->dCphTap.as<int>(), ctx->dMode.as<int>(), ctx->dTarget.as<double>(), ctx->dX.as<double>(), ctx->dOuterLoopUnstable.as<char>());
+            ctx->dDisabled.as<char>(), ctx->dOuterLoopCheckActive.as<char>(), ctx->dPhaseControlCheckCount.as<int>(),
+            ctx->dPhaseControlTap.as<int>(), ctx->dMode.as<int>(), ctx->dTarget.as<double>(), ctx->dX.as<double>(), ctx->dOuterLoopUnstable.as<char>());
     CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
     {                                                    // the loop's check count, per checked scenario
         std::vector<int> it(nS);
-        CUDA_CHECK(cudaMemcpy(it.data(), ctx->dCphIter.p, nS * sizeof(int), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(it.data(), ctx->dPhaseControlCheckCount.p, nS * sizeof(int), cudaMemcpyDeviceToHost));
         for (int s2 = 0; s2 < nS; s2++) if (outerLoopCheckActive[s2]) it[s2]++;
-        CUDA_CHECK(cudaMemcpy(ctx->dCphIter.p, it.data(), nS * sizeof(int), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(ctx->dPhaseControlCheckCount.p, it.data(), nS * sizeof(int), cudaMemcpyHostToDevice));
     }
-    tvcRebuildOverrides(ctx);
+    rebuildTapOverrides(ctx);
     if (std::getenv("OLF_GPU_BATCH_TRACE") != nullptr) {
         std::vector<int> cur(nst);
-        CUDA_CHECK(cudaMemcpy(cur.data(), ctx->dCphTap.p, nst * sizeof(int), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(cur.data(), ctx->dPhaseControlTap.p, nst * sizeof(int), cudaMemcpyDeviceToHost));
         int nMoved = 0;
-        for (int s2 = 0; s2 < nS; s2++) for (int c = 0; c < nC; c++) if (cur[static_cast<size_t>(s2) * nC + c] != ctx->hCphBaseTap[c]) nMoved++;
-        std::fprintf(stderr, "CPHASE_KERNEL nS=%d nCtrl=%d pairsOffBaseTap=%d nR1Ov=%d\n", nS, nC, nMoved, ctx->nR1Ov);
+        for (int s2 = 0; s2 < nS; s2++) for (int c = 0; c < nC; c++) if (cur[static_cast<size_t>(s2) * nC + c] != ctx->hPhaseControlBaseTap[c]) nMoved++;
+        std::fprintf(stderr, "CPHASE_KERNEL nS=%d nControllers=%d pairsOffBaseTap=%d nR1Ov=%d\n", nS, nC, nMoved, ctx->nR1Ov);
     }
 }
 

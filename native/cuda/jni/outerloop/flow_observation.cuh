@@ -21,7 +21,7 @@ using namespace powsybl::openloadflow;
 // evalClosedBranch (the very functions the fill scatters), I through OLF's own reI/imI decomposition
 // (ClosedBranchSide{1,2}CurrentMagnitudeEquationTerm, incl. its one-sided rule at I = 0 and its
 // dr1-less sensitivity). g[0..5] = d/d(v1, v2, ph1, ph2, a1, r1).
-__device__ inline double flcFlowAndGrad(int side, int kind, const double* p, const double* xs, const int* q, double* g) {
+__device__ inline double controlledFlowAndGradient(int side, int kind, const double* p, const double* xs, const int* q, double* g) {
     double v1 = xs[q[5]], v2 = xs[q[7]], ph1 = xs[q[4]], ph2 = xs[q[6]];
     double r1 = q[9] >= 0 ? xs[q[9]] : p[GpuPiModelColumn::R1];
     double a1 = q[8] >= 0 ? xs[q[8]] : p[GpuPiModelColumn::A1];
@@ -54,7 +54,7 @@ __device__ inline double flcFlowAndGrad(int side, int kind, const double* p, con
         double i = hypot(re, im);
         if (i == 0.0) {                                      // one-sided limit: the gradient's MAGNITUDE — the
             for (int k = 0; k < 6; k++) g[k] = 0.0;          // dot with dx is done by the caller as hypot(dre·dx, dim·dx)
-            g[0] = 1e300;                                    // flag (see flcGatherSensiBatch)
+            g[0] = 1e300;                                    // flag (see incrementalFlowControlGatherSensitivityBatch)
             for (int k = 0; k < 6; k++) { g[6 + k] = dre[k]; g[12 + k] = dim[k]; }
             return 0.0;
         }

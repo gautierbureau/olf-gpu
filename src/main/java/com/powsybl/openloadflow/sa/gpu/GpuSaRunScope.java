@@ -83,7 +83,7 @@ final class GpuSaRunScope {
         // INCREMENTAL (OLF's default TVC mode): an in-kernel driver phase (INCREMENTAL_TRANSFORMER_VOLTAGE_CONTROL). The loop never
         // freezes generators (no GeneratorVoltageControlManager), so the gen-under-the-controlled-level
         // gate that the AFTER_GENERATOR port needed never applied here — lifted 2026-09-15.
-        boolean incrementalTvcBatchable =
+        boolean incrementalTransformerVoltageControlBatchable =
                 olfGuardParams.getTransformerVoltageControlMode() == OpenLoadFlowParameters.TransformerVoltageControlMode.INCREMENTAL_VOLTAGE_CONTROL;
         // INCREMENTAL shunt VC: same per-scenario orchestrator pattern (IncrementalShuntVoltageControl)
         // with in-kernel dV/dB sensitivities.
@@ -115,7 +115,7 @@ final class GpuSaRunScope {
                 || hvdcLoopsRun;
         // Secondary voltage control (GpuSecondaryVoltageControlOuterLoop): batched device sensitivities + the zone
         // system replayed per scenario on the host; stage-1 scope is LOCAL generator VC only.
-        boolean svcBatchable = com.powsybl.openloadflow.ac.outerloop.gpu.GpuSecondaryVoltageControlOuterLoop.supported(lfNetwork);
+        boolean secondaryVoltageControlBatchable = com.powsybl.openloadflow.ac.outerloop.gpu.GpuSecondaryVoltageControlOuterLoop.supported(lfNetwork);
         // Voltage monitoring (SVC stand-by automatons, VoltageMonitoring): batchable when every
         // monitoring SVC is local with an automaton — slope-less plain-VOLTAGE SVCs need no loop support
         // (ordinary generator-VC buses on the device).
@@ -128,7 +128,7 @@ final class GpuSaRunScope {
         boolean continuousPhaseBatchable = true;
         // (SimpleTransformerVoltageControlOuterLoop has no generator freeze either — no gen-under-level
         // gate, lifted 2026-09-15.)
-        boolean simpleTvcBatchable =
+        boolean simpleTransformerVoltageControlBatchable =
                 olfGuardParams.getTransformerVoltageControlMode() == OpenLoadFlowParameters.TransformerVoltageControlMode.WITH_GENERATOR_VOLTAGE_CONTROL;
         // REMOTE/DISTRIBUTED generator VC groups + reactive limits. Both modes run the full
         // pin/unpin dynamics: NON-free members via mode-4 transitions + own-q accumulation
@@ -168,11 +168,11 @@ final class GpuSaRunScope {
                 .filter(name -> !DistributedSlackOuterLoop.NAME.equals(name)
                         && !ReactiveLimitsOuterLoop.NAME.equals(name)
                         && !(transformerControlBatchable && "TransformerVoltageControl".equals(name))
-                        && !(incrementalTvcBatchable && "IncrementalTransformerVoltageControl".equals(name))
+                        && !(incrementalTransformerVoltageControlBatchable && "IncrementalTransformerVoltageControl".equals(name))
                         && !(incrementalShuntBatchable && "IncrementalShuntVoltageControl".equals(name))
                         && !(simpleShuntVcBatchable && "ShuntVoltageControl".equals(name))
-                        && !(simpleTvcBatchable && "SimpleTransformerVoltageControl".equals(name))
-                        && !(svcBatchable && "SecondaryVoltageControl".equals(name))
+                        && !(simpleTransformerVoltageControlBatchable && "SimpleTransformerVoltageControl".equals(name))
+                        && !(secondaryVoltageControlBatchable && "SecondaryVoltageControl".equals(name))
                         && !"IncrementalPhaseControl".equals(name)
                         && !"IncrementalTransformerReactivePowerControl".equals(name)
                         && !(continuousPhaseBatchable && "PhaseControl".equals(name))
@@ -238,7 +238,7 @@ final class GpuSaRunScope {
                 .anyMatch(ol -> ReactiveLimitsOuterLoop.NAME.equals(ol.getName()));
         boolean cfgTransformerControl = transformerControlBatchable
                 && acParameters.getOuterLoops().stream().anyMatch(ol -> "TransformerVoltageControl".equals(ol.getName()));
-        boolean cfgIncrementalTvc = incrementalTvcBatchable
+        boolean cfgIncrementalTransformerVoltageControl = incrementalTransformerVoltageControlBatchable
                 && acParameters.getOuterLoops().stream().anyMatch(ol -> "IncrementalTransformerVoltageControl".equals(ol.getName()));
         boolean cfgIncrementalShunt = incrementalShuntBatchable
                 && acParameters.getOuterLoops().stream().anyMatch(ol -> "IncrementalShuntVoltageControl".equals(ol.getName()));
@@ -248,9 +248,9 @@ final class GpuSaRunScope {
         // GpuIncrementalPhaseControlOuterLoop): rho -> branch Q, and a1 -> branch P / I. Both are decision-only loops
         // over pinned identity rows — always batchable when their loop is configured (continuous "PhaseControl" stays
         // CPU via the extraction guard).
-        boolean cfgIncrementalRpc = acParameters.getOuterLoops().stream().anyMatch(ol -> "IncrementalTransformerReactivePowerControl".equals(ol.getName()));
+        boolean cfgIncrementalTransformerReactivePowerControl = acParameters.getOuterLoops().stream().anyMatch(ol -> "IncrementalTransformerReactivePowerControl".equals(ol.getName()));
         boolean cfgIncrementalPhase = acParameters.getOuterLoops().stream().anyMatch(ol -> "IncrementalPhaseControl".equals(ol.getName()));
-        boolean cfgSimpleTvc = simpleTvcBatchable
+        boolean cfgSimpleTransformerVoltageControl = simpleTransformerVoltageControlBatchable
                 && acParameters.getOuterLoops().stream().anyMatch(ol -> "SimpleTransformerVoltageControl".equals(ol.getName()));
         // HVDC freezing applies to CONTINGENCY solves whenever the SA-LEVEL startWithFrozenACEmulation
         // is on — and its DEFAULT IS TRUE (OpenSecurityAnalysisParameters), independently of the
@@ -267,7 +267,7 @@ final class GpuSaRunScope {
                     || acParameters.getOuterLoops().stream().anyMatch(ol -> "FreezingHvdcACEmulation".equals(ol.getName())));
         boolean cfgHvdcLimits = !noHvdc && hvdcBatchable
                 && acParameters.getOuterLoops().stream().anyMatch(ol -> "AcHvdcAcEmulationLimits".equals(ol.getName()));
-        boolean cfgSecondaryVc = svcBatchable
+        boolean cfgSecondaryVoltageControl = secondaryVoltageControlBatchable
                 && acParameters.getOuterLoops().stream().anyMatch(ol -> "SecondaryVoltageControl".equals(ol.getName()));
         boolean cfgVoltageMonitoring = monitoringBatchable && !noSvc
                 && acParameters.getOuterLoops().stream().anyMatch(ol -> "VoltageMonitoring".equals(ol.getName()));
@@ -308,12 +308,12 @@ final class GpuSaRunScope {
                 cfgTransformerControl, cfgMaxOuterIterations, cfgMaxPqPvSwitch, cfgRejectSlackDistributionFailure,
                 new com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDsParams(
                         lfGuardParams.getBalanceType(), olfGuardParams.isUseActiveLimits()),
-                cfgIncrementalTvc, olfGuardParams.getIncrementalTransformerRatioTapControlOuterLoopMaxTapShift(),
+                cfgIncrementalTransformerVoltageControl, olfGuardParams.getIncrementalTransformerRatioTapControlOuterLoopMaxTapShift(),
                 cfgIncrementalShunt, olfGuardParams.getIncrementalShuntControlOuterLoopMaxSectionShift(),
                 cfgSimpleShunt,
-                cfgIncrementalRpc, cfgIncrementalPhase, cfgSimpleTvc,
+                cfgIncrementalTransformerReactivePowerControl, cfgIncrementalPhase, cfgSimpleTransformerVoltageControl,
                 olfGuardParams.isTransformerVoltageControlUseInitialTapPosition(), cfgHvdcFreezing, cfgHvdcLimits,
-                cfgSecondaryVc, olfGuardParams.getMinPlausibleTargetVoltage(), olfGuardParams.getMaxPlausibleTargetVoltage(),
+                cfgSecondaryVoltageControl, olfGuardParams.getMinPlausibleTargetVoltage(), olfGuardParams.getMaxPlausibleTargetVoltage(),
                 cfgVoltageMonitoring, cfgContinuousPhase, defaultLossDist && distributedSlackActive,
                 olfGuardParams.isExtrapolateReactiveLimits(),
                 olfGuardParams.isForceTargetQInReactiveLimits() && lfGuardParams.isUseReactiveLimits(),

@@ -9,7 +9,7 @@ package com.powsybl.openloadflow.ac.solver.gpu.codes;
 
 /**
  * The branch flow a flow-observed controller acts on, which is also its kind (setBatchFlowControllers kind[], the
- * observable of flcFlowAndGrad):
+ * observable of controlledFlowAndGradient):
  * <ul>
  *   <li>REACTIVE_POWER: IncrementalTransformerReactivePowerControlOuterLoop (rho taps, closest r1);</li>
  *   <li>ACTIVE_POWER: AcIncrementalPhaseControlOuterLoop, TransformerPhaseControl.Mode.CONTROLLER (a1 taps,

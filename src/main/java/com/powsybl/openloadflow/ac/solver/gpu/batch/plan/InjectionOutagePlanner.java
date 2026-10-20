@@ -44,7 +44,7 @@ final class InjectionOutagePlanner {
         final GpuAcElementMapper elementMapper = ctx.elementMapper();
         final EquationSystem<AcVariableType, AcEquationType> es = ctx.es();
         final GpuAcData gpuData = ctx.gpuData();
-        final boolean incrementalTvc = ctx.incrementalTvc();
+        final boolean incrementalTransformerVoltageControllers = ctx.incrementalTransformerVoltageControllers();
         final Set<LfBranch> relocatedCouplers = ctx.relocatedCouplers();
         final boolean slackParticipates = ctx.slackParticipates();
         java.util.Set<Integer> baseOpenSet = java.util.Arrays.stream(gpuData.baseOpenBranches().closedBranchElements())
@@ -121,7 +121,7 @@ final class InjectionOutagePlanner {
         List<LfBus> islandLostVcControllers = new ArrayList<>();   // filled by the island-injection path
         if (!c.outagedBranches().isEmpty()) {        // COMBO: the branch part must also qualify
             double[][] distrRhoOverrideTable = VoltageControlOverrides.distrRhoOverrides(es, gpuData, distrRhoControllers,
-                    c.outagedBranches(), incrementalTvc);
+                    c.outagedBranches(), incrementalTransformerVoltageControllers);
             if (distrRhoOverrideTable == null) {
                 if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
                     System.err.println("QUAL_REJECT distrRhoOverrides (injection) " + c.contingencyId());

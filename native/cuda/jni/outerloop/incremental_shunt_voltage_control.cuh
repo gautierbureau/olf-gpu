@@ -12,13 +12,13 @@
 namespace olfgpu {
 
 // Rebuild the per-scenario shunt admittance overrides from the current sections.
-void shcRebuildOverrides(BatchSolverContext* ctx);
+void rebuildShuntAdmittanceOverrides(BatchSolverContext* ctx);
 
 // Per-solve reset: base sections, fresh ratchets, the identity row's target as the base b.
-void shcResetSolve(BatchSolverContext* ctx, DriverPass& drv);
+void incrementalShuntVoltageControlResetSolve(BatchSolverContext* ctx, DriverPass& drv);
 
 // One check of the loop on every live scenario (GpuOuterLoopKind::INCREMENTAL_SHUNT_VOLTAGE_CONTROL).
-void shcStep(BatchSolverContext* ctx, DriverPass& drv);
+void incrementalShuntVoltageControlStep(BatchSolverContext* ctx, DriverPass& drv);
 
 }  // namespace olfgpu
 

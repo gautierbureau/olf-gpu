@@ -70,17 +70,17 @@ public final class GpuIncrementalPhaseControlOuterLoop {
             LfBranch controlled = pc.getControlledBranch();
             Integer pinRow = a1Rows.get(controller.getNum());
             int elemIndex = elementMapper.getElementIndex(controller);
-            int ctlElemIndex = elementMapper.getElementIndex(controlled);
+            int controlledElementIndex = elementMapper.getElementIndex(controlled);
             double[][] tapRows = GpuTransformerVoltageControlOuterLoop.tapModels(controller.getPiModel());
-            if (pinRow == null || elemIndex < 0 || ctlElemIndex < 0 || tapRows.length == 0) {
+            if (pinRow == null || elemIndex < 0 || controlledElementIndex < 0 || tapRows.length == 0) {
                 GpuBatchSkips.record(GpuBatchSkips.Slot.PHASE, LOGGER,
                         "Incremental phase controller {} not representable on the GPU batch — skipped", controller.getId());
                 continue;
             }
-            double halfDb = Math.max(pc.getTargetDeadband(), MIN_TARGET_DEADBAND_P) / 2;
-            out.add(new DeviceFlowControllers.Controller(kind, pinRow, GpuPiModelColumn.A1, pc.getTargetValue(), halfDb,
+            double halfTargetDeadband = Math.max(pc.getTargetDeadband(), MIN_TARGET_DEADBAND_P) / 2;
+            out.add(new DeviceFlowControllers.Controller(kind, pinRow, GpuPiModelColumn.A1, pc.getTargetValue(), halfTargetDeadband,
                     tapRows, DeviceFlowControllers.closestTap(tapRows, GpuPiModelColumn.A1, controller.getPiModel().getA1()),
-                    elemIndex, ctlElemIndex, Integer.MAX_VALUE, pc.getControlledSide() == TwoSides.ONE ? 1 : 2, controller.getNum()));
+                    elemIndex, controlledElementIndex, Integer.MAX_VALUE, pc.getControlledSide() == TwoSides.ONE ? 1 : 2, controller.getNum()));
         }
         return out;
     }

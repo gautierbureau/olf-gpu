@@ -9,7 +9,7 @@ package com.powsybl.openloadflow.ac.solver.gpu.codes;
 
 /**
  * A pi model packed as {@link #COUNT} doubles, in the order of OLF's {@code PiModel} getters: one row per tap in the
- * tap tables of the transformer and phase control loops (tapData), and one per closed branch (closedBranchParameters). Mirrored by
+ * tap tables of the transformer and phase control loops (tapRows), and one per closed branch (closedBranchParameters). Mirrored by
  * native/cuda/jni/common/codes/gpu_pi_model_column.cuh.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}

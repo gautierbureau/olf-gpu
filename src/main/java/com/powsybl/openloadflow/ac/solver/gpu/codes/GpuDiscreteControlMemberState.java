@@ -11,7 +11,7 @@ package com.powsybl.openloadflow.ac.solver.gpu.codes;
  * Where a member of a discrete voltage control stands, per scenario: OLF's TransformerVoltageControlOuterLoop
  * (AFTER_GENERATOR) / SimpleTransformerVoltageControlOuterLoop and ShuntVoltageControlOuterLoop (WITH_GENERATOR)
  * first solve the ratio or susceptance continuously, then round it to a tap or section and disable the control
- * (readBatchDiscreteTvcState / readBatchDiscreteShuntState). Mirrored by
+ * (readBatchTransformerVoltageControlState / readBatchShuntVoltageControlState). Mirrored by
  * native/cuda/jni/common/codes/gpu_discrete_control_member_state.cuh.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}

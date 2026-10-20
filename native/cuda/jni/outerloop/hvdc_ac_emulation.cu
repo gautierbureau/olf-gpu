@@ -44,7 +44,7 @@ __global__ void hvdcAcEmulationLoopBatch(int nh, int nScenarios, int n, int nEle
                                          const int* rowMode, const int* relocOwn,
                                          const double* hvdcAcEmulationParameters, const char* hvdcContingencyOutage,
                                          const double* x, double* target, char* disabled,
-                                         int* status, double* appliedD1, double* appliedD2,
+                                         int* status, double* appliedDelta1, double* appliedDelta2,
                                          const char* outerLoopCheckActive, char* switched) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nh * nScenarios) return;
@@ -114,13 +114,13 @@ __global__ void hvdcAcEmulationLoopBatch(int nh, int nScenarios, int n, int nEle
     if (w1 >= 0 && relocOwn != nullptr && relocOwn[w1] >= 0 && rowMode[(size_t) s * n + w1] == GpuRowMode::FIXED_VARIABLE) w1 = relocOwn[w1];
     if (w2 >= 0 && relocOwn != nullptr && relocOwn[w2] >= 0 && rowMode[(size_t) s * n + w2] == GpuRowMode::FIXED_VARIABLE) w2 = relocOwn[w2];
     if (w1 >= 0) {
-        atomicAdd(&target[(size_t) s * n + w1], want1 - appliedD1[(size_t) s * nh + h]);
+        atomicAdd(&target[(size_t) s * n + w1], want1 - appliedDelta1[(size_t) s * nh + h]);
     }
     if (w2 >= 0) {
-        atomicAdd(&target[(size_t) s * n + w2], want2 - appliedD2[(size_t) s * nh + h]);
+        atomicAdd(&target[(size_t) s * n + w2], want2 - appliedDelta2[(size_t) s * nh + h]);
     }
-    appliedD1[(size_t) s * nh + h] = want1;
-    appliedD2[(size_t) s * nh + h] = want2;
+    appliedDelta1[(size_t) s * nh + h] = want1;
+    appliedDelta2[(size_t) s * nh + h] = want2;
     status[(size_t) s * nh + h] = next;
     switched[s] = 1;                                         // this outer loop is UNSTABLE for s
 }

@@ -178,7 +178,7 @@ void seedSolve(BatchSolverContext* ctx, DriverPass& drv, const int* reactiveLimi
                 ctx->hasReactiveLimitBaseQLimitType ? ctx->dReactiveLimitBaseQLimitType.as<char>() : nullptr,
                 psEntryPtr(ctx), ctx->st->nQr,
                 ctx->dReactiveLimitTargetV.as<double>(), nReactiveLimitTargetVOverrides, nReactiveLimitTargetVOverrides > 0 ? dReactiveLimitTargetVOverrideScenarioEntry.as<int>() : nullptr,
-                nReactiveLimitTargetVOverrides > 0 ? dReactiveLimitTargetVOverrideValue.as<double>() : nullptr, ctx->nSvc > 0 ? ctx->dSecondaryVoltageControlReactiveLimitTargetV.as<double>() : nullptr,
+                nReactiveLimitTargetVOverrides > 0 ? dReactiveLimitTargetVOverrideValue.as<double>() : nullptr, ctx->nSecondaryVoltageControlControllerBuses > 0 ? ctx->dSecondaryVoltageControlReactiveLimitTargetV.as<double>() : nullptr,
                 ctx->nReactiveLimitLocalOverrides > 0 ? ctx->dReactiveLimitLocalOverride.as<char>() : nullptr,
                 ctx->nReactiveLimitLocalOverrides > 0 ? ctx->dReactiveLimitLocalTargetV.as<double>() : nullptr,
                 ctx->hasReactiveLimitSeedTargetQ ? ctx->dReactiveLimitSeedTargetQ.as<double>() : nullptr,
@@ -192,7 +192,7 @@ void seedSolve(BatchSolverContext* ctx, DriverPass& drv, const int* reactiveLimi
                     ctx->dReactiveLimitQLimitType.as<char>(),
                     nReactiveLimitTargetVOverrides, nReactiveLimitTargetVOverrides > 0 ? dReactiveLimitTargetVOverrideScenarioEntry.as<int>() : nullptr,
                     nReactiveLimitTargetVOverrides > 0 ? dReactiveLimitTargetVOverrideValue.as<double>() : nullptr,
-                    ctx->nSvc > 0 ? ctx->dSecondaryVoltageControlReactiveLimitTargetV.as<double>() : nullptr,
+                    ctx->nSecondaryVoltageControlControllerBuses > 0 ? ctx->dSecondaryVoltageControlReactiveLimitTargetV.as<double>() : nullptr,
                     ctx->nReactiveLimitRemoteEntries > 0 ? ctx->dReactiveLimitVoltageControlRole.as<char>() : nullptr,
                     ctx->nReactiveLimitRemoteEntries > 0 ? ctx->dReactiveLimitComparedVoltageRow.as<int>() : nullptr,
                     ctx->dTarget.as<double>(), ctx->dReactiveLimitMinQ.as<double>(), ctx->dReactiveLimitMaxQ.as<double>(),
@@ -250,29 +250,29 @@ void seedSolve(BatchSolverContext* ctx, DriverPass& drv, const int* reactiveLimi
     if (ctx->nDistributedSlackBuses > 0) {
         distributedSlackResetSolve(ctx, drv);
     }
-    if (ctx->nmon > 0) {
-        monitoringResetSolve(ctx, drv);
+    if (ctx->nMonitoringVoltageControllers > 0) {
+        monitoringVoltageResetSolve(ctx, drv);
     }
-    if (ctx->nTvc > 0) {
-        tvcResetSolve(ctx, drv);
+    if (ctx->nIncrementalTransformerVoltageControlControllerBranches > 0) {
+        incrementalTransformerVoltageControlResetSolve(ctx, drv);
     }
-    if (ctx->nCph > 0) {
-        cphResetSolve(ctx, drv);
+    if (ctx->nPhaseControlControllerBranches > 0) {
+        phaseControlResetSolve(ctx, drv);
     }
-    if (ctx->nTvd > 0) {
-        tvdResetSolve(ctx, drv);
+    if (ctx->nTransformerVoltageControlMembers > 0) {
+        transformerVoltageControlResetSolve(ctx, drv);
     }
-    if (ctx->nSvc > 0) {
-        svcResetSolve(ctx, drv);
+    if (ctx->nSecondaryVoltageControlControllerBuses > 0) {
+        secondaryVoltageControlResetSolve(ctx, drv);
     }
-    if (ctx->nSvd > 0) {
-        svdResetSolve(ctx, drv);
+    if (ctx->nShuntVoltageControlMembers > 0) {
+        shuntVoltageControlResetSolve(ctx, drv);
     }
-    if (ctx->nFlc > 0) {
-        flcResetSolve(ctx, drv);
+    if (ctx->nIncrementalFlowControlControllerBranches > 0) {
+        incrementalFlowControlResetSolve(ctx, drv);
     }
-    if (ctx->nShc > 0) {
-        shcResetSolve(ctx, drv);
+    if (ctx->nIncrementalShuntVoltageControlControllerShunts > 0) {
+        incrementalShuntVoltageControlResetSolve(ctx, drv);
     }
     if (ctx->slackOnlyDistribution) {
         slackOnlyDistributionResetSolve(ctx, drv, slackBusAnchorShift);

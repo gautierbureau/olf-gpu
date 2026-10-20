@@ -60,7 +60,7 @@ public final class GpuMonitoringVoltageOuterLoop {
 
     /** One monitored bus: its V row, RL pack index, the automaton band + setpoints, and the VC-ON
      *  activation deltas (row modes + targets; the V-row target is replaced per direction). */
-    public record Ctl(int vRow, int reactiveLimitEntry, double lowThreshold, double highThreshold,
+    public record Controller(int vRow, int reactiveLimitEntry, double lowThreshold, double highThreshold,
                double lowTargetV, double highTargetV,
                int[] deltaRows, int[] deltaModesOn, double[] deltaTargetsOn) {
     }
@@ -81,7 +81,7 @@ public final class GpuMonitoringVoltageOuterLoop {
         return true;
     }
 
-    public static List<Ctl> buildControllers(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
+    public static List<Controller> buildControllers(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
                                       com.powsybl.openloadflow.equations.TargetVector<AcVariableType, AcEquationType> targetVector,
                                       GpuAcActivation baseActivation, double[] baseTargets, int[] reactiveLimitVoltageRow) {
         Map<Integer, Integer> busVRows = new LinkedHashMap<>();
@@ -94,7 +94,7 @@ public final class GpuMonitoringVoltageOuterLoop {
         for (int i = 0; i < reactiveLimitVoltageRow.length; i++) {
             reactiveLimitEntryByVoltageRow.put(reactiveLimitVoltageRow[i], i);
         }
-        List<Ctl> out = new ArrayList<>();
+        List<Controller> out = new ArrayList<>();
         for (LfBus bus : network.getBuses()) {
             LfStaticVarCompensator svc = null;
             for (LfGenerator g : bus.getGenerators()) {
@@ -135,7 +135,7 @@ public final class GpuMonitoringVoltageOuterLoop {
                 deltaModesOn[k] = onAct.rowMode()[deltaRows[k]];
                 deltaTargetsOn[k] = onTargets[deltaRows[k]];
             }
-            out.add(new Ctl(vRow, reactiveLimitEntry, automaton.getLowVoltageThreshold(), automaton.getHighVoltageThreshold(),
+            out.add(new Controller(vRow, reactiveLimitEntry, automaton.getLowVoltageThreshold(), automaton.getHighVoltageThreshold(),
                     automaton.getLowTargetV(), automaton.getHighTargetV(),
                     deltaRows, deltaModesOn, deltaTargetsOn));
         }
@@ -143,7 +143,7 @@ public final class GpuMonitoringVoltageOuterLoop {
     }
 
     @SuppressWarnings("java:S107")
-    private static double[][] resolve(long handle, int chunkSize, int n, int nReactiveLimitEntries, List<Ctl> ctls,
+    private static double[][] resolve(long handle, int chunkSize, int n, int nReactiveLimitEntries, List<Controller> ctls,
             double[][] activatedTargetV, int[] reactiveLimitsState, int skipReactiveLimits,
             int[][] rowModePerScenario, int[] baseRowMode, boolean[][] disabledMask,
             List<Integer> ovIdx, List<Double> ovVal, double[] x0Full,
@@ -192,34 +192,34 @@ public final class GpuMonitoringVoltageOuterLoop {
 
     /** Install the MonitoringVoltage driver phase's table on a batch context (null/empty clears it).
      *  Shared by the batched SA's chunk contexts and the base load flow's batch-of-one. */
-    public static void installDriverLoop(long handle, List<Ctl> ctls) {
+    public static void installDriverLoop(long handle, List<Controller> ctls) {
         if (ctls == null || ctls.isEmpty()) {
             VoltageMonitoringNative.setBatchMonitoringLoops(handle, null, null, null, null, null, null);
             return;
         }
         int nc = ctls.size();
-        int[] monVRow = new int[nc];
-        double[] monBand = new double[nc * 4];
-        int[] deltaPtr = new int[nc + 1];
+        int[] monitoringVoltageBusVRow = new int[nc];
+        double[] monitoringVoltageBand = new double[nc * 4];
+        int[] deltaStart = new int[nc + 1];
         List<Integer> dRow = new ArrayList<>();
         List<Integer> dMode = new ArrayList<>();
         List<Double> dTgt = new ArrayList<>();
         for (int c = 0; c < nc; c++) {
-            Ctl ctl = ctls.get(c);
-            monVRow[c] = ctl.vRow();
-            monBand[c * 4] = ctl.lowThreshold();
-            monBand[c * 4 + 1] = ctl.highThreshold();
-            monBand[c * 4 + 2] = ctl.lowTargetV();
-            monBand[c * 4 + 3] = ctl.highTargetV();
-            deltaPtr[c] = dRow.size();
+            Controller ctl = ctls.get(c);
+            monitoringVoltageBusVRow[c] = ctl.vRow();
+            monitoringVoltageBand[c * 4] = ctl.lowThreshold();
+            monitoringVoltageBand[c * 4 + 1] = ctl.highThreshold();
+            monitoringVoltageBand[c * 4 + 2] = ctl.lowTargetV();
+            monitoringVoltageBand[c * 4 + 3] = ctl.highTargetV();
+            deltaStart[c] = dRow.size();
             for (int k = 0; k < ctl.deltaRows().length; k++) {
                 dRow.add(ctl.deltaRows()[k]);
                 dMode.add(ctl.deltaModesOn()[k]);
                 dTgt.add(ctl.deltaTargetsOn()[k]);
             }
         }
-        deltaPtr[nc] = dRow.size();
-        VoltageMonitoringNative.setBatchMonitoringLoops(handle, monVRow, monBand, deltaPtr,
+        deltaStart[nc] = dRow.size();
+        VoltageMonitoringNative.setBatchMonitoringLoops(handle, monitoringVoltageBusVRow, monitoringVoltageBand, deltaStart,
                 dRow.stream().mapToInt(Integer::intValue).toArray(),
                 dMode.stream().mapToInt(Integer::intValue).toArray(),
                 dTgt.stream().mapToDouble(Double::doubleValue).toArray());
@@ -228,13 +228,13 @@ public final class GpuMonitoringVoltageOuterLoop {
     /** Give the driver's activations (scenario 0: the chosen target per controller, NaN = standing by)
      *  back to the network exactly as OLF's MonitoringVoltageOuterLoop.switchPqPv does: voltage control
      *  on with the recomputed Q target, the SVC in VOLTAGE control, the automaton's target as setpoint. */
-    public static void applyToNetwork(LfNetwork network, List<Ctl> ctls, double[] activated, int[] reactiveLimitBusNum) {
+    public static void applyToNetwork(LfNetwork network, List<Controller> ctls, double[] activated, int[] reactiveLimitBusNum) {
         if (ctls == null || ctls.isEmpty() || activated == null || reactiveLimitBusNum == null) {
             return;
         }
         for (int c = 0; c < ctls.size() && c < activated.length; c++) {
             double t = activated[c];
-            Ctl ctl = ctls.get(c);
+            Controller ctl = ctls.get(c);
             if (Double.isNaN(t) || ctl.reactiveLimitEntry() < 0 || ctl.reactiveLimitEntry() >= reactiveLimitBusNum.length) {
                 continue;
             }

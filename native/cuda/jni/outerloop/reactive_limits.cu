@@ -553,7 +553,7 @@ void reactiveLimitsCheck(BatchSolverContext* ctx, DriverPass& drv, int loopKind)
         }
         CUDA_CHECK(cudaMemsetAsync(ctx->dReactiveLimitCheckDecision.p, 0, static_cast<size_t>(ctx->nReactiveLimitEntries) * nS, ctx->stream));
         reactiveLimitsBatch<<<grid(ctx->nReactiveLimitEntries * nS), BLOCK, 0, ctx->stream>>>(
-                ctx->nSvc > 0 ? ctx->dSecondaryVoltageControlReactiveLimitTargetV.as<double>() : nullptr,
+                ctx->nSecondaryVoltageControlControllerBuses > 0 ? ctx->dSecondaryVoltageControlReactiveLimitTargetV.as<double>() : nullptr,
                 ctx->nReactiveLimitEntries, nS, n, REACTIVE_LIMIT_TOL, MAX_PQ_PV_SWITCH,
                 ctx->dReactiveLimitVoltageRow.as<int>(),
                 ctx->dReactiveLimitReactivePowerRow.p ? ctx->dReactiveLimitReactivePowerRow.as<int>() : nullptr,

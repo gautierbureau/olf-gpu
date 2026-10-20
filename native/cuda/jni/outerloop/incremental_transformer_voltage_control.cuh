@@ -13,13 +13,13 @@
 namespace olfgpu {
 
 // Rebuild the per-scenario r1 overrides from every tap-moving loop's current taps.
-void tvcRebuildOverrides(BatchSolverContext* ctx);
+void rebuildTapOverrides(BatchSolverContext* ctx);
 
 // Per-solve reset: every scenario at the base tap with a fresh ratchet.
-void tvcResetSolve(BatchSolverContext* ctx, DriverPass& drv);
+void incrementalTransformerVoltageControlResetSolve(BatchSolverContext* ctx, DriverPass& drv);
 
 // One check of the loop on every live scenario (GpuOuterLoopKind::INCREMENTAL_TRANSFORMER_VOLTAGE_CONTROL).
-void tvcStep(BatchSolverContext* ctx, DriverPass& drv);
+void incrementalTransformerVoltageControlStep(BatchSolverContext* ctx, DriverPass& drv);
 
 }  // namespace olfgpu
 

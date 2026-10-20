@@ -41,8 +41,8 @@ public final class DeviceFlowControllers {
     private DeviceFlowControllers() {
     }
 
-    public record Controller(int kind, int pinRow, int pinTapCol, double targetValue, double halfDeadband, double[][] tapRows, int baseTapIdx,
-                      int elemIndex, int controlledElemIndex, int maxTapShift, int controlledSide, int branchNum) {
+    public record Controller(int kind, int pinRow, int tapColumn, double targetValue, double halfDeadband, double[][] tapRows, int baseTapIndex,
+                      int elemIndex, int controlledElementIndex, int maxTapShift, int controlledSide, int branchNum) {
     }
 
     /** Install the controllers for the in-kernel loops (RPC at OLF order 9, incremental phase at order 7).
@@ -57,42 +57,42 @@ public final class DeviceFlowControllers {
         int nc = ctrls.size();
         int[] kind = new int[nc];
         int[] pinRow = new int[nc];
-        int[] pinCol = new int[nc];
+        int[] tapColumn = new int[nc];
         int[] side = new int[nc];
         double[] targetValue = new double[nc];
-        double[] halfDb = new double[nc];
+        double[] halfTargetDeadband = new double[nc];
         int[] elem = new int[nc];
-        int[] ctlElem = new int[nc];
-        int[] tapPtr = new int[nc + 1];
+        int[] controlledElement = new int[nc];
+        int[] tapStart = new int[nc + 1];
         int[] baseTap = new int[nc];
         int[] maxShift = new int[nc];
-        List<Double> tapData = new ArrayList<>();
+        List<Double> tapRows = new ArrayList<>();
         for (int c = 0; c < nc; c++) {
             Controller ctl = ctrls.get(c);
             kind[c] = ctl.kind();
             pinRow[c] = ctl.pinRow();
-            pinCol[c] = ctl.pinTapCol();
+            tapColumn[c] = ctl.tapColumn();
             side[c] = ctl.controlledSide();
             targetValue[c] = ctl.targetValue();
-            halfDb[c] = ctl.halfDeadband();
+            halfTargetDeadband[c] = ctl.halfDeadband();
             elem[c] = ctl.elemIndex();
-            ctlElem[c] = ctl.controlledElemIndex();
-            tapPtr[c] = tapData.size() / GpuPiModelColumn.COUNT;
+            controlledElement[c] = ctl.controlledElementIndex();
+            tapStart[c] = tapRows.size() / GpuPiModelColumn.COUNT;
             for (double[] row : ctl.tapRows()) {
                 for (double d : row) {
-                    tapData.add(d);
+                    tapRows.add(d);
                 }
             }
-            baseTap[c] = ctl.baseTapIdx();
+            baseTap[c] = ctl.baseTapIndex();
             maxShift[c] = ctl.maxTapShift() == Integer.MAX_VALUE ? 1 << 20 : ctl.maxTapShift();
         }
-        tapPtr[nc] = tapData.size() / GpuPiModelColumn.COUNT;
+        tapStart[nc] = tapRows.size() / GpuPiModelColumn.COUNT;
         boolean owned = PhaseControlNative.setBatchFlowControllers(handle,
-                kind, pinRow, pinCol, side, targetValue, halfDb, elem, ctlElem, tapPtr,
-                tapData.stream().mapToDouble(Double::doubleValue).toArray(), baseTap, maxShift) != 0;
+                kind, pinRow, tapColumn, side, targetValue, halfTargetDeadband, elem, controlledElement, tapStart,
+                tapRows.stream().mapToDouble(Double::doubleValue).toArray(), baseTap, maxShift) != 0;
         LOGGER.info("Uploaded {} flow-observed incremental controllers to device: {}", nc, owned ? "in-kernel loops" : "host orchestrator");
         if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
-            System.err.printf("FLOW_UPLOAD nCtrl=%d kernel=%b%n", nc, owned);
+            System.err.printf("FLOW_UPLOAD nControllers=%d kernel=%b%n", nc, owned);
         }
         return owned;
     }
@@ -104,7 +104,7 @@ public final class DeviceFlowControllers {
         }
         for (int c = 0; c < ctrls.size() && c < taps.length; c++) {
             Controller ctl = ctrls.get(c);
-            if (taps[c] == ctl.baseTapIdx()) {
+            if (taps[c] == ctl.baseTapIndex()) {
                 continue;
             }
             LfBranch branch = network.getBranch(ctl.branchNum());

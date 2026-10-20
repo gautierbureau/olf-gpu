@@ -13,10 +13,10 @@
 namespace olfgpu {
 
 // Per-solve reset: base taps, check count 0.
-void cphResetSolve(BatchSolverContext* ctx, DriverPass& drv);
+void phaseControlResetSolve(BatchSolverContext* ctx, DriverPass& drv);
 
 // One check of the loop on every live scenario (GpuOuterLoopKind::INCREMENTAL_PHASE_CONTROL).
-void cphStep(BatchSolverContext* ctx, DriverPass& drv);
+void phaseControlStep(BatchSolverContext* ctx, DriverPass& drv);
 
 }  // namespace olfgpu
 

@@ -34,12 +34,12 @@ public final class PhaseControlNative {
     /** Install the CONTINUOUS phase controllers for the in-kernel PhaseControl phase (OLF order 7);
      *  see GpuPhaseControlOuterLoop.uploadToDevice. Returns 1 when the kernel loop owns them. */
     public static native int setBatchContinuousPhase(long handle, int[] kind, int[] a1Row, int[] side, double[] limit,
-            int[] elem, int[] tapPtr, double[] tapData, int[] baseTap);
+            int[] elem, int[] tapStart, double[] tapRows, int[] baseTap);
 
     /** Install the FLOW-OBSERVED incremental controllers (RPC / incremental phase) for the in-kernel
      *  loops (OLF orders 7 and 9); see DeviceFlowControllers.uploadToDevice. Returns 1 when
      *  the kernel loops own them. */
-    public static native int setBatchFlowControllers(long handle, int[] kind, int[] pinRow, int[] pinCol, int[] side,
-            double[] targetValue, double[] halfDb, int[] elem, int[] ctlElem, int[] tapPtr, double[] tapData,
+    public static native int setBatchFlowControllers(long handle, int[] kind, int[] pinRow, int[] tapColumn, int[] side,
+            double[] targetValue, double[] halfTargetDeadband, int[] elem, int[] controlledElement, int[] tapStart, double[] tapRows,
             int[] baseTap, int[] maxShift);
 }

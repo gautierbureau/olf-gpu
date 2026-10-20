@@ -222,13 +222,13 @@ OLF_JNI(sa_gpu, ViolationScreenNative, uploadViolationTable)(
         jintArray jBrFamily, jintArray jBrElem, jintArray jBrGroupStart, jintArray jBrGroupEnd,
         jintArray jGrpSide, jintArray jGrpQty, jintArray jGrpLimStart, jintArray jGrpLimEnd,
         jdoubleArray jLimThreshold,
-        jintArray jBusVRow, jdoubleArray jBusHigh, jdoubleArray jBusLow,
+        jintArray jControllerBusVRow, jdoubleArray jBusHigh, jdoubleArray jBusLow,
         jdoubleArray jClosedBranchParameters, jintArray jClosedBranchIndices, jdoubleArray jOpenBranchParameters, jintArray jOpenBranchIndices) {
     auto* t = new ViolationTable();
     t->nBranches = env->GetArrayLength(jBrFamily);
     t->nGroups = env->GetArrayLength(jGrpSide);
     t->nLimits = env->GetArrayLength(jLimThreshold);
-    t->nBuses = env->GetArrayLength(jBusVRow);
+    t->nBuses = env->GetArrayLength(jControllerBusVRow);
 
     auto uploadI = [&](jintArray a, Buf& buf) {
         jint* p = env->GetIntArrayElements(a, nullptr);
@@ -248,7 +248,7 @@ OLF_JNI(sa_gpu, ViolationScreenNative, uploadViolationTable)(
             && uploadI(jGrpSide, t->grpSide) && uploadI(jGrpQty, t->grpQty)
             && uploadI(jGrpLimStart, t->grpLimStart) && uploadI(jGrpLimEnd, t->grpLimEnd)
             && uploadD(jLimThreshold, t->limThreshold)
-            && uploadI(jBusVRow, t->busVRow) && uploadD(jBusHigh, t->busHigh) && uploadD(jBusLow, t->busLow)
+            && uploadI(jControllerBusVRow, t->busVRow) && uploadD(jBusHigh, t->busHigh) && uploadD(jBusLow, t->busLow)
             && uploadD(jClosedBranchParameters, t->closedBranchParameters) && uploadI(jClosedBranchIndices, t->closedBranchIndices)
             && uploadD(jOpenBranchParameters, t->openBranchParameters) && uploadI(jOpenBranchIndices, t->openBranchIndices);
     if (!ok) {

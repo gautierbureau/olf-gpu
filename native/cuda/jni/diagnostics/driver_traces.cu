@@ -67,9 +67,9 @@ void traceBatchPass(BatchSolverContext* ctx, DriverPass& drv, int nLoops, bool s
             case GpuOuterLoopKind::HOST_SHUNT_VOLTAGE_CONTROL:   kindName = "HOST:ShuntVoltageControl"; break;
             case GpuOuterLoopKind::INCREMENTAL_TRANSFORMER_VOLTAGE_CONTROL:   kindName = "TransformerVoltageControl"; break;
             case GpuOuterLoopKind::INCREMENTAL_SHUNT_VOLTAGE_CONTROL: kindName = "ShuntVoltageControl"; break;
-            case GpuOuterLoopKind::INCREMENTAL_PHASE_CONTROL: kindName = ctx->nCph > 0 ? "PhaseControl" : "IncrementalPhaseControl"; break;
+            case GpuOuterLoopKind::INCREMENTAL_PHASE_CONTROL: kindName = ctx->nPhaseControlControllerBranches > 0 ? "PhaseControl" : "IncrementalPhaseControl"; break;
             case GpuOuterLoopKind::INCREMENTAL_TRANSFORMER_REACTIVE_POWER_CONTROL:  kindName = "TransformerReactivePowerControl"; break;
-            case GpuOuterLoopKind::TRANSFORMER_VOLTAGE_CONTROL:   kindName = ctx->tvdMode == GpuTransformerVoltageControlMode::WITH_GENERATOR_VOLTAGE_CONTROL ? "SimpleTransformerVoltageControl" : "TransformerVoltageControl"; break;
+            case GpuOuterLoopKind::TRANSFORMER_VOLTAGE_CONTROL:   kindName = ctx->transformerVoltageControlMode == GpuTransformerVoltageControlMode::WITH_GENERATOR_VOLTAGE_CONTROL ? "SimpleTransformerVoltageControl" : "TransformerVoltageControl"; break;
             case GpuOuterLoopKind::SHUNT_VOLTAGE_CONTROL:   kindName = "ShuntVoltageControl"; break;
             case GpuOuterLoopKind::SECONDARY_VOLTAGE_CONTROL:   kindName = "SecondaryVoltageControl"; break;
         }
@@ -402,7 +402,7 @@ void traceReactiveLimitsAudit(BatchSolverContext* ctx, DriverPass& drv, std::vec
         CUDA_CHECK(cudaMemcpy(keepSm.data(), ctx->dReactiveLimitSavedRowMode.p, keepSm.size(), cudaMemcpyDeviceToHost));
         CUDA_CHECK(cudaMemcpy(keepSt.data(), ctx->dReactiveLimitSavedTarget.p, keepSt.size() * sizeof(double), cudaMemcpyDeviceToHost));
         reactiveLimitsBatch<<<grid(ctx->nReactiveLimitEntries * nS), BLOCK, 0, ctx->stream>>>(
-                ctx->nSvc > 0 ? ctx->dSecondaryVoltageControlReactiveLimitTargetV.as<double>() : nullptr,
+                ctx->nSecondaryVoltageControlControllerBuses > 0 ? ctx->dSecondaryVoltageControlReactiveLimitTargetV.as<double>() : nullptr,
                 ctx->nReactiveLimitEntries, nS, n, REACTIVE_LIMIT_TOL, MAX_PQ_PV_SWITCH,
                 ctx->dReactiveLimitVoltageRow.as<int>(),
                 ctx->dReactiveLimitReactivePowerRow.p ? ctx->dReactiveLimitReactivePowerRow.as<int>() : nullptr,

@@ -38,7 +38,7 @@ import java.util.Map;
  * VSC injections land as CONVERTER-BUS target overrides (the stations' targetP is 0 in the base
  * linear extraction, so the bus-target delta IS the station targetP, generator convention). Flow
  * evaluations call OLF's OWN p1/p2 formulas directly on the scenario's state array (see
- * {@link Ctl#p1At}) — the equation terms read a shared {@code StateVector} whose every load
+ * {@link Controller#p1At}) — the equation terms read a shared {@code StateVector} whose every load
  * recomputes the whole network's flows and derivatives, which is unaffordable per scenario.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
@@ -56,7 +56,7 @@ public final class GpuHvdcAcEmulationLimitsOuterLoop {
      *  BASE frame — the base status plus the base VSC station targetP contributions ALREADY inside
      *  baseTargets (0 for a linear base; a saturated/frozen base carries its injections there, so
      *  every status override composes as {@code baseTargets - baseD + d(status)}). */
-    public record Ctl(int hvdcElementIndex, int bus1PRow, int bus2PRow, int bus1PhiCol, int bus2PhiCol,
+    public record Controller(int hvdcElementIndex, int bus1PRow, int bus2PRow, int bus1PhiCol, int bus2PhiCol,
                double p0, double k,
                double pMax12, double pMax21, double loss1, double loss2, double r,
                int baseStatus, double baseD1, double baseD2) {
@@ -115,7 +115,7 @@ public final class GpuHvdcAcEmulationLimitsOuterLoop {
         }
     }
 
-    public static List<Ctl> buildControllers(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
+    public static List<Controller> buildControllers(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
                                       int nElements,
                                       com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData gpuData) {
         Map<Integer, Integer> phiRows = new LinkedHashMap<>();
@@ -128,7 +128,7 @@ public final class GpuHvdcAcEmulationLimitsOuterLoop {
                 .filter(h -> h.getBus1() != null && h.getBus2() != null && h.isAcEmulation())
                 .toList();                                   // the packer's exact enumeration order
         int hvdcAcEmulationOffset = nElements - packed.size();
-        List<Ctl> out = new ArrayList<>();
+        List<Controller> out = new ArrayList<>();
         for (int h = 0; h < packed.size(); h++) {
             LfHvdc hvdc = packed.get(h);
             var ac = hvdc.getAcEmulationControl();
@@ -159,7 +159,7 @@ public final class GpuHvdcAcEmulationLimitsOuterLoop {
                         h, hvdc.getId(), hvdcAcEmulationOffset + h, ac.getAcEmulationStatus(), hvdc.getConverterStation1().getTargetP(),
                         hvdc.getConverterStation2().getTargetP(), p1Active);
             }
-            out.add(new Ctl(hvdcAcEmulationOffset + h,
+            out.add(new Controller(hvdcAcEmulationOffset + h,
                     p1Active ? r1 : ~r1, p2Active ? r2 : ~r2,
                     phi1, phi2,
                     ac.getP0(), ac.getDroop() * 180 / Math.PI,
@@ -197,7 +197,7 @@ public final class GpuHvdcAcEmulationLimitsOuterLoop {
 
     /** OLF setVscTargetP: {@code [bus1TargetDelta, bus2TargetDelta]} for a saturation at pController
      *  flowing from the controller station (generator-convention deltas over the linear base). */
-    static double[] saturationDeltas(Ctl c, boolean from1to2) {
+    static double[] saturationDeltas(Controller c, boolean from1to2) {
         if (from1to2) {
             double pAbs = AbstractHvdcAcEmulationFlowEquationTerm.getAbsActivePowerWithLosses(c.pMax12(), c.loss1(), c.loss2(), c.r());
             return new double[] {-c.pMax12(), pAbs};
@@ -213,15 +213,15 @@ public final class GpuHvdcAcEmulationLimitsOuterLoop {
      * with what they did on the device — otherwise the orchestrators that run next re-upload a
      * pre-freeze override list and re-apply a freeze the kernel already lifted.
      */
-    public static void applyStatusOverrides(int chunkSize, int realCount, int n, List<Ctl> ctls,
+    public static void applyStatusOverrides(int chunkSize, int realCount, int n, List<Controller> ctls,
                                      int[][] status, byte[] ctgOut, boolean[][] disabledMask,
                                      double[] baseTargets, GpuBatchOverrides overrides,
-                                     double[] appliedD1, double[] appliedD2, int[][] rowModePerScenario) {
+                                     double[] appliedDelta1, double[] appliedDelta2, int[][] rowModePerScenario) {
         int nh = ctls.size();
         for (int s = 0; s < realCount; s++) {
             int[] rm = rowModePerScenario == null ? null : rowModePerScenario[s];
             for (int h = 0; h < nh; h++) {
-                Ctl c = ctls.get(h);
+                Controller c = ctls.get(h);
                 if (ctgOut[s * nh + h] != 0) {
                     continue;                                // the contingency owns that bit
                 }
@@ -244,8 +244,8 @@ public final class GpuHvdcAcEmulationLimitsOuterLoop {
                     // silently dropped its override.
                     double[] d = status[s][h] == GpuAcEmulationStatus.SATURATION_MODE_FROM_CS1_TO_CS2 ? saturationDeltas(c, true)
                             : status[s][h] == GpuAcEmulationStatus.SATURATION_MODE_FROM_CS2_TO_CS1 ? saturationDeltas(c, false)
-                            : new double[] {appliedD1[s * nh + h] + c.baseD1(),
-                                            appliedD2[s * nh + h] + c.baseD2()};
+                            : new double[] {appliedDelta1[s * nh + h] + c.baseD1(),
+                                            appliedDelta2[s * nh + h] + c.baseD2()};
                     if (c.bus1PActive()) {
                         overrides.merge(s * n + c.bus1WriteRow(rm), baseTargets[c.bus1WriteRow(rm)], c.baseD1(), d[0]);
                     }
@@ -262,10 +262,10 @@ public final class GpuHvdcAcEmulationLimitsOuterLoop {
      *  the hv bit set and NO target override (baseTargets already carry the base injections), and
      *  PADDING slots get the base bits so they still converge at iteration 0. An entry whose bit is
      *  already set while its status is LINEAR is a contingency outage — left alone. */
-    public static void seedBaseStatuses(int chunkSize, int realCount, List<Ctl> ctls,
+    public static void seedBaseStatuses(int chunkSize, int realCount, List<Controller> ctls,
                                  int[][] status, boolean[][] disabledMask) {
         for (int h = 0; h < ctls.size(); h++) {
-            Ctl c = ctls.get(h);
+            Controller c = ctls.get(h);
             if (c.baseStatus() == GpuAcEmulationStatus.LINEAR_MODE) {
                 continue;
             }
@@ -285,8 +285,8 @@ public final class GpuHvdcAcEmulationLimitsOuterLoop {
      *  host-side freeze already applied. Shared by the batched SA's chunk contexts and the base load
      *  flow's batch-of-one. Returns the flat ctgOut bits (null when there is nothing to install — the
      *  context's HVDC loops are then cleared). */
-    public static byte[] installDriverLoops(long handle, List<Ctl> ctls, int chunkSize, int[][] hvdcStatus,
-                                            boolean[][] disabledMask, double[] appliedD1, double[] appliedD2,
+    public static byte[] installDriverLoops(long handle, List<Controller> ctls, int chunkSize, int[][] hvdcStatus,
+                                            boolean[][] disabledMask, double[] appliedDelta1, double[] appliedDelta2,
                                             boolean limits) {
         if (ctls == null || ctls.isEmpty()) {
             HvdcNative.setBatchHvdcLoops(handle, null, null, null, null, null, null, null, null, null, null, 0);
@@ -300,7 +300,7 @@ public final class GpuHvdcAcEmulationLimitsOuterLoop {
         int[] hvdcBus2PhiColumns = new int[nh];
         double[] hvdcAcEmulationParameters = new double[nh * 9];
         for (int h = 0; h < nh; h++) {
-            Ctl c = ctls.get(h);
+            Controller c = ctls.get(h);
             hvdcElement[h] = c.hvdcElementIndex();          // GLOBAL element index
             hvdcBus1PRows[h] = c.bus1PRow();               // where the P target is WRITTEN (relocated row, ~ when inactive)
             hvdcBus2PRows[h] = c.bus2PRow();
@@ -327,14 +327,14 @@ public final class GpuHvdcAcEmulationLimitsOuterLoop {
             }
         }
         HvdcNative.setBatchHvdcLoops(handle, hvdcElement, hvdcBus1PRows, hvdcBus2PRows, hvdcBus1PhiColumns, hvdcBus2PhiColumns, hvdcAcEmulationParameters, ctgOut,
-                flatStatus, appliedD1, appliedD2, limits ? 1 : 0);
+                flatStatus, appliedDelta1, appliedDelta2, limits ? 1 : 0);
         return ctgOut;
     }
 
     /** Give the driver's final AC-emulation statuses (scenario 0) back to the network the way OLF's own
      *  loops do — the same {@code AcEmulationControl} switches, which set the converter stations'
      *  targetP and re-activate/deactivate the emulation terms through OLF's listeners. */
-    public static void applyToNetwork(LfNetwork network, List<Ctl> ctls, int[] deviceStatus, int nElements) {
+    public static void applyToNetwork(LfNetwork network, List<Controller> ctls, int[] deviceStatus, int nElements) {
         if (ctls == null || ctls.isEmpty() || deviceStatus == null) {
             return;
         }

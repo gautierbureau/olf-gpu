@@ -22,24 +22,24 @@ namespace olfgpu {
 /** MonitoringVoltage (OLF MonitoringVoltageOuterLoop): a standby SVC whose monitored bus leaves its
  *  band switches to voltage control at the corresponding setpoint. One-way — once a controller has
  *  fired for a scenario it is never re-checked, exactly as OLF's activatedTargetV bookkeeping. */
-__global__ void monitoringLoopBatch(int nmon, int nScenarios, int n,
-                                    const int* monVRow, const double* monBand,
-                                    const int* deltaPtr, const int* deltaRow,
+__global__ void monitoringVoltageLoopBatch(int nMonitoringVoltageControllers, int nScenarios, int n,
+                                    const int* monitoringVoltageBusVRow, const double* monitoringVoltageBand,
+                                    const int* deltaStart, const int* deltaRow,
                                     const int* deltaMode, const double* deltaTarget,
                                     const double* x, double* target, int* mode,
                                     double* activated, const char* outerLoopCheckActive, char* switched) {
     int k = blockIdx.x * blockDim.x + threadIdx.x;
-    if (k >= nmon * nScenarios) return;
-    int c = k % nmon;
-    int s = k / nmon;
+    if (k >= nMonitoringVoltageControllers * nScenarios) return;
+    int c = k % nMonitoringVoltageControllers;
+    int s = k / nMonitoringVoltageControllers;
     if (!outerLoopCheckActive[s]) return;
-    size_t slot = (size_t) s * nmon + c;
+    size_t slot = (size_t) s * nMonitoringVoltageControllers + c;
     if (!isnan(activated[slot])) return;                     // already switched — a normal PV bus now
-    double v = x[(size_t) s * n + monVRow[c]];
-    double lowThr = monBand[c * 4];
-    double highThr = monBand[c * 4 + 1];
-    double lowTgt = monBand[c * 4 + 2];
-    double highTgt = monBand[c * 4 + 3];
+    double v = x[(size_t) s * n + monitoringVoltageBusVRow[c]];
+    double lowThr = monitoringVoltageBand[c * 4];
+    double highThr = monitoringVoltageBand[c * 4 + 1];
+    double lowTgt = monitoringVoltageBand[c * 4 + 2];
+    double highTgt = monitoringVoltageBand[c * 4 + 3];
     double chosen;
     if (v > highThr) {
         chosen = highTgt;
@@ -49,33 +49,33 @@ __global__ void monitoringLoopBatch(int nmon, int nScenarios, int n,
         return;
     }
     activated[slot] = chosen;
-    for (int d = deltaPtr[c]; d < deltaPtr[c + 1]; d++) {
+    for (int d = deltaStart[c]; d < deltaStart[c + 1]; d++) {
         int row = deltaRow[d];
         mode[(size_t) s * n + row] = deltaMode[d];
-        target[(size_t) s * n + row] = row == monVRow[c] ? chosen : deltaTarget[d];
+        target[(size_t) s * n + row] = row == monitoringVoltageBusVRow[c] ? chosen : deltaTarget[d];
     }
     switched[s] = 1;
 }
 
 // Per-solve reset. MonitoringVoltage: nothing has fired yet in this solve.
-void monitoringResetSolve(BatchSolverContext* ctx, DriverPass& drv) {
+void monitoringVoltageResetSolve(BatchSolverContext* ctx, DriverPass& drv) {
     const int& nS = drv.nS;
-    std::vector<double> nan(static_cast<size_t>(ctx->nmon) * nS, std::nan(""));
-    CUDA_CHECK(cudaMemcpyAsync(ctx->dMonActivated.p, nan.data(),
+    std::vector<double> nan(static_cast<size_t>(ctx->nMonitoringVoltageControllers) * nS, std::nan(""));
+    CUDA_CHECK(cudaMemcpyAsync(ctx->dMonitoringVoltageActivatedTargetV.p, nan.data(),
             nan.size() * sizeof(double), cudaMemcpyHostToDevice, ctx->stream));
     CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
 }
 
 // One check of the loop on every live scenario (GpuOuterLoopKind::MONITORING_VOLTAGE).
-void monitoringStep(BatchSolverContext* ctx, DriverPass& drv) {
+void monitoringVoltageStep(BatchSolverContext* ctx, DriverPass& drv) {
     const int& n = drv.n;
     const int& nS = drv.nS;
-    monitoringLoopBatch<<<grid(ctx->nmon * nS), BLOCK, 0, ctx->stream>>>(
-            ctx->nmon, nS, n, ctx->dMonVRow.as<int>(), ctx->dMonBand.as<double>(),
-            ctx->dMonDeltaPtr.as<int>(), ctx->dMonDeltaRow.as<int>(),
-            ctx->dMonDeltaMode.as<int>(), ctx->dMonDeltaTarget.as<double>(),
+    monitoringVoltageLoopBatch<<<grid(ctx->nMonitoringVoltageControllers * nS), BLOCK, 0, ctx->stream>>>(
+            ctx->nMonitoringVoltageControllers, nS, n, ctx->dMonitoringVoltageBusVRow.as<int>(), ctx->dMonitoringVoltageBand.as<double>(),
+            ctx->dMonitoringVoltageDeltaStart.as<int>(), ctx->dMonitoringVoltageDeltaRow.as<int>(),
+            ctx->dMonitoringVoltageDeltaMode.as<int>(), ctx->dMonitoringVoltageDeltaTarget.as<double>(),
             ctx->dX.as<double>(), ctx->dTarget.as<double>(), ctx->dMode.as<int>(),
-            ctx->dMonActivated.as<double>(), ctx->dOuterLoopCheckActive.as<char>(), ctx->dOuterLoopUnstable.as<char>());
+            ctx->dMonitoringVoltageActivatedTargetV.as<double>(), ctx->dOuterLoopCheckActive.as<char>(), ctx->dOuterLoopUnstable.as<char>());
 }
 
 }  // namespace olfgpu

@@ -24,21 +24,21 @@ namespace olfgpu {
 // LfShuntImpl.dispatchB per controller shunt and switched off at the first check (UNSTABLE). Group activations
 // and member layouts follow the discrete transformer control (transformer_voltage_control.cu).
 
-struct SvdTables {
-    int nG, nM, nDelta, nSubs;
-    const int* grpPtr;
-    const int* deltaPtr; const int* deltaRow; const int* deltaModeOn; const int* deltaModeOff;
+struct ShuntVoltageControlTables {
+    int nGroups, nMembers, nDeltaRows, nShuntCompensators;
+    const int* groupMemberStart;
+    const int* deltaStart; const int* deltaRow; const int* deltaModeOn; const int* deltaModeOff;
     const double* deltaTargetOn; const double* deltaTargetOff;
-    const int* memBRow; const int* memElem; const int* memSubPtr;
-    const int* secPtr; const double* secB; const int* subMin; const int* subBase;
-    int* grpStep; int* memState; double* memContB; int* subPos; double* saved;
+    const int* memberShuntBRow; const int* memberElement; const int* memberShuntCompensatorStart;
+    const int* sectionStart; const double* sectionB; const int* shuntCompensatorMinPosition; const int* shuntCompensatorBasePosition;
+    int* groupStep; int* memberState; double* memberContinuousB; int* shuntCompensatorPosition; double* savedDeltaTarget;
 };
 
 // A shunt group is live when none of its (packed) member shunts is outaged — such contingencies are
 // CPU-routed at qualification anyway (a voltage-controlling shunt outage never qualifies).
-__device__ inline bool svdGroupLive(const SvdTables& T, int s, int nElements, int g, const char* disabled) {
-    for (int m = T.grpPtr[g]; m < T.grpPtr[g + 1]; m++) {
-        if (T.memElem[m] >= 0 && disabled[(size_t) s * nElements + T.memElem[m]]) return false;
+__device__ inline bool shuntVoltageControlGroupLive(const ShuntVoltageControlTables& T, int s, int nElements, int g, const char* disabled) {
+    for (int m = T.groupMemberStart[g]; m < T.groupMemberStart[g + 1]; m++) {
+        if (T.memberElement[m] >= 0 && disabled[(size_t) s * nElements + T.memberElement[m]]) return false;
     }
     return true;
 }
@@ -46,30 +46,30 @@ __device__ inline bool svdGroupLive(const SvdTables& T, int s, int nElements, in
 // ON: every captured delta (the pilot's V identity, the member SHUNT_B power rows — pilot Q relocation and
 // DISTR_SHUNT_B — as the toggled equation system produced them); OFF: the pilot back to its saved/OFF
 // target, every member's SHUNT_B identity pinned at its dispatched section total.
-__device__ inline void svdLayoutGroup(const SvdTables& T, int s, int n, int g, bool on,
+__device__ inline void shuntVoltageControlLayoutGroup(const ShuntVoltageControlTables& T, int s, int n, int g, bool on,
                                       int* mode, double* target, double* x) {
     size_t sn = (size_t) s * n;
-    for (int k = T.deltaPtr[g]; k < T.deltaPtr[g + 1]; k++) {
+    for (int k = T.deltaStart[g]; k < T.deltaStart[g + 1]; k++) {
         int r = T.deltaRow[k];
         int member = -1;
-        for (int m = T.grpPtr[g]; m < T.grpPtr[g + 1]; m++) if (T.memBRow[m] == r) member = m;
-        size_t sk = (size_t) s * T.nDelta + k;
+        for (int m = T.groupMemberStart[g]; m < T.groupMemberStart[g + 1]; m++) if (T.memberShuntBRow[m] == r) member = m;
+        size_t sk = (size_t) s * T.nDeltaRows + k;
         if (on) {
-            if (member < 0 && isnan(T.saved[sk])) T.saved[sk] = target[sn + r];
+            if (member < 0 && isnan(T.savedDeltaTarget[sk])) T.savedDeltaTarget[sk] = target[sn + r];
             mode[sn + r] = T.deltaModeOn[k];
             target[sn + r] = T.deltaTargetOn[k];
         } else if (member < 0) {
             mode[sn + r] = T.deltaModeOff[k];
-            target[sn + r] = isnan(T.saved[sk]) ? T.deltaTargetOff[k] : T.saved[sk];
-            T.saved[sk] = nan("");
+            target[sn + r] = isnan(T.savedDeltaTarget[sk]) ? T.deltaTargetOff[k] : T.savedDeltaTarget[sk];
+            T.savedDeltaTarget[sk] = nan("");
         }
     }
     if (!on) {
-        for (int m = T.grpPtr[g]; m < T.grpPtr[g + 1]; m++) {
-            if (T.memState[(size_t) s * T.nM + m] != GpuDiscreteControlMemberState::ROUNDED) continue;
+        for (int m = T.groupMemberStart[g]; m < T.groupMemberStart[g + 1]; m++) {
+            if (T.memberState[(size_t) s * T.nMembers + m] != GpuDiscreteControlMemberState::ROUNDED) continue;
             double bSum = 0.0;
-            for (int u = T.memSubPtr[m]; u < T.memSubPtr[m + 1]; u++) bSum += T.secB[T.secPtr[u] + T.subPos[(size_t) s * T.nSubs + u]];
-            size_t br = sn + T.memBRow[m];
+            for (int u = T.memberShuntCompensatorStart[m]; u < T.memberShuntCompensatorStart[m + 1]; u++) bSum += T.sectionB[T.sectionStart[u] + T.shuntCompensatorPosition[(size_t) s * T.nShuntCompensators + u]];
+            size_t br = sn + T.memberShuntBRow[m];
             mode[br] = GpuRowMode::FIXED_VARIABLE;
             target[br] = bSum;
             x[br] = bSum;
@@ -77,117 +77,117 @@ __device__ inline void svdLayoutGroup(const SvdTables& T, int s, int n, int g, b
     }
 }
 
-__global__ void svdEntryBatch(SvdTables T, int nScenarios, int n, int nElements, int entryOn,
+__global__ void shuntVoltageControlEntryBatch(ShuntVoltageControlTables T, int nScenarios, int n, int nElements, int entryOn,
                               const char* disabled, int* mode, double* target, double* x) {
     int s = blockIdx.x * blockDim.x + threadIdx.x;
     if (s >= nScenarios) return;
     size_t sn = (size_t) s * n;
-    for (int g = 0; g < T.nG; g++) {
-        if (!svdGroupLive(T, s, nElements, g, disabled)) continue;
-        for (int m = T.grpPtr[g]; m < T.grpPtr[g + 1]; m++) {
-            T.memState[(size_t) s * T.nM + m] = entryOn ? (mode[sn + T.memBRow[m]] == GpuRowMode::EQUATION ? GpuDiscreteControlMemberState::CONTINUOUS : GpuDiscreteControlMemberState::DISABLED) : GpuDiscreteControlMemberState::CONTINUOUS;
+    for (int g = 0; g < T.nGroups; g++) {
+        if (!shuntVoltageControlGroupLive(T, s, nElements, g, disabled)) continue;
+        for (int m = T.groupMemberStart[g]; m < T.groupMemberStart[g + 1]; m++) {
+            T.memberState[(size_t) s * T.nMembers + m] = entryOn ? (mode[sn + T.memberShuntBRow[m]] == GpuRowMode::EQUATION ? GpuDiscreteControlMemberState::CONTINUOUS : GpuDiscreteControlMemberState::DISABLED) : GpuDiscreteControlMemberState::CONTINUOUS;
         }
-        if (!entryOn) svdLayoutGroup(T, s, n, g, true, mode, target, x);
+        if (!entryOn) shuntVoltageControlLayoutGroup(T, s, n, g, true, mode, target, x);
     }
 }
 
 // The loop's first check: OLF disables every controller shunt and dispatches its continuous b to the
 // closest sections (LfShuntImpl.dispatchB: per sub-controller, residue / remaining to the closest section
 // from the CURRENT position over [minPosition, size), strictly closer only), UNSTABLE.
-__global__ void svdCheckBatch(SvdTables T, int nScenarios, int n, int nElements, const char* disabled, const char* outerLoopCheckActive,
+__global__ void shuntVoltageControlCheckBatch(ShuntVoltageControlTables T, int nScenarios, int n, int nElements, const char* disabled, const char* outerLoopCheckActive,
                               int* mode, double* target, double* x, char* switched) {
     int s = blockIdx.x * blockDim.x + threadIdx.x;
     if (s >= nScenarios || !outerLoopCheckActive[s]) return;
     size_t sn = (size_t) s * n;
     bool anyCtl = false;
-    for (int g = 0; g < T.nG; g++) {
-        size_t sg = (size_t) s * T.nG + g;
-        if (T.grpStep[sg] != 0) continue;
-        T.grpStep[sg] = 2;
-        for (int m = T.grpPtr[g]; m < T.grpPtr[g + 1]; m++) {
-            if (T.memElem[m] < 0 || !disabled[(size_t) s * nElements + T.memElem[m]]) anyCtl = true;
+    for (int g = 0; g < T.nGroups; g++) {
+        size_t sg = (size_t) s * T.nGroups + g;
+        if (T.groupStep[sg] != 0) continue;
+        T.groupStep[sg] = 2;
+        for (int m = T.groupMemberStart[g]; m < T.groupMemberStart[g + 1]; m++) {
+            if (T.memberElement[m] < 0 || !disabled[(size_t) s * nElements + T.memberElement[m]]) anyCtl = true;
         }
-        if (!svdGroupLive(T, s, nElements, g, disabled)) continue;
+        if (!shuntVoltageControlGroupLive(T, s, nElements, g, disabled)) continue;
         bool touched = false;
-        for (int m = T.grpPtr[g]; m < T.grpPtr[g + 1]; m++) {
-            size_t sm = (size_t) s * T.nM + m;
-            if (T.memState[sm] != GpuDiscreteControlMemberState::CONTINUOUS) continue;
-            double residue = x[sn + T.memBRow[m]];
-            T.memContB[sm] = residue;
-            int remaining = T.memSubPtr[m + 1] - T.memSubPtr[m];
-            for (int u = T.memSubPtr[m]; u < T.memSubPtr[m + 1]; u++) {
+        for (int m = T.groupMemberStart[g]; m < T.groupMemberStart[g + 1]; m++) {
+            size_t sm = (size_t) s * T.nMembers + m;
+            if (T.memberState[sm] != GpuDiscreteControlMemberState::CONTINUOUS) continue;
+            double residue = x[sn + T.memberShuntBRow[m]];
+            T.memberContinuousB[sm] = residue;
+            int remaining = T.memberShuntCompensatorStart[m + 1] - T.memberShuntCompensatorStart[m];
+            for (int u = T.memberShuntCompensatorStart[m]; u < T.memberShuntCompensatorStart[m + 1]; u++) {
                 double toDispatch = residue / remaining--;
-                int p0 = T.secPtr[u];
-                int nSec = T.secPtr[u + 1] - p0;
-                int best = T.subBase[u];
-                double smallest = fabs(toDispatch - T.secB[p0 + best]);
-                for (int p = T.subMin[u]; p < nSec; p++) {
-                    double dist = fabs(toDispatch - T.secB[p0 + p]);
+                int p0 = T.sectionStart[u];
+                int nSec = T.sectionStart[u + 1] - p0;
+                int best = T.shuntCompensatorBasePosition[u];
+                double smallest = fabs(toDispatch - T.sectionB[p0 + best]);
+                for (int p = T.shuntCompensatorMinPosition[u]; p < nSec; p++) {
+                    double dist = fabs(toDispatch - T.sectionB[p0 + p]);
                     if (dist < smallest) {
                         best = p;
                         smallest = dist;
                     }
                 }
-                T.subPos[(size_t) s * T.nSubs + u] = best;
-                residue -= T.secB[p0 + best];
+                T.shuntCompensatorPosition[(size_t) s * T.nShuntCompensators + u] = best;
+                residue -= T.sectionB[p0 + best];
             }
-            T.memState[sm] = GpuDiscreteControlMemberState::ROUNDED;
+            T.memberState[sm] = GpuDiscreteControlMemberState::ROUNDED;
             touched = true;
         }
-        if (touched) svdLayoutGroup(T, s, n, g, false, mode, target, x);
+        if (touched) shuntVoltageControlLayoutGroup(T, s, n, g, false, mode, target, x);
     }
     if (anyCtl) switched[s] = 1;                             // OLF: UNSTABLE whenever a live controller shunt exists
 }
 
-static SvdTables svdTables(BatchSolverContext* ctx) {
-    SvdTables T;
-    T.nG = ctx->nSvdGroups; T.nM = ctx->nSvd; T.nDelta = ctx->nSvdDelta; T.nSubs = ctx->nSvdSubs;
-    T.grpPtr = ctx->dSvdGrpPtr.as<int>();
-    T.deltaPtr = ctx->dSvdDeltaPtr.as<int>(); T.deltaRow = ctx->dSvdDeltaRow.as<int>();
-    T.deltaModeOn = ctx->dSvdDeltaModeOn.as<int>(); T.deltaModeOff = ctx->dSvdDeltaModeOff.as<int>();
-    T.deltaTargetOn = ctx->dSvdDeltaTargetOn.as<double>(); T.deltaTargetOff = ctx->dSvdDeltaTargetOff.as<double>();
-    T.memBRow = ctx->dSvdMemBRow.as<int>(); T.memElem = ctx->dSvdMemElem.as<int>(); T.memSubPtr = ctx->dSvdMemSubPtr.as<int>();
-    T.secPtr = ctx->dSvdSecPtr.as<int>(); T.secB = ctx->dSvdSecB.as<double>(); T.subMin = ctx->dSvdSubMin.as<int>(); T.subBase = ctx->dSvdSubBase.as<int>();
-    T.grpStep = ctx->dSvdGrpStep.as<int>(); T.memState = ctx->dSvdMemState.as<int>(); T.memContB = ctx->dSvdMemContB.as<double>();
-    T.subPos = ctx->dSvdSubPos.as<int>(); T.saved = ctx->dSvdSaved.as<double>();
+static ShuntVoltageControlTables shuntVoltageControlTables(BatchSolverContext* ctx) {
+    ShuntVoltageControlTables T;
+    T.nGroups = ctx->nShuntVoltageControlGroups; T.nMembers = ctx->nShuntVoltageControlMembers; T.nDeltaRows = ctx->nShuntVoltageControlDeltaRows; T.nShuntCompensators = ctx->nShuntVoltageControlShuntCompensators;
+    T.groupMemberStart = ctx->dShuntVoltageControlGroupMemberStart.as<int>();
+    T.deltaStart = ctx->dShuntVoltageControlDeltaStart.as<int>(); T.deltaRow = ctx->dShuntVoltageControlDeltaRow.as<int>();
+    T.deltaModeOn = ctx->dShuntVoltageControlDeltaModeOn.as<int>(); T.deltaModeOff = ctx->dShuntVoltageControlDeltaModeOff.as<int>();
+    T.deltaTargetOn = ctx->dShuntVoltageControlDeltaTargetOn.as<double>(); T.deltaTargetOff = ctx->dShuntVoltageControlDeltaTargetOff.as<double>();
+    T.memberShuntBRow = ctx->dShuntVoltageControlMemberShuntBRow.as<int>(); T.memberElement = ctx->dShuntVoltageControlMemberElement.as<int>(); T.memberShuntCompensatorStart = ctx->dShuntVoltageControlMemberShuntCompensatorStart.as<int>();
+    T.sectionStart = ctx->dShuntVoltageControlSectionStart.as<int>(); T.sectionB = ctx->dShuntVoltageControlSectionB.as<double>(); T.shuntCompensatorMinPosition = ctx->dShuntVoltageControlShuntCompensatorMinPosition.as<int>(); T.shuntCompensatorBasePosition = ctx->dShuntVoltageControlShuntCompensatorBasePosition.as<int>();
+    T.groupStep = ctx->dShuntVoltageControlGroupStep.as<int>(); T.memberState = ctx->dShuntVoltageControlMemberState.as<int>(); T.memberContinuousB = ctx->dShuntVoltageControlMemberContinuousB.as<double>();
+    T.shuntCompensatorPosition = ctx->dShuntVoltageControlShuntCompensatorPosition.as<int>(); T.savedDeltaTarget = ctx->dShuntVoltageControlSavedDeltaTarget.as<double>();
     return T;
 }
 
-void svdStep(BatchSolverContext* ctx, DriverPass& drv) {
+void shuntVoltageControlStep(BatchSolverContext* ctx, DriverPass& drv) {
     const int& n = drv.n;
     const int& nS = drv.nS;
-    if (ctx->nSvd <= 0) return;
-    svdCheckBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(svdTables(ctx), nS, n, ctx->nElements, ctx->dDisabled.as<char>(),
+    if (ctx->nShuntVoltageControlMembers <= 0) return;
+    shuntVoltageControlCheckBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(shuntVoltageControlTables(ctx), nS, n, ctx->nElements, ctx->dDisabled.as<char>(),
             ctx->dOuterLoopCheckActive.as<char>(), ctx->dMode.as<int>(), ctx->dTarget.as<double>(), ctx->dX.as<double>(), ctx->dOuterLoopUnstable.as<char>());
     CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
     if (std::getenv("OLF_GPU_BATCH_TRACE") != nullptr) {
-        size_t nsm = static_cast<size_t>(nS) * ctx->nSvd;
+        size_t nsm = static_cast<size_t>(nS) * ctx->nShuntVoltageControlMembers;
         std::vector<int> st(nsm);
-        CUDA_CHECK(cudaMemcpy(st.data(), ctx->dSvdMemState.p, nsm * sizeof(int), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(st.data(), ctx->dShuntVoltageControlMemberState.p, nsm * sizeof(int), cudaMemcpyDeviceToHost));
         int nCont = 0, nFixed = 0;
         for (size_t k = 0; k < nsm; k++) { nCont += st[k] == GpuDiscreteControlMemberState::CONTINUOUS; nFixed += st[k] == GpuDiscreteControlMemberState::ROUNDED; }
-        std::fprintf(stderr, "SVD_KERNEL nS=%d nMembers=%d continuous=%d dispatched=%d\n", nS, ctx->nSvd, nCont, nFixed);
+        std::fprintf(stderr, "SVD_KERNEL nS=%d nMembers=%d continuous=%d dispatched=%d\n", nS, ctx->nShuntVoltageControlMembers, nCont, nFixed);
     }
 }
 
 // Per-solve reset. Discrete shunt VC: every control at its entry state.
-void svdResetSolve(BatchSolverContext* ctx, DriverPass& drv) {
+void shuntVoltageControlResetSolve(BatchSolverContext* ctx, DriverPass& drv) {
     const int& n = drv.n;
     const int& nS = drv.nS;
-    size_t nsm = static_cast<size_t>(nS) * ctx->nSvd;
-    size_t nsg = static_cast<size_t>(nS) * ctx->nSvdGroups;
-    size_t nsd = static_cast<size_t>(nS) * std::max(ctx->nSvdDelta, 1);
-    size_t nsu = static_cast<size_t>(nS) * std::max(ctx->nSvdSubs, 1);
+    size_t nsm = static_cast<size_t>(nS) * ctx->nShuntVoltageControlMembers;
+    size_t nsg = static_cast<size_t>(nS) * ctx->nShuntVoltageControlGroups;
+    size_t nsd = static_cast<size_t>(nS) * std::max(ctx->nShuntVoltageControlDeltaRows, 1);
+    size_t nsu = static_cast<size_t>(nS) * std::max(ctx->nShuntVoltageControlShuntCompensators, 1);
     std::vector<int> pos(nsu);
-    for (int s2 = 0; s2 < nS; s2++) for (int u = 0; u < ctx->nSvdSubs; u++) pos[static_cast<size_t>(s2) * ctx->nSvdSubs + u] = 0;
+    for (int s2 = 0; s2 < nS; s2++) for (int u = 0; u < ctx->nShuntVoltageControlShuntCompensators; u++) pos[static_cast<size_t>(s2) * ctx->nShuntVoltageControlShuntCompensators + u] = 0;
     std::vector<double> nanv(std::max(nsm, nsd), std::nan(""));
     CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
-    CUDA_CHECK(cudaMemcpy(ctx->dSvdSubPos.p, pos.data(), nsu * sizeof(int), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemset(ctx->dSvdMemState.p, 0, nsm * sizeof(int)));
-    CUDA_CHECK(cudaMemcpy(ctx->dSvdMemContB.p, nanv.data(), nsm * sizeof(double), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(ctx->dSvdSaved.p, nanv.data(), nsd * sizeof(double), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemset(ctx->dSvdGrpStep.p, 0, nsg * sizeof(int)));
-    svdEntryBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(svdTables(ctx), nS, n, ctx->nElements, ctx->svdEntryOn,
+    CUDA_CHECK(cudaMemcpy(ctx->dShuntVoltageControlShuntCompensatorPosition.p, pos.data(), nsu * sizeof(int), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemset(ctx->dShuntVoltageControlMemberState.p, 0, nsm * sizeof(int)));
+    CUDA_CHECK(cudaMemcpy(ctx->dShuntVoltageControlMemberContinuousB.p, nanv.data(), nsm * sizeof(double), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(ctx->dShuntVoltageControlSavedDeltaTarget.p, nanv.data(), nsd * sizeof(double), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemset(ctx->dShuntVoltageControlGroupStep.p, 0, nsg * sizeof(int)));
+    shuntVoltageControlEntryBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(shuntVoltageControlTables(ctx), nS, n, ctx->nElements, ctx->shuntVoltageControlEntryOn,
             ctx->dDisabled.as<char>(), ctx->dMode.as<int>(), ctx->dTarget.as<double>(), ctx->dX.as<double>());
     CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
 }

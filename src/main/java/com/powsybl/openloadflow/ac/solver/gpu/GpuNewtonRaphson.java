@@ -606,10 +606,10 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
             // Device-side state-vector scaling: NONE = undamped Newton; LINE_SEARCH backtracks on the
             // device (mirrors LineSearchStateVectorScaling); MAX_VOLTAGE_CHANGE clamps each step so the
             // largest |Δv|/|Δφ| stays within maxDv/maxDphi (mirrors MaxVoltageChangeStateVectorScaling).
-            int lsMode = GpuStateVectorScalingMode.of(parameters.getStateVectorScalingMode());
+            int stateVectorScalingMode = GpuStateVectorScalingMode.of(parameters.getStateVectorScalingMode());
             long t1 = System.nanoTime();
             double convEpsPerEq = GpuSolveSettings.deviceConvEpsPerEq(parameters);
-            installTablesAndLineSearch(target, lsMode);
+            installTablesAndLineSearch(target, stateVectorScalingMode);
             // AC-emulation HVDC statuses: OLF's freezing/limits loops DEACTIVATE the hvdc coupling
             // terms for any non-LINEAR status (the injections ride the target vector as VSC station
             // targetP, re-extracted every solve) — mirror it with the hv element's disabled bit,
@@ -690,7 +690,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                     null, null, null, null, null, null,
                     parameters.getMaxIterations(), GPU_TOLERANCE,
                     driverReactiveLimitTol, driverSlackDistTol, convEpsPerEq,
-                    lsMode,
+                    stateVectorScalingMode,
                     parameters.getMaxVoltageChangeStateVectorScalingMaxDv(),
                     parameters.getMaxVoltageChangeStateVectorScalingMaxDphi(),
                     varType, null,
@@ -733,7 +733,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
             // PAUSE/RESUME CYCLE: if the driver paused at a LOOP_HOST_* slot, run the corresponding
             // OLF outer loop on the host and resume. Repeat until the driver completes without pausing.
             if (!hostOuterLoops.isEmpty()) {
-                out = handleDriverPauses(out, n, target, elementMask, lsMode, convEpsPerEq);
+                out = handleDriverPauses(out, n, target, elementMask, stateVectorScalingMode, convEpsPerEq);
                 if (out == null) {
                     restartIterations = runNewtonIterations(0);
                     return runImpl(voltageInitializer, reportNode, true);   // the host loop changed the system
@@ -824,7 +824,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
 
     /** Install the run-constant outer-loop tables when they are dirty, and OLF's line-search budget in line-search
      *  mode. */
-    private void installTablesAndLineSearch(final double[] target, final int lsMode) {
+    private void installTablesAndLineSearch(final double[] target, final int stateVectorScalingMode) {
         if (tablesDirty) {
             // The SAME run-constant outer-loop tables the batched SA installs on its chunk
             // contexts — a batch of one drives the same loops as a batch of five hundred.
@@ -847,7 +847,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                     DeviceLoopTables.realisticFixingLoop(acLoadFlowParameters));
             tablesDirty = false;
         }
-        if (lsMode == GpuStateVectorScalingMode.LINE_SEARCH) {   // batch loop LINE_SEARCH (ported 2026-09-08)
+        if (stateVectorScalingMode == GpuStateVectorScalingMode.LINE_SEARCH) {   // batch loop LINE_SEARCH (ported 2026-09-08)
             NewtonSettingsNative.setBatchLineSearch(context.handle.get(),
                     parameters.getLineSearchStateVectorScalingMaxIteration(),
                     parameters.getLineSearchStateVectorScalingStepFold());
@@ -1098,7 +1098,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
      */
     @SuppressWarnings("java:S3776")
     private double[] handleDriverPauses(double[] outIn, int n, double[] target,
-                                         boolean[][] elementMask, int lsMode, double convEpsPerEq) {
+                                         boolean[][] elementMask, int stateVectorScalingMode, double convEpsPerEq) {
         double[] out = outIn;
         long handle = context.handle.get();
         int pausedKind = DriverNative.readBatchDriverPaused(handle);
@@ -1237,7 +1237,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                     null, null, null, null, null, null,
                     parameters.getMaxIterations(), GPU_TOLERANCE,
                     driverReactiveLimitTol, driverSlackDistTol, convEpsPerEq,
-                    lsMode,
+                    stateVectorScalingMode,
                     parameters.getMaxVoltageChangeStateVectorScalingMaxDv(),
                     parameters.getMaxVoltageChangeStateVectorScalingMaxDphi(),
                     varType, null,
@@ -1267,7 +1267,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
         double[] x0 = equationSystem.getStateVector().get().clone();
         boolean[][] elementMask = new boolean[1][cachedData.getTotalElementCount()];
         double convEpsPerEq = GpuSolveSettings.deviceConvEpsPerEq(parameters);
-        int lsMode = GpuStateVectorScalingMode.of(parameters.getStateVectorScalingMode());
+        int stateVectorScalingMode = GpuStateVectorScalingMode.of(parameters.getStateVectorScalingMode());
         double[] out = BatchSolveNative.solveBatchContext(context.handle.get(),
                 x0, target, new int[][] {activation.rowMode()}, activation.rowMode(),
                 elementMask,
@@ -1276,7 +1276,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                 null, null, null, null, null, null,
                 parameters.getMaxIterations(), GPU_TOLERANCE,
                 driverReactiveLimitTol, driverSlackDistTol, convEpsPerEq,
-                lsMode,
+                stateVectorScalingMode,
                 parameters.getMaxVoltageChangeStateVectorScalingMaxDv(),
                 parameters.getMaxVoltageChangeStateVectorScalingMaxDphi(),
                 varType, null,

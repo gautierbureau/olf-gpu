@@ -11,25 +11,25 @@
 namespace olfgpu {
 
 // Kernels the driver launches.
-__global__ void pilotSelfGateBatch(int nQr, int nScenarios, int nReactiveLimitEntries, const int* psPilotEntry,
-                                   const char* limitType, const char* reactiveLimitIslanded, char* psSkip);
+__global__ void pilotSelfGateBatch(int nReactiveRelocationGroups, int nScenarios, int nReactiveLimitEntries, const int* pilotEntryOfPilotSelfGroup,
+                                   const char* limitType, const char* reactiveLimitIslanded, char* pilotSelfCarrierSkip);
 
-__global__ void capturePilotQBatch(int nQr, int nScenarios, int n, const int* qrPtr, const int* qrRows,
+__global__ void capturePilotQBatch(int nReactiveRelocationGroups, int nScenarios, int n, const int* reactiveRelocationGroupStart, const int* reactiveRelocationCandidateRows,
                                    const int* baseMode, const double* targetBase, double* pilotQ,
-                                   const int* qrBaseTargetRow);
+                                   const int* reactiveRelocationBaseTargetRow);
 
-__global__ void applyPilotQDeltasBatch(int nDelta, const int* key, const double* val, int nQr, int n,
-                                       const int* qrPtr, const int* qrRows, const int* mode,
-                                       const char* distrQSubgroup, int nDistrQMembers, const int* qrMemberStart,
+__global__ void applyPilotQDeltasBatch(int nDelta, const int* key, const double* val, int nReactiveRelocationGroups, int n,
+                                       const int* reactiveRelocationGroupStart, const int* reactiveRelocationCandidateRows, const int* mode,
+                                       const char* distrQSubgroup, int nDistrQMembers, const int* reactiveRelocationDistrQMemberStart,
                                        double* pilotQ, double* target);
 
-__global__ void updatePilotVeqBatch(int nQr, int nScenarios, int n,
-                                    const int* qrPtr, const int* qrRows, const char* qrGenVc,
+__global__ void updatePilotTargetVEquationBatch(int nReactiveRelocationGroups, int nScenarios, int n,
+                                    const int* reactiveRelocationGroupStart, const int* reactiveRelocationCandidateRows, const char* reactiveRelocationIsGeneratorVoltageControl,
                                     const double* pilotQ, int* mode, double* target,
-                                    char* veqOff, double* savedVTarget,
+                                    char* pilotTargetVDeactivated, double* savedVTarget,
                                     const char* outerLoopCheckActive, char* switched,
                                     int nFrozen, const int* frozenSlotRow,
-                                    const int* psEntry,
+                                    const int* pilotSelfReactiveLimitEntry,
                                     const char* limitType, int nReactiveLimitEntries, const double* reactiveLimitMinQ, const double* reactiveLimitMaxQ,
                                     const double* reactiveLimitLoadQ, const double* reactiveLimitInitialTargetQ, int perScenarioReactiveLimits,
                                     const double* reactiveLimitTargetV,
@@ -38,8 +38,8 @@ __global__ void updatePilotVeqBatch(int nQr, int nScenarios, int n,
                                     const double* secondaryVoltageControlReactiveLimitTargetV,
                                     int nDistrQMembers, const int* distrQMemberRelocationGroup, const int* distrQMemberReactiveLimitEntry,
                                     const char* reactiveLimitIslanded,
-                                const char* distrQSubgroup, const int* qrMemberStart, double tol,
-                                const char* reactiveLimitGeneratorsLost, const int* qrDepBase, const int* relocOwn,
+                                const char* distrQSubgroup, const int* reactiveRelocationDistrQMemberStart, double tol,
+                                const char* reactiveLimitGeneratorsLost, const int* reactiveRelocationDependentBaseGroup, const int* relocatedChildOwnRow,
                                 const double* pinTargetIn);
 
 }  // namespace olfgpu

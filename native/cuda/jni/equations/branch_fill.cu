@@ -38,8 +38,8 @@ __global__ void fillClosedBranchBatch(int elementCount, int nScenarios, int n, i
                                       const double* x, double* vals, double* F,
                                       const char* disabled, const char* active,
                                       int nR1Ov, const int* r1OvSlotElem, const double* r1OvVal,
-                                      const int* altDest, const int* selRow, const int* mode, int dynReloc,
-                                      const int* phaseControlDestination, const int* phaseControlSelector, RelocTables rt) {
+                                      const int* alternateDestination, const int* selectorRow, const int* mode, int dynamicRelocation,
+                                      const int* phaseControlDestination, const int* phaseControlSelector, ReactiveRelocationTables rt) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= elementCount * nScenarios) return;
     int e = tid % elementCount;
@@ -64,10 +64,10 @@ __global__ void fillClosedBranchBatch(int elementCount, int nScenarios, int n, i
                      o + 0, o + 1, o + 2, o + 3, o + 4, o + 5, o + 6, o + 7, o + 8, o + 9,
                      o + 10, o + 11, o + 12, o + 13, o + 14, o + 15, o + 16, o + 17, o + 18,
                      o + 19, o + 20, o + 21, o + 22, o + 23, o + 24, o + 25, o + 26, o + 27);
-    if (dynReloc) {
-        scatterAddDyn(CB_NOUT, dest + e * CB_NOUT, altDest + e * CB_NOUT, selRow + e * CB_NOUT,
+    if (dynamicRelocation) {
+        scatterAddRelocated(CB_NOUT, dest + e * CB_NOUT, alternateDestination + e * CB_NOUT, selectorRow + e * CB_NOUT,
                       mode + (size_t) s * n, o, vals + (size_t) s * nnz, F + (size_t) s * n,
-                      relocForScenario(rt, s), e * CB_NOUT);
+                      relocationTablesForScenario(rt, s), e * CB_NOUT);
     } else {
         scatterAdd(CB_NOUT, dest + e * CB_NOUT, o, vals + (size_t) s * nnz, F + (size_t) s * n);
     }
@@ -90,7 +90,7 @@ __global__ void fillClosedBranchBatch(int elementCount, int nScenarios, int n, i
 
 // The fused fill's residual half alone, for the reactive-limit / slack Q buffer: evalClosedBranchF evaluates
 // p1 q1 p2 q2 from the SAME generated expressions and raw-angle trig as evalClosedBranch (bit-identical), with
-// the frozen routing (dynReloc 0, no phase-control re-emission) and no Jacobian at all - neither its 24
+// the frozen routing (dynamicRelocation 0, no phase-control re-emission) and no Jacobian at all - neither its 24
 // derivatives nor their atomics.
 __global__ void fillClosedBranchQbufBatch(int elementCount, int nScenarios, int n, int nElements, int elemOffset,
                                           const double* in, const int* ix, const int* dest,
@@ -126,8 +126,8 @@ __global__ void fillOpenBranchBatch(int elementCount, int nScenarios, int n, int
                                     const double* in, const int* ix, const int* dest,
                                     const double* x, double* vals, double* F,
                                     const char* disabled, const char* active,
-                                    const int* altDest, const int* selRow, const int* mode, int dynReloc,
-                                    RelocTables rt) {
+                                    const int* alternateDestination, const int* selectorRow, const int* mode, int dynamicRelocation,
+                                    ReactiveRelocationTables rt) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= elementCount * nScenarios) return;
     int e = tid % elementCount;
@@ -141,10 +141,10 @@ __global__ void fillOpenBranchBatch(int elementCount, int nScenarios, int n, int
     double o[OB_NOUT];
     evalOpenBranch(p[0], p[1], p[2], p[3], p[4], p[5], v1, p[6], v2, 0,
                    o + 0, o + 1, o + 2, o + 3, o + 4, o + 5, o + 6, o + 7);
-    if (dynReloc) {
-        scatterAddDyn(OB_NOUT, dest + e * OB_NOUT, altDest + e * OB_NOUT, selRow + e * OB_NOUT,
+    if (dynamicRelocation) {
+        scatterAddRelocated(OB_NOUT, dest + e * OB_NOUT, alternateDestination + e * OB_NOUT, selectorRow + e * OB_NOUT,
                       mode + (size_t) s * n, o, vals + (size_t) s * nnz, F + (size_t) s * n,
-                      relocForScenario(rt, s), e * OB_NOUT);
+                      relocationTablesForScenario(rt, s), e * OB_NOUT);
     } else {
         scatterAdd(OB_NOUT, dest + e * OB_NOUT, o, vals + (size_t) s * nnz, F + (size_t) s * n);
     }
@@ -174,8 +174,8 @@ __global__ void fillClosedBranchBatchF(int elementCount, int nScenarios, int n, 
                                        const double* x, double* F,
                                        const char* disabled, const char* active,
                                        int nR1Ov, const int* r1OvSlotElem, const double* r1OvVal,
-                                       const int* altDest, const int* selRow, const int* mode, int dynReloc,
-                                       const int* phaseControlDestination, const int* phaseControlSelector, RelocTables rt) {
+                                       const int* alternateDestination, const int* selectorRow, const int* mode, int dynamicRelocation,
+                                       const int* phaseControlDestination, const int* phaseControlSelector, ReactiveRelocationTables rt) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= elementCount * nScenarios) return;
     int e = tid % elementCount;
@@ -195,8 +195,8 @@ __global__ void fillClosedBranchBatchF(int elementCount, int nScenarios, int n, 
     double o[4];                                             // p1 q1 p2 q2: the fused fill's own expressions
     evalClosedBranchF(p[0], p[1], p[2], p[3], p[4], v1, r1, v2, p[5], a1, ph1, ph2, 0, o + 0, o + 1, o + 2, o + 3);
     const int pos[4] = {0, 7, 14, 21};
-    if (dynReloc) {
-        scatterAddFDyn(4, dest + e * CB_NOUT, altDest + e * CB_NOUT, selRow + e * CB_NOUT,
+    if (dynamicRelocation) {
+        scatterAddFRelocated(4, dest + e * CB_NOUT, alternateDestination + e * CB_NOUT, selectorRow + e * CB_NOUT,
                        pos, mode + (size_t) s * n, o, F + (size_t) s * n, rt, e * CB_NOUT);
     } else {
         scatterAddF(4, dest + e * CB_NOUT, pos, o, F + (size_t) s * n);
@@ -215,8 +215,8 @@ __global__ void fillOpenBranchBatchF(int elementCount, int nScenarios, int n, in
                                      const double* in, const int* ix, const int* dest,
                                      const double* x, double* F,
                                      const char* disabled, const char* active,
-                                     const int* altDest, const int* selRow, const int* mode, int dynReloc,
-                                     RelocTables rt) {
+                                     const int* alternateDestination, const int* selectorRow, const int* mode, int dynamicRelocation,
+                                     ReactiveRelocationTables rt) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= elementCount * nScenarios) return;
     int e = tid % elementCount;
@@ -230,8 +230,8 @@ __global__ void fillOpenBranchBatchF(int elementCount, int nScenarios, int n, in
     double o[4];
     evalOpenBranchF(p[0], p[1], p[2], p[3], p[4], p[5], v1, p[6], v2, 0, o + 0, o + 1, o + 2, o + 3);
     const int pos[4] = {0, 2, 4, 6};
-    if (dynReloc) {
-        scatterAddFDyn(4, dest + e * OB_NOUT, altDest + e * OB_NOUT, selRow + e * OB_NOUT,
+    if (dynamicRelocation) {
+        scatterAddFRelocated(4, dest + e * OB_NOUT, alternateDestination + e * OB_NOUT, selectorRow + e * OB_NOUT,
                        pos, mode + (size_t) s * n, o, F + (size_t) s * n, rt, e * OB_NOUT);
     } else {
         scatterAddF(4, dest + e * OB_NOUT, pos, o, F + (size_t) s * n);

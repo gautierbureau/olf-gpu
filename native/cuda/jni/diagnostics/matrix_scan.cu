@@ -23,7 +23,7 @@ void dumpSlotSystem(BatchSolverContext* ctx, int n, int nnz, int slot, const cha
     std::vector<int> hrp(n + 1);
     std::vector<int> hci(nnz);
     std::vector<int> hmode(n);
-    std::vector<double> hb(n);                               // the RHS as SOLVED (row-repaired, see hazRepairRhs)
+    std::vector<double> hb(n);                               // the RHS as SOLVED (row-repaired, see repairZeroDiagonalRightHandSideBatch)
     CUDA_CHECK(cudaMemcpy(hb.data(), ctx->dB.template as<double>() + (size_t) slot * n, (size_t) n * sizeof(double), cudaMemcpyDeviceToHost));
     CUDA_CHECK(cudaMemcpy(hv.data(), ctx->dVals.template as<double>() + (size_t) slot * nnz, (size_t) nnz * sizeof(double), cudaMemcpyDeviceToHost));
     CUDA_CHECK(cudaMemcpy(hd.data(), ctx->dDx.template as<double>() + (size_t) slot * n, (size_t) n * sizeof(double), cudaMemcpyDeviceToHost));

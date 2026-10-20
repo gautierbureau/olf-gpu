@@ -11,8 +11,8 @@
 namespace olfgpu {
 
 __global__ void residualNormsBatch(int n, const double* F, const char* active, double* out,
-                                   const double* thrIdent, const double* thrPower, const int* mode,
-                                   const double* thrAlt, const int* thrSel);
+                                   const double* fixedVariableRowMaxMismatch, const double* equationRowMaxMismatch, const int* mode,
+                                   const double* alternateRowMaxMismatch, const int* alternateRowMaxMismatchSelector);
 
 void readNormsBatch(BatchSolverContext* ctx, DriverPass& drv, std::vector<double>& hn);
 

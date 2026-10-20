@@ -10,17 +10,17 @@
 
 namespace olfgpu {
 
-__global__ void hazRepairVals(int nHaz, int nS, int nnz, int hazTot, const int* hazRow, const int* hazOff,
-                              const int* hazDonorPtr, const int* hazDonor, const int* hazDonorHaz,
-                              const char* hazSign, const int* rowPtr, const int* colIdx, const int* diagPos,
+__global__ void repairZeroDiagonalRowsBatch(int nZeroDiagonalRows, int nS, int nnz, int nZeroDiagonalRowValues, const int* zeroDiagonalRow, const int* zeroDiagonalRowValueStart,
+                              const int* zeroDiagonalDonorStart, const int* zeroDiagonalDonor, const int* zeroDiagonalDonorOwnIndex,
+                              const char* zeroDiagonalRepairSign, const int* rowPtr, const int* colIdx, const int* diagPos,
                               const double* snap, double* vals, int* choice);
 
-__global__ void hazRepairRhs(int nHaz, int nS, int n, const int* hazRow, const int* hazDonor, const int* hazDonorHaz,
-                             const char* hazSign, const int* choice, const double* bsnap, double* B);
+__global__ void repairZeroDiagonalRightHandSideBatch(int nZeroDiagonalRows, int nS, int n, const int* zeroDiagonalRow, const int* zeroDiagonalDonor, const int* zeroDiagonalDonorOwnIndex,
+                             const char* zeroDiagonalRepairSign, const int* choice, const double* bsnap, double* B);
 
-void hazRepairValues(BatchSolverContext* ctx, int nS, double* vals);
+void repairZeroDiagonalRows(BatchSolverContext* ctx, int nS, double* vals);
 
-void hazRepairRightHandSide(BatchSolverContext* ctx, int nS, double* B, int sOff);
+void repairZeroDiagonalRightHandSide(BatchSolverContext* ctx, int nS, double* B, int sOff);
 
 }  // namespace olfgpu
 

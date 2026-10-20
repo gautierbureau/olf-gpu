@@ -13,8 +13,8 @@ OLF_JNI(ac_equations_vector_gpu, StructureNative, createStructure)(
         jdoubleArray jZeroImpedanceBranchParameters, jintArray jZeroImpedanceBranchIndices,
         jintArray jDistrRhoRow, jintArray jDistrRhoColumn, jdoubleArray jDistrRhoCoefficient,
         jintArray jDistrShuntBRow, jintArray jDistrShuntBColumn, jdoubleArray jDistrShuntBCoefficient, jintArray jClosedBranchPhaseControlSide,
-        jdoubleArray jLoadModelParameters, jintArray jLoadModelIndices, jintArray jqrPtr, jintArray jqrRows,
-        jintArray jOpenBranchAlternateReactiveDestination, jintArray jZeroImpedanceBranchAlternateReactiveDestination, jintArray jqrDepBase, jintArray jqrBaseTargetRow, jintArray jdepGroupOfRow) {
+        jdoubleArray jLoadModelParameters, jintArray jLoadModelIndices, jintArray jReactiveRelocationGroupStart, jintArray jReactiveRelocationCandidateRows,
+        jintArray jOpenBranchAlternateReactiveDestination, jintArray jZeroImpedanceBranchAlternateReactiveDestination, jintArray jReactiveRelocationDependentBaseGroup, jintArray jReactiveRelocationBaseTargetRow, jintArray jReactiveRelocationDependentGroupOfRow) {
     jdouble* closedBranchParameters = env->GetDoubleArrayElements(jClosedBranchParameters, nullptr);
     jint* closedBranchIndices = env->GetIntArrayElements(jClosedBranchIndices, nullptr);
     jdouble* openBranchParameters = env->GetDoubleArrayElements(jOpenBranchParameters, nullptr);
@@ -37,21 +37,21 @@ OLF_JNI(ac_equations_vector_gpu, StructureNative, createStructure)(
     jint* distrShuntBColumn = env->GetIntArrayElements(jDistrShuntBColumn, nullptr);
     jdouble* distrShuntBCoefficient = env->GetDoubleArrayElements(jDistrShuntBCoefficient, nullptr);
     jint* closedBranchPhaseControlSide = env->GetIntArrayElements(jClosedBranchPhaseControlSide, nullptr);
-    jint* qrPtr = env->GetIntArrayElements(jqrPtr, nullptr);
-    jint* qrRows = env->GetIntArrayElements(jqrRows, nullptr);
-    int nQr = env->GetArrayLength(jqrPtr) - 1;               // groups; qrPtr = [0] when none
-    int nQrRows = env->GetArrayLength(jqrRows);
+    jint* reactiveRelocationGroupStart = env->GetIntArrayElements(jReactiveRelocationGroupStart, nullptr);
+    jint* reactiveRelocationCandidateRows = env->GetIntArrayElements(jReactiveRelocationCandidateRows, nullptr);
+    int nReactiveRelocationGroups = env->GetArrayLength(jReactiveRelocationGroupStart) - 1;               // groups; reactiveRelocationGroupStart = [0] when none
+    int nReactiveRelocationCandidateRows = env->GetArrayLength(jReactiveRelocationCandidateRows);
     jdouble* loadModelParameters = env->GetDoubleArrayElements(jLoadModelParameters, nullptr);
     jint* loadModelIndices = env->GetIntArrayElements(jLoadModelIndices, nullptr);
     jint* openBranchAlternateReactiveDestination = env->GetIntArrayElements(jOpenBranchAlternateReactiveDestination, nullptr);
     jint* zeroImpedanceBranchAlternateReactiveDestination = env->GetIntArrayElements(jZeroImpedanceBranchAlternateReactiveDestination, nullptr);
-    jint* qrDepBase = env->GetIntArrayElements(jqrDepBase, nullptr);
-    jint* qrBaseTargetRow = env->GetIntArrayElements(jqrBaseTargetRow, nullptr);
-    jint* depGroupOfRow = env->GetIntArrayElements(jdepGroupOfRow, nullptr);
+    jint* reactiveRelocationDependentBaseGroup = env->GetIntArrayElements(jReactiveRelocationDependentBaseGroup, nullptr);
+    jint* reactiveRelocationBaseTargetRow = env->GetIntArrayElements(jReactiveRelocationBaseTargetRow, nullptr);
+    jint* reactiveRelocationDependentGroupOfRow = env->GetIntArrayElements(jReactiveRelocationDependentGroupOfRow, nullptr);
 
-    int nClosedBranch = env->GetArrayLength(jClosedBranchIndices) / 12;             // closedBranchIndices stride 12 (…a1col r1col qAlt1 qAlt2)
+    int nClosedBranch = env->GetArrayLength(jClosedBranchIndices) / 12;             // closedBranchIndices stride 12 (…a1col r1col alternateQRow1 alternateQRow2)
     int nOpenBranch = env->GetArrayLength(jOpenBranchIndices) / 6;
-    int nShunt = env->GetArrayLength(jShuntIndices) / 5;             // shuntIndices stride 5 (P Q v bcol qAlt)
+    int nShunt = env->GetArrayLength(jShuntIndices) / 5;             // shuntIndices stride 5 (P Q v bcol alternateQRows)
     int nHvdcAcEmulation = env->GetArrayLength(jHvdcAcEmulationIndices) / 4;
     int nDistrQ = env->GetArrayLength(jDistrQElement);
     int nZeroImpedanceBranch = env->GetArrayLength(jZeroImpedanceBranchIndices) / 11;
@@ -80,16 +80,16 @@ OLF_JNI(ac_equations_vector_gpu, StructureNative, createStructure)(
         };
         // rows/cols may be -1 = absent; anything else must be a valid row/col index < n
         checkRange("closedBranchIndices", closedBranchIndices, nClosedBranch, 12, {0, 1, 2, 3, 4, 5, 6, 7, 8, 9}, -1, n);
-        // qAlt slots ([10]/[11] cb, [4] sh) also carry the GROUP encoding -2-groupId (plan-A6)
-        checkRange("closedBranchIndices.qAlt", closedBranchIndices, nClosedBranch, 12, {10, 11}, -1 - nQr, n);
+        // alternateQRows slots ([10]/[11] cb, [4] sh) also carry the GROUP encoding -2-groupId (plan-A6)
+        checkRange("closedBranchIndices.alternateQRows", closedBranchIndices, nClosedBranch, 12, {10, 11}, -1 - nReactiveRelocationGroups, n);
         checkRange("openBranchIndices", openBranchIndices, nOpenBranch, 6, {0, 1, 2, 3, 4, 5}, -1, n);
-        checkRange("openBranchAlternateReactiveDestination", openBranchAlternateReactiveDestination, nOpenBranch, 2, {0, 1}, -1 - nQr, n);
+        checkRange("openBranchAlternateReactiveDestination", openBranchAlternateReactiveDestination, nOpenBranch, 2, {0, 1}, -1 - nReactiveRelocationGroups, n);
         checkRange("shuntIndices", shuntIndices, nShunt, 5, {0, 1, 2, 3}, -1, n);
-        checkRange("shuntIndices.qAlt", shuntIndices, nShunt, 5, {4}, -1 - nQr, n);
-        checkRange("qrRows", qrRows, nQrRows, 1, {0}, 0, n);
-        for (int g = 0; g < nQr; g++) {
-            if (qrPtr[g] < 0 || qrPtr[g + 1] <= qrPtr[g] + 1 || qrPtr[g + 1] > nQrRows) {
-                throw std::runtime_error("bad qrPtr group " + std::to_string(g));
+        checkRange("shuntIndices.alternateQRows", shuntIndices, nShunt, 5, {4}, -1 - nReactiveRelocationGroups, n);
+        checkRange("reactiveRelocationCandidateRows", reactiveRelocationCandidateRows, nReactiveRelocationCandidateRows, 1, {0}, 0, n);
+        for (int g = 0; g < nReactiveRelocationGroups; g++) {
+            if (reactiveRelocationGroupStart[g] < 0 || reactiveRelocationGroupStart[g + 1] <= reactiveRelocationGroupStart[g] + 1 || reactiveRelocationGroupStart[g + 1] > nReactiveRelocationCandidateRows) {
+                throw std::runtime_error("bad reactiveRelocationGroupStart group " + std::to_string(g));
             }
         }
         checkRange("hvdcAcEmulationIndices", hvdcAcEmulationIndices, nHvdcAcEmulation, 4, {0, 1, 2, 3}, -1, n);
@@ -100,7 +100,7 @@ OLF_JNI(ac_equations_vector_gpu, StructureNative, createStructure)(
         // structure on any network with fewer than 14 rows once the relocation went on by default
         // ("bad zeroImpedanceBranchIndices at elem 0 slot 10: 13 (allowed [-1, 10))", four fixtures).
         checkRange("zeroImpedanceBranchIndices.flags", zeroImpedanceBranchIndices, nZeroImpedanceBranch, 11, {10}, 0, 16);
-        checkRange("zeroImpedanceBranchAlternateReactiveDestination", zeroImpedanceBranchAlternateReactiveDestination, nZeroImpedanceBranch, 2, {0, 1}, -1 - nQr, n);
+        checkRange("zeroImpedanceBranchAlternateReactiveDestination", zeroImpedanceBranchAlternateReactiveDestination, nZeroImpedanceBranch, 2, {0, 1}, -1 - nReactiveRelocationGroups, n);
         checkRange("distrRhoRow", distrRhoRow, nDistrRho, 1, {0}, 0, n);
         checkRange("distrRhoColumn", distrRhoColumn, nDistrRho, 1, {0}, 0, n);
         checkRange("distrShuntBRow", distrShuntBRow, nDistrShuntB, 1, {0}, 0, n);
@@ -118,8 +118,8 @@ OLF_JNI(ac_equations_vector_gpu, StructureNative, createStructure)(
                                                    nZeroImpedanceBranch, zeroImpedanceBranchParameters, zeroImpedanceBranchIndices,
                                                    nDistrRho, distrRhoRow, distrRhoColumn, distrRhoCoefficient,
                                                    nDistrShuntB, distrShuntBRow, distrShuntBColumn, distrShuntBCoefficient, closedBranchPhaseControlSide,
-                                                   nLoadModelTerms, loadModelParameters, loadModelIndices, nQr, qrPtr, qrRows,
-                                                   openBranchAlternateReactiveDestination, zeroImpedanceBranchAlternateReactiveDestination, qrDepBase, qrBaseTargetRow, depGroupOfRow));
+                                                   nLoadModelTerms, loadModelParameters, loadModelIndices, nReactiveRelocationGroups, reactiveRelocationGroupStart, reactiveRelocationCandidateRows,
+                                                   openBranchAlternateReactiveDestination, zeroImpedanceBranchAlternateReactiveDestination, reactiveRelocationDependentBaseGroup, reactiveRelocationBaseTargetRow, reactiveRelocationDependentGroupOfRow));
     } catch (const std::exception& e) {
         error = e.what();
     } catch (...) {
@@ -129,8 +129,8 @@ OLF_JNI(ac_equations_vector_gpu, StructureNative, createStructure)(
     env->ReleaseDoubleArrayElements(jClosedBranchParameters, closedBranchParameters, JNI_ABORT);
     env->ReleaseIntArrayElements(jClosedBranchIndices, closedBranchIndices, JNI_ABORT);
     env->ReleaseIntArrayElements(jClosedBranchPhaseControlSide, closedBranchPhaseControlSide, JNI_ABORT);
-    env->ReleaseIntArrayElements(jqrPtr, qrPtr, JNI_ABORT);
-    env->ReleaseIntArrayElements(jqrRows, qrRows, JNI_ABORT);
+    env->ReleaseIntArrayElements(jReactiveRelocationGroupStart, reactiveRelocationGroupStart, JNI_ABORT);
+    env->ReleaseIntArrayElements(jReactiveRelocationCandidateRows, reactiveRelocationCandidateRows, JNI_ABORT);
     env->ReleaseDoubleArrayElements(jOpenBranchParameters, openBranchParameters, JNI_ABORT);
     env->ReleaseIntArrayElements(jOpenBranchIndices, openBranchIndices, JNI_ABORT);
     env->ReleaseDoubleArrayElements(jShuntParameters, shuntParameters, JNI_ABORT);
@@ -154,9 +154,9 @@ OLF_JNI(ac_equations_vector_gpu, StructureNative, createStructure)(
     env->ReleaseIntArrayElements(jLoadModelIndices, loadModelIndices, JNI_ABORT);
     env->ReleaseIntArrayElements(jOpenBranchAlternateReactiveDestination, openBranchAlternateReactiveDestination, JNI_ABORT);
     env->ReleaseIntArrayElements(jZeroImpedanceBranchAlternateReactiveDestination, zeroImpedanceBranchAlternateReactiveDestination, JNI_ABORT);
-    env->ReleaseIntArrayElements(jqrDepBase, qrDepBase, JNI_ABORT);
-    env->ReleaseIntArrayElements(jqrBaseTargetRow, qrBaseTargetRow, JNI_ABORT);
-    env->ReleaseIntArrayElements(jdepGroupOfRow, depGroupOfRow, JNI_ABORT);
+    env->ReleaseIntArrayElements(jReactiveRelocationDependentBaseGroup, reactiveRelocationDependentBaseGroup, JNI_ABORT);
+    env->ReleaseIntArrayElements(jReactiveRelocationBaseTargetRow, reactiveRelocationBaseTargetRow, JNI_ABORT);
+    env->ReleaseIntArrayElements(jReactiveRelocationDependentGroupOfRow, reactiveRelocationDependentGroupOfRow, JNI_ABORT);
 
     if (!error.empty()) {
         env->ThrowNew(env->FindClass("java/lang/RuntimeException"),
@@ -231,7 +231,7 @@ OLF_JNI(ac_equations_vector_gpu, StructureNative, recommendBatchSize)(
         size_t totalBytes = 0;
         CUDA_CHECK(cudaMemGetInfo(&freeBytes, &totalBytes));  // after the probe freed its buffers
         // 7n doubles per scenario, not 5: x/target/F/B/dx PLUS dQbuf (the per-scenario reactive
-        // accumulator) and dXprevLs (the line-search previous state, allocated under the RTE
+        // accumulator) and dLineSearchPreviousX (the line-search previous state, allocated under the RTE
         // parameters' MAX_VOLTAGE_CHANGE scaling).
         double perScenarioBytes = luBytes
                 + (static_cast<double>(st.nnz) + 7.0 * st.n) * sizeof(double)

@@ -24,7 +24,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                               int nReactiveCapabilityCurveOverrides, const int* reactiveCapabilityCurveOverrideScenarioCurve, const double* reactiveCapabilityCurveOverrideStepScale,
                               int maxIter, double tol,
                               double reactiveLimitTol, double slackDistTol, double convEpsPerEq,
-                              int lsMode, double maxDv, double maxDphi, const int* varType,
+                              int stateVectorScalingMode, double maxDv, double maxDphi, const int* varType,
                               const double* x0Full, int nShuntAdmittanceOverrides, const int* shuntAdmittanceOverrideScenarioElement, const double* shuntAdmittanceOverrideDelta,
                               const int* reactiveLimitsSeedState, int* reactiveLimitsFinalState,
                               int nR1Ov, const int* r1OvSlotElem, const double* r1OvVal,

@@ -77,9 +77,9 @@ public final class GpuBatchInjectionOutages {
      *  reactive load (target 0 either way), 8.5e-2 kV on rte6515 BUS-1359_BBS_2 whose pilot has one.
      *  Empty when no islanded controller is a packed member. */
     static List<GenOutage> islandedDistrQEntries(GpuAcData gpuData, List<LfBus> islandedControllers,
-                                                java.util.Map<Integer, int[]> relocDummyQRows,
+                                                java.util.Map<Integer, int[]> relocatedDummyQRows,
                                                 java.util.Set<Integer> outagedZeroImpedanceBranchNums) {
-        return islandedDistrQEntries(gpuData, islandedControllers, relocDummyQRows, outagedZeroImpedanceBranchNums, null);
+        return islandedDistrQEntries(gpuData, islandedControllers, relocatedDummyQRows, outagedZeroImpedanceBranchNums, null);
     }
 
     /** {dq member -> subgroup label} from the plan's flat {member, label} pairs; null when there are none. */
@@ -97,7 +97,7 @@ public final class GpuBatchInjectionOutages {
     /** @param labelOf tasks #71: a split group's subgroup labels — a member's renormalized target sums the keys
      *  of ITS subgroup only, exactly as the kernel's updateDistrQTargetsBatch will maintain it. */
     static List<GenOutage> islandedDistrQEntries(GpuAcData gpuData, List<LfBus> islandedControllers,
-                                                java.util.Map<Integer, int[]> relocDummyQRows,
+                                                java.util.Map<Integer, int[]> relocatedDummyQRows,
                                                 java.util.Set<Integer> outagedZeroImpedanceBranchNums,
                                                 java.util.Map<Integer, Integer> labelOf) {
         List<GenOutage> out = new ArrayList<>();
@@ -158,7 +158,7 @@ public final class GpuBatchInjectionOutages {
                     // solved the renormalized WEIGHTS against a target built from the base keys: measured
                     // -13.3334 MVAr where OLF has -20.0001, one third of the pilot's 40 MVAr load instead
                     // of one half, and 0.32 kV on every bus behind it.
-                    r.add(RelocatedRows.unrelocQRow(mRow[m], relocDummyQRows, outagedZeroImpedanceBranchNums));
+                    r.add(RelocatedRows.scenarioReactiveRowOfStructuralRow(mRow[m], relocatedDummyQRows, outagedZeroImpedanceBranchNums));
                     // targetQ over THIS member's peers — its own control's elements, as AcTargetVector sums them
                     double sumTargetQ = 0;
                     for (int t = gpuData.distrQMembers().targetPeerStart()[m]; t < gpuData.distrQMembers().targetPeerStart()[m + 1]; t++) {
@@ -415,7 +415,7 @@ public final class GpuBatchInjectionOutages {
         // devicePinnedBusLosingReactiveLoadMatchesCpu's B4 by 1.0e-08 kV.
         boolean qOverride = toPq || !busPv && !remotelyControlled;
         // ...but a remotely controlled bus still HAS a reactive balance - OLF keeps its BUS_TARGET_Q, generation
-        // minus load like any PQ bus - and the extraction moved it onto the relocation group's CARRIER (qRowAlt =
+        // minus load like any PQ bus - and the extraction moved it onto the relocation group's CARRIER (alternateQRow =
         // -2-g: the free member's row), whose target the device captures from the BASE targets at solve start
         // (capturePilotQBatch) and hands to whichever member carries the balance later. Losing reactive load (or a
         // fixed-Q generator) at the pilot moves that target, and neither channel could say so: measured on the
@@ -659,7 +659,7 @@ public final class GpuBatchInjectionOutages {
         // the relocation it already has, provided this row goes to mode 4 rather than mode 1:
         // mode 4 means "this row hosts its own Q balance", and it is also what makes the group's
         // mode scan skip the row, so the pilot's balance falls back to the pilot's own row and
-        // updatePilotVeqBatch drops the voltage identity. Needs a pilot that is NOT one of its own
+        // updatePilotTargetVEquationBatch drops the voltage identity. Needs a pilot that is NOT one of its own
         // controllers — that shape has no relocation table for the fallback to land in.
         boolean controlDies = !keepsController && mainVcOf(bus)
                 .map(vc -> vc.getMergedControllerElements().stream()

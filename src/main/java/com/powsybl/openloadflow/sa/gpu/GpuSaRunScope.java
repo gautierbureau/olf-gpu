@@ -134,7 +134,7 @@ final class GpuSaRunScope {
         // pin/unpin dynamics: NON-free members via mode-4 transitions + own-q accumulation
         // (plan-B3), the FREE member via the pilot-Q relocation candidate groups (plan-B4), and
         // the ALL-PINNED corner (control lost) via the pilot-vEq flip — on-device by
-        // updatePilotVeqBatch (mode-scan fallback = candidate 0, the pilot's own row). Still whole-run CPU:
+        // updatePilotTargetVEquationBatch (mode-scan fallback = candidate 0, the pilot's own row). Still whole-run CPU:
         //  - a pinnable free member whose group has NO relocation table (fewer than 2 merged
         //    members). Half-open / zero-impedance q terms at members and pilots ride the ob/zero-impedance
         //    alternate-dest channels since 2026-09-07 — the unclean-member/pilot conditions are
@@ -296,15 +296,15 @@ final class GpuSaRunScope {
         // steps, PV/PQ switch decisions read different intermediate states, and converged states drift
         // (measured 2026-07-17 under the RTE parameters: 6,137 one-sided violation diffs).
         // LINE_SEARCH backtracks per lane on the device (the chunk solver installs OLF's max iteration and step fold).
-        int cfgLsMode = GpuStateVectorScalingMode.of(olfParams.getStateVectorScalingMode());
+        int configuredStateVectorScalingMode = GpuStateVectorScalingMode.of(olfParams.getStateVectorScalingMode());
         double cfgMaxDv = 0.0;
         double cfgMaxDphi = 0.0;
-        if (cfgLsMode == GpuStateVectorScalingMode.MAX_VOLTAGE_CHANGE) {
+        if (configuredStateVectorScalingMode == GpuStateVectorScalingMode.MAX_VOLTAGE_CHANGE) {
             cfgMaxDv = olfParams.getMaxVoltageChangeStateVectorScalingMaxDv();
             cfgMaxDphi = olfParams.getMaxVoltageChangeStateVectorScalingMaxDphi();
         }
         // Assemble the run's per-call batched config (replaces the solver's former JVM-global statics).
-        BatchConfig batchConfig = new BatchConfig(cfgLsMode, cfgMaxDv, cfgMaxDphi,
+        BatchConfig batchConfig = new BatchConfig(configuredStateVectorScalingMode, cfgMaxDv, cfgMaxDphi,
                 cfgTransformerControl, cfgMaxOuterIterations, cfgMaxPqPvSwitch, cfgRejectSlackDistributionFailure,
                 new com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDsParams(
                         lfGuardParams.getBalanceType(), olfGuardParams.isUseActiveLimits()),

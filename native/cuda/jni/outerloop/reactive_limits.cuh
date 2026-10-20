@@ -26,7 +26,7 @@ __global__ void reactiveLimitsBatch(const double* secondaryVoltageControlReactiv
                                     const double* reactiveLimitInitialTargetQ, double vLoRobust, double vHiRobust,
                                     int robust,
                                     int reactiveLimitsDecisionLogScenario, double* reactiveLimitsDecisionLog, int* reactiveLimitsDecisionLogCount, int passId,
-                                    const int* psEntry, int nQr,
+                                    const int* pilotSelfReactiveLimitEntry, int nReactiveRelocationGroups,
                                     const char* reactiveLimitLocalOverride, const double* reactiveLimitLocalTargetV,
                                     const char* reactiveLimitPqPvSwitchForbidden, char* unpinBad, const char* reactiveLimitFlags,
                                     const int* reactiveLimitComparedVoltageRowOverride);
@@ -44,7 +44,7 @@ __global__ void reactiveLimitsForcedPvBatch(int nReactiveLimitEntries, int nScen
 
 __global__ void pilotSelfMixedPvPqGate(int nReactiveLimitEntries, int nScenarios, const char* reactiveLimitVoltageControlRole, const int* reactiveLimitComparedVoltageRow,
                                      const char* limitType, const char* reactiveLimitIslanded, char* bad,
-                                     const int* psEntry, int nQr,
+                                     const int* pilotSelfReactiveLimitEntry, int nReactiveRelocationGroups,
                                 int nDistrQMembers, const int* distrQMemberReactiveLimitEntry, const char* distrQSubgroup);
 
 __global__ void reactiveLimitsPqPvSwitchBatch(int nPairs, int nS, int n, int nReactiveLimitEntries, const int* pairs, const double* newTarget,

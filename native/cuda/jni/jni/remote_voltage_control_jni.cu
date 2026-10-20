@@ -26,7 +26,7 @@ OLF_JNI(ac_equations_vector_gpu, RemoteVoltageControlNative, setBatchDistrQInact
 
 extern "C" JNIEXPORT void JNICALL
 OLF_JNI(ac_equations_vector_gpu, RemoteVoltageControlNative, setBatchDistrQSubgroups)(
-        JNIEnv* env, jclass, jlong handle, jbyteArray jDense, jintArray jQrMemberStart) {
+        JNIEnv* env, jclass, jlong handle, jbyteArray jDense, jintArray jReactiveRelocationDistrQMemberStart) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx == nullptr) {
         return;
@@ -38,9 +38,9 @@ OLF_JNI(ac_equations_vector_gpu, RemoteVoltageControlNative, setBatchDistrQSubgr
     jbyte* d = env->GetByteArrayElements(jDense, nullptr);
     ctx->dDistrQSubgroup.upload(d, static_cast<size_t>(env->GetArrayLength(jDense)));
     env->ReleaseByteArrayElements(jDense, d, JNI_ABORT);
-    jint* q = env->GetIntArrayElements(jQrMemberStart, nullptr);
-    ctx->dQrMemberStart.upload(q, static_cast<size_t>(env->GetArrayLength(jQrMemberStart)) * sizeof(int));
-    env->ReleaseIntArrayElements(jQrMemberStart, q, JNI_ABORT);
+    jint* q = env->GetIntArrayElements(jReactiveRelocationDistrQMemberStart, nullptr);
+    ctx->dReactiveRelocationDistrQMemberStart.upload(q, static_cast<size_t>(env->GetArrayLength(jReactiveRelocationDistrQMemberStart)) * sizeof(int));
+    env->ReleaseIntArrayElements(jReactiveRelocationDistrQMemberStart, q, JNI_ABORT);
     ctx->hasDistrQSubgroups = true;
 }
 
@@ -111,7 +111,7 @@ OLF_JNI(ac_equations_vector_gpu, RemoteVoltageControlNative, setBatchDistrQMembe
 }
 
 // Per-scenario moves of a pilot's captured reactive target (applyPilotQDeltasBatch): {key, delta} with key
-// slot * nQr + group, one entry per key. Nulls clear.
+// slot * nReactiveRelocationGroups + group, one entry per key. Nulls clear.
 extern "C" JNIEXPORT void JNICALL
 OLF_JNI(ac_equations_vector_gpu, RemoteVoltageControlNative, setBatchPilotQDeltas)(
         JNIEnv* env, jclass, jlong handle, jintArray jKeys, jdoubleArray jVals) {
@@ -120,15 +120,15 @@ OLF_JNI(ac_equations_vector_gpu, RemoteVoltageControlNative, setBatchPilotQDelta
         return;
     }
     if (jKeys == nullptr || env->GetArrayLength(jKeys) == 0) {
-        ctx->nQrPqDelta = 0;
+        ctx->nReactiveRelocationPilotTargetQDeltas = 0;
         return;
     }
     int ne = env->GetArrayLength(jKeys);
     jint* keys = env->GetIntArrayElements(jKeys, nullptr);
     jdouble* vals = env->GetDoubleArrayElements(jVals, nullptr);
-    ctx->dQrPqDeltaKey.upload(keys, static_cast<size_t>(ne) * sizeof(int));
-    ctx->dQrPqDeltaVal.upload(vals, static_cast<size_t>(ne) * sizeof(double));
-    ctx->nQrPqDelta = ne;
+    ctx->dReactiveRelocationPilotTargetQDeltaKey.upload(keys, static_cast<size_t>(ne) * sizeof(int));
+    ctx->dReactiveRelocationPilotTargetQDeltaValue.upload(vals, static_cast<size_t>(ne) * sizeof(double));
+    ctx->nReactiveRelocationPilotTargetQDeltas = ne;
     env->ReleaseIntArrayElements(jKeys, keys, JNI_ABORT);
     env->ReleaseDoubleArrayElements(jVals, vals, JNI_ABORT);
 }

@@ -81,7 +81,7 @@ __global__ void residualBatch(int n, int nS, int nnz, const int* rowPtr, const i
 }
 
 // per scenario: ||r||inf / ||b||inf (0 for an inactive lane or a zero right-hand side)
-__global__ void irScoreBatch(int n, int nS, const double* r, const double* b, const char* active, double* score) {
+__global__ void iterativeRefinementScoreBatch(int n, int nS, const double* r, const double* b, const char* active, double* score) {
     int s = blockIdx.x * blockDim.x + threadIdx.x;
     if (s >= nS) return;
     if (active != nullptr && !active[s]) {

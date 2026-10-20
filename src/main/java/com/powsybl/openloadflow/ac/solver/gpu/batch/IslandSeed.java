@@ -120,17 +120,17 @@ final class IslandSeed {
             // solve on, but that row's TARGET is its own DISTR_Q one (0) - the kernel
             // that stamps the pilot's target on the carrier runs only inside the
             // outer-loop passes, and the host re-applies its overrides at every pass.
-            // Stamp it here, by the kernel's own rule (relocChoose: first candidate
+            // Stamp it here, by the kernel's own rule (chooseCarrierRow: first candidate
             // whose mode is neither identity nor pinned). Measured on the remote-control
             // fixture, b1 islanded: OLF's BUS_TARGET_Q at the pilot off by exactly its
             // load, b2 0.45 kV; rte6515: five busbar sections up to 1.3 kV.
-            int[] qrPtr = gpuData.reactiveRelocation().groupStart();
-            int[] qrRows = gpuData.reactiveRelocation().candidateRows();
-            for (int g = 0; qrPtr != null && g + 1 < qrPtr.length; g++) {
+            int[] reactiveRelocationGroupStart = gpuData.reactiveRelocation().groupStart();
+            int[] reactiveRelocationCandidateRows = gpuData.reactiveRelocation().candidateRows();
+            for (int g = 0; reactiveRelocationGroupStart != null && g + 1 < reactiveRelocationGroupStart.length; g++) {
                 int baseCarrier = -1;
                 int newCarrier = -1;
-                for (int c = qrPtr[g] + 1; c < qrPtr[g + 1]; c++) {
-                    int r = qrRows[c];
+                for (int c = reactiveRelocationGroupStart[g] + 1; c < reactiveRelocationGroupStart[g + 1]; c++) {
+                    int r = reactiveRelocationCandidateRows[c];
                     if (baseCarrier < 0 && baseRowMode[r] != GpuRowMode.FIXED_VARIABLE && baseRowMode[r] != GpuRowMode.BUS_TARGET_Q) {
                         baseCarrier = r;
                     }
@@ -145,9 +145,9 @@ final class IslandSeed {
                 // seeding had just put there (middle-section fixture: −0.1333 over −0.2, bus-mid
                 // 0.32 kV off). Only a PINNED pilot's balance travels with the carrier.
                 boolean unpinnedPilotSelf = false;
-                int fallbackRow = qrRows[qrPtr[g]];
-                for (int c = qrPtr[g] + 1; c < qrPtr[g + 1]; c++) {
-                    if (qrRows[c] == fallbackRow) {
+                int fallbackRow = reactiveRelocationCandidateRows[reactiveRelocationGroupStart[g]];
+                for (int c = reactiveRelocationGroupStart[g] + 1; c < reactiveRelocationGroupStart[g + 1]; c++) {
+                    if (reactiveRelocationCandidateRows[c] == fallbackRow) {
                         unpinnedPilotSelf = true;
                         break;
                     }

@@ -86,7 +86,7 @@ final class ChunkLists {
     // index is a chunk SLOT.
     final List<Integer> distrQMemberTargetQOverrideKey = new ArrayList<>();     // slot*nDistrQMembers + member
     final List<Double> distrQMemberTargetQOverrideValue = new ArrayList<>();
-    final java.util.Map<Integer, Double> pilotQDeltas = new java.util.LinkedHashMap<>();   // slot*nQr + group
+    final java.util.Map<Integer, Double> pilotQDeltas = new java.util.LinkedHashMap<>();   // slot*nReactiveRelocationGroups + group
     double[] outageSlackShift = null;    // per slot: the move of the slack's scheduled P by a load lost there
     int[] slackBusRows = null;            // per slot: the row the distributed slack reads the slack on (-1 = base)
     final List<Integer> pfSlot = new ArrayList<>();
@@ -168,7 +168,7 @@ final class ChunkLists {
         ReactiveLimitsNative.setBatchReactiveLimitGeneratorsLost(handle,
                 ChunkArrays.intsOrNull(reactiveLimitGeneratorsLostScenarioEntryList));
         RemoteVoltageControlNative.setBatchDistrQSubgroups(handle, anyDistrQSubgroup ? distrQSubgroupDense : null,
-                anyDistrQSubgroup ? RelocatedRows.qrMemberStart(gpuData) : null);
+                anyDistrQSubgroup ? RelocatedRows.reactiveRelocationDistrQMemberStart(gpuData) : null);
         ReactiveLimitsNative.setBatchReactiveLimitLocalOverrides(handle,
                 ChunkArrays.intsOrNull(reactiveLimitLocalOverrideScenarioEntryList),
                 reactiveLimitLocalOverrideScenarioEntryList.isEmpty() ? null : reactiveLimitLocalTargetV.stream().mapToDouble(Double::doubleValue).toArray());

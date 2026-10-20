@@ -64,7 +64,7 @@ public final class DistrQPacker {
         for (int i = 0; i < rl.busNum().length; i++) {
             reactiveLimitEntryByBusNum.put(rl.busNum()[i], i);
         }
-        List<Integer> qrGroupList = new ArrayList<>();
+        List<Integer> relocationGroupList = new ArrayList<>();
         for (LfBus pilot : network.getBuses()) {
             GeneratorVoltageControl gvc = pilot.getGeneratorVoltageControl()
                     .filter(c -> c.getMergeStatus() == VoltageControl.MergeStatus.MAIN)
@@ -89,9 +89,9 @@ public final class DistrQPacker {
                     .findFirst().orElse(null);
             // the pilot's relocation group: the kernels re-pick the pilot-Q carrier by mode-scan, so
             // the CURRENT carrier's DISTR_Q row is suppressed and its target carries the pilot's Q
-            // instead. Read from qrGroupOfPilot, NOT decoded from qRowAlt: table membership and Q
+            // instead. Read from reactiveRelocationGroupOfPilot, NOT decoded from alternateQRow: table membership and Q
             // re-routing are separate facts that happened to share one encoding.
-            int qrGroup = columns.qrGroupOfPilot()[pilot.getNum()];
+            int pilotRelocationGroup = columns.reactiveRelocationGroupOfPilot()[pilot.getNum()];
             for (int i = 0; i < controllers.size(); i++) {
                 LfBus m = controllers.get(i);
                 mt.memberIdxByBusNum().put(m.getNum(), mt.key().size());
@@ -104,7 +104,7 @@ public final class DistrQPacker {
                 // DISTR_Q target updater write there, which overwrote the BUS_TARGET_V target a scenario
                 // opening the coupler had just set - measured as row 12566 ending at target 0 instead of
                 // 1.142 on BUS-6014_BBS_2.
-                int mParent = columns.ziParentEdge()[m.getNum()];
+                int mParent = columns.spanningTreeParentBranch()[m.getNum()];
                 mt.row().add(mParent >= 0 && columns.dummyQCol()[mParent] >= 0
                         ? columns.dummyQCol()[mParent] : columns.vCol()[m.getNum()]);
                 // a member OWNS a DISTR_Q row when the equation EXISTS and it is not the FREE
@@ -122,7 +122,7 @@ public final class DistrQPacker {
                 mt.tgtPeers().add(m.getGeneratorVoltageControl()
                         .map(c -> c.getMergedControllerElements().stream().map(LfBus::getNum).toList())
                         .orElse(List.of(m.getNum())));
-                qrGroupList.add(qrGroup);
+                relocationGroupList.add(pilotRelocationGroup);
             }
             for (int i = 0; i < controllers.size(); i++) {
                 mt.groupStart().add(start);
@@ -132,7 +132,7 @@ public final class DistrQPacker {
         List<int[]> dq = new ArrayList<>();      // {elem, side, distrQRow, kind, kMember, jMember} per DISTR_Q contribution
         List<Double> distrQWeights = new ArrayList<>();    // weight per contribution
         buildDistrQContributions(network, es, columns.vCol(), family.closedBranchElementOf(), family.shuntElementOf(),
-                family.openBranchElementOf(), columns.dummyQCol(), columns.ziParentEdge(), dq, distrQWeights, mt.memberIdxByBusNum());
+                family.openBranchElementOf(), columns.dummyQCol(), columns.spanningTreeParentBranch(), dq, distrQWeights, mt.memberIdxByBusNum());
         // distrQKind: a GpuReactiveTermKind (for DUMMY_Q, elem holds the var column)
         int[] distrQKind = new int[dq.size()];
         int[] distrQRowMember = new int[dq.size()];
@@ -169,7 +169,7 @@ public final class DistrQPacker {
         return new Pack(new DistrQTerms(distrQElement, distrQSide, distrQWeight, distrQRow, distrQKind, distrQRowMember, distrQInjectionMember),
                 new DistrQMembers(GpuAcArrays.toDoubleArray(mt.key()), GpuAcArrays.toIntArray(mt.reactiveLimitEntry()),
                 GpuAcArrays.toIntArray(mt.groupStart()), GpuAcArrays.toIntArray(mt.groupCount()),
-                GpuAcArrays.toIntArray(mt.row()), hasRow, GpuAcArrays.toIntArray(qrGroupList),
+                GpuAcArrays.toIntArray(mt.row()), hasRow, GpuAcArrays.toIntArray(relocationGroupList),
                 GpuAcArrays.toDoubleArray(mt.targetQ()), GpuAcArrays.toIntArray(mt.busNum()),
                 tgtPtr, GpuAcArrays.toIntArray(tgtPeer)));
     }
@@ -187,7 +187,7 @@ public final class DistrQPacker {
      */
     private static void buildDistrQContributions(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
                                                  int[] vCol, int[] closedBranchElementOf, int[] shuntElementOf, int[] openBranchElementOf,
-                                                 int[] dummyQCol, int[] ziParentEdge, List<int[]> out, List<Double> weights,
+                                                 int[] dummyQCol, int[] spanningTreeParentBranch, List<int[]> out, List<Double> weights,
                                                  java.util.Map<Integer, Integer> memberIdxByBusNum) {
         for (LfBus pilot : network.getBuses()) {
             GeneratorVoltageControl gvc = pilot.getGeneratorVoltageControl()
@@ -212,7 +212,7 @@ public final class DistrQPacker {
                 if (gk == freeCtl || gk.isDisabled() || es.getEquation(gk.getNum(), AcEquationType.DISTR_Q).isEmpty()) {
                     continue;                                // the free controller carries the pilot's Q; a disabled
                 }                                            // controller's DISTR_Q is disabled with its bus
-                int distrQRow = GpuAcRowIndexing.distrQRow(es, gk, ziParentEdge, dummyQCol);
+                int distrQRow = GpuAcRowIndexing.distrQRow(es, gk, spanningTreeParentBranch, dummyQCol);
                 double qpk = gk.getRemoteControlReactivePercent();
                 int kIdx = memberIdxByBusNum.getOrDefault(gk.getNum(), -1);
                 for (LfBus gj : controllers) {
@@ -258,12 +258,12 @@ public final class DistrQPacker {
                             // network.xiidm busbar HFU re-trees HFT_1's couplers HHQ/HHS/HHO, and the reactive flow
                             // circulating HFT_3 -> HFT_1 -> HFT_2 was in no equation at all (1.25e12 pu after the
                             // first solve, its rounding moving the slack by +-0.058 MW from one run to the next).
-                            int dqCol = dummyQCol[brj.getNum()];
-                            if (dqCol < 0) {
+                            int dummyQColumn = dummyQCol[brj.getNum()];
+                            if (dummyQColumn < 0) {
                                 throw new PowsyblException("GPU AC solver: DISTR_Q controller " + gj.getId()
                                         + " has a zero-impedance branch " + brj.getId() + " without a DUMMY_Q variable");
                             }
-                            out.add(new int[] {dqCol, side, distrQRow, GpuReactiveTermKind.DUMMY_Q, kIdx, jIdx});  // elem = the DUMMY_Q var column
+                            out.add(new int[] {dummyQColumn, side, distrQRow, GpuReactiveTermKind.DUMMY_Q, kIdx, jIdx});  // elem = the DUMMY_Q var column
                             weights.add(weight * (side == 0 ? 1.0 : -1.0));
                             continue;
                         }

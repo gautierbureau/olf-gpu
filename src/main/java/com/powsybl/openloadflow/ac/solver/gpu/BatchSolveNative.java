@@ -92,7 +92,7 @@ public final class BatchSolveNative {
                                                        int[] reactiveCapabilityCurveOverrideScenarioCurve, double[] reactiveCapabilityCurveOverrideStepScale,
                                                        int maxIter, double tol,
                                                        double reactiveLimitTol, double slackDistTol, double convEpsPerEq,
-                                                       int lsMode, double maxDv, double maxDphi, int[] varType,
+                                                       int stateVectorScalingMode, double maxDv, double maxDphi, int[] varType,
                                                        double[] x0PerScenario,
                                                        int[] shuntOvSlotElem, double[] shuntOvGb,
                                                        int[] reactiveLimitsSeedState, int[] reactiveLimitsFinalState,

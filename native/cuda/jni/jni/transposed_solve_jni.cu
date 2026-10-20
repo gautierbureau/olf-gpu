@@ -78,15 +78,15 @@ OLF_JNI(ac_solver_gpu, TransposedSolveNative, solveTransposedExplicit)(
         applyReorderAlg(ds.config, false);   // adjoint: its own matrix, matching enabled
         applyMatchingAlg(ds.config);
         CUDSS_CHECK(cudssDataCreate(ds.handle, &ds.data));
-        CUDSS_CHECK(cudssMatrixCreateCsr(&ds.matA, nn, nn, nnz, dRowPtr.as<int>(), nullptr,
+        CUDSS_CHECK(cudssMatrixCreateCsr(&ds.systemMatrix, nn, nn, nnz, dRowPtr.as<int>(), nullptr,
                                          dColIdx.as<int>(), dVals.as<double>(), OLF_CUDSS_CSR_TYPES,
                                          CUDSS_MTYPE_GENERAL, CUDSS_MVIEW_FULL, CUDSS_BASE_ZERO));
-        CUDSS_CHECK(cudssMatrixCreateDn(&ds.matB, nn, 1, nn, dB.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
-        CUDSS_CHECK(cudssMatrixCreateDn(&ds.matX, nn, 1, nn, dX.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
+        CUDSS_CHECK(cudssMatrixCreateDn(&ds.rightHandSideMatrix, nn, 1, nn, dB.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
+        CUDSS_CHECK(cudssMatrixCreateDn(&ds.solutionMatrix, nn, 1, nn, dX.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
         gAnalysesMain++;
-        { AnalysisTimer at_(__LINE__); CUDSS_CHECK(cudssExecute(ds.handle, CUDSS_PHASE_ANALYSIS, ds.config, ds.data, ds.matA, ds.matX, ds.matB)); }
+        { AnalysisTimer at_(__LINE__); CUDSS_CHECK(cudssExecute(ds.handle, CUDSS_PHASE_ANALYSIS, ds.config, ds.data, ds.systemMatrix, ds.solutionMatrix, ds.rightHandSideMatrix)); }
         { AnalysisTimer at_(__LINE__, 'F'); CUDSS_CHECK(cudssExecute(ds.handle, CUDSS_PHASE_FACTORIZATION | CUDSS_PHASE_SOLVE,
-                                 ds.config, ds.data, ds.matA, ds.matX, ds.matB)); }
+                                 ds.config, ds.data, ds.systemMatrix, ds.solutionMatrix, ds.rightHandSideMatrix)); }
         CUDA_CHECK(cudaDeviceSynchronize());
 
         std::vector<double> x(nn);

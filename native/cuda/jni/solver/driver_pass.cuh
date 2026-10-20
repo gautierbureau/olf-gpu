@@ -21,7 +21,7 @@ struct DriverPass {
     size_t nTot = 0;
     double tol = 0.0;
     int maxIter = 0;
-    int lsMode = GpuStateVectorScalingMode::NONE;
+    int stateVectorScalingMode = GpuStateVectorScalingMode::NONE;
     double convEpsPerEq = 0.0;
     bool outerLoopTiming = false;
     int outerLoopPassSolvedScenarios = 0;

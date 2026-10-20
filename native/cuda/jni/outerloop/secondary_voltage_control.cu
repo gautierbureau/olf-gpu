@@ -360,7 +360,7 @@ void secondaryVoltageControlStep(BatchSolverContext* ctx, DriverPass& drv) {
         int row = ctx->st->rowMap[ctx->hSecondaryVoltageControlControlledBusVRow[i]];
         if (row < 0) continue;                           // controlled bus not a live identity: insensitive
         setUnitRhsBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, row, ctx->dB.as<double>());
-        hazRepairRightHandSide(ctx, nS, ctx->dB.as<double>());
+        repairZeroDiagonalRightHandSide(ctx, nS, ctx->dB.as<double>());
         sensitivitySolve(ctx, drv, first);
         secondaryVoltageControlGatherSensitivityBatch<<<grid(nC * nS), BLOCK, 0, ctx->stream>>>(secondaryVoltageControlTables(ctx), nS, n, i,
                 ctx->nElements, ctx->closedBranchOffset, ctx->shuntOffset,

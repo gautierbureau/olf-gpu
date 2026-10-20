@@ -32,9 +32,9 @@ using namespace powsybl::openloadflow;
 
 namespace olfgpu {
 
-void buildZeroImpDest(SharedStructure* st, const CsrPattern& pos, const std::vector<int>& rowMap,
+void buildZeroImpedanceBranchDestination(SharedStructure* st, const CsrPattern& pos, const std::vector<int>& rowMap,
                       int nZeroImpedanceBranch, const double* zeroImpedanceBranchParameters, const int* zeroImpedanceBranchIndices, const int* zeroImpedanceBranchAlternateReactiveDestination,
-                      const int* relocOwn, const int* depGroupOfRow) {
+                      const int* relocatedChildOwnRow, const int* reactiveRelocationDependentGroupOfRow) {
     st->nZeroImpedanceBranch = nZeroImpedanceBranch;
     if (nZeroImpedanceBranch > 0) {
         std::vector<int> zeroImpedanceBranchDestination(static_cast<size_t>(nZeroImpedanceBranch) * 14, -1);
@@ -46,13 +46,13 @@ void buildZeroImpDest(SharedStructure* st, const CsrPattern& pos, const std::vec
         // 4..7 with the same meaning. The P half exists only for the COUPLER-TREE stock-placement fallback —
         // a coupler in a CHAIN emits its +-dummyP into its parent's DUMMY_P row, so opening the parent would
         // strand it (three of the four surviving divergences open two relocated couplers).
-        std::vector<int> ziAlt(static_cast<size_t>(nZeroImpedanceBranch) * 8, -1);
-        std::vector<int> ziSel(static_cast<size_t>(nZeroImpedanceBranch) * 8, -1);
-        std::vector<int> ziGrp(static_cast<size_t>(nZeroImpedanceBranch) * 8, -1);
+        std::vector<int> zeroImpedanceAlternateDestination(static_cast<size_t>(nZeroImpedanceBranch) * 8, -1);
+        std::vector<int> zeroImpedanceSelectorRow(static_cast<size_t>(nZeroImpedanceBranch) * 8, -1);
+        std::vector<int> zeroImpedanceRelocationGroup(static_cast<size_t>(nZeroImpedanceBranch) * 8, -1);
         std::vector<int> relocationCandidateOffset(static_cast<size_t>(nZeroImpedanceBranch) * 8, -1);
-        std::vector<int> ziPool;
-        std::vector<char> ziDep(static_cast<size_t>(nZeroImpedanceBranch) * 8, 0);
-        bool anyDyn = false;
+        std::vector<int> zeroImpedanceRelocationCandidateDestinations;
+        std::vector<char> zeroImpedanceRelocationDependentPilot(static_cast<size_t>(nZeroImpedanceBranch) * 8, 0);
+        bool anyDynamicRelocation = false;
         for (int e = 0; e < nZeroImpedanceBranch; e++) {
             const int* z = zeroImpedanceBranchIndices + static_cast<size_t>(e) * 11;
             // -1 Q row = a DISTR_Q controller whose reactive balance is suppressed (its dummyQ joins the
@@ -70,24 +70,24 @@ void buildZeroImpDest(SharedStructure* st, const CsrPattern& pos, const std::vec
             dd[7] = b2Q >= 0 ? pos.at(b2Q, z[5]) : -1;       // J(bus2 Q, dummyQ)
             int frozenQ[2] = {b1Q, b2Q};
             for (int side = 0; side < 2; side++) {
-                int altRow = zeroImpedanceBranchAlternateReactiveDestination[e * 2 + side];
+                int alternateRow = zeroImpedanceBranchAlternateReactiveDestination[e * 2 + side];
                 int fSlot = static_cast<int>(e) * 8 + side;
                 int jSlot = static_cast<int>(e) * 8 + 2 + side;
-                if (altRow <= -2) {                          // GROUP relocation: one slot per candidate
-                    int g = -2 - altRow;
-                    ziGrp[fSlot] = g;
-                    relocationCandidateOffset[fSlot] = static_cast<int>(ziPool.size());
-                    for (int c = st->hQrPtr[g]; c < st->hQrPtr[g + 1]; c++) {
-                        ziPool.push_back(-2 - st->hQrRows[c]);
+                if (alternateRow <= -2) {                          // GROUP relocation: one slot per candidate
+                    int g = -2 - alternateRow;
+                    zeroImpedanceRelocationGroup[fSlot] = g;
+                    relocationCandidateOffset[fSlot] = static_cast<int>(zeroImpedanceRelocationCandidateDestinations.size());
+                    for (int c = st->hReactiveRelocationGroupStart[g]; c < st->hReactiveRelocationGroupStart[g + 1]; c++) {
+                        zeroImpedanceRelocationCandidateDestinations.push_back(-2 - st->hReactiveRelocationCandidateRows[c]);
                     }
-                    ziGrp[jSlot] = g;
-                    relocationCandidateOffset[jSlot] = static_cast<int>(ziPool.size());
-                    for (int c = st->hQrPtr[g]; c < st->hQrPtr[g + 1]; c++) {
-                        ziPool.push_back(pos.at(st->hQrRows[c], z[5]));
+                    zeroImpedanceRelocationGroup[jSlot] = g;
+                    relocationCandidateOffset[jSlot] = static_cast<int>(zeroImpedanceRelocationCandidateDestinations.size());
+                    for (int c = st->hReactiveRelocationGroupStart[g]; c < st->hReactiveRelocationGroupStart[g + 1]; c++) {
+                        zeroImpedanceRelocationCandidateDestinations.push_back(pos.at(st->hReactiveRelocationCandidateRows[c], z[5]));
                     }
-                    dd[2 + side] = -2 - st->hQrRows[st->hQrPtr[g]];   // frozen F -> fallback (qBuf)
-                    anyDyn = true;
-                } else if (stockPairOut(frozenQ[side], altRow, relocOwn)) {
+                    dd[2 + side] = -2 - st->hReactiveRelocationCandidateRows[st->hReactiveRelocationGroupStart[g]];   // frozen F -> fallback (qBuf)
+                    anyDynamicRelocation = true;
+                } else if (stockPairOut(frozenQ[side], alternateRow, relocatedChildOwnRow)) {
                     // STOCK PAIR for this endpoint's +-dummyQ, exactly as the cb/sh raw-q families encode it
                     // (stockPairOut / stockPairPick): a DISTR_Q controller whose own Q balance is SUPPRESSED
                     // and relocated onto its PARENT coupler's dummy row has three destinations for this
@@ -99,78 +99,78 @@ void buildZeroImpDest(SharedStructure* st, const CsrPattern& pos, const std::vec
                     // BUS-1359_BBS_1 / BUS-1869_BBS_1 (pilot section lost, two remote controllers survive
                     // on a coupler chain) — OLF's bus_target_q[VL-1359_1] carries +dummy_q(COUPLER_2), the
                     // device's row did not, 0.465 / 0.338 kV and +-2 violations in every run.
-                    int own = relocOwn[altRow];
-                    ziGrp[fSlot] = altRow;                   // the selector is the dummy row itself
-                    relocationCandidateOffset[fSlot] = -static_cast<int>(ziPool.size()) - 1;
-                    ziPool.push_back(-2 - own);
-                    ziPool.push_back(-2 - altRow);
-                    ziGrp[jSlot] = altRow;
-                    relocationCandidateOffset[jSlot] = -static_cast<int>(ziPool.size()) - 1;
-                    ziPool.push_back(pos.at(own, z[5]));
-                    ziPool.push_back(pos.at(altRow, z[5]));
-                    anyDyn = true;
-                } else if (depGroupOf(frozenQ[side], stockAltRow(frozenQ[side], altRow, relocOwn), relocOwn, depGroupOfRow) >= 0) {
-                    // DEPENDENT pilot (depPick): the group's pool for this +-dummyQ, plus the two-way home row
-                    int own = stockAltRow(frozenQ[side], altRow, relocOwn);
-                    int dg = depGroupOf(frozenQ[side], own, relocOwn, depGroupOfRow);
-                    ziGrp[fSlot] = dg;
-                    relocationCandidateOffset[fSlot] = static_cast<int>(ziPool.size());
-                    for (int c = st->hQrPtr[dg]; c < st->hQrPtr[dg + 1]; c++) {
-                        ziPool.push_back(-2 - st->hQrRows[c]);
+                    int own = relocatedChildOwnRow[alternateRow];
+                    zeroImpedanceRelocationGroup[fSlot] = alternateRow;                   // the selector is the dummy row itself
+                    relocationCandidateOffset[fSlot] = -static_cast<int>(zeroImpedanceRelocationCandidateDestinations.size()) - 1;
+                    zeroImpedanceRelocationCandidateDestinations.push_back(-2 - own);
+                    zeroImpedanceRelocationCandidateDestinations.push_back(-2 - alternateRow);
+                    zeroImpedanceRelocationGroup[jSlot] = alternateRow;
+                    relocationCandidateOffset[jSlot] = -static_cast<int>(zeroImpedanceRelocationCandidateDestinations.size()) - 1;
+                    zeroImpedanceRelocationCandidateDestinations.push_back(pos.at(own, z[5]));
+                    zeroImpedanceRelocationCandidateDestinations.push_back(pos.at(alternateRow, z[5]));
+                    anyDynamicRelocation = true;
+                } else if (dependentGroupOfHomeRow(frozenQ[side], stockPlacementAlternateRow(frozenQ[side], alternateRow, relocatedChildOwnRow), relocatedChildOwnRow, reactiveRelocationDependentGroupOfRow) >= 0) {
+                    // DEPENDENT pilot (dependentPilotDestination): the group's pool for this +-dummyQ, plus the two-way home row
+                    int own = stockPlacementAlternateRow(frozenQ[side], alternateRow, relocatedChildOwnRow);
+                    int dg = dependentGroupOfHomeRow(frozenQ[side], own, relocatedChildOwnRow, reactiveRelocationDependentGroupOfRow);
+                    zeroImpedanceRelocationGroup[fSlot] = dg;
+                    relocationCandidateOffset[fSlot] = static_cast<int>(zeroImpedanceRelocationCandidateDestinations.size());
+                    for (int c = st->hReactiveRelocationGroupStart[dg]; c < st->hReactiveRelocationGroupStart[dg + 1]; c++) {
+                        zeroImpedanceRelocationCandidateDestinations.push_back(-2 - st->hReactiveRelocationCandidateRows[c]);
                     }
-                    ziGrp[jSlot] = dg;
-                    relocationCandidateOffset[jSlot] = static_cast<int>(ziPool.size());
-                    for (int c = st->hQrPtr[dg]; c < st->hQrPtr[dg + 1]; c++) {
-                        ziPool.push_back(pos.at(st->hQrRows[c], z[5]));
+                    zeroImpedanceRelocationGroup[jSlot] = dg;
+                    relocationCandidateOffset[jSlot] = static_cast<int>(zeroImpedanceRelocationCandidateDestinations.size());
+                    for (int c = st->hReactiveRelocationGroupStart[dg]; c < st->hReactiveRelocationGroupStart[dg + 1]; c++) {
+                        zeroImpedanceRelocationCandidateDestinations.push_back(pos.at(st->hReactiveRelocationCandidateRows[c], z[5]));
                     }
-                    ziDep[fSlot] = 1;
-                    ziDep[jSlot] = 1;
+                    zeroImpedanceRelocationDependentPilot[fSlot] = 1;
+                    zeroImpedanceRelocationDependentPilot[jSlot] = 1;
                     if (own >= 0 && own != frozenQ[side]) {
-                        ziAlt[fSlot] = -2 - own;
-                        ziAlt[jSlot] = pos.at(own, z[5]);
-                        ziSel[fSlot] = -2 - frozenQ[side];
-                        ziSel[jSlot] = -2 - frozenQ[side];
+                        zeroImpedanceAlternateDestination[fSlot] = -2 - own;
+                        zeroImpedanceAlternateDestination[jSlot] = pos.at(own, z[5]);
+                        zeroImpedanceSelectorRow[fSlot] = -2 - frozenQ[side];
+                        zeroImpedanceSelectorRow[jSlot] = -2 - frozenQ[side];
                     } else {
-                        ziSel[fSlot] = frozenQ[side];
-                        ziSel[jSlot] = frozenQ[side];
+                        zeroImpedanceSelectorRow[fSlot] = frozenQ[side];
+                        zeroImpedanceSelectorRow[jSlot] = frozenQ[side];
                     }
-                    anyDyn = true;
-                } else if (altRow >= 0 && altRow != frozenQ[side]) {
-                    ziAlt[fSlot] = -2 - altRow;
-                    ziAlt[jSlot] = pos.at(altRow, z[5]);
-                    int sel = frozenQ[side] >= 0 ? frozenQ[side] : altRow;
-                    ziSel[fSlot] = sel;                      // suppressed frozen dest: select on ALT row
-                    ziSel[jSlot] = sel;
-                    anyDyn = true;
+                    anyDynamicRelocation = true;
+                } else if (alternateRow >= 0 && alternateRow != frozenQ[side]) {
+                    zeroImpedanceAlternateDestination[fSlot] = -2 - alternateRow;
+                    zeroImpedanceAlternateDestination[jSlot] = pos.at(alternateRow, z[5]);
+                    int sel = frozenQ[side] >= 0 ? frozenQ[side] : alternateRow;
+                    zeroImpedanceSelectorRow[fSlot] = sel;                      // suppressed frozen dest: select on ALT row
+                    zeroImpedanceSelectorRow[jSlot] = sel;
+                    anyDynamicRelocation = true;
                 }
             }
-            // STOCK-PLACEMENT fallback (see stockAltRow): when this element's own +-dummy coupling lands on a
+            // STOCK-PLACEMENT fallback (see stockPlacementAlternateRow): when this element's own +-dummy coupling lands on a
             // row that is itself a RELOCATED bus equation's home (its parent coupler's dummy row), give it the
             // bus's own row as the alternate, selected by -2-row so it diverts only while that row is an
             // identity — i.e. only in the scenarios that OPEN the parent coupler.
-            if (relocOwn != nullptr) {
+            if (relocatedChildOwnRow != nullptr) {
                 int frozenP[2] = {b1P, b2P};
                 for (int side = 0; side < 2; side++) {
                     int pRow = frozenP[side];
-                    if (pRow >= 0 && relocOwn[pRow] >= 0) {
-                        ziAlt[static_cast<size_t>(e) * 8 + 4 + side] = -2 - relocOwn[pRow];
-                        ziAlt[static_cast<size_t>(e) * 8 + 6 + side] = pos.at(relocOwn[pRow], z[4]);
-                        ziSel[static_cast<size_t>(e) * 8 + 4 + side] = -2 - pRow;
-                        ziSel[static_cast<size_t>(e) * 8 + 6 + side] = -2 - pRow;
-                        anyDyn = true;
+                    if (pRow >= 0 && relocatedChildOwnRow[pRow] >= 0) {
+                        zeroImpedanceAlternateDestination[static_cast<size_t>(e) * 8 + 4 + side] = -2 - relocatedChildOwnRow[pRow];
+                        zeroImpedanceAlternateDestination[static_cast<size_t>(e) * 8 + 6 + side] = pos.at(relocatedChildOwnRow[pRow], z[4]);
+                        zeroImpedanceSelectorRow[static_cast<size_t>(e) * 8 + 4 + side] = -2 - pRow;
+                        zeroImpedanceSelectorRow[static_cast<size_t>(e) * 8 + 6 + side] = -2 - pRow;
+                        anyDynamicRelocation = true;
                     }
                     int qRow = frozenQ[side];
-                    if (qRow >= 0 && relocOwn[qRow] >= 0 && ziSel[static_cast<size_t>(e) * 8 + side] < 0) {
-                        ziAlt[static_cast<size_t>(e) * 8 + side] = -2 - relocOwn[qRow];
-                        ziAlt[static_cast<size_t>(e) * 8 + 2 + side] = pos.at(relocOwn[qRow], z[5]);
-                        ziSel[static_cast<size_t>(e) * 8 + side] = -2 - qRow;
-                        ziSel[static_cast<size_t>(e) * 8 + 2 + side] = -2 - qRow;
-                        anyDyn = true;
+                    if (qRow >= 0 && relocatedChildOwnRow[qRow] >= 0 && zeroImpedanceSelectorRow[static_cast<size_t>(e) * 8 + side] < 0) {
+                        zeroImpedanceAlternateDestination[static_cast<size_t>(e) * 8 + side] = -2 - relocatedChildOwnRow[qRow];
+                        zeroImpedanceAlternateDestination[static_cast<size_t>(e) * 8 + 2 + side] = pos.at(relocatedChildOwnRow[qRow], z[5]);
+                        zeroImpedanceSelectorRow[static_cast<size_t>(e) * 8 + side] = -2 - qRow;
+                        zeroImpedanceSelectorRow[static_cast<size_t>(e) * 8 + 2 + side] = -2 - qRow;
+                        anyDynamicRelocation = true;
                     }
                 }
             }
             {                                                // every coupler: the tree flag is per scenario
-                int zvRow = rowMap[ziZeroVRow(z)], zpRow = rowMap[ziZeroPhiRow(z)];
+                int zvRow = rowMap[zeroVRowOf(z)], zpRow = rowMap[zeroPhiRowOf(z)];
                 dd[8] = -2 - zvRow;                          // F ZERO_V row
                 dd[9] = pos.at(zvRow, z[6]);                 // J(ZERO_V, v1)
                 dd[10] = pos.at(zvRow, z[7]);                // J(ZERO_V, v2)
@@ -182,16 +182,16 @@ void buildZeroImpDest(SharedStructure* st, const CsrPattern& pos, const std::vec
         st->dZeroImpedanceBranchParameters.upload(zeroImpedanceBranchParameters, nZeroImpedanceBranch * sizeof(double));
         st->dZeroImpedanceBranchIndices.upload(zeroImpedanceBranchIndices, static_cast<size_t>(nZeroImpedanceBranch) * 11 * sizeof(int));
         st->dZeroImpedanceBranchDestination.upload(zeroImpedanceBranchDestination.data(), zeroImpedanceBranchDestination.size() * sizeof(int));
-        if (anyDyn) {
-            st->dZiAltDest.upload(ziAlt.data(), ziAlt.size() * sizeof(int));
-            st->dZiSelRow.upload(ziSel.data(), ziSel.size() * sizeof(int));
-            if (!ziPool.empty()) {
-                st->dZiRelocGroup.upload(ziGrp.data(), ziGrp.size() * sizeof(int));
-                st->dZiRelocOff.upload(relocationCandidateOffset.data(), relocationCandidateOffset.size() * sizeof(int));
-                st->dZiRelocPool.upload(ziPool.data(), ziPool.size() * sizeof(int));
-                st->dZiRelocDep.upload(ziDep.data(), ziDep.size());
+        if (anyDynamicRelocation) {
+            st->dZeroImpedanceAlternateDestination.upload(zeroImpedanceAlternateDestination.data(), zeroImpedanceAlternateDestination.size() * sizeof(int));
+            st->dZeroImpedanceSelectorRow.upload(zeroImpedanceSelectorRow.data(), zeroImpedanceSelectorRow.size() * sizeof(int));
+            if (!zeroImpedanceRelocationCandidateDestinations.empty()) {
+                st->dZeroImpedanceRelocationGroup.upload(zeroImpedanceRelocationGroup.data(), zeroImpedanceRelocationGroup.size() * sizeof(int));
+                st->dZeroImpedanceRelocationCandidateOffset.upload(relocationCandidateOffset.data(), relocationCandidateOffset.size() * sizeof(int));
+                st->dZeroImpedanceRelocationCandidateDestinations.upload(zeroImpedanceRelocationCandidateDestinations.data(), zeroImpedanceRelocationCandidateDestinations.size() * sizeof(int));
+                st->dZeroImpedanceRelocationDependentPilot.upload(zeroImpedanceRelocationDependentPilot.data(), zeroImpedanceRelocationDependentPilot.size());
             }
-            st->ziDyn = true;
+            st->zeroImpedanceDynamicRelocation = true;
         }
     }
 }

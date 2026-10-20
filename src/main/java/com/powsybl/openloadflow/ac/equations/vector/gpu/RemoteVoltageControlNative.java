@@ -45,7 +45,7 @@ public final class RemoteVoltageControlNative {
     /** tasks #71: per (scenario, dq member) SUBGROUP labels of a group a contingency split behind its surviving
      *  main (dense {@code chunkSize x nDistrQMembers} bytes, 0 = the base pilot's group) and the qr group -> first
      *  dq member map the kernels use to pair candidates with members. Null clears the channel. */
-    public static native void setBatchDistrQSubgroups(long handle, byte[] dense, int[] qrMemberStart);
+    public static native void setBatchDistrQSubgroups(long handle, byte[] dense, int[] reactiveRelocationDistrQMemberStart);
 
     /** Install (or clear, with nulls) per-scenario DISTR_Q weight overrides on a batch context —
      *  {@code idx} = flat {scenario, contribution} pairs, {@code w} = the renormalized weight (a gen
@@ -66,7 +66,7 @@ public final class RemoteVoltageControlNative {
     public static native void setBatchPilotAllPinnedFlip(long handle, int[] slots, int[] rows,
                                                          double[] qTargets, int[] survivorReactiveLimitEntryCounts, int[] survivorReactiveLimitEntries);
 
-    /** Per-scenario moves of a remote-control pilot's own reactive target ({key = slot * nQr + group, delta pu}, one
+    /** Per-scenario moves of a remote-control pilot's own reactive target ({key = slot * nReactiveRelocationGroups + group, delta pu}, one
      *  entry per key): added to the value captured from the base carrier and to the first fill's carrier target.
      *  Nulls clear. */
     public static native void setBatchPilotQDeltas(long handle, int[] keys, double[] deltas);

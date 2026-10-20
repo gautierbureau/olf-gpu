@@ -28,8 +28,8 @@ __global__ void fillZeroImpBatch(int nZeroImpedanceBranch, int nScenarios, int n
                                  const double* x, double* vals, double* F, const char* active,
                                  int nBaseClosedZeroImpedanceBranches, int nZeroImpedanceBranchCloseOverrides, const int* zeroImpedanceBranchCloseScenarioElement,
                                  int nZeroImpedanceBranchOpenOverrides, const int* zeroImpedanceBranchOpenScenarioElement,
-                                 const int* ziAlt, const int* ziSel, const int* mode, int ziDyn,
-                                 RelocTables rt, int nSpanningTreeOverrides, const int* spanningTreeOverrideScenarioElementValue,
+                                 const int* zeroImpedanceAlternateDestination, const int* zeroImpedanceSelectorRow, const int* mode, int zeroImpedanceDynamicRelocation,
+                                 ReactiveRelocationTables rt, int nSpanningTreeOverrides, const int* spanningTreeOverrideScenarioElementValue,
                                  const char* zeroImpedanceBranchOpenMask, const char* zeroImpedanceBranchCloseMask, const char* spanningTreeOverrideMask) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nZeroImpedanceBranch * nScenarios) return;
@@ -63,7 +63,7 @@ __global__ void fillZeroImpBatch(int nZeroImpedanceBranch, int nScenarios, int n
         if (!on) return;
     }
     double rho = in[e];
-    const int* q = ix + e * 11;                              // b1P b1Q b2P b2Q dpCol dqCol v1 v2 ph1 ph2 tree
+    const int* q = ix + e * 11;                              // b1P b1Q b2P b2Q dummyPColumn dummyQColumn v1 v2 ph1 ph2 tree
     const double* xs = x + (size_t) s * n;
     double* valsS = vals + (size_t) s * nnz;
     double* FS = F + (size_t) s * n;
@@ -71,17 +71,17 @@ __global__ void fillZeroImpBatch(int nZeroImpedanceBranch, int nScenarios, int n
     double dummyP = xs[q[4]], dummyQ = xs[q[5]];
     int d2 = d[2], d3 = d[3], d6 = d[6], d7 = d[7];
     int d0 = d[0], d1 = d[1], d4 = d[4], d5 = d[5];
-    if (ziDyn) {                                             // dynamic Q-routing (ob/zero-impedance channels)
+    if (zeroImpedanceDynamicRelocation) {                                             // dynamic Q-routing (ob/zero-impedance channels)
         const int* ms = mode + (size_t) s * n;
-        RelocTables rtS = relocForScenario(rt, s);
-        d2 = ziDynDest(d2, e * 8 + 0, ziAlt, ziSel, ms, rtS);
-        d3 = ziDynDest(d3, e * 8 + 1, ziAlt, ziSel, ms, rtS);
-        d6 = ziDynDest(d6, e * 8 + 2, ziAlt, ziSel, ms, rtS);
-        d7 = ziDynDest(d7, e * 8 + 3, ziAlt, ziSel, ms, rtS);
-        d0 = ziDynDest(d0, e * 8 + 4, ziAlt, ziSel, ms, rtS);   // +-dummyP: back to the bus's own PHI row
-        d1 = ziDynDest(d1, e * 8 + 5, ziAlt, ziSel, ms, rtS);   // when its parent coupler opens
-        d4 = ziDynDest(d4, e * 8 + 6, ziAlt, ziSel, ms, rtS);
-        d5 = ziDynDest(d5, e * 8 + 7, ziAlt, ziSel, ms, rtS);
+        ReactiveRelocationTables rtS = relocationTablesForScenario(rt, s);
+        d2 = zeroImpedanceRelocationDestination(d2, e * 8 + 0, zeroImpedanceAlternateDestination, zeroImpedanceSelectorRow, ms, rtS);
+        d3 = zeroImpedanceRelocationDestination(d3, e * 8 + 1, zeroImpedanceAlternateDestination, zeroImpedanceSelectorRow, ms, rtS);
+        d6 = zeroImpedanceRelocationDestination(d6, e * 8 + 2, zeroImpedanceAlternateDestination, zeroImpedanceSelectorRow, ms, rtS);
+        d7 = zeroImpedanceRelocationDestination(d7, e * 8 + 3, zeroImpedanceAlternateDestination, zeroImpedanceSelectorRow, ms, rtS);
+        d0 = zeroImpedanceRelocationDestination(d0, e * 8 + 4, zeroImpedanceAlternateDestination, zeroImpedanceSelectorRow, ms, rtS);   // +-dummyP: back to the bus's own PHI row
+        d1 = zeroImpedanceRelocationDestination(d1, e * 8 + 5, zeroImpedanceAlternateDestination, zeroImpedanceSelectorRow, ms, rtS);   // when its parent coupler opens
+        d4 = zeroImpedanceRelocationDestination(d4, e * 8 + 6, zeroImpedanceAlternateDestination, zeroImpedanceSelectorRow, ms, rtS);
+        d5 = zeroImpedanceRelocationDestination(d5, e * 8 + 7, zeroImpedanceAlternateDestination, zeroImpedanceSelectorRow, ms, rtS);
     }
     addAt(d0, dummyP, valsS, FS);                          // F[bus1 P] += dummyP
     addAt(d1, -dummyP, valsS, FS);                         // F[bus2 P] -= dummyP

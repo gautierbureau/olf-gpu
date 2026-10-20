@@ -50,7 +50,7 @@ __global__ void fillDistrQBatch(int nDistrQ, int nScenarios, int n, int nnz, int
                                 int closedBranchOffset, int openBranchOffset,
                                 const int* distrQElement, const int* distrQSide, const int* distrQKind,
                                 const double* distrQWeight, const int* distrQDestination,
-                                const int* dqAlt, const int* dqSel, const int* dqZiRow,
+                                const int* distrQAlternateDestination, const int* distrQSelectorRow, const int* distrQDummyQRow,
                                 const double* closedBranchParameters, const int* closedBranchIndices, const double* shuntParameters, const int* shuntIndices,
                                 const double* openBranchParameters, const int* openBranchIndices,
                                 const double* x, double* vals, double* F,
@@ -62,12 +62,12 @@ __global__ void fillDistrQBatch(int nDistrQ, int nScenarios, int n, int nnz, int
                                 const int* distrQRowMember, const int* distrQInjectionMember, const double* mKey,
                                 const int* distrQMemberReactiveLimitEntry, const int* mGroupStart, const int* mGroupCount,
                                 const char* limitType, int nReactiveLimitEntries,
-                                const char* psSkip, int psGroups,
-                                const int* mQrGroup, const int* qrPtr, const int* qrRows,
+                                const char* pilotSelfCarrierSkip, int pilotSelfCarrierSkipStride,
+                                const int* memberRelocationGroup, const int* reactiveRelocationGroupStart, const int* reactiveRelocationCandidateRows,
                                 int nR1Ov, const int* r1OvSlotElem, const double* r1OvVal,
                                 int nShuntAdmittanceOverrides, const int* shuntAdmittanceOverrideScenarioElement, const double* shuntAdmittanceOverrideDelta,
                                 int distrQTraceRow,
-                                const char* distrQSubgroup, const int* qrMemberStart, int nDistrQMembersAll) {
+                                const char* distrQSubgroup, const int* reactiveRelocationDistrQMemberStart, int nDistrQMembersAll) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nDistrQ * nScenarios) return;
     int c = tid % nDistrQ;
@@ -75,9 +75,9 @@ __global__ void fillDistrQBatch(int nDistrQ, int nScenarios, int n, int nnz, int
     if (!active[s]) return;
     // STOCK PLACEMENT: a relocated child's sharing row moves to the bus's OWN row in any scenario that
     // kills its parent coupler, which pins that coupler's DUMMY_Q row to an identity (see buildDistrQDest).
-    if (dqSel != nullptr && dqSel[c] >= 0 && dqAlt != nullptr
-            && mode[(size_t) s * n + dqSel[c]] == GpuRowMode::FIXED_VARIABLE && dqAlt[c * 6] <= -2) {
-        distrQDestination = dqAlt;
+    if (distrQSelectorRow != nullptr && distrQSelectorRow[c] >= 0 && distrQAlternateDestination != nullptr
+            && mode[(size_t) s * n + distrQSelectorRow[c]] == GpuRowMode::FIXED_VARIABLE && distrQAlternateDestination[c * 6] <= -2) {
+        distrQDestination = distrQAlternateDestination;
     }
     // an RL-PINNED remote member's row (mode 4) hosts its OWN Q balance — its DISTR_Q emissions
     // stop for this scenario (the CPU deactivates only that member's DISTR_Q equation)
@@ -87,15 +87,15 @@ __global__ void fillDistrQBatch(int nDistrQ, int nScenarios, int n, int nnz, int
         // plan-B4: the CURRENT pilot-Q carrier's row (a re-picked free role after the base free
         // member pinned) hosts the group's relocated pilot balance — its DISTR_Q row is inactive
         // this scenario, exactly like OLF deactivating the new free member's DISTR_Q equation.
-        if (mQrGroup != nullptr && distrQInjectionMember[c] >= 0) {
-            int g = mQrGroup[distrQInjectionMember[c]];
+        if (memberRelocationGroup != nullptr && distrQInjectionMember[c] >= 0) {
+            int g = memberRelocationGroup[distrQInjectionMember[c]];
             // A PILOT-SELF group carries no relocated balance while its pilot is unpinned (its q feeds these
             // very DISTR_Q rows, weighted), so the carrier's row is NOT hosting anything and its DISTR_Q must
             // stay ACTIVE. Suppressing it there dropped an equation without gaining one: one short, singular.
-            bool psGateOff = psSkip != nullptr && g >= 0 && psSkip[(size_t) s * psGroups + g];
-            if (g >= 0 && !psGateOff && d0 <= -2
-                    && -2 - d0 == qrRows[qrPtr[g] + relocChooseSub(g, qrPtr, qrRows, mode + (size_t) s * n,
-                            distrQSubgroup != nullptr ? distrQSubgroup + (size_t) s * nDistrQMembersAll : nullptr, qrMemberStart)]) {
+            bool skipPilotSelfCarrier = pilotSelfCarrierSkip != nullptr && g >= 0 && pilotSelfCarrierSkip[(size_t) s * pilotSelfCarrierSkipStride + g];
+            if (g >= 0 && !skipPilotSelfCarrier && d0 <= -2
+                    && -2 - d0 == reactiveRelocationCandidateRows[reactiveRelocationGroupStart[g] + chooseCarrierRowInSubgroup(g, reactiveRelocationGroupStart, reactiveRelocationCandidateRows, mode + (size_t) s * n,
+                            distrQSubgroup != nullptr ? distrQSubgroup + (size_t) s * nDistrQMembersAll : nullptr, reactiveRelocationDistrQMemberStart)]) {
                 return;
             }
         }
@@ -109,7 +109,7 @@ __global__ void fillDistrQBatch(int nDistrQ, int nScenarios, int n, int nnz, int
     // the coupler then carries no reactive flow at all — the contribution has to go with it. Measured on the
     // middle-section-loss fixtures: the surviving section's DISTR_Q row kept a coefficient 1 on the dead
     // coupler's DUMMY_Q and the solve landed 0.34 kV off (bus vl3_b 401.35 against OLF's 401.69).
-    if (kind == GpuReactiveTermKind::DUMMY_Q && dqZiRow != nullptr && dqZiRow[c] >= 0 && mode[(size_t) s * n + dqZiRow[c]] == GpuRowMode::FIXED_VARIABLE) return;
+    if (kind == GpuReactiveTermKind::DUMMY_Q && distrQDummyQRow != nullptr && distrQDummyQRow[c] >= 0 && mode[(size_t) s * n + distrQDummyQRow[c]] == GpuRowMode::FIXED_VARIABLE) return;
     double w = distrQWeight[c];
     int kM = distrQRowMember != nullptr ? distrQRowMember[c] : -1;
     if (kM >= 0) {
@@ -249,7 +249,7 @@ __global__ void fillDistrRhoBatch(int nDistrRho, int nScenarios, int n, int nnz,
                                   const int* distrRhoColumn, const double* distrRhoCoefficient, const int* distrRhoDestination,
                                   const double* x, double* vals, double* F, const char* active,
                                   int nDistrRhoCoefficientOverrides, const int* distrRhoOverrideScenarioTerm, const double* distrRhoOverrideCoefficient,
-                                  const int* distrRhoQrGroup, const int* mode, const int* qrPtr, const int* qrRows) {
+                                  const int* distrRhoRelocationGroup, const int* mode, const int* reactiveRelocationGroupStart, const int* reactiveRelocationCandidateRows) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nDistrRho * nScenarios) return;
     int c = tid % nDistrRho;
@@ -259,9 +259,9 @@ __global__ void fillDistrRhoBatch(int nDistrRho, int nScenarios, int n, int nnz,
     // inactive PER SCENARIO (same rule as fillDistrQBatch; the
     // machine's zeroed coefficient overrides covers machine steps, but a bare batch solve — the batch-of-1
     // sequential route on a clamp-in-the-base network — has no coefficient overrides and needs the in-kernel skip)
-    if (distrRhoQrGroup != nullptr && distrRhoQrGroup[c] >= 0) {
-        int g = distrRhoQrGroup[c];
-        if (-2 - distrRhoDestination[c * 2] == qrRows[qrPtr[g] + relocChoose(g, qrPtr, qrRows, mode + (size_t) s * n)]) return;
+    if (distrRhoRelocationGroup != nullptr && distrRhoRelocationGroup[c] >= 0) {
+        int g = distrRhoRelocationGroup[c];
+        if (-2 - distrRhoDestination[c * 2] == reactiveRelocationCandidateRows[reactiveRelocationGroupStart[g] + chooseCarrierRow(g, reactiveRelocationGroupStart, reactiveRelocationCandidateRows, mode + (size_t) s * n)]) return;
     }
     double coef = distrRhoCoefficient[c];
     for (int k = 0; k < nDistrRhoCoefficientOverrides; k++) {                        // per-scenario 1/count' renormalization

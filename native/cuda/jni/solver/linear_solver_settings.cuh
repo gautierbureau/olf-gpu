@@ -24,20 +24,20 @@ namespace olfgpu {
 // any linear-solve inexactness there, so refining each solve is redundant (measured ~30% faster on batched N-1
 // with identical convergence). Reusing pivots through CUDSS_PHASE_REFACTORIZATION gives no speedup in batched
 // mode either (the factorization cost is the numeric fill, not pivoting), so it is not used.
-constexpr int IR_N_STEPS = 0;
+constexpr int ITERATIVE_REFINEMENT_STEPS_WITHOUT_COUPLERS = 0;
 
 // Refinement IS required on a system WITH zero-impedance couplers. Each coupler puts ZERO_V / ZERO_PHI on its
 // DUMMY_P / DUMMY_Q rows, carrying v1-v2 and phi1-phi2 and never their own dummy, so two diagonals per coupler
-// are structurally zero; the zero-diagonal repair (hazRepairVals) makes every row nonsingular, but a borrowed
+// are structurally zero; the zero-diagonal repair (repairZeroDiagonalRowsBatch) makes every row nonsingular, but a borrowed
 // +-1 diagonal among O(100) admittance entries is still factored inaccurately by static pivoting. The backward
 // residual stays ~1e-14 while the forward error in dx, with kappa ~ 5e8, is what moves. Measured on rte6515's
 // 500 busbar outages: with refinement the worst ||J.dx-F||inf is 1.5e-11 and buses match the CPU to 2.6e-9 kV;
 // without, 3.8e-4 on the repaired rows and 2.6e-8 kV. Nested dissection reaches the same accuracy without
 // refinement but collapses the batch at scale (0/80 busbar scenarios batched against AMD's 60/80).
 //
-// Refinement is ADAPTIVE: cuDSS runs irBaseSteps internally, then the batch loop measures every lane's backward
+// Refinement is ADAPTIVE: cuDSS runs configuredIterativeRefinementBaseSteps internally, then the batch loop measures every lane's backward
 // residual ratio ||b - J dx||inf / ||b||inf and refines (r = b - J dx, J d = r, dx += d) only while an active
-// lane sits above irTol, up to irMaxSteps solves in all. The count a lane needs depends on which other matrices
+// lane sits above iterativeRefinementTolerance, up to configuredIterativeRefinementMaxSteps solves in all. The count a lane needs depends on which other matrices
 // share its batch, so it is decided per iteration from the residual itself (network.xiidm: a fixed 4 steps cost
 // 64.7 s of 126 s of kernels, a fixed 2 left two busbar scenarios at a linear-solve failure). The internal step
 // matters on the busbar scopes: full network.xiidm busbar scope, 12869 of 12918 contingencies on device with it
@@ -49,20 +49,20 @@ struct LinearSolverSettings {
     int matching = 6;                                        // cudssMatchingAlg_t, CUDSS_MATCHING_ALG_AUTO
     int pivotType = -1;                                      // cudssPivotType_t, -1 = derived from the ordering
     double pivotThreshold = NAN;
-    int irBase = 1;                                          // cuDSS internal refinement steps (coupler systems)
-    int irMax = 4;                                           // adaptive refinement: at most this many solves
-    double irTol = 1e-12;                                    // adaptive refinement: backward-residual target
+    int iterativeRefinementBaseSteps = 1;                                          // cuDSS internal refinement steps (coupler systems)
+    int iterativeRefinementMaxSteps = 4;                                           // adaptive refinement: at most this many solves
+    double iterativeRefinementTolerance = 1e-12;                                    // adaptive refinement: backward-residual target
 };
 extern LinearSolverSettings gLinearSolver;
 
-inline int irBaseSteps() {
-    return gLinearSolver.irBase;
+inline int configuredIterativeRefinementBaseSteps() {
+    return gLinearSolver.iterativeRefinementBaseSteps;
 }
-inline int irMaxSteps() {
-    return gLinearSolver.irMax;
+inline int configuredIterativeRefinementMaxSteps() {
+    return gLinearSolver.iterativeRefinementMaxSteps;
 }
-inline double irTol() {
-    return gLinearSolver.irTol;
+inline double iterativeRefinementTolerance() {
+    return gLinearSolver.iterativeRefinementTolerance;
 }
 
 // The fill-reducing orderings, indexed by GpuReorderingAlgorithm. Factorization cost is LU-fill-bound and the fill
@@ -83,7 +83,7 @@ constexpr OlfReorderAlg REORDER_ALGS[] = {CUDSS_ALG_DEFAULT, CUDSS_ALG_1, CUDSS_
 
 // Matching (MC64-style), for the robust single-matrix mode and the standalone transposed solve. The uniform
 // batch cannot use it (cuDSS 0.8 rejects matching at the uniform-batch analysis), which is why the batched path
-// repairs its zero diagonals itself (hazRepairVals). A raw OLF Jacobian has no nonzero-diagonal guarantee: a bus
+// repairs its zero diagonals itself (repairZeroDiagonalRowsBatch). A raw OLF Jacobian has no nonzero-diagonal guarantee: a bus
 // fed only through a zero-impedance branch leaves four rows with a ZERO diagonal (the branch's ZERO_V / ZERO_PHI
 // and the dead-end bus's P / Q balances). Without matching cuDSS perturbs the zero pivot and returns a wrong
 // answer with a matching residual (ieee14, error vs KLU: AMD 7.2e-3, nested dissection 7.2e-2), so matching is

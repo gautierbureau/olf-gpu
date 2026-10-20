@@ -576,7 +576,7 @@ class GpuSaRemoteVoltageControlTest extends AbstractGpuSaTest {
      *  the guess lands there, as on network.xiidm/IZUM_0) it needs v ABOVE target and never fires
      *  while the members unpin on v BELOW it. The device then solved a pass with two sharing rows and
      *  no voltage identity. On network.xiidm/LNER that one pass put the distributed slack 0.151 MW off.
-     *  Now updatePilotVeqBatch restores the row from the members' state; the local entry is inert.
+     *  Now updatePilotTargetVEquationBatch restores the row from the members' state; the local entry is inert.
      *  With that restore disabled this fails at 407.08 kV against the CPU's 412.00 - the group never
      *  gets its voltage back. Three earlier shapes of this fixture PASSED without the fix and proved
      *  nothing: the members never unpinned, because active power through a near-lossless line moves
@@ -1061,7 +1061,7 @@ class GpuSaRemoteVoltageControlTest extends AbstractGpuSaTest {
         assertGpuMatchesCpu(network, ctgs, 1e-12, remotePinParameters());
     }
 
-    /** DEVICE all-pinned corner: when the LAST live member pins, updatePilotVeqBatch flips the
+    /** DEVICE all-pinned corner: when the LAST live member pins, updatePilotTargetVEquationBatch flips the
      *  pilot's V identity to a power row carrying the captured pilot-Q target (the relocation
      *  mode-scan already lands the pilot's balance there via the fallback candidate), and
      *  restores it on the first unpin. 1e-12 with engagement. */
@@ -1083,7 +1083,7 @@ class GpuSaRemoteVoltageControlTest extends AbstractGpuSaTest {
      *  PINS under the l45b outage — the shape the retired table-less-free-member whole-run gate
      *  used to CPU-route (2026-09-08): the singleton now carries a relocation table
      *  [pilot fallback, member], and its member's pin IS the all-pinned corner — the in-kernel
-     *  mode-scan finds no live candidate and updatePilotVeqBatch flips the pilot's V identity to
+     *  mode-scan finds no live candidate and updatePilotTargetVEquationBatch flips the pilot's V identity to
      *  a power row with the captured pilot Q. Base keeps control, the outage loses it (asserted
      *  on the CPU oracle); GPU SA == CPU SA at 1e-12 with the batch ENGAGED. */
     @Test

@@ -85,7 +85,7 @@ public final class GpuReactiveLimitsOuterLoop {
     /** The row whose target holds RL entry {@code i}'s pinned balance ({@code target + loadQ = the limit}).
      *  Its own V row, except for a pilot-self pilot enrolled in the candidate table (its V row is
      *  candidate 0 of a group and still a V identity, mode 0, while pinned): then the same pick the
-     *  device's {@code relocChoose} makes — the first OTHER candidate whose row is neither identity nor
+     *  device's {@code chooseCarrierRow} makes — the first OTHER candidate whose row is neither identity nor
      *  pinned (the carrier) — and its own row when none is live (the group lost control and the device
      *  flipped that row to a power row, mode 1). */
     private static int pinnedBalanceRow(GpuAcData data, int i, int vRowIn, int[] devModes) {
@@ -104,14 +104,14 @@ public final class GpuReactiveLimitsOuterLoop {
                 || vRow < 0 || vRow >= devModes.length || devModes[vRow] != GpuRowMode.FIXED_VARIABLE) {
             return vRow;
         }
-        int[] qrPtr = data.reactiveRelocation().groupStart();
-        int[] qrRows = data.reactiveRelocation().candidateRows();
-        for (int g = 0; g + 1 < qrPtr.length; g++) {
-            if (qrRows[qrPtr[g]] != vRow) {
+        int[] reactiveRelocationGroupStart = data.reactiveRelocation().groupStart();
+        int[] reactiveRelocationCandidateRows = data.reactiveRelocation().candidateRows();
+        for (int g = 0; g + 1 < reactiveRelocationGroupStart.length; g++) {
+            if (reactiveRelocationCandidateRows[reactiveRelocationGroupStart[g]] != vRow) {
                 continue;
             }
-            for (int c = qrPtr[g] + 1; c < qrPtr[g + 1]; c++) {
-                int r = qrRows[c];
+            for (int c = reactiveRelocationGroupStart[g] + 1; c < reactiveRelocationGroupStart[g + 1]; c++) {
+                int r = reactiveRelocationCandidateRows[c];
                 if (r == vRow) {
                     continue;
                 }

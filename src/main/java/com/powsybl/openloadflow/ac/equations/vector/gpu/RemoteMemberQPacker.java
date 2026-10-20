@@ -88,15 +88,15 @@ public final class RemoteMemberQPacker {
                 if (!member || vCol[bus.getNum()] < 0 || !(bus.getMinQ() < bus.getMaxQ())) {
                     continue;                                // mirror the RL pack's remote-entry condition
                 }
-                // A pilot-self pilot whose Q is RE-ROUTED through a candidate table (qRowAlt = -2-g) already gets
-                // its own injection at its own row from the diagnostic fill: patchFrozenGroupDests points the
+                // A pilot-self pilot whose Q is RE-ROUTED through a candidate table (alternateQRow = -2-g) already gets
+                // its own injection at its own row from the diagnostic fill: patchGroupFrozenDestinations points the
                 // group's frozen role-0 dest at the table's FALLBACK row, which for such a pilot IS its own row.
                 // Adding the remoteMemberReactiveTerms twin on top counted it TWICE. Measured on rte6515 VL-6112_0 with the rotation
                 // property on: q read 0.603080467 where OLF has 0.910540234, and
                 // 1.218 (loadQ) + 2 * (0.910540234 - 1.218) = 0.603080 — the doubled injection, to six digits.
                 // The reactive-limit check then never saw the pilot beyond its limit and never pinned it, which
                 // is what kept the rotation path from ever reaching the pinned arrangement it exists for.
-                if (PilotSelfPacker.isPilotSelfEntry(bus) && columns.qRowAlt()[bus.getNum()] <= -2) {
+                if (PilotSelfPacker.isPilotSelfEntry(bus) && columns.alternateQRow()[bus.getNum()] <= -2) {
                     continue;
                 }
                 var vc = bus.getGeneratorVoltageControl().orElseThrow();
@@ -108,7 +108,7 @@ public final class RemoteMemberQPacker {
                 // the own row left the check reading ZERO for every relocated member, so it could never pin one —
                 // measured on rte6515's full busbar scope: the device's base stopped after its first
                 // ReactiveLimits pass where OLF takes three, and came back MAX_ITERATION_REACHED.
-                int row = GpuAcRowIndexing.relocatedQRow(bus.getNum(), columns.ziParentEdge(),
+                int row = GpuAcRowIndexing.relocatedQRow(bus.getNum(), columns.spanningTreeParentBranch(),
                         columns.dummyQCol(), vCol);
                 if (bus.getShunt().isPresent()) {
                     out.add(new int[] {row, family.shuntElementOf()[bus.getNum()], 0, GpuReactiveTermKind.SHUNT_COMPENSATOR_REACTIVE_FLOW});
@@ -134,9 +134,9 @@ public final class RemoteMemberQPacker {
                     // every coupler, not just the base tree's: a coupler out of it is pinned at dummyQ = 0 and adds
                     // nothing, and one a contingency brings into OLF's tree carries this member's reactive flow
                     if (br.isZeroImpedance(LoadFlowModel.AC)) {
-                        int dqCol = columns.dummyQCol()[br.getNum()];
-                        if (dqCol >= 0) {
-                            out.add(new int[] {row, dqCol, side, GpuReactiveTermKind.DUMMY_Q});
+                        int dummyQColumn = columns.dummyQCol()[br.getNum()];
+                        if (dummyQColumn >= 0) {
+                            out.add(new int[] {row, dummyQColumn, side, GpuReactiveTermKind.DUMMY_Q});
                             w.add(side == 0 ? 1.0 : -1.0);
                         }
                     }

@@ -34,13 +34,13 @@ void setupBatchMatricesUbatch(BatchSolverContext* ctx) {
     //      cuDSS analyzes a single block (cheap) and factorizes/solves all nS via UBATCH_SIZE. ----
     {
         int ub = nScenarios;
-        CUDSS_CHECK(cudssConfigSet(ctx->ds.config, CUDSS_CONFIG_UBATCH_SIZE, &ub, sizeof(ub)));
-        CUDSS_CHECK(cudssMatrixCreateCsr(&ctx->matUb, n, n, ctx->nnz,
+        CUDSS_CHECK(cudssConfigSet(ctx->solver.config, CUDSS_CONFIG_UBATCH_SIZE, &ub, sizeof(ub)));
+        CUDSS_CHECK(cudssMatrixCreateCsr(&ctx->uniformBatchSystemMatrix, n, n, ctx->nnz,
                 ctx->st->dRowPtr.as<int>(), nullptr, ctx->st->dColIdx.as<int>(), ctx->dVals.as<double>(),
                 OLF_CUDSS_CSR_TYPES,
                 CUDSS_MTYPE_GENERAL, CUDSS_MVIEW_FULL, CUDSS_BASE_ZERO));
-        CUDSS_CHECK(cudssMatrixCreateDn(&ctx->matUbB, n, 1, n, ctx->dB.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
-        CUDSS_CHECK(cudssMatrixCreateDn(&ctx->matUbX, n, 1, n, ctx->dDx.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
+        CUDSS_CHECK(cudssMatrixCreateDn(&ctx->uniformBatchRightHandSideMatrix, n, 1, n, ctx->dB.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
+        CUDSS_CHECK(cudssMatrixCreateDn(&ctx->uniformBatchSolutionMatrix, n, 1, n, ctx->dDx.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
         // adaptive refinement: the residual and the correction, the same single-block dense shape as B and X
         if (!ctx->dR.p) {
             ctx->dR.alloc(static_cast<size_t>(n) * ctx->nScenarios * sizeof(double));
@@ -50,23 +50,23 @@ void setupBatchMatricesUbatch(BatchSolverContext* ctx) {
             CUDA_CHECK(cudaMemset(ctx->dR.p, 0, static_cast<size_t>(n) * ctx->nScenarios * sizeof(double)));
             CUDA_CHECK(cudaMemset(ctx->dDelta.p, 0, static_cast<size_t>(n) * ctx->nScenarios * sizeof(double)));
         }
-        if (!ctx->dIrScore.p) {
-            ctx->dIrScore.alloc(static_cast<size_t>(ctx->nScenarios) * sizeof(double));
+        if (!ctx->dIterativeRefinementScore.p) {
+            ctx->dIterativeRefinementScore.alloc(static_cast<size_t>(ctx->nScenarios) * sizeof(double));
         }
-        CUDSS_CHECK(cudssMatrixCreateDn(&ctx->matUbR, n, 1, n, ctx->dR.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
-        CUDSS_CHECK(cudssMatrixCreateDn(&ctx->matUbDelta, n, 1, n, ctx->dDelta.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
+        CUDSS_CHECK(cudssMatrixCreateDn(&ctx->uniformBatchResidualMatrix, n, 1, n, ctx->dR.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
+        CUDSS_CHECK(cudssMatrixCreateDn(&ctx->uniformBatchDeltaMatrix, n, 1, n, ctx->dDelta.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
     }
 }
 
 void setupBatchMatricesFallback(BatchSolverContext* ctx) {
     int n = ctx->n;
     // ---- fallback: a single matrix repointed per scenario inside the solve loop ----
-    CUDSS_CHECK(cudssMatrixCreateCsr(&ctx->ds.matA, n, n, ctx->nnz,
+    CUDSS_CHECK(cudssMatrixCreateCsr(&ctx->solver.systemMatrix, n, n, ctx->nnz,
                                      ctx->st->dRowPtr.as<int>(), nullptr, ctx->st->dColIdx.as<int>(), ctx->dVals.as<double>(),
                                      OLF_CUDSS_CSR_TYPES,
                                      CUDSS_MTYPE_GENERAL, CUDSS_MVIEW_FULL, CUDSS_BASE_ZERO));
-    CUDSS_CHECK(cudssMatrixCreateDn(&ctx->ds.matB, n, 1, n, ctx->dB.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
-    CUDSS_CHECK(cudssMatrixCreateDn(&ctx->ds.matX, n, 1, n, ctx->dDx.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
+    CUDSS_CHECK(cudssMatrixCreateDn(&ctx->solver.rightHandSideMatrix, n, 1, n, ctx->dB.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
+    CUDSS_CHECK(cudssMatrixCreateDn(&ctx->solver.solutionMatrix, n, 1, n, ctx->dDx.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
 }
 
 BatchSolverContext* createBatchContext(const SharedStructurePtr& st, int nScenarios, int mode,
@@ -119,7 +119,7 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& st, int nScenar
     ctx->dQbuf.alloc(static_cast<size_t>(n) * nScenarios * sizeof(double));
     ctx->dOuterLoopCheckActive.alloc(static_cast<size_t>(nScenarios) * sizeof(char));
     ctx->dOuterLoopUnstable.alloc(static_cast<size_t>(nScenarios) * sizeof(char));
-    // The seed launch of updatePilotVeqBatch / updateDistrQTargetsBatch (before the first solve) READS
+    // The seed launch of updatePilotTargetVEquationBatch / updateDistrQTargetsBatch (before the first solve) READS
     // dOuterLoopCheckActive and relies on "not active yet" = 0; the RL pass is what first writes it. Explicit, not
     // left to the allocator's zeroing.
     CUDA_CHECK(cudaMemset(ctx->dOuterLoopCheckActive.p, 0, static_cast<size_t>(nScenarios) * sizeof(char)));
@@ -132,17 +132,17 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& st, int nScenar
     // Derive the PILOT-SELF groups from the candidate table itself: the fallback row repeated among the
     // member rows means the controlled bus is one of its own controllers. The pilot's RL entry is the one
     // whose (row-mapped) V row is that row; without an entry the pilot can never pin and the group needs
-    // no gate. nQr is small (groups), nReactiveLimitEntries a few thousand, and this runs once per context.
-    int nQrG = ctx->st != nullptr ? ctx->st->nQr : 0;
-    if (nQrG > 0) {
-        std::vector<int> psEntry(nQrG, -1);
-        for (int g = 0; g < nQrG; g++) {
-            int p0 = ctx->st->hQrPtr[g];
-            int cnt = ctx->st->hQrPtr[g + 1] - p0;
-            int fallbackRow = ctx->st->hQrRows[p0];
+    // no gate. nReactiveRelocationGroups is small (groups), nReactiveLimitEntries a few thousand, and this runs once per context.
+    int nRelocationGroups = ctx->st != nullptr ? ctx->st->nReactiveRelocationGroups : 0;
+    if (nRelocationGroups > 0) {
+        std::vector<int> pilotSelfReactiveLimitEntry(nRelocationGroups, -1);
+        for (int g = 0; g < nRelocationGroups; g++) {
+            int p0 = ctx->st->hReactiveRelocationGroupStart[g];
+            int cnt = ctx->st->hReactiveRelocationGroupStart[g + 1] - p0;
+            int fallbackRow = ctx->st->hReactiveRelocationCandidateRows[p0];
             bool pilotSelf = false;
             for (int c = 1; c < cnt; c++) {
-                if (ctx->st->hQrRows[p0 + c] == fallbackRow) {
+                if (ctx->st->hReactiveRelocationCandidateRows[p0 + c] == fallbackRow) {
                     pilotSelf = true;
                     break;
                 }
@@ -150,32 +150,32 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& st, int nScenar
             if (!pilotSelf) {
                 continue;                                // not a pilot-self group: -1, no gate (raw q as always)
             }
-            // PS_NO_ENTRY (-2), not -1: a pilot-self pilot with NO reactive-limit entry can never be PINNED
+            // PILOT_SELF_NO_REACTIVE_LIMIT_ENTRY (-2), not -1: a pilot-self pilot with NO reactive-limit entry can never be PINNED
             // (limits off for the run, or an empty q range), so it controls for the whole solve and its raw q
             // must ALWAYS be skipped — the gate is needed MORE, not less, than for a pinnable one. Read as
             // "no gate" (-1, the non-pilot-self value) it was emitted at the carrier row on top of the very
             // DISTR_Q terms it feeds: with reactive limits disabled on rte6515 the base started at
             // |f(x0)| 117.908 against OLF's 117.845 and the device's load flow never converged.
-            psEntry[g] = PS_NO_ENTRY;
+            pilotSelfReactiveLimitEntry[g] = PILOT_SELF_NO_REACTIVE_LIMIT_ENTRY;
             ctx->hasPilotSelf = true;
             for (int i = 0; i < nReactiveLimitEntries; i++) {
                 if (rowMap[reactiveLimitVoltageRow[i]] == fallbackRow) {
-                    psEntry[g] = i;
+                    pilotSelfReactiveLimitEntry[g] = i;
                     break;
                 }
             }
         }
         if (ctx->hasPilotSelf) {
-            ctx->dPsPilotEntry.upload(psEntry.data(), psEntry.size() * sizeof(int));
-            ctx->dPsSkip.alloc(static_cast<size_t>(nQrG) * ctx->nScenarios * sizeof(char));
+            ctx->dPilotSelfReactiveLimitEntry.upload(pilotSelfReactiveLimitEntry.data(), pilotSelfReactiveLimitEntry.size() * sizeof(int));
+            ctx->dPilotSelfCarrierSkip.alloc(static_cast<size_t>(nRelocationGroups) * ctx->nScenarios * sizeof(char));
             if (std::getenv("OLF_GPU_RL_TRACE") != nullptr) {
                 int cnt = 0, noEntry = 0;
-                for (int g = 0; g < nQrG; g++) {
-                    cnt += psEntry[g] >= 0 ? 1 : 0;
-                    noEntry += psEntry[g] == PS_NO_ENTRY ? 1 : 0;
+                for (int g = 0; g < nRelocationGroups; g++) {
+                    cnt += pilotSelfReactiveLimitEntry[g] >= 0 ? 1 : 0;
+                    noEntry += pilotSelfReactiveLimitEntry[g] == PILOT_SELF_NO_REACTIVE_LIMIT_ENTRY ? 1 : 0;
                 }
                 std::fprintf(stderr, "PILOTSELF_GATE groups=%d(+%d never-pinnable) of %d nReactiveLimitEntries=%d\n",
-                             cnt, noEntry, nQrG, nReactiveLimitEntries);
+                             cnt, noEntry, nRelocationGroups, nReactiveLimitEntries);
             }
         }
     }
@@ -287,17 +287,17 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& st, int nScenar
 
     // ---- cuDSS handle/config/data (shared by both solve paths) ----
     CUDA_CHECK(cudaStreamCreate(&ctx->stream));
-    CUDSS_CHECK(cudssCreate(&ctx->ds.handle));
-    CUDSS_CHECK(cudssSetStream(ctx->ds.handle, ctx->stream));
-    CUDSS_CHECK(cudssConfigCreate(&ctx->ds.config));
-    int ir = ctx->st->nZeroImpedanceBranch > 0 ? irBaseSteps() : IR_N_STEPS;
-    CUDSS_CHECK(cudssConfigSet(ctx->ds.config, CUDSS_CONFIG_IR_N_STEPS, &ir, sizeof(ir)));
+    CUDSS_CHECK(cudssCreate(&ctx->solver.handle));
+    CUDSS_CHECK(cudssSetStream(ctx->solver.handle, ctx->stream));
+    CUDSS_CHECK(cudssConfigCreate(&ctx->solver.config));
+    int ir = ctx->st->nZeroImpedanceBranch > 0 ? configuredIterativeRefinementBaseSteps() : ITERATIVE_REFINEMENT_STEPS_WITHOUT_COUPLERS;
+    CUDSS_CHECK(cudssConfigSet(ctx->solver.config, CUDSS_CONFIG_IR_N_STEPS, &ir, sizeof(ir)));
     if (mode == GpuLinearSolveMode::ROBUST) {
-        applyRobustSingleMatrixConfig(ctx->ds.config);       // its own ordering: never set the ordering twice
+        applyRobustSingleMatrixConfig(ctx->solver.config);       // its own ordering: never set the ordering twice
     } else {
-        applyReorderAlg(ctx->ds.config, ctx->st->nZeroImpedanceBranch > 0);
+        applyReorderAlg(ctx->solver.config, ctx->st->nZeroImpedanceBranch > 0);
     }
-    CUDSS_CHECK(cudssDataCreate(ctx->ds.handle, &ctx->ds.data));
+    CUDSS_CHECK(cudssDataCreate(ctx->solver.handle, &ctx->solver.data));
 
     if (mode == GpuLinearSolveMode::UBATCH) {
         setupBatchMatricesUbatch(ctx.get());
@@ -307,20 +307,20 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& st, int nScenar
     return ctx.release();
 }
 
-void uploadBatchOverrides(BatchSolverContext* ctx, int lsMode, double maxDv, double maxDphi,
+void uploadBatchOverrides(BatchSolverContext* ctx, int stateVectorScalingMode, double maxDv, double maxDphi,
                           const int* varType, int nShuntAdmittanceOverrides, const int* shuntAdmittanceOverrideScenarioElement, const double* shuntAdmittanceOverrideDelta,
                           int nBaseClosedZeroImpedanceBranches, int nZeroImpedanceBranchOpenOverrides, const int* zeroImpedanceBranchOpenScenarioElement,
                           int nZeroImpedanceBranchCloseOverrides, const int* zeroImpedanceBranchCloseScenarioElement,
                           int nR1Ov, const int* r1OvSlotElem, const double* r1OvVal) {
     int n = ctx->n;
     int nS = ctx->nScenarios;
-    bool clampStep = lsMode == GpuStateVectorScalingMode::MAX_VOLTAGE_CHANGE && varType != nullptr;
+    bool clampStep = stateVectorScalingMode == GpuStateVectorScalingMode::MAX_VOLTAGE_CHANGE && varType != nullptr;
     if (clampStep && !ctx->dVarType.p) {
         ctx->dVarType.upload(varType, static_cast<size_t>(n) * sizeof(int));
         ctx->dStepFactor.alloc(static_cast<size_t>(nS) * sizeof(double));
     }
-    if (lsMode == GpuStateVectorScalingMode::LINE_SEARCH) {                                       // LINE_SEARCH backtracking buffers
-        if (!ctx->dXprevLs.p) ctx->dXprevLs.alloc(static_cast<size_t>(n) * nS * sizeof(double));
+    if (stateVectorScalingMode == GpuStateVectorScalingMode::LINE_SEARCH) {                                       // LINE_SEARCH backtracking buffers
+        if (!ctx->dLineSearchPreviousX.p) ctx->dLineSearchPreviousX.alloc(static_cast<size_t>(n) * nS * sizeof(double));
         if (!ctx->dStepFactor.p) ctx->dStepFactor.alloc(static_cast<size_t>(nS) * sizeof(double));
     }
     ctx->clampStep = clampStep;

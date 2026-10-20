@@ -46,7 +46,7 @@ __global__ void reactiveLimitsBatch(const double* secondaryVoltageControlReactiv
                                     const double* reactiveLimitInitialTargetQ, double vLoRobust, double vHiRobust,
                                     int robust,
                                     int reactiveLimitsDecisionLogScenario, double* reactiveLimitsDecisionLog, int* reactiveLimitsDecisionLogCount, int passId,
-                                    const int* psEntry, int nQr,
+                                    const int* pilotSelfReactiveLimitEntry, int nReactiveRelocationGroups,
                                     const char* reactiveLimitLocalOverride, const double* reactiveLimitLocalTargetV,
                                     const char* reactiveLimitPqPvSwitchForbidden, char* unpinBad, const char* reactiveLimitFlags,
                                     const int* reactiveLimitComparedVoltageRowOverride) {
@@ -102,7 +102,7 @@ __global__ void reactiveLimitsBatch(const double* secondaryVoltageControlReactiv
         // The FREE member pins the same way (plan-B4): the fill kernels re-pick the pilot-Q
         // carrier by mode-scan over the relocation candidates, and updateDistrQTargetsBatch
         // hands the pilot's Q target to the new carrier's row. When the LAST live member pins,
-        // updatePilotVeqBatch flips the pilot's V identity to a power row (control lost) and
+        // updatePilotTargetVEquationBatch flips the pilot's V identity to a power row (control lost) and
         // restores it on the first unpin — the all-pinned corner runs on-device too.
         size_t ridx = (size_t) s * n + reactiveLimitVoltageRow[i];            // the bus's own V variable: every VOLTAGE read
         // ...and the row its reactive balance and pin live on. The coupler-tree relocation moves it to the parent
@@ -111,8 +111,8 @@ __global__ void reactiveLimitsBatch(const double* secondaryVoltageControlReactiv
         // exactly what mode 0 there means (the same test the zero-impedance scatter's stock-placement fallback uses).
         size_t qidx = ridx;
         if (reactiveLimitReactivePowerRow != nullptr && reactiveLimitReactivePowerRow[i] != reactiveLimitVoltageRow[i]) {
-            size_t relocIdx = (size_t) s * n + reactiveLimitReactivePowerRow[i];
-            qidx = mode[relocIdx] == GpuRowMode::FIXED_VARIABLE ? ridx : relocIdx;
+            size_t relocatedQRowIndex = (size_t) s * n + reactiveLimitReactivePowerRow[i];
+            qidx = mode[relocatedQRowIndex] == GpuRowMode::FIXED_VARIABLE ? ridx : relocatedQRowIndex;
         }
         size_t rst = (size_t) s * nReactiveLimitEntries + i;
         size_t remoteLimitIndex = perScenarioReactiveLimits ? rst : (size_t) i;
@@ -127,7 +127,7 @@ __global__ void reactiveLimitsBatch(const double* secondaryVoltageControlReactiv
         // alternate dest). Everything else (q via the remote q pack, the pilot's V as compare row)
         // is a remote member's. As a LOCAL entry its pin landed on mode 1, an EMPTY row.
         int pvForm = reactiveLimitVoltageControlRole[i] == GpuVoltageControlRole::PILOT_SELF ? GpuRowMode::FIXED_VARIABLE : GpuRowMode::EQUATION;
-        bool enrolledPilot = reactiveLimitVoltageControlRole[i] == GpuVoltageControlRole::PILOT_SELF && isEnrolledPilot(psEntry, nQr, i);
+        bool enrolledPilot = reactiveLimitVoltageControlRole[i] == GpuVoltageControlRole::PILOT_SELF && isEnrolledPilot(pilotSelfReactiveLimitEntry, nReactiveRelocationGroups, i);
         if (limitType[rst] == GpuQLimitType::NONE) {
             if (mode[qidx] != pvForm) return;                // islanded / frozen this scenario
             double q = qBuf[qidx] + reactiveLimitLoadQ[remoteLimitIndex];            // own q via fillRemoteMemberQBatch
@@ -267,7 +267,7 @@ __global__ void reactiveLimitsBatch(const double* secondaryVoltageControlReactiv
     // balance for a pass, which perturbs the whole group, and once per ~2000 contingencies it
     // changes a real downstream pin (8.178e-05 kV on the KUMB group).
     // Neither direction is this entry's to decide. The pin is refused (above), and the switch-back
-    // is not its either: the pilot's row follows its MEMBERS — updatePilotVeqBatch drops the V
+    // is not its either: the pilot's row follows its MEMBERS — updatePilotTargetVEquationBatch drops the V
     // identity when the last member pins and gives it back when one unpins, base-lost groups
     // included. Blocking both directions used to leave network.xiidm/LKPH 0.32 kV off because
     // nothing restored the row then; now something does, in the same pass OLF does it, and this
@@ -448,7 +448,7 @@ __global__ void reactiveLimitsForcedPvBatch(int nReactiveLimitEntries, int nScen
 // members at their own Q. One thread per (scenario, class-2 entry).
 __global__ void pilotSelfMixedPvPqGate(int nReactiveLimitEntries, int nScenarios, const char* reactiveLimitVoltageControlRole, const int* reactiveLimitComparedVoltageRow,
                                      const char* limitType, const char* reactiveLimitIslanded, char* bad,
-                                     const int* psEntry, int nQr,
+                                     const int* pilotSelfReactiveLimitEntry, int nReactiveRelocationGroups,
                                 int nDistrQMembers, const int* distrQMemberReactiveLimitEntry, const char* distrQSubgroup) {
     int t = blockIdx.x * blockDim.x + threadIdx.x;
     if (t >= nReactiveLimitEntries * nScenarios) return;
@@ -458,7 +458,7 @@ __global__ void pilotSelfMixedPvPqGate(int nReactiveLimitEntries, int nScenarios
     // ...that is still ON this component: an islanded pilot keeps its base limit type but has no pin and no
     // balance (OLF removed the bus), and an islanded member is not "still controlling" either.
     if (reactiveLimitIslanded != nullptr && reactiveLimitIslanded[(size_t) s * nReactiveLimitEntries + i]) return;
-    if (isEnrolledPilot(psEntry, nQr, i)) return;            // enrolled (rotation): the carrier hosts its balance
+    if (isEnrolledPilot(pilotSelfReactiveLimitEntry, nReactiveRelocationGroups, i)) return;            // enrolled (rotation): the carrier hosts its balance
     for (int j = 0; j < nReactiveLimitEntries; j++) {                          // ... with a member still controlling
         if (j != i && reactiveLimitComparedVoltageRow[j] == reactiveLimitComparedVoltageRow[i] && reactiveLimitVoltageControlRole[j] != GpuVoltageControlRole::LOCAL
                 && limitType[(size_t) s * nReactiveLimitEntries + j] == GpuQLimitType::NONE
@@ -576,7 +576,7 @@ void reactiveLimitsCheck(BatchSolverContext* ctx, DriverPass& drv, int loopKind)
                 ctx->reactiveLimitsRobustMinRealisticVoltage, ctx->reactiveLimitsRobustMaxRealisticVoltage, ctx->reactiveLimitsRobustMode,
                 reactiveLimitsDecisionLogScenario, ctx->dReactiveLimitsDecisionLog.p ? ctx->dReactiveLimitsDecisionLog.as<double>() : nullptr,
                 ctx->dReactiveLimitsDecisionLogCount.p ? ctx->dReactiveLimitsDecisionLogCount.as<int>() : nullptr, outer,
-                psEntryPtr(ctx), ctx->st->nQr,
+                pilotSelfReactiveLimitEntryOrNull(ctx), ctx->st->nReactiveRelocationGroups,
                 ctx->nReactiveLimitLocalOverrides > 0 ? ctx->dReactiveLimitLocalOverride.as<char>() : nullptr,
                 ctx->nReactiveLimitLocalOverrides > 0 ? ctx->dReactiveLimitLocalTargetV.as<double>() : nullptr,
                 ctx->nReactiveLimitPqPvSwitchForbidden > 0 ? ctx->dReactiveLimitPqPvSwitchForbidden.as<char>() : nullptr, ctx->nReactiveLimitPqPvSwitchForbidden > 0 ? ctx->dReactiveLimitPqPvSwitchRejected.as<char>() : nullptr,
@@ -591,7 +591,7 @@ void reactiveLimitsCheck(BatchSolverContext* ctx, DriverPass& drv, int loopKind)
                     ctx->dReactiveLimitVoltageControlRole.as<char>(), ctx->dReactiveLimitComparedVoltageRow.as<int>(), ctx->dReactiveLimitQLimitType.as<char>(),
                     ctx->nReactiveLimitIslanded > 0 ? ctx->dReactiveLimitIslanded.as<char>() : nullptr,
                     ctx->dPilotSelfMixedPvPqRejected.as<char>(),
-                    psEntryPtr(ctx), ctx->st->nQr,
+                    pilotSelfReactiveLimitEntryOrNull(ctx), ctx->st->nReactiveRelocationGroups,
                 ctx->nDistrQMembers, ctx->dDistrQMemberReactiveLimitEntry.p != nullptr ? ctx->dDistrQMemberReactiveLimitEntry.as<int>() : nullptr, ctx->hasDistrQSubgroups ? ctx->dDistrQSubgroup.as<char>() : nullptr);
             std::vector<char> mixed(nS);
             CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
@@ -636,7 +636,7 @@ void reactiveLimitsCheck(BatchSolverContext* ctx, DriverPass& drv, int loopKind)
                     ctx->dMode.as<int>(), ctx->dTarget.as<double>(), ctx->dOuterLoopCheckActive.as<char>(), ctx->dOuterLoopUnstable.as<char>());
         }
         // The pilot's V-identity flip/restore runs BEFORE the DISTR_Q targets: the carrier hand-off picks the
-        // carrier with relocChoose, which reads the pilot's own row (candidate 1 of a pilot-self group).
+        // carrier with chooseCarrierRow, which reads the pilot's own row (candidate 1 of a pilot-self group).
         // Measured with the order reversed (rte6515 busbar base, group VL-5997): the member that just
         // switched back was handed a target of 0 while the pilot's row was still flipped, its row then
         // hosted the pilot's balance against that 0, and it re-pinned every other pass until maxSwitch.
@@ -657,8 +657,8 @@ void reactiveLimitsCheck(BatchSolverContext* ctx, DriverPass& drv, int loopKind)
                     ctx->dPfFlipped.as<char>(), ctx->dPfSavedVT.as<double>(),
                     ctx->dOuterLoopCheckActive.as<char>(), ctx->dOuterLoopUnstable.as<char>());
         }
-        if (ctx->hasDistrQRelocationGroups && ctx->st->nQr > 0) {    // all-pinned corner: pilot vEq flip/restore
-            launchPilotVeqInner(ctx, drv);
+        if (ctx->hasDistrQRelocationGroups && ctx->st->nReactiveRelocationGroups > 0) {    // all-pinned corner: pilot vEq flip/restore
+            launchPilotTargetVEquationUpdate(ctx, drv);
         }
         if (ctx->nReactiveLimitRemoteEntries > 0 && ctx->nDistrQMembers > 0) {
             // keep the survivors' DISTR_Q row targets in step with the pin states (plan-B3)

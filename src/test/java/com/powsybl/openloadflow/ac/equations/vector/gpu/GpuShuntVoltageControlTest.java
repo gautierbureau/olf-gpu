@@ -184,7 +184,7 @@ class GpuShuntVoltageControlTest {
      * reference to machine precision.
      */
     @Test
-    void dynQRelocUnlocksSharedStructureShuntControl() {
+    void dynamicQRelocationUnlocksSharedStructureShuntControl() {
         Network iidm = ShuntNetworkFactory.create();
         LfNetworkParameters params = new LfNetworkParameters()
                 .setSlackBusSelector(new FirstSlackBusSelector())

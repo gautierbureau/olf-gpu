@@ -65,7 +65,7 @@ __device__ inline double distrQTargetQOf(int nTqOv, const int* tqOvKey, const do
 // voltage freeze at its CEILING (g1 frozen at 10 MVar with a 6000 MVar maxQ on the three-controller fixture)
 // and a generator-lost member at its lost generator's maximum.
 __device__ inline double pinnedTargetQ(int s, int e, int n, int nReactiveLimitEntries, const int* mode, const double* target,
-                                       const int* reactiveLimitVoltageRow, const int* reactiveLimitReactivePowerRow, const int* relocOwn,
+                                       const int* reactiveLimitVoltageRow, const int* reactiveLimitReactivePowerRow, const int* relocatedChildOwnRow,
                                        const char* limitType, const double* reactiveLimitMinQ, const double* reactiveLimitMaxQ,
                                        const double* reactiveLimitLoadQ, int perScenarioReactiveLimits, const double* reactiveLimitInitialTargetQ,
                                        const char* reactiveLimitGeneratorsLost) {
@@ -77,8 +77,8 @@ __device__ inline double pinnedTargetQ(int s, int e, int n, int nReactiveLimitEn
     if (vrow >= 0 && vrow != qrow && mode[(size_t) s * n + vrow] == GpuRowMode::BUS_TARGET_Q) {  // the balance went home (coupler opened)
         return target[(size_t) s * n + vrow];
     }
-    if (qrow >= 0 && relocOwn != nullptr && relocOwn[qrow] >= 0 && mode[(size_t) s * n + relocOwn[qrow]] == GpuRowMode::BUS_TARGET_Q) {
-        return target[(size_t) s * n + relocOwn[qrow]];
+    if (qrow >= 0 && relocatedChildOwnRow != nullptr && relocatedChildOwnRow[qrow] >= 0 && mode[(size_t) s * n + relocatedChildOwnRow[qrow]] == GpuRowMode::BUS_TARGET_Q) {
+        return target[(size_t) s * n + relocatedChildOwnRow[qrow]];
     }
     char lt = limitType[(size_t) s * nReactiveLimitEntries + e];
     size_t li = perScenarioReactiveLimits ? (size_t) s * nReactiveLimitEntries + e : (size_t) e;
@@ -97,15 +97,15 @@ __global__ void updateDistrQTargetsBatch(int nMembers, int nScenarios, int n, in
                                          const int* reactiveLimitVoltageRow, const double* reactiveLimitMinQ, const double* reactiveLimitMaxQ,
                                          const double* reactiveLimitLoadQ, const char* limitType, int perScenarioReactiveLimits,
                                          double* target, const char* outerLoopCheckActive, const double* mTargetQ,
-                                         const int* mQrGroup, const int* qrPtr, const int* qrRows,
-                                         const int* mode, const double* pilotQ, int nQr,
+                                         const int* memberRelocationGroup, const int* reactiveRelocationGroupStart, const int* reactiveRelocationCandidateRows,
+                                         const int* mode, const double* pilotQ, int nReactiveRelocationGroups,
                                          int nDistrQInactiveMembers, const int* distrQInactiveScenarioMember,
                                          int nFrozen, const int* frozenSlotRow,
                                          int nTqOv, const int* tqOvKey, const double* tqOvVal,
                                          const int* mTgtPtr, const int* mTgtPeer,
-                                         const int* psEntry, const int* relocOwn,
-                                const char* distrQSubgroup, const int* qrMemberStart, const char* reactiveLimitGeneratorsLost,
-                                const int* qrDepBase, const char* veqOff,
+                                         const int* pilotSelfReactiveLimitEntry, const int* relocatedChildOwnRow,
+                                const char* distrQSubgroup, const int* reactiveRelocationDistrQMemberStart, const char* reactiveLimitGeneratorsLost,
+                                const int* reactiveRelocationDependentBaseGroup, const char* pilotTargetVDeactivated,
                                 const double* reactiveLimitInitialTargetQ, const int* reactiveLimitReactivePowerRow,
                                 int nDistrQKeyOverrides, const int* distrQKeyOverrideScenarioMember, const double* distrQKeyOverrideKey) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -113,7 +113,7 @@ __global__ void updateDistrQTargetsBatch(int nMembers, int nScenarios, int n, in
     int k = tid % nMembers;
     int s = tid / nMembers;
     if (!outerLoopCheckActive[s]) return;
-    int qg = mQrGroup != nullptr ? mQrGroup[k] : -1;
+    int qg = memberRelocationGroup != nullptr ? memberRelocationGroup[k] : -1;
     if (!mHasRow[k] && qg < 0) return;                       // only members owning a packed DISTR_Q row
                                                              // (or linked to a relocation group, plan-B4)
     // STOCK PLACEMENT: this member's packed DISTR_Q row is its parent coupler's DUMMY_Q row, and a
@@ -122,8 +122,8 @@ __global__ void updateDistrQTargetsBatch(int nMembers, int nScenarios, int n, in
     // identity test below returned and the diverted row kept target 0: measured on the middle-section-loss
     // fixtures as 401.35 kV against OLF's 401.69 once the equation itself had moved.
     int mrow = mRow[k];
-    if (mrow >= 0 && relocOwn != nullptr && relocOwn[mrow] >= 0 && mode[(size_t) s * n + mrow] == GpuRowMode::FIXED_VARIABLE) {
-        mrow = relocOwn[mrow];
+    if (mrow >= 0 && relocatedChildOwnRow != nullptr && relocatedChildOwnRow[mrow] >= 0 && mode[(size_t) s * n + mrow] == GpuRowMode::FIXED_VARIABLE) {
+        mrow = relocatedChildOwnRow[mrow];
     }
     if (mrow >= 0 && rowIsFrozen(nFrozen, frozenSlotRow, s, mrow)) {
         return;                                              // islanded: the row is frozen, not ours to write
@@ -152,37 +152,37 @@ __global__ void updateDistrQTargetsBatch(int nMembers, int nScenarios, int n, in
         // Q target (captured at solve init); its DISTR_Q compensation does not apply. A non-carrier
         // member without a packed DISTR_Q row (the base free member, superseded mid-scenario) has
         // no row to maintain here — the RL kernel owns it while pinned.
-        int carrier = qrRows[qrPtr[qg] + relocChooseSub(qg, qrPtr, qrRows, mode + (size_t) s * n,
-                distrQSubgroup != nullptr ? distrQSubgroup + (size_t) s * nMembers : nullptr, qrMemberStart)];
+        int carrier = reactiveRelocationCandidateRows[reactiveRelocationGroupStart[qg] + chooseCarrierRowInSubgroup(qg, reactiveRelocationGroupStart, reactiveRelocationCandidateRows, mode + (size_t) s * n,
+                distrQSubgroup != nullptr ? distrQSubgroup + (size_t) s * nMembers : nullptr, reactiveRelocationDistrQMemberStart)];
         // A group whose PILOT ROW is frozen this scenario has lost its pilot to an island (tasks #69): its
         // surviving sections form a NEW group OLF re-elects a main for, and that main's sharing rows are
         // plain DISTR_Q rows renormalized over the survivors — there is NO base-pilot balance left to
         // relocate onto a carrier. Writing pilotQ (the dead pilot's BASE target) there would replace the
-        // survivor's sharing equation with a stale number. updatePilotVeqBatch already exits on the same
+        // survivor's sharing equation with a stale number. updatePilotTargetVEquationBatch already exits on the same
         // test; this is its counterpart on the target side.
-        bool pilotFrozen = rowIsFrozen(nFrozen, frozenSlotRow, s, qrRows[qrPtr[qg]]);
-        if (pilotFrozen && qrDepBase != nullptr) {
+        bool pilotFrozen = rowIsFrozen(nFrozen, frozenSlotRow, s, reactiveRelocationCandidateRows[reactiveRelocationGroupStart[qg]]);
+        if (pilotFrozen && reactiveRelocationDependentBaseGroup != nullptr) {
             // The base pilot is lost to an island and OLF re-merged the survivors under a DEPENDENT pilot (a merged
             // controlled bus of the base group): the member row carrying that pilot's balance - its group picks on
             // the same modes as this one, so the same row - takes the dependent pilot's captured target.
-            for (int g2 = 0; g2 < nQr; g2++) {
-                if (qrDepBase[g2] != qg) continue;
-                int pr = qrRows[qrPtr[g2]];
-                if (relocOwn != nullptr && relocOwn[pr] >= 0 && mode[(size_t) s * n + pr] == GpuRowMode::FIXED_VARIABLE) pr = relocOwn[pr];
+            for (int g2 = 0; g2 < nReactiveRelocationGroups; g2++) {
+                if (reactiveRelocationDependentBaseGroup[g2] != qg) continue;
+                int pr = reactiveRelocationCandidateRows[reactiveRelocationGroupStart[g2]];
+                if (relocatedChildOwnRow != nullptr && relocatedChildOwnRow[pr] >= 0 && mode[(size_t) s * n + pr] == GpuRowMode::FIXED_VARIABLE) pr = relocatedChildOwnRow[pr];
                 int pm = mode[(size_t) s * n + pr];
-                if (pm != 0 && pm != 6 && !(veqOff != nullptr && veqOff[(size_t) s * nQr + g2])) continue;
-                int c2 = qrRows[qrPtr[g2] + relocChooseSub(g2, qrPtr, qrRows, mode + (size_t) s * n,
-                        distrQSubgroup != nullptr ? distrQSubgroup + (size_t) s * nMembers : nullptr, qrMemberStart)];
+                if (pm != 0 && pm != 6 && !(pilotTargetVDeactivated != nullptr && pilotTargetVDeactivated[(size_t) s * nReactiveRelocationGroups + g2])) continue;
+                int c2 = reactiveRelocationCandidateRows[reactiveRelocationGroupStart[g2] + chooseCarrierRowInSubgroup(g2, reactiveRelocationGroupStart, reactiveRelocationCandidateRows, mode + (size_t) s * n,
+                        distrQSubgroup != nullptr ? distrQSubgroup + (size_t) s * nMembers : nullptr, reactiveRelocationDistrQMemberStart)];
                 if (c2 == mrow) {
-                    target[(size_t) s * n + mrow] = pilotQ[(size_t) s * nQr + g2];
+                    target[(size_t) s * n + mrow] = pilotQ[(size_t) s * nReactiveRelocationGroups + g2];
                     return;
                 }
             }
         }
         if (mrow == carrier && !pilotFrozen) {
-            int pe = psEntry != nullptr ? psEntry[qg] : -1;  // the group's own pilot, when it is one of its controllers
+            int pe = pilotSelfReactiveLimitEntry != nullptr ? pilotSelfReactiveLimitEntry[qg] : -1;  // the group's own pilot, when it is one of its controllers
             if (pe < 0) {
-                target[(size_t) s * n + mrow] = pilotQ[(size_t) s * nQr + qg];
+                target[(size_t) s * n + mrow] = pilotQ[(size_t) s * nReactiveRelocationGroups + qg];
                 return;
             }
             char plt = limitType[(size_t) s * nReactiveLimitEntries + pe];
@@ -193,12 +193,12 @@ __global__ void updateDistrQTargetsBatch(int nMembers, int nScenarios, int n, in
                 // generator is lost - rte6515 GEN-676 with every busbar section in the list read its lost generator's
                 // maximum here: the carrier's target 0.957 against OLF's -0.043, VL-676_1 supplying the 100 MVAr,
                 // pinned, unpinned, and 1.133 MW distributed where OLF distributes nothing).
-                target[(size_t) s * n + mrow] = pinnedTargetQ(s, pe, n, nReactiveLimitEntries, mode, target, reactiveLimitVoltageRow, reactiveLimitReactivePowerRow, relocOwn,
+                target[(size_t) s * n + mrow] = pinnedTargetQ(s, pe, n, nReactiveLimitEntries, mode, target, reactiveLimitVoltageRow, reactiveLimitReactivePowerRow, relocatedChildOwnRow,
                         limitType, reactiveLimitMinQ, reactiveLimitMaxQ, reactiveLimitLoadQ, perScenarioReactiveLimits, reactiveLimitInitialTargetQ, reactiveLimitGeneratorsLost);
                 return;
             }
             // pilot-self, pilot UNPINNED: its q feeds the DISTR_Q rows weighted and the carrier hosts its OWN
-            // DISTR_Q (psSkip keeps the gate off), so this row wants the normal DISTR_Q target below — not a
+            // DISTR_Q (pilotSelfCarrierSkip keeps the gate off), so this row wants the normal DISTR_Q target below — not a
             // relocated pilot balance that does not exist. Writing pilotQ here is what churned the batch.
         }
         if (!mHasRow[k]) return;
@@ -229,7 +229,7 @@ __global__ void updateDistrQTargetsBatch(int nMembers, int nScenarios, int n, in
             // a FROZEN member's targetQ is what OLF froze it at (freezeGenerationTargetQ...: the limit on a
             // reactive-limit switch, the INITIAL generation target Q on a realistic-voltage freeze), minus its
             // load - the value the member's own balance row enforces. Unpinned members keep their packed targetQ.
-            sumTargetQ += pinnedTargetQ(s, re, n, nReactiveLimitEntries, mode, target, reactiveLimitVoltageRow, reactiveLimitReactivePowerRow, relocOwn,
+            sumTargetQ += pinnedTargetQ(s, re, n, nReactiveLimitEntries, mode, target, reactiveLimitVoltageRow, reactiveLimitReactivePowerRow, relocatedChildOwnRow,
                     limitType, reactiveLimitMinQ, reactiveLimitMaxQ, reactiveLimitLoadQ, perScenarioReactiveLimits, reactiveLimitInitialTargetQ, reactiveLimitGeneratorsLost);
         } else {
             sumTargetQ += distrQTargetQOf(nTqOv, tqOvKey, tqOvVal, s, nMembers, m, mTargetQ);
@@ -400,22 +400,22 @@ void launchDistrQTargetsInner(BatchSolverContext* ctx, DriverPass& drv) {
                     ctx->dTarget.as<double>(), ctx->dOuterLoopCheckActive.as<char>(),
                     ctx->dDistrQMemberTargetQ.as<double>(),
                     ctx->hasDistrQRelocationGroups ? ctx->dDistrQMemberRelocationGroup.as<int>() : nullptr,
-                    ctx->st->nQr > 0 ? ctx->st->dQrPtr.as<int>() : nullptr,
-                    ctx->st->nQr > 0 ? ctx->st->dQrRows.as<int>() : nullptr,
+                    ctx->st->nReactiveRelocationGroups > 0 ? ctx->st->dReactiveRelocationGroupStart.as<int>() : nullptr,
+                    ctx->st->nReactiveRelocationGroups > 0 ? ctx->st->dReactiveRelocationCandidateRows.as<int>() : nullptr,
                     ctx->dMode.as<int>(),
-                    ctx->hasDistrQRelocationGroups ? ctx->dQrPilotQ.as<double>() : nullptr, ctx->st->nQr,
+                    ctx->hasDistrQRelocationGroups ? ctx->dReactiveRelocationPilotTargetQ.as<double>() : nullptr, ctx->st->nReactiveRelocationGroups,
                     ctx->nDistrQInactiveMembers, ctx->nDistrQInactiveMembers ? ctx->dDistrQInactiveMembers.as<int>() : nullptr,
                     ctx->nFrozenRow, ctx->nFrozenRow ? ctx->dFrozenRow.as<int>() : nullptr,
                     ctx->nDistrQMemberTargetQOverrides, ctx->nDistrQMemberTargetQOverrides ? ctx->dDistrQMemberTargetQOverrideKey.as<int>() : nullptr,
                     ctx->nDistrQMemberTargetQOverrides ? ctx->dDistrQMemberTargetQOverrideValue.as<double>() : nullptr,
                     ctx->dDistrQMemberTargetPeerStart.as<int>(), ctx->dDistrQMemberTargetPeer.as<int>(),
-                    psEntryPtr(ctx),
-                    ctx->st->dRelocOwn.p != nullptr
-                            ? ctx->st->dRelocOwn.as<int>() : nullptr,
-                ctx->hasDistrQSubgroups ? ctx->dDistrQSubgroup.as<char>() : nullptr, ctx->hasDistrQSubgroups ? ctx->dQrMemberStart.as<int>() : nullptr,
+                    pilotSelfReactiveLimitEntryOrNull(ctx),
+                    ctx->st->dRelocatedChildOwnRow.p != nullptr
+                            ? ctx->st->dRelocatedChildOwnRow.as<int>() : nullptr,
+                ctx->hasDistrQSubgroups ? ctx->dDistrQSubgroup.as<char>() : nullptr, ctx->hasDistrQSubgroups ? ctx->dReactiveRelocationDistrQMemberStart.as<int>() : nullptr,
                 ctx->nReactiveLimitGeneratorsLost > 0 ? ctx->dReactiveLimitGeneratorsLost.as<char>() : nullptr,
-                ctx->st->dQrDepBase.p ? ctx->st->dQrDepBase.as<int>() : nullptr,
-                ctx->dQrVeqOff.p ? ctx->dQrVeqOff.as<char>() : nullptr,
+                ctx->st->dReactiveRelocationDependentBaseGroup.p ? ctx->st->dReactiveRelocationDependentBaseGroup.as<int>() : nullptr,
+                ctx->dReactiveRelocationPilotTargetVDeactivated.p ? ctx->dReactiveRelocationPilotTargetVDeactivated.as<char>() : nullptr,
                     ctx->dReactiveLimitInitialTargetQ.as<double>(), ctx->dReactiveLimitReactivePowerRow.as<int>(),
                     ctx->nDistrQKeyOverrides, ctx->nDistrQKeyOverrides ? ctx->dDistrQKeyOverrideScenarioMember.as<int>() : nullptr, ctx->nDistrQKeyOverrides ? ctx->dDistrQKeyOverrideKey.as<double>() : nullptr);
     }

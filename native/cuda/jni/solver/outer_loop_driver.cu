@@ -111,7 +111,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                               int nReactiveCapabilityCurveOverrides, const int* reactiveCapabilityCurveOverrideScenarioCurve, const double* reactiveCapabilityCurveOverrideStepScale,
                               int maxIter, double tol,
                               double reactiveLimitTol, double slackDistTol, double convEpsPerEq,
-                              int lsMode, double maxDv, double maxDphi, const int* varType,
+                              int stateVectorScalingMode, double maxDv, double maxDphi, const int* varType,
                               const double* x0Full, int nShuntAdmittanceOverrides, const int* shuntAdmittanceOverrideScenarioElement, const double* shuntAdmittanceOverrideDelta,
                               const int* reactiveLimitsSeedState, int* reactiveLimitsFinalState,
                               int nR1Ov, const int* r1OvSlotElem, const double* r1OvVal,
@@ -131,13 +131,13 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     const int& nS = drv.nS;
     // MAX_VOLTAGE_CHANGE (GpuStateVectorScalingMode::MAX_VOLTAGE_CHANGE): per-scenario step clamp, same rule as the base solver's
     // (varType 1 = V vs maxDv, 0 = PHI vs maxDphi; whole step scaled). Buffers allocated lazily.
-    uploadBatchOverrides(ctx, lsMode, maxDv, maxDphi, varType, nShuntAdmittanceOverrides, shuntAdmittanceOverrideScenarioElement, shuntAdmittanceOverrideDelta,
+    uploadBatchOverrides(ctx, stateVectorScalingMode, maxDv, maxDphi, varType, nShuntAdmittanceOverrides, shuntAdmittanceOverrideScenarioElement, shuntAdmittanceOverrideDelta,
                          nBaseClosedZeroImpedanceBranches, nZeroImpedanceBranchOpenOverrides, zeroImpedanceBranchOpenScenarioElement, nZeroImpedanceBranchCloseOverrides, zeroImpedanceBranchCloseScenarioElement, nR1Ov, r1OvSlotElem, r1OvVal);
     drv.nTot = static_cast<size_t>(n) * nS;
     const size_t& nTot = drv.nTot;
     drv.tol = tol;
     drv.maxIter = maxIter;
-    drv.lsMode = lsMode;
+    drv.stateVectorScalingMode = stateVectorScalingMode;
     drv.convEpsPerEq = convEpsPerEq;
     DeviceBuf dOvIndex, dOvValue;                            // function-scoped: outlive the async override kernel
     DeviceBuf& dBaseMode = drv.dBaseMode;                   // the contingency-free base row mode (length n)
@@ -424,8 +424,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     // sequence has already established — which is exactly what makes a resume cheaper than the
     // orchestrator pattern it replaces: that one resets and re-runs the whole driver every round.
     if (std::getenv("OLF_GPU_BATCH_TRACE") != nullptr && nS == 1) {
-        std::fprintf(stderr, "CTX_FLAGS nS=1 nReactiveLimitEntries=%d nReactiveLimitRemoteEntries=%d hasDistrQRelocationGroups=%d nQr=%d nDistrQ=%d nDistributedSlackBuses=%d nDistributedSlackGenerators=%d nZeroImpedanceBranch=%d nBaseClosedZeroImpedanceBranches=%d nRemoteMemberReactiveTerms=%d resume=%d fullLoadflow=%d\n",
-                     ctx->nReactiveLimitEntries, ctx->nReactiveLimitRemoteEntries, ctx->hasDistrQRelocationGroups ? 1 : 0, ctx->st->nQr, ctx->nDistrQ, ctx->nDistributedSlackBuses, ctx->nDistributedSlackGenerators, ctx->nZeroImpedanceBranch, ctx->nBaseClosedZeroImpedanceBranches, ctx->nRemoteMemberReactiveTerms, resume ? 1 : 0, fullLoadflow ? 1 : 0);
+        std::fprintf(stderr, "CTX_FLAGS nS=1 nReactiveLimitEntries=%d nReactiveLimitRemoteEntries=%d hasDistrQRelocationGroups=%d nReactiveRelocationGroups=%d nDistrQ=%d nDistributedSlackBuses=%d nDistributedSlackGenerators=%d nZeroImpedanceBranch=%d nBaseClosedZeroImpedanceBranches=%d nRemoteMemberReactiveTerms=%d resume=%d fullLoadflow=%d\n",
+                     ctx->nReactiveLimitEntries, ctx->nReactiveLimitRemoteEntries, ctx->hasDistrQRelocationGroups ? 1 : 0, ctx->st->nReactiveRelocationGroups, ctx->nDistrQ, ctx->nDistributedSlackBuses, ctx->nDistributedSlackGenerators, ctx->nZeroImpedanceBranch, ctx->nBaseClosedZeroImpedanceBranches, ctx->nRemoteMemberReactiveTerms, resume ? 1 : 0, fullLoadflow ? 1 : 0);
     }
     if (fullLoadflow && !resume && ctx->nSecondaryVoltageControlControllerBuses > 0) {
         // BEFORE the reactive-limit seeding below, which consults it: no zone has moved a target yet.
@@ -760,20 +760,20 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     // iteration memsets and refills it).
     CUDA_CHECK(cudaMemsetAsync(ctx->dQbuf.p, 0, nTot * sizeof(double), ctx->stream));
     // Reactive-limit Q buffer: physical bus-Q for PV-limit detection — keep the FROZEN routing
-    // (dynReloc=0), the relocation only concerns the Newton residual, not this diagnostic Q.
+    // (dynamicRelocation=0), the relocation only concerns the Newton residual, not this diagnostic Q.
     // Nothing reads a Jacobian here, and the fused J+F fill paid for one anyway: 46 of the 98 closed-branch
     // fills of a 485-contingency network.xiidm chunk, at 38 ms each, were this call. This kernel runs the fused
     // fill's own residual expressions and drops only the 24 Jacobian scatters (an angle-addition variant once
     // moved transformer-control cases by ~3e-5 kV: the bus balance must be the Newton residual's arithmetic).
     if (ctx->st->closedBranch.elementCount) fillClosedBranchQbufBatch<<<grid(ctx->st->closedBranch.elementCount * nS), BLOCK, 0, ctx->stream>>>(ctx->st->closedBranch.elementCount, nS, n, ctx->nElements, ctx->closedBranchOffset, ctx->st->closedBranch.parameters.as<double>(), ctx->st->closedBranch.indices.as<int>(), ctx->st->closedBranch.destination.as<int>(), ctx->dX.as<double>(), ctx->dQbuf.as<double>(), ctx->dDisabled.as<char>(), ctx->dOuterLoopCheckActive.as<char>(), ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>());
-    if (ctx->st->openBranch.elementCount) fillOpenBranchBatch<<<grid(ctx->st->openBranch.elementCount * nS), BLOCK, 0, ctx->stream>>>(ctx->st->openBranch.elementCount, nS, n, nnz, ctx->nElements, ctx->openBranchOffset, ctx->st->openBranch.parameters.as<double>(), ctx->st->openBranch.indices.as<int>(), ctx->st->openBranch.destination.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dQbuf.as<double>(), ctx->dDisabled.as<char>(), ctx->dOuterLoopCheckActive.as<char>(), nullptr, nullptr, nullptr, 0, RelocTables{});
-    if (ctx->st->shunt.elementCount) fillShuntBatch<<<grid(ctx->st->shunt.elementCount * nS), BLOCK, 0, ctx->stream>>>(ctx->st->shunt.elementCount, nS, n, nnz, ctx->nElements, ctx->shuntOffset, ctx->st->shunt.parameters.as<double>(), ctx->st->shunt.indices.as<int>(), ctx->st->shunt.destination.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dQbuf.as<double>(), ctx->dDisabled.as<char>(), ctx->dOuterLoopCheckActive.as<char>(), ctx->nShuntAdmittanceOverrides, ctx->dShuntAdmittanceOverrideScenarioElement.as<int>(), ctx->dShuntAdmittanceOverrideDelta.as<double>(), nullptr, nullptr, nullptr, 0, RelocTables{});
+    if (ctx->st->openBranch.elementCount) fillOpenBranchBatch<<<grid(ctx->st->openBranch.elementCount * nS), BLOCK, 0, ctx->stream>>>(ctx->st->openBranch.elementCount, nS, n, nnz, ctx->nElements, ctx->openBranchOffset, ctx->st->openBranch.parameters.as<double>(), ctx->st->openBranch.indices.as<int>(), ctx->st->openBranch.destination.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dQbuf.as<double>(), ctx->dDisabled.as<char>(), ctx->dOuterLoopCheckActive.as<char>(), nullptr, nullptr, nullptr, 0, ReactiveRelocationTables{});
+    if (ctx->st->shunt.elementCount) fillShuntBatch<<<grid(ctx->st->shunt.elementCount * nS), BLOCK, 0, ctx->stream>>>(ctx->st->shunt.elementCount, nS, n, nnz, ctx->nElements, ctx->shuntOffset, ctx->st->shunt.parameters.as<double>(), ctx->st->shunt.indices.as<int>(), ctx->st->shunt.destination.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dQbuf.as<double>(), ctx->dDisabled.as<char>(), ctx->dOuterLoopCheckActive.as<char>(), ctx->nShuntAdmittanceOverrides, ctx->dShuntAdmittanceOverrideScenarioElement.as<int>(), ctx->dShuntAdmittanceOverrideDelta.as<double>(), nullptr, nullptr, nullptr, 0, ReactiveRelocationTables{});
     if (ctx->st->nLoadModelTerms) fillLoadModelBatch<<<grid(ctx->st->nLoadModelTerms * nS), BLOCK, 0, ctx->stream>>>(ctx->st->nLoadModelTerms, nS, n, nnz, ctx->st->dLoadModelParameters.as<double>(), ctx->st->dLoadModelIndices.as<int>(), ctx->st->dLoadModelDestination.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dQbuf.as<double>(), nullptr, nullptr, nullptr);
     // Zero-impedance dummy transfers MUST be in the Q/P buffer too: the distributed-slack retain
     // reads the slack row's balance from dQbuf — without the coupler's dummy-P the DS sees a
     // phantom mismatch equal to the through-flow and distributes it FOREVER (measured: +392 MW
     // runaway on the first switch-close scenario until the per-scenario budget rejected it).
-    if (ctx->nZeroImpedanceBranch) fillZeroImpBatch<<<grid(ctx->nZeroImpedanceBranch * nS), BLOCK, 0, ctx->stream>>>(ctx->nZeroImpedanceBranch, nS, n, nnz, ctx->st->dZeroImpedanceBranchParameters.as<double>(), ctx->st->dZeroImpedanceBranchIndices.as<int>(), ctx->st->dZeroImpedanceBranchDestination.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dQbuf.as<double>(), ctx->dOuterLoopCheckActive.as<char>(), ctx->nBaseClosedZeroImpedanceBranches, ctx->nZeroImpedanceBranchCloseOverrides, ctx->dZeroImpedanceBranchCloseScenarioElement.as<int>(), ctx->nZeroImpedanceBranchOpenOverrides, ctx->dZeroImpedanceBranchOpenScenarioElement.as<int>(), nullptr, nullptr, nullptr, 0, RelocTables{}, ctx->nSpanningTreeOverrides, ctx->nSpanningTreeOverrides ? ctx->dSpanningTreeOverrideScenarioElementValue.as<int>() : nullptr, ctx->hasZeroImpedanceBranchMasks ? ctx->dZeroImpedanceBranchOpenMask.as<char>() : nullptr, ctx->hasZeroImpedanceBranchMasks ? ctx->dZeroImpedanceBranchCloseMask.as<char>() : nullptr, ctx->hasZeroImpedanceBranchMasks ? ctx->dSpanningTreeOverrideMask.as<char>() : nullptr);
+    if (ctx->nZeroImpedanceBranch) fillZeroImpBatch<<<grid(ctx->nZeroImpedanceBranch * nS), BLOCK, 0, ctx->stream>>>(ctx->nZeroImpedanceBranch, nS, n, nnz, ctx->st->dZeroImpedanceBranchParameters.as<double>(), ctx->st->dZeroImpedanceBranchIndices.as<int>(), ctx->st->dZeroImpedanceBranchDestination.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dQbuf.as<double>(), ctx->dOuterLoopCheckActive.as<char>(), ctx->nBaseClosedZeroImpedanceBranches, ctx->nZeroImpedanceBranchCloseOverrides, ctx->dZeroImpedanceBranchCloseScenarioElement.as<int>(), ctx->nZeroImpedanceBranchOpenOverrides, ctx->dZeroImpedanceBranchOpenScenarioElement.as<int>(), nullptr, nullptr, nullptr, 0, ReactiveRelocationTables{}, ctx->nSpanningTreeOverrides, ctx->nSpanningTreeOverrides ? ctx->dSpanningTreeOverrideScenarioElementValue.as<int>() : nullptr, ctx->hasZeroImpedanceBranchMasks ? ctx->dZeroImpedanceBranchOpenMask.as<char>() : nullptr, ctx->hasZeroImpedanceBranchMasks ? ctx->dZeroImpedanceBranchCloseMask.as<char>() : nullptr, ctx->hasZeroImpedanceBranchMasks ? ctx->dSpanningTreeOverrideMask.as<char>() : nullptr);
     // Remote-member OWN q (plan-B3): fill each member's own reactive injection into its (suppressed,
     // hence free) qBuf row so the RL kernel evaluates remote entries like local ones.
     if (ctx->nRemoteMemberReactiveTerms > 0) {

@@ -42,20 +42,20 @@ public final class GpuAcNewtonSolver {
     }
 
     /** No dependent-pilot group for any candidate group (the raw-row entry points have no merged controls). */
-    private static int[] noDepGroups(int[] qrPtr) {
-        int[] a = new int[Math.max(0, qrPtr.length - 1)];
+    private static int[] noDependentBaseGroups(int[] reactiveRelocationGroupStart) {
+        int[] a = new int[Math.max(0, reactiveRelocationGroupStart.length - 1)];
         java.util.Arrays.fill(a, -1);
         return a;
     }
 
     /** No dependent-pilot group for any device row. */
-    private static int[] noDepRows(int n) {
+    private static int[] noDependentGroupOfRows(int n) {
         int[] a = new int[n];
         java.util.Arrays.fill(a, -1);
         return a;
     }
 
-    private static int[] noQAlt(int ne) {
+    private static int[] noAlternateQRows(int ne) {
         int[] a = new int[ne * 2];
         java.util.Arrays.fill(a, -1);
         return a;
@@ -87,11 +87,11 @@ public final class GpuAcNewtonSolver {
                 distrQElement, distrQSide, distrQWeight, distrQRow, distrQKind, zeroImpedanceBranchParameters, zeroImpedanceBranchIndices,
                 distrRhoRow, distrRhoColumn, distrRhoCoefficient, distrShuntBRow, distrShuntBColumn,
                 distrShuntBCoefficient,
-                new int[] {0}, new int[0], noQAlt(openBranchIndices.length / 6), noQAlt(zeroImpedanceBranchIndices.length / 11));
+                new int[] {0}, new int[0], noAlternateQRows(openBranchIndices.length / 6), noAlternateQRows(zeroImpedanceBranchIndices.length / 11));
     }
 
     /** {@link #solve} with the GROUP pilot-Q relocation tables (plan-A6) and the ob/zero-impedance alternate
-     *  Q rows — required whenever the index packs carry qAlt encodings (shared groups / remote
+     *  Q rows — required whenever the index packs carry alternateQRows encodings (shared groups / remote
      *  members). Pass all-(-1) ob/zero-impedance alt arrays when only cb/sh relocate. */
     @SuppressWarnings("java:S107")
     public static double[] solve(double[] x0, double[] target, int[] rowMode, int maxIter, double tol,
@@ -100,7 +100,7 @@ public final class GpuAcNewtonSolver {
                                  int[] distrQElement, int[] distrQSide, double[] distrQWeight, int[] distrQRow, int[] distrQKind,
                                  double[] zeroImpedanceBranchParameters, int[] zeroImpedanceBranchIndices,
                                  int[] distrRhoRow, int[] distrRhoColumn, double[] distrRhoCoefficient,
-                                 int[] distrShuntBRow, int[] distrShuntBColumn, double[] distrShuntBCoefficient, int[] qrPtr, int[] qrRows,
+                                 int[] distrShuntBRow, int[] distrShuntBColumn, double[] distrShuntBCoefficient, int[] reactiveRelocationGroupStart, int[] reactiveRelocationCandidateRows,
                                  int[] openBranchAlternateReactiveDestination, int[] zeroImpedanceBranchAlternateReactiveDestination) {
         long structure = StructureNative.createStructure(x0.length, closedBranchParameters, closedBranchIndices,
                 openBranchParameters, openBranchIndices, shuntParameters, shuntIndices, hvdcAcEmulationParameters,
@@ -108,8 +108,10 @@ public final class GpuAcNewtonSolver {
                 distrQElement, distrQSide, distrQWeight, distrQRow, distrQKind, zeroImpedanceBranchParameters, zeroImpedanceBranchIndices,
                 distrRhoRow, distrRhoColumn, distrRhoCoefficient, distrShuntBRow, distrShuntBColumn,
                 distrShuntBCoefficient,
-                noPcSide(closedBranchIndices.length / 12), new double[0], new int[0], qrPtr, qrRows, openBranchAlternateReactiveDestination, zeroImpedanceBranchAlternateReactiveDestination,
-                noDepGroups(qrPtr), noDepGroups(qrPtr), noDepRows(x0.length));
+                noPcSide(closedBranchIndices.length / 12), new double[0], new int[0], reactiveRelocationGroupStart,
+                reactiveRelocationCandidateRows, openBranchAlternateReactiveDestination,
+                zeroImpedanceBranchAlternateReactiveDestination,
+                noDependentBaseGroups(reactiveRelocationGroupStart), noDependentBaseGroups(reactiveRelocationGroupStart), noDependentGroupOfRows(x0.length));
         try {
             return solveOnStructure(structure, x0, target, rowMode, maxIter, tol, 0, 0.0, 0.0, new int[x0.length]);
         } finally {
@@ -121,16 +123,16 @@ public final class GpuAcNewtonSolver {
      * One-shot pure Newton-Raphson on an existing structure: a batch-of-one {@link #createBatchContext}
      * without any outer-loop pack, one {@link #solveBatchContext}, then the context is destroyed.
      *
-     * @param lsMode  device step scaling: 0 = none, 1 = line search, 2 = max voltage change
-     * @param maxDv   MAX_VOLTAGE_CHANGE (lsMode 2): clamp on |dv| per iteration (BUS_V rows)
-     * @param maxDphi MAX_VOLTAGE_CHANGE (lsMode 2): clamp on |dphi| per iteration (BUS_PHI rows, radians)
+     * @param stateVectorScalingMode  device step scaling: 0 = none, 1 = line search, 2 = max voltage change
+     * @param maxDv   MAX_VOLTAGE_CHANGE (stateVectorScalingMode 2): clamp on |dv| per iteration (BUS_V rows)
+     * @param maxDphi MAX_VOLTAGE_CHANGE (stateVectorScalingMode 2): clamp on |dphi| per iteration (BUS_PHI rows, radians)
      * @param varType per row, the variable kind for the clamp, see GpuAcActivationExtractor#extractVarType
      * @return {@code double[n + 3]}: the state, then iterations, the final mismatch infinity norm and the
      *         convergence status (see {@link #solveBatchContext})
      */
     @SuppressWarnings("java:S107")
     public static double[] solveOnStructure(long structure, double[] x0, double[] target, int[] rowMode,
-                                            int maxIter, double tol, int lsMode, double maxDv, double maxDphi,
+                                            int maxIter, double tol, int stateVectorScalingMode, double maxDv, double maxDphi,
                                             int[] varType) {
         long handle = BatchSolveNative.createBatchContext(structure, 1, GpuLinearSolveMode.UBATCH,
                 new int[0], new double[0], new double[0], new double[0], new double[0], new byte[0], new double[x0.length],
@@ -139,7 +141,7 @@ public final class GpuAcNewtonSolver {
         try {
             return BatchSolveNative.solveBatchContext(handle, x0, target, new int[][] {rowMode}, rowMode, new boolean[1][0],
                     new int[0], new double[0], new int[0], new double[0], new double[0], new double[0], new double[0], null, null, null, null, null, null, null, null,
-                    maxIter, tol, 0.0, 0.0, 0.0, lsMode, maxDv, maxDphi, varType, null, null, null, null, null, null, null, 0,
+                    maxIter, tol, 0.0, 0.0, 0.0, stateVectorScalingMode, maxDv, maxDphi, varType, null, null, null, null, null, null, null, 0,
                     com.powsybl.openloadflow.ac.outerloop.ReactiveLimitsOuterLoop.MAX_SWITCH_PQ_PV_DEFAULT_VALUE,
                     0, 0, 0, null, null)[0];
         } finally {
@@ -155,7 +157,7 @@ public final class GpuAcNewtonSolver {
             for (int i = 0; i < sel.length; i++) {
                 sel[i] = (int) rowCriteria[3][i];
             }
-            NewtonSettingsNative.setBatchRowCriteriaAlt(handle, rowCriteria[2], sel);
+            NewtonSettingsNative.setBatchRowCriteriaAlternate(handle, rowCriteria[2], sel);
         }
     }
 
@@ -186,7 +188,7 @@ public final class GpuAcNewtonSolver {
                 distrRhoRow, distrRhoColumn, distrRhoCoefficient, distrShuntBRow, distrShuntBColumn,
                 distrShuntBCoefficient,
                 noPcSide(closedBranchIndices.length / 12), new double[0], new int[0], new int[] {0}, new int[0],
-                noQAlt(openBranchIndices.length / 6), noQAlt(zeroImpedanceBranchIndices.length / 11), new int[0], new int[0], noDepRows(n));
+                noAlternateQRows(openBranchIndices.length / 6), noAlternateQRows(zeroImpedanceBranchIndices.length / 11), new int[0], new int[0], noDependentGroupOfRows(n));
         try {
             long handle = BatchSolveNative.createBatchContext(structure, nScenarios, mode,
                     reactiveLimitVoltageRow, reactiveLimitMinQ, reactiveLimitMaxQ, reactiveLimitLoadQ, reactiveLimitTargetV, new byte[reactiveLimitVoltageRow.length], new double[x0Base.length],

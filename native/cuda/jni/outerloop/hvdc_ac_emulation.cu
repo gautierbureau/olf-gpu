@@ -41,7 +41,7 @@ __global__ void hvdcAcEmulationLoopBatch(int nh, int nScenarios, int n, int nEle
                                          int mode,
                                          const int* hvdcElement, const int* hvdcBus1PRow, const int* hvdcBus2PRow,
                                          const int* hvdcBus1PhiColumn, const int* hvdcBus2PhiColumn,
-                                         const int* rowMode, const int* relocOwn,
+                                         const int* rowMode, const int* relocatedChildOwnRow,
                                          const double* hvdcAcEmulationParameters, const char* hvdcContingencyOutage,
                                          const double* x, double* target, char* disabled,
                                          int* status, double* appliedDelta1, double* appliedDelta2,
@@ -107,12 +107,12 @@ __global__ void hvdcAcEmulationLoopBatch(int nh, int nScenarios, int n, int nEle
     // 0.126 kV on every batched branch contingency of a network with a doubled 500 MW link).
     // The P TARGET goes to the row that hosts the bus's P balance THIS scenario: the parent coupler's DUMMY_P
     // row under the coupler-tree relocation, or the bus's own PHI row once a contingency has opened that
-    // coupler (the dummy row is then an identity and the balance is back home — relocOwn, the same stock
+    // coupler (the dummy row is then an identity and the balance is back home — relocatedChildOwnRow, the same stock
     // placement every other target writer follows). An inactive P row (the slack, ~ encoded) absorbs it, as OLF's does.
     int w1 = hvdcBus1PRow[h];
     int w2 = hvdcBus2PRow[h];
-    if (w1 >= 0 && relocOwn != nullptr && relocOwn[w1] >= 0 && rowMode[(size_t) s * n + w1] == GpuRowMode::FIXED_VARIABLE) w1 = relocOwn[w1];
-    if (w2 >= 0 && relocOwn != nullptr && relocOwn[w2] >= 0 && rowMode[(size_t) s * n + w2] == GpuRowMode::FIXED_VARIABLE) w2 = relocOwn[w2];
+    if (w1 >= 0 && relocatedChildOwnRow != nullptr && relocatedChildOwnRow[w1] >= 0 && rowMode[(size_t) s * n + w1] == GpuRowMode::FIXED_VARIABLE) w1 = relocatedChildOwnRow[w1];
+    if (w2 >= 0 && relocatedChildOwnRow != nullptr && relocatedChildOwnRow[w2] >= 0 && rowMode[(size_t) s * n + w2] == GpuRowMode::FIXED_VARIABLE) w2 = relocatedChildOwnRow[w2];
     if (w1 >= 0) {
         atomicAdd(&target[(size_t) s * n + w1], want1 - appliedDelta1[(size_t) s * nh + h]);
     }
@@ -135,7 +135,7 @@ void hvdcStep(BatchSolverContext* ctx, DriverPass& drv, int loopKind) {
             loopKind == GpuOuterLoopKind::FREEZING_HVDC_AC_EMULATION ? 0 : 1,
             ctx->dHvdcElement.as<int>(), ctx->dHvdcBus1PRow.as<int>(), ctx->dHvdcBus2PRow.as<int>(),
             ctx->dHvdcBus1PhiColumn.as<int>(), ctx->dHvdcBus2PhiColumn.as<int>(),
-            ctx->dMode.as<int>(), ctx->st->dRelocOwn.p != nullptr ? ctx->st->dRelocOwn.as<int>() : nullptr,
+            ctx->dMode.as<int>(), ctx->st->dRelocatedChildOwnRow.p != nullptr ? ctx->st->dRelocatedChildOwnRow.as<int>() : nullptr,
             ctx->dHvdcAcEmulationParameters.as<double>(), ctx->dHvdcContingencyOutage.as<char>(),
             ctx->dX.as<double>(), ctx->dTarget.as<double>(), ctx->dDisabled.as<char>(),
             ctx->dHvdcAcEmulationStatus.as<int>(), ctx->dHvdcAppliedDelta1.as<double>(), ctx->dHvdcAppliedDelta2.as<double>(),

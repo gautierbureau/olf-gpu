@@ -16,33 +16,33 @@ __global__ void fillShuntBatch(int elementCount, int nScenarios, int n, int nnz,
                                const double* x, double* vals, double* F,
                                const char* disabled, const char* active,
                                int nShuntAdmittanceOverrides, const int* shuntAdmittanceOverrideScenarioElement, const double* shuntAdmittanceOverrideDelta,
-                               const int* altDest, const int* selRow, const int* mode, int dynReloc,
-                               RelocTables rt);
+                               const int* alternateDestination, const int* selectorRow, const int* mode, int dynamicRelocation,
+                               ReactiveRelocationTables rt);
 
 __global__ void fillHvdcBatch(int elementCount, int nScenarios, int n, int nnz, int nElements, int elemOffset,
                               const double* in, const int* ix, const int* dest,
                               const double* x, double* vals, double* F,
                               const char* disabled, const char* active,
-                              const int* altDest, const int* selRow, const int* mode, int dynReloc);
+                              const int* alternateDestination, const int* selectorRow, const int* mode, int dynamicRelocation);
 
 __global__ void fillLoadModelBatch(int elementCount, int nScenarios, int n, int nnz,
                              const double* in, const int* ix, const int* dest,
                              const double* x, double* vals, double* F,
-                             const int* altRow, const int* altDest, const int* mode);
+                             const int* alternateRow, const int* alternateDestination, const int* mode);
 
 __global__ void fillShuntBatchF(int elementCount, int nScenarios, int n, int nnz, int nElements, int elemOffset,
                                 const double* in, const int* ix, const int* dest,
                                 const double* x, double* F,
                                 const char* disabled, const char* active,
                                 int nShuntAdmittanceOverrides, const int* shuntAdmittanceOverrideScenarioElement, const double* shuntAdmittanceOverrideDelta,
-                                const int* altDest, const int* selRow, const int* mode, int dynReloc,
-                               RelocTables rt);
+                                const int* alternateDestination, const int* selectorRow, const int* mode, int dynamicRelocation,
+                               ReactiveRelocationTables rt);
 
 __global__ void fillHvdcBatchF(int elementCount, int nScenarios, int n, int nnz, int nElements, int elemOffset,
                                const double* in, const int* ix, const int* dest,
                                const double* x, double* F,
                                const char* disabled, const char* active,
-                               const int* altDest, const int* selRow, const int* mode, int dynReloc);
+                               const int* alternateDestination, const int* selectorRow, const int* mode, int dynamicRelocation);
 
 }  // namespace olfgpu
 

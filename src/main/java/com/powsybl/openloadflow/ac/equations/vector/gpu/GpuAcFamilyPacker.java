@@ -61,7 +61,7 @@ final class GpuAcFamilyPacker {
         int[] dummyQCol = columns.dummyQCol();
         int[] shuntBCol = columns.shuntBCol();
         int[] qRow = columns.qRow();
-        int[] qRowAlt = columns.qRowAlt();                   // Dynamic Q-relocation: 2nd candidate Q row per bus (§11)
+        int[] alternateQRow = columns.alternateQRow();                   // Dynamic Q-relocation: 2nd candidate Q row per bus (§11)
         int nBuses = network.getBuses().size();
         int nBranches = network.getBranches().size();
 
@@ -118,15 +118,15 @@ final class GpuAcFamilyPacker {
                 // ZERO_V/ZERO_PHI move onto the child's own v/phi rows. Slots 4/5 stay the dummy COLUMNS (the kernel
                 // reads the dummy values through them), so the relocated ZERO_V/ZERO_PHI ROWS are derived natively
                 // from the child side encoded in slot 10 — the same encoding the stub case used.
-                int child = columns.ziChildBus()[br.getNum()];
+                int child = columns.spanningTreeChildBus()[br.getNum()];
                 int childSide = child == b1n ? 1 : (child == b2n ? 2 : 0);
                 zeroImpedanceBranchIndices.add(new int[] {pRow[b1n], qRow[b1n], pRow[b2n], qRow[b2n], dpRow, distrQRow,
                     vCol[b1n], vCol[b2n], phiCol[b1n], phiCol[b2n],
                     (br.isSpanningTreeEdge(LoadFlowModel.AC) ? 1 : 0) | (childSide << 1)
                         // bit 3: the child side came from the COUPLER-TREE walk; these need the per-scenario
-                        // stock-placement fallback (native stockAltRow)
+                        // stock-placement fallback (native stockPlacementAlternateRow)
                         | (childSide != 0 ? 8 : 0)});
-                zeroImpedanceBranchAlternateReactiveDestination.add(new int[] {qRowAlt[b1n], qRowAlt[b2n]});
+                zeroImpedanceBranchAlternateReactiveDestination.add(new int[] {alternateQRow[b1n], alternateQRow[b2n]});
                 continue;
             }
             if (b1 != null && b2 != null) {
@@ -144,7 +144,7 @@ final class GpuAcFamilyPacker {
                 // branch's own control columns, -1 when not derived (then those scatter rows skip).
                 closedBranchIndices.add(new int[] {pRow[b1.getNum()], qRow[b1.getNum()], pRow[b2.getNum()], qRow[b2.getNum()],
                     ph1, v1, ph2, v2, a1col, r1col,
-                    qRowAlt[b1.getNum()], qRowAlt[b2.getNum()]});    // [10],[11]: alternate Q rows (dyn reloc)
+                    alternateQRow[b1.getNum()], alternateQRow[b2.getNum()]});    // [10],[11]: alternate Q rows (dyn reloc)
                 // CONTINUOUS phase control (CONTROLLER mode, LOCAL): the controlled side whose P-flow is
                 // re-emitted at the CONTROLLER's a1 row when the control is enabled per scenario
                 // (row mode 3). Encoding: -1 = none, else (controllerA1Col << 1) | controlledSide —
@@ -169,7 +169,7 @@ final class GpuAcFamilyPacker {
                 openBranchIndices.add(new int[] {-1, -1,
                     pRow[b2.getNum()], qRow[b2.getNum()],
                     -1, vCol[b2.getNum()]});
-                openBranchAlternateReactiveDestination.add(new int[] {-1, qRowAlt[b2.getNum()]});
+                openBranchAlternateReactiveDestination.add(new int[] {-1, alternateQRow[b2.getNum()]});
             } else if (b1 != null) {                       // side 2 open: p1/q1 at bus1, variable v1
                 openBranchElementOf[br.getNum()] = openBranchParameters.size();
                 openBranchParameters.add(new double[] {pi.getY(), pi.getKsi(), pi.getG1(), pi.getB1(), pi.getG2(), pi.getB2(),
@@ -178,14 +178,14 @@ final class GpuAcFamilyPacker {
                     pRow[b1.getNum()], qRow[b1.getNum()],
                     -1, -1,
                     vCol[b1.getNum()], -1});
-                openBranchAlternateReactiveDestination.add(new int[] {qRowAlt[b1.getNum()], -1});
+                openBranchAlternateReactiveDestination.add(new int[] {alternateQRow[b1.getNum()], -1});
             }
         }
 
         // BASE-OPEN closable branches (batch SA only): appended AFTER the normal closed branches so
         // every normal element index is unchanged; the element mapper mirrors this enumeration.
         List<Integer> baseOpenCb = new ArrayList<>();
-        packBaseOpenClosedBranches(baseOpenBranchIds, network, phiCol, vCol, baseOpenCb, closedBranchParameters, pRow, qRow, qRowAlt,
+        packBaseOpenClosedBranches(baseOpenBranchIds, network, phiCol, vCol, baseOpenCb, closedBranchParameters, pRow, qRow, alternateQRow,
                                    closedBranchIndices, closedBranchPhaseControlSide);
 
         // BASE-OPEN closable ZERO-IMPEDANCE branches (retained-open switches, batch SA only): a
@@ -200,7 +200,7 @@ final class GpuAcFamilyPacker {
         List<Integer> baseOpenZeroImpedanceBranchNums = new ArrayList<>();
         packBaseOpenZeroImpedanceBranches(baseOpenZeroImpedanceBranchIdList, network, dummyPCol, dummyQCol, baseOpenZeroImpedanceBranches, zeroImpedanceBranchParameters,
                                           baseOpenZeroImpedanceBranchNums, zeroImpedanceBranchNums, phiCol, qRow, vCol,
-                                          zeroImpedanceBranchIndices, qRowAlt,
+                                          zeroImpedanceBranchIndices, alternateQRow,
                                           zeroImpedanceBranchAlternateReactiveDestination);
 
         List<double[]> shuntParameters = new ArrayList<>();
@@ -217,7 +217,7 @@ final class GpuAcFamilyPacker {
                 shuntParameters.add(new double[] {sh.getG(), sh.getB()});
                 shuntIndices.add(new int[] {
                     pRow[bus.getNum()], qRow[bus.getNum()], vCol[bus.getNum()], -1,
-                    qRowAlt[bus.getNum()]});                 // [4]: alternate Q row (dyn reloc)
+                    alternateQRow[bus.getNum()]});                 // [4]: alternate Q row (dyn reloc)
             });
             // Voltage-CONTROLLING shunt: its susceptance b is a SHUNT_B state variable (bRow >= 0, idx 3), so the
             // device reads b from x and scatters dq/db onto the b column — the exact analogue of a transformer's
@@ -226,7 +226,7 @@ final class GpuAcFamilyPacker {
                 shuntParameters.add(new double[] {sh.getG(), sh.getB()});
                 shuntIndices.add(new int[] {
                     pRow[bus.getNum()], qRow[bus.getNum()], vCol[bus.getNum()], shuntBCol[sh.getNum()],
-                    qRowAlt[bus.getNum()]});                 // [4]: alternate Q row (dyn reloc)
+                    alternateQRow[bus.getNum()]});                 // [4]: alternate Q row (dyn reloc)
             });
             // SVC stand-by shunt (StandbyAutomaton b0): a permanent fixed susceptance the SVC injects
             // whether standing by or active — a plain fixed-shunt element (silently dropping it was a
@@ -235,7 +235,7 @@ final class GpuAcFamilyPacker {
                 shuntParameters.add(new double[] {sh.getG(), sh.getB()});
                 shuntIndices.add(new int[] {
                     pRow[bus.getNum()], qRow[bus.getNum()], vCol[bus.getNum()], -1,
-                    qRowAlt[bus.getNum()]});                 // [4]: alternate Q row (dyn reloc)
+                    alternateQRow[bus.getNum()]});                 // [4]: alternate Q row (dyn reloc)
             });
             packLoadModels(bus, pRow, qRow, vCol, loadModelParameters, loadModelIndices);
         }
@@ -267,7 +267,7 @@ final class GpuAcFamilyPacker {
     private static void packBaseOpenClosedBranches(final Set<String> baseOpenBranchIds, final LfNetwork network,
                                                    final int[] phiCol, final int[] vCol,
                                                    final List<Integer> baseOpenCb, final List<double[]> closedBranchParameters,
-                                                   final int[] pRow, final int[] qRow, final int[] qRowAlt,
+                                                   final int[] pRow, final int[] qRow, final int[] alternateQRow,
                                                    final List<int[]> closedBranchIndices, final List<Integer> closedBranchPhaseControlSide) {
         if (!baseOpenBranchIds.isEmpty()) {
             for (LfBranch br : network.getBranches()) {
@@ -290,7 +290,7 @@ final class GpuAcFamilyPacker {
                     pi.getKsi(), pi.getR1(), pi.getA1()});
                 closedBranchIndices.add(new int[] {pRow[b1.getNum()], qRow[b1.getNum()], pRow[b2.getNum()], qRow[b2.getNum()],
                     ph1, v1, ph2, v2, -1, -1,                // no control columns on a disabled branch
-                    qRowAlt[b1.getNum()], qRowAlt[b2.getNum()]});    // [10],[11]: alternate Q rows (dyn reloc)
+                    alternateQRow[b1.getNum()], alternateQRow[b2.getNum()]});    // [10],[11]: alternate Q rows (dyn reloc)
                 closedBranchPhaseControlSide.add(-1);                            // EVERY cb element needs its entry: this list
                 // was NOT appended here when closedBranchPhaseControlSide landed (d131ec7), so base-open runs read PAST
                 // the array in native code — the 4x SIGSEGV-at-buildStructure+0xe43 root cause,
@@ -307,7 +307,7 @@ final class GpuAcFamilyPacker {
                                                           final List<Integer> baseOpenZeroImpedanceBranchNums,
                                                           final List<Integer> zeroImpedanceBranchNums, final int[] phiCol,
                                                           final int[] qRow, final int[] vCol,
-                                                          final List<int[]> zeroImpedanceBranchIndices, final int[] qRowAlt,
+                                                          final List<int[]> zeroImpedanceBranchIndices, final int[] alternateQRow,
                                                           final List<int[]> zeroImpedanceBranchAlternateReactiveDestination) {
         if (!baseOpenZeroImpedanceBranchIdList.isEmpty()) {
             for (LfBranch br : network.getBranches()) {
@@ -333,7 +333,7 @@ final class GpuAcFamilyPacker {
                 zeroImpedanceBranchParameters.add(new double[] {PiModel.R2 / br.getPiModel().getR1()});
                 zeroImpedanceBranchIndices.add(new int[] {phiCol[b1n], qRow[b1n], phiCol[b2n], qRow[b2n], dpRow, distrQRow,
                     vCol[b1n], vCol[b2n], phiCol[b1n], phiCol[b2n], 1});
-                zeroImpedanceBranchAlternateReactiveDestination.add(new int[] {qRowAlt[b1n], qRowAlt[b2n]});
+                zeroImpedanceBranchAlternateReactiveDestination.add(new int[] {alternateQRow[b1n], alternateQRow[b2n]});
             }
         }
     }

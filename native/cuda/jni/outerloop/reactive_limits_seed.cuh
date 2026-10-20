@@ -17,21 +17,21 @@ __global__ void initReactiveLimitQLimitTypeBatch(int nReactiveLimitEntries, int 
                                      const char* reactiveLimitVoltageControlRole, const int* reactiveLimitComparedVoltageRow,
                                      const double* target, const double* reactiveLimitBaseMinQ, const double* reactiveLimitBaseMaxQ,
                                      const double* reactiveLimitBaseLoadQ, const char* reactiveLimitBaseQLimitType,
-                                     const int* psEntry, int nQr, const char* reactiveLimitGeneratorsLost);
+                                     const int* pilotSelfReactiveLimitEntry, int nReactiveRelocationGroups, const char* reactiveLimitGeneratorsLost);
 
 __global__ void seedReactiveLimitRowModeFromState(int nReactiveLimitEntries, int nScenarios, int n, const int* reactiveLimitVoltageRow, const int* reactiveLimitReactivePowerRow,
                                     const double* reactiveLimitMinQ, const double* reactiveLimitMaxQ, const double* reactiveLimitLoadQ,
                                     const char* limitType, int* mode, double* target, int perScenarioReactiveLimits,
                                     const char* reactiveLimitVoltageControlRole, double* savedTarget, char* savedMode,
-                                    const char* reactiveLimitBaseQLimitType, const int* psEntry, int nQr,
+                                    const char* reactiveLimitBaseQLimitType, const int* pilotSelfReactiveLimitEntry, int nReactiveRelocationGroups,
                                     const double* reactiveLimitTargetV, int nReactiveLimitTargetVOverrides, const int* reactiveLimitTargetVOverrideScenarioEntry, const double* reactiveLimitTargetVOverrideValue,
                                     const double* secondaryVoltageControlReactiveLimitTargetV, const char* reactiveLimitLocalOverride, const double* reactiveLimitLocalTargetV,
                                     const double* pinTargetIn, const char* reactiveLimitIslanded);
 
 __global__ void exportReactiveLimitTargetQ(int nReactiveLimitEntries, int nScenarios, int n, const int* reactiveLimitVoltageRow, const int* reactiveLimitReactivePowerRow,
                                    const char* limitType, const int* mode, const double* target, const char* reactiveLimitIslanded,
-                                   int nQr, const int* psEntry, const int* qrPtr, const int* qrRows, const char* veqOff,
-                                   const int* qrDepBase, double* out);
+                                   int nReactiveRelocationGroups, const int* pilotSelfReactiveLimitEntry, const int* reactiveRelocationGroupStart, const int* reactiveRelocationCandidateRows, const char* pilotTargetVDeactivated,
+                                   const int* reactiveRelocationDependentBaseGroup, double* out);
 
 }  // namespace olfgpu
 

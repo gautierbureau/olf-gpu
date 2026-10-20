@@ -58,8 +58,8 @@ __global__ void maxVoltageChangeFactorBatch(int n, const double* dx, const int* 
                                             const char* active, double maxDv, double maxDphi,
                                             double* factor) {
     int s = blockIdx.x;
-    __shared__ double smDv[BLOCK];
-    __shared__ double smDphi[BLOCK];
+    __shared__ double sharedMaxDv[BLOCK];
+    __shared__ double sharedMaxDphi[BLOCK];
     double mdv = 0.0;
     double mdphi = 0.0;
     if (active == nullptr || active[s]) {
@@ -73,20 +73,20 @@ __global__ void maxVoltageChangeFactorBatch(int n, const double* dx, const int* 
             }
         }
     }
-    smDv[threadIdx.x] = mdv;
-    smDphi[threadIdx.x] = mdphi;
+    sharedMaxDv[threadIdx.x] = mdv;
+    sharedMaxDphi[threadIdx.x] = mdphi;
     __syncthreads();
     for (int off = blockDim.x / 2; off > 0; off >>= 1) {
         if (threadIdx.x < off) {
-            smDv[threadIdx.x] = fmax(smDv[threadIdx.x], smDv[threadIdx.x + off]);
-            smDphi[threadIdx.x] = fmax(smDphi[threadIdx.x], smDphi[threadIdx.x + off]);
+            sharedMaxDv[threadIdx.x] = fmax(sharedMaxDv[threadIdx.x], sharedMaxDv[threadIdx.x + off]);
+            sharedMaxDphi[threadIdx.x] = fmax(sharedMaxDphi[threadIdx.x], sharedMaxDphi[threadIdx.x + off]);
         }
         __syncthreads();
     }
     if (threadIdx.x == 0) {
         double f = 1.0;
-        if (smDv[0] > maxDv) f = fmin(f, maxDv / smDv[0]);
-        if (smDphi[0] > maxDphi) f = fmin(f, maxDphi / smDphi[0]);
+        if (sharedMaxDv[0] > maxDv) f = fmin(f, maxDv / sharedMaxDv[0]);
+        if (sharedMaxDphi[0] > maxDphi) f = fmin(f, maxDphi / sharedMaxDphi[0]);
         factor[s] = f;
     }
 }

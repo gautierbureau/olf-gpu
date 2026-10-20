@@ -62,7 +62,7 @@ public final class DistrRhoPacker {
             // isTransformerVoltageControlled()/getColumn(), which are false/-1 at a control-OFF
             // base (AFTER_GENERATOR) and silently emptied the pack (the e82290f audit). The FREE
             // member is the FIRST enabled one — OLF's updateRemoteVoltageControlEquations pick and
-            // computeQRowAlt's, so its row carries the relocated pilot Q, never DISTR_RHO. Rows
+            // computeAlternateQRow's, so its row carries the relocated pilot Q, never DISTR_RHO. Rows
             // inactive in a scenario are identity-wiped by the row-mode pass (superset principle).
             TransformerVoltageControl tvc = pilot.getTransformerVoltageControl()
                     .filter(c -> c.getMergeStatus() == VoltageControl.MergeStatus.MAIN)

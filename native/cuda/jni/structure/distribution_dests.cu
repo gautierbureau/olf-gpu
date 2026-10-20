@@ -36,34 +36,34 @@ namespace olfgpu {
 void buildDistrQDest(SharedStructure* st, const CsrPattern& pos, const std::vector<int>& rowMap,
                      int nDistrQ, const int* distrQElement, const int* distrQSide, const int* distrQKind,
                      const double* distrQWeight, const int* distrQRow,
-                     const int* closedBranchIndices, const int* openBranchIndices, const int* shuntIndices, const int* relocOwn) {
+                     const int* closedBranchIndices, const int* openBranchIndices, const int* shuntIndices, const int* relocatedChildOwnRow) {
     st->nDistrQ = nDistrQ;
     if (nDistrQ > 0) {
         std::vector<int> distrQDestination(static_cast<size_t>(nDistrQ) * 6, -1);
         // The COUPLER-TREE stock placement for a DISTR_Q row: a relocated child's sharing equation sits on
         // its parent coupler's DUMMY_Q row, and a scenario that kills that coupler pins the row to an
         // identity — the equation then has to be back on the bus's OWN row, exactly where OLF keeps a
-        // controller's DISTR_Q. dqAlt holds the same six destinations recomputed there and dqSel the dummy
+        // controller's DISTR_Q. distrQAlternateDestination holds the same six destinations recomputed there and distrQSelectorRow the dummy
         // row whose per-scenario mode decides (0 = dead). Without it the middle-section-loss fixtures
         // converged on a system one equation short: bus vl3_b 395.43 kV against OLF's 401.69.
-        std::vector<int> dqAlt(static_cast<size_t>(nDistrQ) * 6, -1);
-        std::vector<int> dqSel(static_cast<size_t>(nDistrQ), -1);
+        std::vector<int> distrQAlternateDestination(static_cast<size_t>(nDistrQ) * 6, -1);
+        std::vector<int> distrQSelectorRow(static_cast<size_t>(nDistrQ), -1);
         // A kind-3 contribution is a COUPLER's DUMMY_Q inside this controller's reactive injection; the pack
         // carries the dummy COLUMN, and the per-scenario mode that says whether that coupler is still alive
         // lives at its ROW. Keep the mapped row per contribution so the fill can ask.
-        std::vector<int> dqZiRow(static_cast<size_t>(nDistrQ), -1);
+        std::vector<int> distrQDummyQRow(static_cast<size_t>(nDistrQ), -1);
         for (int c = 0; c < nDistrQ; c++) {
             int mappedRow = rowMap[distrQRow[c]];
-            int ownRow = relocOwn != nullptr && mappedRow >= 0 ? relocOwn[mappedRow] : -1;
+            int ownRow = relocatedChildOwnRow != nullptr && mappedRow >= 0 ? relocatedChildOwnRow[mappedRow] : -1;
             if (ownRow >= 0) {
-                dqSel[c] = mappedRow;
+                distrQSelectorRow[c] = mappedRow;
             }
             if (distrQKind[c] == GpuReactiveTermKind::DUMMY_Q && distrQElement[c] >= 0) {
-                dqZiRow[c] = rowMap[distrQElement[c]];
+                distrQDummyQRow[c] = rowMap[distrQElement[c]];
             }
             for (int pass = 0; pass < 2; pass++) {           // pass 0 = the real row, pass 1 = the stock row
                 int row = pass == 0 ? mappedRow : ownRow;
-                int* d = (pass == 0 ? distrQDestination : dqAlt).data() + static_cast<size_t>(c) * 6;
+                int* d = (pass == 0 ? distrQDestination : distrQAlternateDestination).data() + static_cast<size_t>(c) * 6;
                 if (row < 0) {
                     continue;
                 }
@@ -90,9 +90,9 @@ void buildDistrQDest(SharedStructure* st, const CsrPattern& pos, const std::vect
         st->dDistrQKind.upload(distrQKind, nDistrQ * sizeof(int));
         st->dDistrQWeight.upload(distrQWeight, nDistrQ * sizeof(double));
         st->dDistrQDestination.upload(distrQDestination.data(), distrQDestination.size() * sizeof(int));
-        st->dDqAlt.upload(dqAlt.data(), dqAlt.size() * sizeof(int));
-        st->dDqSel.upload(dqSel.data(), dqSel.size() * sizeof(int));
-        st->dDqZiRow.upload(dqZiRow.data(), dqZiRow.size() * sizeof(int));
+        st->dDistrQAlternateDestination.upload(distrQAlternateDestination.data(), distrQAlternateDestination.size() * sizeof(int));
+        st->dDistrQSelectorRow.upload(distrQSelectorRow.data(), distrQSelectorRow.size() * sizeof(int));
+        st->dDistrQDummyQRow.upload(distrQDummyQRow.data(), distrQDummyQRow.size() * sizeof(int));
     }
 }
 
@@ -101,7 +101,7 @@ void buildDistrRhoDest(SharedStructure* st, const CsrPattern& pos, const std::ve
     st->nDistrRho = nDistrRho;
     if (nDistrRho > 0) {
         std::vector<int> distrRhoDestination(static_cast<size_t>(nDistrRho) * 2);
-        std::vector<int> distrRhoQrGroup(nDistrRho, -1);
+        std::vector<int> distrRhoRelocationGroup(nDistrRho, -1);
         for (int c = 0; c < nDistrRho; c++) {
             int mappedRow = rowMap[distrRhoRow[c]];
             distrRhoDestination[c * 2 + 0] = -2 - mappedRow;              // DISTR_RHO F row
@@ -110,11 +110,11 @@ void buildDistrRhoDest(SharedStructure* st, const CsrPattern& pos, const std::ve
             // the free role RE-PICKS to this row per scenario, it hosts the relocated pilot Q and
             // its DISTR_RHO emissions must stop — the SEQUENTIAL fill suppresses in-kernel by the
             // same mode-scan the scatter uses (the batch machine instead pushes zero coefficient overrides).
-            for (int g = 0; g < st->nQr && distrRhoQrGroup[c] < 0; g++) {
-                for (int k = st->hQrPtr[g] + 1; k < st->hQrPtr[g + 1]; k++) {
-                    if (st->hQrRows[k] == mappedRow) {
-                        distrRhoQrGroup[c] = g;
-                        st->distrRhoQr = 1;
+            for (int g = 0; g < st->nReactiveRelocationGroups && distrRhoRelocationGroup[c] < 0; g++) {
+                for (int k = st->hReactiveRelocationGroupStart[g] + 1; k < st->hReactiveRelocationGroupStart[g + 1]; k++) {
+                    if (st->hReactiveRelocationCandidateRows[k] == mappedRow) {
+                        distrRhoRelocationGroup[c] = g;
+                        st->hasDistrRhoRelocationGroups = 1;
                         break;
                     }
                 }
@@ -123,8 +123,8 @@ void buildDistrRhoDest(SharedStructure* st, const CsrPattern& pos, const std::ve
         st->dDistrRhoColumn.upload(distrRhoColumn, nDistrRho * sizeof(int));
         st->dDistrRhoCoefficient.upload(distrRhoCoefficient, nDistrRho * sizeof(double));
         st->dDistrRhoDestination.upload(distrRhoDestination.data(), distrRhoDestination.size() * sizeof(int));
-        if (st->distrRhoQr) {
-            st->dDistrRhoQrGroup.upload(distrRhoQrGroup.data(), distrRhoQrGroup.size() * sizeof(int));
+        if (st->hasDistrRhoRelocationGroups) {
+            st->dDistrRhoRelocationGroup.upload(distrRhoRelocationGroup.data(), distrRhoRelocationGroup.size() * sizeof(int));
         }
     }
 }
@@ -146,23 +146,23 @@ void buildDistrShuntBDest(SharedStructure* st, const CsrPattern& pos, const std:
 }
 
 // plan-B4: the FROZEN role-0 dest of a GROUP-relocated output backs only the qBuf DIAGNOSTIC
-// fill (dynReloc = 0; every Newton fill selects a pool slot instead) — point it at the group's
+// fill (dynamicRelocation = 0; every Newton fill selects a pool slot instead) — point it at the group's
 // FALLBACK row (the pilot's own row, read by no outer loop) so a remote member's diagnostic q
 // row carries ONLY its own injection (fillRemoteMemberQBatch). Without this the pilot's whole
 // balance lands on the base carrier's row and corrupts the free member's reactive-limit check.
-void patchFrozenGroupDests(DeviceBuf& dest, const std::vector<int>& relocGroup,
-                           const std::vector<int>& relocOff, int outputCount,
-                           const int* scatterRole, const int* qrPtr, const int* qrRows) {
-    for (size_t o = 0; o < relocGroup.size(); o++) {
-        int g = relocGroup[o];
+void patchGroupFrozenDestinations(DeviceBuf& dest, const std::vector<int>& relocationGroup,
+                           const std::vector<int>& relocationCandidateOffset, int outputCount,
+                           const int* scatterRole, const int* reactiveRelocationGroupStart, const int* reactiveRelocationCandidateRows) {
+    for (size_t o = 0; o < relocationGroup.size(); o++) {
+        int g = relocationGroup[o];
         // A STOCK PAIR (negative offset) parks the DUMMY ROW in the group slot, not a group id — reading
-        // qrPtr[row] there walked off the candidate table and wrote a garbage dest, which the device then
+        // reactiveRelocationGroupStart[row] there walked off the candidate table and wrote a garbage dest, which the device then
         // used: "CUDA error: an illegal memory access" out of createBatchContext.
-        if (g >= 0 && relocOff[o] < 0) {
+        if (g >= 0 && relocationCandidateOffset[o] < 0) {
             continue;
         }
         if (g >= 0 && scatterRole[o % outputCount] == 0) {
-            int v = -2 - qrRows[qrPtr[g]];
+            int v = -2 - reactiveRelocationCandidateRows[reactiveRelocationGroupStart[g]];
             CUDA_CHECK(cudaMemcpy(dest.as<int>() + o, &v, sizeof(int), cudaMemcpyHostToDevice));
         }
     }

@@ -25,8 +25,8 @@ import java.util.Set;
 final class ScenarioPlanBuilder {
 
     final List<Integer> batchedIndices;
-    final java.util.Map<Integer, int[]> relocRows;
-    final java.util.Map<Integer, int[]> relocDummyQRows;
+    final java.util.Map<Integer, int[]> relocatedChildRows;
+    final java.util.Map<Integer, int[]> relocatedDummyQRows;
     final int[][] frozenRowsByIndex;     // islanded buses' variable rows, per contingency
     final int[][] islandedNumsByIndex;   // islanded LfBus nums (result-building excludes them)
     final double[][] frozenTargetsByIndex;   // the clean value each frozen row holds (V=1, phi=0)
@@ -66,8 +66,8 @@ final class ScenarioPlanBuilder {
     @SuppressWarnings("unchecked")
     ScenarioPlanBuilder(int nContingencies, GpuAcData gpuData) {
         this.batchedIndices = new ArrayList<>();
-        this.relocRows = RelocatedRows.relocatedChildRows(gpuData);
-        this.relocDummyQRows = RelocatedRows.relocatedDummyQRows(gpuData);
+        this.relocatedChildRows = RelocatedRows.relocatedChildRows(gpuData);
+        this.relocatedDummyQRows = RelocatedRows.relocatedDummyQRows(gpuData);
         this.frozenRowsByIndex = new int[nContingencies][];
         this.islandedNumsByIndex = new int[nContingencies][];
         this.frozenTargetsByIndex = new double[nContingencies][];

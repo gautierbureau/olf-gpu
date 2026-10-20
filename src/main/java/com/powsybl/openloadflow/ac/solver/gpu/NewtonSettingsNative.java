@@ -40,22 +40,22 @@ public final class NewtonSettingsNative {
     public static native void setBatchFrozenRows(long handle, int[] slotRow);
 
     /** LINE_SEARCH backtracking parameters for a batch context (OLF LineSearchStateVectorScaling's
-     *  maxIteration and stepFold) — consumed by solves called with {@code lsMode == GpuStateVectorScalingMode.LINE_SEARCH}. */
-    public static native void setBatchLineSearch(long handle, int lsMaxIter, double lsStepFold);
+     *  maxIteration and stepFold) — consumed by solves called with {@code stateVectorScalingMode == GpuStateVectorScalingMode.LINE_SEARCH}. */
+    public static native void setBatchLineSearch(long handle, int lineSearchStateVectorScalingMaxIteration, double lineSearchStateVectorScalingStepFold);
 
     /** OLF_GPU_LOOP_TRACE by contingency: the slot to trace in the next solve of this context, -1 = none. */
     public static native void setBatchLoopTraceSlot(long handle, int slot);
 
     /** Install (or clear, with nulls) the PER_EQUATION_TYPE per-row stopping thresholds on a batch
-     *  context: {@code thrIdent[r]} for identity/slope rows, {@code thrPower[r]} for power rows —
+     *  context: {@code fixedVariableRowMaxMismatch[r]} for identity/slope rows, {@code equationRowMaxMismatch[r]} for power rows —
      *  the convergence test then requires EVERY row's |F| under its threshold (OLF's
      *  PerEquationTypeStoppingCriteria) instead of the 2-norm/infnorm rule. Contexts are CACHED, so
      *  a run without the criterion must clear (null, null). */
-    public static native void setBatchRowCriteria(long handle, double[] thrIdent, double[] thrPower);
+    public static native void setBatchRowCriteria(long handle, double[] fixedVariableRowMaxMismatch, double[] equationRowMaxMismatch);
 
     /** The alternate per-row threshold and its selector row (-1: none) of the PER_EQUATION_TYPE criterion (see
      *  GpuAcActivationExtractor.extractRowCriteria); nulls clear them. Call after {@link #setBatchRowCriteria}. */
-    public static native void setBatchRowCriteriaAlt(long handle, double[] thrAlt, int[] thrSel);
+    public static native void setBatchRowCriteriaAlternate(long handle, double[] alternateRowMaxMismatch, int[] alternateRowMaxMismatchSelector);
 
     /** Absolute target writes at flat {@code (scenario * n + row)} positions, for a host-owned loop. */
     public static native void setBatchTargetDeltas(long handle, int[] rows, double[] values);
@@ -67,5 +67,5 @@ public final class NewtonSettingsNative {
     /** The run's linear-solver settings (GpuLoadFlowParameters.install): -1 reorder / pivot type = AUTO, NaN threshold =
      *  cuDSS's own. Read by every context built afterwards and by every solve's iterative refinement. */
     public static native void setLinearSolverSettings(int reorder, int matching, int pivotType, double pivotThreshold,
-                                                      int irBase, int irMax, double irTol);
+                                                      int iterativeRefinementBaseSteps, int iterativeRefinementMaxSteps, double iterativeRefinementTolerance);
 }

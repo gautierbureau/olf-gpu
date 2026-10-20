@@ -97,7 +97,7 @@ final class BranchOutagePlanner {
                     vcOff = null;
                     break;
                 }
-                vcOff.add(new GenOutage(-1, 0, RelocatedRows.relocQRow(vVar.getRow(), pb.relocRows, outagedZeroImpedanceBranchNums),
+                vcOff.add(new GenOutage(-1, 0, RelocatedRows.scenarioReactiveRowOfVRow(vVar.getRow(), pb.relocatedChildRows, outagedZeroImpedanceBranchNums),
                         sb.getTargetQ(), true, true,
                         -1, 0, 0, 0, 0, -1, 0, 0, false, java.util.Set.of(), 0, 0, 0, -1, new int[0],
                         new int[0], new double[0], RelocatedRows.deadControlRowMode(gpuData,
@@ -154,7 +154,7 @@ final class BranchOutagePlanner {
             pb.distrQKeyOverrideMemberByIndex[i] = java.util.Arrays.stream(vcOv[2]).mapToInt(d -> (int) d).toArray();
             pb.distrQKeyOverrideKeyByIndex[i] = vcOv[3];
             // and the survivors' DISTR_Q row TARGETS + the islanded members' inactive entries
-            List<GenOutage> dq = GpuBatchInjectionOutages.islandedDistrQEntries(gpuData, lostVcControllers, pb.relocDummyQRows, outagedZeroImpedanceBranchNums,
+            List<GenOutage> dq = GpuBatchInjectionOutages.islandedDistrQEntries(gpuData, lostVcControllers, pb.relocatedDummyQRows, outagedZeroImpedanceBranchNums,
                     GpuBatchInjectionOutages.labelsOf(pb.distrQSubgroupByIndex[i]));
             if (!dq.isEmpty()) {
                 List<GenOutage> merged = new ArrayList<>();
@@ -260,7 +260,7 @@ final class BranchOutagePlanner {
                 pvOn.addAll(java.util.Arrays.asList(pb.genOutagesByIndex[i]));
             }
             boolean ok = true;
-            boolean relocIdentity = false;
+            boolean crossIdentity = false;
             boolean pinnedMain = false;
             for (var e : reHomed.pvTargets().entrySet()) {
                 var vVar = es.getVariableSet().getVariable(e.getKey().getNum(), AcVariableType.BUS_V);
@@ -269,7 +269,7 @@ final class BranchOutagePlanner {
                     break;
                 }
                 int reHomedReactiveLimitEntry = RelocatedRows.reactiveLimitEntryOf(gpuData, e.getKey());
-                int crossRow = RelocatedRows.relocQRow(vVar.getRow(), pb.relocRows, outagedZeroImpedanceBranchNums);
+                int crossRow = RelocatedRows.scenarioReactiveRowOfVRow(vVar.getRow(), pb.relocatedChildRows, outagedZeroImpedanceBranchNums);
                 if (crossRow != vVar.getRow()) {
                     pvOn.add(ReHomedEntries.reHomedCrossEntry(crossRow, e.getValue(), reHomedReactiveLimitEntry,
                             gpuData.switchedPvToPqInBase(reHomedReactiveLimitEntry), e.getKey().getTargetQ()));
@@ -290,12 +290,12 @@ final class BranchOutagePlanner {
             if (!ok) {
                 GpuBatchQualification.refuse(c,
                         pinnedMain ? "PLAN:VC_REMERGE_PINNED_MAIN"
-                                : relocIdentity ? "PLAN:VC_REMERGE_RELOC_VROW" : "PLAN:VC_REMERGE_NO_VROW");
+                                : crossIdentity ? "PLAN:VC_REMERGE_RELOC_VROW" : "PLAN:VC_REMERGE_NO_VROW");
                 return false;
             }
             if (!reHomed.remoteMainTargets().isEmpty()) {
                 String[] remoteReject = new String[1];
-                List<GenOutage> remoteIds = ReHomedEntries.remoteMainIdentityEntries(reHomed, es, gpuData, pb.relocRows,
+                List<GenOutage> remoteIds = ReHomedEntries.remoteMainIdentityEntries(reHomed, es, gpuData, pb.relocatedChildRows,
                         outagedZeroImpedanceBranchNums, java.util.Set.of(), remoteReject);
                 List<GenOutage> reHomedCtl = remoteIds == null ? null
                         : ReHomedEntries.reHomedRemoteControllerEntries(reHomed, es, gpuData, remoteReject);

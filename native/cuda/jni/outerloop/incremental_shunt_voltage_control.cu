@@ -247,7 +247,7 @@ void incrementalShuntVoltageControlStep(BatchSolverContext* ctx, DriverPass& drv
         int row = ctx->st->rowMap[ctx->hIncrementalShuntVoltageControlShuntBRow[c]];
         if (row < 0) continue;
         setUnitRhsBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, row, ctx->dB.as<double>());
-        hazRepairRightHandSide(ctx, nS, ctx->dB.as<double>());
+        repairZeroDiagonalRightHandSide(ctx, nS, ctx->dB.as<double>());
         sensitivitySolve(ctx, drv, first);
         incrementalShuntVoltageControlGatherSensitivityBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(nS, n, c, nIncrementalShuntVoltageControlControllerShunts, ctx->dIncrementalShuntVoltageControlControlledBusVRow.as<int>(),
                 ctx->dDx.as<double>(), ctx->dIncrementalShuntVoltageControlSensitivity.as<double>());

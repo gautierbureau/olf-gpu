@@ -178,12 +178,12 @@ std::vector<int> buildRowMap(int n, int nClosedBranch, const int* closedBranchIn
         // remote-voltage-control bus (rte6515: row 2200 of 13048, appearing ONLY in zero-impedance[slot 6]).
         claimMovedV(ix[1], ix[6]);
         claimMovedV(ix[3], ix[7]);
-        if (ziDeadSide(ix)) {
+        if (zeroImpedanceDeadEndSideOf(ix)) {
             // The stub's P/Q balances already sit on the dummy rows, where slots 0..3 self-pair and
             // -DUMMY_P / -DUMMY_Q is the diagonal. ZERO_V landed on the stub's v row, which
             // claimMovedV has just claimed (slot 1/3 no longer equals slot 6/7). ZERO_PHI's row is
             // the one nothing else names.
-            pairRc(ziZeroPhiRow(ix), ziZeroPhiRow(ix));
+            pairRc(zeroPhiRowOf(ix), zeroPhiRowOf(ix));
         }
     }
     std::vector<char> colUsed(n, 0);
@@ -240,13 +240,13 @@ void collectFamilyPattern(const std::vector<int>& rowMap,
                           int nDistrQ, const int* distrQElement, const int* distrQSide, const int* distrQKind, const int* distrQRow,
                           int nDistrRho, const int* distrRhoRow, const int* distrRhoColumn,
                           int nDistrShuntB, const int* distrShuntBRow, const int* distrShuntBColumn,
-                          int nZeroImpedanceBranch, const int* zeroImpedanceBranchIndices, const int* relocOwn,
+                          int nZeroImpedanceBranch, const int* zeroImpedanceBranchIndices, const int* relocatedChildOwnRow,
                           std::vector<std::pair<int, int>>& pat) {
     for (int c = 0; c < nDistrQ; c++) {
         // Twice for a relocated child's sharing row: where it lives while the coupler stands, and on the
         // bus's OWN row, which is where it goes in any scenario that kills that coupler (see buildDistrQDest).
         int mapped = rowMap[distrQRow[c]];
-        int own = relocOwn != nullptr && mapped >= 0 ? relocOwn[mapped] : -1;
+        int own = relocatedChildOwnRow != nullptr && mapped >= 0 ? relocatedChildOwnRow[mapped] : -1;
         for (int pass = 0; pass < 2; pass++) {
             int mappedRow = pass == 0 ? mapped : own;
             if (mappedRow < 0) {
@@ -293,7 +293,7 @@ void collectFamilyPattern(const std::vector<int>& rowMap,
         // the solve sat at 0% GPU and never finished a chunk). Four entries per coupler, zero while the
         // base tree holds.
         {
-            int zvRow = rowMap[ziZeroVRow(z)], zpRow = rowMap[ziZeroPhiRow(z)];
+            int zvRow = rowMap[zeroVRowOf(z)], zpRow = rowMap[zeroPhiRowOf(z)];
             pat.emplace_back(zvRow, z[6]);
             pat.emplace_back(zvRow, z[7]);
             pat.emplace_back(zpRow, z[8]);
@@ -306,10 +306,10 @@ void collectFamilyPattern(const std::vector<int>& rowMap,
         // was left free (network.xiidm AJSL: DUMMY_Q AJUU's row held columns {25131, 25135}, the child AJSK_8's V
         // column 2816 nowhere; linear-solve ratio 2.7e12 at the first step). A duplicate pair where the slot
         // already exists changes nothing.
-        if (relocOwn != nullptr && z[5] >= 0) {
+        if (relocatedChildOwnRow != nullptr && z[5] >= 0) {
             int distrQRow = rowMap[z[5]];
-            if (distrQRow >= 0 && relocOwn[distrQRow] >= 0) {
-                pat.emplace_back(distrQRow, relocOwn[distrQRow]);
+            if (distrQRow >= 0 && relocatedChildOwnRow[distrQRow] >= 0) {
+                pat.emplace_back(distrQRow, relocatedChildOwnRow[distrQRow]);
             }
         }
     }

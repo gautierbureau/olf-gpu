@@ -349,7 +349,7 @@ final class VoltageControlOverrides {
         if (kMember == null || jMember == null || memberBus == null || baseW == null) {
             return null;
         }
-        int[] memberQrGroup = gpuData.distrQMembers().relocationGroup();
+        int[] distrQMemberRelocationGroup = gpuData.distrQMembers().relocationGroup();
         java.util.Map<Integer, Integer> memberOfBus = new java.util.HashMap<>();
         for (int m = 0; m < memberBus.length; m++) {
             memberOfBus.put(memberBus[m], m);
@@ -365,7 +365,7 @@ final class VoltageControlOverrides {
             // a group WITH a candidate table has a fixed free member (the first); without one the free role is
             // "first enabled" and may move with the loss - the pack's own qr-group index says which it is
             Integer m0 = memberOfBus.get(bus.getNum());
-            if (m0 == null || memberQrGroup == null || m0 >= memberQrGroup.length || memberQrGroup[m0] < 0) {
+            if (m0 == null || distrQMemberRelocationGroup == null || m0 >= distrQMemberRelocationGroup.length || distrQMemberRelocationGroup[m0] < 0) {
                 return null;
             }
             for (LfBus m : main.getMergedControllerElements()) {

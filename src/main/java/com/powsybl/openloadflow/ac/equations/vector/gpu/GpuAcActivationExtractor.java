@@ -103,7 +103,7 @@ public final class GpuAcActivationExtractor {
         // The coupler-tree relocation, from the same helper ExtractionColumns uses, so the scatter destinations and
         // this target map name the same rows: a child bus's power equations on its parent coupler's dummy columns,
         // that coupler's zero equations on the child's own PHI / V.
-        int[][] ziTree = GpuAcRowIndexing.ziTreeRelocation(network, es, phiCol, vCol, qRow, dummyPCol, dummyQCol);
+        int[][] ziTree = GpuAcRowIndexing.spanningTreeRelocation(network, es, phiCol, vCol, qRow, dummyPCol, dummyQCol);
         int[] stubBranchOfBus = ziTree[0];
         int[] stubBusOfBranch = ziTree[1];
         for (LfBus bus : network.getBuses()) {
@@ -203,7 +203,7 @@ public final class GpuAcActivationExtractor {
             AcVariableType powerRowVar = switch (e.getType()) {
                 case DISTR_RHO -> AcVariableType.BRANCH_RHO1; // controller's BRANCH_RHO1 row
                 case DISTR_SHUNT_B -> AcVariableType.SHUNT_B; // controller's SHUNT_B row
-                // STOCK placement, crosswise (native ziZeroVRow / ziZeroPhiRow): zero-imp v1−rho·v2 sits on the
+                // STOCK placement, crosswise (native zeroVRowOf / zeroPhiRowOf): zero-imp v1−rho·v2 sits on the
                 // DUMMY_Q row and phi1−phi2 on the DUMMY_P row, so that each row's numeric repair from a donor
                 // that carries its dummy column (a Q row, a P row) keeps an entry of its own in the donor's
                 // diagonal column. The target travels with the equation: ZERO_PHI's is the branch's phase shift.
@@ -270,48 +270,48 @@ public final class GpuAcActivationExtractor {
     public static double[][] extractRowCriteria(EquationSystem<AcVariableType, AcEquationType> es, int n,
                                                 double maxP, double maxQ, double maxV, double maxAngle,
                                                 double maxRatio, double maxSusceptance, double eps) {
-        double[] thrIdent = new double[n];
-        double[] thrPower = new double[n];
-        java.util.Arrays.fill(thrIdent, eps);
-        java.util.Arrays.fill(thrPower, eps);
+        double[] fixedVariableRowMaxMismatch = new double[n];
+        double[] equationRowMaxMismatch = new double[n];
+        java.util.Arrays.fill(fixedVariableRowMaxMismatch, eps);
+        java.util.Arrays.fill(equationRowMaxMismatch, eps);
         double sb = 100.0;
         for (var v : es.getIndex().getSortedVariablesToFind()) {
             int r = v.getRow();
             switch (v.getType()) {
                 case BUS_V -> {
-                    thrIdent[r] = maxV;                      // BUS_TARGET_V (incl. slope rows)
-                    thrPower[r] = maxQ / sb;                 // BUS_TARGET_Q / DISTR_Q
+                    fixedVariableRowMaxMismatch[r] = maxV;                      // BUS_TARGET_V (incl. slope rows)
+                    equationRowMaxMismatch[r] = maxQ / sb;                 // BUS_TARGET_Q / DISTR_Q
                 }
                 case BUS_PHI -> {
-                    thrIdent[r] = maxAngle;                  // BUS_TARGET_PHI (slack)
-                    thrPower[r] = maxP / sb;                 // BUS_TARGET_P / BUS_DISTR_SLACK_P
+                    fixedVariableRowMaxMismatch[r] = maxAngle;                  // BUS_TARGET_PHI (slack)
+                    equationRowMaxMismatch[r] = maxP / sb;                 // BUS_TARGET_P / BUS_DISTR_SLACK_P
                 }
                 case BRANCH_ALPHA1 -> {
-                    thrIdent[r] = maxAngle;                  // BRANCH_TARGET_ALPHA1
-                    thrPower[r] = maxP / sb;                 // BRANCH_TARGET_P (row mode 3)
+                    fixedVariableRowMaxMismatch[r] = maxAngle;                  // BRANCH_TARGET_ALPHA1
+                    equationRowMaxMismatch[r] = maxP / sb;                 // BRANCH_TARGET_P (row mode 3)
                 }
                 case BRANCH_RHO1 -> {
-                    thrIdent[r] = maxRatio;                  // BRANCH_TARGET_RHO1 / DISTR_RHO
-                    thrPower[r] = maxRatio;
+                    fixedVariableRowMaxMismatch[r] = maxRatio;                  // BRANCH_TARGET_RHO1 / DISTR_RHO
+                    equationRowMaxMismatch[r] = maxRatio;
                 }
                 case SHUNT_B -> {
-                    thrIdent[r] = maxSusceptance;            // SHUNT_TARGET_B / DISTR_SHUNT_B
-                    thrPower[r] = maxSusceptance;
+                    fixedVariableRowMaxMismatch[r] = maxSusceptance;            // SHUNT_TARGET_B / DISTR_SHUNT_B
+                    equationRowMaxMismatch[r] = maxSusceptance;
                 }
                 case DUMMY_P -> {
-                    thrIdent[r] = maxP / sb;                 // DUMMY_TARGET_P (identity, pinned 0)
-                    thrPower[r] = maxAngle;                  // ZERO_PHI coupling (mode 1)
+                    fixedVariableRowMaxMismatch[r] = maxP / sb;                 // DUMMY_TARGET_P (identity, pinned 0)
+                    equationRowMaxMismatch[r] = maxAngle;                  // ZERO_PHI coupling (mode 1)
                 }
                 case DUMMY_Q -> {
-                    thrIdent[r] = maxQ / sb;                 // DUMMY_TARGET_Q
-                    thrPower[r] = maxV;                      // ZERO_V coupling
+                    fixedVariableRowMaxMismatch[r] = maxQ / sb;                 // DUMMY_TARGET_Q
+                    equationRowMaxMismatch[r] = maxV;                      // ZERO_V coupling
                 }
                 default -> {
                     // convEpsPerEq for anything else — matches OLF's default case
                 }
             }
         }
-        return new double[][] {thrIdent, thrPower};
+        return new double[][] {fixedVariableRowMaxMismatch, equationRowMaxMismatch};
     }
 
     /** OLF's PerEquationTypeStoppingCriteria threshold for an equation TYPE (its checkEquation switch, power values
@@ -344,7 +344,7 @@ public final class GpuAcActivationExtractor {
      * <p>Two placements change per scenario and get an ALTERNATE threshold with a SELECTOR row: a relocated child whose
      * parent coupler opens comes back HOME (its PHI / V rows hold its own balances again, the selector being the
      * coupler's dummy row, an identity in that scenario), and a cross identity (row mode 6: a child's voltage target on
-     * its parent's DUMMY_Q row) is a voltage equation. Returns {thrIdent, thrPower, thrAlt, thrSel (as double, -1 when
+     * its parent's DUMMY_Q row) is a voltage equation. Returns {fixedVariableRowMaxMismatch, equationRowMaxMismatch, alternateRowMaxMismatch, alternateRowMaxMismatchSelector (as double, -1 when
      * none)}.
      */
     @SuppressWarnings("java:S107")
@@ -353,12 +353,12 @@ public final class GpuAcActivationExtractor {
                                                 double maxP, double maxQ, double maxV, double maxAngle,
                                                 double maxRatio, double maxSusceptance, double eps) {
         double[][] base = extractRowCriteria(es, n, maxP, maxQ, maxV, maxAngle, maxRatio, maxSusceptance, eps);
-        double[] thrIdent = base[0];
-        double[] thrPower = base[1];
-        double[] thrAlt = new double[n];
-        double[] thrSel = new double[n];
-        java.util.Arrays.fill(thrSel, -1);
-        java.util.Arrays.fill(thrAlt, eps);
+        double[] fixedVariableRowMaxMismatch = base[0];
+        double[] equationRowMaxMismatch = base[1];
+        double[] alternateRowMaxMismatch = new double[n];
+        double[] alternateRowMaxMismatchSelector = new double[n];
+        java.util.Arrays.fill(alternateRowMaxMismatchSelector, -1);
+        java.util.Arrays.fill(alternateRowMaxMismatch, eps);
         java.util.Map<Integer, AcEquationType> typeOfColumn = new java.util.HashMap<>();
         for (SingleEquation<AcVariableType, AcEquationType> e : es.getIndex().getSortedSingleEquationsToSolve()) {
             typeOfColumn.put(e.getColumn(), e.getType());
@@ -372,9 +372,9 @@ public final class GpuAcActivationExtractor {
             }
             double thr = thresholdOf(type, maxP, maxQ, maxV, maxAngle, maxRatio, maxSusceptance, eps);
             switch (mode[r]) {
-                case 0, 2 -> thrIdent[r] = thr;
-                case 6 -> thrAlt[r] = thr;
-                default -> thrPower[r] = thr;
+                case 0, 2 -> fixedVariableRowMaxMismatch[r] = thr;
+                case 6 -> alternateRowMaxMismatch[r] = thr;
+                default -> equationRowMaxMismatch[r] = thr;
             }
         }
         // The coupler-tree relocation, per scenario: a child's own rows host the coupler's ZERO equations while the
@@ -383,7 +383,7 @@ public final class GpuAcActivationExtractor {
         ExtractionColumns cols = ExtractionColumns.of(network, es);
         for (LfBus bus : network.getBuses()) {
             int b = bus.getNum();
-            int pe = cols.ziParentEdge()[b];
+            int pe = cols.spanningTreeParentBranch()[b];
             if (pe < 0) {
                 continue;
             }
@@ -392,22 +392,22 @@ public final class GpuAcActivationExtractor {
             int phi = cols.phiCol()[b];
             int v = cols.vCol()[b];
             if (phi >= 0 && dp >= 0) {
-                thrSel[phi] = dp;
-                thrAlt[phi] = maxP / 100.0;                  // BUS_TARGET_P back home
+                alternateRowMaxMismatchSelector[phi] = dp;
+                alternateRowMaxMismatch[phi] = maxP / 100.0;                  // BUS_TARGET_P back home
             }
             if (v >= 0 && dq >= 0) {
-                thrSel[v] = dq;
-                thrAlt[v] = maxQ / 100.0;                    // its reactive balance back home (its voltage target,
+                alternateRowMaxMismatchSelector[v] = dq;
+                alternateRowMaxMismatch[v] = maxQ / 100.0;                    // its reactive balance back home (its voltage target,
             }                                                // an identity, keeps the V row's identity threshold)
             if (dq >= 0) {
-                thrAlt[dq] = maxV;                           // the child's voltage target written crosswise (mode 6)
-                thrPower[dq] = maxQ / 100.0;                 // its reactive balance there, shared or pinned
+                alternateRowMaxMismatch[dq] = maxV;                           // the child's voltage target written crosswise (mode 6)
+                equationRowMaxMismatch[dq] = maxQ / 100.0;                 // its reactive balance there, shared or pinned
             }
             if (dp >= 0) {
-                thrPower[dp] = maxP / 100.0;
+                equationRowMaxMismatch[dp] = maxP / 100.0;
             }
         }
-        return new double[][] {thrIdent, thrPower, thrAlt, thrSel};
+        return new double[][] {fixedVariableRowMaxMismatch, equationRowMaxMismatch, alternateRowMaxMismatch, alternateRowMaxMismatchSelector};
     }
 
     /**

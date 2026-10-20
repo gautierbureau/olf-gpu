@@ -90,7 +90,7 @@ public final class GpuAcDataExtractor {
     /**
      * Each bus's P-balance and Q-balance ROW, indexed by {@code LfBus.getNum()}: its own BUS_PHI /
      * BUS_V column, or its parent coupler's DUMMY_P / DUMMY_Q column under the coupler-tree
-     * relocation ({@code ziTreeRelocation}), which is where the extraction actually writes that bus's
+     * relocation ({@code spanningTreeRelocation}), which is where the extraction actually writes that bus's
      * targets.
      *
      * <p>A consumer that resolves a bus's target row from the variable set instead lands on the
@@ -101,14 +101,14 @@ public final class GpuAcDataExtractor {
      * system — the distributed-slack loop then read the surplus as a mismatch and undid the whole
      * loss pre-distribution. rte6515 has no couplers, so it never showed it.
      *
-     * @return {@code {pRow, qRow, ziParentEdge, qRowAlt}} — the third names the coupler hosting each bus's power
+     * @return {@code {pRow, qRow, spanningTreeParentBranch, alternateQRow}} — the third names the coupler hosting each bus's power
      *         equations, or -1 when the bus was not relocated; the fourth is the ALTERNATE reactive row, where a
      *         reactive-limit pin puts the bus's own balance (mode 4): a relocated child's is its coupler's DUMMY_Q
      *         row, -1 or a negative group code otherwise.
      */
     public static int[][] busPowerRows(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es) {
         ExtractionColumns columns = ExtractionColumns.of(network, es);
-        return new int[][] {columns.pRow(), columns.qRow(), columns.ziParentEdge(), columns.qRowAlt()};
+        return new int[][] {columns.pRow(), columns.qRow(), columns.spanningTreeParentBranch(), columns.alternateQRow()};
     }
 
     public static GpuAcData extract(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
@@ -171,17 +171,17 @@ public final class GpuAcDataExtractor {
                         family.baseOpenZeroImpedanceBranches().stream().mapToInt(Integer::intValue).toArray(),
                         family.baseOpenZeroImpedanceBranchNums().stream().mapToInt(Integer::intValue).toArray()),
                 new ElementPack(GpuAcArrays.flatD(family.loadModelParameters(), 3), GpuAcArrays.flatI(family.loadModelIndices(), 2)),
-                new ReactiveRelocationCandidates(columns.qrPtr(), columns.qrRows(), columns.qrDepBase(),
-                        columns.qrBaseTargetRow(), columns.depGroupOfRow()));
+                new ReactiveRelocationCandidates(columns.reactiveRelocationGroupStart(), columns.reactiveRelocationCandidateRows(), columns.reactiveRelocationDependentBaseGroup(),
+                        columns.reactiveRelocationBaseTargetRow(), columns.reactiveRelocationDependentGroupOfRow()));
     }
 
     /** The couplers whose {@code DUMMY_P} / {@code DUMMY_Q} rows host a bus's power equations under the
-     *  coupler-tree relocation ({@link GpuAcRowIndexing#ziTreeRelocation}). A batched scenario has to know them:
+     *  coupler-tree relocation ({@link GpuAcRowIndexing#spanningTreeRelocation}). A batched scenario has to know them:
      *  inside an island every row must become an identity, and under the relocation two of those rows belong to
      *  the coupler, not to the bus. */
     public static java.util.Set<LfBranch> relocatedCouplerBranches(LfNetwork network,
                                                                   EquationSystem<AcVariableType, AcEquationType> es) {
-        int[] childBusOfEdge = ExtractionColumns.of(network, es).ziChildBus();
+        int[] childBusOfEdge = ExtractionColumns.of(network, es).spanningTreeChildBus();
         java.util.Set<LfBranch> relocated = new java.util.HashSet<>();
         for (LfBranch br : network.getBranches()) {
             if (childBusOfEdge[br.getNum()] >= 0) {

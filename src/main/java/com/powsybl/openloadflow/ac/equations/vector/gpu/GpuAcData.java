@@ -17,7 +17,7 @@ import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuQLimitType;
  * switching. Packings (an index of -1 marks an absent branch side):
  * <ul>
  *   <li>closed branches — in {@code nClosedBranch*8} (y g1 g2 b1 b2 ksi r1 a1),
- *       idx {@code nClosedBranch*12} (Prow1 Qrow1 Prow2 Qrow2 ph1col v1col ph2col v2col a1col r1col qAlt1 qAlt2).
+ *       idx {@code nClosedBranch*12} (Prow1 Qrow1 Prow2 Qrow2 ph1col v1col ph2col v2col a1col r1col alternateQRow1 alternateQRow2).
  *       {@code a1col}/{@code r1col} are the BRANCH_ALPHA1/BRANCH_RHO1 variable columns when the
  *       branch derives that control (transformer phase/voltage control), else -1; a controlling
  *       transformer also routes the controlled bus's Q row to its {@code r1col} (see GpuAcDataExtractor)</li>
@@ -107,7 +107,7 @@ public record GpuAcData(ClosedBranchPack closedBranch, OpenBranchPack openBranch
                 && zeroImpedanceBranch.sameIndicesAs(other.zeroImpedanceBranch)
                 && distrRho.sameAs(other.distrRho) && distrShuntB.sameAs(other.distrShuntB)
                 && loadModel.sameParametersAs(other.loadModel) && loadModel.sameIndicesAs(other.loadModel)
-                // the candidate tables build the group relocation pools (buildCbDynDest & co.)
+                // the candidate tables build the group relocation pools (buildClosedBranchRelocationDestination & co.)
                 && reactiveRelocation.sameAs(other.reactiveRelocation);
     }
 
@@ -179,7 +179,7 @@ public record GpuAcData(ClosedBranchPack closedBranch, OpenBranchPack openBranch
      * row, the child's own PHI row hosting the coupler's {@code ZERO_PHI} — and the failure was the kernel
      * reading the bus ANGLE at the same index it wrote the target to (a {@code DUMMY_P} variable read as an
      * angle). The angle column and the target row are separate arrays now, and a scenario that opens the parent
-     * coupler diverts the write to the own row (relocOwn). Measured on rte6515 BUS-1219_BBS: the saturation
+     * coupler diverts the write to the own row (relocatedChildOwnRow). Measured on rte6515 BUS-1219_BBS: the saturation
      * delta of SYN_HVDC_4 landing on a ZERO_PHI row reversed the emulated flow and the limits loop toggled
      * between the two saturation sides to its budget — the one device failure on an OLF-converging busbar
      * contingency (tasks #68 / #69).

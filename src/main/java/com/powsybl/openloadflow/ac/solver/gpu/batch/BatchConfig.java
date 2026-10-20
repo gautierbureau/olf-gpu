@@ -26,8 +26,8 @@ import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuStateVectorScalingMode;
  * forbids — a silent wrong answer).
  *
  * <ul>
- *   <li>{@code lsMode}/{@code maxDv}/{@code maxDphi}: MAX_VOLTAGE_CHANGE state-vector scaling per
- *       scenario (mirrors the CPU's MaxVoltageChangeStateVectorScaling); lsMode 0 = raw full Newton
+ *   <li>{@code stateVectorScalingMode}/{@code maxDv}/{@code maxDphi}: MAX_VOLTAGE_CHANGE state-vector scaling per
+ *       scenario (mirrors the CPU's MaxVoltageChangeStateVectorScaling); stateVectorScalingMode 0 = raw full Newton
  *       steps.</li>
  *   <li>{@code transformerControl}: run the per-scenario AFTER_GENERATOR transformer voltage-control
  *       orchestrator (set only when the resolved outer loops include it and the network is in scope).</li>
@@ -42,7 +42,7 @@ import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuStateVectorScalingMode;
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
-public record BatchConfig(int lsMode, double maxDv, double maxDphi, boolean transformerControl,
+public record BatchConfig(int stateVectorScalingMode, double maxDv, double maxDphi, boolean transformerControl,
                           int maxOuterIterations, int maxPqPvSwitch, boolean rejectSlackDistributionFailure,
                           com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDsParams distributedSlackParameters,
                           boolean incrementalTransformerControl, int incrementalTransformerVoltageControlMaxTapShift,
@@ -96,7 +96,7 @@ public record BatchConfig(int lsMode, double maxDv, double maxDphi, boolean tran
      * remedy for a CHUNK scenario, which previously had no route to it and went to the CPU instead.
      */
     public BatchConfig withRobustSolveMode() {
-        return new BatchConfig(lsMode, maxDv, maxDphi, transformerControl, maxOuterIterations, maxPqPvSwitch,
+        return new BatchConfig(stateVectorScalingMode, maxDv, maxDphi, transformerControl, maxOuterIterations, maxPqPvSwitch,
                 rejectSlackDistributionFailure, distributedSlackParameters, incrementalTransformerControl, incrementalTransformerVoltageControlMaxTapShift,
                 incrementalShuntControl, incrementalShuntVoltageControlMaxSectionShift, simpleShuntControl, incrementalTransformerReactivePowerControl,
                 incrementalPhaseControl, simpleTransformerControl, transformerVoltageControlUseInitialTapPosition, hvdcFreezing,
@@ -109,7 +109,7 @@ public record BatchConfig(int lsMode, double maxDv, double maxDphi, boolean tran
 
     /** This config with the given state sink (see {@link #stateSink()}). */
     public BatchConfig withStateSink(java.util.Map<String, double[]> sink) {
-        return new BatchConfig(lsMode, maxDv, maxDphi, transformerControl, maxOuterIterations, maxPqPvSwitch,
+        return new BatchConfig(stateVectorScalingMode, maxDv, maxDphi, transformerControl, maxOuterIterations, maxPqPvSwitch,
                 rejectSlackDistributionFailure, distributedSlackParameters, incrementalTransformerControl, incrementalTransformerVoltageControlMaxTapShift,
                 incrementalShuntControl, incrementalShuntVoltageControlMaxSectionShift, simpleShuntControl, incrementalTransformerReactivePowerControl,
                 incrementalPhaseControl, simpleTransformerControl, transformerVoltageControlUseInitialTapPosition, hvdcFreezing,
@@ -122,7 +122,7 @@ public record BatchConfig(int lsMode, double maxDv, double maxDphi, boolean tran
 
     /** This config with the given GPU solver parameters (see {@link #gpuParameters()}). */
     public BatchConfig withGpuParameters(GpuLoadFlowParameters parameters) {
-        return new BatchConfig(lsMode, maxDv, maxDphi, transformerControl, maxOuterIterations, maxPqPvSwitch,
+        return new BatchConfig(stateVectorScalingMode, maxDv, maxDphi, transformerControl, maxOuterIterations, maxPqPvSwitch,
                 rejectSlackDistributionFailure, distributedSlackParameters, incrementalTransformerControl, incrementalTransformerVoltageControlMaxTapShift,
                 incrementalShuntControl, incrementalShuntVoltageControlMaxSectionShift, simpleShuntControl, incrementalTransformerReactivePowerControl,
                 incrementalPhaseControl, simpleTransformerControl, transformerVoltageControlUseInitialTapPosition, hvdcFreezing,

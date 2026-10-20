@@ -123,7 +123,7 @@ public final class GpuEquationDump {
             add(terms, zi[o + 3], tag + ".q2(-dQ)");
             if ((zi[o + 10] & 1) != 0) {
                 int childSide = (zi[o + 10] >> 1) & 3;
-                // stock: crosswise, ZERO_V on the DUMMY_Q row and ZERO_PHI on the DUMMY_P row (native ziZeroVRow)
+                // stock: crosswise, ZERO_V on the DUMMY_Q row and ZERO_PHI on the DUMMY_P row (native zeroVRowOf)
                 int zv = childSide == 0 ? zi[o + 5] : (childSide == 1 ? zi[o + 6] : zi[o + 7]);
                 int zp = childSide == 0 ? zi[o + 4] : (childSide == 1 ? zi[o + 8] : zi[o + 9]);
                 add(terms, zv, tag + ".ZERO_V");
@@ -164,7 +164,7 @@ public final class GpuEquationDump {
             LfBus b1 = br == null ? null : br.getBus1();
             LfBus b2 = br == null ? null : br.getBus2();
             w.write(String.format("zi#%d branch=%s b1=%s b2=%s pRow1=%d qRow1=%d pRow2=%d qRow2=%d"
-                            + " dummyP=%d dummyQ=%d spanningTree=%d childSide=%d qAlt=[%d,%d]%n",
+                            + " dummyP=%d dummyQ=%d spanningTree=%d childSide=%d alternateQRows=[%d,%d]%n",
                     e, br == null ? "?" : br.getId(), b1 == null ? "-" : b1.getId(), b2 == null ? "-" : b2.getId(),
                     zi[o], zi[o + 1], zi[o + 2], zi[o + 3], zi[o + 4], zi[o + 5],
                     zi[o + 10] & 1, (zi[o + 10] >> 1) & 3,
@@ -181,7 +181,7 @@ public final class GpuEquationDump {
             boolean qIncomplete = zi[o + 1] < 0 ^ zi[o + 3] < 0;
             if (pIncomplete || qIncomplete) {
                 LfBranch br = e < zeroImpedanceBranchNums.length && zeroImpedanceBranchNums[e] >= 0 ? network.getBranch(zeroImpedanceBranchNums[e]) : null;
-                w.write(String.format("zi#%d branch=%s %s%s pRows=[%d,%d] qRows=[%d,%d] qAlt=[%d,%d]%n",
+                w.write(String.format("zi#%d branch=%s %s%s pRows=[%d,%d] qRows=[%d,%d] alternateQRows=[%d,%d]%n",
                         e, br == null ? "?" : br.getId(), pIncomplete ? "P " : "", qIncomplete ? "Q " : "",
                         zi[o], zi[o + 2], zi[o + 1], zi[o + 3],
                         e * 2 + 1 < zeroImpedanceBranchAlternateReactiveDestination.length ? zeroImpedanceBranchAlternateReactiveDestination[e * 2] : -1,
@@ -191,12 +191,12 @@ public final class GpuEquationDump {
 
         // The GROUPS behind the suppressed rows: a member's Q row is suppressed because its balance lives in
         // the group's DISTR_Q row, and the pilot's own balance rides the FREE member's row. Whether that
-        // arrangement survives an RL pin depends on the candidate table (qRowAlt = -2-group) and on each
+        // arrangement survives an RL pin depends on the candidate table (alternateQRow = -2-group) and on each
         // member's alternate, so print them together with the reasons a table is skipped.
         w.write("\n# remote generator voltage-control groups (pilot, members, rows, candidate table)\n");
         ExtractionColumns cols = ExtractionColumns.of(network, es);
         int[] qRow = cols.qRow();
-        int[] qRowAlt = cols.qRowAlt();
+        int[] alternateQRow = cols.alternateQRow();
         int[] vCol = cols.vCol();
         for (LfBus bus : network.getBuses()) {
             var gvc = bus.getGeneratorVoltageControl()
@@ -208,13 +208,13 @@ public final class GpuEquationDump {
             List<LfBus> members = gvc.getMergedControllerElements();
             StringBuilder sb = new StringBuilder();
             for (LfBus m : members) {
-                sb.append(String.format(" %s[vCol=%d qRow=%d qRowAlt=%d enabled=%b]", m.getId(), vCol[m.getNum()],
-                        qRow[m.getNum()], qRowAlt[m.getNum()], gvc.isControllerEnabled(m)));
+                sb.append(String.format(" %s[vCol=%d qRow=%d alternateQRow=%d enabled=%b]", m.getId(), vCol[m.getNum()],
+                        qRow[m.getNum()], alternateQRow[m.getNum()], gvc.isControllerEnabled(m)));
             }
             w.write(String.format("gvc pilot=%s controlled=%s local=%b pilotIsController=%b vCol=%d qRow=%d"
-                            + " qRowAlt=%d members=%d:%s%n",
+                            + " alternateQRow=%d members=%d:%s%n",
                     bus.getId(), gvc.getControlledBus().getId(), gvc.isLocalControl(), members.contains(bus),
-                    vCol[bus.getNum()], qRow[bus.getNum()], qRowAlt[bus.getNum()], members.size(), sb));
+                    vCol[bus.getNum()], qRow[bus.getNum()], alternateQRow[bus.getNum()], members.size(), sb));
         }
         w.flush();
     }

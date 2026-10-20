@@ -9,14 +9,14 @@
 extern "C" JNIEXPORT void JNICALL
 OLF_JNI(ac_solver_gpu, NewtonSettingsNative, setLinearSolverSettings)(
         JNIEnv*, jclass, jint reorder, jint matching, jint pivotType, jdouble pivotThreshold,
-        jint irBase, jint irMax, jdouble irTol) {
+        jint iterativeRefinementBaseSteps, jint iterativeRefinementMaxSteps, jdouble iterativeRefinementTolerance) {
     gLinearSolver.reorder = reorder;
     gLinearSolver.matching = matching;
     gLinearSolver.pivotType = pivotType;
     gLinearSolver.pivotThreshold = pivotThreshold;
-    gLinearSolver.irBase = irBase;
-    gLinearSolver.irMax = irMax;
-    gLinearSolver.irTol = irTol;
+    gLinearSolver.iterativeRefinementBaseSteps = iterativeRefinementBaseSteps;
+    gLinearSolver.iterativeRefinementMaxSteps = iterativeRefinementMaxSteps;
+    gLinearSolver.iterativeRefinementTolerance = iterativeRefinementTolerance;
 }
 
 // The installed linear-solver settings, in setLinearSolverSettings's order (tests: the parameters reach the device).
@@ -24,15 +24,15 @@ extern "C" JNIEXPORT jdoubleArray JNICALL
 OLF_JNI(ac_solver_gpu, NewtonSettingsNative, readLinearSolverSettings)(JNIEnv* env, jclass) {
     const double v[7] = {static_cast<double>(gLinearSolver.reorder), static_cast<double>(gLinearSolver.matching),
                          static_cast<double>(gLinearSolver.pivotType), gLinearSolver.pivotThreshold,
-                         static_cast<double>(gLinearSolver.irBase), static_cast<double>(gLinearSolver.irMax),
-                         gLinearSolver.irTol};
+                         static_cast<double>(gLinearSolver.iterativeRefinementBaseSteps), static_cast<double>(gLinearSolver.iterativeRefinementMaxSteps),
+                         gLinearSolver.iterativeRefinementTolerance};
     jdoubleArray out = env->NewDoubleArray(7);
     env->SetDoubleArrayRegion(out, 0, 7, v);
     return out;
 }
 
 // LINE_SEARCH backtracking parameters for a batch context (OLF LineSearchStateVectorScaling's
-// maxIteration and stepFold): consumed by solves called with lsMode == GpuStateVectorScalingMode::LINE_SEARCH. Context-scoped like
+// maxIteration and stepFold): consumed by solves called with stateVectorScalingMode == GpuStateVectorScalingMode::LINE_SEARCH. Context-scoped like
 // setBatchRowCriteria, so the solveBatchContext signature stays unchanged.
 // Per-scenario starting values for the next solve given no full per-scenario state: flat index s*n+row -> value,
 // written over the base state tiled on the device. Replaces sending nScenarios * n doubles when only a few rows
@@ -58,38 +58,38 @@ OLF_JNI(ac_solver_gpu, NewtonSettingsNative, setBatchX0Seeds)(
 
 extern "C" JNIEXPORT void JNICALL
 OLF_JNI(ac_solver_gpu, NewtonSettingsNative, setBatchLineSearch)(
-        JNIEnv*, jclass, jlong handle, jint lsMaxIter, jdouble lsStepFold) {
+        JNIEnv*, jclass, jlong handle, jint lineSearchStateVectorScalingMaxIteration, jdouble lineSearchStateVectorScalingStepFold) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx == nullptr) {
         return;
     }
-    ctx->lsMaxIter = lsMaxIter > 0 ? lsMaxIter : 10;
-    ctx->lsStepFold = lsStepFold > 1.0 ? lsStepFold : 4.0 / 3.0;
+    ctx->lineSearchStateVectorScalingMaxIteration = lineSearchStateVectorScalingMaxIteration > 0 ? lineSearchStateVectorScalingMaxIteration : 10;
+    ctx->lineSearchStateVectorScalingStepFold = lineSearchStateVectorScalingStepFold > 1.0 ? lineSearchStateVectorScalingStepFold : 4.0 / 3.0;
 }
 
 // PER_EQUATION_TYPE stopping criterion: install (or clear, with nulls) the per-row threshold
-// arrays on a batch context — thrIdent for identity/slope rows, thrPower for power rows, both
+// arrays on a batch context — fixedVariableRowMaxMismatch for identity/slope rows, equationRowMaxMismatch for power rows, both
 // length n. The convergence test then requires EVERY row's |F| under its threshold (OLF's
 // PerEquationTypeStoppingCriteria), replacing the 2-norm/infnorm rule for this context.
 extern "C" JNIEXPORT void JNICALL
 OLF_JNI(ac_solver_gpu, NewtonSettingsNative, setBatchRowCriteria)(
-        JNIEnv* env, jclass, jlong handle, jdoubleArray jThrIdent, jdoubleArray jThrPower) {
+        JNIEnv* env, jclass, jlong handle, jdoubleArray jFixedVariableRowMaxMismatch, jdoubleArray jEquationRowMaxMismatch) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx == nullptr) {
         return;
     }
-    if (jThrIdent == nullptr || jThrPower == nullptr) {
+    if (jFixedVariableRowMaxMismatch == nullptr || jEquationRowMaxMismatch == nullptr) {
         ctx->perRowCriteria = false;
-        ctx->perRowAlt = false;
+        ctx->perRowAlternateCriteria = false;
         return;
     }
     int n = ctx->st->n;
-    jdouble* thrIdent = env->GetDoubleArrayElements(jThrIdent, nullptr);
-    jdouble* thrPower = env->GetDoubleArrayElements(jThrPower, nullptr);
-    ctx->dThrIdent.upload(thrIdent, static_cast<size_t>(n) * sizeof(double));
-    ctx->dThrPower.upload(thrPower, static_cast<size_t>(n) * sizeof(double));
-    env->ReleaseDoubleArrayElements(jThrIdent, thrIdent, JNI_ABORT);
-    env->ReleaseDoubleArrayElements(jThrPower, thrPower, JNI_ABORT);
+    jdouble* fixedVariableRowMaxMismatch = env->GetDoubleArrayElements(jFixedVariableRowMaxMismatch, nullptr);
+    jdouble* equationRowMaxMismatch = env->GetDoubleArrayElements(jEquationRowMaxMismatch, nullptr);
+    ctx->dFixedVariableRowMaxMismatch.upload(fixedVariableRowMaxMismatch, static_cast<size_t>(n) * sizeof(double));
+    ctx->dEquationRowMaxMismatch.upload(equationRowMaxMismatch, static_cast<size_t>(n) * sizeof(double));
+    env->ReleaseDoubleArrayElements(jFixedVariableRowMaxMismatch, fixedVariableRowMaxMismatch, JNI_ABORT);
+    env->ReleaseDoubleArrayElements(jEquationRowMaxMismatch, equationRowMaxMismatch, JNI_ABORT);
     ctx->perRowCriteria = true;
 }
 
@@ -97,24 +97,24 @@ OLF_JNI(ac_solver_gpu, NewtonSettingsNative, setBatchRowCriteria)(
 // residualNormsBatch for a cross identity (mode 6) and for a relocated child's row once its coupler's dummy row
 // is an identity. Nulls clear them. Install after setBatchRowCriteria, which clears them too.
 extern "C" JNIEXPORT void JNICALL
-OLF_JNI(ac_solver_gpu, NewtonSettingsNative, setBatchRowCriteriaAlt)(
-        JNIEnv* env, jclass, jlong handle, jdoubleArray jThrAlt, jintArray jThrSel) {
+OLF_JNI(ac_solver_gpu, NewtonSettingsNative, setBatchRowCriteriaAlternate)(
+        JNIEnv* env, jclass, jlong handle, jdoubleArray jAlternateRowMaxMismatch, jintArray jAlternateRowMaxMismatchSelector) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx == nullptr) {
         return;
     }
-    if (jThrAlt == nullptr || jThrSel == nullptr) {
-        ctx->perRowAlt = false;
+    if (jAlternateRowMaxMismatch == nullptr || jAlternateRowMaxMismatchSelector == nullptr) {
+        ctx->perRowAlternateCriteria = false;
         return;
     }
     int n = ctx->st->n;
-    jdouble* thrAlt = env->GetDoubleArrayElements(jThrAlt, nullptr);
-    jint* thrSel = env->GetIntArrayElements(jThrSel, nullptr);
-    ctx->dThrAlt.upload(thrAlt, static_cast<size_t>(n) * sizeof(double));
-    ctx->dThrSel.upload(thrSel, static_cast<size_t>(n) * sizeof(int));
-    env->ReleaseDoubleArrayElements(jThrAlt, thrAlt, JNI_ABORT);
-    env->ReleaseIntArrayElements(jThrSel, thrSel, JNI_ABORT);
-    ctx->perRowAlt = true;
+    jdouble* alternateRowMaxMismatch = env->GetDoubleArrayElements(jAlternateRowMaxMismatch, nullptr);
+    jint* alternateRowMaxMismatchSelector = env->GetIntArrayElements(jAlternateRowMaxMismatchSelector, nullptr);
+    ctx->dAlternateRowMaxMismatch.upload(alternateRowMaxMismatch, static_cast<size_t>(n) * sizeof(double));
+    ctx->dAlternateRowMaxMismatchSelector.upload(alternateRowMaxMismatchSelector, static_cast<size_t>(n) * sizeof(int));
+    env->ReleaseDoubleArrayElements(jAlternateRowMaxMismatch, alternateRowMaxMismatch, JNI_ABORT);
+    env->ReleaseIntArrayElements(jAlternateRowMaxMismatchSelector, alternateRowMaxMismatchSelector, JNI_ABORT);
+    ctx->perRowAlternateCriteria = true;
 }
 
 // Per-scenario ACTIVE equation counts for the L2 stopping threshold (see hNActive). Per-chunk state.

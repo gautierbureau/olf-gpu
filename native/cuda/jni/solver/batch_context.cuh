@@ -49,19 +49,19 @@ struct BatchSolverContext {
     // strategies of a contingency that ran out of iterations (PreviousValueVoltageInitializer)
     DeviceBuf dXLastConv;
     DeviceBuf dTargetBase;                                   // the base targets (n), before tiling/overrides
-    DeviceBuf dHazSnap, dHazBSnap, dHazChoice;               // zero-diagonal repair scratch (lazy)
-    int hazCap = 0;
+    DeviceBuf dZeroDiagonalRowSnapshot, dZeroDiagonalRightHandSideSnapshot, dZeroDiagonalDonorChoice;               // zero-diagonal repair scratch (lazy)
+    int zeroDiagonalRepairCapacity = 0;
     bool clampStep = false;                                  // MAX_VOLTAGE_CHANGE per-scenario step clamp (set per solve)
     double maxDv = 0.0, maxDphi = 0.0;
     DeviceBuf dVarType, dStepFactor;                         // n ints / nS factors (lazy, first clamped solve)
-    DeviceBuf dXprevLs;                                      // n*nS pre-step iterates (lazy, LINE_SEARCH solves)
-    int lsMaxIter = 10;                                      // LINE_SEARCH backtracks (setBatchLineSearch)
-    double lsStepFold = 4.0 / 3.0;
+    DeviceBuf dLineSearchPreviousX;                                      // n*nS pre-step iterates (lazy, LINE_SEARCH solves)
+    int lineSearchStateVectorScalingMaxIteration = 10;                                      // LINE_SEARCH backtracks (setBatchLineSearch)
+    double lineSearchStateVectorScalingStepFold = 4.0 / 3.0;
     DeviceBuf dNorms;                                        // nS*4 device-side convergence norms (see residualNormsBatch)
-    DeviceBuf dThrIdent, dThrPower;                          // n each: per-row PER_EQUATION_TYPE thresholds (empty = 2-norm/infnorm criterion)
+    DeviceBuf dFixedVariableRowMaxMismatch, dEquationRowMaxMismatch;                          // n each: per-row PER_EQUATION_TYPE thresholds (empty = 2-norm/infnorm criterion)
     bool perRowCriteria = false;
-    DeviceBuf dThrAlt, dThrSel;                              // n each: the alternate threshold and its selector row (see residualNormsBatch)
-    bool perRowAlt = false;
+    DeviceBuf dAlternateRowMaxMismatch, dAlternateRowMaxMismatchSelector;                              // n each: the alternate threshold and its selector row (see residualNormsBatch)
+    bool perRowAlternateCriteria = false;
     int nShuntAdmittanceOverrides = 0;                                           // per-scenario shunt admittance overrides (set per solve)
     DeviceBuf dShuntAdmittanceOverrideScenarioElement, dShuntAdmittanceOverrideDelta;                        // nShuntAdmittanceOverrides*2 ints (slot, PACK elem) / nShuntAdmittanceOverrides*2 doubles (dG, dB)
     int nBaseClosedZeroImpedanceBranches = 0;                                         // zero-impedance elements [0,nBaseClosedZeroImpedanceBranches) always enabled; [nBaseClosedZeroImpedanceBranches,nZeroImpedanceBranch) are
@@ -80,13 +80,13 @@ struct BatchSolverContext {
     int nR1Ov = 0;                                           // per-scenario closed-branch tap overrides (tap/PST actions)
     DeviceBuf dR1OvSlotElem, dR1OvVal;                       // nR1Ov*2 ints / nR1Ov*8 doubles (full closedBranchParameters row per entry)
     // ---- solve-only batch compaction (mode 3, tol > 0): lazily allocated on first engage ----
-    DeviceBuf dValsC, dBC, dDxC, dMapC;                      // nnz*cap / n*cap / n*cap / cap ints
-    CudssCtx dsC;                                            // dedicated handle/config/data for the compact width
-    cudssMatrix_t matUbC = nullptr, matUbCB = nullptr, matUbCX = nullptr;
-    cudssMatrix_t matUbCR = nullptr, matUbCDelta = nullptr;   // adaptive refinement on the compacted solve
-    cudssMatrix_t matUbR = nullptr, matUbDelta = nullptr;     // ...and on the full-width UBATCH solve
-    DeviceBuf dRC, dDeltaC;
-    int compactCap = 0;                                      // buffer capacity (nS/2)
+    DeviceBuf dValsCompacted, dBCompacted, dDxCompacted, dCompactedScenarioMap;                      // nnz*cap / n*cap / n*cap / cap ints
+    CudssCtx compactedSolver;                                            // dedicated handle/config/data for the compact width
+    cudssMatrix_t compactedUniformBatchSystemMatrix = nullptr, compactedUniformBatchRightHandSideMatrix = nullptr, compactedUniformBatchSolutionMatrix = nullptr;
+    cudssMatrix_t compactedUniformBatchResidualMatrix = nullptr, compactedUniformBatchDeltaMatrix = nullptr;   // adaptive refinement on the compacted solve
+    cudssMatrix_t uniformBatchResidualMatrix = nullptr, uniformBatchDeltaMatrix = nullptr;     // ...and on the full-width UBATCH solve
+    DeviceBuf dRCompacted, dDeltaCompacted;
+    int compactedCapacity = 0;                                      // buffer capacity (nS/2)
     int compactWidth = 0;                                    // currently ANALYZED ubatch width (0 = none)
     // One ANALYZED cuDSS data object per compact width: a data object's
     // buffers belong to the batch size it was analyzed at, but a width seen before -- the next chunk walks the
@@ -110,15 +110,15 @@ struct BatchSolverContext {
     // the group is not of that shape), and the per-(scenario, group) gate the fills read. Both are DERIVED,
     // so no new host table: a group is pilot-self exactly when its fallback row (candidate 0 = the pilot's
     // own row) also appears among its member rows, and the pilot's entry is the RL entry sitting on that row.
-    DeviceBuf dPsPilotEntry;                                 // nQr ints
-    DeviceBuf dPsSkip;                                       // nQr * nScenarios chars
+    DeviceBuf dPilotSelfReactiveLimitEntry;                                 // nReactiveRelocationGroups ints
+    DeviceBuf dPilotSelfCarrierSkip;                                       // nReactiveRelocationGroups * nScenarios chars
     bool hasPilotSelf = false;
     DeviceBuf dReactiveLimitLoadQPerScenario;                                       // per (scenario, controller) — shed load Q
     int nDistrQInactiveMembers = 0;                                            // {slot, distrQMember} pairs: a controller
     DeviceBuf dDistrQInactiveMembers;                                          // that stops controlling in ONE scenario
     bool hasDistrQSubgroups = false;                                       // tasks #71: per (scenario, dq member) subgroup
     DeviceBuf dDistrQSubgroup;                                            // labels (char, dense nS x nDistrQMembers) and the
-    DeviceBuf dQrMemberStart;                                    // qr group -> first dq member map
+    DeviceBuf dReactiveRelocationDistrQMemberStart;                                    // qr group -> first dq member map
     // Reactive capability CURVES at runtime P (setBatchReactiveCapabilityCurves): per participating curve gen —
     // reactiveCapabilityCurveIndices {reactiveLimitEntry, pRow, ptsOff, npts, distributedSlackGeneratorIndex}, reactiveCapabilityCurveParameters {basePpu, share, baseRowTargetP, baseEvalMinPu, baseEvalMaxPu},
     // reactiveCapabilityCurvePoints {p_MW, minQ_MW, maxQ_MW} sorted by p; dReactiveLimitMinQPerScenario/dReactiveLimitMaxQPerScenario = nS*nReactiveLimitEntries evaluated limits.
@@ -192,13 +192,13 @@ struct BatchSolverContext {
     int nDistrQMembers = 0;
     int hasDistrQRelocationGroups = 0;                                 // plan-B4: any member linked to a pilot-Q relocation group
     DeviceBuf dDistrQMemberRelocationGroup;                            // per member: the pilot's qr candidate group id, -1 = none
-    DeviceBuf dQrPilotQ;                                   // per (scenario, qr group): the pilot's Q target, captured
+    DeviceBuf dReactiveRelocationPilotTargetQ;                                   // per (scenario, qr group): the pilot's Q target, captured
                                                            // at solve init from the BASE carrier's row and handed to
                                                            // the CURRENT carrier's row on every re-pick
-    DeviceBuf dQrGenVc;                                    // per qr group: 1 = remote gen-VC group (vs TVC — only
+    DeviceBuf dReactiveRelocationIsGeneratorVoltageControl;                                    // per qr group: 1 = remote gen-VC group (vs TVC — only
                                                            // those get the all-pinned pilot-vEq flip)
-    DeviceBuf dQrVeqOff;                                   // per (scenario, qr group): 1 = the pilot's V equation was
-    DeviceBuf dQrSavedVT;                                  // flipped OFF by updatePilotVeqBatch (+ the saved V target)
+    DeviceBuf dReactiveRelocationPilotTargetVDeactivated;                                   // per (scenario, qr group): 1 = the pilot's V equation was
+    DeviceBuf dReactiveRelocationSavedPilotTargetV;                                  // flipped OFF by updatePilotTargetVEquationBatch (+ the saved V target)
     DeviceBuf dReactiveRelocationPilotReactiveLimitEntry;                             // per qr group: the pilot's own LOCAL reactive-limit entry
                                                            // (its row + the group's V target), -1 = none
     int nRemoteMemberReactiveTerms = 0;                                          // remote-member OWN-q contributions (plan-B3): a twin
@@ -447,9 +447,9 @@ struct BatchSolverContext {
     DeviceBuf dDistrQMemberTargetQOverrideValue;
     int hasSlackBusRowOverride = 0;                               // per-slot slack row (a relocated slack), device rows
     DeviceBuf dSlackBusRowOverride;                               // -1 = the base slack row
-    int nQrPqDelta = 0;                                    // per-scenario moves of a pilot's captured Q target
-    DeviceBuf dQrPqDeltaKey;                               // slot * nQr + group
-    DeviceBuf dQrPqDeltaVal;
+    int nReactiveRelocationPilotTargetQDeltas = 0;                                    // per-scenario moves of a pilot's captured Q target
+    DeviceBuf dReactiveRelocationPilotTargetQDeltaKey;                               // slot * nReactiveRelocationGroups + group
+    DeviceBuf dReactiveRelocationPilotTargetQDeltaValue;
     int nPilotFlip = 0;                                    // pilot-row flip entries (all-survivors-pinned)
     DeviceBuf dPfSlot;
     DeviceBuf dPfRow;
@@ -488,14 +488,14 @@ struct BatchSolverContext {
     bool hasDistributedSlackGeneratorSeedAnchor = false;                            // without the actions (the continued pins' stamps)
                                                              // (OLF distributes into the slack gen and re-solves; no flow change,
                                                              // but the extra polish run must happen to match the CPU trajectory)
-    CudssCtx ds;
+    CudssCtx solver;
     bool analyzed = false;
     int mode = 0;                                            // 3 = UBATCH, 6 = per-scenario loop, robust (pivoted) config
-    DeviceBuf dR, dDelta, dIrScore, dIrLane;                 // adaptive refinement: residual, correction, lane scores/mask
+    DeviceBuf dR, dDelta, dIterativeRefinementScore, dIterativeRefinementScenarioMask;                 // adaptive refinement: residual, correction, lane scores/mask
     // UBATCH single matrices (mode 3 only): a SINGLE per-block CSR (n, nnz, shared rowPtr/colIdx)
     // whose value/RHS pointers are the batched buffers (dVals = nS*nnz, dB/dDx = nS*n); cuDSS
     // analyzes ONE block (cheap) and factorizes/solves all nS via CUDSS_CONFIG_UBATCH_SIZE.
-    cudssMatrix_t matUb = nullptr, matUbB = nullptr, matUbX = nullptr;
+    cudssMatrix_t uniformBatchSystemMatrix = nullptr, uniformBatchRightHandSideMatrix = nullptr, uniformBatchSolutionMatrix = nullptr;
     // Dedicated stream for the WHOLE batch solve (every kernel/memset/async copy + cuDSS via
     // cudssSetStream): keeps the per-iteration launch sequence off the legacy default stream,
     // whose implicit device-wide serialization stitched the timeline with sync points (the
@@ -510,20 +510,20 @@ struct BatchSolverContext {
             secondaryVoltageControlBlasHandle = nullptr;
         }
         if (stream) cudaStreamDestroy(stream);
-        if (matUbR) cudssMatrixDestroy(matUbR);
-        if (matUbDelta) cudssMatrixDestroy(matUbDelta);
-        if (matUbCR) cudssMatrixDestroy(matUbCR);
-        if (matUbCDelta) cudssMatrixDestroy(matUbCDelta);
-        if (matUb) cudssMatrixDestroy(matUb);
-        if (matUbB) cudssMatrixDestroy(matUbB);
-        if (matUbX) cudssMatrixDestroy(matUbX);
+        if (uniformBatchResidualMatrix) cudssMatrixDestroy(uniformBatchResidualMatrix);
+        if (uniformBatchDeltaMatrix) cudssMatrixDestroy(uniformBatchDeltaMatrix);
+        if (compactedUniformBatchResidualMatrix) cudssMatrixDestroy(compactedUniformBatchResidualMatrix);
+        if (compactedUniformBatchDeltaMatrix) cudssMatrixDestroy(compactedUniformBatchDeltaMatrix);
+        if (uniformBatchSystemMatrix) cudssMatrixDestroy(uniformBatchSystemMatrix);
+        if (uniformBatchRightHandSideMatrix) cudssMatrixDestroy(uniformBatchRightHandSideMatrix);
+        if (uniformBatchSolutionMatrix) cudssMatrixDestroy(uniformBatchSolutionMatrix);
         for (auto& e : compactData) {
-            if (e.second && dsC.handle) cudssDataDestroy(dsC.handle, e.second);
+            if (e.second && compactedSolver.handle) cudssDataDestroy(compactedSolver.handle, e.second);
         }
         compactData.clear();
-        if (matUbC) cudssMatrixDestroy(matUbC);
-        if (matUbCB) cudssMatrixDestroy(matUbCB);
-        if (matUbCX) cudssMatrixDestroy(matUbCX);
+        if (compactedUniformBatchSystemMatrix) cudssMatrixDestroy(compactedUniformBatchSystemMatrix);
+        if (compactedUniformBatchRightHandSideMatrix) cudssMatrixDestroy(compactedUniformBatchRightHandSideMatrix);
+        if (compactedUniformBatchSolutionMatrix) cudssMatrixDestroy(compactedUniformBatchSolutionMatrix);
     }
 };
 
@@ -547,7 +547,7 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& st, int nScenar
                                        double slackBusMarginUp, double slackBusMarginDown);
 
 // Upload the call's step-scaling parameters and per-scenario shunt, coupler and tap overrides.
-void uploadBatchOverrides(BatchSolverContext* ctx, int lsMode, double maxDv, double maxDphi,
+void uploadBatchOverrides(BatchSolverContext* ctx, int stateVectorScalingMode, double maxDv, double maxDphi,
                           const int* varType, int nShuntAdmittanceOverrides, const int* shuntAdmittanceOverrideScenarioElement, const double* shuntAdmittanceOverrideDelta,
                           int nBaseClosedZeroImpedanceBranches, int nZeroImpedanceBranchOpenOverrides, const int* zeroImpedanceBranchOpenScenarioElement,
                           int nZeroImpedanceBranchCloseOverrides, const int* zeroImpedanceBranchCloseScenarioElement,

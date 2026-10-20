@@ -37,7 +37,7 @@ public final class StructureNative {
      *
      * @param n     number of variables / equations
      * @param closedBranchParameters  closed branches, {@code nClosedBranch*8}: (y g1 g2 b1 b2 ksi r1 a1)
-     * @param closedBranchIndices closed branches, {@code nClosedBranch*12}: (Prow1 Qrow1 Prow2 Qrow2 ph1col v1col ph2col v2col a1col r1col qAlt1 qAlt2)
+     * @param closedBranchIndices closed branches, {@code nClosedBranch*12}: (Prow1 Qrow1 Prow2 Qrow2 ph1col v1col ph2col v2col a1col r1col alternateQRow1 alternateQRow2)
      * @param openBranchParameters  open branches, {@code nOpenBranch*7}: (y ksi g1 b1 g2 b2 r1)
      * @param openBranchIndices open branches, {@code nOpenBranch*6}: (Prow1 Qrow1 Prow2 Qrow2 v1col v2col)
      * @param shuntParameters  shunts, {@code nShunt*2}: (g b)
@@ -53,9 +53,9 @@ public final class StructureNative {
                                               double[] zeroImpedanceBranchParameters, int[] zeroImpedanceBranchIndices,
                                               int[] distrRhoRow, int[] distrRhoColumn, double[] distrRhoCoefficient,
                                               int[] distrShuntBRow, int[] distrShuntBColumn, double[] distrShuntBCoefficient, int[] closedBranchPhaseControlSide,
-                                              double[] loadModelParameters, int[] loadModelIndices, int[] qrPtr, int[] qrRows,
+                                              double[] loadModelParameters, int[] loadModelIndices, int[] reactiveRelocationGroupStart, int[] reactiveRelocationCandidateRows,
                                               int[] openBranchAlternateReactiveDestination, int[] zeroImpedanceBranchAlternateReactiveDestination,
-                                              int[] qrDepBase, int[] qrBaseTargetRow, int[] depGroupOfRow);
+                                              int[] reactiveRelocationDependentBaseGroup, int[] reactiveRelocationBaseTargetRow, int[] reactiveRelocationDependentGroupOfRow);
 
     /**
      * Release a structure handle from {@link #createStructure} (idempotent for handle 0). Contexts

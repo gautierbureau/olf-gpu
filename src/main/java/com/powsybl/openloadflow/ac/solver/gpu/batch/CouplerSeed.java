@@ -78,9 +78,9 @@ final class CouplerSeed {
             // through the stock-placement fallback, but nothing restores the V identity.
             // Only for a bus that is still VOLTAGE-CONTROLLED: a PQ child's reactive
             // balance returns to this row through that same fallback instead.
-            int relocBits = gpuData.zeroImpedanceBranch().indices()[ze * 11 + 10];
-            int childSide = (relocBits >> 1) & 3;
-            if ((relocBits & 8) != 0 && childSide != 0) {
+            int spanningTreeFlags = gpuData.zeroImpedanceBranch().indices()[ze * 11 + 10];
+            int childSide = (spanningTreeFlags >> 1) & 3;
+            if ((spanningTreeFlags & 8) != 0 && childSide != 0) {
                 LfBus child = childSide == 1 ? outagedZeroImpedanceBranchOfContingency.getBus1() : outagedZeroImpedanceBranchOfContingency.getBus2();
                 int childVRow = gpuData.zeroImpedanceBranch().indices()[ze * 11 + (childSide == 1 ? 6 : 7)];
                 var childVc = child == null ? java.util.Optional.<GeneratorVoltageControl>empty()

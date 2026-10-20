@@ -16,7 +16,7 @@ __global__ void fillDistrQBatch(int nDistrQ, int nScenarios, int n, int nnz, int
                                 int closedBranchOffset, int openBranchOffset,
                                 const int* distrQElement, const int* distrQSide, const int* distrQKind,
                                 const double* distrQWeight, const int* distrQDestination,
-                                const int* dqAlt, const int* dqSel, const int* dqZiRow,
+                                const int* distrQAlternateDestination, const int* distrQSelectorRow, const int* distrQDummyQRow,
                                 const double* closedBranchParameters, const int* closedBranchIndices, const double* shuntParameters, const int* shuntIndices,
                                 const double* openBranchParameters, const int* openBranchIndices,
                                 const double* x, double* vals, double* F,
@@ -28,18 +28,18 @@ __global__ void fillDistrQBatch(int nDistrQ, int nScenarios, int n, int nnz, int
                                 const int* distrQRowMember, const int* distrQInjectionMember, const double* mKey,
                                 const int* distrQMemberReactiveLimitEntry, const int* mGroupStart, const int* mGroupCount,
                                 const char* limitType, int nReactiveLimitEntries,
-                                const char* psSkip, int psGroups,
-                                const int* mQrGroup, const int* qrPtr, const int* qrRows,
+                                const char* pilotSelfCarrierSkip, int pilotSelfCarrierSkipStride,
+                                const int* memberRelocationGroup, const int* reactiveRelocationGroupStart, const int* reactiveRelocationCandidateRows,
                                 int nR1Ov, const int* r1OvSlotElem, const double* r1OvVal,
                                 int nShuntAdmittanceOverrides, const int* shuntAdmittanceOverrideScenarioElement, const double* shuntAdmittanceOverrideDelta,
                                 int distrQTraceRow,
-                                const char* distrQSubgroup, const int* qrMemberStart, int nDistrQMembersAll);
+                                const char* distrQSubgroup, const int* reactiveRelocationDistrQMemberStart, int nDistrQMembersAll);
 
 __global__ void fillDistrRhoBatch(int nDistrRho, int nScenarios, int n, int nnz,
                                   const int* distrRhoColumn, const double* distrRhoCoefficient, const int* distrRhoDestination,
                                   const double* x, double* vals, double* F, const char* active,
                                   int nDistrRhoCoefficientOverrides, const int* distrRhoOverrideScenarioTerm, const double* distrRhoOverrideCoefficient,
-                                  const int* distrRhoQrGroup, const int* mode, const int* qrPtr, const int* qrRows);
+                                  const int* distrRhoRelocationGroup, const int* mode, const int* reactiveRelocationGroupStart, const int* reactiveRelocationCandidateRows);
 
 __global__ void fillDistrShuntBBatch(int nDistrShuntB, int nScenarios, int n, int nnz,
                                      const int* distrShuntBColumn, const double* distrShuntBCoefficient, const int* distrShuntBDestination,

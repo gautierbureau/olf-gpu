@@ -322,7 +322,7 @@ void incrementalTransformerVoltageControlStep(BatchSolverContext* ctx, DriverPas
         int row = ctx->st->rowMap[ctx->hIncrementalTransformerVoltageControlRhoRow[c]];
         if (row < 0) continue;                           // rho row not an active equation: stays insensitive
         setUnitRhsBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, row, ctx->dB.as<double>());
-        hazRepairRightHandSide(ctx, nS, ctx->dB.as<double>());
+        repairZeroDiagonalRightHandSide(ctx, nS, ctx->dB.as<double>());
         sensitivitySolve(ctx, drv, first);
         incrementalTransformerVoltageControlGatherSensitivityBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(nS, n, c, nIncrementalTransformerVoltageControlControllerBranches, ctx->dIncrementalTransformerVoltageControlControlledBusVRow.as<int>(),
                 ctx->dDx.as<double>(), ctx->dIncrementalTransformerVoltageControlSensitivity.as<double>());

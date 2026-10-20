@@ -269,7 +269,7 @@ final class InjectionOutagePlanner {
                         live = null;
                         break;
                     }
-                    int qFlipRow = RelocatedRows.relocQRow(vVar.getRow(), pb.relocRows, outagedZeroImpedanceBranchNums);
+                    int qFlipRow = RelocatedRows.scenarioReactiveRowOfVRow(vVar.getRow(), pb.relocatedChildRows, outagedZeroImpedanceBranchNums);
                     if (frozenSet.contains(qFlipRow)) {
                         live = null;
                         break;
@@ -288,7 +288,7 @@ final class InjectionOutagePlanner {
                     return null;
                 }
             }
-            boolean relocIdentity = false;
+            boolean crossIdentity = false;
             boolean pinnedMain = false;
             if (live != null) {
                 for (var e : reHomed.pvTargets().entrySet()) {
@@ -298,7 +298,7 @@ final class InjectionOutagePlanner {
                         break;
                     }
                     int reHomedReactiveLimitEntry = RelocatedRows.reactiveLimitEntryOf(gpuData, e.getKey());
-                    int crossRow = RelocatedRows.relocQRow(vVar.getRow(), pb.relocRows, outagedZeroImpedanceBranchNums);
+                    int crossRow = RelocatedRows.scenarioReactiveRowOfVRow(vVar.getRow(), pb.relocatedChildRows, outagedZeroImpedanceBranchNums);
                     if (crossRow != vVar.getRow()) {
                         // its own row carries a LIVE coupler's ZERO_V: cross identity on the parent's
                         // DUMMY_Q row (rte6515 BUS-6014_BBS_1/2 VL-6014_3, BUS-6029_BBS_4 VL-6029_2)
@@ -341,7 +341,7 @@ final class InjectionOutagePlanner {
             }
             String[] remoteReject = new String[1];
             if (live != null && !reHomed.remoteMainTargets().isEmpty()) {
-                List<GenOutage> remoteIds = ReHomedEntries.remoteMainIdentityEntries(reHomed, es, gpuData, pb.relocRows,
+                List<GenOutage> remoteIds = ReHomedEntries.remoteMainIdentityEntries(reHomed, es, gpuData, pb.relocatedChildRows,
                         outagedZeroImpedanceBranchNums, frozenSet, remoteReject);
                 if (remoteIds == null) {
                     live = null;
@@ -363,7 +363,7 @@ final class InjectionOutagePlanner {
             if (live == null) {
                 GpuBatchQualification.refuse(c,
                         pinnedMain ? "PLAN:VC_REMERGE_PINNED_MAIN"
-                                : relocIdentity ? "PLAN:VC_REMERGE_RELOC_VROW" : "PLAN:VC_REMERGE_NO_VROW");
+                                : crossIdentity ? "PLAN:VC_REMERGE_RELOC_VROW" : "PLAN:VC_REMERGE_NO_VROW");
                 return null;
             }
             if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {
@@ -388,7 +388,7 @@ final class InjectionOutagePlanner {
                     inactiveForTargets.add(ib);
                 }
             }
-            for (GenOutage go : GpuBatchInjectionOutages.islandedDistrQEntries(gpuData, inactiveForTargets, pb.relocDummyQRows, outagedZeroImpedanceBranchNums,
+            for (GenOutage go : GpuBatchInjectionOutages.islandedDistrQEntries(gpuData, inactiveForTargets, pb.relocatedDummyQRows, outagedZeroImpedanceBranchNums,
                     GpuBatchInjectionOutages.labelsOf(pb.distrQSubgroupByIndex[i]))) {
                 live.add(go.withoutFrozenTargetRows(frozenSet));
             }

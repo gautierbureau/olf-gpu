@@ -188,7 +188,7 @@ final class GpuAcRowIndexing {
      * answers "not a member" for every member of a merged group but one.
      *
      * <p>Both predicates here did filter that way, so {@link ExtractionColumns}'s own-row alternate loop
-     * skipped those members and left them with {@code qRowAlt = -1}. A row then put in mode 4 by a
+     * skipped those members and left them with {@code alternateQRow = -1}. A row then put in mode 4 by a
      * reactive-limit pin assembles EMPTY: measured on rte6515's base, where the pinned pass gave F = -target
      * exactly on both members of a pilot-self group, two identical rows and a dead DUMMY_Q column — a
      * singular matrix KLU refuses to factor.
@@ -233,8 +233,8 @@ final class GpuAcRowIndexing {
      *  coupler's DUMMY_Q column, which its own reactive terms already carry (the kind-3 contribution), leaving
      *  its V row free for that coupler's ZERO_V. */
     static int distrQRow(EquationSystem<AcVariableType, AcEquationType> es, LfBus controller,
-                         int[] ziParentEdge, int[] dummyQCol) {
-        int parent = ziParentEdge == null ? -1 : ziParentEdge[controller.getNum()];
+                         int[] spanningTreeParentBranch, int[] dummyQCol) {
+        int parent = spanningTreeParentBranch == null ? -1 : spanningTreeParentBranch[controller.getNum()];
         if (parent >= 0 && dummyQCol[parent] >= 0) {
             return dummyQCol[parent];
         }
@@ -290,8 +290,8 @@ final class GpuAcRowIndexing {
      * activation extractor targets it, the families write the bus's own q to it in mode 4, and the diagnostic
      * remote-member fill accumulates into it. A consumer left on the own row silently reads ZERO there.
      */
-    static int relocatedQRow(int busNum, int[] ziParentEdge, int[] dummyQCol, int[] vCol) {
-        int parent = ziParentEdge == null ? -1 : ziParentEdge[busNum];
+    static int relocatedQRow(int busNum, int[] spanningTreeParentBranch, int[] dummyQCol, int[] vCol) {
+        int parent = spanningTreeParentBranch == null ? -1 : spanningTreeParentBranch[busNum];
         return parent >= 0 && dummyQCol[parent] >= 0 ? dummyQCol[parent] : vCol[busNum];
     }
 
@@ -308,9 +308,9 @@ final class GpuAcRowIndexing {
      *  lives on its parent coupler's {@code DUMMY_Q} row, its own {@code BUS_V} row holding the coupler's
      *  {@code ZERO_V}. Naming the own row instead assigned two equations to it — measured on rte6515's
      *  [5000,6000) window with the relocation on: "device row 12562 assigned twice", the whole precompute lost. */
-    static int stateQRow(LfBus bus, int[] vCol, int[] ziParentEdge, int[] dummyQCol) {
+    static int stateQRow(LfBus bus, int[] vCol, int[] spanningTreeParentBranch, int[] dummyQCol) {
         LfBus carrier = stateQCarrier(bus);
-        int parent = ziParentEdge == null ? -1 : ziParentEdge[carrier.getNum()];
+        int parent = spanningTreeParentBranch == null ? -1 : spanningTreeParentBranch[carrier.getNum()];
         return parent >= 0 && dummyQCol[parent] >= 0 ? dummyQCol[parent] : vCol[carrier.getNum()];
     }
 
@@ -371,7 +371,7 @@ final class GpuAcRowIndexing {
      * always resolvable. The free controller is selected identically to {@link #computeQRow}: the one
      * whose distribution equation is inactive (with all inactive, the first — stable across states).
      */
-    static int[] computeQRowAlt(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
+    static int[] computeAlternateQRow(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
                                 int[] vCol, int[] branchRhoCol, int[] shuntBCol, int[] qRow) {
         int[] alt = new int[vCol.length];
         java.util.Arrays.fill(alt, -1);
@@ -419,7 +419,7 @@ final class GpuAcRowIndexing {
      * its own rows, whose diagonal comes from its impedant branches.
      *
      * <p>Why: with the stock pairing a coupler's two equations sit on its own dummy rows, which neither depends on,
-     * so a chain of couplers chains zero diagonals. The numeric row repair (hazRepairVals) rescues short chains but
+     * so a chain of couplers chains zero diagonals. The numeric row repair (repairZeroDiagonalRowsBatch) rescues short chains but
      * not longer ones: measured against OLF's own Newton on an all-generator chain, the device's FIRST step is exact
      * at 3 couplers (2.8e-16) and wrong from 7 on (1.6e+04 at 7, 5.5e+04 at 15) - no zero diagonal, no tiny one and
      * no empty column at that point, just an unpivoted factorization losing the chain. rte6515's busbar scope (366
@@ -431,7 +431,7 @@ final class GpuAcRowIndexing {
      *         {@code PHI} / {@code V} host that coupler's zero equations (-1 = not relocated).
      */
 
-    static int[][] ziTreeRelocation(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
+    static int[][] spanningTreeRelocation(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
                                     int[] phiCol, int[] vCol, int[] qRow, int[] dummyPCol, int[] dummyQCol) {
         int nBuses = network.getBuses().size();
         int nBranches = network.getBranches().size();
@@ -564,7 +564,7 @@ final class GpuAcRowIndexing {
         return new int[][] {parentEdgeOfBus, childBusOfEdge};
     }
 
-    /** OLF_GPU_ZITREE_TRACE: one coupler end's placement flags, the inputs of {@link #ziTreeRelocation}'s decisions. */
+    /** OLF_GPU_ZITREE_TRACE: one coupler end's placement flags, the inputs of {@link #spanningTreeRelocation}'s decisions. */
     private static String spanningTreeTraceBus(LfBus bus, EquationSystem<AcVariableType, AcEquationType> es, int[] parentEdgeOfBus,
                                          boolean[] hostsAnotherReactiveRow, int[] qRow, int[] vCol) {
         int bn = bus.getNum();
@@ -640,20 +640,20 @@ final class GpuAcRowIndexing {
      * looser version of this test (branch count + shunt only) fired on rte6515 buses that carry
      * those packs and moved the base error from 3.9e-08 to 5.0e-05.
      */
-    static int ziDeadEndSide(EquationSystem<AcVariableType, AcEquationType> es, LfBranch br,
+    static int zeroImpedanceDeadEndSide(EquationSystem<AcVariableType, AcEquationType> es, LfBranch br,
                              int[] phiCol, int[] vCol, int[] qRow) {
         if (!br.isSpanningTreeEdge(LoadFlowModel.AC)) {
             return 0;                                        // no ZERO_V/ZERO_PHI to relocate
         }
-        boolean s1 = isZiDeadEnd(es, br.getBus1(), br, phiCol, vCol, qRow);
-        boolean s2 = isZiDeadEnd(es, br.getBus2(), br, phiCol, vCol, qRow);
+        boolean s1 = isZeroImpedanceDeadEnd(es, br.getBus1(), br, phiCol, vCol, qRow);
+        boolean s2 = isZeroImpedanceDeadEnd(es, br.getBus2(), br, phiCol, vCol, qRow);
         if (s1 == s2) {
             return 0;                                        // neither, or a two-bus island
         }
         return s1 ? 1 : 2;
     }
 
-    private static boolean isZiDeadEnd(EquationSystem<AcVariableType, AcEquationType> es, LfBus bus,
+    private static boolean isZeroImpedanceDeadEnd(EquationSystem<AcVariableType, AcEquationType> es, LfBus bus,
                                        LfBranch br, int[] phiCol, int[] vCol, int[] qRow) {
         if (bus == null) {
             return false;

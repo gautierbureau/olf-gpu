@@ -65,33 +65,33 @@ std::vector<int> buildDest(int elementCount, const int* idx, int stride, const S
 }
 
 // The alternate candidate Q row for a closed-branch output, or -1 if this output does not relocate
-// (only Q rows, rowEq==1) or the endpoint bus has no second candidate (qRowAlt was -1).
+// (only Q rows, rowEq==1) or the endpoint bus has no second candidate (alternateQRow was -1).
 // STOCK-PLACEMENT fallback for the COUPLER-TREE relocation. A child bus whose P/Q equations were relocated
 // onto its parent coupler's DUMMY_P / DUMMY_Q rows must get them BACK on its own rows in any scenario that
 // OPENS that coupler: the coupler's element is then skipped (no ZERO_V / ZERO_PHI, no +-dummy coupling) and
 // the host pins the dummy rows with DUMMY_TARGET identities, so the relocated equations would be zeroed and
-// the bus left with no balance at all. relocOwn[dummyRow] = that bus's own row.
+// the bus left with no balance at all. relocatedChildOwnRow[dummyRow] = that bus's own row.
 //
 // The selector is the DUMMY ROW itself, whose mode the host sets to 0 exactly when the coupler opens — but
 // it must divert on mode 0 ONLY, not on mode 4: a relocated child that is RL-PINNED carries mode 4 on that
-// same dummy row, where its own Q balance legitimately lives. Encoded as -2-row in selRow, which the picks
+// same dummy row, where its own Q balance legitimately lives. Encoded as -2-row in selectorRow, which the picks
 // decode as "divert only while this row is an identity".
-// The DEPENDENT-PILOT group of the bus owning an output's home row (see depPick), or -1.
-inline int depGroupOf(int frozenRow, int altRow, const int* relocOwn, const int* depGroupOfRow) {
-    if (depGroupOfRow == nullptr) {
+// The DEPENDENT-PILOT group of the bus owning an output's home row (see dependentPilotDestination), or -1.
+inline int dependentGroupOfHomeRow(int frozenRow, int alternateRow, const int* relocatedChildOwnRow, const int* reactiveRelocationDependentGroupOfRow) {
+    if (reactiveRelocationDependentGroupOfRow == nullptr) {
         return -1;
     }
-    int own = altRow >= 0 ? altRow : frozenRow;
-    return own >= 0 ? depGroupOfRow[own] : -1;
+    int own = alternateRow >= 0 ? alternateRow : frozenRow;
+    return own >= 0 ? reactiveRelocationDependentGroupOfRow[own] : -1;
 }
 
-inline int stockAltRow(int frozenRow, int alt, const int* relocOwn) {
-    return alt < 0 && frozenRow >= 0 && relocOwn != nullptr && relocOwn[frozenRow] >= 0
-            ? relocOwn[frozenRow] : alt;
+inline int stockPlacementAlternateRow(int frozenRow, int alt, const int* relocatedChildOwnRow) {
+    return alt < 0 && frozenRow >= 0 && relocatedChildOwnRow != nullptr && relocatedChildOwnRow[frozenRow] >= 0
+            ? relocatedChildOwnRow[frozenRow] : alt;
 }
 
-inline int stockSelRow(int frozenRow, int alt, const int* relocOwn) {
-    return alt < 0 && frozenRow >= 0 && relocOwn != nullptr && relocOwn[frozenRow] >= 0
+inline int stockPlacementSelectorRow(int frozenRow, int alt, const int* relocatedChildOwnRow) {
+    return alt < 0 && frozenRow >= 0 && relocatedChildOwnRow != nullptr && relocatedChildOwnRow[frozenRow] >= 0
             ? -2 - frozenRow : frozenRow;
 }
 
@@ -102,11 +102,11 @@ inline int stockSelRow(int frozenRow, int alt, const int* relocOwn) {
 //                              identity, mode 0 — the stock placement),
 //   nowhere at all             while it shares (mode 1: the DISTR_Q terms carry its q).
 // Two of the three cannot be expressed with one alternate and one selector, so the pair travels in the
-// reloc POOL, marked by a NEGATIVE relocOff, with the DUMMY row itself in the group slot as the selector.
+// reloc POOL, marked by a NEGATIVE relocationCandidateOffset, with the DUMMY row itself in the group slot as the selector.
 // Measured without it (relocation on by default): the middle-section-loss fixtures left the child's own
 // row empty once the contingency killed its coupler — one zero diagonal, dx 4e+12, no convergence.
-inline bool stockPairOut(int frozenRow, int alt, const int* relocOwn) {
-    return frozenRow < 0 && alt >= 0 && relocOwn != nullptr && relocOwn[alt] >= 0;
+inline bool stockPairOut(int frozenRow, int alt, const int* relocatedChildOwnRow) {
+    return frozenRow < 0 && alt >= 0 && relocatedChildOwnRow != nullptr && relocatedChildOwnRow[alt] >= 0;
 }
 
 // Build one family's device-side data (inputs, indices, role-folded destinations).
@@ -132,11 +132,11 @@ void collectFamilyPattern(const std::vector<int>& rowMap,
                           int nDistrQ, const int* distrQElement, const int* distrQSide, const int* distrQKind, const int* distrQRow,
                           int nDistrRho, const int* distrRhoRow, const int* distrRhoColumn,
                           int nDistrShuntB, const int* distrShuntBRow, const int* distrShuntBColumn,
-                          int nZeroImpedanceBranch, const int* zeroImpedanceBranchIndices, const int* relocOwn,
+                          int nZeroImpedanceBranch, const int* zeroImpedanceBranchIndices, const int* relocatedChildOwnRow,
                           std::vector<std::pair<int, int>>& pat);
 
 // q_relocation_pattern.cu
-bool hasAltEntries(const int* a, int len);
+bool hasAlternateRows(const int* a, int len);
 
 bool hasRelocatable(int nClosedBranch, const int* closedBranchIndices, int nShunt, const int* shuntIndices);
 
@@ -146,43 +146,43 @@ void collectClosedBranchPhaseControlPattern(int nClosedBranch, const int* closed
 void buildClosedBranchPhaseControlDestination(int nClosedBranch, const int* closedBranchIndices, const int* closedBranchPhaseControlSide, const std::vector<int>& rowMap,
                       const CsrPattern& pos, std::vector<int>& phaseControlDestination, std::vector<int>& phaseControlSelector);
 
-void collectCbAltPattern(int nClosedBranch, const int* closedBranchIndices, const int* relocOwn, std::vector<std::pair<int, int>>& pat,
-                         int nQr, const int* qrPtr, const int* qrRows, const int* depGroupOfRow);
+void collectClosedBranchRelocationPattern(int nClosedBranch, const int* closedBranchIndices, const int* relocatedChildOwnRow, std::vector<std::pair<int, int>>& pat,
+                         int nReactiveRelocationGroups, const int* reactiveRelocationGroupStart, const int* reactiveRelocationCandidateRows, const int* reactiveRelocationDependentGroupOfRow);
 
-void buildCbDynDest(int nClosedBranch, const int* closedBranchIndices, const int* relocOwn, const CsrPattern& pos,
-                    std::vector<int>& altDest, std::vector<int>& selRow,
-                    int nQr, const int* qrPtr, const int* qrRows,
-                    std::vector<int>& relocGroup, std::vector<int>& relocOff, std::vector<int>& relocPool,
-                    const int* depGroupOfRow, std::vector<char>& relocDep);
+void buildClosedBranchRelocationDestination(int nClosedBranch, const int* closedBranchIndices, const int* relocatedChildOwnRow, const CsrPattern& pos,
+                    std::vector<int>& alternateDestination, std::vector<int>& selectorRow,
+                    int nReactiveRelocationGroups, const int* reactiveRelocationGroupStart, const int* reactiveRelocationCandidateRows,
+                    std::vector<int>& relocationGroup, std::vector<int>& relocationCandidateOffset, std::vector<int>& relocationCandidateDestinations,
+                    const int* reactiveRelocationDependentGroupOfRow, std::vector<char>& relocationDependentPilot);
 
-void collectShAltPattern(int nShunt, const int* shuntIndices, const int* relocOwn, std::vector<std::pair<int, int>>& pat,
-                         int nQr, const int* qrPtr, const int* qrRows, const int* depGroupOfRow);
+void collectShuntRelocationPattern(int nShunt, const int* shuntIndices, const int* relocatedChildOwnRow, std::vector<std::pair<int, int>>& pat,
+                         int nReactiveRelocationGroups, const int* reactiveRelocationGroupStart, const int* reactiveRelocationCandidateRows, const int* reactiveRelocationDependentGroupOfRow);
 
-void buildShDynDest(int nShunt, const int* shuntIndices, const int* relocOwn, const CsrPattern& pos,
-                    std::vector<int>& altDest, std::vector<int>& selRow,
-                    int nQr, const int* qrPtr, const int* qrRows,
-                    std::vector<int>& relocGroup, std::vector<int>& relocOff, std::vector<int>& relocPool,
-                    const int* depGroupOfRow, std::vector<char>& relocDep);
+void buildShuntRelocationDestination(int nShunt, const int* shuntIndices, const int* relocatedChildOwnRow, const CsrPattern& pos,
+                    std::vector<int>& alternateDestination, std::vector<int>& selectorRow,
+                    int nReactiveRelocationGroups, const int* reactiveRelocationGroupStart, const int* reactiveRelocationCandidateRows,
+                    std::vector<int>& relocationGroup, std::vector<int>& relocationCandidateOffset, std::vector<int>& relocationCandidateDestinations,
+                    const int* reactiveRelocationDependentGroupOfRow, std::vector<char>& relocationDependentPilot);
 
-void collectHvAltPattern(int nHvdcAcEmulation, const int* hvdcAcEmulationIndices, const int* relocOwn, std::vector<std::pair<int, int>>& pat);
+void collectHvdcAcEmulationRelocationPattern(int nHvdcAcEmulation, const int* hvdcAcEmulationIndices, const int* relocatedChildOwnRow, std::vector<std::pair<int, int>>& pat);
 
-void buildHvDynDest(int nHvdcAcEmulation, const int* hvdcAcEmulationIndices, const int* relocOwn, const CsrPattern& pos,
-                    std::vector<int>& altDest, std::vector<int>& selRow);
+void buildHvdcAcEmulationRelocationDestination(int nHvdcAcEmulation, const int* hvdcAcEmulationIndices, const int* relocatedChildOwnRow, const CsrPattern& pos,
+                    std::vector<int>& alternateDestination, std::vector<int>& selectorRow);
 
-void collectObAltPattern(int nOpenBranch, const int* openBranchIndices, const int* openBranchAlternateReactiveDestination, const int* relocOwn, std::vector<std::pair<int, int>>& pat,
-                         int nQr, const int* qrPtr, const int* qrRows, const int* depGroupOfRow);
+void collectOpenBranchRelocationPattern(int nOpenBranch, const int* openBranchIndices, const int* openBranchAlternateReactiveDestination, const int* relocatedChildOwnRow, std::vector<std::pair<int, int>>& pat,
+                         int nReactiveRelocationGroups, const int* reactiveRelocationGroupStart, const int* reactiveRelocationCandidateRows, const int* reactiveRelocationDependentGroupOfRow);
 
-void buildObDynDest(int nOpenBranch, const int* openBranchIndices, const int* openBranchAlternateReactiveDestination, const int* relocOwn, const CsrPattern& pos,
-                    std::vector<int>& altDest, std::vector<int>& selRow,
-                    int nQr, const int* qrPtr, const int* qrRows,
-                    std::vector<int>& relocGroup, std::vector<int>& relocOff, std::vector<int>& relocPool,
-                    const int* depGroupOfRow, std::vector<char>& relocDep);
+void buildOpenBranchRelocationDestination(int nOpenBranch, const int* openBranchIndices, const int* openBranchAlternateReactiveDestination, const int* relocatedChildOwnRow, const CsrPattern& pos,
+                    std::vector<int>& alternateDestination, std::vector<int>& selectorRow,
+                    int nReactiveRelocationGroups, const int* reactiveRelocationGroupStart, const int* reactiveRelocationCandidateRows,
+                    std::vector<int>& relocationGroup, std::vector<int>& relocationCandidateOffset, std::vector<int>& relocationCandidateDestinations,
+                    const int* reactiveRelocationDependentGroupOfRow, std::vector<char>& relocationDependentPilot);
 
 // distribution_dests.cu
 void buildDistrQDest(SharedStructure* st, const CsrPattern& pos, const std::vector<int>& rowMap,
                      int nDistrQ, const int* distrQElement, const int* distrQSide, const int* distrQKind,
                      const double* distrQWeight, const int* distrQRow,
-                     const int* closedBranchIndices, const int* openBranchIndices, const int* shuntIndices, const int* relocOwn);
+                     const int* closedBranchIndices, const int* openBranchIndices, const int* shuntIndices, const int* relocatedChildOwnRow);
 
 void buildDistrRhoDest(SharedStructure* st, const CsrPattern& pos, const std::vector<int>& rowMap,
                        int nDistrRho, const int* distrRhoRow, const int* distrRhoColumn, const double* distrRhoCoefficient);
@@ -190,14 +190,14 @@ void buildDistrRhoDest(SharedStructure* st, const CsrPattern& pos, const std::ve
 void buildDistrShuntBDest(SharedStructure* st, const CsrPattern& pos, const std::vector<int>& rowMap,
                           int nDistrShuntB, const int* distrShuntBRow, const int* distrShuntBColumn, const double* distrShuntBCoefficient);
 
-void patchFrozenGroupDests(DeviceBuf& dest, const std::vector<int>& relocGroup,
-                           const std::vector<int>& relocOff, int outputCount,
-                           const int* scatterRole, const int* qrPtr, const int* qrRows);
+void patchGroupFrozenDestinations(DeviceBuf& dest, const std::vector<int>& relocationGroup,
+                           const std::vector<int>& relocationCandidateOffset, int outputCount,
+                           const int* scatterRole, const int* reactiveRelocationGroupStart, const int* reactiveRelocationCandidateRows);
 
 // zero_impedance_dests.cu
-void buildZeroImpDest(SharedStructure* st, const CsrPattern& pos, const std::vector<int>& rowMap,
+void buildZeroImpedanceBranchDestination(SharedStructure* st, const CsrPattern& pos, const std::vector<int>& rowMap,
                       int nZeroImpedanceBranch, const double* zeroImpedanceBranchParameters, const int* zeroImpedanceBranchIndices, const int* zeroImpedanceBranchAlternateReactiveDestination,
-                      const int* relocOwn, const int* depGroupOfRow);
+                      const int* relocatedChildOwnRow, const int* reactiveRelocationDependentGroupOfRow);
 
 }  // namespace olfgpu
 

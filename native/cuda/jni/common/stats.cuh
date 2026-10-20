@@ -48,8 +48,8 @@ extern long long gAnalysesMain;
 extern long long gAnalysesCompact;
 // Adaptive iterative refinement: the refinement solves actually run and the residual checks (one per batched
 // iteration at least).
-extern long gIrExtraSteps;
-extern long gIrChecks;
+extern long gIterativeRefinementExtraSolves;
+extern long gIterativeRefinementChecks;
 
 // Wall time of every symbolic analysis, per CALL SITE (source line), with a device sync on both sides so the
 // reordering's host work and its device kernels are both inside. Only under OLF_GPU_PHASE_TIME (the syncs are

@@ -104,7 +104,7 @@ OLF_JNI(ac_solver_gpu, BatchSolveNative, solveBatchContext)(
         jintArray jReactiveLimitDeltaOverrideScenarioEntry, jdoubleArray jReactiveLimitDeltaOverrideValues,
         jintArray jReactiveCapabilityCurveOverrideScenarioCurve, jdoubleArray jReactiveCapabilityCurveOverrideStepScale, jint maxIter, jdouble tol,
         jdouble reactiveLimitTol, jdouble slackDistTol, jdouble convEpsPerEq,
-        jint lsMode, jdouble maxDv, jdouble maxDphi, jintArray jvarType, jdoubleArray jx0Full,
+        jint stateVectorScalingMode, jdouble maxDv, jdouble maxDphi, jintArray jvarType, jdoubleArray jx0Full,
         jintArray jShuntOvSlotElem, jdoubleArray jShuntOvGb,
         jintArray jReactiveLimitsSeedState, jintArray jReactiveLimitsFinalState,
         jintArray jR1OvSlotElem, jdoubleArray jR1OvVal,
@@ -322,7 +322,7 @@ OLF_JNI(ac_solver_gpu, BatchSolveNative, solveBatchContext)(
                                 reactiveCapabilityCurveOverrideScenarioCurveVec.empty() ? nullptr : reactiveCapabilityCurveOverrideScenarioCurveVec.data(),
                                 reactiveCapabilityCurveOverrideStepScaleVec.empty() ? nullptr : reactiveCapabilityCurveOverrideStepScaleVec.data(), maxIter, tol,
                                 reactiveLimitTol, slackDistTol, convEpsPerEq,
-                                lsMode, maxDv, maxDphi, varTypeVec.empty() ? nullptr : varTypeVec.data(),
+                                stateVectorScalingMode, maxDv, maxDphi, varTypeVec.empty() ? nullptr : varTypeVec.data(),
                                 x0FullVec.empty() ? nullptr : x0FullVec.data(),
                                 static_cast<int>(shuntAdmittanceOverrideScenarioElementVec.size() / 2),
                                 shuntAdmittanceOverrideScenarioElementVec.empty() ? nullptr : shuntAdmittanceOverrideScenarioElementVec.data(),
@@ -384,10 +384,10 @@ OLF_JNI(ac_solver_gpu, BatchSolveNative, solveBatchContext)(
         calls++;
         fprintf(stderr, "JNI_PHASE_TIME calls=%lld marshal=%lld ms solve=%lld ms pack=%lld ms "
                 "| outerPasses=%lld (solving=%lld) newtonIters=%lld activeIterSum=%lld widthIterSum=%lld compactIters=%lld"
-                " | cuDSS analyses main=%lld compaction=%lld | irChecks=%ld irExtraSolves=%ld\n",
+                " | cuDSS analyses main=%lld compaction=%lld | iterativeRefinementChecks=%ld iterativeRefinementExtraSolves=%ld\n",
                 calls, marshalNs / 1000000, solveNs / 1000000, packNs / 1000000,
                 gOuterPasses, gSolvePasses, gNewtonIters, gActiveIterSum, gWidthIterSum, gCompactIters,
-                gAnalysesMain, gAnalysesCompact, gIrChecks, gIrExtraSteps);
+                gAnalysesMain, gAnalysesCompact, gIterativeRefinementChecks, gIterativeRefinementExtraSolves);
         double tot[4] = {0, 0, 0, 0};
         long long cnt[4] = {0, 0, 0, 0};
         for (const auto& kv : gAnalysisSites) {

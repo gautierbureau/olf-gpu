@@ -60,7 +60,7 @@ class GpuSaBusbarAndIslandTest extends AbstractGpuSaTest {
 
     /** An ISLANDING outage that strands a WHOLE remote gen-VC group — pilot AND every controller.
      *  OLF removes those buses' equations outright; the device freezes their rows to a flat identity
-     *  instead, and updatePilotVeqBatch then read the frozen member modes as "no carrier left" and
+     *  instead, and updatePilotTargetVEquationBatch then read the frozen member modes as "no carrier left" and
      *  flipped the frozen PILOT row from its voltage identity into a power row. The frozen target
      *  override re-stamps the voltage value over that power row on the next pass, so the row carries
      *  a residual of exactly 1.0 that no Newton step can clear — and the whole batch then spends
@@ -197,7 +197,7 @@ class GpuSaBusbarAndIslandTest extends AbstractGpuSaTest {
     }
 
     /** Five sections, only the middle one (bbs2) regulating: its V row holds the tree's voltage identity, so the
-     *  coupler tree is rooted there and every coupler is relocated (GpuAcRowIndexing#ziTreeRelocation). Rooted at
+     *  coupler tree is rooted there and every coupler is relocated (GpuAcRowIndexing#spanningTreeRelocation). Rooted at
      *  bbs0 by bus order instead, c12 kept the stock placement and the numeric repair borrowed a live balance row
      *  for its two zero diagonals. Every section's loss on the device, against OLF. */
     @Test

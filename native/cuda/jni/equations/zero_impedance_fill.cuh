@@ -16,8 +16,8 @@ __global__ void fillZeroImpBatch(int nZeroImpedanceBranch, int nScenarios, int n
                                  const double* x, double* vals, double* F, const char* active,
                                  int nBaseClosedZeroImpedanceBranches, int nZeroImpedanceBranchCloseOverrides, const int* zeroImpedanceBranchCloseScenarioElement,
                                  int nZeroImpedanceBranchOpenOverrides, const int* zeroImpedanceBranchOpenScenarioElement,
-                                 const int* ziAlt, const int* ziSel, const int* mode, int ziDyn,
-                                 RelocTables rt, int nSpanningTreeOverrides, const int* spanningTreeOverrideScenarioElementValue,
+                                 const int* zeroImpedanceAlternateDestination, const int* zeroImpedanceSelectorRow, const int* mode, int zeroImpedanceDynamicRelocation,
+                                 ReactiveRelocationTables rt, int nSpanningTreeOverrides, const int* spanningTreeOverrideScenarioElementValue,
                                  const char* zeroImpedanceBranchOpenMask, const char* zeroImpedanceBranchCloseMask, const char* spanningTreeOverrideMask);
 
 }  // namespace olfgpu

@@ -86,7 +86,7 @@ public final class GpuHvdcAcEmulationLimitsOuterLoop {
 
         /** The row the side-1 P target is written to THIS scenario: the relocated row, or the bus's own PHI row
          *  once the scenario has opened the parent coupler (that dummy row is then a mode-0 identity and the
-         *  balance is back home — the stock placement the kernels follow through relocOwn). */
+         *  balance is back home — the stock placement the kernels follow through relocatedChildOwnRow). */
         public int bus1WriteRow(int[] rowMode) {
             return bus1PRow >= 0 && rowMode != null && bus1PRow != bus1PhiCol && rowMode[bus1PRow] == GpuRowMode.FIXED_VARIABLE ? bus1PhiCol : bus1PRow;
         }
@@ -144,7 +144,7 @@ public final class GpuHvdcAcEmulationLimitsOuterLoop {
             // 13194 bad solves) because the kernel read the ANGLE at the same index it wrote the target to, so
             // a relocated bus's angle was read off a DUMMY_P variable. The two roles are separate arrays now
             // (bus{1,2}PhiCol for the reads, bus{1,2}PRow for the writes), and the kernel falls back to the own
-            // row in a scenario that kills the parent coupler (relocOwn, the stock placement). Measured as the
+            // row in a scenario that kills the parent coupler (relocatedChildOwnRow, the stock placement). Measured as the
             // only device failure on an OLF-converging busbar contingency, BUS-1219_BBS: the saturation
             // delta of SYN_HVDC_4 landed on a ZERO_PHI row, reversed the emulated flow and the limits loop
             // toggled SAT_2_TO_1 <-> SAT_1_TO_2 to its 32-pass budget (tasks #68 / #69).

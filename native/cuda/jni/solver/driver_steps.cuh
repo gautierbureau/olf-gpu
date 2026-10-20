@@ -17,16 +17,16 @@ namespace olfgpu {
 void fillActiveBatch(BatchSolverContext* ctx, DriverPass& drv, bool fOnly);
 
 // The zero-diagonal row repair on the assembled values, and the same combination on a right-hand side (nS scenarios
-// from B, choices from the last hazRepairValues; sOff selects the scenario block of a per-scenario call).
-void hazRepairValues(BatchSolverContext* ctx, int nS, double* vals);
-void hazRepairRightHandSide(BatchSolverContext* ctx, int nS, double* B, int sOff = 0);
+// from B, choices from the last repairZeroDiagonalRows; sOff selects the scenario block of a per-scenario call).
+void repairZeroDiagonalRows(BatchSolverContext* ctx, int nS, double* vals);
+void repairZeroDiagonalRightHandSide(BatchSolverContext* ctx, int nS, double* B, int sOff = 0);
 
 // The relocation tables of a family with the pilot-self entries of this context, and those entries.
-RelocTables withPilotSelf(RelocTables rt, BatchSolverContext* ctx);
-const int* psEntryPtr(BatchSolverContext* ctx);
+ReactiveRelocationTables withPilotSelf(ReactiveRelocationTables rt, BatchSolverContext* ctx);
+const int* pilotSelfReactiveLimitEntryOrNull(BatchSolverContext* ctx);
 
 // Lay a remote-voltage-control group's rows out from the current pin states.
-void launchPilotVeqInner(BatchSolverContext* ctx, DriverPass& drv, bool staticLimits = false, bool continuedPins = false);
+void launchPilotTargetVEquationUpdate(BatchSolverContext* ctx, DriverPass& drv, bool staticLimits = false, bool continuedPins = false);
 void launchDistrQTargetsInner(BatchSolverContext* ctx, DriverPass& drv);
 
 // OLF_GPU_REJECT_TRACE=1: WHY a scenario left the batch for the CPU replay (status -2). The census

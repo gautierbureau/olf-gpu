@@ -33,7 +33,7 @@ final class ReHomedEntries {
         if (reHomed.subgroupOf().isEmpty()) {
             return null;
         }
-        if (!RelocatedRows.qrMemberOrderConsistent(gpuData)) {
+        if (!RelocatedRows.reactiveRelocationMemberOrderConsistent(gpuData)) {
             reject[0] = "PLAN:VC_REMERGE_SUBGROUP_TABLE";
             return null;
         }
@@ -118,7 +118,7 @@ final class ReHomedEntries {
      * the pvTargets loop above), with the reject tag in {@code reject[0]}.
      */
     static List<GenOutage> remoteMainIdentityEntries(ControlReHoming.ReHomed reHomed, EquationSystem<AcVariableType, AcEquationType> es,
-                                                             GpuAcData gpuData, java.util.Map<Integer, int[]> relocRows,
+                                                             GpuAcData gpuData, java.util.Map<Integer, int[]> relocatedChildRows,
                                                              java.util.Set<Integer> outagedZeroImpedanceBranchNums, java.util.Set<Integer> frozenSet,
                                                              String[] reject) {
         List<GenOutage> out = new ArrayList<>();
@@ -128,7 +128,7 @@ final class ReHomedEntries {
                 reject[0] = "PLAN:VC_REMERGE_NO_VROW";
                 return null;
             }
-            int[] reloc = relocRows.get(vVar.getRow());
+            int[] reloc = relocatedChildRows.get(vVar.getRow());
             boolean blockCovers = reloc != null && outagedZeroImpedanceBranchNums.contains(reloc[0]);
             int rl = RelocatedRows.reactiveLimitEntryOf(gpuData, e.getKey());
             boolean switchedPvToPqInBase = gpuData.switchedPvToPqInBase(rl);

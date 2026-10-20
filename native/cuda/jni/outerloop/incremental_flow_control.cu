@@ -213,7 +213,7 @@ void incrementalFlowControlStep(BatchSolverContext* ctx, DriverPass& drv, int ki
         int row = ctx->st->rowMap[ctx->hIncrementalFlowControlPinRow[c]];
         if (row < 0) continue;
         setUnitRhsBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, row, ctx->dB.as<double>());
-        hazRepairRightHandSide(ctx, nS, ctx->dB.as<double>());
+        repairZeroDiagonalRightHandSide(ctx, nS, ctx->dB.as<double>());
         sensitivitySolve(ctx, drv, first);
         incrementalFlowControlGatherSensitivityBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(nS, n, c, nF, ctx->closedBranchOffset,
                 ctx->dIncrementalFlowControlControlledFlow.as<int>(), ctx->dIncrementalFlowControlControlledSide.as<int>(), ctx->dIncrementalFlowControlControlledClosedBranch.as<int>(),

@@ -144,7 +144,7 @@ class GpuRemoteControllerReactiveLimitsTest {
         int bn = pinned.getNum();
         int vColPinned = cols.vCol()[bn];
         assertEquals(-1, cols.qRow()[bn], "canonical: the pinned member's frozen q dest is SUPPRESSED");
-        assertEquals(vColPinned, cols.qRowAlt()[bn], "canonical: the member's own row is the ALTERNATE");
+        assertEquals(vColPinned, cols.alternateQRow()[bn], "canonical: the member's own row is the ALTERNATE");
 
         GpuAcActivation act = GpuAcActivationExtractor.extractActivation(network, es, n);
         assertEquals(4, act.rowMode()[vColPinned],

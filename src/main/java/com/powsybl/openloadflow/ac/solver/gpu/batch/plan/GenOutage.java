@@ -134,7 +134,7 @@ public record GenOutage(int pRow, double pTarget, int vRow, double qTarget, bool
      * When this outage kills the group's control, the PILOT loses its voltage identity and goes back
      * to solving its own reactive balance — {@code deadPilotVRow} is its BUS_V row and
      * {@code deadPilotQTarget} that balance's target. It has to be installed at SETUP, not left to
-     * {@code updatePilotVeqBatch} in the reactive-limits phase: this bus's row is mode 4 from the
+     * {@code updatePilotTargetVEquationBatch} in the reactive-limits phase: this bus's row is mode 4 from the
      * first fill, so the group's mode scan already sends the pilot's q to the pilot's own row, and a
      * row that still carries the voltage identity would receive both.
      */
@@ -171,7 +171,7 @@ public record GenOutage(int pRow, double pTarget, int vRow, double qTarget, bool
      * equation) for an ordinary bus, 4 for a REMOTE GROUP MEMBER whose control dies with it. Mode 4
      * means "this row hosts its own Q balance", which is what OLF re-activates there — and it is also
      * what makes the group's relocation mode-scan skip the row, so the pilot's own reactive balance
-     * falls back to the pilot's row and {@code updatePilotVeqBatch} drops its now-meaningless voltage
+     * falls back to the pilot's row and {@code updatePilotTargetVEquationBatch} drops its now-meaningless voltage
      * identity. Installing mode 1 instead would leave the row looking like a live carrier, and the
      * pilot's balance would land on top of the member's own.
      */

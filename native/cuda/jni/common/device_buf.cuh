@@ -31,7 +31,7 @@ struct DeviceBuf {
             // stale content after other solves in the same one - which is how a read-before-write showed up
             // as an in-suite-only flake (2026-10-06: devicePilotLosingItsOwnGeneratorWithPinningSurvivor 3 of
             // 7 class runs, 2e-6 kV or a device failure, 0 of 5 with this on; the culprit was dOuterLoopCheckActive read by
-            // the seed launch of updatePilotVeqBatch, whose comment assumed "outerLoopCheckActive is still 0"). Zeroing
+            // the seed launch of updatePilotTargetVEquationBatch, whose comment assumed "outerLoopCheckActive is still 0"). Zeroing
             // makes that assumption a guarantee instead of a property of the process's allocation history;
             // the cost is one memset per cudaMalloc, at context creation, not per iteration.
             CUDA_CHECK(cudaMemset(p, 0, bytes));

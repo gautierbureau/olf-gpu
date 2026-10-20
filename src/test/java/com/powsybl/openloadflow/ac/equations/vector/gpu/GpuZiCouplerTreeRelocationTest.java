@@ -38,7 +38,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /**
  * The COUPLER-TREE RELOCATION (see
- * {@link GpuAcRowIndexing#ziTreeRelocation}) on the shape that needs it: a chain of zero-impedance couplers with a
+ * {@link GpuAcRowIndexing#spanningTreeRelocation}) on the shape that needs it: a chain of zero-impedance couplers with a
  * generator on every bus, so OLF merges their voltage controls and the numeric row repair is the only thing holding
  * the factorization together.
  *
@@ -144,7 +144,7 @@ class GpuZiCouplerTreeRelocationTest extends AbstractLoadFlowNetworkFactory {
     }
 
     /** The device's step is OLF's with the ZERO_PHI target where the ZERO_PHI equation sits, relocated or stock:
-     *  the target map (GpuAcActivationExtractor) and the native placement (ziZeroVRow / ziZeroPhiRow) name the same
+     *  the target map (GpuAcActivationExtractor) and the native placement (zeroVRowOf / zeroPhiRowOf) name the same
      *  dummy row for each zero equation. With the two crossed, a phase-shifting coupler's step is wrong by the
      *  shift on both of its sections. */
     @Test
@@ -172,7 +172,7 @@ class GpuZiCouplerTreeRelocationTest extends AbstractLoadFlowNetworkFactory {
         assertTrue(c01.isZeroImpedance(LoadFlowModel.AC) && c01.isSpanningTreeEdge(LoadFlowModel.AC));
         assertTrue(s0.getBranches().stream().allMatch(b -> b.isZeroImpedance(LoadFlowModel.AC)), "s0 is a stub");
         assertTrue(s0.isGeneratorVoltageControlled(), "s0 holds the plant's voltage identity");
-        assertEquals(-1, columns.ziChildBus()[c01.getNum()], "c01 is stock: neither section can be its child");
+        assertEquals(-1, columns.spanningTreeChildBus()[c01.getNum()], "c01 is stock: neither section can be its child");
     }
 
     /** The tree is rooted at the section that cannot be a child. Rooted at the first bus instead (s0), the walk
@@ -188,12 +188,12 @@ class GpuZiCouplerTreeRelocationTest extends AbstractLoadFlowNetworkFactory {
         ExtractionColumns columns = ExtractionColumns.of(network, es);
         List<String> stock = network.getBranches().stream()
                 .filter(b -> b.isZeroImpedance(LoadFlowModel.AC) && b.isSpanningTreeEdge(LoadFlowModel.AC))
-                .filter(b -> columns.ziChildBus()[b.getNum()] < 0)
+                .filter(b -> columns.spanningTreeChildBus()[b.getNum()] < 0)
                 .map(LfBranch::getId)
                 .toList();
         assertEquals(List.of(), stock, "every coupler of the tree is relocated");
         LfBus regulated = network.getBuses().stream().filter(b -> b.getId().startsWith("s2")).findFirst().orElseThrow();
-        assertEquals(-1, columns.ziParentEdge()[regulated.getNum()], "the regulated section is the root");
+        assertEquals(-1, columns.spanningTreeParentBranch()[regulated.getNum()], "the regulated section is the root");
     }
 
     /** Relocated, a chain the repair cannot hold (7 and 15 couplers) steps exactly with OLF. */

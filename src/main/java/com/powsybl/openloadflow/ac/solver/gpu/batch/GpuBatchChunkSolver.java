@@ -198,7 +198,7 @@ final class GpuBatchChunkSolver {
         // PER_EQUATION_TYPE criterion: install the per-row thresholds on the (possibly cached)
         // context — or CLEAR a previous run's thresholds under UNIFORM_CRITERIA.
         GpuAcNewtonSolver.installRowCriteria(handle, rowCriteria);
-        // LINE_SEARCH: OLF's backtracking budget and step fold, on the (possibly cached) context; read only in lsMode 1.
+        // LINE_SEARCH: OLF's backtracking budget and step fold, on the (possibly cached) context; read only in stateVectorScalingMode 1.
         NewtonSettingsNative.setBatchLineSearch(handle, parameters.getLineSearchStateVectorScalingMaxIteration(),
                 parameters.getLineSearchStateVectorScalingStepFold());
         // The run-constant outer-loop tables, shared with the base load flow's batch-of-one.
@@ -1011,8 +1011,8 @@ final class GpuBatchChunkSolver {
                             cl.reactiveCapabilityCurveOverrideScenarioCurve.stream().mapToInt(Integer::intValue).toArray(),
                             cl.reactiveCapabilityCurveOverrideStepScale.stream().mapToDouble(Double::doubleValue).toArray(),
                                                         parameters.getMaxIterations(), tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
-                            config.lsMode(), config.maxDv(), config.maxDphi(),
-                            config.lsMode() == GpuStateVectorScalingMode.MAX_VOLTAGE_CHANGE ? varType : null, x0Full,
+                            config.stateVectorScalingMode(), config.maxDv(), config.maxDphi(),
+                            config.stateVectorScalingMode() == GpuStateVectorScalingMode.MAX_VOLTAGE_CHANGE ? varType : null, x0Full,
                             rs.shuntAdmittanceOverrideScenarioElementList.stream().mapToInt(Integer::intValue).toArray(),
                             rs.shuntAdmittanceOverrideDeltaList.stream().mapToDouble(Double::doubleValue).toArray(),
                             reactiveLimitsSeedState, reactiveLimitsFinalState,
@@ -1078,8 +1078,8 @@ final class GpuBatchChunkSolver {
                                     cl.reactiveCapabilityCurveOverrideScenarioCurve.stream().mapToInt(Integer::intValue).toArray(),
                                     cl.reactiveCapabilityCurveOverrideStepScale.stream().mapToDouble(Double::doubleValue).toArray(),
                                                                         parameters.getMaxIterations(), tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
-                                    config.lsMode(), config.maxDv(), config.maxDphi(),
-                                    config.lsMode() == GpuStateVectorScalingMode.MAX_VOLTAGE_CHANGE ? varType : null, x0Full,
+                                    config.stateVectorScalingMode(), config.maxDv(), config.maxDphi(),
+                                    config.stateVectorScalingMode() == GpuStateVectorScalingMode.MAX_VOLTAGE_CHANGE ? varType : null, x0Full,
                                     rs.shuntAdmittanceOverrideScenarioElementList.stream().mapToInt(Integer::intValue).toArray(),
                                     rs.shuntAdmittanceOverrideDeltaList.stream().mapToDouble(Double::doubleValue).toArray(),
                                     null, reactiveLimitsFinalState,

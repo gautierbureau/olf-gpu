@@ -63,103 +63,103 @@ bool repairsZeroDiagonals(const BatchSolverContext* ctx) {
 // those factors goes through the same combination (the unit vectors of the sensitivity solves too).
 // The pattern carries the union of each row with its candidates so the addition lands in place.
 // ---------------------------------------------------------------------------------------------
-__global__ void hazSnapshotVals(int nHaz, int nS, int nnz, int hazTot, const int* hazRow, const int* hazOff,
+__global__ void snapshotZeroDiagonalRowsBatch(int nZeroDiagonalRows, int nS, int nnz, int nZeroDiagonalRowValues, const int* zeroDiagonalRow, const int* zeroDiagonalRowValueStart,
                                 const int* rowPtr, const double* vals, double* snap) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= nHaz * nS) return;
-    int i = tid % nHaz;
-    int s = tid / nHaz;
-    int r = hazRow[i];
+    if (tid >= nZeroDiagonalRows * nS) return;
+    int i = tid % nZeroDiagonalRows;
+    int s = tid / nZeroDiagonalRows;
+    int r = zeroDiagonalRow[i];
     const double* v = vals + (size_t) s * nnz;
-    double* o = snap + (size_t) s * hazTot + hazOff[i];
+    double* o = snap + (size_t) s * nZeroDiagonalRowValues + zeroDiagonalRowValueStart[i];
     for (int k = rowPtr[r]; k < rowPtr[r + 1]; k++) {
         o[k - rowPtr[r]] = v[k];
     }
 }
 
-__global__ void hazRepairVals(int nHaz, int nS, int nnz, int hazTot, const int* hazRow, const int* hazOff,
-                              const int* hazDonorPtr, const int* hazDonor, const int* hazDonorHaz,
-                              const char* hazSign, const int* rowPtr, const int* colIdx, const int* diagPos,
+__global__ void repairZeroDiagonalRowsBatch(int nZeroDiagonalRows, int nS, int nnz, int nZeroDiagonalRowValues, const int* zeroDiagonalRow, const int* zeroDiagonalRowValueStart,
+                              const int* zeroDiagonalDonorStart, const int* zeroDiagonalDonor, const int* zeroDiagonalDonorOwnIndex,
+                              const char* zeroDiagonalRepairSign, const int* rowPtr, const int* colIdx, const int* diagPos,
                               const double* snap, double* vals, int* choice) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= nHaz * nS) return;
-    int i = tid % nHaz;
-    int s = tid / nHaz;
-    int r = hazRow[i];
+    if (tid >= nZeroDiagonalRows * nS) return;
+    int i = tid % nZeroDiagonalRows;
+    int s = tid / nZeroDiagonalRows;
+    int r = zeroDiagonalRow[i];
     double* v = vals + (size_t) s * nnz;
-    choice[(size_t) s * nHaz + i] = -1;
+    choice[(size_t) s * nZeroDiagonalRows + i] = -1;
     if (v[diagPos[r]] != 0.0) return;                        // a real (or identity) diagonal: nothing to do
-    const double* sn = snap + (size_t) s * hazTot;
-    double sgn = hazSign[i];
-    for (int j = hazDonorPtr[i]; j < hazDonorPtr[i + 1]; j++) {
-        int d = hazDonor[j];
-        int hd = hazDonorHaz[j];                             // donor's own hazard slot (its ORIGINAL row is in snap)
+    const double* sn = snap + (size_t) s * nZeroDiagonalRowValues;
+    double sgn = zeroDiagonalRepairSign[i];
+    for (int j = zeroDiagonalDonorStart[i]; j < zeroDiagonalDonorStart[i + 1]; j++) {
+        int d = zeroDiagonalDonor[j];
+        int hd = zeroDiagonalDonorOwnIndex[j];                             // donor's own hazard slot (its ORIGINAL row is in snap)
         int p = csrFind(rowPtr, colIdx, d, r);
         if (p < 0) continue;
-        double coef = hd >= 0 ? sn[hazOff[hd] + (p - rowPtr[d])] : v[p];
+        double coef = hd >= 0 ? sn[zeroDiagonalRowValueStart[hd] + (p - rowPtr[d])] : v[p];
         if (coef == 0.0) continue;                           // this donor does not carry my column this scenario
         for (int k = rowPtr[d]; k < rowPtr[d + 1]; k++) {
-            double dv = hd >= 0 ? sn[hazOff[hd] + (k - rowPtr[d])] : v[k];
+            double dv = hd >= 0 ? sn[zeroDiagonalRowValueStart[hd] + (k - rowPtr[d])] : v[k];
             if (dv == 0.0) continue;
             int q = csrFind(rowPtr, colIdx, r, colIdx[k]);
             if (q >= 0) v[q] += sgn * dv;
         }
-        choice[(size_t) s * nHaz + i] = j;
+        choice[(size_t) s * nZeroDiagonalRows + i] = j;
         return;
     }
 }
 
-__global__ void hazSnapshotB(int nHaz, int nS, int n, const int* hazRow, const double* B, double* bsnap) {
+__global__ void snapshotZeroDiagonalRightHandSideBatch(int nZeroDiagonalRows, int nS, int n, const int* zeroDiagonalRow, const double* B, double* bsnap) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= nHaz * nS) return;
-    int i = tid % nHaz;
-    int s = tid / nHaz;
-    bsnap[tid] = B[(size_t) s * n + hazRow[i]];
+    if (tid >= nZeroDiagonalRows * nS) return;
+    int i = tid % nZeroDiagonalRows;
+    int s = tid / nZeroDiagonalRows;
+    bsnap[tid] = B[(size_t) s * n + zeroDiagonalRow[i]];
 }
 
-__global__ void hazRepairRhs(int nHaz, int nS, int n, const int* hazRow, const int* hazDonor, const int* hazDonorHaz,
-                             const char* hazSign, const int* choice, const double* bsnap, double* B) {
+__global__ void repairZeroDiagonalRightHandSideBatch(int nZeroDiagonalRows, int nS, int n, const int* zeroDiagonalRow, const int* zeroDiagonalDonor, const int* zeroDiagonalDonorOwnIndex,
+                             const char* zeroDiagonalRepairSign, const int* choice, const double* bsnap, double* B) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= nHaz * nS) return;
-    int i = tid % nHaz;
-    int s = tid / nHaz;
+    if (tid >= nZeroDiagonalRows * nS) return;
+    int i = tid % nZeroDiagonalRows;
+    int s = tid / nZeroDiagonalRows;
     int j = choice[tid];
     if (j < 0) return;
-    int d = hazDonor[j];
-    int hd = hazDonorHaz[j];
-    double bd = hd >= 0 ? bsnap[(size_t) s * nHaz + hd] : B[(size_t) s * n + d];
-    B[(size_t) s * n + hazRow[i]] += hazSign[i] * bd;
+    int d = zeroDiagonalDonor[j];
+    int hd = zeroDiagonalDonorOwnIndex[j];
+    double bd = hd >= 0 ? bsnap[(size_t) s * nZeroDiagonalRows + hd] : B[(size_t) s * n + d];
+    B[(size_t) s * n + zeroDiagonalRow[i]] += zeroDiagonalRepairSign[i] * bd;
 }
 
-void hazRepairValues(BatchSolverContext* ctx, int nS, double* vals) {
+void repairZeroDiagonalRows(BatchSolverContext* ctx, int nS, double* vals) {
     auto* st = ctx->st.get();
-    if (st->nHaz == 0 || !repairsZeroDiagonals(ctx)) return;
-    if (ctx->hazCap < nS) {
-        ctx->dHazSnap.alloc((size_t) nS * st->hazTot * sizeof(double));
-        ctx->dHazBSnap.alloc((size_t) nS * st->nHaz * sizeof(double));
-        ctx->dHazChoice.alloc((size_t) nS * st->nHaz * sizeof(int));
-        ctx->hazCap = nS;
+    if (st->nZeroDiagonalRows == 0 || !repairsZeroDiagonals(ctx)) return;
+    if (ctx->zeroDiagonalRepairCapacity < nS) {
+        ctx->dZeroDiagonalRowSnapshot.alloc((size_t) nS * st->nZeroDiagonalRowValues * sizeof(double));
+        ctx->dZeroDiagonalRightHandSideSnapshot.alloc((size_t) nS * st->nZeroDiagonalRows * sizeof(double));
+        ctx->dZeroDiagonalDonorChoice.alloc((size_t) nS * st->nZeroDiagonalRows * sizeof(int));
+        ctx->zeroDiagonalRepairCapacity = nS;
     }
     int nnz = st->nnz;
-    hazSnapshotVals<<<((st->nHaz * nS + BLOCK - 1) / BLOCK), BLOCK, 0, ctx->stream>>>(st->nHaz, nS, nnz, st->hazTot,
-            st->dHazRow.template as<int>(), st->dHazOff.template as<int>(), st->dRowPtr.template as<int>(), vals, ctx->dHazSnap.template as<double>());
-    hazRepairVals<<<((st->nHaz * nS + BLOCK - 1) / BLOCK), BLOCK, 0, ctx->stream>>>(st->nHaz, nS, nnz, st->hazTot,
-            st->dHazRow.template as<int>(), st->dHazOff.template as<int>(), st->dHazDonorPtr.template as<int>(), st->dHazDonor.template as<int>(),
-            st->dHazDonorHaz.template as<int>(), st->dHazSign.template as<char>(), st->dRowPtr.template as<int>(), st->dColIdx.template as<int>(),
-            st->dDiagPos.template as<int>(), ctx->dHazSnap.template as<double>(), vals, ctx->dHazChoice.template as<int>());
+    snapshotZeroDiagonalRowsBatch<<<((st->nZeroDiagonalRows * nS + BLOCK - 1) / BLOCK), BLOCK, 0, ctx->stream>>>(st->nZeroDiagonalRows, nS, nnz, st->nZeroDiagonalRowValues,
+            st->dZeroDiagonalRow.template as<int>(), st->dZeroDiagonalRowValueStart.template as<int>(), st->dRowPtr.template as<int>(), vals, ctx->dZeroDiagonalRowSnapshot.template as<double>());
+    repairZeroDiagonalRowsBatch<<<((st->nZeroDiagonalRows * nS + BLOCK - 1) / BLOCK), BLOCK, 0, ctx->stream>>>(st->nZeroDiagonalRows, nS, nnz, st->nZeroDiagonalRowValues,
+            st->dZeroDiagonalRow.template as<int>(), st->dZeroDiagonalRowValueStart.template as<int>(), st->dZeroDiagonalDonorStart.template as<int>(), st->dZeroDiagonalDonor.template as<int>(),
+            st->dZeroDiagonalDonorOwnIndex.template as<int>(), st->dZeroDiagonalRepairSign.template as<char>(), st->dRowPtr.template as<int>(), st->dColIdx.template as<int>(),
+            st->dDiagPos.template as<int>(), ctx->dZeroDiagonalRowSnapshot.template as<double>(), vals, ctx->dZeroDiagonalDonorChoice.template as<int>());
 }
 
 /** The same combination on a right-hand side (nS scenarios from {@code B}, choices from the last
- *  hazRepairValues on this context; {@code sOff} selects the scenario block for a per-scenario call). */
-void hazRepairRightHandSide(BatchSolverContext* ctx, int nS, double* B, int sOff) {
+ *  repairZeroDiagonalRows on this context; {@code sOff} selects the scenario block for a per-scenario call). */
+void repairZeroDiagonalRightHandSide(BatchSolverContext* ctx, int nS, double* B, int sOff) {
     auto* st = ctx->st.get();
-    if (st->nHaz == 0 || ctx->hazCap < sOff + nS || !repairsZeroDiagonals(ctx)) return;
+    if (st->nZeroDiagonalRows == 0 || ctx->zeroDiagonalRepairCapacity < sOff + nS || !repairsZeroDiagonals(ctx)) return;
     int n = st->n;
-    double* bsnap = ctx->dHazBSnap.template as<double>() + (size_t) sOff * st->nHaz;
-    hazSnapshotB<<<((st->nHaz * nS + BLOCK - 1) / BLOCK), BLOCK, 0, ctx->stream>>>(st->nHaz, nS, n, st->dHazRow.template as<int>(), B, bsnap);
-    hazRepairRhs<<<((st->nHaz * nS + BLOCK - 1) / BLOCK), BLOCK, 0, ctx->stream>>>(st->nHaz, nS, n, st->dHazRow.template as<int>(),
-            st->dHazDonor.template as<int>(), st->dHazDonorHaz.template as<int>(), st->dHazSign.template as<char>(),
-            ctx->dHazChoice.template as<int>() + (size_t) sOff * st->nHaz, bsnap, B);
+    double* bsnap = ctx->dZeroDiagonalRightHandSideSnapshot.template as<double>() + (size_t) sOff * st->nZeroDiagonalRows;
+    snapshotZeroDiagonalRightHandSideBatch<<<((st->nZeroDiagonalRows * nS + BLOCK - 1) / BLOCK), BLOCK, 0, ctx->stream>>>(st->nZeroDiagonalRows, nS, n, st->dZeroDiagonalRow.template as<int>(), B, bsnap);
+    repairZeroDiagonalRightHandSideBatch<<<((st->nZeroDiagonalRows * nS + BLOCK - 1) / BLOCK), BLOCK, 0, ctx->stream>>>(st->nZeroDiagonalRows, nS, n, st->dZeroDiagonalRow.template as<int>(),
+            st->dZeroDiagonalDonor.template as<int>(), st->dZeroDiagonalDonorOwnIndex.template as<int>(), st->dZeroDiagonalRepairSign.template as<char>(),
+            ctx->dZeroDiagonalDonorChoice.template as<int>() + (size_t) sOff * st->nZeroDiagonalRows, bsnap, B);
 }
 
 }  // namespace olfgpu

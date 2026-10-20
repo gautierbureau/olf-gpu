@@ -21,25 +21,25 @@ public final class RelocatedRows {
     private RelocatedRows() {
     }
 
-    /** The kernels map candidate c of qr group g to dq member qrMemberStart[g] + c - 1: true when every packed
+    /** The kernels map candidate c of qr group g to dq member reactiveRelocationDistrQMemberStart[g] + c - 1: true when every packed
      *  member with a row sits at that candidate (merged controller order on both sides). */
-    static boolean qrMemberOrderConsistent(GpuAcData gpuData) {
-        int[] start = qrMemberStart(gpuData);
-        int[] qrPtr = gpuData.reactiveRelocation().groupStart();
-        int[] qrRows = gpuData.reactiveRelocation().candidateRows();
+    static boolean reactiveRelocationMemberOrderConsistent(GpuAcData gpuData) {
+        int[] start = reactiveRelocationDistrQMemberStart(gpuData);
+        int[] reactiveRelocationGroupStart = gpuData.reactiveRelocation().groupStart();
+        int[] reactiveRelocationCandidateRows = gpuData.reactiveRelocation().candidateRows();
         int[] mRow = gpuData.distrQMembers().row();
         byte[] mHasRow = gpuData.distrQMembers().hasRow();
-        int[] mQrGroup = gpuData.distrQMembers().relocationGroup();
-        if (start == null || qrPtr == null || mRow == null || mQrGroup == null) {
+        int[] memberRelocationGroup = gpuData.distrQMembers().relocationGroup();
+        if (start == null || reactiveRelocationGroupStart == null || mRow == null || memberRelocationGroup == null) {
             return false;
         }
-        for (int m = 0; m < mQrGroup.length; m++) {
-            int g = mQrGroup[m];
+        for (int m = 0; m < memberRelocationGroup.length; m++) {
+            int g = memberRelocationGroup[m];
             if (g < 0 || mHasRow[m] == 0 || mRow[m] < 0) {
                 continue;
             }
             int c = m - start[g] + 1;
-            if (c < 1 || qrPtr[g] + c >= qrPtr[g + 1] || qrRows[qrPtr[g] + c] != mRow[m]) {
+            if (c < 1 || reactiveRelocationGroupStart[g] + c >= reactiveRelocationGroupStart[g + 1] || reactiveRelocationCandidateRows[reactiveRelocationGroupStart[g] + c] != mRow[m]) {
                 return false;
             }
         }
@@ -47,16 +47,16 @@ public final class RelocatedRows {
     }
 
     /** qr group -> its first dq member, -1 for a group without packed members. */
-    public static int[] qrMemberStart(GpuAcData gpuData) {
-        int[] mQrGroup = gpuData.distrQMembers().relocationGroup();
-        int[] qrPtr = gpuData.reactiveRelocation().groupStart();
-        if (mQrGroup == null || qrPtr == null || qrPtr.length < 2) {
+    public static int[] reactiveRelocationDistrQMemberStart(GpuAcData gpuData) {
+        int[] memberRelocationGroup = gpuData.distrQMembers().relocationGroup();
+        int[] reactiveRelocationGroupStart = gpuData.reactiveRelocation().groupStart();
+        if (memberRelocationGroup == null || reactiveRelocationGroupStart == null || reactiveRelocationGroupStart.length < 2) {
             return null;
         }
-        int[] start = new int[qrPtr.length - 1];
+        int[] start = new int[reactiveRelocationGroupStart.length - 1];
         java.util.Arrays.fill(start, -1);
-        for (int m = 0; m < mQrGroup.length; m++) {
-            int g = mQrGroup[m];
+        for (int m = 0; m < memberRelocationGroup.length; m++) {
+            int g = memberRelocationGroup[m];
             if (g >= 0 && g < start.length && start[g] < 0) {
                 start[g] = m;
             }
@@ -121,8 +121,8 @@ public final class RelocatedRows {
     /** Where a per-scenario reactive flip lands: the bus's own {@code BUS_V} row, or its parent coupler's
      *  {@code DUMMY_Q} row while that coupler stays closed. An OUTAGED coupler puts the equations back on the
      *  bus's own rows (the stock placement the chunk solver switches to), so the own row is right there. */
-    static int relocQRow(int vRow, java.util.Map<Integer, int[]> relocRows, java.util.Set<Integer> outagedZeroImpedanceBranchNums) {
-        int[] reloc = relocRows.get(vRow);
+    static int scenarioReactiveRowOfVRow(int vRow, java.util.Map<Integer, int[]> relocatedChildRows, java.util.Set<Integer> outagedZeroImpedanceBranchNums) {
+        int[] reloc = relocatedChildRows.get(vRow);
         return reloc == null || outagedZeroImpedanceBranchNums.contains(reloc[0]) ? vRow : reloc[1];
     }
 
@@ -147,7 +147,7 @@ public final class RelocatedRows {
 
     /** The row a consumer holding the structural (already relocated) row must write in THIS scenario:
      *  the child bus's own row once the coupler carrying its equations is outaged, else unchanged. */
-    static int unrelocQRow(int row, java.util.Map<Integer, int[]> dummyQRows, java.util.Set<Integer> outagedZeroImpedanceBranchNums) {
+    static int scenarioReactiveRowOfStructuralRow(int row, java.util.Map<Integer, int[]> dummyQRows, java.util.Set<Integer> outagedZeroImpedanceBranchNums) {
         int[] reloc = dummyQRows.get(row);
         return reloc != null && outagedZeroImpedanceBranchNums.contains(reloc[0]) ? reloc[1] : row;
     }

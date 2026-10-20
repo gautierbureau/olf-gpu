@@ -62,35 +62,35 @@ void seedSolve(BatchSolverContext* ctx, DriverPass& drv, const int* reactiveLimi
         CUDA_CHECK(cudaMemsetAsync(ctx->dDistributedSlackGeneratorMove.p, 0, static_cast<size_t>(ctx->nDistributedSlackGenerators) * nS * sizeof(double), ctx->stream));
         CUDA_CHECK(cudaMemsetAsync(ctx->dDistributedSlackGeneratorMoveValid.p, 0, (size_t) nS * sizeof(char), ctx->stream));
     }
-    if (ctx->hasDistrQRelocationGroups && ctx->st->nQr > 0) {        // plan-B4: capture each group's pilot-Q target from
-        size_t need = static_cast<size_t>(ctx->st->nQr) * nS * sizeof(double);   // the BASE carrier's row,
-        if (!ctx->dQrPilotQ.p) ctx->dQrPilotQ.alloc(need);   // BEFORE any RL mode seeding rewrites it
-        if (!ctx->dQrSavedVT.p) ctx->dQrSavedVT.alloc(need);
-        if (!ctx->dQrVeqOff.p) ctx->dQrVeqOff.alloc(static_cast<size_t>(ctx->st->nQr) * nS * sizeof(char));
-        CUDA_CHECK(cudaMemsetAsync(ctx->dQrVeqOff.p, 0,      // per-solve state, like limitType
-                static_cast<size_t>(ctx->st->nQr) * nS * sizeof(char), ctx->stream));
-        capturePilotQBatch<<<grid(ctx->st->nQr * nS), BLOCK, 0, ctx->stream>>>(ctx->st->nQr, nS, n,
-                ctx->st->dQrPtr.as<int>(), ctx->st->dQrRows.as<int>(), dBaseMode.as<int>(),
-                ctx->dTargetBase.as<double>(), ctx->dQrPilotQ.as<double>(),
-                ctx->st->dQrBaseTargetRow.p ? ctx->st->dQrBaseTargetRow.as<int>() : nullptr);
-        if (ctx->nQrPqDelta > 0) {
-            applyPilotQDeltasBatch<<<grid(ctx->nQrPqDelta), BLOCK, 0, ctx->stream>>>(ctx->nQrPqDelta,
-                    ctx->dQrPqDeltaKey.as<int>(), ctx->dQrPqDeltaVal.as<double>(), ctx->st->nQr, n,
-                    ctx->st->dQrPtr.as<int>(), ctx->st->dQrRows.as<int>(), ctx->dMode.as<int>(),
+    if (ctx->hasDistrQRelocationGroups && ctx->st->nReactiveRelocationGroups > 0) {        // plan-B4: capture each group's pilot-Q target from
+        size_t need = static_cast<size_t>(ctx->st->nReactiveRelocationGroups) * nS * sizeof(double);   // the BASE carrier's row,
+        if (!ctx->dReactiveRelocationPilotTargetQ.p) ctx->dReactiveRelocationPilotTargetQ.alloc(need);   // BEFORE any RL mode seeding rewrites it
+        if (!ctx->dReactiveRelocationSavedPilotTargetV.p) ctx->dReactiveRelocationSavedPilotTargetV.alloc(need);
+        if (!ctx->dReactiveRelocationPilotTargetVDeactivated.p) ctx->dReactiveRelocationPilotTargetVDeactivated.alloc(static_cast<size_t>(ctx->st->nReactiveRelocationGroups) * nS * sizeof(char));
+        CUDA_CHECK(cudaMemsetAsync(ctx->dReactiveRelocationPilotTargetVDeactivated.p, 0,      // per-solve state, like limitType
+                static_cast<size_t>(ctx->st->nReactiveRelocationGroups) * nS * sizeof(char), ctx->stream));
+        capturePilotQBatch<<<grid(ctx->st->nReactiveRelocationGroups * nS), BLOCK, 0, ctx->stream>>>(ctx->st->nReactiveRelocationGroups, nS, n,
+                ctx->st->dReactiveRelocationGroupStart.as<int>(), ctx->st->dReactiveRelocationCandidateRows.as<int>(), dBaseMode.as<int>(),
+                ctx->dTargetBase.as<double>(), ctx->dReactiveRelocationPilotTargetQ.as<double>(),
+                ctx->st->dReactiveRelocationBaseTargetRow.p ? ctx->st->dReactiveRelocationBaseTargetRow.as<int>() : nullptr);
+        if (ctx->nReactiveRelocationPilotTargetQDeltas > 0) {
+            applyPilotQDeltasBatch<<<grid(ctx->nReactiveRelocationPilotTargetQDeltas), BLOCK, 0, ctx->stream>>>(ctx->nReactiveRelocationPilotTargetQDeltas,
+                    ctx->dReactiveRelocationPilotTargetQDeltaKey.as<int>(), ctx->dReactiveRelocationPilotTargetQDeltaValue.as<double>(), ctx->st->nReactiveRelocationGroups, n,
+                    ctx->st->dReactiveRelocationGroupStart.as<int>(), ctx->st->dReactiveRelocationCandidateRows.as<int>(), ctx->dMode.as<int>(),
                     ctx->hasDistrQSubgroups ? ctx->dDistrQSubgroup.as<char>() : nullptr, ctx->nDistrQMembers,
-                    ctx->hasDistrQSubgroups ? ctx->dQrMemberStart.as<int>() : nullptr,
-                    ctx->dQrPilotQ.as<double>(), ctx->dTarget.as<double>());
+                    ctx->hasDistrQSubgroups ? ctx->dReactiveRelocationDistrQMemberStart.as<int>() : nullptr,
+                    ctx->dReactiveRelocationPilotTargetQ.as<double>(), ctx->dTarget.as<double>());
         }
         if (!ctx->dReactiveRelocationPilotReactiveLimitEntry.p) {
             // Per group, the pilot's own LOCAL reactive-limit entry: a pilot whose group lost control
             // in the BASE (every member pinned there) enters the pack as a local entry with an empty
             // reactive range, and that entry carries the group's V target — the value the pilot row
-            // takes back when a member unpins (updatePilotVeqBatch). Built once per context.
-            int nQr = ctx->st->nQr;
-            std::vector<int> ptr(nQr + 1);
-            CUDA_CHECK(cudaMemcpy(ptr.data(), ctx->st->dQrPtr.p, ptr.size() * sizeof(int), cudaMemcpyDeviceToHost));
-            std::vector<int> rows(std::max(ptr[nQr], 1));
-            CUDA_CHECK(cudaMemcpy(rows.data(), ctx->st->dQrRows.p, static_cast<size_t>(ptr[nQr]) * sizeof(int), cudaMemcpyDeviceToHost));
+            // takes back when a member unpins (updatePilotTargetVEquationBatch). Built once per context.
+            int nReactiveRelocationGroups = ctx->st->nReactiveRelocationGroups;
+            std::vector<int> ptr(nReactiveRelocationGroups + 1);
+            CUDA_CHECK(cudaMemcpy(ptr.data(), ctx->st->dReactiveRelocationGroupStart.p, ptr.size() * sizeof(int), cudaMemcpyDeviceToHost));
+            std::vector<int> rows(std::max(ptr[nReactiveRelocationGroups], 1));
+            CUDA_CHECK(cudaMemcpy(rows.data(), ctx->st->dReactiveRelocationCandidateRows.p, static_cast<size_t>(ptr[nReactiveRelocationGroups]) * sizeof(int), cudaMemcpyDeviceToHost));
             std::vector<int> vrow(std::max(ctx->nReactiveLimitEntries, 1));
             std::vector<char> rem(std::max(ctx->nReactiveLimitEntries, 1), 0);
             if (ctx->nReactiveLimitEntries > 0) {
@@ -99,8 +99,8 @@ void seedSolve(BatchSolverContext* ctx, DriverPass& drv, const int* reactiveLimi
                     CUDA_CHECK(cudaMemcpy(rem.data(), ctx->dReactiveLimitVoltageControlRole.p, static_cast<size_t>(ctx->nReactiveLimitEntries), cudaMemcpyDeviceToHost));
                 }
             }
-            std::vector<int> pe(std::max(nQr, 1), -1);
-            for (int g = 0; g < nQr; g++) {
+            std::vector<int> pe(std::max(nReactiveRelocationGroups, 1), -1);
+            for (int g = 0; g < nReactiveRelocationGroups; g++) {
                 int pilotRow = rows[ptr[g]];
                 for (int i = 0; i < ctx->nReactiveLimitEntries; i++) {
                     if (!rem[i] && vrow[i] == pilotRow) { pe[g] = i; break; }
@@ -110,17 +110,17 @@ void seedSolve(BatchSolverContext* ctx, DriverPass& drv, const int* reactiveLimi
         }
         if (nS == 1 && std::getenv("OLF_GPU_BATCH_TRACE") != nullptr) {
             CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
-            int nQr = ctx->st->nQr;
-            std::vector<int> ptr(nQr + 1);
-            CUDA_CHECK(cudaMemcpy(ptr.data(), ctx->st->dQrPtr.p, ptr.size() * sizeof(int), cudaMemcpyDeviceToHost));
-            std::vector<int> rows(ptr[nQr]);
-            CUDA_CHECK(cudaMemcpy(rows.data(), ctx->st->dQrRows.p, rows.size() * sizeof(int), cudaMemcpyDeviceToHost));
-            std::vector<double> pq(nQr), tg(n);
+            int nReactiveRelocationGroups = ctx->st->nReactiveRelocationGroups;
+            std::vector<int> ptr(nReactiveRelocationGroups + 1);
+            CUDA_CHECK(cudaMemcpy(ptr.data(), ctx->st->dReactiveRelocationGroupStart.p, ptr.size() * sizeof(int), cudaMemcpyDeviceToHost));
+            std::vector<int> rows(ptr[nReactiveRelocationGroups]);
+            CUDA_CHECK(cudaMemcpy(rows.data(), ctx->st->dReactiveRelocationCandidateRows.p, rows.size() * sizeof(int), cudaMemcpyDeviceToHost));
+            std::vector<double> pq(nReactiveRelocationGroups), tg(n);
             std::vector<int> md(n);
-            CUDA_CHECK(cudaMemcpy(pq.data(), ctx->dQrPilotQ.p, nQr * sizeof(double), cudaMemcpyDeviceToHost));
+            CUDA_CHECK(cudaMemcpy(pq.data(), ctx->dReactiveRelocationPilotTargetQ.p, nReactiveRelocationGroups * sizeof(double), cudaMemcpyDeviceToHost));
             CUDA_CHECK(cudaMemcpy(tg.data(), ctx->dTarget.p, n * sizeof(double), cudaMemcpyDeviceToHost));
             CUDA_CHECK(cudaMemcpy(md.data(), dBaseMode.p, n * sizeof(int), cudaMemcpyDeviceToHost));
-            for (int g = 0; g < nQr; g++) {
+            for (int g = 0; g < nReactiveRelocationGroups; g++) {
                 std::fprintf(stderr, "PILOTQ_CAPTURE group=%d captured=%.9f candidates:", g, pq[g]);
                 for (int c = ptr[g]; c < ptr[g + 1]; c++) {
                     std::fprintf(stderr, " row%d(mode=%d,target=%.9f)", rows[c], md[rows[c]], tg[rows[c]]);
@@ -176,7 +176,7 @@ void seedSolve(BatchSolverContext* ctx, DriverPass& drv, const int* reactiveLimi
                 ctx->nReactiveLimitRemoteEntries > 0 ? ctx->dReactiveLimitVoltageControlRole.as<char>() : nullptr,
                 ctx->dReactiveLimitSavedTarget.as<double>(), ctx->dReactiveLimitSavedRowMode.as<char>(),
                 ctx->hasReactiveLimitBaseQLimitType ? ctx->dReactiveLimitBaseQLimitType.as<char>() : nullptr,
-                psEntryPtr(ctx), ctx->st->nQr,
+                pilotSelfReactiveLimitEntryOrNull(ctx), ctx->st->nReactiveRelocationGroups,
                 ctx->dReactiveLimitTargetV.as<double>(), nReactiveLimitTargetVOverrides, nReactiveLimitTargetVOverrides > 0 ? dReactiveLimitTargetVOverrideScenarioEntry.as<int>() : nullptr,
                 nReactiveLimitTargetVOverrides > 0 ? dReactiveLimitTargetVOverrideValue.as<double>() : nullptr, ctx->nSecondaryVoltageControlControllerBuses > 0 ? ctx->dSecondaryVoltageControlReactiveLimitTargetV.as<double>() : nullptr,
                 ctx->nReactiveLimitLocalOverrides > 0 ? ctx->dReactiveLimitLocalOverride.as<char>() : nullptr,
@@ -198,7 +198,7 @@ void seedSolve(BatchSolverContext* ctx, DriverPass& drv, const int* reactiveLimi
                     ctx->dTarget.as<double>(), ctx->dReactiveLimitMinQ.as<double>(), ctx->dReactiveLimitMaxQ.as<double>(),
                     ctx->dReactiveLimitLoadQ.as<double>(),
                     ctx->hasReactiveLimitBaseQLimitType ? ctx->dReactiveLimitBaseQLimitType.as<char>() : nullptr,
-                    psEntryPtr(ctx), ctx->st->nQr,
+                    pilotSelfReactiveLimitEntryOrNull(ctx), ctx->st->nReactiveRelocationGroups,
                     ctx->nReactiveLimitGeneratorsLost > 0 ? ctx->dReactiveLimitGeneratorsLost.as<char>() : nullptr);
         }
     }
@@ -245,7 +245,7 @@ void seedSolve(BatchSolverContext* ctx, DriverPass& drv, const int* reactiveLimi
                 ctx->dReactiveLimitLoadQPerScenario.as<double>());
         launchForcedTargetQLimits(ctx, nS, n);
     }
-    launchPilotVeqInner(ctx, drv, true, true);                     // seed: base limits, or the previous solve's flip
+    launchPilotTargetVEquationUpdate(ctx, drv, true, true);                     // seed: base limits, or the previous solve's flip
     launchDistrQTargetsInner(ctx, drv);
     if (ctx->nDistributedSlackBuses > 0) {
         distributedSlackResetSolve(ctx, drv);

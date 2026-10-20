@@ -13,16 +13,16 @@
 namespace olfgpu {
 
 // The GROUP relocation tables of one family, or all-null when the structure has none.
-RelocTables relocOf(Family& f, SharedStructure* st);
+ReactiveRelocationTables relocationTablesOf(Family& f, SharedStructure* st);
 
 // The same for the zero-impedance couplers.
-RelocTables ziRelocOf(SharedStructure* st);
+ReactiveRelocationTables zeroImpedanceRelocationTables(SharedStructure* st);
 
 // Per-scenario slack/PV identity rows over the fixed superset pattern.
 __global__ void applyRowModeBatch(int n, int nScenarios, int nnz, const int* mode, const int* rowPtr,
                                   const int* diagPos, const double* x, const double* target,
                                   double* vals, double* F, const char* active, const double* rowSlope,
-                                  const int* colIdx, const int* relocOwn);
+                                  const int* colIdx, const int* relocatedChildOwnRow);
 
 // F = -target for every active scenario, before the fills add the terms.
 __global__ void initFBatch(int n, int nScenarios, const double* target, double* F, const char* active);

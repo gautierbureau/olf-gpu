@@ -80,7 +80,7 @@ OLF leaves empty. These are the same OLF equations; only their row differs.
   every controller but the first. On the device, p's `BUS_V` row holds the voltage target, so p's `BUS_TARGET_Q` goes
   on the `BUS_V` row of the **first controller that is still free**, which OLF leaves without an equation. Which one
   is free depends on that lane's PV -> PQ switches. So the pattern carries p's balance on every candidate row, and each
-  Jacobian fill picks the first free controller. In the code: the "carrier", `qrPtr` / `qrRows`, the candidate rows
+  Jacobian fill picks the first free controller. In the code: the "carrier", `reactiveRelocationGroupStart` / `reactiveRelocationCandidateRows`, the candidate rows
   of each group.
 - **Transformer and shunt voltage control.** The controlled bus's `BUS_V` row holds `BUS_TARGET_V`. Its
   `BUS_TARGET_Q` goes on the row of the control variable, `BRANCH_RHO1` or `SHUNT_B`.

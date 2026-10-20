@@ -231,36 +231,36 @@ void traceReactiveLimitsState(BatchSolverContext* ctx, DriverPass& drv, bool inD
             }
         }
         // PSG: every pilot-self group's layout this pass — the pilot's pin state, its own row's mode/target,
-        // whether updatePilotVeqBatch flipped it (veqOff), and every candidate row with its mode, so a
+        // whether updatePilotTargetVEquationBatch flipped it (pilotTargetVDeactivated), and every candidate row with its mode, so a
         // "control lost" verdict can be checked against the members it was taken over.
-        if (ctx->hasPilotSelf && ctx->dPsPilotEntry.p && ctx->st->nQr > 0 && !ctx->st->hQrPtr.empty()
+        if (ctx->hasPilotSelf && ctx->dPilotSelfReactiveLimitEntry.p && ctx->st->nReactiveRelocationGroups > 0 && !ctx->st->hReactiveRelocationGroupStart.empty()
                 && std::getenv("OLF_GPU_BATCH_TRACE") != nullptr) {
-            std::vector<int> pe(ctx->st->nQr, -1);
-            std::vector<char> veq(static_cast<size_t>(ctx->st->nQr) * nS, 0);
-            CUDA_CHECK(cudaMemcpy(pe.data(), ctx->dPsPilotEntry.p, pe.size() * sizeof(int), cudaMemcpyDeviceToHost));
-            if (ctx->dQrVeqOff.p) {
-                CUDA_CHECK(cudaMemcpy(veq.data(), ctx->dQrVeqOff.p, veq.size(), cudaMemcpyDeviceToHost));
+            std::vector<int> pe(ctx->st->nReactiveRelocationGroups, -1);
+            std::vector<char> hPilotTargetVDeactivated(static_cast<size_t>(ctx->st->nReactiveRelocationGroups) * nS, 0);
+            CUDA_CHECK(cudaMemcpy(pe.data(), ctx->dPilotSelfReactiveLimitEntry.p, pe.size() * sizeof(int), cudaMemcpyDeviceToHost));
+            if (ctx->dReactiveRelocationPilotTargetVDeactivated.p) {
+                CUDA_CHECK(cudaMemcpy(hPilotTargetVDeactivated.data(), ctx->dReactiveRelocationPilotTargetVDeactivated.p, hPilotTargetVDeactivated.size(), cudaMemcpyDeviceToHost));
             }
             for (int s2 = 0; s2 < nS; s2++) {
-                for (int g = 0; g < ctx->st->nQr; g++) {
+                for (int g = 0; g < ctx->st->nReactiveRelocationGroups; g++) {
                     int e = pe[g];
                     if (e < 0) continue;
-                    int p0 = ctx->st->hQrPtr[g];
-                    int cnt = ctx->st->hQrPtr[g + 1] - p0;
-                    int prow = ctx->st->hQrRows[p0];
+                    int p0 = ctx->st->hReactiveRelocationGroupStart[g];
+                    int cnt = ctx->st->hReactiveRelocationGroupStart[g + 1] - p0;
+                    int prow = ctx->st->hReactiveRelocationCandidateRows[p0];
                     std::string cands;
                     int pick = 0;
                     for (int c = 1; c < cnt; c++) {
-                        int r = ctx->st->hQrRows[p0 + c];
+                        int r = ctx->st->hReactiveRelocationCandidateRows[p0 + c];
                         int m = hMode[(size_t) s2 * n + r];
                         if (pick == 0 && m != GpuRowMode::FIXED_VARIABLE && m != GpuRowMode::BUS_TARGET_Q) pick = c;
                         char b[48];
                         std::snprintf(b, sizeof b, " %d:m%d/t%.4f", r, m, hTgt[(size_t) s2 * n + r]);
                         cands += b;
                     }
-                    std::fprintf(stderr, "PSG s=%d outer=%d g=%d entry=%d lt=%d pilotRow=%d mode=%d target=%.9f veqOff=%d q=%.9f pick=%d cands=[%s ]\n",
+                    std::fprintf(stderr, "PSG s=%d outer=%d g=%d entry=%d lt=%d pilotRow=%d mode=%d target=%.9f pilotTargetVDeactivated=%d q=%.9f pick=%d cands=[%s ]\n",
                                  s2, outer, g, e, (int) lt[(size_t) s2 * ctx->nReactiveLimitEntries + e], prow, hMode[(size_t) s2 * n + prow],
-                                 hTgt[(size_t) s2 * n + prow], (int) veq[(size_t) s2 * ctx->st->nQr + g],
+                                 hTgt[(size_t) s2 * n + prow], (int) hPilotTargetVDeactivated[(size_t) s2 * ctx->st->nReactiveRelocationGroups + g],
                                  qb[(size_t) s2 * n + vr[e]] + lq[e], pick, cands.c_str());
                 }
             }
@@ -345,11 +345,11 @@ void traceReactiveLimitsAudit(BatchSolverContext* ctx, DriverPass& drv, std::vec
         for (int s = 0; s < nS; s++) allLive[s] = (res.status[s] == GpuAcSolverStatus::CONVERGED) ? 1 : 0;
         CUDA_CHECK(cudaMemcpy(ctx->dOuterLoopCheckActive.p, allLive.data(), nS * sizeof(char), cudaMemcpyHostToDevice));
         CUDA_CHECK(cudaMemsetAsync(ctx->dQbuf.p, 0, nTot * sizeof(double), ctx->stream));
-        if (ctx->st->closedBranch.elementCount) fillClosedBranchBatch<<<grid(ctx->st->closedBranch.elementCount * nS), BLOCK, 0, ctx->stream>>>(ctx->st->closedBranch.elementCount, nS, n, nnz, ctx->nElements, ctx->closedBranchOffset, ctx->st->closedBranch.parameters.as<double>(), ctx->st->closedBranch.indices.as<int>(), ctx->st->closedBranch.destination.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dQbuf.as<double>(), ctx->dDisabled.as<char>(), ctx->dOuterLoopCheckActive.as<char>(), ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>(), nullptr, nullptr, nullptr, 0, nullptr, nullptr, RelocTables{});
-        if (ctx->st->openBranch.elementCount) fillOpenBranchBatch<<<grid(ctx->st->openBranch.elementCount * nS), BLOCK, 0, ctx->stream>>>(ctx->st->openBranch.elementCount, nS, n, nnz, ctx->nElements, ctx->openBranchOffset, ctx->st->openBranch.parameters.as<double>(), ctx->st->openBranch.indices.as<int>(), ctx->st->openBranch.destination.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dQbuf.as<double>(), ctx->dDisabled.as<char>(), ctx->dOuterLoopCheckActive.as<char>(), nullptr, nullptr, nullptr, 0, RelocTables{});
-        if (ctx->st->shunt.elementCount) fillShuntBatch<<<grid(ctx->st->shunt.elementCount * nS), BLOCK, 0, ctx->stream>>>(ctx->st->shunt.elementCount, nS, n, nnz, ctx->nElements, ctx->shuntOffset, ctx->st->shunt.parameters.as<double>(), ctx->st->shunt.indices.as<int>(), ctx->st->shunt.destination.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dQbuf.as<double>(), ctx->dDisabled.as<char>(), ctx->dOuterLoopCheckActive.as<char>(), ctx->nShuntAdmittanceOverrides, ctx->dShuntAdmittanceOverrideScenarioElement.as<int>(), ctx->dShuntAdmittanceOverrideDelta.as<double>(), nullptr, nullptr, nullptr, 0, RelocTables{});
+        if (ctx->st->closedBranch.elementCount) fillClosedBranchBatch<<<grid(ctx->st->closedBranch.elementCount * nS), BLOCK, 0, ctx->stream>>>(ctx->st->closedBranch.elementCount, nS, n, nnz, ctx->nElements, ctx->closedBranchOffset, ctx->st->closedBranch.parameters.as<double>(), ctx->st->closedBranch.indices.as<int>(), ctx->st->closedBranch.destination.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dQbuf.as<double>(), ctx->dDisabled.as<char>(), ctx->dOuterLoopCheckActive.as<char>(), ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>(), nullptr, nullptr, nullptr, 0, nullptr, nullptr, ReactiveRelocationTables{});
+        if (ctx->st->openBranch.elementCount) fillOpenBranchBatch<<<grid(ctx->st->openBranch.elementCount * nS), BLOCK, 0, ctx->stream>>>(ctx->st->openBranch.elementCount, nS, n, nnz, ctx->nElements, ctx->openBranchOffset, ctx->st->openBranch.parameters.as<double>(), ctx->st->openBranch.indices.as<int>(), ctx->st->openBranch.destination.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dQbuf.as<double>(), ctx->dDisabled.as<char>(), ctx->dOuterLoopCheckActive.as<char>(), nullptr, nullptr, nullptr, 0, ReactiveRelocationTables{});
+        if (ctx->st->shunt.elementCount) fillShuntBatch<<<grid(ctx->st->shunt.elementCount * nS), BLOCK, 0, ctx->stream>>>(ctx->st->shunt.elementCount, nS, n, nnz, ctx->nElements, ctx->shuntOffset, ctx->st->shunt.parameters.as<double>(), ctx->st->shunt.indices.as<int>(), ctx->st->shunt.destination.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dQbuf.as<double>(), ctx->dDisabled.as<char>(), ctx->dOuterLoopCheckActive.as<char>(), ctx->nShuntAdmittanceOverrides, ctx->dShuntAdmittanceOverrideScenarioElement.as<int>(), ctx->dShuntAdmittanceOverrideDelta.as<double>(), nullptr, nullptr, nullptr, 0, ReactiveRelocationTables{});
         if (ctx->st->nLoadModelTerms) fillLoadModelBatch<<<grid(ctx->st->nLoadModelTerms * nS), BLOCK, 0, ctx->stream>>>(ctx->st->nLoadModelTerms, nS, n, nnz, ctx->st->dLoadModelParameters.as<double>(), ctx->st->dLoadModelIndices.as<int>(), ctx->st->dLoadModelDestination.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dQbuf.as<double>(), nullptr, nullptr, nullptr);
-        if (ctx->nZeroImpedanceBranch) fillZeroImpBatch<<<grid(ctx->nZeroImpedanceBranch * nS), BLOCK, 0, ctx->stream>>>(ctx->nZeroImpedanceBranch, nS, n, nnz, ctx->st->dZeroImpedanceBranchParameters.as<double>(), ctx->st->dZeroImpedanceBranchIndices.as<int>(), ctx->st->dZeroImpedanceBranchDestination.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dQbuf.as<double>(), ctx->dOuterLoopCheckActive.as<char>(), ctx->nBaseClosedZeroImpedanceBranches, ctx->nZeroImpedanceBranchCloseOverrides, ctx->dZeroImpedanceBranchCloseScenarioElement.as<int>(), ctx->nZeroImpedanceBranchOpenOverrides, ctx->dZeroImpedanceBranchOpenScenarioElement.as<int>(), nullptr, nullptr, nullptr, 0, RelocTables{}, ctx->nSpanningTreeOverrides, ctx->nSpanningTreeOverrides ? ctx->dSpanningTreeOverrideScenarioElementValue.as<int>() : nullptr, ctx->hasZeroImpedanceBranchMasks ? ctx->dZeroImpedanceBranchOpenMask.as<char>() : nullptr, ctx->hasZeroImpedanceBranchMasks ? ctx->dZeroImpedanceBranchCloseMask.as<char>() : nullptr, ctx->hasZeroImpedanceBranchMasks ? ctx->dSpanningTreeOverrideMask.as<char>() : nullptr);
+        if (ctx->nZeroImpedanceBranch) fillZeroImpBatch<<<grid(ctx->nZeroImpedanceBranch * nS), BLOCK, 0, ctx->stream>>>(ctx->nZeroImpedanceBranch, nS, n, nnz, ctx->st->dZeroImpedanceBranchParameters.as<double>(), ctx->st->dZeroImpedanceBranchIndices.as<int>(), ctx->st->dZeroImpedanceBranchDestination.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dQbuf.as<double>(), ctx->dOuterLoopCheckActive.as<char>(), ctx->nBaseClosedZeroImpedanceBranches, ctx->nZeroImpedanceBranchCloseOverrides, ctx->dZeroImpedanceBranchCloseScenarioElement.as<int>(), ctx->nZeroImpedanceBranchOpenOverrides, ctx->dZeroImpedanceBranchOpenScenarioElement.as<int>(), nullptr, nullptr, nullptr, 0, ReactiveRelocationTables{}, ctx->nSpanningTreeOverrides, ctx->nSpanningTreeOverrides ? ctx->dSpanningTreeOverrideScenarioElementValue.as<int>() : nullptr, ctx->hasZeroImpedanceBranchMasks ? ctx->dZeroImpedanceBranchOpenMask.as<char>() : nullptr, ctx->hasZeroImpedanceBranchMasks ? ctx->dZeroImpedanceBranchCloseMask.as<char>() : nullptr, ctx->hasZeroImpedanceBranchMasks ? ctx->dSpanningTreeOverrideMask.as<char>() : nullptr);
         if (ctx->nRemoteMemberReactiveTerms > 0) {
             fillRemoteMemberQBatch<<<grid(ctx->nRemoteMemberReactiveTerms * nS), BLOCK, 0, ctx->stream>>>(ctx->nRemoteMemberReactiveTerms, nS, n,
                     ctx->nElements, ctx->closedBranchOffset, ctx->openBranchOffset,
@@ -425,7 +425,7 @@ void traceReactiveLimitsAudit(BatchSolverContext* ctx, DriverPass& drv, std::vec
                 ctx->reactiveLimitsRobustMinRealisticVoltage, ctx->reactiveLimitsRobustMaxRealisticVoltage, ctx->reactiveLimitsRobustMode,
                 reactiveLimitsDecisionLogScenario, ctx->dReactiveLimitsDecisionLog.p ? ctx->dReactiveLimitsDecisionLog.as<double>() : nullptr,
                 ctx->dReactiveLimitsDecisionLogCount.p ? ctx->dReactiveLimitsDecisionLogCount.as<int>() : nullptr, 999999,
-                    psEntryPtr(ctx), ctx->st->nQr,
+                    pilotSelfReactiveLimitEntryOrNull(ctx), ctx->st->nReactiveRelocationGroups,
                     ctx->nReactiveLimitLocalOverrides > 0 ? ctx->dReactiveLimitLocalOverride.as<char>() : nullptr,
                     ctx->nReactiveLimitLocalOverrides > 0 ? ctx->dReactiveLimitLocalTargetV.as<double>() : nullptr,
                     ctx->nReactiveLimitPqPvSwitchForbidden > 0 ? ctx->dReactiveLimitPqPvSwitchForbidden.as<char>() : nullptr, ctx->nReactiveLimitPqPvSwitchForbidden > 0 ? ctx->dReactiveLimitPqPvSwitchRejected.as<char>() : nullptr,

@@ -29,11 +29,11 @@ __global__ void gatherScenarios(long per, int nC, const int* map, const double* 
     dst[i] = src[(long) map[c] * per + i % per];
 }
 
-__global__ void scatterScenarios(long per, int nReal, const int* map, const double* srcC, double* dst) {
+__global__ void scatterScenarios(long per, int nReal, const int* map, const double* compactedSource, double* dst) {
     long i = (long) blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= per * nReal) return;                             // pad slots (c >= nReal) are DISCARDED
     int c = (int) (i / per);
-    dst[(long) map[c] * per + i % per] = srcC[i];
+    dst[(long) map[c] * per + i % per] = compactedSource[i];
 }
 
 // Put nRows compact rows (src, row-major, n each) at their scenario slots of a [nS][n] buffer.

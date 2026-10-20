@@ -31,25 +31,25 @@ import java.util.List;
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
 record ExtractionColumns(int[] phiCol, int[] vCol, int[] branchRhoCol, int[] branchAlphaCol,
-                         int[] dummyPCol, int[] dummyQCol, int[] shuntBCol, int[] qRow, int[] qRowAlt,
-                         int[] qrPtr, int[] qrRows, int[] qrGroupOfPilot, int[] ziDeadEnd,
+                         int[] dummyPCol, int[] dummyQCol, int[] shuntBCol, int[] qRow, int[] alternateQRow,
+                         int[] reactiveRelocationGroupStart, int[] reactiveRelocationCandidateRows, int[] reactiveRelocationGroupOfPilot, int[] zeroImpedanceDeadEndSides,
                          /** Per candidate group: the BASE group a DEPENDENT pilot's group belongs to, -1 for a base
                           *  group. A merged remote group's dependent controlled bus becomes the pilot of OLF's re-merged
                           *  group when a contingency cuts it from the main: its reactive balance then rides a member row
                           *  of the same table, which this group's pool reserves (see the dependent-pilot rule in the
                           *  native pick functions). */
-                         int[] qrDepBase,
+                         int[] reactiveRelocationDependentBaseGroup,
                          /** Per candidate group: the row holding the pilot's reactive target in the BASE structure for a
                           *  dependent pilot (its relocated reactive row), -1 for a base group (the base carrier's). */
-                         int[] qrBaseTargetRow,
+                         int[] reactiveRelocationBaseTargetRow,
                          /** Per DEVICE row: the dependent-pilot group of the bus whose own V row this is, -1 elsewhere. */
-                         int[] depGroupOfRow,
+                         int[] reactiveRelocationDependentGroupOfRow,
                          /** Each bus's P-balance ROW: its own BUS_PHI column, or its parent coupler's DUMMY_P under
-                          *  the coupler-tree relocation (GpuAcRowIndexing#ziTreeRelocation). */
+                          *  the coupler-tree relocation (GpuAcRowIndexing#spanningTreeRelocation). */
                          int[] pRow,
                          /** Per bus, the coupler whose dummy columns host its power equations (-1 = root/none), and
                           *  per branch, the bus whose PHI/V host its zero equations (-1 = not relocated). */
-                         int[] ziParentEdge, int[] ziChildBus) {
+                         int[] spanningTreeParentBranch, int[] spanningTreeChildBus) {
 
     static ExtractionColumns of(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es) {
         // Cache each bus's BUS_PHI/BUS_V column once: a bus appears in several branches (degree ~3),
@@ -80,24 +80,24 @@ record ExtractionColumns(int[] phiCol, int[] vCol, int[] branchRhoCol, int[] bra
         int[] qRow = GpuAcRowIndexing.computeQRow(network, es, vCol, branchRhoCol, shuntBCol);
         // Dynamic Q-relocation: the OTHER candidate Q row of each transformer/shunt voltage-controlled
         // bus, so the fill can follow a per-scenario control toggle on the shared structure (§11).
-        int[] qRowAlt = GpuAcRowIndexing.computeQRowAlt(network, es, vCol, branchRhoCol, shuntBCol, qRow);
+        int[] alternateQRow = GpuAcRowIndexing.computeAlternateQRow(network, es, vCol, branchRhoCol, shuntBCol, qRow);
         // The coupler-tree relocation, computed HERE rather than after the candidate tables: a child bus's power
         // equations move onto its parent coupler's dummy columns, so every row of a coupler chain keeps a
         // structurally non-zero diagonal — and the tables below must name the row that ends up hosting each
         // member's reactive balance, which for a relocated member is that dummy column and no longer its own V row.
-        int[][] spanningTreeEdges = GpuAcRowIndexing.ziTreeRelocation(network, es, phiCol, vCol, qRow, dummyPCol, dummyQCol);
+        int[][] spanningTreeEdges = GpuAcRowIndexing.spanningTreeRelocation(network, es, phiCol, vCol, qRow, dummyPCol, dummyQCol);
         // GROUP pilot-Q relocation candidates (plan-A6): a shared transformer-VC pilot's reactive
         // balance rides on the FREE member's rho column — "first enabled", which an outage or clamp
         // of the free member RE-PICKS per scenario. Encode such pilots' alternate as -2-groupId and
         // ship the candidate table [pilot v row (fallback), member rho cols in merged order]; the
         // fill kernels select the FIRST member row whose per-scenario mode is not identity/pinned
         // (exactly OLF's free-role rule), falling back to the pilot's own row when control is off.
-        List<Integer> qrPtr = new ArrayList<>();
-        List<Integer> qrRows = new ArrayList<>();
-        List<Integer> qrDepBase = new ArrayList<>();
-        List<Integer> qrBaseTargetRow = new ArrayList<>();
-        int[] depGroupOfRow = new int[es.getIndex().getSortedVariablesToFind().size()];
-        java.util.Arrays.fill(depGroupOfRow, -1);
+        List<Integer> reactiveRelocationGroupStart = new ArrayList<>();
+        List<Integer> reactiveRelocationCandidateRows = new ArrayList<>();
+        List<Integer> reactiveRelocationDependentBaseGroup = new ArrayList<>();
+        List<Integer> reactiveRelocationBaseTargetRow = new ArrayList<>();
+        int[] reactiveRelocationDependentGroupOfRow = new int[es.getIndex().getSortedVariablesToFind().size()];
+        java.util.Arrays.fill(reactiveRelocationDependentGroupOfRow, -1);
         for (LfBus bus : network.getBuses()) {
             var tvc = bus.getTransformerVoltageControl()
                     .filter(c -> c.getMergeStatus() == VoltageControl.MergeStatus.MAIN)
@@ -118,13 +118,13 @@ record ExtractionColumns(int[] phiCol, int[] vCol, int[] branchRhoCol, int[] bra
             if (!allResolvable) {
                 continue;
             }
-            int g = qrPtr.size();
-            qrPtr.add(qrRows.size());
-            qrRows.add(vCol[bus.getNum()]);                  // candidate 0 = the FALLBACK (control off)
-            qrRows.addAll(memberRows);
-            qRowAlt[bus.getNum()] = -2 - g;
-            qrDepBase.add(-1);
-            qrBaseTargetRow.add(-1);
+            int g = reactiveRelocationGroupStart.size();
+            reactiveRelocationGroupStart.add(reactiveRelocationCandidateRows.size());
+            reactiveRelocationCandidateRows.add(vCol[bus.getNum()]);                  // candidate 0 = the FALLBACK (control off)
+            reactiveRelocationCandidateRows.addAll(memberRows);
+            alternateQRow[bus.getNum()] = -2 - g;
+            reactiveRelocationDependentBaseGroup.add(-1);
+            reactiveRelocationBaseTargetRow.add(-1);
         }
         // Remote gen-VC pilot-Q relocation (plan-B4): the pilot's reactive balance rides on the
         // FREE member's BUS_V row — "first controller-enabled", which an RL pin of the free member
@@ -134,12 +134,12 @@ record ExtractionColumns(int[] phiCol, int[] vCol, int[] branchRhoCol, int[] bra
         // terms at the pilot ride the relocation too — no branch-shape guard remains. SINGLETON
         // groups (one remote controller) get a table too since 2026-09-08: their candidate list
         // [pilot fallback, the member] is structurally a 2-member table, and the only member's pin
-        // IS the all-pinned corner (updatePilotVeqBatch flips the pilot's V identity) — this
+        // IS the all-pinned corner (updatePilotTargetVEquationBatch flips the pilot's V identity) — this
         // retired the last remote-pin-dynamics whole-run gate (table-less pinnable free member).
-        java.util.Set<Integer> qrPilotBuses = new java.util.HashSet<>();
-        addRemoteVoltageControlGroups(network, es, spanningTreeEdges, qrPilotBuses, dummyQCol, vCol, qrPtr, qrRows,
-                                      qRowAlt, qrDepBase, qrBaseTargetRow, depGroupOfRow);
-        qrPtr.add(qrRows.size());
+        java.util.Set<Integer> reactiveRelocationPilotBuses = new java.util.HashSet<>();
+        addRemoteVoltageControlGroups(network, es, spanningTreeEdges, reactiveRelocationPilotBuses, dummyQCol, vCol, reactiveRelocationGroupStart, reactiveRelocationCandidateRows,
+                                      alternateQRow, reactiveRelocationDependentBaseGroup, reactiveRelocationBaseTargetRow, reactiveRelocationDependentGroupOfRow);
+        reactiveRelocationGroupStart.add(reactiveRelocationCandidateRows.size());
 
         // Remote gen-VC group members (plan-B2), CANONICAL encoding independent of the base pin
         // state: the frozen q dest is SUPPRESSED and the member's OWN row is the ALTERNATE,
@@ -158,9 +158,9 @@ record ExtractionColumns(int[] phiCol, int[] vCol, int[] branchRhoCol, int[] bra
                     && (!GpuAcRowIndexing.isFreeRemoteGenVcMember(bus)
                         // the MAIN control's pilot: on a member's own (merged, dependent) control the
                         // controlled bus is the member itself, which is never in the pilot set
-                        || qrPilotBuses.contains(GpuAcRowIndexing.mainGenVc(bus).getControlledBus().getNum()))) {
+                        || reactiveRelocationPilotBuses.contains(GpuAcRowIndexing.mainGenVc(bus).getControlledBus().getNum()))) {
                 qRow[bn] = -1;
-                qRowAlt[bn] = vCol[bn];
+                alternateQRow[bn] = vCol[bn];
             }
         }
         // A pilot that is ALSO one of its own controllers. computeQRow already suppressed its per-bus
@@ -180,45 +180,45 @@ record ExtractionColumns(int[] phiCol, int[] vCol, int[] branchRhoCol, int[] bra
             // test CLOBBERED the enrolment the loop above had just made — silently, and only for the
             // pilots whose q is suppressed at extraction, which is exactly the unpinned pilot-self case the
             // rotation exists for. Measured on rte6515's VL-6112 group: with the rotation property ON the
-            // DISTR_Q contributions still reported qrGroup=-1, so the carrier gate in fillDistrQBatch could
+            // DISTR_Q contributions still reported pilotRelocationGroup=-1, so the carrier gate in fillDistrQBatch could
             // never fire and the re-picked free member kept a DISTR_Q equation OLF had deactivated.
-            if (vCol[bn] >= 0 && qRow[bn] < 0 && qRowAlt[bn] == -1
+            if (vCol[bn] >= 0 && qRow[bn] < 0 && alternateQRow[bn] == -1
                     && GpuAcRowIndexing.isRemoteGenVcControllerElement(bus)
                     && bus.getGeneratorVoltageControl()
                             .filter(c -> c.getMergeStatus() == VoltageControl.MergeStatus.MAIN)
                             .map(c -> c.getControlledBus() == bus).orElse(false)) {
-                qRowAlt[bn] = vCol[bn];
+                alternateQRow[bn] = vCol[bn];
             }
         }
-        // Which relocation group a pilot OWNS, as its own channel. qRowAlt = -2-g has always meant two
+        // Which relocation group a pilot OWNS, as its own channel. alternateQRow = -2-g has always meant two
         // separate things at once: "route this pilot's Q through the relocation carrier" AND "this
         // pilot has a candidate table". Consumers that want only the second (the member -> group link
         // that gates the gen-VC kernels) had to decode the first, which makes it impossible to give a
         // group a table WITHOUT also re-routing its Q — exactly what a pilot that is one of its own
         // controllers needs, since its q already feeds the group's DISTR_Q rows. Derived here from the
-        // final qRowAlt, so this commit is bit-identical to the decode it replaces.
-        int[] qrGroupOfPilot = new int[nBuses];
-        java.util.Arrays.fill(qrGroupOfPilot, -1);
+        // final alternateQRow, so this commit is bit-identical to the decode it replaces.
+        int[] reactiveRelocationGroupOfPilot = new int[nBuses];
+        java.util.Arrays.fill(reactiveRelocationGroupOfPilot, -1);
         for (int b = 0; b < nBuses; b++) {
-            if (qRowAlt[b] <= -2) {
-                qrGroupOfPilot[b] = -2 - qRowAlt[b];
+            if (alternateQRow[b] <= -2) {
+                reactiveRelocationGroupOfPilot[b] = -2 - alternateQRow[b];
             }
         }
         // Per zero-impedance branch, which side is a DEAD-END STUB safe to relocate (0 = none):
-        // GpuAcRowIndexing#ziDeadEndSide. GpuAcActivationExtractor derives the same answer from the
+        // GpuAcRowIndexing#zeroImpedanceDeadEndSide. GpuAcActivationExtractor derives the same answer from the
         // same helper, so the scatter destinations and the target map name the same rows.
-        int[] ziDeadEnd = new int[nBranches];
+        int[] zeroImpedanceDeadEndSides = new int[nBranches];
         for (LfBranch br : network.getBranches()) {
             if (br.isZeroImpedance(LoadFlowModel.AC)) {
-                ziDeadEnd[br.getNum()] = GpuAcRowIndexing.ziDeadEndSide(es, br, phiCol, vCol, qRow);
+                zeroImpedanceDeadEndSides[br.getNum()] = GpuAcRowIndexing.zeroImpedanceDeadEndSide(es, br, phiCol, vCol, qRow);
             }
         }
-        int[] ziParentEdge = spanningTreeEdges[0];
-        int[] ziChildBus = spanningTreeEdges[1];
+        int[] spanningTreeParentBranch = spanningTreeEdges[0];
+        int[] spanningTreeChildBus = spanningTreeEdges[1];
         int[] pRow = phiCol.clone();
         for (LfBus bus : network.getBuses()) {
             int bn = bus.getNum();
-            int parent = ziParentEdge[bn];
+            int parent = spanningTreeParentBranch[bn];
             if (parent < 0) {
                 continue;
             }
@@ -235,33 +235,33 @@ record ExtractionColumns(int[] phiCol, int[] vCol, int[] branchRhoCol, int[] bra
             // VL-5997/VL-6003/VL-6194/VL-6229, deadCols=2 (first 14417 = DUMMY_Q(BUS-6003_COUPLER_2)),
             // tinyDiag=7, and 6616 of 6876 scenarios rejecting their second iteration at a ratio of 1e+10.
             // Only the plain own-row alternate moves: a candidate-table pilot's is encoded as -2-group.
-            if (qRowAlt[bn] == vCol[bn] && dummyQCol[parent] >= 0) {
-                qRowAlt[bn] = dummyQCol[parent];
+            if (alternateQRow[bn] == vCol[bn] && dummyQCol[parent] >= 0) {
+                alternateQRow[bn] = dummyQCol[parent];
             }
         }
         for (int br = 0; br < nBranches; br++) {
-            int child = ziChildBus[br];
-            if (child >= 0 && ziParentEdge[child] != br) {
-                ziChildBus[br] = -1;                          // its child's relocation did not survive the check
+            int child = spanningTreeChildBus[br];
+            if (child >= 0 && spanningTreeParentBranch[child] != br) {
+                spanningTreeChildBus[br] = -1;                          // its child's relocation did not survive the check
             }
         }
-        return new ExtractionColumns(phiCol, vCol, branchRhoCol, branchAlphaCol, dummyPCol, dummyQCol, shuntBCol, qRow, qRowAlt,
-                GpuAcArrays.toIntArray(qrPtr), GpuAcArrays.toIntArray(qrRows), qrGroupOfPilot, ziDeadEnd,
-                GpuAcArrays.toIntArray(qrDepBase), GpuAcArrays.toIntArray(qrBaseTargetRow), depGroupOfRow,
-                pRow, ziParentEdge, ziChildBus);
+        return new ExtractionColumns(phiCol, vCol, branchRhoCol, branchAlphaCol, dummyPCol, dummyQCol, shuntBCol, qRow, alternateQRow,
+                GpuAcArrays.toIntArray(reactiveRelocationGroupStart), GpuAcArrays.toIntArray(reactiveRelocationCandidateRows), reactiveRelocationGroupOfPilot, zeroImpedanceDeadEndSides,
+                GpuAcArrays.toIntArray(reactiveRelocationDependentBaseGroup), GpuAcArrays.toIntArray(reactiveRelocationBaseTargetRow), reactiveRelocationDependentGroupOfRow,
+                pRow, spanningTreeParentBranch, spanningTreeChildBus);
     }
 
     /** Remote generator voltage-control pilot-Q relocation groups (plan-B4): one candidate table per remote group,
-     *  [pilot V row, member V columns in merged order]; adds each group's pilot to {@code qrPilotBuses}. */
+     *  [pilot V row, member V columns in merged order]; adds each group's pilot to {@code reactiveRelocationPilotBuses}. */
     private static void addRemoteVoltageControlGroups(final LfNetwork network,
                                                        final EquationSystem<AcVariableType, AcEquationType> es,
                                                        final int[][] spanningTreeEdges,
-                                                       final java.util.Set<Integer> qrPilotBuses,
+                                                       final java.util.Set<Integer> reactiveRelocationPilotBuses,
                                                        final int[] dummyQCol, final int[] vCol,
-                                                       final List<Integer> qrPtr, final List<Integer> qrRows,
-                                                       final int[] qRowAlt, final List<Integer> qrDepBase,
-                                                       final List<Integer> qrBaseTargetRow,
-                                                       final int[] depGroupOfRow) {
+                                                       final List<Integer> reactiveRelocationGroupStart, final List<Integer> reactiveRelocationCandidateRows,
+                                                       final int[] alternateQRow, final List<Integer> reactiveRelocationDependentBaseGroup,
+                                                       final List<Integer> reactiveRelocationBaseTargetRow,
+                                                       final int[] reactiveRelocationDependentGroupOfRow) {
         for (LfBus bus : network.getBuses()) {
             var gvc = bus.getGeneratorVoltageControl()
                     .filter(c -> c.getMergeStatus() == VoltageControl.MergeStatus.MAIN)
@@ -292,15 +292,15 @@ record ExtractionColumns(int[] phiCol, int[] vCol, int[] branchRhoCol, int[] bra
             for (LfBus m : gvc.getMergedControllerElements()) {
                 memberRows.add(GpuAcRowIndexing.relocatedQRow(m.getNum(), spanningTreeEdges[0], dummyQCol, vCol));
             }
-            int g = qrPtr.size();
-            qrPtr.add(qrRows.size());
+            int g = reactiveRelocationGroupStart.size();
+            reactiveRelocationGroupStart.add(reactiveRelocationCandidateRows.size());
             // candidate 0 = the FALLBACK (control lost), the pilot's own reactive row — relocated like any other
-            qrRows.add(GpuAcRowIndexing.relocatedQRow(bus.getNum(), spanningTreeEdges[0], dummyQCol, vCol));
-            qrRows.addAll(memberRows);
-            qRowAlt[bus.getNum()] = -2 - g;
-            qrPilotBuses.add(bus.getNum());
-            qrDepBase.add(-1);
-            qrBaseTargetRow.add(-1);
+            reactiveRelocationCandidateRows.add(GpuAcRowIndexing.relocatedQRow(bus.getNum(), spanningTreeEdges[0], dummyQCol, vCol));
+            reactiveRelocationCandidateRows.addAll(memberRows);
+            alternateQRow[bus.getNum()] = -2 - g;
+            reactiveRelocationPilotBuses.add(bus.getNum());
+            reactiveRelocationDependentBaseGroup.add(-1);
+            reactiveRelocationBaseTargetRow.add(-1);
             // DEPENDENT PILOTS. OLF merges the controls of one zero-impedance network into this MAIN; a contingency
             // that cuts a dependent controlled bus from the main re-merges the survivors and elects a new main among
             // them (LfZeroImpedanceNetwork.updateVoltageControlMergeStatus), whose BUS_TARGET_V comes back and whose
@@ -312,17 +312,17 @@ record ExtractionColumns(int[] phiCol, int[] vCol, int[] branchRhoCol, int[] bra
             for (var dvc : gvc.getMergedDependentVoltageControls()) {
                 LfBus dep = dvc.getControlledBus();
                 int dn = dep.getNum();
-                if (vCol[dn] < 0 || gvc.getMergedControllerElements().contains(dep) || depGroupOfRow[vCol[dn]] >= 0) {
+                if (vCol[dn] < 0 || gvc.getMergedControllerElements().contains(dep) || reactiveRelocationDependentGroupOfRow[vCol[dn]] >= 0) {
                     continue;
                 }
-                int dg = qrPtr.size();
-                qrPtr.add(qrRows.size());
-                int depQRow = GpuAcRowIndexing.relocatedQRow(dn, spanningTreeEdges[0], dummyQCol, vCol);
-                qrRows.add(depQRow);
-                qrRows.addAll(memberRows);
-                qrDepBase.add(g);
-                qrBaseTargetRow.add(depQRow);
-                depGroupOfRow[vCol[dn]] = dg;
+                int dg = reactiveRelocationGroupStart.size();
+                reactiveRelocationGroupStart.add(reactiveRelocationCandidateRows.size());
+                int dependentPilotQRow = GpuAcRowIndexing.relocatedQRow(dn, spanningTreeEdges[0], dummyQCol, vCol);
+                reactiveRelocationCandidateRows.add(dependentPilotQRow);
+                reactiveRelocationCandidateRows.addAll(memberRows);
+                reactiveRelocationDependentBaseGroup.add(g);
+                reactiveRelocationBaseTargetRow.add(dependentPilotQRow);
+                reactiveRelocationDependentGroupOfRow[vCol[dn]] = dg;
             }
             if (pilotSelf && System.getenv("OLF_GPU_RL_TRACE") != null) {
                 System.err.println("PILOTSELF_ENROL group=" + g + " pilot=" + bus.getId()

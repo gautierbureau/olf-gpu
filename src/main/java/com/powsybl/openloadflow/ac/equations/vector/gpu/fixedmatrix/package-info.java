@@ -11,7 +11,10 @@
  * {@link com.powsybl.openloadflow.ac.equations.vector.gpu.fixedmatrix.StableRowIndexing}) and the equations placed on
  * another bus's row (section 2.3: {@link com.powsybl.openloadflow.ac.equations.vector.gpu.fixedmatrix.ReactiveRelocation},
  * {@link com.powsybl.openloadflow.ac.equations.vector.gpu.fixedmatrix.ReactiveRelocationCandidates},
- * {@link com.powsybl.openloadflow.ac.equations.vector.gpu.fixedmatrix.CouplerTreeRelocation}).
+ * {@link com.powsybl.openloadflow.ac.equations.vector.gpu.fixedmatrix.ReactiveRelocationTables},
+ * {@link com.powsybl.openloadflow.ac.equations.vector.gpu.fixedmatrix.CouplerTreeRelocation},
+ * {@link com.powsybl.openloadflow.ac.equations.vector.gpu.fixedmatrix.CouplerTreeReHoming}) and the cross identity
+ * (section 2.4: {@link com.powsybl.openloadflow.ac.equations.vector.gpu.fixedmatrix.CrossIdentity}).
  *
  * <p>A leaf: it imports OLF core, {@code network.gpu} and {@code ac.solver.gpu.codes} only, never another GPU package.
  *

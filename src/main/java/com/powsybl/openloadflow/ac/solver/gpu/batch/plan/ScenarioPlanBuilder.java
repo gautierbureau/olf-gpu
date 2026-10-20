@@ -8,6 +8,7 @@
 package com.powsybl.openloadflow.ac.solver.gpu.batch.plan;
 
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
+import com.powsybl.openloadflow.ac.equations.vector.gpu.fixedmatrix.CouplerTreeReHoming;
 import com.powsybl.openloadflow.network.LfBranch;
 
 import java.util.ArrayList;
@@ -66,8 +67,8 @@ final class ScenarioPlanBuilder {
     @SuppressWarnings("unchecked")
     ScenarioPlanBuilder(int nContingencies, GpuAcData gpuData) {
         this.batchedIndices = new ArrayList<>();
-        this.relocatedChildRows = RelocatedRows.relocatedChildRows(gpuData);
-        this.relocatedDummyQRows = RelocatedRows.relocatedDummyQRows(gpuData);
+        this.relocatedChildRows = CouplerTreeReHoming.relocatedChildRows(gpuData.zeroImpedanceBranch().indices(), gpuData.zeroImpedanceBranch().branchNum());
+        this.relocatedDummyQRows = CouplerTreeReHoming.relocatedDummyQRows(gpuData.zeroImpedanceBranch().indices(), gpuData.zeroImpedanceBranch().branchNum());
         this.frozenRowsByIndex = new int[nContingencies][];
         this.islandedNumsByIndex = new int[nContingencies][];
         this.frozenTargetsByIndex = new double[nContingencies][];

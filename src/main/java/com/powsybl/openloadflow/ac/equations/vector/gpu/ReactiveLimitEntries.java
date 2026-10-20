@@ -45,6 +45,21 @@ public record ReactiveLimitEntries(int[] voltageRow, double[] minQ, double[] max
         return voltageRow.length;
     }
 
+    /** The bus's reactive-limit entry, or -1: a re-merged bus is checked as a LOCAL controller by the device
+     *  (OLF checks it as the PV bus it now is; BUS-6113_BBS_1 pinned VL-6113_1 at RL#1, the device never
+     *  looked — 7.1 kV). */
+    public int entryOf(int busNum) {
+        int[] reactiveLimitBusNum = busNum();
+        if (reactiveLimitBusNum != null) {
+            for (int e = 0; e < reactiveLimitBusNum.length; e++) {
+                if (reactiveLimitBusNum[e] == busNum) {
+                    return e;
+                }
+            }
+        }
+        return -1;
+    }
+
     /**
      * What a cached device context depends on. busNum, nominalV, activePowerRow, targetP and idRank are not compared
      * (as before the grouping; whether they should be is recorded in the cleanup plan, step 6).

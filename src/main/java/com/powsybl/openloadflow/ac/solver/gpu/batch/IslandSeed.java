@@ -9,6 +9,7 @@ package com.powsybl.openloadflow.ac.solver.gpu.batch;
 
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcElementMapper;
+import com.powsybl.openloadflow.ac.equations.vector.gpu.fixedmatrix.ReactiveRelocationTables;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.BatchContingency;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuRowMode;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuVoltageControlRole;
@@ -127,17 +128,8 @@ final class IslandSeed {
             int[] reactiveRelocationGroupStart = gpuData.reactiveRelocation().groupStart();
             int[] reactiveRelocationCandidateRows = gpuData.reactiveRelocation().candidateRows();
             for (int g = 0; reactiveRelocationGroupStart != null && g + 1 < reactiveRelocationGroupStart.length; g++) {
-                int baseCarrier = -1;
-                int newCarrier = -1;
-                for (int c = reactiveRelocationGroupStart[g] + 1; c < reactiveRelocationGroupStart[g + 1]; c++) {
-                    int r = reactiveRelocationCandidateRows[c];
-                    if (baseCarrier < 0 && baseRowMode[r] != GpuRowMode.FIXED_VARIABLE && baseRowMode[r] != GpuRowMode.BUS_TARGET_Q) {
-                        baseCarrier = r;
-                    }
-                    if (newCarrier < 0 && row[r] != GpuRowMode.FIXED_VARIABLE && row[r] != GpuRowMode.BUS_TARGET_Q) {
-                        newCarrier = r;
-                    }
-                }
+                int baseCarrier = ReactiveRelocationTables.chooseCarrierRow(gpuData.reactiveRelocation(), g, baseRowMode);
+                int newCarrier = ReactiveRelocationTables.chooseCarrierRow(gpuData.reactiveRelocation(), g, row);
                 // A PILOT-SELF group (rotation: the fallback row is itself a candidate) whose pilot is
                 // UNPINNED in the base carries no pilot balance on its carrier: that row hosts its OWN
                 // DISTR_Q, and the base carrier's target is that member's DISTR_Q target, not a pilot

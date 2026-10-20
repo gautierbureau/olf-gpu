@@ -8,6 +8,7 @@
 package com.powsybl.openloadflow.ac.equations.vector.gpu;
 
 import com.powsybl.commons.PowsyblException;
+import com.powsybl.openloadflow.ac.equations.vector.gpu.fixedmatrix.CouplerTreeReHoming;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfHvdc;
@@ -122,10 +123,10 @@ final class GpuAcFamilyPacker {
                 int childSide = child == b1n ? 1 : (child == b2n ? 2 : 0);
                 zeroImpedanceBranchIndices.add(new int[] {pRow[b1n], qRow[b1n], pRow[b2n], qRow[b2n], dpRow, distrQRow,
                     vCol[b1n], vCol[b2n], phiCol[b1n], phiCol[b2n],
-                    (br.isSpanningTreeEdge(LoadFlowModel.AC) ? 1 : 0) | (childSide << 1)
+                    (br.isSpanningTreeEdge(LoadFlowModel.AC) ? CouplerTreeReHoming.FLAG_SPANNING_TREE_EDGE : 0) | (childSide << CouplerTreeReHoming.CHILD_SIDE_SHIFT)
                         // bit 3: the child side came from the COUPLER-TREE walk; these need the per-scenario
                         // stock-placement fallback (native stockPlacementAlternateRow)
-                        | (childSide != 0 ? 8 : 0)});
+                        | (childSide != 0 ? CouplerTreeReHoming.FLAG_TREE_WALK : 0)});
                 zeroImpedanceBranchAlternateReactiveDestination.add(new int[] {alternateQRow[b1n], alternateQRow[b2n]});
                 continue;
             }

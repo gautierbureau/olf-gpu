@@ -10,6 +10,8 @@ package com.powsybl.openloadflow.ac.solver.gpu.batch.plan;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
+import com.powsybl.openloadflow.ac.equations.vector.gpu.fixedmatrix.CrossIdentity;
+import com.powsybl.openloadflow.ac.equations.vector.gpu.fixedmatrix.ReactiveRelocationTables;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.network.LfBus;
 
@@ -33,7 +35,8 @@ final class VoltageControlReMergeEntries {
         if (reMerged.subgroupOf().isEmpty()) {
             return null;
         }
-        if (!RelocatedRows.reactiveRelocationMemberOrderConsistent(gpuData)) {
+        if (!ReactiveRelocationTables.reactiveRelocationMemberOrderConsistent(gpuData.reactiveRelocation(), gpuData.distrQMembers().row(),
+                gpuData.distrQMembers().hasRow(), gpuData.distrQMembers().relocationGroup())) {
             reject[0] = "PLAN:VC_REMERGE_SUBGROUP_TABLE";
             return null;
         }
@@ -130,7 +133,7 @@ final class VoltageControlReMergeEntries {
             }
             int[] reloc = relocatedChildRows.get(vVar.getRow());
             boolean blockCovers = reloc != null && outagedZeroImpedanceBranchNums.contains(reloc[0]);
-            int reactiveLimitEntry = RelocatedRows.reactiveLimitEntryOf(gpuData, e.getKey());
+            int reactiveLimitEntry = gpuData.reactiveLimits().entryOf(e.getKey().getNum());
             boolean switchedPvToPqInBase = gpuData.switchedPvToPqInBase(reactiveLimitEntry);
             if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {
                 System.err.printf("QUALIFY_TRACE remoteMain bus=%s vRow=%d target=%.6f blockCovers=%b switchedPvToPqInBase=%b%n",
@@ -161,7 +164,7 @@ final class VoltageControlReMergeEntries {
                     var clusterVoltageControl = clusterBus.getGeneratorVoltageControl().orElse(null);
                     List<LfBus> controllers = clusterVoltageControl != null ? clusterVoltageControl.getControllerElements() : List.of(clusterBus);
                     for (LfBus controller : controllers) {
-                        int controllerElementReactiveLimitEntry = RelocatedRows.reactiveLimitEntryOf(gpuData, controller);
+                        int controllerElementReactiveLimitEntry = gpuData.reactiveLimits().entryOf(controller.getNum());
                         if (!gpuData.switchedPvToPqInBase(controllerElementReactiveLimitEntry)) {
                             reject[0] = "PLAN:VC_REMERGE_PINNED_MAIN";
                             return null;
@@ -194,7 +197,7 @@ final class VoltageControlReMergeEntries {
                                                                   GpuAcData gpuData, String[] reject) {
         List<GenOutage> out = new ArrayList<>();
         for (var e : reMerged.reMergedRemoteControllers().entrySet()) {
-            int reactiveLimitEntry = RelocatedRows.reactiveLimitEntryOf(gpuData, e.getKey());
+            int reactiveLimitEntry = gpuData.reactiveLimits().entryOf(e.getKey().getNum());
             if (reactiveLimitEntry < 0) {
                 continue;
             }
@@ -240,6 +243,19 @@ final class VoltageControlReMergeEntries {
                 : new GenOutage(-1, 0, dummyQRow, vTarget, true, true,
                     -1, 0, 0, 0, 0, reactiveLimitEntry, 0, 0, false, java.util.Set.of(), 0, 0, 0, -1, new int[0],
                     new int[0], new double[0], GenOutage.ROW_CROSS_V_IDENTITY, -1, 0, -1, 0, -1, 0, -1, -1, 0, false, -1, 0, 0);
+    }
+
+    /** The PV entry of a re-merged control (the bus whose own {@code BUS_V} row is {@code vRow}): a cross identity
+     *  when {@code crossRow >= 0} ({@link CrossIdentity#row}: its own row carries a LIVE coupler's ZERO_V), else the
+     *  base-pinned form when the base pinned it ({@code switchedPvToPqInBase}), else the plain voltage identity. */
+    static GenOutage pvEntry(int vRow, int crossRow, double vTarget, int reactiveLimitEntry, boolean switchedPvToPqInBase, double qTarget) {
+        if (crossRow >= 0) {
+            return reMergedCrossEntry(crossRow, vTarget, reactiveLimitEntry, switchedPvToPqInBase, qTarget);
+        }
+        if (switchedPvToPqInBase) {
+            return reMergedPinnedPvEntry(vRow, qTarget, vTarget, reactiveLimitEntry);
+        }
+        return reMergedPvEntry(vRow, vTarget, reactiveLimitEntry);
     }
 
     /** A base-pinned member of a re-merged cluster with no enabled controller: no row change, unpin forbidden. */

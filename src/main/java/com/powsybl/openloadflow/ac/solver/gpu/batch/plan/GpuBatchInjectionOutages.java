@@ -10,6 +10,7 @@ package com.powsybl.openloadflow.ac.solver.gpu.batch.plan;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
+import com.powsybl.openloadflow.ac.equations.vector.gpu.fixedmatrix.CouplerTreeReHoming;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuRowMode;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.network.LfBus;
@@ -63,6 +64,22 @@ public final class GpuBatchInjectionOutages {
             }
         }
         return -1;
+    }
+
+    /** The row mode a surviving member of a DEAD voltage control gets on its BUS_V row. A DISTR_Q
+     *  member's row must be mode 4 ("hosts its own reactive balance"): fillDistrQBatch skips every
+     *  contribution whose F row is mode 4 and the member's own q rides its alternate dest, which is
+     *  keyed on mode 4. Mode 1 left the DISTR_Q family writing into the row on top of nothing that
+     *  balanced the bus: rte6515 BUS-1055_BBS_1 (pilot VL-1055_0 islanded, merged section VL-1055_1
+     *  surviving) - OLF's BUS_TARGET_Q at the survivor off by 0.039 pu, 1.3 kV. A survivor that is
+     *  not a packed DISTR_Q member keeps the plain reactive row. */
+    static int deadControlRowMode(GpuAcData gpuData, LfBus survivor) {
+        int slot = distrQMemberSlot(gpuData, survivor);
+        if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {
+            System.err.println("QUALIFY_TRACE deadControlRowMode survivor=" + survivor.getId() + " distrQMemberSlot=" + slot
+                    + " -> mode " + (slot >= 0 ? 4 : 1));
+        }
+        return slot >= 0 ? 4 : 1;
     }
 
     /** RENORMALIZE through an ISLAND: the group's DISTR_Q controllers the contingency puts in another
@@ -158,7 +175,7 @@ public final class GpuBatchInjectionOutages {
                     // solved the renormalized WEIGHTS against a target built from the base keys: measured
                     // -13.3334 MVAr where OLF has -20.0001, one third of the pilot's 40 MVAr load instead
                     // of one half, and 0.32 kV on every bus behind it.
-                    r.add(RelocatedRows.scenarioReactiveRowOfStructuralRow(mRow[m], relocatedDummyQRows, outagedZeroImpedanceBranchNums));
+                    r.add(CouplerTreeReHoming.scenarioReactiveRowOfStructuralRow(mRow[m], relocatedDummyQRows, outagedZeroImpedanceBranchNums));
                     // targetQ over THIS member's peers — its own control's elements, as AcTargetVector sums them
                     double sumTargetQ = 0;
                     for (int t = gpuData.distrQMembers().targetPeerStart()[m]; t < gpuData.distrQMembers().targetPeerStart()[m + 1]; t++) {

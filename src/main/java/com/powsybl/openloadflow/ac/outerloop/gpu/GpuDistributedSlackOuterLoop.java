@@ -11,9 +11,9 @@ import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDistributedSlackParameters;
+import com.powsybl.openloadflow.ac.equations.vector.gpu.fixedmatrix.CouplerTreeReHoming;
 import com.powsybl.openloadflow.ac.solver.gpu.BatchReadbackNative;
 import com.powsybl.openloadflow.equations.EquationSystem;
-import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfGenerator;
 import com.powsybl.openloadflow.network.LfLoad;
@@ -64,7 +64,8 @@ public final class GpuDistributedSlackOuterLoop {
                 // converged state against stale targets: on rte6515's full busbar scope the device's own norm was
                 // 9.45e-06 (OLF's own final 9.50e-06) while OLF re-evaluated 1.67 and called the base
                 // MAX_ITERATION_REACHED, which took the whole security analysis with it.
-                slackBus = relocatedChildOfPRow(network, data, data.distributedSlack().slackPhiRow());
+                slackBus = CouplerTreeReHoming.relocatedChildOfPRow(network, data.zeroImpedanceBranch().indices(), data.zeroImpedanceBranch().branchNum(),
+                        data.distributedSlack().slackPhiRow());
             }
         }
         if (data.distributedSlack().busPhiRow().length == 0) {
@@ -179,24 +180,5 @@ public final class GpuDistributedSlackOuterLoop {
                 g.setTargetP(distributedSlackParameters.anchorTargetP(g) + delta * f / factorSum);
             }
         }
-    }
-
-    /** The bus whose P balance the relocation moved onto the coupler {@code DUMMY_P} row {@code pRow}. */
-    private static LfBus relocatedChildOfPRow(LfNetwork network, GpuAcData data, int pRow) {
-        int[] zeroImpedanceBranchIndices = data.zeroImpedanceBranch().indices();
-        int[] nums = data.zeroImpedanceBranch().branchNum();
-        if (zeroImpedanceBranchIndices == null || nums == null) {
-            return null;
-        }
-        for (int e = 0; e < zeroImpedanceBranchIndices.length / 11 && e < nums.length; e++) {
-            int o = e * 11;
-            int childSide = (zeroImpedanceBranchIndices[o + 10] >> 1) & 3;
-            if (childSide == 0 || zeroImpedanceBranchIndices[o + 4] != pRow || nums[e] < 0) {
-                continue;
-            }
-            LfBranch br = network.getBranch(nums[e]);
-            return childSide == 1 ? br.getBus1() : br.getBus2();
-        }
-        return null;
     }
 }

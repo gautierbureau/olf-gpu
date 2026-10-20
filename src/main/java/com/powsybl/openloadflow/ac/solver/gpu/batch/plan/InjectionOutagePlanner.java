@@ -12,6 +12,8 @@ import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcElementMapper;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDistributedSlackParameters;
+import com.powsybl.openloadflow.ac.equations.vector.gpu.fixedmatrix.CouplerTreeReHoming;
+import com.powsybl.openloadflow.ac.equations.vector.gpu.fixedmatrix.CrossIdentity;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
@@ -269,14 +271,14 @@ final class InjectionOutagePlanner {
                         live = null;
                         break;
                     }
-                    int qFlipRow = RelocatedRows.scenarioReactiveRowOfVRow(vVar.getRow(), pb.relocatedChildRows, outagedZeroImpedanceBranchNums);
+                    int qFlipRow = CouplerTreeReHoming.scenarioReactiveRowOfVRow(vVar.getRow(), pb.relocatedChildRows, outagedZeroImpedanceBranchNums);
                     if (frozenSet.contains(qFlipRow)) {
                         live = null;
                         break;
                     }
                     live.add(new GenOutage(-1, 0, qFlipRow, sb.getTargetQ(), true, true,
                             -1, 0, 0, 0, 0, -1, 0, 0, false, java.util.Set.of(), 0, 0, 0, -1, new int[0],
-                            new int[0], new double[0], RelocatedRows.deadControlRowMode(gpuData,
+                            new int[0], new double[0], GpuBatchInjectionOutages.deadControlRowMode(gpuData,
                                     sb), -1, 0, -1, 0, -1, 0, -1, -1, 0, false, -1, 0, 0));
                 }
                 if (live == null) {
@@ -297,16 +299,11 @@ final class InjectionOutagePlanner {
                         live = null;
                         break;
                     }
-                    int reMergedReactiveLimitEntry = RelocatedRows.reactiveLimitEntryOf(gpuData, e.getKey());
-                    int crossRow = RelocatedRows.scenarioReactiveRowOfVRow(vVar.getRow(), pb.relocatedChildRows, outagedZeroImpedanceBranchNums);
-                    if (crossRow != vVar.getRow()) {
-                        // its own row carries a LIVE coupler's ZERO_V: cross identity on the parent's
-                        // DUMMY_Q row (rte6515 BUS-6014_BBS_1/2 VL-6014_3, BUS-6029_BBS_4 VL-6029_2)
-                        live.add(VoltageControlReMergeEntries.reMergedCrossEntry(crossRow, e.getValue(), reMergedReactiveLimitEntry,
-                                gpuData.switchedPvToPqInBase(reMergedReactiveLimitEntry), e.getKey().getTargetQ()));
-                        continue;
-                    }
-                    if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {
+                    int reMergedReactiveLimitEntry = gpuData.reactiveLimits().entryOf(e.getKey().getNum());
+                    // its own row carries a LIVE coupler's ZERO_V: cross identity on the parent's
+                    // DUMMY_Q row (rte6515 BUS-6014_BBS_1/2 VL-6014_3, BUS-6029_BBS_4 VL-6029_2)
+                    int crossRow = CrossIdentity.row(vVar.getRow(), pb.relocatedChildRows, outagedZeroImpedanceBranchNums);
+                    if (crossRow < 0 && System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {
                         // Is the bus we are about to give a VOLTAGE IDENTITY already PINNED at its
                         // reactive limit? A pinned bus cannot hold its voltage — OLF has it as PQ —
                         // and the RL kernel's "limit drift while pinned" branch writes only the
@@ -329,14 +326,11 @@ final class InjectionOutagePlanner {
                     // loadQ), outside the realistic band [0.8, 1.2] — the run reported FAILED where
                     // OLF reports CONVERGED, losing all 71 of its violations, the WHOLE violation
                     // gap of the full busbar scope.
-                    if (gpuData.switchedPvToPqInBase(reMergedReactiveLimitEntry)) {
-                        // Base-pinned: start as the reactive balance at the pinned value, checked as a
-                        // LOCAL PV bus at the re-merged voltage target (ROW_PINNED_V). rte6515
-                        // BUS-6157_BBS_1 (unpins, re-pins MAX_Q), BUS-6194_BBS_2 (unpins), BUS-6229_BBS_1.
-                        live.add(VoltageControlReMergeEntries.reMergedPinnedPvEntry(vVar.getRow(), e.getKey().getTargetQ(), e.getValue(), reMergedReactiveLimitEntry));
-                        continue;
-                    }
-                    live.add(VoltageControlReMergeEntries.reMergedPvEntry(vVar.getRow(), e.getValue(), reMergedReactiveLimitEntry));
+                    // Base-pinned: start as the reactive balance at the pinned value, checked as a
+                    // LOCAL PV bus at the re-merged voltage target (ROW_PINNED_V). rte6515
+                    // BUS-6157_BBS_1 (unpins, re-pins MAX_Q), BUS-6194_BBS_2 (unpins), BUS-6229_BBS_1.
+                    live.add(VoltageControlReMergeEntries.pvEntry(vVar.getRow(), crossRow, e.getValue(), reMergedReactiveLimitEntry,
+                            gpuData.switchedPvToPqInBase(reMergedReactiveLimitEntry), e.getKey().getTargetQ()));
                 }
             }
             String[] remoteReject = new String[1];

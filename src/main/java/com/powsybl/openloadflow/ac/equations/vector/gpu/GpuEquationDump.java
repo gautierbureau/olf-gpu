@@ -9,6 +9,7 @@ package com.powsybl.openloadflow.ac.equations.vector.gpu;
 
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
+import com.powsybl.openloadflow.ac.equations.vector.gpu.fixedmatrix.CouplerTreeReHoming;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.Variable;
 import com.powsybl.openloadflow.network.LfBranch;
@@ -122,7 +123,7 @@ public final class GpuEquationDump {
             add(terms, zeroImpedanceBranchIndices[o + 2], tag + ".p2(-dP)");
             add(terms, zeroImpedanceBranchIndices[o + 3], tag + ".q2(-dQ)");
             if ((zeroImpedanceBranchIndices[o + 10] & 1) != 0) {
-                int childSide = (zeroImpedanceBranchIndices[o + 10] >> 1) & 3;
+                int childSide = CouplerTreeReHoming.childSide(zeroImpedanceBranchIndices[o + 10]);
                 // stock: crosswise, ZERO_V on the DUMMY_Q row and ZERO_PHI on the DUMMY_P row (native zeroVRowOf)
                 int zv = childSide == 0 ? zeroImpedanceBranchIndices[o + 5] : (childSide == 1 ? zeroImpedanceBranchIndices[o + 6] : zeroImpedanceBranchIndices[o + 7]);
                 int zp = childSide == 0 ? zeroImpedanceBranchIndices[o + 4] : (childSide == 1 ? zeroImpedanceBranchIndices[o + 8] : zeroImpedanceBranchIndices[o + 9]);
@@ -168,7 +169,7 @@ public final class GpuEquationDump {
                     e, br == null ? "?" : br.getId(), b1 == null ? "-" : b1.getId(), b2 == null ? "-" : b2.getId(),
                     zeroImpedanceBranchIndices[o], zeroImpedanceBranchIndices[o + 1], zeroImpedanceBranchIndices[o + 2],
                     zeroImpedanceBranchIndices[o + 3], zeroImpedanceBranchIndices[o + 4], zeroImpedanceBranchIndices[o + 5],
-                    zeroImpedanceBranchIndices[o + 10] & 1, (zeroImpedanceBranchIndices[o + 10] >> 1) & 3,
+                    zeroImpedanceBranchIndices[o + 10] & 1, CouplerTreeReHoming.childSide(zeroImpedanceBranchIndices[o + 10]),
                     e * 2 + 1 < zeroImpedanceBranchAlternateReactiveDestination.length ? zeroImpedanceBranchAlternateReactiveDestination[e * 2] : -1,
                     e * 2 + 1 < zeroImpedanceBranchAlternateReactiveDestination.length ? zeroImpedanceBranchAlternateReactiveDestination[e * 2 + 1] : -1));
         }

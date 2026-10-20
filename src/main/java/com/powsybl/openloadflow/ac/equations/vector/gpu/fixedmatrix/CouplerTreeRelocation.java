@@ -301,4 +301,67 @@ public final class CouplerTreeRelocation {
                 && StableRowIndexing.row(es, bn, AcEquationType.BUS_TARGET_P) >= 0
                 && StableRowIndexing.row(es, bn, AcEquationType.BUS_TARGET_Q) >= 0;
     }
+
+    /**
+     * Applies the coupler-tree relocation ({@link #spanningTreeRelocation}) to the row arrays, after the candidate
+     * tables ({@link ReactiveRelocationTables#build}): each zero-impedance branch's dead-end side
+     * ({@link #zeroImpedanceDeadEndSide}, read on the {@code qRow} the tables left), then each relocated child's P
+     * row, Q row and plain own-row alternate onto its parent coupler's {@code DUMMY_P} / {@code DUMMY_Q}, then drops
+     * from {@code spanningTreeEdges[1]} a coupler whose child's relocation did not survive the check. Mutates
+     * {@code qRow}, {@code alternateQRow} and {@code spanningTreeEdges[1]}.
+     */
+    public static AppliedRows applyToRows(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
+                                          int[] phiCol, int[] vCol, int[] dummyPCol, int[] dummyQCol,
+                                          int[] qRow, int[] alternateQRow, int[][] spanningTreeEdges) {
+        int nBranches = network.getBranches().size();
+        // Per zero-impedance branch, which side is a DEAD-END STUB safe to relocate (0 = none):
+        // CouplerTreeRelocation#zeroImpedanceDeadEndSide. GpuAcActivationExtractor derives the same answer from the
+        // same helper, so the scatter destinations and the target map name the same rows.
+        int[] zeroImpedanceDeadEndSides = new int[nBranches];
+        for (LfBranch br : network.getBranches()) {
+            if (br.isZeroImpedance(LoadFlowModel.AC)) {
+                zeroImpedanceDeadEndSides[br.getNum()] = CouplerTreeRelocation.zeroImpedanceDeadEndSide(es, br, phiCol, vCol, qRow);
+            }
+        }
+        int[] spanningTreeParentBranch = spanningTreeEdges[0];
+        int[] spanningTreeChildBus = spanningTreeEdges[1];
+        int[] pRow = phiCol.clone();
+        for (LfBus bus : network.getBuses()) {
+            int bn = bus.getNum();
+            int parent = spanningTreeParentBranch[bn];
+            if (parent < 0) {
+                continue;
+            }
+            pRow[bn] = dummyPCol[parent];
+            if (qRow[bn] == vCol[bn]) {                       // a DISTR_Q child moves through distrQRow instead
+                qRow[bn] = dummyQCol[parent];
+            }
+            // ...and so does the ALTERNATE row, the one every family writes the bus's OWN q to when a reactive
+            // limit puts it in mode 4. For a relocated child that pin lands on this coupler's DUMMY_Q row (the
+            // native pass diverts it there through reactiveLimitReactivePowerRow, since that is where its balance lives), so leaving the
+            // alternate on the bus's own BUS_V row sent its own q onto the row now holding the coupler's ZERO_V
+            // and left the DUMMY_Q column held by nothing but the DISTR_Q terms the mode-4 flip gates off —
+            // a DEAD COLUMN. Measured on rte6515's full busbar scope: 9 mode-4 rows on relocated couplers of
+            // VL-5997/VL-6003/VL-6194/VL-6229, deadCols=2 (first 14417 = DUMMY_Q(BUS-6003_COUPLER_2)),
+            // tinyDiag=7, and 6616 of 6876 scenarios rejecting their second iteration at a ratio of 1e+10.
+            // Only the plain own-row alternate moves: a candidate-table pilot's is encoded as -2-group.
+            if (alternateQRow[bn] == vCol[bn] && dummyQCol[parent] >= 0) {
+                alternateQRow[bn] = dummyQCol[parent];
+            }
+        }
+        for (int br = 0; br < nBranches; br++) {
+            int child = spanningTreeChildBus[br];
+            if (child >= 0 && spanningTreeParentBranch[child] != br) {
+                spanningTreeChildBus[br] = -1;                          // its child's relocation did not survive the check
+            }
+        }
+        return new AppliedRows(pRow, zeroImpedanceDeadEndSides);
+    }
+
+    /**
+     * The rows {@link #applyToRows} computes: each bus's P-balance row ({@code pRow}) and each zero-impedance
+     * branch's dead-end side ({@code zeroImpedanceDeadEndSides}, 0 = none).
+     */
+    public record AppliedRows(int[] pRow, int[] zeroImpedanceDeadEndSides) {
+    }
 }

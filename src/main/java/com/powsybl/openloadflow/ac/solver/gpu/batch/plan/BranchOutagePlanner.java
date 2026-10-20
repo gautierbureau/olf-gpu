@@ -11,6 +11,8 @@ import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDistributedSlackParameters;
+import com.powsybl.openloadflow.ac.equations.vector.gpu.fixedmatrix.CouplerTreeReHoming;
+import com.powsybl.openloadflow.ac.equations.vector.gpu.fixedmatrix.CrossIdentity;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
@@ -97,10 +99,10 @@ final class BranchOutagePlanner {
                     vcOff = null;
                     break;
                 }
-                vcOff.add(new GenOutage(-1, 0, RelocatedRows.scenarioReactiveRowOfVRow(vVar.getRow(), pb.relocatedChildRows, outagedZeroImpedanceBranchNums),
+                vcOff.add(new GenOutage(-1, 0, CouplerTreeReHoming.scenarioReactiveRowOfVRow(vVar.getRow(), pb.relocatedChildRows, outagedZeroImpedanceBranchNums),
                         sb.getTargetQ(), true, true,
                         -1, 0, 0, 0, 0, -1, 0, 0, false, java.util.Set.of(), 0, 0, 0, -1, new int[0],
-                        new int[0], new double[0], RelocatedRows.deadControlRowMode(gpuData,
+                        new int[0], new double[0], GpuBatchInjectionOutages.deadControlRowMode(gpuData,
                                 sb), -1, 0, -1, 0, -1, 0, -1, -1, 0, false, -1, 0, 0));
             }
             if (vcOff == null) {
@@ -268,24 +270,16 @@ final class BranchOutagePlanner {
                     ok = false;
                     break;
                 }
-                int reMergedReactiveLimitEntry = RelocatedRows.reactiveLimitEntryOf(gpuData, e.getKey());
-                int crossRow = RelocatedRows.scenarioReactiveRowOfVRow(vVar.getRow(), pb.relocatedChildRows, outagedZeroImpedanceBranchNums);
-                if (crossRow != vVar.getRow()) {
-                    pvOn.add(VoltageControlReMergeEntries.reMergedCrossEntry(crossRow, e.getValue(), reMergedReactiveLimitEntry,
-                            gpuData.switchedPvToPqInBase(reMergedReactiveLimitEntry), e.getKey().getTargetQ()));
-                    continue;
-                }
+                int reMergedReactiveLimitEntry = gpuData.reactiveLimits().entryOf(e.getKey().getNum());
+                int crossRow = CrossIdentity.row(vVar.getRow(), pb.relocatedChildRows, outagedZeroImpedanceBranchNums);
                 // Same rule as the island site above: a bus PINNED at its reactive limit in the base
                 // cannot hold a voltage identity (OLF has it PQ). This site lacked the check, so a
                 // middle-section loss whose surviving section is base-pinned batched with the
                 // identity: rte6515 BUS-6157_BBS_1 (VL-6157_1, baseLimitType=1), BUS-6194_BBS_2
                 // (VL-6194_2, 2) and BUS-6229_BBS_1 (VL-6229_1, 2) — three device failures on
                 // systems OLF converges, replayed on the CPU.
-                if (gpuData.switchedPvToPqInBase(reMergedReactiveLimitEntry)) {
-                    pvOn.add(VoltageControlReMergeEntries.reMergedPinnedPvEntry(vVar.getRow(), e.getKey().getTargetQ(), e.getValue(), reMergedReactiveLimitEntry));
-                    continue;
-                }
-                pvOn.add(VoltageControlReMergeEntries.reMergedPvEntry(vVar.getRow(), e.getValue(), reMergedReactiveLimitEntry));
+                pvOn.add(VoltageControlReMergeEntries.pvEntry(vVar.getRow(), crossRow, e.getValue(), reMergedReactiveLimitEntry,
+                        gpuData.switchedPvToPqInBase(reMergedReactiveLimitEntry), e.getKey().getTargetQ()));
             }
             if (!ok) {
                 GpuBatchQualification.refuse(c,

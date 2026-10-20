@@ -8,6 +8,8 @@
 package com.powsybl.openloadflow.ac.outerloop.gpu;
 
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
+import com.powsybl.openloadflow.ac.equations.vector.gpu.fixedmatrix.CouplerTreeReHoming;
+import com.powsybl.openloadflow.ac.equations.vector.gpu.fixedmatrix.ReactiveRelocationTables;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuQLimitType;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuReactiveLimitsState;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuRowMode;
@@ -95,7 +97,7 @@ public final class GpuReactiveLimitsOuterLoop {
         // (reactiveLimitReactivePowerRow). Reading the bus's own row instead read the coupler's ZERO_V target as a reactive limit and
         // froze that on the bus. Mode 0 at the relocated row means the coupler is open here, so the equations
         // are back home and the own row is right (the same per-scenario test the device makes).
-        int relocated = relocatedPinRow(data, vRow);
+        int relocated = CouplerTreeReHoming.relocatedPinRow(data.zeroImpedanceBranch().indices(), vRow);
         if (relocated != vRow && devModes != null && relocated < devModes.length && devModes[relocated] != GpuRowMode.FIXED_VARIABLE) {
             vRow = relocated;
         }
@@ -110,36 +112,12 @@ public final class GpuReactiveLimitsOuterLoop {
             if (reactiveRelocationCandidateRows[reactiveRelocationGroupStart[g]] != vRow) {
                 continue;
             }
-            for (int c = reactiveRelocationGroupStart[g] + 1; c < reactiveRelocationGroupStart[g + 1]; c++) {
-                int r = reactiveRelocationCandidateRows[c];
-                if (r == vRow) {
-                    continue;
-                }
-                int m = devModes[r];
-                if (m != GpuRowMode.FIXED_VARIABLE && m != GpuRowMode.BUS_TARGET_Q) {
-                    return r;
-                }
+            // the candidate equal to vRow is never the carrier: its mode is FIXED_VARIABLE (the guard above)
+            int carrier = ReactiveRelocationTables.chooseCarrierRow(data.reactiveRelocation(), g, devModes);
+            if (carrier >= 0 && carrier != vRow) {
+                return carrier;
             }
             return vRow;
-        }
-        return vRow;
-    }
-
-    /** The relocated {@code DUMMY_Q} row that hosts the reactive balance of the bus whose own {@code BUS_V} row
-     *  is {@code vRow}, or {@code vRow} itself when that bus is not a relocated coupler child. The Java twin of
-     *  the native {@code reactiveLimitReactivePowerRow} map, derived from the same zero-impedance pack. */
-    private static int relocatedPinRow(GpuAcData data, int vRow) {
-        int[] zeroImpedanceBranchIndices = data.zeroImpedanceBranch().indices();
-        if (zeroImpedanceBranchIndices == null || vRow < 0) {
-            return vRow;
-        }
-        for (int e = 0; e < zeroImpedanceBranchIndices.length / 11; e++) {
-            int o = e * 11;
-            int childSide = (zeroImpedanceBranchIndices[o + 10] >> 1) & 3;
-            int ownV = childSide == 1 ? zeroImpedanceBranchIndices[o + 6] : (childSide == 2 ? zeroImpedanceBranchIndices[o + 7] : -1);
-            if (ownV == vRow && zeroImpedanceBranchIndices[o + 5] >= 0) {
-                return zeroImpedanceBranchIndices[o + 5];
-            }
         }
         return vRow;
     }

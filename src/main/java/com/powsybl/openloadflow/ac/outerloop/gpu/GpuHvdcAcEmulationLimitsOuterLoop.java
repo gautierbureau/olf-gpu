@@ -12,6 +12,7 @@ import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.equations.HvdcAcEmulationSide1ActiveFlowEquationTerm;
 import com.powsybl.openloadflow.ac.equations.HvdcAcEmulationSide2ActiveFlowEquationTerm;
+import com.powsybl.openloadflow.ac.equations.vector.gpu.fixedmatrix.CouplerTreeReHoming;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchOverrides;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuAcEmulationStatus;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuRowMode;
@@ -64,7 +65,7 @@ public final class GpuHvdcAcEmulationLimitsOuterLoop {
         // TWO DISTINCT ROLES, and they are NOT the same row under the coupler-tree relocation:
         //   bus{1,2}PRow   = where the P TARGET is written (the bus's P equation). For a relocated
         //                    coupler child that is the parent's DUMMY_P row, NOT the bus's own PHI row,
-        //                    which hosts the coupler's ZERO_PHI (target 0). See GpuAcData.relocatedPRow
+        //                    which hosts the coupler's ZERO_PHI (target 0). See CouplerTreeReHoming.relocatedPRow
         //                    and tasks #68: conflating the two put the freeze setpoints on all ten
         //                    VSC-station breakers' ZERO_PHI rows.
         //   bus{1,2}PhiCol = the ANGLE COLUMN the emulation formula reads. Always the bus's OWN BUS_PHI
@@ -138,7 +139,7 @@ public final class GpuHvdcAcEmulationLimitsOuterLoop {
             // (tasks #68). Resolved through the zero-impedance pack so it cannot drift from the kernels.
             int phi1 = phiRows.get(hvdc.getBus1().getNum());
             int phi2 = phiRows.get(hvdc.getBus2().getNum());
-            // The P-target row IS the relocated DUMMY_P row (GpuAcData.relocatedPRow) — the row the bus's P
+            // The P-target row IS the relocated DUMMY_P row (CouplerTreeReHoming.relocatedPRow) — the row the bus's P
             // balance lives on under the coupler-tree relocation; the bus's own PHI row hosts the coupler's
             // ZERO_PHI there (target 0). The 2026-10-02 attempt at exactly this was "catastrophic" (108 ->
             // 13194 bad solves) because the kernel read the ANGLE at the same index it wrote the target to, so
@@ -148,8 +149,8 @@ public final class GpuHvdcAcEmulationLimitsOuterLoop {
             // only device failure on an OLF-converging busbar contingency, BUS-1219_BBS: the saturation
             // delta of SYN_HVDC_4 landed on a ZERO_PHI row, reversed the emulated flow and the limits loop
             // toggled SAT_2_TO_1 <-> SAT_1_TO_2 to its 32-pass budget (tasks #68 / #69).
-            int r1 = gpuData.relocatedPRow(phi1);
-            int r2 = gpuData.relocatedPRow(phi2);
+            int r1 = CouplerTreeReHoming.relocatedPRow(gpuData.zeroImpedanceBranch().indices(), phi1);
+            int r2 = CouplerTreeReHoming.relocatedPRow(gpuData.zeroImpedanceBranch().indices(), phi2);
             boolean p1Active = es.getEquation(hvdc.getBus1().getNum(), AcEquationType.BUS_TARGET_P)
                     .filter(com.powsybl.openloadflow.equations.Equation::isActive).isPresent();
             boolean p2Active = es.getEquation(hvdc.getBus2().getNum(), AcEquationType.BUS_TARGET_P)

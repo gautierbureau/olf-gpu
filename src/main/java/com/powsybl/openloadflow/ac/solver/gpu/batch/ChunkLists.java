@@ -9,11 +9,11 @@ package com.powsybl.openloadflow.ac.solver.gpu.batch;
 
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.RemoteVoltageControlNative;
+import com.powsybl.openloadflow.ac.equations.vector.gpu.fixedmatrix.ReactiveRelocationTables;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DistributedSlackNative;
 import com.powsybl.openloadflow.ac.outerloop.gpu.ForceTargetQInReactiveLimits;
 import com.powsybl.openloadflow.ac.outerloop.gpu.ReactiveLimitsNative;
 import com.powsybl.openloadflow.ac.solver.gpu.NewtonSettingsNative;
-import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.RelocatedRows;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -168,7 +168,7 @@ final class ChunkLists {
         ReactiveLimitsNative.setBatchReactiveLimitGeneratorsLost(handle,
                 ChunkArrays.intsOrNull(reactiveLimitGeneratorsLostScenarioEntryList));
         RemoteVoltageControlNative.setBatchDistrQSubgroups(handle, anyDistrQSubgroup ? distrQSubgroupDense : null,
-                anyDistrQSubgroup ? RelocatedRows.reactiveRelocationDistrQMemberStart(gpuData) : null);
+                anyDistrQSubgroup ? ReactiveRelocationTables.reactiveRelocationDistrQMemberStart(gpuData.reactiveRelocation(), gpuData.distrQMembers().relocationGroup()) : null);
         ReactiveLimitsNative.setBatchReactiveLimitLocalOverrides(handle,
                 ChunkArrays.intsOrNull(reactiveLimitLocalOverrideScenarioEntryList),
                 reactiveLimitLocalOverrideScenarioEntryList.isEmpty() ? null : reactiveLimitLocalTargetV.stream().mapToDouble(Double::doubleValue).toArray());

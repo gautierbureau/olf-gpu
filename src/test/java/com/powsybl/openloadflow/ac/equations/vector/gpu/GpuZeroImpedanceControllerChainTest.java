@@ -14,6 +14,7 @@ import com.powsybl.openloadflow.ac.AcTargetVector;
 import com.powsybl.openloadflow.ac.equations.AcEquationSystemCreator;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
+import com.powsybl.openloadflow.ac.equations.vector.gpu.fixedmatrix.StableRowIndexing;
 import com.powsybl.openloadflow.ac.solver.AcSolverUtil;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.EquationVector;
@@ -127,7 +128,7 @@ class GpuZeroImpedanceControllerChainTest extends AbstractLoadFlowNetworkFactory
         // The fixture must produce the shape: three merged controllers with a DISTR_Q row and no
         // impedant branch — or the test proves nothing.
         long zeroImpedanceOnlyDistrQ = network.getBuses().stream()
-                .filter(b -> GpuAcRowIndexing.row(es, b.getNum(), AcEquationType.DISTR_Q) >= 0)
+                .filter(b -> StableRowIndexing.row(es, b.getNum(), AcEquationType.DISTR_Q) >= 0)
                 .filter(b -> b.getBranches().stream().allMatch(br -> br.isZeroImpedance(
                         com.powsybl.openloadflow.network.LoadFlowModel.AC)))
                 .count();

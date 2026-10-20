@@ -10,6 +10,8 @@ package com.powsybl.openloadflow.ac.equations.vector.gpu;
 import com.powsybl.commons.PowsyblException;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
+import com.powsybl.openloadflow.ac.equations.vector.gpu.fixedmatrix.CouplerTreeRelocation;
+import com.powsybl.openloadflow.ac.equations.vector.gpu.fixedmatrix.ReactiveRelocationCandidates;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfNetwork;
@@ -129,7 +131,7 @@ public final class GpuAcDataExtractor {
         double[] rowSlope = new double[es.getIndex().getSortedVariablesToFind().size()];
         for (com.powsybl.openloadflow.network.LfBus bus : network.getBuses()) {
             if (bus.hasGeneratorsWithSlope()) {
-                int vRow = com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcRowIndexing.col(
+                int vRow = com.powsybl.openloadflow.ac.equations.vector.gpu.fixedmatrix.StableRowIndexing.col(
                         es, bus.getNum(), com.powsybl.openloadflow.ac.equations.AcVariableType.BUS_V);
                 if (vRow >= 0) {
                     rowSlope[vRow] = bus.getGeneratorsControllingVoltageWithSlope().get(0).getSlope();
@@ -147,7 +149,7 @@ public final class GpuAcDataExtractor {
             if (bus.isFictitious()) {
                 continue;
             }
-            int vRow = com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcRowIndexing.col(
+            int vRow = com.powsybl.openloadflow.ac.equations.vector.gpu.fixedmatrix.StableRowIndexing.col(
                     es, bus.getNum(), com.powsybl.openloadflow.ac.equations.AcVariableType.BUS_V);
             if (vRow >= 0) {
                 rowNominalV[vRow] = bus.getNominalV();
@@ -176,7 +178,7 @@ public final class GpuAcDataExtractor {
     }
 
     /** The couplers whose {@code DUMMY_P} / {@code DUMMY_Q} rows host a bus's power equations under the
-     *  coupler-tree relocation ({@link GpuAcRowIndexing#spanningTreeRelocation}). A batched scenario has to know them:
+     *  coupler-tree relocation ({@link CouplerTreeRelocation#spanningTreeRelocation}). A batched scenario has to know them:
      *  inside an island every row must become an identity, and under the relocation two of those rows belong to
      *  the coupler, not to the bus. */
     public static java.util.Set<LfBranch> relocatedCouplerBranches(LfNetwork network,

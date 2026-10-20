@@ -7,6 +7,7 @@
  */
 package com.powsybl.openloadflow.ac.equations.vector.gpu;
 
+import com.powsybl.openloadflow.ac.equations.vector.gpu.fixedmatrix.ReactiveRelocationCandidates;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuQLimitType;
 
 /**

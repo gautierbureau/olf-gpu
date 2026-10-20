@@ -10,6 +10,9 @@ package com.powsybl.openloadflow.ac.equations.vector.gpu;
 import com.powsybl.commons.PowsyblException;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
+import com.powsybl.openloadflow.ac.equations.vector.gpu.fixedmatrix.CouplerTreeRelocation;
+import com.powsybl.openloadflow.ac.equations.vector.gpu.fixedmatrix.ReactiveRelocation;
+import com.powsybl.openloadflow.ac.equations.vector.gpu.fixedmatrix.StableRowIndexing;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuRowMode;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuStepClampVariable;
 import com.powsybl.openloadflow.equations.EquationSystem;
@@ -19,13 +22,14 @@ import com.powsybl.openloadflow.network.GeneratorVoltageControl;
 import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfNetwork;
 import com.powsybl.openloadflow.network.VoltageControl;
+import com.powsybl.openloadflow.network.gpu.GeneratorVoltageControlRoles;
 
 /**
  * Extracts what ACTIVATION decides — the per-row power-equation/identity mode, the
  * OLF-column→stable-row target mapping ({@link GpuAcActivation}) and the per-row variable
  * kind used by the MAX_VOLTAGE_CHANGE device step scaling. Rebuilt only when an activation
  * event fired; the extracted {@link GpuAcData} structure stays valid across PV→PQ switching
- * (see {@link GpuAcRowIndexing} for the stable-row policy this reuses).
+ * (see {@link StableRowIndexing} for the stable-row policy this reuses).
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
@@ -84,41 +88,41 @@ public final class GpuAcActivationExtractor {
         int[] targetMap = new int[n];
         java.util.Arrays.fill(targetMap, -1);
         int nBranches = network.getBranches().size();
-        int[] branchRhoCol = GpuAcRowIndexing.branchVarCols(es, nBranches, AcVariableType.BRANCH_RHO1);
-        int[] shuntBCol = GpuAcRowIndexing.branchVarCols(es, network.getShunts().size(), AcVariableType.SHUNT_B);
+        int[] branchRhoCol = StableRowIndexing.branchVarCols(es, nBranches, AcVariableType.BRANCH_RHO1);
+        int[] shuntBCol = StableRowIndexing.branchVarCols(es, network.getShunts().size(), AcVariableType.SHUNT_B);
         int[] vCol = new int[network.getBuses().size()];
         for (LfBus bus : network.getBuses()) {
-            vCol[bus.getNum()] = GpuAcRowIndexing.col(es, bus.getNum(), AcVariableType.BUS_V);
+            vCol[bus.getNum()] = StableRowIndexing.col(es, bus.getNum(), AcVariableType.BUS_V);
         }
-        int[] qRow = GpuAcRowIndexing.computeQRow(network, es, vCol, branchRhoCol, shuntBCol);
+        int[] qRow = ReactiveRelocation.computeQRow(network, es, vCol, branchRhoCol, shuntBCol);
         int[] phiCol = new int[network.getBuses().size()];
         for (LfBus bus : network.getBuses()) {
-            phiCol[bus.getNum()] = GpuAcRowIndexing.col(es, bus.getNum(), AcVariableType.BUS_PHI);
+            phiCol[bus.getNum()] = StableRowIndexing.col(es, bus.getNum(), AcVariableType.BUS_PHI);
         }
         // DEAD-END STUB relocation, the other half of the one in GpuAcFamilyPacker: both sides must
         // name the SAME row for each equation. assign() refuses a double write, so a disagreement
         // fails loudly here instead of silently dropping a constraint.
-        int[] dummyPCol = GpuAcRowIndexing.branchVarCols(es, nBranches, AcVariableType.DUMMY_P);
-        int[] dummyQCol = GpuAcRowIndexing.branchVarCols(es, nBranches, AcVariableType.DUMMY_Q);
+        int[] dummyPCol = StableRowIndexing.branchVarCols(es, nBranches, AcVariableType.DUMMY_P);
+        int[] dummyQCol = StableRowIndexing.branchVarCols(es, nBranches, AcVariableType.DUMMY_Q);
         // The coupler-tree relocation, from the same helper ExtractionColumns uses, so the scatter destinations and
         // this target map name the same rows: a child bus's power equations on its parent coupler's dummy columns,
         // that coupler's zero equations on the child's own PHI / V.
-        int[][] ziTree = GpuAcRowIndexing.spanningTreeRelocation(network, es, phiCol, vCol, qRow, dummyPCol, dummyQCol);
+        int[][] ziTree = CouplerTreeRelocation.spanningTreeRelocation(network, es, phiCol, vCol, qRow, dummyPCol, dummyQCol);
         int[] stubBranchOfBus = ziTree[0];
         int[] stubBusOfBranch = ziTree[1];
         for (LfBus bus : network.getBuses()) {
             int stubBr = stubBranchOfBus[bus.getNum()];
-            int p = GpuAcRowIndexing.row(es, bus.getNum(), AcEquationType.BUS_TARGET_P);
+            int p = StableRowIndexing.row(es, bus.getNum(), AcEquationType.BUS_TARGET_P);
             if (p >= 0) {
                 assign(es, targetMap, stubBr >= 0 ? dummyPCol[stubBr] : phiCol[bus.getNum()], p,
                         AcEquationType.BUS_TARGET_P, bus.getNum());
             }
-            int q = GpuAcRowIndexing.row(es, bus.getNum(), AcEquationType.BUS_TARGET_Q);
+            int q = StableRowIndexing.row(es, bus.getNum(), AcEquationType.BUS_TARGET_Q);
             if (q >= 0) {
                 // Q row = V row, the controlling rho row, or the DUMMY_Q row on a dead-end stub
                 int targetQRow = stubBr >= 0 ? dummyQCol[stubBr] : qRow[bus.getNum()];
-                GeneratorVoltageControl mainVc = GpuAcRowIndexing.mainGeneratorVoltageControl(bus);
-                if (stubBr < 0 && mainVc != null && GpuAcRowIndexing.hasCandidateTable(mainVc, es)) {
+                GeneratorVoltageControl mainVc = GeneratorVoltageControlRoles.mainGeneratorVoltageControl(bus);
+                if (stubBr < 0 && mainVc != null && ReactiveRelocation.hasCandidateTable(mainVc, es)) {
                     // A group with a candidate table is extracted CANONICALLY (pin-state independent: every
                     // controller's frozen q row suppressed, the pilot's on the FIRST member), but this target map
                     // is per scenario, so the row is the one the in-kernel mode scan picks in THIS state: a pinned
@@ -126,7 +130,7 @@ public final class GpuAcActivationExtractor {
                     // ENABLED member's V row (the carrier), or on its own V row once every controller is pinned
                     // (its V identity gone, the row is a power row). Measured: the canonical row collided with the
                     // pinned first member's own Q (deviceRemoteFreeMemberSwitchedToPqInBaseMatchesCpu & co., 12 tests).
-                    targetQRow = GpuAcRowIndexing.stateQRow(bus, vCol, stubBranchOfBus, dummyQCol);
+                    targetQRow = ReactiveRelocation.stateQRow(bus, vCol, stubBranchOfBus, dummyQCol);
                 }
                 assign(es, targetMap, targetQRow, q, AcEquationType.BUS_TARGET_Q, bus.getNum());
                 // ACTIVE own-Q balance at a (non-free) remote gen-VC member = the RL-PINNED state:
@@ -173,8 +177,8 @@ public final class GpuAcActivationExtractor {
                 // reach here wrongly was a TRANSIENT MIN_REALISTIC_V freeze the device should never have
                 // made: see RemoteMemberQPacker.isOlfRobustRemoteController (tasks #66), fixed at the SOURCE
                 // by exempting a merged member from robust mode as OLF's own predicate does, not here.
-                boolean mode4 = GpuAcRowIndexing.isRemoteGeneratorVoltageControlControllerElement(bus)
-                        && (pilotSelf || !GpuAcRowIndexing.isFreeRemoteGeneratorVoltageControlMember(bus)) && !enrolled;
+                boolean mode4 = GeneratorVoltageControlRoles.isRemoteGeneratorVoltageControlControllerElement(bus)
+                        && (pilotSelf || !GeneratorVoltageControlRoles.isFreeRemoteGeneratorVoltageControlMember(bus)) && !enrolled;
                 if (mode4) {
                     mode[targetQRow] = GpuRowMode.BUS_TARGET_Q;
                 }
@@ -186,7 +190,7 @@ public final class GpuAcActivationExtractor {
             if (e.getType() == AcEquationType.DISTR_Q) {
                 // the controller's BUS_V row — or, when the controller IS the group's controlled bus
                 // (its own row already carries the pilot's V identity), the FREE controller's row
-                int distrRow = GpuAcRowIndexing.distrQRow(es, network.getBus(e.getElementNum()),
+                int distrRow = ReactiveRelocation.distrQRow(es, network.getBus(e.getElementNum()),
                         stubBranchOfBus, dummyQCol);
                 assign(es, targetMap, distrRow, e.getColumn(), AcEquationType.DISTR_Q, e.getElementNum());
                 continue;
@@ -212,7 +216,7 @@ public final class GpuAcActivationExtractor {
                 default -> null;
             };
             if (powerRowVar != null) {
-                assign(es, targetMap, GpuAcRowIndexing.col(es, e.getElementNum(), powerRowVar),
+                assign(es, targetMap, StableRowIndexing.col(es, e.getElementNum(), powerRowVar),
                         e.getColumn(), e.getType(), e.getElementNum());
                 continue;
             }
@@ -223,7 +227,7 @@ public final class GpuAcActivationExtractor {
                 var branch = network.getBranchById(network.getBranches().stream()
                         .filter(b -> b.getNum() == e.getElementNum()).findFirst().orElseThrow().getId());
                 var phaseControl = branch.getPhaseControl().orElseThrow();
-                int a1r = GpuAcRowIndexing.col(es, phaseControl.getControllerBranch().getNum(), AcVariableType.BRANCH_ALPHA1);
+                int a1r = StableRowIndexing.col(es, phaseControl.getControllerBranch().getNum(), AcVariableType.BRANCH_ALPHA1);
                 mode[a1r] = GpuRowMode.BRANCH_TARGET_P;
                 assign(es, targetMap, a1r, e.getColumn(), AcEquationType.BRANCH_TARGET_P, e.getElementNum());
                 continue;
@@ -249,7 +253,7 @@ public final class GpuAcActivationExtractor {
                         + e.getType() + " activated");
             };
             if (vt != null) {
-                int r = GpuAcRowIndexing.col(es, e.getElementNum(), vt);
+                int r = StableRowIndexing.col(es, e.getElementNum(), vt);
                 // SLOPE-SVC V row (V + slope*sumQ = target): the natural reactive fill STAYS in the row,
                 // scaled by the slope and completed with the +v diagonal (row mode 2) — not an identity.
                 boolean slopeRow = e.getType() == AcEquationType.BUS_TARGET_V
@@ -443,14 +447,14 @@ public final class GpuAcActivationExtractor {
                                                       EquationSystem<AcVariableType, AcEquationType> es) {
         java.util.BitSet pinned = new java.util.BitSet();
         for (LfBus bus : network.getBuses()) {
-            if (GpuAcRowIndexing.row(es, bus.getNum(), AcEquationType.BUS_TARGET_Q) < 0) {
+            if (StableRowIndexing.row(es, bus.getNum(), AcEquationType.BUS_TARGET_Q) < 0) {
                 continue;                                    // no active own-Q balance: not pinned
             }
             boolean pilotSelf = bus.getGeneratorVoltageControl()
                     .filter(c -> c.getMergeStatus() == VoltageControl.MergeStatus.MAIN)
                     .map(c -> c.getControlledBus() == bus).orElse(false);
-            if (GpuAcRowIndexing.isRemoteGeneratorVoltageControlControllerElement(bus)
-                    && (pilotSelf || !GpuAcRowIndexing.isFreeRemoteGeneratorVoltageControlMember(bus))) {
+            if (GeneratorVoltageControlRoles.isRemoteGeneratorVoltageControlControllerElement(bus)
+                    && (pilotSelf || !GeneratorVoltageControlRoles.isFreeRemoteGeneratorVoltageControlMember(bus))) {
                 pinned.set(bus.getNum());
             }
         }

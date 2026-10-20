@@ -14,6 +14,7 @@ import com.powsybl.openloadflow.ac.AcTargetVector;
 import com.powsybl.openloadflow.ac.equations.AcEquationSystemCreator;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
+import com.powsybl.openloadflow.ac.equations.vector.gpu.fixedmatrix.CouplerTreeRelocation;
 import com.powsybl.openloadflow.ac.solver.AcSolverUtil;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.EquationVector;
@@ -38,7 +39,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /**
  * The COUPLER-TREE RELOCATION (see
- * {@link GpuAcRowIndexing#spanningTreeRelocation}) on the shape that needs it: a chain of zero-impedance couplers with a
+ * {@link CouplerTreeRelocation#spanningTreeRelocation}) on the shape that needs it: a chain of zero-impedance couplers with a
  * generator on every bus, so OLF merges their voltage controls and the numeric row repair is the only thing holding
  * the factorization together.
  *

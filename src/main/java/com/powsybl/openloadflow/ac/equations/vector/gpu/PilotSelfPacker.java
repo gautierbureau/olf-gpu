@@ -11,6 +11,7 @@ import com.powsybl.openloadflow.network.GeneratorVoltageControl;
 import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfNetwork;
 import com.powsybl.openloadflow.network.VoltageControl;
+import com.powsybl.openloadflow.network.gpu.GeneratorVoltageControlRoles;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -115,6 +116,6 @@ public final class PilotSelfPacker {
     /** A class-2 entry: a pilot that is one of its own controllers (packed as a remote entry). */
     public static boolean isPilotSelfEntry(LfBus bus) {
         GeneratorVoltageControl voltageControl = RemoteMemberQPacker.mainGeneratorVoltageControl(bus);
-        return voltageControl != null && GpuAcRowIndexing.isRemoteGeneratorVoltageControlControllerElement(bus) && voltageControl.getControlledBus() == bus;
+        return voltageControl != null && GeneratorVoltageControlRoles.isRemoteGeneratorVoltageControlControllerElement(bus) && voltageControl.getControlledBus() == bus;
     }
 }

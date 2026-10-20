@@ -9,9 +9,10 @@
  * GPU AC equation-system extraction and the JNI boundary: turns an OLF vectorized equation
  * system into the fixed-pattern device data ({@link com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData})
  * the native full Newton-Raphson consumes. The extractor ({@link com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcDataExtractor}
- * and its {@code GpuAcValidation} / {@code GpuAcRowIndexing} / {@code GpuAcFamilyPacker} /
+ * and its {@code GpuAcValidation} / {@code GpuAcFamilyPacker} /
  * per-pack {@code *Packer} helpers), the activation extractor, the per-extraction structure
  * cache, and the {@code GpuAcNewtonSolver} JNI binding (with {@code GpuNativeLoader}) live here.
+ * The stable rows and the row placement they use (device-only) live in the {@code fixedmatrix} sub-package.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */

@@ -10,6 +10,7 @@ package com.powsybl.openloadflow.ac.equations.vector.gpu;
 import com.powsybl.commons.PowsyblException;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
+import com.powsybl.openloadflow.ac.equations.vector.gpu.fixedmatrix.ReactiveRelocation;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuReactiveTermKind;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.network.GeneratorVoltageControl;
@@ -201,7 +202,7 @@ public final class DistrQPacker {
             // CANONICAL for a group with a candidate table: the free (reference) controller is the FIRST
             // member, as in the all-enabled state — the per-scenario row modes and the carrier gate decide
             // which DISTR_Q rows are live. Else (no table) the extraction-time free member, as before.
-            LfBus freeCtl = GpuAcRowIndexing.hasCandidateTable(voltageControl, es)
+            LfBus freeCtl = ReactiveRelocation.hasCandidateTable(voltageControl, es)
                     ? controllers.get(0)
                     : controllers.stream().filter(b -> !b.isDisabled() && voltageControl.isControllerEnabled(b)).findFirst().orElse(null);
             for (LfBus gk : controllers) {
@@ -212,7 +213,7 @@ public final class DistrQPacker {
                 if (gk == freeCtl || gk.isDisabled() || es.getEquation(gk.getNum(), AcEquationType.DISTR_Q).isEmpty()) {
                     continue;                                // the free controller carries the pilot's Q; a disabled
                 }                                            // controller's DISTR_Q is disabled with its bus
-                int distrQRow = GpuAcRowIndexing.distrQRow(es, gk, spanningTreeParentBranch, dummyQCol);
+                int distrQRow = ReactiveRelocation.distrQRow(es, gk, spanningTreeParentBranch, dummyQCol);
                 double qpk = gk.getRemoteControlReactivePercent();
                 int kIdx = memberIndexByBusNum.getOrDefault(gk.getNum(), -1);
                 for (LfBus gj : controllers) {

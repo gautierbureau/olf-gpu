@@ -9,6 +9,7 @@ package com.powsybl.openloadflow.ac.equations.vector.gpu;
 
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
+import com.powsybl.openloadflow.ac.equations.vector.gpu.fixedmatrix.ReactiveRelocation;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuReactiveTermKind;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.network.GeneratorVoltageControl;
@@ -16,6 +17,7 @@ import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfNetwork;
 import com.powsybl.openloadflow.network.LoadFlowModel;
+import com.powsybl.openloadflow.network.gpu.GeneratorVoltageControlRoles;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -36,7 +38,7 @@ public final class RemoteMemberQPacker {
      *  and must count exactly the same buses (a drift throws and the run falls to the CPU). */
     public static boolean isRemoteMemberEntry(LfBus bus) {
         GeneratorVoltageControl voltageControl = mainGeneratorVoltageControl(bus);
-        return voltageControl != null && GpuAcRowIndexing.isRemoteGeneratorVoltageControlControllerElement(bus) && voltageControl.getControlledBus() != bus;
+        return voltageControl != null && GeneratorVoltageControlRoles.isRemoteGeneratorVoltageControlControllerElement(bus) && voltageControl.getControlledBus() != bus;
     }
 
     /**
@@ -74,7 +76,7 @@ public final class RemoteMemberQPacker {
      * each with a correct q of 1.921012507 pu against a 0.7536 limit), then diverged at outer pass 7.
      */
     public static GeneratorVoltageControl mainGeneratorVoltageControl(LfBus bus) {
-        return GpuAcRowIndexing.mainGeneratorVoltageControl(bus);              // ONE definition, shared with the row indexing
+        return GeneratorVoltageControlRoles.mainGeneratorVoltageControl(bus);              // ONE definition, shared with the row indexing
     }
 
     static RemoteMemberReactiveTerms remoteMemberQPack(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
@@ -84,7 +86,7 @@ public final class RemoteMemberQPacker {
         int[] vCol = columns.vCol();
         if (reactiveLimits) {
             for (LfBus bus : network.getBuses()) {
-                boolean member = GpuAcRowIndexing.isRemoteGeneratorVoltageControlControllerElement(bus);   // incl. a pilot that is a controller
+                boolean member = GeneratorVoltageControlRoles.isRemoteGeneratorVoltageControlControllerElement(bus);   // incl. a pilot that is a controller
                 if (!member || vCol[bus.getNum()] < 0 || !(bus.getMinQ() < bus.getMaxQ())) {
                     continue;                                // mirror the RL pack's remote-entry condition
                 }
@@ -108,7 +110,7 @@ public final class RemoteMemberQPacker {
                 // the own row left the check reading ZERO for every relocated member, so it could never pin one —
                 // measured on rte6515's full busbar scope: the device's base stopped after its first
                 // ReactiveLimits pass where OLF takes three, and came back MAX_ITERATION_REACHED.
-                int row = GpuAcRowIndexing.relocatedQRow(bus.getNum(), columns.spanningTreeParentBranch(),
+                int row = ReactiveRelocation.relocatedQRow(bus.getNum(), columns.spanningTreeParentBranch(),
                         columns.dummyQCol(), vCol);
                 if (bus.getShunt().isPresent()) {
                     out.add(new int[] {row, family.shuntElementOf()[bus.getNum()], 0, GpuReactiveTermKind.SHUNT_COMPENSATOR_REACTIVE_FLOW});

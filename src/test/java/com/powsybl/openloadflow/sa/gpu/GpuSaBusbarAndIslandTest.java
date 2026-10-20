@@ -197,7 +197,7 @@ class GpuSaBusbarAndIslandTest extends AbstractGpuSaTest {
     }
 
     /** Five sections, only the middle one (bbs2) regulating: its V row holds the tree's voltage identity, so the
-     *  coupler tree is rooted there and every coupler is relocated (GpuAcRowIndexing#spanningTreeRelocation). Rooted at
+     *  coupler tree is rooted there and every coupler is relocated (CouplerTreeRelocation#spanningTreeRelocation). Rooted at
      *  bbs0 by bus order instead, c12 kept the stock placement and the numeric repair borrowed a live balance row
      *  for its two zero diagonals. Every section's loss on the device, against OLF. */
     @Test

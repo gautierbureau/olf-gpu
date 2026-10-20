@@ -18,10 +18,10 @@ import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.LinearDistributionTerms;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.OpenBranchPack;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.ReactiveLimitEntries;
-import com.powsybl.openloadflow.ac.equations.vector.gpu.ReactiveRelocationCandidates;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.RemoteMemberReactiveTerms;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.VoltageRowParameters;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.ZeroImpedanceBranchPack;
+import com.powsybl.openloadflow.ac.equations.vector.gpu.fixedmatrix.ReactiveRelocationCandidates;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;

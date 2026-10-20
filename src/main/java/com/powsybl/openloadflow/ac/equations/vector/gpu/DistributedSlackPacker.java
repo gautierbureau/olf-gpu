@@ -9,6 +9,7 @@ package com.powsybl.openloadflow.ac.equations.vector.gpu;
 
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
+import com.powsybl.openloadflow.ac.equations.vector.gpu.fixedmatrix.StableRowIndexing;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuDistributedSlackFactorMode;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.network.LfBus;
@@ -91,7 +92,7 @@ final class DistributedSlackPacker {
                 break;
             }
             int bn = bus.getNum();
-            if (GpuAcRowIndexing.row(es, bn, AcEquationType.BUS_TARGET_PHI) >= 0) {       // the slack/reference bus
+            if (StableRowIndexing.row(es, bn, AcEquationType.BUS_TARGET_PHI) >= 0) {       // the slack/reference bus
                 slackBusPhiRow = pRow[bn];
                 slackBusTargetP = bus.getTargetP() - anchorOffset(bus, distributedSlackParameters);   // the slack's ANCHOR target
                 slackBusRawFactor = distributedSlackParameters.busFactor(bus);
@@ -122,7 +123,7 @@ final class DistributedSlackPacker {
                 }
                 continue;
             }
-            if (GpuAcRowIndexing.row(es, bn, AcEquationType.BUS_TARGET_P) < 0) {
+            if (StableRowIndexing.row(es, bn, AcEquationType.BUS_TARGET_P) < 0) {
                 continue;                                               // no active P balance to retarget
             }
             double factor = distributedSlackParameters.busFactor(bus);

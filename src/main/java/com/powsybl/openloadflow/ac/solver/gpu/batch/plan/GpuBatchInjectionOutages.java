@@ -298,7 +298,7 @@ public final class GpuBatchInjectionOutages {
     /** The bus's generator voltage control as the GROUP sees it: the MAIN control of a zero-impedance merge.
      *  A section's own control is DEPENDENT there, and asking it reads a one-member group (its own controller)
      *  with no survivors - which refused 285 of rte6515's full-list generator outages as the last controller
-     *  (members=1 alive=0). See the merged-voltage-control note on GpuAcRowIndexing.mainGeneratorVoltageControl. */
+     *  (members=1 alive=0). See the merged-voltage-control note on GeneratorVoltageControlRoles.mainGeneratorVoltageControl. */
     private static java.util.Optional<com.powsybl.openloadflow.network.GeneratorVoltageControl> mainVcOf(LfBus bus) {
         return java.util.Optional.ofNullable(
                 com.powsybl.openloadflow.ac.equations.vector.gpu.RemoteMemberQPacker.mainGeneratorVoltageControl(bus));
@@ -687,7 +687,7 @@ public final class GpuBatchInjectionOutages {
             // — the shape ExtractionColumns deliberately
             // excludes from the Q-relocation table, because while it controls it has NO Q balance
             // of its own to relocate (its q feeds the group's DISTR_Q rows, and a table entry
-            // would double-count it). GpuAcRowIndexing.distrQRow already parks its DISTR_Q on the
+            // would double-count it). ReactiveRelocation.distrQRow already parks its DISTR_Q on the
             // first enabled member's BUS_V row while its own v row holds BUS_TARGET_V.
             //
             // The moment such a pilot stops being a controller it ACQUIRES a Q balance, which has

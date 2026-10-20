@@ -13,6 +13,8 @@ import com.powsybl.openloadflow.ac.AcTargetVector;
 import com.powsybl.openloadflow.ac.equations.AcEquationSystemCreator;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
+import com.powsybl.openloadflow.ac.equations.vector.gpu.fixedmatrix.ReactiveRelocation;
+import com.powsybl.openloadflow.ac.equations.vector.gpu.fixedmatrix.StableRowIndexing;
 import com.powsybl.openloadflow.ac.solver.AcSolverUtil;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.network.AbstractLoadFlowNetworkFactory;
@@ -21,6 +23,7 @@ import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfNetwork;
 import com.powsybl.openloadflow.network.LfNetworkParameters;
 import com.powsybl.openloadflow.network.VoltageControl;
+import com.powsybl.openloadflow.network.gpu.GeneratorVoltageControlRoles;
 import com.powsybl.openloadflow.network.impl.Networks;
 import com.powsybl.openloadflow.network.util.UniformValueVoltageInitializer;
 import org.junit.jupiter.api.Test;
@@ -43,7 +46,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * A merge-status FILTER ({@code getMergeStatus() == MAIN}) answers the wrong question on the DEPENDENT
  * object: its own {@code controllerElements} list is just itself regulating itself, so it looks like a
  * purely LOCAL control and its merged element list is unreachable. Every predicate written that way
- * reported "not a controller" for a bus that is one, and {@link GpuAcRowIndexing#computeQRow} left the
+ * reported "not a controller" for a bus that is one, and {@link ReactiveRelocation#computeQRow} left the
  * bus's reactive balance on its own BUS_V row — the very row that already hosts its DISTR_Q equation.
  * The zero-impedance family then added its direct +-DUMMY_Q coupling there next to the DISTR_Q
  * derivative and the two CANCELLED EXACTLY, leaving the coupler's DUMMY_Q in no equation at all.
@@ -168,16 +171,16 @@ class GpuMergedGenVoltageControlTest extends AbstractLoadFlowNetworkFactory {
         assertEquals(dep, own.getControlledBus(), "...regulating its own bus, in isolation");
 
         // What is actually true of this bus, resolved on the MAIN control.
-        assertTrue(GpuAcRowIndexing.isRemoteGeneratorVoltageControlControllerElement(dep),
+        assertTrue(GeneratorVoltageControlRoles.isRemoteGeneratorVoltageControlControllerElement(dep),
                 "a merged controller element must be recognised through its MAIN control");
 
         // Its reactive injection feeds the group's DISTR_Q row, so it must NOT also scatter to a Q row
         // of its own. With the merge-status filter this came back as the bus's own BUS_V row, which is
         // where its DISTR_Q equation already lives - and the zero-impedance coupling cancelled against
         // it, emptying the coupler's DUMMY_Q column.
-        assertTrue(GpuAcRowIndexing.row(es, dep.getNum(), AcEquationType.DISTR_Q) >= 0,
+        assertTrue(StableRowIndexing.row(es, dep.getNum(), AcEquationType.DISTR_Q) >= 0,
                 "the dependent controller must carry the group's DISTR_Q equation");
-        assertEquals(-1, GpuAcRowIndexing.row(es, dep.getNum(), AcEquationType.BUS_TARGET_Q),
+        assertEquals(-1, StableRowIndexing.row(es, dep.getNum(), AcEquationType.BUS_TARGET_Q),
                 "...and no own reactive target while it controls");
         assertEquals(-1, ExtractionColumns.of(network, es).qRow()[dep.getNum()],
                 "a merged controller element must have NO own Q-balance row");

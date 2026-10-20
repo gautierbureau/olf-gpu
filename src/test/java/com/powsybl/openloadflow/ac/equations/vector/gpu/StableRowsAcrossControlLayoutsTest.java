@@ -11,6 +11,7 @@ import com.powsybl.iidm.network.Network;
 import com.powsybl.openloadflow.ac.equations.AcEquationSystemCreator;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
+import com.powsybl.openloadflow.ac.equations.vector.gpu.fixedmatrix.StableRowIndexing;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.network.FirstSlackBusSelector;
 import com.powsybl.openloadflow.network.LfBranch;
@@ -37,7 +38,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 class StableRowsAcrossControlLayoutsTest {
 
     private static int row(EquationSystem<AcVariableType, AcEquationType> es, int bus, AcEquationType t) {
-        return GpuAcRowIndexing.row(es, bus, t);
+        return StableRowIndexing.row(es, bus, t);
     }
 
     /** Faithful Java port of native buildRowMap. Returns rowMap or null if it would throw. */

@@ -434,7 +434,7 @@ final class GpuSaTestNetworks {
     }
 
     /** @param pilotLine whether the pilot section bbs0 carries a line. WITH it bbs0 is the coupler tree's ROOT
-     *  (GpuAcRowIndexing roots a tree at the first bus with an impedant branch) and the elected main vl12_1 is
+     *  (CouplerTreeRelocation roots a tree at the first bus with an impedant branch) and the elected main vl12_1 is
      *  the killed coupler's CHILD — its identity comes from the stock placement. WITHOUT it bbs0 cannot root
      *  a tree, vl12_1 becomes the root and keeps its OWN row, so its identity is the explicit ROW_V_IDENTITY
      *  of remoteMainIdentityEntries — rte6515 BUS-2640_BBS_1's shape, where that row also carries the

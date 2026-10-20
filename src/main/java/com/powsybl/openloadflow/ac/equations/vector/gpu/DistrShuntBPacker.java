@@ -9,6 +9,7 @@ package com.powsybl.openloadflow.ac.equations.vector.gpu;
 
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
+import com.powsybl.openloadflow.ac.equations.vector.gpu.fixedmatrix.StableRowIndexing;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfNetwork;
@@ -66,7 +67,7 @@ final class DistrShuntBPacker {
             List<LfShunt> controllers = voltageControl.getMergedControllerElements();
             long count = controllers.stream().filter(c -> !c.isDisabled()).count();
             for (LfShunt gk : controllers) {
-                if (GpuAcRowIndexing.row(es, gk.getNum(), AcEquationType.DISTR_SHUNT_B) < 0) {
+                if (StableRowIndexing.row(es, gk.getNum(), AcEquationType.DISTR_SHUNT_B) < 0) {
                     continue;                                // the free controller carries the pilot's Q, no DISTR_SHUNT_B
                 }
                 int distrShuntBRow = shuntBCol[gk.getNum()];

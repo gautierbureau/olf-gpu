@@ -9,6 +9,7 @@ package com.powsybl.openloadflow.ac.equations.vector.gpu;
 
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
+import com.powsybl.openloadflow.ac.equations.vector.gpu.fixedmatrix.StableRowIndexing;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuQLimitType;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuReactiveLimitsEntryFlag;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuVoltageControlRole;
@@ -162,8 +163,8 @@ public final class ReactiveLimitsPacker {
                         continue;                                  // limits off: monitored buses only (see above)
                     }
                     int bn = bus.getNum();
-                    boolean vActive = GpuAcRowIndexing.row(es, bn, AcEquationType.BUS_TARGET_V) >= 0;
-                    boolean qActive = GpuAcRowIndexing.row(es, bn, AcEquationType.BUS_TARGET_Q) >= 0;
+                    boolean vActive = StableRowIndexing.row(es, bn, AcEquationType.BUS_TARGET_V) >= 0;
+                    boolean qActive = StableRowIndexing.row(es, bn, AcEquationType.BUS_TARGET_Q) >= 0;
                     boolean remoteMember = RemoteMemberQPacker.isRemoteMemberEntry(bus);
                     // A pilot that is one of its OWN controllers is packed as a remote entry of class 2: its
                     // q feeds the group's DISTR_Q rows like a remote member's (read through the remote q
@@ -206,7 +207,7 @@ public final class ReactiveLimitsPacker {
                                         + " bus=" + bus.getId() + " remote=" + remoteClass + " pilotVRow=" + pilotV);
                             }
                             reactiveLimitNominalV.add(own.getControlledBus().getNominalV());
-                            reactiveLimitActivePowerRow.add(GpuAcRowIndexing.row(es, bn, AcEquationType.BUS_TARGET_P) >= 0 ? columns.pRow()[bn] : -1);
+                            reactiveLimitActivePowerRow.add(StableRowIndexing.row(es, bn, AcEquationType.BUS_TARGET_P) >= 0 ? columns.pRow()[bn] : -1);
                             reactiveLimitTargetP.add(bus.getTargetP());
                             reactiveLimitBusId.add(bus.getId());
                             reactiveLimitInitialTargetQ.add(initialGenerationTargetQ(bus));
@@ -265,7 +266,7 @@ public final class ReactiveLimitsPacker {
                         reactiveLimitComparedVoltageRow.add(vCol[bn]);                   // local: compare row = own row
                         reactiveLimitBusNum.add(bn);
                         reactiveLimitNominalV.add(bus.getGeneratorVoltageControl().map(c -> c.getControlledBus().getNominalV()).orElse(bus.getNominalV()));
-                        reactiveLimitActivePowerRow.add(GpuAcRowIndexing.row(es, bn, AcEquationType.BUS_TARGET_P) >= 0 ? columns.pRow()[bn] : -1);
+                        reactiveLimitActivePowerRow.add(StableRowIndexing.row(es, bn, AcEquationType.BUS_TARGET_P) >= 0 ? columns.pRow()[bn] : -1);
                         reactiveLimitTargetP.add(bus.getTargetP());
                         reactiveLimitBusId.add(bus.getId());
                         reactiveLimitInitialTargetQ.add(initialGenerationTargetQ(bus));

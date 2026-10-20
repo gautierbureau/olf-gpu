@@ -100,15 +100,11 @@ public record GpuAcData(double[] cbIn, int[] cbIdx, int[] cbPcSide, double[] obI
                         double[] dgMarginUp, double[] dgMarginDown, int[] busGenStart, int[] busGenEnd,
                         int[] dsBusNum, String[] dgGenId,
                         BaseOpenBranches baseOpenBranches,
-                        int[] ziBranchNums, double[] vdlIn, int[] vdlIdx, int[] qrPtr, int[] qrRows,
+                        int[] ziBranchNums, double[] vdlIn, int[] vdlIdx, ReactiveRelocationCandidates reactiveRelocation,
                         int[] obQAlt, int[] ziQAlt,
                         /** Per reactive-limit entry, OLF's {@code LfBus.getQLimitType()} after the base load flow:
                          *  0 none, 1 MIN_Q, 2 MAX_Q, 3 MIN_REALISTIC_V, 4 MAX_REALISTIC_V. */
-                        byte[] rlBaseQLimitType,
-                        /** Dependent-pilot candidate groups (ExtractionColumns): per group its base group or -1, per
-                         *  group the base row of the pilot's reactive target or -1, per device row the dependent group
-                         *  of the bus owning that V row or -1. Structure inputs: they build relocation pools. */
-                        int[] qrDepBase, int[] qrBaseTargetRow, int[] depGroupOfRow) {
+                        byte[] rlBaseQLimitType) {
 
     /**
      * Content equality over every array — true means a cached solver context built from
@@ -154,10 +150,7 @@ public record GpuAcData(double[] cbIn, int[] cbIdx, int[] cbPcSide, double[] obI
                 && java.util.Arrays.equals(cbPcSide, other.cbPcSide)
                 && java.util.Arrays.equals(obQAlt, other.obQAlt) && java.util.Arrays.equals(ziQAlt, other.ziQAlt)
                 // the candidate tables build the group relocation pools (buildCbDynDest & co.)
-                && java.util.Arrays.equals(qrPtr, other.qrPtr) && java.util.Arrays.equals(qrRows, other.qrRows)
-                && java.util.Arrays.equals(qrDepBase, other.qrDepBase)
-                && java.util.Arrays.equals(qrBaseTargetRow, other.qrBaseTargetRow)
-                && java.util.Arrays.equals(depGroupOfRow, other.depGroupOfRow);
+                && reactiveRelocation.sameAs(other.reactiveRelocation);
     }
 
     /**
@@ -190,7 +183,7 @@ public record GpuAcData(double[] cbIn, int[] cbIdx, int[] cbPcSide, double[] obI
                 && dsSlackPhiRow == other.dsSlackPhiRow && dsSlackTargetP == other.dsSlackTargetP
                 && java.util.Arrays.equals(dsBaseTargetP, other.dsBaseTargetP)
                 && java.util.Arrays.equals(dsMaxDelta, other.dsMaxDelta) && java.util.Arrays.equals(dsMinDelta, other.dsMinDelta)
-                && java.util.Arrays.equals(qrPtr, other.qrPtr) && java.util.Arrays.equals(qrRows, other.qrRows)
+                && reactiveRelocation.sameGroupsAs(other.reactiveRelocation)
                 && java.util.Arrays.equals(obQAlt, other.obQAlt) && java.util.Arrays.equals(ziQAlt, other.ziQAlt)
                 && java.util.Arrays.equals(rlMonitored, other.rlMonitored)
                 && java.util.Arrays.equals(rlRemote, other.rlRemote)

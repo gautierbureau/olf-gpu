@@ -182,7 +182,7 @@ final class GenOutageSeed {
                     cl.outageSlackShift[s] += go.pStep();
                 }
                 if (go.pilotQGroup() >= 0) {
-                    cl.pilotQDeltas.merge(s * (gpuData.qrPtr().length - 1) + go.pilotQGroup(),
+                    cl.pilotQDeltas.merge(s * (gpuData.reactiveRelocation().groupStart().length - 1) + go.pilotQGroup(),
                             go.pilotQDelta(), Double::sum);
                 }
                 if (go.overridesDqMemberTargetQ() && gpuData.dqMemberBusNum() != null) {

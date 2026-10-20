@@ -238,7 +238,7 @@ class GpuZiCouplerTreeRelocationTest extends AbstractLoadFlowNetworkFactory {
                 d.drRow(), d.drCol(), d.drCoef(), d.dbRow(), d.dbCol(), d.dbCoef(),
             // the group tables + ob/zi alternates travel with the packs: a pilot-self group enrolled
             // in the candidate table (rotation) encodes -2-g in the q alternates, refused without them
-            d.qrPtr(), d.qrRows(), d.obQAlt(), d.ziQAlt());
+            d.reactiveRelocation().groupStart(), d.reactiveRelocation().candidateRows(), d.obQAlt(), d.ziQAlt());
 
         StateVector sv = es.getStateVector();
         sv.set(x0.clone());

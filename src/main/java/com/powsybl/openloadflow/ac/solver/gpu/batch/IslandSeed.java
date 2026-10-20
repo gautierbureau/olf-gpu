@@ -124,8 +124,8 @@ final class IslandSeed {
             // whose mode is neither identity nor pinned). Measured on the remote-control
             // fixture, b1 islanded: OLF's BUS_TARGET_Q at the pilot off by exactly its
             // load, b2 0.45 kV; rte6515: five busbar sections up to 1.3 kV.
-            int[] qrPtr = gpuData.qrPtr();
-            int[] qrRows = gpuData.qrRows();
+            int[] qrPtr = gpuData.reactiveRelocation().groupStart();
+            int[] qrRows = gpuData.reactiveRelocation().candidateRows();
             for (int g = 0; qrPtr != null && g + 1 < qrPtr.length; g++) {
                 int baseCarrier = -1;
                 int newCarrier = -1;

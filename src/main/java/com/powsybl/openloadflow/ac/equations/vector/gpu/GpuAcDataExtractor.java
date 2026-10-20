@@ -192,9 +192,9 @@ public final class GpuAcDataExtractor {
                         family.baseOpenZiNums().stream().mapToInt(Integer::intValue).toArray()),
                 family.ziNums().stream().mapToInt(Integer::intValue).toArray(),
                 GpuAcArrays.flatD(family.vdlIn(), 3), GpuAcArrays.flatI(family.vdlIdx(), 2),
-                columns.qrPtr(), columns.qrRows(),
-                GpuAcArrays.flatI(family.obQAlt(), 2), GpuAcArrays.flatI(family.ziQAlt(), 2), rl.rlBaseQLimitType(),
-                columns.qrDepBase(), columns.qrBaseTargetRow(), columns.depGroupOfRow());
+                new ReactiveRelocationCandidates(columns.qrPtr(), columns.qrRows(), columns.qrDepBase(),
+                        columns.qrBaseTargetRow(), columns.depGroupOfRow()),
+                GpuAcArrays.flatI(family.obQAlt(), 2), GpuAcArrays.flatI(family.ziQAlt(), 2), rl.rlBaseQLimitType());
     }
 
     /** The couplers whose {@code DUMMY_P} / {@code DUMMY_Q} rows host a bus's power equations under the

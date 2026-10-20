@@ -25,8 +25,8 @@ public final class RelocatedRows {
      *  member with a row sits at that candidate (merged controller order on both sides). */
     static boolean qrMemberOrderConsistent(GpuAcData gpuData) {
         int[] start = qrMemberStart(gpuData);
-        int[] qrPtr = gpuData.qrPtr();
-        int[] qrRows = gpuData.qrRows();
+        int[] qrPtr = gpuData.reactiveRelocation().groupStart();
+        int[] qrRows = gpuData.reactiveRelocation().candidateRows();
         int[] mRow = gpuData.dqMemberRow();
         byte[] mHasRow = gpuData.dqMemberHasRow();
         int[] mQrGroup = gpuData.dqMemberQrGroup();
@@ -49,7 +49,7 @@ public final class RelocatedRows {
     /** qr group -> its first dq member, -1 for a group without packed members. */
     public static int[] qrMemberStart(GpuAcData gpuData) {
         int[] mQrGroup = gpuData.dqMemberQrGroup();
-        int[] qrPtr = gpuData.qrPtr();
+        int[] qrPtr = gpuData.reactiveRelocation().groupStart();
         if (mQrGroup == null || qrPtr == null || qrPtr.length < 2) {
             return null;
         }

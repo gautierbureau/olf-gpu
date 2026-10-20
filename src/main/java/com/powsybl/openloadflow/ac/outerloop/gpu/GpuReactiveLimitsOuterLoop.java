@@ -99,12 +99,12 @@ public final class GpuReactiveLimitsOuterLoop {
         if (relocated != vRow && devModes != null && relocated < devModes.length && devModes[relocated] != GpuRowMode.FIXED_VARIABLE) {
             vRow = relocated;
         }
-        if (devModes == null || data.rlRemote() == null || data.rlRemote()[i] != GpuVoltageControlRole.PILOT_SELF || data.qrPtr() == null
+        if (devModes == null || data.rlRemote() == null || data.rlRemote()[i] != GpuVoltageControlRole.PILOT_SELF || data.reactiveRelocation().groupStart() == null
                 || vRow < 0 || vRow >= devModes.length || devModes[vRow] != GpuRowMode.FIXED_VARIABLE) {
             return vRow;
         }
-        int[] qrPtr = data.qrPtr();
-        int[] qrRows = data.qrRows();
+        int[] qrPtr = data.reactiveRelocation().groupStart();
+        int[] qrRows = data.reactiveRelocation().candidateRows();
         for (int g = 0; g + 1 < qrPtr.length; g++) {
             if (qrRows[qrPtr[g]] != vRow) {
                 continue;

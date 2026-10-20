@@ -10,6 +10,7 @@ package com.powsybl.openloadflow.ac.solver.gpu.batch;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.BaseOpenBranches;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
+import com.powsybl.openloadflow.ac.equations.vector.gpu.ReactiveRelocationCandidates;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.RemoteMemberReactiveTerms;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.VoltageRowParameters;
 import org.junit.jupiter.api.Test;
@@ -49,8 +50,8 @@ class GpuBatchedSecurityAnalysisSolverTest {
             new int[0], new double[0], new double[0], new double[0], new double[0], new double[0],
             new int[0], new int[0],
             new int[0], new String[0],
-            BaseOpenBranches.empty(), new int[0], new double[0], new int[0], new int[] {0}, new int[0],
-            new int[0], new int[0], new byte[0], new int[0], new int[0], new int[0]);
+            BaseOpenBranches.empty(), new int[0], new double[0], new int[0], ReactiveRelocationCandidates.empty(),
+            new int[0], new int[0], new byte[0]);
 
     @Test
     void explicitCapIsHonouredAndClampedToCount() {

@@ -13,6 +13,7 @@
 
 #include "../common/check.cuh"
 #include "../common/launch.cuh"
+#include "../common/codes/gpu_row_mode.cuh"
 #include "../solver/driver_steps.cuh"
 #include "convergence.cuh"
 
@@ -69,14 +70,14 @@ __global__ void residualNormsBatch(int n, const double* F, const char* active, d
                 // threshold; power rows (mode 1), the phase P row (mode 3) and the pinned
                 // remote-member Q row (mode 4) the power-type one
                 int m = mode[(size_t) s * n + i];
-                double thr = (m == 1 || m == 3 || m == 4) ? thrPower[i] : thrIdent[i];
+                double thr = (m == GpuRowMode::EQUATION || m == GpuRowMode::BRANCH_TARGET_P || m == GpuRowMode::BUS_TARGET_Q) ? thrPower[i] : thrIdent[i];
                 if (thrAlt != nullptr) {
                     // the row's equation in THIS lane: a cross identity (mode 6) is a voltage target; a
                     // relocated child's own row hosts its balance again once its coupler's dummy row (the
                     // selector) is an identity
-                    if (m == 6) {
+                    if (m == GpuRowMode::CROSS_FIXED_VARIABLE) {
                         thr = thrAlt[i];
-                    } else if ((m == 1 || m == 3 || m == 4) && thrSel[i] >= 0 && mode[(size_t) s * n + thrSel[i]] == 0) {
+                    } else if ((m == GpuRowMode::EQUATION || m == GpuRowMode::BRANCH_TARGET_P || m == GpuRowMode::BUS_TARGET_Q) && thrSel[i] >= 0 && mode[(size_t) s * n + thrSel[i]] == GpuRowMode::FIXED_VARIABLE) {
                         thr = thrAlt[i];
                     }
                 }

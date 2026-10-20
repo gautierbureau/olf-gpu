@@ -17,6 +17,7 @@
 #include "../common/codes/gpu_pi_model_column.cuh"
 #include "../common/codes/gpu_discrete_control_member_state.cuh"
 #include "../common/codes/gpu_transformer_voltage_control_mode.cuh"
+#include "../common/codes/gpu_row_mode.cuh"
 #include "../solver/driver_steps.cuh"
 #include "incremental_transformer_voltage_control.cuh"
 #include "transformer_voltage_control.cuh"
@@ -120,7 +121,7 @@ __device__ inline void tvdLayoutGroup(const TvdTables& T, int s, int n, int nEle
     // stayed in the balance the tap was decided on (a 5 MVar load at the controlled bus: 6.0e-3 kV).
     if (anyCont) {
         for (int k = T.deltaPtr[g]; k < T.deltaPtr[g + 1]; k++) {
-            if (T.deltaRow[k] != T.grpVRow[g] || T.deltaModeOff[k] != 1) continue;
+            if (T.deltaRow[k] != T.grpVRow[g] || T.deltaModeOff[k] != GpuRowMode::EQUATION) continue;
             double sv = T.saved[(size_t) s * T.nDelta + k];
             if (!isnan(sv)) pilotQ += sv - T.deltaTargetOff[k];
         }
@@ -131,13 +132,13 @@ __device__ inline void tvdLayoutGroup(const TvdTables& T, int s, int n, int nEle
         size_t mr = sn + T.memRhoRow[m];
         int st = T.memState[(size_t) s * T.nM + m];
         if (anyCont && st == GpuDiscreteControlMemberState::CONTINUOUS) {  // ALIVE continuous: carrier (pilot Q) or DISTR_RHO (0)
-            mode[mr] = 1;
+            mode[mr] = GpuRowMode::EQUATION;
             target[mr] = carrier ? 0.0 : pilotQ;
             carrier = true;
         } else if (st == GpuDiscreteControlMemberState::ROUNDED) {  // identity pin at the rounded tap's r1
             int tap = T.memTap[(size_t) s * T.nM + m];
             double r1 = T.tapData[(size_t) (T.memTapPtr[m] + tap) * GpuPiModelColumn::COUNT + GpuPiModelColumn::R1];
-            mode[mr] = 0;
+            mode[mr] = GpuRowMode::FIXED_VARIABLE;
             target[mr] = r1;
             x[mr] = r1;
         }
@@ -159,7 +160,7 @@ __global__ void tvdEntryBatch(TvdTables T, int nScenarios, int n, int nElements,
             if (disabled[(size_t) s * nElements + T.memElem[m]]) continue;
             size_t sm = (size_t) s * T.nM + m;
             if (entryOn) {
-                T.memState[sm] = mode[sn + T.memRhoRow[m]] == 1 ? GpuDiscreteControlMemberState::CONTINUOUS : GpuDiscreteControlMemberState::DISABLED;
+                T.memState[sm] = mode[sn + T.memRhoRow[m]] == GpuRowMode::EQUATION ? GpuDiscreteControlMemberState::CONTINUOUS : GpuDiscreteControlMemberState::DISABLED;
             } else if (T.mode == GpuTransformerVoltageControlMode::WITH_GENERATOR_VOLTAGE_CONTROL) {
                 T.memState[sm] = GpuDiscreteControlMemberState::CONTINUOUS;
                 any = true;
@@ -250,19 +251,19 @@ __global__ void tvdCheckBatch(TvdTables T, int nScenarios, int n, int nElements,
                 // distinguishable from a real Q-limit pin (which the switch-back may undo; this must
                 // not be, OLF's reactive-limits loop never sees a bus whose voltage control is off).
                 size_t st = (size_t) s * T.nrl + re;
-                if (mode[sr] != 1 || T.rlLimitType[st] != GpuQLimitType::NONE) continue;   // pinned already, or not live
+                if (mode[sr] != GpuRowMode::EQUATION || T.rlLimitType[st] != GpuQLimitType::NONE) continue;  // pinned already, or not live
                 T.fzSavedMode[sc] = mode[sr];
                 T.fzSavedTarget[sc] = target[sr];
-                mode[sr] = 4;
+                mode[sr] = GpuRowMode::BUS_TARGET_Q;
                 target[sr] = qBuf[sr] - T.fzLoadQ[c];
                 T.rlLimitType[st] = GpuQLimitType::FROZEN;
                 T.fzFrozen[sc] = 1;
                 continue;
             }
-            if (mode[sr] != 0 && mode[sr] != 2) continue;
+            if (mode[sr] != GpuRowMode::FIXED_VARIABLE && mode[sr] != GpuRowMode::BUS_TARGET_V_WITH_SLOPE) continue;
             T.fzSavedMode[sc] = mode[sr];
             T.fzSavedTarget[sc] = target[sr];
-            mode[sr] = 1;
+            mode[sr] = GpuRowMode::EQUATION;
             target[sr] = qBuf[sr] - T.fzLoadQ[c];            // generationTargetQ = q.eval(); row target = gen − load
             T.fzFrozen[sc] = 1;
         }

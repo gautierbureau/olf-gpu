@@ -22,6 +22,7 @@
 #include "../common/codes/gpu_q_limit_type.cuh"
 #include "../common/codes/gpu_voltage_control_role.cuh"
 #include "../common/codes/gpu_reactive_limits_entry_flag.cuh"
+#include "../common/codes/gpu_row_mode.cuh"
 #include "../diagnostics/driver_traces.cuh"
 #include "forced_target_q.cuh"
 #include "pilot_voltage.cuh"
@@ -112,7 +113,7 @@ __global__ void reactiveLimitsBatch(const double* svcRlVt, int nrl, int nScenari
         size_t qidx = ridx;
         if (rlQrow != nullptr && rlQrow[i] != rlVrow[i]) {
             size_t relocIdx = (size_t) s * n + rlQrow[i];
-            qidx = mode[relocIdx] == 0 ? ridx : relocIdx;
+            qidx = mode[relocIdx] == GpuRowMode::FIXED_VARIABLE ? ridx : relocIdx;
         }
         size_t rst = (size_t) s * nrl + i;
         size_t rli = cvStride ? rst : (size_t) i;
@@ -126,7 +127,7 @@ __global__ void reactiveLimitsBatch(const double* svcRlVt, int nrl, int nScenari
         // voltage IDENTITY (mode 0), not a DISTR_Q share; pinned, its own Q balance (mode 4, the
         // alternate dest). Everything else (q via the remote q pack, the pilot's V as compare row)
         // is a remote member's. As a LOCAL entry its pin landed on mode 1, an EMPTY row.
-        int pvForm = rlRemote[i] == GpuVoltageControlRole::PILOT_SELF ? 0 : 1;
+        int pvForm = rlRemote[i] == GpuVoltageControlRole::PILOT_SELF ? GpuRowMode::FIXED_VARIABLE : GpuRowMode::EQUATION;
         bool enrolledPilot = rlRemote[i] == GpuVoltageControlRole::PILOT_SELF && isEnrolledPilot(psEntry, nQr, i);
         if (limitType[rst] == GpuQLimitType::NONE) {
             if (mode[qidx] != pvForm) return;                // islanded / frozen this scenario
@@ -149,7 +150,7 @@ __global__ void reactiveLimitsBatch(const double* svcRlVt, int nrl, int nScenari
                 savedTarget[rst] = target[qidx];             // the DISTR_Q row target (NOT 0 in general:
                                                              // see updateDistrQTargetsBatch)
                 if (!enrolledPilot) {
-                    mode[qidx] = 4;
+                    mode[qidx] = GpuRowMode::BUS_TARGET_Q;
                     target[qidx] = rliMin - rlLoadQ[rli];
                 }
                 limitType[rst] = GpuQLimitType::MIN_Q;
@@ -159,7 +160,7 @@ __global__ void reactiveLimitsBatch(const double* svcRlVt, int nrl, int nScenari
             } else if (q > rliMax + tol) {
                 savedTarget[rst] = target[qidx];
                 if (!enrolledPilot) {
-                    mode[qidx] = 4;
+                    mode[qidx] = GpuRowMode::BUS_TARGET_Q;
                     target[qidx] = rliMax - rlLoadQ[rli];
                 }
                 limitType[rst] = GpuQLimitType::MAX_Q;
@@ -173,7 +174,7 @@ __global__ void reactiveLimitsBatch(const double* svcRlVt, int nrl, int nScenari
                 // that the switch-back reads like a min/max limit but the Q-limit drift ignores.
                 savedTarget[rst] = target[qidx];
                 if (!enrolledPilot) {
-                    mode[qidx] = 4;
+                    mode[qidx] = GpuRowMode::BUS_TARGET_Q;
                     target[qidx] = rlInitTgtQ[i] - rlLoadQ[rli];
                 }
                 limitType[rst] = unrealisticLo ? GpuQLimitType::MIN_REALISTIC_V : GpuQLimitType::MAX_REALISTIC_V;
@@ -289,17 +290,17 @@ __global__ void reactiveLimitsBatch(const double* svcRlVt, int nrl, int nScenari
     size_t pinIdx = idx;
     if (localOv && rlQrow != nullptr && rlQrow[i] >= 0 && rlQrow[i] != vrow) {
         size_t r2 = (size_t) s * n + rlQrow[i];
-        if (mode[r2] == 6 || (mode[r2] == 4 && mode[idx] != 4)) {
+        if (mode[r2] == GpuRowMode::CROSS_FIXED_VARIABLE || (mode[r2] == GpuRowMode::BUS_TARGET_Q && mode[idx] != GpuRowMode::BUS_TARGET_Q)) {
             pinIdx = r2;
         }
     }
     const bool crossRow = pinIdx != idx;
-    if ((mode[pinIdx] == 0 || mode[pinIdx] == 2 || mode[pinIdx] == 6) && limitType[st] == GpuQLimitType::NONE) {  // currently PV — check the reactive limits
+    if ((mode[pinIdx] == GpuRowMode::FIXED_VARIABLE || mode[pinIdx] == GpuRowMode::BUS_TARGET_V_WITH_SLOPE || mode[pinIdx] == GpuRowMode::CROSS_FIXED_VARIABLE) && limitType[st] == GpuQLimitType::NONE) {  // currently PV — check the reactive limits
         double q = qBuf[qIdx] + rlLoadQ[li];
         if (q < liMin - tol) {
             savedTarget[st] = target[pinIdx];                // remember the row target for the switch-back
             savedMode[st] = static_cast<char>(mode[pinIdx]);   // and the PV form (0, 2 for a slope SVC, 6 cross)
-            mode[pinIdx] = localOv ? 4 : 1;              // a re-homed member: own Q through its ALTERNATE dest
+            mode[pinIdx] = localOv ? GpuRowMode::BUS_TARGET_Q : GpuRowMode::EQUATION;             // a re-homed member: own Q through its ALTERNATE dest
             target[pinIdx] = liMin - rlLoadQ[li];
             limitType[st] = GpuQLimitType::MIN_Q;
             switchCount[st]++;
@@ -308,7 +309,7 @@ __global__ void reactiveLimitsBatch(const double* svcRlVt, int nrl, int nScenari
         } else if (q > liMax + tol) {
             savedTarget[st] = target[pinIdx];
             savedMode[st] = static_cast<char>(mode[pinIdx]);
-            mode[pinIdx] = localOv ? 4 : 1;              // a re-homed member: own Q through its ALTERNATE dest
+            mode[pinIdx] = localOv ? GpuRowMode::BUS_TARGET_Q : GpuRowMode::EQUATION;             // a re-homed member: own Q through its ALTERNATE dest
             target[pinIdx] = liMax - rlLoadQ[li];
             limitType[st] = GpuQLimitType::MAX_Q;
             switchCount[st]++;
@@ -330,7 +331,7 @@ __global__ void reactiveLimitsBatch(const double* svcRlVt, int nrl, int nScenari
                  || (minPin && v < vt));                             // minQ-pinned but v below target
         bool back = wantsBack && switchCount[st] < maxSwitch;
         if (back) {
-            mode[pinIdx] = crossRow ? 6 : 0;                // PQ → PV: resume voltage control (cross identity stays cross)
+            mode[pinIdx] = crossRow ? GpuRowMode::CROSS_FIXED_VARIABLE : GpuRowMode::FIXED_VARIABLE;               // PQ → PV: resume voltage control (cross identity stays cross)
             target[pinIdx] = vt;
             limitType[st] = GpuQLimitType::NONE;
             switched[s] = 1;
@@ -416,8 +417,8 @@ __global__ void rlForcedPvElectBatch(int nrl, int nScenarios, int n,
                 bestP = p;
                 bestId = idRank[i];
             }
-        } else if (limitType[st] == GpuQLimitType::NONE && (rlRemote != nullptr && rlRemote[i] == GpuVoltageControlRole::PILOT_SELF ? m == 0
-                                          : remote ? m == 1 : (m == 0 || m == 2))) {
+        } else if (limitType[st] == GpuQLimitType::NONE && (rlRemote != nullptr && rlRemote[i] == GpuVoltageControlRole::PILOT_SELF ? m == GpuRowMode::FIXED_VARIABLE
+                                          : remote ? m == GpuRowMode::EQUATION : (m == GpuRowMode::FIXED_VARIABLE || m == GpuRowMode::BUS_TARGET_V_WITH_SLOPE))) {
             remaining++;                                     // still PV after this pass
         }
     }
@@ -497,7 +498,7 @@ __global__ void rlUnpinBatch(int nPairs, int nS, int n, int nrl, const int* pair
     if (limitType[st] == GpuQLimitType::FROZEN) return;
     size_t idx = (size_t) s * n + rlVrow[i];
     char sm = savedMode[st];
-    mode[idx] = (sm == 2) ? 2 : 0;                           // the PV form saved at pin time (2 = slope SVC)
+    mode[idx] = (sm == GpuRowMode::BUS_TARGET_V_WITH_SLOPE) ? GpuRowMode::BUS_TARGET_V_WITH_SLOPE : GpuRowMode::FIXED_VARIABLE;                          // the PV form saved at pin time (2 = slope SVC)
     target[idx] = newTarget[k];
     limitType[st] = GpuQLimitType::NONE;
 }

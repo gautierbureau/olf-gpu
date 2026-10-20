@@ -16,6 +16,7 @@
 #include "../common/codes/gpu_q_limit_type.cuh"
 #include "../common/codes/gpu_linear_solve_mode.cuh"
 #include "../common/codes/gpu_controlled_flow.cuh"
+#include "../common/codes/gpu_row_mode.cuh"
 #include <cublas_v2.h>
 #include "closed_branch.cuh"
 #include "../solver/driver_steps.cuh"
@@ -76,7 +77,7 @@ __global__ void svcTriggerBatch(SvcTables T, int nScenarios, int n, const char* 
             if (limitType[st] == GpuQLimitType::NONE) continue;
             size_t idx = (size_t) s * n + T.busVRow[c];
             char sm = savedMode[st];
-            mode[idx] = (sm == 2) ? 2 : 0;                   // back to its PV form
+            mode[idx] = (sm == GpuRowMode::BUS_TARGET_V_WITH_SLOPE) ? GpuRowMode::BUS_TARGET_V_WITH_SLOPE : GpuRowMode::FIXED_VARIABLE;                  // back to its PV form
             target[idx] = T.targetV[(size_t) s * T.nCtl + c];
             limitType[st] = GpuQLimitType::NONE;
         }

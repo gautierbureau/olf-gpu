@@ -14,6 +14,7 @@
 #include "../common/check.cuh"
 #include "../common/launch.cuh"
 #include "../common/codes/gpu_discrete_control_member_state.cuh"
+#include "../common/codes/gpu_row_mode.cuh"
 #include "../solver/driver_steps.cuh"
 #include "shunt_voltage_control.cuh"
 
@@ -69,7 +70,7 @@ __device__ inline void svdLayoutGroup(const SvdTables& T, int s, int n, int g, b
             double bSum = 0.0;
             for (int u = T.memSubPtr[m]; u < T.memSubPtr[m + 1]; u++) bSum += T.secB[T.secPtr[u] + T.subPos[(size_t) s * T.nSubs + u]];
             size_t br = sn + T.memBRow[m];
-            mode[br] = 0;
+            mode[br] = GpuRowMode::FIXED_VARIABLE;
             target[br] = bSum;
             x[br] = bSum;
         }
@@ -84,7 +85,7 @@ __global__ void svdEntryBatch(SvdTables T, int nScenarios, int n, int nElements,
     for (int g = 0; g < T.nG; g++) {
         if (!svdGroupLive(T, s, nElements, g, disabled)) continue;
         for (int m = T.grpPtr[g]; m < T.grpPtr[g + 1]; m++) {
-            T.memState[(size_t) s * T.nM + m] = entryOn ? (mode[sn + T.memBRow[m]] == 1 ? GpuDiscreteControlMemberState::CONTINUOUS : GpuDiscreteControlMemberState::DISABLED) : GpuDiscreteControlMemberState::CONTINUOUS;
+            T.memState[(size_t) s * T.nM + m] = entryOn ? (mode[sn + T.memBRow[m]] == GpuRowMode::EQUATION ? GpuDiscreteControlMemberState::CONTINUOUS : GpuDiscreteControlMemberState::DISABLED) : GpuDiscreteControlMemberState::CONTINUOUS;
         }
         if (!entryOn) svdLayoutGroup(T, s, n, g, true, mode, target, x);
     }

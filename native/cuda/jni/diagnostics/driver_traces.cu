@@ -18,6 +18,7 @@
 #include "../common/codes/gpu_ac_solver_status.cuh"
 #include "../common/codes/gpu_outer_loop_kind.cuh"
 #include "../common/codes/gpu_transformer_voltage_control_mode.cuh"
+#include "../common/codes/gpu_row_mode.cuh"
 #include "../equations/branch_fill.cuh"
 #include "../equations/bus_injection_fill.cuh"
 #include "../equations/distribution_fill.cuh"
@@ -505,7 +506,7 @@ void traceRlState(BatchSolverContext* ctx, DriverPass& drv, bool inDsPhase, doub
                     for (int c = 1; c < cnt; c++) {
                         int r = ctx->st->hQrRows[p0 + c];
                         int m = hMode[(size_t) s2 * n + r];
-                        if (pick == 0 && m != 0 && m != 4) pick = c;
+                        if (pick == 0 && m != GpuRowMode::FIXED_VARIABLE && m != GpuRowMode::BUS_TARGET_Q) pick = c;
                         char b[48];
                         std::snprintf(b, sizeof b, " %d:m%d/t%.4f", r, m, hTgt[(size_t) s2 * n + r]);
                         cands += b;
@@ -808,7 +809,7 @@ void traceRlAudit(BatchSolverContext* ctx, DriverPass& drv, std::vector<std::vec
                 if (alt[st] != 0) continue;                  // pinned: its row holds the limit by construction
                 if (!aisl.empty() && aisl[st]) continue;     // not a controller in this component
                 int m = amode[(size_t) s * n + avr[i]];
-                if (m == 4) continue;                        // row owns its own Q balance this scenario
+                if (m == GpuRowMode::BUS_TARGET_Q) continue;  // row owns its own Q balance this scenario
                 size_t li = ctx->ncv > 0 ? st : (size_t) i;
                 double q = aq[(size_t) s * n + avr[i]] + alq[i];
                 double over = q < amn[li] ? amn[li] - q : (q > amx[li] ? q - amx[li] : 0.0);

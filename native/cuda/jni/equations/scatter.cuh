@@ -8,6 +8,7 @@
 #define OLF_GPU_EQUATIONS_SCATTER_CUH
 
 #include <cuda_runtime.h>
+#include "../common/codes/gpu_row_mode.cuh"
 
 namespace olfgpu {
 
@@ -25,12 +26,12 @@ namespace olfgpu {
  */
 __host__ __device__ inline int stockPairPick(int m, const int* pool, int p, int frozen,
                                              const int* mode, const int* relocOwn, int dummyRow) {
-    if (m == 4) {
+    if (m == GpuRowMode::BUS_TARGET_Q) {
         return pool[p + 1];
     }
-    if (m == 0 && relocOwn != nullptr) {
+    if (m == GpuRowMode::FIXED_VARIABLE && relocOwn != nullptr) {
         int own = relocOwn[dummyRow];
-        if (own >= 0 && mode[own] == 4) {
+        if (own >= 0 && mode[own] == GpuRowMode::BUS_TARGET_Q) {
             return pool[p];
         }
     }
@@ -101,7 +102,7 @@ __device__ inline int relocChoose(int g, const int* qrPtr, const int* qrRows, co
     int cnt = qrPtr[g + 1] - p0;
     for (int c = 1; c < cnt; c++) {
         int m = mode[qrRows[p0 + c]];
-        if (m != 0 && m != 4 && m != 6) {
+        if (m != GpuRowMode::FIXED_VARIABLE && m != GpuRowMode::BUS_TARGET_Q && m != GpuRowMode::CROSS_FIXED_VARIABLE) {
             return c;
         }
     }
@@ -121,7 +122,7 @@ __device__ inline int relocChooseSub(int g, const int* qrPtr, const int* qrRows,
     for (int c = 1; c < cnt; c++) {
         if (sub[qrMemberStart[g] + c - 1] != 0) continue;
         int m = mode[qrRows[p0 + c]];
-        if (m != 0 && m != 4 && m != 6) {
+        if (m != GpuRowMode::FIXED_VARIABLE && m != GpuRowMode::BUS_TARGET_Q && m != GpuRowMode::CROSS_FIXED_VARIABLE) {
             return c;
         }
     }
@@ -157,7 +158,7 @@ __device__ inline int depPick(int slot, int frozen, int altDest, int selRow, con
         if (mf == 1 || mf == 4) return frozen;               // the coupler lives (or the pin sits there)
         if (mf == 0) {                                       // the coupler is dead: home, unless home is the identity
             int mo = mode[rt.relocOwn[fr]];
-            if (mo != 0 && mo != 6) return altDest;
+            if (mo != GpuRowMode::FIXED_VARIABLE && mo != GpuRowMode::CROSS_FIXED_VARIABLE) return altDest;
         }
     } else if (mf != 0 && mf != 6) {                         // a root: its own row, unless that is the identity
         return frozen;
@@ -184,9 +185,9 @@ __device__ inline int ziDynDest(int frozen, int slot, const int* alt, const int*
     }
     int sr = sel != nullptr ? sel[slot] : -1;
     if (sr <= -2) {
-        return mode[-2 - sr] == 0 ? alt[slot] : frozen;       // stock-placement: identity only (see stockAltRow)
+        return mode[-2 - sr] == GpuRowMode::FIXED_VARIABLE ? alt[slot] : frozen;       // stock-placement: identity only (see stockAltRow)
     }
-    return (sr >= 0 && (mode[sr] == 0 || mode[sr] == 4)) ? alt[slot] : frozen;
+    return (sr >= 0 && (mode[sr] == GpuRowMode::FIXED_VARIABLE || mode[sr] == GpuRowMode::BUS_TARGET_Q)) ? alt[slot] : frozen;
 }
 
 static __device__ void scatterAddDyn(int nout, const int* dest, const int* altDest, const int* selRow,
@@ -205,8 +206,8 @@ static __device__ void scatterAddDyn(int nout, const int* dest, const int* altDe
             d = rt.pool[rt.off[eOff + k] + relocChooseSub(rg, rt.qrPtr, rt.qrRows, mode, rt.dqSub, rt.qrMemberStart)];
         } else {
             int sr = selRow[k];
-            bool useAlt = sr >= 0 ? (mode[sr] == 0 || mode[sr] == 4)
-                                  : (sr <= -2 && mode[-2 - sr] == 0);   // stock-placement: identity only
+            bool useAlt = sr >= 0 ? (mode[sr] == GpuRowMode::FIXED_VARIABLE || mode[sr] == GpuRowMode::BUS_TARGET_Q)
+                                  : (sr <= -2 && mode[-2 - sr] == GpuRowMode::FIXED_VARIABLE);   // stock-placement: identity only
             d = useAlt ? altDest[k] : dest[k];
         }
         if (d >= 0) {
@@ -269,8 +270,8 @@ static __device__ void scatterAddFDyn(int nres, const int* dest, const int* altD
             d = rt.pool[rt.off[eOff + idx] + relocChooseSub(rg, rt.qrPtr, rt.qrRows, mode, rt.dqSub, rt.qrMemberStart)];
         } else {
             int sr = selRow[idx];
-            bool useAlt = sr >= 0 ? (mode[sr] == 0 || mode[sr] == 4)
-                                  : (sr <= -2 && mode[-2 - sr] == 0);   // stock-placement: identity only
+            bool useAlt = sr >= 0 ? (mode[sr] == GpuRowMode::FIXED_VARIABLE || mode[sr] == GpuRowMode::BUS_TARGET_Q)
+                                  : (sr <= -2 && mode[-2 - sr] == GpuRowMode::FIXED_VARIABLE);   // stock-placement: identity only
             d = useAlt ? altDest[idx] : dest[idx];
         }
         if (d <= -2) {

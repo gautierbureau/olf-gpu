@@ -13,6 +13,7 @@
 
 #include "../common/check.cuh"
 #include "../common/launch.cuh"
+#include "../common/codes/gpu_row_mode.cuh"
 #include "closed_branch.cuh"
 #include "closed_branch_scatter.h"
 #include "open_branch.cuh"
@@ -75,7 +76,7 @@ __global__ void fillClosedBranchBatch(int ne, int nScenarios, int n, int nnz, in
         const int* psl = pcSel + e * CB_NOUT;                // scenario has the control enabled (row mode 3)
         for (int k = 0; k < CB_NOUT; k++) {
             int d = pd[k];
-            if (d == -1 || mode[(size_t) s * n + psl[k]] != 3) {
+            if (d == -1 || mode[(size_t) s * n + psl[k]] != GpuRowMode::BRANCH_TARGET_P) {
                 continue;
             }
             if (d >= 0) {
@@ -203,7 +204,7 @@ __global__ void fillClosedBranchBatchF(int ne, int nScenarios, int n, int nnz, i
     if (pcDest != nullptr) {                                 // continuous phase control: the P residual at a1
         for (int j = 0; j < 4; j += 2) {                     // outputs 0 (p1) / 2 (p2) at table pos 0 / 14
             int d = pcDest[e * CB_NOUT + pos[j]];
-            if (d < -1 && mode[(size_t) s * n + pcSel[e * CB_NOUT + pos[j]]] == 3) {
+            if (d < -1 && mode[(size_t) s * n + pcSel[e * CB_NOUT + pos[j]]] == GpuRowMode::BRANCH_TARGET_P) {
                 atomicAdd(F + (size_t) s * n + (-2 - d), o[j]);
             }
         }

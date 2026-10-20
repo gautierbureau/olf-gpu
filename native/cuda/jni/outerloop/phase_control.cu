@@ -14,6 +14,7 @@
 #include "../common/codes/gpu_controlled_flow.cuh"
 #include "../common/codes/gpu_phase_control_mode.cuh"
 #include "../common/codes/gpu_pi_model_column.cuh"
+#include "../common/codes/gpu_row_mode.cuh"
 #include "../equations/scenario_overrides.cuh"
 #include "flow_observation.cuh"
 #include "phase_control.cuh"
@@ -48,7 +49,7 @@ __global__ void cphCheckBatch(int nCph, int nScenarios, int n, int nElements, in
                 if (fabs(tapData[(size_t) (base + t) * GpuPiModelColumn::COUNT + GpuPiModelColumn::A1] - a1) < fabs(tapData[(size_t) (base + best) * GpuPiModelColumn::COUNT + GpuPiModelColumn::A1] - a1)) best = t;
             }
             tap[tid] = best;
-            mode[ar] = 0;
+            mode[ar] = GpuRowMode::FIXED_VARIABLE;
             target[ar] = tapData[(size_t) (base + best) * GpuPiModelColumn::COUNT + GpuPiModelColumn::A1];
             x[ar] = target[ar];
         }

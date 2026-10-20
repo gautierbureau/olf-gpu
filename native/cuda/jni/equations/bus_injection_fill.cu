@@ -13,6 +13,7 @@
 
 #include "../common/check.cuh"
 #include "../common/launch.cuh"
+#include "../common/codes/gpu_row_mode.cuh"
 #include "closed_branch.cuh"
 #include "closed_branch_scatter.h"
 #include "open_branch.cuh"
@@ -114,7 +115,7 @@ __global__ void fillVdlBatch(int ne, int nScenarios, int n, int nnz,
     // A load on a relocated coupler-tree child: its term sits on the parent coupler's dummy row, and goes HOME
     // (the child's own row and its reserved slot) in a lane whose dummy row is an identity - the coupler is
     // open or out of the tree there. Mode 4 on that row is the child's pinned balance, which stays.
-    if (mode != nullptr && altRow != nullptr && altRow[e] >= 0 && mode[(size_t) s * n + row] == 0) {
+    if (mode != nullptr && altRow != nullptr && altRow[e] >= 0 && mode[(size_t) s * n + row] == GpuRowMode::FIXED_VARIABLE) {
         row = altRow[e];
         slot = altDest[e];
     }

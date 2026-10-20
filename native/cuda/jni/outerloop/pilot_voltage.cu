@@ -14,6 +14,7 @@
 #include "../common/check.cuh"
 #include "../common/launch.cuh"
 #include "../common/codes/gpu_q_limit_type.cuh"
+#include "../common/codes/gpu_row_mode.cuh"
 #include "../equations/scenario_overrides.cuh"
 #include "../solver/driver_steps.cuh"
 #include "pilot_voltage.cuh"
@@ -89,7 +90,7 @@ __global__ void applyPilotQDeltasBatch(int nDelta, const int* key, const double*
             dqSub != nullptr ? dqSub + (size_t) s * nDqMembers : nullptr, qrMemberStart);
     int row = qrRows[qrPtr[g] + c];
     int m = mode[(size_t) s * n + row];
-    if (m != 0 && m != 6) {
+    if (m != GpuRowMode::FIXED_VARIABLE && m != GpuRowMode::CROSS_FIXED_VARIABLE) {
         target[(size_t) s * n + row] += val[k];
     }
 }
@@ -148,7 +149,7 @@ __global__ void updatePilotVeqBatch(int nQr, int nScenarios, int n,
     // while that identity is there, or while this kernel holds it flipped.
     const bool dependent = qrDepBase != nullptr && qrDepBase[g] >= 0;
     if (dependent) {
-        if (relocOwn != nullptr && relocOwn[pilotRow] >= 0 && mode[(size_t) s * n + pilotRow] == 0) {
+        if (relocOwn != nullptr && relocOwn[pilotRow] >= 0 && mode[(size_t) s * n + pilotRow] == GpuRowMode::FIXED_VARIABLE) {
             pilotRow = relocOwn[pilotRow];
         }
         int pm = mode[(size_t) s * n + pilotRow];
@@ -239,7 +240,7 @@ __global__ void updatePilotVeqBatch(int nQr, int nScenarios, int n,
             int r = qrRows[p0 + c];
             if (r == pilotRow) continue;
             int m = mode[(size_t) s * n + r];
-            if (m != 0 && m != 4) lost = false;
+            if (m != GpuRowMode::FIXED_VARIABLE && m != GpuRowMode::BUS_TARGET_Q) lost = false;
         }
     } else {
         lost = relocChooseSub(g, qrPtr, qrRows, mode + (size_t) s * n,
@@ -248,14 +249,14 @@ __global__ void updatePilotVeqBatch(int nQr, int nScenarios, int n,
     // With the fact known the layout is applied EVERY pass, the first fill included; otherwise it stays where it
     // was — inside the reactive-limits phase, which is all the row-mode inference could support.
     const bool layoutNow = factKnown || act;
-    if (layoutNow && lost && !veqOff[fi] && mode[pi] == 0) {
+    if (layoutNow && lost && !veqOff[fi] && mode[pi] == GpuRowMode::FIXED_VARIABLE) {
         savedVTarget[fi] = target[pi];
-        mode[pi] = 1;
+        mode[pi] = GpuRowMode::EQUATION;
         target[pi] = flipTarget;
         veqOff[fi] = 1;
         switched[s] = act ? 1 : switched[s];                 // only the RL phase drives the outer loop's stability
     } else if (layoutNow && !lost && veqOff[fi]) {
-        mode[pi] = dependent && relocOwn != nullptr && relocOwn[pilotRow] >= 0 ? 6 : 0;   // a cross identity stays cross
+        mode[pi] = dependent && relocOwn != nullptr && relocOwn[pilotRow] >= 0 ? GpuRowMode::CROSS_FIXED_VARIABLE : GpuRowMode::FIXED_VARIABLE;  // a cross identity stays cross
         target[pi] = savedVTarget[fi];
         veqOff[fi] = 0;
         switched[s] = act ? 1 : switched[s];
@@ -268,7 +269,7 @@ __global__ void updatePilotVeqBatch(int nQr, int nScenarios, int n,
         // 0.570758104 and the network sat 5.68e-5 kV off.
         target[pi] = flipTarget;
         switched[s] = 1;
-    } else if (lost && !veqOff[fi] && pe >= 0 && mode[pi] == 1 && rlVtarget != nullptr) {
+    } else if (lost && !veqOff[fi] && pe >= 0 && mode[pi] == GpuRowMode::EQUATION && rlVtarget != nullptr) {
         // Lost already in the BASE: the activation laid the pilot's row out as its own Q balance (OLF's
         // BUS_TARGET_V inactive, BUS_TARGET_Q active). Book it as flipped so a member switching back later
         // restores the V identity at the group's target — without this the restore never fired and the
@@ -290,14 +291,14 @@ __global__ void updatePilotVeqBatch(int nQr, int nScenarios, int n,
         if (continuedFlip) {
             target[pi] = flipTarget;
         }
-    } else if (!lost && pe < 0 && mode[pi] == 1 && qrPilotRlEntry != nullptr && qrPilotRlEntry[g] >= 0) {
+    } else if (!lost && pe < 0 && mode[pi] == GpuRowMode::EQUATION && qrPilotRlEntry != nullptr && qrPilotRlEntry[g] >= 0) {
         // The same base-lost case for a PURE-TRANSIT pilot (not one of its own controllers, so no
         // psEntry): the base carried no saved V target - the pilot's own local reactive-limit entry
         // holds the group's target (per-scenario overrides included). A member just unpinned, and
         // OLF gives the pilot its V equation back IN THAT PASS (network.xiidm/LNER: IZUM_0's three
         // members unpinned on a 7.85e-07 pu margin; restoring a pass late cost 0.151 MW of slack).
         int le = qrPilotRlEntry[g];
-        mode[pi] = 0;
+        mode[pi] = GpuRowMode::FIXED_VARIABLE;
         target[pi] = rlTargetOf(nRlVtOv, rlVtOvSlotIdx, rlVtOvVal, svcRlVt, nrl, s, le, rlVtarget[le]);
         switched[s] = 1;
     }

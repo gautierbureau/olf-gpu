@@ -15,6 +15,7 @@
 #include "../common/launch.cuh"
 #include "../common/codes/gpu_q_limit_type.cuh"
 #include "../common/codes/gpu_reactive_term_kind.cuh"
+#include "../common/codes/gpu_row_mode.cuh"
 #include "closed_branch.cuh"
 #include "closed_branch_scatter.h"
 #include "open_branch.cuh"
@@ -75,14 +76,14 @@ __global__ void fillDistrQBatch(int ndq, int nScenarios, int n, int nnz, int nEl
     // STOCK PLACEMENT: a relocated child's sharing row moves to the bus's OWN row in any scenario that
     // kills its parent coupler, which pins that coupler's DUMMY_Q row to an identity (see buildDistrQDest).
     if (dqSel != nullptr && dqSel[c] >= 0 && dqAlt != nullptr
-            && mode[(size_t) s * n + dqSel[c]] == 0 && dqAlt[c * 6] <= -2) {
+            && mode[(size_t) s * n + dqSel[c]] == GpuRowMode::FIXED_VARIABLE && dqAlt[c * 6] <= -2) {
         dqDest = dqAlt;
     }
     // an RL-PINNED remote member's row (mode 4) hosts its OWN Q balance — its DISTR_Q emissions
     // stop for this scenario (the CPU deactivates only that member's DISTR_Q equation)
     {
         int d0 = dqDest[c * 6];
-        if (d0 <= -2 && mode[(size_t) s * n + (-2 - d0)] == 4) return;
+        if (d0 <= -2 && mode[(size_t) s * n + (-2 - d0)] == GpuRowMode::BUS_TARGET_Q) return;
         // plan-B4: the CURRENT pilot-Q carrier's row (a re-picked free role after the base free
         // member pinned) hosts the group's relocated pilot balance — its DISTR_Q row is inactive
         // this scenario, exactly like OLF deactivating the new free member's DISTR_Q equation.
@@ -108,7 +109,7 @@ __global__ void fillDistrQBatch(int ndq, int nScenarios, int n, int nnz, int nEl
     // the coupler then carries no reactive flow at all — the contribution has to go with it. Measured on the
     // middle-section-loss fixtures: the surviving section's DISTR_Q row kept a coefficient 1 on the dead
     // coupler's DUMMY_Q and the solve landed 0.34 kV off (bus vl3_b 401.35 against OLF's 401.69).
-    if (kind == GpuReactiveTermKind::DUMMY_Q && dqZiRow != nullptr && dqZiRow[c] >= 0 && mode[(size_t) s * n + dqZiRow[c]] == 0) return;
+    if (kind == GpuReactiveTermKind::DUMMY_Q && dqZiRow != nullptr && dqZiRow[c] >= 0 && mode[(size_t) s * n + dqZiRow[c]] == GpuRowMode::FIXED_VARIABLE) return;
     double w = dqWeight[c];
     int kM = dqKMember != nullptr ? dqKMember[c] : -1;
     if (kM >= 0) {

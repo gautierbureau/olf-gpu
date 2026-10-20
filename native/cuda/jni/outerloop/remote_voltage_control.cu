@@ -15,6 +15,7 @@
 #include "../common/launch.cuh"
 #include "../common/codes/gpu_q_limit_type.cuh"
 #include "../common/codes/gpu_reactive_term_kind.cuh"
+#include "../common/codes/gpu_row_mode.cuh"
 #include "closed_branch.cuh"
 #include "closed_branch_scatter.h"
 #include "open_branch.cuh"
@@ -70,13 +71,13 @@ __device__ inline double pinnedTargetQ(int s, int e, int n, int nrl, const int* 
                                        const char* rlGenLost) {
     int vrow = rlVrowArr[e];
     int qrow = (rlQrow != nullptr && rlQrow[e] >= 0) ? rlQrow[e] : vrow;
-    if (qrow >= 0 && mode[(size_t) s * n + qrow] == 4) {
+    if (qrow >= 0 && mode[(size_t) s * n + qrow] == GpuRowMode::BUS_TARGET_Q) {
         return target[(size_t) s * n + qrow];
     }
-    if (vrow >= 0 && vrow != qrow && mode[(size_t) s * n + vrow] == 4) {   // the balance went home (coupler opened)
+    if (vrow >= 0 && vrow != qrow && mode[(size_t) s * n + vrow] == GpuRowMode::BUS_TARGET_Q) {  // the balance went home (coupler opened)
         return target[(size_t) s * n + vrow];
     }
-    if (qrow >= 0 && relocOwn != nullptr && relocOwn[qrow] >= 0 && mode[(size_t) s * n + relocOwn[qrow]] == 4) {
+    if (qrow >= 0 && relocOwn != nullptr && relocOwn[qrow] >= 0 && mode[(size_t) s * n + relocOwn[qrow]] == GpuRowMode::BUS_TARGET_Q) {
         return target[(size_t) s * n + relocOwn[qrow]];
     }
     char lt = limitType[(size_t) s * nrl + e];
@@ -121,13 +122,13 @@ __global__ void updateDistrQTargetsBatch(int nMembers, int nScenarios, int n, in
     // identity test below returned and the diverted row kept target 0: measured on the middle-section-loss
     // fixtures as 401.35 kV against OLF's 401.69 once the equation itself had moved.
     int mrow = mRow[k];
-    if (mrow >= 0 && relocOwn != nullptr && relocOwn[mrow] >= 0 && mode[(size_t) s * n + mrow] == 0) {
+    if (mrow >= 0 && relocOwn != nullptr && relocOwn[mrow] >= 0 && mode[(size_t) s * n + mrow] == GpuRowMode::FIXED_VARIABLE) {
         mrow = relocOwn[mrow];
     }
     if (mrow >= 0 && rowIsFrozen(nFrozen, frozenSlotRow, s, mrow)) {
         return;                                              // islanded: the row is frozen, not ours to write
     }
-    if (mrow >= 0 && (mode[(size_t) s * n + mrow] == 0 || mode[(size_t) s * n + mrow] == 6)) {
+    if (mrow >= 0 && (mode[(size_t) s * n + mrow] == GpuRowMode::FIXED_VARIABLE || mode[(size_t) s * n + mrow] == GpuRowMode::CROSS_FIXED_VARIABLE)) {
         // The row is a VOLTAGE IDENTITY this scenario (6: a cross identity on the relocated child's V column): a control OLF re-merged onto this bus after a
         // zero-impedance split (GpuBatchQualification.reHomedControls — the bus is a plain PV bus at its
         // own target, and the member has left the group), or a frozen/outaged row. A DISTR_Q target
@@ -135,7 +136,7 @@ __global__ void updateDistrQTargetsBatch(int nMembers, int nScenarios, int n, in
         // target 1.039 became 0.000 at the first RL pass and the solve ran to MAX_ITERATION on it.
         return;
     }
-    if (mrow >= 0 && mode[(size_t) s * n + mrow] == 4) {
+    if (mrow >= 0 && mode[(size_t) s * n + mrow] == GpuRowMode::BUS_TARGET_Q) {
         // The row hosts its OWN reactive balance this scenario (mode 4): an RL pin (the RL kernel
         // owns the target) or a control the contingency KILLED (the injection override owns it,
         // OLF's BUS_TARGET_Q). A DISTR_Q target has no business here — fillDistrQBatch already
@@ -167,7 +168,7 @@ __global__ void updateDistrQTargetsBatch(int nMembers, int nScenarios, int n, in
             for (int g2 = 0; g2 < nQr; g2++) {
                 if (qrDepBase[g2] != qg) continue;
                 int pr = qrRows[qrPtr[g2]];
-                if (relocOwn != nullptr && relocOwn[pr] >= 0 && mode[(size_t) s * n + pr] == 0) pr = relocOwn[pr];
+                if (relocOwn != nullptr && relocOwn[pr] >= 0 && mode[(size_t) s * n + pr] == GpuRowMode::FIXED_VARIABLE) pr = relocOwn[pr];
                 int pm = mode[(size_t) s * n + pr];
                 if (pm != 0 && pm != 6 && !(veqOff != nullptr && veqOff[(size_t) s * nQr + g2])) continue;
                 int c2 = qrRows[qrPtr[g2] + relocChooseSub(g2, qrPtr, qrRows, mode + (size_t) s * n,
@@ -283,14 +284,14 @@ __global__ void pilotRowAllPinnedBatch(int nEntries, int nScenarios, int n, int 
             break;
         }
     }
-    if (allPinned && !flipped[e] && mode[ri] == 0) {
+    if (allPinned && !flipped[e] && mode[ri] == GpuRowMode::FIXED_VARIABLE) {
         savedVTarget[e] = target[ri];
-        mode[ri] = 4;
+        mode[ri] = GpuRowMode::BUS_TARGET_Q;
         target[ri] = entQTarget[e];
         flipped[e] = 1;
         switched[s] = 1;
     } else if (!allPinned && flipped[e]) {
-        mode[ri] = 0;
+        mode[ri] = GpuRowMode::FIXED_VARIABLE;
         target[ri] = savedVTarget[e];
         flipped[e] = 0;
         switched[s] = 1;

@@ -16,6 +16,7 @@
 #include "../common/codes/gpu_q_limit_type.cuh"
 #include "../common/codes/gpu_voltage_control_role.cuh"
 #include "../common/codes/gpu_reactive_limits_entry_flag.cuh"
+#include "../common/codes/gpu_row_mode.cuh"
 #include "../equations/scatter.cuh"
 #include "../equations/scenario_overrides.cuh"
 #include "reactive_limits_seed.cuh"
@@ -48,7 +49,7 @@ __global__ void initRlLimitTypeBatch(int nrl, int nScenarios, int n, const int* 
     // the bus's own V variable (VOLTAGE reads) and the row its pin state lives on, which the coupler-tree
     // relocation can move to the parent coupler's DUMMY_Q (see dRlQrow)
     int qrow = rlQrow != nullptr ? rlQrow[i] : vrow;
-    if (qrow != vrow && baseMode[qrow] == 0) {
+    if (qrow != vrow && baseMode[qrow] == GpuRowMode::FIXED_VARIABLE) {
         qrow = vrow;                                         // that coupler is open in the BASE: equations at home
     }
     size_t idx = (size_t) s * n + vrow;
@@ -76,10 +77,10 @@ __global__ void initRlLimitTypeBatch(int nrl, int nScenarios, int n, const int* 
             limitType[st] = olfKind >= GpuQLimitType::MIN_Q && olfKind <= GpuQLimitType::MAX_REALISTIC_V ? olfKind : GpuQLimitType::NONE;
             return;
         }
-        if (baseMode[qrow] == 4) {
+        if (baseMode[qrow] == GpuRowMode::BUS_TARGET_Q) {
             double tgt = target[qix];
             limitType[st] = olfKind != GpuQLimitType::NONE ? olfKind
-                    : (fabs(tgt - (rlMaxQb[i] - rlLoadQb[i])) <= fabs(tgt - (rlMinQb[i] - rlLoadQb[i])) ? 2 : 1);
+                    : (fabs(tgt - (rlMaxQb[i] - rlLoadQb[i])) <= fabs(tgt - (rlMinQb[i] - rlLoadQb[i])) ? GpuQLimitType::MAX_Q : GpuQLimitType::MIN_Q);
         }
         return;
     }
@@ -87,12 +88,12 @@ __global__ void initRlLimitTypeBatch(int nrl, int nScenarios, int n, const int* 
     // PQ by a per-scenario gen-loss OVERRIDE (its generator is gone) has base mode 0 and must get limitType 0 so
     // the reactive-limits switch-back leaves it PQ. Only a controller that is PQ in the BASE (an actual Q-limit
     // switch during the base loadflow) gets a pinned limit type so a relieving contingency can switch it back.
-    if (baseMode[qrow] == 1 && (rlMonitored[i] & GpuReactiveLimitsEntryFlag::STAND_BY_AUTOMATON) == 0) {       // PQ in the base case (a real Q-limit switch —
+    if (baseMode[qrow] == GpuRowMode::EQUATION && (rlMonitored[i] & GpuReactiveLimitsEntryFlag::STAND_BY_AUTOMATON) == 0) {       // PQ in the base case (a real Q-limit switch —
         // NOT a monitoring SVC standing by: that one seeds UNPINNED so only the VoltageMonitoring
         // orchestrator may activate it, exactly like the CPU's null qLimitType)
         double vt = rlTargetOf(nRlVtOv, rlVtOvSlotIdx, rlVtOvVal, svcRlVt, nrl, s, i, rlVtarget[i]);
         limitType[st] = olfKind != GpuQLimitType::NONE ? olfKind
-                : ((x[idx] < vt) ? 2 : 1);                  // v below target ⇒ maxQ pinned; above ⇒ minQ pinned
+                : ((x[idx] < vt) ? GpuQLimitType::MAX_Q : GpuQLimitType::MIN_Q);                  // v below target ⇒ maxQ pinned; above ⇒ minQ pinned
     } else {
         limitType[st] = GpuQLimitType::NONE;  // base PV (incl. a per-scenario gen-override flip)
     }
@@ -128,13 +129,13 @@ __global__ void seedRlModeFromState(int nrl, int nScenarios, int n, const int* r
         int pinRow = vrow;
         if (localOv && rlQrow != nullptr && rlQrow[i] >= 0 && rlQrow[i] != vrow) {
             size_t r2 = (size_t) s * n + rlQrow[i];
-            if (mode[r2] == 6 || (mode[r2] == 4 && mode[(size_t) s * n + vrow] != 4)) {
+            if (mode[r2] == GpuRowMode::CROSS_FIXED_VARIABLE || (mode[r2] == GpuRowMode::BUS_TARGET_Q && mode[(size_t) s * n + vrow] != GpuRowMode::BUS_TARGET_Q)) {
                 pinRow = rlQrow[i];
             }
         }
         size_t pidx = (size_t) s * n + pinRow;
-        if (mode[pidx] == 1 || mode[pidx] == 4) {            // still holding the base pin
-            mode[pidx] = pinRow != vrow ? 6 : 0;
+        if (mode[pidx] == GpuRowMode::EQUATION || mode[pidx] == GpuRowMode::BUS_TARGET_Q) {  // still holding the base pin
+            mode[pidx] = pinRow != vrow ? GpuRowMode::CROSS_FIXED_VARIABLE : GpuRowMode::FIXED_VARIABLE;
             target[pidx] = localOv ? rlLocalVt[st] : rlTargetOf(nRlVtOv, rlVtOvSlotIdx, rlVtOvVal, svcRlVt, nrl, s, i, rlVtarget[i]);
         }
         return;
@@ -146,11 +147,11 @@ __global__ void seedRlModeFromState(int nrl, int nScenarios, int n, const int* r
     if (lt == GpuQLimitType::NONE && rlBaseLt != nullptr && rlBaseLt[i] >= GpuQLimitType::MIN_Q && rlBaseLt[i] <= GpuQLimitType::MAX_REALISTIC_V && rlRemote != nullptr && rlRemote[i] != GpuVoltageControlRole::LOCAL
             && !isEnrolledPilot(psEntry, nQr, i)) {
         int vrow = rlVrow[i];
-        int qrow = rlQrow != nullptr && rlQrow[i] >= 0 && rlQrow[i] != vrow && mode[(size_t) s * n + rlQrow[i]] != 0
+        int qrow = rlQrow != nullptr && rlQrow[i] >= 0 && rlQrow[i] != vrow && mode[(size_t) s * n + rlQrow[i]] != GpuRowMode::FIXED_VARIABLE
                 ? rlQrow[i] : vrow;
         size_t qidx = (size_t) s * n + qrow;
-        if (mode[qidx] == 4) {                               // still holding the base pin
-            mode[qidx] = rlRemote[i] == GpuVoltageControlRole::PILOT_SELF ? 0 : 1;
+        if (mode[qidx] == GpuRowMode::BUS_TARGET_Q) {  // still holding the base pin
+            mode[qidx] = rlRemote[i] == GpuVoltageControlRole::PILOT_SELF ? GpuRowMode::FIXED_VARIABLE : GpuRowMode::EQUATION;
             target[qidx] = rlRemote[i] == GpuVoltageControlRole::PILOT_SELF
                     ? rlTargetOf(nRlVtOv, rlVtOvSlotIdx, rlVtOvVal, svcRlVt, nrl, s, i, rlVtarget[i]) : 0.0;
         }
@@ -161,7 +162,7 @@ __global__ void seedRlModeFromState(int nrl, int nScenarios, int n, const int* r
         // the pin's row (see dRlQrow), with the relocation's per-scenario diversion: mode 0 at the relocated row
         // means its coupler is open this scenario and the equations are back on the bus's own rows
         int seedRow = rlQrow != nullptr ? rlQrow[i] : rlVrow[i];
-        if (seedRow != rlVrow[i] && mode[(size_t) s * n + seedRow] == 0) {
+        if (seedRow != rlVrow[i] && mode[(size_t) s * n + seedRow] == GpuRowMode::FIXED_VARIABLE) {
             seedRow = rlVrow[i];
         }
         size_t idx = (size_t) s * n + seedRow;
@@ -176,7 +177,7 @@ __global__ void seedRlModeFromState(int nrl, int nScenarios, int n, const int* r
         savedTarget[(size_t) s * nrl + i] = target[idx];
         savedMode[(size_t) s * nrl + i] = static_cast<char>(mode[idx]);
         // a pinned REMOTE member's row is mode 4 (own Q balance), a pinned local one mode 1
-        mode[idx] = (rlRemote != nullptr && rlRemote[i] != GpuVoltageControlRole::LOCAL) ? 4 : 1;
+        mode[idx] = (rlRemote != nullptr && rlRemote[i] != GpuVoltageControlRole::LOCAL) ? GpuRowMode::BUS_TARGET_Q : GpuRowMode::EQUATION;
         // the pinned target the previous solve ENDED with, when it exported one: OLF restores the bus's generation
         // target Q from the parent's end, which is not the current limit when that limit moved by less than the
         // re-freeze tolerance (rte6515 LINE-3273-1812, VL-6095: 0.7518298 frozen, the curve at 0.7518918)
@@ -211,7 +212,7 @@ __global__ void exportRlPinTargets(int nrl, int nScenarios, int n, const int* rl
         return;
     }
     int seedRow = rlQrow != nullptr ? rlQrow[i] : rlVrow[i];
-    if (seedRow != rlVrow[i] && mode[(size_t) s * n + seedRow] == 0) {
+    if (seedRow != rlVrow[i] && mode[(size_t) s * n + seedRow] == GpuRowMode::FIXED_VARIABLE) {
         seedRow = rlVrow[i];
     }
     out[tid] = target[(size_t) s * n + seedRow];

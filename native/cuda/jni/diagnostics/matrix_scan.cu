@@ -14,6 +14,7 @@
 #include "closed_branch_scatter.h"
 
 #include "../common/check.cuh"
+#include "../common/codes/gpu_row_mode.cuh"
 #include "matrix_scan.cuh"
 
 using namespace powsybl::openloadflow;
@@ -174,7 +175,7 @@ void scanValsFinite(BatchSolverContext* ctx, int nS, int n, int nnz, int outer) 
             if (m >= 0 && m < 8) {
                 modeCount[m]++;
             }
-            if (m == 4 && m4len < 200) {                     // WHICH rows are pinned, so the fill that first
+            if (m == GpuRowMode::BUS_TARGET_Q && m4len < 200) {  // WHICH rows are pinned, so the fill that first
                 m4len += std::snprintf(m4 + m4len, sizeof(m4) - m4len, " %d", r);   // moves one is visible
             }
         }
@@ -285,9 +286,9 @@ void scanValsFinite(BatchSolverContext* ctx, int nS, int n, int nnz, int outer) 
                             int resolved = frozen;
                             if (ctx->st->ziDyn) {
                                 if (sr <= -2) {
-                                    resolved = selMode == 0 ? zalt[o] : frozen;
+                                    resolved = selMode == GpuRowMode::FIXED_VARIABLE ? zalt[o] : frozen;
                                 } else if (sr >= 0) {
-                                    resolved = (selMode == 0 || selMode == 4) ? zalt[o] : frozen;
+                                    resolved = (selMode == GpuRowMode::FIXED_VARIABLE || selMode == GpuRowMode::BUS_TARGET_Q) ? zalt[o] : frozen;
                                 }
                             }
                             std::fprintf(stderr, "    slot=%d(%s) frozen=%d alt=%d sel=%d selMode=%d -> %d\n",

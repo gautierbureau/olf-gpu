@@ -15,6 +15,7 @@
 #include "../common/launch.cuh"
 #include "../common/codes/gpu_outer_loop_kind.cuh"
 #include "../common/codes/gpu_ac_emulation_status.cuh"
+#include "../common/codes/gpu_row_mode.cuh"
 #include "hvdc.cuh"
 
 #include "hvdc_ac_emulation.cuh"
@@ -119,8 +120,8 @@ __global__ void hvdcAcEmulationLoopBatch(int nh, int nScenarios, int n, int nEle
     // placement every other target writer follows). An inactive P row (the slack, ~ encoded) absorbs it, as OLF's does.
     int w1 = hvBus1Row[h];
     int w2 = hvBus2Row[h];
-    if (w1 >= 0 && relocOwn != nullptr && relocOwn[w1] >= 0 && rowMode[(size_t) s * n + w1] == 0) w1 = relocOwn[w1];
-    if (w2 >= 0 && relocOwn != nullptr && relocOwn[w2] >= 0 && rowMode[(size_t) s * n + w2] == 0) w2 = relocOwn[w2];
+    if (w1 >= 0 && relocOwn != nullptr && relocOwn[w1] >= 0 && rowMode[(size_t) s * n + w1] == GpuRowMode::FIXED_VARIABLE) w1 = relocOwn[w1];
+    if (w2 >= 0 && relocOwn != nullptr && relocOwn[w2] >= 0 && rowMode[(size_t) s * n + w2] == GpuRowMode::FIXED_VARIABLE) w2 = relocOwn[w2];
     if (w1 >= 0) {
         atomicAdd(&target[(size_t) s * n + w1], want1 - appliedD1[(size_t) s * nh + h]);
     }

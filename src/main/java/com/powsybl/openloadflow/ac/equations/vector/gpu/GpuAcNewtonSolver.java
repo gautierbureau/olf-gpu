@@ -171,9 +171,9 @@ public final class GpuAcNewtonSolver {
                                          double[] closedBranchParameters, int[] closedBranchIndices, double[] openBranchParameters, int[] openBranchIndices,
                                          double[] shuntParameters, int[] shuntIndices, double[] hvdcAcEmulationParameters, int[] hvdcAcEmulationIndices,
                                          int[] reactiveLimitVoltageRow, double[] reactiveLimitMinQ, double[] reactiveLimitMaxQ, double[] reactiveLimitLoadQ,
-                                         double[] reactiveLimitTargetV, int[] dsPhiRow, double[] dsFactor,
-                                         int dsSlackPhiRow, double dsSlackTargetP,
-                                         double[] dsBaseTargetP, double[] dsMaxDelta, double[] dsMinDelta,
+                                         double[] reactiveLimitTargetV, int[] distributedSlackBusPhiRow, double[] distributedSlackBusFactor,
+                                         int slackBusPhiRow, double slackBusTargetP,
+                                         double[] distributedSlackBusBaseTargetP, double[] dsMaxDelta, double[] dsMinDelta,
                                          int[] distrQElement, int[] distrQSide, double[] distrQWeight, int[] distrQRow, int[] distrQKind,
                                          int[] distrRhoRow, int[] distrRhoColumn, double[] distrRhoCoefficient,
                                          int[] distrShuntBRow, int[] distrShuntBColumn, double[] distrShuntBCoefficient, double[] zeroImpedanceBranchParameters, int[] zeroImpedanceBranchIndices) {
@@ -190,8 +190,8 @@ public final class GpuAcNewtonSolver {
         try {
             long handle = BatchSolveNative.createBatchContext(structure, nScenarios, mode,
                     reactiveLimitVoltageRow, reactiveLimitMinQ, reactiveLimitMaxQ, reactiveLimitLoadQ, reactiveLimitTargetV, new byte[reactiveLimitVoltageRow.length], new double[x0Base.length],
-                    dsPhiRow, dsFactor, dsSlackPhiRow, dsSlackTargetP,
-                    dsBaseTargetP, dsMaxDelta, dsMinDelta, GpuDistributedSlackFactorMode.STATIC, new double[0], new double[0], 0, 0);
+                    distributedSlackBusPhiRow, distributedSlackBusFactor, slackBusPhiRow, slackBusTargetP,
+                    distributedSlackBusBaseTargetP, dsMaxDelta, dsMinDelta, GpuDistributedSlackFactorMode.STATIC, new double[0], new double[0], 0, 0);
             try {
                 // OLF's forced-PV election keys. This one-shot entry point has no network behind it
                 // (the caller hands raw rows), so the keys are NEUTRAL: equal nominal voltage, no

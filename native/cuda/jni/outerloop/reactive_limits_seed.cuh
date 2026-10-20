@@ -21,7 +21,7 @@ __global__ void initReactiveLimitQLimitTypeBatch(int nReactiveLimitEntries, int 
 
 __global__ void seedReactiveLimitRowModeFromState(int nReactiveLimitEntries, int nScenarios, int n, const int* reactiveLimitVoltageRow, const int* reactiveLimitReactivePowerRow,
                                     const double* reactiveLimitMinQ, const double* reactiveLimitMaxQ, const double* reactiveLimitLoadQ,
-                                    const char* limitType, int* mode, double* target, int cvStride,
+                                    const char* limitType, int* mode, double* target, int perScenarioReactiveLimits,
                                     const char* reactiveLimitVoltageControlRole, double* savedTarget, char* savedMode,
                                     const char* reactiveLimitBaseQLimitType, const int* psEntry, int nQr,
                                     const double* reactiveLimitTargetV, int nReactiveLimitTargetVOverrides, const int* reactiveLimitTargetVOverrideScenarioEntry, const double* reactiveLimitTargetVOverrideValue,

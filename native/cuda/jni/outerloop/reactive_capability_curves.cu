@@ -23,7 +23,7 @@ using namespace powsybl::openloadflow;
 
 namespace olfgpu {
 
-__device__ inline double cvHvdcActivePower(const CvHvdc& c, int s, int n, int h, int side) {
+__device__ inline double hvdcStationReactiveLimitsActivePower(const CurveHvdcAcEmulationView& c, int s, int n, int h, int side) {
     size_t sh = (size_t) s * c.nHvdcAcEmulation + h;
     const double* p = c.in + (size_t) h * 9;
     bool off = c.ctgOut[sh] || c.disabled[(size_t) s * c.nElements + c.elem[h]];
@@ -43,22 +43,22 @@ __device__ inline double cvHvdcActivePower(const CvHvdc& c, int s, int n, int h,
 // DS-moved row target - its base) — exact while intra-bus proportionality holds (the pack's DS
 // model). At the base point the delta is bit-zero (same formula both sides).
 // reactiveCapabilityCurveLimitsBatch reads each generator's OWN cumulative P from the distributed-slack water-fill
-// (dGenCum), which clamps PER GENERATOR, instead of splitting its bus's movement by a share fixed at
+// (dDistributedSlackGeneratorMove), which clamps PER GENERATOR, instead of splitting its bus's movement by a share fixed at
 // pack time. The share is exact only while the intra-bus split stays proportional, and a clamp breaks
 // that: on rte6515 GEN-6172 at VL-6139_0 the 451 MW unit takes +0.0442 where its share says +0.0890,
 // which puts the bus's Q box out by 2.67 MVAr and the bus 0.0379 kV off. The share reconstruction
-// survives ONLY as the fallback for entries genCum cannot serve (no DS slot, the per-generator
+// survives ONLY as the fallback for entries distributedSlackGeneratorMove cannot serve (no DS slot, the per-generator
 // water-fill did not run, or the outaged bus's own entries) — there is no switch back to it.
-__global__ void reactiveCapabilityCurveLimitsBatch(int nReactiveLimitEntries, int nScenarios, int ncv, int n, int cvExtrapolate,
-                                   const int* cvIdx, const double* cvIn, const double* cvPts,
-                                   const int* cvPtr, const int* cvList, CvHvdc cvHv,
+__global__ void reactiveCapabilityCurveLimitsBatch(int nReactiveLimitEntries, int nScenarios, int nReactiveCapabilityCurves, int n, int reactiveCapabilityCurveExtrapolate,
+                                   const int* reactiveCapabilityCurveIndices, const double* reactiveCapabilityCurveParameters, const double* reactiveCapabilityCurvePoints,
+                                   const int* reactiveLimitEntryCurveStart, const int* reactiveLimitEntryCurves, CurveHvdcAcEmulationView reactiveCapabilityCurveHvdcStation,
                                    const double* reactiveLimitMinQ, const double* reactiveLimitMaxQ, const double* reactiveLimitLoadQ,
                                    const double* target,
                                    int nQOv, const int* qOvSlotEntry, const double* qOvMinMax,
                                    const int* qOvPtr, const int* qOvList,
-                                   const int* cvOvPtr, const int* cvOvEntry, const double* cvOvVal,
-                                   const double* genCum, const char* genCumValid, const double* dgAnchor, const double* dgStart, int ngen,
-                                   const int* dsPhiRow, const int* dsRowOv, int nds, const int* dgBus,
+                                   const int* reactiveCapabilityCurveOverrideStart, const int* reactiveCapabilityCurveOverrideCurve, const double* reactiveCapabilityCurveOverrideStepScale,
+                                   const double* distributedSlackGeneratorMove, const char* distributedSlackGeneratorMoveValid, const double* distributedSlackGeneratorAnchor, const double* distributedSlackGeneratorInitialMove, int nDistributedSlackGenerators,
+                                   const int* distributedSlackBusPhiRow, const int* distributedSlackBusRowOverride, int nDistributedSlackBuses, const int* distributedSlackGeneratorBus,
                                    double* minQDyn, double* maxQDyn, double* loadQDyn) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nReactiveLimitEntries * nScenarios) return;
@@ -67,15 +67,15 @@ __global__ void reactiveCapabilityCurveLimitsBatch(int nReactiveLimitEntries, in
     double mn = reactiveLimitMinQ[i];
     double mx = reactiveLimitMaxQ[i];
     double lq = reactiveLimitLoadQ[i];
-    int ovLo = cvOvPtr != nullptr ? cvOvPtr[s] : 0;           // this scenario's curve repairs, if any
-    int ovHi = cvOvPtr != nullptr ? cvOvPtr[s + 1] : 0;       // (CSR by scenario: a handful of entries)
+    int ovLo = reactiveCapabilityCurveOverrideStart != nullptr ? reactiveCapabilityCurveOverrideStart[s] : 0;           // this scenario's curve repairs, if any
+    int ovHi = reactiveCapabilityCurveOverrideStart != nullptr ? reactiveCapabilityCurveOverrideStart[s + 1] : 0;       // (CSR by scenario: a handful of entries)
     // This entry's OWN curves, CSR by entry (built at upload, pack order kept so the sums accumulate in the
-    // same order). The flat scan over every curve cost nReactiveLimitEntries * nS * ncv reads per launch - quadratic in the
+    // same order). The flat scan over every curve cost nReactiveLimitEntries * nS * nReactiveCapabilityCurves reads per launch - quadratic in the
     // network's size, and this kernel runs before every reactive-limit decision of every chunk.
-    // (ncv == 0: no curve channel on this context, or a cached context's stale table from an earlier run - the
+    // (nReactiveCapabilityCurves == 0: no curve channel on this context, or a cached context's stale table from an earlier run - the
     // pointers are not read; the kernel still runs for the Q overrides and the forced target Q below.)
-    for (int c = ncv > 0 ? cvPtr[i] : 0; c < (ncv > 0 ? cvPtr[i + 1] : 0); c++) {
-        int g = cvList[c];
+    for (int c = nReactiveCapabilityCurves > 0 ? reactiveLimitEntryCurveStart[i] : 0; c < (nReactiveCapabilityCurves > 0 ? reactiveLimitEntryCurveStart[i + 1] : 0); c++) {
+        int g = reactiveLimitEntryCurves[c];
         // A generator outage at this bus skews the p_now reconstruction below. pStep is the part of
         // the row target the OUTAGE moved (the lost P, and any shed load) — not slack power, so it
         // moves nobody's curve; shareScale renormalizes this generator's slack share over the
@@ -84,28 +84,28 @@ __global__ void reactiveCapabilityCurveLimitsBatch(int nReactiveLimitEntries, in
         double pStep = 0;
         double shareScale = 1;
         for (int k = ovLo; k < ovHi; k++) {
-            if (cvOvEntry[k] == g) {
-                pStep = cvOvVal[2 * k];
-                shareScale = cvOvVal[2 * k + 1];
+            if (reactiveCapabilityCurveOverrideCurve[k] == g) {
+                pStep = reactiveCapabilityCurveOverrideStepScale[2 * k];
+                shareScale = reactiveCapabilityCurveOverrideStepScale[2 * k + 1];
                 break;
             }
         }
         if (shareScale < 0) continue;
-        int pRow = cvIdx[g * 5 + 1];
-        const double* pts = cvPts + cvIdx[g * 5 + 2] * 3;
-        int npts = cvIdx[g * 5 + 3];
-        int slot = cvIdx[g * 5 + 4];
+        int pRow = reactiveCapabilityCurveIndices[g * 5 + 1];
+        const double* pts = reactiveCapabilityCurvePoints + reactiveCapabilityCurveIndices[g * 5 + 2] * 3;
+        int npts = reactiveCapabilityCurveIndices[g * 5 + 3];
+        int slot = reactiveCapabilityCurveIndices[g * 5 + 4];
         // The row that HOSTS this bus's active balance THIS scenario: the slack pack's row for the bus
         // (a coupler-relocated child's is its parent coupler's DUMMY_P row), moved back to the bus's own
-        // PHI row by dsRowOv when the coupler dies. The static pRow is the bus's own PHI row, which for a
+        // PHI row by distributedSlackBusRowOverride when the coupler dies. The static pRow is the bus's own PHI row, which for a
         // relocated child hosts ZERO_PHI (target 0, never moved): read there, the share reconstruction
         // put the child's generator at its BASE P while its pilot sibling sat at the pre-distributed
         // one. Measured on rte6515 BUS-4467_BBS: VL-6231_1 pinned at 0.576013 where OLF (and the pilot
         // VL-6231_0) had 0.566571 - the same unit halves at the same P - and the 9.4e-3 pu of reactive
         // power that put on the coupler moved the slack mismatch by 9.6e-6 pu, the whole 9.56e-4 MW
         // distributed-power gap.
-        if (slot >= 0 && dgBus != nullptr && dsPhiRow != nullptr && dgBus[slot] >= 0) {   // -1: the slack's own
-            pRow = dsRowOf(dsPhiRow, dsRowOv, s, nds, dgBus[slot]);
+        if (slot >= 0 && distributedSlackGeneratorBus != nullptr && distributedSlackBusPhiRow != nullptr && distributedSlackGeneratorBus[slot] >= 0) {   // -1: the slack's own
+            pRow = distributedSlackBusRowOf(distributedSlackBusPhiRow, distributedSlackBusRowOverride, s, nDistributedSlackBuses, distributedSlackGeneratorBus[slot]);
         }
         // This generator's OWN movement, straight from the distributed-slack water-fill, which clamps
         // PER GENERATOR. Splitting its bus's movement by a fixed share is exact only while the
@@ -114,26 +114,26 @@ __global__ void reactiveCapabilityCurveLimitsBatch(int nReactiveLimitEntries, in
         // to its four siblings. The share reconstruction stays as the fallback for an entry with no
         // slot, and for the outaged bus's own entries, whose pStep/shareScale repair is expressed in
         // those terms.
-        // genCum already reflects the outage — the lost generator is marked out of the water-fill and
+        // distributedSlackGeneratorMove already reflects the outage — the lost generator is marked out of the water-fill and
         // the bus's anchor carries its P — so pStep and shareScale, which exist only to repair the
         // share reconstruction on the outaged bus, are not needed when it is available. The lost
         // generator's OWN entry never reaches here (shareScale < 0 continues above). An AC-emulation
-        // VSC is not in the slack distribution: its P is its link's (CvHvdc).
+        // VSC is not in the slack distribution: its P is its link's (CurveHvdcAcEmulationView).
         double pNow;
-        int hvh = cvHv.hv != nullptr ? cvHv.hv[2 * g] : -1;
-        if (hvh >= 0 && cvHv.nHvdcAcEmulation > 0) {
-            pNow = cvHvdcActivePower(cvHv, s, n, hvh, cvHv.hv[2 * g + 1]);
-        } else if (slot >= 0 && (dgAnchor != nullptr || dgStart != nullptr
-                                 || genCum != nullptr && genCumValid != nullptr && genCumValid[s])) {
+        int hvh = reactiveCapabilityCurveHvdcStation.hv != nullptr ? reactiveCapabilityCurveHvdcStation.hv[2 * g] : -1;
+        if (hvh >= 0 && reactiveCapabilityCurveHvdcStation.nHvdcAcEmulation > 0) {
+            pNow = hvdcStationReactiveLimitsActivePower(reactiveCapabilityCurveHvdcStation, s, n, hvh, reactiveCapabilityCurveHvdcStation.hv[2 * g + 1]);
+        } else if (slot >= 0 && (distributedSlackGeneratorAnchor != nullptr || distributedSlackGeneratorInitialMove != nullptr
+                                 || distributedSlackGeneratorMove != nullptr && distributedSlackGeneratorMoveValid != nullptr && distributedSlackGeneratorMoveValid[s])) {
             // the generator's own P: its anchor, plus this solve's water-fill or, before any pass, where the
-            // solve started it (genPNowMove). A share of its bus row's move is not that once anything clamps.
-            pNow = cvIn[g * 5] + genPNowMove(s, slot, ngen, genCum, genCumValid, dgAnchor, dgStart);
+            // solve started it (distributedSlackGeneratorTargetPMove). A share of its bus row's move is not that once anything clamps.
+            pNow = reactiveCapabilityCurveParameters[g * 5] + distributedSlackGeneratorTargetPMove(s, slot, nDistributedSlackGenerators, distributedSlackGeneratorMove, distributedSlackGeneratorMoveValid, distributedSlackGeneratorAnchor, distributedSlackGeneratorInitialMove);
         } else {
-            pNow = cvIn[g * 5]
-                    + cvIn[g * 5 + 1] * shareScale * (target[(size_t) s * n + pRow] - cvIn[g * 5 + 2] - pStep);
+            pNow = reactiveCapabilityCurveParameters[g * 5]
+                    + reactiveCapabilityCurveParameters[g * 5 + 1] * shareScale * (target[(size_t) s * n + pRow] - reactiveCapabilityCurveParameters[g * 5 + 2] - pStep);
         }
-        double mnAdd = evaluateReactiveCapabilityCurve(pNow * 100.0, pts, npts, 0, cvExtrapolate) / 100.0 - cvIn[g * 5 + 3];
-        double mxAdd = evaluateReactiveCapabilityCurve(pNow * 100.0, pts, npts, 1, cvExtrapolate) / 100.0 - cvIn[g * 5 + 4];
+        double mnAdd = evaluateReactiveCapabilityCurve(pNow * 100.0, pts, npts, 0, reactiveCapabilityCurveExtrapolate) / 100.0 - reactiveCapabilityCurveParameters[g * 5 + 3];
+        double mxAdd = evaluateReactiveCapabilityCurve(pNow * 100.0, pts, npts, 1, reactiveCapabilityCurveExtrapolate) / 100.0 - reactiveCapabilityCurveParameters[g * 5 + 4];
         mn += mnAdd;
         mx += mxAdd;
     }
@@ -156,13 +156,13 @@ __global__ void reactiveCapabilityCurveLimitsBatch(int nReactiveLimitEntries, in
     loadQDyn[(size_t) s * nReactiveLimitEntries + i] = lq;
 }
 
-// The curve kernel's view of the AC-emulation loop state (see CvHvdc).
-CvHvdc cvHvdcView(BatchSolverContext* ctx) {
-    CvHvdc c{};
-    if (!ctx->cvHasHvdc) {
+// The curve kernel's view of the AC-emulation loop state (see CurveHvdcAcEmulationView).
+CurveHvdcAcEmulationView curveHvdcAcEmulationView(BatchSolverContext* ctx) {
+    CurveHvdcAcEmulationView c{};
+    if (!ctx->reactiveCapabilityCurveHasHvdc) {
         return c;
     }
-    c.hv = ctx->dCvHv.as<int>();
+    c.hv = ctx->dReactiveCapabilityCurveHvdcStation.as<int>();
     c.nHvdcAcEmulation = ctx->nHvdcAcEmulation;
     if (ctx->nHvdcAcEmulation > 0) {
         c.status = ctx->dHvdcAcEmulationStatus.as<int>();

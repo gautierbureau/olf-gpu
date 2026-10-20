@@ -38,11 +38,11 @@ final class SlackRelocationSeed {
             row[reference] = GpuRowMode.FIXED_VARIABLE;
             rs.rowModePerScenario[s] = row;
             rs.overrides.add(s * n + reference, 0.0);
-            if (cl.dsSlackRows == null) {
-                cl.dsSlackRows = new int[chunkSize];
-                java.util.Arrays.fill(cl.dsSlackRows, -1);
+            if (cl.slackBusRows == null) {
+                cl.slackBusRows = new int[chunkSize];
+                java.util.Arrays.fill(cl.slackBusRows, -1);
             }
-            cl.dsSlackRows[s] = reference;
+            cl.slackBusRows[s] = reference;
             if (cl.outageSlackShift == null) {
                 cl.outageSlackShift = new double[chunkSize];
             }

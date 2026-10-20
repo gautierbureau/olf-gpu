@@ -44,33 +44,33 @@ OLF_JNI(ac_solver_gpu, BatchReadbackNative, readBatchRowModes)(
     return out;
 }
 
-// Per-scenario slack-only-DS absorbed totals after a solve (see slackOnlyDsCheck) — the pair phase
+// Per-scenario slack-only-DS absorbed totals after a solve (see slackOnlyDistributedSlackCheck) — the pair phase
 // seeds its scenarios with the parent contingency's value (the device analogue of OLF's
 // setGeneratorsInitialTargetPToTargetP before a strategy re-solve). Null when not slack-only.
 extern "C" JNIEXPORT jdoubleArray JNICALL
 OLF_JNI(ac_solver_gpu, BatchReadbackNative, readBatchSlackAbsorbed)(
         JNIEnv* env, jclass, jlong handle) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
-    if (ctx == nullptr || !ctx->dsSlackOnly) {
+    if (ctx == nullptr || !ctx->slackOnlyDistribution) {
         return nullptr;
     }
     std::vector<double> host(ctx->nScenarios);
-    cudaMemcpy(host.data(), ctx->dDsSlackAbsorbed.p, ctx->nScenarios * sizeof(double), cudaMemcpyDeviceToHost);
+    cudaMemcpy(host.data(), ctx->dSlackOnlyAbsorbed.p, ctx->nScenarios * sizeof(double), cudaMemcpyDeviceToHost);
     jdoubleArray out = env->NewDoubleArray(static_cast<jsize>(ctx->nScenarios));
     env->SetDoubleArrayRegion(out, 0, static_cast<jsize>(ctx->nScenarios), host.data());
     return out;
 }
 
 extern "C" JNIEXPORT jdoubleArray JNICALL
-OLF_JNI(ac_solver_gpu, BatchReadbackNative, readBatchDsGenCum)(
+OLF_JNI(ac_solver_gpu, BatchReadbackNative, readBatchDistributedSlackGeneratorMove)(
         JNIEnv* env, jclass, jlong handle) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
-    if (ctx == nullptr || ctx->ngen <= 0 || !ctx->dGenCum.p) {
+    if (ctx == nullptr || ctx->nDistributedSlackGenerators <= 0 || !ctx->dDistributedSlackGeneratorMove.p) {
         return nullptr;
     }
-    size_t cnt = static_cast<size_t>(ctx->nScenarios) * ctx->ngen;
+    size_t cnt = static_cast<size_t>(ctx->nScenarios) * ctx->nDistributedSlackGenerators;
     std::vector<double> host(cnt);
-    cudaMemcpy(host.data(), ctx->dGenCum.p, cnt * sizeof(double), cudaMemcpyDeviceToHost);
+    cudaMemcpy(host.data(), ctx->dDistributedSlackGeneratorMove.p, cnt * sizeof(double), cudaMemcpyDeviceToHost);
     jdoubleArray out = env->NewDoubleArray(static_cast<jsize>(cnt));
     env->SetDoubleArrayRegion(out, 0, static_cast<jsize>(cnt), host.data());
     return out;
@@ -80,24 +80,24 @@ OLF_JNI(ac_solver_gpu, BatchReadbackNative, readBatchDsGenCum)(
 // Newton iterations, total Newton iterations}, flattened s*3. The per-contingency counterpart of
 // GPU_OL_HIST, for matching OLF's CPU_OL_STATS contingency by contingency.
 extern "C" JNIEXPORT jintArray JNICALL
-OLF_JNI(ac_solver_gpu, BatchReadbackNative, readBatchOlStats)(
+OLF_JNI(ac_solver_gpu, BatchReadbackNative, readBatchOuterLoopStats)(
         JNIEnv* env, jclass, jlong handle) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
-    if (ctx == nullptr || ctx->olPasses.size() != static_cast<size_t>(ctx->nScenarios)) {
+    if (ctx == nullptr || ctx->outerLoopSolvePasses.size() != static_cast<size_t>(ctx->nScenarios)) {
         return nullptr;
     }
     std::vector<jint> host(static_cast<size_t>(ctx->nScenarios) * 3);
     for (int s = 0; s < ctx->nScenarios; s++) {
-        host[s * 3] = ctx->olPasses[s];
-        host[s * 3 + 1] = ctx->olFirst[s];
-        host[s * 3 + 2] = ctx->olIters[s];
+        host[s * 3] = ctx->outerLoopSolvePasses[s];
+        host[s * 3 + 1] = ctx->outerLoopFirstSolveIterations[s];
+        host[s * 3 + 2] = ctx->outerLoopIterations[s];
     }
     jintArray out = env->NewIntArray(static_cast<jsize>(host.size()));
     env->SetIntArrayRegion(out, 0, static_cast<jsize>(host.size()), host.data());
     return out;
 }
 
-// How many solveBatchContext calls this context has run. The per-solve DS read-backs (retain, genCum,
+// How many solveBatchContext calls this context has run. The per-solve DS read-backs (retain, distributedSlackGeneratorMove,
 // slack absorbed) are reset at every solve, so a caller summing them must know they span its solve.
 extern "C" JNIEXPORT jlong JNICALL
 OLF_JNI(ac_solver_gpu, BatchReadbackNative, readBatchSolveCount)(
@@ -125,14 +125,14 @@ OLF_JNI(ac_solver_gpu, BatchReadbackNative, readBatchLastConvergedState)(
 }
 
 extern "C" JNIEXPORT jdoubleArray JNICALL
-OLF_JNI(ac_solver_gpu, BatchReadbackNative, readBatchDsRetain)(
+OLF_JNI(ac_solver_gpu, BatchReadbackNative, readBatchSlackRetainedShare)(
         JNIEnv* env, jclass, jlong handle) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
-    if (ctx == nullptr || !ctx->dDsRetainApplied.p) {
+    if (ctx == nullptr || !ctx->dSlackRetainedShareApplied.p) {
         return nullptr;
     }
     std::vector<double> host(ctx->nScenarios);
-    cudaMemcpy(host.data(), ctx->dDsRetainApplied.p, ctx->nScenarios * sizeof(double), cudaMemcpyDeviceToHost);
+    cudaMemcpy(host.data(), ctx->dSlackRetainedShareApplied.p, ctx->nScenarios * sizeof(double), cudaMemcpyDeviceToHost);
     jdoubleArray out = env->NewDoubleArray(static_cast<jsize>(ctx->nScenarios));
     env->SetDoubleArrayRegion(out, 0, static_cast<jsize>(ctx->nScenarios), host.data());
     return out;

@@ -195,8 +195,8 @@ public final class GpuBatchInjectionOutages {
      *  per contingency (the native DS override carries one entry per scenario) — more, or any
      *  per-bus disqualification, returns null and the contingency routes to the CPU. */
     static GenOutage[] computeInjectionOutages(EquationSystem<AcVariableType, AcEquationType> es, GpuAcData gpuData,
-                                               double dsSum, boolean slackParticipates,
-                                               com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDsParams dsParams,
+                                               double distributedSlackRawFactorSum, boolean slackParticipates,
+                                               com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDsParams distributedSlackParameters,
                                                List<LfGenerator> gens, List<LoadLoss> loads, int[][] busRows) {
         java.util.Map<LfBus, List<LfGenerator>> byBus = new java.util.LinkedHashMap<>();
         java.util.Map<LfBus, List<LoadLoss>> loadsByBus = new java.util.LinkedHashMap<>();
@@ -212,14 +212,14 @@ public final class GpuBatchInjectionOutages {
         }
         GenOutage[] out = new GenOutage[byBus.size()];
         int k = 0;
-        int dsBuses = 0;
+        int nDistributedSlackOverrideBuses = 0;
         for (java.util.Map.Entry<LfBus, List<LfGenerator>> e : byBus.entrySet()) {
-            GenOutage go = computeBusGenOutage(es, gpuData, dsSum, slackParticipates, dsParams, e.getKey(), e.getValue(),
+            GenOutage go = computeBusGenOutage(es, gpuData, distributedSlackRawFactorSum, slackParticipates, distributedSlackParameters, e.getKey(), e.getValue(),
                     loadsByBus.getOrDefault(e.getKey(), List.of()), busRows);
             if (go == null) {
                 return null;
             }
-            if (go.dsBus() >= 0 && ++dsBuses > 1) {
+            if (go.distributedSlackOverrideBusIndex() >= 0 && ++nDistributedSlackOverrideBuses > 1) {
                 LOGGER.debug("Multi-injection contingency touches several DS-participant buses — CPU fallback");
                 return null;
             }
@@ -266,7 +266,7 @@ public final class GpuBatchInjectionOutages {
      *  Measured on network.xiidm DBIG: a section loss that opens the coupler DBIS while both sides stay energized and
      *  takes a 20 MW load off the child DBIE_1 - the override sat on the DUMMY_P row, the load stayed in the balance,
      *  20.47 MW of distributed active power and 0.374 kV against the CPU, while the root-side twin DBIF (the same load
-     *  size on DBIE_0, the tree's root) matched at 2e-10 kV. The DS participant index ({@code dsBus}) keeps naming
+     *  size on DBIE_0, the tree's root) matched at 2e-10 kV. The DS participant index ({@code distributedSlackOverrideBusIndex}) keeps naming
      *  the structural row: the chunk solver re-points that participant's row the same way. {@code toQ} equal to the
      *  entry's own V row becomes "no relocated Q row" (-1), the entry's Q target then goes to {@code vRow}. */
     public static GenOutage[] rowsHome(GenOutage[] gos, int fromP, int toP, int fromQ, int toQ) {
@@ -305,8 +305,8 @@ public final class GpuBatchInjectionOutages {
     }
 
     private static GenOutage computeBusGenOutage(EquationSystem<AcVariableType, AcEquationType> es, GpuAcData gpuData,
-                                                 double dsSum, boolean slackParticipates,
-                                                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDsParams dsParams, LfBus bus,
+                                                 double distributedSlackRawFactorSum, boolean slackParticipates,
+                                                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDsParams distributedSlackParameters, LfBus bus,
                                                  List<LfGenerator> lost, List<LoadLoss> lostLoads, int[][] busRows) {
         int busNum = bus.getNum();
         // The slack (reference) bus solves without a P balance: OLF drops its BUS_TARGET_P, and its scheduled P is read
@@ -336,7 +336,7 @@ public final class GpuBatchInjectionOutages {
         if (bus.hasGeneratorsWithSlope()) {               // slope-SVC bus outage: the mode-2 row's fate on a
             return null;             // gen loss is not modeled — CPU
         }
-        if (dsParams.isLoadBased() && !lostLoads.isEmpty()) {   // a lost/shifted load changes the LOAD
+        if (distributedSlackParameters.isLoadBased() && !lostLoads.isEmpty()) {   // a lost/shifted load changes the LOAD
             return null;   // participation factors — not modeled: CPU
         }
         java.util.Set<LfGenerator> lostSet = new java.util.HashSet<>(lost);
@@ -344,7 +344,7 @@ public final class GpuBatchInjectionOutages {
         // NOT its own BUS_PHI column (GpuAcDataExtractor#busPowerRows). Resolving it from the variable
         // set instead put every injection override of a relocated bus on a coupling row whose target is
         // 0, so the absolute override was a no-op and the lost injection stayed in the balance — and it
-        // also made the dsPhiRow lookup below miss, dropping the anchor shift. network.xiidm's loads:
+        // also made the distributedSlackBusPhiRow lookup below miss, dropping the anchor shift. network.xiidm's loads:
         // 4183 of 7494 wrong totals, worst 148 MW, 12640 of 13338 buses off by up to 1.03 kV.
         int pRow = slackBus ? -1 : busRows[0][busNum];       // the slack's row is its angle reference
         int vRow = es.getVariableSet().getVariable(busNum, AcVariableType.BUS_V).getRow();
@@ -354,21 +354,21 @@ public final class GpuBatchInjectionOutages {
         // Is this bus a distributed-slack participant? Matters for BOTH shapes: lost generators
         // leave the participation (factor/headroom reweight), AND pure injection deltas (load
         // losses, redispatch actions) shift the row target — which the retain/waterfill accounting
-        // would misread as already-distributed slack power unless dsBaseTargetP shifts with it
+        // would misread as already-distributed slack power unless distributedSlackBusBaseTargetP shifts with it
         // (measured: a +60 MW redispatch cancelled to a no-op before the base-shift fix).
         double preLostLoadP = lostLoads.stream().mapToDouble(LoadLoss::p).sum();
-        int dsBus = -1;
+        int distributedSlackOverrideBusIndex = -1;
         if (!lost.isEmpty() || preLostLoadP != 0) {
-            int[] dsPhiRow = gpuData.distributedSlack().busPhiRow();
-            for (int i = 0; i < dsPhiRow.length; i++) {
-                if (dsPhiRow[i] == pRow) {
-                    dsBus = i;
+            int[] distributedSlackBusPhiRow = gpuData.distributedSlack().busPhiRow();
+            for (int i = 0; i < distributedSlackBusPhiRow.length; i++) {
+                if (distributedSlackBusPhiRow[i] == pRow) {
+                    distributedSlackOverrideBusIndex = i;
                     break;
                 }
             }
         }
-        boolean lostParticipation = lost.stream().anyMatch(g -> dsParams.factor(g) != 0);
-        if (dsParams.isRemainingMargin() && dsBus >= 0 && lostParticipation) {
+        boolean lostParticipation = lost.stream().anyMatch(g -> distributedSlackParameters.factor(g) != 0);
+        if (distributedSlackParameters.isRemainingMargin() && distributedSlackOverrideBusIndex >= 0 && lostParticipation) {
             return null;       // RM margins reweight per scenario: not modeled — CPU
         }
         if (!distrQBus && bus.getGeneratorVoltageControl().map(vc -> vc.getControlledBus() != null
@@ -458,13 +458,13 @@ public final class GpuBatchInjectionOutages {
         // Distributed-slack reweight for the affected bus. The bus's base target P always drops by the lost
         // gen's P. The participation factor / headroom / footroom drop only if the LOST gen itself participated
         // (mirrors the extractor, which sums these over participating gens with a non-zero droop).
-        DsReweight distributedSlackReweightOut = distributedSlackReweight(dsBus, lostP, lostLoadP, lost, dsParams,
-                dsSum, bus, lostSet);
+        DistributedSlackReweight distributedSlackReweightOut = distributedSlackReweight(distributedSlackOverrideBusIndex, lostP, lostLoadP, lost, distributedSlackParameters,
+                distributedSlackRawFactorSum, bus, lostSet);
         if (distributedSlackReweightOut == null) {
             return null;
         }
-        double dsFactorDelta = distributedSlackReweightOut.dsFactorDelta();
-        double dsBaseDelta = distributedSlackReweightOut.dsBaseDelta();
+        double distributedSlackFactorDelta = distributedSlackReweightOut.distributedSlackFactorDelta();
+        double distributedSlackBaseTargetPDelta = distributedSlackReweightOut.distributedSlackBaseTargetPDelta();
         double dsMaxDelta = distributedSlackReweightOut.dsMaxDelta();
         double dsMinDelta = distributedSlackReweightOut.dsMinDelta();
         // A bus that KEEPS voltage control still carries the lost generators' reactive capability in the
@@ -551,7 +551,7 @@ public final class GpuBatchInjectionOutages {
         }
         java.util.Set<String> lostGenIds = lost.stream().map(LfGenerator::getId)
                 .collect(java.util.stream.Collectors.toUnmodifiableSet());
-        double lostFactorSum = lost.stream().mapToDouble(dsParams::factor).sum();
+        double lostFactorSum = lost.stream().mapToDouble(distributedSlackParameters::factor).sum();
         // Same relocation as pRow, on the reactive side: under a coupler the bus's Q BALANCE sits on the
         // parent's DUMMY_Q column, so an absolute Q target written at the BUS_V row is a no-op and the
         // lost load's REACTIVE power stays in the system. Only when the extraction actually moved it —
@@ -569,7 +569,7 @@ public final class GpuBatchInjectionOutages {
                 && gpuData.switchedPvToPqInBase(reactiveLimitEntry)) {
             qTargetRow = busRows[3][busNum];
         }
-        return new GenOutage(pRow, pTarget, vRow, qTarget, toPq, qOverride, dsBus, dsFactorDelta, dsBaseDelta,
+        return new GenOutage(pRow, pTarget, vRow, qTarget, toPq, qOverride, distributedSlackOverrideBusIndex, distributedSlackFactorDelta, distributedSlackBaseTargetPDelta,
                 dsMaxDelta, dsMinDelta, reactiveLimitEntry, minQDelta, maxQDelta, allGensLost, lostGenIds, lostFactorSum,
                 lostLoadP - lostP, loadQDelta, inactiveDistrQMember, pilotSurvivorReactiveLimitEntries,
                 distrQTargetRows, distrQTargetValues, deadRemoteMember ? GpuRowMode.BUS_TARGET_Q : GpuRowMode.EQUATION,
@@ -845,22 +845,22 @@ public final class GpuBatchInjectionOutages {
 
     /** How the outage reweights the bus's distributed-slack participation: the factor, row-target base and
      *  headroom/footroom the lost generators take with them, or null when the shape refuses the contingency. */
-    private static DsReweight distributedSlackReweight(final int dsBus, final double lostP, final double lostLoadP,
+    private static DistributedSlackReweight distributedSlackReweight(final int distributedSlackOverrideBusIndex, final double lostP, final double lostLoadP,
                                                        final List<LfGenerator> lost,
-                                                       final com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDsParams dsParams,
-                                                       final double dsSum, final LfBus bus,
+                                                       final com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDsParams distributedSlackParameters,
+                                                       final double distributedSlackRawFactorSum, final LfBus bus,
                                                        final java.util.Set<LfGenerator> lostSet) {
-        double dsFactorDelta = 0;
-        double dsBaseDelta = 0;
+        double distributedSlackFactorDelta = 0;
+        double distributedSlackBaseTargetPDelta = 0;
         double dsMaxDelta = 0;
         double dsMinDelta = 0;
-        if (dsBus >= 0) {
-            dsBaseDelta = lostP - lostLoadP;                 // net DROP of the row target (load shed RAISES it)
+        if (distributedSlackOverrideBusIndex >= 0) {
+            distributedSlackBaseTargetPDelta = lostP - lostLoadP;                 // net DROP of the row target (load shed RAISES it)
             for (LfGenerator gen : lost) {                   // per-gen deltas compose additively
-                double gf = dsParams.factor(gen);
+                double gf = distributedSlackParameters.factor(gen);
                 if (gf != 0) {
-                    dsFactorDelta += gf / dsSum;
-                    double[] r = dsParams.rooms(gen, gen.getTargetP());
+                    distributedSlackFactorDelta += gf / distributedSlackRawFactorSum;
+                    double[] r = distributedSlackParameters.rooms(gen, gen.getTargetP());
                     // An infinite room (active limits off, OLF's sign rule leaves one side open) cannot be taken
                     // off the bus's aggregate as a delta: it is 0 while another participant on the bus keeps that
                     // side open, and inexpressible (inf - inf) when the survivors all close it.
@@ -868,13 +868,13 @@ public final class GpuBatchInjectionOutages {
                         if (Double.isInfinite(r[side])) {
                             boolean stillOpen = false;
                             for (LfGenerator other : bus.getGenerators()) {
-                                if (!lostSet.contains(other) && dsParams.factor(other) != 0
-                                        && Double.isInfinite(dsParams.rooms(other, other.getTargetP())[side])) {
+                                if (!lostSet.contains(other) && distributedSlackParameters.factor(other) != 0
+                                        && Double.isInfinite(distributedSlackParameters.rooms(other, other.getTargetP())[side])) {
                                     stillOpen = true;
                                     break;
                                 }
                             }
-                            if (!stillOpen && !dsParams.isLoadBased()) {
+                            if (!stillOpen && !distributedSlackParameters.isLoadBased()) {
                                 return null;
                             }
                             r[side] = 0;
@@ -885,10 +885,10 @@ public final class GpuBatchInjectionOutages {
                 }
             }
         }
-        return new DsReweight(dsFactorDelta, dsBaseDelta, dsMaxDelta, dsMinDelta);
+        return new DistributedSlackReweight(distributedSlackFactorDelta, distributedSlackBaseTargetPDelta, dsMaxDelta, dsMinDelta);
     }
 
-    private record DsReweight(double dsFactorDelta, double dsBaseDelta, double dsMaxDelta, double dsMinDelta) {
+    private record DistributedSlackReweight(double distributedSlackFactorDelta, double distributedSlackBaseTargetPDelta, double dsMaxDelta, double dsMinDelta) {
     }
 
     /** The reactive-limit entries of the group's other controllers that keep a VOLTAGE generator after the loss. */

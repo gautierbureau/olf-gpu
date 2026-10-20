@@ -18,7 +18,7 @@ import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuStateVectorScalingMode;
  * {@link GpuBatchedSecurityAnalysisSolver#solveBatchN1} and down to the device call. It used to live
  * in JVM-global static fields set through setters before each run; production was safe only because
  * the provider always wrote every field first, but anything driving the solver DIRECTLY inherited
- * the previous run's values. That leak (a stale {@code dsRejectResidual} from an RTE run rejecting
+ * the previous run's values. That leak (a stale {@code rejectSlackDistributionFailure} from an RTE run rejecting
  * every saturated scenario of the next direct run) is why GpuBatchedPegaseFullLoadflowTest passed
  * alone yet failed in a full-suite run. Making it a parameter removes the leak by construction; the
  * leak was one-directional (a stale {@code true} over-rejects — slow but correct; a stale
@@ -33,7 +33,7 @@ import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuStateVectorScalingMode;
  *       orchestrator (set only when the resolved outer loops include it and the network is in scope).</li>
  *   <li>{@code maxOuterIterations}/{@code maxPqPvSwitch}: OLF's maxOuterLoopIterations and
  *       reactiveLimitsMaxPqPvSwitch replacing the device constants; 0 = device default (20 / 3).</li>
- *   <li>{@code dsRejectResidual}: a slackDistributionFailureBehavior other than LEAVE_ON_SLACK_BUS
+ *   <li>{@code rejectSlackDistributionFailure}: a slackDistributionFailureBehavior other than LEAVE_ON_SLACK_BUS
  *       makes a saturated distribution REJECT the scenario (CPU fallback replays it with the real
  *       behavior) instead of silently leaving the residual at the slack.</li>
  *   <li>{@code forceTargetQ}: OLF's forceTargetQInReactiveLimits with reactive limits on - curve generators'
@@ -43,8 +43,8 @@ import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuStateVectorScalingMode;
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
 public record BatchConfig(int lsMode, double maxDv, double maxDphi, boolean transformerControl,
-                          int maxOuterIterations, int maxPqPvSwitch, boolean dsRejectResidual,
-                          com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDsParams dsParams,
+                          int maxOuterIterations, int maxPqPvSwitch, boolean rejectSlackDistributionFailure,
+                          com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDsParams distributedSlackParameters,
                           boolean incrementalTransformerControl, int incTvcMaxTapShift,
                           boolean incrementalShuntControl, int incShuntMaxSectionShift,
                           boolean simpleShuntControl,
@@ -97,7 +97,7 @@ public record BatchConfig(int lsMode, double maxDv, double maxDphi, boolean tran
      */
     public BatchConfig withRobustSolveMode() {
         return new BatchConfig(lsMode, maxDv, maxDphi, transformerControl, maxOuterIterations, maxPqPvSwitch,
-                dsRejectResidual, dsParams, incrementalTransformerControl, incTvcMaxTapShift,
+                rejectSlackDistributionFailure, distributedSlackParameters, incrementalTransformerControl, incTvcMaxTapShift,
                 incrementalShuntControl, incShuntMaxSectionShift, simpleShuntControl, incrementalRpcControl,
                 incrementalPhaseControl, simpleTransformerControl, tvcUseInitialTapPosition, hvdcFreezing,
                 hvdcLimits, secondaryVoltageControl, minPlausibleTargetV, maxPlausibleTargetV, voltageMonitoring,
@@ -110,7 +110,7 @@ public record BatchConfig(int lsMode, double maxDv, double maxDphi, boolean tran
     /** This config with the given state sink (see {@link #stateSink()}). */
     public BatchConfig withStateSink(java.util.Map<String, double[]> sink) {
         return new BatchConfig(lsMode, maxDv, maxDphi, transformerControl, maxOuterIterations, maxPqPvSwitch,
-                dsRejectResidual, dsParams, incrementalTransformerControl, incTvcMaxTapShift,
+                rejectSlackDistributionFailure, distributedSlackParameters, incrementalTransformerControl, incTvcMaxTapShift,
                 incrementalShuntControl, incShuntMaxSectionShift, simpleShuntControl, incrementalRpcControl,
                 incrementalPhaseControl, simpleTransformerControl, tvcUseInitialTapPosition, hvdcFreezing,
                 hvdcLimits, secondaryVoltageControl, minPlausibleTargetV, maxPlausibleTargetV, voltageMonitoring,
@@ -123,7 +123,7 @@ public record BatchConfig(int lsMode, double maxDv, double maxDphi, boolean tran
     /** This config with the given GPU solver parameters (see {@link #gpuParameters()}). */
     public BatchConfig withGpuParameters(GpuLoadFlowParameters parameters) {
         return new BatchConfig(lsMode, maxDv, maxDphi, transformerControl, maxOuterIterations, maxPqPvSwitch,
-                dsRejectResidual, dsParams, incrementalTransformerControl, incTvcMaxTapShift,
+                rejectSlackDistributionFailure, distributedSlackParameters, incrementalTransformerControl, incTvcMaxTapShift,
                 incrementalShuntControl, incShuntMaxSectionShift, simpleShuntControl, incrementalRpcControl,
                 incrementalPhaseControl, simpleTransformerControl, tvcUseInitialTapPosition, hvdcFreezing,
                 hvdcLimits, secondaryVoltageControl, minPlausibleTargetV, maxPlausibleTargetV, voltageMonitoring,
@@ -138,7 +138,7 @@ public record BatchConfig(int lsMode, double maxDv, double maxDphi, boolean tran
         return gpuParameters != null ? gpuParameters : GpuLoadFlowParameters.load(PlatformConfig.defaultConfig());
     }
 
-    public int dsRejectResidualFlag() {
-        return dsRejectResidual ? 1 : 0;
+    public int rejectSlackDistributionFailureFlag() {
+        return rejectSlackDistributionFailure ? 1 : 0;
     }
 }

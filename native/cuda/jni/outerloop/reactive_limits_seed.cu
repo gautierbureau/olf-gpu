@@ -101,7 +101,7 @@ __global__ void initReactiveLimitQLimitTypeBatch(int nReactiveLimitEntries, int 
 
 __global__ void seedReactiveLimitRowModeFromState(int nReactiveLimitEntries, int nScenarios, int n, const int* reactiveLimitVoltageRow, const int* reactiveLimitReactivePowerRow,
                                     const double* reactiveLimitMinQ, const double* reactiveLimitMaxQ, const double* reactiveLimitLoadQ,
-                                    const char* limitType, int* mode, double* target, int cvStride,
+                                    const char* limitType, int* mode, double* target, int perScenarioReactiveLimits,
                                     const char* reactiveLimitVoltageControlRole, double* savedTarget, char* savedMode,
                                     const char* reactiveLimitBaseQLimitType, const int* psEntry, int nQr,
                                     const double* reactiveLimitTargetV, int nReactiveLimitTargetVOverrides, const int* reactiveLimitTargetVOverrideScenarioEntry, const double* reactiveLimitTargetVOverrideValue,
@@ -166,7 +166,7 @@ __global__ void seedReactiveLimitRowModeFromState(int nReactiveLimitEntries, int
             seedRow = reactiveLimitVoltageRow[i];
         }
         size_t idx = (size_t) s * n + seedRow;
-        size_t li = cvStride ? (size_t) s * nReactiveLimitEntries + i : (size_t) i;
+        size_t li = perScenarioReactiveLimits ? (size_t) s * nReactiveLimitEntries + i : (size_t) i;
         // What the row looked like BEFORE this seed is what a later switch-back restores. Leaving it
         // unwritten let the restore read whatever the previous solve left in this slot: the buffers are
         // per (entry, SLOT) and a context is reused chunk after chunk, so an entry pinned at seed time

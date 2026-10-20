@@ -114,7 +114,7 @@ public final class GpuAcDataExtractor {
     public static GpuAcData extract(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
                                     boolean distributedSlack, boolean reactiveLimits,
                                     java.util.Set<String> baseOpenBranchIds,
-                                    java.util.Set<String> baseOpenZeroImpedanceBranchIdList, GpuDsParams dsParams) {
+                                    java.util.Set<String> baseOpenZeroImpedanceBranchIdList, GpuDsParams distributedSlackParameters) {
         GpuAcValidation.validate(es);
         ExtractionColumns columns = ExtractionColumns.of(network, es);
         GpuAcFamilyPacker.Packs family = GpuAcFamilyPacker.pack(network, columns, baseOpenBranchIds, baseOpenZeroImpedanceBranchIdList);
@@ -124,7 +124,7 @@ public final class GpuAcDataExtractor {
         LinearDistributionTerms distrShuntB = DistrShuntBPacker.distrShuntBPack(network, es, columns);
 
         RemoteMemberReactiveTerms remoteMemberReactiveTerms = RemoteMemberQPacker.remoteMemberQPack(network, es, columns, family, reactiveLimits);
-        DistributedSlackParticipants ds = DistributedSlackPacker.distributedSlackPack(network, es, columns, distributedSlack, dsParams);
+        DistributedSlackParticipants ds = DistributedSlackPacker.distributedSlackPack(network, es, columns, distributedSlack, distributedSlackParameters);
         // SLOPE-SVC rows (V + slope*sumQ = target, row mode 2): per-row slope, 0 everywhere else
         double[] rowSlope = new double[es.getIndex().getSortedVariablesToFind().size()];
         for (com.powsybl.openloadflow.network.LfBus bus : network.getBuses()) {

@@ -27,19 +27,19 @@ public final class BatchReadbackNative {
 
     /** The driver's DistributedSlack result per (scenario, participating generator): the cumulative
      *  target delta (pu) the water-fill gave each generator — null when the context has no per-generator
-     *  list. Layout {@code s * ngen + g}, g in the extraction's generator order. */
-    public static native double[] readBatchDsGenCum(long handle);
+     *  list. Layout {@code s * nDistributedSlackGenerators + g}, g in the extraction's generator order. */
+    public static native double[] readBatchDistributedSlackGeneratorMove(long handle);
 
     /** Per scenario, the slack's RETAINED share of the distributed mismatch (pu) — what OLF's own loop
      *  gives the slack bus's participating generators, which have no device row of their own. */
-    public static native double[] readBatchDsRetain(long handle);
+    public static native double[] readBatchSlackRetainedShare(long handle);
 
     /** One scenario's state at its last CONVERGED inner solve of the last solve, or its starting state when none
      *  converged: what OLF's network holds after a run that failed, where it starts that contingency's strategies. */
     public static native double[] readBatchLastConvergedState(long handle, int slot);
 
     /** Per scenario of the last batch solve: {solve passes, first pass's Newton iterations, total}, flattened. */
-    public static native int[] readBatchOlStats(long handle);
+    public static native int[] readBatchOuterLoopStats(long handle);
 
     /** The per-scenario ROW MODES the device ended with — the companion to {@link #readBatchTargets}.
      *  A row's equation is (mode, target) TOGETHER, and the outer-loop kernels rewrite both; the host's
@@ -52,7 +52,7 @@ public final class BatchReadbackNative {
     public static native double[] readBatchSlackAbsorbed(long handle);
 
     /** How many {@code solveBatchContext} calls the context has run. The distributed-slack read-backs
-     *  ({@link #readBatchDsRetain}, {@link #readBatchDsGenCum}, {@link #readBatchSlackAbsorbed}) are reset at
+     *  ({@link #readBatchSlackRetainedShare}, {@link #readBatchDistributedSlackGeneratorMove}, {@link #readBatchSlackAbsorbed}) are reset at
      *  every solve: they describe the whole distribution only when one solve covered it. */
     public static native long readBatchSolveCount(long handle);
 

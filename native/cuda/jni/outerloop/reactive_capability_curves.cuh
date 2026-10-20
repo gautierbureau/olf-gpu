@@ -18,7 +18,7 @@ namespace olfgpu {
 // link in the linear mode (LfVscConverterStationImpl.getReactiveLimitsActivePower: minus the side's emulation term),
 // and at its target P otherwise (saturated, frozen, disabled link), which the HVDC loop holds as baseD + appliedD.
 // hv == nullptr: no such entry. nHvdcAcEmulation == 0: the HVDC loops are not on this context (then nothing was packed).
-struct CvHvdc {
+struct CurveHvdcAcEmulationView {
     const int* hv;            // per curve entry {hvdc index in the loop pack, side 1|2}, -1 for a plain generator
     int nHvdcAcEmulation;
     const int* status;        // per (scenario, hvdc)
@@ -35,19 +35,19 @@ struct CvHvdc {
 };
 
 // The curve kernel's view of the AC-emulation loop state.
-CvHvdc cvHvdcView(BatchSolverContext* ctx);
+CurveHvdcAcEmulationView curveHvdcAcEmulationView(BatchSolverContext* ctx);
 
 // Reactive limits of every curve entry at the scenario's current active power.
-__global__ void reactiveCapabilityCurveLimitsBatch(int nReactiveLimitEntries, int nScenarios, int ncv, int n, int cvExtrapolate,
-                                   const int* cvIdx, const double* cvIn, const double* cvPts,
-                                   const int* cvPtr, const int* cvList, CvHvdc cvHv,
+__global__ void reactiveCapabilityCurveLimitsBatch(int nReactiveLimitEntries, int nScenarios, int nReactiveCapabilityCurves, int n, int reactiveCapabilityCurveExtrapolate,
+                                   const int* reactiveCapabilityCurveIndices, const double* reactiveCapabilityCurveParameters, const double* reactiveCapabilityCurvePoints,
+                                   const int* reactiveLimitEntryCurveStart, const int* reactiveLimitEntryCurves, CurveHvdcAcEmulationView reactiveCapabilityCurveHvdcStation,
                                    const double* reactiveLimitMinQ, const double* reactiveLimitMaxQ, const double* reactiveLimitLoadQ,
                                    const double* target,
                                    int nQOv, const int* qOvSlotEntry, const double* qOvMinMax,
                                    const int* qOvPtr, const int* qOvList,
-                                   const int* cvOvPtr, const int* cvOvEntry, const double* cvOvVal,
-                                   const double* genCum, const char* genCumValid, const double* dgAnchor, const double* dgStart, int ngen,
-                                   const int* dsPhiRow, const int* dsRowOv, int nds, const int* dgBus,
+                                   const int* reactiveCapabilityCurveOverrideStart, const int* reactiveCapabilityCurveOverrideCurve, const double* reactiveCapabilityCurveOverrideStepScale,
+                                   const double* distributedSlackGeneratorMove, const char* distributedSlackGeneratorMoveValid, const double* distributedSlackGeneratorAnchor, const double* distributedSlackGeneratorInitialMove, int nDistributedSlackGenerators,
+                                   const int* distributedSlackBusPhiRow, const int* distributedSlackBusRowOverride, int nDistributedSlackBuses, const int* distributedSlackGeneratorBus,
                                    double* minQDyn, double* maxQDyn, double* loadQDyn);
 
 }  // namespace olfgpu

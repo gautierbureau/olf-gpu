@@ -250,34 +250,34 @@ final class GenOutageSeed {
                     //  - the survivors now share the bus's slack over their own
                     //    factors alone, so each one's share renormalizes.
                     for (int e : curveEntriesByPRow.get(go.pRow())) {
-                        double busFactor = reactiveCapabilityCurves.cvBusFactor()[e];
+                        double busFactor = reactiveCapabilityCurves.reactiveCapabilityCurveBusFactor()[e];
                         double left = busFactor - go.lostFactorSum();
-                        boolean dead = go.lostGenIds().contains(reactiveCapabilityCurves.cvGenId()[e]);
-                        cl.cvOvSlot.add(s);
-                        cl.cvOvSlot.add(e);
-                        cl.cvOvVal.add(go.pStep());
+                        boolean dead = go.lostGenIds().contains(reactiveCapabilityCurves.reactiveCapabilityCurveGeneratorId()[e]);
+                        cl.reactiveCapabilityCurveOverrideScenarioCurve.add(s);
+                        cl.reactiveCapabilityCurveOverrideScenarioCurve.add(e);
+                        cl.reactiveCapabilityCurveOverrideStepScale.add(go.pStep());
                         // an AC-emulation VSC's P is its link's: only its own loss matters
-                        cl.cvOvVal.add(dead || !reactiveCapabilityCurves.isHvdc(e) && left <= 0 ? -1
+                        cl.reactiveCapabilityCurveOverrideStepScale.add(dead || !reactiveCapabilityCurves.isHvdc(e) && left <= 0 ? -1
                                 : reactiveCapabilityCurves.isHvdc(e) ? 1 : busFactor / left);
                     }
                 }
-                if (rs.hasDs && go.dsBus() >= 0) {   // lost gen(s) on a DS-participant bus: per-scenario reweight
-                    rs.dsOvBus[s] = go.dsBus();
-                    rs.dsOvFactorDelta[s] = go.dsFactorDelta();
-                    rs.dsOvBaseDelta[s] = go.dsBaseDelta();
-                    rs.dsOvMaxDelta[s] = go.dsMaxDelta();
-                    rs.dsOvMinDelta[s] = go.dsMinDelta();
+                if (rs.hasDistributedSlack && go.distributedSlackOverrideBusIndex() >= 0) {   // lost gen(s) on a DS-participant bus: per-scenario reweight
+                    rs.distributedSlackOverrideBus[s] = go.distributedSlackOverrideBusIndex();
+                    rs.distributedSlackOverrideFactorDelta[s] = go.distributedSlackFactorDelta();
+                    rs.distributedSlackOverrideBaseTargetPDelta[s] = go.distributedSlackBaseTargetPDelta();
+                    rs.distributedSlackOverrideMaxDelta[s] = go.dsMaxDelta();
+                    rs.distributedSlackOverrideMinDelta[s] = go.dsMinDelta();
                     // ...and WHICH generators left, as slots in the DS generator pack. With the
                     // identity the outaged bus's SURVIVORS can take part in the per-generator
                     // water-fill like any others, instead of the bus riding on one aggregate
-                    // entry — which is what leaves their own P unknown (genCum stays zero
+                    // entry — which is what leaves their own P unknown (distributedSlackGeneratorMove stays zero
                     // there) and sends the curve channel back to the share model that
                     // per-generator clamping breaks.
-                    String[] dgIds = gpuData.distributedSlack().generatorId();
-                    for (int g = 0; dgIds != null && g < dgIds.length; g++) {
-                        if (go.lostGenIds().contains(dgIds[g])) {
-                            cl.dsLostGenList.add(s);
-                            cl.dsLostGenList.add(g);
+                    String[] distributedSlackGeneratorIds = gpuData.distributedSlack().generatorId();
+                    for (int g = 0; distributedSlackGeneratorIds != null && g < distributedSlackGeneratorIds.length; g++) {
+                        if (go.lostGenIds().contains(distributedSlackGeneratorIds[g])) {
+                            cl.distributedSlackLostGeneratorList.add(s);
+                            cl.distributedSlackLostGeneratorList.add(g);
                         }
                     }
                 }

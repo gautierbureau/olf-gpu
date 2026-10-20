@@ -142,9 +142,9 @@ class GpuBatchedPegaseFullLoadflowTest {
         // zero-impedance / disconnection-allowed throw on this scope.
         GpuAcData gpuData = GpuAcDataExtractor.extract(network, es);
         int nReactiveLimitEntries = gpuData.getReactiveLimitCount();
-        int nDs = gpuData.getDistributedSlackBusCount();
+        int nDistributedSlackBuses = gpuData.getDistributedSlackBusCount();
         System.out.printf("PEGASE-9241 GPU full-loadflow scope: %d reactive-limit controllers, %d distributed-slack buses%n",
-                nReactiveLimitEntries, nDs);
+                nReactiveLimitEntries, nDistributedSlackBuses);
         assertTrue(nReactiveLimitEntries > 0, "expected local PV controllers to exercise reactive limits");
 
         // Converged base-case AC state (the hot start), exactly as the throughput bench does.

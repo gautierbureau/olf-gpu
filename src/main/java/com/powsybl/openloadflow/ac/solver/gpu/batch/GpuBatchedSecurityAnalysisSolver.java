@@ -118,10 +118,10 @@ public final class GpuBatchedSecurityAnalysisSolver {
                 .filter(b -> b.isZeroImpedance(com.powsybl.openloadflow.network.LoadFlowModel.AC))
                 .map(LfBranch::getId)
                 .collect(java.util.stream.Collectors.toSet());
-        com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDsParams dsParams = config.dsParams();
+        com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDsParams distributedSlackParameters = config.distributedSlackParameters();
         GpuAcData gpuData = baseOpenIds.isEmpty() && baseOpenZeroImpedanceBranchIds.isEmpty()
-                ? GpuAcDataCache.extract(network, equationSystem, distributedSlack, reactiveLimits, dsParams)
-                : GpuAcDataExtractor.extract(network, equationSystem, distributedSlack, reactiveLimits, baseOpenIds, baseOpenZeroImpedanceBranchIds, dsParams);
+                ? GpuAcDataCache.extract(network, equationSystem, distributedSlack, reactiveLimits, distributedSlackParameters)
+                : GpuAcDataExtractor.extract(network, equationSystem, distributedSlack, reactiveLimits, baseOpenIds, baseOpenZeroImpedanceBranchIds, distributedSlackParameters);
         GpuAcActivation baseActivation = GpuAcActivation.fromEquationSystem(network, equationSystem);
         String saEqDump = System.getenv("OLF_GPU_SA_EQ_DUMP");   // the SA extraction's row map (GpuEquationDump)
         if (saEqDump != null && !saEqDump.isEmpty()) {
@@ -159,11 +159,11 @@ public final class GpuBatchedSecurityAnalysisSolver {
         // Distributed-slack factor denominator (Σ maxP/droop over ALL participating gens, incl. the slack's)
         // and whether the slack itself participates: a generator at a DS-participant bus is batched with a
         // per-scenario reweight (computeGenOutage), but only when the slack does not participate.
-        double dsSum = 0;
+        double distributedSlackRawFactorSum = 0;
         if (distributedSlack) {                              // no slack distribution ⇒ no per-scenario DS reweight
             for (LfBus b : network.getBuses()) {
                 for (LfGenerator g : b.getGenerators()) {
-                    dsSum += dsParams.factor(g);
+                    distributedSlackRawFactorSum += distributedSlackParameters.factor(g);
                 }
             }
         }
@@ -171,19 +171,19 @@ public final class GpuBatchedSecurityAnalysisSolver {
         // Reactive capability CURVES at runtime P (ReactiveCapabilityCurves): each tracked generator is evaluated at its own
         // P (its anchor plus its own slack move); a strategy pair moving an untracked curve generator -> CPU.
         ReactiveCapabilityCurves.Channel reactiveCapabilityCurves = reactiveLimits
-                ? ReactiveCapabilityCurves.build(network, equationSystem, gpuData, config.dsParams(), distributedSlack, baseTargets,
+                ? ReactiveCapabilityCurves.build(network, equationSystem, gpuData, config.distributedSlackParameters(), distributedSlack, baseTargets,
                         config.extrapolateReactiveLimits())
                 : null;
         // forceTargetQInReactiveLimits: the curve generators whose clamped Q target follows their P (null = none).
         ForceTargetQInReactiveLimits.Channel forcedTargetQ = reactiveLimits
-                ? ForceTargetQInReactiveLimits.build(network, equationSystem, gpuData, config.dsParams(), config.forceTargetQ(),
+                ? ForceTargetQInReactiveLimits.build(network, equationSystem, gpuData, config.distributedSlackParameters(), config.forceTargetQ(),
                         distributedSlack, baseTargets, baseActivation.rowMode(), config.extrapolateReactiveLimits())
                 : null;
         // Couplers whose DUMMY rows host a bus's power equations under the tree relocation: an island has to
         // freeze those rows too (see IslandedBuses.islandedFrozen). Empty when the relocation is off.
         Set<LfBranch> relocatedCouplers = GpuAcDataExtractor.relocatedCouplerBranches(network, equationSystem);
         GpuBatchQualification.ScenarioPlan plan = GpuBatchQualification.planScenarios(contingencies, qualifications,
-                elementMapper, gpuData, equationSystem, dsSum, slackParticipates, dsParams, distrRhoControllers,
+                elementMapper, gpuData, equationSystem, distributedSlackRawFactorSum, slackParticipates, distributedSlackParameters, distrRhoControllers,
                 relocatedCouplers, reactiveLimits, config.incrementalTransformerControl());
         List<Integer> batchedIndices = plan.batchedIndices();
         if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {

@@ -11,15 +11,15 @@
 namespace olfgpu {
 
 // Kernels launched by the driver and the distributed slack.
-__global__ void forcedTargetQInitBatch(int nfq, int nS, int n, int nds, int extrapolate, const int* fqIdx,
-                                       const double* fqIn, const double* fqPts, const double* fqPre,
-                                       int nLost, const int* lost, const char* dsIslanded, const int* mode,
+__global__ void forcedTargetQInitBatch(int nForcedTargetQ, int nS, int n, int nDistributedSlackBuses, int extrapolate, const int* forcedTargetQIndices,
+                                       const double* forcedTargetQParameters, const double* forcedTargetQPoints, const double* forcedTargetQPreDistribution,
+                                       int nLost, const int* lost, const char* distributedSlackIslanded, const int* mode,
                                        double* target, double* applied);
 
-__global__ void forcedTargetQBatch(int nfq, int nS, int n, int nds, int ngen, int extrapolate, const int* fqIdx,
-                                   const double* fqIn, const double* fqPts, const double* fqPre,
-                                   const double* genCum, const char* genCumValid, const double* dgAnchor,
-                                   const double* dgStart, const int* dsPhiRow, const int* dsRowOv, int nLost, const int* lost, const char* dsIslanded,
+__global__ void forcedTargetQBatch(int nForcedTargetQ, int nS, int n, int nDistributedSlackBuses, int nDistributedSlackGenerators, int extrapolate, const int* forcedTargetQIndices,
+                                   const double* forcedTargetQParameters, const double* forcedTargetQPoints, const double* forcedTargetQPreDistribution,
+                                   const double* distributedSlackGeneratorMove, const char* distributedSlackGeneratorMoveValid, const double* distributedSlackGeneratorAnchor,
+                                   const double* distributedSlackGeneratorInitialMove, const int* distributedSlackBusPhiRow, const int* distributedSlackBusRowOverride, int nLost, const int* lost, const char* distributedSlackIslanded,
                                    const int* mode, const char* outerLoopCheckActive, double* target, double* applied);
 
 // Clamp the reactive limits of the forced-target-Q generators at their current active power.

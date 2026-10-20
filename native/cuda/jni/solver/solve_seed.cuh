@@ -11,9 +11,9 @@
 
 namespace olfgpu {
 
-// Seed one fresh full load flow; reactiveLimitsSeedState = a previous solve's pins (or null), dsSlackShift = a strategy
+// Seed one fresh full load flow; reactiveLimitsSeedState = a previous solve's pins (or null), slackBusAnchorShift = a strategy
 // pair's parent slack total (or null).
-void seedSolve(BatchSolverContext* ctx, DriverPass& drv, const int* reactiveLimitsSeedState, const double* dsSlackShift);
+void seedSolve(BatchSolverContext* ctx, DriverPass& drv, const int* reactiveLimitsSeedState, const double* slackBusAnchorShift);
 
 }  // namespace olfgpu
 

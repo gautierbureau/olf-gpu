@@ -29,10 +29,10 @@ final class ChunkLists {
 
     // {slot, participant} pairs: the distributed-slack participants this scenario
     // strands in another synchronous component (see distributeSlackBatch).
-    final List<Integer> dsIslandedList = new ArrayList<>();
+    final List<Integer> distributedSlackIslandedList = new ArrayList<>();
     // {slot, participant, row} triples: a DS participant whose P-balance row this
     // scenario MOVES. Under the coupler-tree relocation a child bus's P balance lives on
-    // its parent coupler's DUMMY_P row, and dsPhiRow — a STRUCTURAL array — points there.
+    // its parent coupler's DUMMY_P row, and distributedSlackBusPhiRow — a STRUCTURAL array — points there.
     // A contingency that opens that coupler pins the dummy row to a DUMMY_TARGET identity
     // and the stock-placement fallback puts the balance back on the child's OWN phi row,
     // so for THAT scenario the participant's row is the child's. Without this the whole DS
@@ -41,10 +41,10 @@ final class ChunkLists {
     // (0 - anchor) as -1.043213 of "absorbed", so the slack loop fired four times where
     // OLF fires once and over-placed 0.0687 pu on the rows that still worked (0.34 kV on
     // vl3_b). Per chunk, like every other list here — the index is a chunk SLOT.
-    final List<Integer> dsRowOvList = new ArrayList<>();
+    final List<Integer> distributedSlackBusRowOverrideList = new ArrayList<>();
     // ...and the same diversion host-side, for the loss pre-distribution below (it runs
     // after this loop and composes its shares onto the participants' rows).
-    final int[][] dsRowOvBySlot;
+    final int[][] distributedSlackBusRowOverrideByScenario;
     final List<Integer> reactiveLimitIslandedScenarioEntryList = new ArrayList<>();
     final List<Integer> reactiveLimitPqPvSwitchForbiddenScenarioEntryList = new ArrayList<>();   // (scenario, entry): an unpin rejects the scenario
     final List<Integer> reactiveLimitGeneratorsLostScenarioEntryList = new ArrayList<>();   // (scenario, entry): the bus lost every generator
@@ -65,8 +65,8 @@ final class ChunkLists {
     // {slot, curveEntry} pairs + {pStep, shareScale}: how a generator outage repairs
     // the reactive-capability CURVE channel at its own bus (shareScale < 0 = the entry
     // is the lost generator's own and stops evaluating).
-    final List<Integer> cvOvSlot = new ArrayList<>();
-    final List<Double> cvOvVal = new ArrayList<>();
+    final List<Integer> reactiveCapabilityCurveOverrideScenarioCurve = new ArrayList<>();
+    final List<Double> reactiveCapabilityCurveOverrideStepScale = new ArrayList<>();
     // {slot, distrQMember} pairs: a DISTR_Q controller that stops controlling in this
     // scenario. Its key has to leave the renormalization denominator on the TARGET
     // side, which the qPct override channel does not reach.
@@ -74,8 +74,8 @@ final class ChunkLists {
     // PER CHUNK, like distrQInactiveList above: the scenario index in every one of these is a
     // SLOT in this chunk, so a list that outlives the chunk applies chunk N's entries to
     // chunk N+1's slots. That is invisible to any validation run in windows of one chunk.
-    final List<Integer> dsLostGenList = new ArrayList<>();
-    final List<Integer> dsOutList = new ArrayList<>();   // (slot, DS generator) a GeneratorAction took out
+    final List<Integer> distributedSlackLostGeneratorList = new ArrayList<>();
+    final List<Integer> distributedSlackRemovedGeneratorList = new ArrayList<>();   // (slot, DS generator) a GeneratorAction took out
     final List<Integer> frozenSeedSlot = new ArrayList<>();
     final List<Integer> frozenSeedRow = new ArrayList<>();
     final List<Double> frozenSeedValue = new ArrayList<>();
@@ -88,7 +88,7 @@ final class ChunkLists {
     final List<Double> distrQMemberTargetQOverrideValue = new ArrayList<>();
     final java.util.Map<Integer, Double> pilotQDeltas = new java.util.LinkedHashMap<>();   // slot*nQr + group
     double[] outageSlackShift = null;    // per slot: the move of the slack's scheduled P by a load lost there
-    int[] dsSlackRows = null;            // per slot: the row the distributed slack reads the slack on (-1 = base)
+    int[] slackBusRows = null;            // per slot: the row the distributed slack reads the slack on (-1 = base)
     final List<Integer> pfSlot = new ArrayList<>();
     final List<Integer> pfRow = new ArrayList<>();
     final List<Double> pfQTarget = new ArrayList<>();
@@ -114,14 +114,14 @@ final class ChunkLists {
     // the slack's retained share, which is not a device defect.
     final double[] preAbsorbedBySlot;
 
-    ChunkLists(int chunkSize, int n, GpuAcData gpuData, ForceTargetQInReactiveLimits.Channel forcedTargetQ, int ngen) {
-        this.dsRowOvBySlot = new int[chunkSize][];
+    ChunkLists(int chunkSize, int n, GpuAcData gpuData, ForceTargetQInReactiveLimits.Channel forcedTargetQ, int nDistributedSlackGenerators) {
+        this.distributedSlackBusRowOverrideByScenario = new int[chunkSize][];
         this.nDistrQMembersAll = gpuData.distrQMembers().busNum() != null ? gpuData.distrQMembers().busNum().length : 0;
         this.distrQSubgroupDense = new byte[chunkSize * nDistrQMembersAll];
         this.nActive = new int[chunkSize];
         java.util.Arrays.fill(nActive, n);
         this.preLossBySlot = new double[chunkSize];
-        this.genPreMovesBySlot = forcedTargetQ != null || ngen > 0 ? new double[chunkSize][] : null;
+        this.genPreMovesBySlot = forcedTargetQ != null || nDistributedSlackGenerators > 0 ? new double[chunkSize][] : null;
         this.preAbsorbedBySlot = new double[chunkSize];
     }
 
@@ -141,10 +141,10 @@ final class ChunkLists {
                         .flatMap(k -> java.util.stream.IntStream.of(
                                 frozenSeedSlot.get(k), frozenSeedRow.get(k)))
                         .toArray());
-        DistributedSlackNative.setBatchDsLostGenerators(handle,
-                ChunkArrays.intsOrNull(dsLostGenList));
-        DistributedSlackNative.setBatchDsOutGenerators(handle,
-                ChunkArrays.intsOrNull(dsOutList));
+        DistributedSlackNative.setBatchDistributedSlackLostGenerators(handle,
+                ChunkArrays.intsOrNull(distributedSlackLostGeneratorList));
+        DistributedSlackNative.setBatchDistributedSlackRemovedGenerators(handle,
+                ChunkArrays.intsOrNull(distributedSlackRemovedGeneratorList));
         RemoteVoltageControlNative.setBatchDistrQWeightOverrides(handle,
                 ChunkArrays.intsOrNull(distrQWeightOverrideScenarioTermList),
                 ChunkArrays.doublesOrNull(distrQWeightOverrideWeightList));
@@ -157,10 +157,10 @@ final class ChunkLists {
         NewtonSettingsNative.setBatchActiveRowCounts(handle, nActive);
         // Cleared when the chunk strands nobody, so a chunk never inherits the previous
         // chunk's participant mask through the reused context.
-        DistributedSlackNative.setBatchDsIslanded(handle,
-                ChunkArrays.intsOrNull(dsIslandedList));
-        DistributedSlackNative.setBatchDsRowOverrides(handle,
-                ChunkArrays.intsOrNull(dsRowOvList));
+        DistributedSlackNative.setBatchDistributedSlackIslanded(handle,
+                ChunkArrays.intsOrNull(distributedSlackIslandedList));
+        DistributedSlackNative.setBatchDistributedSlackBusRowOverrides(handle,
+                ChunkArrays.intsOrNull(distributedSlackBusRowOverrideList));
         ReactiveLimitsNative.setBatchReactiveLimitIslanded(handle,
                 ChunkArrays.intsOrNull(reactiveLimitIslandedScenarioEntryList));
         ReactiveLimitsNative.setBatchReactiveLimitPqPvSwitchForbidden(handle,
@@ -178,7 +178,7 @@ final class ChunkLists {
         RemoteVoltageControlNative.setBatchDistrQMemberTargetQOverrides(handle,
                 ChunkArrays.intsOrNull(distrQMemberTargetQOverrideKey),
                 distrQMemberTargetQOverrideKey.isEmpty() ? null : distrQMemberTargetQOverrideValue.stream().mapToDouble(Double::doubleValue).toArray());
-        DistributedSlackNative.setBatchDsSlackRows(handle, dsSlackRows);
+        DistributedSlackNative.setBatchSlackBusRows(handle, slackBusRows);
         RemoteVoltageControlNative.setBatchPilotQDeltas(handle,
                 pilotQDeltas.isEmpty() ? null : pilotQDeltas.keySet().stream().mapToInt(Integer::intValue).toArray(),
                 pilotQDeltas.isEmpty() ? null : pilotQDeltas.values().stream().mapToDouble(Double::doubleValue).toArray());

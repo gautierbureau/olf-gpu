@@ -38,7 +38,7 @@ __global__ void reactiveLimitsBatch(const double* secondaryVoltageControlReactiv
                                     char* limitType, char* switchCount, char* switched,
                                     char* passSwitched, char* savedMode,
                                     int nReactiveLimitTargetVOverrides, const int* reactiveLimitTargetVOverrideScenarioEntry, const double* reactiveLimitTargetVOverrideValue,
-                                    const double* rowSlope, double* savedTarget, int cvStride,
+                                    const double* rowSlope, double* savedTarget, int perScenarioReactiveLimits,
                                     const char* reactiveLimitVoltageControlRole, const int* reactiveLimitComparedVoltageRow,
                                     const double* reactiveLimitSvcMinB, const double* reactiveLimitSvcMaxB, const double* reactiveLimitBaseVSquared,
                                     const double* svcBminDyn, const double* svcBmaxDyn,
@@ -115,7 +115,7 @@ __global__ void reactiveLimitsBatch(const double* secondaryVoltageControlReactiv
             qidx = mode[relocIdx] == GpuRowMode::FIXED_VARIABLE ? ridx : relocIdx;
         }
         size_t rst = (size_t) s * nReactiveLimitEntries + i;
-        size_t remoteLimitIndex = cvStride ? rst : (size_t) i;
+        size_t remoteLimitIndex = perScenarioReactiveLimits ? rst : (size_t) i;
         // The quadratic delta exists only for SVC entries: reactiveLimitBaseVSquared is the packed base v², NaN when
         // the extraction ran on a never-solved network (the base load flow's own context) — 0 × NaN
         // poisoned every entry's limits there and nothing ever pinned at base.
@@ -213,7 +213,7 @@ __global__ void reactiveLimitsBatch(const double* secondaryVoltageControlReactiv
                 limitType[rst] = GpuQLimitType::NONE;
                 switched[s] = 1;
                 passSwitched[rst] = 2;
-            } else if (!wantsBack && (cvStride || svcLim) && (limitType[rst] == GpuQLimitType::MIN_Q || limitType[rst] == GpuQLimitType::MAX_Q)) {  // curve/SVC limit drift while pinned
+            } else if (!wantsBack && (perScenarioReactiveLimits || svcLim) && (limitType[rst] == GpuQLimitType::MIN_Q || limitType[rst] == GpuQLimitType::MAX_Q)) {  // curve/SVC limit drift while pinned
                 // OLF re-freezes at a moved limit only for MIN_Q/MAX_Q (checkPqBusWithQLimitType tests
                 // the type explicitly); a realistic-V freeze holds its initial target Q.
                 double lim = limitType[rst] == GpuQLimitType::MIN_Q ? remoteMinQ : remoteMaxQ;
@@ -250,7 +250,7 @@ __global__ void reactiveLimitsBatch(const double* secondaryVoltageControlReactiv
     size_t qIdx = (reactiveLimitReactivePowerRow != nullptr && reactiveLimitReactivePowerRow[i] >= 0 && reactiveLimitReactivePowerRow[i] != vrow)
             ? (size_t) s * n + reactiveLimitReactivePowerRow[i] : idx;
     size_t st = (size_t) s * nReactiveLimitEntries + i;
-    size_t li = cvStride ? st : (size_t) i;                 // curve limits are per (scenario, entry)
+    size_t li = perScenarioReactiveLimits ? st : (size_t) i;                 // curve limits are per (scenario, entry)
     bool slopeRow = rowSlope[vrow] != 0;                    // SLOPE-SVC bus: its PV form is row mode 2
     double dv2 = svcLim ? x[idx] * x[idx] - reactiveLimitBaseVSquared[i] : 0.0;   // see the remote branch: NaN base v² otherwise
     double liMin = reactiveLimitMinQ[li] + (svcLim ? svcBMin * dv2 : 0.0);
@@ -335,7 +335,7 @@ __global__ void reactiveLimitsBatch(const double* secondaryVoltageControlReactiv
             limitType[st] = GpuQLimitType::NONE;
             switched[s] = 1;
             passSwitched[st] = 2;
-        } else if (!wantsBack && (cvStride || svcLim) && (limitType[st] == GpuQLimitType::MIN_Q || limitType[st] == GpuQLimitType::MAX_Q)) {  // a realistic-V freeze keeps its target Q
+        } else if (!wantsBack && (perScenarioReactiveLimits || svcLim) && (limitType[st] == GpuQLimitType::MIN_Q || limitType[st] == GpuQLimitType::MAX_Q)) {  // a realistic-V freeze keeps its target Q
             // Q-limit UPDATE while pinned (OLF checkPqBusWithQLimitType): a CURVE limit that moved
             // (DS moved the gen's P) or an SVC limit that moved (B*v^2 at the live V) re-freezes
             // the pinned Q at the NEW limit when it drifted by more than the mismatch tol.
@@ -519,34 +519,34 @@ void reactiveLimitsCheck(BatchSolverContext* ctx, DriverPass& drv, int loopKind)
     const bool& svcCoefDyn = drv.svcCoefDyn;
     const int& nReactiveLimitTargetVOverrides = drv.nReactiveLimitTargetVOverrides;
     const int& nReactiveLimitDeltaOverrides = drv.nReactiveLimitDeltaOverrides;
-    const int& nCvOv = drv.nCvOv;
+    const int& nReactiveCapabilityCurveOverrides = drv.nReactiveCapabilityCurveOverrides;
     DeviceBuf& dReactiveLimitTargetVOverrideScenarioEntry = drv.dReactiveLimitTargetVOverrideScenarioEntry;
     DeviceBuf& dReactiveLimitTargetVOverrideValue = drv.dReactiveLimitTargetVOverrideValue;
     DeviceBuf& dReactiveLimitDeltaOverrideScenarioEntry = drv.dReactiveLimitDeltaOverrideScenarioEntry;
     DeviceBuf& dReactiveLimitDeltaOverrideValues = drv.dReactiveLimitDeltaOverrideValues;
     DeviceBuf& dReactiveLimitDeltaOverrideStart = drv.dReactiveLimitDeltaOverrideStart;
     DeviceBuf& dReactiveLimitDeltaOverrideList = drv.dReactiveLimitDeltaOverrideList;
-    DeviceBuf& dCvOvPtr = drv.dCvOvPtr;
-    DeviceBuf& dCvOvEntry = drv.dCvOvEntry;
-    DeviceBuf& dCvOvVal = drv.dCvOvVal;
+    DeviceBuf& dReactiveCapabilityCurveOverrideStart = drv.dReactiveCapabilityCurveOverrideStart;
+    DeviceBuf& dReactiveCapabilityCurveOverrideCurve = drv.dReactiveCapabilityCurveOverrideCurve;
+    DeviceBuf& dReactiveCapabilityCurveOverrideStepScale = drv.dReactiveCapabilityCurveOverrideStepScale;
     if (loopKind == GpuOuterLoopKind::REACTIVE_LIMITS && ctx->nReactiveLimitEntries > 0 && !skipReactiveLimitsPhase) {                  // skipReactiveLimitsPhase: a monitoring interleave solve — the
         if (usePerScenarioReactiveLimits) {                            // curve limits at the CURRENT (post-DS) targets,
-            reactiveCapabilityCurveLimitsBatch<<<grid(ctx->nReactiveLimitEntries * nS), BLOCK, 0, ctx->stream>>>(ctx->nReactiveLimitEntries, nS, ctx->ncv, n, ctx->cvExtrapolate,
-                    ctx->dCvIdx.as<int>(), ctx->dCvIn.as<double>(), ctx->dCvPts.as<double>(),
-                    ctx->dCvPtr.as<int>(), ctx->dCvList.as<int>(), cvHvdcView(ctx),
+            reactiveCapabilityCurveLimitsBatch<<<grid(ctx->nReactiveLimitEntries * nS), BLOCK, 0, ctx->stream>>>(ctx->nReactiveLimitEntries, nS, ctx->nReactiveCapabilityCurves, n, ctx->reactiveCapabilityCurveExtrapolate,
+                    ctx->dReactiveCapabilityCurveIndices.as<int>(), ctx->dReactiveCapabilityCurveParameters.as<double>(), ctx->dReactiveCapabilityCurvePoints.as<double>(),
+                    ctx->dReactiveLimitEntryCurveStart.as<int>(), ctx->dReactiveLimitEntryCurves.as<int>(), curveHvdcAcEmulationView(ctx),
                     ctx->dReactiveLimitMinQ.as<double>(), ctx->dReactiveLimitMaxQ.as<double>(), ctx->dReactiveLimitLoadQ.as<double>(),
                     ctx->dTarget.as<double>(),
                     nReactiveLimitDeltaOverrides, nReactiveLimitDeltaOverrides > 0 ? dReactiveLimitDeltaOverrideScenarioEntry.as<int>() : nullptr,
                     nReactiveLimitDeltaOverrides > 0 ? dReactiveLimitDeltaOverrideValues.as<double>() : nullptr,
                     nReactiveLimitDeltaOverrides > 0 ? dReactiveLimitDeltaOverrideStart.as<int>() : nullptr, nReactiveLimitDeltaOverrides > 0 ? dReactiveLimitDeltaOverrideList.as<int>() : nullptr,
-                    nCvOv > 0 ? dCvOvPtr.as<int>() : nullptr,
-                    nCvOv > 0 ? dCvOvEntry.as<int>() : nullptr,
-                    nCvOv > 0 ? dCvOvVal.as<double>() : nullptr,
-                    ctx->ngen > 0 ? ctx->dGenCum.as<double>() : nullptr,
-                    ctx->ngen > 0 ? ctx->dGenCumValid.as<char>() : nullptr, ctx->hasDgAnchor ? ctx->dDgAnchor.as<double>() : nullptr, ctx->hasDgStart ? ctx->dDgStart.as<double>() : nullptr, ctx->ngen,
-                    ctx->nds > 0 ? ctx->dDsPhiRow.as<int>() : nullptr,
-                    ctx->nDsRowOv > 0 ? ctx->dDsRowOv.as<int>() : nullptr, ctx->nds,
-                    ctx->ngen > 0 ? ctx->dgBus.as<int>() : nullptr,
+                    nReactiveCapabilityCurveOverrides > 0 ? dReactiveCapabilityCurveOverrideStart.as<int>() : nullptr,
+                    nReactiveCapabilityCurveOverrides > 0 ? dReactiveCapabilityCurveOverrideCurve.as<int>() : nullptr,
+                    nReactiveCapabilityCurveOverrides > 0 ? dReactiveCapabilityCurveOverrideStepScale.as<double>() : nullptr,
+                    ctx->nDistributedSlackGenerators > 0 ? ctx->dDistributedSlackGeneratorMove.as<double>() : nullptr,
+                    ctx->nDistributedSlackGenerators > 0 ? ctx->dDistributedSlackGeneratorMoveValid.as<char>() : nullptr, ctx->hasDistributedSlackGeneratorAnchor ? ctx->dDistributedSlackGeneratorAnchor.as<double>() : nullptr, ctx->hasDistributedSlackGeneratorInitialMove ? ctx->dDistributedSlackGeneratorInitialMove.as<double>() : nullptr, ctx->nDistributedSlackGenerators,
+                    ctx->nDistributedSlackBuses > 0 ? ctx->dDistributedSlackBusPhiRow.as<int>() : nullptr,
+                    ctx->nDistributedSlackBusRowOverrides > 0 ? ctx->dDistributedSlackBusRowOverride.as<int>() : nullptr, ctx->nDistributedSlackBuses,
+                    ctx->nDistributedSlackGenerators > 0 ? ctx->distributedSlackGeneratorBus.as<int>() : nullptr,
                     ctx->dReactiveLimitMinQPerScenario.as<double>(), ctx->dReactiveLimitMaxQPerScenario.as<double>(),
                     ctx->dReactiveLimitLoadQPerScenario.as<double>());
             launchForcedTargetQLimits(ctx, nS, n);

@@ -81,7 +81,7 @@ class GpuSaDistributedSlackTest extends AbstractGpuSaTest {
     /** DEVICE DS balance type PROPORTIONAL_TO_GENERATION_P (TARGET factors = |targetP| at the anchor):
      *  ieee14 line outages, GPU SA == CPU SA at machine precision. */
     @Test
-    void deviceDsBalanceTypeTargetMatchesCpu() {
+    void deviceDistributedSlackBalanceTypeTargetMatchesCpu() {
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
         Network network = IeeeCdfNetworkFactory.create14();
@@ -95,7 +95,7 @@ class GpuSaDistributedSlackTest extends AbstractGpuSaTest {
     /** DEVICE DS balance type PROPORTIONAL_TO_GENERATION_PARTICIPATION_FACTOR (explicit per-generator
      *  factors, ASYMMETRIC so a wrong split fails the state assert): GPU SA == CPU SA at machine precision. */
     @Test
-    void deviceDsBalanceTypeParticipationFactorMatchesCpu() {
+    void deviceDistributedSlackBalanceTypeParticipationFactorMatchesCpu() {
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
         Network network = IeeeCdfNetworkFactory.create14();
@@ -115,7 +115,7 @@ class GpuSaDistributedSlackTest extends AbstractGpuSaTest {
      *  on B2-G would saturate WITH limits, so the no-limits split is genuinely different — a limits leak
      *  in the pack fails the state assert. */
     @Test
-    void deviceDsNoActiveLimitsMatchesCpu() {
+    void deviceDistributedSlackNoActiveLimitsMatchesCpu() {
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
         Network network = IeeeCdfNetworkFactory.create14();
@@ -134,7 +134,7 @@ class GpuSaDistributedSlackTest extends AbstractGpuSaTest {
      *  own loss is pre-distributed on the host with OLF's rule; the base load flow and the in-loop residuals run the
      *  device's water-fill. 1e-12 on device. */
     @Test
-    void deviceDsNoActiveLimitsKeepsTheGenerationSignMatchesCpu() {
+    void deviceDistributedSlackNoActiveLimitsKeepsTheGenerationSignMatchesCpu() {
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
         Network network = IeeeCdfNetworkFactory.create14();
@@ -155,7 +155,7 @@ class GpuSaDistributedSlackTest extends AbstractGpuSaTest {
     /** DEVICE DS balance type PROPORTIONAL_TO_LOAD: participants are the LOADS (per-bus factor = the
      *  variable load share, unbounded absorption); GPU SA == CPU SA at machine precision. */
     @Test
-    void deviceDsBalanceTypeLoadMatchesCpu() {
+    void deviceDistributedSlackBalanceTypeLoadMatchesCpu() {
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
         Network network = IeeeCdfNetworkFactory.create14();
@@ -170,7 +170,7 @@ class GpuSaDistributedSlackTest extends AbstractGpuSaTest {
      *  (LoadDetail extension, ASYMMETRIC fixed/variable splits so a plain-load factor mixup fails);
      *  GPU SA == CPU SA at machine precision. */
     @Test
-    void deviceDsBalanceTypeConformLoadMatchesCpu() {
+    void deviceDistributedSlackBalanceTypeConformLoadMatchesCpu() {
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
         Network network = IeeeCdfNetworkFactory.create14();
@@ -193,7 +193,7 @@ class GpuSaDistributedSlackTest extends AbstractGpuSaTest {
      *  factors computed in-kernel (ASYMMETRIC margins via a tight maxP on B2-G, so a static-factor or
      *  wrong-direction mixup fails); GPU SA == CPU SA at machine precision. */
     @Test
-    void deviceDsBalanceTypeRemainingMarginMatchesCpu() {
+    void deviceDistributedSlackBalanceTypeRemainingMarginMatchesCpu() {
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
         Network network = IeeeCdfNetworkFactory.create14();
@@ -211,7 +211,7 @@ class GpuSaDistributedSlackTest extends AbstractGpuSaTest {
      *  sections, whose re-solve must CARRY that distribution (capture/seed/re-capture) — without it
      *  the kernel re-derives the slack split from the re-uploaded base targets. 1e-12. */
     @Test
-    void deviceIncrementalShuntDsCarryMatchesCpu() {
+    void deviceIncrementalShuntDistributedSlackCarryMatchesCpu() {
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
         Network network = com.powsybl.openloadflow.network.ShuntNetworkFactory.create();
@@ -238,7 +238,7 @@ class GpuSaDistributedSlackTest extends AbstractGpuSaTest {
      *  more pass on L1 (a 1.196e-6 pu mismatch OLF leaves): 1.1e-10 kV and 1.2e-4 MW of distributed
      *  power, once read as a knife edge. */
     @Test
-    void deviceIncrementalPhaseDsCarryMatchesCpu() {
+    void deviceIncrementalPhaseDistributedSlackCarryMatchesCpu() {
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
         Network network = com.powsybl.openloadflow.network.PhaseControlFactory.createNetworkWithT2wt();
@@ -311,7 +311,7 @@ class GpuSaDistributedSlackTest extends AbstractGpuSaTest {
      *  deltas actually DISTRIBUTE in the main solve — the freeze/limit re-solves must carry that
      *  distribution (capture/seed/re-capture) instead of re-deriving it from base targets. 1e-12. */
     @Test
-    void deviceHvdcDsCarryMatchesCpu() {
+    void deviceHvdcDistributedSlackCarryMatchesCpu() {
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
         Network network = com.powsybl.openloadflow.network.HvdcNetworkFactory.createHvdcInAcEmulationInSymetricNetwork();
@@ -555,7 +555,7 @@ class GpuSaDistributedSlackTest extends AbstractGpuSaTest {
      *  slack's own share onto the slack bus's. Moving only generators left OLF's load targets where they were, and OLF
      *  measured the device's converged base against them: MAX_ITERATION_REACHED. */
     @Test
-    void deviceDsBalanceTypeLoadDistributingInTheBaseMatchesCpu() {
+    void deviceDistributedSlackBalanceTypeLoadDistributingInTheBaseMatchesCpu() {
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
         Network network = IeeeCdfNetworkFactory.create14();

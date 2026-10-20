@@ -103,19 +103,19 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                               const int* rowMode, const int* rowModeSlots, int nRowModeSlots,
                               const int* baseRowMode, const char* disabled,
                               int nOv, const int* ovIndex, const double* ovValue,
-                              const int* dsOvBus, const double* dsOvFactorDelta, const double* dsOvBaseDelta,
-                              const double* dsOvMaxDelta, const double* dsOvMinDelta, const double* dsAnchorShift,
-                              const double* dsSlackShift,
+                              const int* distributedSlackOverrideBus, const double* distributedSlackOverrideFactorDelta, const double* distributedSlackOverrideBaseTargetPDelta,
+                              const double* distributedSlackOverrideMaxDelta, const double* distributedSlackOverrideMinDelta, const double* distributedSlackBusAnchorShift,
+                              const double* slackBusAnchorShift,
                               int nReactiveLimitTargetVOverrides, const int* reactiveLimitTargetVOverrideScenarioEntry, const double* reactiveLimitTargetVOverrideValue,
                               int nReactiveLimitDeltaOverrides, const int* reactiveLimitDeltaOverrideScenarioEntry, const double* reactiveLimitDeltaOverrideValues,
-                              int nCvOv, const int* cvOvSlotEntry, const double* cvOvStepScale,
+                              int nReactiveCapabilityCurveOverrides, const int* reactiveCapabilityCurveOverrideScenarioCurve, const double* reactiveCapabilityCurveOverrideStepScale,
                               int maxIter, double tol,
                               double reactiveLimitTol, double slackDistTol, double convEpsPerEq,
                               int lsMode, double maxDv, double maxDphi, const int* varType,
                               const double* x0Full, int nShuntAdmittanceOverrides, const int* shuntAdmittanceOverrideScenarioElement, const double* shuntAdmittanceOverrideDelta,
                               const int* reactiveLimitsSeedState, int* reactiveLimitsFinalState,
                               int nR1Ov, const int* r1OvSlotElem, const double* r1OvVal,
-                              int maxOuterProductive, int maxPqPvSwitch, int dsRejectResidual, int skipReactiveLimitsPhase,
+                              int maxOuterProductive, int maxPqPvSwitch, int rejectSlackDistributionFailure, int skipReactiveLimitsPhase,
                               int nBaseClosedZeroImpedanceBranches, int nZeroImpedanceBranchCloseOverrides, const int* zeroImpedanceBranchCloseScenarioElement,
                               int nZeroImpedanceBranchOpenOverrides, const int* zeroImpedanceBranchOpenScenarioElement) {
     DriverPass drv;
@@ -124,7 +124,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     drv.nS = ctx->nScenarios;
     drv.nReactiveLimitTargetVOverrides = nReactiveLimitTargetVOverrides;
     drv.nReactiveLimitDeltaOverrides = nReactiveLimitDeltaOverrides;
-    drv.nCvOv = nCvOv;
+    drv.nReactiveCapabilityCurveOverrides = nReactiveCapabilityCurveOverrides;
     drv.skipReactiveLimitsPhase = skipReactiveLimitsPhase;
     const int& n = drv.n;
     const int& nnz = drv.nnz;
@@ -144,15 +144,15 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     DeviceBuf dModeSlots, dModeRows;                         // compact row modes: the scenarios that differ from the base
     DeviceBuf dX0SeedIdx, dX0SeedVal;                        // setBatchX0Seeds, function-scoped like the overrides
     // Per-scenario distributed-slack reweight (generator loss at a DS-participant bus): one affected DS bus per
-    // scenario (dsOvBus[s], -1 if none) whose factor/base/headroom/footroom shrink by the lost gen's share, and
+    // scenario (distributedSlackOverrideBus[s], -1 if none) whose factor/base/headroom/footroom shrink by the lost gen's share, and
     // a per-scenario factor-sum drop so the other buses pick up that share. nullptr when no DS scenarios.
-    DeviceBuf& dDsOvBus = drv.dDsOvBus;
-    DeviceBuf& dDsOvFactorDelta = drv.dDsOvFactorDelta;
-    DeviceBuf& dDsOvBaseDelta = drv.dDsOvBaseDelta;
-    DeviceBuf& dDsOvMaxDelta = drv.dDsOvMaxDelta;
-    DeviceBuf& dDsOvMinDelta = drv.dDsOvMinDelta;
-    drv.hasDsOverride = (dsOvBus != nullptr && ctx->nds > 0);
-    const bool& hasDsOverride = drv.hasDsOverride;
+    DeviceBuf& dDistributedSlackOverrideBus = drv.dDistributedSlackOverrideBus;
+    DeviceBuf& dDistributedSlackOverrideFactorDelta = drv.dDistributedSlackOverrideFactorDelta;
+    DeviceBuf& dDistributedSlackOverrideBaseTargetPDelta = drv.dDistributedSlackOverrideBaseTargetPDelta;
+    DeviceBuf& dDistributedSlackOverrideMaxDelta = drv.dDistributedSlackOverrideMaxDelta;
+    DeviceBuf& dDistributedSlackOverrideMinDelta = drv.dDistributedSlackOverrideMinDelta;
+    drv.hasDistributedSlackOverride = (distributedSlackOverrideBus != nullptr && ctx->nDistributedSlackBuses > 0);
+    const bool& hasDistributedSlackOverride = drv.hasDistributedSlackOverride;
     // Per-scenario DS ANCHOR SHIFT (pair/strategy legs): shift_i = parent's final target at participant i
     // minus the extraction-time base — re-anchors the water-fill's cumulative reference at the PARENT
     // contingency's distribution, mirroring OLF's setGeneratorsInitialTargetPToTargetP before a strategy
@@ -163,19 +163,19 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         dReactiveLimitTargetVOverrideScenarioEntry.upload(reactiveLimitTargetVOverrideScenarioEntry, 2L * nReactiveLimitTargetVOverrides * sizeof(int));
         dReactiveLimitTargetVOverrideValue.upload(reactiveLimitTargetVOverrideValue, (size_t) nReactiveLimitTargetVOverrides * sizeof(double));
     }
-    DeviceBuf& dDsAnchorShift = drv.dDsAnchorShift;
-    DeviceBuf& dDsSlackShift = drv.dDsSlackShift;
-    drv.hasDsAnchor = (dsAnchorShift != nullptr && ctx->nds > 0);
-    const bool& hasDsAnchor = drv.hasDsAnchor;
-    if (hasDsAnchor) {
-        dDsAnchorShift.upload(dsAnchorShift, static_cast<size_t>(nS) * ctx->nds * sizeof(double));
+    DeviceBuf& dDistributedSlackBusAnchorShift = drv.dDistributedSlackBusAnchorShift;
+    DeviceBuf& dSlackBusAnchorShift = drv.dSlackBusAnchorShift;
+    drv.hasDistributedSlackBusAnchorShift = (distributedSlackBusAnchorShift != nullptr && ctx->nDistributedSlackBuses > 0);
+    const bool& hasDistributedSlackBusAnchorShift = drv.hasDistributedSlackBusAnchorShift;
+    if (hasDistributedSlackBusAnchorShift) {
+        dDistributedSlackBusAnchorShift.upload(distributedSlackBusAnchorShift, static_cast<size_t>(nS) * ctx->nDistributedSlackBuses * sizeof(double));
     }
     // The slack's own target move, independent of the participants' anchors: a strategy pair's parent share,
     // and also a contingency's load lost at the slack (a plain scenario, no anchor shift).
-    drv.hasDsSlackShift = (dsSlackShift != nullptr && ctx->nds > 0);
-    const bool& hasDsSlackShift = drv.hasDsSlackShift;
-    if (hasDsSlackShift) {
-        dDsSlackShift.upload(dsSlackShift, static_cast<size_t>(nS) * sizeof(double));
+    drv.hasSlackBusAnchorShift = (slackBusAnchorShift != nullptr && ctx->nDistributedSlackBuses > 0);
+    const bool& hasSlackBusAnchorShift = drv.hasSlackBusAnchorShift;
+    if (hasSlackBusAnchorShift) {
+        dSlackBusAnchorShift.upload(slackBusAnchorShift, static_cast<size_t>(nS) * sizeof(double));
     }
 
     // x0/target are the BASE row (length n), identical for every scenario: upload once and tile across
@@ -189,10 +189,10 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     // sequence's current state on the device — re-uploading the base rows would throw away the
     // distributed slack, the HVDC deltas and the monitoring activations it has accumulated.
     const bool resume = ctx->driverResume != 0;
-    if (!resume || ctx->olPasses.size() != static_cast<size_t>(nS)) {
-        ctx->olFirst.assign(nS, 0);
-        ctx->olIters.assign(nS, 0);
-        ctx->olPasses.assign(nS, 0);
+    if (!resume || ctx->outerLoopSolvePasses.size() != static_cast<size_t>(nS)) {
+        ctx->outerLoopFirstSolveIterations.assign(nS, 0);
+        ctx->outerLoopIterations.assign(nS, 0);
+        ctx->outerLoopSolvePasses.assign(nS, 0);
     }
     ctx->driverResume = 0;
     ctx->driverPaused = 0;
@@ -251,12 +251,12 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             applyTargetOverrideBatch<<<grid(nOv), BLOCK, 0, ctx->stream>>>(nOv, dOvIndex.as<int>(), dOvValue.as<double>(), ctx->dTarget.as<double>());
         }
     }
-    if (hasDsOverride) {                                     // per-scenario generator-loss DS reweight
-        dDsOvBus.upload(dsOvBus, nS * sizeof(int));
-        dDsOvFactorDelta.upload(dsOvFactorDelta, nS * sizeof(double));
-        dDsOvBaseDelta.upload(dsOvBaseDelta, nS * sizeof(double));
-        dDsOvMaxDelta.upload(dsOvMaxDelta, nS * sizeof(double));
-        dDsOvMinDelta.upload(dsOvMinDelta, nS * sizeof(double));
+    if (hasDistributedSlackOverride) {                                     // per-scenario generator-loss DS reweight
+        dDistributedSlackOverrideBus.upload(distributedSlackOverrideBus, nS * sizeof(int));
+        dDistributedSlackOverrideFactorDelta.upload(distributedSlackOverrideFactorDelta, nS * sizeof(double));
+        dDistributedSlackOverrideBaseTargetPDelta.upload(distributedSlackOverrideBaseTargetPDelta, nS * sizeof(double));
+        dDistributedSlackOverrideMaxDelta.upload(distributedSlackOverrideMaxDelta, nS * sizeof(double));
+        dDistributedSlackOverrideMinDelta.upload(distributedSlackOverrideMinDelta, nS * sizeof(double));
     }
     if (!resume) {
         // NOT on a resume: the HVDC AC-emulation driver phases MUTATE element bits on the device during
@@ -293,7 +293,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     // converge the inner Newton, switch any generator over its Q limit, re-converge the switched scenarios,
     // repeat until a pass switches nothing. Fixed-iter mode (tol <= 0, the throughput benchmark) and
     // family-free networks with no controllers do ONE pass (no outer loop) — byte-identical to before.
-    bool fullLoadflow = !deviceFixedIter && (ctx->nReactiveLimitEntries > 0 || ctx->nds > 0 || ctx->dsSlackOnly
+    bool fullLoadflow = !deviceFixedIter && (ctx->nReactiveLimitEntries > 0 || ctx->nDistributedSlackBuses > 0 || ctx->slackOnlyDistribution
                                              || ctx->nmon > 0 || ctx->nTvc > 0 || ctx->nShc > 0 || ctx->nFlc > 0 || ctx->nCph > 0
                                              || ctx->nTvd > 0 || ctx->nSvd > 0 || ctx->nSvc > 0);
     const int MAX_OUTER_LOOP_ITERATIONS = maxOuterProductive > 0 ? maxOuterProductive : 20;   // OLF maxOuterLoopIterations
@@ -367,28 +367,28 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     }
     // Per-scenario curve repairs, CSR by scenario: the dynamic-limits kernel runs one thread per
     // (reactive-limit entry, scenario) and walks the curve entries inside, so a flat {slot, entry}
-    // scan would be paid ncv times per thread. Bucketing by slot makes it a handful of comparisons.
-    DeviceBuf& dCvOvPtr = drv.dCvOvPtr;
-    DeviceBuf& dCvOvEntry = drv.dCvOvEntry;
-    DeviceBuf& dCvOvVal = drv.dCvOvVal;
-    if (nCvOv > 0) {
+    // scan would be paid nReactiveCapabilityCurves times per thread. Bucketing by slot makes it a handful of comparisons.
+    DeviceBuf& dReactiveCapabilityCurveOverrideStart = drv.dReactiveCapabilityCurveOverrideStart;
+    DeviceBuf& dReactiveCapabilityCurveOverrideCurve = drv.dReactiveCapabilityCurveOverrideCurve;
+    DeviceBuf& dReactiveCapabilityCurveOverrideStepScale = drv.dReactiveCapabilityCurveOverrideStepScale;
+    if (nReactiveCapabilityCurveOverrides > 0) {
         std::vector<int> ptr(nS + 1, 0);
-        for (int k = 0; k < nCvOv; k++) ptr[cvOvSlotEntry[2 * k] + 1]++;
+        for (int k = 0; k < nReactiveCapabilityCurveOverrides; k++) ptr[reactiveCapabilityCurveOverrideScenarioCurve[2 * k] + 1]++;
         for (int t = 0; t < nS; t++) ptr[t + 1] += ptr[t];
         std::vector<int> cursor(ptr.begin(), ptr.end() - 1);
-        std::vector<int> entry(nCvOv);
-        std::vector<double> val(static_cast<size_t>(nCvOv) * 2);
-        for (int k = 0; k < nCvOv; k++) {
-            int at = cursor[cvOvSlotEntry[2 * k]]++;
-            entry[at] = cvOvSlotEntry[2 * k + 1];
-            val[2 * at] = cvOvStepScale[2 * k];
-            val[2 * at + 1] = cvOvStepScale[2 * k + 1];
+        std::vector<int> entry(nReactiveCapabilityCurveOverrides);
+        std::vector<double> val(static_cast<size_t>(nReactiveCapabilityCurveOverrides) * 2);
+        for (int k = 0; k < nReactiveCapabilityCurveOverrides; k++) {
+            int at = cursor[reactiveCapabilityCurveOverrideScenarioCurve[2 * k]]++;
+            entry[at] = reactiveCapabilityCurveOverrideScenarioCurve[2 * k + 1];
+            val[2 * at] = reactiveCapabilityCurveOverrideStepScale[2 * k];
+            val[2 * at + 1] = reactiveCapabilityCurveOverrideStepScale[2 * k + 1];
         }
-        dCvOvPtr.upload(ptr.data(), ptr.size() * sizeof(int));
-        dCvOvEntry.upload(entry.data(), entry.size() * sizeof(int));
-        dCvOvVal.upload(val.data(), val.size() * sizeof(double));
+        dReactiveCapabilityCurveOverrideStart.upload(ptr.data(), ptr.size() * sizeof(int));
+        dReactiveCapabilityCurveOverrideCurve.upload(entry.data(), entry.size() * sizeof(int));
+        dReactiveCapabilityCurveOverrideStepScale.upload(val.data(), val.size() * sizeof(double));
     }
-    drv.usePerScenarioReactiveLimits = ctx->nReactiveLimitEntries > 0 && (ctx->ncv > 0 || nReactiveLimitDeltaOverrides > 0 || ctx->nfqLim > 0);
+    drv.usePerScenarioReactiveLimits = ctx->nReactiveLimitEntries > 0 && (ctx->nReactiveCapabilityCurves > 0 || nReactiveLimitDeltaOverrides > 0 || ctx->nForcedTargetQLimitEntries > 0);
     const bool& usePerScenarioReactiveLimits = drv.usePerScenarioReactiveLimits;
     if (usePerScenarioReactiveLimits && (!ctx->dReactiveLimitMinQPerScenario.p || !ctx->dReactiveLimitLoadQPerScenario.p)) {   // curves allocate these on their own
                                                             // table upload; a Q override alone must too, and a
@@ -424,8 +424,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     // sequence has already established — which is exactly what makes a resume cheaper than the
     // orchestrator pattern it replaces: that one resets and re-runs the whole driver every round.
     if (std::getenv("OLF_GPU_BATCH_TRACE") != nullptr && nS == 1) {
-        std::fprintf(stderr, "CTX_FLAGS nS=1 nReactiveLimitEntries=%d nReactiveLimitRemoteEntries=%d hasDistrQRelocationGroups=%d nQr=%d nDistrQ=%d nds=%d ngen=%d nZeroImpedanceBranch=%d nBaseClosedZeroImpedanceBranches=%d nRemoteMemberReactiveTerms=%d resume=%d fullLoadflow=%d\n",
-                     ctx->nReactiveLimitEntries, ctx->nReactiveLimitRemoteEntries, ctx->hasDistrQRelocationGroups ? 1 : 0, ctx->st->nQr, ctx->nDistrQ, ctx->nds, ctx->ngen, ctx->nZeroImpedanceBranch, ctx->nBaseClosedZeroImpedanceBranches, ctx->nRemoteMemberReactiveTerms, resume ? 1 : 0, fullLoadflow ? 1 : 0);
+        std::fprintf(stderr, "CTX_FLAGS nS=1 nReactiveLimitEntries=%d nReactiveLimitRemoteEntries=%d hasDistrQRelocationGroups=%d nQr=%d nDistrQ=%d nDistributedSlackBuses=%d nDistributedSlackGenerators=%d nZeroImpedanceBranch=%d nBaseClosedZeroImpedanceBranches=%d nRemoteMemberReactiveTerms=%d resume=%d fullLoadflow=%d\n",
+                     ctx->nReactiveLimitEntries, ctx->nReactiveLimitRemoteEntries, ctx->hasDistrQRelocationGroups ? 1 : 0, ctx->st->nQr, ctx->nDistrQ, ctx->nDistributedSlackBuses, ctx->nDistributedSlackGenerators, ctx->nZeroImpedanceBranch, ctx->nBaseClosedZeroImpedanceBranches, ctx->nRemoteMemberReactiveTerms, resume ? 1 : 0, fullLoadflow ? 1 : 0);
     }
     if (fullLoadflow && !resume && ctx->nSvc > 0) {
         // BEFORE the reactive-limit seeding below, which consults it: no zone has moved a target yet.
@@ -437,7 +437,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                                    cudaMemcpyDeviceToDevice, ctx->stream));
     }
     if (fullLoadflow && !resume) {                           // per-solve PV↔PQ state: 0 switches, limitType from base
-        seedSolve(ctx, drv, reactiveLimitsSeedState, dsSlackShift);
+        seedSolve(ctx, drv, reactiveLimitsSeedState, slackBusAnchorShift);
     }
 
     // SEQUENTIAL outer loops, exactly like OLF's AcloadFlowEngine: fully stabilize the reactive-limits loop
@@ -468,7 +468,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     // it is not. Folding them needs the discrete tap/section tables on the device.
     int (&loopOrder)[MAX_DEVICE_LOOPS] = drv.loopOrder;
     int nLoops = 0;
-    if (ctx->nds > 0 || ctx->dsSlackOnly) {
+    if (ctx->nDistributedSlackBuses > 0 || ctx->slackOnlyDistribution) {
         loopOrder[nLoops++] = GpuOuterLoopKind::DISTRIBUTED_SLACK;
     }
     if (ctx->nHvdcAcEmulation > 0) {
@@ -631,20 +631,20 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             }
         }
     }
-    static const bool olTimeEnv = std::getenv("OLF_GPU_PHASE_TIME") != nullptr;
-    drv.olTime = olTimeEnv;
-    const bool& olTime = drv.olTime;
-    int& olPassSolved = drv.olPassSolved;
-    olPassSolved = 0;
-    bool olFirstSolveDone = resume;                          // a resumed call's passes are all re-solves
-    int olTriggerKind = resume ? ctx->pausedLoopKind : GpuOuterLoopKind::NONE;  // the loop whose check made the next pass re-solve
+    static const bool outerLoopTimingRequested = std::getenv("OLF_GPU_PHASE_TIME") != nullptr;
+    drv.outerLoopTiming = outerLoopTimingRequested;
+    const bool& outerLoopTiming = drv.outerLoopTiming;
+    int& outerLoopPassSolvedScenarios = drv.outerLoopPassSolvedScenarios;
+    outerLoopPassSolvedScenarios = 0;
+    bool outerLoopFirstSolveDone = resume;                          // a resumed call's passes are all re-solves
+    int outerLoopTriggerKind = resume ? ctx->pausedLoopKind : GpuOuterLoopKind::NONE;  // the loop whose check made the next pass re-solve
     int& outer = drv.outer;
     for (outer = 0; outer < maxOuter && loopIdx < nLoops; outer++) {
     gOuterPasses++;
-    if (olTime) CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
-    const double olT0 = olTime ? olNowMs() : 0.0;
-    const long long olAI0 = gActiveIterSum, olWI0 = gWidthIterSum;
-    const bool olSolving = solvePass;
+    if (outerLoopTiming) CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+    const double outerLoopPassStartMilliseconds = outerLoopTiming ? nowMilliseconds() : 0.0;
+    const long long outerLoopPassStartActiveIterations = gActiveIterSum, outerLoopPassStartWidthIterations = gWidthIterSum;
+    const bool outerLoopPassSolving = solvePass;
     if (solvePass) {
         gSolvePasses++;
     }
@@ -702,30 +702,30 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     if (solvePass) {
         newtonSolve(ctx, drv);
     }   // ---- end if (solvePass) ----
-    if (olTime) {
+    if (outerLoopTiming) {
         CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
-        double ms = olNowMs() - olT0;
-        long long ai = gActiveIterSum - olAI0, wi = gWidthIterSum - olWI0;
-        if (olSolving && !olFirstSolveDone) {
-            gOlFirstSolveMs += ms; gOlFirstSolveScen += olPassSolved; gOlFirstLaneIters += ai; gOlFirstWidthIters += wi;
-            gOlFirstPasses++;
-            olFirstSolveDone = true;
-        } else if (olSolving) {
-            int k = olTriggerKind >= 0 && olTriggerKind < GpuOuterLoopKind::COUNT ? olTriggerKind : 0;
-            gOlReSolveMs[k] += ms; gOlReSolveScen[k] += olPassSolved; gOlReSolveLaneIters[k] += ai;
-            gOlReSolveWidthIters[k] += wi; gOlReSolvePasses[k]++;
+        double ms = nowMilliseconds() - outerLoopPassStartMilliseconds;
+        long long ai = gActiveIterSum - outerLoopPassStartActiveIterations, wi = gWidthIterSum - outerLoopPassStartWidthIterations;
+        if (outerLoopPassSolving && !outerLoopFirstSolveDone) {
+            gOuterLoopFirstSolveMilliseconds += ms; gOuterLoopFirstSolveScenarios += outerLoopPassSolvedScenarios; gOuterLoopFirstSolveLaneIterations += ai; gOuterLoopFirstSolveWidthIterations += wi;
+            gOuterLoopFirstSolvePasses++;
+            outerLoopFirstSolveDone = true;
+        } else if (outerLoopPassSolving) {
+            int k = outerLoopTriggerKind >= 0 && outerLoopTriggerKind < GpuOuterLoopKind::COUNT ? outerLoopTriggerKind : 0;
+            gOuterLoopReSolveMilliseconds[k] += ms; gOuterLoopReSolveScenarios[k] += outerLoopPassSolvedScenarios; gOuterLoopReSolveLaneIterations[k] += ai;
+            gOuterLoopReSolveWidthIterations[k] += wi; gOuterLoopReSolvePasses[k]++;
         }
     }
     // the CHECK part of the pass, charged to the loop being checked when the pass body ends (break/continue too)
-    struct OlCheckTimer {
+    struct OuterLoopCheckTimer {
         bool on; double t0; int kind;
-        ~OlCheckTimer() {
+        ~OuterLoopCheckTimer() {
             if (on && kind >= 0 && kind < GpuOuterLoopKind::COUNT) {
-                gOlCheckMs[kind] += olNowMs() - t0;
-                gOlCheckPasses[kind]++;
+                gOuterLoopCheckMilliseconds[kind] += nowMilliseconds() - t0;
+                gOuterLoopCheckPasses[kind]++;
             }
         }
-    } olCheck{olTime, olTime ? olNowMs() : 0.0, -1};
+    } outerLoopCheckTimer{outerLoopTiming, outerLoopTiming ? nowMilliseconds() : 0.0, -1};
 
     // ---- AcloadFlowEngine's realistic-voltage check, on this INTERMEDIATE state ----
     // OLF re-checks after every solver run once the last loop that can fix an unrealistic state has
@@ -787,9 +787,9 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                 ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>(),
                 ctx->nShuntAdmittanceOverrides, ctx->dShuntAdmittanceOverrideScenarioElement.as<int>(), ctx->dShuntAdmittanceOverrideDelta.as<double>());
     }
-    if (ctx->nHvdcAcEmulation > 0 && ctx->dsSlackPhiRow >= 0) {           // a link on the slack bus, as OLF's slack mismatch sees it
-        hvdcSlackBalanceBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(nS, ctx->nHvdcAcEmulation, n, ctx->nElements, ctx->dsSlackPhiRow,
-                ctx->hasDsSlackRowOv ? ctx->dDsSlackRowOv.as<int>() : nullptr,
+    if (ctx->nHvdcAcEmulation > 0 && ctx->slackBusPhiRow >= 0) {           // a link on the slack bus, as OLF's slack mismatch sees it
+        hvdcSlackBalanceBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(nS, ctx->nHvdcAcEmulation, n, ctx->nElements, ctx->slackBusPhiRow,
+                ctx->hasSlackBusRowOverride ? ctx->dSlackBusRowOverride.as<int>() : nullptr,
                 ctx->dHvdcBus1PRow.as<int>(), ctx->dHvdcBus2PRow.as<int>(), ctx->dHvdcBus1PhiColumn.as<int>(), ctx->dHvdcBus2PhiColumn.as<int>(),
                 ctx->dHvdcElement.as<int>(), ctx->dHvdcAcEmulationParameters.as<double>(), ctx->dHvdcAcEmulationStatus.as<int>(),
                 ctx->dHvdcAppliedDelta1.as<double>(), ctx->dHvdcAppliedDelta2.as<double>(), ctx->dHvdcContingencyOutage.as<char>(),
@@ -817,9 +817,9 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         }
     }
     // Apply ONLY the current phase's outer loop this pass (sequential, like OLF) — never both at once.
-    bool inDsPhase = (loopOrder[loopIdx] == GpuOuterLoopKind::DISTRIBUTED_SLACK);
-    olCheck.kind = loopOrder[loopIdx];
-    olTriggerKind = loopOrder[loopIdx];                     // a re-solve in the next pass was triggered by this check
+    bool inDistributedSlackPhase = (loopOrder[loopIdx] == GpuOuterLoopKind::DISTRIBUTED_SLACK);
+    outerLoopCheckTimer.kind = loopOrder[loopIdx];
+    outerLoopTriggerKind = loopOrder[loopIdx];                     // a re-solve in the next pass was triggered by this check
     traceBatchPass(ctx, drv, nLoops, solvePass);
     int loopKind = loopOrder[loopIdx];
     if (loopKind >= GpuOuterLoopKind::HOST_SECONDARY_VOLTAGE_CONTROL && loopKind <= GpuOuterLoopKind::HOST_SHUNT_VOLTAGE_CONTROL) {   // any LOOP_HOST_* kind: pause for the host
@@ -854,8 +854,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         monitoringStep(ctx, drv);
     } else if (loopKind == GpuOuterLoopKind::FREEZING_HVDC_AC_EMULATION || loopKind == GpuOuterLoopKind::HVDC_AC_EMULATION_LIMITS) {
         hvdcStep(ctx, drv, loopKind);
-    } else if (inDsPhase) {                                // distributed-slack outer loop: spread the slack mismatch
-        dsCheck(ctx, drv);
+    } else if (inDistributedSlackPhase) {                                // distributed-slack outer loop: spread the slack mismatch
+        distributedSlackCheck(ctx, drv);
     } else {                                               // reactive-limits outer loop: switch PV->PQ over Q limit
         reactiveLimitsCheck(ctx, drv, loopKind);
     }
@@ -880,15 +880,15 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     // the contingency-id slot of OLF_GPU_LOOP_TRACE_CTG wins (chunk composition moves fixed slots)
     const int reactiveLimitsTraceScenario = ctx->loopTraceSlot >= 0 ? ctx->loopTraceSlot : reactiveLimitsTraceScenarioEnv;
     traceReactiveLimitsSwitches(ctx, drv, auditLog, reactiveLimitsAuditOn, reactiveLimitsTraceScenario);
-    traceReactiveLimitsState(ctx, drv, inDsPhase, reactiveLimitTol, outerLoopUnstable);
-    if (inDsPhase && (ctx->nds > 0 || ctx->dsSlackOnly) && dsRejectResidual) {
+    traceReactiveLimitsState(ctx, drv, inDistributedSlackPhase, reactiveLimitTol, outerLoopUnstable);
+    if (inDistributedSlackPhase && (ctx->nDistributedSlackBuses > 0 || ctx->slackOnlyDistribution) && rejectSlackDistributionFailure) {
         // slackDistributionFailureBehavior != LEAVE_ON_SLACK_BUS: a scenario whose participants all
         // saturated must NOT be reported converged with the residual absorbed at the slack — route it
         // to the CPU fallback (status -2), which replays it with the run's real failure behavior.
-        std::vector<char> dsResidual(nS);
-        CUDA_CHECK(cudaMemcpy(dsResidual.data(), ctx->dDsResidual.p, nS * sizeof(char), cudaMemcpyDeviceToHost));
+        std::vector<char> slackDistributionFailure(nS);
+        CUDA_CHECK(cudaMemcpy(slackDistributionFailure.data(), ctx->dSlackDistributionFailure.p, nS * sizeof(char), cudaMemcpyDeviceToHost));
         for (int s = 0; s < nS; s++) {
-            if (dsResidual[s] && live[s]) {
+            if (slackDistributionFailure[s] && live[s]) {
                 traceReject(s, "ds-residual-saturated", outer, 0);
                 res.status[s] = GpuAcSolverStatus::REJECTED;
                 active[s] = 0;

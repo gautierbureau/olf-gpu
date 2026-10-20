@@ -75,7 +75,7 @@ class GpuBatchedGeneratorContingencyDsTest {
 
     @Test
     void generatorAtDistributedSlackBusBatchedMatchesCpu() {
-        Network gpuNet = threeBusDs();
+        Network gpuNet = threeBusDistributedSlackNetwork();
         LfNetwork net = load(gpuNet).get(0);
         EquationSystem<AcVariableType, AcEquationType> es = new AcEquationSystemCreator(net).create();
         AcSolverUtil.initStateVector(net, es, new UniformValueVoltageInitializer());
@@ -106,7 +106,7 @@ class GpuBatchedGeneratorContingencyDsTest {
         // CPU reference: disconnect g2, full LoadFlow.run with distributed slack on (same scope).
         sv.set(java.util.Arrays.copyOf(rG2.state(), n));
         AcSolverUtil.updateNetwork(net, es);
-        Network cpu = threeBusDs();
+        Network cpu = threeBusDistributedSlackNetwork();
         cpu.getGenerator("g2").getTerminal().disconnect();
         LoadFlow.Runner runner = new LoadFlow.Runner(new OpenLoadFlowProvider(new DenseMatrixFactory()));
         LoadFlowParameters lfp = new LoadFlowParameters().setDistributedSlack(true).setUseReactiveLimits(false);
@@ -135,7 +135,7 @@ class GpuBatchedGeneratorContingencyDsTest {
     /** Meshed b1(non-participating slack gen)-b2(participating gen, sole controller)-b3(participating gen);
      *  b2/b3 carry loads exceeding the scheduled generation, so the slack absorbs a deficit distributed across
      *  b2/b3. Losing g2 removes its P, flips b2 PV→PQ AND reweights the distribution onto g3. */
-    private static Network threeBusDs() {
+    private static Network threeBusDistributedSlackNetwork() {
         Network n = Network.create("gen-contingency-ds", "test");
         Substation s = n.newSubstation().setId("s").add();
         for (int i = 1; i <= 3; i++) {

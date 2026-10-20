@@ -24,7 +24,7 @@ import java.util.concurrent.atomic.AtomicLong;
  * and the batch's build becomes a cache hit (previously each rebuilt it: duplicated host pattern
  * work, device uploads and allocations).
  *
- * <p>CROSS-FLAVOR sharing: the base load flow always extracts the DS_RL flavor while an SA run
+ * <p>CROSS-FLAVOR sharing: the base load flow always extracts with the distributed slack and reactive limits tables while an SA run
  * extracts with ITS distributed-slack / reactive-limits flags — different {@code GpuAcData}
  * instances for the same equation-system state. The flavor flags only select the outer-loop
  * RL/DS packs, which are batch-CONTEXT inputs, not structure inputs — so on an instance miss the

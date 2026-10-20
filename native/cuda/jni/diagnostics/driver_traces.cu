@@ -109,10 +109,10 @@ void traceReactiveLimitsSwitches(BatchSolverContext* ctx, DriverPass& drv, std::
         CUDA_CHECK(cudaMemcpy(qb2.data(), ctx->dQbuf.p, qb2.size() * sizeof(double), cudaMemcpyDeviceToHost));
         CUDA_CHECK(cudaMemcpy(lq2.data(), ctx->dReactiveLimitLoadQ.p, lq2.size() * sizeof(double), cudaMemcpyDeviceToHost));
         CUDA_CHECK(cudaMemcpy(x2.data(), ctx->dX.p, x2.size() * sizeof(double), cudaMemcpyDeviceToHost));
-        std::vector<double> mn2(static_cast<size_t>(ctx->nReactiveLimitEntries) * (ctx->ncv > 0 ? nS : 1));
+        std::vector<double> mn2(static_cast<size_t>(ctx->nReactiveLimitEntries) * (ctx->nReactiveCapabilityCurves > 0 ? nS : 1));
         std::vector<double> mx2(mn2.size());
-        CUDA_CHECK(cudaMemcpy(mn2.data(), ctx->ncv > 0 ? ctx->dReactiveLimitMinQPerScenario.p : ctx->dReactiveLimitMinQ.p, mn2.size() * sizeof(double), cudaMemcpyDeviceToHost));
-        CUDA_CHECK(cudaMemcpy(mx2.data(), ctx->ncv > 0 ? ctx->dReactiveLimitMaxQPerScenario.p : ctx->dReactiveLimitMaxQ.p, mx2.size() * sizeof(double), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(mn2.data(), ctx->nReactiveCapabilityCurves > 0 ? ctx->dReactiveLimitMinQPerScenario.p : ctx->dReactiveLimitMinQ.p, mn2.size() * sizeof(double), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(mx2.data(), ctx->nReactiveCapabilityCurves > 0 ? ctx->dReactiveLimitMaxQPerScenario.p : ctx->dReactiveLimitMaxQ.p, mx2.size() * sizeof(double), cudaMemcpyDeviceToHost));
         std::vector<int> cv2(ctx->nReactiveLimitEntries, -1);
         std::vector<double> vt2(ctx->nReactiveLimitEntries, 0.0);
         if (ctx->dReactiveLimitComparedVoltageRow.p) {
@@ -129,7 +129,7 @@ void traceReactiveLimitsSwitches(BatchSolverContext* ctx, DriverPass& drv, std::
             for (int i2 = 0; i2 < ctx->nReactiveLimitEntries; i2++) {
                 size_t st2 = (size_t) s2 * ctx->nReactiveLimitEntries + i2;
                 if (!ps[st2]) continue;
-                size_t li2 = ctx->ncv > 0 ? st2 : (size_t) i2;
+                size_t li2 = ctx->nReactiveCapabilityCurves > 0 ? st2 : (size_t) i2;
                 double cmpV2 = (cv2[i2] >= 0) ? x2[(size_t) s2 * n + cv2[i2]] : 0.0;
                 double qq = qb2[(size_t) s2 * n + vr2[i2]] + lq2[i2];
                 // the q the decision READ: at reactiveLimitReactivePowerRow when the entry's balance was relocated (a coupler-tree
@@ -188,11 +188,11 @@ void traceReactiveLimitsSwitches(BatchSolverContext* ctx, DriverPass& drv, std::
 }
 
 // OLF_GPU_BATCH_TRACE: the reactive-limit entries' state after the check.
-void traceReactiveLimitsState(BatchSolverContext* ctx, DriverPass& drv, bool inDsPhase, double reactiveLimitTol, std::vector<char>& outerLoopUnstable) {
+void traceReactiveLimitsState(BatchSolverContext* ctx, DriverPass& drv, bool inDistributedSlackPhase, double reactiveLimitTol, std::vector<char>& outerLoopUnstable) {
     const int& n = drv.n;
     const int& nS = drv.nS;
     const int& outer = drv.outer;
-    if (!inDsPhase && (ctx->nReactiveLimitRemoteEntries > 0 || nS == 1) && ctx->nReactiveLimitEntries > 0
+    if (!inDistributedSlackPhase && (ctx->nReactiveLimitRemoteEntries > 0 || nS == 1) && ctx->nReactiveLimitEntries > 0
             && std::getenv("OLF_GPU_BATCH_TRACE") != nullptr) {   // RL trace
         std::vector<char> lt(static_cast<size_t>(ctx->nReactiveLimitEntries) * nS);
         std::vector<char> rem(ctx->nReactiveLimitEntries);
@@ -208,8 +208,8 @@ void traceReactiveLimitsState(BatchSolverContext* ctx, DriverPass& drv, bool inD
         CUDA_CHECK(cudaMemcpy(lq.data(), ctx->dReactiveLimitLoadQ.p, lq.size() * sizeof(double), cudaMemcpyDeviceToHost));
         std::vector<int> hMode(static_cast<size_t>(n) * nS);
         CUDA_CHECK(cudaMemcpy(hMode.data(), ctx->dMode.p, hMode.size() * sizeof(int), cudaMemcpyDeviceToHost));
-        std::vector<double> hMaxQ(static_cast<size_t>(ctx->nReactiveLimitEntries) * (ctx->ncv > 0 ? nS : 1));
-        CUDA_CHECK(cudaMemcpy(hMaxQ.data(), ctx->ncv > 0 ? ctx->dReactiveLimitMaxQPerScenario.p : ctx->dReactiveLimitMaxQ.p, hMaxQ.size() * sizeof(double), cudaMemcpyDeviceToHost));
+        std::vector<double> hMaxQ(static_cast<size_t>(ctx->nReactiveLimitEntries) * (ctx->nReactiveCapabilityCurves > 0 ? nS : 1));
+        CUDA_CHECK(cudaMemcpy(hMaxQ.data(), ctx->nReactiveCapabilityCurves > 0 ? ctx->dReactiveLimitMaxQPerScenario.p : ctx->dReactiveLimitMaxQ.p, hMaxQ.size() * sizeof(double), cudaMemcpyDeviceToHost));
         std::vector<char> hOuterLoopCheckActive(nS);
         CUDA_CHECK(cudaMemcpy(hOuterLoopCheckActive.data(), ctx->dOuterLoopCheckActive.p, nS, cudaMemcpyDeviceToHost));
         // The STATE the pin decision is taken at. Without it, a q that disagrees with OLF cannot be
@@ -222,10 +222,10 @@ void traceReactiveLimitsState(BatchSolverContext* ctx, DriverPass& drv, bool inD
         for (int s2 = 0; s2 < nS; s2++) {
             for (int i2 = 0; i2 < ctx->nReactiveLimitEntries; i2++) {
                 if (rem[i2] || nS == 1) {
-                    std::fprintf(stderr, "RL_TRACE s=%d entry=%d remote=%d lt=%d switched=%d q=%.9f mode=%d tol=%.3e maxQ=%.6f ncv=%d outerLoopCheckActive=%d v=%.9f qbuf=%.9f\n",
+                    std::fprintf(stderr, "RL_TRACE s=%d entry=%d remote=%d lt=%d switched=%d q=%.9f mode=%d tol=%.3e maxQ=%.6f nReactiveCapabilityCurves=%d outerLoopCheckActive=%d v=%.9f qbuf=%.9f\n",
                                  s2, i2, (int) rem[i2], (int) lt[(size_t) s2 * ctx->nReactiveLimitEntries + i2], (int) outerLoopUnstable[s2],
                                  qb[(size_t) s2 * n + vr[i2]] + lq[i2], hMode[(size_t) s2 * n + vr[i2]], reactiveLimitTol,
-                                 hMaxQ[ctx->ncv > 0 ? (size_t) s2 * ctx->nReactiveLimitEntries + i2 : (size_t) i2], ctx->ncv, (int) hOuterLoopCheckActive[s2],
+                                 hMaxQ[ctx->nReactiveCapabilityCurves > 0 ? (size_t) s2 * ctx->nReactiveLimitEntries + i2 : (size_t) i2], ctx->nReactiveCapabilityCurves, (int) hOuterLoopCheckActive[s2],
                                  hXrl[(size_t) s2 * n + vr[i2]], qb[(size_t) s2 * n + vr[i2]]);
                 }
             }
@@ -278,12 +278,12 @@ void traceLoopSlot(BatchSolverContext* ctx, DriverPass& drv, int loopTraceSlot, 
     BatchResult& res = drv.res;
     if (loopTraceSlot >= 0 && loopTraceSlot < nS) {
         double gate[8] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};   // see the gateLast write
-        if (ctx->dDsGateLast.p) {
-            CUDA_CHECK(cudaMemcpy(gate, ctx->dDsGateLast.as<double>() + 8 * loopTraceSlot, 8 * sizeof(double), cudaMemcpyDeviceToHost));
+        if (ctx->dDistributedSlackLastPassAccounting.p) {
+            CUDA_CHECK(cudaMemcpy(gate, ctx->dDistributedSlackLastPassAccounting.as<double>() + 8 * loopTraceSlot, 8 * sizeof(double), cudaMemcpyDeviceToHost));
         }
         std::fprintf(stderr, "LOOP_PASS s=%d outer=%d loopIdx=%d kind=%d solved=%d switched=%d nChanged=%d live=%d status=%d"
                      " dsRem=%.12f dsFire=%d nrIters=%d dsSlackP=%.12f dsSlackTgt=%.12f dsSlackMismatch=%.12f"
-                     " dsRetain=%.12f fsGlobal=%.12f dsPlaced=%.12f\n",
+                     " slackRetainedShare=%.12f fsGlobal=%.12f dsPlaced=%.12f\n",
                      loopTraceSlot, outer, loopIdx, loopOrder[loopIdx], solvePass ? 1 : 0,
                      (int) outerLoopUnstable[loopTraceSlot], nChanged, (int) live[loopTraceSlot], res.status[loopTraceSlot],
                      gate[0], (int) gate[1], res.iters[loopTraceSlot],
@@ -322,7 +322,7 @@ void traceReactiveLimitsAudit(BatchSolverContext* ctx, DriverPass& drv, std::vec
     const int& nReactiveLimitTargetVOverrides = drv.nReactiveLimitTargetVOverrides;
     DeviceBuf& dReactiveLimitTargetVOverrideScenarioEntry = drv.dReactiveLimitTargetVOverrideScenarioEntry;
     DeviceBuf& dReactiveLimitTargetVOverrideValue = drv.dReactiveLimitTargetVOverrideValue;
-    DeviceBuf& dCvOvVal = drv.dCvOvVal;
+    DeviceBuf& dReactiveCapabilityCurveOverrideStepScale = drv.dReactiveCapabilityCurveOverrideStepScale;
     const int& n = drv.n;
     const int& nS = drv.nS;
     const int& nnz = drv.nnz;
@@ -331,13 +331,13 @@ void traceReactiveLimitsAudit(BatchSolverContext* ctx, DriverPass& drv, std::vec
     const int& reactiveLimitsDecisionLogScenario = drv.reactiveLimitsDecisionLogScenario;
     const bool& usePerScenarioReactiveLimits = drv.usePerScenarioReactiveLimits;
     const int& nReactiveLimitDeltaOverrides = drv.nReactiveLimitDeltaOverrides;
-    const int& nCvOv = drv.nCvOv;
+    const int& nReactiveCapabilityCurveOverrides = drv.nReactiveCapabilityCurveOverrides;
     DeviceBuf& dReactiveLimitDeltaOverrideScenarioEntry = drv.dReactiveLimitDeltaOverrideScenarioEntry;
     DeviceBuf& dReactiveLimitDeltaOverrideValues = drv.dReactiveLimitDeltaOverrideValues;
     DeviceBuf& dReactiveLimitDeltaOverrideStart = drv.dReactiveLimitDeltaOverrideStart;
     DeviceBuf& dReactiveLimitDeltaOverrideList = drv.dReactiveLimitDeltaOverrideList;
-    DeviceBuf& dCvOvPtr = drv.dCvOvPtr;
-    DeviceBuf& dCvOvEntry = drv.dCvOvEntry;
+    DeviceBuf& dReactiveCapabilityCurveOverrideStart = drv.dReactiveCapabilityCurveOverrideStart;
+    DeviceBuf& dReactiveCapabilityCurveOverrideCurve = drv.dReactiveCapabilityCurveOverrideCurve;
     if (ctx->nReactiveLimitEntries > 0 && std::getenv("OLF_GPU_RL_AUDIT") != nullptr) {
         double auditTol = std::atof(std::getenv("OLF_GPU_RL_AUDIT"));
         if (auditTol <= 0.0) auditTol = 1e-6;
@@ -367,22 +367,22 @@ void traceReactiveLimitsAudit(BatchSolverContext* ctx, DriverPass& drv, std::vec
         // outerLoopUnstable names the scenarios that were returned one check short. Running it on the real
         // buffers is safe for the same reason: a fixpoint is a no-op.
         if (usePerScenarioReactiveLimits) {                                // limits at the FINAL targets
-            reactiveCapabilityCurveLimitsBatch<<<grid(ctx->nReactiveLimitEntries * nS), BLOCK, 0, ctx->stream>>>(ctx->nReactiveLimitEntries, nS, ctx->ncv, n, ctx->cvExtrapolate,
-                    ctx->dCvIdx.as<int>(), ctx->dCvIn.as<double>(), ctx->dCvPts.as<double>(),
-                        ctx->dCvPtr.as<int>(), ctx->dCvList.as<int>(), cvHvdcView(ctx),
+            reactiveCapabilityCurveLimitsBatch<<<grid(ctx->nReactiveLimitEntries * nS), BLOCK, 0, ctx->stream>>>(ctx->nReactiveLimitEntries, nS, ctx->nReactiveCapabilityCurves, n, ctx->reactiveCapabilityCurveExtrapolate,
+                    ctx->dReactiveCapabilityCurveIndices.as<int>(), ctx->dReactiveCapabilityCurveParameters.as<double>(), ctx->dReactiveCapabilityCurvePoints.as<double>(),
+                        ctx->dReactiveLimitEntryCurveStart.as<int>(), ctx->dReactiveLimitEntryCurves.as<int>(), curveHvdcAcEmulationView(ctx),
                     ctx->dReactiveLimitMinQ.as<double>(), ctx->dReactiveLimitMaxQ.as<double>(), ctx->dReactiveLimitLoadQ.as<double>(),
                     ctx->dTarget.as<double>(),
                     nReactiveLimitDeltaOverrides, nReactiveLimitDeltaOverrides > 0 ? dReactiveLimitDeltaOverrideScenarioEntry.as<int>() : nullptr,
                     nReactiveLimitDeltaOverrides > 0 ? dReactiveLimitDeltaOverrideValues.as<double>() : nullptr,
                         nReactiveLimitDeltaOverrides > 0 ? dReactiveLimitDeltaOverrideStart.as<int>() : nullptr, nReactiveLimitDeltaOverrides > 0 ? dReactiveLimitDeltaOverrideList.as<int>() : nullptr,
-                    nCvOv > 0 ? dCvOvPtr.as<int>() : nullptr,
-                    nCvOv > 0 ? dCvOvEntry.as<int>() : nullptr,
-                    nCvOv > 0 ? dCvOvVal.as<double>() : nullptr,
-                    ctx->ngen > 0 ? ctx->dGenCum.as<double>() : nullptr,
-                    ctx->ngen > 0 ? ctx->dGenCumValid.as<char>() : nullptr, ctx->hasDgAnchor ? ctx->dDgAnchor.as<double>() : nullptr, ctx->hasDgStart ? ctx->dDgStart.as<double>() : nullptr, ctx->ngen,
-                    ctx->nds > 0 ? ctx->dDsPhiRow.as<int>() : nullptr,
-                    ctx->nDsRowOv > 0 ? ctx->dDsRowOv.as<int>() : nullptr, ctx->nds,
-                    ctx->ngen > 0 ? ctx->dgBus.as<int>() : nullptr,
+                    nReactiveCapabilityCurveOverrides > 0 ? dReactiveCapabilityCurveOverrideStart.as<int>() : nullptr,
+                    nReactiveCapabilityCurveOverrides > 0 ? dReactiveCapabilityCurveOverrideCurve.as<int>() : nullptr,
+                    nReactiveCapabilityCurveOverrides > 0 ? dReactiveCapabilityCurveOverrideStepScale.as<double>() : nullptr,
+                    ctx->nDistributedSlackGenerators > 0 ? ctx->dDistributedSlackGeneratorMove.as<double>() : nullptr,
+                    ctx->nDistributedSlackGenerators > 0 ? ctx->dDistributedSlackGeneratorMoveValid.as<char>() : nullptr, ctx->hasDistributedSlackGeneratorAnchor ? ctx->dDistributedSlackGeneratorAnchor.as<double>() : nullptr, ctx->hasDistributedSlackGeneratorInitialMove ? ctx->dDistributedSlackGeneratorInitialMove.as<double>() : nullptr, ctx->nDistributedSlackGenerators,
+                    ctx->nDistributedSlackBuses > 0 ? ctx->dDistributedSlackBusPhiRow.as<int>() : nullptr,
+                    ctx->nDistributedSlackBusRowOverrides > 0 ? ctx->dDistributedSlackBusRowOverride.as<int>() : nullptr, ctx->nDistributedSlackBuses,
+                    ctx->nDistributedSlackGenerators > 0 ? ctx->distributedSlackGeneratorBus.as<int>() : nullptr,
                     ctx->dReactiveLimitMinQPerScenario.as<double>(), ctx->dReactiveLimitMaxQPerScenario.as<double>(),
                     ctx->dReactiveLimitLoadQPerScenario.as<double>());
             launchForcedTargetQLimits(ctx, nS, n);
@@ -459,10 +459,10 @@ void traceReactiveLimitsAudit(BatchSolverContext* ctx, DriverPass& drv, std::vec
             aisl.resize(static_cast<size_t>(ctx->nReactiveLimitEntries) * nS);
             CUDA_CHECK(cudaMemcpy(aisl.data(), ctx->dReactiveLimitIslanded.p, aisl.size(), cudaMemcpyDeviceToHost));
         }
-        std::vector<double> amn(static_cast<size_t>(ctx->nReactiveLimitEntries) * (ctx->ncv > 0 ? nS : 1)), amx;
+        std::vector<double> amn(static_cast<size_t>(ctx->nReactiveLimitEntries) * (ctx->nReactiveCapabilityCurves > 0 ? nS : 1)), amx;
         amx.resize(amn.size());
-        CUDA_CHECK(cudaMemcpy(amn.data(), ctx->ncv > 0 ? ctx->dReactiveLimitMinQPerScenario.p : ctx->dReactiveLimitMinQ.p, amn.size() * sizeof(double), cudaMemcpyDeviceToHost));
-        CUDA_CHECK(cudaMemcpy(amx.data(), ctx->ncv > 0 ? ctx->dReactiveLimitMaxQPerScenario.p : ctx->dReactiveLimitMaxQ.p, amx.size() * sizeof(double), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(amn.data(), ctx->nReactiveCapabilityCurves > 0 ? ctx->dReactiveLimitMinQPerScenario.p : ctx->dReactiveLimitMinQ.p, amn.size() * sizeof(double), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(amx.data(), ctx->nReactiveCapabilityCurves > 0 ? ctx->dReactiveLimitMaxQPerScenario.p : ctx->dReactiveLimitMaxQ.p, amx.size() * sizeof(double), cudaMemcpyDeviceToHost));
         std::vector<int> acv(ctx->nReactiveLimitEntries, -1);
         std::vector<double> avt(ctx->nReactiveLimitEntries, 0.0);
         if (ctx->dReactiveLimitComparedVoltageRow.p) {
@@ -476,7 +476,7 @@ void traceReactiveLimitsAudit(BatchSolverContext* ctx, DriverPass& drv, std::vec
             for (int i = 0; i < ctx->nReactiveLimitEntries; i++) {
                 size_t st = (size_t) s * ctx->nReactiveLimitEntries + i;
                 if (!aPs[st]) continue;
-                size_t li = ctx->ncv > 0 ? st : (size_t) i;
+                size_t li = ctx->nReactiveCapabilityCurves > 0 ? st : (size_t) i;
                 double cmpV = (acv[i] >= 0) ? ax[(size_t) s * n + acv[i]] : 0.0;
                 // act 1 = a pin this check owed, 2 = an unpin, 3 = a moved limit it owed
                 std::fprintf(stderr, "RL_OWED s=%d entry=%d vrow=%d act=%d ltBefore=%d ltAfter=%d q=%.15e min=%.15e max=%.15e v=%.15e cmpV=%.15e vt=%.15e margin=%.3e\n",
@@ -499,7 +499,7 @@ void traceReactiveLimitsAudit(BatchSolverContext* ctx, DriverPass& drv, std::vec
                 if (!aisl.empty() && aisl[st]) continue;     // not a controller in this component
                 int m = amode[(size_t) s * n + avr[i]];
                 if (m == GpuRowMode::BUS_TARGET_Q) continue;  // row owns its own Q balance this scenario
-                size_t li = ctx->ncv > 0 ? st : (size_t) i;
+                size_t li = ctx->nReactiveCapabilityCurves > 0 ? st : (size_t) i;
                 double q = aq[(size_t) s * n + avr[i]] + alq[i];
                 double over = q < amn[li] ? amn[li] - q : (q > amx[li] ? q - amx[li] : 0.0);
                 if (over > auditTol) {
@@ -521,18 +521,18 @@ void traceReactiveLimitsAudit(BatchSolverContext* ctx, DriverPass& drv, std::vec
 void tracePhaseTime(BatchSolverContext* ctx, DriverPass& drv) {
     const int& nS = drv.nS;
     BatchResult& res = drv.res;
-    if (!ctx->driverPaused && std::getenv("OLF_GPU_PHASE_TIME") != nullptr && ctx->olPasses.size() == static_cast<size_t>(nS)) {
+    if (!ctx->driverPaused && std::getenv("OLF_GPU_PHASE_TIME") != nullptr && ctx->outerLoopSolvePasses.size() == static_cast<size_t>(nS)) {
         for (int s = 0; s < nS; s++) {
-            if (ctx->olPasses[s] == 0) continue;
+            if (ctx->outerLoopSolvePasses[s] == 0) continue;
             if (res.status[s] != GpuAcSolverStatus::CONVERGED) {                         // not finished converged on device (CPU replay,
-                gOlNotConverged++;                           // max-iter, ...): its work is counted apart
-                gOlNotConvergedIters += ctx->olIters[s];
+                gOuterLoopNotConverged++;                           // max-iter, ...): its work is counted apart
+                gOuterLoopNotConvergedIterations += ctx->outerLoopIterations[s];
                 continue;
             }
-            int k = std::min(ctx->olPasses[s], 15);
-            gOlHistCount[k]++;
-            gOlHistFirst[k] += ctx->olFirst[s];
-            gOlHistTotal[k] += ctx->olIters[s];
+            int k = std::min(ctx->outerLoopSolvePasses[s], 15);
+            gOuterLoopPassHistogramCount[k]++;
+            gOuterLoopPassHistogramFirstSolveIterations[k] += ctx->outerLoopFirstSolveIterations[s];
+            gOuterLoopPassHistogramTotalIterations[k] += ctx->outerLoopIterations[s];
         }
     }
 }

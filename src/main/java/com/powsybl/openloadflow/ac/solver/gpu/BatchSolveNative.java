@@ -41,11 +41,11 @@ public final class BatchSolveNative {
     public static native long createBatchContext(long structureHandle, int nScenarios, int mode,
                                                   int[] reactiveLimitVoltageRow, double[] reactiveLimitMinQ, double[] reactiveLimitMaxQ, double[] reactiveLimitLoadQ,
                                                   double[] reactiveLimitTargetV, byte[] reactiveLimitFlags, double[] rowSlope,
-                                                  int[] dsPhiRow, double[] dsFactor,
-                                                  int dsSlackPhiRow, double dsSlackTargetP,
-                                                  double[] dsBaseTargetP, double[] dsMaxDelta, double[] dsMinDelta,
-                                                  int dsMode, double[] dsMarginUp, double[] dsMarginDown,
-                                                  double dsSlackMarginUp, double dsSlackMarginDown);
+                                                  int[] distributedSlackBusPhiRow, double[] distributedSlackBusFactor,
+                                                  int slackBusPhiRow, double slackBusTargetP,
+                                                  double[] distributedSlackBusBaseTargetP, double[] dsMaxDelta, double[] dsMinDelta,
+                                                  int distributedSlackFactorMode, double[] distributedSlackBusMarginUp, double[] distributedSlackBusMarginDown,
+                                                  double slackBusMarginUp, double slackBusMarginDown);
 
     /** Release a batch context from {@link #createBatchContext} (idempotent for handle 0). */
     public static native void destroyBatchContext(long handle);
@@ -83,13 +83,13 @@ public final class BatchSolveNative {
     public static native double[][] solveBatchContext(long handle, double[] x0Base, double[] targetBase,
                                                        int[][] rowMode, int[] baseRowMode, boolean[][] disabledElementMask,
                                                        int[] targetOverrideIndex, double[] targetOverrideValue,
-                                                       int[] dsOverrideBus, double[] dsOverrideFactorDelta,
-                                                       double[] dsOverrideBaseDelta, double[] dsOverrideMaxDelta,
-                                                       double[] dsOverrideMinDelta, double[] dsAnchorShift,
-                                                       double[] dsSlackShift,
+                                                       int[] distributedSlackOverrideBus, double[] distributedSlackOverrideFactorDelta,
+                                                       double[] distributedSlackOverrideBaseTargetPDelta, double[] distributedSlackOverrideMaxDelta,
+                                                       double[] distributedSlackOverrideMinDelta, double[] distributedSlackBusAnchorShift,
+                                                       double[] slackBusAnchorShift,
                                                        int[] reactiveLimitTargetVOverrideScenarioEntry, double[] reactiveLimitTargetVOverrideValue,
                                                        int[] reactiveLimitDeltaOverrideScenarioEntry, double[] reactiveLimitDeltaOverrideValues,
-                                                       int[] cvOvSlotEntry, double[] cvOvStepScale,
+                                                       int[] reactiveCapabilityCurveOverrideScenarioCurve, double[] reactiveCapabilityCurveOverrideStepScale,
                                                        int maxIter, double tol,
                                                        double reactiveLimitTol, double slackDistTol, double convEpsPerEq,
                                                        int lsMode, double maxDv, double maxDphi, int[] varType,
@@ -97,6 +97,6 @@ public final class BatchSolveNative {
                                                        int[] shuntOvSlotElem, double[] shuntOvGb,
                                                        int[] reactiveLimitsSeedState, int[] reactiveLimitsFinalState,
                                                        int[] r1OvSlotElem, double[] r1OvVal,
-                                                       int maxOuterIterations, int maxPqPvSwitch, int dsRejectResidual, int skipReactiveLimitsPhase,
+                                                       int maxOuterIterations, int maxPqPvSwitch, int rejectSlackDistributionFailure, int skipReactiveLimitsPhase,
                                                        int nBaseClosedZeroImpedanceBranches, int[] zeroImpedanceBranchCloseScenarioElement, int[] zeroImpedanceBranchOpenScenarioElement);
 }

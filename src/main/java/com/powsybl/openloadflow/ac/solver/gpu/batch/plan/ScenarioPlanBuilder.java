@@ -49,7 +49,7 @@ final class ScenarioPlanBuilder {
     // member's rho; the FREE member's outage shifts the pilot-Q role — CPU (A6).
     final int[][] distrRhoOverrideTermByIndex;
     final double[][] distrRhoOverrideCoefficientByIndex;
-    final int[][] islandedDsByIndex;
+    final int[][] islandedDistributedSlackByIndex;
     final int[][] islandedReactiveLimitEntriesByIndex;
     // {pRow, qRow} per LfBus.getNum(), resolved lazily on the first injection outage: the P/Q
     // balance rows the extraction writes targets at, which the coupler-tree relocation moves off
@@ -80,7 +80,7 @@ final class ScenarioPlanBuilder {
         this.distrQKeyOverrideKeyByIndex = new double[nContingencies][];
         this.distrRhoOverrideTermByIndex = new int[nContingencies][];
         this.distrRhoOverrideCoefficientByIndex = new double[nContingencies][];
-        this.islandedDsByIndex = new int[nContingencies][];
+        this.islandedDistributedSlackByIndex = new int[nContingencies][];
         this.islandedReactiveLimitEntriesByIndex = new int[nContingencies][];
         this.distrQSubgroupByIndex = new int[nContingencies][];
         this.relocatedSlackRow = new int[nContingencies];
@@ -92,16 +92,16 @@ final class ScenarioPlanBuilder {
 
     /** The plan, once every contingency went through its planner. */
     GpuBatchQualification.ScenarioPlan build() {
-        int maskedDs = 0;
-        for (int[] m : islandedDsByIndex) {
-            maskedDs += m == null ? 0 : m.length;
+        int maskedDistributedSlackParticipants = 0;
+        for (int[] m : islandedDistributedSlackByIndex) {
+            maskedDistributedSlackParticipants += m == null ? 0 : m.length;
         }
-        com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.LAST_ISLANDED_DS_MASKED.set(maskedDs);
+        com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.LAST_ISLANDED_DS_MASKED.set(maskedDistributedSlackParticipants);
         return new GpuBatchQualification.ScenarioPlan(batchedIndices, frozenRowsByIndex, islandedNumsByIndex,
                 frozenTargetsByIndex, genOutagesByIndex, islandingCount, activePowerLossByIndex,
                 distrQWeightOverrideTermByIndex, distrQWeightOverrideWeightByIndex, distrQKeyOverrideMemberByIndex,
                 distrQKeyOverrideKeyByIndex, distrRhoOverrideTermByIndex, distrRhoOverrideCoefficientByIndex,
-                islandedDsByIndex,
+                islandedDistributedSlackByIndex,
                 islandedReactiveLimitEntriesByIndex, islandedHvdcsByIndex, distrQSubgroupByIndex,
                 new GpuBatchQualification.SlackRelocations(relocatedSlackRow, relocatedSlackShift));
     }

@@ -632,7 +632,7 @@ final class GpuAcRowIndexing {
      * well behaved, with AMD retained.
      *
      * <p>WHY THE CONDITIONS ARE THIS STRICT. Moving a bus's P balance off {@code phiCol} is only safe
-     * when NOTHING ELSE is keyed on that row, and several packs are: {@code dsPhiRow} writes each
+     * when NOTHING ELSE is keyed on that row, and several packs are: {@code distributedSlackBusPhiRow} writes each
      * distributed-slack participant's target at {@code phiCol[bn]}, the reactive-capability curve
      * pack has its own P rows, the HVDC family scatters into both ends' P rows, and a load model
      * emits a load model term at the bus's P and Q rows. Excluding generators covers DS, the curves and

@@ -33,9 +33,10 @@ import java.util.List;
  * ({@code reactiveCapabilityCurveLimitsBatch}) re-evaluates the bus limits at the CURRENT targets before every RL
  * decision. Non-participating curve gens never move — their base snapshot stays exact, no entry.
  *
- * <p>Channel layout (setBatchReactiveCapabilityCurves): cvIdx stride 5 {reactiveLimitEntry, pRow, ptsOff, npts, dsGenSlot}; cvIn stride 5
- * {basePpu, share, baseRowTargetP, baseEvalMinPu, baseEvalMaxPu}; cvPts stride 3
- * {p_MW, minQ_MW, maxQ_MW} sorted by p; cvHv stride 2 {hvdc, side} (null when no entry is one).
+ * <p>Channel layout (setBatchReactiveCapabilityCurves): reactiveCapabilityCurveIndices stride 5 {reactiveLimitEntry,
+         pRow, ptsOff, npts, distributedSlackGeneratorIndex}; reactiveCapabilityCurveParameters stride 5
+ * {basePpu, share, baseRowTargetP, baseEvalMinPu, baseEvalMaxPu}; reactiveCapabilityCurvePoints stride 3
+ * {p_MW, minQ_MW, maxQ_MW} sorted by p; reactiveCapabilityCurveHvdcStation stride 2 {hvdc, side} (null when no entry is one).
  *
  * <p>An AC-emulation VSC station is an entry too, whatever the slack distribution: OLF evaluates its curve at the
  * live flow of its link in the linear mode, and at its target P otherwise
@@ -51,14 +52,14 @@ public final class ReactiveCapabilityCurves {
 
     /** The packed channel, null when the network needs none (no participating curve gen).
      *  {@code extrapolate} = OLF's extrapolateReactiveLimits: the kernel continues the boundary
-     *  two-point slope past [minP, maxP] instead of clamping (the base evals in cvIn come from
+     *  two-point slope past [minP, maxP] instead of clamping (the base evals in reactiveCapabilityCurveParameters come from
      *  OLF's own gen.getMinQ()/getMaxQ(), which already honor the flag). */
-    public record Channel(int[] cvIdx, double[] cvIn, double[] cvPts, boolean extrapolate,
-                         String[] cvGenId, double[] cvBusFactor, int[] cvHv) {
+    public record Channel(int[] reactiveCapabilityCurveIndices, double[] reactiveCapabilityCurveParameters, double[] reactiveCapabilityCurvePoints, boolean extrapolate,
+                         String[] reactiveCapabilityCurveGeneratorId, double[] reactiveCapabilityCurveBusFactor, int[] reactiveCapabilityCurveHvdcStation) {
 
         /** Whether entry {@code e} is an AC-emulation VSC: its P is its link's, not the slack's. */
         public boolean isHvdc(int e) {
-            return cvHv != null && cvHv[2 * e] >= 0;
+            return reactiveCapabilityCurveHvdcStation != null && reactiveCapabilityCurveHvdcStation[2 * e] >= 0;
         }
     }
 
@@ -74,7 +75,7 @@ public final class ReactiveCapabilityCurves {
      *  {@code gpuData.reactiveLimits().voltageRow()} — a drift throws, falling back to CPU). Returns null when no
      *  PARTICIPATING curve generator exists (static snapshots stay exact). */
     public static Channel build(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
-                                GpuAcData gpuData, GpuDsParams dsParams, boolean distributedSlack,
+                                GpuAcData gpuData, GpuDsParams distributedSlackParameters, boolean distributedSlack,
                                 double[] baseTargets, boolean extrapolate) {
         // the AC-emulation stations, in the HVDC loop tables' order: station -> {hvdc, side}
         java.util.Map<LfGenerator, int[]> hvdcSides = new java.util.IdentityHashMap<>();
@@ -85,12 +86,12 @@ public final class ReactiveCapabilityCurves {
             hvdcSides.put(packedHvdcs.get(h).getConverterStation1(), new int[] {h, 1});
             hvdcSides.put(packedHvdcs.get(h).getConverterStation2(), new int[] {h, 2});
         }
-        List<Integer> cvHv = new ArrayList<>();
-        List<int[]> cvIdx = new ArrayList<>();
-        List<double[]> cvIn = new ArrayList<>();
-        List<Double> cvPts = new ArrayList<>();
-        List<String> cvGenId = new ArrayList<>();
-        List<Double> cvBusFactor = new ArrayList<>();
+        List<Integer> reactiveCapabilityCurveHvdcStation = new ArrayList<>();
+        List<int[]> reactiveCapabilityCurveIndices = new ArrayList<>();
+        List<double[]> reactiveCapabilityCurveParameters = new ArrayList<>();
+        List<Double> reactiveCapabilityCurvePoints = new ArrayList<>();
+        List<String> reactiveCapabilityCurveGeneratorId = new ArrayList<>();
+        List<Double> reactiveCapabilityCurveBusFactor = new ArrayList<>();
         // Each bus's P-BALANCE row, from the one source of truth. Resolving it from the variable set
         // instead gives the bus's own BUS_PHI column, which is NOT where its P target lives once the
         // coupler-tree relocation has moved it onto the parent coupler's DUMMY_P — and this channel
@@ -125,8 +126,10 @@ public final class ReactiveCapabilityCurves {
                 // remote members keep STATIC limits in the channel (a curve gen at a remote member is
                 // possible but its own P participation is the same as a local bus's) — fall through to
                 // the same per-generator curve packing below.
-                packBusCurves(bus, reactiveLimitEntry, es, distributedSlack ? dsParams : null, baseTargets, busPRow, cvIdx, cvIn, cvPts,
-                        cvGenId, cvBusFactor, gpuData, hvdcSides, cvHv);
+                packBusCurves(bus, reactiveLimitEntry, es, distributedSlack ? distributedSlackParameters : null,
+                        baseTargets, busPRow, reactiveCapabilityCurveIndices, reactiveCapabilityCurveParameters,
+                        reactiveCapabilityCurvePoints,
+                        reactiveCapabilityCurveGeneratorId, reactiveCapabilityCurveBusFactor, gpuData, hvdcSides, reactiveCapabilityCurveHvdcStation);
                 reactiveLimitEntry++;
                 continue;
             }
@@ -141,24 +144,26 @@ public final class ReactiveCapabilityCurves {
                 throw new PowsyblException("GPU AC solver: RL-pack enumeration drift while packing curve limits (bus "
                         + bus.getId() + ")");
             }
-            packBusCurves(bus, reactiveLimitEntry, es, distributedSlack ? dsParams : null, baseTargets, busPRow, cvIdx, cvIn, cvPts,
-                    cvGenId, cvBusFactor, gpuData, hvdcSides, cvHv);
+            packBusCurves(bus, reactiveLimitEntry, es, distributedSlack ? distributedSlackParameters : null,
+                    baseTargets, busPRow, reactiveCapabilityCurveIndices, reactiveCapabilityCurveParameters,
+                    reactiveCapabilityCurvePoints,
+                    reactiveCapabilityCurveGeneratorId, reactiveCapabilityCurveBusFactor, gpuData, hvdcSides, reactiveCapabilityCurveHvdcStation);
             reactiveLimitEntry++;
         }
-        if (cvIdx.isEmpty()) {
+        if (reactiveCapabilityCurveIndices.isEmpty()) {
             return null;
         }
         return new Channel(
-                cvIdx.stream().flatMapToInt(java.util.stream.IntStream::of).toArray(),
-                cvIn.stream().flatMapToDouble(java.util.stream.DoubleStream::of).toArray(),
-                cvPts.stream().mapToDouble(Double::doubleValue).toArray(), extrapolate,
-                cvGenId.toArray(new String[0]),
-                cvBusFactor.stream().mapToDouble(Double::doubleValue).toArray(),
-                cvHv.stream().anyMatch(h -> h >= 0) ? cvHv.stream().mapToInt(Integer::intValue).toArray() : null);
+                reactiveCapabilityCurveIndices.stream().flatMapToInt(java.util.stream.IntStream::of).toArray(),
+                reactiveCapabilityCurveParameters.stream().flatMapToDouble(java.util.stream.DoubleStream::of).toArray(),
+                reactiveCapabilityCurvePoints.stream().mapToDouble(Double::doubleValue).toArray(), extrapolate,
+                reactiveCapabilityCurveGeneratorId.toArray(new String[0]),
+                reactiveCapabilityCurveBusFactor.stream().mapToDouble(Double::doubleValue).toArray(),
+                reactiveCapabilityCurveHvdcStation.stream().anyMatch(h -> h >= 0) ? reactiveCapabilityCurveHvdcStation.stream().mapToInt(Integer::intValue).toArray() : null);
     }
 
     /** The bus's index in the distributed-slack BUS pack, or -1 when it does not participate. */
-    private static int dsBusIndexOf(GpuAcData gpuData, int busNum) {
+    private static int distributedSlackBusIndexOf(GpuAcData gpuData, int busNum) {
         int[] nums = gpuData.distributedSlack().busNum();
         if (nums == null) {
             return -1;
@@ -173,12 +178,12 @@ public final class ReactiveCapabilityCurves {
 
     @SuppressWarnings("java:S107")
     /** The generator's index in the distributed-slack GENERATOR pack, or -1 when it is not in it. */
-    private static int dsSlotOf(String[] dgGenId, String genId) {
-        if (dgGenId == null) {
+    private static int distributedSlackGeneratorIndexOf(String[] distributedSlackGeneratorId, String genId) {
+        if (distributedSlackGeneratorId == null) {
             return -1;
         }
-        for (int i = 0; i < dgGenId.length; i++) {
-            if (dgGenId[i].equals(genId)) {
+        for (int i = 0; i < distributedSlackGeneratorId.length; i++) {
+            if (distributedSlackGeneratorId[i].equals(genId)) {
                 return i;
             }
         }
@@ -186,19 +191,19 @@ public final class ReactiveCapabilityCurves {
     }
 
     private static void packBusCurves(LfBus bus, int reactiveLimitEntry, EquationSystem<AcVariableType, AcEquationType> es,
-                                      GpuDsParams dsParams, double[] baseTargets, int[] busPRow,
-                                      List<int[]> cvIdx, List<double[]> cvIn, List<Double> cvPts,
-                                      List<String> cvGenId, List<Double> cvBusFactor, GpuAcData gpuData,
-                                      java.util.Map<LfGenerator, int[]> hvdcSides, List<Integer> cvHv) {
-        String[] dgGenId = gpuData.distributedSlack().generatorId();
-        // dsParams == null: no slack distribution, only the AC-emulation stations' P moves
-        double busFactor = dsParams != null ? bus.getGenerators().stream().mapToDouble(dsParams::factor).sum() : 0;
+                                      GpuDsParams distributedSlackParameters, double[] baseTargets, int[] busPRow,
+                                      List<int[]> reactiveCapabilityCurveIndices, List<double[]> reactiveCapabilityCurveParameters, List<Double> reactiveCapabilityCurvePoints,
+                                      List<String> reactiveCapabilityCurveGeneratorId, List<Double> reactiveCapabilityCurveBusFactor, GpuAcData gpuData,
+                                      java.util.Map<LfGenerator, int[]> hvdcSides, List<Integer> reactiveCapabilityCurveHvdcStation) {
+        String[] distributedSlackGeneratorId = gpuData.distributedSlack().generatorId();
+        // distributedSlackParameters == null: no slack distribution, only the AC-emulation stations' P moves
+        double busFactor = distributedSlackParameters != null ? bus.getGenerators().stream().mapToDouble(distributedSlackParameters::factor).sum() : 0;
         for (LfGenerator gen : bus.getGenerators()) {
             var curve = gen instanceof AbstractLfGenerator alg
                     ? alg.getReactiveLimits().filter(rl -> rl.getKind() == ReactiveLimitsKind.CURVE).orElse(null)
                     : null;
             int[] hvdcSide = hvdcSides.get(gen);
-            if (curve == null || hvdcSide == null && (busFactor <= 0 || dsParams.factor(gen) <= 0)) {
+            if (curve == null || hvdcSide == null && (busFactor <= 0 || distributedSlackParameters.factor(gen) <= 0)) {
                 continue;                                    // no curve, or its P never moves — static is exact
             }
             // A bus limit is NOT the sum of its generators' curve limits. AbstractLfBus.getLimitQ
@@ -218,44 +223,44 @@ public final class ReactiveCapabilityCurves {
             }
             var points = ((ReactiveCapabilityCurve) curve).getPoints().stream()
                     .sorted(java.util.Comparator.comparingDouble(ReactiveCapabilityCurve.Point::getP)).toList();
-            int ptsOff = cvPts.size() / 3;
+            int ptsOff = reactiveCapabilityCurvePoints.size() / 3;
             for (var pt : points) {
-                cvPts.add(pt.getP());
-                cvPts.add(pt.getMinQ());
-                cvPts.add(pt.getMaxQ());
+                reactiveCapabilityCurvePoints.add(pt.getP());
+                reactiveCapabilityCurvePoints.add(pt.getMinQ());
+                reactiveCapabilityCurvePoints.add(pt.getMaxQ());
             }
             int pRow = busPRow[bus.getNum()];             // the RELOCATED P-balance row (see build)
-            // A slack participant's row is the slack pack's own (dsPhiRow is built from the same busPRow, so
-            // this only asserts the two packs agree); the kernel resolves the per-scenario row (dsRowOv) itself.
-            int dsIdx = dsBusIndexOf(gpuData, bus.getNum());
-            if (dsIdx >= 0) {
-                pRow = gpuData.distributedSlack().busPhiRow()[dsIdx];
+            // A slack participant's row is the slack pack's own (distributedSlackBusPhiRow is built from the same busPRow, so
+            // this only asserts the two packs agree); the kernel resolves the per-scenario row (distributedSlackBusRowOverride) itself.
+            int distributedSlackBusIndex = distributedSlackBusIndexOf(gpuData, bus.getNum());
+            if (distributedSlackBusIndex >= 0) {
+                pRow = gpuData.distributedSlack().busPhiRow()[distributedSlackBusIndex];
             }
             // ...and WHICH generator this is in the distributed-slack generator pack. The kernel reads
-            // that generator's own cumulative P movement (genCum) instead of splitting its bus's
+            // that generator's own cumulative P movement (distributedSlackGeneratorMove) instead of splitting its bus's
             // movement by a fixed share: the share is exact only while the intra-bus split stays
             // proportional, and OLF's water-fill clamps PER GENERATOR, which breaks it the moment one
             // generator on the bus saturates. -1 when the generator is not in the pack (then the share
             // reconstruction is the only thing available).
             if (hvdcSide != null) {
                 // its P is its link's (the kernel reads it from the HVDC loop state): no slack slot, no share
-                cvIdx.add(new int[] {reactiveLimitEntry, pRow, ptsOff, points.size(), -1});
-                cvIn.add(new double[] {gen.getTargetP(), 0, baseTargets[pRow], gen.getMinQ(), gen.getMaxQ()});
-                cvHv.add(hvdcSide[0]);
-                cvHv.add(hvdcSide[1]);
-                cvGenId.add(gen.getId());
-                cvBusFactor.add(busFactor);
+                reactiveCapabilityCurveIndices.add(new int[] {reactiveLimitEntry, pRow, ptsOff, points.size(), -1});
+                reactiveCapabilityCurveParameters.add(new double[] {gen.getTargetP(), 0, baseTargets[pRow], gen.getMinQ(), gen.getMaxQ()});
+                reactiveCapabilityCurveHvdcStation.add(hvdcSide[0]);
+                reactiveCapabilityCurveHvdcStation.add(hvdcSide[1]);
+                reactiveCapabilityCurveGeneratorId.add(gen.getId());
+                reactiveCapabilityCurveBusFactor.add(busFactor);
                 continue;
             }
-            cvIdx.add(new int[] {reactiveLimitEntry, pRow, ptsOff, points.size(), dsSlotOf(dgGenId, gen.getId())});
-            cvIn.add(new double[] {gen.getTargetP(), dsParams.factor(gen) / busFactor, baseTargets[pRow],
+            reactiveCapabilityCurveIndices.add(new int[] {reactiveLimitEntry, pRow, ptsOff, points.size(), distributedSlackGeneratorIndexOf(distributedSlackGeneratorId, gen.getId())});
+            reactiveCapabilityCurveParameters.add(new double[] {gen.getTargetP(), distributedSlackParameters.factor(gen) / busFactor, baseTargets[pRow],
                 gen.getMinQ(), gen.getMaxQ()});              // base evals AT base targetP (bit-zero delta at base)
-            cvHv.add(-1);
-            cvHv.add(-1);
+            reactiveCapabilityCurveHvdcStation.add(-1);
+            reactiveCapabilityCurveHvdcStation.add(-1);
             // host-side only: which generator this entry is, and the denominator its share was built on, so a
             // scenario losing a sibling can renormalize it
-            cvGenId.add(gen.getId());
-            cvBusFactor.add(busFactor);
+            reactiveCapabilityCurveGeneratorId.add(gen.getId());
+            reactiveCapabilityCurveBusFactor.add(busFactor);
         }
     }
 }

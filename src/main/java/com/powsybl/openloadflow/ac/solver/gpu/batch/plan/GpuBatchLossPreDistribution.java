@@ -23,7 +23,7 @@ import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuDistributedSlackFactorMod
  * (same factor/base/headroom model, per-scenario gen-outage reweight, REMAINING_MARGIN margins,
  * saturation re-normalization rounds, {@code P_RESIDUE_EPS}); the result feeds the device as the
  * SAME three coupled pieces the strategy-pair re-anchoring uses — participant target overrides +
- * {@code dsAnchorShift} + the slack's own absorbed share in {@code dsSlackShift} — so the device
+ * {@code distributedSlackBusAnchorShift} + the slack's own absorbed share in {@code slackBusAnchorShift} — so the device
  * solve starts at the CPU's post-pre-distribution operating point and its DS gate measures the
  * identical residual.
  *
@@ -50,9 +50,9 @@ public final class GpuBatchLossPreDistribution {
      * slack band: measured 1.07 MW of branch-flow difference against the CPU on rte6515, enough to
      * flip apparent-power violations.
      *
-     * @param genMovesOut when not null ({@code double[ngen]}), receives each generator's own move - what the
+     * @param genMovesOut when not null ({@code double[nDistributedSlackGenerators]}), receives each generator's own move - what the
      *        forced-target-Q channel clamps at (ForceTargetQInReactiveLimits); left at zero when nothing moves
-     * @return {@code double[nds + 1]}: the participant shares (target/anchor deltas per DS row)
+     * @return {@code double[nDistributedSlackBuses + 1]}: the participant shares (target/anchor deltas per DS row)
      *         followed by the slack bus's own absorbed share, or {@code null} when nothing can move
      *         (no participants, zero mismatch).
      */
@@ -60,13 +60,13 @@ public final class GpuBatchLossPreDistribution {
                                int ovBus, double ovFactorDelta, double ovBaseDelta,
                                double ovMaxDelta, double ovMinDelta, boolean[] islanded,
                                int[] lostGenSlots, double[] genMovesOut) {
-        int nds = gpuData.distributedSlack().busPhiRow().length;
-        if (nds == 0 || mismatch == 0) {
+        int nDistributedSlackBuses = gpuData.distributedSlack().busPhiRow().length;
+        if (nDistributedSlackBuses == 0 || mismatch == 0) {
             return null;
         }
         boolean dirUp = mismatch > 0;
-        int ngen = gpuData.distributedSlack().generatorBus() == null ? 0 : gpuData.distributedSlack().generatorBus().length;
-        // The slack bus's own generators in the generator pack (dgBus -1): they are water-filled with the others,
+        int nDistributedSlackGenerators = gpuData.distributedSlack().generatorBus() == null ? 0 : gpuData.distributedSlack().generatorBus().length;
+        // The slack bus's own generators in the generator pack (distributedSlackGeneratorBus -1): they are water-filled with the others,
         // clamped at their own limits, so the whole mismatch goes into the list and the slack's share is theirs.
         boolean slackInPack = slackInPack(gpuData);
         // fs = the participants' collective share of the mismatch = 1 - rho, with rho the slack's
@@ -80,7 +80,7 @@ public final class GpuBatchLossPreDistribution {
         double fs;
         if (gpuData.distributedSlack().factorMode() == GpuDistributedSlackFactorMode.REMAINING_MARGIN) {                        // REMAINING_MARGIN: direction-dependent margins
             double sumM = 0;
-            for (int i = 0; i < nds; i++) {
+            for (int i = 0; i < nDistributedSlackBuses; i++) {
                 if (islanded != null && islanded[i]) {
                     continue;                                // in another synchronous component now
                 }
@@ -92,7 +92,7 @@ public final class GpuBatchLossPreDistribution {
         } else {
             double fsAll = 0;
             double fsActive = 0;
-            for (int i = 0; i < nds; i++) {
+            for (int i = 0; i < nDistributedSlackBuses; i++) {
                 fsAll += gpuData.distributedSlack().busFactor()[i];
                 if (islanded != null && islanded[i]) {
                     continue;                                // in another synchronous component now
@@ -107,8 +107,8 @@ public final class GpuBatchLossPreDistribution {
             if (fs <= 0 && rho > 0 && !slackInPack) {
                 // Only the slack bus's generators are left to participate: OLF puts the whole mismatch on
                 // them. The device carries it in the slack's retained share; the result reports it.
-                double[] out = new double[nds + 1];
-                out[nds] = mismatch;
+                double[] out = new double[nDistributedSlackBuses + 1];
+                out[nDistributedSlackBuses] = mismatch;
                 return out;
             }
         }
@@ -119,19 +119,19 @@ public final class GpuBatchLossPreDistribution {
             return null;
         }
         double rem = fs * mismatch;                          // the participants' collective share of the loss
-        double[] cum = new double[nds];
+        double[] cum = new double[nDistributedSlackBuses];
         double slackShare = 0;
         // PER-GENERATOR, exactly as the kernel and exactly as OLF: the seed and the device's own
         // water-fill have to be the same function, or the device re-derives from an anchor the seed
         // never produced. The bus-aggregate loop below stays for the cases the generator arrays do
         // not cover (a pack built without them).
-        if (ngen > 0) {
-            double[] genCum = new double[ngen];
-            boolean[] removed = new boolean[ngen];
+        if (nDistributedSlackGenerators > 0) {
+            double[] distributedSlackGeneratorMove = new double[nDistributedSlackGenerators];
+            boolean[] removed = new boolean[nDistributedSlackGenerators];
             // normalizeParticipationFactors mutates the stored factor in place; mirror that, or the
             // seed takes a different floating-point path from the kernel it is meant to match.
-            double[] fWork = new double[ngen];
-            for (int g = 0; g < ngen; g++) {
+            double[] fWork = new double[nDistributedSlackGenerators];
+            for (int g = 0; g < nDistributedSlackGenerators; g++) {
                 fWork[g] = genFactor(gpuData, dirUp, g);
             }
             // The bus that lost a generator is treated PER GENERATOR, exactly as the kernel does
@@ -145,9 +145,9 @@ public final class GpuBatchLossPreDistribution {
                 fWork[lostGenSlots[k]] = 0.0;
             }
             double ovCum = 0.0;
-            for (int iter = 0; iter < ngen && Math.abs(rem) > P_RESIDUE_EPS; iter++) {
+            for (int iter = 0; iter < nDistributedSlackGenerators && Math.abs(rem) > P_RESIDUE_EPS; iter++) {
                 double fsumActive = 0.0;
-                for (int g = 0; g < ngen; g++) {
+                for (int g = 0; g < nDistributedSlackGenerators; g++) {
                     if (removed[g] || excluded(gpuData.distributedSlack().generatorBus()[g], ovBus, ovPerGen, islanded)) {
                         continue;
                     }
@@ -175,12 +175,12 @@ public final class GpuBatchLossPreDistribution {
                     break;
                 }
                 double done = 0.0;
-                for (int g = 0; g < ngen; g++) {
+                for (int g = 0; g < nDistributedSlackGenerators; g++) {
                     if (removed[g] || excluded(gpuData.distributedSlack().generatorBus()[g], ovBus, ovPerGen, islanded)) {
                         continue;
                     }
                     fWork[g] /= fsumActive;
-                    double newCum = genCum[g] + rem * fWork[g];
+                    double newCum = distributedSlackGeneratorMove[g] + rem * fWork[g];
                     // OLF removes on a STRICT overshoot only.
                     if (rem > 0 && newCum > gpuData.distributedSlack().generatorMaxDelta()[g]) {
                         newCum = gpuData.distributedSlack().generatorMaxDelta()[g];
@@ -189,9 +189,9 @@ public final class GpuBatchLossPreDistribution {
                         newCum = gpuData.distributedSlack().generatorMinDelta()[g];
                         removed[g] = true;
                     }
-                    if (newCum != genCum[g]) {
-                        done += newCum - genCum[g];
-                        genCum[g] = newCum;
+                    if (newCum != distributedSlackGeneratorMove[g]) {
+                        done += newCum - distributedSlackGeneratorMove[g];
+                        distributedSlackGeneratorMove[g] = newCum;
                     }
                 }
                 if (ovActive) {
@@ -204,14 +204,14 @@ public final class GpuBatchLossPreDistribution {
                 rem -= done;
             }
             if (genMovesOut != null) {
-                System.arraycopy(genCum, 0, genMovesOut, 0, ngen);
+                System.arraycopy(distributedSlackGeneratorMove, 0, genMovesOut, 0, nDistributedSlackGenerators);
             }
-            for (int g = 0; g < ngen; g++) {
+            for (int g = 0; g < nDistributedSlackGenerators; g++) {
                 if (gpuData.distributedSlack().generatorBus()[g] < 0) {
-                    slackShare += genCum[g];
+                    slackShare += distributedSlackGeneratorMove[g];
                 }
             }
-            for (int i = 0; i < nds; i++) {
+            for (int i = 0; i < nDistributedSlackBuses; i++) {
                 if (islanded != null && islanded[i]) {
                     continue;
                 }
@@ -221,14 +221,14 @@ public final class GpuBatchLossPreDistribution {
                 }
                 double sum = 0;
                 for (int g = gpuData.distributedSlack().busGeneratorStart()[i]; g < gpuData.distributedSlack().busGeneratorEnd()[i]; g++) {
-                    sum += genCum[g];
+                    sum += distributedSlackGeneratorMove[g];
                 }
                 cum[i] = sum;
             }
         } else {
-            for (int iter = 0; iter < nds && Math.abs(rem) > P_RESIDUE_EPS; iter++) {
+            for (int iter = 0; iter < nDistributedSlackBuses && Math.abs(rem) > P_RESIDUE_EPS; iter++) {
                 double fsumActive = 0.0;                         // re-normalize over the still-unsaturated buses
-                for (int i = 0; i < nds; i++) {
+                for (int i = 0; i < nDistributedSlackBuses; i++) {
                     double f = effFactor(gpuData, dirUp, i, ovBus, ovFactorDelta, islanded);
                     double maxD = gpuData.distributedSlack().busMaxDelta()[i] - (ovBus == i ? ovMaxDelta : 0.0);
                     double minD = gpuData.distributedSlack().busMinDelta()[i] - (ovBus == i ? ovMinDelta : 0.0);
@@ -241,7 +241,7 @@ public final class GpuBatchLossPreDistribution {
                     break;                                       // every participant saturated — residual stays at the slack
                 }
                 double done = 0.0;
-                for (int i = 0; i < nds; i++) {
+                for (int i = 0; i < nDistributedSlackBuses; i++) {
                     double f = effFactor(gpuData, dirUp, i, ovBus, ovFactorDelta, islanded);
                     double maxD = gpuData.distributedSlack().busMaxDelta()[i] - (ovBus == i ? ovMaxDelta : 0.0);
                     double minD = gpuData.distributedSlack().busMinDelta()[i] - (ovBus == i ? ovMinDelta : 0.0);
@@ -262,18 +262,18 @@ public final class GpuBatchLossPreDistribution {
         for (double c : cum) {
             absorbed += c;
         }
-        double[] out = new double[nds + 1];
-        System.arraycopy(cum, 0, out, 0, nds);
+        double[] out = new double[nDistributedSlackBuses + 1];
+        System.arraycopy(cum, 0, out, 0, nDistributedSlackBuses);
         // the slack's own share: its generators' moves, or with them outside the list the pair-leg convention
-        out[nds] = slackInPack ? slackShare : (1.0 - fs) / fs * absorbed;
+        out[nDistributedSlackBuses] = slackInPack ? slackShare : (1.0 - fs) / fs * absorbed;
         return out;
     }
 
     /** Whether the slack bus's own participating generators are in the generator pack (DS row -1). */
     public static boolean slackInPack(GpuAcData gpuData) {
-        int[] dgBus = gpuData.distributedSlack().generatorBus();
-        for (int g = 0; dgBus != null && g < dgBus.length; g++) {
-            if (dgBus[g] < 0) {
+        int[] distributedSlackGeneratorBus = gpuData.distributedSlack().generatorBus();
+        for (int g = 0; distributedSlackGeneratorBus != null && g < distributedSlackGeneratorBus.length; g++) {
+            if (distributedSlackGeneratorBus[g] < 0) {
                 return true;
             }
         }

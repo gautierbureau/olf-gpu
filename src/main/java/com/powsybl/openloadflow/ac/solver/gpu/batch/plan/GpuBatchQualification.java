@@ -76,7 +76,7 @@ public final class GpuBatchQualification {
                         int[][] distrRhoOverrideTermByIndex, double[][] distrRhoOverrideCoefficientByIndex,
                         /** Per scenario, the distributed-slack participants this contingency strands in
                          *  another synchronous component — the set the device must renormalize over. */
-                        int[][] islandedDsByIndex,
+                        int[][] islandedDistributedSlackByIndex,
                         /** Per scenario, the reactive-limits controllers stranded in another component. */
                         int[][] islandedReactiveLimitEntriesByIndex,
                         /** Per scenario, AC-emulation HVDCs with an ISLANDED endpoint. OLF's
@@ -110,12 +110,12 @@ public final class GpuBatchQualification {
             List<GpuBatchContingencyValidator.Qualification> qualifications,
             GpuAcElementMapper elementMapper, GpuAcData gpuData,
             EquationSystem<AcVariableType, AcEquationType> es,
-            double dsSum, boolean slackParticipates,
-            com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDsParams dsParams, Set<LfBranch> distrRhoControllers,
+            double distributedSlackRawFactorSum, boolean slackParticipates,
+            com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDsParams distributedSlackParameters, Set<LfBranch> distrRhoControllers,
             Set<LfBranch> relocatedCouplers, boolean reactiveLimits, boolean incrementalTvc) {
         ScenarioPlanBuilder pb = new ScenarioPlanBuilder(contingencies.size(), gpuData);
-        PlanContext ctx = new PlanContext(contingencies, qualifications, elementMapper, gpuData, es, dsSum,
-                slackParticipates, dsParams, distrRhoControllers, relocatedCouplers, reactiveLimits, incrementalTvc);
+        PlanContext ctx = new PlanContext(contingencies, qualifications, elementMapper, gpuData, es, distributedSlackRawFactorSum,
+                slackParticipates, distributedSlackParameters, distrRhoControllers, relocatedCouplers, reactiveLimits, incrementalTvc);
         for (int i = 0; i < qualifications.size(); i++) {
             GpuBatchContingencyValidator.Qualification q = qualifications.get(i);
             if (!q.qualified()) {
@@ -172,7 +172,7 @@ public final class GpuBatchQualification {
             // A participant outside a non-empty pack (its bus has no active P balance row) has nowhere to sit out. (In
             // a slack-only distribution there is no pack, and any action there moves the slack bus: SLACK_BUS.)
             if (gpuData.distributedSlack().generatorId() != null && gpuData.distributedSlack().generatorId().length > 0 && c.generatorActions().stream()
-                    .anyMatch(m -> dsParams.factor(m.generator()) != 0 && !ControlReHoming.inGeneratorPack(gpuData, m.generator().getId()))) {
+                    .anyMatch(m -> distributedSlackParameters.factor(m.generator()) != 0 && !ControlReHoming.inGeneratorPack(gpuData, m.generator().getId()))) {
                 refuse(c, "PLAN:PAIR_ACTION_UNTRACKED_PARTICIPANT");
                 continue;
             }
@@ -192,7 +192,7 @@ public final class GpuBatchQualification {
                 int phiRow = phiVar == null ? -1 : phiVar.getRow();
                 LfBus baseSlack = newSlack.getNetwork().getSynchronousNetworks().getFirst().getSlackBuses().getFirst();
                 boolean ds = gpuData.distributedSlack().slackPhiRow() >= 0;
-                boolean participates = ds && (dsParams.busFactor(baseSlack) != 0 || dsParams.busFactor(newSlack) != 0);
+                boolean participates = ds && (distributedSlackParameters.busFactor(baseSlack) != 0 || distributedSlackParameters.busFactor(newSlack) != 0);
                 boolean slackOnly = ds && gpuData.distributedSlack().busPhiRow().length == 0;
                 // the slack's balance is read from the injection buffer, which carries no AC-emulation HVDC term
                 boolean emulatedHvdc = newSlack.getHvdcs().stream().anyMatch(com.powsybl.openloadflow.network.LfHvdc::isAcEmulation);

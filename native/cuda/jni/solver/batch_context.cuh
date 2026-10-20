@@ -120,25 +120,25 @@ struct BatchSolverContext {
     DeviceBuf dDistrQSubgroup;                                            // labels (char, dense nS x nDistrQMembers) and the
     DeviceBuf dQrMemberStart;                                    // qr group -> first dq member map
     // Reactive capability CURVES at runtime P (setBatchReactiveCapabilityCurves): per participating curve gen —
-    // cvIdx {reactiveLimitEntry, pRow, ptsOff, npts, dsGenSlot}, cvIn {basePpu, share, baseRowTargetP, baseEvalMinPu, baseEvalMaxPu},
-    // cvPts {p_MW, minQ_MW, maxQ_MW} sorted by p; dReactiveLimitMinQPerScenario/dReactiveLimitMaxQPerScenario = nS*nReactiveLimitEntries evaluated limits.
-    int ncv = 0;
-    int cvExtrapolate = 0;                                 // OLF extrapolateReactiveLimits for curve gens
-    DeviceBuf dCvIdx, dCvIn, dCvPts, dReactiveLimitMinQPerScenario, dReactiveLimitMaxQPerScenario;
-    DeviceBuf dCvHv;                                         // per curve entry {hvdc, side}, see CvHvdc
-    bool cvHasHvdc = false;
-    DeviceBuf dCvPtr, dCvList;                             // the curves of each reactive-limit entry, CSR
-                                                           // (cvPtr[nReactiveLimitEntries + 1] into cvList[ncv], pack order kept)
+    // reactiveCapabilityCurveIndices {reactiveLimitEntry, pRow, ptsOff, npts, distributedSlackGeneratorIndex}, reactiveCapabilityCurveParameters {basePpu, share, baseRowTargetP, baseEvalMinPu, baseEvalMaxPu},
+    // reactiveCapabilityCurvePoints {p_MW, minQ_MW, maxQ_MW} sorted by p; dReactiveLimitMinQPerScenario/dReactiveLimitMaxQPerScenario = nS*nReactiveLimitEntries evaluated limits.
+    int nReactiveCapabilityCurves = 0;
+    int reactiveCapabilityCurveExtrapolate = 0;                                 // OLF extrapolateReactiveLimits for curve gens
+    DeviceBuf dReactiveCapabilityCurveIndices, dReactiveCapabilityCurveParameters, dReactiveCapabilityCurvePoints, dReactiveLimitMinQPerScenario, dReactiveLimitMaxQPerScenario;
+    DeviceBuf dReactiveCapabilityCurveHvdcStation;                                         // per curve entry {hvdc, side}, see CurveHvdcAcEmulationView
+    bool reactiveCapabilityCurveHasHvdc = false;
+    DeviceBuf dReactiveLimitEntryCurveStart, dReactiveLimitEntryCurves;                             // the curves of each reactive-limit entry, CSR
+                                                           // (reactiveLimitEntryCurveStart[nReactiveLimitEntries + 1] into reactiveLimitEntryCurves[nReactiveCapabilityCurves], pack order kept)
     // forceTargetQInReactiveLimits (GpuBatchForcedTargetQ): generators whose IIDM target Q OLF clamps into their
     // curve limits at their CURRENT target P - on a bus whose Q balance carries it (qRow), or in a voltage-controlled
-    // bus's reactive limits (reactiveLimitEntry). fqIdx stride 7 {qRow, dsGenSlot, ptsOff, npts, dsBusIdx, baseQRowMode, reactiveLimitEntry}; fqIn stride 5 {basePpu, rawTargetQPu, baseClampedPu, share,
-    // baseRowTargetP}; dFqApplied [nS * nfq] = the clamped value the scenario's Q target carries now; dFqPre
-    // [nS * nfq] = each generator's loss pre-distribution move (pu), absent when no scenario pre-distributes.
-    int nfq = 0;
-    int nfqLim = 0;                                        // of which limit entries (voltage-controlled bus)
-    int fqExtrapolate = 0;
-    bool fqHasPre = false;
-    DeviceBuf dFqIdx, dFqIn, dFqPts, dFqApplied, dFqPre;
+    // bus's reactive limits (reactiveLimitEntry). forcedTargetQIndices stride 7 {qRow, distributedSlackGeneratorIndex, ptsOff, npts, distributedSlackBusIndex, baseQRowMode, reactiveLimitEntry}; forcedTargetQParameters stride 5 {basePpu, rawTargetQPu, baseClampedPu, share,
+    // baseRowTargetP}; dForcedTargetQApplied [nS * nForcedTargetQ] = the clamped value the scenario's Q target carries now; dForcedTargetQPreDistribution
+    // [nS * nForcedTargetQ] = each generator's loss pre-distribution move (pu), absent when no scenario pre-distributes.
+    int nForcedTargetQ = 0;
+    int nForcedTargetQLimitEntries = 0;                                        // of which limit entries (voltage-controlled bus)
+    int forcedTargetQExtrapolate = 0;
+    bool hasForcedTargetQPreDistribution = false;
+    DeviceBuf dForcedTargetQIndices, dForcedTargetQParameters, dForcedTargetQPoints, dForcedTargetQApplied, dForcedTargetQPreDistribution;
     // DISTR_Q weight overrides (setBatchDistrQWeightOverrides): a gen outage at a remote-VC controller
     // bus renormalizes the group's qPct keys per scenario — {s, contrib} pairs + the new weight.
     int nDistrQWeightOverrides = 0;
@@ -236,29 +236,29 @@ struct BatchSolverContext {
     // 0 = ReactiveLimits is the last one, 1 = the discrete TransformerVoltageControl.
     int realisticFixingLoop = GpuRealisticVoltageFixingLoop::NONE;
     // Distributed slack: the (mapped) slack BUS_PHI row + its scheduled targetP give the per-scenario
-    // mismatch (read from dQbuf); dDsPhiRow/dDsFactor are the participating buses' P-target rows + normalized
+    // mismatch (read from dQbuf); dDistributedSlackBusPhiRow/dDistributedSlackBusFactor are the participating buses' P-target rows + normalized
     // participation factors. Reuses dOuterLoopCheckActive/dOuterLoopUnstable (same outer schedule as reactive limits).
-    int nds = 0, dsSlackPhiRow = -1;
-    double dsSlackTargetP = 0.0;
-    DeviceBuf dDsPhiRow, dDsFactor;                        // per participating bus (nds)
-    DeviceBuf dDsBaseTargetP, dDsMaxDelta, dDsMinDelta;   // per participating bus (nds): base P target + headroom/footroom
-    double dsFactorSum = 1.0;                              // Σ emitted factors (< 1 ⇒ slack participates, keeps 1−Σ)
-    int dsMode = GpuDistributedSlackFactorMode::STATIC;    // REMAINING_MARGIN: direction-dependent
-    DeviceBuf dDsMarginUp, dDsMarginDown;                  //   per-bus margins, normalized in-kernel
-    double dsSlackMarginUp = 0.0, dsSlackMarginDown = 0.0; //   the slack's own margins (its retained share)
-    DeviceBuf dDsRetain;
-    DeviceBuf dDsGateLast;                                   // per scenario {rem, fired} at the last DS gate (LOOP_TRACE reads it)
-    DeviceBuf dDsRetainApplied;                              // per scenario: dsRetain at the last check that FIRED,
+    int nDistributedSlackBuses = 0, slackBusPhiRow = -1;
+    double slackBusTargetP = 0.0;
+    DeviceBuf dDistributedSlackBusPhiRow, dDistributedSlackBusFactor;                        // per participating bus (nDistributedSlackBuses)
+    DeviceBuf dDistributedSlackBusBaseTargetP, dDistributedSlackBusMaxDelta, dDistributedSlackBusMinDelta;   // per participating bus (nDistributedSlackBuses): base P target + headroom/footroom
+    double distributedSlackFactorSum = 1.0;                              // Σ emitted factors (< 1 ⇒ slack participates, keeps 1−Σ)
+    int distributedSlackFactorMode = GpuDistributedSlackFactorMode::STATIC;    // REMAINING_MARGIN: direction-dependent
+    DeviceBuf dDistributedSlackBusMarginUp, dDistributedSlackBusMarginDown;                  //   per-bus margins, normalized in-kernel
+    double slackBusMarginUp = 0.0, slackBusMarginDown = 0.0; //   the slack's own margins (its retained share)
+    DeviceBuf dSlackRetainedShare;
+    DeviceBuf dDistributedSlackLastPassAccounting;                                   // per scenario {rem, fired} at the last DS gate (LOOP_TRACE reads it)
+    DeviceBuf dSlackRetainedShareApplied;                              // per scenario: slackRetainedShare at the last check that FIRED,
                                                              // NaN while no distribution happened in this solve
     long long solveCount = 0;                                // solveBatchContext calls on this context: the DS
                                                              // read-backs above describe the LAST solve only
-    // Per-GENERATOR participants (setBatchDsGenerators). OLF's water-fill participates and saturates
+    // Per-GENERATOR participants (setBatchDistributedSlackGenerators). OLF's water-fill participates and saturates
     // per generator — ParticipatingElement wraps an LfGenerator and step.run clamps each at its OWN
     // limits and REMOVES it — so a bus-level aggregate only reproduces OLF while nothing saturates.
     // The bus arrays keep owning the equation row and the anchor; these own the factors and limits.
-    int ngen = 0;
-    DeviceBuf dgBus, dgFactor, dgMaxDelta, dgMinDelta, dgMarginUp, dgMarginDown;
-    DeviceBuf dBusGenStart, dBusGenEnd;
+    int nDistributedSlackGenerators = 0;
+    DeviceBuf distributedSlackGeneratorBus, distributedSlackGeneratorFactor, distributedSlackGeneratorMaxDelta, distributedSlackGeneratorMinDelta, distributedSlackGeneratorMarginUp, distributedSlackGeneratorMarginDown;
+    DeviceBuf dDistributedSlackBusGeneratorStart, dDistributedSlackBusGeneratorEnd;
     // Per (scenario, generator): its cumulative delta from the anchor, and whether the water-fill has
     // REMOVED it. Removal is not the same as "sitting at its bound": OLF removes an element only when
     // it strictly OVERSHOOTS, so one that lands exactly on its limit stays in the normalization for
@@ -287,7 +287,7 @@ struct BatchSolverContext {
     int pausedLoopIdx = 0;
     int pausedSeqChanged = 0;
     std::vector<int> pausedProdIters;
-    std::vector<int> olFirst, olIters, olPasses;              // OLF_GPU_PHASE_TIME: per-scenario Newton work by
+    std::vector<int> outerLoopFirstSolveIterations, outerLoopIterations, outerLoopSolvePasses;              // OLF_GPU_PHASE_TIME: per-scenario Newton work by
                                                              // solve pass (kept across a host-loop pause)
     std::vector<char> pausedLive, pausedActive;
     std::vector<char> hostChanged;                           // per scenario: the host loop was UNSTABLE
@@ -403,17 +403,17 @@ struct BatchSolverContext {
     DeviceBuf dSvdMemBRow, dSvdMemElem, dSvdMemSubPtr, dSvdSecPtr, dSvdSecB, dSvdSubMin, dSvdSubBase;
     DeviceBuf dSvdGrpStep, dSvdMemState, dSvdMemContB, dSvdSubPos, dSvdSaved;
 
-    DeviceBuf dGenCum, dGenRemoved;
+    DeviceBuf dDistributedSlackGeneratorMove, dDistributedSlackGeneratorRemoved;
     DeviceBuf dFrozenRow;                                  // (scenario, row) pairs: rows an islanding
     int nFrozenRow = 0;                                    // outage froze to a flat identity state
-    DeviceBuf dDsLostGen;                                  // (scenario, DS generator slot) pairs: the
-    int nDsLostGen = 0;                                    // generators an outage removes, by identity
+    DeviceBuf dDistributedSlackLostGenerators;                                  // (scenario, DS generator slot) pairs: the
+    int nDistributedSlackLostGenerators = 0;                                    // generators an outage removes, by identity
     DeviceBuf dReactiveLimitSeedTargetQ;                                 // per (scenario, entry): the pinned target a continued
     bool hasReactiveLimitSeedTargetQ = false;                            // solve restores (setBatchReactiveLimitSeedTargetQ), NaN = the limit
-    DeviceBuf dDsOutGen;                                   // (scenario, DS generator slot) pairs: participants
-    int nDsOutGen = 0;                                     // a GeneratorAction took out of the distribution
-    DeviceBuf dGenCumValid;                                // per scenario: the PER-GENERATOR water-fill ran, so
-                                                           // dGenCum holds each generator's own movement. The
+    DeviceBuf dDistributedSlackRemovedGenerators;                                   // (scenario, DS generator slot) pairs: participants
+    int nDistributedSlackRemovedGenerators = 0;                                     // a GeneratorAction took out of the distribution
+    DeviceBuf dDistributedSlackGeneratorMoveValid;                                // per scenario: the PER-GENERATOR water-fill ran, so
+                                                           // dDistributedSlackGeneratorMove holds each generator's own movement. The
                                                            // anchored path distributes per BUS and leaves it zero,
                                                            // which a reader cannot tell from "nothing moved".
 
@@ -421,15 +421,15 @@ struct BatchSolverContext {
     // normalizeParticipationFactors mutates ParticipatingElement.factor: by iteration k a survivor's
     // factor has been divided k times. f/Sigma_survivors(raw) is the same number algebraically and a
     // different one in floating point, which is enough to flip a clamp decision at a knife-edge.
-    DeviceBuf dGenFactorWork;
+    DeviceBuf dDistributedSlackGeneratorWorkingFactor;
     // Per (scenario, participant) chars, 1 = this participant is in ANOTHER synchronous component in
     // this scenario. OLF distributes over getSynchronousNetworks().getFirst(), so an islanded
     // participant is simply not a participant: its share must not be computed, and — decisively — the
     // set it is renormalized against must shrink with it. Empty = every participant participates.
-    int nDsIslanded = 0;
-    DeviceBuf dDsIslanded;
-    int nDsRowOv = 0;                                        // per-scenario DS participant row diversions
-    DeviceBuf dDsRowOv;                                      // nScenarios * nds ints, -1 = use dsPhiRow
+    int nDistributedSlackIslanded = 0;
+    DeviceBuf dDistributedSlackIslanded;
+    int nDistributedSlackBusRowOverrides = 0;                                        // per-scenario DS participant row diversions
+    DeviceBuf dDistributedSlackBusRowOverride;                                      // nScenarios * nDistributedSlackBuses ints, -1 = use distributedSlackBusPhiRow
     // Same idea for the reactive-limits pass: per (scenario, controller), 1 = its bus is in another
     // synchronous component in this scenario, so the loop must not look at it.
     int nReactiveLimitIslanded = 0;
@@ -445,8 +445,8 @@ struct BatchSolverContext {
     int nDistrQMemberTargetQOverrides = 0;                                       // per-scenario member targetQ overrides
     DeviceBuf dDistrQMemberTargetQOverrideKey;
     DeviceBuf dDistrQMemberTargetQOverrideValue;
-    int hasDsSlackRowOv = 0;                               // per-slot slack row (a relocated slack), device rows
-    DeviceBuf dDsSlackRowOv;                               // -1 = the base slack row
+    int hasSlackBusRowOverride = 0;                               // per-slot slack row (a relocated slack), device rows
+    DeviceBuf dSlackBusRowOverride;                               // -1 = the base slack row
     int nQrPqDelta = 0;                                    // per-scenario moves of a pilot's captured Q target
     DeviceBuf dQrPqDeltaKey;                               // slot * nQr + group
     DeviceBuf dQrPqDeltaVal;
@@ -471,21 +471,21 @@ struct BatchSolverContext {
     DeviceBuf dHvdcContingencyOutage;                                     // per (scenario, hvdc): outaged BY the contingency
     DeviceBuf dHvdcAcEmulationStatus;                                     // per (scenario, hvdc): LINEAR/SAT_1_2/SAT_2_1/FROZEN
     DeviceBuf dHvdcAppliedDelta1, dHvdcAppliedDelta2;                    // the converter-row delta currently APPLIED
-    DeviceBuf dDsResidual;                                   // nS chars: waterfill left an out-of-tolerance residual                                   // per scenario (nS): frozen slack-retained mismatch share
-    // The slack bus's own participating generators' total rooms from their anchor targets (setBatchDsSlackRooms):
+    DeviceBuf dSlackDistributionFailure;                                   // nS chars: waterfill left an out-of-tolerance residual                                   // per scenario (nS): frozen slack-retained mismatch share
+    // The slack bus's own participating generators' total rooms from their anchor targets (setBatchSlackBusRooms):
     // what a slack-only distribution can place before OLF's water-fill leaves a remaining mismatch. Unbounded until
     // installed, and for a load-based slack.
-    double dsSlackRoomUp = INFINITY, dsSlackRoomDown = -INFINITY;
-    bool dsSlackOnly = false;                                // DS enabled with the SLACK generator as the only participant:
-    DeviceBuf dDsSlackAbsorbed;                              // nS doubles — mismatch absorbed into the slack's own target so far
-    DeviceBuf dDsSlackAnchor;                                // nS doubles — slack-only strategy pairs: the parent's total
-    bool dsSlackHasAnchor = false;                           // (setBatchSlackOnlyAnchor; zero anchor when unset)
-    DeviceBuf dDgAnchor;                                     // nS * ngen doubles — strategy pairs: each participating
-    bool hasDgAnchor = false;                                // generator's target at the parent's end (setBatchGenAnchor)
-    DeviceBuf dDgStart;                                      // nS * ngen doubles — each participating generator's move
-    bool hasDgStart = false;                                 // from its anchor at the solve's start (setBatchGenAnchor)
-    DeviceBuf dDgSeedAnchor;                                 // nS * ngen doubles — strategy pairs: the parent's own end,
-    bool hasDgSeedAnchor = false;                            // without the actions (the continued pins' stamps)
+    double slackBusRoomUp = INFINITY, slackBusRoomDown = -INFINITY;
+    bool slackOnlyDistribution = false;                                // DS enabled with the SLACK generator as the only participant:
+    DeviceBuf dSlackOnlyAbsorbed;                              // nS doubles — mismatch absorbed into the slack's own target so far
+    DeviceBuf dSlackOnlyAnchor;                                // nS doubles — slack-only strategy pairs: the parent's total
+    bool hasSlackOnlyAnchor = false;                           // (setBatchSlackOnlyAnchor; zero anchor when unset)
+    DeviceBuf dDistributedSlackGeneratorAnchor;                                     // nS * nDistributedSlackGenerators doubles — strategy pairs: each participating
+    bool hasDistributedSlackGeneratorAnchor = false;                                // generator's target at the parent's end (setBatchDistributedSlackGeneratorAnchors)
+    DeviceBuf dDistributedSlackGeneratorInitialMove;                                      // nS * nDistributedSlackGenerators doubles — each participating generator's move
+    bool hasDistributedSlackGeneratorInitialMove = false;                                 // from its anchor at the solve's start (setBatchDistributedSlackGeneratorAnchors)
+    DeviceBuf dDistributedSlackGeneratorSeedAnchor;                                 // nS * nDistributedSlackGenerators doubles — strategy pairs: the parent's own end,
+    bool hasDistributedSlackGeneratorSeedAnchor = false;                            // without the actions (the continued pins' stamps)
                                                              // (OLF distributes into the slack gen and re-solves; no flow change,
                                                              // but the extra polish run must happen to match the CPU trajectory)
     CudssCtx ds;
@@ -540,11 +540,11 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& st, int nScenar
                                        int nReactiveLimitEntries, const int* reactiveLimitVoltageRow, const double* reactiveLimitMinQ,
                                        const double* reactiveLimitMaxQ, const double* reactiveLimitLoadQ, const double* reactiveLimitTargetV,
                                        const signed char* reactiveLimitFlags, const double* rowSlope,
-                                       int nds, const int* dsPhiRow, const double* dsFactor,
-                                       int dsSlackPhiRow, double dsSlackTargetP,
-                                       const double* dsBaseTargetP, const double* dsMaxDelta, const double* dsMinDelta,
-                                       int dsMode, const double* dsMarginUp, const double* dsMarginDown,
-                                       double dsSlackMarginUp, double dsSlackMarginDown);
+                                       int nDistributedSlackBuses, const int* distributedSlackBusPhiRow, const double* distributedSlackBusFactor,
+                                       int slackBusPhiRow, double slackBusTargetP,
+                                       const double* distributedSlackBusBaseTargetP, const double* dsMaxDelta, const double* dsMinDelta,
+                                       int distributedSlackFactorMode, const double* distributedSlackBusMarginUp, const double* distributedSlackBusMarginDown,
+                                       double slackBusMarginUp, double slackBusMarginDown);
 
 // Upload the call's step-scaling parameters and per-scenario shunt, coupler and tap overrides.
 void uploadBatchOverrides(BatchSolverContext* ctx, int lsMode, double maxDv, double maxDphi,

@@ -41,9 +41,9 @@ import java.util.List;
  * {@code forcedTargetQLimitsBatch} after every rebuild of the dynamic limits). A remote-control member or a
  * reactive-power-controlled bus throws, and the caller keeps the run on the CPU.
  *
- * <p>Layout (setBatchForcedTargetQ): fqIdx stride 7 {qRow, dsGenSlot, ptsOff, npts, dsBusIdx, baseQRowMode, reactiveLimitEntry}
+ * <p>Layout (setBatchForcedTargetQ): forcedTargetQIndices stride 7 {qRow, distributedSlackGeneratorIndex, ptsOff, npts, distributedSlackBusIndex, baseQRowMode, reactiveLimitEntry}
  * (qRow -1 for a limit entry, reactiveLimitEntry -1 for a Q-row entry);
- * fqIn stride 5 {basePpu, rawTargetQPu, baseClampedPu, share, baseRowTargetP}; fqPts stride 3 {p_MW, minQ_MW,
+ * forcedTargetQParameters stride 5 {basePpu, rawTargetQPu, baseClampedPu, share, baseRowTargetP}; forcedTargetQPoints stride 3 {p_MW, minQ_MW,
  * maxQ_MW} sorted by p.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
@@ -55,25 +55,25 @@ public final class ForceTargetQInReactiveLimits {
 
     /** The packed channel; {@code genSlot} is each entry's generator slot in the distributed-slack generator pack
      *  (host side, to pick the entry's pre-distribution move). */
-    public record Channel(int[] fqIdx, double[] fqIn, double[] fqPts, boolean extrapolate, int[] genSlot) {
+    public record Channel(int[] forcedTargetQIndices, double[] forcedTargetQParameters, double[] forcedTargetQPoints, boolean extrapolate, int[] genSlot) {
 
         public int size() {
             return genSlot.length;
         }
 
-        /** {@code [nS * nfq]}: each entry's share of the scenarios' loss pre-distribution, from the
+        /** {@code [nS * nForcedTargetQ]}: each entry's share of the scenarios' loss pre-distribution, from the
          *  per-generator water-fill moves ({@code genMoves[s]} indexed by generator slot, null = no move). */
         public double[] preMoves(double[][] genMoves) {
-            int nfq = size();
-            double[] pre = new double[genMoves.length * nfq];
+            int nForcedTargetQ = size();
+            double[] pre = new double[genMoves.length * nForcedTargetQ];
             boolean any = false;
             for (int s = 0; s < genMoves.length; s++) {
                 if (genMoves[s] == null) {
                     continue;
                 }
-                for (int e = 0; e < nfq; e++) {
-                    pre[s * nfq + e] = genMoves[s][genSlot[e]];
-                    any |= pre[s * nfq + e] != 0;
+                for (int e = 0; e < nForcedTargetQ; e++) {
+                    pre[s * nForcedTargetQ + e] = genMoves[s][genSlot[e]];
+                    any |= pre[s * nForcedTargetQ + e] != 0;
                 }
             }
             return any ? pre : null;
@@ -82,7 +82,7 @@ public final class ForceTargetQInReactiveLimits {
 
     /** Null when nothing can move: the flag off, no distributed slack, or no clamping curve generator. */
     public static Channel build(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
-                                GpuAcData gpuData, GpuDsParams dsParams, boolean forceTargetQ,
+                                GpuAcData gpuData, GpuDsParams distributedSlackParameters, boolean forceTargetQ,
                                 boolean distributedSlack, double[] baseTargets, int[] baseRowMode,
                                 boolean extrapolate) {
         if (!forceTargetQ || !distributedSlack || gpuData.distributedSlack().generatorId() == null) {
@@ -97,7 +97,7 @@ public final class ForceTargetQInReactiveLimits {
             if (bus.isDisabled()) {
                 continue;
             }
-            double busFactor = bus.getGenerators().stream().mapToDouble(dsParams::factor).sum();
+            double busFactor = bus.getGenerators().stream().mapToDouble(distributedSlackParameters::factor).sum();
             for (LfGenerator gen : bus.getGenerators()) {
                 if (!(gen instanceof LfGeneratorImpl) || gen.isDisabled()
                         || gen.getGeneratorControlType() == LfGenerator.GeneratorControlType.VOLTAGE) {
@@ -105,8 +105,8 @@ public final class ForceTargetQInReactiveLimits {
                 }
                 var curve = ((AbstractLfGenerator) gen).getReactiveLimits()
                         .filter(rl -> rl.getKind() == ReactiveLimitsKind.CURVE).orElse(null);
-                int slot = dsSlotOf(gpuData.distributedSlack().generatorId(), gen.getId());
-                if (curve == null || slot < 0 || dsParams.factor(gen) <= 0) {
+                int slot = distributedSlackGeneratorIndexOf(gpuData.distributedSlack().generatorId(), gen.getId());
+                if (curve == null || slot < 0 || distributedSlackParameters.factor(gen) <= 0) {
                     continue;                                // its clamp cannot move: the base target stays exact
                 }
                 if (gpuData.distributedSlack().generatorBus()[slot] < 0) {
@@ -137,8 +137,8 @@ public final class ForceTargetQInReactiveLimits {
                         continue;                            // no Q balance row carries its target
                     }
                 }
-                int dsIdx = dsBusIndexOf(gpuData, bus.getNum());
-                if (dsIdx < 0) {
+                int distributedSlackBusIndex = distributedSlackBusIndexOf(gpuData, bus.getNum());
+                if (distributedSlackBusIndex < 0) {
                     throw new PowsyblException("GPU AC solver: participating generator " + gen.getId()
                             + " on a bus outside the distributed-slack pack");
                 }
@@ -150,10 +150,10 @@ public final class ForceTargetQInReactiveLimits {
                     pts.add(pt.getMinQ());
                     pts.add(pt.getMaxQ());
                 }
-                int pRow = gpuData.distributedSlack().busPhiRow()[dsIdx];
-                idx.add(new int[] {qRow, slot, ptsOff, points.size(), dsIdx, qRow >= 0 ? baseRowMode[qRow] : 0, reactiveLimitEntry});
+                int pRow = gpuData.distributedSlack().busPhiRow()[distributedSlackBusIndex];
+                idx.add(new int[] {qRow, slot, ptsOff, points.size(), distributedSlackBusIndex, qRow >= 0 ? baseRowMode[qRow] : 0, reactiveLimitEntry});
                 in.add(new double[] {gen.getTargetP(), gen.getRawTargetQ(), gen.getTargetQ(),
-                    dsParams.factor(gen) / busFactor, baseTargets[pRow]});
+                    distributedSlackParameters.factor(gen) / busFactor, baseTargets[pRow]});
                 slots.add(slot);
             }
         }
@@ -169,9 +169,9 @@ public final class ForceTargetQInReactiveLimits {
     /** Install the channel, or clear it (a cached context reused by a run without it). */
     public static void install(long handle, Channel channel) {
         ReactiveLimitsNative.setBatchForcedTargetQ(handle,
-                channel != null ? channel.fqIdx() : null,
-                channel != null ? channel.fqIn() : null,
-                channel != null ? channel.fqPts() : null,
+                channel != null ? channel.forcedTargetQIndices() : null,
+                channel != null ? channel.forcedTargetQParameters() : null,
+                channel != null ? channel.forcedTargetQPoints() : null,
                 channel != null && channel.extrapolate() ? 1 : 0);
     }
 
@@ -192,7 +192,7 @@ public final class ForceTargetQInReactiveLimits {
         return -1;
     }
 
-    private static int dsBusIndexOf(GpuAcData gpuData, int busNum) {
+    private static int distributedSlackBusIndexOf(GpuAcData gpuData, int busNum) {
         int[] nums = gpuData.distributedSlack().busNum();
         if (nums == null) {
             return -1;
@@ -205,9 +205,9 @@ public final class ForceTargetQInReactiveLimits {
         return -1;
     }
 
-    private static int dsSlotOf(String[] dgGenId, String genId) {
-        for (int i = 0; i < dgGenId.length; i++) {
-            if (dgGenId[i].equals(genId)) {
+    private static int distributedSlackGeneratorIndexOf(String[] distributedSlackGeneratorId, String genId) {
+        for (int i = 0; i < distributedSlackGeneratorId.length; i++) {
+            if (distributedSlackGeneratorId[i].equals(genId)) {
                 return i;
             }
         }

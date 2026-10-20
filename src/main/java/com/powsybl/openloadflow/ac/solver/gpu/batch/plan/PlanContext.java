@@ -27,7 +27,7 @@ import java.util.Set;
  */
 record PlanContext(List<BatchContingency> contingencies, List<GpuBatchContingencyValidator.Qualification> qualifications,
                    GpuAcElementMapper elementMapper, GpuAcData gpuData,
-                   EquationSystem<AcVariableType, AcEquationType> es, double dsSum, boolean slackParticipates,
-                   GpuDsParams dsParams, Set<LfBranch> distrRhoControllers, Set<LfBranch> relocatedCouplers,
+                   EquationSystem<AcVariableType, AcEquationType> es, double distributedSlackRawFactorSum, boolean slackParticipates,
+                   GpuDsParams distributedSlackParameters, Set<LfBranch> distrRhoControllers, Set<LfBranch> relocatedCouplers,
                    boolean reactiveLimits, boolean incrementalTvc) {
 }

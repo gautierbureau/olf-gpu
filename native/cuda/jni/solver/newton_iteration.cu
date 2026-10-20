@@ -45,8 +45,8 @@ void newtonSolve(BatchSolverContext* ctx, DriverPass& drv) {
     const int& lsMode = drv.lsMode;
     const double& convEpsPerEq = drv.convEpsPerEq;
     const bool& deviceFixedIter = drv.deviceFixedIter;
-    const bool& olTime = drv.olTime;
-    int& olPassSolved = drv.olPassSolved;
+    const bool& outerLoopTiming = drv.outerLoopTiming;
+    int& outerLoopPassSolvedScenarios = drv.outerLoopPassSolvedScenarios;
     int& nActive = drv.nActive;
     std::vector<char>& active = drv.active;
     std::vector<char>& live = drv.live;
@@ -531,16 +531,16 @@ void newtonSolve(BatchSolverContext* ctx, DriverPass& drv) {
         if (!deviceFixedIter) CUDA_CHECK(cudaStreamSynchronize(ctx->stream));   // fixed-iter: no per-iter host sync
         }
     }   // ---- end inner Newton loop ----
-    if (olTime) {
+    if (outerLoopTiming) {
         int nSolved = 0;
         for (int s = 0; s < nS; s++) nSolved += wasActive[s] ? 1 : 0;
-        olPassSolved = nSolved;
+        outerLoopPassSolvedScenarios = nSolved;
     }
     for (int s = 0; s < nS; s++) {                           // per-scenario Newton work by pass (cheap, host)
         if (wasActive[s]) {
-            if (ctx->olPasses[s] == 0) ctx->olFirst[s] = res.iters[s];
-            ctx->olIters[s] += res.iters[s];
-            ctx->olPasses[s]++;
+            if (ctx->outerLoopSolvePasses[s] == 0) ctx->outerLoopFirstSolveIterations[s] = res.iters[s];
+            ctx->outerLoopIterations[s] += res.iters[s];
+            ctx->outerLoopSolvePasses[s]++;
         }
     }
 }

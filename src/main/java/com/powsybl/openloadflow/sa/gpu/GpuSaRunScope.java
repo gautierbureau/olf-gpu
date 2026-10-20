@@ -182,26 +182,26 @@ final class GpuSaRunScope {
         // Parameterization corner cases the device DS loop does not model (see
         // docs/gpu-vs-cpu-capabilities.md Part II §A): the device weights are always maxP/droop with
         // active limits — any other balance type or unlimited distribution must fall back whole-run.
-        boolean dsLoopActive = acParameters.getOuterLoops().stream()
+        boolean distributedSlackLoopActive = acParameters.getOuterLoops().stream()
                 .anyMatch(ol -> DistributedSlackOuterLoop.NAME.equals(ol.getName()));
         // The device DS pass models EVERY balance type (GpuDsParams.supports returns true for all
         // six — incl. the load-based types and REMAINING_MARGIN via the margin factors, GpuDistributedSlackFactorMode)
         // and both useActiveLimits settings, so this guard is future-proofing for balance types
         // OLF adds later, not a live fallback.
-        if (dsLoopActive && !com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDsParams.supports(lfGuardParams.getBalanceType())) {
+        if (distributedSlackLoopActive && !com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDsParams.supports(lfGuardParams.getBalanceType())) {
             unsupportedOuterLoops.add("DistributedSlack[balanceType=" + lfGuardParams.getBalanceType() + "]");
         }
         // loadPowerFactorConstant rescales each distributed load's targetQ alongside targetP — a per-round
         // bus Q-target mutation the device DS pass does not model.
         boolean loadBased = lfGuardParams.getBalanceType() == LoadFlowParameters.BalanceType.PROPORTIONAL_TO_LOAD
                 || lfGuardParams.getBalanceType() == LoadFlowParameters.BalanceType.PROPORTIONAL_TO_CONFORM_LOAD;
-        if (dsLoopActive && loadBased && olfGuardParams.isLoadPowerFactorConstant()) {
+        if (distributedSlackLoopActive && loadBased && olfGuardParams.isLoadPowerFactorConstant()) {
             unsupportedOuterLoops.add("DistributedSlack[loadPowerFactorConstant]");
         }
         // Voltage-dependent load model + LOAD-based balance: distribution rescales each load's
         // targetP, which scales the load model term coefficients per round — static device coefs would
         // go stale mid-run.
-        if (dsLoopActive && loadBased && olfGuardParams.isUseLoadModel()) {
+        if (distributedSlackLoopActive && loadBased && olfGuardParams.isUseLoadModel()) {
             unsupportedOuterLoops.add("DistributedSlack[useLoadModel+loadBased]");
         }
         if (remoteReactiveLimitsUnsupported && acParameters.getOuterLoops().stream()
@@ -214,7 +214,7 @@ final class GpuSaRunScope {
         // failure behavior is not LEAVE_ON_SLACK_BUS (e.g. RTE production uses FAIL).
         int cfgMaxOuterIterations = olfGuardParams.getMaxOuterLoopIterations();
         int cfgMaxPqPvSwitch = olfGuardParams.getReactiveLimitsMaxPqPvSwitch();
-        boolean cfgDsRejectResidual = olfGuardParams.getSlackDistributionFailureBehavior()
+        boolean cfgRejectSlackDistributionFailure = olfGuardParams.getSlackDistributionFailureBehavior()
                 != com.powsybl.openloadflow.OpenLoadFlowParameters.SlackDistributionFailureBehavior.LEAVE_ON_SLACK_BUS;
         // OLF's SA distributes each contingency's SCHEDULED active power loss BEFORE the post-contingency
         // solve (ContingencyActivePowerLossDistribution SPI). The batch replays the "Default" impl
@@ -223,9 +223,9 @@ final class GpuSaRunScope {
                 .getOrDefault(securityAnalysisParameters).getContingencyActivePowerLossDistribution();
         boolean defaultLossDist = com.powsybl.openloadflow.sa.OpenSecurityAnalysisParameters
                 .CONTINGENCY_ACTIVE_POWER_LOSS_DISTRIBUTION_DEFAULT_VALUE.equals(lossDistName);
-        boolean dsActive = acParameters.getOuterLoops().stream()
+        boolean distributedSlackActive = acParameters.getOuterLoops().stream()
                 .anyMatch(ol -> DistributedSlackOuterLoop.NAME.equals(ol.getName()));
-        if (!defaultLossDist && dsActive) {
+        if (!defaultLossDist && distributedSlackActive) {
             unsupportedOuterLoops.add("ContingencyActivePowerLossDistribution[" + lossDistName + "]");
         }
         boolean batchDisabled = !unsupportedOuterLoops.isEmpty();
@@ -305,7 +305,7 @@ final class GpuSaRunScope {
         }
         // Assemble the run's per-call batched config (replaces the solver's former JVM-global statics).
         BatchConfig batchConfig = new BatchConfig(cfgLsMode, cfgMaxDv, cfgMaxDphi,
-                cfgTransformerControl, cfgMaxOuterIterations, cfgMaxPqPvSwitch, cfgDsRejectResidual,
+                cfgTransformerControl, cfgMaxOuterIterations, cfgMaxPqPvSwitch, cfgRejectSlackDistributionFailure,
                 new com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDsParams(
                         lfGuardParams.getBalanceType(), olfGuardParams.isUseActiveLimits()),
                 cfgIncrementalTvc, olfGuardParams.getIncrementalTransformerRatioTapControlOuterLoopMaxTapShift(),
@@ -314,7 +314,7 @@ final class GpuSaRunScope {
                 cfgIncrementalRpc, cfgIncrementalPhase, cfgSimpleTvc,
                 olfGuardParams.isTransformerVoltageControlUseInitialTapPosition(), cfgHvdcFreezing, cfgHvdcLimits,
                 cfgSecondaryVc, olfGuardParams.getMinPlausibleTargetVoltage(), olfGuardParams.getMaxPlausibleTargetVoltage(),
-                cfgVoltageMonitoring, cfgContinuousPhase, defaultLossDist && dsActive,
+                cfgVoltageMonitoring, cfgContinuousPhase, defaultLossDist && distributedSlackActive,
                 olfGuardParams.isExtrapolateReactiveLimits(),
                 olfGuardParams.isForceTargetQInReactiveLimits() && lfGuardParams.isUseReactiveLimits(),
                 olfParams.getNewtonRaphsonStoppingCriteriaType()

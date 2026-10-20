@@ -27,22 +27,22 @@ public final class DistributedSlackNative {
 
     /**
      * Install the PER-GENERATOR distributed-slack participants: the factors and limits OLF's
-     * water-fill actually saturates on, grouped by bus ({@code busGenStart}/{@code busGenEnd} slice
+     * water-fill actually saturates on, grouped by bus ({@code distributedSlackBusGeneratorStart}/{@code distributedSlackBusGeneratorEnd} slice
      * the generator arrays, so a bus's row value is the sum over its slice).
      *
      * <p>OLF's {@code ParticipatingElement} wraps an {@code LfGenerator} and {@code step.run} clamps
      * each at its own {@code minTargetP}/{@code maxTargetP} and removes it, so a bus-level aggregate
      * reproduces OLF only while nothing saturates.
      */
-    public static native void setBatchDsGenerators(long handle, int[] genBus, double[] genFactor,
+    public static native void setBatchDistributedSlackGenerators(long handle, int[] genBus, double[] genFactor,
                                                    double[] genMaxDelta, double[] genMinDelta,
                                                    double[] genMarginUp, double[] genMarginDown,
-                                                   int[] busGenStart, int[] busGenEnd);
+                                                   int[] distributedSlackBusGeneratorStart, int[] distributedSlackBusGeneratorEnd);
 
     /**
      * Install (or clear, with null) the per-scenario distributed-slack participants that a
      * fragmenting contingency strands in another synchronous component, as {@code {slot, participant}}
-     * pairs indexing {@code dsPhiRow}.
+     * pairs indexing {@code distributedSlackBusPhiRow}.
      *
      * <p>OLF distributes over {@code getSynchronousNetworks().getFirst()}, so a stranded participant
      * is not a participant: the device drops it from the distribution AND renormalizes the survivors'
@@ -50,25 +50,25 @@ public final class DistributedSlackNative {
      * remains. Doing only the first half leaves the pass retiring with most of the mismatch
      * undistributed.
      */
-    public static native void setBatchDsIslanded(long handle, int[] slotParticipantPairs);
+    public static native void setBatchDistributedSlackIslanded(long handle, int[] slotParticipantPairs);
 
     /** The generators an outage REMOVES, as (scenario, DS generator slot) pairs. With the identity the
      *  outaged bus's survivors take part in the per-generator slack water-fill like any others, instead
      *  of the bus riding on one aggregate entry — which leaves their own P unknown to everything that
      *  reads it, the reactive-capability curve channel above all. */
-    public static native void setBatchDsLostGenerators(long handle, int[] slotGen);
+    public static native void setBatchDistributedSlackLostGenerators(long handle, int[] slotGen);
 
     /** The participants a strategy's GeneratorAction takes out of the slack distribution (OLF's
      *  reApplyActivePowerControlChecks), as (scenario, DS generator slot) pairs: they keep the action's target and
      *  take no share. Null clears the channel. */
-    public static native void setBatchDsOutGenerators(long handle, int[] slotGen);
+    public static native void setBatchDistributedSlackRemovedGenerators(long handle, int[] slotGen);
 
     /**
      * Install (or clear, with null) the per-scenario P-balance row of a distributed-slack participant
      * whose row THIS scenario moves, as {@code {slot, participant, row}} triples ({@code participant}
-     * indexes {@code dsPhiRow}, {@code row} is an equation row in the same space as {@code dsPhiRow}).
+     * indexes {@code distributedSlackBusPhiRow}, {@code row} is an equation row in the same space as {@code distributedSlackBusPhiRow}).
      *
-     * <p>{@code dsPhiRow} is structural, and under the coupler-tree relocation a child bus's P balance
+     * <p>{@code distributedSlackBusPhiRow} is structural, and under the coupler-tree relocation a child bus's P balance
      * sits on its parent coupler's {@code DUMMY_P} row. A contingency that OPENS that coupler pins the
      * dummy row to a {@code DUMMY_TARGET} identity and the stock-placement fallback returns the balance
      * to the child's own {@code BUS_PHI} row — so for that scenario the participant's row is the
@@ -77,24 +77,24 @@ public final class DistributedSlackNative {
      * {@code (0 - anchor)} of absorbed power, which makes the slack loop redistribute what OLF placed
      * once.
      */
-    public static native void setBatchDsRowOverrides(long handle, int[] slotParticipantRowTriples);
+    public static native void setBatchDistributedSlackBusRowOverrides(long handle, int[] slotParticipantRowTriples);
 
-    /** The slack bus's participating generators' total rooms (GpuAcData.dsSlackRoomUp/Down): the bound of a
+    /** The slack bus's participating generators' total rooms (GpuAcData.slackBusRoomUp/Down): the bound of a
      *  slack-only distribution, beyond which the device flags OLF's remaining mismatch. */
-    public static native void setBatchDsSlackRooms(long handle, double roomUp, double roomDown);
+    public static native void setBatchSlackBusRooms(long handle, double roomUp, double roomDown);
 
     /** Per slot, the row the distributed-slack kernels read the slack's balance on: the angle row of the bus OLF
      *  re-picks as the slack when a contingency isolates the base one, -1 = the base slack row. Null clears. */
-    public static native void setBatchDsSlackRows(long handle, int[] rows);
+    public static native void setBatchSlackBusRows(long handle, int[] rows);
 
-    /** Per scenario and participating generator ({@code s * ngen + g}, pu) for the following solves: {@code anchor},
+    /** Per scenario and participating generator ({@code s * nDistributedSlackGenerators + g}, pu) for the following solves: {@code anchor},
      *  its move from its base target P to where the slack's water-fill starts it (a strategy pair: the parent's final
      *  target, or a GeneratorAction's value; null = the base); {@code start}, its move from that anchor when the solve
      *  starts (a contingency's loss pre-distribution; null = none). The curve and forced-target-Q channels evaluate a
      *  generator at anchor + its water-fill move once a slack pass ran, at anchor + start before. {@code seedAnchor}
      *  (strategy pairs): the anchor without the strategy's GeneratorActions, the P the pins continued from the parent
      *  are stamped at (OLF keeps their restored target Q until its reactive-limit check); null = the anchor. */
-    public static native void setBatchGenAnchor(long handle, double[] anchor, double[] start, double[] seedAnchor);
+    public static native void setBatchDistributedSlackGeneratorAnchors(long handle, double[] anchor, double[] start, double[] seedAnchor);
 
     /** Slack-only distribution: per scenario, the slack generators' initial target relative to the slack's target P
      *  for the following solves - a strategy pair's parent total, which OLF re-anchors on; null = 0 (a contingency,

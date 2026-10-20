@@ -34,7 +34,7 @@ final class PlanOverrideSeed {
         final int[][] distrQSubgroupByIndex = plan.distrQSubgroupByIndex();
         final double[][] distrRhoOverrideCoefficientByIndex = plan.distrRhoOverrideCoefficientByIndex();
         final int[][] distrRhoOverrideTermByIndex = plan.distrRhoOverrideTermByIndex();
-        final int[][] islandedDsByIndex = plan.islandedDsByIndex();
+        final int[][] islandedDistributedSlackByIndex = plan.islandedDistributedSlackByIndex();
         final int[][] islandedReactiveLimitEntriesByIndex = plan.islandedReactiveLimitEntriesByIndex();
         if (!pairPhase && activePowerLossByIndex != null) {
             cl.preLossBySlot[s] = activePowerLossByIndex[ci];
@@ -60,10 +60,10 @@ final class PlanOverrideSeed {
                 cl.distrRhoOverrideCoefficientList.add(distrRhoOverrideCoefficientByIndex[ci][k]);
             }
         }
-        if (islandedDsByIndex != null && islandedDsByIndex[ci] != null) {
-            for (int participant : islandedDsByIndex[ci]) {
-                cl.dsIslandedList.add(s);
-                cl.dsIslandedList.add(participant);
+        if (islandedDistributedSlackByIndex != null && islandedDistributedSlackByIndex[ci] != null) {
+            for (int participant : islandedDistributedSlackByIndex[ci]) {
+                cl.distributedSlackIslandedList.add(s);
+                cl.distributedSlackIslandedList.add(participant);
             }
         }
         if (islandedReactiveLimitEntriesByIndex != null && islandedReactiveLimitEntriesByIndex[ci] != null) {

@@ -29,7 +29,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /**
  * The per-extraction shared-structure cache ({@link GpuAcStructures}): two extraction FLAVORS of one
- * equation-system state — the base load flow always extracts DS_RL, an SA run with distributed slack /
+ * equation-system state — the base load flow always extracts with both loop tables, an SA run with distributed slack /
  * reactive limits disabled extracts another flavor, so they are DIFFERENT {@link GpuAcData} instances —
  * must still share ONE device-resident structure, because the flavor flags only select the outer-loop
  * RL/DS packs, which are batch-context inputs and not structure inputs
@@ -56,17 +56,17 @@ class GpuAcStructuresTest {
         int n = es.getIndex().getSortedVariablesToFind().size();
 
         // Two flavors of the SAME equation-system state: distinct instances, distinct RL/DS packs
-        // (eurostag's PV generator gives the DS_RL flavor a non-empty reactive-limits pack), but
+        // (eurostag's PV generator gives the extraction with both loop tables a non-empty reactive-limits pack), but
         // identical structure inputs.
-        GpuAcData distributedSlackAndReactiveLimits = GpuAcDataExtractor.extract(network, es, true, true);
+        GpuAcData extractedWithLoopTables = GpuAcDataExtractor.extract(network, es, true, true);
         GpuAcData none = GpuAcDataExtractor.extract(network, es, false, false);
-        assertNotSame(distributedSlackAndReactiveLimits, none);
-        assertTrue(distributedSlackAndReactiveLimits.getReactiveLimitCount() > 0, "eurostag's PV generator must fill the DS_RL flavor's RL pack");
+        assertNotSame(extractedWithLoopTables, none);
+        assertTrue(extractedWithLoopTables.getReactiveLimitCount() > 0, "eurostag's PV generator must fill the extraction with both loop tables's RL pack");
         assertEquals(0, none.getReactiveLimitCount(), "the NONE flavor must have an empty RL pack");
-        assertTrue(distributedSlackAndReactiveLimits.sameStructureInputsAs(none),
+        assertTrue(extractedWithLoopTables.sameStructureInputsAs(none),
                 "the flavor flags must not change the structure inputs (only the RL/DS packs)");
 
-        long first = GpuAcStructures.handle(n, distributedSlackAndReactiveLimits);
+        long first = GpuAcStructures.handle(n, extractedWithLoopTables);
         long builds = GpuAcStructures.buildCount();
         long hits = GpuAcStructures.hitCount();
 
@@ -77,7 +77,7 @@ class GpuAcStructuresTest {
         assertEquals(hits + 1, GpuAcStructures.hitCount(), "the cross-flavor lookup must count as a hit");
 
         // Same-instance lookups keep hitting (both flavors are now keys).
-        assertEquals(first, GpuAcStructures.handle(n, distributedSlackAndReactiveLimits));
+        assertEquals(first, GpuAcStructures.handle(n, extractedWithLoopTables));
         assertEquals(first, GpuAcStructures.handle(n, none));
         assertEquals(hits + 3, GpuAcStructures.hitCount());
 

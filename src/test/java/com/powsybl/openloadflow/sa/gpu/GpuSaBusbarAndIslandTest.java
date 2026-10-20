@@ -90,7 +90,7 @@ class GpuSaBusbarAndIslandTest extends AbstractGpuSaTest {
      *  as absorbed power, reset them to the base P and gave the island shares of the mismatch that
      *  never reached the grid — a second DS round OLF does not run, 1.18e-03 kV on rte6515. */
     @Test
-    void deviceBusLossIslandingDsParticipantMatchesCpu() {
+    void deviceBusLossIslandingDistributedSlackParticipantMatchesCpu() {
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
         Network network = islandableRemoteControlGroupNetwork();

@@ -64,17 +64,17 @@ static __device__ double evaluateReactiveCapabilityCurve(double pMW, const doubl
 }
 
 // A participating generator's move from its base target P in scenario s: its anchor (a strategy pair's parent target,
-// or a GeneratorAction's value; dgAnchor, null = the base) plus its own move from that anchor - this solve's water-fill
-// (genCum) once a pass ran, else where the solve STARTED it (dgStart: a contingency's loss pre-distribution, which
+// or a GeneratorAction's value; distributedSlackGeneratorAnchor, null = the base) plus its own move from that anchor - this solve's water-fill
+// (distributedSlackGeneratorMove) once a pass ran, else where the solve STARTED it (distributedSlackGeneratorInitialMove: a contingency's loss pre-distribution, which
 // moves each generator by its own clamped share, not by a share of its bus's move).
-__device__ inline double genPNowMove(int s, int g, int ngen, const double* genCum, const char* genCumValid,
-                                     const double* dgAnchor, const double* dgStart) {
-    size_t k = (size_t) s * ngen + g;
-    double a = dgAnchor != nullptr ? dgAnchor[k] : 0.0;
-    if (genCum != nullptr && genCumValid != nullptr && genCumValid[s]) {
-        return a + genCum[k];
+__device__ inline double distributedSlackGeneratorTargetPMove(int s, int g, int nDistributedSlackGenerators, const double* distributedSlackGeneratorMove, const char* distributedSlackGeneratorMoveValid,
+                                     const double* distributedSlackGeneratorAnchor, const double* distributedSlackGeneratorInitialMove) {
+    size_t k = (size_t) s * nDistributedSlackGenerators + g;
+    double a = distributedSlackGeneratorAnchor != nullptr ? distributedSlackGeneratorAnchor[k] : 0.0;
+    if (distributedSlackGeneratorMove != nullptr && distributedSlackGeneratorMoveValid != nullptr && distributedSlackGeneratorMoveValid[s]) {
+        return a + distributedSlackGeneratorMove[k];
     }
-    return a + (dgStart != nullptr ? dgStart[k] : 0.0);
+    return a + (distributedSlackGeneratorInitialMove != nullptr ? distributedSlackGeneratorInitialMove[k] : 0.0);
 }
 
 }  // namespace olfgpu

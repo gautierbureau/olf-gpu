@@ -39,8 +39,8 @@ final class InjectionOutagePlanner {
     static void plan(PlanContext ctx, ScenarioPlanBuilder pb, int i, BatchContingency c,
                      GpuBatchContingencyValidator.Qualification q, java.util.Set<Integer> outagedZeroImpedanceBranchNums) {
         final Set<LfBranch> distrRhoControllers = ctx.distrRhoControllers();
-        final GpuDsParams dsParams = ctx.dsParams();
-        final double dsSum = ctx.dsSum();
+        final GpuDsParams distributedSlackParameters = ctx.distributedSlackParameters();
+        final double distributedSlackRawFactorSum = ctx.distributedSlackRawFactorSum();
         final GpuAcElementMapper elementMapper = ctx.elementMapper();
         final EquationSystem<AcVariableType, AcEquationType> es = ctx.es();
         final GpuAcData gpuData = ctx.gpuData();
@@ -109,8 +109,8 @@ final class InjectionOutagePlanner {
                         .busPowerRows(anyBus.getNetwork(), es);   // no bus is looked up either
             }
         }
-        GenOutage[] gos = GpuBatchInjectionOutages.computeInjectionOutages(es, gpuData, dsSum, slackParticipates,
-                dsParams, liveLostGens, liveLostLoads, pb.busRows);
+        GenOutage[] gos = GpuBatchInjectionOutages.computeInjectionOutages(es, gpuData, distributedSlackRawFactorSum, slackParticipates,
+                distributedSlackParameters, liveLostGens, liveLostLoads, pb.busRows);
         if (gos == null) {                           // slack / >1 DS bus / remote gen — route to CPU
             // (was tagged SHUNT_SHAPE, a copy-paste from the block above: this is the INJECTION
             // outage shape, and the census is how we pick what to fix — a tag that lies about
@@ -404,7 +404,7 @@ final class InjectionOutagePlanner {
             // Measured on rte6515 BUS-1238_BBS: absorbed -0.305 pu where OLF pre-distributed
             // +0.155, a second DS round OLF never runs (+0.471 pu reappearing at the slack)
             // and 1.18e-03 kV at the end.
-            pb.islandedDsByIndex[i] = IslandedBuses.islandedDsParticipants(fi.rows(), gpuData, q.islandedBuses());
+            pb.islandedDistributedSlackByIndex[i] = IslandedBuses.islandedDistributedSlackParticipants(fi.rows(), gpuData, q.islandedBuses());
             pb.islandedReactiveLimitEntriesByIndex[i] = IslandedBuses.islandedReactiveLimitControllers(fi.rows(), gpuData);
             if (fi.rows().length > 0) {
                 pb.islandingCount++;

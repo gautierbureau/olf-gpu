@@ -22,12 +22,12 @@ extern long long gOuterPasses;
 
 // OLF_GPU_PHASE_TIME: where the outer-loop driver's time goes. Index = the GpuOuterLoopKind that TRIGGERED a
 // re-solve (the loop whose check changed something), or the loop being CHECKED; the first solve of a call is apart.
-extern double gOlFirstSolveMs, gOlReSolveMs[GpuOuterLoopKind::COUNT], gOlCheckMs[GpuOuterLoopKind::COUNT];
-extern long long gOlFirstSolveScen, gOlReSolveScen[GpuOuterLoopKind::COUNT], gOlReSolvePasses[GpuOuterLoopKind::COUNT];
-extern long long gOlFirstLaneIters, gOlReSolveLaneIters[GpuOuterLoopKind::COUNT], gOlFirstWidthIters, gOlReSolveWidthIters[GpuOuterLoopKind::COUNT];
-extern long long gOlCheckPasses[GpuOuterLoopKind::COUNT], gOlFirstPasses;
+extern double gOuterLoopFirstSolveMilliseconds, gOuterLoopReSolveMilliseconds[GpuOuterLoopKind::COUNT], gOuterLoopCheckMilliseconds[GpuOuterLoopKind::COUNT];
+extern long long gOuterLoopFirstSolveScenarios, gOuterLoopReSolveScenarios[GpuOuterLoopKind::COUNT], gOuterLoopReSolvePasses[GpuOuterLoopKind::COUNT];
+extern long long gOuterLoopFirstSolveLaneIterations, gOuterLoopReSolveLaneIterations[GpuOuterLoopKind::COUNT], gOuterLoopFirstSolveWidthIterations, gOuterLoopReSolveWidthIterations[GpuOuterLoopKind::COUNT];
+extern long long gOuterLoopCheckPasses[GpuOuterLoopKind::COUNT], gOuterLoopFirstSolvePasses;
 
-inline double olNowMs() {
+inline double nowMilliseconds() {
     return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
@@ -40,8 +40,8 @@ extern long long gCompactIters;
 // Per scenario at the end of a completed batch call: how many SOLVE PASSES it took part in (1 = the state came
 // right out of the first inner Newton; each further pass is an outer loop that changed something and
 // re-solved), the first pass's iterations and the total. Histogram key = passes (capped at 15).
-extern long long gOlHistCount[16], gOlHistFirst[16], gOlHistTotal[16];
-extern long long gOlNotConverged, gOlNotConvergedIters;
+extern long long gOuterLoopPassHistogramCount[16], gOuterLoopPassHistogramFirstSolveIterations[16], gOuterLoopPassHistogramTotalIterations[16];
+extern long long gOuterLoopNotConverged, gOuterLoopNotConvergedIterations;
 // cuDSS symbolic analyses run: the main contexts (a batch, the base load flow) and the straggler-compaction
 // context (one per compact WIDTH it is analyzed at).
 extern long long gAnalysesMain;

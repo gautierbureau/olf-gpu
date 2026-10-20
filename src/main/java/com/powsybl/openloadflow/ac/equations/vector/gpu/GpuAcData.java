@@ -45,14 +45,14 @@ import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuQLimitType;
  * <p>Reactive limits: {@link ReactiveLimitEntries}. The calculated generator Q of an entry is
  * {@code sum branch q + shunt q + loadQ}, the first part read from its BUS_V row after a fill into a zeroed buffer.
  *
- * <p>Distributed slack (the batched full-loadflow outer loop): {@code dsSlackPhiRow} the slack bus's stable
- * BUS_PHI row (-1 if none) and {@code dsSlackTargetP} its scheduled active target (pu) give the mismatch
- * {@code Σ branch p at the slack − dsSlackTargetP}; each participating non-slack bus {@code dsPhiRow} (its
- * BUS_TARGET_P row) takes {@code dsFactor × mismatch} into its P target, with {@code dsFactor} the NORMALIZED
+ * <p>Distributed slack (the batched full-loadflow outer loop): {@code slackBusPhiRow} the slack bus's stable
+ * BUS_PHI row (-1 if none) and {@code slackBusTargetP} its scheduled active target (pu) give the mismatch
+ * {@code Σ branch p at the slack − slackBusTargetP}; each participating non-slack bus {@code distributedSlackBusPhiRow} (its
+ * BUS_TARGET_P row) takes {@code distributedSlackBusFactor × mismatch} into its P target, with {@code distributedSlackBusFactor} the NORMALIZED
  * participation factor (PROPORTIONAL_TO_GENERATION_P_MAX: {@code Σ maxP/droop} over the bus's participating
  * generators) normalized by {@code Σ maxP/droop over ALL participants INCLUDING any at the slack bus} — so a
  * participating slack generator's share is left at the slack (no row emitted) instead of over-distributed.
- * {@code dsBaseTargetP} is each emitted bus's initial P target and {@code dsMaxDelta}/{@code dsMinDelta} its
+ * {@code distributedSlackBusBaseTargetP} is each emitted bus's initial P target and {@code dsMaxDelta}/{@code dsMinDelta} its
  * headroom/footroom ({@code Σ (maxTargetP−targetP)} / {@code Σ (minTargetP−targetP)} over participating gens,
  * OLF's no-sign-change rule, useActiveLimits assumed true): the batch clamps each bus's CUMULATIVE delta to
  * [footroom, headroom], so saturation drop-out + redistribution converge to OLF's water-filling.
@@ -89,9 +89,9 @@ public record GpuAcData(ClosedBranchPack closedBranch, OpenBranchPack openBranch
      * Content equality over the SHARED-STRUCTURE inputs only — the family packs (values AND indices),
      * DISTR_Q, zero-impedance and DISTR_RHO — i.e. exactly what {@code GpuAcNewtonSolver.createStructure}
      * consumes. The reactive-limits / distributed-slack packs are EXCLUDED: they are batch-CONTEXT
-     * inputs, not structure inputs, so two extraction FLAVORS of one equation-system state (the base
-     * load flow always extracts DS_RL; an SA run may extract with DS or RL disabled) compare equal here
-     * and can share one device-resident structure (see {@code GpuAcStructures}).
+     * inputs, not structure inputs, so two extractions of one equation-system state (the base load flow always
+     * extracts with the distributed slack and reactive limits tables; an SA run may extract without one) compare
+     * equal here and can share one device-resident structure (see {@code GpuAcStructures}).
      */
     public boolean sameStructureInputsAs(GpuAcData other) {
         if (other != null && !baseOpenBranches.sameElementsAs(other.baseOpenBranches)) {

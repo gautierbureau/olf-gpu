@@ -93,7 +93,7 @@ class GpuSaReactiveLimitsTest extends AbstractGpuSaTest {
      *
      *  <p>OPEN, measured 2026-10-08: at the default convEps the device ends 1.5e-5 kV off at B2 (B3-G outage); at
      *  convEps 1e-12 both arms agree to 1e-11, so the curve is evaluated at the right P (the suspicion that the curve
-     *  channel misses the pre-distribution move is NOT confirmed - genCum carries it). Without the curve (fixed min/max
+     *  channel misses the pre-distribution move is NOT confirmed - distributedSlackGeneratorMove carries it). Without the curve (fixed min/max
      *  limits) the same case is still 1.6e-7 kV off. A gap above machine precision means the two arms are not solving
      *  the same equation system at some solve: find the first pass whose targets, row modes or limits differ (OLF_DS_TRACE
      *  / OLF_RL_TRACE against the device's per-pass state). The assert is not loosened. */
@@ -368,7 +368,7 @@ class GpuSaReactiveLimitsTest extends AbstractGpuSaTest {
      *  max and FREEZES its generation target; losing B8-G (30 MW) pre-distributes onto B3's two units, both curves
      *  fall, and OLF re-freezes B3 at the moved limit (RL_REFREEZE -0.1368 -> -0.2173 pu). Without the limit entries
      *  the device is 0.86 kV off at B3; routing a frozen bus's clamp to its Q row instead is just as far off; adding
-     *  the loss pre-distribution on top of genCum (which already carries it) is 0.84 kV off the other way. The
+     *  the loss pre-distribution on top of distributedSlackGeneratorMove (which already carries it) is 0.84 kV off the other way. The
      *  CPU-only check proves the flag moves the answer. */
     @Test
     void deviceForcedTargetQOnVoltageControlledBusMovesItsLimits() {
@@ -657,7 +657,7 @@ class GpuSaReactiveLimitsTest extends AbstractGpuSaTest {
                 .setSlackBusSelectionMode(com.powsybl.openloadflow.network.SlackBusSelectionMode.NAME)
                 .setSlackBusesIds(List.of("vl0_b"));
         // ...and the loss of the PILOT section itself (bbs0: g0 and the load), which kills the coupler: the
-        // surviving child's balance moves back to its own PHI row (dsRowOv) and the kernel must follow it
+        // surviving child's balance moves back to its own PHI row (distributedSlackBusRowOverride) and the kernel must follow it
         // there - the structural dummy row is an identity at 0 in that scenario
         List<Contingency> ctgs = List.of(
                 new Contingency("bus-1", new com.powsybl.contingency.BusbarSectionContingency("bbs1")),

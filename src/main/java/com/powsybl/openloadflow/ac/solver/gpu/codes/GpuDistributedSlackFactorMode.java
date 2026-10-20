@@ -8,7 +8,7 @@
 package com.powsybl.openloadflow.ac.solver.gpu.codes;
 
 /**
- * How the device computes each distributed-slack participant's factor ({@code dsMode}). OLF's
+ * How the device computes each distributed-slack participant's factor ({@code distributedSlackFactorMode}). OLF's
  * GenerationActivePowerDistributionStep.ParticipationType has four values; the device only needs to tell
  * REMAINING_MARGIN, whose factor depends on the direction and on what the participant already took, from every
  * other balance type, whose factor is fixed for the run. Mirrored by
@@ -18,7 +18,7 @@ package com.powsybl.openloadflow.ac.solver.gpu.codes;
  */
 public final class GpuDistributedSlackFactorMode {
 
-    /** The factor is fixed for the run (dsFactor): MAX, TARGET, PARTICIPATION_FACTOR and the load balance types. */
+    /** The factor is fixed for the run (distributedSlackBusFactor): MAX, TARGET, PARTICIPATION_FACTOR and the load balance types. */
     public static final int STATIC = 0;
     /** OLF's ParticipationType.REMAINING_MARGIN: the factor is the room left in the direction of the mismatch. */
     public static final int REMAINING_MARGIN = 1;

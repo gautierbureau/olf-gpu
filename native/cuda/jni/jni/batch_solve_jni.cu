@@ -29,11 +29,11 @@ OLF_JNI(ac_solver_gpu, BatchSolveNative, createBatchContext)(
         JNIEnv* env, jclass, jlong structureHandle, jint nScenarios, jint mode,
         jintArray jReactiveLimitVoltageRow, jdoubleArray jReactiveLimitMinQ, jdoubleArray jReactiveLimitMaxQ, jdoubleArray jReactiveLimitLoadQ,
         jdoubleArray jReactiveLimitTargetV, jbyteArray jReactiveLimitFlags, jdoubleArray jrowSlope,
-        jintArray jdsPhiRow, jdoubleArray jdsFactor,
-        jint jdsSlackPhiRow, jdouble jdsSlackTargetP,
-        jdoubleArray jdsBaseTargetP, jdoubleArray jdsMaxDelta, jdoubleArray jdsMinDelta,
-        jint jdsMode, jdoubleArray jdsMarginUp, jdoubleArray jdsMarginDown,
-        jdouble jdsSlackMarginUp, jdouble jdsSlackMarginDown) {
+        jintArray jDistributedSlackBusPhiRow, jdoubleArray jDistributedSlackBusFactor,
+        jint jSlackBusPhiRow, jdouble jSlackBusTargetP,
+        jdoubleArray jDistributedSlackBusBaseTargetP, jdoubleArray jDistributedSlackBusMaxDelta, jdoubleArray jDistributedSlackBusMinDelta,
+        jint jDistributedSlackFactorMode, jdoubleArray jDistributedSlackBusMarginUp, jdoubleArray jDistributedSlackBusMarginDown,
+        jdouble jSlackBusMarginUp, jdouble jSlackBusMarginDown) {
     auto* st = reinterpret_cast<SharedStructurePtr*>(structureHandle);
     jint* reactiveLimitVoltageRow = env->GetIntArrayElements(jReactiveLimitVoltageRow, nullptr);
     jdouble* reactiveLimitMinQ = env->GetDoubleArrayElements(jReactiveLimitMinQ, nullptr);
@@ -42,16 +42,16 @@ OLF_JNI(ac_solver_gpu, BatchSolveNative, createBatchContext)(
     jdouble* reactiveLimitTargetV = env->GetDoubleArrayElements(jReactiveLimitTargetV, nullptr);
     jbyte* reactiveLimitFlags = env->GetByteArrayElements(jReactiveLimitFlags, nullptr);
     jdouble* rowSlope = env->GetDoubleArrayElements(jrowSlope, nullptr);
-    jint* dsPhiRow = env->GetIntArrayElements(jdsPhiRow, nullptr);
-    jdouble* dsFactor = env->GetDoubleArrayElements(jdsFactor, nullptr);
-    jdouble* dsBaseTargetP = env->GetDoubleArrayElements(jdsBaseTargetP, nullptr);
-    jdouble* dsMaxDelta = env->GetDoubleArrayElements(jdsMaxDelta, nullptr);
-    jdouble* dsMinDelta = env->GetDoubleArrayElements(jdsMinDelta, nullptr);
-    jdouble* dsMarginUp = env->GetDoubleArrayElements(jdsMarginUp, nullptr);
-    jdouble* dsMarginDown = env->GetDoubleArrayElements(jdsMarginDown, nullptr);
+    jint* distributedSlackBusPhiRow = env->GetIntArrayElements(jDistributedSlackBusPhiRow, nullptr);
+    jdouble* distributedSlackBusFactor = env->GetDoubleArrayElements(jDistributedSlackBusFactor, nullptr);
+    jdouble* distributedSlackBusBaseTargetP = env->GetDoubleArrayElements(jDistributedSlackBusBaseTargetP, nullptr);
+    jdouble* dsMaxDelta = env->GetDoubleArrayElements(jDistributedSlackBusMaxDelta, nullptr);
+    jdouble* dsMinDelta = env->GetDoubleArrayElements(jDistributedSlackBusMinDelta, nullptr);
+    jdouble* distributedSlackBusMarginUp = env->GetDoubleArrayElements(jDistributedSlackBusMarginUp, nullptr);
+    jdouble* distributedSlackBusMarginDown = env->GetDoubleArrayElements(jDistributedSlackBusMarginDown, nullptr);
 
     int nReactiveLimitEntries = env->GetArrayLength(jReactiveLimitVoltageRow);
-    int nds = env->GetArrayLength(jdsPhiRow);
+    int nDistributedSlackBuses = env->GetArrayLength(jDistributedSlackBusPhiRow);
 
     std::string error;
     BatchSolverContext* ctx = nullptr;
@@ -61,9 +61,9 @@ OLF_JNI(ac_solver_gpu, BatchSolveNative, createBatchContext)(
         }
         ctx = createBatchContext(*st, nScenarios, mode,
                                  nReactiveLimitEntries, reactiveLimitVoltageRow, reactiveLimitMinQ, reactiveLimitMaxQ, reactiveLimitLoadQ, reactiveLimitTargetV, reactiveLimitFlags, rowSlope,
-                                 nds, dsPhiRow, dsFactor, jdsSlackPhiRow, jdsSlackTargetP,
-                                 dsBaseTargetP, dsMaxDelta, dsMinDelta,
-                                 jdsMode, dsMarginUp, dsMarginDown, jdsSlackMarginUp, jdsSlackMarginDown);
+                                 nDistributedSlackBuses, distributedSlackBusPhiRow, distributedSlackBusFactor, jSlackBusPhiRow, jSlackBusTargetP,
+                                 distributedSlackBusBaseTargetP, dsMaxDelta, dsMinDelta,
+                                 jDistributedSlackFactorMode, distributedSlackBusMarginUp, distributedSlackBusMarginDown, jSlackBusMarginUp, jSlackBusMarginDown);
     } catch (const std::exception& e) {
         error = e.what();
     } catch (...) {
@@ -77,13 +77,13 @@ OLF_JNI(ac_solver_gpu, BatchSolveNative, createBatchContext)(
     env->ReleaseDoubleArrayElements(jReactiveLimitTargetV, reactiveLimitTargetV, JNI_ABORT);
     env->ReleaseByteArrayElements(jReactiveLimitFlags, reactiveLimitFlags, JNI_ABORT);
     env->ReleaseDoubleArrayElements(jrowSlope, rowSlope, JNI_ABORT);
-    env->ReleaseIntArrayElements(jdsPhiRow, dsPhiRow, JNI_ABORT);
-    env->ReleaseDoubleArrayElements(jdsFactor, dsFactor, JNI_ABORT);
-    env->ReleaseDoubleArrayElements(jdsBaseTargetP, dsBaseTargetP, JNI_ABORT);
-    env->ReleaseDoubleArrayElements(jdsMaxDelta, dsMaxDelta, JNI_ABORT);
-    env->ReleaseDoubleArrayElements(jdsMinDelta, dsMinDelta, JNI_ABORT);
-    env->ReleaseDoubleArrayElements(jdsMarginUp, dsMarginUp, JNI_ABORT);
-    env->ReleaseDoubleArrayElements(jdsMarginDown, dsMarginDown, JNI_ABORT);
+    env->ReleaseIntArrayElements(jDistributedSlackBusPhiRow, distributedSlackBusPhiRow, JNI_ABORT);
+    env->ReleaseDoubleArrayElements(jDistributedSlackBusFactor, distributedSlackBusFactor, JNI_ABORT);
+    env->ReleaseDoubleArrayElements(jDistributedSlackBusBaseTargetP, distributedSlackBusBaseTargetP, JNI_ABORT);
+    env->ReleaseDoubleArrayElements(jDistributedSlackBusMaxDelta, dsMaxDelta, JNI_ABORT);
+    env->ReleaseDoubleArrayElements(jDistributedSlackBusMinDelta, dsMinDelta, JNI_ABORT);
+    env->ReleaseDoubleArrayElements(jDistributedSlackBusMarginUp, distributedSlackBusMarginUp, JNI_ABORT);
+    env->ReleaseDoubleArrayElements(jDistributedSlackBusMarginDown, distributedSlackBusMarginDown, JNI_ABORT);
 
     if (!error.empty()) {
         env->ThrowNew(env->FindClass("java/lang/RuntimeException"),
@@ -98,17 +98,17 @@ OLF_JNI(ac_solver_gpu, BatchSolveNative, solveBatchContext)(
         JNIEnv* env, jclass, jlong handle, jdoubleArray jx0Base, jdoubleArray jtargetBase,
         jobjectArray jrowMode, jintArray jbaseRowMode, jobjectArray jdisabledMask,
         jintArray jtargetOverrideIndex, jdoubleArray jtargetOverrideValue,
-        jintArray jdsOverrideBus, jdoubleArray jdsOverrideFactorDelta, jdoubleArray jdsOverrideBaseDelta,
-        jdoubleArray jdsOverrideMaxDelta, jdoubleArray jdsOverrideMinDelta, jdoubleArray jdsAnchorShift,
-        jdoubleArray jdsSlackShift, jintArray jReactiveLimitTargetVOverrideScenarioEntry, jdoubleArray jReactiveLimitTargetVOverrideValue,
+        jintArray jDistributedSlackOverrideBus, jdoubleArray jDistributedSlackOverrideFactorDelta, jdoubleArray jDistributedSlackOverrideBaseTargetPDelta,
+        jdoubleArray jDistributedSlackOverrideMaxDelta, jdoubleArray jDistributedSlackOverrideMinDelta, jdoubleArray jDistributedSlackBusAnchorShift,
+        jdoubleArray jSlackBusAnchorShift, jintArray jReactiveLimitTargetVOverrideScenarioEntry, jdoubleArray jReactiveLimitTargetVOverrideValue,
         jintArray jReactiveLimitDeltaOverrideScenarioEntry, jdoubleArray jReactiveLimitDeltaOverrideValues,
-        jintArray jcvOvSlotEntry, jdoubleArray jcvOvStepScale, jint maxIter, jdouble tol,
+        jintArray jReactiveCapabilityCurveOverrideScenarioCurve, jdoubleArray jReactiveCapabilityCurveOverrideStepScale, jint maxIter, jdouble tol,
         jdouble reactiveLimitTol, jdouble slackDistTol, jdouble convEpsPerEq,
         jint lsMode, jdouble maxDv, jdouble maxDphi, jintArray jvarType, jdoubleArray jx0Full,
         jintArray jShuntOvSlotElem, jdoubleArray jShuntOvGb,
         jintArray jReactiveLimitsSeedState, jintArray jReactiveLimitsFinalState,
         jintArray jR1OvSlotElem, jdoubleArray jR1OvVal,
-        jint maxOuterProductive, jint maxPqPvSwitch, jint dsRejectResidual, jint skipReactiveLimitsPhase,
+        jint maxOuterProductive, jint maxPqPvSwitch, jint rejectSlackDistributionFailure, jint skipReactiveLimitsPhase,
         jint nBaseClosedZeroImpedanceBranches, jintArray jZeroImpedanceBranchCloseScenarioElement, jintArray jZeroImpedanceBranchOpenScenarioElement) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx != nullptr) {
@@ -254,25 +254,25 @@ OLF_JNI(ac_solver_gpu, BatchSolveNative, solveBatchContext)(
 
         // Per-scenario distributed-slack reweight: present (length nS) only when a generator-loss scenario
         // sits on a DS-participant bus; empty array → no DS override (pass nullptr to the solver).
-        int nDsOv = env->GetArrayLength(jdsOverrideBus);
-        std::vector<int> dsOvBus(nDsOv);
-        std::vector<double> dsOvFactorDelta(nDsOv), dsOvBaseDelta(nDsOv), dsOvMaxDelta(nDsOv), dsOvMinDelta(nDsOv);
-        if (nDsOv > 0) {
-            env->GetIntArrayRegion(jdsOverrideBus, 0, nDsOv, dsOvBus.data());
-            env->GetDoubleArrayRegion(jdsOverrideFactorDelta, 0, nDsOv, dsOvFactorDelta.data());
-            env->GetDoubleArrayRegion(jdsOverrideBaseDelta, 0, nDsOv, dsOvBaseDelta.data());
-            env->GetDoubleArrayRegion(jdsOverrideMaxDelta, 0, nDsOv, dsOvMaxDelta.data());
-            env->GetDoubleArrayRegion(jdsOverrideMinDelta, 0, nDsOv, dsOvMinDelta.data());
+        int nDistributedSlackOverrides = env->GetArrayLength(jDistributedSlackOverrideBus);
+        std::vector<int> distributedSlackOverrideBus(nDistributedSlackOverrides);
+        std::vector<double> distributedSlackOverrideFactorDelta(nDistributedSlackOverrides), distributedSlackOverrideBaseTargetPDelta(nDistributedSlackOverrides), distributedSlackOverrideMaxDelta(nDistributedSlackOverrides), distributedSlackOverrideMinDelta(nDistributedSlackOverrides);
+        if (nDistributedSlackOverrides > 0) {
+            env->GetIntArrayRegion(jDistributedSlackOverrideBus, 0, nDistributedSlackOverrides, distributedSlackOverrideBus.data());
+            env->GetDoubleArrayRegion(jDistributedSlackOverrideFactorDelta, 0, nDistributedSlackOverrides, distributedSlackOverrideFactorDelta.data());
+            env->GetDoubleArrayRegion(jDistributedSlackOverrideBaseTargetPDelta, 0, nDistributedSlackOverrides, distributedSlackOverrideBaseTargetPDelta.data());
+            env->GetDoubleArrayRegion(jDistributedSlackOverrideMaxDelta, 0, nDistributedSlackOverrides, distributedSlackOverrideMaxDelta.data());
+            env->GetDoubleArrayRegion(jDistributedSlackOverrideMinDelta, 0, nDistributedSlackOverrides, distributedSlackOverrideMinDelta.data());
         }
-        std::vector<double> dsAnchorVec;
-        if (jdsAnchorShift != nullptr) {
-            dsAnchorVec.resize(env->GetArrayLength(jdsAnchorShift));
-            env->GetDoubleArrayRegion(jdsAnchorShift, 0, static_cast<jsize>(dsAnchorVec.size()), dsAnchorVec.data());
+        std::vector<double> distributedSlackBusAnchorShiftVec;
+        if (jDistributedSlackBusAnchorShift != nullptr) {
+            distributedSlackBusAnchorShiftVec.resize(env->GetArrayLength(jDistributedSlackBusAnchorShift));
+            env->GetDoubleArrayRegion(jDistributedSlackBusAnchorShift, 0, static_cast<jsize>(distributedSlackBusAnchorShiftVec.size()), distributedSlackBusAnchorShiftVec.data());
         }
-        std::vector<double> dsSlackShiftVec;
-        if (jdsSlackShift != nullptr) {
-            dsSlackShiftVec.resize(env->GetArrayLength(jdsSlackShift));
-            env->GetDoubleArrayRegion(jdsSlackShift, 0, static_cast<jsize>(dsSlackShiftVec.size()), dsSlackShiftVec.data());
+        std::vector<double> slackBusAnchorShiftVec;
+        if (jSlackBusAnchorShift != nullptr) {
+            slackBusAnchorShiftVec.resize(env->GetArrayLength(jSlackBusAnchorShift));
+            env->GetDoubleArrayRegion(jSlackBusAnchorShift, 0, static_cast<jsize>(slackBusAnchorShiftVec.size()), slackBusAnchorShiftVec.data());
         }
         std::vector<int> reactiveLimitTargetVOverrideScenarioEntryVec;
         std::vector<double> reactiveLimitTargetVOverrideValueVec;
@@ -284,13 +284,13 @@ OLF_JNI(ac_solver_gpu, BatchSolveNative, solveBatchContext)(
             reactiveLimitDeltaOverrideValuesVec.resize(env->GetArrayLength(jReactiveLimitDeltaOverrideValues));
             env->GetDoubleArrayRegion(jReactiveLimitDeltaOverrideValues, 0, static_cast<jsize>(reactiveLimitDeltaOverrideValuesVec.size()), reactiveLimitDeltaOverrideValuesVec.data());
         }
-        std::vector<int> cvOvSlotEntryVec;
-        std::vector<double> cvOvStepScaleVec;
-        if (jcvOvSlotEntry != nullptr && jcvOvStepScale != nullptr) {
-            cvOvSlotEntryVec.resize(env->GetArrayLength(jcvOvSlotEntry));
-            env->GetIntArrayRegion(jcvOvSlotEntry, 0, static_cast<jsize>(cvOvSlotEntryVec.size()), cvOvSlotEntryVec.data());
-            cvOvStepScaleVec.resize(env->GetArrayLength(jcvOvStepScale));
-            env->GetDoubleArrayRegion(jcvOvStepScale, 0, static_cast<jsize>(cvOvStepScaleVec.size()), cvOvStepScaleVec.data());
+        std::vector<int> reactiveCapabilityCurveOverrideScenarioCurveVec;
+        std::vector<double> reactiveCapabilityCurveOverrideStepScaleVec;
+        if (jReactiveCapabilityCurveOverrideScenarioCurve != nullptr && jReactiveCapabilityCurveOverrideStepScale != nullptr) {
+            reactiveCapabilityCurveOverrideScenarioCurveVec.resize(env->GetArrayLength(jReactiveCapabilityCurveOverrideScenarioCurve));
+            env->GetIntArrayRegion(jReactiveCapabilityCurveOverrideScenarioCurve, 0, static_cast<jsize>(reactiveCapabilityCurveOverrideScenarioCurveVec.size()), reactiveCapabilityCurveOverrideScenarioCurveVec.data());
+            reactiveCapabilityCurveOverrideStepScaleVec.resize(env->GetArrayLength(jReactiveCapabilityCurveOverrideStepScale));
+            env->GetDoubleArrayRegion(jReactiveCapabilityCurveOverrideStepScale, 0, static_cast<jsize>(reactiveCapabilityCurveOverrideStepScaleVec.size()), reactiveCapabilityCurveOverrideStepScaleVec.data());
         }
         if (jReactiveLimitTargetVOverrideScenarioEntry != nullptr && jReactiveLimitTargetVOverrideValue != nullptr) {
             reactiveLimitTargetVOverrideScenarioEntryVec.resize(env->GetArrayLength(jReactiveLimitTargetVOverrideScenarioEntry));
@@ -308,19 +308,19 @@ OLF_JNI(ac_solver_gpu, BatchSolveNative, solveBatchContext)(
                                 rowModeSlots.empty() ? kNoModeSlots : rowModeSlots.data(),
                                 static_cast<int>(rowModeSlots.size()), baseRowMode.data(), disabledData,
                                 nOv, ovIndex.data(), ovValue.data(),
-                                nDsOv > 0 ? dsOvBus.data() : nullptr, dsOvFactorDelta.data(),
-                                dsOvBaseDelta.data(), dsOvMaxDelta.data(), dsOvMinDelta.data(),
-                                dsAnchorVec.empty() ? nullptr : dsAnchorVec.data(),
-                                dsSlackShiftVec.empty() ? nullptr : dsSlackShiftVec.data(),
+                                nDistributedSlackOverrides > 0 ? distributedSlackOverrideBus.data() : nullptr, distributedSlackOverrideFactorDelta.data(),
+                                distributedSlackOverrideBaseTargetPDelta.data(), distributedSlackOverrideMaxDelta.data(), distributedSlackOverrideMinDelta.data(),
+                                distributedSlackBusAnchorShiftVec.empty() ? nullptr : distributedSlackBusAnchorShiftVec.data(),
+                                slackBusAnchorShiftVec.empty() ? nullptr : slackBusAnchorShiftVec.data(),
                                 static_cast<int>(reactiveLimitTargetVOverrideValueVec.size()),
                                 reactiveLimitTargetVOverrideScenarioEntryVec.empty() ? nullptr : reactiveLimitTargetVOverrideScenarioEntryVec.data(),
                                 reactiveLimitTargetVOverrideValueVec.empty() ? nullptr : reactiveLimitTargetVOverrideValueVec.data(),
                                 static_cast<int>(reactiveLimitDeltaOverrideValuesVec.size() / 5),
                                 reactiveLimitDeltaOverrideScenarioEntryVec.empty() ? nullptr : reactiveLimitDeltaOverrideScenarioEntryVec.data(),
                                 reactiveLimitDeltaOverrideValuesVec.empty() ? nullptr : reactiveLimitDeltaOverrideValuesVec.data(),
-                                static_cast<int>(cvOvStepScaleVec.size() / 2),
-                                cvOvSlotEntryVec.empty() ? nullptr : cvOvSlotEntryVec.data(),
-                                cvOvStepScaleVec.empty() ? nullptr : cvOvStepScaleVec.data(), maxIter, tol,
+                                static_cast<int>(reactiveCapabilityCurveOverrideStepScaleVec.size() / 2),
+                                reactiveCapabilityCurveOverrideScenarioCurveVec.empty() ? nullptr : reactiveCapabilityCurveOverrideScenarioCurveVec.data(),
+                                reactiveCapabilityCurveOverrideStepScaleVec.empty() ? nullptr : reactiveCapabilityCurveOverrideStepScaleVec.data(), maxIter, tol,
                                 reactiveLimitTol, slackDistTol, convEpsPerEq,
                                 lsMode, maxDv, maxDphi, varTypeVec.empty() ? nullptr : varTypeVec.data(),
                                 x0FullVec.empty() ? nullptr : x0FullVec.data(),
@@ -332,7 +332,7 @@ OLF_JNI(ac_solver_gpu, BatchSolveNative, solveBatchContext)(
                                 static_cast<int>(r1OvSlotElemVec.size() / 2),
                                 r1OvSlotElemVec.empty() ? nullptr : r1OvSlotElemVec.data(),
                                 r1OvValVec.empty() ? nullptr : r1OvValVec.data(),
-                                maxOuterProductive, maxPqPvSwitch, dsRejectResidual, skipReactiveLimitsPhase,
+                                maxOuterProductive, maxPqPvSwitch, rejectSlackDistributionFailure, skipReactiveLimitsPhase,
                                 nBaseClosedZeroImpedanceBranches, static_cast<int>(zeroImpedanceBranchCloseScenarioElementVec.size() / 2),
                                 zeroImpedanceBranchCloseScenarioElementVec.empty() ? nullptr : zeroImpedanceBranchCloseScenarioElementVec.data(),
                                 static_cast<int>(zeroImpedanceBranchOpenScenarioElementVec.size() / 2),
@@ -398,22 +398,22 @@ OLF_JNI(ac_solver_gpu, BatchSolveNative, solveBatchContext)(
             fprintf(stderr, "CUDSS_PHASE_SITE %c line=%d count=%lld ms=%.1f\n", ph, line, kv.second.first, kv.second.second);
         }
         for (int k = 1; k < 16; k++) {
-            if (gOlHistCount[k] == 0) continue;
+            if (gOuterLoopPassHistogramCount[k] == 0) continue;
             fprintf(stderr, "GPU_OL_HIST passes=%d%s scenarios=%lld firstNrIters=%lld totalNrIters=%lld\n", k,
-                    k == 15 ? "+" : "", gOlHistCount[k], gOlHistFirst[k], gOlHistTotal[k]);
+                    k == 15 ? "+" : "", gOuterLoopPassHistogramCount[k], gOuterLoopPassHistogramFirstSolveIterations[k], gOuterLoopPassHistogramTotalIterations[k]);
         }
-        fprintf(stderr, "GPU_OL_HIST notConvergedOnDevice=%lld iters=%lld\n", gOlNotConverged, gOlNotConvergedIters);
+        fprintf(stderr, "GPU_OL_HIST notConvergedOnDevice=%lld iters=%lld\n", gOuterLoopNotConverged, gOuterLoopNotConvergedIterations);
         fprintf(stderr, "GPU_OL_TIME first-solve passes=%lld ms=%.1f scenarioSolves=%lld laneIters=%lld widthIters=%lld\n",
-                gOlFirstPasses, gOlFirstSolveMs, gOlFirstSolveScen, gOlFirstLaneIters, gOlFirstWidthIters);
+                gOuterLoopFirstSolvePasses, gOuterLoopFirstSolveMilliseconds, gOuterLoopFirstSolveScenarios, gOuterLoopFirstSolveLaneIterations, gOuterLoopFirstSolveWidthIterations);
         for (int k = 0; k < GpuOuterLoopKind::COUNT; k++) {
-            if (gOlReSolvePasses[k] > 0) {
+            if (gOuterLoopReSolvePasses[k] > 0) {
                 fprintf(stderr, "GPU_OL_TIME re-solve trigger=%s passes=%lld ms=%.1f scenarioSolves=%lld laneIters=%lld widthIters=%lld\n",
-                        olKindName(k), gOlReSolvePasses[k], gOlReSolveMs[k], gOlReSolveScen[k], gOlReSolveLaneIters[k], gOlReSolveWidthIters[k]);
+                        outerLoopKindName(k), gOuterLoopReSolvePasses[k], gOuterLoopReSolveMilliseconds[k], gOuterLoopReSolveScenarios[k], gOuterLoopReSolveLaneIterations[k], gOuterLoopReSolveWidthIterations[k]);
             }
         }
         for (int k = 0; k < GpuOuterLoopKind::COUNT; k++) {
-            if (gOlCheckPasses[k] > 0) {
-                fprintf(stderr, "GPU_OL_TIME check loop=%s passes=%lld ms=%.1f\n", olKindName(k), gOlCheckPasses[k], gOlCheckMs[k]);
+            if (gOuterLoopCheckPasses[k] > 0) {
+                fprintf(stderr, "GPU_OL_TIME check loop=%s passes=%lld ms=%.1f\n", outerLoopKindName(k), gOuterLoopCheckPasses[k], gOuterLoopCheckMilliseconds[k]);
             }
         }
         fprintf(stderr, "CUDSS_PHASE_TIME analysis=%lld x %.1f ms | factorization=%lld x %.1f ms | solve=%lld x %.1f ms"

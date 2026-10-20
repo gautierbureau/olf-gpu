@@ -73,11 +73,11 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& st, int nScenar
                                        int nReactiveLimitEntries, const int* reactiveLimitVoltageRow, const double* reactiveLimitMinQ,
                                        const double* reactiveLimitMaxQ, const double* reactiveLimitLoadQ, const double* reactiveLimitTargetV,
                                        const signed char* reactiveLimitFlags, const double* rowSlope,
-                                       int nds, const int* dsPhiRow, const double* dsFactor,
-                                       int dsSlackPhiRow, double dsSlackTargetP,
-                                       const double* dsBaseTargetP, const double* dsMaxDelta, const double* dsMinDelta,
-                                       int dsMode, const double* dsMarginUp, const double* dsMarginDown,
-                                       double dsSlackMarginUp, double dsSlackMarginDown) {
+                                       int nDistributedSlackBuses, const int* distributedSlackBusPhiRow, const double* distributedSlackBusFactor,
+                                       int slackBusPhiRow, double slackBusTargetP,
+                                       const double* distributedSlackBusBaseTargetP, const double* dsMaxDelta, const double* dsMinDelta,
+                                       int distributedSlackFactorMode, const double* distributedSlackBusMarginUp, const double* distributedSlackBusMarginDown,
+                                       double slackBusMarginUp, double slackBusMarginDown) {
     auto ctx = std::make_unique<BatchSolverContext>();
     ctx->st = st;
     int n = st->n;
@@ -251,38 +251,38 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& st, int nScenar
         ctx->dReactiveLimitBaseVSquared.upload(svcZero.data(), nReactiveLimitEntries * sizeof(double));
     }
     ctx->dRowSlope.upload(rowSlope, n * sizeof(double));
-    ctx->nds = nds;
-    ctx->dsSlackTargetP = dsSlackTargetP;
-    ctx->dsMode = dsMode;
-    ctx->dsSlackMarginUp = dsSlackMarginUp;
-    ctx->dsSlackMarginDown = dsSlackMarginDown;
-    if (dsMode == GpuDistributedSlackFactorMode::REMAINING_MARGIN && nds > 0) {
-        ctx->dDsMarginUp.upload(dsMarginUp, nds * sizeof(double));
-        ctx->dDsMarginDown.upload(dsMarginDown, nds * sizeof(double));
+    ctx->nDistributedSlackBuses = nDistributedSlackBuses;
+    ctx->slackBusTargetP = slackBusTargetP;
+    ctx->distributedSlackFactorMode = distributedSlackFactorMode;
+    ctx->slackBusMarginUp = slackBusMarginUp;
+    ctx->slackBusMarginDown = slackBusMarginDown;
+    if (distributedSlackFactorMode == GpuDistributedSlackFactorMode::REMAINING_MARGIN && nDistributedSlackBuses > 0) {
+        ctx->dDistributedSlackBusMarginUp.upload(distributedSlackBusMarginUp, nDistributedSlackBuses * sizeof(double));
+        ctx->dDistributedSlackBusMarginDown.upload(distributedSlackBusMarginDown, nDistributedSlackBuses * sizeof(double));
     }
-    ctx->dsSlackPhiRow = dsSlackPhiRow >= 0 ? rowMap[dsSlackPhiRow] : -1;
-    ctx->dsSlackOnly = (nds == 0 && ctx->dsSlackPhiRow >= 0);
-    if (ctx->dsSlackOnly) {
-        ctx->dDsSlackAbsorbed.alloc(static_cast<size_t>(nScenarios) * sizeof(double));
+    ctx->slackBusPhiRow = slackBusPhiRow >= 0 ? rowMap[slackBusPhiRow] : -1;
+    ctx->slackOnlyDistribution = (nDistributedSlackBuses == 0 && ctx->slackBusPhiRow >= 0);
+    if (ctx->slackOnlyDistribution) {
+        ctx->dSlackOnlyAbsorbed.alloc(static_cast<size_t>(nScenarios) * sizeof(double));
     }
-    if (nds > 0) {
-        std::vector<int> dsPhiRowM(nds);
-        for (int i = 0; i < nds; i++) {
-            dsPhiRowM[i] = rowMap[dsPhiRow[i]];
+    if (nDistributedSlackBuses > 0) {
+        std::vector<int> distributedSlackBusPhiRowMapped(nDistributedSlackBuses);
+        for (int i = 0; i < nDistributedSlackBuses; i++) {
+            distributedSlackBusPhiRowMapped[i] = rowMap[distributedSlackBusPhiRow[i]];
         }
-        ctx->dDsPhiRow.upload(dsPhiRowM.data(), nds * sizeof(int));
-        ctx->dDsFactor.upload(dsFactor, nds * sizeof(double));
-        ctx->dDsBaseTargetP.upload(dsBaseTargetP, nds * sizeof(double));
-        ctx->dDsMaxDelta.upload(dsMaxDelta, nds * sizeof(double));
-        ctx->dDsMinDelta.upload(dsMinDelta, nds * sizeof(double));
+        ctx->dDistributedSlackBusPhiRow.upload(distributedSlackBusPhiRowMapped.data(), nDistributedSlackBuses * sizeof(int));
+        ctx->dDistributedSlackBusFactor.upload(distributedSlackBusFactor, nDistributedSlackBuses * sizeof(double));
+        ctx->dDistributedSlackBusBaseTargetP.upload(distributedSlackBusBaseTargetP, nDistributedSlackBuses * sizeof(double));
+        ctx->dDistributedSlackBusMaxDelta.upload(dsMaxDelta, nDistributedSlackBuses * sizeof(double));
+        ctx->dDistributedSlackBusMinDelta.upload(dsMinDelta, nDistributedSlackBuses * sizeof(double));
         double factorSum = 0.0;
-        for (int i = 0; i < nds; i++) {
-            factorSum += dsFactor[i];
+        for (int i = 0; i < nDistributedSlackBuses; i++) {
+            factorSum += distributedSlackBusFactor[i];
         }
-        ctx->dsFactorSum = factorSum > 0 ? factorSum : 1.0;
-        ctx->dDsRetain.alloc(static_cast<size_t>(nScenarios) * sizeof(double));
-        ctx->dDsGateLast.alloc(static_cast<size_t>(nScenarios) * 8 * sizeof(double));   // see the gateLast write
-        ctx->dDsRetainApplied.alloc(static_cast<size_t>(nScenarios) * sizeof(double));
+        ctx->distributedSlackFactorSum = factorSum > 0 ? factorSum : 1.0;
+        ctx->dSlackRetainedShare.alloc(static_cast<size_t>(nScenarios) * sizeof(double));
+        ctx->dDistributedSlackLastPassAccounting.alloc(static_cast<size_t>(nScenarios) * 8 * sizeof(double));   // see the gateLast write
+        ctx->dSlackRetainedShareApplied.alloc(static_cast<size_t>(nScenarios) * sizeof(double));
     }
 
     // ---- cuDSS handle/config/data (shared by both solve paths) ----

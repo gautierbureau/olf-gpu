@@ -19,11 +19,11 @@ __global__ void hvdcSlackBalanceBatch(int nS, int nh, int n, int nElements, int 
                                       const char* disabled, const double* x, const char* outerLoopCheckActive, double* qBuf);
 
 // Per-solve resets.
-void dsResetSolve(BatchSolverContext* ctx, DriverPass& drv);
-void dsSlackOnlyResetSolve(BatchSolverContext* ctx, DriverPass& drv, const double* dsSlackShift);
+void distributedSlackResetSolve(BatchSolverContext* ctx, DriverPass& drv);
+void slackOnlyDistributionResetSolve(BatchSolverContext* ctx, DriverPass& drv, const double* slackBusAnchorShift);
 
 // One check of DistributedSlackOuterLoop on every live scenario (GpuOuterLoopKind::DISTRIBUTED_SLACK).
-void dsCheck(BatchSolverContext* ctx, DriverPass& drv);
+void distributedSlackCheck(BatchSolverContext* ctx, DriverPass& drv);
 
 }  // namespace olfgpu
 

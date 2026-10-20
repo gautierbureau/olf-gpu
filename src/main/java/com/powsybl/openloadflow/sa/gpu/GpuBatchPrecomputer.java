@@ -133,7 +133,7 @@ final class GpuBatchPrecomputer {
             // it is the cache hit the solver is about to take, and the plain (no base-open) flavor is
             // self-consistent with the plain mapper below — a base-open branch simply maps to no
             // element and falls back to the host scan.
-            GpuAcData screenData = GpuAcDataCache.extract(net, es, distributedSlack, reactiveLimits, config.dsParams());
+            GpuAcData screenData = GpuAcDataCache.extract(net, es, distributedSlack, reactiveLimits, config.distributedSlackParameters());
             GpuAcElementMapper screenMapper = new GpuAcElementMapper(net);
 
             // Every batched scenario's state is held until the analysis ends (the violation screen decides on all of
@@ -369,8 +369,8 @@ final class GpuBatchPrecomputer {
                 // PARTICIPATION_FACTOR): the pair phase re-anchors the DS water-fill at the parent's
                 // distributed targets, and TARGET (|targetP|) and the load-based factors are evaluated
                 // AT THAT MOVED ANCHOR — the device's static factors would drift. Needs a per-scenario
-                // factor channel (like dsAnchorShift) first.
-                var pairBt = config.dsParams().balanceType();
+                // factor channel (like distributedSlackBusAnchorShift) first.
+                var pairBt = config.distributedSlackParameters().balanceType();
                 if (pairBt != com.powsybl.loadflow.LoadFlowParameters.BalanceType.PROPORTIONAL_TO_GENERATION_P_MAX
                         && pairBt != com.powsybl.loadflow.LoadFlowParameters.BalanceType.PROPORTIONAL_TO_GENERATION_PARTICIPATION_FACTOR) {
                     continue;                        // pair handled by the CPU per-strategy path
@@ -383,16 +383,16 @@ final class GpuBatchPrecomputer {
                     // An absolute GeneratorAction on a participant restarts that generator from the value, over
                     // its share of the parent's distribution. The pair leg drops the parent's anchor shift of the
                     // generator's BUS, which is that share only when no other participant sits on the bus.
-                    var pairDsParams = config.dsParams();
+                    var pairDistributedSlackParameters = config.distributedSlackParameters();
                     if (pair != null && pair.absoluteTargetGenerators().stream()
-                            .filter(g -> pairDsParams.factor(g) != 0)
+                            .filter(g -> pairDistributedSlackParameters.factor(g) != 0)
                             .anyMatch(g -> g.getBus().getGenerators().stream()
-                                    .anyMatch(o -> o != g && pairDsParams.factor(o) != 0))) {
+                                    .anyMatch(o -> o != g && pairDistributedSlackParameters.factor(o) != 0))) {
                         pair = null;                     // the bus's split of the parent share is not known: CPU
                     }
                     // A GeneratorAction re-checks its generator's participation at the new target. A generator that
                     // did not participate and now does would have to join the device's generator pack: CPU.
-                    if (pair != null && pair.generatorActions().stream().anyMatch(m -> pairDsParams.factor(m.generator()) == 0
+                    if (pair != null && pair.generatorActions().stream().anyMatch(m -> pairDistributedSlackParameters.factor(m.generator()) == 0
                             && m.participatesAt() != null
                             && m.participatesAt().test(m.newTargetP(m.generator().getTargetP())))) {
                         GpuBatchScopeCensus.record("PAIR:ACTION_STARTS_PARTICIPATION");

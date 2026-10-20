@@ -18,7 +18,7 @@ __global__ void reactiveLimitsBatch(const double* secondaryVoltageControlReactiv
                                     char* limitType, char* switchCount, char* switched,
                                     char* passSwitched, char* savedMode,
                                     int nReactiveLimitTargetVOverrides, const int* reactiveLimitTargetVOverrideScenarioEntry, const double* reactiveLimitTargetVOverrideValue,
-                                    const double* rowSlope, double* savedTarget, int cvStride,
+                                    const double* rowSlope, double* savedTarget, int perScenarioReactiveLimits,
                                     const char* reactiveLimitVoltageControlRole, const int* reactiveLimitComparedVoltageRow,
                                     const double* reactiveLimitSvcMinB, const double* reactiveLimitSvcMaxB, const double* reactiveLimitBaseVSquared,
                                     const double* svcBminDyn, const double* svcBmaxDyn,

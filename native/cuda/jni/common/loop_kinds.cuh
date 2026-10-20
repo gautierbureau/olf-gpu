@@ -9,7 +9,7 @@
 #include "codes/gpu_outer_loop_kind.cuh"
 
 // The outer loops the device driver can run: codes/gpu_outer_loop_kind.cuh.
-inline const char* olKindName(int k) {
+inline const char* outerLoopKindName(int k) {
     switch (k) {
         case GpuOuterLoopKind::DISTRIBUTED_SLACK: return "DistributedSlack";
         case GpuOuterLoopKind::FREEZING_HVDC_AC_EMULATION: return "FreezingHvdcACEmulation";

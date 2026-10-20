@@ -57,18 +57,18 @@ class GpuBatchedParticipatingSlackConvergenceTest {
     private static final double TOL = 1e-12;
 
     @Test
-    void participatingSlackResidualVsDsTolerance() {
+    void participatingSlackResidualVsDistributedSlackTolerance() {
         assumeTrue(GpuAcNewtonSolver.isAvailable(), "GPU batched native lib not available");
 
         double[] slackMw = {1.0, 1e-2, 1e-4, 1e-6, 1e-8, 1e-10};   // slackBusPMaxMismatch (MW) → pu = /100
         System.out.println("participating-slack retain: worst |gpu-cpu| vs DS tolerance (both sides matched)");
         double tightFloor = 0;
         for (double mw : slackMw) {
-            double dsTolPu = mw / 100.0;
-            double worst = solveOnce(dsTolPu, mw);
-            System.out.printf("  slackBusPMaxMismatch=%.0e MW (dsTol=%.0e pu): worst |gpu-cpu| = %.3e%n",
-                    mw, dsTolPu, worst);
-            if (dsTolPu <= 1e-6 && !Double.isNaN(worst)) {     // tight enough that distribution actually triggers
+            double distributedSlackTolerancePerUnit = mw / 100.0;
+            double worst = solveOnce(distributedSlackTolerancePerUnit, mw);
+            System.out.printf("  slackBusPMaxMismatch=%.0e MW (distributedSlackTolerance=%.0e pu): worst |gpu-cpu| = %.3e%n",
+                    mw, distributedSlackTolerancePerUnit, worst);
+            if (distributedSlackTolerancePerUnit <= 1e-6 && !Double.isNaN(worst)) {     // tight enough that distribution actually triggers
                 tightFloor = Math.max(tightFloor, worst);
             }
         }
@@ -82,7 +82,7 @@ class GpuBatchedParticipatingSlackConvergenceTest {
                 + "bounded (a loss linearization, not a divergence): floor = " + tightFloor);
     }
 
-    private double solveOnce(double dsTolPu, double slackMw) {
+    private double solveOnce(double distributedSlackTolerancePerUnit, double slackMw) {
         // CPU reference: participating slack, distributed slack on, TIGHT inner Newton, DS tol = slackMw.
         Network cpu = participatingSlackNet();
         LoadFlow.Runner runner = new LoadFlow.Runner(new OpenLoadFlowProvider(new DenseMatrixFactory()));
@@ -94,7 +94,7 @@ class GpuBatchedParticipatingSlackConvergenceTest {
             return Double.NaN;
         }
 
-        // GPU: batched full loadflow over a single base-case scenario, DS tol = dsTolPu, tight inner (convEpsPerEq).
+        // GPU: batched full loadflow over a single base-case scenario, DS tol = distributedSlackTolerancePerUnit, tight inner (convEpsPerEq).
         Network gpuNet = participatingSlackNet();
         LfNetwork net = Networks.load(gpuNet, new LfNetworkParameters().setSlackBusSelector(new FirstSlackBusSelector())).get(0);
         EquationSystem<AcVariableType, AcEquationType> es = new AcEquationSystemCreator(net).create();
@@ -111,7 +111,7 @@ class GpuBatchedParticipatingSlackConvergenceTest {
         boolean[][] disabledMask = {new boolean[d.getTotalElementCount()]};
         int[][] rowModes = {act.rowMode()};
         double[][] batch = GpuAcNewtonSolver.solveBatch(baseState, stableTargets, rowModes, disabledMask,
-                GpuBatchContextCache.resolveBatchMode(), MAX_ITER, 1e-10, 1e-4, dsTolPu,
+                GpuBatchContextCache.resolveBatchMode(), MAX_ITER, 1e-10, 1e-4, distributedSlackTolerancePerUnit,
                 d.closedBranch().parameters(), d.closedBranch().indices(), d.openBranch().parameters(),
                 d.openBranch().indices(), d.shunt().parameters(), d.shunt().indices(), d.hvdcAcEmulation().parameters(),
                 d.hvdcAcEmulation().indices(),
@@ -124,7 +124,7 @@ class GpuBatchedParticipatingSlackConvergenceTest {
                 d.zeroImpedanceBranch().indices());
         int n = baseState.length;
         if ((int) batch[0][n + 2] != 0) {
-            System.out.printf("    (GPU did not converge at dsTol=%.0e)%n", dsTolPu);
+            System.out.printf("    (GPU did not converge at distributedSlackTolerance=%.0e)%n", distributedSlackTolerancePerUnit);
             return Double.NaN;
         }
         sv.set(java.util.Arrays.copyOf(batch[0], n));

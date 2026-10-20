@@ -121,7 +121,7 @@ final class ChunkArrays {
     }
 
     /** The generator's slot in the distributed-slack generator pack, or -1 when it does not participate. */
-    static int dgSlotOf(GpuAcData gpuData, String genId) {
+    static int distributedSlackGeneratorIndexOf(GpuAcData gpuData, String genId) {
         String[] ids = gpuData.distributedSlack().generatorId();
         for (int g = 0; ids != null && g < ids.length; g++) {
             if (ids[g].equals(genId)) {

@@ -147,8 +147,10 @@ public final class GpuMonitoringVoltageOuterLoop {
             double[][] activatedTargetV, int[] reactiveLimitsState, int skipReactiveLimits,
             int[][] rowModePerScenario, int[] baseRowMode, boolean[][] disabledMask,
             List<Integer> ovIdx, List<Double> ovVal, double[] x0Full,
-            int[] dsOvBus, double[] dsOvFactorDelta, double[] dsOvBaseDelta, double[] dsOvMaxDelta, double[] dsOvMinDelta,
-            double[] dsAnchorCarry, double[] dsSlackCarry,
+            int[] distributedSlackOverrideBus, double[] distributedSlackOverrideFactorDelta,
+            double[] distributedSlackOverrideBaseTargetPDelta, double[] distributedSlackOverrideMaxDelta,
+            double[] distributedSlackOverrideMinDelta,
+            double[] distributedSlackBusAnchorCarry, double[] slackBusAnchorCarry,
             int[] r1OvSlotElem, double[] r1OvVal, int[] shuntAdmittanceOverrideScenarioElement, double[] shuntAdmittanceOverrideDelta,
             int nBaseClosedZeroImpedanceBranches, int[] zeroImpedanceBranchCloseScenarioElement, int[] zeroImpedanceBranchOpenScenarioElement,
             double[] baseState, double[] baseTargets, NewtonRaphsonParameters parameters,
@@ -170,7 +172,9 @@ public final class GpuMonitoringVoltageOuterLoop {
                 rowModePerScenario, baseRowMode, disabledMask,
                 ovIdx.stream().mapToInt(Integer::intValue).toArray(),
                 ovVal.stream().mapToDouble(Double::doubleValue).toArray(),
-                dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta, dsAnchorCarry, dsSlackCarry,
+                distributedSlackOverrideBus, distributedSlackOverrideFactorDelta,
+                distributedSlackOverrideBaseTargetPDelta, distributedSlackOverrideMaxDelta,
+                distributedSlackOverrideMinDelta, distributedSlackBusAnchorCarry, slackBusAnchorCarry,
                 vtSlotIdx.stream().mapToInt(Integer::intValue).toArray(),
                 vtVal.stream().mapToDouble(Double::doubleValue).toArray(),
                 null, null,
@@ -180,7 +184,7 @@ public final class GpuMonitoringVoltageOuterLoop {
                 config.lsMode() == GpuStateVectorScalingMode.MAX_VOLTAGE_CHANGE ? varType : null, x0Full,
                 shuntAdmittanceOverrideScenarioElement, shuntAdmittanceOverrideDelta, reactiveLimitsState, reactiveLimitsFinalState,
                 r1OvSlotElem, r1OvVal,
-                config.maxOuterIterations(), config.maxPqPvSwitch(), config.dsRejectResidualFlag(), skipReactiveLimits,
+                config.maxOuterIterations(), config.maxPqPvSwitch(), config.rejectSlackDistributionFailureFlag(), skipReactiveLimits,
                 nBaseClosedZeroImpedanceBranches, zeroImpedanceBranchCloseScenarioElement, zeroImpedanceBranchOpenScenarioElement);
         System.arraycopy(reactiveLimitsFinalState, 0, reactiveLimitsState, 0, reactiveLimitsFinalState.length);
         return r2;

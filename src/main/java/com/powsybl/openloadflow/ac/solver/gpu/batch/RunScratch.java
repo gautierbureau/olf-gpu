@@ -54,14 +54,14 @@ final class RunScratch {
     final List<Double> r1OvValList;
     final int shuntPackOffset;
     // Per-scenario distributed-slack reweight (a generator loss at a DS-participant bus): one affected DS
-    // bus per slot (dsOvBus[s] = its DS-pack index, -1 = none) whose factor/base/headroom/footroom and the
+    // bus per slot (distributedSlackOverrideBus[s] = its DS-pack index, -1 = none) whose factor/base/headroom/footroom and the
     // factor sum shrink by the lost gen's share. Only allocated when the network has distributed slack.
-    final boolean hasDs;
-    final int[] dsOvBus;
-    final double[] dsOvFactorDelta;
-    final double[] dsOvBaseDelta;
-    final double[] dsOvMaxDelta;
-    final double[] dsOvMinDelta;
+    final boolean hasDistributedSlack;
+    final int[] distributedSlackOverrideBus;
+    final double[] distributedSlackOverrideFactorDelta;
+    final double[] distributedSlackOverrideBaseTargetPDelta;
+    final double[] distributedSlackOverrideMaxDelta;
+    final double[] distributedSlackOverrideMinDelta;
     private final int[] baseRowMode;
     private final int[] baseOpenClosedBranchElements;
 
@@ -100,12 +100,12 @@ final class RunScratch {
         this.r1OvSlotElemList = new ArrayList<>();
         this.r1OvValList = new ArrayList<>();
         this.shuntPackOffset = elementMapper.getClosedBranchCount() + elementMapper.getOpenBranchCount();
-        this.hasDs = gpuData.distributedSlack().busPhiRow().length > 0;
-        this.dsOvBus = hasDs ? new int[chunkSize] : new int[0];
-        this.dsOvFactorDelta = hasDs ? new double[chunkSize] : new double[0];
-        this.dsOvBaseDelta = hasDs ? new double[chunkSize] : new double[0];
-        this.dsOvMaxDelta = hasDs ? new double[chunkSize] : new double[0];
-        this.dsOvMinDelta = hasDs ? new double[chunkSize] : new double[0];
+        this.hasDistributedSlack = gpuData.distributedSlack().busPhiRow().length > 0;
+        this.distributedSlackOverrideBus = hasDistributedSlack ? new int[chunkSize] : new int[0];
+        this.distributedSlackOverrideFactorDelta = hasDistributedSlack ? new double[chunkSize] : new double[0];
+        this.distributedSlackOverrideBaseTargetPDelta = hasDistributedSlack ? new double[chunkSize] : new double[0];
+        this.distributedSlackOverrideMaxDelta = hasDistributedSlack ? new double[chunkSize] : new double[0];
+        this.distributedSlackOverrideMinDelta = hasDistributedSlack ? new double[chunkSize] : new double[0];
         this.baseRowMode = baseRowMode;
         this.baseOpenClosedBranchElements = gpuData.baseOpenBranches().closedBranchElements();
     }
@@ -119,12 +119,12 @@ final class RunScratch {
         shuntAdmittanceOverrideDeltaList.clear();
         r1OvSlotElemList.clear();
         r1OvValList.clear();
-        if (hasDs) {
-            java.util.Arrays.fill(dsOvBus, -1);
-            java.util.Arrays.fill(dsOvFactorDelta, 0);
-            java.util.Arrays.fill(dsOvBaseDelta, 0);
-            java.util.Arrays.fill(dsOvMaxDelta, 0);
-            java.util.Arrays.fill(dsOvMinDelta, 0);
+        if (hasDistributedSlack) {
+            java.util.Arrays.fill(distributedSlackOverrideBus, -1);
+            java.util.Arrays.fill(distributedSlackOverrideFactorDelta, 0);
+            java.util.Arrays.fill(distributedSlackOverrideBaseTargetPDelta, 0);
+            java.util.Arrays.fill(distributedSlackOverrideMaxDelta, 0);
+            java.util.Arrays.fill(distributedSlackOverrideMinDelta, 0);
         }
     }
 

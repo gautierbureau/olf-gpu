@@ -20,10 +20,10 @@ import java.util.Arrays;
  * target. That is how an island that KILLS a remote voltage control is expressed — every surviving
  * member bus of the control has to solve its own reactive balance again, and nothing about P moves.
  *
- * <p>When the lost generator sits on a distributed-slack participant bus, {@code dsBus} is that bus's
+ * <p>When the lost generator sits on a distributed-slack participant bus, {@code distributedSlackOverrideBusIndex} is that bus's
  * DS-pack index (else -1) and the {@code ds*Delta} fields carry the reweight the device applies: the
  * bus's participation factor, base target P, headroom and footroom each shrink by the lost gen's share,
- * and the per-scenario factor sum drops by {@code dsFactorDelta} so the other buses absorb that share.
+ * and the per-scenario factor sum drops by {@code distributedSlackFactorDelta} so the other buses absorb that share.
  * This is only valid when the slack itself does not participate (otherwise the loss is rejected).
  *
  * <p>A bus that KEEPS voltage control after losing a generator still has that generator's reactive
@@ -36,7 +36,7 @@ import java.util.Arrays;
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
 public record GenOutage(int pRow, double pTarget, int vRow, double qTarget, boolean toPq, boolean qOverride,
-                        int dsBus, double dsFactorDelta, double dsBaseDelta, double dsMaxDelta, double dsMinDelta,
+                        int distributedSlackOverrideBusIndex, double distributedSlackFactorDelta, double distributedSlackBaseTargetPDelta, double dsMaxDelta, double dsMinDelta,
                         int reactiveLimitEntry, double minQDelta, double maxQDelta, boolean allGensLost,
                         java.util.Set<String> lostGenIds, double lostFactorSum, double pStep, double loadQDelta,
                         int inactiveDistrQMember, int[] pilotGroupSurvivorReactiveLimitEntries,
@@ -78,7 +78,7 @@ public record GenOutage(int pRow, double pTarget, int vRow, double qTarget, bool
         if (newPRow == pRow && newQTargetRow == qTargetRow) {
             return this;
         }
-        return new GenOutage(newPRow, pTarget, vRow, qTarget, toPq, qOverride, dsBus, dsFactorDelta, dsBaseDelta,
+        return new GenOutage(newPRow, pTarget, vRow, qTarget, toPq, qOverride, distributedSlackOverrideBusIndex, distributedSlackFactorDelta, distributedSlackBaseTargetPDelta,
                 dsMaxDelta, dsMinDelta, reactiveLimitEntry, minQDelta, maxQDelta, allGensLost, lostGenIds, lostFactorSum, pStep,
                 loadQDelta, inactiveDistrQMember, pilotGroupSurvivorReactiveLimitEntries, distrQTargetRows, distrQTargetValues,
                 pqRowMode, deadPilotVRow, deadPilotQTarget, pinnedPilotVRow, pinnedPilotQTarget, distrQTargetQOverrideMember,
@@ -103,7 +103,7 @@ public record GenOutage(int pRow, double pTarget, int vRow, double qTarget, bool
         if (rows.size() == distrQTargetRows.length) {
             return this;
         }
-        return new GenOutage(pRow, pTarget, vRow, qTarget, toPq, qOverride, dsBus, dsFactorDelta, dsBaseDelta,
+        return new GenOutage(pRow, pTarget, vRow, qTarget, toPq, qOverride, distributedSlackOverrideBusIndex, distributedSlackFactorDelta, distributedSlackBaseTargetPDelta,
                 dsMaxDelta, dsMinDelta, reactiveLimitEntry, minQDelta, maxQDelta, allGensLost, lostGenIds, lostFactorSum, pStep,
                 loadQDelta, inactiveDistrQMember, pilotGroupSurvivorReactiveLimitEntries,
                 rows.stream().mapToInt(Integer::intValue).toArray(), values.stream().mapToDouble(Double::doubleValue).toArray(),

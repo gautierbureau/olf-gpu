@@ -63,7 +63,7 @@ import java.util.List;
  */
 final class GpuBatchChunkSolver {
 
-    private static final boolean OL_STATS = System.getenv("OLF_OL_STATS") != null;
+    private static final boolean OUTER_LOOP_STATS = System.getenv("OLF_OL_STATS") != null;
 
     private static final Logger LOGGER = LoggerFactory.getLogger(GpuBatchChunkSolver.class);
 
@@ -158,7 +158,7 @@ final class GpuBatchChunkSolver {
         double[][] distrQKeyOverrideKeyByIndex = plan.distrQKeyOverrideKeyByIndex();
         int[][] distrRhoOverrideTermByIndex = plan.distrRhoOverrideTermByIndex();
         double[][] distrRhoOverrideCoefficientByIndex = plan.distrRhoOverrideCoefficientByIndex();
-        int[][] islandedDsByIndex = plan.islandedDsByIndex();
+        int[][] islandedDistributedSlackByIndex = plan.islandedDistributedSlackByIndex();
         int[][] islandedReactiveLimitEntriesByIndex = plan.islandedReactiveLimitEntriesByIndex();
         List<com.powsybl.openloadflow.network.LfHvdc>[] islandedHvdcsByIndex = plan.islandedHvdcsByIndex();
         int[][] distrQSubgroupByIndex = plan.distrQSubgroupByIndex();
@@ -211,8 +211,8 @@ final class GpuBatchChunkSolver {
         java.util.Map<Integer, int[]> curveEntriesByPRow = new java.util.HashMap<>();
         if (reactiveCapabilityCurves != null) {
             java.util.Map<Integer, List<Integer>> acc = new java.util.HashMap<>();
-            for (int e = 0; e < reactiveCapabilityCurves.cvGenId().length; e++) {
-                acc.computeIfAbsent(reactiveCapabilityCurves.cvIdx()[e * 5 + 1], k -> new ArrayList<>()).add(e);
+            for (int e = 0; e < reactiveCapabilityCurves.reactiveCapabilityCurveGeneratorId().length; e++) {
+                acc.computeIfAbsent(reactiveCapabilityCurves.reactiveCapabilityCurveIndices()[e * 5 + 1], k -> new ArrayList<>()).add(e);
             }
             acc.forEach((row, es) -> curveEntriesByPRow.put(row, es.stream().mapToInt(Integer::intValue).toArray()));
         }
@@ -255,16 +255,16 @@ final class GpuBatchChunkSolver {
         // ctg index -> its FINAL distributed-slack targets at the DS participant rows (the device DS mutates
         // targets in place; read back after each ctg chunk). The pair phase re-anchors its distribution here,
         // mirroring OLF's setGeneratorsInitialTargetPToTargetP before the strategy re-solve.
-        int nds = gpuData.distributedSlack().busPhiRow().length;
-        java.util.Map<Integer, double[]> dsTargetsByIndex = new java.util.HashMap<>();
-        // ctg index -> each participating generator's final move from its base target (the device's genCum, or the
+        int nDistributedSlackBuses = gpuData.distributedSlack().busPhiRow().length;
+        java.util.Map<Integer, double[]> distributedSlackTargetsByIndex = new java.util.HashMap<>();
+        // ctg index -> each participating generator's final move from its base target (the device's distributedSlackGeneratorMove, or the
         // loss pre-distribution alone when no slack pass fired): its pairs' per-generator anchors
-        int ngen = gpuData.distributedSlack().generatorBus() == null ? 0 : gpuData.distributedSlack().generatorBus().length;
+        int nDistributedSlackGenerators = gpuData.distributedSlack().generatorBus() == null ? 0 : gpuData.distributedSlack().generatorBus().length;
         java.util.Map<Integer, double[]> genMovesByIndex = new java.util.HashMap<>();
         // ctg index -> the state its pairs start from when it ran out of Newton iterations (see the capture)
         java.util.Map<Integer, double[]> exhaustedStartByIndex = new java.util.HashMap<>();
         java.util.Map<Integer, Double> slackAbsorbedByIndex = new java.util.HashMap<>();   // slack-only DS parents
-        boolean dsSlackOnly = gpuData.distributedSlack().busPhiRow().length == 0 && gpuData.distributedSlack().slackPhiRow() >= 0;
+        boolean slackOnlyDistribution = gpuData.distributedSlack().busPhiRow().length == 0 && gpuData.distributedSlack().slackPhiRow() >= 0;
         // Host-side base RL seed (mirrors initReactiveLimitQLimitTypeBatch) for PADDING slots of pair chunks.
         int[] baseReactiveLimitsState = new int[nReactiveLimitEntries];
         byte[] baseLimitTypes = gpuData.reactiveLimits().baseQLimitType();
@@ -316,9 +316,9 @@ final class GpuBatchChunkSolver {
                         }
                         GpuTransformerVoltageControlOuterLoop.uploadFixMasks(handle, phases.freeze(), slotCtgs, chunkSize);
                     }
-                    ChunkLists cl = new ChunkLists(chunkSize, n, gpuData, forcedTargetQ, ngen);
+                    ChunkLists cl = new ChunkLists(chunkSize, n, gpuData, forcedTargetQ, nDistributedSlackGenerators);
                     SlotSeeding seeding = new SlotSeeding(chunkSize, pairPhase, n, gpuData, elementMapper, contingencies,
-                            plan, baseState, baseTargets, baseRowMode, hvdcElemIndex, baseNonSpanningTreeBranches, nds, reactiveCapabilityCurves,
+                            plan, baseState, baseTargets, baseRowMode, hvdcElemIndex, baseNonSpanningTreeBranches, nDistributedSlackBuses, reactiveCapabilityCurves,
                             curveEntriesByPRow, rs, cl);
                     rs.resetChunk();
                     for (int s = 0; s < chunkSize; s++) {
@@ -353,17 +353,17 @@ final class GpuBatchChunkSolver {
                         }
                         // else: padding scenario = base case (no element disabled), discarded below
                     }
-                    double[] dsAnchorShift = null;
-                    double[] dgAnchor = null;                // pairs: each participating generator's anchor (s * ngen + g)
-                    double[] dgSeedAnchor = null;            // ...and the same without the strategy's GeneratorActions
-                    double[] dsSlackShift = null;
+                    double[] distributedSlackBusAnchorShift = null;
+                    double[] distributedSlackGeneratorAnchor = null;                // pairs: each participating generator's anchor (s * nDistributedSlackGenerators + g)
+                    double[] distributedSlackGeneratorSeedAnchor = null;            // ...and the same without the strategy's GeneratorActions
+                    double[] slackBusAnchorShift = null;
                     double[] pairSlackAbsorbedSeed = null;   // slack-only pairs: the parent's absorbed total they start from
                     boolean[] rejectAfterSolve = null;       // pairs whose parent the device did not answer: CPU
                     boolean[] pairParentConverged = new boolean[chunkSize];
                     double[] reactiveLimitSeedTargetQ = null;                 // pairs: each parent's final pinned targets (NaN = none)
                     // the loss pre-distribution's share on the slack generators, when nobody else is left to participate
                     double[] preSlackSeed = null;
-                    if (!pairPhase && (rs.hasDs || dsSlackOnly) && config.contingencyLossPreDistribution()) {
+                    if (!pairPhase && (rs.hasDistributedSlack || slackOnlyDistribution) && config.contingencyLossPreDistribution()) {
                         // CPU parity (DefaultContingencyActivePowerLossDistribution): with DS on, the
                         // contingency's SCHEDULED lost active power is distributed ONCE over the
                         // participating generators BEFORE the post-contingency solve — the CPU's DS loop
@@ -379,7 +379,7 @@ final class GpuBatchChunkSolver {
                                 preDistributedByIndex[preIdx] = 0.0;
                                 continue;
                             }
-                            if (!rs.hasDs) {
+                            if (!rs.hasDistributedSlack) {
                                 // the slack generators take what their rooms allow, as OLF's water-fill places it;
                                 // the rest stays for the DistributedSlack check, where the failure behaviour decides
                                 double placed = Math.min(Math.max(cl.preLossBySlot[s], gpuData.distributedSlack().slackRoomDown()),
@@ -388,12 +388,12 @@ final class GpuBatchChunkSolver {
                                 // SLACK-ONLY (the slack bus is the only participant): OLF distributes
                                 // the whole scheduled loss into the slack generator's own target, so
                                 // its target for this scenario is base + loss. The device has no
-                                // BUS_TARGET_P row at the slack — its P is free — so dsSlackTargetP is
+                                // BUS_TARGET_P row at the slack — its P is free — so slackBusTargetP is
                                 // a RUN CONSTANT and that displacement has nowhere to live except
-                                // dDsSlackAbsorbed, which dsSlackShift seeds.
+                                // dSlackOnlyAbsorbed, which slackBusAnchorShift seeds.
                                 //
-                                // Without this the whole block was skipped (the gate was hasDs), the
-                                // accumulator started at 0, and slackOnlyDsCheck measured the mismatch
+                                // Without this the whole block was skipped (the gate was hasDistributedSlack), the
+                                // accumulator started at 0, and slackOnlyDistributedSlackCheck measured the mismatch
                                 // against the BASE slack target: on the deviceHvdc* networks that is
                                 // -3.006957565 pu where OLF sees -0.006957565, so the check fired on
                                 // the first pass and absorbed the lot. OLF reports STABLE there (0.0070
@@ -401,10 +401,10 @@ final class GpuBatchChunkSolver {
                                 // — which our accumulator, 3.0 too low, then read as -0.006745466 and
                                 // let pass. Same single distribution, wrong pass, and the two arms end
                                 // their Newton sequences on different calls.
-                                if (dsSlackShift == null) {
-                                    dsSlackShift = new double[chunkSize];
+                                if (slackBusAnchorShift == null) {
+                                    slackBusAnchorShift = new double[chunkSize];
                                 }
-                                dsSlackShift[s] = placed;
+                                slackBusAnchorShift[s] = placed;
                                 if (System.getenv("OLF_GPU_PRELOSS_TRACE") != null) {
                                     System.err.printf("PRELOSS_SLACKONLY ctg=%s loss=%s slackBase=%s -> slackTarget=%s%n",
                                             contingencies.get(group.get(chunkStart + s)).contingencyId(),
@@ -422,8 +422,8 @@ final class GpuBatchChunkSolver {
                             // mismatch during the solve, at a different point inside the slack band).
                             int ci = group.get(chunkStart + s);
                             int[] frozen = frozenRowsByIndex[ci];
-                            boolean[] islandedDs = null;
-                            // The PLAN's mask first (islandedDsParticipants): it matches a participant on its BUS
+                            boolean[] islandedDistributedSlackMask = null;
+                            // The PLAN's mask first (islandedDistributedSlackParticipants): it matches a participant on its BUS
                             // as well as on its row, which the row test below cannot do for a participant whose P
                             // row the coupler-tree relocation moved onto its parent coupler's DUMMY_P — the frozen
                             // rows are the bus's own BUS_PHI/BUS_V. Rebuilding the mask here from the row test
@@ -431,33 +431,33 @@ final class GpuBatchChunkSolver {
                             // middle-section fixture, the pre-loss gave the ISLANDED generator's relocated row a
                             // share of -0.894 pu, and the device's slack loop then chased its own tail for five
                             // passes and retired 0.837 pu away from OLF.
-                            if (islandedDsByIndex != null && islandedDsByIndex[ci] != null) {
-                                for (int participant : islandedDsByIndex[ci]) {
-                                    if (participant >= 0 && participant < nds) {
-                                        if (islandedDs == null) {
-                                            islandedDs = new boolean[nds];
+                            if (islandedDistributedSlackByIndex != null && islandedDistributedSlackByIndex[ci] != null) {
+                                for (int participant : islandedDistributedSlackByIndex[ci]) {
+                                    if (participant >= 0 && participant < nDistributedSlackBuses) {
+                                        if (islandedDistributedSlackMask == null) {
+                                            islandedDistributedSlackMask = new boolean[nDistributedSlackBuses];
                                         }
-                                        islandedDs[participant] = true;
+                                        islandedDistributedSlackMask[participant] = true;
                                     }
                                 }
                             }
-                            for (int i = 0; i < nds; i++) {
+                            for (int i = 0; i < nDistributedSlackBuses; i++) {
                                 for (int fr : frozen) {
                                     if (fr == gpuData.distributedSlack().busPhiRow()[i]) {
-                                        if (islandedDs == null) {
-                                            islandedDs = new boolean[nds];
+                                        if (islandedDistributedSlackMask == null) {
+                                            islandedDistributedSlackMask = new boolean[nDistributedSlackBuses];
                                         }
-                                        islandedDs[i] = true;
+                                        islandedDistributedSlackMask[i] = true;
                                     }
                                 }
                             }
                             double[] shares = GpuBatchLossPreDistribution.distribute(gpuData, cl.preLossBySlot[s],
-                                    rs.dsOvBus.length > 0 ? rs.dsOvBus[s] : -1,
-                                    rs.dsOvFactorDelta.length > 0 ? rs.dsOvFactorDelta[s] : 0,
-                                    rs.dsOvBaseDelta.length > 0 ? rs.dsOvBaseDelta[s] : 0,
-                                    rs.dsOvMaxDelta.length > 0 ? rs.dsOvMaxDelta[s] : 0,
-                                    rs.dsOvMinDelta.length > 0 ? rs.dsOvMinDelta[s] : 0, islandedDs,
-                                    ChunkArrays.lostSlotsOf(cl.dsLostGenList, s),
+                                    rs.distributedSlackOverrideBus.length > 0 ? rs.distributedSlackOverrideBus[s] : -1,
+                                    rs.distributedSlackOverrideFactorDelta.length > 0 ? rs.distributedSlackOverrideFactorDelta[s] : 0,
+                                    rs.distributedSlackOverrideBaseTargetPDelta.length > 0 ? rs.distributedSlackOverrideBaseTargetPDelta[s] : 0,
+                                    rs.distributedSlackOverrideMaxDelta.length > 0 ? rs.distributedSlackOverrideMaxDelta[s] : 0,
+                                    rs.distributedSlackOverrideMinDelta.length > 0 ? rs.distributedSlackOverrideMinDelta[s] : 0, islandedDistributedSlackMask,
+                                    ChunkArrays.lostSlotsOf(cl.distributedSlackLostGeneratorList, s),
                                     cl.genPreMovesBySlot != null ? (cl.genPreMovesBySlot[s] = new double[gpuData.distributedSlack().generatorBus().length]) : null);
                             // OLF_GPU_SEED_DUMP=<file>: the per-bus SHARE the host-side loss
                             // pre-distribution seeds, against OLF's own pre-distribution section in
@@ -469,7 +469,7 @@ final class GpuBatchChunkSolver {
                                         new java.io.FileWriter(System.getenv("OLF_GPU_SEED_DUMP"), true))) {
                                     w.printf("# SEED ctg=%s%n",
                                             contingencies.get(group.get(chunkStart + s)).contingencyId());
-                                    for (int i = 0; i < nds; i++) {
+                                    for (int i = 0; i < nDistributedSlackBuses; i++) {
                                         if (shares[i] != 0) {
                                             w.printf("%d %.12f%n", i, shares[i]);
                                         }
@@ -481,29 +481,29 @@ final class GpuBatchChunkSolver {
                             if (System.getenv("OLF_GPU_PRELOSS_TRACE") != null) {
                                 double absorbed = 0;
                                 if (shares != null) {
-                                    for (int i = 0; i < nds; i++) {
+                                    for (int i = 0; i < nDistributedSlackBuses; i++) {
                                         absorbed += shares[i];
                                     }
                                 }
                                 double fsAll = 0;
                                 double fsIslanded = 0;
-                                for (int i = 0; i < nds; i++) {
+                                for (int i = 0; i < nDistributedSlackBuses; i++) {
                                     fsAll += gpuData.distributedSlack().busFactor()[i];
-                                    if (islandedDs != null && islandedDs[i]) {
+                                    if (islandedDistributedSlackMask != null && islandedDistributedSlackMask[i]) {
                                         fsIslanded += gpuData.distributedSlack().busFactor()[i];
                                     }
                                 }
                                 System.err.printf("ISLANDED_DS ctg=%s count=%d%n",
-                                        contingencies.get(ci).contingencyId(), ChunkArrays.countTrue(islandedDs));
+                                        contingencies.get(ci).contingencyId(), ChunkArrays.countTrue(islandedDistributedSlackMask));
                                 System.err.printf("PRELOSS_FACTORS ctg=%s factorSumAll=%.6f factorSumIslanded=%.6f "
                                         + "(%.2f%% of the participation is in the island)%n",
                                         contingencies.get(ci).contingencyId(), fsAll, fsIslanded,
                                         fsAll > 0 ? 100.0 * fsIslanded / fsAll : 0.0);
                                 System.err.printf("PRELOSS ctg=%s mismatch=%.6f pu absorbed=%.6f pu slackShare=%.6f "
-                                        + "islandedDsParticipants=%d%n",
+                                        + "islandedDistributedSlackParticipants=%d%n",
                                         contingencies.get(ci).contingencyId(), cl.preLossBySlot[s], absorbed,
-                                        shares == null ? 0.0 : shares[nds],
-                                        ChunkArrays.countTrue(islandedDs));
+                                        shares == null ? 0.0 : shares[nDistributedSlackBuses],
+                                        ChunkArrays.countTrue(islandedDistributedSlackMask));
                             }
                             if (shares == null) {
                                 preDistributedByIndex[preIdx] = 0.0;
@@ -514,21 +514,21 @@ final class GpuBatchChunkSolver {
                                 preDistributed += share;
                             }
                             preDistributedByIndex[preIdx] = preDistributed;
-                            if (preDistributed == shares[nds] && shares[nds] != 0
+                            if (preDistributed == shares[nDistributedSlackBuses] && shares[nDistributedSlackBuses] != 0
                                     && !GpuBatchLossPreDistribution.slackInPack(gpuData)) {
                                 // Only the slack bus's generators participate: OLF moved their target by the whole
                                 // loss, and its slack check measures against that target. The device's slack-only
-                                // pass (distributeSlackBatch) measures against slackTargetP + dsSlackShift.
-                                if (dsSlackShift == null) {
-                                    dsSlackShift = new double[chunkSize];
+                                // pass (distributeSlackBatch) measures against slackTargetP + slackBusAnchorShift.
+                                if (slackBusAnchorShift == null) {
+                                    slackBusAnchorShift = new double[chunkSize];
                                 }
                                 if (preSlackSeed == null) {
                                     preSlackSeed = new double[chunkSize];
                                 }
-                                dsSlackShift[s] = shares[nds];
-                                preSlackSeed[s] = shares[nds];
+                                slackBusAnchorShift[s] = shares[nDistributedSlackBuses];
+                                preSlackSeed[s] = shares[nDistributedSlackBuses];
                             }
-                            for (int i = 0; i < nds; i++) {
+                            for (int i = 0; i < nDistributedSlackBuses; i++) {
                                 cl.preAbsorbedBySlot[s] += shares[i];        // participants only
                             }
                             // The pre-distribution is a DISPLACEMENT from the anchor, not a new anchor.
@@ -541,18 +541,18 @@ final class GpuBatchChunkSolver {
                             // +4.8 then -0.160339 and saturated none. Seeding the TARGETS (so the solve
                             // starts at the same operating point) while leaving the anchor alone is what
                             // makes the kernel's reset pick the shares back up as absorbedNow.
-                            for (int i = 0; i < nds; i++) {
+                            for (int i = 0; i < nDistributedSlackBuses; i++) {
                                 if (shares[i] == 0) {
                                     continue;
                                 }
                                 // The row this scenario actually solves the bus's P balance on: the
                                 // coupler-tree relocation's dummy row unless this scenario opened that
                                 // coupler, in which case the balance — and so the share — is on the bus's
-                                // own phi row. The ANCHOR stays the participant's own dsBaseTargetP, which
+                                // own phi row. The ANCHOR stays the participant's own distributedSlackBusBaseTargetP, which
                                 // the device carried to the new row with the equation.
-                                int dsRow = cl.dsRowOvBySlot[s] != null && cl.dsRowOvBySlot[s][i] >= 0
-                                        ? cl.dsRowOvBySlot[s][i] : gpuData.distributedSlack().busPhiRow()[i];
-                                int flat = s * n + dsRow;
+                                int distributedSlackBusRow = cl.distributedSlackBusRowOverrideByScenario[s] != null && cl.distributedSlackBusRowOverrideByScenario[s][i] >= 0
+                                        ? cl.distributedSlackBusRowOverrideByScenario[s][i] : gpuData.distributedSlack().busPhiRow()[i];
+                                int flat = s * n + distributedSlackBusRow;
                                 // compose with a gen-outage override on the same row
                                 rs.overrides.compose(flat, baseTargets[gpuData.distributedSlack().busPhiRow()[i]], shares[i]);
                             }
@@ -599,8 +599,8 @@ final class GpuBatchChunkSolver {
                     // targets. The device mirrors this with three coupled pieces (each alone is wrong —
                     // participant shifts without the slack shift leave the band check measured against the
                     // pre-distribution slack target, which kills the distribution):
-                    //  - dsAnchorShift: participant water-fill anchors moved to the parent's final DS targets;
-                    //  - dsSlackShift: the slack bus's own absorbed share of the parent's distribution
+                    //  - distributedSlackBusAnchorShift: participant water-fill anchors moved to the parent's final DS targets;
+                    //  - slackBusAnchorShift: the slack bus's own absorbed share of the parent's distribution
                     //    ((1-fs)/fs x the participants' absorbed sum), so the mismatch/band is measured against
                     //    the parent's slack target exactly as the CPU leg measures it;
                     //  - DS-row target seeds at the parent values, so the first inner solve runs at the CPU
@@ -608,23 +608,23 @@ final class GpuBatchChunkSolver {
                     if (pairPhase) {
                         x0Full = new double[chunkSize * n];
                         reactiveLimitsSeedState = nReactiveLimitEntries > 0 ? new int[chunkSize * nReactiveLimitEntries] : null;
-                        if (nds > 0) {
-                            dsAnchorShift = new double[chunkSize * nds];
-                            dsSlackShift = new double[chunkSize];
-                            dgAnchor = ngen > 0 ? new double[chunkSize * ngen] : null;
-                            dgSeedAnchor = ngen > 0 ? new double[chunkSize * ngen] : null;
-                        } else if (dsSlackOnly) {
-                            dsSlackShift = new double[chunkSize];    // absorbed-total seeds (no participant anchors)
+                        if (nDistributedSlackBuses > 0) {
+                            distributedSlackBusAnchorShift = new double[chunkSize * nDistributedSlackBuses];
+                            slackBusAnchorShift = new double[chunkSize];
+                            distributedSlackGeneratorAnchor = nDistributedSlackGenerators > 0 ? new double[chunkSize * nDistributedSlackGenerators] : null;
+                            distributedSlackGeneratorSeedAnchor = nDistributedSlackGenerators > 0 ? new double[chunkSize * nDistributedSlackGenerators] : null;
+                        } else if (slackOnlyDistribution) {
+                            slackBusAnchorShift = new double[chunkSize];    // absorbed-total seeds (no participant anchors)
                             pairSlackAbsorbedSeed = new double[chunkSize];
                         }
-                        double dsFactorSum = 0;
+                        double distributedSlackFactorSum = 0;
                         for (double fv : gpuData.distributedSlack().busFactor()) {
-                            dsFactorSum += fv;
+                            distributedSlackFactorSum += fv;
                         }
                         for (int s = 0; s < chunkSize; s++) {
                             double[] parent = null;
                             int[] parentReactiveLimitsState = null;
-                            double[] parentDs = null;
+                            double[] parentDistributedSlackTargets = null;
                             Double parentSlackAbs = null;
                             if (s < realCount) {
                                 String pairId = contingencies.get(group.get(chunkStart + s)).contingencyId();
@@ -640,7 +640,7 @@ final class GpuBatchChunkSolver {
                                 }
                                 if (parent != null) {
                                     parentReactiveLimitsState = reactiveLimitsStateByIndex.get(pIdx);
-                                    parentDs = dsTargetsByIndex.get(pIdx);
+                                    parentDistributedSlackTargets = distributedSlackTargetsByIndex.get(pIdx);
                                     parentSlackAbs = slackAbsorbedByIndex.get(pIdx);
                                 } else {
                                     // The device has no answer for the parent (the CPU replays it): OLF starts the strategy
@@ -696,15 +696,15 @@ final class GpuBatchChunkSolver {
                                     System.arraycopy(pins, 0, reactiveLimitSeedTargetQ, s * nReactiveLimitEntries, nReactiveLimitEntries);
                                 }
                             }
-                            if (dsSlackOnly && dsSlackShift != null && parentSlackAbs != null) {
-                                dsSlackShift[s] = parentSlackAbs;    // seed the pair with the parent's absorbed total
+                            if (slackOnlyDistribution && slackBusAnchorShift != null && parentSlackAbs != null) {
+                                slackBusAnchorShift[s] = parentSlackAbs;    // seed the pair with the parent's absorbed total
                                 pairSlackAbsorbedSeed[s] = parentSlackAbs;
                             }
-                            if (parentDs != null && dsAnchorShift != null && dsFactorSum > 0) {
-                                // parentDs = [absorption per DS row..., parent factor sum] (captured after the
+                            if (parentDistributedSlackTargets != null && distributedSlackBusAnchorShift != null && distributedSlackFactorSum > 0) {
+                                // parentDistributedSlackTargets = [absorption per DS row..., parent factor sum] (captured after the
                                 // parent's solve). The anchor shift is the parent's PURE ABSORPTION — the part
                                 // of the parent's final DS target that its distribution added on top of the
-                                // parent's own effective base — which composes with the pair's own dsOvBaseDelta
+                                // parent's own effective base — which composes with the pair's own distributedSlackOverrideBaseTargetPDelta
                                 // in the kernel (base_eff = base - ovDelta + shift), so gen-outage parents and
                                 // action deltas are both handled without double counting.
                                 double absorbedSum = 0;
@@ -713,18 +713,18 @@ final class GpuBatchChunkSolver {
                                 // action's own delta (base-referenced, on the override bus) is the whole move.
                                 // The precomputer only batches it when that generator is its bus's only participant.
                                 int absoluteBus = -1;
-                                if (rs.dsOvBus.length > 0 && rs.dsOvBus[s] >= 0) {
+                                if (rs.distributedSlackOverrideBus.length > 0 && rs.distributedSlackOverrideBus[s] >= 0) {
                                     for (com.powsybl.openloadflow.network.LfGenerator g : contingencies.get(group.get(chunkStart + s)).absoluteTargetGenerators()) {
-                                        if (config.dsParams().factor(g) != 0) {
-                                            absoluteBus = rs.dsOvBus[s];
+                                        if (config.distributedSlackParameters().factor(g) != 0) {
+                                            absoluteBus = rs.distributedSlackOverrideBus[s];
                                         }
                                     }
                                 }
-                                for (int i = 0; i < nds; i++) {
+                                for (int i = 0; i < nDistributedSlackBuses; i++) {
                                     int row = gpuData.distributedSlack().busPhiRow()[i];
-                                    double shift = i == absoluteBus ? 0.0 : parentDs[i];
-                                    dsAnchorShift[s * nds + i] = shift;
-                                    absorbedSum += parentDs[i];      // the slack's share of the parent counts it all
+                                    double shift = i == absoluteBus ? 0.0 : parentDistributedSlackTargets[i];
+                                    distributedSlackBusAnchorShift[s * nDistributedSlackBuses + i] = shift;
+                                    absorbedSum += parentDistributedSlackTargets[i];      // the slack's share of the parent counts it all
                                     // Seed the DS-row target at the CPU strategy leg's starting value — the
                                     // parent-absorbed target plus the pair's own composed delta — so the first
                                     // inner solve runs at the CPU leg's starting operating point (losses are
@@ -732,7 +732,8 @@ final class GpuBatchChunkSolver {
                                     // gen-outage pTarget) is base-referenced: add the parent absorption to it. On the row
                                     // this pair solves the balance on (its own coupler openings), from the participant's
                                     // own base target, as the loss pre-distribution composes its shares.
-                                    int pairRow = cl.dsRowOvBySlot[s] != null && cl.dsRowOvBySlot[s][i] >= 0 ? cl.dsRowOvBySlot[s][i] : row;
+                                    int[] rowOverrides = cl.distributedSlackBusRowOverrideByScenario[s];
+                                    int pairRow = rowOverrides != null && rowOverrides[i] >= 0 ? rowOverrides[i] : row;
                                     rs.overrides.compose(s * n + pairRow, baseTargets[row], shift);
                                 }
                                 // the slack's own absorption in the parent's distribution: its own factor's share
@@ -740,20 +741,20 @@ final class GpuBatchChunkSolver {
                                 // not one minus their sum - a lost or islanded participant's factor is not the
                                 // slack's (pilotSelfCurveNetwork losing g3, the slack out of the distribution:
                                 // 0.2234 pu of slack target where OLF has none, 2.1 MW distributed against 20.2)
-                                double parentFs = parentDs[nds];
-                                dsSlackShift[s] = parentFs > 0 ? (1.0 - dsFactorSum) / parentFs * absorbedSum : 0.0;
+                                double parentFs = parentDistributedSlackTargets[nDistributedSlackBuses];
+                                slackBusAnchorShift[s] = parentFs > 0 ? (1.0 - distributedSlackFactorSum) / parentFs * absorbedSum : 0.0;
                             }
-                            if (dgAnchor != null && s < realCount) {
+                            if (distributedSlackGeneratorAnchor != null && s < realCount) {
                                 // Each generator's own anchor: where the parent's distribution left it, and for a
                                 // GeneratorAction the action's value (LfGeneratorAction sets the target AND the initial
                                 // target): the parent's target plus the change, or the value itself.
                                 String pairId = contingencies.get(group.get(chunkStart + s)).contingencyId();
                                 Integer pIdx = indexById.get(pairId.substring(0, pairId.indexOf(BatchContingency.STRATEGY_KEY_SEP)));
-                                double[] parentMoves = parentDs != null && pIdx != null ? genMovesByIndex.get(pIdx) : null;
+                                double[] parentMoves = parentDistributedSlackTargets != null && pIdx != null ? genMovesByIndex.get(pIdx) : null;
                                 if (parentMoves != null) {
-                                    System.arraycopy(parentMoves, 0, dgAnchor, s * ngen, ngen);
-                                    System.arraycopy(parentMoves, 0, dgSeedAnchor, s * ngen, ngen);
-                                    if (dsSlackShift != null && GpuBatchLossPreDistribution.slackInPack(gpuData)) {
+                                    System.arraycopy(parentMoves, 0, distributedSlackGeneratorAnchor, s * nDistributedSlackGenerators, nDistributedSlackGenerators);
+                                    System.arraycopy(parentMoves, 0, distributedSlackGeneratorSeedAnchor, s * nDistributedSlackGenerators, nDistributedSlackGenerators);
+                                    if (slackBusAnchorShift != null && GpuBatchLossPreDistribution.slackInPack(gpuData)) {
                                         // the slack's generators are listed: the parent left them at their own moves,
                                         // except one an absolute action restarts from its value (the action's own
                                         // move of the slack target carries that)
@@ -764,30 +765,31 @@ final class GpuBatchChunkSolver {
                                             }
                                         }
                                         double slackMoves = 0;
-                                        for (int g = 0; g < ngen; g++) {
+                                        for (int g = 0; g < nDistributedSlackGenerators; g++) {
                                             if (gpuData.distributedSlack().generatorBus()[g] < 0 && !absolute.contains(gpuData.distributedSlack().generatorId()[g])) {
                                                 slackMoves += parentMoves[g];
                                             }
                                         }
-                                        dsSlackShift[s] = slackMoves;
+                                        slackBusAnchorShift[s] = slackMoves;
                                     }
                                 }
                                 // OLF re-checks each moved generator's participation at its new target
                                 // (reApplyActivePowerControlChecks); the last action on a generator decides
                                 java.util.Map<Integer, Boolean> staysBySlot = new java.util.TreeMap<>();
                                 for (BatchContingency.GeneratorMove m : contingencies.get(group.get(chunkStart + s)).generatorActions()) {
-                                    int g = ChunkArrays.dgSlotOf(gpuData, m.generator().getId());
+                                    int g = ChunkArrays.distributedSlackGeneratorIndexOf(gpuData, m.generator().getId());
                                     if (g >= 0) {
                                         // its target before the action: its anchor plus where the parent left it
-                                        double before = config.dsParams().anchorTargetP(m.generator()) + dgAnchor[s * ngen + g];
+                                        double before = config.distributedSlackParameters().anchorTargetP(m.generator()) + distributedSlackGeneratorAnchor[s * nDistributedSlackGenerators + g];
                                         staysBySlot.put(g, m.participatesAt() == null || m.participatesAt().test(m.newTargetP(before)));
-                                        dgAnchor[s * ngen + g] = m.absolute() ? m.deltaP() : dgAnchor[s * ngen + g] + m.deltaP();
+                                        int k = s * nDistributedSlackGenerators + g;
+                                        distributedSlackGeneratorAnchor[k] = m.absolute() ? m.deltaP() : distributedSlackGeneratorAnchor[k] + m.deltaP();
                                     }
                                 }
                                 for (var e : staysBySlot.entrySet()) {
                                     if (!e.getValue()) {             // out of the distribution: it keeps the action's target
-                                        cl.dsOutList.add(s);
-                                        cl.dsOutList.add(e.getKey());
+                                        cl.distributedSlackRemovedGeneratorList.add(s);
+                                        cl.distributedSlackRemovedGeneratorList.add(e.getKey());
                                     }
                                 }
                             }
@@ -976,35 +978,38 @@ final class GpuBatchChunkSolver {
                     if (forcedTargetQ != null) {                 // where each slot's pre-distribution put the clamping gens
                         // a pair starts each generator at its anchor, a contingency at its pre-distributed target
                         ReactiveLimitsNative.setBatchForcedTargetQPre(handle, forcedTargetQ.preMoves(
-                                pairPhase && dgAnchor != null ? ChunkArrays.perSlot(dgAnchor, chunkSize, ngen) : cl.genPreMovesBySlot));
+                                pairPhase && distributedSlackGeneratorAnchor != null ? ChunkArrays.perSlot(distributedSlackGeneratorAnchor,
+                                        chunkSize, nDistributedSlackGenerators) : cl.genPreMovesBySlot));
                     }
-                    if (cl.outageSlackShift != null && rs.hasDs) {     // on top of whatever the pre-distribution or the pair's
-                        if (dsSlackShift == null) {               // parent put there: both are slack-target moves
-                            dsSlackShift = new double[chunkSize];
+                    if (cl.outageSlackShift != null && rs.hasDistributedSlack) {     // on top of whatever the pre-distribution or the pair's
+                        if (slackBusAnchorShift == null) {               // parent put there: both are slack-target moves
+                            slackBusAnchorShift = new double[chunkSize];
                         }
                         for (int s = 0; s < chunkSize; s++) {
-                            dsSlackShift[s] += cl.outageSlackShift[s];
+                            slackBusAnchorShift[s] += cl.outageSlackShift[s];
                         }
                     }
-                    if (dsSlackOnly) {
+                    if (slackOnlyDistribution) {
                         DistributedSlackNative.setBatchSlackOnlyAnchor(handle, pairPhase ? pairSlackAbsorbedSeed : null);
                     }
                     if (nReactiveLimitEntries > 0) {
                         ReactiveLimitsNative.setBatchReactiveLimitSeedTargetQ(handle, pairPhase ? reactiveLimitSeedTargetQ : null);
                     }
-                    if (ngen > 0) {
-                        DistributedSlackNative.setBatchGenAnchor(handle, pairPhase ? dgAnchor : null,
-                                pairPhase ? null : ChunkArrays.flat(cl.genPreMovesBySlot, chunkSize, ngen), pairPhase ? dgSeedAnchor : null);
+                    if (nDistributedSlackGenerators > 0) {
+                        DistributedSlackNative.setBatchDistributedSlackGeneratorAnchors(handle, pairPhase ? distributedSlackGeneratorAnchor : null,
+                                pairPhase ? null : ChunkArrays.flat(cl.genPreMovesBySlot, chunkSize, nDistributedSlackGenerators), pairPhase ? distributedSlackGeneratorSeedAnchor : null);
                     }
                     double[][] chunkResults = BatchSolveNative.solveBatchContext(handle, baseState, baseTargets,
                             rs.rowModePerScenario, baseRowMode, rs.disabledMask, targetOverrideIndex, targetOverrideValue,
-                            rs.dsOvBus, rs.dsOvFactorDelta, rs.dsOvBaseDelta, rs.dsOvMaxDelta, rs.dsOvMinDelta, dsAnchorShift, dsSlackShift,
+                            rs.distributedSlackOverrideBus, rs.distributedSlackOverrideFactorDelta,
+                            rs.distributedSlackOverrideBaseTargetPDelta, rs.distributedSlackOverrideMaxDelta,
+                            rs.distributedSlackOverrideMinDelta, distributedSlackBusAnchorShift, slackBusAnchorShift,
                             ChunkArrays.intsOrNull(cl.reactiveLimitTargetVOverrideScenarioEntryList),
                             cl.reactiveLimitTargetVOverrideScenarioEntryList.isEmpty() ? null : cl.reactiveLimitTargetVOverrideValue.stream().mapToDouble(Double::doubleValue).toArray(),
                             cl.reactiveLimitDeltaOverrideScenarioEntryList.stream().mapToInt(Integer::intValue).toArray(),
                             cl.reactiveLimitDeltaOverrideValueList.stream().mapToDouble(Double::doubleValue).toArray(),
-                            cl.cvOvSlot.stream().mapToInt(Integer::intValue).toArray(),
-                            cl.cvOvVal.stream().mapToDouble(Double::doubleValue).toArray(),
+                            cl.reactiveCapabilityCurveOverrideScenarioCurve.stream().mapToInt(Integer::intValue).toArray(),
+                            cl.reactiveCapabilityCurveOverrideStepScale.stream().mapToDouble(Double::doubleValue).toArray(),
                                                         parameters.getMaxIterations(), tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
                             config.lsMode(), config.maxDv(), config.maxDphi(),
                             config.lsMode() == GpuStateVectorScalingMode.MAX_VOLTAGE_CHANGE ? varType : null, x0Full,
@@ -1013,7 +1018,7 @@ final class GpuBatchChunkSolver {
                             reactiveLimitsSeedState, reactiveLimitsFinalState,
                             rs.r1OvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
                             rs.r1OvValList.stream().mapToDouble(Double::doubleValue).toArray(),
-                            config.maxOuterIterations(), config.maxPqPvSwitch(), config.dsRejectResidualFlag(),
+                            config.maxOuterIterations(), config.maxPqPvSwitch(), config.rejectSlackDistributionFailureFlag(),
                             // monitoring active: OLF checks VoltageMonitoring BEFORE ReactiveLimits — the main
                             // solve surfaces the DS-stable / pre-RL state; the orchestrator then interleaves
                             // and finishes with the full RL-enabled solves.
@@ -1061,14 +1066,17 @@ final class GpuBatchChunkSolver {
                             DriverNative.setBatchDriverResume(handle, dec.hostChanged());
                             chunkResults = BatchSolveNative.solveBatchContext(handle, baseState, baseTargets,
                                     rs.rowModePerScenario, baseRowMode, rs.disabledMask, targetOverrideIndex, targetOverrideValue,
-                                    rs.dsOvBus, rs.dsOvFactorDelta, rs.dsOvBaseDelta, rs.dsOvMaxDelta, rs.dsOvMinDelta, dsAnchorShift, dsSlackShift,
+                                    rs.distributedSlackOverrideBus, rs.distributedSlackOverrideFactorDelta,
+                                    rs.distributedSlackOverrideBaseTargetPDelta, rs.distributedSlackOverrideMaxDelta,
+                                    rs.distributedSlackOverrideMinDelta, distributedSlackBusAnchorShift,
+                                    slackBusAnchorShift,
                                     ChunkArrays.concatInts(cl.reactiveLimitTargetVOverrideScenarioEntryList, dec.secondaryVoltageControlTargetVScenarioEntry()),
                                     ChunkArrays.concatDoubles(cl.reactiveLimitTargetVOverrideValue, dec.secondaryVoltageControlTargetVValues()),
 
                                     cl.reactiveLimitDeltaOverrideScenarioEntryList.stream().mapToInt(Integer::intValue).toArray(),
                                     cl.reactiveLimitDeltaOverrideValueList.stream().mapToDouble(Double::doubleValue).toArray(),
-                                    cl.cvOvSlot.stream().mapToInt(Integer::intValue).toArray(),
-                                    cl.cvOvVal.stream().mapToDouble(Double::doubleValue).toArray(),
+                                    cl.reactiveCapabilityCurveOverrideScenarioCurve.stream().mapToInt(Integer::intValue).toArray(),
+                                    cl.reactiveCapabilityCurveOverrideStepScale.stream().mapToDouble(Double::doubleValue).toArray(),
                                                                         parameters.getMaxIterations(), tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
                                     config.lsMode(), config.maxDv(), config.maxDphi(),
                                     config.lsMode() == GpuStateVectorScalingMode.MAX_VOLTAGE_CHANGE ? varType : null, x0Full,
@@ -1077,7 +1085,7 @@ final class GpuBatchChunkSolver {
                                     null, reactiveLimitsFinalState,
                                     rs.r1OvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
                                     rs.r1OvValList.stream().mapToDouble(Double::doubleValue).toArray(),
-                                    config.maxOuterIterations(), config.maxPqPvSwitch(), config.dsRejectResidualFlag(), 0,
+                                    config.maxOuterIterations(), config.maxPqPvSwitch(), config.rejectSlackDistributionFailureFlag(), 0,
                                     rs.nBaseClosedZeroImpedanceBranches, rs.zeroImpedanceBranchCloseScenarioElementList.stream().mapToInt(Integer::intValue).toArray(),
                                     rs.zeroImpedanceBranchOpenScenarioElementList.stream().mapToInt(Integer::intValue).toArray());
                         }
@@ -1099,10 +1107,10 @@ final class GpuBatchChunkSolver {
                         }
                         orchNs.merge("SecondaryVc.driverPause", System.nanoTime() - tSvc0, Long::sum);
                     }
-                    if (OL_STATS) {
+                    if (OUTER_LOOP_STATS) {
                         // OLF_OL_STATS: the device's per-contingency Newton work, in the same shape as OLF's
                         // CPU_OL_STATS lines, so the two arms can be matched contingency by contingency.
-                        int[] ol = BatchReadbackNative.readBatchOlStats(handle);
+                        int[] ol = BatchReadbackNative.readBatchOuterLoopStats(handle);
                         if (ol != null) {
                             for (int s2 = 0; s2 < realCount; s2++) {
                                 int st = chunkResults[s2] == null ? Integer.MIN_VALUE : (int) chunkResults[s2][n + 2];
@@ -1172,7 +1180,7 @@ final class GpuBatchChunkSolver {
                             }
                         }
                     }
-                    if (System.getenv("OLF_GPU_PRELOSS_TRACE") != null && nds > 0 && !pairPhase) {
+                    if (System.getenv("OLF_GPU_PRELOSS_TRACE") != null && nDistributedSlackBuses > 0 && !pairPhase) {
                         // Did the DEVICE's own distributed-slack pass move power AFTER the host-side
                         // pre-distribution? The CPU's loop should see only the loss-nonlinearity
                         // residual and stay inside the slack band; if ours redistributes again, the
@@ -1184,15 +1192,15 @@ final class GpuBatchChunkSolver {
                             }
                             int ci = group.get(chunkStart + s);
                             double moved = 0;
-                            for (int i = 0; i < nds; i++) {
-                                int row = cl.dsRowOvBySlot[s] != null && cl.dsRowOvBySlot[s][i] >= 0
-                                        ? cl.dsRowOvBySlot[s][i] : gpuData.distributedSlack().busPhiRow()[i];
+                            for (int i = 0; i < nDistributedSlackBuses; i++) {
+                                int row = cl.distributedSlackBusRowOverrideByScenario[s] != null && cl.distributedSlackBusRowOverrideByScenario[s][i] >= 0
+                                        ? cl.distributedSlackBusRowOverrideByScenario[s][i] : gpuData.distributedSlack().busPhiRow()[i];
                                 // A participant this contingency ISLANDED has its row frozen to a flat
                                 // identity, so (final - base) there is minus its whole anchor and not a
                                 // distribution at all: counting it read the middle-section fixture's
                                 // participants as -1.669969 pu off OLF when the real gap was -0.0687.
-                                if (islandedDsByIndex != null && islandedDsByIndex[ci] != null
-                                        && ChunkArrays.contains(islandedDsByIndex[ci], i)) {
+                                if (islandedDistributedSlackByIndex != null && islandedDistributedSlackByIndex[ci] != null
+                                        && ChunkArrays.contains(islandedDistributedSlackByIndex[ci], i)) {
                                     continue;
                                 }
                                 moved += ft[s * n + row] - baseTargets[gpuData.distributedSlack().busPhiRow()[i]];
@@ -1271,7 +1279,7 @@ final class GpuBatchChunkSolver {
                             reactiveLimitsStateByIndex.put(group.get(chunkStart + s), slice);
                         }
                     }
-                    if (!pairPhase && dsSlackOnly && !pairIdxList.isEmpty()) {
+                    if (!pairPhase && slackOnlyDistribution && !pairIdxList.isEmpty()) {
                         // capture each ctg's slack-only-DS absorbed total for its pairs' seeding
                         double[] absorbed = BatchReadbackNative.readBatchSlackAbsorbed(handle);
                         if (absorbed != null) {
@@ -1292,18 +1300,18 @@ final class GpuBatchChunkSolver {
                             }
                         }
                     }
-                    if (!pairPhase && nds > 0 && !pairIdxList.isEmpty()) {
+                    if (!pairPhase && nDistributedSlackBuses > 0 && !pairIdxList.isEmpty()) {
                         // Capture each ctg's DS ABSORPTION (final distributed target minus the ctg's own
                         // effective base per DS row) plus its factor sum, for its pairs' re-anchoring —
                         // the device analogue of OLF's setGeneratorsInitialTargetPToTargetP before a
                         // strategy re-solve.
                         double[] finalTargets = BatchReadbackNative.readBatchTargets(handle);
                         for (int s = 0; s < realCount; s++) {
-                            double[] slice = new double[nds + 1];
+                            double[] slice = new double[nDistributedSlackBuses + 1];
                             double fs = 0;
-                            int[] islandedDs = islandedDsByIndex != null ? islandedDsByIndex[group.get(chunkStart + s)] : null;
-                            for (int i = 0; i < nds; i++) {
-                                if (islandedDs != null && ChunkArrays.contains(islandedDs, i)) {
+                            int[] islandedDistributedSlackMask = islandedDistributedSlackByIndex != null ? islandedDistributedSlackByIndex[group.get(chunkStart + s)] : null;
+                            for (int i = 0; i < nDistributedSlackBuses; i++) {
+                                if (islandedDistributedSlackMask != null && ChunkArrays.contains(islandedDistributedSlackMask, i)) {
                                     // A participant this contingency islanded absorbed nothing. Its row is a FROZEN
                                     // identity whose target is an angle: read as a P it handed the pairs minus the bus's
                                     // whole base injection, composed onto the pair's frozen row (rte6515 LINE-4468-670:
@@ -1314,32 +1322,32 @@ final class GpuBatchChunkSolver {
                                 // brought a relocated balance home to the bus's own phi row, and the coupler's dummy
                                 // row left behind holds a pinned stub (rte6515 BUS-1359_BBS_2: read there, -0.1926 pu
                                 // of "absorption" that the pairs' first distribution took back, 19.27 MW)
-                                int row = cl.dsRowOvBySlot[s] != null && cl.dsRowOvBySlot[s][i] >= 0
-                                        ? cl.dsRowOvBySlot[s][i] : gpuData.distributedSlack().busPhiRow()[i];
+                                int row = cl.distributedSlackBusRowOverrideByScenario[s] != null && cl.distributedSlackBusRowOverrideByScenario[s][i] >= 0
+                                        ? cl.distributedSlackBusRowOverrideByScenario[s][i] : gpuData.distributedSlack().busPhiRow()[i];
                                 double effBase = baseTargets[gpuData.distributedSlack().busPhiRow()[i]]
-                                        - (rs.dsOvBus[s] == i ? rs.dsOvBaseDelta[s] : 0.0);
+                                        - (rs.distributedSlackOverrideBus[s] == i ? rs.distributedSlackOverrideBaseTargetPDelta[s] : 0.0);
                                 slice[i] = finalTargets[s * n + row] - effBase;
                                 // the factors the parent's distribution renormalized over: an islanded participant
                                 // is out of them, a lost generator's share leaves its bus
                                 fs += gpuData.distributedSlack().busFactor()[i]
-                                        - (rs.dsOvBus[s] == i ? rs.dsOvFactorDelta[s] : 0.0);
+                                        - (rs.distributedSlackOverrideBus[s] == i ? rs.distributedSlackOverrideFactorDelta[s] : 0.0);
                             }
-                            slice[nds] = fs;
-                            dsTargetsByIndex.put(group.get(chunkStart + s), slice);
+                            slice[nDistributedSlackBuses] = fs;
+                            distributedSlackTargetsByIndex.put(group.get(chunkStart + s), slice);
                         }
-                        if (ngen > 0) {
+                        if (nDistributedSlackGenerators > 0) {
                             // ...and each GENERATOR's final move, which is what OLF's setGeneratorsInitialTargetPToTargetP
                             // really keeps: the bus absorption above does not say how a bus's generators split it once
                             // one of them saturates. A slack pass re-derives the whole distribution from the base
-                            // targets, so genCum holds it all when one fired; otherwise the pre-distribution alone moved.
-                            double[] genCum = BatchReadbackNative.readBatchDsGenCum(handle);
-                            double[] retain = BatchReadbackNative.readBatchDsRetain(handle);
+                            // targets, so distributedSlackGeneratorMove holds it all when one fired; otherwise the pre-distribution alone moved.
+                            double[] distributedSlackGeneratorMove = BatchReadbackNative.readBatchDistributedSlackGeneratorMove(handle);
+                            double[] retain = BatchReadbackNative.readBatchSlackRetainedShare(handle);
                             for (int s = 0; s < realCount; s++) {
-                                double[] moves = new double[ngen];
-                                if (genCum != null && retain != null && !Double.isNaN(retain[s])) {
-                                    System.arraycopy(genCum, s * ngen, moves, 0, ngen);
+                                double[] moves = new double[nDistributedSlackGenerators];
+                                if (distributedSlackGeneratorMove != null && retain != null && !Double.isNaN(retain[s])) {
+                                    System.arraycopy(distributedSlackGeneratorMove, s * nDistributedSlackGenerators, moves, 0, nDistributedSlackGenerators);
                                 } else if (cl.genPreMovesBySlot != null && cl.genPreMovesBySlot[s] != null) {
-                                    System.arraycopy(cl.genPreMovesBySlot[s], 0, moves, 0, ngen);
+                                    System.arraycopy(cl.genPreMovesBySlot[s], 0, moves, 0, nDistributedSlackGenerators);
                                 }
                                 genMovesByIndex.put(group.get(chunkStart + s), moves);
                             }
@@ -1374,12 +1382,12 @@ final class GpuBatchChunkSolver {
                                     contingencies.get(group.get(chunkStart + s)).contingencyId(), pinned, ids);
                         }
                     }
-                    if ((rs.hasDs || dsSlackOnly)
+                    if ((rs.hasDistributedSlack || slackOnlyDistribution)
                             && BatchReadbackNative.readBatchSolveCount(handle) - solveCountBefore == 1) {
                         recordDistributedActivePower(handle, gpuData, realCount, chunkSize, n, group, chunkStart,
-                                dsSlackOnly, rs.dsOvBus, rs.dsOvBaseDelta, pairPhase ? dsAnchorShift : null,
+                                slackOnlyDistribution, rs.distributedSlackOverrideBus, rs.distributedSlackOverrideBaseTargetPDelta, pairPhase ? distributedSlackBusAnchorShift : null,
                                 pairPhase ? pairSlackAbsorbedSeed : null, pairPhase ? null : preSlackSeed,
-                                pairPhase && dgAnchor != null, preDistributedByIndex, distributedByIndex);
+                                pairPhase && distributedSlackGeneratorAnchor != null, preDistributedByIndex, distributedByIndex);
                     }
                     for (int s = 0; s < realCount; s++) {
                         double[] row = chunkResults[s];
@@ -1436,7 +1444,7 @@ final class GpuBatchChunkSolver {
      *
      * <p>Each device pass re-derives the WHOLE distribution from the anchor (OLF's resetToInitialState), so
      * after the last pass that fired the participants carry it in their per-generator cumulative shares and
-     * the slack its retained share: Σ genCum + retain — the same two read-backs the base load flow writes
+     * the slack its retained share: Σ distributedSlackGeneratorMove + retain — the same two read-backs the base load flow writes
      * back as targets ({@code GpuDistributedSlackOuterLoop.applyToNetwork}). When no pass fired the
      * distribution is the pre-distribution alone. Slack-only participation keeps everything in the slack's
      * absorbed total. Only valid when ONE solve covered the chunk (the read-backs are per solve): the caller
@@ -1453,25 +1461,25 @@ final class GpuBatchChunkSolver {
      * measured from; it is added back. Null when no scenario of the chunk has one.
      */
     private static void recordDistributedActivePower(long handle, GpuAcData gpuData, int realCount, int chunkSize, int n,
-                                                     List<Integer> group, int chunkStart, boolean dsSlackOnly,
-                                                     int[] dsOvBus, double[] dsOvBaseDelta,
+                                                     List<Integer> group, int chunkStart, boolean slackOnlyDistribution,
+                                                     int[] distributedSlackOverrideBus, double[] distributedSlackOverrideBaseTargetPDelta,
                                                      double[] anchorShift, double[] slackAbsorbedSeed, double[] preSlackSeed,
                                                      boolean genAnchored,
                                                      double[] preDistributedByIndex, double[] distributedByIndex) {
         boolean pair = anchorShift != null || slackAbsorbedSeed != null;
-        if (dsSlackOnly) {
+        if (slackOnlyDistribution) {
             double[] absorbed = BatchReadbackNative.readBatchSlackAbsorbed(handle);
             for (int s = 0; s < realCount && absorbed != null; s++) {
                 distributedByIndex[group.get(chunkStart + s)] = absorbed[s] - (slackAbsorbedSeed != null ? slackAbsorbedSeed[s] : 0.0);
             }
             return;
         }
-        double[] retain = BatchReadbackNative.readBatchDsRetain(handle);
+        double[] retain = BatchReadbackNative.readBatchSlackRetainedShare(handle);
         if (retain == null) {
             return;
         }
-        int ngen = gpuData.distributedSlack().generatorBus() == null ? 0 : gpuData.distributedSlack().generatorBus().length;
-        double[] genCum = null;
+        int nDistributedSlackGenerators = gpuData.distributedSlack().generatorBus() == null ? 0 : gpuData.distributedSlack().generatorBus().length;
+        double[] distributedSlackGeneratorMove = null;
         double[] targets = null;
         for (int s = 0; s < realCount; s++) {
             int idx = group.get(chunkStart + s);
@@ -1481,31 +1489,31 @@ final class GpuBatchChunkSolver {
             }
             double participants = 0;
             // The kernel runs the per-generator water-fill unless a scenario is re-anchored WITHOUT per-generator
-            // anchors: then the bus-level loop moves the row targets and leaves genCum at zero (distributeSlackBatch's
-            // `anchored` test, on the same values). genCum is measured from each generator's own anchor.
+            // anchors: then the bus-level loop moves the row targets and leaves distributedSlackGeneratorMove at zero (distributeSlackBatch's
+            // `anchored` test, on the same values). distributedSlackGeneratorMove is measured from each generator's own anchor.
             boolean anchored = false;
             for (int i = 0; anchorShift != null && i < gpuData.distributedSlack().busPhiRow().length && !anchored; i++) {
                 anchored = anchorShift[s * gpuData.distributedSlack().busPhiRow().length + i] != 0.0;
             }
-            if (ngen > 0 && (!anchored || genAnchored)) {
-                if (genCum == null) {
-                    genCum = BatchReadbackNative.readBatchDsGenCum(handle);
+            if (nDistributedSlackGenerators > 0 && (!anchored || genAnchored)) {
+                if (distributedSlackGeneratorMove == null) {
+                    distributedSlackGeneratorMove = BatchReadbackNative.readBatchDistributedSlackGeneratorMove(handle);
                 }
-                if (genCum == null) {
+                if (distributedSlackGeneratorMove == null) {
                     continue;
                 }
-                for (int g = 0; g < ngen; g++) {
+                for (int g = 0; g < nDistributedSlackGenerators; g++) {
                     if (gpuData.distributedSlack().generatorBus()[g] >= 0) {           // the slack's own generators are in retain
-                        participants += genCum[s * ngen + g];
+                        participants += distributedSlackGeneratorMove[s * nDistributedSlackGenerators + g];
                     }
                 }
             } else {                                         // bus-level participants: targets from the anchor
                 if (targets == null) {
                     targets = BatchReadbackNative.readBatchTargets(handle);
                 }
-                int ov = dsOvBus != null && dsOvBus.length > 0 ? dsOvBus[s] : -1;
+                int ov = distributedSlackOverrideBus != null && distributedSlackOverrideBus.length > 0 ? distributedSlackOverrideBus[s] : -1;
                 for (int i = 0; i < gpuData.distributedSlack().busPhiRow().length; i++) {
-                    double anchor = gpuData.distributedSlack().busBaseTargetP()[i] - (ov == i ? dsOvBaseDelta[s] : 0.0)
+                    double anchor = gpuData.distributedSlack().busBaseTargetP()[i] - (ov == i ? distributedSlackOverrideBaseTargetPDelta[s] : 0.0)
                             + (anchorShift != null ? anchorShift[s * gpuData.distributedSlack().busPhiRow().length + i] : 0.0);
                     participants += targets[s * n + gpuData.distributedSlack().busPhiRow()[i]] - anchor;
                 }

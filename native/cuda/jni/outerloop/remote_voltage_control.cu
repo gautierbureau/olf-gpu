@@ -67,7 +67,7 @@ __device__ inline double distrQTargetQOf(int nTqOv, const int* tqOvKey, const do
 __device__ inline double pinnedTargetQ(int s, int e, int n, int nReactiveLimitEntries, const int* mode, const double* target,
                                        const int* reactiveLimitVoltageRow, const int* reactiveLimitReactivePowerRow, const int* relocOwn,
                                        const char* limitType, const double* reactiveLimitMinQ, const double* reactiveLimitMaxQ,
-                                       const double* reactiveLimitLoadQ, int cvStride, const double* reactiveLimitInitialTargetQ,
+                                       const double* reactiveLimitLoadQ, int perScenarioReactiveLimits, const double* reactiveLimitInitialTargetQ,
                                        const char* reactiveLimitGeneratorsLost) {
     int vrow = reactiveLimitVoltageRow[e];
     int qrow = (reactiveLimitReactivePowerRow != nullptr && reactiveLimitReactivePowerRow[e] >= 0) ? reactiveLimitReactivePowerRow[e] : vrow;
@@ -81,7 +81,7 @@ __device__ inline double pinnedTargetQ(int s, int e, int n, int nReactiveLimitEn
         return target[(size_t) s * n + relocOwn[qrow]];
     }
     char lt = limitType[(size_t) s * nReactiveLimitEntries + e];
-    size_t li = cvStride ? (size_t) s * nReactiveLimitEntries + e : (size_t) e;
+    size_t li = perScenarioReactiveLimits ? (size_t) s * nReactiveLimitEntries + e : (size_t) e;
     double lim = (lt == GpuQLimitType::MIN_REALISTIC_V || lt == GpuQLimitType::MAX_REALISTIC_V) && reactiveLimitInitialTargetQ != nullptr ? reactiveLimitInitialTargetQ[e]
                : isMinLimit(lt) ? reactiveLimitMinQ[li] : reactiveLimitMaxQ[li];
     if (lt == GpuQLimitType::FROZEN && reactiveLimitGeneratorsLost != nullptr && reactiveLimitGeneratorsLost[(size_t) s * nReactiveLimitEntries + e]) {
@@ -95,7 +95,7 @@ __global__ void updateDistrQTargetsBatch(int nMembers, int nScenarios, int n, in
                                          const int* mGroupStart, const int* mGroupCount,
                                          const int* mRow, const char* mHasRow,
                                          const int* reactiveLimitVoltageRow, const double* reactiveLimitMinQ, const double* reactiveLimitMaxQ,
-                                         const double* reactiveLimitLoadQ, const char* limitType, int cvStride,
+                                         const double* reactiveLimitLoadQ, const char* limitType, int perScenarioReactiveLimits,
                                          double* target, const char* outerLoopCheckActive, const double* mTargetQ,
                                          const int* mQrGroup, const int* qrPtr, const int* qrRows,
                                          const int* mode, const double* pilotQ, int nQr,
@@ -194,7 +194,7 @@ __global__ void updateDistrQTargetsBatch(int nMembers, int nScenarios, int n, in
                 // maximum here: the carrier's target 0.957 against OLF's -0.043, VL-676_1 supplying the 100 MVAr,
                 // pinned, unpinned, and 1.133 MW distributed where OLF distributes nothing).
                 target[(size_t) s * n + mrow] = pinnedTargetQ(s, pe, n, nReactiveLimitEntries, mode, target, reactiveLimitVoltageRow, reactiveLimitReactivePowerRow, relocOwn,
-                        limitType, reactiveLimitMinQ, reactiveLimitMaxQ, reactiveLimitLoadQ, cvStride, reactiveLimitInitialTargetQ, reactiveLimitGeneratorsLost);
+                        limitType, reactiveLimitMinQ, reactiveLimitMaxQ, reactiveLimitLoadQ, perScenarioReactiveLimits, reactiveLimitInitialTargetQ, reactiveLimitGeneratorsLost);
                 return;
             }
             // pilot-self, pilot UNPINNED: its q feeds the DISTR_Q rows weighted and the carrier hosts its OWN
@@ -230,7 +230,7 @@ __global__ void updateDistrQTargetsBatch(int nMembers, int nScenarios, int n, in
             // reactive-limit switch, the INITIAL generation target Q on a realistic-voltage freeze), minus its
             // load - the value the member's own balance row enforces. Unpinned members keep their packed targetQ.
             sumTargetQ += pinnedTargetQ(s, re, n, nReactiveLimitEntries, mode, target, reactiveLimitVoltageRow, reactiveLimitReactivePowerRow, relocOwn,
-                    limitType, reactiveLimitMinQ, reactiveLimitMaxQ, reactiveLimitLoadQ, cvStride, reactiveLimitInitialTargetQ, reactiveLimitGeneratorsLost);
+                    limitType, reactiveLimitMinQ, reactiveLimitMaxQ, reactiveLimitLoadQ, perScenarioReactiveLimits, reactiveLimitInitialTargetQ, reactiveLimitGeneratorsLost);
         } else {
             sumTargetQ += distrQTargetQOf(nTqOv, tqOvKey, tqOvVal, s, nMembers, m, mTargetQ);
         }

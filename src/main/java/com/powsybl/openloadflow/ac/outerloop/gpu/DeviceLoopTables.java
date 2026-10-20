@@ -89,10 +89,10 @@ public final class DeviceLoopTables {
                 realisticFixingLoop);
         // Curve limits at runtime P: install (or clear, for cached contexts) the per-gen curve channel.
         ReactiveLimitsNative.setBatchReactiveCapabilityCurves(handle,
-                reactiveCapabilityCurves != null ? reactiveCapabilityCurves.cvIdx() : null,
-                reactiveCapabilityCurves != null ? reactiveCapabilityCurves.cvIn() : null,
-                reactiveCapabilityCurves != null ? reactiveCapabilityCurves.cvPts() : null,
-                reactiveCapabilityCurves != null ? reactiveCapabilityCurves.cvHv() : null,
+                reactiveCapabilityCurves != null ? reactiveCapabilityCurves.reactiveCapabilityCurveIndices() : null,
+                reactiveCapabilityCurves != null ? reactiveCapabilityCurves.reactiveCapabilityCurveParameters() : null,
+                reactiveCapabilityCurves != null ? reactiveCapabilityCurves.reactiveCapabilityCurvePoints() : null,
+                reactiveCapabilityCurves != null ? reactiveCapabilityCurves.reactiveCapabilityCurveHvdcStation() : null,
                 reactiveCapabilityCurves != null && reactiveCapabilityCurves.extrapolate() ? 1 : 0);
         // forceTargetQInReactiveLimits: the clamped generators' Q targets follow their P (or the channel is cleared).
         ForceTargetQInReactiveLimits.install(handle, forcedTargetQ);
@@ -157,10 +157,10 @@ public final class DeviceLoopTables {
                 anyReactiveLimitRemoteEntry ? gpuData.distrQMembers().targetPeerStart() : null,
                 anyReactiveLimitRemoteEntry ? gpuData.distrQMembers().targetPeer() : null);
         // Per-generator DistributedSlack participants (OLF's water-fill saturates per generator).
-        DistributedSlackNative.setBatchDsGenerators(handle, gpuData.distributedSlack().generatorBus(), gpuData.distributedSlack().generatorFactor(),
+        DistributedSlackNative.setBatchDistributedSlackGenerators(handle, gpuData.distributedSlack().generatorBus(), gpuData.distributedSlack().generatorFactor(),
                 gpuData.distributedSlack().generatorMaxDelta(), gpuData.distributedSlack().generatorMinDelta(),
                 gpuData.distributedSlack().generatorMarginUp(), gpuData.distributedSlack().generatorMarginDown(),
                 gpuData.distributedSlack().busGeneratorStart(), gpuData.distributedSlack().busGeneratorEnd());
-        DistributedSlackNative.setBatchDsSlackRooms(handle, gpuData.distributedSlack().slackRoomUp(), gpuData.distributedSlack().slackRoomDown());
+        DistributedSlackNative.setBatchSlackBusRooms(handle, gpuData.distributedSlack().slackRoomUp(), gpuData.distributedSlack().slackRoomDown());
     }
 }

@@ -35,15 +35,15 @@ public final class GpuDistributedSlackOuterLoop {
 
     /** DistributedSlack, exactly OLF's ActivePowerDistribution: every participating generator ends at
      *  its ANCHOR target ({@code initialTargetP}) plus the cumulative share the water-fill gave it
-     *  ({@code genCum}, per generator — each saturates at its own limits); the slack bus's own
+     *  ({@code distributedSlackGeneratorMove}, per generator — each saturates at its own limits); the slack bus's own
      *  generators, which have no device row, split the slack's retained share by factor — the value
      *  captured at the last check that actually DISTRIBUTED, not the sub-tolerance one a STABLE check
      *  measures. A solve whose DistributedSlack phase never fired leaves the generators alone.
      *  Returns what it distributed (pu, see GpuNewtonRaphson#lastDistributedActivePower), NaN when nothing. */
     public static double applyToNetwork(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> equationSystem, long handle,
-                            GpuDsParams dsParams,
+                            GpuDsParams distributedSlackParameters,
                             Map<LfLoad, Double> loadAnchorTargetP,
-                            double[] deviceTargets, double[] genCum, double[] retain, GpuAcData data) {
+                            double[] deviceTargets, double[] distributedSlackGeneratorMove, double[] retain, GpuAcData data) {
         double lastDistributedActivePower = Double.NaN;
         if (deviceTargets == null || data == null) {
             return lastDistributedActivePower;
@@ -59,7 +59,7 @@ public final class GpuDistributedSlackOuterLoop {
             }
             if (slackBus == null) {
                 // The COUPLER-TREE RELOCATION moved that bus's P balance onto its parent coupler's DUMMY_P row,
-                // which no BUS_PHI variable owns — the pack ships the relocated row (dsSlackPhiRow = pRow). Left
+                // which no BUS_PHI variable owns — the pack ships the relocated row (slackBusPhiRow = pRow). Left
                 // unresolved, the slack's retained share was never written back and OLF measured the device's
                 // converged state against stale targets: on rte6515's full busbar scope the device's own norm was
                 // 9.45e-06 (OLF's own final 9.50e-06) while OLF re-evaluated 1.67 and called the base
@@ -71,7 +71,7 @@ public final class GpuDistributedSlackOuterLoop {
             // slack-only participation: the whole distribution is the slack's absorbed total
             double[] absorbed = BatchReadbackNative.readBatchSlackAbsorbed(handle);
             if (slackBus != null && absorbed != null && absorbed.length > 0 && absorbed[0] != 0) {
-                setAnchoredShare(slackBus, absorbed[0], dsParams);
+                setAnchoredShare(slackBus, absorbed[0], distributedSlackParameters);
                 lastDistributedActivePower = absorbed[0];
             }
             return lastDistributedActivePower;
@@ -88,16 +88,16 @@ public final class GpuDistributedSlackOuterLoop {
         }
         double distributed = retain[0];                     // the slack's retained share + the participants' below
         boolean slackInPack = false;                        // the slack's own generators listed (DS row -1)
-        if (genCum != null && data.distributedSlack().generatorId() != null && genCum.length >= data.distributedSlack().generatorId().length) {
+        if (distributedSlackGeneratorMove != null && data.distributedSlack().generatorId() != null && distributedSlackGeneratorMove.length >= data.distributedSlack().generatorId().length) {
             for (int g = 0; g < data.distributedSlack().generatorId().length; g++) {
                 if (data.distributedSlack().generatorBus()[g] < 0) {
                     slackInPack = true;                     // its move is the retained share already counted
                 } else {
-                    distributed += genCum[g];
+                    distributed += distributedSlackGeneratorMove[g];
                 }
                 LfGenerator gen = genById.get(data.distributedSlack().generatorId()[g]);
                 if (gen != null) {
-                    gen.setTargetP(dsParams.anchorTargetP(gen) + genCum[g]);
+                    gen.setTargetP(distributedSlackParameters.anchorTargetP(gen) + distributedSlackGeneratorMove[g]);
                 }
             }
         } else {
@@ -109,20 +109,20 @@ public final class GpuDistributedSlackOuterLoop {
                 LfBus bus = data.distributedSlack().busNum() != null && i < data.distributedSlack().busNum().length ? network.getBus(data.distributedSlack().busNum()[i]) : null;
                 distributed += deviceTargets[row] - data.distributedSlack().busBaseTargetP()[i];
                 if (bus != null) {
-                    if (dsParams.isLoadBased()) {
+                    if (distributedSlackParameters.isLoadBased()) {
                         moveLoads(bus, deviceTargets[row] - data.distributedSlack().busBaseTargetP()[i], loadAnchorTargetP);
                     } else {
-                        setAnchoredShare(bus, deviceTargets[row] - data.distributedSlack().busBaseTargetP()[i], dsParams);
+                        setAnchoredShare(bus, deviceTargets[row] - data.distributedSlack().busBaseTargetP()[i], distributedSlackParameters);
                     }
                 }
             }
         }
         lastDistributedActivePower = distributed;
         if (slackBus != null && retain[0] != 0 && !slackInPack) {
-            if (dsParams.isLoadBased()) {
+            if (distributedSlackParameters.isLoadBased()) {
                 moveLoads(slackBus, retain[0], loadAnchorTargetP);
             } else {
-                setAnchoredShare(slackBus, retain[0], dsParams);
+                setAnchoredShare(slackBus, retain[0], distributedSlackParameters);
             }
         }
 
@@ -165,18 +165,18 @@ public final class GpuDistributedSlackOuterLoop {
 
     /** Give a bus's participating generators {@code anchor + delta × f / Σf} — OLF's split of a
      *  bus-level amount from the anchor, with the run's balance-type factors. */
-    private static void setAnchoredShare(LfBus bus, double delta, GpuDsParams dsParams) {
+    private static void setAnchoredShare(LfBus bus, double delta, GpuDsParams distributedSlackParameters) {
         double factorSum = 0;
         for (LfGenerator g : bus.getGenerators()) {
-            factorSum += dsParams.factor(g);
+            factorSum += distributedSlackParameters.factor(g);
         }
         if (factorSum <= 0) {
             return;
         }
         for (LfGenerator g : bus.getGenerators()) {
-            double f = dsParams.factor(g);
+            double f = distributedSlackParameters.factor(g);
             if (f != 0) {
-                g.setTargetP(dsParams.anchorTargetP(g) + delta * f / factorSum);
+                g.setTargetP(distributedSlackParameters.anchorTargetP(g) + delta * f / factorSum);
             }
         }
     }

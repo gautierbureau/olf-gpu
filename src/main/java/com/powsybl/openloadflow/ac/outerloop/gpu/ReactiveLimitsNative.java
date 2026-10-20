@@ -31,11 +31,11 @@ public final class ReactiveLimitsNative {
 
     /** Install (or clear, with nulls) the forceTargetQInReactiveLimits channel on a batch context: the Q
      *  targets of generators OLF clamps into their curve limits at their current P (see ForceTargetQInReactiveLimits). */
-    public static native void setBatchForcedTargetQ(long handle, int[] fqIdx, double[] fqIn, double[] fqPts,
+    public static native void setBatchForcedTargetQ(long handle, int[] forcedTargetQIndices, double[] forcedTargetQParameters, double[] forcedTargetQPoints,
                                                     int extrapolate);
 
-    /** Per-chunk loss pre-distribution moves of the forced-target-Q generators ([nS * nfq] pu), or null. */
-    public static native void setBatchForcedTargetQPre(long handle, double[] fqPre);
+    /** Per-chunk loss pre-distribution moves of the forced-target-Q generators ([nS * nForcedTargetQ] pu), or null. */
+    public static native void setBatchForcedTargetQPre(long handle, double[] forcedTargetQPreDistribution);
 
     /** {@code AcloadFlowEngine.isStateUnrealistic} on the driver's INTERMEDIATE states: per row, 1 = a
      *  non-fictitious bus's {@code BUS_V} at or above {@code minNominalVoltageRealisticVoltageCheck},
@@ -57,8 +57,8 @@ public final class ReactiveLimitsNative {
 
     /** Install (or clear, with nulls) the reactive-capability-CURVE channel on a batch context —
      *  per-scenario dynamic RL limits evaluated at the current targets (see ReactiveCapabilityCurves). */
-    public static native void setBatchReactiveCapabilityCurves(long handle, int[] cvIdx, double[] cvIn, double[] cvPts,
-                                               int[] cvHv, int extrapolate);
+    public static native void setBatchReactiveCapabilityCurves(long handle, int[] reactiveCapabilityCurveIndices, double[] reactiveCapabilityCurveParameters, double[] reactiveCapabilityCurvePoints,
+                                               int[] reactiveCapabilityCurveHvdcStation, int extrapolate);
 
     /** OLF's GLOBAL forced-PV election keys per RL entry (ReactiveLimitsOuterLoop.switchPvPq: when every
      *  PV bus would switch, the strongest stays PV — highest controlled-bus nominal V, then highest bus

@@ -10,17 +10,17 @@
 
 namespace olfgpu {
 
-// The row this SCENARIO solves participant i's P balance on. Normally its structural dsPhiRow; under
+// The row this SCENARIO solves participant i's P balance on. Normally its structural distributedSlackBusPhiRow; under
 // the coupler-tree relocation that is the parent coupler's DUMMY_P row, and a scenario opening that
-// coupler moves the balance back to the bus's own BUS_PHI row (setBatchDsRowOverrides).
-__host__ __device__ inline int dsRowOf(const int* dsPhiRow, const int* dsRowOv, int s, int nds, int i) {
-    if (dsRowOv != nullptr) {
-        int r = dsRowOv[(size_t) s * nds + i];
+// coupler moves the balance back to the bus's own BUS_PHI row (setBatchDistributedSlackBusRowOverrides).
+__host__ __device__ inline int distributedSlackBusRowOf(const int* distributedSlackBusPhiRow, const int* distributedSlackBusRowOverride, int s, int nDistributedSlackBuses, int i) {
+    if (distributedSlackBusRowOverride != nullptr) {
+        int r = distributedSlackBusRowOverride[(size_t) s * nDistributedSlackBuses + i];
         if (r >= 0) {
             return r;
         }
     }
-    return dsPhiRow[i];
+    return distributedSlackBusPhiRow[i];
 }
 
 }  // namespace olfgpu

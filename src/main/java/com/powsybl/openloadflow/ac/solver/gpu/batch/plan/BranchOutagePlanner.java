@@ -37,8 +37,8 @@ final class BranchOutagePlanner {
     static void plan(PlanContext ctx, ScenarioPlanBuilder pb, int i, BatchContingency c,
                      GpuBatchContingencyValidator.Qualification q, java.util.Set<Integer> outagedZeroImpedanceBranchNums) {
         final Set<LfBranch> distrRhoControllers = ctx.distrRhoControllers();
-        final GpuDsParams dsParams = ctx.dsParams();
-        final double dsSum = ctx.dsSum();
+        final GpuDsParams distributedSlackParameters = ctx.distributedSlackParameters();
+        final double distributedSlackRawFactorSum = ctx.distributedSlackRawFactorSum();
         final EquationSystem<AcVariableType, AcEquationType> es = ctx.es();
         final GpuAcData gpuData = ctx.gpuData();
         final boolean incrementalTvc = ctx.incrementalTvc();
@@ -119,8 +119,8 @@ final class BranchOutagePlanner {
                 pb.busRows = com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcDataExtractor
                         .busPowerRows(stationResets.get(0).bus().getNetwork(), es);
             }
-            GenOutage[] st = GpuBatchInjectionOutages.computeInjectionOutages(es, gpuData, dsSum, slackParticipates,
-                    dsParams, List.of(), stationResets, pb.busRows);
+            GenOutage[] st = GpuBatchInjectionOutages.computeInjectionOutages(es, gpuData, distributedSlackRawFactorSum, slackParticipates,
+                    distributedSlackParameters, List.of(), stationResets, pb.busRows);
             if (st == null) {
                 GpuBatchQualification.refuse(c, "PLAN:INJECTION_OUTAGE_SHAPE");
                 return;
@@ -187,7 +187,7 @@ final class BranchOutagePlanner {
         // retained share it had while the stranded bus still counted, and the pass retires with
         // most of the mismatch undistributed. The device now takes the per-scenario participant
         // set and derives BOTH the shares and the stopping gate from it.
-        pb.islandedDsByIndex[i] = IslandedBuses.islandedDsParticipants(fi.rows(), gpuData, q.islandedBuses());
+        pb.islandedDistributedSlackByIndex[i] = IslandedBuses.islandedDistributedSlackParticipants(fi.rows(), gpuData, q.islandedBuses());
         pb.islandedReactiveLimitEntriesByIndex[i] = IslandedBuses.islandedReactiveLimitControllers(fi.rows(), gpuData);
         if ("1".equals(System.getenv("OLF_GPU_DBG_BUSDUMP")) && fi.rows().length > 0) {
             // Which reactive-limits ENTRIES the island masks, and which frozen rows are an
@@ -203,7 +203,7 @@ final class BranchOutagePlanner {
             // filterParticipatingBuses on the surviving component, so if it loses N buses and
             // this masks fewer, the device still distributes to a bus OLF has dropped.
             System.err.println("ISLANDED-DS '" + c.contingencyId() + "' islandedBuses="
-                    + q.islandedBuses().size() + " maskedParticipants=" + pb.islandedDsByIndex[i].length
+                    + q.islandedBuses().size() + " maskedParticipants=" + pb.islandedDistributedSlackByIndex[i].length
                     + " participatingIslandedBuses=" + q.islandedBuses().stream()
                             .filter(b -> b.isParticipating()).count());
             // Per bus, so an unmatched participant is EXPLAINED rather than assumed harmless:

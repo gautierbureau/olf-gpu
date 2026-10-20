@@ -114,13 +114,13 @@ final class IslandedBuses {
      *  put in another synchronous component. OLF distributes over
      *  {@code getSynchronousNetworks().getFirst()}, so these are simply not participants for this
      *  scenario, and the device renormalizes the remaining factors over the survivors. */
-    static int[] islandedDsParticipants(int[] frozenRows, GpuAcData gpuData, List<LfBus> islandedBuses) {
-        int[] dsPhiRow = gpuData.distributedSlack().busPhiRow();
-        if (dsPhiRow == null || dsPhiRow.length == 0 || frozenRows.length == 0) {
+    static int[] islandedDistributedSlackParticipants(int[] frozenRows, GpuAcData gpuData, List<LfBus> islandedBuses) {
+        int[] distributedSlackBusPhiRow = gpuData.distributedSlack().busPhiRow();
+        if (distributedSlackBusPhiRow == null || distributedSlackBusPhiRow.length == 0 || frozenRows.length == 0) {
             return NO_ISLANDED_DS;
         }
         // Match on the BUS as well as on the row. The row test alone misses a participant whose P row was
-        // RELOCATED by the coupler-tree relocation: dsPhiRow carries pRow, which for a relocated bus is its
+        // RELOCATED by the coupler-tree relocation: distributedSlackBusPhiRow carries pRow, which for a relocated bus is its
         // parent coupler's DUMMY_P, while the frozen rows are the bus's own BUS_PHI / BUS_V. The device then
         // kept distributing slack to a generator on a DEAD bus — measured on BUS-6014_BBS_2 as 7.386 MW of
         // distributed active power against the CPU, with every bus in the network shifted 2-4e-2 kV in one
@@ -129,13 +129,13 @@ final class IslandedBuses {
         for (LfBus b : islandedBuses) {
             islandedNums.add(b.getNum());
         }
-        int[] dsBusNum = gpuData.distributedSlack().busNum();
-        int[] found = new int[dsPhiRow.length];
+        int[] distributedSlackBusNum = gpuData.distributedSlack().busNum();
+        int[] found = new int[distributedSlackBusPhiRow.length];
         int count = 0;
-        for (int i = 0; i < dsPhiRow.length; i++) {
-            boolean islanded = dsBusNum != null && i < dsBusNum.length && islandedNums.contains(dsBusNum[i]);
+        for (int i = 0; i < distributedSlackBusPhiRow.length; i++) {
+            boolean islanded = distributedSlackBusNum != null && i < distributedSlackBusNum.length && islandedNums.contains(distributedSlackBusNum[i]);
             for (int frozen : frozenRows) {
-                if (frozen == dsPhiRow[i]) {
+                if (frozen == distributedSlackBusPhiRow[i]) {
                     islanded = true;
                     break;
                 }
@@ -144,8 +144,8 @@ final class IslandedBuses {
                 found[count++] = i;
             }
             if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {
-                System.err.printf("QUALIFY_TRACE dsPart i=%d row=%d busNum=%s islanded=%b%n", i, dsPhiRow[i],
-                        dsBusNum != null && i < dsBusNum.length ? Integer.toString(dsBusNum[i]) : "-", islanded);
+                System.err.printf("QUALIFY_TRACE dsPart i=%d row=%d busNum=%s islanded=%b%n", i, distributedSlackBusPhiRow[i],
+                        distributedSlackBusNum != null && i < distributedSlackBusNum.length ? Integer.toString(distributedSlackBusNum[i]) : "-", islanded);
             }
         }
         return count == 0 ? NO_ISLANDED_DS : java.util.Arrays.copyOf(found, count);

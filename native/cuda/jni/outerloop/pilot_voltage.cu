@@ -122,7 +122,7 @@ __global__ void updatePilotVeqBatch(int nQr, int nScenarios, int n,
                                     int nFrozen, const int* frozenSlotRow,
                                     const int* psEntry,
                                     const char* limitType, int nReactiveLimitEntries, const double* reactiveLimitMinQ, const double* reactiveLimitMaxQ,
-                                    const double* reactiveLimitLoadQ, const double* reactiveLimitInitialTargetQ, int cvStride,
+                                    const double* reactiveLimitLoadQ, const double* reactiveLimitInitialTargetQ, int perScenarioReactiveLimits,
                                     const double* reactiveLimitTargetV,
                                     const int* reactiveRelocationPilotReactiveLimitEntry,
                                     int nReactiveLimitTargetVOverrides, const int* reactiveLimitTargetVOverrideScenarioEntry, const double* reactiveLimitTargetVOverrideValue,
@@ -167,7 +167,7 @@ __global__ void updatePilotVeqBatch(int nQr, int nScenarios, int n,
     double flipTarget = pilotQ[(size_t) s * nQr + g];
     bool continuedFlip = false;
     if (pe >= 0 && plt != GpuQLimitType::NONE) {
-        size_t li = cvStride ? (size_t) s * nReactiveLimitEntries + pe : (size_t) pe;
+        size_t li = perScenarioReactiveLimits ? (size_t) s * nReactiveLimitEntries + pe : (size_t) pe;
         double lim = (plt == GpuQLimitType::MIN_REALISTIC_V || plt == GpuQLimitType::MAX_REALISTIC_V) && reactiveLimitInitialTargetQ != nullptr ? reactiveLimitInitialTargetQ[pe]
                    : isMinLimit(plt) ? reactiveLimitMinQ[li] : reactiveLimitMaxQ[li];
         // A pilot whose bus LOST EVERY GENERATOR this scenario (seeded GpuQLimitType::FROZEN through setBatchReactiveLimitGeneratorsLost)

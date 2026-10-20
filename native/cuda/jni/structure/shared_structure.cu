@@ -39,13 +39,13 @@ SharedStructure* buildStructure(int n,
                                 int nHvdcAcEmulation, const double* hvdcAcEmulationParameters, const int* hvdcAcEmulationIndices,
                                 int ndq, const int* dqElem, const int* dqSide, const double* dqWeight,
                                 const int* dqRow, const int* dqKind,
-                                int nzi, const double* ziIn, const int* ziIdx,
+                                int nZeroImpedanceBranch, const double* zeroImpedanceBranchParameters, const int* zeroImpedanceBranchIndices,
                                 int nDistrRho, const int* distrRhoRow, const int* distrRhoColumn, const double* distrRhoCoefficient,
                                 int nDistrShuntB, const int* distrShuntBRow, const int* distrShuntBColumn, const double* distrShuntBCoefficient,
                                 const int* closedBranchPhaseControlSide,
                                 int nLoadModelTerms, const double* loadModelParameters, const int* loadModelIndices,
                                 int nQr, const int* qrPtr, const int* qrRowsIn,
-                                const int* openBranchAlternateReactiveDestinationIn, const int* ziQAltIn,
+                                const int* openBranchAlternateReactiveDestinationIn, const int* zeroImpedanceBranchAlternateReactiveDestinationIn,
                                 const int* qrDepBaseIn, const int* qrBaseTargetRowIn, const int* depGroupOfRowIn) {
     auto st = std::make_unique<SharedStructure>();
     st->n = n;
@@ -56,17 +56,17 @@ SharedStructure* buildStructure(int n,
     st->hvdcAcEmulationOffset = nClosedBranch + nOpenBranch + nShunt;
 
     // ---- diagonal-pairing row permutation + index packs rewritten through it ----
-    st->rowMap = buildRowMap(n, nClosedBranch, closedBranchIndices, nOpenBranch, openBranchIndices, nShunt, shuntIndices, nHvdcAcEmulation, hvdcAcEmulationIndices, ndq, dqRow, nzi, ziIdx);
+    st->rowMap = buildRowMap(n, nClosedBranch, closedBranchIndices, nOpenBranch, openBranchIndices, nShunt, shuntIndices, nHvdcAcEmulation, hvdcAcEmulationIndices, ndq, dqRow, nZeroImpedanceBranch, zeroImpedanceBranchIndices);
     const std::vector<int>& rowMap = st->rowMap;
     // COUPLER-TREE relocation, per-scenario placement: map each coupler DUMMY row that hosts a child bus's
     // relocated P/Q equation to that bus's OWN row, so a scenario OPENING the coupler can put the equation
-    // back where the stock layout has it (see stockAltRow). ziIdx is not row-mapped and its slots 4..9 are
+    // back where the stock layout has it (see stockAltRow). zeroImpedanceBranchIndices is not row-mapped and its slots 4..9 are
     // variable COLUMNS, so both sides go through rowMap. Empty unless rows actually moved, which keeps every
     // existing structure bit-identical.
     std::vector<int> relocOwnRow(static_cast<size_t>(n), -1);
     bool anyRelocOwn = false;
-    for (int e = 0; e < nzi; e++) {
-        const int* z = ziIdx + static_cast<size_t>(e) * 11;
+    for (int e = 0; e < nZeroImpedanceBranch; e++) {
+        const int* z = zeroImpedanceBranchIndices + static_cast<size_t>(e) * 11;
         int childSide = (z[10] >> 1) & 3;
         if (childSide == 0 || (z[10] & 8) == 0) {
             continue;                                        // dead-end stub (bit 3 clear): long-standing case
@@ -129,9 +129,9 @@ SharedStructure* buildStructure(int n,
     std::vector<int> closedBranchIndicesMapped = mapRows(closedBranchIndices, nClosedBranch, 12, {0, 1, 2, 3, 10, 11});
     std::vector<int> openBranchIndicesMapped = mapRows(openBranchIndices, nOpenBranch, 6, {0, 1, 2, 3});
     std::vector<int> openBranchAlternateReactiveDestinationMapped = mapRows(openBranchAlternateReactiveDestinationIn, nOpenBranch, 2, {0, 1});   // negative encodings pass through
-    std::vector<int> ziQAltM = mapRows(ziQAltIn, nzi, 2, {0, 1});
+    std::vector<int> zeroImpedanceBranchAlternateReactiveDestinationMapped = mapRows(zeroImpedanceBranchAlternateReactiveDestinationIn, nZeroImpedanceBranch, 2, {0, 1});
     const int* openBranchAlternateReactiveDestination = openBranchAlternateReactiveDestinationMapped.data();
-    const int* ziQAlt = ziQAltM.data();
+    const int* zeroImpedanceBranchAlternateReactiveDestination = zeroImpedanceBranchAlternateReactiveDestinationMapped.data();
     std::vector<int> shuntIndicesMapped = mapRows(shuntIndices, nShunt, 5, {0, 1, 4});
     std::vector<int> hvdcAcEmulationIndicesMapped = mapRows(hvdcAcEmulationIndices, nHvdcAcEmulation, 4, {0, 1});
     std::vector<int> loadModelIndicesMapped = mapRows(loadModelIndices, nLoadModelTerms, 2, {0});
@@ -145,7 +145,7 @@ SharedStructure* buildStructure(int n,
     std::vector<std::pair<int, int>> pat;
     collectPattern(nClosedBranch, closedBranchIndices, 12, CB_SCATTER, CB_NOUT, resolveClosedBranch, pat);
     bool dynReloc = anyRelocOwn || anyDep || hasRelocatable(nClosedBranch, closedBranchIndices, nShunt, shuntIndices)
-            || hasAltEntries(openBranchAlternateReactiveDestination, nOpenBranch * 2) || hasAltEntries(ziQAlt, nzi * 2);
+            || hasAltEntries(openBranchAlternateReactiveDestination, nOpenBranch * 2) || hasAltEntries(zeroImpedanceBranchAlternateReactiveDestination, nZeroImpedanceBranch * 2);
     if (dynReloc) {
         collectCbAltPattern(nClosedBranch, closedBranchIndices, relocOwn, pat, st->nQr,        // union the alternate Q rows into the pattern
                 st->hQrPtr.data(), st->hQrRows.data(), depGroupOfRow);      // (+ every GROUP candidate's slots, plan-A6)
@@ -170,10 +170,10 @@ SharedStructure* buildStructure(int n,
         collectHvAltPattern(nHvdcAcEmulation, hvdcAcEmulationIndices, relocOwn, pat);
     }
     collectFamilyPattern(rowMap, closedBranchIndices, openBranchIndices, shuntIndices, ndq, dqElem, dqSide, dqKind, dqRow,
-                         nDistrRho, distrRhoRow, distrRhoColumn, nDistrShuntB, distrShuntBRow, distrShuntBColumn, nzi, ziIdx, dynReloc ? relocOwn : nullptr, pat);
+                         nDistrRho, distrRhoRow, distrRhoColumn, nDistrShuntB, distrShuntBRow, distrShuntBColumn, nZeroImpedanceBranch, zeroImpedanceBranchIndices, dynReloc ? relocOwn : nullptr, pat);
     if (dynReloc) {
-        for (int e = 0; e < nzi; e++) {                      // zi STOCK positions: a +-dummy coupling that lands on
-        const int* z = ziIdx + static_cast<size_t>(e) * 11;   // a relocated bus's home row also needs the slot
+        for (int e = 0; e < nZeroImpedanceBranch; e++) {                      // zero-impedance STOCK positions: a +-dummy coupling that lands on
+        const int* z = zeroImpedanceBranchIndices + static_cast<size_t>(e) * 11;   // a relocated bus's home row also needs the slot
         if (relocOwn != nullptr) {                            // at that bus's OWN row, for the open-coupler case
             int rows[2] = {rowMap[z[0]], rowMap[z[2]]};
             for (int side = 0; side < 2; side++) {
@@ -190,8 +190,8 @@ SharedStructure* buildStructure(int n,
         }
     }
     if (depGroupOfRow != nullptr) {                       // DEPENDENT pilots: their +-dummyQ on every candidate row
-        for (int e = 0; e < nzi; e++) {
-            const int* z = ziIdx + static_cast<size_t>(e) * 11;
+        for (int e = 0; e < nZeroImpedanceBranch; e++) {
+            const int* z = zeroImpedanceBranchIndices + static_cast<size_t>(e) * 11;
             int qrows[2] = {z[1] >= 0 ? rowMap[z[1]] : -1, z[3] >= 0 ? rowMap[z[3]] : -1};
             for (int side = 0; side < 2; side++) {
                 int fr = qrows[side];
@@ -206,10 +206,10 @@ SharedStructure* buildStructure(int n,
             }
         }
     }
-    for (int e = 0; e < nzi; e++) {                      // zi alt J slots: (alt/candidate row, dummyQ col)
-            int dqCol = ziIdx[static_cast<size_t>(e) * 11 + 5];
+    for (int e = 0; e < nZeroImpedanceBranch; e++) {                      // zero-impedance alt J slots: (alt/candidate row, dummyQ col)
+            int dqCol = zeroImpedanceBranchIndices[static_cast<size_t>(e) * 11 + 5];
             for (int side = 0; side < 2; side++) {
-                int altRow = ziQAlt[e * 2 + side];
+                int altRow = zeroImpedanceBranchAlternateReactiveDestination[e * 2 + side];
                 if (altRow <= -2) {
                     int g = -2 - altRow;
                     for (int c = st->hQrPtr[g]; c < st->hQrPtr[g + 1]; c++) {
@@ -252,8 +252,8 @@ SharedStructure* buildStructure(int n,
             auto& v = hazDonors[slot];
             if (std::find(v.begin(), v.end(), donor) == v.end()) v.push_back(donor);
         };
-        for (int e = 0; e < nzi; e++) {
-            const int* z = ziIdx + static_cast<size_t>(e) * 11;
+        for (int e = 0; e < nZeroImpedanceBranch; e++) {
+            const int* z = zeroImpedanceBranchIndices + static_cast<size_t>(e) * 11;
             // A LOOP edge (out of the base tree) is registered too: its dummies are identities in the base, but a
             // scenario whose contingency re-elects OLF's tree RE-COUPLES it (GpuBatchChunkSolver), and its ZERO_V /
             // ZERO_PHI then sit on those dummy rows with a zero diagonal exactly like a tree edge's. Leaving them
@@ -319,7 +319,7 @@ SharedStructure* buildStructure(int n,
             addDonor(sQ, vA);
             addDonor(sQ, vB);
             for (int side = 0; side < 2; side++) {           // endpoint Q riding a relocation group
-                int alt = ziQAlt[e * 2 + side];
+                int alt = zeroImpedanceBranchAlternateReactiveDestination[e * 2 + side];
                 if (alt <= -2 && !st->hQrPtr.empty()) {
                     int g = -2 - alt;
                     for (int c = st->hQrPtr[g]; c < st->hQrPtr[g + 1]; c++) addDonor(sQ, st->hQrRows[c]);
@@ -344,8 +344,8 @@ SharedStructure* buildStructure(int n,
             // tree couplers (a leaf is unique to its coupler) and, among equals, the one no other
             // dummy row has taken; a bus row prefers a ZERO row no other bus row has taken.
             std::map<int, int> ziDeg;                        // bus row -> incident tree couplers
-            for (int e = 0; e < nzi; e++) {
-                const int* z = ziIdx + static_cast<size_t>(e) * 11;
+            for (int e = 0; e < nZeroImpedanceBranch; e++) {
+                const int* z = zeroImpedanceBranchIndices + static_cast<size_t>(e) * 11;
                 if (!ziSpan(z) || ziDeadSide(z) != 0) continue;
                 for (int slot : {z[0], z[2], z[1] >= 0 ? z[1] : z[6], z[3] >= 0 ? z[3] : z[7]}) {
                     if (slot >= 0) ziDeg[rowMap[slot]]++;
@@ -528,7 +528,7 @@ SharedStructure* buildStructure(int n,
     buildDistrQDest(st.get(), pos, rowMap, ndq, dqElem, dqSide, dqKind, dqWeight, dqRow, closedBranchIndices, openBranchIndices, shuntIndices, relocOwn);
 
     // ---- zero-impedance destinations: per branch the 8 dummy couplings + (tree) the 6 ZERO_V/ZERO_PHI ----
-    buildZeroImpDest(st.get(), pos, rowMap, nzi, ziIn, ziIdx, ziQAlt, relocOwn, depGroupOfRow);
+    buildZeroImpDest(st.get(), pos, rowMap, nZeroImpedanceBranch, zeroImpedanceBranchParameters, zeroImpedanceBranchIndices, zeroImpedanceBranchAlternateReactiveDestination, relocOwn, depGroupOfRow);
 
     // ---- DISTR_RHO destinations: per contribution {F row, J slot (row, r1 col)} ----
     buildDistrRhoDest(st.get(), pos, rowMap, nDistrRho, distrRhoRow, distrRhoColumn, distrRhoCoefficient);
@@ -595,7 +595,7 @@ double luBytesPerScenario(SharedStructure& st) {
         CudssCtx ds;
         CUDSS_CHECK(cudssCreate(&ds.handle));
         CUDSS_CHECK(cudssConfigCreate(&ds.config));
-        applyReorderAlg(ds.config, st.nzi > 0);
+        applyReorderAlg(ds.config, st.nZeroImpedanceBranch > 0);
         CUDSS_CHECK(cudssDataCreate(ds.handle, &ds.data));
         CUDSS_CHECK(cudssMatrixCreateCsr(&ds.matA, n, n, st.nnz, st.dRowPtr.as<int>(), nullptr,
                                          st.dColIdx.as<int>(), dVals.as<double>(), OLF_CUDSS_CSR_TYPES,
@@ -640,10 +640,10 @@ double luBytesPerScenario(SharedStructure& st) {
 }
 
 
-// VALUES-level refresh: re-upload only the per-element PARAMETER packs (closedBranchParameters/openBranchParameters/shuntParameters/hvdcAcEmulationParameters/ziIn)
+// VALUES-level refresh: re-upload only the per-element PARAMETER packs (closedBranchParameters/openBranchParameters/shuntParameters/hvdcAcEmulationParameters/zeroImpedanceBranchParameters)
 // into the SHARED structure, in place. The CSR pattern, the diagonal pairing, the index/dest packs and
 // cuDSS's symbolic ANALYSIS are UNCHANGED — they depend on the index packs and structure, not on these
-// values (a transformer tap or shunt-b move changes r1/a1/b — or a coupler's rho, ziIn — only). The
+// values (a transformer tap or shunt-b move changes r1/a1/b — or a coupler's rho, zeroImpedanceBranchParameters — only). The
 // fill kernels read in[] every iteration, so the next batched solve refactorizes on the fresh values.
 // Element COUNTS must match the cached structure (the Java side only takes this path when the index
 // packs are identical), so we copy into the EXISTING device buffers (no realloc — DeviceBuf::alloc
@@ -653,7 +653,7 @@ double luBytesPerScenario(SharedStructure& st) {
 // GpuAcStructures.rebind, so content matching never aliases stale values).
 void refreshStructureValues(SharedStructure& st, int nClosedBranch, const double* closedBranchParameters, int nOpenBranch, const double* openBranchParameters,
                             int nShunt, const double* shuntParameters, int nHvdcAcEmulation, const double* hvdcAcEmulationParameters,
-                            int nzi, const double* ziIn) {
+                            int nZeroImpedanceBranch, const double* zeroImpedanceBranchParameters) {
     auto refresh = [](Family& f, int elementCount, const double* in) {
         if (elementCount != f.elementCount) {
             throw std::runtime_error("refreshStructureValues: element count changed (not a VALUES event)");
@@ -667,11 +667,11 @@ void refreshStructureValues(SharedStructure& st, int nClosedBranch, const double
     refresh(st.openBranch, nOpenBranch, openBranchParameters);
     refresh(st.shunt, nShunt, shuntParameters);
     refresh(st.hvdcAcEmulation, nHvdcAcEmulation, hvdcAcEmulationParameters);
-    if (nzi != st.nzi) {
+    if (nZeroImpedanceBranch != st.nZeroImpedanceBranch) {
         throw std::runtime_error("refreshStructureValues: zero-impedance count changed (not a VALUES event)");
     }
-    if (nzi) {
-        CUDA_CHECK(cudaMemcpy(st.dZiIn.p, ziIn, static_cast<size_t>(nzi) * sizeof(double), cudaMemcpyHostToDevice));
+    if (nZeroImpedanceBranch) {
+        CUDA_CHECK(cudaMemcpy(st.dZeroImpedanceBranchParameters.p, zeroImpedanceBranchParameters, static_cast<size_t>(nZeroImpedanceBranch) * sizeof(double), cudaMemcpyHostToDevice));
     }
 }
 

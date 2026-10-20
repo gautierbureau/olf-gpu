@@ -44,7 +44,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class GpuSeqBaseFallbackTest {
 
-    private static Network ziMemberNetwork() {
+    private static Network zeroImpedanceMemberNetwork() {
         Network network = com.powsybl.openloadflow.network.VoltageControlNetworkFactory.createWithGeneratorRemoteControl();
         var s = network.getSubstation("s");
         var vl5 = s.newVoltageLevel().setId("vl5").setNominalV(400)
@@ -90,9 +90,9 @@ class GpuSeqBaseFallbackTest {
     void pinnedRemoteMemberRunStaysOnTheDevice() {
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
-        double[] cpu = run(ziMemberNetwork(), false);
+        double[] cpu = run(zeroImpedanceMemberNetwork(), false);
         long fallbacksBefore = GpuNewtonRaphson.CPU_FALLBACK_COUNT.get();
-        double[] gpu = run(ziMemberNetwork(), true);
+        double[] gpu = run(zeroImpedanceMemberNetwork(), true);
         assertEquals(fallbacksBefore, GpuNewtonRaphson.CPU_FALLBACK_COUNT.get(),
                 "the pinned remote gen-VC run must need no CPU fallback: its re-extracted qPct is OLF's");
         double worst = 0;

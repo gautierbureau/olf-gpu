@@ -253,7 +253,7 @@ final class GpuContingencyMapper {
             }
             if (branch.isZeroImpedance(com.powsybl.openloadflow.network.LoadFlowModel.AC)) {
                 trace(pc, "one-side open zero-impedance " + e.getKey());
-                return null;                                 // zi one-side: spanning-tree re-pick — CPU
+                return null;                                 // zero-impedance one-side: spanning-tree re-pick — CPU
             }
             out.add(new com.powsybl.openloadflow.ac.solver.gpu.batch.plan.BatchContingency.SideOpen(branch,
                     e.getValue() == DisabledBranchStatus.SIDE_1 ? 1 : 2));
@@ -272,7 +272,7 @@ final class GpuContingencyMapper {
                 }
                 if (branch.isZeroImpedance(com.powsybl.openloadflow.network.LoadFlowModel.AC)) {
                     trace(pc, "lost bus " + busId + " has zero-impedance incident " + branch.getId());
-                    return null;                             // zi incident: spanning-tree re-pick — CPU
+                    return null;                             // zero-impedance incident: spanning-tree re-pick — CPU
                 }
                 if (branch.getBus1() == null || branch.getBus2() == null) {
                     continue;                                // already open-ended — nothing carries flow
@@ -317,12 +317,12 @@ final class GpuContingencyMapper {
      *  2026-09-08; the per-element mask carries any count and the validator rejects fragmenting
      *  sets), or null when the branch part is out of batch scope. Generators are allowed alongside
      *  (branch+generator combos batch since 2026-07-17); buses and loads are not. */
-    static List<LfBranch> closedBranchOutages(LfNetwork net, PropagatedContingency pc, List<LfBranch> ziOutages) {
-        java.util.Set<String> ziIds = ziOutages.stream().map(LfBranch::getId)
+    static List<LfBranch> closedBranchOutages(LfNetwork net, PropagatedContingency pc, List<LfBranch> zeroImpedanceBranchOutages) {
+        java.util.Set<String> zeroImpedanceBranchIds = zeroImpedanceBranchOutages.stream().map(LfBranch::getId)
                 .collect(java.util.stream.Collectors.toSet());
         List<LfBranch> branches = new ArrayList<>(pc.getBranchIdsToOpen().size());
         for (Map.Entry<String, DisabledBranchStatus> e : pc.getBranchIdsToOpen().entrySet()) {
-            if (ziIds.contains(e.getKey())) {
+            if (zeroImpedanceBranchIds.contains(e.getKey())) {
                 continue;
             }
             LfBranch branch = net.getBranchById(e.getKey());

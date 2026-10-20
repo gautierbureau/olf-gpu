@@ -342,7 +342,7 @@ abstract class AbstractGpuSaTest extends AbstractOpenSecurityAnalysisTest {
         com.powsybl.security.SecurityAnalysisParameters sap = new com.powsybl.security.SecurityAnalysisParameters();
         // Node-breaker networks: contingency PROPAGATION opens the target's breakers too (switches are
         // LfBranches in breaker mode), tripping the batch's >2-branch guard — keep the strategy tests
-        // on the un-propagated contingency shape (switch outages as zi-element outages are future scope).
+        // on the un-propagated contingency shape (switch outages as zero-impedance-element outages are future scope).
         sap.addExtension(OpenSecurityAnalysisParameters.class,
                 new OpenSecurityAnalysisParameters().setContingencyPropagation(false));
         sap.setLoadFlowParameters(lfp);

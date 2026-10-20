@@ -153,7 +153,7 @@ public final class GpuBatchContingencyValidator {
         // and the DEAD-STUB shape (one side left islanded) is the one the frozen-rows machinery
         // reproduces exactly. A switch whose two sides BOTH stay in the main component would
         // require re-picking the zero-impedance group's spanning tree per scenario — CPU.
-        closed.addAll(contingency.outagedZiBranches());
+        closed.addAll(contingency.outagedZeroImpedanceBranches());
         if (closed.isEmpty()) {
             return Qualification.ok(contingency);
         }

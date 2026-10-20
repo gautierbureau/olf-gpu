@@ -33,12 +33,12 @@ using namespace powsybl::openloadflow;
 namespace olfgpu {
 
 void buildZeroImpDest(SharedStructure* st, const CsrPattern& pos, const std::vector<int>& rowMap,
-                      int nzi, const double* ziIn, const int* ziIdx, const int* ziQAlt,
+                      int nZeroImpedanceBranch, const double* zeroImpedanceBranchParameters, const int* zeroImpedanceBranchIndices, const int* zeroImpedanceBranchAlternateReactiveDestination,
                       const int* relocOwn, const int* depGroupOfRow) {
-    st->nzi = nzi;
-    if (nzi > 0) {
-        std::vector<int> ziDest(static_cast<size_t>(nzi) * 14, -1);
-        // zi dynamic Q-routing (ob/zi channels): 4 q slots per element {F side1, F side2, J side1,
+    st->nZeroImpedanceBranch = nZeroImpedanceBranch;
+    if (nZeroImpedanceBranch > 0) {
+        std::vector<int> zeroImpedanceBranchDestination(static_cast<size_t>(nZeroImpedanceBranch) * 14, -1);
+        // zero-impedance dynamic Q-routing (ob/zero-impedance channels): 4 q slots per element {F side1, F side2, J side1,
         // J side2} with the same alt/select/group encodings as the cb/sh families. A GROUP side's
         // FROZEN F dest is re-pointed at the fallback row (the pilot's own row) so the qBuf
         // diagnostic never lands the pilot's dummy-Q on a member row.
@@ -46,20 +46,20 @@ void buildZeroImpDest(SharedStructure* st, const CsrPattern& pos, const std::vec
         // 4..7 with the same meaning. The P half exists only for the COUPLER-TREE stock-placement fallback —
         // a coupler in a CHAIN emits its +-dummyP into its parent's DUMMY_P row, so opening the parent would
         // strand it (three of the four surviving divergences open two relocated couplers).
-        std::vector<int> ziAlt(static_cast<size_t>(nzi) * 8, -1);
-        std::vector<int> ziSel(static_cast<size_t>(nzi) * 8, -1);
-        std::vector<int> ziGrp(static_cast<size_t>(nzi) * 8, -1);
-        std::vector<int> ziOff(static_cast<size_t>(nzi) * 8, -1);
+        std::vector<int> ziAlt(static_cast<size_t>(nZeroImpedanceBranch) * 8, -1);
+        std::vector<int> ziSel(static_cast<size_t>(nZeroImpedanceBranch) * 8, -1);
+        std::vector<int> ziGrp(static_cast<size_t>(nZeroImpedanceBranch) * 8, -1);
+        std::vector<int> zeroImpedanceBranchOpenOverrides(static_cast<size_t>(nZeroImpedanceBranch) * 8, -1);
         std::vector<int> ziPool;
-        std::vector<char> ziDep(static_cast<size_t>(nzi) * 8, 0);
+        std::vector<char> ziDep(static_cast<size_t>(nZeroImpedanceBranch) * 8, 0);
         bool anyDyn = false;
-        for (int e = 0; e < nzi; e++) {
-            const int* z = ziIdx + static_cast<size_t>(e) * 11;
+        for (int e = 0; e < nZeroImpedanceBranch; e++) {
+            const int* z = zeroImpedanceBranchIndices + static_cast<size_t>(e) * 11;
             // -1 Q row = a DISTR_Q controller whose reactive balance is suppressed (its dummyQ joins the
             // DISTR_Q rows via kind 3, not its own Q balance) — skip the coupling there.
             int b1P = rowMap[z[0]], b2P = rowMap[z[2]];
             int b1Q = z[1] >= 0 ? rowMap[z[1]] : -1, b2Q = z[3] >= 0 ? rowMap[z[3]] : -1;
-            int* dd = ziDest.data() + static_cast<size_t>(e) * 14;
+            int* dd = zeroImpedanceBranchDestination.data() + static_cast<size_t>(e) * 14;
             dd[0] = -2 - b1P;                                // F bus1 P (+dummyP)
             dd[1] = -2 - b2P;                                // F bus2 P (-dummyP)
             dd[2] = b1Q >= 0 ? -2 - b1Q : -1;                // F bus1 Q (+dummyQ), skip if suppressed
@@ -70,18 +70,18 @@ void buildZeroImpDest(SharedStructure* st, const CsrPattern& pos, const std::vec
             dd[7] = b2Q >= 0 ? pos.at(b2Q, z[5]) : -1;       // J(bus2 Q, dummyQ)
             int frozenQ[2] = {b1Q, b2Q};
             for (int side = 0; side < 2; side++) {
-                int altRow = ziQAlt[e * 2 + side];
+                int altRow = zeroImpedanceBranchAlternateReactiveDestination[e * 2 + side];
                 int fSlot = static_cast<int>(e) * 8 + side;
                 int jSlot = static_cast<int>(e) * 8 + 2 + side;
                 if (altRow <= -2) {                          // GROUP relocation: one slot per candidate
                     int g = -2 - altRow;
                     ziGrp[fSlot] = g;
-                    ziOff[fSlot] = static_cast<int>(ziPool.size());
+                    zeroImpedanceBranchOpenOverrides[fSlot] = static_cast<int>(ziPool.size());
                     for (int c = st->hQrPtr[g]; c < st->hQrPtr[g + 1]; c++) {
                         ziPool.push_back(-2 - st->hQrRows[c]);
                     }
                     ziGrp[jSlot] = g;
-                    ziOff[jSlot] = static_cast<int>(ziPool.size());
+                    zeroImpedanceBranchOpenOverrides[jSlot] = static_cast<int>(ziPool.size());
                     for (int c = st->hQrPtr[g]; c < st->hQrPtr[g + 1]; c++) {
                         ziPool.push_back(pos.at(st->hQrRows[c], z[5]));
                     }
@@ -101,11 +101,11 @@ void buildZeroImpDest(SharedStructure* st, const CsrPattern& pos, const std::vec
                     // device's row did not, 0.465 / 0.338 kV and +-2 violations in every run.
                     int own = relocOwn[altRow];
                     ziGrp[fSlot] = altRow;                   // the selector is the dummy row itself
-                    ziOff[fSlot] = -static_cast<int>(ziPool.size()) - 1;
+                    zeroImpedanceBranchOpenOverrides[fSlot] = -static_cast<int>(ziPool.size()) - 1;
                     ziPool.push_back(-2 - own);
                     ziPool.push_back(-2 - altRow);
                     ziGrp[jSlot] = altRow;
-                    ziOff[jSlot] = -static_cast<int>(ziPool.size()) - 1;
+                    zeroImpedanceBranchOpenOverrides[jSlot] = -static_cast<int>(ziPool.size()) - 1;
                     ziPool.push_back(pos.at(own, z[5]));
                     ziPool.push_back(pos.at(altRow, z[5]));
                     anyDyn = true;
@@ -114,12 +114,12 @@ void buildZeroImpDest(SharedStructure* st, const CsrPattern& pos, const std::vec
                     int own = stockAltRow(frozenQ[side], altRow, relocOwn);
                     int dg = depGroupOf(frozenQ[side], own, relocOwn, depGroupOfRow);
                     ziGrp[fSlot] = dg;
-                    ziOff[fSlot] = static_cast<int>(ziPool.size());
+                    zeroImpedanceBranchOpenOverrides[fSlot] = static_cast<int>(ziPool.size());
                     for (int c = st->hQrPtr[dg]; c < st->hQrPtr[dg + 1]; c++) {
                         ziPool.push_back(-2 - st->hQrRows[c]);
                     }
                     ziGrp[jSlot] = dg;
-                    ziOff[jSlot] = static_cast<int>(ziPool.size());
+                    zeroImpedanceBranchOpenOverrides[jSlot] = static_cast<int>(ziPool.size());
                     for (int c = st->hQrPtr[dg]; c < st->hQrPtr[dg + 1]; c++) {
                         ziPool.push_back(pos.at(st->hQrRows[c], z[5]));
                     }
@@ -179,15 +179,15 @@ void buildZeroImpDest(SharedStructure* st, const CsrPattern& pos, const std::vec
                 dd[13] = pos.at(zpRow, z[9]);                // J(ZERO_PHI, ph2)
             }
         }
-        st->dZiIn.upload(ziIn, nzi * sizeof(double));
-        st->dZiIdx.upload(ziIdx, static_cast<size_t>(nzi) * 11 * sizeof(int));
-        st->dZiDest.upload(ziDest.data(), ziDest.size() * sizeof(int));
+        st->dZeroImpedanceBranchParameters.upload(zeroImpedanceBranchParameters, nZeroImpedanceBranch * sizeof(double));
+        st->dZeroImpedanceBranchIndices.upload(zeroImpedanceBranchIndices, static_cast<size_t>(nZeroImpedanceBranch) * 11 * sizeof(int));
+        st->dZeroImpedanceBranchDestination.upload(zeroImpedanceBranchDestination.data(), zeroImpedanceBranchDestination.size() * sizeof(int));
         if (anyDyn) {
             st->dZiAltDest.upload(ziAlt.data(), ziAlt.size() * sizeof(int));
             st->dZiSelRow.upload(ziSel.data(), ziSel.size() * sizeof(int));
             if (!ziPool.empty()) {
                 st->dZiRelocGroup.upload(ziGrp.data(), ziGrp.size() * sizeof(int));
-                st->dZiRelocOff.upload(ziOff.data(), ziOff.size() * sizeof(int));
+                st->dZiRelocOff.upload(zeroImpedanceBranchOpenOverrides.data(), zeroImpedanceBranchOpenOverrides.size() * sizeof(int));
                 st->dZiRelocPool.upload(ziPool.data(), ziPool.size() * sizeof(int));
                 st->dZiRelocDep.upload(ziDep.data(), ziDep.size());
             }

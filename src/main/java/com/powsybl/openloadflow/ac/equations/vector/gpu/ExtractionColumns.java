@@ -85,7 +85,7 @@ record ExtractionColumns(int[] phiCol, int[] vCol, int[] branchRhoCol, int[] bra
         // equations move onto its parent coupler's dummy columns, so every row of a coupler chain keeps a
         // structurally non-zero diagonal — and the tables below must name the row that ends up hosting each
         // member's reactive balance, which for a relocated member is that dummy column and no longer its own V row.
-        int[][] ziTreeEdges = GpuAcRowIndexing.ziTreeRelocation(network, es, phiCol, vCol, qRow, dummyPCol, dummyQCol);
+        int[][] spanningTreeEdges = GpuAcRowIndexing.ziTreeRelocation(network, es, phiCol, vCol, qRow, dummyPCol, dummyQCol);
         // GROUP pilot-Q relocation candidates (plan-A6): a shared transformer-VC pilot's reactive
         // balance rides on the FREE member's rho column — "first enabled", which an outage or clamp
         // of the free member RE-PICKS per scenario. Encode such pilots' alternate as -2-groupId and
@@ -130,14 +130,14 @@ record ExtractionColumns(int[] phiCol, int[] vCol, int[] branchRhoCol, int[] bra
         // FREE member's BUS_V row — "first controller-enabled", which an RL pin of the free member
         // RE-PICKS per scenario. Same candidate table + in-kernel mode-scan select as the TVC
         // groups above: [pilot v row (fallback = group control lost), member v cols in merged
-        // order]. Since the ob/zi alternate-dest channels landed, half-open and zero-impedance q
+        // order]. Since the ob/zero-impedance alternate-dest channels landed, half-open and zero-impedance q
         // terms at the pilot ride the relocation too — no branch-shape guard remains. SINGLETON
         // groups (one remote controller) get a table too since 2026-09-08: their candidate list
         // [pilot fallback, the member] is structurally a 2-member table, and the only member's pin
         // IS the all-pinned corner (updatePilotVeqBatch flips the pilot's V identity) — this
         // retired the last remote-pin-dynamics whole-run gate (table-less pinnable free member).
         java.util.Set<Integer> qrPilotBuses = new java.util.HashSet<>();
-        addRemoteVoltageControlGroups(network, es, ziTreeEdges, qrPilotBuses, dummyQCol, vCol, qrPtr, qrRows,
+        addRemoteVoltageControlGroups(network, es, spanningTreeEdges, qrPilotBuses, dummyQCol, vCol, qrPtr, qrRows,
                                       qRowAlt, qrDepBase, qrBaseTargetRow, depGroupOfRow);
         qrPtr.add(qrRows.size());
 
@@ -148,7 +148,7 @@ record ExtractionColumns(int[] phiCol, int[] vCol, int[] branchRhoCol, int[] bra
         // (plan-B4: the pilot's Q follows the mode-scan carrier, so the free member's row is free
         // to host its own Q balance when pinned); without a group it keeps the structure-frozen
         // pilot-carrier encoding and free pins stay whole-run CPU.
-        // Every member is canonical since the ob/zi alternate-dest channels: a pinned (mode 4)
+        // Every member is canonical since the ob/zero-impedance alternate-dest channels: a pinned (mode 4)
         // member's half-open charging and dummy-Q terms follow the same per-scenario routing as
         // its cb/sh terms (the pre-channel gap measured 3.3e-4 kV on a pinned member with one
         // open line, then guarded — the guard is gone).
@@ -213,8 +213,8 @@ record ExtractionColumns(int[] phiCol, int[] vCol, int[] branchRhoCol, int[] bra
                 ziDeadEnd[br.getNum()] = GpuAcRowIndexing.ziDeadEndSide(es, br, phiCol, vCol, qRow);
             }
         }
-        int[] ziParentEdge = ziTreeEdges[0];
-        int[] ziChildBus = ziTreeEdges[1];
+        int[] ziParentEdge = spanningTreeEdges[0];
+        int[] ziChildBus = spanningTreeEdges[1];
         int[] pRow = phiCol.clone();
         for (LfBus bus : network.getBuses()) {
             int bn = bus.getNum();
@@ -255,7 +255,7 @@ record ExtractionColumns(int[] phiCol, int[] vCol, int[] branchRhoCol, int[] bra
      *  [pilot V row, member V columns in merged order]; adds each group's pilot to {@code qrPilotBuses}. */
     private static void addRemoteVoltageControlGroups(final LfNetwork network,
                                                        final EquationSystem<AcVariableType, AcEquationType> es,
-                                                       final int[][] ziTreeEdges,
+                                                       final int[][] spanningTreeEdges,
                                                        final java.util.Set<Integer> qrPilotBuses,
                                                        final int[] dummyQCol, final int[] vCol,
                                                        final List<Integer> qrPtr, final List<Integer> qrRows,
@@ -290,12 +290,12 @@ record ExtractionColumns(int[] phiCol, int[] vCol, int[] branchRhoCol, int[] bra
             // BUS_V(VL-6003_1) at 6.5e+02 and on the empty pilot row BUS_V(VL-6003_0) at 1.09e+02, every iteration.
             List<Integer> memberRows = new ArrayList<>();
             for (LfBus m : gvc.getMergedControllerElements()) {
-                memberRows.add(GpuAcRowIndexing.relocatedQRow(m.getNum(), ziTreeEdges[0], dummyQCol, vCol));
+                memberRows.add(GpuAcRowIndexing.relocatedQRow(m.getNum(), spanningTreeEdges[0], dummyQCol, vCol));
             }
             int g = qrPtr.size();
             qrPtr.add(qrRows.size());
             // candidate 0 = the FALLBACK (control lost), the pilot's own reactive row — relocated like any other
-            qrRows.add(GpuAcRowIndexing.relocatedQRow(bus.getNum(), ziTreeEdges[0], dummyQCol, vCol));
+            qrRows.add(GpuAcRowIndexing.relocatedQRow(bus.getNum(), spanningTreeEdges[0], dummyQCol, vCol));
             qrRows.addAll(memberRows);
             qRowAlt[bus.getNum()] = -2 - g;
             qrPilotBuses.add(bus.getNum());
@@ -317,7 +317,7 @@ record ExtractionColumns(int[] phiCol, int[] vCol, int[] branchRhoCol, int[] bra
                 }
                 int dg = qrPtr.size();
                 qrPtr.add(qrRows.size());
-                int depQRow = GpuAcRowIndexing.relocatedQRow(dn, ziTreeEdges[0], dummyQCol, vCol);
+                int depQRow = GpuAcRowIndexing.relocatedQRow(dn, spanningTreeEdges[0], dummyQCol, vCol);
                 qrRows.add(depQRow);
                 qrRows.addAll(memberRows);
                 qrDepBase.add(g);

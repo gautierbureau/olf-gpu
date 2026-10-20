@@ -98,5 +98,5 @@ public final class BatchSolveNative {
                                                        int[] rlStateIn, int[] rlStateOut,
                                                        int[] r1OvSlotElem, double[] r1OvVal,
                                                        int maxOuterIterations, int maxPqPvSwitch, int dsRejectResidual, int skipRlPhase,
-                                                       int nziBase, int[] ziOnSlotElem, int[] ziOffSlotElem);
+                                                       int nBaseClosedZeroImpedanceBranches, int[] zeroImpedanceBranchCloseScenarioElement, int[] zeroImpedanceBranchOpenScenarioElement);
 }

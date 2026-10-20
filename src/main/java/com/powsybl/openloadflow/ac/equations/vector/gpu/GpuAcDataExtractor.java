@@ -82,8 +82,8 @@ public final class GpuAcDataExtractor {
     public static GpuAcData extract(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
                                     boolean distributedSlack, boolean reactiveLimits,
                                     java.util.Set<String> baseOpenBranchIds,
-                                    java.util.Set<String> baseOpenZiBranchIds) {
-        return extract(network, es, distributedSlack, reactiveLimits, baseOpenBranchIds, baseOpenZiBranchIds,
+                                    java.util.Set<String> baseOpenZeroImpedanceBranchIdList) {
+        return extract(network, es, distributedSlack, reactiveLimits, baseOpenBranchIds, baseOpenZeroImpedanceBranchIdList,
                 GpuDsParams.DEFAULT);
     }
 
@@ -114,10 +114,10 @@ public final class GpuAcDataExtractor {
     public static GpuAcData extract(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
                                     boolean distributedSlack, boolean reactiveLimits,
                                     java.util.Set<String> baseOpenBranchIds,
-                                    java.util.Set<String> baseOpenZiBranchIds, GpuDsParams dsParams) {
+                                    java.util.Set<String> baseOpenZeroImpedanceBranchIdList, GpuDsParams dsParams) {
         GpuAcValidation.validate(es);
         ExtractionColumns columns = ExtractionColumns.of(network, es);
-        GpuAcFamilyPacker.Packs family = GpuAcFamilyPacker.pack(network, columns, baseOpenBranchIds, baseOpenZiBranchIds);
+        GpuAcFamilyPacker.Packs family = GpuAcFamilyPacker.pack(network, columns, baseOpenBranchIds, baseOpenZeroImpedanceBranchIdList);
         ReactiveLimitEntries rl = ReactiveLimitsPacker.reactiveLimitsPack(network, es, columns, reactiveLimits);
         DistrQPacker.Pack dq = DistrQPacker.distrQPack(network, es, columns, family, rl);
         LinearDistributionTerms distrRho = DistrRhoPacker.distrRhoPack(network, es, columns);
@@ -161,15 +161,15 @@ public final class GpuAcDataExtractor {
                 new ElementPack(GpuAcArrays.flatD(family.shuntParameters(), 2), GpuAcArrays.flatI(family.shuntIndices(), 5)),
                 new ElementPack(GpuAcArrays.flatD(family.hvdcAcEmulationParameters(), 5), GpuAcArrays.flatI(family.hvdcAcEmulationIndices(), 4)),
                 dq.terms(), dq.members(),
-                new ZeroImpedanceBranchPack(GpuAcArrays.flatD(family.ziIn(), 1), GpuAcArrays.flatI(family.ziIdx(), 11),
-                        family.ziNums().stream().mapToInt(Integer::intValue).toArray(), GpuAcArrays.flatI(family.ziQAlt(), 2)),
+                new ZeroImpedanceBranchPack(GpuAcArrays.flatD(family.zeroImpedanceBranchParameters(), 1), GpuAcArrays.flatI(family.zeroImpedanceBranchIndices(), 11),
+                        family.zeroImpedanceBranchNums().stream().mapToInt(Integer::intValue).toArray(), GpuAcArrays.flatI(family.zeroImpedanceBranchAlternateReactiveDestination(), 2)),
                 distrRho, distrShuntB,
                 rl,
                 rmq, new VoltageRowParameters(rowSlope, rowNominalV),
                 ds,
                 new BaseOpenBranches(family.baseOpenCb().stream().mapToInt(Integer::intValue).toArray(),
-                        family.baseOpenZi().stream().mapToInt(Integer::intValue).toArray(),
-                        family.baseOpenZiNums().stream().mapToInt(Integer::intValue).toArray()),
+                        family.baseOpenZeroImpedanceBranches().stream().mapToInt(Integer::intValue).toArray(),
+                        family.baseOpenZeroImpedanceBranchNums().stream().mapToInt(Integer::intValue).toArray()),
                 new ElementPack(GpuAcArrays.flatD(family.loadModelParameters(), 3), GpuAcArrays.flatI(family.loadModelIndices(), 2)),
                 new ReactiveRelocationCandidates(columns.qrPtr(), columns.qrRows(), columns.qrDepBase(),
                         columns.qrBaseTargetRow(), columns.depGroupOfRow()));

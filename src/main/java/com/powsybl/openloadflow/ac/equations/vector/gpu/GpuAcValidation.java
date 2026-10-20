@@ -103,7 +103,7 @@ final class GpuAcValidation {
             }
             for (int elementNum = 0; elementNum < arr.getElementCount(); elementNum++) {
                 for (SingleEquationTerm<AcVariableType, AcEquationType> t : arr.getSingleEquationTerms(elementNum)) {
-                    // a VariableEquationTerm is a zero-impedance DUMMY_P/Q coupling term (GPU zi family)
+                    // a VariableEquationTerm is a zero-impedance DUMMY_P/Q coupling term (GPU zero-impedance family)
                     if (t.isActive() && !SUPPORTED_PQ_TERMS.contains(t.getClass())
                             && !isDummyCouplingTerm(t)) {
                         throw new PowsyblException("GPU AC solver: unsupported equation term "

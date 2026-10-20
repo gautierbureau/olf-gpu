@@ -422,7 +422,7 @@ class GpuSaContingencyKindsTest extends AbstractGpuSaTest {
         // #33: with contingency PROPAGATION on (production default) a node-breaker line outage also
         // opens the target's breakers — switches are zero-impedance LfBranches, so the naive shape is
         // "3 branches" and nothing batched at all on a node-breaker network. The switch part is now a
-        // per-scenario zi-element outage: the dead stub it leaves behind is frozen by the existing
+        // per-scenario zero-impedance-element outage: the dead stub it leaves behind is frozen by the existing
         // islanding machinery, and the impedant part still obeys the <=2-branch mask rule.
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");

@@ -140,7 +140,7 @@ public final class GpuAcActivationExtractor {
                 // row, this left the row at mode 1, so the mode-4 gate in fillDistrQBatch never
                 // fired and the existence-keyed DISTR_Q kind-3 terms stayed live ALONGSIDE the
                 // zero-impedance family's direct +-DUMMY_Q into the same row. The two cancel: on
-                // rte6515 BUS-24_COUPLER_1 the kind-3 pair summed to +1.0 against the zi coupling's
+                // rte6515 BUS-24_COUPLER_1 the kind-3 pair summed to +1.0 against the zero-impedance coupling's
                 // -1.0, leaving the coupler's DUMMY_Q in NO equation. 45 such columns at 2000
                 // busbar sections, which is what collapsed batching above ~1000.
                 // A pilot that is one of its OWN controllers gets mode 4 whenever its own Q balance

@@ -38,9 +38,9 @@ final class ActionSeed {
         final RunScratch rs = ctx.rs();
         for (LfBranch reclosed : contingencies.get(ci).reclosedBranches()) {
             if (reclosed.isZeroImpedance(com.powsybl.openloadflow.network.LoadFlowModel.AC)) {
-                Integer ze = rs.ziElemByBranchNumChunk.get(reclosed.getNum());
-                rs.ziOnSlotElemList.add(s);
-                rs.ziOnSlotElemList.add(ze);
+                Integer ze = rs.zeroImpedanceElementByBranchNumChunk.get(reclosed.getNum());
+                rs.zeroImpedanceBranchCloseScenarioElementList.add(s);
+                rs.zeroImpedanceBranchCloseScenarioElementList.add(ze);
                 // flip the two dummy rows from identity (pinned 0) to the ZERO_V/ZERO_PHI
                 // coupling; targets stay 0 (switch: rho=1, phase shift 0)
                 int dpRow = gpuData.zeroImpedanceBranch().indices()[ze * 11 + 4];

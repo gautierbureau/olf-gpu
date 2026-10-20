@@ -60,7 +60,7 @@ public final class ZeroImpedanceTreeReplay {
     private final LfNetwork network;
     private final Map<LfBus, Graph<LfBus, LfBranch>> netOf = new HashMap<>();
     private final Set<LfBranch> inTree = new HashSet<>();
-    private final List<LfBranch> ziBranches;
+    private final List<LfBranch> zeroImpedanceBranches;
 
     public ZeroImpedanceTreeReplay(LfNetwork network) {
         this.network = network;
@@ -69,8 +69,8 @@ public final class ZeroImpedanceTreeReplay {
             Graphs.addGraph(copy, zn.getGraph());           // same vertex and edge iteration order
             register(copy);
         }
-        this.ziBranches = network.getBranches().stream().filter(b -> b.isZeroImpedance(AC)).toList();
-        for (LfBranch b : ziBranches) {
+        this.zeroImpedanceBranches = network.getBranches().stream().filter(b -> b.isZeroImpedance(AC)).toList();
+        for (LfBranch b : zeroImpedanceBranches) {
             if (b.isSpanningTreeEdge(AC)) {
                 inTree.add(b);
             }
@@ -79,7 +79,7 @@ public final class ZeroImpedanceTreeReplay {
 
     /** The zero-impedance branches out of OLF's tree right now (branch order), the base's included. */
     List<LfBranch> nonTree() {
-        return ziBranches.stream().filter(b -> !inTree.contains(b)).toList();
+        return zeroImpedanceBranches.stream().filter(b -> !inTree.contains(b)).toList();
     }
 
     /**

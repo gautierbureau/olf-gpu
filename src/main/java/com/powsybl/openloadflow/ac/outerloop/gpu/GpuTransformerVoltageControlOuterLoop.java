@@ -512,7 +512,7 @@ public final class GpuTransformerVoltageControlOuterLoop {
         for (int s = 0; s < chunkSize; s++) {
             if (s < scenarios.size()) {
                 List<LfBranch> outaged = new ArrayList<>(scenarios.get(s).outagedBranches());
-                outaged.addAll(scenarios.get(s).outagedZiBranches());
+                outaged.addAll(scenarios.get(s).outagedZeroImpedanceBranches());
                 fz.builder().fill(outaged, minMask, s * stride, maxMask, s * stride);
             } else {
                 System.arraycopy(fz.minMask(), 0, minMask, s * stride, stride);

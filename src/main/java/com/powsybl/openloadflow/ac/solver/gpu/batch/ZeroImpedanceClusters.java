@@ -33,7 +33,7 @@ final class ZeroImpedanceClusters {
      *  rebuilds them in its first Newton step - on network.xiidm an entry residual of 14.988 pu, the same
      *  for every contingency, against 0.16 when they are carried. The device starts the same way, so both
      *  arms take the same first step from the same state. */
-    static double[] zeroZiFlows(GpuAcData gpuData, double[] baseState) {
+    static double[] zeroZeroImpedanceBranchFlows(GpuAcData gpuData, double[] baseState) {
         int[] zi = gpuData.zeroImpedanceBranch().indices();
         if (zi == null || zi.length == 0) {
             return baseState;
@@ -65,25 +65,25 @@ final class ZeroImpedanceClusters {
      * the first solve, the rounding of which moved the slack mismatch by +-0.058 MW from one run to the next
      * (1.041 MW distributed in one run where OLF distributes nothing).
      */
-    static boolean holdsClusterVoltage(String contingencyId, LfBus child, List<LfBranch> outagedZi,
-                                       java.util.Map<Integer, Integer> ziElemByNum, int[] ziIdx, int[] frozenRows) {
+    static boolean holdsClusterVoltage(String contingencyId, LfBus child, List<LfBranch> outagedZeroImpedanceBranch,
+                                       java.util.Map<Integer, Integer> zeroImpedanceElementByNum, int[] zeroImpedanceBranchIndices, int[] frozenRows) {
         java.util.Set<Integer> frozen = new java.util.HashSet<>();
         for (int r : frozenRows) {
             frozen.add(r);
         }
-        java.util.Set<LfBranch> opened = new java.util.HashSet<>(outagedZi);
+        java.util.Set<LfBranch> opened = new java.util.HashSet<>(outagedZeroImpedanceBranch);
         List<LfBus> cluster = new ArrayList<>(List.of(child));
         java.util.Set<LfBus> seen = new java.util.HashSet<>(cluster);
         for (int k = 0; k < cluster.size(); k++) {
             LfBus b = cluster.get(k);
             for (LfBranch br : b.getBranches()) {
-                Integer ze = ziElemByNum.get(br.getNum());
+                Integer ze = zeroImpedanceElementByNum.get(br.getNum());
                 if (ze == null || opened.contains(br) || br.isDisabled()) {
                     continue;
                 }
                 boolean fromBus1 = br.getBus1() == b;
                 LfBus other = fromBus1 ? br.getBus2() : br.getBus1();
-                int otherVRow = ziIdx[ze * 11 + (fromBus1 ? 7 : 6)];
+                int otherVRow = zeroImpedanceBranchIndices[ze * 11 + (fromBus1 ? 7 : 6)];
                 if (other == null || other.isDisabled() || frozen.contains(otherVRow) || !seen.add(other)) {
                     continue;
                 }
@@ -109,7 +109,7 @@ final class ZeroImpedanceClusters {
                 .orElse(true);
     }
 
-    /** The zero-impedance elements OUT of the base spanning tree (ziIdx slot 10 is 0), in element order. */
+    /** The zero-impedance elements OUT of the base spanning tree (zeroImpedanceBranchIndices slot 10 is 0), in element order. */
     static int[] baseNonTreeElements(GpuAcData gpuData) {
         int[] zIdx = gpuData.zeroImpedanceBranch().indices();
         int nz = gpuData.zeroImpedanceBranch().branchNum() == null ? 0 : gpuData.zeroImpedanceBranch().branchNum().length;
@@ -119,13 +119,13 @@ final class ZeroImpedanceClusters {
                 cnt++;
             }
         }
-        int[] baseNonTreeZi = new int[cnt];
+        int[] baseNonSpanningTreeBranches = new int[cnt];
         cnt = 0;
         for (int zb = 0; zb < nz; zb++) {
             if (zIdx[zb * 11 + 10] == 0) {
-                baseNonTreeZi[cnt++] = zb;
+                baseNonSpanningTreeBranches[cnt++] = zb;
             }
         }
-        return baseNonTreeZi;
+        return baseNonSpanningTreeBranches;
     }
 }

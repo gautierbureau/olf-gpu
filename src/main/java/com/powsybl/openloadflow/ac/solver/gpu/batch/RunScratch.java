@@ -42,12 +42,12 @@ final class RunScratch {
     // override (the device scatter has no ordering), the lookup that enforces that must not be
     // a linear scan, and the index must never outlive the entries — see GpuBatchOverrides.
     final GpuBatchOverrides overrides;
-    final java.util.Map<Integer, Integer> ziElemByBranchNumChunk;
-    final int nziBase;
-    final java.util.Map<Integer, Integer> ziElemByNumAll;
-    final List<Integer> ziOffSlotElemList; // per-scenario zi-element outages (switch opens)
-    final List<Integer> ziOnSlotElemList;  // per-scenario zi-element enables (switch closes)
-    final List<Integer> ziTreeSlotElemValList;   // {slot, ziElement, isTree} where OLF's tree moved
+    final java.util.Map<Integer, Integer> zeroImpedanceElementByBranchNumChunk;
+    final int nBaseClosedZeroImpedanceBranches;
+    final java.util.Map<Integer, Integer> zeroImpedanceElementByNumAll;
+    final List<Integer> zeroImpedanceBranchOpenScenarioElementList; // per-scenario zero-impedance-element outages (switch opens)
+    final List<Integer> zeroImpedanceBranchCloseScenarioElementList;  // per-scenario zero-impedance-element enables (switch closes)
+    final List<Integer> spanningTreeOverrideScenarioElementValueList;   // {slot, zeroImpedanceElement, isTree} where OLF's tree moved
     final List<Integer> shuntAdmittanceOverrideScenarioElementList;  // per-scenario shunt admittance overrides
     final List<Double> shuntAdmittanceOverrideDeltaList;
     final List<Integer> r1OvSlotElemList;  // per-scenario fixed-ratio tap overrides
@@ -86,15 +86,15 @@ final class RunScratch {
         }
         this.rowModePerScenario = new int[chunkSize][];
         this.overrides = new GpuBatchOverrides();
-        this.ziElemByBranchNumChunk = gpuData.baseOpenBranches().zeroImpedanceElementByBranchNum();
-        this.nziBase = gpuData.zeroImpedanceBranch().indices().length / 11 - gpuData.baseOpenBranches().zeroImpedanceElements().length;
-        this.ziElemByNumAll = new java.util.HashMap<>();
+        this.zeroImpedanceElementByBranchNumChunk = gpuData.baseOpenBranches().zeroImpedanceElementByBranchNum();
+        this.nBaseClosedZeroImpedanceBranches = gpuData.zeroImpedanceBranch().indices().length / 11 - gpuData.baseOpenBranches().zeroImpedanceElements().length;
+        this.zeroImpedanceElementByNumAll = new java.util.HashMap<>();
         for (int z = 0; z < gpuData.zeroImpedanceBranch().indices().length / 11; z++) {
-            ziElemByNumAll.put(gpuData.zeroImpedanceBranch().branchNum()[z], z);
+            zeroImpedanceElementByNumAll.put(gpuData.zeroImpedanceBranch().branchNum()[z], z);
         }
-        this.ziOffSlotElemList = new ArrayList<>();
-        this.ziOnSlotElemList = new ArrayList<>();
-        this.ziTreeSlotElemValList = new ArrayList<>();
+        this.zeroImpedanceBranchOpenScenarioElementList = new ArrayList<>();
+        this.zeroImpedanceBranchCloseScenarioElementList = new ArrayList<>();
+        this.spanningTreeOverrideScenarioElementValueList = new ArrayList<>();
         this.shuntAdmittanceOverrideScenarioElementList = new ArrayList<>();
         this.shuntAdmittanceOverrideDeltaList = new ArrayList<>();
         this.r1OvSlotElemList = new ArrayList<>();
@@ -112,9 +112,9 @@ final class RunScratch {
 
     /** Clear the run-scope lists a chunk rebuilds, and the distributed-slack reweight. */
     void resetChunk() {
-        ziOffSlotElemList.clear();
-        ziTreeSlotElemValList.clear();
-        ziOnSlotElemList.clear();
+        zeroImpedanceBranchOpenScenarioElementList.clear();
+        spanningTreeOverrideScenarioElementValueList.clear();
+        zeroImpedanceBranchCloseScenarioElementList.clear();
         shuntAdmittanceOverrideScenarioElementList.clear();
         shuntAdmittanceOverrideDeltaList.clear();
         r1OvSlotElemList.clear();

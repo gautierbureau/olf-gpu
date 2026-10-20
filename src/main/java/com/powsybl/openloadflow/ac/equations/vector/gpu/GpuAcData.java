@@ -34,8 +34,8 @@ import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuQLimitType;
  * <p>DISTR_Q (remote generator voltage control): {@link DistrQTerms} and {@link DistrQMembers}. Empty when no
  * remote generator voltage control is active.
  *
- * <p>Zero-impedance branches (bus couplers) are a LINEAR family: {@code ziIn} {@code nzi*1} (rho = R2/r1),
- * idx {@code nzi*11} (b1Prow b1Qrow b2Prow b2Qrow dpRow dqRow v1col v2col ph1col ph2col enabledTree). Each
+ * <p>Zero-impedance branches (bus couplers) are a LINEAR family: {@code zeroImpedanceBranchParameters} {@code nZeroImpedanceBranch*1} (rho = R2/r1),
+ * idx {@code nZeroImpedanceBranch*11} (b1Prow b1Qrow b2Prow b2Qrow dpRow dqRow v1col v2col ph1col ph2col enabledTree). Each
  * adds DUMMY_P/DUMMY_Q variables whose columns ({@code dpRow}/{@code dqRow}) enter both buses' P/Q balances
  * (±1); a spanning-tree edge ({@code enabledTree}=1) also carries the voltage/angle coupling
  * ZERO_V (v1−rho·v2) on the DUMMY_P row and ZERO_PHI (ph1−ph2) on the DUMMY_Q row.
@@ -185,16 +185,16 @@ public record GpuAcData(ClosedBranchPack closedBranch, OpenBranchPack openBranch
      * contingency (tasks #68 / #69).
      */
     public int relocatedPRow(int phiCol) {
-        int[] ziIdx = zeroImpedanceBranch.indices();
-        if (ziIdx == null || phiCol < 0) {
+        int[] zeroImpedanceBranchIndices = zeroImpedanceBranch.indices();
+        if (zeroImpedanceBranchIndices == null || phiCol < 0) {
             return phiCol;
         }
-        for (int e = 0; e < ziIdx.length / 11; e++) {
+        for (int e = 0; e < zeroImpedanceBranchIndices.length / 11; e++) {
             int o = e * 11;
-            int childSide = (ziIdx[o + 10] >> 1) & 3;
-            int ownPhi = childSide == 1 ? ziIdx[o + 8] : (childSide == 2 ? ziIdx[o + 9] : -1);
-            if (ownPhi == phiCol && ziIdx[o + 4] >= 0) {
-                return ziIdx[o + 4];
+            int childSide = (zeroImpedanceBranchIndices[o + 10] >> 1) & 3;
+            int ownPhi = childSide == 1 ? zeroImpedanceBranchIndices[o + 8] : (childSide == 2 ? zeroImpedanceBranchIndices[o + 9] : -1);
+            if (ownPhi == phiCol && zeroImpedanceBranchIndices[o + 4] >= 0) {
+                return zeroImpedanceBranchIndices[o + 4];
             }
         }
         return phiCol;

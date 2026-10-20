@@ -78,8 +78,8 @@ public final class GpuBatchInjectionOutages {
      *  Empty when no islanded controller is a packed member. */
     static List<GenOutage> islandedDistrQEntries(GpuAcData gpuData, List<LfBus> islandedControllers,
                                                 java.util.Map<Integer, int[]> relocDummyQRows,
-                                                java.util.Set<Integer> outagedZiNums) {
-        return islandedDistrQEntries(gpuData, islandedControllers, relocDummyQRows, outagedZiNums, null);
+                                                java.util.Set<Integer> outagedZeroImpedanceBranchNums) {
+        return islandedDistrQEntries(gpuData, islandedControllers, relocDummyQRows, outagedZeroImpedanceBranchNums, null);
     }
 
     /** {dq member -> subgroup label} from the plan's flat {member, label} pairs; null when there are none. */
@@ -98,7 +98,7 @@ public final class GpuBatchInjectionOutages {
      *  of ITS subgroup only, exactly as the kernel's updateDistrQTargetsBatch will maintain it. */
     static List<GenOutage> islandedDistrQEntries(GpuAcData gpuData, List<LfBus> islandedControllers,
                                                 java.util.Map<Integer, int[]> relocDummyQRows,
-                                                java.util.Set<Integer> outagedZiNums,
+                                                java.util.Set<Integer> outagedZeroImpedanceBranchNums,
                                                 java.util.Map<Integer, Integer> labelOf) {
         List<GenOutage> out = new ArrayList<>();
         int[] mBusNum = gpuData.distrQMembers().busNum();
@@ -158,7 +158,7 @@ public final class GpuBatchInjectionOutages {
                     // solved the renormalized WEIGHTS against a target built from the base keys: measured
                     // -13.3334 MVAr where OLF has -20.0001, one third of the pilot's 40 MVAr load instead
                     // of one half, and 0.32 kV on every bus behind it.
-                    r.add(RelocatedRows.unrelocQRow(mRow[m], relocDummyQRows, outagedZiNums));
+                    r.add(RelocatedRows.unrelocQRow(mRow[m], relocDummyQRows, outagedZeroImpedanceBranchNums));
                     // targetQ over THIS member's peers — its own control's elements, as AcTargetVector sums them
                     double sumTargetQ = 0;
                     for (int t = gpuData.distrQMembers().targetPeerStart()[m]; t < gpuData.distrQMembers().targetPeerStart()[m + 1]; t++) {

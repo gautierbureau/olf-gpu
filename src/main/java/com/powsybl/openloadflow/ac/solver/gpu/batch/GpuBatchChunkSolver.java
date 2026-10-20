@@ -55,7 +55,7 @@ import java.util.List;
  * Drives the batched GPU solve of the qualified N-1 scenarios in device-memory-bounded chunks:
  * one cached native context (sized to the chunk, cuDSS analyzed once) reused across all chunks and
  * two phases (plain contingencies, then warm-continued (ctg, strategy) pairs). Assembles each
- * scenario's per-slot element mask, row-mode overrides (islanding freeze / PV->PQ flip / zi switch),
+ * scenario's per-slot element mask, row-mode overrides (islanding freeze / PV->PQ flip / zero-impedance switch),
  * target/shunt/tap/distributed-slack overrides, runs the batched Newton, then the per-scenario
  * transformer-control orchestration, and writes results back by original contingency index.
  *
@@ -81,7 +81,7 @@ final class GpuBatchChunkSolver {
      */
     static void solveQualifiedInChunks(ChunkInputs inputs) {
         GpuAcData gpuData = inputs.base().gpuData();
-        ChunkInputs in = inputs.withBaseState(ZeroImpedanceClusters.zeroZiFlows(gpuData, inputs.base().baseState()));
+        ChunkInputs in = inputs.withBaseState(ZeroImpedanceClusters.zeroZeroImpedanceBranchFlows(gpuData, inputs.base().baseState()));
         List<Integer> batchedIndices = in.plan().batchedIndices();
         int n = in.base().n();
         double[][] resultsByIndex = in.sinks().resultsByIndex();
@@ -298,9 +298,9 @@ final class GpuBatchChunkSolver {
             long tOrchestratorNs = 0;
             java.util.Map<String, Long> orchNs = new java.util.LinkedHashMap<>();
             // The zero-impedance elements OUT of the base tree, once: a scenario with sticky non-tree couplers puts
-            // every one of them back except its still-out set, and scanning all ziBranchNums per scenario with a
+            // every one of them back except its still-out set, and scanning all zeroImpedanceBranchNumbers per scenario with a
             // boxed set was 1.4 s of host time on network.xiidm (2653 elements x every such scenario).
-            int[] baseNonTreeZi = ZeroImpedanceClusters.baseNonTreeElements(gpuData);
+            int[] baseNonSpanningTreeBranches = ZeroImpedanceClusters.baseNonTreeElements(gpuData);
             for (List<Integer> group : List.of(ctgIdxList, pairIdxList)) {
                 boolean pairPhase = group == pairIdxList;
                 int nbg = group.size();
@@ -318,7 +318,7 @@ final class GpuBatchChunkSolver {
                     }
                     ChunkLists cl = new ChunkLists(chunkSize, n, gpuData, forcedTargetQ, ngen);
                     SlotSeeding seeding = new SlotSeeding(chunkSize, pairPhase, n, gpuData, elementMapper, contingencies,
-                            plan, baseState, baseTargets, baseRowMode, hvdcElemIndex, baseNonTreeZi, nds, rlCurves,
+                            plan, baseState, baseTargets, baseRowMode, hvdcElemIndex, baseNonSpanningTreeBranches, nds, rlCurves,
                             curveEntriesByPRow, rs, cl);
                     rs.resetChunk();
                     for (int s = 0; s < chunkSize; s++) {
@@ -939,8 +939,8 @@ final class GpuBatchChunkSolver {
                     // follows the chunk composition, which moves with the resolved chunk size).
                     // OLF's tree for the scenarios of this chunk, where it has moved from the one the
                     // structure was extracted on (empty clears the previous chunk's list).
-                    ZeroImpedanceNative.setBatchZiTreeOverrides(handle,
-                            rs.ziTreeSlotElemValList.stream().mapToInt(Integer::intValue).toArray());
+                    ZeroImpedanceNative.setBatchSpanningTreeOverrides(handle,
+                            rs.spanningTreeOverrideScenarioElementValueList.stream().mapToInt(Integer::intValue).toArray());
                     String traceCtg = System.getenv("OLF_GPU_LOOP_TRACE_CTG");
                     int traceSlot = -1;
                     if (traceCtg != null) {
@@ -1016,8 +1016,8 @@ final class GpuBatchChunkSolver {
                             // solve surfaces the DS-stable / pre-RL state; the orchestrator then interleaves
                             // and finishes with the full RL-enabled solves.
                             0,
-                            rs.nziBase, rs.ziOnSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
-                            rs.ziOffSlotElemList.stream().mapToInt(Integer::intValue).toArray());
+                            rs.nBaseClosedZeroImpedanceBranches, rs.zeroImpedanceBranchCloseScenarioElementList.stream().mapToInt(Integer::intValue).toArray(),
+                            rs.zeroImpedanceBranchOpenScenarioElementList.stream().mapToInt(Integer::intValue).toArray());
                     if (System.getenv("OLF_GPU_REJECT_TRACE") != null) {
                         // slot -> contingency for every scenario the device rejected in this chunk: the native
                         // GPU_REJECT lines name slots, and a slot only means something with the chunk's composition.
@@ -1074,8 +1074,8 @@ final class GpuBatchChunkSolver {
                                     rs.r1OvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
                                     rs.r1OvValList.stream().mapToDouble(Double::doubleValue).toArray(),
                                     config.maxOuterIterations(), config.maxPqPvSwitch(), config.dsRejectResidualFlag(), 0,
-                                    rs.nziBase, rs.ziOnSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
-                                    rs.ziOffSlotElemList.stream().mapToInt(Integer::intValue).toArray());
+                                    rs.nBaseClosedZeroImpedanceBranches, rs.zeroImpedanceBranchCloseScenarioElementList.stream().mapToInt(Integer::intValue).toArray(),
+                                    rs.zeroImpedanceBranchOpenScenarioElementList.stream().mapToInt(Integer::intValue).toArray());
                         }
                         if (DriverNative.readBatchDriverPaused(handle) != GpuOuterLoopKind.NOT_PAUSED) {
                             // Safety net only: the budget bookkeeping above should always end the cycle.

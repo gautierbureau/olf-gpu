@@ -11,14 +11,14 @@
 
 namespace olfgpu {
 
-__global__ void fillZeroImpBatch(int nzi, int nScenarios, int n, int nnz,
+__global__ void fillZeroImpBatch(int nZeroImpedanceBranch, int nScenarios, int n, int nnz,
                                  const double* in, const int* ix, const int* dest,
                                  const double* x, double* vals, double* F, const char* active,
-                                 int nziBase, int nZiOn, const int* ziOnSlotElem,
-                                 int nZiOff, const int* ziOffSlotElem,
+                                 int nBaseClosedZeroImpedanceBranches, int nZeroImpedanceBranchCloseOverrides, const int* zeroImpedanceBranchCloseScenarioElement,
+                                 int nZeroImpedanceBranchOpenOverrides, const int* zeroImpedanceBranchOpenScenarioElement,
                                  const int* ziAlt, const int* ziSel, const int* mode, int ziDyn,
-                                 RelocTables rt, int nZiTree, const int* ziTreeSlotElemVal,
-                                 const char* ziOffMask, const char* ziOnMask, const char* ziTreeMask);
+                                 RelocTables rt, int nSpanningTreeOverrides, const int* spanningTreeOverrideScenarioElementValue,
+                                 const char* zeroImpedanceBranchOpenMask, const char* zeroImpedanceBranchCloseMask, const char* spanningTreeOverrideMask);
 
 }  // namespace olfgpu
 

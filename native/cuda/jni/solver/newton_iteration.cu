@@ -348,8 +348,8 @@ void newtonSolve(BatchSolverContext* ctx, DriverPass& drv) {
                 CUDSS_CHECK(cudssCreate(&ctx->dsC.handle));
                 CUDSS_CHECK(cudssSetStream(ctx->dsC.handle, ctx->stream));
                 CUDSS_CHECK(cudssConfigCreate(&ctx->dsC.config));
-                applyReorderAlg(ctx->dsC.config, ctx->st->nzi > 0);
-                int irC = ctx->st->nzi > 0 ? irBaseSteps() : IR_N_STEPS;
+                applyReorderAlg(ctx->dsC.config, ctx->st->nZeroImpedanceBranch > 0);
+                int irC = ctx->st->nZeroImpedanceBranch > 0 ? irBaseSteps() : IR_N_STEPS;
                 CUDSS_CHECK(cudssConfigSet(ctx->dsC.config, CUDSS_CONFIG_IR_N_STEPS, &irC, sizeof(irC)));
                 CUDSS_CHECK(cudssMatrixCreateCsr(&ctx->matUbC, n, n, nnz,
                         ctx->st->dRowPtr.as<int>(), nullptr, ctx->st->dColIdx.as<int>(), ctx->dValsC.as<double>(),
@@ -407,7 +407,7 @@ void newtonSolve(BatchSolverContext* ctx, DriverPass& drv) {
                 compactData = cached;
             }
             { AnalysisTimer at_(__LINE__, 'F'); CUDSS_CHECK(cudssExecute(ctx->dsC.handle, CUDSS_PHASE_FACTORIZATION | CUDSS_PHASE_SOLVE, ctx->dsC.config, compactData, ctx->matUbC, ctx->matUbCX, ctx->matUbCB)); }
-            if (ctx->st->nzi > 0 && ctx->dRC.p != nullptr && ctx->dIrScore.p != nullptr && ctx->dIrScore.cap >= static_cast<size_t>(w) * sizeof(double)) {
+            if (ctx->st->nZeroImpedanceBranch > 0 && ctx->dRC.p != nullptr && ctx->dIrScore.p != nullptr && ctx->dIrScore.cap >= static_cast<size_t>(w) * sizeof(double)) {
                 // adaptive refinement on the compacted lanes (all w are real or a duplicate of a real one)
                 refineLanes(ctx, w, n, nnz, ctx->dValsC.as<double>(), ctx->dDxC.as<double>(), ctx->dBC.as<double>(),
                         ctx->dRC.as<double>(), ctx->dDeltaC.as<double>(), nullptr, [&]() {
@@ -419,7 +419,7 @@ void newtonSolve(BatchSolverContext* ctx, DriverPass& drv) {
             scatterScenarios<<<grid(n * nReal), BLOCK, 0, ctx->stream>>>(n, nReal, ctx->dMapC.as<int>(), ctx->dDxC.as<double>(), ctx->dDx.as<double>());
         } else {
             { AnalysisTimer at_(__LINE__, ((ubPhase) & (CUDSS_PHASE_FACTORIZATION | CUDSS_PHASE_REFACTORIZATION)) ? 'G' : ((ubPhase) & CUDSS_PHASE_ANALYSIS) ? 'A' : 'S'); CUDSS_CHECK(cudssExecute(ctx->ds.handle, ubPhase, ctx->ds.config, ctx->ds.data, ctx->matUb, ctx->matUbX, ctx->matUbB)); }
-            if (ctx->st->nzi > 0 && ctx->dR.p != nullptr && ctx->matUbR != nullptr && ctx->dIrScore.p != nullptr) {
+            if (ctx->st->nZeroImpedanceBranch > 0 && ctx->dR.p != nullptr && ctx->matUbR != nullptr && ctx->dIrScore.p != nullptr) {
                 // adaptive refinement on the full-width UBATCH solve (see refineLanes)
                 refineLanes(ctx, nS, n, nnz, ctx->dVals.as<double>(), ctx->dDx.as<double>(), ctx->dB.as<double>(),
                         ctx->dR.as<double>(), ctx->dDelta.as<double>(), ctx->dActive.as<char>(), [&]() {

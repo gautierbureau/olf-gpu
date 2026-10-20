@@ -39,19 +39,19 @@ final class GpuAcFamilyPacker {
      * The packed families and the per-family element-index maps. The {@code *In} / {@code *Idx}
      * lists are fixed-stride rows flattened at assembly; {@code closedBranchElementOf} / {@code openBranchElementOf} /
      * {@code shuntElementOf} map a branch/bus number to its element index (-1 when absent); the
-     * {@code baseOpen*} / {@code ziNums} lists carry the batch-SA per-scenario mask metadata.
+     * {@code baseOpen*} / {@code zeroImpedanceBranchNums} lists carry the batch-SA per-scenario mask metadata.
      */
     record Packs(List<double[]> closedBranchParameters, List<int[]> closedBranchIndices, List<double[]> openBranchParameters, List<int[]> openBranchIndices,
                  List<double[]> shuntParameters, List<int[]> shuntIndices, List<double[]> hvdcAcEmulationParameters, List<int[]> hvdcAcEmulationIndices,
-                 List<double[]> ziIn, List<int[]> ziIdx, List<Integer> ziNums,
-                 List<Integer> baseOpenCb, List<Integer> baseOpenZi, List<Integer> baseOpenZiNums,
+                 List<double[]> zeroImpedanceBranchParameters, List<int[]> zeroImpedanceBranchIndices, List<Integer> zeroImpedanceBranchNums,
+                 List<Integer> baseOpenCb, List<Integer> baseOpenZeroImpedanceBranches, List<Integer> baseOpenZeroImpedanceBranchNums,
                  int[] closedBranchElementOf, int[] openBranchElementOf, int[] shuntElementOf, List<Integer> closedBranchPhaseControlSide,
                  List<double[]> loadModelParameters, List<int[]> loadModelIndices,
-                 List<int[]> openBranchAlternateReactiveDestination, List<int[]> ziQAlt) {
+                 List<int[]> openBranchAlternateReactiveDestination, List<int[]> zeroImpedanceBranchAlternateReactiveDestination) {
     }
 
     static Packs pack(LfNetwork network, ExtractionColumns columns,
-                      Set<String> baseOpenBranchIds, Set<String> baseOpenZiBranchIds) {
+                      Set<String> baseOpenBranchIds, Set<String> baseOpenZeroImpedanceBranchIdList) {
         int[] phiCol = columns.phiCol();
         int[] pRow = columns.pRow();       // a bus's P-balance row: its PHI column, or its parent coupler's DUMMY_P
         int[] vCol = columns.vCol();
@@ -65,9 +65,9 @@ final class GpuAcFamilyPacker {
         int nBuses = network.getBuses().size();
         int nBranches = network.getBranches().size();
 
-        List<double[]> ziIn = new ArrayList<>();
-        List<int[]> ziIdx = new ArrayList<>();
-        List<Integer> ziNums = new ArrayList<>();            // LfBranch num per zi element (per-scenario masks)
+        List<double[]> zeroImpedanceBranchParameters = new ArrayList<>();
+        List<int[]> zeroImpedanceBranchIndices = new ArrayList<>();
+        List<Integer> zeroImpedanceBranchNums = new ArrayList<>();            // LfBranch num per zero-impedance element (per-scenario masks)
 
         // closed-branch element index per branch number (-1 = not a closed branch), used to wire the
         // DISTR_Q reactive contributions to their closed-branch q1/q2 outputs.
@@ -79,13 +79,13 @@ final class GpuAcFamilyPacker {
         List<Integer> closedBranchPhaseControlSide = new ArrayList<>();
         List<double[]> openBranchParameters = new ArrayList<>();
         List<int[]> openBranchIndices = new ArrayList<>();
-        // Dynamic Q-relocation for the ob/zi families (the cb/sh channels' twin): per element, the
+        // Dynamic Q-relocation for the ob/zero-impedance families (the cb/sh channels' twin): per element, the
         // ALTERNATE Q row of each side's bus — a two-way row (>= 0), a -2-groupId relocation-group
         // encoding, or -1 (no second candidate). Lets a pinned remote member's / relocated pilot's
         // half-open-charging and dummy-Q terms follow the per-scenario routing instead of the
         // frozen dests (the guarded 3.3e-4 kV gap).
         List<int[]> openBranchAlternateReactiveDestination = new ArrayList<>();
-        List<int[]> ziQAlt = new ArrayList<>();
+        List<int[]> zeroImpedanceBranchAlternateReactiveDestination = new ArrayList<>();
         int[] openBranchElementOf = new int[nBranches];                 // open-branch element index per branch (-1 = none)
         java.util.Arrays.fill(openBranchElementOf, -1);
         for (LfBranch br : network.getBranches()) {
@@ -111,8 +111,8 @@ final class GpuAcFamilyPacker {
                             + " has no DUMMY_P/DUMMY_Q variables (unsupported non-impedant shape, e.g. both "
                             + "ends voltage-controlled or a 3-winding star)");
                 }
-                ziNums.add(br.getNum());
-                ziIn.add(new double[] {PiModel.R2 / pi.getR1()});
+                zeroImpedanceBranchNums.add(br.getNum());
+                zeroImpedanceBranchParameters.add(new double[] {PiModel.R2 / pi.getR1()});
                 // COUPLER-TREE relocation (the dead-end stub is its k=1 case): the CHILD bus's P/Q balances move
                 // onto this coupler's DUMMY_P/DUMMY_Q rows, where ∓DUMMY_P / ∓DUMMY_Q is their diagonal, and
                 // ZERO_V/ZERO_PHI move onto the child's own v/phi rows. Slots 4/5 stay the dummy COLUMNS (the kernel
@@ -120,13 +120,13 @@ final class GpuAcFamilyPacker {
                 // from the child side encoded in slot 10 — the same encoding the stub case used.
                 int child = columns.ziChildBus()[br.getNum()];
                 int childSide = child == b1n ? 1 : (child == b2n ? 2 : 0);
-                ziIdx.add(new int[] {pRow[b1n], qRow[b1n], pRow[b2n], qRow[b2n], dpRow, dqRow,
+                zeroImpedanceBranchIndices.add(new int[] {pRow[b1n], qRow[b1n], pRow[b2n], qRow[b2n], dpRow, dqRow,
                     vCol[b1n], vCol[b2n], phiCol[b1n], phiCol[b2n],
                     (br.isSpanningTreeEdge(LoadFlowModel.AC) ? 1 : 0) | (childSide << 1)
                         // bit 3: the child side came from the COUPLER-TREE walk; these need the per-scenario
                         // stock-placement fallback (native stockAltRow)
                         | (childSide != 0 ? 8 : 0)});
-                ziQAlt.add(new int[] {qRowAlt[b1n], qRowAlt[b2n]});
+                zeroImpedanceBranchAlternateReactiveDestination.add(new int[] {qRowAlt[b1n], qRowAlt[b2n]});
                 continue;
             }
             if (b1 != null && b2 != null) {
@@ -189,17 +189,19 @@ final class GpuAcFamilyPacker {
                                    closedBranchIndices, closedBranchPhaseControlSide);
 
         // BASE-OPEN closable ZERO-IMPEDANCE branches (retained-open switches, batch SA only): a
-        // DISABLED zi branch keeps its DUMMY_TARGET_P/Q identity rows ACTIVE (dummies pinned 0) and
+        // DISABLED zero-impedance branch keeps its DUMMY_TARGET_P/Q identity rows ACTIVE (dummies pinned 0) and
         // its dummy variables therefore HAVE rows — packing it adds the coupling slots to the
         // superset pattern; the solver enables the element and flips the two dummy rows to the
         // ZERO_V/ZERO_PHI coupling only in scenarios that CLOSE the switch (always a spanning-tree
         // merge by qualification scope, so the tree flag is baked to 1). Both coupling targets are 0
         // for a switch (rho = 1, phase shift A = 0), matching the identity rows' targets — no
         // per-scenario target override needed.
-        List<Integer> baseOpenZi = new ArrayList<>();
-        List<Integer> baseOpenZiNums = new ArrayList<>();
-        packBaseOpenZeroImpedanceBranches(baseOpenZiBranchIds, network, dummyPCol, dummyQCol, baseOpenZi, ziIn,
-                                          baseOpenZiNums, ziNums, phiCol, qRow, vCol, ziIdx, qRowAlt, ziQAlt);
+        List<Integer> baseOpenZeroImpedanceBranches = new ArrayList<>();
+        List<Integer> baseOpenZeroImpedanceBranchNums = new ArrayList<>();
+        packBaseOpenZeroImpedanceBranches(baseOpenZeroImpedanceBranchIdList, network, dummyPCol, dummyQCol, baseOpenZeroImpedanceBranches, zeroImpedanceBranchParameters,
+                                          baseOpenZeroImpedanceBranchNums, zeroImpedanceBranchNums, phiCol, qRow, vCol,
+                                          zeroImpedanceBranchIndices, qRowAlt,
+                                          zeroImpedanceBranchAlternateReactiveDestination);
 
         List<double[]> shuntParameters = new ArrayList<>();
         List<int[]> shuntIndices = new ArrayList<>();
@@ -256,9 +258,9 @@ final class GpuAcFamilyPacker {
         }
 
         return new Packs(closedBranchParameters, closedBranchIndices, openBranchParameters, openBranchIndices,
-                shuntParameters, shuntIndices, hvdcAcEmulationParameters, hvdcAcEmulationIndices, ziIn, ziIdx, ziNums,
-                baseOpenCb, baseOpenZi, baseOpenZiNums, closedBranchElementOf, openBranchElementOf, shuntElementOf, closedBranchPhaseControlSide,
-                loadModelParameters, loadModelIndices, openBranchAlternateReactiveDestination, ziQAlt);
+                shuntParameters, shuntIndices, hvdcAcEmulationParameters, hvdcAcEmulationIndices, zeroImpedanceBranchParameters, zeroImpedanceBranchIndices, zeroImpedanceBranchNums,
+                baseOpenCb, baseOpenZeroImpedanceBranches, baseOpenZeroImpedanceBranchNums, closedBranchElementOf, openBranchElementOf, shuntElementOf, closedBranchPhaseControlSide,
+                loadModelParameters, loadModelIndices, openBranchAlternateReactiveDestination, zeroImpedanceBranchAlternateReactiveDestination);
     }
 
     /** BASE-OPEN closable branches (batch SA only), appended after the normal closed branches so every normal element index is unchanged. */
@@ -298,18 +300,18 @@ final class GpuAcFamilyPacker {
     }
 
     /** BASE-OPEN closable zero-impedance branches (retained-open switches, batch SA only), appended after the base couplers. */
-    private static void packBaseOpenZeroImpedanceBranches(final Set<String> baseOpenZiBranchIds,
+    private static void packBaseOpenZeroImpedanceBranches(final Set<String> baseOpenZeroImpedanceBranchIdList,
                                                           final LfNetwork network, final int[] dummyPCol,
-                                                          final int[] dummyQCol, final List<Integer> baseOpenZi,
-                                                          final List<double[]> ziIn,
-                                                          final List<Integer> baseOpenZiNums,
-                                                          final List<Integer> ziNums, final int[] phiCol,
+                                                          final int[] dummyQCol, final List<Integer> baseOpenZeroImpedanceBranches,
+                                                          final List<double[]> zeroImpedanceBranchParameters,
+                                                          final List<Integer> baseOpenZeroImpedanceBranchNums,
+                                                          final List<Integer> zeroImpedanceBranchNums, final int[] phiCol,
                                                           final int[] qRow, final int[] vCol,
-                                                          final List<int[]> ziIdx, final int[] qRowAlt,
-                                                          final List<int[]> ziQAlt) {
-        if (!baseOpenZiBranchIds.isEmpty()) {
+                                                          final List<int[]> zeroImpedanceBranchIndices, final int[] qRowAlt,
+                                                          final List<int[]> zeroImpedanceBranchAlternateReactiveDestination) {
+        if (!baseOpenZeroImpedanceBranchIdList.isEmpty()) {
             for (LfBranch br : network.getBranches()) {
-                if (!br.isDisabled() || !baseOpenZiBranchIds.contains(br.getId())
+                if (!br.isDisabled() || !baseOpenZeroImpedanceBranchIdList.contains(br.getId())
                         || !br.isZeroImpedance(LoadFlowModel.AC)) {
                     continue;
                 }
@@ -325,13 +327,13 @@ final class GpuAcFamilyPacker {
                 }
                 int b1n = b1.getNum();
                 int b2n = b2.getNum();
-                baseOpenZi.add(ziIn.size());
-                baseOpenZiNums.add(br.getNum());
-                ziNums.add(br.getNum());
-                ziIn.add(new double[] {PiModel.R2 / br.getPiModel().getR1()});
-                ziIdx.add(new int[] {phiCol[b1n], qRow[b1n], phiCol[b2n], qRow[b2n], dpRow, dqRow,
+                baseOpenZeroImpedanceBranches.add(zeroImpedanceBranchParameters.size());
+                baseOpenZeroImpedanceBranchNums.add(br.getNum());
+                zeroImpedanceBranchNums.add(br.getNum());
+                zeroImpedanceBranchParameters.add(new double[] {PiModel.R2 / br.getPiModel().getR1()});
+                zeroImpedanceBranchIndices.add(new int[] {phiCol[b1n], qRow[b1n], phiCol[b2n], qRow[b2n], dpRow, dqRow,
                     vCol[b1n], vCol[b2n], phiCol[b1n], phiCol[b2n], 1});
-                ziQAlt.add(new int[] {qRowAlt[b1n], qRowAlt[b2n]});
+                zeroImpedanceBranchAlternateReactiveDestination.add(new int[] {qRowAlt[b1n], qRowAlt[b2n]});
             }
         }
     }

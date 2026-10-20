@@ -125,14 +125,14 @@ void setupFamily(Family& f, int elementCount, const double* in, int parameterStr
 // csr_pattern.cu
 std::vector<int> buildRowMap(int n, int nClosedBranch, const int* closedBranchIndices, int nOpenBranch, const int* openBranchIndices,
                              int nShunt, const int* shuntIndices, int nHvdcAcEmulation, const int* hvdcAcEmulationIndices,
-                             int ndq, const int* dqRow, int nzi, const int* ziIdx);
+                             int ndq, const int* dqRow, int nZeroImpedanceBranch, const int* zeroImpedanceBranchIndices);
 
 void collectFamilyPattern(const std::vector<int>& rowMap,
                           const int* closedBranchIndices, const int* openBranchIndices, const int* shuntIndices,
                           int ndq, const int* dqElem, const int* dqSide, const int* dqKind, const int* dqRow,
                           int nDistrRho, const int* distrRhoRow, const int* distrRhoColumn,
                           int nDistrShuntB, const int* distrShuntBRow, const int* distrShuntBColumn,
-                          int nzi, const int* ziIdx, const int* relocOwn,
+                          int nZeroImpedanceBranch, const int* zeroImpedanceBranchIndices, const int* relocOwn,
                           std::vector<std::pair<int, int>>& pat);
 
 // q_relocation_pattern.cu
@@ -196,7 +196,7 @@ void patchFrozenGroupDests(DeviceBuf& dest, const std::vector<int>& relocGroup,
 
 // zero_impedance_dests.cu
 void buildZeroImpDest(SharedStructure* st, const CsrPattern& pos, const std::vector<int>& rowMap,
-                      int nzi, const double* ziIn, const int* ziIdx, const int* ziQAlt,
+                      int nZeroImpedanceBranch, const double* zeroImpedanceBranchParameters, const int* zeroImpedanceBranchIndices, const int* zeroImpedanceBranchAlternateReactiveDestination,
                       const int* relocOwn, const int* depGroupOfRow);
 
 }  // namespace olfgpu

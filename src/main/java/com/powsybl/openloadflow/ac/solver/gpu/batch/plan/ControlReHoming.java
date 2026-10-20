@@ -58,10 +58,10 @@ public final class ControlReHoming {
      * BUS-6002_BBS_2 (coupler open, VL-6002_2 8.7 kV off, 29 phantom violations). A cluster with several controls
      * or a remote controller is a NEW remote group the tables cannot host — CPU, tagged.
      */
-    static ReHomed reHomedControls(List<LfBus> islandedBuses, List<LfBranch> outagedZiBranches, String contingencyId,
+    static ReHomed reHomedControls(List<LfBus> islandedBuses, List<LfBranch> outagedZeroImpedanceBranches, String contingencyId,
                                    EquationSystem<AcVariableType, AcEquationType> es) {
         java.util.Set<LfBus> islanded = new java.util.HashSet<>(islandedBuses);
-        java.util.Set<LfBranch> outaged = new java.util.HashSet<>(outagedZiBranches);
+        java.util.Set<LfBranch> outaged = new java.util.HashSet<>(outagedZeroImpedanceBranches);
         java.util.LinkedHashSet<com.powsybl.openloadflow.network.GeneratorVoltageControl> mains = new java.util.LinkedHashSet<>();
         java.util.function.Consumer<LfBus> addMain = b -> {
             if (b != null) {
@@ -73,7 +73,7 @@ public final class ControlReHoming {
             }
         };
         islandedBuses.forEach(addMain);
-        for (LfBranch br : outagedZiBranches) {
+        for (LfBranch br : outagedZeroImpedanceBranches) {
             addMain.accept(br.getBus1());
             addMain.accept(br.getBus2());
         }

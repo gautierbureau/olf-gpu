@@ -109,7 +109,7 @@ OLF_JNI(ac_solver_gpu, BatchSolveNative, solveBatchContext)(
         jintArray jRlStateIn, jintArray jRlStateOut,
         jintArray jR1OvSlotElem, jdoubleArray jR1OvVal,
         jint maxOuterProductive, jint rlMaxSwitch, jint dsRejectResidual, jint skipRlPhase,
-        jint nziBase, jintArray jZiOnSlotElem, jintArray jZiOffSlotElem) {
+        jint nBaseClosedZeroImpedanceBranches, jintArray jZeroImpedanceBranchCloseScenarioElement, jintArray jZeroImpedanceBranchOpenScenarioElement) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx != nullptr) {
         ctx->solveCount++;
@@ -138,17 +138,17 @@ OLF_JNI(ac_solver_gpu, BatchSolveNative, solveBatchContext)(
         r1OvValVec.resize(static_cast<size_t>(rn) * 4);      // full 8-double closedBranchParameters row per (slot, elem) entry
         env->GetDoubleArrayRegion(jR1OvVal, 0, rn * 4, r1OvValVec.data());
     }
-    std::vector<int> ziOffSlotElemVec;
-    if (jZiOffSlotElem != nullptr) {
-        jsize zn = env->GetArrayLength(jZiOffSlotElem);
-        ziOffSlotElemVec.resize(zn);
-        env->GetIntArrayRegion(jZiOffSlotElem, 0, zn, ziOffSlotElemVec.data());
+    std::vector<int> zeroImpedanceBranchOpenScenarioElementVec;
+    if (jZeroImpedanceBranchOpenScenarioElement != nullptr) {
+        jsize zn = env->GetArrayLength(jZeroImpedanceBranchOpenScenarioElement);
+        zeroImpedanceBranchOpenScenarioElementVec.resize(zn);
+        env->GetIntArrayRegion(jZeroImpedanceBranchOpenScenarioElement, 0, zn, zeroImpedanceBranchOpenScenarioElementVec.data());
     }
-    std::vector<int> ziOnSlotElemVec;
-    if (jZiOnSlotElem != nullptr) {
-        jsize zn = env->GetArrayLength(jZiOnSlotElem);
-        ziOnSlotElemVec.resize(zn);
-        env->GetIntArrayRegion(jZiOnSlotElem, 0, zn, ziOnSlotElemVec.data());
+    std::vector<int> zeroImpedanceBranchCloseScenarioElementVec;
+    if (jZeroImpedanceBranchCloseScenarioElement != nullptr) {
+        jsize zn = env->GetArrayLength(jZeroImpedanceBranchCloseScenarioElement);
+        zeroImpedanceBranchCloseScenarioElementVec.resize(zn);
+        env->GetIntArrayRegion(jZeroImpedanceBranchCloseScenarioElement, 0, zn, zeroImpedanceBranchCloseScenarioElementVec.data());
     }
     std::vector<int> rlStateInVec;
     if (jRlStateIn != nullptr) {
@@ -333,10 +333,10 @@ OLF_JNI(ac_solver_gpu, BatchSolveNative, solveBatchContext)(
                                 r1OvSlotElemVec.empty() ? nullptr : r1OvSlotElemVec.data(),
                                 r1OvValVec.empty() ? nullptr : r1OvValVec.data(),
                                 maxOuterProductive, rlMaxSwitch, dsRejectResidual, skipRlPhase,
-                                nziBase, static_cast<int>(ziOnSlotElemVec.size() / 2),
-                                ziOnSlotElemVec.empty() ? nullptr : ziOnSlotElemVec.data(),
-                                static_cast<int>(ziOffSlotElemVec.size() / 2),
-                                ziOffSlotElemVec.empty() ? nullptr : ziOffSlotElemVec.data());
+                                nBaseClosedZeroImpedanceBranches, static_cast<int>(zeroImpedanceBranchCloseScenarioElementVec.size() / 2),
+                                zeroImpedanceBranchCloseScenarioElementVec.empty() ? nullptr : zeroImpedanceBranchCloseScenarioElementVec.data(),
+                                static_cast<int>(zeroImpedanceBranchOpenScenarioElementVec.size() / 2),
+                                zeroImpedanceBranchOpenScenarioElementVec.empty() ? nullptr : zeroImpedanceBranchOpenScenarioElementVec.data());
         if (jniPhaseTime()) {
             solveNs += nowNs() - tSolve0;
         }

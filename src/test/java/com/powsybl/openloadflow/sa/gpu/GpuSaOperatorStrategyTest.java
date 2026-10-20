@@ -384,7 +384,7 @@ class GpuSaOperatorStrategyTest extends AbstractGpuSaTest {
     void baseOpenSwitchCloseStrategyBatchMatchesCpu() {
         // #31: SwitchAction CLOSING a base-open busbar coupler (zero-impedance branch). The retained
         // switch's dummy variables already have rows (identity-pinned to 0 while open), so the close
-        // is a per-scenario zi-element enable + identity->coupling row flip on the device. Node-breaker
+        // is a per-scenario zero-impedance-element enable + identity->coupling row flip on the device. Node-breaker
         // network: coupler C open at base splits VL1 into BBS1 (lines L1+L3) and BBS2 (G + L2); the
         // L1 outage keeps both sides energized, the strategy merges them back.
         org.junit.jupiter.api.Assumptions.assumeTrue(

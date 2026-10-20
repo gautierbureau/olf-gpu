@@ -33,7 +33,7 @@ namespace olfgpu {
 // - DISTR_RHO: no per-scenario mask — a contingency that outages a controlling transformer
 //   is rejected to the CPU (the 1/count coefficients would reform).
 // - Zero-impedance: the base couplers are replicated; a scenario opens or closes couplers through
-//   its per-scenario on/off overrides (ziOff / ziOn).
+//   its per-scenario on/off overrides (zeroImpedanceBranchOpenOverrides / zeroImpedanceBranchCloseOverrides).
 struct BatchSolverContext {
     int loopTraceSlot = -1;                                  // OLF_GPU_LOOP_TRACE by CONTINGENCY: the slot the host resolved for this chunk
     SharedStructurePtr st;                                   // built once per extraction, see SharedStructure
@@ -42,7 +42,7 @@ struct BatchSolverContext {
     int nScenarios = 0;
     int nElements = 0;
     int closedBranchOffset = 0, openBranchOffset = 0, shuntOffset = 0, hvdcAcEmulationOffset = 0;   // element-mask offsets per family
-    int ndq = 0, nDistrRho = 0, nDistrShuntB = 0, nzi = 0;                  // copies of the structure counts
+    int ndq = 0, nDistrRho = 0, nDistrShuntB = 0, nZeroImpedanceBranch = 0;                  // copies of the structure counts
     DeviceBuf dX, dTarget, dF, dB, dDx, dVals, dMode;        // per-scenario (n or nnz strided)
     // per scenario: the state at its last CONVERGED inner solve (its starting state before any): what OLF's network
     // holds when a run fails (NewtonRaphson updates the buses only on convergence), and so where OLF starts the
@@ -64,19 +64,19 @@ struct BatchSolverContext {
     bool perRowAlt = false;
     int nShuntAdmittanceOverrides = 0;                                           // per-scenario shunt admittance overrides (set per solve)
     DeviceBuf dShuntAdmittanceOverrideScenarioElement, dShuntAdmittanceOverrideDelta;                        // nShuntAdmittanceOverrides*2 ints (slot, PACK elem) / nShuntAdmittanceOverrides*2 doubles (dG, dB)
-    int nziBase = 0;                                         // zi elements [0,nziBase) always enabled; [nziBase,nzi) are
-                                                             // base-open closable switches gated by the ziOn list
-    int nZiOn = 0;
-    int nZiOff = 0;
-    DeviceBuf dZiTreeSlotElemVal;                          // per (scenario, coupler) OLF tree flag where it differs from extraction
-    int nZiTree = 0;
-    DeviceBuf dZiOffSlotElem;                                // nZiOff*2 ints (slot, zi elem) — scenarios that OPEN a switch
-    DeviceBuf dZiOnSlotElem;                                 // nZiOn*2 ints (slot, zi elem) — scenarios that CLOSE a switch
-    // DENSE (scenario, zi element) forms of the three lists above and of the tree overrides, nScenarios*nzi chars
-    // each: the fill kernel read them as linear scans PER THREAD, O(nzi * nS * (nZiOff + nZiOn + nZiTree)) - on
+    int nBaseClosedZeroImpedanceBranches = 0;                                         // zero-impedance elements [0,nBaseClosedZeroImpedanceBranches) always enabled; [nBaseClosedZeroImpedanceBranches,nZeroImpedanceBranch) are
+                                                             // base-open closable switches gated by the zeroImpedanceBranchCloseOverrides list
+    int nZeroImpedanceBranchCloseOverrides = 0;
+    int nZeroImpedanceBranchOpenOverrides = 0;
+    DeviceBuf dSpanningTreeOverrideScenarioElementValue;                          // per (scenario, coupler) OLF tree flag where it differs from extraction
+    int nSpanningTreeOverrides = 0;
+    DeviceBuf dZeroImpedanceBranchOpenScenarioElement;                                // nZeroImpedanceBranchOpenOverrides*2 ints (slot, zero-impedance elem) — scenarios that OPEN a switch
+    DeviceBuf dZeroImpedanceBranchCloseScenarioElement;                                 // nZeroImpedanceBranchCloseOverrides*2 ints (slot, zero-impedance elem) — scenarios that CLOSE a switch
+    // DENSE (scenario, zero-impedance element) forms of the three lists above and of the tree overrides, nScenarios*nZeroImpedanceBranch chars
+    // each: the fill kernel read them as linear scans PER THREAD, O(nZeroImpedanceBranch * nS * (nZeroImpedanceBranchOpenOverrides + nZeroImpedanceBranchCloseOverrides + nSpanningTreeOverrides)) - on
     // network.xiidm's full non-busbar scope fillZeroImpBatch was the top kernel, 32 s of 126 s (45 ms a launch).
-    DeviceBuf dZiOffMask, dZiOnMask, dZiTreeMask;            // off/on: 1 = listed; tree: -1 = no override, else 0/1
-    bool hasZiMasks = false;
+    DeviceBuf dZeroImpedanceBranchOpenMask, dZeroImpedanceBranchCloseMask, dSpanningTreeOverrideMask;            // off/on: 1 = listed; tree: -1 = no override, else 0/1
+    bool hasZeroImpedanceBranchMasks = false;
     int nR1Ov = 0;                                           // per-scenario closed-branch tap overrides (tap/PST actions)
     DeviceBuf dR1OvSlotElem, dR1OvVal;                       // nR1Ov*2 ints / nR1Ov*8 doubles (full closedBranchParameters row per entry)
     // ---- solve-only batch compaction (mode 3, tol > 0): lazily allocated on first engage ----
@@ -549,8 +549,8 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& st, int nScenar
 // Upload the call's step-scaling parameters and per-scenario shunt, coupler and tap overrides.
 void uploadBatchOverrides(BatchSolverContext* ctx, int lsMode, double maxDv, double maxDphi,
                           const int* varType, int nShuntAdmittanceOverrides, const int* shuntAdmittanceOverrideScenarioElement, const double* shuntAdmittanceOverrideDelta,
-                          int nziBase, int nZiOff, const int* ziOffSlotElem,
-                          int nZiOn, const int* ziOnSlotElem,
+                          int nBaseClosedZeroImpedanceBranches, int nZeroImpedanceBranchOpenOverrides, const int* zeroImpedanceBranchOpenScenarioElement,
+                          int nZeroImpedanceBranchCloseOverrides, const int* zeroImpedanceBranchCloseScenarioElement,
                           int nR1Ov, const int* r1OvSlotElem, const double* r1OvVal);
 
 }  // namespace olfgpu

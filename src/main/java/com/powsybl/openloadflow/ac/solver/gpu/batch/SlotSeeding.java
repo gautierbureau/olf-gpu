@@ -26,7 +26,7 @@ import java.util.Map;
  */
 record SlotSeeding(int chunkSize, boolean pairPhase, int n, GpuAcData gpuData, GpuAcElementMapper elementMapper,
                    List<BatchContingency> contingencies, GpuBatchQualification.ScenarioPlan plan, double[] baseState,
-                   double[] baseTargets, int[] baseRowMode, Map<LfHvdc, Integer> hvdcElemIndex, int[] baseNonTreeZi,
+                   double[] baseTargets, int[] baseRowMode, Map<LfHvdc, Integer> hvdcElemIndex, int[] baseNonSpanningTreeBranches,
                    int nds, ReactiveCapabilityCurves.Channel rlCurves, Map<Integer, int[]> curveEntriesByPRow, RunScratch rs,
                    ChunkLists cl) {
 }

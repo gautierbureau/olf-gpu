@@ -121,9 +121,9 @@ public final class RelocatedRows {
     /** Where a per-scenario reactive flip lands: the bus's own {@code BUS_V} row, or its parent coupler's
      *  {@code DUMMY_Q} row while that coupler stays closed. An OUTAGED coupler puts the equations back on the
      *  bus's own rows (the stock placement the chunk solver switches to), so the own row is right there. */
-    static int relocQRow(int vRow, java.util.Map<Integer, int[]> relocRows, java.util.Set<Integer> outagedZiNums) {
+    static int relocQRow(int vRow, java.util.Map<Integer, int[]> relocRows, java.util.Set<Integer> outagedZeroImpedanceBranchNums) {
         int[] reloc = relocRows.get(vRow);
-        return reloc == null || outagedZiNums.contains(reloc[0]) ? vRow : reloc[1];
+        return reloc == null || outagedZeroImpedanceBranchNums.contains(reloc[0]) ? vRow : reloc[1];
     }
 
     /** The INVERSE of {@link #relocatedChildRows}, keyed by the coupler's {@code DUMMY_Q} row:
@@ -147,8 +147,8 @@ public final class RelocatedRows {
 
     /** The row a consumer holding the structural (already relocated) row must write in THIS scenario:
      *  the child bus's own row once the coupler carrying its equations is outaged, else unchanged. */
-    static int unrelocQRow(int row, java.util.Map<Integer, int[]> dummyQRows, java.util.Set<Integer> outagedZiNums) {
+    static int unrelocQRow(int row, java.util.Map<Integer, int[]> dummyQRows, java.util.Set<Integer> outagedZeroImpedanceBranchNums) {
         int[] reloc = dummyQRows.get(row);
-        return reloc != null && outagedZiNums.contains(reloc[0]) ? reloc[1] : row;
+        return reloc != null && outagedZeroImpedanceBranchNums.contains(reloc[0]) ? reloc[1] : row;
     }
 }

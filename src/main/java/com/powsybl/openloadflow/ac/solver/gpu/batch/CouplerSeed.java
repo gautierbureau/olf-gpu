@@ -36,7 +36,7 @@ final class CouplerSeed {
      *  balances come home here rewritten to the bus's own rows. */
     static GenOutage[] seed(SlotSeeding ctx, int s, int ci, GenOutage[] slotGosIn) {
         GenOutage[] slotGos = slotGosIn;
-        final int[] baseNonTreeZi = ctx.baseNonTreeZi();
+        final int[] baseNonSpanningTreeBranches = ctx.baseNonSpanningTreeBranches();
         final int[] baseRowMode = ctx.baseRowMode();
         final double[] baseTargets = ctx.baseTargets();
         final ChunkLists cl = ctx.cl();
@@ -46,28 +46,28 @@ final class CouplerSeed {
         final int n = ctx.n();
         final int nds = ctx.nds();
         final RunScratch rs = ctx.rs();
-        for (LfBranch ziOut : contingencies.get(ci).outagedZiBranches()) {
-            Integer ze = rs.ziElemByNumAll.get(ziOut.getNum());
+        for (LfBranch outagedZeroImpedanceBranchOfContingency : contingencies.get(ci).outagedZeroImpedanceBranches()) {
+            Integer ze = rs.zeroImpedanceElementByNumAll.get(outagedZeroImpedanceBranchOfContingency.getNum());
             // OLF_GPU_ZITREE_TRACE: does this scenario OPEN a coupler the tree relocation
             // moved rows onto? Such a scenario deactivates the coupler's ZERO_V/ZERO_PHI,
             // which the relocation put on the CHILD bus's rows, and pins its dummies with
             // DUMMY_TARGET identities those rows no longer host — the per-scenario gap.
-            // childSide (ziIdx slot 10, bits 1-2) is nonzero exactly when rows moved.
+            // childSide (zeroImpedanceBranchIndices slot 10, bits 1-2) is nonzero exactly when rows moved.
             if (System.getenv("OLF_GPU_ZITREE_TRACE") != null
                     && ((gpuData.zeroImpedanceBranch().indices()[ze * 11 + 10] >> 1) & 3) != 0) {
                 System.err.println("ZITREE_OPEN ctg=" + contingencies.get(ci).contingencyId()
-                        + " coupler=" + ziOut.getId()
+                        + " coupler=" + outagedZeroImpedanceBranchOfContingency.getId()
                         + " childSide=" + ((gpuData.zeroImpedanceBranch().indices()[ze * 11 + 10] >> 1) & 3));
             }
-            rs.ziOffSlotElemList.add(s);
-            rs.ziOffSlotElemList.add(ze);
+            rs.zeroImpedanceBranchOpenScenarioElementList.add(s);
+            rs.zeroImpedanceBranchOpenScenarioElementList.add(ze);
             // the decoupled branch's ZERO_V/ZERO_PHI rows become identities again
             // (dummies pinned to 0) — the inverse of a close
             int dpRow = gpuData.zeroImpedanceBranch().indices()[ze * 11 + 4];
             int dqRow = gpuData.zeroImpedanceBranch().indices()[ze * 11 + 5];
-            int[] rowZi = rs.rowModePerScenario[s] == baseRowMode ? baseRowMode.clone() : rs.rowModePerScenario[s];
-            rowZi[dpRow] = GpuRowMode.FIXED_VARIABLE;
-            rowZi[dqRow] = GpuRowMode.FIXED_VARIABLE;
+            int[] rowModesWithZeroImpedanceBranch = rs.rowModePerScenario[s] == baseRowMode ? baseRowMode.clone() : rs.rowModePerScenario[s];
+            rowModesWithZeroImpedanceBranch[dpRow] = GpuRowMode.FIXED_VARIABLE;
+            rowModesWithZeroImpedanceBranch[dqRow] = GpuRowMode.FIXED_VARIABLE;
             rs.overrides.add(s * n + dpRow, 0.0);
             rs.overrides.add(s * n + dqRow, 0.0);
             // The RELOCATION gave this coupler's ZERO_V the CHILD bus's own V row. With the
@@ -81,7 +81,7 @@ final class CouplerSeed {
             int relocBits = gpuData.zeroImpedanceBranch().indices()[ze * 11 + 10];
             int childSide = (relocBits >> 1) & 3;
             if ((relocBits & 8) != 0 && childSide != 0) {
-                LfBus child = childSide == 1 ? ziOut.getBus1() : ziOut.getBus2();
+                LfBus child = childSide == 1 ? outagedZeroImpedanceBranchOfContingency.getBus1() : outagedZeroImpedanceBranchOfContingency.getBus2();
                 int childVRow = gpuData.zeroImpedanceBranch().indices()[ze * 11 + (childSide == 1 ? 6 : 7)];
                 var childVc = child == null ? java.util.Optional.<GeneratorVoltageControl>empty()
                         : child.getGeneratorVoltageControl();
@@ -130,7 +130,7 @@ final class CouplerSeed {
                 boolean applied = !GenOutage.planFlipsRow(slotGos, childVRow) && childVRow >= 0 && child != null && !child.isDisabled()
                         && child.isGeneratorVoltageControlled() && childVc.isPresent()
                         && ZeroImpedanceClusters.holdsClusterVoltage(contingencies.get(ci).contingencyId(), child,
-                                contingencies.get(ci).outagedZiBranches(), rs.ziElemByNumAll, gpuData.zeroImpedanceBranch().indices(),
+                                contingencies.get(ci).outagedZeroImpedanceBranches(), rs.zeroImpedanceElementByNumAll, gpuData.zeroImpedanceBranch().indices(),
                                 frozenForCtg);
                 int childRl = RelocatedRows.rlEntryOf(gpuData, child);
                 boolean childPinned = applied
@@ -139,10 +139,10 @@ final class CouplerSeed {
                     // The child is PQ in the base (reactive limit): its balance comes home at
                     // the pinned value, no identity (the qualification refused such a child as
                     // VC_REMERGE_PINNED_MAIN until the entry channels below existed).
-                    rowZi[childVRow] = GpuRowMode.BUS_TARGET_Q;
+                    rowModesWithZeroImpedanceBranch[childVRow] = GpuRowMode.BUS_TARGET_Q;
                     rs.overrides.add(s * n + childVRow, child.getTargetQ());
                 } else if (applied) {
-                    rowZi[childVRow] = GpuRowMode.FIXED_VARIABLE;
+                    rowModesWithZeroImpedanceBranch[childVRow] = GpuRowMode.FIXED_VARIABLE;
                     rs.overrides.add(s * n + childVRow, childVc.orElseThrow().getTargetValue());
                 }
                 if (childPhiRow >= 0 && dpRow >= 0) {
@@ -183,7 +183,7 @@ final class CouplerSeed {
                     rs.overrides.add(s * n + childVRow, baseTargets[dqRow]);
                 }
                 if (System.getenv("OLF_GPU_ZITREE_TRACE") != null) {
-                    System.err.println("ZITREE_VID coupler=" + ziOut.getId()
+                    System.err.println("ZITREE_VID coupler=" + outagedZeroImpedanceBranchOfContingency.getId()
                             + " child=" + (child == null ? "-" : child.getId())
                             + " vRow=" + childVRow
                             + " disabled=" + (child != null && child.isDisabled())
@@ -194,7 +194,7 @@ final class CouplerSeed {
                             + " applied=" + applied);
                 }
             }
-            rs.rowModePerScenario[s] = rowZi;
+            rs.rowModePerScenario[s] = rowModesWithZeroImpedanceBranch;
         }
         // OLF's spanning tree, replayed by GpuBatchPrecomputer. The device extracted
         // its structure on the BASE tree; where OLF has moved on by the time it reaches
@@ -202,27 +202,27 @@ final class CouplerSeed {
         // rows (target 0) and the one it replaced takes the ZERO_V/ZERO_PHI coupling
         // back. The split is physically equivalent either way - this is about solving
         // the system OLF solves, from the state OLF solves it at.
-        if (System.getenv("OLF_GPU_ZITREE_TRACE") != null && contingencies.get(ci).stickyNonTreeZi().size() > 40) {
+        if (System.getenv("OLF_GPU_ZITREE_TRACE") != null && contingencies.get(ci).stickyNonSpanningTreeBranches().size() > 40) {
             System.err.println("ZITREE_LEAVE_WIDE slot=" + s + " ctg=" + contingencies.get(ci).contingencyId()
-                    + " nonTree=" + contingencies.get(ci).stickyNonTreeZi().size());
+                    + " nonTree=" + contingencies.get(ci).stickyNonSpanningTreeBranches().size());
         }
-        for (LfBranch nonTree : contingencies.get(ci).stickyNonTreeZi()) {
+        for (LfBranch nonTree : contingencies.get(ci).stickyNonSpanningTreeBranches()) {
             // The contingency's OWN opened couplers are out of the tree too (the replay
             // reports the tree OLF solves on), but the opening path above already owns
             // them - identities, target migration, the child's BUS_TARGET_V. Handling them
             // again here overwrote that voltage target with the reactive one: network.xiidm
             // IKFR (opens IKFH) converged on the CPU and came back non-converged, 66.9 MW
             // against -2.42. They stay in stillOut below, so they are not re-coupled either.
-            if (contingencies.get(ci).outagedZiBranches().contains(nonTree)) {
+            if (contingencies.get(ci).outagedZeroImpedanceBranches().contains(nonTree)) {
                 continue;
             }
-            Integer ze = rs.ziElemByNumAll.get(nonTree.getNum());
+            Integer ze = rs.zeroImpedanceElementByNumAll.get(nonTree.getNum());
             if (ze == null || gpuData.zeroImpedanceBranch().indices()[ze * 11 + 10] == 0) {
                 continue;                // absent, or already out of the base tree
             }
-            rs.ziTreeSlotElemValList.add(s);
-            rs.ziTreeSlotElemValList.add(ze);
-            rs.ziTreeSlotElemValList.add(0);
+            rs.spanningTreeOverrideScenarioElementValueList.add(s);
+            rs.spanningTreeOverrideScenarioElementValueList.add(ze);
+            rs.spanningTreeOverrideScenarioElementValueList.add(0);
             int dpRow = gpuData.zeroImpedanceBranch().indices()[ze * 11 + 4];
             int dqRow = gpuData.zeroImpedanceBranch().indices()[ze * 11 + 5];
             int[] row = rs.rowModePerScenario[s] == baseRowMode ? baseRowMode.clone() : rs.rowModePerScenario[s];
@@ -287,17 +287,17 @@ final class CouplerSeed {
                 rs.overrides.put(s * n + childVRow, baseTargets[dqRow]);
             }
         }
-        if (!contingencies.get(ci).stickyNonTreeZi().isEmpty()) {
-            int[] stillOut = contingencies.get(ci).stickyNonTreeZi().stream()
+        if (!contingencies.get(ci).stickyNonSpanningTreeBranches().isEmpty()) {
+            int[] stillOut = contingencies.get(ci).stickyNonSpanningTreeBranches().stream()
                     .mapToInt(LfBranch::getNum).sorted().toArray();
-            int[] ziNums = gpuData.zeroImpedanceBranch().branchNum();
-            for (int zb : baseNonTreeZi) {
-                if (java.util.Arrays.binarySearch(stillOut, ziNums[zb]) >= 0) {
-                    continue;            // still out (the base-tree ones are not in baseNonTreeZi)
+            int[] zeroImpedanceBranchNums = gpuData.zeroImpedanceBranch().branchNum();
+            for (int zb : baseNonSpanningTreeBranches) {
+                if (java.util.Arrays.binarySearch(stillOut, zeroImpedanceBranchNums[zb]) >= 0) {
+                    continue;            // still out (the base-tree ones are not in baseNonSpanningTreeBranches)
                 }
-                rs.ziTreeSlotElemValList.add(s);
-                rs.ziTreeSlotElemValList.add(zb);
-                rs.ziTreeSlotElemValList.add(1);
+                rs.spanningTreeOverrideScenarioElementValueList.add(s);
+                rs.spanningTreeOverrideScenarioElementValueList.add(zb);
+                rs.spanningTreeOverrideScenarioElementValueList.add(1);
                 int bdp = gpuData.zeroImpedanceBranch().indices()[zb * 11 + 4];
                 int bdq = gpuData.zeroImpedanceBranch().indices()[zb * 11 + 5];
                 int[] r2 = rs.rowModePerScenario[s] == baseRowMode ? baseRowMode.clone() : rs.rowModePerScenario[s];

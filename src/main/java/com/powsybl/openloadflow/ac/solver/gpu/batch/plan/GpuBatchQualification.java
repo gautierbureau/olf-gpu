@@ -207,7 +207,7 @@ public final class GpuBatchQualification {
                 pb.relocatedSlackShift[i] = ds ? newSlack.getTargetP() - gpuData.distributedSlack().slackTargetP() : 0;
                 com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("PLAN:SLACK_RELOCATED");
             }
-            java.util.Set<Integer> outagedZiNums = c.outagedZiBranches().stream()
+            java.util.Set<Integer> outagedZeroImpedanceBranchNums = c.outagedZeroImpedanceBranches().stream()
                     .map(LfBranch::getNum).collect(java.util.stream.Collectors.toSet());
             // SIDE-OPEN scope (conservative): a branch that carries a VARIABLE (BRANCH_RHO1 /
             // BRANCH_ALPHA1) or belongs to a DISTR_RHO group changes the live es shape when
@@ -221,9 +221,9 @@ public final class GpuBatchQualification {
             }
             if (!c.lostGenerators().isEmpty() || !c.lostLoads().isEmpty() || !c.shuntShifts().isEmpty()
                     || !c.tapOverrides().isEmpty() || !c.reclosedBranches().isEmpty()
-                    || !c.outagedZiBranches().isEmpty()
+                    || !c.outagedZeroImpedanceBranches().isEmpty()
                     || !c.outagedHvdcs().isEmpty()) {        // injection/shift/tap/reclose/switch/hvdc-outage (or branch+)
-                InjectionOutagePlanner.plan(ctx, pb, i, c, q, outagedZiNums);
+                InjectionOutagePlanner.plan(ctx, pb, i, c, q, outagedZeroImpedanceBranchNums);
             } else if (!c.outagedShunts().isEmpty()) {       // fixed-shunt disconnection: mask the shunt element
                 if (canBatchShuntOutage(c.outagedShunts(), elementMapper, gpuData)) {
                     pb.batchedIndices.add(i);
@@ -231,7 +231,7 @@ public final class GpuBatchQualification {
                     pb.frozenTargetsByIndex[i] = IslandedBuses.NO_FROZEN_TARGETS;
                 }                                            // else: not a packed fixed shunt / DISTR_Q contributor → CPU
             } else {
-                BranchOutagePlanner.plan(ctx, pb, i, c, q, outagedZiNums);
+                BranchOutagePlanner.plan(ctx, pb, i, c, q, outagedZeroImpedanceBranchNums);
             }
         }
         return pb.build();

@@ -77,7 +77,7 @@ final class ScheduledLoss {
             return false;
         }
         java.util.Set<LfBranch> cut = new java.util.HashSet<>(c.outagedBranches());
-        cut.addAll(c.outagedZiBranches());
+        cut.addAll(c.outagedZeroImpedanceBranches());
         for (BatchContingency.SideOpen so : c.sideOpenBranches()) {
             cut.add(so.branch());
         }

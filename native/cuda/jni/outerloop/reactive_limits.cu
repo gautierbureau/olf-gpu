@@ -108,7 +108,7 @@ __global__ void reactiveLimitsBatch(const double* svcRlVt, int nrl, int nScenari
         // ...and the row its reactive balance and pin live on. The coupler-tree relocation moves it to the parent
         // coupler's DUMMY_Q row — but PER SCENARIO: a contingency that OPENS that coupler sends the child's
         // equations back to its own rows and the host pins the dummy row with a DUMMY_TARGET identity, which is
-        // exactly what mode 0 there means (the same test the zi scatter's stock-placement fallback uses).
+        // exactly what mode 0 there means (the same test the zero-impedance scatter's stock-placement fallback uses).
         size_t qidx = ridx;
         if (rlQrow != nullptr && rlQrow[i] != rlVrow[i]) {
             size_t relocIdx = (size_t) s * n + rlQrow[i];

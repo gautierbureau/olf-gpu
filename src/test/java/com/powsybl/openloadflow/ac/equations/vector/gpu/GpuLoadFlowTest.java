@@ -358,14 +358,14 @@ class GpuLoadFlowTest extends com.powsybl.openloadflow.network.AbstractLoadFlowN
     @Test
     void zeroImpedanceControllerChain() {
         long before = com.powsybl.openloadflow.ac.solver.gpu.GpuNewtonRaphson.CPU_FALLBACK_COUNT.get();
-        compareWithParams(() -> ziControllerChain(3), "zero-impedance controller chain of 3",
+        compareWithParams(() -> zeroImpedanceControllerChainNetwork(3), "zero-impedance controller chain of 3",
                 p -> p.setDistributedSlack(true).setUseReactiveLimits(true), 1e-10);
         org.junit.jupiter.api.Assertions.assertEquals(before,
                 com.powsybl.openloadflow.ac.solver.gpu.GpuNewtonRaphson.CPU_FALLBACK_COUNT.get(),
                 "the chain must solve ON the GPU (no CPU fallback)");
     }
 
-    private static Network ziControllerChain(int couplers) {
+    private static Network zeroImpedanceControllerChainNetwork(int couplers) {
         Network network = Network.create("zi-chain-" + couplers, "code");
         com.powsybl.iidm.network.Bus b0 = createBus(network, "s", "b0");
         createLoad(b0, "ld0", couplers, couplers / 2.0);

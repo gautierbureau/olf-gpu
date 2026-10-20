@@ -45,7 +45,7 @@ struct Family {
     bool hasPhaseControl = false;                            // phase control destinations populated (mode-3 gated emission)
 };
 
-// ziIdx slot 10 packs two things: bit 0 = spanning-tree edge, bits 1-2 = which side is a DEAD-END
+// zeroImpedanceBranchIndices slot 10 packs two things: bit 0 = spanning-tree edge, bits 1-2 = which side is a DEAD-END
 // STUB (0 = none, see GpuAcRowIndexing#ziDeadEndSide). On a stub the four rows around the branch
 // would all have a ZERO DIAGONAL — ZERO_V and ZERO_PHI never depend on their own dummy, and the
 // stub's P/Q balances carry only -DUMMY_P / -DUMMY_Q — and cuDSS's symmetric AMD ordering
@@ -96,12 +96,12 @@ struct SharedStructure {
                                                              // column's device ROW, -1 otherwise
     DeviceBuf dDqAlt, dDqSel;                                // the STOCK-placement twin of dDqDest
                                                              // (ndq*6) and the dummy row it keys on (ndq)
-    int nzi = 0;                                             // zero-impedance branches
-    DeviceBuf dZiIn, dZiIdx, dZiDest;                        // nzi (dZiIn) / nzi*11 (dZiIdx) / nzi*14 (dZiDest)
+    int nZeroImpedanceBranch = 0;                                             // zero-impedance branches
+    DeviceBuf dZeroImpedanceBranchParameters, dZeroImpedanceBranchIndices, dZeroImpedanceBranchDestination;                        // nZeroImpedanceBranch (dZeroImpedanceBranchParameters) / nZeroImpedanceBranch*11 (dZeroImpedanceBranchIndices) / nZeroImpedanceBranch*14 (dZeroImpedanceBranchDestination)
     DeviceBuf dDistrRhoQrGroup;                                    // per DISTR_RHO contribution: the qr relocation group
     int distrRhoQr = 0;                                            // whose candidates contain its row (-1 none) — the seq
                                                              // fill suppresses the CURRENT carrier's row in-kernel
-    DeviceBuf dZiAltDest;                                    // zi dynamic Q-routing (ob/zi channels): per element,
+    DeviceBuf dZiAltDest;                                    // zero-impedance dynamic Q-routing (ob/zero-impedance channels): per element,
     DeviceBuf dZiSelRow;                                     // 4 q slots {F1,F2,J1,J2} alt dests + select rows, and
     DeviceBuf dZiRelocGroup;                                 // the GROUP relocation tables (same encodings as the
     DeviceBuf dZiRelocOff;                                   // cb/sh families)
@@ -141,13 +141,13 @@ SharedStructure* buildStructure(int n,
                                 int nHvdcAcEmulation, const double* hvdcAcEmulationParameters, const int* hvdcAcEmulationIndices,
                                 int ndq, const int* dqElem, const int* dqSide, const double* dqWeight,
                                 const int* dqRow, const int* dqKind,
-                                int nzi, const double* ziIn, const int* ziIdx,
+                                int nZeroImpedanceBranch, const double* zeroImpedanceBranchParameters, const int* zeroImpedanceBranchIndices,
                                 int nDistrRho, const int* distrRhoRow, const int* distrRhoColumn, const double* distrRhoCoefficient,
                                 int nDistrShuntB, const int* distrShuntBRow, const int* distrShuntBColumn, const double* distrShuntBCoefficient,
                                 const int* closedBranchPhaseControlSide,
                                 int nLoadModelTerms, const double* loadModelParameters, const int* loadModelIndices,
                                 int nQr, const int* qrPtr, const int* qrRowsIn,
-                                const int* openBranchAlternateReactiveDestinationIn, const int* ziQAltIn,
+                                const int* openBranchAlternateReactiveDestinationIn, const int* zeroImpedanceBranchAlternateReactiveDestinationIn,
                                 const int* qrDepBaseIn, const int* qrBaseTargetRowIn, const int* depGroupOfRowIn);
 
 // The device bytes one scenario's LU factors take, from a cuDSS probe analysis (cached on the structure).
@@ -156,7 +156,7 @@ double luBytesPerScenario(SharedStructure& st);
 // Re-upload the per-element parameter packs in place (a tap or shunt-susceptance move): same pattern, new values.
 void refreshStructureValues(SharedStructure& st, int nClosedBranch, const double* closedBranchParameters, int nOpenBranch, const double* openBranchParameters,
                             int nShunt, const double* shuntParameters, int nHvdcAcEmulation, const double* hvdcAcEmulationParameters,
-                            int nzi, const double* ziIn);
+                            int nZeroImpedanceBranch, const double* zeroImpedanceBranchParameters);
 
 }  // namespace olfgpu
 

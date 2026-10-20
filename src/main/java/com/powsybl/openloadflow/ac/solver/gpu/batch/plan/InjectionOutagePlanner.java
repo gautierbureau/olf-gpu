@@ -35,9 +35,9 @@ final class InjectionOutagePlanner {
     }
 
     /** Plan contingency {@code i}: on success its entries are in {@code pb} and it is batched; a refusal leaves it to
-     *  the CPU. {@code outagedZiNums} are the numbers of the couplers it opens. */
+     *  the CPU. {@code outagedZeroImpedanceBranchNums} are the numbers of the couplers it opens. */
     static void plan(PlanContext ctx, ScenarioPlanBuilder pb, int i, BatchContingency c,
-                     GpuBatchContingencyValidator.Qualification q, java.util.Set<Integer> outagedZiNums) {
+                     GpuBatchContingencyValidator.Qualification q, java.util.Set<Integer> outagedZeroImpedanceBranchNums) {
         final Set<LfBranch> distrRhoControllers = ctx.distrRhoControllers();
         final GpuDsParams dsParams = ctx.dsParams();
         final double dsSum = ctx.dsSum();
@@ -49,14 +49,14 @@ final class InjectionOutagePlanner {
         final boolean slackParticipates = ctx.slackParticipates();
         java.util.Set<Integer> baseOpenSet = java.util.Arrays.stream(gpuData.baseOpenBranches().closedBranchElements())
                 .boxed().collect(java.util.stream.Collectors.toSet());
-        java.util.Map<Integer, Integer> ziElemByBranchNum = gpuData.baseOpenBranches().zeroImpedanceElementByBranchNum();
+        java.util.Map<Integer, Integer> zeroImpedanceElementByBranchNum = gpuData.baseOpenBranches().zeroImpedanceElementByBranchNum();
         boolean recloseOk = true;
-        int ziCloses = 0;
+        int zeroImpedanceBranchCloses = 0;
         for (LfBranch rb : c.reclosedBranches()) {
             if (rb.isZeroImpedance(com.powsybl.openloadflow.network.LoadFlowModel.AC)) {
-                // switch close: packed base-open zi element, exactly one per scenario
+                // switch close: packed base-open zero-impedance element, exactly one per scenario
                 // (multi-switch closes can interact through the spanning tree — CPU)
-                if (!ziElemByBranchNum.containsKey(rb.getNum()) || ++ziCloses > 1) {
+                if (!zeroImpedanceElementByBranchNum.containsKey(rb.getNum()) || ++zeroImpedanceBranchCloses > 1) {
                     recloseOk = false;
                 }
             } else if (!baseOpenSet.contains(elementMapper.getElementIndex(rb))) {
@@ -141,11 +141,11 @@ final class InjectionOutagePlanner {
         // a member pinned in the base and released after the opening went back to the GROUP's sharing row and
         // put the group's voltage identity back on the pinned main's section, an equation system OLF does not
         // have (the split-group fixture: the device diverged where OLF converges in one release).
-        boolean splitsMergedControl = q.islandedBuses().isEmpty() && !c.outagedZiBranches().isEmpty()
-                && ControlReHoming.reHomedControls(List.of(), c.outagedZiBranches(), c.contingencyId(),
+        boolean splitsMergedControl = q.islandedBuses().isEmpty() && !c.outagedZeroImpedanceBranches().isEmpty()
+                && ControlReHoming.reHomedControls(List.of(), c.outagedZeroImpedanceBranches(), c.contingencyId(),
                                                    es).changesControls();
         gos = planIslandTail(q, splitsMergedControl, es, c, pb, i, gpuData, islandLostVcControllers,
-                             relocatedCouplers, gos, outagedZiNums);
+                             relocatedCouplers, gos, outagedZeroImpedanceBranchNums);
         if (gos == null) {
             return;
         }
@@ -190,7 +190,7 @@ final class InjectionOutagePlanner {
                                               final BatchContingency c, final ScenarioPlanBuilder pb, final int i,
                                               final GpuAcData gpuData, final List<LfBus> islandLostVcControllers,
                                               final Set<LfBranch> relocatedCouplers, final GenOutage[] gosIn,
-                                              final java.util.Set<Integer> outagedZiNums) {
+                                              final java.util.Set<Integer> outagedZeroImpedanceBranchNums) {
         GenOutage[] gos = gosIn;
         if (!q.islandedBuses().isEmpty() || splitsMergedControl) {
             // An outage that ISLANDS buses while it also removes injections: a busbar section
@@ -216,7 +216,7 @@ final class InjectionOutagePlanner {
             VoltageControlOverrides.VcSplit vcSplit = VoltageControlOverrides.classifyVcSplit(es, q.islandedBuses(), lostVcControllers, deadControlBuses,
                     islandedHvdcs);
             ControlReHoming.ReHomed reHomed = ControlReHoming.reHomedControls(q.islandedBuses(),
-                    c.outagedZiBranches(), c.contingencyId(), es);
+                    c.outagedZeroImpedanceBranches(), c.contingencyId(), es);
             if (reHomed.reject() != null) {
                 GpuBatchQualification.refuse(c, "PLAN:" + reHomed.reject());
                 return null;
@@ -269,7 +269,7 @@ final class InjectionOutagePlanner {
                         live = null;
                         break;
                     }
-                    int qFlipRow = RelocatedRows.relocQRow(vVar.getRow(), pb.relocRows, outagedZiNums);
+                    int qFlipRow = RelocatedRows.relocQRow(vVar.getRow(), pb.relocRows, outagedZeroImpedanceBranchNums);
                     if (frozenSet.contains(qFlipRow)) {
                         live = null;
                         break;
@@ -298,7 +298,7 @@ final class InjectionOutagePlanner {
                         break;
                     }
                     int reHomedRl = RelocatedRows.rlEntryOf(gpuData, e.getKey());
-                    int crossRow = RelocatedRows.relocQRow(vVar.getRow(), pb.relocRows, outagedZiNums);
+                    int crossRow = RelocatedRows.relocQRow(vVar.getRow(), pb.relocRows, outagedZeroImpedanceBranchNums);
                     if (crossRow != vVar.getRow()) {
                         // its own row carries a LIVE coupler's ZERO_V: cross identity on the parent's
                         // DUMMY_Q row (rte6515 BUS-6014_BBS_1/2 VL-6014_3, BUS-6029_BBS_4 VL-6029_2)
@@ -342,7 +342,7 @@ final class InjectionOutagePlanner {
             String[] remoteReject = new String[1];
             if (live != null && !reHomed.remoteMainTargets().isEmpty()) {
                 List<GenOutage> remoteIds = ReHomedEntries.remoteMainIdentityEntries(reHomed, es, gpuData, pb.relocRows,
-                        outagedZiNums, frozenSet, remoteReject);
+                        outagedZeroImpedanceBranchNums, frozenSet, remoteReject);
                 if (remoteIds == null) {
                     live = null;
                 } else {
@@ -388,7 +388,7 @@ final class InjectionOutagePlanner {
                     inactiveForTargets.add(ib);
                 }
             }
-            for (GenOutage go : GpuBatchInjectionOutages.islandedDistrQEntries(gpuData, inactiveForTargets, pb.relocDummyQRows, outagedZiNums,
+            for (GenOutage go : GpuBatchInjectionOutages.islandedDistrQEntries(gpuData, inactiveForTargets, pb.relocDummyQRows, outagedZeroImpedanceBranchNums,
                     GpuBatchInjectionOutages.labelsOf(pb.dqSubByIndex[i]))) {
                 live.add(go.withoutFrozenTargetRows(frozenSet));
             }

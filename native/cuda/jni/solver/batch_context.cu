@@ -93,7 +93,7 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& st, int nScenar
     ctx->ndq = st->ndq;
     ctx->nDistrRho = st->nDistrRho;
     ctx->nDistrShuntB = st->nDistrShuntB;
-    ctx->nzi = st->nzi;
+    ctx->nZeroImpedanceBranch = st->nZeroImpedanceBranch;
     const std::vector<int>& rowMap = st->rowMap;
     const std::vector<int>& rowPtr = st->rowPtr;
     const std::vector<int>& colIdx = st->colIdx;
@@ -193,11 +193,11 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& st, int nScenar
         // with the relocation enabled, entries read -78.0 and 4767.3 MVAr and 20 buses were pinned that OLF never
         // pins, after which the pinned solve burned all 30 iterations.
         std::vector<int> rlQrowM(rlVrowM);
-        if (ctx->nzi > 0 && ctx->st->dZiIdx.p != nullptr) {
-            std::vector<int> zidx(static_cast<size_t>(ctx->nzi) * 11);
-            CUDA_CHECK(cudaMemcpy(zidx.data(), ctx->st->dZiIdx.p, zidx.size() * sizeof(int), cudaMemcpyDeviceToHost));
+        if (ctx->nZeroImpedanceBranch > 0 && ctx->st->dZeroImpedanceBranchIndices.p != nullptr) {
+            std::vector<int> zidx(static_cast<size_t>(ctx->nZeroImpedanceBranch) * 11);
+            CUDA_CHECK(cudaMemcpy(zidx.data(), ctx->st->dZeroImpedanceBranchIndices.p, zidx.size() * sizeof(int), cudaMemcpyDeviceToHost));
             std::map<int, int> qRowOfVRow;
-            for (int e = 0; e < ctx->nzi; e++) {
+            for (int e = 0; e < ctx->nZeroImpedanceBranch; e++) {
                 const int* z = zidx.data() + static_cast<size_t>(e) * 11;
                 int childSide = (z[10] >> 1) & 3;
                 int ownVCol = childSide == 1 ? z[6] : (childSide == 2 ? z[7] : -1);
@@ -290,12 +290,12 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& st, int nScenar
     CUDSS_CHECK(cudssCreate(&ctx->ds.handle));
     CUDSS_CHECK(cudssSetStream(ctx->ds.handle, ctx->stream));
     CUDSS_CHECK(cudssConfigCreate(&ctx->ds.config));
-    int ir = ctx->st->nzi > 0 ? irBaseSteps() : IR_N_STEPS;
+    int ir = ctx->st->nZeroImpedanceBranch > 0 ? irBaseSteps() : IR_N_STEPS;
     CUDSS_CHECK(cudssConfigSet(ctx->ds.config, CUDSS_CONFIG_IR_N_STEPS, &ir, sizeof(ir)));
     if (mode == GpuLinearSolveMode::ROBUST) {
         applyRobustSingleMatrixConfig(ctx->ds.config);       // its own ordering: never set the ordering twice
     } else {
-        applyReorderAlg(ctx->ds.config, ctx->st->nzi > 0);
+        applyReorderAlg(ctx->ds.config, ctx->st->nZeroImpedanceBranch > 0);
     }
     CUDSS_CHECK(cudssDataCreate(ctx->ds.handle, &ctx->ds.data));
 
@@ -309,8 +309,8 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& st, int nScenar
 
 void uploadBatchOverrides(BatchSolverContext* ctx, int lsMode, double maxDv, double maxDphi,
                           const int* varType, int nShuntAdmittanceOverrides, const int* shuntAdmittanceOverrideScenarioElement, const double* shuntAdmittanceOverrideDelta,
-                          int nziBase, int nZiOff, const int* ziOffSlotElem,
-                          int nZiOn, const int* ziOnSlotElem,
+                          int nBaseClosedZeroImpedanceBranches, int nZeroImpedanceBranchOpenOverrides, const int* zeroImpedanceBranchOpenScenarioElement,
+                          int nZeroImpedanceBranchCloseOverrides, const int* zeroImpedanceBranchCloseScenarioElement,
                           int nR1Ov, const int* r1OvSlotElem, const double* r1OvVal) {
     int n = ctx->n;
     int nS = ctx->nScenarios;
@@ -347,41 +347,41 @@ void uploadBatchOverrides(BatchSolverContext* ctx, int lsMode, double maxDv, dou
         ctx->dShuntAdmittanceOverrideScenarioElement.upload(dummyI, sizeof(dummyI));
         ctx->dShuntAdmittanceOverrideDelta.upload(dummyD, sizeof(dummyD));
     }
-    ctx->nziBase = nziBase > 0 ? nziBase : ctx->nzi;         // default: every zi element always enabled
-    ctx->nZiOff = nZiOff;
-    if (nZiOff > 0) {
-        ctx->dZiOffSlotElem.upload(ziOffSlotElem, static_cast<size_t>(nZiOff) * 2 * sizeof(int));
-    } else if (!ctx->dZiOffSlotElem.p) {
-        int dummyZiOff[2] = {-1, -1};
-        ctx->dZiOffSlotElem.upload(dummyZiOff, sizeof(dummyZiOff));
+    ctx->nBaseClosedZeroImpedanceBranches = nBaseClosedZeroImpedanceBranches > 0 ? nBaseClosedZeroImpedanceBranches : ctx->nZeroImpedanceBranch;         // default: every zero-impedance element always enabled
+    ctx->nZeroImpedanceBranchOpenOverrides = nZeroImpedanceBranchOpenOverrides;
+    if (nZeroImpedanceBranchOpenOverrides > 0) {
+        ctx->dZeroImpedanceBranchOpenScenarioElement.upload(zeroImpedanceBranchOpenScenarioElement, static_cast<size_t>(nZeroImpedanceBranchOpenOverrides) * 2 * sizeof(int));
+    } else if (!ctx->dZeroImpedanceBranchOpenScenarioElement.p) {
+        int noZeroImpedanceBranchOpenOverride[2] = {-1, -1};
+        ctx->dZeroImpedanceBranchOpenScenarioElement.upload(noZeroImpedanceBranchOpenOverride, sizeof(noZeroImpedanceBranchOpenOverride));
     }
-    ctx->nZiOn = nZiOn;
-    if (nZiOn > 0) {
-        ctx->dZiOnSlotElem.upload(ziOnSlotElem, static_cast<size_t>(nZiOn) * 2 * sizeof(int));
-    } else if (!ctx->dZiOnSlotElem.p) {
-        int dummyZi[2] = {-1, -1};
-        ctx->dZiOnSlotElem.upload(dummyZi, sizeof(dummyZi));
+    ctx->nZeroImpedanceBranchCloseOverrides = nZeroImpedanceBranchCloseOverrides;
+    if (nZeroImpedanceBranchCloseOverrides > 0) {
+        ctx->dZeroImpedanceBranchCloseScenarioElement.upload(zeroImpedanceBranchCloseScenarioElement, static_cast<size_t>(nZeroImpedanceBranchCloseOverrides) * 2 * sizeof(int));
+    } else if (!ctx->dZeroImpedanceBranchCloseScenarioElement.p) {
+        int noZeroImpedanceBranchCloseOverride[2] = {-1, -1};
+        ctx->dZeroImpedanceBranchCloseScenarioElement.upload(noZeroImpedanceBranchCloseOverride, sizeof(noZeroImpedanceBranchCloseOverride));
     }
-    if (ctx->nzi > 0) {                                      // the dense (scenario, element) forms (see dZiOffMask)
-        size_t len = static_cast<size_t>(ctx->nScenarios) * ctx->nzi;
+    if (ctx->nZeroImpedanceBranch > 0) {                                      // the dense (scenario, element) forms (see dZeroImpedanceBranchOpenMask)
+        size_t len = static_cast<size_t>(ctx->nScenarios) * ctx->nZeroImpedanceBranch;
         std::vector<char> off(len, 0), on(len, 0);
-        for (int k = 0; k < nZiOff; k++) {
-            int sl = ziOffSlotElem[2 * k], e = ziOffSlotElem[2 * k + 1];
-            if (sl >= 0 && sl < ctx->nScenarios && e >= 0 && e < ctx->nzi) off[(size_t) sl * ctx->nzi + e] = 1;
+        for (int k = 0; k < nZeroImpedanceBranchOpenOverrides; k++) {
+            int sl = zeroImpedanceBranchOpenScenarioElement[2 * k], e = zeroImpedanceBranchOpenScenarioElement[2 * k + 1];
+            if (sl >= 0 && sl < ctx->nScenarios && e >= 0 && e < ctx->nZeroImpedanceBranch) off[(size_t) sl * ctx->nZeroImpedanceBranch + e] = 1;
         }
-        for (int k = 0; k < nZiOn; k++) {
-            int sl = ziOnSlotElem[2 * k], e = ziOnSlotElem[2 * k + 1];
-            if (sl >= 0 && sl < ctx->nScenarios && e >= 0 && e < ctx->nzi) on[(size_t) sl * ctx->nzi + e] = 1;
+        for (int k = 0; k < nZeroImpedanceBranchCloseOverrides; k++) {
+            int sl = zeroImpedanceBranchCloseScenarioElement[2 * k], e = zeroImpedanceBranchCloseScenarioElement[2 * k + 1];
+            if (sl >= 0 && sl < ctx->nScenarios && e >= 0 && e < ctx->nZeroImpedanceBranch) on[(size_t) sl * ctx->nZeroImpedanceBranch + e] = 1;
         }
-        ctx->dZiOffMask.upload(off.data(), len);
-        ctx->dZiOnMask.upload(on.data(), len);
-        if (!ctx->dZiTreeMask.p) {
+        ctx->dZeroImpedanceBranchOpenMask.upload(off.data(), len);
+        ctx->dZeroImpedanceBranchCloseMask.upload(on.data(), len);
+        if (!ctx->dSpanningTreeOverrideMask.p) {
             std::vector<char> tree(len, (char) -1);
-            ctx->dZiTreeMask.upload(tree.data(), len);
+            ctx->dSpanningTreeOverrideMask.upload(tree.data(), len);
         }
-        ctx->hasZiMasks = true;
+        ctx->hasZeroImpedanceBranchMasks = true;
         if (std::getenv("OLF_GPU_PHASE_TIME") != nullptr) {
-            std::fprintf(stderr, "ZI_LISTS nzi=%d nScenarios=%d nZiOff=%d nZiOn=%d\n", ctx->nzi, ctx->nScenarios, nZiOff, nZiOn);
+            std::fprintf(stderr, "ZI_LISTS nZeroImpedanceBranch=%d nScenarios=%d nZeroImpedanceBranchOpenOverrides=%d nZeroImpedanceBranchCloseOverrides=%d\n", ctx->nZeroImpedanceBranch, ctx->nScenarios, nZeroImpedanceBranchOpenOverrides, nZeroImpedanceBranchCloseOverrides);
         }
     }
     ctx->nR1Ov = nR1Ov;

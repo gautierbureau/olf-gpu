@@ -23,8 +23,8 @@ public final class ZeroImpedanceNative {
     private ZeroImpedanceNative() {
     }
 
-    /** Per (scenario, coupler) spanning-tree flag, as flat {slot, ziElement, isTree} triples, for the
+    /** Per (scenario, coupler) spanning-tree flag, as flat {slot, zeroImpedanceElement, isTree} triples, for the
      *  scenarios where OLF's tree has moved away from the one the structure was extracted on. Empty
      *  clears. */
-    public static native void setBatchZiTreeOverrides(long handle, int[] slotElemVal);
+    public static native void setBatchSpanningTreeOverrides(long handle, int[] slotElemVal);
 }

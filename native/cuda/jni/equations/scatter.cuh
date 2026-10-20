@@ -18,7 +18,7 @@ namespace olfgpu {
  *   dummy row mode 4                      -> the dummy row: a reactive limit pins it there, coupler alive;
  *   dummy row mode 0 and own row mode 4   -> the OWN row: the coupler is dead, so the equations are back home
  *                                            and the pin is there (measured: rte6515 BUS-11_BBS_1 put mode 4 on
- *                                            BUS_V(VL-11_1), which holds zi#1's ZERO_V, and writing nothing left
+ *                                            BUS_V(VL-11_1), which holds zero-impedance#1's ZERO_V, and writing nothing left
  *                                            that row with a zero diagonal — 20 of the 6667 scenarios failed
  *                                            their linear solve exactly this way, all of them _BBS_1 outages);
  *   anything else                         -> nothing: while it SHARES, its DISTR_Q row (diverted home when the
@@ -166,7 +166,7 @@ __device__ inline int depPick(int slot, int frozen, int altDest, int selRow, con
     return rt.pool[rt.off[slot] + relocChooseSub(rt.group[slot], rt.qrPtr, rt.qrRows, mode, rt.dqSub, rt.qrMemberStart)];
 }
 
-// zi q-slot dynamic pick (F/J slots {0..3} per element): group -> mode-scan candidate slot,
+// zero-impedance q-slot dynamic pick (F/J slots {0..3} per element): group -> mode-scan candidate slot,
 // two-way -> alt when the select row is identity/pinned this scenario, else the frozen dest.
 __device__ inline int ziDynDest(int frozen, int slot, const int* alt, const int* sel,
                                 const int* mode, RelocTables rt) {

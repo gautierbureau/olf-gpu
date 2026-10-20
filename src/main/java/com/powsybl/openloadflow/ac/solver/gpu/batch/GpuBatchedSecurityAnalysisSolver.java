@@ -113,15 +113,15 @@ public final class GpuBatchedSecurityAnalysisSolver {
                 .filter(b -> !b.isZeroImpedance(com.powsybl.openloadflow.network.LoadFlowModel.AC))
                 .map(LfBranch::getId)
                 .collect(java.util.stream.Collectors.toSet());
-        java.util.Set<String> baseOpenZiIds = contingencies.stream()
+        java.util.Set<String> baseOpenZeroImpedanceBranchIds = contingencies.stream()
                 .flatMap(c -> c.reclosedBranches().stream())
                 .filter(b -> b.isZeroImpedance(com.powsybl.openloadflow.network.LoadFlowModel.AC))
                 .map(LfBranch::getId)
                 .collect(java.util.stream.Collectors.toSet());
         com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDsParams dsParams = config.dsParams();
-        GpuAcData gpuData = baseOpenIds.isEmpty() && baseOpenZiIds.isEmpty()
+        GpuAcData gpuData = baseOpenIds.isEmpty() && baseOpenZeroImpedanceBranchIds.isEmpty()
                 ? GpuAcDataCache.extract(network, equationSystem, distributedSlack, reactiveLimits, dsParams)
-                : GpuAcDataExtractor.extract(network, equationSystem, distributedSlack, reactiveLimits, baseOpenIds, baseOpenZiIds, dsParams);
+                : GpuAcDataExtractor.extract(network, equationSystem, distributedSlack, reactiveLimits, baseOpenIds, baseOpenZeroImpedanceBranchIds, dsParams);
         GpuAcActivation baseActivation = GpuAcActivation.fromEquationSystem(network, equationSystem);
         String saEqDump = System.getenv("OLF_GPU_SA_EQ_DUMP");   // the SA extraction's row map (GpuEquationDump)
         if (saEqDump != null && !saEqDump.isEmpty()) {

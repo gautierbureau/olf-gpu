@@ -994,7 +994,7 @@ class GpuSaRemoteVoltageControlTest extends AbstractGpuSaTest {
     }
 
     /** Zero-impedance twin: a PINNABLE member with a ZERO-IMPEDANCE spanning-tree branch at its
-     *  bus — the dummy-Q coupling follows the mode-4 row through the zi dynamic slots. 1e-12. */
+     *  bus — the dummy-Q coupling follows the mode-4 row through the zero-impedance dynamic slots. 1e-12. */
     @Test
     void deviceRemoteZeroImpMemberPinMatchesCpu() {
         org.junit.jupiter.api.Assumptions.assumeTrue(

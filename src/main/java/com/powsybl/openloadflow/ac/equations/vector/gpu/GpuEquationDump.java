@@ -26,7 +26,7 @@ import java.util.List;
  * <p>OLF can print its equations ({@code P1 = ac_p_closed_1(...) + ...}), which is how a wrong equation is
  * normally caught. The GPU system has no such reading: it is a set of index PACKS that say which row each
  * element's output is scattered into, so "our equations" only exist implicitly, spread across
- * {@code closedBranchIndices}/{@code openBranchIndices}/{@code shuntIndices}/{@code hvdcAcEmulationIndices}/{@code ziIdx} and the DISTR_Q / DISTR_RHO tables.
+ * {@code closedBranchIndices}/{@code openBranchIndices}/{@code shuntIndices}/{@code hvdcAcEmulationIndices}/{@code zeroImpedanceBranchIndices} and the DISTR_Q / DISTR_RHO tables.
  * This writes them out the same way round as OLF: one line per DEVICE ROW, naming the variable that row
  * belongs to and every element output that lands there. A row with no contribution that is not an identity,
  * or a coupling that appears with the same sign twice, is then as visible as it is in OLF's own dump.
@@ -113,7 +113,7 @@ public final class GpuEquationDump {
             add(terms, hv[e * 4 + 1], "hv#" + e + ".p2");
         }
         int[] zi = d.zeroImpedanceBranch().indices();
-        int[] ziNums = d.zeroImpedanceBranch().branchNum();
+        int[] zeroImpedanceBranchNums = d.zeroImpedanceBranch().branchNum();
         for (int e = 0; e < zi.length / 11; e++) {
             int o = e * 11;
             String tag = "zi#" + e;
@@ -157,10 +157,10 @@ public final class GpuEquationDump {
         }
 
         w.write("\n# ZERO-IMPEDANCE branches, every row slot including -1 (a -1 is a DROPPED term)\n");
-        int[] ziQAlt = d.zeroImpedanceBranch().alternateReactiveDestination();
+        int[] zeroImpedanceBranchAlternateReactiveDestination = d.zeroImpedanceBranch().alternateReactiveDestination();
         for (int e = 0; e < zi.length / 11; e++) {
             int o = e * 11;
-            LfBranch br = e < ziNums.length && ziNums[e] >= 0 ? network.getBranch(ziNums[e]) : null;
+            LfBranch br = e < zeroImpedanceBranchNums.length && zeroImpedanceBranchNums[e] >= 0 ? network.getBranch(zeroImpedanceBranchNums[e]) : null;
             LfBus b1 = br == null ? null : br.getBus1();
             LfBus b2 = br == null ? null : br.getBus2();
             w.write(String.format("zi#%d branch=%s b1=%s b2=%s pRow1=%d qRow1=%d pRow2=%d qRow2=%d"
@@ -168,8 +168,8 @@ public final class GpuEquationDump {
                     e, br == null ? "?" : br.getId(), b1 == null ? "-" : b1.getId(), b2 == null ? "-" : b2.getId(),
                     zi[o], zi[o + 1], zi[o + 2], zi[o + 3], zi[o + 4], zi[o + 5],
                     zi[o + 10] & 1, (zi[o + 10] >> 1) & 3,
-                    e * 2 + 1 < ziQAlt.length ? ziQAlt[e * 2] : -1,
-                    e * 2 + 1 < ziQAlt.length ? ziQAlt[e * 2 + 1] : -1));
+                    e * 2 + 1 < zeroImpedanceBranchAlternateReactiveDestination.length ? zeroImpedanceBranchAlternateReactiveDestination[e * 2] : -1,
+                    e * 2 + 1 < zeroImpedanceBranchAlternateReactiveDestination.length ? zeroImpedanceBranchAlternateReactiveDestination[e * 2 + 1] : -1));
         }
 
         // The invariant a rank-deficient assembly breaks: a DUMMY_Q (or DUMMY_P) is determined only by an
@@ -180,12 +180,12 @@ public final class GpuEquationDump {
             boolean pIncomplete = zi[o] < 0 ^ zi[o + 2] < 0;
             boolean qIncomplete = zi[o + 1] < 0 ^ zi[o + 3] < 0;
             if (pIncomplete || qIncomplete) {
-                LfBranch br = e < ziNums.length && ziNums[e] >= 0 ? network.getBranch(ziNums[e]) : null;
+                LfBranch br = e < zeroImpedanceBranchNums.length && zeroImpedanceBranchNums[e] >= 0 ? network.getBranch(zeroImpedanceBranchNums[e]) : null;
                 w.write(String.format("zi#%d branch=%s %s%s pRows=[%d,%d] qRows=[%d,%d] qAlt=[%d,%d]%n",
                         e, br == null ? "?" : br.getId(), pIncomplete ? "P " : "", qIncomplete ? "Q " : "",
                         zi[o], zi[o + 2], zi[o + 1], zi[o + 3],
-                        e * 2 + 1 < ziQAlt.length ? ziQAlt[e * 2] : -1,
-                        e * 2 + 1 < ziQAlt.length ? ziQAlt[e * 2 + 1] : -1));
+                        e * 2 + 1 < zeroImpedanceBranchAlternateReactiveDestination.length ? zeroImpedanceBranchAlternateReactiveDestination[e * 2] : -1,
+                        e * 2 + 1 < zeroImpedanceBranchAlternateReactiveDestination.length ? zeroImpedanceBranchAlternateReactiveDestination[e * 2 + 1] : -1));
             }
         }
 

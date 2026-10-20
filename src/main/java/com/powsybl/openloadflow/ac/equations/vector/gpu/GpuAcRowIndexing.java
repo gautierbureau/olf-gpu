@@ -213,7 +213,7 @@ final class GpuAcRowIndexing {
      *  {@link #computeQRow} then left its Q balance on its own BUS_V row — a row that already hosts
      *  the bus's DISTR_Q equation. The zero-impedance family's direct +-DUMMY_Q coupling landed
      *  there alongside the DISTR_Q derivative and the two CANCELLED: measured on rte6515
-     *  BUS-24_COUPLER_1 as kind-3 terms summing +1.0 against the zi coupling's -1.0, leaving the
+     *  BUS-24_COUPLER_1 as kind-3 terms summing +1.0 against the zero-impedance coupling's -1.0, leaving the
      *  coupler's DUMMY_Q in NO equation at all — a STRUCTURALLY ZERO COLUMN, which is invisible in
      *  every residual (the free variable perturbs nothing, so |F| looks healthy while the whole
      *  Newton step is polluted). 45 such columns at 2000 busbar sections.
@@ -553,8 +553,8 @@ final class GpuAcRowIndexing {
                     } else {                                 // why each stock coupler stayed stock: both ends' flags
                         System.err.println("ZITREE_STOCK coupler=" + br.getId()
                                 + " dummyCols=" + (dummyPCol[br.getNum()] >= 0 && dummyQCol[br.getNum()] >= 0)
-                                + " " + ziTreeTraceBus(br.getBus1(), es, parentEdgeOfBus, hostsAnotherReactiveRow, qRow, vCol)
-                                + " " + ziTreeTraceBus(br.getBus2(), es, parentEdgeOfBus, hostsAnotherReactiveRow, qRow, vCol));
+                                + " " + spanningTreeTraceBus(br.getBus1(), es, parentEdgeOfBus, hostsAnotherReactiveRow, qRow, vCol)
+                                + " " + spanningTreeTraceBus(br.getBus2(), es, parentEdgeOfBus, hostsAnotherReactiveRow, qRow, vCol));
                     }
                 }
             }
@@ -565,7 +565,7 @@ final class GpuAcRowIndexing {
     }
 
     /** OLF_GPU_ZITREE_TRACE: one coupler end's placement flags, the inputs of {@link #ziTreeRelocation}'s decisions. */
-    private static String ziTreeTraceBus(LfBus bus, EquationSystem<AcVariableType, AcEquationType> es, int[] parentEdgeOfBus,
+    private static String spanningTreeTraceBus(LfBus bus, EquationSystem<AcVariableType, AcEquationType> es, int[] parentEdgeOfBus,
                                          boolean[] hostsAnotherReactiveRow, int[] qRow, int[] vCol) {
         int bn = bus.getNum();
         return bus.getId() + "{" + (parentEdgeOfBus[bn] >= 0 ? "child" : "root")

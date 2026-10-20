@@ -136,7 +136,7 @@ final class GpuSaRunScope {
         // the ALL-PINNED corner (control lost) via the pilot-vEq flip — on-device by
         // updatePilotVeqBatch (mode-scan fallback = candidate 0, the pilot's own row). Still whole-run CPU:
         //  - a pinnable free member whose group has NO relocation table (fewer than 2 merged
-        //    members). Half-open / zero-impedance q terms at members and pilots ride the ob/zi
+        //    members). Half-open / zero-impedance q terms at members and pilots ride the ob/zero-impedance
         //    alternate-dest channels since 2026-09-07 — the unclean-member/pilot conditions are
         //    gone (the pre-channel gap was 3.3e-4 kV on a pinned member with one open line).
         boolean remoteRlUnsupported = remoteRlUnrepresentable(lfNetwork);

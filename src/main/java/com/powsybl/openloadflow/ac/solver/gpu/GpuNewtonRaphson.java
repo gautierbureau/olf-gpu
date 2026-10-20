@@ -760,7 +760,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
             lastRunOnDevice = true;                          // the DRIVER decided the loops of this solve
 
             // DEVICE-BROKEN result safety net: a non-finite or absurd residual is a device-side
-            // numerical failure (e.g. the open zi-with-loaded-far-bus-behind-a-remote-member shape,
+            // numerical failure (e.g. the open zero-impedance-with-loaded-far-bus-behind-a-remote-member shape,
             // where the sequential solve returns phi ~1e22 while the SAME system solves on the CPU
             // and in the batch context — see GpuSeqBaseFallbackTest). Returning it would poison
             // OLF's outer loops and fail the whole run (an SA base would come back FAILED where the

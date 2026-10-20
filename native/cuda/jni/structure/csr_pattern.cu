@@ -82,7 +82,7 @@ RC resolveHvdcAcEmulation(const HvdcScatter& s, const int* ix) {          // P1 
 // the solution dx needs no back-permutation.
 std::vector<int> buildRowMap(int n, int nClosedBranch, const int* closedBranchIndices, int nOpenBranch, const int* openBranchIndices,
                              int nShunt, const int* shuntIndices, int nHvdcAcEmulation, const int* hvdcAcEmulationIndices,
-                             int ndq, const int* dqRow, int nzi, const int* ziIdx) {
+                             int ndq, const int* dqRow, int nZeroImpedanceBranch, const int* zeroImpedanceBranchIndices) {
     std::vector<int> rowMap(n, -1);
     auto pairRc = [&](int row, int col) {
         if (row < 0 || col < 0) return;
@@ -163,8 +163,8 @@ std::vector<int> buildRowMap(int n, int nClosedBranch, const int* closedBranchIn
     }
     // Zero-impedance branch: claim its DUMMY_P / DUMMY_Q rows (ZERO_V/ZERO_PHI or DUMMY_TARGET identities)
     // and, defensively, its bus P/Q rows (a coupler-only bus has no closed/open branch to claim them).
-    for (int e = 0; e < nzi; e++) {
-        const int* ix = ziIdx + e * 11;                      // b1P b1Q b2P b2Q dpRow dqRow v1 v2 ...
+    for (int e = 0; e < nZeroImpedanceBranch; e++) {
+        const int* ix = zeroImpedanceBranchIndices + e * 11;                      // b1P b1Q b2P b2Q dpRow dqRow v1 v2 ...
         for (int s = 0; s < 6; s++) {
             pairRc(ix[s], ix[s]);
         }
@@ -175,7 +175,7 @@ std::vector<int> buildRowMap(int n, int nClosedBranch, const int* closedBranchIn
         // touching such a bus therefore left its V row unpaired and buildStructure rejected the whole
         // system. That is why busbar-section contingencies never reached the GPU: retaining switches
         // creates zero-impedance branches, and past ~20 retained sections one of them lands on a
-        // remote-voltage-control bus (rte6515: row 2200 of 13048, appearing ONLY in zi[slot 6]).
+        // remote-voltage-control bus (rte6515: row 2200 of 13048, appearing ONLY in zero-impedance[slot 6]).
         claimMovedV(ix[1], ix[6]);
         claimMovedV(ix[3], ix[7]);
         if (ziDeadSide(ix)) {
@@ -210,7 +210,7 @@ std::vector<int> buildRowMap(int n, int nClosedBranch, const int* closedBranchIn
             };
             std::string seen = where("cb", closedBranchIndices, nClosedBranch, 12) + where("ob", openBranchIndices, nOpenBranch, 6)
                     + where("sh", shuntIndices, nShunt, 5) + where("hv", hvdcAcEmulationIndices, nHvdcAcEmulation, 4)
-                    + where("zi", ziIdx, nzi, 11);
+                    + where("zi", zeroImpedanceBranchIndices, nZeroImpedanceBranch, 11);
             int dqHits = 0;
             for (int c = 0; c < ndq && dqRow != nullptr; c++) {
                 if (dqRow[c] == r) {
@@ -240,7 +240,7 @@ void collectFamilyPattern(const std::vector<int>& rowMap,
                           int ndq, const int* dqElem, const int* dqSide, const int* dqKind, const int* dqRow,
                           int nDistrRho, const int* distrRhoRow, const int* distrRhoColumn,
                           int nDistrShuntB, const int* distrShuntBRow, const int* distrShuntBColumn,
-                          int nzi, const int* ziIdx, const int* relocOwn,
+                          int nZeroImpedanceBranch, const int* zeroImpedanceBranchIndices, const int* relocOwn,
                           std::vector<std::pair<int, int>>& pat) {
     for (int c = 0; c < ndq; c++) {
         // Twice for a relocated child's sharing row: where it lives while the coupler stands, and on the
@@ -278,8 +278,8 @@ void collectFamilyPattern(const std::vector<int>& rowMap,
     for (int c = 0; c < nDistrShuntB; c++) {                          // DISTR_SHUNT_B: controller b column in a DISTR_SHUNT_B row
         pat.emplace_back(rowMap[distrShuntBRow[c]], distrShuntBColumn[c]);
     }
-    for (int e = 0; e < nzi; e++) {                          // zero-impedance: dummy couplings + (tree) ZERO_V/PHI
-        const int* z = ziIdx + static_cast<size_t>(e) * 11;
+    for (int e = 0; e < nZeroImpedanceBranch; e++) {                          // zero-impedance: dummy couplings + (tree) ZERO_V/PHI
+        const int* z = zeroImpedanceBranchIndices + static_cast<size_t>(e) * 11;
         int b1P = rowMap[z[0]], b2P = rowMap[z[2]];
         int b1Q = z[1] >= 0 ? rowMap[z[1]] : -1, b2Q = z[3] >= 0 ? rowMap[z[3]] : -1;
         pat.emplace_back(b1P, z[4]);

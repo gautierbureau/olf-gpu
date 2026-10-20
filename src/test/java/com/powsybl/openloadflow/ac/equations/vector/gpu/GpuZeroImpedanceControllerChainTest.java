@@ -107,7 +107,7 @@ class GpuZeroImpedanceControllerChainTest extends AbstractLoadFlowNetworkFactory
                 d.distrQ().element(), d.distrQ().side(), d.distrQ().weight(), d.distrQ().row(), d.distrQ().kind(),
                 d.zeroImpedanceBranch().parameters(), d.zeroImpedanceBranch().indices(),
                 d.distrRho().row(), d.distrRho().column(), d.distrRho().coefficient(), d.distrShuntB().row(), d.distrShuntB().column(), d.distrShuntB().coefficient(),
-                // the group tables + ob/zi alternates travel with the packs: a pilot-self group enrolled
+                // the group tables + ob/zero-impedance alternates travel with the packs: a pilot-self group enrolled
                 // in the candidate table (rotation) encodes -2-g in the q alternates, refused without them
                 d.reactiveRelocation().groupStart(), d.reactiveRelocation().candidateRows(), d.openBranch().alternateReactiveDestination(), d.zeroImpedanceBranch().alternateReactiveDestination());
     }
@@ -126,12 +126,12 @@ class GpuZeroImpedanceControllerChainTest extends AbstractLoadFlowNetworkFactory
 
         // The fixture must produce the shape: three merged controllers with a DISTR_Q row and no
         // impedant branch — or the test proves nothing.
-        long ziOnlyDistrQ = network.getBuses().stream()
+        long zeroImpedanceOnlyDistrQ = network.getBuses().stream()
                 .filter(b -> GpuAcRowIndexing.row(es, b.getNum(), AcEquationType.DISTR_Q) >= 0)
                 .filter(b -> b.getBranches().stream().allMatch(br -> br.isZeroImpedance(
                         com.powsybl.openloadflow.network.LoadFlowModel.AC)))
                 .count();
-        assertEquals(3, ziOnlyDistrQ, "three controller sections must live behind couplers only");
+        assertEquals(3, zeroImpedanceOnlyDistrQ, "three controller sections must live behind couplers only");
 
         double[] gpu1 = gpuSteps(network, es, target, x0, 1, n);
         double[] cpu1 = cpuSteps(es, target, eq, sv, 1);

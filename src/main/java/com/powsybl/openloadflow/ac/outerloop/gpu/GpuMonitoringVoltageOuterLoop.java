@@ -150,7 +150,7 @@ public final class GpuMonitoringVoltageOuterLoop {
             int[] dsOvBus, double[] dsOvFactorDelta, double[] dsOvBaseDelta, double[] dsOvMaxDelta, double[] dsOvMinDelta,
             double[] dsAnchorCarry, double[] dsSlackCarry,
             int[] r1OvSlotElem, double[] r1OvVal, int[] shuntAdmittanceOverrideScenarioElement, double[] shuntAdmittanceOverrideDelta,
-            int nziBase, int[] ziOnSlotElem, int[] ziOffSlotElem,
+            int nBaseClosedZeroImpedanceBranches, int[] zeroImpedanceBranchCloseScenarioElement, int[] zeroImpedanceBranchOpenScenarioElement,
             double[] baseState, double[] baseTargets, NewtonRaphsonParameters parameters,
             double tol, double reactiveLimitTol, double slackDistTol, double convEpsPerEq, int[] varType,
             BatchConfig config, int realCount) {
@@ -181,7 +181,7 @@ public final class GpuMonitoringVoltageOuterLoop {
                 shuntAdmittanceOverrideScenarioElement, shuntAdmittanceOverrideDelta, rlState, rlStateOut,
                 r1OvSlotElem, r1OvVal,
                 config.maxOuterIterations(), config.maxPqPvSwitch(), config.dsRejectResidualFlag(), skipRl,
-                nziBase, ziOnSlotElem, ziOffSlotElem);
+                nBaseClosedZeroImpedanceBranches, zeroImpedanceBranchCloseScenarioElement, zeroImpedanceBranchOpenScenarioElement);
         System.arraycopy(rlStateOut, 0, rlState, 0, rlStateOut.length);
         return r2;
     }

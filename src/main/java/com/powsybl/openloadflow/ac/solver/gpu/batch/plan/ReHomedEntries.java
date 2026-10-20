@@ -119,7 +119,7 @@ final class ReHomedEntries {
      */
     static List<GenOutage> remoteMainIdentityEntries(ControlReHoming.ReHomed reHomed, EquationSystem<AcVariableType, AcEquationType> es,
                                                              GpuAcData gpuData, java.util.Map<Integer, int[]> relocRows,
-                                                             java.util.Set<Integer> outagedZiNums, java.util.Set<Integer> frozenSet,
+                                                             java.util.Set<Integer> outagedZeroImpedanceBranchNums, java.util.Set<Integer> frozenSet,
                                                              String[] reject) {
         List<GenOutage> out = new ArrayList<>();
         for (var e : reHomed.remoteMainTargets().entrySet()) {
@@ -129,7 +129,7 @@ final class ReHomedEntries {
                 return null;
             }
             int[] reloc = relocRows.get(vVar.getRow());
-            boolean blockCovers = reloc != null && outagedZiNums.contains(reloc[0]);
+            boolean blockCovers = reloc != null && outagedZeroImpedanceBranchNums.contains(reloc[0]);
             int rl = RelocatedRows.rlEntryOf(gpuData, e.getKey());
             boolean switchedPvToPqInBase = gpuData.switchedPvToPqInBase(rl);
             if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {

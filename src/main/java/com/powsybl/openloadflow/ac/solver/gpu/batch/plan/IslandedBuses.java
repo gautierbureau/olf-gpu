@@ -76,7 +76,7 @@ final class IslandedBuses {
      * bus's power balance is stranded on a dummy row nobody pins, and the island cannot converge.
      *
      * <p>Only couplers with BOTH endpoints islanded are frozen here; the boundary coupler the contingency opened
-     * already has its dummy rows pinned by the chunk solver's zi-outage path. The set is empty when the relocation
+     * already has its dummy rows pinned by the chunk solver's zero-impedance-outage path. The set is empty when the relocation
      * is off, so the default path keeps its exact row list (and with it {@code nActive}).
      */
     static void freezeRelocatedCouplerRows(EquationSystem<AcVariableType, AcEquationType> es,

@@ -50,11 +50,11 @@ public final class StructureNative {
                                               double[] closedBranchParameters, int[] closedBranchIndices, double[] openBranchParameters, int[] openBranchIndices,
                                               double[] shuntParameters, int[] shuntIndices, double[] hvdcAcEmulationParameters, int[] hvdcAcEmulationIndices,
                                               int[] dqElem, int[] dqSide, double[] dqWeight, int[] dqRow, int[] dqKind,
-                                              double[] ziIn, int[] ziIdx,
+                                              double[] zeroImpedanceBranchParameters, int[] zeroImpedanceBranchIndices,
                                               int[] distrRhoRow, int[] distrRhoColumn, double[] distrRhoCoefficient,
                                               int[] distrShuntBRow, int[] distrShuntBColumn, double[] distrShuntBCoefficient, int[] closedBranchPhaseControlSide,
                                               double[] loadModelParameters, int[] loadModelIndices, int[] qrPtr, int[] qrRows,
-                                              int[] openBranchAlternateReactiveDestination, int[] ziQAlt,
+                                              int[] openBranchAlternateReactiveDestination, int[] zeroImpedanceBranchAlternateReactiveDestination,
                                               int[] qrDepBase, int[] qrBaseTargetRow, int[] depGroupOfRow);
 
     /**
@@ -86,5 +86,5 @@ public final class StructureNative {
      *  usable when the caller holds a BATCH context — one extraction has ONE value set, every
      *  context sharing the structure sees the update. */
     public static native void refreshStructureValues(long structureHandle, double[] closedBranchParameters, double[] openBranchParameters,
-                                                     double[] shuntParameters, double[] hvdcAcEmulationParameters, double[] ziIn);
+                                                     double[] shuntParameters, double[] hvdcAcEmulationParameters, double[] zeroImpedanceBranchParameters);
 }

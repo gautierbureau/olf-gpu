@@ -110,7 +110,7 @@ final class GpuStrategyComposer {
      *  contingency itself loses, on which a load action is a no-op. */
     static BatchContingency composeStrategyScenario(Network network, LfNetwork net, String contingencyId,
                                                     OperatorStrategy strategy, List<String> actionIds, List<Action> currentActions,
-                                                    List<LfBranch> ctgZiOutages,
+                                                    List<LfBranch> contingencyZeroImpedanceBranchOutages,
                                                     List<LfBranch> ctgBranches,
                                                     List<LfGenerator> ctgGens,
                                                     List<LoadLoss> ctgLoads,
@@ -118,7 +118,7 @@ final class GpuStrategyComposer {
                                                     List<ShuntShift> ctgShifts,
                                                     List<com.powsybl.openloadflow.network.LfHvdc> ctgHvdcs,
                                                     List<BatchContingency.SideOpen> ctgSideOpens,
-                                                    List<LfBranch> ctgStickyNonTreeZi,
+                                                    List<LfBranch> contingencyStickyNonSpanningTreeBranches,
                                                     com.powsybl.openloadflow.network.LfNetworkParameters networkParameters,
                                                     com.powsybl.loadflow.LoadFlowParameters.BalanceType balanceType) {
         List<LfBranch> branches = new java.util.ArrayList<>(ctgBranches);
@@ -340,7 +340,7 @@ final class GpuStrategyComposer {
         if (!reenabled.isEmpty()) {
             // OLF re-enables every branch at a bus its actions bring back into the main component that is not connected
             // at both ends (AbstractLfBranchAction.updateBusesAndBranchStatus), even one the contingency outaged
-            List<LfBranch> ctgCut = new java.util.ArrayList<>(ctgZiOutages);
+            List<LfBranch> ctgCut = new java.util.ArrayList<>(contingencyZeroImpedanceBranchOutages);
             ctgBranches.stream().filter(b -> b.getBus1() != null && b.getBus2() != null).forEach(ctgCut::add);
             ctgSideOpens.forEach(so -> ctgCut.add(so.branch()));
             for (LfBus bus : busesBroughtBack(net, ctgCut, reenabled, opened)) {
@@ -355,8 +355,8 @@ final class GpuStrategyComposer {
                 // the parent's one-side openings and the zero-impedance tree OLF reaches the strategy with: the pair is
                 // the contingency's topology plus the actions (dropping them solved another network: 0.52 kV at B4 on a
                 // three-winding transformer outage)
-                branches, ctgGens, loads, shifts, taps, List.of(), reclosed, ctgZiOutages, ctgHvdcs, ctgSideOpens,
-                ctgStickyNonTreeZi, generatorActions, acEmulationOff);
+                branches, ctgGens, loads, shifts, taps, List.of(), reclosed, contingencyZeroImpedanceBranchOutages, ctgHvdcs, ctgSideOpens,
+                contingencyStickyNonSpanningTreeBranches, generatorActions, acEmulationOff);
     }
 
     /**

@@ -23,38 +23,38 @@ namespace olfgpu {
 // Batched zero-impedance fill: one thread per (branch, scenario). The Jacobian entries are
 // constants, only F depends on the state — DUMMY_P/Q ±1 couplings into both buses' P/Q balances and, on a spanning-tree edge,
 // the ZERO_V (v1−rho·v2) / ZERO_PHI (ph1−ph2) coupling. Active-gated, no mask (bus-coupler outage is rejected).
-__global__ void fillZeroImpBatch(int nzi, int nScenarios, int n, int nnz,
+__global__ void fillZeroImpBatch(int nZeroImpedanceBranch, int nScenarios, int n, int nnz,
                                  const double* in, const int* ix, const int* dest,
                                  const double* x, double* vals, double* F, const char* active,
-                                 int nziBase, int nZiOn, const int* ziOnSlotElem,
-                                 int nZiOff, const int* ziOffSlotElem,
+                                 int nBaseClosedZeroImpedanceBranches, int nZeroImpedanceBranchCloseOverrides, const int* zeroImpedanceBranchCloseScenarioElement,
+                                 int nZeroImpedanceBranchOpenOverrides, const int* zeroImpedanceBranchOpenScenarioElement,
                                  const int* ziAlt, const int* ziSel, const int* mode, int ziDyn,
-                                 RelocTables rt, int nZiTree, const int* ziTreeSlotElemVal,
-                                 const char* ziOffMask, const char* ziOnMask, const char* ziTreeMask) {
+                                 RelocTables rt, int nSpanningTreeOverrides, const int* spanningTreeOverrideScenarioElementValue,
+                                 const char* zeroImpedanceBranchOpenMask, const char* zeroImpedanceBranchCloseMask, const char* spanningTreeOverrideMask) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= nzi * nScenarios) return;
-    int e = tid % nzi;
-    int s = tid / nzi;
+    if (tid >= nZeroImpedanceBranch * nScenarios) return;
+    int e = tid % nZeroImpedanceBranch;
+    int s = tid / nZeroImpedanceBranch;
     if (!active[s]) return;
-    size_t me = (size_t) s * nzi + e;                        // the dense (scenario, element) masks, when built
-    if (ziOffMask != nullptr) {
-        if (ziOffMask[me]) return;                           // per-scenario switch OUTAGE
+    size_t me = (size_t) s * nZeroImpedanceBranch + e;                        // the dense (scenario, element) masks, when built
+    if (zeroImpedanceBranchOpenMask != nullptr) {
+        if (zeroImpedanceBranchOpenMask[me]) return;                           // per-scenario switch OUTAGE
     } else {
-        for (int k = 0; k < nZiOff; k++) {                   // per-scenario switch OUTAGE (node-breaker
-            if (ziOffSlotElem[2 * k] == s && ziOffSlotElem[2 * k + 1] == e) {   // contingency propagation)
+        for (int k = 0; k < nZeroImpedanceBranchOpenOverrides; k++) {                   // per-scenario switch OUTAGE (node-breaker
+            if (zeroImpedanceBranchOpenScenarioElement[2 * k] == s && zeroImpedanceBranchOpenScenarioElement[2 * k + 1] == e) {   // contingency propagation)
                 return;
             }
         }
     }
-    if (e >= nziBase) {
+    if (e >= nBaseClosedZeroImpedanceBranches) {
         // BASE-OPEN closable switch element: contributes ONLY in scenarios that CLOSE it —
         // sparse (slot, elem) enable list, a handful of entries per run.
         bool on = false;
-        if (ziOnMask != nullptr) {
-            on = ziOnMask[me] != 0;
+        if (zeroImpedanceBranchCloseMask != nullptr) {
+            on = zeroImpedanceBranchCloseMask[me] != 0;
         } else {
-            for (int k = 0; k < nZiOn; k++) {
-                if (ziOnSlotElem[2 * k] == s && ziOnSlotElem[2 * k + 1] == e) {
+            for (int k = 0; k < nZeroImpedanceBranchCloseOverrides; k++) {
+                if (zeroImpedanceBranchCloseScenarioElement[2 * k] == s && zeroImpedanceBranchCloseScenarioElement[2 * k + 1] == e) {
                     on = true;
                     break;
                 }
@@ -71,7 +71,7 @@ __global__ void fillZeroImpBatch(int nzi, int nScenarios, int n, int nnz,
     double dummyP = xs[q[4]], dummyQ = xs[q[5]];
     int d2 = d[2], d3 = d[3], d6 = d[6], d7 = d[7];
     int d0 = d[0], d1 = d[1], d4 = d[4], d5 = d[5];
-    if (ziDyn) {                                             // dynamic Q-routing (ob/zi channels)
+    if (ziDyn) {                                             // dynamic Q-routing (ob/zero-impedance channels)
         const int* ms = mode + (size_t) s * n;
         RelocTables rtS = relocForScenario(rt, s);
         d2 = ziDynDest(d2, e * 8 + 0, ziAlt, ziSel, ms, rtS);
@@ -92,13 +92,13 @@ __global__ void fillZeroImpBatch(int nzi, int nScenarios, int n, int nnz,
     addAt(d6, 1.0, valsS, FS);                               // J(bus1 Q, dummyQ)
     addAt(d7, -1.0, valsS, FS);                              // J(bus2 Q, dummyQ)
     int isTree = q[10] & 1;                                  // the tree at EXTRACTION...
-    if (ziTreeMask != nullptr) {
-        char t = ziTreeMask[me];                             // ...overridden where OLF's has moved by then
+    if (spanningTreeOverrideMask != nullptr) {
+        char t = spanningTreeOverrideMask[me];                             // ...overridden where OLF's has moved by then
         if (t >= 0) isTree = t;
     } else {
-        for (int k = 0; k < nZiTree; k++) {
-            if (ziTreeSlotElemVal[3 * k] == s && ziTreeSlotElemVal[3 * k + 1] == e) {
-                isTree = ziTreeSlotElemVal[3 * k + 2];
+        for (int k = 0; k < nSpanningTreeOverrides; k++) {
+            if (spanningTreeOverrideScenarioElementValue[3 * k] == s && spanningTreeOverrideScenarioElementValue[3 * k + 1] == e) {
+                isTree = spanningTreeOverrideScenarioElementValue[3 * k + 2];
                 break;
             }
         }

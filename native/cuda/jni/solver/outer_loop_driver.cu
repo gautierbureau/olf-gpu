@@ -130,7 +130,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     const int& nnz = drv.nnz;
     const int& nS = drv.nS;
     // MAX_VOLTAGE_CHANGE (GpuStateVectorScalingMode::MAX_VOLTAGE_CHANGE): per-scenario step clamp, same rule as the base solver's
-    // (varType 1 = V vs maxDv, 0 = PHI vs maxDphi; whole step scaled). Buffers allocated lazily.
+    // (varType = OLF's AcVariableType ordinal: BUS_V vs maxDv, BUS_PHI vs maxDphi; whole step scaled). Buffers allocated lazily.
     uploadBatchOverrides(ctx, stateVectorScalingMode, maxDv, maxDphi, varType, nShuntAdmittanceOverrides, shuntAdmittanceOverrideScenarioElement, shuntAdmittanceOverrideDelta,
                          nBaseClosedZeroImpedanceBranches, nZeroImpedanceBranchOpenOverrides, zeroImpedanceBranchOpenScenarioElement, nZeroImpedanceBranchCloseOverrides, zeroImpedanceBranchCloseScenarioElement, nClosedBranchParameterOverrides, closedBranchParameterOverrideScenarioElement, closedBranchParameterOverrideValues);
     drv.nTot = static_cast<size_t>(n) * nS;

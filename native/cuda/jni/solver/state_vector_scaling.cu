@@ -13,7 +13,7 @@
 
 #include "../common/check.cuh"
 #include "../common/launch.cuh"
-#include "../common/codes/gpu_step_clamp_variable.cuh"
+#include "../common/codes/gpu_ac_variable_type.cuh"
 #include "../solver/driver_steps.cuh"
 #include "state_vector_scaling.cuh"
 
@@ -66,9 +66,9 @@ __global__ void maxVoltageChangeFactorBatch(int n, const double* dx, const int* 
         const double* d = dx + (size_t) s * n;
         for (int i = threadIdx.x; i < n; i += blockDim.x) {
             double a = fabs(d[i]);
-            if (varType[i] == GpuStepClampVariable::BUS_V) {
+            if (varType[i] == GpuAcVariableType::BUS_V) {
                 mdv = fmax(mdv, a);
-            } else if (varType[i] == GpuStepClampVariable::BUS_PHI) {
+            } else if (varType[i] == GpuAcVariableType::BUS_PHI) {
                 mdphi = fmax(mdphi, a);
             }
         }

@@ -208,5 +208,5 @@ constants carry OLF's constant names.
 | `GpuPiModelColumn` | a `PiModel` as 8 doubles, in its getters' order (tap tables, `closedBranchParameters`) | `Y` 0, `G1` 1, `G2` 2, `B1` 3, `B2` 4, `KSI` 5, `R1` 6, `A1` 7, `COUNT` 8 |
 | `GpuDiscreteControlMemberState` | a discrete transformer / shunt voltage control member: continuous first, then rounded and disabled | `DISABLED` 0, `CONTINUOUS` 1, `ROUNDED` 2 |
 | `GpuTransformerVoltageControlMode` | `TransformerVoltageControlMode` (device numbering) | `AFTER_GENERATOR_VOLTAGE_CONTROL` 0, `WITH_GENERATOR_VOLTAGE_CONTROL` 1 |
-| `GpuStepClampVariable` | `AcVariableType` as `MaxVoltageChangeStateVectorScaling` sees it (device numbering) | `BUS_PHI` 0, `BUS_V` 1, `OTHER` 2 |
+| `GpuAcVariableType` | OLF's `AcVariableType` ordinals the device reads (the step clamp's varType, one per row) | `BUS_V` 0, `BUS_PHI` 1 (OLF's ordinals) |
 | `GpuRowMode` | which equation a stable row holds (section 2.2) | `FIXED_VARIABLE` 0, `EQUATION` 1, `BUS_TARGET_V_WITH_SLOPE` 2, `BRANCH_TARGET_P` 3, `BUS_TARGET_Q` 4, `CROSS_FIXED_VARIABLE` 6 |

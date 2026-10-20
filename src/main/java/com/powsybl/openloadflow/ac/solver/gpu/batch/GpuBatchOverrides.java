@@ -52,22 +52,6 @@ public final class GpuBatchOverrides {
      *  row's target. Counted on every run — the chunk solver names the chunk when it is non-zero. */
     private int conflictCount;
 
-    /** OLF_GPU_OV_DUP_TRACE: measure the invariant this class states in its own javadoc — a row must
-     *  carry at most ONE override, because applyTargetOverrideBatch is one thread per entry writing
-     *  target[ovIndex[k]] and two entries for one row RACE. A duplicate whose value EQUALS the entry
-     *  it shadows is benign (either write gives the same target); one with a different value is a
-     *  nondeterministic target. Off by default: add() runs millions of times per chunk. */
-    private static final boolean DUP_TRACE = System.getenv("OLF_GPU_OV_DUP_TRACE") != null;
-    /** Distinct flat rows that got a second entry, and those where it CONFLICTED (different value). */
-    private final gnu.trove.set.hash.TIntHashSet dupRows = new gnu.trove.set.hash.TIntHashSet();
-    private final gnu.trove.set.hash.TIntHashSet conflictRows = new gnu.trove.set.hash.TIntHashSet();
-    /** The first few conflicts, as {flat, shadowedValue, newValue} — enough to name them. */
-    private final java.util.List<double[]> conflictSamples = new java.util.ArrayList<>();
-    /** ...and, per sample, the call site of the SHADOWING write. Only one of the two producers, but
-     *  naming one is what lets the pair be read off the code instead of guessed. Captured only for a
-     *  conflict (at most 40 per chunk), never on the 3.4M-entry hot path. */
-    private final java.util.List<String> conflictSites = new java.util.ArrayList<>();
-
     /** A copy of the entries, to put back with {@link #restore}. */
     record Snapshot(int[] index, double[] value, int generation, int duplicateAppends) {
     }
@@ -79,17 +63,7 @@ public final class GpuBatchOverrides {
         positionOf.clear();
         generation++;
         conflictCount = 0;
-        if (DUP_TRACE) {
-            dupRows.clear();
-            conflictRows.clear();
-            conflictSamples.clear();
-            conflictSites.clear();
-        }
     }
-
-    private static final java.util.Set<Integer> WATCH = System.getenv("OLF_GPU_OV_WATCH") == null ? java.util.Set.of()
-            : java.util.Arrays.stream(System.getenv("OLF_GPU_OV_WATCH").split(",")).map(String::trim)
-                    .map(Integer::valueOf).collect(java.util.stream.Collectors.toUnmodifiableSet());
 
     /** Adds since the last {@link #clear} that replaced an existing entry with a DIFFERENT value — a target two
      *  producers disagreed on, resolved deterministically to the later one. Zero on a sound plan. */
@@ -106,29 +80,11 @@ public final class GpuBatchOverrides {
      *  entries handed to the device now never hold a row twice; a conflicting duplicate is still COUNTED
      *  (always, one compare on a rare path) so the chunk solver can name it. */
     public void add(int flat, double v) {
-        if (WATCH.contains(flat)) {                          // OLF_GPU_OV_WATCH=<flat>[,<flat>]: who writes it
-            System.err.println("OV_WATCH flat=" + flat + " v=" + v + " at " + java.util.Arrays.stream(new Throwable().getStackTrace())
-                    .filter(f -> f.getClassName().startsWith("com.powsybl.openloadflow")).limit(4)
-                    .map(f -> f.getFileName() + ":" + f.getLineNumber()).reduce((a, b) -> a + "<" + b).orElse("?"));
-        }
         int prev = positionOf.get(flat);
         if (prev >= 0) {
             duplicateAppends++;
-            double shadowed = value.getQuick(prev);
-            boolean conflict = Double.compare(shadowed, v) != 0;
-            if (conflict) {
+            if (Double.compare(value.getQuick(prev), v) != 0) {
                 conflictCount++;
-            }
-            if (DUP_TRACE) {
-                dupRows.add(flat);
-                if (conflict && conflictRows.add(flat) && conflictSamples.size() < 40) {
-                    conflictSamples.add(new double[] {flat, shadowed, v});
-                    conflictSites.add(java.util.Arrays.stream(new Throwable().getStackTrace())
-                            .filter(f -> f.getClassName().startsWith("com.powsybl.openloadflow"))
-                            .limit(4)
-                            .map(f -> f.getFileName() + ":" + f.getLineNumber())
-                            .reduce((a, b) -> a + "<" + b).orElse("?"));
-                }
             }
             value.setQuick(prev, v);
             return;
@@ -213,31 +169,6 @@ public final class GpuBatchOverrides {
         for (int k = 0; k < size; k++) {
             add(snapshot.index()[k], snapshot.value()[k]);
         }
-    }
-
-    /** Is the duplicate measurement on? (OLF_GPU_OV_DUP_TRACE) */
-    static boolean dupTrace() {
-        return DUP_TRACE;
-    }
-
-    /** Distinct rows that carry more than one override entry in the CURRENT chunk. */
-    int duplicateRowCount() {
-        return dupRows.size();
-    }
-
-    /** Of those, the rows whose duplicate entries disagree — a target the device picks by a race. */
-    int conflictingRowCount() {
-        return conflictRows.size();
-    }
-
-    /** Up to 40 samples of the disagreements, as {flat, shadowedValue, newValue}. */
-    java.util.List<double[]> conflictSamples() {
-        return conflictSamples;
-    }
-
-    /** Per sample, the call site of the shadowing write (innermost openloadflow frames). */
-    java.util.List<String> conflictSites() {
-        return conflictSites;
     }
 
     int[] indexArray() {

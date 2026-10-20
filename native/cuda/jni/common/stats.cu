@@ -12,8 +12,6 @@ long long gOlFirstSolveScen = 0, gOlReSolveScen[GpuOuterLoopKind::COUNT] = {0}, 
 long long gOlFirstLaneIters = 0, gOlReSolveLaneIters[GpuOuterLoopKind::COUNT] = {0}, gOlFirstWidthIters = 0, gOlReSolveWidthIters[GpuOuterLoopKind::COUNT] = {0};
 long long gOlCheckPasses[GpuOuterLoopKind::COUNT] = {0}, gOlFirstPasses = 0;
 
-long long gRlCheckScen[8] = {0}, gRlStableScen = 0, gRlEntryCodes[4] = {0};
-
 long long gNewtonIters = 0;
 int gLastPassIters = 0;
 long long gSolvePasses = 0;

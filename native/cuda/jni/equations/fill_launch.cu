@@ -16,8 +16,6 @@
 #include "../common/codes/gpu_row_mode.cuh"
 #include "scatter.cuh"
 #include "../solver/driver_steps.cuh"
-#include "../diagnostics/driver_traces.cuh"
-#include "../diagnostics/matrix_scan.cuh"
 #include "branch_fill.cuh"
 #include "bus_injection_fill.cuh"
 #include "distribution_fill.cuh"
@@ -166,7 +164,6 @@ void fillActiveBatch(BatchSolverContext* ctx, DriverPass& drv, bool fOnly) {
     const int& n = drv.n;
     const int& nnz = drv.nnz;
     const int& nS = drv.nS;
-    const int& outer = drv.outer;
     const bool& deviceFixedIter = drv.deviceFixedIter;
     if (ctx->hasPilotSelf && ctx->dPsSkip.p != nullptr && ctx->st->nQr > 0) {
         // Recompute the PILOT-SELF gate from the CURRENT pin states BEFORE any family fill: such a pilot
@@ -191,17 +188,6 @@ void fillActiveBatch(BatchSolverContext* ctx, DriverPass& drv, bool fOnly) {
             fillClosedBranchBatchF<<<grid(ctx->st->cb.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->cb.ne, nS, n, nnz, ctx->nElements, ctx->cbOffset, ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->cb.dest.as<int>(), ctx->dX.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>(), ctx->st->cb.altDest.as<int>(), ctx->st->cb.selRow.as<int>(), ctx->dMode.as<int>(), ctx->st->cb.dynReloc ? 1 : 0, ctx->st->cb.phaseCtl ? ctx->st->cb.pcDest.as<int>() : nullptr, ctx->st->cb.phaseCtl ? ctx->st->cb.pcSel.as<int>() : nullptr, withPilotSelf(relocOf(ctx->st->cb, ctx->st.get()), ctx));
         } else {
             fillClosedBranchBatch<<<grid(ctx->st->cb.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->cb.ne, nS, n, nnz, ctx->nElements, ctx->cbOffset, ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->cb.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>(), ctx->st->cb.altDest.as<int>(), ctx->st->cb.selRow.as<int>(), ctx->dMode.as<int>(), ctx->st->cb.dynReloc ? 1 : 0, ctx->st->cb.phaseCtl ? ctx->st->cb.pcDest.as<int>() : nullptr, ctx->st->cb.phaseCtl ? ctx->st->cb.pcSel.as<int>() : nullptr, withPilotSelf(relocOf(ctx->st->cb, ctx->st.get()), ctx));
-        }
-    }
-    {
-        static const char* cbProbe = std::getenv("OLF_GPU_CB_PROBE");
-        static bool cbProbed = false;
-        if (cbProbe != nullptr && !cbProbed && nS > 1 && ctx->st->cb.ne) {
-            cbProbed = true;
-            cbRowProbe<<<1, 1, 0, ctx->stream>>>(nS, std::atoi(cbProbe), ctx->st->cb.in.as<double>(),
-                    ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>(),
-                    ctx->nElements, ctx->cbOffset, ctx->dDisabled.as<char>(), ctx->dActive.as<char>());
-            CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
         }
     }
     if (ctx->st->ob.ne) {
@@ -241,12 +227,7 @@ if (ctx->ndq) fillDistrQBatch<<<grid(ctx->ndq * nS), BLOCK, 0, ctx->stream>>>(ct
     if (ctx->nzi) fillZeroImpBatch<<<grid(ctx->nzi * nS), BLOCK, 0, ctx->stream>>>(ctx->nzi, nS, n, nnz, ctx->st->dZiIn.as<double>(), ctx->st->dZiIdx.as<int>(), ctx->st->dZiDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->nziBase, ctx->nZiOn, ctx->dZiOnSlotElem.as<int>(), ctx->nZiOff, ctx->dZiOffSlotElem.as<int>(), ctx->st->dZiAltDest.as<int>(), ctx->st->dZiSelRow.as<int>(), ctx->dMode.as<int>(), ctx->st->ziDyn ? 1 : 0, withPilotSelf(ziRelocOf(ctx->st.get()), ctx), ctx->nZiTree, ctx->nZiTree ? ctx->dZiTreeSlotElemVal.as<int>() : nullptr, ctx->hasZiMasks ? ctx->dZiOffMask.as<char>() : nullptr, ctx->hasZiMasks ? ctx->dZiOnMask.as<char>() : nullptr, ctx->hasZiMasks ? ctx->dZiTreeMask.as<char>() : nullptr);
     applyRowModeBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, nnz, ctx->dMode.as<int>(), ctx->st->dRowPtr.as<int>(), ctx->st->dDiagPos.as<int>(), ctx->dX.as<double>(), ctx->dTarget.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->dRowSlope.as<double>(),
                 ctx->st->dColIdx.as<int>(), ctx->st->dRelocOwn.p != nullptr ? ctx->st->dRelocOwn.as<int>() : nullptr);
-    // OLF_GPU_VALS_SCAN_PREREPAIR: scan/dump the fill BEFORE the zero-diagonal repair rewrites hazard rows
-    // (a row that reads as a borrowed donor after the repair was EMPTY before it — the defect is upstream).
-    static const bool scanPreRepair = std::getenv("OLF_GPU_VALS_SCAN_PREREPAIR") != nullptr;
-    if (scanPreRepair) scanValsFinite(ctx, nS, n, nnz, outer);
     hazRepairValues(ctx, nS, ctx->dVals.as<double>());
-    if (!scanPreRepair) scanValsFinite(ctx, nS, n, nnz, outer);   // OLF_GPU_VALS_SCAN: is the matrix sound at all?
     if (!deviceFixedIter) CUDA_CHECK(cudaStreamSynchronize(ctx->stream));   // fixed-iter: stream-ordered into the solve, no host sync
 }
 

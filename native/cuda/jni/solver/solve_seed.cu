@@ -164,7 +164,7 @@ void seedSolve(BatchSolverContext* ctx, DriverPass& drv, const int* rlStateIn, c
                     ctx->nDsRowOv > 0 ? ctx->dDsRowOv.as<int>() : nullptr, ctx->nds,
                     ctx->ngen > 0 ? ctx->dgBus.as<int>() : nullptr,
                     ctx->dRlMinQDyn.as<double>(), ctx->dRlMaxQDyn.as<double>(),
-                    ctx->dRlLoadQDyn.as<double>(), cvProbeEntry, cvProbeSlotByCtg ? ctx->loopTraceSlot : cvProbeSlot);
+                    ctx->dRlLoadQDyn.as<double>());
             launchForcedTargetQLimits(ctx, nS, n);
         }
         seedRlModeFromState<<<grid(ctx->nrl * nS), BLOCK, 0, ctx->stream>>>(ctx->nrl, nS, n,
@@ -200,19 +200,6 @@ void seedSolve(BatchSolverContext* ctx, DriverPass& drv, const int* rlStateIn, c
                     ctx->hasRlBaseLt ? ctx->dRlBaseLimitType.as<char>() : nullptr,
                     psEntryPtr(ctx), ctx->st->nQr,
                     ctx->nRlGenLost > 0 ? ctx->dRlGenLost.as<char>() : nullptr);
-            if (ctx->nRlGenLost > 0 && std::getenv("OLF_GPU_GENLOST_TRACE") != nullptr) {
-                // the seeded types of the lost-generator entries, read back (device printf is not captured)
-                CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
-                std::vector<char> hm((size_t) nS * ctx->nrl), hl((size_t) nS * ctx->nrl);
-                CUDA_CHECK(cudaMemcpy(hm.data(), ctx->dRlGenLost.p, hm.size(), cudaMemcpyDeviceToHost));
-                CUDA_CHECK(cudaMemcpy(hl.data(), ctx->dRlLimitType.p, hl.size(), cudaMemcpyDeviceToHost));
-                for (size_t k = 0; k < hm.size(); k++) {
-                    if (hm[k]) {
-                        std::fprintf(stderr, "GENLOST_SEED slot=%d entry=%d limitType=%d nS=%d nrl=%d\n",
-                                     (int) (k / ctx->nrl), (int) (k % ctx->nrl), (int) hl[k], nS, ctx->nrl);
-                    }
-                }
-            }
         }
     }
     // The seeded pin states must reach the ROWS before the first fill: a pinned enrolled pilot's balance
@@ -255,7 +242,7 @@ void seedSolve(BatchSolverContext* ctx, DriverPass& drv, const int* rlStateIn, c
                 ctx->nDsRowOv > 0 ? ctx->dDsRowOv.as<int>() : nullptr, ctx->nds,
                 ctx->ngen > 0 ? ctx->dgBus.as<int>() : nullptr,
                 ctx->dRlMinQDyn.as<double>(), ctx->dRlMaxQDyn.as<double>(),
-                ctx->dRlLoadQDyn.as<double>(), cvProbeEntry, cvProbeSlotByCtg ? ctx->loopTraceSlot : cvProbeSlot);
+                ctx->dRlLoadQDyn.as<double>());
         launchForcedTargetQLimits(ctx, nS, n);
     }
     launchPilotVeqInner(ctx, drv, true, true);                     // seed: base limits, or the previous solve's flip

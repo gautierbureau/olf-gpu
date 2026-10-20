@@ -73,14 +73,6 @@ __global__ void hvdcSlackBalanceBatch(int nS, int nh, int n, int nElements, int 
     qBuf[(size_t) s * n + slackRow] += corr;
 }
 
-// OLF_GPU_DS_DEBUG: the kernel-level water-fill prints ([DS-GATE]/[DS-WF]/[DS-SAT]) follow ONE slot,
-// OLF_GPU_DS_DEBUG_SLOT (default 0); returns slot+1, 0 = off.
-static int dsDebugTraceSlot() {
-    if (std::getenv("OLF_GPU_DS_DEBUG") == nullptr) return 0;
-    const char* e = std::getenv("OLF_GPU_DS_DEBUG_SLOT");
-    return (e != nullptr ? std::atoi(e) : 0) + 1;
-}
-
 // Slack-only distributed slack: the slack generator is the ONLY participant, so OLF's distribution
 // puts the whole mismatch into the slack gen's own target — no flow change, but the outer loop reports
 // UNSTABLE and triggers a re-solve that polishes the state by one more Newton run. Mirror it exactly:
@@ -231,7 +223,7 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
                                               const int* busGenStart, const int* busGenEnd,
                                               double* genCum, char* genCumValid, const double* dgAnchor, const double* dgStart, char* genRemoved, double* genFactorWork,
                                               int nDsLostGen, const int* dsLostGen, int nDsOutGen, const int* dsOutGen,
-                                              double* target, char* switched, char* dsResidual, double* retainApplied, double* gateLast, int dbgTrace) {
+                                              double* target, char* switched, char* dsResidual, double* retainApplied, double* gateLast) {
     int s = blockIdx.x * blockDim.x + threadIdx.x;
     if (s >= nScenarios) return;
     if (!rlActive[s]) return;
@@ -305,11 +297,6 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
     if (slackInPack) {
         fsGlobal = 1.0;
         noCapacity = false;
-    }
-    if (dbgTrace && s == dbgTrace - 1) {
-        printf("[DS-GATE] slackMismatch=%.9f retain=%.9f rem=%.9f fsGlobal=%.9f tol=%.9f slackTgt=%.9f fire=%d\n",
-               qBuf[(size_t) s * n + slackPhiRow] - slackTgt, dsRetain[s], rem, fsGlobal, slackDistTol, slackTgt,
-               (fsGlobal > 0.0 && fabs(rem) > fsGlobal * gateTol) ? 1 : 0);
     }
     if (gateLast != nullptr) {
         // The WHOLE accounting of one slack pass, host-readable (device printf does not reach the test log).
@@ -387,11 +374,6 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
         // ANOTHER scenario's slots (s=1 -> index 11 = scenario 1's slackTgt). Every LOOP_PASS number
         // read off a firing pass was therefore the wrong quantity.
         gateLast[8 * s + 7] = rem;                           // what this pass places over the participants
-    }
-    if (dbgTrace && s == dbgTrace - 1) {
-        printf("[DS-WF] entry slackMismatch=%.9f absorbedNow=%.9f fsGlobal=%.9f rem=%.9f nds=%d ngen=%d anchorShift=%d\n",
-               qBuf[(size_t) s * n + slackPhiRow] - slackTgt, absorbedNow, fsGlobal, rem, nds, ngen,
-               dsAnchorShift != nullptr ? 1 : 0);
     }
     bool changed = false;
     // PER-GENERATOR water-fill, the shape of OLF's GenerationActivePowerDistributionStep.run: factors
@@ -513,11 +495,6 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
                     done += newCum - cum;
                     changed = true;
                 }
-                if (dbgTrace && s == dbgTrace - 1 && genRemoved[(size_t) s * ngen + g]
-                        && (newCum == maxD || newCum == minD)) {
-                    printf("[DS-SAT] iter=%d gen=%d newCum=%.9f maxD=%.9f minD=%.9f\n",
-                           iter, g, newCum, maxD, minD);
-                }
             }
             if (ovActive) {
                 size_t idx = (size_t) s * n + dsRowOf(dsPhiRow, dsRowOv, s, nds, ov);
@@ -543,10 +520,6 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
                 target[(size_t) s * n + dsRowOf(dsPhiRow, dsRowOv, s, nds, i)] =
                         dsBaseTargetP[i] + (dsAnchorShift != nullptr ? dsAnchorShift[(size_t) s * nds + i] : 0.0)
                         - (ov == i ? dsOvBaseDelta[s] : 0.0) + sum;
-            }
-            if (dbgTrace && s == dbgTrace - 1) {
-                printf("[DS-WF] iter=%d fsumActive=%.9f rem=%.9f done=%.9f (per-generator)\n",
-                       iter, fsumActive, rem, done);
             }
             rem -= done;
         }
@@ -602,9 +575,6 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
                 done += newCum - cum;
                 changed = true;
             }
-        }
-        if (dbgTrace && s == dbgTrace - 1) {
-            printf("[DS-WF] iter=%d fsumActive=%.9f rem=%.9f done=%.9f\n", iter, fsumActive, rem, done);
         }
         rem -= done;
     }
@@ -695,8 +665,7 @@ void dsCheck(BatchSolverContext* ctx, DriverPass& drv) {
                 ctx->nDsOutGen, ctx->nDsOutGen > 0 ? ctx->dDsOutGen.as<int>() : nullptr,
                 ctx->dTarget.as<double>(), ctx->dRlSwitched.as<char>(), ctx->dDsResidual.as<char>(),
                 ctx->dDsRetainApplied.as<double>(),
-                ctx->dDsGateLast.p ? ctx->dDsGateLast.as<double>() : nullptr,
-                dsDebugTraceSlot());
+                ctx->dDsGateLast.p ? ctx->dDsGateLast.as<double>() : nullptr);
         if (ctx->nfq > 0) {                              // forced target Q follows the generators' new P
             forcedTargetQBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(ctx->nfq, nS, n, ctx->nds, ctx->ngen,
                     ctx->fqExtrapolate, ctx->dFqIdx.as<int>(), ctx->dFqIn.as<double>(), ctx->dFqPts.as<double>(),

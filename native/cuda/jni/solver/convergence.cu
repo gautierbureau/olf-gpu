@@ -25,27 +25,6 @@ namespace olfgpu {
 // exact vs the host loop; the ssq PARALLEL summation order differs from the host's sequential
 // sum by last-ulp amounts — borderline ||F||2 stopping decisions can flip at ulp level (same
 // class of effect as any reduction-order change; the criterion itself is unchanged).
-// OLF_GPU_WORST_ROW=1 (with OLF_GPU_BATCH_TRACE): name the row carrying the largest residual at a
-// solve's start. A norm says HOW FAR the state is; only the row says WHY — an identity row sitting at
-// an exact 1.0 is a different animal from a power row at 1.0.
-__global__ void worstRowBatch(int n, const double* F, const int* mode, const double* target,
-                              const double* x, int s) {
-    if (blockIdx.x != 0 || threadIdx.x != 0) return;
-    int bi = -1;
-    double bv = -1.0;
-    for (int i = 0; i < n; i++) {
-        double v = fabs(F[(size_t) s * n + i]);
-        if (v > bv) {
-            bv = v;
-            bi = i;
-        }
-    }
-    if (bi >= 0) {
-        printf("[WORST_ROW] s=%d row=%d |F|=%.12f mode=%d target=%.9f x=%.9f\n",
-               s, bi, bv, mode[(size_t) s * n + bi], target[(size_t) s * n + bi], x[(size_t) s * n + bi]);
-    }
-}
-
 __global__ void residualNormsBatch(int n, const double* F, const char* active, double* out,
                                    const double* thrIdent, const double* thrPower, const int* mode,
                                    const double* thrAlt, const int* thrSel) {

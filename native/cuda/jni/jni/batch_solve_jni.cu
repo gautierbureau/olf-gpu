@@ -416,15 +416,6 @@ OLF_JNI(ac_solver_gpu, BatchSolveNative, solveBatchContext)(
                 fprintf(stderr, "GPU_OL_TIME check loop=%s passes=%lld ms=%.1f\n", olKindName(k), gOlCheckPasses[k], gOlCheckMs[k]);
             }
         }
-        if (rlReasonsOn()) {
-            static const char* names[8] = {"group re-stamp only", "pin", "unpin", "pin+unpin", "limit refresh",
-                                           "pin+refresh", "unpin+refresh", "pin+unpin+refresh"};
-            fprintf(stderr, "GPU_RL_REASONS stable checks=%lld | entries: pins=%lld unpins=%lld refreshes=%lld\n",
-                    gRlStableScen, gRlEntryCodes[1], gRlEntryCodes[2], gRlEntryCodes[3]);
-            for (int m = 0; m < 8; m++) {
-                if (gRlCheckScen[m] > 0) fprintf(stderr, "GPU_RL_REASONS unstable because %s: %lld\n", names[m], gRlCheckScen[m]);
-            }
-        }
         fprintf(stderr, "CUDSS_PHASE_TIME analysis=%lld x %.1f ms | factorization=%lld x %.1f ms | solve=%lld x %.1f ms"
                 " | factorization+solve=%lld x %.1f ms\n", cnt[0], tot[0], cnt[1], tot[1], cnt[2], tot[2], cnt[3], tot[3]);
     }

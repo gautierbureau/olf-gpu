@@ -28,8 +28,8 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Diagnostics of the batched security analysis, each behind its OLF_GPU_* switch: the partial-flow and violation
- * cross-checks, OLF's residual at the device state, and the device state and post-contingency equation dumps.
+ * Diagnostics of the batched security analysis, each behind its OLF_GPU_* switch: the violation cross-check, OLF's
+ * residual at the device state, and the device state and post-contingency equation dumps.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
@@ -42,41 +42,6 @@ final class GpuSaDiagnostics {
     static final java.util.concurrent.atomic.LongAdder CROSSCHECKED = new java.util.concurrent.atomic.LongAdder();
 
     private GpuSaDiagnostics() {
-    }
-
-    /** Tally of OLF_GPU_PARTIAL_FLOW_CHECK. */
-    static final class PartialFlowCheck {
-        private long checked;
-        private long differing;
-        private long branchesRead;
-        private final List<String> samples = new java.util.ArrayList<>();
-
-        void compare(String contingencyId, List<com.powsybl.contingency.violations.LimitViolation> partial,
-                     List<com.powsybl.contingency.violations.LimitViolation> full, int branches) {
-            checked++;
-            branchesRead += branches;
-            List<String> a = partial.stream().map(PartialFlowCheck::key).toList();
-            List<String> b = full.stream().map(PartialFlowCheck::key).toList();
-            if (!a.equals(b)) {
-                differing++;
-                if (samples.size() < 10) {
-                    samples.add(contingencyId + ": partial " + a.size() + " violations, full " + b.size()
-                            + " | first partial-only " + a.stream().filter(k -> !b.contains(k)).findFirst().orElse("-")
-                            + " | first full-only " + b.stream().filter(k -> !a.contains(k)).findFirst().orElse("-"));
-                }
-            }
-        }
-
-        private static String key(com.powsybl.contingency.violations.LimitViolation v) {
-            return v.getSubjectId() + "|" + v.getLimitType() + "|" + v.getSide() + "|" + v.getLimitName()
-                    + "|" + Double.doubleToLongBits(v.getValue()) + "|" + Double.doubleToLongBits(v.getLimit());
-        }
-
-        void print() {
-            System.err.printf("PARTIAL_FLOW_CHECK contingencies compared=%d identical=%d differing=%d | mean branches read %.1f%n",
-                    checked, checked - differing, differing, checked > 0 ? (double) branchesRead / checked : 0.0);
-            samples.forEach(x -> System.err.println("PARTIAL_FLOW_CHECK   " + x));
-        }
     }
 
     /** {@code OLF_GPU_VIOL_CROSSCHECK=1}: run the stock detection on the SAME state and demand the
@@ -137,8 +102,8 @@ final class GpuSaDiagnostics {
             var elem = context.getNetwork().getElement(eq.getType().getElementType(), eq.getElementNum());
             // OLF's own TARGET for that row, and the DEVICE row the same quantity lives on. A residual
             // is (state - target): printing OLF's target next to the device row lets the two be
-            // compared directly (point OLF_GPU_FINAL_TARGET_ROW at devRow), which separates "the
-            // device solved a different TARGET" from "the device assembled a different EQUATION" —
+            // compared directly, which separates "the device solved a different TARGET" from "the
+            // device assembled a different EQUATION" —
             // indistinguishable from the residual alone.
             int devRow = -1;
             if (baseVariableRows != null && eq != null) {
@@ -317,8 +282,7 @@ final class GpuSaDiagnostics {
                 // the DEVICE ROW too: the row's per-scenario MODE is what says which equation governs
                 // that bus here (1 = power/DISTR_Q, 4 = its own Q, 0 = identity), and that is the
                 // question #66 turns on -- OLF has VL-2669_1..4 on DISTR_Q at convergence while the
-                // device appears to leave them on their own BUS_TARGET_Q. Join against the modes in an
-                // OLF_GPU_VALS_DUMP of the same slot.
+                // device appears to leave them on their own BUS_TARGET_Q.
                 w.write(v.getType().name() + " " + id + " " + state[row] + " row=" + row + "\n");
             }
         } catch (java.io.IOException | RuntimeException ex) {
@@ -355,9 +319,8 @@ final class GpuSaDiagnostics {
                     .map(LfBus::getId).sorted().toList() + "\n");
             w.write("# disabled branches: " + lfContingency.getDisabledNetwork().getBranches().stream()
                     .map(LfBranch::getId).sorted().toList() + "\n");
-            // OLF's own mismatch to distribute, the reference for the device's scheduledActivePowerLoss
-            // (OLF_GPU_LOSS_TRACE prints that one): gen - load over the DISABLED buses plus the named lost
-            // loads/generators that are not on them.
+            // OLF's own mismatch to distribute, the reference for the device's scheduledActivePowerLoss:
+            // gen - load over the DISABLED buses plus the named lost loads/generators that are not on them.
             w.write(String.format("# OLF activePowerLoss=%.9f pu (disconnectedGeneration=%.9f"
                             + " disconnectedLoad=%.9f)%n", lfContingency.getActivePowerLoss(),
                     lfContingency.getDisconnectedGenerationActivePower(),
@@ -379,9 +342,8 @@ final class GpuSaDiagnostics {
             }
             context.getEquationSystem().write(w, true);
             // ...and OLF's OWN f(x0) - target per ACTIVE equation at the post-contingency start (the residual
-            // its first |f(x0)| line is the norm of), the contingency counterpart of OLF_GPU_F0_TRACE: lined
-            // up against the device's first fill of that slot (OLF_GPU_VALS_SCAN_SLOT + OLF_GPU_VALS_DUMP), it
-            // names the equation the two arms evaluate differently before any step blurs it.
+            // its first |f(x0)| line is the norm of): lined up against the device's first evaluation of that
+            // slot, it names the equation the two arms evaluate differently before any step blurs it.
             // What this section IS, since a previous version of this comment got it wrong: the
             // POST-contingency equation system evaluated at the PRE-contingency state. The dump runs on
             // the first line of runPostContingencySimulation, before the solver touches x, but

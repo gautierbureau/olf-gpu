@@ -13,7 +13,7 @@ namespace olfgpu {
 __global__ void hazRepairVals(int nHaz, int nS, int nnz, int hazTot, const int* hazRow, const int* hazOff,
                               const int* hazDonorPtr, const int* hazDonor, const int* hazDonorHaz,
                               const char* hazSign, const int* rowPtr, const int* colIdx, const int* diagPos,
-                              const double* snap, double* vals, int* choice, int traceNoDonor);
+                              const double* snap, double* vals, int* choice);
 
 __global__ void hazRepairRhs(int nHaz, int nS, int n, const int* hazRow, const int* hazDonor, const int* hazDonorHaz,
                              const char* hazSign, const int* choice, const double* bsnap, double* B);

@@ -27,8 +27,7 @@ __global__ void fillRemoteMemberQBatch(int nrmq, int nScenarios, int n, int nEle
                                        const double* x, double* qBuf,
                                        const char* disabled, const char* rlActive,
                                        int nR1Ov, const int* r1OvSlotElem, const double* r1OvVal,
-                                       int nShOv, const int* shOvSlotElem, const double* shOvGb,
-                                       int traceRow);
+                                       int nShOv, const int* shOvSlotElem, const double* shOvGb);
 
 }  // namespace olfgpu
 

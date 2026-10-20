@@ -536,11 +536,6 @@ OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchRlGenLost)(
             mask[(size_t) s * ctx->nrl + i] = 1;
         }
     }
-    if (std::getenv("OLF_GPU_GENLOST_TRACE") != nullptr) {
-        for (int k = 0; k < nPairs; k++) {
-            std::fprintf(stderr, "GENLOST slot=%d entry=%d\n", pairs[2 * k], pairs[2 * k + 1]);
-        }
-    }
     env->ReleaseIntArrayElements(jPairs, pairs, JNI_ABORT);
     ctx->dRlGenLost.upload(mask.data(), len);
     ctx->nRlGenLost = nPairs;

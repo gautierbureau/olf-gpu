@@ -224,9 +224,6 @@ public final class GpuSecondaryVoltageControlOuterLoop {
                 continue;
             }
             final double v = moved;
-            if (System.getenv("OLF_GPU_SVC_WB_TRACE") != null) {
-                System.err.printf("SVC_WB bus=%s base=%.6f moved=%.6f%n", ctld.getId(), ctls.get(c).baseTargetV(), v);
-            }
             ctld.getGeneratorVoltageControl().ifPresent(vc -> vc.setTargetValue(v));
         }
     }

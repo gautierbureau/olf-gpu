@@ -1,8 +1,8 @@
 // Copyright (c) 2026, RTE (http://www.rte-france.com)
 // SPDX-License-Identifier: MPL-2.0
 //
-// Run-wide counters and timers of the batched solver, printed by the OLF_GPU_PHASE_TIME and
-// OLF_GPU_RL_REASONS traces. Declared here, defined once in stats.cu.
+// Run-wide counters and timers of the batched solver, printed by the OLF_GPU_PHASE_TIME trace. Declared here,
+// defined once in stats.cu.
 #ifndef OLF_GPU_COMMON_STATS_CUH
 #define OLF_GPU_COMMON_STATS_CUH
 
@@ -27,14 +27,6 @@ extern long long gOlFirstSolveScen, gOlReSolveScen[GpuOuterLoopKind::COUNT], gOl
 extern long long gOlFirstLaneIters, gOlReSolveLaneIters[GpuOuterLoopKind::COUNT], gOlFirstWidthIters, gOlReSolveWidthIters[GpuOuterLoopKind::COUNT];
 extern long long gOlCheckPasses[GpuOuterLoopKind::COUNT], gOlFirstPasses;
 
-// OLF_GPU_RL_REASONS=1: why each reactive-limits check was unstable, per checked scenario (bit 1 a pin PV->PQ, bit 2 an
-// unpin PQ->PV, bit 4 a limit refresh of a pinned entry; 0 with the scenario switched = a group re-stamp only), and
-// the entries behind it.
-extern long long gRlCheckScen[8], gRlStableScen, gRlEntryCodes[4];
-inline bool rlReasonsOn() {
-    static const bool on = std::getenv("OLF_GPU_RL_REASONS") != nullptr;
-    return on;
-}
 inline double olNowMs() {
     return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }

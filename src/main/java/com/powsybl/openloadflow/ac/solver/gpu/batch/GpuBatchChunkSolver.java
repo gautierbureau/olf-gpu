@@ -126,29 +126,6 @@ final class GpuBatchChunkSolver {
         }
     }
 
-    /** One row of the OLF_GPU_TARGET_ROW probe: the row's base target, its per-scenario row modes and
-     *  every per-scenario override landing on it. */
-    private static void emitTargetRow(int probe, int n, int realCount, double[] baseTargets, int[] baseRowMode,
-                                      int[][] rowModePerScenario, int[] targetOverrideIndex,
-                                      double[] targetOverrideValue) {
-        StringBuilder sb = new StringBuilder(String.format(
-                "TARGET_ROW row=%d base=%.9f baseMode=%d", probe, baseTargets[probe], baseRowMode[probe]));
-        if (rowModePerScenario != null) {
-            for (int s2 = 0; s2 < realCount; s2++) {
-                if (rowModePerScenario[s2] != null && rowModePerScenario[s2][probe] != baseRowMode[probe]) {
-                    sb.append(String.format(" mode[s=%d]=%d", s2, rowModePerScenario[s2][probe]));
-                }
-            }
-        }
-        for (int k2 = 0; k2 < targetOverrideIndex.length; k2++) {
-            if (targetOverrideIndex[k2] % n == probe) {
-                sb.append(String.format(" ov[s=%d]=%.9f",
-                        targetOverrideIndex[k2] / n, targetOverrideValue[k2]));
-            }
-        }
-        System.err.println(sb);
-    }
-
     /** cuDSS reports an out-of-device-memory as status 2 (CUDSS_STATUS_ALLOC_FAILED); a CUDA OOM
      *  surfaces as its own message. Both mean "this chunk does not fit", not "this network cannot
      *  be batched". */
@@ -372,7 +349,7 @@ final class GpuBatchChunkSolver {
                             GenOutage[] slotGos = genOutagesByIndex[ci];
                             slotGos = CouplerSeed.seed(seeding, s, ci, slotGos);
                             ActionSeed.seed(seeding, s, ci);
-                            GenOutageSeed.seed(seeding, s, ci, slotGos, pilotBalanceRows);
+                            GenOutageSeed.seed(seeding, s, slotGos, pilotBalanceRows);
                         }
                         // else: padding scenario = base case (no element disabled), discarded below
                     }
@@ -594,68 +571,10 @@ final class GpuBatchChunkSolver {
                         // Two producers disagreed on one row's target. GpuBatchOverrides resolved it to the
                         // later one (no row reaches the device twice), but a sound plan has NO such row:
                         // every one so far was a write that should not exist (a DISTR_Q seed on a mode-0/4
-                        // row). Name it; OLF_GPU_OV_DUP_TRACE=1 lists the rows.
+                        // row). Name it.
                         LOGGER.warn("GPU batched SA: {} conflicting target overrides in chunk at {} (resolved to the later"
-                                + " writer; OLF_GPU_OV_DUP_TRACE=1 lists them)", rs.overrides.conflictingAddCount(), chunkStart);
+                                + " writer)", rs.overrides.conflictingAddCount(), chunkStart);
                         com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("HOST:OVERRIDE_CONFLICT");
-                    }
-                    if (GpuBatchOverrides.dupTrace()) {
-                        // The invariant GpuBatchOverrides states in its javadoc, measured on the entries
-                        // actually handed to the device: a row with two entries is written by two threads
-                        // of applyTargetOverrideBatch in an unspecified order. Same value = benign;
-                        // different values = a target chosen by a race.
-                        System.err.printf("OV_DUP chunk entries=%d dupRows=%d conflictRows=%d%n",
-                                targetOverrideIndex.length, rs.overrides.duplicateRowCount(),
-                                rs.overrides.conflictingRowCount());
-                        java.util.List<String> sites = rs.overrides.conflictSites();
-                        for (int ci2 = 0; ci2 < rs.overrides.conflictSamples().size(); ci2++) {
-                            double[] c = rs.overrides.conflictSamples().get(ci2);
-                            int flat = (int) c[0];
-                            int slot = flat / n;
-                            String id = slot < realCount
-                                    ? contingencies.get(group.get(chunkStart + slot)).contingencyId() : "<padding>";
-                            int row2 = flat % n;
-                            // The row MODE decides who is right: updateDistrQTargetsBatch refuses to
-                            // maintain a DISTR_Q target on a mode-0 identity or a mode-4 own-Q row, so a
-                            // seeded DISTR_Q target on such a row is the write that should not exist.
-                            int mode2 = rs.rowModePerScenario != null && slot < realCount
-                                    && rs.rowModePerScenario[slot] != null
-                                    ? rs.rowModePerScenario[slot][row2] : baseRowMode[row2];
-                            System.err.printf("OV_CONFLICT ctg=%s row=%d mode=%d baseMode=%d"
-                                            + " shadowed=%.9f new=%.9f by=%s%n",
-                                    id, row2, mode2, baseRowMode[row2], c[1], c[2],
-                                    ci2 < sites.size() ? sites.get(ci2) : "?");
-                        }
-                    }
-                    // OLF_GPU_TARGET_ROW=<row>: the target the DEVICE actually solves that row against —
-                    // the base value and every per-scenario override landing on it. A row whose
-                    // converged residual equals minus its OLF target is a row solved against 0.
-                    String tgtRow = System.getenv("OLF_GPU_TARGET_ROW");
-                    for (String probeSpec : tgtRow == null ? new String[0] : tgtRow.split(",")) {
-                        // A LIST (or a lo-hi range): finding which device row carries a given equation
-                        // means scanning them, and one row per JVM run made that a five-minute question.
-                        int first = Integer.parseInt(probeSpec.trim().split("-")[0]);
-                        int last = probeSpec.contains("-")
-                                ? Integer.parseInt(probeSpec.trim().split("-")[1]) : first;
-                        for (int probe = first; probe <= last && probe < n; probe++) {
-                            emitTargetRow(probe, n, realCount, baseTargets, baseRowMode, rs.rowModePerScenario,
-                                    targetOverrideIndex, targetOverrideValue);
-                        }
-                    }
-                    if (pairPhase && "1".equals(System.getenv("OLF_GPU_DBG_PAIR_OV"))) {
-                        for (int s2 = 0; s2 < realCount; s2++) {
-                            StringBuilder sb = new StringBuilder("GPU-PAIR-OV "
-                                    + contingencies.get(group.get(chunkStart + s2)).contingencyId().replace(BatchContingency.STRATEGY_KEY_SEP, '|'));
-                            for (int k2 = 0; k2 < targetOverrideIndex.length; k2++) {
-                                if (targetOverrideIndex[k2] / n == s2) {
-                                    int row = targetOverrideIndex[k2] % n;
-                                    sb.append(String.format(" row%d=%.4f(base %.4f)", row, targetOverrideValue[k2], baseTargets[row]));
-                                }
-                            }
-                            System.err.println(sb);
-                        }
-                        System.err.println("GPU-PAIR-SHOV slotElem=" + rs.shOvSlotElemList + " gb=" + rs.shOvGbList
-                                + " shPackOffset=" + rs.shPackOffset);
                     }
                     // Pair phase: warm continuation from each parent contingency's state + RL pinning.
                     double[] x0Full = null;
@@ -873,14 +792,6 @@ final class GpuBatchChunkSolver {
                         }
                         targetOverrideIndex = rs.overrides.indexArray();
                         targetOverrideValue = rs.overrides.valueArray();
-                        // OLF_GPU_TARGET_ROW once more, AFTER the pair's re-anchoring composed onto the overrides: the
-                        // print above runs before it, and showed a frozen row's clean 0 where the device got -8.728
-                        for (String probeSpec : tgtRow == null ? new String[0] : tgtRow.split(",")) {
-                            int probe = Integer.parseInt(probeSpec.trim().split("-")[0]);
-                            System.err.print("PAIR-COMPOSED ");
-                            emitTargetRow(probe, n, realCount, baseTargets, baseRowMode, rs.rowModePerScenario,
-                                    targetOverrideIndex, targetOverrideValue);
-                        }
                     }
                     // HVDC AC-emulation: snapshot the pre-freeze override lists (the round rebuild base),
                     // then OLF's FreezingHvdcACEmulation freezes every live hvdc at its scenario's
@@ -978,10 +889,9 @@ final class GpuBatchChunkSolver {
                         GpuHvdcAcEmulationLimitsOuterLoop.seedBaseStatuses(chunkSize, realCount, hvdcControllers,
                                 hvdcStatus, rs.disabledMask);
                     }
-                    boolean dbgPairRl = pairPhase && nrl > 0 && "1".equals(System.getenv("OLF_GPU_DBG_PAIR_RL"));
                     boolean svcActive = phases.secondaryVc() != null && !phases.secondaryVc().ctls().isEmpty();
                     boolean monActive = phases.monitoring() != null && !phases.monitoring().isEmpty();
-                    int[] rlStateOut = (!pairPhase && !pairIdxList.isEmpty() || dbgPairRl || svcActive || monActive
+                    int[] rlStateOut = (!pairPhase && !pairIdxList.isEmpty() || svcActive || monActive
                             || System.getenv("OLF_GPU_RL_TRACE") != null) && nrl > 0 ? new int[chunkSize * nrl] : null;
                     cl.upload(handle, gpuData);
                     // The two HVDC AC-emulation loops run as DRIVER PHASES, in OLF's own position
@@ -1061,33 +971,6 @@ final class GpuBatchChunkSolver {
                             throw new java.io.UncheckedIOException(e);
                         }
                     }
-                    if (System.getenv("OLF_GPU_ROW_PROBE") != null && realCount > 1) {
-                        // OLF_GPU_ROW_PROBE=<row>[,<row>]: slot 1's row mode and target next to the base's,
-                        // and every row whose mode slot 1 changed - what the scenario solves differently.
-                        int[] m1 = rs.rowModePerScenario[1];
-                        java.util.List<Integer> changed = new java.util.ArrayList<>();
-                        for (int r = 0; r < n; r++) {
-                            if (m1[r] != baseRowMode[r]) {
-                                changed.add(r);
-                            }
-                        }
-                        java.util.Map<Integer, Double> ov1 = new java.util.TreeMap<>();
-                        for (int k = 0; k < targetOverrideIndex.length; k++) {
-                            if (targetOverrideIndex[k] / n == 1) {
-                                ov1.put(targetOverrideIndex[k] % n, targetOverrideValue[k]);
-                            }
-                        }
-                        System.err.println("ROW_PROBE ctg=" + contingencies.get(group.get(chunkStart + 1)).contingencyId()
-                                + " modeChanged=" + changed.subList(0, Math.min(40, changed.size())) + " n=" + changed.size()
-                                + " overrides=" + ov1.size());
-                        for (String t : System.getenv("OLF_GPU_ROW_PROBE").split(",")) {
-                            int r = Integer.parseInt(t.trim());
-                            System.err.printf("ROW_PROBE row=%d baseMode=%d mode1=%d baseTarget=%.9f ov1=%s x=%.9f%n",
-                                    r, baseRowMode[r], m1[r], baseTargets[r], ov1.get(r), baseState[r]);
-                        }
-                        ov1.entrySet().stream().limit(60).forEach(e -> System.err.printf(
-                                "ROW_PROBE ov row=%d value=%.9f base=%.9f%n", e.getKey(), e.getValue(), baseTargets[e.getKey()]));
-                    }
                     if (forcedTargetQ != null) {                 // where each slot's pre-distribution put the clamping gens
                         // a pair starts each generator at its anchor, a contingency at its pre-distributed target
                         ReactiveLimitsNative.setBatchForcedTargetQPre(handle, forcedTargetQ.preMoves(
@@ -1143,32 +1026,6 @@ final class GpuBatchChunkSolver {
                             if (st <= GpuAcSolverStatus.REJECTED) {
                                 System.err.println("CHUNK_REJECT slot=" + s + " ctg=" + contingencies.get(group.get(chunkStart + s)).contingencyId()
                                         + " status=" + st);
-                            }
-                        }
-                    }
-                    if (System.getenv("OLF_GPU_DUMMY_CENSUS") != null) {
-                        // OLF_GPU_DUMMY_CENSUS=1: a scenario whose final state carries a coupler flow beyond any physical
-                        // value (|dummy| > 1e3 pu, 100 GW) solved a SINGULAR system - a loop of zero-impedance couplers
-                        // whose circulating flow no equation determines. The equations then differ from OLF's, and the
-                        // rounding of that flow moves the answer from one run to the next (network.xiidm busbar HFU).
-                        int nz = gpuData.zeroImpedanceBranch().branchNum() == null ? 0 : gpuData.zeroImpedanceBranch().branchNum().length;
-                        for (int s = 0; s < realCount; s++) {
-                            double worst = 0;
-                            int worstZe = -1;
-                            for (int z = 0; z < nz; z++) {
-                                for (int k = 4; k <= 5; k++) {
-                                    int r = gpuData.zeroImpedanceBranch().indices()[z * 11 + k];
-                                    if (r >= 0 && r < n && Math.abs(chunkResults[s][r]) > worst) {
-                                        worst = Math.abs(chunkResults[s][r]);
-                                        worstZe = z;
-                                    }
-                                }
-                            }
-                            if (worst > 1e3) {
-                                System.err.printf("DUMMY_CENSUS ctg=%s status=%d worst=%.3e coupler=#%d%n",
-                                        contingencies.get(group.get(chunkStart + s)).contingencyId(),
-                                        chunkResults[s].length > n + 2 ? (int) chunkResults[s][n + 2] : 0, worst,
-                                        gpuData.zeroImpedanceBranch().branchNum()[worstZe]);
                             }
                         }
                     }
@@ -1292,50 +1149,22 @@ final class GpuBatchChunkSolver {
                             targetOverrideValue = rs.overrides.valueArray();
                         }
                     }
-                    if (System.getenv("OLF_GPU_ITER_TRACE") != null && !pairPhase) {
-                        java.util.Map<Integer, Integer> hist = new java.util.TreeMap<>();
-                        for (int s = 0; s < realCount; s++) {
-                            hist.merge((int) chunkResults[s][n], 1, Integer::sum);
-                        }
-                        System.err.println("ITER_HIST main solve, iterations -> scenarios: " + hist);
-                        // OLF_GPU_ITER_TRACE_CTG=<id>[,<id>]: the iteration count of NAMED scenarios, at any
-                        // chunk size. Two implementations that solve the same system in the same number of
-                        // iterations agree to machine precision, so the count is the first thing to compare
-                        // against OLF's own (OLF_LF_STEPS_TRACE) when the answers differ - and on a full
-                        // scope the per-scenario print below never fires, because the chunk holds hundreds.
-                        String iterCtg = System.getenv("OLF_GPU_ITER_TRACE_CTG");
+                    // OLF_GPU_ITER_TRACE_CTG=<id>[,<id>]: the iteration count of NAMED scenarios, at any
+                    // chunk size. Two implementations that solve the same system in the same number of
+                    // iterations agree to machine precision, so the count is the first thing to compare
+                    // against OLF's own (OLF_LF_STEPS_TRACE) when the answers differ.
+                    String iterCtg = System.getenv("OLF_GPU_ITER_TRACE_CTG");
+                    if (iterCtg != null && !pairPhase) {
                         for (int s = 0; s < realCount; s++) {
                             String id = contingencies.get(group.get(chunkStart + s)).contingencyId();
                             boolean named = false;
-                            if (iterCtg != null) {
-                                for (String w : iterCtg.split(",")) {
-                                    named = named || w.trim().equals(id);
-                                }
+                            for (String w : iterCtg.split(",")) {
+                                named = named || w.trim().equals(id);
                             }
-                            if (named || realCount <= 4) {
+                            if (named) {
                                 System.err.printf("ITER ctg=%s iters=%d finalMismatch=%.6e status=%d%n",
                                         id, (int) chunkResults[s][n], chunkResults[s][n + 1],
                                         (int) chunkResults[s][n + 2]);
-                            }
-                        }
-                    }
-                    if (System.getenv("OLF_GPU_DS_FINAL_DUMP") != null && nds > 0 && !pairPhase) {
-                        // Every participant's FINAL distributed-slack delta for slot 0, against the same
-                        // anchor the water-fill resets to. Two water-fills that move the same TOTAL can
-                        // still split it differently, and only the per-participant deltas say so (the
-                        // CPU counterpart is OLF's DS_GEN trace under OLF_DS_TRACE).
-                        double[] ftd = BatchReadbackNative.readBatchTargets(handle);
-                        for (int i = 0; i < nds; i++) {
-                            // slot 0's row, diverted like the kernels' — reading the structural row for a
-                            // participant this scenario moved reports the PINNED dummy row's target, which
-                            // is how a spurious -1.043213 "delta" got read as a real distribution.
-                            int row = cl.dsRowOvBySlot[0] != null && cl.dsRowOvBySlot[0][i] >= 0
-                                    ? cl.dsRowOvBySlot[0][i] : gpuData.distributedSlack().busPhiRow()[i];
-                            double d = ftd[row] - gpuData.distributedSlack().busBaseTargetP()[i];
-                            if (d != 0) {
-                                System.err.printf("DS_FINAL_ROW ctg=%s i=%d row=%d base=%.12e final=%.12e delta=%.12e factor=%.12e%n",
-                                        contingencies.get(group.get(chunkStart)).contingencyId(), i, row,
-                                        gpuData.distributedSlack().busBaseTargetP()[i], ftd[row], d, gpuData.distributedSlack().busFactor()[i]);
                             }
                         }
                     }
@@ -1381,20 +1210,6 @@ final class GpuBatchChunkSolver {
                         GpuBatchPhaseStats.add("main.iterMax", itMax);
                         GpuBatchPhaseStats.bump("main.solves");
                     }
-                    if (System.getenv("OLF_GPU_DS_TARGET_DUMP") != null && nds > 0) {
-                        // The FINAL distributed target on every participant row, after every
-                        // orchestrator. Both arms are converged, so if their reported states differ
-                        // their TARGETS must differ — this is the only direct way to see where.
-                        double[] ft = BatchReadbackNative.readBatchTargets(handle);
-                        for (int s = 0; s < realCount; s++) {
-                            String id = contingencies.get(group.get(chunkStart + s)).contingencyId();
-                            for (int i = 0; i < nds; i++) {
-                                System.err.printf("GPU_DS_TARGET ctg=%s i=%d row=%d target=%s%n",
-                                        id, i, gpuData.distributedSlack().busPhiRow()[i],
-                                        Double.toString(ft[s * n + gpuData.distributedSlack().busPhiRow()[i]]));
-                            }
-                        }
-                    }
                     if (System.getenv("OLF_GPU_RL_TRACE") != null && rlStateOut != null) {
                         // rlStateOut packs a GpuReactiveLimitsState per (controller, scenario):
                         // switchCount > 0 means the DEVICE switched that controller during THIS solve, which
@@ -1439,18 +1254,6 @@ final class GpuBatchChunkSolver {
                     // never runs — measured as the WHOLE divergence on LINE-1392-677 and
                     // LINE-2045-221 (1.1e-3 pu = 7.0e-2 kV at a 63 kV bus).
                     java.util.Arrays.fill(rlSolvedPerScenario, true);
-                    if (dbgPairRl) {
-                        for (int s2 = 0; s2 < realCount; s2++) {
-                            StringBuilder sb = new StringBuilder("GPU-PAIR-RL " + contingencies.get(group.get(chunkStart + s2)).contingencyId().replace(BatchContingency.STRATEGY_KEY_SEP, '|'));
-                            for (int i2 = 0; i2 < nrl; i2++) {
-                                int v = rlStateOut[s2 * nrl + i2];
-                                if (GpuReactiveLimitsState.limitType(v) != GpuQLimitType.NONE) {
-                                    sb.append(" ctl").append(i2).append("=lt").append(GpuReactiveLimitsState.limitType(v)).append("/sc").append(GpuReactiveLimitsState.pvPqSwitchCount(v));
-                                }
-                            }
-                            System.err.println(sb);
-                        }
-                    }
                     if (rlStateOut != null && !pairPhase) {      // capture each ctg's final RL pinning for its pairs
                         // ...and the targets its pins ENDED with, which its pairs restore (OLF restores the parent's
                         // generation target Q; a limit that moved by less than the re-freeze tolerance kept the old one)
@@ -1471,36 +1274,6 @@ final class GpuBatchChunkSolver {
                             for (int s = 0; s < realCount; s++) {
                                 slackAbsorbedByIndex.put(group.get(chunkStart + s), absorbed[s]);
                             }
-                        }
-                    }
-                    // OLF_GPU_ROWMODE_DUMP_CTG=<contingency id>: the DEVICE's final per-scenario row modes
-                    // and targets for that scenario, as the rows that DIFFER from the base. This is the other
-                    // half of the comparison against OLF_GPU_EQ_DUMP_CTG (OLF's post-contingency equations):
-                    // together they say, row by row, which equation each side has where.
-                    String rmCtg = System.getenv("OLF_GPU_ROWMODE_DUMP_CTG");
-                    if (rmCtg != null && !rmCtg.isEmpty()) {
-                        int[] devModes = BatchReadbackNative.readBatchRowModes(handle);
-                        double[] devTargets = BatchReadbackNative.readBatchTargets(handle);
-                        for (int s = 0; s < realCount; s++) {
-                            if (!rmCtg.equals(contingencies.get(group.get(chunkStart + s)).contingencyId())) {
-                                continue;
-                            }
-                            // OLF_GPU_ROWMODE_DUMP_ALL=1: EVERY row, not only the ones differing from
-                            // base. Needed to diff the device's TARGET VECTOR against OLF's F0 section
-                            // (which prints f and target per ACTIVE equation): a target that is wrong
-                            // while equal to the base's is invisible in the differing-rows view, and
-                            // equation IDENTITY matching says nothing about the numbers (tasks #67).
-                            boolean rmAll = "1".equals(System.getenv("OLF_GPU_ROWMODE_DUMP_ALL"));
-                            StringBuilder sb = new StringBuilder();
-                            for (int r = 0; r < n; r++) {
-                                int m = devModes[s * n + r];
-                                if (rmAll || m != baseRowMode[r]) {
-                                    sb.append(String.format("  row=%d mode=%d<-%d target=%.17g%n",
-                                            r, m, baseRowMode[r], devTargets[s * n + r]));
-                                }
-                            }
-                            System.err.print("ROWMODE_DUMP ctg=" + rmCtg + " slot=" + s
-                                    + " rows differing from base:\n" + sb);
                         }
                     }
                     if (!pairPhase && !pairIdxList.isEmpty()) {
@@ -1573,87 +1346,6 @@ final class GpuBatchChunkSolver {
                     // Post-RL host orchestrators below: SVC(4), Monitoring(5), Phase(7), TVC(8), TRPC(9), Shunt(10).
 
                     tOrchestratorNs += System.nanoTime() - tOrch0;
-                    // OLF_GPU_FINAL_TARGET_ROW=<row>: the target the device ENDED UP solving that row
-                    // against, after every per-scenario kernel and orchestrator. The base+override
-                    // view (OLF_GPU_TARGET_ROW) shows what was UPLOADED; this shows what survived.
-                    if (System.getenv("OLF_GPU_FINAL_TARGET_ROW") != null) {
-                        // Comma-separated rows, so a shape that spans a group (pilot + its members)
-                        // is read in ONE run instead of one run per row.
-                        double[] ftp = BatchReadbackNative.readBatchTargets(handle);
-                        int[] fmode = BatchReadbackNative.readBatchRowModes(handle);
-                        for (String tok : System.getenv("OLF_GPU_FINAL_TARGET_ROW").split(",")) {
-                            int probe = Integer.parseInt(tok.trim());
-                            for (int s = 0; s < realCount; s++) {
-                                // setupMode is what the HOST asked for; devMode is what the device
-                                // ENDED with. They differ exactly when an outer-loop kernel rewrote the
-                                // row -- which is the thing worth seeing.
-                                int setupMode = rs.rowModePerScenario != null && rs.rowModePerScenario[s] != null
-                                        ? rs.rowModePerScenario[s][probe] : baseRowMode[probe];
-                                System.err.printf("FINAL_TARGET ctg=%s row=%d base=%.9f final=%.9f"
-                                                + " setupMode=%d devMode=%d%n",
-                                        contingencies.get(group.get(chunkStart + s)).contingencyId(), probe,
-                                        baseTargets[probe], ftp[s * n + probe], setupMode,
-                                        fmode == null ? -99 : fmode[s * n + probe]);
-                            }
-                        }
-                    }
-                    // OLF_GPU_GENCUM_DUMP=<file>: each GENERATOR's own cumulative P movement as the
-                    // device computed it, which is what the curve channel now evaluates its capability
-                    // at. Joined against OLF's per-generator movement (OLF_DS_SPLIT's G lines) it says
-                    // whether the device and OLF put the same power on the same machine — the question
-                    // the per-bus totals cannot answer.
-                    if (System.getenv("OLF_GPU_GENCUM_DUMP") != null && gpuData.distributedSlack().generatorId() != null) {
-                        double[] gc = BatchReadbackNative.readBatchDsGenCum(handle);
-                        String[] ids = gpuData.distributedSlack().generatorId();
-                        if (gc != null && ids.length > 0) {
-                            try (java.io.PrintWriter w = new java.io.PrintWriter(
-                                    new java.io.FileWriter(System.getenv("OLF_GPU_GENCUM_DUMP"), true))) {
-                                // OLF_TRACE_CTG=<id>: only that contingency, matching the OLF-side
-                                // filter on OLF_DS_SPLIT. One line per moved generator over 6667
-                                // contingencies is millions of lines on each side; the join that this
-                                // dump exists for needs one section from each.
-                                String gcWant = System.getenv("OLF_TRACE_CTG");
-                                for (int s2 = 0; s2 < realCount; s2++) {
-                                    String gcId = contingencies.get(group.get(chunkStart + s2)).contingencyId();
-                                    if (gcWant != null && !gcWant.equals(gcId)) {
-                                        continue;
-                                    }
-                                    w.printf("# GENCUM ctg=%s%n", gcId);
-                                    for (int g = 0; g < ids.length; g++) {
-                                        double v = gc[s2 * ids.length + g];
-                                        if (v != 0) {
-                                            w.printf("%s %.12f%n", ids[g], v);
-                                        }
-                                    }
-                                }
-                            } catch (java.io.IOException e) {
-                                throw new java.io.UncheckedIOException(e);
-                            }
-                        }
-                    }
-                    if (System.getenv("OLF_GPU_DS_TARGET_DUMP") != null && nds > 0) {
-                        // The FINAL distributed target on every participant row, after every
-                        // orchestrator. Both arms are converged, so if their reported states differ
-                        // their TARGETS must differ — this is the only direct way to see where.
-                        double[] ft = BatchReadbackNative.readBatchTargets(handle);
-                        for (int s = 0; s < realCount; s++) {
-                            String id = contingencies.get(group.get(chunkStart + s)).contingencyId();
-                            double tot = 0;
-                            for (int i = 0; i < nds; i++) {
-                                int row = gpuData.distributedSlack().busPhiRow()[i];
-                                double effBase = baseTargets[row] - (rs.dsOvBus[s] == i ? rs.dsOvBaseDelta[s] : 0.0);
-                                tot += ft[s * n + row] - effBase;
-                                System.err.printf("GPU_DS_TARGET ctg=%s i=%d target=%s delta=%s%n",
-                                        id, i, Double.toString(ft[s * n + row]),
-                                        Double.toString(ft[s * n + row] - effBase));
-                            }
-                            // The CUMULATIVE distributed active power. OLF's own DS re-distributes the
-                            // cumulative amount from the INITIAL target P on every pass, so this total is
-                            // directly comparable to the LAST `effective` OLF_DS_TRACE reports for the
-                            // same contingency.
-                            System.err.printf("GPU_DS_TOTAL ctg=%s distributed=%.9f%n", id, tot);
-                        }
-                    }
                     if (System.getenv("OLF_GPU_RL_TRACE") != null && rlStateOut != null) {
                         // The FINAL reactive-limits state, after every orchestrator re-solve. The
                         // per-solve trace above only sees the main solve, and OLF pins late in its

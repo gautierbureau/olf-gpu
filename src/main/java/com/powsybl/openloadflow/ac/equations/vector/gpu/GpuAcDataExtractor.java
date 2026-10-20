@@ -108,14 +108,6 @@ public final class GpuAcDataExtractor {
      */
     public static int[][] busPowerRows(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es) {
         ExtractionColumns columns = ExtractionColumns.of(network, es);
-        if (System.getenv("OLF_GPU_BUS_ROWS_TRACE") != null) {   // which buses the coupler tree relocated,
-            for (com.powsybl.openloadflow.network.LfBus b : network.getBuses()) {   // and to which rows
-                System.err.printf("BUSROWS bus=%s num=%d branches=%d gens=%d loads=%d ziParent=%d pRow=%d qRow=%d%n",
-                        b.getId(), b.getNum(), b.getBranches().size(), b.getGenerators().size(),
-                        b.getLoads().size(), columns.ziParentEdge()[b.getNum()],
-                        columns.pRow()[b.getNum()], columns.qRow()[b.getNum()]);
-            }
-        }
         return new int[][] {columns.pRow(), columns.qRow(), columns.ziParentEdge(), columns.qRowAlt()};
     }
 

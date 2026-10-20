@@ -422,27 +422,6 @@ SharedStructure* buildStructure(int n,
         if (std::getenv("OLF_GPU_TRACE") != nullptr) {
             std::fprintf(stderr, "zero-diagonal repair: %d hazard rows, %zu donor candidates\n", st->nHaz, donor.size());
         }
-        // OLF_GPU_HAZ_ROWS=<row>[,<row>]: is this row in the repair set, and which rows may it borrow?
-        // (physical rows, the space VALS_TINY reports in)
-        if (const char* hr = std::getenv("OLF_GPU_HAZ_ROWS")) {
-            std::string list(hr);
-            size_t pos = 0;
-            while (pos <= list.size()) {
-                size_t comma = list.find(',', pos);
-                int want = std::atoi(list.substr(pos, comma == std::string::npos ? std::string::npos : comma - pos).c_str());
-                auto it = hazSlot.find(want);
-                if (it == hazSlot.end()) {
-                    std::fprintf(stderr, "HAZ_ROW row=%d NOT REGISTERED\n", want);
-                } else {
-                    int i = it->second;
-                    std::fprintf(stderr, "HAZ_ROW row=%d slot=%d sign=%d donors=", want, i, (int) hazSigns[i]);
-                    for (int d : hazDonors[i]) std::fprintf(stderr, "%d ", d);
-                    std::fprintf(stderr, "\n");
-                }
-                if (comma == std::string::npos) break;
-                pos = comma + 1;
-            }
-        }
     }
     st->dRowPtr.upload(st->rowPtr.data(), (n + 1) * sizeof(int));
     st->dColIdx.upload(st->colIdx.data(), st->nnz * sizeof(int));

@@ -68,13 +68,6 @@ void buildZeroImpDest(SharedStructure* st, const CsrPattern& pos, const std::vec
             dd[5] = pos.at(b2P, z[4]);                       // J(bus2 P, dummyP)
             dd[6] = b1Q >= 0 ? pos.at(b1Q, z[5]) : -1;       // J(bus1 Q, dummyQ)
             dd[7] = b2Q >= 0 ? pos.at(b2Q, z[5]) : -1;       // J(bus2 Q, dummyQ)
-            static const char* ziTrace = std::getenv("OLF_GPU_ZI_DEST_TRACE");
-            if (ziTrace != nullptr && z[5] == std::atoi(ziTrace)) {
-                std::fprintf(stderr, "ZI_DEST e=%d dqCol=%d b1Q=%d b2Q=%d alt0=%d alt1=%d "
-                             "dd2=%d dd3=%d dd6=%d dd7=%d\n",
-                             e, z[5], b1Q, b2Q, ziQAlt[e * 2 + 0], ziQAlt[e * 2 + 1],
-                             dd[2], dd[3], dd[6], dd[7]);
-            }
             int frozenQ[2] = {b1Q, b2Q};
             for (int side = 0; side < 2; side++) {
                 int altRow = ziQAlt[e * 2 + side];

@@ -294,19 +294,6 @@ public final class ReactiveLimitsPacker {
             }
             System.err.println("GPU_PILOTSELF groups=" + ps.groupCount() + " bySize=" + bySize);
         }
-        if (System.getenv("OLF_GPU_RL_PACK_DUMP") != null) {
-            for (int i = 0; i < rlBusNum.size(); i++) {
-                // cmpVrow is the row whose V the switch condition reads - for a REMOTE member that is
-                // the PILOT's row, not the member's own, so a pin that looks unexplainable from the
-                // member alone is often the pilot's V. loadQ and vTarget complete the pin target
-                // (OLF pins at limit - loadTargetQ), which is the other half of any pin mismatch.
-                System.err.printf("RL_PACK entry=%d bus=%s vRow=%d minQ=%.9f maxQ=%.9f remote=%d"
-                        + " monitored=%d cmpVrow=%d loadQ=%.9f vTarget=%.9f baseQLimitType=%d%n",
-                        i, network.getBus(rlBusNum.get(i)).getId(), rlVrow.get(i), rlMinQ.get(i), rlMaxQ.get(i),
-                        rlRemote.get(i), rlMonitored.get(i), rlCmpVrow.get(i), rlLoadQ.get(i),
-                        rlVtarget.get(i), rlBaseQLimitType.get(i));
-            }
-        }
 
         byte[] baseLt = new byte[rlBaseQLimitType.size()];
         for (int i = 0; i < baseLt.length; i++) {

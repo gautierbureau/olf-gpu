@@ -9,12 +9,9 @@ package com.powsybl.openloadflow.ac.solver.gpu.batch;
 
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
 import com.powsybl.openloadflow.ac.outerloop.gpu.ReactiveCapabilityCurves;
-import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.BatchContingency;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.GenOutage;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuRowMode;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuVoltageControlRole;
-
-import java.util.List;
 
 /**
  * The seeding of one slot's generator and injection outages ({@link GenOutage} plan entries): the per-bus target
@@ -29,14 +26,12 @@ final class GenOutageSeed {
     private GenOutageSeed() {
     }
 
-    /** Seed slot {@code s} (contingency index {@code ci}) from its plan entries {@code slotGos}; the rows in
+    /** Seed slot {@code s} from its plan entries {@code slotGos}; the rows in
      *  {@code pilotBalanceRows} host a pilot's relocated reactive balance in this scenario. */
-    static void seed(SlotSeeding ctx, int s, int ci, GenOutage[] slotGos, gnu.trove.set.hash.TIntHashSet pilotBalanceRows) {
+    static void seed(SlotSeeding ctx, int s, GenOutage[] slotGos, gnu.trove.set.hash.TIntHashSet pilotBalanceRows) {
         final int chunkSize = ctx.chunkSize();
         final int n = ctx.n();
         final GpuAcData gpuData = ctx.gpuData();
-        final List<BatchContingency> contingencies = ctx.contingencies();
-        final double[] baseTargets = ctx.baseTargets();
         final int[] baseRowMode = ctx.baseRowMode();
         final ReactiveCapabilityCurves.Channel rlCurves = ctx.rlCurves();
         final java.util.Map<Integer, int[]> curveEntriesByPRow = ctx.curveEntriesByPRow();
@@ -47,28 +42,9 @@ final class GenOutageSeed {
             for (GenOutage go : gos) {   // at most one DS-participant bus per contingency by construction)
                 if (go.pRow() >= 0) {    // pRow < 0: a row-mode-only entry (a voltage
                     rs.overrides.add(s * n + go.pRow(), go.pTarget());   // control the island killed)
-                    // OLF_GPU_INJ_OV_CTG=<id>[,<id>]: the row this injection outage moves and
-                    // BY HOW MUCH, against the row's base target. A bus whose target does not
-                    // move by the lost injection leaves that power in the balance, and the
-                    // distributed-slack loop then reads it as a mismatch and undoes the loss
-                    // pre-distribution (network.xiidm loads: 4183 of 7494 totals wrong).
-                    String injWant = System.getenv("OLF_GPU_INJ_OV_CTG");
-                    if (injWant != null) {
-                        String cid = contingencies.get(ci).contingencyId();
-                        for (String w : injWant.split(",")) {
-                            if (w.trim().equals(cid)) {
-                                System.err.printf("INJ_OV ctg=%s pRow=%d base=%.12f pTarget=%.12f "
-                                        + "delta=%.12f dsBus=%d dsBaseDelta=%.12f pStep=%.12f"
-                                        + " | qRow=%d qBase=%.12f qTarget=%.12f qOv=%b%n",
-                                        cid, go.pRow(), baseTargets[go.pRow()], go.pTarget(),
-                                        go.pTarget() - baseTargets[go.pRow()], go.dsBus(),
-                                        go.dsBaseDelta(), go.pStep(),
-                                        go.qTargetRowOrV(),
-                                        go.qTargetRowOrV() >= 0 ? baseTargets[go.qTargetRowOrV()] : Double.NaN,
-                                        go.qTarget(), go.qOverride());
-                            }
-                        }
-                    }
+                    // A bus whose target does not move by the lost injection leaves that power in
+                    // the balance, and the distributed-slack loop then reads it as a mismatch and
+                    // undoes the loss pre-distribution (network.xiidm loads: 4183 of 7494 totals wrong).
                 }
                 if (go.qOverride()) {    // Q target sheds the lost gens' Q: on the PV->PQ flip AND
                     // on an ALREADY-PQ bus losing fixed-Q gens (#21)
@@ -204,8 +180,8 @@ final class GenOutageSeed {
                         // TargetsBatch refuses to maintain a DISTR_Q target on either ("A
                         // DISTR_Q target has no business here"), so uploading one is a
                         // write this code does not own: it lands as a SECOND override on a
-                        // row that already has one. Measured over the full busbar scope
-                        // (OLF_GPU_OV_DUP_TRACE): 26 mode-4 rows across 24 contingencies
+                        // row that already has one. Measured over the full busbar scope:
+                        // 26 mode-4 rows across 24 contingencies
                         // disagreed, all from this site — BUS-1359_BBS_1 and BUS-1869_BBS_1
                         // (the +-2 violation pair), BUS-1599_BBS_1. Then, once the split
                         // re-homes batched (tasks #70), the mode-0 case: BUS-2640_BBS_1's

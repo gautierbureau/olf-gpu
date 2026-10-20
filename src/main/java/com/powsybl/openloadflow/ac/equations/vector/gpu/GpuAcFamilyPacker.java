@@ -111,23 +111,6 @@ final class GpuAcFamilyPacker {
                             + " has no DUMMY_P/DUMMY_Q variables (unsupported non-impedant shape, e.g. both "
                             + "ends voltage-controlled or a 3-winding star)");
                 }
-                // OLF_GPU_DBG_ROW=<deviceRow>: everything the packer knows about one row. A mode-4 row
-                // gathers its bus's OWN q through each family's ALTERNATE destination, so when such a
-                // row assembles garbage the question is whether every family touching that bus supplies
-                // a valid alternate — and for a zero-impedance branch that is ziQAlt.
-                String dbgRow = System.getenv("OLF_GPU_DBG_ROW");
-                if (dbgRow != null) {
-                    int want = Integer.parseInt(dbgRow);
-                    if (vCol[b1n] == want || vCol[b2n] == want || qRow[b1n] == want || qRow[b2n] == want) {
-                        System.err.printf("DBG_ROW %d: zi branch %s  b1=%s(vCol=%d qRow=%d qRowAlt=%d)"
-                                        + "  b2=%s(vCol=%d qRow=%d qRowAlt=%d)  spanningTree=%b%n",
-                                want, br.getId(), b1.getId(), vCol[b1n], qRow[b1n], qRowAlt[b1n],
-                                b2.getId(), vCol[b2n], qRow[b2n], qRowAlt[b2n],
-                                br.isSpanningTreeEdge(LoadFlowModel.AC));
-                        System.err.printf("DBG_ROW %d:   dummyP=%d dummyQ=%d  y=%.6e ksi=%.6e r1=%.6f%n",
-                                want, dpRow, dqRow, pi.getY(), pi.getKsi(), pi.getR1());
-                    }
-                }
                 ziNums.add(br.getNum());
                 ziIn.add(new double[] {PiModel.R2 / pi.getR1()});
                 // COUPLER-TREE relocation (the dead-end stub is its k=1 case): the CHILD bus's P/Q balances move

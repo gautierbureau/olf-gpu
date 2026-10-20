@@ -807,7 +807,7 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
         // direct evidence. Ported from GpuVsCpuProductionSaBenchmarkTest; the harness has no
         // appender configured (core/classic version mismatch), so attach one.
         // OLF_GPU_DBG_NR: the CPU arm's own Newton trajectory — |f(x0)|, one line per iteration, and
-        // every MAX_VOLTAGE_CHANGE step-size clamp it applies. Put beside the device's OLF_GPU_CONV_TRACE
+        // every MAX_VOLTAGE_CHANGE step-size clamp it applies. Put beside the device's own trajectory
         // this is the only direct way to see WHERE the two trajectories part at the DEFAULT criterion,
         // which is the question: the two arms must take the same iterates, not merely land in the same
         // tolerance ball. Tightening the tolerance hides this instead of answering it.

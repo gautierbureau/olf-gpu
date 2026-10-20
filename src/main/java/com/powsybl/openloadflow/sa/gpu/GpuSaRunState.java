@@ -41,9 +41,6 @@ final class GpuSaRunState {
     PrecomputedBatch precomputed = PrecomputedBatch.empty();
     /** The state injector's row permutation, kept across this partition's contingencies. */
     final GpuStateInjector.Remap remap = new GpuStateInjector.Remap();
-    final GpuSaDiagnostics.PartialFlowCheck partialFlowCheck = new GpuSaDiagnostics.PartialFlowCheck();
-    /** OLF_GPU_RESTORE_CHECK: this partition's restores against the state a full restore produces. */
-    final GpuRestoreCheck restoreCheck = new GpuRestoreCheck();
     /** The contingency whose loss distribution the replay answered, and the one whose state the device supplied:
      *  when both name the contingency just simulated, only its own elements and the bus voltages changed. */
     String lossReplayedFor;
@@ -64,9 +61,6 @@ final class GpuSaRunState {
     int[] phiRowOfBus;
     Map<Variable<AcVariableType>, Integer> busRowsFor;
     boolean busRowsUsable;
-    long busArrayChecked;
-    long busArrayDiffering;
-    String busArrayFirstDiff;
     // The run's actual outer loops, captured in runSimulations: the device must run the distributed-slack /
     // reactive-limits passes ONLY when OLF would (i.e. when the outer loop is in the configured list), never
     // unconditionally from network capability. Default to OLF's defaults until runSimulations sets them.

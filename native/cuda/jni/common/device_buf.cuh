@@ -5,8 +5,6 @@
 #ifndef OLF_GPU_COMMON_DEVICE_BUF_CUH
 #define OLF_GPU_COMMON_DEVICE_BUF_CUH
 
-#include <execinfo.h>
-
 #include <cstdio>
 #include <cstdlib>
 
@@ -37,18 +35,6 @@ struct DeviceBuf {
             // makes that assumption a guarantee instead of a property of the process's allocation history;
             // the cost is one memset per cudaMalloc, at context creation, not per iteration.
             CUDA_CHECK(cudaMemset(p, 0, bytes));
-            // OLF_GPU_ALLOC_TRACE=1 prints each allocation's index and size.
-            static long allocIndex = -1;
-            ++allocIndex;
-            static const char* trace = std::getenv("OLF_GPU_ALLOC_TRACE");
-            if (trace != nullptr) {
-                std::fprintf(stderr, "ALLOC #%ld %zu bytes\n", allocIndex, bytes);
-                if (std::atol(trace) == allocIndex) {        // OLF_GPU_ALLOC_TRACE=<k>: host backtrace of that one
-                    void* frames[24];
-                    int nf = backtrace(frames, 24);
-                    backtrace_symbols_fd(frames, nf, 2);
-                }
-            }
         }
     }
     void alloc(size_t bytes) { ensure(bytes); }

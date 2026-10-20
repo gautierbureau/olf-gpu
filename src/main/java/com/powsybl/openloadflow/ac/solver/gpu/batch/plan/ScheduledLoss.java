@@ -24,28 +24,6 @@ final class ScheduledLoss {
     private ScheduledLoss() {
     }
 
-    /**
-     * {@code OLF_GPU_LOSS_TRACE=<contingency id>}: the device's SCHEDULED active power loss and the islanded
-     * bus set it was computed from. The formula mirrors {@code LfContingency}'s
-     * {@code disconnectedGenerationActivePower - disconnectedLoadActivePower} term for term, but only if this
-     * islanded set equals OLF's {@code disabledNetwork.getBuses()} — an islanded bus contributes its WHOLE
-     * injection and is skipped in the named lost load/generator sums, so a set that differs by one bus moves
-     * the loss by that bus's (generation - load). Compare against the {@code disabled buses:} line that
-     * {@code OLF_GPU_EQ_DUMP_CTG} prints.
-     */
-    static void traceScheduledLoss(BatchContingency c, List<LfBus> islandedBuses, double loss) {
-        String want = System.getenv("OLF_GPU_LOSS_TRACE");
-        if (want == null || !want.equals(c.contingencyId())) {
-            return;
-        }
-        System.err.printf("LOSS_TRACE ctg=%s deviceScheduledLoss=%.9f pu islanded=%s lostGens=%s lostLoads=%s%n",
-                c.contingencyId(), loss,
-                islandedBuses.stream().map(LfBus::getId).sorted().toList(),
-                c.lostGenerators().stream().map(com.powsybl.openloadflow.network.LfGenerator::getId).sorted()
-                        .toList(),
-                c.lostLoads().stream().map(ll -> ll.bus() == null ? "?" : ll.bus().getId()).sorted().toList());
-    }
-
     /** The surviving converter station's injection when this contingency islands the other endpoint of its link.
      *  AC emulation: OLF's station reports targetP 0 once a bus of its link is disabled, so a saturated or frozen
      *  link's survivor always loses its injection (a linear one has none). SETPOINT links follow

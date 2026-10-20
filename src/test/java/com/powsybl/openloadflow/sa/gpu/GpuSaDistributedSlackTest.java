@@ -283,8 +283,8 @@ class GpuSaDistributedSlackTest extends AbstractGpuSaTest {
      *  (8.02e-08 kV -> 2.81e-09 kV at b2) and closes rte6515's GEN-6372 completely (1.11e-05 relative
      *  -> 3.64e-13, and the 1389-generator set from 1 differing violation to 0), but 2.81e-09 kV is
      *  still above the bar, so something smaller-order in the saturating path is still wrong. The seed
-     *  and OLF now agree on WHICH generator pins and at WHAT value (OLF_GPU_SEED_TRACE against OLF's
-     *  OLF_DS_TRACE: both clamp g2c at 0.23 - 0.217443120 = 0.01255688), so the remaining difference is
+     *  and OLF now agree on WHICH generator pins and at WHAT value (both clamp g2c at
+     *  0.23 - 0.217443120 = 0.01255688), so the remaining difference is
      *  elsewhere. Sweeping g2c's headroom shows the split cleanly: at maxP 50/30/26 nobody saturates
      *  and BOTH arms agree at 1e-11; only at 23 does anything differ. That is also why this network
      *  cannot host a passing regression test for the fix — where it bites, this residual bites too.

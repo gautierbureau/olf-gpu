@@ -30,10 +30,6 @@ final class GpuPostContingencyState {
     private GpuPostContingencyState() {
     }
 
-    /** OLF_GPU_BUS_ARRAY_CHECK=1: after each array update, run the variable walk too and require every bus's V,
-     *  angle and the realistic-voltage verdict to be bit-identical. */
-    static final boolean BUS_ARRAY_CHECK = System.getenv("OLF_GPU_BUS_ARRAY_CHECK") != null;
-
     /**
      * Bus voltages and angles straight from the device state, and the realistic-voltage check, in one loop over the
      * buses. The device state is in the BASE row layout and every enabled bus keeps its base V and angle variables,
@@ -109,30 +105,6 @@ final class GpuPostContingencyState {
                 if (trace) {
                     System.err.printf("UNREALISTIC bus=%s v=%.9f nominalV=%.3f band=[%.3f, %.3f]%n",
                             bus.getId(), value, bus.getNominalV(), minV, maxV);
-                }
-            }
-        }
-        if (BUS_ARRAY_CHECK) {
-            double[] v = new double[vRow.length];
-            double[] a = new double[vRow.length];
-            for (int num = 0; num < vRow.length; num++) {
-                v[num] = buses.get(num).getV();
-                a[num] = buses.get(num).getAngle();
-            }
-            boolean walked = updateNetworkAndCheckRealistic(precomputed.equationSystem(), network, parameters, rs);
-            rs.busArrayChecked++;
-            String diff = walked != unrealistic ? "realistic verdict " + unrealistic + " vs " + walked : null;
-            for (int num = 0; num < vRow.length && diff == null; num++) {
-                LfBus bus = buses.get(num);
-                if (Double.doubleToLongBits(v[num]) != Double.doubleToLongBits(bus.getV())
-                        || Double.doubleToLongBits(a[num]) != Double.doubleToLongBits(bus.getAngle())) {
-                    diff = "bus " + bus.getId() + " v " + v[num] + " vs " + bus.getV() + " angle " + a[num] + " vs " + bus.getAngle();
-                }
-            }
-            if (diff != null) {
-                rs.busArrayDiffering++;
-                if (rs.busArrayFirstDiff == null) {
-                    rs.busArrayFirstDiff = diff;
                 }
             }
         }
@@ -227,21 +199,5 @@ final class GpuPostContingencyState {
             }
         }
         return unrealistic;
-    }
-
-    /** OLF's DISTR_Q target, reproduced from {@code AcTargetVector} (which keeps it private):
-     *  {@code (qPct_i - 1) * targetQ_i + qPct_i * sum_{j != i} targetQ_j}. Diagnostic only. */
-    static double distrQTarget(LfNetwork network, LfBus controllerBus) {
-        double qPct = controllerBus.getRemoteControlReactivePercent();
-        double target = (qPct - 1) * controllerBus.getTargetQ();
-        var members = controllerBus.getGeneratorVoltageControl().isPresent()
-                ? controllerBus.getGeneratorVoltageControl().orElseThrow().getMergedControllerElements()
-                : controllerBus.getGeneratorReactivePowerControl().orElseThrow().getControllerBuses();
-        for (LfBus other : members) {
-            if (other != controllerBus) {
-                target += qPct * other.getTargetQ();
-            }
-        }
-        return target;
     }
 }

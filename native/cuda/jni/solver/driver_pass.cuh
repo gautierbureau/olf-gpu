@@ -23,13 +23,11 @@ struct DriverPass {
     int maxIter = 0;
     int lsMode = GpuStateVectorScalingMode::NONE;
     double convEpsPerEq = 0.0;
-    bool iterLog = false;
     bool olTime = false;
     int olPassSolved = 0;
     int nActive = 0;
     std::vector<char> wasActive;
     std::vector<double> hF;
-    std::vector<std::string> iterLogLines;
     int rlMaxSwitch = 0;
     int swLogSlot = -1;
     int skipRlPhase = 0;

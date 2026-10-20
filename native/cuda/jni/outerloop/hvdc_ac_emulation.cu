@@ -45,7 +45,7 @@ __global__ void hvdcAcEmulationLoopBatch(int nh, int nScenarios, int n, int nEle
                                          const double* hvIn, const char* hvCtgOut,
                                          const double* x, double* target, char* disabled,
                                          int* status, double* appliedD1, double* appliedD2,
-                                         const char* rlActive, char* switched, int traceSlot) {
+                                         const char* rlActive, char* switched) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nh * nScenarios) return;
     int h = tid % nh;
@@ -54,15 +54,6 @@ __global__ void hvdcAcEmulationLoopBatch(int nh, int nScenarios, int n, int nEle
     const double* p = hvIn + (size_t) h * 9;                 // p0 k pMax12 pMax21 loss1 loss2 r baseD1 baseD2
     int st = status[(size_t) s * nh + h];
     int next = st;
-    if (s == traceSlot && mode == 1) {                       // OLF_GPU_HVDC_LOOP_TRACE=<slot>: the fork's HVDC_CHECK twin
-        const double* xs = x + (size_t) s * n;
-        double ph1 = xs[hvBus1Phi[h]];
-        double ph2 = xs[hvBus2Phi[h]];
-        printf("HVDC_CHECK s=%d h=%d elem=%d before=%d p1=%.12f p2=%.12f pmax12=%.9f pmax21=%.9f ph1=%.12f ph2=%.12f disabled=%d\n",
-               s, h, hvElem[h], st, hvdc::p1(p[0], p[1], p[4], p[5], p[6], ph1, ph2),
-               hvdc::p2(p[0], p[1], p[4], p[5], p[6], ph1, ph2), p[2], p[3], ph1, ph2,
-               (int) disabled[(size_t) s * nElements + hvElem[h]]);
-    }
     if (mode == 0) {                                         // FreezingHvdcACEmulation: unfreeze
         if (st != GpuAcEmulationStatus::FROZEN) return;
         next = GpuAcEmulationStatus::LINEAR_MODE;
@@ -139,18 +130,6 @@ __global__ void hvdcAcEmulationLoopBatch(int nh, int nScenarios, int n, int nEle
 void hvdcStep(BatchSolverContext* ctx, DriverPass& drv, int loopKind) {
     const int& n = drv.n;
     const int& nS = drv.nS;
-    const int& outer = drv.outer;
-    // OLF_GPU_HVDC_LOOP_TRACE=<slot>: the status of every link of that scenario before and after this pass,
-    // read back on the host (device printf is not relied on), beside the kernel's own per-link print.
-    static const char* hvTraceEnv = std::getenv("OLF_GPU_HVDC_LOOP_TRACE");
-    static const int hvTraceSlot = hvTraceEnv != nullptr ? std::atoi(hvTraceEnv) : -1;
-    std::vector<int> hvBefore;
-    if (hvTraceSlot >= 0 && hvTraceSlot < nS && ctx->nhv > 0) {
-        hvBefore.resize(ctx->nhv);
-        CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
-        CUDA_CHECK(cudaMemcpy(hvBefore.data(), ctx->dHvStatus.as<int>() + (size_t) hvTraceSlot * ctx->nhv,
-                              ctx->nhv * sizeof(int), cudaMemcpyDeviceToHost));
-    }
     hvdcAcEmulationLoopBatch<<<grid(ctx->nhv * nS), BLOCK, 0, ctx->stream>>>(
             ctx->nhv, nS, n, ctx->nElements, ctx->hvOffset,
             loopKind == GpuOuterLoopKind::FREEZING_HVDC_AC_EMULATION ? 0 : 1,
@@ -160,24 +139,7 @@ void hvdcStep(BatchSolverContext* ctx, DriverPass& drv, int loopKind) {
             ctx->dHvIn.as<double>(), ctx->dHvCtgOut.as<char>(),
             ctx->dX.as<double>(), ctx->dTarget.as<double>(), ctx->dDisabled.as<char>(),
             ctx->dHvStatus.as<int>(), ctx->dHvAppliedD1.as<double>(), ctx->dHvAppliedD2.as<double>(),
-            ctx->dRlActive.as<char>(), ctx->dRlSwitched.as<char>(), hvTraceSlot);
-    if (!hvBefore.empty()) {
-        std::vector<int> hvAfter(ctx->nhv);
-        std::vector<double> d1(ctx->nhv), d2(ctx->nhv);
-        CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
-        CUDA_CHECK(cudaMemcpy(hvAfter.data(), ctx->dHvStatus.as<int>() + (size_t) hvTraceSlot * ctx->nhv,
-                              ctx->nhv * sizeof(int), cudaMemcpyDeviceToHost));
-        CUDA_CHECK(cudaMemcpy(d1.data(), ctx->dHvAppliedD1.as<double>() + (size_t) hvTraceSlot * ctx->nhv,
-                              ctx->nhv * sizeof(double), cudaMemcpyDeviceToHost));
-        CUDA_CHECK(cudaMemcpy(d2.data(), ctx->dHvAppliedD2.as<double>() + (size_t) hvTraceSlot * ctx->nhv,
-                              ctx->nhv * sizeof(double), cudaMemcpyDeviceToHost));
-        for (int h = 0; h < ctx->nhv; h++) {
-            if (hvBefore[h] != hvAfter[h]) {
-                std::fprintf(stderr, "HVDC_LOOP s=%d outer=%d kind=%d h=%d status %d -> %d appliedD1=%.9f appliedD2=%.9f\n",
-                             hvTraceSlot, outer, loopKind, h, hvBefore[h], hvAfter[h], d1[h], d2[h]);
-            }
-        }
-    }
+            ctx->dRlActive.as<char>(), ctx->dRlSwitched.as<char>());
 }
 
 }  // namespace olfgpu

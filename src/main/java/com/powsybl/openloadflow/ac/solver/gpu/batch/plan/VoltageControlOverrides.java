@@ -296,20 +296,16 @@ final class VoltageControlOverrides {
                     }
                 }
             }
-            GpuAcData nd = null;
             if (newW == null) {
                 // the free role of a table-less group may move with the loss: re-extract, as before
-                nd = com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcDataExtractor
-                        .extract(network, es, false, false);
-                newW = nd.distrQ().weight();
+                newW = com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcDataExtractor
+                        .extract(network, es, false, false).distrQ().weight();
             }
             if (newW.length != baseW.length) {
                 return null;                                 // structural drift — not a pure reweight
             }
             List<Double> idx = new ArrayList<>();
             List<Double> w = new ArrayList<>();
-            boolean dqOvTrace = System.getenv("OLF_GPU_DQOV_TRACE") != null;
-            int traced = 0;
             int[] kMemberOf = gpuData.distrQ().rowMember();
             for (int k = 0; k < newW.length; k++) {
                 if (newW[k] != baseW[k]) {
@@ -318,16 +314,7 @@ final class VoltageControlOverrides {
                     }
                     idx.add((double) k);
                     w.add(newW[k]);
-                    if (dqOvTrace && traced++ < 12 && nd != null) {   // the two packs' metadata at a differing index
-                        System.err.printf("DQOV_PACK k=%d old(row=%d kind=%d elem=%d side=%d w=%.6f) new(row=%d kind=%d elem=%d side=%d w=%.6f)%n",
-                                k, gpuData.distrQ().row()[k], gpuData.distrQ().kind()[k], gpuData.distrQ().element()[k], gpuData.distrQ().side()[k], baseW[k],
-                                nd.distrQ().row()[k], nd.distrQ().kind()[k], nd.distrQ().element()[k], nd.distrQ().side()[k], newW[k]);
-                    }
                 }
-            }
-            if (dqOvTrace) {
-                System.err.println("DQOV_PACK lost=" + lost.stream().map(g -> g.getId()).toList() + " differing=" + idx.size()
-                        + " of " + newW.length + " oldFlags(ds,rl)=? newFlags=(false,false)");
             }
             return new double[][] {idx.stream().mapToDouble(Double::doubleValue).toArray(),
                 w.stream().mapToDouble(Double::doubleValue).toArray(),

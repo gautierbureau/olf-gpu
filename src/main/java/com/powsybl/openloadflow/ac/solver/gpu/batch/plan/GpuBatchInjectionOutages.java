@@ -168,24 +168,6 @@ public final class GpuBatchInjectionOutages {
                 }
                 rows = r.stream().mapToInt(Integer::intValue).toArray();
                 values = v.stream().mapToDouble(Double::doubleValue).toArray();
-                if (System.getenv("OLF_GPU_DQISL_TRACE") != null) {
-                    // The counterpart of the generator path's DQSEED. Its absence cost a measurement:
-                    // DQSEED staying silent says nothing about THIS path, and reading that as "the
-                    // target is never seeded" sent one fix at an inert code path.
-                    StringBuilder sb = new StringBuilder();
-                    for (int m = gs; m < gs + gc; m++) {
-                        sb.append(" m").append(m).append("[bus=").append(mBusNum[m])
-                                .append(" hasRow=").append(mHasRow[m]).append(" row=").append(mRow[m])
-                                .append(" reloc=").append(RelocatedRows.unrelocQRow(mRow[m],
-                                        relocDummyQRows, outagedZiNums))
-                                .append(" key=").append(mKey[m])
-                                .append(" targetQ=").append(baseTargetQ(any, mBusNum[m]))
-                                .append(" inactive=").append(inactive.contains(m))
-                                .append(" keeps=").append(memberKeepsKey(any, mBusNum[m], m, -1)).append(']');
-                    }
-                    System.err.println("DQISL group=" + gs + " count=" + gc + " keySumByLabel=" + keySumByLabel
-                            + " rows=" + r + " values=" + v + sb);
-                }
             }
             out.add(new GenOutage(-1, 0, -1, 0, false, false, -1, 0, 0, 0, 0, -1, 0, 0, false,
                     java.util.Set.of(), 0, 0, 0, im, new int[0], rows, values, 0, -1, 0, -1, 0, -1, 0, -1, -1, 0, false, -1, 0, 0));
@@ -208,16 +190,6 @@ public final class GpuBatchInjectionOutages {
         return mb != null && !mb.isDisabled() && mb.isGeneratorVoltageControlEnabled();
     }
 
-    /** WHY one bus's injection outage could not be represented. All twelve exits share the
-     *  PLAN:INJECTION_OUTAGE_SHAPE census tag, which is too coarse to pick the next thing to fix;
-     *  OLF_GPU_GENOUT_REJECT=1 names the exit and the bus. */
-    private static <T> T reject(String why, LfBus bus) {
-        if (System.getenv("OLF_GPU_GENOUT_REJECT") != null) {
-            System.err.println("GENOUT_REJECT " + why + " bus=" + (bus == null ? "?" : bus.getId()));
-        }
-        return null;
-    }
-
     /** Merged per-BUS outages for a MULTI-generator contingency: gens grouped by bus, each bus's
      *  targets/DS deltas summed. Stage-1 constraint: at most ONE distributed-slack-participant bus
      *  per contingency (the native DS override carries one entry per scenario) — more, or any
@@ -230,7 +202,7 @@ public final class GpuBatchInjectionOutages {
         java.util.Map<LfBus, List<LoadLoss>> loadsByBus = new java.util.LinkedHashMap<>();
         for (LfGenerator g : gens) {
             if (g.getBus() == null) {
-                return reject("GEN_WITHOUT_BUS", null);
+                return null;
             }
             byBus.computeIfAbsent(g.getBus(), b -> new ArrayList<>()).add(g);
         }
@@ -245,11 +217,11 @@ public final class GpuBatchInjectionOutages {
             GenOutage go = computeBusGenOutage(es, gpuData, dsSum, slackParticipates, dsParams, e.getKey(), e.getValue(),
                     loadsByBus.getOrDefault(e.getKey(), List.of()), busRows);
             if (go == null) {
-                return null;                                 // the per-bus exit already named itself
+                return null;
             }
             if (go.dsBus() >= 0 && ++dsBuses > 1) {
                 LOGGER.debug("Multi-injection contingency touches several DS-participant buses — CPU fallback");
-                return reject("MULTI_DS_BUS", e.getKey());
+                return null;
             }
             out[k++] = go;
         }
@@ -265,7 +237,7 @@ public final class GpuBatchInjectionOutages {
                     || go.flipsPilotRowWhenAllPinned();
         }
         if (movesPilotQ && changesControl) {
-            return reject("PILOT_Q_WITH_CONTROL_CHANGE", null);
+            return null;
         }
         // Two buses of the SAME remote group deactivated by one contingency: each bus's seeded
         // DISTR_Q targets renormalize over its own loss alone, so neither accounts for the other and
@@ -280,7 +252,7 @@ public final class GpuBatchInjectionOutages {
             for (int b = a + 1; b < out.length; b++) {
                 if (out[b].deactivatesDqMember()
                         && gpuData.distrQMembers().groupStart()[out[b].inactiveDqMember()] == ga) {
-                    return reject("DISTR_Q_TWO_MEMBERS_LOST", null);
+                    return null;
                 }
             }
         }
@@ -325,8 +297,8 @@ public final class GpuBatchInjectionOutages {
 
     /** The bus's generator voltage control as the GROUP sees it: the MAIN control of a zero-impedance merge.
      *  A section's own control is DEPENDENT there, and asking it reads a one-member group (its own controller)
-     *  with no survivors - which refused 285 of rte6515's full-list generator outages as DISTR_Q_LAST_CONTROLLER
-     *  (OLF_GPU_GENOUT_SHAPE: members=1 alive=0). See the merged-voltage-control note on GpuAcRowIndexing.mainGenVc. */
+     *  with no survivors - which refused 285 of rte6515's full-list generator outages as the last controller
+     *  (members=1 alive=0). See the merged-voltage-control note on GpuAcRowIndexing.mainGenVc. */
     private static java.util.Optional<com.powsybl.openloadflow.network.GeneratorVoltageControl> mainVcOf(LfBus bus) {
         return java.util.Optional.ofNullable(
                 com.powsybl.openloadflow.ac.equations.vector.gpu.RemoteMemberQPacker.mainGenVc(bus));
@@ -345,7 +317,7 @@ public final class GpuBatchInjectionOutages {
         // stay on the CPU.
         boolean slackBus = es.getEquation(busNum, AcEquationType.BUS_TARGET_PHI).isPresent();
         if (slackBus && (!lost.isEmpty() || gpuData.distributedSlack().busPhiRow().length == 0 && gpuData.distributedSlack().slackPhiRow() >= 0)) {
-            return reject("SLACK_BUS", bus);
+            return null;
         }
         // DISTR_Q controller bus (remote/distributed VC): the qPct weights are BAKED into the
         // equation system at creation — the CPU does not rebuild them on a gen loss either. When the
@@ -362,10 +334,10 @@ public final class GpuBatchInjectionOutages {
         int deadPilotVRow = fate.deadPilotVRow();
         double deadPilotQTarget = fate.deadPilotQTarget();
         if (bus.hasGeneratorsWithSlope()) {               // slope-SVC bus outage: the mode-2 row's fate on a
-            return reject("SLOPE_SVC_BUS", bus);             // gen loss is not modeled — CPU
+            return null;             // gen loss is not modeled — CPU
         }
         if (dsParams.isLoadBased() && !lostLoads.isEmpty()) {   // a lost/shifted load changes the LOAD
-            return reject("LOAD_BASED_DS_LOAD_LOSS", bus);   // participation factors — not modeled: CPU
+            return null;   // participation factors — not modeled: CPU
         }
         java.util.Set<LfGenerator> lostSet = new java.util.HashSet<>(lost);
         // The bus's P-BALANCE row, which under a coupler tree is its parent coupler's DUMMY_P column,
@@ -377,7 +349,7 @@ public final class GpuBatchInjectionOutages {
         int pRow = slackBus ? -1 : busRows[0][busNum];       // the slack's row is its angle reference
         int vRow = es.getVariableSet().getVariable(busNum, AcVariableType.BUS_V).getRow();
         if (pRow < 0 && !slackBus || vRow < 0) {
-            return reject("NO_P_OR_V_ROW", bus);
+            return null;
         }
         // Is this bus a distributed-slack participant? Matters for BOTH shapes: lost generators
         // leave the participation (factor/headroom reweight), AND pure injection deltas (load
@@ -397,11 +369,11 @@ public final class GpuBatchInjectionOutages {
         }
         boolean lostParticipation = lost.stream().anyMatch(g -> dsParams.factor(g) != 0);
         if (dsParams.isRemainingMargin() && dsBus >= 0 && lostParticipation) {
-            return reject("REMAINING_MARGIN_DS", bus);       // RM margins reweight per scenario: not modeled — CPU
+            return null;       // RM margins reweight per scenario: not modeled — CPU
         }
         if (!distrQBus && bus.getGeneratorVoltageControl().map(vc -> vc.getControlledBus() != null
                 && vc.getControlledBus().getNum() != busNum).orElse(false)) {
-            return reject("REMOTE_SINGLE_CONTROLLER", bus);   // (pilot-Q remap, no DISTR_Q row at this bus):
+            return null;   // (pilot-Q remap, no DISTR_Q row at this bus):
         }                                                        // its q accounting is not modeled — CPU
         double lostP = lost.stream().mapToDouble(LfGenerator::getTargetP).sum();
         double lostLoadP = lostLoads.stream().mapToDouble(LoadLoss::p).sum();
@@ -459,7 +431,7 @@ public final class GpuBatchInjectionOutages {
             if (lostLoadQ != 0 || lostGenQ != 0) {
                 int alt = busRows.length > 3 ? busRows[3][busNum] : -1;
                 if (alt > -2) {                              // the balance is not on a carrier: no channel for it
-                    return reject("PILOT_Q_NOT_RELOCATED", bus);
+                    return null;
                 }
                 pilotQGroup = -2 - alt;
                 pilotQDelta = lostLoadQ - lostGenQ;          // targetQ = generation - load
@@ -517,37 +489,6 @@ public final class GpuBatchInjectionOutages {
         // nothing to switch back to. OLF simply has no controller there. (Measured on rte6515 GEN-6130:
         // 0.995 kV at that node against 2.2e-4 everywhere else, and one apparent-power violation.)
         boolean allGensLost = bus.getGenerators().stream().allMatch(lostSet::contains);
-        if (System.getenv("OLF_GPU_GENOUT_TRACE") != null) {
-            System.err.printf("GENOUT bus=%s busPv=%b frozenQ=%b toPq=%b qOverride=%b lost=%s busGens=%d rlEntry=%d "
-                    + "dMinQ=%.6f dMaxQ=%.6f busMinQ=%.6f busMaxQ=%.6f distrQ=%b ctrlBus=%s dsBus=%d dFactor=%.9f dBase=%.9f lostLoadQ=%.9f dLoadQ=%.9f "
-                    + "vcCtl=%d vcCtlAlive=%d local=%b pilotIsCtl=%b vRow=%d members=%s free=%s pilotLoadQ=%.9f deadOwnsRow=%b%n",
-                    bus.getId(), busPv, bus.isGenerationTargetQFrozen(), toPq, qOverride,
-                    lost.stream().map(LfGenerator::getId).toList(), bus.getGenerators().size(),
-                    rlEntry, minQDelta, maxQDelta, bus.getMinQ(), bus.getMaxQ(), distrQBus,
-                    bus.getGeneratorVoltageControl().map(vc -> vc.getControlledBus().getId()).orElse("-"),
-                    dsBus, dsFactorDelta, dsBaseDelta, lostLoadQ, loadQDelta,
-                    bus.getGeneratorVoltageControl().map(vc -> vc.getMergedControllerElements().size()).orElse(0),
-                    bus.getGeneratorVoltageControl().map(vc -> (int) vc.getMergedControllerElements().stream()
-                            .filter(cb -> cb.getGenerators().stream()
-                                    .anyMatch(g -> !lostSet.contains(g)
-                                            && g.getGeneratorControlType() == LfGenerator.GeneratorControlType.VOLTAGE))
-                            .count()).orElse(0),
-                    bus.getGeneratorVoltageControl().map(vc -> vc.isLocalControl()).orElse(false),
-                    bus.getGeneratorVoltageControl().map(vc -> vc.getMergedControllerElements().contains(bus))
-                            .orElse(false),
-                    vRow,
-                    bus.getGeneratorVoltageControl().map(vc -> vc.getMergedControllerElements().stream()
-                            .map(m -> m.getId() + "#" + es.getVariableSet()
-                                    .getVariable(m.getNum(), AcVariableType.BUS_V).getRow()).toList().toString())
-                            .orElse("-"),
-                    bus.getGeneratorVoltageControl().map(vc -> vc.getMergedControllerElements().stream()
-                            .filter(vc::isControllerEnabled).findFirst().map(LfBus::getId).orElse("none"))
-                            .orElse("-"),
-                    bus.getGeneratorVoltageControl().map(vc -> vc.getControlledBus().getLoadTargetQ()).orElse(0.0),
-                    bus.getGeneratorVoltageControl().map(vc -> vc.getMergedControllerElements().stream()
-                            .filter(vc::isControllerEnabled).findFirst().map(m -> m != bus).orElse(false))
-                            .orElse(false));
-        }
         // Identity of what was lost, for the reactive-capability CURVE channel: it evaluates each
         // generator's curve at its OWN post-DS active power, which it reconstructs from the bus's row
         // target by participation share. The lost generator's entry has to go, the survivors' shares
@@ -563,7 +504,7 @@ public final class GpuBatchInjectionOutages {
                 }
             }
             if (inactiveDqMember < 0) {
-                return reject("DISTR_Q_MEMBER_NOT_PACKED", bus);
+                return null;
             }
         }
         // The group's DISTR_Q row targets, renormalized over the survivors exactly as OLF does
@@ -733,7 +674,7 @@ public final class GpuBatchInjectionOutages {
             LfBus pilot = mainVcOf(bus).orElseThrow().getControlledBus();
             var pilotV = es.getVariableSet().getVariable(pilot.getNum(), AcVariableType.BUS_V);
             if (pilotV == null || pilotV.getRow() < 0) {
-                return reject("DEAD_CONTROL_PILOT_NO_V_ROW", bus);
+                return null;
             }
             deadPilotVRow = pilotV.getRow();
             deadPilotQTarget = pilot.getTargetQ();
@@ -743,7 +684,7 @@ public final class GpuBatchInjectionOutages {
             // 3.157 kV at GEN-1522) and LOAD-1263 lands 0.105 kV out.
             //
             // EVERY one of those buses is a PILOT THAT IS ALSO ONE OF ITS CONTROLLERS
-            // (OLF_GPU_GENOUT_TRACE prints pilotIsCtl) — the shape ExtractionColumns deliberately
+            // — the shape ExtractionColumns deliberately
             // excludes from the Q-relocation table, because while it controls it has NO Q balance
             // of its own to relocate (its q feeds the group's DISTR_Q rows, and a table entry
             // would double-count it). GpuAcRowIndexing.distrQRow already parks its DISTR_Q on the
@@ -762,40 +703,6 @@ public final class GpuBatchInjectionOutages {
             //
             // If you come back to lift either, diff BUSES (OLF_GPU_SA_BUSDIFF=1). Violation parity
             // is a threshold test: of the 8 wrong generator cases it caught exactly ONE.
-            if (System.getenv("OLF_GPU_GENOUT_SHAPE") != null) {
-                var vcO = mainVcOf(bus);
-                LfBus pilot = vcO.map(vc -> vc.getControlledBus()).orElse(null);
-                long alive = vcO.map(vc -> vc.getMergedControllerElements().stream()
-                        .filter(cb -> cb.getGenerators().stream().anyMatch(g -> !lostHere.contains(g)
-                                && g.getGeneratorControlType() == LfGenerator.GeneratorControlType.VOLTAGE))
-                        .count()).orElse(0L);
-                System.err.printf("GENOUT_SHAPE bus=%s pilot=%s pilotIsCtl=%b members=%d alive=%d "
-                        + "pilotLoadQ=%.4f keepsCtl=%b lostLoads=%d%n",
-                        bus.getId(), pilot == null ? "?" : pilot.getId(),
-                        vcO.map(vc -> vc.getMergedControllerElements().contains(vc.getControlledBus())).orElse(false),
-                        vcO.map(vc -> vc.getMergedControllerElements().size()).orElse(0), alive,
-                        pilot == null ? 0.0 : pilot.getLoadTargetQ(), keepsController, lostLoads.size());
-                // The DEVICE rows of the pilot and of every member, so a post-solve readback
-                // (OLF_GPU_FINAL_TARGET_ROW) can be pointed at this group without guessing which
-                // row index the equation landed on.
-                if (pilot != null) {
-                    StringBuilder mr = new StringBuilder();
-                    vcO.ifPresent(vc -> vc.getMergedControllerElements().forEach(m -> {
-                        var mv = es.getVariableSet().getVariable(m.getNum(), AcVariableType.BUS_V);
-                        mr.append(m.getId()).append('=').append(mv == null ? -1 : mv.getRow()).append(' ');
-                    }));
-                    var pv = es.getVariableSet().getVariable(pilot.getNum(), AcVariableType.BUS_V);
-                    System.err.printf("GENOUT_SHAPE   rows pilot=%s:%d members: %s%n",
-                            pilot.getId(), pv == null ? -1 : pv.getRow(), mr.toString().trim());
-                }
-                double postGenQ = bus.getGenerators().stream().filter(g -> !lostHere.contains(g))
-                        .mapToDouble(LfGenerator::getTargetQ).sum();
-                System.err.printf("GENOUT_SHAPE   bus=%s baseTargetQ=%.9f postTargetQ=%.9f delta=%.9f "
-                        + "frozen=%b genTargetQ=%.9f loadQ=%.9f%n",
-                        bus.getId(), bus.getTargetQ(), postGenQ - bus.getLoadTargetQ(),
-                        (postGenQ - bus.getLoadTargetQ()) - bus.getTargetQ(),
-                        bus.isGenerationTargetQFrozen(), bus.getGenerationTargetQ(), bus.getLoadTargetQ());
-            }
             // A PURE reactive-LOAD loss on a packed DISTR_Q member, with the group's control
             // untouched, IS expressible: the member's own targetQ moves (targetQ = generation -
             // load) and every DISTR_Q target in the group follows it through the per-scenario
@@ -807,7 +714,7 @@ public final class GpuBatchInjectionOutages {
             boolean pureLoadLossOnPackedMember = keepsController && lostHere.isEmpty()
                     && !lostLoads.isEmpty() && dqMemberSlot(gpuData, bus) >= 0;
             if (!pureLoadLossOnPackedMember) {
-                return reject(keepsController ? "DISTR_Q_BUS_WITH_LOAD_LOSS" : "DISTR_Q_LAST_CONTROLLER", bus);
+                return null;
             }
         }
         return new DistrQBusFate(vcSurvives, deadRemoteMember, deadPilotVRow, deadPilotQTarget);
@@ -968,7 +875,7 @@ public final class GpuBatchInjectionOutages {
                                 }
                             }
                             if (!stillOpen && !dsParams.isLoadBased()) {
-                                return reject("DS_ROOM_UNBOUNDED_TO_BOUNDED", bus);
+                                return null;
                             }
                             r[side] = 0;
                         }

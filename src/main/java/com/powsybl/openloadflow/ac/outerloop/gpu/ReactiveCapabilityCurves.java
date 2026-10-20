@@ -148,32 +148,6 @@ public final class ReactiveCapabilityCurves {
         if (cvIdx.isEmpty()) {
             return null;
         }
-        // OLF_GPU_CURVE_DUMP=<file>: what the channel packs per curve generator — the generator, its
-        // base P and the SHARE the kernel uses to reconstruct its own P from its bus's row target.
-        // Joined against OLF's per-generator movement (OLF_DS_SPLIT's G lines) this says directly
-        // whether the proportional-share model holds for a given scenario.
-        String dump = System.getenv("OLF_GPU_CURVE_DUMP");
-        if (dump != null) {
-            try (java.io.PrintWriter w = new java.io.PrintWriter(new java.io.FileWriter(dump))) {
-                for (int g = 0; g < cvGenId.size(); g++) {
-                    double[] in = cvIn.get(g);
-                    int[] ix = cvIdx.get(g);
-                    StringBuilder sb = new StringBuilder(String.format(
-                            "%s rlIdx=%d baseP=%.12f share=%.12f baseRowTarget=%.12f busFactor=%.12f "
-                            + "baseEvalMin=%.12f baseEvalMax=%.12f dsSlot=%d npts=%d pts=",
-                            cvGenId.get(g), ix[0], in[0], in[1], in[2], cvBusFactor.get(g), in[3], in[4],
-                            ix[4], ix[3]));
-                    for (int k = 0; k < ix[3]; k++) {        // cvPts stride 3 {p_MW, minQ_MW, maxQ_MW}
-                        int o = (ix[2] + k) * 3;
-                        sb.append(String.format("%s%.9f:%.9f:%.9f", k == 0 ? "" : ",",
-                                cvPts.get(o), cvPts.get(o + 1), cvPts.get(o + 2)));
-                    }
-                    w.println(sb);
-                }
-            } catch (java.io.IOException e) {
-                throw new java.io.UncheckedIOException(e);
-            }
-        }
         return new Channel(
                 cvIdx.stream().flatMapToInt(java.util.stream.IntStream::of).toArray(),
                 cvIn.stream().flatMapToDouble(java.util.stream.DoubleStream::of).toArray(),

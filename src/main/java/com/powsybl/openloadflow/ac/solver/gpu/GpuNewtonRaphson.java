@@ -311,8 +311,8 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                 m4.append(' ').append(r);
             }
         }
-        // The HOST's pinned rows, to line up against the device's (OLF_GPU_VALS_SCAN prints mode4Rows per
-        // fill): if they differ, the device moved a pin, and the row it moved it to is the defect.
+        // The HOST's pinned rows, to line up against the device's: if they differ, the device moved a pin,
+        // and the row it moved it to is the defect.
         System.err.println("EQ_DUMP wrote " + path + " and " + path + ".olf (n=" + n + " pinned=" + pinned
                 + ") hostMode4Rows=[" + m4.toString().trim() + "]");
     }
@@ -322,9 +322,6 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
 
     /** OLF_GPU_EQ_DUMP: written once per run (see dumpEquationsOnce). */
     private boolean equationsDumped;
-
-    /** OLF_GPU_F0_TRACE: written once per run (see runImpl). */
-    private boolean f0Traced;
 
     private GpuAcActivation activation;
 
@@ -598,12 +595,6 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
             }
             double[] target = activation.applyTargets(targetVector.getArray());
             double[] x0 = equationSystem.getStateVector().get().clone();
-            // OLF_GPU_F0_TRACE=<path>: OLF's OWN mismatch vector at x0 (f(x0) - target, the residual its first
-            // |f(x0)| line is the norm of), one line per equation with its type, element and id. Lined up
-            // against the device's first fill (OLF_GPU_VALS_DUMP_ANY) it names the equation the two arms
-            // evaluate differently BEFORE any step is taken — the only place a difference is not yet blurred
-            // by different iterates. Written once per run.
-            traceInitialMismatch();
             rlStateOut = cachedData.reactiveLimits().voltageRow().length > 0 ? new int[cachedData.reactiveLimits().voltageRow().length] : null;
             int[] rlStateIn = null;
             if (restart && rlCarry != null && rlStateOut != null) {
@@ -761,12 +752,6 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
             equationVector.minus(targetVector);
             NewtonRaphsonStoppingCriteria.TestResult result =
                     parameters.getStoppingCriteria().test(equationVector.getArray(), equationSystem);
-            // OLF_GPU_RESIDUAL_TRACE: the device solved to ITS residual, this is OLF's own residual at
-            // the state it returned — a large value here means the device's equations disagree with
-            // OLF's (a packing/row-mapping bug), not that the solver failed to converge. The
-            // by-equation-type breakdown names the family to look at. (Test logback is broken —
-            // stderr lever.)
-            traceResidual(n, out, iterations, result);
             // OLF's NewtonRaphson.run reports MAX_ITERATION_REACHED whenever iterations >= maxIterations, a
             // test passing after the last allowed step included; the device applies the same rule and its
             // verdict is kept. OLF's own criterion on the returned state decides the rest.
@@ -788,7 +773,6 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                         + result.getNorm() + ")");
             }
             LOGGER.debug("GPU Newton-Raphson: {} iterations, |f(x)|={}, {}", iterations, result.getNorm(), status);
-            traceSequentialSolve(iterations, result, out, n, status);
         } catch (RuntimeException e) {
             CPU_FALLBACK_COUNT.incrementAndGet();
             lastRunOnDevice = false;
@@ -1008,153 +992,6 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
             invalidation.activationDirty = true;
         }
         return rebuilt;
-    }
-
-    /** OLF_GPU_F0_TRACE: the initial mismatch of the first solve, written once to the given path. */
-    private void traceInitialMismatch() {
-        String f0Path = System.getenv("OLF_GPU_F0_TRACE");
-        if (f0Path != null && !f0Path.isEmpty() && !f0Traced) {
-            f0Traced = true;
-            double[] fx0 = equationVector.getArray();
-            double[] tg0 = targetVector.getArray();
-            double n2 = 0;
-            try (java.io.PrintWriter pw = new java.io.PrintWriter(java.nio.file.Files.newBufferedWriter(java.nio.file.Path.of(f0Path)))) {
-                for (int c = 0; c < fx0.length; c++) {
-                    double v = fx0[c] - (c < tg0.length ? tg0[c] : 0.0);
-                    n2 += v * v;
-                    var eq = equationSystem.getIndex().getEquationAtColumn(c);
-                    String id;
-                    try {
-                        id = switch (eq.getType().getElementType()) {
-                            case BUS -> network.getBus(eq.getElementNum()).getId();
-                            case BRANCH -> network.getBranch(eq.getElementNum()).getId();
-                            default -> "#" + eq.getElementNum();
-                        };
-                    } catch (RuntimeException e) {
-                        id = "#" + eq.getElementNum();
-                    }
-                    pw.println(c + " " + eq.getType() + " " + eq.getElementNum() + " " + id + " " + v);
-                }
-            } catch (java.io.IOException e) {
-                LOGGER.warn("OLF_GPU_F0_TRACE failed: {}", e.toString());
-            }
-            System.err.println("F0_TRACE wrote " + f0Path + " rows=" + fx0.length + " norm2=" + Math.sqrt(n2));
-        }
-    }
-
-    /** OLF_GPU_RESIDUAL_TRACE: OLF's residual at the device's final state, row by row. */
-    private void traceResidual(final int n, final double[] out, final int iterations,
-                               final NewtonRaphsonStoppingCriteria.TestResult result) {
-        if (System.getenv("OLF_GPU_RESIDUAL_TRACE") != null) {
-            double[] fx = equationVector.getArray();
-            int nanX = 0;
-            int nanF = 0;
-            int firstNanF = -1;
-            for (int i2 = 0; i2 < n; i2++) {
-                if (Double.isNaN(out[i2])) {
-                    nanX++;
-                }
-                if (i2 < fx.length && Double.isNaN(fx[i2])) {
-                    nanF++;
-                    if (firstNanF < 0) {
-                        firstNanF = i2;
-                    }
-                }
-            }
-            if (nanX > 0 || nanF > 0) {
-                System.err.println("RESID_NAN deviceStateNaN=" + nanX + " olfResidualNaN=" + nanF + " firstNanRow=" + firstNanF
-                        + (firstNanF >= 0 ? " eq=" + equationSystem.getIndex().getEquationAtColumn(firstNanF).getType()
-                        + " elem=" + equationSystem.getIndex().getEquationAtColumn(firstNanF).getElementNum() : "")
-                        + " deviceIters=" + iterations + " devNorm=" + out[n + 1]);
-            }
-            double n2 = 0;
-            int worstRow = -1;
-            double worst = 0;
-            for (int i2 = 0; i2 < fx.length; i2++) {
-                n2 += fx[i2] * fx[i2];
-                if (Math.abs(fx[i2]) > worst) {
-                    worst = Math.abs(fx[i2]);
-                    worstRow = i2;
-                }
-            }
-            System.err.println("RESID_TRACE rows=" + fx.length + " cpuNorm2=" + Math.sqrt(n2)
-                    + " cpuInfNorm=" + worst + " worstRow=" + worstRow
-                    + " deviceIters=" + iterations + " stop=" + result.isStop());
-            var worstEq = equationSystem.getIndex().getEquationAtColumn(worstRow);
-            System.err.println("RESID_TRACE worst equation type=" + worstEq.getType()
-                    + " elementNum=" + worstEq.getElementNum());
-            java.util.Map<String, Integer> byType = new java.util.TreeMap<>();
-            java.util.Map<String, Double> maxByType = new java.util.TreeMap<>();
-            for (int i2 = 0; i2 < fx.length; i2++) {
-                if (Math.abs(fx[i2]) > 1e-4) {
-                    String t = equationSystem.getIndex().getEquationAtColumn(i2).getType().toString();
-                    byType.merge(t, 1, Integer::sum);
-                    maxByType.merge(t, Math.abs(fx[i2]), Math::max);
-                }
-            }
-            System.err.println("RESID_TRACE rows over 1e-4 by type=" + byType + " max=" + maxByType);
-            double[] devT = BatchReadbackNative.readBatchTargets(context.handle.get());
-            double[] olfT = targetVector.getArray();
-            for (int i2 = 0; i2 < fx.length; i2++) {
-                if (Math.abs(fx[i2]) <= 1e-4) {
-                    continue;
-                }
-                var eq = equationSystem.getIndex().getEquationAtColumn(i2);
-                StringBuilder sb = new StringBuilder("RESID_ROW row=" + i2 + " type=" + eq.getType()
-                        + " f=" + fx[i2] + " olfTarget=" + olfT[i2]
-                        + " devTarget=" + (devT != null && i2 < devT.length ? devT[i2] : Double.NaN)
-                        + " devMode=" + activation.rowMode()[i2] + " x=" + out[i2]);
-                LfBus bus = eq.getType().toString().startsWith("BUS_") ? network.getBus(eq.getElementNum()) : null;
-                if (bus != null) {
-                    sb.append(" bus=").append(bus.getId()).append(" vcEnabled=").append(bus.isGeneratorVoltageControlEnabled())
-                      .append(" qLimitType=").append(bus.getQLimitType().map(Object::toString).orElse("-"))
-                      .append(" genTargetQ=").append(bus.getGenerationTargetQ()).append(" loadTargetQ=").append(bus.getLoadTargetQ())
-                      .append(" minQ=").append(bus.getMinQ()).append(" maxQ=").append(bus.getMaxQ())
-                      .append(" hasVc=").append(bus.getGeneratorVoltageControl().isPresent())
-                      .append(" isVcController=").append(bus.isGeneratorVoltageControlled());
-                    if (cachedData.reactiveLimits().busNum() != null && rlStateOut != null) {
-                        for (int k = 0; k < cachedData.reactiveLimits().busNum().length; k++) {
-                            if (cachedData.reactiveLimits().busNum()[k] == bus.getNum()) {
-                                sb.append(" rl[").append(k).append("]: state=").append(rlStateOut[k])
-                                  .append(" vRow=").append(cachedData.reactiveLimits().voltageRow()[k]).append(" remote=").append(cachedData.reactiveLimits().voltageControlRole()[k])
-                                  .append(" rlMinQ=").append(cachedData.reactiveLimits().minQ()[k]).append(" rlMaxQ=").append(cachedData.reactiveLimits().maxQ()[k])
-                                  .append(" rlLoadQ=").append(cachedData.reactiveLimits().loadQ()[k])
-                                  .append(" devTargetAtVrow=").append(devT != null ? devT[cachedData.reactiveLimits().voltageRow()[k]] : Double.NaN)
-                                  .append(" devModeAtVrow=").append(activation.rowMode()[cachedData.reactiveLimits().voltageRow()[k]]);
-                            }
-                        }
-                    }
-                }
-                System.err.println(sb);
-            }
-        }
-    }
-
-    /** OLF_GPU_SEQ_TRACE: the solve's outcome on stderr (the test logback is broken). */
-    private void traceSequentialSolve(final int iterations, final NewtonRaphsonStoppingCriteria.TestResult result,
-                                      final double[] out, final int n, final AcSolverStatus status) {
-        if (System.getenv("OLF_GPU_SEQ_TRACE") != null) {   // test logback is broken — stderr trace
-            System.err.println("SEQ_TRACE solve iters=" + iterations + " norm=" + result.getNorm()
-                    + " devNorm=" + out[n + 1] + " status=" + status);
-            double[] fv = equationVector.getArray();
-            int[] tm = activation.targetMap();
-            var vars = equationSystem.getIndex().getSortedVariablesToFind();
-            for (int c = 0; c < fv.length; c++) {
-                if (Math.abs(fv[c]) > 1e-4) {
-                    int row = -1;
-                    for (int r = 0; r < tm.length; r++) {
-                        if (tm[r] == c) {
-                            row = r;
-                        }
-                    }
-                    final int rr = row;
-                    var vv = vars.stream().filter(x -> x.getRow() == rr).findFirst().orElse(null);
-                    System.err.println("SEQ_TRACE   |f|=" + Math.abs(fv[c]) + " col=" + c + " row=" + row
-                            + " mode=" + (row >= 0 ? activation.rowMode()[row] : -9)
-                            + " var=" + (vv != null ? vv.getType() + "#" + vv.getElementNum() : "?"));
-                }
-            }
-        }
     }
 
     /** The incremental and discrete transformer, shunt and phase loops (OLF orders 7 to 10) installed on the device

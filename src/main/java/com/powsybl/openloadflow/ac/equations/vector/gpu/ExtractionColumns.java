@@ -140,34 +140,6 @@ record ExtractionColumns(int[] phiCol, int[] vCol, int[] branchRhoCol, int[] bra
         addRemoteVoltageControlGroups(network, es, ziTreeEdges, qrPilotBuses, dummyQCol, vCol, qrPtr, qrRows,
                                       qRowAlt, qrDepBase, qrBaseTargetRow, depGroupOfRow);
         qrPtr.add(qrRows.size());
-        if (System.getenv("OLF_GPU_QR_TRACE") != null) {   // every relocation group of THIS extraction
-            for (int g = 0; g + 1 < qrPtr.size(); g++) {
-                StringBuilder sb = new StringBuilder("QR_TRACE group=" + g + " rows=");
-                for (int c = qrPtr.get(g); c < qrPtr.get(g + 1); c++) {
-                    sb.append(qrRows.get(c)).append(c == qrPtr.get(g) ? "|" : ",");
-                }
-                System.err.println(sb);
-            }
-            for (LfBus bus : network.getBuses()) {           // every generator-VC controller: its state at THIS extraction
-                if (bus.getGeneratorVoltageControl().isPresent()) {
-                    System.err.println("QR_TRACE ctl bus=" + bus.getId() + " vRow=" + vCol[bus.getNum()]
-                            + " enabled=" + bus.isGeneratorVoltageControlEnabled()
-                            + " qLimit=" + bus.getQLimitType().map(Object::toString).orElse("-")
-                            + " minQ=" + bus.getMinQ() + " maxQ=" + bus.getMaxQ()
-                            + " genTargetQ=" + bus.getGenerationTargetQ() + " loadQ=" + bus.getLoadTargetQ()
-                            + " q=" + (bus.getQ() != null ? bus.getQ().eval() : Double.NaN)
-                            + " controlled=" + bus.getGeneratorVoltageControl().map(c -> c.getControlledBus().getId()).orElse("-")
-                            + " main=" + bus.getGeneratorVoltageControl().map(c -> c.getMergeStatus().name()).orElse("-"));
-                }
-                if (vCol[bus.getNum()] >= 0 && qRowAlt[bus.getNum()] != -1) {
-                    System.err.println("QR_TRACE bus=" + bus.getId() + " vRow=" + vCol[bus.getNum()]
-                            + " qRowAlt=" + qRowAlt[bus.getNum()]
-                            + " gvcMain=" + bus.getGeneratorVoltageControl().map(c -> c.getMergeStatus().name()).orElse("-")
-                            + " vcOn=" + bus.isGeneratorVoltageControlled()
-                            + " pinned=" + (bus.getGeneratorVoltageControl().isPresent() && !bus.isGeneratorVoltageControlEnabled()));
-                }
-            }
-        }
 
         // Remote gen-VC group members (plan-B2), CANONICAL encoding independent of the base pin
         // state: the frozen q dest is SUPPRESSED and the member's OWN row is the ALTERNATE,
@@ -244,26 +216,6 @@ record ExtractionColumns(int[] phiCol, int[] vCol, int[] branchRhoCol, int[] bra
         int[] ziParentEdge = ziTreeEdges[0];
         int[] ziChildBus = ziTreeEdges[1];
         int[] pRow = phiCol.clone();
-        if (System.getenv("OLF_GPU_ZI_RELOC_TRACE") != null) {
-            long relocated = java.util.Arrays.stream(ziParentEdge).filter(x -> x >= 0).count();
-            System.err.printf("ZI_RELOC relocatedBuses=%d of %d%n", relocated, nBuses);
-            // =ids: WHICH buses relocate, and what each one carries.
-            if ("ids".equals(System.getenv("OLF_GPU_ZI_RELOC_TRACE"))) {
-                for (LfBus b : network.getBuses()) {
-                    int pe = ziParentEdge[b.getNum()];
-                    if (pe >= 0) {
-                        System.err.printf("ZI_RELOC_BUS %s parentEdge=%d gens=%d shunt=%b loadModel=%b"
-                                + " vc=%b ctrl=%b p0=%.4f q0=%.4f%n",
-                                b.getId(), pe, b.getGenerators().size(),
-                                b.getShunt().isPresent() || b.getControllerShunt().isPresent()
-                                        || b.getSvcShunt().isPresent(),
-                                b.getLoads().stream().anyMatch(l -> l.getLoadModel().isPresent()),
-                                b.isGeneratorVoltageControlled(),
-                                b.isGeneratorVoltageControlEnabled(), b.getLoadTargetP(), b.getLoadTargetQ());
-                    }
-                }
-            }
-        }
         for (LfBus bus : network.getBuses()) {
             int bn = bus.getNum();
             int parent = ziParentEdge[bn];

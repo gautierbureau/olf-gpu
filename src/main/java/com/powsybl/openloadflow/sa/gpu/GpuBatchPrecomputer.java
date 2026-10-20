@@ -59,9 +59,6 @@ final class GpuBatchPrecomputer {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(GpuBatchPrecomputer.class);
 
-    /** Run counter of OLF_GPU_BASE_STATE_DUMP (cold, warm, ...). */
-    private static final java.util.concurrent.atomic.AtomicInteger BASE_DUMPS = new java.util.concurrent.atomic.AtomicInteger();
-
     /** Serializes device access across partition-worker threads (the batch precompute queues here). */
     private static final Object GPU_DEVICE_LOCK = new Object();
 
@@ -114,51 +111,6 @@ final class GpuBatchPrecomputer {
             // After the converged base load flow the engine's state vector holds the base operating point.
             EquationSystem<AcVariableType, AcEquationType> es = context.getEquationSystem();
             double[] baseState = es.getStateVector().get().clone();
-            // OLF_GPU_BASE_STATE_DUMP=<prefix>: the state every scenario starts from, one file per security analysis
-            // (<prefix>.<k>, k counting the runs of this JVM), "<row> <value>" with every double exact.
-            String baseDump = System.getenv("OLF_GPU_BASE_STATE_DUMP");
-            if (baseDump != null) {
-                java.nio.file.Path out = java.nio.file.Path.of(baseDump + "." + BASE_DUMPS.getAndIncrement());
-                String[] what = new String[baseState.length];
-                // the state vector against the NETWORK's bus values (what the base result reports): a captured
-                // vector that is not the base load flow's final state shows up here
-                double worstV = 0;
-                double worstPhi = 0;
-                String worstVBus = "-";
-                for (var v : es.getVariableSet().getVariables()) {
-                    if (v.getRow() < 0 || v.getType().getElementType() != com.powsybl.openloadflow.network.ElementType.BUS) {
-                        continue;
-                    }
-                    var bus = net.getBus(v.getElementNum());
-                    if (v.getType() == com.powsybl.openloadflow.ac.equations.AcVariableType.BUS_V
-                            && Math.abs(baseState[v.getRow()] - bus.getV()) > worstV) {
-                        worstV = Math.abs(baseState[v.getRow()] - bus.getV());
-                        worstVBus = bus.getId();
-                    } else if (v.getType() == com.powsybl.openloadflow.ac.equations.AcVariableType.BUS_PHI) {
-                        worstPhi = Math.max(worstPhi, Math.abs(baseState[v.getRow()] - bus.getAngle()));
-                    }
-                }
-                System.err.printf("BASE_STATE_DUMP %s: state vs network worst |dV|=%.3e (%s) |dPhi|=%.3e%n",
-                        out, worstV, worstVBus, worstPhi);
-                for (var v : es.getVariableSet().getVariables()) {
-                    if (v.getRow() >= 0 && v.getRow() < what.length) {
-                        var et = v.getType().getElementType();
-                        what[v.getRow()] = v.getType() + " "
-                                + (et == com.powsybl.openloadflow.network.ElementType.BUS ? net.getBus(v.getElementNum()).getId()
-                                : et == com.powsybl.openloadflow.network.ElementType.BRANCH ? net.getBranch(v.getElementNum()).getId()
-                                        + " " + java.util.Optional.ofNullable(net.getBranch(v.getElementNum()).getBus1()).map(com.powsybl.openloadflow.network.LfBus::getId).orElse("-")
-                                        + "-" + java.util.Optional.ofNullable(net.getBranch(v.getElementNum()).getBus2()).map(com.powsybl.openloadflow.network.LfBus::getId).orElse("-")
-                                : "#" + v.getElementNum());
-                    }
-                }
-                try (java.io.PrintWriter w = new java.io.PrintWriter(java.nio.file.Files.newBufferedWriter(out))) {
-                    for (int r = 0; r < baseState.length; r++) {
-                        w.println(r + " " + Double.toString(baseState[r]) + " " + what[r]);
-                    }
-                } catch (java.io.IOException e) {
-                    throw new java.io.UncheckedIOException(e);
-                }
-            }
             var target = context.getTargetVector();
 
             List<BatchContingency> batch = new ArrayList<>();
@@ -182,26 +134,6 @@ final class GpuBatchPrecomputer {
             // self-consistent with the plain mapper below — a base-open branch simply maps to no
             // element and falls back to the host scan.
             GpuAcData screenData = GpuAcDataCache.extract(net, es, distributedSlack, reactiveLimits, config.dsParams());
-            // OLF_GPU_DS_BUSMAP=<file>: DS-pack index -> bus id, written at BASE state. The chunk
-            // solver dumps the distributed power per DS index (GPU_DS_TARGET) but has no network
-            // handle to name the bus; OLF's own side (OLF_DS_SPLIT) is keyed by bus id. This map is
-            // what joins the two, which is the only way to compare the SPLIT rather than the total.
-            String dsBusMap = System.getenv("OLF_GPU_DS_BUSMAP");
-            if (dsBusMap != null && screenData != null && screenData.distributedSlack().busPhiRow() != null) {
-                java.util.Map<Integer, String> busByPhiRow = new java.util.HashMap<>();
-                for (var b : net.getBuses()) {
-                    var v = es.getVariableSet().getVariable(b.getNum(), AcVariableType.BUS_PHI);
-                    if (v != null && v.getRow() >= 0) {
-                        busByPhiRow.put(v.getRow(), b.getId());
-                    }
-                }
-                try (java.io.PrintWriter w = new java.io.PrintWriter(new java.io.FileWriter(dsBusMap))) {
-                    int[] rows = screenData.distributedSlack().busPhiRow();
-                    for (int i = 0; i < rows.length; i++) {
-                        w.printf("%d %s%n", i, busByPhiRow.getOrDefault(rows[i], "?row" + rows[i]));
-                    }
-                }
-            }
             GpuAcElementMapper screenMapper = new GpuAcElementMapper(net);
 
             // Every batched scenario's state is held until the analysis ends (the violation screen decides on all of
@@ -269,25 +201,8 @@ final class GpuBatchPrecomputer {
                 }
             }
             Map<Variable<AcVariableType>, Integer> baseVariableRows = new HashMap<>();
-            // OLF_GPU_NAME_ROW=<n>[,<n>]: which element does a DEVICE row belong to? The device
-            // numbers its rows by OLF's own variable row (this map is the identity), so a row index
-            // printed by OLF_GPU_WORST_ROW or OLF_GPU_PROBE_ROWS can be turned back into an element
-            // here and nowhere else — `getEquationAtColumn` resolves against an activation-dependent
-            // index and has named the wrong element three times.
-            java.util.Set<Integer> nameRows = new java.util.HashSet<>();
-            boolean nameAll = "all".equals(System.getenv("OLF_GPU_NAME_ROW"));
-            if (System.getenv("OLF_GPU_NAME_ROW") != null && !nameAll) {
-                for (String t : System.getenv("OLF_GPU_NAME_ROW").split(",")) {
-                    nameRows.add(Integer.parseInt(t.trim()));
-                }
-            }
             for (var v : es.getIndex().getSortedVariablesToFind()) {
                 baseVariableRows.put(v, v.getRow());
-                if (nameAll || nameRows.contains(v.getRow())) {
-                    var el = net.getElement(v.getType().getElementType(), v.getElementNum());
-                    System.err.printf("NAME_ROW %d: var=%s elementNum=%d id=%s%n",
-                            v.getRow(), v.getType(), v.getElementNum(), el == null ? "?" : el.getId());
-                }
             }
             LOGGER.info("GPU batched SA: precomputed {} of {} branch (N-1..N-k) contingencies on the device",
                     states.size(), batch.size());
@@ -350,10 +265,6 @@ final class GpuBatchPrecomputer {
         List<LfBranch> ziNonTree = ziTree.applyAndRevert(pc);
         if (System.getenv("OLF_GPU_ZITREE_TRACE") != null && ziNonTree.size() > 40) {
             System.err.println("ZITREE_REPLAY_WIDE ctg=" + pc.getContingency().getId() + " nonTree=" + ziNonTree.size());
-        }
-        if (System.getenv("OLF_GPU_ZI_TREE_REPLAY") != null) {
-            System.err.println("ZI_TREE_REPLAY ctg=" + pc.getContingency().getId() + " nonTree="
-                    + ziNonTree.stream().map(LfBranch::getId).sorted().toList());
         }
         List<LfBranch> branches = pc.getBranchIdsToOpen().isEmpty() ? List.of()
                 : GpuContingencyMapper.closedBranchOutages(net, pc, ziOutages);

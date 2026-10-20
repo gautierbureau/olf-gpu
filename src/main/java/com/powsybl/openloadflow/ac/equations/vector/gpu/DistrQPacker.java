@@ -92,16 +92,6 @@ public final class DistrQPacker {
             // instead. Read from qrGroupOfPilot, NOT decoded from qRowAlt: table membership and Q
             // re-routing are separate facts that happened to share one encoding.
             int qrGroup = columns.qrGroupOfPilot()[pilot.getNum()];
-            if (System.getenv("OLF_GPU_QR_TRACE") != null) {  // the raw reactive keys THIS extraction packs
-                StringBuilder sb = new StringBuilder("QR_TRACE keys pilot=" + pilot.getId() + " members=");
-                for (int i = 0; i < controllers.size(); i++) {
-                    sb.append(controllers.get(i).getId()).append(':').append(rawKeys[i])
-                            .append("(range=").append(controllers.get(i).getMaxQ() - controllers.get(i).getMinQ()).append(") ");
-                }
-                StackTraceElement[] st = new Throwable().getStackTrace();
-                sb.append(" caller=").append(st.length > 4 ? st[4].getClassName().replaceAll(".*\\.", "") + "." + st[4].getMethodName() + ":" + st[4].getLineNumber() : "?");
-                System.err.println(sb);
-            }
             for (int i = 0; i < controllers.size(); i++) {
                 LfBus m = controllers.get(i);
                 mt.memberIdxByBusNum().put(m.getNum(), mt.key().size());
@@ -214,14 +204,6 @@ public final class DistrQPacker {
             LfBus freeCtl = GpuAcRowIndexing.hasCandidateTable(gvc, es)
                     ? controllers.get(0)
                     : controllers.stream().filter(b -> !b.isDisabled() && gvc.isControllerEnabled(b)).findFirst().orElse(null);
-            if (System.getenv("OLF_GPU_FREECTL_TRACE") != null) {
-                System.err.printf("FREECTL pilot=%s members=%s freeCtl=%s olfHasDistrQ=%s%n",
-                        gvc.getControlledBus().getId(),
-                        controllers.stream().map(LfBus::getId).toList(),
-                        freeCtl == null ? "-" : freeCtl.getId(),
-                        controllers.stream().map(b -> b.getId() + "="
-                                + !es.getEquation(b.getNum(), AcEquationType.DISTR_Q).isEmpty()).toList());
-            }
             for (LfBus gk : controllers) {
                 // EXISTENCE-keyed (the A1 lesson): pack every non-free member whose DISTR_Q equation
                 // EXISTS — a base-PINNED member's row is inactive (mode 4, own Q) but an in-flight
@@ -280,16 +262,6 @@ public final class DistrQPacker {
                             if (dqCol < 0) {
                                 throw new PowsyblException("GPU AC solver: DISTR_Q controller " + gj.getId()
                                         + " has a zero-impedance branch " + brj.getId() + " without a DUMMY_Q variable");
-                            }
-                            // Keyed by dummy-Q column OR, with a leading 'r', by dqROW - when the
-                            // question is "what lands in THIS equation" the column is not known yet.
-                            String dq3 = System.getenv("OLF_GPU_DQ3_TRACE");
-                            if (dq3 != null && (dq3.startsWith("r")
-                                    ? dqRow == Integer.parseInt(dq3.substring(1))
-                                    : dqCol == Integer.parseInt(dq3))) {
-                                System.err.printf("DQ3 gk=%s qpk=%.9f gj=%s side=%d dqRow=%d weight=%.9f"
-                                        + " signed=%.9f%n", gk.getId(), qpk, gj.getId(), side, dqRow,
-                                        weight, weight * (side == 0 ? 1.0 : -1.0));
                             }
                             out.add(new int[] {dqCol, side, dqRow, GpuReactiveTermKind.DUMMY_Q, kIdx, jIdx});  // elem = the DUMMY_Q var column
                             weights.add(weight * (side == 0 ? 1.0 : -1.0));

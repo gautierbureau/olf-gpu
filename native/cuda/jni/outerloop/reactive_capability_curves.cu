@@ -59,7 +59,7 @@ __global__ void rlCurveLimitsBatch(int nrl, int nScenarios, int ncv, int n, int 
                                    const int* cvOvPtr, const int* cvOvEntry, const double* cvOvVal,
                                    const double* genCum, const char* genCumValid, const double* dgAnchor, const double* dgStart, int ngen,
                                    const int* dsPhiRow, const int* dsRowOv, int nds, const int* dgBus,
-                                   double* minQDyn, double* maxQDyn, double* loadQDyn, int cvProbeEntry, int cvProbeSlot) {
+                                   double* minQDyn, double* maxQDyn, double* loadQDyn) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nrl * nScenarios) return;
     int i = tid % nrl;
@@ -134,18 +134,6 @@ __global__ void rlCurveLimitsBatch(int nrl, int nScenarios, int ncv, int n, int 
         }
         double mnAdd = rlCurveEval(pNow * 100.0, pts, npts, 0, cvExtrapolate) / 100.0 - cvIn[g * 5 + 3];
         double mxAdd = rlCurveEval(pNow * 100.0, pts, npts, 1, cvExtrapolate) / 100.0 - cvIn[g * 5 + 4];
-        if ((cvProbeEntry == -2 || (cvProbeEntry >= 0 && i == cvProbeEntry)) && s == cvProbeSlot) {
-            // OLF_GPU_CV_PROBE=<rl entry>: the P this curve is evaluated AT, and where that P came
-            // from. OLF re-reads bus.getMinQ() at the generator's CURRENT targetP; the device
-            // reconstructs it, and the two only agree while the reconstruction does.
-            printf("[CV-PROBE] s=%d entry=%d g=%d slot=%d genCumValid=%d basePpu=%.12f genCum=%.12f"
-                   " share=%.12f baseRowTargetP=%.12f rowTarget=%.12f pStep=%.12f shareScale=%.6f"
-                   " pNow=%.12f mnAdd=%.12e mxAdd=%.12e\n",
-                   s, i, g, slot, (int) (genCumValid != nullptr && genCumValid[s]), cvIn[g * 5],
-                   (genCum != nullptr && slot >= 0) ? genCum[(size_t) s * ngen + slot] : 0.0,
-                   cvIn[g * 5 + 1], cvIn[g * 5 + 2], target[(size_t) s * n + pRow], pStep, shareScale,
-                   pNow, mnAdd, mxAdd);
-        }
         mn += mnAdd;
         mx += mxAdd;
     }

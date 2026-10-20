@@ -95,10 +95,6 @@ final class DistributedSlackPacker {
                 dsSlackPhiRow = pRow[bn];
                 dsSlackTargetP = bus.getTargetP() - anchorOffset(bus, dsParams);   // the slack's ANCHOR target
                 dsSlackFactor = dsParams.busFactor(bus);
-                if (System.getenv("OLF_GPU_DS_GEN_TRACE") != null) {
-                    System.err.println("GPU_DS_SLACK bus=" + bus.getId() + " busFactor=" + dsSlackFactor
-                            + " gens=" + bus.getGenerators().stream().map(g -> g.getId() + ":" + dsParams.factor(g)).toList());
-                }
                 if (dsParams.isRemainingMargin()) {
                     double[] m = dsParams.busMargins(bus);
                     dsSlackMarginUp = m[0];
@@ -125,11 +121,6 @@ final class DistributedSlackPacker {
                 continue;
             }
             if (GpuAcRowIndexing.row(es, bn, AcEquationType.BUS_TARGET_P) < 0) {
-                if (System.getenv("OLF_GPU_DS_GEN_TRACE") != null) {
-                    System.err.println("GPU_DS_SKIP bus=" + bus.getId() + " busFactor=" + dsParams.busFactor(bus)
-                            + " gens=" + bus.getGenerators().stream().map(g -> g.getId() + ":" + dsParams.factor(g)).toList()
-                            + " (no active BUS_TARGET_P row)");
-                }
                 continue;                                               // no active P balance to retarget
             }
             double factor = dsParams.busFactor(bus);
@@ -146,18 +137,7 @@ final class DistributedSlackPacker {
                 headroom = Double.POSITIVE_INFINITY;                    // loads: OLF rescales them unbounded
                 footroom = Double.NEGATIVE_INFINITY;
             }
-            if (factor > 0 && System.getenv("OLF_GPU_DS_PACK_TRACE") != null
-                    && (footroom > 0 || headroom < 0)) {
-                // The base P is OUTSIDE the bus's own active limits. OLF's water-fill still SETS such a
-                // generator to the bound (newTargetP = minTargetP), which MOVES it -- in the opposite
-                // direction to the mismatch when it starts beyond the bound.
-                System.err.printf("DS_PACK_OUTSIDE bus=%s baseTargetP=%.9f headroom=%.9f footroom=%.9f factor=%.9f%n",
-                        bus.getId(), bus.getTargetP(), headroom, footroom, factor);
-            }
             if (factor > 0) {
-                if (System.getenv("OLF_GPU_DS_TARGET_DUMP") != null) {
-                    System.err.println("GPU_DS_BUS idx=" + dsPhiRow.size() + " bus=" + bus.getId());
-                }
                 dsPhiRow.add(pRow[bn]);
                 dsBusNum.add(bn);
                 dsFactorRaw.add(factor);
@@ -250,12 +230,6 @@ final class DistributedSlackPacker {
                                          List<Double> dgMinDelta, List<Double> dgMarginUp, List<Double> dgMarginDown) {
         double gf = dsParams.factor(g);
         double tp = dsParams.anchorTargetP(g);
-        if (System.getenv("OLF_GPU_DS_GEN_TRACE") != null) {
-            System.err.println("GPU_DS_GEN idx=" + dgFactorRaw.size() + " bus=" + g.getBus().getId()
-                    + " gen=" + g.getId() + " factor=" + gf
-                    + " targetP=" + g.getTargetP()
-                    + " maxTargetP=" + g.getMaxTargetP() + " minTargetP=" + g.getMinTargetP());
-        }
         dgBus.add(dsRow);
         dgGenId.add(g.getId());
         dgFactorRaw.add(gf);

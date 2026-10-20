@@ -31,19 +31,6 @@ import com.powsybl.openloadflow.network.VoltageControl;
  */
 public final class GpuAcActivationExtractor {
 
-    /** {@code OLF_GPU_DISTRQ_DUMP=<busIdPrefix>}: print the DISTR_Q row assignment for a group —
-     *  which row each controller's equation lands on, its own BUS_V row, the group's controlled bus
-     *  and which members are enabled. Lines carry the extraction pass number: OLF keys DISTR_Q on
-     *  {@code (bus, type)}, so one bus has at most ONE such equation per pass and two lines for the
-     *  same bus are two passes, not two equations. */
-    private static final String DISTR_Q_DUMP = System.getenv("OLF_GPU_DISTRQ_DUMP");
-
-    /** {@code OLF_GPU_QROW_TRACE=<row|busIdPrefix>[,…]}: see the claim trace below. Read once — the
-     *  row loop runs per extraction over every bus, and the two traces must agree on the pass number. */
-    private static final String QROW_TRACE = System.getenv("OLF_GPU_QROW_TRACE");
-
-    private static final java.util.concurrent.atomic.AtomicInteger PASS = new java.util.concurrent.atomic.AtomicInteger();
-
     private GpuAcActivationExtractor() {
     }
 
@@ -96,11 +83,6 @@ public final class GpuAcActivationExtractor {
         java.util.Arrays.fill(mode, GpuRowMode.EQUATION);
         int[] targetMap = new int[n];
         java.util.Arrays.fill(targetMap, -1);
-        // ONE pass number for both traces, taken before either writes, so a QROW_CLAIM and a
-        // DISTR_Q line from the same extraction carry the same number. Comparing an EARLY pass's
-        // claim against a LATE pass's DISTR_Q state (the mistake this entry made five times, across
-        // two different runs) then shows up as the pass numbers differing rather than as a result.
-        int pass = DISTR_Q_DUMP == null && QROW_TRACE == null ? 0 : PASS.incrementAndGet();
         int nBranches = network.getBranches().size();
         int[] branchRhoCol = GpuAcRowIndexing.branchVarCols(es, nBranches, AcVariableType.BRANCH_RHO1);
         int[] shuntBCol = GpuAcRowIndexing.branchVarCols(es, network.getShunts().size(), AcVariableType.SHUNT_B);
@@ -193,61 +175,6 @@ public final class GpuAcActivationExtractor {
                 // by exempting a merged member from robust mode as OLF's own predicate does, not here.
                 boolean mode4 = GpuAcRowIndexing.isRemoteGenVcControllerElement(bus)
                         && (pilotSelf || !GpuAcRowIndexing.isFreeRemoteGenVcMember(bus)) && !enrolled;
-                // OLF_GPU_QROW_TRACE=<row|busIdPrefix>[,…]: WHO claims a reactive row, and on what grounds.
-                // A relocated member's DISTR_Q is assigned to its parent coupler's DUMMY_Q row, and so is
-                // any bus whose qRow maps there with an ACTIVE BUS_TARGET_Q — two equations, one row, and
-                // the mode-4 own-Q wins, dropping the sharing (tasks #66). The gate below keys on an
-                // ACTIVE BUS_TARGET_Q, and in OLF's base those are INACTIVE for the measured group, so
-                // this prints the bus, the column it read, the target and the predicate to say which bus
-                // and which extraction pass actually claimed the row.
-                for (String tok : QROW_TRACE == null ? new String[0] : QROW_TRACE.split(",")) {
-                    // A row number OR a bus-id prefix. The prefix form is the one to use for a
-                    // busbar-section scope: which switches stay retained follows the contingency
-                    // LIST, so a row number is only valid at the exact scope it was read at, and
-                    // keying on it forces the full-scope run for every measurement.
-                    String t = tok.trim();
-                    boolean hit = t.chars().allMatch(Character::isDigit)
-                            ? Integer.parseInt(t) == qr : bus.getId().startsWith(t);
-                    if (hit) {
-                        // mainVc is what the row logic resolves (the MERGED group); the bus's own control is
-                        // a dependent. Printing both, plus whether the controller is ENABLED, says whether the
-                        // device is reading an inconsistent BUS_TARGET_Q/DISTR_Q pair or a genuinely pinned one.
-                        var ownVc = bus.getGeneratorVoltageControl().orElse(null);
-                        // WHICH of OLF's three disable paths left enabled=false, because they need
-                        // opposite fixes and the pin dumps cannot tell them apart:
-                        //   frozenQ=true  -> freezeGenerationTargetQAndDisableGeneratorVoltageControl,
-                        //                    i.e. a PV->PQ pin (ReactiveLimitsOuterLoop or the tap
-                        //                    manager's disableGeneratorVoltageControlsUnderMax...).
-                        //   monitoringV   -> a MONITORING_VOLTAGE generator (an SVC with a stand-by
-                        //                    automaton): LfNetworkLoaderImpl creates the control
-                        //                    DISABLED at LOAD and MonitoringVoltageOuterLoop enables
-                        //                    it during the solve. Invisible to RL_SWITCH, which is why
-                        //                    the arms' pin SETS matched while `enabled` did not (#66).
-                        //   neither       -> LfContingency/NetworkCache, or a BusState restore.
-                        boolean monitoringV = bus.getGenerators().stream().anyMatch(
-                                g -> g.getGeneratorControlType() == com.powsybl.openloadflow.network.LfGenerator
-                                        .GeneratorControlType.MONITORING_VOLTAGE);
-                        System.err.printf("QROW_CLAIM pass=%d row=%d bus=%s busTargetQcol=%d distrQcol=%d "
-                                + "mainVc=%s mainMembers=%d enabled=%b ownVc=%s ownMembers=%d ownMerge=%s "
-                                + "frozenQ=%b monitoringV=%b qLimit=%s gens=%d candTable=%s "
-                                + "remoteCtl=%b pilotSelf=%b freeMember=%b enrolled=%b -> mode4=%b%n",
-                                pass, qr, bus.getId(), q,
-                                GpuAcRowIndexing.row(es, bus.getNum(), AcEquationType.DISTR_Q),
-                                mainVc == null ? "-" : mainVc.getControlledBus().getId(),
-                                mainVc == null ? 0 : mainVc.getMergedControllerElements().size(),
-                                mainVc != null && mainVc.isControllerEnabled(bus),
-                                ownVc == null ? "-" : ownVc.getControlledBus().getId(),
-                                ownVc == null ? 0 : ownVc.getMergedControllerElements().size(),
-                                ownVc == null ? "-" : ownVc.getMergeStatus().toString(),
-                                bus.isGenerationTargetQFrozen(), monitoringV,
-                                bus.getQLimitType().map(Object::toString).orElse("-"),
-                                bus.getGenerators().size(),
-                                // WHY the group misses the canonical pin-state-independent path (#66)
-                                GpuAcRowIndexing.candidateTableReason(mainVc, es),
-                                GpuAcRowIndexing.isRemoteGenVcControllerElement(bus), pilotSelf,
-                                GpuAcRowIndexing.isFreeRemoteGenVcMember(bus), enrolled, mode4);
-                    }
-                }
                 if (mode4) {
                     mode[qr] = GpuRowMode.BUS_TARGET_Q;
                 }
@@ -261,21 +188,6 @@ public final class GpuAcActivationExtractor {
                 // (its own row already carries the pilot's V identity), the FREE controller's row
                 int distrRow = GpuAcRowIndexing.distrQRow(es, network.getBus(e.getElementNum()),
                         stubBranchOfBus, dummyQCol);
-                if (DISTR_Q_DUMP != null) {
-                    LfBus cb = network.getBus(e.getElementNum());
-                    if (cb.getId().startsWith(DISTR_Q_DUMP)) {
-                        var vc = cb.getGeneratorVoltageControl().orElse(null);
-                        System.err.printf("DISTRQ_ROW pass=%d controller=%s eqCol=%d assignedRow=%d ownVRow=%d "
-                                + "controlledBus=%s enabled=%b qPct=%.9f members=%s%n",
-                                pass, cb.getId(), e.getColumn(), distrRow,
-                                GpuAcRowIndexing.col(es, cb.getNum(), AcVariableType.BUS_V),
-                                vc == null ? "-" : vc.getControlledBus().getId(),
-                                vc != null && vc.isControllerEnabled(cb),
-                                cb.getRemoteControlReactivePercent(),
-                                vc == null ? "-" : vc.getMergedControllerElements().stream()
-                                        .map(b -> b.getId() + (vc.isControllerEnabled(b) ? "(on)" : "(off)")).toList());
-                    }
-                }
                 assign(es, targetMap, distrRow, e.getColumn(), AcEquationType.DISTR_Q, e.getElementNum());
                 continue;
             }

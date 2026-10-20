@@ -23,7 +23,6 @@
 #include "../common/codes/gpu_voltage_control_role.cuh"
 #include "../common/codes/gpu_reactive_limits_entry_flag.cuh"
 #include "../common/codes/gpu_row_mode.cuh"
-#include "../diagnostics/driver_traces.cuh"
 #include "forced_target_q.cuh"
 #include "pilot_voltage.cuh"
 #include "reactive_capability_curves.cuh"
@@ -549,23 +548,8 @@ void rlCheck(BatchSolverContext* ctx, DriverPass& drv, int loopKind) {
                     ctx->nDsRowOv > 0 ? ctx->dDsRowOv.as<int>() : nullptr, ctx->nds,
                     ctx->ngen > 0 ? ctx->dgBus.as<int>() : nullptr,
                     ctx->dRlMinQDyn.as<double>(), ctx->dRlMaxQDyn.as<double>(),
-                    ctx->dRlLoadQDyn.as<double>(), cvProbeEntry, cvProbeSlotByCtg ? ctx->loopTraceSlot : cvProbeSlot);
+                    ctx->dRlLoadQDyn.as<double>());
             launchForcedTargetQLimits(ctx, nS, n);
-            // Host-side readback of the probed entry's dynamic limits (device printf is not reliably
-            // captured by the test runner): the limit the RL pass that follows will pin at.
-            int cvHostSlot = cvProbeSlotByCtg ? ctx->loopTraceSlot : cvProbeSlot;
-            static const std::vector<int> cvHostEntries = cvProbeEntries();
-            if (cvHostSlot >= 0 && cvHostSlot < nS) {
-                for (int pe : cvHostEntries) {
-                    if (pe < 0 || pe >= ctx->nrl) continue;
-                    double lim[2];
-                    size_t off = static_cast<size_t>(cvHostSlot) * ctx->nrl + pe;
-                    CUDA_CHECK(cudaMemcpy(&lim[0], ctx->dRlMinQDyn.as<double>() + off, sizeof(double), cudaMemcpyDeviceToHost));
-                    CUDA_CHECK(cudaMemcpy(&lim[1], ctx->dRlMaxQDyn.as<double>() + off, sizeof(double), cudaMemcpyDeviceToHost));
-                    fprintf(stderr, "[CV-HOST] outer=%d slot=%d entry=%d minQDyn=%.12f maxQDyn=%.12f\n",
-                            outer, cvHostSlot, pe, lim[0], lim[1]);
-                }
-            }
         }
         CUDA_CHECK(cudaMemsetAsync(ctx->dRlPassSwitched.p, 0, static_cast<size_t>(ctx->nrl) * nS, ctx->stream));
         reactiveLimitsBatch<<<grid(ctx->nrl * nS), BLOCK, 0, ctx->stream>>>(
@@ -598,7 +582,6 @@ void rlCheck(BatchSolverContext* ctx, DriverPass& drv, int loopKind) {
                 ctx->nRlNoUnpin > 0 ? ctx->dRlNoUnpin.as<char>() : nullptr, ctx->nRlNoUnpin > 0 ? ctx->dRlUnpinBad.as<char>() : nullptr,
                 ctx->dRlMonitored.p ? ctx->dRlMonitored.as<char>() : nullptr,
                 ctx->nRlCmp > 0 ? ctx->dRlCmpOv.as<int>() : nullptr);
-psgStep(ctx, nS, n, outer, "afterRL");
         if (ctx->nRlPilotSelf > 0) {
             // a pilot that is its own controller pinned while a member of its group is not (or
             // the reverse): the device has no row for OLF's layout of that state - CPU replay
@@ -635,14 +618,12 @@ psgStep(ctx, nS, n, outer, "afterRL");
                 }
             }
         }
-psgStep(ctx, nS, n, outer, "afterMixedGate");
         if (ctx->rlRobust && ctx->nRlRemote > 0) {       // "set V to a safe 1 pu", as its own pass
             rlRobustVResetBatch<<<grid(ctx->nrl * nS), BLOCK, 0, ctx->stream>>>(
                     ctx->nrl, nS, n, ctx->dRlVrow.as<int>(), ctx->dRlRemote.as<char>(),
                     ctx->dRlActive.as<char>(), ctx->dRlPassSwitched.as<char>(), ctx->dX.as<double>(),
                     ctx->rlVLoRobust, ctx->rlVHiRobust);
         }
-psgStep(ctx, nS, n, outer, "afterRobust");
         if (ctx->hasRlElection && ctx->allPvPinnable) {  // the rule can only fire when every PV is pinnable
             rlForcedPvElectBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(ctx->nrl, nS, n,
                     ctx->dRlVrow.as<int>(),
@@ -654,7 +635,6 @@ psgStep(ctx, nS, n, outer, "afterRobust");
                     ctx->dRlSavedMode.as<char>(), ctx->dRlSavedTarget.as<double>(),
                     ctx->dMode.as<int>(), ctx->dTarget.as<double>(), ctx->dRlActive.as<char>(), ctx->dRlSwitched.as<char>());
         }
-psgStep(ctx, nS, n, outer, "afterElect");
         // The pilot's V-identity flip/restore runs BEFORE the DISTR_Q targets: the carrier hand-off picks the
         // carrier with relocChoose, which reads the pilot's own row (candidate 1 of a pilot-self group).
         // Measured with the order reversed (rte6515 busbar base, group VL-5997): the member that just
@@ -677,16 +657,13 @@ psgStep(ctx, nS, n, outer, "afterElect");
                     ctx->dPfFlipped.as<char>(), ctx->dPfSavedVT.as<double>(),
                     ctx->dRlActive.as<char>(), ctx->dRlSwitched.as<char>());
         }
-psgStep(ctx, nS, n, outer, "afterAllPinned");
         if (ctx->hasDqQrGroups && ctx->st->nQr > 0) {    // all-pinned corner: pilot vEq flip/restore
             launchPilotVeqInner(ctx, drv);
         }
-psgStep(ctx, nS, n, outer, "afterPilotVeq");
         if (ctx->nRlRemote > 0 && ctx->nDqMembers > 0) {
             // keep the survivors' DISTR_Q row targets in step with the pin states (plan-B3)
             launchDistrQTargetsInner(ctx, drv);
         }
-psgStep(ctx, nS, n, outer, "afterDistrQ");
     }
 }
 

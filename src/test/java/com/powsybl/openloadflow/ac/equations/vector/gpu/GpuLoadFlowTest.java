@@ -354,8 +354,7 @@ class GpuLoadFlowTest extends com.powsybl.openloadflow.network.AbstractLoadFlowN
     }
 
     /** A zero-impedance chain of generator buses (every bus a controller of the merged group, the pilot
-     *  one of them): the LoadFlow path, so the first fill can be read against OLF's f(x0)
-     *  (OLF_GPU_F0_TRACE + OLF_GPU_VALS_DUMP_ANY) when the two disagree. */
+     *  one of them), through the LoadFlow path. */
     @Test
     void zeroImpedanceControllerChain() {
         long before = com.powsybl.openloadflow.ac.solver.gpu.GpuNewtonRaphson.CPU_FALLBACK_COUNT.get();

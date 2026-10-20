@@ -10,9 +10,6 @@
 
 namespace olfgpu {
 
-__global__ void worstRowBatch(int n, const double* F, const int* mode, const double* target,
-                              const double* x, int s);
-
 __global__ void residualNormsBatch(int n, const double* F, const char* active, double* out,
                                    const double* thrIdent, const double* thrPower, const int* mode,
                                    const double* thrAlt, const int* thrSel);

@@ -85,16 +85,6 @@ public final class RemoteMemberQPacker {
         if (reactiveLimits) {
             for (LfBus bus : network.getBuses()) {
                 boolean member = GpuAcRowIndexing.isRemoteGenVcControllerElement(bus);   // incl. a pilot that is a controller
-                // OLF_GPU_RMQ_WHY=1: one line per REMOTE CONTROLLER bus saying whether it gets a diagnostic q
-                // and, when it does not, which gate dropped it. A member with no q source is invisible to the
-                // reactive-limit check — it can never pin, whatever its real q — which is how rte6515's base
-                // pinned 16 where OLF pinned 19 and then diverged.
-                if (member && System.getenv("OLF_GPU_RMQ_WHY") != null) {
-                    System.err.printf("RMQ_WHY bus=%s vCol=%d minQ=%.6f maxQ=%.6f qRange=%b skipped=%s%n",
-                            bus.getId(), vCol[bus.getNum()], bus.getMinQ(), bus.getMaxQ(),
-                            bus.getMinQ() < bus.getMaxQ(),
-                            vCol[bus.getNum()] < 0 ? "no-vCol" : !(bus.getMinQ() < bus.getMaxQ()) ? "empty-q-range" : "-");
-                }
                 if (!member || vCol[bus.getNum()] < 0 || !(bus.getMinQ() < bus.getMaxQ())) {
                     continue;                                // mirror the RL pack's remote-entry condition
                 }

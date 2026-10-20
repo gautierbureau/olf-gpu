@@ -116,11 +116,6 @@ final class InjectionOutagePlanner {
             // outage shape, and the census is how we pick what to fix — a tag that lies about
             // the reason sends the next person at the wrong gate.)
             GpuBatchQualification.refuse(c, "PLAN:INJECTION_OUTAGE_SHAPE");
-            if (System.getenv("OLF_GPU_GENOUT_REJECT") != null) {
-                // The exit named itself and its bus a moment ago; name the CONTINGENCY too, so
-                // the reason, the bus and the id that reproduces it are on adjacent lines.
-                System.err.println("GENOUT_REJECT   ctg=" + c.contingencyId());
-            }
             return;
         }
         List<LfBus> islandLostVcControllers = new ArrayList<>();   // filled by the island-injection path
@@ -173,22 +168,6 @@ final class InjectionOutagePlanner {
             pb.dqOvWByIndex[i] = ov[1];
             pb.dqKeyOvMemberByIndex[i] = java.util.Arrays.stream(ov[2]).mapToInt(d -> (int) d).toArray();
             pb.dqKeyOvByIndex[i] = ov[3];
-            String dqOvTrace = System.getenv("OLF_GPU_DQOV_TRACE");   // <contingency id>: every reweighted entry
-            if (dqOvTrace != null && dqOvTrace.equals(c.contingencyId())) {
-                int[] mBus = gpuData.distrQMembers().busNum();
-                for (int k = 0; k < ov[0].length; k++) {
-                    int cc = (int) ov[0][k];
-                    int kM = gpuData.distrQ().rowMember() != null ? gpuData.distrQ().rowMember()[cc] : -1;
-                    int jM = gpuData.distrQ().injectionMember() != null ? gpuData.distrQ().injectionMember()[cc] : -1;
-                    System.err.printf("DQOV_TRACE ctg=%s c=%d row=%d kind=%d elem=%d oldW=%.6f newW=%.6f kMember=%s jMember=%s%n",
-                            c.contingencyId(), cc, gpuData.distrQ().row()[cc], gpuData.distrQ().kind()[cc], gpuData.distrQ().element()[cc],
-                            gpuData.distrQ().weight()[cc], ov[1][k],
-                            kM >= 0 && mBus != null ? goneForKeys.get(0).getBus().getNetwork().getBus(mBus[kM]).getId() : "?",
-                            jM >= 0 && mBus != null ? goneForKeys.get(0).getBus().getNetwork().getBus(mBus[jM]).getId() : "?");
-                }
-                System.err.println("DQOV_TRACE ctg=" + c.contingencyId() + " total=" + ov[0].length
-                        + " lostGens=" + goneForKeys.stream().map(g -> g.getId()).toList());
-            }
         }
         if (pb.relocatedSlackRow[i] >= 0 && gos != null) {
             int reference = pb.relocatedSlackRow[i];
@@ -199,7 +178,6 @@ final class InjectionOutagePlanner {
         }
         pb.genOutagesByIndex[i] = gos;
         pb.activePowerLossByIndex[i] = ScheduledLoss.scheduledActivePowerLoss(c, q.islandedBuses());
-        ScheduledLoss.traceScheduledLoss(c, q.islandedBuses(), pb.activePowerLossByIndex[i]);
         pb.batchedIndices.add(i);
     }
 

@@ -45,7 +45,6 @@ void newtonSolve(BatchSolverContext* ctx, DriverPass& drv) {
     const int& lsMode = drv.lsMode;
     const double& convEpsPerEq = drv.convEpsPerEq;
     const bool& deviceFixedIter = drv.deviceFixedIter;
-    const bool& iterLog = drv.iterLog;
     const bool& olTime = drv.olTime;
     int& olPassSolved = drv.olPassSolved;
     int& nActive = drv.nActive;
@@ -53,7 +52,6 @@ void newtonSolve(BatchSolverContext* ctx, DriverPass& drv) {
     std::vector<char>& live = drv.live;
     std::vector<char>& wasActive = drv.wasActive;
     std::vector<double>& hF = drv.hF;
-    std::vector<std::string>& iterLogLines = drv.iterLogLines;
     BatchResult& res = drv.res;
 
     // LINE_SEARCH per-scenario backtracking state (lastNorm2 / haveLast, per pass — a phase re-entry retargets the system, voiding the step relation)
@@ -183,47 +181,10 @@ void newtonSolve(BatchSolverContext* ctx, DriverPass& drv) {
                 // PerEquationTypeStoppingCriteria — stop when EVERY row clears its type threshold.
                 bool converged = ctx->perRowCriteria ? (finite && maxRatio < 1.0)
                         : convEpsPerEq > 0.0 ? (std::sqrt(ssq) < thr2Of(s)) : (norm < tol);
-                if (iterLog) {
-                    char line[192];
-                    std::snprintf(line, sizeof line, "ITER_LOG outer=%d s=%d it=%d norm2=%.17e thr2=%.17e conv=%d",
-                                  outer, s, it, std::sqrt(ssq), thr2Of(s), converged ? 1 : 0);
-                    iterLogLines.emplace_back(line);
-                }
-                // OLF_GPU_CONV_TRACE=<slot>|all: the stopping DECISION itself - the 2-norm, the
-                // threshold it is held against and the active row count behind that threshold. Two
-                // arms that agree on every residual and still stop one Newton step apart differ
-                // here and nowhere else, and the exit norms alone cannot show it.
-                static const char* convTraceEnv = std::getenv("OLF_GPU_CONV_TRACE");
-                static const int convTraceSlot = convTraceEnv == nullptr ? -1
-                        : (std::string(convTraceEnv) == "all" ? -2 : std::atoi(convTraceEnv));
-                if (convTraceSlot == -2 || convTraceSlot == s) {
-                    std::fprintf(stderr, "CONV_TRACE s=%d it=%d norm2=%.17e thr2=%.17e nActive=%d inf=%.17e perRow=%d maxRatio=%.6e converged=%d\n",
-                                 s, it, std::sqrt(ssq), thr2Of(s), ctx->hNActive.empty() ? n : ctx->hNActive[s], norm,
-                                 ctx->perRowCriteria ? 1 : 0, maxRatio, converged ? 1 : 0);
-                    // the eight worst rows, by index: WHERE the residual sits, so a step that lands
-                    // two orders of magnitude from the other arm's can be traced to its rows
-                    std::vector<double> hFs(n);
-                    CUDA_CHECK(cudaMemcpy(hFs.data(), ctx->dF.as<double>() + (size_t) s * n, (size_t) n * sizeof(double), cudaMemcpyDeviceToHost));
-                    std::vector<int> ord(n);
-                    for (int i = 0; i < n; i++) ord[i] = i;
-                    std::partial_sort(ord.begin(), ord.begin() + std::min(n, 8), ord.end(),
-                                      [&](int a, int b) { return std::fabs(hFs[a]) > std::fabs(hFs[b]); });
-                    std::fprintf(stderr, "CONV_TOP s=%d it=%d :", s, it);
-                    for (int k = 0; k < std::min(n, 8); k++) {
-                        std::fprintf(stderr, " [%d]=%.9e", ord[k], hFs[ord[k]]);
-                    }
-                    std::fprintf(stderr, "\n");
-                }
                 static const char* sdEnv = std::getenv("OLF_GPU_STATE_DUMP");
                 if (sdEnv != nullptr && s == 0 && it <= std::atoi(sdEnv) && n <= 64) {
                     stateDumpBatch<<<1, 1, 0, ctx->stream>>>(n, ctx->dF.as<double>(), ctx->dMode.as<int>(),
                             ctx->dTarget.as<double>(), ctx->dX.as<double>(), s, it);
-                    CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
-                }
-                static const char* wrEnv = std::getenv("OLF_GPU_WORST_ROW");
-                if (wrEnv != nullptr && s == 0 && it <= std::atoi(wrEnv)) {
-                    worstRowBatch<<<1, 1, 0, ctx->stream>>>(n, ctx->dF.as<double>(), ctx->dMode.as<int>(),
-                            ctx->dTarget.as<double>(), ctx->dX.as<double>(), s);
                     CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
                 }
                 if (std::getenv("OLF_GPU_BATCH_TRACE") != nullptr) {
@@ -377,7 +338,6 @@ void newtonSolve(BatchSolverContext* ctx, DriverPass& drv) {
         if (!compactSolve) {
             gWidthIterSum += nS;                             // full-width factorization this iteration
         }
-        int iterLogWidth = nS;                               // OLF_GPU_ITER_LOG: the width this iteration factorized
         if (compactSolve) {
             if (ctx->compactCap == 0) {                       // lazy first-engage setup
                 ctx->compactCap = std::max(1, compactLimit);
@@ -420,7 +380,6 @@ void newtonSolve(BatchSolverContext* ctx, DriverPass& drv) {
                 cmap.push_back(cmap[0]);
             }
             gWidthIterSum += w;                              // compacted width actually factorized
-            iterLogWidth = -w;
             gCompactIters++;
             CUDA_CHECK(cudaMemcpyAsync(ctx->dMapC.p, cmap.data(), w * sizeof(int), cudaMemcpyHostToDevice, ctx->stream));
             gatherScenarios<<<grid(nnz * w), BLOCK, 0, ctx->stream>>>(nnz, w, ctx->dMapC.as<int>(), ctx->dVals.as<double>(), ctx->dValsC.as<double>());
@@ -467,111 +426,6 @@ void newtonSolve(BatchSolverContext* ctx, DriverPass& drv) {
                     AnalysisTimer at_(__LINE__, 'S');
                     CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_SOLVE, ctx->ds.config, ctx->ds.data, ctx->matUb, ctx->matUbDelta, ctx->matUbR));
                 });
-            }
-        }
-        // OLF_GPU_DX_DUMP=<path>: the FIRST solve's first Newton step, written out whole — the
-        // assembled Jacobian (CSR triplets), the mismatch F it was built at, and the step dx it
-        // produced. The CPU arm writes the same three under OLF_NR_DX_DUMP, and the two are
-        // comparable WITHOUT a row map: the device's COLUMN index is OLF's own variable row
-        // (GpuBatchPrecomputer stores v.getRow() verbatim), so dx compares term by term, and a
-        // per-variable-column fingerprint of |J| localises any Jacobian difference to a variable.
-        // Only F needs the row map, and its sorted multiset is permutation-invariant anyway.
-        {
-            static const char* dxPath = std::getenv("OLF_GPU_DX_DUMP");   // read once, not per iteration
-            static bool dumped = false;
-            // With OLF_GPU_LOOP_TRACE_CTG set, the dump is that contingency's slot in its own chunk
-            // (the host sets loopTraceSlot to -1 for the chunks that do not hold it); slot 0 of the
-            // first solve otherwise, as before.
-            const int dumpSlot = ctx->loopTraceSlot >= 0 ? ctx->loopTraceSlot : (std::getenv("OLF_GPU_LOOP_TRACE_CTG") != nullptr ? -1 : 0);
-            // OLF_GPU_DX_DUMP_OUTER=<k>: the first step of outer pass k instead of the first solve's
-            static const int dxOuter = std::getenv("OLF_GPU_DX_DUMP_OUTER") != nullptr ? std::atoi(std::getenv("OLF_GPU_DX_DUMP_OUTER")) : -1;
-            if (dxPath != nullptr && !dumped && it == 0 && dumpSlot >= 0 && (dxOuter < 0 || outer == dxOuter)) {
-                dumped = true;
-                dumpSlotSystem(ctx, n, nnz, dumpSlot, dxPath);
-            }
-        }
-        // OLF_GPU_ROW_PROBE=<row>: that row in EVERY scenario at EVERY iteration - its residual,
-        // its own state, and its non-zero Jacobian entries by column. The DX dump answers "what is
-        // the shared base structure" and the state dump only fits a toy system; neither says what
-        // one row of a 13000-row SCENARIO looks like at convergence, which is the question when a
-        // bus's voltage has not moved by a single bit from the base while the CPU's has.
-        {
-            static const char* rowProbeEnv = std::getenv("OLF_GPU_ROW_PROBE");
-            static int rowProbe = rowProbeEnv != nullptr ? std::atoi(rowProbeEnv) : -1;
-            // With OLF_GPU_LOOP_TRACE_CTG set, only the traced contingency's slot in the chunk that holds it: every
-            // chunk has a slot of that number, so printing them all mixed other contingencies' rows into the trace
-            // (rte6515 GEN-676: slot 275 of every chunk read as GEN-676's row, base weights and all).
-            const bool probeCtg = std::getenv("OLF_GPU_LOOP_TRACE_CTG") != nullptr;
-            if (rowProbe >= 0 && rowProbe < n && (!probeCtg || ctx->loopTraceSlot >= 0)) {
-                CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
-                std::vector<int> hrp(n + 1);
-                CUDA_CHECK(cudaMemcpy(hrp.data(), ctx->st->dRowPtr.p, (size_t) (n + 1) * sizeof(int), cudaMemcpyDeviceToHost));
-                int k0 = hrp[rowProbe];
-                int k1 = hrp[rowProbe + 1];
-                std::vector<int> hci(k1 - k0);
-                CUDA_CHECK(cudaMemcpy(hci.data(), ctx->st->dColIdx.as<int>() + k0, (size_t) (k1 - k0) * sizeof(int), cudaMemcpyDeviceToHost));
-                std::vector<int> hmode(nS);
-                for (int s2 = probeCtg ? ctx->loopTraceSlot : 0; s2 < (probeCtg ? ctx->loopTraceSlot + 1 : nS); s2++) {
-                    double fv = 0;
-                    double xv = 0;
-                    int mv = 0;
-                    CUDA_CHECK(cudaMemcpy(&fv, ctx->dF.as<double>() + (size_t) s2 * n + rowProbe, sizeof(double), cudaMemcpyDeviceToHost));
-                    CUDA_CHECK(cudaMemcpy(&xv, ctx->dX.as<double>() + (size_t) s2 * n + rowProbe, sizeof(double), cudaMemcpyDeviceToHost));
-                    CUDA_CHECK(cudaMemcpy(&mv, ctx->dMode.as<int>() + (size_t) s2 * n + rowProbe, sizeof(int), cudaMemcpyDeviceToHost));
-                    double tv = 0;
-                    CUDA_CHECK(cudaMemcpy(&tv, ctx->dTarget.as<double>() + (size_t) s2 * n + rowProbe, sizeof(double), cudaMemcpyDeviceToHost));
-                    std::vector<double> hv(k1 - k0);
-                    CUDA_CHECK(cudaMemcpy(hv.data(), ctx->dVals.as<double>() + (size_t) s2 * nnz + k0, (size_t) (k1 - k0) * sizeof(double), cudaMemcpyDeviceToHost));
-                    std::fprintf(stderr, "ROW_PROBE it=%d s=%d row=%d mode=%d F=%.12e x=%.12e target=%.12e nnz=%d :", it, s2, rowProbe, mv, fv, xv, tv, k1 - k0);
-                    for (int k = 0; k < k1 - k0; k++) {
-                        if (hv[k] != 0.0) {
-                            std::fprintf(stderr, " [%d]=%.6e", hci[k], hv[k]);
-                        }
-                    }
-                    std::fprintf(stderr, "\n");
-                }
-            }
-        }
-        static const bool linResidOn = std::getenv("OLF_GPU_LIN_RESID") != nullptr;
-        if (linResidOn) {
-            DeviceBuf rp;
-            DeviceBuf rm;
-            rp.alloc((size_t) n * nS * sizeof(double));
-            rm.alloc((size_t) n * nS * sizeof(double));
-            linResidRowBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, nnz, ctx->st->dRowPtr.as<int>(),
-                    ctx->st->dColIdx.as<int>(), ctx->dVals.as<double>(), ctx->dDx.as<double>(),
-                    ctx->dB.as<double>(), rp.as<double>(), rm.as<double>());   // B = the (repaired) RHS
-            CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
-            std::vector<double> hrp((size_t) n * nS);
-            std::vector<double> hrm((size_t) n * nS);
-            std::vector<double> hf((size_t) n * nS);
-            std::vector<double> hdx((size_t) n * nS);
-            CUDA_CHECK(cudaMemcpy(hrp.data(), rp.p, (size_t) n * nS * sizeof(double), cudaMemcpyDeviceToHost));
-            CUDA_CHECK(cudaMemcpy(hrm.data(), rm.p, (size_t) n * nS * sizeof(double), cudaMemcpyDeviceToHost));
-            CUDA_CHECK(cudaMemcpy(hf.data(), ctx->dF.p, (size_t) n * nS * sizeof(double), cudaMemcpyDeviceToHost));
-            CUDA_CHECK(cudaMemcpy(hdx.data(), ctx->dDx.p, (size_t) n * nS * sizeof(double), cudaMemcpyDeviceToHost));
-            for (int s = 0; s < nS; s++) {
-                if (!active[s]) continue;
-                double mp = 0;
-                double mm = 0;
-                double mf = 0;
-                double mdx = 0;
-                double ssq = 0;                              // ||F||2 too: OLF's default stopping test is on the 2-norm
-                int argp = -1;
-                int argm = -1;
-                for (int i = 0; i < n; i++) {
-                    size_t t = (size_t) s * n + i;
-                    if (std::fabs(hrp[t]) > mp) { mp = std::fabs(hrp[t]); argp = i; }
-                    if (std::fabs(hrm[t]) > mm) { mm = std::fabs(hrm[t]); argm = i; }
-                    mf = std::max(mf, std::fabs(hf[t]));
-                    ssq += hf[t] * hf[t];
-                    mdx = std::max(mdx, std::fabs(hdx[t]));
-                }
-                double best = std::min(mp, mm);
-                int argw = mp < mm ? argp : argm;
-                std::fprintf(stderr, "LIN_RESID it=%d slot=%d n=%d ||J.dx-F||inf=%.6e ||F||inf=%.6e ||F||2=%.17e "
-                             "||dx||inf=%.6e ratio=%.3e worstRow=%d\n",
-                             it, s, n, best, mf, std::sqrt(ssq), mdx, mf > 0 ? best / mf : 0.0, argw);
             }
         }
         // LINEAR-SOLVE GUARD, first iteration of the first pass of every batched solve: a
@@ -635,83 +489,11 @@ void newtonSolve(BatchSolverContext* ctx, DriverPass& drv) {
                 }
             }
         }
-        // OLF_GPU_ITER_LOG: every step's linear solve scored like the pass-0 guard above, on every pass
-        std::vector<double> iterLogLin;
-        if (iterLog && !deviceFixedIter) {
-            if (!ctx->dLinRp.p) {
-                ctx->dLinRp.alloc((size_t) n * nS * sizeof(double));
-                ctx->dLinRm.alloc((size_t) n * nS * sizeof(double));
-                ctx->dLinSc.alloc((size_t) 3 * nS * sizeof(double));
-            }
-            linResidRowBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, nnz, ctx->st->dRowPtr.as<int>(),
-                    ctx->st->dColIdx.as<int>(), ctx->dVals.as<double>(), ctx->dDx.as<double>(),
-                    ctx->dB.as<double>(), ctx->dLinRp.as<double>(), ctx->dLinRm.as<double>());
-            linResidScoreBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(n, nS, ctx->dLinRp.as<double>(), ctx->dLinRm.as<double>(),
-                    ctx->dF.as<double>(), ctx->dLinSc.as<double>());
-            iterLogLin.resize((size_t) 3 * nS);
-            CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
-            CUDA_CHECK(cudaMemcpy(iterLogLin.data(), ctx->dLinSc.p, (size_t) 3 * nS * sizeof(double), cudaMemcpyDeviceToHost));
-        }
         if (ctx->clampStep) {
             maxVoltageChangeFactorBatch<<<nS, BLOCK, 0, ctx->stream>>>(n, ctx->dDx.as<double>(), ctx->dVarType.as<int>(), ctx->dActive.as<char>(), ctx->maxDv, ctx->maxDphi, ctx->dStepFactor.as<double>());
-            traceStepFactor(ctx, nS, it, active);
             axpy1BatchScaled<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, n * nS, ctx->dDx.as<double>(), ctx->dStepFactor.as<double>(), ctx->dX.as<double>());
         } else {
             axpy1Batch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n * nS, ctx->dDx.as<double>(), ctx->dX.as<double>());
-        }
-        if (!iterLogLin.empty()) {
-            std::vector<double> fac(nS, 1.0);
-            if (ctx->clampStep) {
-                CUDA_CHECK(cudaMemcpy(fac.data(), ctx->dStepFactor.p, nS * sizeof(double), cudaMemcpyDeviceToHost));
-            }
-            for (int s = 0; s < nS; s++) {
-                if (!active[s]) continue;
-                char line[256];
-                std::snprintf(line, sizeof line, "LIN_LOG outer=%d s=%d it=%d ratio=%.6e resid=%.6e fmax=%.6e factor=%.9f width=%d",
-                              outer, s, it, iterLogLin[3 * s + 2], iterLogLin[3 * s], iterLogLin[3 * s + 1], fac[s], iterLogWidth);
-                iterLogLines.emplace_back(line);
-                if (!(iterLogLin[3 * s + 2] <= 1e-4)) {
-                    // WHERE a poor solve leaves its residual: the worst row under the sign convention the ratio
-                    // used, its row mode, and whether it is a zero-diagonal hazard row (with this lane's donor)
-                    std::vector<double> rp(n), rm(n);
-                    std::vector<int> md(n);
-                    CUDA_CHECK(cudaMemcpy(rp.data(), ctx->dLinRp.as<double>() + (size_t) s * n, n * sizeof(double), cudaMemcpyDeviceToHost));
-                    CUDA_CHECK(cudaMemcpy(rm.data(), ctx->dLinRm.as<double>() + (size_t) s * n, n * sizeof(double), cudaMemcpyDeviceToHost));
-                    CUDA_CHECK(cudaMemcpy(md.data(), ctx->dMode.as<int>() + (size_t) s * n, n * sizeof(int), cudaMemcpyDeviceToHost));
-                    double mp = 0.0;
-                    double mm = 0.0;
-                    for (int i = 0; i < n; i++) {
-                        mp = std::max(mp, std::fabs(rp[i]));
-                        mm = std::max(mm, std::fabs(rm[i]));
-                    }
-                    const std::vector<double>& r = mp <= mm ? rp : rm;   // the sign convention the score took
-                    std::vector<int> ord(n);
-                    for (int i = 0; i < n; i++) ord[i] = i;
-                    std::partial_sort(ord.begin(), ord.begin() + std::min(n, 4), ord.end(),
-                                      [&](int a, int b) { return std::fabs(r[a]) > std::fabs(r[b]); });
-                    const auto& hz = ctx->st->hHazRow;
-                    std::vector<int> choice;
-                    if (!hz.empty() && ctx->dHazChoice.p && ctx->hazCap >= nS) {
-                        choice.resize(hz.size());
-                        CUDA_CHECK(cudaMemcpy(choice.data(), ctx->dHazChoice.as<int>() + (size_t) s * hz.size(),
-                                              hz.size() * sizeof(int), cudaMemcpyDeviceToHost));
-                    }
-                    std::string worst = "LIN_WORST outer=" + std::to_string(outer) + " s=" + std::to_string(s)
-                            + " it=" + std::to_string(it);
-                    for (int k = 0; k < std::min(n, 4); k++) {
-                        int row = ord[k];
-                        int hi = -1;
-                        for (size_t h = 0; h < hz.size(); h++) {
-                            if (hz[h] == row) hi = static_cast<int>(h);
-                        }
-                        char b[128];
-                        std::snprintf(b, sizeof b, " [row=%d r=%.3e mode=%d haz=%d donor=%d]", row, r[row], md[row], hi,
-                                      hi >= 0 && !choice.empty() ? choice[hi] : -9);
-                        worst += b;
-                    }
-                    iterLogLines.emplace_back(worst);
-                }
-            }
         }
         if (!deviceFixedIter) CUDA_CHECK(cudaStreamSynchronize(ctx->stream));   // fixed-iter: no per-iter host sync (final readback syncs)
         } else {

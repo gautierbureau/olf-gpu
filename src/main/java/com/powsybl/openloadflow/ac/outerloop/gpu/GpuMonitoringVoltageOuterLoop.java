@@ -55,12 +55,6 @@ public final class GpuMonitoringVoltageOuterLoop {
     public static final java.util.concurrent.atomic.LongAdder SKIPPED_CONFIRM_SOLVES = new java.util.concurrent.atomic.LongAdder();
     public static final java.util.concurrent.atomic.LongAdder ACTIVATIONS = new java.util.concurrent.atomic.LongAdder();
 
-    /** {@code OLF_GPU_MON_TRACE}: print each monitored bus's per-unit voltage against its automaton
-     *  band. Thresholds are per-unit inside OLF, so a kV band picked by eye is easy to get wrong —
-     *  and an SVC whose BASE voltage is out of band is switched to plain voltage control for good by
-     *  OLF's monitoring loop, leaving nothing for the batch to monitor. */
-    private static final boolean MON_TRACE = System.getenv("OLF_GPU_MON_TRACE") != null;
-
     private GpuMonitoringVoltageOuterLoop() {
     }
 

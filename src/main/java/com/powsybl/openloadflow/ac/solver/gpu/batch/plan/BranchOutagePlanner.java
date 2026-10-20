@@ -242,7 +242,6 @@ final class BranchOutagePlanner {
         pb.frozenRowsByIndex[i] = fi.rows();
         pb.frozenTargetsByIndex[i] = fi.targets();
         pb.activePowerLossByIndex[i] = ScheduledLoss.scheduledActivePowerLoss(c, q.islandedBuses());
-        ScheduledLoss.traceScheduledLoss(c, q.islandedBuses(), pb.activePowerLossByIndex[i]);
         if (pb.frozenRowsByIndex[i].length > 0) {
             pb.islandingCount++;
         }

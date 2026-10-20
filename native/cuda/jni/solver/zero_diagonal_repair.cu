@@ -80,7 +80,7 @@ __global__ void hazSnapshotVals(int nHaz, int nS, int nnz, int hazTot, const int
 __global__ void hazRepairVals(int nHaz, int nS, int nnz, int hazTot, const int* hazRow, const int* hazOff,
                               const int* hazDonorPtr, const int* hazDonor, const int* hazDonorHaz,
                               const char* hazSign, const int* rowPtr, const int* colIdx, const int* diagPos,
-                              const double* snap, double* vals, int* choice, int traceNoDonor) {
+                              const double* snap, double* vals, int* choice) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nHaz * nS) return;
     int i = tid % nHaz;
@@ -106,10 +106,6 @@ __global__ void hazRepairVals(int nHaz, int nS, int nnz, int hazTot, const int* 
         }
         choice[(size_t) s * nHaz + i] = j;
         return;
-    }
-    if (traceNoDonor) {                                      // a zero diagonal nobody could repair: the
-        printf("HAZ_NODONOR s=%d row=%d donors=%d\n", s, r,   // pivot cuDSS will perturb (device printf)
-               hazDonorPtr[i + 1] - hazDonorPtr[i]);
     }
 }
 
@@ -150,8 +146,7 @@ void hazRepairValues(BatchSolverContext* ctx, int nS, double* vals) {
     hazRepairVals<<<((st->nHaz * nS + BLOCK - 1) / BLOCK), BLOCK, 0, ctx->stream>>>(st->nHaz, nS, nnz, st->hazTot,
             st->dHazRow.template as<int>(), st->dHazOff.template as<int>(), st->dHazDonorPtr.template as<int>(), st->dHazDonor.template as<int>(),
             st->dHazDonorHaz.template as<int>(), st->dHazSign.template as<char>(), st->dRowPtr.template as<int>(), st->dColIdx.template as<int>(),
-            st->dDiagPos.template as<int>(), ctx->dHazSnap.template as<double>(), vals, ctx->dHazChoice.template as<int>(),
-            std::getenv("OLF_GPU_HAZ_TRACE") != nullptr ? 1 : 0);
+            st->dDiagPos.template as<int>(), ctx->dHazSnap.template as<double>(), vals, ctx->dHazChoice.template as<int>());
 }
 
 /** The same combination on a right-hand side (nS scenarios from {@code B}, choices from the last

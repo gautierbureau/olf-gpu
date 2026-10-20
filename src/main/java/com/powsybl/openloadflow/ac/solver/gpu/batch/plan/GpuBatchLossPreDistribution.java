@@ -201,18 +201,6 @@ public final class GpuBatchLossPreDistribution {
                         ovCum = newCum;
                     }
                 }
-                if (System.getenv("OLF_GPU_SEED_TRACE") != null) {
-                    // Pairs with OLF's OLF_DS_TRACE (DS_RUN / DS_SAT): same rounds, same saturations,
-                    // same clamp values, or the seed is not the function it is meant to replay.
-                    System.err.printf("SEED iter=%d fsumActive=%.12f rem=%.12f done=%.12f%n",
-                            iter, fsumActive, rem, done);
-                    for (int g = 0; g < ngen; g++) {
-                        if (removed[g] && genCum[g] != 0) {
-                            System.err.printf("  SEED_SAT gen=%d bus=%d cum=%.12f maxD=%.12f%n",
-                                    g, gpuData.distributedSlack().generatorBus()[g], genCum[g], gpuData.distributedSlack().generatorMaxDelta()[g]);
-                        }
-                    }
-                }
                 rem -= done;
             }
             if (genMovesOut != null) {

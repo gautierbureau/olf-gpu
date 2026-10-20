@@ -33,17 +33,6 @@ final class GpuStateInjector {
     private GpuStateInjector() {
     }
 
-    /** OLF_GPU_INJECT_DIAG=1: tally which variable kinds the contingencies add or remove (printed at JVM exit). */
-    private static final boolean INJECT_DIAG = System.getenv("OLF_GPU_INJECT_DIAG") != null;
-    private static final java.util.Map<String, java.util.concurrent.atomic.LongAdder> DIAG =
-            new java.util.concurrent.ConcurrentHashMap<>();
-
-    private static void printDiag() {
-        DIAG.entrySet().stream()
-                .sorted((a, b) -> Long.compare(b.getValue().sum(), a.getValue().sum())).limit(30)
-                .forEach(e -> System.err.println("INJECT_DIAG " + e.getValue().sum() + " " + e.getKey()));
-    }
-
     /**
      * The row remap, kept across contingencies instead of rebuilt for each one.
      *
@@ -163,42 +152,6 @@ final class GpuStateInjector {
                 identity = true;
                 for (int row = 0; row < rows.length && identity; row++) {
                     identity = rows[row] == row;
-                }
-            }
-            if (INJECT_DIAG) {                               // the merge against the keyed walk it replaces
-                int[] kr = new int[vars.size()];
-                for (Variable<AcVariableType> v : vars) {
-                    int key = v.getElementNum() * types + v.getType().ordinal();
-                    kr[v.getRow()] = key < keyed.length ? keyed[key] : -1;
-                }
-                boolean kid = true;
-                for (int row = 0; row < kr.length && kid; row++) {
-                    kid = kr[row] == row;
-                }
-                DIAG.computeIfAbsent(java.util.Arrays.equals(kr, rows) && kid == identity ? "merge == keyed" : "MERGE DIFFERS",
-                        x -> new java.util.concurrent.atomic.LongAdder()).increment();
-            }
-            if (INJECT_DIAG) {                               // which variable kinds the contingency added or removed
-                java.util.Set<Integer> present = new java.util.HashSet<>();
-                for (Variable<AcVariableType> v : vars) {
-                    present.add(v.getElementNum() * types + v.getType().ordinal());
-                    if (v.getElementNum() * types + v.getType().ordinal() >= keyed.length
-                            || keyed[v.getElementNum() * types + v.getType().ordinal()] < 0) {
-                        DIAG.computeIfAbsent("added " + v.getType(), k -> new java.util.concurrent.atomic.LongAdder()).increment();
-                    }
-                }
-                java.util.Map<String, Integer> missing = new java.util.TreeMap<>();
-                for (Variable<AcVariableType> v : baseVariableRows.keySet()) {
-                    if (!present.contains(v.getElementNum() * types + v.getType().ordinal())) {
-                        missing.merge(v.getType().toString(), 1, Integer::sum);
-                    }
-                }
-                missing.forEach((k, c) -> DIAG.computeIfAbsent("removed " + k, x -> new java.util.concurrent.atomic.LongAdder()).add(c));
-                DIAG.computeIfAbsent("rebuilds", x -> new java.util.concurrent.atomic.LongAdder()).increment();
-                DIAG.computeIfAbsent(identity ? "rebuilds: identity" : "rebuilds: shifted", x -> new java.util.concurrent.atomic.LongAdder()).increment();
-                DIAG.computeIfAbsent("rebuild shape " + missing, x -> new java.util.concurrent.atomic.LongAdder()).increment();
-                if (DIAG.get("rebuilds").sum() % 4000 == 0) {
-                    printDiag();
                 }
             }
             remap.baseRowOf = rows;

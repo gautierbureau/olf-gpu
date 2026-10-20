@@ -5,7 +5,6 @@
 #include <cuda_runtime.h>
 
 #include <algorithm>
-#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -47,145 +46,8 @@ __global__ void stateDumpBatch(int n, const double* F, const int* mode, const do
     }
 }
 
-// OLF_GPU_CB_PROBE=<cb element index>: the pi row the device ACTUALLY evaluates for that closed
-// branch in EVERY slot, after findTapOverride, alongside its disabled/active bits. The host knows
-// what it MEANT to send (GpuBatchSideOpen.danglingCbRow); this says what the kernel read. A
-// side-open that reduces to a pure shunt must show y = 0 with the equivalent on the live side's
-// g/b — anything else and the override never reached the fill.
-__global__ void cbRowProbe(int nS, int e, const double* cbIn, int nR1Ov,
-                           const int* r1OvSlotElem, const double* r1OvVal,
-                           int nElements, int elemOffset, const char* disabled, const char* active) {
-    for (int s = 0; s < nS; s++) {
-        const double* p = cbIn + (size_t) e * 8;
-        double pOv[8];
-        bool ov = findTapOverride(nR1Ov, r1OvSlotElem, r1OvVal, s, e, pOv);
-        if (ov) {
-            p = pOv;
-        }
-        printf("[CB_ROW] s=%d e=%d ov=%d dis=%d act=%d y=%.12e g1=%.12e g2=%.12e b1=%.12e b2=%.12e "
-               "ksi=%.12e r1=%.12f a1=%.12f\n",
-               s, e, ov ? 1 : 0, (int) disabled[(size_t) s * nElements + elemOffset + e], (int) active[s],
-               p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7]);
-    }
-}
-
-// OLF_GPU_PSG_STEP=<group>: one pilot-self group's layout after EACH kernel of the reactive-limits pass
-// (scenario 0), so a row that changes between two traces can be charged to the kernel that ran between them.
-void psgStep(BatchSolverContext* ctx, int nS, int n, int outer, const char* tag) {
-    // OLF_GPU_ROW_TRACE=<row,row,...>: those rows' mode and target for the slot OLF_GPU_LOOP_TRACE_CTG resolved,
-    // after each kernel of the reactive-limits pass (same hook points as PSG_STEP, any scenario).
-    static const char* rowEnv = std::getenv("OLF_GPU_ROW_TRACE");
-    if (rowEnv != nullptr && ctx->loopTraceSlot >= 0 && ctx->loopTraceSlot < nS) {
-        CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
-        std::string str(rowEnv);
-        size_t pos = 0;
-        while (pos <= str.size()) {
-            size_t c = str.find(',', pos);
-            if (c == std::string::npos) c = str.size();
-            if (c > pos) {
-                int r = std::atoi(str.substr(pos, c - pos).c_str());
-                if (r >= 0 && r < n) {
-                    int m = 0;
-                    double t = 0;
-                    size_t idx = (size_t) ctx->loopTraceSlot * n + r;
-                    CUDA_CHECK(cudaMemcpy(&m, static_cast<const int*>(ctx->dMode.p) + idx, sizeof(int), cudaMemcpyDeviceToHost));
-                    CUDA_CHECK(cudaMemcpy(&t, static_cast<const double*>(ctx->dTarget.p) + idx, sizeof(double), cudaMemcpyDeviceToHost));
-                    std::fprintf(stderr, "ROW_TRACE outer=%d %-14s slot=%d row=%d mode=%d target=%.12f\n",
-                                 outer, tag, ctx->loopTraceSlot, r, m, t);
-                }
-            }
-            pos = c + 1;
-        }
-        // OLF_GPU_ROW_TRACE_GROUP=<g>: that pilot-self group's gate and its pilot entry's limit type, same slot
-        static const char* grpEnv = std::getenv("OLF_GPU_ROW_TRACE_GROUP");
-        if (grpEnv != nullptr && ctx->hasPilotSelf && ctx->dPsSkip.p != nullptr && ctx->dPsPilotEntry.p != nullptr) {
-            int g = std::atoi(grpEnv);
-            if (g >= 0 && g < ctx->st->nQr) {
-                char sk = 0;
-                int pe = -1;
-                char lt = -1;
-                CUDA_CHECK(cudaMemcpy(&sk, static_cast<const char*>(ctx->dPsSkip.p) + (size_t) ctx->loopTraceSlot * ctx->st->nQr + g, 1, cudaMemcpyDeviceToHost));
-                CUDA_CHECK(cudaMemcpy(&pe, static_cast<const int*>(ctx->dPsPilotEntry.p) + g, sizeof(int), cudaMemcpyDeviceToHost));
-                if (pe >= 0 && pe < ctx->nrl) {
-                    CUDA_CHECK(cudaMemcpy(&lt, static_cast<const char*>(ctx->dRlLimitType.p) + (size_t) ctx->loopTraceSlot * ctx->nrl + pe, 1, cudaMemcpyDeviceToHost));
-                }
-                std::fprintf(stderr, "GROUP_TRACE outer=%d %-14s slot=%d g=%d psSkip=%d pilotEntry=%d lt=%d\n",
-                             outer, tag, ctx->loopTraceSlot, g, (int) sk, pe, (int) lt);
-            }
-        }
-    }
-    static const char* env = std::getenv("OLF_GPU_PSG_STEP");
-    if (env == nullptr || !ctx->hasPilotSelf || !ctx->dPsPilotEntry.p || ctx->st->nQr <= 0 || ctx->st->hQrPtr.empty()) return;
-    int g = std::atoi(env);
-    if (g < 0 || g >= ctx->st->nQr) return;
-    CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
-    std::vector<int> pe(ctx->st->nQr);
-    CUDA_CHECK(cudaMemcpy(pe.data(), ctx->dPsPilotEntry.p, pe.size() * sizeof(int), cudaMemcpyDeviceToHost));
-    int e = pe[g];
-    if (e < 0) return;
-    int p0 = ctx->st->hQrPtr[g], cnt = ctx->st->hQrPtr[g + 1] - p0;
-    std::vector<int> hm(n);
-    std::vector<double> ht(n);
-    CUDA_CHECK(cudaMemcpy(hm.data(), ctx->dMode.p, n * sizeof(int), cudaMemcpyDeviceToHost));
-    CUDA_CHECK(cudaMemcpy(ht.data(), ctx->dTarget.p, n * sizeof(double), cudaMemcpyDeviceToHost));
-    char lt = 0, veq = 0;
-    CUDA_CHECK(cudaMemcpy(&lt, static_cast<const char*>(ctx->dRlLimitType.p) + e, 1, cudaMemcpyDeviceToHost));
-    if (ctx->dQrVeqOff.p) CUDA_CHECK(cudaMemcpy(&veq, static_cast<const char*>(ctx->dQrVeqOff.p) + g, 1, cudaMemcpyDeviceToHost));
-    std::string cands;
-    for (int c = 1; c < cnt; c++) {
-        int r = ctx->st->hQrRows[p0 + c];
-        char b[48];
-        std::snprintf(b, sizeof b, " %d:m%d/t%.4f", r, hm[r], ht[r]);
-        cands += b;
-    }
-    int prow = ctx->st->hQrRows[p0];
-    std::fprintf(stderr, "PSG_STEP outer=%d %-14s g=%d entry=%d lt=%d pilotRow=%d mode=%d target=%.9f veqOff=%d cands=[%s ]\n",
-                 outer, tag, g, e, (int) lt, prow, hm[prow], ht[prow], (int) veq, cands.c_str());
-}
-
-// OLF_GPU_STEP_TRACE=1: the MAX_VOLTAGE_CHANGE clamp factor actually applied, per (iteration, slot).
-// The decisive number for "why does this scenario need more than its iteration budget": a factor near
-// 1 means Newton is taking its full step and the slowness is elsewhere, while a factor of a few
-// percent means the step is throttled and 30 iterations simply cannot cover the distance. Nothing
-// else printed it — ||dx||inf from LIN_RESID is NOT a proxy, because the largest component is
-// typically a DUMMY_P/DUMMY_Q flow correction and those carry varType 2, which the clamp IGNORES
-// (only BUS_V=1 and BUS_PHI=0 enter the maxima). See tasks #67.
-void traceStepFactor(BatchSolverContext* ctx, int nS, int it, const std::vector<char>& active) {
-    static const bool on = std::getenv("OLF_GPU_STEP_TRACE") != nullptr;
-    if (!on || ctx->dStepFactor.p == nullptr) {
-        return;
-    }
-    std::vector<double> hf(nS);
-    CUDA_CHECK(cudaMemcpy(hf.data(), ctx->dStepFactor.p, (size_t) nS * sizeof(double), cudaMemcpyDeviceToHost));
-    // WHICH variable binds the clamp, and by how much. f alone says the step is throttled; the
-    // argmax says WHERE the wild direction is, which is the only way to tell an ill-conditioned
-    // direction from a legitimately large move.
-    int n = ctx->n;
-    std::vector<double> hdx((size_t) n * nS);
-    std::vector<int> hvt(n);
-    CUDA_CHECK(cudaMemcpy(hdx.data(), ctx->dDx.p, (size_t) n * nS * sizeof(double), cudaMemcpyDeviceToHost));
-    CUDA_CHECK(cudaMemcpy(hvt.data(), ctx->dVarType.p, (size_t) n * sizeof(int), cudaMemcpyDeviceToHost));
-    for (int s = 0; s < nS; s++) {
-        if (!active.empty() && !active[s]) {
-            continue;
-        }
-        double mdv = 0;
-        double mdphi = 0;
-        int argv = -1;
-        int argphi = -1;
-        for (int i = 0; i < n; i++) {
-            double av = std::fabs(hdx[(size_t) s * n + i]);
-            if (hvt[i] == 1 && av > mdv) { mdv = av; argv = i; }
-            if (hvt[i] == 0 && av > mdphi) { mdphi = av; argphi = i; }
-        }
-        std::fprintf(stderr, "STEP_FACTOR it=%d slot=%d f=%.9g maxDv=%.6g atVrow=%d maxDphi=%.6g atPhirow=%d\n",
-                     it, s, hf[s], mdv, argv, mdphi, argphi);
-    }
-}
-
-// OLF_GPU_BATCH_TRACE / OLF_GPU_ROW_PROBE: the pass's per-scenario state before the loop check.
+// OLF_GPU_BATCH_TRACE: the pass's per-scenario state before the loop check.
 void traceBatchPass(BatchSolverContext* ctx, DriverPass& drv, int nLoops, bool solvePass) {
-    const int& n = drv.n;
     const int& nS = drv.nS;
     const int& outer = drv.outer;
     int& loopIdx = drv.loopIdx;
@@ -225,81 +87,7 @@ void traceBatchPass(BatchSolverContext* ctx, DriverPass& drv, int nLoops, bool s
         }
         std::fprintf(stderr, "BATCH_TRACE pass done: outer=%d loop=%d/%d kind=%s solved=%d changedScenarios=%d iters=%d pinned=%d",
                      outer, loopIdx, nLoops, kindName, solvePass ? 1 : 0, nSw, gLastPassIters, nPinned);
-        {
-            // OLF_GPU_ROW_PROBE=<row>: that row's slot-0 TARGET as each pass leaves it — the inner
-            // probe only sees iterations, and a target a loop phase mutates between solves (the
-            // HVDC freeze/unfreeze, a DS anchor reset) is invisible there.
-            static const char* passProbeEnv = std::getenv("OLF_GPU_ROW_PROBE");
-            static int passProbe = passProbeEnv != nullptr ? std::atoi(passProbeEnv) : -1;
-            if (passProbe >= 0 && passProbe < n) {
-                double tv = 0;
-                double fv = 0;
-                CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
-                CUDA_CHECK(cudaMemcpy(&tv, ctx->dTarget.as<double>() + passProbe, sizeof(double), cudaMemcpyDeviceToHost));
-                CUDA_CHECK(cudaMemcpy(&fv, ctx->dF.as<double>() + passProbe, sizeof(double), cudaMemcpyDeviceToHost));
-                std::fprintf(stderr, " probeRow=%d target=%.12e F=%.12e", passProbe, tv, fv);
-            }
-        }
         std::fprintf(stderr, "\n");
-    }
-}
-
-// OLF_GPU_DS_DEBUG: is scenario 0 converged when the distributed-slack check reads its mismatch?
-void traceDsConvergence(BatchSolverContext* ctx, DriverPass& drv, bool inDsPhase) {
-    const int& n = drv.n;
-    const int& nS = drv.nS;
-    const int& outer = drv.outer;
-    std::vector<char>& rlActive = drv.rlActive;
-    if (inDsPhase && getenv("OLF_GPU_DS_DEBUG") && nS > 0) {
-        // Is scenario 0 actually CONVERGED at the moment the DS loop reads its mismatch? OLF checks
-        // its slack mismatch on a converged state; if ours is only part-way there, the mismatch it
-        // measures is not the same quantity, and a threshold at the same scale flips.
-        std::vector<double> f0(n);
-        CUDA_CHECK(cudaMemcpy(f0.data(), ctx->dF.as<double>(), n * sizeof(double), cudaMemcpyDeviceToHost));
-        double ssq = 0.0;
-        double inf = 0.0;
-        for (int i = 0; i < n; i++) {
-            ssq += f0[i] * f0[i];
-            inf = fmax(inf, fabs(f0[i]));
-        }
-        double slackM = std::numeric_limits<double>::quiet_NaN();
-        double retain0 = std::numeric_limits<double>::quiet_NaN();
-        if (ctx->dsSlackPhiRow >= 0) {
-            std::vector<double> q0(n);
-            CUDA_CHECK(cudaMemcpy(q0.data(), ctx->dQbuf.as<double>(), n * sizeof(double), cudaMemcpyDeviceToHost));
-            slackM = q0[ctx->dsSlackPhiRow] - ctx->dsSlackTargetP;
-            if (ctx->dDsRetain.p) CUDA_CHECK(cudaMemcpy(&retain0, ctx->dDsRetain.p, sizeof(double), cudaMemcpyDeviceToHost));
-        }
-        std::fprintf(stderr, "[DS-CONV] outer=%d innerNewtonIters=%d ||F||2=%.9e ||F||inf=%.9e slackMismatchFromAnchor=%.9f retain=%.9f rlActive=%d\n",
-                     outer, gLastPassIters, std::sqrt(ssq), inf, slackM, retain0, (int) rlActive[0]);
-    }
-}
-
-// OLF_GPU_RL_REASONS: why each reactive-limits check was unstable.
-void traceRlReasons(BatchSolverContext* ctx, DriverPass& drv, const std::vector<char>& rlSwitched) {
-    const int& nS = drv.nS;
-    int& loopIdx = drv.loopIdx;
-    int (&loopOrder)[MAX_DEVICE_LOOPS] = drv.loopOrder;
-    std::vector<char>& rlActive = drv.rlActive;
-    if (rlReasonsOn() && loopOrder[loopIdx] == GpuOuterLoopKind::REACTIVE_LIMITS && ctx->nrl > 0 && ctx->dRlPassSwitched.p) {
-        std::vector<char> ps(static_cast<size_t>(ctx->nrl) * nS);
-        CUDA_CHECK(cudaMemcpy(ps.data(), ctx->dRlPassSwitched.p, ps.size(), cudaMemcpyDeviceToHost));
-        for (int s = 0; s < nS; s++) {
-            if (!rlActive[s]) continue;
-            int mask = 0;
-            for (int i = 0; i < ctx->nrl; i++) {
-                char c = ps[static_cast<size_t>(s) * ctx->nrl + i];
-                if (c >= 1 && c <= 3) {
-                    mask |= 1 << (c - 1);
-                    gRlEntryCodes[static_cast<int>(c)]++;
-                }
-            }
-            if (rlSwitched[s]) {
-                gRlCheckScen[mask]++;
-            } else {
-                gRlStableScen++;
-            }
-        }
     }
 }
 
@@ -340,26 +128,7 @@ void traceRlSwitches(BatchSolverContext* ctx, DriverPass& drv, std::vector<std::
             std::string rec;
             for (int i2 = 0; i2 < ctx->nrl; i2++) {
                 size_t st2 = (size_t) s2 * ctx->nrl + i2;
-                // OLF_GPU_SW_TRACE_ENTRIES=<e,...>: those entries print EVERY RL pass for the traced slot, switched
-                // or not - a decision the device did NOT take is the one to compare against the CPU's.
-                static const std::vector<int> swEntries = [] {
-                    std::vector<int> v;
-                    const char* e = std::getenv("OLF_GPU_SW_TRACE_ENTRIES");
-                    if (e == nullptr) return v;
-                    std::string str(e);
-                    size_t pos = 0;
-                    while (pos <= str.size()) {
-                        size_t c = str.find(',', pos);
-                        if (c == std::string::npos) c = str.size();
-                        if (c > pos) v.push_back(std::atoi(str.substr(pos, c - pos).c_str()));
-                        pos = c + 1;
-                    }
-                    return v;
-                }();
-                static const bool swAll = std::getenv("OLF_GPU_SW_TRACE_ENTRIES") != nullptr
-                                          && std::string(std::getenv("OLF_GPU_SW_TRACE_ENTRIES")) == "all";
-                bool forced = toStderr && (swAll || std::find(swEntries.begin(), swEntries.end(), i2) != swEntries.end());
-                if (!ps[st2] && !forced) continue;
+                if (!ps[st2]) continue;
                 size_t li2 = ctx->ncv > 0 ? st2 : (size_t) i2;
                 double cmpV2 = (cv2[i2] >= 0) ? x2[(size_t) s2 * n + cv2[i2]] : 0.0;
                 double qq = qb2[(size_t) s2 * n + vr2[i2]] + lq2[i2];
@@ -418,13 +187,13 @@ void traceRlSwitches(BatchSolverContext* ctx, DriverPass& drv, std::vector<std::
     }
 }
 
-// OLF_GPU_BATCH_TRACE / OLF_GPU_RL_TRACE_VROW: the reactive-limit entries' state after the check.
-void traceRlState(BatchSolverContext* ctx, DriverPass& drv, bool inDsPhase, double reactiveLimitTol, std::vector<char>& rlSwitched, int rlTraceVrow) {
+// OLF_GPU_BATCH_TRACE: the reactive-limit entries' state after the check.
+void traceRlState(BatchSolverContext* ctx, DriverPass& drv, bool inDsPhase, double reactiveLimitTol, std::vector<char>& rlSwitched) {
     const int& n = drv.n;
     const int& nS = drv.nS;
     const int& outer = drv.outer;
-    if (!inDsPhase && (ctx->nRlRemote > 0 || nS == 1 || rlTraceVrow >= 0) && ctx->nrl > 0
-            && (std::getenv("OLF_GPU_BATCH_TRACE") != nullptr || rlTraceVrow >= 0)) {   // RL trace
+    if (!inDsPhase && (ctx->nRlRemote > 0 || nS == 1) && ctx->nrl > 0
+            && std::getenv("OLF_GPU_BATCH_TRACE") != nullptr) {   // RL trace
         std::vector<char> lt(static_cast<size_t>(ctx->nrl) * nS);
         std::vector<char> rem(ctx->nrl);
         std::vector<int> vr(ctx->nrl);
@@ -448,33 +217,11 @@ void traceRlState(BatchSolverContext* ctx, DriverPass& drv, bool inDsPhase, doub
         // same quantity at a different V is not evidence of a wrong formula.
         std::vector<double> hXrl(static_cast<size_t>(n) * nS);
         CUDA_CHECK(cudaMemcpy(hXrl.data(), ctx->dX.p, hXrl.size() * sizeof(double), cudaMemcpyDeviceToHost));
-        std::vector<double> hMinQ(hMaxQ.size());
-        CUDA_CHECK(cudaMemcpy(hMinQ.data(), ctx->ncv > 0 ? ctx->dRlMinQDyn.p : ctx->dRlMinQ.p, hMinQ.size() * sizeof(double), cudaMemcpyDeviceToHost));
         std::vector<double> hTgt(static_cast<size_t>(n) * nS);
         CUDA_CHECK(cudaMemcpy(hTgt.data(), ctx->dTarget.p, hTgt.size() * sizeof(double), cudaMemcpyDeviceToHost));
-        // The switch-back COMPARISON itself: the controlled (pilot) bus's voltage against the group
-        // target, and the MARGIN between them. A pin that flips between runs is only "the last bits"
-        // if that margin is at the noise floor - print it rather than assume it.
-        std::vector<int> cmpVr(ctx->nrl);
-        std::vector<double> vTgt(ctx->nrl);
-        if (ctx->dRlCmpVrow.p) {
-            CUDA_CHECK(cudaMemcpy(cmpVr.data(), ctx->dRlCmpVrow.p, cmpVr.size() * sizeof(int), cudaMemcpyDeviceToHost));
-        }
-        if (ctx->dRlVtarget.p) {
-            CUDA_CHECK(cudaMemcpy(vTgt.data(), ctx->dRlVtarget.p, vTgt.size() * sizeof(double), cudaMemcpyDeviceToHost));
-        }
         for (int s2 = 0; s2 < nS; s2++) {
             for (int i2 = 0; i2 < ctx->nrl; i2++) {
-                if (rlTraceVrow >= 0 && vr[i2] == rlTraceVrow) {
-                    double cmpV = (ctx->dRlCmpVrow.p && cmpVr[i2] >= 0) ? hXrl[(size_t) s2 * n + cmpVr[i2]] : 0.0;
-                    std::fprintf(stderr, "RL_VROW s=%d entry=%d lt=%d q=%.9f minQ=%.9f maxQ=%.9f target=%.9f mode=%d v=%.9f loadQ=%.9f cmpV=%.12f vt=%.12f margin=%.3e\n",
-                                 s2, i2, (int) lt[(size_t) s2 * ctx->nrl + i2], qb[(size_t) s2 * n + vr[i2]] + lq[i2],
-                                 hMinQ[ctx->ncv > 0 ? (size_t) s2 * ctx->nrl + i2 : (size_t) i2],
-                                 hMaxQ[ctx->ncv > 0 ? (size_t) s2 * ctx->nrl + i2 : (size_t) i2],
-                                 hTgt[(size_t) s2 * n + vr[i2]], hMode[(size_t) s2 * n + vr[i2]],
-                                 hXrl[(size_t) s2 * n + vr[i2]], lq[i2], cmpV, vTgt[i2], cmpV - vTgt[i2]);
-                }
-                if ((rem[i2] || nS == 1) && std::getenv("OLF_GPU_BATCH_TRACE") != nullptr) {
+                if (rem[i2] || nS == 1) {
                     std::fprintf(stderr, "RL_TRACE s=%d entry=%d remote=%d lt=%d switched=%d q=%.9f mode=%d tol=%.3e maxQ=%.6f ncv=%d rlActive=%d v=%.9f qbuf=%.9f\n",
                                  s2, i2, (int) rem[i2], (int) lt[(size_t) s2 * ctx->nrl + i2], (int) rlSwitched[s2],
                                  qb[(size_t) s2 * n + vr[i2]] + lq[i2], hMode[(size_t) s2 * n + vr[i2]], reactiveLimitTol,
@@ -521,36 +268,6 @@ void traceRlState(BatchSolverContext* ctx, DriverPass& drv, bool inDsPhase, doub
     }
 }
 
-// OLF_GPU_DS_DEBUG: the distributed-slack check's gate per scenario.
-void traceDsCheck(BatchSolverContext* ctx, DriverPass& drv, bool inDsPhase) {
-    const int& n = drv.n;
-    const int& nS = drv.nS;
-    const int& outer = drv.outer;
-    std::vector<char>& live = drv.live;
-    const double& SLACK_DIST_TOL = drv.slackDistTol;
-    if (inDsPhase && (ctx->nds > 0 || ctx->dsSlackOnly) && getenv("OLF_GPU_DS_DEBUG")) {
-        // EVERY scenario, not just 0: the question "did OLF's DS fire on this check and did ours?"
-        // is per scenario, and the scenario that disagrees is rarely slot 0.
-        std::vector<double> qbufH(static_cast<size_t>(n) * nS);
-        std::vector<double> retainH(nS, 0.0);
-        std::vector<double> absH(nS, 0.0);
-        CUDA_CHECK(cudaMemcpy(qbufH.data(), ctx->dQbuf.p, sizeof(double) * qbufH.size(), cudaMemcpyDeviceToHost));
-        if (ctx->nds > 0 && ctx->dDsRetain.p) {
-            CUDA_CHECK(cudaMemcpy(retainH.data(), ctx->dDsRetain.p, sizeof(double) * nS, cudaMemcpyDeviceToHost));
-        }
-        if (ctx->dsSlackOnly && ctx->dDsSlackAbsorbed.p) {
-            CUDA_CHECK(cudaMemcpy(absH.data(), ctx->dDsSlackAbsorbed.p, sizeof(double) * nS, cudaMemcpyDeviceToHost));
-        }
-        for (int s = 0; s < nS; s++) {
-            double slackP = qbufH[static_cast<size_t>(s) * n + ctx->dsSlackPhiRow];
-            double rem = (slackP - ctx->dsSlackTargetP) - retainH[s] - absH[s];
-            std::fprintf(stderr, "[DS-DEV] outer=%d s=%d live=%d slackP=%.9f slackTargetP=%.9f retain=%.9f rem=%.9f tol=%.3e fires=%d\n",
-                    outer, s, (int) live[s], slackP, ctx->dsSlackTargetP, retainH[s], rem, SLACK_DIST_TOL,
-                    std::fabs(rem) > SLACK_DIST_TOL ? 1 : 0);
-        }
-    }
-}
-
 // OLF_GPU_LOOP_TRACE: one scenario's loop sequence (which slot found it unstable).
 void traceLoopSlot(BatchSolverContext* ctx, DriverPass& drv, int loopTraceSlot, int nChanged, std::vector<char>& rlSwitched, bool solvePass) {
     const int& nS = drv.nS;
@@ -571,34 +288,6 @@ void traceLoopSlot(BatchSolverContext* ctx, DriverPass& drv, int loopTraceSlot, 
                      (int) rlSwitched[loopTraceSlot], nChanged, (int) live[loopTraceSlot], res.status[loopTraceSlot],
                      gate[0], (int) gate[1], res.iters[loopTraceSlot],
                      gate[2], gate[3], gate[4], gate[5], gate[6], gate[7]);
-    }
-}
-
-// OLF_GPU_ITER_LOG: the pass record (loop, re-solve, switch, iterations, status, DS gate).
-void tracePassLog(BatchSolverContext* ctx, DriverPass& drv, std::vector<char>& rlSwitched, bool solvePass) {
-    const int& nS = drv.nS;
-    const int& outer = drv.outer;
-    int& loopIdx = drv.loopIdx;
-    int (&loopOrder)[MAX_DEVICE_LOOPS] = drv.loopOrder;
-    std::vector<char>& live = drv.live;
-    BatchResult& res = drv.res;
-    const bool& iterLog = drv.iterLog;
-    std::vector<std::string>& iterLogLines = drv.iterLogLines;
-    if (iterLog) {
-        std::vector<double> gates;
-        if (ctx->dDsGateLast.p) {
-            gates.resize(static_cast<size_t>(nS) * 8);
-            CUDA_CHECK(cudaMemcpy(gates.data(), ctx->dDsGateLast.p, gates.size() * sizeof(double), cudaMemcpyDeviceToHost));
-        }
-        for (int s = 0; s < nS; s++) {
-            char line[256];
-            std::snprintf(line, sizeof line, "PASS_LOG outer=%d loopIdx=%d kind=%d solved=%d s=%d live=%d switched=%d iters=%d"
-                          " status=%d dsRem=%.17e dsFire=%d dsPlaced=%.17e",
-                          outer, loopIdx, loopOrder[loopIdx], solvePass ? 1 : 0, s, (int) live[s], (int) rlSwitched[s],
-                          res.iters[s], res.status[s], gates.empty() ? 0.0 : gates[8 * s],
-                          gates.empty() ? 0 : (int) gates[8 * s + 1], gates.empty() ? 0.0 : gates[8 * s + 7]);
-            iterLogLines.emplace_back(line);
-        }
     }
 }
 
@@ -670,7 +359,7 @@ void traceRlAudit(BatchSolverContext* ctx, DriverPass& drv, std::vector<std::vec
                     ctx->st->ob.in.as<double>(), ctx->st->ob.ix.as<int>(),
                     ctx->dX.as<double>(), ctx->dQbuf.as<double>(), ctx->dDisabled.as<char>(), ctx->dRlActive.as<char>(),
                     ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>(),
-                    ctx->nShOv, ctx->dShOvSlotElem.as<int>(), ctx->dShOvGb.as<double>(), -1);
+                    ctx->nShOv, ctx->dShOvSlotElem.as<int>(), ctx->dShOvGb.as<double>());
         }
         // The audit's verdict comes from OLF's OWN check, not a second implementation of it: run the
         // real reactiveLimitsBatch on the final state. It either changes nothing - the state IS the
@@ -695,7 +384,7 @@ void traceRlAudit(BatchSolverContext* ctx, DriverPass& drv, std::vector<std::vec
                     ctx->nDsRowOv > 0 ? ctx->dDsRowOv.as<int>() : nullptr, ctx->nds,
                     ctx->ngen > 0 ? ctx->dgBus.as<int>() : nullptr,
                     ctx->dRlMinQDyn.as<double>(), ctx->dRlMaxQDyn.as<double>(),
-                    ctx->dRlLoadQDyn.as<double>(), -1, 0);
+                    ctx->dRlLoadQDyn.as<double>());
             launchForcedTargetQLimits(ctx, nS, n);
         }
         CUDA_CHECK(cudaMemsetAsync(ctx->dRlPassSwitched.p, 0, static_cast<size_t>(ctx->nrl) * nS, ctx->stream));
@@ -824,37 +513,6 @@ void traceRlAudit(BatchSolverContext* ctx, DriverPass& drv, std::vector<std::vec
                     }
                 }
             }
-        }
-    }
-}
-
-// OLF_GPU_DBG_DS: the distributed-slack state at the end of the solve.
-void traceDsFinal(BatchSolverContext* ctx, DriverPass& drv) {
-    const int& n = drv.n;
-    const int& nS = drv.nS;
-    BatchResult& res = drv.res;
-    if (getenv("OLF_GPU_DBG_DS") && ctx->nds > 0) {
-        std::vector<double> tFinal(static_cast<size_t>(n) * nS);
-        CUDA_CHECK(cudaMemcpy(tFinal.data(), ctx->dTarget.p, tFinal.size() * sizeof(double), cudaMemcpyDeviceToHost));
-        std::vector<char> ltDump(static_cast<size_t>(std::max(ctx->nrl, 1)) * nS, 0);
-        if (ctx->nrl > 0) {
-            CUDA_CHECK(cudaMemcpy(ltDump.data(), ctx->dRlLimitType.p, static_cast<size_t>(ctx->nrl) * nS, cudaMemcpyDeviceToHost));
-        }
-        std::vector<int> dsRows(ctx->nds);
-        std::vector<double> dsBase(ctx->nds);
-        CUDA_CHECK(cudaMemcpy(dsRows.data(), ctx->dDsPhiRow.p, ctx->nds * sizeof(int), cudaMemcpyDeviceToHost));
-        CUDA_CHECK(cudaMemcpy(dsBase.data(), ctx->dDsBaseTargetP.p, ctx->nds * sizeof(double), cudaMemcpyDeviceToHost));
-        for (int s = 0; s < nS; s++) {
-            double tot = 0;
-            fprintf(stderr, "GPU-DS s=%d", s);
-            for (int i = 0; i < ctx->nds; i++) {
-                double d = tFinal[(size_t) s * n + dsRows[i]] - dsBase[i];
-                tot += d;
-                fprintf(stderr, " row%d=%+.4f", dsRows[i], d * 100.0);
-            }
-            fprintf(stderr, " | totMW=%+.4f | lt:", tot * 100.0);
-            for (int i = 0; i < ctx->nrl; i++) fprintf(stderr, "%d", ltDump[(size_t) i * nS + s]);
-            fprintf(stderr, " status=%d\n", res.status[s]);
         }
     }
 }

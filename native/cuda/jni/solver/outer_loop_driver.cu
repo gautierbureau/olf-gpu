@@ -302,16 +302,6 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     drv.rlMaxSwitch = rlMaxSwitch >= 0 ? rlMaxSwitch : 3;
     static const char* swLogEnv = std::getenv("OLF_GPU_SW_LOG");
     drv.swLogSlot = swLogEnv == nullptr ? -1 : (std::string(swLogEnv) == "all" ? -2 : std::atoi(swLogEnv));
-    // OLF_GPU_ITER_LOG=1: EVERY scenario's stopping decision at every Newton iteration (ITER_LOG), the score of
-    // every step's linear solve (LIN_LOG, and LIN_WORST where it is poor) and its record at the end of every outer
-    // pass (PASS_LOG: loop, re-solve, switch, iterations, status, DS gate), printed once when the driver returns.
-    // Built from the norms the host already reads each iteration, the pass-0 guard's two scoring kernels run on
-    // every step (one 3*nS copy) and ONE copy of the DS gate records per pass - none of the whole-vector copies
-    // the slot traces make: a run-to-run divergence of one scenario among hundreds is found by diffing two logs.
-    static const bool iterLogEnv = std::getenv("OLF_GPU_ITER_LOG") != nullptr;
-    drv.iterLog = iterLogEnv;
-    const bool& iterLog = drv.iterLog;
-    std::vector<std::string>& iterLogLines = drv.iterLogLines;
     // Outer-loop convergence tolerances (pu) — passed in so the device uses the SAME criteria as the CPU
     // loadflow that built the base case (maxReactivePowerMismatch / slackBusPMaxMismatch, per-unitized), NOT
     // hardcoded constants. With matching parameters and the same equations the GPU outer-loop fixed point
@@ -641,7 +631,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             }
         }
     }
-    static const bool olTimeEnv = std::getenv("OLF_GPU_PHASE_TIME") != nullptr || rlReasonsOn();
+    static const bool olTimeEnv = std::getenv("OLF_GPU_PHASE_TIME") != nullptr;
     drv.olTime = olTimeEnv;
     const bool& olTime = drv.olTime;
     int& olPassSolved = drv.olPassSolved;
@@ -653,7 +643,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     gOuterPasses++;
     if (olTime) CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
     const double olT0 = olTime ? olNowMs() : 0.0;
-    const long long olAI0 = gActiveIterSum, olWI0 = gWidthIterSum, olNI0 = gNewtonIters;
+    const long long olAI0 = gActiveIterSum, olWI0 = gWidthIterSum;
     const bool olSolving = solvePass;
     if (solvePass) {
         gSolvePasses++;
@@ -724,10 +714,6 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             int k = olTriggerKind >= 0 && olTriggerKind < GpuOuterLoopKind::COUNT ? olTriggerKind : 0;
             gOlReSolveMs[k] += ms; gOlReSolveScen[k] += olPassSolved; gOlReSolveLaneIters[k] += ai;
             gOlReSolveWidthIters[k] += wi; gOlReSolvePasses[k]++;
-            if (rlReasonsOn() && k == GpuOuterLoopKind::REACTIVE_LIMITS) {
-                std::fprintf(stderr, "GPU_RL_PASS outer=%d width=%d active=%d ms=%.1f batchIters=%lld laneIters=%lld widthIters=%lld\n",
-                             outer, nS, olPassSolved, ms, gNewtonIters - olNI0, ai, wi);
-            }
         }
     }
     // the CHECK part of the pass, charged to the loop being checked when the pass body ends (break/continue too)
@@ -791,11 +777,6 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     // Remote-member OWN q (plan-B3): fill each member's own reactive injection into its (suppressed,
     // hence free) qBuf row so the RL kernel evaluates remote entries like local ones.
     if (ctx->nRmq > 0) {
-        // OLF_GPU_RMQ_TRACE=<deviceRow>: every contribution this kernel adds to that member's
-        // diagnostic q row, named by kind and element. The RL check pins on q = qBuf[row] + loadQ,
-        // so a q that disagrees with OLF is answered here and nowhere else.
-        static const char* rmqTraceEnv = std::getenv("OLF_GPU_RMQ_TRACE");
-        int rmqTraceRow = rmqTraceEnv != nullptr ? std::atoi(rmqTraceEnv) : -1;
         fillRemoteMemberQBatch<<<grid(ctx->nRmq * nS), BLOCK, 0, ctx->stream>>>(ctx->nRmq, nS, n,
                 ctx->nElements, ctx->cbOffset, ctx->obOffset,
                 ctx->dRmqRow.as<int>(), ctx->dRmqElem.as<int>(), ctx->dRmqSide.as<int>(),
@@ -804,8 +785,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                 ctx->st->ob.in.as<double>(), ctx->st->ob.ix.as<int>(),
                 ctx->dX.as<double>(), ctx->dQbuf.as<double>(), ctx->dDisabled.as<char>(), ctx->dRlActive.as<char>(),
                 ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>(),
-                ctx->nShOv, ctx->dShOvSlotElem.as<int>(), ctx->dShOvGb.as<double>(),
-                rmqTraceRow);
+                ctx->nShOv, ctx->dShOvSlotElem.as<int>(), ctx->dShOvGb.as<double>());
     }
     if (ctx->nhv > 0 && ctx->dsSlackPhiRow >= 0) {           // a link on the slack bus, as OLF's slack mismatch sees it
         hvdcSlackBalanceBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(nS, ctx->nhv, n, ctx->nElements, ctx->dsSlackPhiRow,
@@ -841,7 +821,6 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     olCheck.kind = loopOrder[loopIdx];
     olTriggerKind = loopOrder[loopIdx];                     // a re-solve in the next pass was triggered by this check
     traceBatchPass(ctx, drv, nLoops, solvePass);
-    traceDsConvergence(ctx, drv, inDsPhase);
     int loopKind = loopOrder[loopIdx];
     if (loopKind >= GpuOuterLoopKind::HOST_SECONDARY_VOLTAGE_CONTROL && loopKind <= GpuOuterLoopKind::HOST_SHUNT_VOLTAGE_CONTROL) {   // any LOOP_HOST_* kind: pause for the host
         // Hand the sequence back. Everything the device holds — x, targets, row modes, RL pins,
@@ -882,7 +861,6 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     }
     CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
     CUDA_CHECK(cudaMemcpy(rlSwitched.data(), ctx->dRlSwitched.p, nS * sizeof(char), cudaMemcpyDeviceToHost));
-    traceRlReasons(ctx, drv, rlSwitched);
     for (int s = 0; s < nS; s++) {
         if (loopRejected[s]) {                              // a device loop routed the scenario to the CPU fallback
             traceReject(s, "device-loop-routed", outer, 0);
@@ -893,11 +871,6 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             loopRejected[s] = 0;
         }
     }
-    // OLF_GPU_RL_TRACE_VROW=<v row>: one LOCAL entry's pin state at every check (the trace below
-    // otherwise names remote entries only) - with its live limits and row target, which is what a
-    // curve-limit drift moves.
-    static const char* rlTraceVrowEnv = std::getenv("OLF_GPU_RL_TRACE_VROW");
-    static const int rlTraceVrow = rlTraceVrowEnv != nullptr ? std::atoi(rlTraceVrowEnv) : -1;
     // OLF_GPU_SW_TRACE=<slot>: every controller this RL pass CHANGED for one scenario, with the
     // quantities its decision turned on. A scenario that ends one outer pass short of the CPU's
     // trajectory did so because one of these decisions went the other way; without the list there is
@@ -907,8 +880,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     // the contingency-id slot of OLF_GPU_LOOP_TRACE_CTG wins (chunk composition moves fixed slots)
     const int swTraceSlot = ctx->loopTraceSlot >= 0 ? ctx->loopTraceSlot : swTraceSlotEnv;
     traceRlSwitches(ctx, drv, auditLog, rlAuditOn, swTraceSlot);
-    traceRlState(ctx, drv, inDsPhase, reactiveLimitTol, rlSwitched, rlTraceVrow);
-    traceDsCheck(ctx, drv, inDsPhase);
+    traceRlState(ctx, drv, inDsPhase, reactiveLimitTol, rlSwitched);
     if (inDsPhase && (ctx->nds > 0 || ctx->dsSlackOnly) && dsRejectResidual) {
         // slackDistributionFailureBehavior != LEAVE_ON_SLACK_BUS: a scenario whose participants all
         // saturated must NOT be reported converged with the residual absorbed at the slack — route it
@@ -940,7 +912,6 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     // scenario from one run to the next (IZUZ: slot 170, then 18)
     const int loopTraceSlot = ctx->loopTraceSlot >= 0 ? ctx->loopTraceSlot : (loopTraceEnv != nullptr ? std::atoi(loopTraceEnv) : -1);
     traceLoopSlot(ctx, drv, loopTraceSlot, nChanged, rlSwitched, solvePass);
-    tracePassLog(ctx, drv, rlSwitched, solvePass);
     if (nChanged > 0) {                                     // this outer loop is still unstable
         for (int s = 0; s < nS; s++) {
             if (rlSwitched[s] && ++prodIters[s] >= RL_MAX_OUTER) {
@@ -982,13 +953,6 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     }
     }   // ---- end sequential outer-loop driver ----
 
-    if (iterLog) {
-        for (const std::string& line : iterLogLines) {
-            std::fprintf(stderr, "%s\n", line.c_str());
-        }
-        std::fprintf(stderr, "ITER_LOG_END nS=%d lines=%zu\n", nS, iterLogLines.size());
-    }
-
     traceSwitchLog(ctx, drv);
     // ---- OLF_GPU_RL_AUDIT=<pu threshold>: audit the FINAL state against the reactive-limit rule
     //      itself. OLF's outer loop ends only after a check found NOTHING to switch, so in OLF's
@@ -999,7 +963,6 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     //      for every live scenario, refreshes the curve limits at the final targets, and prints one
     //      line per violating (scenario, entry).
     traceRlAudit(ctx, drv, auditLog);
-    traceDsFinal(ctx, drv);
     if (rlStateOut != nullptr && ctx->nrl > 0) {             // export per-(controller, scenario) RL state
         std::vector<char> lt(static_cast<size_t>(ctx->nrl) * nS), sc(static_cast<size_t>(ctx->nrl) * nS);
         CUDA_CHECK(cudaMemcpy(lt.data(), ctx->dRlLimitType.p, lt.size(), cudaMemcpyDeviceToHost));

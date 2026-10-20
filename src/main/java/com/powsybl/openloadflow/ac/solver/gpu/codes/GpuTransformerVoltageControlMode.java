@@ -7,20 +7,25 @@
  */
 package com.powsybl.openloadflow.ac.solver.gpu.codes;
 
+import com.powsybl.openloadflow.OpenLoadFlowParameters;
+
 /**
- * Which of OLF's discrete transformer voltage control loops the device runs (setBatchTransformerVoltageControl mode), named after
- * OLF's {@code TransformerVoltageControlMode} constants. The device numbering is its own (OLF's ordinals put
- * WITH_GENERATOR first); INCREMENTAL_VOLTAGE_CONTROL runs as its own loop. Mirrored by
- * native/cuda/jni/common/codes/gpu_transformer_voltage_control_mode.cuh.
+ * Which of OLF's discrete transformer voltage control loops the device runs (setBatchTransformerVoltageControl mode):
+ * OLF's {@link OpenLoadFlowParameters.TransformerVoltageControlMode}, by ordinal. INCREMENTAL_VOLTAGE_CONTROL runs as its
+ * own loop (GpuIncrementalTransformerVoltageControlOuterLoop), so the device reads only these two. Mirrored by
+ * native/cuda/jni/common/codes/gpu_transformer_voltage_control_mode.cuh (GpuCodesMirrorTest checks it equals OLF's
+ * ordinals).
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
 public final class GpuTransformerVoltageControlMode {
 
-    /** TransformerVoltageControlOuterLoop: INITIAL, CONTROL, COMPLETE. */
-    public static final int AFTER_GENERATOR_VOLTAGE_CONTROL = 0;
     /** SimpleTransformerVoltageControlOuterLoop: control on for the first solve, then rounded. */
-    public static final int WITH_GENERATOR_VOLTAGE_CONTROL = 1;
+    public static final int WITH_GENERATOR_VOLTAGE_CONTROL =
+            OpenLoadFlowParameters.TransformerVoltageControlMode.WITH_GENERATOR_VOLTAGE_CONTROL.ordinal();
+    /** TransformerVoltageControlOuterLoop: INITIAL, CONTROL, COMPLETE. */
+    public static final int AFTER_GENERATOR_VOLTAGE_CONTROL =
+            OpenLoadFlowParameters.TransformerVoltageControlMode.AFTER_GENERATOR_VOLTAGE_CONTROL.ordinal();
 
     private GpuTransformerVoltageControlMode() {
     }

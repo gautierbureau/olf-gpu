@@ -12,7 +12,7 @@ import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 /**
  * The batched solve entry points.
  *
- * <p>JNI glue: {@code native/cuda/jni/jni/batch_solve_jni.cu}.
+ * <p>JNI glue: {@code native/cuda/jni/batch_solve_jni.cu}.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */

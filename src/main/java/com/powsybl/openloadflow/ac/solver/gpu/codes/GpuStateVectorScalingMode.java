@@ -11,7 +11,7 @@ import com.powsybl.openloadflow.ac.solver.StateVectorScalingMode;
 
 /**
  * OLF's {@link StateVectorScalingMode} as the device receives it ({@code stateVectorScalingMode} in the solve calls). Mirrored by
- * native/cuda/jni/common/codes/gpu_state_vector_scaling_mode.cuh.
+ * native/cuda/common/codes/gpu_state_vector_scaling_mode.cuh.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */

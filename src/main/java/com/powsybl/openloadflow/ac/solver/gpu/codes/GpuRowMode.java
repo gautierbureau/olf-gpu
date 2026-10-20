@@ -10,7 +10,7 @@ package com.powsybl.openloadflow.ac.solver.gpu.codes;
 /**
  * Which OLF equation a stable row holds in a lane (docs/gpu-vs-olf.md, section 2.2): OLF activates and deactivates
  * equations; the device's rows are permanent, so "OLF activates X" becomes "the row now holds X". Mirrored by
- * native/cuda/jni/common/codes/gpu_row_mode.cuh.
+ * native/cuda/common/codes/gpu_row_mode.cuh.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */

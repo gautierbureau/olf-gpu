@@ -49,9 +49,9 @@ MODULE = {
     "constants": {"R2": 1, "A2": 0},
 
     # --- CUDA emission identity ------------------------------------------------
-    "cuda_path": "native/cuda/closed_branch.cuh",
-    "scatter_path": "native/cuda/closed_branch.scatter.json",
-    "scatter_header_path": "native/cuda/closed_branch_scatter.h",
+    "cuda_path": "native/cuda/equations/generated/closed_branch.cuh",
+    "scatter_path": "codegen/scatter/closed_branch.scatter.json",
+    "scatter_header_path": "native/cuda/equations/generated/closed_branch_scatter.h",
     "cuda_namespace": "powsybl::openloadflow",
     "cuda_routine": "evalClosedBranch",
     "cuda_fn_macro": "CB_FN",

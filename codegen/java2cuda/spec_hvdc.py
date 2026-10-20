@@ -50,9 +50,9 @@ MODULE = {
     "constants": {},
 
     # --- CUDA emission identity ------------------------------------------------
-    "cuda_path": "native/cuda/hvdc.cuh",
-    "scatter_path": "native/cuda/hvdc.scatter.json",
-    "scatter_header_path": "native/cuda/hvdc_scatter.h",
+    "cuda_path": "native/cuda/equations/generated/hvdc.cuh",
+    "scatter_path": "codegen/scatter/hvdc.scatter.json",
+    "scatter_header_path": "native/cuda/equations/generated/hvdc_scatter.h",
     "cuda_namespace": "powsybl::openloadflow",
     "cuda_routine": "evalHvdc",
     "cuda_fn_macro": "HVDC_FN",

@@ -2,7 +2,7 @@
 
 THE equation codegen (see ../README.md for the overview): the untouched,
 hand-written OLF Java is the single source of truth; the fused CUDA kernels +
-scatter tables in `native/cuda/` are parsed and transpiled from it. Covers all
+scatter tables in `native/cuda/equations/generated/` are parsed and transpiled from it. Covers all
 seven families: closed-branch, open-branch P/Q, shunt, HVDC AC emulation and the
 ZIP/exponential load models (`vdl` — the GPU fill kernels) plus the two
 current-magnitude families (closed/open) as NEW GPU
@@ -32,7 +32,7 @@ OLF Java (src/main, upstream)                spec_closed_branch.py (METADATA onl
   |  private helpers AND sibling calls                 |
   +--> flat Java expressions  --(rewrite sinTheta -> sinTheta<side> etc., the
         (valid C for doubles)   shared per-element trig locals computed from the
-                                PARSED theta1/theta2 bodies)--> native/cuda/closed_branch.cuh
+                                PARSED theta1/theta2 bodies)--> native/cuda/equations/generated/closed_branch.cuh
 ```
 
 The emitted kernel bodies are the **verbatim OLF Java text** — reviewable line by
@@ -100,15 +100,15 @@ exactly the factoring `AcNetworkVector` does on the CPU.
     own values, ~1e-6 (replaces the autodiff guarantee; audits the production
     Jacobian itself; also confirms the DROPPED zero derivatives FD to ~0).
     Skipped for HVDC (`approx_jacobian`), like the pipeline's autodiff skip.
-  - **C. drop-in** — the rendered kernel == the COMMITTED `native/cuda/<family>.cuh`,
+  - **C. drop-in** — the rendered kernel == the COMMITTED `native/cuda/equations/generated/<family>.cuh`,
     output-for-output in the same order, 1e-12. Since adoption this is the drift
     guard (rendered vs committed render); at adoption time it proved the swap
     against the SymPy pipeline's kernels (≤7e-15).
   - **D. rendered** — the rendered kernel == the golden manifest, 1e-12.
-- Kernels are emitted into `native/cuda/` (all seven host-compile clean in ONE
+- Kernels are emitted into `native/cuda/equations/generated/` (all seven host-compile clean in ONE
   translation unit with `g++ -Wall -Wextra` — the shared `R2` constexpr guard is
   exercised); the four fill-kernel families also emit their scatter
-  `.scatter.json` + `_scatter.h` from the spec's stamp, validated by
+  `_scatter.h` + `codegen/scatter/<family>.scatter.json` from the spec's stamp, validated by
   `../check_scatter.py`.
 
 ## Run

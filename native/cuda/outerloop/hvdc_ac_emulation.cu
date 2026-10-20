@@ -16,7 +16,7 @@
 #include "../common/codes/gpu_outer_loop_kind.cuh"
 #include "../common/codes/gpu_ac_emulation_status.cuh"
 #include "../common/codes/gpu_row_mode.cuh"
-#include "hvdc.cuh"
+#include "../equations/generated/hvdc.cuh"
 
 #include "hvdc_ac_emulation.cuh"
 

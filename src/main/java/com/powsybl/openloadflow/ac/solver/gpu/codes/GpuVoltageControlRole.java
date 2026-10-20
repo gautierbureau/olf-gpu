@@ -13,7 +13,7 @@ package com.powsybl.openloadflow.ac.solver.gpu.codes;
  * controllers (pilot-self, docs/gpu-vs-olf.md section 6). A remote member splits in two on OLF's
  * voltageRemoteControlRobustMode rule (ReactiveLimitsOuterLoop: realistic-voltage pins of remote controllers),
  * which exempts a member whose own control is local. Mirrored by
- * native/cuda/jni/common/codes/gpu_voltage_control_role.cuh.
+ * native/cuda/common/codes/gpu_voltage_control_role.cuh.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */

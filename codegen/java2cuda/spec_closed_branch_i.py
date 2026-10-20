@@ -46,7 +46,7 @@ MODULE = {
     "constants": {"R2": 1, "A2": 0},
 
     # --- CUDA emission identity (NEW — no residual-pipeline counterpart) --------
-    "cuda_path": "native/cuda/closed_branch_i.cuh",
+    "cuda_path": "native/cuda/equations/generated/closed_branch_i.cuh",
     "cuda_namespace": "powsybl::openloadflow",
     "cuda_routine": "evalClosedBranchI",
     "cuda_fn_macro": "CBI_FN",

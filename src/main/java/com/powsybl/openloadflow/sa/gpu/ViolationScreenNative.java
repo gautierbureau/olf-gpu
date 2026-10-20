@@ -12,7 +12,7 @@ import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 /**
  * The device's violation screen: a limit table uploaded once per run, screened against a batch of states.
  *
- * <p>JNI glue: {@code native/cuda/jni/olf_gpu_violations.cu}.
+ * <p>JNI glue: {@code native/cuda/sa/olf_gpu_violations.cu}.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */

@@ -12,7 +12,7 @@ import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 /**
  * The batched sensitivities the incremental control loops read.
  *
- * <p>JNI glue: {@code native/cuda/jni/jni/sensitivity_jni.cu}.
+ * <p>JNI glue: {@code native/cuda/jni/sensitivity_jni.cu}.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */

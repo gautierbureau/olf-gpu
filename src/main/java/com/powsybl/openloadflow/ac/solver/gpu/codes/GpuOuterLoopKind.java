@@ -10,7 +10,7 @@ package com.powsybl.openloadflow.ac.solver.gpu.codes;
 /**
  * The outer loops the device driver runs, named after OLF's loops. A {@code HOST_*} kind is a loop the driver leaves
  * to OLF: it pauses at the loop's slot and OLF's own loop runs there; the host-loop mask has one bit per host kind
- * ({@link #hostMaskBit}). Mirrored by native/cuda/jni/common/codes/gpu_outer_loop_kind.cuh.
+ * ({@link #hostMaskBit}). Mirrored by native/cuda/common/codes/gpu_outer_loop_kind.cuh.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */

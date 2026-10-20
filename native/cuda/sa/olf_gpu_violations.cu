@@ -22,14 +22,14 @@
 // i = hypot(p, q) / v but s = sqrt(p*p + q*q), which are not the same function in floating point.
 #include <cuda_runtime.h>
 #include <jni.h>
-#include "jni/olf_jni.h"
+#include "../jni/olf_jni.h"
 #include <cstdio>
 #include <cstdlib>
 #include <vector>
 
-#include "../closed_branch.cuh"
-#include "../open_branch.cuh"
-#include "common/codes/gpu_two_sides.cuh"
+#include "../equations/generated/closed_branch.cuh"
+#include "../equations/generated/open_branch.cuh"
+#include "../common/codes/gpu_two_sides.cuh"
 
 using namespace powsybl::openloadflow;
 

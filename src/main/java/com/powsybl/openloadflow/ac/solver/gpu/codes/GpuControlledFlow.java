@@ -17,7 +17,7 @@ package com.powsybl.openloadflow.ac.solver.gpu.codes;
  *   <li>CURRENT: AcIncrementalPhaseControlOuterLoop, TransformerPhaseControl.Mode.LIMITER (a1 taps, one-sided).</li>
  * </ul>
  * The driver selects kinds with a mask of {@code 1 << kind}. Mirrored by
- * native/cuda/jni/common/codes/gpu_controlled_flow.cuh.
+ * native/cuda/common/codes/gpu_controlled_flow.cuh.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */

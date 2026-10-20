@@ -2,7 +2,7 @@
 #
 # Guard for the java2cuda equation codegen. The hand-written OLF equation Java
 # (src/main/java, byte-identical to upstream) is the SINGLE SOURCE OF TRUTH; the
-# fused CUDA kernels + scatter tables in native/cuda are parsed and transpiled
+# fused CUDA kernels + scatter tables in native/cuda/equations/generated are parsed and transpiled
 # from it (codegen/java2cuda, stdlib parser + one Jinja template — no SymPy:
 # OLF hand-writes both the values and the Jacobian, nothing is derived).
 #
@@ -43,7 +43,7 @@ jobs:
       - name: Alert if generated kernels are stale or hand-edited
         run: |
           if ! git diff --quiet; then
-            echo "::warning::native/cuda kernels differ from a fresh render of the OLF Java."
+            echo "::warning::native/cuda/equations/generated kernels differ from a fresh render of the OLF Java."
             echo "If you changed a formula method in src/main/java: run codegen/regenerate.sh and commit."
             echo "If a kernel file was hand-edited: revert it — kernels are generated from the Java."
             git --no-pager diff --stat

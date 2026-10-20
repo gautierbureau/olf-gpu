@@ -9,10 +9,10 @@
 #include <utility>
 #include <vector>
 
-#include "closed_branch_scatter.h"
-#include "open_branch_scatter.h"
-#include "shunt_scatter.h"
-#include "hvdc_scatter.h"
+#include "../equations/generated/closed_branch_scatter.h"
+#include "../equations/generated/open_branch_scatter.h"
+#include "../equations/generated/shunt_scatter.h"
+#include "../equations/generated/hvdc_scatter.h"
 
 #include "csr_pattern.cuh"
 #include "shared_structure.cuh"

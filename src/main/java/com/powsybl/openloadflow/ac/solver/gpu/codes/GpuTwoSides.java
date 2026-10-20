@@ -13,7 +13,7 @@ import com.powsybl.iidm.network.TwoSides;
  * A branch side as the device reads it: powsybl's {@link TwoSides}, by ordinal (ONE 0, TWO 1; not {@code getNum()}).
  * Every pack that carries a side uses it: DISTR_Q and remote-member reactive terms, controlled flows, limits and
  * violations, side-open branches, contingencies, HVDC curve stations and the zero-impedance coupler packs. Mirrored by
- * native/cuda/jni/common/codes/gpu_two_sides.cuh (GpuCodesMirrorTest checks it equals OLF's ordinals).
+ * native/cuda/common/codes/gpu_two_sides.cuh (GpuCodesMirrorTest checks it equals OLF's ordinals).
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */

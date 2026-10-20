@@ -11,7 +11,7 @@ import com.powsybl.openloadflow.network.LfHvdc;
 
 /**
  * OLF's {@code LfHvdc.AcEmulationControl.AcEmulationStatus} as the device holds it, per (scenario, hvdc). Mirrored by
- * native/cuda/jni/common/codes/gpu_ac_emulation_status.cuh.
+ * native/cuda/common/codes/gpu_ac_emulation_status.cuh.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */

@@ -18,7 +18,7 @@
 #include "../common/codes/gpu_distributed_slack_factor_mode.cuh"
 #include "../common/codes/gpu_outer_loop_kind.cuh"
 #include "../common/codes/gpu_ac_emulation_status.cuh"
-#include "hvdc.cuh"
+#include "../equations/generated/hvdc.cuh"
 #include "forced_target_q.cuh"
 #include "slack_participants.cuh"
 #include "distributed_slack.cuh"

@@ -12,7 +12,7 @@ import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 /**
  * The device's shunt voltage control loops, incremental and discrete.
  *
- * <p>JNI glue: {@code native/cuda/jni/jni/shunt_voltage_control_jni.cu}.
+ * <p>JNI glue: {@code native/cuda/jni/shunt_voltage_control_jni.cu}.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */

@@ -13,7 +13,7 @@ import com.powsybl.openloadflow.ac.equations.AcVariableType;
  * OLF's {@link AcVariableType}, by ordinal, for the variable types the device reads: the MAX_VOLTAGE_CHANGE step clamp
  * (varType, one per state row) clamps on the BUS_V and BUS_PHI steps only, as OLF's
  * {@code MaxVoltageChangeStateVectorScaling}. Every other ordinal is scaled with the step and never a clamp source.
- * Mirrored by native/cuda/jni/common/codes/gpu_ac_variable_type.cuh (GpuCodesMirrorTest checks it equals OLF's ordinals).
+ * Mirrored by native/cuda/common/codes/gpu_ac_variable_type.cuh (GpuCodesMirrorTest checks it equals OLF's ordinals).
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */

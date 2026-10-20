@@ -10,7 +10,7 @@ package com.powsybl.openloadflow.ac.equations.vector.gpu;
 /**
  * The zero-impedance (coupler) tables of the device structure.
  *
- * <p>JNI glue: {@code native/cuda/jni/jni/zero_impedance_jni.cu}.
+ * <p>JNI glue: {@code native/cuda/jni/zero_impedance_jni.cu}.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */

@@ -6,7 +6,7 @@
 #include <utility>
 #include <vector>
 
-#include "closed_branch_scatter.h"
+#include "../equations/generated/closed_branch_scatter.h"
 
 #include "structure_build.cuh"
 #include "../common/codes/gpu_two_sides.cuh"

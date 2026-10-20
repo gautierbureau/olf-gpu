@@ -13,7 +13,7 @@
 #                        FD floor). This audits the PRODUCTION Jacobian itself —
 #                        the check that replaces the residual pipeline's autodiff.
 #   C. drift guard     — the RENDERED kernel equals the COMMITTED
-#                        native/cuda/<family>.cuh: both .cuh texts are parsed
+#                        native/cuda/equations/generated/<family>.cuh: both .cuh texts are parsed
 #                        (locals + SoA assignments) and evaluated in Python over
 #                        the same raw inputs, output-for-output, to 1e-12. At
 #                        adoption time this proved the swap against the SymPy
@@ -268,10 +268,10 @@ def check_dropin(mod, rendered_text):
     (built from that exact order) stay valid verbatim. The current-magnitude
     families are NEW GPU targets — the residual pipeline emitted no kernel for
     them, so there is nothing to compare against."""
-    committed_path = os.path.join(ROOT, "native", "cuda", os.path.basename(mod["cuda_path"]))
+    committed_path = os.path.join(ROOT, mod["cuda_path"])
     if not os.path.exists(committed_path):
         print(f"  C. drop-in: skipped — NEW GPU target (the residual pipeline emitted no "
-              f"native/cuda/{os.path.basename(mod['cuda_path'])})")
+              f"{mod['cuda_path']})")
         return
     with open(committed_path) as f:
         committed = f.read()
@@ -292,7 +292,7 @@ def check_dropin(mod, rendered_text):
             if err > EQUIV_TOL:
                 raise SystemExit(f"FAIL drop-in: {name} parsed={a[name]!r} committed={b[name]!r} relerr={err:.3e}")
     print(f"  C. drop-in: {len(no)} rendered outputs == the committed "
-          f"native/cuda/{os.path.basename(mod['cuda_path'])}, same order "
+          f"{mod['cuda_path']}, same order "
           f"(worst relerr {worst:.2e} < {EQUIV_TOL:g}) — scatter tables reusable verbatim")
 
 

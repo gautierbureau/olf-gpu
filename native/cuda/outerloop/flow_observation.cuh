@@ -8,8 +8,8 @@
 
 #include <cmath>
 
-#include "closed_branch.cuh"
-#include "closed_branch_scatter.h"
+#include "../equations/generated/closed_branch.cuh"
+#include "../equations/generated/closed_branch_scatter.h"
 #include "../common/codes/gpu_controlled_flow.cuh"
 #include "../common/codes/gpu_pi_model_column.cuh"
 #include "../common/codes/gpu_two_sides.cuh"

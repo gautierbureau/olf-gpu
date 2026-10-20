@@ -12,7 +12,7 @@ import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 /**
  * The device's distributed-slack tables and per-scenario overrides (DistributedSlackOuterLoop).
  *
- * <p>JNI glue: {@code native/cuda/jni/jni/distributed_slack_jni.cu}.
+ * <p>JNI glue: {@code native/cuda/jni/distributed_slack_jni.cu}.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */

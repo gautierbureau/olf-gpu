@@ -4,7 +4,7 @@
 #
 # Validate a family's scatter stamp (codegen/java2cuda/spec_<family>.py "stamp")
 # against OLF's REAL equation-system wiring, so the generated scatter descriptor
-# (native/cuda/<family>.scatter.json) cannot silently drift from the Java the GPU
+# (codegen/scatter/<family>.scatter.json) cannot silently drift from the Java the GPU
 # kernel must reproduce. Two authoritative, parseable sources per family:
 #
 #   columns   — array families (closed-branch): the vector evaluator's

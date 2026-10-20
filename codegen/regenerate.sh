@@ -15,7 +15,7 @@ python3 codegen/java2cuda/prove.py
 echo "[2/3] check scatter stamps vs OLF equation-system wiring"
 python3 codegen/check_scatter.py
 
-echo "[3/3] render: OLF Java -> native/cuda/*.cuh + scatter tables"
+echo "[3/3] render: OLF Java -> native/cuda/equations/generated/*.cuh + scatter tables"
 python3 codegen/java2cuda/java2cuda.py
 
 echo

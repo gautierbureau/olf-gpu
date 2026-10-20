@@ -482,7 +482,7 @@ doesn't rediscover them.
   margin (log only, no algorithmic effect). DC variant ignores LIMITER PSTs entirely.
 
   **Port state — much of the structure already exists and is unreachable today:** `CB_SCATTER`
-  (`native/cuda/closed_branch_scatter.h`) already carries `dp1da1[5] dq1da1[12] dp2da1[19]
+  (`native/cuda/equations/generated/closed_branch_scatter.h`) already carries `dp1da1[5] dq1da1[12] dp2da1[19]
   dq2da1[26]` scattering to the branch-owned α1 column (endpoint 2, colVar 0), and
   `GpuAcDataExtractor:203` already packs `branchAlphaCol` into `cbIdx[8]` — both dead because
   `validate()` throws first. Staged port: (1) allowlist α1 + pack the `BRANCH_TARGET_ALPHA1`

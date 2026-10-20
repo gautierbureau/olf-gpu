@@ -25,7 +25,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Every code family in this package has ONE definition per side: the Java class here and a header of the same name
- * in native/cuda/jni/common/codes. This test parses each header and checks it holds exactly the Java constants, so
+ * in native/cuda/common/codes. This test parses each header and checks it holds exactly the Java constants, so
  * the two sides cannot drift apart. No device needed.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
@@ -33,7 +33,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class GpuCodesMirrorTest {
 
     private static final Path JAVA_DIR = Path.of("src/main/java/com/powsybl/openloadflow/ac/solver/gpu/codes");
-    private static final Path NATIVE_DIR = Path.of("native/cuda/jni/common/codes");
+    private static final Path NATIVE_DIR = Path.of("native/cuda/common/codes");
     private static final Pattern NAMESPACE = Pattern.compile("namespace (\\w+) \\{(.*?)\\n}", Pattern.DOTALL);
     private static final Pattern CONSTANT = Pattern.compile("constexpr int (\\w+) = (-?\\d+);");
 

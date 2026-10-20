@@ -12,7 +12,7 @@ package com.powsybl.openloadflow.ac.solver.gpu.codes;
  * (AFTER_GENERATOR) / SimpleTransformerVoltageControlOuterLoop and ShuntVoltageControlOuterLoop (WITH_GENERATOR)
  * first solve the ratio or susceptance continuously, then round it to a tap or section and disable the control
  * (readBatchTransformerVoltageControlState / readBatchShuntVoltageControlState). Mirrored by
- * native/cuda/jni/common/codes/gpu_discrete_control_member_state.cuh.
+ * native/cuda/common/codes/gpu_discrete_control_member_state.cuh.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */

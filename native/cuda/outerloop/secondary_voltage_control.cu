@@ -20,7 +20,7 @@
 #include "../common/codes/gpu_row_mode.cuh"
 #include "../common/codes/gpu_two_sides.cuh"
 #include <cublas_v2.h>
-#include "closed_branch.cuh"
+#include "../equations/generated/closed_branch.cuh"
 #include "../solver/driver_steps.cuh"
 #include "../equations/scenario_overrides.cuh"
 #include "flow_observation.cuh"

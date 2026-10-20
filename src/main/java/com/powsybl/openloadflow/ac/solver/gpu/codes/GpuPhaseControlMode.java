@@ -9,7 +9,7 @@ package com.powsybl.openloadflow.ac.solver.gpu.codes;
 
 /**
  * OLF's {@code TransformerPhaseControl.Mode} of a continuous phase control (setBatchContinuousPhase kind[]), with
- * OLF's ordinals. Mirrored by native/cuda/jni/common/codes/gpu_phase_control_mode.cuh.
+ * OLF's ordinals. Mirrored by native/cuda/common/codes/gpu_phase_control_mode.cuh.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */

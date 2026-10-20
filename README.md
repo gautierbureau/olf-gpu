@@ -17,7 +17,7 @@ GPU extension for [powsybl-open-loadflow](https://github.com/powsybl/powsybl-ope
   standard AC path when no GPU is present. Best measured: pegase9241, 500 contingencies,
   K=4 — ~4.8 ms/scenario warm on an RTX A1000 (cuDSS 0.8.0, uniform batch).
 
-**Stock OLF is never modified.** The fused CUDA kernels in `native/cuda/` are PARSED and
+**Stock OLF is never modified.** The fused CUDA kernels in `native/cuda/equations/generated/` are PARSED and
 transpiled from OLF's own hand-written equation Java by `codegen/java2cuda` (no symbolic
 math — OLF hand-writes both the values and the Jacobian); the proof suite pins them to a
 frozen golden manifest and to the committed kernels, and `codegen/check_scatter.py`

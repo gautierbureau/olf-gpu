@@ -12,7 +12,7 @@ import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 /**
  * The transposed solve on a batch context's factors.
  *
- * <p>JNI glue: {@code native/cuda/jni/jni/transposed_solve_jni.cu}.
+ * <p>JNI glue: {@code native/cuda/jni/transposed_solve_jni.cu}.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */

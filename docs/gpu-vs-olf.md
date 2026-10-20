@@ -39,7 +39,7 @@ Everything below follows from this constraint.
 ## 2. Consequences for the equation system
 
 The device-only code of 2.1, 2.3 and 2.4 lives in one place: the Java package `ac.equations.vector.gpu.fixedmatrix` and
-the native directory `native/cuda/jni/fixedmatrix/`. Everything else in the GPU code follows OLF's own layout and names.
+the native directory `native/cuda/fixedmatrix/`. Everything else in the GPU code follows OLF's own layout and names.
 
 ### 2.1 Stable rows: one row per variable
 
@@ -185,7 +185,7 @@ are indexed `[s * count + index]`.
 ## 7. Codes shared with the device
 
 Java and the native library exchange some OLF notions as integers. Each code family has one definition per side,
-under the same name: a class in `ac.solver.gpu.codes` and a header in `native/cuda/jni/common/codes`
+under the same name: a class in `ac.solver.gpu.codes` and a header in `native/cuda/common/codes`
 (`GpuCodesMirrorTest` checks they agree). Where OLF has the notion, the family is named `Gpu` + OLF's name and its
 constants carry OLF's constant names.
 

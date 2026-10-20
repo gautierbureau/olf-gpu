@@ -16,8 +16,8 @@ src/main/java (untouched, upstream)          codegen/java2cuda/spec_<family>.py
   |  flatten locals + recursively inline               |
   |  private helpers AND sibling calls                 v
   +--> flat Java expressions --(rewrite precomputed-trig params to shared kernel
-        (valid C for doubles)  locals, hoist components)--> native/cuda/<family>.cuh
-                                                          + <family>.scatter.json/_scatter.h
+        (valid C for doubles)  locals, hoist components)--> native/cuda/equations/generated/<family>.cuh
+                                                          + <family>_scatter.h, codegen/scatter/<family>.scatter.json
 ```
 
 The emitted kernel bodies are the VERBATIM OLF Java expressions — reviewable

@@ -12,7 +12,7 @@ import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 /**
  * The device outer-loop driver: host-owned loop slots, pause and resume.
  *
- * <p>JNI glue: {@code native/cuda/jni/jni/driver_jni.cu}.
+ * <p>JNI glue: {@code native/cuda/jni/driver_jni.cu}.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */

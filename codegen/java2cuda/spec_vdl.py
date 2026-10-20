@@ -37,7 +37,7 @@ MODULE = {
     "constants": {},
 
     # --- CUDA emission identity ------------------------------------------------
-    "cuda_path": "native/cuda/vdl.cuh",
+    "cuda_path": "native/cuda/equations/generated/vdl.cuh",
     "cuda_namespace": "powsybl::openloadflow",
     "cuda_routine": "evalVdl",
     "cuda_fn_macro": "VDL_FN",

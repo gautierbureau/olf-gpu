@@ -12,7 +12,7 @@ import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 /**
  * The read-back of a batched solve's state, targets and row modes.
  *
- * <p>JNI glue: {@code native/cuda/jni/jni/batch_readback_jni.cu}.
+ * <p>JNI glue: {@code native/cuda/jni/batch_readback_jni.cu}.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */

@@ -12,7 +12,7 @@ import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 /**
  * The device's HVDC AC-emulation loops (FreezingHvdcACEmulationOuterloop, AcHvdcAcEmulationLimitsOuterLoop).
  *
- * <p>JNI glue: {@code native/cuda/jni/jni/hvdc_jni.cu}.
+ * <p>JNI glue: {@code native/cuda/jni/hvdc_jni.cu}.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */

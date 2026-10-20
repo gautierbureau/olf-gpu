@@ -40,9 +40,9 @@ MODULE = {
     "constants": {"R2": 1},
 
     # --- CUDA emission identity ------------------------------------------------
-    "cuda_path": "native/cuda/open_branch.cuh",
-    "scatter_path": "native/cuda/open_branch.scatter.json",
-    "scatter_header_path": "native/cuda/open_branch_scatter.h",
+    "cuda_path": "native/cuda/equations/generated/open_branch.cuh",
+    "scatter_path": "codegen/scatter/open_branch.scatter.json",
+    "scatter_header_path": "native/cuda/equations/generated/open_branch_scatter.h",
     "cuda_namespace": "powsybl::openloadflow",
     "cuda_routine": "evalOpenBranch",
     "cuda_fn_macro": "OB_FN",

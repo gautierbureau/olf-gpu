@@ -27,9 +27,9 @@ MODULE = {
     "constants": {},
 
     # --- CUDA emission identity ------------------------------------------------
-    "cuda_path": "native/cuda/shunt.cuh",
-    "scatter_path": "native/cuda/shunt.scatter.json",
-    "scatter_header_path": "native/cuda/shunt_scatter.h",
+    "cuda_path": "native/cuda/equations/generated/shunt.cuh",
+    "scatter_path": "codegen/scatter/shunt.scatter.json",
+    "scatter_header_path": "native/cuda/equations/generated/shunt_scatter.h",
     "cuda_namespace": "powsybl::openloadflow",
     "cuda_routine": "evalShunt",
     "cuda_fn_macro": "SH_FN",

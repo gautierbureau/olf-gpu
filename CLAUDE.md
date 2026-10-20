@@ -27,7 +27,7 @@ test-jar does not export them — keep them signature-compatible).
 **The hand-written OLF equation Java is the single source of truth.** The term
 classes in `src/main/java/.../ac/equations/` are BYTE-IDENTICAL to upstream main
 (never edit a formula there except as an upstream-able change); the fused CUDA
-kernels + scatter tables in `native/cuda/` are PARSED and TRANSPILED from them by
+kernels + scatter tables in `native/cuda/equations/generated/` are PARSED and TRANSPILED from them by
 `codegen/java2cuda/` (stdlib parser reusing `extract_golden.py`'s flattening +
 one Jinja template — **no SymPy**: OLF hand-writes values AND Jacobian, nothing
 is derived). Per-family specs `codegen/java2cuda/spec_<family>.py` are METADATA
@@ -50,7 +50,7 @@ i1(...,theta)), helper hoisting to kernel locals with dependencies
 ## Regenerate / verify
 
 ```
-codegen/regenerate.sh      # prove -> check_scatter -> render into native/cuda
+codegen/regenerate.sh      # prove -> check_scatter -> render into native/cuda/equations/generated/
 mvn -o validate            # checkstyle — must be 0 violations
 ```
 Proof (`codegen/java2cuda/prove.py`, stdlib): A parse == golden manifest
@@ -65,7 +65,7 @@ own) then `codegen/regenerate.sh` + commit kernels (+ golden if math changed).
 
 ## Conventions & gotchas
 
-- **Never hand-edit** `native/cuda/*.cuh` / scatter files — they are generated
+- **Never hand-edit** `native/cuda/equations/generated/*` / `codegen/scatter/*.scatter.json` — they are generated
   from the Java (CI flags any diff).
 - The parser handles OLF's expression-only Java subset (locals + single return,
   helper calls, boolean predicates, ternaries, Math/FastMath); anything else

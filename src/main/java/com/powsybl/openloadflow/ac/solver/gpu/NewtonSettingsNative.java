@@ -12,7 +12,7 @@ import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 /**
  * The batched Newton-Raphson settings: stopping criteria, line search, iteration budgets.
  *
- * <p>JNI glue: {@code native/cuda/jni/jni/newton_settings_jni.cu}.
+ * <p>JNI glue: {@code native/cuda/jni/newton_settings_jni.cu}.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */

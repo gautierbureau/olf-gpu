@@ -10,7 +10,7 @@ package com.powsybl.openloadflow.ac.equations.vector.gpu;
 /**
  * The remote voltage control (DISTR_Q) tables and per-scenario overrides.
  *
- * <p>JNI glue: {@code native/cuda/jni/jni/remote_voltage_control_jni.cu}.
+ * <p>JNI glue: {@code native/cuda/jni/remote_voltage_control_jni.cu}.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */

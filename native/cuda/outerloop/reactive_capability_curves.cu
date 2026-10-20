@@ -15,7 +15,7 @@
 #include "../common/launch.cuh"
 #include "../common/codes/gpu_ac_emulation_status.cuh"
 #include "../common/codes/gpu_two_sides.cuh"
-#include "hvdc.cuh"
+#include "../equations/generated/hvdc.cuh"
 #include "reactive_capability_curve.cuh"
 #include "slack_participants.cuh"
 #include "reactive_capability_curves.cuh"

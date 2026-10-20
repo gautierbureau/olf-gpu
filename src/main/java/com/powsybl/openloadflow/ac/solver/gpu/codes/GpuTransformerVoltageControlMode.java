@@ -13,7 +13,7 @@ import com.powsybl.openloadflow.OpenLoadFlowParameters;
  * Which of OLF's discrete transformer voltage control loops the device runs (setBatchTransformerVoltageControl mode):
  * OLF's {@link OpenLoadFlowParameters.TransformerVoltageControlMode}, by ordinal. INCREMENTAL_VOLTAGE_CONTROL runs as its
  * own loop (GpuIncrementalTransformerVoltageControlOuterLoop), so the device reads only these two. Mirrored by
- * native/cuda/jni/common/codes/gpu_transformer_voltage_control_mode.cuh (GpuCodesMirrorTest checks it equals OLF's
+ * native/cuda/common/codes/gpu_transformer_voltage_control_mode.cuh (GpuCodesMirrorTest checks it equals OLF's
  * ordinals).
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}

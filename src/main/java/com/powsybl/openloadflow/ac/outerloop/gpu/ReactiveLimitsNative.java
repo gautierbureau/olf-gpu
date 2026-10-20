@@ -13,7 +13,7 @@ import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
  * The device's reactive-limit tables and per-scenario overrides (ReactiveLimitsOuterLoop): the pin entries,
  * the capability curves, forced target Q, the realistic-voltage check and the remote member pins.
  *
- * <p>JNI glue: {@code native/cuda/jni/jni/reactive_limits_jni.cu}.
+ * <p>JNI glue: {@code native/cuda/jni/reactive_limits_jni.cu}.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */

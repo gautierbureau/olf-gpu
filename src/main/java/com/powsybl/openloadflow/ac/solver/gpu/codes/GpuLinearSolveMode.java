@@ -9,7 +9,7 @@ package com.powsybl.openloadflow.ac.solver.gpu.codes;
 
 /**
  * How a batch context factors its matrices (the mode of createBatchContext). Device only: OLF factors one KLU matrix
- * per solve. Mirrored by native/cuda/jni/common/codes/gpu_linear_solve_mode.cuh.
+ * per solve. Mirrored by native/cuda/common/codes/gpu_linear_solve_mode.cuh.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */

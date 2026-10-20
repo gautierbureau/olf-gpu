@@ -10,7 +10,7 @@ package com.powsybl.openloadflow.ac.solver.gpu.codes;
 /**
  * Which loop OLF lets repair an unrealistic voltage before its realistic-voltage check fails the run
  * ({@code AcLoadFlowEngine.runOuterLoops}: the last configured loop whose {@code canFixUnrealisticState()} is true,
- * under voltageRemoteControlRobustMode). Mirrored by native/cuda/jni/common/codes/gpu_realistic_voltage_fixing_loop.cuh.
+ * under voltageRemoteControlRobustMode). Mirrored by native/cuda/common/codes/gpu_realistic_voltage_fixing_loop.cuh.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */

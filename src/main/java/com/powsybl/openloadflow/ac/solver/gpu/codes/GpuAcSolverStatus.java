@@ -10,7 +10,7 @@ package com.powsybl.openloadflow.ac.solver.gpu.codes;
 /**
  * A scenario's status at the end of a device solve ({@code BatchScenarioResult#convergenceStatus()}, the
  * {@code n + 2} column of the solve result). The first two are OLF's {@code AcSolverStatus}; the three negative ones
- * are the device's (docs/gpu-vs-olf.md, section 6). Mirrored by native/cuda/jni/common/codes/gpu_ac_solver_status.cuh.
+ * are the device's (docs/gpu-vs-olf.md, section 6). Mirrored by native/cuda/common/codes/gpu_ac_solver_status.cuh.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */

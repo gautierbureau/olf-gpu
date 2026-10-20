@@ -12,7 +12,7 @@ package com.powsybl.openloadflow.ac.solver.gpu.codes;
  * GenerationActivePowerDistributionStep.ParticipationType has four values; the device only needs to tell
  * REMAINING_MARGIN, whose factor depends on the direction and on what the participant already took, from every
  * other balance type, whose factor is fixed for the run. Mirrored by
- * native/cuda/jni/common/codes/gpu_distributed_slack_factor_mode.cuh.
+ * native/cuda/common/codes/gpu_distributed_slack_factor_mode.cuh.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */

@@ -25,7 +25,7 @@ BOTH detectors on every contingency of a census and compares field for field —
 
 ## Step 3: the kernel
 
-`native/cuda/jni/olf_gpu_violations.cu` — a SEPARATE translation unit that needs no cuDSS and
+`native/cuda/sa/olf_gpu_violations.cu` — a SEPARATE translation unit that needs no cuDSS and
 nothing from the solver's context, only the generated flow formulas, so it compiles in seconds and
 cannot perturb the solver's codegen (adding a parameter to a solve kernel has flipped a 1e-12 test
 before).

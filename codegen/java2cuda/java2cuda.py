@@ -13,8 +13,8 @@
 #     --(rewrite the precomputed-trig parameters to shared kernel locals:
 #        sinKsi -> sinKsi, sinTheta -> sinTheta<side>, computed ONCE per element
 #        from the parsed theta1/theta2 bodies — explicit trig sharing, no CSE)-->
-#   native/cuda/<family>.cuh  (bodies are the VERBATIM OLF Java text)
-#   + native/cuda/<family>.scatter.json / _scatter.h  (from the spec's stamp)
+#   native/cuda/equations/generated/<family>.cuh  (bodies are the VERBATIM OLF Java text)
+#   + codegen/scatter/<family>.scatter.json / native/cuda/equations/generated/<family>_scatter.h  (from the spec's stamp)
 #
 # The spec (spec_closed_branch.py) is metadata only; nothing is authored twice.
 # Derivative correctness is OLF's own (EquationsTest / production); prove.py adds a

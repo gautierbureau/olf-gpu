@@ -7,7 +7,7 @@
 /** Install the SecondaryVoltageControl zones for the in-kernel phase (OLF order 4). Controllers are
  *  addressed by their controlled bus's V row (the sensitivity's unit row and where a moved target lands)
  *  and their own bus V row (the reactive injection the K comes from); each carries a CSR slice of Q
- *  observables (kind 0/1 = a closed branch's side-1/side-2 reactive flow, 2 = a shunt) and the zones a
+ *  observables (a GpuReactiveTermKind: a closed branch's reactive flow on a GpuTwoSides side, or a shunt) and the zones a
  *  CSR slice of controllers. Returns 1 when the kernel loop owns them — it refuses a zone set wider than
  *  the in-kernel dense system, or an observable on an element the batch does not pack. */
 extern "C" JNIEXPORT jint JNICALL
@@ -15,7 +15,7 @@ OLF_JNI(ac_outerloop_gpu, SecondaryVoltageControlNative, setBatchSecondaryVoltag
         JNIEnv* env, jclass, jlong handle,
         jintArray jControlledBusVRow, jintArray jControllerBusVRow, jintArray jSecondaryVoltageControlReactiveLimitEntry, jdoubleArray jBaseTargetV,
         jdoubleArray jMinQ, jdoubleArray jMaxQ, jdoubleArray jLoadQ,
-        jintArray jReactiveTermStart, jintArray jReactiveTermKind, jintArray jReactiveTermElement, jintArray jReactiveTermShuntBRow,
+        jintArray jReactiveTermStart, jintArray jReactiveTermKind, jintArray jReactiveTermSide, jintArray jReactiveTermElement, jintArray jReactiveTermShuntBRow,
         jintArray jZoneStart, jintArray jZoneControllerBus, jintArray jZonePilotBusVRow, jdoubleArray jZoneTargetV,
         jdouble minPlausibleV, jdouble maxPlausibleV) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
@@ -35,7 +35,7 @@ OLF_JNI(ac_outerloop_gpu, SecondaryVoltageControlNative, setBatchSecondaryVoltag
         v.resize(env->GetArrayLength(a));
         env->GetDoubleArrayRegion(a, 0, static_cast<jsize>(v.size()), v.data());
     };
-    std::vector<int> busVRow, reactiveLimitEntry, qPtr, reactiveTermKind, reactiveTermElement, reactiveTermShuntBRow, zoneStart, zoneControllerBus, zonePilotBusVRow;
+    std::vector<int> busVRow, reactiveLimitEntry, qPtr, reactiveTermKind, reactiveTermSide, reactiveTermElement, reactiveTermShuntBRow, zoneStart, zoneControllerBus, zonePilotBusVRow;
     std::vector<double> minQ, maxQ, loadQ, zoneTargetV;
     readI(jControlledBusVRow, ctx->hSecondaryVoltageControlControlledBusVRow);
     readI(jControllerBusVRow, busVRow);
@@ -46,6 +46,7 @@ OLF_JNI(ac_outerloop_gpu, SecondaryVoltageControlNative, setBatchSecondaryVoltag
     readD(jLoadQ, loadQ);
     readI(jReactiveTermStart, qPtr);
     readI(jReactiveTermKind, reactiveTermKind);
+    readI(jReactiveTermSide, reactiveTermSide);
     readI(jReactiveTermElement, reactiveTermElement);
     readI(jReactiveTermShuntBRow, reactiveTermShuntBRow);
     readI(jZoneStart, zoneStart);
@@ -81,6 +82,7 @@ OLF_JNI(ac_outerloop_gpu, SecondaryVoltageControlNative, setBatchSecondaryVoltag
     ctx->dSecondaryVoltageControlLoadTargetQ.upload(loadQ.data(), nC * sizeof(double));
     ctx->dSecondaryVoltageControlReactiveTermStart.upload(qPtr.data(), qPtr.size() * sizeof(int));
     ctx->dSecondaryVoltageControlReactiveTermKind.upload(reactiveTermKind.data(), std::max<size_t>(reactiveTermKind.size(), 1) * sizeof(int));
+    ctx->dSecondaryVoltageControlReactiveTermSide.upload(reactiveTermSide.data(), std::max<size_t>(reactiveTermSide.size(), 1) * sizeof(int));
     ctx->dSecondaryVoltageControlReactiveTermElement.upload(reactiveTermElement.data(), std::max<size_t>(reactiveTermElement.size(), 1) * sizeof(int));
     ctx->dSecondaryVoltageControlReactiveTermShuntBRow.upload(reactiveTermShuntBRow.data(), std::max<size_t>(reactiveTermShuntBRow.size(), 1) * sizeof(int));
     ctx->dSecondaryVoltageControlZoneStart.upload(zoneStart.data(), zoneStart.size() * sizeof(int));

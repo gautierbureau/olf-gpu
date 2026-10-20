@@ -17,6 +17,8 @@ import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchSkips;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuAcSolverStatus;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuQLimitType;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuReactiveLimitsState;
+import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuReactiveTermKind;
+import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuTwoSides;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.EquationTerm;
 import com.powsybl.openloadflow.equations.Variable;
@@ -70,12 +72,13 @@ public final class GpuSecondaryVoltageControlOuterLoop {
     private GpuSecondaryVoltageControlOuterLoop() {
     }
 
-    /** One Q observable of a controller bus, as the DEVICE sees it: {@code kind} 0/1 = the CLOSED
-     *  BRANCH's side-1/side-2 reactive flow, whose gradient comes from the codegen'd evalClosedBranch
-     *  (the very function the fill scatters); 2 = a SHUNT's q = -b*v^2, i.e. OLF's
-     *  ShuntCompensatorReactiveFlowEquationTerm (dq/dv = -2bv, dq/db = -v^2). {@code elem} is the
-     *  PACK-relative element index; {@code bRow} a derived shunt's SHUNT_B row, -1 when b is fixed. */
-    public record ReactiveTerm(int kind, int elem, int bRow) {
+    /** One Q observable of a controller bus, as the DEVICE sees it: {@code kind} a {@link GpuReactiveTermKind},
+     *  CLOSED_BRANCH_REACTIVE_FLOW = the closed branch's reactive flow on {@code side} (a {@link GpuTwoSides}), whose
+     *  gradient comes from the codegen'd evalClosedBranch (the very function the fill scatters);
+     *  SHUNT_COMPENSATOR_REACTIVE_FLOW = a SHUNT's q = -b*v^2, i.e. OLF's ShuntCompensatorReactiveFlowEquationTerm
+     *  (dq/dv = -2bv, dq/db = -v^2), side NONE. {@code elem} is the PACK-relative element index; {@code bRow} a
+     *  derived shunt's SHUNT_B row, -1 when b is fixed. */
+    public record ReactiveTerm(int kind, int side, int elem, int bRow) {
     }
 
     /** One (controller, controlled) PAIR — a bijection under {@link #supported}: {@code vRow} is
@@ -167,11 +170,11 @@ public final class GpuSecondaryVoltageControlOuterLoop {
                         int elem = elementMapper.getElementIndex(branch);
                         if (branch.getBus1() == controller) {
                             qTerms.add((EquationTerm<AcVariableType, AcEquationType>) branch.getQ1());
-                            reactiveTerms.add(new ReactiveTerm(0, elem, -1));
+                            reactiveTerms.add(new ReactiveTerm(GpuReactiveTermKind.CLOSED_BRANCH_REACTIVE_FLOW, GpuTwoSides.ONE, elem, -1));
                         }
                         if (branch.getBus2() == controller) {
                             qTerms.add((EquationTerm<AcVariableType, AcEquationType>) branch.getQ2());
-                            reactiveTerms.add(new ReactiveTerm(1, elem, -1));
+                            reactiveTerms.add(new ReactiveTerm(GpuReactiveTermKind.CLOSED_BRANCH_REACTIVE_FLOW, GpuTwoSides.TWO, elem, -1));
                         }
                     }
                 }
@@ -180,7 +183,8 @@ public final class GpuSecondaryVoltageControlOuterLoop {
                         LfShunt shunt = optionalShunt.get();
                         qTerms.add((EquationTerm<AcVariableType, AcEquationType>) shunt.getQ());
                         Integer bRow = shuntBRows.get(shunt.getNum());
-                        reactiveTerms.add(new ReactiveTerm(2, elementMapper.getElementIndex(shunt), bRow != null ? bRow : -1));
+                        reactiveTerms.add(new ReactiveTerm(GpuReactiveTermKind.SHUNT_COMPENSATOR_REACTIVE_FLOW, GpuTwoSides.NONE,
+                                elementMapper.getElementIndex(shunt), bRow != null ? bRow : -1));
                     }
                 }
                 zoneControllerBuses.add(controllerBuses.size());
@@ -240,7 +244,7 @@ public final class GpuSecondaryVoltageControlOuterLoop {
     public static boolean uploadToDevice(long handle, Controllers controllers) {
         if (controllers == null || controllers.controllerBuses().isEmpty() || controllers.zones().isEmpty()) {
             SecondaryVoltageControlNative.setBatchSecondaryVoltageControl(handle, null, null, null, null, null, null, null,
-                    null, null, null, null, null, null, null, null, 0, 0);
+                    null, null, null, null, null, null, null, null, null, 0, 0);
             return false;
         }
         List<ControllerBus> controllerBuses = controllers.controllerBuses();
@@ -254,6 +258,7 @@ public final class GpuSecondaryVoltageControlOuterLoop {
         double[] loadQ = new double[nControllerBuses];
         int[] qPtr = new int[nControllerBuses + 1];
         List<Integer> reactiveTermKind = new ArrayList<>();
+        List<Integer> reactiveTermSide = new ArrayList<>();
         List<Integer> reactiveTermElement = new ArrayList<>();
         List<Integer> reactiveTermShuntBRow = new ArrayList<>();
         for (int c = 0; c < nControllerBuses; c++) {
@@ -268,6 +273,7 @@ public final class GpuSecondaryVoltageControlOuterLoop {
             qPtr[c] = reactiveTermKind.size();
             for (ReactiveTerm o : controllerBus.reactiveTerms()) {
                 reactiveTermKind.add(o.kind());
+                reactiveTermSide.add(o.side());
                 reactiveTermElement.add(o.elem());
                 reactiveTermShuntBRow.add(o.bRow());
             }
@@ -291,6 +297,7 @@ public final class GpuSecondaryVoltageControlOuterLoop {
         boolean owned = SecondaryVoltageControlNative.setBatchSecondaryVoltageControl(handle, controlledBusVRow, busVRow, reactiveLimitEntry, baseTargetV,
                 minQ, maxQ, loadQ, qPtr,
                 reactiveTermKind.stream().mapToInt(Integer::intValue).toArray(),
+                reactiveTermSide.stream().mapToInt(Integer::intValue).toArray(),
                 reactiveTermElement.stream().mapToInt(Integer::intValue).toArray(),
                 reactiveTermShuntBRow.stream().mapToInt(Integer::intValue).toArray(),
                 zoneStart, zoneControllerBus.stream().mapToInt(Integer::intValue).toArray(), zonePilotBusVRow, zoneTargetV,

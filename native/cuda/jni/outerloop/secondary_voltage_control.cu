@@ -16,6 +16,7 @@
 #include "../common/codes/gpu_q_limit_type.cuh"
 #include "../common/codes/gpu_linear_solve_mode.cuh"
 #include "../common/codes/gpu_controlled_flow.cuh"
+#include "../common/codes/gpu_reactive_term_kind.cuh"
 #include "../common/codes/gpu_row_mode.cuh"
 #include "../common/codes/gpu_two_sides.cuh"
 #include <cublas_v2.h>
@@ -41,7 +42,7 @@ struct SecondaryVoltageControlTables {
     int nControllerBuses, nZones, nReactiveLimitEntries;
     const int* controlledBusVRow; const int* controllerBusVRow; const int* reactiveLimitEntry;
     const double* baseTargetV; const double* minQ; const double* maxQ; const double* loadTargetQ;
-    const int* reactiveTermStart; const int* reactiveTermKind; const int* reactiveTermElement; const int* reactiveTermShuntBRow;
+    const int* reactiveTermStart; const int* reactiveTermKind; const int* reactiveTermSide; const int* reactiveTermElement; const int* reactiveTermShuntBRow;
     const int* zoneStart; const int* zoneControllerBus; const int* zonePilotBusVRow; const double* zoneTargetV;
     double* controlledBusTargetV; double* k0; double* jk; double* jvpp; double* secondaryVoltageControlReactiveLimitTargetV;
     char* controllerBusEnabled; char* needsAdjustment; char* rejected;
@@ -134,7 +135,7 @@ __global__ void secondaryVoltageControlGatherSensitivityBatch(SecondaryVoltageCo
         int elem = T.reactiveTermElement[k];
         // NO isDisabled test here, deliberately: OLF's calculateSensiQ sums the controller bus's branch
         // terms as they stand, an outaged one included. Replicating the quirk keeps us on its trajectory.
-        if (T.reactiveTermKind[k] == 2) {                               // shunt: q = -b v^2
+        if (T.reactiveTermKind[k] == GpuReactiveTermKind::SHUNT_COMPENSATOR_REACTIVE_FLOW) {  // shunt: q = -b v^2
             int e = elem - shuntOffset;
             if (e < 0) continue;
             double g = shuntParameters[e * 2];
@@ -153,7 +154,7 @@ __global__ void secondaryVoltageControlGatherSensitivityBatch(SecondaryVoltageCo
             if (findTapOverride(nClosedBranchParameterOverrides, closedBranchParameterOverrideScenarioElement, closedBranchParameterOverrideValues, s, e, pOv)) p = pOv;
             const int* q = closedBranchIndices + e * 12;
             double g[18];
-            controlledFlowAndGradient(T.reactiveTermKind[k] == 0 ? GpuTwoSides::ONE : GpuTwoSides::TWO, GpuControlledFlow::REACTIVE_POWER, p, xs, q, g);  // the reactive flow on side 1 / 2
+            controlledFlowAndGradient(T.reactiveTermSide[k], GpuControlledFlow::REACTIVE_POWER, p, xs, q, g);  // the closed branch's reactive flow on its side
             double d[6] = { dxs[q[5]], dxs[q[7]], dxs[q[4]], dxs[q[6]],
                             q[8] >= 0 ? dxs[q[8]] : 0.0, q[9] >= 0 ? dxs[q[9]] : 0.0 };
             for (int m = 0; m < 6; m++) sq += g[m] * d[m];
@@ -304,6 +305,7 @@ static SecondaryVoltageControlTables secondaryVoltageControlTables(BatchSolverCo
     T.baseTargetV = ctx->dSecondaryVoltageControlBaseTargetV.as<double>(); T.minQ = ctx->dSecondaryVoltageControlMinQ.as<double>();
     T.maxQ = ctx->dSecondaryVoltageControlMaxQ.as<double>(); T.loadTargetQ = ctx->dSecondaryVoltageControlLoadTargetQ.as<double>();
     T.reactiveTermStart = ctx->dSecondaryVoltageControlReactiveTermStart.as<int>(); T.reactiveTermKind = ctx->dSecondaryVoltageControlReactiveTermKind.as<int>();
+    T.reactiveTermSide = ctx->dSecondaryVoltageControlReactiveTermSide.as<int>();
     T.reactiveTermElement = ctx->dSecondaryVoltageControlReactiveTermElement.as<int>(); T.reactiveTermShuntBRow = ctx->dSecondaryVoltageControlReactiveTermShuntBRow.as<int>();
     T.zoneStart = ctx->dSecondaryVoltageControlZoneStart.as<int>(); T.zoneControllerBus = ctx->dSecondaryVoltageControlZoneControllerBus.as<int>();
     T.zonePilotBusVRow = ctx->dSecondaryVoltageControlZonePilotBusVRow.as<int>(); T.zoneTargetV = ctx->dSecondaryVoltageControlZoneTargetV.as<double>();

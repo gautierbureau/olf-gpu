@@ -36,7 +36,7 @@ public final class SecondaryVoltageControlNative {
     public static native int setBatchSecondaryVoltageControl(long handle,
             int[] controlledBusVRow, int[] busVRow, int[] reactiveLimitEntry, double[] baseTargetV,
             double[] minQ, double[] maxQ, double[] loadQ,
-            int[] qPtr, int[] reactiveTermKind, int[] reactiveTermElement, int[] reactiveTermShuntBRow,
+            int[] qPtr, int[] reactiveTermKind, int[] reactiveTermSide, int[] reactiveTermElement, int[] reactiveTermShuntBRow,
             int[] zoneStart, int[] zoneControllerBus, int[] zonePilotBusVRow, double[] zoneTargetV,
             double minPlausibleV, double maxPlausibleV);
 }

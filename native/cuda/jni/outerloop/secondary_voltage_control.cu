@@ -364,8 +364,8 @@ void svcStep(BatchSolverContext* ctx, DriverPass& drv) {
         sensitivitySolve(ctx, drv, first);
         svcGatherBatch<<<grid(nC * nS), BLOCK, 0, ctx->stream>>>(svcTables(ctx), nS, n, i,
                 ctx->nElements, ctx->cbOffset, ctx->shOffset,
-                ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(),
-                ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(),
+                ctx->st->cb.parameters.as<double>(), ctx->st->cb.indices.as<int>(),
+                ctx->st->sh.parameters.as<double>(), ctx->st->sh.indices.as<int>(),
                 ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>(),
                 ctx->nShOv, ctx->dShOvSlotElem.as<int>(), ctx->dShOvGb.as<double>(),
                 ctx->dDisabled.as<char>(), ctx->dX.as<double>(), ctx->dDx.as<double>());

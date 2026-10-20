@@ -32,15 +32,17 @@ struct CudssCtx {
     }
 };
 
+// One family of equation terms evaluated per element (closed branch, open branch, shunt, HVDC AC emulation): the
+// element parameters and indices GpuAcData packs (ElementPack), and where each term's outputs land in F and J.
 struct Family {
-    int ne = 0, instride = 0, ixstride = 0, nout = 0;
-    DeviceBuf in, ix, dest;
-    DeviceBuf altDest, selRow;                               // Dynamic Q-relocation (cb only); empty when disabled
+    int elementCount = 0, parameterStride = 0, indexStride = 0, outputCount = 0;
+    DeviceBuf parameters, indices, destination;
+    DeviceBuf alternateDestination, selectorRow;             // Dynamic Q-relocation (cb only); empty when disabled
     DeviceBuf relocGroup, relocOff, relocPool;               // GROUP relocation (plan-A6): per-output group id +
     DeviceBuf relocDep;                                      // per output: 1 = dependent-pilot routing (depPick)
     bool dynReloc = false;                                   // slot-pool offset; pool = one slot per candidate
-    DeviceBuf pcDest, pcSel;                                 // Continuous phase control (cb only): P-flow row at a1
-    bool phaseCtl = false;                                   // pcDest/pcSel populated (mode-3 gated emission)
+    DeviceBuf phaseControlDestination, phaseControlSelector; // Continuous phase control (cb only): P-flow row at a1
+    bool hasPhaseControl = false;                            // phase control destinations populated (mode-3 gated emission)
 };
 
 // ziIdx slot 10 packs two things: bit 0 = spanning-tree edge, bits 1-2 = which side is a DEAD-END

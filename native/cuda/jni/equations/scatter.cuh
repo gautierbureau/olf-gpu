@@ -38,8 +38,8 @@ __host__ __device__ inline int stockPairPick(int m, const int* pool, int p, int 
     return frozen;
 }
 
-static __device__ void scatterAdd(int nout, const int* dest, const double* o, double* vals, double* F) {
-    for (int k = 0; k < nout; k++) {
+static __device__ void scatterAdd(int outputCount, const int* dest, const double* o, double* vals, double* F) {
+    for (int k = 0; k < outputCount; k++) {
         int d = dest[k];
         if (d >= 0) {
             atomicAdd(&vals[d], o[k]);
@@ -190,10 +190,10 @@ __device__ inline int ziDynDest(int frozen, int slot, const int* alt, const int*
     return (sr >= 0 && (mode[sr] == GpuRowMode::FIXED_VARIABLE || mode[sr] == GpuRowMode::BUS_TARGET_Q)) ? alt[slot] : frozen;
 }
 
-static __device__ void scatterAddDyn(int nout, const int* dest, const int* altDest, const int* selRow,
+static __device__ void scatterAddDyn(int outputCount, const int* dest, const int* altDest, const int* selRow,
                               const int* mode, const double* o, double* vals, double* F,
                               RelocTables rt, int eOff) {
-    for (int k = 0; k < nout; k++) {
+    for (int k = 0; k < outputCount; k++) {
         int d;
         int rg = rt.group != nullptr ? rt.group[eOff + k] : -1;
         if (rg >= 0 && rt.dep != nullptr && rt.dep[eOff + k]) {

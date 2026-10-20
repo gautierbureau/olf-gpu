@@ -31,7 +31,7 @@ using namespace powsybl::openloadflow;
 
 namespace olfgpu {
 
-__global__ void fillShuntBatch(int ne, int nScenarios, int n, int nnz, int nElements, int elemOffset,
+__global__ void fillShuntBatch(int elementCount, int nScenarios, int n, int nnz, int nElements, int elemOffset,
                                const double* in, const int* ix, const int* dest,
                                const double* x, double* vals, double* F,
                                const char* disabled, const char* active,
@@ -39,9 +39,9 @@ __global__ void fillShuntBatch(int ne, int nScenarios, int n, int nnz, int nElem
                                const int* altDest, const int* selRow, const int* mode, int dynReloc,
                                RelocTables rt) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= ne * nScenarios) return;
-    int e = tid % ne;
-    int s = tid / ne;
+    if (tid >= elementCount * nScenarios) return;
+    int e = tid % elementCount;
+    int s = tid / elementCount;
     if (!active[s] || disabled[s * nElements + elemOffset + e]) return;
     const double* p = in + e * 2;                            // g b
     double g = p[0];
@@ -63,15 +63,15 @@ __global__ void fillShuntBatch(int ne, int nScenarios, int n, int nnz, int nElem
     }
 }
 
-__global__ void fillHvdcBatch(int ne, int nScenarios, int n, int nnz, int nElements, int elemOffset,
+__global__ void fillHvdcBatch(int elementCount, int nScenarios, int n, int nnz, int nElements, int elemOffset,
                               const double* in, const int* ix, const int* dest,
                               const double* x, double* vals, double* F,
                               const char* disabled, const char* active,
                               const int* altDest, const int* selRow, const int* mode, int dynReloc) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= ne * nScenarios) return;
-    int e = tid % ne;
-    int s = tid / ne;
+    if (tid >= elementCount * nScenarios) return;
+    int e = tid % elementCount;
+    int s = tid / elementCount;
     if (!active[s] || disabled[s * nElements + elemOffset + e]) return;
     const double* p = in + e * 5;                            // p0 k lf1 lf2 r
     const int* q = ix + e * 4;
@@ -93,14 +93,14 @@ __global__ void fillHvdcBatch(int ne, int nScenarios, int n, int nnz, int nEleme
 // Identity rows are wiped by applyRowModeBatch afterwards, so a PV bus's Q-row term vanishes
 // exactly like every other Q fill (and reappears when RL flips the bus PQ). vals == nullptr
 // makes it the residual-only (line-search) variant.
-__global__ void fillLoadModelBatch(int ne, int nScenarios, int n, int nnz,
+__global__ void fillLoadModelBatch(int elementCount, int nScenarios, int n, int nnz,
                              const double* in, const int* ix, const int* dest,
                              const double* x, double* vals, double* F,
                              const int* altRow, const int* altDest, const int* mode) {
     int t = blockIdx.x * blockDim.x + threadIdx.x;
-    if (t >= ne * nScenarios) return;
-    int e = t % ne;
-    int s = t / ne;
+    if (t >= elementCount * nScenarios) return;
+    int e = t % elementCount;
+    int s = t / elementCount;
     // GENERATED evalVdl (codegen family "vdl", parsed from OLF's
     // AbstractLoadModelEquationTerm.f/dfdv): one packed element per exp term, the sum over a
     // load model's terms IS the per-entry atomicAdd — exactly the Java accumulation loop.
@@ -125,7 +125,7 @@ __global__ void fillLoadModelBatch(int ne, int nScenarios, int n, int nnz,
     }
 }
 
-__global__ void fillShuntBatchF(int ne, int nScenarios, int n, int nnz, int nElements, int elemOffset,
+__global__ void fillShuntBatchF(int elementCount, int nScenarios, int n, int nnz, int nElements, int elemOffset,
                                 const double* in, const int* ix, const int* dest,
                                 const double* x, double* F,
                                 const char* disabled, const char* active,
@@ -133,9 +133,9 @@ __global__ void fillShuntBatchF(int ne, int nScenarios, int n, int nnz, int nEle
                                 const int* altDest, const int* selRow, const int* mode, int dynReloc,
                                RelocTables rt) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= ne * nScenarios) return;
-    int e = tid % ne;
-    int s = tid / ne;
+    if (tid >= elementCount * nScenarios) return;
+    int e = tid % elementCount;
+    int s = tid / elementCount;
     if (!active[s] || disabled[s * nElements + elemOffset + e]) return;
     const double* p = in + e * 2;                            // g b
     double g = p[0];
@@ -155,15 +155,15 @@ __global__ void fillShuntBatchF(int ne, int nScenarios, int n, int nnz, int nEle
     }
 }
 
-__global__ void fillHvdcBatchF(int ne, int nScenarios, int n, int nnz, int nElements, int elemOffset,
+__global__ void fillHvdcBatchF(int elementCount, int nScenarios, int n, int nnz, int nElements, int elemOffset,
                                const double* in, const int* ix, const int* dest,
                                const double* x, double* F,
                                const char* disabled, const char* active,
                                const int* altDest, const int* selRow, const int* mode, int dynReloc) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= ne * nScenarios) return;
-    int e = tid % ne;
-    int s = tid / ne;
+    if (tid >= elementCount * nScenarios) return;
+    int e = tid % elementCount;
+    int s = tid / elementCount;
     if (!active[s] || disabled[s * nElements + elemOffset + e]) return;
     const double* p = in + e * 5;                            // p0 k lf1 lf2 r
     const int* q = ix + e * 4;

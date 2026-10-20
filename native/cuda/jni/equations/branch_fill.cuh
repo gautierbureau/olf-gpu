@@ -12,35 +12,35 @@
 
 namespace olfgpu {
 
-__global__ void fillClosedBranchBatch(int ne, int nScenarios, int n, int nnz, int nElements, int elemOffset,
+__global__ void fillClosedBranchBatch(int elementCount, int nScenarios, int n, int nnz, int nElements, int elemOffset,
                                       const double* in, const int* ix, const int* dest,
                                       const double* x, double* vals, double* F,
                                       const char* disabled, const char* active,
                                       int nR1Ov, const int* r1OvSlotElem, const double* r1OvVal,
                                       const int* altDest, const int* selRow, const int* mode, int dynReloc,
-                                      const int* pcDest, const int* pcSel, RelocTables rt);
+                                      const int* phaseControlDestination, const int* phaseControlSelector, RelocTables rt);
 
-__global__ void fillClosedBranchQbufBatch(int ne, int nScenarios, int n, int nElements, int elemOffset,
+__global__ void fillClosedBranchQbufBatch(int elementCount, int nScenarios, int n, int nElements, int elemOffset,
                                           const double* in, const int* ix, const int* dest,
                                           const double* x, double* F, const char* disabled, const char* active,
                                           int nR1Ov, const int* r1OvSlotElem, const double* r1OvVal);
 
-__global__ void fillOpenBranchBatch(int ne, int nScenarios, int n, int nnz, int nElements, int elemOffset,
+__global__ void fillOpenBranchBatch(int elementCount, int nScenarios, int n, int nnz, int nElements, int elemOffset,
                                     const double* in, const int* ix, const int* dest,
                                     const double* x, double* vals, double* F,
                                     const char* disabled, const char* active,
                                     const int* altDest, const int* selRow, const int* mode, int dynReloc,
                                     RelocTables rt);
 
-__global__ void fillClosedBranchBatchF(int ne, int nScenarios, int n, int nnz, int nElements, int elemOffset,
+__global__ void fillClosedBranchBatchF(int elementCount, int nScenarios, int n, int nnz, int nElements, int elemOffset,
                                        const double* in, const int* ix, const int* dest,
                                        const double* x, double* F,
                                        const char* disabled, const char* active,
                                        int nR1Ov, const int* r1OvSlotElem, const double* r1OvVal,
                                        const int* altDest, const int* selRow, const int* mode, int dynReloc,
-                                       const int* pcDest, const int* pcSel, RelocTables rt);
+                                       const int* phaseControlDestination, const int* phaseControlSelector, RelocTables rt);
 
-__global__ void fillOpenBranchBatchF(int ne, int nScenarios, int n, int nnz, int nElements, int elemOffset,
+__global__ void fillOpenBranchBatchF(int elementCount, int nScenarios, int n, int nnz, int nElements, int elemOffset,
                                      const double* in, const int* ix, const int* dest,
                                      const double* x, double* F,
                                      const char* disabled, const char* active,

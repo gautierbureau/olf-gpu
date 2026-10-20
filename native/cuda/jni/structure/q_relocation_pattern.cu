@@ -102,9 +102,9 @@ void collectCbPhasePattern(int ncb, const int* cbIdx, const int* cbPcSide,
 // Per (closed branch, output): the phase-row destination (J slot, or -2-row for the P residual) and
 // the a1 row whose per-scenario mode gates the emission (mode 3 = control enabled). -1 = no emission.
 void buildCbPhaseDest(int ncb, const int* cbIdx, const int* cbPcSide, const std::vector<int>& rowMap,
-                      const CsrPattern& pos, std::vector<int>& pcDest, std::vector<int>& pcSel) {
-    pcDest.assign(static_cast<size_t>(ncb) * CB_NOUT, -1);
-    pcSel.assign(static_cast<size_t>(ncb) * CB_NOUT, -1);
+                      const CsrPattern& pos, std::vector<int>& phaseControlDestination, std::vector<int>& phaseControlSelector) {
+    phaseControlDestination.assign(static_cast<size_t>(ncb) * CB_NOUT, -1);
+    phaseControlSelector.assign(static_cast<size_t>(ncb) * CB_NOUT, -1);
     for (int e = 0; e < ncb; e++) {
         if (cbPcSide[e] < 0) {
             continue;
@@ -114,13 +114,13 @@ void buildCbPhaseDest(int ncb, const int* cbIdx, const int* cbPcSide, const std:
         const int* ix = cbIdx + static_cast<size_t>(e) * 12;
         int pcRow = rowMap[a1Col];
         int k0 = side == 0 ? 0 : 14;
-        pcDest[static_cast<size_t>(e) * CB_NOUT + k0] = -2 - pcRow;    // the P residual
-        pcSel[static_cast<size_t>(e) * CB_NOUT + k0] = a1Col;          // mode-3 gate lives at the CONTROLLER's a1 row
+        phaseControlDestination[static_cast<size_t>(e) * CB_NOUT + k0] = -2 - pcRow;    // the P residual
+        phaseControlSelector[static_cast<size_t>(e) * CB_NOUT + k0] = a1Col;          // mode-3 gate lives at the CONTROLLER's a1 row
         for (int k = k0 + 1; k <= k0 + 6; k++) {
             RC rc = resolveCb(CB_SCATTER[k], ix);
             if (rc.col >= 0) {
-                pcDest[static_cast<size_t>(e) * CB_NOUT + k] = pos.at(pcRow, rc.col);
-                pcSel[static_cast<size_t>(e) * CB_NOUT + k] = a1Col;
+                phaseControlDestination[static_cast<size_t>(e) * CB_NOUT + k] = pos.at(pcRow, rc.col);
+                phaseControlSelector[static_cast<size_t>(e) * CB_NOUT + k] = a1Col;
             }
         }
     }

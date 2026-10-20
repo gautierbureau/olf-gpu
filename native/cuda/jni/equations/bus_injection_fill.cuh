@@ -11,7 +11,7 @@
 
 namespace olfgpu {
 
-__global__ void fillShuntBatch(int ne, int nScenarios, int n, int nnz, int nElements, int elemOffset,
+__global__ void fillShuntBatch(int elementCount, int nScenarios, int n, int nnz, int nElements, int elemOffset,
                                const double* in, const int* ix, const int* dest,
                                const double* x, double* vals, double* F,
                                const char* disabled, const char* active,
@@ -19,18 +19,18 @@ __global__ void fillShuntBatch(int ne, int nScenarios, int n, int nnz, int nElem
                                const int* altDest, const int* selRow, const int* mode, int dynReloc,
                                RelocTables rt);
 
-__global__ void fillHvdcBatch(int ne, int nScenarios, int n, int nnz, int nElements, int elemOffset,
+__global__ void fillHvdcBatch(int elementCount, int nScenarios, int n, int nnz, int nElements, int elemOffset,
                               const double* in, const int* ix, const int* dest,
                               const double* x, double* vals, double* F,
                               const char* disabled, const char* active,
                               const int* altDest, const int* selRow, const int* mode, int dynReloc);
 
-__global__ void fillLoadModelBatch(int ne, int nScenarios, int n, int nnz,
+__global__ void fillLoadModelBatch(int elementCount, int nScenarios, int n, int nnz,
                              const double* in, const int* ix, const int* dest,
                              const double* x, double* vals, double* F,
                              const int* altRow, const int* altDest, const int* mode);
 
-__global__ void fillShuntBatchF(int ne, int nScenarios, int n, int nnz, int nElements, int elemOffset,
+__global__ void fillShuntBatchF(int elementCount, int nScenarios, int n, int nnz, int nElements, int elemOffset,
                                 const double* in, const int* ix, const int* dest,
                                 const double* x, double* F,
                                 const char* disabled, const char* active,
@@ -38,7 +38,7 @@ __global__ void fillShuntBatchF(int ne, int nScenarios, int n, int nnz, int nEle
                                 const int* altDest, const int* selRow, const int* mode, int dynReloc,
                                RelocTables rt);
 
-__global__ void fillHvdcBatchF(int ne, int nScenarios, int n, int nnz, int nElements, int elemOffset,
+__global__ void fillHvdcBatchF(int elementCount, int nScenarios, int n, int nnz, int nElements, int elemOffset,
                                const double* in, const int* ix, const int* dest,
                                const double* x, double* F,
                                const char* disabled, const char* active,

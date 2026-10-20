@@ -29,10 +29,10 @@ RC resolveHv(const HvdcScatter& s, const int* ix);           // P1 P2 ph1 ph2
 
 // One pass per family: collect the J pattern entries (role 1, both indices present).
 template <typename S, typename F>
-void collectPattern(int ne, const int* idx, int stride, const S* table, int nout, F resolve,
+void collectPattern(int elementCount, const int* idx, int stride, const S* table, int outputCount, F resolve,
                     std::vector<std::pair<int, int>>& pat) {
-    for (int e = 0; e < ne; e++) {
-        for (int k = 0; k < nout; k++) {
+    for (int e = 0; e < elementCount; e++) {
+        for (int k = 0; k < outputCount; k++) {
             RC rc = resolve(table[k], idx + e * stride);
             if (table[k].role == 1 && rc.row >= 0 && rc.col >= 0) {
                 pat.emplace_back(rc.row, rc.col);
@@ -48,16 +48,16 @@ void collectPattern(int ne, const int* idx, int stride, const S* table, int nout
 // Second pass: the per-(element, output) destination with the role folded in:
 //   role 1 -> CSR values slot (>= 0);  role 0 -> -2 - F row;  absent/skip -> -1.
 template <typename S, typename F>
-std::vector<int> buildDest(int ne, const int* idx, int stride, const S* table, int nout,
+std::vector<int> buildDest(int elementCount, const int* idx, int stride, const S* table, int outputCount,
                            F resolve, const CsrPattern& pos) {
-    std::vector<int> dest(static_cast<size_t>(ne) * nout, -1);
-    for (int e = 0; e < ne; e++) {
-        for (int k = 0; k < nout; k++) {
+    std::vector<int> dest(static_cast<size_t>(elementCount) * outputCount, -1);
+    for (int e = 0; e < elementCount; e++) {
+        for (int k = 0; k < outputCount; k++) {
             RC rc = resolve(table[k], idx + e * stride);
             if (table[k].role == 1 && rc.row >= 0 && rc.col >= 0) {
-                dest[static_cast<size_t>(e) * nout + k] = pos.at(rc.row, rc.col);
+                dest[static_cast<size_t>(e) * outputCount + k] = pos.at(rc.row, rc.col);
             } else if (table[k].role == 0 && rc.row >= 0) {
-                dest[static_cast<size_t>(e) * nout + k] = -2 - rc.row;
+                dest[static_cast<size_t>(e) * outputCount + k] = -2 - rc.row;
             }
         }
     }
@@ -111,15 +111,15 @@ inline bool stockPairOut(int frozenRow, int alt, const int* relocOwn) {
 
 // Build one family's device-side data (inputs, indices, role-folded destinations).
 template <typename S, typename R>
-void setupFamily(Family& f, int ne, const double* in, int instride, const int* idx,
-                 int ixstride, const S* table, int nout, R resolve,
+void setupFamily(Family& f, int elementCount, const double* in, int parameterStride, const int* idx,
+                 int indexStride, const S* table, int outputCount, R resolve,
                  const CsrPattern& pos) {
-    f.ne = ne; f.instride = instride; f.ixstride = ixstride; f.nout = nout;
-    if (ne == 0) return;
-    f.in.upload(in, static_cast<size_t>(ne) * instride * sizeof(double));
-    f.ix.upload(idx, static_cast<size_t>(ne) * ixstride * sizeof(int));
-    std::vector<int> dest = buildDest(ne, idx, ixstride, table, nout, resolve, pos);
-    f.dest.upload(dest.data(), dest.size() * sizeof(int));
+    f.elementCount = elementCount; f.parameterStride = parameterStride; f.indexStride = indexStride; f.outputCount = outputCount;
+    if (elementCount == 0) return;
+    f.parameters.upload(in, static_cast<size_t>(elementCount) * parameterStride * sizeof(double));
+    f.indices.upload(idx, static_cast<size_t>(elementCount) * indexStride * sizeof(int));
+    std::vector<int> dest = buildDest(elementCount, idx, indexStride, table, outputCount, resolve, pos);
+    f.destination.upload(dest.data(), dest.size() * sizeof(int));
 }
 
 // csr_pattern.cu
@@ -144,7 +144,7 @@ void collectCbPhasePattern(int ncb, const int* cbIdx, const int* cbPcSide,
                            const std::vector<int>& rowMap, std::vector<std::pair<int, int>>& pat);
 
 void buildCbPhaseDest(int ncb, const int* cbIdx, const int* cbPcSide, const std::vector<int>& rowMap,
-                      const CsrPattern& pos, std::vector<int>& pcDest, std::vector<int>& pcSel);
+                      const CsrPattern& pos, std::vector<int>& phaseControlDestination, std::vector<int>& phaseControlSelector);
 
 void collectCbAltPattern(int ncb, const int* cbIdx, const int* relocOwn, std::vector<std::pair<int, int>>& pat,
                          int nQr, const int* qrPtr, const int* qrRows, const int* depGroupOfRow);
@@ -191,7 +191,7 @@ void buildDistrShuntBDest(SharedStructure* st, const CsrPattern& pos, const std:
                           int nDistrShuntB, const int* distrShuntBRow, const int* distrShuntBColumn, const double* distrShuntBCoefficient);
 
 void patchFrozenGroupDests(DeviceBuf& dest, const std::vector<int>& relocGroup,
-                           const std::vector<int>& relocOff, int nout,
+                           const std::vector<int>& relocOff, int outputCount,
                            const int* scatterRole, const int* qrPtr, const int* qrRows);
 
 // zero_impedance_dests.cu

@@ -193,7 +193,7 @@ void flcStep(BatchSolverContext* ctx, DriverPass& drv, int kindMask) {
     flcCheckBatch<<<grid(static_cast<int>(nst)), BLOCK, 0, ctx->stream>>>(nF, nS, n, ctx->nElements, ctx->cbOffset, kindMask,
             ctx->dFlcKind.as<int>(), ctx->dFlcSide.as<int>(), ctx->dFlcTargetValue.as<double>(), ctx->dFlcHalfDb.as<double>(),
             ctx->dFlcElem.as<int>(), ctx->dFlcCtlPack.as<int>(),
-            ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>(),
+            ctx->st->cb.parameters.as<double>(), ctx->st->cb.indices.as<int>(), ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>(),
             ctx->dDisabled.as<char>(), ctx->dX.as<double>(), ctx->dRlActive.as<char>(),
             ctx->dFlcOutOfDb.as<char>(), ctx->dFlcDiff.as<double>());
     std::vector<char> outOfDb(nst);
@@ -217,7 +217,7 @@ void flcStep(BatchSolverContext* ctx, DriverPass& drv, int kindMask) {
         sensitivitySolve(ctx, drv, first);
         flcGatherSensiBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(nS, n, c, nF, ctx->cbOffset,
                 ctx->dFlcKind.as<int>(), ctx->dFlcSide.as<int>(), ctx->dFlcCtlPack.as<int>(),
-                ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>(),
+                ctx->st->cb.parameters.as<double>(), ctx->st->cb.indices.as<int>(), ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>(),
                 ctx->dX.as<double>(), ctx->dDx.as<double>(), ctx->dFlcSensi.as<double>());
     }
     CUDA_CHECK(cudaMemcpy(ctx->dActive.p, active.data(), nS, cudaMemcpyHostToDevice));

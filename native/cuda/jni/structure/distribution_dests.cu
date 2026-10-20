@@ -151,7 +151,7 @@ void buildDistrShuntBDest(SharedStructure* st, const CsrPattern& pos, const std:
 // row carries ONLY its own injection (fillRemoteMemberQBatch). Without this the pilot's whole
 // balance lands on the base carrier's row and corrupts the free member's reactive-limit check.
 void patchFrozenGroupDests(DeviceBuf& dest, const std::vector<int>& relocGroup,
-                           const std::vector<int>& relocOff, int nout,
+                           const std::vector<int>& relocOff, int outputCount,
                            const int* scatterRole, const int* qrPtr, const int* qrRows) {
     for (size_t o = 0; o < relocGroup.size(); o++) {
         int g = relocGroup[o];
@@ -161,7 +161,7 @@ void patchFrozenGroupDests(DeviceBuf& dest, const std::vector<int>& relocGroup,
         if (g >= 0 && relocOff[o] < 0) {
             continue;
         }
-        if (g >= 0 && scatterRole[o % nout] == 0) {
+        if (g >= 0 && scatterRole[o % outputCount] == 0) {
             int v = -2 - qrRows[qrPtr[g]];
             CUDA_CHECK(cudaMemcpy(dest.as<int>() + o, &v, sizeof(int), cudaMemcpyHostToDevice));
         }

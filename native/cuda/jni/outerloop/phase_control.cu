@@ -99,7 +99,7 @@ void cphStep(BatchSolverContext* ctx, DriverPass& drv) {
     cphCheckBatch<<<grid(static_cast<int>(nst)), BLOCK, 0, ctx->stream>>>(nC, nS, n, ctx->nElements, ctx->cbOffset,
             ctx->dCphKind.as<int>(), ctx->dCphA1Row.as<int>(), ctx->dCphSide.as<int>(), ctx->dCphLimit.as<double>(), ctx->dCphElem.as<int>(),
             ctx->dCphTapPtr.as<int>(), ctx->dCphTapData.as<double>(),
-            ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>(),
+            ctx->st->cb.parameters.as<double>(), ctx->st->cb.indices.as<int>(), ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>(),
             ctx->dDisabled.as<char>(), ctx->dRlActive.as<char>(), ctx->dCphIter.as<int>(),
             ctx->dCphTap.as<int>(), ctx->dMode.as<int>(), ctx->dTarget.as<double>(), ctx->dX.as<double>(), ctx->dRlSwitched.as<char>());
     CUDA_CHECK(cudaStreamSynchronize(ctx->stream));

@@ -86,9 +86,9 @@ SharedStructure* buildStructure(int n,
     if (anyRelocOwn) {                                       // the kernels that divert per scenario need it
         st->dRelocOwn.upload(relocOwnRow.data(), relocOwnRow.size() * sizeof(int));
     }
-    auto mapRows = [&](const int* idx, int ne, int stride, std::initializer_list<int> rowSlots) {
-        std::vector<int> out(idx, idx + static_cast<size_t>(ne) * stride);
-        for (int e = 0; e < ne; e++) {
+    auto mapRows = [&](const int* idx, int elementCount, int stride, std::initializer_list<int> rowSlots) {
+        std::vector<int> out(idx, idx + static_cast<size_t>(elementCount) * stride);
+        for (int e = 0; e < elementCount; e++) {
             for (int s : rowSlots) {
                 int& r = out[static_cast<size_t>(e) * stride + s];
                 if (r >= 0) {
@@ -150,11 +150,11 @@ SharedStructure* buildStructure(int n,
         collectCbAltPattern(ncb, cbIdx, relocOwn, pat, st->nQr,        // union the alternate Q rows into the pattern
                 st->hQrPtr.data(), st->hQrRows.data(), depGroupOfRow);      // (+ every GROUP candidate's slots, plan-A6)
     }
-    bool phaseCtl = false;
+    bool hasPhaseControl = false;
     for (int e = 0; e < ncb; e++) {
-        phaseCtl |= cbPcSide[e] >= 0;
+        hasPhaseControl |= cbPcSide[e] >= 0;
     }
-    if (phaseCtl) {
+    if (hasPhaseControl) {
         collectCbPhasePattern(ncb, cbIdx, cbPcSide, rowMap, pat);   // union the a1-row P-flow positions
     }
     collectPattern(nob, obIdx, 6, OB_SCATTER, OB_NOUT, resolveOb, pat);
@@ -437,8 +437,8 @@ SharedStructure* buildStructure(int n,
         std::vector<char> relocDep;
         buildCbDynDest(ncb, cbIdx, relocOwn, pos, altDest, selRow, st->nQr, st->hQrPtr.data(), st->hQrRows.data(),
                 relocGroup, relocOff, relocPool, depGroupOfRow, relocDep);
-        st->cb.altDest.upload(altDest.data(), altDest.size() * sizeof(int));
-        st->cb.selRow.upload(selRow.data(), selRow.size() * sizeof(int));
+        st->cb.alternateDestination.upload(altDest.data(), altDest.size() * sizeof(int));
+        st->cb.selectorRow.upload(selRow.data(), selRow.size() * sizeof(int));
         if (!relocPool.empty()) {
             st->cb.relocGroup.upload(relocGroup.data(), relocGroup.size() * sizeof(int));
             st->cb.relocOff.upload(relocOff.data(), relocOff.size() * sizeof(int));
@@ -448,18 +448,18 @@ SharedStructure* buildStructure(int n,
             for (int k = 0; k < CB_NOUT; k++) {
                 cbRoles[k] = CB_SCATTER[k].role;
             }
-            patchFrozenGroupDests(st->cb.dest, relocGroup, relocOff, CB_NOUT, cbRoles,
+            patchFrozenGroupDests(st->cb.destination, relocGroup, relocOff, CB_NOUT, cbRoles,
                     st->hQrPtr.data(), st->hQrRows.data());
         }
         st->cb.dynReloc = true;
     }
-    if (phaseCtl) {                                          // continuous phase control: P-flow row at a1
-        std::vector<int> pcDest;
-        std::vector<int> pcSel;
-        buildCbPhaseDest(ncb, cbIdx, cbPcSide, rowMap, pos, pcDest, pcSel);
-        st->cb.pcDest.upload(pcDest.data(), pcDest.size() * sizeof(int));
-        st->cb.pcSel.upload(pcSel.data(), pcSel.size() * sizeof(int));
-        st->cb.phaseCtl = true;
+    if (hasPhaseControl) {                                          // continuous phase control: P-flow row at a1
+        std::vector<int> phaseControlDestination;
+        std::vector<int> phaseControlSelector;
+        buildCbPhaseDest(ncb, cbIdx, cbPcSide, rowMap, pos, phaseControlDestination, phaseControlSelector);
+        st->cb.phaseControlDestination.upload(phaseControlDestination.data(), phaseControlDestination.size() * sizeof(int));
+        st->cb.phaseControlSelector.upload(phaseControlSelector.data(), phaseControlSelector.size() * sizeof(int));
+        st->cb.hasPhaseControl = true;
     }
     setupFamily(st->ob, nob, obIn, 7, obIdx, 6, OB_SCATTER, OB_NOUT, resolveOb, pos);
     if (dynReloc && nob) {                                   // ob dynamic Q-routing: alt-dest + selector
@@ -471,8 +471,8 @@ SharedStructure* buildStructure(int n,
         std::vector<char> obRelocDep;
         buildObDynDest(nob, obIdx, obQAlt, relocOwn, pos, obAltDest, obSelRow, st->nQr, st->hQrPtr.data(), st->hQrRows.data(),
                 obRelocGroup, obRelocOff, obRelocPool, depGroupOfRow, obRelocDep);
-        st->ob.altDest.upload(obAltDest.data(), obAltDest.size() * sizeof(int));
-        st->ob.selRow.upload(obSelRow.data(), obSelRow.size() * sizeof(int));
+        st->ob.alternateDestination.upload(obAltDest.data(), obAltDest.size() * sizeof(int));
+        st->ob.selectorRow.upload(obSelRow.data(), obSelRow.size() * sizeof(int));
         if (!obRelocPool.empty()) {
             st->ob.relocGroup.upload(obRelocGroup.data(), obRelocGroup.size() * sizeof(int));
             st->ob.relocOff.upload(obRelocOff.data(), obRelocOff.size() * sizeof(int));
@@ -482,7 +482,7 @@ SharedStructure* buildStructure(int n,
             for (int k = 0; k < OB_NOUT; k++) {
                 obRoles[k] = OB_SCATTER[k].role;
             }
-            patchFrozenGroupDests(st->ob.dest, obRelocGroup, obRelocOff, OB_NOUT, obRoles,
+            patchFrozenGroupDests(st->ob.destination, obRelocGroup, obRelocOff, OB_NOUT, obRoles,
                     st->hQrPtr.data(), st->hQrRows.data());
         }
         st->ob.dynReloc = true;
@@ -497,8 +497,8 @@ SharedStructure* buildStructure(int n,
         std::vector<char> shRelocDep;
         buildShDynDest(nsh, shIdx, relocOwn, pos, shAltDest, shSelRow, st->nQr, st->hQrPtr.data(), st->hQrRows.data(),
                 shRelocGroup, shRelocOff, shRelocPool, depGroupOfRow, shRelocDep);
-        st->sh.altDest.upload(shAltDest.data(), shAltDest.size() * sizeof(int));
-        st->sh.selRow.upload(shSelRow.data(), shSelRow.size() * sizeof(int));
+        st->sh.alternateDestination.upload(shAltDest.data(), shAltDest.size() * sizeof(int));
+        st->sh.selectorRow.upload(shSelRow.data(), shSelRow.size() * sizeof(int));
         if (!shRelocPool.empty()) {
             st->sh.relocGroup.upload(shRelocGroup.data(), shRelocGroup.size() * sizeof(int));
             st->sh.relocOff.upload(shRelocOff.data(), shRelocOff.size() * sizeof(int));
@@ -508,7 +508,7 @@ SharedStructure* buildStructure(int n,
             for (int k = 0; k < SH_NOUT; k++) {
                 shRoles[k] = SH_SCATTER[k].role;
             }
-            patchFrozenGroupDests(st->sh.dest, shRelocGroup, shRelocOff, SH_NOUT, shRoles,
+            patchFrozenGroupDests(st->sh.destination, shRelocGroup, shRelocOff, SH_NOUT, shRoles,
                     st->hQrPtr.data(), st->hQrRows.data());
         }
         st->sh.dynReloc = true;
@@ -518,8 +518,8 @@ SharedStructure* buildStructure(int n,
         std::vector<int> hvAltDest;
         std::vector<int> hvSelRow;
         buildHvDynDest(nhv, hvIdx, relocOwn, pos, hvAltDest, hvSelRow);
-        st->hv.altDest.upload(hvAltDest.data(), hvAltDest.size() * sizeof(int));
-        st->hv.selRow.upload(hvSelRow.data(), hvSelRow.size() * sizeof(int));
+        st->hv.alternateDestination.upload(hvAltDest.data(), hvAltDest.size() * sizeof(int));
+        st->hv.selectorRow.upload(hvSelRow.data(), hvSelRow.size() * sizeof(int));
         st->hv.dynReloc = true;
     }
 
@@ -654,12 +654,12 @@ double luBytesPerScenario(SharedStructure& st) {
 void refreshStructureValues(SharedStructure& st, int ncb, const double* cbIn, int nob, const double* obIn,
                             int nsh, const double* shIn, int nhv, const double* hvIn,
                             int nzi, const double* ziIn) {
-    auto refresh = [](Family& f, int ne, const double* in) {
-        if (ne != f.ne) {
+    auto refresh = [](Family& f, int elementCount, const double* in) {
+        if (elementCount != f.elementCount) {
             throw std::runtime_error("refreshStructureValues: element count changed (not a VALUES event)");
         }
-        if (ne) {
-            CUDA_CHECK(cudaMemcpy(f.in.p, in, static_cast<size_t>(ne) * f.instride * sizeof(double),
+        if (elementCount) {
+            CUDA_CHECK(cudaMemcpy(f.parameters.p, in, static_cast<size_t>(elementCount) * f.parameterStride * sizeof(double),
                                   cudaMemcpyHostToDevice));
         }
     };

@@ -78,7 +78,7 @@ public final class DeviceLoopTables {
         // AcloadFlowEngine's realistic-voltage check, applied to the states INSIDE the driver's sweep.
         // The row carries its bus's nominal voltage (0 = a row the check never looks at, which is
         // every row that is not a non-fictitious bus's BUS_V), so the run's threshold is applied here.
-        double[] rowNominalV = gpuData.rowNominalV();
+        double[] rowNominalV = gpuData.voltageRows().nominalV();
         byte[] rowChecked = new byte[rowNominalV.length];
         for (int r = 0; r < rowNominalV.length; r++) {
             rowChecked[r] = rowNominalV[r] > 0 && rowNominalV[r] >= minNominalVoltageRealisticVoltageCheck

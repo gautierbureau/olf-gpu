@@ -976,7 +976,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                 context.handle.set(BatchSolveNative.createBatchContext(GpuAcStructures.handle(n, data), 1,
                         robustModeForRun ? GpuLinearSolveMode.ROBUST : GpuBatchContextCache.resolveBatchMode(),
                         data.rlVrow(), data.rlMinQ(), data.rlMaxQ(), data.rlLoadQ(), data.rlVtarget(),
-                        data.rlMonitored(), data.rowSlope(),
+                        data.rlMonitored(), data.voltageRows().slope(),
                         data.dsPhiRow(), data.dsFactor(), data.dsSlackPhiRow(), data.dsSlackTargetP(),
                         data.dsBaseTargetP(), data.dsMaxDelta(), data.dsMinDelta(),
                         data.dsMode(), data.dsMarginUp(), data.dsMarginDown(),

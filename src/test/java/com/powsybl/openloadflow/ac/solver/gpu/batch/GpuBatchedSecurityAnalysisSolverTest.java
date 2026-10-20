@@ -10,6 +10,7 @@ package com.powsybl.openloadflow.ac.solver.gpu.batch;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.RemoteMemberReactiveTerms;
+import com.powsybl.openloadflow.ac.equations.vector.gpu.VoltageRowParameters;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -40,7 +41,7 @@ class GpuBatchedSecurityAnalysisSolverTest {
             new double[0], new double[0], new double[0], new byte[0],
             new byte[0], new int[0], new int[0],
             new double[0], new int[0], new double[0], new int[0], new double[0],
-            RemoteMemberReactiveTerms.empty(), new double[0], new double[0],
+            RemoteMemberReactiveTerms.empty(), VoltageRowParameters.empty(),
             new int[0], new double[0], -1, 0.0,
             new double[0], new double[0], new double[0],
             0, new double[0], new double[0], 0.0, 0.0, Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY,

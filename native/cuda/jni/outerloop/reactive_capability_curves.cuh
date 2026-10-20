@@ -17,10 +17,10 @@ namespace olfgpu {
 // The AC-emulation VSC entries of the curve channel: OLF evaluates such a station's curve at the live flow of its
 // link in the linear mode (LfVscConverterStationImpl.getReactiveLimitsActivePower: minus the side's emulation term),
 // and at its target P otherwise (saturated, frozen, disabled link), which the HVDC loop holds as baseD + appliedD.
-// hv == nullptr: no such entry. nhv == 0: the HVDC loops are not on this context (then nothing was packed).
+// hv == nullptr: no such entry. nHvdcAcEmulation == 0: the HVDC loops are not on this context (then nothing was packed).
 struct CvHvdc {
     const int* hv;            // per curve entry {hvdc index in the loop pack, side 1|2}, -1 for a plain generator
-    int nhv;
+    int nHvdcAcEmulation;
     const int* status;        // per (scenario, hvdc)
     const double* d1;
     const double* d2;

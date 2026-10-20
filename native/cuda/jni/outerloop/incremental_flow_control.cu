@@ -26,10 +26,10 @@
 namespace olfgpu {
 
 // Per (scenario, controller): OLF's out-of-deadband test on the controlled flow (LIMITER: one-sided).
-__global__ void flcCheckBatch(int nFlc, int nScenarios, int n, int nElements, int cbOffset, int kindMask,
+__global__ void flcCheckBatch(int nFlc, int nScenarios, int n, int nElements, int closedBranchOffset, int kindMask,
                               const int* kind, const int* side, const double* targetValue, const double* halfDb,
                               const int* elem, const int* ctlPack,
-                              const double* cbIn, const int* cbIx, int nR1Ov, const int* r1OvSlotElem, const double* r1OvVal,
+                              const double* closedBranchParameters, const int* closedBranchIndices, int nR1Ov, const int* r1OvSlotElem, const double* r1OvVal,
                               const char* disabled, const double* x, const char* rlActive,
                               char* outOfDb, double* diff) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -39,12 +39,12 @@ __global__ void flcCheckBatch(int nFlc, int nScenarios, int n, int nElements, in
     outOfDb[tid] = 0;
     if (!rlActive[s] || !(kindMask & controlledFlowMaskBit(kind[c]))) return;
     int e = ctlPack[c];
-    if (disabled[(size_t) s * nElements + elem[c]] || disabled[(size_t) s * nElements + cbOffset + e]) return;
-    const double* p = cbIn + e * GpuPiModelColumn::COUNT;
+    if (disabled[(size_t) s * nElements + elem[c]] || disabled[(size_t) s * nElements + closedBranchOffset + e]) return;
+    const double* p = closedBranchParameters + e * GpuPiModelColumn::COUNT;
     double pOv[8];
     if (findTapOverride(nR1Ov, r1OvSlotElem, r1OvVal, s, e, pOv)) p = pOv;
     double g[18];
-    double flow = flcFlowAndGrad(side[c], kind[c], p, x + (size_t) s * n, cbIx + e * 12, g);
+    double flow = flcFlowAndGrad(side[c], kind[c], p, x + (size_t) s * n, closedBranchIndices + e * 12, g);
     double d = targetValue[c] - flow;
     diff[tid] = d;
     outOfDb[tid] = (kind[c] == GpuControlledFlow::CURRENT ? flow > targetValue[c] : fabs(d) > halfDb[c]) ? 1 : 0;
@@ -52,17 +52,17 @@ __global__ void flcCheckBatch(int nFlc, int nScenarios, int n, int nElements, in
 
 // Per scenario, for controller c: the controlled flow's gradient dotted with the unit-RHS solution at
 // the controlled branch's variable columns (a non-variable r1/a1 column contributes nothing).
-__global__ void flcGatherSensiBatch(int nScenarios, int n, int c, int nFlc, int cbOffset,
+__global__ void flcGatherSensiBatch(int nScenarios, int n, int c, int nFlc, int closedBranchOffset,
                                     const int* kind, const int* side, const int* ctlPack,
-                                    const double* cbIn, const int* cbIx, int nR1Ov, const int* r1OvSlotElem, const double* r1OvVal,
+                                    const double* closedBranchParameters, const int* closedBranchIndices, int nR1Ov, const int* r1OvSlotElem, const double* r1OvVal,
                                     const double* x, const double* dx, double* sensi) {
     int s = blockIdx.x * blockDim.x + threadIdx.x;
     if (s >= nScenarios) return;
     int e = ctlPack[c];
-    const double* p = cbIn + e * GpuPiModelColumn::COUNT;
+    const double* p = closedBranchParameters + e * GpuPiModelColumn::COUNT;
     double pOv[8];
     if (findTapOverride(nR1Ov, r1OvSlotElem, r1OvVal, s, e, pOv)) p = pOv;
-    const int* q = cbIx + e * 12;
+    const int* q = closedBranchIndices + e * 12;
     const double* dxs = dx + (size_t) s * n;
     double g[18];
     flcFlowAndGrad(side[c], kind[c], p, x + (size_t) s * n, q, g);
@@ -190,10 +190,10 @@ void flcStep(BatchSolverContext* ctx, DriverPass& drv, int kindMask) {
         return;
     }
     size_t nst = static_cast<size_t>(nS) * nF;
-    flcCheckBatch<<<grid(static_cast<int>(nst)), BLOCK, 0, ctx->stream>>>(nF, nS, n, ctx->nElements, ctx->cbOffset, kindMask,
+    flcCheckBatch<<<grid(static_cast<int>(nst)), BLOCK, 0, ctx->stream>>>(nF, nS, n, ctx->nElements, ctx->closedBranchOffset, kindMask,
             ctx->dFlcKind.as<int>(), ctx->dFlcSide.as<int>(), ctx->dFlcTargetValue.as<double>(), ctx->dFlcHalfDb.as<double>(),
             ctx->dFlcElem.as<int>(), ctx->dFlcCtlPack.as<int>(),
-            ctx->st->cb.parameters.as<double>(), ctx->st->cb.indices.as<int>(), ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>(),
+            ctx->st->closedBranch.parameters.as<double>(), ctx->st->closedBranch.indices.as<int>(), ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>(),
             ctx->dDisabled.as<char>(), ctx->dX.as<double>(), ctx->dRlActive.as<char>(),
             ctx->dFlcOutOfDb.as<char>(), ctx->dFlcDiff.as<double>());
     std::vector<char> outOfDb(nst);
@@ -215,9 +215,9 @@ void flcStep(BatchSolverContext* ctx, DriverPass& drv, int kindMask) {
         setUnitRhsBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, row, ctx->dB.as<double>());
         hazRepairRightHandSide(ctx, nS, ctx->dB.as<double>());
         sensitivitySolve(ctx, drv, first);
-        flcGatherSensiBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(nS, n, c, nF, ctx->cbOffset,
+        flcGatherSensiBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(nS, n, c, nF, ctx->closedBranchOffset,
                 ctx->dFlcKind.as<int>(), ctx->dFlcSide.as<int>(), ctx->dFlcCtlPack.as<int>(),
-                ctx->st->cb.parameters.as<double>(), ctx->st->cb.indices.as<int>(), ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>(),
+                ctx->st->closedBranch.parameters.as<double>(), ctx->st->closedBranch.indices.as<int>(), ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>(),
                 ctx->dX.as<double>(), ctx->dDx.as<double>(), ctx->dFlcSensi.as<double>());
     }
     CUDA_CHECK(cudaMemcpy(ctx->dActive.p, active.data(), nS, cudaMemcpyHostToDevice));

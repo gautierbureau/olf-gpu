@@ -10,12 +10,12 @@ package com.powsybl.openloadflow.ac.solver.gpu.batch.plan;
 import com.powsybl.openloadflow.network.LfBranch;
 
 /**
- * The target tap's full static branch row [y, g1, g2, b1, b2, ksi, r1, a1] (cbIn packing),
+ * The target tap's full static branch row [y, g1, g2, b1, b2, ksi, r1, a1] (closedBranchParameters packing),
  * replacing the element's row for one scenario — per-tap impedance changes included. The
  * branch's ratio and phase must be FIXED (not state variables): the batch qualification
  * rejects controlled transformers.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
-public record TapR1Override(LfBranch branch, double[] cbRow) {
+public record TapR1Override(LfBranch branch, double[] closedBranchParameterRow) {
 }

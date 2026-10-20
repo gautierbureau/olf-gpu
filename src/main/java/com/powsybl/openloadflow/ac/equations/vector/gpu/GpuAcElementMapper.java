@@ -97,17 +97,17 @@ public class GpuAcElementMapper {
         // shunt outage then masked (or shifted) ANOTHER bus's shunt (measured on network.xiidm /
         // LITK: a 14 MVar reactor lost on an islanded section came off a live 80 MVar one, 1.2 kV).
         this.shuntToElementIndex = new HashMap<>();
-        int shOffset = closedBranchCount + openBranchCount;
-        int shIndex = 0;
+        int shuntOffset = closedBranchCount + openBranchCount;
+        int shuntIndex = 0;
         for (LfBus bus : network.getBuses()) {
             for (var shunt : java.util.List.of(bus.getShunt(), bus.getControllerShunt(), bus.getSvcShunt())) {
                 if (shunt.isPresent()) {
-                    shuntToElementIndex.put(shunt.get(), shOffset + shIndex);
-                    shIndex++;
+                    shuntToElementIndex.put(shunt.get(), shuntOffset + shuntIndex);
+                    shuntIndex++;
                 }
             }
         }
-        this.shuntCount = shIndex;
+        this.shuntCount = shuntIndex;
     }
 
     /**

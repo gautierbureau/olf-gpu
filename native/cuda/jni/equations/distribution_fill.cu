@@ -47,12 +47,12 @@ int gpuDqTraceRow() {
 // reactive sum (the controller weight qPercent is unchanged, so only the term vanishes). kinds 1 (shunt) and
 // 3 (zero-imp dummy) cannot be a single-branch contingency in a qualified batched scenario, so no mask check.
 __global__ void fillDistrQBatch(int ndq, int nScenarios, int n, int nnz, int nElements,
-                                int cbOffset, int obOffset,
+                                int closedBranchOffset, int openBranchOffset,
                                 const int* dqElem, const int* dqSide, const int* dqKind,
                                 const double* dqWeight, const int* dqDest,
                                 const int* dqAlt, const int* dqSel, const int* dqZiRow,
-                                const double* cbIn, const int* cbIx, const double* shIn, const int* shIx,
-                                const double* obIn, const int* obIx,
+                                const double* closedBranchParameters, const int* closedBranchIndices, const double* shuntParameters, const int* shuntIndices,
+                                const double* openBranchParameters, const int* openBranchIndices,
                                 const double* x, double* vals, double* F,
                                 const char* disabled, const char* active,
                                 int nDqOv, const int* dqOvIdx, const double* dqOvW,
@@ -65,7 +65,7 @@ __global__ void fillDistrQBatch(int ndq, int nScenarios, int n, int nnz, int nEl
                                 const char* psSkip, int psGroups,
                                 const int* mQrGroup, const int* qrPtr, const int* qrRows,
                                 int nR1Ov, const int* r1OvSlotElem, const double* r1OvVal,
-                                int nShOv, const int* shOvSlotElem, const double* shOvGb,
+                                int nShuntAdmittanceOverrides, const int* shuntAdmittanceOverrideScenarioElement, const double* shuntAdmittanceOverrideDelta,
                                 int dqTraceRow,
                                 const char* dqSub, const int* qrMemberStart, int nDqMembersAll) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -102,8 +102,8 @@ __global__ void fillDistrQBatch(int ndq, int nScenarios, int n, int nnz, int nEl
     }
     int e = dqElem[c];
     int kind = dqKind[c];
-    if (kind == GpuReactiveTermKind::CLOSED_BRANCH_REACTIVE_FLOW && disabled[s * nElements + cbOffset + e]) return;  // outaged closed contributor
-    if (kind == GpuReactiveTermKind::OPEN_BRANCH_REACTIVE_FLOW && disabled[s * nElements + obOffset + e]) return;  // outaged open contributor
+    if (kind == GpuReactiveTermKind::CLOSED_BRANCH_REACTIVE_FLOW && disabled[s * nElements + closedBranchOffset + e]) return;  // outaged closed contributor
+    if (kind == GpuReactiveTermKind::OPEN_BRANCH_REACTIVE_FLOW && disabled[s * nElements + openBranchOffset + e]) return;  // outaged open contributor
     // kind 3 is a COUPLER's DUMMY_Q as part of this controller's reactive injection, and its element index
     // IS that dummy column (= its row). A scenario that kills the coupler pins that row to an identity, and
     // the coupler then carries no reactive flow at all — the contribution has to go with it. Measured on the
@@ -162,11 +162,11 @@ __global__ void fillDistrQBatch(int ndq, int nScenarios, int n, int nnz, int nEl
     double* FS = F + (size_t) s * n;
 
     if (kind == GpuReactiveTermKind::SHUNT_COMPENSATOR_REACTIVE_FLOW) {  // shunt q: {q -> F, dq/dv -> J(row, vcol)}
-        const double* sp = shIn + e * 2;
-        int vcol = shIx[e * 5 + 2];
+        const double* sp = shuntParameters + e * 2;
+        int vcol = shuntIndices[e * 5 + 2];
         double g = sp[0];
         double b = sp[1];
-        applyShuntOverride(nShOv, shOvSlotElem, shOvGb, s, e, g, b);
+        applyShuntOverride(nShuntAdmittanceOverrides, shuntAdmittanceOverrideScenarioElement, shuntAdmittanceOverrideDelta, s, e, g, b);
         double so[SH_NOUT];
         evalShunt(xs[vcol], g, b, 0, so + 0, so + 1, so + 2, so + 3, so + 4);
         if (dst[0] <= -2 && (-2 - dst[0]) == dqTraceRow) {
@@ -185,8 +185,8 @@ __global__ void fillDistrQBatch(int ndq, int nScenarios, int n, int nnz, int nEl
         return;
     }
     if (kind == GpuReactiveTermKind::OPEN_BRANCH_REACTIVE_FLOW) {  // half-open branch: connected-side q + dq/dv
-        const double* op = obIn + e * 7;
-        const int* oq = obIx + e * 6;
+        const double* op = openBranchParameters + e * 7;
+        const int* oq = openBranchIndices + e * 6;
         int vcol = dqSide[c] == 0 ? oq[4] : oq[5];
         double v1 = dqSide[c] == 0 ? xs[vcol] : 1.0;
         double v2 = dqSide[c] == 1 ? xs[vcol] : 1.0;
@@ -208,7 +208,7 @@ __global__ void fillDistrQBatch(int ndq, int nScenarios, int n, int nnz, int nEl
     // transformers into an outaged busbar live against a far bus frozen at v=1.0 and injected
     // +0.813908 of phantom reactive into one DISTR_Q row (rte6515 BUS-1265_BBS, measured residual
     // -0.814738) - which moved the sharing solution 2.1 kV and then tripped a spurious RL pin.
-    const double* p0 = cbIn + e * 8;
+    const double* p0 = closedBranchParameters + e * 8;
     double p[8];
     for (int i = 0; i < 8; i++) {
         p[i] = p0[i];
@@ -219,7 +219,7 @@ __global__ void fillDistrQBatch(int ndq, int nScenarios, int n, int nnz, int nEl
             p[i] = pOv[i];
         }
     }
-    const int* q = cbIx + e * 12;
+    const int* q = closedBranchIndices + e * 12;
     double v1 = xs[q[5]], v2 = xs[q[7]], ph1 = xs[q[4]], ph2 = xs[q[6]];
     double r1 = q[9] >= 0 ? xs[q[9]] : p[6];
     double a1 = q[8] >= 0 ? xs[q[8]] : p[7];

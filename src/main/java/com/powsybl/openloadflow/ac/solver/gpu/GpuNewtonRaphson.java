@@ -616,14 +616,14 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
             // which fillHvdcBatch honors. Without this the fill emitted the LINEAR coupling on top
             // of the frozen/saturated injections (the former frozen-HVDC cpu-base-only condition).
             boolean[][] elementMask = new boolean[1][cachedData.getTotalElementCount()];
-            List<LfHvdc> hvPacked = network.getHvdcs().stream()
+            List<LfHvdc> packedHvdcs = network.getHvdcs().stream()
                     .filter(h -> h.getBus1() != null && h.getBus2() != null && h.isAcEmulation())
                     .toList();                               // the packer's exact enumeration order
-            int hvOffset = cachedData.getTotalElementCount() - hvPacked.size();
-            for (int h = 0; h < hvPacked.size(); h++) {
-                if (hvPacked.get(h).getAcEmulationControl().getAcEmulationStatus()
+            int hvdcAcEmulationOffset = cachedData.getTotalElementCount() - packedHvdcs.size();
+            for (int h = 0; h < packedHvdcs.size(); h++) {
+                if (packedHvdcs.get(h).getAcEmulationControl().getAcEmulationStatus()
                         != LfHvdc.AcEmulationControl.AcEmulationStatus.LINEAR_MODE) {
-                    elementMask[0][hvOffset + h] = true;
+                    elementMask[0][hvdcAcEmulationOffset + h] = true;
                 }
             }
             int[] ovIdx = new int[0];
@@ -921,14 +921,14 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
         }
         if (hvdcCtls != null && !hvdcCtls.isEmpty()) {
             int nh = hvdcCtls.size();
-            int[][] hvStatus = new int[1][nh];
+            int[][] hvdcAcEmulationStatus = new int[1][nh];
             double[] appliedD1 = new double[nh];
             double[] appliedD2 = new double[nh];
             for (var ctl : hvdcCtls) {
-                elementMask[0][ctl.hvElemIndex()] = false;   // set back below from the status, as a BASE status
+                elementMask[0][ctl.hvdcElementIndex()] = false;   // set back below from the status, as a BASE status
             }
-            GpuHvdcAcEmulationLimitsOuterLoop.seedBaseStatuses(1, 1, hvdcCtls, hvStatus, elementMask);
-            GpuHvdcAcEmulationLimitsOuterLoop.installDriverLoops(handle, hvdcCtls, 1, hvStatus, elementMask,
+            GpuHvdcAcEmulationLimitsOuterLoop.seedBaseStatuses(1, 1, hvdcCtls, hvdcAcEmulationStatus, elementMask);
+            GpuHvdcAcEmulationLimitsOuterLoop.installDriverLoops(handle, hvdcCtls, 1, hvdcAcEmulationStatus, elementMask,
                     appliedD1, appliedD2, hvdcLimits);
         } else {
             GpuHvdcAcEmulationLimitsOuterLoop.installDriverLoops(handle, null, 1, null, null, null, null, false);

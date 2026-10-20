@@ -56,7 +56,7 @@ public final class GpuHvdcAcEmulationLimitsOuterLoop {
      *  BASE frame — the base status plus the base VSC station targetP contributions ALREADY inside
      *  baseTargets (0 for a linear base; a saturated/frozen base carries its injections there, so
      *  every status override composes as {@code baseTargets - baseD + d(status)}). */
-    public record Ctl(int hvElemIndex, int bus1PRow, int bus2PRow, int bus1PhiCol, int bus2PhiCol,
+    public record Ctl(int hvdcElementIndex, int bus1PRow, int bus2PRow, int bus1PhiCol, int bus2PhiCol,
                double p0, double k,
                double pMax12, double pMax21, double loss1, double loss2, double r,
                int baseStatus, double baseD1, double baseD2) {
@@ -127,7 +127,7 @@ public final class GpuHvdcAcEmulationLimitsOuterLoop {
         List<LfHvdc> packed = network.getHvdcs().stream()
                 .filter(h -> h.getBus1() != null && h.getBus2() != null && h.isAcEmulation())
                 .toList();                                   // the packer's exact enumeration order
-        int hvOffset = nElements - packed.size();
+        int hvdcAcEmulationOffset = nElements - packed.size();
         List<Ctl> out = new ArrayList<>();
         for (int h = 0; h < packed.size(); h++) {
             LfHvdc hvdc = packed.get(h);
@@ -156,10 +156,10 @@ public final class GpuHvdcAcEmulationLimitsOuterLoop {
                     .filter(com.powsybl.openloadflow.equations.Equation::isActive).isPresent();
             if (HVDC_TRACE_ROW != -1) {
                 System.err.printf("HVDC_BUILD h=%d id=%s elem=%d olfStatus=%s st1TargetP=%.9f st2TargetP=%.9f p1Active=%b%n",
-                        h, hvdc.getId(), hvOffset + h, ac.getAcEmulationStatus(), hvdc.getConverterStation1().getTargetP(),
+                        h, hvdc.getId(), hvdcAcEmulationOffset + h, ac.getAcEmulationStatus(), hvdc.getConverterStation1().getTargetP(),
                         hvdc.getConverterStation2().getTargetP(), p1Active);
             }
-            out.add(new Ctl(hvOffset + h,
+            out.add(new Ctl(hvdcAcEmulationOffset + h,
                     p1Active ? r1 : ~r1, p2Active ? r2 : ~r2,
                     phi1, phi2,
                     ac.getP0(), ac.getDroop() * 180 / Math.PI,
@@ -180,9 +180,9 @@ public final class GpuHvdcAcEmulationLimitsOuterLoop {
                 .filter(h -> h.getBus1() != null && h.getBus2() != null && h.isAcEmulation())
                 .toList();
         java.util.Map<LfHvdc, Integer> out = new java.util.LinkedHashMap<>();
-        int hvOffset = nElements - packed.size();
+        int hvdcAcEmulationOffset = nElements - packed.size();
         for (int h = 0; h < packed.size(); h++) {
-            out.put(packed.get(h), hvOffset + h);
+            out.put(packed.get(h), hvdcAcEmulationOffset + h);
         }
         return out;
     }
@@ -226,7 +226,7 @@ public final class GpuHvdcAcEmulationLimitsOuterLoop {
                     continue;                                // the contingency owns that bit
                 }
                 if (status[s][h] == GpuAcEmulationStatus.LINEAR_MODE) {
-                    disabledMask[s][c.hvElemIndex()] = false;
+                    disabledMask[s][c.hvdcElementIndex()] = false;
                     if (c.baseStatus() != GpuAcEmulationStatus.LINEAR_MODE) {  // strip the base injections from the targets
                         if (c.bus1PActive()) {
                             overrides.merge(s * n + c.bus1WriteRow(rm), baseTargets[c.bus1WriteRow(rm)], c.baseD1(), 0);
@@ -236,7 +236,7 @@ public final class GpuHvdcAcEmulationLimitsOuterLoop {
                         }
                     }
                 } else {
-                    disabledMask[s][c.hvElemIndex()] = true;
+                    disabledMask[s][c.hvdcElementIndex()] = true;
                     // A STILL-FROZEN entry (its scenario retired before the unfreeze phase reached
                     // it) must keep the delta the pre-solve freeze applied — recomputing it here is
                     // impossible (it was taken at the warm-start flows), but it is exactly what the
@@ -271,10 +271,10 @@ public final class GpuHvdcAcEmulationLimitsOuterLoop {
             }
             for (int s = 0; s < chunkSize; s++) {
                 if (s >= realCount) {
-                    disabledMask[s][c.hvElemIndex()] = true;
-                } else if (status[s][h] == GpuAcEmulationStatus.LINEAR_MODE && !disabledMask[s][c.hvElemIndex()]) {
+                    disabledMask[s][c.hvdcElementIndex()] = true;
+                } else if (status[s][h] == GpuAcEmulationStatus.LINEAR_MODE && !disabledMask[s][c.hvdcElementIndex()]) {
                     status[s][h] = c.baseStatus();
-                    disabledMask[s][c.hvElemIndex()] = true;
+                    disabledMask[s][c.hvdcElementIndex()] = true;
                 }
             }
         }
@@ -293,28 +293,28 @@ public final class GpuHvdcAcEmulationLimitsOuterLoop {
             return null;
         }
         int nh = ctls.size();
-        int[] hvElem = new int[nh];
-        int[] hvB1 = new int[nh];
-        int[] hvB2 = new int[nh];
-        int[] hvPhi1 = new int[nh];
-        int[] hvPhi2 = new int[nh];
-        double[] hvIn = new double[nh * 9];
+        int[] hvdcElement = new int[nh];
+        int[] hvdcBus1PRows = new int[nh];
+        int[] hvdcBus2PRows = new int[nh];
+        int[] hvdcBus1PhiColumns = new int[nh];
+        int[] hvdcBus2PhiColumns = new int[nh];
+        double[] hvdcAcEmulationParameters = new double[nh * 9];
         for (int h = 0; h < nh; h++) {
             Ctl c = ctls.get(h);
-            hvElem[h] = c.hvElemIndex();          // GLOBAL element index
-            hvB1[h] = c.bus1PRow();               // where the P target is WRITTEN (relocated row, ~ when inactive)
-            hvB2[h] = c.bus2PRow();
-            hvPhi1[h] = c.bus1PhiCol();           // where the ANGLE is READ (always the bus's own column)
-            hvPhi2[h] = c.bus2PhiCol();
-            hvIn[h * 9] = c.p0();
-            hvIn[h * 9 + 1] = c.k();
-            hvIn[h * 9 + 2] = c.pMax12();
-            hvIn[h * 9 + 3] = c.pMax21();
-            hvIn[h * 9 + 4] = c.loss1();
-            hvIn[h * 9 + 5] = c.loss2();
-            hvIn[h * 9 + 6] = c.r();
-            hvIn[h * 9 + 7] = c.baseD1();
-            hvIn[h * 9 + 8] = c.baseD2();
+            hvdcElement[h] = c.hvdcElementIndex();          // GLOBAL element index
+            hvdcBus1PRows[h] = c.bus1PRow();               // where the P target is WRITTEN (relocated row, ~ when inactive)
+            hvdcBus2PRows[h] = c.bus2PRow();
+            hvdcBus1PhiColumns[h] = c.bus1PhiCol();           // where the ANGLE is READ (always the bus's own column)
+            hvdcBus2PhiColumns[h] = c.bus2PhiCol();
+            hvdcAcEmulationParameters[h * 9] = c.p0();
+            hvdcAcEmulationParameters[h * 9 + 1] = c.k();
+            hvdcAcEmulationParameters[h * 9 + 2] = c.pMax12();
+            hvdcAcEmulationParameters[h * 9 + 3] = c.pMax21();
+            hvdcAcEmulationParameters[h * 9 + 4] = c.loss1();
+            hvdcAcEmulationParameters[h * 9 + 5] = c.loss2();
+            hvdcAcEmulationParameters[h * 9 + 6] = c.r();
+            hvdcAcEmulationParameters[h * 9 + 7] = c.baseD1();
+            hvdcAcEmulationParameters[h * 9 + 8] = c.baseD2();
         }
         byte[] ctgOut = new byte[chunkSize * nh];
         int[] flatStatus = new int[chunkSize * nh];
@@ -323,10 +323,10 @@ public final class GpuHvdcAcEmulationLimitsOuterLoop {
                 flatStatus[s2 * nh + h] = hvdcStatus[s2][h];
                 // "the contingency outaged it" is the bit set on a LINEAR entry
                 ctgOut[s2 * nh + h] = (byte) (hvdcStatus[s2][h] == GpuAcEmulationStatus.LINEAR_MODE
-                        && disabledMask[s2][ctls.get(h).hvElemIndex()] ? 1 : 0);
+                        && disabledMask[s2][ctls.get(h).hvdcElementIndex()] ? 1 : 0);
             }
         }
-        HvdcNative.setBatchHvdcLoops(handle, hvElem, hvB1, hvB2, hvPhi1, hvPhi2, hvIn, ctgOut,
+        HvdcNative.setBatchHvdcLoops(handle, hvdcElement, hvdcBus1PRows, hvdcBus2PRows, hvdcBus1PhiColumns, hvdcBus2PhiColumns, hvdcAcEmulationParameters, ctgOut,
                 flatStatus, appliedD1, appliedD2, limits ? 1 : 0);
         return ctgOut;
     }
@@ -341,7 +341,7 @@ public final class GpuHvdcAcEmulationLimitsOuterLoop {
         java.util.Map<Integer, LfHvdc> byElem = new java.util.HashMap<>();
         elementIndices(network, nElements).forEach((h, e) -> byElem.put(e, h));
         for (int h = 0; h < ctls.size() && h < deviceStatus.length; h++) {
-            LfHvdc hvdc = byElem.get(ctls.get(h).hvElemIndex());
+            LfHvdc hvdc = byElem.get(ctls.get(h).hvdcElementIndex());
             if (hvdc == null) {
                 continue;
             }

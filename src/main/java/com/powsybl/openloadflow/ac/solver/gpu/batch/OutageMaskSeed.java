@@ -52,16 +52,16 @@ final class OutageMaskSeed {
             // nothing), and the connected side's g/b carry the equivalent. No new
             // kernel: this is the per-scenario pi-model override the tap channel
             // already uses, and the cb evaluation reads it through findTapOverride.
-            double[] cbRow = GpuBatchSideOpen.danglingCbRow(so.branch(), so.side());
-            if (cbRow == null) {         // not expressible -> keep the old behaviour
-                int cbIdx2 = elementMapper.getElementIndex(so.branch());
-                rs.disabledMask[s][cbIdx2] = true;
-                eis[ei++] = cbIdx2;
+            double[] closedBranchParameterRow = GpuBatchSideOpen.danglingClosedBranchParameterRow(so.branch(), so.side());
+            if (closedBranchParameterRow == null) {         // not expressible -> keep the old behaviour
+                int closedBranchElementIndex = elementMapper.getElementIndex(so.branch());
+                rs.disabledMask[s][closedBranchElementIndex] = true;
+                eis[ei++] = closedBranchElementIndex;
             } else {
                 int soElem = elementMapper.getElementIndex(so.branch());
                 if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {
                     // Does this branch also feed a DISTR_Q row? fillDistrQBatch reads
-                    // cbIn with NO r1Ov parameters, so it cannot see the per-scenario
+                    // closedBranchParameters with NO r1Ov parameters, so it cannot see the per-scenario
                     // pi override: a side-opened branch that contributes to a remote
                     // voltage-control group's reactive distribution would be counted
                     // there with its FULL series admittance instead of the dangling
@@ -79,11 +79,11 @@ final class OutageMaskSeed {
                             contingencies.get(ci).contingencyId(), so.branch().getId(),
                             so.side(), soElem, hits,
                             sopi.getG1(), sopi.getB1(), sopi.getG2(), sopi.getB2(),
-                            cbRow[1], cbRow[3], cbRow[2], cbRow[4]);
+                            closedBranchParameterRow[1], closedBranchParameterRow[3], closedBranchParameterRow[2], closedBranchParameterRow[4]);
                 }
                 rs.r1OvSlotElemList.add(s);
                 rs.r1OvSlotElemList.add(soElem);
-                for (double v : cbRow) {
+                for (double v : closedBranchParameterRow) {
                     rs.r1OvValList.add(v);
                 }
             }

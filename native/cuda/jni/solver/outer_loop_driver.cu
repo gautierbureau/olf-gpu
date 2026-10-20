@@ -112,7 +112,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                               int maxIter, double tol,
                               double reactiveLimitTol, double slackDistTol, double convEpsPerEq,
                               int lsMode, double maxDv, double maxDphi, const int* varType,
-                              const double* x0Full, int nShOv, const int* shOvSlotElem, const double* shOvGb,
+                              const double* x0Full, int nShuntAdmittanceOverrides, const int* shuntAdmittanceOverrideScenarioElement, const double* shuntAdmittanceOverrideDelta,
                               const int* rlStateIn, int* rlStateOut,
                               int nR1Ov, const int* r1OvSlotElem, const double* r1OvVal,
                               int maxOuterProductive, int rlMaxSwitch, int dsRejectResidual, int skipRlPhase,
@@ -131,7 +131,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     const int& nS = drv.nS;
     // MAX_VOLTAGE_CHANGE (GpuStateVectorScalingMode::MAX_VOLTAGE_CHANGE): per-scenario step clamp, same rule as the base solver's
     // (varType 1 = V vs maxDv, 0 = PHI vs maxDphi; whole step scaled). Buffers allocated lazily.
-    uploadBatchOverrides(ctx, lsMode, maxDv, maxDphi, varType, nShOv, shOvSlotElem, shOvGb,
+    uploadBatchOverrides(ctx, lsMode, maxDv, maxDphi, varType, nShuntAdmittanceOverrides, shuntAdmittanceOverrideScenarioElement, shuntAdmittanceOverrideDelta,
                          nziBase, nZiOff, ziOffSlotElem, nZiOn, ziOnSlotElem, nR1Ov, r1OvSlotElem, r1OvVal);
     drv.nTot = static_cast<size_t>(n) * nS;
     const size_t& nTot = drv.nTot;
@@ -471,9 +471,9 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     if (ctx->nds > 0 || ctx->dsSlackOnly) {
         loopOrder[nLoops++] = GpuOuterLoopKind::DISTRIBUTED_SLACK;
     }
-    if (ctx->nhv > 0) {
+    if (ctx->nHvdcAcEmulation > 0) {
         loopOrder[nLoops++] = GpuOuterLoopKind::FREEZING_HVDC_AC_EMULATION;  // OLF: FreezingHvdcACEmulation
-        if (ctx->hvLimitsActive) {
+        if (ctx->hvdcAcEmulationLimitsActive) {
             loopOrder[nLoops++] = GpuOuterLoopKind::HVDC_AC_EMULATION_LIMITS;  // OLF: AcHvdcAcEmulationLimits
         }
     }
@@ -765,9 +765,9 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     // fills of a 485-contingency network.xiidm chunk, at 38 ms each, were this call. This kernel runs the fused
     // fill's own residual expressions and drops only the 24 Jacobian scatters (an angle-addition variant once
     // moved transformer-control cases by ~3e-5 kV: the bus balance must be the Newton residual's arithmetic).
-    if (ctx->st->cb.elementCount) fillClosedBranchQbufBatch<<<grid(ctx->st->cb.elementCount * nS), BLOCK, 0, ctx->stream>>>(ctx->st->cb.elementCount, nS, n, ctx->nElements, ctx->cbOffset, ctx->st->cb.parameters.as<double>(), ctx->st->cb.indices.as<int>(), ctx->st->cb.destination.as<int>(), ctx->dX.as<double>(), ctx->dQbuf.as<double>(), ctx->dDisabled.as<char>(), ctx->dRlActive.as<char>(), ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>());
-    if (ctx->st->ob.elementCount) fillOpenBranchBatch<<<grid(ctx->st->ob.elementCount * nS), BLOCK, 0, ctx->stream>>>(ctx->st->ob.elementCount, nS, n, nnz, ctx->nElements, ctx->obOffset, ctx->st->ob.parameters.as<double>(), ctx->st->ob.indices.as<int>(), ctx->st->ob.destination.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dQbuf.as<double>(), ctx->dDisabled.as<char>(), ctx->dRlActive.as<char>(), nullptr, nullptr, nullptr, 0, RelocTables{});
-    if (ctx->st->sh.elementCount) fillShuntBatch<<<grid(ctx->st->sh.elementCount * nS), BLOCK, 0, ctx->stream>>>(ctx->st->sh.elementCount, nS, n, nnz, ctx->nElements, ctx->shOffset, ctx->st->sh.parameters.as<double>(), ctx->st->sh.indices.as<int>(), ctx->st->sh.destination.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dQbuf.as<double>(), ctx->dDisabled.as<char>(), ctx->dRlActive.as<char>(), ctx->nShOv, ctx->dShOvSlotElem.as<int>(), ctx->dShOvGb.as<double>(), nullptr, nullptr, nullptr, 0, RelocTables{});
+    if (ctx->st->closedBranch.elementCount) fillClosedBranchQbufBatch<<<grid(ctx->st->closedBranch.elementCount * nS), BLOCK, 0, ctx->stream>>>(ctx->st->closedBranch.elementCount, nS, n, ctx->nElements, ctx->closedBranchOffset, ctx->st->closedBranch.parameters.as<double>(), ctx->st->closedBranch.indices.as<int>(), ctx->st->closedBranch.destination.as<int>(), ctx->dX.as<double>(), ctx->dQbuf.as<double>(), ctx->dDisabled.as<char>(), ctx->dRlActive.as<char>(), ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>());
+    if (ctx->st->openBranch.elementCount) fillOpenBranchBatch<<<grid(ctx->st->openBranch.elementCount * nS), BLOCK, 0, ctx->stream>>>(ctx->st->openBranch.elementCount, nS, n, nnz, ctx->nElements, ctx->openBranchOffset, ctx->st->openBranch.parameters.as<double>(), ctx->st->openBranch.indices.as<int>(), ctx->st->openBranch.destination.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dQbuf.as<double>(), ctx->dDisabled.as<char>(), ctx->dRlActive.as<char>(), nullptr, nullptr, nullptr, 0, RelocTables{});
+    if (ctx->st->shunt.elementCount) fillShuntBatch<<<grid(ctx->st->shunt.elementCount * nS), BLOCK, 0, ctx->stream>>>(ctx->st->shunt.elementCount, nS, n, nnz, ctx->nElements, ctx->shuntOffset, ctx->st->shunt.parameters.as<double>(), ctx->st->shunt.indices.as<int>(), ctx->st->shunt.destination.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dQbuf.as<double>(), ctx->dDisabled.as<char>(), ctx->dRlActive.as<char>(), ctx->nShuntAdmittanceOverrides, ctx->dShuntAdmittanceOverrideScenarioElement.as<int>(), ctx->dShuntAdmittanceOverrideDelta.as<double>(), nullptr, nullptr, nullptr, 0, RelocTables{});
     if (ctx->st->nLoadModelTerms) fillLoadModelBatch<<<grid(ctx->st->nLoadModelTerms * nS), BLOCK, 0, ctx->stream>>>(ctx->st->nLoadModelTerms, nS, n, nnz, ctx->st->dLoadModelParameters.as<double>(), ctx->st->dLoadModelIndices.as<int>(), ctx->st->dLoadModelDestination.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dQbuf.as<double>(), nullptr, nullptr, nullptr);
     // Zero-impedance dummy transfers MUST be in the Q/P buffer too: the distributed-slack retain
     // reads the slack row's balance from dQbuf — without the coupler's dummy-P the DS sees a
@@ -778,21 +778,21 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     // hence free) qBuf row so the RL kernel evaluates remote entries like local ones.
     if (ctx->nRmq > 0) {
         fillRemoteMemberQBatch<<<grid(ctx->nRmq * nS), BLOCK, 0, ctx->stream>>>(ctx->nRmq, nS, n,
-                ctx->nElements, ctx->cbOffset, ctx->obOffset,
+                ctx->nElements, ctx->closedBranchOffset, ctx->openBranchOffset,
                 ctx->dRmqRow.as<int>(), ctx->dRmqElem.as<int>(), ctx->dRmqSide.as<int>(),
                 ctx->dRmqKind.as<int>(), ctx->dRmqWeight.as<double>(),
-                ctx->st->cb.parameters.as<double>(), ctx->st->cb.indices.as<int>(), ctx->st->sh.parameters.as<double>(), ctx->st->sh.indices.as<int>(),
-                ctx->st->ob.parameters.as<double>(), ctx->st->ob.indices.as<int>(),
+                ctx->st->closedBranch.parameters.as<double>(), ctx->st->closedBranch.indices.as<int>(), ctx->st->shunt.parameters.as<double>(), ctx->st->shunt.indices.as<int>(),
+                ctx->st->openBranch.parameters.as<double>(), ctx->st->openBranch.indices.as<int>(),
                 ctx->dX.as<double>(), ctx->dQbuf.as<double>(), ctx->dDisabled.as<char>(), ctx->dRlActive.as<char>(),
                 ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>(),
-                ctx->nShOv, ctx->dShOvSlotElem.as<int>(), ctx->dShOvGb.as<double>());
+                ctx->nShuntAdmittanceOverrides, ctx->dShuntAdmittanceOverrideScenarioElement.as<int>(), ctx->dShuntAdmittanceOverrideDelta.as<double>());
     }
-    if (ctx->nhv > 0 && ctx->dsSlackPhiRow >= 0) {           // a link on the slack bus, as OLF's slack mismatch sees it
-        hvdcSlackBalanceBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(nS, ctx->nhv, n, ctx->nElements, ctx->dsSlackPhiRow,
+    if (ctx->nHvdcAcEmulation > 0 && ctx->dsSlackPhiRow >= 0) {           // a link on the slack bus, as OLF's slack mismatch sees it
+        hvdcSlackBalanceBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(nS, ctx->nHvdcAcEmulation, n, ctx->nElements, ctx->dsSlackPhiRow,
                 ctx->hasDsSlackRowOv ? ctx->dDsSlackRowOv.as<int>() : nullptr,
-                ctx->dHvBus1Row.as<int>(), ctx->dHvBus2Row.as<int>(), ctx->dHvBus1Phi.as<int>(), ctx->dHvBus2Phi.as<int>(),
-                ctx->dHvElem.as<int>(), ctx->dHvIn.as<double>(), ctx->dHvStatus.as<int>(),
-                ctx->dHvAppliedD1.as<double>(), ctx->dHvAppliedD2.as<double>(), ctx->dHvCtgOut.as<char>(),
+                ctx->dHvdcBus1PRow.as<int>(), ctx->dHvdcBus2PRow.as<int>(), ctx->dHvdcBus1PhiColumn.as<int>(), ctx->dHvdcBus2PhiColumn.as<int>(),
+                ctx->dHvdcElement.as<int>(), ctx->dHvdcAcEmulationParameters.as<double>(), ctx->dHvdcAcEmulationStatus.as<int>(),
+                ctx->dHvdcAppliedDelta1.as<double>(), ctx->dHvdcAppliedDelta2.as<double>(), ctx->dHvdcContingencyOutage.as<char>(),
                 ctx->dDisabled.as<char>(), ctx->dX.as<double>(), ctx->dRlActive.as<char>(), ctx->dQbuf.as<double>());
     }
     CUDA_CHECK(cudaMemsetAsync(ctx->dRlSwitched.p, 0, nS * sizeof(char), ctx->stream));

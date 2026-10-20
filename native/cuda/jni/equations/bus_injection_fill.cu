@@ -35,7 +35,7 @@ __global__ void fillShuntBatch(int elementCount, int nScenarios, int n, int nnz,
                                const double* in, const int* ix, const int* dest,
                                const double* x, double* vals, double* F,
                                const char* disabled, const char* active,
-                               int nShOv, const int* shOvSlotElem, const double* shOvGb,
+                               int nShuntAdmittanceOverrides, const int* shuntAdmittanceOverrideScenarioElement, const double* shuntAdmittanceOverrideDelta,
                                const int* altDest, const int* selRow, const int* mode, int dynReloc,
                                RelocTables rt) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -46,7 +46,7 @@ __global__ void fillShuntBatch(int elementCount, int nScenarios, int n, int nnz,
     const double* p = in + e * 2;                            // g b
     double g = p[0];
     double b = p[1];
-    applyShuntOverride(nShOv, shOvSlotElem, shOvGb, s, e, g, b);
+    applyShuntOverride(nShuntAdmittanceOverrides, shuntAdmittanceOverrideScenarioElement, shuntAdmittanceOverrideDelta, s, e, g, b);
     // A voltage-controlling shunt (bcol >= 0) reads its susceptance from the per-scenario state vector; a
     // fixed shunt keeps the packed value (+ any contingency shunt-shift override).
     int bcol = ix[e * 5 + 3];
@@ -129,7 +129,7 @@ __global__ void fillShuntBatchF(int elementCount, int nScenarios, int n, int nnz
                                 const double* in, const int* ix, const int* dest,
                                 const double* x, double* F,
                                 const char* disabled, const char* active,
-                                int nShOv, const int* shOvSlotElem, const double* shOvGb,
+                                int nShuntAdmittanceOverrides, const int* shuntAdmittanceOverrideScenarioElement, const double* shuntAdmittanceOverrideDelta,
                                 const int* altDest, const int* selRow, const int* mode, int dynReloc,
                                RelocTables rt) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -140,7 +140,7 @@ __global__ void fillShuntBatchF(int elementCount, int nScenarios, int n, int nnz
     const double* p = in + e * 2;                            // g b
     double g = p[0];
     double b = p[1];
-    applyShuntOverride(nShOv, shOvSlotElem, shOvGb, s, e, g, b);
+    applyShuntOverride(nShuntAdmittanceOverrides, shuntAdmittanceOverrideScenarioElement, shuntAdmittanceOverrideDelta, s, e, g, b);
     int bcol = ix[e * 5 + 3];
     if (bcol >= 0) b = x[(size_t) s * n + bcol];             // voltage-controlling shunt: b from state
     double v = x[(size_t) s * n + ix[e * 5 + 2]];

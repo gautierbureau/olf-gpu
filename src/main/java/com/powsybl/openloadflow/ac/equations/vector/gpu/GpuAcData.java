@@ -16,19 +16,19 @@ import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuQLimitType;
  * rows), so this structure is the fixed superset, identical across activation
  * switching. Packings (an index of -1 marks an absent branch side):
  * <ul>
- *   <li>closed branches — in {@code ncb*8} (y g1 g2 b1 b2 ksi r1 a1),
- *       idx {@code ncb*12} (Prow1 Qrow1 Prow2 Qrow2 ph1col v1col ph2col v2col a1col r1col qAlt1 qAlt2).
+ *   <li>closed branches — in {@code nClosedBranch*8} (y g1 g2 b1 b2 ksi r1 a1),
+ *       idx {@code nClosedBranch*12} (Prow1 Qrow1 Prow2 Qrow2 ph1col v1col ph2col v2col a1col r1col qAlt1 qAlt2).
  *       {@code a1col}/{@code r1col} are the BRANCH_ALPHA1/BRANCH_RHO1 variable columns when the
  *       branch derives that control (transformer phase/voltage control), else -1; a controlling
  *       transformer also routes the controlled bus's Q row to its {@code r1col} (see GpuAcDataExtractor)</li>
- *   <li>open branches — in {@code nob*7} (y ksi g1 b1 g2 b2 r1),
- *       idx {@code nob*6} (Prow1 Qrow1 Prow2 Qrow2 v1col v2col)</li>
- *   <li>shunts — in {@code nsh*2} (g b), idx {@code nsh*4} (Prow Qrow vcol bcol) — {@code bcol} is the
+ *   <li>open branches — in {@code nOpenBranch*7} (y ksi g1 b1 g2 b2 r1),
+ *       idx {@code nOpenBranch*6} (Prow1 Qrow1 Prow2 Qrow2 v1col v2col)</li>
+ *   <li>shunts — in {@code nShunt*2} (g b), idx {@code nShunt*4} (Prow Qrow vcol bcol) — {@code bcol} is the
  *       shunt's SHUNT_B variable row when it derives voltage control (b read from the state vector; dq/db
  *       scattered onto that column), else -1 (fixed shunt, b constant); a controlling shunt also routes the
  *       controlled bus's Q row to its {@code bcol}, the analogue of the transformer rho pairing</li>
- *   <li>HVDC AC emulation — in {@code nhv*5} (p0 k lossFactor1 lossFactor2 r),
- *       idx {@code nhv*4} (Prow1 Prow2 ph1col ph2col)</li>
+ *   <li>HVDC AC emulation — in {@code nHvdcAcEmulation*5} (p0 k lossFactor1 lossFactor2 r),
+ *       idx {@code nHvdcAcEmulation*4} (Prow1 Prow2 ph1col ph2col)</li>
  * </ul>
  *
  * <p>DISTR_Q (remote generator voltage control): {@link DistrQTerms} and {@link DistrQMembers}. Empty when no
@@ -116,7 +116,7 @@ public record GpuAcData(ClosedBranchPack closedBranch, OpenBranchPack openBranch
      * the CSR pattern + diagonal pairing). True means a cached context's pattern and cuDSS symbolic
      * analysis are still valid and only the element PARAMETER packs may differ — the VALUES invalidation
      * level: a cheap in-place re-upload (refreshStructureValues) instead of a full rebuild + re-analysis.
-     * A transformer tap or shunt-susceptance move changes {@code cbIn}/{@code shIn} values but not the
+     * A transformer tap or shunt-susceptance move changes {@code closedBranchParameters}/{@code shuntParameters} values but not the
      * indices, so it is {@code sameStructureAs} but not {@code sameAs}.
      */
     public boolean sameStructureAs(GpuAcData other) {

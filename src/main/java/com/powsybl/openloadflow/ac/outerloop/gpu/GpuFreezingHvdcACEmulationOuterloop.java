@@ -73,10 +73,10 @@ public final class GpuFreezingHvdcACEmulationOuterloop {
                 GpuHvdcAcEmulationLimitsOuterLoop.Ctl c = ctls.get(h);
                 if (HVDC_TRACE_ROW != -1) {
                     System.err.printf("HVDC_CTL s=%d h=%d elem=%d baseStatus=%d baseD1=%.9f baseD2=%.9f disabled=%b p1warm=%.9f p2warm=%.9f pMax12=%.6f baseT1=%.9f%n",
-                            s, h, c.hvElemIndex(), c.baseStatus(), c.baseD1(), c.baseD2(), disabledMask[s][c.hvElemIndex()],
+                            s, h, c.hvdcElementIndex(), c.baseStatus(), c.baseD1(), c.baseD2(), disabledMask[s][c.hvdcElementIndex()],
                             c.p1At(warm), c.p2At(warm), c.pMax12(), c.bus1PRow() >= 0 ? baseTargets[c.bus1PRow()] : Double.NaN);
                 }
-                if (disabledMask[s][c.hvElemIndex()]) {
+                if (disabledMask[s][c.hvdcElementIndex()]) {
                     continue;                                // outaged hvdc — stays as the contingency left it
                 }
                 double[] d = frozenDeltas(c, c.p1At(warm), c.p2At(warm));
@@ -96,7 +96,7 @@ public final class GpuFreezingHvdcACEmulationOuterloop {
                     appliedD2[s * ctls.size() + h] = d[1] - c.baseD2();
                 }
                 status[s][h] = GpuAcEmulationStatus.FROZEN;
-                disabledMask[s][c.hvElemIndex()] = true;
+                disabledMask[s][c.hvdcElementIndex()] = true;
                 // base frame: baseTargets (or the row's existing override — e.g. a lost load on the
                 // converter bus) already carry the base injections
                 if (c.bus1PActive()) {

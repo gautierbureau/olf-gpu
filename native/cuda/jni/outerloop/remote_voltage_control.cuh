@@ -19,15 +19,15 @@ __global__ void pilotRowAllPinnedBatch(int nEntries, int nScenarios, int n, int 
                                        const char* rlActive, char* switched);
 
 __global__ void fillRemoteMemberQBatch(int nrmq, int nScenarios, int n, int nElements,
-                                       int cbOffset, int obOffset,
+                                       int closedBranchOffset, int openBranchOffset,
                                        const int* rmqRow, const int* rmqElem, const int* rmqSide,
                                        const int* rmqKind, const double* rmqWeight,
-                                       const double* cbIn, const int* cbIx, const double* shIn, const int* shIx,
-                                       const double* obIn, const int* obIx,
+                                       const double* closedBranchParameters, const int* closedBranchIndices, const double* shuntParameters, const int* shuntIndices,
+                                       const double* openBranchParameters, const int* openBranchIndices,
                                        const double* x, double* qBuf,
                                        const char* disabled, const char* rlActive,
                                        int nR1Ov, const int* r1OvSlotElem, const double* r1OvVal,
-                                       int nShOv, const int* shOvSlotElem, const double* shOvGb);
+                                       int nShuntAdmittanceOverrides, const int* shuntAdmittanceOverrideScenarioElement, const double* shuntAdmittanceOverrideDelta);
 
 }  // namespace olfgpu
 

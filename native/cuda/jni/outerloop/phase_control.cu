@@ -27,10 +27,10 @@ namespace olfgpu {
 // UNSTABLE on a non-empty controller list, LIMITER-only included — a no-change re-solve). Later checks:
 // a live LIMITER whose current exceeds the limit shifts one tap against the sign of dI/da1
 // (shiftOneTapPositionToChangeA1). The tap's pi row follows through the shared r1 override rebuild.
-__global__ void cphCheckBatch(int nCph, int nScenarios, int n, int nElements, int cbOffset,
+__global__ void cphCheckBatch(int nCph, int nScenarios, int n, int nElements, int closedBranchOffset,
                               const int* kind, const int* a1Row, const int* side, const double* limit, const int* elem,
                               const int* tapPtr, const double* tapData,
-                              const double* cbIn, const int* cbIx, int nR1Ov, const int* r1OvSlotElem, const double* r1OvVal,
+                              const double* closedBranchParameters, const int* closedBranchIndices, int nR1Ov, const int* r1OvSlotElem, const double* r1OvVal,
                               const char* disabled, const char* rlActive, const int* iter,
                               int* tap, int* mode, double* target, double* x, char* switched) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -57,12 +57,12 @@ __global__ void cphCheckBatch(int nCph, int nScenarios, int n, int nElements, in
         return;
     }
     if (kind[c] != GpuPhaseControlMode::LIMITER) return;
-    int e = elem[c] - cbOffset;                              // LIMITER is local: the controlled branch is itself
-    const double* p = cbIn + e * GpuPiModelColumn::COUNT;
+    int e = elem[c] - closedBranchOffset;                              // LIMITER is local: the controlled branch is itself
+    const double* p = closedBranchParameters + e * GpuPiModelColumn::COUNT;
     double pOv[8];
     if (findTapOverride(nR1Ov, r1OvSlotElem, r1OvVal, s, e, pOv)) p = pOv;
     double g[18];
-    double i = flcFlowAndGrad(side[c], GpuControlledFlow::CURRENT, p, x + (size_t) s * n, cbIx + e * 12, g);
+    double i = flcFlowAndGrad(side[c], GpuControlledFlow::CURRENT, p, x + (size_t) s * n, closedBranchIndices + e * 12, g);
     if (!(i > limit[c])) return;
     double dida1 = g[0] == 1e300 ? 0.0 : g[4];
     int dir = dida1 > 0 ? -1 : 1;                            // reduce I: move a1 against the slope
@@ -96,10 +96,10 @@ void cphStep(BatchSolverContext* ctx, DriverPass& drv) {
     int nC = ctx->nCph;
     if (nC <= 0) return;
     size_t nst = static_cast<size_t>(nS) * nC;
-    cphCheckBatch<<<grid(static_cast<int>(nst)), BLOCK, 0, ctx->stream>>>(nC, nS, n, ctx->nElements, ctx->cbOffset,
+    cphCheckBatch<<<grid(static_cast<int>(nst)), BLOCK, 0, ctx->stream>>>(nC, nS, n, ctx->nElements, ctx->closedBranchOffset,
             ctx->dCphKind.as<int>(), ctx->dCphA1Row.as<int>(), ctx->dCphSide.as<int>(), ctx->dCphLimit.as<double>(), ctx->dCphElem.as<int>(),
             ctx->dCphTapPtr.as<int>(), ctx->dCphTapData.as<double>(),
-            ctx->st->cb.parameters.as<double>(), ctx->st->cb.indices.as<int>(), ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>(),
+            ctx->st->closedBranch.parameters.as<double>(), ctx->st->closedBranch.indices.as<int>(), ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>(),
             ctx->dDisabled.as<char>(), ctx->dRlActive.as<char>(), ctx->dCphIter.as<int>(),
             ctx->dCphTap.as<int>(), ctx->dMode.as<int>(), ctx->dTarget.as<double>(), ctx->dX.as<double>(), ctx->dRlSwitched.as<char>());
     CUDA_CHECK(cudaStreamSynchronize(ctx->stream));

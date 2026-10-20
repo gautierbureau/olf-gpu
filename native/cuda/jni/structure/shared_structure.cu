@@ -33,30 +33,30 @@ using namespace powsybl::openloadflow;
 namespace olfgpu {
 
 SharedStructure* buildStructure(int n,
-                                int ncb, const double* cbIn, const int* cbIdx,
-                                int nob, const double* obIn, const int* obIdx,
-                                int nsh, const double* shIn, const int* shIdx,
-                                int nhv, const double* hvIn, const int* hvIdx,
+                                int nClosedBranch, const double* closedBranchParameters, const int* closedBranchIndices,
+                                int nOpenBranch, const double* openBranchParameters, const int* openBranchIndices,
+                                int nShunt, const double* shuntParameters, const int* shuntIndices,
+                                int nHvdcAcEmulation, const double* hvdcAcEmulationParameters, const int* hvdcAcEmulationIndices,
                                 int ndq, const int* dqElem, const int* dqSide, const double* dqWeight,
                                 const int* dqRow, const int* dqKind,
                                 int nzi, const double* ziIn, const int* ziIdx,
                                 int nDistrRho, const int* distrRhoRow, const int* distrRhoColumn, const double* distrRhoCoefficient,
                                 int nDistrShuntB, const int* distrShuntBRow, const int* distrShuntBColumn, const double* distrShuntBCoefficient,
-                                const int* cbPcSide,
+                                const int* closedBranchPhaseControlSide,
                                 int nLoadModelTerms, const double* loadModelParameters, const int* loadModelIndices,
                                 int nQr, const int* qrPtr, const int* qrRowsIn,
-                                const int* obQAltIn, const int* ziQAltIn,
+                                const int* openBranchAlternateReactiveDestinationIn, const int* ziQAltIn,
                                 const int* qrDepBaseIn, const int* qrBaseTargetRowIn, const int* depGroupOfRowIn) {
     auto st = std::make_unique<SharedStructure>();
     st->n = n;
-    st->nElements = ncb + nob + nsh + nhv;
-    st->cbOffset = 0;
-    st->obOffset = ncb;
-    st->shOffset = ncb + nob;
-    st->hvOffset = ncb + nob + nsh;
+    st->nElements = nClosedBranch + nOpenBranch + nShunt + nHvdcAcEmulation;
+    st->closedBranchOffset = 0;
+    st->openBranchOffset = nClosedBranch;
+    st->shuntOffset = nClosedBranch + nOpenBranch;
+    st->hvdcAcEmulationOffset = nClosedBranch + nOpenBranch + nShunt;
 
     // ---- diagonal-pairing row permutation + index packs rewritten through it ----
-    st->rowMap = buildRowMap(n, ncb, cbIdx, nob, obIdx, nsh, shIdx, nhv, hvIdx, ndq, dqRow, nzi, ziIdx);
+    st->rowMap = buildRowMap(n, nClosedBranch, closedBranchIndices, nOpenBranch, openBranchIndices, nShunt, shuntIndices, nHvdcAcEmulation, hvdcAcEmulationIndices, ndq, dqRow, nzi, ziIdx);
     const std::vector<int>& rowMap = st->rowMap;
     // COUPLER-TREE relocation, per-scenario placement: map each coupler DUMMY row that hosts a child bus's
     // relocated P/Q equation to that bus's OWN row, so a scenario OPENING the coupler can put the equation
@@ -126,50 +126,50 @@ SharedStructure* buildStructure(int n,
         }
     }
     const int* depGroupOfRow = anyDep ? st->hDepGroupOfRow.data() : nullptr;
-    std::vector<int> cbIdxM = mapRows(cbIdx, ncb, 12, {0, 1, 2, 3, 10, 11});
-    std::vector<int> obIdxM = mapRows(obIdx, nob, 6, {0, 1, 2, 3});
-    std::vector<int> obQAltM = mapRows(obQAltIn, nob, 2, {0, 1});   // negative encodings pass through
+    std::vector<int> closedBranchIndicesMapped = mapRows(closedBranchIndices, nClosedBranch, 12, {0, 1, 2, 3, 10, 11});
+    std::vector<int> openBranchIndicesMapped = mapRows(openBranchIndices, nOpenBranch, 6, {0, 1, 2, 3});
+    std::vector<int> openBranchAlternateReactiveDestinationMapped = mapRows(openBranchAlternateReactiveDestinationIn, nOpenBranch, 2, {0, 1});   // negative encodings pass through
     std::vector<int> ziQAltM = mapRows(ziQAltIn, nzi, 2, {0, 1});
-    const int* obQAlt = obQAltM.data();
+    const int* openBranchAlternateReactiveDestination = openBranchAlternateReactiveDestinationMapped.data();
     const int* ziQAlt = ziQAltM.data();
-    std::vector<int> shIdxM = mapRows(shIdx, nsh, 5, {0, 1, 4});
-    std::vector<int> hvIdxM = mapRows(hvIdx, nhv, 4, {0, 1});
+    std::vector<int> shuntIndicesMapped = mapRows(shuntIndices, nShunt, 5, {0, 1, 4});
+    std::vector<int> hvdcAcEmulationIndicesMapped = mapRows(hvdcAcEmulationIndices, nHvdcAcEmulation, 4, {0, 1});
     std::vector<int> loadModelIndicesMapped = mapRows(loadModelIndices, nLoadModelTerms, 2, {0});
     loadModelIndices = loadModelIndicesMapped.data();
-    cbIdx = cbIdxM.data();
-    obIdx = obIdxM.data();
-    shIdx = shIdxM.data();
-    hvIdx = hvIdxM.data();
+    closedBranchIndices = closedBranchIndicesMapped.data();
+    openBranchIndices = openBranchIndicesMapped.data();
+    shuntIndices = shuntIndicesMapped.data();
+    hvdcAcEmulationIndices = hvdcAcEmulationIndicesMapped.data();
 
     // ---- fixed CSR pattern (rows = permuted equations, cols = variables) ----
     std::vector<std::pair<int, int>> pat;
-    collectPattern(ncb, cbIdx, 12, CB_SCATTER, CB_NOUT, resolveCb, pat);
-    bool dynReloc = anyRelocOwn || anyDep || hasRelocatable(ncb, cbIdx, nsh, shIdx)
-            || hasAltEntries(obQAlt, nob * 2) || hasAltEntries(ziQAlt, nzi * 2);
+    collectPattern(nClosedBranch, closedBranchIndices, 12, CB_SCATTER, CB_NOUT, resolveClosedBranch, pat);
+    bool dynReloc = anyRelocOwn || anyDep || hasRelocatable(nClosedBranch, closedBranchIndices, nShunt, shuntIndices)
+            || hasAltEntries(openBranchAlternateReactiveDestination, nOpenBranch * 2) || hasAltEntries(ziQAlt, nzi * 2);
     if (dynReloc) {
-        collectCbAltPattern(ncb, cbIdx, relocOwn, pat, st->nQr,        // union the alternate Q rows into the pattern
+        collectCbAltPattern(nClosedBranch, closedBranchIndices, relocOwn, pat, st->nQr,        // union the alternate Q rows into the pattern
                 st->hQrPtr.data(), st->hQrRows.data(), depGroupOfRow);      // (+ every GROUP candidate's slots, plan-A6)
     }
     bool hasPhaseControl = false;
-    for (int e = 0; e < ncb; e++) {
-        hasPhaseControl |= cbPcSide[e] >= 0;
+    for (int e = 0; e < nClosedBranch; e++) {
+        hasPhaseControl |= closedBranchPhaseControlSide[e] >= 0;
     }
     if (hasPhaseControl) {
-        collectCbPhasePattern(ncb, cbIdx, cbPcSide, rowMap, pat);   // union the a1-row P-flow positions
+        collectClosedBranchPhaseControlPattern(nClosedBranch, closedBranchIndices, closedBranchPhaseControlSide, rowMap, pat);   // union the a1-row P-flow positions
     }
-    collectPattern(nob, obIdx, 6, OB_SCATTER, OB_NOUT, resolveOb, pat);
+    collectPattern(nOpenBranch, openBranchIndices, 6, OB_SCATTER, OB_NOUT, resolveOpenBranch, pat);
     if (dynReloc) {
-        collectObAltPattern(nob, obIdx, obQAlt, relocOwn, pat, st->nQr, st->hQrPtr.data(), st->hQrRows.data(), depGroupOfRow);
+        collectObAltPattern(nOpenBranch, openBranchIndices, openBranchAlternateReactiveDestination, relocOwn, pat, st->nQr, st->hQrPtr.data(), st->hQrRows.data(), depGroupOfRow);
     }
-    collectPattern(nsh, shIdx, 5, SH_SCATTER, SH_NOUT, resolveSh, pat);
+    collectPattern(nShunt, shuntIndices, 5, SH_SCATTER, SH_NOUT, resolveShunt, pat);
     if (dynReloc) {
-        collectShAltPattern(nsh, shIdx, relocOwn, pat, st->nQr, st->hQrPtr.data(), st->hQrRows.data(), depGroupOfRow);
+        collectShAltPattern(nShunt, shuntIndices, relocOwn, pat, st->nQr, st->hQrPtr.data(), st->hQrRows.data(), depGroupOfRow);
     }
-    collectPattern(nhv, hvIdx, 4, HVDC_SCATTER, HVDC_NOUT, resolveHv, pat);
+    collectPattern(nHvdcAcEmulation, hvdcAcEmulationIndices, 4, HVDC_SCATTER, HVDC_NOUT, resolveHvdcAcEmulation, pat);
     if (dynReloc) {
-        collectHvAltPattern(nhv, hvIdx, relocOwn, pat);
+        collectHvAltPattern(nHvdcAcEmulation, hvdcAcEmulationIndices, relocOwn, pat);
     }
-    collectFamilyPattern(rowMap, cbIdx, obIdx, shIdx, ndq, dqElem, dqSide, dqKind, dqRow,
+    collectFamilyPattern(rowMap, closedBranchIndices, openBranchIndices, shuntIndices, ndq, dqElem, dqSide, dqKind, dqRow,
                          nDistrRho, distrRhoRow, distrRhoColumn, nDistrShuntB, distrShuntBRow, distrShuntBColumn, nzi, ziIdx, dynReloc ? relocOwn : nullptr, pat);
     if (dynReloc) {
         for (int e = 0; e < nzi; e++) {                      // zi STOCK positions: a +-dummy coupling that lands on
@@ -427,105 +427,105 @@ SharedStructure* buildStructure(int n,
     st->dColIdx.upload(st->colIdx.data(), st->nnz * sizeof(int));
 
     // ---- family device data (inputs, indices, role-folded destinations) + static trig ----
-    setupFamily(st->cb, ncb, cbIn, 8, cbIdx, 12, CB_SCATTER, CB_NOUT, resolveCb, pos);
-    if (dynReloc && ncb) {                                   // Dynamic Q-relocation: alt-dest + frozen-row select map
+    setupFamily(st->closedBranch, nClosedBranch, closedBranchParameters, 8, closedBranchIndices, 12, CB_SCATTER, CB_NOUT, resolveClosedBranch, pos);
+    if (dynReloc && nClosedBranch) {                                   // Dynamic Q-relocation: alt-dest + frozen-row select map
         std::vector<int> altDest;
         std::vector<int> selRow;
         std::vector<int> relocGroup;
         std::vector<int> relocOff;
         std::vector<int> relocPool;
         std::vector<char> relocDep;
-        buildCbDynDest(ncb, cbIdx, relocOwn, pos, altDest, selRow, st->nQr, st->hQrPtr.data(), st->hQrRows.data(),
+        buildCbDynDest(nClosedBranch, closedBranchIndices, relocOwn, pos, altDest, selRow, st->nQr, st->hQrPtr.data(), st->hQrRows.data(),
                 relocGroup, relocOff, relocPool, depGroupOfRow, relocDep);
-        st->cb.alternateDestination.upload(altDest.data(), altDest.size() * sizeof(int));
-        st->cb.selectorRow.upload(selRow.data(), selRow.size() * sizeof(int));
+        st->closedBranch.alternateDestination.upload(altDest.data(), altDest.size() * sizeof(int));
+        st->closedBranch.selectorRow.upload(selRow.data(), selRow.size() * sizeof(int));
         if (!relocPool.empty()) {
-            st->cb.relocGroup.upload(relocGroup.data(), relocGroup.size() * sizeof(int));
-            st->cb.relocOff.upload(relocOff.data(), relocOff.size() * sizeof(int));
-            st->cb.relocPool.upload(relocPool.data(), relocPool.size() * sizeof(int));
-            st->cb.relocDep.upload(relocDep.data(), relocDep.size());
+            st->closedBranch.relocGroup.upload(relocGroup.data(), relocGroup.size() * sizeof(int));
+            st->closedBranch.relocOff.upload(relocOff.data(), relocOff.size() * sizeof(int));
+            st->closedBranch.relocPool.upload(relocPool.data(), relocPool.size() * sizeof(int));
+            st->closedBranch.relocDep.upload(relocDep.data(), relocDep.size());
             static int cbRoles[CB_NOUT];
             for (int k = 0; k < CB_NOUT; k++) {
                 cbRoles[k] = CB_SCATTER[k].role;
             }
-            patchFrozenGroupDests(st->cb.destination, relocGroup, relocOff, CB_NOUT, cbRoles,
+            patchFrozenGroupDests(st->closedBranch.destination, relocGroup, relocOff, CB_NOUT, cbRoles,
                     st->hQrPtr.data(), st->hQrRows.data());
         }
-        st->cb.dynReloc = true;
+        st->closedBranch.dynReloc = true;
     }
     if (hasPhaseControl) {                                          // continuous phase control: P-flow row at a1
         std::vector<int> phaseControlDestination;
         std::vector<int> phaseControlSelector;
-        buildCbPhaseDest(ncb, cbIdx, cbPcSide, rowMap, pos, phaseControlDestination, phaseControlSelector);
-        st->cb.phaseControlDestination.upload(phaseControlDestination.data(), phaseControlDestination.size() * sizeof(int));
-        st->cb.phaseControlSelector.upload(phaseControlSelector.data(), phaseControlSelector.size() * sizeof(int));
-        st->cb.hasPhaseControl = true;
+        buildClosedBranchPhaseControlDestination(nClosedBranch, closedBranchIndices, closedBranchPhaseControlSide, rowMap, pos, phaseControlDestination, phaseControlSelector);
+        st->closedBranch.phaseControlDestination.upload(phaseControlDestination.data(), phaseControlDestination.size() * sizeof(int));
+        st->closedBranch.phaseControlSelector.upload(phaseControlSelector.data(), phaseControlSelector.size() * sizeof(int));
+        st->closedBranch.hasPhaseControl = true;
     }
-    setupFamily(st->ob, nob, obIn, 7, obIdx, 6, OB_SCATTER, OB_NOUT, resolveOb, pos);
-    if (dynReloc && nob) {                                   // ob dynamic Q-routing: alt-dest + selector
+    setupFamily(st->openBranch, nOpenBranch, openBranchParameters, 7, openBranchIndices, 6, OB_SCATTER, OB_NOUT, resolveOpenBranch, pos);
+    if (dynReloc && nOpenBranch) {                                   // ob dynamic Q-routing: alt-dest + selector
         std::vector<int> obAltDest;
         std::vector<int> obSelRow;
         std::vector<int> obRelocGroup;
         std::vector<int> obRelocOff;
         std::vector<int> obRelocPool;
         std::vector<char> obRelocDep;
-        buildObDynDest(nob, obIdx, obQAlt, relocOwn, pos, obAltDest, obSelRow, st->nQr, st->hQrPtr.data(), st->hQrRows.data(),
+        buildObDynDest(nOpenBranch, openBranchIndices, openBranchAlternateReactiveDestination, relocOwn, pos, obAltDest, obSelRow, st->nQr, st->hQrPtr.data(), st->hQrRows.data(),
                 obRelocGroup, obRelocOff, obRelocPool, depGroupOfRow, obRelocDep);
-        st->ob.alternateDestination.upload(obAltDest.data(), obAltDest.size() * sizeof(int));
-        st->ob.selectorRow.upload(obSelRow.data(), obSelRow.size() * sizeof(int));
+        st->openBranch.alternateDestination.upload(obAltDest.data(), obAltDest.size() * sizeof(int));
+        st->openBranch.selectorRow.upload(obSelRow.data(), obSelRow.size() * sizeof(int));
         if (!obRelocPool.empty()) {
-            st->ob.relocGroup.upload(obRelocGroup.data(), obRelocGroup.size() * sizeof(int));
-            st->ob.relocOff.upload(obRelocOff.data(), obRelocOff.size() * sizeof(int));
-            st->ob.relocPool.upload(obRelocPool.data(), obRelocPool.size() * sizeof(int));
-            st->ob.relocDep.upload(obRelocDep.data(), obRelocDep.size());
+            st->openBranch.relocGroup.upload(obRelocGroup.data(), obRelocGroup.size() * sizeof(int));
+            st->openBranch.relocOff.upload(obRelocOff.data(), obRelocOff.size() * sizeof(int));
+            st->openBranch.relocPool.upload(obRelocPool.data(), obRelocPool.size() * sizeof(int));
+            st->openBranch.relocDep.upload(obRelocDep.data(), obRelocDep.size());
             static int obRoles[OB_NOUT];
             for (int k = 0; k < OB_NOUT; k++) {
                 obRoles[k] = OB_SCATTER[k].role;
             }
-            patchFrozenGroupDests(st->ob.destination, obRelocGroup, obRelocOff, OB_NOUT, obRoles,
+            patchFrozenGroupDests(st->openBranch.destination, obRelocGroup, obRelocOff, OB_NOUT, obRoles,
                     st->hQrPtr.data(), st->hQrRows.data());
         }
-        st->ob.dynReloc = true;
+        st->openBranch.dynReloc = true;
     }
-    setupFamily(st->sh, nsh, shIn, 2, shIdx, 5, SH_SCATTER, SH_NOUT, resolveSh, pos);
-    if (dynReloc && nsh) {                                   // Dynamic Q-relocation: shunt alt-dest + selector
+    setupFamily(st->shunt, nShunt, shuntParameters, 2, shuntIndices, 5, SH_SCATTER, SH_NOUT, resolveShunt, pos);
+    if (dynReloc && nShunt) {                                   // Dynamic Q-relocation: shunt alt-dest + selector
         std::vector<int> shAltDest;
         std::vector<int> shSelRow;
         std::vector<int> shRelocGroup;
         std::vector<int> shRelocOff;
         std::vector<int> shRelocPool;
         std::vector<char> shRelocDep;
-        buildShDynDest(nsh, shIdx, relocOwn, pos, shAltDest, shSelRow, st->nQr, st->hQrPtr.data(), st->hQrRows.data(),
+        buildShDynDest(nShunt, shuntIndices, relocOwn, pos, shAltDest, shSelRow, st->nQr, st->hQrPtr.data(), st->hQrRows.data(),
                 shRelocGroup, shRelocOff, shRelocPool, depGroupOfRow, shRelocDep);
-        st->sh.alternateDestination.upload(shAltDest.data(), shAltDest.size() * sizeof(int));
-        st->sh.selectorRow.upload(shSelRow.data(), shSelRow.size() * sizeof(int));
+        st->shunt.alternateDestination.upload(shAltDest.data(), shAltDest.size() * sizeof(int));
+        st->shunt.selectorRow.upload(shSelRow.data(), shSelRow.size() * sizeof(int));
         if (!shRelocPool.empty()) {
-            st->sh.relocGroup.upload(shRelocGroup.data(), shRelocGroup.size() * sizeof(int));
-            st->sh.relocOff.upload(shRelocOff.data(), shRelocOff.size() * sizeof(int));
-            st->sh.relocPool.upload(shRelocPool.data(), shRelocPool.size() * sizeof(int));
-            st->sh.relocDep.upload(shRelocDep.data(), shRelocDep.size());
+            st->shunt.relocGroup.upload(shRelocGroup.data(), shRelocGroup.size() * sizeof(int));
+            st->shunt.relocOff.upload(shRelocOff.data(), shRelocOff.size() * sizeof(int));
+            st->shunt.relocPool.upload(shRelocPool.data(), shRelocPool.size() * sizeof(int));
+            st->shunt.relocDep.upload(shRelocDep.data(), shRelocDep.size());
             static int shRoles[SH_NOUT];
             for (int k = 0; k < SH_NOUT; k++) {
                 shRoles[k] = SH_SCATTER[k].role;
             }
-            patchFrozenGroupDests(st->sh.destination, shRelocGroup, shRelocOff, SH_NOUT, shRoles,
+            patchFrozenGroupDests(st->shunt.destination, shRelocGroup, shRelocOff, SH_NOUT, shRoles,
                     st->hQrPtr.data(), st->hQrRows.data());
         }
-        st->sh.dynReloc = true;
+        st->shunt.dynReloc = true;
     }
-    setupFamily(st->hv, nhv, hvIn, 5, hvIdx, 4, HVDC_SCATTER, HVDC_NOUT, resolveHv, pos);
-    if (dynReloc && nhv) {                                   // a converter bus under a coupler the scenario opens
+    setupFamily(st->hvdcAcEmulation, nHvdcAcEmulation, hvdcAcEmulationParameters, 5, hvdcAcEmulationIndices, 4, HVDC_SCATTER, HVDC_NOUT, resolveHvdcAcEmulation, pos);
+    if (dynReloc && nHvdcAcEmulation) {                                   // a converter bus under a coupler the scenario opens
         std::vector<int> hvAltDest;
         std::vector<int> hvSelRow;
-        buildHvDynDest(nhv, hvIdx, relocOwn, pos, hvAltDest, hvSelRow);
-        st->hv.alternateDestination.upload(hvAltDest.data(), hvAltDest.size() * sizeof(int));
-        st->hv.selectorRow.upload(hvSelRow.data(), hvSelRow.size() * sizeof(int));
-        st->hv.dynReloc = true;
+        buildHvDynDest(nHvdcAcEmulation, hvdcAcEmulationIndices, relocOwn, pos, hvAltDest, hvSelRow);
+        st->hvdcAcEmulation.alternateDestination.upload(hvAltDest.data(), hvAltDest.size() * sizeof(int));
+        st->hvdcAcEmulation.selectorRow.upload(hvSelRow.data(), hvSelRow.size() * sizeof(int));
+        st->hvdcAcEmulation.dynReloc = true;
     }
 
     // ---- DISTR_Q destinations: per contribution {F-row, dq/dv1, dq/dv2, dq/dph1, dq/dph2, dq/dr1}
     //      (-2-row encodes an F row, >=0 a J slot, -1 skip) ----
-    buildDistrQDest(st.get(), pos, rowMap, ndq, dqElem, dqSide, dqKind, dqWeight, dqRow, cbIdx, obIdx, shIdx, relocOwn);
+    buildDistrQDest(st.get(), pos, rowMap, ndq, dqElem, dqSide, dqKind, dqWeight, dqRow, closedBranchIndices, openBranchIndices, shuntIndices, relocOwn);
 
     // ---- zero-impedance destinations: per branch the 8 dummy couplings + (tree) the 6 ZERO_V/ZERO_PHI ----
     buildZeroImpDest(st.get(), pos, rowMap, nzi, ziIn, ziIdx, ziQAlt, relocOwn, depGroupOfRow);
@@ -640,7 +640,7 @@ double luBytesPerScenario(SharedStructure& st) {
 }
 
 
-// VALUES-level refresh: re-upload only the per-element PARAMETER packs (cbIn/obIn/shIn/hvIn/ziIn)
+// VALUES-level refresh: re-upload only the per-element PARAMETER packs (closedBranchParameters/openBranchParameters/shuntParameters/hvdcAcEmulationParameters/ziIn)
 // into the SHARED structure, in place. The CSR pattern, the diagonal pairing, the index/dest packs and
 // cuDSS's symbolic ANALYSIS are UNCHANGED — they depend on the index packs and structure, not on these
 // values (a transformer tap or shunt-b move changes r1/a1/b — or a coupler's rho, ziIn — only). The
@@ -651,8 +651,8 @@ double luBytesPerScenario(SharedStructure& st) {
 // the shared structure is the correct semantic — one extraction has ONE value set; any context sharing
 // it must see the new values (the Java side then re-keys the structure cache to the new extraction,
 // GpuAcStructures.rebind, so content matching never aliases stale values).
-void refreshStructureValues(SharedStructure& st, int ncb, const double* cbIn, int nob, const double* obIn,
-                            int nsh, const double* shIn, int nhv, const double* hvIn,
+void refreshStructureValues(SharedStructure& st, int nClosedBranch, const double* closedBranchParameters, int nOpenBranch, const double* openBranchParameters,
+                            int nShunt, const double* shuntParameters, int nHvdcAcEmulation, const double* hvdcAcEmulationParameters,
                             int nzi, const double* ziIn) {
     auto refresh = [](Family& f, int elementCount, const double* in) {
         if (elementCount != f.elementCount) {
@@ -663,10 +663,10 @@ void refreshStructureValues(SharedStructure& st, int ncb, const double* cbIn, in
                                   cudaMemcpyHostToDevice));
         }
     };
-    refresh(st.cb, ncb, cbIn);
-    refresh(st.ob, nob, obIn);
-    refresh(st.sh, nsh, shIn);
-    refresh(st.hv, nhv, hvIn);
+    refresh(st.closedBranch, nClosedBranch, closedBranchParameters);
+    refresh(st.openBranch, nOpenBranch, openBranchParameters);
+    refresh(st.shunt, nShunt, shuntParameters);
+    refresh(st.hvdcAcEmulation, nHvdcAcEmulation, hvdcAcEmulationParameters);
     if (nzi != st.nzi) {
         throw std::runtime_error("refreshStructureValues: zero-impedance count changed (not a VALUES event)");
     }

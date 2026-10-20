@@ -46,7 +46,7 @@ import java.util.Map;
  *       off OLF's own current term), exactly {@code changeTapPositions}.</li>
  * </ul>
  *
- * <p>Scope: CONTROLLER mode supports LOCAL and REMOTE control (2026-09-05 — cbPcSide carries the
+ * <p>Scope: CONTROLLER mode supports LOCAL and REMOTE control (2026-09-05 — closedBranchPhaseControlSide carries the
  * controller's a1 column, so the controlled element emits at the right row); LIMITER stays local
  * (OLF's own loop supports only local).
  *
@@ -87,7 +87,7 @@ public final class GpuPhaseControlOuterLoop {
             int elemIndex = elementMapper.getElementIndex(branch);
             double[][] tapRows = GpuTransformerVoltageControlOuterLoop.tapModels(branch.getPiModel());
             // REMOTE control is fine in BOTH modes. CONTROLLER: the activation diff + tap rounding live
-            // on the CONTROLLER and the P row re-emission is keyed by cbPcSide on the controlled
+            // on the CONTROLLER and the P row re-emission is keyed by closedBranchPhaseControlSide on the controlled
             // element. LIMITER: OLF's loop is local BY CONSTRUCTION, not by restriction —
             // changeTapPositions reads controllerBranch.getI1()/getI2() and
             // isSensitivityCurrentPerA1Positive differentiates those same terms, so the controlled

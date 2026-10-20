@@ -83,11 +83,11 @@ inline int ziZeroPhiRow(const int* z) {
 struct SharedStructure {
     int n = 0;
     int nnz = 0;
-    int nElements = 0;                                       // ncb + nob + nsh + nhv (disabled-mask layout)
-    int cbOffset = 0, obOffset = 0, shOffset = 0, hvOffset = 0;
+    int nElements = 0;                                       // nClosedBranch + nOpenBranch + nShunt + nHvdcAcEmulation (disabled-mask layout)
+    int closedBranchOffset = 0, openBranchOffset = 0, shuntOffset = 0, hvdcAcEmulationOffset = 0;
     std::vector<int> rowMap;                                 // eq row -> paired variable col
     std::vector<int> rowPtr, colIdx;                         // host CSR pattern (mode-2 blkdiag build)
-    Family cb, ob, sh, hv;
+    Family closedBranch, openBranch, shunt, hvdcAcEmulation;
     int ndq = 0;                                             // DISTR_Q weighted reactive contributions
     DeviceBuf dDqElem, dDqSide, dDqKind, dDqWeight, dDqDest; // ndq each (dDqDest is ndq*6)
     DeviceBuf dRelocOwn;                                     // per row: the relocated child's OWN row for a
@@ -135,27 +135,27 @@ using SharedStructurePtr = std::shared_ptr<SharedStructure>;
 
 // Built once per extraction (the createStructure JNI entry), see structure_build.cu.
 SharedStructure* buildStructure(int n,
-                                int ncb, const double* cbIn, const int* cbIdx,
-                                int nob, const double* obIn, const int* obIdx,
-                                int nsh, const double* shIn, const int* shIdx,
-                                int nhv, const double* hvIn, const int* hvIdx,
+                                int nClosedBranch, const double* closedBranchParameters, const int* closedBranchIndices,
+                                int nOpenBranch, const double* openBranchParameters, const int* openBranchIndices,
+                                int nShunt, const double* shuntParameters, const int* shuntIndices,
+                                int nHvdcAcEmulation, const double* hvdcAcEmulationParameters, const int* hvdcAcEmulationIndices,
                                 int ndq, const int* dqElem, const int* dqSide, const double* dqWeight,
                                 const int* dqRow, const int* dqKind,
                                 int nzi, const double* ziIn, const int* ziIdx,
                                 int nDistrRho, const int* distrRhoRow, const int* distrRhoColumn, const double* distrRhoCoefficient,
                                 int nDistrShuntB, const int* distrShuntBRow, const int* distrShuntBColumn, const double* distrShuntBCoefficient,
-                                const int* cbPcSide,
+                                const int* closedBranchPhaseControlSide,
                                 int nLoadModelTerms, const double* loadModelParameters, const int* loadModelIndices,
                                 int nQr, const int* qrPtr, const int* qrRowsIn,
-                                const int* obQAltIn, const int* ziQAltIn,
+                                const int* openBranchAlternateReactiveDestinationIn, const int* ziQAltIn,
                                 const int* qrDepBaseIn, const int* qrBaseTargetRowIn, const int* depGroupOfRowIn);
 
 // The device bytes one scenario's LU factors take, from a cuDSS probe analysis (cached on the structure).
 double luBytesPerScenario(SharedStructure& st);
 
 // Re-upload the per-element parameter packs in place (a tap or shunt-susceptance move): same pattern, new values.
-void refreshStructureValues(SharedStructure& st, int ncb, const double* cbIn, int nob, const double* obIn,
-                            int nsh, const double* shIn, int nhv, const double* hvIn,
+void refreshStructureValues(SharedStructure& st, int nClosedBranch, const double* closedBranchParameters, int nOpenBranch, const double* openBranchParameters,
+                            int nShunt, const double* shuntParameters, int nHvdcAcEmulation, const double* hvdcAcEmulationParameters,
                             int nzi, const double* ziIn);
 
 }  // namespace olfgpu

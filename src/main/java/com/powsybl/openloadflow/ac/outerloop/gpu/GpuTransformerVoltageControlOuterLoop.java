@@ -805,7 +805,7 @@ public final class GpuTransformerVoltageControlOuterLoop {
     }
 
     /** Full per-tap static branch rows, snapshotted read-only from {@code PiModelArray.getModels()}:
-     *  one row [y, g1, g2, b1, b2, ksi, r1, a1] per tap position — the EXACT cbIn packing, so a
+     *  one row [y, g1, g2, b1, b2, ksi, r1, a1] per tap position — the EXACT closedBranchParameters packing, so a
      *  tap/PST action's override is the target row verbatim.
      *
      *  <p>Empty means the branch carries a continuous {@code SimplePiModel} and has no taps at all.

@@ -76,7 +76,7 @@ public final class GpuAcDataExtractor {
      * present and energized — the shape {@code Networks.loadWithReconnectableElements} produces for
      * branches closable by an action: loaded CLOSED in a temp variant, then re-opened by connectivity,
      * so the pi model and both buses are valid). They are appended to the closed-branch pack and
-     * reported in {@code baseOpenCbElements}; the batch solver DISABLES them in every scenario's mask
+     * reported in {@code baseOpenClosedBranchElements}; the batch solver DISABLES them in every scenario's mask
      * by default — a reclose action clears the bit. The plain-LF path never packs them (empty set).
      */
     public static GpuAcData extract(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
@@ -154,12 +154,12 @@ public final class GpuAcDataExtractor {
             }
         }
         return new GpuAcData(
-                new ClosedBranchPack(GpuAcArrays.flatD(family.cbIn(), 8), GpuAcArrays.flatI(family.cbIdx(), 12),
-                        family.cbPcSide().stream().mapToInt(Integer::intValue).toArray()),
-                new OpenBranchPack(GpuAcArrays.flatD(family.obIn(), 7), GpuAcArrays.flatI(family.obIdx(), 6),
-                        GpuAcArrays.flatI(family.obQAlt(), 2)),
-                new ElementPack(GpuAcArrays.flatD(family.shIn(), 2), GpuAcArrays.flatI(family.shIdx(), 5)),
-                new ElementPack(GpuAcArrays.flatD(family.hvIn(), 5), GpuAcArrays.flatI(family.hvIdx(), 4)),
+                new ClosedBranchPack(GpuAcArrays.flatD(family.closedBranchParameters(), 8), GpuAcArrays.flatI(family.closedBranchIndices(), 12),
+                        family.closedBranchPhaseControlSide().stream().mapToInt(Integer::intValue).toArray()),
+                new OpenBranchPack(GpuAcArrays.flatD(family.openBranchParameters(), 7), GpuAcArrays.flatI(family.openBranchIndices(), 6),
+                        GpuAcArrays.flatI(family.openBranchAlternateReactiveDestination(), 2)),
+                new ElementPack(GpuAcArrays.flatD(family.shuntParameters(), 2), GpuAcArrays.flatI(family.shuntIndices(), 5)),
+                new ElementPack(GpuAcArrays.flatD(family.hvdcAcEmulationParameters(), 5), GpuAcArrays.flatI(family.hvdcAcEmulationIndices(), 4)),
                 dq.terms(), dq.members(),
                 new ZeroImpedanceBranchPack(GpuAcArrays.flatD(family.ziIn(), 1), GpuAcArrays.flatI(family.ziIdx(), 11),
                         family.ziNums().stream().mapToInt(Integer::intValue).toArray(), GpuAcArrays.flatI(family.ziQAlt(), 2)),

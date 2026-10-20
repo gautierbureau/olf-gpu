@@ -41,7 +41,7 @@ struct BatchSolverContext {
     int nnz = 0;
     int nScenarios = 0;
     int nElements = 0;
-    int cbOffset = 0, obOffset = 0, shOffset = 0, hvOffset = 0;   // element-mask offsets per family
+    int closedBranchOffset = 0, openBranchOffset = 0, shuntOffset = 0, hvdcAcEmulationOffset = 0;   // element-mask offsets per family
     int ndq = 0, nDistrRho = 0, nDistrShuntB = 0, nzi = 0;                  // copies of the structure counts
     DeviceBuf dX, dTarget, dF, dB, dDx, dVals, dMode;        // per-scenario (n or nnz strided)
     // per scenario: the state at its last CONVERGED inner solve (its starting state before any): what OLF's network
@@ -62,8 +62,8 @@ struct BatchSolverContext {
     bool perRowCriteria = false;
     DeviceBuf dThrAlt, dThrSel;                              // n each: the alternate threshold and its selector row (see residualNormsBatch)
     bool perRowAlt = false;
-    int nShOv = 0;                                           // per-scenario shunt admittance overrides (set per solve)
-    DeviceBuf dShOvSlotElem, dShOvGb;                        // nShOv*2 ints (slot, PACK elem) / nShOv*2 doubles (dG, dB)
+    int nShuntAdmittanceOverrides = 0;                                           // per-scenario shunt admittance overrides (set per solve)
+    DeviceBuf dShuntAdmittanceOverrideScenarioElement, dShuntAdmittanceOverrideDelta;                        // nShuntAdmittanceOverrides*2 ints (slot, PACK elem) / nShuntAdmittanceOverrides*2 doubles (dG, dB)
     int nziBase = 0;                                         // zi elements [0,nziBase) always enabled; [nziBase,nzi) are
                                                              // base-open closable switches gated by the ziOn list
     int nZiOn = 0;
@@ -78,7 +78,7 @@ struct BatchSolverContext {
     DeviceBuf dZiOffMask, dZiOnMask, dZiTreeMask;            // off/on: 1 = listed; tree: -1 = no override, else 0/1
     bool hasZiMasks = false;
     int nR1Ov = 0;                                           // per-scenario closed-branch tap overrides (tap/PST actions)
-    DeviceBuf dR1OvSlotElem, dR1OvVal;                       // nR1Ov*2 ints / nR1Ov*8 doubles (full cbIn row per entry)
+    DeviceBuf dR1OvSlotElem, dR1OvVal;                       // nR1Ov*2 ints / nR1Ov*8 doubles (full closedBranchParameters row per entry)
     // ---- solve-only batch compaction (mode 3, tol > 0): lazily allocated on first engage ----
     DeviceBuf dValsC, dBC, dDxC, dMapC;                      // nnz*cap / n*cap / n*cap / cap ints
     CudssCtx dsC;                                            // dedicated handle/config/data for the compact width
@@ -353,8 +353,8 @@ struct BatchSolverContext {
     DeviceBuf dCphTap, dCphPrevTap, dCphIter;                // per (scenario, controller) tap; per scenario check count
     std::vector<int> hCphElem, hCphTapPtr, hCphBaseTap;
     std::vector<double> hCphTapData;
-    std::vector<int> hShOvBaseSlotElem;                      // the caller's shunt overrides at solve entry
-    std::vector<double> hShOvBaseGb;
+    std::vector<int> hShuntAdmittanceOverrideBaseScenarioElement;                      // the caller's shunt overrides at solve entry
+    std::vector<double> hShuntAdmittanceOverrideBaseDelta;
     // DISCRETE (non-incremental) TRANSFORMER VOLTAGE CONTROL — GpuOuterLoopKind::TRANSFORMER_VOLTAGE_CONTROL (OLF order 8): OLF's
     // TransformerVoltageControlOuterLoop (AFTER_GENERATOR_VOLTAGE_CONTROL: INITIAL/CONTROL/COMPLETE) or
     // SimpleTransformerVoltageControlOuterLoop (WITH_GENERATOR_VOLTAGE_CONTROL). One group per controlled bus
@@ -463,14 +463,14 @@ struct BatchSolverContext {
     // PHASES rather than host orchestrators. OLF runs both BETWEEN DistributedSlack and
     // ReactiveLimits; run from the host after the whole solve they land after RL instead, which is
     // what put the device's last DS check on a pre-pin state.
-    int nhv = 0;                                             // AC-emulation HVDCs in the loop tables
-    int hvLimitsActive = 0;                                  // AcHvdcAcEmulationLimits configured
-    DeviceBuf dHvElem, dHvBus1Row, dHvBus2Row;               // per hvdc: the rows the P TARGETS are written to
-    DeviceBuf dHvBus1Phi, dHvBus2Phi;                        // per hvdc: the angle COLUMNS the emulation reads (#68)
-    DeviceBuf dHvIn;                                         // per hvdc x9: p0 k pMax12 pMax21 loss1 loss2 r baseD1 baseD2
-    DeviceBuf dHvCtgOut;                                     // per (scenario, hvdc): outaged BY the contingency
-    DeviceBuf dHvStatus;                                     // per (scenario, hvdc): LINEAR/SAT_1_2/SAT_2_1/FROZEN
-    DeviceBuf dHvAppliedD1, dHvAppliedD2;                    // the converter-row delta currently APPLIED
+    int nHvdcAcEmulation = 0;                                             // AC-emulation HVDCs in the loop tables
+    int hvdcAcEmulationLimitsActive = 0;                                  // AcHvdcAcEmulationLimits configured
+    DeviceBuf dHvdcElement, dHvdcBus1PRow, dHvdcBus2PRow;               // per hvdc: the rows the P TARGETS are written to
+    DeviceBuf dHvdcBus1PhiColumn, dHvdcBus2PhiColumn;                        // per hvdc: the angle COLUMNS the emulation reads (#68)
+    DeviceBuf dHvdcAcEmulationParameters;                                         // per hvdc x9: p0 k pMax12 pMax21 loss1 loss2 r baseD1 baseD2
+    DeviceBuf dHvdcContingencyOutage;                                     // per (scenario, hvdc): outaged BY the contingency
+    DeviceBuf dHvdcAcEmulationStatus;                                     // per (scenario, hvdc): LINEAR/SAT_1_2/SAT_2_1/FROZEN
+    DeviceBuf dHvdcAppliedDelta1, dHvdcAppliedDelta2;                    // the converter-row delta currently APPLIED
     DeviceBuf dDsResidual;                                   // nS chars: waterfill left an out-of-tolerance residual                                   // per scenario (nS): frozen slack-retained mismatch share
     // The slack bus's own participating generators' total rooms from their anchor targets (setBatchDsSlackRooms):
     // what a slack-only distribution can place before OLF's water-fill leaves a remaining mismatch. Unbounded until
@@ -548,7 +548,7 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& st, int nScenar
 
 // Upload the call's step-scaling parameters and per-scenario shunt, coupler and tap overrides.
 void uploadBatchOverrides(BatchSolverContext* ctx, int lsMode, double maxDv, double maxDphi,
-                          const int* varType, int nShOv, const int* shOvSlotElem, const double* shOvGb,
+                          const int* varType, int nShuntAdmittanceOverrides, const int* shuntAdmittanceOverrideScenarioElement, const double* shuntAdmittanceOverrideDelta,
                           int nziBase, int nZiOff, const int* ziOffSlotElem,
                           int nZiOn, const int* ziOnSlotElem,
                           int nR1Ov, const int* r1OvSlotElem, const double* r1OvVal);

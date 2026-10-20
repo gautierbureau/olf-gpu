@@ -219,7 +219,7 @@ public final class GpuAcActivationExtractor {
             if (e.getType() == AcEquationType.BRANCH_TARGET_P) {
                 // CONTINUOUS phase control enabled: the controlled branch's P-flow equation sits at the
                 // CONTROLLER's a1-paired row (row mode 3 — the cb family re-emits the P outputs there,
-                // cbPcSide carrying the controller's a1 column, LOCAL and REMOTE alike).
+                // closedBranchPhaseControlSide carrying the controller's a1 column, LOCAL and REMOTE alike).
                 var branch = network.getBranchById(network.getBranches().stream()
                         .filter(b -> b.getNum() == e.getElementNum()).findFirst().orElseThrow().getId());
                 var pc = branch.getPhaseControl().orElseThrow();

@@ -165,7 +165,7 @@ class GpuSaPhaseControlTest extends AbstractGpuSaTest {
 
     /** REMOTE continuous phase control (CONTROLLER mode): PS1's a1 drives the P flow of the PARALLEL
      *  line L2 (controlled branch != controller) — the controlled element re-emits its P block at the
-     *  CONTROLLER's a1 row (cbPcSide encodes the controller's a1 column); GPU SA == CPU SA at 1e-12. */
+     *  CONTROLLER's a1 row (closedBranchPhaseControlSide encodes the controller's a1 column); GPU SA == CPU SA at 1e-12. */
     @Test
     void deviceRemoteContinuousPhaseControlMatchesCpu() {
         org.junit.jupiter.api.Assumptions.assumeTrue(

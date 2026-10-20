@@ -57,7 +57,7 @@ public final class GpuShuntVoltageControlOuterLoop {
     }
 
     /** One controller shunt of a group: its SHUNT_B row and per-section tables (dispatch targets). */
-    public record Member(int bRow, List<GpuIncrementalShuntVoltageControlOuterLoop.Sub> subs, int shOvElem, int elemIndexAbs, int shuntNum) {
+    public record Member(int bRow, List<GpuIncrementalShuntVoltageControlOuterLoop.Sub> subs, int shuntAdmittanceOverrideElement, int elemIndexAbs, int shuntNum) {
     }
 
     /** One controlled bus's shunt VC group: the toggle-diff VC-ON activation + its member shunts. */
@@ -72,7 +72,7 @@ public final class GpuShuntVoltageControlOuterLoop {
     public static List<Group> buildGroups(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
                                    TargetVector<AcVariableType, AcEquationType> targetVector,
                                    GpuAcActivation baseActivation, double[] baseTargets,
-                                   GpuAcElementMapper elementMapper, int shPackOffset) {
+                                   GpuAcElementMapper elementMapper, int shuntPackOffset) {
         List<Group> out = new ArrayList<>();
         java.util.Map<Integer, Integer> shuntBRows = new java.util.HashMap<>();
         for (Variable<AcVariableType> v : es.getIndex().getSortedVariablesToFind()) {
@@ -120,7 +120,7 @@ public final class GpuShuntVoltageControlOuterLoop {
                     ok = false;
                     break;
                 }
-                members.add(new Member(shuntBRows.get(sh.getNum()), subs, elemIndex - shPackOffset, elemIndex, sh.getNum()));
+                members.add(new Member(shuntBRows.get(sh.getNum()), subs, elemIndex - shuntPackOffset, elemIndex, sh.getNum()));
             }
             if (!ok) {
                 continue;

@@ -13,8 +13,8 @@ namespace olfgpu {
 
 // Kernel launched before the check, for a link on the slack bus.
 __global__ void hvdcSlackBalanceBatch(int nS, int nh, int n, int nElements, int slackRowBase, const int* slackRowOv,
-                                      const int* hvBus1Row, const int* hvBus2Row, const int* hvBus1Phi,
-                                      const int* hvBus2Phi, const int* hvElem, const double* hvIn,
+                                      const int* hvdcBus1PRow, const int* hvdcBus2PRow, const int* hvdcBus1PhiColumn,
+                                      const int* hvdcBus2PhiColumn, const int* hvdcElement, const double* hvdcAcEmulationParameters,
                                       const int* status, const double* d1, const double* d2, const char* ctgOut,
                                       const char* disabled, const double* x, const char* rlActive, double* qBuf);
 

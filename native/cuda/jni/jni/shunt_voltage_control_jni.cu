@@ -6,13 +6,13 @@
 
 /** Upload the incremental SHUNT voltage-control tables for the in-kernel loop. Per controller:
  *  bRow (SHUNT_B identity row), vRow (controlled bus), targetV, halfDb, elemAbs (global element, -1),
- *  shOvElem (shunt-pack element for the static (dG, dB) override, -1); groups: groupPtr[nGroups+1] ->
+ *  shuntAdmittanceOverrideElement (shunt-pack element for the static (dG, dB) override, -1); groups: groupPtr[nGroups+1] ->
  *  groupCtrl (controllers, |b|-descending); subs: subPtr[nCtrl+1] -> per sub secPtr[nSubs+1] into
  *  secB/secG, subMin, subBase. Returns 1 when the kernel loop owns them, 0 when there are none. */
 extern "C" JNIEXPORT jint JNICALL
 OLF_JNI(ac_outerloop_gpu, ShuntVoltageControlNative, setBatchShuntControllers)(
         JNIEnv* env, jclass, jlong handle,
-        jintArray jBRow, jintArray jVRow, jdoubleArray jTargetV, jdoubleArray jHalfDb, jintArray jElemAbs, jintArray jShOvElem,
+        jintArray jBRow, jintArray jVRow, jdoubleArray jTargetV, jdoubleArray jHalfDb, jintArray jElemAbs, jintArray jShuntAdmittanceOverrideElement,
         jintArray jGroupPtr, jintArray jGroupCtrl, jintArray jSubPtr, jintArray jSecPtr, jdoubleArray jSecB, jdoubleArray jSecG,
         jintArray jSubMin, jintArray jSubBase, jint maxSectionShift) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
@@ -38,7 +38,7 @@ OLF_JNI(ac_outerloop_gpu, ShuntVoltageControlNative, setBatchShuntControllers)(
     readD(jTargetV, targetV);
     readD(jHalfDb, halfDb);
     readI(jElemAbs, elemAbs);
-    readI(jShOvElem, ctx->hShcShOvElem);
+    readI(jShuntAdmittanceOverrideElement, ctx->hShcShOvElem);
     readI(jGroupPtr, groupPtr);
     readI(jGroupCtrl, groupCtrl);
     readI(jSubPtr, ctx->hShcSubPtr);

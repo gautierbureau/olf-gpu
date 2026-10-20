@@ -48,11 +48,11 @@ final class RunScratch {
     final List<Integer> ziOffSlotElemList; // per-scenario zi-element outages (switch opens)
     final List<Integer> ziOnSlotElemList;  // per-scenario zi-element enables (switch closes)
     final List<Integer> ziTreeSlotElemValList;   // {slot, ziElement, isTree} where OLF's tree moved
-    final List<Integer> shOvSlotElemList;  // per-scenario shunt admittance overrides
-    final List<Double> shOvGbList;
+    final List<Integer> shuntAdmittanceOverrideScenarioElementList;  // per-scenario shunt admittance overrides
+    final List<Double> shuntAdmittanceOverrideDeltaList;
     final List<Integer> r1OvSlotElemList;  // per-scenario fixed-ratio tap overrides
     final List<Double> r1OvValList;
-    final int shPackOffset;
+    final int shuntPackOffset;
     // Per-scenario distributed-slack reweight (a generator loss at a DS-participant bus): one affected DS
     // bus per slot (dsOvBus[s] = its DS-pack index, -1 = none) whose factor/base/headroom/footroom and the
     // factor sum shrink by the lost gen's share. Only allocated when the network has distributed slack.
@@ -63,7 +63,7 @@ final class RunScratch {
     final double[] dsOvMaxDelta;
     final double[] dsOvMinDelta;
     private final int[] baseRowMode;
-    private final int[] baseOpenCbElements;
+    private final int[] baseOpenClosedBranchElements;
 
     RunScratch(int chunkSize, int nElements, GpuAcData gpuData, GpuAcElementMapper elementMapper, int[] baseRowMode) {
         this.disabledMask = new boolean[chunkSize][nElements];
@@ -95,11 +95,11 @@ final class RunScratch {
         this.ziOffSlotElemList = new ArrayList<>();
         this.ziOnSlotElemList = new ArrayList<>();
         this.ziTreeSlotElemValList = new ArrayList<>();
-        this.shOvSlotElemList = new ArrayList<>();
-        this.shOvGbList = new ArrayList<>();
+        this.shuntAdmittanceOverrideScenarioElementList = new ArrayList<>();
+        this.shuntAdmittanceOverrideDeltaList = new ArrayList<>();
         this.r1OvSlotElemList = new ArrayList<>();
         this.r1OvValList = new ArrayList<>();
-        this.shPackOffset = elementMapper.getClosedBranchCount() + elementMapper.getOpenBranchCount();
+        this.shuntPackOffset = elementMapper.getClosedBranchCount() + elementMapper.getOpenBranchCount();
         this.hasDs = gpuData.distributedSlack().busPhiRow().length > 0;
         this.dsOvBus = hasDs ? new int[chunkSize] : new int[0];
         this.dsOvFactorDelta = hasDs ? new double[chunkSize] : new double[0];
@@ -107,7 +107,7 @@ final class RunScratch {
         this.dsOvMaxDelta = hasDs ? new double[chunkSize] : new double[0];
         this.dsOvMinDelta = hasDs ? new double[chunkSize] : new double[0];
         this.baseRowMode = baseRowMode;
-        this.baseOpenCbElements = gpuData.baseOpenBranches().closedBranchElements();
+        this.baseOpenClosedBranchElements = gpuData.baseOpenBranches().closedBranchElements();
     }
 
     /** Clear the run-scope lists a chunk rebuilds, and the distributed-slack reweight. */
@@ -115,8 +115,8 @@ final class RunScratch {
         ziOffSlotElemList.clear();
         ziTreeSlotElemValList.clear();
         ziOnSlotElemList.clear();
-        shOvSlotElemList.clear();
-        shOvGbList.clear();
+        shuntAdmittanceOverrideScenarioElementList.clear();
+        shuntAdmittanceOverrideDeltaList.clear();
         r1OvSlotElemList.clear();
         r1OvValList.clear();
         if (hasDs) {
@@ -148,7 +148,7 @@ final class RunScratch {
     void resetSlot(int s) {
         java.util.Arrays.fill(disabledMask[s], false);
         disabledIdx[s] = null;
-        for (int e : baseOpenCbElements) {
+        for (int e : baseOpenClosedBranchElements) {
             disabledMask[s][e] = true;           // base-open elements stay OUT unless this scenario recloses them
         }
         rowModePerScenario[s] = baseRowMode;     // default: base layout (padding + non-fragmenting)

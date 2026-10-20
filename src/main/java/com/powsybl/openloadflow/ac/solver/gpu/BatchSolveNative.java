@@ -69,7 +69,7 @@ public final class BatchSolveNative {
      *                            (islanded buses frozen, slack/PV identity rows)
      * @param disabledElementMask per-scenario disabled elements, {@code [nScenarios][nElements]}: bit-packed
      *                            (true if that element is outaged in this scenario; elements enumerated
-     *                            as: first ncb closed branches, then nob open branches, then nsh shunts, then nhv HVDCs)
+     *                            as: first nClosedBranch closed branches, then nOpenBranch open branches, then nShunt shunts, then nHvdcAcEmulation HVDCs)
      * @param maxIter             maximum Newton iterations per scenario
      * @param tol                 convergence tolerance on mismatch infinity norm (the device floor)
      * @param convEpsPerEq        if {@code > 0}, the inner-Newton convergence test uses OLF's EXACT criterion

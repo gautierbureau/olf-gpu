@@ -149,7 +149,7 @@ public final class GpuMonitoringVoltageOuterLoop {
             List<Integer> ovIdx, List<Double> ovVal, double[] x0Full,
             int[] dsOvBus, double[] dsOvFactorDelta, double[] dsOvBaseDelta, double[] dsOvMaxDelta, double[] dsOvMinDelta,
             double[] dsAnchorCarry, double[] dsSlackCarry,
-            int[] r1OvSlotElem, double[] r1OvVal, int[] shOvSlotElem, double[] shOvGb,
+            int[] r1OvSlotElem, double[] r1OvVal, int[] shuntAdmittanceOverrideScenarioElement, double[] shuntAdmittanceOverrideDelta,
             int nziBase, int[] ziOnSlotElem, int[] ziOffSlotElem,
             double[] baseState, double[] baseTargets, NewtonRaphsonParameters parameters,
             double tol, double reactiveLimitTol, double slackDistTol, double convEpsPerEq, int[] varType,
@@ -178,7 +178,7 @@ public final class GpuMonitoringVoltageOuterLoop {
                 parameters.getMaxIterations(), tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
                 config.lsMode(), config.maxDv(), config.maxDphi(),
                 config.lsMode() == GpuStateVectorScalingMode.MAX_VOLTAGE_CHANGE ? varType : null, x0Full,
-                shOvSlotElem, shOvGb, rlState, rlStateOut,
+                shuntAdmittanceOverrideScenarioElement, shuntAdmittanceOverrideDelta, rlState, rlStateOut,
                 r1OvSlotElem, r1OvVal,
                 config.maxOuterIterations(), config.maxPqPvSwitch(), config.dsRejectResidualFlag(), skipRl,
                 nziBase, ziOnSlotElem, ziOffSlotElem);

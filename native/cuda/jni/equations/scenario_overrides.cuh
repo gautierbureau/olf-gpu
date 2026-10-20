@@ -13,7 +13,7 @@ namespace olfgpu {
 
 // Per-scenario closed-branch TAP override (tap/PST actions on FIXED-tap transformers): entries
 // are (slot, cb elem) with the target tap's FULL static row (y g1 g2 b1 b2 ksi r1 a1)
-// replacing the element's cbIn row — per-tap r/x/g/b changes are first-class (y/ksi move).
+// replacing the element's closedBranchParameters row — per-tap r/x/g/b changes are first-class (y/ksi move).
 // Java guards that the branch's ratio/phase are NOT state variables (r1col/a1col == -1), so
 // the state path never conflicts. An override invalidates the element's precomputed trig
 // statics (ksi/a1 may differ) — the caller must take the raw-sincos path (same fallback as
@@ -34,12 +34,12 @@ __device__ inline bool findTapOverride(int nTapOv, const int* tapOvSlotElem, con
 // Per-scenario shunt admittance override (section shifts / reconnection): entries are
 // (slot, PACK elem) pairs with (dG, dB) deltas added onto the static per-element g/b. Linear
 // scan per thread — the list is a handful of entries per run.
-__device__ inline void applyShuntOverride(int nShOv, const int* shOvSlotElem, const double* shOvGb,
+__device__ inline void applyShuntOverride(int nShuntAdmittanceOverrides, const int* shuntAdmittanceOverrideScenarioElement, const double* shuntAdmittanceOverrideDelta,
                                           int s, int e, double& g, double& b) {
-    for (int k = 0; k < nShOv; k++) {
-        if (shOvSlotElem[2 * k] == s && shOvSlotElem[2 * k + 1] == e) {
-            g += shOvGb[2 * k];
-            b += shOvGb[2 * k + 1];
+    for (int k = 0; k < nShuntAdmittanceOverrides; k++) {
+        if (shuntAdmittanceOverrideScenarioElement[2 * k] == s && shuntAdmittanceOverrideScenarioElement[2 * k + 1] == e) {
+            g += shuntAdmittanceOverrideDelta[2 * k];
+            b += shuntAdmittanceOverrideDelta[2 * k + 1];
         }
     }
 }

@@ -13,12 +13,12 @@ namespace olfgpu {
 int gpuDqTraceRow();
 
 __global__ void fillDistrQBatch(int ndq, int nScenarios, int n, int nnz, int nElements,
-                                int cbOffset, int obOffset,
+                                int closedBranchOffset, int openBranchOffset,
                                 const int* dqElem, const int* dqSide, const int* dqKind,
                                 const double* dqWeight, const int* dqDest,
                                 const int* dqAlt, const int* dqSel, const int* dqZiRow,
-                                const double* cbIn, const int* cbIx, const double* shIn, const int* shIx,
-                                const double* obIn, const int* obIx,
+                                const double* closedBranchParameters, const int* closedBranchIndices, const double* shuntParameters, const int* shuntIndices,
+                                const double* openBranchParameters, const int* openBranchIndices,
                                 const double* x, double* vals, double* F,
                                 const char* disabled, const char* active,
                                 int nDqOv, const int* dqOvIdx, const double* dqOvW,
@@ -31,7 +31,7 @@ __global__ void fillDistrQBatch(int ndq, int nScenarios, int n, int nnz, int nEl
                                 const char* psSkip, int psGroups,
                                 const int* mQrGroup, const int* qrPtr, const int* qrRows,
                                 int nR1Ov, const int* r1OvSlotElem, const double* r1OvVal,
-                                int nShOv, const int* shOvSlotElem, const double* shOvGb,
+                                int nShuntAdmittanceOverrides, const int* shuntAdmittanceOverrideScenarioElement, const double* shuntAdmittanceOverrideDelta,
                                 int dqTraceRow,
                                 const char* dqSub, const int* qrMemberStart, int nDqMembersAll);
 

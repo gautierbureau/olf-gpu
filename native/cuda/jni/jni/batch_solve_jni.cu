@@ -135,7 +135,7 @@ OLF_JNI(ac_solver_gpu, BatchSolveNative, solveBatchContext)(
         jsize rn = env->GetArrayLength(jR1OvSlotElem);
         r1OvSlotElemVec.resize(rn);
         env->GetIntArrayRegion(jR1OvSlotElem, 0, rn, r1OvSlotElemVec.data());
-        r1OvValVec.resize(static_cast<size_t>(rn) * 4);      // full 8-double cbIn row per (slot, elem) entry
+        r1OvValVec.resize(static_cast<size_t>(rn) * 4);      // full 8-double closedBranchParameters row per (slot, elem) entry
         env->GetDoubleArrayRegion(jR1OvVal, 0, rn * 4, r1OvValVec.data());
     }
     std::vector<int> ziOffSlotElemVec;
@@ -160,14 +160,14 @@ OLF_JNI(ac_solver_gpu, BatchSolveNative, solveBatchContext)(
     if (jRlStateOut != nullptr) {
         rlStateOutVec.resize(env->GetArrayLength(jRlStateOut));
     }
-    std::vector<int> shOvSlotElemVec;
-    std::vector<double> shOvGbVec;
+    std::vector<int> shuntAdmittanceOverrideScenarioElementVec;
+    std::vector<double> shuntAdmittanceOverrideDeltaVec;
     if (jShuntOvSlotElem != nullptr) {
         jsize sn = env->GetArrayLength(jShuntOvSlotElem);
-        shOvSlotElemVec.resize(sn);
-        env->GetIntArrayRegion(jShuntOvSlotElem, 0, sn, shOvSlotElemVec.data());
-        shOvGbVec.resize(sn);
-        env->GetDoubleArrayRegion(jShuntOvGb, 0, sn, shOvGbVec.data());
+        shuntAdmittanceOverrideScenarioElementVec.resize(sn);
+        env->GetIntArrayRegion(jShuntOvSlotElem, 0, sn, shuntAdmittanceOverrideScenarioElementVec.data());
+        shuntAdmittanceOverrideDeltaVec.resize(sn);
+        env->GetDoubleArrayRegion(jShuntOvGb, 0, sn, shuntAdmittanceOverrideDeltaVec.data());
     }
     std::vector<double> x0FullVec;
     if (jx0Full != nullptr) {
@@ -324,9 +324,9 @@ OLF_JNI(ac_solver_gpu, BatchSolveNative, solveBatchContext)(
                                 reactiveLimitTol, slackDistTol, convEpsPerEq,
                                 lsMode, maxDv, maxDphi, varTypeVec.empty() ? nullptr : varTypeVec.data(),
                                 x0FullVec.empty() ? nullptr : x0FullVec.data(),
-                                static_cast<int>(shOvSlotElemVec.size() / 2),
-                                shOvSlotElemVec.empty() ? nullptr : shOvSlotElemVec.data(),
-                                shOvGbVec.empty() ? nullptr : shOvGbVec.data(),
+                                static_cast<int>(shuntAdmittanceOverrideScenarioElementVec.size() / 2),
+                                shuntAdmittanceOverrideScenarioElementVec.empty() ? nullptr : shuntAdmittanceOverrideScenarioElementVec.data(),
+                                shuntAdmittanceOverrideDeltaVec.empty() ? nullptr : shuntAdmittanceOverrideDeltaVec.data(),
                                 rlStateInVec.empty() ? nullptr : rlStateInVec.data(),
                                 rlStateOutVec.empty() ? nullptr : rlStateOutVec.data(),
                                 static_cast<int>(r1OvSlotElemVec.size() / 2),

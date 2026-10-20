@@ -54,5 +54,5 @@ public final class ViolationScreenNative {
             int[] groupSide, int[] groupQuantity, int[] groupLimitStart, int[] groupLimitEnd,
             double[] limitThreshold,
             int[] busVRow, double[] busHighLimit, double[] busLowLimit,
-            double[] cbIn, int[] cbIdx, double[] obIn, int[] obIdx);
+            double[] closedBranchParameters, int[] closedBranchIndices, double[] openBranchParameters, int[] openBranchIndices);
 }

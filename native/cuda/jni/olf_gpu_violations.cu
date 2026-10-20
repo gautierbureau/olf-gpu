@@ -84,7 +84,7 @@ struct ViolationTable {
     Buf grpSide, grpQty, grpLimStart, grpLimEnd;
     Buf limThreshold;
     Buf busVRow, busHigh, busLow;
-    Buf cbIn, cbIdx, obIn, obIdx;
+    Buf closedBranchParameters, closedBranchIndices, openBranchParameters, openBranchIndices;
     // Scratch, grown on demand: the states of one chunk and its records.
     Buf states, records, counts;
     size_t statesCap = 0, recordsCap = 0, countsCap = 0;
@@ -102,7 +102,7 @@ __global__ void screenBranches(int nBranches, int nScenarios, int n, int capacit
                                const int* brFamily, const int* brElem, const int* brGroupStart, const int* brGroupEnd,
                                const int* grpSide, const int* grpQty, const int* grpLimStart, const int* grpLimEnd,
                                const double* limThreshold,
-                               const double* cbIn, const int* cbIdx, const double* obIn, const int* obIdx,
+                               const double* closedBranchParameters, const int* closedBranchIndices, const double* openBranchParameters, const int* openBranchIndices,
                                const double* x, int* records, int* counts) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nBranches * nScenarios) {
@@ -116,8 +116,8 @@ __global__ void screenBranches(int nBranches, int nScenarios, int n, int capacit
     int family = brFamily[b];
     int e = brElem[b];
     if (family == FAMILY_CLOSED) {
-        const double* p = cbIn + (size_t) e * 8;             // y g1 g2 b1 b2 ksi r1 a1
-        const int* q = cbIdx + (size_t) e * 12;              // P1 Q1 P2 Q2 ph1 v1 ph2 v2 a1col r1col
+        const double* p = closedBranchParameters + (size_t) e * 8;             // y g1 g2 b1 b2 ksi r1 a1
+        const int* q = closedBranchIndices + (size_t) e * 12;              // P1 Q1 P2 Q2 ph1 v1 ph2 v2 a1col r1col
         if (q[4] < 0 || q[5] < 0 || q[6] < 0 || q[7] < 0) {
             return;
         }
@@ -140,8 +140,8 @@ __global__ void screenBranches(int nBranches, int nScenarios, int n, int capacit
         p2 = closed_branch::p2(y, sinKsi, g2, v1, r1, v2, sin(theta2));
         q2 = closed_branch::q2(y, cosKsi, b2, v1, r1, v2, cos(theta2));
     } else if (family == FAMILY_OPEN) {
-        const double* p = obIn + (size_t) e * 7;             // y ksi g1 b1 g2 b2 r1
-        const int* q = obIdx + (size_t) e * 6;               // P1 Q1 P2 Q2 v1col v2col
+        const double* p = openBranchParameters + (size_t) e * 7;             // y ksi g1 b1 g2 b2 r1
+        const int* q = openBranchIndices + (size_t) e * 6;               // P1 Q1 P2 Q2 v1col v2col
         double y = p[0], ksi = p[1], g1 = p[2], b1 = p[3], g2 = p[4], b2 = p[5], r1 = p[6];
         double sinKsi = sin(ksi);
         double cosKsi = cos(ksi);
@@ -223,7 +223,7 @@ OLF_JNI(sa_gpu, ViolationScreenNative, uploadViolationTable)(
         jintArray jGrpSide, jintArray jGrpQty, jintArray jGrpLimStart, jintArray jGrpLimEnd,
         jdoubleArray jLimThreshold,
         jintArray jBusVRow, jdoubleArray jBusHigh, jdoubleArray jBusLow,
-        jdoubleArray jCbIn, jintArray jCbIdx, jdoubleArray jObIn, jintArray jObIdx) {
+        jdoubleArray jClosedBranchParameters, jintArray jClosedBranchIndices, jdoubleArray jOpenBranchParameters, jintArray jOpenBranchIndices) {
     auto* t = new ViolationTable();
     t->nBranches = env->GetArrayLength(jBrFamily);
     t->nGroups = env->GetArrayLength(jGrpSide);
@@ -249,8 +249,8 @@ OLF_JNI(sa_gpu, ViolationScreenNative, uploadViolationTable)(
             && uploadI(jGrpLimStart, t->grpLimStart) && uploadI(jGrpLimEnd, t->grpLimEnd)
             && uploadD(jLimThreshold, t->limThreshold)
             && uploadI(jBusVRow, t->busVRow) && uploadD(jBusHigh, t->busHigh) && uploadD(jBusLow, t->busLow)
-            && uploadD(jCbIn, t->cbIn) && uploadI(jCbIdx, t->cbIdx)
-            && uploadD(jObIn, t->obIn) && uploadI(jObIdx, t->obIdx);
+            && uploadD(jClosedBranchParameters, t->closedBranchParameters) && uploadI(jClosedBranchIndices, t->closedBranchIndices)
+            && uploadD(jOpenBranchParameters, t->openBranchParameters) && uploadI(jOpenBranchIndices, t->openBranchIndices);
     if (!ok) {
         delete t;
         return 0;
@@ -299,7 +299,7 @@ static bool runChunk(JNIEnv* env, ViolationTable* t, jdoubleArray jStates, jint 
             t->brFamily.as<int>(), t->brElem.as<int>(), t->brGroupStart.as<int>(), t->brGroupEnd.as<int>(),
             t->grpSide.as<int>(), t->grpQty.as<int>(), t->grpLimStart.as<int>(), t->grpLimEnd.as<int>(),
             t->limThreshold.as<double>(),
-            t->cbIn.as<double>(), t->cbIdx.as<int>(), t->obIn.as<double>(), t->obIdx.as<int>(),
+            t->closedBranchParameters.as<double>(), t->closedBranchIndices.as<int>(), t->openBranchParameters.as<double>(), t->openBranchIndices.as<int>(),
             t->states.as<double>(), t->records.as<int>(), t->counts.as<int>());
     if (t->nBuses > 0) {
         screenBuses<<<grid(t->nBuses * nScenarios), BLOCK>>>(

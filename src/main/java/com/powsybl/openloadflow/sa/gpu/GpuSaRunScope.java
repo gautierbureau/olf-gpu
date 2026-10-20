@@ -121,7 +121,7 @@ final class GpuSaRunScope {
         // (ordinary generator-VC buses on the device).
         boolean monitoringBatchable = com.powsybl.openloadflow.ac.outerloop.gpu.GpuMonitoringVoltageOuterLoop.supported(lfNetwork);
         // CONTINUOUS phase control (GpuPhaseControlOuterLoop): both modes batch LOCAL and REMOTE.
-        // CONTROLLER since 2026-09-05 (cbPcSide carries the controller's a1 column); LIMITER since
+        // CONTROLLER since 2026-09-05 (closedBranchPhaseControlSide carries the controller's a1 column); LIMITER since
         // 2026-09-16 — OLF's PhaseControlOuterLoop is local BY CONSTRUCTION there, reading the
         // CONTROLLER branch's own I terms and differentiating them, so the controlled branch never
         // enters the decision and a remote LIMITER is the same computation.

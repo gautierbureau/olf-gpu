@@ -86,10 +86,10 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& st, int nScenar
     ctx->nScenarios = nScenarios;
     ctx->mode = mode;
     ctx->nElements = st->nElements;
-    ctx->cbOffset = st->cbOffset;
-    ctx->obOffset = st->obOffset;
-    ctx->shOffset = st->shOffset;
-    ctx->hvOffset = st->hvOffset;
+    ctx->closedBranchOffset = st->closedBranchOffset;
+    ctx->openBranchOffset = st->openBranchOffset;
+    ctx->shuntOffset = st->shuntOffset;
+    ctx->hvdcAcEmulationOffset = st->hvdcAcEmulationOffset;
     ctx->ndq = st->ndq;
     ctx->nDistrRho = st->nDistrRho;
     ctx->nDistrShuntB = st->nDistrShuntB;
@@ -308,7 +308,7 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& st, int nScenar
 }
 
 void uploadBatchOverrides(BatchSolverContext* ctx, int lsMode, double maxDv, double maxDphi,
-                          const int* varType, int nShOv, const int* shOvSlotElem, const double* shOvGb,
+                          const int* varType, int nShuntAdmittanceOverrides, const int* shuntAdmittanceOverrideScenarioElement, const double* shuntAdmittanceOverrideDelta,
                           int nziBase, int nZiOff, const int* ziOffSlotElem,
                           int nZiOn, const int* ziOnSlotElem,
                           int nR1Ov, const int* r1OvSlotElem, const double* r1OvVal) {
@@ -329,23 +329,23 @@ void uploadBatchOverrides(BatchSolverContext* ctx, int lsMode, double maxDv, dou
     // Per-scenario shunt admittance overrides (section shifts / reconnection). PACK-indexed
     // elements (shunt family index, not the global element index). Empty = a 1-entry dummy
     // upload so the kernels' pointers are always valid.
-    ctx->nShOv = nShOv;
-    ctx->hShOvBaseSlotElem.assign(shOvSlotElem, shOvSlotElem + (size_t) nShOv * 2);
-    ctx->hShOvBaseGb.assign(shOvGb, shOvGb + (size_t) nShOv * 2);
-    if (nShOv > 0 || ctx->nShc > 0) {
+    ctx->nShuntAdmittanceOverrides = nShuntAdmittanceOverrides;
+    ctx->hShuntAdmittanceOverrideBaseScenarioElement.assign(shuntAdmittanceOverrideScenarioElement, shuntAdmittanceOverrideScenarioElement + (size_t) nShuntAdmittanceOverrides * 2);
+    ctx->hShuntAdmittanceOverrideBaseDelta.assign(shuntAdmittanceOverrideDelta, shuntAdmittanceOverrideDelta + (size_t) nShuntAdmittanceOverrides * 2);
+    if (nShuntAdmittanceOverrides > 0 || ctx->nShc > 0) {
         // room for the in-kernel shunt loop to append one (dG, dB) per (scenario, controller)
-        size_t capEntries = std::max<size_t>(static_cast<size_t>(nShOv) + (ctx->nShc > 0 ? static_cast<size_t>(nS) * ctx->nShc : 0), 1);
-        ctx->dShOvSlotElem.ensure(capEntries * 2 * sizeof(int));
-        ctx->dShOvGb.ensure(capEntries * 2 * sizeof(double));
-        if (nShOv > 0) {
-            CUDA_CHECK(cudaMemcpy(ctx->dShOvSlotElem.p, shOvSlotElem, static_cast<size_t>(nShOv) * 2 * sizeof(int), cudaMemcpyHostToDevice));
-            CUDA_CHECK(cudaMemcpy(ctx->dShOvGb.p, shOvGb, static_cast<size_t>(nShOv) * 2 * sizeof(double), cudaMemcpyHostToDevice));
+        size_t capEntries = std::max<size_t>(static_cast<size_t>(nShuntAdmittanceOverrides) + (ctx->nShc > 0 ? static_cast<size_t>(nS) * ctx->nShc : 0), 1);
+        ctx->dShuntAdmittanceOverrideScenarioElement.ensure(capEntries * 2 * sizeof(int));
+        ctx->dShuntAdmittanceOverrideDelta.ensure(capEntries * 2 * sizeof(double));
+        if (nShuntAdmittanceOverrides > 0) {
+            CUDA_CHECK(cudaMemcpy(ctx->dShuntAdmittanceOverrideScenarioElement.p, shuntAdmittanceOverrideScenarioElement, static_cast<size_t>(nShuntAdmittanceOverrides) * 2 * sizeof(int), cudaMemcpyHostToDevice));
+            CUDA_CHECK(cudaMemcpy(ctx->dShuntAdmittanceOverrideDelta.p, shuntAdmittanceOverrideDelta, static_cast<size_t>(nShuntAdmittanceOverrides) * 2 * sizeof(double), cudaMemcpyHostToDevice));
         }
-    } else if (!ctx->dShOvSlotElem.p) {
+    } else if (!ctx->dShuntAdmittanceOverrideScenarioElement.p) {
         int dummyI[2] = {-1, -1};
         double dummyD[2] = {0, 0};
-        ctx->dShOvSlotElem.upload(dummyI, sizeof(dummyI));
-        ctx->dShOvGb.upload(dummyD, sizeof(dummyD));
+        ctx->dShuntAdmittanceOverrideScenarioElement.upload(dummyI, sizeof(dummyI));
+        ctx->dShuntAdmittanceOverrideDelta.upload(dummyD, sizeof(dummyD));
     }
     ctx->nziBase = nziBase > 0 ? nziBase : ctx->nzi;         // default: every zi element always enabled
     ctx->nZiOff = nZiOff;

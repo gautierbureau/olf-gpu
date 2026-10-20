@@ -52,7 +52,7 @@ final class GpuBatchSideOpen {
      * into the override row and letting the closed-branch evaluation apply r1^2 is exact. a1 drops out
      * entirely: with y = 0 there are no cross terms for a phase shift to rotate.
      */
-    static double[] danglingCbRow(LfBranch branch, int openSide) {
+    static double[] danglingClosedBranchParameterRow(LfBranch branch, int openSide) {
         PiModel pi = branch.getPiModel();
         // OLF's series admittance from (y, ksi): G = y sin(ksi), B = -y cos(ksi).
         double gs = pi.getY() * Math.sin(pi.getKsi());

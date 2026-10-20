@@ -111,7 +111,7 @@ public final class RemoteMemberQPacker {
                 int row = GpuAcRowIndexing.relocatedQRow(bus.getNum(), columns.ziParentEdge(),
                         columns.dummyQCol(), vCol);
                 if (bus.getShunt().isPresent()) {
-                    out.add(new int[] {row, family.shElemOf()[bus.getNum()], 0, GpuReactiveTermKind.SHUNT_COMPENSATOR_REACTIVE_FLOW});
+                    out.add(new int[] {row, family.shuntElementOf()[bus.getNum()], 0, GpuReactiveTermKind.SHUNT_COMPENSATOR_REACTIVE_FLOW});
                     w.add(1.0);
                 }
                 for (LfBranch br : bus.getBranches()) {
@@ -119,13 +119,13 @@ public final class RemoteMemberQPacker {
                         continue;
                     }
                     int side = br.getBus1() == bus ? 0 : 1;
-                    int e = family.cbElemOf()[br.getNum()];
+                    int e = family.closedBranchElementOf()[br.getNum()];
                     if (e >= 0) {
                         out.add(new int[] {row, e, side, GpuReactiveTermKind.CLOSED_BRANCH_REACTIVE_FLOW});
                         w.add(1.0);
                         continue;
                     }
-                    int oe = family.obElemOf()[br.getNum()];
+                    int oe = family.openBranchElementOf()[br.getNum()];
                     if (oe >= 0) {
                         out.add(new int[] {row, oe, side, GpuReactiveTermKind.OPEN_BRANCH_REACTIVE_FLOW});
                         w.add(1.0);

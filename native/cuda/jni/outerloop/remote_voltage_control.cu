@@ -303,15 +303,15 @@ __global__ void pilotRowAllPinnedBatch(int nEntries, int nScenarios, int n, int 
 // q = qBuf[row] + loadQ works verbatim for remote entries. Same family evaluation as fillDistrQBatch
 // with weight 1 (±1 for zero-impedance DUMMY_Q terms), residual value only (no Jacobian).
 __global__ void fillRemoteMemberQBatch(int nrmq, int nScenarios, int n, int nElements,
-                                       int cbOffset, int obOffset,
+                                       int closedBranchOffset, int openBranchOffset,
                                        const int* rmqRow, const int* rmqElem, const int* rmqSide,
                                        const int* rmqKind, const double* rmqWeight,
-                                       const double* cbIn, const int* cbIx, const double* shIn, const int* shIx,
-                                       const double* obIn, const int* obIx,
+                                       const double* closedBranchParameters, const int* closedBranchIndices, const double* shuntParameters, const int* shuntIndices,
+                                       const double* openBranchParameters, const int* openBranchIndices,
                                        const double* x, double* qBuf,
                                        const char* disabled, const char* rlActive,
                                        int nR1Ov, const int* r1OvSlotElem, const double* r1OvVal,
-                                       int nShOv, const int* shOvSlotElem, const double* shOvGb) {
+                                       int nShuntAdmittanceOverrides, const int* shuntAdmittanceOverrideScenarioElement, const double* shuntAdmittanceOverrideDelta) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nrmq * nScenarios) return;
     int c = tid % nrmq;
@@ -319,21 +319,21 @@ __global__ void fillRemoteMemberQBatch(int nrmq, int nScenarios, int n, int nEle
     if (!rlActive[s]) return;
     int e = rmqElem[c];
     int kind = rmqKind[c];
-    if (kind == GpuReactiveTermKind::CLOSED_BRANCH_REACTIVE_FLOW && disabled[s * nElements + cbOffset + e]) {
+    if (kind == GpuReactiveTermKind::CLOSED_BRANCH_REACTIVE_FLOW && disabled[s * nElements + closedBranchOffset + e]) {
         return;
     }
-    if (kind == GpuReactiveTermKind::OPEN_BRANCH_REACTIVE_FLOW && disabled[s * nElements + obOffset + e]) {
+    if (kind == GpuReactiveTermKind::OPEN_BRANCH_REACTIVE_FLOW && disabled[s * nElements + openBranchOffset + e]) {
         return;
     }
     double w = rmqWeight[c];
     const double* xs = x + (size_t) s * n;
     double* q = qBuf + (size_t) s * n + rmqRow[c];
     if (kind == GpuReactiveTermKind::SHUNT_COMPENSATOR_REACTIVE_FLOW) {  // fixed shunt q at the member bus
-        const double* sp = shIn + e * 2;
+        const double* sp = shuntParameters + e * 2;
         double g = sp[0];
         double b = sp[1];
-        applyShuntOverride(nShOv, shOvSlotElem, shOvGb, s, e, g, b);
-        int vcol = shIx[e * 5 + 2];
+        applyShuntOverride(nShuntAdmittanceOverrides, shuntAdmittanceOverrideScenarioElement, shuntAdmittanceOverrideDelta, s, e, g, b);
+        int vcol = shuntIndices[e * 5 + 2];
         double so[SH_NOUT];
         evalShunt(xs[vcol], g, b, 0, so + 0, so + 1, so + 2, so + 3, so + 4);
         atomicAdd(q, w * so[2]);
@@ -344,8 +344,8 @@ __global__ void fillRemoteMemberQBatch(int nrmq, int nScenarios, int n, int nEle
         return;
     }
     if (kind == GpuReactiveTermKind::OPEN_BRANCH_REACTIVE_FLOW) {  // half-open branch, connected side
-        const double* op = obIn + e * 7;
-        const int* oq = obIx + e * 6;
+        const double* op = openBranchParameters + e * 7;
+        const int* oq = openBranchIndices + e * 6;
         int vcol = rmqSide[c] == 0 ? oq[4] : oq[5];
         double v1 = rmqSide[c] == 0 ? xs[vcol] : 1.0;
         double v2 = rmqSide[c] == 1 ? xs[vcol] : 1.0;
@@ -356,7 +356,7 @@ __global__ void fillRemoteMemberQBatch(int nrmq, int nScenarios, int n, int nEle
         return;
     }
     // kind 0: closed branch q at the member's side (full pi row honors the tap override channel)
-    const double* p0 = cbIn + e * 8;
+    const double* p0 = closedBranchParameters + e * 8;
     double p[8];
     for (int i = 0; i < 8; i++) {
         p[i] = p0[i];
@@ -367,7 +367,7 @@ __global__ void fillRemoteMemberQBatch(int nrmq, int nScenarios, int n, int nEle
             p[i] = pOv[i];
         }
     }
-    const int* qx = cbIx + e * 12;
+    const int* qx = closedBranchIndices + e * 12;
     double v1 = xs[qx[5]];
     double v2 = xs[qx[7]];
     double ph1 = xs[qx[4]];

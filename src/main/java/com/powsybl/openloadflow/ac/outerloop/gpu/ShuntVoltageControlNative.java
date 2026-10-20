@@ -47,7 +47,7 @@ public final class ShuntVoltageControlNative {
     /** Install the incremental SHUNT voltage-control tables for the in-kernel loop (OLF order 10);
      *  see GpuIncrementalShuntVoltageControlOuterLoop.uploadToDevice. Returns 1 when the kernel loop owns them. */
     public static native int setBatchShuntControllers(long handle,
-            int[] bRow, int[] vRow, double[] targetV, double[] halfDb, int[] elemAbs, int[] shOvElem,
+            int[] bRow, int[] vRow, double[] targetV, double[] halfDb, int[] elemAbs, int[] shuntAdmittanceOverrideElement,
             int[] groupPtr, int[] groupCtrl, int[] subPtr, int[] secPtr, double[] secB, double[] secG,
             int[] subMin, int[] subBase, int maxSectionShift);
 }

@@ -63,7 +63,7 @@ public final class GpuIncrementalShuntVoltageControlOuterLoop {
     /** One controller shunt: the SHUNT_B variable row (pinned identity — unit-RHS row, target index and
      *  state index coincide), the controlled bus V row, and its sub-controllers. */
     public record Controller(int bRow, int vRow, int ctrlBusNum, double targetV, double halfDeadband,
-                      List<Sub> subs, double bMagnitude, int shOvElem, int elemIndexAbs, int shuntNum) {
+                      List<Sub> subs, double bMagnitude, int shuntAdmittanceOverrideElement, int elemIndexAbs, int shuntNum) {
     }
 
     private static final class Ratchet {
@@ -84,7 +84,7 @@ public final class GpuIncrementalShuntVoltageControlOuterLoop {
     }
 
     public static List<Controller> buildControllers(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
-                                             GpuAcElementMapper elementMapper, int shPackOffset) {
+                                             GpuAcElementMapper elementMapper, int shuntPackOffset) {
         List<Controller> out = new ArrayList<>();
         Map<Integer, Integer> busVRows = new LinkedHashMap<>();
         Map<Integer, Integer> shuntBRows = new LinkedHashMap<>();
@@ -111,7 +111,7 @@ public final class GpuIncrementalShuntVoltageControlOuterLoop {
             // The element mapper packs only the per-bus FIXED shunt aggregate — a CONTROLLER shunt
             // is a separate LfShunt and legitimately maps to -1. Its b rides the SHUNT_B state
             // variable (target override at bRow + x0 seed), so the element index is only needed for
-            // STATIC-G deltas (shOv) and the per-scenario outage mask: accept -1 when the sections
+            // STATIC-G deltas (shuntAdmittanceOverrides) and the per-scenario outage mask: accept -1 when the sections
             // carry no G variation, and guard those two uses. (Before this, EVERY incremental shunt
             // controller of this shape was silently skipped and the loop never ran on the batch —
             // the dedicated test was hollow: its 5 kV deadband never moved a section post-outage.)
@@ -141,7 +141,7 @@ public final class GpuIncrementalShuntVoltageControlOuterLoop {
             double halfDeadband = vc.getTargetDeadband()
                     .orElse(MIN_TARGET_DEADBAND_KV / vc.getControlledBus().getNominalV()) / 2;
             out.add(new Controller(bRow, vRow, vc.getControlledBus().getNum(), vc.getTargetValue(), halfDeadband,
-                    subs, magnitude, elemIndex - shPackOffset, elemIndex, shunt.getNum()));
+                    subs, magnitude, elemIndex - shuntPackOffset, elemIndex, shunt.getNum()));
         }
         return out;
     }
@@ -178,7 +178,7 @@ public final class GpuIncrementalShuntVoltageControlOuterLoop {
         double[] targetV = new double[nc];
         double[] halfDb = new double[nc];
         int[] elemAbs = new int[nc];
-        int[] shOvElem = new int[nc];
+        int[] shuntAdmittanceOverrideElement = new int[nc];
         int[] subPtr = new int[nc + 1];
         List<Integer> secPtr = new ArrayList<>();
         List<Double> secB = new ArrayList<>();
@@ -192,7 +192,7 @@ public final class GpuIncrementalShuntVoltageControlOuterLoop {
             targetV[c] = ctl.targetV();
             halfDb[c] = ctl.halfDeadband();
             elemAbs[c] = ctl.elemIndexAbs();
-            shOvElem[c] = ctl.elemIndexAbs() >= 0 ? ctl.shOvElem() : -1;
+            shuntAdmittanceOverrideElement[c] = ctl.elemIndexAbs() >= 0 ? ctl.shuntAdmittanceOverrideElement() : -1;
             subPtr[c] = subMin.size();
             for (Sub sub : ctl.subs()) {
                 secPtr.add(secB.size());
@@ -207,7 +207,7 @@ public final class GpuIncrementalShuntVoltageControlOuterLoop {
         subPtr[nc] = subMin.size();
         secPtr.add(secB.size());
         boolean owned = ShuntVoltageControlNative.setBatchShuntControllers(handle,
-                bRow, vRow, targetV, halfDb, elemAbs, shOvElem, groupPtr, groupCtrl, subPtr,
+                bRow, vRow, targetV, halfDb, elemAbs, shuntAdmittanceOverrideElement, groupPtr, groupCtrl, subPtr,
                 secPtr.stream().mapToInt(Integer::intValue).toArray(),
                 secB.stream().mapToDouble(Double::doubleValue).toArray(),
                 secG.stream().mapToDouble(Double::doubleValue).toArray(),

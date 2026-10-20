@@ -150,8 +150,8 @@ void shcRebuildOverrides(BatchSolverContext* ctx) {
     int nS = ctx->nScenarios;
     std::vector<int> pos(static_cast<size_t>(nS) * ctx->nShcSubs);
     CUDA_CHECK(cudaMemcpy(pos.data(), ctx->dShcPos.p, pos.size() * sizeof(int), cudaMemcpyDeviceToHost));
-    std::vector<int> slot(ctx->hShOvBaseSlotElem);
-    std::vector<double> val(ctx->hShOvBaseGb);
+    std::vector<int> slot(ctx->hShuntAdmittanceOverrideBaseScenarioElement);
+    std::vector<double> val(ctx->hShuntAdmittanceOverrideBaseDelta);
     for (int s = 0; s < nS; s++) {
         for (int c = 0; c < ctx->nShc; c++) {
             if (ctx->hShcShOvElem[c] < 0) continue;          // no packed element: b rides SHUNT_B only
@@ -171,12 +171,12 @@ void shcRebuildOverrides(BatchSolverContext* ctx) {
     }
     int nOv = static_cast<int>(slot.size() / 2);
     if (nOv > 0) {
-        ctx->dShOvSlotElem.ensure(slot.size() * sizeof(int));
-        ctx->dShOvGb.ensure(val.size() * sizeof(double));
-        CUDA_CHECK(cudaMemcpy(ctx->dShOvSlotElem.p, slot.data(), slot.size() * sizeof(int), cudaMemcpyHostToDevice));
-        CUDA_CHECK(cudaMemcpy(ctx->dShOvGb.p, val.data(), val.size() * sizeof(double), cudaMemcpyHostToDevice));
+        ctx->dShuntAdmittanceOverrideScenarioElement.ensure(slot.size() * sizeof(int));
+        ctx->dShuntAdmittanceOverrideDelta.ensure(val.size() * sizeof(double));
+        CUDA_CHECK(cudaMemcpy(ctx->dShuntAdmittanceOverrideScenarioElement.p, slot.data(), slot.size() * sizeof(int), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(ctx->dShuntAdmittanceOverrideDelta.p, val.data(), val.size() * sizeof(double), cudaMemcpyHostToDevice));
     }
-    ctx->nShOv = nOv;
+    ctx->nShuntAdmittanceOverrides = nOv;
 }
 
 // Per-solve reset. Incremental shunt VC: base sections, fresh ratchets, the identity row's target as the base b.
@@ -271,7 +271,7 @@ void shcStep(BatchSolverContext* ctx, DriverPass& drv) {
         int nOut = 0, nMoved = 0;
         for (char c : outOfDb) nOut += c ? 1 : 0;
         for (int s2 = 0; s2 < nS; s2++) for (int u = 0; u < ctx->nShcSubs; u++) if (pos[static_cast<size_t>(s2) * ctx->nShcSubs + u] != ctx->hShcSubBase[u]) nMoved++;
-        std::fprintf(stderr, "SHUNT_KERNEL nS=%d nCtrl=%d nGroups=%d outOfDeadband=%d subsOffBase=%d nShOv=%d\n", nS, nShc, nG, nOut, nMoved, ctx->nShOv);
+        std::fprintf(stderr, "SHUNT_KERNEL nS=%d nCtrl=%d nGroups=%d outOfDeadband=%d subsOffBase=%d nShuntAdmittanceOverrides=%d\n", nS, nShc, nG, nOut, nMoved, ctx->nShuntAdmittanceOverrides);
     }
 }
 

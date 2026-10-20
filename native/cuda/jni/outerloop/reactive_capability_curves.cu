@@ -24,7 +24,7 @@ using namespace powsybl::openloadflow;
 namespace olfgpu {
 
 __device__ inline double cvHvdcActivePower(const CvHvdc& c, int s, int n, int h, int side) {
-    size_t sh = (size_t) s * c.nhv + h;
+    size_t sh = (size_t) s * c.nHvdcAcEmulation + h;
     const double* p = c.in + (size_t) h * 9;
     bool off = c.ctgOut[sh] || c.disabled[(size_t) s * c.nElements + c.elem[h]];
     if (c.status[sh] == GpuAcEmulationStatus::LINEAR_MODE && !off) {
@@ -121,7 +121,7 @@ __global__ void rlCurveLimitsBatch(int nrl, int nScenarios, int ncv, int n, int 
         // VSC is not in the slack distribution: its P is its link's (CvHvdc).
         double pNow;
         int hvh = cvHv.hv != nullptr ? cvHv.hv[2 * g] : -1;
-        if (hvh >= 0 && cvHv.nhv > 0) {
+        if (hvh >= 0 && cvHv.nHvdcAcEmulation > 0) {
             pNow = cvHvdcActivePower(cvHv, s, n, hvh, cvHv.hv[2 * g + 1]);
         } else if (slot >= 0 && (dgAnchor != nullptr || dgStart != nullptr
                                  || genCum != nullptr && genCumValid != nullptr && genCumValid[s])) {
@@ -163,18 +163,18 @@ CvHvdc cvHvdcView(BatchSolverContext* ctx) {
         return c;
     }
     c.hv = ctx->dCvHv.as<int>();
-    c.nhv = ctx->nhv;
-    if (ctx->nhv > 0) {
-        c.status = ctx->dHvStatus.as<int>();
-        c.d1 = ctx->dHvAppliedD1.as<double>();
-        c.d2 = ctx->dHvAppliedD2.as<double>();
-        c.in = ctx->dHvIn.as<double>();
-        c.phi1 = ctx->dHvBus1Phi.as<int>();
-        c.phi2 = ctx->dHvBus2Phi.as<int>();
-        c.elem = ctx->dHvElem.as<int>();
+    c.nHvdcAcEmulation = ctx->nHvdcAcEmulation;
+    if (ctx->nHvdcAcEmulation > 0) {
+        c.status = ctx->dHvdcAcEmulationStatus.as<int>();
+        c.d1 = ctx->dHvdcAppliedDelta1.as<double>();
+        c.d2 = ctx->dHvdcAppliedDelta2.as<double>();
+        c.in = ctx->dHvdcAcEmulationParameters.as<double>();
+        c.phi1 = ctx->dHvdcBus1PhiColumn.as<int>();
+        c.phi2 = ctx->dHvdcBus2PhiColumn.as<int>();
+        c.elem = ctx->dHvdcElement.as<int>();
         c.disabled = ctx->dDisabled.as<char>();
         c.nElements = ctx->nElements;
-        c.ctgOut = ctx->dHvCtgOut.as<char>();
+        c.ctgOut = ctx->dHvdcContingencyOutage.as<char>();
         c.x = ctx->dX.as<double>();
     }
     return c;

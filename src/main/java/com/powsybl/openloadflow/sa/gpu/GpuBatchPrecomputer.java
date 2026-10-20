@@ -324,7 +324,7 @@ final class GpuBatchPrecomputer {
                         e.getValue().getVariableActive(), e.getValue().getReactive());
             }
             // Each SIDE-OPEN with the side and the pi-model the dangling reduction will use.
-            // r1 != 1 or a1 != 0 means danglingCbRow takes its TRANSFORMER path, where r1^2
+            // r1 != 1 or a1 != 0 means danglingClosedBranchParameterRow takes its TRANSFORMER path, where r1^2
             // multiplies OLF's whole open-side-2 bracket and side-1-open uses the constant R2 —
             // analytically verified but, until something prints this, never known to have run.
             for (var so : sideOpens == null ? List.<BatchContingency.SideOpen>of() : sideOpens) {

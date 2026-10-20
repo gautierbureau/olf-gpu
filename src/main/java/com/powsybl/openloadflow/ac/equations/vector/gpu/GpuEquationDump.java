@@ -26,7 +26,7 @@ import java.util.List;
  * <p>OLF can print its equations ({@code P1 = ac_p_closed_1(...) + ...}), which is how a wrong equation is
  * normally caught. The GPU system has no such reading: it is a set of index PACKS that say which row each
  * element's output is scattered into, so "our equations" only exist implicitly, spread across
- * {@code cbIdx}/{@code obIdx}/{@code shIdx}/{@code hvIdx}/{@code ziIdx} and the DISTR_Q / DISTR_RHO tables.
+ * {@code closedBranchIndices}/{@code openBranchIndices}/{@code shuntIndices}/{@code hvdcAcEmulationIndices}/{@code ziIdx} and the DISTR_Q / DISTR_RHO tables.
  * This writes them out the same way round as OLF: one line per DEVICE ROW, naming the variable that row
  * belongs to and every element output that lands there. A row with no contribution that is not an identity,
  * or a coupling that appears with the same sign twice, is then as visible as it is in OLF's own dump.

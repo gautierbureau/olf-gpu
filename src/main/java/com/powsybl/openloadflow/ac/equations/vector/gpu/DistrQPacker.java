@@ -131,8 +131,8 @@ public final class DistrQPacker {
         }
         List<int[]> dq = new ArrayList<>();      // {elem, side, dqRow, kind, kMember, jMember} per DISTR_Q contribution
         List<Double> dqW = new ArrayList<>();    // weight per contribution
-        buildDistrQContributions(network, es, columns.vCol(), family.cbElemOf(), family.shElemOf(),
-                family.obElemOf(), columns.dummyQCol(), columns.ziParentEdge(), dq, dqW, mt.memberIdxByBusNum());
+        buildDistrQContributions(network, es, columns.vCol(), family.closedBranchElementOf(), family.shuntElementOf(),
+                family.openBranchElementOf(), columns.dummyQCol(), columns.ziParentEdge(), dq, dqW, mt.memberIdxByBusNum());
         // dqKind: a GpuReactiveTermKind (for DUMMY_Q, elem holds the var column)
         int[] dqKind = new int[dq.size()];
         int[] dqKMember = new int[dq.size()];
@@ -186,7 +186,7 @@ public final class DistrQPacker {
      * the controllers' own per-bus Q scatter is suppressed there too.
      */
     private static void buildDistrQContributions(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
-                                                 int[] vCol, int[] cbElemOf, int[] shElemOf, int[] obElemOf,
+                                                 int[] vCol, int[] closedBranchElementOf, int[] shuntElementOf, int[] openBranchElementOf,
                                                  int[] dummyQCol, int[] ziParentEdge, List<int[]> out, List<Double> weights,
                                                  java.util.Map<Integer, Integer> memberIdxByBusNum) {
         for (LfBus pilot : network.getBuses()) {
@@ -226,7 +226,7 @@ public final class DistrQPacker {
                                 + " has a voltage-controlling shunt (SHUNT_B) reactive contribution (not supported)");
                     }
                     if (gj.getShunt().isPresent()) {         // a fixed shunt's reactive joins the q sum
-                        out.add(new int[] {shElemOf[gj.getNum()], 0, dqRow, GpuReactiveTermKind.SHUNT_COMPENSATOR_REACTIVE_FLOW, kIdx, jIdx});
+                        out.add(new int[] {shuntElementOf[gj.getNum()], 0, dqRow, GpuReactiveTermKind.SHUNT_COMPENSATOR_REACTIVE_FLOW, kIdx, jIdx});
                         weights.add(weight);
                     }
                     for (LfBranch brj : gj.getBranches()) {
@@ -234,13 +234,13 @@ public final class DistrQPacker {
                             continue;
                         }
                         int side = brj.getBus1() == gj ? 0 : 1;
-                        int e = cbElemOf[brj.getNum()];
+                        int e = closedBranchElementOf[brj.getNum()];
                         if (e >= 0) {                        // closed branch: weighted q1/q2 (kind 0)
                             out.add(new int[] {e, side, dqRow, GpuReactiveTermKind.CLOSED_BRANCH_REACTIVE_FLOW, kIdx, jIdx});
                             weights.add(weight);
                             continue;
                         }
-                        int oe = obElemOf[brj.getNum()];
+                        int oe = openBranchElementOf[brj.getNum()];
                         if (oe >= 0) {                       // half-open branch incident on the controller:
                             // its connected-side reactive flow (shunt + series) joins the q sum (kind 2)
                             out.add(new int[] {oe, side, dqRow, GpuReactiveTermKind.OPEN_BRANCH_REACTIVE_FLOW, kIdx, jIdx});

@@ -33,7 +33,7 @@ using namespace powsybl::openloadflow;
 
 namespace olfgpu {
 
-RC resolveCb(const CbScatter& s, const int* ix) {            // P1 Q1 P2 Q2 ph1 v1 ph2 v2 a1col r1col
+RC resolveClosedBranch(const CbScatter& s, const int* ix) {            // P1 Q1 P2 Q2 ph1 v1 ph2 v2 a1col r1col
     RC rc;
     if (s.role == 2) return rc;
     rc.row = ix[s.rowEnd * 2 + s.rowEq];
@@ -44,7 +44,7 @@ RC resolveCb(const CbScatter& s, const int* ix) {            // P1 Q1 P2 Q2 ph1 
     return rc;
 }
 
-RC resolveOb(const ObScatter& s, const int* ix) {            // P1 Q1 P2 Q2 v1 v2
+RC resolveOpenBranch(const ObScatter& s, const int* ix) {            // P1 Q1 P2 Q2 v1 v2
     RC rc;
     if (s.role == 2) return rc;
     rc.row = ix[s.rowEnd * 2 + s.rowEq];
@@ -52,7 +52,7 @@ RC resolveOb(const ObScatter& s, const int* ix) {            // P1 Q1 P2 Q2 v1 v
     return rc;
 }
 
-RC resolveSh(const ShScatter& s, const int* ix) {            // P Q v bcol
+RC resolveShunt(const ShScatter& s, const int* ix) {            // P Q v bcol
     RC rc;
     if (s.role == 2) return rc;
     rc.row = ix[s.rowEq];                                    // single bus: rowEnd == 0
@@ -62,7 +62,7 @@ RC resolveSh(const ShScatter& s, const int* ix) {            // P Q v bcol
     return rc;
 }
 
-RC resolveHv(const HvdcScatter& s, const int* ix) {          // P1 P2 ph1 ph2
+RC resolveHvdcAcEmulation(const HvdcScatter& s, const int* ix) {          // P1 P2 ph1 ph2
     RC rc;
     if (s.role == 2) return rc;
     rc.row = ix[s.rowEnd];                                   // P rows only: rowEq == 0
@@ -80,8 +80,8 @@ RC resolveHv(const HvdcScatter& s, const int* ix) {          // P1 P2 ph1 ph2
 // Choosing the ordering ourselves — a bus-ordered J — fixes any
 // numbering. The mismatch/targets are permuted the same way; columns are untouched, so
 // the solution dx needs no back-permutation.
-std::vector<int> buildRowMap(int n, int ncb, const int* cbIdx, int nob, const int* obIdx,
-                             int nsh, const int* shIdx, int nhv, const int* hvIdx,
+std::vector<int> buildRowMap(int n, int nClosedBranch, const int* closedBranchIndices, int nOpenBranch, const int* openBranchIndices,
+                             int nShunt, const int* shuntIndices, int nHvdcAcEmulation, const int* hvdcAcEmulationIndices,
                              int ndq, const int* dqRow, int nzi, const int* ziIdx) {
     std::vector<int> rowMap(n, -1);
     auto pairRc = [&](int row, int col) {
@@ -107,8 +107,8 @@ std::vector<int> buildRowMap(int n, int ncb, const int* cbIdx, int nob, const in
             pairRc(vcol, vcol);
         }
     };
-    for (int e = 0; e < ncb; e++) {                          // P1 Q1 P2 Q2 ph1 v1 ph2 v2 a1col r1col
-        const int* ix = cbIdx + e * 12;
+    for (int e = 0; e < nClosedBranch; e++) {                          // P1 Q1 P2 Q2 ph1 v1 ph2 v2 a1col r1col
+        const int* ix = closedBranchIndices + e * 12;
         pairP(ix[0], ix[4]);                                 // P1 -> ph1 (or itself, relocated)
         pairP(ix[2], ix[6]);                                 // P2 -> ph2 (or itself, relocated)
         // Q rows pair with their own stable index — its V col on an ordinary bus (Qrow==v col), the
@@ -134,24 +134,24 @@ std::vector<int> buildRowMap(int n, int ncb, const int* cbIdx, int nob, const in
             pairRc(ix[8], ix[8]);
         }
     }
-    for (int e = 0; e < nob; e++) {                          // P1 Q1 P2 Q2 v1 v2 (no ph cols:
-        const int* ix = obIdx + e * 6;                       // P rows pair via closed branches)
+    for (int e = 0; e < nOpenBranch; e++) {                          // P1 Q1 P2 Q2 v1 v2 (no ph cols:
+        const int* ix = openBranchIndices + e * 6;                       // P rows pair via closed branches)
         pairRc(ix[1], ix[1]);                                // Q rows self-pair (v col, or rho col if controlled)
         pairRc(ix[3], ix[3]);
         claimMovedV(ix[1], ix[4]);
         claimMovedV(ix[3], ix[5]);
     }
-    for (int e = 0; e < nsh; e++) {                          // P Q v bcol
-        pairRc(shIdx[e * 5 + 1], shIdx[e * 5 + 1]);          // Q self-pairs (v col, or SHUNT_B col if controlled)
-        claimMovedV(shIdx[e * 5 + 1], shIdx[e * 5 + 2]);
-        if (shIdx[e * 5 + 3] >= 0) {
+    for (int e = 0; e < nShunt; e++) {                          // P Q v bcol
+        pairRc(shuntIndices[e * 5 + 1], shuntIndices[e * 5 + 1]);          // Q self-pairs (v col, or SHUNT_B col if controlled)
+        claimMovedV(shuntIndices[e * 5 + 1], shuntIndices[e * 5 + 2]);
+        if (shuntIndices[e * 5 + 3] >= 0) {
             // claim the SHUNT_B row: its diagonal is the b col either way — dq/db when the susceptance is a
             // free control, or the unit derivative of the b−target identity when it is held constant.
-            pairRc(shIdx[e * 5 + 3], shIdx[e * 5 + 3]);
+            pairRc(shuntIndices[e * 5 + 3], shuntIndices[e * 5 + 3]);
         }
     }
-    for (int e = 0; e < nhv; e++) {                          // P1 P2 ph1 ph2
-        const int* ix = hvIdx + e * 4;
+    for (int e = 0; e < nHvdcAcEmulation; e++) {                          // P1 P2 ph1 ph2
+        const int* ix = hvdcAcEmulationIndices + e * 4;
         pairP(ix[0], ix[2]);
         pairP(ix[1], ix[3]);
     }
@@ -208,8 +208,8 @@ std::vector<int> buildRowMap(int n, int ncb, const int* cbIdx, int nob, const in
                 }
                 return out;
             };
-            std::string seen = where("cb", cbIdx, ncb, 12) + where("ob", obIdx, nob, 6)
-                    + where("sh", shIdx, nsh, 5) + where("hv", hvIdx, nhv, 4)
+            std::string seen = where("cb", closedBranchIndices, nClosedBranch, 12) + where("ob", openBranchIndices, nOpenBranch, 6)
+                    + where("sh", shuntIndices, nShunt, 5) + where("hv", hvdcAcEmulationIndices, nHvdcAcEmulation, 4)
                     + where("zi", ziIdx, nzi, 11);
             int dqHits = 0;
             for (int c = 0; c < ndq && dqRow != nullptr; c++) {
@@ -233,10 +233,10 @@ std::vector<int> buildRowMap(int n, int ncb, const int* cbIdx, int nob, const in
 
 // The DISTR_Q / DISTR_RHO / zero-impedance family contributions to the CSR pattern (the rows they add
 // variable columns to). Shared by buildStructure for both solver contexts, so every consumer sees the
-// SAME nnz the real context builds. cbIdx/obIdx/shIdx are the row-mapped packs; only the family ROWS are
+// SAME nnz the real context builds. closedBranchIndices/openBranchIndices/shuntIndices are the row-mapped packs; only the family ROWS are
 // taken through rowMap here, the contributor columns (v/ph/dummy/r1) are variable columns left as-is.
 void collectFamilyPattern(const std::vector<int>& rowMap,
-                          const int* cbIdx, const int* obIdx, const int* shIdx,
+                          const int* closedBranchIndices, const int* openBranchIndices, const int* shuntIndices,
                           int ndq, const int* dqElem, const int* dqSide, const int* dqKind, const int* dqRow,
                           int nDistrRho, const int* distrRhoRow, const int* distrRhoColumn,
                           int nDistrShuntB, const int* distrShuntBRow, const int* distrShuntBColumn,
@@ -256,14 +256,14 @@ void collectFamilyPattern(const std::vector<int>& rowMap,
                 pat.emplace_back(mappedRow, mappedRow);      // the stock row's own diagonal
             }
             if (dqKind[c] == GpuReactiveTermKind::SHUNT_COMPENSATOR_REACTIVE_FLOW) {  // shunt q: bus V column
-                pat.emplace_back(mappedRow, shIdx[static_cast<size_t>(dqElem[c]) * 5 + 2]);
+                pat.emplace_back(mappedRow, shuntIndices[static_cast<size_t>(dqElem[c]) * 5 + 2]);
             } else if (dqKind[c] == GpuReactiveTermKind::OPEN_BRANCH_REACTIVE_FLOW) {  // half-open: connected-side V column
-                const int* oq = obIdx + static_cast<size_t>(dqElem[c]) * 6;
+                const int* oq = openBranchIndices + static_cast<size_t>(dqElem[c]) * 6;
                 pat.emplace_back(mappedRow, dqSide[c] == 0 ? oq[4] : oq[5]);
             } else if (dqKind[c] == GpuReactiveTermKind::DUMMY_Q) {  // zero-imp DUMMY_Q column
                 pat.emplace_back(mappedRow, dqElem[c]);
             } else {                                         // closed branch: v1 v2 ph1 ph2 r1
-                const int* q = cbIdx + static_cast<size_t>(dqElem[c]) * 12;
+                const int* q = closedBranchIndices + static_cast<size_t>(dqElem[c]) * 12;
                 pat.emplace_back(mappedRow, q[5]);
                 pat.emplace_back(mappedRow, q[7]);
                 pat.emplace_back(mappedRow, q[4]);

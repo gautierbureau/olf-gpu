@@ -45,8 +45,8 @@ __host__ __device__ inline bool slackGeneratorsInPack(int ngen, const int* dgBus
 // a post-contingency solve read as an 84 MW slack mismatch where OLF saw 0.66 MW, and the device ran slack passes
 // OLF never ran.
 __global__ void hvdcSlackBalanceBatch(int nS, int nh, int n, int nElements, int slackRowBase, const int* slackRowOv,
-                                      const int* hvBus1Row, const int* hvBus2Row, const int* hvBus1Phi,
-                                      const int* hvBus2Phi, const int* hvElem, const double* hvIn,
+                                      const int* hvdcBus1PRow, const int* hvdcBus2PRow, const int* hvdcBus1PhiColumn,
+                                      const int* hvdcBus2PhiColumn, const int* hvdcElement, const double* hvdcAcEmulationParameters,
                                       const int* status, const double* d1, const double* d2, const char* ctgOut,
                                       const char* disabled, const double* x, const char* rlActive, double* qBuf) {
     int s = blockIdx.x * blockDim.x + threadIdx.x;
@@ -55,14 +55,14 @@ __global__ void hvdcSlackBalanceBatch(int nS, int nh, int n, int nElements, int 
     const double* xs = x + (size_t) s * n;
     double corr = 0.0;
     for (int h = 0; h < nh; h++) {
-        int r1 = hvBus1Row[h] < 0 ? ~hvBus1Row[h] : hvBus1Row[h];
-        int r2 = hvBus2Row[h] < 0 ? ~hvBus2Row[h] : hvBus2Row[h];
+        int r1 = hvdcBus1PRow[h] < 0 ? ~hvdcBus1PRow[h] : hvdcBus1PRow[h];
+        int r2 = hvdcBus2PRow[h] < 0 ? ~hvdcBus2PRow[h] : hvdcBus2PRow[h];
         if (r1 != slackRow && r2 != slackRow) continue;
         size_t sh = (size_t) s * nh + h;
-        const double* p = hvIn + (size_t) h * 9;
-        bool live = status[sh] == GpuAcEmulationStatus::LINEAR_MODE && !ctgOut[sh] && !disabled[(size_t) s * nElements + hvElem[h]];
-        double ph1 = xs[hvBus1Phi[h]];
-        double ph2 = xs[hvBus2Phi[h]];
+        const double* p = hvdcAcEmulationParameters + (size_t) h * 9;
+        bool live = status[sh] == GpuAcEmulationStatus::LINEAR_MODE && !ctgOut[sh] && !disabled[(size_t) s * nElements + hvdcElement[h]];
+        double ph1 = xs[hvdcBus1PhiColumn[h]];
+        double ph2 = xs[hvdcBus2PhiColumn[h]];
         if (r1 == slackRow) {
             corr += (live ? hvdc::p1(p[0], p[1], p[4], p[5], p[6], ph1, ph2) : 0.0) - d1[sh];
         }

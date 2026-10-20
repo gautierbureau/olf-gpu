@@ -72,21 +72,21 @@ final class GpuViolationScreen {
     private final int[] branchElem;
     private final int[] busVRow;
 
-    private final double[] cbIn;
-    private final int[] cbIdx;
-    private final double[] obIn;
-    private final int[] obIdx;
+    private final double[] closedBranchParameters;
+    private final int[] closedBranchIndices;
+    private final double[] openBranchParameters;
+    private final int[] openBranchIndices;
 
     private GpuViolationScreen(GpuLimitTable table, byte[] branchFamily, int[] branchElem, int[] busVRow,
-                               double[] cbIn, int[] cbIdx, double[] obIn, int[] obIdx) {
+                               double[] closedBranchParameters, int[] closedBranchIndices, double[] openBranchParameters, int[] openBranchIndices) {
         this.table = table;
         this.branchFamily = branchFamily;
         this.branchElem = branchElem;
         this.busVRow = busVRow;
-        this.cbIn = cbIn;
-        this.cbIdx = cbIdx;
-        this.obIn = obIn;
-        this.obIdx = obIdx;
+        this.closedBranchParameters = closedBranchParameters;
+        this.closedBranchIndices = closedBranchIndices;
+        this.openBranchParameters = openBranchParameters;
+        this.openBranchIndices = openBranchIndices;
     }
 
     /**
@@ -279,7 +279,7 @@ final class GpuViolationScreen {
         }
         deviceTable = ViolationScreenNative.uploadViolationTable(family, branchElem, groupStart, groupEnd,
                 groupSide, groupQuantity, groupLimitStart, groupLimitEnd, thresholds,
-                busVRow, busHigh, busLow, cbIn, cbIdx, obIn, obIdx);
+                busVRow, busHigh, busLow, closedBranchParameters, closedBranchIndices, openBranchParameters, openBranchIndices);
         return deviceTable;
     }
 
@@ -389,8 +389,8 @@ final class GpuViolationScreen {
     private double[] flows(int branchIndex, double[] state) {
         int e = branchElem[branchIndex];
         if (branchFamily[branchIndex] == FAMILY_CLOSED) {
-            double[] in = cbIn;
-            int[] ix = cbIdx;
+            double[] in = closedBranchParameters;
+            int[] ix = closedBranchIndices;
             int o = e * 8;
             int c = e * 12;
             int ph1Col = ix[c + 4];
@@ -431,8 +431,8 @@ final class GpuViolationScreen {
                 v1, v2,
             };
         }
-        double[] in = obIn;
-        int[] ix = obIdx;
+        double[] in = openBranchParameters;
+        int[] ix = openBranchIndices;
         int o = e * 7;
         int c = e * 6;
         int v1Col = ix[c + 4];

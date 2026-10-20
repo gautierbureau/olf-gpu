@@ -61,8 +61,8 @@ public final class GpuAcNewtonSolver {
         return a;
     }
 
-    private static int[] noPcSide(int ncb) {
-        int[] a = new int[ncb];
+    private static int[] noPcSide(int nClosedBranch) {
+        int[] a = new int[nClosedBranch];
         java.util.Arrays.fill(a, -1);
         return a;
     }
@@ -75,15 +75,17 @@ public final class GpuAcNewtonSolver {
      *         convergence status (see {@link #solveBatchContext})
      */
     public static double[] solve(double[] x0, double[] target, int[] rowMode, int maxIter, double tol,
-                                 double[] cbIn, int[] cbIdx, double[] obIn, int[] obIdx,
-                                 double[] shIn, int[] shIdx, double[] hvIn, int[] hvIdx,
+                                 double[] closedBranchParameters, int[] closedBranchIndices, double[] openBranchParameters, int[] openBranchIndices,
+                                 double[] shuntParameters, int[] shuntIndices, double[] hvdcAcEmulationParameters, int[] hvdcAcEmulationIndices,
                                  int[] dqElem, int[] dqSide, double[] dqWeight, int[] dqRow, int[] dqKind,
                                  double[] ziIn, int[] ziIdx,
                                  int[] distrRhoRow, int[] distrRhoColumn, double[] distrRhoCoefficient,
                                  int[] distrShuntBRow, int[] distrShuntBColumn, double[] distrShuntBCoefficient) {
-        return solve(x0, target, rowMode, maxIter, tol, cbIn, cbIdx, obIn, obIdx, shIn, shIdx, hvIn, hvIdx,
+        return solve(x0, target, rowMode, maxIter, tol, closedBranchParameters, closedBranchIndices,
+                openBranchParameters, openBranchIndices, shuntParameters, shuntIndices, hvdcAcEmulationParameters,
+                hvdcAcEmulationIndices,
                 dqElem, dqSide, dqWeight, dqRow, dqKind, ziIn, ziIdx, distrRhoRow, distrRhoColumn, distrRhoCoefficient, distrShuntBRow, distrShuntBColumn, distrShuntBCoefficient,
-                new int[] {0}, new int[0], noQAlt(obIdx.length / 6), noQAlt(ziIdx.length / 11));
+                new int[] {0}, new int[0], noQAlt(openBranchIndices.length / 6), noQAlt(ziIdx.length / 11));
     }
 
     /** {@link #solve} with the GROUP pilot-Q relocation tables (plan-A6) and the ob/zi alternate
@@ -91,16 +93,18 @@ public final class GpuAcNewtonSolver {
      *  members). Pass all-(-1) ob/zi alt arrays when only cb/sh relocate. */
     @SuppressWarnings("java:S107")
     public static double[] solve(double[] x0, double[] target, int[] rowMode, int maxIter, double tol,
-                                 double[] cbIn, int[] cbIdx, double[] obIn, int[] obIdx,
-                                 double[] shIn, int[] shIdx, double[] hvIn, int[] hvIdx,
+                                 double[] closedBranchParameters, int[] closedBranchIndices, double[] openBranchParameters, int[] openBranchIndices,
+                                 double[] shuntParameters, int[] shuntIndices, double[] hvdcAcEmulationParameters, int[] hvdcAcEmulationIndices,
                                  int[] dqElem, int[] dqSide, double[] dqWeight, int[] dqRow, int[] dqKind,
                                  double[] ziIn, int[] ziIdx,
                                  int[] distrRhoRow, int[] distrRhoColumn, double[] distrRhoCoefficient,
                                  int[] distrShuntBRow, int[] distrShuntBColumn, double[] distrShuntBCoefficient, int[] qrPtr, int[] qrRows,
-                                 int[] obQAlt, int[] ziQAlt) {
-        long structure = StructureNative.createStructure(x0.length, cbIn, cbIdx, obIn, obIdx, shIn, shIdx, hvIn, hvIdx,
+                                 int[] openBranchAlternateReactiveDestination, int[] ziQAlt) {
+        long structure = StructureNative.createStructure(x0.length, closedBranchParameters, closedBranchIndices,
+                openBranchParameters, openBranchIndices, shuntParameters, shuntIndices, hvdcAcEmulationParameters,
+                hvdcAcEmulationIndices,
                 dqElem, dqSide, dqWeight, dqRow, dqKind, ziIn, ziIdx, distrRhoRow, distrRhoColumn, distrRhoCoefficient, distrShuntBRow, distrShuntBColumn, distrShuntBCoefficient,
-                noPcSide(cbIdx.length / 12), new double[0], new int[0], qrPtr, qrRows, obQAlt, ziQAlt,
+                noPcSide(closedBranchIndices.length / 12), new double[0], new int[0], qrPtr, qrRows, openBranchAlternateReactiveDestination, ziQAlt,
                 noDepGroups(qrPtr), noDepGroups(qrPtr), noDepRows(x0.length));
         try {
             return solveOnStructure(structure, x0, target, rowMode, maxIter, tol, 0, 0.0, 0.0, new int[x0.length]);
@@ -160,8 +164,8 @@ public final class GpuAcNewtonSolver {
     public static double[][] solveBatch(double[] x0Base, double[] targetBase, int[][] rowMode,
                                          boolean[][] disabledElementMask, int mode, int maxIter, double tol,
                                          double reactiveLimitTol, double slackDistTol,
-                                         double[] cbIn, int[] cbIdx, double[] obIn, int[] obIdx,
-                                         double[] shIn, int[] shIdx, double[] hvIn, int[] hvIdx,
+                                         double[] closedBranchParameters, int[] closedBranchIndices, double[] openBranchParameters, int[] openBranchIndices,
+                                         double[] shuntParameters, int[] shuntIndices, double[] hvdcAcEmulationParameters, int[] hvdcAcEmulationIndices,
                                          int[] rlVrow, double[] rlMinQ, double[] rlMaxQ, double[] rlLoadQ,
                                          double[] rlVtarget, int[] dsPhiRow, double[] dsFactor,
                                          int dsSlackPhiRow, double dsSlackTargetP,
@@ -171,10 +175,12 @@ public final class GpuAcNewtonSolver {
                                          int[] distrShuntBRow, int[] distrShuntBColumn, double[] distrShuntBCoefficient, double[] ziIn, int[] ziIdx) {
         int n = x0Base.length;
         int nScenarios = disabledElementMask.length;
-        long structure = StructureNative.createStructure(n, cbIn, cbIdx, obIn, obIdx, shIn, shIdx, hvIn, hvIdx,
+        long structure = StructureNative.createStructure(n, closedBranchParameters, closedBranchIndices,
+                openBranchParameters, openBranchIndices, shuntParameters, shuntIndices, hvdcAcEmulationParameters,
+                hvdcAcEmulationIndices,
                 dqElem, dqSide, dqWeight, dqRow, dqKind, ziIn, ziIdx, distrRhoRow, distrRhoColumn, distrRhoCoefficient, distrShuntBRow, distrShuntBColumn, distrShuntBCoefficient,
-                noPcSide(cbIdx.length / 12), new double[0], new int[0], new int[] {0}, new int[0],
-                noQAlt(obIdx.length / 6), noQAlt(ziIdx.length / 11), new int[0], new int[0], noDepRows(n));
+                noPcSide(closedBranchIndices.length / 12), new double[0], new int[0], new int[] {0}, new int[0],
+                noQAlt(openBranchIndices.length / 6), noQAlt(ziIdx.length / 11), new int[0], new int[0], noDepRows(n));
         try {
             long handle = BatchSolveNative.createBatchContext(structure, nScenarios, mode,
                     rlVrow, rlMinQ, rlMaxQ, rlLoadQ, rlVtarget, new byte[rlVrow.length], new double[x0Base.length],

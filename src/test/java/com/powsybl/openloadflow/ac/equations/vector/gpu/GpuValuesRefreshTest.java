@@ -36,7 +36,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  *
  * <p>The substantive property: a values-REFRESHED structure must solve BYTE-IDENTICALLY to one built from
  * scratch on the new values. Driven via a transformer {@code r1} (ratio/tap) change on eurostag, which is
- * {@link GpuAcData#sameStructureAs} (idx packs unchanged) but not {@link GpuAcData#sameAs} (cbIn changed).
+ * {@link GpuAcData#sameStructureAs} (idx packs unchanged) but not {@link GpuAcData#sameAs} (closedBranchParameters changed).
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */

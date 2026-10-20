@@ -117,10 +117,10 @@ __global__ void svcTriggerBatch(SvcTables T, int nScenarios, int n, const char* 
 // After the unit-RHS solve for CONTROLLED bus i: OLF's calculateSensiK for every controller j — the sum
 // over j's own Q observables of (term gradient . dx_i), scaled by 2/(maxQ-minQ) — and calculateSensiVpp,
 // which is dx_i at the zone's pilot row.
-__global__ void svcGatherBatch(SvcTables T, int nScenarios, int n, int i, int nElements, int cbOffset, int shOffset,
-                               const double* cbIn, const int* cbIx, const double* shIn, const int* shIx,
+__global__ void svcGatherBatch(SvcTables T, int nScenarios, int n, int i, int nElements, int closedBranchOffset, int shuntOffset,
+                               const double* closedBranchParameters, const int* closedBranchIndices, const double* shuntParameters, const int* shuntIndices,
                                int nR1Ov, const int* r1OvSlotElem, const double* r1OvVal,
-                               int nShOv, const int* shOvSlotElem, const double* shOvGb,
+                               int nShuntAdmittanceOverrides, const int* shuntAdmittanceOverrideScenarioElement, const double* shuntAdmittanceOverrideDelta,
                                const char* disabled, const double* x, const double* dx) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= T.nCtl * nScenarios) return;
@@ -134,23 +134,23 @@ __global__ void svcGatherBatch(SvcTables T, int nScenarios, int n, int i, int nE
         // NO isDisabled test here, deliberately: OLF's calculateSensiQ sums the controller bus's branch
         // terms as they stand, an outaged one included. Replicating the quirk keeps us on its trajectory.
         if (T.qKind[k] == 2) {                               // shunt: q = -b v^2
-            int e = elem - shOffset;
+            int e = elem - shuntOffset;
             if (e < 0) continue;
-            double g = shIn[e * 2];
-            double b = shIn[e * 2 + 1];
-            applyShuntOverride(nShOv, shOvSlotElem, shOvGb, s, e, g, b);
-            int vCol = shIx[e * 5 + 2];
-            int bCol = shIx[e * 5 + 3];                      // SHUNT_B row when b is a solved variable
+            double g = shuntParameters[e * 2];
+            double b = shuntParameters[e * 2 + 1];
+            applyShuntOverride(nShuntAdmittanceOverrides, shuntAdmittanceOverrideScenarioElement, shuntAdmittanceOverrideDelta, s, e, g, b);
+            int vCol = shuntIndices[e * 5 + 2];
+            int bCol = shuntIndices[e * 5 + 3];                      // SHUNT_B row when b is a solved variable
             if (bCol >= 0) b = xs[bCol];
             double v = xs[vCol];
             sq += (-2.0 * b * v) * dxs[vCol] + (bCol >= 0 ? (-v * v) * dxs[bCol] : 0.0);
         } else {
-            int e = elem - cbOffset;
+            int e = elem - closedBranchOffset;
             if (e < 0) continue;
-            const double* p = cbIn + e * 8;
+            const double* p = closedBranchParameters + e * 8;
             double pOv[8];
             if (findTapOverride(nR1Ov, r1OvSlotElem, r1OvVal, s, e, pOv)) p = pOv;
-            const int* q = cbIx + e * 12;
+            const int* q = closedBranchIndices + e * 12;
             double g[18];
             flcFlowAndGrad(T.qKind[k] == 0 ? 1 : 2, GpuControlledFlow::REACTIVE_POWER, p, xs, q, g);  // the reactive flow on side 1 / 2
             double d[6] = { dxs[q[5]], dxs[q[7]], dxs[q[4]], dxs[q[6]],
@@ -363,11 +363,11 @@ void svcStep(BatchSolverContext* ctx, DriverPass& drv) {
         hazRepairRightHandSide(ctx, nS, ctx->dB.as<double>());
         sensitivitySolve(ctx, drv, first);
         svcGatherBatch<<<grid(nC * nS), BLOCK, 0, ctx->stream>>>(svcTables(ctx), nS, n, i,
-                ctx->nElements, ctx->cbOffset, ctx->shOffset,
-                ctx->st->cb.parameters.as<double>(), ctx->st->cb.indices.as<int>(),
-                ctx->st->sh.parameters.as<double>(), ctx->st->sh.indices.as<int>(),
+                ctx->nElements, ctx->closedBranchOffset, ctx->shuntOffset,
+                ctx->st->closedBranch.parameters.as<double>(), ctx->st->closedBranch.indices.as<int>(),
+                ctx->st->shunt.parameters.as<double>(), ctx->st->shunt.indices.as<int>(),
                 ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>(),
-                ctx->nShOv, ctx->dShOvSlotElem.as<int>(), ctx->dShOvGb.as<double>(),
+                ctx->nShuntAdmittanceOverrides, ctx->dShuntAdmittanceOverrideScenarioElement.as<int>(), ctx->dShuntAdmittanceOverrideDelta.as<double>(),
                 ctx->dDisabled.as<char>(), ctx->dX.as<double>(), ctx->dDx.as<double>());
     }
     CUDA_CHECK(cudaMemcpy(ctx->dActive.p, active.data(), nS, cudaMemcpyHostToDevice));   // as it was

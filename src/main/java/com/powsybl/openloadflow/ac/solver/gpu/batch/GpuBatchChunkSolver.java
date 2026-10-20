@@ -798,8 +798,8 @@ final class GpuBatchChunkSolver {
                     // WARM-START flows BEFORE the first solve.
                     GpuBatchOverrides.Snapshot preHvdcOverrides = null;
                     int[][] hvdcStatus = null;
-                    double[] hvAppliedD1 = null;
-                    double[] hvAppliedD2 = null;
+                    double[] hvdcAppliedDelta1 = null;
+                    double[] hvdcAppliedDelta2 = null;
                     // HvdcAction (AC emulation off): OLF sets each station's target to the link's flow at the state the
                     // strategy starts from - the parent's converged solution, which is this pair's warm start - unclamped,
                     // and takes the link out of its equations. On the device: the element masked, the two set points as
@@ -807,7 +807,7 @@ final class GpuBatchChunkSolver {
                     // scenario's own (never frozen, unfrozen or saturated by them). A station on the slack bus has no row:
                     // its set point reaches the slack mismatch through the applied delta (hvdcSlackBalanceBatch), which
                     // the VSC curve channel reads too - set below, once the HVDC arrays exist.
-                    List<double[]> hvActionApplied = new ArrayList<>();   // {slot, ctl, d1 - baseD1, d2 - baseD2}
+                    List<double[]> hvdcActionApplied = new ArrayList<>();   // {slot, ctl, d1 - baseD1, d2 - baseD2}
                     for (int s = 0; pairPhase && s < realCount; s++) {
                         List<com.powsybl.openloadflow.network.LfHvdc> off = new ArrayList<>(contingencies.get(group.get(chunkStart + s)).acEmulationOffHvdcs());
                         // a link whose converter bus the contingency isolated carries no power: OLF's action changes nothing
@@ -826,7 +826,7 @@ final class GpuBatchChunkSolver {
                         for (com.powsybl.openloadflow.network.LfHvdc hv : off) {
                             Integer elem = hvdcElemIndex.get(hv);
                             GpuHvdcAcEmulationLimitsOuterLoop.Ctl c = !ok || elem == null ? null : hvdcControllers.stream()
-                                    .filter(ctl -> ctl.hvElemIndex() == elem).findFirst().orElse(null);
+                                    .filter(ctl -> ctl.hvdcElementIndex() == elem).findFirst().orElse(null);
                             if (c == null) {
                                 ok = false;
                                 break;
@@ -835,14 +835,14 @@ final class GpuBatchChunkSolver {
                             double d1 = -c.p1At(warm);
                             double d2 = -c.p2At(warm);
                             int[] rm = rs.rowModePerScenario[s];
-                            rs.disabledMask[s][c.hvElemIndex()] = true;
+                            rs.disabledMask[s][c.hvdcElementIndex()] = true;
                             if (c.bus1PActive()) {
                                 rs.overrides.merge(s * n + c.bus1WriteRow(rm), baseTargets[c.bus1WriteRow(rm)], c.baseD1(), d1);
                             }
                             if (c.bus2PActive()) {
                                 rs.overrides.merge(s * n + c.bus2WriteRow(rm), baseTargets[c.bus2WriteRow(rm)], c.baseD2(), d2);
                             }
-                            hvActionApplied.add(new double[] {s, hvdcControllers.indexOf(c), d1 - c.baseD1(), d2 - c.baseD2()});
+                            hvdcActionApplied.add(new double[] {s, hvdcControllers.indexOf(c), d1 - c.baseD1(), d2 - c.baseD2()});
                         }
                         if (!ok) {
                             if (rejectAfterSolve == null) {
@@ -853,8 +853,8 @@ final class GpuBatchChunkSolver {
                         }
                     }
                     if (hvdcControllers != null && !hvdcControllers.isEmpty()) {
-                        hvAppliedD1 = new double[chunkSize * hvdcControllers.size()];
-                        hvAppliedD2 = new double[chunkSize * hvdcControllers.size()];
+                        hvdcAppliedDelta1 = new double[chunkSize * hvdcControllers.size()];
+                        hvdcAppliedDelta2 = new double[chunkSize * hvdcControllers.size()];
                         preHvdcOverrides = rs.overrides.snapshot();
                         if (System.getenv("OLF_GPU_HVDC_TRACE") != null) {
                             for (int s = 0; s < realCount; s++) {
@@ -876,7 +876,7 @@ final class GpuBatchChunkSolver {
                         if (config.hvdcFreezing()) {
                             hvdcStatus = GpuFreezingHvdcACEmulationOuterloop.applyFreeze(chunkSize, realCount, n, hvdcControllers,
                                     baseState, x0Full, x0Full == null ? x0SeedIdx : null, x0Full == null ? x0SeedVal : null,
-                                    rs.disabledMask, baseTargets, rs.overrides, hvAppliedD1, hvAppliedD2, rs.rowModePerScenario);
+                                    rs.disabledMask, baseTargets, rs.overrides, hvdcAppliedDelta1, hvdcAppliedDelta2, rs.rowModePerScenario);
                             targetOverrideIndex = rs.overrides.indexArray();
                             targetOverrideValue = rs.overrides.valueArray();
                         } else {
@@ -898,16 +898,16 @@ final class GpuBatchChunkSolver {
                     // between DistributedSlack and ReactiveLimits. Running them instead as host
                     // orchestrators after the whole solve put them out of OLF's order and left one
                     // differing violation line over 2000 rte6515 branch contingencies.
-                    for (double[] e : hvActionApplied) {           // the HvdcAction set points, as applied deltas
+                    for (double[] e : hvdcActionApplied) {           // the HvdcAction set points, as applied deltas
                         int k = (int) e[0] * hvdcControllers.size() + (int) e[1];
-                        hvAppliedD1[k] = e[2];
-                        hvAppliedD2[k] = e[3];
+                        hvdcAppliedDelta1[k] = e[2];
+                        hvdcAppliedDelta2[k] = e[3];
                     }
                     byte[] ctgOutOf = null;
                     boolean hasHvdcDriverLoops = hvdcControllers != null && !hvdcControllers.isEmpty();
                     ctgOutOf = GpuHvdcAcEmulationLimitsOuterLoop.installDriverLoops(handle,
                             hasHvdcDriverLoops ? hvdcControllers : null, chunkSize, hvdcStatus, rs.disabledMask,
-                            hvAppliedD1, hvAppliedD2, config.hvdcLimits());
+                            hvdcAppliedDelta1, hvdcAppliedDelta2, config.hvdcLimits());
                     // MonitoringVoltage as a DRIVER PHASE, in OLF's own slot (order 6, between the
                     // HVDC loops and ReactiveLimits) instead of as a host orchestrator after the whole
                     // solve. Run-constant table, but the context is per chunk.
@@ -1006,8 +1006,8 @@ final class GpuBatchChunkSolver {
                                                         parameters.getMaxIterations(), tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
                             config.lsMode(), config.maxDv(), config.maxDphi(),
                             config.lsMode() == GpuStateVectorScalingMode.MAX_VOLTAGE_CHANGE ? varType : null, x0Full,
-                            rs.shOvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
-                            rs.shOvGbList.stream().mapToDouble(Double::doubleValue).toArray(),
+                            rs.shuntAdmittanceOverrideScenarioElementList.stream().mapToInt(Integer::intValue).toArray(),
+                            rs.shuntAdmittanceOverrideDeltaList.stream().mapToDouble(Double::doubleValue).toArray(),
                             rlStateIn, rlStateOut,
                             rs.r1OvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
                             rs.r1OvValList.stream().mapToDouble(Double::doubleValue).toArray(),
@@ -1068,8 +1068,8 @@ final class GpuBatchChunkSolver {
                                                                         parameters.getMaxIterations(), tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
                                     config.lsMode(), config.maxDv(), config.maxDphi(),
                                     config.lsMode() == GpuStateVectorScalingMode.MAX_VOLTAGE_CHANGE ? varType : null, x0Full,
-                                    rs.shOvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
-                                    rs.shOvGbList.stream().mapToDouble(Double::doubleValue).toArray(),
+                                    rs.shuntAdmittanceOverrideScenarioElementList.stream().mapToInt(Integer::intValue).toArray(),
+                                    rs.shuntAdmittanceOverrideDeltaList.stream().mapToDouble(Double::doubleValue).toArray(),
                                     null, rlStateOut,
                                     rs.r1OvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
                                     rs.r1OvValList.stream().mapToDouble(Double::doubleValue).toArray(),
@@ -1144,7 +1144,7 @@ final class GpuBatchChunkSolver {
                             rs.overrides.restore(preHvdcOverrides);
                             GpuHvdcAcEmulationLimitsOuterLoop.applyStatusOverrides(chunkSize, realCount, n,
                                     hvdcControllers, hvdcStatus, ctgOutOf, rs.disabledMask, baseTargets, rs.overrides,
-                                    hvAppliedD1, hvAppliedD2, rs.rowModePerScenario);
+                                    hvdcAppliedDelta1, hvdcAppliedDelta2, rs.rowModePerScenario);
                             targetOverrideIndex = rs.overrides.indexArray();
                             targetOverrideValue = rs.overrides.valueArray();
                         }

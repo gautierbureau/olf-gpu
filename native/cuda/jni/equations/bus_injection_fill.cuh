@@ -15,7 +15,7 @@ __global__ void fillShuntBatch(int elementCount, int nScenarios, int n, int nnz,
                                const double* in, const int* ix, const int* dest,
                                const double* x, double* vals, double* F,
                                const char* disabled, const char* active,
-                               int nShOv, const int* shOvSlotElem, const double* shOvGb,
+                               int nShuntAdmittanceOverrides, const int* shuntAdmittanceOverrideScenarioElement, const double* shuntAdmittanceOverrideDelta,
                                const int* altDest, const int* selRow, const int* mode, int dynReloc,
                                RelocTables rt);
 
@@ -34,7 +34,7 @@ __global__ void fillShuntBatchF(int elementCount, int nScenarios, int n, int nnz
                                 const double* in, const int* ix, const int* dest,
                                 const double* x, double* F,
                                 const char* disabled, const char* active,
-                                int nShOv, const int* shOvSlotElem, const double* shOvGb,
+                                int nShuntAdmittanceOverrides, const int* shuntAdmittanceOverrideScenarioElement, const double* shuntAdmittanceOverrideDelta,
                                 const int* altDest, const int* selRow, const int* mode, int dynReloc,
                                RelocTables rt);
 

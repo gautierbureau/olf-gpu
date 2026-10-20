@@ -36,7 +36,7 @@ namespace olfgpu {
 void buildDistrQDest(SharedStructure* st, const CsrPattern& pos, const std::vector<int>& rowMap,
                      int ndq, const int* dqElem, const int* dqSide, const int* dqKind,
                      const double* dqWeight, const int* dqRow,
-                     const int* cbIdx, const int* obIdx, const int* shIdx, const int* relocOwn) {
+                     const int* closedBranchIndices, const int* openBranchIndices, const int* shuntIndices, const int* relocOwn) {
     st->ndq = ndq;
     if (ndq > 0) {
         std::vector<int> dqDest(static_cast<size_t>(ndq) * 6, -1);
@@ -69,14 +69,14 @@ void buildDistrQDest(SharedStructure* st, const CsrPattern& pos, const std::vect
                 }
                 d[0] = -2 - row;                             // q value -> F row
                 if (dqKind[c] == GpuReactiveTermKind::SHUNT_COMPENSATOR_REACTIVE_FLOW) {  // shunt: dq/dv on the bus V column
-                    d[1] = pos.at(row, shIdx[static_cast<size_t>(dqElem[c]) * 5 + 2]);
+                    d[1] = pos.at(row, shuntIndices[static_cast<size_t>(dqElem[c]) * 5 + 2]);
                 } else if (dqKind[c] == GpuReactiveTermKind::OPEN_BRANCH_REACTIVE_FLOW) {  // half-open: dq/dv on the connected-side V col
-                    const int* oq = obIdx + static_cast<size_t>(dqElem[c]) * 6;
+                    const int* oq = openBranchIndices + static_cast<size_t>(dqElem[c]) * 6;
                     d[1] = pos.at(row, dqSide[c] == 0 ? oq[4] : oq[5]);
                 } else if (dqKind[c] == GpuReactiveTermKind::DUMMY_Q) {  // zero-impedance: J slot on the dummyQ column
                     d[1] = pos.at(row, dqElem[c]);
                 } else {                                     // closed branch
-                    const int* q = cbIdx + static_cast<size_t>(dqElem[c]) * 12;
+                    const int* q = closedBranchIndices + static_cast<size_t>(dqElem[c]) * 12;
                     d[1] = pos.at(row, q[5]);                // dq/dv1
                     d[2] = pos.at(row, q[7]);                // dq/dv2
                     d[3] = pos.at(row, q[4]);                // dq/dph1

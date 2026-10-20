@@ -50,8 +50,8 @@ OLF_JNI(ac_outerloop_gpu, PhaseControlNative, setBatchFlowControllers)(
     int nc = static_cast<int>(ctx->hFlcKind.size());
     std::vector<int> ctlPack(nc);
     for (int c = 0; c < nc; c++) {
-        ctlPack[c] = ctlElem[c] - ctx->cbOffset;             // the controlled branch's index in the closed-branch pack
-        if (ctlPack[c] < 0 || ctlPack[c] >= ctx->st->cb.elementCount) {
+        ctlPack[c] = ctlElem[c] - ctx->closedBranchOffset;             // the controlled branch's index in the closed-branch pack
+        if (ctlPack[c] < 0 || ctlPack[c] >= ctx->st->closedBranch.elementCount) {
             return 0;                                        // not a closed branch: the host orchestrator keeps it
         }
         if (ctx->hFlcKind[c] == GpuControlledFlow::REACTIVE_POWER) ctx->nFlcRpc++; else ctx->nFlcPhase++;
@@ -131,8 +131,8 @@ OLF_JNI(ac_outerloop_gpu, PhaseControlNative, setBatchContinuousPhase)(
     readI(jBaseTap, ctx->hCphBaseTap);
     int nc = static_cast<int>(kind.size());
     for (int c = 0; c < nc; c++) {
-        int e = ctx->hCphElem[c] - ctx->cbOffset;
-        if (e < 0 || e >= ctx->st->cb.elementCount) {
+        int e = ctx->hCphElem[c] - ctx->closedBranchOffset;
+        if (e < 0 || e >= ctx->st->closedBranch.elementCount) {
             return 0;                                        // not a closed branch: the host orchestrator keeps it
         }
     }

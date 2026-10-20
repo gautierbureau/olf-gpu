@@ -71,7 +71,7 @@ final class GpuAcValidation {
             // transformer locally controlling one of its own terminal buses; computeQRow throws
             // on the unsupported shapes (remote / multi-transformer DISTR_RHO).
             // BRANCH_ALPHA1 (phase control) is packed as a COLUMN only: the closed-branch kernel already
-            // reads a1 from the state vector when the branch derives it (cbIdx[8]) and already emits
+            // reads a1 from the state vector when the branch derives it (closedBranchIndices[8]) and already emits
             // dp1da1/dq1da1/dp2da1/dq2da1. Which ROW pairs with that column is decided in
             // extractActivation: BRANCH_TARGET_ALPHA1 (identity, INCREMENTAL mode) is packed,
             // BRANCH_TARGET_P (CONTINUOUS mode with control enabled) throws there.

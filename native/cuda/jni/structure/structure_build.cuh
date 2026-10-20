@@ -22,10 +22,10 @@ namespace olfgpu {
 using namespace powsybl::openloadflow;
 
 // csr_pattern.cu: one scatter-table row of one element -> (equation row, variable column), absent for role 2.
-RC resolveCb(const CbScatter& s, const int* ix);             // P1 Q1 P2 Q2 ph1 v1 ph2 v2 a1col r1col
-RC resolveOb(const ObScatter& s, const int* ix);             // P1 Q1 P2 Q2 v1 v2
-RC resolveSh(const ShScatter& s, const int* ix);             // P Q v bcol
-RC resolveHv(const HvdcScatter& s, const int* ix);           // P1 P2 ph1 ph2
+RC resolveClosedBranch(const CbScatter& s, const int* ix);             // P1 Q1 P2 Q2 ph1 v1 ph2 v2 a1col r1col
+RC resolveOpenBranch(const ObScatter& s, const int* ix);             // P1 Q1 P2 Q2 v1 v2
+RC resolveShunt(const ShScatter& s, const int* ix);             // P Q v bcol
+RC resolveHvdcAcEmulation(const HvdcScatter& s, const int* ix);           // P1 P2 ph1 ph2
 
 // One pass per family: collect the J pattern entries (role 1, both indices present).
 template <typename S, typename F>
@@ -123,12 +123,12 @@ void setupFamily(Family& f, int elementCount, const double* in, int parameterStr
 }
 
 // csr_pattern.cu
-std::vector<int> buildRowMap(int n, int ncb, const int* cbIdx, int nob, const int* obIdx,
-                             int nsh, const int* shIdx, int nhv, const int* hvIdx,
+std::vector<int> buildRowMap(int n, int nClosedBranch, const int* closedBranchIndices, int nOpenBranch, const int* openBranchIndices,
+                             int nShunt, const int* shuntIndices, int nHvdcAcEmulation, const int* hvdcAcEmulationIndices,
                              int ndq, const int* dqRow, int nzi, const int* ziIdx);
 
 void collectFamilyPattern(const std::vector<int>& rowMap,
-                          const int* cbIdx, const int* obIdx, const int* shIdx,
+                          const int* closedBranchIndices, const int* openBranchIndices, const int* shuntIndices,
                           int ndq, const int* dqElem, const int* dqSide, const int* dqKind, const int* dqRow,
                           int nDistrRho, const int* distrRhoRow, const int* distrRhoColumn,
                           int nDistrShuntB, const int* distrShuntBRow, const int* distrShuntBColumn,
@@ -138,41 +138,41 @@ void collectFamilyPattern(const std::vector<int>& rowMap,
 // q_relocation_pattern.cu
 bool hasAltEntries(const int* a, int len);
 
-bool hasRelocatable(int ncb, const int* cbIdx, int nsh, const int* shIdx);
+bool hasRelocatable(int nClosedBranch, const int* closedBranchIndices, int nShunt, const int* shuntIndices);
 
-void collectCbPhasePattern(int ncb, const int* cbIdx, const int* cbPcSide,
+void collectClosedBranchPhaseControlPattern(int nClosedBranch, const int* closedBranchIndices, const int* closedBranchPhaseControlSide,
                            const std::vector<int>& rowMap, std::vector<std::pair<int, int>>& pat);
 
-void buildCbPhaseDest(int ncb, const int* cbIdx, const int* cbPcSide, const std::vector<int>& rowMap,
+void buildClosedBranchPhaseControlDestination(int nClosedBranch, const int* closedBranchIndices, const int* closedBranchPhaseControlSide, const std::vector<int>& rowMap,
                       const CsrPattern& pos, std::vector<int>& phaseControlDestination, std::vector<int>& phaseControlSelector);
 
-void collectCbAltPattern(int ncb, const int* cbIdx, const int* relocOwn, std::vector<std::pair<int, int>>& pat,
+void collectCbAltPattern(int nClosedBranch, const int* closedBranchIndices, const int* relocOwn, std::vector<std::pair<int, int>>& pat,
                          int nQr, const int* qrPtr, const int* qrRows, const int* depGroupOfRow);
 
-void buildCbDynDest(int ncb, const int* cbIdx, const int* relocOwn, const CsrPattern& pos,
+void buildCbDynDest(int nClosedBranch, const int* closedBranchIndices, const int* relocOwn, const CsrPattern& pos,
                     std::vector<int>& altDest, std::vector<int>& selRow,
                     int nQr, const int* qrPtr, const int* qrRows,
                     std::vector<int>& relocGroup, std::vector<int>& relocOff, std::vector<int>& relocPool,
                     const int* depGroupOfRow, std::vector<char>& relocDep);
 
-void collectShAltPattern(int nsh, const int* shIdx, const int* relocOwn, std::vector<std::pair<int, int>>& pat,
+void collectShAltPattern(int nShunt, const int* shuntIndices, const int* relocOwn, std::vector<std::pair<int, int>>& pat,
                          int nQr, const int* qrPtr, const int* qrRows, const int* depGroupOfRow);
 
-void buildShDynDest(int nsh, const int* shIdx, const int* relocOwn, const CsrPattern& pos,
+void buildShDynDest(int nShunt, const int* shuntIndices, const int* relocOwn, const CsrPattern& pos,
                     std::vector<int>& altDest, std::vector<int>& selRow,
                     int nQr, const int* qrPtr, const int* qrRows,
                     std::vector<int>& relocGroup, std::vector<int>& relocOff, std::vector<int>& relocPool,
                     const int* depGroupOfRow, std::vector<char>& relocDep);
 
-void collectHvAltPattern(int nhv, const int* hvIdx, const int* relocOwn, std::vector<std::pair<int, int>>& pat);
+void collectHvAltPattern(int nHvdcAcEmulation, const int* hvdcAcEmulationIndices, const int* relocOwn, std::vector<std::pair<int, int>>& pat);
 
-void buildHvDynDest(int nhv, const int* hvIdx, const int* relocOwn, const CsrPattern& pos,
+void buildHvDynDest(int nHvdcAcEmulation, const int* hvdcAcEmulationIndices, const int* relocOwn, const CsrPattern& pos,
                     std::vector<int>& altDest, std::vector<int>& selRow);
 
-void collectObAltPattern(int nob, const int* obIdx, const int* obQAlt, const int* relocOwn, std::vector<std::pair<int, int>>& pat,
+void collectObAltPattern(int nOpenBranch, const int* openBranchIndices, const int* openBranchAlternateReactiveDestination, const int* relocOwn, std::vector<std::pair<int, int>>& pat,
                          int nQr, const int* qrPtr, const int* qrRows, const int* depGroupOfRow);
 
-void buildObDynDest(int nob, const int* obIdx, const int* obQAlt, const int* relocOwn, const CsrPattern& pos,
+void buildObDynDest(int nOpenBranch, const int* openBranchIndices, const int* openBranchAlternateReactiveDestination, const int* relocOwn, const CsrPattern& pos,
                     std::vector<int>& altDest, std::vector<int>& selRow,
                     int nQr, const int* qrPtr, const int* qrRows,
                     std::vector<int>& relocGroup, std::vector<int>& relocOff, std::vector<int>& relocPool,
@@ -182,7 +182,7 @@ void buildObDynDest(int nob, const int* obIdx, const int* obQAlt, const int* rel
 void buildDistrQDest(SharedStructure* st, const CsrPattern& pos, const std::vector<int>& rowMap,
                      int ndq, const int* dqElem, const int* dqSide, const int* dqKind,
                      const double* dqWeight, const int* dqRow,
-                     const int* cbIdx, const int* obIdx, const int* shIdx, const int* relocOwn);
+                     const int* closedBranchIndices, const int* openBranchIndices, const int* shuntIndices, const int* relocOwn);
 
 void buildDistrRhoDest(SharedStructure* st, const CsrPattern& pos, const std::vector<int>& rowMap,
                        int nDistrRho, const int* distrRhoRow, const int* distrRhoColumn, const double* distrRhoCoefficient);

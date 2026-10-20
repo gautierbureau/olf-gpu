@@ -36,25 +36,25 @@ public final class StructureNative {
      * counts are implied by the index array lengths and -1 marks an absent branch side.
      *
      * @param n     number of variables / equations
-     * @param cbIn  closed branches, {@code ncb*8}: (y g1 g2 b1 b2 ksi r1 a1)
-     * @param cbIdx closed branches, {@code ncb*12}: (Prow1 Qrow1 Prow2 Qrow2 ph1col v1col ph2col v2col a1col r1col qAlt1 qAlt2)
-     * @param obIn  open branches, {@code nob*7}: (y ksi g1 b1 g2 b2 r1)
-     * @param obIdx open branches, {@code nob*6}: (Prow1 Qrow1 Prow2 Qrow2 v1col v2col)
-     * @param shIn  shunts, {@code nsh*2}: (g b)
-     * @param shIdx shunts, {@code nsh*3}: (Prow Qrow vcol)
-     * @param hvIn  HVDC AC emulation, {@code nhv*5}: (p0 k lossFactor1 lossFactor2 r)
-     * @param hvIdx HVDC AC emulation, {@code nhv*4}: (Prow1 Prow2 ph1col ph2col)
+     * @param closedBranchParameters  closed branches, {@code nClosedBranch*8}: (y g1 g2 b1 b2 ksi r1 a1)
+     * @param closedBranchIndices closed branches, {@code nClosedBranch*12}: (Prow1 Qrow1 Prow2 Qrow2 ph1col v1col ph2col v2col a1col r1col qAlt1 qAlt2)
+     * @param openBranchParameters  open branches, {@code nOpenBranch*7}: (y ksi g1 b1 g2 b2 r1)
+     * @param openBranchIndices open branches, {@code nOpenBranch*6}: (Prow1 Qrow1 Prow2 Qrow2 v1col v2col)
+     * @param shuntParameters  shunts, {@code nShunt*2}: (g b)
+     * @param shuntIndices shunts, {@code nShunt*3}: (Prow Qrow vcol)
+     * @param hvdcAcEmulationParameters  HVDC AC emulation, {@code nHvdcAcEmulation*5}: (p0 k lossFactor1 lossFactor2 r)
+     * @param hvdcAcEmulationIndices HVDC AC emulation, {@code nHvdcAcEmulation*4}: (Prow1 Prow2 ph1col ph2col)
      * @return an opaque native handle; release it with {@link #destroyStructure}
      */
     public static native long createStructure(int n,
-                                              double[] cbIn, int[] cbIdx, double[] obIn, int[] obIdx,
-                                              double[] shIn, int[] shIdx, double[] hvIn, int[] hvIdx,
+                                              double[] closedBranchParameters, int[] closedBranchIndices, double[] openBranchParameters, int[] openBranchIndices,
+                                              double[] shuntParameters, int[] shuntIndices, double[] hvdcAcEmulationParameters, int[] hvdcAcEmulationIndices,
                                               int[] dqElem, int[] dqSide, double[] dqWeight, int[] dqRow, int[] dqKind,
                                               double[] ziIn, int[] ziIdx,
                                               int[] distrRhoRow, int[] distrRhoColumn, double[] distrRhoCoefficient,
-                                              int[] distrShuntBRow, int[] distrShuntBColumn, double[] distrShuntBCoefficient, int[] cbPcSide,
+                                              int[] distrShuntBRow, int[] distrShuntBColumn, double[] distrShuntBCoefficient, int[] closedBranchPhaseControlSide,
                                               double[] loadModelParameters, int[] loadModelIndices, int[] qrPtr, int[] qrRows,
-                                              int[] obQAlt, int[] ziQAlt,
+                                              int[] openBranchAlternateReactiveDestination, int[] ziQAlt,
                                               int[] qrDepBase, int[] qrBaseTargetRow, int[] depGroupOfRow);
 
     /**
@@ -85,6 +85,6 @@ public final class StructureNative {
      *  {@link #refreshStructureValues} (tap r1/a1 or shunt-b moves with an unchanged pattern), but
      *  usable when the caller holds a BATCH context — one extraction has ONE value set, every
      *  context sharing the structure sees the update. */
-    public static native void refreshStructureValues(long structureHandle, double[] cbIn, double[] obIn,
-                                                     double[] shIn, double[] hvIn, double[] ziIn);
+    public static native void refreshStructureValues(long structureHandle, double[] closedBranchParameters, double[] openBranchParameters,
+                                                     double[] shuntParameters, double[] hvdcAcEmulationParameters, double[] ziIn);
 }

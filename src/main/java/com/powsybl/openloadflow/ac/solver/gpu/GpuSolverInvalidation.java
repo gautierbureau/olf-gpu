@@ -178,12 +178,12 @@ final class GpuSolverInvalidation
 
     @Override
     public void onTapPositionChange(LfBranch branch, int oldPosition, int newPosition) {
-        structureChanged();                                  // r1/a1 in cbIn; run() downgrades to VALUES
+        structureChanged();                                  // r1/a1 in closedBranchParameters; run() downgrades to VALUES
     }
 
     @Override
     public void onShuntSusceptanceChange(LfShunt shunt, double b) {
-        structureChanged();                                  // b in shIn; run() downgrades to VALUES
+        structureChanged();                                  // b in shuntParameters; run() downgrades to VALUES
     }
 
     @Override

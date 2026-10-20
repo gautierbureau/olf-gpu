@@ -37,12 +37,12 @@ __device__ inline double hvdcAbsActivePowerWithLosses(double pController, double
  *  appliedDelta — so they compose with whatever else already overrides that row (a lost load on a
  *  converter bus, the DS carry) without rebuilding the whole override list, which is what the host
  *  orchestrator had to do on every round. */
-__global__ void hvdcAcEmulationLoopBatch(int nh, int nScenarios, int n, int nElements, int hvOffset,
+__global__ void hvdcAcEmulationLoopBatch(int nh, int nScenarios, int n, int nElements, int hvdcAcEmulationOffset,
                                          int mode,
-                                         const int* hvElem, const int* hvBus1Row, const int* hvBus2Row,
-                                         const int* hvBus1Phi, const int* hvBus2Phi,
+                                         const int* hvdcElement, const int* hvdcBus1PRow, const int* hvdcBus2PRow,
+                                         const int* hvdcBus1PhiColumn, const int* hvdcBus2PhiColumn,
                                          const int* rowMode, const int* relocOwn,
-                                         const double* hvIn, const char* hvCtgOut,
+                                         const double* hvdcAcEmulationParameters, const char* hvdcContingencyOutage,
                                          const double* x, double* target, char* disabled,
                                          int* status, double* appliedD1, double* appliedD2,
                                          const char* rlActive, char* switched) {
@@ -50,21 +50,21 @@ __global__ void hvdcAcEmulationLoopBatch(int nh, int nScenarios, int n, int nEle
     if (tid >= nh * nScenarios) return;
     int h = tid % nh;
     int s = tid / nh;
-    if (!rlActive[s] || hvCtgOut[(size_t) s * nh + h]) return;    // outaged: the contingency owns that bit
-    const double* p = hvIn + (size_t) h * 9;                 // p0 k pMax12 pMax21 loss1 loss2 r baseD1 baseD2
+    if (!rlActive[s] || hvdcContingencyOutage[(size_t) s * nh + h]) return;    // outaged: the contingency owns that bit
+    const double* p = hvdcAcEmulationParameters + (size_t) h * 9;                 // p0 k pMax12 pMax21 loss1 loss2 r baseD1 baseD2
     int st = status[(size_t) s * nh + h];
     int next = st;
     if (mode == 0) {                                         // FreezingHvdcACEmulation: unfreeze
         if (st != GpuAcEmulationStatus::FROZEN) return;
         next = GpuAcEmulationStatus::LINEAR_MODE;
     } else {                                                 // AcHvdcAcEmulationLimits
-        size_t elemSlot = (size_t) s * nElements + hvElem[h];
+        size_t elemSlot = (size_t) s * nElements + hvdcElement[h];
         if (st == GpuAcEmulationStatus::LINEAR_MODE && disabled[elemSlot]) return;
         const double* xs = x + (size_t) s * n;
         // The ANGLE is the bus's own BUS_PHI column, whatever row its P balance lives on (tasks #68: reading
         // it at the target row made a relocated converter bus read a DUMMY_P variable as its angle).
-        double ph1 = xs[hvBus1Phi[h]];
-        double ph2 = xs[hvBus2Phi[h]];
+        double ph1 = xs[hvdcBus1PhiColumn[h]];
+        double ph2 = xs[hvdcBus2PhiColumn[h]];
         double pp1 = hvdc::p1(p[0], p[1], p[4], p[5], p[6], ph1, ph2);
         double pp2 = hvdc::p2(p[0], p[1], p[4], p[5], p[6], ph1, ph2);
         if (st == GpuAcEmulationStatus::LINEAR_MODE) {  // OLF checkAcEmulationMode
@@ -86,7 +86,7 @@ __global__ void hvdcAcEmulationLoopBatch(int nh, int nScenarios, int n, int nEle
     if (next == st) return;
     double nd1 = 0.0;
     double nd2 = 0.0;
-    size_t elemSlot = (size_t) s * nElements + hvElem[h];
+    size_t elemSlot = (size_t) s * nElements + hvdcElement[h];
     if (next == GpuAcEmulationStatus::LINEAR_MODE) {
         disabled[elemSlot] = 0;                              // re-enabled: its own equation terms carry the flow
     } else {
@@ -109,8 +109,8 @@ __global__ void hvdcAcEmulationLoopBatch(int nh, int nScenarios, int n, int nEle
     // row under the coupler-tree relocation, or the bus's own PHI row once a contingency has opened that
     // coupler (the dummy row is then an identity and the balance is back home — relocOwn, the same stock
     // placement every other target writer follows). An inactive P row (the slack, ~ encoded) absorbs it, as OLF's does.
-    int w1 = hvBus1Row[h];
-    int w2 = hvBus2Row[h];
+    int w1 = hvdcBus1PRow[h];
+    int w2 = hvdcBus2PRow[h];
     if (w1 >= 0 && relocOwn != nullptr && relocOwn[w1] >= 0 && rowMode[(size_t) s * n + w1] == GpuRowMode::FIXED_VARIABLE) w1 = relocOwn[w1];
     if (w2 >= 0 && relocOwn != nullptr && relocOwn[w2] >= 0 && rowMode[(size_t) s * n + w2] == GpuRowMode::FIXED_VARIABLE) w2 = relocOwn[w2];
     if (w1 >= 0) {
@@ -130,15 +130,15 @@ __global__ void hvdcAcEmulationLoopBatch(int nh, int nScenarios, int n, int nEle
 void hvdcStep(BatchSolverContext* ctx, DriverPass& drv, int loopKind) {
     const int& n = drv.n;
     const int& nS = drv.nS;
-    hvdcAcEmulationLoopBatch<<<grid(ctx->nhv * nS), BLOCK, 0, ctx->stream>>>(
-            ctx->nhv, nS, n, ctx->nElements, ctx->hvOffset,
+    hvdcAcEmulationLoopBatch<<<grid(ctx->nHvdcAcEmulation * nS), BLOCK, 0, ctx->stream>>>(
+            ctx->nHvdcAcEmulation, nS, n, ctx->nElements, ctx->hvdcAcEmulationOffset,
             loopKind == GpuOuterLoopKind::FREEZING_HVDC_AC_EMULATION ? 0 : 1,
-            ctx->dHvElem.as<int>(), ctx->dHvBus1Row.as<int>(), ctx->dHvBus2Row.as<int>(),
-            ctx->dHvBus1Phi.as<int>(), ctx->dHvBus2Phi.as<int>(),
+            ctx->dHvdcElement.as<int>(), ctx->dHvdcBus1PRow.as<int>(), ctx->dHvdcBus2PRow.as<int>(),
+            ctx->dHvdcBus1PhiColumn.as<int>(), ctx->dHvdcBus2PhiColumn.as<int>(),
             ctx->dMode.as<int>(), ctx->st->dRelocOwn.p != nullptr ? ctx->st->dRelocOwn.as<int>() : nullptr,
-            ctx->dHvIn.as<double>(), ctx->dHvCtgOut.as<char>(),
+            ctx->dHvdcAcEmulationParameters.as<double>(), ctx->dHvdcContingencyOutage.as<char>(),
             ctx->dX.as<double>(), ctx->dTarget.as<double>(), ctx->dDisabled.as<char>(),
-            ctx->dHvStatus.as<int>(), ctx->dHvAppliedD1.as<double>(), ctx->dHvAppliedD2.as<double>(),
+            ctx->dHvdcAcEmulationStatus.as<int>(), ctx->dHvdcAppliedDelta1.as<double>(), ctx->dHvdcAppliedDelta2.as<double>(),
             ctx->dRlActive.as<char>(), ctx->dRlSwitched.as<char>());
 }
 

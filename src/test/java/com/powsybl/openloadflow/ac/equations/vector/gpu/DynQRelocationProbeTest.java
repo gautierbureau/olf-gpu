@@ -66,7 +66,7 @@ class DynQRelocationProbeTest {
             }
         };
         int[] cb = d.closedBranch().indices();
-        for (int e = 0; e < cb.length / 12; e++) {          // cbIdx stride 12 (…a1col r1col qAlt1 qAlt2)
+        for (int e = 0; e < cb.length / 12; e++) {          // closedBranchIndices stride 12 (…a1col r1col qAlt1 qAlt2)
             int b = e * 12;
             pairRc.accept(cb[b], cb[b + 4]);
             pairRc.accept(cb[b + 2], cb[b + 6]);

@@ -18,7 +18,7 @@ OLF_JNI(ac_outerloop_gpu, HvdcNative, setBatchHvdcLoops)(
         return;
     }
     if (jElem == nullptr || env->GetArrayLength(jElem) == 0) {
-        ctx->nhv = 0;
+        ctx->nHvdcAcEmulation = 0;
         return;
     }
     int nh = env->GetArrayLength(jElem);
@@ -32,20 +32,20 @@ OLF_JNI(ac_outerloop_gpu, HvdcNative, setBatchHvdcLoops)(
         b.upload(q, (size_t) env->GetArrayLength(a) * sizeof(double));
         env->ReleaseDoubleArrayElements(a, q, JNI_ABORT);
     };
-    upI(jElem, ctx->dHvElem);
-    upI(jBus1Row, ctx->dHvBus1Row);
-    upI(jBus2Row, ctx->dHvBus2Row);
-    upI(jBus1Phi, ctx->dHvBus1Phi);
-    upI(jBus2Phi, ctx->dHvBus2Phi);
-    upD(jIn, ctx->dHvIn);
-    upI(jStatus, ctx->dHvStatus);
-    upD(jAppliedD1, ctx->dHvAppliedD1);
-    upD(jAppliedD2, ctx->dHvAppliedD2);
+    upI(jElem, ctx->dHvdcElement);
+    upI(jBus1Row, ctx->dHvdcBus1PRow);
+    upI(jBus2Row, ctx->dHvdcBus2PRow);
+    upI(jBus1Phi, ctx->dHvdcBus1PhiColumn);
+    upI(jBus2Phi, ctx->dHvdcBus2PhiColumn);
+    upD(jIn, ctx->dHvdcAcEmulationParameters);
+    upI(jStatus, ctx->dHvdcAcEmulationStatus);
+    upD(jAppliedD1, ctx->dHvdcAppliedDelta1);
+    upD(jAppliedD2, ctx->dHvdcAppliedDelta2);
     jbyte* co = env->GetByteArrayElements(jCtgOut, nullptr);
-    ctx->dHvCtgOut.upload(co, (size_t) env->GetArrayLength(jCtgOut));
+    ctx->dHvdcContingencyOutage.upload(co, (size_t) env->GetArrayLength(jCtgOut));
     env->ReleaseByteArrayElements(jCtgOut, co, JNI_ABORT);
-    ctx->nhv = nh;
-    ctx->hvLimitsActive = limitsActive;
+    ctx->nHvdcAcEmulation = nh;
+    ctx->hvdcAcEmulationLimitsActive = limitsActive;
 }
 
 /** Read the HVDC statuses back after a solve, so the host keeps its own view in step. */
@@ -53,12 +53,12 @@ extern "C" JNIEXPORT jintArray JNICALL
 OLF_JNI(ac_outerloop_gpu, HvdcNative, readBatchHvdcStatus)(
         JNIEnv* env, jclass, jlong handle) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
-    if (ctx == nullptr || ctx->nhv == 0) {
+    if (ctx == nullptr || ctx->nHvdcAcEmulation == 0) {
         return nullptr;
     }
-    size_t len = (size_t) ctx->nScenarios * ctx->nhv;
+    size_t len = (size_t) ctx->nScenarios * ctx->nHvdcAcEmulation;
     std::vector<int> host(len);
-    if (cudaMemcpy(host.data(), ctx->dHvStatus.p, len * sizeof(int), cudaMemcpyDeviceToHost) != cudaSuccess) {
+    if (cudaMemcpy(host.data(), ctx->dHvdcAcEmulationStatus.p, len * sizeof(int), cudaMemcpyDeviceToHost) != cudaSuccess) {
         return nullptr;
     }
     jintArray out = env->NewIntArray((jsize) len);

@@ -7,22 +7,22 @@
 extern "C" JNIEXPORT jlong JNICALL
 OLF_JNI(ac_equations_vector_gpu, StructureNative, createStructure)(
         JNIEnv* env, jclass, jint n,
-        jdoubleArray jcbIn, jintArray jcbIdx, jdoubleArray jobIn, jintArray jobIdx,
-        jdoubleArray jshIn, jintArray jshIdx, jdoubleArray jhvIn, jintArray jhvIdx,
+        jdoubleArray jClosedBranchParameters, jintArray jClosedBranchIndices, jdoubleArray jOpenBranchParameters, jintArray jOpenBranchIndices,
+        jdoubleArray jShuntParameters, jintArray jShuntIndices, jdoubleArray jHvdcAcEmulationParameters, jintArray jHvdcAcEmulationIndices,
         jintArray jdqElem, jintArray jdqSide, jdoubleArray jdqWeight, jintArray jdqRow, jintArray jdqKind,
         jdoubleArray jziIn, jintArray jziIdx,
         jintArray jDistrRhoRow, jintArray jDistrRhoColumn, jdoubleArray jDistrRhoCoefficient,
-        jintArray jDistrShuntBRow, jintArray jDistrShuntBColumn, jdoubleArray jDistrShuntBCoefficient, jintArray jcbPcSide,
+        jintArray jDistrShuntBRow, jintArray jDistrShuntBColumn, jdoubleArray jDistrShuntBCoefficient, jintArray jClosedBranchPhaseControlSide,
         jdoubleArray jLoadModelParameters, jintArray jLoadModelIndices, jintArray jqrPtr, jintArray jqrRows,
-        jintArray jobQAlt, jintArray jziQAlt, jintArray jqrDepBase, jintArray jqrBaseTargetRow, jintArray jdepGroupOfRow) {
-    jdouble* cbIn = env->GetDoubleArrayElements(jcbIn, nullptr);
-    jint* cbIdx = env->GetIntArrayElements(jcbIdx, nullptr);
-    jdouble* obIn = env->GetDoubleArrayElements(jobIn, nullptr);
-    jint* obIdx = env->GetIntArrayElements(jobIdx, nullptr);
-    jdouble* shIn = env->GetDoubleArrayElements(jshIn, nullptr);
-    jint* shIdx = env->GetIntArrayElements(jshIdx, nullptr);
-    jdouble* hvIn = env->GetDoubleArrayElements(jhvIn, nullptr);
-    jint* hvIdx = env->GetIntArrayElements(jhvIdx, nullptr);
+        jintArray jOpenBranchAlternateReactiveDestination, jintArray jziQAlt, jintArray jqrDepBase, jintArray jqrBaseTargetRow, jintArray jdepGroupOfRow) {
+    jdouble* closedBranchParameters = env->GetDoubleArrayElements(jClosedBranchParameters, nullptr);
+    jint* closedBranchIndices = env->GetIntArrayElements(jClosedBranchIndices, nullptr);
+    jdouble* openBranchParameters = env->GetDoubleArrayElements(jOpenBranchParameters, nullptr);
+    jint* openBranchIndices = env->GetIntArrayElements(jOpenBranchIndices, nullptr);
+    jdouble* shuntParameters = env->GetDoubleArrayElements(jShuntParameters, nullptr);
+    jint* shuntIndices = env->GetIntArrayElements(jShuntIndices, nullptr);
+    jdouble* hvdcAcEmulationParameters = env->GetDoubleArrayElements(jHvdcAcEmulationParameters, nullptr);
+    jint* hvdcAcEmulationIndices = env->GetIntArrayElements(jHvdcAcEmulationIndices, nullptr);
     jint* dqElem = env->GetIntArrayElements(jdqElem, nullptr);
     jint* dqSide = env->GetIntArrayElements(jdqSide, nullptr);
     jdouble* dqWeight = env->GetDoubleArrayElements(jdqWeight, nullptr);
@@ -36,23 +36,23 @@ OLF_JNI(ac_equations_vector_gpu, StructureNative, createStructure)(
     jint* distrShuntBRow = env->GetIntArrayElements(jDistrShuntBRow, nullptr);
     jint* distrShuntBColumn = env->GetIntArrayElements(jDistrShuntBColumn, nullptr);
     jdouble* distrShuntBCoefficient = env->GetDoubleArrayElements(jDistrShuntBCoefficient, nullptr);
-    jint* cbPcSide = env->GetIntArrayElements(jcbPcSide, nullptr);
+    jint* closedBranchPhaseControlSide = env->GetIntArrayElements(jClosedBranchPhaseControlSide, nullptr);
     jint* qrPtr = env->GetIntArrayElements(jqrPtr, nullptr);
     jint* qrRows = env->GetIntArrayElements(jqrRows, nullptr);
     int nQr = env->GetArrayLength(jqrPtr) - 1;               // groups; qrPtr = [0] when none
     int nQrRows = env->GetArrayLength(jqrRows);
     jdouble* loadModelParameters = env->GetDoubleArrayElements(jLoadModelParameters, nullptr);
     jint* loadModelIndices = env->GetIntArrayElements(jLoadModelIndices, nullptr);
-    jint* obQAlt = env->GetIntArrayElements(jobQAlt, nullptr);
+    jint* openBranchAlternateReactiveDestination = env->GetIntArrayElements(jOpenBranchAlternateReactiveDestination, nullptr);
     jint* ziQAlt = env->GetIntArrayElements(jziQAlt, nullptr);
     jint* qrDepBase = env->GetIntArrayElements(jqrDepBase, nullptr);
     jint* qrBaseTargetRow = env->GetIntArrayElements(jqrBaseTargetRow, nullptr);
     jint* depGroupOfRow = env->GetIntArrayElements(jdepGroupOfRow, nullptr);
 
-    int ncb = env->GetArrayLength(jcbIdx) / 12;             // cbIdx stride 12 (…a1col r1col qAlt1 qAlt2)
-    int nob = env->GetArrayLength(jobIdx) / 6;
-    int nsh = env->GetArrayLength(jshIdx) / 5;             // shIdx stride 5 (P Q v bcol qAlt)
-    int nhv = env->GetArrayLength(jhvIdx) / 4;
+    int nClosedBranch = env->GetArrayLength(jClosedBranchIndices) / 12;             // closedBranchIndices stride 12 (…a1col r1col qAlt1 qAlt2)
+    int nOpenBranch = env->GetArrayLength(jOpenBranchIndices) / 6;
+    int nShunt = env->GetArrayLength(jShuntIndices) / 5;             // shuntIndices stride 5 (P Q v bcol qAlt)
+    int nHvdcAcEmulation = env->GetArrayLength(jHvdcAcEmulationIndices) / 4;
     int ndq = env->GetArrayLength(jdqElem);
     int nzi = env->GetArrayLength(jziIdx) / 11;
     int nDistrRho = env->GetArrayLength(jDistrRhoRow);
@@ -79,20 +79,20 @@ OLF_JNI(ac_equations_vector_gpu, StructureNative, createStructure)(
             }
         };
         // rows/cols may be -1 = absent; anything else must be a valid row/col index < n
-        checkRange("cbIdx", cbIdx, ncb, 12, {0, 1, 2, 3, 4, 5, 6, 7, 8, 9}, -1, n);
+        checkRange("closedBranchIndices", closedBranchIndices, nClosedBranch, 12, {0, 1, 2, 3, 4, 5, 6, 7, 8, 9}, -1, n);
         // qAlt slots ([10]/[11] cb, [4] sh) also carry the GROUP encoding -2-groupId (plan-A6)
-        checkRange("cbIdx.qAlt", cbIdx, ncb, 12, {10, 11}, -1 - nQr, n);
-        checkRange("obIdx", obIdx, nob, 6, {0, 1, 2, 3, 4, 5}, -1, n);
-        checkRange("obQAlt", obQAlt, nob, 2, {0, 1}, -1 - nQr, n);
-        checkRange("shIdx", shIdx, nsh, 5, {0, 1, 2, 3}, -1, n);
-        checkRange("shIdx.qAlt", shIdx, nsh, 5, {4}, -1 - nQr, n);
+        checkRange("closedBranchIndices.qAlt", closedBranchIndices, nClosedBranch, 12, {10, 11}, -1 - nQr, n);
+        checkRange("openBranchIndices", openBranchIndices, nOpenBranch, 6, {0, 1, 2, 3, 4, 5}, -1, n);
+        checkRange("openBranchAlternateReactiveDestination", openBranchAlternateReactiveDestination, nOpenBranch, 2, {0, 1}, -1 - nQr, n);
+        checkRange("shuntIndices", shuntIndices, nShunt, 5, {0, 1, 2, 3}, -1, n);
+        checkRange("shuntIndices.qAlt", shuntIndices, nShunt, 5, {4}, -1 - nQr, n);
         checkRange("qrRows", qrRows, nQrRows, 1, {0}, 0, n);
         for (int g = 0; g < nQr; g++) {
             if (qrPtr[g] < 0 || qrPtr[g + 1] <= qrPtr[g] + 1 || qrPtr[g + 1] > nQrRows) {
                 throw std::runtime_error("bad qrPtr group " + std::to_string(g));
             }
         }
-        checkRange("hvIdx", hvIdx, nhv, 4, {0, 1, 2, 3}, -1, n);
+        checkRange("hvdcAcEmulationIndices", hvdcAcEmulationIndices, nHvdcAcEmulation, 4, {0, 1, 2, 3}, -1, n);
         checkRange("dqRow", dqRow, ndq, 1, {0}, 0, n);
         checkRange("ziIdx", ziIdx, nzi, 11, {0, 1, 2, 3, 4, 5, 6, 7, 8, 9}, -1, n);
         // slot 10 is the FLAGS word, not a row: bit 0 spanning-tree, bits 1-2 the relocated child side,
@@ -106,37 +106,37 @@ OLF_JNI(ac_equations_vector_gpu, StructureNative, createStructure)(
         checkRange("distrShuntBRow", distrShuntBRow, nDistrShuntB, 1, {0}, 0, n);
         checkRange("distrShuntBColumn", distrShuntBColumn, nDistrShuntB, 1, {0}, 0, n);
         checkRange("loadModelIndices", loadModelIndices, nLoadModelTerms, 2, {0, 1}, 0, n);
-        for (int e = 0; e < ncb; e++) {                      // encoded (a1Col << 1) | side, or -1
-            if (cbPcSide[e] >= 0 && (cbPcSide[e] >> 1) >= n) {
-                throw std::runtime_error("bad cbPcSide at elem " + std::to_string(e)
-                        + ": a1Col " + std::to_string(cbPcSide[e] >> 1) + " >= n " + std::to_string(n));
+        for (int e = 0; e < nClosedBranch; e++) {                      // encoded (a1Col << 1) | side, or -1
+            if (closedBranchPhaseControlSide[e] >= 0 && (closedBranchPhaseControlSide[e] >> 1) >= n) {
+                throw std::runtime_error("bad closedBranchPhaseControlSide at elem " + std::to_string(e)
+                        + ": a1Col " + std::to_string(closedBranchPhaseControlSide[e] >> 1) + " >= n " + std::to_string(n));
             }
         }
-        st = new SharedStructurePtr(buildStructure(n, ncb, cbIn, cbIdx, nob, obIn, obIdx,
-                                                   nsh, shIn, shIdx, nhv, hvIn, hvIdx,
+        st = new SharedStructurePtr(buildStructure(n, nClosedBranch, closedBranchParameters, closedBranchIndices, nOpenBranch, openBranchParameters, openBranchIndices,
+                                                   nShunt, shuntParameters, shuntIndices, nHvdcAcEmulation, hvdcAcEmulationParameters, hvdcAcEmulationIndices,
                                                    ndq, dqElem, dqSide, dqWeight, dqRow, dqKind,
                                                    nzi, ziIn, ziIdx,
                                                    nDistrRho, distrRhoRow, distrRhoColumn, distrRhoCoefficient,
-                                                   nDistrShuntB, distrShuntBRow, distrShuntBColumn, distrShuntBCoefficient, cbPcSide,
+                                                   nDistrShuntB, distrShuntBRow, distrShuntBColumn, distrShuntBCoefficient, closedBranchPhaseControlSide,
                                                    nLoadModelTerms, loadModelParameters, loadModelIndices, nQr, qrPtr, qrRows,
-                                                   obQAlt, ziQAlt, qrDepBase, qrBaseTargetRow, depGroupOfRow));
+                                                   openBranchAlternateReactiveDestination, ziQAlt, qrDepBase, qrBaseTargetRow, depGroupOfRow));
     } catch (const std::exception& e) {
         error = e.what();
     } catch (...) {
         error = "unknown native error";
     }
 
-    env->ReleaseDoubleArrayElements(jcbIn, cbIn, JNI_ABORT);
-    env->ReleaseIntArrayElements(jcbIdx, cbIdx, JNI_ABORT);
-    env->ReleaseIntArrayElements(jcbPcSide, cbPcSide, JNI_ABORT);
+    env->ReleaseDoubleArrayElements(jClosedBranchParameters, closedBranchParameters, JNI_ABORT);
+    env->ReleaseIntArrayElements(jClosedBranchIndices, closedBranchIndices, JNI_ABORT);
+    env->ReleaseIntArrayElements(jClosedBranchPhaseControlSide, closedBranchPhaseControlSide, JNI_ABORT);
     env->ReleaseIntArrayElements(jqrPtr, qrPtr, JNI_ABORT);
     env->ReleaseIntArrayElements(jqrRows, qrRows, JNI_ABORT);
-    env->ReleaseDoubleArrayElements(jobIn, obIn, JNI_ABORT);
-    env->ReleaseIntArrayElements(jobIdx, obIdx, JNI_ABORT);
-    env->ReleaseDoubleArrayElements(jshIn, shIn, JNI_ABORT);
-    env->ReleaseIntArrayElements(jshIdx, shIdx, JNI_ABORT);
-    env->ReleaseDoubleArrayElements(jhvIn, hvIn, JNI_ABORT);
-    env->ReleaseIntArrayElements(jhvIdx, hvIdx, JNI_ABORT);
+    env->ReleaseDoubleArrayElements(jOpenBranchParameters, openBranchParameters, JNI_ABORT);
+    env->ReleaseIntArrayElements(jOpenBranchIndices, openBranchIndices, JNI_ABORT);
+    env->ReleaseDoubleArrayElements(jShuntParameters, shuntParameters, JNI_ABORT);
+    env->ReleaseIntArrayElements(jShuntIndices, shuntIndices, JNI_ABORT);
+    env->ReleaseDoubleArrayElements(jHvdcAcEmulationParameters, hvdcAcEmulationParameters, JNI_ABORT);
+    env->ReleaseIntArrayElements(jHvdcAcEmulationIndices, hvdcAcEmulationIndices, JNI_ABORT);
     env->ReleaseIntArrayElements(jdqElem, dqElem, JNI_ABORT);
     env->ReleaseIntArrayElements(jdqSide, dqSide, JNI_ABORT);
     env->ReleaseDoubleArrayElements(jdqWeight, dqWeight, JNI_ABORT);
@@ -152,7 +152,7 @@ OLF_JNI(ac_equations_vector_gpu, StructureNative, createStructure)(
     env->ReleaseDoubleArrayElements(jDistrShuntBCoefficient, distrShuntBCoefficient, JNI_ABORT);
     env->ReleaseDoubleArrayElements(jLoadModelParameters, loadModelParameters, JNI_ABORT);
     env->ReleaseIntArrayElements(jLoadModelIndices, loadModelIndices, JNI_ABORT);
-    env->ReleaseIntArrayElements(jobQAlt, obQAlt, JNI_ABORT);
+    env->ReleaseIntArrayElements(jOpenBranchAlternateReactiveDestination, openBranchAlternateReactiveDestination, JNI_ABORT);
     env->ReleaseIntArrayElements(jziQAlt, ziQAlt, JNI_ABORT);
     env->ReleaseIntArrayElements(jqrDepBase, qrDepBase, JNI_ABORT);
     env->ReleaseIntArrayElements(jqrBaseTargetRow, qrBaseTargetRow, JNI_ABORT);
@@ -179,31 +179,31 @@ OLF_JNI(ac_equations_vector_gpu, StructureNative, destroyStructure)(
 // one extraction has ONE value set, and every context sharing the structure sees the update.
 extern "C" JNIEXPORT void JNICALL
 OLF_JNI(ac_equations_vector_gpu, StructureNative, refreshStructureValues)(
-        JNIEnv* env, jclass, jlong structureHandle, jdoubleArray jcbIn, jdoubleArray jobIn,
-        jdoubleArray jshIn, jdoubleArray jhvIn, jdoubleArray jziIn) {
+        JNIEnv* env, jclass, jlong structureHandle, jdoubleArray jClosedBranchParameters, jdoubleArray jOpenBranchParameters,
+        jdoubleArray jShuntParameters, jdoubleArray jHvdcAcEmulationParameters, jdoubleArray jziIn) {
     auto* stp = reinterpret_cast<SharedStructurePtr*>(structureHandle);
-    jdouble* cbIn = env->GetDoubleArrayElements(jcbIn, nullptr);
-    jdouble* obIn = env->GetDoubleArrayElements(jobIn, nullptr);
-    jdouble* shIn = env->GetDoubleArrayElements(jshIn, nullptr);
-    jdouble* hvIn = env->GetDoubleArrayElements(jhvIn, nullptr);
+    jdouble* closedBranchParameters = env->GetDoubleArrayElements(jClosedBranchParameters, nullptr);
+    jdouble* openBranchParameters = env->GetDoubleArrayElements(jOpenBranchParameters, nullptr);
+    jdouble* shuntParameters = env->GetDoubleArrayElements(jShuntParameters, nullptr);
+    jdouble* hvdcAcEmulationParameters = env->GetDoubleArrayElements(jHvdcAcEmulationParameters, nullptr);
     jdouble* ziIn = env->GetDoubleArrayElements(jziIn, nullptr);
     std::string error;
     try {
         if (stp == nullptr || !*stp) {
             throw std::runtime_error("invalid structure handle");
         }
-        refreshStructureValues(**stp, env->GetArrayLength(jcbIn) / 8, cbIn, env->GetArrayLength(jobIn) / 7, obIn,
-                               env->GetArrayLength(jshIn) / 2, shIn, env->GetArrayLength(jhvIn) / 5, hvIn,
+        refreshStructureValues(**stp, env->GetArrayLength(jClosedBranchParameters) / 8, closedBranchParameters, env->GetArrayLength(jOpenBranchParameters) / 7, openBranchParameters,
+                               env->GetArrayLength(jShuntParameters) / 2, shuntParameters, env->GetArrayLength(jHvdcAcEmulationParameters) / 5, hvdcAcEmulationParameters,
                                env->GetArrayLength(jziIn), ziIn);
     } catch (const std::exception& e) {
         error = e.what();
     } catch (...) {
         error = "unknown native error";
     }
-    env->ReleaseDoubleArrayElements(jcbIn, cbIn, JNI_ABORT);
-    env->ReleaseDoubleArrayElements(jobIn, obIn, JNI_ABORT);
-    env->ReleaseDoubleArrayElements(jshIn, shIn, JNI_ABORT);
-    env->ReleaseDoubleArrayElements(jhvIn, hvIn, JNI_ABORT);
+    env->ReleaseDoubleArrayElements(jClosedBranchParameters, closedBranchParameters, JNI_ABORT);
+    env->ReleaseDoubleArrayElements(jOpenBranchParameters, openBranchParameters, JNI_ABORT);
+    env->ReleaseDoubleArrayElements(jShuntParameters, shuntParameters, JNI_ABORT);
+    env->ReleaseDoubleArrayElements(jHvdcAcEmulationParameters, hvdcAcEmulationParameters, JNI_ABORT);
     env->ReleaseDoubleArrayElements(jziIn, ziIn, JNI_ABORT);
     if (!error.empty()) {
         env->ThrowNew(env->FindClass("java/lang/RuntimeException"),

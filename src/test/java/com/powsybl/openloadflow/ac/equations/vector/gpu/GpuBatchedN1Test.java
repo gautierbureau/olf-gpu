@@ -101,7 +101,9 @@ class GpuBatchedN1Test {
         java.util.Arrays.fill(rowModes, activation.rowMode());
 
         double[][] batch = GpuAcNewtonSolver.solveBatch(x0, stableTargets, rowModes, disabledMask,
-                0, MAX_ITER, TOL, 1e-4, 1e-2, d.cbIn(), d.cbIdx(), d.obIn(), d.obIdx(), d.shIn(), d.shIdx(), d.hvIn(), d.hvIdx(),
+                0, MAX_ITER, TOL, 1e-4, 1e-2, d.closedBranch().parameters(), d.closedBranch().indices(),
+                d.openBranch().parameters(), d.openBranch().indices(), d.shunt().parameters(), d.shunt().indices(),
+                d.hvdcAcEmulation().parameters(), d.hvdcAcEmulation().indices(),
                 new int[0], new double[0], new double[0], new double[0], new double[0],
                 new int[0], new double[0], -1, 0.0,
                 new double[0], new double[0], new double[0],
@@ -158,7 +160,9 @@ class GpuBatchedN1Test {
         int[][] rowModes = {activation.rowMode(), activation.rowMode()};   // per-scenario; both = base
 
         double[][] batch = GpuAcNewtonSolver.solveBatch(x0, stableTargets, rowModes, disabledMask,
-                0, MAX_ITER, TOL, 1e-4, 1e-2, d.cbIn(), d.cbIdx(), d.obIn(), d.obIdx(), d.shIn(), d.shIdx(), d.hvIn(), d.hvIdx(),
+                0, MAX_ITER, TOL, 1e-4, 1e-2, d.closedBranch().parameters(), d.closedBranch().indices(),
+                d.openBranch().parameters(), d.openBranch().indices(), d.shunt().parameters(), d.shunt().indices(),
+                d.hvdcAcEmulation().parameters(), d.hvdcAcEmulation().indices(),
                 new int[0], new double[0], new double[0], new double[0], new double[0],
                 new int[0], new double[0], -1, 0.0,
                 new double[0], new double[0], new double[0],

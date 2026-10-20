@@ -59,18 +59,17 @@ import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuQLimitType;
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
-public record GpuAcData(double[] cbIn, int[] cbIdx, int[] cbPcSide, double[] obIn, int[] obIdx,
-                        double[] shIn, int[] shIdx, double[] hvIn, int[] hvIdx,
+public record GpuAcData(ClosedBranchPack closedBranch, OpenBranchPack openBranch, ElementPack shunt,
+                        ElementPack hvdcAcEmulation,
                         DistrQTerms distrQ, DistrQMembers distrQMembers,
-                        double[] ziIn, int[] ziIdx,
+                        ZeroImpedanceBranchPack zeroImpedanceBranch,
                         LinearDistributionTerms distrRho, LinearDistributionTerms distrShuntB,
                         ReactiveLimitEntries reactiveLimits,
                         RemoteMemberReactiveTerms remoteMemberReactiveTerms,
                         VoltageRowParameters voltageRows,
                         DistributedSlackParticipants distributedSlack,
                         BaseOpenBranches baseOpenBranches,
-                        int[] ziBranchNums, double[] vdlIn, int[] vdlIdx, ReactiveRelocationCandidates reactiveRelocation,
-                        int[] obQAlt, int[] ziQAlt) {
+                        ElementPack loadModel, ReactiveRelocationCandidates reactiveRelocation) {
 
     /**
      * Content equality over every array — true means a cached solver context built from
@@ -80,9 +79,9 @@ public record GpuAcData(double[] cbIn, int[] cbIdx, int[] cbPcSide, double[] obI
      */
     public boolean sameAs(GpuAcData other) {
         return sameStructureAs(other)
-                && java.util.Arrays.equals(cbIn, other.cbIn) && java.util.Arrays.equals(obIn, other.obIn)
-                && java.util.Arrays.equals(shIn, other.shIn) && java.util.Arrays.equals(hvIn, other.hvIn)
-                && java.util.Arrays.equals(ziIn, other.ziIn) && java.util.Arrays.equals(vdlIn, other.vdlIn);
+                && closedBranch.sameParametersAs(other.closedBranch) && openBranch.sameParametersAs(other.openBranch)
+                && shunt.sameParametersAs(other.shunt) && hvdcAcEmulation.sameParametersAs(other.hvdcAcEmulation)
+                && zeroImpedanceBranch.sameParametersAs(other.zeroImpedanceBranch) && loadModel.sameParametersAs(other.loadModel);
         // distrRho's coefficients are structural (qPct/count-derived); covered by sameStructureAs below.
     }
 
@@ -99,17 +98,15 @@ public record GpuAcData(double[] cbIn, int[] cbIdx, int[] cbPcSide, double[] obI
             return false;
         }
         return other != null
-                && java.util.Arrays.equals(cbIn, other.cbIn) && java.util.Arrays.equals(cbIdx, other.cbIdx)
-                && java.util.Arrays.equals(obIn, other.obIn) && java.util.Arrays.equals(obIdx, other.obIdx)
-                && java.util.Arrays.equals(shIn, other.shIn) && java.util.Arrays.equals(shIdx, other.shIdx)
-                && java.util.Arrays.equals(hvIn, other.hvIn) && java.util.Arrays.equals(hvIdx, other.hvIdx)
+                && closedBranch.sameParametersAs(other.closedBranch) && closedBranch.sameIndicesAs(other.closedBranch)
+                && openBranch.sameParametersAs(other.openBranch) && openBranch.sameIndicesAs(other.openBranch)
+                && shunt.sameParametersAs(other.shunt) && shunt.sameIndicesAs(other.shunt)
+                && hvdcAcEmulation.sameParametersAs(other.hvdcAcEmulation) && hvdcAcEmulation.sameIndicesAs(other.hvdcAcEmulation)
                 && distrQ.sameTermsAs(other.distrQ)
-                && java.util.Arrays.equals(ziIn, other.ziIn) && java.util.Arrays.equals(ziIdx, other.ziIdx)
+                && zeroImpedanceBranch.sameParametersAs(other.zeroImpedanceBranch)
+                && zeroImpedanceBranch.sameIndicesAs(other.zeroImpedanceBranch)
                 && distrRho.sameAs(other.distrRho) && distrShuntB.sameAs(other.distrShuntB)
-                && java.util.Arrays.equals(vdlIn, other.vdlIn) && java.util.Arrays.equals(vdlIdx, other.vdlIdx)
-                // structure input too: the phase-control alt-dest tables (pcDest/pcSel) are built from it
-                && java.util.Arrays.equals(cbPcSide, other.cbPcSide)
-                && java.util.Arrays.equals(obQAlt, other.obQAlt) && java.util.Arrays.equals(ziQAlt, other.ziQAlt)
+                && loadModel.sameParametersAs(other.loadModel) && loadModel.sameIndicesAs(other.loadModel)
                 // the candidate tables build the group relocation pools (buildCbDynDest & co.)
                 && reactiveRelocation.sameAs(other.reactiveRelocation);
     }
@@ -124,35 +121,33 @@ public record GpuAcData(double[] cbIn, int[] cbIdx, int[] cbPcSide, double[] obI
      */
     public boolean sameStructureAs(GpuAcData other) {
         return other != null
-                && java.util.Arrays.equals(cbIdx, other.cbIdx) && java.util.Arrays.equals(obIdx, other.obIdx)
-                && java.util.Arrays.equals(shIdx, other.shIdx) && java.util.Arrays.equals(hvIdx, other.hvIdx)
+                && closedBranch.sameIndicesAs(other.closedBranch) && openBranch.sameIndicesAs(other.openBranch)
+                && shunt.sameIndicesAs(other.shunt) && hvdcAcEmulation.sameIndicesAs(other.hvdcAcEmulation)
                 && distrQ.sameAs(other.distrQ)
-                && java.util.Arrays.equals(ziIdx, other.ziIdx)
+                && zeroImpedanceBranch.sameIndicesAs(other.zeroImpedanceBranch)
                 && distrRho.sameAs(other.distrRho) && distrShuntB.sameAs(other.distrShuntB)
                 && reactiveLimits.sameAs(other.reactiveLimits)
                 && distributedSlack.sameAs(other.distributedSlack)
                 && reactiveRelocation.sameGroupsAs(other.reactiveRelocation)
-                && java.util.Arrays.equals(obQAlt, other.obQAlt) && java.util.Arrays.equals(ziQAlt, other.ziQAlt)
                 && distrQMembers.sameAs(other.distrQMembers)
                 && remoteMemberReactiveTerms.sameAs(other.remoteMemberReactiveTerms)
-                && voltageRows.sameAs(other.voltageRows)
-                && java.util.Arrays.equals(cbPcSide, other.cbPcSide);
+                && voltageRows.sameAs(other.voltageRows);
     }
 
     public int getClosedBranchCount() {
-        return cbIdx.length / 12;
+        return closedBranch.indices().length / 12;
     }
 
     public int getOpenBranchCount() {
-        return obIdx.length / 6;
+        return openBranch.indices().length / 6;
     }
 
     public int getShuntCount() {
-        return shIdx.length / 5;
+        return shunt.indices().length / 5;
     }
 
     public int getHvdcCount() {
-        return hvIdx.length / 4;
+        return hvdcAcEmulation.indices().length / 4;
     }
 
     public int getDistrQContributionCount() {
@@ -160,7 +155,7 @@ public record GpuAcData(double[] cbIn, int[] cbIdx, int[] cbPcSide, double[] obI
     }
 
     public int getZeroImpedanceCount() {
-        return ziIdx.length / 11;
+        return zeroImpedanceBranch.indices().length / 11;
     }
 
     /**
@@ -190,6 +185,7 @@ public record GpuAcData(double[] cbIn, int[] cbIdx, int[] cbPcSide, double[] obI
      * contingency (tasks #68 / #69).
      */
     public int relocatedPRow(int phiCol) {
+        int[] ziIdx = zeroImpedanceBranch.indices();
         if (ziIdx == null || phiCol < 0) {
             return phiCol;
         }

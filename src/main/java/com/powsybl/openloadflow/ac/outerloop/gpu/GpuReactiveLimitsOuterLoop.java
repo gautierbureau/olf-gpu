@@ -129,7 +129,7 @@ public final class GpuReactiveLimitsOuterLoop {
      *  is {@code vRow}, or {@code vRow} itself when that bus is not a relocated coupler child. The Java twin of
      *  the native {@code rlQrow} map, derived from the same zero-impedance pack. */
     private static int relocatedPinRow(GpuAcData data, int vRow) {
-        int[] zi = data.ziIdx();
+        int[] zi = data.zeroImpedanceBranch().indices();
         if (zi == null || vRow < 0) {
             return vRow;
         }

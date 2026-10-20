@@ -142,12 +142,14 @@ class GpuTransformerSharedControlTest {
         double[] stableTargets = activation.applyTargets(target.getArray());
 
         double[] out = GpuAcNewtonSolver.solve(x0, stableTargets, activation.rowMode(), MAX_ITER, TOL,
-                d.cbIn(), d.cbIdx(), d.obIn(), d.obIdx(), d.shIn(), d.shIdx(), d.hvIn(), d.hvIdx(),
+                d.closedBranch().parameters(), d.closedBranch().indices(), d.openBranch().parameters(),
+                d.openBranch().indices(), d.shunt().parameters(), d.shunt().indices(), d.hvdcAcEmulation().parameters(),
+                d.hvdcAcEmulation().indices(),
                 d.distrQ().element(), d.distrQ().side(), d.distrQ().weight(), d.distrQ().row(), d.distrQ().kind(),
-                d.ziIn(), d.ziIdx(),
+                d.zeroImpedanceBranch().parameters(), d.zeroImpedanceBranch().indices(),
                 d.distrRho().row(), d.distrRho().column(), d.distrRho().coefficient(),
                 d.distrShuntB().row(), d.distrShuntB().column(), d.distrShuntB().coefficient(),
-                d.reactiveRelocation().groupStart(), d.reactiveRelocation().candidateRows(), d.obQAlt(), d.ziQAlt());
+                d.reactiveRelocation().groupStart(), d.reactiveRelocation().candidateRows(), d.openBranch().alternateReactiveDestination(), d.zeroImpedanceBranch().alternateReactiveDestination());
         int iters = (int) out[n];
         double norm = out[n + 1];
 

@@ -91,9 +91,11 @@ class GpuFullNewtonTest {
         double[] stableTargets = activation.applyTargets(target.getArray());
 
         double[] out = GpuAcNewtonSolver.solve(x0, stableTargets, activation.rowMode(), MAX_ITER, TOL,
-                d.cbIn(), d.cbIdx(), d.obIn(), d.obIdx(), d.shIn(), d.shIdx(), d.hvIn(), d.hvIdx(),
+                d.closedBranch().parameters(), d.closedBranch().indices(), d.openBranch().parameters(),
+                d.openBranch().indices(), d.shunt().parameters(), d.shunt().indices(), d.hvdcAcEmulation().parameters(),
+                d.hvdcAcEmulation().indices(),
                 d.distrQ().element(), d.distrQ().side(), d.distrQ().weight(), d.distrQ().row(), d.distrQ().kind(),
-                d.ziIn(), d.ziIdx(),
+                d.zeroImpedanceBranch().parameters(), d.zeroImpedanceBranch().indices(),
                 d.distrRho().row(), d.distrRho().column(), d.distrRho().coefficient(), d.distrShuntB().row(), d.distrShuntB().column(), d.distrShuntB().coefficient());
         int iters = (int) out[n];
         double norm = out[n + 1];
@@ -106,8 +108,8 @@ class GpuFullNewtonTest {
         }
         System.out.printf("GPU full Newton [%s]: %d elements (%d cb, %d ob, %d sh, %d hvdc), n=%d, "
                         + "%d iters, ||F||inf %.2e, max|x_gpu - x_olf| = %.2e%n",
-                label, d.cbIdx().length / 8 + d.obIdx().length / 6 + d.shIdx().length / 3 + d.hvIdx().length / 4,
-                d.cbIdx().length / 8, d.obIdx().length / 6, d.shIdx().length / 3, d.hvIdx().length / 4,
+                label, d.closedBranch().indices().length / 8 + d.openBranch().indices().length / 6 + d.shunt().indices().length / 3 + d.hvdcAcEmulation().indices().length / 4,
+                d.closedBranch().indices().length / 8, d.openBranch().indices().length / 6, d.shunt().indices().length / 3, d.hvdcAcEmulation().indices().length / 4,
                 n, iters, norm, worst);
         assertTrue(norm < TOL, "GPU Newton must converge (||F||inf = " + norm + ")");
         assertTrue(worst < 1e-6, "GPU state must match OLF's Newton (max diff = " + worst + ")");

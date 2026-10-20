@@ -57,7 +57,7 @@ final class IslandSeed {
         for (BatchContingency.SideOpen so : sideOpens) {
             int e = elementMapper.getElementIndex(so.branch());
             sideOpenElems.add(e);
-            if (frozenCols.contains(gpuData.cbIdx()[e * 12 + (so.side() == 1 ? 7 : 5)])) {
+            if (frozenCols.contains(gpuData.closedBranch().indices()[e * 12 + (so.side() == 1 ? 7 : 5)])) {
                 rs.disabledMask[s][e] = true;
             }
         }
@@ -77,10 +77,10 @@ final class IslandSeed {
         for (LfBranch branch : branches) {           // var-carrying outaged branches: the CPU drops
             int eIdx = elementMapper.getElementIndex(branch);   // the rho/a1 identity equations too
             if (eIdx >= 0 && eIdx < elementMapper.getClosedBranchCount()) {
-                if (gpuData.cbIdx()[eIdx * 12 + 9] >= 0) {
+                if (gpuData.closedBranch().indices()[eIdx * 12 + 9] >= 0) {
                     cl.nActive[s]--;        // BRANCH_RHO1 variable + its identity leave the index
                 }
-                if (gpuData.cbIdx()[eIdx * 12 + 8] >= 0) {
+                if (gpuData.closedBranch().indices()[eIdx * 12 + 8] >= 0) {
                     cl.nActive[s]--;        // BRANCH_ALPHA1 variable + its identity leave the index
                 }
             }

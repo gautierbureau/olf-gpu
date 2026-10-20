@@ -54,17 +54,17 @@ final class CouplerSeed {
             // DUMMY_TARGET identities those rows no longer host — the per-scenario gap.
             // childSide (ziIdx slot 10, bits 1-2) is nonzero exactly when rows moved.
             if (System.getenv("OLF_GPU_ZITREE_TRACE") != null
-                    && ((gpuData.ziIdx()[ze * 11 + 10] >> 1) & 3) != 0) {
+                    && ((gpuData.zeroImpedanceBranch().indices()[ze * 11 + 10] >> 1) & 3) != 0) {
                 System.err.println("ZITREE_OPEN ctg=" + contingencies.get(ci).contingencyId()
                         + " coupler=" + ziOut.getId()
-                        + " childSide=" + ((gpuData.ziIdx()[ze * 11 + 10] >> 1) & 3));
+                        + " childSide=" + ((gpuData.zeroImpedanceBranch().indices()[ze * 11 + 10] >> 1) & 3));
             }
             rs.ziOffSlotElemList.add(s);
             rs.ziOffSlotElemList.add(ze);
             // the decoupled branch's ZERO_V/ZERO_PHI rows become identities again
             // (dummies pinned to 0) — the inverse of a close
-            int dpRow = gpuData.ziIdx()[ze * 11 + 4];
-            int dqRow = gpuData.ziIdx()[ze * 11 + 5];
+            int dpRow = gpuData.zeroImpedanceBranch().indices()[ze * 11 + 4];
+            int dqRow = gpuData.zeroImpedanceBranch().indices()[ze * 11 + 5];
             int[] rowZi = rs.rowModePerScenario[s] == baseRowMode ? baseRowMode.clone() : rs.rowModePerScenario[s];
             rowZi[dpRow] = GpuRowMode.FIXED_VARIABLE;
             rowZi[dqRow] = GpuRowMode.FIXED_VARIABLE;
@@ -78,11 +78,11 @@ final class CouplerSeed {
             // through the stock-placement fallback, but nothing restores the V identity.
             // Only for a bus that is still VOLTAGE-CONTROLLED: a PQ child's reactive
             // balance returns to this row through that same fallback instead.
-            int relocBits = gpuData.ziIdx()[ze * 11 + 10];
+            int relocBits = gpuData.zeroImpedanceBranch().indices()[ze * 11 + 10];
             int childSide = (relocBits >> 1) & 3;
             if ((relocBits & 8) != 0 && childSide != 0) {
                 LfBus child = childSide == 1 ? ziOut.getBus1() : ziOut.getBus2();
-                int childVRow = gpuData.ziIdx()[ze * 11 + (childSide == 1 ? 6 : 7)];
+                int childVRow = gpuData.zeroImpedanceBranch().indices()[ze * 11 + (childSide == 1 ? 6 : 7)];
                 var childVc = child == null ? java.util.Optional.<GeneratorVoltageControl>empty()
                         : child.getGeneratorVoltageControl();
                 // The TARGET must travel with the equation. The child's P balance lives on
@@ -94,8 +94,8 @@ final class CouplerSeed {
                 // DUMMY_TARGET identity, and the slack absorbs it — measured on
                 // BUS-6014_BBS_2 as 7.386 MW of distributed active power against the CPU
                 // and every bus shifted 2-4e-2 kV in one direction.
-                int childPhiRow = childSide == 1 ? gpuData.ziIdx()[ze * 11 + 8]
-                        : gpuData.ziIdx()[ze * 11 + 9];
+                int childPhiRow = childSide == 1 ? gpuData.zeroImpedanceBranch().indices()[ze * 11 + 8]
+                        : gpuData.zeroImpedanceBranch().indices()[ze * 11 + 9];
                 // ...unless the child is in the ISLAND this outage created. Then the
                 // freeze already holds its rows at a clean flat state (V=1, phi=0) and
                 // OLF has removed the bus, so moving an injection target onto them would
@@ -130,7 +130,7 @@ final class CouplerSeed {
                 boolean applied = !GenOutage.planFlipsRow(slotGos, childVRow) && childVRow >= 0 && child != null && !child.isDisabled()
                         && child.isGeneratorVoltageControlled() && childVc.isPresent()
                         && ZeroImpedanceClusters.holdsClusterVoltage(contingencies.get(ci).contingencyId(), child,
-                                contingencies.get(ci).outagedZiBranches(), rs.ziElemByNumAll, gpuData.ziIdx(),
+                                contingencies.get(ci).outagedZiBranches(), rs.ziElemByNumAll, gpuData.zeroImpedanceBranch().indices(),
                                 frozenForCtg);
                 int childRl = RelocatedRows.rlEntryOf(gpuData, child);
                 boolean childPinned = applied
@@ -217,14 +217,14 @@ final class CouplerSeed {
                 continue;
             }
             Integer ze = rs.ziElemByNumAll.get(nonTree.getNum());
-            if (ze == null || gpuData.ziIdx()[ze * 11 + 10] == 0) {
+            if (ze == null || gpuData.zeroImpedanceBranch().indices()[ze * 11 + 10] == 0) {
                 continue;                // absent, or already out of the base tree
             }
             rs.ziTreeSlotElemValList.add(s);
             rs.ziTreeSlotElemValList.add(ze);
             rs.ziTreeSlotElemValList.add(0);
-            int dpRow = gpuData.ziIdx()[ze * 11 + 4];
-            int dqRow = gpuData.ziIdx()[ze * 11 + 5];
+            int dpRow = gpuData.zeroImpedanceBranch().indices()[ze * 11 + 4];
+            int dqRow = gpuData.zeroImpedanceBranch().indices()[ze * 11 + 5];
             int[] row = rs.rowModePerScenario[s] == baseRowMode ? baseRowMode.clone() : rs.rowModePerScenario[s];
             row[dpRow] = GpuRowMode.FIXED_VARIABLE;              // identity rows, target 0
             row[dqRow] = GpuRowMode.FIXED_VARIABLE;
@@ -246,14 +246,14 @@ final class CouplerSeed {
             // NB no BUS_TARGET_V identity here, unlike the opening path: the coupler is only
             // leaving the TREE, not opening, so the replacement edge still couples the child
             // and its voltage is not its own to set.
-            int treeBits = gpuData.ziIdx()[ze * 11 + 10];
+            int treeBits = gpuData.zeroImpedanceBranch().indices()[ze * 11 + 10];
             int treeChildSide = (treeBits >> 1) & 3;
             if ((treeBits & 8) == 0 || treeChildSide == 0) {
                 continue;                // not a relocated coupler: nothing moved onto it
             }
-            int childPhiRow = treeChildSide == 1 ? gpuData.ziIdx()[ze * 11 + 8]
-                    : gpuData.ziIdx()[ze * 11 + 9];
-            int childVRow = gpuData.ziIdx()[ze * 11 + (treeChildSide == 1 ? 6 : 7)];
+            int childPhiRow = treeChildSide == 1 ? gpuData.zeroImpedanceBranch().indices()[ze * 11 + 8]
+                    : gpuData.zeroImpedanceBranch().indices()[ze * 11 + 9];
+            int childVRow = gpuData.zeroImpedanceBranch().indices()[ze * 11 + (treeChildSide == 1 ? 6 : 7)];
             boolean childFrozen = false;
             for (int fr : frozenRowsByIndex[ci]) {
                 if (fr == childPhiRow || fr == childVRow) {
@@ -290,7 +290,7 @@ final class CouplerSeed {
         if (!contingencies.get(ci).stickyNonTreeZi().isEmpty()) {
             int[] stillOut = contingencies.get(ci).stickyNonTreeZi().stream()
                     .mapToInt(LfBranch::getNum).sorted().toArray();
-            int[] ziNums = gpuData.ziBranchNums();
+            int[] ziNums = gpuData.zeroImpedanceBranch().branchNum();
             for (int zb : baseNonTreeZi) {
                 if (java.util.Arrays.binarySearch(stillOut, ziNums[zb]) >= 0) {
                     continue;            // still out (the base-tree ones are not in baseNonTreeZi)
@@ -298,8 +298,8 @@ final class CouplerSeed {
                 rs.ziTreeSlotElemValList.add(s);
                 rs.ziTreeSlotElemValList.add(zb);
                 rs.ziTreeSlotElemValList.add(1);
-                int bdp = gpuData.ziIdx()[zb * 11 + 4];
-                int bdq = gpuData.ziIdx()[zb * 11 + 5];
+                int bdp = gpuData.zeroImpedanceBranch().indices()[zb * 11 + 4];
+                int bdq = gpuData.zeroImpedanceBranch().indices()[zb * 11 + 5];
                 int[] r2 = rs.rowModePerScenario[s] == baseRowMode ? baseRowMode.clone() : rs.rowModePerScenario[s];
                 r2[bdp] = 1;             // back into the coupling
                 r2[bdq] = 1;

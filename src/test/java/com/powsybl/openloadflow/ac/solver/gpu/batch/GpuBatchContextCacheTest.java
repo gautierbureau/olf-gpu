@@ -77,7 +77,7 @@ class GpuBatchContextCacheTest {
         assertTrue(before.sameStructureAs(after));
         assertFalse(before.sameAs(after));
         StructureNative.refreshStructureValues(GpuAcStructures.handle(n, before),
-                after.cbIn(), after.obIn(), after.shIn(), after.hvIn(), after.ziIn());
+                after.closedBranch().parameters(), after.openBranch().parameters(), after.shunt().parameters(), after.hvdcAcEmulation().parameters(), after.zeroImpedanceBranch().parameters());
         GpuAcStructures.rebind(before, after);
 
         // the old extraction again (the network state restored): its structure is no longer the one the

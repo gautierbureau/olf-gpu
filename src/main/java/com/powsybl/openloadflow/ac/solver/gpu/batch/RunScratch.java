@@ -69,16 +69,16 @@ final class RunScratch {
         this.disabledMask = new boolean[chunkSize][nElements];
         this.disabledIdx = new int[chunkSize][];
         this.elementsAtVCol = new java.util.HashMap<>();
-        this.ncbElems = gpuData.cbIdx().length / 12;
+        this.ncbElems = gpuData.closedBranch().indices().length / 12;
         for (int e = 0; e < ncbElems; e++) {
-            for (int col : new int[] {gpuData.cbIdx()[e * 12 + 5], gpuData.cbIdx()[e * 12 + 7]}) {
+            for (int col : new int[] {gpuData.closedBranch().indices()[e * 12 + 5], gpuData.closedBranch().indices()[e * 12 + 7]}) {
                 if (col >= 0) {
                     elementsAtVCol.computeIfAbsent(col, k -> new ArrayList<>()).add(e);
                 }
             }
         }
-        for (int e = 0; e < gpuData.obIdx().length / 6; e++) {
-            for (int col : new int[] {gpuData.obIdx()[e * 6 + 4], gpuData.obIdx()[e * 6 + 5]}) {
+        for (int e = 0; e < gpuData.openBranch().indices().length / 6; e++) {
+            for (int col : new int[] {gpuData.openBranch().indices()[e * 6 + 4], gpuData.openBranch().indices()[e * 6 + 5]}) {
                 if (col >= 0) {
                     elementsAtVCol.computeIfAbsent(col, k -> new ArrayList<>()).add(ncbElems + e);
                 }
@@ -87,10 +87,10 @@ final class RunScratch {
         this.rowModePerScenario = new int[chunkSize][];
         this.overrides = new GpuBatchOverrides();
         this.ziElemByBranchNumChunk = gpuData.baseOpenBranches().zeroImpedanceElementByBranchNum();
-        this.nziBase = gpuData.ziIdx().length / 11 - gpuData.baseOpenBranches().zeroImpedanceElements().length;
+        this.nziBase = gpuData.zeroImpedanceBranch().indices().length / 11 - gpuData.baseOpenBranches().zeroImpedanceElements().length;
         this.ziElemByNumAll = new java.util.HashMap<>();
-        for (int z = 0; z < gpuData.ziIdx().length / 11; z++) {
-            ziElemByNumAll.put(gpuData.ziBranchNums()[z], z);
+        for (int z = 0; z < gpuData.zeroImpedanceBranch().indices().length / 11; z++) {
+            ziElemByNumAll.put(gpuData.zeroImpedanceBranch().branchNum()[z], z);
         }
         this.ziOffSlotElemList = new ArrayList<>();
         this.ziOnSlotElemList = new ArrayList<>();

@@ -34,7 +34,7 @@ final class ZeroImpedanceClusters {
      *  for every contingency, against 0.16 when they are carried. The device starts the same way, so both
      *  arms take the same first step from the same state. */
     static double[] zeroZiFlows(GpuAcData gpuData, double[] baseState) {
-        int[] zi = gpuData.ziIdx();
+        int[] zi = gpuData.zeroImpedanceBranch().indices();
         if (zi == null || zi.length == 0) {
             return baseState;
         }
@@ -111,8 +111,8 @@ final class ZeroImpedanceClusters {
 
     /** The zero-impedance elements OUT of the base spanning tree (ziIdx slot 10 is 0), in element order. */
     static int[] baseNonTreeElements(GpuAcData gpuData) {
-        int[] zIdx = gpuData.ziIdx();
-        int nz = gpuData.ziBranchNums() == null ? 0 : gpuData.ziBranchNums().length;
+        int[] zIdx = gpuData.zeroImpedanceBranch().indices();
+        int nz = gpuData.zeroImpedanceBranch().branchNum() == null ? 0 : gpuData.zeroImpedanceBranch().branchNum().length;
         int cnt = 0;
         for (int zb = 0; zb < nz; zb++) {
             if (zIdx[zb * 11 + 10] == 0) {

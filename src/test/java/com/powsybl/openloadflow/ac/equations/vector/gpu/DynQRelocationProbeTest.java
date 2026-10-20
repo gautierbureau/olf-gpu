@@ -65,7 +65,7 @@ class DynQRelocationProbeTest {
                 pairRc.accept(vcol, vcol);
             }
         };
-        int[] cb = d.cbIdx();
+        int[] cb = d.closedBranch().indices();
         for (int e = 0; e < cb.length / 12; e++) {          // cbIdx stride 12 (…a1col r1col qAlt1 qAlt2)
             int b = e * 12;
             pairRc.accept(cb[b], cb[b + 4]);
@@ -81,7 +81,7 @@ class DynQRelocationProbeTest {
                 pairRc.accept(cb[b + 8], cb[b + 8]);
             }
         }
-        int[] ob = d.obIdx();
+        int[] ob = d.openBranch().indices();
         for (int e = 0; e < ob.length / 6; e++) {
             int b = e * 6;
             pairRc.accept(ob[b + 1], ob[b + 1]);
@@ -89,7 +89,7 @@ class DynQRelocationProbeTest {
             claimMovedV.accept(ob[b + 1], ob[b + 4]);
             claimMovedV.accept(ob[b + 3], ob[b + 5]);
         }
-        int[] sh = d.shIdx();
+        int[] sh = d.shunt().indices();
         for (int e = 0; e < sh.length / 4; e++) {
             int b = e * 4;
             pairRc.accept(sh[b + 1], sh[b + 1]);
@@ -98,7 +98,7 @@ class DynQRelocationProbeTest {
                 pairRc.accept(sh[b + 3], sh[b + 3]);
             }
         }
-        int[] hv = d.hvIdx();
+        int[] hv = d.hvdcAcEmulation().indices();
         for (int e = 0; e < hv.length / 4; e++) {
             int b = e * 4;
             pairRc.accept(hv[b], hv[b + 2]);
@@ -108,7 +108,7 @@ class DynQRelocationProbeTest {
         for (int c = 0; c < dqRow.length; c++) {
             pairRc.accept(dqRow[c], dqRow[c]);
         }
-        int[] zi = d.ziIdx();
+        int[] zi = d.zeroImpedanceBranch().indices();
         for (int e = 0; e < zi.length / 11; e++) {
             for (int s = 0; s < 6; s++) {
                 pairRc.accept(zi[e * 11 + s], zi[e * 11 + s]);

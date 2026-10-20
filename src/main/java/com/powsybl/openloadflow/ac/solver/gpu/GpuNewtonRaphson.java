@@ -991,7 +991,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                 CONTEXT_REBUILDS.incrementAndGet();
             } else if (!data.sameAs(cachedData)) {
                 StructureNative.refreshStructureValues(GpuAcStructures.handle(n, cachedData),
-                        data.cbIn(), data.obIn(), data.shIn(), data.hvIn(), data.ziIn());
+                        data.closedBranch().parameters(), data.openBranch().parameters(), data.shunt().parameters(), data.hvdcAcEmulation().parameters(), data.zeroImpedanceBranch().parameters());
                 // the SHARED structure now holds the new values — re-key it to the new
                 // extraction so content matching never aliases it under the old one
                 GpuAcStructures.rebind(cachedData, data);

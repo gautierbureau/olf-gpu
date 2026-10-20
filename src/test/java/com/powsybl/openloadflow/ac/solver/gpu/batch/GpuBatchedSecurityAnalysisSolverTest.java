@@ -8,16 +8,20 @@
 package com.powsybl.openloadflow.ac.solver.gpu.batch;
 
 import com.powsybl.openloadflow.ac.equations.vector.gpu.BaseOpenBranches;
+import com.powsybl.openloadflow.ac.equations.vector.gpu.ClosedBranchPack;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.DistrQMembers;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.DistrQTerms;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.DistributedSlackParticipants;
+import com.powsybl.openloadflow.ac.equations.vector.gpu.ElementPack;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.LinearDistributionTerms;
+import com.powsybl.openloadflow.ac.equations.vector.gpu.OpenBranchPack;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.ReactiveLimitEntries;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.ReactiveRelocationCandidates;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.RemoteMemberReactiveTerms;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.VoltageRowParameters;
+import com.powsybl.openloadflow.ac.equations.vector.gpu.ZeroImpedanceBranchPack;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -35,16 +39,12 @@ import static org.junit.jupiter.api.Assumptions.assumeFalse;
  */
 class GpuBatchedSecurityAnalysisSolverTest {
 
-    private static final GpuAcData EMPTY = new GpuAcData(new double[0], new int[0], new int[0], new double[0], new int[0],
-            new double[0], new int[0], new double[0], new int[0],
-            DistrQTerms.empty(), DistrQMembers.empty(),
-            new double[0], new int[0],
-            LinearDistributionTerms.empty(), LinearDistributionTerms.empty(),
-            ReactiveLimitEntries.empty(),
-            RemoteMemberReactiveTerms.empty(), VoltageRowParameters.empty(),
-            DistributedSlackParticipants.empty(),
-            BaseOpenBranches.empty(), new int[0], new double[0], new int[0], ReactiveRelocationCandidates.empty(),
-            new int[0], new int[0]);
+    private static final GpuAcData EMPTY = new GpuAcData(ClosedBranchPack.empty(), OpenBranchPack.empty(),
+            ElementPack.empty(), ElementPack.empty(), DistrQTerms.empty(), DistrQMembers.empty(),
+            ZeroImpedanceBranchPack.empty(), LinearDistributionTerms.empty(), LinearDistributionTerms.empty(),
+            ReactiveLimitEntries.empty(), RemoteMemberReactiveTerms.empty(), VoltageRowParameters.empty(),
+            DistributedSlackParticipants.empty(), BaseOpenBranches.empty(), ElementPack.empty(),
+            ReactiveRelocationCandidates.empty());
 
     @Test
     void explicitCapIsHonouredAndClampedToCount() {

@@ -99,9 +99,11 @@ class GpuShuntVoltageControlTest {
         double[] stableTargets = activation.applyTargets(target.getArray());
 
         double[] out = GpuAcNewtonSolver.solve(x0, stableTargets, activation.rowMode(), MAX_ITER, TOL,
-                d.cbIn(), d.cbIdx(), d.obIn(), d.obIdx(), d.shIn(), d.shIdx(), d.hvIn(), d.hvIdx(),
+                d.closedBranch().parameters(), d.closedBranch().indices(), d.openBranch().parameters(),
+                d.openBranch().indices(), d.shunt().parameters(), d.shunt().indices(), d.hvdcAcEmulation().parameters(),
+                d.hvdcAcEmulation().indices(),
                 d.distrQ().element(), d.distrQ().side(), d.distrQ().weight(), d.distrQ().row(), d.distrQ().kind(),
-                d.ziIn(), d.ziIdx(),
+                d.zeroImpedanceBranch().parameters(), d.zeroImpedanceBranch().indices(),
                 d.distrRho().row(), d.distrRho().column(), d.distrRho().coefficient(), d.distrShuntB().row(), d.distrShuntB().column(), d.distrShuntB().coefficient());
         int iters = (int) out[n];
         double norm = out[n + 1];
@@ -207,9 +209,11 @@ class GpuShuntVoltageControlTest {
 
         // (3) Solve the OFF structure with the ON activation.
         double[] out = GpuAcNewtonSolver.solve(x0, onTargets, onAct.rowMode(), MAX_ITER, TOL,
-                dOff.cbIn(), dOff.cbIdx(), dOff.obIn(), dOff.obIdx(), dOff.shIn(), dOff.shIdx(), dOff.hvIn(), dOff.hvIdx(),
+                dOff.closedBranch().parameters(), dOff.closedBranch().indices(), dOff.openBranch().parameters(),
+                dOff.openBranch().indices(), dOff.shunt().parameters(), dOff.shunt().indices(),
+                dOff.hvdcAcEmulation().parameters(), dOff.hvdcAcEmulation().indices(),
                 dOff.distrQ().element(), dOff.distrQ().side(), dOff.distrQ().weight(), dOff.distrQ().row(), dOff.distrQ().kind(),
-                dOff.ziIn(), dOff.ziIdx(),
+                dOff.zeroImpedanceBranch().parameters(), dOff.zeroImpedanceBranch().indices(),
                 dOff.distrRho().row(), dOff.distrRho().column(), dOff.distrRho().coefficient(), dOff.distrShuntB().row(), dOff.distrShuntB().column(), dOff.distrShuntB().coefficient());
         double norm = out[n + 1];
 

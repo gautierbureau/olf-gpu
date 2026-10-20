@@ -183,8 +183,8 @@ public final class GpuDistributedSlackOuterLoop {
 
     /** The bus whose P balance the relocation moved onto the coupler {@code DUMMY_P} row {@code pRow}. */
     private static LfBus relocatedChildOfPRow(LfNetwork network, GpuAcData data, int pRow) {
-        int[] zi = data.ziIdx();
-        int[] nums = data.ziBranchNums();
+        int[] zi = data.zeroImpedanceBranch().indices();
+        int[] nums = data.zeroImpedanceBranch().branchNum();
         if (zi == null || nums == null) {
             return null;
         }

@@ -82,7 +82,7 @@ public final class GpuEquationDump {
             terms[r] = new ArrayList<>();
         }
 
-        int[] cb = d.cbIdx();
+        int[] cb = d.closedBranch().indices();
         for (int e = 0; e < cb.length / 12; e++) {
             int o = e * 12;
             add(terms, cb[o], "cb#" + e + ".p1");
@@ -92,7 +92,7 @@ public final class GpuEquationDump {
             add(terms, cb[o + 10], "cb#" + e + ".q1@alt");
             add(terms, cb[o + 11], "cb#" + e + ".q2@alt");
         }
-        int[] ob = d.obIdx();
+        int[] ob = d.openBranch().indices();
         for (int e = 0; e < ob.length / 6; e++) {
             int o = e * 6;
             add(terms, ob[o], "ob#" + e + ".p1");
@@ -100,20 +100,20 @@ public final class GpuEquationDump {
             add(terms, ob[o + 2], "ob#" + e + ".p2");
             add(terms, ob[o + 3], "ob#" + e + ".q2");
         }
-        int[] sh = d.shIdx();
+        int[] sh = d.shunt().indices();
         for (int e = 0; e < sh.length / 5; e++) {
             int o = e * 5;
             add(terms, sh[o], "sh#" + e + ".p");
             add(terms, sh[o + 1], "sh#" + e + ".q");
             add(terms, sh[o + 4], "sh#" + e + ".q@alt");
         }
-        int[] hv = d.hvIdx();
+        int[] hv = d.hvdcAcEmulation().indices();
         for (int e = 0; e < hv.length / 4; e++) {
             add(terms, hv[e * 4], "hv#" + e + ".p1");
             add(terms, hv[e * 4 + 1], "hv#" + e + ".p2");
         }
-        int[] zi = d.ziIdx();
-        int[] ziNums = d.ziBranchNums();
+        int[] zi = d.zeroImpedanceBranch().indices();
+        int[] ziNums = d.zeroImpedanceBranch().branchNum();
         for (int e = 0; e < zi.length / 11; e++) {
             int o = e * 11;
             String tag = "zi#" + e;
@@ -141,7 +141,7 @@ public final class GpuEquationDump {
         for (int k = 0; k < d.distrShuntB().row().length; k++) {
             add(terms, d.distrShuntB().row()[k], "db[col=" + d.distrShuntB().column()[k] + "]");
         }
-        int[] vdl = d.vdlIdx();
+        int[] vdl = d.loadModel().indices();
         for (int e = 0; e < vdl.length / 4; e++) {
             add(terms, vdl[e * 4], "vdl#" + e + ".p");
             add(terms, vdl[e * 4 + 1], "vdl#" + e + ".q");
@@ -157,7 +157,7 @@ public final class GpuEquationDump {
         }
 
         w.write("\n# ZERO-IMPEDANCE branches, every row slot including -1 (a -1 is a DROPPED term)\n");
-        int[] ziQAlt = d.ziQAlt();
+        int[] ziQAlt = d.zeroImpedanceBranch().alternateReactiveDestination();
         for (int e = 0; e < zi.length / 11; e++) {
             int o = e * 11;
             LfBranch br = e < ziNums.length && ziNums[e] >= 0 ? network.getBranch(ziNums[e]) : null;

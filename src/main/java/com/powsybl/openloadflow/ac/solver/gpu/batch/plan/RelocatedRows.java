@@ -105,8 +105,8 @@ public final class RelocatedRows {
      */
     static java.util.Map<Integer, int[]> relocatedChildRows(GpuAcData gpuData) {
         java.util.Map<Integer, int[]> out = new java.util.HashMap<>();
-        int[] zi = gpuData.ziIdx();
-        int[] nums = gpuData.ziBranchNums();
+        int[] zi = gpuData.zeroImpedanceBranch().indices();
+        int[] nums = gpuData.zeroImpedanceBranch().branchNum();
         for (int e = 0; e < zi.length / 11 && e < nums.length; e++) {
             int o = e * 11;
             int childSide = (zi[o + 10] >> 1) & 3;
@@ -132,8 +132,8 @@ public final class RelocatedRows {
      *  a scenario that OUTAGES the coupler puts the child's reactive equation on the bus's own row. */
     static java.util.Map<Integer, int[]> relocatedDummyQRows(GpuAcData gpuData) {
         java.util.Map<Integer, int[]> out = new java.util.HashMap<>();
-        int[] zi = gpuData.ziIdx();
-        int[] nums = gpuData.ziBranchNums();
+        int[] zi = gpuData.zeroImpedanceBranch().indices();
+        int[] nums = gpuData.zeroImpedanceBranch().branchNum();
         for (int e = 0; e < zi.length / 11 && e < nums.length; e++) {
             int o = e * 11;
             int childSide = (zi[o + 10] >> 1) & 3;

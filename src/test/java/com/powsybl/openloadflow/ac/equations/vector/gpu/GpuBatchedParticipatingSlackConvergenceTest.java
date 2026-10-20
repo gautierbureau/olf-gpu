@@ -112,12 +112,16 @@ class GpuBatchedParticipatingSlackConvergenceTest {
         int[][] rowModes = {act.rowMode()};
         double[][] batch = GpuAcNewtonSolver.solveBatch(baseState, stableTargets, rowModes, disabledMask,
                 GpuBatchContextCache.resolveBatchMode(), MAX_ITER, 1e-10, 1e-4, dsTolPu,
-                d.cbIn(), d.cbIdx(), d.obIn(), d.obIdx(), d.shIn(), d.shIdx(), d.hvIn(), d.hvIdx(),
+                d.closedBranch().parameters(), d.closedBranch().indices(), d.openBranch().parameters(),
+                d.openBranch().indices(), d.shunt().parameters(), d.shunt().indices(), d.hvdcAcEmulation().parameters(),
+                d.hvdcAcEmulation().indices(),
                 new int[0], new double[0], new double[0], new double[0], new double[0],
                 d.distributedSlack().busPhiRow(), d.distributedSlack().busFactor(), d.distributedSlack().slackPhiRow(), d.distributedSlack().slackTargetP(),
                 d.distributedSlack().busBaseTargetP(), d.distributedSlack().busMaxDelta(), d.distributedSlack().busMinDelta(),
                 d.distrQ().element(), d.distrQ().side(), d.distrQ().weight(), d.distrQ().row(), d.distrQ().kind(),
-                d.distrRho().row(), d.distrRho().column(), d.distrRho().coefficient(), d.distrShuntB().row(), d.distrShuntB().column(), d.distrShuntB().coefficient(), d.ziIn(), d.ziIdx());
+                d.distrRho().row(), d.distrRho().column(), d.distrRho().coefficient(), d.distrShuntB().row(),
+                d.distrShuntB().column(), d.distrShuntB().coefficient(), d.zeroImpedanceBranch().parameters(),
+                d.zeroImpedanceBranch().indices());
         int n = baseState.length;
         if ((int) batch[0][n + 2] != 0) {
             System.out.printf("    (GPU did not converge at dsTol=%.0e)%n", dsTolPu);

@@ -112,14 +112,17 @@ public final class GpuAcStructures {
             }
             if (structure == null) {
                 structure = new Structure(StructureNative.createStructure(n,
-                        data.cbIn(), data.cbIdx(), data.obIn(), data.obIdx(),
-                        data.shIn(), data.shIdx(), data.hvIn(), data.hvIdx(),
+                        data.closedBranch().parameters(), data.closedBranch().indices(), data.openBranch().parameters(), data.openBranch().indices(),
+                        data.shunt().parameters(), data.shunt().indices(), data.hvdcAcEmulation().parameters(), data.hvdcAcEmulation().indices(),
                         data.distrQ().element(), data.distrQ().side(), data.distrQ().weight(), data.distrQ().row(), data.distrQ().kind(),
-                        data.ziIn(), data.ziIdx(),
+                        data.zeroImpedanceBranch().parameters(), data.zeroImpedanceBranch().indices(),
                         data.distrRho().row(), data.distrRho().column(), data.distrRho().coefficient(),
-                        data.distrShuntB().row(), data.distrShuntB().column(), data.distrShuntB().coefficient(), data.cbPcSide(),
-                        data.vdlIn(), data.vdlIdx(), data.reactiveRelocation().groupStart(), data.reactiveRelocation().candidateRows(),
-                        data.obQAlt(), data.ziQAlt(), data.reactiveRelocation().dependentBaseGroup(), data.reactiveRelocation().baseTargetRow(), data.reactiveRelocation().dependentGroupOfRow()), n);
+                        data.distrShuntB().row(), data.distrShuntB().column(), data.distrShuntB().coefficient(), data.closedBranch().phaseControlSide(),
+                        data.loadModel().parameters(), data.loadModel().indices(), data.reactiveRelocation().groupStart(), data.reactiveRelocation().candidateRows(),
+                        data.openBranch().alternateReactiveDestination(),
+                        data.zeroImpedanceBranch().alternateReactiveDestination(),
+                        data.reactiveRelocation().dependentBaseGroup(), data.reactiveRelocation().baseTargetRow(),
+                        data.reactiveRelocation().dependentGroupOfRow()), n);
                 CACHE.put(data, structure);
                 BUILDS.incrementAndGet();
                 return structure.handle;

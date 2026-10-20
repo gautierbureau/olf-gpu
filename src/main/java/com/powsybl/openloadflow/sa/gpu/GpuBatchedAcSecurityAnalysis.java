@@ -1008,8 +1008,8 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                     // same terms on both arms is a pi-model disagreement on one of these.
                     var gd = precomputed.gpuData();
                     if (gd != null) {
-                        int cbCount = gd.cbIn().length / 8;
-                        int idxStride = cbCount > 0 ? gd.cbIdx().length / cbCount : 0;
+                        int cbCount = gd.closedBranch().parameters().length / 8;
+                        int idxStride = cbCount > 0 ? gd.closedBranch().indices().length / cbCount : 0;
                         for (var br : b.getBranches()) {
                             var pm = br.getPiModel();
                             Integer ph1 = br.getBus1() == null ? null : precomputed.baseVariableRows().get(precomputed.equationSystem().getVariableSet()
@@ -1018,8 +1018,8 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                                     .getVariable(br.getBus2().getNum(), AcVariableType.BUS_PHI));
                             String pack = "absent";
                             for (int e = 0; e < cbCount && idxStride > 0; e++) {
-                                if (ph1 != null && ph2 != null && gd.cbIdx()[e * idxStride] == ph1 && gd.cbIdx()[e * idxStride + 2] == ph2) {
-                                    double[] r = java.util.Arrays.copyOfRange(gd.cbIn(), e * 8, e * 8 + 8);
+                                if (ph1 != null && ph2 != null && gd.closedBranch().indices()[e * idxStride] == ph1 && gd.closedBranch().indices()[e * idxStride + 2] == ph2) {
+                                    double[] r = java.util.Arrays.copyOfRange(gd.closedBranch().parameters(), e * 8, e * 8 + 8);
                                     pack = String.format("cb=%d y=%.9f g1=%.9f g2=%.9f b1=%.9f b2=%.9f ksi=%.9f r1=%.9f a1=%.9f",
                                             e, r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7]);
                                 }

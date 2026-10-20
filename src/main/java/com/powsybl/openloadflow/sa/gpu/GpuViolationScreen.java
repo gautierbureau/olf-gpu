@@ -134,17 +134,17 @@ final class GpuViolationScreen {
             Integer row = baseVariableRows.get(v);
             vRow[i] = row != null ? row : -1;                // absent at base (never a candidate)
         }
-        return new GpuViolationScreen(table, family, elem, vRow, data.cbIn(), data.cbIdx(), data.obIn(), data.obIdx());
+        return new GpuViolationScreen(table, family, elem, vRow, data.closedBranch().parameters(), data.closedBranch().indices(), data.openBranch().parameters(), data.openBranch().indices());
     }
 
     /** Every state column the flow evaluation reads is present at base. */
     private static boolean hasColumns(byte family, int elem, GpuAcData data) {
         if (family == FAMILY_CLOSED) {
-            int[] ix = data.cbIdx();
+            int[] ix = data.closedBranch().indices();
             int c = elem * 12;
             return ix[c + 4] >= 0 && ix[c + 5] >= 0 && ix[c + 6] >= 0 && ix[c + 7] >= 0;
         }
-        int[] ix = data.obIdx();
+        int[] ix = data.openBranch().indices();
         int c = elem * 6;
         return ix[c + 4] >= 0 || ix[c + 5] >= 0;             // an open branch carries one side only
     }

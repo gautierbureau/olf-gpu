@@ -38,6 +38,9 @@ Everything below follows from this constraint.
 
 ## 2. Consequences for the equation system
 
+The device-only code of 2.1, 2.3 and 2.4 lives in one place: the Java package `ac.equations.vector.gpu.fixedmatrix` and
+the native directory `native/cuda/jni/fixedmatrix/`. Everything else in the GPU code follows OLF's own layout and names.
+
 ### 2.1 Stable rows: one row per variable
 
 OLF's row numbers depend on which equations are active. The device cannot renumber, so each variable keeps one
@@ -52,7 +55,7 @@ Two reasons:
 - the derivative of each equation with respect to its own variable lands on the diagonal. The batched factorization does
   not pivot (2.4), so it needs that diagonal to be nonzero.
 
-In the code: "stable indexing", the `...Row` / `...Col` fields of the extracted data.
+In the code: `fixedmatrix.StableRowIndexing`; the `...Row` / `...Col` fields of `ExtractionColumns`.
 
 ### 2.2 Row state: which OLF equation is active on a row
 
@@ -70,6 +73,8 @@ small integer per row and per lane, the row *mode* (`GpuRowMode`, section 7):
 
 A PV -> PQ switch is therefore `FIXED_VARIABLE` -> `BUS_TARGET_Q` on the device, and the switch back is the reverse.
 
+In the code: the row state is OLF's activation, extracted by `GpuAcActivationExtractor`; it is not in `fixedmatrix`.
+
 ### 2.3 Equations placed on another bus's row
 
 Pairing every equation with a variable leaves some equations without a row of their own. They are placed on a row that
@@ -80,18 +85,23 @@ OLF leaves empty. These are the same OLF equations; only their row differs.
   every controller but the first. On the device, p's `BUS_V` row holds the voltage target, so p's `BUS_TARGET_Q` goes
   on the `BUS_V` row of the **first controller that is still free**, which OLF leaves without an equation. Which one
   is free depends on that lane's PV -> PQ switches. So the pattern carries p's balance on every candidate row, and each
-  Jacobian fill picks the first free controller. In the code: the "carrier", `reactiveRelocationGroupStart` / `reactiveRelocationCandidateRows`, the candidate rows
-  of each group.
+  Jacobian fill picks the first free controller. In the code: the "carrier"; `fixedmatrix.ReactiveRelocation` (which
+  row hosts a bus's reactive balance), `ReactiveRelocationTables` / `ReactiveRelocationCandidates` (the candidate rows
+  of each group); native `fixedmatrix/reactive_relocation.cuh` (`chooseCarrierRow`), `relocated_scatter.cuh`,
+  `relocation_pattern.cu`.
 - **Transformer and shunt voltage control.** The controlled bus's `BUS_V` row holds `BUS_TARGET_V`. Its
-  `BUS_TARGET_Q` goes on the row of the control variable, `BRANCH_RHO1` or `SHUNT_B`.
+  `BUS_TARGET_Q` goes on the row of the control variable, `BRANCH_RHO1` or `SHUNT_B`. In the code:
+  `ReactiveRelocation.computeQRow` / `computeAlternateQRow`.
 - **Zero-impedance branches (couplers).** OLF models a coupler with `DUMMY_P` / `DUMMY_Q` variables and `ZERO_V` /
   `ZERO_PHI` equations on its spanning tree (`LfZeroImpedanceNetwork`). Their rows have zero diagonals as OLF places
   them. The device moves them:
   - **relocation**: for a tree coupler with a child bus, the child's power balances go on the coupler's dummy rows,
-    and the coupler's `ZERO_V` / `ZERO_PHI` on the child's rows. Decided once per run, from the base tree;
+    and the coupler's `ZERO_V` / `ZERO_PHI` on the child's rows. Decided once per run, from the base tree
+    (`fixedmatrix.CouplerTreeRelocation`; native `relocated_rows.cu`, `zero_impedance_relocation.cu`);
   - **stock placement**: the other couplers keep their rows, with the two equations crosswise, and the zero diagonals
-    are handled by the repair (2.4);
-  - **re-homing**: in a lane whose contingency opens the coupler, the child's balances come back to its own rows;
+    are handled by the repair (2.4) (native `stock_placement.cuh`);
+  - **re-homing**: in a lane whose contingency opens the coupler, the child's balances come back to its own rows
+    (`fixedmatrix.CouplerTreeReHoming`, applied per scenario by `batch.CouplerSeed`);
   - **re-merge**: after a busbar-section loss, OLF re-elects which bus of a coupler cluster holds the voltage
     (`LfZeroImpedanceNetwork.updateVoltageControlMergeStatus`, MAIN / DEPENDENT); the device puts the voltage
     target on the elected bus (`VoltageControlReMerge`). OLF behaviour replayed per contingency, not a device-only
@@ -108,6 +118,11 @@ does not pivot. A zero diagonal would stop it. Three mechanisms handle that. Non
   whose variable it couples to;
 - **robust retry**: a lane whose batched linear solve fails is re-solved alone on the device, on its own matrix, with
   matching and pivoting.
+
+In the code: row repair `fixedmatrix/zero_diagonal_repair.cu` and `zero_diagonal_repair_tables.cu`; cross identity
+`fixedmatrix.CrossIdentity`, `fixedmatrix/cross_identity.cuh`, `GpuRowMode.CROSS_FIXED_VARIABLE`; robust retry
+`GpuLinearSolveMode.ROBUST`, `solver/linear_solver_settings.cuh` and the second pass of `sa.gpu.GpuBatchPrecomputer`.
+Robust retry stays with the solver: it is a mode of the linear solve itself, not a change of the matrix.
 
 ## 3. Scenario and chunk
 
@@ -145,18 +160,21 @@ Two kinds of contingency are handed back to OLF's ordinary sequential path, whic
 
 Only notions with no OLF counterpart. Everything else uses OLF's name.
 
-| term | meaning | section |
-|---|---|---|
-| fixed matrix / union pattern | one sparsity pattern and one symbolic analysis for every contingency of the run | 1 |
-| stable rows | each variable's permanent row and column; each equation on its variable's row | 2.1 |
-| row state (row mode) | which OLF equation a row holds in a lane | 2.2 |
-| carrier | the free controller whose `BUS_V` row holds a remote pilot's `BUS_TARGET_Q` | 2.3 |
-| relocation, stock placement, re-homing, re-merge | where coupler and voltage-control equations sit | 2.3 |
-| row repair, cross identity, robust retry | factoring without pivoting | 2.4 |
-| scenario, chunk, compaction | the batch | 3 |
-| pass, driver phase | one solve plus one loop check for a whole chunk | 4 |
-| refusal | a contingency handed back to OLF before any solve | 5 |
-| pilot-self | the controlled bus of a remote voltage control that is also one of its own controllers (`GpuVoltageControlRole.PILOT_SELF`) | 2.3 |
+| term | meaning | section | code |
+|---|---|---|---|
+| fixed matrix / union pattern | one sparsity pattern and one symbolic analysis for every contingency of the run | 1 | `structure/shared_structure.cu` |
+| stable rows | each variable's permanent row and column; each equation on its variable's row | 2.1 | `fixedmatrix.StableRowIndexing` |
+| row state (row mode) | which OLF equation a row holds in a lane | 2.2 | `GpuRowMode`, `GpuAcActivationExtractor` |
+| carrier | the free controller whose `BUS_V` row holds a remote pilot's `BUS_TARGET_Q` | 2.3 | `fixedmatrix.ReactiveRelocation*`, `fixedmatrix/reactive_relocation.cuh` |
+| relocation, stock placement, re-homing | where coupler equations sit | 2.3 | `fixedmatrix.CouplerTreeRelocation`, `CouplerTreeReHoming`, `fixedmatrix/stock_placement.cuh` |
+| row repair, cross identity, robust retry | factoring without pivoting | 2.4 | `fixedmatrix/zero_diagonal_repair*.cu`, `fixedmatrix.CrossIdentity`, `GpuLinearSolveMode.ROBUST` |
+| scenario, chunk, compaction | the batch | 3 | `ac.solver.gpu.batch` |
+| pass, driver phase | one solve plus one loop check for a whole chunk | 4 | `solver/outer_loop_driver.cu` |
+| refusal | a contingency handed back to OLF before any solve | 5 | `batch.plan.GpuBatchQualification` |
+| pilot-self | the controlled bus of a remote voltage control that is also one of its own controllers (`GpuVoltageControlRole.PILOT_SELF`) | 2.3 | `PilotSelfPacker` |
+
+The voltage-control re-merge (2.3) is not in this table: it is OLF's `updateVoltageControlMergeStatus`, replayed per
+contingency (`batch.plan.VoltageControlReMerge`).
 
 Names in the code spell every notion out (`distributedSlackBusFactor`, `reactiveLimitVoltageRow`); a `d` prefix is
 a device buffer, `h` its host copy, `j` the JNI argument that carries it. Only loop indices keep one letter, each

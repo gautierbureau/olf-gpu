@@ -44,10 +44,7 @@ import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuQLimitType;
  * (±1); a spanning-tree edge ({@code enabledTree}=1) also carries the voltage/angle coupling
  * ZERO_V (v1−rho·v2) on the DUMMY_P row and ZERO_PHI (ph1−ph2) on the DUMMY_Q row.
  *
- * <p>DISTR_RHO (ratio distribution across several transformers controlling one bus) is a LINEAR family of
- * contributions: {@code drRow} the stable DISTR_RHO row (a controller's BRANCH_RHO1 row), {@code drCol} a
- * controller's BRANCH_RHO1 column, {@code drCoef} the constant coefficient ({@code 1/count} for a foreign
- * controller, {@code 1/count - 1} for the row's own). Empty unless several transformers share one bus.
+ * <p>DISTR_RHO and DISTR_SHUNT_B are {@link LinearDistributionTerms}.
  *
  * <p>Reactive limits (the batched full-loadflow PV↔PQ outer loop): per LOCAL generator-voltage-controller
  * (PV) bus, {@code rlVrow} its stable BUS_V row (where a PV→PQ switch flips the row mode 0→1 and the target
@@ -79,8 +76,7 @@ public record GpuAcData(double[] cbIn, int[] cbIdx, int[] cbPcSide, double[] obI
                         int[] dqMemberQrGroup, double[] dqMemberTargetQ, int[] dqMemberBusNum,
                         int[] dqMemberTgtPtr, int[] dqMemberTgtPeer,
                         double[] ziIn, int[] ziIdx,
-                        int[] drRow, int[] drCol, double[] drCoef,
-                        int[] dbRow, int[] dbCol, double[] dbCoef,
+                        LinearDistributionTerms distrRho, LinearDistributionTerms distrShuntB,
                         int[] rlVrow, double[] rlMinQ, double[] rlMaxQ, double[] rlLoadQ, double[] rlVtarget,
                         double[] rlSvcBmin, double[] rlSvcBmax, double[] rlV2Base,
                         byte[] rlMonitored, byte[] rlRemote, int[] rlCmpVrow, int[] rlBusNum,
@@ -117,7 +113,7 @@ public record GpuAcData(double[] cbIn, int[] cbIdx, int[] cbPcSide, double[] obI
                 && java.util.Arrays.equals(cbIn, other.cbIn) && java.util.Arrays.equals(obIn, other.obIn)
                 && java.util.Arrays.equals(shIn, other.shIn) && java.util.Arrays.equals(hvIn, other.hvIn)
                 && java.util.Arrays.equals(ziIn, other.ziIn) && java.util.Arrays.equals(vdlIn, other.vdlIn);
-        // drCoef is structural (qPct/count-derived); covered by sameStructureAs below.
+        // distrRho's coefficients are structural (qPct/count-derived); covered by sameStructureAs below.
     }
 
     /**
@@ -141,10 +137,7 @@ public record GpuAcData(double[] cbIn, int[] cbIdx, int[] cbPcSide, double[] obI
                 && java.util.Arrays.equals(dqWeight, other.dqWeight) && java.util.Arrays.equals(dqRow, other.dqRow)
                 && java.util.Arrays.equals(dqKind, other.dqKind)
                 && java.util.Arrays.equals(ziIn, other.ziIn) && java.util.Arrays.equals(ziIdx, other.ziIdx)
-                && java.util.Arrays.equals(drRow, other.drRow) && java.util.Arrays.equals(drCol, other.drCol)
-                && java.util.Arrays.equals(drCoef, other.drCoef)
-                && java.util.Arrays.equals(dbRow, other.dbRow) && java.util.Arrays.equals(dbCol, other.dbCol)
-                && java.util.Arrays.equals(dbCoef, other.dbCoef)
+                && distrRho.sameAs(other.distrRho) && distrShuntB.sameAs(other.distrShuntB)
                 && java.util.Arrays.equals(vdlIn, other.vdlIn) && java.util.Arrays.equals(vdlIdx, other.vdlIdx)
                 // structure input too: the phase-control alt-dest tables (pcDest/pcSel) are built from it
                 && java.util.Arrays.equals(cbPcSide, other.cbPcSide)
@@ -169,10 +162,7 @@ public record GpuAcData(double[] cbIn, int[] cbIdx, int[] cbPcSide, double[] obI
                 && java.util.Arrays.equals(dqRow, other.dqRow) && java.util.Arrays.equals(dqWeight, other.dqWeight)
                 && java.util.Arrays.equals(dqKind, other.dqKind)
                 && java.util.Arrays.equals(ziIdx, other.ziIdx)
-                && java.util.Arrays.equals(drRow, other.drRow) && java.util.Arrays.equals(drCol, other.drCol)
-                && java.util.Arrays.equals(drCoef, other.drCoef)
-                && java.util.Arrays.equals(dbRow, other.dbRow) && java.util.Arrays.equals(dbCol, other.dbCol)
-                && java.util.Arrays.equals(dbCoef, other.dbCoef)
+                && distrRho.sameAs(other.distrRho) && distrShuntB.sameAs(other.distrShuntB)
                 && java.util.Arrays.equals(rlVrow, other.rlVrow) && java.util.Arrays.equals(rlMinQ, other.rlMinQ)
                 && java.util.Arrays.equals(rlMaxQ, other.rlMaxQ) && java.util.Arrays.equals(rlLoadQ, other.rlLoadQ)
                 && java.util.Arrays.equals(rlVtarget, other.rlVtarget)
@@ -275,7 +265,7 @@ public record GpuAcData(double[] cbIn, int[] cbIdx, int[] cbPcSide, double[] obI
     }
 
     public int getDistrRhoContributionCount() {
-        return drRow.length;
+        return distrRho.row().length;
     }
 
     /** Number of local PV controller buses subject to the batched reactive-limits (PV→PQ) outer loop. */

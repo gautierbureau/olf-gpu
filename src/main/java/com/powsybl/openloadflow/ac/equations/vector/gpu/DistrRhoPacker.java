@@ -31,11 +31,7 @@ public final class DistrRhoPacker {
     private DistrRhoPacker() {
     }
 
-    /** DISTR_RHO contributions in the flat device layout: {@code {drRow, drCol}} per row + coefficient. */
-    record DrPack(int[] drRow, int[] drCol, double[] drCoef) {
-    }
-
-    static DrPack distrRhoPack(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
+    static LinearDistributionTerms distrRhoPack(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
                                ExtractionColumns columns) {
         List<int[]> dr = new ArrayList<>();      // {drRow, drCol} per DISTR_RHO contribution
         List<Double> drC = new ArrayList<>();    // coefficient per contribution
@@ -48,7 +44,7 @@ public final class DistrRhoPacker {
             drCol[i] = dr.get(i)[1];
             drCoef[i] = drC.get(i);
         }
-        return new DrPack(drRow, drCol, drCoef);
+        return new LinearDistributionTerms(drRow, drCol, drCoef);
     }
 
     /**

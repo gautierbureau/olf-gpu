@@ -135,11 +135,11 @@ public final class GpuEquationDump {
             add(terms, dqRow[k], String.format("dq[k=%d elem=%d side=%d kind=%d w=%.6g]",
                     k, d.dqElem()[k], d.dqSide()[k], d.dqKind()[k], d.dqWeight()[k]));
         }
-        for (int k = 0; k < d.drRow().length; k++) {
-            add(terms, d.drRow()[k], "dr[col=" + d.drCol()[k] + "]");
+        for (int k = 0; k < d.distrRho().row().length; k++) {
+            add(terms, d.distrRho().row()[k], "dr[col=" + d.distrRho().column()[k] + "]");
         }
-        for (int k = 0; k < d.dbRow().length; k++) {
-            add(terms, d.dbRow()[k], "db[col=" + d.dbCol()[k] + "]");
+        for (int k = 0; k < d.distrShuntB().row().length; k++) {
+            add(terms, d.distrShuntB().row()[k], "db[col=" + d.distrShuntB().column()[k] + "]");
         }
         int[] vdl = d.vdlIdx();
         for (int e = 0; e < vdl.length / 4; e++) {

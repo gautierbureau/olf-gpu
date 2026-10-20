@@ -160,7 +160,9 @@ class GpuGeneratorRemoteControlTest {
                 d.cbIn(), d.cbIdx(), d.obIn(), d.obIdx(), d.shIn(), d.shIdx(), d.hvIn(), d.hvIdx(),
                 d.dqElem(), d.dqSide(), d.dqWeight(), d.dqRow(), d.dqKind(),
                 d.ziIn(), d.ziIdx(),
-                d.drRow(), d.drCol(), d.drCoef(), d.dbRow(), d.dbCol(), d.dbCoef(), d.reactiveRelocation().groupStart(), d.reactiveRelocation().candidateRows(), d.obQAlt(), d.ziQAlt());
+                d.distrRho().row(), d.distrRho().column(), d.distrRho().coefficient(),
+                d.distrShuntB().row(), d.distrShuntB().column(), d.distrShuntB().coefficient(),
+                d.reactiveRelocation().groupStart(), d.reactiveRelocation().candidateRows(), d.obQAlt(), d.ziQAlt());
         int iters = (int) out[n];
         double norm = out[n + 1];
 

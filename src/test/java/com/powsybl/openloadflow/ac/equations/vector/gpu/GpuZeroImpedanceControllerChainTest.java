@@ -104,7 +104,7 @@ class GpuZeroImpedanceControllerChainTest extends AbstractLoadFlowNetworkFactory
                 d.cbIn(), d.cbIdx(), d.obIn(), d.obIdx(), d.shIn(), d.shIdx(), d.hvIn(), d.hvIdx(),
                 d.dqElem(), d.dqSide(), d.dqWeight(), d.dqRow(), d.dqKind(),
                 d.ziIn(), d.ziIdx(),
-                d.drRow(), d.drCol(), d.drCoef(), d.dbRow(), d.dbCol(), d.dbCoef(),
+                d.distrRho().row(), d.distrRho().column(), d.distrRho().coefficient(), d.distrShuntB().row(), d.distrShuntB().column(), d.distrShuntB().coefficient(),
                 // the group tables + ob/zi alternates travel with the packs: a pilot-self group enrolled
                 // in the candidate table (rotation) encodes -2-g in the q alternates, refused without them
                 d.reactiveRelocation().groupStart(), d.reactiveRelocation().candidateRows(), d.obQAlt(), d.ziQAlt());

@@ -88,19 +88,19 @@ final class VoltageControlOverrides {
         double cPrime = group.size() - 1.0;
         List<Double> idx = new ArrayList<>();
         List<Double> coefs = new ArrayList<>();
-        for (int k = 0; k < gpuData.drRow().length; k++) {
-            LfBranch rowOwner = byRhoCol.get(gpuData.drRow()[k]);
-            LfBranch colOwner = byRhoCol.get(gpuData.drCol()[k]);
+        for (int k = 0; k < gpuData.distrRho().row().length; k++) {
+            LfBranch rowOwner = byRhoCol.get(gpuData.distrRho().row()[k]);
+            LfBranch colOwner = byRhoCol.get(gpuData.distrRho().column()[k]);
             if (rowOwner == null && colOwner == null) {
                 continue;                                    // another group's contribution
             }
             double coef;
-            if (rowOwner == d || colOwner == d || gpuData.drRow()[k] == dCol || gpuData.drCol()[k] == dCol) {
+            if (rowOwner == d || colOwner == d || gpuData.distrRho().row()[k] == dCol || gpuData.distrRho().column()[k] == dCol) {
                 coef = 0;                                    // cross terms to the outaged member die with it
             } else if (newCarrier != null && rowOwner == newCarrier) {
                 coef = 0;                                    // the re-picked carrier's DISTR_RHO row deactivates
             } else {
-                coef = 1.0 / cPrime - (gpuData.drRow()[k] == gpuData.drCol()[k] ? 1.0 : 0.0);
+                coef = 1.0 / cPrime - (gpuData.distrRho().row()[k] == gpuData.distrRho().column()[k] ? 1.0 : 0.0);
             }
             idx.add((double) k);
             coefs.add(coef);

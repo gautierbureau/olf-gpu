@@ -128,8 +128,8 @@ public final class GpuAcDataExtractor {
         GpuAcFamilyPacker.Packs family = GpuAcFamilyPacker.pack(network, columns, baseOpenBranchIds, baseOpenZiBranchIds);
         ReactiveLimitsPacker.RlPack rl = ReactiveLimitsPacker.reactiveLimitsPack(network, es, columns, reactiveLimits);
         DistrQPacker.DqPack dq = DistrQPacker.distrQPack(network, es, columns, family, rl);
-        DistrRhoPacker.DrPack dr = DistrRhoPacker.distrRhoPack(network, es, columns);
-        DistrShuntBPacker.DsbPack dsb = DistrShuntBPacker.distrShuntBPack(network, es, columns);
+        LinearDistributionTerms dr = DistrRhoPacker.distrRhoPack(network, es, columns);
+        LinearDistributionTerms dsb = DistrShuntBPacker.distrShuntBPack(network, es, columns);
 
         RemoteMemberReactiveTerms rmq = RemoteMemberQPacker.remoteMemberQPack(network, es, columns, family, reactiveLimits);
         DistributedSlackPacker.DsPack ds = DistributedSlackPacker.distributedSlackPack(network, es, columns, distributedSlack, dsParams);
@@ -173,8 +173,7 @@ public final class GpuAcDataExtractor {
                 dq.dqMemberQrGroup(), dq.dqMemberTargetQ(), dq.dqMemberBusNum(),
                 dq.dqMemberTgtPtr(), dq.dqMemberTgtPeer(),
                 GpuAcArrays.flatD(family.ziIn(), 1), GpuAcArrays.flatI(family.ziIdx(), 11),
-                dr.drRow(), dr.drCol(), dr.drCoef(),
-                dsb.dbRow(), dsb.dbCol(), dsb.dbCoef(),
+                dr, dsb,
                 rl.rlVrow(), rl.rlMinQ(), rl.rlMaxQ(), rl.rlLoadQ(), rl.rlVtarget(),
                 rl.rlSvcBmin(), rl.rlSvcBmax(), rl.rlV2Base(), rl.rlMonitored(),
                 rl.rlRemote(), rl.rlCmpVrow(), rl.rlBusNum(),

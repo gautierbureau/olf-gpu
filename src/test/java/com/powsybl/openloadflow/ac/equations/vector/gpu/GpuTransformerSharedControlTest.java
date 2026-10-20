@@ -89,16 +89,16 @@ class GpuTransformerSharedControlTest {
         // control DISABLED (the AFTER_GENERATOR base): the pack must still carry the coupling
         members.forEach(b -> b.setVoltageControlEnabled(false));
         GpuAcData d = GpuAcDataExtractor.extract(network, es);
-        org.junit.jupiter.api.Assertions.assertEquals(2, d.drRow().length,
+        org.junit.jupiter.api.Assertions.assertEquals(2, d.distrRho().row().length,
                 "one non-free member row x 2 columns expected in the DISTR_RHO pack at a disabled base");
         int n = es.getIndex().getSortedVariablesToFind().size();
         int rhoColFree = es.getVariableSet().getVariable(members.get(0).getNum(), AcVariableType.BRANCH_RHO1).getRow();
         int rhoColOther = es.getVariableSet().getVariable(members.get(1).getNum(), AcVariableType.BRANCH_RHO1).getRow();
-        for (int k = 0; k < d.drRow().length; k++) {
-            org.junit.jupiter.api.Assertions.assertEquals(rhoColOther, d.drRow()[k],
+        for (int k = 0; k < d.distrRho().row().length; k++) {
+            org.junit.jupiter.api.Assertions.assertEquals(rhoColOther, d.distrRho().row()[k],
                     "DISTR_RHO rows must sit on the NON-free member's rho column");
         }
-        org.junit.jupiter.api.Assertions.assertEquals(-0.5, d.drCoef()[java.util.List.of(d.drCol()[0], d.drCol()[1]).indexOf(rhoColOther)],
+        org.junit.jupiter.api.Assertions.assertEquals(-0.5, d.distrRho().coefficient()[java.util.List.of(d.distrRho().column()[0], d.distrRho().column()[1]).indexOf(rhoColOther)],
                 1e-15, "self coefficient 1/2 - 1");
         // toggled ALL-ON: activation must express the group state
         members.forEach(b -> b.setVoltageControlEnabled(true));
@@ -145,7 +145,9 @@ class GpuTransformerSharedControlTest {
                 d.cbIn(), d.cbIdx(), d.obIn(), d.obIdx(), d.shIn(), d.shIdx(), d.hvIn(), d.hvIdx(),
                 d.dqElem(), d.dqSide(), d.dqWeight(), d.dqRow(), d.dqKind(),
                 d.ziIn(), d.ziIdx(),
-                d.drRow(), d.drCol(), d.drCoef(), d.dbRow(), d.dbCol(), d.dbCoef(), d.reactiveRelocation().groupStart(), d.reactiveRelocation().candidateRows(), d.obQAlt(), d.ziQAlt());
+                d.distrRho().row(), d.distrRho().column(), d.distrRho().coefficient(),
+                d.distrShuntB().row(), d.distrShuntB().column(), d.distrShuntB().coefficient(),
+                d.reactiveRelocation().groupStart(), d.reactiveRelocation().candidateRows(), d.obQAlt(), d.ziQAlt());
         int iters = (int) out[n];
         double norm = out[n + 1];
 

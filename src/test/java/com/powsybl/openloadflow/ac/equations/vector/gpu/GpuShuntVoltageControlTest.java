@@ -102,7 +102,7 @@ class GpuShuntVoltageControlTest {
                 d.cbIn(), d.cbIdx(), d.obIn(), d.obIdx(), d.shIn(), d.shIdx(), d.hvIn(), d.hvIdx(),
                 d.dqElem(), d.dqSide(), d.dqWeight(), d.dqRow(), d.dqKind(),
                 d.ziIn(), d.ziIdx(),
-                d.drRow(), d.drCol(), d.drCoef(), d.dbRow(), d.dbCol(), d.dbCoef());
+                d.distrRho().row(), d.distrRho().column(), d.distrRho().coefficient(), d.distrShuntB().row(), d.distrShuntB().column(), d.distrShuntB().coefficient());
         int iters = (int) out[n];
         double norm = out[n + 1];
 
@@ -210,7 +210,7 @@ class GpuShuntVoltageControlTest {
                 dOff.cbIn(), dOff.cbIdx(), dOff.obIn(), dOff.obIdx(), dOff.shIn(), dOff.shIdx(), dOff.hvIn(), dOff.hvIdx(),
                 dOff.dqElem(), dOff.dqSide(), dOff.dqWeight(), dOff.dqRow(), dOff.dqKind(),
                 dOff.ziIn(), dOff.ziIdx(),
-                dOff.drRow(), dOff.drCol(), dOff.drCoef(), dOff.dbRow(), dOff.dbCol(), dOff.dbCoef());
+                dOff.distrRho().row(), dOff.distrRho().column(), dOff.distrRho().coefficient(), dOff.distrShuntB().row(), dOff.distrShuntB().column(), dOff.distrShuntB().coefficient());
         double norm = out[n + 1];
 
         // (4) Reference: OLF's own continuous (control-ON) solve — the correct answer.

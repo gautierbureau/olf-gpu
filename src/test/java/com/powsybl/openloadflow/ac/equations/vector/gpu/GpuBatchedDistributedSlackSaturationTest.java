@@ -129,7 +129,7 @@ class GpuBatchedDistributedSlackSaturationTest {
                 d.dsPhiRow(), d.dsFactor(), d.dsSlackPhiRow(), d.dsSlackTargetP(),
                 d.dsBaseTargetP(), d.dsMaxDelta(), d.dsMinDelta(),
                 d.dqElem(), d.dqSide(), d.dqWeight(), d.dqRow(), d.dqKind(),
-                d.drRow(), d.drCol(), d.drCoef(), d.dbRow(), d.dbCol(), d.dbCoef(), d.ziIn(), d.ziIdx());
+                d.distrRho().row(), d.distrRho().column(), d.distrRho().coefficient(), d.distrShuntB().row(), d.distrShuntB().column(), d.distrShuntB().coefficient(), d.ziIn(), d.ziIdx());
         int n = baseState.length;
         int status = (int) batch[0][n + 2];
         System.out.printf("GPU distributed slack [%s]: status=%d, %d iters, ||F||inf %.2e%n",

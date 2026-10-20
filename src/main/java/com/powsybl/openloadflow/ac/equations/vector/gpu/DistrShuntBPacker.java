@@ -30,12 +30,7 @@ final class DistrShuntBPacker {
     private DistrShuntBPacker() {
     }
 
-    /** DISTR_SHUNT_B contributions in the flat device layout: {@code {dbRow, dbCol}} per row + coefficient —
-     *  the shunt-susceptance analogue of {@link DistrRhoPacker.DrPack} (structurally identical linear distribution rows). */
-    record DsbPack(int[] dbRow, int[] dbCol, double[] dbCoef) {
-    }
-
-    static DsbPack distrShuntBPack(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
+    static LinearDistributionTerms distrShuntBPack(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
                                    ExtractionColumns columns) {
         List<int[]> db = new ArrayList<>();      // {dbRow, dbCol} per DISTR_SHUNT_B contribution
         List<Double> dbC = new ArrayList<>();    // coefficient per contribution
@@ -48,7 +43,7 @@ final class DistrShuntBPacker {
             dbCol[i] = db.get(i)[1];
             dbCoef[i] = dbC.get(i);
         }
-        return new DsbPack(dbRow, dbCol, dbCoef);
+        return new LinearDistributionTerms(dbRow, dbCol, dbCoef);
     }
 
     /**

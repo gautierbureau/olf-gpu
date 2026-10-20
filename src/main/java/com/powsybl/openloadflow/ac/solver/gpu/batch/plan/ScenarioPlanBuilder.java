@@ -47,8 +47,8 @@ final class ScenarioPlanBuilder {
     // shared-TVC group renormalizes the survivors' 1/count coefficients (the CPU's coefficients
     // are live suppliers over !isDisabled) and zeroes every contribution touching the outaged
     // member's rho; the FREE member's outage shifts the pilot-Q role — CPU (A6).
-    final int[][] drOvContribByIndex;
-    final double[][] drOvCByIndex;
+    final int[][] distrRhoOverrideTermByIndex;
+    final double[][] distrRhoOverrideCoefficientByIndex;
     final int[][] islandedDsByIndex;
     final int[][] islandedRlByIndex;
     // {pRow, qRow} per LfBus.getNum(), resolved lazily on the first injection outage: the P/Q
@@ -78,8 +78,8 @@ final class ScenarioPlanBuilder {
         this.dqOvWByIndex = new double[nContingencies][];
         this.dqKeyOvMemberByIndex = new int[nContingencies][];
         this.dqKeyOvByIndex = new double[nContingencies][];
-        this.drOvContribByIndex = new int[nContingencies][];
-        this.drOvCByIndex = new double[nContingencies][];
+        this.distrRhoOverrideTermByIndex = new int[nContingencies][];
+        this.distrRhoOverrideCoefficientByIndex = new double[nContingencies][];
         this.islandedDsByIndex = new int[nContingencies][];
         this.islandedRlByIndex = new int[nContingencies][];
         this.dqSubByIndex = new int[nContingencies][];
@@ -99,7 +99,7 @@ final class ScenarioPlanBuilder {
         com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.LAST_ISLANDED_DS_MASKED.set(maskedDs);
         return new GpuBatchQualification.ScenarioPlan(batchedIndices, frozenRowsByIndex, islandedNumsByIndex,
                 frozenTargetsByIndex, genOutagesByIndex, islandingCount, activePowerLossByIndex,
-                dqOvContribByIndex, dqOvWByIndex, dqKeyOvMemberByIndex, dqKeyOvByIndex, drOvContribByIndex, drOvCByIndex, islandedDsByIndex,
+                dqOvContribByIndex, dqOvWByIndex, dqKeyOvMemberByIndex, dqKeyOvByIndex, distrRhoOverrideTermByIndex, distrRhoOverrideCoefficientByIndex, islandedDsByIndex,
                 islandedRlByIndex, islandedHvdcsByIndex, dqSubByIndex,
                 new GpuBatchQualification.SlackRelocations(relocatedSlackRow, relocatedSlackShift));
     }

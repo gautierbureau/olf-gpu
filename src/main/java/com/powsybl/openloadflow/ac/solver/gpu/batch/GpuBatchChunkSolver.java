@@ -179,8 +179,8 @@ final class GpuBatchChunkSolver {
         double[][] dqOvWByIndex = plan.dqOvWByIndex();
         int[][] dqKeyOvMemberByIndex = plan.dqKeyOvMemberByIndex();
         double[][] dqKeyOvByIndex = plan.dqKeyOvByIndex();
-        int[][] drOvContribByIndex = plan.drOvContribByIndex();
-        double[][] drOvCByIndex = plan.drOvCByIndex();
+        int[][] distrRhoOverrideTermByIndex = plan.distrRhoOverrideTermByIndex();
+        double[][] distrRhoOverrideCoefficientByIndex = plan.distrRhoOverrideCoefficientByIndex();
         int[][] islandedDsByIndex = plan.islandedDsByIndex();
         int[][] islandedRlByIndex = plan.islandedRlByIndex();
         List<com.powsybl.openloadflow.network.LfHvdc>[] islandedHvdcsByIndex = plan.islandedHvdcsByIndex();

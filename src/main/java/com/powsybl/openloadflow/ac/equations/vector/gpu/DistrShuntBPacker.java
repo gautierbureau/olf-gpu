@@ -32,18 +32,18 @@ final class DistrShuntBPacker {
 
     static LinearDistributionTerms distrShuntBPack(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
                                    ExtractionColumns columns) {
-        List<int[]> db = new ArrayList<>();      // {dbRow, dbCol} per DISTR_SHUNT_B contribution
-        List<Double> dbC = new ArrayList<>();    // coefficient per contribution
-        buildDistrShuntBContributions(network, es, columns.shuntBCol(), db, dbC);
-        int[] dbRow = new int[db.size()];
-        int[] dbCol = new int[db.size()];
-        double[] dbCoef = new double[db.size()];
-        for (int i = 0; i < db.size(); i++) {
-            dbRow[i] = db.get(i)[0];
-            dbCol[i] = db.get(i)[1];
-            dbCoef[i] = dbC.get(i);
+        List<int[]> terms = new ArrayList<>();   // {distrShuntBRow, distrShuntBColumn} per DISTR_SHUNT_B contribution
+        List<Double> coefficients = new ArrayList<>();    // coefficient per contribution
+        buildDistrShuntBContributions(network, es, columns.shuntBCol(), terms, coefficients);
+        int[] distrShuntBRow = new int[terms.size()];
+        int[] distrShuntBColumn = new int[terms.size()];
+        double[] distrShuntBCoefficient = new double[terms.size()];
+        for (int i = 0; i < terms.size(); i++) {
+            distrShuntBRow[i] = terms.get(i)[0];
+            distrShuntBColumn[i] = terms.get(i)[1];
+            distrShuntBCoefficient[i] = coefficients.get(i);
         }
-        return new LinearDistributionTerms(dbRow, dbCol, dbCoef);
+        return new LinearDistributionTerms(distrShuntBRow, distrShuntBColumn, distrShuntBCoefficient);
     }
 
     /**
@@ -69,13 +69,13 @@ final class DistrShuntBPacker {
                 if (GpuAcRowIndexing.row(es, gk.getNum(), AcEquationType.DISTR_SHUNT_B) < 0) {
                     continue;                                // the free controller carries the pilot's Q, no DISTR_SHUNT_B
                 }
-                int dbRow = shuntBCol[gk.getNum()];
+                int distrShuntBRow = shuntBCol[gk.getNum()];
                 for (LfShunt gj : controllers) {
                     if (gj.isDisabled()) {
                         continue;
                     }
                     double coef = 1.0 / count - (gj == gk ? 1.0 : 0.0);
-                    out.add(new int[] {dbRow, shuntBCol[gj.getNum()]});
+                    out.add(new int[] {distrShuntBRow, shuntBCol[gj.getNum()]});
                     coefs.add(coef);
                 }
             }

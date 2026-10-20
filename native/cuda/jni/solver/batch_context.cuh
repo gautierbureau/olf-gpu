@@ -42,7 +42,7 @@ struct BatchSolverContext {
     int nScenarios = 0;
     int nElements = 0;
     int cbOffset = 0, obOffset = 0, shOffset = 0, hvOffset = 0;   // element-mask offsets per family
-    int ndq = 0, ndr = 0, ndb = 0, nzi = 0;                  // copies of the structure counts
+    int ndq = 0, nDistrRho = 0, nDistrShuntB = 0, nzi = 0;                  // copies of the structure counts
     DeviceBuf dX, dTarget, dF, dB, dDx, dVals, dMode;        // per-scenario (n or nnz strided)
     // per scenario: the state at its last CONVERGED inner solve (its starting state before any): what OLF's network
     // holds when a run fails (NewtonRaphson updates the buses only on convergence), and so where OLF starts the
@@ -149,10 +149,10 @@ struct BatchSolverContext {
     // for what keys cannot express (a re-extracted pack whose free role moved).
     int nDqKeyOv = 0;
     DeviceBuf dDqKeyOvIdx, dDqKeyOvKey;
-    // DISTR_RHO coefficient overrides (setBatchDrCoefOverrides): a member outage renormalizes the
+    // DISTR_RHO coefficient overrides (setBatchDistrRhoCoefficientOverrides): a member outage renormalizes the
     // group's 1/count coefficients per scenario — {s, contrib} pairs + the new coefficient.
-    int nDrOv = 0;
-    DeviceBuf dDrOvIdx, dDrOvC;
+    int nDistrRhoCoefficientOverrides = 0;
+    DeviceBuf dDistrRhoOverrideScenarioTerm, dDistrRhoOverrideCoefficient;
     // Per-scenario ACTIVE equation counts (setBatchActiveRowCounts): OLF's L2 stopping threshold is
     // sqrt(eps^2 * nActive) and the CPU REMOVES equations for outaged elements carrying variables
     // (rho/a1 identities) and islanded buses — the padded device n over-counts by those rows, a ~%

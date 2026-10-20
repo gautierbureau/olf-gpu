@@ -91,8 +91,8 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& st, int nScenar
     ctx->shOffset = st->shOffset;
     ctx->hvOffset = st->hvOffset;
     ctx->ndq = st->ndq;
-    ctx->ndr = st->ndr;
-    ctx->ndb = st->ndb;
+    ctx->nDistrRho = st->nDistrRho;
+    ctx->nDistrShuntB = st->nDistrShuntB;
     ctx->nzi = st->nzi;
     const std::vector<int>& rowMap = st->rowMap;
     const std::vector<int>& rowPtr = st->rowPtr;

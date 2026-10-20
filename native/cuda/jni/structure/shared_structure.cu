@@ -40,8 +40,8 @@ SharedStructure* buildStructure(int n,
                                 int ndq, const int* dqElem, const int* dqSide, const double* dqWeight,
                                 const int* dqRow, const int* dqKind,
                                 int nzi, const double* ziIn, const int* ziIdx,
-                                int ndr, const int* drRow, const int* drCol, const double* drCoef,
-                                int ndb, const int* dbRow, const int* dbCol, const double* dbCoef,
+                                int nDistrRho, const int* distrRhoRow, const int* distrRhoColumn, const double* distrRhoCoefficient,
+                                int nDistrShuntB, const int* distrShuntBRow, const int* distrShuntBColumn, const double* distrShuntBCoefficient,
                                 const int* cbPcSide,
                                 int nvdl, const double* vdlIn, const int* vdlIdx,
                                 int nQr, const int* qrPtr, const int* qrRowsIn,
@@ -170,7 +170,7 @@ SharedStructure* buildStructure(int n,
         collectHvAltPattern(nhv, hvIdx, relocOwn, pat);
     }
     collectFamilyPattern(rowMap, cbIdx, obIdx, shIdx, ndq, dqElem, dqSide, dqKind, dqRow,
-                         ndr, drRow, drCol, ndb, dbRow, dbCol, nzi, ziIdx, dynReloc ? relocOwn : nullptr, pat);
+                         nDistrRho, distrRhoRow, distrRhoColumn, nDistrShuntB, distrShuntBRow, distrShuntBColumn, nzi, ziIdx, dynReloc ? relocOwn : nullptr, pat);
     if (dynReloc) {
         for (int e = 0; e < nzi; e++) {                      // zi STOCK positions: a +-dummy coupling that lands on
         const int* z = ziIdx + static_cast<size_t>(e) * 11;   // a relocated bus's home row also needs the slot
@@ -552,10 +552,10 @@ SharedStructure* buildStructure(int n,
     buildZeroImpDest(st.get(), pos, rowMap, nzi, ziIn, ziIdx, ziQAlt, relocOwn, depGroupOfRow);
 
     // ---- DISTR_RHO destinations: per contribution {F row, J slot (row, r1 col)} ----
-    buildDistrRhoDest(st.get(), pos, rowMap, ndr, drRow, drCol, drCoef);
+    buildDistrRhoDest(st.get(), pos, rowMap, nDistrRho, distrRhoRow, distrRhoColumn, distrRhoCoefficient);
 
     // ---- DISTR_SHUNT_B destinations: per contribution {F row, J slot (row, b col)} ----
-    buildDistrShuntBDest(st.get(), pos, rowMap, ndb, dbRow, dbCol, dbCoef);
+    buildDistrShuntBDest(st.get(), pos, rowMap, nDistrShuntB, distrShuntBRow, distrShuntBColumn, distrShuntBCoefficient);
 
     // ---- voltage-dependent load (ZIP/exponential) destinations: one J slot (row, own-V) per term ----
     st->nvdl = nvdl;

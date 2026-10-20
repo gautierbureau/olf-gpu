@@ -130,8 +130,8 @@ std::vector<int> buildRowMap(int n, int ncb, const int* cbIdx, int nob, const in
 void collectFamilyPattern(const std::vector<int>& rowMap,
                           const int* cbIdx, const int* obIdx, const int* shIdx,
                           int ndq, const int* dqElem, const int* dqSide, const int* dqKind, const int* dqRow,
-                          int ndr, const int* drRow, const int* drCol,
-                          int ndb, const int* dbRow, const int* dbCol,
+                          int nDistrRho, const int* distrRhoRow, const int* distrRhoColumn,
+                          int nDistrShuntB, const int* distrShuntBRow, const int* distrShuntBColumn,
                           int nzi, const int* ziIdx, const int* relocOwn,
                           std::vector<std::pair<int, int>>& pat);
 
@@ -185,10 +185,10 @@ void buildDistrQDest(SharedStructure* st, const CsrPattern& pos, const std::vect
                      const int* cbIdx, const int* obIdx, const int* shIdx, const int* relocOwn);
 
 void buildDistrRhoDest(SharedStructure* st, const CsrPattern& pos, const std::vector<int>& rowMap,
-                       int ndr, const int* drRow, const int* drCol, const double* drCoef);
+                       int nDistrRho, const int* distrRhoRow, const int* distrRhoColumn, const double* distrRhoCoefficient);
 
 void buildDistrShuntBDest(SharedStructure* st, const CsrPattern& pos, const std::vector<int>& rowMap,
-                          int ndb, const int* dbRow, const int* dbCol, const double* dbCoef);
+                          int nDistrShuntB, const int* distrShuntBRow, const int* distrShuntBColumn, const double* distrShuntBCoefficient);
 
 void patchFrozenGroupDests(DeviceBuf& dest, const std::vector<int>& relocGroup,
                            const std::vector<int>& relocOff, int nout,

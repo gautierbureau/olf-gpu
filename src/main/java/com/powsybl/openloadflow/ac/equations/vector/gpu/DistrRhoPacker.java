@@ -33,18 +33,18 @@ public final class DistrRhoPacker {
 
     static LinearDistributionTerms distrRhoPack(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
                                ExtractionColumns columns) {
-        List<int[]> dr = new ArrayList<>();      // {drRow, drCol} per DISTR_RHO contribution
-        List<Double> drC = new ArrayList<>();    // coefficient per contribution
-        buildDistrRhoContributions(network, es, columns.branchRhoCol(), dr, drC);
-        int[] drRow = new int[dr.size()];
-        int[] drCol = new int[dr.size()];
-        double[] drCoef = new double[dr.size()];
-        for (int i = 0; i < dr.size(); i++) {
-            drRow[i] = dr.get(i)[0];
-            drCol[i] = dr.get(i)[1];
-            drCoef[i] = drC.get(i);
+        List<int[]> terms = new ArrayList<>();   // {distrRhoRow, distrRhoColumn} per DISTR_RHO contribution
+        List<Double> coefficients = new ArrayList<>();    // coefficient per contribution
+        buildDistrRhoContributions(network, es, columns.branchRhoCol(), terms, coefficients);
+        int[] distrRhoRow = new int[terms.size()];
+        int[] distrRhoColumn = new int[terms.size()];
+        double[] distrRhoCoefficient = new double[terms.size()];
+        for (int i = 0; i < terms.size(); i++) {
+            distrRhoRow[i] = terms.get(i)[0];
+            distrRhoColumn[i] = terms.get(i)[1];
+            distrRhoCoefficient[i] = coefficients.get(i);
         }
-        return new LinearDistributionTerms(drRow, drCol, drCoef);
+        return new LinearDistributionTerms(distrRhoRow, distrRhoColumn, distrRhoCoefficient);
     }
 
     /**
@@ -77,10 +77,10 @@ public final class DistrRhoPacker {
             long count = controllers.size();
             for (int k = 1; k < controllers.size(); k++) {   // k = 0 is the FREE member: no DISTR_RHO row
                 LfBranch gk = controllers.get(k);
-                int drRow = branchRhoCol[gk.getNum()];
+                int distrRhoRow = branchRhoCol[gk.getNum()];
                 for (LfBranch gj : controllers) {
                     double coef = 1.0 / count - (gj == gk ? 1.0 : 0.0);
-                    out.add(new int[] {drRow, branchRhoCol[gj.getNum()]});
+                    out.add(new int[] {distrRhoRow, branchRhoCol[gj.getNum()]});
                     coefs.add(coef);
                 }
             }

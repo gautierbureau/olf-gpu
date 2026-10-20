@@ -35,14 +35,14 @@ __global__ void fillDistrQBatch(int ndq, int nScenarios, int n, int nnz, int nEl
                                 int dqTraceRow,
                                 const char* dqSub, const int* qrMemberStart, int nDqMembersAll);
 
-__global__ void fillDistrRhoBatch(int ndr, int nScenarios, int n, int nnz,
-                                  const int* drCol, const double* drCoef, const int* drDest,
+__global__ void fillDistrRhoBatch(int nDistrRho, int nScenarios, int n, int nnz,
+                                  const int* distrRhoColumn, const double* distrRhoCoefficient, const int* distrRhoDestination,
                                   const double* x, double* vals, double* F, const char* active,
-                                  int nDrOv, const int* drOvIdx, const double* drOvC,
-                                  const int* drQrGroup, const int* mode, const int* qrPtr, const int* qrRows);
+                                  int nDistrRhoCoefficientOverrides, const int* distrRhoOverrideScenarioTerm, const double* distrRhoOverrideCoefficient,
+                                  const int* distrRhoQrGroup, const int* mode, const int* qrPtr, const int* qrRows);
 
-__global__ void fillDistrShuntBBatch(int ndb, int nScenarios, int n, int nnz,
-                                     const int* dbCol, const double* dbCoef, const int* dbDest,
+__global__ void fillDistrShuntBBatch(int nDistrShuntB, int nScenarios, int n, int nnz,
+                                     const int* distrShuntBColumn, const double* distrShuntBCoefficient, const int* distrShuntBDestination,
                                      const double* x, double* vals, double* F, const char* active);
 
 }  // namespace olfgpu

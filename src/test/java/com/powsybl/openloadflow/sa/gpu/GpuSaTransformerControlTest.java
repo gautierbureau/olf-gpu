@@ -215,7 +215,7 @@ class GpuSaTransformerControlTest extends AbstractGpuSaTest {
     /** SHARED transformer control group under AFTER_GENERATOR TVC, THREE parallel T2wTs regulating
      *  one bus (DISTR_RHO coupling) — plan A3/A4/A5: the parallel-line outage orchestrates the full
      *  group on the device; the T2wT2 (NON-free) MEMBER outage BATCHES with the survivors'
-     *  coefficients renormalized per scenario (drOv: 1/3-based -> 1/2-based, cross terms to the
+     *  coefficients renormalized per scenario (coefficient overrides: 1/3-based -> 1/2-based, cross terms to the
      *  outaged rho zeroed, its identity pinned at base — plan A5); the T2wT (FREE member) outage is
      *  routed to the CPU per-contingency (role re-pick, plan A6). All at 1e-12. */
     @Test

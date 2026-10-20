@@ -165,18 +165,18 @@ final class BranchOutagePlanner {
                 pb.genOutagesByIndex[i] = merged.toArray(new GenOutage[0]);
             }
         }
-        double[][] drOv = VoltageControlOverrides.distrRhoOverrides(es, gpuData, distrRhoControllers,
+        double[][] distrRhoOverrideTable = VoltageControlOverrides.distrRhoOverrides(es, gpuData, distrRhoControllers,
                                                                     c.outagedBranches(), incrementalTvc);
-        if (drOv == null) {
+        if (distrRhoOverrideTable == null) {
             if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
-                System.err.println("QUAL_REJECT drOv2 " + c.contingencyId());
+                System.err.println("QUAL_REJECT distrRhoOverrides (branch) " + c.contingencyId());
             }
             GpuBatchQualification.refuse(c, "PLAN:DISTR_RHO_GROUP_OUTAGE2");
             return;                                // multi-member / no-survivor group outage — CPU
         }
-        if (drOv[0].length > 0) {
-            pb.drOvContribByIndex[i] = java.util.Arrays.stream(drOv[0]).mapToInt(d -> (int) d).toArray();
-            pb.drOvCByIndex[i] = drOv[1];
+        if (distrRhoOverrideTable[0].length > 0) {
+            pb.distrRhoOverrideTermByIndex[i] = java.util.Arrays.stream(distrRhoOverrideTable[0]).mapToInt(d -> (int) d).toArray();
+            pb.distrRhoOverrideCoefficientByIndex[i] = distrRhoOverrideTable[1];
         }
         IslandedBuses.FrozenIsland fi = IslandedBuses.islandedFrozen(es, q.islandedBuses(), relocatedCouplers);
         // A contingency that BOTH splits the network AND strands a distributed-slack participant.

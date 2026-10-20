@@ -238,8 +238,8 @@ std::vector<int> buildRowMap(int n, int ncb, const int* cbIdx, int nob, const in
 void collectFamilyPattern(const std::vector<int>& rowMap,
                           const int* cbIdx, const int* obIdx, const int* shIdx,
                           int ndq, const int* dqElem, const int* dqSide, const int* dqKind, const int* dqRow,
-                          int ndr, const int* drRow, const int* drCol,
-                          int ndb, const int* dbRow, const int* dbCol,
+                          int nDistrRho, const int* distrRhoRow, const int* distrRhoColumn,
+                          int nDistrShuntB, const int* distrShuntBRow, const int* distrShuntBColumn,
                           int nzi, const int* ziIdx, const int* relocOwn,
                           std::vector<std::pair<int, int>>& pat) {
     for (int c = 0; c < ndq; c++) {
@@ -272,11 +272,11 @@ void collectFamilyPattern(const std::vector<int>& rowMap,
             }
         }
     }
-    for (int c = 0; c < ndr; c++) {                          // DISTR_RHO: controller r1 column in a DISTR_RHO row
-        pat.emplace_back(rowMap[drRow[c]], drCol[c]);
+    for (int c = 0; c < nDistrRho; c++) {                          // DISTR_RHO: controller r1 column in a DISTR_RHO row
+        pat.emplace_back(rowMap[distrRhoRow[c]], distrRhoColumn[c]);
     }
-    for (int c = 0; c < ndb; c++) {                          // DISTR_SHUNT_B: controller b column in a DISTR_SHUNT_B row
-        pat.emplace_back(rowMap[dbRow[c]], dbCol[c]);
+    for (int c = 0; c < nDistrShuntB; c++) {                          // DISTR_SHUNT_B: controller b column in a DISTR_SHUNT_B row
+        pat.emplace_back(rowMap[distrShuntBRow[c]], distrShuntBColumn[c]);
     }
     for (int e = 0; e < nzi; e++) {                          // zero-impedance: dummy couplings + (tree) ZERO_V/PHI
         const int* z = ziIdx + static_cast<size_t>(e) * 11;

@@ -55,7 +55,7 @@ public final class RemoteVoltageControlNative {
     /** Install (or clear, with nulls) per-scenario DISTR_RHO coefficient overrides on a batch
      *  context — {@code idx} = flat {scenario, contribution} pairs, {@code c} = the renormalized
      *  1/count' coefficient (a shared-TVC group member outaged in that scenario). Per-chunk state. */
-    public static native void setBatchDrCoefOverrides(long handle, int[] idx, double[] c);
+    public static native void setBatchDistrRhoCoefficientOverrides(long handle, int[] idx, double[] c);
 
     /** Pilot-row flip entries: one per (scenario, pilot) where the outage made the pilot stop being one
      *  of its OWN controllers. While the survivors hold its voltage the pilot keeps BUS_TARGET_V and its

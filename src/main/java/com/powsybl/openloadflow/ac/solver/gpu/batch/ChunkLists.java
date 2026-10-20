@@ -98,8 +98,8 @@ final class ChunkLists {
     final List<Double> dqOvWList = new ArrayList<>();
     final List<Integer> dqKeyOvIdxList = new ArrayList<>();
     final List<Double> dqKeyOvList = new ArrayList<>();
-    final List<Integer> drOvIdxList = new ArrayList<>();   // {s, contrib} pairs (DISTR_RHO renorm, plan A5)
-    final List<Double> drOvCList = new ArrayList<>();
+    final List<Integer> distrRhoOverrideScenarioTermList = new ArrayList<>();   // {s, contrib} pairs (DISTR_RHO renorm, plan A5)
+    final List<Double> distrRhoOverrideCoefficientList = new ArrayList<>();
     // per-scenario ACTIVE equation counts (L2 threshold parity — the CPU removes an
     // equation per frozen islanded row and per outaged element carrying a variable)
     final int[] nActive;
@@ -151,9 +151,9 @@ final class ChunkLists {
         RemoteVoltageControlNative.setBatchDqKeyOverrides(handle,
                 ChunkArrays.intsOrNull(dqKeyOvIdxList),
                 ChunkArrays.doublesOrNull(dqKeyOvList));
-        RemoteVoltageControlNative.setBatchDrCoefOverrides(handle,
-                ChunkArrays.intsOrNull(drOvIdxList),
-                ChunkArrays.doublesOrNull(drOvCList));
+        RemoteVoltageControlNative.setBatchDistrRhoCoefficientOverrides(handle,
+                ChunkArrays.intsOrNull(distrRhoOverrideScenarioTermList),
+                ChunkArrays.doublesOrNull(distrRhoOverrideCoefficientList));
         NewtonSettingsNative.setBatchActiveRowCounts(handle, nActive);
         // Cleared when the chunk strands nobody, so a chunk never inherits the previous
         // chunk's participant mask through the reused context.

@@ -97,51 +97,51 @@ void buildDistrQDest(SharedStructure* st, const CsrPattern& pos, const std::vect
 }
 
 void buildDistrRhoDest(SharedStructure* st, const CsrPattern& pos, const std::vector<int>& rowMap,
-                       int ndr, const int* drRow, const int* drCol, const double* drCoef) {
-    st->ndr = ndr;
-    if (ndr > 0) {
-        std::vector<int> drDest(static_cast<size_t>(ndr) * 2);
-        std::vector<int> drQrGroup(ndr, -1);
-        for (int c = 0; c < ndr; c++) {
-            int mappedRow = rowMap[drRow[c]];
-            drDest[c * 2 + 0] = -2 - mappedRow;              // DISTR_RHO F row
-            drDest[c * 2 + 1] = pos.at(mappedRow, drCol[c]); // J slot
+                       int nDistrRho, const int* distrRhoRow, const int* distrRhoColumn, const double* distrRhoCoefficient) {
+    st->nDistrRho = nDistrRho;
+    if (nDistrRho > 0) {
+        std::vector<int> distrRhoDestination(static_cast<size_t>(nDistrRho) * 2);
+        std::vector<int> distrRhoQrGroup(nDistrRho, -1);
+        for (int c = 0; c < nDistrRho; c++) {
+            int mappedRow = rowMap[distrRhoRow[c]];
+            distrRhoDestination[c * 2 + 0] = -2 - mappedRow;              // DISTR_RHO F row
+            distrRhoDestination[c * 2 + 1] = pos.at(mappedRow, distrRhoColumn[c]); // J slot
             // link the row to its pilot-Q relocation group (a member rho row is a candidate): when
             // the free role RE-PICKS to this row per scenario, it hosts the relocated pilot Q and
             // its DISTR_RHO emissions must stop — the SEQUENTIAL fill suppresses in-kernel by the
-            // same mode-scan the scatter uses (the batch machine instead pushes drOv zero entries).
-            for (int g = 0; g < st->nQr && drQrGroup[c] < 0; g++) {
+            // same mode-scan the scatter uses (the batch machine instead pushes zero coefficient overrides).
+            for (int g = 0; g < st->nQr && distrRhoQrGroup[c] < 0; g++) {
                 for (int k = st->hQrPtr[g] + 1; k < st->hQrPtr[g + 1]; k++) {
                     if (st->hQrRows[k] == mappedRow) {
-                        drQrGroup[c] = g;
-                        st->drQr = 1;
+                        distrRhoQrGroup[c] = g;
+                        st->distrRhoQr = 1;
                         break;
                     }
                 }
             }
         }
-        st->dDrCol.upload(drCol, ndr * sizeof(int));
-        st->dDrCoef.upload(drCoef, ndr * sizeof(double));
-        st->dDrDest.upload(drDest.data(), drDest.size() * sizeof(int));
-        if (st->drQr) {
-            st->dDrQrGroup.upload(drQrGroup.data(), drQrGroup.size() * sizeof(int));
+        st->dDistrRhoColumn.upload(distrRhoColumn, nDistrRho * sizeof(int));
+        st->dDistrRhoCoefficient.upload(distrRhoCoefficient, nDistrRho * sizeof(double));
+        st->dDistrRhoDestination.upload(distrRhoDestination.data(), distrRhoDestination.size() * sizeof(int));
+        if (st->distrRhoQr) {
+            st->dDistrRhoQrGroup.upload(distrRhoQrGroup.data(), distrRhoQrGroup.size() * sizeof(int));
         }
     }
 }
 
 void buildDistrShuntBDest(SharedStructure* st, const CsrPattern& pos, const std::vector<int>& rowMap,
-                          int ndb, const int* dbRow, const int* dbCol, const double* dbCoef) {
-    st->ndb = ndb;
-    if (ndb > 0) {
-        std::vector<int> dbDest(static_cast<size_t>(ndb) * 2);
-        for (int c = 0; c < ndb; c++) {
-            int mappedRow = rowMap[dbRow[c]];
-            dbDest[c * 2 + 0] = -2 - mappedRow;              // DISTR_SHUNT_B F row
-            dbDest[c * 2 + 1] = pos.at(mappedRow, dbCol[c]); // J slot
+                          int nDistrShuntB, const int* distrShuntBRow, const int* distrShuntBColumn, const double* distrShuntBCoefficient) {
+    st->nDistrShuntB = nDistrShuntB;
+    if (nDistrShuntB > 0) {
+        std::vector<int> distrShuntBDestination(static_cast<size_t>(nDistrShuntB) * 2);
+        for (int c = 0; c < nDistrShuntB; c++) {
+            int mappedRow = rowMap[distrShuntBRow[c]];
+            distrShuntBDestination[c * 2 + 0] = -2 - mappedRow;              // DISTR_SHUNT_B F row
+            distrShuntBDestination[c * 2 + 1] = pos.at(mappedRow, distrShuntBColumn[c]); // J slot
         }
-        st->dDbCol.upload(dbCol, ndb * sizeof(int));
-        st->dDbCoef.upload(dbCoef, ndb * sizeof(double));
-        st->dDbDest.upload(dbDest.data(), dbDest.size() * sizeof(int));
+        st->dDistrShuntBColumn.upload(distrShuntBColumn, nDistrShuntB * sizeof(int));
+        st->dDistrShuntBCoefficient.upload(distrShuntBCoefficient, nDistrShuntB * sizeof(double));
+        st->dDistrShuntBDestination.upload(distrShuntBDestination.data(), distrShuntBDestination.size() * sizeof(int));
     }
 }
 

@@ -79,10 +79,10 @@ public final class GpuAcNewtonSolver {
                                  double[] shIn, int[] shIdx, double[] hvIn, int[] hvIdx,
                                  int[] dqElem, int[] dqSide, double[] dqWeight, int[] dqRow, int[] dqKind,
                                  double[] ziIn, int[] ziIdx,
-                                 int[] drRow, int[] drCol, double[] drCoef,
-                                 int[] dbRow, int[] dbCol, double[] dbCoef) {
+                                 int[] distrRhoRow, int[] distrRhoColumn, double[] distrRhoCoefficient,
+                                 int[] distrShuntBRow, int[] distrShuntBColumn, double[] distrShuntBCoefficient) {
         return solve(x0, target, rowMode, maxIter, tol, cbIn, cbIdx, obIn, obIdx, shIn, shIdx, hvIn, hvIdx,
-                dqElem, dqSide, dqWeight, dqRow, dqKind, ziIn, ziIdx, drRow, drCol, drCoef, dbRow, dbCol, dbCoef,
+                dqElem, dqSide, dqWeight, dqRow, dqKind, ziIn, ziIdx, distrRhoRow, distrRhoColumn, distrRhoCoefficient, distrShuntBRow, distrShuntBColumn, distrShuntBCoefficient,
                 new int[] {0}, new int[0], noQAlt(obIdx.length / 6), noQAlt(ziIdx.length / 11));
     }
 
@@ -95,11 +95,11 @@ public final class GpuAcNewtonSolver {
                                  double[] shIn, int[] shIdx, double[] hvIn, int[] hvIdx,
                                  int[] dqElem, int[] dqSide, double[] dqWeight, int[] dqRow, int[] dqKind,
                                  double[] ziIn, int[] ziIdx,
-                                 int[] drRow, int[] drCol, double[] drCoef,
-                                 int[] dbRow, int[] dbCol, double[] dbCoef, int[] qrPtr, int[] qrRows,
+                                 int[] distrRhoRow, int[] distrRhoColumn, double[] distrRhoCoefficient,
+                                 int[] distrShuntBRow, int[] distrShuntBColumn, double[] distrShuntBCoefficient, int[] qrPtr, int[] qrRows,
                                  int[] obQAlt, int[] ziQAlt) {
         long structure = StructureNative.createStructure(x0.length, cbIn, cbIdx, obIn, obIdx, shIn, shIdx, hvIn, hvIdx,
-                dqElem, dqSide, dqWeight, dqRow, dqKind, ziIn, ziIdx, drRow, drCol, drCoef, dbRow, dbCol, dbCoef,
+                dqElem, dqSide, dqWeight, dqRow, dqKind, ziIn, ziIdx, distrRhoRow, distrRhoColumn, distrRhoCoefficient, distrShuntBRow, distrShuntBColumn, distrShuntBCoefficient,
                 noPcSide(cbIdx.length / 12), new double[0], new int[0], qrPtr, qrRows, obQAlt, ziQAlt,
                 noDepGroups(qrPtr), noDepGroups(qrPtr), noDepRows(x0.length));
         try {
@@ -167,12 +167,12 @@ public final class GpuAcNewtonSolver {
                                          int dsSlackPhiRow, double dsSlackTargetP,
                                          double[] dsBaseTargetP, double[] dsMaxDelta, double[] dsMinDelta,
                                          int[] dqElem, int[] dqSide, double[] dqWeight, int[] dqRow, int[] dqKind,
-                                         int[] drRow, int[] drCol, double[] drCoef,
-                                         int[] dbRow, int[] dbCol, double[] dbCoef, double[] ziIn, int[] ziIdx) {
+                                         int[] distrRhoRow, int[] distrRhoColumn, double[] distrRhoCoefficient,
+                                         int[] distrShuntBRow, int[] distrShuntBColumn, double[] distrShuntBCoefficient, double[] ziIn, int[] ziIdx) {
         int n = x0Base.length;
         int nScenarios = disabledElementMask.length;
         long structure = StructureNative.createStructure(n, cbIn, cbIdx, obIn, obIdx, shIn, shIdx, hvIn, hvIdx,
-                dqElem, dqSide, dqWeight, dqRow, dqKind, ziIn, ziIdx, drRow, drCol, drCoef, dbRow, dbCol, dbCoef,
+                dqElem, dqSide, dqWeight, dqRow, dqKind, ziIn, ziIdx, distrRhoRow, distrRhoColumn, distrRhoCoefficient, distrShuntBRow, distrShuntBColumn, distrShuntBCoefficient,
                 noPcSide(cbIdx.length / 12), new double[0], new int[0], new int[] {0}, new int[0],
                 noQAlt(obIdx.length / 6), noQAlt(ziIdx.length / 11), new int[0], new int[0], noDepRows(n));
         try {

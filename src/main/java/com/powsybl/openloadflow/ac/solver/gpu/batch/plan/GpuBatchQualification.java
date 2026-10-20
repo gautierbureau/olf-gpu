@@ -73,7 +73,7 @@ public final class GpuBatchQualification {
                         /** Per scenario, the members whose reactive KEY the contingency changes (a generator lost at a
                          *  bus that keeps a controller) and OLF's post-loss key; the kernels renormalize them live. */
                         int[][] dqKeyOvMemberByIndex, double[][] dqKeyOvByIndex,
-                        int[][] drOvContribByIndex, double[][] drOvCByIndex,
+                        int[][] distrRhoOverrideTermByIndex, double[][] distrRhoOverrideCoefficientByIndex,
                         /** Per scenario, the distributed-slack participants this contingency strands in
                          *  another synchronous component — the set the device must renormalize over. */
                         int[][] islandedDsByIndex,

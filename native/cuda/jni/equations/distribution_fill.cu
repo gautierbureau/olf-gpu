@@ -245,50 +245,50 @@ __global__ void fillDistrQBatch(int ndq, int nScenarios, int n, int nnz, int nEl
 // Batched DISTR_RHO fill: one thread per (contribution, scenario). Linear coef*r1 into the controller's
 // BRANCH_RHO1 row — strided per scenario, active-gated, no mask (controller-outage contingencies are
 // rejected to the CPU because the 1/count coefficients reform).
-__global__ void fillDistrRhoBatch(int ndr, int nScenarios, int n, int nnz,
-                                  const int* drCol, const double* drCoef, const int* drDest,
+__global__ void fillDistrRhoBatch(int nDistrRho, int nScenarios, int n, int nnz,
+                                  const int* distrRhoColumn, const double* distrRhoCoefficient, const int* distrRhoDestination,
                                   const double* x, double* vals, double* F, const char* active,
-                                  int nDrOv, const int* drOvIdx, const double* drOvC,
-                                  const int* drQrGroup, const int* mode, const int* qrPtr, const int* qrRows) {
+                                  int nDistrRhoCoefficientOverrides, const int* distrRhoOverrideScenarioTerm, const double* distrRhoOverrideCoefficient,
+                                  const int* distrRhoQrGroup, const int* mode, const int* qrPtr, const int* qrRows) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= ndr * nScenarios) return;
-    int c = tid % ndr;
-    int s = tid / ndr;
+    if (tid >= nDistrRho * nScenarios) return;
+    int c = tid % nDistrRho;
+    int s = tid / nDistrRho;
     if (!active[s]) return;
     // the CURRENT pilot-Q carrier's row hosts the relocated pilot balance — its DISTR_RHO row is
     // inactive PER SCENARIO (same rule as fillDistrQBatch; the
-    // machine's drOv zeroing covers machine steps, but a bare batch solve — the batch-of-1
-    // sequential route on a clamp-in-the-base network — has no drOv and needs the in-kernel skip)
-    if (drQrGroup != nullptr && drQrGroup[c] >= 0) {
-        int g = drQrGroup[c];
-        if (-2 - drDest[c * 2] == qrRows[qrPtr[g] + relocChoose(g, qrPtr, qrRows, mode + (size_t) s * n)]) return;
+    // machine's zeroed coefficient overrides covers machine steps, but a bare batch solve — the batch-of-1
+    // sequential route on a clamp-in-the-base network — has no coefficient overrides and needs the in-kernel skip)
+    if (distrRhoQrGroup != nullptr && distrRhoQrGroup[c] >= 0) {
+        int g = distrRhoQrGroup[c];
+        if (-2 - distrRhoDestination[c * 2] == qrRows[qrPtr[g] + relocChoose(g, qrPtr, qrRows, mode + (size_t) s * n)]) return;
     }
-    double coef = drCoef[c];
-    for (int k = 0; k < nDrOv; k++) {                        // per-scenario 1/count' renormalization
-        if (drOvIdx[k * 2] == s && drOvIdx[k * 2 + 1] == c) {
-            coef = drOvC[k];
+    double coef = distrRhoCoefficient[c];
+    for (int k = 0; k < nDistrRhoCoefficientOverrides; k++) {                        // per-scenario 1/count' renormalization
+        if (distrRhoOverrideScenarioTerm[k * 2] == s && distrRhoOverrideScenarioTerm[k * 2 + 1] == c) {
+            coef = distrRhoOverrideCoefficient[k];
         }
     }
-    int dF = drDest[c * 2 + 0];
-    int dJ = drDest[c * 2 + 1];
-    if (dF <= -2) atomicAdd(&F[(size_t) s * n + (-2 - dF)], coef * x[(size_t) s * n + drCol[c]]);
+    int dF = distrRhoDestination[c * 2 + 0];
+    int dJ = distrRhoDestination[c * 2 + 1];
+    if (dF <= -2) atomicAdd(&F[(size_t) s * n + (-2 - dF)], coef * x[(size_t) s * n + distrRhoColumn[c]]);
     if (dJ >= 0) atomicAdd(&vals[(size_t) s * nnz + dJ], coef);
 }
 
 // Batched DISTR_SHUNT_B fill: the SHUNT_B analogue of fillDistrRhoBatch. Linear coef*b into the controller's
 // SHUNT_B row, strided per scenario, active-gated.
-__global__ void fillDistrShuntBBatch(int ndb, int nScenarios, int n, int nnz,
-                                     const int* dbCol, const double* dbCoef, const int* dbDest,
+__global__ void fillDistrShuntBBatch(int nDistrShuntB, int nScenarios, int n, int nnz,
+                                     const int* distrShuntBColumn, const double* distrShuntBCoefficient, const int* distrShuntBDestination,
                                      const double* x, double* vals, double* F, const char* active) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= ndb * nScenarios) return;
-    int c = tid % ndb;
-    int s = tid / ndb;
+    if (tid >= nDistrShuntB * nScenarios) return;
+    int c = tid % nDistrShuntB;
+    int s = tid / nDistrShuntB;
     if (!active[s]) return;
-    double coef = dbCoef[c];
-    int dF = dbDest[c * 2 + 0];
-    int dJ = dbDest[c * 2 + 1];
-    if (dF <= -2) atomicAdd(&F[(size_t) s * n + (-2 - dF)], coef * x[(size_t) s * n + dbCol[c]]);
+    double coef = distrShuntBCoefficient[c];
+    int dF = distrShuntBDestination[c * 2 + 0];
+    int dJ = distrShuntBDestination[c * 2 + 1];
+    if (dF <= -2) atomicAdd(&F[(size_t) s * n + (-2 - dF)], coef * x[(size_t) s * n + distrShuntBColumn[c]]);
     if (dJ >= 0) atomicAdd(&vals[(size_t) s * nnz + dJ], coef);
 }
 

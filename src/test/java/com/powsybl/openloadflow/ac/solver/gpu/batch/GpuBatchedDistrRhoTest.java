@@ -114,7 +114,7 @@ class GpuBatchedDistrRhoTest {
             boolean isController = c.outagedBranches().stream().anyMatch(controllers::contains);
             if (isController && r.needsCpuFallback()) {
                 // FREE-member outage: the free role re-picks — per-scenario CPU route until A6.
-                // NON-free member outages batch since A5 (drOv analytic 1/c' renorm) and fall
+                // NON-free member outages batch since A5 (analytic 1/c' coefficient overrides) and fall
                 // through to the same device-vs-CPU comparison as every other contingency.
                 controllerRejected++;
                 continue;

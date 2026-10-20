@@ -96,8 +96,8 @@ struct SharedStructure {
                                                              // (ndq*6) and the dummy row it keys on (ndq)
     int nzi = 0;                                             // zero-impedance branches
     DeviceBuf dZiIn, dZiIdx, dZiDest;                        // nzi (dZiIn) / nzi*11 (dZiIdx) / nzi*14 (dZiDest)
-    DeviceBuf dDrQrGroup;                                    // per DISTR_RHO contribution: the qr relocation group
-    int drQr = 0;                                            // whose candidates contain its row (-1 none) — the seq
+    DeviceBuf dDistrRhoQrGroup;                                    // per DISTR_RHO contribution: the qr relocation group
+    int distrRhoQr = 0;                                            // whose candidates contain its row (-1 none) — the seq
                                                              // fill suppresses the CURRENT carrier's row in-kernel
     DeviceBuf dZiAltDest;                                    // zi dynamic Q-routing (ob/zi channels): per element,
     DeviceBuf dZiSelRow;                                     // 4 q slots {F1,F2,J1,J2} alt dests + select rows, and
@@ -105,10 +105,10 @@ struct SharedStructure {
     DeviceBuf dZiRelocOff;                                   // cb/sh families)
     DeviceBuf dZiRelocPool;
     bool ziDyn = false;
-    int ndr = 0;                                             // DISTR_RHO linear contributions
-    DeviceBuf dDrCol, dDrCoef, dDrDest;                      // ndr each (dDrDest is ndr*2)
-    int ndb = 0;                                             // DISTR_SHUNT_B linear contributions
-    DeviceBuf dDbCol, dDbCoef, dDbDest;                      // ndb each (dDbDest is ndb*2)
+    int nDistrRho = 0;                                             // DISTR_RHO linear contributions
+    DeviceBuf dDistrRhoColumn, dDistrRhoCoefficient, dDistrRhoDestination;                      // nDistrRho each (dDistrRhoDestination is nDistrRho*2)
+    int nDistrShuntB = 0;                                             // DISTR_SHUNT_B linear contributions
+    DeviceBuf dDistrShuntBColumn, dDistrShuntBCoefficient, dDistrShuntBDestination;                      // nDistrShuntB each (dDistrShuntBDestination is nDistrShuntB*2)
     int nvdl = 0;                                            // voltage-dependent load model terms (ZIP/exp)
     DeviceBuf dVdlIn, dVdlIdx, dVdlDest;                     // nvdl*3 (c, n, target — verbatim OLF) / nvdl*2 (row, vCol) / nvdl
     DeviceBuf dVdlAltRow, dVdlAltDest;                       // nvdl each: a relocated child's home row and slot (-1: none)
@@ -140,8 +140,8 @@ SharedStructure* buildStructure(int n,
                                 int ndq, const int* dqElem, const int* dqSide, const double* dqWeight,
                                 const int* dqRow, const int* dqKind,
                                 int nzi, const double* ziIn, const int* ziIdx,
-                                int ndr, const int* drRow, const int* drCol, const double* drCoef,
-                                int ndb, const int* dbRow, const int* dbCol, const double* dbCoef,
+                                int nDistrRho, const int* distrRhoRow, const int* distrRhoColumn, const double* distrRhoCoefficient,
+                                int nDistrShuntB, const int* distrShuntBRow, const int* distrShuntBColumn, const double* distrShuntBCoefficient,
                                 const int* cbPcSide,
                                 int nvdl, const double* vdlIn, const int* vdlIdx,
                                 int nQr, const int* qrPtr, const int* qrRowsIn,

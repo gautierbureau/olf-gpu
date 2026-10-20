@@ -185,22 +185,22 @@ OLF_JNI(ac_equations_vector_gpu, RemoteVoltageControlNative, setBatchPilotAllPin
 // renormalization pairs {s, contrib} + new coefficients on a batch context (a shared-TVC group
 // member outaged in that scenario — plan-group-member-dynamics A5).
 extern "C" JNIEXPORT void JNICALL
-OLF_JNI(ac_equations_vector_gpu, RemoteVoltageControlNative, setBatchDrCoefOverrides)(
+OLF_JNI(ac_equations_vector_gpu, RemoteVoltageControlNative, setBatchDistrRhoCoefficientOverrides)(
         JNIEnv* env, jclass, jlong handle, jintArray jIdx, jdoubleArray jC) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx == nullptr) {
         return;
     }
     if (jIdx == nullptr || jC == nullptr || env->GetArrayLength(jC) == 0) {
-        ctx->nDrOv = 0;
+        ctx->nDistrRhoCoefficientOverrides = 0;
         return;
     }
     int nOv = env->GetArrayLength(jC);
     jint* idx = env->GetIntArrayElements(jIdx, nullptr);
     jdouble* c = env->GetDoubleArrayElements(jC, nullptr);
-    ctx->dDrOvIdx.upload(idx, static_cast<size_t>(nOv) * 2 * sizeof(int));
-    ctx->dDrOvC.upload(c, static_cast<size_t>(nOv) * sizeof(double));
+    ctx->dDistrRhoOverrideScenarioTerm.upload(idx, static_cast<size_t>(nOv) * 2 * sizeof(int));
+    ctx->dDistrRhoOverrideCoefficient.upload(c, static_cast<size_t>(nOv) * sizeof(double));
     env->ReleaseIntArrayElements(jIdx, idx, JNI_ABORT);
     env->ReleaseDoubleArrayElements(jC, c, JNI_ABORT);
-    ctx->nDrOv = nOv;
+    ctx->nDistrRhoCoefficientOverrides = nOv;
 }

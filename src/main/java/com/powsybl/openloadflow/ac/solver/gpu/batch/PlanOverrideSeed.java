@@ -32,8 +32,8 @@ final class PlanOverrideSeed {
         final int[][] dqOvContribByIndex = plan.dqOvContribByIndex();
         final double[][] dqOvWByIndex = plan.dqOvWByIndex();
         final int[][] dqSubByIndex = plan.dqSubByIndex();
-        final double[][] drOvCByIndex = plan.drOvCByIndex();
-        final int[][] drOvContribByIndex = plan.drOvContribByIndex();
+        final double[][] distrRhoOverrideCoefficientByIndex = plan.distrRhoOverrideCoefficientByIndex();
+        final int[][] distrRhoOverrideTermByIndex = plan.distrRhoOverrideTermByIndex();
         final int[][] islandedDsByIndex = plan.islandedDsByIndex();
         final int[][] islandedRlByIndex = plan.islandedRlByIndex();
         if (!pairPhase && activePowerLossByIndex != null) {
@@ -53,11 +53,11 @@ final class PlanOverrideSeed {
                 cl.dqKeyOvList.add(dqKeyOvByIndex[ci][k]);
             }
         }
-        if (drOvContribByIndex != null && drOvContribByIndex[ci] != null) {
-            for (int k = 0; k < drOvContribByIndex[ci].length; k++) {
-                cl.drOvIdxList.add(s);
-                cl.drOvIdxList.add(drOvContribByIndex[ci][k]);
-                cl.drOvCList.add(drOvCByIndex[ci][k]);
+        if (distrRhoOverrideTermByIndex != null && distrRhoOverrideTermByIndex[ci] != null) {
+            for (int k = 0; k < distrRhoOverrideTermByIndex[ci].length; k++) {
+                cl.distrRhoOverrideScenarioTermList.add(s);
+                cl.distrRhoOverrideScenarioTermList.add(distrRhoOverrideTermByIndex[ci][k]);
+                cl.distrRhoOverrideCoefficientList.add(distrRhoOverrideCoefficientByIndex[ci][k]);
             }
         }
         if (islandedDsByIndex != null && islandedDsByIndex[ci] != null) {

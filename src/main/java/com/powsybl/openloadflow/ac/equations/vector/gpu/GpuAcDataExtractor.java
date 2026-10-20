@@ -128,8 +128,8 @@ public final class GpuAcDataExtractor {
         GpuAcFamilyPacker.Packs family = GpuAcFamilyPacker.pack(network, columns, baseOpenBranchIds, baseOpenZiBranchIds);
         ReactiveLimitEntries rl = ReactiveLimitsPacker.reactiveLimitsPack(network, es, columns, reactiveLimits);
         DistrQPacker.Pack dq = DistrQPacker.distrQPack(network, es, columns, family, rl);
-        LinearDistributionTerms dr = DistrRhoPacker.distrRhoPack(network, es, columns);
-        LinearDistributionTerms dsb = DistrShuntBPacker.distrShuntBPack(network, es, columns);
+        LinearDistributionTerms distrRho = DistrRhoPacker.distrRhoPack(network, es, columns);
+        LinearDistributionTerms distrShuntB = DistrShuntBPacker.distrShuntBPack(network, es, columns);
 
         RemoteMemberReactiveTerms rmq = RemoteMemberQPacker.remoteMemberQPack(network, es, columns, family, reactiveLimits);
         DistributedSlackParticipants ds = DistributedSlackPacker.distributedSlackPack(network, es, columns, distributedSlack, dsParams);
@@ -171,7 +171,7 @@ public final class GpuAcDataExtractor {
                 dq.terms(), dq.members(),
                 new ZeroImpedanceBranchPack(GpuAcArrays.flatD(family.ziIn(), 1), GpuAcArrays.flatI(family.ziIdx(), 11),
                         family.ziNums().stream().mapToInt(Integer::intValue).toArray(), GpuAcArrays.flatI(family.ziQAlt(), 2)),
-                dr, dsb,
+                distrRho, distrShuntB,
                 rl,
                 rmq, new VoltageRowParameters(rowSlope, rowNominalV),
                 ds,

@@ -125,18 +125,18 @@ final class InjectionOutagePlanner {
         }
         List<LfBus> islandLostVcControllers = new ArrayList<>();   // filled by the island-injection path
         if (!c.outagedBranches().isEmpty()) {        // COMBO: the branch part must also qualify
-            double[][] drOv = VoltageControlOverrides.distrRhoOverrides(es, gpuData, distrRhoControllers,
+            double[][] distrRhoOverrideTable = VoltageControlOverrides.distrRhoOverrides(es, gpuData, distrRhoControllers,
                     c.outagedBranches(), incrementalTvc);
-            if (drOv == null) {
+            if (distrRhoOverrideTable == null) {
                 if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
-                    System.err.println("QUAL_REJECT drOv " + c.contingencyId());
+                    System.err.println("QUAL_REJECT distrRhoOverrides (injection) " + c.contingencyId());
                 }
                 GpuBatchQualification.refuse(c, "PLAN:DISTR_RHO_GROUP_OUTAGE");
                 return;                            // multi-member / no-survivor group outage — CPU
             }
-            if (drOv[0].length > 0) {
-                pb.drOvContribByIndex[i] = java.util.Arrays.stream(drOv[0]).mapToInt(d -> (int) d).toArray();
-                pb.drOvCByIndex[i] = drOv[1];
+            if (distrRhoOverrideTable[0].length > 0) {
+                pb.distrRhoOverrideTermByIndex[i] = java.util.Arrays.stream(distrRhoOverrideTable[0]).mapToInt(d -> (int) d).toArray();
+                pb.distrRhoOverrideCoefficientByIndex[i] = distrRhoOverrideTable[1];
             }
         }
         // A coupler opened WITHOUT islanding anything still splits a merged voltage control when it separates

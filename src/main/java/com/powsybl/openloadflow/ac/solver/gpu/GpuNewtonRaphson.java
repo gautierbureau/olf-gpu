@@ -954,7 +954,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                 BatchSolveNative.destroyBatchContext(context.handle.getAndSet(0));
                 // BATCH-OF-1: the load flow runs on a BATCH context of one scenario, so per-row
                 // PER_EQUATION_TYPE criteria, slope-SVC (mode 2), continuous phase (mode 3) and
-                // the vdl/ZIP fills come from the batch pipeline instead of being ported twice.
+                // the load model (ZIP) fills come from the batch pipeline instead of being ported twice.
                 // The shared structure comes from the per-extraction cache — the batched SA
                 // building its context from the SAME extraction reuses it device-side.
                 context.handle.set(BatchSolveNative.createBatchContext(GpuAcStructures.handle(n, data), 1,

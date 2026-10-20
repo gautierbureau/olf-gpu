@@ -93,7 +93,7 @@ __global__ void fillHvdcBatch(int ne, int nScenarios, int n, int nnz, int nEleme
 // Identity rows are wiped by applyRowModeBatch afterwards, so a PV bus's Q-row term vanishes
 // exactly like every other Q fill (and reappears when RL flips the bus PQ). vals == nullptr
 // makes it the residual-only (line-search) variant.
-__global__ void fillVdlBatch(int ne, int nScenarios, int n, int nnz,
+__global__ void fillLoadModelBatch(int ne, int nScenarios, int n, int nnz,
                              const double* in, const int* ix, const int* dest,
                              const double* x, double* vals, double* F,
                              const int* altRow, const int* altDest, const int* mode) {

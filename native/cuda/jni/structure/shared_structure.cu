@@ -43,7 +43,7 @@ SharedStructure* buildStructure(int n,
                                 int nDistrRho, const int* distrRhoRow, const int* distrRhoColumn, const double* distrRhoCoefficient,
                                 int nDistrShuntB, const int* distrShuntBRow, const int* distrShuntBColumn, const double* distrShuntBCoefficient,
                                 const int* cbPcSide,
-                                int nvdl, const double* vdlIn, const int* vdlIdx,
+                                int nLoadModelTerms, const double* loadModelParameters, const int* loadModelIndices,
                                 int nQr, const int* qrPtr, const int* qrRowsIn,
                                 const int* obQAltIn, const int* ziQAltIn,
                                 const int* qrDepBaseIn, const int* qrBaseTargetRowIn, const int* depGroupOfRowIn) {
@@ -134,8 +134,8 @@ SharedStructure* buildStructure(int n,
     const int* ziQAlt = ziQAltM.data();
     std::vector<int> shIdxM = mapRows(shIdx, nsh, 5, {0, 1, 4});
     std::vector<int> hvIdxM = mapRows(hvIdx, nhv, 4, {0, 1});
-    std::vector<int> vdlIdxM = mapRows(vdlIdx, nvdl, 2, {0});
-    vdlIdx = vdlIdxM.data();
+    std::vector<int> loadModelIndicesMapped = mapRows(loadModelIndices, nLoadModelTerms, 2, {0});
+    loadModelIndices = loadModelIndicesMapped.data();
     cbIdx = cbIdxM.data();
     obIdx = obIdxM.data();
     shIdx = shIdxM.data();
@@ -224,10 +224,10 @@ SharedStructure* buildStructure(int n,
             }
         }
     }
-    for (int e = 0; e < nvdl; e++) {                         // voltage-dependent load: (row, own-V) slot
-        pat.emplace_back(vdlIdx[e * 2], vdlIdx[e * 2 + 1]);
-        if (relocOwn != nullptr && relocOwn[vdlIdx[e * 2]] >= 0) {
-            pat.emplace_back(relocOwn[vdlIdx[e * 2]], vdlIdx[e * 2 + 1]);   // the re-homed child's own slot
+    for (int e = 0; e < nLoadModelTerms; e++) {                         // voltage-dependent load: (row, own-V) slot
+        pat.emplace_back(loadModelIndices[e * 2], loadModelIndices[e * 2 + 1]);
+        if (relocOwn != nullptr && relocOwn[loadModelIndices[e * 2]] >= 0) {
+            pat.emplace_back(relocOwn[loadModelIndices[e * 2]], loadModelIndices[e * 2 + 1]);   // the re-homed child's own slot
         }
     }
     // ---- zero-diagonal repair tables (hazRepairVals): hazard rows + donor candidates, then the
@@ -537,30 +537,30 @@ SharedStructure* buildStructure(int n,
     buildDistrShuntBDest(st.get(), pos, rowMap, nDistrShuntB, distrShuntBRow, distrShuntBColumn, distrShuntBCoefficient);
 
     // ---- voltage-dependent load (ZIP/exponential) destinations: one J slot (row, own-V) per term ----
-    st->nvdl = nvdl;
-    if (nvdl > 0) {
-        std::vector<int> vdlDest(nvdl);
-        for (int e = 0; e < nvdl; e++) {
-            vdlDest[e] = pos.at(vdlIdx[e * 2], vdlIdx[e * 2 + 1]);
+    st->nLoadModelTerms = nLoadModelTerms;
+    if (nLoadModelTerms > 0) {
+        std::vector<int> loadModelDestination(nLoadModelTerms);
+        for (int e = 0; e < nLoadModelTerms; e++) {
+            loadModelDestination[e] = pos.at(loadModelIndices[e * 2], loadModelIndices[e * 2 + 1]);
         }
-        st->dVdlIn.upload(vdlIn, static_cast<size_t>(nvdl) * 3 * sizeof(double));
-        st->dVdlIdx.upload(vdlIdx, static_cast<size_t>(nvdl) * 2 * sizeof(int));
-        st->dVdlDest.upload(vdlDest.data(), static_cast<size_t>(nvdl) * sizeof(int));
-        std::vector<int> vdlAltRow(nvdl, -1);
-        std::vector<int> vdlAltDest(nvdl, -1);
+        st->dLoadModelParameters.upload(loadModelParameters, static_cast<size_t>(nLoadModelTerms) * 3 * sizeof(double));
+        st->dLoadModelIndices.upload(loadModelIndices, static_cast<size_t>(nLoadModelTerms) * 2 * sizeof(int));
+        st->dLoadModelDestination.upload(loadModelDestination.data(), static_cast<size_t>(nLoadModelTerms) * sizeof(int));
+        std::vector<int> loadModelAlternateRow(nLoadModelTerms, -1);
+        std::vector<int> loadModelAlternateDestination(nLoadModelTerms, -1);
         bool anyAlt = false;
-        for (int e = 0; e < nvdl; e++) {
-            int row = vdlIdx[e * 2];
+        for (int e = 0; e < nLoadModelTerms; e++) {
+            int row = loadModelIndices[e * 2];
             if (relocOwn != nullptr && relocOwn[row] >= 0) {
-                vdlAltRow[e] = relocOwn[row];
-                vdlAltDest[e] = pos.at(relocOwn[row], vdlIdx[e * 2 + 1]);
+                loadModelAlternateRow[e] = relocOwn[row];
+                loadModelAlternateDestination[e] = pos.at(relocOwn[row], loadModelIndices[e * 2 + 1]);
                 anyAlt = true;
             }
         }
-        st->vdlDyn = anyAlt;
+        st->loadModelRelocated = anyAlt;
         if (anyAlt) {
-            st->dVdlAltRow.upload(vdlAltRow.data(), static_cast<size_t>(nvdl) * sizeof(int));
-            st->dVdlAltDest.upload(vdlAltDest.data(), static_cast<size_t>(nvdl) * sizeof(int));
+            st->dLoadModelAlternateRow.upload(loadModelAlternateRow.data(), static_cast<size_t>(nLoadModelTerms) * sizeof(int));
+            st->dLoadModelAlternateDestination.upload(loadModelAlternateDestination.data(), static_cast<size_t>(nLoadModelTerms) * sizeof(int));
         }
     }
 

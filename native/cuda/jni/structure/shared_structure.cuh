@@ -109,10 +109,10 @@ struct SharedStructure {
     DeviceBuf dDistrRhoColumn, dDistrRhoCoefficient, dDistrRhoDestination;                      // nDistrRho each (dDistrRhoDestination is nDistrRho*2)
     int nDistrShuntB = 0;                                             // DISTR_SHUNT_B linear contributions
     DeviceBuf dDistrShuntBColumn, dDistrShuntBCoefficient, dDistrShuntBDestination;                      // nDistrShuntB each (dDistrShuntBDestination is nDistrShuntB*2)
-    int nvdl = 0;                                            // voltage-dependent load model terms (ZIP/exp)
-    DeviceBuf dVdlIn, dVdlIdx, dVdlDest;                     // nvdl*3 (c, n, target — verbatim OLF) / nvdl*2 (row, vCol) / nvdl
-    DeviceBuf dVdlAltRow, dVdlAltDest;                       // nvdl each: a relocated child's home row and slot (-1: none)
-    bool vdlDyn = false;
+    int nLoadModelTerms = 0;                                            // voltage-dependent load model terms (ZIP/exp)
+    DeviceBuf dLoadModelParameters, dLoadModelIndices, dLoadModelDestination;                     // nLoadModelTerms*3 (c, n, target — verbatim OLF) / nLoadModelTerms*2 (row, vCol) / nLoadModelTerms
+    DeviceBuf dLoadModelAlternateRow, dLoadModelAlternateDestination;                       // nLoadModelTerms each: a relocated child's home row and slot (-1: none)
+    bool loadModelRelocated = false;
     int nQr = 0;                                             // pilot-Q relocation GROUPS (plan-A6): candidate
     std::vector<int> hQrPtr, hQrRows;                        // tables [fallback row, member rows...] per group
     DeviceBuf dQrPtr, dQrRows;                               // (rows in DEVICE row space, rowMap applied)
@@ -143,7 +143,7 @@ SharedStructure* buildStructure(int n,
                                 int nDistrRho, const int* distrRhoRow, const int* distrRhoColumn, const double* distrRhoCoefficient,
                                 int nDistrShuntB, const int* distrShuntBRow, const int* distrShuntBColumn, const double* distrShuntBCoefficient,
                                 const int* cbPcSide,
-                                int nvdl, const double* vdlIn, const int* vdlIdx,
+                                int nLoadModelTerms, const double* loadModelParameters, const int* loadModelIndices,
                                 int nQr, const int* qrPtr, const int* qrRowsIn,
                                 const int* obQAltIn, const int* ziQAltIn,
                                 const int* qrDepBaseIn, const int* qrBaseTargetRowIn, const int* depGroupOfRowIn);

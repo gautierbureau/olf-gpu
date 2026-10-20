@@ -635,7 +635,7 @@ final class GpuAcRowIndexing {
      * when NOTHING ELSE is keyed on that row, and several packs are: {@code dsPhiRow} writes each
      * distributed-slack participant's target at {@code phiCol[bn]}, the reactive-capability curve
      * pack has its own P rows, the HVDC family scatters into both ends' P rows, and a load model
-     * emits a vdl term at the bus's P and Q rows. Excluding generators covers DS, the curves and
+     * emits a load model term at the bus's P and Q rows. Excluding generators covers DS, the curves and
      * HVDC at once, because OLF models a converter station as an {@code LfGenerator}. A first,
      * looser version of this test (branch count + shunt only) fired on rte6515 buses that carry
      * those packs and moved the base error from 3.9e-08 to 5.0e-05.
@@ -673,7 +673,7 @@ final class GpuAcRowIndexing {
         }
         for (com.powsybl.openloadflow.network.LfLoad load : bus.getLoads()) {
             if (load.getLoadModel().isPresent()) {
-                return false;                                // vdl term at this bus's P and Q rows
+                return false;                                // load model term at this bus's P and Q rows
             }
         }
         return phiCol[bn] >= 0 && vCol[bn] >= 0 && qRow[bn] == vCol[bn]

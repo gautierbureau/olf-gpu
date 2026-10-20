@@ -114,7 +114,7 @@ class GpuLoadFlowTest extends com.powsybl.openloadflow.network.AbstractLoadFlowN
         compare(ShuntNetworkFactory::create, "shunt compensator");
     }
 
-    /** Sequential-solver ZIP/exponential loads (the batch-of-1 route runs the vdl fills): the
+    /** Sequential-solver ZIP/exponential loads (the batch-of-1 route runs the load model fills): the
      *  Eurostag network with a ZIP load solves ON the GPU (fallback counter guarded) and matches
      *  the CPU exactly. */
     @Test

@@ -25,7 +25,7 @@ __global__ void fillHvdcBatch(int ne, int nScenarios, int n, int nnz, int nEleme
                               const char* disabled, const char* active,
                               const int* altDest, const int* selRow, const int* mode, int dynReloc);
 
-__global__ void fillVdlBatch(int ne, int nScenarios, int n, int nnz,
+__global__ void fillLoadModelBatch(int ne, int nScenarios, int n, int nnz,
                              const double* in, const int* ix, const int* dest,
                              const double* x, double* vals, double* F,
                              const int* altRow, const int* altDest, const int* mode);

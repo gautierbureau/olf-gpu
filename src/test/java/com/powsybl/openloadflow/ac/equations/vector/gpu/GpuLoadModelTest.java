@@ -26,7 +26,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /**
- * Voltage-dependent load models (ZIP + exponential) on the GPU inner Newton: the vdl family adds
+ * Voltage-dependent load models (ZIP + exponential) on the GPU inner Newton: the load model family adds
  * {@code c_n·target·V^n} to the bus P/Q rows with the derivative on the own-V column — exactly OLF's
  * {@code AbstractLoadModelEquationTerm} (the constant part stays in the target vector). Mirrors OLF's
  * own {@code LoadModelTest} networks; the GPU must actually SOLVE (fallback counter asserted) and

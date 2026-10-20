@@ -46,7 +46,7 @@ final class GpuAcFamilyPacker {
                  List<double[]> ziIn, List<int[]> ziIdx, List<Integer> ziNums,
                  List<Integer> baseOpenCb, List<Integer> baseOpenZi, List<Integer> baseOpenZiNums,
                  int[] cbElemOf, int[] obElemOf, int[] shElemOf, List<Integer> cbPcSide,
-                 List<double[]> vdlIn, List<int[]> vdlIdx,
+                 List<double[]> loadModelParameters, List<int[]> loadModelIndices,
                  List<int[]> obQAlt, List<int[]> ziQAlt) {
     }
 
@@ -203,8 +203,8 @@ final class GpuAcFamilyPacker {
 
         List<double[]> shIn = new ArrayList<>();
         List<int[]> shIdx = new ArrayList<>();
-        List<double[]> vdlIn = new ArrayList<>();
-        List<int[]> vdlIdx = new ArrayList<>();
+        List<double[]> loadModelParameters = new ArrayList<>();
+        List<int[]> loadModelIndices = new ArrayList<>();
         int[] shElemOf = new int[nBuses];                    // shunt element index per bus (-1 = none)
         java.util.Arrays.fill(shElemOf, -1);
         for (LfBus bus : network.getBuses()) {
@@ -235,7 +235,7 @@ final class GpuAcFamilyPacker {
                     pRow[bus.getNum()], qRow[bus.getNum()], vCol[bus.getNum()], -1,
                     qRowAlt[bus.getNum()]});                 // [4]: alternate Q row (dyn reloc)
             });
-            packLoadModels(bus, pRow, qRow, vCol, vdlIn, vdlIdx);
+            packLoadModels(bus, pRow, qRow, vCol, loadModelParameters, loadModelIndices);
         }
 
         List<double[]> hvIn = new ArrayList<>();
@@ -257,7 +257,7 @@ final class GpuAcFamilyPacker {
 
         return new Packs(cbIn, cbIdx, obIn, obIdx, shIn, shIdx, hvIn, hvIdx, ziIn, ziIdx, ziNums,
                 baseOpenCb, baseOpenZi, baseOpenZiNums, cbElemOf, obElemOf, shElemOf, cbPcSide,
-                vdlIn, vdlIdx, obQAlt, ziQAlt);
+                loadModelParameters, loadModelIndices, obQAlt, ziQAlt);
     }
 
     /** BASE-OPEN closable branches (batch SA only), appended after the normal closed branches so every normal element index is unchanged. */
@@ -335,25 +335,25 @@ final class GpuAcFamilyPacker {
         }
     }
 
-    /** Voltage-dependent load model (ZIP/exponential): one vdl entry per NON-CONSTANT exp term,
+    /** Voltage-dependent load model (ZIP/exponential): one load model entry per NON-CONSTANT exp term,
      *  f = c_n * target * V^n added to the bus P/Q row with the derivative on the own-V column —
      *  exactly OLF's AbstractLoadModelEquationTerm (the n = 0 part lives in the target vector). */
     private static void packLoadModels(com.powsybl.openloadflow.network.LfBus bus, int[] pRow, int[] qRow, int[] vCol,
-                                       List<double[]> vdlIn, List<int[]> vdlIdx) {
+                                       List<double[]> loadModelParameters, List<int[]> loadModelIndices) {
         for (com.powsybl.openloadflow.network.LfLoad load : bus.getLoads()) {
             var lm = load.getLoadModel().orElse(null);
             if (lm == null) {
                 continue;
             }
             if (bus.getControllerShunt().isPresent()) {
-                // dynamic Q-relocation can move this bus's Q row per scenario; the vdl Q slot is
+                // dynamic Q-relocation can move this bus's Q row per scenario; the load model Q slot is
                 // static — reject the combo to the CPU rather than emit at a stale row
                 throw new com.powsybl.commons.PowsyblException("GPU AC solver: load model on controller-shunt bus "
                         + bus.getId() + " (dynamic Q-relocation) not supported");
             }
             if (qRow[bus.getNum()] < 0 || pRow[bus.getNum()] < 0 || vCol[bus.getNum()] < 0) {
                 // a suppressed/relocated Q row (e.g. a REMOTE-VC controller bus: qRow == -1) has no
-                // static slot for the vdl term — a -1 row would be an OOB read in buildStructure
+                // static slot for the load model term — a -1 row would be an OOB read in buildStructure
                 throw new com.powsybl.commons.PowsyblException("GPU AC solver: load model on bus "
                         + bus.getId() + " with a suppressed/absent P/Q/V row not supported");
             }
@@ -362,14 +362,14 @@ final class GpuAcFamilyPacker {
             // n != 0 skip mirrors the Java loop's guard (constant terms live in the targets)
             for (var t : lm.getExpTermsP()) {
                 if (t.n() != 0) {
-                    vdlIn.add(new double[] {t.c(), t.n(), load.getTargetP()});
-                    vdlIdx.add(new int[] {pRow[bus.getNum()], vCol[bus.getNum()]});
+                    loadModelParameters.add(new double[] {t.c(), t.n(), load.getTargetP()});
+                    loadModelIndices.add(new int[] {pRow[bus.getNum()], vCol[bus.getNum()]});
                 }
             }
             for (var t : lm.getExpTermsQ()) {
                 if (t.n() != 0) {
-                    vdlIn.add(new double[] {t.c(), t.n(), load.getTargetQ()});
-                    vdlIdx.add(new int[] {qRow[bus.getNum()], vCol[bus.getNum()]});
+                    loadModelParameters.add(new double[] {t.c(), t.n(), load.getTargetQ()});
+                    loadModelIndices.add(new int[] {qRow[bus.getNum()], vCol[bus.getNum()]});
                 }
             }
         }

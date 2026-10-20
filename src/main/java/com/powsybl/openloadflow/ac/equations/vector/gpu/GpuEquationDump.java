@@ -141,10 +141,10 @@ public final class GpuEquationDump {
         for (int k = 0; k < d.distrShuntB().row().length; k++) {
             add(terms, d.distrShuntB().row()[k], "db[col=" + d.distrShuntB().column()[k] + "]");
         }
-        int[] vdl = d.loadModel().indices();
-        for (int e = 0; e < vdl.length / 4; e++) {
-            add(terms, vdl[e * 4], "vdl#" + e + ".p");
-            add(terms, vdl[e * 4 + 1], "vdl#" + e + ".q");
+        int[] loadModel = d.loadModel().indices();
+        for (int e = 0; e < loadModel.length / 4; e++) {
+            add(terms, loadModel[e * 4], "loadModel#" + e + ".p");
+            add(terms, loadModel[e * 4 + 1], "loadModel#" + e + ".q");
         }
 
         w.write("# GPU equation system: one line per device row (row = the variable it is paired with)\n");

@@ -199,7 +199,7 @@ final class GpuSaRunScope {
             unsupportedOuterLoops.add("DistributedSlack[loadPowerFactorConstant]");
         }
         // Voltage-dependent load model + LOAD-based balance: distribution rescales each load's
-        // targetP, which scales the vdl term coefficients per round — static device coefs would
+        // targetP, which scales the load model term coefficients per round — static device coefs would
         // go stale mid-run.
         if (dsLoopActive && loadBased && olfGuardParams.isUseLoadModel()) {
             unsupportedOuterLoops.add("DistributedSlack[useLoadModel+loadBased]");

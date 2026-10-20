@@ -53,7 +53,7 @@ public final class StructureNative {
                                               double[] ziIn, int[] ziIdx,
                                               int[] distrRhoRow, int[] distrRhoColumn, double[] distrRhoCoefficient,
                                               int[] distrShuntBRow, int[] distrShuntBColumn, double[] distrShuntBCoefficient, int[] cbPcSide,
-                                              double[] vdlIn, int[] vdlIdx, int[] qrPtr, int[] qrRows,
+                                              double[] loadModelParameters, int[] loadModelIndices, int[] qrPtr, int[] qrRows,
                                               int[] obQAlt, int[] ziQAlt,
                                               int[] qrDepBase, int[] qrBaseTargetRow, int[] depGroupOfRow);
 

@@ -206,8 +206,8 @@ void fillActiveBatch(BatchSolverContext* ctx, DriverPass& drv, bool fOnly) {
     }
     // voltage-dependent load model: own guarded block (NOT inside the shunt guard — a modeled
     // load needs no shunt present); residual always, Jacobian slot unless the F-only pass
-    if (ctx->st->nvdl) {
-        fillVdlBatch<<<grid(ctx->st->nvdl * nS), BLOCK, 0, ctx->stream>>>(ctx->st->nvdl, nS, n, nnz, ctx->st->dVdlIn.as<double>(), ctx->st->dVdlIdx.as<int>(), ctx->st->dVdlDest.as<int>(), ctx->dX.as<double>(), fOnly ? nullptr : ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->st->vdlDyn ? ctx->st->dVdlAltRow.as<int>() : nullptr, ctx->st->vdlDyn ? ctx->st->dVdlAltDest.as<int>() : nullptr, ctx->st->vdlDyn ? ctx->dMode.as<int>() : nullptr);
+    if (ctx->st->nLoadModelTerms) {
+        fillLoadModelBatch<<<grid(ctx->st->nLoadModelTerms * nS), BLOCK, 0, ctx->stream>>>(ctx->st->nLoadModelTerms, nS, n, nnz, ctx->st->dLoadModelParameters.as<double>(), ctx->st->dLoadModelIndices.as<int>(), ctx->st->dLoadModelDestination.as<int>(), ctx->dX.as<double>(), fOnly ? nullptr : ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->st->loadModelRelocated ? ctx->st->dLoadModelAlternateRow.as<int>() : nullptr, ctx->st->loadModelRelocated ? ctx->st->dLoadModelAlternateDestination.as<int>() : nullptr, ctx->st->loadModelRelocated ? ctx->dMode.as<int>() : nullptr);
     }
     if (ctx->st->hv.ne) {
         if (fOnly) {

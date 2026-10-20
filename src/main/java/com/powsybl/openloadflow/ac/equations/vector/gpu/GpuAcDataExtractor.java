@@ -170,7 +170,7 @@ public final class GpuAcDataExtractor {
                 new BaseOpenBranches(family.baseOpenCb().stream().mapToInt(Integer::intValue).toArray(),
                         family.baseOpenZi().stream().mapToInt(Integer::intValue).toArray(),
                         family.baseOpenZiNums().stream().mapToInt(Integer::intValue).toArray()),
-                new ElementPack(GpuAcArrays.flatD(family.vdlIn(), 3), GpuAcArrays.flatI(family.vdlIdx(), 2)),
+                new ElementPack(GpuAcArrays.flatD(family.loadModelParameters(), 3), GpuAcArrays.flatI(family.loadModelIndices(), 2)),
                 new ReactiveRelocationCandidates(columns.qrPtr(), columns.qrRows(), columns.qrDepBase(),
                         columns.qrBaseTargetRow(), columns.depGroupOfRow()));
     }

@@ -13,7 +13,7 @@ OLF_JNI(ac_equations_vector_gpu, StructureNative, createStructure)(
         jdoubleArray jziIn, jintArray jziIdx,
         jintArray jDistrRhoRow, jintArray jDistrRhoColumn, jdoubleArray jDistrRhoCoefficient,
         jintArray jDistrShuntBRow, jintArray jDistrShuntBColumn, jdoubleArray jDistrShuntBCoefficient, jintArray jcbPcSide,
-        jdoubleArray jvdlIn, jintArray jvdlIdx, jintArray jqrPtr, jintArray jqrRows,
+        jdoubleArray jLoadModelParameters, jintArray jLoadModelIndices, jintArray jqrPtr, jintArray jqrRows,
         jintArray jobQAlt, jintArray jziQAlt, jintArray jqrDepBase, jintArray jqrBaseTargetRow, jintArray jdepGroupOfRow) {
     jdouble* cbIn = env->GetDoubleArrayElements(jcbIn, nullptr);
     jint* cbIdx = env->GetIntArrayElements(jcbIdx, nullptr);
@@ -41,8 +41,8 @@ OLF_JNI(ac_equations_vector_gpu, StructureNative, createStructure)(
     jint* qrRows = env->GetIntArrayElements(jqrRows, nullptr);
     int nQr = env->GetArrayLength(jqrPtr) - 1;               // groups; qrPtr = [0] when none
     int nQrRows = env->GetArrayLength(jqrRows);
-    jdouble* vdlIn = env->GetDoubleArrayElements(jvdlIn, nullptr);
-    jint* vdlIdx = env->GetIntArrayElements(jvdlIdx, nullptr);
+    jdouble* loadModelParameters = env->GetDoubleArrayElements(jLoadModelParameters, nullptr);
+    jint* loadModelIndices = env->GetIntArrayElements(jLoadModelIndices, nullptr);
     jint* obQAlt = env->GetIntArrayElements(jobQAlt, nullptr);
     jint* ziQAlt = env->GetIntArrayElements(jziQAlt, nullptr);
     jint* qrDepBase = env->GetIntArrayElements(jqrDepBase, nullptr);
@@ -57,7 +57,7 @@ OLF_JNI(ac_equations_vector_gpu, StructureNative, createStructure)(
     int nzi = env->GetArrayLength(jziIdx) / 11;
     int nDistrRho = env->GetArrayLength(jDistrRhoRow);
     int nDistrShuntB = env->GetArrayLength(jDistrShuntBRow);
-    int nvdl = env->GetArrayLength(jvdlIdx) / 2;             // vdlIdx stride 2 (row, vCol)
+    int nLoadModelTerms = env->GetArrayLength(jLoadModelIndices) / 2;             // loadModelIndices stride 2 (row, vCol)
 
     std::string error;
     SharedStructurePtr* st = nullptr;
@@ -105,7 +105,7 @@ OLF_JNI(ac_equations_vector_gpu, StructureNative, createStructure)(
         checkRange("distrRhoColumn", distrRhoColumn, nDistrRho, 1, {0}, 0, n);
         checkRange("distrShuntBRow", distrShuntBRow, nDistrShuntB, 1, {0}, 0, n);
         checkRange("distrShuntBColumn", distrShuntBColumn, nDistrShuntB, 1, {0}, 0, n);
-        checkRange("vdlIdx", vdlIdx, nvdl, 2, {0, 1}, 0, n);
+        checkRange("loadModelIndices", loadModelIndices, nLoadModelTerms, 2, {0, 1}, 0, n);
         for (int e = 0; e < ncb; e++) {                      // encoded (a1Col << 1) | side, or -1
             if (cbPcSide[e] >= 0 && (cbPcSide[e] >> 1) >= n) {
                 throw std::runtime_error("bad cbPcSide at elem " + std::to_string(e)
@@ -118,7 +118,7 @@ OLF_JNI(ac_equations_vector_gpu, StructureNative, createStructure)(
                                                    nzi, ziIn, ziIdx,
                                                    nDistrRho, distrRhoRow, distrRhoColumn, distrRhoCoefficient,
                                                    nDistrShuntB, distrShuntBRow, distrShuntBColumn, distrShuntBCoefficient, cbPcSide,
-                                                   nvdl, vdlIn, vdlIdx, nQr, qrPtr, qrRows,
+                                                   nLoadModelTerms, loadModelParameters, loadModelIndices, nQr, qrPtr, qrRows,
                                                    obQAlt, ziQAlt, qrDepBase, qrBaseTargetRow, depGroupOfRow));
     } catch (const std::exception& e) {
         error = e.what();
@@ -150,8 +150,8 @@ OLF_JNI(ac_equations_vector_gpu, StructureNative, createStructure)(
     env->ReleaseIntArrayElements(jDistrShuntBRow, distrShuntBRow, JNI_ABORT);
     env->ReleaseIntArrayElements(jDistrShuntBColumn, distrShuntBColumn, JNI_ABORT);
     env->ReleaseDoubleArrayElements(jDistrShuntBCoefficient, distrShuntBCoefficient, JNI_ABORT);
-    env->ReleaseDoubleArrayElements(jvdlIn, vdlIn, JNI_ABORT);
-    env->ReleaseIntArrayElements(jvdlIdx, vdlIdx, JNI_ABORT);
+    env->ReleaseDoubleArrayElements(jLoadModelParameters, loadModelParameters, JNI_ABORT);
+    env->ReleaseIntArrayElements(jLoadModelIndices, loadModelIndices, JNI_ABORT);
     env->ReleaseIntArrayElements(jobQAlt, obQAlt, JNI_ABORT);
     env->ReleaseIntArrayElements(jziQAlt, ziQAlt, JNI_ABORT);
     env->ReleaseIntArrayElements(jqrDepBase, qrDepBase, JNI_ABORT);

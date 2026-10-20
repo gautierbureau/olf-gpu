@@ -263,7 +263,7 @@ class GpuSaContingencyKindsTest extends AbstractGpuSaTest {
         assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
     }
 
-    /** Voltage-dependent (ZIP) load model under batched SA: the vdl family evaluates
+    /** Voltage-dependent (ZIP) load model under batched SA: the load model family evaluates
      *  c_n*target*V^n on the bus P/Q rows per scenario; DS + RL on; parallel-line outage. */
     @Test
     void deviceZipLoadModelMatchesCpu() {

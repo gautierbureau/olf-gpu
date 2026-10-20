@@ -31,13 +31,13 @@ __global__ void cphCheckBatch(int nCph, int nScenarios, int n, int nElements, in
                               const int* kind, const int* a1Row, const int* side, const double* limit, const int* elem,
                               const int* tapPtr, const double* tapData,
                               const double* closedBranchParameters, const int* closedBranchIndices, int nR1Ov, const int* r1OvSlotElem, const double* r1OvVal,
-                              const char* disabled, const char* rlActive, const int* iter,
+                              const char* disabled, const char* outerLoopCheckActive, const int* iter,
                               int* tap, int* mode, double* target, double* x, char* switched) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nCph * nScenarios) return;
     int c = tid % nCph;
     int s = tid / nCph;
-    if (!rlActive[s] || disabled[(size_t) s * nElements + elem[c]]) return;
+    if (!outerLoopCheckActive[s] || disabled[(size_t) s * nElements + elem[c]]) return;
     size_t ar = (size_t) s * n + a1Row[c];
     int base = tapPtr[c];
     int nTaps = tapPtr[c + 1] - base;
@@ -92,7 +92,7 @@ void cphResetSolve(BatchSolverContext* ctx, DriverPass& drv) {
 void cphStep(BatchSolverContext* ctx, DriverPass& drv) {
     const int& n = drv.n;
     const int& nS = drv.nS;
-    std::vector<char>& rlActive = drv.rlActive;
+    std::vector<char>& outerLoopCheckActive = drv.outerLoopCheckActive;
     int nC = ctx->nCph;
     if (nC <= 0) return;
     size_t nst = static_cast<size_t>(nS) * nC;
@@ -100,13 +100,13 @@ void cphStep(BatchSolverContext* ctx, DriverPass& drv) {
             ctx->dCphKind.as<int>(), ctx->dCphA1Row.as<int>(), ctx->dCphSide.as<int>(), ctx->dCphLimit.as<double>(), ctx->dCphElem.as<int>(),
             ctx->dCphTapPtr.as<int>(), ctx->dCphTapData.as<double>(),
             ctx->st->closedBranch.parameters.as<double>(), ctx->st->closedBranch.indices.as<int>(), ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>(),
-            ctx->dDisabled.as<char>(), ctx->dRlActive.as<char>(), ctx->dCphIter.as<int>(),
-            ctx->dCphTap.as<int>(), ctx->dMode.as<int>(), ctx->dTarget.as<double>(), ctx->dX.as<double>(), ctx->dRlSwitched.as<char>());
+            ctx->dDisabled.as<char>(), ctx->dOuterLoopCheckActive.as<char>(), ctx->dCphIter.as<int>(),
+            ctx->dCphTap.as<int>(), ctx->dMode.as<int>(), ctx->dTarget.as<double>(), ctx->dX.as<double>(), ctx->dOuterLoopUnstable.as<char>());
     CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
     {                                                    // the loop's check count, per checked scenario
         std::vector<int> it(nS);
         CUDA_CHECK(cudaMemcpy(it.data(), ctx->dCphIter.p, nS * sizeof(int), cudaMemcpyDeviceToHost));
-        for (int s2 = 0; s2 < nS; s2++) if (rlActive[s2]) it[s2]++;
+        for (int s2 = 0; s2 < nS; s2++) if (outerLoopCheckActive[s2]) it[s2]++;
         CUDA_CHECK(cudaMemcpy(ctx->dCphIter.p, it.data(), nS * sizeof(int), cudaMemcpyHostToDevice));
     }
     tvcRebuildOverrides(ctx);

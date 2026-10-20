@@ -140,7 +140,7 @@ public final class GpuBatchContextCache {
                 data.distributedSlack().busBaseTargetP(), data.distributedSlack().busMaxDelta(), data.distributedSlack().busMinDelta(),
                 data.distributedSlack().factorMode(), data.distributedSlack().busMarginUp(), data.distributedSlack().busMarginDown(),
                 data.distributedSlack().slackMarginUp(), data.distributedSlack().slackMarginDown());
-        DeviceLoopTables.installRlElection(handle, data);
+        DeviceLoopTables.installReactiveLimitStrongestPvKeys(handle, data);
         cachedContext = new CachedBatchContext(handle, data, chunkSize, mode, structure);
         BUILDS.incrementAndGet();
         return handle;

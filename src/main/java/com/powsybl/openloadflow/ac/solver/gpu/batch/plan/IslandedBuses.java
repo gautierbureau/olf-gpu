@@ -154,16 +154,16 @@ final class IslandedBuses {
     /** The reactive-limits controllers this contingency puts in another synchronous component: their
      *  BUS_V row is one of the frozen island rows. OLF disables those buses, so its ReactiveLimits
      *  loop never sees them; the device must not either, or it pins a PV bus OLF leaves alone. */
-    static int[] islandedRlControllers(int[] frozenRows, GpuAcData gpuData) {
-        int[] rlVrow = gpuData.reactiveLimits().voltageRow();
-        if (rlVrow == null || rlVrow.length == 0 || frozenRows.length == 0) {
+    static int[] islandedReactiveLimitControllers(int[] frozenRows, GpuAcData gpuData) {
+        int[] reactiveLimitVoltageRow = gpuData.reactiveLimits().voltageRow();
+        if (reactiveLimitVoltageRow == null || reactiveLimitVoltageRow.length == 0 || frozenRows.length == 0) {
             return NO_ISLANDED_DS;
         }
-        int[] found = new int[rlVrow.length];
+        int[] found = new int[reactiveLimitVoltageRow.length];
         int count = 0;
-        for (int i = 0; i < rlVrow.length; i++) {
+        for (int i = 0; i < reactiveLimitVoltageRow.length; i++) {
             for (int frozen : frozenRows) {
-                if (frozen == rlVrow[i]) {
+                if (frozen == reactiveLimitVoltageRow[i]) {
                     found[count++] = i;
                     break;
                 }

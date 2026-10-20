@@ -37,20 +37,20 @@ namespace olfgpu {
 // The per-solve seed of a fresh (non-resumed) full load flow: the generators' slack moves cleared, the pilot Q targets
 // captured, every reactive-limit pin seeded (from the base or a previous solve) and stamped on the rows, and every
 // in-kernel loop reset to its entry state.
-void seedSolve(BatchSolverContext* ctx, DriverPass& drv, const int* rlStateIn, const double* dsSlackShift) {
+void seedSolve(BatchSolverContext* ctx, DriverPass& drv, const int* reactiveLimitsSeedState, const double* dsSlackShift) {
     const int& n = drv.n;
     const int& nS = drv.nS;
-    const bool& useDynRlLimits = drv.useDynRlLimits;
-    const int& nRlVtOv = drv.nRlVtOv;
-    const int& nRlQOv = drv.nRlQOv;
+    const bool& usePerScenarioReactiveLimits = drv.usePerScenarioReactiveLimits;
+    const int& nReactiveLimitTargetVOverrides = drv.nReactiveLimitTargetVOverrides;
+    const int& nReactiveLimitDeltaOverrides = drv.nReactiveLimitDeltaOverrides;
     const int& nCvOv = drv.nCvOv;
     DeviceBuf& dBaseMode = drv.dBaseMode;
-    DeviceBuf& dRlVtOvSlotIdx = drv.dRlVtOvSlotIdx;
-    DeviceBuf& dRlVtOvVal = drv.dRlVtOvVal;
-    DeviceBuf& dRlQOvSlotEntry = drv.dRlQOvSlotEntry;
-    DeviceBuf& dRlQOvMinMax = drv.dRlQOvMinMax;
-    DeviceBuf& dRlQOvPtr = drv.dRlQOvPtr;
-    DeviceBuf& dRlQOvList = drv.dRlQOvList;
+    DeviceBuf& dReactiveLimitTargetVOverrideScenarioEntry = drv.dReactiveLimitTargetVOverrideScenarioEntry;
+    DeviceBuf& dReactiveLimitTargetVOverrideValue = drv.dReactiveLimitTargetVOverrideValue;
+    DeviceBuf& dReactiveLimitDeltaOverrideScenarioEntry = drv.dReactiveLimitDeltaOverrideScenarioEntry;
+    DeviceBuf& dReactiveLimitDeltaOverrideValues = drv.dReactiveLimitDeltaOverrideValues;
+    DeviceBuf& dReactiveLimitDeltaOverrideStart = drv.dReactiveLimitDeltaOverrideStart;
+    DeviceBuf& dReactiveLimitDeltaOverrideList = drv.dReactiveLimitDeltaOverrideList;
     DeviceBuf& dCvOvPtr = drv.dCvOvPtr;
     DeviceBuf& dCvOvEntry = drv.dCvOvEntry;
     DeviceBuf& dCvOvVal = drv.dCvOvVal;
@@ -81,7 +81,7 @@ void seedSolve(BatchSolverContext* ctx, DriverPass& drv, const int* rlStateIn, c
                     ctx->hasDistrQSubgroups ? ctx->dQrMemberStart.as<int>() : nullptr,
                     ctx->dQrPilotQ.as<double>(), ctx->dTarget.as<double>());
         }
-        if (!ctx->dQrPilotRlEntry.p) {
+        if (!ctx->dReactiveRelocationPilotReactiveLimitEntry.p) {
             // Per group, the pilot's own LOCAL reactive-limit entry: a pilot whose group lost control
             // in the BASE (every member pinned there) enters the pack as a local entry with an empty
             // reactive range, and that entry carries the group's V target — the value the pilot row
@@ -91,22 +91,22 @@ void seedSolve(BatchSolverContext* ctx, DriverPass& drv, const int* rlStateIn, c
             CUDA_CHECK(cudaMemcpy(ptr.data(), ctx->st->dQrPtr.p, ptr.size() * sizeof(int), cudaMemcpyDeviceToHost));
             std::vector<int> rows(std::max(ptr[nQr], 1));
             CUDA_CHECK(cudaMemcpy(rows.data(), ctx->st->dQrRows.p, static_cast<size_t>(ptr[nQr]) * sizeof(int), cudaMemcpyDeviceToHost));
-            std::vector<int> vrow(std::max(ctx->nrl, 1));
-            std::vector<char> rem(std::max(ctx->nrl, 1), 0);
-            if (ctx->nrl > 0) {
-                CUDA_CHECK(cudaMemcpy(vrow.data(), ctx->dRlVrow.p, static_cast<size_t>(ctx->nrl) * sizeof(int), cudaMemcpyDeviceToHost));
-                if (ctx->dRlRemote.p) {
-                    CUDA_CHECK(cudaMemcpy(rem.data(), ctx->dRlRemote.p, static_cast<size_t>(ctx->nrl), cudaMemcpyDeviceToHost));
+            std::vector<int> vrow(std::max(ctx->nReactiveLimitEntries, 1));
+            std::vector<char> rem(std::max(ctx->nReactiveLimitEntries, 1), 0);
+            if (ctx->nReactiveLimitEntries > 0) {
+                CUDA_CHECK(cudaMemcpy(vrow.data(), ctx->dReactiveLimitVoltageRow.p, static_cast<size_t>(ctx->nReactiveLimitEntries) * sizeof(int), cudaMemcpyDeviceToHost));
+                if (ctx->dReactiveLimitVoltageControlRole.p) {
+                    CUDA_CHECK(cudaMemcpy(rem.data(), ctx->dReactiveLimitVoltageControlRole.p, static_cast<size_t>(ctx->nReactiveLimitEntries), cudaMemcpyDeviceToHost));
                 }
             }
             std::vector<int> pe(std::max(nQr, 1), -1);
             for (int g = 0; g < nQr; g++) {
                 int pilotRow = rows[ptr[g]];
-                for (int i = 0; i < ctx->nrl; i++) {
+                for (int i = 0; i < ctx->nReactiveLimitEntries; i++) {
                     if (!rem[i] && vrow[i] == pilotRow) { pe[g] = i; break; }
                 }
             }
-            ctx->dQrPilotRlEntry.upload(pe.data(), pe.size() * sizeof(int));
+            ctx->dReactiveRelocationPilotReactiveLimitEntry.upload(pe.data(), pe.size() * sizeof(int));
         }
         if (nS == 1 && std::getenv("OLF_GPU_BATCH_TRACE") != nullptr) {
             CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
@@ -129,30 +129,30 @@ void seedSolve(BatchSolverContext* ctx, DriverPass& drv, const int* rlStateIn, c
             }
         }
     }
-    if (rlStateIn != nullptr && ctx->nrl > 0) {
+    if (reactiveLimitsSeedState != nullptr && ctx->nReactiveLimitEntries > 0) {
         // WARM CONTINUATION: seed each (controller, scenario)'s pinned limit type AND switch
         // count from the state the caller passes. A re-solve inside one load flow passes both; a
         // strategy pair passes its parent's pins with zero counts, since OLF's reactive-limit
         // loop counts afresh in every load flow.
-        std::vector<char> lt(static_cast<size_t>(ctx->nrl) * nS), sc(static_cast<size_t>(ctx->nrl) * nS);
+        std::vector<char> lt(static_cast<size_t>(ctx->nReactiveLimitEntries) * nS), sc(static_cast<size_t>(ctx->nReactiveLimitEntries) * nS);
         for (size_t k = 0; k < lt.size(); k++) {
-            lt[k] = static_cast<char>(rlStateLimitType(rlStateIn[k]));
-            sc[k] = static_cast<char>(rlStatePvPqSwitchCount(rlStateIn[k]));
+            lt[k] = static_cast<char>(reactiveLimitsStateQLimitType(reactiveLimitsSeedState[k]));
+            sc[k] = static_cast<char>(reactiveLimitsStatePvPqSwitchCount(reactiveLimitsSeedState[k]));
         }
-        CUDA_CHECK(cudaMemcpyAsync(ctx->dRlLimitType.p, lt.data(), lt.size(), cudaMemcpyHostToDevice, ctx->stream));
-        CUDA_CHECK(cudaMemcpy(ctx->dRlSwitchCount.p, sc.data(), sc.size(), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpyAsync(ctx->dReactiveLimitQLimitType.p, lt.data(), lt.size(), cudaMemcpyHostToDevice, ctx->stream));
+        CUDA_CHECK(cudaMemcpy(ctx->dReactiveLimitPvPqSwitchCount.p, sc.data(), sc.size(), cudaMemcpyHostToDevice));
         // The limits the continued pins are STAMPED at: OLF restores each pinned bus's generation target Q from
         // the parent's end, and a GeneratorAction only invalidates the bus's target P, so the first solve keeps
         // the limit at the parent's P (dgSeedAnchor) and the reactive-limit check refreshes it afterwards.
-        if (useDynRlLimits) {                            // curve limits at the CURRENT (seeded) targets,
-            rlCurveLimitsBatch<<<grid(ctx->nrl * nS), BLOCK, 0, ctx->stream>>>(ctx->nrl, nS, ctx->ncv, n, ctx->cvExtrapolate,
+        if (usePerScenarioReactiveLimits) {                            // curve limits at the CURRENT (seeded) targets,
+            reactiveCapabilityCurveLimitsBatch<<<grid(ctx->nReactiveLimitEntries * nS), BLOCK, 0, ctx->stream>>>(ctx->nReactiveLimitEntries, nS, ctx->ncv, n, ctx->cvExtrapolate,
                     ctx->dCvIdx.as<int>(), ctx->dCvIn.as<double>(), ctx->dCvPts.as<double>(),
                     ctx->dCvPtr.as<int>(), ctx->dCvList.as<int>(), cvHvdcView(ctx),
-                    ctx->dRlMinQ.as<double>(), ctx->dRlMaxQ.as<double>(), ctx->dRlLoadQ.as<double>(),
+                    ctx->dReactiveLimitMinQ.as<double>(), ctx->dReactiveLimitMaxQ.as<double>(), ctx->dReactiveLimitLoadQ.as<double>(),
                     ctx->dTarget.as<double>(),
-                    nRlQOv, nRlQOv > 0 ? dRlQOvSlotEntry.as<int>() : nullptr,
-                    nRlQOv > 0 ? dRlQOvMinMax.as<double>() : nullptr,
-                    nRlQOv > 0 ? dRlQOvPtr.as<int>() : nullptr, nRlQOv > 0 ? dRlQOvList.as<int>() : nullptr,
+                    nReactiveLimitDeltaOverrides, nReactiveLimitDeltaOverrides > 0 ? dReactiveLimitDeltaOverrideScenarioEntry.as<int>() : nullptr,
+                    nReactiveLimitDeltaOverrides > 0 ? dReactiveLimitDeltaOverrideValues.as<double>() : nullptr,
+                    nReactiveLimitDeltaOverrides > 0 ? dReactiveLimitDeltaOverrideStart.as<int>() : nullptr, nReactiveLimitDeltaOverrides > 0 ? dReactiveLimitDeltaOverrideList.as<int>() : nullptr,
                     nCvOv > 0 ? dCvOvPtr.as<int>() : nullptr,
                     nCvOv > 0 ? dCvOvEntry.as<int>() : nullptr,
                     nCvOv > 0 ? dCvOvVal.as<double>() : nullptr,
@@ -163,59 +163,59 @@ void seedSolve(BatchSolverContext* ctx, DriverPass& drv, const int* rlStateIn, c
                     ctx->nds > 0 ? ctx->dDsPhiRow.as<int>() : nullptr,
                     ctx->nDsRowOv > 0 ? ctx->dDsRowOv.as<int>() : nullptr, ctx->nds,
                     ctx->ngen > 0 ? ctx->dgBus.as<int>() : nullptr,
-                    ctx->dRlMinQDyn.as<double>(), ctx->dRlMaxQDyn.as<double>(),
-                    ctx->dRlLoadQDyn.as<double>());
+                    ctx->dReactiveLimitMinQPerScenario.as<double>(), ctx->dReactiveLimitMaxQPerScenario.as<double>(),
+                    ctx->dReactiveLimitLoadQPerScenario.as<double>());
             launchForcedTargetQLimits(ctx, nS, n);
         }
-        seedRlModeFromState<<<grid(ctx->nrl * nS), BLOCK, 0, ctx->stream>>>(ctx->nrl, nS, n,
-                ctx->dRlVrow.as<int>(), ctx->dRlQrow.p ? ctx->dRlQrow.as<int>() : nullptr,
-                useDynRlLimits ? ctx->dRlMinQDyn.as<double>() : ctx->dRlMinQ.as<double>(),
-                useDynRlLimits ? ctx->dRlMaxQDyn.as<double>() : ctx->dRlMaxQ.as<double>(),
-                useDynRlLimits ? ctx->dRlLoadQDyn.as<double>() : ctx->dRlLoadQ.as<double>(), ctx->dRlLimitType.as<char>(),
-                ctx->dMode.as<int>(), ctx->dTarget.as<double>(), useDynRlLimits ? 1 : 0,
-                ctx->nRlRemote > 0 ? ctx->dRlRemote.as<char>() : nullptr,
-                ctx->dRlSavedTarget.as<double>(), ctx->dRlSavedMode.as<char>(),
-                ctx->hasRlBaseLt ? ctx->dRlBaseLimitType.as<char>() : nullptr,
+        seedReactiveLimitRowModeFromState<<<grid(ctx->nReactiveLimitEntries * nS), BLOCK, 0, ctx->stream>>>(ctx->nReactiveLimitEntries, nS, n,
+                ctx->dReactiveLimitVoltageRow.as<int>(), ctx->dReactiveLimitReactivePowerRow.p ? ctx->dReactiveLimitReactivePowerRow.as<int>() : nullptr,
+                usePerScenarioReactiveLimits ? ctx->dReactiveLimitMinQPerScenario.as<double>() : ctx->dReactiveLimitMinQ.as<double>(),
+                usePerScenarioReactiveLimits ? ctx->dReactiveLimitMaxQPerScenario.as<double>() : ctx->dReactiveLimitMaxQ.as<double>(),
+                usePerScenarioReactiveLimits ? ctx->dReactiveLimitLoadQPerScenario.as<double>() : ctx->dReactiveLimitLoadQ.as<double>(), ctx->dReactiveLimitQLimitType.as<char>(),
+                ctx->dMode.as<int>(), ctx->dTarget.as<double>(), usePerScenarioReactiveLimits ? 1 : 0,
+                ctx->nReactiveLimitRemoteEntries > 0 ? ctx->dReactiveLimitVoltageControlRole.as<char>() : nullptr,
+                ctx->dReactiveLimitSavedTarget.as<double>(), ctx->dReactiveLimitSavedRowMode.as<char>(),
+                ctx->hasReactiveLimitBaseQLimitType ? ctx->dReactiveLimitBaseQLimitType.as<char>() : nullptr,
                 psEntryPtr(ctx), ctx->st->nQr,
-                ctx->dRlVtarget.as<double>(), nRlVtOv, nRlVtOv > 0 ? dRlVtOvSlotIdx.as<int>() : nullptr,
-                nRlVtOv > 0 ? dRlVtOvVal.as<double>() : nullptr, ctx->nSvc > 0 ? ctx->dSvcRlVt.as<double>() : nullptr,
-                ctx->nRlLocal > 0 ? ctx->dRlLocalOv.as<char>() : nullptr,
-                ctx->nRlLocal > 0 ? ctx->dRlLocalVt.as<double>() : nullptr,
-                ctx->hasRlPinTgtIn ? ctx->dRlPinTgtIn.as<double>() : nullptr,
-                ctx->nRlIslanded > 0 ? ctx->dRlIslanded.as<char>() : nullptr);
+                ctx->dReactiveLimitTargetV.as<double>(), nReactiveLimitTargetVOverrides, nReactiveLimitTargetVOverrides > 0 ? dReactiveLimitTargetVOverrideScenarioEntry.as<int>() : nullptr,
+                nReactiveLimitTargetVOverrides > 0 ? dReactiveLimitTargetVOverrideValue.as<double>() : nullptr, ctx->nSvc > 0 ? ctx->dSecondaryVoltageControlReactiveLimitTargetV.as<double>() : nullptr,
+                ctx->nReactiveLimitLocalOverrides > 0 ? ctx->dReactiveLimitLocalOverride.as<char>() : nullptr,
+                ctx->nReactiveLimitLocalOverrides > 0 ? ctx->dReactiveLimitLocalTargetV.as<double>() : nullptr,
+                ctx->hasReactiveLimitSeedTargetQ ? ctx->dReactiveLimitSeedTargetQ.as<double>() : nullptr,
+                ctx->nReactiveLimitIslanded > 0 ? ctx->dReactiveLimitIslanded.as<char>() : nullptr);
     } else {
-        CUDA_CHECK(cudaMemsetAsync(ctx->dRlSwitchCount.p, 0, static_cast<size_t>(ctx->nrl) * nS * sizeof(char), ctx->stream));
-        if (ctx->nrl > 0) {                              // seed the pinned limit for base-PQ controllers (else all PV)
-            initRlLimitTypeBatch<<<grid(ctx->nrl * nS), BLOCK, 0, ctx->stream>>>(ctx->nrl, nS, n, ctx->dRlVrow.as<int>(),
-                    ctx->dRlQrow.p ? ctx->dRlQrow.as<int>() : nullptr,
-                    ctx->dRlVtarget.as<double>(), ctx->dRlMonitored.as<char>(), dBaseMode.as<int>(), ctx->dX.as<double>(),
-                    ctx->dRlLimitType.as<char>(),
-                    nRlVtOv, nRlVtOv > 0 ? dRlVtOvSlotIdx.as<int>() : nullptr,
-                    nRlVtOv > 0 ? dRlVtOvVal.as<double>() : nullptr,
-                    ctx->nSvc > 0 ? ctx->dSvcRlVt.as<double>() : nullptr,
-                    ctx->nRlRemote > 0 ? ctx->dRlRemote.as<char>() : nullptr,
-                    ctx->nRlRemote > 0 ? ctx->dRlCmpVrow.as<int>() : nullptr,
-                    ctx->dTarget.as<double>(), ctx->dRlMinQ.as<double>(), ctx->dRlMaxQ.as<double>(),
-                    ctx->dRlLoadQ.as<double>(),
-                    ctx->hasRlBaseLt ? ctx->dRlBaseLimitType.as<char>() : nullptr,
+        CUDA_CHECK(cudaMemsetAsync(ctx->dReactiveLimitPvPqSwitchCount.p, 0, static_cast<size_t>(ctx->nReactiveLimitEntries) * nS * sizeof(char), ctx->stream));
+        if (ctx->nReactiveLimitEntries > 0) {                              // seed the pinned limit for base-PQ controllers (else all PV)
+            initReactiveLimitQLimitTypeBatch<<<grid(ctx->nReactiveLimitEntries * nS), BLOCK, 0, ctx->stream>>>(ctx->nReactiveLimitEntries, nS, n, ctx->dReactiveLimitVoltageRow.as<int>(),
+                    ctx->dReactiveLimitReactivePowerRow.p ? ctx->dReactiveLimitReactivePowerRow.as<int>() : nullptr,
+                    ctx->dReactiveLimitTargetV.as<double>(), ctx->dReactiveLimitFlags.as<char>(), dBaseMode.as<int>(), ctx->dX.as<double>(),
+                    ctx->dReactiveLimitQLimitType.as<char>(),
+                    nReactiveLimitTargetVOverrides, nReactiveLimitTargetVOverrides > 0 ? dReactiveLimitTargetVOverrideScenarioEntry.as<int>() : nullptr,
+                    nReactiveLimitTargetVOverrides > 0 ? dReactiveLimitTargetVOverrideValue.as<double>() : nullptr,
+                    ctx->nSvc > 0 ? ctx->dSecondaryVoltageControlReactiveLimitTargetV.as<double>() : nullptr,
+                    ctx->nReactiveLimitRemoteEntries > 0 ? ctx->dReactiveLimitVoltageControlRole.as<char>() : nullptr,
+                    ctx->nReactiveLimitRemoteEntries > 0 ? ctx->dReactiveLimitComparedVoltageRow.as<int>() : nullptr,
+                    ctx->dTarget.as<double>(), ctx->dReactiveLimitMinQ.as<double>(), ctx->dReactiveLimitMaxQ.as<double>(),
+                    ctx->dReactiveLimitLoadQ.as<double>(),
+                    ctx->hasReactiveLimitBaseQLimitType ? ctx->dReactiveLimitBaseQLimitType.as<char>() : nullptr,
                     psEntryPtr(ctx), ctx->st->nQr,
-                    ctx->nRlGenLost > 0 ? ctx->dRlGenLost.as<char>() : nullptr);
+                    ctx->nReactiveLimitGeneratorsLost > 0 ? ctx->dReactiveLimitGeneratorsLost.as<char>() : nullptr);
         }
     }
     // The seeded pin states must reach the ROWS before the first fill: a pinned enrolled pilot's balance
     // goes on the carrier's target (its DISTR_Q target otherwise), and a group that lost control in the
     // base has its pilot row flipped already. Both kernels are idempotent; the RL pass runs them again.
-    // Every scenario takes the seed stamps: updateDistrQTargetsBatch returns on !rlActive[s], and rlActive is
+    // Every scenario takes the seed stamps: updateDistrQTargetsBatch returns on !outerLoopCheckActive[s], and outerLoopCheckActive is
     // only written by the outer-loop passes - at seed time it still held the context's zeros (or the previous
     // chunk's last pass), so the carrier stamp below never ran before the FIRST solve. A pilot-self pilot that
     // lost every generator with two live survivors then solved its carrier row against the plan's renormalized
     // DISTR_Q seed (0.5 x its -0.6 balance = -0.3) instead of its balance: measured as 0.258 kV at b2 on
     // devicePilotControllerLosingItsOwnGeneratorMatchesCpu (OLF's BUS_TARGET_Q of the pilot 0.3 pu off at the
     // device state), and rte6515's 50 refused pilot outages. One survivor hid it: its seed degenerates to the
-    // pilot's own target. The passes upload their own rlActive before they run.
+    // pilot's own target. The passes upload their own outerLoopCheckActive before they run.
     {
         std::vector<char> allOn(nS, 1);
-        CUDA_CHECK(cudaMemcpyAsync(ctx->dRlActive.p, allOn.data(), nS, cudaMemcpyHostToDevice, ctx->stream));
+        CUDA_CHECK(cudaMemcpyAsync(ctx->dOuterLoopCheckActive.p, allOn.data(), nS, cudaMemcpyHostToDevice, ctx->stream));
         CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
     }
     // The dynamic reactive limits BEFORE the seed stamps, on the cold path too. They were first computed in the
@@ -223,16 +223,16 @@ void seedSolve(BatchSolverContext* ctx, DriverPass& drv, const int* rlStateIn, c
     // carrier target came out 0 - 0 instead of 0 - loadQ, and a survivor's sharing target summed a pinned
     // peer's (limit - loadQ) as 0 - 0 - measured on devicePilotControllerLosingItsOwnGeneratorMatchesCpu
     // as rows 2 and 4 both at target 0 during the solve (OLF: -0.6 and -0.3). The warm path already ran
-    // this before seeding; here it runs after initRlLimitTypeBatch has set the scenario's limit types.
-    if (useDynRlLimits) {                            // curve limits at the CURRENT (seeded) targets,
-        rlCurveLimitsBatch<<<grid(ctx->nrl * nS), BLOCK, 0, ctx->stream>>>(ctx->nrl, nS, ctx->ncv, n, ctx->cvExtrapolate,
+    // this before seeding; here it runs after initReactiveLimitQLimitTypeBatch has set the scenario's limit types.
+    if (usePerScenarioReactiveLimits) {                            // curve limits at the CURRENT (seeded) targets,
+        reactiveCapabilityCurveLimitsBatch<<<grid(ctx->nReactiveLimitEntries * nS), BLOCK, 0, ctx->stream>>>(ctx->nReactiveLimitEntries, nS, ctx->ncv, n, ctx->cvExtrapolate,
                 ctx->dCvIdx.as<int>(), ctx->dCvIn.as<double>(), ctx->dCvPts.as<double>(),
                     ctx->dCvPtr.as<int>(), ctx->dCvList.as<int>(), cvHvdcView(ctx),
-                ctx->dRlMinQ.as<double>(), ctx->dRlMaxQ.as<double>(), ctx->dRlLoadQ.as<double>(),
+                ctx->dReactiveLimitMinQ.as<double>(), ctx->dReactiveLimitMaxQ.as<double>(), ctx->dReactiveLimitLoadQ.as<double>(),
                 ctx->dTarget.as<double>(),
-                nRlQOv, nRlQOv > 0 ? dRlQOvSlotEntry.as<int>() : nullptr,
-                nRlQOv > 0 ? dRlQOvMinMax.as<double>() : nullptr,
-                    nRlQOv > 0 ? dRlQOvPtr.as<int>() : nullptr, nRlQOv > 0 ? dRlQOvList.as<int>() : nullptr,
+                nReactiveLimitDeltaOverrides, nReactiveLimitDeltaOverrides > 0 ? dReactiveLimitDeltaOverrideScenarioEntry.as<int>() : nullptr,
+                nReactiveLimitDeltaOverrides > 0 ? dReactiveLimitDeltaOverrideValues.as<double>() : nullptr,
+                    nReactiveLimitDeltaOverrides > 0 ? dReactiveLimitDeltaOverrideStart.as<int>() : nullptr, nReactiveLimitDeltaOverrides > 0 ? dReactiveLimitDeltaOverrideList.as<int>() : nullptr,
                 nCvOv > 0 ? dCvOvPtr.as<int>() : nullptr,
                 nCvOv > 0 ? dCvOvEntry.as<int>() : nullptr,
                 nCvOv > 0 ? dCvOvVal.as<double>() : nullptr,
@@ -241,8 +241,8 @@ void seedSolve(BatchSolverContext* ctx, DriverPass& drv, const int* rlStateIn, c
                 ctx->nds > 0 ? ctx->dDsPhiRow.as<int>() : nullptr,
                 ctx->nDsRowOv > 0 ? ctx->dDsRowOv.as<int>() : nullptr, ctx->nds,
                 ctx->ngen > 0 ? ctx->dgBus.as<int>() : nullptr,
-                ctx->dRlMinQDyn.as<double>(), ctx->dRlMaxQDyn.as<double>(),
-                ctx->dRlLoadQDyn.as<double>());
+                ctx->dReactiveLimitMinQPerScenario.as<double>(), ctx->dReactiveLimitMaxQPerScenario.as<double>(),
+                ctx->dReactiveLimitLoadQPerScenario.as<double>());
         launchForcedTargetQLimits(ctx, nS, n);
     }
     launchPilotVeqInner(ctx, drv, true, true);                     // seed: base limits, or the previous solve's flip

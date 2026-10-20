@@ -106,26 +106,26 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                               const int* dsOvBus, const double* dsOvFactorDelta, const double* dsOvBaseDelta,
                               const double* dsOvMaxDelta, const double* dsOvMinDelta, const double* dsAnchorShift,
                               const double* dsSlackShift,
-                              int nRlVtOv, const int* rlVtOvSlotIdx, const double* rlVtOvVal,
-                              int nRlQOv, const int* rlQOvSlotEntry, const double* rlQOvMinMax,
+                              int nReactiveLimitTargetVOverrides, const int* reactiveLimitTargetVOverrideScenarioEntry, const double* reactiveLimitTargetVOverrideValue,
+                              int nReactiveLimitDeltaOverrides, const int* reactiveLimitDeltaOverrideScenarioEntry, const double* reactiveLimitDeltaOverrideValues,
                               int nCvOv, const int* cvOvSlotEntry, const double* cvOvStepScale,
                               int maxIter, double tol,
                               double reactiveLimitTol, double slackDistTol, double convEpsPerEq,
                               int lsMode, double maxDv, double maxDphi, const int* varType,
                               const double* x0Full, int nShuntAdmittanceOverrides, const int* shuntAdmittanceOverrideScenarioElement, const double* shuntAdmittanceOverrideDelta,
-                              const int* rlStateIn, int* rlStateOut,
+                              const int* reactiveLimitsSeedState, int* reactiveLimitsFinalState,
                               int nR1Ov, const int* r1OvSlotElem, const double* r1OvVal,
-                              int maxOuterProductive, int rlMaxSwitch, int dsRejectResidual, int skipRlPhase,
+                              int maxOuterProductive, int maxPqPvSwitch, int dsRejectResidual, int skipReactiveLimitsPhase,
                               int nBaseClosedZeroImpedanceBranches, int nZeroImpedanceBranchCloseOverrides, const int* zeroImpedanceBranchCloseScenarioElement,
                               int nZeroImpedanceBranchOpenOverrides, const int* zeroImpedanceBranchOpenScenarioElement) {
     DriverPass drv;
     drv.n = ctx->n;
     drv.nnz = ctx->nnz;
     drv.nS = ctx->nScenarios;
-    drv.nRlVtOv = nRlVtOv;
-    drv.nRlQOv = nRlQOv;
+    drv.nReactiveLimitTargetVOverrides = nReactiveLimitTargetVOverrides;
+    drv.nReactiveLimitDeltaOverrides = nReactiveLimitDeltaOverrides;
     drv.nCvOv = nCvOv;
-    drv.skipRlPhase = skipRlPhase;
+    drv.skipReactiveLimitsPhase = skipReactiveLimitsPhase;
     const int& n = drv.n;
     const int& nnz = drv.nnz;
     const int& nS = drv.nS;
@@ -157,11 +157,11 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     // minus the extraction-time base — re-anchors the water-fill's cumulative reference at the PARENT
     // contingency's distribution, mirroring OLF's setGeneratorsInitialTargetPToTargetP before a strategy
     // re-solve. nullptr = anchored at the base (plain contingencies).
-    DeviceBuf& dRlVtOvSlotIdx = drv.dRlVtOvSlotIdx;
-    DeviceBuf& dRlVtOvVal = drv.dRlVtOvVal;
-    if (nRlVtOv > 0) {
-        dRlVtOvSlotIdx.upload(rlVtOvSlotIdx, 2L * nRlVtOv * sizeof(int));
-        dRlVtOvVal.upload(rlVtOvVal, (size_t) nRlVtOv * sizeof(double));
+    DeviceBuf& dReactiveLimitTargetVOverrideScenarioEntry = drv.dReactiveLimitTargetVOverrideScenarioEntry;
+    DeviceBuf& dReactiveLimitTargetVOverrideValue = drv.dReactiveLimitTargetVOverrideValue;
+    if (nReactiveLimitTargetVOverrides > 0) {
+        dReactiveLimitTargetVOverrideScenarioEntry.upload(reactiveLimitTargetVOverrideScenarioEntry, 2L * nReactiveLimitTargetVOverrides * sizeof(int));
+        dReactiveLimitTargetVOverrideValue.upload(reactiveLimitTargetVOverrideValue, (size_t) nReactiveLimitTargetVOverrides * sizeof(double));
     }
     DeviceBuf& dDsAnchorShift = drv.dDsAnchorShift;
     DeviceBuf& dDsSlackShift = drv.dDsSlackShift;
@@ -293,15 +293,15 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     // converge the inner Newton, switch any generator over its Q limit, re-converge the switched scenarios,
     // repeat until a pass switches nothing. Fixed-iter mode (tol <= 0, the throughput benchmark) and
     // family-free networks with no controllers do ONE pass (no outer loop) — byte-identical to before.
-    bool fullLoadflow = !deviceFixedIter && (ctx->nrl > 0 || ctx->nds > 0 || ctx->dsSlackOnly
+    bool fullLoadflow = !deviceFixedIter && (ctx->nReactiveLimitEntries > 0 || ctx->nds > 0 || ctx->dsSlackOnly
                                              || ctx->nmon > 0 || ctx->nTvc > 0 || ctx->nShc > 0 || ctx->nFlc > 0 || ctx->nCph > 0
                                              || ctx->nTvd > 0 || ctx->nSvd > 0 || ctx->nSvc > 0);
-    const int RL_MAX_OUTER = maxOuterProductive > 0 ? maxOuterProductive : 20;   // OLF maxOuterLoopIterations
+    const int MAX_OUTER_LOOP_ITERATIONS = maxOuterProductive > 0 ? maxOuterProductive : 20;   // OLF maxOuterLoopIterations
     // per-bus PV→PQ count cap (OLF maxPqPvSwitch): 0 is OLF's "never switch back" and is honoured as such;
     // only a negative value (no cap given) takes OLF's default of 3.
-    drv.rlMaxSwitch = rlMaxSwitch >= 0 ? rlMaxSwitch : 3;
-    static const char* swLogEnv = std::getenv("OLF_GPU_SW_LOG");
-    drv.swLogSlot = swLogEnv == nullptr ? -1 : (std::string(swLogEnv) == "all" ? -2 : std::atoi(swLogEnv));
+    drv.maxPqPvSwitch = maxPqPvSwitch >= 0 ? maxPqPvSwitch : 3;
+    static const char* reactiveLimitsDecisionLogEnv = std::getenv("OLF_GPU_SW_LOG");
+    drv.reactiveLimitsDecisionLogScenario = reactiveLimitsDecisionLogEnv == nullptr ? -1 : (std::string(reactiveLimitsDecisionLogEnv) == "all" ? -2 : std::atoi(reactiveLimitsDecisionLogEnv));
     // Outer-loop convergence tolerances (pu) — passed in so the device uses the SAME criteria as the CPU
     // loadflow that built the base case (maxReactivePowerMismatch / slackBusPMaxMismatch, per-unitized), NOT
     // hardcoded constants. With matching parameters and the same equations the GPU outer-loop fixed point
@@ -311,59 +311,59 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     drv.slackDistTol = slackDistTol;
     drv.pResidueEps = 1e-5;                                  // OLF ActivePowerDistribution.P_RESIDUE_EPS: the
                                                             // water-filling distributes the mismatch down to this
-    // RL_MAX_OUTER bounds the PRODUCTIVE outer iterations (an outer loop that re-solved), matching OLF's
+    // MAX_OUTER_LOOP_ITERATIONS bounds the PRODUCTIVE outer iterations (an outer loop that re-solved), matching OLF's
     // outerLoopTotalIterations budget. The raw pass loop gets a generous safety bound on top, because the
     // sequential driver also spends non-productive passes (phase transitions / stability re-checks) that OLF
     // does not count.
     // The reactive-limit limits become PER-SCENARIO as soon as either channel is live: curve limits at
     // the runtime P, or a generator lost at a bus that keeps voltage control taking its capability away.
-    DeviceBuf& dRlQOvSlotEntry = drv.dRlQOvSlotEntry;
-    DeviceBuf& dRlQOvMinMax = drv.dRlQOvMinMax;
-    DeviceBuf& dRlQOvPtr = drv.dRlQOvPtr;
-    DeviceBuf& dRlQOvList = drv.dRlQOvList;
-    if (nRlQOv > 0) {
-        dRlQOvSlotEntry.upload(rlQOvSlotEntry, static_cast<size_t>(nRlQOv) * 2 * sizeof(int));
-        dRlQOvMinMax.upload(rlQOvMinMax, static_cast<size_t>(nRlQOv) * 5 * sizeof(double));   // {dMinQ, dMaxQ, dLoadQ, dBmin, dBmax}
+    DeviceBuf& dReactiveLimitDeltaOverrideScenarioEntry = drv.dReactiveLimitDeltaOverrideScenarioEntry;
+    DeviceBuf& dReactiveLimitDeltaOverrideValues = drv.dReactiveLimitDeltaOverrideValues;
+    DeviceBuf& dReactiveLimitDeltaOverrideStart = drv.dReactiveLimitDeltaOverrideStart;
+    DeviceBuf& dReactiveLimitDeltaOverrideList = drv.dReactiveLimitDeltaOverrideList;
+    if (nReactiveLimitDeltaOverrides > 0) {
+        dReactiveLimitDeltaOverrideScenarioEntry.upload(reactiveLimitDeltaOverrideScenarioEntry, static_cast<size_t>(nReactiveLimitDeltaOverrides) * 2 * sizeof(int));
+        dReactiveLimitDeltaOverrideValues.upload(reactiveLimitDeltaOverrideValues, static_cast<size_t>(nReactiveLimitDeltaOverrides) * 5 * sizeof(double));   // {dMinQ, dMaxQ, dLoadQ, dBmin, dBmax}
         // ...indexed by slot (CSR, entry order kept), so the dynamic-limits kernel reads its scenario's own
         // overrides instead of scanning the chunk's.
         std::vector<int> qPtr(nS + 1, 0);
-        std::vector<int> qList(nRlQOv);
-        for (int k = 0; k < nRlQOv; k++) qPtr[rlQOvSlotEntry[2 * k] + 1]++;
+        std::vector<int> qList(nReactiveLimitDeltaOverrides);
+        for (int k = 0; k < nReactiveLimitDeltaOverrides; k++) qPtr[reactiveLimitDeltaOverrideScenarioEntry[2 * k] + 1]++;
         for (int t = 0; t < nS; t++) qPtr[t + 1] += qPtr[t];
         std::vector<int> qCursor(qPtr.begin(), qPtr.end() - 1);
-        for (int k = 0; k < nRlQOv; k++) qList[qCursor[rlQOvSlotEntry[2 * k]]++] = k;
-        dRlQOvPtr.upload(qPtr.data(), qPtr.size() * sizeof(int));
-        dRlQOvList.upload(qList.data(), qList.size() * sizeof(int));
+        for (int k = 0; k < nReactiveLimitDeltaOverrides; k++) qList[qCursor[reactiveLimitDeltaOverrideScenarioEntry[2 * k]]++] = k;
+        dReactiveLimitDeltaOverrideStart.upload(qPtr.data(), qPtr.size() * sizeof(int));
+        dReactiveLimitDeltaOverrideList.upload(qList.data(), qList.size() * sizeof(int));
     }
     // A lost voltage-controlling SVC also takes its share of the entry's quadratic limit coefficients (an SVC's
     // limit is its susceptance times v^2): per (scenario, entry) coefficients, read by the reactive-limits check
     // in place of the run-constant ones. Built only when some override carries such a share.
     bool& svcCoefDyn = drv.svcCoefDyn;
     svcCoefDyn = false;
-    for (int k = 0; k < nRlQOv && !svcCoefDyn; k++) {
-        svcCoefDyn = rlQOvMinMax[5 * k + 3] != 0.0 || rlQOvMinMax[5 * k + 4] != 0.0;
+    for (int k = 0; k < nReactiveLimitDeltaOverrides && !svcCoefDyn; k++) {
+        svcCoefDyn = reactiveLimitDeltaOverrideValues[5 * k + 3] != 0.0 || reactiveLimitDeltaOverrideValues[5 * k + 4] != 0.0;
     }
-    if (svcCoefDyn && ctx->nrl > 0) {
-        size_t nrl = static_cast<size_t>(ctx->nrl);
-        std::vector<double> bmin(nrl), bmax(nrl);
-        CUDA_CHECK(cudaMemcpy(bmin.data(), ctx->dRlSvcBmin.p, nrl * sizeof(double), cudaMemcpyDeviceToHost));
-        CUDA_CHECK(cudaMemcpy(bmax.data(), ctx->dRlSvcBmax.p, nrl * sizeof(double), cudaMemcpyDeviceToHost));
-        std::vector<double> dynMin(static_cast<size_t>(nS) * nrl), dynMax(static_cast<size_t>(nS) * nrl);
+    if (svcCoefDyn && ctx->nReactiveLimitEntries > 0) {
+        size_t nReactiveLimitEntries = static_cast<size_t>(ctx->nReactiveLimitEntries);
+        std::vector<double> bmin(nReactiveLimitEntries), bmax(nReactiveLimitEntries);
+        CUDA_CHECK(cudaMemcpy(bmin.data(), ctx->dReactiveLimitSvcMinB.p, nReactiveLimitEntries * sizeof(double), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(bmax.data(), ctx->dReactiveLimitSvcMaxB.p, nReactiveLimitEntries * sizeof(double), cudaMemcpyDeviceToHost));
+        std::vector<double> dynMin(static_cast<size_t>(nS) * nReactiveLimitEntries), dynMax(static_cast<size_t>(nS) * nReactiveLimitEntries);
         for (int t = 0; t < nS; t++) {
-            std::copy(bmin.begin(), bmin.end(), dynMin.begin() + static_cast<size_t>(t) * nrl);
-            std::copy(bmax.begin(), bmax.end(), dynMax.begin() + static_cast<size_t>(t) * nrl);
+            std::copy(bmin.begin(), bmin.end(), dynMin.begin() + static_cast<size_t>(t) * nReactiveLimitEntries);
+            std::copy(bmax.begin(), bmax.end(), dynMax.begin() + static_cast<size_t>(t) * nReactiveLimitEntries);
         }
-        for (int k = 0; k < nRlQOv; k++) {
-            size_t at = static_cast<size_t>(rlQOvSlotEntry[2 * k]) * nrl + rlQOvSlotEntry[2 * k + 1];
-            dynMin[at] += rlQOvMinMax[5 * k + 3];
-            dynMax[at] += rlQOvMinMax[5 * k + 4];
+        for (int k = 0; k < nReactiveLimitDeltaOverrides; k++) {
+            size_t at = static_cast<size_t>(reactiveLimitDeltaOverrideScenarioEntry[2 * k]) * nReactiveLimitEntries + reactiveLimitDeltaOverrideScenarioEntry[2 * k + 1];
+            dynMin[at] += reactiveLimitDeltaOverrideValues[5 * k + 3];
+            dynMax[at] += reactiveLimitDeltaOverrideValues[5 * k + 4];
         }
-        if (!ctx->dRlSvcBminDyn.p) {
-            ctx->dRlSvcBminDyn.alloc(static_cast<size_t>(ctx->nScenarios) * nrl * sizeof(double));
-            ctx->dRlSvcBmaxDyn.alloc(static_cast<size_t>(ctx->nScenarios) * nrl * sizeof(double));
+        if (!ctx->dReactiveLimitSvcMinBPerScenario.p) {
+            ctx->dReactiveLimitSvcMinBPerScenario.alloc(static_cast<size_t>(ctx->nScenarios) * nReactiveLimitEntries * sizeof(double));
+            ctx->dReactiveLimitSvcMaxBPerScenario.alloc(static_cast<size_t>(ctx->nScenarios) * nReactiveLimitEntries * sizeof(double));
         }
-        CUDA_CHECK(cudaMemcpy(ctx->dRlSvcBminDyn.p, dynMin.data(), dynMin.size() * sizeof(double), cudaMemcpyHostToDevice));
-        CUDA_CHECK(cudaMemcpy(ctx->dRlSvcBmaxDyn.p, dynMax.data(), dynMax.size() * sizeof(double), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(ctx->dReactiveLimitSvcMinBPerScenario.p, dynMin.data(), dynMin.size() * sizeof(double), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(ctx->dReactiveLimitSvcMaxBPerScenario.p, dynMax.data(), dynMax.size() * sizeof(double), cudaMemcpyHostToDevice));
     }
     // Per-scenario curve repairs, CSR by scenario: the dynamic-limits kernel runs one thread per
     // (reactive-limit entry, scenario) and walks the curve entries inside, so a flat {slot, entry}
@@ -388,56 +388,56 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         dCvOvEntry.upload(entry.data(), entry.size() * sizeof(int));
         dCvOvVal.upload(val.data(), val.size() * sizeof(double));
     }
-    drv.useDynRlLimits = ctx->nrl > 0 && (ctx->ncv > 0 || nRlQOv > 0 || ctx->nfqLim > 0);
-    const bool& useDynRlLimits = drv.useDynRlLimits;
-    if (useDynRlLimits && (!ctx->dRlMinQDyn.p || !ctx->dRlLoadQDyn.p)) {   // curves allocate these on their own
+    drv.usePerScenarioReactiveLimits = ctx->nReactiveLimitEntries > 0 && (ctx->ncv > 0 || nReactiveLimitDeltaOverrides > 0 || ctx->nfqLim > 0);
+    const bool& usePerScenarioReactiveLimits = drv.usePerScenarioReactiveLimits;
+    if (usePerScenarioReactiveLimits && (!ctx->dReactiveLimitMinQPerScenario.p || !ctx->dReactiveLimitLoadQPerScenario.p)) {   // curves allocate these on their own
                                                             // table upload; a Q override alone must too, and a
                                                             // guard that names only ONE of them silently leaves
                                                             // the others null on a curve network (measured: the
                                                             // whole precompute fell back to the CPU)
-        ctx->dRlLoadQDyn.alloc(static_cast<size_t>(ctx->nScenarios) * ctx->nrl * sizeof(double));
-        ctx->dRlMinQDyn.alloc(static_cast<size_t>(ctx->nScenarios) * ctx->nrl * sizeof(double));
-        ctx->dRlMaxQDyn.alloc(static_cast<size_t>(ctx->nScenarios) * ctx->nrl * sizeof(double));
+        ctx->dReactiveLimitLoadQPerScenario.alloc(static_cast<size_t>(ctx->nScenarios) * ctx->nReactiveLimitEntries * sizeof(double));
+        ctx->dReactiveLimitMinQPerScenario.alloc(static_cast<size_t>(ctx->nScenarios) * ctx->nReactiveLimitEntries * sizeof(double));
+        ctx->dReactiveLimitMaxQPerScenario.alloc(static_cast<size_t>(ctx->nScenarios) * ctx->nReactiveLimitEntries * sizeof(double));
     }
-    int maxOuter = fullLoadflow ? 8 * RL_MAX_OUTER : 1;
+    int maxOuter = fullLoadflow ? 8 * MAX_OUTER_LOOP_ITERATIONS : 1;
     // The two kernels that lay a group's rows out from the CURRENT pin states (the RL pass runs them after
     // its pins; the seeding below runs them once so the FIRST fill sees the seeded pins on the rows).
     // `staticLimits`: use the STATIC reactive-limit arrays rather than the curve-evaluated ones. At SEED time the
-    // dynamic arrays are still zero (rlCurveLimitsBatch runs in the reactive-limits phase), so a seed-time flip
+    // dynamic arrays are still zero (reactiveCapabilityCurveLimitsBatch runs in the reactive-limits phase), so a seed-time flip
     // stamped the pilot's own-Q target as 0 instead of (limit - loadQ) and the whole slack phase ran against it —
     // measured on rte6515 BUS-6112_BBS_2: row 12834 converged at target 0 through outer 32, then the RL phase
     // re-stamped -0.444 and the solve had to catch up, one pass behind OLF. The re-stamp branch in the kernel
     // keeps the value current once the curve limits exist, so the static value is a correct starting point.
-    std::vector<char>& rlActive = drv.rlActive;
-    rlActive.assign(nS, 0);
-    std::vector<char> rlSwitched(nS);
+    std::vector<char>& outerLoopCheckActive = drv.outerLoopCheckActive;
+    outerLoopCheckActive.assign(nS, 0);
+    std::vector<char> outerLoopUnstable(nS);
     std::vector<char>& wasActive = drv.wasActive;
     wasActive.assign(nS, 0);
     // OLF_GPU_RL_AUDIT: per-scenario decision history, kept in memory and printed only for the
     // scenarios the end-of-solve audit flags. The failing scenario is not known until the solve is
     // over and the flip is rare, so the only way to see its trajectory is to record every scenario's
     // and throw away the rest.
-    const bool rlAuditOn = std::getenv("OLF_GPU_RL_AUDIT") != nullptr;
-    std::vector<std::vector<std::string>> auditLog(rlAuditOn ? nS : 0);
+    const bool reactiveLimitsAuditOn = std::getenv("OLF_GPU_RL_AUDIT") != nullptr;
+    std::vector<std::vector<std::string>> auditLog(reactiveLimitsAuditOn ? nS : 0);
     // ...but NOT on a resume: these are per-SOLVE state, and a resumed driver is continuing the SAME
     // solve. Re-seeding here would discard the RL pins, monitoring activations and absorbed slack the
     // sequence has already established — which is exactly what makes a resume cheaper than the
     // orchestrator pattern it replaces: that one resets and re-runs the whole driver every round.
     if (std::getenv("OLF_GPU_BATCH_TRACE") != nullptr && nS == 1) {
-        std::fprintf(stderr, "CTX_FLAGS nS=1 nrl=%d nRlRemote=%d hasDistrQRelocationGroups=%d nQr=%d nDistrQ=%d nds=%d ngen=%d nZeroImpedanceBranch=%d nBaseClosedZeroImpedanceBranches=%d nRmq=%d resume=%d fullLoadflow=%d\n",
-                     ctx->nrl, ctx->nRlRemote, ctx->hasDistrQRelocationGroups ? 1 : 0, ctx->st->nQr, ctx->nDistrQ, ctx->nds, ctx->ngen, ctx->nZeroImpedanceBranch, ctx->nBaseClosedZeroImpedanceBranches, ctx->nRmq, resume ? 1 : 0, fullLoadflow ? 1 : 0);
+        std::fprintf(stderr, "CTX_FLAGS nS=1 nReactiveLimitEntries=%d nReactiveLimitRemoteEntries=%d hasDistrQRelocationGroups=%d nQr=%d nDistrQ=%d nds=%d ngen=%d nZeroImpedanceBranch=%d nBaseClosedZeroImpedanceBranches=%d nRemoteMemberReactiveTerms=%d resume=%d fullLoadflow=%d\n",
+                     ctx->nReactiveLimitEntries, ctx->nReactiveLimitRemoteEntries, ctx->hasDistrQRelocationGroups ? 1 : 0, ctx->st->nQr, ctx->nDistrQ, ctx->nds, ctx->ngen, ctx->nZeroImpedanceBranch, ctx->nBaseClosedZeroImpedanceBranches, ctx->nRemoteMemberReactiveTerms, resume ? 1 : 0, fullLoadflow ? 1 : 0);
     }
     if (fullLoadflow && !resume && ctx->nSvc > 0) {
         // BEFORE the reactive-limit seeding below, which consults it: no zone has moved a target yet.
-        std::vector<double> nanv(static_cast<size_t>(nS) * std::max(ctx->nrl, 1), std::nan(""));
-        CUDA_CHECK(cudaMemcpy(ctx->dSvcRlVt.p, nanv.data(), nanv.size() * sizeof(double), cudaMemcpyHostToDevice));
+        std::vector<double> nanv(static_cast<size_t>(nS) * std::max(ctx->nReactiveLimitEntries, 1), std::nan(""));
+        CUDA_CHECK(cudaMemcpy(ctx->dSecondaryVoltageControlReactiveLimitTargetV.p, nanv.data(), nanv.size() * sizeof(double), cudaMemcpyHostToDevice));
     }
     if (!resume) {                                           // no inner solve has converged yet: the start
         CUDA_CHECK(cudaMemcpyAsync(ctx->dXLastConv.p, ctx->dX.p, static_cast<size_t>(nS) * n * sizeof(double),
                                    cudaMemcpyDeviceToDevice, ctx->stream));
     }
     if (fullLoadflow && !resume) {                           // per-solve PV↔PQ state: 0 switches, limitType from base
-        seedSolve(ctx, drv, rlStateIn, dsSlackShift);
+        seedSolve(ctx, drv, reactiveLimitsSeedState, dsSlackShift);
     }
 
     // SEQUENTIAL outer loops, exactly like OLF's AcloadFlowEngine: fully stabilize the reactive-limits loop
@@ -485,7 +485,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     if (ctx->nmon > 0) {
         loopOrder[nLoops++] = GpuOuterLoopKind::MONITORING_VOLTAGE;  // OLF order 5: MonitoringVoltage
     }
-    if (ctx->nrl > 0) {
+    if (ctx->nReactiveLimitEntries > 0) {
         loopOrder[nLoops++] = GpuOuterLoopKind::REACTIVE_LIMITS;  // OLF order 6: ReactiveLimits
     }
     if (ctx->nFlcPhase > 0 || ctx->nCph > 0) {
@@ -570,7 +570,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         live = ctx->pausedLive;
         if (ctx->pausedStatus.size() == res.status.size()) {
             res.status = ctx->pausedStatus;                  // the state is the converged one the pause left: a
-        }                                                    // STABLE host verdict then re-CHECKS RL on it (rlActive)
+        }                                                    // STABLE host verdict then re-CHECKS RL on it (outerLoopCheckActive)
         bool anyChanged = false;
         for (int s = 0; s < nS; s++) {
             char ch = s < (int) ctx->hostChanged.size() ? ctx->hostChanged[s] : 0;
@@ -585,7 +585,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             // starts a fresh `outer` budget, so the pause/resume cycle spins forever (measured: a
             // 2000-contingency rte6515 slice with SecondaryVoltageControl did not finish in 28 min).
             for (int s = 0; s < nS; s++) {
-                if (active[s] && ++prodIters[s] >= RL_MAX_OUTER) {
+                if (active[s] && ++prodIters[s] >= MAX_OUTER_LOOP_ITERATIONS) {
                     traceReject(s, "host-loop-outer-budget", -1, 0);
                     res.status[s] = GpuAcSolverStatus::REJECTED;                      // budget exhausted -> CPU replays it
                     live[s] = 0;
@@ -751,9 +751,9 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     // ---- REACTIVE LIMITS pass: switch any local PV controller over its Q limit to PQ ----
     // Only scenarios (re)solved this pass that converged can have new violations.
     for (int s = 0; s < nS; s++) {
-        rlActive[s] = (wasActive[s] && res.status[s] == GpuAcSolverStatus::CONVERGED) ? 1 : 0;
+        outerLoopCheckActive[s] = (wasActive[s] && res.status[s] == GpuAcSolverStatus::CONVERGED) ? 1 : 0;
     }
-    CUDA_CHECK(cudaMemcpy(ctx->dRlActive.p, rlActive.data(), nS * sizeof(char), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(ctx->dOuterLoopCheckActive.p, outerLoopCheckActive.data(), nS * sizeof(char), cudaMemcpyHostToDevice));
     // generator Q per controller = (Σ branch q + shunt q) at its BUS_V row + load Q. Compute the first
     // part by a fill into a ZEROED buffer: no −target init, no applyRowModeBatch, so qBuf[row] is the raw
     // bus reactive balance. Disabled branches are skipped (outage); dVals is scratch (the next inner
@@ -765,25 +765,25 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     // fills of a 485-contingency network.xiidm chunk, at 38 ms each, were this call. This kernel runs the fused
     // fill's own residual expressions and drops only the 24 Jacobian scatters (an angle-addition variant once
     // moved transformer-control cases by ~3e-5 kV: the bus balance must be the Newton residual's arithmetic).
-    if (ctx->st->closedBranch.elementCount) fillClosedBranchQbufBatch<<<grid(ctx->st->closedBranch.elementCount * nS), BLOCK, 0, ctx->stream>>>(ctx->st->closedBranch.elementCount, nS, n, ctx->nElements, ctx->closedBranchOffset, ctx->st->closedBranch.parameters.as<double>(), ctx->st->closedBranch.indices.as<int>(), ctx->st->closedBranch.destination.as<int>(), ctx->dX.as<double>(), ctx->dQbuf.as<double>(), ctx->dDisabled.as<char>(), ctx->dRlActive.as<char>(), ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>());
-    if (ctx->st->openBranch.elementCount) fillOpenBranchBatch<<<grid(ctx->st->openBranch.elementCount * nS), BLOCK, 0, ctx->stream>>>(ctx->st->openBranch.elementCount, nS, n, nnz, ctx->nElements, ctx->openBranchOffset, ctx->st->openBranch.parameters.as<double>(), ctx->st->openBranch.indices.as<int>(), ctx->st->openBranch.destination.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dQbuf.as<double>(), ctx->dDisabled.as<char>(), ctx->dRlActive.as<char>(), nullptr, nullptr, nullptr, 0, RelocTables{});
-    if (ctx->st->shunt.elementCount) fillShuntBatch<<<grid(ctx->st->shunt.elementCount * nS), BLOCK, 0, ctx->stream>>>(ctx->st->shunt.elementCount, nS, n, nnz, ctx->nElements, ctx->shuntOffset, ctx->st->shunt.parameters.as<double>(), ctx->st->shunt.indices.as<int>(), ctx->st->shunt.destination.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dQbuf.as<double>(), ctx->dDisabled.as<char>(), ctx->dRlActive.as<char>(), ctx->nShuntAdmittanceOverrides, ctx->dShuntAdmittanceOverrideScenarioElement.as<int>(), ctx->dShuntAdmittanceOverrideDelta.as<double>(), nullptr, nullptr, nullptr, 0, RelocTables{});
+    if (ctx->st->closedBranch.elementCount) fillClosedBranchQbufBatch<<<grid(ctx->st->closedBranch.elementCount * nS), BLOCK, 0, ctx->stream>>>(ctx->st->closedBranch.elementCount, nS, n, ctx->nElements, ctx->closedBranchOffset, ctx->st->closedBranch.parameters.as<double>(), ctx->st->closedBranch.indices.as<int>(), ctx->st->closedBranch.destination.as<int>(), ctx->dX.as<double>(), ctx->dQbuf.as<double>(), ctx->dDisabled.as<char>(), ctx->dOuterLoopCheckActive.as<char>(), ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>());
+    if (ctx->st->openBranch.elementCount) fillOpenBranchBatch<<<grid(ctx->st->openBranch.elementCount * nS), BLOCK, 0, ctx->stream>>>(ctx->st->openBranch.elementCount, nS, n, nnz, ctx->nElements, ctx->openBranchOffset, ctx->st->openBranch.parameters.as<double>(), ctx->st->openBranch.indices.as<int>(), ctx->st->openBranch.destination.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dQbuf.as<double>(), ctx->dDisabled.as<char>(), ctx->dOuterLoopCheckActive.as<char>(), nullptr, nullptr, nullptr, 0, RelocTables{});
+    if (ctx->st->shunt.elementCount) fillShuntBatch<<<grid(ctx->st->shunt.elementCount * nS), BLOCK, 0, ctx->stream>>>(ctx->st->shunt.elementCount, nS, n, nnz, ctx->nElements, ctx->shuntOffset, ctx->st->shunt.parameters.as<double>(), ctx->st->shunt.indices.as<int>(), ctx->st->shunt.destination.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dQbuf.as<double>(), ctx->dDisabled.as<char>(), ctx->dOuterLoopCheckActive.as<char>(), ctx->nShuntAdmittanceOverrides, ctx->dShuntAdmittanceOverrideScenarioElement.as<int>(), ctx->dShuntAdmittanceOverrideDelta.as<double>(), nullptr, nullptr, nullptr, 0, RelocTables{});
     if (ctx->st->nLoadModelTerms) fillLoadModelBatch<<<grid(ctx->st->nLoadModelTerms * nS), BLOCK, 0, ctx->stream>>>(ctx->st->nLoadModelTerms, nS, n, nnz, ctx->st->dLoadModelParameters.as<double>(), ctx->st->dLoadModelIndices.as<int>(), ctx->st->dLoadModelDestination.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dQbuf.as<double>(), nullptr, nullptr, nullptr);
     // Zero-impedance dummy transfers MUST be in the Q/P buffer too: the distributed-slack retain
     // reads the slack row's balance from dQbuf — without the coupler's dummy-P the DS sees a
     // phantom mismatch equal to the through-flow and distributes it FOREVER (measured: +392 MW
     // runaway on the first switch-close scenario until the per-scenario budget rejected it).
-    if (ctx->nZeroImpedanceBranch) fillZeroImpBatch<<<grid(ctx->nZeroImpedanceBranch * nS), BLOCK, 0, ctx->stream>>>(ctx->nZeroImpedanceBranch, nS, n, nnz, ctx->st->dZeroImpedanceBranchParameters.as<double>(), ctx->st->dZeroImpedanceBranchIndices.as<int>(), ctx->st->dZeroImpedanceBranchDestination.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dQbuf.as<double>(), ctx->dRlActive.as<char>(), ctx->nBaseClosedZeroImpedanceBranches, ctx->nZeroImpedanceBranchCloseOverrides, ctx->dZeroImpedanceBranchCloseScenarioElement.as<int>(), ctx->nZeroImpedanceBranchOpenOverrides, ctx->dZeroImpedanceBranchOpenScenarioElement.as<int>(), nullptr, nullptr, nullptr, 0, RelocTables{}, ctx->nSpanningTreeOverrides, ctx->nSpanningTreeOverrides ? ctx->dSpanningTreeOverrideScenarioElementValue.as<int>() : nullptr, ctx->hasZeroImpedanceBranchMasks ? ctx->dZeroImpedanceBranchOpenMask.as<char>() : nullptr, ctx->hasZeroImpedanceBranchMasks ? ctx->dZeroImpedanceBranchCloseMask.as<char>() : nullptr, ctx->hasZeroImpedanceBranchMasks ? ctx->dSpanningTreeOverrideMask.as<char>() : nullptr);
+    if (ctx->nZeroImpedanceBranch) fillZeroImpBatch<<<grid(ctx->nZeroImpedanceBranch * nS), BLOCK, 0, ctx->stream>>>(ctx->nZeroImpedanceBranch, nS, n, nnz, ctx->st->dZeroImpedanceBranchParameters.as<double>(), ctx->st->dZeroImpedanceBranchIndices.as<int>(), ctx->st->dZeroImpedanceBranchDestination.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dQbuf.as<double>(), ctx->dOuterLoopCheckActive.as<char>(), ctx->nBaseClosedZeroImpedanceBranches, ctx->nZeroImpedanceBranchCloseOverrides, ctx->dZeroImpedanceBranchCloseScenarioElement.as<int>(), ctx->nZeroImpedanceBranchOpenOverrides, ctx->dZeroImpedanceBranchOpenScenarioElement.as<int>(), nullptr, nullptr, nullptr, 0, RelocTables{}, ctx->nSpanningTreeOverrides, ctx->nSpanningTreeOverrides ? ctx->dSpanningTreeOverrideScenarioElementValue.as<int>() : nullptr, ctx->hasZeroImpedanceBranchMasks ? ctx->dZeroImpedanceBranchOpenMask.as<char>() : nullptr, ctx->hasZeroImpedanceBranchMasks ? ctx->dZeroImpedanceBranchCloseMask.as<char>() : nullptr, ctx->hasZeroImpedanceBranchMasks ? ctx->dSpanningTreeOverrideMask.as<char>() : nullptr);
     // Remote-member OWN q (plan-B3): fill each member's own reactive injection into its (suppressed,
     // hence free) qBuf row so the RL kernel evaluates remote entries like local ones.
-    if (ctx->nRmq > 0) {
-        fillRemoteMemberQBatch<<<grid(ctx->nRmq * nS), BLOCK, 0, ctx->stream>>>(ctx->nRmq, nS, n,
+    if (ctx->nRemoteMemberReactiveTerms > 0) {
+        fillRemoteMemberQBatch<<<grid(ctx->nRemoteMemberReactiveTerms * nS), BLOCK, 0, ctx->stream>>>(ctx->nRemoteMemberReactiveTerms, nS, n,
                 ctx->nElements, ctx->closedBranchOffset, ctx->openBranchOffset,
-                ctx->dRmqRow.as<int>(), ctx->dRmqElem.as<int>(), ctx->dRmqSide.as<int>(),
-                ctx->dRmqKind.as<int>(), ctx->dRmqWeight.as<double>(),
+                ctx->dRemoteMemberReactiveTermRow.as<int>(), ctx->dRemoteMemberReactiveTermElement.as<int>(), ctx->dRemoteMemberReactiveTermSide.as<int>(),
+                ctx->dRemoteMemberReactiveTermKind.as<int>(), ctx->dRemoteMemberReactiveTermWeight.as<double>(),
                 ctx->st->closedBranch.parameters.as<double>(), ctx->st->closedBranch.indices.as<int>(), ctx->st->shunt.parameters.as<double>(), ctx->st->shunt.indices.as<int>(),
                 ctx->st->openBranch.parameters.as<double>(), ctx->st->openBranch.indices.as<int>(),
-                ctx->dX.as<double>(), ctx->dQbuf.as<double>(), ctx->dDisabled.as<char>(), ctx->dRlActive.as<char>(),
+                ctx->dX.as<double>(), ctx->dQbuf.as<double>(), ctx->dDisabled.as<char>(), ctx->dOuterLoopCheckActive.as<char>(),
                 ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>(),
                 ctx->nShuntAdmittanceOverrides, ctx->dShuntAdmittanceOverrideScenarioElement.as<int>(), ctx->dShuntAdmittanceOverrideDelta.as<double>());
     }
@@ -793,9 +793,9 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                 ctx->dHvdcBus1PRow.as<int>(), ctx->dHvdcBus2PRow.as<int>(), ctx->dHvdcBus1PhiColumn.as<int>(), ctx->dHvdcBus2PhiColumn.as<int>(),
                 ctx->dHvdcElement.as<int>(), ctx->dHvdcAcEmulationParameters.as<double>(), ctx->dHvdcAcEmulationStatus.as<int>(),
                 ctx->dHvdcAppliedDelta1.as<double>(), ctx->dHvdcAppliedDelta2.as<double>(), ctx->dHvdcContingencyOutage.as<char>(),
-                ctx->dDisabled.as<char>(), ctx->dX.as<double>(), ctx->dRlActive.as<char>(), ctx->dQbuf.as<double>());
+                ctx->dDisabled.as<char>(), ctx->dX.as<double>(), ctx->dOuterLoopCheckActive.as<char>(), ctx->dQbuf.as<double>());
     }
-    CUDA_CHECK(cudaMemsetAsync(ctx->dRlSwitched.p, 0, nS * sizeof(char), ctx->stream));
+    CUDA_CHECK(cudaMemsetAsync(ctx->dOuterLoopUnstable.p, 0, nS * sizeof(char), ctx->stream));
     if (outer == 0 && !resume && ctx->loopTraceSlot >= 0 && ctx->loopTraceSlot < nS) {
         // OLF_GPU_SLOT_DUMP, second point: the traced scenario's state and bus balances (qBuf) at the FIRST
         // outer-loop check, i.e. after the first solve - "<prefix>.<k>.pass0", "<row> <x> <qBuf>".
@@ -857,17 +857,17 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     } else if (inDsPhase) {                                // distributed-slack outer loop: spread the slack mismatch
         dsCheck(ctx, drv);
     } else {                                               // reactive-limits outer loop: switch PV->PQ over Q limit
-        rlCheck(ctx, drv, loopKind);
+        reactiveLimitsCheck(ctx, drv, loopKind);
     }
     CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
-    CUDA_CHECK(cudaMemcpy(rlSwitched.data(), ctx->dRlSwitched.p, nS * sizeof(char), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(outerLoopUnstable.data(), ctx->dOuterLoopUnstable.p, nS * sizeof(char), cudaMemcpyDeviceToHost));
     for (int s = 0; s < nS; s++) {
         if (loopRejected[s]) {                              // a device loop routed the scenario to the CPU fallback
             traceReject(s, "device-loop-routed", outer, 0);
             res.status[s] = GpuAcSolverStatus::REJECTED;
             live[s] = 0;
             active[s] = 0;
-            rlSwitched[s] = 0;
+            outerLoopUnstable[s] = 0;
             loopRejected[s] = 0;
         }
     }
@@ -875,12 +875,12 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     // quantities its decision turned on. A scenario that ends one outer pass short of the CPU's
     // trajectory did so because one of these decisions went the other way; without the list there is
     // no way to name WHICH controller, and the margin of that one decision is the whole question.
-    static const char* swTraceEnv = std::getenv("OLF_GPU_SW_TRACE");
-    static const int swTraceSlotEnv = swTraceEnv != nullptr ? std::atoi(swTraceEnv) : -1;
+    static const char* reactiveLimitsTraceEnv = std::getenv("OLF_GPU_SW_TRACE");
+    static const int reactiveLimitsTraceScenarioEnv = reactiveLimitsTraceEnv != nullptr ? std::atoi(reactiveLimitsTraceEnv) : -1;
     // the contingency-id slot of OLF_GPU_LOOP_TRACE_CTG wins (chunk composition moves fixed slots)
-    const int swTraceSlot = ctx->loopTraceSlot >= 0 ? ctx->loopTraceSlot : swTraceSlotEnv;
-    traceRlSwitches(ctx, drv, auditLog, rlAuditOn, swTraceSlot);
-    traceRlState(ctx, drv, inDsPhase, reactiveLimitTol, rlSwitched);
+    const int reactiveLimitsTraceScenario = ctx->loopTraceSlot >= 0 ? ctx->loopTraceSlot : reactiveLimitsTraceScenarioEnv;
+    traceReactiveLimitsSwitches(ctx, drv, auditLog, reactiveLimitsAuditOn, reactiveLimitsTraceScenario);
+    traceReactiveLimitsState(ctx, drv, inDsPhase, reactiveLimitTol, outerLoopUnstable);
     if (inDsPhase && (ctx->nds > 0 || ctx->dsSlackOnly) && dsRejectResidual) {
         // slackDistributionFailureBehavior != LEAVE_ON_SLACK_BUS: a scenario whose participants all
         // saturated must NOT be reported converged with the residual absorbed at the slack — route it
@@ -893,13 +893,13 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                 res.status[s] = GpuAcSolverStatus::REJECTED;
                 active[s] = 0;
                 live[s] = 0;
-                rlSwitched[s] = 0;
+                outerLoopUnstable[s] = 0;
             }
         }
     }
     int nChanged = 0;
     for (int s = 0; s < nS; s++) {
-        if (rlSwitched[s]) {
+        if (outerLoopUnstable[s]) {
             nChanged++;
         }
     }
@@ -911,19 +911,19 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     // chunk composition moves with the resolved chunk size, so a fixed slot traces a different
     // scenario from one run to the next (IZUZ: slot 170, then 18)
     const int loopTraceSlot = ctx->loopTraceSlot >= 0 ? ctx->loopTraceSlot : (loopTraceEnv != nullptr ? std::atoi(loopTraceEnv) : -1);
-    traceLoopSlot(ctx, drv, loopTraceSlot, nChanged, rlSwitched, solvePass);
+    traceLoopSlot(ctx, drv, loopTraceSlot, nChanged, outerLoopUnstable, solvePass);
     if (nChanged > 0) {                                     // this outer loop is still unstable
         for (int s = 0; s < nS; s++) {
-            if (rlSwitched[s] && ++prodIters[s] >= RL_MAX_OUTER) {
+            if (outerLoopUnstable[s] && ++prodIters[s] >= MAX_OUTER_LOOP_ITERATIONS) {
                 // This scenario exhausted ITS outer-iteration budget mid-sequence. Never report it
                 // converged on a half-finished RL/DS fixpoint — reject to the CPU fallback, which
                 // replays it under OLF's own maxOuterLoopIterations/UNSTABLE handling.
                 traceReject(s, "outer-loop-budget", outer, 0);
                 res.status[s] = GpuAcSolverStatus::REJECTED;
-                rlSwitched[s] = 0;
+                outerLoopUnstable[s] = 0;
                 live[s] = 0;
             }
-            active[s] = rlSwitched[s];                      // re-solve only the scenarios it changed, stay in this phase
+            active[s] = outerLoopUnstable[s];                      // re-solve only the scenarios it changed, stay in this phase
         }
         seqChanged = true;
         solvePass = true;                                   // mutated targets/modes -> a real re-solve is due
@@ -962,13 +962,13 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     //      comparison with the CPU is needed to see. Re-fills the diagnostic q at the final state
     //      for every live scenario, refreshes the curve limits at the final targets, and prints one
     //      line per violating (scenario, entry).
-    traceRlAudit(ctx, drv, auditLog);
-    if (rlStateOut != nullptr && ctx->nrl > 0) {             // export per-(controller, scenario) RL state
-        std::vector<char> lt(static_cast<size_t>(ctx->nrl) * nS), sc(static_cast<size_t>(ctx->nrl) * nS);
-        CUDA_CHECK(cudaMemcpy(lt.data(), ctx->dRlLimitType.p, lt.size(), cudaMemcpyDeviceToHost));
-        CUDA_CHECK(cudaMemcpy(sc.data(), ctx->dRlSwitchCount.p, sc.size(), cudaMemcpyDeviceToHost));
+    traceReactiveLimitsAudit(ctx, drv, auditLog);
+    if (reactiveLimitsFinalState != nullptr && ctx->nReactiveLimitEntries > 0) {             // export per-(controller, scenario) RL state
+        std::vector<char> lt(static_cast<size_t>(ctx->nReactiveLimitEntries) * nS), sc(static_cast<size_t>(ctx->nReactiveLimitEntries) * nS);
+        CUDA_CHECK(cudaMemcpy(lt.data(), ctx->dReactiveLimitQLimitType.p, lt.size(), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(sc.data(), ctx->dReactiveLimitPvPqSwitchCount.p, sc.size(), cudaMemcpyDeviceToHost));
         for (size_t k = 0; k < lt.size(); k++) {
-            rlStateOut[k] = rlState(lt[k], sc[k]);
+            reactiveLimitsFinalState[k] = reactiveLimitsState(lt[k], sc[k]);
         }
     }
     tracePhaseTime(ctx, drv);

@@ -70,9 +70,9 @@ void setupBatchMatricesFallback(BatchSolverContext* ctx) {
 }
 
 BatchSolverContext* createBatchContext(const SharedStructurePtr& st, int nScenarios, int mode,
-                                       int nrl, const int* rlVrow, const double* rlMinQ,
-                                       const double* rlMaxQ, const double* rlLoadQ, const double* rlVtarget,
-                                       const signed char* rlMonitored, const double* rowSlope,
+                                       int nReactiveLimitEntries, const int* reactiveLimitVoltageRow, const double* reactiveLimitMinQ,
+                                       const double* reactiveLimitMaxQ, const double* reactiveLimitLoadQ, const double* reactiveLimitTargetV,
+                                       const signed char* reactiveLimitFlags, const double* rowSlope,
                                        int nds, const int* dsPhiRow, const double* dsFactor,
                                        int dsSlackPhiRow, double dsSlackTargetP,
                                        const double* dsBaseTargetP, const double* dsMaxDelta, const double* dsMinDelta,
@@ -115,16 +115,16 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& st, int nScenar
 
     // ---- reactive-limits pack: the controller BUS_V rows mapped through the diagonal-pairing
     //      permutation (= identity in the batch path, no families, but mapped for correctness) ----
-    ctx->nrl = nrl;
+    ctx->nReactiveLimitEntries = nReactiveLimitEntries;
     ctx->dQbuf.alloc(static_cast<size_t>(n) * nScenarios * sizeof(double));
-    ctx->dRlActive.alloc(static_cast<size_t>(nScenarios) * sizeof(char));
-    ctx->dRlSwitched.alloc(static_cast<size_t>(nScenarios) * sizeof(char));
+    ctx->dOuterLoopCheckActive.alloc(static_cast<size_t>(nScenarios) * sizeof(char));
+    ctx->dOuterLoopUnstable.alloc(static_cast<size_t>(nScenarios) * sizeof(char));
     // The seed launch of updatePilotVeqBatch / updateDistrQTargetsBatch (before the first solve) READS
-    // dRlActive and relies on "not active yet" = 0; the RL pass is what first writes it. Explicit, not
+    // dOuterLoopCheckActive and relies on "not active yet" = 0; the RL pass is what first writes it. Explicit, not
     // left to the allocator's zeroing.
-    CUDA_CHECK(cudaMemset(ctx->dRlActive.p, 0, static_cast<size_t>(nScenarios) * sizeof(char)));
-    CUDA_CHECK(cudaMemset(ctx->dRlSwitched.p, 0, static_cast<size_t>(nScenarios) * sizeof(char)));
-    // OUTSIDE the `nrl > 0` block: a run with reactive limits DISABLED has no entries at all, and that is
+    CUDA_CHECK(cudaMemset(ctx->dOuterLoopCheckActive.p, 0, static_cast<size_t>(nScenarios) * sizeof(char)));
+    CUDA_CHECK(cudaMemset(ctx->dOuterLoopUnstable.p, 0, static_cast<size_t>(nScenarios) * sizeof(char)));
+    // OUTSIDE the `nReactiveLimitEntries > 0` block: a run with reactive limits DISABLED has no entries at all, and that is
     // exactly when every pilot-self group needs the gate — its pilot can never pin, so it controls throughout.
     // Built inside, the gate did not exist for such a run: the pilots' raw q was emitted at their carrier rows
     // on top of the DISTR_Q terms and rte6515's base (limits off) started at |f(x0)| 117.908 against OLF's
@@ -132,7 +132,7 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& st, int nScenar
     // Derive the PILOT-SELF groups from the candidate table itself: the fallback row repeated among the
     // member rows means the controlled bus is one of its own controllers. The pilot's RL entry is the one
     // whose (row-mapped) V row is that row; without an entry the pilot can never pin and the group needs
-    // no gate. nQr is small (groups), nrl a few thousand, and this runs once per context.
+    // no gate. nQr is small (groups), nReactiveLimitEntries a few thousand, and this runs once per context.
     int nQrG = ctx->st != nullptr ? ctx->st->nQr : 0;
     if (nQrG > 0) {
         std::vector<int> psEntry(nQrG, -1);
@@ -158,8 +158,8 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& st, int nScenar
             // |f(x0)| 117.908 against OLF's 117.845 and the device's load flow never converged.
             psEntry[g] = PS_NO_ENTRY;
             ctx->hasPilotSelf = true;
-            for (int i = 0; i < nrl; i++) {
-                if (rowMap[rlVrow[i]] == fallbackRow) {
+            for (int i = 0; i < nReactiveLimitEntries; i++) {
+                if (rowMap[reactiveLimitVoltageRow[i]] == fallbackRow) {
                     psEntry[g] = i;
                     break;
                 }
@@ -174,25 +174,25 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& st, int nScenar
                     cnt += psEntry[g] >= 0 ? 1 : 0;
                     noEntry += psEntry[g] == PS_NO_ENTRY ? 1 : 0;
                 }
-                std::fprintf(stderr, "PILOTSELF_GATE groups=%d(+%d never-pinnable) of %d nrl=%d\n",
-                             cnt, noEntry, nQrG, nrl);
+                std::fprintf(stderr, "PILOTSELF_GATE groups=%d(+%d never-pinnable) of %d nReactiveLimitEntries=%d\n",
+                             cnt, noEntry, nQrG, nReactiveLimitEntries);
             }
         }
     }
-    if (nrl > 0) {
-        std::vector<int> rlVrowM(nrl);
-        for (int i = 0; i < nrl; i++) {
-            rlVrowM[i] = rowMap[rlVrow[i]];
+    if (nReactiveLimitEntries > 0) {
+        std::vector<int> reactiveLimitVoltageRowMapped(nReactiveLimitEntries);
+        for (int i = 0; i < nReactiveLimitEntries; i++) {
+            reactiveLimitVoltageRowMapped[i] = rowMap[reactiveLimitVoltageRow[i]];
         }
-        ctx->dRlVrow.upload(rlVrowM.data(), nrl * sizeof(int));
+        ctx->dReactiveLimitVoltageRow.upload(reactiveLimitVoltageRowMapped.data(), nReactiveLimitEntries * sizeof(int));
         // A bus whose power equations the COUPLER-TREE relocation moved onto its parent coupler's dummy columns has
         // its reactive balance — and its BUS_TARGET_Q, which GpuAcActivationExtractor already puts there — at that
         // coupler's DUMMY_Q row, while its OWN V row carries the coupler's ZERO_V. The reactive-limit pass must read
-        // q and flip the pin at THAT row; its VOLTAGE reads stay on the bus's own row (dRlVrow). Without the split
+        // q and flip the pin at THAT row; its VOLTAGE reads stay on the bus's own row (dReactiveLimitVoltageRow). Without the split
         // the check compared a voltage residual against reactive limits: measured on rte6515's full busbar scope
         // with the relocation enabled, entries read -78.0 and 4767.3 MVAr and 20 buses were pinned that OLF never
         // pins, after which the pinned solve burned all 30 iterations.
-        std::vector<int> rlQrowM(rlVrowM);
+        std::vector<int> reactiveLimitReactivePowerRowMapped(reactiveLimitVoltageRowMapped);
         if (ctx->nZeroImpedanceBranch > 0 && ctx->st->dZeroImpedanceBranchIndices.p != nullptr) {
             std::vector<int> zidx(static_cast<size_t>(ctx->nZeroImpedanceBranch) * 11);
             CUDA_CHECK(cudaMemcpy(zidx.data(), ctx->st->dZeroImpedanceBranchIndices.p, zidx.size() * sizeof(int), cudaMemcpyDeviceToHost));
@@ -207,48 +207,48 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& st, int nScenar
                 qRowOfVRow[rowMap[ownVCol]] = rowMap[z[5]];
             }
             int moved = 0;
-            for (int i = 0; i < nrl; i++) {
-                auto it = qRowOfVRow.find(rlVrowM[i]);
+            for (int i = 0; i < nReactiveLimitEntries; i++) {
+                auto it = qRowOfVRow.find(reactiveLimitVoltageRowMapped[i]);
                 if (it != qRowOfVRow.end()) {
-                    rlQrowM[i] = it->second;
+                    reactiveLimitReactivePowerRowMapped[i] = it->second;
                     moved++;
                 }
             }
             if (moved > 0 && std::getenv("OLF_GPU_RL_TRACE") != nullptr) {
-                std::fprintf(stderr, "RL_QROW %d of %d entries follow the coupler relocation\n", moved, nrl);
+                std::fprintf(stderr, "RL_QROW %d of %d entries follow the coupler relocation\n", moved, nReactiveLimitEntries);
             }
         }
-        ctx->dRlQrow.upload(rlQrowM.data(), nrl * sizeof(int));
-        ctx->dRlMinQ.upload(rlMinQ, nrl * sizeof(double));
-        ctx->dRlMaxQ.upload(rlMaxQ, nrl * sizeof(double));
-        ctx->dRlLoadQ.upload(rlLoadQ, nrl * sizeof(double));
-        ctx->dRlVtarget.upload(rlVtarget, nrl * sizeof(double));
-        ctx->dRlMonitored.upload(rlMonitored, nrl * sizeof(char));
+        ctx->dReactiveLimitReactivePowerRow.upload(reactiveLimitReactivePowerRowMapped.data(), nReactiveLimitEntries * sizeof(int));
+        ctx->dReactiveLimitMinQ.upload(reactiveLimitMinQ, nReactiveLimitEntries * sizeof(double));
+        ctx->dReactiveLimitMaxQ.upload(reactiveLimitMaxQ, nReactiveLimitEntries * sizeof(double));
+        ctx->dReactiveLimitLoadQ.upload(reactiveLimitLoadQ, nReactiveLimitEntries * sizeof(double));
+        ctx->dReactiveLimitTargetV.upload(reactiveLimitTargetV, nReactiveLimitEntries * sizeof(double));
+        ctx->dReactiveLimitFlags.upload(reactiveLimitFlags, nReactiveLimitEntries * sizeof(char));
         ctx->allPvPinnable = 1;
-        for (int i = 0; i < nrl; i++) {
-            if (!(rlMonitored[i] & GpuReactiveLimitsEntryFlag::STAND_BY_AUTOMATON) && !((rlMinQ[i] > -1e7 || rlMaxQ[i] < 1e7) && rlMinQ[i] < rlMaxQ[i])) {
+        for (int i = 0; i < nReactiveLimitEntries; i++) {
+            if (!(reactiveLimitFlags[i] & GpuReactiveLimitsEntryFlag::STAND_BY_AUTOMATON) && !((reactiveLimitMinQ[i] > -1e7 || reactiveLimitMaxQ[i] < 1e7) && reactiveLimitMinQ[i] < reactiveLimitMaxQ[i])) {
                 ctx->allPvPinnable = 0;                      // an unlimited PV bus: the rule never fires
             }
         }
-        ctx->dRlSavedTarget.alloc(static_cast<size_t>(nrl) * nScenarios * sizeof(double));
-        ctx->dRlPassSwitched.alloc(static_cast<size_t>(nrl) * nScenarios * sizeof(char));
+        ctx->dReactiveLimitSavedTarget.alloc(static_cast<size_t>(nReactiveLimitEntries) * nScenarios * sizeof(double));
+        ctx->dReactiveLimitCheckDecision.alloc(static_cast<size_t>(nReactiveLimitEntries) * nScenarios * sizeof(char));
         // OLF_GPU_SW_LOG=<slot>: record one scenario's reactive-limit decisions ON THE DEVICE (one
         // atomicAdd per decision, copied out once at the end) instead of reading the whole batch's
         // buffers over PCIe every pass. The host-side traces cost hundreds of MB per pass, which
         // serializes the stream and changes the very kernel scheduling whose effect is being traced:
         // a run-to-run flip disappears while you watch it.
         if (std::getenv("OLF_GPU_SW_LOG") != nullptr) {
-            ctx->dSwLog.alloc(SW_LOG_CAP * SW_LOG_W * sizeof(double));
-            ctx->dSwLogCnt.alloc(sizeof(int));
-            CUDA_CHECK(cudaMemset(ctx->dSwLogCnt.p, 0, sizeof(int)));
+            ctx->dReactiveLimitsDecisionLog.alloc(REACTIVE_LIMITS_DECISION_LOG_CAPACITY * REACTIVE_LIMITS_DECISION_LOG_WIDTH * sizeof(double));
+            ctx->dReactiveLimitsDecisionLogCount.alloc(sizeof(int));
+            CUDA_CHECK(cudaMemset(ctx->dReactiveLimitsDecisionLogCount.p, 0, sizeof(int)));
         }
-        ctx->dRlSavedMode.alloc(static_cast<size_t>(nrl) * nScenarios * sizeof(char));
-        ctx->dRlLimitType.alloc(static_cast<size_t>(nrl) * nScenarios * sizeof(char));
-        ctx->dRlSwitchCount.alloc(static_cast<size_t>(nrl) * nScenarios * sizeof(char));
-        std::vector<double> svcZero(nrl, 0.0);              // neutral until setBatchRlSvcLimits installs
-        ctx->dRlSvcBmin.upload(svcZero.data(), nrl * sizeof(double));
-        ctx->dRlSvcBmax.upload(svcZero.data(), nrl * sizeof(double));
-        ctx->dRlV2Base.upload(svcZero.data(), nrl * sizeof(double));
+        ctx->dReactiveLimitSavedRowMode.alloc(static_cast<size_t>(nReactiveLimitEntries) * nScenarios * sizeof(char));
+        ctx->dReactiveLimitQLimitType.alloc(static_cast<size_t>(nReactiveLimitEntries) * nScenarios * sizeof(char));
+        ctx->dReactiveLimitPvPqSwitchCount.alloc(static_cast<size_t>(nReactiveLimitEntries) * nScenarios * sizeof(char));
+        std::vector<double> svcZero(nReactiveLimitEntries, 0.0);              // neutral until setBatchReactiveLimitSvcSusceptanceLimits installs
+        ctx->dReactiveLimitSvcMinB.upload(svcZero.data(), nReactiveLimitEntries * sizeof(double));
+        ctx->dReactiveLimitSvcMaxB.upload(svcZero.data(), nReactiveLimitEntries * sizeof(double));
+        ctx->dReactiveLimitBaseVSquared.upload(svcZero.data(), nReactiveLimitEntries * sizeof(double));
     }
     ctx->dRowSlope.upload(rowSlope, n * sizeof(double));
     ctx->nds = nds;

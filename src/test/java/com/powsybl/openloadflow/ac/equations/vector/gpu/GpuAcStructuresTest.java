@@ -58,15 +58,15 @@ class GpuAcStructuresTest {
         // Two flavors of the SAME equation-system state: distinct instances, distinct RL/DS packs
         // (eurostag's PV generator gives the DS_RL flavor a non-empty reactive-limits pack), but
         // identical structure inputs.
-        GpuAcData dsRl = GpuAcDataExtractor.extract(network, es, true, true);
+        GpuAcData distributedSlackAndReactiveLimits = GpuAcDataExtractor.extract(network, es, true, true);
         GpuAcData none = GpuAcDataExtractor.extract(network, es, false, false);
-        assertNotSame(dsRl, none);
-        assertTrue(dsRl.getReactiveLimitCount() > 0, "eurostag's PV generator must fill the DS_RL flavor's RL pack");
+        assertNotSame(distributedSlackAndReactiveLimits, none);
+        assertTrue(distributedSlackAndReactiveLimits.getReactiveLimitCount() > 0, "eurostag's PV generator must fill the DS_RL flavor's RL pack");
         assertEquals(0, none.getReactiveLimitCount(), "the NONE flavor must have an empty RL pack");
-        assertTrue(dsRl.sameStructureInputsAs(none),
+        assertTrue(distributedSlackAndReactiveLimits.sameStructureInputsAs(none),
                 "the flavor flags must not change the structure inputs (only the RL/DS packs)");
 
-        long first = GpuAcStructures.handle(n, dsRl);
+        long first = GpuAcStructures.handle(n, distributedSlackAndReactiveLimits);
         long builds = GpuAcStructures.buildCount();
         long hits = GpuAcStructures.hitCount();
 
@@ -77,7 +77,7 @@ class GpuAcStructuresTest {
         assertEquals(hits + 1, GpuAcStructures.hitCount(), "the cross-flavor lookup must count as a hit");
 
         // Same-instance lookups keep hitting (both flavors are now keys).
-        assertEquals(first, GpuAcStructures.handle(n, dsRl));
+        assertEquals(first, GpuAcStructures.handle(n, distributedSlackAndReactiveLimits));
         assertEquals(first, GpuAcStructures.handle(n, none));
         assertEquals(hits + 3, GpuAcStructures.hitCount());
 

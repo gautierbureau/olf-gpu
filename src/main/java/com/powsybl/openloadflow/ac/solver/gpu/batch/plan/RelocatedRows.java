@@ -67,11 +67,11 @@ public final class RelocatedRows {
     /** The bus's reactive-limit entry, or -1: a re-homed bus is checked as a LOCAL controller by the device
      *  (OLF checks it as the PV bus it now is; BUS-6113_BBS_1 pinned VL-6113_1 at RL#1, the device never
      *  looked — 7.1 kV). */
-    public static int rlEntryOf(GpuAcData gpuData, LfBus bus) {
-        int[] rlBusNum = gpuData.reactiveLimits().busNum();
-        if (rlBusNum != null) {
-            for (int e = 0; e < rlBusNum.length; e++) {
-                if (rlBusNum[e] == bus.getNum()) {
+    public static int reactiveLimitEntryOf(GpuAcData gpuData, LfBus bus) {
+        int[] reactiveLimitBusNum = gpuData.reactiveLimits().busNum();
+        if (reactiveLimitBusNum != null) {
+            for (int e = 0; e < reactiveLimitBusNum.length; e++) {
+                if (reactiveLimitBusNum[e] == bus.getNum()) {
                     return e;
                 }
             }
@@ -101,7 +101,7 @@ public final class RelocatedRows {
      * bus's reactive balance (and its {@code BUS_TARGET_Q}) onto the coupler's dummy row and put the coupler's
      * {@code ZERO_V} on the bus's own row, so a per-scenario flip of "solve your own reactive balance at this
      * target" has to land on the dummy row — the native reactive-limit pass makes exactly the same diversion
-     * (see {@code rlQrow}) — and a flip to a VOLTAGE identity has nowhere to land at all.
+     * (see {@code reactiveLimitReactivePowerRow}) — and a flip to a VOLTAGE identity has nowhere to land at all.
      */
     static java.util.Map<Integer, int[]> relocatedChildRows(GpuAcData gpuData) {
         java.util.Map<Integer, int[]> out = new java.util.HashMap<>();

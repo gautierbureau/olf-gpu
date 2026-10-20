@@ -58,19 +58,19 @@ __device__ inline double distrQTargetQOf(int nTqOv, const int* tqOvKey, const do
 // OLF's frozen targetQ (generation minus load) of a PINNED reactive-limit entry this scenario, the value its peers'
 // DISTR_Q targets sum (AcTargetVector: otherControllerBus.getTargetQ()) and a pilot-self carrier hosts. The
 // entry's own balance row carries that value whenever the pin gave it one (mode 4): the reactive-limit kernel's
-// limit, rlInitTgtQ for a realistic-voltage freeze (OLF freezes at the INITIAL generation target Q), the injection
+// limit, reactiveLimitInitialTargetQ for a realistic-voltage freeze (OLF freezes at the INITIAL generation target Q), the injection
 // channel's target for a bus that lost generators, the limit drift included - one source for the member's own
 // row and for its peers. A pinned entry whose row is not a balance (a pilot-self pilot keeps its voltage identity)
-// takes the pin rule directly. Rebuilding every pinned peer from `lt == 1 ? rlMinQ : rlMaxQ` put a realistic-
+// takes the pin rule directly. Rebuilding every pinned peer from `lt == 1 ? reactiveLimitMinQ : reactiveLimitMaxQ` put a realistic-
 // voltage freeze at its CEILING (g1 frozen at 10 MVar with a 6000 MVar maxQ on the three-controller fixture)
 // and a generator-lost member at its lost generator's maximum.
-__device__ inline double pinnedTargetQ(int s, int e, int n, int nrl, const int* mode, const double* target,
-                                       const int* rlVrowArr, const int* rlQrow, const int* relocOwn,
-                                       const char* limitType, const double* rlMinQ, const double* rlMaxQ,
-                                       const double* rlLoadQ, int cvStride, const double* rlInitTgtQ,
-                                       const char* rlGenLost) {
-    int vrow = rlVrowArr[e];
-    int qrow = (rlQrow != nullptr && rlQrow[e] >= 0) ? rlQrow[e] : vrow;
+__device__ inline double pinnedTargetQ(int s, int e, int n, int nReactiveLimitEntries, const int* mode, const double* target,
+                                       const int* reactiveLimitVoltageRow, const int* reactiveLimitReactivePowerRow, const int* relocOwn,
+                                       const char* limitType, const double* reactiveLimitMinQ, const double* reactiveLimitMaxQ,
+                                       const double* reactiveLimitLoadQ, int cvStride, const double* reactiveLimitInitialTargetQ,
+                                       const char* reactiveLimitGeneratorsLost) {
+    int vrow = reactiveLimitVoltageRow[e];
+    int qrow = (reactiveLimitReactivePowerRow != nullptr && reactiveLimitReactivePowerRow[e] >= 0) ? reactiveLimitReactivePowerRow[e] : vrow;
     if (qrow >= 0 && mode[(size_t) s * n + qrow] == GpuRowMode::BUS_TARGET_Q) {
         return target[(size_t) s * n + qrow];
     }
@@ -80,23 +80,23 @@ __device__ inline double pinnedTargetQ(int s, int e, int n, int nrl, const int* 
     if (qrow >= 0 && relocOwn != nullptr && relocOwn[qrow] >= 0 && mode[(size_t) s * n + relocOwn[qrow]] == GpuRowMode::BUS_TARGET_Q) {
         return target[(size_t) s * n + relocOwn[qrow]];
     }
-    char lt = limitType[(size_t) s * nrl + e];
-    size_t li = cvStride ? (size_t) s * nrl + e : (size_t) e;
-    double lim = (lt == GpuQLimitType::MIN_REALISTIC_V || lt == GpuQLimitType::MAX_REALISTIC_V) && rlInitTgtQ != nullptr ? rlInitTgtQ[e]
-               : isMinLimit(lt) ? rlMinQ[li] : rlMaxQ[li];
-    if (lt == GpuQLimitType::FROZEN && rlGenLost != nullptr && rlGenLost[(size_t) s * nrl + e]) {
+    char lt = limitType[(size_t) s * nReactiveLimitEntries + e];
+    size_t li = cvStride ? (size_t) s * nReactiveLimitEntries + e : (size_t) e;
+    double lim = (lt == GpuQLimitType::MIN_REALISTIC_V || lt == GpuQLimitType::MAX_REALISTIC_V) && reactiveLimitInitialTargetQ != nullptr ? reactiveLimitInitialTargetQ[e]
+               : isMinLimit(lt) ? reactiveLimitMinQ[li] : reactiveLimitMaxQ[li];
+    if (lt == GpuQLimitType::FROZEN && reactiveLimitGeneratorsLost != nullptr && reactiveLimitGeneratorsLost[(size_t) s * nReactiveLimitEntries + e]) {
         lim = 0.0;                                       // every generator lost: no generation term at all
     }
-    return lim - rlLoadQ[li];
+    return lim - reactiveLimitLoadQ[li];
 }
 
-__global__ void updateDistrQTargetsBatch(int nMembers, int nScenarios, int n, int nrl,
-                                         const double* mKey, const int* mRlEntry,
+__global__ void updateDistrQTargetsBatch(int nMembers, int nScenarios, int n, int nReactiveLimitEntries,
+                                         const double* mKey, const int* distrQMemberReactiveLimitEntry,
                                          const int* mGroupStart, const int* mGroupCount,
                                          const int* mRow, const char* mHasRow,
-                                         const int* rlVrowArr, const double* rlMinQ, const double* rlMaxQ,
-                                         const double* rlLoadQ, const char* limitType, int cvStride,
-                                         double* target, const char* rlActive, const double* mTargetQ,
+                                         const int* reactiveLimitVoltageRow, const double* reactiveLimitMinQ, const double* reactiveLimitMaxQ,
+                                         const double* reactiveLimitLoadQ, const char* limitType, int cvStride,
+                                         double* target, const char* outerLoopCheckActive, const double* mTargetQ,
                                          const int* mQrGroup, const int* qrPtr, const int* qrRows,
                                          const int* mode, const double* pilotQ, int nQr,
                                          int nDistrQInactiveMembers, const int* distrQInactiveScenarioMember,
@@ -104,15 +104,15 @@ __global__ void updateDistrQTargetsBatch(int nMembers, int nScenarios, int n, in
                                          int nTqOv, const int* tqOvKey, const double* tqOvVal,
                                          const int* mTgtPtr, const int* mTgtPeer,
                                          const int* psEntry, const int* relocOwn,
-                                const char* distrQSubgroup, const int* qrMemberStart, const char* rlGenLost,
+                                const char* distrQSubgroup, const int* qrMemberStart, const char* reactiveLimitGeneratorsLost,
                                 const int* qrDepBase, const char* veqOff,
-                                const double* rlInitTgtQ, const int* rlQrow,
+                                const double* reactiveLimitInitialTargetQ, const int* reactiveLimitReactivePowerRow,
                                 int nDistrQKeyOverrides, const int* distrQKeyOverrideScenarioMember, const double* distrQKeyOverrideKey) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nMembers * nScenarios) return;
     int k = tid % nMembers;
     int s = tid / nMembers;
-    if (!rlActive[s]) return;
+    if (!outerLoopCheckActive[s]) return;
     int qg = mQrGroup != nullptr ? mQrGroup[k] : -1;
     if (!mHasRow[k] && qg < 0) return;                       // only members owning a packed DISTR_Q row
                                                              // (or linked to a relocation group, plan-B4)
@@ -145,8 +145,8 @@ __global__ void updateDistrQTargetsBatch(int nMembers, int nScenarios, int n, in
         // target (0.02 pu) back and the re-solve balanced 2 MVar the CPU never asked for (0.65 kV).
         return;
     }
-    int reK = mRlEntry[k];
-    if (reK >= 0 && limitType[(size_t) s * nrl + reK] != GpuQLimitType::NONE) return;  // pinned: the RL kernel owns its row
+    int reK = distrQMemberReactiveLimitEntry[k];
+    if (reK >= 0 && limitType[(size_t) s * nReactiveLimitEntries + reK] != GpuQLimitType::NONE) return;  // pinned: the RL kernel owns its row
     if (qg >= 0) {
         // plan-B4: the member whose row CURRENTLY hosts the relocated pilot Q carries the pilot's
         // Q target (captured at solve init); its DISTR_Q compensation does not apply. A non-carrier
@@ -185,7 +185,7 @@ __global__ void updateDistrQTargetsBatch(int nMembers, int nScenarios, int n, in
                 target[(size_t) s * n + mrow] = pilotQ[(size_t) s * nQr + qg];
                 return;
             }
-            char plt = limitType[(size_t) s * nrl + pe];
+            char plt = limitType[(size_t) s * nReactiveLimitEntries + pe];
             if (plt != GpuQLimitType::NONE) {
                 // pilot-self, pilot PINNED: the carrier hosts the pilot's own balance at OLF's frozen targetQ (the RL
                 // kernel leaves the pilot's row a V identity in this case, so pinnedTargetQ takes the pin rule: the
@@ -193,8 +193,8 @@ __global__ void updateDistrQTargetsBatch(int nMembers, int nScenarios, int n, in
                 // generator is lost - rte6515 GEN-676 with every busbar section in the list read its lost generator's
                 // maximum here: the carrier's target 0.957 against OLF's -0.043, VL-676_1 supplying the 100 MVAr,
                 // pinned, unpinned, and 1.133 MW distributed where OLF distributes nothing).
-                target[(size_t) s * n + mrow] = pinnedTargetQ(s, pe, n, nrl, mode, target, rlVrowArr, rlQrow, relocOwn,
-                        limitType, rlMinQ, rlMaxQ, rlLoadQ, cvStride, rlInitTgtQ, rlGenLost);
+                target[(size_t) s * n + mrow] = pinnedTargetQ(s, pe, n, nReactiveLimitEntries, mode, target, reactiveLimitVoltageRow, reactiveLimitReactivePowerRow, relocOwn,
+                        limitType, reactiveLimitMinQ, reactiveLimitMaxQ, reactiveLimitLoadQ, cvStride, reactiveLimitInitialTargetQ, reactiveLimitGeneratorsLost);
                 return;
             }
             // pilot-self, pilot UNPINNED: its q feeds the DISTR_Q rows weighted and the carrier hosts its OWN
@@ -209,8 +209,8 @@ __global__ void updateDistrQTargetsBatch(int nMembers, int nScenarios, int n, in
     const char* subS = distrQSubgroup != nullptr ? distrQSubgroup + (size_t) s * nMembers : nullptr;
     char subK = subS != nullptr ? subS[k] : 0;
     for (int m = gs; m < gs + gc; m++) {                     // live keys over the WHOLE merged group (updateReactiveKeys)
-        int re = mRlEntry[m];
-        bool pinned = re >= 0 && limitType[(size_t) s * nrl + re] != GpuQLimitType::NONE;
+        int re = distrQMemberReactiveLimitEntry[m];
+        bool pinned = re >= 0 && limitType[(size_t) s * nReactiveLimitEntries + re] != GpuQLimitType::NONE;
         bool inactive = distrQMemberInactive(nDistrQInactiveMembers, distrQInactiveScenarioMember, s, m);
         bool otherSub = subS != nullptr && subS[m] != subK;  // a split group's other subgroup (tasks #71)
         sum += (pinned || inactive || otherSub) ? 0.0 : distrQKeyOf(nDistrQKeyOverrides, distrQKeyOverrideScenarioMember, distrQKeyOverrideKey, s, m, mKey);
@@ -223,14 +223,14 @@ __global__ void updateDistrQTargetsBatch(int nMembers, int nScenarios, int n, in
     double sumTargetQ = 0.0;
     for (int t = mTgtPtr[k]; t < mTgtPtr[k + 1]; t++) {
         int m = mTgtPeer[t];
-        int re = mRlEntry[m];
-        bool pinned = re >= 0 && limitType[(size_t) s * nrl + re] != GpuQLimitType::NONE;
+        int re = distrQMemberReactiveLimitEntry[m];
+        bool pinned = re >= 0 && limitType[(size_t) s * nReactiveLimitEntries + re] != GpuQLimitType::NONE;
         if (pinned) {
             // a FROZEN member's targetQ is what OLF froze it at (freezeGenerationTargetQ...: the limit on a
             // reactive-limit switch, the INITIAL generation target Q on a realistic-voltage freeze), minus its
             // load - the value the member's own balance row enforces. Unpinned members keep their packed targetQ.
-            sumTargetQ += pinnedTargetQ(s, re, n, nrl, mode, target, rlVrowArr, rlQrow, relocOwn,
-                    limitType, rlMinQ, rlMaxQ, rlLoadQ, cvStride, rlInitTgtQ, rlGenLost);
+            sumTargetQ += pinnedTargetQ(s, re, n, nReactiveLimitEntries, mode, target, reactiveLimitVoltageRow, reactiveLimitReactivePowerRow, relocOwn,
+                    limitType, reactiveLimitMinQ, reactiveLimitMaxQ, reactiveLimitLoadQ, cvStride, reactiveLimitInitialTargetQ, reactiveLimitGeneratorsLost);
         } else {
             sumTargetQ += distrQTargetQOf(nTqOv, tqOvKey, tqOvVal, s, nMembers, m, mTargetQ);
         }
@@ -263,23 +263,23 @@ __global__ void updateDistrQTargetsBatch(int nMembers, int nScenarios, int n, in
 // q because the extraction now gives a pilot-that-is-its-own-controller that alternate; without it
 // the row assembles EMPTY and the flip is a measured no-op (state unchanged to 10 digits).
 // Reversible: if a later pass unpins a survivor, the V identity and its target come back.
-__global__ void pilotRowAllPinnedBatch(int nEntries, int nScenarios, int n, int nrl,
+__global__ void pilotRowAllPinnedBatch(int nEntries, int nScenarios, int n, int nReactiveLimitEntries,
                                        const int* entSlot, const int* entRow, const double* entQTarget,
-                                       const int* entOff, const int* entCount, const int* entRlPool,
+                                       const int* entOff, const int* entCount, const int* survivorReactiveLimitEntries,
                                        const char* limitType, int* mode, double* target,
                                        char* flipped, double* savedVTarget,
-                                       const char* rlActive, char* switched) {
+                                       const char* outerLoopCheckActive, char* switched) {
     int e = blockIdx.x * blockDim.x + threadIdx.x;
     if (e >= nEntries) return;
     int s = entSlot[e];
-    if (s < 0 || s >= nScenarios || !rlActive[s]) return;
+    if (s < 0 || s >= nScenarios || !outerLoopCheckActive[s]) return;
     int row = entRow[e];
     if (row < 0 || row >= n) return;
     size_t ri = (size_t) s * n + row;
     bool allPinned = entCount[e] > 0;
     for (int k = 0; k < entCount[e]; k++) {
-        int rl = entRlPool[entOff[e] + k];
-        if (rl < 0 || rl >= nrl || limitType[(size_t) s * nrl + rl] == GpuQLimitType::NONE) {
+        int rl = survivorReactiveLimitEntries[entOff[e] + k];
+        if (rl < 0 || rl >= nReactiveLimitEntries || limitType[(size_t) s * nReactiveLimitEntries + rl] == GpuQLimitType::NONE) {
             allPinned = false;                              // this one still carries its DISTR_Q row
             break;
         }
@@ -302,32 +302,32 @@ __global__ void pilotRowAllPinnedBatch(int nEntries, int nScenarios, int n, int 
 // the diagnostic Q buffer at its OWN row (suppressed by the main qBuf fill), so the RL kernel's
 // q = qBuf[row] + loadQ works verbatim for remote entries. Same family evaluation as fillDistrQBatch
 // with weight 1 (±1 for zero-impedance DUMMY_Q terms), residual value only (no Jacobian).
-__global__ void fillRemoteMemberQBatch(int nrmq, int nScenarios, int n, int nElements,
+__global__ void fillRemoteMemberQBatch(int nRemoteMemberReactiveTerms, int nScenarios, int n, int nElements,
                                        int closedBranchOffset, int openBranchOffset,
-                                       const int* rmqRow, const int* rmqElem, const int* rmqSide,
-                                       const int* rmqKind, const double* rmqWeight,
+                                       const int* remoteMemberReactiveTermRow, const int* remoteMemberReactiveTermElement, const int* remoteMemberReactiveTermSide,
+                                       const int* remoteMemberReactiveTermKind, const double* remoteMemberReactiveTermWeight,
                                        const double* closedBranchParameters, const int* closedBranchIndices, const double* shuntParameters, const int* shuntIndices,
                                        const double* openBranchParameters, const int* openBranchIndices,
                                        const double* x, double* qBuf,
-                                       const char* disabled, const char* rlActive,
+                                       const char* disabled, const char* outerLoopCheckActive,
                                        int nR1Ov, const int* r1OvSlotElem, const double* r1OvVal,
                                        int nShuntAdmittanceOverrides, const int* shuntAdmittanceOverrideScenarioElement, const double* shuntAdmittanceOverrideDelta) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= nrmq * nScenarios) return;
-    int c = tid % nrmq;
-    int s = tid / nrmq;
-    if (!rlActive[s]) return;
-    int e = rmqElem[c];
-    int kind = rmqKind[c];
+    if (tid >= nRemoteMemberReactiveTerms * nScenarios) return;
+    int c = tid % nRemoteMemberReactiveTerms;
+    int s = tid / nRemoteMemberReactiveTerms;
+    if (!outerLoopCheckActive[s]) return;
+    int e = remoteMemberReactiveTermElement[c];
+    int kind = remoteMemberReactiveTermKind[c];
     if (kind == GpuReactiveTermKind::CLOSED_BRANCH_REACTIVE_FLOW && disabled[s * nElements + closedBranchOffset + e]) {
         return;
     }
     if (kind == GpuReactiveTermKind::OPEN_BRANCH_REACTIVE_FLOW && disabled[s * nElements + openBranchOffset + e]) {
         return;
     }
-    double w = rmqWeight[c];
+    double w = remoteMemberReactiveTermWeight[c];
     const double* xs = x + (size_t) s * n;
-    double* q = qBuf + (size_t) s * n + rmqRow[c];
+    double* q = qBuf + (size_t) s * n + remoteMemberReactiveTermRow[c];
     if (kind == GpuReactiveTermKind::SHUNT_COMPENSATOR_REACTIVE_FLOW) {  // fixed shunt q at the member bus
         const double* sp = shuntParameters + e * 2;
         double g = sp[0];
@@ -346,13 +346,13 @@ __global__ void fillRemoteMemberQBatch(int nrmq, int nScenarios, int n, int nEle
     if (kind == GpuReactiveTermKind::OPEN_BRANCH_REACTIVE_FLOW) {  // half-open branch, connected side
         const double* op = openBranchParameters + e * 7;
         const int* oq = openBranchIndices + e * 6;
-        int vcol = rmqSide[c] == 0 ? oq[4] : oq[5];
-        double v1 = rmqSide[c] == 0 ? xs[vcol] : 1.0;
-        double v2 = rmqSide[c] == 1 ? xs[vcol] : 1.0;
+        int vcol = remoteMemberReactiveTermSide[c] == 0 ? oq[4] : oq[5];
+        double v1 = remoteMemberReactiveTermSide[c] == 0 ? xs[vcol] : 1.0;
+        double v2 = remoteMemberReactiveTermSide[c] == 1 ? xs[vcol] : 1.0;
         double oo[OB_NOUT];
         evalOpenBranch(op[0], op[1], op[2], op[3], op[4], op[5], v1, op[6], v2, 0,
                        oo + 0, oo + 1, oo + 2, oo + 3, oo + 4, oo + 5, oo + 6, oo + 7);
-        atomicAdd(q, w * oo[rmqSide[c] == 0 ? 6 : 2]);
+        atomicAdd(q, w * oo[remoteMemberReactiveTermSide[c] == 0 ? 6 : 2]);
         return;
     }
     // kind 0: closed branch q at the member's side (full pi row honors the tap override channel)
@@ -379,25 +379,25 @@ __global__ void fillRemoteMemberQBatch(int nrmq, int nScenarios, int n, int nEle
                      o + 0, o + 1, o + 2, o + 3, o + 4, o + 5, o + 6, o + 7, o + 8, o + 9,
                      o + 10, o + 11, o + 12, o + 13, o + 14, o + 15, o + 16, o + 17, o + 18,
                      o + 19, o + 20, o + 21, o + 22, o + 23, o + 24, o + 25, o + 26, o + 27);
-    atomicAdd(q, w * o[rmqSide[c] == 0 ? 7 : 21]);           // q1 / q2 residual outputs
+    atomicAdd(q, w * o[remoteMemberReactiveTermSide[c] == 0 ? 7 : 21]);           // q1 / q2 residual outputs
     return;
 }
 
 void launchDistrQTargetsInner(BatchSolverContext* ctx, DriverPass& drv) {
     const int& n = drv.n;
     const int& nS = drv.nS;
-    const bool& useDynRlLimits = drv.useDynRlLimits;
-    if (ctx->nRlRemote > 0 && ctx->nDistrQMembers > 0) {
+    const bool& usePerScenarioReactiveLimits = drv.usePerScenarioReactiveLimits;
+    if (ctx->nReactiveLimitRemoteEntries > 0 && ctx->nDistrQMembers > 0) {
         updateDistrQTargetsBatch<<<grid(ctx->nDistrQMembers * nS), BLOCK, 0, ctx->stream>>>(
-                    ctx->nDistrQMembers, nS, n, ctx->nrl,
+                    ctx->nDistrQMembers, nS, n, ctx->nReactiveLimitEntries,
                     ctx->dDistrQMemberKey.as<double>(), ctx->dDistrQMemberReactiveLimitEntry.as<int>(),
                     ctx->dDistrQMemberGroupStart.as<int>(), ctx->dDistrQMemberGroupCount.as<int>(),
                     ctx->dDistrQMemberRow.as<int>(), ctx->dDistrQMemberHasRow.as<char>(),
-                    ctx->dRlVrow.as<int>(),
-                    useDynRlLimits ? ctx->dRlMinQDyn.as<double>() : ctx->dRlMinQ.as<double>(),
-                    useDynRlLimits ? ctx->dRlMaxQDyn.as<double>() : ctx->dRlMaxQ.as<double>(),
-                    useDynRlLimits ? ctx->dRlLoadQDyn.as<double>() : ctx->dRlLoadQ.as<double>(), ctx->dRlLimitType.as<char>(), useDynRlLimits ? 1 : 0,
-                    ctx->dTarget.as<double>(), ctx->dRlActive.as<char>(),
+                    ctx->dReactiveLimitVoltageRow.as<int>(),
+                    usePerScenarioReactiveLimits ? ctx->dReactiveLimitMinQPerScenario.as<double>() : ctx->dReactiveLimitMinQ.as<double>(),
+                    usePerScenarioReactiveLimits ? ctx->dReactiveLimitMaxQPerScenario.as<double>() : ctx->dReactiveLimitMaxQ.as<double>(),
+                    usePerScenarioReactiveLimits ? ctx->dReactiveLimitLoadQPerScenario.as<double>() : ctx->dReactiveLimitLoadQ.as<double>(), ctx->dReactiveLimitQLimitType.as<char>(), usePerScenarioReactiveLimits ? 1 : 0,
+                    ctx->dTarget.as<double>(), ctx->dOuterLoopCheckActive.as<char>(),
                     ctx->dDistrQMemberTargetQ.as<double>(),
                     ctx->hasDistrQRelocationGroups ? ctx->dDistrQMemberRelocationGroup.as<int>() : nullptr,
                     ctx->st->nQr > 0 ? ctx->st->dQrPtr.as<int>() : nullptr,
@@ -413,10 +413,10 @@ void launchDistrQTargetsInner(BatchSolverContext* ctx, DriverPass& drv) {
                     ctx->st->dRelocOwn.p != nullptr
                             ? ctx->st->dRelocOwn.as<int>() : nullptr,
                 ctx->hasDistrQSubgroups ? ctx->dDistrQSubgroup.as<char>() : nullptr, ctx->hasDistrQSubgroups ? ctx->dQrMemberStart.as<int>() : nullptr,
-                ctx->nRlGenLost > 0 ? ctx->dRlGenLost.as<char>() : nullptr,
+                ctx->nReactiveLimitGeneratorsLost > 0 ? ctx->dReactiveLimitGeneratorsLost.as<char>() : nullptr,
                 ctx->st->dQrDepBase.p ? ctx->st->dQrDepBase.as<int>() : nullptr,
                 ctx->dQrVeqOff.p ? ctx->dQrVeqOff.as<char>() : nullptr,
-                    ctx->dRlInitTgtQ.as<double>(), ctx->dRlQrow.as<int>(),
+                    ctx->dReactiveLimitInitialTargetQ.as<double>(), ctx->dReactiveLimitReactivePowerRow.as<int>(),
                     ctx->nDistrQKeyOverrides, ctx->nDistrQKeyOverrides ? ctx->dDistrQKeyOverrideScenarioMember.as<int>() : nullptr, ctx->nDistrQKeyOverrides ? ctx->dDistrQKeyOverrideKey.as<double>() : nullptr);
     }
 }

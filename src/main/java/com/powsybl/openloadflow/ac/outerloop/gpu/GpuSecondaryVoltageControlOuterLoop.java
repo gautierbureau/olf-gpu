@@ -50,13 +50,13 @@ import java.util.Map;
  * </ul>
  *
  * <p>Per-scenario mechanics: new generator-VC targets land as V-row target overrides (PV rows) and
- * per-scenario RL V-target overrides (the {@code rlVtOv} channel — the RL switch-back must compare
+ * per-scenario RL V-target overrides (the {@code reactiveLimitTargetVOverrides} channel — the RL switch-back must compare
  * against the MOVED target); OLF's {@code tryToReEnableHelpfulControllerBuses} maps to clearing the
  * some-but-not-all pinned controllers' RL state before the re-solve. Scope: LOCAL and REMOTE
  * generator voltage control with DISTINCT controlled buses (a controller<->controlled bijection —
- * see {@link #supported}); a remote controller's RL entry is the rlRemote member entry, its moved
+ * see {@link #supported}); a remote controller's RL entry is the reactiveLimitVoltageControlRole member entry, its moved
  * zone target lands on the CONTROLLED bus's V row and steers the pilot-referenced switch-back via
- * the rlVtOv channel.
+ * the reactiveLimitTargetVOverrides channel.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
@@ -80,10 +80,10 @@ public final class GpuSecondaryVoltageControlOuterLoop {
 
     /** One (controller, controlled) PAIR — a bijection under {@link #supported}: {@code vRow} is
      *  the CONTROLLER bus's V row (keys its RL entry — for a REMOTE controller that is the
-     *  rlRemote member entry), {@code ctldVRow} the CONTROLLED bus's pinned BUS_TARGET_V row (the
+     *  reactiveLimitVoltageControlRole member entry), {@code ctldVRow} the CONTROLLED bus's pinned BUS_TARGET_V row (the
      *  sensitivity unit row and the row the moved zone target lands on — OLF adjusts the
      *  CONTROLLED bus's VC target). Local control collapses the two. */
-    public record CtlBus(int vRow, int ctldVRow, int ctldBusNum, int rlIdx, double baseTargetV, double minQ, double maxQ,
+    public record CtlBus(int vRow, int ctldVRow, int ctldBusNum, int reactiveLimitEntry, double baseTargetV, double minQ, double maxQ,
                   double loadTargetQ,
                   com.powsybl.openloadflow.util.Evaluable busQ,
                   List<EquationTerm<AcVariableType, AcEquationType>> qTerms,
@@ -125,7 +125,7 @@ public final class GpuSecondaryVoltageControlOuterLoop {
 
     @SuppressWarnings("unchecked")
     public static Controllers build(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
-                             int[] rlVrow, DevicePhases.EsContext esCtx,
+                             int[] reactiveLimitVoltageRow, DevicePhases.EsContext esCtx,
                              double minPlausibleTargetV, double maxPlausibleTargetV,
                              GpuAcElementMapper elementMapper) {
         Map<Integer, Integer> busVRows = new LinkedHashMap<>();
@@ -137,9 +137,9 @@ public final class GpuSecondaryVoltageControlOuterLoop {
                 shuntBRows.put(v.getElementNum(), v.getRow());
             }
         }
-        Map<Integer, Integer> rlIdxOfVRow = new LinkedHashMap<>();
-        for (int i = 0; i < rlVrow.length; i++) {
-            rlIdxOfVRow.put(rlVrow[i], i);
+        Map<Integer, Integer> reactiveLimitEntryByVoltageRow = new LinkedHashMap<>();
+        for (int i = 0; i < reactiveLimitVoltageRow.length; i++) {
+            reactiveLimitEntryByVoltageRow.put(reactiveLimitVoltageRow[i], i);
         }
         List<CtlBus> ctls = new ArrayList<>();
         List<Zone> zones = new ArrayList<>();
@@ -149,8 +149,8 @@ public final class GpuSecondaryVoltageControlOuterLoop {
                 var vc = controller.getGeneratorVoltageControl().orElseThrow();
                 Integer vRow = busVRows.get(controller.getNum());
                 Integer ctldVRow = busVRows.get(vc.getControlledBus().getNum());
-                Integer rlIdx = vRow != null ? rlIdxOfVRow.get(vRow) : null;
-                if (vRow == null || ctldVRow == null || rlIdx == null) {
+                Integer reactiveLimitEntry = vRow != null ? reactiveLimitEntryByVoltageRow.get(vRow) : null;
+                if (vRow == null || ctldVRow == null || reactiveLimitEntry == null) {
                     GpuBatchSkips.record(GpuBatchSkips.Slot.SVC, LOGGER,
                             "Secondary VC controller {} not representable on the GPU batch — skipped zone {}",
                             controller.getId(), svc.getZoneName());
@@ -184,7 +184,7 @@ public final class GpuSecondaryVoltageControlOuterLoop {
                     }
                 }
                 zoneCtls.add(ctls.size());
-                ctls.add(new CtlBus(vRow, ctldVRow, vc.getControlledBus().getNum(), rlIdx, vc.getTargetValue(),
+                ctls.add(new CtlBus(vRow, ctldVRow, vc.getControlledBus().getNum(), reactiveLimitEntry, vc.getTargetValue(),
                         controller.getMinQ(), controller.getMaxQ(),
                         controller.getLoadTargetQ(), controller.getQ(), qTerms, qObs));
             }
@@ -247,7 +247,7 @@ public final class GpuSecondaryVoltageControlOuterLoop {
         int nc = ctls.size();
         int[] ctldVRow = new int[nc];
         int[] busVRow = new int[nc];
-        int[] rlIdx = new int[nc];
+        int[] reactiveLimitEntry = new int[nc];
         double[] baseTargetV = new double[nc];
         double[] minQ = new double[nc];
         double[] maxQ = new double[nc];
@@ -260,7 +260,7 @@ public final class GpuSecondaryVoltageControlOuterLoop {
             CtlBus ctl = ctls.get(c);
             ctldVRow[c] = ctl.ctldVRow();
             busVRow[c] = ctl.vRow();
-            rlIdx[c] = ctl.rlIdx();
+            reactiveLimitEntry[c] = ctl.reactiveLimitEntry();
             baseTargetV[c] = ctl.baseTargetV();
             minQ[c] = ctl.minQ();
             maxQ[c] = ctl.maxQ();
@@ -288,7 +288,7 @@ public final class GpuSecondaryVoltageControlOuterLoop {
             zoneTargetV[z] = zone.pilotTargetV();
         }
         zonePtr[nz] = zoneCtl.size();
-        boolean owned = SecondaryVoltageControlNative.setBatchSecondaryVc(handle, ctldVRow, busVRow, rlIdx, baseTargetV,
+        boolean owned = SecondaryVoltageControlNative.setBatchSecondaryVc(handle, ctldVRow, busVRow, reactiveLimitEntry, baseTargetV,
                 minQ, maxQ, loadQ, qPtr,
                 qKind.stream().mapToInt(Integer::intValue).toArray(),
                 qElem.stream().mapToInt(Integer::intValue).toArray(),
@@ -335,7 +335,7 @@ public final class GpuSecondaryVoltageControlOuterLoop {
      *  ({@code scenario * n + row}), the per-(scenario, RL entry) voltage targets the switch-back must
      *  compare against, and the per-scenario "this loop changed something" flags OLF's UNSTABLE verdict
      *  maps to. */
-    public record PauseDecision(int[] targetRows, double[] targetValues, int[] rlVtSlotIdx, double[] rlVtValues,
+    public record PauseDecision(int[] targetRows, double[] targetValues, int[] secondaryVoltageControlTargetVScenarioEntry, double[] secondaryVoltageControlTargetVValues,
                                 int[] unpinPairs, double[] unpinTargets, byte[] hostChanged, boolean anyMoved) {
     }
 
@@ -344,22 +344,22 @@ public final class GpuSecondaryVoltageControlOuterLoop {
      *  the solve, in OLF's order, with the distributed slack and the reactive-limit state it already
      *  holds. {@code targetV} carries the zone targets across pauses (OLF keeps them on the network). */
     @SuppressWarnings("java:S107")
-    public static PauseDecision decideAtPause(long handle, int chunkSize, int realCount, int n, int nrl,
-            double[][] states, Controllers controllers, int[] rlState, double[][] targetV, double[] baseState) {
+    public static PauseDecision decideAtPause(long handle, int chunkSize, int realCount, int n, int nReactiveLimitEntries,
+            double[][] states, Controllers controllers, int[] reactiveLimitsState, double[][] targetV, double[] baseState) {
         List<CtlBus> ctls = controllers.ctls();
         int nc = ctls.size();
         byte[] hostChanged = new byte[chunkSize];
-        if (nc == 0 || rlState == null) {
+        if (nc == 0 || reactiveLimitsState == null) {
             return new PauseDecision(null, null, null, null, null, null, hostChanged, false);
         }
         int[][] uo = observables(controllers);
         // the pin state BEFORE the decision: what decideRound clears is OLF's re-enable, and the device
         // only learns about it through the un-pin channel (a resume re-seeds no RL state)
-        int[] pinnedBefore = rlState.clone();
+        int[] pinnedBefore = reactiveLimitsState.clone();
         final double[] esStateOnEntry = controllers.esCtx().stateVector().get().clone();
         boolean[] affected;
         try {
-            affected = decideRound(handle, chunkSize, realCount, n, nrl, states, controllers, rlState,
+            affected = decideRound(handle, chunkSize, realCount, n, nReactiveLimitEntries, states, controllers, reactiveLimitsState,
                     targetV, baseState, uo[0], uo[1], 0);
         } finally {
             controllers.esCtx().stateVector().set(esStateOnEntry);
@@ -374,10 +374,10 @@ public final class GpuSecondaryVoltageControlOuterLoop {
             hostChanged[s] = (byte) (affected != null && affected[s] ? 1 : 0);
             for (int c = 0; c < nc; c++) {
                 CtlBus ctl = ctls.get(c);
-                int e = s * nrl + ctl.rlIdx();
-                if (GpuReactiveLimitsState.limitType(pinnedBefore[e]) != GpuQLimitType.NONE && GpuReactiveLimitsState.limitType(rlState[e]) == GpuQLimitType.NONE) {
+                int e = s * nReactiveLimitEntries + ctl.reactiveLimitEntry();
+                if (GpuReactiveLimitsState.limitType(pinnedBefore[e]) != GpuQLimitType.NONE && GpuReactiveLimitsState.limitType(reactiveLimitsState[e]) == GpuQLimitType.NONE) {
                     unpin.add(s);                            // OLF's re-enable: back to PV at the zone's target
-                    unpin.add(ctl.rlIdx());
+                    unpin.add(ctl.reactiveLimitEntry());
                     unpinT.add(targetV[s][c]);
                 }
                 // The switch-back comparison target is a SOLVE ARGUMENT, re-uploaded per call: it must be
@@ -387,12 +387,12 @@ public final class GpuSecondaryVoltageControlOuterLoop {
                 if (targetV[s][c] == ctl.baseTargetV()) {
                     continue;
                 }
-                if (GpuReactiveLimitsState.limitType(rlState[e]) == GpuQLimitType.NONE) {
+                if (GpuReactiveLimitsState.limitType(reactiveLimitsState[e]) == GpuQLimitType.NONE) {
                     rows.add(s * n + ctl.ctldVRow());        // the CONTROLLED bus's V target moves now
                     vals.add(targetV[s][c]);
                 }                                            // pinned row: the Q pin stays; the override below
                 vtSlotIdx.add(s);                            // steers the RL switch-back and its restored target
-                vtSlotIdx.add(ctl.rlIdx());
+                vtSlotIdx.add(ctl.reactiveLimitEntry());
                 vtVal.add(targetV[s][c]);
             }
         }
@@ -408,13 +408,13 @@ public final class GpuSecondaryVoltageControlOuterLoop {
     /** ONE decision round of OLF's processSecondaryVoltageControl over the chunk: the per-zone trigger
      *  (pilot deadband, K spread), tryToReEnableHelpfulControllerBuses, the batched device sensitivities
      *  and the per-scenario zone system. Mutates {@code targetV} (the moved generator-VC targets) and
-     *  {@code rlState} (re-enabled controllers lose their pin); returns the scenarios that moved, or
+     *  {@code reactiveLimitsState} (re-enabled controllers lose their pin); returns the scenarios that moved, or
      *  {@code null} when nothing did. Shared by the host orchestrator and the driver-pause path so the
      *  two can never drift. */
     // a zone system that does not solve leaves that scenario unadjusted
     @SuppressWarnings({"java:S107", "java:S3776", "checkstyle:IllegalCatchError"})
-    private static boolean[] decideRound(long handle, int chunkSize, int realCount, int n, int nrl,
-            double[][] chunkResults, Controllers controllers, int[] rlState, double[][] targetV,
+    private static boolean[] decideRound(long handle, int chunkSize, int realCount, int n, int nReactiveLimitEntries,
+            double[][] chunkResults, Controllers controllers, int[] reactiveLimitsState, double[][] targetV,
             double[] baseState, int[] unit, int[] obs, int round) {
         List<CtlBus> ctls = controllers.ctls();
         List<Zone> zones = controllers.zones();
@@ -434,13 +434,13 @@ public final class GpuSecondaryVoltageControlOuterLoop {
             for (Zone z : zones) {
                 int pinned = 0;
                 for (int c : z.ctls()) {
-                    if (GpuReactiveLimitsState.limitType(rlState[s * nrl + ctls.get(c).rlIdx()]) != GpuQLimitType.NONE) {
+                    if (GpuReactiveLimitsState.limitType(reactiveLimitsState[s * nReactiveLimitEntries + ctls.get(c).reactiveLimitEntry()]) != GpuQLimitType.NONE) {
                         pinned++;
                     }
                 }
                 if (pinned > 0 && pinned < z.ctls().length) {
                     for (int c : z.ctls()) {
-                        if (GpuReactiveLimitsState.limitType(rlState[s * nrl + ctls.get(c).rlIdx()]) != GpuQLimitType.NONE) {
+                        if (GpuReactiveLimitsState.limitType(reactiveLimitsState[s * nReactiveLimitEntries + ctls.get(c).reactiveLimitEntry()]) != GpuQLimitType.NONE) {
                             reEnabled[s][c] = true;
                         }
                     }
@@ -503,7 +503,7 @@ public final class GpuSecondaryVoltageControlOuterLoop {
             // enabled controllers this scenario: unpinned or just re-enabled
             List<Integer> enabled = new ArrayList<>();
             for (int c = 0; c < nc; c++) {
-                if (GpuReactiveLimitsState.limitType(rlState[s * nrl + ctls.get(c).rlIdx()]) == GpuQLimitType.NONE || reEnabled[s][c]) {
+                if (GpuReactiveLimitsState.limitType(reactiveLimitsState[s * nReactiveLimitEntries + ctls.get(c).reactiveLimitEntry()]) == GpuQLimitType.NONE || reEnabled[s][c]) {
                     enabled.add(c);
                 }
             }
@@ -602,8 +602,8 @@ public final class GpuSecondaryVoltageControlOuterLoop {
             // apply the re-enables: clear the RL pins so the next solve resumes voltage control there
             for (int c = 0; c < nc; c++) {
                 if (reEnabled[s][c]) {
-                    int st = s * nrl + ctls.get(c).rlIdx();
-                    rlState[st] = rlState[st] & ~3;
+                    int st = s * nReactiveLimitEntries + ctls.get(c).reactiveLimitEntry();
+                    reactiveLimitsState[st] = reactiveLimitsState[st] & ~3;
                 }
             }
         }

@@ -38,10 +38,10 @@ struct CvHvdc {
 CvHvdc cvHvdcView(BatchSolverContext* ctx);
 
 // Reactive limits of every curve entry at the scenario's current active power.
-__global__ void rlCurveLimitsBatch(int nrl, int nScenarios, int ncv, int n, int cvExtrapolate,
+__global__ void reactiveCapabilityCurveLimitsBatch(int nReactiveLimitEntries, int nScenarios, int ncv, int n, int cvExtrapolate,
                                    const int* cvIdx, const double* cvIn, const double* cvPts,
                                    const int* cvPtr, const int* cvList, CvHvdc cvHv,
-                                   const double* rlMinQ, const double* rlMaxQ, const double* rlLoadQ,
+                                   const double* reactiveLimitMinQ, const double* reactiveLimitMaxQ, const double* reactiveLimitLoadQ,
                                    const double* target,
                                    int nQOv, const int* qOvSlotEntry, const double* qOvMinMax,
                                    const int* qOvPtr, const int* qOvList,

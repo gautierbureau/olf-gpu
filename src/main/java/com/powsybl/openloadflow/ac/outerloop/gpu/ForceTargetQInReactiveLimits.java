@@ -41,8 +41,8 @@ import java.util.List;
  * {@code forcedTargetQLimitsBatch} after every rebuild of the dynamic limits). A remote-control member or a
  * reactive-power-controlled bus throws, and the caller keeps the run on the CPU.
  *
- * <p>Layout (setBatchForcedTargetQ): fqIdx stride 7 {qRow, dsGenSlot, ptsOff, npts, dsBusIdx, baseQRowMode, rlIdx}
- * (qRow -1 for a limit entry, rlIdx -1 for a Q-row entry);
+ * <p>Layout (setBatchForcedTargetQ): fqIdx stride 7 {qRow, dsGenSlot, ptsOff, npts, dsBusIdx, baseQRowMode, reactiveLimitEntry}
+ * (qRow -1 for a limit entry, reactiveLimitEntry -1 for a Q-row entry);
  * fqIn stride 5 {basePpu, rawTargetQPu, baseClampedPu, share, baseRowTargetP}; fqPts stride 3 {p_MW, minQ_MW,
  * maxQ_MW} sorted by p.
  *
@@ -117,15 +117,15 @@ public final class ForceTargetQInReactiveLimits {
                             + " on a reactive-power-controlled bus is not supported");
                 }
                 int qRow = -1;
-                int rlIdx = -1;
+                int reactiveLimitEntry = -1;
                 if (bus.isGeneratorVoltageControlEnabled() || bus.isGenerationTargetQFrozen()) {
                     // its target enters the bus's reactive LIMITS (AbstractLfBus.getLimitQ), in min and max alike.
                     // A bus the reactive-limit loop switched to PQ belongs here too: OLF FREEZES its generation
                     // target (invalidateGenerationTargetP skips it), and the clamp only reaches it through the
                     // limit the bus re-freezes at when the limit moves (RL_REFREEZE) - moving its Q row instead put
                     // the device 0.86 kV off at B3 in deviceForcedTargetQOnVoltageControlledBusMovesItsLimits.
-                    rlIdx = localRlEntryOf(gpuData, bus);
-                    if (rlIdx < 0) {
+                    reactiveLimitEntry = localReactiveLimitEntryOf(gpuData, bus);
+                    if (reactiveLimitEntry < 0) {
                         throw new PowsyblException("GPU AC solver: forced target Q of generator " + gen.getId()
                                 + " on a bus without a local reactive-limit entry is not supported");
                     }
@@ -151,7 +151,7 @@ public final class ForceTargetQInReactiveLimits {
                     pts.add(pt.getMaxQ());
                 }
                 int pRow = gpuData.distributedSlack().busPhiRow()[dsIdx];
-                idx.add(new int[] {qRow, slot, ptsOff, points.size(), dsIdx, qRow >= 0 ? baseRowMode[qRow] : 0, rlIdx});
+                idx.add(new int[] {qRow, slot, ptsOff, points.size(), dsIdx, qRow >= 0 ? baseRowMode[qRow] : 0, reactiveLimitEntry});
                 in.add(new double[] {gen.getTargetP(), gen.getRawTargetQ(), gen.getTargetQ(),
                     dsParams.factor(gen) / busFactor, baseTargets[pRow]});
                 slots.add(slot);
@@ -177,7 +177,7 @@ public final class ForceTargetQInReactiveLimits {
 
     /** The bus's reactive-limit entry when it is a LOCAL one (the bus controls its own voltage, not a remote-group
      *  member or pilot), -1 otherwise. */
-    private static int localRlEntryOf(GpuAcData gpuData, LfBus bus) {
+    private static int localReactiveLimitEntryOf(GpuAcData gpuData, LfBus bus) {
         boolean local = bus.getGeneratorVoltageControl()
                 .map(vc -> vc.getControlledBus() == bus && vc.getControllerElements().size() == 1).orElse(false);
         int[] busNums = gpuData.reactiveLimits().busNum();

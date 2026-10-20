@@ -22,8 +22,8 @@ namespace olfgpu {
 // OLF LfGeneratorImpl.getTargetQ under forceTargetQInReactiveLimits: the IIDM target Q, clamped into the
 // generator's curve limits at target P p (below minQ -> minQ, above maxQ -> maxQ).
 __device__ double fqClamped(double pPu, double raw, const double* pts, int npts, int extrapolate) {
-    double mn = rlCurveEval(pPu * 100.0, pts, npts, 0, extrapolate) / 100.0;
-    double mx = rlCurveEval(pPu * 100.0, pts, npts, 1, extrapolate) / 100.0;
+    double mn = evaluateReactiveCapabilityCurve(pPu * 100.0, pts, npts, 0, extrapolate) / 100.0;
+    double mx = evaluateReactiveCapabilityCurve(pPu * 100.0, pts, npts, 1, extrapolate) / 100.0;
     return raw < mn ? mn : (raw > mx ? mx : raw);
 }
 
@@ -84,9 +84,9 @@ __global__ void forcedTargetQBatch(int nfq, int nS, int n, int nds, int ngen, in
                                    const double* fqIn, const double* fqPts, const double* fqPre,
                                    const double* genCum, const char* genCumValid, const double* dgAnchor,
                                    const double* dgStart, const int* dsPhiRow, const int* dsRowOv, int nLost, const int* lost, const char* dsIslanded,
-                                   const int* mode, const char* rlActive, double* target, double* applied) {
+                                   const int* mode, const char* outerLoopCheckActive, double* target, double* applied) {
     int s = blockIdx.x * blockDim.x + threadIdx.x;
-    if (s >= nS || !rlActive[s]) return;
+    if (s >= nS || !outerLoopCheckActive[s]) return;
     for (int e = 0; e < nfq; e++) {
         if (fqIdx[e * 7] < 0 || !fqEntryLive(s, e, n, nds, fqIdx, nLost, lost, dsIslanded, mode)) continue;
         double p = fqPNow(s, e, n, nds, ngen, nfq, fqIdx, fqIn, fqPre, genCum, genCumValid, dgAnchor, dgStart, dsPhiRow, dsRowOv, target);
@@ -99,9 +99,9 @@ __global__ void forcedTargetQBatch(int nfq, int nS, int n, int nds, int ngen, in
 
 // A non-controlling generator on a VOLTAGE-CONTROLLED bus: AbstractLfBus.getLimitQ counts its (clamped) target Q
 // in BOTH the bus's min and max limits, re-read at the current P on every reactive-limit check. Runs right after
-// rlCurveLimitsBatch rebuilt the dynamic limits from their static values (which carry the BASE clamp), so it adds
-// the clamp's move since the base. Limit entries only (rlIdx >= 0).
-__global__ void forcedTargetQLimitsBatch(int nfq, int nS, int n, int nds, int ngen, int nrl, int extrapolate,
+// reactiveCapabilityCurveLimitsBatch rebuilt the dynamic limits from their static values (which carry the BASE clamp), so it adds
+// the clamp's move since the base. Limit entries only (reactiveLimitEntry >= 0).
+__global__ void forcedTargetQLimitsBatch(int nfq, int nS, int n, int nds, int ngen, int nReactiveLimitEntries, int extrapolate,
                                          const int* fqIdx, const double* fqIn, const double* fqPts,
                                          const double* fqPre, const double* genCum, const char* genCumValid,
                                          const double* dgAnchor, const double* dgStart, const int* dsPhiRow, const int* dsRowOv, int nLost, const int* lost,
@@ -115,15 +115,15 @@ __global__ void forcedTargetQLimitsBatch(int nfq, int nS, int n, int nds, int ng
         double p = fqPNow(s, e, n, nds, ngen, nfq, fqIdx, fqIn, fqPre, genCum, genCumValid, dgAnchor, dgStart, dsPhiRow, dsRowOv, target);
         double d = fqClamped(p, fqIn[e * 5 + 1], fqPts + fqIdx[e * 7 + 2] * 3, fqIdx[e * 7 + 3], extrapolate)
                 - fqIn[e * 5 + 2];
-        minQDyn[(size_t) s * nrl + rl] += d;
-        maxQDyn[(size_t) s * nrl + rl] += d;
+        minQDyn[(size_t) s * nReactiveLimitEntries + rl] += d;
+        maxQDyn[(size_t) s * nReactiveLimitEntries + rl] += d;
     }
 }
 
 // forceTargetQInReactiveLimits on voltage-controlled buses: after every rebuild of the dynamic reactive limits.
 void launchForcedTargetQLimits(BatchSolverContext* ctx, int nS, int n) {
     if (ctx->nfqLim <= 0) return;
-    forcedTargetQLimitsBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(ctx->nfq, nS, n, ctx->nds, ctx->ngen, ctx->nrl,
+    forcedTargetQLimitsBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(ctx->nfq, nS, n, ctx->nds, ctx->ngen, ctx->nReactiveLimitEntries,
             ctx->fqExtrapolate, ctx->dFqIdx.as<int>(), ctx->dFqIn.as<double>(), ctx->dFqPts.as<double>(),
             ctx->fqHasPre ? ctx->dFqPre.as<double>() : nullptr,
             ctx->ngen > 0 ? ctx->dGenCum.as<double>() : nullptr,
@@ -131,7 +131,7 @@ void launchForcedTargetQLimits(BatchSolverContext* ctx, int nS, int n) {
             ctx->nds > 0 ? ctx->dDsPhiRow.as<int>() : nullptr, ctx->nDsRowOv > 0 ? ctx->dDsRowOv.as<int>() : nullptr,
             ctx->nDsLostGen, ctx->nDsLostGen > 0 ? ctx->dDsLostGen.as<int>() : nullptr,
             ctx->nDsIslanded > 0 ? ctx->dDsIslanded.as<char>() : nullptr, ctx->dMode.as<int>(),
-            ctx->dTarget.as<double>(), ctx->dRlMinQDyn.as<double>(), ctx->dRlMaxQDyn.as<double>());
+            ctx->dTarget.as<double>(), ctx->dReactiveLimitMinQPerScenario.as<double>(), ctx->dReactiveLimitMaxQPerScenario.as<double>());
 }
 
 }  // namespace olfgpu

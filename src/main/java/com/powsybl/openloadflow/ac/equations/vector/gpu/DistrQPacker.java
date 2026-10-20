@@ -44,7 +44,7 @@ public final class DistrQPacker {
      *  per-(entry, scenario) limitType, replicating the CPU's zero-then-sum-in-member-order
      *  arithmetic bit-for-bit. distrQRowMember/distrQInjectionMember are −1 for non-group contributions. */
     private record MemberTables(java.util.Map<Integer, Integer> memberIdxByBusNum,
-                                List<Double> key, List<Integer> rlEntry,
+                                List<Double> key, List<Integer> reactiveLimitEntry,
                                 List<Integer> groupStart, List<Integer> groupCount,
                                 List<Integer> row, List<Byte> hasRow, List<Double> targetQ,
                                 List<Integer> busNum,
@@ -60,9 +60,9 @@ public final class DistrQPacker {
         MemberTables mt = new MemberTables(new java.util.HashMap<>(), new ArrayList<>(), new ArrayList<>(),
                 new ArrayList<>(), new ArrayList<>(), new ArrayList<>(), new ArrayList<>(), new ArrayList<>(),
                 new ArrayList<>(), new ArrayList<>());
-        java.util.Map<Integer, Integer> rlEntryByBusNum = new java.util.HashMap<>();
+        java.util.Map<Integer, Integer> reactiveLimitEntryByBusNum = new java.util.HashMap<>();
         for (int i = 0; i < rl.busNum().length; i++) {
-            rlEntryByBusNum.put(rl.busNum()[i], i);
+            reactiveLimitEntryByBusNum.put(rl.busNum()[i], i);
         }
         List<Integer> qrGroupList = new ArrayList<>();
         for (LfBus pilot : network.getBuses()) {
@@ -96,7 +96,7 @@ public final class DistrQPacker {
                 LfBus m = controllers.get(i);
                 mt.memberIdxByBusNum().put(m.getNum(), mt.key().size());
                 mt.key().add(rawKeys[i]);
-                mt.rlEntry().add(rlEntryByBusNum.getOrDefault(m.getNum(), -1));
+                mt.reactiveLimitEntry().add(reactiveLimitEntryByBusNum.getOrDefault(m.getNum(), -1));
                 // The member's DISTR_Q row, NOT simply its V column: under the coupler-tree relocation a
                 // relocated child's DISTR_Q lives on its parent coupler's DUMMY_Q (the same move
                 // buildDistrQContributions makes through distrQRow's tree overload), and its own V row
@@ -167,7 +167,7 @@ public final class DistrQPacker {
         }
         tgtPtr[tgtPtr.length - 1] = tgtPeer.size();
         return new Pack(new DistrQTerms(distrQElement, distrQSide, distrQWeight, distrQRow, distrQKind, distrQRowMember, distrQInjectionMember),
-                new DistrQMembers(GpuAcArrays.toDoubleArray(mt.key()), GpuAcArrays.toIntArray(mt.rlEntry()),
+                new DistrQMembers(GpuAcArrays.toDoubleArray(mt.key()), GpuAcArrays.toIntArray(mt.reactiveLimitEntry()),
                 GpuAcArrays.toIntArray(mt.groupStart()), GpuAcArrays.toIntArray(mt.groupCount()),
                 GpuAcArrays.toIntArray(mt.row()), hasRow, GpuAcArrays.toIntArray(qrGroupList),
                 GpuAcArrays.toDoubleArray(mt.targetQ()), GpuAcArrays.toIntArray(mt.busNum()),

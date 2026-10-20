@@ -132,9 +132,9 @@ final class CouplerSeed {
                         && ZeroImpedanceClusters.holdsClusterVoltage(contingencies.get(ci).contingencyId(), child,
                                 contingencies.get(ci).outagedZeroImpedanceBranches(), rs.zeroImpedanceElementByNumAll, gpuData.zeroImpedanceBranch().indices(),
                                 frozenForCtg);
-                int childRl = RelocatedRows.rlEntryOf(gpuData, child);
+                int childReactiveLimitEntry = RelocatedRows.reactiveLimitEntryOf(gpuData, child);
                 boolean childPinned = applied
-                        && gpuData.switchedPvToPqInBase(childRl);
+                        && gpuData.switchedPvToPqInBase(childReactiveLimitEntry);
                 if (applied && childPinned) {
                     // The child is PQ in the base (reactive limit): its balance comes home at
                     // the pinned value, no identity (the qualification refused such a child as

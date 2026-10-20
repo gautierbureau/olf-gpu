@@ -1,7 +1,7 @@
 // Copyright (c) 2026, RTE (http://www.rte-france.com)
 // SPDX-License-Identifier: MPL-2.0
 //
-// A reactive-limit entry's limit type, per scenario (limitType, the low 3 bits of rlState, rlBaseQLimitType):
+// A reactive-limit entry's limit type, per scenario (limitType, the low 3 bits of reactiveLimitsState, reactiveLimitBaseQLimitType):
 // OLF's LfBus.QLimitType (ordinal + 1), NONE when the entry is not pinned, and FROZEN, the device's mark for a
 // voltage control OLF's GeneratorVoltageControlManager froze or whose generators are all lost. Mirrors
 // com.powsybl.openloadflow.ac.solver.gpu.codes.GpuQLimitType (GpuCodesMirrorTest checks they agree).

@@ -37,12 +37,12 @@ constexpr double SVC_DV_EPS = 1e-4;                          // OLF DV_EPS (0.1 
 constexpr double SVC_DK_DIFF_MAX_EPS = 1e-3;                 // OLF DK_DIFF_MAX_EPS (1 MVar)
 
 struct SvcTables {
-    int nCtl, nZones, nrl;
-    const int* ctldVRow; const int* busVRow; const int* rlIdx;
+    int nCtl, nZones, nReactiveLimitEntries;
+    const int* ctldVRow; const int* busVRow; const int* reactiveLimitEntry;
     const double* baseTargetV; const double* minQ; const double* maxQ; const double* loadQ;
     const int* qPtr; const int* qKind; const int* qElem; const int* qBRow;
     const int* zonePtr; const int* zoneCtl; const int* zonePilotRow; const double* zoneTargetV;
-    double* targetV; double* k0; double* jk; double* jvpp; double* rlVt;
+    double* targetV; double* k0; double* jk; double* jvpp; double* secondaryVoltageControlReactiveLimitTargetV;
     char* enabled; char* need; char* reject;
     double minPlausibleV, maxPlausibleV;
 };
@@ -55,25 +55,25 @@ __device__ inline double svcQToK(double q, double minQ, double maxQ) {
 // reactive limit gives every limited one back its voltage control), then the per-zone trigger on the
 // pilot deadband and the K spread. The re-enable runs whether or not the zone then adjusts — OLF mutates
 // the network before it decides.
-__global__ void svcTriggerBatch(SvcTables T, int nScenarios, int n, const char* rlActive,
+__global__ void svcTriggerBatch(SvcTables T, int nScenarios, int n, const char* outerLoopCheckActive,
                                 const double* qBuf, const double* x, char* limitType, const char* savedMode,
                                 int* mode, double* target) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= T.nZones * nScenarios) return;
     int z = tid % T.nZones;
     int s = tid / T.nZones;
-    if (!rlActive[s]) return;
+    if (!outerLoopCheckActive[s]) return;
     int lo = T.zonePtr[z];
     int hi = T.zonePtr[z + 1];
     // ---- tryToReEnableHelpfulControllerBuses ----
     int nPinned = 0;
     for (int k = lo; k < hi; k++) {
-        if (limitType[(size_t) s * T.nrl + T.rlIdx[T.zoneCtl[k]]] != GpuQLimitType::NONE) nPinned++;
+        if (limitType[(size_t) s * T.nReactiveLimitEntries + T.reactiveLimitEntry[T.zoneCtl[k]]] != GpuQLimitType::NONE) nPinned++;
     }
     if (nPinned > 0 && nPinned < hi - lo) {
         for (int k = lo; k < hi; k++) {
             int c = T.zoneCtl[k];
-            size_t st = (size_t) s * T.nrl + T.rlIdx[c];
+            size_t st = (size_t) s * T.nReactiveLimitEntries + T.reactiveLimitEntry[c];
             if (limitType[st] == GpuQLimitType::NONE) continue;
             size_t idx = (size_t) s * n + T.busVRow[c];
             char sm = savedMode[st];
@@ -97,7 +97,7 @@ __global__ void svcTriggerBatch(SvcTables T, int nScenarios, int n, const char* 
         kMax = fmax(kMax, kk);
         allAbove &= kk > 1.0;
         allBelow &= kk < -1.0;
-        T.enabled[(size_t) s * T.nCtl + c] = limitType[(size_t) s * T.nrl + T.rlIdx[c]] == GpuQLimitType::NONE ? 1 : 0;
+        T.enabled[(size_t) s * T.nCtl + c] = limitType[(size_t) s * T.nReactiveLimitEntries + T.reactiveLimitEntry[c]] == GpuQLimitType::NONE ? 1 : 0;
     }
     // OLF filters the zone OUT of the check when it has no controller whose voltage control is enabled
     // (findAnyControlledBusWithAtLeastOneControllerBusWithVoltageControlEnabled): every controller at a
@@ -177,7 +177,7 @@ __global__ void svcGatherBatch(SvcTables T, int nScenarios, int n, int i, int nE
 // controller (at a reactive limit) is padded out with an identity row and a zero right-hand side,
 // which leaves the enabled block exactly the system OLF solves and gives the disabled one dv = 0.
 // Column-major, because that is what cuBLAS reads.
-__global__ void svcAssembleBatch(SvcTables T, int nScenarios, int n, const char* rlActive,
+__global__ void svcAssembleBatch(SvcTables T, int nScenarios, int n, const char* outerLoopCheckActive,
                                  const int* ctlZone, const double* x, double* mat, double* rhs) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= T.nCtl * nScenarios) return;
@@ -186,7 +186,7 @@ __global__ void svcAssembleBatch(SvcTables T, int nScenarios, int n, const char*
     int nC = T.nCtl;
     double* m = mat + (size_t) s * nC * nC;
     double* r = rhs + (size_t) s * nC;
-    bool live = rlActive[s] && T.need[s];
+    bool live = outerLoopCheckActive[s] && T.need[s];
     if (!live || !T.enabled[(size_t) s * nC + i]) {
         for (int j = 0; j < nC; j++) {
             m[(size_t) j * nC + i] = (i == j) ? 1.0 : 0.0;   // identity row: this controller does not move
@@ -250,10 +250,10 @@ __global__ void svcPointersBatch(int nScenarios, int nC, double* mat, double* rh
 // After the batched solve: OLF's plausibility test on the new targets, then commit. A singular zone
 // system (cuBLAS info != 0) or an implausible target sends the scenario to the CPU, which is where
 // OLF's own MatrixException / FAILED verdict would land it.
-__global__ void svcCommitBatch(SvcTables T, int nScenarios, const char* rlActive,
+__global__ void svcCommitBatch(SvcTables T, int nScenarios, const char* outerLoopCheckActive,
                                const int* info, const double* rhs, char* switched) {
     int s = blockIdx.x * blockDim.x + threadIdx.x;
-    if (s >= nScenarios || !rlActive[s] || !T.need[s]) return;
+    if (s >= nScenarios || !outerLoopCheckActive[s] || !T.need[s]) return;
     int nC = T.nCtl;
     if (info[s] != 0) {
         T.reject[s] = 1;
@@ -281,25 +281,25 @@ __global__ void svcCommitBatch(SvcTables T, int nScenarios, const char* rlActive
 
 // Give the moved zone targets to the system: an UNPINNED controller's controlled-bus V identity takes the
 // new target; a PINNED one keeps its Q pin but its switch-back must compare against the moved target.
-__global__ void svcApplyBatch(SvcTables T, int nScenarios, int n, const char* rlActive,
+__global__ void svcApplyBatch(SvcTables T, int nScenarios, int n, const char* outerLoopCheckActive,
                               const char* limitType, double* target) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= T.nCtl * nScenarios) return;
     int c = tid % T.nCtl;
     int s = tid / T.nCtl;
-    if (!rlActive[s]) return;
+    if (!outerLoopCheckActive[s]) return;
     double tv = T.targetV[(size_t) s * T.nCtl + c];
     if (tv == T.baseTargetV[c]) return;
-    T.rlVt[(size_t) s * T.nrl + T.rlIdx[c]] = tv;
-    if (limitType[(size_t) s * T.nrl + T.rlIdx[c]] == GpuQLimitType::NONE) {
+    T.secondaryVoltageControlReactiveLimitTargetV[(size_t) s * T.nReactiveLimitEntries + T.reactiveLimitEntry[c]] = tv;
+    if (limitType[(size_t) s * T.nReactiveLimitEntries + T.reactiveLimitEntry[c]] == GpuQLimitType::NONE) {
         target[(size_t) s * n + T.ctldVRow[c]] = tv;
     }
 }
 
 static SvcTables svcTables(BatchSolverContext* ctx) {
     SvcTables T;
-    T.nCtl = ctx->nSvc; T.nZones = ctx->nSvcZones; T.nrl = ctx->nrl;
-    T.ctldVRow = ctx->dSvcCtldVRow.as<int>(); T.busVRow = ctx->dSvcBusVRow.as<int>(); T.rlIdx = ctx->dSvcRlIdx.as<int>();
+    T.nCtl = ctx->nSvc; T.nZones = ctx->nSvcZones; T.nReactiveLimitEntries = ctx->nReactiveLimitEntries;
+    T.ctldVRow = ctx->dSvcCtldVRow.as<int>(); T.busVRow = ctx->dSvcBusVRow.as<int>(); T.reactiveLimitEntry = ctx->dSecondaryVoltageControlReactiveLimitEntry.as<int>();
     T.baseTargetV = ctx->dSvcBaseTargetV.as<double>(); T.minQ = ctx->dSvcMinQ.as<double>();
     T.maxQ = ctx->dSvcMaxQ.as<double>(); T.loadQ = ctx->dSvcLoadQ.as<double>();
     T.qPtr = ctx->dSvcQPtr.as<int>(); T.qKind = ctx->dSvcQKind.as<int>();
@@ -307,7 +307,7 @@ static SvcTables svcTables(BatchSolverContext* ctx) {
     T.zonePtr = ctx->dSvcZonePtr.as<int>(); T.zoneCtl = ctx->dSvcZoneCtl.as<int>();
     T.zonePilotRow = ctx->dSvcZonePilotRow.as<int>(); T.zoneTargetV = ctx->dSvcZoneTargetV.as<double>();
     T.targetV = ctx->dSvcTargetV.as<double>(); T.k0 = ctx->dSvcK0.as<double>();
-    T.jk = ctx->dSvcJk.as<double>(); T.jvpp = ctx->dSvcJvpp.as<double>(); T.rlVt = ctx->dSvcRlVt.as<double>();
+    T.jk = ctx->dSvcJk.as<double>(); T.jvpp = ctx->dSvcJvpp.as<double>(); T.secondaryVoltageControlReactiveLimitTargetV = ctx->dSecondaryVoltageControlReactiveLimitTargetV.as<double>();
     T.enabled = ctx->dSvcEnabled.as<char>(); T.need = ctx->dSvcNeed.as<char>(); T.reject = ctx->dSvcReject.as<char>();
     T.minPlausibleV = ctx->svcMinPlausibleV; T.maxPlausibleV = ctx->svcMaxPlausibleV;
     return T;
@@ -343,8 +343,8 @@ void svcStep(BatchSolverContext* ctx, DriverPass& drv) {
     }
     CUDA_CHECK(cudaMemsetAsync(ctx->dSvcNeed.p, 0, nS, ctx->stream));
     svcTriggerBatch<<<grid(ctx->nSvcZones * nS), BLOCK, 0, ctx->stream>>>(svcTables(ctx), nS, n,
-            ctx->dRlActive.as<char>(), ctx->dQbuf.as<double>(), ctx->dX.as<double>(),
-            ctx->dRlLimitType.as<char>(), ctx->dRlSavedMode.as<char>(),
+            ctx->dOuterLoopCheckActive.as<char>(), ctx->dQbuf.as<double>(), ctx->dX.as<double>(),
+            ctx->dReactiveLimitQLimitType.as<char>(), ctx->dReactiveLimitSavedRowMode.as<char>(),
             ctx->dMode.as<int>(), ctx->dTarget.as<double>());
     std::vector<char> need(nS);
     CUDA_CHECK(cudaMemcpyAsync(need.data(), ctx->dSvcNeed.p, nS, cudaMemcpyDeviceToHost, ctx->stream));
@@ -377,7 +377,7 @@ void svcStep(BatchSolverContext* ctx, DriverPass& drv) {
     }
     CUBLAS_CHECK(cublasSetStream(ctx->svcBlas, ctx->stream));
     svcAssembleBatch<<<grid(nC * nS), BLOCK, 0, ctx->stream>>>(svcTables(ctx), nS, n,
-            ctx->dRlActive.as<char>(), ctx->dSvcCtlZone.as<int>(), ctx->dX.as<double>(),
+            ctx->dOuterLoopCheckActive.as<char>(), ctx->dSvcCtlZone.as<int>(), ctx->dX.as<double>(),
             ctx->dSvcMat.as<double>(), ctx->dSvcRhs.as<double>());
     svcPointersBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(nS, nC,
             ctx->dSvcMat.as<double>(), ctx->dSvcRhs.as<double>(),
@@ -394,10 +394,10 @@ void svcStep(BatchSolverContext* ctx, DriverPass& drv) {
         throw std::runtime_error("cublasDgetrsBatched rejected its arguments");
     }
     svcCommitBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(svcTables(ctx), nS,
-            ctx->dRlActive.as<char>(), ctx->dSvcInfo.as<int>(), ctx->dSvcRhs.as<double>(),
-            ctx->dRlSwitched.as<char>());
+            ctx->dOuterLoopCheckActive.as<char>(), ctx->dSvcInfo.as<int>(), ctx->dSvcRhs.as<double>(),
+            ctx->dOuterLoopUnstable.as<char>());
     svcApplyBatch<<<grid(nC * nS), BLOCK, 0, ctx->stream>>>(svcTables(ctx), nS, n,
-            ctx->dRlActive.as<char>(), ctx->dRlLimitType.as<char>(), ctx->dTarget.as<double>());
+            ctx->dOuterLoopCheckActive.as<char>(), ctx->dReactiveLimitQLimitType.as<char>(), ctx->dTarget.as<double>());
     CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
     std::vector<char> rej(nS);
     CUDA_CHECK(cudaMemcpy(rej.data(), ctx->dSvcReject.p, nS, cudaMemcpyDeviceToHost));

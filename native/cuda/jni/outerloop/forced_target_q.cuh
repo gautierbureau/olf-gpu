@@ -20,7 +20,7 @@ __global__ void forcedTargetQBatch(int nfq, int nS, int n, int nds, int ngen, in
                                    const double* fqIn, const double* fqPts, const double* fqPre,
                                    const double* genCum, const char* genCumValid, const double* dgAnchor,
                                    const double* dgStart, const int* dsPhiRow, const int* dsRowOv, int nLost, const int* lost, const char* dsIslanded,
-                                   const int* mode, const char* rlActive, double* target, double* applied);
+                                   const int* mode, const char* outerLoopCheckActive, double* target, double* applied);
 
 // Clamp the reactive limits of the forced-target-Q generators at their current active power.
 void launchForcedTargetQLimits(BatchSolverContext* ctx, int nS, int n);

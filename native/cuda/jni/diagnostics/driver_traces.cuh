@@ -23,19 +23,19 @@ __global__ void stateDumpBatch(int n, const double* F, const int* mode, const do
 void traceBatchPass(BatchSolverContext* ctx, DriverPass& drv, int nLoops, bool solvePass);
 
 // OLF_GPU_RL_AUDIT / OLF_GPU_SW_TRACE: every reactive-limit switch of the pass, per scenario.
-void traceRlSwitches(BatchSolverContext* ctx, DriverPass& drv, std::vector<std::vector<std::string>>& auditLog, bool rlAuditOn, int swTraceSlot);
+void traceReactiveLimitsSwitches(BatchSolverContext* ctx, DriverPass& drv, std::vector<std::vector<std::string>>& auditLog, bool reactiveLimitsAuditOn, int reactiveLimitsTraceScenario);
 
 // OLF_GPU_BATCH_TRACE: the reactive-limit entries' state after the check.
-void traceRlState(BatchSolverContext* ctx, DriverPass& drv, bool inDsPhase, double reactiveLimitTol, std::vector<char>& rlSwitched);
+void traceReactiveLimitsState(BatchSolverContext* ctx, DriverPass& drv, bool inDsPhase, double reactiveLimitTol, std::vector<char>& outerLoopUnstable);
 
 // OLF_GPU_LOOP_TRACE: one scenario's loop sequence (which slot found it unstable).
-void traceLoopSlot(BatchSolverContext* ctx, DriverPass& drv, int loopTraceSlot, int nChanged, std::vector<char>& rlSwitched, bool solvePass);
+void traceLoopSlot(BatchSolverContext* ctx, DriverPass& drv, int loopTraceSlot, int nChanged, std::vector<char>& outerLoopUnstable, bool solvePass);
 
 // OLF_GPU_SW_LOG: the on-device reactive-limit decision log of one scenario.
 void traceSwitchLog(BatchSolverContext* ctx, DriverPass& drv);
 
 // OLF_GPU_RL_AUDIT: the end-of-solve audit of the reactive-limit decisions.
-void traceRlAudit(BatchSolverContext* ctx, DriverPass& drv, std::vector<std::vector<std::string>>& auditLog);
+void traceReactiveLimitsAudit(BatchSolverContext* ctx, DriverPass& drv, std::vector<std::vector<std::string>>& auditLog);
 
 // OLF_GPU_PHASE_TIME: the per-scenario solve-pass histogram.
 void tracePhaseTime(BatchSolverContext* ctx, DriverPass& drv);

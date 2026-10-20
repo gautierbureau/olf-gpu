@@ -23,7 +23,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
  */
 class GpuNewtonRaphsonDriverSettingsTest {
 
-    private static double rlBand(com.powsybl.openloadflow.ac.solver.NewtonRaphsonStoppingCriteriaType type) {
+    private static double expectedMaxReactivePowerMismatch(com.powsybl.openloadflow.ac.solver.NewtonRaphsonStoppingCriteriaType type) {
         Network network = EurostagTutorialExample1Factory.create();
         LoadFlowParameters lfp = new LoadFlowParameters().setUseReactiveLimits(true);
         OpenLoadFlowParameters olfp = OpenLoadFlowParameters.create(lfp)
@@ -39,11 +39,11 @@ class GpuNewtonRaphsonDriverSettingsTest {
      *  per-equation criteria); the driver must switch at that band, not at it divided by SB again. */
     @Test
     void perEquationTypeCriteriaBandIsOlfsPerUnitBand() {
-        assertEquals(0.5 / 100, rlBand(com.powsybl.openloadflow.ac.solver.NewtonRaphsonStoppingCriteriaType.PER_EQUATION_TYPE_CRITERIA), 1e-15);
+        assertEquals(0.5 / 100, expectedMaxReactivePowerMismatch(com.powsybl.openloadflow.ac.solver.NewtonRaphsonStoppingCriteriaType.PER_EQUATION_TYPE_CRITERIA), 1e-15);
     }
 
     @Test
     void uniformCriteriaBandIsConvEpsPerEq() {
-        assertEquals(1e-6, rlBand(com.powsybl.openloadflow.ac.solver.NewtonRaphsonStoppingCriteriaType.UNIFORM_CRITERIA), 1e-18);
+        assertEquals(1e-6, expectedMaxReactivePowerMismatch(com.powsybl.openloadflow.ac.solver.NewtonRaphsonStoppingCriteriaType.UNIFORM_CRITERIA), 1e-18);
     }
 }

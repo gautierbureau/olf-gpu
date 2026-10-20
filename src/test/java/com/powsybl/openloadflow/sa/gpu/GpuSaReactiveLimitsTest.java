@@ -67,7 +67,7 @@ class GpuSaReactiveLimitsTest extends AbstractGpuSaTest {
     }
 
     /** Reactive capability CURVE limits at runtime P: B2's curve makes maxQ fall as DS RAISES its
-     *  targetP post-outage — the RL pin must use the limit at the MOVED P (rlCurveLimitsBatch), not
+     *  targetP post-outage — the RL pin must use the limit at the MOVED P (reactiveCapabilityCurveLimitsBatch), not
      *  the base snapshot; a sloped curve segment spans the DS range so the two differ materially. */
     @Test
     void deviceCurveReactiveLimitsAtRuntimePMatchesCpu() {
@@ -443,8 +443,8 @@ class GpuSaReactiveLimitsTest extends AbstractGpuSaTest {
      *  was a whole-run CPU gate on any curve network): the curve stops at P = 41 MW just above
      *  B2-G's base 40 MW, so the post-outage DS raise pushes P OUTSIDE the range and the limit
      *  must continue on the BOUNDARY TWO-POINT SLOPE (ReactiveCapabilityCurveUtil
-     *  .extrapolateReactiveLimitsSlope) instead of clamping — rlCurveEval's extrapolate branch,
-     *  fed live by rlCurveLimitsBatch at the DS-moved targets. GPU SA == CPU SA at 1e-11 (the
+     *  .extrapolateReactiveLimitsSlope) instead of clamping — evaluateReactiveCapabilityCurve's extrapolate branch,
+     *  fed live by reactiveCapabilityCurveLimitsBatch at the DS-moved targets. GPU SA == CPU SA at 1e-11 (the
      *  curve channel's established share-reconstruction tolerance). */
     @Test
     void deviceCurveExtrapolationMatchesCpu() {

@@ -99,10 +99,10 @@ struct BatchSolverContext {
     DeviceBuf dDisabled, dActive;                            // per-scenario masks
     // Reactive limits (full-loadflow PV→PQ outer loop): per local-PV controller bus, its (rowMap-mapped)
     // BUS_V row + reactive limits + load Q. dQbuf holds Σ branch q at every row (a fill into a zeroed
-    // buffer); dRlActive marks which scenarios to RL-check this pass; dRlSwitched flags scenarios that switched.
-    int nrl = 0;
-    DeviceBuf dRlVrow, dRlMinQ, dRlMaxQ, dRlLoadQ, dRlVtarget;   // per controller (nrl)
-    DeviceBuf dRlQrow;                                       // per controller: the row its reactive BALANCE and its
+    // buffer); dOuterLoopCheckActive marks which scenarios to RL-check this pass; dOuterLoopUnstable flags scenarios that switched.
+    int nReactiveLimitEntries = 0;
+    DeviceBuf dReactiveLimitVoltageRow, dReactiveLimitMinQ, dReactiveLimitMaxQ, dReactiveLimitLoadQ, dReactiveLimitTargetV;   // per controller (nReactiveLimitEntries)
+    DeviceBuf dReactiveLimitReactivePowerRow;                                       // per controller: the row its reactive BALANCE and its
                                                              // pin live on — its own V row, or, when the coupler-tree
                                                              // relocation moved its power equations onto the parent
                                                              // coupler's dummy columns, that coupler's DUMMY_Q row
@@ -113,25 +113,25 @@ struct BatchSolverContext {
     DeviceBuf dPsPilotEntry;                                 // nQr ints
     DeviceBuf dPsSkip;                                       // nQr * nScenarios chars
     bool hasPilotSelf = false;
-    DeviceBuf dRlLoadQDyn;                                       // per (scenario, controller) — shed load Q
+    DeviceBuf dReactiveLimitLoadQPerScenario;                                       // per (scenario, controller) — shed load Q
     int nDistrQInactiveMembers = 0;                                            // {slot, distrQMember} pairs: a controller
     DeviceBuf dDistrQInactiveMembers;                                          // that stops controlling in ONE scenario
     bool hasDistrQSubgroups = false;                                       // tasks #71: per (scenario, dq member) subgroup
     DeviceBuf dDistrQSubgroup;                                            // labels (char, dense nS x nDistrQMembers) and the
     DeviceBuf dQrMemberStart;                                    // qr group -> first dq member map
-    // Reactive capability CURVES at runtime P (setBatchRlCurves): per participating curve gen —
-    // cvIdx {rlIdx, pRow, ptsOff, npts, dsGenSlot}, cvIn {basePpu, share, baseRowTargetP, baseEvalMinPu, baseEvalMaxPu},
-    // cvPts {p_MW, minQ_MW, maxQ_MW} sorted by p; dRlMinQDyn/dRlMaxQDyn = nS*nrl evaluated limits.
+    // Reactive capability CURVES at runtime P (setBatchReactiveCapabilityCurves): per participating curve gen —
+    // cvIdx {reactiveLimitEntry, pRow, ptsOff, npts, dsGenSlot}, cvIn {basePpu, share, baseRowTargetP, baseEvalMinPu, baseEvalMaxPu},
+    // cvPts {p_MW, minQ_MW, maxQ_MW} sorted by p; dReactiveLimitMinQPerScenario/dReactiveLimitMaxQPerScenario = nS*nReactiveLimitEntries evaluated limits.
     int ncv = 0;
     int cvExtrapolate = 0;                                 // OLF extrapolateReactiveLimits for curve gens
-    DeviceBuf dCvIdx, dCvIn, dCvPts, dRlMinQDyn, dRlMaxQDyn;
+    DeviceBuf dCvIdx, dCvIn, dCvPts, dReactiveLimitMinQPerScenario, dReactiveLimitMaxQPerScenario;
     DeviceBuf dCvHv;                                         // per curve entry {hvdc, side}, see CvHvdc
     bool cvHasHvdc = false;
     DeviceBuf dCvPtr, dCvList;                             // the curves of each reactive-limit entry, CSR
-                                                           // (cvPtr[nrl + 1] into cvList[ncv], pack order kept)
+                                                           // (cvPtr[nReactiveLimitEntries + 1] into cvList[ncv], pack order kept)
     // forceTargetQInReactiveLimits (GpuBatchForcedTargetQ): generators whose IIDM target Q OLF clamps into their
     // curve limits at their CURRENT target P - on a bus whose Q balance carries it (qRow), or in a voltage-controlled
-    // bus's reactive limits (rlIdx). fqIdx stride 7 {qRow, dsGenSlot, ptsOff, npts, dsBusIdx, baseQRowMode, rlIdx}; fqIn stride 5 {basePpu, rawTargetQPu, baseClampedPu, share,
+    // bus's reactive limits (reactiveLimitEntry). fqIdx stride 7 {qRow, dsGenSlot, ptsOff, npts, dsBusIdx, baseQRowMode, reactiveLimitEntry}; fqIn stride 5 {basePpu, rawTargetQPu, baseClampedPu, share,
     // baseRowTargetP}; dFqApplied [nS * nfq] = the clamped value the scenario's Q target carries now; dFqPre
     // [nS * nfq] = each generator's loss pre-distribution move (pu), absent when no scenario pre-distributes.
     int nfq = 0;
@@ -158,20 +158,20 @@ struct BatchSolverContext {
     // (rho/a1 identities) and islanded buses — the padded device n over-counts by those rows, a ~%
     // threshold skew that lands stops up to the criterion apart. Empty = use n for every scenario.
     std::vector<int> hNActive;
-    DeviceBuf dRlMonitored;                                // per controller: 1 = MONITORING_VOLTAGE SVC standing by
+    DeviceBuf dReactiveLimitFlags;                                // per controller: 1 = MONITORING_VOLTAGE SVC standing by
     int allPvPinnable = 0;                                 // every non-monitored RL entry has finite limits — the
                                                            // ONLY networks where OLF's global "strongest stays PV"
                                                            // rule (remainingPvBusCount 0) is reachable
     DeviceBuf dRowSlope;                                   // per row: SLOPE-SVC slope (mode-2 V rows), 0 elsewhere
-    int nRlRemote = 0;                                     // remote-member RL entries present (plan-B1/B3)
-    int nRlPilotSelf = 0;                                  // rlRemote == 2 entries (a pilot that is its own controller)
-    DeviceBuf dRlMixedBad;                                 // nS chars: rlPilotSelfMixedGate flags
-    DeviceBuf dRlRemote;                                   // per-entry remote kind (1 = remote group member)
-    DeviceBuf dRlBaseLimitType;                            // OLF's base pin kind per entry (0..4); see hasRlBaseLt
-    int hasRlBaseLt = 0;
-    DeviceBuf dRlCmpVrow;                                  // per-entry compare row (PILOT v col for remote members)
-    DeviceBuf dRlSvcBminDyn, dRlSvcBmaxDyn;                // per (scenario, entry) coefs when a lost SVC takes its share
-    DeviceBuf dRlSvcBmin, dRlSvcBmax, dRlV2Base;           // per-entry SVC quadratic limit coefs + packed base v^2
+    int nReactiveLimitRemoteEntries = 0;                                     // remote-member RL entries present (plan-B1/B3)
+    int nReactiveLimitPilotSelfEntries = 0;                                  // reactiveLimitVoltageControlRole == 2 entries (a pilot that is its own controller)
+    DeviceBuf dPilotSelfMixedPvPqRejected;                                 // nS chars: pilotSelfMixedPvPqGate flags
+    DeviceBuf dReactiveLimitVoltageControlRole;                                   // per-entry remote kind (1 = remote group member)
+    DeviceBuf dReactiveLimitBaseQLimitType;                            // OLF's base pin kind per entry (0..4); see hasReactiveLimitBaseQLimitType
+    int hasReactiveLimitBaseQLimitType = 0;
+    DeviceBuf dReactiveLimitComparedVoltageRow;                                  // per-entry compare row (PILOT v col for remote members)
+    DeviceBuf dReactiveLimitSvcMinBPerScenario, dReactiveLimitSvcMaxBPerScenario;                // per (scenario, entry) coefs when a lost SVC takes its share
+    DeviceBuf dReactiveLimitSvcMinB, dReactiveLimitSvcMaxB, dReactiveLimitBaseVSquared;           // per-entry SVC quadratic limit coefs + packed base v^2
                                                            // (limit(v) = static + b*(v^2 - v2Base)); zeroed default
     int nDistrQDynamicKeys = 0;                                        // dynamic reactive keys (plan-B3): an RL pin zeroes the
     DeviceBuf dDistrQRowMember;                                  // pinned member's key and renormalizes the DISTR_Q
@@ -199,32 +199,32 @@ struct BatchSolverContext {
                                                            // those get the all-pinned pilot-vEq flip)
     DeviceBuf dQrVeqOff;                                   // per (scenario, qr group): 1 = the pilot's V equation was
     DeviceBuf dQrSavedVT;                                  // flipped OFF by updatePilotVeqBatch (+ the saved V target)
-    DeviceBuf dQrPilotRlEntry;                             // per qr group: the pilot's own LOCAL reactive-limit entry
+    DeviceBuf dReactiveRelocationPilotReactiveLimitEntry;                             // per qr group: the pilot's own LOCAL reactive-limit entry
                                                            // (its row + the group's V target), -1 = none
-    int nRmq = 0;                                          // remote-member OWN-q contributions (plan-B3): a twin
-    DeviceBuf dRmqRow;                                     // of the DISTR_Q assembly accumulating each member's own
-    DeviceBuf dRmqElem;                                    // bus q into dQbuf at its own row (that slot is free —
-    DeviceBuf dRmqSide;                                    // the main qBuf fill suppresses member rows)
-    DeviceBuf dRmqKind;
-    DeviceBuf dRmqWeight;
-    DeviceBuf dRlSavedTarget;                              // per (controller, scenario): the row target saved at a
+    int nRemoteMemberReactiveTerms = 0;                                          // remote-member OWN-q contributions (plan-B3): a twin
+    DeviceBuf dRemoteMemberReactiveTermRow;                                     // of the DISTR_Q assembly accumulating each member's own
+    DeviceBuf dRemoteMemberReactiveTermElement;                                    // bus q into dQbuf at its own row (that slot is free —
+    DeviceBuf dRemoteMemberReactiveTermSide;                                    // the main qBuf fill suppresses member rows)
+    DeviceBuf dRemoteMemberReactiveTermKind;
+    DeviceBuf dRemoteMemberReactiveTermWeight;
+    DeviceBuf dReactiveLimitSavedTarget;                              // per (controller, scenario): the row target saved at a
                                                            // PV->PQ pin, restored on switch-back for mode-2 rows
-    DeviceBuf dQbuf, dRlActive, dRlSwitched;               // dQbuf nS*n, dRlActive/dRlSwitched nS
-    DeviceBuf dRlLimitType, dRlSwitchCount;               // per (controller, scenario): 0 PV / 1 minQ / 2 maxQ; PV→PQ count
+    DeviceBuf dQbuf, dOuterLoopCheckActive, dOuterLoopUnstable;               // dQbuf nS*n, dOuterLoopCheckActive/dOuterLoopUnstable nS
+    DeviceBuf dReactiveLimitQLimitType, dReactiveLimitPvPqSwitchCount;               // per (controller, scenario): 0 PV / 1 minQ / 2 maxQ; PV→PQ count
     // OLF's GLOBAL forced-PV election ("all PV buses should switch — the strongest stays PV"): what each
     // entry did THIS pass (1 = pinned PV→PQ, 2 = switched back, 3 = limit re-freeze), the row mode a pin
     // replaced (to undo the elected one), and the static election keys (controlled bus nominal V, the
     // bus's P row for its LIVE target P, the static target P when it has no row, the id rank).
-    DeviceBuf dRlPassSwitched, dRlSavedMode;
-    DeviceBuf dSwLog, dSwLogCnt;                           // OLF_GPU_SW_LOG: on-DEVICE decision log for one slot
-    DeviceBuf dRlElectNomV, dRlElectPRow, dRlElectStaticP, dRlElectIdRank;
-    int hasRlElection = 0;
+    DeviceBuf dReactiveLimitCheckDecision, dReactiveLimitSavedRowMode;
+    DeviceBuf dReactiveLimitsDecisionLog, dReactiveLimitsDecisionLogCount;                           // OLF_GPU_SW_LOG: on-DEVICE decision log for one slot
+    DeviceBuf dReactiveLimitNominalV, dReactiveLimitActivePowerRow, dReactiveLimitTargetP, dReactiveLimitIdRank;
+    int hasReactiveLimitStrongestPvKeys = 0;
     // voltageRemoteControlRobustMode (OLF default TRUE): a REMOTE voltage controller whose OWN bus
     // voltage leaves the realistic band is reseeded at 1 pu, and — when its Q is still inside its
     // limits — frozen at its initial generation target Q with a MIN/MAX_REALISTIC_V limit type.
-    DeviceBuf dRlInitTgtQ;                                 // per entry: Σ generator targetQ (pu)
-    int rlRobust = 0;
-    double rlVLoRobust = 0.0, rlVHiRobust = 0.0;           // minRealisticV·1.02 and maxRealisticV/1.02
+    DeviceBuf dReactiveLimitInitialTargetQ;                                 // per entry: Σ generator targetQ (pu)
+    int reactiveLimitsRobustMode = 0;
+    double reactiveLimitsRobustMinRealisticVoltage = 0.0, reactiveLimitsRobustMaxRealisticVoltage = 0.0;           // minRealisticV·1.02 and maxRealisticV/1.02
     // AcloadFlowEngine's realistic-voltage check, run on the INTERMEDIATE states of the driver's
     // sweep: per row, 1 = a non-fictitious bus's BUS_V at or above minNominalVoltageRealisticVoltageCheck.
     DeviceBuf dRealisticRow, dRealisticGate, dRealisticBad;
@@ -237,7 +237,7 @@ struct BatchSolverContext {
     int realisticFixingLoop = GpuRealisticVoltageFixingLoop::NONE;
     // Distributed slack: the (mapped) slack BUS_PHI row + its scheduled targetP give the per-scenario
     // mismatch (read from dQbuf); dDsPhiRow/dDsFactor are the participating buses' P-target rows + normalized
-    // participation factors. Reuses dRlActive/dRlSwitched (same outer schedule as reactive limits).
+    // participation factors. Reuses dOuterLoopCheckActive/dOuterLoopUnstable (same outer schedule as reactive limits).
     int nds = 0, dsSlackPhiRow = -1;
     double dsSlackTargetP = 0.0;
     DeviceBuf dDsPhiRow, dDsFactor;                        // per participating bus (nds)
@@ -280,7 +280,7 @@ struct BatchSolverContext {
     int driverPaused = 0;                                    // the last call stopped at a GpuOuterLoopKind::HOST_*
     int pausedLoopKind = GpuOuterLoopKind::NOT_PAUSED;       // WHICH host loop the driver stopped at
     std::vector<int> pausedStatus;                           // per-scenario solve status at the pause: the resumed
-                                                             // call's checks (rlActive = converged) need it back
+                                                             // call's checks (outerLoopCheckActive = converged) need it back
     int startLoopKind = GpuOuterLoopKind::NONE;              // a RESTARTED sequence resumes its sweep AT this
                                                              // loop (OLF re-checks the loop that went UNSTABLE
                                                              // after the re-solve, before restarting the sweep)
@@ -369,10 +369,10 @@ struct BatchSolverContext {
     // SECONDARY VOLTAGE CONTROL — GpuOuterLoopKind::SECONDARY_VOLTAGE_CONTROL (OLF order 4). Zones of controller buses regulating a
     // pilot point: run entirely on the device, the small dense zone system included.
     int nSvc = 0, nSvcZones = 0;
-    DeviceBuf dSvcCtldVRow, dSvcBusVRow, dSvcRlIdx, dSvcBaseTargetV, dSvcMinQ, dSvcMaxQ, dSvcLoadQ;
+    DeviceBuf dSvcCtldVRow, dSvcBusVRow, dSecondaryVoltageControlReactiveLimitEntry, dSvcBaseTargetV, dSvcMinQ, dSvcMaxQ, dSvcLoadQ;
     DeviceBuf dSvcQPtr, dSvcQKind, dSvcQElem, dSvcQBRow;
     DeviceBuf dSvcZonePtr, dSvcZoneCtl, dSvcZonePilotRow, dSvcZoneTargetV;
-    DeviceBuf dSvcTargetV, dSvcK0, dSvcJk, dSvcJvpp, dSvcEnabled, dSvcNeed, dSvcReject, dSvcRlVt;
+    DeviceBuf dSvcTargetV, dSvcK0, dSvcJk, dSvcJvpp, dSvcEnabled, dSvcNeed, dSvcReject, dSecondaryVoltageControlReactiveLimitTargetV;
     // Batched dense LU workspaces: the zone systems live in DEVICE memory, one N*N column-major matrix
     // and one RHS per scenario, plus the pointer/pivot/info arrays cuBLAS's batched API takes.
     DeviceBuf dSvcMat, dSvcRhs, dSvcMatPtr, dSvcRhsPtr, dSvcPiv, dSvcInfo, dSvcCtlZone;
@@ -408,8 +408,8 @@ struct BatchSolverContext {
     int nFrozenRow = 0;                                    // outage froze to a flat identity state
     DeviceBuf dDsLostGen;                                  // (scenario, DS generator slot) pairs: the
     int nDsLostGen = 0;                                    // generators an outage removes, by identity
-    DeviceBuf dRlPinTgtIn;                                 // per (scenario, entry): the pinned target a continued
-    bool hasRlPinTgtIn = false;                            // solve restores (setBatchRlPinTargets), NaN = the limit
+    DeviceBuf dReactiveLimitSeedTargetQ;                                 // per (scenario, entry): the pinned target a continued
+    bool hasReactiveLimitSeedTargetQ = false;                            // solve restores (setBatchReactiveLimitSeedTargetQ), NaN = the limit
     DeviceBuf dDsOutGen;                                   // (scenario, DS generator slot) pairs: participants
     int nDsOutGen = 0;                                     // a GeneratorAction took out of the distribution
     DeviceBuf dGenCumValid;                                // per scenario: the PER-GENERATOR water-fill ran, so
@@ -432,16 +432,16 @@ struct BatchSolverContext {
     DeviceBuf dDsRowOv;                                      // nScenarios * nds ints, -1 = use dsPhiRow
     // Same idea for the reactive-limits pass: per (scenario, controller), 1 = its bus is in another
     // synchronous component in this scenario, so the loop must not look at it.
-    int nRlIslanded = 0;
-    DeviceBuf dRlNoUnpin, dRlUnpinBad;                       // (scenario, entry) unpin forbidden; per-scenario flag
-    int nRlNoUnpin = 0;
-    DeviceBuf dRlGenLost;                                    // (scenario, entry): the bus lost every generator this
-    int nRlGenLost = 0;                                      // scenario — not a controller, seeded FROZEN
-    DeviceBuf dRlLocalOv, dRlLocalVt;                        // re-homed PV buses: (scenario, entry) mask + own V target
-    int nRlLocal = 0;
-    DeviceBuf dRlCmpOv;                                      // remote controllers re-homed onto a NEW pilot: (scenario,
-    int nRlCmp = 0;                                          // entry) -> the new pilot's V row, -1 = the base pilot's
-    DeviceBuf dRlIslanded;
+    int nReactiveLimitIslanded = 0;
+    DeviceBuf dReactiveLimitPqPvSwitchForbidden, dReactiveLimitPqPvSwitchRejected;                       // (scenario, entry) unpin forbidden; per-scenario flag
+    int nReactiveLimitPqPvSwitchForbidden = 0;
+    DeviceBuf dReactiveLimitGeneratorsLost;                                    // (scenario, entry): the bus lost every generator this
+    int nReactiveLimitGeneratorsLost = 0;                                      // scenario — not a controller, seeded FROZEN
+    DeviceBuf dReactiveLimitLocalOverride, dReactiveLimitLocalTargetV;                        // re-homed PV buses: (scenario, entry) mask + own V target
+    int nReactiveLimitLocalOverrides = 0;
+    DeviceBuf dReactiveLimitComparedVoltageRowOverride;                                      // remote controllers re-homed onto a NEW pilot: (scenario,
+    int nReactiveLimitComparedVoltageRowOverrides = 0;                                          // entry) -> the new pilot's V row, -1 = the base pilot's
+    DeviceBuf dReactiveLimitIslanded;
     int nDistrQMemberTargetQOverrides = 0;                                       // per-scenario member targetQ overrides
     DeviceBuf dDistrQMemberTargetQOverrideKey;
     DeviceBuf dDistrQMemberTargetQOverrideValue;
@@ -456,7 +456,7 @@ struct BatchSolverContext {
     DeviceBuf dPfQTarget;
     DeviceBuf dPfOff;
     DeviceBuf dPfCount;
-    DeviceBuf dPfRlPool;
+    DeviceBuf dPilotFlipSurvivorReactiveLimitEntries;
     DeviceBuf dPfFlipped;
     DeviceBuf dPfSavedVT;
     // HVDC AC-emulation outer loops (FreezingHvdcACEmulation + AcHvdcAcEmulationLimits) as DRIVER
@@ -537,9 +537,9 @@ struct BatchResult {
 
 // Build a batched context of nScenarios on a shared structure (the createBatchContext JNI entry).
 BatchSolverContext* createBatchContext(const SharedStructurePtr& st, int nScenarios, int mode,
-                                       int nrl, const int* rlVrow, const double* rlMinQ,
-                                       const double* rlMaxQ, const double* rlLoadQ, const double* rlVtarget,
-                                       const signed char* rlMonitored, const double* rowSlope,
+                                       int nReactiveLimitEntries, const int* reactiveLimitVoltageRow, const double* reactiveLimitMinQ,
+                                       const double* reactiveLimitMaxQ, const double* reactiveLimitLoadQ, const double* reactiveLimitTargetV,
+                                       const signed char* reactiveLimitFlags, const double* rowSlope,
                                        int nds, const int* dsPhiRow, const double* dsFactor,
                                        int dsSlackPhiRow, double dsSlackTargetP,
                                        const double* dsBaseTargetP, const double* dsMaxDelta, const double* dsMinDelta,

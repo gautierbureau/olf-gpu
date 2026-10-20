@@ -1,7 +1,7 @@
 // Copyright (c) 2026, RTE (http://www.rte-france.com)
 // SPDX-License-Identifier: MPL-2.0
 //
-// Bit flags of a reactive-limit entry (rlMonitored). Mirrors
+// Bit flags of a reactive-limit entry (reactiveLimitFlags). Mirrors
 // com.powsybl.openloadflow.ac.solver.gpu.codes.GpuReactiveLimitsEntryFlag (GpuCodesMirrorTest checks they agree).
 #ifndef OLF_GPU_COMMON_CODES_GPU_REACTIVE_LIMITS_ENTRY_FLAG_CUH
 #define OLF_GPU_COMMON_CODES_GPU_REACTIVE_LIMITS_ENTRY_FLAG_CUH

@@ -31,12 +31,12 @@ import java.util.Map;
 
 /**
  * DEVICE port of OLF's {@code MonitoringVoltageOuterLoop} (SVC stand-by automatons): a monitoring
- * SVC's bus stands by as PQ (its base-PQ RL entry seeds UNPINNED via {@code rlMonitored} — the CPU's
+ * SVC's bus stands by as PQ (its base-PQ RL entry seeds UNPINNED via {@code reactiveLimitFlags} — the CPU's
  * null qLimitType, so the reactive-limits loop never touches it spontaneously) until the bus voltage
  * leaves the automaton's [low, high] threshold band; then the bus switches PQ → PV at the automaton's
  * LOW/HIGH target voltage (OLF's {@code switchPqPv}) and stays a normal voltage controller for the
  * rest of the run (the RL loop may then pin it at its Q limits like any PV bus — the moved target
- * reaches the RL kernel through the {@code rlVtOv} channel).
+ * reaches the RL kernel through the {@code reactiveLimitTargetVOverrides} channel).
  *
  * <p>Per-scenario activation = the bus's VC-ON activation deltas (captured by enable-toggle diff,
  * like the Simple-TVC port) with the V-row target REPLACED by the chosen automaton setpoint.
@@ -60,7 +60,7 @@ public final class GpuMonitoringVoltageOuterLoop {
 
     /** One monitored bus: its V row, RL pack index, the automaton band + setpoints, and the VC-ON
      *  activation deltas (row modes + targets; the V-row target is replaced per direction). */
-    public record Ctl(int vRow, int rlIdx, double lowThreshold, double highThreshold,
+    public record Ctl(int vRow, int reactiveLimitEntry, double lowThreshold, double highThreshold,
                double lowTargetV, double highTargetV,
                int[] deltaRows, int[] deltaModesOn, double[] deltaTargetsOn) {
     }
@@ -83,16 +83,16 @@ public final class GpuMonitoringVoltageOuterLoop {
 
     public static List<Ctl> buildControllers(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
                                       com.powsybl.openloadflow.equations.TargetVector<AcVariableType, AcEquationType> targetVector,
-                                      GpuAcActivation baseActivation, double[] baseTargets, int[] rlVrow) {
+                                      GpuAcActivation baseActivation, double[] baseTargets, int[] reactiveLimitVoltageRow) {
         Map<Integer, Integer> busVRows = new LinkedHashMap<>();
         for (Variable<AcVariableType> v : es.getIndex().getSortedVariablesToFind()) {
             if (v.getType() == AcVariableType.BUS_V) {
                 busVRows.put(v.getElementNum(), v.getRow());
             }
         }
-        Map<Integer, Integer> rlIdxOfVRow = new LinkedHashMap<>();
-        for (int i = 0; i < rlVrow.length; i++) {
-            rlIdxOfVRow.put(rlVrow[i], i);
+        Map<Integer, Integer> reactiveLimitEntryByVoltageRow = new LinkedHashMap<>();
+        for (int i = 0; i < reactiveLimitVoltageRow.length; i++) {
+            reactiveLimitEntryByVoltageRow.put(reactiveLimitVoltageRow[i], i);
         }
         List<Ctl> out = new ArrayList<>();
         for (LfBus bus : network.getBuses()) {
@@ -108,8 +108,8 @@ public final class GpuMonitoringVoltageOuterLoop {
             }
             var automatonOpt = svc.getStandByAutomaton();
             Integer vRow = busVRows.get(bus.getNum());
-            Integer rlIdx = vRow != null ? rlIdxOfVRow.get(vRow) : null;
-            if (automatonOpt.isEmpty() || vRow == null || rlIdx == null || bus.isGeneratorVoltageControlEnabled()) {
+            Integer reactiveLimitEntry = vRow != null ? reactiveLimitEntryByVoltageRow.get(vRow) : null;
+            if (automatonOpt.isEmpty() || vRow == null || reactiveLimitEntry == null || bus.isGeneratorVoltageControlEnabled()) {
                 GpuBatchSkips.record(GpuBatchSkips.Slot.MONITORING, LOGGER,
                         "Monitoring SVC bus {} not representable on the GPU batch — skipped", bus.getId());
                 continue;
@@ -135,7 +135,7 @@ public final class GpuMonitoringVoltageOuterLoop {
                 deltaModesOn[k] = onAct.rowMode()[deltaRows[k]];
                 deltaTargetsOn[k] = onTargets[deltaRows[k]];
             }
-            out.add(new Ctl(vRow, rlIdx, automaton.getLowVoltageThreshold(), automaton.getHighVoltageThreshold(),
+            out.add(new Ctl(vRow, reactiveLimitEntry, automaton.getLowVoltageThreshold(), automaton.getHighVoltageThreshold(),
                     automaton.getLowTargetV(), automaton.getHighTargetV(),
                     deltaRows, deltaModesOn, deltaTargetsOn));
         }
@@ -143,8 +143,8 @@ public final class GpuMonitoringVoltageOuterLoop {
     }
 
     @SuppressWarnings("java:S107")
-    private static double[][] resolve(long handle, int chunkSize, int n, int nrl, List<Ctl> ctls,
-            double[][] activatedTargetV, int[] rlState, int skipRl,
+    private static double[][] resolve(long handle, int chunkSize, int n, int nReactiveLimitEntries, List<Ctl> ctls,
+            double[][] activatedTargetV, int[] reactiveLimitsState, int skipReactiveLimits,
             int[][] rowModePerScenario, int[] baseRowMode, boolean[][] disabledMask,
             List<Integer> ovIdx, List<Double> ovVal, double[] x0Full,
             int[] dsOvBus, double[] dsOvFactorDelta, double[] dsOvBaseDelta, double[] dsOvMaxDelta, double[] dsOvMinDelta,
@@ -160,12 +160,12 @@ public final class GpuMonitoringVoltageOuterLoop {
             for (int c = 0; c < ctls.size(); c++) {
                 if (!Double.isNaN(activatedTargetV[s][c])) {
                     vtSlotIdx.add(s);
-                    vtSlotIdx.add(ctls.get(c).rlIdx());
+                    vtSlotIdx.add(ctls.get(c).reactiveLimitEntry());
                     vtVal.add(activatedTargetV[s][c]);       // the RL kernel's checks use the moved target
                 }
             }
         }
-        int[] rlStateOut = new int[chunkSize * nrl];
+        int[] reactiveLimitsFinalState = new int[chunkSize * nReactiveLimitEntries];
         double[][] r2 = BatchSolveNative.solveBatchContext(handle, baseState, baseTargets,
                 rowModePerScenario, baseRowMode, disabledMask,
                 ovIdx.stream().mapToInt(Integer::intValue).toArray(),
@@ -178,11 +178,11 @@ public final class GpuMonitoringVoltageOuterLoop {
                 parameters.getMaxIterations(), tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
                 config.lsMode(), config.maxDv(), config.maxDphi(),
                 config.lsMode() == GpuStateVectorScalingMode.MAX_VOLTAGE_CHANGE ? varType : null, x0Full,
-                shuntAdmittanceOverrideScenarioElement, shuntAdmittanceOverrideDelta, rlState, rlStateOut,
+                shuntAdmittanceOverrideScenarioElement, shuntAdmittanceOverrideDelta, reactiveLimitsState, reactiveLimitsFinalState,
                 r1OvSlotElem, r1OvVal,
-                config.maxOuterIterations(), config.maxPqPvSwitch(), config.dsRejectResidualFlag(), skipRl,
+                config.maxOuterIterations(), config.maxPqPvSwitch(), config.dsRejectResidualFlag(), skipReactiveLimits,
                 nBaseClosedZeroImpedanceBranches, zeroImpedanceBranchCloseScenarioElement, zeroImpedanceBranchOpenScenarioElement);
-        System.arraycopy(rlStateOut, 0, rlState, 0, rlStateOut.length);
+        System.arraycopy(reactiveLimitsFinalState, 0, reactiveLimitsState, 0, reactiveLimitsFinalState.length);
         return r2;
     }
 
@@ -224,17 +224,17 @@ public final class GpuMonitoringVoltageOuterLoop {
     /** Give the driver's activations (scenario 0: the chosen target per controller, NaN = standing by)
      *  back to the network exactly as OLF's MonitoringVoltageOuterLoop.switchPqPv does: voltage control
      *  on with the recomputed Q target, the SVC in VOLTAGE control, the automaton's target as setpoint. */
-    public static void applyToNetwork(LfNetwork network, List<Ctl> ctls, double[] activated, int[] rlBusNum) {
-        if (ctls == null || ctls.isEmpty() || activated == null || rlBusNum == null) {
+    public static void applyToNetwork(LfNetwork network, List<Ctl> ctls, double[] activated, int[] reactiveLimitBusNum) {
+        if (ctls == null || ctls.isEmpty() || activated == null || reactiveLimitBusNum == null) {
             return;
         }
         for (int c = 0; c < ctls.size() && c < activated.length; c++) {
             double t = activated[c];
             Ctl ctl = ctls.get(c);
-            if (Double.isNaN(t) || ctl.rlIdx() < 0 || ctl.rlIdx() >= rlBusNum.length) {
+            if (Double.isNaN(t) || ctl.reactiveLimitEntry() < 0 || ctl.reactiveLimitEntry() >= reactiveLimitBusNum.length) {
                 continue;
             }
-            LfBus bus = network.getBus(rlBusNum[ctl.rlIdx()]);
+            LfBus bus = network.getBus(reactiveLimitBusNum[ctl.reactiveLimitEntry()]);
             if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
                 System.err.println("WB_MON bus=" + (bus == null ? "?" : bus.getId()) + " activatedTarget=" + t
                         + " vcEnabled=" + (bus != null && bus.isGeneratorVoltageControlEnabled()));

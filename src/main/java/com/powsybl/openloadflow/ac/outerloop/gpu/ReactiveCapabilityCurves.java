@@ -30,10 +30,10 @@ import java.util.List;
  * PARTICIPATING curve generator, the curve points plus the linkage {@code p_now = baseP +
  * share·(rowTarget − baseRowTarget)} (share = the gen's DS factor over its bus's — exact while the
  * intra-bus split stays proportional, which is the pack's DS model), and the kernel
- * ({@code rlCurveLimitsBatch}) re-evaluates the bus limits at the CURRENT targets before every RL
+ * ({@code reactiveCapabilityCurveLimitsBatch}) re-evaluates the bus limits at the CURRENT targets before every RL
  * decision. Non-participating curve gens never move — their base snapshot stays exact, no entry.
  *
- * <p>Channel layout (setBatchRlCurves): cvIdx stride 5 {rlIdx, pRow, ptsOff, npts, dsGenSlot}; cvIn stride 5
+ * <p>Channel layout (setBatchReactiveCapabilityCurves): cvIdx stride 5 {reactiveLimitEntry, pRow, ptsOff, npts, dsGenSlot}; cvIn stride 5
  * {basePpu, share, baseRowTargetP, baseEvalMinPu, baseEvalMaxPu}; cvPts stride 3
  * {p_MW, minQ_MW, maxQ_MW} sorted by p; cvHv stride 2 {hvdc, side} (null when no entry is one).
  *
@@ -98,12 +98,12 @@ public final class ReactiveCapabilityCurves {
         // evaluates every curve on this bus at the wrong active power.
         int[] busPRow = com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcDataExtractor
                 .busPowerRows(network, es)[0];
-        int rlIdx = 0;
+        int reactiveLimitEntry = 0;
         for (LfBus bus : network.getBuses()) {
             int bn = bus.getNum();
             var vVar = es.getVariableSet().getVariable(bn, AcVariableType.BUS_V);
             // REPLAY the RL pack's enumeration exactly (ReactiveLimitsPacker.reactiveLimitsPack):
-            // a remote group member with finite limits is an rlRemote entry regardless of its base
+            // a remote group member with finite limits is an reactiveLimitVoltageControlRole entry regardless of its base
             // pin state; a local bus enters as basePv or basePqCapable.
             // the SAME predicates as the reactive-limit pack (a local copy drifted on rte6515's full
             // busbar scope at VL-5_0: a pilot whose own control is merged is reached through the
@@ -118,16 +118,16 @@ public final class ReactiveCapabilityCurves {
                         || !(bus.getMinQ() < bus.getMaxQ())) {
                     continue;                                // not packed
                 }
-                if (rlIdx >= gpuData.reactiveLimits().voltageRow().length || gpuData.reactiveLimits().voltageRow()[rlIdx] != vVar.getRow()) {
+                if (reactiveLimitEntry >= gpuData.reactiveLimits().voltageRow().length || gpuData.reactiveLimits().voltageRow()[reactiveLimitEntry] != vVar.getRow()) {
                     throw new PowsyblException("GPU AC solver: RL-pack enumeration drift while packing curve limits (bus "
                             + bus.getId() + ")");
                 }
                 // remote members keep STATIC limits in the channel (a curve gen at a remote member is
                 // possible but its own P participation is the same as a local bus's) — fall through to
                 // the same per-generator curve packing below.
-                packBusCurves(bus, rlIdx, es, distributedSlack ? dsParams : null, baseTargets, busPRow, cvIdx, cvIn, cvPts,
+                packBusCurves(bus, reactiveLimitEntry, es, distributedSlack ? dsParams : null, baseTargets, busPRow, cvIdx, cvIn, cvPts,
                         cvGenId, cvBusFactor, gpuData, hvdcSides, cvHv);
-                rlIdx++;
+                reactiveLimitEntry++;
                 continue;
             }
             boolean vActive = es.getEquation(bn, AcEquationType.BUS_TARGET_V).map(e -> e.isActive()).orElse(false);
@@ -137,13 +137,13 @@ public final class ReactiveCapabilityCurves {
             if (vVar == null || vVar.getRow() < 0 || bus.getGeneratorVoltageControl().isEmpty() || !(basePv || basePqCapable)) {
                 continue;
             }
-            if (rlIdx >= gpuData.reactiveLimits().voltageRow().length || gpuData.reactiveLimits().voltageRow()[rlIdx] != vVar.getRow()) {
+            if (reactiveLimitEntry >= gpuData.reactiveLimits().voltageRow().length || gpuData.reactiveLimits().voltageRow()[reactiveLimitEntry] != vVar.getRow()) {
                 throw new PowsyblException("GPU AC solver: RL-pack enumeration drift while packing curve limits (bus "
                         + bus.getId() + ")");
             }
-            packBusCurves(bus, rlIdx, es, distributedSlack ? dsParams : null, baseTargets, busPRow, cvIdx, cvIn, cvPts,
+            packBusCurves(bus, reactiveLimitEntry, es, distributedSlack ? dsParams : null, baseTargets, busPRow, cvIdx, cvIn, cvPts,
                     cvGenId, cvBusFactor, gpuData, hvdcSides, cvHv);
-            rlIdx++;
+            reactiveLimitEntry++;
         }
         if (cvIdx.isEmpty()) {
             return null;
@@ -185,7 +185,7 @@ public final class ReactiveCapabilityCurves {
         return -1;
     }
 
-    private static void packBusCurves(LfBus bus, int rlIdx, EquationSystem<AcVariableType, AcEquationType> es,
+    private static void packBusCurves(LfBus bus, int reactiveLimitEntry, EquationSystem<AcVariableType, AcEquationType> es,
                                       GpuDsParams dsParams, double[] baseTargets, int[] busPRow,
                                       List<int[]> cvIdx, List<double[]> cvIn, List<Double> cvPts,
                                       List<String> cvGenId, List<Double> cvBusFactor, GpuAcData gpuData,
@@ -239,7 +239,7 @@ public final class ReactiveCapabilityCurves {
             // reconstruction is the only thing available).
             if (hvdcSide != null) {
                 // its P is its link's (the kernel reads it from the HVDC loop state): no slack slot, no share
-                cvIdx.add(new int[] {rlIdx, pRow, ptsOff, points.size(), -1});
+                cvIdx.add(new int[] {reactiveLimitEntry, pRow, ptsOff, points.size(), -1});
                 cvIn.add(new double[] {gen.getTargetP(), 0, baseTargets[pRow], gen.getMinQ(), gen.getMaxQ()});
                 cvHv.add(hvdcSide[0]);
                 cvHv.add(hvdcSide[1]);
@@ -247,7 +247,7 @@ public final class ReactiveCapabilityCurves {
                 cvBusFactor.add(busFactor);
                 continue;
             }
-            cvIdx.add(new int[] {rlIdx, pRow, ptsOff, points.size(), dsSlotOf(dgGenId, gen.getId())});
+            cvIdx.add(new int[] {reactiveLimitEntry, pRow, ptsOff, points.size(), dsSlotOf(dgGenId, gen.getId())});
             cvIn.add(new double[] {gen.getTargetP(), dsParams.factor(gen) / busFactor, baseTargets[pRow],
                 gen.getMinQ(), gen.getMaxQ()});              // base evals AT base targetP (bit-zero delta at base)
             cvHv.add(-1);

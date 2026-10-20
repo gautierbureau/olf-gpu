@@ -155,9 +155,9 @@ class GpuVsCpuProductionSaBenchmarkTest extends AbstractOpenSecurityAnalysisTest
         // OLF_GPU_DBG_RL: TRACE the CPU arm's ReactiveLimitsOuterLoop so every PV<->PQ switch (bus id, q,
         // qLimit) is logged, to diff against the device batch's RLSWITCH trace and the RLMAP (vrow->bus).
         if (System.getenv("OLF_GPU_DBG_RL") != null) {
-            ch.qos.logback.classic.Logger rlLog = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory
+            ch.qos.logback.classic.Logger reactiveLimitsLogger = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory
                     .getLogger("com.powsybl.openloadflow.ac.outerloop.ReactiveLimitsOuterLoop");
-            rlLog.setLevel(ch.qos.logback.classic.Level.TRACE);
+            reactiveLimitsLogger.setLevel(ch.qos.logback.classic.Level.TRACE);
             ch.qos.logback.classic.Logger root = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory
                     .getLogger(org.slf4j.Logger.ROOT_LOGGER_NAME);
             if (!root.iteratorForAppenders().hasNext()) {       // no appender configured — attach a console one
@@ -169,7 +169,7 @@ class GpuVsCpuProductionSaBenchmarkTest extends AbstractOpenSecurityAnalysisTest
                 ca.setContext(root.getLoggerContext());
                 ca.setEncoder(enc);
                 ca.start();
-                rlLog.addAppender(ca);
+                reactiveLimitsLogger.addAppender(ca);
             }
         }
         // THE RTE production parameters, loaded from the JSON checked in at the repo root
@@ -194,14 +194,14 @@ class GpuVsCpuProductionSaBenchmarkTest extends AbstractOpenSecurityAnalysisTest
             com.powsybl.openloadflow.OpenLoadFlowParameters.get(lfp)
                     .setSlackBusPMaxMismatch(Double.parseDouble(slackTolEnv) * 100.0);
         }
-        String rlTolEnv = System.getenv("OLF_GPU_SA_RL_TOL");
-        if (rlTolEnv != null) {
+        String maxReactivePowerMismatchEnv = System.getenv("OLF_GPU_SA_RL_TOL");
+        if (maxReactivePowerMismatchEnv != null) {
             com.powsybl.openloadflow.OpenLoadFlowParameters.get(lfp)
-                    .setMaxReactivePowerMismatch(Double.parseDouble(rlTolEnv) * 100.0);
+                    .setMaxReactivePowerMismatch(Double.parseDouble(maxReactivePowerMismatchEnv) * 100.0);
         }
         // OLF_GPU_SA_MAX_OUTER: cap the outer-loop iterations on BOTH arms (trajectory tracing — stop
         // after N outer passes and compare CPU vs GPU state to see where they first diverge). The GPU
-        // batch driver caps RL_MAX_OUTER by the same maxOuterLoopIterations.
+        // batch driver caps MAX_OUTER_LOOP_ITERATIONS by the same maxOuterLoopIterations.
         String maxOuterEnv = System.getenv("OLF_GPU_SA_MAX_OUTER");
         if (maxOuterEnv != null) {
             com.powsybl.openloadflow.OpenLoadFlowParameters.get(lfp)
@@ -227,8 +227,8 @@ class GpuVsCpuProductionSaBenchmarkTest extends AbstractOpenSecurityAnalysisTest
         LoadFlowParameters lfpGpu = lfp;
         String gpuConvEpsEnv = System.getenv("OLF_GPU_SA_GPU_CONV_EPS");
         String gpuSlackTolEnv = System.getenv("OLF_GPU_SA_GPU_SLACK_TOL");
-        String gpuRlTolEnv = System.getenv("OLF_GPU_SA_GPU_RL_TOL");
-        if (gpuConvEpsEnv != null || gpuSlackTolEnv != null || gpuRlTolEnv != null) {
+        String gpuMaxReactivePowerMismatchEnv = System.getenv("OLF_GPU_SA_GPU_RL_TOL");
+        if (gpuConvEpsEnv != null || gpuSlackTolEnv != null || gpuMaxReactivePowerMismatchEnv != null) {
             lfpGpu = lfp.copy();
             com.powsybl.openloadflow.OpenLoadFlowParameters gpuOlf =
                     com.powsybl.openloadflow.OpenLoadFlowParameters.get(lfpGpu);
@@ -239,8 +239,8 @@ class GpuVsCpuProductionSaBenchmarkTest extends AbstractOpenSecurityAnalysisTest
                 lfpGpu.setDistributedSlack(true);
                 gpuOlf.setSlackBusPMaxMismatch(Double.parseDouble(gpuSlackTolEnv) * 100.0);
             }
-            if (gpuRlTolEnv != null) {
-                gpuOlf.setMaxReactivePowerMismatch(Double.parseDouble(gpuRlTolEnv) * 100.0);
+            if (gpuMaxReactivePowerMismatchEnv != null) {
+                gpuOlf.setMaxReactivePowerMismatch(Double.parseDouble(gpuMaxReactivePowerMismatchEnv) * 100.0);
             }
         }
 

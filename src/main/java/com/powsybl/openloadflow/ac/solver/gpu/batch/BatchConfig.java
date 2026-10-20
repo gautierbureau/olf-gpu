@@ -53,10 +53,10 @@ public record BatchConfig(int lsMode, double maxDv, double maxDphi, boolean tran
                           boolean hvdcFreezing, boolean hvdcLimits,
                           boolean secondaryVoltageControl, double minPlausibleTargetV, double maxPlausibleTargetV,
                           boolean voltageMonitoring, boolean continuousPhaseControl, boolean contingencyLossPreDistribution,
-                          boolean rlCurveExtrapolate, boolean forceTargetQ,
+                          boolean extrapolateReactiveLimits, boolean forceTargetQ,
                           PerEqCriteria perEqCriteria,
                           double genVcMinNominalV,
-                          boolean rlRobustMode, double minRealisticVoltage, double maxRealisticVoltage,
+                          boolean reactiveLimitsRobustMode, double minRealisticVoltage, double maxRealisticVoltage,
                           double minNominalVoltageRealisticVoltageCheck, int realisticFixingLoop,
                           boolean robustSolveMode, SlackRelocation slackRelocation,
                           /** Where the chunk solver puts every CONVERGED scenario's state as its chunk completes, keyed by
@@ -101,8 +101,8 @@ public record BatchConfig(int lsMode, double maxDv, double maxDphi, boolean tran
                 incrementalShuntControl, incShuntMaxSectionShift, simpleShuntControl, incrementalRpcControl,
                 incrementalPhaseControl, simpleTransformerControl, tvcUseInitialTapPosition, hvdcFreezing,
                 hvdcLimits, secondaryVoltageControl, minPlausibleTargetV, maxPlausibleTargetV, voltageMonitoring,
-                continuousPhaseControl, contingencyLossPreDistribution, rlCurveExtrapolate, forceTargetQ, perEqCriteria,
-                genVcMinNominalV, rlRobustMode, minRealisticVoltage, maxRealisticVoltage,
+                continuousPhaseControl, contingencyLossPreDistribution, extrapolateReactiveLimits, forceTargetQ, perEqCriteria,
+                genVcMinNominalV, reactiveLimitsRobustMode, minRealisticVoltage, maxRealisticVoltage,
                 minNominalVoltageRealisticVoltageCheck, realisticFixingLoop, true, slackRelocation, stateSink,
                 gpuParameters);
     }
@@ -114,8 +114,8 @@ public record BatchConfig(int lsMode, double maxDv, double maxDphi, boolean tran
                 incrementalShuntControl, incShuntMaxSectionShift, simpleShuntControl, incrementalRpcControl,
                 incrementalPhaseControl, simpleTransformerControl, tvcUseInitialTapPosition, hvdcFreezing,
                 hvdcLimits, secondaryVoltageControl, minPlausibleTargetV, maxPlausibleTargetV, voltageMonitoring,
-                continuousPhaseControl, contingencyLossPreDistribution, rlCurveExtrapolate, forceTargetQ, perEqCriteria,
-                genVcMinNominalV, rlRobustMode, minRealisticVoltage, maxRealisticVoltage,
+                continuousPhaseControl, contingencyLossPreDistribution, extrapolateReactiveLimits, forceTargetQ, perEqCriteria,
+                genVcMinNominalV, reactiveLimitsRobustMode, minRealisticVoltage, maxRealisticVoltage,
                 minNominalVoltageRealisticVoltageCheck, realisticFixingLoop, robustSolveMode, slackRelocation, sink,
                 gpuParameters);
     }
@@ -127,8 +127,8 @@ public record BatchConfig(int lsMode, double maxDv, double maxDphi, boolean tran
                 incrementalShuntControl, incShuntMaxSectionShift, simpleShuntControl, incrementalRpcControl,
                 incrementalPhaseControl, simpleTransformerControl, tvcUseInitialTapPosition, hvdcFreezing,
                 hvdcLimits, secondaryVoltageControl, minPlausibleTargetV, maxPlausibleTargetV, voltageMonitoring,
-                continuousPhaseControl, contingencyLossPreDistribution, rlCurveExtrapolate, forceTargetQ, perEqCriteria,
-                genVcMinNominalV, rlRobustMode, minRealisticVoltage, maxRealisticVoltage,
+                continuousPhaseControl, contingencyLossPreDistribution, extrapolateReactiveLimits, forceTargetQ, perEqCriteria,
+                genVcMinNominalV, reactiveLimitsRobustMode, minRealisticVoltage, maxRealisticVoltage,
                 minNominalVoltageRealisticVoltageCheck, realisticFixingLoop, robustSolveMode, slackRelocation, stateSink,
                 parameters);
     }

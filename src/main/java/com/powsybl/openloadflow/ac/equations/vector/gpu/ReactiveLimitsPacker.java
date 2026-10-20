@@ -53,8 +53,8 @@ public final class ReactiveLimitsPacker {
      *  limit(v) = packedLimit + b*(v^2 - v2Base) — exact for the SVC part, identically zero on
      *  SVC-less buses. Must run under the SAME control-type view as the min/max capture (the
      *  monitoring flip). */
-    private static void addSvcQuadratic(LfBus bus, List<Double> rlSvcBmin, List<Double> rlSvcBmax,
-                                        List<Double> rlV2Base) {
+    private static void addSvcQuadratic(LfBus bus, List<Double> reactiveLimitSvcMinB, List<Double> reactiveLimitSvcMaxB,
+                                        List<Double> reactiveLimitBaseVSquared) {
         double v2 = bus.getV() * bus.getV();
         double bmin = 0;
         double bmax = 0;
@@ -65,9 +65,9 @@ public final class ReactiveLimitsPacker {
                 bmax += g.getMaxQ() / v2;
             }
         }
-        rlSvcBmin.add(bmin);
-        rlSvcBmax.add(bmax);
-        rlV2Base.add(v2);
+        reactiveLimitSvcMinB.add(bmin);
+        reactiveLimitSvcMaxB.add(bmax);
+        reactiveLimitBaseVSquared.add(v2);
     }
 
     /** A bus whose generators include a standby-automaton MONITORING_VOLTAGE one: the VoltageMonitoring phase's
@@ -96,36 +96,36 @@ public final class ReactiveLimitsPacker {
         //    it (e.g. losing a nearby transformer). The device seeds the pinned limit type from the base state
         //    (v below target ⇒ maxQ-pinned, above ⇒ minQ-pinned) so the switch-back fires.
         // REMOTE group members (a MAIN generator voltage control whose controlled bus is NOT the member —
-        // plan-group-member-dynamics Part B): packed as rlRemote=1 entries with the PILOT's v column as the
+        // plan-group-member-dynamics Part B): packed as reactiveLimitVoltageControlRole=1 entries with the PILOT's v column as the
         // compare row (both RL switch conditions test the pilot's V against the GROUP target — verified B0).
-        List<Integer> rlVrow = new ArrayList<>();
-        List<Double> rlMinQ = new ArrayList<>();
-        List<Double> rlMaxQ = new ArrayList<>();
-        List<Double> rlLoadQ = new ArrayList<>();
-        List<Double> rlVtarget = new ArrayList<>();
-        List<Double> rlSvcBmin = new ArrayList<>();
-        List<Double> rlSvcBmax = new ArrayList<>();
-        List<Double> rlV2Base = new ArrayList<>();
-        List<Byte> rlMonitored = new ArrayList<>();
-        List<Byte> rlRemote = new ArrayList<>();
-        List<Integer> rlCmpVrow = new ArrayList<>();
-        List<Integer> rlBusNum = new ArrayList<>();
+        List<Integer> reactiveLimitVoltageRow = new ArrayList<>();
+        List<Double> reactiveLimitMinQ = new ArrayList<>();
+        List<Double> reactiveLimitMaxQ = new ArrayList<>();
+        List<Double> reactiveLimitLoadQ = new ArrayList<>();
+        List<Double> reactiveLimitTargetV = new ArrayList<>();
+        List<Double> reactiveLimitSvcMinB = new ArrayList<>();
+        List<Double> reactiveLimitSvcMaxB = new ArrayList<>();
+        List<Double> reactiveLimitBaseVSquared = new ArrayList<>();
+        List<Byte> reactiveLimitFlags = new ArrayList<>();
+        List<Byte> reactiveLimitVoltageControlRole = new ArrayList<>();
+        List<Integer> reactiveLimitComparedVoltageRow = new ArrayList<>();
+        List<Integer> reactiveLimitBusNum = new ArrayList<>();
         // forced-PV election keys (OLF switchPvPq: controlled bus nominal V, live target P, id)
-        List<Double> rlNominalV = new ArrayList<>();
-        List<Integer> rlPRow = new ArrayList<>();
-        List<Double> rlTargetP = new ArrayList<>();
-        List<String> rlBusId = new ArrayList<>();
+        List<Double> reactiveLimitNominalV = new ArrayList<>();
+        List<Integer> reactiveLimitActivePowerRow = new ArrayList<>();
+        List<Double> reactiveLimitTargetP = new ArrayList<>();
+        List<String> reactiveLimitBusId = new ArrayList<>();
         // Robust-mode pin target (ReactiveLimitsOuterLoop.getInitialGenerationTargetQ): the sum of the
         // bus generators' targetQ, which is what OLF freezes a REMOTE controller at when its own voltage
         // leaves the realistic band while its Q is still inside its limits.
-        List<Double> rlInitTargetQ = new ArrayList<>();
+        List<Double> reactiveLimitInitialTargetQ = new ArrayList<>();
         // OLF's OWN reason for a base pin (LfBus.getQLimitType): 1 MIN_Q, 2 MAX_Q, 3 MIN_REALISTIC_V,
         // 4 MAX_REALISTIC_V, 0 none. The device used to guess the KIND of a base pin from which Q
         // limit the row's target was nearest to - which turns a realistic-voltage pin (target = the
         // generation targetQ, nowhere near a limit) into a MIN_Q/MAX_Q pin, and the curve-limit drift
         // then legitimately re-freezes that "limit pin" AT the limit. rte6515 VL-1251_1: OLF pins it
         // at -0.0035 (V < 16 kV), the device at -1.0000, in every one of 366 contingencies.
-        List<Byte> rlBaseQLimitType = new ArrayList<>();
+        List<Byte> reactiveLimitBaseQLimitType = new ArrayList<>();
         // A never-solved network has NaN bus voltages, and an SVC's reactive limits are Bmin/Bmax·V²:
         // packing them (and the quadratic reference v²) at NaN left the entry's limits NaN and the
         // device never pinned it (the base load flow on the driver; a chunk extracts after a solve).
@@ -183,34 +183,34 @@ public final class ReactiveLimitsPacker {
                         var own = bus.getGeneratorVoltageControl().orElse(vc);
                         int pilotV = vCol[own.getControlledBus().getNum()];
                         if (pilotV >= 0 && bus.getMinQ() < bus.getMaxQ()) {
-                            rlVrow.add(vCol[bn]);                  // transition WRITE row: the member's own bus row
-                            rlMinQ.add(bus.getMinQ());
-                            rlMaxQ.add(bus.getMaxQ());
-                            rlLoadQ.add(bus.getLoadTargetQ());
-                            rlVtarget.add(own.getTargetValue());   // the member's own control's target
-                            addSvcQuadratic(bus, rlSvcBmin, rlSvcBmax, rlV2Base);
-                            rlMonitored.add((byte) 0);
+                            reactiveLimitVoltageRow.add(vCol[bn]);                  // transition WRITE row: the member's own bus row
+                            reactiveLimitMinQ.add(bus.getMinQ());
+                            reactiveLimitMaxQ.add(bus.getMaxQ());
+                            reactiveLimitLoadQ.add(bus.getLoadTargetQ());
+                            reactiveLimitTargetV.add(own.getTargetValue());   // the member's own control's target
+                            addSvcQuadratic(bus, reactiveLimitSvcMinB, reactiveLimitSvcMaxB, reactiveLimitBaseVSquared);
+                            reactiveLimitFlags.add((byte) 0);
                             // 2 = pilot-self; 1 = a remote member OLF's robust rule APPLIES to;
                             // 3 = a remote member OLF's robust rule EXEMPTS, because the bus's OWN control is
                             // local (see isOlfRobustRemoteController). Class 3 is truthy and not 2, so every
-                            // other rlRemote site treats it exactly like class 1 — only the kernel's robust
-                            // unrealistic-voltage gate and rlRobustVResetBatch (which tests == 1) single it out.
+                            // other reactiveLimitVoltageControlRole site treats it exactly like class 1 — only the kernel's robust
+                            // unrealistic-voltage gate and reactiveLimitsRobustVoltageResetBatch (which tests == 1) single it out.
                             byte remoteClass = (byte) (pilotSelf ? GpuVoltageControlRole.PILOT_SELF
                                     : RemoteMemberQPacker.isOlfRobustRemoteController(bus) ? GpuVoltageControlRole.REMOTE
                                     : GpuVoltageControlRole.REMOTE_ROBUST_MODE_EXEMPT);
-                            rlRemote.add(remoteClass);
-                            rlCmpVrow.add(pilotV);                 // switch conditions compare the PILOT's V
-                            rlBusNum.add(bn);
+                            reactiveLimitVoltageControlRole.add(remoteClass);
+                            reactiveLimitComparedVoltageRow.add(pilotV);                 // switch conditions compare the PILOT's V
+                            reactiveLimitBusNum.add(bn);
                             if (System.getenv("OLF_GPU_RL_TRACE") != null) {
-                                System.err.println("GPU_RL_ENTRY idx=" + (rlVrow.size() - 1) + " vRow=" + vCol[bn]
+                                System.err.println("GPU_RL_ENTRY idx=" + (reactiveLimitVoltageRow.size() - 1) + " vRow=" + vCol[bn]
                                         + " bus=" + bus.getId() + " remote=" + remoteClass + " pilotVRow=" + pilotV);
                             }
-                            rlNominalV.add(own.getControlledBus().getNominalV());
-                            rlPRow.add(GpuAcRowIndexing.row(es, bn, AcEquationType.BUS_TARGET_P) >= 0 ? columns.pRow()[bn] : -1);
-                            rlTargetP.add(bus.getTargetP());
-                            rlBusId.add(bus.getId());
-                            rlInitTargetQ.add(initialGenerationTargetQ(bus));
-                            rlBaseQLimitType.add(GpuQLimitType.of(bus));
+                            reactiveLimitNominalV.add(own.getControlledBus().getNominalV());
+                            reactiveLimitActivePowerRow.add(GpuAcRowIndexing.row(es, bn, AcEquationType.BUS_TARGET_P) >= 0 ? columns.pRow()[bn] : -1);
+                            reactiveLimitTargetP.add(bus.getTargetP());
+                            reactiveLimitBusId.add(bus.getId());
+                            reactiveLimitInitialTargetQ.add(initialGenerationTargetQ(bus));
+                            reactiveLimitBaseQLimitType.add(GpuQLimitType.of(bus));
                         }
                         continue;                                  // never let a base-pinned remote member
                     }                                              // masquerade as a LOCAL basePqCapable entry
@@ -231,26 +231,26 @@ public final class ReactiveLimitsPacker {
                             monitoringSvc.setGeneratorControlType(LfGenerator.GeneratorControlType.VOLTAGE);
                             minQ = bus.getMinQ();
                             maxQ = bus.getMaxQ();
-                            addSvcQuadratic(bus, rlSvcBmin, rlSvcBmax, rlV2Base);
+                            addSvcQuadratic(bus, reactiveLimitSvcMinB, reactiveLimitSvcMaxB, reactiveLimitBaseVSquared);
                             monitoringSvc.setGeneratorControlType(LfGenerator.GeneratorControlType.MONITORING_VOLTAGE);
                         } else {
                             minQ = bus.getMinQ();
                             maxQ = bus.getMaxQ();
-                            addSvcQuadratic(bus, rlSvcBmin, rlSvcBmax, rlV2Base);
+                            addSvcQuadratic(bus, reactiveLimitSvcMinB, reactiveLimitSvcMaxB, reactiveLimitBaseVSquared);
                         }
-                        rlVrow.add(vCol[bn]);
+                        reactiveLimitVoltageRow.add(vCol[bn]);
                         if (System.getenv("OLF_GPU_RL_TRACE") != null) {
                             // entry -> bus, so a device pin can be named and lined up against OLF's RL_SWITCH
-                            System.err.println("GPU_RL_ENTRY idx=" + (rlVrow.size() - 1) + " vRow=" + vCol[bn]
+                            System.err.println("GPU_RL_ENTRY idx=" + (reactiveLimitVoltageRow.size() - 1) + " vRow=" + vCol[bn]
                                     + " bus=" + bus.getId() + " minQ=" + minQ + " maxQ=" + maxQ
                                     + " loadQ=" + bus.getLoadTargetQ() + " basePv=" + basePv
                                     + " basePqCapable=" + basePqCapable + " vcEnabled=" + bus.isGeneratorVoltageControlEnabled()
                                     + " gens=" + bus.getGenerators().size());
                         }
-                        rlMinQ.add(minQ);
-                        rlMaxQ.add(maxQ);
-                        rlLoadQ.add(bus.getLoadTargetQ());
-                        rlVtarget.add(bus.getGeneratorVoltageControl().orElseThrow().getTargetValue());
+                        reactiveLimitMinQ.add(minQ);
+                        reactiveLimitMaxQ.add(maxQ);
+                        reactiveLimitLoadQ.add(bus.getLoadTargetQ());
+                        reactiveLimitTargetV.add(bus.getGeneratorVoltageControl().orElseThrow().getTargetValue());
                         // bit 1: a MONITORING_VOLTAGE SVC standing by; bit 2: this bus is NOT one of its voltage control's
                         // controller elements (a controlled pilot with no generators of its own) - the only entries the
                         // device's degenerate-range guard may skip, because OLF's loop walks controller elements and a real
@@ -259,17 +259,17 @@ public final class ReactiveLimitsPacker {
                                 bus.getGeneratorVoltageControl().orElseThrow().getMainVoltageControl();
                         boolean ownController = mainVc.getMergedControllerElements().contains(bus)
                                 || bus.getGeneratorVoltageControl().orElseThrow().getControllerElements().contains(bus);
-                        rlMonitored.add((byte) ((monitoringSvc != null ? GpuReactiveLimitsEntryFlag.STAND_BY_AUTOMATON : 0)
+                        reactiveLimitFlags.add((byte) ((monitoringSvc != null ? GpuReactiveLimitsEntryFlag.STAND_BY_AUTOMATON : 0)
                                 | (ownController ? 0 : GpuReactiveLimitsEntryFlag.NOT_CONTROLLER_ELEMENT)));
-                        rlRemote.add((byte) GpuVoltageControlRole.LOCAL);
-                        rlCmpVrow.add(vCol[bn]);                   // local: compare row = own row
-                        rlBusNum.add(bn);
-                        rlNominalV.add(bus.getGeneratorVoltageControl().map(c -> c.getControlledBus().getNominalV()).orElse(bus.getNominalV()));
-                        rlPRow.add(GpuAcRowIndexing.row(es, bn, AcEquationType.BUS_TARGET_P) >= 0 ? columns.pRow()[bn] : -1);
-                        rlTargetP.add(bus.getTargetP());
-                        rlBusId.add(bus.getId());
-                        rlInitTargetQ.add(initialGenerationTargetQ(bus));
-                        rlBaseQLimitType.add(GpuQLimitType.of(bus));
+                        reactiveLimitVoltageControlRole.add((byte) GpuVoltageControlRole.LOCAL);
+                        reactiveLimitComparedVoltageRow.add(vCol[bn]);                   // local: compare row = own row
+                        reactiveLimitBusNum.add(bn);
+                        reactiveLimitNominalV.add(bus.getGeneratorVoltageControl().map(c -> c.getControlledBus().getNominalV()).orElse(bus.getNominalV()));
+                        reactiveLimitActivePowerRow.add(GpuAcRowIndexing.row(es, bn, AcEquationType.BUS_TARGET_P) >= 0 ? columns.pRow()[bn] : -1);
+                        reactiveLimitTargetP.add(bus.getTargetP());
+                        reactiveLimitBusId.add(bus.getId());
+                        reactiveLimitInitialTargetQ.add(initialGenerationTargetQ(bus));
+                        reactiveLimitBaseQLimitType.add(GpuQLimitType.of(bus));
                     }
                 }
             }
@@ -278,16 +278,16 @@ public final class ReactiveLimitsPacker {
                 bus.setV(Double.NaN);
             }
         }
-        byte[] mon = new byte[rlMonitored.size()];
-        byte[] rem = new byte[rlRemote.size()];
+        byte[] mon = new byte[reactiveLimitFlags.size()];
+        byte[] rem = new byte[reactiveLimitVoltageControlRole.size()];
         for (int i = 0; i < mon.length; i++) {
-            mon[i] = rlMonitored.get(i);
-            rem[i] = rlRemote.get(i);
+            mon[i] = reactiveLimitFlags.get(i);
+            rem[i] = reactiveLimitVoltageControlRole.get(i);
         }
         if (System.getenv("OLF_GPU_RL_TRACE") != null) {
             // The pilot-self groups this extraction sees, with their member ENTRIES: the rotation the device
             // still owes OLF is computed from those entries' pin states (see PilotSelfPacker.PilotSelfPack).
-            PilotSelfPacker.PilotSelfPack ps = PilotSelfPacker.pilotSelfGroups(network, columns, GpuAcArrays.toIntArray(rlBusNum));
+            PilotSelfPacker.PilotSelfPack ps = PilotSelfPacker.pilotSelfGroups(network, columns, GpuAcArrays.toIntArray(reactiveLimitBusNum));
             java.util.Map<Integer, Integer> bySize = new java.util.TreeMap<>();
             for (int g = 0; g < ps.groupCount(); g++) {
                 bySize.merge(ps.ptr()[g + 1] - ps.ptr()[g], 1, Integer::sum);
@@ -295,18 +295,18 @@ public final class ReactiveLimitsPacker {
             System.err.println("GPU_PILOTSELF groups=" + ps.groupCount() + " bySize=" + bySize);
         }
 
-        byte[] baseLt = new byte[rlBaseQLimitType.size()];
+        byte[] baseLt = new byte[reactiveLimitBaseQLimitType.size()];
         for (int i = 0; i < baseLt.length; i++) {
-            baseLt[i] = rlBaseQLimitType.get(i);
+            baseLt[i] = reactiveLimitBaseQLimitType.get(i);
         }
-        return new ReactiveLimitEntries(GpuAcArrays.toIntArray(rlVrow), GpuAcArrays.toDoubleArray(rlMinQ),
-                GpuAcArrays.toDoubleArray(rlMaxQ), GpuAcArrays.toDoubleArray(rlLoadQ),
-                GpuAcArrays.toDoubleArray(rlVtarget), GpuAcArrays.toDoubleArray(rlSvcBmin),
-                GpuAcArrays.toDoubleArray(rlSvcBmax), GpuAcArrays.toDoubleArray(rlV2Base),
-                mon, rem, GpuAcArrays.toIntArray(rlCmpVrow),
-                GpuAcArrays.toIntArray(rlBusNum),
-                GpuAcArrays.toDoubleArray(rlNominalV), GpuAcArrays.toIntArray(rlPRow), GpuAcArrays.toDoubleArray(rlTargetP),
-                idRanks(rlBusId), GpuAcArrays.toDoubleArray(rlInitTargetQ), baseLt);
+        return new ReactiveLimitEntries(GpuAcArrays.toIntArray(reactiveLimitVoltageRow), GpuAcArrays.toDoubleArray(reactiveLimitMinQ),
+                GpuAcArrays.toDoubleArray(reactiveLimitMaxQ), GpuAcArrays.toDoubleArray(reactiveLimitLoadQ),
+                GpuAcArrays.toDoubleArray(reactiveLimitTargetV), GpuAcArrays.toDoubleArray(reactiveLimitSvcMinB),
+                GpuAcArrays.toDoubleArray(reactiveLimitSvcMaxB), GpuAcArrays.toDoubleArray(reactiveLimitBaseVSquared),
+                mon, rem, GpuAcArrays.toIntArray(reactiveLimitComparedVoltageRow),
+                GpuAcArrays.toIntArray(reactiveLimitBusNum),
+                GpuAcArrays.toDoubleArray(reactiveLimitNominalV), GpuAcArrays.toIntArray(reactiveLimitActivePowerRow), GpuAcArrays.toDoubleArray(reactiveLimitTargetP),
+                idRanks(reactiveLimitBusId), GpuAcArrays.toDoubleArray(reactiveLimitInitialTargetQ), baseLt);
     }
 
     /** The targetQ OLF gives a member once the reactive-limits loop UNPINS it. A member pinned in the

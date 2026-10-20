@@ -64,14 +64,14 @@ class GpuBatchedPegaseOutlierDiagnosticTest {
     private static final double PV_EPS = 1e-6;                  // |V - targetV| below this ⇒ still voltage-controlled
 
     private static final boolean NO_DS = System.getenv("OLF_GPU_NO_DS") != null;
-    private static final boolean NO_RL = System.getenv("OLF_GPU_NO_RL") != null;
+    private static final boolean NO_REACTIVE_LIMITS = System.getenv("OLF_GPU_NO_RL") != null;
     // DS tolerance (pu) applied on BOTH sides: GPU slackDistTol + CPU slackBusPMaxMismatch = SLACK_TOL_PU * SB.
     private static final double SLACK_TOL_PU = Double.parseDouble(System.getenv().getOrDefault("OLF_GPU_SLACK_TOL", "1e-2"));
 
     private static LoadFlowParameters gpuScopeParameters() {
         LoadFlowParameters lfp = new LoadFlowParameters()
                 .setVoltageInitMode(LoadFlowParameters.VoltageInitMode.DC_VALUES)
-                .setUseReactiveLimits(!NO_RL)
+                .setUseReactiveLimits(!NO_REACTIVE_LIMITS)
                 .setDistributedSlack(!NO_DS);
         OpenLoadFlowParameters.create(lfp)
                 .setVoltageRemoteControl(false)
@@ -110,21 +110,21 @@ class GpuBatchedPegaseOutlierDiagnosticTest {
         var probeBus = network.getBusById(probeBusId);
         if (probeBus != null) {
             int vrow = es.getVariableSet().getVariable(probeBus.getNum(), AcVariableType.BUS_V).getRow();
-            int[] rlVrow = dbg.reactiveLimits().voltageRow();
-            boolean inRlList = false;
-            for (int i = 0; i < rlVrow.length; i++) {
-                if (rlVrow[i] == vrow) {
-                    inRlList = true;
-                    System.out.printf("DEVICE RL DATA for %s: rlVtarget=%.6f rlMaxQ=%.4f rlMinQ=%.4f rlLoadQ=%.4f%n",
+            int[] reactiveLimitVoltageRow = dbg.reactiveLimits().voltageRow();
+            boolean inReactiveLimitEntries = false;
+            for (int i = 0; i < reactiveLimitVoltageRow.length; i++) {
+                if (reactiveLimitVoltageRow[i] == vrow) {
+                    inReactiveLimitEntries = true;
+                    System.out.printf("DEVICE RL DATA for %s: reactiveLimitTargetV=%.6f reactiveLimitMaxQ=%.4f reactiveLimitMinQ=%.4f reactiveLimitLoadQ=%.4f%n",
                             probeBusId, dbg.reactiveLimits().targetV()[i], dbg.reactiveLimits().maxQ()[i], dbg.reactiveLimits().minQ()[i], dbg.reactiveLimits().loadQ()[i]);
                     break;
                 }
             }
             boolean vcEnabled = probeBus.isGeneratorVoltageControlEnabled();
             double vcTarget = probeBus.getGeneratorVoltageControl().map(vc -> vc.getTargetValue()).orElse(Double.NaN);
-            System.out.printf("BASE-CASE status of %s: inDeviceRlList=%b, generatorVoltageControlEnabled(PV)=%b, "
+            System.out.printf("BASE-CASE status of %s: inDeviceReactiveLimitEntries=%b, generatorVoltageControlEnabled(PV)=%b, "
                     + "baseV=%.6f target=%.6f (PV⇔V==target) | hasGVC=%b, getMaxQ=%.4f%n",
-                    probeBusId, inRlList, vcEnabled, probeBus.getV(), vcTarget,
+                    probeBusId, inReactiveLimitEntries, vcEnabled, probeBus.getV(), vcTarget,
                     probeBus.getGeneratorVoltageControl().isPresent(), probeBus.getMaxQ());
         }
 
@@ -136,7 +136,7 @@ class GpuBatchedPegaseOutlierDiagnosticTest {
         List<BatchScenarioResult> results = GpuBatchedSecurityAnalysisSolver.solveBatchN1(
                 BatchSolveRequest.of(network, baseState, conts, es, target, params, ReportNode.NO_OP)
                         .withTol(1e-10)
-                        .withOuterLoops(!NO_DS, !NO_RL)
+                        .withOuterLoops(!NO_DS, !NO_REACTIVE_LIMITS)
                         .withOuterLoopTolerances(convEps, SLACK_TOL_PU)
                         .withConvEpsPerEq(convEps));
         BatchScenarioResult r = results.get(0);
@@ -219,7 +219,7 @@ class GpuBatchedPegaseOutlierDiagnosticTest {
             }
         }
         System.out.printf("%nPV/PQ switch-set disagreements: %d%n", switchDiffs);
-        // Regression guard for the base-PQ-controller fix (GpuAcDataExtractor + initRlLimitTypeBatch): the device
+        // Regression guard for the base-PQ-controller fix (GpuAcDataExtractor + initReactiveLimitQLimitTypeBatch): the device
         // must re-derive the SAME PV/PQ set as OLF for the contingency, incl. restoring a base-PQ controller to PV.
         assertTrue(switchDiffs == 0, "the GPU and CPU must agree on the PV/PQ switch set for " + CONT
                 + " (disagreements = " + switchDiffs + ")");

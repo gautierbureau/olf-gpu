@@ -45,23 +45,23 @@ final class ChunkLists {
     // ...and the same diversion host-side, for the loss pre-distribution below (it runs
     // after this loop and composes its shares onto the participants' rows).
     final int[][] dsRowOvBySlot;
-    final List<Integer> rlIslandedList = new ArrayList<>();
-    final List<Integer> rlNoUnpinList = new ArrayList<>();   // (scenario, entry): an unpin rejects the scenario
-    final List<Integer> rlGenLostList = new ArrayList<>();   // (scenario, entry): the bus lost every generator
+    final List<Integer> reactiveLimitIslandedScenarioEntryList = new ArrayList<>();
+    final List<Integer> reactiveLimitPqPvSwitchForbiddenScenarioEntryList = new ArrayList<>();   // (scenario, entry): an unpin rejects the scenario
+    final List<Integer> reactiveLimitGeneratorsLostScenarioEntryList = new ArrayList<>();   // (scenario, entry): the bus lost every generator
     // tasks #71: per (scenario, dq member) subgroup labels of a split group, dense, null when none
     final int nDistrQMembersAll;
     final byte[] distrQSubgroupDense;
     boolean anyDistrQSubgroup = false;
-    final List<Integer> rlLocalList = new ArrayList<>();     // (slot, entry): re-homed PV buses checked as LOCAL
-    final List<Integer> rlCmpList = new ArrayList<>();       // (slot, entry): remote controllers re-homed onto a NEW pilot
-    final List<Integer> rlCmpRows = new ArrayList<>();       // ...the new pilot's V row their limit check reads
-    final List<Integer> rlVtOvIdx = new ArrayList<>();       // (slot, entry): per-scenario reactive-limit V target
-    final List<Double> rlVtOvVal = new ArrayList<>();
-    final List<Double> rlLocalVt = new ArrayList<>();        // their own voltage target (pu)
-    // {slot, rlEntry} pairs + {dMinQ, dMaxQ}: the reactive capability a lost generator
+    final List<Integer> reactiveLimitLocalOverrideScenarioEntryList = new ArrayList<>();     // (slot, entry): re-homed PV buses checked as LOCAL
+    final List<Integer> reactiveLimitComparedVoltageRowOverrideScenarioEntryList = new ArrayList<>();       // (slot, entry): remote controllers re-homed onto a NEW pilot
+    final List<Integer> reactiveLimitComparedVoltageRowOverrideRowList = new ArrayList<>();       // ...the new pilot's V row their limit check reads
+    final List<Integer> reactiveLimitTargetVOverrideScenarioEntryList = new ArrayList<>();       // (slot, entry): per-scenario reactive-limit V target
+    final List<Double> reactiveLimitTargetVOverrideValue = new ArrayList<>();
+    final List<Double> reactiveLimitLocalTargetV = new ArrayList<>();        // their own voltage target (pu)
+    // {slot, reactiveLimitEntry} pairs + {dMinQ, dMaxQ}: the reactive capability a lost generator
     // takes with it, at a bus that still controls voltage.
-    final List<Integer> rlQOvSlot = new ArrayList<>();
-    final List<Double> rlQOvVal = new ArrayList<>();
+    final List<Integer> reactiveLimitDeltaOverrideScenarioEntryList = new ArrayList<>();
+    final List<Double> reactiveLimitDeltaOverrideValueList = new ArrayList<>();
     // {slot, curveEntry} pairs + {pStep, shareScale}: how a generator outage repairs
     // the reactive-capability CURVE channel at its own bus (shareScale < 0 = the entry
     // is the lost generator's own and stops evaluating).
@@ -92,8 +92,8 @@ final class ChunkLists {
     final List<Integer> pfSlot = new ArrayList<>();
     final List<Integer> pfRow = new ArrayList<>();
     final List<Double> pfQTarget = new ArrayList<>();
-    final List<Integer> pfRlCount = new ArrayList<>();
-    final List<Integer> pfRlPool = new ArrayList<>();
+    final List<Integer> pilotFlipSurvivorReactiveLimitEntryCounts = new ArrayList<>();
+    final List<Integer> pilotFlipSurvivorReactiveLimitEntries = new ArrayList<>();
     final List<Integer> distrQWeightOverrideScenarioTermList = new ArrayList<>();   // {s, contrib} pairs (DISTR_Q reweight)
     final List<Double> distrQWeightOverrideWeightList = new ArrayList<>();
     final List<Integer> distrQKeyOverrideScenarioMemberList = new ArrayList<>();
@@ -161,20 +161,20 @@ final class ChunkLists {
                 ChunkArrays.intsOrNull(dsIslandedList));
         DistributedSlackNative.setBatchDsRowOverrides(handle,
                 ChunkArrays.intsOrNull(dsRowOvList));
-        ReactiveLimitsNative.setBatchRlIslanded(handle,
-                ChunkArrays.intsOrNull(rlIslandedList));
-        ReactiveLimitsNative.setBatchRlNoUnpin(handle,
-                ChunkArrays.intsOrNull(rlNoUnpinList));
-        ReactiveLimitsNative.setBatchRlGenLost(handle,
-                ChunkArrays.intsOrNull(rlGenLostList));
+        ReactiveLimitsNative.setBatchReactiveLimitIslanded(handle,
+                ChunkArrays.intsOrNull(reactiveLimitIslandedScenarioEntryList));
+        ReactiveLimitsNative.setBatchReactiveLimitPqPvSwitchForbidden(handle,
+                ChunkArrays.intsOrNull(reactiveLimitPqPvSwitchForbiddenScenarioEntryList));
+        ReactiveLimitsNative.setBatchReactiveLimitGeneratorsLost(handle,
+                ChunkArrays.intsOrNull(reactiveLimitGeneratorsLostScenarioEntryList));
         RemoteVoltageControlNative.setBatchDistrQSubgroups(handle, anyDistrQSubgroup ? distrQSubgroupDense : null,
                 anyDistrQSubgroup ? RelocatedRows.qrMemberStart(gpuData) : null);
-        ReactiveLimitsNative.setBatchRlLocal(handle,
-                ChunkArrays.intsOrNull(rlLocalList),
-                rlLocalList.isEmpty() ? null : rlLocalVt.stream().mapToDouble(Double::doubleValue).toArray());
-        ReactiveLimitsNative.setBatchRlCmpOverrides(handle,
-                ChunkArrays.intsOrNull(rlCmpList),
-                rlCmpList.isEmpty() ? null : rlCmpRows.stream().mapToInt(Integer::intValue).toArray());
+        ReactiveLimitsNative.setBatchReactiveLimitLocalOverrides(handle,
+                ChunkArrays.intsOrNull(reactiveLimitLocalOverrideScenarioEntryList),
+                reactiveLimitLocalOverrideScenarioEntryList.isEmpty() ? null : reactiveLimitLocalTargetV.stream().mapToDouble(Double::doubleValue).toArray());
+        ReactiveLimitsNative.setBatchReactiveLimitComparedVoltageRowOverrides(handle,
+                ChunkArrays.intsOrNull(reactiveLimitComparedVoltageRowOverrideScenarioEntryList),
+                reactiveLimitComparedVoltageRowOverrideScenarioEntryList.isEmpty() ? null : reactiveLimitComparedVoltageRowOverrideRowList.stream().mapToInt(Integer::intValue).toArray());
         RemoteVoltageControlNative.setBatchDistrQMemberTargetQOverrides(handle,
                 ChunkArrays.intsOrNull(distrQMemberTargetQOverrideKey),
                 distrQMemberTargetQOverrideKey.isEmpty() ? null : distrQMemberTargetQOverrideValue.stream().mapToDouble(Double::doubleValue).toArray());
@@ -186,7 +186,7 @@ final class ChunkLists {
                 ChunkArrays.intsOrNull(pfSlot),
                 pfSlot.isEmpty() ? null : pfRow.stream().mapToInt(Integer::intValue).toArray(),
                 pfSlot.isEmpty() ? null : pfQTarget.stream().mapToDouble(Double::doubleValue).toArray(),
-                pfSlot.isEmpty() ? null : pfRlCount.stream().mapToInt(Integer::intValue).toArray(),
-                pfSlot.isEmpty() ? null : pfRlPool.stream().mapToInt(Integer::intValue).toArray());
+                pfSlot.isEmpty() ? null : pilotFlipSurvivorReactiveLimitEntryCounts.stream().mapToInt(Integer::intValue).toArray(),
+                pfSlot.isEmpty() ? null : pilotFlipSurvivorReactiveLimitEntries.stream().mapToInt(Integer::intValue).toArray());
     }
 }

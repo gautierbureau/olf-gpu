@@ -16,7 +16,7 @@ __global__ void hvdcSlackBalanceBatch(int nS, int nh, int n, int nElements, int 
                                       const int* hvdcBus1PRow, const int* hvdcBus2PRow, const int* hvdcBus1PhiColumn,
                                       const int* hvdcBus2PhiColumn, const int* hvdcElement, const double* hvdcAcEmulationParameters,
                                       const int* status, const double* d1, const double* d2, const char* ctgOut,
-                                      const char* disabled, const double* x, const char* rlActive, double* qBuf);
+                                      const char* disabled, const double* x, const char* outerLoopCheckActive, double* qBuf);
 
 // Per-solve resets.
 void dsResetSolve(BatchSolverContext* ctx, DriverPass& drv);

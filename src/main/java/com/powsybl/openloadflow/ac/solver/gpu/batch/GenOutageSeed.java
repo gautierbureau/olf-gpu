@@ -33,7 +33,7 @@ final class GenOutageSeed {
         final int n = ctx.n();
         final GpuAcData gpuData = ctx.gpuData();
         final int[] baseRowMode = ctx.baseRowMode();
-        final ReactiveCapabilityCurves.Channel rlCurves = ctx.rlCurves();
+        final ReactiveCapabilityCurves.Channel reactiveCapabilityCurves = ctx.reactiveCapabilityCurves();
         final java.util.Map<Integer, int[]> curveEntriesByPRow = ctx.curveEntriesByPRow();
         final RunScratch rs = ctx.rs();
         final ChunkLists cl = ctx.cl();
@@ -71,10 +71,10 @@ final class GenOutageSeed {
                     row[go.vRow()] = go.pqRowModeOrDefault();   // BUS_V row becomes the reactive-power equation (PV→PQ)
                     rs.rowModePerScenario[s] = row;
                 }
-                if (go.reHomesRlEntry()) {
-                    cl.rlLocalList.add(s);
-                    cl.rlLocalList.add(go.rlEntry());
-                    cl.rlLocalVt.add(go.reHomeVTarget());
+                if (go.reHomesReactiveLimitEntry()) {
+                    cl.reactiveLimitLocalOverrideScenarioEntryList.add(s);
+                    cl.reactiveLimitLocalOverrideScenarioEntryList.add(go.reactiveLimitEntry());
+                    cl.reactiveLimitLocalTargetV.add(go.reHomeVTarget());
                 }
                 if (go.reHomesRemoteController()) {
                     // OLF's re-merged control: this remote member's reactive-limit check reads the
@@ -82,22 +82,22 @@ final class GenOutageSeed {
                     // table's sharing row, which the dependent pilot's pool uses as the carrier.
                     if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {
                         System.err.printf("QUALIFY_TRACE reHomeRemoteCtl slot=%d entry=%d of %d cmpRow=%d vt=%.6f%n",
-                                s, go.rlEntry(), gpuData.reactiveLimits().voltageRow().length, go.reHomePilotVRow(), go.qTarget());
+                                s, go.reactiveLimitEntry(), gpuData.reactiveLimits().voltageRow().length, go.reHomePilotVRow(), go.qTarget());
                     }
-                    cl.rlCmpList.add(s);
-                    cl.rlCmpList.add(go.rlEntry());
-                    cl.rlCmpRows.add(go.reHomePilotVRow());
-                    cl.rlVtOvIdx.add(s);
-                    cl.rlVtOvIdx.add(go.rlEntry());
-                    cl.rlVtOvVal.add(go.qTarget());
+                    cl.reactiveLimitComparedVoltageRowOverrideScenarioEntryList.add(s);
+                    cl.reactiveLimitComparedVoltageRowOverrideScenarioEntryList.add(go.reactiveLimitEntry());
+                    cl.reactiveLimitComparedVoltageRowOverrideRowList.add(go.reHomePilotVRow());
+                    cl.reactiveLimitTargetVOverrideScenarioEntryList.add(s);
+                    cl.reactiveLimitTargetVOverrideScenarioEntryList.add(go.reactiveLimitEntry());
+                    cl.reactiveLimitTargetVOverrideValue.add(go.qTarget());
                 }
                 if (go.forbidsUnpin()) {
-                    cl.rlNoUnpinList.add(s);
-                    cl.rlNoUnpinList.add(go.rlEntry());
+                    cl.reactiveLimitPqPvSwitchForbiddenScenarioEntryList.add(s);
+                    cl.reactiveLimitPqPvSwitchForbiddenScenarioEntryList.add(go.reactiveLimitEntry());
                 }
                 if (go.silencesReactiveLimitEntry()) {
                     // Nothing left to control voltage at that bus: its reactive-limit
-                    // entry is seeded FROZEN for this scenario (setBatchRlGenLost) - no
+                    // entry is seeded FROZEN for this scenario (setBatchReactiveLimitGeneratorsLost) - no
                     // pin, no switch back to PV with its only generator gone, and not a
                     // live controller to the pilot-self layout. NOT the islanded channel
                     // a contingency-stranded controller uses: "islanded" means the bus
@@ -125,12 +125,12 @@ final class GenOutageSeed {
                     // Its limits already collapse with the outage (minQDelta/maxQDelta, the curve channel),
                     // so the entry is simply left live (fixture:
                     // deviceSwitchedToPqInBaseBusLosingItsOnlyGeneratorIsStillCheckedMatchesCpu).
-                    boolean liveDeadLocal = (gpuData.reactiveLimits().voltageControlRole() == null || gpuData.reactiveLimits().voltageControlRole().length <= go.rlEntry()
-                                    || gpuData.reactiveLimits().voltageControlRole()[go.rlEntry()] == GpuVoltageControlRole.LOCAL)
-                            && gpuData.switchedPvToPqInBase(go.rlEntry());
+                    boolean liveDeadLocal = (gpuData.reactiveLimits().voltageControlRole() == null || gpuData.reactiveLimits().voltageControlRole().length <= go.reactiveLimitEntry()
+                                    || gpuData.reactiveLimits().voltageControlRole()[go.reactiveLimitEntry()] == GpuVoltageControlRole.LOCAL)
+                            && gpuData.switchedPvToPqInBase(go.reactiveLimitEntry());
                     if (liveDeadLocal) {
                         // left live: no channel
-                    } else if (go.flipsPilotRowWhenAllPinned() || gpuData.switchedPvToPqInBase(go.rlEntry())) {
+                    } else if (go.flipsPilotRowWhenAllPinned() || gpuData.switchedPvToPqInBase(go.reactiveLimitEntry())) {
                         // ...and a MEMBER the base PINNED: its reactive balance already sits on
                         // its own mode-4 row (its pin row), and OLF recomputes that balance's
                         // target over the generators left - none - the moment the last one goes
@@ -140,11 +140,11 @@ final class GenOutageSeed {
                         // merged-control fixture as 0.36 kV at b1 (row 7 at 0.05 against OLF's 0),
                         // and the shape of rte6515's VL-5997 / VL-6003 / VL-6194 / VL-6229
                         // relocated pins.
-                        cl.rlGenLostList.add(s);
-                        cl.rlGenLostList.add(go.rlEntry());
+                        cl.reactiveLimitGeneratorsLostScenarioEntryList.add(s);
+                        cl.reactiveLimitGeneratorsLostScenarioEntryList.add(go.reactiveLimitEntry());
                     } else {
-                        cl.rlIslandedList.add(s);
-                        cl.rlIslandedList.add(go.rlEntry());
+                        cl.reactiveLimitIslandedScenarioEntryList.add(s);
+                        cl.reactiveLimitIslandedScenarioEntryList.add(go.reactiveLimitEntry());
                     }
                 }
                 if (go.deactivatesDistrQMember()) {
@@ -220,22 +220,22 @@ final class GenOutageSeed {
                     cl.pfSlot.add(s);                     // handled IN the solve
                     cl.pfRow.add(go.pinnedPilotVRow());
                     cl.pfQTarget.add(go.pinnedPilotQTarget());
-                    cl.pfRlCount.add(go.pilotGroupSurvivorRlEntries().length);
-                    for (int rl : go.pilotGroupSurvivorRlEntries()) {
-                        cl.pfRlPool.add(rl);
+                    cl.pilotFlipSurvivorReactiveLimitEntryCounts.add(go.pilotGroupSurvivorReactiveLimitEntries().length);
+                    for (int rl : go.pilotGroupSurvivorReactiveLimitEntries()) {
+                        cl.pilotFlipSurvivorReactiveLimitEntries.add(rl);
                     }
                 }
                 if (go.shrinksReactiveLimits()) {
                     // The bus KEEPS voltage control, so its reactive-limit entry is
                     // still read — and the device's aggregate still holds the lost
                     // generator's capability, which OLF's bus.getMinQ() does not.
-                    cl.rlQOvSlot.add(s);
-                    cl.rlQOvSlot.add(go.rlEntry());
-                    cl.rlQOvVal.add(go.minQDelta());
-                    cl.rlQOvVal.add(go.maxQDelta());
-                    cl.rlQOvVal.add(go.loadQDelta());
-                    cl.rlQOvVal.add(go.svcBminDelta());
-                    cl.rlQOvVal.add(go.svcBmaxDelta());
+                    cl.reactiveLimitDeltaOverrideScenarioEntryList.add(s);
+                    cl.reactiveLimitDeltaOverrideScenarioEntryList.add(go.reactiveLimitEntry());
+                    cl.reactiveLimitDeltaOverrideValueList.add(go.minQDelta());
+                    cl.reactiveLimitDeltaOverrideValueList.add(go.maxQDelta());
+                    cl.reactiveLimitDeltaOverrideValueList.add(go.loadQDelta());
+                    cl.reactiveLimitDeltaOverrideValueList.add(go.svcBminDelta());
+                    cl.reactiveLimitDeltaOverrideValueList.add(go.svcBmaxDelta());
                 }
                 if (go.pRow() >= 0 && curveEntriesByPRow.containsKey(go.pRow())) {
                     // The CURVE channel reconstructs each generator's OWN active
@@ -250,15 +250,15 @@ final class GenOutageSeed {
                     //  - the survivors now share the bus's slack over their own
                     //    factors alone, so each one's share renormalizes.
                     for (int e : curveEntriesByPRow.get(go.pRow())) {
-                        double busFactor = rlCurves.cvBusFactor()[e];
+                        double busFactor = reactiveCapabilityCurves.cvBusFactor()[e];
                         double left = busFactor - go.lostFactorSum();
-                        boolean dead = go.lostGenIds().contains(rlCurves.cvGenId()[e]);
+                        boolean dead = go.lostGenIds().contains(reactiveCapabilityCurves.cvGenId()[e]);
                         cl.cvOvSlot.add(s);
                         cl.cvOvSlot.add(e);
                         cl.cvOvVal.add(go.pStep());
                         // an AC-emulation VSC's P is its link's: only its own loss matters
-                        cl.cvOvVal.add(dead || !rlCurves.isHvdc(e) && left <= 0 ? -1
-                                : rlCurves.isHvdc(e) ? 1 : busFactor / left);
+                        cl.cvOvVal.add(dead || !reactiveCapabilityCurves.isHvdc(e) && left <= 0 ? -1
+                                : reactiveCapabilityCurves.isHvdc(e) ? 1 : busFactor / left);
                     }
                 }
                 if (rs.hasDs && go.dsBus() >= 0) {   // lost gen(s) on a DS-participant bus: per-scenario reweight

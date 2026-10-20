@@ -64,10 +64,10 @@ public final class PilotSelfPacker {
 
     /** Builds {@link PilotSelfPack} from an RL pack's entries (bus num -> entry index). */
     public static PilotSelfPack pilotSelfGroups(LfNetwork network,
-                                                ExtractionColumns columns, int[] rlBusNum) {
+                                                ExtractionColumns columns, int[] reactiveLimitBusNum) {
         java.util.Map<Integer, Integer> entryOfBus = new java.util.HashMap<>();
-        for (int i = 0; i < rlBusNum.length; i++) {
-            entryOfBus.putIfAbsent(rlBusNum[i], i);
+        for (int i = 0; i < reactiveLimitBusNum.length; i++) {
+            entryOfBus.putIfAbsent(reactiveLimitBusNum[i], i);
         }
         int[] vCol = columns.vCol();
         List<Integer> ptr = new ArrayList<>();

@@ -30,14 +30,14 @@ __global__ void flcCheckBatch(int nFlc, int nScenarios, int n, int nElements, in
                               const int* kind, const int* side, const double* targetValue, const double* halfDb,
                               const int* elem, const int* ctlPack,
                               const double* closedBranchParameters, const int* closedBranchIndices, int nR1Ov, const int* r1OvSlotElem, const double* r1OvVal,
-                              const char* disabled, const double* x, const char* rlActive,
+                              const char* disabled, const double* x, const char* outerLoopCheckActive,
                               char* outOfDb, double* diff) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nFlc * nScenarios) return;
     int c = tid % nFlc;
     int s = tid / nFlc;
     outOfDb[tid] = 0;
-    if (!rlActive[s] || !(kindMask & controlledFlowMaskBit(kind[c]))) return;
+    if (!outerLoopCheckActive[s] || !(kindMask & controlledFlowMaskBit(kind[c]))) return;
     int e = ctlPack[c];
     if (disabled[(size_t) s * nElements + elem[c]] || disabled[(size_t) s * nElements + closedBranchOffset + e]) return;
     const double* p = closedBranchParameters + e * GpuPiModelColumn::COUNT;
@@ -194,7 +194,7 @@ void flcStep(BatchSolverContext* ctx, DriverPass& drv, int kindMask) {
             ctx->dFlcKind.as<int>(), ctx->dFlcSide.as<int>(), ctx->dFlcTargetValue.as<double>(), ctx->dFlcHalfDb.as<double>(),
             ctx->dFlcElem.as<int>(), ctx->dFlcCtlPack.as<int>(),
             ctx->st->closedBranch.parameters.as<double>(), ctx->st->closedBranch.indices.as<int>(), ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>(),
-            ctx->dDisabled.as<char>(), ctx->dX.as<double>(), ctx->dRlActive.as<char>(),
+            ctx->dDisabled.as<char>(), ctx->dX.as<double>(), ctx->dOuterLoopCheckActive.as<char>(),
             ctx->dFlcOutOfDb.as<char>(), ctx->dFlcDiff.as<double>());
     std::vector<char> outOfDb(nst);
     CUDA_CHECK(cudaMemcpyAsync(outOfDb.data(), ctx->dFlcOutOfDb.p, nst, cudaMemcpyDeviceToHost, ctx->stream));
@@ -224,7 +224,7 @@ void flcStep(BatchSolverContext* ctx, DriverPass& drv, int kindMask) {
     flcDecisionBatch<<<grid(static_cast<int>(nst)), BLOCK, 0, ctx->stream>>>(nF, nS, kindMask,
             ctx->dFlcKind.as<int>(), ctx->dFlcPinCol.as<int>(), ctx->dFlcTapPtr.as<int>(), ctx->dFlcTapData.as<double>(), ctx->dFlcMaxShift.as<int>(),
             ctx->dFlcOutOfDb.as<char>(), ctx->dFlcDiff.as<double>(), ctx->dFlcSensi.as<double>(),
-            ctx->dFlcCurTap.as<int>(), ctx->dFlcRatDir.as<int>(), ctx->dFlcRatCount.as<int>(), ctx->dFlcRatAllowed.as<int>(), ctx->dRlSwitched.as<char>());
+            ctx->dFlcCurTap.as<int>(), ctx->dFlcRatDir.as<int>(), ctx->dFlcRatCount.as<int>(), ctx->dFlcRatAllowed.as<int>(), ctx->dOuterLoopUnstable.as<char>());
     flcApplyBatch<<<grid(static_cast<int>(nst)), BLOCK, 0, ctx->stream>>>(nF, nS, n, ctx->dFlcPinRow.as<int>(), ctx->dFlcPinCol.as<int>(),
             ctx->dFlcTapPtr.as<int>(), ctx->dFlcTapData.as<double>(), ctx->dFlcCurTap.as<int>(), ctx->dFlcPrevTap.as<int>(),
             ctx->dTarget.as<double>(), ctx->dX.as<double>());

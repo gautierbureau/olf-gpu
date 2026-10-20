@@ -82,15 +82,15 @@ public final class DevicePhases {
      * Build every configured phase's tables. Resets {@link GpuBatchSkips} first, so the caller can ask
      * {@link DevicePhaseOwnership} afterwards whether each loop came out COMPLETE.
      *
-     * <p>{@code rlVrow} is the reactive-limit row pack the monitoring and secondary-voltage phases index
-     * against, {@code rlBusNum} its bus numbers (the generator freeze needs them to find a REMOTE
+     * <p>{@code reactiveLimitVoltageRow} is the reactive-limit row pack the monitoring and secondary-voltage phases index
+     * against, {@code reactiveLimitBusNum} its bus numbers (the generator freeze needs them to find a REMOTE
      * candidate's entry) and {@code n} the system size. One element mapper is built here and shared: the
      * base load flow used to construct a fresh one per builder, three times over.
      */
     public static Built build(Request request, LfNetwork network,
                               EquationSystem<AcVariableType, AcEquationType> es,
                               TargetVector<AcVariableType, AcEquationType> targetVector,
-                              GpuAcActivation activation, double[] targets, int[] rlVrow, int[] rlBusNum, int n) {
+                              GpuAcActivation activation, double[] targets, int[] reactiveLimitVoltageRow, int[] reactiveLimitBusNum, int n) {
         GpuBatchSkips.reset();
         GpuAcElementMapper mapper = new GpuAcElementMapper(network);
         int shuntOffset = mapper.getClosedBranchCount() + mapper.getOpenBranchCount();
@@ -100,7 +100,7 @@ public final class DevicePhases {
                 : null;
         return new Built(
                 request.monitoring()
-                        ? GpuMonitoringVoltageOuterLoop.buildControllers(network, es, targetVector, activation, targets, rlVrow)
+                        ? GpuMonitoringVoltageOuterLoop.buildControllers(network, es, targetVector, activation, targets, reactiveLimitVoltageRow)
                         : null,
                 request.incrementalTvc()
                         ? GpuIncrementalTransformerVoltageControlOuterLoop.buildControllers(network, es, mapper)
@@ -118,10 +118,10 @@ public final class DevicePhases {
                 discreteTvc,
                 discreteTvc != null
                         ? GpuTransformerVoltageControlOuterLoop.buildFreezeTables(network, es, discreteTvc,
-                                request.genVcMinNominalV(), rlBusNum)
+                                request.genVcMinNominalV(), reactiveLimitBusNum)
                         : null,
                 request.secondaryVc() && GpuSecondaryVoltageControlOuterLoop.supported(network)
-                        ? GpuSecondaryVoltageControlOuterLoop.build(network, es, rlVrow,
+                        ? GpuSecondaryVoltageControlOuterLoop.build(network, es, reactiveLimitVoltageRow,
                                 new EsContext(es.getStateVector(), n),
                                 request.minPlausibleTargetV(), request.maxPlausibleTargetV(), mapper)
                         : null,

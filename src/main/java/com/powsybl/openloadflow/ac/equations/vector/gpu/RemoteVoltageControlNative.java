@@ -61,10 +61,10 @@ public final class RemoteVoltageControlNative {
      *  of its OWN controllers. While the survivors hold its voltage the pilot keeps BUS_TARGET_V and its
      *  acquired reactive balance rides one of THEIR rows; when every survivor pins, those rows take their
      *  own pinned balances and the pilot's is evicted. The kernel then puts it on the pilot's freed row,
-     *  as OLF does. {@code rlCounts} sizes each entry's slice of {@code rlPool} (the surviving
+     *  as OLF does. {@code survivorReactiveLimitEntryCounts} sizes each entry's slice of {@code survivorReactiveLimitEntries} (the surviving
      *  controllers' reactive-limit entries). Nulls clear. */
     public static native void setBatchPilotAllPinnedFlip(long handle, int[] slots, int[] rows,
-                                                         double[] qTargets, int[] rlCounts, int[] rlPool);
+                                                         double[] qTargets, int[] survivorReactiveLimitEntryCounts, int[] survivorReactiveLimitEntries);
 
     /** Per-scenario moves of a remote-control pilot's own reactive target ({key = slot * nQr + group, delta pu}, one
      *  entry per key): added to the value captured from the base carrier and to the first fill's carrier target.

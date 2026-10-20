@@ -188,15 +188,15 @@ final class BranchOutagePlanner {
         // most of the mismatch undistributed. The device now takes the per-scenario participant
         // set and derives BOTH the shares and the stopping gate from it.
         pb.islandedDsByIndex[i] = IslandedBuses.islandedDsParticipants(fi.rows(), gpuData, q.islandedBuses());
-        pb.islandedRlByIndex[i] = IslandedBuses.islandedRlControllers(fi.rows(), gpuData);
+        pb.islandedReactiveLimitEntriesByIndex[i] = IslandedBuses.islandedReactiveLimitControllers(fi.rows(), gpuData);
         if ("1".equals(System.getenv("OLF_GPU_DBG_BUSDUMP")) && fi.rows().length > 0) {
             // Which reactive-limits ENTRIES the island masks, and which frozen rows are an
-            // rlVrow at all: an unmasked frozen controller row is a row the RL pass can pin,
+            // reactiveLimitVoltageRow at all: an unmasked frozen controller row is a row the RL pass can pin,
             // and a pin on a frozen row survives every later target override.
             System.err.println("ISLANDED-RL '" + c.contingencyId() + "' frozenRows="
                     + java.util.Arrays.toString(fi.rows()) + " maskedEntries="
-                    + java.util.Arrays.toString(pb.islandedRlByIndex[i]) + " rlVrowOfMasked="
-                    + java.util.Arrays.stream(pb.islandedRlByIndex[i]).map(e -> gpuData.reactiveLimits().voltageRow()[e]).boxed().toList());
+                    + java.util.Arrays.toString(pb.islandedReactiveLimitEntriesByIndex[i]) + " rlVrowOfMasked="
+                    + java.util.Arrays.stream(pb.islandedReactiveLimitEntriesByIndex[i]).map(e -> gpuData.reactiveLimits().voltageRow()[e]).boxed().toList());
         }
         if ("1".equals(System.getenv("OLF_GPU_DBG_BUSDUMP")) && q.islandedBuses().size() > 0) {
             // The count that must match OLF's participant drop: OLF re-runs
@@ -268,11 +268,11 @@ final class BranchOutagePlanner {
                     ok = false;
                     break;
                 }
-                int reHomedRl = RelocatedRows.rlEntryOf(gpuData, e.getKey());
+                int reHomedReactiveLimitEntry = RelocatedRows.reactiveLimitEntryOf(gpuData, e.getKey());
                 int crossRow = RelocatedRows.relocQRow(vVar.getRow(), pb.relocRows, outagedZeroImpedanceBranchNums);
                 if (crossRow != vVar.getRow()) {
-                    pvOn.add(ReHomedEntries.reHomedCrossEntry(crossRow, e.getValue(), reHomedRl,
-                            gpuData.switchedPvToPqInBase(reHomedRl), e.getKey().getTargetQ()));
+                    pvOn.add(ReHomedEntries.reHomedCrossEntry(crossRow, e.getValue(), reHomedReactiveLimitEntry,
+                            gpuData.switchedPvToPqInBase(reHomedReactiveLimitEntry), e.getKey().getTargetQ()));
                     continue;
                 }
                 // Same rule as the island site above: a bus PINNED at its reactive limit in the base
@@ -281,11 +281,11 @@ final class BranchOutagePlanner {
                 // identity: rte6515 BUS-6157_BBS_1 (VL-6157_1, baseLimitType=1), BUS-6194_BBS_2
                 // (VL-6194_2, 2) and BUS-6229_BBS_1 (VL-6229_1, 2) — three device failures on
                 // systems OLF converges, replayed on the CPU.
-                if (gpuData.switchedPvToPqInBase(reHomedRl)) {
-                    pvOn.add(ReHomedEntries.reHomedPinnedPvEntry(vVar.getRow(), e.getKey().getTargetQ(), e.getValue(), reHomedRl));
+                if (gpuData.switchedPvToPqInBase(reHomedReactiveLimitEntry)) {
+                    pvOn.add(ReHomedEntries.reHomedPinnedPvEntry(vVar.getRow(), e.getKey().getTargetQ(), e.getValue(), reHomedReactiveLimitEntry));
                     continue;
                 }
-                pvOn.add(ReHomedEntries.reHomedPvEntry(vVar.getRow(), e.getValue(), reHomedRl));
+                pvOn.add(ReHomedEntries.reHomedPvEntry(vVar.getRow(), e.getValue(), reHomedReactiveLimitEntry));
             }
             if (!ok) {
                 GpuBatchQualification.refuse(c,

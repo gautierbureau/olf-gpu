@@ -29,7 +29,7 @@ namespace olfgpu {
 // .extrapolateReactiveLimitsSlope math — the BOUNDARY two-point slope continued past the range,
 // with the intersecting-limits corner (extrapolated minQ > maxQ) collapsing BOTH to their mean.
 // sel 0 = minQ, 1 = maxQ. p in MW, result in MVAr.
-static __device__ double rlCurveEval(double pMW, const double* pts, int npts, int sel, int extrapolate) {
+static __device__ double evaluateReactiveCapabilityCurve(double pMW, const double* pts, int npts, int sel, int extrapolate) {
     for (int k = 0; k < npts; k++) {
         if (pts[k * 3] == pMW) {
             return pts[k * 3 + 1 + sel];                     // first case: exact curve point

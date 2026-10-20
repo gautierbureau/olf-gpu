@@ -24,7 +24,7 @@ final class GpuSolveSettings {
     /** Read the bands out of the run's OWN configured loops, so the device decides at OLF's threshold. */
     static double[] driverSettings(com.powsybl.openloadflow.ac.AcLoadFlowParameters p) {
         double slackTol = Double.MAX_VALUE;
-        double rlTol = 0;
+        double maxReactivePowerMismatch = 0;
         int maxSwitch = 0;
         for (var ol : p.getOuterLoops()) {
             if (ol instanceof com.powsybl.openloadflow.ac.outerloop.DistributedSlackOuterLoop ds) {
@@ -34,11 +34,11 @@ final class GpuSolveSettings {
                 // (AbstractAcOuterLoopConfig: convEpsPerEq under UNIFORM_CRITERIA, maxReactivePowerMismatch / SB
                 // under PER_EQUATION_TYPE_CRITERIA), the same value GpuSaRunScope derives for the batched SA.
                 // Dividing it by SB again made the per-equation band 100 times too tight.
-                rlTol = rl.getMaxReactivePowerMismatch();
+                maxReactivePowerMismatch = rl.getMaxReactivePowerMismatch();
                 maxSwitch = rl.getMaxPqPvSwitch();
             }
         }
-        return new double[] {slackTol, rlTol, p.getMaxOuterLoopIterations(), maxSwitch};
+        return new double[] {slackTol, maxReactivePowerMismatch, p.getMaxOuterLoopIterations(), maxSwitch};
     }
 
     static double deviceConvEpsPerEq(NewtonRaphsonParameters parameters) {

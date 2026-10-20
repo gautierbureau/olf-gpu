@@ -297,7 +297,7 @@ void tvcStep(BatchSolverContext* ctx, DriverPass& drv) {
     size_t nst = static_cast<size_t>(nS) * nTvc;
     tvcDeadbandCheckBatch<<<grid(static_cast<int>(nst)), BLOCK, 0, ctx->stream>>>(nTvc, nS, n, ctx->nElements,
             ctx->dTvcVRow.as<int>(), ctx->dTvcTargetV.as<double>(), ctx->dTvcHalfDb.as<double>(),
-            ctx->dTvcElemIndex.as<int>(), ctx->dDisabled.as<char>(), ctx->dX.as<double>(), ctx->dRlActive.as<char>(),
+            ctx->dTvcElemIndex.as<int>(), ctx->dDisabled.as<char>(), ctx->dX.as<double>(), ctx->dOuterLoopCheckActive.as<char>(),
             ctx->dTvcOutOfDb.as<char>(), ctx->dTvcDiffV.as<double>());
     std::vector<char> outOfDb(nst);
     CUDA_CHECK(cudaMemcpyAsync(outOfDb.data(), ctx->dTvcOutOfDb.p, nst, cudaMemcpyDeviceToHost, ctx->stream));
@@ -328,13 +328,13 @@ void tvcStep(BatchSolverContext* ctx, DriverPass& drv) {
                 ctx->dDx.as<double>(), ctx->dTvcSensi.as<double>());
     }
     CUDA_CHECK(cudaMemcpy(ctx->dActive.p, active.data(), nS, cudaMemcpyHostToDevice));   // as it was
-    // Tap decision; a moved scenario is an UNSTABLE verdict (dRlSwitched), like every device loop.
+    // Tap decision; a moved scenario is an UNSTABLE verdict (dOuterLoopUnstable), like every device loop.
     tvcGroupDecisionBatch<<<grid(ctx->nTvcGroups * nS), BLOCK, 0, ctx->stream>>>(ctx->nTvcGroups, nS, nTvc,
             ctx->dTvcGroupPtr.as<int>(), ctx->dTvcGroupCtrl.as<int>(),
             ctx->dTvcOutOfDb.as<char>(), ctx->dTvcDiffV.as<double>(), ctx->dTvcSensi.as<double>(), ctx->dTvcHalfDb.as<double>(),
             ctx->dTvcTapPtr.as<int>(), ctx->dTvcTapData.as<double>(),
             ctx->dTvcCurTap.as<int>(), ctx->dTvcRatchetDir.as<int>(), ctx->dTvcRatchetCount.as<int>(),
-            ctx->dTvcRatchetAllowed.as<int>(), ctx->tvcMaxTapShift, 0.05, ctx->dRlSwitched.as<char>());
+            ctx->dTvcRatchetAllowed.as<int>(), ctx->tvcMaxTapShift, 0.05, ctx->dOuterLoopUnstable.as<char>());
     // Apply: rho target + state seed on the moved pairs, then the pi rows through the tap-override list.
     tvcApplyRhoBatch<<<grid(static_cast<int>(nst)), BLOCK, 0, ctx->stream>>>(nTvc, nS, n,
             ctx->dTvcRhoRow.as<int>(), ctx->dTvcTapPtr.as<int>(), ctx->dTvcTapData.as<double>(),

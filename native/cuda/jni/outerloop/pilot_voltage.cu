@@ -27,8 +27,8 @@ namespace olfgpu {
 // group's DISTR_Q rows WEIGHTED (it has no Q balance of its own), so emitting it raw at the carrier row
 // would double-count it. Once a reactive limit pins it, OLF activates its BUS_TARGET_Q and the carrier row
 // is exactly where that balance goes — the relocation the CPU does statically, here per scenario.
-__global__ void pilotSelfGateBatch(int nQr, int nScenarios, int nrl, const int* psPilotEntry,
-                                   const char* limitType, const char* rlIslanded, char* psSkip) {
+__global__ void pilotSelfGateBatch(int nQr, int nScenarios, int nReactiveLimitEntries, const int* psPilotEntry,
+                                   const char* limitType, const char* reactiveLimitIslanded, char* psSkip) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nQr * nScenarios) return;
     int g = tid % nQr;
@@ -37,16 +37,16 @@ __global__ void pilotSelfGateBatch(int nQr, int nScenarios, int nrl, const int* 
     char skip;
     if (e == PS_NO_ENTRY) {
         skip = 1;                                            // pilot-self, never pinnable ⇒ always controlling
-    } else if (e >= 0 && e < nrl) {
+    } else if (e >= 0 && e < nReactiveLimitEntries) {
         // An ISLANDED pilot (its section lost with the contingency) has no balance anywhere — OLF removed
-        // the bus. Its limit type still reads its BASE pin (initRlLimitTypeBatch seeds an enrolled pilot's
+        // the bus. Its limit type still reads its BASE pin (initReactiveLimitQLimitTypeBatch seeds an enrolled pilot's
         // kind from the base), and "pinned" here means "its balance rides the carrier": the carrier's own
         // DISTR_Q was suppressed for a balance that does not exist and the row went empty. Measured on
         // rte6515 BUS-6194_BBS_1 (pilot VL-6194_0 base-pinned MAX_Q then islanded: FAILED where OLF
         // converges with 60 violations) and BUS-6003_BBS_1 (0.473 MW of distributed active power).
         // Unpinned or islanded ⇒ skip; pinned and alive ⇒ its balance rides the carrier.
-        bool islanded = rlIslanded != nullptr && rlIslanded[(size_t) s * nrl + e];
-        skip = (islanded || limitType[(size_t) s * nrl + e] == GpuQLimitType::NONE) ? 1 : 0;
+        bool islanded = reactiveLimitIslanded != nullptr && reactiveLimitIslanded[(size_t) s * nReactiveLimitEntries + e];
+        skip = (islanded || limitType[(size_t) s * nReactiveLimitEntries + e] == GpuQLimitType::NONE) ? 1 : 0;
     } else {
         skip = 0;                                            // not a pilot-self group
     }
@@ -110,7 +110,7 @@ __global__ void applyPilotQDeltasBatch(int nDelta, const int* key, const double*
 // network.xiidm/LNER: the three members of IZUM_0's group unpinned on a 1.2e-6 pu knife-edge, the
 // device solved one pass with three sharing rows and no voltage identity, re-pinned two of the three
 // where OLF re-pinned all three, and the distributed slack ended 0.151 MW apart. The restore below
-// takes the group's V target from the pilot's local entry (qrPilotRlEntry), per-scenario overrides
+// takes the group's V target from the pilot's local entry (reactiveRelocationPilotReactiveLimitEntry), per-scenario overrides
 // included, and the local entry itself no longer decides anything. A flip (either direction) marks
 // the scenario switched: the row swap needs a re-solve even when it rides a no-switch
 // warm-continuation pass.
@@ -118,31 +118,31 @@ __global__ void updatePilotVeqBatch(int nQr, int nScenarios, int n,
                                     const int* qrPtr, const int* qrRows, const char* qrGenVc,
                                     const double* pilotQ, int* mode, double* target,
                                     char* veqOff, double* savedVTarget,
-                                    const char* rlActive, char* switched,
+                                    const char* outerLoopCheckActive, char* switched,
                                     int nFrozen, const int* frozenSlotRow,
                                     const int* psEntry,
-                                    const char* limitType, int nrl, const double* rlMinQ, const double* rlMaxQ,
-                                    const double* rlLoadQ, const double* rlInitTgtQ, int cvStride,
-                                    const double* rlVtarget,
-                                    const int* qrPilotRlEntry,
-                                    int nRlVtOv, const int* rlVtOvSlotIdx, const double* rlVtOvVal,
-                                    const double* svcRlVt,
+                                    const char* limitType, int nReactiveLimitEntries, const double* reactiveLimitMinQ, const double* reactiveLimitMaxQ,
+                                    const double* reactiveLimitLoadQ, const double* reactiveLimitInitialTargetQ, int cvStride,
+                                    const double* reactiveLimitTargetV,
+                                    const int* reactiveRelocationPilotReactiveLimitEntry,
+                                    int nReactiveLimitTargetVOverrides, const int* reactiveLimitTargetVOverrideScenarioEntry, const double* reactiveLimitTargetVOverrideValue,
+                                    const double* secondaryVoltageControlReactiveLimitTargetV,
                                     int nDistrQMembers, const int* distrQMemberRelocationGroup, const int* distrQMemberReactiveLimitEntry,
-                                    const char* rlIslandedMask,
+                                    const char* reactiveLimitIslanded,
                                 const char* distrQSubgroup, const int* qrMemberStart, double tol,
-                                const char* rlGenLost, const int* qrDepBase, const int* relocOwn,
+                                const char* reactiveLimitGeneratorsLost, const int* qrDepBase, const int* relocOwn,
                                 const double* pinTargetIn) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nQr * nScenarios) return;
     int g = tid % nQr;
     int s = tid / nQr;
     if (!qrGenVc[g]) return;
-    // The RL phase owns the flip/restore below (rlActive); the BOOKING of a group lost in the base runs at the
-    // post-seed launch too, when rlActive is still 0 — without it the unpin of such a pilot at its first RL pass
+    // The RL phase owns the flip/restore below (outerLoopCheckActive); the BOOKING of a group lost in the base runs at the
+    // post-seed launch too, when outerLoopCheckActive is still 0 — without it the unpin of such a pilot at its first RL pass
     // found veqOff = 0, restored nothing, and the pilot's row stayed a power row with its raw q gated off
     // (unpinned ⇒ psSkip): an empty row and a bad solve (rte6515 [5000,6000] BUS-6003_BBS_2, slot 797,
     // max-iter-bad-solve at RL#2).
-    bool act = rlActive[s] != 0;
+    bool act = outerLoopCheckActive[s] != 0;
     int pilotRow = qrRows[qrPtr[g]];
     // A DEPENDENT pilot (qrDepBase): its identity sits on its own V row once its parent coupler is dead (the dummy
     // row an identity) and on the dummy row as a cross identity while the coupler lives; the group is live only
@@ -163,30 +163,30 @@ __global__ void updatePilotVeqBatch(int nQr, int nScenarios, int n,
     // BUS_TARGET_Q, whose target is its Q LIMIT (the RL pin's value), not the group's captured pilot-Q
     // target (0 here — a pin with the wrong target moved V past the group target and unpinned it again).
     int pe = psEntry != nullptr ? psEntry[g] : -1;
-    char plt = pe >= 0 && limitType != nullptr ? limitType[(size_t) s * nrl + pe] : 0;
+    char plt = pe >= 0 && limitType != nullptr ? limitType[(size_t) s * nReactiveLimitEntries + pe] : 0;
     double flipTarget = pilotQ[(size_t) s * nQr + g];
     bool continuedFlip = false;
     if (pe >= 0 && plt != GpuQLimitType::NONE) {
-        size_t li = cvStride ? (size_t) s * nrl + pe : (size_t) pe;
-        double lim = (plt == GpuQLimitType::MIN_REALISTIC_V || plt == GpuQLimitType::MAX_REALISTIC_V) && rlInitTgtQ != nullptr ? rlInitTgtQ[pe]
-                   : isMinLimit(plt) ? rlMinQ[li] : rlMaxQ[li];
-        // A pilot whose bus LOST EVERY GENERATOR this scenario (seeded GpuQLimitType::FROZEN through setBatchRlGenLost)
+        size_t li = cvStride ? (size_t) s * nReactiveLimitEntries + pe : (size_t) pe;
+        double lim = (plt == GpuQLimitType::MIN_REALISTIC_V || plt == GpuQLimitType::MAX_REALISTIC_V) && reactiveLimitInitialTargetQ != nullptr ? reactiveLimitInitialTargetQ[pe]
+                   : isMinLimit(plt) ? reactiveLimitMinQ[li] : reactiveLimitMaxQ[li];
+        // A pilot whose bus LOST EVERY GENERATOR this scenario (seeded GpuQLimitType::FROZEN through setBatchReactiveLimitGeneratorsLost)
         // is not pinned at any limit: OLF's BUS_TARGET_Q there has no generator term at all, only the bus's
-        // load. Falling through to rlMaxQ asked the bus for its lost generator's MAXIMUM reactive output:
+        // load. Falling through to reactiveLimitMaxQ asked the bus for its lost generator's MAXIMUM reactive output:
         // rte6515 GEN-1251 with every busbar section in the list (VL-1251_0, the pilot of a two-section group
         // whose other member is pinned), target 1.0 pu against OLF's 0.0, the bus driven from 0.572 to 0.94 pu
         // for the first passes, 4.18 MW of slack read where OLF reads -0.33, and -0.384 MW distributed against 0.
-        if (plt == GpuQLimitType::FROZEN && rlGenLost != nullptr && rlGenLost[(size_t) s * nrl + pe]) {
+        if (plt == GpuQLimitType::FROZEN && reactiveLimitGeneratorsLost != nullptr && reactiveLimitGeneratorsLost[(size_t) s * nReactiveLimitEntries + pe]) {
             lim = 0.0;
         }
-        flipTarget = lim - rlLoadQ[li];
+        flipTarget = lim - reactiveLimitLoadQ[li];
         // A pilot whose group the PREVIOUS solve had already flipped (a strategy pair continuing its contingency):
         // OLF restores that solve's frozen target Q and re-freezes it only past the reactive power mismatch. The
         // seed launch reads the base limits, which a curve moved since (rte6515 BUS-6066_BBS_1, VL-6231_0: flipped
         // at 0.576013 against the parent's 0.574331, then re-frozen at the pair's limit - 3.8e-5 kV on every
         // strategy, even one changing nothing).
-        if (pinTargetIn != nullptr && plt >= 1 && plt <= 4 && !isnan(pinTargetIn[(size_t) s * nrl + pe])) {
-            flipTarget = pinTargetIn[(size_t) s * nrl + pe];
+        if (pinTargetIn != nullptr && plt >= 1 && plt <= 4 && !isnan(pinTargetIn[(size_t) s * nReactiveLimitEntries + pe])) {
+            flipTarget = pinTargetIn[(size_t) s * nReactiveLimitEntries + pe];
             continuedFlip = true;
         }
     }
@@ -212,15 +212,15 @@ __global__ void updatePilotVeqBatch(int nQr, int nScenarios, int n,
     // 1.902, and the run ended 3.7e-3 MW apart in distributed active power).
     bool entryKnown = false;
     bool anyEnabled = false;
-    if (pe >= 0 && distrQMemberRelocationGroup != nullptr && distrQMemberReactiveLimitEntry != nullptr && limitType != nullptr && nrl > 0) {
+    if (pe >= 0 && distrQMemberRelocationGroup != nullptr && distrQMemberReactiveLimitEntry != nullptr && limitType != nullptr && nReactiveLimitEntries > 0) {
         for (int m = 0; m < nDistrQMembers; m++) {
             if (distrQMemberRelocationGroup[m] != g) continue;
             if (distrQSubgroup != nullptr && distrQSubgroup[(size_t) s * nDistrQMembers + m] != 0) continue;   // another subgroup's controller (#71)
             int re = distrQMemberReactiveLimitEntry[m];
-            if (re < 0 || re >= nrl) continue;
-            if (rlIslandedMask != nullptr && rlIslandedMask[(size_t) s * nrl + re]) continue;   // OLF disables it
+            if (re < 0 || re >= nReactiveLimitEntries) continue;
+            if (reactiveLimitIslanded != nullptr && reactiveLimitIslanded[(size_t) s * nReactiveLimitEntries + re]) continue;   // OLF disables it
             entryKnown = true;
-            if (limitType[(size_t) s * nrl + re] == GpuQLimitType::NONE) {  // still controlling
+            if (limitType[(size_t) s * nReactiveLimitEntries + re] == GpuQLimitType::NONE) {  // still controlling
                 anyEnabled = true;
                 break;
             }
@@ -269,20 +269,20 @@ __global__ void updatePilotVeqBatch(int nQr, int nScenarios, int n,
         // 0.570758104 and the network sat 5.68e-5 kV off.
         target[pi] = flipTarget;
         switched[s] = 1;
-    } else if (lost && !veqOff[fi] && pe >= 0 && mode[pi] == GpuRowMode::EQUATION && rlVtarget != nullptr) {
+    } else if (lost && !veqOff[fi] && pe >= 0 && mode[pi] == GpuRowMode::EQUATION && reactiveLimitTargetV != nullptr) {
         // Lost already in the BASE: the activation laid the pilot's row out as its own Q balance (OLF's
         // BUS_TARGET_V inactive, BUS_TARGET_Q active). Book it as flipped so a member switching back later
         // restores the V identity at the group's target — without this the restore never fired and the
         // pilot stayed a power row beside a member that had resumed control.
         veqOff[fi] = 1;
-        savedVTarget[fi] = rlVtarget[pe];
+        savedVTarget[fi] = reactiveLimitTargetV[pe];
         // ...and if this scenario's outage took the pilot bus's every generator, its balance target loses the
         // generator's pinned output NOW, from the first fill: OLF's BUS_TARGET_Q there has no generator term.
         // The re-stamp branch above only runs inside the reactive-limits phase, so the slack phase solved with
         // the lost generator's pin still injected - rte6515 GEN-6003 with every busbar section in the list:
         // VL-6003_0 kept 0.7477 pu against OLF's 0.0 through the first passes, and the first slack read was
         // 0.049 MW off (238.816 MW distributed against OLF's 238.865).
-        if (plt == GpuQLimitType::FROZEN && rlGenLost != nullptr && rlGenLost[(size_t) s * nrl + pe]) {
+        if (plt == GpuQLimitType::FROZEN && reactiveLimitGeneratorsLost != nullptr && reactiveLimitGeneratorsLost[(size_t) s * nReactiveLimitEntries + pe]) {
             target[pi] = flipTarget;
         }
         // ...and a group the previous solve had flipped at another pin (a strategy pair continuing its
@@ -291,15 +291,15 @@ __global__ void updatePilotVeqBatch(int nQr, int nScenarios, int n,
         if (continuedFlip) {
             target[pi] = flipTarget;
         }
-    } else if (!lost && pe < 0 && mode[pi] == GpuRowMode::EQUATION && qrPilotRlEntry != nullptr && qrPilotRlEntry[g] >= 0) {
+    } else if (!lost && pe < 0 && mode[pi] == GpuRowMode::EQUATION && reactiveRelocationPilotReactiveLimitEntry != nullptr && reactiveRelocationPilotReactiveLimitEntry[g] >= 0) {
         // The same base-lost case for a PURE-TRANSIT pilot (not one of its own controllers, so no
         // psEntry): the base carried no saved V target - the pilot's own local reactive-limit entry
         // holds the group's target (per-scenario overrides included). A member just unpinned, and
         // OLF gives the pilot its V equation back IN THAT PASS (network.xiidm/LNER: IZUM_0's three
         // members unpinned on a 7.85e-07 pu margin; restoring a pass late cost 0.151 MW of slack).
-        int le = qrPilotRlEntry[g];
+        int le = reactiveRelocationPilotReactiveLimitEntry[g];
         mode[pi] = GpuRowMode::FIXED_VARIABLE;
-        target[pi] = rlTargetOf(nRlVtOv, rlVtOvSlotIdx, rlVtOvVal, svcRlVt, nrl, s, le, rlVtarget[le]);
+        target[pi] = reactiveLimitTargetVOf(nReactiveLimitTargetVOverrides, reactiveLimitTargetVOverrideScenarioEntry, reactiveLimitTargetVOverrideValue, secondaryVoltageControlReactiveLimitTargetV, nReactiveLimitEntries, s, le, reactiveLimitTargetV[le]);
         switched[s] = 1;
     }
 }
@@ -307,39 +307,39 @@ __global__ void updatePilotVeqBatch(int nQr, int nScenarios, int n,
 void launchPilotVeqInner(BatchSolverContext* ctx, DriverPass& drv, bool staticLimits, bool continuedPins) {
     const int& n = drv.n;
     const int& nS = drv.nS;
-    const bool& useDynRlLimits = drv.useDynRlLimits;
+    const bool& usePerScenarioReactiveLimits = drv.usePerScenarioReactiveLimits;
     const double& REACTIVE_LIMIT_TOL = drv.reactiveLimitTol;
-    const int& nRlVtOv = drv.nRlVtOv;
-    DeviceBuf& dRlVtOvSlotIdx = drv.dRlVtOvSlotIdx;
-    DeviceBuf& dRlVtOvVal = drv.dRlVtOvVal;
-    const bool useDyn = useDynRlLimits && !staticLimits;
+    const int& nReactiveLimitTargetVOverrides = drv.nReactiveLimitTargetVOverrides;
+    DeviceBuf& dReactiveLimitTargetVOverrideScenarioEntry = drv.dReactiveLimitTargetVOverrideScenarioEntry;
+    DeviceBuf& dReactiveLimitTargetVOverrideValue = drv.dReactiveLimitTargetVOverrideValue;
+    const bool useDyn = usePerScenarioReactiveLimits && !staticLimits;
     if (ctx->hasDistrQRelocationGroups && ctx->st->nQr > 0) {
         updatePilotVeqBatch<<<grid(ctx->st->nQr * nS), BLOCK, 0, ctx->stream>>>(
                     ctx->st->nQr, nS, n,
                     ctx->st->dQrPtr.as<int>(), ctx->st->dQrRows.as<int>(), ctx->dQrGenVc.as<char>(),
                     ctx->dQrPilotQ.as<double>(), ctx->dMode.as<int>(), ctx->dTarget.as<double>(),
                     ctx->dQrVeqOff.as<char>(), ctx->dQrSavedVT.as<double>(),
-                    ctx->dRlActive.as<char>(), ctx->dRlSwitched.as<char>(),
+                    ctx->dOuterLoopCheckActive.as<char>(), ctx->dOuterLoopUnstable.as<char>(),
                     ctx->nFrozenRow, ctx->nFrozenRow ? ctx->dFrozenRow.as<int>() : nullptr,
                     psEntryPtr(ctx),
-                ctx->dRlLimitType.p ? ctx->dRlLimitType.as<char>() : nullptr, ctx->nrl,
-                useDyn ? ctx->dRlMinQDyn.as<double>() : ctx->dRlMinQ.as<double>(),
-                useDyn ? ctx->dRlMaxQDyn.as<double>() : ctx->dRlMaxQ.as<double>(),
-                useDyn ? ctx->dRlLoadQDyn.as<double>() : ctx->dRlLoadQ.as<double>(),
-                ctx->rlRobust ? ctx->dRlInitTgtQ.as<double>() : nullptr, useDyn ? 1 : 0,
-                ctx->dRlVtarget.p ? ctx->dRlVtarget.as<double>() : nullptr,
-                ctx->dQrPilotRlEntry.p ? ctx->dQrPilotRlEntry.as<int>() : nullptr,
-                nRlVtOv, nRlVtOv > 0 ? dRlVtOvSlotIdx.as<int>() : nullptr,
-                nRlVtOv > 0 ? dRlVtOvVal.as<double>() : nullptr,
-                ctx->nSvc > 0 ? ctx->dSvcRlVt.as<double>() : nullptr,
+                ctx->dReactiveLimitQLimitType.p ? ctx->dReactiveLimitQLimitType.as<char>() : nullptr, ctx->nReactiveLimitEntries,
+                useDyn ? ctx->dReactiveLimitMinQPerScenario.as<double>() : ctx->dReactiveLimitMinQ.as<double>(),
+                useDyn ? ctx->dReactiveLimitMaxQPerScenario.as<double>() : ctx->dReactiveLimitMaxQ.as<double>(),
+                useDyn ? ctx->dReactiveLimitLoadQPerScenario.as<double>() : ctx->dReactiveLimitLoadQ.as<double>(),
+                ctx->reactiveLimitsRobustMode ? ctx->dReactiveLimitInitialTargetQ.as<double>() : nullptr, useDyn ? 1 : 0,
+                ctx->dReactiveLimitTargetV.p ? ctx->dReactiveLimitTargetV.as<double>() : nullptr,
+                ctx->dReactiveRelocationPilotReactiveLimitEntry.p ? ctx->dReactiveRelocationPilotReactiveLimitEntry.as<int>() : nullptr,
+                nReactiveLimitTargetVOverrides, nReactiveLimitTargetVOverrides > 0 ? dReactiveLimitTargetVOverrideScenarioEntry.as<int>() : nullptr,
+                nReactiveLimitTargetVOverrides > 0 ? dReactiveLimitTargetVOverrideValue.as<double>() : nullptr,
+                ctx->nSvc > 0 ? ctx->dSecondaryVoltageControlReactiveLimitTargetV.as<double>() : nullptr,
                 ctx->nDistrQMembers, ctx->dDistrQMemberRelocationGroup.p ? ctx->dDistrQMemberRelocationGroup.as<int>() : nullptr,
                 ctx->dDistrQMemberReactiveLimitEntry.p ? ctx->dDistrQMemberReactiveLimitEntry.as<int>() : nullptr,
-                ctx->nRlIslanded > 0 ? ctx->dRlIslanded.as<char>() : nullptr,
+                ctx->nReactiveLimitIslanded > 0 ? ctx->dReactiveLimitIslanded.as<char>() : nullptr,
                 ctx->hasDistrQSubgroups ? ctx->dDistrQSubgroup.as<char>() : nullptr, ctx->hasDistrQSubgroups ? ctx->dQrMemberStart.as<int>() : nullptr,
-                REACTIVE_LIMIT_TOL, ctx->nRlGenLost > 0 ? ctx->dRlGenLost.as<char>() : nullptr,
+                REACTIVE_LIMIT_TOL, ctx->nReactiveLimitGeneratorsLost > 0 ? ctx->dReactiveLimitGeneratorsLost.as<char>() : nullptr,
                 ctx->st->dQrDepBase.p ? ctx->st->dQrDepBase.as<int>() : nullptr,
                 ctx->st->dRelocOwn.p ? ctx->st->dRelocOwn.as<int>() : nullptr,
-                continuedPins && ctx->hasRlPinTgtIn ? ctx->dRlPinTgtIn.as<double>() : nullptr);
+                continuedPins && ctx->hasReactiveLimitSeedTargetQ ? ctx->dReactiveLimitSeedTargetQ.as<double>() : nullptr);
     }
 }
 

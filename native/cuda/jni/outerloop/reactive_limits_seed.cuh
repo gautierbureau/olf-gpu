@@ -10,26 +10,26 @@
 
 namespace olfgpu {
 
-__global__ void initRlLimitTypeBatch(int nrl, int nScenarios, int n, const int* rlVrow, const int* rlQrow,
-                                     const double* rlVtarget, const char* rlMonitored,
+__global__ void initReactiveLimitQLimitTypeBatch(int nReactiveLimitEntries, int nScenarios, int n, const int* reactiveLimitVoltageRow, const int* reactiveLimitReactivePowerRow,
+                                     const double* reactiveLimitTargetV, const char* reactiveLimitFlags,
                                      const int* baseMode, const double* x, char* limitType,
-                                     int nRlVtOv, const int* rlVtOvSlotIdx, const double* rlVtOvVal, const double* svcRlVt,
-                                     const char* rlRemote, const int* rlCmpVrow,
-                                     const double* target, const double* rlMinQb, const double* rlMaxQb,
-                                     const double* rlLoadQb, const char* rlBaseLt,
-                                     const int* psEntry, int nQr, const char* rlGenLost);
+                                     int nReactiveLimitTargetVOverrides, const int* reactiveLimitTargetVOverrideScenarioEntry, const double* reactiveLimitTargetVOverrideValue, const double* secondaryVoltageControlReactiveLimitTargetV,
+                                     const char* reactiveLimitVoltageControlRole, const int* reactiveLimitComparedVoltageRow,
+                                     const double* target, const double* reactiveLimitBaseMinQ, const double* reactiveLimitBaseMaxQ,
+                                     const double* reactiveLimitBaseLoadQ, const char* reactiveLimitBaseQLimitType,
+                                     const int* psEntry, int nQr, const char* reactiveLimitGeneratorsLost);
 
-__global__ void seedRlModeFromState(int nrl, int nScenarios, int n, const int* rlVrow, const int* rlQrow,
-                                    const double* rlMinQ, const double* rlMaxQ, const double* rlLoadQ,
+__global__ void seedReactiveLimitRowModeFromState(int nReactiveLimitEntries, int nScenarios, int n, const int* reactiveLimitVoltageRow, const int* reactiveLimitReactivePowerRow,
+                                    const double* reactiveLimitMinQ, const double* reactiveLimitMaxQ, const double* reactiveLimitLoadQ,
                                     const char* limitType, int* mode, double* target, int cvStride,
-                                    const char* rlRemote, double* savedTarget, char* savedMode,
-                                    const char* rlBaseLt, const int* psEntry, int nQr,
-                                    const double* rlVtarget, int nRlVtOv, const int* rlVtOvSlotIdx, const double* rlVtOvVal,
-                                    const double* svcRlVt, const char* rlLocalOv, const double* rlLocalVt,
-                                    const double* pinTargetIn, const char* rlIslanded);
+                                    const char* reactiveLimitVoltageControlRole, double* savedTarget, char* savedMode,
+                                    const char* reactiveLimitBaseQLimitType, const int* psEntry, int nQr,
+                                    const double* reactiveLimitTargetV, int nReactiveLimitTargetVOverrides, const int* reactiveLimitTargetVOverrideScenarioEntry, const double* reactiveLimitTargetVOverrideValue,
+                                    const double* secondaryVoltageControlReactiveLimitTargetV, const char* reactiveLimitLocalOverride, const double* reactiveLimitLocalTargetV,
+                                    const double* pinTargetIn, const char* reactiveLimitIslanded);
 
-__global__ void exportRlPinTargets(int nrl, int nScenarios, int n, const int* rlVrow, const int* rlQrow,
-                                   const char* limitType, const int* mode, const double* target, const char* rlIslanded,
+__global__ void exportReactiveLimitTargetQ(int nReactiveLimitEntries, int nScenarios, int n, const int* reactiveLimitVoltageRow, const int* reactiveLimitReactivePowerRow,
+                                   const char* limitType, const int* mode, const double* target, const char* reactiveLimitIslanded,
                                    int nQr, const int* psEntry, const int* qrPtr, const int* qrRows, const char* veqOff,
                                    const int* qrDepBase, double* out);
 

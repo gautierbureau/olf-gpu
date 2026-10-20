@@ -33,19 +33,19 @@ public final class GpuReactiveLimitsOuterLoop {
      *  target vector picks the limit up. A pin the device released (a PQ→PV switch-back) is undone the
      *  way OLF undoes it. Limit types 3/4 are robust mode's MIN/MAX_REALISTIC_V freezes: the pin is the
      *  same, only the recorded type differs (and OLF never re-freezes those at a moved Q limit). */
-    public static void applyToNetwork(LfNetwork network, int[] rlStateOut, GpuAcData data, double[] deviceTargets, int[] devModes) {
-        if (rlStateOut == null || data == null || data.reactiveLimits().busNum() == null) {
+    public static void applyToNetwork(LfNetwork network, int[] reactiveLimitsFinalState, GpuAcData data, double[] deviceTargets, int[] devModes) {
+        if (reactiveLimitsFinalState == null || data == null || data.reactiveLimits().busNum() == null) {
             return;
         }
-        int nrl = Math.min(rlStateOut.length, data.reactiveLimits().busNum().length);
-        for (int i = 0; i < nrl; i++) {
-            int limitType = GpuReactiveLimitsState.limitType(rlStateOut[i]);
+        int nReactiveLimitEntries = Math.min(reactiveLimitsFinalState.length, data.reactiveLimits().busNum().length);
+        for (int i = 0; i < nReactiveLimitEntries; i++) {
+            int limitType = GpuReactiveLimitsState.limitType(reactiveLimitsFinalState[i]);
             LfBus bus = network.getBus(data.reactiveLimits().busNum()[i]);
             if (bus == null) {
                 continue;
             }
-            if (System.getenv("OLF_GPU_BATCH_TRACE") != null && (limitType != GpuQLimitType.NONE || GpuReactiveLimitsState.pvPqSwitchCount(rlStateOut[i]) != 0)) {
-                System.err.println("WB_RL bus=" + bus.getId() + " limitType=" + limitType + " switchCount=" + GpuReactiveLimitsState.pvPqSwitchCount(rlStateOut[i])
+            if (System.getenv("OLF_GPU_BATCH_TRACE") != null && (limitType != GpuQLimitType.NONE || GpuReactiveLimitsState.pvPqSwitchCount(reactiveLimitsFinalState[i]) != 0)) {
+                System.err.println("WB_RL bus=" + bus.getId() + " limitType=" + limitType + " switchCount=" + GpuReactiveLimitsState.pvPqSwitchCount(reactiveLimitsFinalState[i])
                         + " vcEnabled=" + bus.isGeneratorVoltageControlEnabled() + " qLimitType=" + bus.getQLimitType().map(Object::toString).orElse("-")
                         + " remote=" + data.reactiveLimits().voltageControlRole()[i]);
             }
@@ -92,7 +92,7 @@ public final class GpuReactiveLimitsOuterLoop {
         int vRow = vRowIn;
         // First, the COUPLER-TREE RELOCATION: a relocated child's reactive balance — and so the target the pin
         // wrote — lives on its parent coupler's DUMMY_Q row, which is exactly where the native pass put it
-        // (rlQrow). Reading the bus's own row instead read the coupler's ZERO_V target as a reactive limit and
+        // (reactiveLimitReactivePowerRow). Reading the bus's own row instead read the coupler's ZERO_V target as a reactive limit and
         // froze that on the bus. Mode 0 at the relocated row means the coupler is open here, so the equations
         // are back home and the own row is right (the same per-scenario test the device makes).
         int relocated = relocatedPinRow(data, vRow);
@@ -127,7 +127,7 @@ public final class GpuReactiveLimitsOuterLoop {
 
     /** The relocated {@code DUMMY_Q} row that hosts the reactive balance of the bus whose own {@code BUS_V} row
      *  is {@code vRow}, or {@code vRow} itself when that bus is not a relocated coupler child. The Java twin of
-     *  the native {@code rlQrow} map, derived from the same zero-impedance pack. */
+     *  the native {@code reactiveLimitReactivePowerRow} map, derived from the same zero-impedance pack. */
     private static int relocatedPinRow(GpuAcData data, int vRow) {
         int[] zi = data.zeroImpedanceBranch().indices();
         if (zi == null || vRow < 0) {

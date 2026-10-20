@@ -48,7 +48,7 @@ record ChunkInputs(List<BatchContingency> contingencies, ChunkInputs.BaseCase ba
     /** The run's driver phases, its AC-emulation HVDC controllers (null without the HVDC loops) and the
      *  reactive-capability curve and forced-target-Q channels. */
     record DevicePhaseInputs(DevicePhases.Built phases, List<GpuHvdcAcEmulationLimitsOuterLoop.Ctl> hvdcControllers,
-                             ReactiveCapabilityCurves.Channel rlCurves, ForceTargetQInReactiveLimits.Channel forcedTargetQ) {
+                             ReactiveCapabilityCurves.Channel reactiveCapabilityCurves, ForceTargetQInReactiveLimits.Channel forcedTargetQ) {
     }
 
     /** Where the results go, per contingency index: the result row (null = route to the CPU), the replayed loss

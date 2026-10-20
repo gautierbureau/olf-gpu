@@ -11,21 +11,21 @@
 namespace olfgpu {
 
 // Kernels the driver launches.
-__global__ void pilotRowAllPinnedBatch(int nEntries, int nScenarios, int n, int nrl,
+__global__ void pilotRowAllPinnedBatch(int nEntries, int nScenarios, int n, int nReactiveLimitEntries,
                                        const int* entSlot, const int* entRow, const double* entQTarget,
-                                       const int* entOff, const int* entCount, const int* entRlPool,
+                                       const int* entOff, const int* entCount, const int* survivorReactiveLimitEntries,
                                        const char* limitType, int* mode, double* target,
                                        char* flipped, double* savedVTarget,
-                                       const char* rlActive, char* switched);
+                                       const char* outerLoopCheckActive, char* switched);
 
-__global__ void fillRemoteMemberQBatch(int nrmq, int nScenarios, int n, int nElements,
+__global__ void fillRemoteMemberQBatch(int nRemoteMemberReactiveTerms, int nScenarios, int n, int nElements,
                                        int closedBranchOffset, int openBranchOffset,
-                                       const int* rmqRow, const int* rmqElem, const int* rmqSide,
-                                       const int* rmqKind, const double* rmqWeight,
+                                       const int* remoteMemberReactiveTermRow, const int* remoteMemberReactiveTermElement, const int* remoteMemberReactiveTermSide,
+                                       const int* remoteMemberReactiveTermKind, const double* remoteMemberReactiveTermWeight,
                                        const double* closedBranchParameters, const int* closedBranchIndices, const double* shuntParameters, const int* shuntIndices,
                                        const double* openBranchParameters, const int* openBranchIndices,
                                        const double* x, double* qBuf,
-                                       const char* disabled, const char* rlActive,
+                                       const char* disabled, const char* outerLoopCheckActive,
                                        int nR1Ov, const int* r1OvSlotElem, const double* r1OvVal,
                                        int nShuntAdmittanceOverrides, const int* shuntAdmittanceOverrideScenarioElement, const double* shuntAdmittanceOverrideDelta);
 

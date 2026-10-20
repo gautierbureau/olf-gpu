@@ -253,12 +253,12 @@ public final class GpuTransformerVoltageControlOuterLoop {
     }
 
     /** The reactive-limit pack entry of a bus, or −1. */
-    private static int rlEntryOf(int[] rlBusNum, int busNum) {
-        if (rlBusNum == null) {
+    private static int reactiveLimitEntryOf(int[] reactiveLimitBusNum, int busNum) {
+        if (reactiveLimitBusNum == null) {
             return -1;
         }
-        for (int i = 0; i < rlBusNum.length; i++) {
-            if (rlBusNum[i] == busNum) {
+        for (int i = 0; i < reactiveLimitBusNum.length; i++) {
+            if (reactiveLimitBusNum[i] == busNum) {
                 return i;
             }
         }
@@ -293,7 +293,7 @@ public final class GpuTransformerVoltageControlOuterLoop {
      * control. No PV bus in the max mask means OLF sees none either — disable it. In between, the answer
      * depends on which controllers this scenario enabled, and the scenario goes to the CPU.
      */
-    public record FreezeTables(int[] vRow, double[] loadQ, int[] busNum, int[] rlEntry,
+    public record FreezeTables(int[] vRow, double[] loadQ, int[] busNum, int[] reactiveLimitEntry,
                                int[] fixPvRow, int fixWords, int[] minMask, int[] maxMask, int nMembers,
                                FixMaskBuilder builder) {
         public boolean hasCandidates() {
@@ -313,7 +313,7 @@ public final class GpuTransformerVoltageControlOuterLoop {
      *  Null when a candidate is a remote controller. */
     public static FreezeTables buildFreezeTables(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
                                                  List<TransformerController> tcs, double minNominalVOverride,
-                                                 int[] rlBusNum) {
+                                                 int[] reactiveLimitBusNum) {
         double limit = minNominalVoltageLimit(network, minNominalVOverride);
         List<LfBus> candidates = freezeCandidates(network, limit);
         if (candidates == null) {
@@ -328,7 +328,7 @@ public final class GpuTransformerVoltageControlOuterLoop {
         int[] vRow = new int[candidates.size()];
         double[] loadQ = new double[candidates.size()];
         int[] busNum = new int[candidates.size()];
-        int[] rlEntry = new int[candidates.size()];
+        int[] reactiveLimitEntry = new int[candidates.size()];
         for (int c = 0; c < candidates.size(); c++) {
             LfBus bus = candidates.get(c);
             Integer row = busVRows.get(bus.getNum());
@@ -341,8 +341,8 @@ public final class GpuTransformerVoltageControlOuterLoop {
             // REMOTE controller (the controlled bus is not this one): the kernel freezes it as a
             // reactive-limit remote pin and marks its ENTRY, so the DISTR_Q shares renormalize.
             boolean remote = bus.getGeneratorVoltageControl().map(c2 -> c2.getControlledBus() != bus).orElse(false);
-            rlEntry[c] = remote ? rlEntryOf(rlBusNum, bus.getNum()) : -1;
-            if (remote && rlEntry[c] < 0) {
+            reactiveLimitEntry[c] = remote ? reactiveLimitEntryOf(reactiveLimitBusNum, bus.getNum()) : -1;
+            if (remote && reactiveLimitEntry[c] < 0) {
                 // The gate admitted it on the network-only condition but the pack has no entry, so
                 // nothing would carry the frozen limit type and the group's DISTR_Q shares would not
                 // renormalize. Silently skipping the freeze is the one outcome worth refusing.
@@ -379,7 +379,7 @@ public final class GpuTransformerVoltageControlOuterLoop {
         int[] minMask = new int[nMembers * words];
         int[] maxMask = new int[nMembers * words];
         builder.fill(List.of(), minMask, 0, maxMask, 0);       // base topology: no contingency branches
-        return new FreezeTables(vRow, loadQ, busNum, rlEntry, fixPvRow, words, minMask, maxMask, nMembers, builder);
+        return new FreezeTables(vRow, loadQ, busNum, reactiveLimitEntry, fixPvRow, words, minMask, maxMask, nMembers, builder);
     }
 
     /**
@@ -488,7 +488,7 @@ public final class GpuTransformerVoltageControlOuterLoop {
             TransformerVoltageControlNative.setBatchDiscreteTvcFreeze(handle, null, null, null, null);
             return;
         }
-        TransformerVoltageControlNative.setBatchDiscreteTvcFreeze(handle, fz.vRow(), fz.loadQ(), fz.rlEntry(), fz.fixPvRow());
+        TransformerVoltageControlNative.setBatchDiscreteTvcFreeze(handle, fz.vRow(), fz.loadQ(), fz.reactiveLimitEntry(), fz.fixPvRow());
         if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
             System.err.printf("TVD_FREEZE_UPLOAD nCandidates=%d fixPvBuses=%d members=%d%n",
                     fz.vRow().length, fz.fixPvRow().length, fz.nMembers());

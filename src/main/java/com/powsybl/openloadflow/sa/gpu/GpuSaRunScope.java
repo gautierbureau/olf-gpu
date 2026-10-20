@@ -139,7 +139,7 @@ final class GpuSaRunScope {
         //    members). Half-open / zero-impedance q terms at members and pilots ride the ob/zero-impedance
         //    alternate-dest channels since 2026-09-07 — the unclean-member/pilot conditions are
         //    gone (the pre-channel gap was 3.3e-4 kV on a pinned member with one open line).
-        boolean remoteRlUnsupported = remoteRlUnrepresentable(lfNetwork);
+        boolean remoteReactiveLimitsUnsupported = remoteReactiveLimitsUnrepresentable(lfNetwork);
         boolean noSvc = lfNetwork.getBuses().stream()
                 .flatMap(b -> b.getGenerators().stream())
                 .noneMatch(g -> g instanceof com.powsybl.openloadflow.network.LfStaticVarCompensator);
@@ -204,7 +204,7 @@ final class GpuSaRunScope {
         if (dsLoopActive && loadBased && olfGuardParams.isUseLoadModel()) {
             unsupportedOuterLoops.add("DistributedSlack[useLoadModel+loadBased]");
         }
-        if (remoteRlUnsupported && acParameters.getOuterLoops().stream()
+        if (remoteReactiveLimitsUnsupported && acParameters.getOuterLoops().stream()
                 .anyMatch(ol -> ReactiveLimitsOuterLoop.NAME.equals(ol.getName()))) {
             unsupportedOuterLoops.add("ReactiveLimits[remoteGroupPinDynamicsUnrepresentable]");
         }
@@ -353,7 +353,7 @@ final class GpuSaRunScope {
      *  get a relocation table too (their only member's pin IS the all-pinned corner, handled by
      *  the pilot-vEq flip), so every clean group shape is representable. Kept as a method so a
      *  future unrepresentable shape has a place to land. */
-    private static boolean remoteRlUnrepresentable(LfNetwork lfNetwork) {
+    private static boolean remoteReactiveLimitsUnrepresentable(LfNetwork lfNetwork) {
         return false;
     }
 

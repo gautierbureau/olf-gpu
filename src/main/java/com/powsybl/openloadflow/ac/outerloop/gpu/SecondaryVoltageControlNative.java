@@ -34,7 +34,7 @@ public final class SecondaryVoltageControlNative {
      *  set wider than the in-kernel dense system, or an observable on an element the batch does not pack. */
     @SuppressWarnings("java:S107")
     public static native int setBatchSecondaryVc(long handle,
-            int[] ctldVRow, int[] busVRow, int[] rlIdx, double[] baseTargetV,
+            int[] ctldVRow, int[] busVRow, int[] reactiveLimitEntry, double[] baseTargetV,
             double[] minQ, double[] maxQ, double[] loadQ,
             int[] qPtr, int[] qKind, int[] qElem, int[] qBRow,
             int[] zonePtr, int[] zoneCtl, int[] zonePilotRow, double[] zoneTargetV,

@@ -297,13 +297,13 @@ final class InjectionOutagePlanner {
                         live = null;
                         break;
                     }
-                    int reHomedRl = RelocatedRows.rlEntryOf(gpuData, e.getKey());
+                    int reHomedReactiveLimitEntry = RelocatedRows.reactiveLimitEntryOf(gpuData, e.getKey());
                     int crossRow = RelocatedRows.relocQRow(vVar.getRow(), pb.relocRows, outagedZeroImpedanceBranchNums);
                     if (crossRow != vVar.getRow()) {
                         // its own row carries a LIVE coupler's ZERO_V: cross identity on the parent's
                         // DUMMY_Q row (rte6515 BUS-6014_BBS_1/2 VL-6014_3, BUS-6029_BBS_4 VL-6029_2)
-                        live.add(ReHomedEntries.reHomedCrossEntry(crossRow, e.getValue(), reHomedRl,
-                                gpuData.switchedPvToPqInBase(reHomedRl), e.getKey().getTargetQ()));
+                        live.add(ReHomedEntries.reHomedCrossEntry(crossRow, e.getValue(), reHomedReactiveLimitEntry,
+                                gpuData.switchedPvToPqInBase(reHomedReactiveLimitEntry), e.getKey().getTargetQ()));
                         continue;
                     }
                     if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {
@@ -312,11 +312,11 @@ final class InjectionOutagePlanner {
                         // and the RL kernel's "limit drift while pinned" branch writes only the
                         // TARGET, leaving the host's mode 0 in place, so the identity then holds v
                         // at a reactive value.
-                        byte baseLt = gpuData.reactiveLimits().baseQLimitType() != null && reHomedRl >= 0
-                                ? gpuData.reactiveLimits().baseQLimitType()[reHomedRl] : (byte) -1;
+                        byte baseLt = gpuData.reactiveLimits().baseQLimitType() != null && reHomedReactiveLimitEntry >= 0
+                                ? gpuData.reactiveLimits().baseQLimitType()[reHomedReactiveLimitEntry] : (byte) -1;
                         System.err.printf("QUALIFY_TRACE reHomePv bus=%s vRow=%d target=%.6f"
-                                        + " rlEntry=%d baseLimitType=%d%n",
-                                e.getKey().getId(), vVar.getRow(), e.getValue(), reHomedRl, baseLt);
+                                        + " reactiveLimitEntry=%d baseLimitType=%d%n",
+                                e.getKey().getId(), vVar.getRow(), e.getValue(), reHomedReactiveLimitEntry, baseLt);
                     }
                     // A bus PINNED at its reactive limit cannot also hold its voltage: OLF has it
                     // as PQ, and giving it a V identity here is a state the device cannot represent.
@@ -329,14 +329,14 @@ final class InjectionOutagePlanner {
                     // loadQ), outside the realistic band [0.8, 1.2] — the run reported FAILED where
                     // OLF reports CONVERGED, losing all 71 of its violations, the WHOLE violation
                     // gap of the full busbar scope.
-                    if (gpuData.switchedPvToPqInBase(reHomedRl)) {
+                    if (gpuData.switchedPvToPqInBase(reHomedReactiveLimitEntry)) {
                         // Base-pinned: start as the reactive balance at the pinned value, checked as a
                         // LOCAL PV bus at the re-homed voltage target (ROW_PINNED_V). rte6515
                         // BUS-6157_BBS_1 (unpins, re-pins MAX_Q), BUS-6194_BBS_2 (unpins), BUS-6229_BBS_1.
-                        live.add(ReHomedEntries.reHomedPinnedPvEntry(vVar.getRow(), e.getKey().getTargetQ(), e.getValue(), reHomedRl));
+                        live.add(ReHomedEntries.reHomedPinnedPvEntry(vVar.getRow(), e.getKey().getTargetQ(), e.getValue(), reHomedReactiveLimitEntry));
                         continue;
                     }
-                    live.add(ReHomedEntries.reHomedPvEntry(vVar.getRow(), e.getValue(), reHomedRl));
+                    live.add(ReHomedEntries.reHomedPvEntry(vVar.getRow(), e.getValue(), reHomedReactiveLimitEntry));
                 }
             }
             String[] remoteReject = new String[1];
@@ -405,7 +405,7 @@ final class InjectionOutagePlanner {
             // +0.155, a second DS round OLF never runs (+0.471 pu reappearing at the slack)
             // and 1.18e-03 kV at the end.
             pb.islandedDsByIndex[i] = IslandedBuses.islandedDsParticipants(fi.rows(), gpuData, q.islandedBuses());
-            pb.islandedRlByIndex[i] = IslandedBuses.islandedRlControllers(fi.rows(), gpuData);
+            pb.islandedReactiveLimitEntriesByIndex[i] = IslandedBuses.islandedReactiveLimitControllers(fi.rows(), gpuData);
             if (fi.rows().length > 0) {
                 pb.islandingCount++;
             }

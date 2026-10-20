@@ -35,7 +35,7 @@ final class PlanOverrideSeed {
         final double[][] distrRhoOverrideCoefficientByIndex = plan.distrRhoOverrideCoefficientByIndex();
         final int[][] distrRhoOverrideTermByIndex = plan.distrRhoOverrideTermByIndex();
         final int[][] islandedDsByIndex = plan.islandedDsByIndex();
-        final int[][] islandedRlByIndex = plan.islandedRlByIndex();
+        final int[][] islandedReactiveLimitEntriesByIndex = plan.islandedReactiveLimitEntriesByIndex();
         if (!pairPhase && activePowerLossByIndex != null) {
             cl.preLossBySlot[s] = activePowerLossByIndex[ci];
         }
@@ -66,10 +66,10 @@ final class PlanOverrideSeed {
                 cl.dsIslandedList.add(participant);
             }
         }
-        if (islandedRlByIndex != null && islandedRlByIndex[ci] != null) {
-            for (int controller : islandedRlByIndex[ci]) {
-                cl.rlIslandedList.add(s);
-                cl.rlIslandedList.add(controller);
+        if (islandedReactiveLimitEntriesByIndex != null && islandedReactiveLimitEntriesByIndex[ci] != null) {
+            for (int controller : islandedReactiveLimitEntriesByIndex[ci]) {
+                cl.reactiveLimitIslandedScenarioEntryList.add(s);
+                cl.reactiveLimitIslandedScenarioEntryList.add(controller);
             }
         }
         if (distrQSubgroupByIndex != null && distrQSubgroupByIndex[ci] != null && cl.nDistrQMembersAll > 0) {

@@ -159,7 +159,7 @@ final class GpuBatchChunkSolver {
         int[][] distrRhoOverrideTermByIndex = plan.distrRhoOverrideTermByIndex();
         double[][] distrRhoOverrideCoefficientByIndex = plan.distrRhoOverrideCoefficientByIndex();
         int[][] islandedDsByIndex = plan.islandedDsByIndex();
-        int[][] islandedRlByIndex = plan.islandedRlByIndex();
+        int[][] islandedReactiveLimitEntriesByIndex = plan.islandedReactiveLimitEntriesByIndex();
         List<com.powsybl.openloadflow.network.LfHvdc>[] islandedHvdcsByIndex = plan.islandedHvdcsByIndex();
         int[][] distrQSubgroupByIndex = plan.distrQSubgroupByIndex();
         GpuBatchQualification.SlackRelocations slackRelocations = plan.slackRelocations();
@@ -171,7 +171,7 @@ final class GpuBatchChunkSolver {
         double[][] rowCriteria = in.settings().rowCriteria();
         DevicePhases.Built phases = in.phases().phases();
         List<GpuHvdcAcEmulationLimitsOuterLoop.Ctl> hvdcControllers = in.phases().hvdcControllers();
-        ReactiveCapabilityCurves.Channel rlCurves = in.phases().rlCurves();
+        ReactiveCapabilityCurves.Channel reactiveCapabilityCurves = in.phases().reactiveCapabilityCurves();
         ForceTargetQInReactiveLimits.Channel forcedTargetQ = in.phases().forcedTargetQ();
         double[][] resultsByIndex = in.sinks().resultsByIndex();
         double[] preDistributedByIndex = in.sinks().preDistributedByIndex();
@@ -202,17 +202,17 @@ final class GpuBatchChunkSolver {
         NewtonSettingsNative.setBatchLineSearch(handle, parameters.getLineSearchStateVectorScalingMaxIteration(),
                 parameters.getLineSearchStateVectorScalingStepFold());
         // The run-constant outer-loop tables, shared with the base load flow's batch-of-one.
-        DeviceLoopTables.install(handle, gpuData, rlCurves, forcedTargetQ,
-                config.rlRobustMode(), config.minRealisticVoltage(), config.maxRealisticVoltage(),
+        DeviceLoopTables.install(handle, gpuData, reactiveCapabilityCurves, forcedTargetQ,
+                config.reactiveLimitsRobustMode(), config.minRealisticVoltage(), config.maxRealisticVoltage(),
                 config.minNominalVoltageRealisticVoltageCheck(), config.realisticFixingLoop());
 
         // Which reactive-capability CURVE entries hang off each bus P row. Run-constant, and the
         // index a generator outage needs to find the entries it disturbs at its own bus.
         java.util.Map<Integer, int[]> curveEntriesByPRow = new java.util.HashMap<>();
-        if (rlCurves != null) {
+        if (reactiveCapabilityCurves != null) {
             java.util.Map<Integer, List<Integer>> acc = new java.util.HashMap<>();
-            for (int e = 0; e < rlCurves.cvGenId().length; e++) {
-                acc.computeIfAbsent(rlCurves.cvIdx()[e * 5 + 1], k -> new ArrayList<>()).add(e);
+            for (int e = 0; e < reactiveCapabilityCurves.cvGenId().length; e++) {
+                acc.computeIfAbsent(reactiveCapabilityCurves.cvIdx()[e * 5 + 1], k -> new ArrayList<>()).add(e);
             }
             acc.forEach((row, es) -> curveEntriesByPRow.put(row, es.stream().mapToInt(Integer::intValue).toArray()));
         }
@@ -237,7 +237,7 @@ final class GpuBatchChunkSolver {
         RunScratch rs = new RunScratch(chunkSize, nElements, gpuData, elementMapper, baseRowMode);
         // TWO-PHASE ordering (operator strategies, warm continuation): plain contingencies first,
         // then (ctg, strategy) PAIRS — each pair chunk is seeded with its PARENT contingency's
-        // solved state (x0PerScenario) and reactive-limits pinning (rlStateIn), so the strategy
+        // solved state (x0PerScenario) and reactive-limits pinning (reactiveLimitsSeedState), so the strategy
         // solve continues the contingency's outer-loop trajectory exactly like the CPU's
         // per-contingency action solve. Pair whose parent did not converge is dropped (CPU path).
         List<Integer> ctgIdxList = new ArrayList<>();
@@ -249,9 +249,9 @@ final class GpuBatchChunkSolver {
         for (int i = 0; i < contingencies.size(); i++) {
             indexById.put(contingencies.get(i).contingencyId(), i);
         }
-        int nrl = gpuData.reactiveLimits().voltageRow().length;
-        java.util.Map<Integer, int[]> rlByIndex = new java.util.HashMap<>();    // ctg index -> its nrl RL-state slice
-        java.util.Map<Integer, double[]> rlPinByIndex = new java.util.HashMap<>();   // ctg index -> its final pinned targets
+        int nReactiveLimitEntries = gpuData.reactiveLimits().voltageRow().length;
+        java.util.Map<Integer, int[]> reactiveLimitsStateByIndex = new java.util.HashMap<>();    // ctg index -> its nReactiveLimitEntries RL-state slice
+        java.util.Map<Integer, double[]> reactiveLimitTargetQByIndex = new java.util.HashMap<>();   // ctg index -> its final pinned targets
         // ctg index -> its FINAL distributed-slack targets at the DS participant rows (the device DS mutates
         // targets in place; read back after each ctg chunk). The pair phase re-anchors its distribution here,
         // mirroring OLF's setGeneratorsInitialTargetPToTargetP before the strategy re-solve.
@@ -265,10 +265,10 @@ final class GpuBatchChunkSolver {
         java.util.Map<Integer, double[]> exhaustedStartByIndex = new java.util.HashMap<>();
         java.util.Map<Integer, Double> slackAbsorbedByIndex = new java.util.HashMap<>();   // slack-only DS parents
         boolean dsSlackOnly = gpuData.distributedSlack().busPhiRow().length == 0 && gpuData.distributedSlack().slackPhiRow() >= 0;
-        // Host-side base RL seed (mirrors initRlLimitTypeBatch) for PADDING slots of pair chunks.
-        int[] baseRlSeed = new int[nrl];
+        // Host-side base RL seed (mirrors initReactiveLimitQLimitTypeBatch) for PADDING slots of pair chunks.
+        int[] baseReactiveLimitsState = new int[nReactiveLimitEntries];
         byte[] baseLimitTypes = gpuData.reactiveLimits().baseQLimitType();
-        for (int i = 0; i < nrl; i++) {
+        for (int i = 0; i < nReactiveLimitEntries; i++) {
             int vrow = gpuData.reactiveLimits().voltageRow()[i];
             // remote entries (plan-B3): base mode 1 = UNPINNED DISTR_Q share; only mode 4 is a pin.
             // The pilot's V equals the group target at the base (degenerate) — key the direction on
@@ -277,13 +277,13 @@ final class GpuBatchChunkSolver {
             byte olfKind = baseLimitTypes.length > i ? baseLimitTypes[i] : GpuQLimitType.NONE;
             if (remote) {
                 double tgt = baseTargets[vrow];
-                baseRlSeed[i] = baseRowMode[vrow] == GpuRowMode.BUS_TARGET_Q
+                baseReactiveLimitsState[i] = baseRowMode[vrow] == GpuRowMode.BUS_TARGET_Q
                         ? (olfKind != GpuQLimitType.NONE ? olfKind
                            : (Math.abs(tgt - (gpuData.reactiveLimits().maxQ()[i] - gpuData.reactiveLimits().loadQ()[i]))
                               <= Math.abs(tgt - (gpuData.reactiveLimits().minQ()[i] - gpuData.reactiveLimits().loadQ()[i])) ? GpuQLimitType.MAX_Q : GpuQLimitType.MIN_Q))
                         : GpuQLimitType.NONE;
             } else {
-                baseRlSeed[i] = baseRowMode[vrow] == GpuRowMode.EQUATION
+                baseReactiveLimitsState[i] = baseRowMode[vrow] == GpuRowMode.EQUATION
                         ? (olfKind != GpuQLimitType.NONE ? olfKind
                            : (baseState[vrow] < gpuData.reactiveLimits().targetV()[i] ? GpuQLimitType.MAX_Q : GpuQLimitType.MIN_Q))
                         : GpuQLimitType.NONE;
@@ -318,7 +318,7 @@ final class GpuBatchChunkSolver {
                     }
                     ChunkLists cl = new ChunkLists(chunkSize, n, gpuData, forcedTargetQ, ngen);
                     SlotSeeding seeding = new SlotSeeding(chunkSize, pairPhase, n, gpuData, elementMapper, contingencies,
-                            plan, baseState, baseTargets, baseRowMode, hvdcElemIndex, baseNonSpanningTreeBranches, nds, rlCurves,
+                            plan, baseState, baseTargets, baseRowMode, hvdcElemIndex, baseNonSpanningTreeBranches, nds, reactiveCapabilityCurves,
                             curveEntriesByPRow, rs, cl);
                     rs.resetChunk();
                     for (int s = 0; s < chunkSize; s++) {
@@ -360,7 +360,7 @@ final class GpuBatchChunkSolver {
                     double[] pairSlackAbsorbedSeed = null;   // slack-only pairs: the parent's absorbed total they start from
                     boolean[] rejectAfterSolve = null;       // pairs whose parent the device did not answer: CPU
                     boolean[] pairParentConverged = new boolean[chunkSize];
-                    double[] rlPinIn = null;                 // pairs: each parent's final pinned targets (NaN = none)
+                    double[] reactiveLimitSeedTargetQ = null;                 // pairs: each parent's final pinned targets (NaN = none)
                     // the loss pre-distribution's share on the slack generators, when nobody else is left to participate
                     double[] preSlackSeed = null;
                     if (!pairPhase && (rs.hasDs || dsSlackOnly) && config.contingencyLossPreDistribution()) {
@@ -578,7 +578,7 @@ final class GpuBatchChunkSolver {
                     }
                     // Pair phase: warm continuation from each parent contingency's state + RL pinning.
                     double[] x0Full = null;
-                    int[] rlStateIn = null;
+                    int[] reactiveLimitsSeedState = null;
                     int[] x0SeedIdx = null;
                     double[] x0SeedVal = null;
                     if (!cl.frozenSeedSlot.isEmpty()) {         // islanding in this chunk: seed the frozen rows
@@ -607,7 +607,7 @@ final class GpuBatchChunkSolver {
                     //    leg's starting operating point (losses are nonlinear along the path).
                     if (pairPhase) {
                         x0Full = new double[chunkSize * n];
-                        rlStateIn = nrl > 0 ? new int[chunkSize * nrl] : null;
+                        reactiveLimitsSeedState = nReactiveLimitEntries > 0 ? new int[chunkSize * nReactiveLimitEntries] : null;
                         if (nds > 0) {
                             dsAnchorShift = new double[chunkSize * nds];
                             dsSlackShift = new double[chunkSize];
@@ -623,7 +623,7 @@ final class GpuBatchChunkSolver {
                         }
                         for (int s = 0; s < chunkSize; s++) {
                             double[] parent = null;
-                            int[] parentRl = null;
+                            int[] parentReactiveLimitsState = null;
                             double[] parentDs = null;
                             Double parentSlackAbs = null;
                             if (s < realCount) {
@@ -639,7 +639,7 @@ final class GpuBatchChunkSolver {
                                     parent = exhaustedStartByIndex.get(pIdx);   // OLF's network after the failed run
                                 }
                                 if (parent != null) {
-                                    parentRl = rlByIndex.get(pIdx);
+                                    parentReactiveLimitsState = reactiveLimitsStateByIndex.get(pIdx);
                                     parentDs = dsTargetsByIndex.get(pIdx);
                                     parentSlackAbs = slackAbsorbedByIndex.get(pIdx);
                                 } else {
@@ -679,19 +679,21 @@ final class GpuBatchChunkSolver {
                                     x0Full[s * n + cl.frozenSeedRow.get(k)] = cl.frozenSeedValue.get(k);
                                 }
                             }
-                            if (rlStateIn != null) {
+                            if (reactiveLimitsSeedState != null) {
                                 // the parent's pins, not its switch counts: OLF runs the strategy as a new load flow,
                                 // whose reactive-limit loop counts PV -> PQ switches afresh
-                                for (int i = 0; i < nrl; i++) {
-                                    rlStateIn[s * nrl + i] = GpuReactiveLimitsState.limitType((parentRl != null ? parentRl : baseRlSeed)[i]);
+                                int[] seedFrom = parentReactiveLimitsState != null ? parentReactiveLimitsState : baseReactiveLimitsState;
+                                for (int i = 0; i < nReactiveLimitEntries; i++) {
+                                    reactiveLimitsSeedState[s * nReactiveLimitEntries + i] = GpuReactiveLimitsState.limitType(seedFrom[i]);
                                 }
-                                double[] pins = parentRl != null ? rlPinByIndex.get(ChunkArrays.pIdxOf(contingencies, group, chunkStart, s, indexById, realCount)) : null;
+                                double[] pins = parentReactiveLimitsState != null
+                                        ? reactiveLimitTargetQByIndex.get(ChunkArrays.pIdxOf(contingencies, group, chunkStart, s, indexById, realCount)) : null;
                                 if (pins != null) {
-                                    if (rlPinIn == null) {
-                                        rlPinIn = new double[chunkSize * nrl];
-                                        java.util.Arrays.fill(rlPinIn, Double.NaN);
+                                    if (reactiveLimitSeedTargetQ == null) {
+                                        reactiveLimitSeedTargetQ = new double[chunkSize * nReactiveLimitEntries];
+                                        java.util.Arrays.fill(reactiveLimitSeedTargetQ, Double.NaN);
                                     }
-                                    System.arraycopy(pins, 0, rlPinIn, s * nrl, nrl);
+                                    System.arraycopy(pins, 0, reactiveLimitSeedTargetQ, s * nReactiveLimitEntries, nReactiveLimitEntries);
                                 }
                             }
                             if (dsSlackOnly && dsSlackShift != null && parentSlackAbs != null) {
@@ -891,8 +893,8 @@ final class GpuBatchChunkSolver {
                     }
                     boolean svcActive = phases.secondaryVc() != null && !phases.secondaryVc().ctls().isEmpty();
                     boolean monActive = phases.monitoring() != null && !phases.monitoring().isEmpty();
-                    int[] rlStateOut = (!pairPhase && !pairIdxList.isEmpty() || svcActive || monActive
-                            || System.getenv("OLF_GPU_RL_TRACE") != null) && nrl > 0 ? new int[chunkSize * nrl] : null;
+                    int[] reactiveLimitsFinalState = (!pairPhase && !pairIdxList.isEmpty() || svcActive || monActive
+                            || System.getenv("OLF_GPU_RL_TRACE") != null) && nReactiveLimitEntries > 0 ? new int[chunkSize * nReactiveLimitEntries] : null;
                     cl.upload(handle, gpuData);
                     // The two HVDC AC-emulation loops run as DRIVER PHASES, in OLF's own position
                     // between DistributedSlack and ReactiveLimits. Running them instead as host
@@ -928,7 +930,7 @@ final class GpuBatchChunkSolver {
                     if (!svcInKernel) {
                         GpuSecondaryVoltageControlOuterLoop.uploadToDevice(handle, null);   // clear a cached context's table
                     }
-                    boolean svcAsDriverPause = svcActive && rlStateOut != null && !svcInKernel;
+                    boolean svcAsDriverPause = svcActive && reactiveLimitsFinalState != null && !svcInKernel;
                     DriverNative.setBatchHostLoop(handle, svcAsDriverPause
                             ? GpuOuterLoopKind.hostMaskBit(GpuOuterLoopKind.HOST_SECONDARY_VOLTAGE_CONTROL) : 0);
                     long solveCountBefore = BatchReadbackNative.readBatchSolveCount(handle);
@@ -987,8 +989,8 @@ final class GpuBatchChunkSolver {
                     if (dsSlackOnly) {
                         DistributedSlackNative.setBatchSlackOnlyAnchor(handle, pairPhase ? pairSlackAbsorbedSeed : null);
                     }
-                    if (nrl > 0) {
-                        ReactiveLimitsNative.setBatchRlPinTargets(handle, pairPhase ? rlPinIn : null);
+                    if (nReactiveLimitEntries > 0) {
+                        ReactiveLimitsNative.setBatchReactiveLimitSeedTargetQ(handle, pairPhase ? reactiveLimitSeedTargetQ : null);
                     }
                     if (ngen > 0) {
                         DistributedSlackNative.setBatchGenAnchor(handle, pairPhase ? dgAnchor : null,
@@ -997,10 +999,10 @@ final class GpuBatchChunkSolver {
                     double[][] chunkResults = BatchSolveNative.solveBatchContext(handle, baseState, baseTargets,
                             rs.rowModePerScenario, baseRowMode, rs.disabledMask, targetOverrideIndex, targetOverrideValue,
                             rs.dsOvBus, rs.dsOvFactorDelta, rs.dsOvBaseDelta, rs.dsOvMaxDelta, rs.dsOvMinDelta, dsAnchorShift, dsSlackShift,
-                            ChunkArrays.intsOrNull(cl.rlVtOvIdx),
-                            cl.rlVtOvIdx.isEmpty() ? null : cl.rlVtOvVal.stream().mapToDouble(Double::doubleValue).toArray(),
-                            cl.rlQOvSlot.stream().mapToInt(Integer::intValue).toArray(),
-                            cl.rlQOvVal.stream().mapToDouble(Double::doubleValue).toArray(),
+                            ChunkArrays.intsOrNull(cl.reactiveLimitTargetVOverrideScenarioEntryList),
+                            cl.reactiveLimitTargetVOverrideScenarioEntryList.isEmpty() ? null : cl.reactiveLimitTargetVOverrideValue.stream().mapToDouble(Double::doubleValue).toArray(),
+                            cl.reactiveLimitDeltaOverrideScenarioEntryList.stream().mapToInt(Integer::intValue).toArray(),
+                            cl.reactiveLimitDeltaOverrideValueList.stream().mapToDouble(Double::doubleValue).toArray(),
                             cl.cvOvSlot.stream().mapToInt(Integer::intValue).toArray(),
                             cl.cvOvVal.stream().mapToDouble(Double::doubleValue).toArray(),
                                                         parameters.getMaxIterations(), tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
@@ -1008,7 +1010,7 @@ final class GpuBatchChunkSolver {
                             config.lsMode() == GpuStateVectorScalingMode.MAX_VOLTAGE_CHANGE ? varType : null, x0Full,
                             rs.shuntAdmittanceOverrideScenarioElementList.stream().mapToInt(Integer::intValue).toArray(),
                             rs.shuntAdmittanceOverrideDeltaList.stream().mapToDouble(Double::doubleValue).toArray(),
-                            rlStateIn, rlStateOut,
+                            reactiveLimitsSeedState, reactiveLimitsFinalState,
                             rs.r1OvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
                             rs.r1OvValList.stream().mapToDouble(Double::doubleValue).toArray(),
                             config.maxOuterIterations(), config.maxPqPvSwitch(), config.dsRejectResidualFlag(),
@@ -1048,21 +1050,23 @@ final class GpuBatchChunkSolver {
                         int svcRounds = 0;
                         while (DriverNative.readBatchDriverPaused(handle) == GpuOuterLoopKind.HOST_SECONDARY_VOLTAGE_CONTROL
                                 && svcRounds++ < maxSvcRounds) {
-                            var dec = GpuSecondaryVoltageControlOuterLoop.decideAtPause(handle, chunkSize, realCount, n, nrl,
-                                    chunkResults, phases.secondaryVc(), rlStateOut, svcTargetV, baseState);
+                            var dec = GpuSecondaryVoltageControlOuterLoop.decideAtPause(handle, chunkSize, realCount, n, nReactiveLimitEntries,
+                                    chunkResults, phases.secondaryVc(), reactiveLimitsFinalState, svcTargetV, baseState);
                             if (dec.targetRows() != null && dec.targetRows().length > 0) {
                                 NewtonSettingsNative.setBatchTargetDeltas(handle, dec.targetRows(), dec.targetValues());
                             }
                             if (dec.unpinPairs() != null && dec.unpinPairs().length > 0) {
-                                ReactiveLimitsNative.setBatchRlUnpin(handle, dec.unpinPairs(), dec.unpinTargets());
+                                ReactiveLimitsNative.setBatchReactiveLimitPqPvSwitches(handle, dec.unpinPairs(), dec.unpinTargets());
                             }
                             DriverNative.setBatchDriverResume(handle, dec.hostChanged());
                             chunkResults = BatchSolveNative.solveBatchContext(handle, baseState, baseTargets,
                                     rs.rowModePerScenario, baseRowMode, rs.disabledMask, targetOverrideIndex, targetOverrideValue,
                                     rs.dsOvBus, rs.dsOvFactorDelta, rs.dsOvBaseDelta, rs.dsOvMaxDelta, rs.dsOvMinDelta, dsAnchorShift, dsSlackShift,
-                                    ChunkArrays.concatInts(cl.rlVtOvIdx, dec.rlVtSlotIdx()), ChunkArrays.concatDoubles(cl.rlVtOvVal, dec.rlVtValues()),
-                                    cl.rlQOvSlot.stream().mapToInt(Integer::intValue).toArray(),
-                                    cl.rlQOvVal.stream().mapToDouble(Double::doubleValue).toArray(),
+                                    ChunkArrays.concatInts(cl.reactiveLimitTargetVOverrideScenarioEntryList, dec.secondaryVoltageControlTargetVScenarioEntry()),
+                                    ChunkArrays.concatDoubles(cl.reactiveLimitTargetVOverrideValue, dec.secondaryVoltageControlTargetVValues()),
+
+                                    cl.reactiveLimitDeltaOverrideScenarioEntryList.stream().mapToInt(Integer::intValue).toArray(),
+                                    cl.reactiveLimitDeltaOverrideValueList.stream().mapToDouble(Double::doubleValue).toArray(),
                                     cl.cvOvSlot.stream().mapToInt(Integer::intValue).toArray(),
                                     cl.cvOvVal.stream().mapToDouble(Double::doubleValue).toArray(),
                                                                         parameters.getMaxIterations(), tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
@@ -1070,7 +1074,7 @@ final class GpuBatchChunkSolver {
                                     config.lsMode() == GpuStateVectorScalingMode.MAX_VOLTAGE_CHANGE ? varType : null, x0Full,
                                     rs.shuntAdmittanceOverrideScenarioElementList.stream().mapToInt(Integer::intValue).toArray(),
                                     rs.shuntAdmittanceOverrideDeltaList.stream().mapToDouble(Double::doubleValue).toArray(),
-                                    null, rlStateOut,
+                                    null, reactiveLimitsFinalState,
                                     rs.r1OvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
                                     rs.r1OvValList.stream().mapToDouble(Double::doubleValue).toArray(),
                                     config.maxOuterIterations(), config.maxPqPvSwitch(), config.dsRejectResidualFlag(), 0,
@@ -1210,16 +1214,16 @@ final class GpuBatchChunkSolver {
                         GpuBatchPhaseStats.add("main.iterMax", itMax);
                         GpuBatchPhaseStats.bump("main.solves");
                     }
-                    if (System.getenv("OLF_GPU_RL_TRACE") != null && rlStateOut != null) {
-                        // rlStateOut packs a GpuReactiveLimitsState per (controller, scenario):
+                    if (System.getenv("OLF_GPU_RL_TRACE") != null && reactiveLimitsFinalState != null) {
+                        // reactiveLimitsFinalState packs a GpuReactiveLimitsState per (controller, scenario):
                         // switchCount > 0 means the DEVICE switched that controller during THIS solve, which
                         // is exactly the decision OLF's ReactiveLimitsOuterLoop makes (and logs) on the CPU.
                         for (int s = 0; s < realCount; s++) {
                             int switched = 0;
                             int pinned = 0;
                             StringBuilder ids = new StringBuilder();
-                            for (int i = 0; i < nrl; i++) {
-                                int v = rlStateOut[s * nrl + i];
+                            for (int i = 0; i < nReactiveLimitEntries; i++) {
+                                int v = reactiveLimitsFinalState[s * nReactiveLimitEntries + i];
                                 if (GpuReactiveLimitsState.limitType(v) != GpuQLimitType.NONE) {
                                     pinned++;
                                     if (ids.length() < 4000) {
@@ -1246,25 +1250,25 @@ final class GpuBatchChunkSolver {
                     // main solve skipped the RL phase for the monitoring interleave, all of them otherwise.
                     // An orchestrator that RL-solves a scenario sets its flag, and VoltageMonitoring uses
                     // it to skip a confirmation solve that could only re-derive what it was handed.
-                    boolean[] rlSolvedPerScenario = new boolean[chunkSize];
+                    boolean[] reactiveLimitsSolvedPerScenario = new boolean[chunkSize];
                     // When the network has HVDC the driver's loop LIST ends with ReactiveLimits, so
                     // the main solve leaves every scenario RL-stable and OLF's rule applies: a loop
                     // that reports STABLE never re-solves. Reporting those scenarios as still "owing"
                     // an RL solve makes the monitoring orchestrator run one extra Newton step the CPU
                     // never runs — measured as the WHOLE divergence on LINE-1392-677 and
                     // LINE-2045-221 (1.1e-3 pu = 7.0e-2 kV at a 63 kV bus).
-                    java.util.Arrays.fill(rlSolvedPerScenario, true);
-                    if (rlStateOut != null && !pairPhase) {      // capture each ctg's final RL pinning for its pairs
+                    java.util.Arrays.fill(reactiveLimitsSolvedPerScenario, true);
+                    if (reactiveLimitsFinalState != null && !pairPhase) {      // capture each ctg's final RL pinning for its pairs
                         // ...and the targets its pins ENDED with, which its pairs restore (OLF restores the parent's
                         // generation target Q; a limit that moved by less than the re-freeze tolerance kept the old one)
-                        double[] pins = ReactiveLimitsNative.readBatchRlPinTargets(handle);
+                        double[] pins = ReactiveLimitsNative.readBatchReactiveLimitTargetQ(handle);
                         for (int s = 0; s < realCount; s++) {
                             if (pins != null) {
-                                rlPinByIndex.put(group.get(chunkStart + s), java.util.Arrays.copyOfRange(pins, s * nrl, (s + 1) * nrl));
+                                reactiveLimitTargetQByIndex.put(group.get(chunkStart + s), java.util.Arrays.copyOfRange(pins, s * nReactiveLimitEntries, (s + 1) * nReactiveLimitEntries));
                             }
-                            int[] slice = new int[nrl];
-                            System.arraycopy(rlStateOut, s * nrl, slice, 0, nrl);
-                            rlByIndex.put(group.get(chunkStart + s), slice);
+                            int[] slice = new int[nReactiveLimitEntries];
+                            System.arraycopy(reactiveLimitsFinalState, s * nReactiveLimitEntries, slice, 0, nReactiveLimitEntries);
+                            reactiveLimitsStateByIndex.put(group.get(chunkStart + s), slice);
                         }
                     }
                     if (!pairPhase && dsSlackOnly && !pairIdxList.isEmpty()) {
@@ -1346,7 +1350,7 @@ final class GpuBatchChunkSolver {
                     // Post-RL host orchestrators below: SVC(4), Monitoring(5), Phase(7), TVC(8), TRPC(9), Shunt(10).
 
                     tOrchestratorNs += System.nanoTime() - tOrch0;
-                    if (System.getenv("OLF_GPU_RL_TRACE") != null && rlStateOut != null) {
+                    if (System.getenv("OLF_GPU_RL_TRACE") != null && reactiveLimitsFinalState != null) {
                         // The FINAL reactive-limits state, after every orchestrator re-solve. The
                         // per-solve trace above only sees the main solve, and OLF pins late in its
                         // outer-loop sequence (DS, HVDC freeze, monitoring, THEN ReactiveLimits), so
@@ -1354,16 +1358,16 @@ final class GpuBatchChunkSolver {
                         // points in the trajectory.
                         for (int s = 0; s < realCount; s++) {
                             int pinned = 0;
-                            for (int i = 0; i < nrl; i++) {
-                                if (GpuReactiveLimitsState.limitType(rlStateOut[s * nrl + i]) != GpuQLimitType.NONE) {
+                            for (int i = 0; i < nReactiveLimitEntries; i++) {
+                                if (GpuReactiveLimitsState.limitType(reactiveLimitsFinalState[s * nReactiveLimitEntries + i]) != GpuQLimitType.NONE) {
                                     pinned++;
                                 }
                             }
                             StringBuilder ids = new StringBuilder();
-                            for (int i = 0; i < nrl; i++) {
-                                if (GpuReactiveLimitsState.limitType(rlStateOut[s * nrl + i]) != GpuQLimitType.NONE) {
+                            for (int i = 0; i < nReactiveLimitEntries; i++) {
+                                if (GpuReactiveLimitsState.limitType(reactiveLimitsFinalState[s * nReactiveLimitEntries + i]) != GpuQLimitType.NONE) {
                                     ids.append(' ').append(i).append("(vRow=").append(gpuData.reactiveLimits().voltageRow()[i])
-                                       .append(",lt=").append(GpuReactiveLimitsState.limitType(rlStateOut[s * nrl + i])).append(')');
+                                       .append(",lt=").append(GpuReactiveLimitsState.limitType(reactiveLimitsFinalState[s * nReactiveLimitEntries + i])).append(')');
                                 }
                             }
                             System.err.printf("GPU_RL_FINAL ctg=%s pinnedTotal=%d%s%n",

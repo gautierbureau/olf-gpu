@@ -132,7 +132,7 @@ class GpuSaVoltageMonitoringTest extends AbstractGpuSaTest {
     }
 
     /** DEVICE-mode VoltageMonitoring with a MONITORING SVC (stand-by automaton): the standing-by bus
-     *  seeds UNPINNED in the device RL pack (rlMonitored) and activates PQ->PV at the automaton
+     *  seeds UNPINNED in the device RL pack (reactiveLimitFlags) and activates PQ->PV at the automaton
      *  setpoint when a contingency pushes its V outside the threshold band (VoltageMonitoring);
      *  GPU SA == CPU SA at 1e-12. */
     @Test

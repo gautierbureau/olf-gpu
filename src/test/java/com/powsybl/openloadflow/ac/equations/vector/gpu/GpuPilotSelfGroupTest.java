@@ -83,7 +83,7 @@ class GpuPilotSelfGroupTest extends AbstractLoadFlowNetworkFactory {
     }
 
     @Test
-    void tableKeysTheGroupByRlEntryAndKeepsMergedOrder() {
+    void tableKeysTheGroupByReactiveLimitEntryAndKeepsMergedOrder() {
         LfNetwork network = Networks.load(pilotSelfNetwork(),
                 new LfNetworkParameters().setSlackBusSelector(new FirstSlackBusSelector())).get(0);
         EquationSystem<AcVariableType, AcEquationType> es = new AcEquationSystemCreator(network).create();
@@ -102,20 +102,20 @@ class GpuPilotSelfGroupTest extends AbstractLoadFlowNetworkFactory {
 
         ExtractionColumns columns = ExtractionColumns.of(network, es);
         // Every controller bus is its own RL entry here, in bus order, which is what the real pack builds.
-        int[] rlBusNum = network.getBuses().stream().mapToInt(LfBus::getNum).toArray();
-        PilotSelfPacker.PilotSelfPack pack = PilotSelfPacker.pilotSelfGroups(network, columns, rlBusNum);
+        int[] reactiveLimitBusNum = network.getBuses().stream().mapToInt(LfBus::getNum).toArray();
+        PilotSelfPacker.PilotSelfPack pack = PilotSelfPacker.pilotSelfGroups(network, columns, reactiveLimitBusNum);
 
         assertEquals(1, pack.groupCount(), "the one pilot-self group must be packed");
         assertEquals(members.size(), pack.ptr()[1] - pack.ptr()[0], "every controller must be a member entry");
         assertEquals(columns.vCol()[pilot.getNum()], pack.pilotRow()[0],
                 "BUS_TARGET_V stays on the controlled bus's own row, so that is the pilot row");
-        assertEquals(pilot.getNum(), rlBusNum[pack.pilotEntry()[0]], "the pilot entry must be the pilot's");
+        assertEquals(pilot.getNum(), reactiveLimitBusNum[pack.pilotEntry()[0]], "the pilot entry must be the pilot's");
         for (int k = 0; k < members.size(); k++) {            // MERGED ORDER matters: OLF's free role is index 0
             LfBus m = members.get(k);
             int at = pack.ptr()[0] + k;
             assertEquals(columns.vCol()[m.getNum()], pack.memberRow()[at],
                     "member " + m.getId() + " must keep its merged position");
-            assertEquals(m.getNum(), rlBusNum[pack.memberEntry()[at]], "member entry must resolve to the bus");
+            assertEquals(m.getNum(), reactiveLimitBusNum[pack.memberEntry()[at]], "member entry must resolve to the bus");
         }
         assertTrue(pack.vTarget()[0] > 0, "the group's voltage target must travel with it");
     }
@@ -131,8 +131,8 @@ class GpuPilotSelfGroupTest extends AbstractLoadFlowNetworkFactory {
         com.powsybl.openloadflow.ac.solver.AcSolverUtil.initStateVector(lf, es,
                 new com.powsybl.openloadflow.network.util.UniformValueVoltageInitializer());
         ExtractionColumns columns = ExtractionColumns.of(lf, es);
-        int[] rlBusNum = lf.getBuses().stream().mapToInt(LfBus::getNum).toArray();
-        PilotSelfPacker.PilotSelfPack pack = PilotSelfPacker.pilotSelfGroups(lf, columns, rlBusNum);
+        int[] reactiveLimitBusNum = lf.getBuses().stream().mapToInt(LfBus::getNum).toArray();
+        PilotSelfPacker.PilotSelfPack pack = PilotSelfPacker.pilotSelfGroups(lf, columns, reactiveLimitBusNum);
         assertEquals(0, pack.groupCount(), "a pilot that is not one of its own controllers must not be packed");
     }
 }

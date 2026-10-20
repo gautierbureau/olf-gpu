@@ -8,7 +8,7 @@
 package com.powsybl.openloadflow.ac.solver.gpu.codes;
 
 /**
- * The role of a reactive-limit entry's bus in its generator voltage control (rlRemote): a local controller, a
+ * The role of a reactive-limit entry's bus in its generator voltage control (reactiveLimitVoltageControlRole): a local controller, a
  * member of a remote voltage control, or the controlled bus of a remote control that is also one of its own
  * controllers (pilot-self, docs/gpu-vs-olf.md section 6). A remote member splits in two on OLF's
  * voltageRemoteControlRobustMode rule (ReactiveLimitsOuterLoop: realistic-voltage pins of remote controllers),

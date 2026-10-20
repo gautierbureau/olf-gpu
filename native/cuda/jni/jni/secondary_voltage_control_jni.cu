@@ -13,7 +13,7 @@
 extern "C" JNIEXPORT jint JNICALL
 OLF_JNI(ac_outerloop_gpu, SecondaryVoltageControlNative, setBatchSecondaryVc)(
         JNIEnv* env, jclass, jlong handle,
-        jintArray jCtldVRow, jintArray jBusVRow, jintArray jRlIdx, jdoubleArray jBaseTargetV,
+        jintArray jCtldVRow, jintArray jBusVRow, jintArray jSecondaryVoltageControlReactiveLimitEntry, jdoubleArray jBaseTargetV,
         jdoubleArray jMinQ, jdoubleArray jMaxQ, jdoubleArray jLoadQ,
         jintArray jQPtr, jintArray jQKind, jintArray jQElem, jintArray jQBRow,
         jintArray jZonePtr, jintArray jZoneCtl, jintArray jZonePilotRow, jdoubleArray jZoneTargetV,
@@ -24,7 +24,7 @@ OLF_JNI(ac_outerloop_gpu, SecondaryVoltageControlNative, setBatchSecondaryVc)(
     }
     ctx->nSvc = 0;
     ctx->nSvcZones = 0;
-    if (jCtldVRow == nullptr || env->GetArrayLength(jCtldVRow) == 0 || ctx->nrl <= 0) {
+    if (jCtldVRow == nullptr || env->GetArrayLength(jCtldVRow) == 0 || ctx->nReactiveLimitEntries <= 0) {
         return 0;
     }
     auto readI = [&](jintArray a, std::vector<int>& v) {
@@ -35,11 +35,11 @@ OLF_JNI(ac_outerloop_gpu, SecondaryVoltageControlNative, setBatchSecondaryVc)(
         v.resize(env->GetArrayLength(a));
         env->GetDoubleArrayRegion(a, 0, static_cast<jsize>(v.size()), v.data());
     };
-    std::vector<int> busVRow, rlIdx, qPtr, qKind, qElem, qBRow, zonePtr, zoneCtl, zonePilotRow;
+    std::vector<int> busVRow, reactiveLimitEntry, qPtr, qKind, qElem, qBRow, zonePtr, zoneCtl, zonePilotRow;
     std::vector<double> minQ, maxQ, loadQ, zoneTargetV;
     readI(jCtldVRow, ctx->hSvcCtldVRow);
     readI(jBusVRow, busVRow);
-    readI(jRlIdx, rlIdx);
+    readI(jSecondaryVoltageControlReactiveLimitEntry, reactiveLimitEntry);
     readD(jBaseTargetV, ctx->hSvcBaseTargetV);
     readD(jMinQ, minQ);
     readD(jMaxQ, maxQ);
@@ -74,7 +74,7 @@ OLF_JNI(ac_outerloop_gpu, SecondaryVoltageControlNative, setBatchSecondaryVc)(
     }
     ctx->dSvcCtldVRow.upload(ctx->hSvcCtldVRow.data(), nC * sizeof(int));
     ctx->dSvcBusVRow.upload(busVRow.data(), nC * sizeof(int));
-    ctx->dSvcRlIdx.upload(rlIdx.data(), nC * sizeof(int));
+    ctx->dSecondaryVoltageControlReactiveLimitEntry.upload(reactiveLimitEntry.data(), nC * sizeof(int));
     ctx->dSvcBaseTargetV.upload(ctx->hSvcBaseTargetV.data(), nC * sizeof(double));
     ctx->dSvcMinQ.upload(minQ.data(), nC * sizeof(double));
     ctx->dSvcMaxQ.upload(maxQ.data(), nC * sizeof(double));
@@ -95,7 +95,7 @@ OLF_JNI(ac_outerloop_gpu, SecondaryVoltageControlNative, setBatchSecondaryVc)(
     ctx->dSvcEnabled.ensure(nS * nC * sizeof(char));
     ctx->dSvcNeed.ensure(nS * sizeof(char));
     ctx->dSvcReject.ensure(nS * sizeof(char));
-    ctx->dSvcRlVt.ensure(nS * std::max(ctx->nrl, 1) * sizeof(double));
+    ctx->dSecondaryVoltageControlReactiveLimitTargetV.ensure(nS * std::max(ctx->nReactiveLimitEntries, 1) * sizeof(double));
     ctx->dSvcMat.ensure(nS * static_cast<size_t>(nC) * nC * sizeof(double));
     ctx->dSvcRhs.ensure(nS * nC * sizeof(double));
     ctx->dSvcMatPtr.ensure(nS * sizeof(double*));
@@ -112,12 +112,12 @@ OLF_JNI(ac_outerloop_gpu, SecondaryVoltageControlNative, setBatchSecondaryVc)(
         ctx->dSvcCtlZone.upload(zoneOf.data(), zoneOf.size() * sizeof(int));
     }
     {
-        // NaN = "this zone has not moved the controller's target", which is what rlTargetOf tests. The
+        // NaN = "this zone has not moved the controller's target", which is what reactiveLimitTargetVOf tests. The
         // reactive-limit SEEDING reads this buffer before the per-solve reset further down runs, so an
         // uninitialised one hands the switch-back a garbage comparison voltage and un-pins controllers
         // that should stay pinned (measured on ieee14's z1: pins 4 -> 2 instead of 4 -> 6, and 1.0e-10 kV).
-        std::vector<double> nanv(nS * std::max(ctx->nrl, 1), std::nan(""));
-        CUDA_CHECK(cudaMemcpy(ctx->dSvcRlVt.p, nanv.data(), nanv.size() * sizeof(double), cudaMemcpyHostToDevice));
+        std::vector<double> nanv(nS * std::max(ctx->nReactiveLimitEntries, 1), std::nan(""));
+        CUDA_CHECK(cudaMemcpy(ctx->dSecondaryVoltageControlReactiveLimitTargetV.p, nanv.data(), nanv.size() * sizeof(double), cudaMemcpyHostToDevice));
     }
     ctx->svcMinPlausibleV = minPlausibleV;
     ctx->svcMaxPlausibleV = maxPlausibleV;

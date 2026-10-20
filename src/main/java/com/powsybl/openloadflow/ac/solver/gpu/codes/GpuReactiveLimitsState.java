@@ -8,7 +8,7 @@
 package com.powsybl.openloadflow.ac.solver.gpu.codes;
 
 /**
- * A reactive-limit entry's state as one int (rlStateIn / rlStateOut): its {@link GpuQLimitType} in the low bits and
+ * A reactive-limit entry's state as one int (reactiveLimitsSeedState / reactiveLimitsFinalState): its {@link GpuQLimitType} in the low bits and
  * its PV -> PQ switch count above, the count OLF's ReactiveLimitsOuterLoop keeps per bus (pvPqSwitchCount) and compares
  * with maxPqPvSwitch. Mirrored by native/cuda/jni/common/codes/gpu_reactive_limits_state.cuh.
  *

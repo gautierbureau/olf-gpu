@@ -27,19 +27,19 @@ import java.util.Arrays;
  * This is only valid when the slack itself does not participate (otherwise the loss is rejected).
  *
  * <p>A bus that KEEPS voltage control after losing a generator still has that generator's reactive
- * capability in the device's aggregate: {@code rlMinQ}/{@code rlMaxQ} are run-constant while OLF's
- * {@code bus.getMinQ()} sums the generators that are still there. {@code rlEntry} names the
+ * capability in the device's aggregate: {@code reactiveLimitMinQ}/{@code reactiveLimitMaxQ} are run-constant while OLF's
+ * {@code bus.getMinQ()} sums the generators that are still there. {@code reactiveLimitEntry} names the
  * reactive-limit entry to correct and the two deltas are what to add to it (negative: the lost
- * generator's own share). {@code rlEntry < 0} when there is nothing to correct — the bus goes to PQ,
+ * generator's own share). {@code reactiveLimitEntry < 0} when there is nothing to correct — the bus goes to PQ,
  * or it is not a reactive-limit controller at all.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
 public record GenOutage(int pRow, double pTarget, int vRow, double qTarget, boolean toPq, boolean qOverride,
                         int dsBus, double dsFactorDelta, double dsBaseDelta, double dsMaxDelta, double dsMinDelta,
-                        int rlEntry, double minQDelta, double maxQDelta, boolean allGensLost,
+                        int reactiveLimitEntry, double minQDelta, double maxQDelta, boolean allGensLost,
                         java.util.Set<String> lostGenIds, double lostFactorSum, double pStep, double loadQDelta,
-                        int inactiveDistrQMember, int[] pilotGroupSurvivorRlEntries,
+                        int inactiveDistrQMember, int[] pilotGroupSurvivorReactiveLimitEntries,
                         int[] distrQTargetRows, double[] distrQTargetValues, int pqRowMode,
                         int deadPilotVRow, double deadPilotQTarget,
                         int pinnedPilotVRow, double pinnedPilotQTarget,
@@ -79,8 +79,8 @@ public record GenOutage(int pRow, double pTarget, int vRow, double qTarget, bool
             return this;
         }
         return new GenOutage(newPRow, pTarget, vRow, qTarget, toPq, qOverride, dsBus, dsFactorDelta, dsBaseDelta,
-                dsMaxDelta, dsMinDelta, rlEntry, minQDelta, maxQDelta, allGensLost, lostGenIds, lostFactorSum, pStep,
-                loadQDelta, inactiveDistrQMember, pilotGroupSurvivorRlEntries, distrQTargetRows, distrQTargetValues,
+                dsMaxDelta, dsMinDelta, reactiveLimitEntry, minQDelta, maxQDelta, allGensLost, lostGenIds, lostFactorSum, pStep,
+                loadQDelta, inactiveDistrQMember, pilotGroupSurvivorReactiveLimitEntries, distrQTargetRows, distrQTargetValues,
                 pqRowMode, deadPilotVRow, deadPilotQTarget, pinnedPilotVRow, pinnedPilotQTarget, distrQTargetQOverrideMember,
                 distrQTargetQOverrideValue, newQTargetRow, pilotQGroup, pilotQDelta, onSlack, reHomePilotVRow, svcBminDelta, svcBmaxDelta);
     }
@@ -104,8 +104,8 @@ public record GenOutage(int pRow, double pTarget, int vRow, double qTarget, bool
             return this;
         }
         return new GenOutage(pRow, pTarget, vRow, qTarget, toPq, qOverride, dsBus, dsFactorDelta, dsBaseDelta,
-                dsMaxDelta, dsMinDelta, rlEntry, minQDelta, maxQDelta, allGensLost, lostGenIds, lostFactorSum, pStep,
-                loadQDelta, inactiveDistrQMember, pilotGroupSurvivorRlEntries,
+                dsMaxDelta, dsMinDelta, reactiveLimitEntry, minQDelta, maxQDelta, allGensLost, lostGenIds, lostFactorSum, pStep,
+                loadQDelta, inactiveDistrQMember, pilotGroupSurvivorReactiveLimitEntries,
                 rows.stream().mapToInt(Integer::intValue).toArray(), values.stream().mapToDouble(Double::doubleValue).toArray(),
                 pqRowMode, deadPilotVRow, deadPilotQTarget, pinnedPilotVRow, pinnedPilotQTarget, distrQTargetQOverrideMember,
                 distrQTargetQOverrideValue, qTargetRow, pilotQGroup, pilotQDelta, onSlack, reHomePilotVRow, svcBminDelta, svcBmaxDelta);
@@ -187,7 +187,7 @@ public record GenOutage(int pRow, double pTarget, int vRow, double qTarget, bool
     }
 
     public boolean forbidsUnpin() {
-        return pqRowMode == ROW_PINNED_NO_UNPIN && rlEntry >= 0;
+        return pqRowMode == ROW_PINNED_NO_UNPIN && reactiveLimitEntry >= 0;
     }
 
     /**
@@ -217,7 +217,7 @@ public record GenOutage(int pRow, double pTarget, int vRow, double qTarget, bool
      * pilot-that-is-its-own-controller the member ALTERNATE dest.
      */
     public boolean flipsPilotRowWhenAllPinned() {
-        return pinnedPilotVRow >= 0 && pilotGroupSurvivorRlEntries.length > 0;
+        return pinnedPilotVRow >= 0 && pilotGroupSurvivorReactiveLimitEntries.length > 0;
     }
 
     /** This outage moved a packed DISTR_Q member's OWN targetQ (a reactive LOAD loss on a group member).
@@ -231,25 +231,25 @@ public record GenOutage(int pRow, double pTarget, int vRow, double qTarget, bool
     /** A re-homed voltage control (see {@link #ROW_V_IDENTITY}): its bus is a plain PV bus this scenario, so its
      *  reactive-limit entry — packed as a remote member of the base group — is checked as a LOCAL controller
      *  (pin on its own row, switch back on its own voltage) at the target {@code qTarget} carries. */
-    public boolean reHomesRlEntry() {
-        return (pqRowMode == ROW_V_IDENTITY || pqRowMode == ROW_PINNED_V || pqRowMode == ROW_CROSS_V_IDENTITY) && rlEntry >= 0;
+    public boolean reHomesReactiveLimitEntry() {
+        return (pqRowMode == ROW_V_IDENTITY || pqRowMode == ROW_PINNED_V || pqRowMode == ROW_CROSS_V_IDENTITY) && reactiveLimitEntry >= 0;
     }
 
     /** A remote controller re-pointed at a new pilot this scenario (no row change of its own). */
     public boolean reHomesRemoteController() {
-        return pqRowMode == ROW_REMOTE_REHOME && rlEntry >= 0 && reHomePilotVRow >= 0;
+        return pqRowMode == ROW_REMOTE_REHOME && reactiveLimitEntry >= 0 && reHomePilotVRow >= 0;
     }
 
     /** The bus keeps NO generator: its reactive-limit entry is not a controller in this scenario. */
     public boolean silencesReactiveLimitEntry() {
-        return rlEntry >= 0 && allGensLost;
+        return reactiveLimitEntry >= 0 && allGensLost;
     }
 
     /** Anything this outage changes about the entry's run-constant reactive inputs: the capability the
      *  lost generators take with them, and the load target Q the pinned target and the controller's own
      *  q are both measured against. */
     public boolean shrinksReactiveLimits() {
-        return rlEntry >= 0 && (minQDelta != 0 || maxQDelta != 0 || loadQDelta != 0 || svcBminDelta != 0 || svcBmaxDelta != 0);
+        return reactiveLimitEntry >= 0 && (minQDelta != 0 || maxQDelta != 0 || loadQDelta != 0 || svcBminDelta != 0 || svcBmaxDelta != 0);
     }
 
     /** Does the plan write a TARGET at {@code row} for this scenario? Then the structural DEFAULT targets of the

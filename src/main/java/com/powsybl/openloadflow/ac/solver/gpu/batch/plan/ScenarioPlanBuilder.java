@@ -50,7 +50,7 @@ final class ScenarioPlanBuilder {
     final int[][] distrRhoOverrideTermByIndex;
     final double[][] distrRhoOverrideCoefficientByIndex;
     final int[][] islandedDsByIndex;
-    final int[][] islandedRlByIndex;
+    final int[][] islandedReactiveLimitEntriesByIndex;
     // {pRow, qRow} per LfBus.getNum(), resolved lazily on the first injection outage: the P/Q
     // balance rows the extraction writes targets at, which the coupler-tree relocation moves off
     // the bus's own BUS_PHI/BUS_V columns. One O(buses+branches) pass for the whole plan.
@@ -81,7 +81,7 @@ final class ScenarioPlanBuilder {
         this.distrRhoOverrideTermByIndex = new int[nContingencies][];
         this.distrRhoOverrideCoefficientByIndex = new double[nContingencies][];
         this.islandedDsByIndex = new int[nContingencies][];
-        this.islandedRlByIndex = new int[nContingencies][];
+        this.islandedReactiveLimitEntriesByIndex = new int[nContingencies][];
         this.distrQSubgroupByIndex = new int[nContingencies][];
         this.relocatedSlackRow = new int[nContingencies];
         java.util.Arrays.fill(relocatedSlackRow, -1);
@@ -102,7 +102,7 @@ final class ScenarioPlanBuilder {
                 distrQWeightOverrideTermByIndex, distrQWeightOverrideWeightByIndex, distrQKeyOverrideMemberByIndex,
                 distrQKeyOverrideKeyByIndex, distrRhoOverrideTermByIndex, distrRhoOverrideCoefficientByIndex,
                 islandedDsByIndex,
-                islandedRlByIndex, islandedHvdcsByIndex, distrQSubgroupByIndex,
+                islandedReactiveLimitEntriesByIndex, islandedHvdcsByIndex, distrQSubgroupByIndex,
                 new GpuBatchQualification.SlackRelocations(relocatedSlackRow, relocatedSlackShift));
     }
 }

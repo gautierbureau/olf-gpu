@@ -170,14 +170,14 @@ public final class GpuBatchedSecurityAnalysisSolver {
         boolean slackParticipates = java.util.Arrays.stream(gpuData.distributedSlack().busFactor()).sum() < 1 - 1e-9;
         // Reactive capability CURVES at runtime P (ReactiveCapabilityCurves): each tracked generator is evaluated at its own
         // P (its anchor plus its own slack move); a strategy pair moving an untracked curve generator -> CPU.
-        ReactiveCapabilityCurves.Channel rlCurves = reactiveLimits
+        ReactiveCapabilityCurves.Channel reactiveCapabilityCurves = reactiveLimits
                 ? ReactiveCapabilityCurves.build(network, equationSystem, gpuData, config.dsParams(), distributedSlack, baseTargets,
-                        config.rlCurveExtrapolate())
+                        config.extrapolateReactiveLimits())
                 : null;
         // forceTargetQInReactiveLimits: the curve generators whose clamped Q target follows their P (null = none).
         ForceTargetQInReactiveLimits.Channel forcedTargetQ = reactiveLimits
                 ? ForceTargetQInReactiveLimits.build(network, equationSystem, gpuData, config.dsParams(), config.forceTargetQ(),
-                        distributedSlack, baseTargets, baseActivation.rowMode(), config.rlCurveExtrapolate())
+                        distributedSlack, baseTargets, baseActivation.rowMode(), config.extrapolateReactiveLimits())
                 : null;
         // Couplers whose DUMMY rows host a bus's power equations under the tree relocation: an island has to
         // freeze those rows too (see IslandedBuses.islandedFrozen). Empty when the relocation is off.
@@ -245,7 +245,7 @@ public final class GpuBatchedSecurityAnalysisSolver {
                                 n, nElements, varType, hvdcElemIndex),
                         plan,
                         new ChunkInputs.SolveSettings(parameters, tol, reactiveLimitTol, slackDistTol, convEpsPerEq, rowCriteria),
-                        new ChunkInputs.DevicePhaseInputs(phases, hvdcControllers, rlCurves, forcedTargetQ),
+                        new ChunkInputs.DevicePhaseInputs(phases, hvdcControllers, reactiveCapabilityCurves, forcedTargetQ),
                         new ChunkInputs.ResultSinks(resultsByIndex, preDistributedByIndex, distributedByIndex),
                         config));
             }

@@ -60,8 +60,8 @@ __global__ void fillDistrQBatch(int nDistrQ, int nScenarios, int n, int nnz, int
                                 const int* mode,
                                 int nDistrQInactiveMembers, const int* distrQInactiveScenarioMember,
                                 const int* distrQRowMember, const int* distrQInjectionMember, const double* mKey,
-                                const int* mRlEntry, const int* mGroupStart, const int* mGroupCount,
-                                const char* limitType, int nrl,
+                                const int* distrQMemberReactiveLimitEntry, const int* mGroupStart, const int* mGroupCount,
+                                const char* limitType, int nReactiveLimitEntries,
                                 const char* psSkip, int psGroups,
                                 const int* mQrGroup, const int* qrPtr, const int* qrRows,
                                 int nR1Ov, const int* r1OvSlotElem, const double* r1OvVal,
@@ -125,8 +125,8 @@ __global__ void fillDistrQBatch(int nDistrQ, int nScenarios, int n, int nnz, int
         if (subS != nullptr && distrQInjectionMember[c] >= 0 && subS[distrQInjectionMember[c]] != subK) return;
         double sum = 0.0;
         for (int m = gs; m < gs + gc; m++) {
-            int re = mRlEntry[m];
-            bool pinned = re >= 0 && limitType[(size_t) s * nrl + re] != GpuQLimitType::NONE;
+            int re = distrQMemberReactiveLimitEntry[m];
+            bool pinned = re >= 0 && limitType[(size_t) s * nReactiveLimitEntries + re] != GpuQLimitType::NONE;
             bool otherSub = subS != nullptr && subS[m] != subK;
             sum += (pinned || otherSub || distrQMemberInactive(nDistrQInactiveMembers, distrQInactiveScenarioMember, s, m))
                     ? 0.0 : distrQKeyOf(nDistrQKeyOverrides, distrQKeyOverrideScenarioMember, distrQKeyOverrideKey, s, m, mKey);
@@ -135,8 +135,8 @@ __global__ void fillDistrQBatch(int nDistrQ, int nScenarios, int n, int nnz, int
         // qPct of the ROW OWNER); the pin is balanced on the TARGET side instead — OLF's
         // getGeneratorReactivePowerDistributionTarget adds qPct_k * targetQ_j for each frozen j
         // (updateDistrQTargetsBatch keeps the per-scenario targets in step with the pin states)
-        int reK = mRlEntry[kM];
-        bool kPinned = reK >= 0 && limitType[(size_t) s * nrl + reK] != GpuQLimitType::NONE;
+        int reK = distrQMemberReactiveLimitEntry[kM];
+        bool kPinned = reK >= 0 && limitType[(size_t) s * nReactiveLimitEntries + reK] != GpuQLimitType::NONE;
         double qpk = (sum == 0.0 || kPinned || distrQMemberInactive(nDistrQInactiveMembers, distrQInactiveScenarioMember, s, kM))
                 ? 0.0 : distrQKeyOf(nDistrQKeyOverrides, distrQKeyOverrideScenarioMember, distrQKeyOverrideKey, s, kM, mKey) / sum;
         w = qpk - (distrQInjectionMember[c] == kM ? 1.0 : 0.0);

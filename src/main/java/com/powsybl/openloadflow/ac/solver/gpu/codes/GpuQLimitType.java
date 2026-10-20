@@ -10,7 +10,7 @@ package com.powsybl.openloadflow.ac.solver.gpu.codes;
 import com.powsybl.openloadflow.network.LfBus;
 
 /**
- * A reactive-limit entry's limit type as the device holds it (the low bits of rlState, rlBaseQLimitType): OLF's
+ * A reactive-limit entry's limit type as the device holds it (the low bits of reactiveLimitsState, reactiveLimitBaseQLimitType): OLF's
  * {@link LfBus.QLimitType} (ordinal + 1), {@link #NONE} when the entry is not pinned, and {@link #FROZEN}, the
  * device's mark for a voltage control OLF's GeneratorVoltageControlManager froze or whose generators are all lost.
  * Mirrored by native/cuda/jni/common/codes/gpu_q_limit_type.cuh.

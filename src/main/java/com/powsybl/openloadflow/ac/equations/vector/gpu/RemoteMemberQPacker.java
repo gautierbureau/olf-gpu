@@ -49,7 +49,7 @@ public final class RemoteMemberQPacker {
      * {@link #mainGenVc}. For a MERGED group every member keeps its own DEPENDENT control whose
      * controlled bus is ITSELF, so OLF reads every such member as a LOCAL controller and skips the
      * whole {@code robustMode && generatorRemoteController && …} block for it — while the device's
-     * {@code rlRemote} class, built from the MAIN control, calls that member "remote" and applies the
+     * {@code reactiveLimitVoltageControlRole} class, built from the MAIN control, calls that member "remote" and applies the
      * rule. That gap is [[#66]]: on rte6515 the device froze VL-2669_1..4 with
      * {@code MIN_REALISTIC_V} (their shared target, 12.4 kV on a 20 kV level = 0.62 pu, is below the
      * 0.816 pu trip point) where OLF froze nothing, so mode-4 own-Q balances replaced the DISTR_Q
@@ -91,7 +91,7 @@ public final class RemoteMemberQPacker {
                 // A pilot-self pilot whose Q is RE-ROUTED through a candidate table (qRowAlt = -2-g) already gets
                 // its own injection at its own row from the diagnostic fill: patchFrozenGroupDests points the
                 // group's frozen role-0 dest at the table's FALLBACK row, which for such a pilot IS its own row.
-                // Adding the rmq twin on top counted it TWICE. Measured on rte6515 VL-6112_0 with the rotation
+                // Adding the remoteMemberReactiveTerms twin on top counted it TWICE. Measured on rte6515 VL-6112_0 with the rotation
                 // property on: q read 0.603080467 where OLF has 0.910540234, and
                 // 1.218 (loadQ) + 2 * (0.910540234 - 1.218) = 0.603080 — the doubled injection, to six digits.
                 // The reactive-limit check then never saw the pilot beyond its limit and never pinned it, which
@@ -103,7 +103,7 @@ public final class RemoteMemberQPacker {
                 if (vCol[vc.getControlledBus().getNum()] < 0) {
                     continue;
                 }
-                // The row the reactive-limit check READS (native rlQrow): for a relocated child that is the
+                // The row the reactive-limit check READS (native reactiveLimitReactivePowerRow): for a relocated child that is the
                 // parent coupler's DUMMY_Q row, not its own V row, which now holds the coupler's ZERO_V. Filling
                 // the own row left the check reading ZERO for every relocated member, so it could never pin one —
                 // measured on rte6515's full busbar scope: the device's base stopped after its first

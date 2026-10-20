@@ -8,7 +8,7 @@
 package com.powsybl.openloadflow.ac.solver.gpu.codes;
 
 /**
- * Bit flags of a reactive-limit entry (rlMonitored). Mirrored by
+ * Bit flags of a reactive-limit entry (reactiveLimitFlags). Mirrored by
  * native/cuda/jni/common/codes/gpu_reactive_limits_entry_flag.cuh.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}

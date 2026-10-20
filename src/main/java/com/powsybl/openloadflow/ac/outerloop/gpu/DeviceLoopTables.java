@@ -67,14 +67,14 @@ public final class DeviceLoopTables {
      * per-scenario rejection to the CPU; installing them here makes that rejection unreachable, which
      * is why {@code solveBatchContext} now refuses a context that reaches it without them.
      */
-    public static void installRlElection(long handle, GpuAcData gpuData) {
-        ReactiveLimitsNative.setBatchRlElection(handle, gpuData.reactiveLimits().nominalV(), gpuData.reactiveLimits().activePowerRow(),
+    public static void installReactiveLimitStrongestPvKeys(long handle, GpuAcData gpuData) {
+        ReactiveLimitsNative.setBatchReactiveLimitStrongestPvKeys(handle, gpuData.reactiveLimits().nominalV(), gpuData.reactiveLimits().activePowerRow(),
                 gpuData.reactiveLimits().targetP(), gpuData.reactiveLimits().idRank());
     }
 
-    public static void install(long handle, GpuAcData gpuData, ReactiveCapabilityCurves.Channel rlCurves,
+    public static void install(long handle, GpuAcData gpuData, ReactiveCapabilityCurves.Channel reactiveCapabilityCurves,
                                ForceTargetQInReactiveLimits.Channel forcedTargetQ,
-                               boolean rlRobustMode, double minRealisticVoltage, double maxRealisticVoltage,
+                               boolean reactiveLimitsRobustMode, double minRealisticVoltage, double maxRealisticVoltage,
                                double minNominalVoltageRealisticVoltageCheck, int realisticFixingLoop) {
         // AcloadFlowEngine's realistic-voltage check, applied to the states INSIDE the driver's sweep.
         // The row carries its bus's nominal voltage (0 = a row the check never looks at, which is
@@ -88,28 +88,28 @@ public final class DeviceLoopTables {
         ReactiveLimitsNative.setBatchRealisticCheck(handle, rowChecked, minRealisticVoltage, maxRealisticVoltage, 1,
                 realisticFixingLoop);
         // Curve limits at runtime P: install (or clear, for cached contexts) the per-gen curve channel.
-        ReactiveLimitsNative.setBatchRlCurves(handle,
-                rlCurves != null ? rlCurves.cvIdx() : null,
-                rlCurves != null ? rlCurves.cvIn() : null,
-                rlCurves != null ? rlCurves.cvPts() : null,
-                rlCurves != null ? rlCurves.cvHv() : null,
-                rlCurves != null && rlCurves.extrapolate() ? 1 : 0);
+        ReactiveLimitsNative.setBatchReactiveCapabilityCurves(handle,
+                reactiveCapabilityCurves != null ? reactiveCapabilityCurves.cvIdx() : null,
+                reactiveCapabilityCurves != null ? reactiveCapabilityCurves.cvIn() : null,
+                reactiveCapabilityCurves != null ? reactiveCapabilityCurves.cvPts() : null,
+                reactiveCapabilityCurves != null ? reactiveCapabilityCurves.cvHv() : null,
+                reactiveCapabilityCurves != null && reactiveCapabilityCurves.extrapolate() ? 1 : 0);
         // forceTargetQInReactiveLimits: the clamped generators' Q targets follow their P (or the channel is cleared).
         ForceTargetQInReactiveLimits.install(handle, forcedTargetQ);
         // Voltage-dependent SVC reactive limits: install the quadratic coefficients (zero on
         // SVC-less entries — the kernel's limit(v) then degenerates to the packed static limit).
-        ReactiveLimitsNative.setBatchRlSvcLimits(handle,
+        ReactiveLimitsNative.setBatchReactiveLimitSvcSusceptanceLimits(handle,
                 gpuData.reactiveLimits().svcMinB(), gpuData.reactiveLimits().svcMaxB(), gpuData.reactiveLimits().baseVSquared());
         // OLF's global forced-PV election keys — the RL pass keeps the strongest bus PV when every
         // PV bus would switch, instead of rejecting the scenario to the CPU.
         ReactiveLimitEntries rl = gpuData.reactiveLimits();
-        ReactiveLimitsNative.setBatchRlElection(handle, rl.nominalV(), rl.activePowerRow(), rl.targetP(), rl.idRank());
+        ReactiveLimitsNative.setBatchReactiveLimitStrongestPvKeys(handle, rl.nominalV(), rl.activePowerRow(), rl.targetP(), rl.idRank());
         // voltageRemoteControlRobustMode: install (or clear, for a cached context whose run has the
         // mode off) the realistic-V criteria the RL pass applies to REMOTE voltage controllers.
         // REALISTIC_VOLTAGE_MARGIN = 1.02, straight out of ReactiveLimitsOuterLoop.
-        ReactiveLimitsNative.setBatchRlRobust(handle, gpuData.reactiveLimits().initialTargetQ(),
+        ReactiveLimitsNative.setBatchReactiveLimitsRobustMode(handle, gpuData.reactiveLimits().initialTargetQ(),
                 minRealisticVoltage * REALISTIC_VOLTAGE_MARGIN, maxRealisticVoltage / REALISTIC_VOLTAGE_MARGIN,
-                rlRobustMode ? 1 : 0);
+                reactiveLimitsRobustMode ? 1 : 0);
         // OLF's own base QLimitTypes, so a realistic-voltage switch is not re-seeded as a Q-limit one.
         byte[] baseLimitTypes = gpuData.reactiveLimits().baseQLimitType();
         boolean anyBaseLt = false;
@@ -126,36 +126,36 @@ public final class DeviceLoopTables {
                     ks.append(' ').append(i).append(':').append(baseLimitTypes[i]);
                 }
             }
-            System.err.println("GPU_RL_KINDS install handle=" + handle + " nrl=" + gpuData.reactiveLimits().voltageRow().length
+            System.err.println("GPU_RL_KINDS install handle=" + handle + " nReactiveLimitEntries=" + gpuData.reactiveLimits().voltageRow().length
                     + " anyBaseLt=" + anyBaseLt + " kinds:" + ks + " caller="
                     + Thread.currentThread().getStackTrace()[2].getClassName().replaceAll(".*\\.", ""));
         }
-        ReactiveLimitsNative.setBatchRlBaseLimitType(handle, anyBaseLt ? baseLimitTypes : null);
+        ReactiveLimitsNative.setBatchReactiveLimitBaseQLimitType(handle, anyBaseLt ? baseLimitTypes : null);
         // Remote-member RL entries (plan-B1): install (or clear, on a cached context) the kinds.
-        boolean anyRlRemote = false;
+        boolean anyReactiveLimitRemoteEntry = false;
         for (byte b : gpuData.reactiveLimits().voltageControlRole()) {
-            anyRlRemote |= b != GpuVoltageControlRole.LOCAL;
+            anyReactiveLimitRemoteEntry |= b != GpuVoltageControlRole.LOCAL;
         }
-        ReactiveLimitsNative.setBatchRlRemote(handle,
-                anyRlRemote ? gpuData.reactiveLimits().voltageControlRole() : null,
-                anyRlRemote ? gpuData.reactiveLimits().comparedVoltageRow() : null,
-                anyRlRemote ? gpuData.remoteMemberReactiveTerms().row() : null,
-                anyRlRemote ? gpuData.remoteMemberReactiveTerms().element() : null,
-                anyRlRemote ? gpuData.remoteMemberReactiveTerms().side() : null,
-                anyRlRemote ? gpuData.remoteMemberReactiveTerms().kind() : null,
-                anyRlRemote ? gpuData.remoteMemberReactiveTerms().weight() : null,
-                anyRlRemote ? gpuData.distrQ().rowMember() : null,
-                anyRlRemote ? gpuData.distrQ().injectionMember() : null,
-                anyRlRemote ? gpuData.distrQMembers().key() : null,
-                anyRlRemote ? gpuData.distrQMembers().reactiveLimitEntry() : null,
-                anyRlRemote ? gpuData.distrQMembers().groupStart() : null,
-                anyRlRemote ? gpuData.distrQMembers().groupCount() : null,
-                anyRlRemote ? gpuData.distrQMembers().row() : null,
-                anyRlRemote ? gpuData.distrQMembers().hasRow() : null,
-                anyRlRemote ? gpuData.distrQMembers().relocationGroup() : null,
-                anyRlRemote ? gpuData.distrQMembers().targetQ() : null,
-                anyRlRemote ? gpuData.distrQMembers().targetPeerStart() : null,
-                anyRlRemote ? gpuData.distrQMembers().targetPeer() : null);
+        ReactiveLimitsNative.setBatchReactiveLimitRemoteEntries(handle,
+                anyReactiveLimitRemoteEntry ? gpuData.reactiveLimits().voltageControlRole() : null,
+                anyReactiveLimitRemoteEntry ? gpuData.reactiveLimits().comparedVoltageRow() : null,
+                anyReactiveLimitRemoteEntry ? gpuData.remoteMemberReactiveTerms().row() : null,
+                anyReactiveLimitRemoteEntry ? gpuData.remoteMemberReactiveTerms().element() : null,
+                anyReactiveLimitRemoteEntry ? gpuData.remoteMemberReactiveTerms().side() : null,
+                anyReactiveLimitRemoteEntry ? gpuData.remoteMemberReactiveTerms().kind() : null,
+                anyReactiveLimitRemoteEntry ? gpuData.remoteMemberReactiveTerms().weight() : null,
+                anyReactiveLimitRemoteEntry ? gpuData.distrQ().rowMember() : null,
+                anyReactiveLimitRemoteEntry ? gpuData.distrQ().injectionMember() : null,
+                anyReactiveLimitRemoteEntry ? gpuData.distrQMembers().key() : null,
+                anyReactiveLimitRemoteEntry ? gpuData.distrQMembers().reactiveLimitEntry() : null,
+                anyReactiveLimitRemoteEntry ? gpuData.distrQMembers().groupStart() : null,
+                anyReactiveLimitRemoteEntry ? gpuData.distrQMembers().groupCount() : null,
+                anyReactiveLimitRemoteEntry ? gpuData.distrQMembers().row() : null,
+                anyReactiveLimitRemoteEntry ? gpuData.distrQMembers().hasRow() : null,
+                anyReactiveLimitRemoteEntry ? gpuData.distrQMembers().relocationGroup() : null,
+                anyReactiveLimitRemoteEntry ? gpuData.distrQMembers().targetQ() : null,
+                anyReactiveLimitRemoteEntry ? gpuData.distrQMembers().targetPeerStart() : null,
+                anyReactiveLimitRemoteEntry ? gpuData.distrQMembers().targetPeer() : null);
         // Per-generator DistributedSlack participants (OLF's water-fill saturates per generator).
         DistributedSlackNative.setBatchDsGenerators(handle, gpuData.distributedSlack().generatorBus(), gpuData.distributedSlack().generatorFactor(),
                 gpuData.distributedSlack().generatorMaxDelta(), gpuData.distributedSlack().generatorMinDelta(),

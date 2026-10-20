@@ -130,7 +130,7 @@ final class ReHomedEntries {
             }
             int[] reloc = relocRows.get(vVar.getRow());
             boolean blockCovers = reloc != null && outagedZeroImpedanceBranchNums.contains(reloc[0]);
-            int rl = RelocatedRows.rlEntryOf(gpuData, e.getKey());
+            int rl = RelocatedRows.reactiveLimitEntryOf(gpuData, e.getKey());
             boolean switchedPvToPqInBase = gpuData.switchedPvToPqInBase(rl);
             if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {
                 System.err.printf("QUALIFY_TRACE remoteMain bus=%s vRow=%d target=%.6f blockCovers=%b switchedPvToPqInBase=%b%n",
@@ -161,12 +161,12 @@ final class ReHomedEntries {
                     var cvc = cb.getGeneratorVoltageControl().orElse(null);
                     List<LfBus> ctl = cvc != null ? cvc.getControllerElements() : List.of(cb);
                     for (LfBus ce : ctl) {
-                        int ceRl = RelocatedRows.rlEntryOf(gpuData, ce);
-                        if (!gpuData.switchedPvToPqInBase(ceRl)) {
+                        int controllerElementReactiveLimitEntry = RelocatedRows.reactiveLimitEntryOf(gpuData, ce);
+                        if (!gpuData.switchedPvToPqInBase(controllerElementReactiveLimitEntry)) {
                             reject[0] = "PLAN:VC_REMERGE_PINNED_MAIN";
                             return null;
                         }
-                        guards.add(noUnpinEntry(ceRl));
+                        guards.add(noUnpinEntry(controllerElementReactiveLimitEntry));
                     }
                 }
                 out.addAll(guards);
@@ -194,7 +194,7 @@ final class ReHomedEntries {
                                                                   GpuAcData gpuData, String[] reject) {
         List<GenOutage> out = new ArrayList<>();
         for (var e : reHomed.reHomedRemoteControllers().entrySet()) {
-            int rl = RelocatedRows.rlEntryOf(gpuData, e.getKey());
+            int rl = RelocatedRows.reactiveLimitEntryOf(gpuData, e.getKey());
             if (rl < 0) {
                 continue;
             }
@@ -205,7 +205,7 @@ final class ReHomedEntries {
                 return null;
             }
             if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {
-                System.err.printf("QUALIFY_TRACE reHomeRemoteCtl controller=%s rlEntry=%d pilot=%s pilotVRow=%d target=%.6f%n",
+                System.err.printf("QUALIFY_TRACE reHomeRemoteCtl controller=%s reactiveLimitEntry=%d pilot=%s pilotVRow=%d target=%.6f%n",
                         e.getKey().getId(), rl, e.getValue().getId(), pilotV.getRow(), target);
             }
             out.add(new GenOutage(-1, 0, -1, target, false, false,
@@ -217,35 +217,35 @@ final class ReHomedEntries {
     }
 
     /** Row-mode-only GenOutage: the bus's V row becomes a VOLTAGE IDENTITY at {@code vTarget} (a re-homed control). */
-    static GenOutage reHomedPvEntry(int vRow, double vTarget, int rlEntry) {
+    static GenOutage reHomedPvEntry(int vRow, double vTarget, int reactiveLimitEntry) {
         return new GenOutage(-1, 0, vRow, vTarget, true, true,
-                -1, 0, 0, 0, 0, rlEntry, 0, 0, false, java.util.Set.of(), 0, 0, 0, -1, new int[0],
+                -1, 0, 0, 0, 0, reactiveLimitEntry, 0, 0, false, java.util.Set.of(), 0, 0, 0, -1, new int[0],
                 new int[0], new double[0], GenOutage.ROW_V_IDENTITY, -1, 0, -1, 0, -1, 0, -1, -1, 0, false, -1, 0, 0);
     }
 
     /** A re-homed control whose bus the BASE pinned: its own row starts as its reactive balance at the pinned
      *  value (mode 4, {@code qTarget} = LfBus.getTargetQ(), the frozen generation minus the load) and its entry is a
      *  LOCAL PV bus at {@code vTarget}, so an unpin restores the identity as OLF re-activates BUS_TARGET_V. */
-    static GenOutage reHomedPinnedPvEntry(int vRow, double qTarget, double vTarget, int rlEntry) {
+    static GenOutage reHomedPinnedPvEntry(int vRow, double qTarget, double vTarget, int reactiveLimitEntry) {
         return new GenOutage(-1, 0, vRow, qTarget, true, true,
-                -1, 0, 0, 0, 0, rlEntry, 0, 0, false, java.util.Set.of(), 0, 0, 0, -1, new int[0],
+                -1, 0, 0, 0, 0, reactiveLimitEntry, 0, 0, false, java.util.Set.of(), 0, 0, 0, -1, new int[0],
                 new int[0], new double[0], GenOutage.ROW_PINNED_V, -1, vTarget, -1, 0, -1, 0, -1, -1, 0, false, -1, 0, 0);
     }
 
     /** A re-homed control whose own V row hosts a LIVE coupler's ZERO_V (tasks #70, VC_REMERGE_RELOC_VROW): its
      *  identity is a CROSS identity on the parent coupler's DUMMY_Q row (mode 6, the bus's V column), or — base
      *  pinned — that row starts as the balance at the pinned value and the entry unpins back to the cross form. */
-    static GenOutage reHomedCrossEntry(int dummyQRow, double vTarget, int rlEntry, boolean pinned, double qTarget) {
-        return pinned ? reHomedPinnedPvEntry(dummyQRow, qTarget, vTarget, rlEntry)
+    static GenOutage reHomedCrossEntry(int dummyQRow, double vTarget, int reactiveLimitEntry, boolean pinned, double qTarget) {
+        return pinned ? reHomedPinnedPvEntry(dummyQRow, qTarget, vTarget, reactiveLimitEntry)
                 : new GenOutage(-1, 0, dummyQRow, vTarget, true, true,
-                    -1, 0, 0, 0, 0, rlEntry, 0, 0, false, java.util.Set.of(), 0, 0, 0, -1, new int[0],
+                    -1, 0, 0, 0, 0, reactiveLimitEntry, 0, 0, false, java.util.Set.of(), 0, 0, 0, -1, new int[0],
                     new int[0], new double[0], GenOutage.ROW_CROSS_V_IDENTITY, -1, 0, -1, 0, -1, 0, -1, -1, 0, false, -1, 0, 0);
     }
 
     /** A base-pinned member of a re-homed cluster with no enabled controller: no row change, unpin forbidden. */
-    static GenOutage noUnpinEntry(int rlEntry) {
+    static GenOutage noUnpinEntry(int reactiveLimitEntry) {
         return new GenOutage(-1, 0, -1, 0, false, false,
-                -1, 0, 0, 0, 0, rlEntry, 0, 0, false, java.util.Set.of(), 0, 0, 0, -1, new int[0],
+                -1, 0, 0, 0, 0, reactiveLimitEntry, 0, 0, false, java.util.Set.of(), 0, 0, 0, -1, new int[0],
                 new int[0], new double[0], GenOutage.ROW_PINNED_NO_UNPIN, -1, 0, -1, 0, -1, 0, -1, -1, 0, false, -1, 0, 0);
     }
 }

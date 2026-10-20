@@ -115,8 +115,8 @@ class GpuSaSecondaryVoltageControlTest extends AbstractGpuSaTest {
     /** DEVICE-mode SecondaryVoltageControl with a REMOTE controller (was rejected by the LOCAL-only
      *  stage-1 scope): B6-G regulates B5 through a line terminal — the zone system's sensitivity
      *  unit row and the moved zone target now live on the CONTROLLED bus B5's pinned V row while
-     *  the controller's RL entry is the rlRemote member entry (pilot-referenced switch-back via
-     *  rlVtOv). B6-G keeps its stock (pinnable) limits: the singleton remote group batches since
+     *  the controller's RL entry is the reactiveLimitVoltageControlRole member entry (pilot-referenced switch-back via
+     *  reactiveLimitTargetVOverrides). B6-G keeps its stock (pinnable) limits: the singleton remote group batches since
      *  the table-less-free-member gate retired (backlog item 4, folded in here — the singleton's
      *  relocation table is [pilot fallback, member], its only member's pin IS the all-pinned
      *  pilot-vEq corner). B8-G stays local in the same zone (controllers <-> controlled buses

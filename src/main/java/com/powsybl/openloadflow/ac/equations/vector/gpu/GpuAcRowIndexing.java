@@ -286,7 +286,7 @@ final class GpuAcRowIndexing {
      * The row that hosts a bus's reactive balance once the COUPLER-TREE RELOCATION has had its say: its own
      * {@code BUS_V} row, or its parent coupler's {@code DUMMY_Q} row when the relocation moved its power
      * equations there. Every consumer of "where does this bus's q live" has to ask this — the reactive-limit
-     * pass reads the pin and the q at that row (native {@code rlQrow}), the candidate table enrols it, the
+     * pass reads the pin and the q at that row (native {@code reactiveLimitReactivePowerRow}), the candidate table enrols it, the
      * activation extractor targets it, the families write the bus's own q to it in mode 4, and the diagnostic
      * remote-member fill accumulates into it. A consumer left on the own row silently reads ZERO there.
      */

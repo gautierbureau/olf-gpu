@@ -42,17 +42,17 @@ __device__ inline double cvHvdcActivePower(const CvHvdc& c, int s, int n, int h,
 // participating curve gen's delta eval(p_now) - eval(p_base). p_now = basePpu + share * (the bus's
 // DS-moved row target - its base) — exact while intra-bus proportionality holds (the pack's DS
 // model). At the base point the delta is bit-zero (same formula both sides).
-// rlCurveLimitsBatch reads each generator's OWN cumulative P from the distributed-slack water-fill
+// reactiveCapabilityCurveLimitsBatch reads each generator's OWN cumulative P from the distributed-slack water-fill
 // (dGenCum), which clamps PER GENERATOR, instead of splitting its bus's movement by a share fixed at
 // pack time. The share is exact only while the intra-bus split stays proportional, and a clamp breaks
 // that: on rte6515 GEN-6172 at VL-6139_0 the 451 MW unit takes +0.0442 where its share says +0.0890,
 // which puts the bus's Q box out by 2.67 MVAr and the bus 0.0379 kV off. The share reconstruction
 // survives ONLY as the fallback for entries genCum cannot serve (no DS slot, the per-generator
 // water-fill did not run, or the outaged bus's own entries) — there is no switch back to it.
-__global__ void rlCurveLimitsBatch(int nrl, int nScenarios, int ncv, int n, int cvExtrapolate,
+__global__ void reactiveCapabilityCurveLimitsBatch(int nReactiveLimitEntries, int nScenarios, int ncv, int n, int cvExtrapolate,
                                    const int* cvIdx, const double* cvIn, const double* cvPts,
                                    const int* cvPtr, const int* cvList, CvHvdc cvHv,
-                                   const double* rlMinQ, const double* rlMaxQ, const double* rlLoadQ,
+                                   const double* reactiveLimitMinQ, const double* reactiveLimitMaxQ, const double* reactiveLimitLoadQ,
                                    const double* target,
                                    int nQOv, const int* qOvSlotEntry, const double* qOvMinMax,
                                    const int* qOvPtr, const int* qOvList,
@@ -61,16 +61,16 @@ __global__ void rlCurveLimitsBatch(int nrl, int nScenarios, int ncv, int n, int 
                                    const int* dsPhiRow, const int* dsRowOv, int nds, const int* dgBus,
                                    double* minQDyn, double* maxQDyn, double* loadQDyn) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= nrl * nScenarios) return;
-    int i = tid % nrl;
-    int s = tid / nrl;
-    double mn = rlMinQ[i];
-    double mx = rlMaxQ[i];
-    double lq = rlLoadQ[i];
+    if (tid >= nReactiveLimitEntries * nScenarios) return;
+    int i = tid % nReactiveLimitEntries;
+    int s = tid / nReactiveLimitEntries;
+    double mn = reactiveLimitMinQ[i];
+    double mx = reactiveLimitMaxQ[i];
+    double lq = reactiveLimitLoadQ[i];
     int ovLo = cvOvPtr != nullptr ? cvOvPtr[s] : 0;           // this scenario's curve repairs, if any
     int ovHi = cvOvPtr != nullptr ? cvOvPtr[s + 1] : 0;       // (CSR by scenario: a handful of entries)
     // This entry's OWN curves, CSR by entry (built at upload, pack order kept so the sums accumulate in the
-    // same order). The flat scan over every curve cost nrl * nS * ncv reads per launch - quadratic in the
+    // same order). The flat scan over every curve cost nReactiveLimitEntries * nS * ncv reads per launch - quadratic in the
     // network's size, and this kernel runs before every reactive-limit decision of every chunk.
     // (ncv == 0: no curve channel on this context, or a cached context's stale table from an earlier run - the
     // pointers are not read; the kernel still runs for the Q overrides and the forced target Q below.)
@@ -132,8 +132,8 @@ __global__ void rlCurveLimitsBatch(int nrl, int nScenarios, int ncv, int n, int 
             pNow = cvIn[g * 5]
                     + cvIn[g * 5 + 1] * shareScale * (target[(size_t) s * n + pRow] - cvIn[g * 5 + 2] - pStep);
         }
-        double mnAdd = rlCurveEval(pNow * 100.0, pts, npts, 0, cvExtrapolate) / 100.0 - cvIn[g * 5 + 3];
-        double mxAdd = rlCurveEval(pNow * 100.0, pts, npts, 1, cvExtrapolate) / 100.0 - cvIn[g * 5 + 4];
+        double mnAdd = evaluateReactiveCapabilityCurve(pNow * 100.0, pts, npts, 0, cvExtrapolate) / 100.0 - cvIn[g * 5 + 3];
+        double mxAdd = evaluateReactiveCapabilityCurve(pNow * 100.0, pts, npts, 1, cvExtrapolate) / 100.0 - cvIn[g * 5 + 4];
         mn += mnAdd;
         mx += mxAdd;
     }
@@ -141,7 +141,7 @@ __global__ void rlCurveLimitsBatch(int nrl, int nScenarios, int ncv, int n, int 
     // static aggregate is run-constant and still holds it, while OLF's bus.getMinQ()/getMaxQ() sum only
     // the generators still there, so the scenario's own delta comes in here. Without curves this is the
     // ONLY reason the dynamic limits exist, which is why the seeding above starts from the static pair.
-    // ...the scenario's OWN overrides, CSR by slot: the flat {slot, entry} scan cost nrl * nS * nQOv reads per
+    // ...the scenario's OWN overrides, CSR by slot: the flat {slot, entry} scan cost nReactiveLimitEntries * nS * nQOv reads per
     // launch, with nQOv about nS on a generator-outage chunk (one override per scenario).
     for (int c = qOvPtr != nullptr ? qOvPtr[s] : 0; c < (qOvPtr != nullptr ? qOvPtr[s + 1] : 0); c++) {
         int k = qOvList[c];
@@ -151,9 +151,9 @@ __global__ void rlCurveLimitsBatch(int nrl, int nScenarios, int ncv, int n, int 
             lq += qOvMinMax[5 * k + 2];                      // a SHED load's reactive power: the pinned
         }                                                    // target and the controller's own q both
     }                                                        // measure against the bus's load target Q
-    minQDyn[(size_t) s * nrl + i] = mn;
-    maxQDyn[(size_t) s * nrl + i] = mx;
-    loadQDyn[(size_t) s * nrl + i] = lq;
+    minQDyn[(size_t) s * nReactiveLimitEntries + i] = mn;
+    maxQDyn[(size_t) s * nReactiveLimitEntries + i] = mx;
+    loadQDyn[(size_t) s * nReactiveLimitEntries + i] = lq;
 }
 
 // The curve kernel's view of the AC-emulation loop state (see CvHvdc).

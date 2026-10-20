@@ -48,9 +48,9 @@ __global__ void hvdcSlackBalanceBatch(int nS, int nh, int n, int nElements, int 
                                       const int* hvdcBus1PRow, const int* hvdcBus2PRow, const int* hvdcBus1PhiColumn,
                                       const int* hvdcBus2PhiColumn, const int* hvdcElement, const double* hvdcAcEmulationParameters,
                                       const int* status, const double* d1, const double* d2, const char* ctgOut,
-                                      const char* disabled, const double* x, const char* rlActive, double* qBuf) {
+                                      const char* disabled, const double* x, const char* outerLoopCheckActive, double* qBuf) {
     int s = blockIdx.x * blockDim.x + threadIdx.x;
-    if (s >= nS || !rlActive[s]) return;
+    if (s >= nS || !outerLoopCheckActive[s]) return;
     int slackRow = slackRowOv != nullptr && slackRowOv[s] >= 0 ? slackRowOv[s] : slackRowBase;
     const double* xs = x + (size_t) s * n;
     double corr = 0.0;
@@ -85,11 +85,11 @@ __global__ void hvdcSlackBalanceBatch(int nS, int nh, int n, int nElements, int 
 // that, from the anchor; what is left is its remaining mismatch, flagged in residual (FAIL / THROW decide on it),
 // and a check that finds the generators already saturated moves nothing (movedBuses false: STABLE).
 __global__ void slackOnlyDsCheck(int nScenarios, int n, int slackPhiRowBase, const int* slackRowOv, double slackTargetP,
-                                 double slackDistTol, double residueEps, const double* qBuf, const char* rlActive,
+                                 double slackDistTol, double residueEps, const double* qBuf, const char* outerLoopCheckActive,
                                  const double* anchor, double roomUp, double roomDown,
                                  double* absorbed, char* switched, char* residual) {
     int s = blockIdx.x * blockDim.x + threadIdx.x;
-    if (s >= nScenarios || !rlActive[s]) return;
+    if (s >= nScenarios || !outerLoopCheckActive[s]) return;
     int slackPhiRow = slackRowOv != nullptr && slackRowOv[s] >= 0 ? slackRowOv[s] : slackPhiRowBase;   // relocated slack
     double m = qBuf[(size_t) s * n + slackPhiRow] - slackTargetP - absorbed[s];
     if (fabs(m) > slackDistTol && fabs(m) > residueEps) {   // OLF's check: both bounds
@@ -110,7 +110,7 @@ __global__ void slackOnlyDsCheck(int nScenarios, int n, int slackPhiRowBase, con
 __global__ void computeSlackRetain(int nScenarios, int n, int nds, int slackPhiRowBase, const int* slackRowOv, double slackTargetP,
                                    double oneMinusFactorSum, const int* dsPhiRow, const int* dsRowOv,
                                    const double* dsBaseTargetP,
-                                   const double* target, const double* qBuf, const char* rlActive,
+                                   const double* target, const double* qBuf, const char* outerLoopCheckActive,
                                    double* retain,
                                    const int* dsOvBus, const double* dsOvBaseDelta,
                                    const double* dsAnchorShift, const double* dsSlackShift,
@@ -120,7 +120,7 @@ __global__ void computeSlackRetain(int nScenarios, int n, int nds, int slackPhiR
                                    int ngen, const int* dgBus, const double* dgStart, const double* retainApplied) {
     int s = blockIdx.x * blockDim.x + threadIdx.x;
     if (s >= nScenarios) return;
-    if (!rlActive[s]) return;
+    if (!outerLoopCheckActive[s]) return;
     if (slackGeneratorsInPack(ngen, dgBus)) {
         // The slack's generators are in the water-fill list: its share is what the last distribution gave them
         // (clamped like anyone's), not a fixed fraction of the total. Before any pass in this solve that is the
@@ -211,7 +211,7 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
                                               int slackPhiRowBase, const int* slackRowOv, double slackTargetP, const int* dsPhiRow, const int* dsRowOv,
                                               const double* dsFactor, const double* dsBaseTargetP, const double* dsAnchorShift, const double* dsSlackShift,
                                               const double* dsMaxDelta, const double* dsMinDelta, const double* dsRetain,
-                                              const double* qBuf, const char* rlActive,
+                                              const double* qBuf, const char* outerLoopCheckActive,
                                               const int* dsOvBus, const double* dsOvFactorDelta, const double* dsOvBaseDelta,
                                               const double* dsOvMaxDelta, const double* dsOvMinDelta,
                                               int dsMode, const double* dsMarginUp, const double* dsMarginDown,
@@ -226,7 +226,7 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
                                               double* target, char* switched, char* dsResidual, double* retainApplied, double* gateLast) {
     int s = blockIdx.x * blockDim.x + threadIdx.x;
     if (s >= nScenarios) return;
-    if (!rlActive[s]) return;
+    if (!outerLoopCheckActive[s]) return;
     int slackPhiRow = slackRowOv != nullptr && slackRowOv[s] >= 0 ? slackRowOv[s] : slackPhiRowBase;   // relocated slack
     // OLF's DistributedSlackOuterLoop.check distributes only when the slack mismatch exceeds BOTH
     // slackBusPMaxMismatch and ActivePowerDistribution.P_RESIDUE_EPS; the second only binds below 1 kW.
@@ -615,10 +615,10 @@ void dsCheck(BatchSolverContext* ctx, DriverPass& drv) {
         CUDA_CHECK(cudaMemsetAsync(ctx->dDsResidual.p, 0, nS * sizeof(char), ctx->stream));
         slackOnlyDsCheck<<<grid(nS), BLOCK, 0, ctx->stream>>>(nS, n, ctx->dsSlackPhiRow,
                 ctx->hasDsSlackRowOv ? ctx->dDsSlackRowOv.as<int>() : nullptr, ctx->dsSlackTargetP,
-                SLACK_DIST_TOL, P_RESIDUE_EPS, ctx->dQbuf.as<double>(), ctx->dRlActive.as<char>(),
+                SLACK_DIST_TOL, P_RESIDUE_EPS, ctx->dQbuf.as<double>(), ctx->dOuterLoopCheckActive.as<char>(),
                 ctx->dsSlackHasAnchor ? ctx->dDsSlackAnchor.as<double>() : nullptr,
                 ctx->dsSlackRoomUp, ctx->dsSlackRoomDown,
-                ctx->dDsSlackAbsorbed.as<double>(), ctx->dRlSwitched.as<char>(), ctx->dDsResidual.as<char>());
+                ctx->dDsSlackAbsorbed.as<double>(), ctx->dOuterLoopUnstable.as<char>(), ctx->dDsResidual.as<char>());
     }
     if (ctx->nds > 0) {
         // Recompute the slack's retained share from the CURRENT total imbalance every pass (NOT frozen at
@@ -627,7 +627,7 @@ void dsCheck(BatchSolverContext* ctx, DriverPass& drv) {
                 ctx->hasDsSlackRowOv ? ctx->dDsSlackRowOv.as<int>() : nullptr, ctx->dsSlackTargetP,
                 1.0 - ctx->dsFactorSum, ctx->dDsPhiRow.as<int>(),
                 ctx->nDsRowOv > 0 ? ctx->dDsRowOv.as<int>() : nullptr, ctx->dDsBaseTargetP.as<double>(),
-                ctx->dTarget.as<double>(), ctx->dQbuf.as<double>(), ctx->dRlActive.as<char>(),
+                ctx->dTarget.as<double>(), ctx->dQbuf.as<double>(), ctx->dOuterLoopCheckActive.as<char>(),
                 ctx->dDsRetain.as<double>(),
                 hasDsOverride ? dDsOvBus.as<int>() : nullptr, dDsOvBaseDelta.as<double>(),
                 hasDsAnchor ? dDsAnchorShift.as<double>() : nullptr,
@@ -648,7 +648,7 @@ void dsCheck(BatchSolverContext* ctx, DriverPass& drv) {
                 hasDsAnchor ? dDsAnchorShift.as<double>() : nullptr,
                 hasDsSlackShift ? dDsSlackShift.as<double>() : nullptr,
                 ctx->dDsMaxDelta.as<double>(), ctx->dDsMinDelta.as<double>(), ctx->dDsRetain.as<double>(),
-                ctx->dQbuf.as<double>(), ctx->dRlActive.as<char>(),
+                ctx->dQbuf.as<double>(), ctx->dOuterLoopCheckActive.as<char>(),
                 hasDsOverride ? dDsOvBus.as<int>() : nullptr, dDsOvFactorDelta.as<double>(),
                 dDsOvBaseDelta.as<double>(), dDsOvMaxDelta.as<double>(), dDsOvMinDelta.as<double>(),
                 ctx->dsMode, ctx->dsMode == GpuDistributedSlackFactorMode::REMAINING_MARGIN ? ctx->dDsMarginUp.as<double>() : nullptr,
@@ -663,7 +663,7 @@ void dsCheck(BatchSolverContext* ctx, DriverPass& drv) {
                 ctx->dGenRemoved.as<char>(), ctx->dGenFactorWork.as<double>(),
                 ctx->nDsLostGen, ctx->nDsLostGen > 0 ? ctx->dDsLostGen.as<int>() : nullptr,
                 ctx->nDsOutGen, ctx->nDsOutGen > 0 ? ctx->dDsOutGen.as<int>() : nullptr,
-                ctx->dTarget.as<double>(), ctx->dRlSwitched.as<char>(), ctx->dDsResidual.as<char>(),
+                ctx->dTarget.as<double>(), ctx->dOuterLoopUnstable.as<char>(), ctx->dDsResidual.as<char>(),
                 ctx->dDsRetainApplied.as<double>(),
                 ctx->dDsGateLast.p ? ctx->dDsGateLast.as<double>() : nullptr);
         if (ctx->nfq > 0) {                              // forced target Q follows the generators' new P
@@ -675,7 +675,7 @@ void dsCheck(BatchSolverContext* ctx, DriverPass& drv) {
                     ctx->dDsPhiRow.as<int>(), ctx->nDsRowOv > 0 ? ctx->dDsRowOv.as<int>() : nullptr,
                     ctx->nDsLostGen, ctx->nDsLostGen > 0 ? ctx->dDsLostGen.as<int>() : nullptr,
                     ctx->nDsIslanded > 0 ? ctx->dDsIslanded.as<char>() : nullptr, ctx->dMode.as<int>(),
-                    ctx->dRlActive.as<char>(), ctx->dTarget.as<double>(), ctx->dFqApplied.as<double>());
+                    ctx->dOuterLoopCheckActive.as<char>(), ctx->dTarget.as<double>(), ctx->dFqApplied.as<double>());
         }
     }
 }

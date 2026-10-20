@@ -80,17 +80,17 @@ __device__ inline double distrQKeyOf(int nKeyOv, const int* keyOvIdx, const doub
 
 // Per-scenario RL V-target override (secondary voltage control moves generator-VC targets): entries are
 // (slot, rl index) pairs with the REPLACEMENT target. Linear scan — the list is a handful of entries.
-__device__ inline double rlTargetOf(int nRlVtOv, const int* rlVtOvSlotIdx, const double* rlVtOvVal,
-                                    const double* svcRlVt, int nrl, int s, int i, double baseTarget) {
-    if (svcRlVt != nullptr) {                                // a zone moved this controller's target: the
-        double v = svcRlVt[(size_t) s * nrl + i];            // switch-back must compare against the MOVED one
+__device__ inline double reactiveLimitTargetVOf(int nReactiveLimitTargetVOverrides, const int* reactiveLimitTargetVOverrideScenarioEntry, const double* reactiveLimitTargetVOverrideValue,
+                                    const double* secondaryVoltageControlReactiveLimitTargetV, int nReactiveLimitEntries, int s, int i, double baseTarget) {
+    if (secondaryVoltageControlReactiveLimitTargetV != nullptr) {                                // a zone moved this controller's target: the
+        double v = secondaryVoltageControlReactiveLimitTargetV[(size_t) s * nReactiveLimitEntries + i];            // switch-back must compare against the MOVED one
         if (!isnan(v)) {
             return v;
         }
     }
-    for (int k = 0; k < nRlVtOv; k++) {
-        if (rlVtOvSlotIdx[2 * k] == s && rlVtOvSlotIdx[2 * k + 1] == i) {
-            return rlVtOvVal[k];
+    for (int k = 0; k < nReactiveLimitTargetVOverrides; k++) {
+        if (reactiveLimitTargetVOverrideScenarioEntry[2 * k] == s && reactiveLimitTargetVOverrideScenarioEntry[2 * k + 1] == i) {
+            return reactiveLimitTargetVOverrideValue[k];
         }
     }
     return baseTarget;

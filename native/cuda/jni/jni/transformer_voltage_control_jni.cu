@@ -208,16 +208,16 @@ OLF_JNI(ac_outerloop_gpu, TransformerVoltageControlNative, setBatchDiscreteTvcFr
     }
     int nFz = static_cast<int>(vRow.size());
     if (nFz > 0) {
-        std::vector<int> rlEntry;
+        std::vector<int> reactiveLimitEntry;
         if (jFzRlEntry != nullptr) {
-            readI(jFzRlEntry, rlEntry);
+            readI(jFzRlEntry, reactiveLimitEntry);
         }
-        if (static_cast<int>(rlEntry.size()) != nFz) {
-            rlEntry.assign(nFz, -1);                         // no remote candidate
+        if (static_cast<int>(reactiveLimitEntry.size()) != nFz) {
+            reactiveLimitEntry.assign(nFz, -1);                         // no remote candidate
         }
         ctx->dTvdFzVRow.upload(vRow.data(), nFz * sizeof(int));
         ctx->dTvdFzLoadQ.upload(loadQ.data(), nFz * sizeof(double));
-        ctx->dTvdFzRlEntry.upload(rlEntry.data(), nFz * sizeof(int));
+        ctx->dTvdFzRlEntry.upload(reactiveLimitEntry.data(), nFz * sizeof(int));
         size_t nsc = static_cast<size_t>(ctx->nScenarios) * nFz;
         ctx->dTvdFzFrozen.ensure(nsc * sizeof(int));
         ctx->dTvdFzSavedMode.ensure(nsc * sizeof(int));

@@ -170,8 +170,8 @@ public final class GpuAcNewtonSolver {
                                          double reactiveLimitTol, double slackDistTol,
                                          double[] closedBranchParameters, int[] closedBranchIndices, double[] openBranchParameters, int[] openBranchIndices,
                                          double[] shuntParameters, int[] shuntIndices, double[] hvdcAcEmulationParameters, int[] hvdcAcEmulationIndices,
-                                         int[] rlVrow, double[] rlMinQ, double[] rlMaxQ, double[] rlLoadQ,
-                                         double[] rlVtarget, int[] dsPhiRow, double[] dsFactor,
+                                         int[] reactiveLimitVoltageRow, double[] reactiveLimitMinQ, double[] reactiveLimitMaxQ, double[] reactiveLimitLoadQ,
+                                         double[] reactiveLimitTargetV, int[] dsPhiRow, double[] dsFactor,
                                          int dsSlackPhiRow, double dsSlackTargetP,
                                          double[] dsBaseTargetP, double[] dsMaxDelta, double[] dsMinDelta,
                                          int[] distrQElement, int[] distrQSide, double[] distrQWeight, int[] distrQRow, int[] distrQKind,
@@ -189,7 +189,7 @@ public final class GpuAcNewtonSolver {
                 noQAlt(openBranchIndices.length / 6), noQAlt(zeroImpedanceBranchIndices.length / 11), new int[0], new int[0], noDepRows(n));
         try {
             long handle = BatchSolveNative.createBatchContext(structure, nScenarios, mode,
-                    rlVrow, rlMinQ, rlMaxQ, rlLoadQ, rlVtarget, new byte[rlVrow.length], new double[x0Base.length],
+                    reactiveLimitVoltageRow, reactiveLimitMinQ, reactiveLimitMaxQ, reactiveLimitLoadQ, reactiveLimitTargetV, new byte[reactiveLimitVoltageRow.length], new double[x0Base.length],
                     dsPhiRow, dsFactor, dsSlackPhiRow, dsSlackTargetP,
                     dsBaseTargetP, dsMaxDelta, dsMinDelta, GpuDistributedSlackFactorMode.STATIC, new double[0], new double[0], 0, 0);
             try {
@@ -199,13 +199,13 @@ public final class GpuAcNewtonSolver {
                 // OLF's last tie-break, "lowest id stays PV". A context that reaches a solve without
                 // any keys is refused, and the rule can only fire at all when every PV bus is
                 // pinnable, so this keeps the low-level entry usable without inventing a ranking.
-                int[] idRank = new int[rlVrow.length];
-                int[] pRow = new int[rlVrow.length];
+                int[] idRank = new int[reactiveLimitVoltageRow.length];
+                int[] pRow = new int[reactiveLimitVoltageRow.length];
                 for (int i = 0; i < idRank.length; i++) {
                     idRank[i] = i;
                     pRow[i] = -1;
                 }
-                ReactiveLimitsNative.setBatchRlElection(handle, new double[rlVrow.length], pRow, new double[rlVrow.length], idRank);
+                ReactiveLimitsNative.setBatchReactiveLimitStrongestPvKeys(handle, new double[reactiveLimitVoltageRow.length], pRow, new double[reactiveLimitVoltageRow.length], idRank);
                 // one-shot: no per-scenario gen-override flips, so any scenario's row mode IS the base row mode
                 return BatchSolveNative.solveBatchContext(handle, x0Base, targetBase, rowMode, rowMode[0], disabledElementMask,
                         new int[0], new double[0], new int[0], new double[0], new double[0], new double[0], new double[0], null, null, null, null, null, null, null, null,

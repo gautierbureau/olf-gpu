@@ -27,12 +27,12 @@ __global__ void monitoringLoopBatch(int nmon, int nScenarios, int n,
                                     const int* deltaPtr, const int* deltaRow,
                                     const int* deltaMode, const double* deltaTarget,
                                     const double* x, double* target, int* mode,
-                                    double* activated, const char* rlActive, char* switched) {
+                                    double* activated, const char* outerLoopCheckActive, char* switched) {
     int k = blockIdx.x * blockDim.x + threadIdx.x;
     if (k >= nmon * nScenarios) return;
     int c = k % nmon;
     int s = k / nmon;
-    if (!rlActive[s]) return;
+    if (!outerLoopCheckActive[s]) return;
     size_t slot = (size_t) s * nmon + c;
     if (!isnan(activated[slot])) return;                     // already switched — a normal PV bus now
     double v = x[(size_t) s * n + monVRow[c]];
@@ -75,7 +75,7 @@ void monitoringStep(BatchSolverContext* ctx, DriverPass& drv) {
             ctx->dMonDeltaPtr.as<int>(), ctx->dMonDeltaRow.as<int>(),
             ctx->dMonDeltaMode.as<int>(), ctx->dMonDeltaTarget.as<double>(),
             ctx->dX.as<double>(), ctx->dTarget.as<double>(), ctx->dMode.as<int>(),
-            ctx->dMonActivated.as<double>(), ctx->dRlActive.as<char>(), ctx->dRlSwitched.as<char>());
+            ctx->dMonActivated.as<double>(), ctx->dOuterLoopCheckActive.as<char>(), ctx->dOuterLoopUnstable.as<char>());
 }
 
 }  // namespace olfgpu

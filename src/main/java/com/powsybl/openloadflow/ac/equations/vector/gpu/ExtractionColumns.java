@@ -228,7 +228,7 @@ record ExtractionColumns(int[] phiCol, int[] vCol, int[] branchRhoCol, int[] bra
             }
             // ...and so does the ALTERNATE row, the one every family writes the bus's OWN q to when a reactive
             // limit puts it in mode 4. For a relocated child that pin lands on this coupler's DUMMY_Q row (the
-            // native pass diverts it there through rlQrow, since that is where its balance lives), so leaving the
+            // native pass diverts it there through reactiveLimitReactivePowerRow, since that is where its balance lives), so leaving the
             // alternate on the bus's own BUS_V row sent its own q onto the row now holding the coupler's ZERO_V
             // and left the DUMMY_Q column held by nothing but the DISTR_Q terms the mode-4 flip gates off —
             // a DEAD COLUMN. Measured on rte6515's full busbar scope: 9 mode-4 rows on relocated couplers of

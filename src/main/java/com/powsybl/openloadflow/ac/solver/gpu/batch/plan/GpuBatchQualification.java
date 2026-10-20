@@ -78,7 +78,7 @@ public final class GpuBatchQualification {
                          *  another synchronous component — the set the device must renormalize over. */
                         int[][] islandedDsByIndex,
                         /** Per scenario, the reactive-limits controllers stranded in another component. */
-                        int[][] islandedRlByIndex,
+                        int[][] islandedReactiveLimitEntriesByIndex,
                         /** Per scenario, AC-emulation HVDCs with an ISLANDED endpoint. OLF's
                          *  processHvdcsWithoutPower zeroes both converter stations' targetP; in AC
                          *  emulation those targets are already 0 (the injection is an equation term,

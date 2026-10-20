@@ -25,14 +25,14 @@ namespace olfgpu {
 __global__ void shcDeadbandCheckBatch(int nGroups, int nScenarios, int n, int nElements,
                                       const int* groupPtr, const int* groupCtrl,
                                       const int* vRow, const double* targetV, const double* halfDb, const int* elemAbs,
-                                      const char* disabled, const double* x, const char* rlActive,
+                                      const char* disabled, const double* x, const char* outerLoopCheckActive,
                                       char* outOfDb, double* diffV) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nGroups * nScenarios) return;
     int g = tid % nGroups;
     int s = tid / nGroups;
     outOfDb[tid] = 0;
-    if (!rlActive[s]) return;
+    if (!outerLoopCheckActive[s]) return;
     int c0 = groupCtrl[groupPtr[g]];
     bool live = false;
     for (int k = groupPtr[g]; k < groupPtr[g + 1] && !live; k++) {
@@ -219,7 +219,7 @@ void shcStep(BatchSolverContext* ctx, DriverPass& drv) {
     shcDeadbandCheckBatch<<<grid(static_cast<int>(nsg)), BLOCK, 0, ctx->stream>>>(nG, nS, n, ctx->nElements,
             ctx->dShcGroupPtr.as<int>(), ctx->dShcGroupCtrl.as<int>(),
             ctx->dShcVRow.as<int>(), ctx->dShcTargetV.as<double>(), ctx->dShcHalfDb.as<double>(), ctx->dShcElemAbs.as<int>(),
-            ctx->dDisabled.as<char>(), ctx->dX.as<double>(), ctx->dRlActive.as<char>(),
+            ctx->dDisabled.as<char>(), ctx->dX.as<double>(), ctx->dOuterLoopCheckActive.as<char>(),
             ctx->dShcOutOfDb.as<char>(), ctx->dShcDiffV.as<double>());
     std::vector<char> outOfDb(nsg);
     CUDA_CHECK(cudaMemcpyAsync(outOfDb.data(), ctx->dShcOutOfDb.p, nsg, cudaMemcpyDeviceToHost, ctx->stream));
@@ -259,7 +259,7 @@ void shcStep(BatchSolverContext* ctx, DriverPass& drv) {
             ctx->dShcHalfDb.as<double>(), ctx->dShcElemAbs.as<int>(), ctx->dDisabled.as<char>(),
             ctx->dShcOutOfDb.as<char>(), ctx->dShcDiffV.as<double>(), ctx->dShcSensi.as<double>(),
             ctx->dShcPos.as<int>(), ctx->dShcRatDir.as<int>(), ctx->dShcRatCount.as<int>(), ctx->dShcRatAllowed.as<int>(),
-            ctx->dShcShift.as<int>(), ctx->dRlSwitched.as<char>());
+            ctx->dShcShift.as<int>(), ctx->dOuterLoopUnstable.as<char>());
     shcApplyBatch<<<grid(nShc * nS), BLOCK, 0, ctx->stream>>>(nShc, nS, n, ctx->dShcBRow.as<int>(), ctx->dShcSubPtr.as<int>(),
             ctx->dShcSecPtr.as<int>(), ctx->dShcSecB.as<double>(), ctx->dShcSubBase.as<int>(), ctx->dShcPos.as<int>(),
             ctx->nShcSubs, ctx->dShcBaseB.as<double>(), ctx->dShcAppliedDb.as<double>(), ctx->dTarget.as<double>(), ctx->dX.as<double>());

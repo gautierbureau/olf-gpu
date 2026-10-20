@@ -80,7 +80,7 @@ class GpuBatchedPegaseFullLoadflowTest {
     // limits (switch tolerance = convEpsPerEq, matched), AND distributed slack (SLACK_TOL_PU on both — see
     // below). Two earlier discrepancies were resolved: (1) a real BUG — base-case-PQ voltage controllers were
     // frozen and could never switch back to PV under a relieving contingency (fixed in GpuAcDataExtractor +
-    // initRlLimitTypeBatch; was the ~1e-3 TWT-14-2925 outlier); (2) the loose 1-MW default DS tolerance left a
+    // initReactiveLimitQLimitTypeBatch; was the ~1e-3 TWT-14-2925 outlier); (2) the loose 1-MW default DS tolerance left a
     // ~1e-4 uniform-angle band, removed by matching a TIGHT DS tolerance on both sides. With all criteria tight
     // and matched the 40-sample agrees to worst ~1.5e-7 / median ~2e-8 — machine precision for this scale.
     // Overridable to inspect outliers.
@@ -141,11 +141,11 @@ class GpuBatchedPegaseFullLoadflowTest {
         // hollow — it would degenerate to a plain Newton solve). Also re-runs validate(): no DISTR_Q /
         // zero-impedance / disconnection-allowed throw on this scope.
         GpuAcData gpuData = GpuAcDataExtractor.extract(network, es);
-        int nRl = gpuData.getReactiveLimitCount();
+        int nReactiveLimitEntries = gpuData.getReactiveLimitCount();
         int nDs = gpuData.getDistributedSlackBusCount();
         System.out.printf("PEGASE-9241 GPU full-loadflow scope: %d reactive-limit controllers, %d distributed-slack buses%n",
-                nRl, nDs);
-        assertTrue(nRl > 0, "expected local PV controllers to exercise reactive limits");
+                nReactiveLimitEntries, nDs);
+        assertTrue(nReactiveLimitEntries > 0, "expected local PV controllers to exercise reactive limits");
 
         // Converged base-case AC state (the hot start), exactly as the throughput bench does.
         try (AcLoadFlowContext context = new AcLoadFlowContext(network, acp)) {

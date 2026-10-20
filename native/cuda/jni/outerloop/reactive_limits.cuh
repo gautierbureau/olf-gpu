@@ -11,48 +11,48 @@
 
 namespace olfgpu {
 
-__global__ void reactiveLimitsBatch(const double* svcRlVt, int nrl, int nScenarios, int n, double tol, int maxSwitch,
-                                    const int* rlVrow, const int* rlQrow, const double* rlMinQ, const double* rlMaxQ,
-                                    const double* rlLoadQ, const double* rlVtarget, const double* qBuf,
-                                    const double* x, const char* rlActive, int* mode, double* target,
+__global__ void reactiveLimitsBatch(const double* secondaryVoltageControlReactiveLimitTargetV, int nReactiveLimitEntries, int nScenarios, int n, double tol, int maxSwitch,
+                                    const int* reactiveLimitVoltageRow, const int* reactiveLimitReactivePowerRow, const double* reactiveLimitMinQ, const double* reactiveLimitMaxQ,
+                                    const double* reactiveLimitLoadQ, const double* reactiveLimitTargetV, const double* qBuf,
+                                    const double* x, const char* outerLoopCheckActive, int* mode, double* target,
                                     char* limitType, char* switchCount, char* switched,
                                     char* passSwitched, char* savedMode,
-                                    int nRlVtOv, const int* rlVtOvSlotIdx, const double* rlVtOvVal,
+                                    int nReactiveLimitTargetVOverrides, const int* reactiveLimitTargetVOverrideScenarioEntry, const double* reactiveLimitTargetVOverrideValue,
                                     const double* rowSlope, double* savedTarget, int cvStride,
-                                    const char* rlRemote, const int* rlCmpVrow,
-                                    const double* rlSvcBmin, const double* rlSvcBmax, const double* rlV2Base,
+                                    const char* reactiveLimitVoltageControlRole, const int* reactiveLimitComparedVoltageRow,
+                                    const double* reactiveLimitSvcMinB, const double* reactiveLimitSvcMaxB, const double* reactiveLimitBaseVSquared,
                                     const double* svcBminDyn, const double* svcBmaxDyn,
-                                    const char* rlIslanded,
-                                    const double* rlInitTgtQ, double vLoRobust, double vHiRobust,
+                                    const char* reactiveLimitIslanded,
+                                    const double* reactiveLimitInitialTargetQ, double vLoRobust, double vHiRobust,
                                     int robust,
-                                    int swLogSlot, double* swLog, int* swLogCnt, int passId,
+                                    int reactiveLimitsDecisionLogScenario, double* reactiveLimitsDecisionLog, int* reactiveLimitsDecisionLogCount, int passId,
                                     const int* psEntry, int nQr,
-                                    const char* rlLocalOv, const double* rlLocalVt,
-                                    const char* rlNoUnpin, char* unpinBad, const char* rlMonitored,
-                                    const int* rlCmpOv);
+                                    const char* reactiveLimitLocalOverride, const double* reactiveLimitLocalTargetV,
+                                    const char* reactiveLimitPqPvSwitchForbidden, char* unpinBad, const char* reactiveLimitFlags,
+                                    const int* reactiveLimitComparedVoltageRowOverride);
 
-__global__ void rlRobustVResetBatch(int nrl, int nScenarios, int n, const int* rlVrow, const char* rlRemote,
-                                    const char* rlActive, const char* passSwitched, double* x,
+__global__ void reactiveLimitsRobustVoltageResetBatch(int nReactiveLimitEntries, int nScenarios, int n, const int* reactiveLimitVoltageRow, const char* reactiveLimitVoltageControlRole,
+                                    const char* outerLoopCheckActive, const char* passSwitched, double* x,
                                     double vLoRobust, double vHiRobust);
 
-__global__ void rlForcedPvElectBatch(int nrl, int nScenarios, int n,
-                                     const int* rlVrow, const char* rlRemote, const char* rlIslanded,
+__global__ void reactiveLimitsForcedPvBatch(int nReactiveLimitEntries, int nScenarios, int n,
+                                     const int* reactiveLimitVoltageRow, const char* reactiveLimitVoltageControlRole, const char* reactiveLimitIslanded,
                                      const double* nomV, const int* pRow, const double* staticP, const int* idRank,
                                      char* limitType, char* switchCount, char* passSwitched, const char* savedMode,
                                      const double* savedTarget, int* mode, double* target,
-                                     const char* rlActive, char* switched);
+                                     const char* outerLoopCheckActive, char* switched);
 
-__global__ void rlPilotSelfMixedGate(int nrl, int nScenarios, const char* rlRemote, const int* rlCmpVrow,
-                                     const char* limitType, const char* rlIslanded, char* bad,
+__global__ void pilotSelfMixedPvPqGate(int nReactiveLimitEntries, int nScenarios, const char* reactiveLimitVoltageControlRole, const int* reactiveLimitComparedVoltageRow,
+                                     const char* limitType, const char* reactiveLimitIslanded, char* bad,
                                      const int* psEntry, int nQr,
                                 int nDistrQMembers, const int* distrQMemberReactiveLimitEntry, const char* distrQSubgroup);
 
-__global__ void rlUnpinBatch(int nPairs, int nS, int n, int nrl, const int* pairs, const double* newTarget,
-                             const int* rlVrow, char* limitType, const char* savedMode, int* mode, double* target);
+__global__ void reactiveLimitsPqPvSwitchBatch(int nPairs, int nS, int n, int nReactiveLimitEntries, const int* pairs, const double* newTarget,
+                             const int* reactiveLimitVoltageRow, char* limitType, const char* savedMode, int* mode, double* target);
 
 
 // One check of ReactiveLimitsOuterLoop on every live scenario (loopKind GpuOuterLoopKind::REACTIVE_LIMITS).
-void rlCheck(BatchSolverContext* ctx, DriverPass& drv, int loopKind);
+void reactiveLimitsCheck(BatchSolverContext* ctx, DriverPass& drv, int loopKind);
 
 }  // namespace olfgpu
 

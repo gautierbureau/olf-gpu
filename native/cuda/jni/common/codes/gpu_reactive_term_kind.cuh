@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MPL-2.0
 //
 // The kind of a reactive injection term in a DISTR_Q contribution (distrQKind) or a remote member's Q balance
-// (rmqKind): the terms OLF's createReactiveTerms sums. Mirrors
+// (remoteMemberReactiveTermKind): the terms OLF's createReactiveTerms sums. Mirrors
 // com.powsybl.openloadflow.ac.solver.gpu.codes.GpuReactiveTermKind (GpuCodesMirrorTest checks they agree).
 #ifndef OLF_GPU_COMMON_CODES_GPU_REACTIVE_TERM_KIND_CUH
 #define OLF_GPU_COMMON_CODES_GPU_REACTIVE_TERM_KIND_CUH

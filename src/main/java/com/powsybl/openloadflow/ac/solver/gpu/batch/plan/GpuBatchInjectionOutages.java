@@ -475,9 +475,9 @@ public final class GpuBatchInjectionOutages {
         // busPv=false: its entry is still a controller, its pinned target Q IS the limit, and it can
         // switch back to PV. Measured on rte6515 GEN-6003 — one generator of three lost at a pinned
         // bus, the stale capability injected as Q, and 1.9 kV network-wide.
-        int[] rlBusNum = gpuData.reactiveLimits().busNum();
-        RlDeltas reactiveLimitDeltasOut = reactiveLimitDeltas(rlBusNum, bus, toPq, lost, lostLoadQ);
-        int rlEntry = reactiveLimitDeltasOut.rlEntry();
+        int[] reactiveLimitBusNum = gpuData.reactiveLimits().busNum();
+        ReactiveLimitDeltas reactiveLimitDeltasOut = reactiveLimitDeltas(reactiveLimitBusNum, bus, toPq, lost, lostLoadQ);
+        int reactiveLimitEntry = reactiveLimitDeltasOut.reactiveLimitEntry();
         double minQDelta = reactiveLimitDeltasOut.minQDelta();
         double maxQDelta = reactiveLimitDeltasOut.maxQDelta();
         double loadQDelta = reactiveLimitDeltasOut.loadQDelta();
@@ -532,14 +532,14 @@ public final class GpuBatchInjectionOutages {
                 lostLoadQ);
         distrQTargetRows = distrQSeed.rows();
         distrQTargetValues = distrQSeed.values();
-        int[] pilotSurvivorRlEntries = vcSurvives ? survivorRlEntries(bus, lostSet, rlBusNum) : new int[0];
+        int[] pilotSurvivorReactiveLimitEntries = vcSurvives ? survivorReactiveLimitEntriesOf(bus, lostSet, reactiveLimitBusNum) : new int[0];
         // The pilot's OWN row, for the runtime flip when every survivor pins. Only when the outaged
         // bus IS the pilot: that is the case where losing its generators makes the pilot stop being
         // one of its own controllers and ACQUIRE a reactive balance. See
         // GenOutage.flipsPilotRowWhenAllPinned.
         int pinnedPilotVRow = -1;
         double pinnedPilotQTarget = 0;
-        if (vcSurvives && pilotSurvivorRlEntries.length > 0
+        if (vcSurvives && pilotSurvivorReactiveLimitEntries.length > 0
                 && mainVcOf(bus).orElseThrow().getControlledBus() == bus) {
             var pilotV = es.getVariableSet().getVariable(bus.getNum(), AcVariableType.BUS_V);
             if (pilotV != null && pilotV.getRow() >= 0) {
@@ -565,13 +565,13 @@ public final class GpuBatchInjectionOutages {
         // otherwise. Written at the bus's own V row (the coupler's ZERO_V, target 0) the override was a no-op:
         // measured on the merged-control fixture as 0.36 kV at b1, row 7 ending at 0.05 against OLF's 0.
         if (qTargetRow < 0 && busRows[2][busNum] >= 0 && busRows.length > 3 && busRows[3][busNum] >= 0
-                && busRows[3][busNum] != vRow && allGensLost && rlEntry >= 0
-                && gpuData.switchedPvToPqInBase(rlEntry)) {
+                && busRows[3][busNum] != vRow && allGensLost && reactiveLimitEntry >= 0
+                && gpuData.switchedPvToPqInBase(reactiveLimitEntry)) {
             qTargetRow = busRows[3][busNum];
         }
         return new GenOutage(pRow, pTarget, vRow, qTarget, toPq, qOverride, dsBus, dsFactorDelta, dsBaseDelta,
-                dsMaxDelta, dsMinDelta, rlEntry, minQDelta, maxQDelta, allGensLost, lostGenIds, lostFactorSum,
-                lostLoadP - lostP, loadQDelta, inactiveDistrQMember, pilotSurvivorRlEntries,
+                dsMaxDelta, dsMinDelta, reactiveLimitEntry, minQDelta, maxQDelta, allGensLost, lostGenIds, lostFactorSum,
+                lostLoadP - lostP, loadQDelta, inactiveDistrQMember, pilotSurvivorReactiveLimitEntries,
                 distrQTargetRows, distrQTargetValues, deadRemoteMember ? GpuRowMode.BUS_TARGET_Q : GpuRowMode.EQUATION,
                 deadPilotVRow, deadPilotQTarget, pinnedPilotVRow, pinnedPilotQTarget,
                 distrQTargetQOverrideMember, distrQTargetQOverrideValue, qTargetRow, pilotQGroup, pilotQDelta, slackBus, -1, svcBminDelta, svcBmaxDelta);
@@ -803,21 +803,21 @@ public final class GpuBatchInjectionOutages {
 
     /** The reactive-limit entry of the outaged bus and the reactive capability the outage takes from it: the
      *  generators' Q limits, the lost load's Q, and an SVC's susceptance limits. */
-    private static RlDeltas reactiveLimitDeltas(final int[] rlBusNum, final LfBus bus, final boolean toPq,
+    private static ReactiveLimitDeltas reactiveLimitDeltas(final int[] reactiveLimitBusNum, final LfBus bus, final boolean toPq,
                                                 final List<LfGenerator> lost, final double lostLoadQ) {
-        int rlEntry = -1;
+        int reactiveLimitEntry = -1;
         double minQDelta = 0;
         double maxQDelta = 0;
-        for (int i = 0; rlBusNum != null && i < rlBusNum.length; i++) {
-            if (rlBusNum[i] == bus.getNum()) {
-                rlEntry = i;
+        for (int i = 0; reactiveLimitBusNum != null && i < reactiveLimitBusNum.length; i++) {
+            if (reactiveLimitBusNum[i] == bus.getNum()) {
+                reactiveLimitEntry = i;
                 break;
             }
         }
         double loadQDelta = 0;
         double svcBminDelta = 0;
         double svcBmaxDelta = 0;
-        if (rlEntry >= 0 && !toPq) {
+        if (reactiveLimitEntry >= 0 && !toPq) {
             minQDelta = -lost.stream().mapToDouble(g -> qContrib(g, LfGenerator::getMinQ)).sum();
             maxQDelta = -lost.stream().mapToDouble(g -> qContrib(g, LfGenerator::getMaxQ)).sum();
             // the same SVCs ReactiveLimitsPacker.addSvcQuadratic folds into the entry's coefficients
@@ -836,10 +836,10 @@ public final class GpuBatchInjectionOutages {
             // PINNED fell through it and was silently wrong instead (rte6515 LOAD-6157, 0.37 kV).
             loadQDelta = -lostLoadQ;
         }
-        return new RlDeltas(rlEntry, minQDelta, maxQDelta, loadQDelta, svcBminDelta, svcBmaxDelta);
+        return new ReactiveLimitDeltas(reactiveLimitEntry, minQDelta, maxQDelta, loadQDelta, svcBminDelta, svcBmaxDelta);
     }
 
-    private record RlDeltas(int rlEntry, double minQDelta, double maxQDelta, double loadQDelta, double svcBminDelta,
+    private record ReactiveLimitDeltas(int reactiveLimitEntry, double minQDelta, double maxQDelta, double loadQDelta, double svcBminDelta,
                             double svcBmaxDelta) {
     }
 
@@ -892,15 +892,15 @@ public final class GpuBatchInjectionOutages {
     }
 
     /** The reactive-limit entries of the group's other controllers that keep a VOLTAGE generator after the loss. */
-    private static int[] survivorRlEntries(LfBus bus, java.util.Set<LfGenerator> lostSet, int[] rlBusNum) {
+    private static int[] survivorReactiveLimitEntriesOf(LfBus bus, java.util.Set<LfGenerator> lostSet, int[] reactiveLimitBusNum) {
         java.util.List<Integer> entries = new ArrayList<>();
         for (LfBus cb : mainVcOf(bus).orElseThrow().getMergedControllerElements()) {
             if (cb == bus || cb.getGenerators().stream().noneMatch(g -> !lostSet.contains(g)
                     && g.getGeneratorControlType() == LfGenerator.GeneratorControlType.VOLTAGE)) {
                 continue;
             }
-            for (int i = 0; rlBusNum != null && i < rlBusNum.length; i++) {
-                if (rlBusNum[i] == cb.getNum()) {
+            for (int i = 0; reactiveLimitBusNum != null && i < reactiveLimitBusNum.length; i++) {
+                if (reactiveLimitBusNum[i] == cb.getNum()) {
                     entries.add(i);
                     break;
                 }

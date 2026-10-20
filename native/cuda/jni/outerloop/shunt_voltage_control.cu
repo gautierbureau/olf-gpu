@@ -94,10 +94,10 @@ __global__ void svdEntryBatch(SvdTables T, int nScenarios, int n, int nElements,
 // The loop's first check: OLF disables every controller shunt and dispatches its continuous b to the
 // closest sections (LfShuntImpl.dispatchB: per sub-controller, residue / remaining to the closest section
 // from the CURRENT position over [minPosition, size), strictly closer only), UNSTABLE.
-__global__ void svdCheckBatch(SvdTables T, int nScenarios, int n, int nElements, const char* disabled, const char* rlActive,
+__global__ void svdCheckBatch(SvdTables T, int nScenarios, int n, int nElements, const char* disabled, const char* outerLoopCheckActive,
                               int* mode, double* target, double* x, char* switched) {
     int s = blockIdx.x * blockDim.x + threadIdx.x;
-    if (s >= nScenarios || !rlActive[s]) return;
+    if (s >= nScenarios || !outerLoopCheckActive[s]) return;
     size_t sn = (size_t) s * n;
     bool anyCtl = false;
     for (int g = 0; g < T.nG; g++) {
@@ -158,7 +158,7 @@ void svdStep(BatchSolverContext* ctx, DriverPass& drv) {
     const int& nS = drv.nS;
     if (ctx->nSvd <= 0) return;
     svdCheckBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(svdTables(ctx), nS, n, ctx->nElements, ctx->dDisabled.as<char>(),
-            ctx->dRlActive.as<char>(), ctx->dMode.as<int>(), ctx->dTarget.as<double>(), ctx->dX.as<double>(), ctx->dRlSwitched.as<char>());
+            ctx->dOuterLoopCheckActive.as<char>(), ctx->dMode.as<int>(), ctx->dTarget.as<double>(), ctx->dX.as<double>(), ctx->dOuterLoopUnstable.as<char>());
     CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
     if (std::getenv("OLF_GPU_BATCH_TRACE") != nullptr) {
         size_t nsm = static_cast<size_t>(nS) * ctx->nSvd;

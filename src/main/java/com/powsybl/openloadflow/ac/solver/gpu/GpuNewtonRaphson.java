@@ -191,7 +191,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
     /** The driver's per-controller reactive-limit state after the last solve (a GpuReactiveLimitsState: limit
      *  type and PV -> PQ switch count), read back so the PV↔PQ decisions can be given to the network. The limit
      *  type takes three bits because robust mode adds MIN/MAX_REALISTIC_V to MIN_Q/MAX_Q. */
-    private int[] rlStateOut;
+    private int[] reactiveLimitsFinalState;
 
     /**
      * Give the driver's outer-loop decisions back to the network — what OLF's own loops do as a side
@@ -219,7 +219,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
         lastDistributedActivePower = GpuDistributedSlackOuterLoop.applyToNetwork(network, equationSystem, handle, driverDsParams(),
                 loadAnchorTargetP, deviceTargets,
                 BatchReadbackNative.readBatchDsGenCum(handle), BatchReadbackNative.readBatchDsRetain(handle), data);
-        GpuReactiveLimitsOuterLoop.applyToNetwork(network, rlStateOut, data, deviceTargets,
+        GpuReactiveLimitsOuterLoop.applyToNetwork(network, reactiveLimitsFinalState, data, deviceTargets,
                 data.reactiveLimits().voltageControlRole() != null ? BatchReadbackNative.readBatchRowModes(handle) : null);
         if (tvcOwned && tvcCtls != null) {
             GpuIncrementalTransformerVoltageControlOuterLoop.applyToNetwork(network, tvcCtls,
@@ -366,7 +366,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
 
     /** Per controller bus, the driver's RL state carried across a restart (OLF's switch counters
      *  persist for the whole outer-loop run), keyed by bus num since the entry order may change. */
-    private java.util.Map<Integer, Integer> rlCarry;
+    private java.util.Map<Integer, Integer> reactiveLimitsStateCarry;
 
     /** Newton iterations of this run's device sequences that a host-loop restart closed (see runNewtonIterations). */
     private int restartIterations;
@@ -410,7 +410,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
         return null;
     }
 
-    private com.powsybl.openloadflow.ac.outerloop.ReactiveLimitsOuterLoop driverRlLoop() {
+    private com.powsybl.openloadflow.ac.outerloop.ReactiveLimitsOuterLoop driverReactiveLimitsOuterLoop() {
         if (acLoadFlowParameters == null) {
             return null;
         }
@@ -508,7 +508,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
             return cpuNewtonRaphson(voltageInitializer, reportNode);
         }
         hostLoopPairs = null;
-        rlCarry = null;
+        reactiveLimitsStateCarry = null;
         restartIterations = 0;
         (parameters instanceof GpuNewtonRaphsonParameters gpu ? gpu.getGpuParameters() : new GpuLoadFlowParameters())
                 .install();
@@ -595,12 +595,12 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
             }
             double[] target = activation.applyTargets(targetVector.getArray());
             double[] x0 = equationSystem.getStateVector().get().clone();
-            rlStateOut = cachedData.reactiveLimits().voltageRow().length > 0 ? new int[cachedData.reactiveLimits().voltageRow().length] : null;
-            int[] rlStateIn = null;
-            if (restart && rlCarry != null && rlStateOut != null) {
-                rlStateIn = new int[rlStateOut.length];
-                for (int i = 0; i < rlStateIn.length; i++) {
-                    rlStateIn[i] = rlCarry.getOrDefault(cachedData.reactiveLimits().busNum()[i], 0);
+            reactiveLimitsFinalState = cachedData.reactiveLimits().voltageRow().length > 0 ? new int[cachedData.reactiveLimits().voltageRow().length] : null;
+            int[] reactiveLimitsSeedState = null;
+            if (restart && reactiveLimitsStateCarry != null && reactiveLimitsFinalState != null) {
+                reactiveLimitsSeedState = new int[reactiveLimitsFinalState.length];
+                for (int i = 0; i < reactiveLimitsSeedState.length; i++) {
+                    reactiveLimitsSeedState[i] = reactiveLimitsStateCarry.getOrDefault(cachedData.reactiveLimits().busNum()[i], 0);
                 }
             }
             // Device-side state-vector scaling: NONE = undamped Newton; LINE_SEARCH backtracks on the
@@ -694,9 +694,9 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                     parameters.getMaxVoltageChangeStateVectorScalingMaxDv(),
                     parameters.getMaxVoltageChangeStateVectorScalingMaxDphi(),
                     varType, null,
-                    null, null, rlStateIn, rlStateOut, null, null,
+                    null, null, reactiveLimitsSeedState, reactiveLimitsFinalState, null, null,
                     driverMaxOuterIterations, driverMaxPqPvSwitch, driverDsRejectResidual ? 1 : 0,
-                    0,                                       // skipRlPhase: the driver owns RL
+                    0,                                       // skipReactiveLimitsPhase: the driver owns RL
                     0, null, null)[0];
             long t2 = System.nanoTime();
             if (out.length > n + 2 && (int) out[n + 2] == GpuAcSolverStatus.LINEAR_SOLVE_FAILED && !robustModeForRun) {
@@ -829,18 +829,18 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
             // The SAME run-constant outer-loop tables the batched SA installs on its chunk
             // contexts — a batch of one drives the same loops as a batch of five hundred.
             var dsLoop = driverDsLoop();
-            ReactiveCapabilityCurves.Channel rlCurves = driverRlLoop() != null
+            ReactiveCapabilityCurves.Channel reactiveCapabilityCurves = driverReactiveLimitsOuterLoop() != null
                     ? ReactiveCapabilityCurves.build(network, equationSystem, cachedData, driverDsParams(), dsLoop != null, target,
                             acLoadFlowParameters.getNetworkParameters().isExtrapolateReactiveLimits())
                     : null;
             // forceTargetQInReactiveLimits: the base load flow's slack moves P too, and OLF re-clamps.
             var lfNetworkParameters = acLoadFlowParameters.getNetworkParameters();
-            ForceTargetQInReactiveLimits.Channel forcedTargetQ = driverRlLoop() != null && dsLoop != null
+            ForceTargetQInReactiveLimits.Channel forcedTargetQ = driverReactiveLimitsOuterLoop() != null && dsLoop != null
                     ? ForceTargetQInReactiveLimits.build(network, equationSystem, cachedData, driverDsParams(),
                             lfNetworkParameters.isForceTargetQInReactiveLimits() && lfNetworkParameters.isReactiveLimits(),
                             true, target, activation.rowMode(), lfNetworkParameters.isExtrapolateReactiveLimits())
                     : null;
-            DeviceLoopTables.install(context.handle.get(), cachedData, rlCurves, forcedTargetQ,
+            DeviceLoopTables.install(context.handle.get(), cachedData, reactiveCapabilityCurves, forcedTargetQ,
                     acLoadFlowParameters.isVoltageRemoteControlRobustMode(),
                     acLoadFlowParameters.getMinRealisticVoltage(), acLoadFlowParameters.getMaxRealisticVoltage(),
                     acLoadFlowParameters.getMinNominalVoltageRealisticVoltageCheck(),
@@ -944,7 +944,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
             // The RUN's outer-loop set and its DistributedSlack settings — the device must not
             // distribute with a default balance type, nor run a loop the run does not configure.
             GpuAcData data = GpuAcDataCache.extract(network, equationSystem,
-                    driverDsLoop() != null, driverRlLoop() != null,
+                    driverDsLoop() != null, driverReactiveLimitsOuterLoop() != null,
                     driverDsParams());
             // Three-level reconciliation, decided by the DATA not the event: a changed CSR pattern
             // (index packs) is STRUCTURE -> rebuild + cuDSS re-analysis; an unchanged pattern with
@@ -966,7 +966,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                         data.distributedSlack().factorMode(), data.distributedSlack().busMarginUp(), data.distributedSlack().busMarginDown(),
                         data.distributedSlack().slackMarginUp(), data.distributedSlack().slackMarginDown()));
                 // OLF's forced-PV election keys are part of creating a context with RL entries.
-                DeviceLoopTables.installRlElection(context.handle.get(), data);
+                DeviceLoopTables.installReactiveLimitStrongestPvKeys(context.handle.get(), data);
                 cachedData = data;
                 loadAnchorTargetP = GpuDistributedSlackOuterLoop.captureLoadAnchors(network);
                 rebuilt = true;
@@ -983,7 +983,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                 loadAnchorTargetP = GpuDistributedSlackOuterLoop.captureLoadAnchors(network);
                 // The election keys are per-extraction (nominal V, live target P, id rank), so a
                 // value refresh re-installs them too.
-                DeviceLoopTables.installRlElection(context.handle.get(), data);
+                DeviceLoopTables.installReactiveLimitStrongestPvKeys(context.handle.get(), data);
                 tablesDirty = true;
                 VALUE_REFRESHES.incrementAndGet();
             }
@@ -1153,7 +1153,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                     // its sweep, and so does the driver: cancel the pause, carry the RL state, and
                     // let runImpl re-extract and start over. Target-only changes resume in place.
                     GpuAcData probe = GpuAcDataCache.extract(network, equationSystem,
-                            driverDsLoop() != null, driverRlLoop() != null, driverDsParams());
+                            driverDsLoop() != null, driverReactiveLimitsOuterLoop() != null, driverDsParams());
                     var act2 = GpuAcActivationExtractor.extractActivation(network, equationSystem, n);
                     boolean modesChanged = !Arrays.equals(act2.rowMode(), activation.rowMode());
                     if (!probe.sameAs(cachedData) || modesChanged) {
@@ -1185,10 +1185,10 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                         // from the original targets and undoes the distribution (4.3e-3 kV on the
                         // AFTER_GENERATOR transformer-VC base).
                         applyDeviceDecisionsToNetwork(cachedData);
-                        rlCarry = new java.util.HashMap<>();
-                        if (rlStateOut != null && cachedData.reactiveLimits().busNum() != null) {
-                            for (int i = 0; i < rlStateOut.length && i < cachedData.reactiveLimits().busNum().length; i++) {
-                                rlCarry.put(cachedData.reactiveLimits().busNum()[i], rlStateOut[i]);
+                        reactiveLimitsStateCarry = new java.util.HashMap<>();
+                        if (reactiveLimitsFinalState != null && cachedData.reactiveLimits().busNum() != null) {
+                            for (int i = 0; i < reactiveLimitsFinalState.length && i < cachedData.reactiveLimits().busNum().length; i++) {
+                                reactiveLimitsStateCarry.put(cachedData.reactiveLimits().busNum()[i], reactiveLimitsFinalState[i]);
                             }
                         }
                         DriverNative.cancelBatchDriverPause(handle);
@@ -1236,7 +1236,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                     parameters.getMaxVoltageChangeStateVectorScalingMaxDv(),
                     parameters.getMaxVoltageChangeStateVectorScalingMaxDphi(),
                     varType, null,
-                    null, null, null, rlStateOut, null, null,
+                    null, null, null, reactiveLimitsFinalState, null, null,
                     driverMaxOuterIterations, driverMaxPqPvSwitch, driverDsRejectResidual ? 1 : 0, 0,
                     0, null, null)[0];
             pausedKind = DriverNative.readBatchDriverPaused(handle);
@@ -1275,7 +1275,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                 parameters.getMaxVoltageChangeStateVectorScalingMaxDv(),
                 parameters.getMaxVoltageChangeStateVectorScalingMaxDphi(),
                 varType, null,
-                null, null, null, rlStateOut, null, null,
+                null, null, null, reactiveLimitsFinalState, null, null,
                 driverMaxOuterIterations, driverMaxPqPvSwitch, driverDsRejectResidual ? 1 : 0,
                 0,
                 0, null, null)[0];

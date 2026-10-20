@@ -211,11 +211,11 @@ public record GpuAcData(ClosedBranchPack closedBranch, OpenBranchPack openBranch
 
     /**
      * Did OLF's {@code ReactiveLimitsOuterLoop} switch this entry's bus PV -> PQ in the base load flow, at any of
-     * the four {@code LfBus.QLimitType}s? False for no entry ({@code rlEntry < 0}).
+     * the four {@code LfBus.QLimitType}s? False for no entry ({@code reactiveLimitEntry < 0}).
      */
-    public boolean switchedPvToPqInBase(int rlEntry) {
+    public boolean switchedPvToPqInBase(int reactiveLimitEntry) {
         byte[] baseQLimitType = reactiveLimits.baseQLimitType();
-        return baseQLimitType != null && rlEntry >= 0 && rlEntry < baseQLimitType.length && baseQLimitType[rlEntry] != GpuQLimitType.NONE;
+        return baseQLimitType != null && reactiveLimitEntry >= 0 && reactiveLimitEntry < baseQLimitType.length && baseQLimitType[reactiveLimitEntry] != GpuQLimitType.NONE;
     }
 
     /** Number of participating buses in the batched distributed-slack outer loop (0 = no distribution). */

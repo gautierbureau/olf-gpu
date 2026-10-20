@@ -45,12 +45,12 @@ __global__ void hvdcAcEmulationLoopBatch(int nh, int nScenarios, int n, int nEle
                                          const double* hvdcAcEmulationParameters, const char* hvdcContingencyOutage,
                                          const double* x, double* target, char* disabled,
                                          int* status, double* appliedD1, double* appliedD2,
-                                         const char* rlActive, char* switched) {
+                                         const char* outerLoopCheckActive, char* switched) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nh * nScenarios) return;
     int h = tid % nh;
     int s = tid / nh;
-    if (!rlActive[s] || hvdcContingencyOutage[(size_t) s * nh + h]) return;    // outaged: the contingency owns that bit
+    if (!outerLoopCheckActive[s] || hvdcContingencyOutage[(size_t) s * nh + h]) return;    // outaged: the contingency owns that bit
     const double* p = hvdcAcEmulationParameters + (size_t) h * 9;                 // p0 k pMax12 pMax21 loss1 loss2 r baseD1 baseD2
     int st = status[(size_t) s * nh + h];
     int next = st;
@@ -139,7 +139,7 @@ void hvdcStep(BatchSolverContext* ctx, DriverPass& drv, int loopKind) {
             ctx->dHvdcAcEmulationParameters.as<double>(), ctx->dHvdcContingencyOutage.as<char>(),
             ctx->dX.as<double>(), ctx->dTarget.as<double>(), ctx->dDisabled.as<char>(),
             ctx->dHvdcAcEmulationStatus.as<int>(), ctx->dHvdcAppliedDelta1.as<double>(), ctx->dHvdcAppliedDelta2.as<double>(),
-            ctx->dRlActive.as<char>(), ctx->dRlSwitched.as<char>());
+            ctx->dOuterLoopCheckActive.as<char>(), ctx->dOuterLoopUnstable.as<char>());
 }
 
 }  // namespace olfgpu

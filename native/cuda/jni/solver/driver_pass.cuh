@@ -28,13 +28,13 @@ struct DriverPass {
     int nActive = 0;
     std::vector<char> wasActive;
     std::vector<double> hF;
-    int rlMaxSwitch = 0;
-    int swLogSlot = -1;
-    int skipRlPhase = 0;
+    int maxPqPvSwitch = 0;
+    int reactiveLimitsDecisionLogScenario = -1;
+    int skipReactiveLimitsPhase = 0;
     bool svcCoefDyn = false;
-    int nRlQOv = 0;
+    int nReactiveLimitDeltaOverrides = 0;
     int nCvOv = 0;
-    DeviceBuf dRlQOvSlotEntry, dRlQOvMinMax, dRlQOvPtr, dRlQOvList;
+    DeviceBuf dReactiveLimitDeltaOverrideScenarioEntry, dReactiveLimitDeltaOverrideValues, dReactiveLimitDeltaOverrideStart, dReactiveLimitDeltaOverrideList;
     DeviceBuf dCvOvPtr, dCvOvEntry, dCvOvVal;
     double slackDistTol = 0.0;
     double pResidueEps = 0.0;
@@ -49,17 +49,17 @@ struct DriverPass {
     int outer = 0;
     std::vector<char> active;
     std::vector<char> live;
-    std::vector<char> rlActive;
+    std::vector<char> outerLoopCheckActive;
     std::vector<char> loopRejected;
     int loopIdx = 0;
     int loopOrder[MAX_DEVICE_LOOPS] = {};
     BatchResult res;
-    bool useDynRlLimits = false;
+    bool usePerScenarioReactiveLimits = false;
     bool deviceFixedIter = false;
     double reactiveLimitTol = 0.0;
-    int nRlVtOv = 0;
-    DeviceBuf dRlVtOvSlotIdx;
-    DeviceBuf dRlVtOvVal;
+    int nReactiveLimitTargetVOverrides = 0;
+    DeviceBuf dReactiveLimitTargetVOverrideScenarioEntry;
+    DeviceBuf dReactiveLimitTargetVOverrideValue;
 };
 
 }  // namespace olfgpu

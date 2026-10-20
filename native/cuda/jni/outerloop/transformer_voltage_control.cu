@@ -45,9 +45,9 @@ struct TvdTables {
     int* scnStep; int* grpStep; double* grpShMin; double* grpShMax; double* grpShInit;
     int* memState; int* memTap; double* memRoundFrom; double* saved; char* reject;
     // generator freeze + connectivity fix (AFTER_GENERATOR only)
-    int nFz, hasFix, fixWords, nrl;
+    int nFz, hasFix, fixWords, nReactiveLimitEntries;
     const int* fzVRow; const double* fzLoadQ; const int* fzRlEntry; const int* fixPvRow;
-    char* rlLimitType;                                       // the freeze marks a REMOTE member here
+    char* reactiveLimitQLimitType;                                       // the freeze marks a REMOTE member here
     const int* fixMinMask; const int* fixMaxMask;               // per (scenario, member), fixWords ints
     int* fzFrozen; int* fzSavedMode; double* fzSavedTarget;
 };
@@ -171,10 +171,10 @@ __global__ void tvdEntryBatch(TvdTables T, int nScenarios, int n, int nElements,
 }
 
 // One thread per scenario (OLF keeps ONE step for all controls of a run).
-__global__ void tvdCheckBatch(TvdTables T, int nScenarios, int n, int nElements, const char* disabled, const char* rlActive,
+__global__ void tvdCheckBatch(TvdTables T, int nScenarios, int n, int nElements, const char* disabled, const char* outerLoopCheckActive,
                               const double* qBuf, int* mode, double* target, double* x, char* switched) {
     int s = blockIdx.x * blockDim.x + threadIdx.x;
-    if (s >= nScenarios || !rlActive[s]) return;
+    if (s >= nScenarios || !outerLoopCheckActive[s]) return;
     size_t sn = (size_t) s * n;
     if (T.mode == GpuTransformerVoltageControlMode::WITH_GENERATOR_VOLTAGE_CONTROL) {                                       // SimpleTransformerVoltageControl: iteration 0 rounds all
         bool anyCtl = false;
@@ -250,13 +250,13 @@ __global__ void tvdCheckBatch(TvdTables T, int nScenarios, int n, int nElements,
                 // reads to drop a member, so it has to be set, and GpuQLimitType::FROZEN keeps it
                 // distinguishable from a real Q-limit pin (which the switch-back may undo; this must
                 // not be, OLF's reactive-limits loop never sees a bus whose voltage control is off).
-                size_t st = (size_t) s * T.nrl + re;
-                if (mode[sr] != GpuRowMode::EQUATION || T.rlLimitType[st] != GpuQLimitType::NONE) continue;  // pinned already, or not live
+                size_t st = (size_t) s * T.nReactiveLimitEntries + re;
+                if (mode[sr] != GpuRowMode::EQUATION || T.reactiveLimitQLimitType[st] != GpuQLimitType::NONE) continue;  // pinned already, or not live
                 T.fzSavedMode[sc] = mode[sr];
                 T.fzSavedTarget[sc] = target[sr];
                 mode[sr] = GpuRowMode::BUS_TARGET_Q;
                 target[sr] = qBuf[sr] - T.fzLoadQ[c];
-                T.rlLimitType[st] = GpuQLimitType::FROZEN;
+                T.reactiveLimitQLimitType[st] = GpuQLimitType::FROZEN;
                 T.fzFrozen[sc] = 1;
                 continue;
             }
@@ -363,7 +363,7 @@ __global__ void tvdCheckBatch(TvdTables T, int nScenarios, int n, int nElements,
         mode[sr] = T.fzSavedMode[sc];
         target[sr] = T.fzSavedTarget[sc];
         if (T.fzRlEntry[c] >= 0) {                           // a remote member rejoins the DISTR_Q shares
-            T.rlLimitType[(size_t) s * T.nrl + T.fzRlEntry[c]] = GpuQLimitType::NONE;
+            T.reactiveLimitQLimitType[(size_t) s * T.nReactiveLimitEntries + T.fzRlEntry[c]] = GpuQLimitType::NONE;
         }
         T.fzFrozen[sc] = 0;
     }
@@ -389,7 +389,7 @@ static TvdTables tvdTables(BatchSolverContext* ctx) {
     T.saved = ctx->dTvdSaved.as<double>(); T.reject = ctx->dTvdReject.as<char>();
     T.nFz = ctx->nTvdFz; T.hasFix = ctx->tvdFixTables ? 1 : 0; T.fixWords = ctx->tvdFixWords;
     T.fzVRow = ctx->dTvdFzVRow.as<int>(); T.fzLoadQ = ctx->dTvdFzLoadQ.as<double>();
-    T.fzRlEntry = ctx->dTvdFzRlEntry.as<int>(); T.nrl = ctx->nrl; T.rlLimitType = ctx->dRlLimitType.as<char>();
+    T.fzRlEntry = ctx->dTvdFzRlEntry.as<int>(); T.nReactiveLimitEntries = ctx->nReactiveLimitEntries; T.reactiveLimitQLimitType = ctx->dReactiveLimitQLimitType.as<char>();
     T.fixPvRow = ctx->dTvdFixPvRow.as<int>();
     T.fixMinMask = ctx->dTvdFixMinMask.as<int>(); T.fixMaxMask = ctx->dTvdFixMaxMask.as<int>();
     T.fzFrozen = ctx->dTvdFzFrozen.as<int>(); T.fzSavedMode = ctx->dTvdFzSavedMode.as<int>(); T.fzSavedTarget = ctx->dTvdFzSavedTarget.as<double>();
@@ -403,8 +403,8 @@ void tvdStep(BatchSolverContext* ctx, DriverPass& drv) {
     std::vector<char>& loopRejected = drv.loopRejected;
     if (ctx->nTvd <= 0) return;
     tvdCheckBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(tvdTables(ctx), nS, n, ctx->nElements, ctx->dDisabled.as<char>(),
-            ctx->dRlActive.as<char>(), ctx->dQbuf.as<double>(), ctx->dMode.as<int>(), ctx->dTarget.as<double>(), ctx->dX.as<double>(),
-            ctx->dRlSwitched.as<char>());
+            ctx->dOuterLoopCheckActive.as<char>(), ctx->dQbuf.as<double>(), ctx->dMode.as<int>(), ctx->dTarget.as<double>(), ctx->dX.as<double>(),
+            ctx->dOuterLoopUnstable.as<char>());
     // Freezing a REMOTE controller can take the LAST live member of its group, and then the group
     // controls nothing: OLF's freeze disables the voltage control, so the CONTROLLED bus stops
     // carrying a V identity. That flip lives in its own kernel, which the reactive-limits phase runs

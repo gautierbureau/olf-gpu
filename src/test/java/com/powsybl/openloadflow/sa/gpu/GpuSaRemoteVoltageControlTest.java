@@ -301,7 +301,7 @@ class GpuSaRemoteVoltageControlTest extends AbstractGpuSaTest {
         // suppressed) while b3 keeps a DISTR_Q renormalized over {b2, b3} whose target still carries the pilot's
         // targetQ (-0.6: OLF sums every merged controller's target, keys alone renormalize). The device solved
         // b2's row at 0.5 x -0.6 then at 0 - 0 (OLF's BUS_TARGET_Q of the pilot 0.3 then 0.6 pu off at the
-        // device state, OLF_GPU_SA_RESID): the seed-time carrier stamp was gated off by rlActive, and the
+        // device state, OLF_GPU_SA_RESID): the seed-time carrier stamp was gated off by outerLoopCheckActive, and the
         // dynamic limit arrays it reads were first filled in the reactive-limit pass, after the first solve.
         // Exact at 1e-11 since, and the outage must BATCH.
         assertGpuMatchesCpu(network, ctgs, 1e-11, lfp);
@@ -754,7 +754,7 @@ class GpuSaRemoteVoltageControlTest extends AbstractGpuSaTest {
     /** OLF's GLOBAL "all PV buses should switch — strongest stays PV" rule (this network's ONLY
      *  PV buses are the three limited members; the L14 outage drives every one over its limit and
      *  the CPU FORCES g1 to stay PV at q=1742 > maxQ=1000). The device runs the same election
-     *  IN-KERNEL after its pin pass (rlForcedPvElectBatch: highest controlled-bus nominal V, then
+     *  IN-KERNEL after its pin pass (reactiveLimitsForcedPvBatch: highest controlled-bus nominal V, then
      *  highest live target P, then lowest id — the elected pin is undone), so the scenario SOLVES
      *  on the device at 1e-12 instead of being rejected to the CPU (pre-election it solved 1.9 kV
      *  wrong; the detector then rejected it — count 0). */

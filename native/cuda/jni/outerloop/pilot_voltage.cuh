@@ -11,8 +11,8 @@
 namespace olfgpu {
 
 // Kernels the driver launches.
-__global__ void pilotSelfGateBatch(int nQr, int nScenarios, int nrl, const int* psPilotEntry,
-                                   const char* limitType, const char* rlIslanded, char* psSkip);
+__global__ void pilotSelfGateBatch(int nQr, int nScenarios, int nReactiveLimitEntries, const int* psPilotEntry,
+                                   const char* limitType, const char* reactiveLimitIslanded, char* psSkip);
 
 __global__ void capturePilotQBatch(int nQr, int nScenarios, int n, const int* qrPtr, const int* qrRows,
                                    const int* baseMode, const double* targetBase, double* pilotQ,
@@ -27,19 +27,19 @@ __global__ void updatePilotVeqBatch(int nQr, int nScenarios, int n,
                                     const int* qrPtr, const int* qrRows, const char* qrGenVc,
                                     const double* pilotQ, int* mode, double* target,
                                     char* veqOff, double* savedVTarget,
-                                    const char* rlActive, char* switched,
+                                    const char* outerLoopCheckActive, char* switched,
                                     int nFrozen, const int* frozenSlotRow,
                                     const int* psEntry,
-                                    const char* limitType, int nrl, const double* rlMinQ, const double* rlMaxQ,
-                                    const double* rlLoadQ, const double* rlInitTgtQ, int cvStride,
-                                    const double* rlVtarget,
-                                    const int* qrPilotRlEntry,
-                                    int nRlVtOv, const int* rlVtOvSlotIdx, const double* rlVtOvVal,
-                                    const double* svcRlVt,
+                                    const char* limitType, int nReactiveLimitEntries, const double* reactiveLimitMinQ, const double* reactiveLimitMaxQ,
+                                    const double* reactiveLimitLoadQ, const double* reactiveLimitInitialTargetQ, int cvStride,
+                                    const double* reactiveLimitTargetV,
+                                    const int* reactiveRelocationPilotReactiveLimitEntry,
+                                    int nReactiveLimitTargetVOverrides, const int* reactiveLimitTargetVOverrideScenarioEntry, const double* reactiveLimitTargetVOverrideValue,
+                                    const double* secondaryVoltageControlReactiveLimitTargetV,
                                     int nDistrQMembers, const int* distrQMemberRelocationGroup, const int* distrQMemberReactiveLimitEntry,
-                                    const char* rlIslandedMask,
+                                    const char* reactiveLimitIslanded,
                                 const char* distrQSubgroup, const int* qrMemberStart, double tol,
-                                const char* rlGenLost, const int* qrDepBase, const int* relocOwn,
+                                const char* reactiveLimitGeneratorsLost, const int* qrDepBase, const int* relocOwn,
                                 const double* pinTargetIn);
 
 }  // namespace olfgpu

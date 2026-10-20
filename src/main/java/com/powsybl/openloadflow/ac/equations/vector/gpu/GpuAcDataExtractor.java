@@ -123,7 +123,7 @@ public final class GpuAcDataExtractor {
         LinearDistributionTerms distrRho = DistrRhoPacker.distrRhoPack(network, es, columns);
         LinearDistributionTerms distrShuntB = DistrShuntBPacker.distrShuntBPack(network, es, columns);
 
-        RemoteMemberReactiveTerms rmq = RemoteMemberQPacker.remoteMemberQPack(network, es, columns, family, reactiveLimits);
+        RemoteMemberReactiveTerms remoteMemberReactiveTerms = RemoteMemberQPacker.remoteMemberQPack(network, es, columns, family, reactiveLimits);
         DistributedSlackParticipants ds = DistributedSlackPacker.distributedSlackPack(network, es, columns, distributedSlack, dsParams);
         // SLOPE-SVC rows (V + slope*sumQ = target, row mode 2): per-row slope, 0 everywhere else
         double[] rowSlope = new double[es.getIndex().getSortedVariablesToFind().size()];
@@ -165,7 +165,7 @@ public final class GpuAcDataExtractor {
                         family.zeroImpedanceBranchNums().stream().mapToInt(Integer::intValue).toArray(), GpuAcArrays.flatI(family.zeroImpedanceBranchAlternateReactiveDestination(), 2)),
                 distrRho, distrShuntB,
                 rl,
-                rmq, new VoltageRowParameters(rowSlope, rowNominalV),
+                remoteMemberReactiveTerms, new VoltageRowParameters(rowSlope, rowNominalV),
                 ds,
                 new BaseOpenBranches(family.baseOpenCb().stream().mapToInt(Integer::intValue).toArray(),
                         family.baseOpenZeroImpedanceBranches().stream().mapToInt(Integer::intValue).toArray(),

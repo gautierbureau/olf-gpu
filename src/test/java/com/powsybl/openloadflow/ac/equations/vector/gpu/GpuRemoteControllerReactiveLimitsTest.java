@@ -79,11 +79,11 @@ class GpuRemoteControllerReactiveLimitsTest {
     }
 
     /** Plan-B1 pack acceptance: every remote group member with finite limits is packed as an
-     *  rlRemote=1 entry whose COMPARE row is the PILOT's v column (both RL switch conditions test
+     *  reactiveLimitVoltageControlRole=1 entry whose COMPARE row is the PILOT's v column (both RL switch conditions test
      *  the pilot's V against the GROUP target — B0), the write row stays the member's own bus row,
      *  and a base-PINNED remote member must NOT leak into the local basePqCapable shape. */
     @org.junit.jupiter.api.Test
-    void remoteMembersPackedAsRlRemoteEntries() {
+    void remoteMembersPackedAsRemoteReactiveLimitEntries() {
         LfNetwork network = Networks.load(VoltageControlNetworkFactory.createWithGeneratorRemoteControl(),
                 new LfNetworkParameters()
                         .setSlackBusSelector(new FirstSlackBusSelector())
@@ -118,7 +118,7 @@ class GpuRemoteControllerReactiveLimitsTest {
             }
         }
         assertEquals(members, remoteEntries,
-                "every remote member with finite limits must be packed as rlRemote=1 (pilot " + pilot.getId() + ")");
+                "every remote member with finite limits must be packed as reactiveLimitVoltageControlRole=1 (pilot " + pilot.getId() + ")");
     }
 
     /** Plan-B2 engagement proof (the deadband-vacuous lesson: never trust a pass without showing

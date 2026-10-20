@@ -1145,9 +1145,9 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
     /** OLF_GPU_DBG_RL: the reactive-limit loop's debug parameters. */
     private void applyReactiveLimitsDebug() {
         if (System.getenv("OLF_GPU_DBG_RL") != null) {
-            ch.qos.logback.classic.Logger rlLog = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory
+            ch.qos.logback.classic.Logger reactiveLimitsLogger = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory
                     .getLogger("com.powsybl.openloadflow.ac.outerloop.ReactiveLimitsOuterLoop");
-            rlLog.setLevel(ch.qos.logback.classic.Level.TRACE);
+            reactiveLimitsLogger.setLevel(ch.qos.logback.classic.Level.TRACE);
             // The voltage-MONITORING loop too (standby SVC automata): its PQ->PV activations are the
             // other per-contingency DECISION the two arms can disagree on, and like a pin they leave
             // no residual - only the two decision logs tell them apart.
@@ -1172,7 +1172,7 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
                 ca.setContext(root.getLoggerContext());
                 ca.setEncoder(enc);
                 ca.start();
-                rlLog.addAppender(ca);
+                reactiveLimitsLogger.addAppender(ca);
                 monLog.addAppender(ca);
                 hvdcLogger.addAppender(ca);
             }

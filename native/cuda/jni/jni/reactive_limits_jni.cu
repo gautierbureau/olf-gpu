@@ -6,11 +6,11 @@
 #include "../common/codes/gpu_voltage_control_role.cuh"
 
 // Reactive-capability CURVES at runtime P: install (or clear, with nulls) the per-gen curve channel
-// on a batch context — see rlCurveLimitsBatch. cvIdx stride 5 {rlIdx, pRow, ptsOff, npts, dsGenSlot}; cvIn
+// on a batch context — see reactiveCapabilityCurveLimitsBatch. cvIdx stride 5 {reactiveLimitEntry, pRow, ptsOff, npts, dsGenSlot}; cvIn
 // stride 5 {basePpu, share, baseRowTargetP, baseEvalMinPu, baseEvalMaxPu}; cvPts stride 3
 // {p_MW, minQ_MW, maxQ_MW} sorted by p; cvHv (null when no entry is an AC-emulation VSC) stride 2 {hvdc, side}.
 extern "C" JNIEXPORT void JNICALL
-OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchRlCurves)(
+OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchReactiveCapabilityCurves)(
         JNIEnv* env, jclass, jlong handle, jintArray jCvIdx, jdoubleArray jCvIn, jdoubleArray jCvPts,
         jintArray jCvHv, jint extrapolate) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
@@ -22,7 +22,7 @@ OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchRlCurves)(
         ctx->ncv = 0;
         return;
     }
-    int ncv = env->GetArrayLength(jCvIdx) / 5;   // stride 5: {rlIdx, pRow, ptsOff, npts, dsGenSlot}
+    int ncv = env->GetArrayLength(jCvIdx) / 5;   // stride 5: {reactiveLimitEntry, pRow, ptsOff, npts, dsGenSlot}
     if (ncv == 0) {
         ctx->ncv = 0;
         return;
@@ -39,14 +39,14 @@ OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchRlCurves)(
     ctx->dCvIdx.upload(cvIdx, static_cast<size_t>(ncv) * 5 * sizeof(int));
     ctx->dCvIn.upload(cvIn, static_cast<size_t>(ncv) * 5 * sizeof(double));
     ctx->dCvPts.upload(cvPts, static_cast<size_t>(env->GetArrayLength(jCvPts)) * sizeof(double));
-    // The curves of each reactive-limit entry, CSR (pack order kept within an entry): rlCurveLimitsBatch runs
+    // The curves of each reactive-limit entry, CSR (pack order kept within an entry): reactiveCapabilityCurveLimitsBatch runs
     // one thread per (entry, scenario) and walked EVERY curve to find its own.
     {
-        std::vector<int> ptr(static_cast<size_t>(ctx->nrl) + 1, 0);
+        std::vector<int> ptr(static_cast<size_t>(ctx->nReactiveLimitEntries) + 1, 0);
         std::vector<int> list(ncv);
         for (int g = 0; g < ncv; g++) {
             int e = cvIdx[g * 5];
-            if (e < 0 || e >= ctx->nrl) {
+            if (e < 0 || e >= ctx->nReactiveLimitEntries) {
                 env->ReleaseIntArrayElements(jCvIdx, cvIdx, JNI_ABORT);
                 env->ReleaseDoubleArrayElements(jCvIn, cvIn, JNI_ABORT);
                 env->ReleaseDoubleArrayElements(jCvPts, cvPts, JNI_ABORT);
@@ -57,15 +57,15 @@ OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchRlCurves)(
             }
             ptr[e + 1]++;
         }
-        for (int e = 0; e < ctx->nrl; e++) ptr[e + 1] += ptr[e];
+        for (int e = 0; e < ctx->nReactiveLimitEntries; e++) ptr[e + 1] += ptr[e];
         std::vector<int> cursor(ptr.begin(), ptr.end() - 1);
         for (int g = 0; g < ncv; g++) list[cursor[cvIdx[g * 5]]++] = g;
         ctx->dCvPtr.upload(ptr.data(), ptr.size() * sizeof(int));
         ctx->dCvList.upload(list.data(), list.size() * sizeof(int));
     }
-    ctx->dRlMinQDyn.alloc(static_cast<size_t>(ctx->nScenarios) * ctx->nrl * sizeof(double));
-    ctx->dRlMaxQDyn.alloc(static_cast<size_t>(ctx->nScenarios) * ctx->nrl * sizeof(double));
-    ctx->dRlLoadQDyn.alloc(static_cast<size_t>(ctx->nScenarios) * ctx->nrl * sizeof(double));
+    ctx->dReactiveLimitMinQPerScenario.alloc(static_cast<size_t>(ctx->nScenarios) * ctx->nReactiveLimitEntries * sizeof(double));
+    ctx->dReactiveLimitMaxQPerScenario.alloc(static_cast<size_t>(ctx->nScenarios) * ctx->nReactiveLimitEntries * sizeof(double));
+    ctx->dReactiveLimitLoadQPerScenario.alloc(static_cast<size_t>(ctx->nScenarios) * ctx->nReactiveLimitEntries * sizeof(double));
     env->ReleaseIntArrayElements(jCvIdx, cvIdx, JNI_ABORT);
     env->ReleaseDoubleArrayElements(jCvIn, cvIn, JNI_ABORT);
     env->ReleaseDoubleArrayElements(jCvPts, cvPts, JNI_ABORT);
@@ -74,7 +74,7 @@ OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchRlCurves)(
 }
 
 // forceTargetQInReactiveLimits channel (GpuBatchForcedTargetQ): fqIdx stride 7 {qRow, dsGenSlot, ptsOff, npts,
-// dsBusIdx, baseQRowMode, rlIdx}; fqIn stride 5 {basePpu, rawTargetQPu, baseClampedPu, share, baseRowTargetP}; fqPts
+// dsBusIdx, baseQRowMode, reactiveLimitEntry}; fqIn stride 5 {basePpu, rawTargetQPu, baseClampedPu, share, baseRowTargetP}; fqPts
 // stride 3 {p_MW, minQ_MW, maxQ_MW} sorted by p. Null clears the channel (a cached context reused by a run
 // without it).
 extern "C" JNIEXPORT void JNICALL
@@ -130,34 +130,34 @@ OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchForcedTargetQPre)(
 }
 
 extern "C" JNIEXPORT void JNICALL
-OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchRlElection)(
+OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchReactiveLimitStrongestPvKeys)(
         JNIEnv* env, jclass, jlong handle, jdoubleArray jNomV, jintArray jPRow, jdoubleArray jStaticP, jintArray jIdRank) {
     BatchSolverContext* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx == nullptr) {
         return;
     }
-    ctx->hasRlElection = 0;
-    if (ctx->nrl == 0 || jNomV == nullptr || jPRow == nullptr || jStaticP == nullptr || jIdRank == nullptr) {
+    ctx->hasReactiveLimitStrongestPvKeys = 0;
+    if (ctx->nReactiveLimitEntries == 0 || jNomV == nullptr || jPRow == nullptr || jStaticP == nullptr || jIdRank == nullptr) {
         return;
     }
-    if (env->GetArrayLength(jNomV) != ctx->nrl || env->GetArrayLength(jPRow) != ctx->nrl
-            || env->GetArrayLength(jStaticP) != ctx->nrl || env->GetArrayLength(jIdRank) != ctx->nrl) {
-        env->ThrowNew(env->FindClass("java/lang/RuntimeException"), "setBatchRlElection: array length != nrl");
+    if (env->GetArrayLength(jNomV) != ctx->nReactiveLimitEntries || env->GetArrayLength(jPRow) != ctx->nReactiveLimitEntries
+            || env->GetArrayLength(jStaticP) != ctx->nReactiveLimitEntries || env->GetArrayLength(jIdRank) != ctx->nReactiveLimitEntries) {
+        env->ThrowNew(env->FindClass("java/lang/RuntimeException"), "setBatchReactiveLimitStrongestPvKeys: array length != nReactiveLimitEntries");
         return;
     }
     jdouble* nv = env->GetDoubleArrayElements(jNomV, nullptr);
     jint* pr = env->GetIntArrayElements(jPRow, nullptr);
     jdouble* sp = env->GetDoubleArrayElements(jStaticP, nullptr);
     jint* ir = env->GetIntArrayElements(jIdRank, nullptr);
-    ctx->dRlElectNomV.upload(nv, static_cast<size_t>(ctx->nrl) * sizeof(double));
-    ctx->dRlElectPRow.upload(pr, static_cast<size_t>(ctx->nrl) * sizeof(int));
-    ctx->dRlElectStaticP.upload(sp, static_cast<size_t>(ctx->nrl) * sizeof(double));
-    ctx->dRlElectIdRank.upload(ir, static_cast<size_t>(ctx->nrl) * sizeof(int));
+    ctx->dReactiveLimitNominalV.upload(nv, static_cast<size_t>(ctx->nReactiveLimitEntries) * sizeof(double));
+    ctx->dReactiveLimitActivePowerRow.upload(pr, static_cast<size_t>(ctx->nReactiveLimitEntries) * sizeof(int));
+    ctx->dReactiveLimitTargetP.upload(sp, static_cast<size_t>(ctx->nReactiveLimitEntries) * sizeof(double));
+    ctx->dReactiveLimitIdRank.upload(ir, static_cast<size_t>(ctx->nReactiveLimitEntries) * sizeof(int));
     env->ReleaseDoubleArrayElements(jNomV, nv, JNI_ABORT);
     env->ReleaseIntArrayElements(jPRow, pr, JNI_ABORT);
     env->ReleaseDoubleArrayElements(jStaticP, sp, JNI_ABORT);
     env->ReleaseIntArrayElements(jIdRank, ir, JNI_ABORT);
-    ctx->hasRlElection = 1;
+    ctx->hasReactiveLimitStrongestPvKeys = 1;
 }
 
 // voltageRemoteControlRobustMode (OLF's default): install the robust-mode channel on a batch context —
@@ -166,26 +166,26 @@ OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchRlElection)(
 // REALISTIC_VOLTAGE_MARGIN and maxRealisticVoltage / REALISTIC_VOLTAGE_MARGIN, margin 1.02). robust = 0
 // clears the channel, so a cached context reused by a run with the mode off stops applying it.
 extern "C" JNIEXPORT void JNICALL
-OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchRlRobust)(
+OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchReactiveLimitsRobustMode)(
         JNIEnv* env, jclass, jlong handle, jdoubleArray jInitTgtQ, jdouble vLo, jdouble vHi, jint robust) {
     BatchSolverContext* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx == nullptr) {
         return;
     }
-    ctx->rlRobust = 0;
-    if (ctx->nrl == 0 || robust == 0 || jInitTgtQ == nullptr) {
+    ctx->reactiveLimitsRobustMode = 0;
+    if (ctx->nReactiveLimitEntries == 0 || robust == 0 || jInitTgtQ == nullptr) {
         return;
     }
-    if (env->GetArrayLength(jInitTgtQ) != ctx->nrl) {
-        env->ThrowNew(env->FindClass("java/lang/RuntimeException"), "setBatchRlRobust: array length != nrl");
+    if (env->GetArrayLength(jInitTgtQ) != ctx->nReactiveLimitEntries) {
+        env->ThrowNew(env->FindClass("java/lang/RuntimeException"), "setBatchReactiveLimitsRobustMode: array length != nReactiveLimitEntries");
         return;
     }
     jdouble* q0 = env->GetDoubleArrayElements(jInitTgtQ, nullptr);
-    ctx->dRlInitTgtQ.upload(q0, static_cast<size_t>(ctx->nrl) * sizeof(double));
+    ctx->dReactiveLimitInitialTargetQ.upload(q0, static_cast<size_t>(ctx->nReactiveLimitEntries) * sizeof(double));
     env->ReleaseDoubleArrayElements(jInitTgtQ, q0, JNI_ABORT);
-    ctx->rlVLoRobust = vLo;
-    ctx->rlVHiRobust = vHi;
-    ctx->rlRobust = 1;
+    ctx->reactiveLimitsRobustMinRealisticVoltage = vLo;
+    ctx->reactiveLimitsRobustMaxRealisticVoltage = vHi;
+    ctx->reactiveLimitsRobustMode = 1;
 }
 
 // AcloadFlowEngine's realistic-voltage check: install (or clear) the per-row "this row is a
@@ -216,57 +216,57 @@ OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchRealisticCheck)(
 }
 
 extern "C" JNIEXPORT void JNICALL
-OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchRlSvcLimits)(
+OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchReactiveLimitSvcSusceptanceLimits)(
         JNIEnv* env, jclass, jlong handle, jdoubleArray jBmin, jdoubleArray jBmax, jdoubleArray jV2Base) {
     BatchSolverContext* ctx = reinterpret_cast<BatchSolverContext*>(handle);
-    if (ctx == nullptr || ctx->nrl == 0) {
+    if (ctx == nullptr || ctx->nReactiveLimitEntries == 0) {
         return;
     }
-    if (env->GetArrayLength(jBmin) != ctx->nrl || env->GetArrayLength(jBmax) != ctx->nrl
-            || env->GetArrayLength(jV2Base) != ctx->nrl) {
+    if (env->GetArrayLength(jBmin) != ctx->nReactiveLimitEntries || env->GetArrayLength(jBmax) != ctx->nReactiveLimitEntries
+            || env->GetArrayLength(jV2Base) != ctx->nReactiveLimitEntries) {
         env->ThrowNew(env->FindClass("java/lang/RuntimeException"),
-                      "setBatchRlSvcLimits: array length != nrl");
+                      "setBatchReactiveLimitSvcSusceptanceLimits: array length != nReactiveLimitEntries");
         return;
     }
     jdouble* bmin = env->GetDoubleArrayElements(jBmin, nullptr);
     jdouble* bmax = env->GetDoubleArrayElements(jBmax, nullptr);
     jdouble* v2b = env->GetDoubleArrayElements(jV2Base, nullptr);
-    ctx->dRlSvcBmin.upload(bmin, static_cast<size_t>(ctx->nrl) * sizeof(double));
-    ctx->dRlSvcBmax.upload(bmax, static_cast<size_t>(ctx->nrl) * sizeof(double));
-    ctx->dRlV2Base.upload(v2b, static_cast<size_t>(ctx->nrl) * sizeof(double));
+    ctx->dReactiveLimitSvcMinB.upload(bmin, static_cast<size_t>(ctx->nReactiveLimitEntries) * sizeof(double));
+    ctx->dReactiveLimitSvcMaxB.upload(bmax, static_cast<size_t>(ctx->nReactiveLimitEntries) * sizeof(double));
+    ctx->dReactiveLimitBaseVSquared.upload(v2b, static_cast<size_t>(ctx->nReactiveLimitEntries) * sizeof(double));
     env->ReleaseDoubleArrayElements(jBmin, bmin, JNI_ABORT);
     env->ReleaseDoubleArrayElements(jBmax, bmax, JNI_ABORT);
     env->ReleaseDoubleArrayElements(jV2Base, v2b, JNI_ABORT);
 }
 
 extern "C" JNIEXPORT void JNICALL
-OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchRlBaseLimitType)(
+OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchReactiveLimitBaseQLimitType)(
         JNIEnv* env, jclass, jlong handle, jbyteArray jKinds) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx == nullptr) {
         return;
     }
     if (jKinds == nullptr || env->GetArrayLength(jKinds) == 0) {
-        ctx->hasRlBaseLt = 0;
+        ctx->hasReactiveLimitBaseQLimitType = 0;
         return;
     }
-    if (env->GetArrayLength(jKinds) != ctx->nrl) {
+    if (env->GetArrayLength(jKinds) != ctx->nReactiveLimitEntries) {
         env->ThrowNew(env->FindClass("java/lang/RuntimeException"),
-                      "setBatchRlBaseLimitType: array length != nrl");
+                      "setBatchReactiveLimitBaseQLimitType: array length != nReactiveLimitEntries");
         return;
     }
     jbyte* kinds = env->GetByteArrayElements(jKinds, nullptr);
-    ctx->dRlBaseLimitType.alloc(static_cast<size_t>(ctx->nrl));
-    CUDA_CHECK(cudaMemcpy(ctx->dRlBaseLimitType.p, kinds, static_cast<size_t>(ctx->nrl), cudaMemcpyHostToDevice));
+    ctx->dReactiveLimitBaseQLimitType.alloc(static_cast<size_t>(ctx->nReactiveLimitEntries));
+    CUDA_CHECK(cudaMemcpy(ctx->dReactiveLimitBaseQLimitType.p, kinds, static_cast<size_t>(ctx->nReactiveLimitEntries), cudaMemcpyHostToDevice));
     env->ReleaseByteArrayElements(jKinds, kinds, JNI_ABORT);
-    ctx->hasRlBaseLt = 1;
+    ctx->hasReactiveLimitBaseQLimitType = 1;
 }
 
 extern "C" JNIEXPORT void JNICALL
-OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchRlRemote)(
+OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchReactiveLimitRemoteEntries)(
         JNIEnv* env, jclass, jlong handle, jbyteArray jRemote, jintArray jCmpVrow,
-        jintArray jRmqRow, jintArray jRmqElem, jintArray jRmqSide, jintArray jRmqKind, jdoubleArray jRmqWeight,
-        jintArray jDistrQRowMember, jintArray jDistrQInjectionMember, jdoubleArray jMKey, jintArray jMRlEntry,
+        jintArray jRemoteMemberReactiveTermRow, jintArray jRemoteMemberReactiveTermElement, jintArray jRemoteMemberReactiveTermSide, jintArray jRemoteMemberReactiveTermKind, jdoubleArray jRemoteMemberReactiveTermWeight,
+        jintArray jDistrQRowMember, jintArray jDistrQInjectionMember, jdoubleArray jMKey, jintArray jDistrQMemberReactiveLimitEntry,
         jintArray jMGroupStart, jintArray jMGroupCount, jintArray jMRow, jbyteArray jMHasRow,
         jintArray jMQrGroup, jdoubleArray jMTargetQ, jintArray jMTgtPtr, jintArray jMTgtPeer) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
@@ -274,16 +274,16 @@ OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchRlRemote)(
         return;
     }
     if (jRemote == nullptr || jCmpVrow == nullptr || env->GetArrayLength(jRemote) == 0) {
-        ctx->nRlRemote = 0;
-        ctx->nRmq = 0;
+        ctx->nReactiveLimitRemoteEntries = 0;
+        ctx->nRemoteMemberReactiveTerms = 0;
         ctx->nDistrQDynamicKeys = 0;
         ctx->hasDistrQRelocationGroups = 0;
         return;
     }
     int nr = env->GetArrayLength(jRemote);
-    if (nr != ctx->nrl || env->GetArrayLength(jCmpVrow) != ctx->nrl) {
+    if (nr != ctx->nReactiveLimitEntries || env->GetArrayLength(jCmpVrow) != ctx->nReactiveLimitEntries) {
         env->ThrowNew(env->FindClass("java/lang/RuntimeException"),
-                      "setBatchRlRemote: array length != nrl");
+                      "setBatchReactiveLimitRemoteEntries: array length != nReactiveLimitEntries");
         return;
     }
     jbyte* rem = env->GetByteArrayElements(jRemote, nullptr);
@@ -298,31 +298,31 @@ OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchRlRemote)(
             selfCount++;
         }
     }
-    ctx->nRlPilotSelf = selfCount;
-    ctx->dRlRemote.upload(rem, static_cast<size_t>(nr) * sizeof(char));
-    ctx->dRlCmpVrow.upload(cmp, static_cast<size_t>(nr) * sizeof(int));
+    ctx->nReactiveLimitPilotSelfEntries = selfCount;
+    ctx->dReactiveLimitVoltageControlRole.upload(rem, static_cast<size_t>(nr) * sizeof(char));
+    ctx->dReactiveLimitComparedVoltageRow.upload(cmp, static_cast<size_t>(nr) * sizeof(int));
     env->ReleaseByteArrayElements(jRemote, rem, JNI_ABORT);
     env->ReleaseIntArrayElements(jCmpVrow, cmp, JNI_ABORT);
-    ctx->nRlRemote = count;
-    ctx->nRmq = 0;
-    if (jRmqRow != nullptr && env->GetArrayLength(jRmqRow) > 0) {
-        int nq = env->GetArrayLength(jRmqRow);
-        jint* qr = env->GetIntArrayElements(jRmqRow, nullptr);
-        jint* qe = env->GetIntArrayElements(jRmqElem, nullptr);
-        jint* qsd = env->GetIntArrayElements(jRmqSide, nullptr);
-        jint* qk = env->GetIntArrayElements(jRmqKind, nullptr);
-        jdouble* qw = env->GetDoubleArrayElements(jRmqWeight, nullptr);
-        ctx->dRmqRow.upload(qr, static_cast<size_t>(nq) * sizeof(int));
-        ctx->dRmqElem.upload(qe, static_cast<size_t>(nq) * sizeof(int));
-        ctx->dRmqSide.upload(qsd, static_cast<size_t>(nq) * sizeof(int));
-        ctx->dRmqKind.upload(qk, static_cast<size_t>(nq) * sizeof(int));
-        ctx->dRmqWeight.upload(qw, static_cast<size_t>(nq) * sizeof(double));
-        env->ReleaseIntArrayElements(jRmqRow, qr, JNI_ABORT);
-        env->ReleaseIntArrayElements(jRmqElem, qe, JNI_ABORT);
-        env->ReleaseIntArrayElements(jRmqSide, qsd, JNI_ABORT);
-        env->ReleaseIntArrayElements(jRmqKind, qk, JNI_ABORT);
-        env->ReleaseDoubleArrayElements(jRmqWeight, qw, JNI_ABORT);
-        ctx->nRmq = nq;
+    ctx->nReactiveLimitRemoteEntries = count;
+    ctx->nRemoteMemberReactiveTerms = 0;
+    if (jRemoteMemberReactiveTermRow != nullptr && env->GetArrayLength(jRemoteMemberReactiveTermRow) > 0) {
+        int nq = env->GetArrayLength(jRemoteMemberReactiveTermRow);
+        jint* qr = env->GetIntArrayElements(jRemoteMemberReactiveTermRow, nullptr);
+        jint* qe = env->GetIntArrayElements(jRemoteMemberReactiveTermElement, nullptr);
+        jint* qsd = env->GetIntArrayElements(jRemoteMemberReactiveTermSide, nullptr);
+        jint* qk = env->GetIntArrayElements(jRemoteMemberReactiveTermKind, nullptr);
+        jdouble* qw = env->GetDoubleArrayElements(jRemoteMemberReactiveTermWeight, nullptr);
+        ctx->dRemoteMemberReactiveTermRow.upload(qr, static_cast<size_t>(nq) * sizeof(int));
+        ctx->dRemoteMemberReactiveTermElement.upload(qe, static_cast<size_t>(nq) * sizeof(int));
+        ctx->dRemoteMemberReactiveTermSide.upload(qsd, static_cast<size_t>(nq) * sizeof(int));
+        ctx->dRemoteMemberReactiveTermKind.upload(qk, static_cast<size_t>(nq) * sizeof(int));
+        ctx->dRemoteMemberReactiveTermWeight.upload(qw, static_cast<size_t>(nq) * sizeof(double));
+        env->ReleaseIntArrayElements(jRemoteMemberReactiveTermRow, qr, JNI_ABORT);
+        env->ReleaseIntArrayElements(jRemoteMemberReactiveTermElement, qe, JNI_ABORT);
+        env->ReleaseIntArrayElements(jRemoteMemberReactiveTermSide, qsd, JNI_ABORT);
+        env->ReleaseIntArrayElements(jRemoteMemberReactiveTermKind, qk, JNI_ABORT);
+        env->ReleaseDoubleArrayElements(jRemoteMemberReactiveTermWeight, qw, JNI_ABORT);
+        ctx->nRemoteMemberReactiveTerms = nq;
     }
     ctx->nDistrQDynamicKeys = 0;
     ctx->hasDistrQRelocationGroups = 0;
@@ -336,7 +336,7 @@ OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchRlRemote)(
         jint* km = nDistrQTermMembers > 0 ? env->GetIntArrayElements(jDistrQRowMember, nullptr) : nullptr;
         jint* jm = nDistrQTermMembers > 0 ? env->GetIntArrayElements(jDistrQInjectionMember, nullptr) : nullptr;
         jdouble* mk = env->GetDoubleArrayElements(jMKey, nullptr);
-        jint* mre = env->GetIntArrayElements(jMRlEntry, nullptr);
+        jint* mre = env->GetIntArrayElements(jDistrQMemberReactiveLimitEntry, nullptr);
         jint* mgs = env->GetIntArrayElements(jMGroupStart, nullptr);
         jint* mgc = env->GetIntArrayElements(jMGroupCount, nullptr);
         jint* mrw = env->GetIntArrayElements(jMRow, nullptr);
@@ -347,7 +347,7 @@ OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchRlRemote)(
         env->ReleaseByteArrayElements(jMHasRow, mhr, JNI_ABORT);
         if (jMTargetQ == nullptr || env->GetArrayLength(jMTargetQ) != nm) {
             env->ThrowNew(env->FindClass("java/lang/RuntimeException"),
-                          "setBatchRlRemote: distrQMemberTargetQ missing or length != members");
+                          "setBatchReactiveLimitRemoteEntries: distrQMemberTargetQ missing or length != members");
             return;
         }
         jdouble* mtq = env->GetDoubleArrayElements(jMTargetQ, nullptr);
@@ -355,7 +355,7 @@ OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchRlRemote)(
         env->ReleaseDoubleArrayElements(jMTargetQ, mtq, JNI_ABORT);
         if (jMTgtPtr == nullptr || env->GetArrayLength(jMTgtPtr) != nm + 1 || jMTgtPeer == nullptr) {
             env->ThrowNew(env->FindClass("java/lang/RuntimeException"),
-                          "setBatchRlRemote: distrQMemberTargetPeerStart missing or length != members + 1");
+                          "setBatchReactiveLimitRemoteEntries: distrQMemberTargetPeerStart missing or length != members + 1");
             return;
         }
         jint* mtp = env->GetIntArrayElements(jMTgtPtr, nullptr);
@@ -381,7 +381,7 @@ OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchRlRemote)(
             env->ReleaseIntArrayElements(jDistrQInjectionMember, jm, JNI_ABORT);
         }
         env->ReleaseDoubleArrayElements(jMKey, mk, JNI_ABORT);
-        env->ReleaseIntArrayElements(jMRlEntry, mre, JNI_ABORT);
+        env->ReleaseIntArrayElements(jDistrQMemberReactiveLimitEntry, mre, JNI_ABORT);
         env->ReleaseIntArrayElements(jMGroupStart, mgs, JNI_ABORT);
         env->ReleaseIntArrayElements(jMGroupCount, mgc, JNI_ABORT);
         ctx->nDistrQDynamicKeys = nDistrQTermMembers;
@@ -410,43 +410,43 @@ OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchRlRemote)(
 }
 
 extern "C" JNIEXPORT void JNICALL
-OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchRlPinTargets)(
+OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchReactiveLimitSeedTargetQ)(
         JNIEnv* env, jclass, jlong handle, jdoubleArray jTargets) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx == nullptr) {
         return;
     }
     if (jTargets == nullptr || env->GetArrayLength(jTargets) == 0) {
-        ctx->hasRlPinTgtIn = false;
+        ctx->hasReactiveLimitSeedTargetQ = false;
         return;
     }
     int len = env->GetArrayLength(jTargets);
     jdouble* t = env->GetDoubleArrayElements(jTargets, nullptr);
-    ctx->dRlPinTgtIn.upload(t, static_cast<size_t>(len) * sizeof(double));
+    ctx->dReactiveLimitSeedTargetQ.upload(t, static_cast<size_t>(len) * sizeof(double));
     env->ReleaseDoubleArrayElements(jTargets, t, JNI_ABORT);
-    ctx->hasRlPinTgtIn = true;
+    ctx->hasReactiveLimitSeedTargetQ = true;
 }
 
 extern "C" JNIEXPORT jdoubleArray JNICALL
-OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, readBatchRlPinTargets)(
+OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, readBatchReactiveLimitTargetQ)(
         JNIEnv* env, jclass, jlong handle) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
-    if (ctx == nullptr || ctx->nrl <= 0) {
+    if (ctx == nullptr || ctx->nReactiveLimitEntries <= 0) {
         return nullptr;
     }
     int nS = ctx->nScenarios;
     int n = ctx->st->n;
     DeviceBuf out;
-    out.alloc(static_cast<size_t>(ctx->nrl) * nS * sizeof(double));
-    exportRlPinTargets<<<grid(ctx->nrl * nS), BLOCK, 0, ctx->stream>>>(ctx->nrl, nS, n, ctx->dRlVrow.as<int>(),
-            ctx->dRlQrow.p ? ctx->dRlQrow.as<int>() : nullptr, ctx->dRlLimitType.as<char>(), ctx->dMode.as<int>(),
-            ctx->dTarget.as<double>(), ctx->nRlIslanded > 0 ? ctx->dRlIslanded.as<char>() : nullptr,
+    out.alloc(static_cast<size_t>(ctx->nReactiveLimitEntries) * nS * sizeof(double));
+    exportReactiveLimitTargetQ<<<grid(ctx->nReactiveLimitEntries * nS), BLOCK, 0, ctx->stream>>>(ctx->nReactiveLimitEntries, nS, n, ctx->dReactiveLimitVoltageRow.as<int>(),
+            ctx->dReactiveLimitReactivePowerRow.p ? ctx->dReactiveLimitReactivePowerRow.as<int>() : nullptr, ctx->dReactiveLimitQLimitType.as<char>(), ctx->dMode.as<int>(),
+            ctx->dTarget.as<double>(), ctx->nReactiveLimitIslanded > 0 ? ctx->dReactiveLimitIslanded.as<char>() : nullptr,
             ctx->hasDistrQRelocationGroups ? ctx->st->nQr : 0, psEntryPtr(ctx),
             ctx->hasDistrQRelocationGroups && ctx->st->nQr > 0 ? ctx->st->dQrPtr.as<int>() : nullptr,
             ctx->hasDistrQRelocationGroups && ctx->st->nQr > 0 ? ctx->st->dQrRows.as<int>() : nullptr,
             ctx->hasDistrQRelocationGroups && ctx->st->nQr > 0 ? ctx->dQrVeqOff.as<char>() : nullptr,
             ctx->st->dQrDepBase.p ? ctx->st->dQrDepBase.as<int>() : nullptr, out.as<double>());
-    std::vector<double> host(static_cast<size_t>(ctx->nrl) * nS);
+    std::vector<double> host(static_cast<size_t>(ctx->nReactiveLimitEntries) * nS);
     CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
     CUDA_CHECK(cudaMemcpy(host.data(), out.p, host.size() * sizeof(double), cudaMemcpyDeviceToHost));
     jdoubleArray arr = env->NewDoubleArray(static_cast<jsize>(host.size()));
@@ -458,10 +458,10 @@ OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, readBatchRlPinTargets)(
  *  {@code pairs} is (scenario, RL entry) flattened, {@code newTarget} the voltage target each row goes
  *  back to. No-op for an entry that is not pinned. */
 extern "C" JNIEXPORT void JNICALL
-OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchRlUnpin)(
+OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchReactiveLimitPqPvSwitches)(
         JNIEnv* env, jclass, jlong handle, jintArray jPairs, jdoubleArray jTargets) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
-    if (ctx == nullptr || ctx->nrl <= 0 || jPairs == nullptr || jTargets == nullptr) {
+    if (ctx == nullptr || ctx->nReactiveLimitEntries <= 0 || jPairs == nullptr || jTargets == nullptr) {
         return;
     }
     int nPairs = env->GetArrayLength(jTargets);
@@ -476,113 +476,113 @@ OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchRlUnpin)(
     DeviceBuf dTargets;
     dPairs.upload(pairs.data(), pairs.size() * sizeof(int));
     dTargets.upload(targets.data(), targets.size() * sizeof(double));
-    rlUnpinBatch<<<grid(nPairs), BLOCK, 0, ctx->stream>>>(nPairs, ctx->nScenarios, ctx->n, ctx->nrl,
-            dPairs.as<int>(), dTargets.as<double>(), ctx->dRlVrow.as<int>(), ctx->dRlLimitType.as<char>(),
-            ctx->dRlSavedMode.as<char>(), ctx->dMode.as<int>(), ctx->dTarget.as<double>());
+    reactiveLimitsPqPvSwitchBatch<<<grid(nPairs), BLOCK, 0, ctx->stream>>>(nPairs, ctx->nScenarios, ctx->n, ctx->nReactiveLimitEntries,
+            dPairs.as<int>(), dTargets.as<double>(), ctx->dReactiveLimitVoltageRow.as<int>(), ctx->dReactiveLimitQLimitType.as<char>(),
+            ctx->dReactiveLimitSavedRowMode.as<char>(), ctx->dMode.as<int>(), ctx->dTarget.as<double>());
     CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
 }
 
 // Reactive-limits controllers STRANDED in another synchronous component: install (or clear, with
 // null) the per-scenario mask as {slot, controller} pairs.
 extern "C" JNIEXPORT void JNICALL
-OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchRlNoUnpin)(
+OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchReactiveLimitPqPvSwitchForbidden)(
         JNIEnv* env, jclass, jlong handle, jintArray jPairs) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx == nullptr) {
         return;
     }
-    if (jPairs == nullptr || env->GetArrayLength(jPairs) == 0 || ctx->nrl == 0) {
-        ctx->nRlNoUnpin = 0;
+    if (jPairs == nullptr || env->GetArrayLength(jPairs) == 0 || ctx->nReactiveLimitEntries == 0) {
+        ctx->nReactiveLimitPqPvSwitchForbidden = 0;
         return;
     }
-    size_t len = static_cast<size_t>(ctx->nScenarios) * ctx->nrl;
+    size_t len = static_cast<size_t>(ctx->nScenarios) * ctx->nReactiveLimitEntries;
     std::vector<char> mask(len, 0);
     int nPairs = env->GetArrayLength(jPairs) / 2;
     jint* pairs = env->GetIntArrayElements(jPairs, nullptr);
     for (int k = 0; k < nPairs; k++) {
         int s = pairs[2 * k];
         int i = pairs[2 * k + 1];
-        if (s >= 0 && s < ctx->nScenarios && i >= 0 && i < ctx->nrl) {
-            mask[(size_t) s * ctx->nrl + i] = 1;
+        if (s >= 0 && s < ctx->nScenarios && i >= 0 && i < ctx->nReactiveLimitEntries) {
+            mask[(size_t) s * ctx->nReactiveLimitEntries + i] = 1;
         }
     }
     env->ReleaseIntArrayElements(jPairs, pairs, JNI_ABORT);
-    ctx->dRlNoUnpin.upload(mask.data(), len);
+    ctx->dReactiveLimitPqPvSwitchForbidden.upload(mask.data(), len);
     std::vector<char> zero(ctx->nScenarios, 0);
-    ctx->dRlUnpinBad.upload(zero.data(), ctx->nScenarios);
-    ctx->nRlNoUnpin = nPairs;
+    ctx->dReactiveLimitPqPvSwitchRejected.upload(zero.data(), ctx->nScenarios);
+    ctx->nReactiveLimitPqPvSwitchForbidden = nPairs;
 }
 
-// (scenario, entry) pairs whose bus lost EVERY generator this scenario: seeded FROZEN by initRlLimitTypeBatch.
+// (scenario, entry) pairs whose bus lost EVERY generator this scenario: seeded FROZEN by initReactiveLimitQLimitTypeBatch.
 extern "C" JNIEXPORT void JNICALL
-OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchRlGenLost)(
+OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchReactiveLimitGeneratorsLost)(
         JNIEnv* env, jclass, jlong handle, jintArray jPairs) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx == nullptr) {
         return;
     }
-    if (jPairs == nullptr || env->GetArrayLength(jPairs) == 0 || ctx->nrl == 0) {
-        ctx->nRlGenLost = 0;
+    if (jPairs == nullptr || env->GetArrayLength(jPairs) == 0 || ctx->nReactiveLimitEntries == 0) {
+        ctx->nReactiveLimitGeneratorsLost = 0;
         return;
     }
-    size_t len = static_cast<size_t>(ctx->nScenarios) * ctx->nrl;
+    size_t len = static_cast<size_t>(ctx->nScenarios) * ctx->nReactiveLimitEntries;
     std::vector<char> mask(len, 0);
     int nPairs = env->GetArrayLength(jPairs) / 2;
     jint* pairs = env->GetIntArrayElements(jPairs, nullptr);
     for (int k = 0; k < nPairs; k++) {
         int s = pairs[2 * k];
         int i = pairs[2 * k + 1];
-        if (s >= 0 && s < ctx->nScenarios && i >= 0 && i < ctx->nrl) {
-            mask[(size_t) s * ctx->nrl + i] = 1;
+        if (s >= 0 && s < ctx->nScenarios && i >= 0 && i < ctx->nReactiveLimitEntries) {
+            mask[(size_t) s * ctx->nReactiveLimitEntries + i] = 1;
         }
     }
     env->ReleaseIntArrayElements(jPairs, pairs, JNI_ABORT);
-    ctx->dRlGenLost.upload(mask.data(), len);
-    ctx->nRlGenLost = nPairs;
+    ctx->dReactiveLimitGeneratorsLost.upload(mask.data(), len);
+    ctx->nReactiveLimitGeneratorsLost = nPairs;
 }
 
 extern "C" JNIEXPORT void JNICALL
-OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchRlIslanded)(
+OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchReactiveLimitIslanded)(
         JNIEnv* env, jclass, jlong handle, jintArray jPairs) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx == nullptr) {
         return;
     }
-    if (jPairs == nullptr || env->GetArrayLength(jPairs) == 0 || ctx->nrl == 0) {
-        ctx->nRlIslanded = 0;
+    if (jPairs == nullptr || env->GetArrayLength(jPairs) == 0 || ctx->nReactiveLimitEntries == 0) {
+        ctx->nReactiveLimitIslanded = 0;
         return;
     }
-    size_t maskLen = static_cast<size_t>(ctx->nScenarios) * ctx->nrl;
+    size_t maskLen = static_cast<size_t>(ctx->nScenarios) * ctx->nReactiveLimitEntries;
     std::vector<char> mask(maskLen, 0);
     int nPairs = env->GetArrayLength(jPairs) / 2;
     jint* pairs = env->GetIntArrayElements(jPairs, nullptr);
     for (int k = 0; k < nPairs; k++) {
         int s = pairs[2 * k];
         int i = pairs[2 * k + 1];
-        if (s >= 0 && s < ctx->nScenarios && i >= 0 && i < ctx->nrl) {
-            mask[(size_t) s * ctx->nrl + i] = 1;
+        if (s >= 0 && s < ctx->nScenarios && i >= 0 && i < ctx->nReactiveLimitEntries) {
+            mask[(size_t) s * ctx->nReactiveLimitEntries + i] = 1;
         }
     }
     env->ReleaseIntArrayElements(jPairs, pairs, JNI_ABORT);
-    ctx->dRlIslanded.upload(mask.data(), maskLen);
-    ctx->nRlIslanded = nPairs;
+    ctx->dReactiveLimitIslanded.upload(mask.data(), maskLen);
+    ctx->nReactiveLimitIslanded = nPairs;
 }
 
 // Re-homed voltage controls (GpuBatchQualification.reHomedControls): per (slot, entry) pair the entry is
 // checked by the reactive-limits pass as a LOCAL controller at the given voltage target (pu) — the bus is
 // a plain PV bus this scenario, whatever its base packing. Null clears the context's list.
 extern "C" JNIEXPORT void JNICALL
-OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchRlLocal)(
+OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchReactiveLimitLocalOverrides)(
         JNIEnv* env, jclass, jlong handle, jintArray jPairs, jdoubleArray jVt) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx == nullptr) {
         return;
     }
-    if (jPairs == nullptr || jVt == nullptr || env->GetArrayLength(jPairs) == 0 || ctx->nrl == 0) {
-        ctx->nRlLocal = 0;
+    if (jPairs == nullptr || jVt == nullptr || env->GetArrayLength(jPairs) == 0 || ctx->nReactiveLimitEntries == 0) {
+        ctx->nReactiveLimitLocalOverrides = 0;
         return;
     }
-    size_t len = static_cast<size_t>(ctx->nScenarios) * ctx->nrl;
+    size_t len = static_cast<size_t>(ctx->nScenarios) * ctx->nReactiveLimitEntries;
     std::vector<char> mask(len, 0);
     std::vector<double> vt(len, 0.0);
     int nPairs = env->GetArrayLength(jPairs) / 2;
@@ -591,33 +591,33 @@ OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchRlLocal)(
     for (int k = 0; k < nPairs; k++) {
         int s = pairs[2 * k];
         int i = pairs[2 * k + 1];
-        if (s >= 0 && s < ctx->nScenarios && i >= 0 && i < ctx->nrl) {
-            mask[(size_t) s * ctx->nrl + i] = 1;
-            vt[(size_t) s * ctx->nrl + i] = vts[k];
+        if (s >= 0 && s < ctx->nScenarios && i >= 0 && i < ctx->nReactiveLimitEntries) {
+            mask[(size_t) s * ctx->nReactiveLimitEntries + i] = 1;
+            vt[(size_t) s * ctx->nReactiveLimitEntries + i] = vts[k];
         }
     }
     env->ReleaseIntArrayElements(jPairs, pairs, JNI_ABORT);
     env->ReleaseDoubleArrayElements(jVt, vts, JNI_ABORT);
-    ctx->dRlLocalOv.upload(mask.data(), len);
-    ctx->dRlLocalVt.upload(vt.data(), len * sizeof(double));
-    ctx->nRlLocal = nPairs;
+    ctx->dReactiveLimitLocalOverride.upload(mask.data(), len);
+    ctx->dReactiveLimitLocalTargetV.upload(vt.data(), len * sizeof(double));
+    ctx->nReactiveLimitLocalOverrides = nPairs;
 }
 
 // Remote controllers OLF re-merges onto a NEW pilot after a zero-impedance split: per (scenario, entry) the V row
 // the reactive-limit switch-back compares against the (per-scenario) group target - the new pilot's, not the base
 // pilot's whose row is frozen with its island. Null or empty clears the context's list.
 extern "C" JNIEXPORT void JNICALL
-OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchRlCmpOverrides)(
+OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchReactiveLimitComparedVoltageRowOverrides)(
         JNIEnv* env, jclass, jlong handle, jintArray jPairs, jintArray jCmp) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx == nullptr) {
         return;
     }
-    if (jPairs == nullptr || jCmp == nullptr || env->GetArrayLength(jPairs) == 0 || ctx->nrl == 0) {
-        ctx->nRlCmp = 0;
+    if (jPairs == nullptr || jCmp == nullptr || env->GetArrayLength(jPairs) == 0 || ctx->nReactiveLimitEntries == 0) {
+        ctx->nReactiveLimitComparedVoltageRowOverrides = 0;
         return;
     }
-    size_t len = static_cast<size_t>(ctx->nScenarios) * ctx->nrl;
+    size_t len = static_cast<size_t>(ctx->nScenarios) * ctx->nReactiveLimitEntries;
     std::vector<int> cmp(len, -1);
     int nPairs = env->GetArrayLength(jPairs) / 2;
     jint* pairs = env->GetIntArrayElements(jPairs, nullptr);
@@ -625,12 +625,12 @@ OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchRlCmpOverrides)(
     for (int k = 0; k < nPairs; k++) {
         int s = pairs[2 * k];
         int i = pairs[2 * k + 1];
-        if (s >= 0 && s < ctx->nScenarios && i >= 0 && i < ctx->nrl) {
-            cmp[(size_t) s * ctx->nrl + i] = rows[k];
+        if (s >= 0 && s < ctx->nScenarios && i >= 0 && i < ctx->nReactiveLimitEntries) {
+            cmp[(size_t) s * ctx->nReactiveLimitEntries + i] = rows[k];
         }
     }
     env->ReleaseIntArrayElements(jPairs, pairs, JNI_ABORT);
     env->ReleaseIntArrayElements(jCmp, rows, JNI_ABORT);
-    ctx->dRlCmpOv.upload(cmp.data(), len * sizeof(int));
-    ctx->nRlCmp = nPairs;
+    ctx->dReactiveLimitComparedVoltageRowOverride.upload(cmp.data(), len * sizeof(int));
+    ctx->nReactiveLimitComparedVoltageRowOverrides = nPairs;
 }

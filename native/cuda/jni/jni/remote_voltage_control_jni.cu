@@ -134,14 +134,14 @@ OLF_JNI(ac_equations_vector_gpu, RemoteVoltageControlNative, setBatchPilotQDelta
 }
 
 // Pilot-row flip entries (see pilotRowAllPinnedBatch): one per (scenario, pilot) where the outage
-// made the pilot stop being one of its own controllers. slots/rows/qTargets are per entry; rlCounts
-// says how many surviving-controller RL entries each one owns and rlPool concatenates them in order.
+// made the pilot stop being one of its own controllers. slots/rows/qTargets are per entry; survivorReactiveLimitEntryCounts
+// says how many surviving-controller RL entries each one owns and survivorReactiveLimitEntries concatenates them in order.
 // Nulls clear. Flip state (flipped/savedVTarget) is allocated zeroed here, so each solve starts with
 // every pilot row unflipped.
 extern "C" JNIEXPORT void JNICALL
 OLF_JNI(ac_equations_vector_gpu, RemoteVoltageControlNative, setBatchPilotAllPinnedFlip)(
         JNIEnv* env, jclass, jlong handle, jintArray jSlots, jintArray jRows, jdoubleArray jQTargets,
-        jintArray jRlCounts, jintArray jRlPool) {
+        jintArray jSurvivorReactiveLimitEntryCounts, jintArray jSurvivorReactiveLimitEntries) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx == nullptr) {
         return;
@@ -154,9 +154,9 @@ OLF_JNI(ac_equations_vector_gpu, RemoteVoltageControlNative, setBatchPilotAllPin
     jint* slots = env->GetIntArrayElements(jSlots, nullptr);
     jint* rows = env->GetIntArrayElements(jRows, nullptr);
     jdouble* qt = env->GetDoubleArrayElements(jQTargets, nullptr);
-    jint* cnt = env->GetIntArrayElements(jRlCounts, nullptr);
-    jint* pool = env->GetIntArrayElements(jRlPool, nullptr);
-    int poolLen = env->GetArrayLength(jRlPool);
+    jint* cnt = env->GetIntArrayElements(jSurvivorReactiveLimitEntryCounts, nullptr);
+    jint* pool = env->GetIntArrayElements(jSurvivorReactiveLimitEntries, nullptr);
+    int poolLen = env->GetArrayLength(jSurvivorReactiveLimitEntries);
     std::vector<int> off(ne);
     int acc = 0;
     for (int i = 0; i < ne; i++) {
@@ -168,7 +168,7 @@ OLF_JNI(ac_equations_vector_gpu, RemoteVoltageControlNative, setBatchPilotAllPin
     ctx->dPfQTarget.upload(qt, static_cast<size_t>(ne) * sizeof(double));
     ctx->dPfCount.upload(cnt, static_cast<size_t>(ne) * sizeof(int));
     ctx->dPfOff.upload(off.data(), static_cast<size_t>(ne) * sizeof(int));
-    ctx->dPfRlPool.upload(pool, static_cast<size_t>(poolLen > 0 ? poolLen : 1) * sizeof(int));
+    ctx->dPilotFlipSurvivorReactiveLimitEntries.upload(pool, static_cast<size_t>(poolLen > 0 ? poolLen : 1) * sizeof(int));
     std::vector<char> zeroC(ne, 0);
     std::vector<double> zeroD(ne, 0.0);
     ctx->dPfFlipped.upload(zeroC.data(), static_cast<size_t>(ne) * sizeof(char));
@@ -177,8 +177,8 @@ OLF_JNI(ac_equations_vector_gpu, RemoteVoltageControlNative, setBatchPilotAllPin
     env->ReleaseIntArrayElements(jSlots, slots, JNI_ABORT);
     env->ReleaseIntArrayElements(jRows, rows, JNI_ABORT);
     env->ReleaseDoubleArrayElements(jQTargets, qt, JNI_ABORT);
-    env->ReleaseIntArrayElements(jRlCounts, cnt, JNI_ABORT);
-    env->ReleaseIntArrayElements(jRlPool, pool, JNI_ABORT);
+    env->ReleaseIntArrayElements(jSurvivorReactiveLimitEntryCounts, cnt, JNI_ABORT);
+    env->ReleaseIntArrayElements(jSurvivorReactiveLimitEntries, pool, JNI_ABORT);
 }
 
 // DISTR_RHO coefficient overrides: install (or clear, with nulls) the per-scenario 1/count'

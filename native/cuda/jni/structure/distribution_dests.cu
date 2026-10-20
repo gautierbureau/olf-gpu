@@ -34,49 +34,49 @@ using namespace powsybl::openloadflow;
 namespace olfgpu {
 
 void buildDistrQDest(SharedStructure* st, const CsrPattern& pos, const std::vector<int>& rowMap,
-                     int ndq, const int* dqElem, const int* dqSide, const int* dqKind,
-                     const double* dqWeight, const int* dqRow,
+                     int nDistrQ, const int* distrQElement, const int* distrQSide, const int* distrQKind,
+                     const double* distrQWeight, const int* distrQRow,
                      const int* closedBranchIndices, const int* openBranchIndices, const int* shuntIndices, const int* relocOwn) {
-    st->ndq = ndq;
-    if (ndq > 0) {
-        std::vector<int> dqDest(static_cast<size_t>(ndq) * 6, -1);
+    st->nDistrQ = nDistrQ;
+    if (nDistrQ > 0) {
+        std::vector<int> distrQDestination(static_cast<size_t>(nDistrQ) * 6, -1);
         // The COUPLER-TREE stock placement for a DISTR_Q row: a relocated child's sharing equation sits on
         // its parent coupler's DUMMY_Q row, and a scenario that kills that coupler pins the row to an
         // identity — the equation then has to be back on the bus's OWN row, exactly where OLF keeps a
         // controller's DISTR_Q. dqAlt holds the same six destinations recomputed there and dqSel the dummy
         // row whose per-scenario mode decides (0 = dead). Without it the middle-section-loss fixtures
         // converged on a system one equation short: bus vl3_b 395.43 kV against OLF's 401.69.
-        std::vector<int> dqAlt(static_cast<size_t>(ndq) * 6, -1);
-        std::vector<int> dqSel(static_cast<size_t>(ndq), -1);
+        std::vector<int> dqAlt(static_cast<size_t>(nDistrQ) * 6, -1);
+        std::vector<int> dqSel(static_cast<size_t>(nDistrQ), -1);
         // A kind-3 contribution is a COUPLER's DUMMY_Q inside this controller's reactive injection; the pack
         // carries the dummy COLUMN, and the per-scenario mode that says whether that coupler is still alive
         // lives at its ROW. Keep the mapped row per contribution so the fill can ask.
-        std::vector<int> dqZiRow(static_cast<size_t>(ndq), -1);
-        for (int c = 0; c < ndq; c++) {
-            int mappedRow = rowMap[dqRow[c]];
+        std::vector<int> dqZiRow(static_cast<size_t>(nDistrQ), -1);
+        for (int c = 0; c < nDistrQ; c++) {
+            int mappedRow = rowMap[distrQRow[c]];
             int ownRow = relocOwn != nullptr && mappedRow >= 0 ? relocOwn[mappedRow] : -1;
             if (ownRow >= 0) {
                 dqSel[c] = mappedRow;
             }
-            if (dqKind[c] == GpuReactiveTermKind::DUMMY_Q && dqElem[c] >= 0) {
-                dqZiRow[c] = rowMap[dqElem[c]];
+            if (distrQKind[c] == GpuReactiveTermKind::DUMMY_Q && distrQElement[c] >= 0) {
+                dqZiRow[c] = rowMap[distrQElement[c]];
             }
             for (int pass = 0; pass < 2; pass++) {           // pass 0 = the real row, pass 1 = the stock row
                 int row = pass == 0 ? mappedRow : ownRow;
-                int* d = (pass == 0 ? dqDest : dqAlt).data() + static_cast<size_t>(c) * 6;
+                int* d = (pass == 0 ? distrQDestination : dqAlt).data() + static_cast<size_t>(c) * 6;
                 if (row < 0) {
                     continue;
                 }
                 d[0] = -2 - row;                             // q value -> F row
-                if (dqKind[c] == GpuReactiveTermKind::SHUNT_COMPENSATOR_REACTIVE_FLOW) {  // shunt: dq/dv on the bus V column
-                    d[1] = pos.at(row, shuntIndices[static_cast<size_t>(dqElem[c]) * 5 + 2]);
-                } else if (dqKind[c] == GpuReactiveTermKind::OPEN_BRANCH_REACTIVE_FLOW) {  // half-open: dq/dv on the connected-side V col
-                    const int* oq = openBranchIndices + static_cast<size_t>(dqElem[c]) * 6;
-                    d[1] = pos.at(row, dqSide[c] == 0 ? oq[4] : oq[5]);
-                } else if (dqKind[c] == GpuReactiveTermKind::DUMMY_Q) {  // zero-impedance: J slot on the dummyQ column
-                    d[1] = pos.at(row, dqElem[c]);
+                if (distrQKind[c] == GpuReactiveTermKind::SHUNT_COMPENSATOR_REACTIVE_FLOW) {  // shunt: dq/dv on the bus V column
+                    d[1] = pos.at(row, shuntIndices[static_cast<size_t>(distrQElement[c]) * 5 + 2]);
+                } else if (distrQKind[c] == GpuReactiveTermKind::OPEN_BRANCH_REACTIVE_FLOW) {  // half-open: dq/dv on the connected-side V col
+                    const int* oq = openBranchIndices + static_cast<size_t>(distrQElement[c]) * 6;
+                    d[1] = pos.at(row, distrQSide[c] == 0 ? oq[4] : oq[5]);
+                } else if (distrQKind[c] == GpuReactiveTermKind::DUMMY_Q) {  // zero-impedance: J slot on the dummyQ column
+                    d[1] = pos.at(row, distrQElement[c]);
                 } else {                                     // closed branch
-                    const int* q = closedBranchIndices + static_cast<size_t>(dqElem[c]) * 12;
+                    const int* q = closedBranchIndices + static_cast<size_t>(distrQElement[c]) * 12;
                     d[1] = pos.at(row, q[5]);                // dq/dv1
                     d[2] = pos.at(row, q[7]);                // dq/dv2
                     d[3] = pos.at(row, q[4]);                // dq/dph1
@@ -85,11 +85,11 @@ void buildDistrQDest(SharedStructure* st, const CsrPattern& pos, const std::vect
                 }
             }
         }
-        st->dDqElem.upload(dqElem, ndq * sizeof(int));
-        st->dDqSide.upload(dqSide, ndq * sizeof(int));
-        st->dDqKind.upload(dqKind, ndq * sizeof(int));
-        st->dDqWeight.upload(dqWeight, ndq * sizeof(double));
-        st->dDqDest.upload(dqDest.data(), dqDest.size() * sizeof(int));
+        st->dDistrQElement.upload(distrQElement, nDistrQ * sizeof(int));
+        st->dDistrQSide.upload(distrQSide, nDistrQ * sizeof(int));
+        st->dDistrQKind.upload(distrQKind, nDistrQ * sizeof(int));
+        st->dDistrQWeight.upload(distrQWeight, nDistrQ * sizeof(double));
+        st->dDistrQDestination.upload(distrQDestination.data(), distrQDestination.size() * sizeof(int));
         st->dDqAlt.upload(dqAlt.data(), dqAlt.size() * sizeof(int));
         st->dDqSel.upload(dqSel.data(), dqSel.size() * sizeof(int));
         st->dDqZiRow.upload(dqZiRow.data(), dqZiRow.size() * sizeof(int));

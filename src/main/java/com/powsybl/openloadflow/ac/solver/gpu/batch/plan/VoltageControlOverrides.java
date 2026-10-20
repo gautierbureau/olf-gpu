@@ -265,7 +265,7 @@ final class VoltageControlOverrides {
                 updateMainReactiveKeys(bus);
             }
             double[] baseW = gpuData.distrQ().weight();
-            double[] newW = reweightedDqWeights(es, gpuData, touched);
+            double[] newW = reweightedDistrQWeights(es, gpuData, touched);
             // The member KEYS after the loss (OLF's qPct on the touched groups' MAIN controls, just updated): the
             // kernels renormalize them over the members a pin leaves enabled, so the loss and an in-flight pin in the
             // same group compose - which fixed per-contribution weights cannot do (the fill applied them over its
@@ -340,7 +340,7 @@ final class VoltageControlOverrides {
      * a DISTR_Q member). Returns null when a touched bus is the free controller of a group WITHOUT a candidate
      * table — there the loss can move the free role, which changes the pack's row set, not only its weights.
      */
-    static double[] reweightedDqWeights(EquationSystem<AcVariableType, AcEquationType> es, GpuAcData gpuData,
+    static double[] reweightedDistrQWeights(EquationSystem<AcVariableType, AcEquationType> es, GpuAcData gpuData,
                                                 java.util.Set<LfBus> touched) {
         int[] kMember = gpuData.distrQ().rowMember();
         int[] jMember = gpuData.distrQ().injectionMember();

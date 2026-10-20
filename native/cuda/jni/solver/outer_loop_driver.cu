@@ -424,8 +424,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     // sequence has already established — which is exactly what makes a resume cheaper than the
     // orchestrator pattern it replaces: that one resets and re-runs the whole driver every round.
     if (std::getenv("OLF_GPU_BATCH_TRACE") != nullptr && nS == 1) {
-        std::fprintf(stderr, "CTX_FLAGS nS=1 nrl=%d nRlRemote=%d hasDqQrGroups=%d nQr=%d ndq=%d nds=%d ngen=%d nZeroImpedanceBranch=%d nBaseClosedZeroImpedanceBranches=%d nRmq=%d resume=%d fullLoadflow=%d\n",
-                     ctx->nrl, ctx->nRlRemote, ctx->hasDqQrGroups ? 1 : 0, ctx->st->nQr, ctx->ndq, ctx->nds, ctx->ngen, ctx->nZeroImpedanceBranch, ctx->nBaseClosedZeroImpedanceBranches, ctx->nRmq, resume ? 1 : 0, fullLoadflow ? 1 : 0);
+        std::fprintf(stderr, "CTX_FLAGS nS=1 nrl=%d nRlRemote=%d hasDistrQRelocationGroups=%d nQr=%d nDistrQ=%d nds=%d ngen=%d nZeroImpedanceBranch=%d nBaseClosedZeroImpedanceBranches=%d nRmq=%d resume=%d fullLoadflow=%d\n",
+                     ctx->nrl, ctx->nRlRemote, ctx->hasDistrQRelocationGroups ? 1 : 0, ctx->st->nQr, ctx->nDistrQ, ctx->nds, ctx->ngen, ctx->nZeroImpedanceBranch, ctx->nBaseClosedZeroImpedanceBranches, ctx->nRmq, resume ? 1 : 0, fullLoadflow ? 1 : 0);
     }
     if (fullLoadflow && !resume && ctx->nSvc > 0) {
         // BEFORE the reactive-limit seeding below, which consults it: no zone has moved a target yet.

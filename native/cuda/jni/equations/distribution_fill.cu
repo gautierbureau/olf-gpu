@@ -33,7 +33,7 @@ using namespace powsybl::openloadflow;
 
 namespace olfgpu {
 
-int gpuDqTraceRow() {
+int gpuDistrQTraceRow() {
     // OLF_GPU_DQ_TRACE=<deviceRow>: every DISTR_Q residual contribution landing in that row.
     static const char* e = std::getenv("OLF_GPU_DQ_TRACE");
     static int v = e != nullptr ? std::atoi(e) : -1;
@@ -46,62 +46,62 @@ int gpuDqTraceRow() {
 // branch is outaged in this scenario — matching the CPU, which removes that branch's q from the controller's
 // reactive sum (the controller weight qPercent is unchanged, so only the term vanishes). kinds 1 (shunt) and
 // 3 (zero-imp dummy) cannot be a single-branch contingency in a qualified batched scenario, so no mask check.
-__global__ void fillDistrQBatch(int ndq, int nScenarios, int n, int nnz, int nElements,
+__global__ void fillDistrQBatch(int nDistrQ, int nScenarios, int n, int nnz, int nElements,
                                 int closedBranchOffset, int openBranchOffset,
-                                const int* dqElem, const int* dqSide, const int* dqKind,
-                                const double* dqWeight, const int* dqDest,
+                                const int* distrQElement, const int* distrQSide, const int* distrQKind,
+                                const double* distrQWeight, const int* distrQDestination,
                                 const int* dqAlt, const int* dqSel, const int* dqZiRow,
                                 const double* closedBranchParameters, const int* closedBranchIndices, const double* shuntParameters, const int* shuntIndices,
                                 const double* openBranchParameters, const int* openBranchIndices,
                                 const double* x, double* vals, double* F,
                                 const char* disabled, const char* active,
-                                int nDqOv, const int* dqOvIdx, const double* dqOvW,
-                                int nDqKeyOv, const int* dqKeyOvIdx, const double* dqKeyOvKey,
+                                int nDistrQWeightOverrides, const int* distrQWeightOverrideScenarioTerm, const double* distrQWeightOverrideWeight,
+                                int nDistrQKeyOverrides, const int* distrQKeyOverrideScenarioMember, const double* distrQKeyOverrideKey,
                                 const int* mode,
-                                int nDqInact, const int* dqInactSlotMember,
-                                const int* dqKMember, const int* dqJMember, const double* mKey,
+                                int nDistrQInactiveMembers, const int* distrQInactiveScenarioMember,
+                                const int* distrQRowMember, const int* distrQInjectionMember, const double* mKey,
                                 const int* mRlEntry, const int* mGroupStart, const int* mGroupCount,
                                 const char* limitType, int nrl,
                                 const char* psSkip, int psGroups,
                                 const int* mQrGroup, const int* qrPtr, const int* qrRows,
                                 int nR1Ov, const int* r1OvSlotElem, const double* r1OvVal,
                                 int nShuntAdmittanceOverrides, const int* shuntAdmittanceOverrideScenarioElement, const double* shuntAdmittanceOverrideDelta,
-                                int dqTraceRow,
-                                const char* dqSub, const int* qrMemberStart, int nDqMembersAll) {
+                                int distrQTraceRow,
+                                const char* distrQSubgroup, const int* qrMemberStart, int nDistrQMembersAll) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= ndq * nScenarios) return;
-    int c = tid % ndq;
-    int s = tid / ndq;
+    if (tid >= nDistrQ * nScenarios) return;
+    int c = tid % nDistrQ;
+    int s = tid / nDistrQ;
     if (!active[s]) return;
     // STOCK PLACEMENT: a relocated child's sharing row moves to the bus's OWN row in any scenario that
     // kills its parent coupler, which pins that coupler's DUMMY_Q row to an identity (see buildDistrQDest).
     if (dqSel != nullptr && dqSel[c] >= 0 && dqAlt != nullptr
             && mode[(size_t) s * n + dqSel[c]] == GpuRowMode::FIXED_VARIABLE && dqAlt[c * 6] <= -2) {
-        dqDest = dqAlt;
+        distrQDestination = dqAlt;
     }
     // an RL-PINNED remote member's row (mode 4) hosts its OWN Q balance — its DISTR_Q emissions
     // stop for this scenario (the CPU deactivates only that member's DISTR_Q equation)
     {
-        int d0 = dqDest[c * 6];
+        int d0 = distrQDestination[c * 6];
         if (d0 <= -2 && mode[(size_t) s * n + (-2 - d0)] == GpuRowMode::BUS_TARGET_Q) return;
         // plan-B4: the CURRENT pilot-Q carrier's row (a re-picked free role after the base free
         // member pinned) hosts the group's relocated pilot balance — its DISTR_Q row is inactive
         // this scenario, exactly like OLF deactivating the new free member's DISTR_Q equation.
-        if (mQrGroup != nullptr && dqJMember[c] >= 0) {
-            int g = mQrGroup[dqJMember[c]];
+        if (mQrGroup != nullptr && distrQInjectionMember[c] >= 0) {
+            int g = mQrGroup[distrQInjectionMember[c]];
             // A PILOT-SELF group carries no relocated balance while its pilot is unpinned (its q feeds these
             // very DISTR_Q rows, weighted), so the carrier's row is NOT hosting anything and its DISTR_Q must
             // stay ACTIVE. Suppressing it there dropped an equation without gaining one: one short, singular.
             bool psGateOff = psSkip != nullptr && g >= 0 && psSkip[(size_t) s * psGroups + g];
             if (g >= 0 && !psGateOff && d0 <= -2
                     && -2 - d0 == qrRows[qrPtr[g] + relocChooseSub(g, qrPtr, qrRows, mode + (size_t) s * n,
-                            dqSub != nullptr ? dqSub + (size_t) s * nDqMembersAll : nullptr, qrMemberStart)]) {
+                            distrQSubgroup != nullptr ? distrQSubgroup + (size_t) s * nDistrQMembersAll : nullptr, qrMemberStart)]) {
                 return;
             }
         }
     }
-    int e = dqElem[c];
-    int kind = dqKind[c];
+    int e = distrQElement[c];
+    int kind = distrQKind[c];
     if (kind == GpuReactiveTermKind::CLOSED_BRANCH_REACTIVE_FLOW && disabled[s * nElements + closedBranchOffset + e]) return;  // outaged closed contributor
     if (kind == GpuReactiveTermKind::OPEN_BRANCH_REACTIVE_FLOW && disabled[s * nElements + openBranchOffset + e]) return;  // outaged open contributor
     // kind 3 is a COUPLER's DUMMY_Q as part of this controller's reactive injection, and its element index
@@ -110,8 +110,8 @@ __global__ void fillDistrQBatch(int ndq, int nScenarios, int n, int nnz, int nEl
     // middle-section-loss fixtures: the surviving section's DISTR_Q row kept a coefficient 1 on the dead
     // coupler's DUMMY_Q and the solve landed 0.34 kV off (bus vl3_b 401.35 against OLF's 401.69).
     if (kind == GpuReactiveTermKind::DUMMY_Q && dqZiRow != nullptr && dqZiRow[c] >= 0 && mode[(size_t) s * n + dqZiRow[c]] == GpuRowMode::FIXED_VARIABLE) return;
-    double w = dqWeight[c];
-    int kM = dqKMember != nullptr ? dqKMember[c] : -1;
+    double w = distrQWeight[c];
+    int kM = distrQRowMember != nullptr ? distrQRowMember[c] : -1;
     if (kM >= 0) {
         // DYNAMIC reactive keys (plan-B3): an RL pin disables the member's controller, which zeroes
         // its key and renormalizes qPct over the survivors (updateReactiveKeys). Replicate OLF's
@@ -120,16 +120,16 @@ __global__ void fillDistrQBatch(int ndq, int nScenarios, int n, int nnz, int nEl
         int gc = mGroupCount[kM];
         // SUBGROUPS (tasks #71): a split group's members pair only within their own subgroup — the other
         // subgroup's keys leave this denominator and its members' q terms leave this row (below).
-        const char* subS = dqSub != nullptr ? dqSub + (size_t) s * nDqMembersAll : nullptr;
+        const char* subS = distrQSubgroup != nullptr ? distrQSubgroup + (size_t) s * nDistrQMembersAll : nullptr;
         char subK = subS != nullptr ? subS[kM] : 0;
-        if (subS != nullptr && dqJMember[c] >= 0 && subS[dqJMember[c]] != subK) return;
+        if (subS != nullptr && distrQInjectionMember[c] >= 0 && subS[distrQInjectionMember[c]] != subK) return;
         double sum = 0.0;
         for (int m = gs; m < gs + gc; m++) {
             int re = mRlEntry[m];
             bool pinned = re >= 0 && limitType[(size_t) s * nrl + re] != GpuQLimitType::NONE;
             bool otherSub = subS != nullptr && subS[m] != subK;
-            sum += (pinned || otherSub || dqMemberInactive(nDqInact, dqInactSlotMember, s, m))
-                    ? 0.0 : dqKeyOf(nDqKeyOv, dqKeyOvIdx, dqKeyOvKey, s, m, mKey);
+            sum += (pinned || otherSub || distrQMemberInactive(nDistrQInactiveMembers, distrQInactiveScenarioMember, s, m))
+                    ? 0.0 : distrQKeyOf(nDistrQKeyOverrides, distrQKeyOverrideScenarioMember, distrQKeyOverrideKey, s, m, mKey);
         }
         // the PINNED member's q terms STAY in every survivor's row (weight = the renormalized
         // qPct of the ROW OWNER); the pin is balanced on the TARGET side instead — OLF's
@@ -137,10 +137,10 @@ __global__ void fillDistrQBatch(int ndq, int nScenarios, int n, int nnz, int nEl
         // (updateDistrQTargetsBatch keeps the per-scenario targets in step with the pin states)
         int reK = mRlEntry[kM];
         bool kPinned = reK >= 0 && limitType[(size_t) s * nrl + reK] != GpuQLimitType::NONE;
-        double qpk = (sum == 0.0 || kPinned || dqMemberInactive(nDqInact, dqInactSlotMember, s, kM))
-                ? 0.0 : dqKeyOf(nDqKeyOv, dqKeyOvIdx, dqKeyOvKey, s, kM, mKey) / sum;
-        w = qpk - (dqJMember[c] == kM ? 1.0 : 0.0);
-        if (kind == GpuReactiveTermKind::DUMMY_Q && dqSide[c] != 0) {
+        double qpk = (sum == 0.0 || kPinned || distrQMemberInactive(nDistrQInactiveMembers, distrQInactiveScenarioMember, s, kM))
+                ? 0.0 : distrQKeyOf(nDistrQKeyOverrides, distrQKeyOverrideScenarioMember, distrQKeyOverrideKey, s, kM, mKey) / sum;
+        w = qpk - (distrQInjectionMember[c] == kM ? 1.0 : 0.0);
+        if (kind == GpuReactiveTermKind::DUMMY_Q && distrQSide[c] != 0) {
             // The host folds the SIDE SIGN into a kind-3 weight (+dummyQ where the controller is
             // bus1, -dummyQ where it is bus2 — exactly createReactiveTerms' term); this live
             // recomputation rebuilds qPct_k - delta_jk and must put that sign back. Without it a
@@ -151,12 +151,12 @@ __global__ void fillDistrQBatch(int ndq, int nScenarios, int n, int nnz, int nEl
             w = -w;
         }
     }
-    for (int k = 0; k < nDqOv; k++) {                        // per-scenario qPct renormalization (gen outage)
-        if (dqOvIdx[k * 2] == s && dqOvIdx[k * 2 + 1] == c) {
-            w = dqOvW[k];
+    for (int k = 0; k < nDistrQWeightOverrides; k++) {                        // per-scenario qPct renormalization (gen outage)
+        if (distrQWeightOverrideScenarioTerm[k * 2] == s && distrQWeightOverrideScenarioTerm[k * 2 + 1] == c) {
+            w = distrQWeightOverrideWeight[k];
         }
     }
-    const int* dst = dqDest + c * 6;
+    const int* dst = distrQDestination + c * 6;
     const double* xs = x + (size_t) s * n;
     double* valsS = vals + (size_t) s * nnz;
     double* FS = F + (size_t) s * n;
@@ -169,7 +169,7 @@ __global__ void fillDistrQBatch(int ndq, int nScenarios, int n, int nnz, int nEl
         applyShuntOverride(nShuntAdmittanceOverrides, shuntAdmittanceOverrideScenarioElement, shuntAdmittanceOverrideDelta, s, e, g, b);
         double so[SH_NOUT];
         evalShunt(xs[vcol], g, b, 0, so + 0, so + 1, so + 2, so + 3, so + 4);
-        if (dst[0] <= -2 && (-2 - dst[0]) == dqTraceRow) {
+        if (dst[0] <= -2 && (-2 - dst[0]) == distrQTraceRow) {
             printf("DQF kind=1(shunt) elem=%d w=%.6f contrib=%.9f\n", e, w, w * so[2]);
         }
         if (dst[0] <= -2) atomicAdd(&FS[-2 - dst[0]], w * so[2]);
@@ -177,7 +177,7 @@ __global__ void fillDistrQBatch(int ndq, int nScenarios, int n, int nnz, int nEl
         return;
     }
     if (kind == GpuReactiveTermKind::DUMMY_Q) {  // zero-impedance DUMMY_Q: linear w*dummyQ
-        if (dst[0] <= -2 && (-2 - dst[0]) == dqTraceRow) {
+        if (dst[0] <= -2 && (-2 - dst[0]) == distrQTraceRow) {
             printf("DQF kind=3(ziDummyQ) col=%d w=%.6f contrib=%.9f\n", e, w, w * xs[e]);
         }
         if (dst[0] <= -2) atomicAdd(&FS[-2 - dst[0]], w * xs[e]);
@@ -187,14 +187,14 @@ __global__ void fillDistrQBatch(int ndq, int nScenarios, int n, int nnz, int nEl
     if (kind == GpuReactiveTermKind::OPEN_BRANCH_REACTIVE_FLOW) {  // half-open branch: connected-side q + dq/dv
         const double* op = openBranchParameters + e * 7;
         const int* oq = openBranchIndices + e * 6;
-        int vcol = dqSide[c] == 0 ? oq[4] : oq[5];
-        double v1 = dqSide[c] == 0 ? xs[vcol] : 1.0;
-        double v2 = dqSide[c] == 1 ? xs[vcol] : 1.0;
+        int vcol = distrQSide[c] == 0 ? oq[4] : oq[5];
+        double v1 = distrQSide[c] == 0 ? xs[vcol] : 1.0;
+        double v2 = distrQSide[c] == 1 ? xs[vcol] : 1.0;
         double oo[OB_NOUT];
         evalOpenBranch(op[0], op[1], op[2], op[3], op[4], op[5], v1, op[6], v2, 0,
                        oo + 0, oo + 1, oo + 2, oo + 3, oo + 4, oo + 5, oo + 6, oo + 7);
-        int qi = dqSide[c] == 0 ? 6 : 2;
-        if (dst[0] <= -2 && (-2 - dst[0]) == dqTraceRow) {
+        int qi = distrQSide[c] == 0 ? 6 : 2;
+        if (dst[0] <= -2 && (-2 - dst[0]) == distrQTraceRow) {
             printf("DQF kind=2(halfOpen) elem=%d w=%.6f contrib=%.9f\n", e, w, w * oo[qi]);
         }
         if (dst[0] <= -2) atomicAdd(&FS[-2 - dst[0]], w * oo[qi]);
@@ -228,12 +228,12 @@ __global__ void fillDistrQBatch(int ndq, int nScenarios, int n, int nnz, int nEl
                      o + 0, o + 1, o + 2, o + 3, o + 4, o + 5, o + 6, o + 7, o + 8, o + 9,
                      o + 10, o + 11, o + 12, o + 13, o + 14, o + 15, o + 16, o + 17, o + 18,
                      o + 19, o + 20, o + 21, o + 22, o + 23, o + 24, o + 25, o + 26, o + 27);
-    int qi = dqSide[c] == 0 ? 7 : 21;            // side-1 q1[7]..dq1dr1[13]; side-2 q2[21]..dq2dr1[27]
+    int qi = distrQSide[c] == 0 ? 7 : 21;            // side-1 q1[7]..dq1dr1[13]; side-2 q2[21]..dq2dr1[27]
     double out6[6] = {o[qi], o[qi + 1], o[qi + 2], o[qi + 3], o[qi + 4], o[qi + 6]};
     for (int m = 0; m < 6; m++) {
         int d = dst[m];
         double val = w * out6[m];
-        if (d <= -2 && (-2 - d) == dqTraceRow) {
+        if (d <= -2 && (-2 - d) == distrQTraceRow) {
             printf("DQF kind=0(closed) elem=%d w=%.6f v1=%.9f v2=%.9f y=%.6f contrib=%.9f\n",
                    e, w, v1, v2, p[0], val);
         }

@@ -560,7 +560,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
             // A REACTIVE-LIMIT PIN of a remote gen-VC member (row mode 4) renormalizes OLF's DISTR_Q reactive
             // keys (updateReactiveKeys) and fires NO equation-system event, so the cached extraction would keep
             // its pre-pin static qPct. Watch the pinned SET and re-extract when it changes: the fresh pack's
-            // dqWeight differs, sameStructureAs compares it, so the structure is rebuilt with OLF's renormalized
+            // distrQWeight differs, sameStructureAs compares it, so the structure is rebuilt with OLF's renormalized
             // keys. That is what used to make every post-pin solve CPU-routed; it now solves on the device.
             java.util.BitSet pinnedNow = GpuAcActivationExtractor.pinnedRemoteMembers(network, equationSystem);
             if (!pinnedNow.equals(pinnedAtExtraction)) {

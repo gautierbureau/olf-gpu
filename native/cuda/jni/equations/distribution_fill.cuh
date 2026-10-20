@@ -10,30 +10,30 @@
 
 namespace olfgpu {
 
-int gpuDqTraceRow();
+int gpuDistrQTraceRow();
 
-__global__ void fillDistrQBatch(int ndq, int nScenarios, int n, int nnz, int nElements,
+__global__ void fillDistrQBatch(int nDistrQ, int nScenarios, int n, int nnz, int nElements,
                                 int closedBranchOffset, int openBranchOffset,
-                                const int* dqElem, const int* dqSide, const int* dqKind,
-                                const double* dqWeight, const int* dqDest,
+                                const int* distrQElement, const int* distrQSide, const int* distrQKind,
+                                const double* distrQWeight, const int* distrQDestination,
                                 const int* dqAlt, const int* dqSel, const int* dqZiRow,
                                 const double* closedBranchParameters, const int* closedBranchIndices, const double* shuntParameters, const int* shuntIndices,
                                 const double* openBranchParameters, const int* openBranchIndices,
                                 const double* x, double* vals, double* F,
                                 const char* disabled, const char* active,
-                                int nDqOv, const int* dqOvIdx, const double* dqOvW,
-                                int nDqKeyOv, const int* dqKeyOvIdx, const double* dqKeyOvKey,
+                                int nDistrQWeightOverrides, const int* distrQWeightOverrideScenarioTerm, const double* distrQWeightOverrideWeight,
+                                int nDistrQKeyOverrides, const int* distrQKeyOverrideScenarioMember, const double* distrQKeyOverrideKey,
                                 const int* mode,
-                                int nDqInact, const int* dqInactSlotMember,
-                                const int* dqKMember, const int* dqJMember, const double* mKey,
+                                int nDistrQInactiveMembers, const int* distrQInactiveScenarioMember,
+                                const int* distrQRowMember, const int* distrQInjectionMember, const double* mKey,
                                 const int* mRlEntry, const int* mGroupStart, const int* mGroupCount,
                                 const char* limitType, int nrl,
                                 const char* psSkip, int psGroups,
                                 const int* mQrGroup, const int* qrPtr, const int* qrRows,
                                 int nR1Ov, const int* r1OvSlotElem, const double* r1OvVal,
                                 int nShuntAdmittanceOverrides, const int* shuntAdmittanceOverrideScenarioElement, const double* shuntAdmittanceOverrideDelta,
-                                int dqTraceRow,
-                                const char* dqSub, const int* qrMemberStart, int nDqMembersAll);
+                                int distrQTraceRow,
+                                const char* distrQSubgroup, const int* qrMemberStart, int nDistrQMembersAll);
 
 __global__ void fillDistrRhoBatch(int nDistrRho, int nScenarios, int n, int nnz,
                                   const int* distrRhoColumn, const double* distrRhoCoefficient, const int* distrRhoDestination,

@@ -20,7 +20,7 @@ __global__ void capturePilotQBatch(int nQr, int nScenarios, int n, const int* qr
 
 __global__ void applyPilotQDeltasBatch(int nDelta, const int* key, const double* val, int nQr, int n,
                                        const int* qrPtr, const int* qrRows, const int* mode,
-                                       const char* dqSub, int nDqMembers, const int* qrMemberStart,
+                                       const char* distrQSubgroup, int nDistrQMembers, const int* qrMemberStart,
                                        double* pilotQ, double* target);
 
 __global__ void updatePilotVeqBatch(int nQr, int nScenarios, int n,
@@ -36,9 +36,9 @@ __global__ void updatePilotVeqBatch(int nQr, int nScenarios, int n,
                                     const int* qrPilotRlEntry,
                                     int nRlVtOv, const int* rlVtOvSlotIdx, const double* rlVtOvVal,
                                     const double* svcRlVt,
-                                    int nDqMembers, const int* dqMemberQrGroup, const int* dqMemberRlEntry,
+                                    int nDistrQMembers, const int* distrQMemberRelocationGroup, const int* distrQMemberReactiveLimitEntry,
                                     const char* rlIslandedMask,
-                                const char* dqSub, const int* qrMemberStart, double tol,
+                                const char* distrQSubgroup, const int* qrMemberStart, double tol,
                                 const char* rlGenLost, const int* qrDepBase, const int* relocOwn,
                                 const double* pinTargetIn);
 

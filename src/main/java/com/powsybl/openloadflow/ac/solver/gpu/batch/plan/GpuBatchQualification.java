@@ -69,10 +69,10 @@ public final class GpuBatchQualification {
                         int[][] islandedNumsByIndex, double[][] frozenTargetsByIndex,
                         GenOutage[][] genOutagesByIndex, int islandingCount,
                         double[] activePowerLossByIndex,
-                        int[][] dqOvContribByIndex, double[][] dqOvWByIndex,
+                        int[][] distrQWeightOverrideTermByIndex, double[][] distrQWeightOverrideWeightByIndex,
                         /** Per scenario, the members whose reactive KEY the contingency changes (a generator lost at a
                          *  bus that keeps a controller) and OLF's post-loss key; the kernels renormalize them live. */
-                        int[][] dqKeyOvMemberByIndex, double[][] dqKeyOvByIndex,
+                        int[][] distrQKeyOverrideMemberByIndex, double[][] distrQKeyOverrideKeyByIndex,
                         int[][] distrRhoOverrideTermByIndex, double[][] distrRhoOverrideCoefficientByIndex,
                         /** Per scenario, the distributed-slack participants this contingency strands in
                          *  another synchronous component — the set the device must renormalize over. */
@@ -85,7 +85,7 @@ public final class GpuBatchQualification {
                          *  not a target), so masking the element is the whole of it. */
                         List<com.powsybl.openloadflow.network.LfHvdc>[] islandedHvdcsByIndex,
                         /** Per scenario, {dq member, subgroup label} pairs of a split group (tasks #71), else null. */
-                        int[][] dqSubByIndex,
+                        int[][] distrQSubgroupByIndex,
                         /** Per scenario, the slack OLF re-picks when the outage isolates the base one. */
                         SlackRelocations slackRelocations) {
     }

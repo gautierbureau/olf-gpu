@@ -90,7 +90,7 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& st, int nScenar
     ctx->openBranchOffset = st->openBranchOffset;
     ctx->shuntOffset = st->shuntOffset;
     ctx->hvdcAcEmulationOffset = st->hvdcAcEmulationOffset;
-    ctx->ndq = st->ndq;
+    ctx->nDistrQ = st->nDistrQ;
     ctx->nDistrRho = st->nDistrRho;
     ctx->nDistrShuntB = st->nDistrShuntB;
     ctx->nZeroImpedanceBranch = st->nZeroImpedanceBranch;

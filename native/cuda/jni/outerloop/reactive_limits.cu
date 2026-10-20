@@ -449,7 +449,7 @@ __global__ void rlForcedPvElectBatch(int nrl, int nScenarios, int n,
 __global__ void rlPilotSelfMixedGate(int nrl, int nScenarios, const char* rlRemote, const int* rlCmpVrow,
                                      const char* limitType, const char* rlIslanded, char* bad,
                                      const int* psEntry, int nQr,
-                                int nDqMembers, const int* dqMemberRlEntry, const char* dqSub) {
+                                int nDistrQMembers, const int* distrQMemberReactiveLimitEntry, const char* distrQSubgroup) {
     int t = blockIdx.x * blockDim.x + threadIdx.x;
     if (t >= nrl * nScenarios) return;
     int i = t % nrl;
@@ -463,10 +463,10 @@ __global__ void rlPilotSelfMixedGate(int nrl, int nScenarios, const char* rlRemo
         if (j != i && rlCmpVrow[j] == rlCmpVrow[i] && rlRemote[j] != GpuVoltageControlRole::LOCAL
                 && limitType[(size_t) s * nrl + j] == GpuQLimitType::NONE
                 && !(rlIslanded != nullptr && rlIslanded[(size_t) s * nrl + j])) {
-            if (dqSub != nullptr && dqMemberRlEntry != nullptr) {   // a member of ANOTHER subgroup is not this
+            if (distrQSubgroup != nullptr && distrQMemberReactiveLimitEntry != nullptr) {   // a member of ANOTHER subgroup is not this
                 bool other = false;                                  // pilot's controller any more (tasks #71)
-                for (int m = 0; m < nDqMembers; m++) {
-                    if (dqMemberRlEntry[m] == j && dqSub[(size_t) s * nDqMembers + m] != 0) { other = true; break; }
+                for (int m = 0; m < nDistrQMembers; m++) {
+                    if (distrQMemberReactiveLimitEntry[m] == j && distrQSubgroup[(size_t) s * nDistrQMembers + m] != 0) { other = true; break; }
                 }
                 if (other) continue;
             }
@@ -592,7 +592,7 @@ void rlCheck(BatchSolverContext* ctx, DriverPass& drv, int loopKind) {
                     ctx->nRlIslanded > 0 ? ctx->dRlIslanded.as<char>() : nullptr,
                     ctx->dRlMixedBad.as<char>(),
                     psEntryPtr(ctx), ctx->st->nQr,
-                ctx->nDqMembers, ctx->dDqMemberRlEntry.p != nullptr ? ctx->dDqMemberRlEntry.as<int>() : nullptr, ctx->hasDqSub ? ctx->dDqSub.as<char>() : nullptr);
+                ctx->nDistrQMembers, ctx->dDistrQMemberReactiveLimitEntry.p != nullptr ? ctx->dDistrQMemberReactiveLimitEntry.as<int>() : nullptr, ctx->hasDistrQSubgroups ? ctx->dDistrQSubgroup.as<char>() : nullptr);
             std::vector<char> mixed(nS);
             CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
             CUDA_CHECK(cudaMemcpy(mixed.data(), ctx->dRlMixedBad.p, nS * sizeof(char), cudaMemcpyDeviceToHost));
@@ -657,10 +657,10 @@ void rlCheck(BatchSolverContext* ctx, DriverPass& drv, int loopKind) {
                     ctx->dPfFlipped.as<char>(), ctx->dPfSavedVT.as<double>(),
                     ctx->dRlActive.as<char>(), ctx->dRlSwitched.as<char>());
         }
-        if (ctx->hasDqQrGroups && ctx->st->nQr > 0) {    // all-pinned corner: pilot vEq flip/restore
+        if (ctx->hasDistrQRelocationGroups && ctx->st->nQr > 0) {    // all-pinned corner: pilot vEq flip/restore
             launchPilotVeqInner(ctx, drv);
         }
-        if (ctx->nRlRemote > 0 && ctx->nDqMembers > 0) {
+        if (ctx->nRlRemote > 0 && ctx->nDistrQMembers > 0) {
             // keep the survivors' DISTR_Q row targets in step with the pin states (plan-B3)
             launchDistrQTargetsInner(ctx, drv);
         }

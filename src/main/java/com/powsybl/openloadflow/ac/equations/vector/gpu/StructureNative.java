@@ -49,7 +49,7 @@ public final class StructureNative {
     public static native long createStructure(int n,
                                               double[] closedBranchParameters, int[] closedBranchIndices, double[] openBranchParameters, int[] openBranchIndices,
                                               double[] shuntParameters, int[] shuntIndices, double[] hvdcAcEmulationParameters, int[] hvdcAcEmulationIndices,
-                                              int[] dqElem, int[] dqSide, double[] dqWeight, int[] dqRow, int[] dqKind,
+                                              int[] distrQElement, int[] distrQSide, double[] distrQWeight, int[] distrQRow, int[] distrQKind,
                                               double[] zeroImpedanceBranchParameters, int[] zeroImpedanceBranchIndices,
                                               int[] distrRhoRow, int[] distrRhoColumn, double[] distrRhoCoefficient,
                                               int[] distrShuntBRow, int[] distrShuntBColumn, double[] distrShuntBCoefficient, int[] closedBranchPhaseControlSide,

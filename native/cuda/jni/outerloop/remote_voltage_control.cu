@@ -42,7 +42,7 @@ namespace olfgpu {
 // put the base value straight back (measured on rte6515 LOAD-1263: the seeded row came back at
 // final = base = 0.016, residual still 4.6e-02). The override list is tiny — one entry per outaged
 // member bus — so a linear scan per lookup costs nothing.
-__device__ inline double dqTargetQOf(int nTqOv, const int* tqOvKey, const double* tqOvVal,
+__device__ inline double distrQTargetQOf(int nTqOv, const int* tqOvKey, const double* tqOvVal,
                                      int s, int nMembers, int idx, const double* mTargetQ) {
     if (nTqOv > 0) {
         int want = s * nMembers + idx;
@@ -99,15 +99,15 @@ __global__ void updateDistrQTargetsBatch(int nMembers, int nScenarios, int n, in
                                          double* target, const char* rlActive, const double* mTargetQ,
                                          const int* mQrGroup, const int* qrPtr, const int* qrRows,
                                          const int* mode, const double* pilotQ, int nQr,
-                                         int nDqInact, const int* dqInactSlotMember,
+                                         int nDistrQInactiveMembers, const int* distrQInactiveScenarioMember,
                                          int nFrozen, const int* frozenSlotRow,
                                          int nTqOv, const int* tqOvKey, const double* tqOvVal,
                                          const int* mTgtPtr, const int* mTgtPeer,
                                          const int* psEntry, const int* relocOwn,
-                                const char* dqSub, const int* qrMemberStart, const char* rlGenLost,
+                                const char* distrQSubgroup, const int* qrMemberStart, const char* rlGenLost,
                                 const int* qrDepBase, const char* veqOff,
                                 const double* rlInitTgtQ, const int* rlQrow,
-                                int nDqKeyOv, const int* dqKeyOvIdx, const double* dqKeyOvKey) {
+                                int nDistrQKeyOverrides, const int* distrQKeyOverrideScenarioMember, const double* distrQKeyOverrideKey) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nMembers * nScenarios) return;
     int k = tid % nMembers;
@@ -153,7 +153,7 @@ __global__ void updateDistrQTargetsBatch(int nMembers, int nScenarios, int n, in
         // member without a packed DISTR_Q row (the base free member, superseded mid-scenario) has
         // no row to maintain here — the RL kernel owns it while pinned.
         int carrier = qrRows[qrPtr[qg] + relocChooseSub(qg, qrPtr, qrRows, mode + (size_t) s * n,
-                dqSub != nullptr ? dqSub + (size_t) s * nMembers : nullptr, qrMemberStart)];
+                distrQSubgroup != nullptr ? distrQSubgroup + (size_t) s * nMembers : nullptr, qrMemberStart)];
         // A group whose PILOT ROW is frozen this scenario has lost its pilot to an island (tasks #69): its
         // surviving sections form a NEW group OLF re-elects a main for, and that main's sharing rows are
         // plain DISTR_Q rows renormalized over the survivors — there is NO base-pilot balance left to
@@ -172,7 +172,7 @@ __global__ void updateDistrQTargetsBatch(int nMembers, int nScenarios, int n, in
                 int pm = mode[(size_t) s * n + pr];
                 if (pm != 0 && pm != 6 && !(veqOff != nullptr && veqOff[(size_t) s * nQr + g2])) continue;
                 int c2 = qrRows[qrPtr[g2] + relocChooseSub(g2, qrPtr, qrRows, mode + (size_t) s * n,
-                        dqSub != nullptr ? dqSub + (size_t) s * nMembers : nullptr, qrMemberStart)];
+                        distrQSubgroup != nullptr ? distrQSubgroup + (size_t) s * nMembers : nullptr, qrMemberStart)];
                 if (c2 == mrow) {
                     target[(size_t) s * n + mrow] = pilotQ[(size_t) s * nQr + g2];
                     return;
@@ -206,14 +206,14 @@ __global__ void updateDistrQTargetsBatch(int nMembers, int nScenarios, int n, in
     int gs = mGroupStart[k];
     int gc = mGroupCount[k];
     double sum = 0.0;
-    const char* subS = dqSub != nullptr ? dqSub + (size_t) s * nMembers : nullptr;
+    const char* subS = distrQSubgroup != nullptr ? distrQSubgroup + (size_t) s * nMembers : nullptr;
     char subK = subS != nullptr ? subS[k] : 0;
     for (int m = gs; m < gs + gc; m++) {                     // live keys over the WHOLE merged group (updateReactiveKeys)
         int re = mRlEntry[m];
         bool pinned = re >= 0 && limitType[(size_t) s * nrl + re] != GpuQLimitType::NONE;
-        bool inactive = dqMemberInactive(nDqInact, dqInactSlotMember, s, m);
+        bool inactive = distrQMemberInactive(nDistrQInactiveMembers, distrQInactiveScenarioMember, s, m);
         bool otherSub = subS != nullptr && subS[m] != subK;  // a split group's other subgroup (tasks #71)
-        sum += (pinned || inactive || otherSub) ? 0.0 : dqKeyOf(nDqKeyOv, dqKeyOvIdx, dqKeyOvKey, s, m, mKey);
+        sum += (pinned || inactive || otherSub) ? 0.0 : distrQKeyOf(nDistrQKeyOverrides, distrQKeyOverrideScenarioMember, distrQKeyOverrideKey, s, m, mKey);
     }
     // targetQ over the peers AcTargetVector sums for THIS member: the elements of its OWN control
     // (getGeneratorVoltageControl().getMergedControllerElements()), which for a control merged INTO this
@@ -232,11 +232,11 @@ __global__ void updateDistrQTargetsBatch(int nMembers, int nScenarios, int n, in
             sumTargetQ += pinnedTargetQ(s, re, n, nrl, mode, target, rlVrowArr, rlQrow, relocOwn,
                     limitType, rlMinQ, rlMaxQ, rlLoadQ, cvStride, rlInitTgtQ, rlGenLost);
         } else {
-            sumTargetQ += dqTargetQOf(nTqOv, tqOvKey, tqOvVal, s, nMembers, m, mTargetQ);
+            sumTargetQ += distrQTargetQOf(nTqOv, tqOvKey, tqOvVal, s, nMembers, m, mTargetQ);
         }
     }
-    double qpk = (sum == 0.0 || dqMemberInactive(nDqInact, dqInactSlotMember, s, k))
-            ? 0.0 : dqKeyOf(nDqKeyOv, dqKeyOvIdx, dqKeyOvKey, s, k, mKey) / sum;
+    double qpk = (sum == 0.0 || distrQMemberInactive(nDistrQInactiveMembers, distrQInactiveScenarioMember, s, k))
+            ? 0.0 : distrQKeyOf(nDistrQKeyOverrides, distrQKeyOverrideScenarioMember, distrQKeyOverrideKey, s, k, mKey) / sum;
     // AcTargetVector.getGeneratorReactivePowerDistributionTarget, verbatim:
     //   (qPct_k - 1) * targetQ_k + qPct_k * sum_{j != k} targetQ_j
     // which is qPct_k * sum_over_its_PEERS targetQ_j - targetQ_k (k is always one of its own peers). k is never pinned here (the RL kernel
@@ -247,7 +247,7 @@ __global__ void updateDistrQTargetsBatch(int nMembers, int nScenarios, int n, in
     // qPct_k * sum_unpinned targetQ_j - targetQ_k, and drove the members to equal reactive
     // injections instead of equally-shared DEVIATIONS from their targets.
     target[(size_t) s * n + mrow] = qpk * sumTargetQ
-            - dqTargetQOf(nTqOv, tqOvKey, tqOvVal, s, nMembers, k, mTargetQ);
+            - distrQTargetQOf(nTqOv, tqOvKey, tqOvVal, s, nMembers, k, mTargetQ);
 }
 
 // A pilot that STOPPED being one of its OWN controllers (this scenario outaged its generators) keeps
@@ -387,37 +387,37 @@ void launchDistrQTargetsInner(BatchSolverContext* ctx, DriverPass& drv) {
     const int& n = drv.n;
     const int& nS = drv.nS;
     const bool& useDynRlLimits = drv.useDynRlLimits;
-    if (ctx->nRlRemote > 0 && ctx->nDqMembers > 0) {
-        updateDistrQTargetsBatch<<<grid(ctx->nDqMembers * nS), BLOCK, 0, ctx->stream>>>(
-                    ctx->nDqMembers, nS, n, ctx->nrl,
-                    ctx->dDqMemberKey.as<double>(), ctx->dDqMemberRlEntry.as<int>(),
-                    ctx->dDqMemberGroupStart.as<int>(), ctx->dDqMemberGroupCount.as<int>(),
-                    ctx->dDqMemberRow.as<int>(), ctx->dDqMemberHasRow.as<char>(),
+    if (ctx->nRlRemote > 0 && ctx->nDistrQMembers > 0) {
+        updateDistrQTargetsBatch<<<grid(ctx->nDistrQMembers * nS), BLOCK, 0, ctx->stream>>>(
+                    ctx->nDistrQMembers, nS, n, ctx->nrl,
+                    ctx->dDistrQMemberKey.as<double>(), ctx->dDistrQMemberReactiveLimitEntry.as<int>(),
+                    ctx->dDistrQMemberGroupStart.as<int>(), ctx->dDistrQMemberGroupCount.as<int>(),
+                    ctx->dDistrQMemberRow.as<int>(), ctx->dDistrQMemberHasRow.as<char>(),
                     ctx->dRlVrow.as<int>(),
                     useDynRlLimits ? ctx->dRlMinQDyn.as<double>() : ctx->dRlMinQ.as<double>(),
                     useDynRlLimits ? ctx->dRlMaxQDyn.as<double>() : ctx->dRlMaxQ.as<double>(),
                     useDynRlLimits ? ctx->dRlLoadQDyn.as<double>() : ctx->dRlLoadQ.as<double>(), ctx->dRlLimitType.as<char>(), useDynRlLimits ? 1 : 0,
                     ctx->dTarget.as<double>(), ctx->dRlActive.as<char>(),
-                    ctx->dDqMemberTargetQ.as<double>(),
-                    ctx->hasDqQrGroups ? ctx->dDqMemberQrGroup.as<int>() : nullptr,
+                    ctx->dDistrQMemberTargetQ.as<double>(),
+                    ctx->hasDistrQRelocationGroups ? ctx->dDistrQMemberRelocationGroup.as<int>() : nullptr,
                     ctx->st->nQr > 0 ? ctx->st->dQrPtr.as<int>() : nullptr,
                     ctx->st->nQr > 0 ? ctx->st->dQrRows.as<int>() : nullptr,
                     ctx->dMode.as<int>(),
-                    ctx->hasDqQrGroups ? ctx->dQrPilotQ.as<double>() : nullptr, ctx->st->nQr,
-                    ctx->nDqInact, ctx->nDqInact ? ctx->dDqInact.as<int>() : nullptr,
+                    ctx->hasDistrQRelocationGroups ? ctx->dQrPilotQ.as<double>() : nullptr, ctx->st->nQr,
+                    ctx->nDistrQInactiveMembers, ctx->nDistrQInactiveMembers ? ctx->dDistrQInactiveMembers.as<int>() : nullptr,
                     ctx->nFrozenRow, ctx->nFrozenRow ? ctx->dFrozenRow.as<int>() : nullptr,
-                    ctx->nDqTqOv, ctx->nDqTqOv ? ctx->dDqTqOvKey.as<int>() : nullptr,
-                    ctx->nDqTqOv ? ctx->dDqTqOvVal.as<double>() : nullptr,
-                    ctx->dDqMemberTgtPtr.as<int>(), ctx->dDqMemberTgtPeer.as<int>(),
+                    ctx->nDistrQMemberTargetQOverrides, ctx->nDistrQMemberTargetQOverrides ? ctx->dDistrQMemberTargetQOverrideKey.as<int>() : nullptr,
+                    ctx->nDistrQMemberTargetQOverrides ? ctx->dDistrQMemberTargetQOverrideValue.as<double>() : nullptr,
+                    ctx->dDistrQMemberTargetPeerStart.as<int>(), ctx->dDistrQMemberTargetPeer.as<int>(),
                     psEntryPtr(ctx),
                     ctx->st->dRelocOwn.p != nullptr
                             ? ctx->st->dRelocOwn.as<int>() : nullptr,
-                ctx->hasDqSub ? ctx->dDqSub.as<char>() : nullptr, ctx->hasDqSub ? ctx->dQrMemberStart.as<int>() : nullptr,
+                ctx->hasDistrQSubgroups ? ctx->dDistrQSubgroup.as<char>() : nullptr, ctx->hasDistrQSubgroups ? ctx->dQrMemberStart.as<int>() : nullptr,
                 ctx->nRlGenLost > 0 ? ctx->dRlGenLost.as<char>() : nullptr,
                 ctx->st->dQrDepBase.p ? ctx->st->dQrDepBase.as<int>() : nullptr,
                 ctx->dQrVeqOff.p ? ctx->dQrVeqOff.as<char>() : nullptr,
                     ctx->dRlInitTgtQ.as<double>(), ctx->dRlQrow.as<int>(),
-                    ctx->nDqKeyOv, ctx->nDqKeyOv ? ctx->dDqKeyOvIdx.as<int>() : nullptr, ctx->nDqKeyOv ? ctx->dDqKeyOvKey.as<double>() : nullptr);
+                    ctx->nDistrQKeyOverrides, ctx->nDistrQKeyOverrides ? ctx->dDistrQKeyOverrideScenarioMember.as<int>() : nullptr, ctx->nDistrQKeyOverrides ? ctx->dDistrQKeyOverrideKey.as<double>() : nullptr);
     }
 }
 

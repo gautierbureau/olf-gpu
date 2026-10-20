@@ -39,11 +39,11 @@ public record GenOutage(int pRow, double pTarget, int vRow, double qTarget, bool
                         int dsBus, double dsFactorDelta, double dsBaseDelta, double dsMaxDelta, double dsMinDelta,
                         int rlEntry, double minQDelta, double maxQDelta, boolean allGensLost,
                         java.util.Set<String> lostGenIds, double lostFactorSum, double pStep, double loadQDelta,
-                        int inactiveDqMember, int[] pilotGroupSurvivorRlEntries,
-                        int[] dqTargetRows, double[] dqTargetValues, int pqRowMode,
+                        int inactiveDistrQMember, int[] pilotGroupSurvivorRlEntries,
+                        int[] distrQTargetRows, double[] distrQTargetValues, int pqRowMode,
                         int deadPilotVRow, double deadPilotQTarget,
                         int pinnedPilotVRow, double pinnedPilotQTarget,
-                        int dqTargetQOvMember, double dqTargetQOvValue,
+                        int distrQTargetQOverrideMember, double distrQTargetQOverrideValue,
                         /** The row carrying this bus's Q BALANCE, when the coupler-tree relocation moved it off the
                          *  bus's own BUS_V column onto the parent coupler's DUMMY_Q column; -1 = it is {@code vRow}.
                          *  The two part company only under a coupler: {@code vRow} stays the BUS_V row because that
@@ -80,35 +80,35 @@ public record GenOutage(int pRow, double pTarget, int vRow, double qTarget, bool
         }
         return new GenOutage(newPRow, pTarget, vRow, qTarget, toPq, qOverride, dsBus, dsFactorDelta, dsBaseDelta,
                 dsMaxDelta, dsMinDelta, rlEntry, minQDelta, maxQDelta, allGensLost, lostGenIds, lostFactorSum, pStep,
-                loadQDelta, inactiveDqMember, pilotGroupSurvivorRlEntries, dqTargetRows, dqTargetValues,
-                pqRowMode, deadPilotVRow, deadPilotQTarget, pinnedPilotVRow, pinnedPilotQTarget, dqTargetQOvMember,
-                dqTargetQOvValue, newQTargetRow, pilotQGroup, pilotQDelta, onSlack, reHomePilotVRow, svcBminDelta, svcBmaxDelta);
+                loadQDelta, inactiveDistrQMember, pilotGroupSurvivorRlEntries, distrQTargetRows, distrQTargetValues,
+                pqRowMode, deadPilotVRow, deadPilotQTarget, pinnedPilotVRow, pinnedPilotQTarget, distrQTargetQOverrideMember,
+                distrQTargetQOverrideValue, newQTargetRow, pilotQGroup, pilotQDelta, onSlack, reHomePilotVRow, svcBminDelta, svcBmaxDelta);
     }
 
     /** This entry without the DISTR_Q row targets that fall on a FROZEN (islanded) row: such a row is an identity
      *  held at a flat value, and a second override on it (a survivor's renormalized target written onto an islanded
      *  member's own row) won over the flat one and drove the dead bus's V to 0 in clamped steps. */
     public GenOutage withoutFrozenTargetRows(java.util.Set<Integer> frozenRows) {
-        if (dqTargetRows == null || dqTargetRows.length == 0 || frozenRows.isEmpty()) {
+        if (distrQTargetRows == null || distrQTargetRows.length == 0 || frozenRows.isEmpty()) {
             return this;
         }
         java.util.List<Integer> rows = new java.util.ArrayList<>();
         java.util.List<Double> values = new java.util.ArrayList<>();
-        for (int t = 0; t < dqTargetRows.length; t++) {
-            if (!frozenRows.contains(dqTargetRows[t])) {
-                rows.add(dqTargetRows[t]);
-                values.add(dqTargetValues[t]);
+        for (int t = 0; t < distrQTargetRows.length; t++) {
+            if (!frozenRows.contains(distrQTargetRows[t])) {
+                rows.add(distrQTargetRows[t]);
+                values.add(distrQTargetValues[t]);
             }
         }
-        if (rows.size() == dqTargetRows.length) {
+        if (rows.size() == distrQTargetRows.length) {
             return this;
         }
         return new GenOutage(pRow, pTarget, vRow, qTarget, toPq, qOverride, dsBus, dsFactorDelta, dsBaseDelta,
                 dsMaxDelta, dsMinDelta, rlEntry, minQDelta, maxQDelta, allGensLost, lostGenIds, lostFactorSum, pStep,
-                loadQDelta, inactiveDqMember, pilotGroupSurvivorRlEntries,
+                loadQDelta, inactiveDistrQMember, pilotGroupSurvivorRlEntries,
                 rows.stream().mapToInt(Integer::intValue).toArray(), values.stream().mapToDouble(Double::doubleValue).toArray(),
-                pqRowMode, deadPilotVRow, deadPilotQTarget, pinnedPilotVRow, pinnedPilotQTarget, dqTargetQOvMember,
-                dqTargetQOvValue, qTargetRow, pilotQGroup, pilotQDelta, onSlack, reHomePilotVRow, svcBminDelta, svcBmaxDelta);
+                pqRowMode, deadPilotVRow, deadPilotQTarget, pinnedPilotVRow, pinnedPilotQTarget, distrQTargetQOverrideMember,
+                distrQTargetQOverrideValue, qTargetRow, pilotQGroup, pilotQDelta, onSlack, reHomePilotVRow, svcBminDelta, svcBmaxDelta);
     }
     // lostGenIds / lostFactorSum exist for the reactive-capability CURVE channel, which evaluates each
     // generator's curve at its OWN post-distribution active power, reconstructed from the bus's row
@@ -126,8 +126,8 @@ public record GenOutage(int pRow, double pTarget, int vRow, double qTarget, bool
      * -1 when nothing changes. See the DISTR_Q gate in GpuBatchInjectionOutages for why the bus keeps
      * its BUS_TARGET_V while this happens.
      */
-    public boolean deactivatesDqMember() {
-        return inactiveDqMember >= 0;
+    public boolean deactivatesDistrQMember() {
+        return inactiveDistrQMember >= 0;
     }
 
     /**
@@ -202,8 +202,8 @@ public record GenOutage(int pRow, double pTarget, int vRow, double qTarget, bool
      * every member row of the group with the renormalized value; when the reactive-limits kernel does
      * run it recomputes the same expression from the live pin states and supersedes them.
      */
-    public boolean seedsDqTargets() {
-        return dqTargetRows.length > 0;
+    public boolean seedsDistrQTargets() {
+        return distrQTargetRows.length > 0;
     }
 
     /**
@@ -224,8 +224,8 @@ public record GenOutage(int pRow, double pTarget, int vRow, double qTarget, bool
      *  Every target in the group reads that value twice — inside the shared sum and as its own
      *  subtracted term — and the device's target kernel recomputes them from the base value on every
      *  reactive-limits pass, so the new value has to travel as an override rather than a row seed. */
-    public boolean overridesDqMemberTargetQ() {
-        return dqTargetQOvMember >= 0;
+    public boolean overridesDistrQMemberTargetQ() {
+        return distrQTargetQOverrideMember >= 0;
     }
 
     /** A re-homed voltage control (see {@link #ROW_V_IDENTITY}): its bus is a plain PV bus this scenario, so its
@@ -261,7 +261,7 @@ public record GenOutage(int pRow, double pTarget, int vRow, double qTarget, bool
             if (go.pRow() == row
                     || (go.toPq() || go.qOverride()) && go.qTargetRowOrV() == row
                     || go.toPq() && go.vRow() == row
-                    || go.seedsDqTargets() && Arrays.stream(go.dqTargetRows()).anyMatch(r -> r == row)
+                    || go.seedsDistrQTargets() && Arrays.stream(go.distrQTargetRows()).anyMatch(r -> r == row)
                     || go.killsPilotVoltageIdentity() && go.deadPilotVRow() == row) {
                 return true;
             }

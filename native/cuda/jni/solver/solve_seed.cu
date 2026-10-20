@@ -62,7 +62,7 @@ void seedSolve(BatchSolverContext* ctx, DriverPass& drv, const int* rlStateIn, c
         CUDA_CHECK(cudaMemsetAsync(ctx->dGenCum.p, 0, static_cast<size_t>(ctx->ngen) * nS * sizeof(double), ctx->stream));
         CUDA_CHECK(cudaMemsetAsync(ctx->dGenCumValid.p, 0, (size_t) nS * sizeof(char), ctx->stream));
     }
-    if (ctx->hasDqQrGroups && ctx->st->nQr > 0) {        // plan-B4: capture each group's pilot-Q target from
+    if (ctx->hasDistrQRelocationGroups && ctx->st->nQr > 0) {        // plan-B4: capture each group's pilot-Q target from
         size_t need = static_cast<size_t>(ctx->st->nQr) * nS * sizeof(double);   // the BASE carrier's row,
         if (!ctx->dQrPilotQ.p) ctx->dQrPilotQ.alloc(need);   // BEFORE any RL mode seeding rewrites it
         if (!ctx->dQrSavedVT.p) ctx->dQrSavedVT.alloc(need);
@@ -77,8 +77,8 @@ void seedSolve(BatchSolverContext* ctx, DriverPass& drv, const int* rlStateIn, c
             applyPilotQDeltasBatch<<<grid(ctx->nQrPqDelta), BLOCK, 0, ctx->stream>>>(ctx->nQrPqDelta,
                     ctx->dQrPqDeltaKey.as<int>(), ctx->dQrPqDeltaVal.as<double>(), ctx->st->nQr, n,
                     ctx->st->dQrPtr.as<int>(), ctx->st->dQrRows.as<int>(), ctx->dMode.as<int>(),
-                    ctx->hasDqSub ? ctx->dDqSub.as<char>() : nullptr, ctx->nDqMembers,
-                    ctx->hasDqSub ? ctx->dQrMemberStart.as<int>() : nullptr,
+                    ctx->hasDistrQSubgroups ? ctx->dDistrQSubgroup.as<char>() : nullptr, ctx->nDistrQMembers,
+                    ctx->hasDistrQSubgroups ? ctx->dQrMemberStart.as<int>() : nullptr,
                     ctx->dQrPilotQ.as<double>(), ctx->dTarget.as<double>());
         }
         if (!ctx->dQrPilotRlEntry.p) {

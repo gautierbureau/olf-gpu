@@ -37,8 +37,8 @@ SharedStructure* buildStructure(int n,
                                 int nOpenBranch, const double* openBranchParameters, const int* openBranchIndices,
                                 int nShunt, const double* shuntParameters, const int* shuntIndices,
                                 int nHvdcAcEmulation, const double* hvdcAcEmulationParameters, const int* hvdcAcEmulationIndices,
-                                int ndq, const int* dqElem, const int* dqSide, const double* dqWeight,
-                                const int* dqRow, const int* dqKind,
+                                int nDistrQ, const int* distrQElement, const int* distrQSide, const double* distrQWeight,
+                                const int* distrQRow, const int* distrQKind,
                                 int nZeroImpedanceBranch, const double* zeroImpedanceBranchParameters, const int* zeroImpedanceBranchIndices,
                                 int nDistrRho, const int* distrRhoRow, const int* distrRhoColumn, const double* distrRhoCoefficient,
                                 int nDistrShuntB, const int* distrShuntBRow, const int* distrShuntBColumn, const double* distrShuntBCoefficient,
@@ -56,7 +56,7 @@ SharedStructure* buildStructure(int n,
     st->hvdcAcEmulationOffset = nClosedBranch + nOpenBranch + nShunt;
 
     // ---- diagonal-pairing row permutation + index packs rewritten through it ----
-    st->rowMap = buildRowMap(n, nClosedBranch, closedBranchIndices, nOpenBranch, openBranchIndices, nShunt, shuntIndices, nHvdcAcEmulation, hvdcAcEmulationIndices, ndq, dqRow, nZeroImpedanceBranch, zeroImpedanceBranchIndices);
+    st->rowMap = buildRowMap(n, nClosedBranch, closedBranchIndices, nOpenBranch, openBranchIndices, nShunt, shuntIndices, nHvdcAcEmulation, hvdcAcEmulationIndices, nDistrQ, distrQRow, nZeroImpedanceBranch, zeroImpedanceBranchIndices);
     const std::vector<int>& rowMap = st->rowMap;
     // COUPLER-TREE relocation, per-scenario placement: map each coupler DUMMY row that hosts a child bus's
     // relocated P/Q equation to that bus's OWN row, so a scenario OPENING the coupler can put the equation
@@ -169,7 +169,7 @@ SharedStructure* buildStructure(int n,
     if (dynReloc) {
         collectHvAltPattern(nHvdcAcEmulation, hvdcAcEmulationIndices, relocOwn, pat);
     }
-    collectFamilyPattern(rowMap, closedBranchIndices, openBranchIndices, shuntIndices, ndq, dqElem, dqSide, dqKind, dqRow,
+    collectFamilyPattern(rowMap, closedBranchIndices, openBranchIndices, shuntIndices, nDistrQ, distrQElement, distrQSide, distrQKind, distrQRow,
                          nDistrRho, distrRhoRow, distrRhoColumn, nDistrShuntB, distrShuntBRow, distrShuntBColumn, nZeroImpedanceBranch, zeroImpedanceBranchIndices, dynReloc ? relocOwn : nullptr, pat);
     if (dynReloc) {
         for (int e = 0; e < nZeroImpedanceBranch; e++) {                      // zero-impedance STOCK positions: a +-dummy coupling that lands on
@@ -525,7 +525,7 @@ SharedStructure* buildStructure(int n,
 
     // ---- DISTR_Q destinations: per contribution {F-row, dq/dv1, dq/dv2, dq/dph1, dq/dph2, dq/dr1}
     //      (-2-row encodes an F row, >=0 a J slot, -1 skip) ----
-    buildDistrQDest(st.get(), pos, rowMap, ndq, dqElem, dqSide, dqKind, dqWeight, dqRow, closedBranchIndices, openBranchIndices, shuntIndices, relocOwn);
+    buildDistrQDest(st.get(), pos, rowMap, nDistrQ, distrQElement, distrQSide, distrQKind, distrQWeight, distrQRow, closedBranchIndices, openBranchIndices, shuntIndices, relocOwn);
 
     // ---- zero-impedance destinations: per branch the 8 dummy couplings + (tree) the 6 ZERO_V/ZERO_PHI ----
     buildZeroImpDest(st.get(), pos, rowMap, nZeroImpedanceBranch, zeroImpedanceBranchParameters, zeroImpedanceBranchIndices, zeroImpedanceBranchAlternateReactiveDestination, relocOwn, depGroupOfRow);

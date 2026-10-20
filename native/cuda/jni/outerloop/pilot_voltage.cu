@@ -79,7 +79,7 @@ __global__ void capturePilotQBatch(int nQr, int nScenarios, int n, const int* qr
 // (scenario, group): the host merges them.
 __global__ void applyPilotQDeltasBatch(int nDelta, const int* key, const double* val, int nQr, int n,
                                        const int* qrPtr, const int* qrRows, const int* mode,
-                                       const char* dqSub, int nDqMembers, const int* qrMemberStart,
+                                       const char* distrQSubgroup, int nDistrQMembers, const int* qrMemberStart,
                                        double* pilotQ, double* target) {
     int k = blockIdx.x * blockDim.x + threadIdx.x;
     if (k >= nDelta) return;
@@ -87,7 +87,7 @@ __global__ void applyPilotQDeltasBatch(int nDelta, const int* key, const double*
     int g = key[k] % nQr;
     pilotQ[key[k]] += val[k];
     int c = relocChooseSub(g, qrPtr, qrRows, mode + (size_t) s * n,
-            dqSub != nullptr ? dqSub + (size_t) s * nDqMembers : nullptr, qrMemberStart);
+            distrQSubgroup != nullptr ? distrQSubgroup + (size_t) s * nDistrQMembers : nullptr, qrMemberStart);
     int row = qrRows[qrPtr[g] + c];
     int m = mode[(size_t) s * n + row];
     if (m != GpuRowMode::FIXED_VARIABLE && m != GpuRowMode::CROSS_FIXED_VARIABLE) {
@@ -127,9 +127,9 @@ __global__ void updatePilotVeqBatch(int nQr, int nScenarios, int n,
                                     const int* qrPilotRlEntry,
                                     int nRlVtOv, const int* rlVtOvSlotIdx, const double* rlVtOvVal,
                                     const double* svcRlVt,
-                                    int nDqMembers, const int* dqMemberQrGroup, const int* dqMemberRlEntry,
+                                    int nDistrQMembers, const int* distrQMemberRelocationGroup, const int* distrQMemberReactiveLimitEntry,
                                     const char* rlIslandedMask,
-                                const char* dqSub, const int* qrMemberStart, double tol,
+                                const char* distrQSubgroup, const int* qrMemberStart, double tol,
                                 const char* rlGenLost, const int* qrDepBase, const int* relocOwn,
                                 const double* pinTargetIn) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -212,11 +212,11 @@ __global__ void updatePilotVeqBatch(int nQr, int nScenarios, int n,
     // 1.902, and the run ended 3.7e-3 MW apart in distributed active power).
     bool entryKnown = false;
     bool anyEnabled = false;
-    if (pe >= 0 && dqMemberQrGroup != nullptr && dqMemberRlEntry != nullptr && limitType != nullptr && nrl > 0) {
-        for (int m = 0; m < nDqMembers; m++) {
-            if (dqMemberQrGroup[m] != g) continue;
-            if (dqSub != nullptr && dqSub[(size_t) s * nDqMembers + m] != 0) continue;   // another subgroup's controller (#71)
-            int re = dqMemberRlEntry[m];
+    if (pe >= 0 && distrQMemberRelocationGroup != nullptr && distrQMemberReactiveLimitEntry != nullptr && limitType != nullptr && nrl > 0) {
+        for (int m = 0; m < nDistrQMembers; m++) {
+            if (distrQMemberRelocationGroup[m] != g) continue;
+            if (distrQSubgroup != nullptr && distrQSubgroup[(size_t) s * nDistrQMembers + m] != 0) continue;   // another subgroup's controller (#71)
+            int re = distrQMemberReactiveLimitEntry[m];
             if (re < 0 || re >= nrl) continue;
             if (rlIslandedMask != nullptr && rlIslandedMask[(size_t) s * nrl + re]) continue;   // OLF disables it
             entryKnown = true;
@@ -244,7 +244,7 @@ __global__ void updatePilotVeqBatch(int nQr, int nScenarios, int n,
         }
     } else {
         lost = relocChooseSub(g, qrPtr, qrRows, mode + (size_t) s * n,
-                dqSub != nullptr ? dqSub + (size_t) s * nDqMembers : nullptr, qrMemberStart) == 0;
+                distrQSubgroup != nullptr ? distrQSubgroup + (size_t) s * nDistrQMembers : nullptr, qrMemberStart) == 0;
     }
     // With the fact known the layout is applied EVERY pass, the first fill included; otherwise it stays where it
     // was — inside the reactive-limits phase, which is all the row-mode inference could support.
@@ -313,7 +313,7 @@ void launchPilotVeqInner(BatchSolverContext* ctx, DriverPass& drv, bool staticLi
     DeviceBuf& dRlVtOvSlotIdx = drv.dRlVtOvSlotIdx;
     DeviceBuf& dRlVtOvVal = drv.dRlVtOvVal;
     const bool useDyn = useDynRlLimits && !staticLimits;
-    if (ctx->hasDqQrGroups && ctx->st->nQr > 0) {
+    if (ctx->hasDistrQRelocationGroups && ctx->st->nQr > 0) {
         updatePilotVeqBatch<<<grid(ctx->st->nQr * nS), BLOCK, 0, ctx->stream>>>(
                     ctx->st->nQr, nS, n,
                     ctx->st->dQrPtr.as<int>(), ctx->st->dQrRows.as<int>(), ctx->dQrGenVc.as<char>(),
@@ -332,10 +332,10 @@ void launchPilotVeqInner(BatchSolverContext* ctx, DriverPass& drv, bool staticLi
                 nRlVtOv, nRlVtOv > 0 ? dRlVtOvSlotIdx.as<int>() : nullptr,
                 nRlVtOv > 0 ? dRlVtOvVal.as<double>() : nullptr,
                 ctx->nSvc > 0 ? ctx->dSvcRlVt.as<double>() : nullptr,
-                ctx->nDqMembers, ctx->dDqMemberQrGroup.p ? ctx->dDqMemberQrGroup.as<int>() : nullptr,
-                ctx->dDqMemberRlEntry.p ? ctx->dDqMemberRlEntry.as<int>() : nullptr,
+                ctx->nDistrQMembers, ctx->dDistrQMemberRelocationGroup.p ? ctx->dDistrQMemberRelocationGroup.as<int>() : nullptr,
+                ctx->dDistrQMemberReactiveLimitEntry.p ? ctx->dDistrQMemberReactiveLimitEntry.as<int>() : nullptr,
                 ctx->nRlIslanded > 0 ? ctx->dRlIslanded.as<char>() : nullptr,
-                ctx->hasDqSub ? ctx->dDqSub.as<char>() : nullptr, ctx->hasDqSub ? ctx->dQrMemberStart.as<int>() : nullptr,
+                ctx->hasDistrQSubgroups ? ctx->dDistrQSubgroup.as<char>() : nullptr, ctx->hasDistrQSubgroups ? ctx->dQrMemberStart.as<int>() : nullptr,
                 REACTIVE_LIMIT_TOL, ctx->nRlGenLost > 0 ? ctx->dRlGenLost.as<char>() : nullptr,
                 ctx->st->dQrDepBase.p ? ctx->st->dQrDepBase.as<int>() : nullptr,
                 ctx->st->dRelocOwn.p ? ctx->st->dRelocOwn.as<int>() : nullptr,

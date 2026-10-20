@@ -59,7 +59,7 @@ __device__ __forceinline__ bool rowIsFrozen(int nFrozen, const int* frozenSlotRo
 // generator while the group's other controllers survive). OLF's updateReactiveKeys zeroes its key
 // and renormalizes over the rest — the same treatment a PINNED member gets, except its target
 // contribution stays its own targetQ instead of a reactive limit.
-__device__ __forceinline__ bool dqMemberInactive(int nInact, const int* inactSlotMember, int s, int m) {
+__device__ __forceinline__ bool distrQMemberInactive(int nInact, const int* inactSlotMember, int s, int m) {
     for (int k = 0; k < nInact; k++) {
         if (inactSlotMember[2 * k] == s && inactSlotMember[2 * k + 1] == m) {
             return true;
@@ -70,7 +70,7 @@ __device__ __forceinline__ bool dqMemberInactive(int nInact, const int* inactSlo
 
 // A member's reactive key this scenario: the per-scenario override (OLF's updateReactiveKeys after the scenario's
 // generator losses) when the plan wrote one, else the base pack's. Tiny lists, a linear scan per lookup.
-__device__ inline double dqKeyOf(int nKeyOv, const int* keyOvIdx, const double* keyOvKey, int s, int m,
+__device__ inline double distrQKeyOf(int nKeyOv, const int* keyOvIdx, const double* keyOvKey, int s, int m,
                                  const double* mKey) {
     for (int i = 0; i < nKeyOv; i++) {
         if (keyOvIdx[2 * i] == s && keyOvIdx[2 * i + 1] == m) return keyOvKey[i];

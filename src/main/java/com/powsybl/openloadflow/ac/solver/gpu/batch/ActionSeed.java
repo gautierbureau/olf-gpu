@@ -44,10 +44,10 @@ final class ActionSeed {
                 // flip the two dummy rows from identity (pinned 0) to the ZERO_V/ZERO_PHI
                 // coupling; targets stay 0 (switch: rho=1, phase shift 0)
                 int dpRow = gpuData.zeroImpedanceBranch().indices()[ze * 11 + 4];
-                int dqRow = gpuData.zeroImpedanceBranch().indices()[ze * 11 + 5];
+                int distrQRow = gpuData.zeroImpedanceBranch().indices()[ze * 11 + 5];
                 int[] row = rs.rowModePerScenario[s] == baseRowMode ? baseRowMode.clone() : rs.rowModePerScenario[s];
                 row[dpRow] = GpuRowMode.EQUATION;
-                row[dqRow] = GpuRowMode.EQUATION;
+                row[distrQRow] = GpuRowMode.EQUATION;
                 rs.rowModePerScenario[s] = row;
             } else {
                 rs.disabledMask[s][elementMapper.getElementIndex(reclosed)] = false;

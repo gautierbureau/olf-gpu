@@ -4,10 +4,10 @@
 // JNI entry points of GpuAcNewtonSolver: Zero-impedance couplers: per-scenario spanning-tree overrides.
 #include "jni_common.cuh"
 
-// plan-B4 (JAVA hybrid): install ONLY the carrier-row suppression tables — dqJMember (per DISTR_Q
-// contribution: row-owner member) + dqMemberQrGroup (per member: pilot's relocation group) — so a
+// plan-B4 (JAVA hybrid): install ONLY the carrier-row suppression tables — distrQInjectionMember (per DISTR_Q
+// contribution: row-owner member) + distrQMemberRelocationGroup (per member: pilot's relocation group) — so a
 // pushed mode-4 free-member row gates the re-picked carrier's DISTR_Q row off in fillDistrQBatch.
-// Does NOT touch nDqDyn: the hybrid's weights stay static-pack + dqOv (OLF renormalizes and the
+// Does NOT touch nDistrQDynamicKeys: the hybrid's weights stay static-pack + distrQWeightOverrideTable (OLF renormalizes and the
 // engine pushes live values). Nulls clear.
 extern "C" JNIEXPORT void JNICALL
 OLF_JNI(ac_equations_vector_gpu, ZeroImpedanceNative, setBatchSpanningTreeOverrides)(

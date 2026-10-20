@@ -87,9 +87,9 @@ public final class RelocatedRows {
      *  surviving) - OLF's BUS_TARGET_Q at the survivor off by 0.039 pu, 1.3 kV. A survivor that is
      *  not a packed DISTR_Q member keeps the plain reactive row. */
     static int deadControlRowMode(GpuAcData gpuData, LfBus survivor) {
-        int slot = GpuBatchInjectionOutages.dqMemberSlot(gpuData, survivor);
+        int slot = GpuBatchInjectionOutages.distrQMemberSlot(gpuData, survivor);
         if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {
-            System.err.println("QUALIFY_TRACE deadControlRowMode survivor=" + survivor.getId() + " dqMemberSlot=" + slot
+            System.err.println("QUALIFY_TRACE deadControlRowMode survivor=" + survivor.getId() + " distrQMemberSlot=" + slot
                     + " -> mode " + (slot >= 0 ? 4 : 1));
         }
         return slot >= 0 ? 4 : 1;

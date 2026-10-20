@@ -42,7 +42,7 @@ final class ReHomedEntries {
             var vc = e.getKey().getGeneratorVoltageControl().orElse(null);
             List<LfBus> controllers = vc != null ? vc.getControllerElements() : List.of(e.getKey());
             for (LfBus ce : controllers) {
-                int slot = GpuBatchInjectionOutages.dqMemberSlot(gpuData, ce);
+                int slot = GpuBatchInjectionOutages.distrQMemberSlot(gpuData, ce);
                 if (slot < 0) {
                     reject[0] = "PLAN:VC_REMERGE_SUBGROUP_UNPACKED";
                     return null;

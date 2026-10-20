@@ -56,7 +56,7 @@ final class BranchOutagePlanner {
             return;
         }
         String[] subReject = new String[1];
-        pb.dqSubByIndex[i] = ReHomedEntries.subgroupPairs(reHomed, gpuData, subReject);
+        pb.distrQSubgroupByIndex[i] = ReHomedEntries.subgroupPairs(reHomed, gpuData, subReject);
         if (subReject[0] != null) {
             GpuBatchQualification.refuse(c, subReject[0]);
             return;
@@ -144,18 +144,18 @@ final class BranchOutagePlanner {
                     .flatMap(b -> b.getGenerators().stream())
                     .toList();
             double[][] vcOv = ReHomedEntries.withoutSplitGroups(VoltageControlOverrides.distrQWeightOverrides(es, gpuData, goneControllers),
-                                                                pb.dqSubByIndex[i], gpuData);
+                                                                pb.distrQSubgroupByIndex[i], gpuData);
             if (vcOv == null) {
                 GpuBatchQualification.refuse(c, "PLAN:DISTR_Q_WEIGHT_REDIFF");
                 return;
             }
-            pb.dqOvContribByIndex[i] = java.util.Arrays.stream(vcOv[0]).mapToInt(d -> (int) d).toArray();
-            pb.dqOvWByIndex[i] = vcOv[1];
-            pb.dqKeyOvMemberByIndex[i] = java.util.Arrays.stream(vcOv[2]).mapToInt(d -> (int) d).toArray();
-            pb.dqKeyOvByIndex[i] = vcOv[3];
+            pb.distrQWeightOverrideTermByIndex[i] = java.util.Arrays.stream(vcOv[0]).mapToInt(d -> (int) d).toArray();
+            pb.distrQWeightOverrideWeightByIndex[i] = vcOv[1];
+            pb.distrQKeyOverrideMemberByIndex[i] = java.util.Arrays.stream(vcOv[2]).mapToInt(d -> (int) d).toArray();
+            pb.distrQKeyOverrideKeyByIndex[i] = vcOv[3];
             // and the survivors' DISTR_Q row TARGETS + the islanded members' inactive entries
             List<GenOutage> dq = GpuBatchInjectionOutages.islandedDistrQEntries(gpuData, lostVcControllers, pb.relocDummyQRows, outagedZeroImpedanceBranchNums,
-                    GpuBatchInjectionOutages.labelsOf(pb.dqSubByIndex[i]));
+                    GpuBatchInjectionOutages.labelsOf(pb.distrQSubgroupByIndex[i]));
             if (!dq.isEmpty()) {
                 List<GenOutage> merged = new ArrayList<>();
                 if (pb.genOutagesByIndex[i] != null) {

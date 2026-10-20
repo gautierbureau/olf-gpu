@@ -105,8 +105,8 @@ final class GpuAcFamilyPacker {
                 int b1n = b1.getNum();
                 int b2n = b2.getNum();
                 int dpRow = dummyPCol[br.getNum()];
-                int dqRow = dummyQCol[br.getNum()];
-                if (dpRow < 0 || dqRow < 0) {
+                int distrQRow = dummyQCol[br.getNum()];
+                if (dpRow < 0 || distrQRow < 0) {
                     throw new PowsyblException("GPU AC solver: zero-impedance branch " + br.getId()
                             + " has no DUMMY_P/DUMMY_Q variables (unsupported non-impedant shape, e.g. both "
                             + "ends voltage-controlled or a 3-winding star)");
@@ -120,7 +120,7 @@ final class GpuAcFamilyPacker {
                 // from the child side encoded in slot 10 — the same encoding the stub case used.
                 int child = columns.ziChildBus()[br.getNum()];
                 int childSide = child == b1n ? 1 : (child == b2n ? 2 : 0);
-                zeroImpedanceBranchIndices.add(new int[] {pRow[b1n], qRow[b1n], pRow[b2n], qRow[b2n], dpRow, dqRow,
+                zeroImpedanceBranchIndices.add(new int[] {pRow[b1n], qRow[b1n], pRow[b2n], qRow[b2n], dpRow, distrQRow,
                     vCol[b1n], vCol[b2n], phiCol[b1n], phiCol[b2n],
                     (br.isSpanningTreeEdge(LoadFlowModel.AC) ? 1 : 0) | (childSide << 1)
                         // bit 3: the child side came from the COUPLER-TREE walk; these need the per-scenario
@@ -321,8 +321,8 @@ final class GpuAcFamilyPacker {
                     continue;                                // dead-island reconnection — CPU scope
                 }
                 int dpRow = dummyPCol[br.getNum()];
-                int dqRow = dummyQCol[br.getNum()];
-                if (dpRow < 0 || dqRow < 0) {
+                int distrQRow = dummyQCol[br.getNum()];
+                if (dpRow < 0 || distrQRow < 0) {
                     continue;                                // no dummy rows — CPU scope
                 }
                 int b1n = b1.getNum();
@@ -331,7 +331,7 @@ final class GpuAcFamilyPacker {
                 baseOpenZeroImpedanceBranchNums.add(br.getNum());
                 zeroImpedanceBranchNums.add(br.getNum());
                 zeroImpedanceBranchParameters.add(new double[] {PiModel.R2 / br.getPiModel().getR1()});
-                zeroImpedanceBranchIndices.add(new int[] {phiCol[b1n], qRow[b1n], phiCol[b2n], qRow[b2n], dpRow, dqRow,
+                zeroImpedanceBranchIndices.add(new int[] {phiCol[b1n], qRow[b1n], phiCol[b2n], qRow[b2n], dpRow, distrQRow,
                     vCol[b1n], vCol[b2n], phiCol[b1n], phiCol[b2n], 1});
                 zeroImpedanceBranchAlternateReactiveDestination.add(new int[] {qRowAlt[b1n], qRowAlt[b2n]});
             }

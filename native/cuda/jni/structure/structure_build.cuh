@@ -125,11 +125,11 @@ void setupFamily(Family& f, int elementCount, const double* in, int parameterStr
 // csr_pattern.cu
 std::vector<int> buildRowMap(int n, int nClosedBranch, const int* closedBranchIndices, int nOpenBranch, const int* openBranchIndices,
                              int nShunt, const int* shuntIndices, int nHvdcAcEmulation, const int* hvdcAcEmulationIndices,
-                             int ndq, const int* dqRow, int nZeroImpedanceBranch, const int* zeroImpedanceBranchIndices);
+                             int nDistrQ, const int* distrQRow, int nZeroImpedanceBranch, const int* zeroImpedanceBranchIndices);
 
 void collectFamilyPattern(const std::vector<int>& rowMap,
                           const int* closedBranchIndices, const int* openBranchIndices, const int* shuntIndices,
-                          int ndq, const int* dqElem, const int* dqSide, const int* dqKind, const int* dqRow,
+                          int nDistrQ, const int* distrQElement, const int* distrQSide, const int* distrQKind, const int* distrQRow,
                           int nDistrRho, const int* distrRhoRow, const int* distrRhoColumn,
                           int nDistrShuntB, const int* distrShuntBRow, const int* distrShuntBColumn,
                           int nZeroImpedanceBranch, const int* zeroImpedanceBranchIndices, const int* relocOwn,
@@ -180,8 +180,8 @@ void buildObDynDest(int nOpenBranch, const int* openBranchIndices, const int* op
 
 // distribution_dests.cu
 void buildDistrQDest(SharedStructure* st, const CsrPattern& pos, const std::vector<int>& rowMap,
-                     int ndq, const int* dqElem, const int* dqSide, const int* dqKind,
-                     const double* dqWeight, const int* dqRow,
+                     int nDistrQ, const int* distrQElement, const int* distrQSide, const int* distrQKind,
+                     const double* distrQWeight, const int* distrQRow,
                      const int* closedBranchIndices, const int* openBranchIndices, const int* shuntIndices, const int* relocOwn);
 
 void buildDistrRhoDest(SharedStructure* st, const CsrPattern& pos, const std::vector<int>& rowMap,

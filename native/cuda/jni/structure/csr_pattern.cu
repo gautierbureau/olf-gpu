@@ -82,7 +82,7 @@ RC resolveHvdcAcEmulation(const HvdcScatter& s, const int* ix) {          // P1 
 // the solution dx needs no back-permutation.
 std::vector<int> buildRowMap(int n, int nClosedBranch, const int* closedBranchIndices, int nOpenBranch, const int* openBranchIndices,
                              int nShunt, const int* shuntIndices, int nHvdcAcEmulation, const int* hvdcAcEmulationIndices,
-                             int ndq, const int* dqRow, int nZeroImpedanceBranch, const int* zeroImpedanceBranchIndices) {
+                             int nDistrQ, const int* distrQRow, int nZeroImpedanceBranch, const int* zeroImpedanceBranchIndices) {
     std::vector<int> rowMap(n, -1);
     auto pairRc = [&](int row, int col) {
         if (row < 0 || col < 0) return;
@@ -157,14 +157,14 @@ std::vector<int> buildRowMap(int n, int nClosedBranch, const int* closedBranchIn
     }
     // DISTR_Q reactive-distribution rows sit on a controller's BUS_V row and self-pair: their strong
     // diagonal is that controller's own weighted dq/dV (qPct_k·∂q_Gk/∂V_Gk − ∂q_Gk/∂V_Gk). Each
-    // distinct dqRow appears for several contributions; pairRc is idempotent so re-pairing is fine.
-    for (int c = 0; c < ndq; c++) {
-        pairRc(dqRow[c], dqRow[c]);
+    // distinct distrQRow appears for several contributions; pairRc is idempotent so re-pairing is fine.
+    for (int c = 0; c < nDistrQ; c++) {
+        pairRc(distrQRow[c], distrQRow[c]);
     }
     // Zero-impedance branch: claim its DUMMY_P / DUMMY_Q rows (ZERO_V/ZERO_PHI or DUMMY_TARGET identities)
     // and, defensively, its bus P/Q rows (a coupler-only bus has no closed/open branch to claim them).
     for (int e = 0; e < nZeroImpedanceBranch; e++) {
-        const int* ix = zeroImpedanceBranchIndices + e * 11;                      // b1P b1Q b2P b2Q dpRow dqRow v1 v2 ...
+        const int* ix = zeroImpedanceBranchIndices + e * 11;                      // b1P b1Q b2P b2Q dpRow distrQRow v1 v2 ...
         for (int s = 0; s < 6; s++) {
             pairRc(ix[s], ix[s]);
         }
@@ -211,16 +211,16 @@ std::vector<int> buildRowMap(int n, int nClosedBranch, const int* closedBranchIn
             std::string seen = where("cb", closedBranchIndices, nClosedBranch, 12) + where("ob", openBranchIndices, nOpenBranch, 6)
                     + where("sh", shuntIndices, nShunt, 5) + where("hv", hvdcAcEmulationIndices, nHvdcAcEmulation, 4)
                     + where("zi", zeroImpedanceBranchIndices, nZeroImpedanceBranch, 11);
-            int dqHits = 0;
-            for (int c = 0; c < ndq && dqRow != nullptr; c++) {
-                if (dqRow[c] == r) {
-                    dqHits++;
+            int distrQHits = 0;
+            for (int c = 0; c < nDistrQ && distrQRow != nullptr; c++) {
+                if (distrQRow[c] == r) {
+                    distrQHits++;
                 }
             }
             throw std::runtime_error("equation row " + std::to_string(r) + " of " + std::to_string(n)
                                      + " has no diagonal pairing (appears in: "
                                      + (seen.empty() ? std::string("NOTHING") : seen)
-                                     + ", dqRow hits " + std::to_string(dqHits) + ")");
+                                     + ", distrQRow hits " + std::to_string(distrQHits) + ")");
         }
         if (colUsed[rowMap[r]]) {
             throw std::runtime_error("diagonal pairing is not a bijection (column "
@@ -237,15 +237,15 @@ std::vector<int> buildRowMap(int n, int nClosedBranch, const int* closedBranchIn
 // taken through rowMap here, the contributor columns (v/ph/dummy/r1) are variable columns left as-is.
 void collectFamilyPattern(const std::vector<int>& rowMap,
                           const int* closedBranchIndices, const int* openBranchIndices, const int* shuntIndices,
-                          int ndq, const int* dqElem, const int* dqSide, const int* dqKind, const int* dqRow,
+                          int nDistrQ, const int* distrQElement, const int* distrQSide, const int* distrQKind, const int* distrQRow,
                           int nDistrRho, const int* distrRhoRow, const int* distrRhoColumn,
                           int nDistrShuntB, const int* distrShuntBRow, const int* distrShuntBColumn,
                           int nZeroImpedanceBranch, const int* zeroImpedanceBranchIndices, const int* relocOwn,
                           std::vector<std::pair<int, int>>& pat) {
-    for (int c = 0; c < ndq; c++) {
+    for (int c = 0; c < nDistrQ; c++) {
         // Twice for a relocated child's sharing row: where it lives while the coupler stands, and on the
         // bus's OWN row, which is where it goes in any scenario that kills that coupler (see buildDistrQDest).
-        int mapped = rowMap[dqRow[c]];
+        int mapped = rowMap[distrQRow[c]];
         int own = relocOwn != nullptr && mapped >= 0 ? relocOwn[mapped] : -1;
         for (int pass = 0; pass < 2; pass++) {
             int mappedRow = pass == 0 ? mapped : own;
@@ -255,15 +255,15 @@ void collectFamilyPattern(const std::vector<int>& rowMap,
             if (pass == 1) {
                 pat.emplace_back(mappedRow, mappedRow);      // the stock row's own diagonal
             }
-            if (dqKind[c] == GpuReactiveTermKind::SHUNT_COMPENSATOR_REACTIVE_FLOW) {  // shunt q: bus V column
-                pat.emplace_back(mappedRow, shuntIndices[static_cast<size_t>(dqElem[c]) * 5 + 2]);
-            } else if (dqKind[c] == GpuReactiveTermKind::OPEN_BRANCH_REACTIVE_FLOW) {  // half-open: connected-side V column
-                const int* oq = openBranchIndices + static_cast<size_t>(dqElem[c]) * 6;
-                pat.emplace_back(mappedRow, dqSide[c] == 0 ? oq[4] : oq[5]);
-            } else if (dqKind[c] == GpuReactiveTermKind::DUMMY_Q) {  // zero-imp DUMMY_Q column
-                pat.emplace_back(mappedRow, dqElem[c]);
+            if (distrQKind[c] == GpuReactiveTermKind::SHUNT_COMPENSATOR_REACTIVE_FLOW) {  // shunt q: bus V column
+                pat.emplace_back(mappedRow, shuntIndices[static_cast<size_t>(distrQElement[c]) * 5 + 2]);
+            } else if (distrQKind[c] == GpuReactiveTermKind::OPEN_BRANCH_REACTIVE_FLOW) {  // half-open: connected-side V column
+                const int* oq = openBranchIndices + static_cast<size_t>(distrQElement[c]) * 6;
+                pat.emplace_back(mappedRow, distrQSide[c] == 0 ? oq[4] : oq[5]);
+            } else if (distrQKind[c] == GpuReactiveTermKind::DUMMY_Q) {  // zero-imp DUMMY_Q column
+                pat.emplace_back(mappedRow, distrQElement[c]);
             } else {                                         // closed branch: v1 v2 ph1 ph2 r1
-                const int* q = closedBranchIndices + static_cast<size_t>(dqElem[c]) * 12;
+                const int* q = closedBranchIndices + static_cast<size_t>(distrQElement[c]) * 12;
                 pat.emplace_back(mappedRow, q[5]);
                 pat.emplace_back(mappedRow, q[7]);
                 pat.emplace_back(mappedRow, q[4]);
@@ -307,9 +307,9 @@ void collectFamilyPattern(const std::vector<int>& rowMap,
         // column 2816 nowhere; linear-solve ratio 2.7e12 at the first step). A duplicate pair where the slot
         // already exists changes nothing.
         if (relocOwn != nullptr && z[5] >= 0) {
-            int dqRow = rowMap[z[5]];
-            if (dqRow >= 0 && relocOwn[dqRow] >= 0) {
-                pat.emplace_back(dqRow, relocOwn[dqRow]);
+            int distrQRow = rowMap[z[5]];
+            if (distrQRow >= 0 && relocOwn[distrQRow] >= 0) {
+                pat.emplace_back(distrQRow, relocOwn[distrQRow]);
             }
         }
     }

@@ -64,12 +64,12 @@ final class CouplerSeed {
             // the decoupled branch's ZERO_V/ZERO_PHI rows become identities again
             // (dummies pinned to 0) — the inverse of a close
             int dpRow = gpuData.zeroImpedanceBranch().indices()[ze * 11 + 4];
-            int dqRow = gpuData.zeroImpedanceBranch().indices()[ze * 11 + 5];
+            int distrQRow = gpuData.zeroImpedanceBranch().indices()[ze * 11 + 5];
             int[] rowModesWithZeroImpedanceBranch = rs.rowModePerScenario[s] == baseRowMode ? baseRowMode.clone() : rs.rowModePerScenario[s];
             rowModesWithZeroImpedanceBranch[dpRow] = GpuRowMode.FIXED_VARIABLE;
-            rowModesWithZeroImpedanceBranch[dqRow] = GpuRowMode.FIXED_VARIABLE;
+            rowModesWithZeroImpedanceBranch[distrQRow] = GpuRowMode.FIXED_VARIABLE;
             rs.overrides.add(s * n + dpRow, 0.0);
-            rs.overrides.add(s * n + dqRow, 0.0);
+            rs.overrides.add(s * n + distrQRow, 0.0);
             // The RELOCATION gave this coupler's ZERO_V the CHILD bus's own V row. With the
             // coupler open that equation is gone, and OLF's post-contingency system has
             // BUS_TARGET_V active on that bus instead (read off the CPU dump for
@@ -124,7 +124,7 @@ final class CouplerSeed {
                 // its coupler opens - the section survives its own loss, both sides energized - has its
                 // P target and its reactive flip moved home by rowsHome below), while the default
                 // targets yield to any plan entry writing the row.
-                slotGos = GpuBatchInjectionOutages.rowsHome(slotGos, dpRow, childPhiRow, dqRow, childVRow);
+                slotGos = GpuBatchInjectionOutages.rowsHome(slotGos, dpRow, childPhiRow, distrQRow, childVRow);
                 boolean planHasV = GenOutage.planSeedsRow(slotGos, childVRow);     // a target: the defaults yield
                 boolean planHasPhi = GenOutage.planSeedsRow(slotGos, childPhiRow);
                 boolean applied = !GenOutage.planFlipsRow(slotGos, childVRow) && childVRow >= 0 && child != null && !child.isDisabled()
@@ -170,7 +170,7 @@ final class CouplerSeed {
                 //
                 // ...unless that row is a DISTR_Q row whose target the plan RENORMALIZES for
                 // this scenario (an island took a controller out of the group). Then
-                // baseTargets[dqRow] is the BASE-key target and the plan's entry is OLF's,
+                // baseTargets[distrQRow] is the BASE-key target and the plan's entry is OLF's,
                 // and writing both left TWO override entries on one row — which the device
                 // resolves by a race (applyTargetOverrideBatch is one thread per entry
                 // writing target[ovIndex[k]]). Measured on the middle-section fixture: the
@@ -179,8 +179,8 @@ final class CouplerSeed {
                 // 13.33 MVAr on l2 and 0.32 kV on every bus behind it. Yielding here (rather
                 // than letting the plan's entry overwrite) keeps every scenario whose plan
                 // seeds no target for the row bit-identical.
-                if (!applied && !planHasV && childVRow >= 0 && dqRow >= 0) {
-                    rs.overrides.add(s * n + childVRow, baseTargets[dqRow]);
+                if (!applied && !planHasV && childVRow >= 0 && distrQRow >= 0) {
+                    rs.overrides.add(s * n + childVRow, baseTargets[distrQRow]);
                 }
                 if (System.getenv("OLF_GPU_ZITREE_TRACE") != null) {
                     System.err.println("ZITREE_VID coupler=" + outagedZeroImpedanceBranchOfContingency.getId()
@@ -224,12 +224,12 @@ final class CouplerSeed {
             rs.spanningTreeOverrideScenarioElementValueList.add(ze);
             rs.spanningTreeOverrideScenarioElementValueList.add(0);
             int dpRow = gpuData.zeroImpedanceBranch().indices()[ze * 11 + 4];
-            int dqRow = gpuData.zeroImpedanceBranch().indices()[ze * 11 + 5];
+            int distrQRow = gpuData.zeroImpedanceBranch().indices()[ze * 11 + 5];
             int[] row = rs.rowModePerScenario[s] == baseRowMode ? baseRowMode.clone() : rs.rowModePerScenario[s];
             row[dpRow] = GpuRowMode.FIXED_VARIABLE;              // identity rows, target 0
-            row[dqRow] = GpuRowMode.FIXED_VARIABLE;
+            row[distrQRow] = GpuRowMode.FIXED_VARIABLE;
             rs.overrides.add(s * n + dpRow, 0.0);
-            rs.overrides.add(s * n + dqRow, 0.0);
+            rs.overrides.add(s * n + distrQRow, 0.0);
             rs.rowModePerScenario[s] = row;
             // ...and if the RELOCATION put a child bus's power balance on those dummy rows,
             // its TARGETS have to travel with it, exactly as on the coupler-OPENING path
@@ -264,7 +264,7 @@ final class CouplerSeed {
             if (childFrozen) {
                 continue;
             }
-            slotGos = GpuBatchInjectionOutages.rowsHome(slotGos, dpRow, childPhiRow, dqRow, childVRow);
+            slotGos = GpuBatchInjectionOutages.rowsHome(slotGos, dpRow, childPhiRow, distrQRow, childVRow);
             if (childPhiRow >= 0 && dpRow >= 0) {
                 if (!GenOutage.planSeedsRow(slotGos, childPhiRow)) {   // the plan's own target wins
                     rs.overrides.put(s * n + childPhiRow, baseTargets[dpRow]);
@@ -283,8 +283,8 @@ final class CouplerSeed {
                     cl.dsRowOvBySlot[s][i] = childPhiRow;
                 }
             }
-            if (childVRow >= 0 && dqRow >= 0 && !GenOutage.planSeedsRow(slotGos, childVRow)) {
-                rs.overrides.put(s * n + childVRow, baseTargets[dqRow]);
+            if (childVRow >= 0 && distrQRow >= 0 && !GenOutage.planSeedsRow(slotGos, childVRow)) {
+                rs.overrides.put(s * n + childVRow, baseTargets[distrQRow]);
             }
         }
         if (!contingencies.get(ci).stickyNonSpanningTreeBranches().isEmpty()) {

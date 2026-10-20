@@ -104,9 +104,9 @@ class DynQRelocationProbeTest {
             pairRc.accept(hv[b], hv[b + 2]);
             pairRc.accept(hv[b + 1], hv[b + 3]);
         }
-        int[] dqRow = d.distrQ().row();
-        for (int c = 0; c < dqRow.length; c++) {
-            pairRc.accept(dqRow[c], dqRow[c]);
+        int[] distrQRow = d.distrQ().row();
+        for (int c = 0; c < distrQRow.length; c++) {
+            pairRc.accept(distrQRow[c], distrQRow[c]);
         }
         int[] zi = d.zeroImpedanceBranch().indices();
         for (int e = 0; e < zi.length / 11; e++) {

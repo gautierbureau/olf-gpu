@@ -39,10 +39,10 @@ final class ScenarioPlanBuilder {
     // Per-contingency DISTR_Q weight overrides: a gen outage at a remote-VC controller bus makes
     // the CPU renormalize the group's qPct keys (LfContingency.processLostGenerators ->
     // updateReactiveKeys); replay the toggle host-side and diff the extracted weights.
-    final int[][] dqOvContribByIndex;
-    final double[][] dqOvWByIndex;
-    final int[][] dqKeyOvMemberByIndex;
-    final double[][] dqKeyOvByIndex;
+    final int[][] distrQWeightOverrideTermByIndex;
+    final double[][] distrQWeightOverrideWeightByIndex;
+    final int[][] distrQKeyOverrideMemberByIndex;
+    final double[][] distrQKeyOverrideKeyByIndex;
     // Per-contingency DISTR_RHO coefficient overrides (plan A5): outaging a NON-FREE member of a
     // shared-TVC group renormalizes the survivors' 1/count coefficients (the CPU's coefficients
     // are live suppliers over !isDisabled) and zeroes every contribution touching the outaged
@@ -55,7 +55,7 @@ final class ScenarioPlanBuilder {
     // balance rows the extraction writes targets at, which the coupler-tree relocation moves off
     // the bus's own BUS_PHI/BUS_V columns. One O(buses+branches) pass for the whole plan.
     int[][] busRows;
-    final int[][] dqSubByIndex;
+    final int[][] distrQSubgroupByIndex;
     final int[] relocatedSlackRow;
     final double[] relocatedSlackShift;
     int islandingCount;
@@ -74,15 +74,15 @@ final class ScenarioPlanBuilder {
         this.genOutagesByIndex = new GenOutage[nContingencies][];
         this.activePowerLossByIndex = new double[nContingencies];
         this.islandedHvdcsByIndex = new List[nContingencies];
-        this.dqOvContribByIndex = new int[nContingencies][];
-        this.dqOvWByIndex = new double[nContingencies][];
-        this.dqKeyOvMemberByIndex = new int[nContingencies][];
-        this.dqKeyOvByIndex = new double[nContingencies][];
+        this.distrQWeightOverrideTermByIndex = new int[nContingencies][];
+        this.distrQWeightOverrideWeightByIndex = new double[nContingencies][];
+        this.distrQKeyOverrideMemberByIndex = new int[nContingencies][];
+        this.distrQKeyOverrideKeyByIndex = new double[nContingencies][];
         this.distrRhoOverrideTermByIndex = new int[nContingencies][];
         this.distrRhoOverrideCoefficientByIndex = new double[nContingencies][];
         this.islandedDsByIndex = new int[nContingencies][];
         this.islandedRlByIndex = new int[nContingencies][];
-        this.dqSubByIndex = new int[nContingencies][];
+        this.distrQSubgroupByIndex = new int[nContingencies][];
         this.relocatedSlackRow = new int[nContingencies];
         java.util.Arrays.fill(relocatedSlackRow, -1);
         this.relocatedSlackShift = new double[nContingencies];
@@ -99,8 +99,10 @@ final class ScenarioPlanBuilder {
         com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.LAST_ISLANDED_DS_MASKED.set(maskedDs);
         return new GpuBatchQualification.ScenarioPlan(batchedIndices, frozenRowsByIndex, islandedNumsByIndex,
                 frozenTargetsByIndex, genOutagesByIndex, islandingCount, activePowerLossByIndex,
-                dqOvContribByIndex, dqOvWByIndex, dqKeyOvMemberByIndex, dqKeyOvByIndex, distrRhoOverrideTermByIndex, distrRhoOverrideCoefficientByIndex, islandedDsByIndex,
-                islandedRlByIndex, islandedHvdcsByIndex, dqSubByIndex,
+                distrQWeightOverrideTermByIndex, distrQWeightOverrideWeightByIndex, distrQKeyOverrideMemberByIndex,
+                distrQKeyOverrideKeyByIndex, distrRhoOverrideTermByIndex, distrRhoOverrideCoefficientByIndex,
+                islandedDsByIndex,
+                islandedRlByIndex, islandedHvdcsByIndex, distrQSubgroupByIndex,
                 new GpuBatchQualification.SlackRelocations(relocatedSlackRow, relocatedSlackShift));
     }
 }

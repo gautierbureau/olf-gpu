@@ -106,7 +106,7 @@ class GpuGeneratorRemoteControlTest {
     void generatorRemoteControlWithOpenBranchAtController() {
         // a half-open line incident on a DISTR_Q controller bus (b1): only its connected side is energized, so
         // OLF adds an OpenBranchSide2ReactiveFlowEquationTerm to b1's reactive sum. The GPU must mirror it with
-        // an open-branch q contribution (dqKind 2) into the DISTR_Q rows — not throw on the non-closed branch.
+        // an open-branch q contribution (distrQKind 2) into the DISTR_Q rows — not throw on the non-closed branch.
         Network iidm = VoltageControlNetworkFactory.createWithGeneratorRemoteControl();
         VoltageLevel vl5 = iidm.getSubstation("s").newVoltageLevel()
                 .setId("vl5").setNominalV(20).setTopologyKind(TopologyKind.BUS_BREAKER).add();
@@ -123,7 +123,7 @@ class GpuGeneratorRemoteControlTest {
     void generatorRemoteControlWithZeroImpedanceBranchAtController() {
         // a zero-impedance coupler incident on a DISTR_Q controller bus (b2), feeding a load on the far bus.
         // OLF adds the coupler's DUMMY_Q variable term to b2's reactive sum; the GPU must mirror it with a
-        // linear DUMMY_Q contribution (dqKind 3) into the DISTR_Q rows — exercising the zero-impedance family
+        // linear DUMMY_Q contribution (distrQKind 3) into the DISTR_Q rows — exercising the zero-impedance family
         // (P3, whose dummyQ coupling must be SKIPPED on the controller's suppressed Q row) and the DISTR_Q
         // assembly (P2) together.
         Network iidm = VoltageControlNetworkFactory.createWithGeneratorRemoteControl();

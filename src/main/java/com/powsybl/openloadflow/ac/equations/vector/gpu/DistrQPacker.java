@@ -42,7 +42,7 @@ public final class DistrQPacker {
      *  renormalizes over the survivors — so the DISTR_Q weights are PIN-STATE-DEPENDENT and the
      *  kernel recomputes them per scenario from the RAW keys (Control.createReactiveKeys) and the
      *  per-(entry, scenario) limitType, replicating the CPU's zero-then-sum-in-member-order
-     *  arithmetic bit-for-bit. dqKMember/dqJMember are −1 for non-group contributions. */
+     *  arithmetic bit-for-bit. distrQRowMember/distrQInjectionMember are −1 for non-group contributions. */
     private record MemberTables(java.util.Map<Integer, Integer> memberIdxByBusNum,
                                 List<Double> key, List<Integer> rlEntry,
                                 List<Integer> groupStart, List<Integer> groupCount,
@@ -50,7 +50,7 @@ public final class DistrQPacker {
                                 List<Integer> busNum,
                                 /** Per member, the members whose targetQ OLF sums into its DISTR_Q target: the
                                  *  elements of the member's OWN voltage control, which for a control MERGED into
-                                 *  another (DEPENDENT) is just its own — see the peer CSR in {@link DqPack}. */
+                                 *  another (DEPENDENT) is just its own — see the peer CSR in {@link DistrQPack}. */
                                 List<List<Integer>> tgtPeers) {
     }
 
@@ -129,26 +129,26 @@ public final class DistrQPacker {
                 mt.groupCount().add(controllers.size());
             }
         }
-        List<int[]> dq = new ArrayList<>();      // {elem, side, dqRow, kind, kMember, jMember} per DISTR_Q contribution
-        List<Double> dqW = new ArrayList<>();    // weight per contribution
+        List<int[]> dq = new ArrayList<>();      // {elem, side, distrQRow, kind, kMember, jMember} per DISTR_Q contribution
+        List<Double> distrQWeights = new ArrayList<>();    // weight per contribution
         buildDistrQContributions(network, es, columns.vCol(), family.closedBranchElementOf(), family.shuntElementOf(),
-                family.openBranchElementOf(), columns.dummyQCol(), columns.ziParentEdge(), dq, dqW, mt.memberIdxByBusNum());
-        // dqKind: a GpuReactiveTermKind (for DUMMY_Q, elem holds the var column)
-        int[] dqKind = new int[dq.size()];
-        int[] dqKMember = new int[dq.size()];
-        int[] dqJMember = new int[dq.size()];
-        int[] dqElem = new int[dq.size()];
-        int[] dqSide = new int[dq.size()];
-        int[] dqRow = new int[dq.size()];
-        double[] dqWeight = new double[dq.size()];
+                family.openBranchElementOf(), columns.dummyQCol(), columns.ziParentEdge(), dq, distrQWeights, mt.memberIdxByBusNum());
+        // distrQKind: a GpuReactiveTermKind (for DUMMY_Q, elem holds the var column)
+        int[] distrQKind = new int[dq.size()];
+        int[] distrQRowMember = new int[dq.size()];
+        int[] distrQInjectionMember = new int[dq.size()];
+        int[] distrQElement = new int[dq.size()];
+        int[] distrQSide = new int[dq.size()];
+        int[] distrQRow = new int[dq.size()];
+        double[] distrQWeight = new double[dq.size()];
         for (int i = 0; i < dq.size(); i++) {
-            dqElem[i] = dq.get(i)[0];
-            dqSide[i] = dq.get(i)[1];
-            dqRow[i] = dq.get(i)[2];
-            dqKind[i] = dq.get(i)[3];
-            dqKMember[i] = dq.get(i)[4];
-            dqJMember[i] = dq.get(i)[5];
-            dqWeight[i] = dqW.get(i);
+            distrQElement[i] = dq.get(i)[0];
+            distrQSide[i] = dq.get(i)[1];
+            distrQRow[i] = dq.get(i)[2];
+            distrQKind[i] = dq.get(i)[3];
+            distrQRowMember[i] = dq.get(i)[4];
+            distrQInjectionMember[i] = dq.get(i)[5];
+            distrQWeight[i] = distrQWeights.get(i);
         }
         byte[] hasRow = new byte[mt.hasRow().size()];
         for (int i = 0; i < hasRow.length; i++) {
@@ -166,7 +166,7 @@ public final class DistrQPacker {
             }
         }
         tgtPtr[tgtPtr.length - 1] = tgtPeer.size();
-        return new Pack(new DistrQTerms(dqElem, dqSide, dqWeight, dqRow, dqKind, dqKMember, dqJMember),
+        return new Pack(new DistrQTerms(distrQElement, distrQSide, distrQWeight, distrQRow, distrQKind, distrQRowMember, distrQInjectionMember),
                 new DistrQMembers(GpuAcArrays.toDoubleArray(mt.key()), GpuAcArrays.toIntArray(mt.rlEntry()),
                 GpuAcArrays.toIntArray(mt.groupStart()), GpuAcArrays.toIntArray(mt.groupCount()),
                 GpuAcArrays.toIntArray(mt.row()), hasRow, GpuAcArrays.toIntArray(qrGroupList),
@@ -212,7 +212,7 @@ public final class DistrQPacker {
                 if (gk == freeCtl || gk.isDisabled() || es.getEquation(gk.getNum(), AcEquationType.DISTR_Q).isEmpty()) {
                     continue;                                // the free controller carries the pilot's Q; a disabled
                 }                                            // controller's DISTR_Q is disabled with its bus
-                int dqRow = GpuAcRowIndexing.distrQRow(es, gk, ziParentEdge, dummyQCol);
+                int distrQRow = GpuAcRowIndexing.distrQRow(es, gk, ziParentEdge, dummyQCol);
                 double qpk = gk.getRemoteControlReactivePercent();
                 int kIdx = memberIdxByBusNum.getOrDefault(gk.getNum(), -1);
                 for (LfBus gj : controllers) {
@@ -226,7 +226,7 @@ public final class DistrQPacker {
                                 + " has a voltage-controlling shunt (SHUNT_B) reactive contribution (not supported)");
                     }
                     if (gj.getShunt().isPresent()) {         // a fixed shunt's reactive joins the q sum
-                        out.add(new int[] {shuntElementOf[gj.getNum()], 0, dqRow, GpuReactiveTermKind.SHUNT_COMPENSATOR_REACTIVE_FLOW, kIdx, jIdx});
+                        out.add(new int[] {shuntElementOf[gj.getNum()], 0, distrQRow, GpuReactiveTermKind.SHUNT_COMPENSATOR_REACTIVE_FLOW, kIdx, jIdx});
                         weights.add(weight);
                     }
                     for (LfBranch brj : gj.getBranches()) {
@@ -236,14 +236,14 @@ public final class DistrQPacker {
                         int side = brj.getBus1() == gj ? 0 : 1;
                         int e = closedBranchElementOf[brj.getNum()];
                         if (e >= 0) {                        // closed branch: weighted q1/q2 (kind 0)
-                            out.add(new int[] {e, side, dqRow, GpuReactiveTermKind.CLOSED_BRANCH_REACTIVE_FLOW, kIdx, jIdx});
+                            out.add(new int[] {e, side, distrQRow, GpuReactiveTermKind.CLOSED_BRANCH_REACTIVE_FLOW, kIdx, jIdx});
                             weights.add(weight);
                             continue;
                         }
                         int oe = openBranchElementOf[brj.getNum()];
                         if (oe >= 0) {                       // half-open branch incident on the controller:
                             // its connected-side reactive flow (shunt + series) joins the q sum (kind 2)
-                            out.add(new int[] {oe, side, dqRow, GpuReactiveTermKind.OPEN_BRANCH_REACTIVE_FLOW, kIdx, jIdx});
+                            out.add(new int[] {oe, side, distrQRow, GpuReactiveTermKind.OPEN_BRANCH_REACTIVE_FLOW, kIdx, jIdx});
                             weights.add(weight);
                             continue;
                         }
@@ -263,7 +263,7 @@ public final class DistrQPacker {
                                 throw new PowsyblException("GPU AC solver: DISTR_Q controller " + gj.getId()
                                         + " has a zero-impedance branch " + brj.getId() + " without a DUMMY_Q variable");
                             }
-                            out.add(new int[] {dqCol, side, dqRow, GpuReactiveTermKind.DUMMY_Q, kIdx, jIdx});  // elem = the DUMMY_Q var column
+                            out.add(new int[] {dqCol, side, distrQRow, GpuReactiveTermKind.DUMMY_Q, kIdx, jIdx});  // elem = the DUMMY_Q var column
                             weights.add(weight * (side == 0 ? 1.0 : -1.0));
                             continue;
                         }

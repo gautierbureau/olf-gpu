@@ -411,7 +411,7 @@ void tvdStep(BatchSolverContext* ctx, DriverPass& drv) {
     // after its pins; the freeze happens two loops later and would otherwise leave the pilot holding
     // a target for a control that no longer exists until the next sweep reached RL again (measured
     // 0.6 kV). Same kernel, run again here — it restores the identity at COMPLETE on the same rule.
-    if (ctx->hasDqQrGroups && ctx->st->nQr > 0 && ctx->nTvdFz > 0) {
+    if (ctx->hasDistrQRelocationGroups && ctx->st->nQr > 0 && ctx->nTvdFz > 0) {
         launchPilotVeqInner(ctx, drv);
     }
     CUDA_CHECK(cudaStreamSynchronize(ctx->stream));

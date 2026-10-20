@@ -23,34 +23,34 @@ public final class RemoteVoltageControlNative {
     private RemoteVoltageControlNative() {
     }
 
-    /** {@code {slot, dqMember}} pairs: DISTR_Q controllers a scenario DEACTIVATES (their bus lost its
+    /** {@code {slot, distrQMember}} pairs: DISTR_Q controllers a scenario DEACTIVATES (their bus lost its
      *  last voltage generator while the group survives). Context state, not a solve parameter — a
      *  monitoring or secondary-VC re-solve on the same context must not silently drop it, which is
      *  exactly what happened while this was a parameter: the re-solve passed null and
      *  updateDistrQTargetsBatch recomputed the DISTR_Q target with the dead controller's key back in
      *  the denominator, clobbering the right target with the base one. Cleared when the chunk has none. */
-    public static native void setBatchDqInactiveMembers(long handle, int[] slotMember);
+    public static native void setBatchDistrQInactiveMembers(long handle, int[] slotMember);
 
     /** Per-scenario member reactive keys: {@code idx} = flat {scenario, member} pairs, {@code key} = OLF's
      *  qPct after the scenario's generator losses (updateReactiveKeys); the DISTR_Q fill and the target kernel
      *  renormalize them over the members a pin leaves enabled. Per-chunk state; nulls clear it. */
-    public static native void setBatchDqKeyOverrides(long handle, int[] idx, double[] key);
+    public static native void setBatchDistrQKeyOverrides(long handle, int[] idx, double[] key);
 
     /** Per-scenario member targetQ overrides for the DISTR_Q target kernel, as {@code key = slot *
-     *  nDqMembers + memberIndex} with the member's post-contingency targetQ. Needed because that kernel
+     *  nDistrQMembers + memberIndex} with the member's post-contingency targetQ. Needed because that kernel
      *  RECOMPUTES the group's row targets from the base member targetQ on every reactive-limits pass, so
      *  a host-side row seed alone is put straight back. Nulls clear. */
-    public static native void setBatchDqMemberTargetQOverrides(long handle, int[] keys, double[] values);
+    public static native void setBatchDistrQMemberTargetQOverrides(long handle, int[] keys, double[] values);
 
     /** tasks #71: per (scenario, dq member) SUBGROUP labels of a group a contingency split behind its surviving
-     *  main (dense {@code chunkSize x nDqMembers} bytes, 0 = the base pilot's group) and the qr group -> first
+     *  main (dense {@code chunkSize x nDistrQMembers} bytes, 0 = the base pilot's group) and the qr group -> first
      *  dq member map the kernels use to pair candidates with members. Null clears the channel. */
-    public static native void setBatchDqSubgroups(long handle, byte[] dense, int[] qrMemberStart);
+    public static native void setBatchDistrQSubgroups(long handle, byte[] dense, int[] qrMemberStart);
 
     /** Install (or clear, with nulls) per-scenario DISTR_Q weight overrides on a batch context —
      *  {@code idx} = flat {scenario, contribution} pairs, {@code w} = the renormalized weight (a gen
      *  outage at a remote-VC controller bus re-runs updateReactiveKeys on the CPU). Per-chunk state. */
-    public static native void setBatchDqWeightOverrides(long handle, int[] idx, double[] w);
+    public static native void setBatchDistrQWeightOverrides(long handle, int[] idx, double[] w);
 
     /** Install (or clear, with nulls) per-scenario DISTR_RHO coefficient overrides on a batch
      *  context — {@code idx} = flat {scenario, contribution} pairs, {@code c} = the renormalized

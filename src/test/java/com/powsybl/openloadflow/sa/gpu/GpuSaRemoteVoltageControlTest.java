@@ -264,7 +264,7 @@ class GpuSaRemoteVoltageControlTest extends AbstractGpuSaTest {
      *  makes the two targets differ (a group whose buses carry no reactive load has base == renormalized,
      *  which is why the earlier gate's "pilot load Q is zero" proxy looked like a rule).
      *
-     *  <p>VERIFIED by disabling the seeded targets (GenOutage.seedsDqTargets) and watching both
+     *  <p>VERIFIED by disabling the seeded targets (GenOutage.seedsDistrQTargets) and watching both
      *  contingencies fail: on rte6515 the same defect is 0.247 kV (GEN-1263) and 0.134 kV (GEN-1264),
      *  and OLF's own residual at the device's state is 0.076 pu on exactly one equation — the
      *  deactivated bus's reactive balance. */
@@ -1137,7 +1137,7 @@ class GpuSaRemoteVoltageControlTest extends AbstractGpuSaTest {
     /** OLF's security analysis with the GPU Newton-Raphson as its AC solver, a contingency islanding one controller of
      *  a remote voltage control. The post-contingency extraction sees that controller's bus disabled: no V column, a
      *  DISTR_Q equation disabled with it, a key OLF set to 0. The DISTR_Q pack still packed it and the device refused
-     *  the structure ("bad dqRow ... -1"); then the reactive-capability channel's replay of the reactive-limit pack
+     *  the structure ("bad distrQRow ... -1"); then the reactive-capability channel's replay of the reactive-limit pack
      *  kept it where the pack skips it ("RL-pack enumeration drift"). Every post-contingency solve fell back to the
      *  CPU: right, but not on the device. Once on the device, the surviving controller that carries the pilot's
      *  reactive balance was FROZEN (the device-only base code 6, "PV/PQ state not on its own row"): OLF applies its

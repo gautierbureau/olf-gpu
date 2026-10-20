@@ -35,8 +35,8 @@ import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuQLimitType;
  * remote generator voltage control is active.
  *
  * <p>Zero-impedance branches (bus couplers) are a LINEAR family: {@code zeroImpedanceBranchParameters} {@code nZeroImpedanceBranch*1} (rho = R2/r1),
- * idx {@code nZeroImpedanceBranch*11} (b1Prow b1Qrow b2Prow b2Qrow dpRow dqRow v1col v2col ph1col ph2col enabledTree). Each
- * adds DUMMY_P/DUMMY_Q variables whose columns ({@code dpRow}/{@code dqRow}) enter both buses' P/Q balances
+ * idx {@code nZeroImpedanceBranch*11} (b1Prow b1Qrow b2Prow b2Qrow dpRow distrQRow v1col v2col ph1col ph2col enabledTree). Each
+ * adds DUMMY_P/DUMMY_Q variables whose columns ({@code dpRow}/{@code distrQRow}) enter both buses' P/Q balances
  * (±1); a spanning-tree edge ({@code enabledTree}=1) also carries the voltage/angle coupling
  * ZERO_V (v1−rho·v2) on the DUMMY_P row and ZERO_PHI (ph1−ph2) on the DUMMY_Q row.
  *

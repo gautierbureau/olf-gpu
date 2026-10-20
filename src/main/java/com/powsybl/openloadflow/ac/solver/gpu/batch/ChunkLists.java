@@ -49,9 +49,9 @@ final class ChunkLists {
     final List<Integer> rlNoUnpinList = new ArrayList<>();   // (scenario, entry): an unpin rejects the scenario
     final List<Integer> rlGenLostList = new ArrayList<>();   // (scenario, entry): the bus lost every generator
     // tasks #71: per (scenario, dq member) subgroup labels of a split group, dense, null when none
-    final int nDqMembersAll;
-    final byte[] dqSubDense;
-    boolean anyDqSub = false;
+    final int nDistrQMembersAll;
+    final byte[] distrQSubgroupDense;
+    boolean anyDistrQSubgroup = false;
     final List<Integer> rlLocalList = new ArrayList<>();     // (slot, entry): re-homed PV buses checked as LOCAL
     final List<Integer> rlCmpList = new ArrayList<>();       // (slot, entry): remote controllers re-homed onto a NEW pilot
     final List<Integer> rlCmpRows = new ArrayList<>();       // ...the new pilot's V row their limit check reads
@@ -67,11 +67,11 @@ final class ChunkLists {
     // is the lost generator's own and stops evaluating).
     final List<Integer> cvOvSlot = new ArrayList<>();
     final List<Double> cvOvVal = new ArrayList<>();
-    // {slot, dqMember} pairs: a DISTR_Q controller that stops controlling in this
+    // {slot, distrQMember} pairs: a DISTR_Q controller that stops controlling in this
     // scenario. Its key has to leave the renormalization denominator on the TARGET
     // side, which the qPct override channel does not reach.
-    final List<Integer> dqInactList = new ArrayList<>();
-    // PER CHUNK, like dqInactList above: the scenario index in every one of these is a
+    final List<Integer> distrQInactiveList = new ArrayList<>();
+    // PER CHUNK, like distrQInactiveList above: the scenario index in every one of these is a
     // SLOT in this chunk, so a list that outlives the chunk applies chunk N's entries to
     // chunk N+1's slots. That is invisible to any validation run in windows of one chunk.
     final List<Integer> dsLostGenList = new ArrayList<>();
@@ -84,8 +84,8 @@ final class ChunkLists {
     // Pilot-row flip entries: the scenarios that used to be REJECTED by that check are
     // FIXED in the solve instead. Per chunk, like every other list here — the scenario
     // index is a chunk SLOT.
-    final List<Integer> dqTqOvKey = new ArrayList<>();     // slot*nDqMembers + member
-    final List<Double> dqTqOvVal = new ArrayList<>();
+    final List<Integer> distrQMemberTargetQOverrideKey = new ArrayList<>();     // slot*nDistrQMembers + member
+    final List<Double> distrQMemberTargetQOverrideValue = new ArrayList<>();
     final java.util.Map<Integer, Double> pilotQDeltas = new java.util.LinkedHashMap<>();   // slot*nQr + group
     double[] outageSlackShift = null;    // per slot: the move of the slack's scheduled P by a load lost there
     int[] dsSlackRows = null;            // per slot: the row the distributed slack reads the slack on (-1 = base)
@@ -94,10 +94,10 @@ final class ChunkLists {
     final List<Double> pfQTarget = new ArrayList<>();
     final List<Integer> pfRlCount = new ArrayList<>();
     final List<Integer> pfRlPool = new ArrayList<>();
-    final List<Integer> dqOvIdxList = new ArrayList<>();   // {s, contrib} pairs (DISTR_Q reweight)
-    final List<Double> dqOvWList = new ArrayList<>();
-    final List<Integer> dqKeyOvIdxList = new ArrayList<>();
-    final List<Double> dqKeyOvList = new ArrayList<>();
+    final List<Integer> distrQWeightOverrideScenarioTermList = new ArrayList<>();   // {s, contrib} pairs (DISTR_Q reweight)
+    final List<Double> distrQWeightOverrideWeightList = new ArrayList<>();
+    final List<Integer> distrQKeyOverrideScenarioMemberList = new ArrayList<>();
+    final List<Double> distrQKeyOverrideKeyList = new ArrayList<>();
     final List<Integer> distrRhoOverrideScenarioTermList = new ArrayList<>();   // {s, contrib} pairs (DISTR_RHO renorm, plan A5)
     final List<Double> distrRhoOverrideCoefficientList = new ArrayList<>();
     // per-scenario ACTIVE equation counts (L2 threshold parity — the CPU removes an
@@ -116,8 +116,8 @@ final class ChunkLists {
 
     ChunkLists(int chunkSize, int n, GpuAcData gpuData, ForceTargetQInReactiveLimits.Channel forcedTargetQ, int ngen) {
         this.dsRowOvBySlot = new int[chunkSize][];
-        this.nDqMembersAll = gpuData.distrQMembers().busNum() != null ? gpuData.distrQMembers().busNum().length : 0;
-        this.dqSubDense = new byte[chunkSize * nDqMembersAll];
+        this.nDistrQMembersAll = gpuData.distrQMembers().busNum() != null ? gpuData.distrQMembers().busNum().length : 0;
+        this.distrQSubgroupDense = new byte[chunkSize * nDistrQMembersAll];
         this.nActive = new int[chunkSize];
         java.util.Arrays.fill(nActive, n);
         this.preLossBySlot = new double[chunkSize];
@@ -133,8 +133,8 @@ final class ChunkLists {
         // re-solve on this context must not drop it (as a solve PARAMETER it did — the
         // re-solve passed null and the DISTR_Q target was recomputed with the dead
         // controller's key back in the denominator, clobbering the right target).
-        RemoteVoltageControlNative.setBatchDqInactiveMembers(handle,
-                ChunkArrays.intsOrNull(dqInactList));
+        RemoteVoltageControlNative.setBatchDistrQInactiveMembers(handle,
+                ChunkArrays.intsOrNull(distrQInactiveList));
         NewtonSettingsNative.setBatchFrozenRows(handle,
                 frozenSeedSlot.isEmpty() ? null : java.util.stream.IntStream
                         .range(0, frozenSeedSlot.size())
@@ -145,12 +145,12 @@ final class ChunkLists {
                 ChunkArrays.intsOrNull(dsLostGenList));
         DistributedSlackNative.setBatchDsOutGenerators(handle,
                 ChunkArrays.intsOrNull(dsOutList));
-        RemoteVoltageControlNative.setBatchDqWeightOverrides(handle,
-                ChunkArrays.intsOrNull(dqOvIdxList),
-                ChunkArrays.doublesOrNull(dqOvWList));
-        RemoteVoltageControlNative.setBatchDqKeyOverrides(handle,
-                ChunkArrays.intsOrNull(dqKeyOvIdxList),
-                ChunkArrays.doublesOrNull(dqKeyOvList));
+        RemoteVoltageControlNative.setBatchDistrQWeightOverrides(handle,
+                ChunkArrays.intsOrNull(distrQWeightOverrideScenarioTermList),
+                ChunkArrays.doublesOrNull(distrQWeightOverrideWeightList));
+        RemoteVoltageControlNative.setBatchDistrQKeyOverrides(handle,
+                ChunkArrays.intsOrNull(distrQKeyOverrideScenarioMemberList),
+                ChunkArrays.doublesOrNull(distrQKeyOverrideKeyList));
         RemoteVoltageControlNative.setBatchDistrRhoCoefficientOverrides(handle,
                 ChunkArrays.intsOrNull(distrRhoOverrideScenarioTermList),
                 ChunkArrays.doublesOrNull(distrRhoOverrideCoefficientList));
@@ -167,17 +167,17 @@ final class ChunkLists {
                 ChunkArrays.intsOrNull(rlNoUnpinList));
         ReactiveLimitsNative.setBatchRlGenLost(handle,
                 ChunkArrays.intsOrNull(rlGenLostList));
-        RemoteVoltageControlNative.setBatchDqSubgroups(handle, anyDqSub ? dqSubDense : null,
-                anyDqSub ? RelocatedRows.qrMemberStart(gpuData) : null);
+        RemoteVoltageControlNative.setBatchDistrQSubgroups(handle, anyDistrQSubgroup ? distrQSubgroupDense : null,
+                anyDistrQSubgroup ? RelocatedRows.qrMemberStart(gpuData) : null);
         ReactiveLimitsNative.setBatchRlLocal(handle,
                 ChunkArrays.intsOrNull(rlLocalList),
                 rlLocalList.isEmpty() ? null : rlLocalVt.stream().mapToDouble(Double::doubleValue).toArray());
         ReactiveLimitsNative.setBatchRlCmpOverrides(handle,
                 ChunkArrays.intsOrNull(rlCmpList),
                 rlCmpList.isEmpty() ? null : rlCmpRows.stream().mapToInt(Integer::intValue).toArray());
-        RemoteVoltageControlNative.setBatchDqMemberTargetQOverrides(handle,
-                ChunkArrays.intsOrNull(dqTqOvKey),
-                dqTqOvKey.isEmpty() ? null : dqTqOvVal.stream().mapToDouble(Double::doubleValue).toArray());
+        RemoteVoltageControlNative.setBatchDistrQMemberTargetQOverrides(handle,
+                ChunkArrays.intsOrNull(distrQMemberTargetQOverrideKey),
+                distrQMemberTargetQOverrideKey.isEmpty() ? null : distrQMemberTargetQOverrideValue.stream().mapToDouble(Double::doubleValue).toArray());
         DistributedSlackNative.setBatchDsSlackRows(handle, dsSlackRows);
         RemoteVoltageControlNative.setBatchPilotQDeltas(handle,
                 pilotQDeltas.isEmpty() ? null : pilotQDeltas.keySet().stream().mapToInt(Integer::intValue).toArray(),

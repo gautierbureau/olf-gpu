@@ -29,16 +29,16 @@ class GpuBatchChunkSolverGateTest {
 
     private static final int ROW = 13328;
 
-    private static GenOutage entry(int pRow, int vRow, boolean toPq, boolean qOverride, int[] dqRows, int deadPilotVRow) {
+    private static GenOutage entry(int pRow, int vRow, boolean toPq, boolean qOverride, int[] distrQRows, int deadPilotVRow) {
         return new GenOutage(pRow, 0, vRow, 0, toPq, qOverride, -1, 0, 0, 0, 0, -1, 0, 0, false, Set.of(), 0, 0, 0,
-                dqRows.length > 0 ? 0 : -1, new int[0], dqRows, new double[dqRows.length], 0,
+                distrQRows.length > 0 ? 0 : -1, new int[0], distrQRows, new double[distrQRows.length], 0,
                 deadPilotVRow, 0, -1, 0, -1, 0, -1, -1, 0, false, -1, 0, 0);
     }
 
     @Test
     void aDistrQSeedWritesTheRowButDoesNotFlipIt() {
         GenOutage[] seed = {entry(-1, -1, false, false, new int[] {ROW, 14433}, -1)};
-        assertTrue(seed[0].seedsDqTargets());
+        assertTrue(seed[0].seedsDistrQTargets());
         assertTrue(GenOutage.planSeedsRow(seed, ROW), "the default Q target yields to the seed");
         assertFalse(GenOutage.planFlipsRow(seed, ROW), "the voltage identity stays");
         assertFalse(GenOutage.planSeedsRow(seed, ROW + 1));

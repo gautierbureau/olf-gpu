@@ -88,14 +88,14 @@ struct SharedStructure {
     std::vector<int> rowMap;                                 // eq row -> paired variable col
     std::vector<int> rowPtr, colIdx;                         // host CSR pattern (mode-2 blkdiag build)
     Family closedBranch, openBranch, shunt, hvdcAcEmulation;
-    int ndq = 0;                                             // DISTR_Q weighted reactive contributions
-    DeviceBuf dDqElem, dDqSide, dDqKind, dDqWeight, dDqDest; // ndq each (dDqDest is ndq*6)
+    int nDistrQ = 0;                                             // DISTR_Q weighted reactive contributions
+    DeviceBuf dDistrQElement, dDistrQSide, dDistrQKind, dDistrQWeight, dDistrQDestination; // nDistrQ each (dDistrQDestination is nDistrQ*6)
     DeviceBuf dRelocOwn;                                     // per row: the relocated child's OWN row for a
                                                              // coupler DUMMY row, -1 elsewhere (stock placement)
     DeviceBuf dDqZiRow;                                      // per contribution: a kind-3 coupler dummy
                                                              // column's device ROW, -1 otherwise
-    DeviceBuf dDqAlt, dDqSel;                                // the STOCK-placement twin of dDqDest
-                                                             // (ndq*6) and the dummy row it keys on (ndq)
+    DeviceBuf dDqAlt, dDqSel;                                // the STOCK-placement twin of dDistrQDestination
+                                                             // (nDistrQ*6) and the dummy row it keys on (nDistrQ)
     int nZeroImpedanceBranch = 0;                                             // zero-impedance branches
     DeviceBuf dZeroImpedanceBranchParameters, dZeroImpedanceBranchIndices, dZeroImpedanceBranchDestination;                        // nZeroImpedanceBranch (dZeroImpedanceBranchParameters) / nZeroImpedanceBranch*11 (dZeroImpedanceBranchIndices) / nZeroImpedanceBranch*14 (dZeroImpedanceBranchDestination)
     DeviceBuf dDistrRhoQrGroup;                                    // per DISTR_RHO contribution: the qr relocation group
@@ -139,8 +139,8 @@ SharedStructure* buildStructure(int n,
                                 int nOpenBranch, const double* openBranchParameters, const int* openBranchIndices,
                                 int nShunt, const double* shuntParameters, const int* shuntIndices,
                                 int nHvdcAcEmulation, const double* hvdcAcEmulationParameters, const int* hvdcAcEmulationIndices,
-                                int ndq, const int* dqElem, const int* dqSide, const double* dqWeight,
-                                const int* dqRow, const int* dqKind,
+                                int nDistrQ, const int* distrQElement, const int* distrQSide, const double* distrQWeight,
+                                const int* distrQRow, const int* distrQKind,
                                 int nZeroImpedanceBranch, const double* zeroImpedanceBranchParameters, const int* zeroImpedanceBranchIndices,
                                 int nDistrRho, const int* distrRhoRow, const int* distrRhoColumn, const double* distrRhoCoefficient,
                                 int nDistrShuntB, const int* distrShuntBRow, const int* distrShuntBColumn, const double* distrShuntBCoefficient,

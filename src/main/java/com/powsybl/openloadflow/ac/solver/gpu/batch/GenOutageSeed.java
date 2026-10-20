@@ -147,9 +147,9 @@ final class GenOutageSeed {
                         cl.rlIslandedList.add(go.rlEntry());
                     }
                 }
-                if (go.deactivatesDqMember()) {
-                    cl.dqInactList.add(s);
-                    cl.dqInactList.add(go.inactiveDqMember());
+                if (go.deactivatesDistrQMember()) {
+                    cl.distrQInactiveList.add(s);
+                    cl.distrQInactiveList.add(go.inactiveDistrQMember());
                 }
                 if (go.onSlack()) {
                     if (cl.outageSlackShift == null) {
@@ -161,16 +161,16 @@ final class GenOutageSeed {
                     cl.pilotQDeltas.merge(s * (gpuData.reactiveRelocation().groupStart().length - 1) + go.pilotQGroup(),
                             go.pilotQDelta(), Double::sum);
                 }
-                if (go.overridesDqMemberTargetQ() && gpuData.distrQMembers().busNum() != null) {
-                    cl.dqTqOvKey.add(s * gpuData.distrQMembers().busNum().length
-                            + go.dqTargetQOvMember());
-                    cl.dqTqOvVal.add(go.dqTargetQOvValue());
+                if (go.overridesDistrQMemberTargetQ() && gpuData.distrQMembers().busNum() != null) {
+                    cl.distrQMemberTargetQOverrideKey.add(s * gpuData.distrQMembers().busNum().length
+                            + go.distrQTargetQOverrideMember());
+                    cl.distrQMemberTargetQOverrideValue.add(go.distrQTargetQOverrideValue());
                 }
-                if (go.seedsDqTargets()) {
-                    for (int t = 0; t < go.dqTargetRows().length; t++) {
-                        int dqRow2 = go.dqTargetRows()[t];
-                        int dqMode = rs.rowModePerScenario[s] != null
-                                ? rs.rowModePerScenario[s][dqRow2] : baseRowMode[dqRow2];
+                if (go.seedsDistrQTargets()) {
+                    for (int t = 0; t < go.distrQTargetRows().length; t++) {
+                        int distrQTargetRow = go.distrQTargetRows()[t];
+                        int distrQRowMode = rs.rowModePerScenario[s] != null
+                                ? rs.rowModePerScenario[s][distrQTargetRow] : baseRowMode[distrQTargetRow];
                         // Seed only where the row still HOSTS a DISTR_Q equation this
                         // scenario. Mode 4 means it hosts its own reactive balance (an RL
                         // pin, or a control the contingency killed and whose BUS_TARGET_Q
@@ -193,7 +193,7 @@ final class GenOutageSeed {
                         // OLF). The earlier "mode 0 is NOT skipped: skipping it moved
                         // deviceMultiChunkMatchesCpu by 1.06e-12 kV" was the race's own
                         // noise being guarded.
-                        if (dqMode == GpuRowMode.BUS_TARGET_Q || dqMode == GpuRowMode.FIXED_VARIABLE || dqMode == GpuRowMode.CROSS_FIXED_VARIABLE) {
+                        if (distrQRowMode == GpuRowMode.BUS_TARGET_Q || distrQRowMode == GpuRowMode.FIXED_VARIABLE || distrQRowMode == GpuRowMode.CROSS_FIXED_VARIABLE) {
                             continue;
                         }
                         // ...nor on the row that HOSTS A PILOT'S BALANCE this scenario: a frozen base
@@ -203,17 +203,17 @@ final class GenOutageSeed {
                         // writes raced on the device and the pilot's won by luck — measured once the
                         // race was closed: deviceBusLossIslandingBaseCarrierMemberMatchesCpu, row 2
                         // −2.0 (b4's load) shadowed by this seed's 0.0, b2 22.49 → 22.04 kV.
-                        if (pilotBalanceRows.contains(dqRow2)) {
+                        if (pilotBalanceRows.contains(distrQTargetRow)) {
                             continue;
                         }
                         // Any OTHER earlier override on a seed row is a producer this code does not
                         // know about: keep the more specific one, and count it so a composition gap
                         // (two seeds for one row from two paths) is measurable, never a race.
-                        if (rs.overrides.has(s * n + dqRow2)) {
+                        if (rs.overrides.has(s * n + distrQTargetRow)) {
                             com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("HOST:DQSEED_SHADOWED");
                             continue;
                         }
-                        rs.overrides.add(s * n + dqRow2, go.dqTargetValues()[t]);
+                        rs.overrides.add(s * n + distrQTargetRow, go.distrQTargetValues()[t]);
                     }
                 }
                 if (go.flipsPilotRowWhenAllPinned()) {

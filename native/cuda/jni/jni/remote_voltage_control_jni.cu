@@ -7,105 +7,105 @@
 // DISTR_Q weight overrides: install (or clear, with nulls) the per-scenario qPct renormalization
 // pairs {s, contrib} + new weights on a batch context (gen outage at a remote-VC controller bus).
 extern "C" JNIEXPORT void JNICALL
-OLF_JNI(ac_equations_vector_gpu, RemoteVoltageControlNative, setBatchDqInactiveMembers)(
+OLF_JNI(ac_equations_vector_gpu, RemoteVoltageControlNative, setBatchDistrQInactiveMembers)(
         JNIEnv* env, jclass, jlong handle, jintArray jSlotMember) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx == nullptr) {
         return;
     }
     if (jSlotMember == nullptr || env->GetArrayLength(jSlotMember) == 0) {
-        ctx->nDqInact = 0;
+        ctx->nDistrQInactiveMembers = 0;
         return;
     }
     int n2 = env->GetArrayLength(jSlotMember);
     jint* sm = env->GetIntArrayElements(jSlotMember, nullptr);
-    ctx->dDqInact.upload(sm, static_cast<size_t>(n2) * sizeof(int));
+    ctx->dDistrQInactiveMembers.upload(sm, static_cast<size_t>(n2) * sizeof(int));
     env->ReleaseIntArrayElements(jSlotMember, sm, JNI_ABORT);
-    ctx->nDqInact = n2 / 2;
+    ctx->nDistrQInactiveMembers = n2 / 2;
 }
 
 extern "C" JNIEXPORT void JNICALL
-OLF_JNI(ac_equations_vector_gpu, RemoteVoltageControlNative, setBatchDqSubgroups)(
+OLF_JNI(ac_equations_vector_gpu, RemoteVoltageControlNative, setBatchDistrQSubgroups)(
         JNIEnv* env, jclass, jlong handle, jbyteArray jDense, jintArray jQrMemberStart) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx == nullptr) {
         return;
     }
     if (jDense == nullptr || env->GetArrayLength(jDense) == 0) {
-        ctx->hasDqSub = false;
+        ctx->hasDistrQSubgroups = false;
         return;
     }
     jbyte* d = env->GetByteArrayElements(jDense, nullptr);
-    ctx->dDqSub.upload(d, static_cast<size_t>(env->GetArrayLength(jDense)));
+    ctx->dDistrQSubgroup.upload(d, static_cast<size_t>(env->GetArrayLength(jDense)));
     env->ReleaseByteArrayElements(jDense, d, JNI_ABORT);
     jint* q = env->GetIntArrayElements(jQrMemberStart, nullptr);
     ctx->dQrMemberStart.upload(q, static_cast<size_t>(env->GetArrayLength(jQrMemberStart)) * sizeof(int));
     env->ReleaseIntArrayElements(jQrMemberStart, q, JNI_ABORT);
-    ctx->hasDqSub = true;
+    ctx->hasDistrQSubgroups = true;
 }
 
 extern "C" JNIEXPORT void JNICALL
-OLF_JNI(ac_equations_vector_gpu, RemoteVoltageControlNative, setBatchDqWeightOverrides)(
+OLF_JNI(ac_equations_vector_gpu, RemoteVoltageControlNative, setBatchDistrQWeightOverrides)(
         JNIEnv* env, jclass, jlong handle, jintArray jIdx, jdoubleArray jW) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx == nullptr) {
         return;
     }
     if (jIdx == nullptr || jW == nullptr || env->GetArrayLength(jW) == 0) {
-        ctx->nDqOv = 0;
+        ctx->nDistrQWeightOverrides = 0;
         return;
     }
     int nOv = env->GetArrayLength(jW);
     jint* idx = env->GetIntArrayElements(jIdx, nullptr);
     jdouble* w = env->GetDoubleArrayElements(jW, nullptr);
-    ctx->dDqOvIdx.upload(idx, static_cast<size_t>(nOv) * 2 * sizeof(int));
-    ctx->dDqOvW.upload(w, static_cast<size_t>(nOv) * sizeof(double));
+    ctx->dDistrQWeightOverrideScenarioTerm.upload(idx, static_cast<size_t>(nOv) * 2 * sizeof(int));
+    ctx->dDistrQWeightOverrideWeight.upload(w, static_cast<size_t>(nOv) * sizeof(double));
     env->ReleaseIntArrayElements(jIdx, idx, JNI_ABORT);
     env->ReleaseDoubleArrayElements(jW, w, JNI_ABORT);
-    ctx->nDqOv = nOv;
+    ctx->nDistrQWeightOverrides = nOv;
 }
 
 extern "C" JNIEXPORT void JNICALL
-OLF_JNI(ac_equations_vector_gpu, RemoteVoltageControlNative, setBatchDqKeyOverrides)(
+OLF_JNI(ac_equations_vector_gpu, RemoteVoltageControlNative, setBatchDistrQKeyOverrides)(
         JNIEnv* env, jclass, jlong handle, jintArray jIdx, jdoubleArray jKey) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx == nullptr) {
         return;
     }
     if (jIdx == nullptr || jKey == nullptr || env->GetArrayLength(jKey) == 0) {
-        ctx->nDqKeyOv = 0;
+        ctx->nDistrQKeyOverrides = 0;
         return;
     }
     int nOv = env->GetArrayLength(jKey);
     jint* idx = env->GetIntArrayElements(jIdx, nullptr);
     jdouble* key = env->GetDoubleArrayElements(jKey, nullptr);
-    ctx->dDqKeyOvIdx.upload(idx, static_cast<size_t>(nOv) * 2 * sizeof(int));
-    ctx->dDqKeyOvKey.upload(key, static_cast<size_t>(nOv) * sizeof(double));
+    ctx->dDistrQKeyOverrideScenarioMember.upload(idx, static_cast<size_t>(nOv) * 2 * sizeof(int));
+    ctx->dDistrQKeyOverrideKey.upload(key, static_cast<size_t>(nOv) * sizeof(double));
     env->ReleaseIntArrayElements(jIdx, idx, JNI_ABORT);
     env->ReleaseDoubleArrayElements(jKey, key, JNI_ABORT);
-    ctx->nDqKeyOv = nOv;
+    ctx->nDistrQKeyOverrides = nOv;
 }
 
 // Per-scenario member targetQ overrides for the DISTR_Q target kernel: {key, value} where key is
-// slot * nDqMembers + memberIndex. Set when an outaged bus is a packed group member whose own targetQ
+// slot * nDistrQMembers + memberIndex. Set when an outaged bus is a packed group member whose own targetQ
 // moved (a reactive LOAD loss). Nulls clear.
 extern "C" JNIEXPORT void JNICALL
-OLF_JNI(ac_equations_vector_gpu, RemoteVoltageControlNative, setBatchDqMemberTargetQOverrides)(
+OLF_JNI(ac_equations_vector_gpu, RemoteVoltageControlNative, setBatchDistrQMemberTargetQOverrides)(
         JNIEnv* env, jclass, jlong handle, jintArray jKeys, jdoubleArray jVals) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx == nullptr) {
         return;
     }
     if (jKeys == nullptr || env->GetArrayLength(jKeys) == 0) {
-        ctx->nDqTqOv = 0;
+        ctx->nDistrQMemberTargetQOverrides = 0;
         return;
     }
     int ne = env->GetArrayLength(jKeys);
     jint* keys = env->GetIntArrayElements(jKeys, nullptr);
     jdouble* vals = env->GetDoubleArrayElements(jVals, nullptr);
-    ctx->dDqTqOvKey.upload(keys, static_cast<size_t>(ne) * sizeof(int));
-    ctx->dDqTqOvVal.upload(vals, static_cast<size_t>(ne) * sizeof(double));
-    ctx->nDqTqOv = ne;
+    ctx->dDistrQMemberTargetQOverrideKey.upload(keys, static_cast<size_t>(ne) * sizeof(int));
+    ctx->dDistrQMemberTargetQOverrideValue.upload(vals, static_cast<size_t>(ne) * sizeof(double));
+    ctx->nDistrQMemberTargetQOverrides = ne;
     env->ReleaseIntArrayElements(jKeys, keys, JNI_ABORT);
     env->ReleaseDoubleArrayElements(jVals, vals, JNI_ABORT);
 }

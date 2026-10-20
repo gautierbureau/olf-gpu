@@ -266,7 +266,7 @@ extern "C" JNIEXPORT void JNICALL
 OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchRlRemote)(
         JNIEnv* env, jclass, jlong handle, jbyteArray jRemote, jintArray jCmpVrow,
         jintArray jRmqRow, jintArray jRmqElem, jintArray jRmqSide, jintArray jRmqKind, jdoubleArray jRmqWeight,
-        jintArray jDqKMember, jintArray jDqJMember, jdoubleArray jMKey, jintArray jMRlEntry,
+        jintArray jDistrQRowMember, jintArray jDistrQInjectionMember, jdoubleArray jMKey, jintArray jMRlEntry,
         jintArray jMGroupStart, jintArray jMGroupCount, jintArray jMRow, jbyteArray jMHasRow,
         jintArray jMQrGroup, jdoubleArray jMTargetQ, jintArray jMTgtPtr, jintArray jMTgtPeer) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
@@ -276,8 +276,8 @@ OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchRlRemote)(
     if (jRemote == nullptr || jCmpVrow == nullptr || env->GetArrayLength(jRemote) == 0) {
         ctx->nRlRemote = 0;
         ctx->nRmq = 0;
-        ctx->nDqDyn = 0;
-        ctx->hasDqQrGroups = 0;
+        ctx->nDistrQDynamicKeys = 0;
+        ctx->hasDistrQRelocationGroups = 0;
         return;
     }
     int nr = env->GetArrayLength(jRemote);
@@ -324,74 +324,74 @@ OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchRlRemote)(
         env->ReleaseDoubleArrayElements(jRmqWeight, qw, JNI_ABORT);
         ctx->nRmq = nq;
     }
-    ctx->nDqDyn = 0;
-    ctx->hasDqQrGroups = 0;
+    ctx->nDistrQDynamicKeys = 0;
+    ctx->hasDistrQRelocationGroups = 0;
     // Keyed on the MEMBER list, not on the DISTR_Q rows: a SINGLETON remote group has members (and a
     // pilot-Q relocation group, so its pilot's control-loss flip must be armed) but no DISTR_Q row at
-    // all — gating on dqKMember left hasDqQrGroups at 0 for it, and the base load flow on the driver
+    // all — gating on distrQRowMember left hasDistrQRelocationGroups at 0 for it, and the base load flow on the driver
     // kept the pilot's V equation after pinning its only member (2.4e-3 pu on the pilot's Q).
     if (jMKey != nullptr && env->GetArrayLength(jMKey) > 0) {
-        int ndqc = jDqKMember != nullptr ? env->GetArrayLength(jDqKMember) : 0;
+        int nDistrQTermMembers = jDistrQRowMember != nullptr ? env->GetArrayLength(jDistrQRowMember) : 0;
         int nm = env->GetArrayLength(jMKey);
-        jint* km = ndqc > 0 ? env->GetIntArrayElements(jDqKMember, nullptr) : nullptr;
-        jint* jm = ndqc > 0 ? env->GetIntArrayElements(jDqJMember, nullptr) : nullptr;
+        jint* km = nDistrQTermMembers > 0 ? env->GetIntArrayElements(jDistrQRowMember, nullptr) : nullptr;
+        jint* jm = nDistrQTermMembers > 0 ? env->GetIntArrayElements(jDistrQInjectionMember, nullptr) : nullptr;
         jdouble* mk = env->GetDoubleArrayElements(jMKey, nullptr);
         jint* mre = env->GetIntArrayElements(jMRlEntry, nullptr);
         jint* mgs = env->GetIntArrayElements(jMGroupStart, nullptr);
         jint* mgc = env->GetIntArrayElements(jMGroupCount, nullptr);
         jint* mrw = env->GetIntArrayElements(jMRow, nullptr);
         jbyte* mhr = env->GetByteArrayElements(jMHasRow, nullptr);
-        ctx->dDqMemberRow.upload(mrw, static_cast<size_t>(nm) * sizeof(int));
-        ctx->dDqMemberHasRow.upload(mhr, static_cast<size_t>(nm) * sizeof(char));
+        ctx->dDistrQMemberRow.upload(mrw, static_cast<size_t>(nm) * sizeof(int));
+        ctx->dDistrQMemberHasRow.upload(mhr, static_cast<size_t>(nm) * sizeof(char));
         env->ReleaseIntArrayElements(jMRow, mrw, JNI_ABORT);
         env->ReleaseByteArrayElements(jMHasRow, mhr, JNI_ABORT);
         if (jMTargetQ == nullptr || env->GetArrayLength(jMTargetQ) != nm) {
             env->ThrowNew(env->FindClass("java/lang/RuntimeException"),
-                          "setBatchRlRemote: dqMemberTargetQ missing or length != members");
+                          "setBatchRlRemote: distrQMemberTargetQ missing or length != members");
             return;
         }
         jdouble* mtq = env->GetDoubleArrayElements(jMTargetQ, nullptr);
-        ctx->dDqMemberTargetQ.upload(mtq, static_cast<size_t>(nm) * sizeof(double));
+        ctx->dDistrQMemberTargetQ.upload(mtq, static_cast<size_t>(nm) * sizeof(double));
         env->ReleaseDoubleArrayElements(jMTargetQ, mtq, JNI_ABORT);
         if (jMTgtPtr == nullptr || env->GetArrayLength(jMTgtPtr) != nm + 1 || jMTgtPeer == nullptr) {
             env->ThrowNew(env->FindClass("java/lang/RuntimeException"),
-                          "setBatchRlRemote: dqMemberTgtPtr missing or length != members + 1");
+                          "setBatchRlRemote: distrQMemberTargetPeerStart missing or length != members + 1");
             return;
         }
         jint* mtp = env->GetIntArrayElements(jMTgtPtr, nullptr);
-        ctx->dDqMemberTgtPtr.upload(mtp, static_cast<size_t>(nm + 1) * sizeof(int));
+        ctx->dDistrQMemberTargetPeerStart.upload(mtp, static_cast<size_t>(nm + 1) * sizeof(int));
         env->ReleaseIntArrayElements(jMTgtPtr, mtp, JNI_ABORT);
         int nPeer = env->GetArrayLength(jMTgtPeer);
         if (nPeer > 0) {
             jint* mpe = env->GetIntArrayElements(jMTgtPeer, nullptr);
-            ctx->dDqMemberTgtPeer.upload(mpe, static_cast<size_t>(nPeer) * sizeof(int));
+            ctx->dDistrQMemberTargetPeer.upload(mpe, static_cast<size_t>(nPeer) * sizeof(int));
             env->ReleaseIntArrayElements(jMTgtPeer, mpe, JNI_ABORT);
         }
-        ctx->nDqMembers = nm;
-        if (ndqc > 0) {
-            ctx->dDqKMember.upload(km, static_cast<size_t>(ndqc) * sizeof(int));
-            ctx->dDqJMember.upload(jm, static_cast<size_t>(ndqc) * sizeof(int));
+        ctx->nDistrQMembers = nm;
+        if (nDistrQTermMembers > 0) {
+            ctx->dDistrQRowMember.upload(km, static_cast<size_t>(nDistrQTermMembers) * sizeof(int));
+            ctx->dDistrQInjectionMember.upload(jm, static_cast<size_t>(nDistrQTermMembers) * sizeof(int));
         }
-        ctx->dDqMemberKey.upload(mk, static_cast<size_t>(nm) * sizeof(double));
-        ctx->dDqMemberRlEntry.upload(mre, static_cast<size_t>(nm) * sizeof(int));
-        ctx->dDqMemberGroupStart.upload(mgs, static_cast<size_t>(nm) * sizeof(int));
-        ctx->dDqMemberGroupCount.upload(mgc, static_cast<size_t>(nm) * sizeof(int));
-        if (ndqc > 0) {
-            env->ReleaseIntArrayElements(jDqKMember, km, JNI_ABORT);
-            env->ReleaseIntArrayElements(jDqJMember, jm, JNI_ABORT);
+        ctx->dDistrQMemberKey.upload(mk, static_cast<size_t>(nm) * sizeof(double));
+        ctx->dDistrQMemberReactiveLimitEntry.upload(mre, static_cast<size_t>(nm) * sizeof(int));
+        ctx->dDistrQMemberGroupStart.upload(mgs, static_cast<size_t>(nm) * sizeof(int));
+        ctx->dDistrQMemberGroupCount.upload(mgc, static_cast<size_t>(nm) * sizeof(int));
+        if (nDistrQTermMembers > 0) {
+            env->ReleaseIntArrayElements(jDistrQRowMember, km, JNI_ABORT);
+            env->ReleaseIntArrayElements(jDistrQInjectionMember, jm, JNI_ABORT);
         }
         env->ReleaseDoubleArrayElements(jMKey, mk, JNI_ABORT);
         env->ReleaseIntArrayElements(jMRlEntry, mre, JNI_ABORT);
         env->ReleaseIntArrayElements(jMGroupStart, mgs, JNI_ABORT);
         env->ReleaseIntArrayElements(jMGroupCount, mgc, JNI_ABORT);
-        ctx->nDqDyn = ndqc;
-        ctx->hasDqQrGroups = 0;
+        ctx->nDistrQDynamicKeys = nDistrQTermMembers;
+        ctx->hasDistrQRelocationGroups = 0;
         if (jMQrGroup != nullptr && env->GetArrayLength(jMQrGroup) == nm) {
             jint* mqg = env->GetIntArrayElements(jMQrGroup, nullptr);
             std::vector<char> genVc(ctx->st->nQr > 0 ? ctx->st->nQr : 1, 0);
             for (int i = 0; i < nm; i++) {
                 if (mqg[i] >= 0) {
-                    ctx->hasDqQrGroups = 1;                  // plan-B4: relocation-linked group present
+                    ctx->hasDistrQRelocationGroups = 1;                  // plan-B4: relocation-linked group present
                     genVc[mqg[i]] = 1;                       // this qr group is a remote gen-VC group
                 }
             }
@@ -400,8 +400,8 @@ OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchRlRemote)(
                     genVc[g] = genVc[ctx->st->hQrDepBase[g]];
                 }
             }
-            ctx->dDqMemberQrGroup.upload(mqg, static_cast<size_t>(nm) * sizeof(int));
-            if (ctx->hasDqQrGroups) {
+            ctx->dDistrQMemberRelocationGroup.upload(mqg, static_cast<size_t>(nm) * sizeof(int));
+            if (ctx->hasDistrQRelocationGroups) {
                 ctx->dQrGenVc.upload(genVc.data(), genVc.size() * sizeof(char));
             }
             env->ReleaseIntArrayElements(jMQrGroup, mqg, JNI_ABORT);
@@ -441,10 +441,10 @@ OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, readBatchRlPinTargets)(
     exportRlPinTargets<<<grid(ctx->nrl * nS), BLOCK, 0, ctx->stream>>>(ctx->nrl, nS, n, ctx->dRlVrow.as<int>(),
             ctx->dRlQrow.p ? ctx->dRlQrow.as<int>() : nullptr, ctx->dRlLimitType.as<char>(), ctx->dMode.as<int>(),
             ctx->dTarget.as<double>(), ctx->nRlIslanded > 0 ? ctx->dRlIslanded.as<char>() : nullptr,
-            ctx->hasDqQrGroups ? ctx->st->nQr : 0, psEntryPtr(ctx),
-            ctx->hasDqQrGroups && ctx->st->nQr > 0 ? ctx->st->dQrPtr.as<int>() : nullptr,
-            ctx->hasDqQrGroups && ctx->st->nQr > 0 ? ctx->st->dQrRows.as<int>() : nullptr,
-            ctx->hasDqQrGroups && ctx->st->nQr > 0 ? ctx->dQrVeqOff.as<char>() : nullptr,
+            ctx->hasDistrQRelocationGroups ? ctx->st->nQr : 0, psEntryPtr(ctx),
+            ctx->hasDistrQRelocationGroups && ctx->st->nQr > 0 ? ctx->st->dQrPtr.as<int>() : nullptr,
+            ctx->hasDistrQRelocationGroups && ctx->st->nQr > 0 ? ctx->st->dQrRows.as<int>() : nullptr,
+            ctx->hasDistrQRelocationGroups && ctx->st->nQr > 0 ? ctx->dQrVeqOff.as<char>() : nullptr,
             ctx->st->dQrDepBase.p ? ctx->st->dQrDepBase.as<int>() : nullptr, out.as<double>());
     std::vector<double> host(static_cast<size_t>(ctx->nrl) * nS);
     CUDA_CHECK(cudaStreamSynchronize(ctx->stream));

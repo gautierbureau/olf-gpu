@@ -76,9 +76,9 @@ struct RelocTables {
     // that splits a merged group behind its surviving main leaves two OLF groups on ONE candidate table (tasks
     // #71): keys and q contributions pair only within a subgroup, and the base pilot's carrier is picked among
     // subgroup-0 members only. Null = no split anywhere in the batch.
-    const char* dqSub = nullptr;
+    const char* distrQSubgroup = nullptr;
     const int* qrMemberStart = nullptr;                      // qr group -> its first dq member (candidate 1)
-    int nDqMembers = 0;
+    int nDistrQMembers = 0;
     const char* dep = nullptr;                               // per output: dependent-pilot routing (see depPick)
 };
 
@@ -91,8 +91,8 @@ __device__ inline RelocTables relocForScenario(RelocTables rt, int s) {
     if (rt.psSkip != nullptr) {
         rt.psSkip += (size_t) s * rt.psGroups;
     }
-    if (rt.dqSub != nullptr) {
-        rt.dqSub += (size_t) s * rt.nDqMembers;
+    if (rt.distrQSubgroup != nullptr) {
+        rt.distrQSubgroup += (size_t) s * rt.nDistrQMembers;
     }
     return rt;
 }
@@ -163,7 +163,7 @@ __device__ inline int depPick(int slot, int frozen, int altDest, int selRow, con
     } else if (mf != 0 && mf != 6) {                         // a root: its own row, unless that is the identity
         return frozen;
     }
-    return rt.pool[rt.off[slot] + relocChooseSub(rt.group[slot], rt.qrPtr, rt.qrRows, mode, rt.dqSub, rt.qrMemberStart)];
+    return rt.pool[rt.off[slot] + relocChooseSub(rt.group[slot], rt.qrPtr, rt.qrRows, mode, rt.distrQSubgroup, rt.qrMemberStart)];
 }
 
 // zero-impedance q-slot dynamic pick (F/J slots {0..3} per element): group -> mode-scan candidate slot,
@@ -181,7 +181,7 @@ __device__ inline int ziDynDest(int frozen, int slot, const int* alt, const int*
         if (rt.psSkip != nullptr && rt.psSkip[rg]) {
             return -1;                                       // pilot-self group, pilot unpinned: no raw q
         }
-        return rt.pool[rt.off[slot] + relocChooseSub(rg, rt.qrPtr, rt.qrRows, mode, rt.dqSub, rt.qrMemberStart)];
+        return rt.pool[rt.off[slot] + relocChooseSub(rg, rt.qrPtr, rt.qrRows, mode, rt.distrQSubgroup, rt.qrMemberStart)];
     }
     int sr = sel != nullptr ? sel[slot] : -1;
     if (sr <= -2) {
@@ -203,7 +203,7 @@ static __device__ void scatterAddDyn(int outputCount, const int* dest, const int
         } else if (rg >= 0 && rt.psSkip != nullptr && rt.psSkip[rg]) {
             continue;                                        // pilot-self group, pilot unpinned: no raw q
         } else if (rg >= 0) {
-            d = rt.pool[rt.off[eOff + k] + relocChooseSub(rg, rt.qrPtr, rt.qrRows, mode, rt.dqSub, rt.qrMemberStart)];
+            d = rt.pool[rt.off[eOff + k] + relocChooseSub(rg, rt.qrPtr, rt.qrRows, mode, rt.distrQSubgroup, rt.qrMemberStart)];
         } else {
             int sr = selRow[k];
             bool useAlt = sr >= 0 ? (mode[sr] == GpuRowMode::FIXED_VARIABLE || mode[sr] == GpuRowMode::BUS_TARGET_Q)
@@ -267,7 +267,7 @@ static __device__ void scatterAddFDyn(int nres, const int* dest, const int* altD
         } else if (rg >= 0 && rt.psSkip != nullptr && rt.psSkip[rg]) {
             continue;                                        // pilot-self group, pilot unpinned: no raw q
         } else if (rg >= 0) {
-            d = rt.pool[rt.off[eOff + idx] + relocChooseSub(rg, rt.qrPtr, rt.qrRows, mode, rt.dqSub, rt.qrMemberStart)];
+            d = rt.pool[rt.off[eOff + idx] + relocChooseSub(rg, rt.qrPtr, rt.qrRows, mode, rt.distrQSubgroup, rt.qrMemberStart)];
         } else {
             int sr = selRow[idx];
             bool useAlt = sr >= 0 ? (mode[sr] == GpuRowMode::FIXED_VARIABLE || mode[sr] == GpuRowMode::BUS_TARGET_Q)

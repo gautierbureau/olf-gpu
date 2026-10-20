@@ -159,15 +159,15 @@ final class InjectionOutagePlanner {
         if (goneForKeys.stream().anyMatch(g -> g.getBus() != null
                 && es.getEquation(g.getBus().getNum(), AcEquationType.DISTR_Q).isPresent())) {
             double[][] ov = ReHomedEntries.withoutSplitGroups(VoltageControlOverrides.distrQWeightOverrides(es, gpuData, goneForKeys),
-                                                              pb.dqSubByIndex[i], gpuData);
+                                                              pb.distrQSubgroupByIndex[i], gpuData);
             if (ov == null) {
                 GpuBatchQualification.refuse(c, "PLAN:DISTR_Q_WEIGHT_REDIFF");
                 return;                            // weight rediff unavailable — CPU
             }
-            pb.dqOvContribByIndex[i] = java.util.Arrays.stream(ov[0]).mapToInt(d -> (int) d).toArray();
-            pb.dqOvWByIndex[i] = ov[1];
-            pb.dqKeyOvMemberByIndex[i] = java.util.Arrays.stream(ov[2]).mapToInt(d -> (int) d).toArray();
-            pb.dqKeyOvByIndex[i] = ov[3];
+            pb.distrQWeightOverrideTermByIndex[i] = java.util.Arrays.stream(ov[0]).mapToInt(d -> (int) d).toArray();
+            pb.distrQWeightOverrideWeightByIndex[i] = ov[1];
+            pb.distrQKeyOverrideMemberByIndex[i] = java.util.Arrays.stream(ov[2]).mapToInt(d -> (int) d).toArray();
+            pb.distrQKeyOverrideKeyByIndex[i] = ov[3];
         }
         if (pb.relocatedSlackRow[i] >= 0 && gos != null) {
             int reference = pb.relocatedSlackRow[i];
@@ -222,7 +222,7 @@ final class InjectionOutagePlanner {
                 return null;
             }
             String[] subReject = new String[1];
-            pb.dqSubByIndex[i] = ReHomedEntries.subgroupPairs(reHomed, gpuData, subReject);
+            pb.distrQSubgroupByIndex[i] = ReHomedEntries.subgroupPairs(reHomed, gpuData, subReject);
             if (subReject[0] != null) {
                 GpuBatchQualification.refuse(c, subReject[0]);
                 return null;
@@ -384,12 +384,12 @@ final class InjectionOutagePlanner {
             // a frozen row at all: those rows belong to buses OLF removes from the system.
             List<LfBus> inactiveForTargets = new ArrayList<>(islandLostVcControllers);
             for (LfBus ib : q.islandedBuses()) {
-                if (!inactiveForTargets.contains(ib) && GpuBatchInjectionOutages.dqMemberSlot(gpuData, ib) >= 0) {
+                if (!inactiveForTargets.contains(ib) && GpuBatchInjectionOutages.distrQMemberSlot(gpuData, ib) >= 0) {
                     inactiveForTargets.add(ib);
                 }
             }
             for (GenOutage go : GpuBatchInjectionOutages.islandedDistrQEntries(gpuData, inactiveForTargets, pb.relocDummyQRows, outagedZeroImpedanceBranchNums,
-                    GpuBatchInjectionOutages.labelsOf(pb.dqSubByIndex[i]))) {
+                    GpuBatchInjectionOutages.labelsOf(pb.distrQSubgroupByIndex[i]))) {
                 live.add(go.withoutFrozenTargetRows(frozenSet));
             }
             gos = live.toArray(new GenOutage[0]);

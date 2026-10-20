@@ -27,11 +27,11 @@ final class PlanOverrideSeed {
         final boolean pairPhase = ctx.pairPhase();
         final GpuBatchQualification.ScenarioPlan plan = ctx.plan();
         final double[] activePowerLossByIndex = plan.activePowerLossByIndex();
-        final double[][] dqKeyOvByIndex = plan.dqKeyOvByIndex();
-        final int[][] dqKeyOvMemberByIndex = plan.dqKeyOvMemberByIndex();
-        final int[][] dqOvContribByIndex = plan.dqOvContribByIndex();
-        final double[][] dqOvWByIndex = plan.dqOvWByIndex();
-        final int[][] dqSubByIndex = plan.dqSubByIndex();
+        final double[][] distrQKeyOverrideKeyByIndex = plan.distrQKeyOverrideKeyByIndex();
+        final int[][] distrQKeyOverrideMemberByIndex = plan.distrQKeyOverrideMemberByIndex();
+        final int[][] distrQWeightOverrideTermByIndex = plan.distrQWeightOverrideTermByIndex();
+        final double[][] distrQWeightOverrideWeightByIndex = plan.distrQWeightOverrideWeightByIndex();
+        final int[][] distrQSubgroupByIndex = plan.distrQSubgroupByIndex();
         final double[][] distrRhoOverrideCoefficientByIndex = plan.distrRhoOverrideCoefficientByIndex();
         final int[][] distrRhoOverrideTermByIndex = plan.distrRhoOverrideTermByIndex();
         final int[][] islandedDsByIndex = plan.islandedDsByIndex();
@@ -39,18 +39,18 @@ final class PlanOverrideSeed {
         if (!pairPhase && activePowerLossByIndex != null) {
             cl.preLossBySlot[s] = activePowerLossByIndex[ci];
         }
-        if (dqOvContribByIndex != null && dqOvContribByIndex[ci] != null) {
-            for (int k = 0; k < dqOvContribByIndex[ci].length; k++) {
-                cl.dqOvIdxList.add(s);
-                cl.dqOvIdxList.add(dqOvContribByIndex[ci][k]);
-                cl.dqOvWList.add(dqOvWByIndex[ci][k]);
+        if (distrQWeightOverrideTermByIndex != null && distrQWeightOverrideTermByIndex[ci] != null) {
+            for (int k = 0; k < distrQWeightOverrideTermByIndex[ci].length; k++) {
+                cl.distrQWeightOverrideScenarioTermList.add(s);
+                cl.distrQWeightOverrideScenarioTermList.add(distrQWeightOverrideTermByIndex[ci][k]);
+                cl.distrQWeightOverrideWeightList.add(distrQWeightOverrideWeightByIndex[ci][k]);
             }
         }
-        if (dqKeyOvMemberByIndex != null && dqKeyOvMemberByIndex[ci] != null) {
-            for (int k = 0; k < dqKeyOvMemberByIndex[ci].length; k++) {
-                cl.dqKeyOvIdxList.add(s);
-                cl.dqKeyOvIdxList.add(dqKeyOvMemberByIndex[ci][k]);
-                cl.dqKeyOvList.add(dqKeyOvByIndex[ci][k]);
+        if (distrQKeyOverrideMemberByIndex != null && distrQKeyOverrideMemberByIndex[ci] != null) {
+            for (int k = 0; k < distrQKeyOverrideMemberByIndex[ci].length; k++) {
+                cl.distrQKeyOverrideScenarioMemberList.add(s);
+                cl.distrQKeyOverrideScenarioMemberList.add(distrQKeyOverrideMemberByIndex[ci][k]);
+                cl.distrQKeyOverrideKeyList.add(distrQKeyOverrideKeyByIndex[ci][k]);
             }
         }
         if (distrRhoOverrideTermByIndex != null && distrRhoOverrideTermByIndex[ci] != null) {
@@ -72,11 +72,11 @@ final class PlanOverrideSeed {
                 cl.rlIslandedList.add(controller);
             }
         }
-        if (dqSubByIndex != null && dqSubByIndex[ci] != null && cl.nDqMembersAll > 0) {
-            for (int p = 0; p < dqSubByIndex[ci].length; p += 2) {
-                cl.dqSubDense[s * cl.nDqMembersAll + dqSubByIndex[ci][p]] = (byte) dqSubByIndex[ci][p + 1];
+        if (distrQSubgroupByIndex != null && distrQSubgroupByIndex[ci] != null && cl.nDistrQMembersAll > 0) {
+            for (int p = 0; p < distrQSubgroupByIndex[ci].length; p += 2) {
+                cl.distrQSubgroupDense[s * cl.nDistrQMembersAll + distrQSubgroupByIndex[ci][p]] = (byte) distrQSubgroupByIndex[ci][p + 1];
             }
-            cl.anyDqSub = true;
+            cl.anyDistrQSubgroup = true;
         }
     }
 }

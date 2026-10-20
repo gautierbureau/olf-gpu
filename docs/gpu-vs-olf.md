@@ -174,7 +174,7 @@ constants carry OLF's constant names.
 | `GpuReactiveLimitsState` | a bus's QLimitType + `pvPqSwitchCount` | `LIMIT_TYPE_MASK` 7 (a `GpuQLimitType`), `PV_PQ_SWITCH_COUNT_SHIFT` 3 |
 | `GpuVoltageControlRole` | a bus's place in its `GeneratorVoltageControl` | `LOCAL` 0, `REMOTE` 1 (robust mode rule applies), `PILOT_SELF` 2 (device term, section 6), `REMOTE_ROBUST_MODE_EXEMPT` 3 (own control local) |
 | `GpuReactiveLimitsEntryFlag` | bit flags of a reactive-limit entry | `STAND_BY_AUTOMATON` 1 (an SVC under OLF's `StandByAutomaton`), `NOT_CONTROLLER_ELEMENT` 2 |
-| `GpuReactiveTermKind` | the terms `createReactiveTerms` sums (DISTR_Q `dqKind`, remote member `rmqKind`) | `CLOSED_BRANCH_REACTIVE_FLOW` 0, `SHUNT_COMPENSATOR_REACTIVE_FLOW` 1, `OPEN_BRANCH_REACTIVE_FLOW` 2, `DUMMY_Q` 3 |
+| `GpuReactiveTermKind` | the terms `createReactiveTerms` sums (DISTR_Q `distrQKind`, remote member `rmqKind`) | `CLOSED_BRANCH_REACTIVE_FLOW` 0, `SHUNT_COMPENSATOR_REACTIVE_FLOW` 1, `OPEN_BRANCH_REACTIVE_FLOW` 2, `DUMMY_Q` 3 |
 | `GpuRealisticVoltageFixingLoop` | the last loop whose `canFixUnrealisticState()` is true (robust mode) | `NONE` -1, `REACTIVE_LIMITS` 0, `TRANSFORMER_VOLTAGE_CONTROL` 1 |
 | `GpuLinearSolveMode` | device only (OLF factors one KLU matrix per solve) | `UBATCH` 3, `ROBUST` 6 |
 | `GpuControlledFlow` | the flow a flow-observed controller acts on: IncrementalTransformerReactivePowerControl, IncrementalPhaseControl CONTROLLER / LIMITER | `REACTIVE_POWER` 0, `ACTIVE_POWER` 1, `CURRENT` 2; the driver selects kinds with `controlledFlowMaskBit` |

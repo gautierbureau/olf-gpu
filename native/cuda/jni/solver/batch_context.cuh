@@ -42,7 +42,7 @@ struct BatchSolverContext {
     int nScenarios = 0;
     int nElements = 0;
     int closedBranchOffset = 0, openBranchOffset = 0, shuntOffset = 0, hvdcAcEmulationOffset = 0;   // element-mask offsets per family
-    int ndq = 0, nDistrRho = 0, nDistrShuntB = 0, nZeroImpedanceBranch = 0;                  // copies of the structure counts
+    int nDistrQ = 0, nDistrRho = 0, nDistrShuntB = 0, nZeroImpedanceBranch = 0;                  // copies of the structure counts
     DeviceBuf dX, dTarget, dF, dB, dDx, dVals, dMode;        // per-scenario (n or nnz strided)
     // per scenario: the state at its last CONVERGED inner solve (its starting state before any): what OLF's network
     // holds when a run fails (NewtonRaphson updates the buses only on convergence), and so where OLF starts the
@@ -114,10 +114,10 @@ struct BatchSolverContext {
     DeviceBuf dPsSkip;                                       // nQr * nScenarios chars
     bool hasPilotSelf = false;
     DeviceBuf dRlLoadQDyn;                                       // per (scenario, controller) — shed load Q
-    int nDqInact = 0;                                            // {slot, dqMember} pairs: a controller
-    DeviceBuf dDqInact;                                          // that stops controlling in ONE scenario
-    bool hasDqSub = false;                                       // tasks #71: per (scenario, dq member) subgroup
-    DeviceBuf dDqSub;                                            // labels (char, dense nS x nDqMembers) and the
+    int nDistrQInactiveMembers = 0;                                            // {slot, distrQMember} pairs: a controller
+    DeviceBuf dDistrQInactiveMembers;                                          // that stops controlling in ONE scenario
+    bool hasDistrQSubgroups = false;                                       // tasks #71: per (scenario, dq member) subgroup
+    DeviceBuf dDistrQSubgroup;                                            // labels (char, dense nS x nDistrQMembers) and the
     DeviceBuf dQrMemberStart;                                    // qr group -> first dq member map
     // Reactive capability CURVES at runtime P (setBatchRlCurves): per participating curve gen —
     // cvIdx {rlIdx, pRow, ptsOff, npts, dsGenSlot}, cvIn {basePpu, share, baseRowTargetP, baseEvalMinPu, baseEvalMaxPu},
@@ -139,16 +139,16 @@ struct BatchSolverContext {
     int fqExtrapolate = 0;
     bool fqHasPre = false;
     DeviceBuf dFqIdx, dFqIn, dFqPts, dFqApplied, dFqPre;
-    // DISTR_Q weight overrides (setBatchDqWeightOverrides): a gen outage at a remote-VC controller
+    // DISTR_Q weight overrides (setBatchDistrQWeightOverrides): a gen outage at a remote-VC controller
     // bus renormalizes the group's qPct keys per scenario — {s, contrib} pairs + the new weight.
-    int nDqOv = 0;
-    DeviceBuf dDqOvIdx, dDqOvW;
-    // Per-scenario member reactive KEYS (setBatchDqKeyOverrides, {slot, member} -> OLF's qPct after the scenario's
+    int nDistrQWeightOverrides = 0;
+    DeviceBuf dDistrQWeightOverrideScenarioTerm, dDistrQWeightOverrideWeight;
+    // Per-scenario member reactive KEYS (setBatchDistrQKeyOverrides, {slot, member} -> OLF's qPct after the scenario's
     // generator losses): the DISTR_Q fill and the target kernel renormalize these over the members a pin leaves
     // enabled, so an outage and an in-flight pin in one group compose. The per-contribution weight overrides stay
     // for what keys cannot express (a re-extracted pack whose free role moved).
-    int nDqKeyOv = 0;
-    DeviceBuf dDqKeyOvIdx, dDqKeyOvKey;
+    int nDistrQKeyOverrides = 0;
+    DeviceBuf dDistrQKeyOverrideScenarioMember, dDistrQKeyOverrideKey;
     // DISTR_RHO coefficient overrides (setBatchDistrRhoCoefficientOverrides): a member outage renormalizes the
     // group's 1/count coefficients per scenario — {s, contrib} pairs + the new coefficient.
     int nDistrRhoCoefficientOverrides = 0;
@@ -173,25 +173,25 @@ struct BatchSolverContext {
     DeviceBuf dRlSvcBminDyn, dRlSvcBmaxDyn;                // per (scenario, entry) coefs when a lost SVC takes its share
     DeviceBuf dRlSvcBmin, dRlSvcBmax, dRlV2Base;           // per-entry SVC quadratic limit coefs + packed base v^2
                                                            // (limit(v) = static + b*(v^2 - v2Base)); zeroed default
-    int nDqDyn = 0;                                        // dynamic reactive keys (plan-B3): an RL pin zeroes the
-    DeviceBuf dDqKMember;                                  // pinned member's key and renormalizes the DISTR_Q
-    DeviceBuf dDqJMember;                                  // weights over the survivors (updateReactiveKeys) — the
-    DeviceBuf dDqMemberKey;                                // kernel recomputes each contribution's weight from the
-    DeviceBuf dDqMemberRlEntry;                            // RAW keys + the per-(entry, scenario) limitType,
-    DeviceBuf dDqMemberGroupStart;                         // zero-then-sum in member order (bit-exact vs OLF)
-    DeviceBuf dDqMemberGroupCount;
-    DeviceBuf dDqMemberRow;                                // per member: its own row (vCol) + whether it OWNS a
-    DeviceBuf dDqMemberHasRow;                             // packed DISTR_Q row (non-free with existing equation)
-    DeviceBuf dDqMemberTargetQ;                            // per member: its UNPINNED targetQ (generationTargetQ -
+    int nDistrQDynamicKeys = 0;                                        // dynamic reactive keys (plan-B3): an RL pin zeroes the
+    DeviceBuf dDistrQRowMember;                                  // pinned member's key and renormalizes the DISTR_Q
+    DeviceBuf dDistrQInjectionMember;                                  // weights over the survivors (updateReactiveKeys) — the
+    DeviceBuf dDistrQMemberKey;                                // kernel recomputes each contribution's weight from the
+    DeviceBuf dDistrQMemberReactiveLimitEntry;                            // RAW keys + the per-(entry, scenario) limitType,
+    DeviceBuf dDistrQMemberGroupStart;                         // zero-then-sum in member order (bit-exact vs OLF)
+    DeviceBuf dDistrQMemberGroupCount;
+    DeviceBuf dDistrQMemberRow;                                // per member: its own row (vCol) + whether it OWNS a
+    DeviceBuf dDistrQMemberHasRow;                             // packed DISTR_Q row (non-free with existing equation)
+    DeviceBuf dDistrQMemberTargetQ;                            // per member: its UNPINNED targetQ (generationTargetQ -
                                                            // loadTargetQ), the value AcTargetVector reads for every
                                                            // member the RL loop has not frozen
     DeviceBuf dLinRp, dLinRm, dLinSc;                      // linear-solve guard scratch, reused across passes
-    DeviceBuf dDqMemberTgtPtr;                             // per member (CSR): the members whose targetQ OLF sums
-    DeviceBuf dDqMemberTgtPeer;                            // into its DISTR_Q target — its OWN control's elements,
+    DeviceBuf dDistrQMemberTargetPeerStart;                             // per member (CSR): the members whose targetQ OLF sums
+    DeviceBuf dDistrQMemberTargetPeer;                            // into its DISTR_Q target — its OWN control's elements,
                                                            // just itself for a control MERGED into the group
-    int nDqMembers = 0;
-    int hasDqQrGroups = 0;                                 // plan-B4: any member linked to a pilot-Q relocation group
-    DeviceBuf dDqMemberQrGroup;                            // per member: the pilot's qr candidate group id, -1 = none
+    int nDistrQMembers = 0;
+    int hasDistrQRelocationGroups = 0;                                 // plan-B4: any member linked to a pilot-Q relocation group
+    DeviceBuf dDistrQMemberRelocationGroup;                            // per member: the pilot's qr candidate group id, -1 = none
     DeviceBuf dQrPilotQ;                                   // per (scenario, qr group): the pilot's Q target, captured
                                                            // at solve init from the BASE carrier's row and handed to
                                                            // the CURRENT carrier's row on every re-pick
@@ -442,9 +442,9 @@ struct BatchSolverContext {
     DeviceBuf dRlCmpOv;                                      // remote controllers re-homed onto a NEW pilot: (scenario,
     int nRlCmp = 0;                                          // entry) -> the new pilot's V row, -1 = the base pilot's
     DeviceBuf dRlIslanded;
-    int nDqTqOv = 0;                                       // per-scenario member targetQ overrides
-    DeviceBuf dDqTqOvKey;
-    DeviceBuf dDqTqOvVal;
+    int nDistrQMemberTargetQOverrides = 0;                                       // per-scenario member targetQ overrides
+    DeviceBuf dDistrQMemberTargetQOverrideKey;
+    DeviceBuf dDistrQMemberTargetQOverrideValue;
     int hasDsSlackRowOv = 0;                               // per-slot slack row (a relocated slack), device rows
     DeviceBuf dDsSlackRowOv;                               // -1 = the base slack row
     int nQrPqDelta = 0;                                    // per-scenario moves of a pilot's captured Q target

@@ -45,7 +45,7 @@ __global__ void rlForcedPvElectBatch(int nrl, int nScenarios, int n,
 __global__ void rlPilotSelfMixedGate(int nrl, int nScenarios, const char* rlRemote, const int* rlCmpVrow,
                                      const char* limitType, const char* rlIslanded, char* bad,
                                      const int* psEntry, int nQr,
-                                int nDqMembers, const int* dqMemberRlEntry, const char* dqSub);
+                                int nDistrQMembers, const int* distrQMemberReactiveLimitEntry, const char* distrQSubgroup);
 
 __global__ void rlUnpinBatch(int nPairs, int nS, int n, int nrl, const int* pairs, const double* newTarget,
                              const int* rlVrow, char* limitType, const char* savedMode, int* mode, double* target);

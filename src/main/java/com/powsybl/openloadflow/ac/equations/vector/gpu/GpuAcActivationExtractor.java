@@ -436,7 +436,7 @@ public final class GpuAcActivationExtractor {
      * ({@code updateReactiveKeys}) and fires NO equation-system event, so a cached extraction would keep its
      * pre-pin {@code qPct} and the device would distribute reactive power with stale weights. A caller that
      * caches an extraction across solves therefore watches this set and re-extracts when it changes: the fresh
-     * pack's {@code dqWeight} differs, which {@code GpuAcData.sameStructureAs} compares, so the structure is
+     * pack's {@code distrQWeight} differs, which {@code GpuAcData.sameStructureAs} compares, so the structure is
      * REBUILT with OLF's renormalized keys instead of being value-refreshed in place.
      */
     public static java.util.BitSet pinnedRemoteMembers(LfNetwork network,

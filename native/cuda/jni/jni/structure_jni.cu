@@ -9,7 +9,7 @@ OLF_JNI(ac_equations_vector_gpu, StructureNative, createStructure)(
         JNIEnv* env, jclass, jint n,
         jdoubleArray jClosedBranchParameters, jintArray jClosedBranchIndices, jdoubleArray jOpenBranchParameters, jintArray jOpenBranchIndices,
         jdoubleArray jShuntParameters, jintArray jShuntIndices, jdoubleArray jHvdcAcEmulationParameters, jintArray jHvdcAcEmulationIndices,
-        jintArray jdqElem, jintArray jdqSide, jdoubleArray jdqWeight, jintArray jdqRow, jintArray jdqKind,
+        jintArray jDistrQElement, jintArray jDistrQSide, jdoubleArray jDistrQWeight, jintArray jDistrQRow, jintArray jDistrQKind,
         jdoubleArray jZeroImpedanceBranchParameters, jintArray jZeroImpedanceBranchIndices,
         jintArray jDistrRhoRow, jintArray jDistrRhoColumn, jdoubleArray jDistrRhoCoefficient,
         jintArray jDistrShuntBRow, jintArray jDistrShuntBColumn, jdoubleArray jDistrShuntBCoefficient, jintArray jClosedBranchPhaseControlSide,
@@ -23,11 +23,11 @@ OLF_JNI(ac_equations_vector_gpu, StructureNative, createStructure)(
     jint* shuntIndices = env->GetIntArrayElements(jShuntIndices, nullptr);
     jdouble* hvdcAcEmulationParameters = env->GetDoubleArrayElements(jHvdcAcEmulationParameters, nullptr);
     jint* hvdcAcEmulationIndices = env->GetIntArrayElements(jHvdcAcEmulationIndices, nullptr);
-    jint* dqElem = env->GetIntArrayElements(jdqElem, nullptr);
-    jint* dqSide = env->GetIntArrayElements(jdqSide, nullptr);
-    jdouble* dqWeight = env->GetDoubleArrayElements(jdqWeight, nullptr);
-    jint* dqRow = env->GetIntArrayElements(jdqRow, nullptr);
-    jint* dqKind = env->GetIntArrayElements(jdqKind, nullptr);
+    jint* distrQElement = env->GetIntArrayElements(jDistrQElement, nullptr);
+    jint* distrQSide = env->GetIntArrayElements(jDistrQSide, nullptr);
+    jdouble* distrQWeight = env->GetDoubleArrayElements(jDistrQWeight, nullptr);
+    jint* distrQRow = env->GetIntArrayElements(jDistrQRow, nullptr);
+    jint* distrQKind = env->GetIntArrayElements(jDistrQKind, nullptr);
     jdouble* zeroImpedanceBranchParameters = env->GetDoubleArrayElements(jZeroImpedanceBranchParameters, nullptr);
     jint* zeroImpedanceBranchIndices = env->GetIntArrayElements(jZeroImpedanceBranchIndices, nullptr);
     jint* distrRhoRow = env->GetIntArrayElements(jDistrRhoRow, nullptr);
@@ -53,7 +53,7 @@ OLF_JNI(ac_equations_vector_gpu, StructureNative, createStructure)(
     int nOpenBranch = env->GetArrayLength(jOpenBranchIndices) / 6;
     int nShunt = env->GetArrayLength(jShuntIndices) / 5;             // shuntIndices stride 5 (P Q v bcol qAlt)
     int nHvdcAcEmulation = env->GetArrayLength(jHvdcAcEmulationIndices) / 4;
-    int ndq = env->GetArrayLength(jdqElem);
+    int nDistrQ = env->GetArrayLength(jDistrQElement);
     int nZeroImpedanceBranch = env->GetArrayLength(jZeroImpedanceBranchIndices) / 11;
     int nDistrRho = env->GetArrayLength(jDistrRhoRow);
     int nDistrShuntB = env->GetArrayLength(jDistrShuntBRow);
@@ -93,7 +93,7 @@ OLF_JNI(ac_equations_vector_gpu, StructureNative, createStructure)(
             }
         }
         checkRange("hvdcAcEmulationIndices", hvdcAcEmulationIndices, nHvdcAcEmulation, 4, {0, 1, 2, 3}, -1, n);
-        checkRange("dqRow", dqRow, ndq, 1, {0}, 0, n);
+        checkRange("distrQRow", distrQRow, nDistrQ, 1, {0}, 0, n);
         checkRange("zeroImpedanceBranchIndices", zeroImpedanceBranchIndices, nZeroImpedanceBranch, 11, {0, 1, 2, 3, 4, 5, 6, 7, 8, 9}, -1, n);
         // slot 10 is the FLAGS word, not a row: bit 0 spanning-tree, bits 1-2 the relocated child side,
         // bit 3 "the side came from the coupler-tree walk". Checking it against n rejected a valid
@@ -114,7 +114,7 @@ OLF_JNI(ac_equations_vector_gpu, StructureNative, createStructure)(
         }
         st = new SharedStructurePtr(buildStructure(n, nClosedBranch, closedBranchParameters, closedBranchIndices, nOpenBranch, openBranchParameters, openBranchIndices,
                                                    nShunt, shuntParameters, shuntIndices, nHvdcAcEmulation, hvdcAcEmulationParameters, hvdcAcEmulationIndices,
-                                                   ndq, dqElem, dqSide, dqWeight, dqRow, dqKind,
+                                                   nDistrQ, distrQElement, distrQSide, distrQWeight, distrQRow, distrQKind,
                                                    nZeroImpedanceBranch, zeroImpedanceBranchParameters, zeroImpedanceBranchIndices,
                                                    nDistrRho, distrRhoRow, distrRhoColumn, distrRhoCoefficient,
                                                    nDistrShuntB, distrShuntBRow, distrShuntBColumn, distrShuntBCoefficient, closedBranchPhaseControlSide,
@@ -137,11 +137,11 @@ OLF_JNI(ac_equations_vector_gpu, StructureNative, createStructure)(
     env->ReleaseIntArrayElements(jShuntIndices, shuntIndices, JNI_ABORT);
     env->ReleaseDoubleArrayElements(jHvdcAcEmulationParameters, hvdcAcEmulationParameters, JNI_ABORT);
     env->ReleaseIntArrayElements(jHvdcAcEmulationIndices, hvdcAcEmulationIndices, JNI_ABORT);
-    env->ReleaseIntArrayElements(jdqElem, dqElem, JNI_ABORT);
-    env->ReleaseIntArrayElements(jdqSide, dqSide, JNI_ABORT);
-    env->ReleaseDoubleArrayElements(jdqWeight, dqWeight, JNI_ABORT);
-    env->ReleaseIntArrayElements(jdqRow, dqRow, JNI_ABORT);
-    env->ReleaseIntArrayElements(jdqKind, dqKind, JNI_ABORT);
+    env->ReleaseIntArrayElements(jDistrQElement, distrQElement, JNI_ABORT);
+    env->ReleaseIntArrayElements(jDistrQSide, distrQSide, JNI_ABORT);
+    env->ReleaseDoubleArrayElements(jDistrQWeight, distrQWeight, JNI_ABORT);
+    env->ReleaseIntArrayElements(jDistrQRow, distrQRow, JNI_ABORT);
+    env->ReleaseIntArrayElements(jDistrQKind, distrQKind, JNI_ABORT);
     env->ReleaseDoubleArrayElements(jZeroImpedanceBranchParameters, zeroImpedanceBranchParameters, JNI_ABORT);
     env->ReleaseIntArrayElements(jZeroImpedanceBranchIndices, zeroImpedanceBranchIndices, JNI_ABORT);
     env->ReleaseIntArrayElements(jDistrRhoRow, distrRhoRow, JNI_ABORT);

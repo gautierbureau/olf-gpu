@@ -96,17 +96,17 @@ public final class ReactiveLimitsNative {
 
     /** Remote-member RL entries (plan-B1): per-entry remote kinds + compare rows (PILOT v column for
      *  remote group members — both RL switch conditions test the pilot's V against the GROUP target).
-     *  {@code dqMemberQrGroup} (plan-B4) links each group member to its pilot's relocation candidate
+     *  {@code distrQMemberRelocationGroup} (plan-B4) links each group member to its pilot's relocation candidate
      *  group (−1 = none) so the kernels suppress the CURRENT carrier's DISTR_Q row and hand its
      *  target the pilot's Q when the free role re-picks. Nulls clear. */
     public static native void setBatchRlRemote(long handle, byte[] rlRemote, int[] rlCmpVrow,
                                                int[] rmqRow, int[] rmqElem, int[] rmqSide, int[] rmqKind,
                                                double[] rmqWeight,
-                                               int[] dqKMember, int[] dqJMember, double[] dqMemberKey,
-                                               int[] dqMemberRlEntry, int[] dqMemberGroupStart,
-                                               int[] dqMemberGroupCount, int[] dqMemberRow, byte[] dqMemberHasRow,
-                                               int[] dqMemberQrGroup, double[] dqMemberTargetQ,
-                                               int[] dqMemberTgtPtr, int[] dqMemberTgtPeer);
+                                               int[] distrQRowMember, int[] distrQInjectionMember, double[] distrQMemberKey,
+                                               int[] distrQMemberReactiveLimitEntry, int[] distrQMemberGroupStart,
+                                               int[] distrQMemberGroupCount, int[] distrQMemberRow, byte[] distrQMemberHasRow,
+                                               int[] distrQMemberRelocationGroup, double[] distrQMemberTargetQ,
+                                               int[] distrQMemberTargetPeerStart, int[] distrQMemberTargetPeer);
 
     /** {@code voltageRemoteControlRobustMode} (OLF's default): per RL entry, the initial generation
      *  target Q a realistic-V freeze pins at, plus the two thresholds the controller's OWN voltage is

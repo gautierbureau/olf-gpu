@@ -74,7 +74,7 @@ final class OutageMaskSeed {
                     }
                     var sopi = so.branch().getPiModel();
                     System.err.printf("SIDEOPEN_DQ ctg=%s branch=%s side=%d elem=%d"
-                                    + " dqContribs=%d base(g1=%.9e b1=%.9e g2=%.9e b2=%.9e)"
+                                    + " distrQTerms=%d base(g1=%.9e b1=%.9e g2=%.9e b2=%.9e)"
                                     + " eq(g1=%.9e b1=%.9e g2=%.9e b2=%.9e)%n",
                             contingencies.get(ci).contingencyId(), so.branch().getId(),
                             so.side(), soElem, hits,

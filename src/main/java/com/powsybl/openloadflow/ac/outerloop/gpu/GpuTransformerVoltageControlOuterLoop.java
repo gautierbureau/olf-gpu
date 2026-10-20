@@ -15,6 +15,7 @@ import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchSkips;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.BatchContingency;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuDiscreteControlMemberState;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuPiModelColumn;
+import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuTransformerVoltageControlMode;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.TargetVector;
 import com.powsybl.openloadflow.equations.Variable;
@@ -671,13 +672,12 @@ public final class GpuTransformerVoltageControlOuterLoop {
     }
 
     /** Install the controls for the in-kernel DISCRETE TransformerVoltageControl phase (OLF order 8):
-     *  {@code mode} 0 = AFTER_GENERATOR (TransformerVoltageControlOuterLoop), 1 = WITH_GENERATOR
-     *  (SimpleTransformerVoltageControlOuterLoop); {@code entryOn} = the activation the solve starts from
+     *  {@code mode} a GpuTransformerVoltageControlMode; {@code entryOn} = the activation the solve starts from
      *  already carries the control ON (the WITH_GENERATOR base load flow — OLF's initialize ran on the
      *  network). Returns true when the kernel loop owns them (every member has a tap table). */
     public static boolean uploadToDevice(long handle, List<TransformerController> tcs, int mode, boolean entryOn) {
         if (tcs == null || tcs.isEmpty()) {
-            TransformerVoltageControlNative.setBatchDiscreteTvc(handle, 0, 0, null, null, null, null, null, null, null, null, null,
+            TransformerVoltageControlNative.setBatchDiscreteTvc(handle, GpuTransformerVoltageControlMode.AFTER_GENERATOR_VOLTAGE_CONTROL, 0, null, null, null, null, null, null, null, null, null,
                     null, null, null, null, null, null, null, null, null, null);
             return false;
         }
@@ -747,11 +747,11 @@ public final class GpuTransformerVoltageControlOuterLoop {
                 memInit.stream().mapToDouble(Double::doubleValue).toArray(),
                 tapData.stream().mapToDouble(Double::doubleValue).toArray()) != 0;
         if (!owned) {
-            TransformerVoltageControlNative.setBatchDiscreteTvc(handle, 0, 0, null, null, null, null, null, null, null, null, null,
+            TransformerVoltageControlNative.setBatchDiscreteTvc(handle, GpuTransformerVoltageControlMode.AFTER_GENERATOR_VOLTAGE_CONTROL, 0, null, null, null, null, null, null, null, null, null,
                     null, null, null, null, null, null, null, null, null, null);
         }
         LOGGER.info("Uploaded {} discrete transformer voltage controls ({} members, mode {}) to device: {}",
-                nG, memRhoRow.size(), mode == 1 ? "WITH_GENERATOR" : "AFTER_GENERATOR", owned ? "in-kernel loop" : "host orchestrator");
+                nG, memRhoRow.size(), mode == GpuTransformerVoltageControlMode.WITH_GENERATOR_VOLTAGE_CONTROL ? "WITH_GENERATOR" : "AFTER_GENERATOR", owned ? "in-kernel loop" : "host orchestrator");
         if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
             System.err.printf("TVD_UPLOAD mode=%d entryOn=%b nGroups=%d nMembers=%d kernel=%b%n", mode, entryOn, nG, memRhoRow.size(), owned);
         }

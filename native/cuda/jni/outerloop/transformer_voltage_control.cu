@@ -16,6 +16,7 @@
 #include "../common/codes/gpu_q_limit_type.cuh"
 #include "../common/codes/gpu_pi_model_column.cuh"
 #include "../common/codes/gpu_discrete_control_member_state.cuh"
+#include "../common/codes/gpu_transformer_voltage_control_mode.cuh"
 #include "../solver/driver_steps.cuh"
 #include "incremental_transformer_voltage_control.cuh"
 #include "transformer_voltage_control.cuh"
@@ -23,11 +24,11 @@
 namespace olfgpu {
 
 // OLF's non-incremental voltage-control loops as driver phases:
-//  - TransformerVoltageControlOuterLoop (AFTER_GENERATOR, tvdMode 0): INITIAL (enable the out-of-deadband
+//  - TransformerVoltageControlOuterLoop (AFTER_GENERATOR_VOLTAGE_CONTROL): INITIAL (enable the out-of-deadband
 //    controls, TransformerRatioManager bounds) -> CONTROL (clamp continuous ratios outside their range to
 //    the extreme, round, disable; else updateContinuousRatio + roundVoltageRatios -> COMPLETE; UNSTABLE in
 //    any case) -> COMPLETE (STABLE);
-//  - SimpleTransformerVoltageControlOuterLoop (WITH_GENERATOR, tvdMode 1): control ON for the first solve,
+//  - SimpleTransformerVoltageControlOuterLoop (WITH_GENERATOR_VOLTAGE_CONTROL): control ON for the first solve,
 //    every controller rounded to its closest tap and switched off at the first check (UNSTABLE);
 // A group's ON/OFF activations are the toggle-diffed row deltas the Java side captured; member rows are
 // laid out by ROLE per scenario — the first alive continuous member hosts the relocated pilot Q (the
@@ -159,7 +160,7 @@ __global__ void tvdEntryBatch(TvdTables T, int nScenarios, int n, int nElements,
             size_t sm = (size_t) s * T.nM + m;
             if (entryOn) {
                 T.memState[sm] = mode[sn + T.memRhoRow[m]] == 1 ? GpuDiscreteControlMemberState::CONTINUOUS : GpuDiscreteControlMemberState::DISABLED;
-            } else if (T.mode == 1) {
+            } else if (T.mode == GpuTransformerVoltageControlMode::WITH_GENERATOR_VOLTAGE_CONTROL) {
                 T.memState[sm] = GpuDiscreteControlMemberState::CONTINUOUS;
                 any = true;
             }
@@ -174,7 +175,7 @@ __global__ void tvdCheckBatch(TvdTables T, int nScenarios, int n, int nElements,
     int s = blockIdx.x * blockDim.x + threadIdx.x;
     if (s >= nScenarios || !rlActive[s]) return;
     size_t sn = (size_t) s * n;
-    if (T.mode == 1) {                                       // SimpleTransformerVoltageControl: iteration 0 rounds all
+    if (T.mode == GpuTransformerVoltageControlMode::WITH_GENERATOR_VOLTAGE_CONTROL) {                                       // SimpleTransformerVoltageControl: iteration 0 rounds all
         bool anyCtl = false;
         for (int g = 0; g < T.nG; g++) {
             size_t sg = (size_t) s * T.nG + g;

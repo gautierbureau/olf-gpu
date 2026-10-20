@@ -17,6 +17,7 @@
 #include "../common/stats.cuh"
 #include "../common/codes/gpu_ac_solver_status.cuh"
 #include "../common/codes/gpu_outer_loop_kind.cuh"
+#include "../common/codes/gpu_transformer_voltage_control_mode.cuh"
 #include "../equations/branch_fill.cuh"
 #include "../equations/bus_injection_fill.cuh"
 #include "../equations/distribution_fill.cuh"
@@ -205,7 +206,7 @@ void traceBatchPass(BatchSolverContext* ctx, DriverPass& drv, int nLoops, bool s
             case GpuOuterLoopKind::INCREMENTAL_SHUNT_VOLTAGE_CONTROL: kindName = "ShuntVoltageControl"; break;
             case GpuOuterLoopKind::INCREMENTAL_PHASE_CONTROL: kindName = ctx->nCph > 0 ? "PhaseControl" : "IncrementalPhaseControl"; break;
             case GpuOuterLoopKind::INCREMENTAL_TRANSFORMER_REACTIVE_POWER_CONTROL:  kindName = "TransformerReactivePowerControl"; break;
-            case GpuOuterLoopKind::TRANSFORMER_VOLTAGE_CONTROL:   kindName = ctx->tvdMode == 1 ? "SimpleTransformerVoltageControl" : "TransformerVoltageControl"; break;
+            case GpuOuterLoopKind::TRANSFORMER_VOLTAGE_CONTROL:   kindName = ctx->tvdMode == GpuTransformerVoltageControlMode::WITH_GENERATOR_VOLTAGE_CONTROL ? "SimpleTransformerVoltageControl" : "TransformerVoltageControl"; break;
             case GpuOuterLoopKind::SHUNT_VOLTAGE_CONTROL:   kindName = "ShuntVoltageControl"; break;
             case GpuOuterLoopKind::SECONDARY_VOLTAGE_CONTROL:   kindName = "SecondaryVoltageControl"; break;
         }

@@ -9,6 +9,7 @@ package com.powsybl.openloadflow.ac.outerloop.gpu;
 
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchSkips;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuOuterLoopKind;
+import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuTransformerVoltageControlMode;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -44,7 +45,7 @@ public final class DevicePhaseOwnership {
         int mask = hostMask;
         if (!GpuBatchSkips.complete(GpuBatchSkips.Slot.TVC)) {
             GpuIncrementalTransformerVoltageControlOuterLoop.uploadToDevice(handle, null, 1);
-            GpuTransformerVoltageControlOuterLoop.uploadToDevice(handle, null, 0, false);
+            GpuTransformerVoltageControlOuterLoop.uploadToDevice(handle, null, GpuTransformerVoltageControlMode.AFTER_GENERATOR_VOLTAGE_CONTROL, false);
             GpuTransformerVoltageControlOuterLoop.uploadFreeze(handle, null);
             mask |= GpuOuterLoopKind.hostMaskBit(GpuOuterLoopKind.HOST_TRANSFORMER_VOLTAGE_CONTROL);
         }

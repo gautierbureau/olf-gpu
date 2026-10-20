@@ -20,6 +20,7 @@
 #include "../common/codes/gpu_ac_solver_status.cuh"
 #include "../common/codes/gpu_outer_loop_kind.cuh"
 #include "../common/codes/gpu_realistic_voltage_fixing_loop.cuh"
+#include "../common/codes/gpu_transformer_voltage_control_mode.cuh"
 #include "../structure/shared_structure.cuh"
 
 namespace olfgpu {
@@ -355,10 +356,10 @@ struct BatchSolverContext {
     std::vector<int> hShOvBaseSlotElem;                      // the caller's shunt overrides at solve entry
     std::vector<double> hShOvBaseGb;
     // DISCRETE (non-incremental) TRANSFORMER VOLTAGE CONTROL — GpuOuterLoopKind::TRANSFORMER_VOLTAGE_CONTROL (OLF order 8): OLF's
-    // TransformerVoltageControlOuterLoop (tvdMode 0, AFTER_GENERATOR: INITIAL/CONTROL/COMPLETE) or
-    // SimpleTransformerVoltageControlOuterLoop (tvdMode 1, WITH_GENERATOR). One group per controlled bus
+    // TransformerVoltageControlOuterLoop (AFTER_GENERATOR_VOLTAGE_CONTROL: INITIAL/CONTROL/COMPLETE) or
+    // SimpleTransformerVoltageControlOuterLoop (WITH_GENERATOR_VOLTAGE_CONTROL). One group per controlled bus
     // (CSR over members); the group's ON/OFF activations are the toggle-diffed row deltas (CSR).
-    int nTvd = 0, nTvdGroups = 0, nTvdDelta = 0, tvdMode = 0, tvdEntryOn = 0;
+    int nTvd = 0, nTvdGroups = 0, nTvdDelta = 0, tvdMode = GpuTransformerVoltageControlMode::AFTER_GENERATOR_VOLTAGE_CONTROL, tvdEntryOn = 0;
     DeviceBuf dTvdGrpPtr, dTvdGrpVRow, dTvdGrpTargetV, dTvdGrpHalfDb, dTvdGrpUseInit;
     DeviceBuf dTvdDeltaPtr, dTvdDeltaRow, dTvdDeltaModeOn, dTvdDeltaModeOff, dTvdDeltaTargetOn, dTvdDeltaTargetOff;
     DeviceBuf dTvdMemRhoRow, dTvdMemElem, dTvdMemBaseTap, dTvdMemTapPtr, dTvdMemMin, dTvdMemMax, dTvdMemInit, dTvdTapData;

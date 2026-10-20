@@ -7,6 +7,7 @@
  */
 package com.powsybl.openloadflow.ac.outerloop.gpu;
 
+import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuTransformerVoltageControlMode;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -66,14 +67,15 @@ public final class DevicePhaseInstaller {
         // without a tap table) is not owned.
         boolean tvdInKernel = false;
         if (r.discreteTvc() != null) {
-            tvdInKernel = GpuTransformerVoltageControlOuterLoop.uploadToDevice(handle, r.discreteTvc(), r.simpleTvc() ? 1 : 0,
+            tvdInKernel = GpuTransformerVoltageControlOuterLoop.uploadToDevice(handle, r.discreteTvc(), r.simpleTvc()
+                    ? GpuTransformerVoltageControlMode.WITH_GENERATOR_VOLTAGE_CONTROL : GpuTransformerVoltageControlMode.AFTER_GENERATOR_VOLTAGE_CONTROL,
                     r.entryOn() && r.simpleTvc());
             if (tvdInKernel && r.afterGenerator()) {
                 // AFTER_GENERATOR: OLF's GeneratorVoltageControlManager freezes the generator controls under the
                 // transformer-controlled level while the transformers act. Without the freeze tables (a candidate
                 // the kernel cannot represent) the device does not own the loop.
                 if (r.freeze() == null) {
-                    GpuTransformerVoltageControlOuterLoop.uploadToDevice(handle, null, 0, false);
+                    GpuTransformerVoltageControlOuterLoop.uploadToDevice(handle, null, GpuTransformerVoltageControlMode.AFTER_GENERATOR_VOLTAGE_CONTROL, false);
                     tvdInKernel = false;
                 } else {
                     GpuTransformerVoltageControlOuterLoop.uploadFreeze(handle, r.freeze());
@@ -82,7 +84,7 @@ public final class DevicePhaseInstaller {
                 GpuTransformerVoltageControlOuterLoop.uploadFreeze(handle, null);   // WITH_GENERATOR freezes nothing
             }
         } else {
-            GpuTransformerVoltageControlOuterLoop.uploadToDevice(handle, null, 0, false);   // clears a cached context's table
+            GpuTransformerVoltageControlOuterLoop.uploadToDevice(handle, null, GpuTransformerVoltageControlMode.AFTER_GENERATOR_VOLTAGE_CONTROL, false);   // clears a cached context's table
         }
         boolean svdInKernel = GpuShuntVoltageControlOuterLoop.uploadToDevice(handle, r.simpleShunt(), r.entryOn());
 

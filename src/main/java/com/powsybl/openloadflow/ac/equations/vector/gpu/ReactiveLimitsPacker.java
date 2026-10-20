@@ -31,17 +31,6 @@ public final class ReactiveLimitsPacker {
     private ReactiveLimitsPacker() {
     }
 
-    /** Reactive-limits (PV↔PQ) pack: one entry per voltage-capable controller bus. {@code rlMonitored}
-     *  flags a bus whose base-PQ state is a MONITORING_VOLTAGE SVC standing by — NOT a Q-limit switch:
-     *  the device RL must seed it UNPINNED (no spontaneous switch-back; only the VoltageMonitoring
-     *  orchestrator may activate it). */
-    record RlPack(int[] rlVrow, double[] rlMinQ, double[] rlMaxQ, double[] rlLoadQ, double[] rlVtarget,
-                  double[] rlSvcBmin, double[] rlSvcBmax, double[] rlV2Base,
-                  byte[] rlMonitored, byte[] rlRemote, int[] rlCmpVrow, int[] rlBusNum,
-                  double[] rlNominalV, int[] rlPRow, double[] rlTargetP, int[] rlIdRank,
-                  double[] rlInitTargetQ, byte[] rlBaseQLimitType) {
-    }
-
     /** Rank of each id in lexicographic order — OLF's BY_ID_COMPARATOR tie-break, as an int the kernel can compare. */
     private static int[] idRanks(List<String> ids) {
         List<String> sorted = new ArrayList<>(ids);
@@ -92,7 +81,7 @@ public final class ReactiveLimitsPacker {
         return network.getBuses().stream().anyMatch(ReactiveLimitsPacker::isMonitoringSvcBus);
     }
 
-    static RlPack reactiveLimitsPack(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
+    static ReactiveLimitEntries reactiveLimitsPack(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
                                      ExtractionColumns columns, boolean reactiveLimits) {
         int[] vCol = columns.vCol();
         // Reactive-limits (PV↔PQ) pack: every LOCAL voltage-capable controller bus. Two kinds are packed so the
@@ -323,7 +312,7 @@ public final class ReactiveLimitsPacker {
         for (int i = 0; i < baseLt.length; i++) {
             baseLt[i] = rlBaseQLimitType.get(i);
         }
-        return new RlPack(GpuAcArrays.toIntArray(rlVrow), GpuAcArrays.toDoubleArray(rlMinQ),
+        return new ReactiveLimitEntries(GpuAcArrays.toIntArray(rlVrow), GpuAcArrays.toDoubleArray(rlMinQ),
                 GpuAcArrays.toDoubleArray(rlMaxQ), GpuAcArrays.toDoubleArray(rlLoadQ),
                 GpuAcArrays.toDoubleArray(rlVtarget), GpuAcArrays.toDoubleArray(rlSvcBmin),
                 GpuAcArrays.toDoubleArray(rlSvcBmax), GpuAcArrays.toDoubleArray(rlV2Base),

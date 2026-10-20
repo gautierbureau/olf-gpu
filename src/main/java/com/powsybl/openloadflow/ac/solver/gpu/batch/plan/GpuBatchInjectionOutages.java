@@ -503,7 +503,7 @@ public final class GpuBatchInjectionOutages {
         // busPv=false: its entry is still a controller, its pinned target Q IS the limit, and it can
         // switch back to PV. Measured on rte6515 GEN-6003 — one generator of three lost at a pinned
         // bus, the stale capability injected as Q, and 1.9 kV network-wide.
-        int[] rlBusNum = gpuData.rlBusNum();
+        int[] rlBusNum = gpuData.reactiveLimits().busNum();
         RlDeltas reactiveLimitDeltasOut = reactiveLimitDeltas(rlBusNum, bus, toPq, lost, lostLoadQ);
         int rlEntry = reactiveLimitDeltasOut.rlEntry();
         double minQDelta = reactiveLimitDeltasOut.minQDelta();

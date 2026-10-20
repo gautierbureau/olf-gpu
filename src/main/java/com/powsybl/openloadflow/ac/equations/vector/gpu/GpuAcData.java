@@ -46,13 +46,8 @@ import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuQLimitType;
  *
  * <p>DISTR_RHO and DISTR_SHUNT_B are {@link LinearDistributionTerms}.
  *
- * <p>Reactive limits (the batched full-loadflow PV↔PQ outer loop): per LOCAL generator-voltage-controller
- * (PV) bus, {@code rlVrow} its stable BUS_V row (where a PV→PQ switch flips the row mode 0→1 and the target
- * Vtarget→qLimit−loadQ; a PQ→PV switchback restores mode 1→0 and target→{@code rlVtarget}), {@code rlMinQ}/
- * {@code rlMaxQ} its reactive limits (pu/SB), {@code rlLoadQ} its load target Q and {@code rlVtarget} its
- * controlled voltage target (pu). The calculated generator Q is {@code Σ branch q + shunt q + rlLoadQ}, the
- * first part read from the bus's BUS_V row after a fill into a zeroed buffer. Empty when no PV control (or
- * consumed only by the batched full-loadflow path).
+ * <p>Reactive limits: {@link ReactiveLimitEntries}. The calculated generator Q of an entry is
+ * {@code sum branch q + shunt q + loadQ}, the first part read from its BUS_V row after a fill into a zeroed buffer.
  *
  * <p>Distributed slack (the batched full-loadflow outer loop): {@code dsSlackPhiRow} the slack bus's stable
  * BUS_PHI row (-1 if none) and {@code dsSlackTargetP} its scheduled active target (pu) give the mismatch
@@ -77,11 +72,7 @@ public record GpuAcData(double[] cbIn, int[] cbIdx, int[] cbPcSide, double[] obI
                         int[] dqMemberTgtPtr, int[] dqMemberTgtPeer,
                         double[] ziIn, int[] ziIdx,
                         LinearDistributionTerms distrRho, LinearDistributionTerms distrShuntB,
-                        int[] rlVrow, double[] rlMinQ, double[] rlMaxQ, double[] rlLoadQ, double[] rlVtarget,
-                        double[] rlSvcBmin, double[] rlSvcBmax, double[] rlV2Base,
-                        byte[] rlMonitored, byte[] rlRemote, int[] rlCmpVrow, int[] rlBusNum,
-                        double[] rlNominalV, int[] rlPRow, double[] rlTargetP, int[] rlIdRank,
-                        double[] rlInitTargetQ,
+                        ReactiveLimitEntries reactiveLimits,
                         RemoteMemberReactiveTerms remoteMemberReactiveTerms,
                         VoltageRowParameters voltageRows,
                         int[] dsPhiRow, double[] dsFactor, int dsSlackPhiRow, double dsSlackTargetP,
@@ -97,10 +88,7 @@ public record GpuAcData(double[] cbIn, int[] cbIdx, int[] cbPcSide, double[] obI
                         int[] dsBusNum, String[] dgGenId,
                         BaseOpenBranches baseOpenBranches,
                         int[] ziBranchNums, double[] vdlIn, int[] vdlIdx, ReactiveRelocationCandidates reactiveRelocation,
-                        int[] obQAlt, int[] ziQAlt,
-                        /** Per reactive-limit entry, OLF's {@code LfBus.getQLimitType()} after the base load flow:
-                         *  0 none, 1 MIN_Q, 2 MAX_Q, 3 MIN_REALISTIC_V, 4 MAX_REALISTIC_V. */
-                        byte[] rlBaseQLimitType) {
+                        int[] obQAlt, int[] ziQAlt) {
 
     /**
      * Content equality over every array — true means a cached solver context built from
@@ -163,23 +151,13 @@ public record GpuAcData(double[] cbIn, int[] cbIdx, int[] cbPcSide, double[] obI
                 && java.util.Arrays.equals(dqKind, other.dqKind)
                 && java.util.Arrays.equals(ziIdx, other.ziIdx)
                 && distrRho.sameAs(other.distrRho) && distrShuntB.sameAs(other.distrShuntB)
-                && java.util.Arrays.equals(rlVrow, other.rlVrow) && java.util.Arrays.equals(rlMinQ, other.rlMinQ)
-                && java.util.Arrays.equals(rlMaxQ, other.rlMaxQ) && java.util.Arrays.equals(rlLoadQ, other.rlLoadQ)
-                && java.util.Arrays.equals(rlVtarget, other.rlVtarget)
-                && java.util.Arrays.equals(rlSvcBmin, other.rlSvcBmin)
-                && java.util.Arrays.equals(rlSvcBmax, other.rlSvcBmax)
-                && java.util.Arrays.equals(rlV2Base, other.rlV2Base)
+                && reactiveLimits.sameAs(other.reactiveLimits)
                 && java.util.Arrays.equals(dsPhiRow, other.dsPhiRow) && java.util.Arrays.equals(dsFactor, other.dsFactor)
                 && dsSlackPhiRow == other.dsSlackPhiRow && dsSlackTargetP == other.dsSlackTargetP
                 && java.util.Arrays.equals(dsBaseTargetP, other.dsBaseTargetP)
                 && java.util.Arrays.equals(dsMaxDelta, other.dsMaxDelta) && java.util.Arrays.equals(dsMinDelta, other.dsMinDelta)
                 && reactiveRelocation.sameGroupsAs(other.reactiveRelocation)
                 && java.util.Arrays.equals(obQAlt, other.obQAlt) && java.util.Arrays.equals(ziQAlt, other.ziQAlt)
-                && java.util.Arrays.equals(rlMonitored, other.rlMonitored)
-                && java.util.Arrays.equals(rlRemote, other.rlRemote)
-                && java.util.Arrays.equals(rlBaseQLimitType, other.rlBaseQLimitType)
-                && java.util.Arrays.equals(rlCmpVrow, other.rlCmpVrow)
-                && java.util.Arrays.equals(rlInitTargetQ, other.rlInitTargetQ)
                 && java.util.Arrays.equals(dqKMember, other.dqKMember) && java.util.Arrays.equals(dqJMember, other.dqJMember)
                 && java.util.Arrays.equals(dqMemberKey, other.dqMemberKey)
                 && java.util.Arrays.equals(dqMemberRlEntry, other.dqMemberRlEntry)
@@ -270,7 +248,7 @@ public record GpuAcData(double[] cbIn, int[] cbIdx, int[] cbPcSide, double[] obI
 
     /** Number of local PV controller buses subject to the batched reactive-limits (PV→PQ) outer loop. */
     public int getReactiveLimitCount() {
-        return rlVrow.length;
+        return reactiveLimits.size();
     }
 
     /**
@@ -278,7 +256,8 @@ public record GpuAcData(double[] cbIn, int[] cbIdx, int[] cbPcSide, double[] obI
      * the four {@code LfBus.QLimitType}s? False for no entry ({@code rlEntry < 0}).
      */
     public boolean switchedPvToPqInBase(int rlEntry) {
-        return rlBaseQLimitType != null && rlEntry >= 0 && rlEntry < rlBaseQLimitType.length && rlBaseQLimitType[rlEntry] != GpuQLimitType.NONE;
+        byte[] baseQLimitType = reactiveLimits.baseQLimitType();
+        return baseQLimitType != null && rlEntry >= 0 && rlEntry < baseQLimitType.length && baseQLimitType[rlEntry] != GpuQLimitType.NONE;
     }
 
     /** Number of participating buses in the batched distributed-slack outer loop (0 = no distribution). */

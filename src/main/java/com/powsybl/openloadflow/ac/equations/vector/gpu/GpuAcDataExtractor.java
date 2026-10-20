@@ -126,7 +126,7 @@ public final class GpuAcDataExtractor {
         GpuAcValidation.validate(es);
         ExtractionColumns columns = ExtractionColumns.of(network, es);
         GpuAcFamilyPacker.Packs family = GpuAcFamilyPacker.pack(network, columns, baseOpenBranchIds, baseOpenZiBranchIds);
-        ReactiveLimitsPacker.RlPack rl = ReactiveLimitsPacker.reactiveLimitsPack(network, es, columns, reactiveLimits);
+        ReactiveLimitEntries rl = ReactiveLimitsPacker.reactiveLimitsPack(network, es, columns, reactiveLimits);
         DistrQPacker.DqPack dq = DistrQPacker.distrQPack(network, es, columns, family, rl);
         LinearDistributionTerms dr = DistrRhoPacker.distrRhoPack(network, es, columns);
         LinearDistributionTerms dsb = DistrShuntBPacker.distrShuntBPack(network, es, columns);
@@ -174,10 +174,7 @@ public final class GpuAcDataExtractor {
                 dq.dqMemberTgtPtr(), dq.dqMemberTgtPeer(),
                 GpuAcArrays.flatD(family.ziIn(), 1), GpuAcArrays.flatI(family.ziIdx(), 11),
                 dr, dsb,
-                rl.rlVrow(), rl.rlMinQ(), rl.rlMaxQ(), rl.rlLoadQ(), rl.rlVtarget(),
-                rl.rlSvcBmin(), rl.rlSvcBmax(), rl.rlV2Base(), rl.rlMonitored(),
-                rl.rlRemote(), rl.rlCmpVrow(), rl.rlBusNum(),
-                rl.rlNominalV(), rl.rlPRow(), rl.rlTargetP(), rl.rlIdRank(), rl.rlInitTargetQ(),
+                rl,
                 rmq, new VoltageRowParameters(rowSlope, rowNominalV),
                 ds.dsPhiRow(), ds.dsFactor(), ds.dsSlackPhiRow(), ds.dsSlackTargetP(),
                 ds.dsBaseTargetP(), ds.dsMaxDelta(), ds.dsMinDelta(),
@@ -193,7 +190,7 @@ public final class GpuAcDataExtractor {
                 GpuAcArrays.flatD(family.vdlIn(), 3), GpuAcArrays.flatI(family.vdlIdx(), 2),
                 new ReactiveRelocationCandidates(columns.qrPtr(), columns.qrRows(), columns.qrDepBase(),
                         columns.qrBaseTargetRow(), columns.depGroupOfRow()),
-                GpuAcArrays.flatI(family.obQAlt(), 2), GpuAcArrays.flatI(family.ziQAlt(), 2), rl.rlBaseQLimitType());
+                GpuAcArrays.flatI(family.obQAlt(), 2), GpuAcArrays.flatI(family.ziQAlt(), 2));
     }
 
     /** The couplers whose {@code DUMMY_P} / {@code DUMMY_Q} rows host a bus's power equations under the

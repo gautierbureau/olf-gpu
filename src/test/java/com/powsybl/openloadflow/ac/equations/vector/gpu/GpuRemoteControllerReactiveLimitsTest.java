@@ -105,16 +105,16 @@ class GpuRemoteControllerReactiveLimitsTest {
                 .filter(bus -> bus.getMinQ() < bus.getMaxQ())
                 .count();
         int remoteEntries = 0;
-        for (int i = 0; i < d.rlRemote().length; i++) {
-            if (d.rlRemote()[i] != 0) {
+        for (int i = 0; i < d.reactiveLimits().voltageControlRole().length; i++) {
+            if (d.reactiveLimits().voltageControlRole()[i] != 0) {
                 remoteEntries++;
-                assertNotEquals(d.rlVrow()[i], d.rlCmpVrow()[i],
+                assertNotEquals(d.reactiveLimits().voltageRow()[i], d.reactiveLimits().comparedVoltageRow()[i],
                         "a remote entry's compare row must be the pilot's v column, not its own row");
-                assertEquals(d.rlVtarget()[i],
+                assertEquals(d.reactiveLimits().targetV()[i],
                         pinned.getGeneratorVoltageControl().orElseThrow().getTargetValue(), 0,
                         "remote entries carry the GROUP target");
             } else {
-                assertEquals(d.rlVrow()[i], d.rlCmpVrow()[i], "local entries compare at their own row");
+                assertEquals(d.reactiveLimits().voltageRow()[i], d.reactiveLimits().comparedVoltageRow()[i], "local entries compare at their own row");
             }
         }
         assertEquals(members, remoteEntries,

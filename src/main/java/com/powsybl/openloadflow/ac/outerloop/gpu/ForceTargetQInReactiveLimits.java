@@ -180,12 +180,12 @@ public final class ForceTargetQInReactiveLimits {
     private static int localRlEntryOf(GpuAcData gpuData, LfBus bus) {
         boolean local = bus.getGeneratorVoltageControl()
                 .map(vc -> vc.getControlledBus() == bus && vc.getControllerElements().size() == 1).orElse(false);
-        int[] busNums = gpuData.rlBusNum();
+        int[] busNums = gpuData.reactiveLimits().busNum();
         if (!local || busNums == null) {
             return -1;
         }
         for (int i = 0; i < busNums.length; i++) {
-            if (busNums[i] == bus.getNum() && (gpuData.rlRemote() == null || gpuData.rlRemote()[i] == GpuVoltageControlRole.LOCAL)) {
+            if (busNums[i] == bus.getNum() && (gpuData.reactiveLimits().voltageControlRole() == null || gpuData.reactiveLimits().voltageControlRole()[i] == GpuVoltageControlRole.LOCAL)) {
                 return i;
             }
         }

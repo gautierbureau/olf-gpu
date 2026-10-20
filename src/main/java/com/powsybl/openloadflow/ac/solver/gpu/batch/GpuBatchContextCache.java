@@ -134,7 +134,8 @@ public final class GpuBatchContextCache {
         // the shared structure comes from the per-extraction cache — when the base load flow ran
         // on the GPU with the same extraction (GpuAcDataCache hand-off), this is a device-side hit
         long handle = BatchSolveNative.createBatchContext(structure, chunkSize, mode,
-                data.rlVrow(), data.rlMinQ(), data.rlMaxQ(), data.rlLoadQ(), data.rlVtarget(), data.rlMonitored(), data.voltageRows().slope(),
+                data.reactiveLimits().voltageRow(), data.reactiveLimits().minQ(), data.reactiveLimits().maxQ(),
+                data.reactiveLimits().loadQ(), data.reactiveLimits().targetV(), data.reactiveLimits().flags(), data.voltageRows().slope(),
                 data.dsPhiRow(), data.dsFactor(), data.dsSlackPhiRow(), data.dsSlackTargetP(),
                 data.dsBaseTargetP(), data.dsMaxDelta(), data.dsMinDelta(),
                 data.dsMode(), data.dsMarginUp(), data.dsMarginDown(),

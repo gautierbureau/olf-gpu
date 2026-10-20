@@ -59,14 +59,14 @@ public final class DistrQPacker {
     }
 
     static DqPack distrQPack(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
-                             ExtractionColumns columns, GpuAcFamilyPacker.Packs family, ReactiveLimitsPacker.RlPack rl) {
+                             ExtractionColumns columns, GpuAcFamilyPacker.Packs family, ReactiveLimitEntries rl) {
         // member tables (plan-B3): raw keys + RL-entry mapping + group ranges, in group member order
         MemberTables mt = new MemberTables(new java.util.HashMap<>(), new ArrayList<>(), new ArrayList<>(),
                 new ArrayList<>(), new ArrayList<>(), new ArrayList<>(), new ArrayList<>(), new ArrayList<>(),
                 new ArrayList<>(), new ArrayList<>());
         java.util.Map<Integer, Integer> rlEntryByBusNum = new java.util.HashMap<>();
-        for (int i = 0; i < rl.rlBusNum().length; i++) {
-            rlEntryByBusNum.put(rl.rlBusNum()[i], i);
+        for (int i = 0; i < rl.busNum().length; i++) {
+            rlEntryByBusNum.put(rl.busNum()[i], i);
         }
         List<Integer> qrGroupList = new ArrayList<>();
         for (LfBus pilot : network.getBuses()) {

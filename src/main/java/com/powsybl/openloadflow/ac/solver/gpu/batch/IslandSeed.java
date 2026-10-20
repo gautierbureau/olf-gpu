@@ -152,9 +152,9 @@ final class IslandSeed {
                         break;
                     }
                 }
-                if (unpinnedPilotSelf && gpuData.rlVrow() != null && gpuData.rlRemote() != null) {
-                    for (int e = 0; e < gpuData.rlVrow().length; e++) {
-                        if (gpuData.rlVrow()[e] == fallbackRow && gpuData.rlRemote()[e] == GpuVoltageControlRole.PILOT_SELF) {
+                if (unpinnedPilotSelf && gpuData.reactiveLimits().voltageRow() != null && gpuData.reactiveLimits().voltageControlRole() != null) {
+                    for (int e = 0; e < gpuData.reactiveLimits().voltageRow().length; e++) {
+                        if (gpuData.reactiveLimits().voltageRow()[e] == fallbackRow && gpuData.reactiveLimits().voltageControlRole()[e] == GpuVoltageControlRole.PILOT_SELF) {
                             unpinnedPilotSelf = !gpuData.switchedPvToPqInBase(e);
                             break;
                         }

@@ -110,13 +110,13 @@ class GpuBatchedPegaseOutlierDiagnosticTest {
         var probeBus = network.getBusById(probeBusId);
         if (probeBus != null) {
             int vrow = es.getVariableSet().getVariable(probeBus.getNum(), AcVariableType.BUS_V).getRow();
-            int[] rlVrow = dbg.rlVrow();
+            int[] rlVrow = dbg.reactiveLimits().voltageRow();
             boolean inRlList = false;
             for (int i = 0; i < rlVrow.length; i++) {
                 if (rlVrow[i] == vrow) {
                     inRlList = true;
                     System.out.printf("DEVICE RL DATA for %s: rlVtarget=%.6f rlMaxQ=%.4f rlMinQ=%.4f rlLoadQ=%.4f%n",
-                            probeBusId, dbg.rlVtarget()[i], dbg.rlMaxQ()[i], dbg.rlMinQ()[i], dbg.rlLoadQ()[i]);
+                            probeBusId, dbg.reactiveLimits().targetV()[i], dbg.reactiveLimits().maxQ()[i], dbg.reactiveLimits().minQ()[i], dbg.reactiveLimits().loadQ()[i]);
                     break;
                 }
             }

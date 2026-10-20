@@ -34,20 +34,20 @@ public final class GpuReactiveLimitsOuterLoop {
      *  way OLF undoes it. Limit types 3/4 are robust mode's MIN/MAX_REALISTIC_V freezes: the pin is the
      *  same, only the recorded type differs (and OLF never re-freezes those at a moved Q limit). */
     public static void applyToNetwork(LfNetwork network, int[] rlStateOut, GpuAcData data, double[] deviceTargets, int[] devModes) {
-        if (rlStateOut == null || data == null || data.rlBusNum() == null) {
+        if (rlStateOut == null || data == null || data.reactiveLimits().busNum() == null) {
             return;
         }
-        int nrl = Math.min(rlStateOut.length, data.rlBusNum().length);
+        int nrl = Math.min(rlStateOut.length, data.reactiveLimits().busNum().length);
         for (int i = 0; i < nrl; i++) {
             int limitType = GpuReactiveLimitsState.limitType(rlStateOut[i]);
-            LfBus bus = network.getBus(data.rlBusNum()[i]);
+            LfBus bus = network.getBus(data.reactiveLimits().busNum()[i]);
             if (bus == null) {
                 continue;
             }
             if (System.getenv("OLF_GPU_BATCH_TRACE") != null && (limitType != GpuQLimitType.NONE || GpuReactiveLimitsState.pvPqSwitchCount(rlStateOut[i]) != 0)) {
                 System.err.println("WB_RL bus=" + bus.getId() + " limitType=" + limitType + " switchCount=" + GpuReactiveLimitsState.pvPqSwitchCount(rlStateOut[i])
                         + " vcEnabled=" + bus.isGeneratorVoltageControlEnabled() + " qLimitType=" + bus.getQLimitType().map(Object::toString).orElse("-")
-                        + " remote=" + data.rlRemote()[i]);
+                        + " remote=" + data.reactiveLimits().voltageControlRole()[i]);
             }
             if (limitType == GpuQLimitType.FROZEN) {
                 // Frozen by the generator voltage control manager, not pinned at a reactive limit:
@@ -59,7 +59,7 @@ public final class GpuReactiveLimitsOuterLoop {
                 // The limit the device pinned at — its row target is limit − loadQ, evaluated at the LIVE
                 // voltage for an SVC (OLF freezes at bus.getMinQ()/getMaxQ() read at the check, the same
                 // live value); the packed base-V aggregate is 1.3e-4 pu off on rte6515's VL-6226_0.
-                int vRow = data.rlVrow()[i];
+                int vRow = data.reactiveLimits().voltageRow()[i];
                 // A pilot-self pilot enrolled in the candidate table keeps BUS_TARGET_V on its own row while
                 // pinned: its pinned balance rides the first enabled member's row (the carrier), or its own
                 // row only once the group lost control (flipped to a power row). Read the limit where the
@@ -68,9 +68,9 @@ public final class GpuReactiveLimitsOuterLoop {
                 // MAX_ITERATION_REACHED on that residual).
                 int limitRow = pinnedBalanceRow(data, i, vRow, devModes);
                 double qLimit = deviceTargets != null && limitRow >= 0 && limitRow < deviceTargets.length
-                        ? deviceTargets[limitRow] + data.rlLoadQ()[i]
-                        : (limitType == GpuQLimitType.MIN_Q ? data.rlMinQ()[i]
-                           : limitType == GpuQLimitType.MAX_Q ? data.rlMaxQ()[i] : data.rlInitTargetQ()[i]);
+                        ? deviceTargets[limitRow] + data.reactiveLimits().loadQ()[i]
+                        : (limitType == GpuQLimitType.MIN_Q ? data.reactiveLimits().minQ()[i]
+                           : limitType == GpuQLimitType.MAX_Q ? data.reactiveLimits().maxQ()[i] : data.reactiveLimits().initialTargetQ()[i]);
                 bus.freezeGenerationTargetQAndDisableGeneratorVoltageControl(qLimit);
                 bus.setQLimitType(GpuQLimitType.toOlf(limitType));
             } else if (limitType == GpuQLimitType.NONE && !bus.isGeneratorVoltageControlEnabled() && bus.getQLimitType().isPresent()
@@ -99,7 +99,8 @@ public final class GpuReactiveLimitsOuterLoop {
         if (relocated != vRow && devModes != null && relocated < devModes.length && devModes[relocated] != GpuRowMode.FIXED_VARIABLE) {
             vRow = relocated;
         }
-        if (devModes == null || data.rlRemote() == null || data.rlRemote()[i] != GpuVoltageControlRole.PILOT_SELF || data.reactiveRelocation().groupStart() == null
+        byte[] role = data.reactiveLimits().voltageControlRole();
+        if (devModes == null || role == null || role[i] != GpuVoltageControlRole.PILOT_SELF || data.reactiveRelocation().groupStart() == null
                 || vRow < 0 || vRow >= devModes.length || devModes[vRow] != GpuRowMode.FIXED_VARIABLE) {
             return vRow;
         }

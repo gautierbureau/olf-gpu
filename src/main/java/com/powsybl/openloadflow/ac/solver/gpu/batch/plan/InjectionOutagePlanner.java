@@ -334,8 +334,8 @@ final class InjectionOutagePlanner {
                         // and the RL kernel's "limit drift while pinned" branch writes only the
                         // TARGET, leaving the host's mode 0 in place, so the identity then holds v
                         // at a reactive value.
-                        byte baseLt = gpuData.rlBaseQLimitType() != null && reHomedRl >= 0
-                                ? gpuData.rlBaseQLimitType()[reHomedRl] : (byte) -1;
+                        byte baseLt = gpuData.reactiveLimits().baseQLimitType() != null && reHomedRl >= 0
+                                ? gpuData.reactiveLimits().baseQLimitType()[reHomedRl] : (byte) -1;
                         System.err.printf("QUALIFY_TRACE reHomePv bus=%s vRow=%d target=%.6f"
                                         + " rlEntry=%d baseLimitType=%d%n",
                                 e.getKey().getId(), vVar.getRow(), e.getValue(), reHomedRl, baseLt);

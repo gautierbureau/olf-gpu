@@ -272,7 +272,7 @@ final class GpuBatchChunkSolver {
         for (int i = 0; i < contingencies.size(); i++) {
             indexById.put(contingencies.get(i).contingencyId(), i);
         }
-        int nrl = gpuData.rlVrow().length;
+        int nrl = gpuData.reactiveLimits().voltageRow().length;
         java.util.Map<Integer, int[]> rlByIndex = new java.util.HashMap<>();    // ctg index -> its nrl RL-state slice
         java.util.Map<Integer, double[]> rlPinByIndex = new java.util.HashMap<>();   // ctg index -> its final pinned targets
         // ctg index -> its FINAL distributed-slack targets at the DS participant rows (the device DS mutates
@@ -290,25 +290,25 @@ final class GpuBatchChunkSolver {
         boolean dsSlackOnly = gpuData.dsPhiRow().length == 0 && gpuData.dsSlackPhiRow() >= 0;
         // Host-side base RL seed (mirrors initRlLimitTypeBatch) for PADDING slots of pair chunks.
         int[] baseRlSeed = new int[nrl];
-        byte[] baseLimitTypes = gpuData.rlBaseQLimitType();
+        byte[] baseLimitTypes = gpuData.reactiveLimits().baseQLimitType();
         for (int i = 0; i < nrl; i++) {
-            int vrow = gpuData.rlVrow()[i];
+            int vrow = gpuData.reactiveLimits().voltageRow()[i];
             // remote entries (plan-B3): base mode 1 = UNPINNED DISTR_Q share; only mode 4 is a pin.
             // The pilot's V equals the group target at the base (degenerate) — key the direction on
             // WHICH limit the extracted BUS_TARGET_Q target equals instead.
-            boolean remote = gpuData.rlRemote().length > i && gpuData.rlRemote()[i] != GpuVoltageControlRole.LOCAL;
+            boolean remote = gpuData.reactiveLimits().voltageControlRole().length > i && gpuData.reactiveLimits().voltageControlRole()[i] != GpuVoltageControlRole.LOCAL;
             byte olfKind = baseLimitTypes.length > i ? baseLimitTypes[i] : GpuQLimitType.NONE;
             if (remote) {
                 double tgt = baseTargets[vrow];
                 baseRlSeed[i] = baseRowMode[vrow] == GpuRowMode.BUS_TARGET_Q
                         ? (olfKind != GpuQLimitType.NONE ? olfKind
-                           : (Math.abs(tgt - (gpuData.rlMaxQ()[i] - gpuData.rlLoadQ()[i]))
-                              <= Math.abs(tgt - (gpuData.rlMinQ()[i] - gpuData.rlLoadQ()[i])) ? GpuQLimitType.MAX_Q : GpuQLimitType.MIN_Q))
+                           : (Math.abs(tgt - (gpuData.reactiveLimits().maxQ()[i] - gpuData.reactiveLimits().loadQ()[i]))
+                              <= Math.abs(tgt - (gpuData.reactiveLimits().minQ()[i] - gpuData.reactiveLimits().loadQ()[i])) ? GpuQLimitType.MAX_Q : GpuQLimitType.MIN_Q))
                         : GpuQLimitType.NONE;
             } else {
                 baseRlSeed[i] = baseRowMode[vrow] == GpuRowMode.EQUATION
                         ? (olfKind != GpuQLimitType.NONE ? olfKind
-                           : (baseState[vrow] < gpuData.rlVtarget()[i] ? GpuQLimitType.MAX_Q : GpuQLimitType.MIN_Q))
+                           : (baseState[vrow] < gpuData.reactiveLimits().targetV()[i] ? GpuQLimitType.MAX_Q : GpuQLimitType.MIN_Q))
                         : GpuQLimitType.NONE;
             }
         }
@@ -1410,7 +1410,7 @@ final class GpuBatchChunkSolver {
                                     if (ids.length() < 4000) {
                                         // vRow identifies WHICH controller: it is the bus's stable device
                                         // row, the same number the DISTR_Q / target dumps print.
-                                        ids.append(" p").append(i).append("(vRow=").append(gpuData.rlVrow()[i])
+                                        ids.append(" p").append(i).append("(vRow=").append(gpuData.reactiveLimits().voltageRow()[i])
                                            .append(",lt=").append(GpuReactiveLimitsState.limitType(v)).append(')');
                                     }
                                 }
@@ -1418,7 +1418,7 @@ final class GpuBatchChunkSolver {
                                     switched++;
                                     if (ids.length() < 300) {
                                         ids.append(" rl").append(i).append("(vRow=")
-                                           .append(gpuData.rlVrow()[i]).append(",lt=").append(GpuReactiveLimitsState.limitType(v)).append(')');
+                                           .append(gpuData.reactiveLimits().voltageRow()[i]).append(",lt=").append(GpuReactiveLimitsState.limitType(v)).append(')');
                                     }
                                 }
                             }
@@ -1670,7 +1670,7 @@ final class GpuBatchChunkSolver {
                             StringBuilder ids = new StringBuilder();
                             for (int i = 0; i < nrl; i++) {
                                 if (GpuReactiveLimitsState.limitType(rlStateOut[s * nrl + i]) != GpuQLimitType.NONE) {
-                                    ids.append(' ').append(i).append("(vRow=").append(gpuData.rlVrow()[i])
+                                    ids.append(' ').append(i).append("(vRow=").append(gpuData.reactiveLimits().voltageRow()[i])
                                        .append(",lt=").append(GpuReactiveLimitsState.limitType(rlStateOut[s * nrl + i])).append(')');
                                 }
                             }

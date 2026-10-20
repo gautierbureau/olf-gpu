@@ -71,7 +71,7 @@ public final class ReactiveCapabilityCurves {
     }
 
     /** Build the channel by replaying the RL pack's bus enumeration (verified against
-     *  {@code gpuData.rlVrow()} — a drift throws, falling back to CPU). Returns null when no
+     *  {@code gpuData.reactiveLimits().voltageRow()} — a drift throws, falling back to CPU). Returns null when no
      *  PARTICIPATING curve generator exists (static snapshots stay exact). */
     public static Channel build(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
                                 GpuAcData gpuData, GpuDsParams dsParams, boolean distributedSlack,
@@ -118,7 +118,7 @@ public final class ReactiveCapabilityCurves {
                         || !(bus.getMinQ() < bus.getMaxQ())) {
                     continue;                                // not packed
                 }
-                if (rlIdx >= gpuData.rlVrow().length || gpuData.rlVrow()[rlIdx] != vVar.getRow()) {
+                if (rlIdx >= gpuData.reactiveLimits().voltageRow().length || gpuData.reactiveLimits().voltageRow()[rlIdx] != vVar.getRow()) {
                     throw new PowsyblException("GPU AC solver: RL-pack enumeration drift while packing curve limits (bus "
                             + bus.getId() + ")");
                 }
@@ -137,7 +137,7 @@ public final class ReactiveCapabilityCurves {
             if (vVar == null || vVar.getRow() < 0 || bus.getGeneratorVoltageControl().isEmpty() || !(basePv || basePqCapable)) {
                 continue;
             }
-            if (rlIdx >= gpuData.rlVrow().length || gpuData.rlVrow()[rlIdx] != vVar.getRow()) {
+            if (rlIdx >= gpuData.reactiveLimits().voltageRow().length || gpuData.reactiveLimits().voltageRow()[rlIdx] != vVar.getRow()) {
                 throw new PowsyblException("GPU AC solver: RL-pack enumeration drift while packing curve limits (bus "
                         + bus.getId() + ")");
             }

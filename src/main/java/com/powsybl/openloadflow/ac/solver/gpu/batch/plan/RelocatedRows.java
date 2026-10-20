@@ -68,7 +68,7 @@ public final class RelocatedRows {
      *  (OLF checks it as the PV bus it now is; BUS-6113_BBS_1 pinned VL-6113_1 at RL#1, the device never
      *  looked — 7.1 kV). */
     public static int rlEntryOf(GpuAcData gpuData, LfBus bus) {
-        int[] rlBusNum = gpuData.rlBusNum();
+        int[] rlBusNum = gpuData.reactiveLimits().busNum();
         if (rlBusNum != null) {
             for (int e = 0; e < rlBusNum.length; e++) {
                 if (rlBusNum[e] == bus.getNum()) {

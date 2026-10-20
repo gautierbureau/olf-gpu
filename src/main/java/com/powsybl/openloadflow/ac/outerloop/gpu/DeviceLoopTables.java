@@ -8,6 +8,7 @@
 package com.powsybl.openloadflow.ac.outerloop.gpu;
 
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
+import com.powsybl.openloadflow.ac.equations.vector.gpu.ReactiveLimitEntries;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuQLimitType;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuRealisticVoltageFixingLoop;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuVoltageControlRole;
@@ -67,8 +68,8 @@ public final class DeviceLoopTables {
      * is why {@code solveBatchContext} now refuses a context that reaches it without them.
      */
     public static void installRlElection(long handle, GpuAcData gpuData) {
-        ReactiveLimitsNative.setBatchRlElection(handle, gpuData.rlNominalV(), gpuData.rlPRow(),
-                gpuData.rlTargetP(), gpuData.rlIdRank());
+        ReactiveLimitsNative.setBatchRlElection(handle, gpuData.reactiveLimits().nominalV(), gpuData.reactiveLimits().activePowerRow(),
+                gpuData.reactiveLimits().targetP(), gpuData.reactiveLimits().idRank());
     }
 
     public static void install(long handle, GpuAcData gpuData, ReactiveCapabilityCurves.Channel rlCurves,
@@ -98,18 +99,19 @@ public final class DeviceLoopTables {
         // Voltage-dependent SVC reactive limits: install the quadratic coefficients (zero on
         // SVC-less entries — the kernel's limit(v) then degenerates to the packed static limit).
         ReactiveLimitsNative.setBatchRlSvcLimits(handle,
-                gpuData.rlSvcBmin(), gpuData.rlSvcBmax(), gpuData.rlV2Base());
+                gpuData.reactiveLimits().svcMinB(), gpuData.reactiveLimits().svcMaxB(), gpuData.reactiveLimits().baseVSquared());
         // OLF's global forced-PV election keys — the RL pass keeps the strongest bus PV when every
         // PV bus would switch, instead of rejecting the scenario to the CPU.
-        ReactiveLimitsNative.setBatchRlElection(handle, gpuData.rlNominalV(), gpuData.rlPRow(), gpuData.rlTargetP(), gpuData.rlIdRank());
+        ReactiveLimitEntries rl = gpuData.reactiveLimits();
+        ReactiveLimitsNative.setBatchRlElection(handle, rl.nominalV(), rl.activePowerRow(), rl.targetP(), rl.idRank());
         // voltageRemoteControlRobustMode: install (or clear, for a cached context whose run has the
         // mode off) the realistic-V criteria the RL pass applies to REMOTE voltage controllers.
         // REALISTIC_VOLTAGE_MARGIN = 1.02, straight out of ReactiveLimitsOuterLoop.
-        ReactiveLimitsNative.setBatchRlRobust(handle, gpuData.rlInitTargetQ(),
+        ReactiveLimitsNative.setBatchRlRobust(handle, gpuData.reactiveLimits().initialTargetQ(),
                 minRealisticVoltage * REALISTIC_VOLTAGE_MARGIN, maxRealisticVoltage / REALISTIC_VOLTAGE_MARGIN,
                 rlRobustMode ? 1 : 0);
         // OLF's own base QLimitTypes, so a realistic-voltage switch is not re-seeded as a Q-limit one.
-        byte[] baseLimitTypes = gpuData.rlBaseQLimitType();
+        byte[] baseLimitTypes = gpuData.reactiveLimits().baseQLimitType();
         boolean anyBaseLt = false;
         for (byte b : baseLimitTypes) {
             anyBaseLt |= b != GpuQLimitType.NONE;
@@ -124,19 +126,19 @@ public final class DeviceLoopTables {
                     ks.append(' ').append(i).append(':').append(baseLimitTypes[i]);
                 }
             }
-            System.err.println("GPU_RL_KINDS install handle=" + handle + " nrl=" + gpuData.rlVrow().length
+            System.err.println("GPU_RL_KINDS install handle=" + handle + " nrl=" + gpuData.reactiveLimits().voltageRow().length
                     + " anyBaseLt=" + anyBaseLt + " kinds:" + ks + " caller="
                     + Thread.currentThread().getStackTrace()[2].getClassName().replaceAll(".*\\.", ""));
         }
         ReactiveLimitsNative.setBatchRlBaseLimitType(handle, anyBaseLt ? baseLimitTypes : null);
         // Remote-member RL entries (plan-B1): install (or clear, on a cached context) the kinds.
         boolean anyRlRemote = false;
-        for (byte b : gpuData.rlRemote()) {
+        for (byte b : gpuData.reactiveLimits().voltageControlRole()) {
             anyRlRemote |= b != GpuVoltageControlRole.LOCAL;
         }
         ReactiveLimitsNative.setBatchRlRemote(handle,
-                anyRlRemote ? gpuData.rlRemote() : null,
-                anyRlRemote ? gpuData.rlCmpVrow() : null,
+                anyRlRemote ? gpuData.reactiveLimits().voltageControlRole() : null,
+                anyRlRemote ? gpuData.reactiveLimits().comparedVoltageRow() : null,
                 anyRlRemote ? gpuData.remoteMemberReactiveTerms().row() : null,
                 anyRlRemote ? gpuData.remoteMemberReactiveTerms().element() : null,
                 anyRlRemote ? gpuData.remoteMemberReactiveTerms().side() : null,

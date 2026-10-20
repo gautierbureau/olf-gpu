@@ -210,7 +210,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
         }
         if (monCtls != null && !monCtls.isEmpty()) {
             GpuMonitoringVoltageOuterLoop.applyToNetwork(network, monCtls, VoltageMonitoringNative.readBatchMonitoringTargets(handle),
-                    data.rlBusNum());
+                    data.reactiveLimits().busNum());
         }
         if (svcCtls != null) {
             com.powsybl.openloadflow.ac.outerloop.gpu.GpuSecondaryVoltageControlOuterLoop.applyToNetwork(network, svcCtls,
@@ -220,7 +220,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                 loadAnchorTargetP, deviceTargets,
                 BatchReadbackNative.readBatchDsGenCum(handle), BatchReadbackNative.readBatchDsRetain(handle), data);
         GpuReactiveLimitsOuterLoop.applyToNetwork(network, rlStateOut, data, deviceTargets,
-                data.rlRemote() != null ? BatchReadbackNative.readBatchRowModes(handle) : null);
+                data.reactiveLimits().voltageControlRole() != null ? BatchReadbackNative.readBatchRowModes(handle) : null);
         if (tvcOwned && tvcCtls != null) {
             GpuIncrementalTransformerVoltageControlOuterLoop.applyToNetwork(network, tvcCtls,
                                                                TransformerVoltageControlNative.readBatchTvcTaps(handle));
@@ -604,12 +604,12 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
             // evaluate differently BEFORE any step is taken — the only place a difference is not yet blurred
             // by different iterates. Written once per run.
             traceInitialMismatch();
-            rlStateOut = cachedData.rlVrow().length > 0 ? new int[cachedData.rlVrow().length] : null;
+            rlStateOut = cachedData.reactiveLimits().voltageRow().length > 0 ? new int[cachedData.reactiveLimits().voltageRow().length] : null;
             int[] rlStateIn = null;
             if (restart && rlCarry != null && rlStateOut != null) {
                 rlStateIn = new int[rlStateOut.length];
                 for (int i = 0; i < rlStateIn.length; i++) {
-                    rlStateIn[i] = rlCarry.getOrDefault(cachedData.rlBusNum()[i], 0);
+                    rlStateIn[i] = rlCarry.getOrDefault(cachedData.reactiveLimits().busNum()[i], 0);
                 }
             }
             // Device-side state-vector scaling: NONE = undamped Newton; LINE_SEARCH backtracks on the
@@ -921,7 +921,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                         acLoadFlowParameters.getNetworkParameters().getMinPlausibleTargetVoltage(),
                         acLoadFlowParameters.getNetworkParameters().getMaxPlausibleTargetVoltage()),
                 network, equationSystem, targetVector, activation, target,
-                cachedData.rlVrow(), cachedData.rlBusNum(), n);
+                cachedData.reactiveLimits().voltageRow(), cachedData.reactiveLimits().busNum(), n);
         invalidation.structureDirty = sdAll;
         invalidation.activationDirty = adAll;
         return phases;
@@ -975,8 +975,8 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                 // building its context from the SAME extraction reuses it device-side.
                 context.handle.set(BatchSolveNative.createBatchContext(GpuAcStructures.handle(n, data), 1,
                         robustModeForRun ? GpuLinearSolveMode.ROBUST : GpuBatchContextCache.resolveBatchMode(),
-                        data.rlVrow(), data.rlMinQ(), data.rlMaxQ(), data.rlLoadQ(), data.rlVtarget(),
-                        data.rlMonitored(), data.voltageRows().slope(),
+                        data.reactiveLimits().voltageRow(), data.reactiveLimits().minQ(), data.reactiveLimits().maxQ(), data.reactiveLimits().loadQ(), data.reactiveLimits().targetV(),
+                        data.reactiveLimits().flags(), data.voltageRows().slope(),
                         data.dsPhiRow(), data.dsFactor(), data.dsSlackPhiRow(), data.dsSlackTargetP(),
                         data.dsBaseTargetP(), data.dsMaxDelta(), data.dsMinDelta(),
                         data.dsMode(), data.dsMarginUp(), data.dsMarginDown(),
@@ -1112,15 +1112,15 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                       .append(" minQ=").append(bus.getMinQ()).append(" maxQ=").append(bus.getMaxQ())
                       .append(" hasVc=").append(bus.getGeneratorVoltageControl().isPresent())
                       .append(" isVcController=").append(bus.isGeneratorVoltageControlled());
-                    if (cachedData.rlBusNum() != null && rlStateOut != null) {
-                        for (int k = 0; k < cachedData.rlBusNum().length; k++) {
-                            if (cachedData.rlBusNum()[k] == bus.getNum()) {
+                    if (cachedData.reactiveLimits().busNum() != null && rlStateOut != null) {
+                        for (int k = 0; k < cachedData.reactiveLimits().busNum().length; k++) {
+                            if (cachedData.reactiveLimits().busNum()[k] == bus.getNum()) {
                                 sb.append(" rl[").append(k).append("]: state=").append(rlStateOut[k])
-                                  .append(" vRow=").append(cachedData.rlVrow()[k]).append(" remote=").append(cachedData.rlRemote()[k])
-                                  .append(" rlMinQ=").append(cachedData.rlMinQ()[k]).append(" rlMaxQ=").append(cachedData.rlMaxQ()[k])
-                                  .append(" rlLoadQ=").append(cachedData.rlLoadQ()[k])
-                                  .append(" devTargetAtVrow=").append(devT != null ? devT[cachedData.rlVrow()[k]] : Double.NaN)
-                                  .append(" devModeAtVrow=").append(activation.rowMode()[cachedData.rlVrow()[k]]);
+                                  .append(" vRow=").append(cachedData.reactiveLimits().voltageRow()[k]).append(" remote=").append(cachedData.reactiveLimits().voltageControlRole()[k])
+                                  .append(" rlMinQ=").append(cachedData.reactiveLimits().minQ()[k]).append(" rlMaxQ=").append(cachedData.reactiveLimits().maxQ()[k])
+                                  .append(" rlLoadQ=").append(cachedData.reactiveLimits().loadQ()[k])
+                                  .append(" devTargetAtVrow=").append(devT != null ? devT[cachedData.reactiveLimits().voltageRow()[k]] : Double.NaN)
+                                  .append(" devModeAtVrow=").append(activation.rowMode()[cachedData.reactiveLimits().voltageRow()[k]]);
                             }
                         }
                     }
@@ -1349,9 +1349,9 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                         // AFTER_GENERATOR transformer-VC base).
                         applyDeviceDecisionsToNetwork(cachedData);
                         rlCarry = new java.util.HashMap<>();
-                        if (rlStateOut != null && cachedData.rlBusNum() != null) {
-                            for (int i = 0; i < rlStateOut.length && i < cachedData.rlBusNum().length; i++) {
-                                rlCarry.put(cachedData.rlBusNum()[i], rlStateOut[i]);
+                        if (rlStateOut != null && cachedData.reactiveLimits().busNum() != null) {
+                            for (int i = 0; i < rlStateOut.length && i < cachedData.reactiveLimits().busNum().length; i++) {
+                                rlCarry.put(cachedData.reactiveLimits().busNum()[i], rlStateOut[i]);
                             }
                         }
                         DriverNative.cancelBatchDriverPause(handle);

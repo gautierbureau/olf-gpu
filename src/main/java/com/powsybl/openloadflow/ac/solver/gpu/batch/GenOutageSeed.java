@@ -106,7 +106,7 @@ final class GenOutageSeed {
                     // table's sharing row, which the dependent pilot's pool uses as the carrier.
                     if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {
                         System.err.printf("QUALIFY_TRACE reHomeRemoteCtl slot=%d entry=%d of %d cmpRow=%d vt=%.6f%n",
-                                s, go.rlEntry(), gpuData.rlVrow().length, go.reHomePilotVRow(), go.qTarget());
+                                s, go.rlEntry(), gpuData.reactiveLimits().voltageRow().length, go.reHomePilotVRow(), go.qTarget());
                     }
                     cl.rlCmpList.add(s);
                     cl.rlCmpList.add(go.rlEntry());
@@ -149,8 +149,8 @@ final class GenOutageSeed {
                     // Its limits already collapse with the outage (minQDelta/maxQDelta, the curve channel),
                     // so the entry is simply left live (fixture:
                     // deviceSwitchedToPqInBaseBusLosingItsOnlyGeneratorIsStillCheckedMatchesCpu).
-                    boolean liveDeadLocal = (gpuData.rlRemote() == null || gpuData.rlRemote().length <= go.rlEntry()
-                                    || gpuData.rlRemote()[go.rlEntry()] == GpuVoltageControlRole.LOCAL)
+                    boolean liveDeadLocal = (gpuData.reactiveLimits().voltageControlRole() == null || gpuData.reactiveLimits().voltageControlRole().length <= go.rlEntry()
+                                    || gpuData.reactiveLimits().voltageControlRole()[go.rlEntry()] == GpuVoltageControlRole.LOCAL)
                             && gpuData.switchedPvToPqInBase(go.rlEntry());
                     if (liveDeadLocal) {
                         // left live: no channel

@@ -196,7 +196,7 @@ final class BranchOutagePlanner {
             System.err.println("ISLANDED-RL '" + c.contingencyId() + "' frozenRows="
                     + java.util.Arrays.toString(fi.rows()) + " maskedEntries="
                     + java.util.Arrays.toString(pb.islandedRlByIndex[i]) + " rlVrowOfMasked="
-                    + java.util.Arrays.stream(pb.islandedRlByIndex[i]).map(e -> gpuData.rlVrow()[e]).boxed().toList());
+                    + java.util.Arrays.stream(pb.islandedRlByIndex[i]).map(e -> gpuData.reactiveLimits().voltageRow()[e]).boxed().toList());
         }
         if ("1".equals(System.getenv("OLF_GPU_DBG_BUSDUMP")) && q.islandedBuses().size() > 0) {
             // The count that must match OLF's participant drop: OLF re-runs

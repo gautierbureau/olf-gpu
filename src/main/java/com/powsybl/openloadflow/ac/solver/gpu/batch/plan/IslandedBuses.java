@@ -155,7 +155,7 @@ final class IslandedBuses {
      *  BUS_V row is one of the frozen island rows. OLF disables those buses, so its ReactiveLimits
      *  loop never sees them; the device must not either, or it pins a PV bus OLF leaves alone. */
     static int[] islandedRlControllers(int[] frozenRows, GpuAcData gpuData) {
-        int[] rlVrow = gpuData.rlVrow();
+        int[] rlVrow = gpuData.reactiveLimits().voltageRow();
         if (rlVrow == null || rlVrow.length == 0 || frozenRows.length == 0) {
             return NO_ISLANDED_DS;
         }

@@ -86,11 +86,8 @@ final class RunScratch {
         }
         this.rowModePerScenario = new int[chunkSize][];
         this.overrides = new GpuBatchOverrides();
-        this.ziElemByBranchNumChunk = new java.util.HashMap<>();
-        for (int z = 0; z < gpuData.baseOpenZiElements().length; z++) {
-            ziElemByBranchNumChunk.put(gpuData.baseOpenZiBranchNums()[z], gpuData.baseOpenZiElements()[z]);
-        }
-        this.nziBase = gpuData.ziIdx().length / 11 - gpuData.baseOpenZiElements().length;
+        this.ziElemByBranchNumChunk = gpuData.baseOpenBranches().zeroImpedanceElementByBranchNum();
+        this.nziBase = gpuData.ziIdx().length / 11 - gpuData.baseOpenBranches().zeroImpedanceElements().length;
         this.ziElemByNumAll = new java.util.HashMap<>();
         for (int z = 0; z < gpuData.ziIdx().length / 11; z++) {
             ziElemByNumAll.put(gpuData.ziBranchNums()[z], z);
@@ -110,7 +107,7 @@ final class RunScratch {
         this.dsOvMaxDelta = hasDs ? new double[chunkSize] : new double[0];
         this.dsOvMinDelta = hasDs ? new double[chunkSize] : new double[0];
         this.baseRowMode = baseRowMode;
-        this.baseOpenCbElements = gpuData.baseOpenCbElements();
+        this.baseOpenCbElements = gpuData.baseOpenBranches().closedBranchElements();
     }
 
     /** Clear the run-scope lists a chunk rebuilds, and the distributed-slack reweight. */

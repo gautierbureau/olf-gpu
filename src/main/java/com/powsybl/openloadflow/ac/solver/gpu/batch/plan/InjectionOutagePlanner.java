@@ -47,12 +47,9 @@ final class InjectionOutagePlanner {
         final boolean incrementalTvc = ctx.incrementalTvc();
         final Set<LfBranch> relocatedCouplers = ctx.relocatedCouplers();
         final boolean slackParticipates = ctx.slackParticipates();
-        java.util.Set<Integer> baseOpenSet = java.util.Arrays.stream(gpuData.baseOpenCbElements())
+        java.util.Set<Integer> baseOpenSet = java.util.Arrays.stream(gpuData.baseOpenBranches().closedBranchElements())
                 .boxed().collect(java.util.stream.Collectors.toSet());
-        java.util.Map<Integer, Integer> ziElemByBranchNum = new java.util.HashMap<>();
-        for (int z = 0; z < gpuData.baseOpenZiElements().length; z++) {
-            ziElemByBranchNum.put(gpuData.baseOpenZiBranchNums()[z], gpuData.baseOpenZiElements()[z]);
-        }
+        java.util.Map<Integer, Integer> ziElemByBranchNum = gpuData.baseOpenBranches().zeroImpedanceElementByBranchNum();
         boolean recloseOk = true;
         int ziCloses = 0;
         for (LfBranch rb : c.reclosedBranches()) {

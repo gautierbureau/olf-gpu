@@ -99,7 +99,7 @@ public record GpuAcData(double[] cbIn, int[] cbIdx, int[] cbPcSide, double[] obI
                         int[] dgBus, double[] dgFactor, double[] dgMaxDelta, double[] dgMinDelta,
                         double[] dgMarginUp, double[] dgMarginDown, int[] busGenStart, int[] busGenEnd,
                         int[] dsBusNum, String[] dgGenId,
-                        int[] baseOpenCbElements, int[] baseOpenZiElements, int[] baseOpenZiBranchNums,
+                        BaseOpenBranches baseOpenBranches,
                         int[] ziBranchNums, double[] vdlIn, int[] vdlIdx, int[] qrPtr, int[] qrRows,
                         int[] obQAlt, int[] ziQAlt,
                         /** Per reactive-limit entry, OLF's {@code LfBus.getQLimitType()} after the base load flow:
@@ -133,8 +133,7 @@ public record GpuAcData(double[] cbIn, int[] cbIdx, int[] cbPcSide, double[] obI
      * and can share one device-resident structure (see {@code GpuAcStructures}).
      */
     public boolean sameStructureInputsAs(GpuAcData other) {
-        if (other != null && (!java.util.Arrays.equals(baseOpenCbElements, other.baseOpenCbElements)
-                || !java.util.Arrays.equals(baseOpenZiElements, other.baseOpenZiElements))) {
+        if (other != null && !baseOpenBranches.sameElementsAs(other.baseOpenBranches)) {
             return false;
         }
         return other != null

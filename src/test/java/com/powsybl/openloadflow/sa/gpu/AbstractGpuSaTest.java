@@ -76,7 +76,7 @@ abstract class AbstractGpuSaTest extends AbstractOpenSecurityAnalysisTest {
                 .setSlackBusesIds(List.of("vl0"));
         GpuBatchScopeCensus.reset();
         assertGpuMatchesCpu(remoteMergedSectionsNetwork(sections), ctgs, 1e-9, lfp, true);
-        // A section whose loss re-homes the survivors onto a REMOTELY controlled cluster is hosted on the device
+        // A section whose loss re-merges the survivors onto a REMOTELY controlled cluster is hosted on the device
         // once the base pilot is lost (the new pilot's balance rides the first free controller through its
         // dependent-pilot pool); a cluster splitting off BEHIND a surviving main is still the CPU's, tagged.
         assertEquals(refused, GpuBatchScopeCensus.planRefusedIds());

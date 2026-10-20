@@ -91,7 +91,7 @@ __global__ void reactiveLimitsBatch(const double* secondaryVoltageControlReactiv
         r[6] = vOwn; r[7] = cmpV; r[8] = targetV; r[9] = limitType[(size_t) s * nReactiveLimitEntries + i];
         r[10] = switchCount[(size_t) s * nReactiveLimitEntries + i]; r[11] = s;
     };
-    // A RE-HOMED voltage control (GpuBatchQualification.reHomedControls): this scenario the bus is a plain PV
+    // A RE-MERGED voltage control (GpuBatchQualification.reMergedControls): this scenario the bus is a plain PV
     // bus, so its entry — packed as a remote member of the base group — takes the LOCAL path below, at its
     // own voltage target. OLF checks it as the PV bus it now is (BUS-6113_BBS_1: VL-6113_1 pinned at RL#1).
     bool localOv = reactiveLimitLocalOverride != nullptr && reactiveLimitLocalOverride[(size_t) s * nReactiveLimitEntries + i];
@@ -185,7 +185,7 @@ __global__ void reactiveLimitsBatch(const double* secondaryVoltageControlReactiv
             // robust criteria. That WRITES the state vector every other entry is still reading here,
             // so it runs as its own pass (reactiveLimitsRobustVoltageResetBatch) once this one has finished.
         } else {                                            // pinned — switch-back tests the PILOT
-            // a controller re-homed onto a NEW pilot this scenario reads that pilot's voltage (reactiveLimitComparedVoltageRowOverride)
+            // a controller re-merged onto a NEW pilot this scenario reads that pilot's voltage (reactiveLimitComparedVoltageRowOverride)
             double v = x[(size_t) s * n + (reactiveLimitComparedVoltageRowOverride != nullptr && reactiveLimitComparedVoltageRowOverride[rst] >= 0 ? reactiveLimitComparedVoltageRowOverride[rst] : reactiveLimitComparedVoltageRow[i])];
             double targetV = reactiveLimitTargetVOf(nReactiveLimitTargetVOverrides, reactiveLimitTargetVOverrideScenarioEntry, reactiveLimitTargetVOverrideValue, secondaryVoltageControlReactiveLimitTargetV, nReactiveLimitEntries, s, i, reactiveLimitTargetV[i]);
             bool minPin = isMinLimit(limitType[rst]);
@@ -200,7 +200,7 @@ __global__ void reactiveLimitsBatch(const double* secondaryVoltageControlReactiv
             bool wantsBack = (!minPin && v > targetV) || (minPin && v < targetV);
             bool back = wantsBack && switchCount[rst] < maxSwitch;
             if (back && reactiveLimitPqPvSwitchForbidden != nullptr && reactiveLimitPqPvSwitchForbidden[rst]) {
-                // a pinned member of a re-homed cluster with no enabled controller: OLF would re-activate the
+                // a pinned member of a re-merged cluster with no enabled controller: OLF would re-activate the
                 // cluster's BUS_TARGET_V, which this table cannot host for a lost pilot — reject, CPU replay
                 unpinBad[s] = 1;
                 back = false;
@@ -242,7 +242,7 @@ __global__ void reactiveLimitsBatch(const double* secondaryVoltageControlReactiv
     // that pins the dummy to a DUMMY_TARGET identity -- and qBuf is a separate accumulator, so reading it
     // there is valid whatever the row's equation MODE. Only the pin WRITE belongs on the live row, which
     // is idx. Conflating the two reproduced that base failure per scenario: measured on rte6515
-    // BUS-6113_BBS_1, VL-6113_1 is re-homed LOCAL (reHomePv reactiveLimitEntry=969) and OLF pins it MIN_Q at
+    // BUS-6113_BBS_1, VL-6113_1 is re-merged LOCAL (reMergePv reactiveLimitEntry=969) and OLF pins it MIN_Q at
     // q=-3.231 against a -0.774 limit, while the device read q~0 and never pinned. Its THIRD slack check
     // then measured 0.013280180 where OLF measures 0.006846832 -- straddling the 1 MW gate -- so the
     // device took a distribution OLF does not and reported 1.328 MW more distributed active power: the
@@ -283,7 +283,7 @@ __global__ void reactiveLimitsBatch(const double* secondaryVoltageControlReactiv
                  reactiveLimitTargetVOf(nReactiveLimitTargetVOverrides, reactiveLimitTargetVOverrideScenarioEntry, reactiveLimitTargetVOverrideValue, secondaryVoltageControlReactiveLimitTargetV, nReactiveLimitEntries, s, i, reactiveLimitTargetV[i]));
         return;
     }
-    // A re-homed LOCAL control whose own V row carries a live coupler's ZERO_V keeps its identity (mode 6, on its
+    // A re-merged LOCAL control whose own V row carries a live coupler's ZERO_V keeps its identity (mode 6, on its
     // own V column) and its pinned balance (mode 4) on the RELOCATED row — the parent coupler's DUMMY_Q (tasks #70,
     // VC_REMERGE_RELOC_VROW). The voltage is still read at the bus's own column (idx).
     size_t pinIdx = idx;
@@ -299,7 +299,7 @@ __global__ void reactiveLimitsBatch(const double* secondaryVoltageControlReactiv
         if (q < liMin - tol) {
             savedTarget[scenarioEntry] = target[pinIdx];                // remember the row target for the switch-back
             savedMode[scenarioEntry] = static_cast<char>(mode[pinIdx]);   // and the PV form (0, 2 for a slope SVC, 6 cross)
-            mode[pinIdx] = localOv ? GpuRowMode::BUS_TARGET_Q : GpuRowMode::EQUATION;             // a re-homed member: own Q through its ALTERNATE dest
+            mode[pinIdx] = localOv ? GpuRowMode::BUS_TARGET_Q : GpuRowMode::EQUATION;             // a re-merged member: own Q through its ALTERNATE dest
             target[pinIdx] = liMin - reactiveLimitLoadQ[li];
             limitType[scenarioEntry] = GpuQLimitType::MIN_Q;
             switchCount[scenarioEntry]++;
@@ -308,7 +308,7 @@ __global__ void reactiveLimitsBatch(const double* secondaryVoltageControlReactiv
         } else if (q > liMax + tol) {
             savedTarget[scenarioEntry] = target[pinIdx];
             savedMode[scenarioEntry] = static_cast<char>(mode[pinIdx]);
-            mode[pinIdx] = localOv ? GpuRowMode::BUS_TARGET_Q : GpuRowMode::EQUATION;             // a re-homed member: own Q through its ALTERNATE dest
+            mode[pinIdx] = localOv ? GpuRowMode::BUS_TARGET_Q : GpuRowMode::EQUATION;             // a re-merged member: own Q through its ALTERNATE dest
             target[pinIdx] = liMax - reactiveLimitLoadQ[li];
             limitType[scenarioEntry] = GpuQLimitType::MAX_Q;
             switchCount[scenarioEntry]++;

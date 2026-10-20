@@ -10,7 +10,7 @@
  * changes, and whether the device can solve it. The contingencies as the device sees them ({@code BatchContingency}
  * and its lost loads, shunt shifts and tap overrides), their qualification ({@code GpuBatchContingencyValidator},
  * {@code GpuBatchQualification}), the branch and injection outage planners, the generator outages
- * ({@code GenOutage}), the voltage control overrides and re-homing, the islanded buses, the scheduled loss and its
+ * ({@code GenOutage}), the voltage control overrides and re-merging, the islanded buses, the scheduled loss and its
  * pre-distribution, and the slack relocation. The solve side
  * ({@link com.powsybl.openloadflow.ac.solver.gpu.batch}) reads this package; this package never reads it.
  *

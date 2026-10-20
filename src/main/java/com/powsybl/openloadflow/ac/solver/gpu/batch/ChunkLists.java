@@ -52,8 +52,8 @@ final class ChunkLists {
     final int nDistrQMembersAll;
     final byte[] distrQSubgroupDense;
     boolean anyDistrQSubgroup = false;
-    final List<Integer> reactiveLimitLocalOverrideScenarioEntryList = new ArrayList<>();     // (slot, entry): re-homed PV buses checked as LOCAL
-    final List<Integer> reactiveLimitComparedVoltageRowOverrideScenarioEntryList = new ArrayList<>();       // (slot, entry): remote controllers re-homed onto a NEW pilot
+    final List<Integer> reactiveLimitLocalOverrideScenarioEntryList = new ArrayList<>();     // (slot, entry): re-merged PV buses checked as LOCAL
+    final List<Integer> reactiveLimitComparedVoltageRowOverrideScenarioEntryList = new ArrayList<>();       // (slot, entry): remote controllers re-merged onto a NEW pilot
     final List<Integer> reactiveLimitComparedVoltageRowOverrideRowList = new ArrayList<>();       // ...the new pilot's V row their limit check reads
     final List<Integer> reactiveLimitTargetVOverrideScenarioEntryList = new ArrayList<>();       // (slot, entry): per-scenario reactive-limit V target
     final List<Double> reactiveLimitTargetVOverrideValue = new ArrayList<>();

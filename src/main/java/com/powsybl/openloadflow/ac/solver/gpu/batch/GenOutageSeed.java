@@ -71,22 +71,22 @@ final class GenOutageSeed {
                     row[go.vRow()] = go.pqRowModeOrDefault();   // BUS_V row becomes the reactive-power equation (PV→PQ)
                     rs.rowModePerScenario[s] = row;
                 }
-                if (go.reHomesReactiveLimitEntry()) {
+                if (go.reMergesReactiveLimitEntry()) {
                     cl.reactiveLimitLocalOverrideScenarioEntryList.add(s);
                     cl.reactiveLimitLocalOverrideScenarioEntryList.add(go.reactiveLimitEntry());
-                    cl.reactiveLimitLocalTargetV.add(go.reHomeVTarget());
+                    cl.reactiveLimitLocalTargetV.add(go.reMergeVTarget());
                 }
-                if (go.reHomesRemoteController()) {
+                if (go.reMergesRemoteController()) {
                     // OLF's re-merged control: this remote member's reactive-limit check reads the
                     // NEW pilot's voltage against the new pilot's target; its row stays the base
                     // table's sharing row, which the dependent pilot's pool uses as the carrier.
                     if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {
-                        System.err.printf("QUALIFY_TRACE reHomeRemoteCtl slot=%d entry=%d of %d cmpRow=%d vt=%.6f%n",
-                                s, go.reactiveLimitEntry(), gpuData.reactiveLimits().voltageRow().length, go.reHomePilotVRow(), go.qTarget());
+                        System.err.printf("QUALIFY_TRACE reMergeRemoteController slot=%d entry=%d of %d cmpRow=%d vt=%.6f%n",
+                                s, go.reactiveLimitEntry(), gpuData.reactiveLimits().voltageRow().length, go.reMergePilotVRow(), go.qTarget());
                     }
                     cl.reactiveLimitComparedVoltageRowOverrideScenarioEntryList.add(s);
                     cl.reactiveLimitComparedVoltageRowOverrideScenarioEntryList.add(go.reactiveLimitEntry());
-                    cl.reactiveLimitComparedVoltageRowOverrideRowList.add(go.reHomePilotVRow());
+                    cl.reactiveLimitComparedVoltageRowOverrideRowList.add(go.reMergePilotVRow());
                     cl.reactiveLimitTargetVOverrideScenarioEntryList.add(s);
                     cl.reactiveLimitTargetVOverrideScenarioEntryList.add(go.reactiveLimitEntry());
                     cl.reactiveLimitTargetVOverrideValue.add(go.qTarget());
@@ -175,7 +175,7 @@ final class GenOutageSeed {
                         // scenario. Mode 4 means it hosts its own reactive balance (an RL
                         // pin, or a control the contingency killed and whose BUS_TARGET_Q
                         // the injection override owns); mode 0 means it is an IDENTITY —
-                        // a re-homed control's voltage target (reHomedPvEntry, the remote
+                        // a re-merged control's voltage target (reMergedPvEntry, the remote
                         // main of a split group) or a frozen/outaged row. updateDistrQ-
                         // TargetsBatch refuses to maintain a DISTR_Q target on either ("A
                         // DISTR_Q target has no business here"), so uploading one is a
@@ -184,7 +184,7 @@ final class GenOutageSeed {
                         // 26 mode-4 rows across 24 contingencies
                         // disagreed, all from this site — BUS-1359_BBS_1 and BUS-1869_BBS_1
                         // (the +-2 violation pair), BUS-1599_BBS_1. Then, once the split
-                        // re-homes batched (tasks #70), the mode-0 case: BUS-2640_BBS_1's
+                        // re-merges batched (tasks #70), the mode-0 case: BUS-2640_BBS_1's
                         // elected main VL-2640_1 got its 1.034 identity on row 5956 AND
                         // this seed's 0.0 (its renormalized DISTR_Q target); the device
                         // picked 0.0 in the full 6667-contingency batch (slot 1844: V

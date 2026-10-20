@@ -199,7 +199,7 @@ final class GpuSaTestNetworks {
      *  would become one and route the plan to the branch-combo path instead). Equipment switches are
      *  disconnectors so the trip propagates through them (a breaker would stop it). */
     /**
-     * The dominant NON-BATCHED shape of rte6515's full busbar scope (tasks #69, 31 of 46 refused re-homes):
+     * The dominant NON-BATCHED shape of rte6515's full busbar scope (tasks #69, 31 of 46 refused re-merges):
      * a merged voltage-control group whose PILOT SECTION is lost while TWO coupler-joined sections survive,
      * each with its own LOCAL generator. OLF re-runs the merge on the surviving zero-impedance network,
      * elects a new main (highest target, then controlled-bus id), rebuilds DISTR_Q over the survivors with
@@ -467,7 +467,7 @@ final class GpuSaTestNetworks {
         // setRetained here is INERT for the security analysis: OLF re-derives the retained set from the
         // contingency list (only a switch some listed contingency opens stays a bus-breaker separator and
         // becomes an LfSwitch). The couplers exist on the LF network because the test lists a loss on each
-        // side of them, see deviceLostPilotSectionReHomesSurvivingClusterMatchesCpu.
+        // side of them, see deviceLostPilotSectionReMergesSurvivingClusterMatchesCpu.
         vl12.getNodeBreakerView().newBreaker().setId("c01").setNode1(0).setNode2(1).setRetained(true).setOpen(false).add();
         vl12.getNodeBreakerView().newBreaker().setId("c12").setNode1(1).setNode2(2).setRetained(true).setOpen(false).add();
         int node = 10;
@@ -484,7 +484,7 @@ final class GpuSaTestNetworks {
         vl12.newLoad().setId("ld0").setNode(11).setP0(30).setQ0(40).add();
         for (String[] g : new String[][] {{"g1", "13"}, {"g2", "15"}}) {
             // remoteSurvivors: g1/g2 regulate bbs0 REMOTELY (one remote group, pilot bbs0), so losing bbs0 kills
-            // their control instead of re-homing it — two dead-control survivors on a coupler chain.
+            // their control instead of re-merging it — two dead-control survivors on a coupler chain.
             var adder = vl12.newGenerator().setId(g[0]).setNode(Integer.parseInt(g[1]))
                     .setMinP(0).setMaxP(500).setTargetP(100).setTargetQ(0).setVoltageRegulatorOn(true)
                     .setTargetV(remoteSurvivors ? 406 : 405);

@@ -437,9 +437,9 @@ struct BatchSolverContext {
     int nReactiveLimitPqPvSwitchForbidden = 0;
     DeviceBuf dReactiveLimitGeneratorsLost;                                    // (scenario, entry): the bus lost every generator this
     int nReactiveLimitGeneratorsLost = 0;                                      // scenario — not a controller, seeded FROZEN
-    DeviceBuf dReactiveLimitLocalOverride, dReactiveLimitLocalTargetV;                        // re-homed PV buses: (scenario, entry) mask + own V target
+    DeviceBuf dReactiveLimitLocalOverride, dReactiveLimitLocalTargetV;                        // re-merged PV buses: (scenario, entry) mask + own V target
     int nReactiveLimitLocalOverrides = 0;
-    DeviceBuf dReactiveLimitComparedVoltageRowOverride;                                      // remote controllers re-homed onto a NEW pilot: (scenario,
+    DeviceBuf dReactiveLimitComparedVoltageRowOverride;                                      // remote controllers re-merged onto a NEW pilot: (scenario,
     int nReactiveLimitComparedVoltageRowOverrides = 0;                                          // entry) -> the new pilot's V row, -1 = the base pilot's
     DeviceBuf dReactiveLimitIslanded;
     int nDistrQMemberTargetQOverrides = 0;                                       // per-scenario member targetQ overrides

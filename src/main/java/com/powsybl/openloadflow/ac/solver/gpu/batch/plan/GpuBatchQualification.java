@@ -164,7 +164,7 @@ public final class GpuBatchQualification {
             // distributed-slack generator pack (its anchor and its own move); any other curve generator keeps its
             // limits at the base target P - CPU.
             if (reactiveLimits && c.generatorActions().stream()
-                    .anyMatch(m -> ControlReHoming.hasCurve(m.generator()) && !ControlReHoming.inGeneratorPack(gpuData, m.generator().getId()))) {
+                    .anyMatch(m -> VoltageControlReMerge.hasCurve(m.generator()) && !VoltageControlReMerge.inGeneratorPack(gpuData, m.generator().getId()))) {
                 refuse(c, "PLAN:PAIR_ACTION_UNTRACKED_CURVE");
                 continue;
             }
@@ -172,7 +172,7 @@ public final class GpuBatchQualification {
             // A participant outside a non-empty pack (its bus has no active P balance row) has nowhere to sit out. (In
             // a slack-only distribution there is no pack, and any action there moves the slack bus: SLACK_BUS.)
             if (gpuData.distributedSlack().generatorId() != null && gpuData.distributedSlack().generatorId().length > 0 && c.generatorActions().stream()
-                    .anyMatch(m -> distributedSlackParameters.factor(m.generator()) != 0 && !ControlReHoming.inGeneratorPack(gpuData, m.generator().getId()))) {
+                    .anyMatch(m -> distributedSlackParameters.factor(m.generator()) != 0 && !VoltageControlReMerge.inGeneratorPack(gpuData, m.generator().getId()))) {
                 refuse(c, "PLAN:PAIR_ACTION_UNTRACKED_PARTICIPANT");
                 continue;
             }

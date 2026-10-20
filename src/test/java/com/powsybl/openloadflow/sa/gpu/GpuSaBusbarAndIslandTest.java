@@ -481,7 +481,7 @@ class GpuSaBusbarAndIslandTest extends AbstractGpuSaTest {
      *  child's balance. The three-section chain with a ZIP load on every section, each coupler opened in turn (both
      *  sides stay energized). 1e-12 on device. */
     @Test
-    void deviceZipLoadOnARehomedSectionMatchesCpu() {
+    void deviceZipLoadOnAReMergedSectionMatchesCpu() {
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
         Network network = liveSectionChainNetwork();
@@ -588,7 +588,7 @@ class GpuSaBusbarAndIslandTest extends AbstractGpuSaTest {
 
     /** A coupler opened by a SwitchContingency that islands nothing still SPLITS the merged voltage control of its two
      *  sections: OLF re-merges per zero-impedance cluster, so g1 regulates bbs1 on its own, at its own target. The
-     *  device planned that re-homing only for outages that island a bus; here the entries stayed the base group's, and a
+     *  device planned that re-merging only for outages that island a bus; here the entries stayed the base group's, and a
      *  member the base pinned went back, once released, to the group's sharing row while the group's voltage identity
      *  came back on bbs0, whose generator is still pinned: a system OLF does not have. Both sections pinned MAX_Q in the
      *  base: the device diverged (MAX_ITERATION_REACHED) where OLF converges after releasing g1; both MIN_Q: the same;
@@ -613,7 +613,7 @@ class GpuSaBusbarAndIslandTest extends AbstractGpuSaTest {
 
     /** The same split in BREAKER mode, every member free: a busbar-section contingency in the list makes OLF model every
      *  switch, so opening c01 separates the generator nodes of the coupled curve sections into two clusters, each with
-     *  its own control. Without the re-homing the device kept the merged control's layout and held bbs0 at 400.9745 kV
+     *  its own control. Without the re-merging the device kept the merged control's layout and held bbs0 at 400.9745 kV
      *  where OLF holds its 401.0 target (the section alone, in bus-breaker topology, happened to come out right). */
     @Test
     void deviceCouplerOpeningInBreakerModeMatchesCpu() {

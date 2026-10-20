@@ -18,19 +18,20 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Voltage controls re-homed by an islanding contingency: which controllers survive, which pilot or main generator
- * takes over, and which shapes the device refuses (OLF's voltage-control re-merge after a topology change).
+ * Voltage controls re-merged by an islanding contingency: which controllers survive, which pilot or main generator
+ * takes over, and which shapes the device refuses: OLF's LfZeroImpedanceNetwork.updateVoltageControlMergeStatus
+ * (MAIN / DEPENDENT) replayed for the contingency.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
-public final class ControlReHoming {
+public final class VoltageControlReMerge {
 
-    private ControlReHoming() {
+    private VoltageControlReMerge() {
     }
 
     /** The outcome of OLF's voltage-control RE-MERGE after a contingency: buses that become plain PV buses at their
      *  own target, the controllers that thereby leave their base group's DISTR_Q, or a reject tag. */
-    record ReHomed(java.util.LinkedHashMap<LfBus, Double> pvTargets, List<LfBus> leftControllers, String reject,
+    record ReMerged(java.util.LinkedHashMap<LfBus, Double> pvTargets, List<LfBus> leftControllers, String reject,
                    java.util.LinkedHashMap<LfBus, Double> remoteMainTargets, java.util.Set<LfBus> remoteClusterBuses,
                    /** Per controlled bus of a surviving cluster that is NOT the base main's: its SUBGROUP label
                     *  (1, 2, ...) this scenario — the base main's own cluster stays label 0 (tasks #71). */
@@ -39,7 +40,7 @@ public final class ControlReHoming {
                     *  controlled bus OLF elects as the cluster's new main: their rows stay the base table's sharing rows
                     *  (the new pilot's balance rides the first free one through its dependent-pilot pool) and their
                     *  reactive-limit check reads the new pilot's voltage against the new pilot's target. */
-                   java.util.LinkedHashMap<LfBus, LfBus> reHomedRemoteControllers) {
+                   java.util.LinkedHashMap<LfBus, LfBus> reMergedRemoteControllers) {
 
         /** Whether OLF's re-merge changes any control at all (or the device refuses the shape). */
         boolean changesControls() {
@@ -58,7 +59,7 @@ public final class ControlReHoming {
      * BUS-6002_BBS_2 (coupler open, VL-6002_2 8.7 kV off, 29 phantom violations). A cluster with several controls
      * or a remote controller is a NEW remote group the tables cannot host — CPU, tagged.
      */
-    static ReHomed reHomedControls(List<LfBus> islandedBuses, List<LfBranch> outagedZeroImpedanceBranches, String contingencyId,
+    static ReMerged reMergedControls(List<LfBus> islandedBuses, List<LfBranch> outagedZeroImpedanceBranches, String contingencyId,
                                    EquationSystem<AcVariableType, AcEquationType> es) {
         java.util.Set<LfBus> islanded = new java.util.HashSet<>(islandedBuses);
         java.util.Set<LfBranch> outaged = new java.util.HashSet<>(outagedZeroImpedanceBranches);
@@ -82,7 +83,7 @@ public final class ControlReHoming {
         java.util.LinkedHashMap<LfBus, Double> remoteMains = new java.util.LinkedHashMap<>();
         java.util.Set<LfBus> remoteCluster = new java.util.LinkedHashSet<>();
         java.util.LinkedHashMap<LfBus, Integer> subgroupOf = new java.util.LinkedHashMap<>();
-        java.util.LinkedHashMap<LfBus, LfBus> reHomedRemoteControllers = new java.util.LinkedHashMap<>();
+        java.util.LinkedHashMap<LfBus, LfBus> reMergedRemoteControllers = new java.util.LinkedHashMap<>();
         for (var main : mains) {
             java.util.Map<LfBus, com.powsybl.openloadflow.network.VoltageControl<LfBus>> controlOf = new java.util.LinkedHashMap<>();
             controlOf.put(main.getControlledBus(), main);
@@ -103,8 +104,8 @@ public final class ControlReHoming {
                 // BFS over the surviving zero-impedance edges through EVERY live bus — an uncontrolled section
                 // between two controlled ones still joins them (OLF's zero-impedance network is the bus set, not
                 // the controlled set): walking controlled buses only split a group behind a plain section and
-                // re-homed a controller OLF keeps merged (the 4-section fixture with bbs1 uncontrolled, bus-3:
-                // vl12_2 "re-homed" 1.4 kV off; rte6515 BUS-6029_BBS_4's VL-6029_2 behind the uncontrolled VL-6029_1).
+                // re-merged a controller OLF keeps merged (the 4-section fixture with bbs1 uncontrolled, bus-3:
+                // vl12_2 "re-merged" 1.4 kV off; rte6515 BUS-6029_BBS_4's VL-6029_2 behind the uncontrolled VL-6029_1).
                 List<LfBus> cluster = new ArrayList<>(List.of(start));   // the CONTROLLED buses reached
                 List<LfBus> walk = new ArrayList<>(List.of(start));      // every bus reached
                 java.util.Set<LfBus> walked = new java.util.HashSet<>(List.of(start));
@@ -135,7 +136,7 @@ public final class ControlReHoming {
                 boolean local = cluster.size() == 1
                         && newMain.getControllerElements().stream().allMatch(controller -> controller == newMain.getControlledBus());
                 if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {
-                    System.err.printf("QUALIFY_TRACE reHome ctg=%s main=%s cluster=%s newMain=%s target=%.6f local=%b%n",
+                    System.err.printf("QUALIFY_TRACE reMerge ctg=%s main=%s cluster=%s newMain=%s target=%.6f local=%b%n",
                             contingencyId, main.getControlledBus().getId(), cluster.stream().map(LfBus::getId).toList(),
                             newMain.getControlledBus().getId(), newMain.getTargetValue(), local);
                 }
@@ -149,9 +150,9 @@ public final class ControlReHoming {
                     // reactive balance rides the first free member row through its DEPENDENT-PILOT pool
                     // (ExtractionColumns: the same member rows, that bus's reactive terms), which coincides with the
                     // base group's carrier pick on the same modes; each controller's reactive-limit check is re-pointed
-                    // at the new pilot (ROW_REMOTE_REHOME). The base pilot's own balance has no carrier to write while
+                    // at the new pilot (ROW_REMOTE_REMERGE). The base pilot's own balance has no carrier to write while
                     // its row is frozen (updateDistrQTargetsBatch), so nothing of the dead group is left in the system.
-                    // network.xiidm busbar GOOD (GOPN_0 islanded, GOMV_1 re-homed onto GOPN_1), CKTZ, CXUJ, FUDD.
+                    // network.xiidm busbar GOOD (GOPN_0 islanded, GOMV_1 re-merged onto GOPN_1), CKTZ, CXUJ, FUDD.
                     //
                     // Hosted when the base pilot is LOST and this cluster is every survivor of the group. A cluster
                     // splitting off BEHIND a surviving main (the base group keeps its pilot) is a second OLF group on
@@ -160,17 +161,17 @@ public final class ControlReHoming {
                     boolean baseMainAlive = alive.contains(main.getControlledBus());
                     if (baseMainAlive || cluster.size() != alive.size() || !remoteMains.isEmpty()) {
                         if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {
-                            System.err.printf("QUALIFY_TRACE reHome ctg=%s main=%s cluster=%s REMOTE controllers behind a surviving main -> CPU%n",
+                            System.err.printf("QUALIFY_TRACE reMerge ctg=%s main=%s cluster=%s REMOTE controllers behind a surviving main -> CPU%n",
                                     contingencyId, main.getControlledBus().getId(), cluster.stream().map(LfBus::getId).toList());
                         }
-                        return new ReHomed(pv, left, "VC_REMERGE_REMOTE_SUBGROUP", remoteMains, remoteCluster, subgroupOf,
-                                reHomedRemoteControllers);
+                        return new ReMerged(pv, left, "VC_REMERGE_REMOTE_SUBGROUP", remoteMains, remoteCluster, subgroupOf,
+                                reMergedRemoteControllers);
                     }
                     remoteMains.put(newMain.getControlledBus(), newMain.getTargetValue());
                     remoteCluster.addAll(cluster);
                     for (LfBus controlledBus : cluster) {
                         for (LfBus controller : controlOf.get(controlledBus).getControllerElements()) {
-                            reHomedRemoteControllers.put(controller, newMain.getControlledBus());
+                            reMergedRemoteControllers.put(controller, newMain.getControlledBus());
                         }
                     }
                     for (LfBus controlledBus : controlOf.keySet()) {   // the controllers the group LOST with the islanded sections
@@ -195,13 +196,13 @@ public final class ControlReHoming {
                     // sharing rows, and the new main's voltage identity is either the one the stock
                     // placement already installs on a killed coupler's child or an explicit ROW_V_IDENTITY
                     // (the caller decides, it holds the relocation map). Measured on rte6515's full busbar
-                    // scope: 46 distinct refused re-homes, 45 with the elected main coupler-adjacent to the
+                    // scope: 46 distinct refused re-merges, 45 with the elected main coupler-adjacent to the
                     // island, 31 of them exactly "pilot section lost, two sections survive" (tasks #69).
                     // Two or more surviving non-local clusters of ONE base group would be two new groups
                     // sharing one candidate table — still refused.
                     boolean wholeSurvivors = cluster.size() == alive.size();
                     if (!wholeSurvivors || !remoteMains.isEmpty()) {
-                        // tasks #71: the base main keeps its own cluster (or another cluster already re-homed) and
+                        // tasks #71: the base main keeps its own cluster (or another cluster already re-merged) and
                         // THIS cluster is a further OLF group on the same candidate table — a SUBGROUP: its members
                         // pair keys and q terms among themselves only, its elected main gets the identity, the base
                         // pilot's carrier is picked among label-0 members. Needs the group's candidate table
@@ -230,9 +231,9 @@ public final class ControlReHoming {
                         left.add(controller);
                     }
                 }
-                // A locally re-homed bus is its OWN OLF group too: label it so the base pilot's "enabled
+                // A locally re-merged bus is its OWN OLF group too: label it so the base pilot's "enabled
                 // controller" scan and the DISTR_Q rows of the main's side stop counting it (rte6515
-                // BUS-6194_BBS_2: the re-homed VL-6194_2 unpinned, the kernel read it as a live controller of the
+                // BUS-6194_BBS_2: the re-merged VL-6194_2 unpinned, the kernel read it as a live controller of the
                 // pinned main VL-6194_0 and restored the main's identity OLF has off — 4.775 kV).
                 if (!alive.isEmpty() && alive.stream().anyMatch(b -> b == main.getControlledBus())) {
                     int label = subgroupOf.values().stream().mapToInt(Integer::intValue).max().orElse(0) + 1;
@@ -240,7 +241,7 @@ public final class ControlReHoming {
                 }
             }
         }
-        return new ReHomed(pv, left, null, remoteMains, remoteCluster, subgroupOf, reHomedRemoteControllers);
+        return new ReMerged(pv, left, null, remoteMains, remoteCluster, subgroupOf, reMergedRemoteControllers);
     }
 
     /** Whether the generator's reactive limits are a capability CURVE (they then depend on its target P). */

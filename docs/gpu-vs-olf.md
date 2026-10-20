@@ -92,8 +92,10 @@ OLF leaves empty. These are the same OLF equations; only their row differs.
   - **stock placement**: the other couplers keep their rows, with the two equations crosswise, and the zero diagonals
     are handled by the repair (2.4);
   - **re-homing**: in a lane whose contingency opens the coupler, the child's balances come back to its own rows;
-  - **re-merge**: after a busbar-section loss, OLF re-elects which bus of a coupler cluster holds the voltage; the
-    device puts the voltage target on the elected bus. (The code calls it `REHOME`, but it is a re-election.)
+  - **re-merge**: after a busbar-section loss, OLF re-elects which bus of a coupler cluster holds the voltage
+    (`LfZeroImpedanceNetwork.updateVoltageControlMergeStatus`, MAIN / DEPENDENT); the device puts the voltage
+    target on the elected bus (`VoltageControlReMerge`). OLF behaviour replayed per contingency, not a device-only
+    mechanism.
 
 ### 2.4 A factorization without pivoting
 

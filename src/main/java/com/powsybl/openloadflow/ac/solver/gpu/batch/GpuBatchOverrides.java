@@ -74,7 +74,7 @@ public final class GpuBatchOverrides {
     /** Add an override for {@code flat}. A row that already has an entry gets its VALUE REPLACED in place —
      *  "last one wins", decided HERE and not by the device. This used to append a second entry, and
      *  applyTargetOverrideBatch (one thread per entry writing {@code target[ovIndex[k]]}) then picked the
-     *  survivor by scheduling: rte6515 BUS-2640_BBS_1's re-homed voltage identity (1.034) on row 5956 lost to a
+     *  survivor by scheduling: rte6515 BUS-2640_BBS_1's re-merged voltage identity (1.034) on row 5956 lost to a
      *  DISTR_Q seed of 0.0 in the 6667-contingency batch (slot 1844, 193.85 MW of distributed power and
      *  +197 violations against OLF) and won in a 3-contingency batch (slot 0, bit-identical to OLF). The
      *  entries handed to the device now never hold a row twice; a conflicting duplicate is still COUNTED

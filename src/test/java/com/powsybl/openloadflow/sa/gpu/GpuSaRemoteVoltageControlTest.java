@@ -20,7 +20,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * GPU-batched security analysis against the CPU: remote and merged generator voltage controls: member pins, pilots, split and re-homed groups.
+ * GPU-batched security analysis against the CPU: remote and merged generator voltage controls: member pins, pilots, split and re-merged groups.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
@@ -347,31 +347,31 @@ class GpuSaRemoteVoltageControlTest extends AbstractGpuSaTest {
         assertSplitGroupMatchesCpu(4);
     }
 
-    /** The main's pilot section islanded with its generator, ONE remote survivor re-homed onto its own section
+    /** The main's pilot section islanded with its generator, ONE remote survivor re-merged onto its own section
      *  (network.xiidm GOOD: GOMV_1 -> GOPN_1): on the device, at 1e-9 kV. The surviving section's identity goes on
      *  its own row (the killed coupler's child), its reactive balance on the free controller's row through its
      *  dependent-pilot pool, and the controller's limit check reads the new pilot. With the "control dies" flip
      *  the device used to hold vg1 at 404.07 kV against OLF's 405.87 (bbs1's balance enforced nowhere). */
     @Test
-    void deviceMergedRemoteControlSurvivorReHomesOntoItsOwnSectionMatchesCpu() {
+    void deviceMergedRemoteControlSurvivorReMergesOntoItsOwnSectionMatchesCpu() {
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
         assertRemoteMergedSectionsMatchCpu(2, java.util.Set.of());
     }
 
-    /** Three sections: losing bbs0 re-homes TWO remote survivors onto one control (network.xiidm CXUJ: CXSS_2/_4 ->
+    /** Three sections: losing bbs0 re-merges TWO remote survivors onto one control (network.xiidm CXUJ: CXSS_2/_4 ->
      *  CXYW_1) - on the device, the new pilot's balance on the first free controller, the other's row a sharing row
-     *  renormalized over the two; losing the middle bbs1 cuts bbs2 off a SURVIVING main and re-homes vg2 onto it -
+     *  renormalized over the two; losing the middle bbs1 cuts bbs2 off a SURVIVING main and re-merges vg2 onto it -
      *  a second group on the one table, still the CPU's (VC_REMERGE_REMOTE_SUBGROUP); losing bbs2 only renormalizes
      *  the main's group and stays on the device. */
     @Test
-    void deviceMergedRemoteControlTwoSurvivorsReHomeMatchesCpu() {
+    void deviceMergedRemoteControlTwoSurvivorsReMergeMatchesCpu() {
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
         assertRemoteMergedSectionsMatchCpu(3, java.util.Set.of("bus-1"));
     }
 
-    /** The re-homed controller PINS: the same two sections, g0 given a wide reactive range so the merged group's
+    /** The re-merged controller PINS: the same two sections, g0 given a wide reactive range so the merged group's
      *  keys (OLF: proportional to the ranges) leave g1 about a tenth of the base duty, and g1 capped at 80 MVAr -
      *  above that base share, below the ~121 MVAr holding its section alone at 404 kV takes once bbs0 and g0 are
      *  gone. OLF re-merges g1 onto bbs1, pins it at MAX_Q at the first reactive-limit
@@ -380,7 +380,7 @@ class GpuSaRemoteVoltageControlTest extends AbstractGpuSaTest {
      *  reads bbs1's voltage, the pin lands on g1's own row, and the dependent-pilot group flips bbs1's identity to
      *  its balance on its own row. GPU SA == CPU SA at 1e-9 kV, batched. */
     @Test
-    void deviceMergedRemoteControlReHomedControllerPinsMatchesCpu() {
+    void deviceMergedRemoteControlReMergedControllerPinsMatchesCpu() {
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
         Network network = remoteMergedSectionsNetwork(2);
@@ -412,9 +412,9 @@ class GpuSaRemoteVoltageControlTest extends AbstractGpuSaTest {
         assertEquals(1, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(), "census=" + GpuBatchScopeCensus.snapshot());
     }
 
-    /** Two sections with the SURVIVOR's generator pinned in the base: losing the main re-homes a LOCAL control to
+    /** Two sections with the SURVIVOR's generator pinned in the base: losing the main re-merges a LOCAL control to
      *  a bus OLF has PQ at its limit — the device starts the row as the reactive balance at the pinned value and
-     *  checks the entry as a local PV bus at the re-homed target, so an unpin restores the identity (rte6515
+     *  checks the entry as a local PV bus at the re-merged target, so an unpin restores the identity (rte6515
      *  BUS-6157_BBS_1 unpins then re-pins at the other limit, BUS-6194_BBS_2 unpins, BUS-6229_BBS_1 stays). */
     @Test
     void deviceLostPilotLocalPinnedSurvivorMatchesCpu() {
@@ -433,21 +433,21 @@ class GpuSaRemoteVoltageControlTest extends AbstractGpuSaTest {
         assertSplitGroupMatchesCpu(3, java.util.Set.of(1, 2));
     }
 
-    /** Three sections, the middle one WITHOUT voltage control: losing the main re-homes a LOCAL control to bbs2,
+    /** Three sections, the middle one WITHOUT voltage control: losing the main re-merges a LOCAL control to bbs2,
      *  whose own V row hosts the LIVE coupler c12's ZERO_V — the identity goes on c12's DUMMY_Q row as a cross
      *  identity on bbs2's V column (rte6515 BUS-6014_BBS_1/2, BUS-6029_BBS_4: VC_REMERGE_RELOC_VROW). */
     @Test
-    void deviceLostPilotReHomedUnderLiveCouplerMatchesCpu() {
+    void deviceLostPilotReMergedUnderLiveCouplerMatchesCpu() {
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
         assertSplitGroupMatchesCpu(3, java.util.Set.of(), java.util.Set.of(1));
     }
 
-    /** The same re-home with bbs2 joined by couplers only (no line): its reactive balance is all coupler flows, so no
+    /** The same re-merge with bbs2 joined by couplers only (no line): its reactive balance is all coupler flows, so no
      *  dq/dV term of its own reserves the cross identity's slot on c12's DUMMY_Q row (network.xiidm AJSL and six more:
      *  the row came out empty, a coupler flow was left free, linear-solve failure at the first step). */
     @Test
-    void deviceLostPilotReHomedOnCouplerOnlySectionMatchesCpu() {
+    void deviceLostPilotReMergedOnCouplerOnlySectionMatchesCpu() {
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
         assertSplitGroupMatchesCpu(3, java.util.Set.of(), java.util.Set.of(1), java.util.Set.of(2));
@@ -462,7 +462,7 @@ class GpuSaRemoteVoltageControlTest extends AbstractGpuSaTest {
         assertSplitGroupMatchesCpu(4, java.util.Set.of(), java.util.Set.of(1));
     }
 
-    /** The same under-live-coupler shape with the re-homed bus PINNED in the base: the cross row starts as the
+    /** The same under-live-coupler shape with the re-merged bus PINNED in the base: the cross row starts as the
      *  balance at the pinned value and unpins back to the cross identity. */
     @Test
     void deviceLostPilotPinnedUnderLiveCouplerMatchesCpu() {
@@ -481,13 +481,13 @@ class GpuSaRemoteVoltageControlTest extends AbstractGpuSaTest {
     }
 
     @Test
-    void deviceLostPilotSectionReHomesSurvivingClusterMatchesCpu() {
+    void deviceLostPilotSectionReMergesSurvivingClusterMatchesCpu() {
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
         // bbs2's loss is in the list ONLY so that c12 exists on the LF network: OLF retains exactly the
         // node-breaker switches some listed contingency opens (Networks.retainAndCloseNecessarySwitches
         // resets every other retained flag first), so with bbs0 alone c12 collapses, vl12_1 and vl12_2
-        // are ONE bus and the scenario degenerates to the single-bus LOCAL re-home. Measured: the device
+        // are ONE bus and the scenario degenerates to the single-bus LOCAL re-merge. Measured: the device
         // extraction then had two vl12 buses and one coupler, and this test passed through the old path.
         assertMergedPilotLossMatchesCpu(lostPilotSectionNetwork(),
                 List.of(new Contingency("bus-pilot", new com.powsybl.contingency.BusbarSectionContingency("bbs0")),
@@ -515,7 +515,7 @@ class GpuSaRemoteVoltageControlTest extends AbstractGpuSaTest {
 
     /** The lost pilot was PINNED at its reactive ceiling in the BASE (g0 capped at 5 MVar). OLF: the base keeps
      *  BUS_TARGET_V on vl12_0 with g1/g2 controlling and g0 PQ at its limit; the contingency then removes the bus
-     *  and re-homes the survivors exactly as when the pilot was unpinned. On the device the islanded pilot's RL
+     *  and re-merges the survivors exactly as when the pilot was unpinned. On the device the islanded pilot's RL
      *  entry kept its base limit type, which the pilot-self gate read as "pinned: its balance rides the carrier" —
      *  it suppressed the carrier member's own DISTR_Q for a balance OLF had removed with the bus. rte6515
      *  BUS-6194_BBS_1 (FAILED where OLF converges, 60 violations lost) and BUS-6003_BBS_1 (0.473 MW). */

@@ -50,7 +50,7 @@ public final class ReactiveLimitsNative {
     public static native void setBatchReactiveLimitBaseQLimitType(long handle, byte[] reactiveLimitBaseQLimitType);
 
     /** Remote controllers OLF re-merges onto a NEW pilot after a zero-impedance split (GpuBatchQualification
-     *  .reHomedControls): per (slot, entry) pair the V row the entry's reactive-limit check compares against the
+     *  .reMergedControls): per (slot, entry) pair the V row the entry's reactive-limit check compares against the
      *  group target instead of the base pilot's. The target itself rides the per-scenario V-target overrides of
      *  the solve. Null clears the context's list. */
     public static native void setBatchReactiveLimitComparedVoltageRowOverrides(long handle, int[] slotEntryPairs, int[] cmpVRows);
@@ -81,12 +81,12 @@ public final class ReactiveLimitsNative {
      */
     public static native void setBatchReactiveLimitIslanded(long handle, int[] slotControllerPairs);
 
-    /** Re-homed voltage controls (ControlReHoming.reHomedControls): per (slot, entry) pair the entry is
+    /** Re-merged voltage controls (VoltageControlReMerge.reMergedControls): per (slot, entry) pair the entry is
      *  checked by the reactive-limits pass as a LOCAL controller at {@code vTargets[k]} — the bus is a plain PV
      *  bus this scenario, whatever its base packing. Null clears the context's list. */
     public static native void setBatchReactiveLimitLocalOverrides(long handle, int[] slotEntryPairs, double[] vTargets);
 
-    /** (scenario, reactive-limit entry) pairs whose UNPIN the device cannot host (a pinned member of a re-homed
+    /** (scenario, reactive-limit entry) pairs whose UNPIN the device cannot host (a pinned member of a re-merged
      *  cluster with no enabled controller): the kernel rejects the scenario instead of switching (CPU replay). */
     public static native void setBatchReactiveLimitPqPvSwitchForbidden(long handle, int[] slotEntryPairs);
 

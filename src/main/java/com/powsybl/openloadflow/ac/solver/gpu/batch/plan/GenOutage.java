@@ -58,10 +58,10 @@ public record GenOutage(int pRow, double pTarget, int vRow, double qTarget, bool
                         /** The bus is the SLACK: it has no P balance row, and {@code pStep} moves the slack's scheduled P,
                          *  which only the distributed-slack check reads (the per-scenario slack shift). */
                         boolean onSlack,
-                        /** ROW_REMOTE_REHOME: the V row of the pilot this remote controller regulates this scenario (OLF's
+                        /** ROW_REMOTE_REMERGE: the V row of the pilot this remote controller regulates this scenario (OLF's
                          *  re-merged control after a zero-impedance split), read by its reactive-limit check instead of the
                          *  base group's pilot; -1 for every other kind. */
-                        int reHomePilotVRow,
+                        int reMergePilotVRow,
                         /** The lost voltage-controlling SVCs' share of the entry's quadratic limit coefficients (pu, the
                          *  b of limit(v) = packedLimit + b*(v^2 - v2Base)): an SVC's limit is its susceptance times v^2,
                          *  so taking its base-voltage limit off (minQDelta/maxQDelta) leaves its b in the aggregate. */
@@ -84,7 +84,7 @@ public record GenOutage(int pRow, double pTarget, int vRow, double qTarget, bool
                 distributedSlackOverrideMaxDelta, distributedSlackOverrideMinDelta, reactiveLimitEntry, minQDelta, maxQDelta, allGensLost, lostGenIds, lostFactorSum, pStep,
                 loadQDelta, inactiveDistrQMember, pilotGroupSurvivorReactiveLimitEntries, distrQTargetRows, distrQTargetValues,
                 pqRowMode, deadPilotVRow, deadPilotQTarget, pinnedPilotVRow, pinnedPilotQTarget, distrQTargetQOverrideMember,
-                distrQTargetQOverrideValue, newQTargetRow, pilotQGroup, pilotQDelta, onSlack, reHomePilotVRow, svcBminDelta, svcBmaxDelta);
+                distrQTargetQOverrideValue, newQTargetRow, pilotQGroup, pilotQDelta, onSlack, reMergePilotVRow, svcBminDelta, svcBmaxDelta);
     }
 
     /** This entry without the DISTR_Q row targets that fall on a FROZEN (islanded) row: such a row is an identity
@@ -110,7 +110,7 @@ public record GenOutage(int pRow, double pTarget, int vRow, double qTarget, bool
                 loadQDelta, inactiveDistrQMember, pilotGroupSurvivorReactiveLimitEntries,
                 rows.stream().mapToInt(Integer::intValue).toArray(), values.stream().mapToDouble(Double::doubleValue).toArray(),
                 pqRowMode, deadPilotVRow, deadPilotQTarget, pinnedPilotVRow, pinnedPilotQTarget, distrQTargetQOverrideMember,
-                distrQTargetQOverrideValue, qTargetRow, pilotQGroup, pilotQDelta, onSlack, reHomePilotVRow, svcBminDelta, svcBmaxDelta);
+                distrQTargetQOverrideValue, qTargetRow, pilotQGroup, pilotQDelta, onSlack, reMergePilotVRow, svcBminDelta, svcBmaxDelta);
     }
     // lostGenIds / lostFactorSum exist for the reactive-capability CURVE channel, which evaluates each
     // generator's curve at its OWN post-distribution active power, reconstructed from the bus's row
@@ -145,28 +145,28 @@ public record GenOutage(int pRow, double pTarget, int vRow, double qTarget, bool
     }
 
     /** {@code pqRowMode} value meaning "the V row becomes a VOLTAGE IDENTITY (mode 0)": a merged voltage
-     *  control re-homed to this bus by a zero-impedance split (see ControlReHoming.reHomedControls),
+     *  control re-merged to this bus by a zero-impedance split (see VoltageControlReMerge.reMergedControls),
      *  with {@code qTarget} then carrying the bus's own voltage target. 0 is the "default" (1). */
     public static final int ROW_V_IDENTITY = -1;
-    /** A re-homed control whose bus is PINNED at a reactive limit in the base: the row starts as its own
+    /** A re-merged control whose bus is PINNED at a reactive limit in the base: the row starts as its own
      *  reactive balance (mode 4) at {@code qTarget} (the pinned generation minus the load), and its reactive-limit
      *  entry is checked as a LOCAL PV bus at {@code deadPilotQTarget}, which here carries the VOLTAGE target —
      *  an unpin restores the voltage identity exactly as OLF re-activates BUS_TARGET_V (tasks #70,
      *  VC_REMERGE_PINNED_MAIN; rte6515 BUS-6157_BBS_1 unpins and re-pins at the other limit). */
     public static final int ROW_PINNED_V = -5;
-    /** A base-pinned member of a re-homed cluster with NO enabled controller left (every controller pinned):
+    /** A base-pinned member of a re-merged cluster with NO enabled controller left (every controller pinned):
      *  no row change — the stock placement already keeps its balance at the limit — but an UNPIN would need a
      *  voltage identity the device cannot host, so the kernel rejects the scenario instead (CPU replay). */
     public static final int ROW_PINNED_NO_UNPIN = -6;
-    /** A re-homed control whose own V row hosts a LIVE coupler's ZERO_V: the voltage identity goes on the parent
+    /** A re-merged control whose own V row hosts a LIVE coupler's ZERO_V: the voltage identity goes on the parent
      *  coupler's DUMMY_Q row (where the bus's reactive equation lives) as a CROSS identity on the bus's own V
      *  column — device row mode 6 — with {@code vRow} = that dummy row and {@code qTarget} the voltage target
      *  (tasks #70, VC_REMERGE_RELOC_VROW). */
     public static final int ROW_CROSS_V_IDENTITY = -7;
-    /** A remote controller re-homed onto a NEW pilot: no row of its own changes (its row stays the sharing row
+    /** A remote controller re-merged onto a NEW pilot: no row of its own changes (its row stays the sharing row
      *  of the base table, which the dependent-pilot pool uses as the new pilot's carrier), but its reactive-limit
-     *  check compares the new pilot's voltage ({@link #reHomePilotVRow}) against the new pilot's target. */
-    public static final int ROW_REMOTE_REHOME = -8;
+     *  check compares the new pilot's voltage ({@link #reMergePilotVRow}) against the new pilot's target. */
+    public static final int ROW_REMOTE_REMERGE = -8;
 
     /**
      * The row mode the PV-&gt;PQ flip installs on this bus's BUS_V row: 1 (a plain reactive-power
@@ -182,9 +182,9 @@ public record GenOutage(int pRow, double pTarget, int vRow, double qTarget, bool
                 : pqRowMode < 0 ? GpuRowMode.FIXED_VARIABLE : pqRowMode;
     }
 
-    /** The voltage target a re-homed control is checked against ({@link #ROW_V_IDENTITY}: the row target itself;
+    /** The voltage target a re-merged control is checked against ({@link #ROW_V_IDENTITY}: the row target itself;
      *  {@link #ROW_PINNED_V}: carried in deadPilotQTarget, the row target being the pinned Q). */
-    public double reHomeVTarget() {
+    public double reMergeVTarget() {
         return pqRowMode == ROW_PINNED_V ? deadPilotQTarget : qTarget;
     }
 
@@ -230,16 +230,16 @@ public record GenOutage(int pRow, double pTarget, int vRow, double qTarget, bool
         return distrQTargetQOverrideMember >= 0;
     }
 
-    /** A re-homed voltage control (see {@link #ROW_V_IDENTITY}): its bus is a plain PV bus this scenario, so its
+    /** A re-merged voltage control (see {@link #ROW_V_IDENTITY}): its bus is a plain PV bus this scenario, so its
      *  reactive-limit entry — packed as a remote member of the base group — is checked as a LOCAL controller
      *  (pin on its own row, switch back on its own voltage) at the target {@code qTarget} carries. */
-    public boolean reHomesReactiveLimitEntry() {
+    public boolean reMergesReactiveLimitEntry() {
         return (pqRowMode == ROW_V_IDENTITY || pqRowMode == ROW_PINNED_V || pqRowMode == ROW_CROSS_V_IDENTITY) && reactiveLimitEntry >= 0;
     }
 
     /** A remote controller re-pointed at a new pilot this scenario (no row change of its own). */
-    public boolean reHomesRemoteController() {
-        return pqRowMode == ROW_REMOTE_REHOME && reactiveLimitEntry >= 0 && reHomePilotVRow >= 0;
+    public boolean reMergesRemoteController() {
+        return pqRowMode == ROW_REMOTE_REMERGE && reactiveLimitEntry >= 0 && reMergePilotVRow >= 0;
     }
 
     /** The bus keeps NO generator: its reactive-limit entry is not a controller in this scenario. */
@@ -272,10 +272,10 @@ public record GenOutage(int pRow, double pTarget, int vRow, double qTarget, bool
     }
 
     /** Does the plan change the MODE of {@code row} this scenario - a flip to a reactive balance (the bus lost its
-     *  last controller), a re-homed identity of its own, a killed pilot's identity? Only then does the opening path
+     *  last controller), a re-merged identity of its own, a killed pilot's identity? Only then does the opening path
      *  leave the killed coupler's child WITHOUT the voltage identity it holds for its cluster. A plan entry that only
      *  writes a target there - a merged group's DISTR_Q seed brought home onto the child's own row, exactly the
-     *  elected main of a re-homed cluster - must not: measured on rte6515 BUS-6066_BBS_1 / BUS-2341_BBS_1 /
+     *  elected main of a re-merged cluster - must not: measured on rte6515 BUS-6066_BBS_1 / BUS-2341_BBS_1 /
      *  BUS-6002_BBS_1 when the seed gated the identity, 6.7 / 2.3 / 0.03 kV and 1.27 / 1.21 MW against OLF,
      *  and BUS-246_BBS_2 singular. */
     public static boolean planFlipsRow(GenOutage[] gos, int row) {

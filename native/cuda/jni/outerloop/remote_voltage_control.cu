@@ -130,7 +130,7 @@ __global__ void updateDistrQTargetsBatch(int nMembers, int nScenarios, int n, in
     }
     if (mrow >= 0 && (mode[(size_t) s * n + mrow] == GpuRowMode::FIXED_VARIABLE || mode[(size_t) s * n + mrow] == GpuRowMode::CROSS_FIXED_VARIABLE)) {
         // The row is a VOLTAGE IDENTITY this scenario (6: a cross identity on the relocated child's V column): a control OLF re-merged onto this bus after a
-        // zero-impedance split (GpuBatchQualification.reHomedControls — the bus is a plain PV bus at its
+        // zero-impedance split (GpuBatchQualification.reMergedControls — the bus is a plain PV bus at its
         // own target, and the member has left the group), or a frozen/outaged row. A DISTR_Q target
         // written here replaces the voltage target: measured on rte6515 BUS-6029_BBS_1, VL-6029_1's
         // target 1.039 became 0.000 at the first RL pass and the solve ran to MAX_ITERATION on it.

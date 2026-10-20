@@ -21,7 +21,7 @@ import java.util.Set;
 
 /**
  * The plan of a contingency that only takes branches out, islanding buses or not: the voltage controls the islands
- * cut or re-home (DISTR_Q weights and keys, re-homed and pinned controllers, split groups), the distributed-slack
+ * cut or re-merge (DISTR_Q weights and keys, re-merged and pinned controllers, split groups), the distributed-slack
  * participants and reactive-limit controllers they strand, the islanded HVDCs, and the islanded rows frozen at a flat
  * state; or a refusal to the CPU when a shape is outside what the device models.
  *
@@ -49,27 +49,27 @@ final class BranchOutagePlanner {
         List<com.powsybl.openloadflow.network.LfHvdc> islandedHvdcs = new ArrayList<>();
         VoltageControlOverrides.VcSplit vcSplit = VoltageControlOverrides.classifyVcSplit(es, q.islandedBuses(), lostVcControllers, deadControlBuses,
                 islandedHvdcs);
-        ControlReHoming.ReHomed reHomed = ControlReHoming.reHomedControls(q.islandedBuses(), c.outagedZeroImpedanceBranches(),
+        VoltageControlReMerge.ReMerged reMerged = VoltageControlReMerge.reMergedControls(q.islandedBuses(), c.outagedZeroImpedanceBranches(),
                 c.contingencyId(), es);
-        if (reHomed.reject() != null) {
-            GpuBatchQualification.refuse(c, "PLAN:" + reHomed.reject());
+        if (reMerged.reject() != null) {
+            GpuBatchQualification.refuse(c, "PLAN:" + reMerged.reject());
             return;
         }
         String[] subReject = new String[1];
-        pb.distrQSubgroupByIndex[i] = ReHomedEntries.subgroupPairs(reHomed, gpuData, subReject);
+        pb.distrQSubgroupByIndex[i] = VoltageControlReMergeEntries.subgroupPairs(reMerged, gpuData, subReject);
         if (subReject[0] != null) {
             GpuBatchQualification.refuse(c, subReject[0]);
             return;
         }
-        deadControlBuses.removeAll(reHomed.pvTargets().keySet());
-        deadControlBuses.removeAll(reHomed.remoteClusterBuses());   // a surviving remote cluster, not dead
-        deadControlBuses.removeAll(reHomed.reHomedRemoteControllers().keySet());   // re-pointed at the new pilot
-        for (LfBus lb : reHomed.leftControllers()) {
+        deadControlBuses.removeAll(reMerged.pvTargets().keySet());
+        deadControlBuses.removeAll(reMerged.remoteClusterBuses());   // a surviving remote cluster, not dead
+        deadControlBuses.removeAll(reMerged.reMergedRemoteControllers().keySet());   // re-pointed at the new pilot
+        for (LfBus lb : reMerged.leftControllers()) {
             if (!lostVcControllers.contains(lb)) {
                 lostVcControllers.add(lb);
             }
         }
-        if (!reHomed.leftControllers().isEmpty() && vcSplit == VoltageControlOverrides.VcSplit.CONTAINED) {
+        if (!reMerged.leftControllers().isEmpty() && vcSplit == VoltageControlOverrides.VcSplit.CONTAINED) {
             vcSplit = VoltageControlOverrides.VcSplit.RENORMALIZE;           // the group goes on without them
         }
         if (!islandedHvdcs.isEmpty()) {
@@ -132,7 +132,7 @@ final class BranchOutagePlanner {
             merged.addAll(java.util.Arrays.asList(injectionOutages));
             pb.genOutagesByIndex[i] = merged.toArray(new GenOutage[0]);
         }
-        if (!planReHomedControls(reHomed, pb, i, es, gpuData, outagedZeroImpedanceBranchNums, c)) {
+        if (!planReMergedControls(reMerged, pb, i, es, gpuData, outagedZeroImpedanceBranchNums, c)) {
             return;
         }
         if (vcSplit == VoltageControlOverrides.VcSplit.RENORMALIZE) {
@@ -143,7 +143,7 @@ final class BranchOutagePlanner {
             List<com.powsybl.openloadflow.network.LfGenerator> goneControllers = lostVcControllers.stream()
                     .flatMap(b -> b.getGenerators().stream())
                     .toList();
-            double[][] vcOv = ReHomedEntries.withoutSplitGroups(VoltageControlOverrides.distrQWeightOverrides(es, gpuData, goneControllers),
+            double[][] vcOv = VoltageControlReMergeEntries.withoutSplitGroups(VoltageControlOverrides.distrQWeightOverrides(es, gpuData, goneControllers),
                                                                 pb.distrQSubgroupByIndex[i], gpuData);
             if (vcOv == null) {
                 GpuBatchQualification.refuse(c, "PLAN:DISTR_Q_WEIGHT_REDIFF");
@@ -247,14 +247,14 @@ final class BranchOutagePlanner {
         }
     }
 
-    /** The re-homed voltage controls of an islanding branch outage: the PV entries of the controllers re-homed by
+    /** The re-merged voltage controls of an islanding branch outage: the PV entries of the controllers re-merged by
      *  the island, the remote mains turned identities, and their reactive-limit entries; false when a shape refuses
      *  the contingency. */
-    private static boolean planReHomedControls(final ControlReHoming.ReHomed reHomed, final ScenarioPlanBuilder pb,
+    private static boolean planReMergedControls(final VoltageControlReMerge.ReMerged reMerged, final ScenarioPlanBuilder pb,
                                                final int i, final EquationSystem<AcVariableType, AcEquationType> es,
                                                final GpuAcData gpuData, final java.util.Set<Integer> outagedZeroImpedanceBranchNums,
                                                final BatchContingency c) {
-        if (!reHomed.pvTargets().isEmpty() || !reHomed.remoteMainTargets().isEmpty()) {
+        if (!reMerged.pvTargets().isEmpty() || !reMerged.remoteMainTargets().isEmpty()) {
             List<GenOutage> pvOn = new ArrayList<>();
             if (pb.genOutagesByIndex[i] != null) {
                 pvOn.addAll(java.util.Arrays.asList(pb.genOutagesByIndex[i]));
@@ -262,17 +262,17 @@ final class BranchOutagePlanner {
             boolean ok = true;
             boolean crossIdentity = false;
             boolean pinnedMain = false;
-            for (var e : reHomed.pvTargets().entrySet()) {
+            for (var e : reMerged.pvTargets().entrySet()) {
                 var vVar = es.getVariableSet().getVariable(e.getKey().getNum(), AcVariableType.BUS_V);
                 if (vVar == null || vVar.getRow() < 0) {
                     ok = false;
                     break;
                 }
-                int reHomedReactiveLimitEntry = RelocatedRows.reactiveLimitEntryOf(gpuData, e.getKey());
+                int reMergedReactiveLimitEntry = RelocatedRows.reactiveLimitEntryOf(gpuData, e.getKey());
                 int crossRow = RelocatedRows.scenarioReactiveRowOfVRow(vVar.getRow(), pb.relocatedChildRows, outagedZeroImpedanceBranchNums);
                 if (crossRow != vVar.getRow()) {
-                    pvOn.add(ReHomedEntries.reHomedCrossEntry(crossRow, e.getValue(), reHomedReactiveLimitEntry,
-                            gpuData.switchedPvToPqInBase(reHomedReactiveLimitEntry), e.getKey().getTargetQ()));
+                    pvOn.add(VoltageControlReMergeEntries.reMergedCrossEntry(crossRow, e.getValue(), reMergedReactiveLimitEntry,
+                            gpuData.switchedPvToPqInBase(reMergedReactiveLimitEntry), e.getKey().getTargetQ()));
                     continue;
                 }
                 // Same rule as the island site above: a bus PINNED at its reactive limit in the base
@@ -281,11 +281,11 @@ final class BranchOutagePlanner {
                 // identity: rte6515 BUS-6157_BBS_1 (VL-6157_1, baseLimitType=1), BUS-6194_BBS_2
                 // (VL-6194_2, 2) and BUS-6229_BBS_1 (VL-6229_1, 2) — three device failures on
                 // systems OLF converges, replayed on the CPU.
-                if (gpuData.switchedPvToPqInBase(reHomedReactiveLimitEntry)) {
-                    pvOn.add(ReHomedEntries.reHomedPinnedPvEntry(vVar.getRow(), e.getKey().getTargetQ(), e.getValue(), reHomedReactiveLimitEntry));
+                if (gpuData.switchedPvToPqInBase(reMergedReactiveLimitEntry)) {
+                    pvOn.add(VoltageControlReMergeEntries.reMergedPinnedPvEntry(vVar.getRow(), e.getKey().getTargetQ(), e.getValue(), reMergedReactiveLimitEntry));
                     continue;
                 }
-                pvOn.add(ReHomedEntries.reHomedPvEntry(vVar.getRow(), e.getValue(), reHomedReactiveLimitEntry));
+                pvOn.add(VoltageControlReMergeEntries.reMergedPvEntry(vVar.getRow(), e.getValue(), reMergedReactiveLimitEntry));
             }
             if (!ok) {
                 GpuBatchQualification.refuse(c,
@@ -293,18 +293,18 @@ final class BranchOutagePlanner {
                                 : crossIdentity ? "PLAN:VC_REMERGE_RELOC_VROW" : "PLAN:VC_REMERGE_NO_VROW");
                 return false;
             }
-            if (!reHomed.remoteMainTargets().isEmpty()) {
+            if (!reMerged.remoteMainTargets().isEmpty()) {
                 String[] remoteReject = new String[1];
-                List<GenOutage> remoteIds = ReHomedEntries.remoteMainIdentityEntries(reHomed, es, gpuData, pb.relocatedChildRows,
+                List<GenOutage> remoteIds = VoltageControlReMergeEntries.remoteMainIdentityEntries(reMerged, es, gpuData, pb.relocatedChildRows,
                         outagedZeroImpedanceBranchNums, java.util.Set.of(), remoteReject);
-                List<GenOutage> reHomedCtl = remoteIds == null ? null
-                        : ReHomedEntries.reHomedRemoteControllerEntries(reHomed, es, gpuData, remoteReject);
-                if (remoteIds == null || reHomedCtl == null) {
+                List<GenOutage> reMergedController = remoteIds == null ? null
+                        : VoltageControlReMergeEntries.reMergedRemoteControllerEntries(reMerged, es, gpuData, remoteReject);
+                if (remoteIds == null || reMergedController == null) {
                     GpuBatchQualification.refuse(c, remoteReject[0]);
                     return false;
                 }
                 pvOn.addAll(remoteIds);
-                pvOn.addAll(reHomedCtl);
+                pvOn.addAll(reMergedController);
             }
             pb.genOutagesByIndex[i] = pvOn.toArray(new GenOutage[0]);
         }

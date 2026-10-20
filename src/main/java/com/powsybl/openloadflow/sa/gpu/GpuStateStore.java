@@ -46,7 +46,7 @@ public final class GpuStateStore extends AbstractMap<String, double[]> implement
     private final Path file;
     private final FileChannel channel;
     private final Map<String, Integer> slotOf = new LinkedHashMap<>();
-    private final ByteBuffer io;
+    private final ByteBuffer stateBuffer;
     private boolean closed;
 
     private GpuStateStore(int n) throws IOException {
@@ -54,7 +54,7 @@ public final class GpuStateStore extends AbstractMap<String, double[]> implement
         this.file = Files.createTempFile("olf-gpu-states-", ".bin");
         this.file.toFile().deleteOnExit();
         this.channel = FileChannel.open(file, StandardOpenOption.READ, StandardOpenOption.WRITE);
-        this.io = ByteBuffer.allocateDirect(n * Double.BYTES).order(ByteOrder.nativeOrder());
+        this.stateBuffer = ByteBuffer.allocateDirect(n * Double.BYTES).order(ByteOrder.nativeOrder());
     }
 
     /** A store for states of {@code n} entries each. */
@@ -100,13 +100,13 @@ public final class GpuStateStore extends AbstractMap<String, double[]> implement
         } else {
             previous = read(slot);
         }
-        io.clear();
-        io.asDoubleBuffer().put(state);
-        io.limit(n * Double.BYTES);
+        stateBuffer.clear();
+        stateBuffer.asDoubleBuffer().put(state);
+        stateBuffer.limit(n * Double.BYTES);
         try {
             long offset = (long) slot * n * Double.BYTES;
-            while (io.hasRemaining()) {
-                offset += channel.write(io, offset);
+            while (stateBuffer.hasRemaining()) {
+                offset += channel.write(stateBuffer, offset);
             }
         } catch (IOException e) {
             throw new UncheckedIOException(e);
@@ -165,12 +165,12 @@ public final class GpuStateStore extends AbstractMap<String, double[]> implement
     }
 
     private double[] read(int slot) {
-        io.clear();
-        io.limit(n * Double.BYTES);
+        stateBuffer.clear();
+        stateBuffer.limit(n * Double.BYTES);
         try {
             long offset = (long) slot * n * Double.BYTES;
-            while (io.hasRemaining()) {
-                int r = channel.read(io, offset);
+            while (stateBuffer.hasRemaining()) {
+                int r = channel.read(stateBuffer, offset);
                 if (r < 0) {
                     throw new PowsyblException("GPU state store: state " + slot + " is missing from " + file);
                 }
@@ -179,9 +179,9 @@ public final class GpuStateStore extends AbstractMap<String, double[]> implement
         } catch (IOException e) {
             throw new UncheckedIOException(e);
         }
-        io.flip();
+        stateBuffer.flip();
         double[] state = new double[n];
-        io.asDoubleBuffer().get(state);
+        stateBuffer.asDoubleBuffer().get(state);
         return state;
     }
 

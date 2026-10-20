@@ -111,17 +111,17 @@ __global__ void fillLoadModelBatch(int elementCount, int nScenarios, int n, int 
     double o[2];
     evalVdl(v, target, c, expn, 0, o + 0, o + 1);
     int row = ix[e * 2];
-    int slot = dest[e];
+    int destination = dest[e];
     // A load on a relocated coupler-tree child: its term sits on the parent coupler's dummy row, and goes HOME
     // (the child's own row and its reserved slot) in a lane whose dummy row is an identity - the coupler is
     // open or out of the tree there. Mode 4 on that row is the child's pinned balance, which stays.
     if (mode != nullptr && alternateRow != nullptr && alternateRow[e] >= 0 && mode[(size_t) s * n + row] == GpuRowMode::FIXED_VARIABLE) {
         row = alternateRow[e];
-        slot = alternateDestination[e];
+        destination = alternateDestination[e];
     }
     atomicAdd(&F[(size_t) s * n + row], o[0]);
     if (vals != nullptr) {
-        atomicAdd(&vals[(size_t) s * nnz + slot], o[1]);
+        atomicAdd(&vals[(size_t) s * nnz + destination], o[1]);
     }
 }
 

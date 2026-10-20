@@ -15,7 +15,7 @@ namespace olfgpu {
 BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const double* target,
                               const int* rowMode, const int* rowModeSlots, int nRowModeSlots,
                               const int* baseRowMode, const char* disabled,
-                              int nOv, const int* ovIndex, const double* ovValue,
+                              int nTargetOverrides, const int* targetOverrideIndex, const double* targetOverrideValue,
                               const int* distributedSlackOverrideBus, const double* distributedSlackOverrideFactorDelta, const double* distributedSlackOverrideBaseTargetPDelta,
                               const double* distributedSlackOverrideMaxDelta, const double* distributedSlackOverrideMinDelta, const double* distributedSlackBusAnchorShift,
                               const double* slackBusAnchorShift,

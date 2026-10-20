@@ -536,7 +536,7 @@ struct BatchResult {
 
 
 // Build a batched context of nScenarios on a shared structure (the createBatchContext JNI entry).
-BatchSolverContext* createBatchContext(const SharedStructurePtr& st, int nScenarios, int mode,
+BatchSolverContext* createBatchContext(const SharedStructurePtr& structure, int nScenarios, int mode,
                                        int nReactiveLimitEntries, const int* reactiveLimitVoltageRow, const double* reactiveLimitMinQ,
                                        const double* reactiveLimitMaxQ, const double* reactiveLimitLoadQ, const double* reactiveLimitTargetV,
                                        const signed char* reactiveLimitFlags, const double* rowSlope,

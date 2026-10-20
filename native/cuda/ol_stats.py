@@ -15,14 +15,14 @@ conv=[r for r in solved if r[1][3]=='CONVERGED']
 print(f"contingencies {len(rows)}, solved {len(solved)}, converged {len(conv)}")
 # resolves = number of outer-loop re-solves that actually ran Newton (each loop entry counts re-solves)
 h=collections.Counter(); hf=collections.Counter(); ht=collections.Counter()
-for _,(f,t,o,st,lp) in conv:
-    k=sum(v[0] for v in lp.values()); h[k]+=1; hf[k]+=f; ht[k]+=t
+for _,(f,t,o,status,loop_counts) in conv:
+    k=sum(v[0] for v in loop_counts.values()); h[k]+=1; hf[k]+=f; ht[k]+=t
 tf=sum(hf.values()); tt=sum(ht.values())
 print(f"Newton iterations: first inner solve {tf}, total {tt} -> outer-loop re-solves cost {tt-tf} ({100*(tt-tf)/tt:.1f}%)")
 print("solve passes (1 + outer re-solves) | contingencies | first-NR iters | total-NR iters")
 for k in sorted(h): print(f"  {k+1:3d} | {h[k]:6d} | {hf[k]:7d} | {ht[k]:7d}")
 per=collections.defaultdict(lambda:[0,0,0])
-for _,(f,t,o,st,lp) in conv:
-    for n,(a,b) in lp.items(): per[n][0]+=1; per[n][1]+=a; per[n][2]+=b
+for _,(f,t,o,status,loop_counts) in conv:
+    for n,(a,b) in loop_counts.items(): per[n][0]+=1; per[n][1]+=a; per[n][2]+=b
 print("outer loop | contingencies it re-solved | re-solves | NR iterations")
 for n,(c,a,b) in sorted(per.items(), key=lambda x:-x[1][2]): print(f"  {n:34s} {c:6d} {a:7d} {b:7d}")

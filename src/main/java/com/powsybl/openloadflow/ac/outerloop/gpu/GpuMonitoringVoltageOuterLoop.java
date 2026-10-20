@@ -70,8 +70,8 @@ public final class GpuMonitoringVoltageOuterLoop {
         for (LfBus bus : network.getBuses()) {
             for (LfGenerator g : bus.getGenerators()) {
                 if (g.getGeneratorControlType() == LfGenerator.GeneratorControlType.MONITORING_VOLTAGE) {
-                    var vc = bus.getGeneratorVoltageControl().orElse(null);
-                    if (vc == null || vc.getControlledBus() != bus
+                    var voltageControl = bus.getGeneratorVoltageControl().orElse(null);
+                    if (voltageControl == null || voltageControl.getControlledBus() != bus
                             || ((LfStaticVarCompensator) g).getStandByAutomaton().isEmpty()) {
                         return false;
                     }
@@ -96,17 +96,17 @@ public final class GpuMonitoringVoltageOuterLoop {
         }
         List<Controller> out = new ArrayList<>();
         for (LfBus bus : network.getBuses()) {
-            LfStaticVarCompensator svc = null;
+            LfStaticVarCompensator staticVarCompensator = null;
             for (LfGenerator g : bus.getGenerators()) {
                 if (g.getGeneratorControlType() == LfGenerator.GeneratorControlType.MONITORING_VOLTAGE) {
-                    svc = (LfStaticVarCompensator) g;
+                    staticVarCompensator = (LfStaticVarCompensator) g;
                     break;
                 }
             }
-            if (svc == null) {
+            if (staticVarCompensator == null) {
                 continue;
             }
-            var automatonOpt = svc.getStandByAutomaton();
+            var automatonOpt = staticVarCompensator.getStandByAutomaton();
             Integer vRow = busVRows.get(bus.getNum());
             Integer reactiveLimitEntry = vRow != null ? reactiveLimitEntryByVoltageRow.get(vRow) : null;
             if (automatonOpt.isEmpty() || vRow == null || reactiveLimitEntry == null || bus.isGeneratorVoltageControlEnabled()) {
@@ -143,7 +143,7 @@ public final class GpuMonitoringVoltageOuterLoop {
     }
 
     @SuppressWarnings("java:S107")
-    private static double[][] resolve(long handle, int chunkSize, int n, int nReactiveLimitEntries, List<Controller> ctls,
+    private static double[][] resolve(long handle, int chunkSize, int n, int nReactiveLimitEntries, List<Controller> controllers,
             double[][] activatedTargetV, int[] reactiveLimitsState, int skipReactiveLimits,
             int[][] rowModePerScenario, int[] baseRowMode, boolean[][] disabledMask,
             List<Integer> ovIdx, List<Double> ovVal, double[] x0Full,
@@ -159,10 +159,10 @@ public final class GpuMonitoringVoltageOuterLoop {
         List<Integer> vtSlotIdx = new ArrayList<>();
         List<Double> vtVal = new ArrayList<>();
         for (int s = 0; s < realCount; s++) {
-            for (int c = 0; c < ctls.size(); c++) {
+            for (int c = 0; c < controllers.size(); c++) {
                 if (!Double.isNaN(activatedTargetV[s][c])) {
                     vtSlotIdx.add(s);
-                    vtSlotIdx.add(ctls.get(c).reactiveLimitEntry());
+                    vtSlotIdx.add(controllers.get(c).reactiveLimitEntry());
                     vtVal.add(activatedTargetV[s][c]);       // the RL kernel's checks use the moved target
                 }
             }
@@ -192,33 +192,33 @@ public final class GpuMonitoringVoltageOuterLoop {
 
     /** Install the MonitoringVoltage driver phase's table on a batch context (null/empty clears it).
      *  Shared by the batched SA's chunk contexts and the base load flow's batch-of-one. */
-    public static void installDriverLoop(long handle, List<Controller> ctls) {
-        if (ctls == null || ctls.isEmpty()) {
+    public static void installDriverLoop(long handle, List<Controller> controllers) {
+        if (controllers == null || controllers.isEmpty()) {
             VoltageMonitoringNative.setBatchMonitoringLoops(handle, null, null, null, null, null, null);
             return;
         }
-        int nc = ctls.size();
-        int[] monitoringVoltageBusVRow = new int[nc];
-        double[] monitoringVoltageBand = new double[nc * 4];
-        int[] deltaStart = new int[nc + 1];
+        int nControllers = controllers.size();
+        int[] monitoringVoltageBusVRow = new int[nControllers];
+        double[] monitoringVoltageBand = new double[nControllers * 4];
+        int[] deltaStart = new int[nControllers + 1];
         List<Integer> dRow = new ArrayList<>();
         List<Integer> dMode = new ArrayList<>();
         List<Double> dTgt = new ArrayList<>();
-        for (int c = 0; c < nc; c++) {
-            Controller ctl = ctls.get(c);
-            monitoringVoltageBusVRow[c] = ctl.vRow();
-            monitoringVoltageBand[c * 4] = ctl.lowThreshold();
-            monitoringVoltageBand[c * 4 + 1] = ctl.highThreshold();
-            monitoringVoltageBand[c * 4 + 2] = ctl.lowTargetV();
-            monitoringVoltageBand[c * 4 + 3] = ctl.highTargetV();
+        for (int c = 0; c < nControllers; c++) {
+            Controller controller = controllers.get(c);
+            monitoringVoltageBusVRow[c] = controller.vRow();
+            monitoringVoltageBand[c * 4] = controller.lowThreshold();
+            monitoringVoltageBand[c * 4 + 1] = controller.highThreshold();
+            monitoringVoltageBand[c * 4 + 2] = controller.lowTargetV();
+            monitoringVoltageBand[c * 4 + 3] = controller.highTargetV();
             deltaStart[c] = dRow.size();
-            for (int k = 0; k < ctl.deltaRows().length; k++) {
-                dRow.add(ctl.deltaRows()[k]);
-                dMode.add(ctl.deltaModesOn()[k]);
-                dTgt.add(ctl.deltaTargetsOn()[k]);
+            for (int k = 0; k < controller.deltaRows().length; k++) {
+                dRow.add(controller.deltaRows()[k]);
+                dMode.add(controller.deltaModesOn()[k]);
+                dTgt.add(controller.deltaTargetsOn()[k]);
             }
         }
-        deltaStart[nc] = dRow.size();
+        deltaStart[nControllers] = dRow.size();
         VoltageMonitoringNative.setBatchMonitoringLoops(handle, monitoringVoltageBusVRow, monitoringVoltageBand, deltaStart,
                 dRow.stream().mapToInt(Integer::intValue).toArray(),
                 dMode.stream().mapToInt(Integer::intValue).toArray(),
@@ -228,17 +228,17 @@ public final class GpuMonitoringVoltageOuterLoop {
     /** Give the driver's activations (scenario 0: the chosen target per controller, NaN = standing by)
      *  back to the network exactly as OLF's MonitoringVoltageOuterLoop.switchPqPv does: voltage control
      *  on with the recomputed Q target, the SVC in VOLTAGE control, the automaton's target as setpoint. */
-    public static void applyToNetwork(LfNetwork network, List<Controller> ctls, double[] activated, int[] reactiveLimitBusNum) {
-        if (ctls == null || ctls.isEmpty() || activated == null || reactiveLimitBusNum == null) {
+    public static void applyToNetwork(LfNetwork network, List<Controller> controllers, double[] activated, int[] reactiveLimitBusNum) {
+        if (controllers == null || controllers.isEmpty() || activated == null || reactiveLimitBusNum == null) {
             return;
         }
-        for (int c = 0; c < ctls.size() && c < activated.length; c++) {
+        for (int c = 0; c < controllers.size() && c < activated.length; c++) {
             double t = activated[c];
-            Controller ctl = ctls.get(c);
-            if (Double.isNaN(t) || ctl.reactiveLimitEntry() < 0 || ctl.reactiveLimitEntry() >= reactiveLimitBusNum.length) {
+            Controller controller = controllers.get(c);
+            if (Double.isNaN(t) || controller.reactiveLimitEntry() < 0 || controller.reactiveLimitEntry() >= reactiveLimitBusNum.length) {
                 continue;
             }
-            LfBus bus = network.getBus(reactiveLimitBusNum[ctl.reactiveLimitEntry()]);
+            LfBus bus = network.getBus(reactiveLimitBusNum[controller.reactiveLimitEntry()]);
             if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
                 System.err.println("WB_MON bus=" + (bus == null ? "?" : bus.getId()) + " activatedTarget=" + t
                         + " vcEnabled=" + (bus != null && bus.isGeneratorVoltageControlEnabled()));
@@ -253,7 +253,7 @@ public final class GpuMonitoringVoltageOuterLoop {
                     break;
                 }
             }
-            bus.getGeneratorVoltageControl().ifPresent(vc -> vc.setTargetValue(t));
+            bus.getGeneratorVoltageControl().ifPresent(voltageControl -> voltageControl.setTargetValue(t));
         }
     }
 }

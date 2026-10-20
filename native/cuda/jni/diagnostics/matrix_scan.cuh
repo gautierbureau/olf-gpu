@@ -11,7 +11,7 @@
 namespace olfgpu {
 
 // One scenario's linear system as solved (repaired J, F, B, dx, row modes) written to path.
-void dumpSlotSystem(BatchSolverContext* ctx, int n, int nnz, int slot, const char* path);
+void dumpSlotSystem(BatchSolverContext* ctx, int n, int nnz, int scenario, const char* path);
 
 }  // namespace olfgpu
 

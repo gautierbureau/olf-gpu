@@ -212,9 +212,9 @@ final class GpuAcFamilyPacker {
         for (LfBus bus : network.getBuses()) {
             // Fixed (non-controlling) shunt: b is a constant (bRow = -1, idx 3). shuntElementOf points DISTR_Q's
             // reactive contribution at the fixed shunt.
-            bus.getShunt().ifPresent(sh -> {
+            bus.getShunt().ifPresent(shunt -> {
                 shuntElementOf[bus.getNum()] = shuntParameters.size();
-                shuntParameters.add(new double[] {sh.getG(), sh.getB()});
+                shuntParameters.add(new double[] {shunt.getG(), shunt.getB()});
                 shuntIndices.add(new int[] {
                     pRow[bus.getNum()], qRow[bus.getNum()], vCol[bus.getNum()], -1,
                     alternateQRow[bus.getNum()]});                 // [4]: alternate Q row (dyn reloc)
@@ -222,17 +222,17 @@ final class GpuAcFamilyPacker {
             // Voltage-CONTROLLING shunt: its susceptance b is a SHUNT_B state variable (bRow >= 0, idx 3), so the
             // device reads b from x and scatters dq/db onto the b column — the exact analogue of a transformer's
             // BRANCH_RHO1. bRow = -1 degrades it to a fixed shunt (shunt voltage control off in the equation system).
-            bus.getControllerShunt().ifPresent(sh -> {
-                shuntParameters.add(new double[] {sh.getG(), sh.getB()});
+            bus.getControllerShunt().ifPresent(shunt -> {
+                shuntParameters.add(new double[] {shunt.getG(), shunt.getB()});
                 shuntIndices.add(new int[] {
-                    pRow[bus.getNum()], qRow[bus.getNum()], vCol[bus.getNum()], shuntBCol[sh.getNum()],
+                    pRow[bus.getNum()], qRow[bus.getNum()], vCol[bus.getNum()], shuntBCol[shunt.getNum()],
                     alternateQRow[bus.getNum()]});                 // [4]: alternate Q row (dyn reloc)
             });
             // SVC stand-by shunt (StandbyAutomaton b0): a permanent fixed susceptance the SVC injects
             // whether standing by or active — a plain fixed-shunt element (silently dropping it was a
             // 1.17 kV wrong answer on the monitoring network, found 2026-09-02).
-            bus.getSvcShunt().ifPresent(sh -> {
-                shuntParameters.add(new double[] {sh.getG(), sh.getB()});
+            bus.getSvcShunt().ifPresent(shunt -> {
+                shuntParameters.add(new double[] {shunt.getG(), shunt.getB()});
                 shuntIndices.add(new int[] {
                     pRow[bus.getNum()], qRow[bus.getNum()], vCol[bus.getNum()], -1,
                     alternateQRow[bus.getNum()]});                 // [4]: alternate Q row (dyn reloc)

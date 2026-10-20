@@ -24,17 +24,17 @@ using namespace powsybl::openloadflow;
 namespace olfgpu {
 
 __device__ inline double hvdcStationReactiveLimitsActivePower(const CurveHvdcAcEmulationView& c, int s, int n, int h, int side) {
-    size_t sh = (size_t) s * c.nHvdcAcEmulation + h;
+    size_t scenarioHvdc = (size_t) s * c.nHvdcAcEmulation + h;
     const double* p = c.in + (size_t) h * 9;
-    bool off = c.ctgOut[sh] || c.disabled[(size_t) s * c.nElements + c.elem[h]];
-    if (c.status[sh] == GpuAcEmulationStatus::LINEAR_MODE && !off) {
+    bool off = c.ctgOut[scenarioHvdc] || c.disabled[(size_t) s * c.nElements + c.elem[h]];
+    if (c.status[scenarioHvdc] == GpuAcEmulationStatus::LINEAR_MODE && !off) {
         const double* xs = c.x + (size_t) s * n;
         double ph1 = xs[c.phi1[h]];
         double ph2 = xs[c.phi2[h]];
         return side == 1 ? -hvdc::p1(p[0], p[1], p[4], p[5], p[6], ph1, ph2)
                          : -hvdc::p2(p[0], p[1], p[4], p[5], p[6], ph1, ph2);
     }
-    return side == 1 ? c.d1[sh] + p[7] : c.d2[sh] + p[8];
+    return side == 1 ? c.d1[scenarioHvdc] + p[7] : c.d2[scenarioHvdc] + p[8];
 }
 
 // Evaluate the per-scenario DYNAMIC reactive limits (OLF: bus.getMinQ()/getMaxQ() re-read each RL
@@ -94,7 +94,7 @@ __global__ void reactiveCapabilityCurveLimitsBatch(int nReactiveLimitEntries, in
         int pRow = reactiveCapabilityCurveIndices[g * 5 + 1];
         const double* pts = reactiveCapabilityCurvePoints + reactiveCapabilityCurveIndices[g * 5 + 2] * 3;
         int npts = reactiveCapabilityCurveIndices[g * 5 + 3];
-        int slot = reactiveCapabilityCurveIndices[g * 5 + 4];
+        int distributedSlackGenerator = reactiveCapabilityCurveIndices[g * 5 + 4];
         // The row that HOSTS this bus's active balance THIS scenario: the slack pack's row for the bus
         // (a coupler-relocated child's is its parent coupler's DUMMY_P row), moved back to the bus's own
         // PHI row by distributedSlackBusRowOverride when the coupler dies. The static pRow is the bus's own PHI row, which for a
@@ -104,8 +104,9 @@ __global__ void reactiveCapabilityCurveLimitsBatch(int nReactiveLimitEntries, in
         // VL-6231_0) had 0.566571 - the same unit halves at the same P - and the 9.4e-3 pu of reactive
         // power that put on the coupler moved the slack mismatch by 9.6e-6 pu, the whole 9.56e-4 MW
         // distributed-power gap.
-        if (slot >= 0 && distributedSlackGeneratorBus != nullptr && distributedSlackBusPhiRow != nullptr && distributedSlackGeneratorBus[slot] >= 0) {   // -1: the slack's own
-            pRow = distributedSlackBusRowOf(distributedSlackBusPhiRow, distributedSlackBusRowOverride, s, nDistributedSlackBuses, distributedSlackGeneratorBus[slot]);
+        if (distributedSlackGenerator >= 0 && distributedSlackGeneratorBus != nullptr && distributedSlackBusPhiRow != nullptr
+                && distributedSlackGeneratorBus[distributedSlackGenerator] >= 0) {   // -1: the slack's own
+            pRow = distributedSlackBusRowOf(distributedSlackBusPhiRow, distributedSlackBusRowOverride, s, nDistributedSlackBuses, distributedSlackGeneratorBus[distributedSlackGenerator]);
         }
         // This generator's OWN movement, straight from the distributed-slack water-fill, which clamps
         // PER GENERATOR. Splitting its bus's movement by a fixed share is exact only while the
@@ -120,14 +121,14 @@ __global__ void reactiveCapabilityCurveLimitsBatch(int nReactiveLimitEntries, in
         // generator's OWN entry never reaches here (shareScale < 0 continues above). An AC-emulation
         // VSC is not in the slack distribution: its P is its link's (CurveHvdcAcEmulationView).
         double pNow;
-        int hvh = reactiveCapabilityCurveHvdcStation.hv != nullptr ? reactiveCapabilityCurveHvdcStation.hv[2 * g] : -1;
-        if (hvh >= 0 && reactiveCapabilityCurveHvdcStation.nHvdcAcEmulation > 0) {
-            pNow = hvdcStationReactiveLimitsActivePower(reactiveCapabilityCurveHvdcStation, s, n, hvh, reactiveCapabilityCurveHvdcStation.hv[2 * g + 1]);
-        } else if (slot >= 0 && (distributedSlackGeneratorAnchor != nullptr || distributedSlackGeneratorInitialMove != nullptr
+        int hvdcIndex = reactiveCapabilityCurveHvdcStation.hv != nullptr ? reactiveCapabilityCurveHvdcStation.hv[2 * g] : -1;
+        if (hvdcIndex >= 0 && reactiveCapabilityCurveHvdcStation.nHvdcAcEmulation > 0) {
+            pNow = hvdcStationReactiveLimitsActivePower(reactiveCapabilityCurveHvdcStation, s, n, hvdcIndex, reactiveCapabilityCurveHvdcStation.hv[2 * g + 1]);
+        } else if (distributedSlackGenerator >= 0 && (distributedSlackGeneratorAnchor != nullptr || distributedSlackGeneratorInitialMove != nullptr
                                  || distributedSlackGeneratorMove != nullptr && distributedSlackGeneratorMoveValid != nullptr && distributedSlackGeneratorMoveValid[s])) {
             // the generator's own P: its anchor, plus this solve's water-fill or, before any pass, where the
             // solve started it (distributedSlackGeneratorTargetPMove). A share of its bus row's move is not that once anything clamps.
-            pNow = reactiveCapabilityCurveParameters[g * 5] + distributedSlackGeneratorTargetPMove(s, slot, nDistributedSlackGenerators, distributedSlackGeneratorMove, distributedSlackGeneratorMoveValid, distributedSlackGeneratorAnchor, distributedSlackGeneratorInitialMove);
+            pNow = reactiveCapabilityCurveParameters[g * 5] + distributedSlackGeneratorTargetPMove(s, distributedSlackGenerator, nDistributedSlackGenerators, distributedSlackGeneratorMove, distributedSlackGeneratorMoveValid, distributedSlackGeneratorAnchor, distributedSlackGeneratorInitialMove);
         } else {
             pNow = reactiveCapabilityCurveParameters[g * 5]
                     + reactiveCapabilityCurveParameters[g * 5 + 1] * shareScale * (target[(size_t) s * n + pRow] - reactiveCapabilityCurveParameters[g * 5 + 2] - pStep);

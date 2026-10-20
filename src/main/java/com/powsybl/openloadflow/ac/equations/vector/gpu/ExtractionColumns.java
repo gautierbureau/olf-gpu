@@ -99,15 +99,15 @@ record ExtractionColumns(int[] phiCol, int[] vCol, int[] branchRhoCol, int[] bra
         int[] reactiveRelocationDependentGroupOfRow = new int[es.getIndex().getSortedVariablesToFind().size()];
         java.util.Arrays.fill(reactiveRelocationDependentGroupOfRow, -1);
         for (LfBus bus : network.getBuses()) {
-            var tvc = bus.getTransformerVoltageControl()
+            var voltageControl = bus.getTransformerVoltageControl()
                     .filter(c -> c.getMergeStatus() == VoltageControl.MergeStatus.MAIN)
                     .orElse(null);
-            if (tvc == null || tvc.getMergedControllerElements().size() < 2 || vCol[bus.getNum()] < 0) {
+            if (voltageControl == null || voltageControl.getMergedControllerElements().size() < 2 || vCol[bus.getNum()] < 0) {
                 continue;
             }
             List<Integer> memberRows = new ArrayList<>();
             boolean allResolvable = true;
-            for (var m : tvc.getMergedControllerElements()) {
+            for (var m : voltageControl.getMergedControllerElements()) {
                 int rc = branchRhoCol[m.getNum()];
                 if (rc < 0) {
                     allResolvable = false;                   // a member without a rho column: keep the
@@ -263,7 +263,7 @@ record ExtractionColumns(int[] phiCol, int[] vCol, int[] branchRhoCol, int[] bra
                                                        final List<Integer> reactiveRelocationBaseTargetRow,
                                                        final int[] reactiveRelocationDependentGroupOfRow) {
         for (LfBus bus : network.getBuses()) {
-            var gvc = bus.getGeneratorVoltageControl()
+            var voltageControl = bus.getGeneratorVoltageControl()
                     .filter(c -> c.getMergeStatus() == VoltageControl.MergeStatus.MAIN)
                     .filter(c -> bus.isGeneratorVoltageControlled() && !c.isLocalControl())
                     .orElse(null);
@@ -276,10 +276,10 @@ record ExtractionColumns(int[] phiCol, int[] vCol, int[] branchRhoCol, int[] bra
             // emission GATED on it being pinned (psPilotPinned in olf_gpu_nr_jni.cu). Property-gated while
             // this lands; without it such a group keeps a relocation frozen at extraction, which is what
             // leaves rte6515's busbar base rank-deficient.
-            boolean pilotSelf = gvc != null && gvc.getMergedControllerElements().contains(bus);
+            boolean pilotSelf = voltageControl != null && voltageControl.getMergedControllerElements().contains(bus);
             // the ONE enrolment predicate (GpuAcRowIndexing.hasCandidateTable): the same answer decides the
             // canonical, pin-state-independent encoding of the group's q rows and DISTR_Q pack
-            if (!GpuAcRowIndexing.hasCandidateTable(gvc, es)) {
+            if (!GpuAcRowIndexing.hasCandidateTable(voltageControl, es)) {
                 continue;
             }
             // Each member's row is the one that HOSTS its reactive balance, which the coupler-tree relocation can
@@ -289,7 +289,7 @@ record ExtractionColumns(int[] phiCol, int[] vCol, int[] branchRhoCol, int[] bra
             // rte6515's [5000,6000) window with the relocation on, the failing slot's residual sat on
             // BUS_V(VL-6003_1) at 6.5e+02 and on the empty pilot row BUS_V(VL-6003_0) at 1.09e+02, every iteration.
             List<Integer> memberRows = new ArrayList<>();
-            for (LfBus m : gvc.getMergedControllerElements()) {
+            for (LfBus m : voltageControl.getMergedControllerElements()) {
                 memberRows.add(GpuAcRowIndexing.relocatedQRow(m.getNum(), spanningTreeEdges[0], dummyQCol, vCol));
             }
             int g = reactiveRelocationGroupStart.size();
@@ -309,24 +309,24 @@ record ExtractionColumns(int[] phiCol, int[] vCol, int[] branchRhoCol, int[] bra
             // reactive row (the fallback when the re-merged control is lost), then the base members in merged order,
             // so its carrier pick coincides with the base group's on the same modes. A dependent bus that is itself
             // one of the controllers has no balance of its own to host (pilot-self) and is left out.
-            for (var dvc : gvc.getMergedDependentVoltageControls()) {
-                LfBus dep = dvc.getControlledBus();
-                int dn = dep.getNum();
-                if (vCol[dn] < 0 || gvc.getMergedControllerElements().contains(dep) || reactiveRelocationDependentGroupOfRow[vCol[dn]] >= 0) {
+            for (var dependentVoltageControl : voltageControl.getMergedDependentVoltageControls()) {
+                LfBus dependentBus = dependentVoltageControl.getControlledBus();
+                int dependentBusNum = dependentBus.getNum();
+                if (vCol[dependentBusNum] < 0 || voltageControl.getMergedControllerElements().contains(dependentBus) || reactiveRelocationDependentGroupOfRow[vCol[dependentBusNum]] >= 0) {
                     continue;
                 }
-                int dg = reactiveRelocationGroupStart.size();
+                int dependentGroup = reactiveRelocationGroupStart.size();
                 reactiveRelocationGroupStart.add(reactiveRelocationCandidateRows.size());
-                int dependentPilotQRow = GpuAcRowIndexing.relocatedQRow(dn, spanningTreeEdges[0], dummyQCol, vCol);
+                int dependentPilotQRow = GpuAcRowIndexing.relocatedQRow(dependentBusNum, spanningTreeEdges[0], dummyQCol, vCol);
                 reactiveRelocationCandidateRows.add(dependentPilotQRow);
                 reactiveRelocationCandidateRows.addAll(memberRows);
                 reactiveRelocationDependentBaseGroup.add(g);
                 reactiveRelocationBaseTargetRow.add(dependentPilotQRow);
-                reactiveRelocationDependentGroupOfRow[vCol[dn]] = dg;
+                reactiveRelocationDependentGroupOfRow[vCol[dependentBusNum]] = dependentGroup;
             }
             if (pilotSelf && System.getenv("OLF_GPU_RL_TRACE") != null) {
                 System.err.println("PILOTSELF_ENROL group=" + g + " pilot=" + bus.getId()
-                        + " members=" + gvc.getMergedControllerElements().size()
+                        + " members=" + voltageControl.getMergedControllerElements().size()
                         + " fallbackRow=" + vCol[bus.getNum()]);
             }
         }

@@ -258,8 +258,8 @@ void collectFamilyPattern(const std::vector<int>& rowMap,
             if (distrQKind[c] == GpuReactiveTermKind::SHUNT_COMPENSATOR_REACTIVE_FLOW) {  // shunt q: bus V column
                 pat.emplace_back(mappedRow, shuntIndices[static_cast<size_t>(distrQElement[c]) * 5 + 2]);
             } else if (distrQKind[c] == GpuReactiveTermKind::OPEN_BRANCH_REACTIVE_FLOW) {  // half-open: connected-side V column
-                const int* oq = openBranchIndices + static_cast<size_t>(distrQElement[c]) * 6;
-                pat.emplace_back(mappedRow, distrQSide[c] == 0 ? oq[4] : oq[5]);
+                const int* openBranch = openBranchIndices + static_cast<size_t>(distrQElement[c]) * 6;
+                pat.emplace_back(mappedRow, distrQSide[c] == 0 ? openBranch[4] : openBranch[5]);
             } else if (distrQKind[c] == GpuReactiveTermKind::DUMMY_Q) {  // zero-imp DUMMY_Q column
                 pat.emplace_back(mappedRow, distrQElement[c]);
             } else {                                         // closed branch: v1 v2 ph1 ph2 r1

@@ -56,14 +56,14 @@ final class DistrShuntBPacker {
     private static void buildDistrShuntBContributions(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
                                                       int[] shuntBCol, List<int[]> out, List<Double> coefs) {
         for (LfBus pilot : network.getBuses()) {
-            ShuntVoltageControl svc = pilot.getShuntVoltageControl()
+            ShuntVoltageControl voltageControl = pilot.getShuntVoltageControl()
                     .filter(c -> c.getMergeStatus() == VoltageControl.MergeStatus.MAIN)
                     .filter(c -> pilot.isShuntVoltageControlled())
                     .orElse(null);
-            if (svc == null) {
+            if (voltageControl == null) {
                 continue;
             }
-            List<LfShunt> controllers = svc.getMergedControllerElements();
+            List<LfShunt> controllers = voltageControl.getMergedControllerElements();
             long count = controllers.stream().filter(c -> !c.isDisabled()).count();
             for (LfShunt gk : controllers) {
                 if (GpuAcRowIndexing.row(es, gk.getNum(), AcEquationType.DISTR_SHUNT_B) < 0) {

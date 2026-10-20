@@ -104,9 +104,9 @@ public final class GpuStateStore extends AbstractMap<String, double[]> implement
         io.asDoubleBuffer().put(state);
         io.limit(n * Double.BYTES);
         try {
-            long off = (long) slot * n * Double.BYTES;
+            long offset = (long) slot * n * Double.BYTES;
             while (io.hasRemaining()) {
-                off += channel.write(io, off);
+                offset += channel.write(io, offset);
             }
         } catch (IOException e) {
             throw new UncheckedIOException(e);
@@ -168,13 +168,13 @@ public final class GpuStateStore extends AbstractMap<String, double[]> implement
         io.clear();
         io.limit(n * Double.BYTES);
         try {
-            long off = (long) slot * n * Double.BYTES;
+            long offset = (long) slot * n * Double.BYTES;
             while (io.hasRemaining()) {
-                int r = channel.read(io, off);
+                int r = channel.read(io, offset);
                 if (r < 0) {
                     throw new PowsyblException("GPU state store: state " + slot + " is missing from " + file);
                 }
-                off += r;
+                offset += r;
             }
         } catch (IOException e) {
             throw new UncheckedIOException(e);

@@ -52,14 +52,14 @@ __global__ void hvdcAcEmulationLoopBatch(int nh, int nScenarios, int n, int nEle
     int s = tid / nh;
     if (!outerLoopCheckActive[s] || hvdcContingencyOutage[(size_t) s * nh + h]) return;    // outaged: the contingency owns that bit
     const double* p = hvdcAcEmulationParameters + (size_t) h * 9;                 // p0 k pMax12 pMax21 loss1 loss2 r baseD1 baseD2
-    int st = status[(size_t) s * nh + h];
-    int next = st;
+    int acEmulationStatus = status[(size_t) s * nh + h];
+    int next = acEmulationStatus;
     if (mode == 0) {                                         // FreezingHvdcACEmulation: unfreeze
-        if (st != GpuAcEmulationStatus::FROZEN) return;
+        if (acEmulationStatus != GpuAcEmulationStatus::FROZEN) return;
         next = GpuAcEmulationStatus::LINEAR_MODE;
     } else {                                                 // AcHvdcAcEmulationLimits
         size_t elemSlot = (size_t) s * nElements + hvdcElement[h];
-        if (st == GpuAcEmulationStatus::LINEAR_MODE && disabled[elemSlot]) return;
+        if (acEmulationStatus == GpuAcEmulationStatus::LINEAR_MODE && disabled[elemSlot]) return;
         const double* xs = x + (size_t) s * n;
         // The ANGLE is the bus's own BUS_PHI column, whatever row its P balance lives on (tasks #68: reading
         // it at the target row made a relocated converter bus read a DUMMY_P variable as its angle).
@@ -67,23 +67,23 @@ __global__ void hvdcAcEmulationLoopBatch(int nh, int nScenarios, int n, int nEle
         double ph2 = xs[hvdcBus2PhiColumn[h]];
         double pp1 = hvdc::p1(p[0], p[1], p[4], p[5], p[6], ph1, ph2);
         double pp2 = hvdc::p2(p[0], p[1], p[4], p[5], p[6], ph1, ph2);
-        if (st == GpuAcEmulationStatus::LINEAR_MODE) {  // OLF checkAcEmulationMode
+        if (acEmulationStatus == GpuAcEmulationStatus::LINEAR_MODE) {  // OLF checkAcEmulationMode
             if (pp1 >= 0) {
                 if (pp1 > p[2]) { next = GpuAcEmulationStatus::SATURATION_MODE_FROM_CS1_TO_CS2; }
             } else if (pp2 > p[3]) {
                 next = GpuAcEmulationStatus::SATURATION_MODE_FROM_CS2_TO_CS1;
             }
-        } else if (st == GpuAcEmulationStatus::SATURATION_MODE_FROM_CS1_TO_CS2 || st == GpuAcEmulationStatus::SATURATION_MODE_FROM_CS2_TO_CS1) {
+        } else if (acEmulationStatus == GpuAcEmulationStatus::SATURATION_MODE_FROM_CS1_TO_CS2 || acEmulationStatus == GpuAcEmulationStatus::SATURATION_MODE_FROM_CS2_TO_CS1) {
             if ((pp1 > 0 && pp1 < p[2]) || (pp2 > 0 && pp2 < p[3])) {
                 next = GpuAcEmulationStatus::LINEAR_MODE;
-            } else if (pp1 < 0 && st == GpuAcEmulationStatus::SATURATION_MODE_FROM_CS1_TO_CS2) {
+            } else if (pp1 < 0 && acEmulationStatus == GpuAcEmulationStatus::SATURATION_MODE_FROM_CS1_TO_CS2) {
                 next = GpuAcEmulationStatus::SATURATION_MODE_FROM_CS2_TO_CS1;
-            } else if (pp2 < 0 && st == GpuAcEmulationStatus::SATURATION_MODE_FROM_CS2_TO_CS1) {
+            } else if (pp2 < 0 && acEmulationStatus == GpuAcEmulationStatus::SATURATION_MODE_FROM_CS2_TO_CS1) {
                 next = GpuAcEmulationStatus::SATURATION_MODE_FROM_CS1_TO_CS2;
             }
         }
     }
-    if (next == st) return;
+    if (next == acEmulationStatus) return;
     double nd1 = 0.0;
     double nd2 = 0.0;
     size_t elemSlot = (size_t) s * nElements + hvdcElement[h];

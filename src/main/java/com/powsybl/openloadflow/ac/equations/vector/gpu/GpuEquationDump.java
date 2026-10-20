@@ -82,50 +82,50 @@ public final class GpuEquationDump {
             terms[r] = new ArrayList<>();
         }
 
-        int[] cb = d.closedBranch().indices();
-        for (int e = 0; e < cb.length / 12; e++) {
+        int[] closedBranchIndices = d.closedBranch().indices();
+        for (int e = 0; e < closedBranchIndices.length / 12; e++) {
             int o = e * 12;
-            add(terms, cb[o], "cb#" + e + ".p1");
-            add(terms, cb[o + 1], "cb#" + e + ".q1");
-            add(terms, cb[o + 2], "cb#" + e + ".p2");
-            add(terms, cb[o + 3], "cb#" + e + ".q2");
-            add(terms, cb[o + 10], "cb#" + e + ".q1@alt");
-            add(terms, cb[o + 11], "cb#" + e + ".q2@alt");
+            add(terms, closedBranchIndices[o], "cb#" + e + ".p1");
+            add(terms, closedBranchIndices[o + 1], "cb#" + e + ".q1");
+            add(terms, closedBranchIndices[o + 2], "cb#" + e + ".p2");
+            add(terms, closedBranchIndices[o + 3], "cb#" + e + ".q2");
+            add(terms, closedBranchIndices[o + 10], "cb#" + e + ".q1@alt");
+            add(terms, closedBranchIndices[o + 11], "cb#" + e + ".q2@alt");
         }
-        int[] ob = d.openBranch().indices();
-        for (int e = 0; e < ob.length / 6; e++) {
+        int[] openBranchIndices = d.openBranch().indices();
+        for (int e = 0; e < openBranchIndices.length / 6; e++) {
             int o = e * 6;
-            add(terms, ob[o], "ob#" + e + ".p1");
-            add(terms, ob[o + 1], "ob#" + e + ".q1");
-            add(terms, ob[o + 2], "ob#" + e + ".p2");
-            add(terms, ob[o + 3], "ob#" + e + ".q2");
+            add(terms, openBranchIndices[o], "ob#" + e + ".p1");
+            add(terms, openBranchIndices[o + 1], "ob#" + e + ".q1");
+            add(terms, openBranchIndices[o + 2], "ob#" + e + ".p2");
+            add(terms, openBranchIndices[o + 3], "ob#" + e + ".q2");
         }
-        int[] sh = d.shunt().indices();
-        for (int e = 0; e < sh.length / 5; e++) {
+        int[] shuntIndices = d.shunt().indices();
+        for (int e = 0; e < shuntIndices.length / 5; e++) {
             int o = e * 5;
-            add(terms, sh[o], "sh#" + e + ".p");
-            add(terms, sh[o + 1], "sh#" + e + ".q");
-            add(terms, sh[o + 4], "sh#" + e + ".q@alt");
+            add(terms, shuntIndices[o], "sh#" + e + ".p");
+            add(terms, shuntIndices[o + 1], "sh#" + e + ".q");
+            add(terms, shuntIndices[o + 4], "sh#" + e + ".q@alt");
         }
-        int[] hv = d.hvdcAcEmulation().indices();
-        for (int e = 0; e < hv.length / 4; e++) {
-            add(terms, hv[e * 4], "hv#" + e + ".p1");
-            add(terms, hv[e * 4 + 1], "hv#" + e + ".p2");
+        int[] hvdcAcEmulationIndices = d.hvdcAcEmulation().indices();
+        for (int e = 0; e < hvdcAcEmulationIndices.length / 4; e++) {
+            add(terms, hvdcAcEmulationIndices[e * 4], "hv#" + e + ".p1");
+            add(terms, hvdcAcEmulationIndices[e * 4 + 1], "hv#" + e + ".p2");
         }
-        int[] zi = d.zeroImpedanceBranch().indices();
+        int[] zeroImpedanceBranchIndices = d.zeroImpedanceBranch().indices();
         int[] zeroImpedanceBranchNums = d.zeroImpedanceBranch().branchNum();
-        for (int e = 0; e < zi.length / 11; e++) {
+        for (int e = 0; e < zeroImpedanceBranchIndices.length / 11; e++) {
             int o = e * 11;
             String tag = "zi#" + e;
-            add(terms, zi[o], tag + ".p1(+dP)");
-            add(terms, zi[o + 1], tag + ".q1(+dQ)");
-            add(terms, zi[o + 2], tag + ".p2(-dP)");
-            add(terms, zi[o + 3], tag + ".q2(-dQ)");
-            if ((zi[o + 10] & 1) != 0) {
-                int childSide = (zi[o + 10] >> 1) & 3;
+            add(terms, zeroImpedanceBranchIndices[o], tag + ".p1(+dP)");
+            add(terms, zeroImpedanceBranchIndices[o + 1], tag + ".q1(+dQ)");
+            add(terms, zeroImpedanceBranchIndices[o + 2], tag + ".p2(-dP)");
+            add(terms, zeroImpedanceBranchIndices[o + 3], tag + ".q2(-dQ)");
+            if ((zeroImpedanceBranchIndices[o + 10] & 1) != 0) {
+                int childSide = (zeroImpedanceBranchIndices[o + 10] >> 1) & 3;
                 // stock: crosswise, ZERO_V on the DUMMY_Q row and ZERO_PHI on the DUMMY_P row (native zeroVRowOf)
-                int zv = childSide == 0 ? zi[o + 5] : (childSide == 1 ? zi[o + 6] : zi[o + 7]);
-                int zp = childSide == 0 ? zi[o + 4] : (childSide == 1 ? zi[o + 8] : zi[o + 9]);
+                int zv = childSide == 0 ? zeroImpedanceBranchIndices[o + 5] : (childSide == 1 ? zeroImpedanceBranchIndices[o + 6] : zeroImpedanceBranchIndices[o + 7]);
+                int zp = childSide == 0 ? zeroImpedanceBranchIndices[o + 4] : (childSide == 1 ? zeroImpedanceBranchIndices[o + 8] : zeroImpedanceBranchIndices[o + 9]);
                 add(terms, zv, tag + ".ZERO_V");
                 add(terms, zp, tag + ".ZERO_PHI");
             }
@@ -158,7 +158,7 @@ public final class GpuEquationDump {
 
         w.write("\n# ZERO-IMPEDANCE branches, every row slot including -1 (a -1 is a DROPPED term)\n");
         int[] zeroImpedanceBranchAlternateReactiveDestination = d.zeroImpedanceBranch().alternateReactiveDestination();
-        for (int e = 0; e < zi.length / 11; e++) {
+        for (int e = 0; e < zeroImpedanceBranchIndices.length / 11; e++) {
             int o = e * 11;
             LfBranch br = e < zeroImpedanceBranchNums.length && zeroImpedanceBranchNums[e] >= 0 ? network.getBranch(zeroImpedanceBranchNums[e]) : null;
             LfBus b1 = br == null ? null : br.getBus1();
@@ -166,8 +166,9 @@ public final class GpuEquationDump {
             w.write(String.format("zi#%d branch=%s b1=%s b2=%s pRow1=%d qRow1=%d pRow2=%d qRow2=%d"
                             + " dummyP=%d dummyQ=%d spanningTree=%d childSide=%d alternateQRows=[%d,%d]%n",
                     e, br == null ? "?" : br.getId(), b1 == null ? "-" : b1.getId(), b2 == null ? "-" : b2.getId(),
-                    zi[o], zi[o + 1], zi[o + 2], zi[o + 3], zi[o + 4], zi[o + 5],
-                    zi[o + 10] & 1, (zi[o + 10] >> 1) & 3,
+                    zeroImpedanceBranchIndices[o], zeroImpedanceBranchIndices[o + 1], zeroImpedanceBranchIndices[o + 2],
+                    zeroImpedanceBranchIndices[o + 3], zeroImpedanceBranchIndices[o + 4], zeroImpedanceBranchIndices[o + 5],
+                    zeroImpedanceBranchIndices[o + 10] & 1, (zeroImpedanceBranchIndices[o + 10] >> 1) & 3,
                     e * 2 + 1 < zeroImpedanceBranchAlternateReactiveDestination.length ? zeroImpedanceBranchAlternateReactiveDestination[e * 2] : -1,
                     e * 2 + 1 < zeroImpedanceBranchAlternateReactiveDestination.length ? zeroImpedanceBranchAlternateReactiveDestination[e * 2 + 1] : -1));
         }
@@ -175,15 +176,15 @@ public final class GpuEquationDump {
         // The invariant a rank-deficient assembly breaks: a DUMMY_Q (or DUMMY_P) is determined only by an
         // OPPOSING pair of couplings. One side suppressed (-1) leaves the column free.
         w.write("\n# couplers whose dummy coupling is INCOMPLETE (one endpoint row suppressed)\n");
-        for (int e = 0; e < zi.length / 11; e++) {
+        for (int e = 0; e < zeroImpedanceBranchIndices.length / 11; e++) {
             int o = e * 11;
-            boolean pIncomplete = zi[o] < 0 ^ zi[o + 2] < 0;
-            boolean qIncomplete = zi[o + 1] < 0 ^ zi[o + 3] < 0;
+            boolean pIncomplete = zeroImpedanceBranchIndices[o] < 0 ^ zeroImpedanceBranchIndices[o + 2] < 0;
+            boolean qIncomplete = zeroImpedanceBranchIndices[o + 1] < 0 ^ zeroImpedanceBranchIndices[o + 3] < 0;
             if (pIncomplete || qIncomplete) {
                 LfBranch br = e < zeroImpedanceBranchNums.length && zeroImpedanceBranchNums[e] >= 0 ? network.getBranch(zeroImpedanceBranchNums[e]) : null;
                 w.write(String.format("zi#%d branch=%s %s%s pRows=[%d,%d] qRows=[%d,%d] alternateQRows=[%d,%d]%n",
                         e, br == null ? "?" : br.getId(), pIncomplete ? "P " : "", qIncomplete ? "Q " : "",
-                        zi[o], zi[o + 2], zi[o + 1], zi[o + 3],
+                        zeroImpedanceBranchIndices[o], zeroImpedanceBranchIndices[o + 2], zeroImpedanceBranchIndices[o + 1], zeroImpedanceBranchIndices[o + 3],
                         e * 2 + 1 < zeroImpedanceBranchAlternateReactiveDestination.length ? zeroImpedanceBranchAlternateReactiveDestination[e * 2] : -1,
                         e * 2 + 1 < zeroImpedanceBranchAlternateReactiveDestination.length ? zeroImpedanceBranchAlternateReactiveDestination[e * 2 + 1] : -1));
             }
@@ -199,21 +200,21 @@ public final class GpuEquationDump {
         int[] alternateQRow = cols.alternateQRow();
         int[] vCol = cols.vCol();
         for (LfBus bus : network.getBuses()) {
-            var gvc = bus.getGeneratorVoltageControl()
+            var voltageControl = bus.getGeneratorVoltageControl()
                     .filter(c -> c.getMergeStatus() == com.powsybl.openloadflow.network.VoltageControl.MergeStatus.MAIN)
                     .orElse(null);
-            if (gvc == null) {
+            if (voltageControl == null) {
                 continue;
             }
-            List<LfBus> members = gvc.getMergedControllerElements();
+            List<LfBus> members = voltageControl.getMergedControllerElements();
             StringBuilder sb = new StringBuilder();
             for (LfBus m : members) {
                 sb.append(String.format(" %s[vCol=%d qRow=%d alternateQRow=%d enabled=%b]", m.getId(), vCol[m.getNum()],
-                        qRow[m.getNum()], alternateQRow[m.getNum()], gvc.isControllerEnabled(m)));
+                        qRow[m.getNum()], alternateQRow[m.getNum()], voltageControl.isControllerEnabled(m)));
             }
             w.write(String.format("gvc pilot=%s controlled=%s local=%b pilotIsController=%b vCol=%d qRow=%d"
                             + " alternateQRow=%d members=%d:%s%n",
-                    bus.getId(), gvc.getControlledBus().getId(), gvc.isLocalControl(), members.contains(bus),
+                    bus.getId(), voltageControl.getControlledBus().getId(), voltageControl.isLocalControl(), members.contains(bus),
                     vCol[bus.getNum()], qRow[bus.getNum()], alternateQRow[bus.getNum()], members.size(), sb));
         }
         w.flush();

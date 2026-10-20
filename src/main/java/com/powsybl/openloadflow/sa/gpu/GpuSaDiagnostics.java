@@ -86,10 +86,10 @@ final class GpuSaDiagnostics {
                                           Map<com.powsybl.openloadflow.equations.Variable<com.powsybl.openloadflow.ac.equations.AcVariableType>,
                                                   Integer> baseVariableRows,
                                           int[] islandedBusNums) {
-        var ev = context.getEquationVector();
-        var tv = context.getTargetVector();
-        ev.minus(tv);
-        double[] fx = ev.getArray();
+        var equationVector = context.getEquationVector();
+        var targetVector = context.getTargetVector();
+        equationVector.minus(targetVector);
+        double[] fx = equationVector.getArray();
         System.err.printf("SA_RESID ctg=%s olfActiveEquations=%d%n", contingencyId, fx.length);
         Integer[] order = new Integer[fx.length];
         for (int i = 0; i < fx.length; i++) {
@@ -107,11 +107,11 @@ final class GpuSaDiagnostics {
             // indistinguishable from the residual alone.
             int devRow = -1;
             if (baseVariableRows != null && eq != null) {
-                var vr = es.getVariableSet().getVariable(eq.getElementNum(),
+                var variable = es.getVariableSet().getVariable(eq.getElementNum(),
                         eq.getType() == com.powsybl.openloadflow.ac.equations.AcEquationType.BUS_TARGET_P
                                 ? com.powsybl.openloadflow.ac.equations.AcVariableType.BUS_PHI
                                 : com.powsybl.openloadflow.ac.equations.AcVariableType.BUS_V);
-                Integer r = vr == null ? null : baseVariableRows.get(vr);
+                Integer r = variable == null ? null : baseVariableRows.get(variable);
                 devRow = r == null ? -1 : r;
             }
             // SIGNED, not |F|. Two buses whose residuals are equal and OPPOSITE are the two ends of a
@@ -125,20 +125,20 @@ final class GpuSaDiagnostics {
             int degree = 0;
             double islandShunt = Double.NaN;
             if (islandedBusNums != null && elem instanceof com.powsybl.openloadflow.network.LfBus b) {
-                java.util.Set<Integer> isl = new java.util.HashSet<>();
-                for (int bn : islandedBusNums) {
-                    isl.add(bn);
+                java.util.Set<Integer> islandedBuses = new java.util.HashSet<>();
+                for (int busNum : islandedBusNums) {
+                    islandedBuses.add(busNum);
                 }
-                for (var br : b.getBranches()) {
+                for (var branch : b.getBranches()) {
                     degree++;
-                    var other = br.getBus1() == b ? br.getBus2() : br.getBus1();
-                    if (other != null && isl.contains(other.getNum())) {
+                    var other = branch.getBus1() == b ? branch.getBus2() : branch.getBus1();
+                    if (other != null && islandedBuses.contains(other.getNum())) {
                         toIsland++;
                         // The QUANTITATIVE test of "the device dropped the dangling half": if that is
                         // what happened, the residual should be this branch's connected-side shunt
                         // term, b_side * v^2, which OLF keeps and the device deletes with the element.
-                        var pi = br.getPiModel();
-                        double bSide = br.getBus1() == b ? pi.getB1() : pi.getB2();
+                        var pi = branch.getPiModel();
+                        double bSide = branch.getBus1() == b ? pi.getB1() : pi.getB2();
                         double v = b.getV();
                         islandShunt = bSide * v * v;
                     }
@@ -148,31 +148,31 @@ final class GpuSaDiagnostics {
             // round number in every contingency is a fixed missing TERM, not a solve difference,
             // and only the bus's own inventory says which term: a shunt's b, the generators' and
             // loads' reactive, and whether OLF considers the bus disabled at all.
-            if (elem instanceof LfBus rb) {
-                double shB = rb.getShunt().map(sh -> sh.getB()).orElse(0.0)
-                        + rb.getControllerShunt().map(sh -> sh.getB()).orElse(0.0)
-                        + rb.getSvcShunt().map(sh -> sh.getB()).orElse(0.0);
+            if (elem instanceof LfBus bus) {
+                double shuntB = bus.getShunt().map(shunt -> shunt.getB()).orElse(0.0)
+                        + bus.getControllerShunt().map(shunt -> shunt.getB()).orElse(0.0)
+                        + bus.getSvcShunt().map(shunt -> shunt.getB()).orElse(0.0);
                 double genQ = 0;
-                for (LfGenerator g : rb.getGenerators()) {
+                for (LfGenerator g : bus.getGenerators()) {
                     genQ += g.getTargetQ();
                 }
                 System.err.printf("SA_RESID_BUS ctg=%s id=%s disabled=%s v=%.9f shuntB=%.9f"
                         + " nGen=%d genTargetQ=%.9f loadTargetQ=%.9f vcEnabled=%s%n",
-                        contingencyId, rb.getId(), rb.isDisabled(), rb.getV(), shB,
-                        rb.getGenerators().size(), genQ, rb.getLoadTargetQ(),
-                        rb.isGeneratorVoltageControlEnabled());
+                        contingencyId, bus.getId(), bus.isDisabled(), bus.getV(), shuntB,
+                        bus.getGenerators().size(), genQ, bus.getLoadTargetQ(),
+                        bus.isGeneratorVoltageControlEnabled());
             }
             // EVERY branch of the network incident to this bus, disabled ones included. getBranches()
             // is the bus's LIVE list and came back empty while the equation still evaluated non-zero,
             // so one of the two is lying; this says which, and names the branch either way.
-            if (elem instanceof LfBus ib) {
-                for (LfBranch nb : context.getNetwork().getBranches()) {
-                    if (nb.getBus1() == ib || nb.getBus2() == ib) {
+            if (elem instanceof LfBus bus) {
+                for (LfBranch branch : context.getNetwork().getBranches()) {
+                    if (branch.getBus1() == bus || branch.getBus2() == bus) {
                         System.err.printf("SA_RESID_INC ctg=%s bus=%s branch=%s num=%d disabled=%s"
-                                + " zeroImp=%s side=%d%n", contingencyId, ib.getId(), nb.getId(),
-                                nb.getNum(), nb.isDisabled(),
-                                nb.isZeroImpedance(com.powsybl.openloadflow.network.LoadFlowModel.AC),
-                                nb.getBus1() == ib ? 1 : 2);
+                                + " zeroImp=%s side=%d%n", contingencyId, bus.getId(), branch.getId(),
+                                branch.getNum(), branch.isDisabled(),
+                                branch.isZeroImpedance(com.powsybl.openloadflow.network.LoadFlowModel.AC),
+                                branch.getBus1() == bus ? 1 : 2);
                     }
                 }
             }
@@ -199,12 +199,12 @@ final class GpuSaDiagnostics {
                 // bus has no branches left.
                 StringBuilder vars = new StringBuilder();
                 try {
-                    for (var vv : t.getVariables()) {
-                        vars.append(' ').append(vv.getType()).append('#').append(vv.getElementNum());
-                        if (vv.getType() == AcVariableType.BUS_V || vv.getType() == AcVariableType.BUS_PHI) {
-                            LfBus vb = context.getNetwork().getBus(vv.getElementNum());
-                            vars.append('(').append(vb == null ? "?" : vb.getId())
-                                    .append(vb != null && vb.isDisabled() ? ",DISABLED" : "").append(')');
+                    for (var variable : t.getVariables()) {
+                        vars.append(' ').append(variable.getType()).append('#').append(variable.getElementNum());
+                        if (variable.getType() == AcVariableType.BUS_V || variable.getType() == AcVariableType.BUS_PHI) {
+                            LfBus variableBus = context.getNetwork().getBus(variable.getElementNum());
+                            vars.append('(').append(variableBus == null ? "?" : variableBus.getId())
+                                    .append(variableBus != null && variableBus.isDisabled() ? ",DISABLED" : "").append(')');
                         }
                     }
                 } catch (RuntimeException ex) {
@@ -218,9 +218,9 @@ final class GpuSaDiagnostics {
             // DEVICE's state. The device believes its sharing equation is satisfied there; if OLF
             // disagrees, these are the numbers that say which member's q the two compute
             // differently - the equation residual alone cannot.
-            if (eq.getType() == AcEquationType.DISTR_Q && elem instanceof LfBus db) {
-                db.getGeneratorVoltageControl().ifPresent(vc -> {
-                    for (LfBus m : vc.getMergedControllerElements()) {
+            if (eq.getType() == AcEquationType.DISTR_Q && elem instanceof LfBus controllerBus) {
+                controllerBus.getGeneratorVoltageControl().ifPresent(voltageControl -> {
+                    for (LfBus m : voltageControl.getMergedControllerElements()) {
                         System.err.printf("SA_RESID_Q ctg=%s member=%s qPercent=%.9f qAtDeviceState=%.9f"
                                 + " loadQ=%.9f v=%.9f%n", contingencyId, m.getId(),
                                 m.getRemoteControlReactivePercent(), m.getQ().eval(),
@@ -231,7 +231,7 @@ final class GpuSaDiagnostics {
             System.err.printf("SA_RESID ctg=%s row=%d F=%+.9e eq=%s elem=%d id=%s olfTarget=%.9f devRow=%d"
                             + " degree=%d toIsland=%d islandBranchShunt=%+.9f%n",
                     contingencyId, row, fx[row], eq.getType(), eq.getElementNum(),
-                    elem == null ? "?" : elem.getId(), tv.getArray()[row], devRow, degree, toIsland,
+                    elem == null ? "?" : elem.getId(), targetVector.getArray()[row], devRow, degree, toIsland,
                     islandShunt);
         }
     }
@@ -336,9 +336,9 @@ final class GpuSaDiagnostics {
                 w.write("#   bus " + b.getNum() + " = " + b.getId() + (b.isDisabled() ? "  [DISABLED]" : "") + "\n");
             }
             w.write("# branch legend: num = id\n");
-            for (LfBranch br : network.getBranches()) {
-                w.write("#   branch " + br.getNum() + " = " + br.getId()
-                        + (br.isDisabled() ? "  [DISABLED]" : "") + "\n");
+            for (LfBranch branch : network.getBranches()) {
+                w.write("#   branch " + branch.getNum() + " = " + branch.getId()
+                        + (branch.isDisabled() ? "  [DISABLED]" : "") + "\n");
             }
             context.getEquationSystem().write(w, true);
             // ...and OLF's OWN f(x0) - target per ACTIVE equation at the post-contingency start (the residual
@@ -366,12 +366,12 @@ final class GpuSaDiagnostics {
             // pre-contingency state leaves unconstrained -- which the split makes readable.
             try {
                 double[] fx0 = context.getEquationVector().getArray();
-                double[] tg0 = context.getTargetVector().getArray();
-                double n2 = 0;
+                double[] target0 = context.getTargetVector().getArray();
+                double squaredNorm = 0;
                 w.write("# F0: column type elementNum id residual(f-target) f target\n");
                 for (int c = 0; c < fx0.length; c++) {
-                    double v = fx0[c] - (c < tg0.length ? tg0[c] : 0.0);
-                    n2 += v * v;
+                    double v = fx0[c] - (c < target0.length ? target0[c] : 0.0);
+                    squaredNorm += v * v;
                     var eq = context.getEquationSystem().getIndex().getEquationAtColumn(c);
                     String id;
                     try {
@@ -384,9 +384,9 @@ final class GpuSaDiagnostics {
                         id = "#" + eq.getElementNum();
                     }
                     w.write("F0 " + c + " " + eq.getType() + " " + eq.getElementNum() + " " + id + " " + v
-                            + " " + fx0[c] + " " + (c < tg0.length ? tg0[c] : 0.0) + "\n");
+                            + " " + fx0[c] + " " + (c < target0.length ? target0[c] : 0.0) + "\n");
                 }
-                w.write("# F0 norm2=" + Math.sqrt(n2) + "\n");
+                w.write("# F0 norm2=" + Math.sqrt(squaredNorm) + "\n");
             } catch (RuntimeException e) {
                 w.write("# F0 unavailable: " + e + "\n");
             }

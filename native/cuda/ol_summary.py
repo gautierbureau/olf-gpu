@@ -22,8 +22,8 @@ else:
         if m: last[m.group(1)] = (int(m.group(2)), int(m.group(3)), int(m.group(4)), m.group(5))
         m = re.match(r'GPU_OL_TIME re-solve trigger=(\S+) passes=\d+ ms=\S+ scenarioSolves=(\d+)', l)
         if m: by_type[m.group(1)] = int(m.group(2))   # cumulative print: the last one wins
-    for c, (p, f, t, st) in last.items():
-        if st != '0': continue
+    for c, (p, f, t, status) in last.items():
+        if status != '0': continue
         n += 1; o = p - 1; hist[o] += 1; tot += o; trig += o > 0; first += f; total += t
 print(json.dumps({"arm": arm, "reportedContingencies": n, "contingenciesTriggeringOuterLoops": trig,
                   "totalOuterLoopIterations": tot, "outerLoopIterationsByType": dict(by_type.most_common()),

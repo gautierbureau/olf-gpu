@@ -78,11 +78,11 @@ public final class GpuPhaseControlOuterLoop {
         }
         List<Controller> out = new ArrayList<>();
         for (LfBranch branch : network.getBranches()) {
-            var pcOpt = branch.getPhaseControl();
-            if (pcOpt.isEmpty() || branch.isDisabled() || !branch.isPhaseController()) {
+            var optionalPhaseControl = branch.getPhaseControl();
+            if (optionalPhaseControl.isEmpty() || branch.isDisabled() || !branch.isPhaseController()) {
                 continue;
             }
-            TransformerPhaseControl pc = pcOpt.orElseThrow();
+            TransformerPhaseControl phaseControl = optionalPhaseControl.orElseThrow();
             Integer a1Row = a1Rows.get(branch.getNum());
             int elemIndex = elementMapper.getElementIndex(branch);
             double[][] tapRows = GpuTransformerVoltageControlOuterLoop.tapModels(branch.getPiModel());
@@ -105,7 +105,7 @@ public final class GpuPhaseControlOuterLoop {
                     baseTap = t;
                 }
             }
-            if (pc.getMode() == TransformerPhaseControl.Mode.CONTROLLER) {
+            if (phaseControl.getMode() == TransformerPhaseControl.Mode.CONTROLLER) {
                 // VC-ON activation diff: what enabling the phase control changes (a1 row -> mode 3 + target)
                 boolean was = branch.isPhaseControlEnabled();
                 branch.setPhaseControlEnabled(true);
@@ -126,12 +126,12 @@ public final class GpuPhaseControlOuterLoop {
                     deltaTargetsOn[k] = onTargets[deltaRows[k]];
                 }
                 out.add(new Controller(GpuPhaseControlMode.CONTROLLER, a1Row, null, 0, tapRows, baseTap, elemIndex,
-                        deltaRows, deltaModesOn, deltaTargetsOn, pc.getControlledSide() == TwoSides.ONE ? 1 : 2, branch.getNum()));
-            } else if (pc.getMode() == TransformerPhaseControl.Mode.LIMITER) {
-                var iTerm = (EquationTerm<AcVariableType, AcEquationType>) (pc.getControlledSide() == TwoSides.ONE
+                        deltaRows, deltaModesOn, deltaTargetsOn, phaseControl.getControlledSide() == TwoSides.ONE ? 1 : 2, branch.getNum()));
+            } else if (phaseControl.getMode() == TransformerPhaseControl.Mode.LIMITER) {
+                var iTerm = (EquationTerm<AcVariableType, AcEquationType>) (phaseControl.getControlledSide() == TwoSides.ONE
                         ? branch.getI1() : branch.getI2());
-                out.add(new Controller(GpuPhaseControlMode.LIMITER, a1Row, iTerm, pc.getTargetValue(), tapRows, baseTap, elemIndex,
-                        new int[0], new int[0], new double[0], pc.getControlledSide() == TwoSides.ONE ? 1 : 2, branch.getNum()));
+                out.add(new Controller(GpuPhaseControlMode.LIMITER, a1Row, iTerm, phaseControl.getTargetValue(), tapRows, baseTap, elemIndex,
+                        new int[0], new int[0], new double[0], phaseControl.getControlledSide() == TwoSides.ONE ? 1 : 2, branch.getNum()));
             }
         }
         return out;
@@ -139,11 +139,11 @@ public final class GpuPhaseControlOuterLoop {
 
     /** Pre-solve (OLF initialize): enable every live CONTROLLER-mode phase control — the a1 row
      *  becomes the P-flow equation (row mode 3) for the first solve. */
-    public static void applyPhaseOn(int realCount, int n, List<Controller> ctls,
+    public static void applyPhaseOn(int realCount, int n, List<Controller> controllers,
                              int[][] rowModePerScenario, int[] baseRowMode, boolean[][] disabledMask,
                              GpuBatchOverrides overrides) {
         for (int slot = 0; slot < realCount; slot++) {
-            for (Controller c : ctls) {
+            for (Controller c : controllers) {
                 if (c.kind() != GpuPhaseControlMode.CONTROLLER || disabledMask[slot][c.elemIndex()]) {
                     continue;
                 }
@@ -160,65 +160,65 @@ public final class GpuPhaseControlOuterLoop {
 
     /** Install the controllers for the in-kernel PhaseControl phase (OLF order 7). Returns true when the
      *  kernel loop OWNS them (the host orchestrator must then stay off). */
-    public static boolean uploadToDevice(long handle, List<Controller> ctls) {
-        if (ctls == null || ctls.isEmpty()) {
+    public static boolean uploadToDevice(long handle, List<Controller> controllers) {
+        if (controllers == null || controllers.isEmpty()) {
             PhaseControlNative.setBatchContinuousPhase(handle,
                     null, null, null, null, null, null, null, null);
             return false;
         }
-        int nc = ctls.size();
-        int[] kind = new int[nc];
-        int[] a1Row = new int[nc];
-        int[] side = new int[nc];
-        double[] limit = new double[nc];
-        int[] elem = new int[nc];
-        int[] tapStart = new int[nc + 1];
-        int[] baseTap = new int[nc];
+        int nControllers = controllers.size();
+        int[] kind = new int[nControllers];
+        int[] a1Row = new int[nControllers];
+        int[] side = new int[nControllers];
+        double[] limit = new double[nControllers];
+        int[] elem = new int[nControllers];
+        int[] tapStart = new int[nControllers + 1];
+        int[] baseTap = new int[nControllers];
         List<Double> tapRows = new ArrayList<>();
-        for (int c = 0; c < nc; c++) {
-            Controller ctl = ctls.get(c);
-            kind[c] = ctl.kind();
-            a1Row[c] = ctl.a1Row();
-            side[c] = ctl.controlledSide();
-            limit[c] = ctl.iLimit();
-            elem[c] = ctl.elemIndex();
+        for (int c = 0; c < nControllers; c++) {
+            Controller controller = controllers.get(c);
+            kind[c] = controller.kind();
+            a1Row[c] = controller.a1Row();
+            side[c] = controller.controlledSide();
+            limit[c] = controller.iLimit();
+            elem[c] = controller.elemIndex();
             tapStart[c] = tapRows.size() / GpuPiModelColumn.COUNT;
-            for (double[] row : ctl.tapRows()) {
+            for (double[] row : controller.tapRows()) {
                 for (double d : row) {
                     tapRows.add(d);
                 }
             }
-            baseTap[c] = ctl.baseTapIndex();
+            baseTap[c] = controller.baseTapIndex();
         }
-        tapStart[nc] = tapRows.size() / GpuPiModelColumn.COUNT;
+        tapStart[nControllers] = tapRows.size() / GpuPiModelColumn.COUNT;
         boolean owned = PhaseControlNative.setBatchContinuousPhase(handle,
                 kind, a1Row, side, limit, elem, tapStart, tapRows.stream().mapToDouble(Double::doubleValue).toArray(), baseTap) != 0;
-        LOGGER.info("Uploaded {} continuous phase controllers to device: {}", nc, owned ? "in-kernel loop" : "host orchestrator");
+        LOGGER.info("Uploaded {} continuous phase controllers to device: {}", nControllers, owned ? "in-kernel loop" : "host orchestrator");
         if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
-            System.err.printf("CPHASE_UPLOAD nControllers=%d kernel=%b%n", nc, owned);
+            System.err.printf("CPHASE_UPLOAD nControllers=%d kernel=%b%n", nControllers, owned);
         }
         return owned;
     }
 
     /** Give the driver's decisions (scenario 0) back to the network the way OLF's loop leaves it: every
      *  CONTROLLER-mode control switched off, every tap at the rounded / shifted position. */
-    public static void applyToNetwork(LfNetwork network, List<Controller> ctls, int[] taps) {
-        if (ctls == null || ctls.isEmpty() || taps == null) {
+    public static void applyToNetwork(LfNetwork network, List<Controller> controllers, int[] taps) {
+        if (controllers == null || controllers.isEmpty() || taps == null) {
             return;
         }
-        for (int c = 0; c < ctls.size() && c < taps.length; c++) {
-            Controller ctl = ctls.get(c);
-            LfBranch branch = network.getBranch(ctl.branchNum());
+        for (int c = 0; c < controllers.size() && c < taps.length; c++) {
+            Controller controller = controllers.get(c);
+            LfBranch branch = network.getBranch(controller.branchNum());
             if (branch == null) {
                 continue;
             }
-            if (ctl.kind() == GpuPhaseControlMode.CONTROLLER && branch.isPhaseControlEnabled()) {
+            if (controller.kind() == GpuPhaseControlMode.CONTROLLER && branch.isPhaseControlEnabled()) {
                 branch.setPhaseControlEnabled(false);
             }
-            var pm = branch.getPiModel();
-            int pos = pm.getTapPositionRange().getMinimum() + taps[c];
-            if (pm.getTapPosition() != pos) {
-                pm.setTapPosition(pos);
+            var piModel = branch.getPiModel();
+            int pos = piModel.getTapPositionRange().getMinimum() + taps[c];
+            if (piModel.getTapPosition() != pos) {
+                piModel.setTapPosition(pos);
             }
         }
     }

@@ -107,12 +107,12 @@ final class GpuAcRowIndexing {
             }
             // A pilot bus controlled by REMOTE generators: its reactive balance moves onto the free
             // controller's BUS_V row (the controller whose DISTR_Q is inactive — the extra freedom).
-            GeneratorVoltageControl gvc = bus.getGeneratorVoltageControl()
+            GeneratorVoltageControl generatorVoltageControl = bus.getGeneratorVoltageControl()
                     .filter(c -> c.getMergeStatus() == VoltageControl.MergeStatus.MAIN)
                     .filter(c -> bus.isGeneratorVoltageControlled() && !c.isLocalControl())
                     .orElse(null);
-            if (gvc != null) {
-                LfBus freeController = gvc.getMergedControllerElements().stream()
+            if (generatorVoltageControl != null) {
+                LfBus freeController = generatorVoltageControl.getMergedControllerElements().stream()
                         .filter(c -> row(es, c.getNum(), AcEquationType.DISTR_Q) < 0)
                         .filter(c -> row(es, c.getNum(), AcEquationType.BUS_TARGET_Q) < 0)
                         .findFirst()
@@ -124,11 +124,11 @@ final class GpuAcRowIndexing {
             // A pilot bus voltage-controlled by shunts: its reactive balance moves onto the FREE controller
             // shunt's SHUNT_B row (the controller whose DISTR_SHUNT_B is inactive — the extra freedom), the
             // exact analogue of the transformer rho case below.
-            ShuntVoltageControl svc = bus.getShuntVoltageControl()
+            ShuntVoltageControl shuntVoltageControl = bus.getShuntVoltageControl()
                     .filter(c -> c.getMergeStatus() == VoltageControl.MergeStatus.MAIN)
                     .orElse(null);
-            if (svc != null) {
-                LfShunt freeShunt = svc.getMergedControllerElements().stream()
+            if (shuntVoltageControl != null) {
+                LfShunt freeShunt = shuntVoltageControl.getMergedControllerElements().stream()
                         .filter(c -> !c.isDisabled())
                         .filter(c -> row(es, c.getNum(), AcEquationType.DISTR_SHUNT_B) < 0)
                         .filter(c -> row(es, c.getNum(), AcEquationType.SHUNT_TARGET_B) < 0)   // control ON
@@ -147,11 +147,11 @@ final class GpuAcRowIndexing {
             // controller's BRANCH_RHO1 row (the controller whose DISTR_RHO is inactive — the extra freedom).
             // With one local transformer this is item 4; with several it is ratio distribution (DISTR_RHO),
             // and the controller may even be remote (then the pilot-Q diagonal is zero → cuDSS pivoting).
-            TransformerVoltageControl tvc = bus.getTransformerVoltageControl()
+            TransformerVoltageControl transformerVoltageControl = bus.getTransformerVoltageControl()
                     .filter(c -> c.getMergeStatus() == VoltageControl.MergeStatus.MAIN)
                     .orElseThrow(() -> new PowsyblException("GPU AC solver: bus " + bus.getId()
                             + " has active voltage and reactive targets but no supported voltage control"));
-            LfBranch freeController = tvc.getMergedControllerElements().stream()
+            LfBranch freeController = transformerVoltageControl.getMergedControllerElements().stream()
                     .filter(c -> !c.isDisabled())            // an OUTAGED member also has DISTR_RHO
                     .filter(c -> row(es, c.getNum(), AcEquationType.DISTR_RHO) < 0)   // inactive, but its rho
                     // a CLAMPED/ROUNDED member has DISTR_RHO inactive too, but its rho row already
@@ -177,8 +177,8 @@ final class GpuAcRowIndexing {
      *  updateRemoteVoltageControlEquations) is the group's pilot-Q carrier and keeps the
      *  structure-frozen encoding; the others take the canonical suppressed-dest/mode-4 one. */
     static boolean isRemoteGenVcMember(LfBus bus) {
-        GeneratorVoltageControl vc = mainGenVc(bus);
-        return vc != null && isRemoteGenVcControllerElement(bus) && vc.getControlledBus() != bus;
+        GeneratorVoltageControl voltageControl = mainGenVc(bus);
+        return voltageControl != null && isRemoteGenVcControllerElement(bus) && voltageControl.getControlledBus() != bus;
     }
 
     /**
@@ -250,11 +250,11 @@ final class GpuAcRowIndexing {
      *  left unsatisfied (measured on a richer-modelling RTE-like network: the device "converged"
      *  with a 0.45 pu DISTR_Q residual and OLF's own re-test then failed the load flow). */
     static int distrQRow(EquationSystem<AcVariableType, AcEquationType> es, LfBus controller) {
-        var vc = controller.getGeneratorVoltageControl()
+        var voltageControl = controller.getGeneratorVoltageControl()
                 .filter(c -> c.getMergeStatus() == VoltageControl.MergeStatus.MAIN)
                 .orElse(null);
-        if (vc != null && vc.getControlledBus() == controller) {
-            LfBus free = distrQHostMember(vc, es);
+        if (voltageControl != null && voltageControl.getControlledBus() == controller) {
+            LfBus free = distrQHostMember(voltageControl, es);
             if (free == null) {
                 throw new PowsyblException("GPU AC solver: remote generator voltage control of bus "
                         + controller.getId() + " has no controller");
@@ -273,12 +273,12 @@ final class GpuAcRowIndexing {
      *  NOT the free-member predicate below: a pinned member is never free (its row hosts its own
      *  Q balance, canonical encoding) - calling it free left a pinned singleton at mode 1 with the
      *  structure-frozen encoding (deviceRemoteSingletonMemberPin, deviceRemoteRobustRealisticVoltage). */
-    static LfBus distrQHostMember(GeneratorVoltageControl vc, EquationSystem<AcVariableType, AcEquationType> es) {
-        List<LfBus> members = vc.getMergedControllerElements();
-        if (hasCandidateTable(vc, es)) {
+    static LfBus distrQHostMember(GeneratorVoltageControl voltageControl, EquationSystem<AcVariableType, AcEquationType> es) {
+        List<LfBus> members = voltageControl.getMergedControllerElements();
+        if (hasCandidateTable(voltageControl, es)) {
             return members.get(0);                           // canonical: the first member, whatever is pinned
         }
-        return members.stream().filter(vc::isControllerEnabled).findFirst()
+        return members.stream().filter(voltageControl::isControllerEnabled).findFirst()
                 .orElse(members.isEmpty() ? null : members.get(0));
     }
 
@@ -318,28 +318,28 @@ final class GpuAcRowIndexing {
      *  candidate-table group — the first ENABLED member (the carrier), falling back to itself when every
      *  controller is pinned. */
     private static LfBus stateQCarrier(LfBus bus) {
-        GeneratorVoltageControl vc = mainGenVc(bus);
-        if (vc != null && vc.getControlledBus() == bus) {
-            return vc.getMergedControllerElements().stream()
-                    .filter(vc::isControllerEnabled).findFirst().orElse(bus);
+        GeneratorVoltageControl voltageControl = mainGenVc(bus);
+        if (voltageControl != null && voltageControl.getControlledBus() == bus) {
+            return voltageControl.getMergedControllerElements().stream()
+                    .filter(voltageControl::isControllerEnabled).findFirst().orElse(bus);
         }
         return bus;
     }
 
     /**
-     * True when {@code vc} is a MAIN remote generator voltage control that ExtractionColumns gives a
+     * True when {@code voltageControl} is a MAIN remote generator voltage control that ExtractionColumns gives a
      * candidate table (plan-B4 / pilot-self rotation): every member and the pilot have a BUS_V column, and a
      * pilot that is one of its own controllers rotates (property on, at least two controllers). Such a
      * group is encoded CANONICALLY — as if every controller were enabled — because the table's in-kernel
      * mode scan re-picks the carrier per scenario; the pin state at extraction time must not leak into the
      * structure (see computeQRow). Keep in step with the enrolment in ExtractionColumns.
      */
-    static boolean hasCandidateTable(GeneratorVoltageControl vc, EquationSystem<AcVariableType, AcEquationType> es) {
-        if (vc == null || vc.getMergeStatus() != VoltageControl.MergeStatus.MAIN || vc.isLocalControl()) {
+    static boolean hasCandidateTable(GeneratorVoltageControl voltageControl, EquationSystem<AcVariableType, AcEquationType> es) {
+        if (voltageControl == null || voltageControl.getMergeStatus() != VoltageControl.MergeStatus.MAIN || voltageControl.isLocalControl()) {
             return false;
         }
-        LfBus pilot = vc.getControlledBus();
-        List<LfBus> members = vc.getMergedControllerElements();
+        LfBus pilot = voltageControl.getControlledBus();
+        List<LfBus> members = voltageControl.getMergedControllerElements();
         if (members.isEmpty() || col(es, pilot.getNum(), AcVariableType.BUS_V) < 0) {
             return false;
         }
@@ -352,10 +352,10 @@ final class GpuAcRowIndexing {
 
     /** The FREE member: the first ENABLED merged controller. None when every controller is pinned. */
     static boolean isFreeRemoteGenVcMember(LfBus bus) {
-        GeneratorVoltageControl vc = mainGenVc(bus);
-        return vc != null && isRemoteGenVcControllerElement(bus)
-                && vc.getMergedControllerElements().stream()
-                        .filter(vc::isControllerEnabled).findFirst().map(m -> m == bus).orElse(false);
+        GeneratorVoltageControl voltageControl = mainGenVc(bus);
+        return voltageControl != null && isRemoteGenVcControllerElement(bus)
+                && voltageControl.getMergedControllerElements().stream()
+                        .filter(voltageControl::isControllerEnabled).findFirst().map(m -> m == bus).orElse(false);
     }
 
     /**
@@ -378,29 +378,29 @@ final class GpuAcRowIndexing {
         for (LfBus bus : network.getBuses()) {
             int bn = bus.getNum();
             int controlVarRow = -1;
-            TransformerVoltageControl tvc = bus.getTransformerVoltageControl()
+            TransformerVoltageControl transformerVoltageControl = bus.getTransformerVoltageControl()
                     .filter(c -> c.getMergeStatus() == VoltageControl.MergeStatus.MAIN)
                     .orElse(null);
-            ShuntVoltageControl svc = bus.getShuntVoltageControl()
+            ShuntVoltageControl shuntVoltageControl = bus.getShuntVoltageControl()
                     .filter(c -> c.getMergeStatus() == VoltageControl.MergeStatus.MAIN)
                     .orElse(null);
-            if (tvc != null) {
+            if (transformerVoltageControl != null) {
                 // NO control-ON filter here (unlike computeQRow's live free pick): the ALTERNATE
                 // is computed at a control-OFF base too, where every identity is active — the
                 // stable "first with DISTR_RHO inactive" pick keeps the two-way relocation alive.
-                LfBranch ctl = tvc.getMergedControllerElements().stream()
+                LfBranch freeController = transformerVoltageControl.getMergedControllerElements().stream()
                         .filter(c -> !c.isDisabled())
                         .filter(c -> row(es, c.getNum(), AcEquationType.DISTR_RHO) < 0)
                         .findFirst().orElse(null);
-                if (ctl != null) {
-                    controlVarRow = branchRhoCol[ctl.getNum()];
+                if (freeController != null) {
+                    controlVarRow = branchRhoCol[freeController.getNum()];
                 }
-            } else if (svc != null) {
-                LfShunt ctl = svc.getMergedControllerElements().stream()
+            } else if (shuntVoltageControl != null) {
+                LfShunt freeController = shuntVoltageControl.getMergedControllerElements().stream()
                         .filter(c -> row(es, c.getNum(), AcEquationType.DISTR_SHUNT_B) < 0)
                         .findFirst().orElse(null);
-                if (ctl != null) {
-                    controlVarRow = shuntBCol[ctl.getNum()];
+                if (freeController != null) {
+                    controlVarRow = shuntBCol[freeController.getNum()];
                 }
             }
             if (controlVarRow >= 0 && vCol[bn] >= 0) {
@@ -601,8 +601,8 @@ final class GpuAcRowIndexing {
         return row(es, bus.getNum(), AcEquationType.BUS_TARGET_PHI) >= 0;
     }
 
-    private static boolean identityOwner(VoltageControl<?> vc, LfBus bus) {
-        return vc != null && vc.findMainVisibleControlledBus().map(b -> b == bus).orElse(false);
+    private static boolean identityOwner(VoltageControl<?> voltageControl, LfBus bus) {
+        return voltageControl != null && voltageControl.findMainVisibleControlledBus().map(b -> b == bus).orElse(false);
     }
 
     private static boolean hasImpedantBranch(LfBus bus) {

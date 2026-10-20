@@ -142,19 +142,19 @@ OLF_JNI(ac_solver_gpu, NewtonSettingsNative, setBatchTargetDeltas)(
     if (ctx == nullptr || jRows == nullptr) {
         return;
     }
-    jsize cnt = env->GetArrayLength(jRows);
-    if (cnt == 0) {
+    jsize count = env->GetArrayLength(jRows);
+    if (count == 0) {
         return;
     }
-    std::vector<int> rows(cnt);
-    std::vector<double> vals(cnt);
-    env->GetIntArrayRegion(jRows, 0, cnt, rows.data());
-    env->GetDoubleArrayRegion(jVals, 0, cnt, vals.data());
+    std::vector<int> rows(count);
+    std::vector<double> vals(count);
+    env->GetIntArrayRegion(jRows, 0, count, rows.data());
+    env->GetDoubleArrayRegion(jVals, 0, count, vals.data());
     DeviceBuf dR;
     DeviceBuf dV;
-    dR.upload(rows.data(), (size_t) cnt * sizeof(int));
-    dV.upload(vals.data(), (size_t) cnt * sizeof(double));
-    applyTargetOverrideBatch<<<grid(cnt), BLOCK, 0, ctx->stream>>>(cnt, dR.as<int>(), dV.as<double>(),
+    dR.upload(rows.data(), (size_t) count * sizeof(int));
+    dV.upload(vals.data(), (size_t) count * sizeof(double));
+    applyTargetOverrideBatch<<<grid(count), BLOCK, 0, ctx->stream>>>(count, dR.as<int>(), dV.as<double>(),
                                                                   ctx->dTarget.as<double>());
     CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
 }

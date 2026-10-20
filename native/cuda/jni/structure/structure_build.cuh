@@ -179,15 +179,15 @@ void buildOpenBranchRelocationDestination(int nOpenBranch, const int* openBranch
                     const int* reactiveRelocationDependentGroupOfRow, std::vector<char>& relocationDependentPilot);
 
 // distribution_dests.cu
-void buildDistrQDest(SharedStructure* st, const CsrPattern& pos, const std::vector<int>& rowMap,
+void buildDistrQDest(SharedStructure* structure, const CsrPattern& pos, const std::vector<int>& rowMap,
                      int nDistrQ, const int* distrQElement, const int* distrQSide, const int* distrQKind,
                      const double* distrQWeight, const int* distrQRow,
                      const int* closedBranchIndices, const int* openBranchIndices, const int* shuntIndices, const int* relocatedChildOwnRow);
 
-void buildDistrRhoDest(SharedStructure* st, const CsrPattern& pos, const std::vector<int>& rowMap,
+void buildDistrRhoDest(SharedStructure* structure, const CsrPattern& pos, const std::vector<int>& rowMap,
                        int nDistrRho, const int* distrRhoRow, const int* distrRhoColumn, const double* distrRhoCoefficient);
 
-void buildDistrShuntBDest(SharedStructure* st, const CsrPattern& pos, const std::vector<int>& rowMap,
+void buildDistrShuntBDest(SharedStructure* structure, const CsrPattern& pos, const std::vector<int>& rowMap,
                           int nDistrShuntB, const int* distrShuntBRow, const int* distrShuntBColumn, const double* distrShuntBCoefficient);
 
 void patchGroupFrozenDestinations(DeviceBuf& dest, const std::vector<int>& relocationGroup,
@@ -195,7 +195,7 @@ void patchGroupFrozenDestinations(DeviceBuf& dest, const std::vector<int>& reloc
                            const int* scatterRole, const int* reactiveRelocationGroupStart, const int* reactiveRelocationCandidateRows);
 
 // zero_impedance_dests.cu
-void buildZeroImpedanceBranchDestination(SharedStructure* st, const CsrPattern& pos, const std::vector<int>& rowMap,
+void buildZeroImpedanceBranchDestination(SharedStructure* structure, const CsrPattern& pos, const std::vector<int>& rowMap,
                       int nZeroImpedanceBranch, const double* zeroImpedanceBranchParameters, const int* zeroImpedanceBranchIndices, const int* zeroImpedanceBranchAlternateReactiveDestination,
                       const int* relocatedChildOwnRow, const int* reactiveRelocationDependentGroupOfRow);
 

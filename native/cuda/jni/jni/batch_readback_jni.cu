@@ -68,11 +68,11 @@ OLF_JNI(ac_solver_gpu, BatchReadbackNative, readBatchDistributedSlackGeneratorMo
     if (ctx == nullptr || ctx->nDistributedSlackGenerators <= 0 || !ctx->dDistributedSlackGeneratorMove.p) {
         return nullptr;
     }
-    size_t cnt = static_cast<size_t>(ctx->nScenarios) * ctx->nDistributedSlackGenerators;
-    std::vector<double> host(cnt);
-    cudaMemcpy(host.data(), ctx->dDistributedSlackGeneratorMove.p, cnt * sizeof(double), cudaMemcpyDeviceToHost);
-    jdoubleArray out = env->NewDoubleArray(static_cast<jsize>(cnt));
-    env->SetDoubleArrayRegion(out, 0, static_cast<jsize>(cnt), host.data());
+    size_t count = static_cast<size_t>(ctx->nScenarios) * ctx->nDistributedSlackGenerators;
+    std::vector<double> host(count);
+    cudaMemcpy(host.data(), ctx->dDistributedSlackGeneratorMove.p, count * sizeof(double), cudaMemcpyDeviceToHost);
+    jdoubleArray out = env->NewDoubleArray(static_cast<jsize>(count));
+    env->SetDoubleArrayRegion(out, 0, static_cast<jsize>(count), host.data());
     return out;
 }
 

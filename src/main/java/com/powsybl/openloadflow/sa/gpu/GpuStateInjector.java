@@ -196,13 +196,13 @@ final class GpuStateInjector {
             return result;
         }
         java.util.Set<String> islandedBusIds = new java.util.HashSet<>();
-        boolean dbg = "1".equals(System.getenv("OLF_GPU_DBG_BUSDUMP"));
+        boolean busDumpTrace = "1".equals(System.getenv("OLF_GPU_DBG_BUSDUMP"));
         for (int num : nums) {
             LfBus b = network.getBuses().get(num);
-            b.createBusResults().forEach(br -> islandedBusIds.add(br.getBusId()));
+            b.createBusResults().forEach(busResult -> islandedBusIds.add(busResult.getBusId()));
         }
-        var filtered = result.getBusResults().stream().filter(br -> !islandedBusIds.contains(br.getBusId())).toList();
-        if (dbg) {
+        var filtered = result.getBusResults().stream().filter(busResult -> !islandedBusIds.contains(busResult.getBusId())).toList();
+        if (busDumpTrace) {
             System.err.println("FILTER-ISLANDED '" + scenarioId.replace(BatchContingency.STRATEGY_KEY_SEP, '|')
                     + "' ids=" + islandedBusIds + " " + result.getBusResults().size() + "->" + filtered.size());
         }

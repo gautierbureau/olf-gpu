@@ -108,8 +108,8 @@ final class GpuSaRunScope {
         // explicitly off and no limits loop) the base coupling would double-count -> keep the gate.
         boolean hvdcLoopsRun = com.powsybl.openloadflow.sa.OpenSecurityAnalysisParameters
                 .getOrDefault(securityAnalysisParameters).isStartWithFrozenACEmulation()
-                || acParameters.getOuterLoops().stream().anyMatch(ol ->
-                        "AcHvdcAcEmulationLimits".equals(ol.getName()) || "FreezingHvdcACEmulation".equals(ol.getName()));
+                || acParameters.getOuterLoops().stream().anyMatch(outerLoop ->
+                        "AcHvdcAcEmulationLimits".equals(outerLoop.getName()) || "FreezingHvdcACEmulation".equals(outerLoop.getName()));
         boolean hvdcBatchable = noHvdc
                 || com.powsybl.openloadflow.ac.outerloop.gpu.GpuHvdcAcEmulationLimitsOuterLoop.allLinearAtBase(lfNetwork)
                 || hvdcLoopsRun;
@@ -183,7 +183,7 @@ final class GpuSaRunScope {
         // docs/gpu-vs-cpu-capabilities.md Part II §A): the device weights are always maxP/droop with
         // active limits — any other balance type or unlimited distribution must fall back whole-run.
         boolean distributedSlackLoopActive = acParameters.getOuterLoops().stream()
-                .anyMatch(ol -> DistributedSlackOuterLoop.NAME.equals(ol.getName()));
+                .anyMatch(outerLoop -> DistributedSlackOuterLoop.NAME.equals(outerLoop.getName()));
         // The device DS pass models EVERY balance type (GpuDistributedSlackParameters.supports returns true for all
         // six — incl. the load-based types and REMAINING_MARGIN via the margin factors, GpuDistributedSlackFactorMode)
         // and both useActiveLimits settings, so this guard is future-proofing for balance types
@@ -205,7 +205,7 @@ final class GpuSaRunScope {
             unsupportedOuterLoops.add("DistributedSlack[useLoadModel+loadBased]");
         }
         if (remoteReactiveLimitsUnsupported && acParameters.getOuterLoops().stream()
-                .anyMatch(ol -> ReactiveLimitsOuterLoop.NAME.equals(ol.getName()))) {
+                .anyMatch(outerLoop -> ReactiveLimitsOuterLoop.NAME.equals(outerLoop.getName()))) {
             unsupportedOuterLoops.add("ReactiveLimits[remoteGroupPinDynamicsUnrepresentable]");
         }
         // Parameterization the device loops DO model — wire the run's values in place of the
@@ -224,7 +224,7 @@ final class GpuSaRunScope {
         boolean defaultLossDist = com.powsybl.openloadflow.sa.OpenSecurityAnalysisParameters
                 .CONTINGENCY_ACTIVE_POWER_LOSS_DISTRIBUTION_DEFAULT_VALUE.equals(lossDistName);
         boolean distributedSlackActive = acParameters.getOuterLoops().stream()
-                .anyMatch(ol -> DistributedSlackOuterLoop.NAME.equals(ol.getName()));
+                .anyMatch(outerLoop -> DistributedSlackOuterLoop.NAME.equals(outerLoop.getName()));
         if (!defaultLossDist && distributedSlackActive) {
             unsupportedOuterLoops.add("ContingencyActivePowerLossDistribution[" + lossDistName + "]");
         }
@@ -233,25 +233,25 @@ final class GpuSaRunScope {
         // distributed-slack / reactive-limits passes only when OLF does (presence in the resolved outer-loop
         // list is the definitive signal — gens may report participation / buses may be PV regardless).
         boolean distributedSlack = acParameters.getOuterLoops().stream()
-                .anyMatch(ol -> DistributedSlackOuterLoop.NAME.equals(ol.getName()));
+                .anyMatch(outerLoop -> DistributedSlackOuterLoop.NAME.equals(outerLoop.getName()));
         boolean reactiveLimits = acParameters.getOuterLoops().stream()
-                .anyMatch(ol -> ReactiveLimitsOuterLoop.NAME.equals(ol.getName()));
+                .anyMatch(outerLoop -> ReactiveLimitsOuterLoop.NAME.equals(outerLoop.getName()));
         boolean cfgTransformerControl = transformerControlBatchable
-                && acParameters.getOuterLoops().stream().anyMatch(ol -> "TransformerVoltageControl".equals(ol.getName()));
+                && acParameters.getOuterLoops().stream().anyMatch(outerLoop -> "TransformerVoltageControl".equals(outerLoop.getName()));
         boolean cfgIncrementalTransformerVoltageControl = incrementalTransformerVoltageControlBatchable
-                && acParameters.getOuterLoops().stream().anyMatch(ol -> "IncrementalTransformerVoltageControl".equals(ol.getName()));
+                && acParameters.getOuterLoops().stream().anyMatch(outerLoop -> "IncrementalTransformerVoltageControl".equals(outerLoop.getName()));
         boolean cfgIncrementalShunt = incrementalShuntBatchable
-                && acParameters.getOuterLoops().stream().anyMatch(ol -> "IncrementalShuntVoltageControl".equals(ol.getName()));
+                && acParameters.getOuterLoops().stream().anyMatch(outerLoop -> "IncrementalShuntVoltageControl".equals(outerLoop.getName()));
         boolean cfgSimpleShunt = simpleShuntVcBatchable
-                && acParameters.getOuterLoops().stream().anyMatch(ol -> "ShuntVoltageControl".equals(ol.getName()));
+                && acParameters.getOuterLoops().stream().anyMatch(outerLoop -> "ShuntVoltageControl".equals(outerLoop.getName()));
         // The flow-observed incremental family (GpuIncrementalTransformerReactivePowerControlOuterLoop,
         // GpuIncrementalPhaseControlOuterLoop): rho -> branch Q, and a1 -> branch P / I. Both are decision-only loops
         // over pinned identity rows — always batchable when their loop is configured (continuous "PhaseControl" stays
         // CPU via the extraction guard).
-        boolean cfgIncrementalTransformerReactivePowerControl = acParameters.getOuterLoops().stream().anyMatch(ol -> "IncrementalTransformerReactivePowerControl".equals(ol.getName()));
-        boolean cfgIncrementalPhase = acParameters.getOuterLoops().stream().anyMatch(ol -> "IncrementalPhaseControl".equals(ol.getName()));
+        boolean cfgIncrementalTransformerReactivePowerControl = acParameters.getOuterLoops().stream().anyMatch(outerLoop -> "IncrementalTransformerReactivePowerControl".equals(outerLoop.getName()));
+        boolean cfgIncrementalPhase = acParameters.getOuterLoops().stream().anyMatch(outerLoop -> "IncrementalPhaseControl".equals(outerLoop.getName()));
         boolean cfgSimpleTransformerVoltageControl = simpleTransformerVoltageControlBatchable
-                && acParameters.getOuterLoops().stream().anyMatch(ol -> "SimpleTransformerVoltageControl".equals(ol.getName()));
+                && acParameters.getOuterLoops().stream().anyMatch(outerLoop -> "SimpleTransformerVoltageControl".equals(outerLoop.getName()));
         // HVDC freezing applies to CONTINGENCY solves whenever the SA-LEVEL startWithFrozenACEmulation
         // is on — and its DEFAULT IS TRUE (OpenSecurityAnalysisParameters), independently of the
         // loadflow-level flag: AcSecurityAnalysis.applyGenericContingencyParameters injects the
@@ -264,15 +264,15 @@ final class GpuSaRunScope {
                 .getOrDefault(securityAnalysisParameters).isStartWithFrozenACEmulation();
         boolean cfgHvdcFreezing = !noHvdc && hvdcBatchable
                 && (saContingencyFreeze
-                    || acParameters.getOuterLoops().stream().anyMatch(ol -> "FreezingHvdcACEmulation".equals(ol.getName())));
+                    || acParameters.getOuterLoops().stream().anyMatch(outerLoop -> "FreezingHvdcACEmulation".equals(outerLoop.getName())));
         boolean cfgHvdcLimits = !noHvdc && hvdcBatchable
-                && acParameters.getOuterLoops().stream().anyMatch(ol -> "AcHvdcAcEmulationLimits".equals(ol.getName()));
+                && acParameters.getOuterLoops().stream().anyMatch(outerLoop -> "AcHvdcAcEmulationLimits".equals(outerLoop.getName()));
         boolean cfgSecondaryVoltageControl = secondaryVoltageControlBatchable
-                && acParameters.getOuterLoops().stream().anyMatch(ol -> "SecondaryVoltageControl".equals(ol.getName()));
+                && acParameters.getOuterLoops().stream().anyMatch(outerLoop -> "SecondaryVoltageControl".equals(outerLoop.getName()));
         boolean cfgVoltageMonitoring = monitoringBatchable && !noSvc
-                && acParameters.getOuterLoops().stream().anyMatch(ol -> "VoltageMonitoring".equals(ol.getName()));
+                && acParameters.getOuterLoops().stream().anyMatch(outerLoop -> "VoltageMonitoring".equals(outerLoop.getName()));
         boolean cfgContinuousPhase = continuousPhaseBatchable
-                && acParameters.getOuterLoops().stream().anyMatch(ol -> "PhaseControl".equals(ol.getName()));
+                && acParameters.getOuterLoops().stream().anyMatch(outerLoop -> "PhaseControl".equals(outerLoop.getName()));
         // Align the device outer-loop tolerances to the CPU loadflow's (per-unit on the 100 MVA base). The
         // reactive-limits PV→PQ switch threshold is NOT always maxReactivePowerMismatch: OLF derives it from the
         // stopping-criteria type exactly as AbstractAcOuterLoopConfig.createReactiveLimitsOuterLoop does —
@@ -341,12 +341,12 @@ final class GpuSaRunScope {
     /** The run's slack re-pick for contingencies that isolate the slack, when the device can follow it: one slack
      *  bus, and the reference bus being that slack (what the security analysis configures). */
     private static SlackRelocation slackRelocation(AcLoadFlowParameters acParameters) {
-        var np = acParameters.getNetworkParameters();
-        if (np.getMaxSlackBusCount() != 1
-                || !(np.getReferenceBusSelector() instanceof com.powsybl.openloadflow.network.ReferenceBusFirstSlackSelector)) {
+        var networkParameters = acParameters.getNetworkParameters();
+        if (networkParameters.getMaxSlackBusCount() != 1
+                || !(networkParameters.getReferenceBusSelector() instanceof com.powsybl.openloadflow.network.ReferenceBusFirstSlackSelector)) {
             return null;
         }
-        return new SlackRelocation(np.getSlackBusSelector(), 1);
+        return new SlackRelocation(networkParameters.getSlackBusSelector(), 1);
     }
 
     /** The remote-group pin-dynamics residual gate — RETIRED 2026-09-08: singleton remote groups

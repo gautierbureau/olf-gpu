@@ -77,19 +77,19 @@ public final class PilotSelfPacker {
         List<Integer> pilotRow = new ArrayList<>();
         List<Double> vTarget = new ArrayList<>();
         for (LfBus bus : network.getBuses()) {
-            var gvc = bus.getGeneratorVoltageControl()
+            var voltageControl = bus.getGeneratorVoltageControl()
                     .filter(c -> c.getMergeStatus() == VoltageControl.MergeStatus.MAIN)
                     .filter(c -> !c.isLocalControl())
                     .orElse(null);
-            if (gvc == null || gvc.getControlledBus() != bus || !gvc.getMergedControllerElements().contains(bus)
-                    || gvc.getMergedControllerElements().size() < 2) {
+            if (voltageControl == null || voltageControl.getControlledBus() != bus || !voltageControl.getMergedControllerElements().contains(bus)
+                    || voltageControl.getMergedControllerElements().size() < 2) {
                 continue;                                    // not a pilot-self group with a rotation to make
             }
             Integer pe = entryOfBus.get(bus.getNum());
             if (pe == null || vCol[bus.getNum()] < 0) {
                 continue;                                    // the pilot cannot pin: nothing rotates
             }
-            List<LfBus> members = gvc.getMergedControllerElements();
+            List<LfBus> members = voltageControl.getMergedControllerElements();
             boolean rowsResolvable = members.stream().allMatch(m -> vCol[m.getNum()] >= 0);
             if (!rowsResolvable) {
                 continue;
@@ -101,7 +101,7 @@ public final class PilotSelfPacker {
             }
             pilotEntry.add(pe);
             pilotRow.add(vCol[bus.getNum()]);
-            vTarget.add(gvc.getTargetValue());
+            vTarget.add(voltageControl.getTargetValue());
         }
         ptr.add(memberEntry.size());
         if (pilotEntry.isEmpty()) {
@@ -114,7 +114,7 @@ public final class PilotSelfPacker {
 
     /** A class-2 entry: a pilot that is one of its own controllers (packed as a remote entry). */
     public static boolean isPilotSelfEntry(LfBus bus) {
-        GeneratorVoltageControl vc = RemoteMemberQPacker.mainGenVc(bus);
-        return vc != null && GpuAcRowIndexing.isRemoteGenVcControllerElement(bus) && vc.getControlledBus() == bus;
+        GeneratorVoltageControl voltageControl = RemoteMemberQPacker.mainGenVc(bus);
+        return voltageControl != null && GpuAcRowIndexing.isRemoteGenVcControllerElement(bus) && voltageControl.getControlledBus() == bus;
     }
 }

@@ -121,7 +121,7 @@ class GpuBatchedPegaseOutlierDiagnosticTest {
                 }
             }
             boolean vcEnabled = probeBus.isGeneratorVoltageControlEnabled();
-            double vcTarget = probeBus.getGeneratorVoltageControl().map(vc -> vc.getTargetValue()).orElse(Double.NaN);
+            double vcTarget = probeBus.getGeneratorVoltageControl().map(voltageControl -> voltageControl.getTargetValue()).orElse(Double.NaN);
             System.out.printf("BASE-CASE status of %s: inDeviceReactiveLimitEntries=%b, generatorVoltageControlEnabled(PV)=%b, "
                     + "baseV=%.6f target=%.6f (PV⇔V==target) | hasGVC=%b, getMaxQ=%.4f%n",
                     probeBusId, inReactiveLimitEntries, vcEnabled, probeBus.getV(), vcTarget,

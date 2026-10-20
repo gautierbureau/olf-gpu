@@ -162,10 +162,10 @@ void shuntVoltageControlStep(BatchSolverContext* ctx, DriverPass& drv) {
     CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
     if (std::getenv("OLF_GPU_BATCH_TRACE") != nullptr) {
         size_t nsm = static_cast<size_t>(nS) * ctx->nShuntVoltageControlMembers;
-        std::vector<int> st(nsm);
-        CUDA_CHECK(cudaMemcpy(st.data(), ctx->dShuntVoltageControlMemberState.p, nsm * sizeof(int), cudaMemcpyDeviceToHost));
+        std::vector<int> memberState(nsm);
+        CUDA_CHECK(cudaMemcpy(memberState.data(), ctx->dShuntVoltageControlMemberState.p, nsm * sizeof(int), cudaMemcpyDeviceToHost));
         int nCont = 0, nFixed = 0;
-        for (size_t k = 0; k < nsm; k++) { nCont += st[k] == GpuDiscreteControlMemberState::CONTINUOUS; nFixed += st[k] == GpuDiscreteControlMemberState::ROUNDED; }
+        for (size_t k = 0; k < nsm; k++) { nCont += memberState[k] == GpuDiscreteControlMemberState::CONTINUOUS; nFixed += memberState[k] == GpuDiscreteControlMemberState::ROUNDED; }
         std::fprintf(stderr, "SVD_KERNEL nS=%d nMembers=%d continuous=%d dispatched=%d\n", nS, ctx->nShuntVoltageControlMembers, nCont, nFixed);
     }
 }

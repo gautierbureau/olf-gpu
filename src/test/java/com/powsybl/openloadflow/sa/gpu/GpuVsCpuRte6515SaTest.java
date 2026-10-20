@@ -214,9 +214,9 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
             for (String id : idKind.split(",")) {
                 com.powsybl.iidm.network.Identifiable<?> i = network.getIdentifiable(id.trim());
                 String extra = "";
-                if (i instanceof com.powsybl.iidm.network.Switch sw) {
-                    com.powsybl.iidm.network.VoltageLevel vl = sw.getVoltageLevel();
-                    extra = " retained=" + sw.isRetained() + " open=" + sw.isOpen() + " kind=" + sw.getKind()
+                if (i instanceof com.powsybl.iidm.network.Switch switchElement) {
+                    com.powsybl.iidm.network.VoltageLevel vl = switchElement.getVoltageLevel();
+                    extra = " retained=" + switchElement.isRetained() + " open=" + switchElement.isOpen() + " kind=" + switchElement.getKind()
                             + " vl=" + vl.getId() + " vlBusesInMainCC="
                             + vl.getBusView().getBusStream().filter(b -> b.getConnectedComponent() != null
                                     && b.getConnectedComponent().getNum()
@@ -915,7 +915,7 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
         // its strategies their bus results too (distributed power matched to 1e-9 MW on network.xiidm LLFP while a
         // strategy's buses were 8.5e-4 kV apart)
         if ("1".equals(System.getenv("OLF_GPU_SA_BUSDIFF_STRATEGIES"))) {
-            strategies.forEach(st -> busDiffCtgs.add(st.getContingencyContext().getContingencyId()));
+            strategies.forEach(strategy -> busDiffCtgs.add(strategy.getContingencyContext().getContingencyId()));
         }
         // OLF_GPU_SA_BUSDIFF=0 turns it off even with CTG_ONLY: a timing run on an id-selected list must not
         // pay one BusResult per bus per contingency on both arms (1000 rte6515 branches, cold GPU arm: 34.1 s with it, 9.8 s without).
@@ -1189,9 +1189,9 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
             // rte6515 carries two zones — shifting only one leaves the other's controllers idle and the
             // run then exercises half the zone systems.
             String shift = System.getenv("OLF_GPU_SVC_PILOT_SHIFT");
-            var svc = network.getExtension(com.powsybl.iidm.network.extensions.SecondaryVoltageControl.class);
-            if (shift != null && svc != null) {
-                for (var zone : svc.getControlZones()) {
+            var secondaryVoltageControl = network.getExtension(com.powsybl.iidm.network.extensions.SecondaryVoltageControl.class);
+            if (shift != null && secondaryVoltageControl != null) {
+                for (var zone : secondaryVoltageControl.getControlZones()) {
                     var pilot = zone.getPilotPoint();
                     double before = pilot.getTargetV();
                     pilot.setTargetV(before + Double.parseDouble(shift));
@@ -1319,28 +1319,28 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
                                          final SecurityAnalysisResult gpuWarm, final SecurityAnalysisResult cpu) {
         if (!monBranches.isEmpty()) {
             Map<String, com.powsybl.security.results.BranchResult> gpuBr = new TreeMap<>();
-            for (var gp : gpuWarm.getPostContingencyResults()) {
-                gp.getNetworkResult().getBranchResults()
-                        .forEach(b -> gpuBr.put(gp.getContingency().getId() + "|" + b.getBranchId(), b));
+            for (var gpuResult : gpuWarm.getPostContingencyResults()) {
+                gpuResult.getNetworkResult().getBranchResults()
+                        .forEach(b -> gpuBr.put(gpuResult.getContingency().getId() + "|" + b.getBranchId(), b));
             }
-            for (var cp : cpu.getPostContingencyResults()) {
-                for (var cb : cp.getNetworkResult().getBranchResults()) {
-                    var gb = gpuBr.get(cp.getContingency().getId() + "|" + cb.getBranchId());
-                    if (gb == null) {
+            for (var cpuResult : cpu.getPostContingencyResults()) {
+                for (var cpuBranch : cpuResult.getNetworkResult().getBranchResults()) {
+                    var gpuBranch = gpuBr.get(cpuResult.getContingency().getId() + "|" + cpuBranch.getBranchId());
+                    if (gpuBranch == null) {
                         continue;
                     }
-                    double i1d = Math.abs(cb.getI1() - gb.getI1());
+                    double i1d = Math.abs(cpuBranch.getI1() - gpuBranch.getI1());
                     // BOTH sides: a one-sided violation is usually on side TWO, and side ONE matching says
                     // nothing about it (rte6515 BUS-125_BBS_1: LINE-2533-1468's I1 agreed to 1e-13 while only
                     // the CPU reported a CURRENT TWO violation 21% over its limit).
-                    double i2d = Math.abs(cb.getI2() - gb.getI2());
+                    double i2d = Math.abs(cpuBranch.getI2() - gpuBranch.getI2());
                     System.out.printf("  BRDIFF ctg=%-14s %s I1 cpu=%.6f gpu=%.6f d=%.3e (%.3e rel) "
                             + "| I2 cpu=%.6f gpu=%.6f d=%.3e (%.3e rel)"
                             + "| P1 cpu=%.6f gpu=%.6f | Q1 cpu=%.6f gpu=%.6f%n",
-                            cp.getContingency().getId(), cb.getBranchId(), cb.getI1(), gb.getI1(),
-                            i1d, i1d / Math.max(1e-9, Math.abs(cb.getI1())),
-                            cb.getI2(), gb.getI2(), i2d, i2d / Math.max(1e-9, Math.abs(cb.getI2())),
-                            cb.getP1(), gb.getP1(), cb.getQ1(), gb.getQ1());
+                            cpuResult.getContingency().getId(), cpuBranch.getBranchId(), cpuBranch.getI1(), gpuBranch.getI1(),
+                            i1d, i1d / Math.max(1e-9, Math.abs(cpuBranch.getI1())),
+                            cpuBranch.getI2(), gpuBranch.getI2(), i2d, i2d / Math.max(1e-9, Math.abs(cpuBranch.getI2())),
+                            cpuBranch.getP1(), gpuBranch.getP1(), cpuBranch.getQ1(), gpuBranch.getQ1());
                 }
             }
         }
@@ -1622,7 +1622,7 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
         if (parentsDump != null) {
             try {
                 Files.write(Path.of(parentsDump), strats.stream()
-                        .map(st -> st.getContingencyContext().getContingencyId()).distinct().toList());
+                        .map(strategy -> strategy.getContingencyContext().getContingencyId()).distinct().toList());
             } catch (java.io.IOException e) {
                 throw new java.io.UncheckedIOException(e);
             }
@@ -1757,8 +1757,8 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
                 System.out.printf("    STRATEGY_BUS %s worst %.3e kV over %d buses:%s%n", id, diffs.get(0)[0], diffs.size(), top);
                 String ctgId = c.getOperatorStrategy().getContingencyContext().getContingencyId();
                 java.util.function.BiFunction<SecurityAnalysisResult, Boolean, Double> parentV = (res, x) -> res.getPostContingencyResults().stream()
-                        .filter(pc -> pc.getContingency().getId().equals(ctgId)).findFirst()
-                        .flatMap(pc -> pc.getNetworkResult().getBusResults().stream().filter(b -> b.getBusId().equals(wb)).findFirst())
+                        .filter(postContingencyResult -> postContingencyResult.getContingency().getId().equals(ctgId)).findFirst()
+                        .flatMap(postContingencyResult -> postContingencyResult.getNetworkResult().getBusResults().stream().filter(b -> b.getBusId().equals(wb)).findFirst())
                         .map(b -> b.getV()).orElse(Double.NaN);
                 double cpuS = cs.getNetworkResult().getBusResults().stream().filter(b -> b.getBusId().equals(wb)).findFirst().get().getV();
                 System.out.printf("    STRATEGY_BUS_V %s %s: strategy cpu=%.9f gpu=%.9f | parent cpu=%.9f gpu=%.9f%n", id, wb,

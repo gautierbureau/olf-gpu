@@ -557,10 +557,10 @@ class GpuSaBusbarAndIslandTest extends AbstractGpuSaTest {
         network.newLine().setId("lx").setVoltageLevel1("VL4").setConnectableBus1("B4")   // open at the main side
                 .setVoltageLevel2("vx").setNode2(3).setR(0.5).setX(5).setG1(0).setB1(0).setG2(0).setB2(0).add();
         List<Contingency> ctgs = List.of(new Contingency("l23+lx", new BranchContingency("L2-3-1"), new BranchContingency("lx")));
-        var pc = com.powsybl.openloadflow.network.impl.PropagatedContingency.createList(network, ctgs,
+        var propagatedContingency = com.powsybl.openloadflow.network.impl.PropagatedContingency.createList(network, ctgs,
                 new com.powsybl.openloadflow.network.LfTopoConfig(),
                 new com.powsybl.openloadflow.network.impl.PropagatedContingencyCreationParameters()).get(0);
-        assertEquals(java.util.Set.of("ldx"), pc.getLoadIdsToLose().keySet(), "the propagation trips the far load");
+        assertEquals(java.util.Set.of("ldx"), propagatedContingency.getLoadIdsToLose().keySet(), "the propagation trips the far load");
         GpuBatchScopeCensus.reset();
         assertGpuMatchesCpu(network, ctgs, 1e-12);
         assertEquals(java.util.Set.of(), GpuBatchScopeCensus.planRefusedIds(), "census=" + GpuBatchScopeCensus.snapshot());

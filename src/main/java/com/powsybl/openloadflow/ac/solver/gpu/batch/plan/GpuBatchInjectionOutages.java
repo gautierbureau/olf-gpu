@@ -371,8 +371,8 @@ public final class GpuBatchInjectionOutages {
         if (distributedSlackParameters.isRemainingMargin() && distributedSlackOverrideBusIndex >= 0 && lostParticipation) {
             return null;       // RM margins reweight per scenario: not modeled — CPU
         }
-        if (!distrQBus && bus.getGeneratorVoltageControl().map(vc -> vc.getControlledBus() != null
-                && vc.getControlledBus().getNum() != busNum).orElse(false)) {
+        if (!distrQBus && bus.getGeneratorVoltageControl().map(voltageControl -> voltageControl.getControlledBus() != null
+                && voltageControl.getControlledBus().getNum() != busNum).orElse(false)) {
             return null;   // (pilot-Q remap, no DISTR_Q row at this bus):
         }                                                        // its q accounting is not modeled — CPU
         double lostP = lost.stream().mapToDouble(LfGenerator::getTargetP).sum();
@@ -425,7 +425,7 @@ public final class GpuBatchInjectionOutages {
         int pilotQGroup = -1;
         double pilotQDelta = 0;
         boolean purePilot = remotelyControlled
-                && mainVcOf(bus).map(vc -> !vc.getMergedControllerElements().contains(bus)).orElse(false);
+                && mainVcOf(bus).map(voltageControl -> !voltageControl.getMergedControllerElements().contains(bus)).orElse(false);
         if (purePilot) {                                     // a pilot among its controllers has no balance of its
             double lostGenQ = lost.stream().mapToDouble(LfGenerator::getTargetQ).sum();   // own (DISTR_Q member)
             if (lostLoadQ != 0 || lostGenQ != 0) {
@@ -579,11 +579,11 @@ public final class GpuBatchInjectionOutages {
 
     /** Does another controller of the bus's remote voltage-control group keep a VOLTAGE generator after the loss of
      *  {@code lostHere}? Then the group still holds this bus's voltage. */
-    private static boolean remoteGroupSurvives(com.powsybl.openloadflow.network.GeneratorVoltageControl vc,
+    private static boolean remoteGroupSurvives(com.powsybl.openloadflow.network.GeneratorVoltageControl voltageControl,
                                                LfBus bus, java.util.Set<LfGenerator> lostHere) {
-        List<LfBus> members = vc.getMergedControllerElements();
+        List<LfBus> members = voltageControl.getMergedControllerElements();
         long survivors = members.stream()
-                .filter(cb -> cb != bus && cb.getGenerators().stream()
+                .filter(member -> member != bus && member.getGenerators().stream()
                         .anyMatch(g -> !lostHere.contains(g)
                                 && g.getGeneratorControlType() == LfGenerator.GeneratorControlType.VOLTAGE))
                 .count();
@@ -591,9 +591,9 @@ public final class GpuBatchInjectionOutages {
         // hold a DISTR_Q: it carries the pilot's relocated reactive balance instead,
         // or, for a pilot that is one of its own controllers, nothing at all, since
         // while it controls it has no reactive balance to relocate.
-        boolean isFree = members.stream().filter(vc::isControllerEnabled)
+        boolean isFree = members.stream().filter(voltageControl::isControllerEnabled)
                 .findFirst().map(m -> m == bus).orElse(false);
-        boolean pilotIsController = members.contains(vc.getControlledBus());
+        boolean pilotIsController = members.contains(voltageControl.getControlledBus());
         // Losing the FREE member moves the free role, and with it the row OLF puts the
         // pilot's reactive balance on; the mode scan re-picks the carrier, so any number of
         // survivors is fine (measured: rte6515 GEN-5958, 3 members and 2 survivors,
@@ -651,7 +651,7 @@ public final class GpuBatchInjectionOutages {
         // With qPct renormalized to 1 on the survivors, DISTR_Q (qPct_k·Σq − q_k) on this bus's own
         // row degenerates to q = targetQ: precisely the reactive balance OLF re-activates here.
         vcSurvives = !keepsController && mainVcOf(bus)
-                .map(vc -> remoteGroupSurvives(vc, bus, lostHere))
+                .map(voltageControl -> remoteGroupSurvives(voltageControl, bus, lostHere))
                 .orElse(false);
         // The group's control DIES with this bus (no controller anywhere keeps a VOLTAGE
         // generator). OLF then deactivates the pilot's BUS_TARGET_V and re-activates a reactive
@@ -662,12 +662,12 @@ public final class GpuBatchInjectionOutages {
         // updatePilotTargetVEquationBatch drops the voltage identity. Needs a pilot that is NOT one of its own
         // controllers — that shape has no relocation table for the fallback to land in.
         boolean controlDies = !keepsController && mainVcOf(bus)
-                .map(vc -> vc.getMergedControllerElements().stream()
-                                .noneMatch(cb -> cb.getGenerators().stream()
+                .map(voltageControl -> voltageControl.getMergedControllerElements().stream()
+                                .noneMatch(member -> member.getGenerators().stream()
                                         .anyMatch(g -> !lostHere.contains(g)
                                                 && g.getGeneratorControlType() == LfGenerator.GeneratorControlType.VOLTAGE))
-                        && !vc.getMergedControllerElements().contains(vc.getControlledBus())
-                        && vc.getControlledBus() != bus)
+                        && !voltageControl.getMergedControllerElements().contains(voltageControl.getControlledBus())
+                        && voltageControl.getControlledBus() != bus)
                 .orElse(false);
         if (controlDies && lostLoads.isEmpty()) {
             deadRemoteMember = true;
@@ -895,13 +895,13 @@ public final class GpuBatchInjectionOutages {
     /** The reactive-limit entries of the group's other controllers that keep a VOLTAGE generator after the loss. */
     private static int[] survivorReactiveLimitEntriesOf(LfBus bus, java.util.Set<LfGenerator> lostSet, int[] reactiveLimitBusNum) {
         java.util.List<Integer> entries = new ArrayList<>();
-        for (LfBus cb : mainVcOf(bus).orElseThrow().getMergedControllerElements()) {
-            if (cb == bus || cb.getGenerators().stream().noneMatch(g -> !lostSet.contains(g)
+        for (LfBus controller : mainVcOf(bus).orElseThrow().getMergedControllerElements()) {
+            if (controller == bus || controller.getGenerators().stream().noneMatch(g -> !lostSet.contains(g)
                     && g.getGeneratorControlType() == LfGenerator.GeneratorControlType.VOLTAGE)) {
                 continue;
             }
             for (int i = 0; reactiveLimitBusNum != null && i < reactiveLimitBusNum.length; i++) {
-                if (reactiveLimitBusNum[i] == cb.getNum()) {
+                if (reactiveLimitBusNum[i] == controller.getNum()) {
                     entries.add(i);
                     break;
                 }

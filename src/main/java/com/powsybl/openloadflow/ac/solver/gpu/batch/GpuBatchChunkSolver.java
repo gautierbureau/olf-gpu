@@ -827,10 +827,10 @@ final class GpuBatchChunkSolver {
                         // OLF evaluates the flow on its equation system's state: a parent that did not converge left
                         // its last iterate there, which the device does not keep
                         boolean ok = pairParentConverged[s] && x0Full != null && hvdcControllers != null;
-                        for (com.powsybl.openloadflow.network.LfHvdc hv : off) {
-                            Integer elem = hvdcElemIndex.get(hv);
+                        for (com.powsybl.openloadflow.network.LfHvdc hvdc : off) {
+                            Integer elem = hvdcElemIndex.get(hvdc);
                             GpuHvdcAcEmulationLimitsOuterLoop.Controller c = !ok || elem == null ? null : hvdcControllers.stream()
-                                    .filter(ctl -> ctl.hvdcElementIndex() == elem).findFirst().orElse(null);
+                                    .filter(controller -> controller.hvdcElementIndex() == elem).findFirst().orElse(null);
                             if (c == null) {
                                 ok = false;
                                 break;
@@ -1029,10 +1029,10 @@ final class GpuBatchChunkSolver {
                         // slot -> contingency for every scenario the device rejected in this chunk: the native
                         // GPU_REJECT lines name slots, and a slot only means something with the chunk's composition.
                         for (int s = 0; s < realCount; s++) {
-                            int st = chunkResults[s].length > n + 2 ? (int) chunkResults[s][n + 2] : 0;
-                            if (st <= GpuAcSolverStatus.REJECTED) {
+                            int status = chunkResults[s].length > n + 2 ? (int) chunkResults[s][n + 2] : 0;
+                            if (status <= GpuAcSolverStatus.REJECTED) {
                                 System.err.println("CHUNK_REJECT slot=" + s + " ctg=" + contingencies.get(group.get(chunkStart + s)).contingencyId()
-                                        + " status=" + st);
+                                        + " status=" + status);
                             }
                         }
                     }
@@ -1110,13 +1110,13 @@ final class GpuBatchChunkSolver {
                     if (OUTER_LOOP_STATS) {
                         // OLF_OL_STATS: the device's per-contingency Newton work, in the same shape as OLF's
                         // CPU_OL_STATS lines, so the two arms can be matched contingency by contingency.
-                        int[] ol = BatchReadbackNative.readBatchOuterLoopStats(handle);
-                        if (ol != null) {
+                        int[] outerLoopStats = BatchReadbackNative.readBatchOuterLoopStats(handle);
+                        if (outerLoopStats != null) {
                             for (int s2 = 0; s2 < realCount; s2++) {
-                                int st = chunkResults[s2] == null ? Integer.MIN_VALUE : (int) chunkResults[s2][n + 2];
+                                int status = chunkResults[s2] == null ? Integer.MIN_VALUE : (int) chunkResults[s2][n + 2];
                                 System.err.println("GPU_OL_STATS ctg=" + contingencies.get(group.get(chunkStart + s2)).contingencyId()
-                                        + " passes=" + ol[s2 * 3] + " firstNr=" + ol[s2 * 3 + 1] + " totalNr=" + ol[s2 * 3 + 2]
-                                        + " status=" + st);
+                                        + " passes=" + outerLoopStats[s2 * 3] + " firstNr=" + outerLoopStats[s2 * 3 + 1] + " totalNr=" + outerLoopStats[s2 * 3 + 2]
+                                        + " status=" + status);
                             }
                         }
                     }

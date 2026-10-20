@@ -60,11 +60,11 @@ final class ActionSeed {
                 rs.r1OvValList.add(v);
             }
         }
-        for (ShuntShift sh : contingencies.get(ci).shuntShifts()) {
+        for (ShuntShift shuntShift : contingencies.get(ci).shuntShifts()) {
             rs.shuntAdmittanceOverrideScenarioElementList.add(s);
-            rs.shuntAdmittanceOverrideScenarioElementList.add(elementMapper.getElementIndex(sh.shunt()) - rs.shuntPackOffset);
-            rs.shuntAdmittanceOverrideDeltaList.add(sh.dg());
-            rs.shuntAdmittanceOverrideDeltaList.add(sh.db());
+            rs.shuntAdmittanceOverrideScenarioElementList.add(elementMapper.getElementIndex(shuntShift.shunt()) - rs.shuntPackOffset);
+            rs.shuntAdmittanceOverrideDeltaList.add(shuntShift.dg());
+            rs.shuntAdmittanceOverrideDeltaList.add(shuntShift.db());
         }
     }
 }

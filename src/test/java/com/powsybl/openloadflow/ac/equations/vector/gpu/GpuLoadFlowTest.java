@@ -191,10 +191,10 @@ class GpuLoadFlowTest extends com.powsybl.openloadflow.network.AbstractLoadFlowN
         // prove the automaton genuinely ACTIVATED mid-base (else the test is hollow): activation
         // makes the SVC hold its bus at the LOW setpoint (394), far from the standing-by state
         Network check = com.powsybl.openloadflow.network.VoltageControlNetworkFactory.createWithStaticVarCompensator();
-        com.powsybl.iidm.network.StaticVarCompensator svc = check.getStaticVarCompensator("svc1");
-        svc.setVoltageSetpoint(385).setRegulationMode(com.powsybl.iidm.network.StaticVarCompensator.RegulationMode.VOLTAGE)
+        com.powsybl.iidm.network.StaticVarCompensator staticVarCompensator = check.getStaticVarCompensator("svc1");
+        staticVarCompensator.setVoltageSetpoint(385).setRegulationMode(com.powsybl.iidm.network.StaticVarCompensator.RegulationMode.VOLTAGE)
                 .setRegulating(true);
-        svc.newExtension(com.powsybl.iidm.network.extensions.StandbyAutomatonAdder.class)
+        staticVarCompensator.newExtension(com.powsybl.iidm.network.extensions.StandbyAutomatonAdder.class)
                 .withHighVoltageThreshold(400).withLowVoltageThreshold(393)
                 .withLowVoltageSetpoint(394).withHighVoltageSetpoint(395)
                 .withB0(-0.001f).withStandbyStatus(true).add();
@@ -203,7 +203,7 @@ class GpuLoadFlowTest extends com.powsybl.openloadflow.network.AbstractLoadFlowN
                 .setAcSolverType(GpuNewtonRaphsonFactory.NAME);
         new LoadFlow.Runner(new OpenLoadFlowProvider(new DenseMatrixFactory())).run(check, cp);
         org.junit.jupiter.api.Assertions.assertEquals(394.0,
-                svc.getTerminal().getBusView().getBus().getV(), 1e-6,
+                staticVarCompensator.getTerminal().getBusView().getBus().getV(), 1e-6,
                 "the stand-by automaton must have ACTIVATED at the low setpoint in the base");
     }
 

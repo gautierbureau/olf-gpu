@@ -102,7 +102,7 @@ __global__ void tileBaseRow(int total, int n, T* d) {
 BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const double* target,
                               const int* rowMode, const int* rowModeSlots, int nRowModeSlots,
                               const int* baseRowMode, const char* disabled,
-                              int nOv, const int* ovIndex, const double* ovValue,
+                              int nTargetOverrides, const int* targetOverrideIndex, const double* targetOverrideValue,
                               const int* distributedSlackOverrideBus, const double* distributedSlackOverrideFactorDelta, const double* distributedSlackOverrideBaseTargetPDelta,
                               const double* distributedSlackOverrideMaxDelta, const double* distributedSlackOverrideMinDelta, const double* distributedSlackBusAnchorShift,
                               const double* slackBusAnchorShift,
@@ -139,7 +139,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     drv.maxIter = maxIter;
     drv.stateVectorScalingMode = stateVectorScalingMode;
     drv.convEpsPerEq = convEpsPerEq;
-    DeviceBuf dOvIndex, dOvValue;                            // function-scoped: outlive the async override kernel
+    DeviceBuf dTargetOverrideIndex, dTargetOverrideValue;                            // function-scoped: outlive the async override kernel
     DeviceBuf& dBaseMode = drv.dBaseMode;                   // the contingency-free base row mode (length n)
     DeviceBuf dModeSlots, dModeRows;                         // compact row modes: the scenarios that differ from the base
     DeviceBuf dX0SeedIdx, dX0SeedVal;                        // setBatchX0Seeds, function-scoped like the overrides
@@ -245,10 +245,10 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         ctx->x0SeedIdx.clear();                              // consumed by this solve either way
         ctx->x0SeedVal.clear();
         tileBaseRow<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n * nS, n, ctx->dTarget.as<double>());
-        if (nOv > 0) {                                       // per-scenario target overrides (generator loss)
-            dOvIndex.upload(ovIndex, nOv * sizeof(int));
-            dOvValue.upload(ovValue, nOv * sizeof(double));
-            applyTargetOverrideBatch<<<grid(nOv), BLOCK, 0, ctx->stream>>>(nOv, dOvIndex.as<int>(), dOvValue.as<double>(), ctx->dTarget.as<double>());
+        if (nTargetOverrides > 0) {                                       // per-scenario target overrides (generator loss)
+            dTargetOverrideIndex.upload(targetOverrideIndex, nTargetOverrides * sizeof(int));
+            dTargetOverrideValue.upload(targetOverrideValue, nTargetOverrides * sizeof(double));
+            applyTargetOverrideBatch<<<grid(nTargetOverrides), BLOCK, 0, ctx->stream>>>(nTargetOverrides, dTargetOverrideIndex.as<int>(), dTargetOverrideValue.as<double>(), ctx->dTarget.as<double>());
         }
     }
     if (hasDistributedSlackOverride) {                                     // per-scenario generator-loss DS reweight
@@ -964,11 +964,11 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     //      line per violating (scenario, entry).
     traceReactiveLimitsAudit(ctx, drv, auditLog);
     if (reactiveLimitsFinalState != nullptr && ctx->nReactiveLimitEntries > 0) {             // export per-(controller, scenario) RL state
-        std::vector<char> lt(static_cast<size_t>(ctx->nReactiveLimitEntries) * nS), sc(static_cast<size_t>(ctx->nReactiveLimitEntries) * nS);
-        CUDA_CHECK(cudaMemcpy(lt.data(), ctx->dReactiveLimitQLimitType.p, lt.size(), cudaMemcpyDeviceToHost));
+        std::vector<char> qLimitType(static_cast<size_t>(ctx->nReactiveLimitEntries) * nS), sc(static_cast<size_t>(ctx->nReactiveLimitEntries) * nS);
+        CUDA_CHECK(cudaMemcpy(qLimitType.data(), ctx->dReactiveLimitQLimitType.p, qLimitType.size(), cudaMemcpyDeviceToHost));
         CUDA_CHECK(cudaMemcpy(sc.data(), ctx->dReactiveLimitPvPqSwitchCount.p, sc.size(), cudaMemcpyDeviceToHost));
-        for (size_t k = 0; k < lt.size(); k++) {
-            reactiveLimitsFinalState[k] = reactiveLimitsState(lt[k], sc[k]);
+        for (size_t k = 0; k < qLimitType.size(); k++) {
+            reactiveLimitsFinalState[k] = reactiveLimitsState(qLimitType[k], sc[k]);
         }
     }
     tracePhaseTime(ctx, drv);

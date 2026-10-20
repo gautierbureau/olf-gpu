@@ -53,11 +53,11 @@ public final class GpuFreezingHvdcACEmulationOuterloop {
      * @param rowModePerScenario the per-scenario row modes (null = base layout everywhere): a converter bus whose
      *  parent coupler the scenario opens takes its P target on its OWN row (see GpuHvdcAcEmulationLimitsOuterLoop.Controller.bus1WriteRow).
      */
-    public static int[][] applyFreeze(int chunkSize, int realCount, int n, List<GpuHvdcAcEmulationLimitsOuterLoop.Controller> ctls,
+    public static int[][] applyFreeze(int chunkSize, int realCount, int n, List<GpuHvdcAcEmulationLimitsOuterLoop.Controller> controllers,
                                double[] baseState, double[] x0PerScenario, int[] seedIdx, double[] seedVal,
                                boolean[][] disabledMask, double[] baseTargets, GpuBatchOverrides overrides,
                                double[] appliedDelta1, double[] appliedDelta2, int[][] rowModePerScenario) {
-        int[][] status = new int[chunkSize][ctls.size()];
+        int[][] status = new int[chunkSize][controllers.size()];
         double[] warm = baseState.clone();
         int[][] seedsOf = x0PerScenario == null && seedIdx != null ? seedsByScenario(seedIdx, realCount, n) : null;
         for (int s = 0; s < realCount; s++) {
@@ -69,8 +69,8 @@ public final class GpuFreezingHvdcACEmulationOuterloop {
                     warm[seedIdx[k] - s * n] = seedVal[k];
                 }
             }
-            for (int h = 0; h < ctls.size(); h++) {
-                GpuHvdcAcEmulationLimitsOuterLoop.Controller c = ctls.get(h);
+            for (int h = 0; h < controllers.size(); h++) {
+                GpuHvdcAcEmulationLimitsOuterLoop.Controller c = controllers.get(h);
                 if (HVDC_TRACE_ROW != -1) {
                     System.err.printf("HVDC_CTL s=%d h=%d elem=%d baseStatus=%d baseD1=%.9f baseD2=%.9f disabled=%b p1warm=%.9f p2warm=%.9f pMax12=%.6f baseT1=%.9f%n",
                             s, h, c.hvdcElementIndex(), c.baseStatus(), c.baseD1(), c.baseD2(), disabledMask[s][c.hvdcElementIndex()],
@@ -92,8 +92,8 @@ public final class GpuFreezingHvdcACEmulationOuterloop {
                             c.pMax12(), c.pMax21());
                 }
                 if (appliedDelta1 != null) {
-                    appliedDelta1[s * ctls.size() + h] = d[0] - c.baseD1();
-                    appliedDelta2[s * ctls.size() + h] = d[1] - c.baseD2();
+                    appliedDelta1[s * controllers.size() + h] = d[0] - c.baseD1();
+                    appliedDelta2[s * controllers.size() + h] = d[1] - c.baseD2();
                 }
                 status[s][h] = GpuAcEmulationStatus.FROZEN;
                 disabledMask[s][c.hvdcElementIndex()] = true;

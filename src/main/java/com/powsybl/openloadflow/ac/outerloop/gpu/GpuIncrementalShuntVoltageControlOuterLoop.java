@@ -101,13 +101,13 @@ public final class GpuIncrementalShuntVoltageControlOuterLoop {
                     + " shuntBRows=" + shuntBRows.size());
         }
         for (LfShunt shunt : network.<LfShunt>getControllerElements(com.powsybl.openloadflow.network.VoltageControl.Type.SHUNT)) {
-            var vcOpt = shunt.getVoltageControl();
-            if (vcOpt.isEmpty() || shunt.getControllers().isEmpty()) {
+            var optionalVoltageControl = shunt.getVoltageControl();
+            if (optionalVoltageControl.isEmpty() || shunt.getControllers().isEmpty()) {
                 continue;
             }
-            var vc = vcOpt.orElseThrow();
+            var voltageControl = optionalVoltageControl.orElseThrow();
             Integer bRow = shuntBRows.get(shunt.getNum());
-            Integer vRow = busVRows.get(vc.getControlledBus().getNum());
+            Integer vRow = busVRows.get(voltageControl.getControlledBus().getNum());
             // The element mapper packs only the per-bus FIXED shunt aggregate — a CONTROLLER shunt
             // is a separate LfShunt and legitimately maps to -1. Its b rides the SHUNT_B state
             // variable (target override at bRow + x0 seed), so the element index is only needed for
@@ -138,9 +138,9 @@ public final class GpuIncrementalShuntVoltageControlOuterLoop {
                 LOGGER.info("Incremental shunt controller {} has section-G variation but no packed element — skipped", shunt.getId());
                 continue;
             }
-            double halfDeadband = vc.getTargetDeadband()
-                    .orElse(MIN_TARGET_DEADBAND_KV / vc.getControlledBus().getNominalV()) / 2;
-            out.add(new Controller(bRow, vRow, vc.getControlledBus().getNum(), vc.getTargetValue(), halfDeadband,
+            double halfDeadband = voltageControl.getTargetDeadband()
+                    .orElse(MIN_TARGET_DEADBAND_KV / voltageControl.getControlledBus().getNominalV()) / 2;
+            out.add(new Controller(bRow, vRow, voltageControl.getControlledBus().getNum(), voltageControl.getTargetValue(), halfDeadband,
                     subs, magnitude, elemIndex - shuntPackOffset, elemIndex, shunt.getNum()));
         }
         return out;
@@ -150,51 +150,51 @@ public final class GpuIncrementalShuntVoltageControlOuterLoop {
     /** Install the controllers for the in-kernel loop (OLF order 10): groups per controlled bus in
      *  OLF's |b|-descending order, sub-controller section tables, the run's maxSectionShift. Returns
      *  true when the kernel loop OWNS them (the host orchestrator must then stay off). */
-    public static boolean uploadToDevice(long handle, List<Controller> ctrls, int maxSectionShift) {
-        if (ctrls == null || ctrls.isEmpty()) {
+    public static boolean uploadToDevice(long handle, List<Controller> controllers, int maxSectionShift) {
+        if (controllers == null || controllers.isEmpty()) {
             ShuntVoltageControlNative.setBatchIncrementalShuntVoltageControl(handle,
                     null, null, null, null, null, null, null, null, null, null, null, null, null, null, maxSectionShift);
             return false;
         }
-        int nc = ctrls.size();
+        int nControllers = controllers.size();
         Map<Integer, List<Integer>> byBus = new LinkedHashMap<>();
-        for (int c = 0; c < nc; c++) {
-            byBus.computeIfAbsent(ctrls.get(c).controlledBusNum(), k -> new ArrayList<>()).add(c);
+        for (int c = 0; c < nControllers; c++) {
+            byBus.computeIfAbsent(controllers.get(c).controlledBusNum(), k -> new ArrayList<>()).add(c);
         }
         int[] groupControllerStart = new int[byBus.size() + 1];
-        int[] groupController = new int[nc];
+        int[] groupController = new int[nControllers];
         int g = 0;
         int k = 0;
         for (List<Integer> group : byBus.values()) {
-            group.sort(Comparator.comparingDouble((Integer ci) -> ctrls.get(ci).bMagnitude()).reversed());
+            group.sort(Comparator.comparingDouble((Integer ci) -> controllers.get(ci).bMagnitude()).reversed());
             groupControllerStart[g++] = k;
             for (int ci : group) {
                 groupController[k++] = ci;
             }
         }
         groupControllerStart[g] = k;
-        int[] bRow = new int[nc];
-        int[] vRow = new int[nc];
-        double[] targetV = new double[nc];
-        double[] halfTargetDeadband = new double[nc];
-        int[] controllerElement = new int[nc];
-        int[] shuntAdmittanceOverrideElement = new int[nc];
-        int[] shuntCompensatorStart = new int[nc + 1];
+        int[] bRow = new int[nControllers];
+        int[] vRow = new int[nControllers];
+        double[] targetV = new double[nControllers];
+        double[] halfTargetDeadband = new double[nControllers];
+        int[] controllerElement = new int[nControllers];
+        int[] shuntAdmittanceOverrideElement = new int[nControllers];
+        int[] shuntCompensatorStart = new int[nControllers + 1];
         List<Integer> sectionStart = new ArrayList<>();
         List<Double> sectionB = new ArrayList<>();
         List<Double> sectionG = new ArrayList<>();
         List<Integer> shuntCompensatorMinPosition = new ArrayList<>();
         List<Integer> shuntCompensatorBasePosition = new ArrayList<>();
-        for (int c = 0; c < nc; c++) {
-            Controller ctl = ctrls.get(c);
-            bRow[c] = ctl.bRow();
-            vRow[c] = ctl.vRow();
-            targetV[c] = ctl.targetV();
-            halfTargetDeadband[c] = ctl.halfDeadband();
-            controllerElement[c] = ctl.elemIndexAbs();
-            shuntAdmittanceOverrideElement[c] = ctl.elemIndexAbs() >= 0 ? ctl.shuntAdmittanceOverrideElement() : -1;
+        for (int c = 0; c < nControllers; c++) {
+            Controller controller = controllers.get(c);
+            bRow[c] = controller.bRow();
+            vRow[c] = controller.vRow();
+            targetV[c] = controller.targetV();
+            halfTargetDeadband[c] = controller.halfDeadband();
+            controllerElement[c] = controller.elemIndexAbs();
+            shuntAdmittanceOverrideElement[c] = controller.elemIndexAbs() >= 0 ? controller.shuntAdmittanceOverrideElement() : -1;
             shuntCompensatorStart[c] = shuntCompensatorMinPosition.size();
-            for (Sub sub : ctl.subs()) {
+            for (Sub sub : controller.subs()) {
                 sectionStart.add(sectionB.size());
                 for (int i = 0; i < sub.sectionsB().length; i++) {
                     sectionB.add(sub.sectionsB()[i]);
@@ -204,7 +204,7 @@ public final class GpuIncrementalShuntVoltageControlOuterLoop {
                 shuntCompensatorBasePosition.add(sub.basePos());
             }
         }
-        shuntCompensatorStart[nc] = shuntCompensatorMinPosition.size();
+        shuntCompensatorStart[nControllers] = shuntCompensatorMinPosition.size();
         sectionStart.add(sectionB.size());
         boolean owned = ShuntVoltageControlNative.setBatchIncrementalShuntVoltageControl(handle,
                 bRow, vRow, targetV, halfTargetDeadband, controllerElement, shuntAdmittanceOverrideElement, groupControllerStart, groupController, shuntCompensatorStart,
@@ -214,24 +214,24 @@ public final class GpuIncrementalShuntVoltageControlOuterLoop {
                 shuntCompensatorMinPosition.stream().mapToInt(Integer::intValue).toArray(),
                 shuntCompensatorBasePosition.stream().mapToInt(Integer::intValue).toArray(), maxSectionShift) != 0;
         LOGGER.info("Uploaded {} incremental shunt controllers to device ({} groups, {} subs): {}",
-                nc, byBus.size(), shuntCompensatorMinPosition.size(), owned ? "in-kernel loop" : "host orchestrator");
+                nControllers, byBus.size(), shuntCompensatorMinPosition.size(), owned ? "in-kernel loop" : "host orchestrator");
         if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
-            System.err.printf("SHUNT_UPLOAD nControllers=%d nGroups=%d nSubs=%d kernel=%b%n", nc, byBus.size(), shuntCompensatorMinPosition.size(), owned);
+            System.err.printf("SHUNT_UPLOAD nControllers=%d nGroups=%d nSubs=%d kernel=%b%n", nControllers, byBus.size(), shuntCompensatorMinPosition.size(), owned);
         }
         return owned;
     }
 
     /** Give the driver's final sections (scenario 0) back to the network — what OLF's own loop leaves
      *  through LfShunt.Controller.updateSectionB; the shunt's b follows through OLF's listeners. */
-    public static void applyToNetwork(LfNetwork network, List<Controller> ctrls, int[] positions) {
-        if (ctrls == null || ctrls.isEmpty() || positions == null) {
+    public static void applyToNetwork(LfNetwork network, List<Controller> controllers, int[] positions) {
+        if (controllers == null || controllers.isEmpty() || positions == null) {
             return;
         }
         int u = 0;
-        for (Controller ctl : ctrls) {
-            LfShunt shunt = network.getShunt(ctl.shuntNum());
+        for (Controller controller : controllers) {
+            LfShunt shunt = network.getShunt(controller.shuntNum());
             List<LfShunt.Controller> subs = shunt != null ? shunt.getControllers() : List.of();
-            for (int k = 0; k < ctl.subs().size(); k++, u++) {
+            for (int k = 0; k < controller.subs().size(); k++, u++) {
                 if (u < positions.length && k < subs.size() && subs.get(k).getPosition() != positions[u]) {
                     subs.get(k).updateSectionB(positions[u]);
                 }

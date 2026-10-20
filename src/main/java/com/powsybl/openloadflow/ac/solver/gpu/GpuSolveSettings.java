@@ -26,16 +26,16 @@ final class GpuSolveSettings {
         double slackTol = Double.MAX_VALUE;
         double maxReactivePowerMismatch = 0;
         int maxSwitch = 0;
-        for (var ol : p.getOuterLoops()) {
-            if (ol instanceof com.powsybl.openloadflow.ac.outerloop.DistributedSlackOuterLoop ds) {
-                slackTol = ds.getSlackBusPMaxMismatch() / com.powsybl.openloadflow.util.PerUnit.SB;
-            } else if (ol instanceof com.powsybl.openloadflow.ac.outerloop.ReactiveLimitsOuterLoop rl) {
+        for (var outerLoop : p.getOuterLoops()) {
+            if (outerLoop instanceof com.powsybl.openloadflow.ac.outerloop.DistributedSlackOuterLoop distributedSlackOuterLoop) {
+                slackTol = distributedSlackOuterLoop.getSlackBusPMaxMismatch() / com.powsybl.openloadflow.util.PerUnit.SB;
+            } else if (outerLoop instanceof com.powsybl.openloadflow.ac.outerloop.ReactiveLimitsOuterLoop reactiveLimitsOuterLoop) {
                 // OLF builds the loop with its EFFECTIVE band, already in per unit
                 // (AbstractAcOuterLoopConfig: convEpsPerEq under UNIFORM_CRITERIA, maxReactivePowerMismatch / SB
                 // under PER_EQUATION_TYPE_CRITERIA), the same value GpuSaRunScope derives for the batched SA.
                 // Dividing it by SB again made the per-equation band 100 times too tight.
-                maxReactivePowerMismatch = rl.getMaxReactivePowerMismatch();
-                maxSwitch = rl.getMaxPqPvSwitch();
+                maxReactivePowerMismatch = reactiveLimitsOuterLoop.getMaxReactivePowerMismatch();
+                maxSwitch = reactiveLimitsOuterLoop.getMaxPqPvSwitch();
             }
         }
         return new double[] {slackTol, maxReactivePowerMismatch, p.getMaxOuterLoopIterations(), maxSwitch};

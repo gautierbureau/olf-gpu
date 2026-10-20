@@ -134,12 +134,12 @@ void seedSolve(BatchSolverContext* ctx, DriverPass& drv, const int* reactiveLimi
         // count from the state the caller passes. A re-solve inside one load flow passes both; a
         // strategy pair passes its parent's pins with zero counts, since OLF's reactive-limit
         // loop counts afresh in every load flow.
-        std::vector<char> lt(static_cast<size_t>(ctx->nReactiveLimitEntries) * nS), sc(static_cast<size_t>(ctx->nReactiveLimitEntries) * nS);
-        for (size_t k = 0; k < lt.size(); k++) {
-            lt[k] = static_cast<char>(reactiveLimitsStateQLimitType(reactiveLimitsSeedState[k]));
+        std::vector<char> qLimitType(static_cast<size_t>(ctx->nReactiveLimitEntries) * nS), sc(static_cast<size_t>(ctx->nReactiveLimitEntries) * nS);
+        for (size_t k = 0; k < qLimitType.size(); k++) {
+            qLimitType[k] = static_cast<char>(reactiveLimitsStateQLimitType(reactiveLimitsSeedState[k]));
             sc[k] = static_cast<char>(reactiveLimitsStatePvPqSwitchCount(reactiveLimitsSeedState[k]));
         }
-        CUDA_CHECK(cudaMemcpyAsync(ctx->dReactiveLimitQLimitType.p, lt.data(), lt.size(), cudaMemcpyHostToDevice, ctx->stream));
+        CUDA_CHECK(cudaMemcpyAsync(ctx->dReactiveLimitQLimitType.p, qLimitType.data(), qLimitType.size(), cudaMemcpyHostToDevice, ctx->stream));
         CUDA_CHECK(cudaMemcpy(ctx->dReactiveLimitPvPqSwitchCount.p, sc.data(), sc.size(), cudaMemcpyHostToDevice));
         // The limits the continued pins are STAMPED at: OLF restores each pinned bus's generation target Q from
         // the parent's end, and a GeneratorAction only invalidates the bus's target P, so the first solve keeps

@@ -116,7 +116,7 @@ public final class GpuAcActivationExtractor {
             int q = GpuAcRowIndexing.row(es, bus.getNum(), AcEquationType.BUS_TARGET_Q);
             if (q >= 0) {
                 // Q row = V row, the controlling rho row, or the DUMMY_Q row on a dead-end stub
-                int qr = stubBr >= 0 ? dummyQCol[stubBr] : qRow[bus.getNum()];
+                int targetQRow = stubBr >= 0 ? dummyQCol[stubBr] : qRow[bus.getNum()];
                 GeneratorVoltageControl mainVc = GpuAcRowIndexing.mainGenVc(bus);
                 if (stubBr < 0 && mainVc != null && GpuAcRowIndexing.hasCandidateTable(mainVc, es)) {
                     // A group with a candidate table is extracted CANONICALLY (pin-state independent: every
@@ -126,9 +126,9 @@ public final class GpuAcActivationExtractor {
                     // ENABLED member's V row (the carrier), or on its own V row once every controller is pinned
                     // (its V identity gone, the row is a power row). Measured: the canonical row collided with the
                     // pinned first member's own Q (deviceRemoteFreeMemberSwitchedToPqInBaseMatchesCpu & co., 12 tests).
-                    qr = GpuAcRowIndexing.stateQRow(bus, vCol, stubBranchOfBus, dummyQCol);
+                    targetQRow = GpuAcRowIndexing.stateQRow(bus, vCol, stubBranchOfBus, dummyQCol);
                 }
-                assign(es, targetMap, qr, q, AcEquationType.BUS_TARGET_Q, bus.getNum());
+                assign(es, targetMap, targetQRow, q, AcEquationType.BUS_TARGET_Q, bus.getNum());
                 // ACTIVE own-Q balance at a (non-free) remote gen-VC member = the RL-PINNED state:
                 // row mode 4, so the family fills route the member's own q here (the frozen dest is
                 // canonically SUPPRESSED) and the DISTR_Q emissions at this row gate off (plan-B2).
@@ -176,7 +176,7 @@ public final class GpuAcActivationExtractor {
                 boolean mode4 = GpuAcRowIndexing.isRemoteGenVcControllerElement(bus)
                         && (pilotSelf || !GpuAcRowIndexing.isFreeRemoteGenVcMember(bus)) && !enrolled;
                 if (mode4) {
-                    mode[qr] = GpuRowMode.BUS_TARGET_Q;
+                    mode[targetQRow] = GpuRowMode.BUS_TARGET_Q;
                 }
             }
         }
@@ -222,8 +222,8 @@ public final class GpuAcActivationExtractor {
                 // closedBranchPhaseControlSide carrying the controller's a1 column, LOCAL and REMOTE alike).
                 var branch = network.getBranchById(network.getBranches().stream()
                         .filter(b -> b.getNum() == e.getElementNum()).findFirst().orElseThrow().getId());
-                var pc = branch.getPhaseControl().orElseThrow();
-                int a1r = GpuAcRowIndexing.col(es, pc.getControllerBranch().getNum(), AcVariableType.BRANCH_ALPHA1);
+                var phaseControl = branch.getPhaseControl().orElseThrow();
+                int a1r = GpuAcRowIndexing.col(es, phaseControl.getControllerBranch().getNum(), AcVariableType.BRANCH_ALPHA1);
                 mode[a1r] = GpuRowMode.BRANCH_TARGET_P;
                 assign(es, targetMap, a1r, e.getColumn(), AcEquationType.BRANCH_TARGET_P, e.getElementNum());
                 continue;
@@ -387,24 +387,24 @@ public final class GpuAcActivationExtractor {
             if (pe < 0) {
                 continue;
             }
-            int dp = cols.dummyPCol()[pe];
-            int dq = cols.dummyQCol()[pe];
+            int dummyPRow = cols.dummyPCol()[pe];
+            int dummyQRow = cols.dummyQCol()[pe];
             int phi = cols.phiCol()[b];
             int v = cols.vCol()[b];
-            if (phi >= 0 && dp >= 0) {
-                alternateRowMaxMismatchSelector[phi] = dp;
+            if (phi >= 0 && dummyPRow >= 0) {
+                alternateRowMaxMismatchSelector[phi] = dummyPRow;
                 alternateRowMaxMismatch[phi] = maxP / 100.0;                  // BUS_TARGET_P back home
             }
-            if (v >= 0 && dq >= 0) {
-                alternateRowMaxMismatchSelector[v] = dq;
+            if (v >= 0 && dummyQRow >= 0) {
+                alternateRowMaxMismatchSelector[v] = dummyQRow;
                 alternateRowMaxMismatch[v] = maxQ / 100.0;                    // its reactive balance back home (its voltage target,
             }                                                // an identity, keeps the V row's identity threshold)
-            if (dq >= 0) {
-                alternateRowMaxMismatch[dq] = maxV;                           // the child's voltage target written crosswise (mode 6)
-                equationRowMaxMismatch[dq] = maxQ / 100.0;                 // its reactive balance there, shared or pinned
+            if (dummyQRow >= 0) {
+                alternateRowMaxMismatch[dummyQRow] = maxV;                           // the child's voltage target written crosswise (mode 6)
+                equationRowMaxMismatch[dummyQRow] = maxQ / 100.0;                 // its reactive balance there, shared or pinned
             }
-            if (dp >= 0) {
-                equationRowMaxMismatch[dp] = maxP / 100.0;
+            if (dummyPRow >= 0) {
+                equationRowMaxMismatch[dummyPRow] = maxP / 100.0;
             }
         }
         return new double[][] {fixedVariableRowMaxMismatch, equationRowMaxMismatch, alternateRowMaxMismatch, alternateRowMaxMismatchSelector};

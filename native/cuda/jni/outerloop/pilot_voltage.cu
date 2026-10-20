@@ -235,8 +235,8 @@ __global__ void updatePilotTargetVEquationBatch(int nReactiveRelocationGroups, i
     } else if (pe >= 0) {
         lost = plt != GpuQLimitType::NONE;  // an unpinned pilot still controls its own bus
         int p0 = reactiveRelocationGroupStart[g];
-        int cnt = reactiveRelocationGroupStart[g + 1] - p0;
-        for (int c = 1; lost && c < cnt; c++) {
+        int count = reactiveRelocationGroupStart[g + 1] - p0;
+        for (int c = 1; lost && c < count; c++) {
             int r = reactiveRelocationCandidateRows[p0 + c];
             if (r == pilotRow) continue;
             int m = mode[(size_t) s * n + r];

@@ -61,7 +61,7 @@ __device__ inline double distrQTargetQOf(int nTqOv, const int* tqOvKey, const do
 // limit, reactiveLimitInitialTargetQ for a realistic-voltage freeze (OLF freezes at the INITIAL generation target Q), the injection
 // channel's target for a bus that lost generators, the limit drift included - one source for the member's own
 // row and for its peers. A pinned entry whose row is not a balance (a pilot-self pilot keeps its voltage identity)
-// takes the pin rule directly. Rebuilding every pinned peer from `lt == 1 ? reactiveLimitMinQ : reactiveLimitMaxQ` put a realistic-
+// takes the pin rule directly. Rebuilding every pinned peer from `qLimitType == 1 ? reactiveLimitMinQ : reactiveLimitMaxQ` put a realistic-
 // voltage freeze at its CEILING (g1 frozen at 10 MVar with a 6000 MVar maxQ on the three-controller fixture)
 // and a generator-lost member at its lost generator's maximum.
 __device__ inline double pinnedTargetQ(int s, int e, int n, int nReactiveLimitEntries, const int* mode, const double* target,
@@ -80,11 +80,11 @@ __device__ inline double pinnedTargetQ(int s, int e, int n, int nReactiveLimitEn
     if (qrow >= 0 && relocatedChildOwnRow != nullptr && relocatedChildOwnRow[qrow] >= 0 && mode[(size_t) s * n + relocatedChildOwnRow[qrow]] == GpuRowMode::BUS_TARGET_Q) {
         return target[(size_t) s * n + relocatedChildOwnRow[qrow]];
     }
-    char lt = limitType[(size_t) s * nReactiveLimitEntries + e];
+    char qLimitType = limitType[(size_t) s * nReactiveLimitEntries + e];
     size_t li = perScenarioReactiveLimits ? (size_t) s * nReactiveLimitEntries + e : (size_t) e;
-    double lim = (lt == GpuQLimitType::MIN_REALISTIC_V || lt == GpuQLimitType::MAX_REALISTIC_V) && reactiveLimitInitialTargetQ != nullptr ? reactiveLimitInitialTargetQ[e]
-               : isMinLimit(lt) ? reactiveLimitMinQ[li] : reactiveLimitMaxQ[li];
-    if (lt == GpuQLimitType::FROZEN && reactiveLimitGeneratorsLost != nullptr && reactiveLimitGeneratorsLost[(size_t) s * nReactiveLimitEntries + e]) {
+    double lim = (qLimitType == GpuQLimitType::MIN_REALISTIC_V || qLimitType == GpuQLimitType::MAX_REALISTIC_V) && reactiveLimitInitialTargetQ != nullptr ? reactiveLimitInitialTargetQ[e]
+               : isMinLimit(qLimitType) ? reactiveLimitMinQ[li] : reactiveLimitMaxQ[li];
+    if (qLimitType == GpuQLimitType::FROZEN && reactiveLimitGeneratorsLost != nullptr && reactiveLimitGeneratorsLost[(size_t) s * nReactiveLimitEntries + e]) {
         lim = 0.0;                                       // every generator lost: no generation term at all
     }
     return lim - reactiveLimitLoadQ[li];
@@ -278,8 +278,8 @@ __global__ void pilotRowAllPinnedBatch(int nEntries, int nScenarios, int n, int 
     size_t ri = (size_t) s * n + row;
     bool allPinned = entCount[e] > 0;
     for (int k = 0; k < entCount[e]; k++) {
-        int rl = survivorReactiveLimitEntries[entOff[e] + k];
-        if (rl < 0 || rl >= nReactiveLimitEntries || limitType[(size_t) s * nReactiveLimitEntries + rl] == GpuQLimitType::NONE) {
+        int survivorEntry = survivorReactiveLimitEntries[entOff[e] + k];
+        if (survivorEntry < 0 || survivorEntry >= nReactiveLimitEntries || limitType[(size_t) s * nReactiveLimitEntries + survivorEntry] == GpuQLimitType::NONE) {
             allPinned = false;                              // this one still carries its DISTR_Q row
             break;
         }
@@ -345,8 +345,8 @@ __global__ void fillRemoteMemberQBatch(int nRemoteMemberReactiveTerms, int nScen
     }
     if (kind == GpuReactiveTermKind::OPEN_BRANCH_REACTIVE_FLOW) {  // half-open branch, connected side
         const double* op = openBranchParameters + e * 7;
-        const int* oq = openBranchIndices + e * 6;
-        int vcol = remoteMemberReactiveTermSide[c] == 0 ? oq[4] : oq[5];
+        const int* openBranch = openBranchIndices + e * 6;
+        int vcol = remoteMemberReactiveTermSide[c] == 0 ? openBranch[4] : openBranch[5];
         double v1 = remoteMemberReactiveTermSide[c] == 0 ? xs[vcol] : 1.0;
         double v2 = remoteMemberReactiveTermSide[c] == 1 ? xs[vcol] : 1.0;
         double oo[OB_NOUT];

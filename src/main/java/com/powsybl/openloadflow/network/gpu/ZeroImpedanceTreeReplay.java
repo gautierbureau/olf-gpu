@@ -90,8 +90,8 @@ public final class ZeroImpedanceTreeReplay {
      * window: the pre-apply tree left AATX/AATY 4.8/2.5 MW and ADJN/ADJO 32 MW off the CPU - exactly
      * the four contingencies whose apply re-elects.
      */
-    public List<LfBranch> applyAndRevert(PropagatedContingency pc) {
-        return applyAndRevert(pc, List.of(), List.of());
+    public List<LfBranch> applyAndRevert(PropagatedContingency propagatedContingency) {
+        return applyAndRevert(propagatedContingency, List.of(), List.of());
     }
 
     /**
@@ -99,14 +99,14 @@ public final class ZeroImpedanceTreeReplay {
      * closings ({@code closed}: a coupler the contingency opened, or one open at base), the tree read, everything
      * reverted. A pair otherwise inherits its contingency's tree, which still holds a reclosed coupler out of it.
      */
-    public List<LfBranch> applyAndRevert(PropagatedContingency pc, List<LfBranch> opened, List<LfBranch> closed) {
-        Optional<LfContingency> lfc = pc.toLfContingency(network, false, ZeroImpedanceTreeReplay::connectivityLoss);
-        if (lfc.isEmpty() && opened.isEmpty() && closed.isEmpty()) {
+    public List<LfBranch> applyAndRevert(PropagatedContingency propagatedContingency, List<LfBranch> opened, List<LfBranch> closed) {
+        Optional<LfContingency> lfContingency = propagatedContingency.toLfContingency(network, false, ZeroImpedanceTreeReplay::connectivityLoss);
+        if (lfContingency.isEmpty() && opened.isEmpty() && closed.isEmpty()) {
             return nonTree();                                // no impact: OLF never applies it
         }
         List<LfBranch> disabled = new ArrayList<>();
-        if (lfc.isPresent()) {
-            for (Map.Entry<LfBranch, DisabledBranchStatus> e : lfc.get().getDisabledNetwork().getBranchesStatus().entrySet()) {
+        if (lfContingency.isPresent()) {
+            for (Map.Entry<LfBranch, DisabledBranchStatus> e : lfContingency.get().getDisabledNetwork().getBranchesStatus().entrySet()) {
                 LfBranch b = e.getKey();
                 if (e.getValue() == DisabledBranchStatus.BOTH_SIDES && !b.isDisabled() && b.isZeroImpedance(AC)
                         && b.getBus1() != null && b.getBus2() != null && !closed.contains(b)) {
@@ -135,15 +135,15 @@ public final class ZeroImpedanceTreeReplay {
         }
         disabled.sort(Comparator.comparingInt(LfBranch::getNum));
         for (LfBranch b : disabled) {
-            Graph<LfBus, LfBranch> g1 = netOf.get(b.getBus1());
-            Graph<LfBus, LfBranch> g2 = netOf.get(b.getBus2());
-            if (g1 == g2) {
-                g1.addEdge(b.getBus1(), b.getBus2(), b);     // addBranch: the tree is re-elected
-                elect(g1);
+            Graph<LfBus, LfBranch> graph1 = netOf.get(b.getBus1());
+            Graph<LfBus, LfBranch> graph2 = netOf.get(b.getBus2());
+            if (graph1 == graph2) {
+                graph1.addEdge(b.getBus1(), b.getBus2(), b);     // addBranch: the tree is re-elected
+                elect(graph1);
             } else {
                 Graph<LfBus, LfBranch> merged = new Pseudograph<>(LfBranch.class);
-                Graphs.addGraph(merged, g1);
-                Graphs.addGraph(merged, g2);
+                Graphs.addGraph(merged, graph1);
+                Graphs.addGraph(merged, graph2);
                 merged.addEdge(b.getBus1(), b.getBus2(), b);
                 register(merged);
             }
@@ -153,15 +153,15 @@ public final class ZeroImpedanceTreeReplay {
 
     /** OLF's addBranch: merge the two networks the coupler joins (a lone bus is its own), or re-elect within one. */
     private void addBranch(LfBranch b) {
-        Graph<LfBus, LfBranch> g1 = graphOf(b.getBus1());
-        Graph<LfBus, LfBranch> g2 = graphOf(b.getBus2());
-        if (g1 == g2) {
-            g1.addEdge(b.getBus1(), b.getBus2(), b);
-            elect(g1);
+        Graph<LfBus, LfBranch> graph1 = graphOf(b.getBus1());
+        Graph<LfBus, LfBranch> graph2 = graphOf(b.getBus2());
+        if (graph1 == graph2) {
+            graph1.addEdge(b.getBus1(), b.getBus2(), b);
+            elect(graph1);
         } else {
             Graph<LfBus, LfBranch> merged = new Pseudograph<>(LfBranch.class);
-            Graphs.addGraph(merged, g1);
-            Graphs.addGraph(merged, g2);
+            Graphs.addGraph(merged, graph1);
+            Graphs.addGraph(merged, graph2);
             merged.addEdge(b.getBus1(), b.getBus2(), b);
             register(merged);
         }
@@ -184,9 +184,9 @@ public final class ZeroImpedanceTreeReplay {
             for (Set<LfBus> set : sets) {
                 Set<LfBus> sorted = new LinkedHashSet<>();
                 set.stream().sorted(Comparator.comparing(LfBus::getId)).forEach(sorted::add);
-                Graph<LfBus, LfBranch> sub = new Pseudograph<>(LfBranch.class);
-                Graphs.addGraph(sub, new AsSubgraph<>(graph, sorted));
-                register(sub);
+                Graph<LfBus, LfBranch> subGraph = new Pseudograph<>(LfBranch.class);
+                Graphs.addGraph(subGraph, new AsSubgraph<>(graph, sorted));
+                register(subGraph);
             }
         } else if (inTree.remove(b)) {
             elect(graph);

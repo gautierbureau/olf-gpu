@@ -150,12 +150,12 @@ class GpuSaTransformerControlTest extends AbstractGpuSaTest {
             for (int i = 0; i < cpu.getPostContingencyResults().size(); i++) {
                 assertEquals(cpu.getPostContingencyResults().get(i).getStatus(),
                         gpu.getPostContingencyResults().get(i).getStatus());
-                var cb = cpu.getPostContingencyResults().get(i).getNetworkResult().getBusResults();
-                var gb = gpu.getPostContingencyResults().get(i).getNetworkResult().getBusResults();
-                assertEquals(cb.size(), gb.size());
-                for (int b = 0; b < cb.size(); b++) {
-                    org.junit.jupiter.api.Assertions.assertEquals(cb.get(b).getV(), gb.get(b).getV(), 1e-12,
-                            "transformer-VC bus voltage " + cb.get(b).getBusId());
+                var cpuBuses = cpu.getPostContingencyResults().get(i).getNetworkResult().getBusResults();
+                var gpuBuses = gpu.getPostContingencyResults().get(i).getNetworkResult().getBusResults();
+                assertEquals(cpuBuses.size(), gpuBuses.size());
+                for (int b = 0; b < cpuBuses.size(); b++) {
+                    org.junit.jupiter.api.Assertions.assertEquals(cpuBuses.get(b).getV(), gpuBuses.get(b).getV(), 1e-12,
+                            "transformer-VC bus voltage " + cpuBuses.get(b).getBusId());
                 }
             }
         } finally {
@@ -254,9 +254,9 @@ class GpuSaTransformerControlTest extends AbstractGpuSaTest {
         var old = t.getRatioTapChanger();
         var adder = t.newRatioTapChanger();
         for (int p = old.getLowTapPosition(); p <= old.getLowTapPosition() + 1; p++) {
-            var st = old.getStep(p);                         // keep only rho <= 1.0: maxR1 caps at 1.0
-            adder.beginStep().setRho(st.getRho()).setR(st.getR()).setX(st.getX())
-                    .setG(st.getG()).setB(st.getB()).endStep();
+            var step = old.getStep(p);                         // keep only rho <= 1.0: maxR1 caps at 1.0
+            adder.beginStep().setRho(step.getRho()).setR(step.getR()).setX(step.getX())
+                    .setG(step.getG()).setB(step.getB()).endStep();
         }
         adder.setLowTapPosition(old.getLowTapPosition()).setTapPosition(old.getLowTapPosition() + 1)
                 .setLoadTapChangingCapabilities(true)
@@ -421,9 +421,9 @@ class GpuSaTransformerControlTest extends AbstractGpuSaTest {
             var old = t.getRatioTapChanger();
             var adder = t.newRatioTapChanger();
             for (int p = old.getLowTapPosition(); p <= old.getLowTapPosition() + 1; p++) {
-                var st = old.getStep(p);                     // keep only rho <= 1.0: maxR1 caps at 1.0
-                adder.beginStep().setRho(st.getRho()).setR(st.getR()).setX(st.getX())
-                        .setG(st.getG()).setB(st.getB()).endStep();
+                var step = old.getStep(p);                     // keep only rho <= 1.0: maxR1 caps at 1.0
+                adder.beginStep().setRho(step.getRho()).setR(step.getR()).setX(step.getX())
+                        .setG(step.getG()).setB(step.getB()).endStep();
             }
             adder.setLowTapPosition(old.getLowTapPosition()).setTapPosition(old.getLowTapPosition() + 1)
                     .setLoadTapChangingCapabilities(true)
@@ -581,12 +581,12 @@ class GpuSaTransformerControlTest extends AbstractGpuSaTest {
         List<Contingency> ctgs = List.of(new Contingency(bisHolder[0], new BranchContingency(bisHolder[0])));
         com.powsybl.security.SecurityAnalysisParameters sap = new com.powsybl.security.SecurityAnalysisParameters();
         sap.setLoadFlowParameters(mkSaLfp.get());
-        List<com.powsybl.security.monitor.StateMonitor> mon = List.of(new com.powsybl.security.monitor.StateMonitor(
+        List<com.powsybl.security.monitor.StateMonitor> monitors = List.of(new com.powsybl.security.monitor.StateMonitor(
                 com.powsybl.contingency.ContingencyContext.all(), java.util.Set.of(),
                 saNet.getVoltageLevelStream().map(vl -> vl.getId()).collect(java.util.stream.Collectors.toSet()), java.util.Set.of()));
-        SecurityAnalysisResult saCpu = runSecurityAnalysis(saNet, ctgs, mon, sap);
+        SecurityAnalysisResult saCpu = runSecurityAnalysis(saNet, ctgs, monitors, sap);
         securityAnalysisProvider = new GpuSecurityAnalysisProvider(commonTestConfig.matrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>());
-        SecurityAnalysisResult saGpu = runSecurityAnalysis(baseNet.get(), ctgs, mon, sap);
+        SecurityAnalysisResult saGpu = runSecurityAnalysis(baseNet.get(), ctgs, monitors, sap);
         securityAnalysisProvider = new OpenSecurityAnalysisProvider(commonTestConfig.matrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>());
         double saCpuV = saCpu.getPostContingencyResults().get(0).getNetworkResult().getBusResults().stream().filter(b -> b.getBusId().equals("BUS_3")).findFirst().orElseThrow().getV();
         double saGpuV = saGpu.getPostContingencyResults().get(0).getNetworkResult().getBusResults().stream().filter(b -> b.getBusId().equals("BUS_3")).findFirst().orElseThrow().getV();
@@ -626,15 +626,15 @@ class GpuSaTransformerControlTest extends AbstractGpuSaTest {
         com.powsybl.security.SecurityAnalysisParameters sap = new com.powsybl.security.SecurityAnalysisParameters();
         sap.setLoadFlowParameters(lfp);
         java.util.Set<String> vls = network.getVoltageLevelStream().map(vl -> vl.getId()).collect(java.util.stream.Collectors.toSet());
-        List<com.powsybl.security.monitor.StateMonitor> mon = List.of(new com.powsybl.security.monitor.StateMonitor(
+        List<com.powsybl.security.monitor.StateMonitor> monitors = List.of(new com.powsybl.security.monitor.StateMonitor(
                 com.powsybl.contingency.ContingencyContext.all(), java.util.Set.of(), vls, java.util.Set.of()));
         java.util.function.Function<SecurityAnalysisResult, Double> v3 = r -> r.getPostContingencyResults().get(0)
                 .getNetworkResult().getBusResults().stream().filter(b -> b.getBusId().equals("BUS_3")).findFirst().orElseThrow().getV();
-        double cpu = v3.apply(runSecurityAnalysis(network, ctgs, mon, sap));
+        double cpu = v3.apply(runSecurityAnalysis(network, ctgs, monitors, sap));
         securityAnalysisProvider = new GpuSecurityAnalysisProvider(commonTestConfig.matrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>());
         double gpu;
         try {
-            gpu = v3.apply(runSecurityAnalysis(network, ctgs, mon, sap));
+            gpu = v3.apply(runSecurityAnalysis(network, ctgs, monitors, sap));
         } finally {
             securityAnalysisProvider = new OpenSecurityAnalysisProvider(commonTestConfig.matrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>());
         }
@@ -688,7 +688,7 @@ class GpuSaTransformerControlTest extends AbstractGpuSaTest {
         com.powsybl.security.SecurityAnalysisParameters sap = new com.powsybl.security.SecurityAnalysisParameters();
         sap.setLoadFlowParameters(lfp);
         List<Contingency> ctgs = List.of(new Contingency(outaged, new BranchContingency(outaged)));
-        List<com.powsybl.security.monitor.StateMonitor> mon = List.of(new com.powsybl.security.monitor.StateMonitor(
+        List<com.powsybl.security.monitor.StateMonitor> monitors = List.of(new com.powsybl.security.monitor.StateMonitor(
                 com.powsybl.contingency.ContingencyContext.all(), java.util.Set.of(),
                 mkNet.get().getVoltageLevelStream().map(vl -> vl.getId()).collect(java.util.stream.Collectors.toSet()), java.util.Set.of()));
         java.util.function.Function<SecurityAnalysisResult, Double> v3 = r -> r.getPostContingencyResults().get(0)
@@ -698,7 +698,7 @@ class GpuSaTransformerControlTest extends AbstractGpuSaTest {
         com.powsybl.commons.report.ReportNode rSa = com.powsybl.commons.report.ReportNode.newRootReportNode()
                 .withResourceBundles(com.powsybl.openloadflow.util.report.PowsyblOpenLoadFlowReportResourceBundle.BASE_NAME)
                 .withMessageTemplate("olf.securityAnalysis").build();
-        double cpu = v3.apply(runSecurityAnalysis(mkNet.get(), ctgs, mon, sap, rSa));
+        double cpu = v3.apply(runSecurityAnalysis(mkNet.get(), ctgs, monitors, sap, rSa));
         var postNode = findSubtree(rSa, "olf.postContingencySimulation");
         java.util.Map<String, Integer> tPost = new java.util.TreeMap<>();
         if (postNode != null) {
@@ -710,7 +710,7 @@ class GpuSaTransformerControlTest extends AbstractGpuSaTest {
         securityAnalysisProvider = new GpuSecurityAnalysisProvider(commonTestConfig.matrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>());
         double gpu;
         try {
-            gpu = v3.apply(runSecurityAnalysis(mkNet.get(), ctgs, mon, sap));
+            gpu = v3.apply(runSecurityAnalysis(mkNet.get(), ctgs, monitors, sap));
         } finally {
             securityAnalysisProvider = new OpenSecurityAnalysisProvider(commonTestConfig.matrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>());
         }

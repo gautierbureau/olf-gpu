@@ -40,9 +40,9 @@ public final class DeviceLoopTables {
             return GpuRealisticVoltageFixingLoop.NONE;
         }
         com.powsybl.openloadflow.ac.outerloop.AcOuterLoop last = null;
-        for (var ol : p.getOuterLoops()) {
-            if (ol.canFixUnrealisticState()) {
-                last = ol;
+        for (var outerLoop : p.getOuterLoops()) {
+            if (outerLoop.canFixUnrealisticState()) {
+                last = outerLoop;
             }
         }
         if (last == null) {
@@ -102,8 +102,8 @@ public final class DeviceLoopTables {
                 gpuData.reactiveLimits().svcMinB(), gpuData.reactiveLimits().svcMaxB(), gpuData.reactiveLimits().baseVSquared());
         // OLF's global forced-PV election keys — the RL pass keeps the strongest bus PV when every
         // PV bus would switch, instead of rejecting the scenario to the CPU.
-        ReactiveLimitEntries rl = gpuData.reactiveLimits();
-        ReactiveLimitsNative.setBatchReactiveLimitStrongestPvKeys(handle, rl.nominalV(), rl.activePowerRow(), rl.targetP(), rl.idRank());
+        ReactiveLimitEntries reactiveLimits = gpuData.reactiveLimits();
+        ReactiveLimitsNative.setBatchReactiveLimitStrongestPvKeys(handle, reactiveLimits.nominalV(), reactiveLimits.activePowerRow(), reactiveLimits.targetP(), reactiveLimits.idRank());
         // voltageRemoteControlRobustMode: install (or clear, for a cached context whose run has the
         // mode off) the realistic-V criteria the RL pass applies to REMOTE voltage controllers.
         // REALISTIC_VOLTAGE_MARGIN = 1.02, straight out of ReactiveLimitsOuterLoop.

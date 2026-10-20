@@ -104,7 +104,7 @@ public final class ForceTargetQInReactiveLimits {
                     continue;                                // not in the bus's generation target Q
                 }
                 var curve = ((AbstractLfGenerator) gen).getReactiveLimits()
-                        .filter(rl -> rl.getKind() == ReactiveLimitsKind.CURVE).orElse(null);
+                        .filter(reactiveLimits -> reactiveLimits.getKind() == ReactiveLimitsKind.CURVE).orElse(null);
                 int slot = distributedSlackGeneratorIndexOf(gpuData.distributedSlack().generatorId(), gen.getId());
                 if (curve == null || slot < 0 || distributedSlackParameters.factor(gen) <= 0) {
                     continue;                                // its clamp cannot move: the base target stays exact
@@ -179,7 +179,7 @@ public final class ForceTargetQInReactiveLimits {
      *  member or pilot), -1 otherwise. */
     private static int localReactiveLimitEntryOf(GpuAcData gpuData, LfBus bus) {
         boolean local = bus.getGeneratorVoltageControl()
-                .map(vc -> vc.getControlledBus() == bus && vc.getControllerElements().size() == 1).orElse(false);
+                .map(voltageControl -> voltageControl.getControlledBus() == bus && voltageControl.getControllerElements().size() == 1).orElse(false);
         int[] busNums = gpuData.reactiveLimits().busNum();
         if (!local || busNums == null) {
             return -1;

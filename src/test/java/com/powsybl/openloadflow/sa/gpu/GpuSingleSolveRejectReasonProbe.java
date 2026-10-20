@@ -56,9 +56,9 @@ class GpuSingleSolveRejectReasonProbe {
         if (eps != null && !eps.isBlank()) {
             OpenLoadFlowParameters.create(lfp).setNewtonRaphsonConvEpsPerEq(Double.parseDouble(eps));
         }
-        String st = System.getenv("OLF_GPU_DISC_SLACKTOL");
-        if (st != null && !st.isBlank()) {
-            OpenLoadFlowParameters.create(lfp).setSlackBusPMaxMismatch(Double.parseDouble(st) * 100.0);
+        String slackBusPMaxMismatch = System.getenv("OLF_GPU_DISC_SLACKTOL");
+        if (slackBusPMaxMismatch != null && !slackBusPMaxMismatch.isBlank()) {
+            OpenLoadFlowParameters.create(lfp).setSlackBusPMaxMismatch(Double.parseDouble(slackBusPMaxMismatch) * 100.0);
         }
         return lfp;
     }

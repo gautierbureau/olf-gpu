@@ -35,8 +35,8 @@ public final class RemoteMemberQPacker {
      *  not the group's controlled bus. Shared with ReactiveCapabilityCurves, which REPLAYS this enumeration
      *  and must count exactly the same buses (a drift throws and the run falls to the CPU). */
     public static boolean isRemoteMemberEntry(LfBus bus) {
-        GeneratorVoltageControl vc = mainGenVc(bus);
-        return vc != null && GpuAcRowIndexing.isRemoteGenVcControllerElement(bus) && vc.getControlledBus() != bus;
+        GeneratorVoltageControl voltageControl = mainGenVc(bus);
+        return voltageControl != null && GpuAcRowIndexing.isRemoteGenVcControllerElement(bus) && voltageControl.getControlledBus() != bus;
     }
 
     /**
@@ -99,8 +99,8 @@ public final class RemoteMemberQPacker {
                 if (PilotSelfPacker.isPilotSelfEntry(bus) && columns.alternateQRow()[bus.getNum()] <= -2) {
                     continue;
                 }
-                var vc = bus.getGeneratorVoltageControl().orElseThrow();
-                if (vCol[vc.getControlledBus().getNum()] < 0) {
+                var voltageControl = bus.getGeneratorVoltageControl().orElseThrow();
+                if (vCol[voltageControl.getControlledBus().getNum()] < 0) {
                     continue;
                 }
                 // The row the reactive-limit check READS (native reactiveLimitReactivePowerRow): for a relocated child that is the

@@ -55,25 +55,25 @@ public final class DistrQPacker {
     }
 
     static Pack distrQPack(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
-                             ExtractionColumns columns, GpuAcFamilyPacker.Packs family, ReactiveLimitEntries rl) {
+                             ExtractionColumns columns, GpuAcFamilyPacker.Packs family, ReactiveLimitEntries reactiveLimits) {
         // member tables (plan-B3): raw keys + RL-entry mapping + group ranges, in group member order
-        MemberTables mt = new MemberTables(new java.util.HashMap<>(), new ArrayList<>(), new ArrayList<>(),
+        MemberTables memberTables = new MemberTables(new java.util.HashMap<>(), new ArrayList<>(), new ArrayList<>(),
                 new ArrayList<>(), new ArrayList<>(), new ArrayList<>(), new ArrayList<>(), new ArrayList<>(),
                 new ArrayList<>(), new ArrayList<>());
         java.util.Map<Integer, Integer> reactiveLimitEntryByBusNum = new java.util.HashMap<>();
-        for (int i = 0; i < rl.busNum().length; i++) {
-            reactiveLimitEntryByBusNum.put(rl.busNum()[i], i);
+        for (int i = 0; i < reactiveLimits.busNum().length; i++) {
+            reactiveLimitEntryByBusNum.put(reactiveLimits.busNum()[i], i);
         }
         List<Integer> relocationGroupList = new ArrayList<>();
         for (LfBus pilot : network.getBuses()) {
-            GeneratorVoltageControl gvc = pilot.getGeneratorVoltageControl()
+            GeneratorVoltageControl voltageControl = pilot.getGeneratorVoltageControl()
                     .filter(c -> c.getMergeStatus() == VoltageControl.MergeStatus.MAIN)
                     .filter(c -> pilot.isGeneratorVoltageControlled() && !c.isLocalControl())
                     .orElse(null);
-            if (gvc == null) {
+            if (voltageControl == null) {
                 continue;
             }
-            List<LfBus> controllers = gvc.getMergedControllerElements();
+            List<LfBus> controllers = voltageControl.getMergedControllerElements();
             double[] rawKeys = com.powsybl.openloadflow.network.Control.createReactiveKeys(
                     controllers, com.powsybl.openloadflow.network.LfGenerator.GeneratorControlType.VOLTAGE);
             // A controller bus a contingency disabled takes no share (GeneratorVoltageControl.updateReactiveKeys sets
@@ -84,8 +84,8 @@ public final class DistrQPacker {
                     rawKeys[i] = 0;
                 }
             }
-            int start = mt.key().size();
-            LfBus freeMember = controllers.stream().filter(b -> !b.isDisabled() && gvc.isControllerEnabled(b))
+            int start = memberTables.key().size();
+            LfBus freeMember = controllers.stream().filter(b -> !b.isDisabled() && voltageControl.isControllerEnabled(b))
                     .findFirst().orElse(null);
             // the pilot's relocation group: the kernels re-pick the pilot-Q carrier by mode-scan, so
             // the CURRENT carrier's DISTR_Q row is suppressed and its target carries the pilot's Q
@@ -94,9 +94,9 @@ public final class DistrQPacker {
             int pilotRelocationGroup = columns.reactiveRelocationGroupOfPilot()[pilot.getNum()];
             for (int i = 0; i < controllers.size(); i++) {
                 LfBus m = controllers.get(i);
-                mt.memberIdxByBusNum().put(m.getNum(), mt.key().size());
-                mt.key().add(rawKeys[i]);
-                mt.reactiveLimitEntry().add(reactiveLimitEntryByBusNum.getOrDefault(m.getNum(), -1));
+                memberTables.memberIdxByBusNum().put(m.getNum(), memberTables.key().size());
+                memberTables.key().add(rawKeys[i]);
+                memberTables.reactiveLimitEntry().add(reactiveLimitEntryByBusNum.getOrDefault(m.getNum(), -1));
                 // The member's DISTR_Q row, NOT simply its V column: under the coupler-tree relocation a
                 // relocated child's DISTR_Q lives on its parent coupler's DUMMY_Q (the same move
                 // buildDistrQContributions makes through distrQRow's tree overload), and its own V row
@@ -105,61 +105,61 @@ public final class DistrQPacker {
                 // opening the coupler had just set - measured as row 12566 ending at target 0 instead of
                 // 1.142 on BUS-6014_BBS_2.
                 int mParent = columns.spanningTreeParentBranch()[m.getNum()];
-                mt.row().add(mParent >= 0 && columns.dummyQCol()[mParent] >= 0
+                memberTables.row().add(mParent >= 0 && columns.dummyQCol()[mParent] >= 0
                         ? columns.dummyQCol()[mParent] : columns.vCol()[m.getNum()]);
                 // a member OWNS a DISTR_Q row when the equation EXISTS and it is not the FREE
                 // member (whose row carries the pilot's relocated Q)
-                mt.hasRow().add((byte) (m != freeMember && !m.isDisabled()
+                memberTables.hasRow().add((byte) (m != freeMember && !m.isDisabled()
                         && es.getEquation(m.getNum(), AcEquationType.DISTR_Q).isPresent() ? 1 : 0));
                 // the member's UNPINNED targetQ (generationTargetQ - loadTargetQ), which is what
                 // AcTargetVector reads for every member the RL loop has not frozen; a frozen
                 // member's targetQ is its q limit and the kernel derives that from the RL tables.
-                mt.targetQ().add(ReactiveLimitsPacker.unpinnedTargetQ(m));
-                mt.busNum().add(m.getNum());
+                memberTables.targetQ().add(ReactiveLimitsPacker.unpinnedTargetQ(m));
+                memberTables.busNum().add(m.getNum());
                 // AcTargetVector reads the member's OWN control's merged elements, so a control merged INTO this
                 // group (DEPENDENT: its own list is just its controller) sums only its own targetQ. Recorded as bus
                 // numbers here and resolved to member indices once every member is known.
-                mt.tgtPeers().add(m.getGeneratorVoltageControl()
+                memberTables.tgtPeers().add(m.getGeneratorVoltageControl()
                         .map(c -> c.getMergedControllerElements().stream().map(LfBus::getNum).toList())
                         .orElse(List.of(m.getNum())));
                 relocationGroupList.add(pilotRelocationGroup);
             }
             for (int i = 0; i < controllers.size(); i++) {
-                mt.groupStart().add(start);
-                mt.groupCount().add(controllers.size());
+                memberTables.groupStart().add(start);
+                memberTables.groupCount().add(controllers.size());
             }
         }
-        List<int[]> dq = new ArrayList<>();      // {elem, side, distrQRow, kind, kMember, jMember} per DISTR_Q contribution
+        List<int[]> distrQContributions = new ArrayList<>();      // {elem, side, distrQRow, kind, kMember, jMember} per DISTR_Q contribution
         List<Double> distrQWeights = new ArrayList<>();    // weight per contribution
         buildDistrQContributions(network, es, columns.vCol(), family.closedBranchElementOf(), family.shuntElementOf(),
-                family.openBranchElementOf(), columns.dummyQCol(), columns.spanningTreeParentBranch(), dq, distrQWeights, mt.memberIdxByBusNum());
+                family.openBranchElementOf(), columns.dummyQCol(), columns.spanningTreeParentBranch(), distrQContributions, distrQWeights, memberTables.memberIdxByBusNum());
         // distrQKind: a GpuReactiveTermKind (for DUMMY_Q, elem holds the var column)
-        int[] distrQKind = new int[dq.size()];
-        int[] distrQRowMember = new int[dq.size()];
-        int[] distrQInjectionMember = new int[dq.size()];
-        int[] distrQElement = new int[dq.size()];
-        int[] distrQSide = new int[dq.size()];
-        int[] distrQRow = new int[dq.size()];
-        double[] distrQWeight = new double[dq.size()];
-        for (int i = 0; i < dq.size(); i++) {
-            distrQElement[i] = dq.get(i)[0];
-            distrQSide[i] = dq.get(i)[1];
-            distrQRow[i] = dq.get(i)[2];
-            distrQKind[i] = dq.get(i)[3];
-            distrQRowMember[i] = dq.get(i)[4];
-            distrQInjectionMember[i] = dq.get(i)[5];
+        int[] distrQKind = new int[distrQContributions.size()];
+        int[] distrQRowMember = new int[distrQContributions.size()];
+        int[] distrQInjectionMember = new int[distrQContributions.size()];
+        int[] distrQElement = new int[distrQContributions.size()];
+        int[] distrQSide = new int[distrQContributions.size()];
+        int[] distrQRow = new int[distrQContributions.size()];
+        double[] distrQWeight = new double[distrQContributions.size()];
+        for (int i = 0; i < distrQContributions.size(); i++) {
+            distrQElement[i] = distrQContributions.get(i)[0];
+            distrQSide[i] = distrQContributions.get(i)[1];
+            distrQRow[i] = distrQContributions.get(i)[2];
+            distrQKind[i] = distrQContributions.get(i)[3];
+            distrQRowMember[i] = distrQContributions.get(i)[4];
+            distrQInjectionMember[i] = distrQContributions.get(i)[5];
             distrQWeight[i] = distrQWeights.get(i);
         }
-        byte[] hasRow = new byte[mt.hasRow().size()];
+        byte[] hasRow = new byte[memberTables.hasRow().size()];
         for (int i = 0; i < hasRow.length; i++) {
-            hasRow[i] = mt.hasRow().get(i);
+            hasRow[i] = memberTables.hasRow().get(i);
         }
-        int[] tgtPtr = new int[mt.tgtPeers().size() + 1];
+        int[] tgtPtr = new int[memberTables.tgtPeers().size() + 1];
         List<Integer> tgtPeer = new ArrayList<>();
-        for (int i = 0; i < mt.tgtPeers().size(); i++) {
+        for (int i = 0; i < memberTables.tgtPeers().size(); i++) {
             tgtPtr[i] = tgtPeer.size();
-            for (int busNum : mt.tgtPeers().get(i)) {
-                Integer peer = mt.memberIdxByBusNum().get(busNum);
+            for (int busNum : memberTables.tgtPeers().get(i)) {
+                Integer peer = memberTables.memberIdxByBusNum().get(busNum);
                 if (peer != null) {                          // a peer outside the packed group cannot be summed
                     tgtPeer.add(peer);
                 }
@@ -167,10 +167,10 @@ public final class DistrQPacker {
         }
         tgtPtr[tgtPtr.length - 1] = tgtPeer.size();
         return new Pack(new DistrQTerms(distrQElement, distrQSide, distrQWeight, distrQRow, distrQKind, distrQRowMember, distrQInjectionMember),
-                new DistrQMembers(GpuAcArrays.toDoubleArray(mt.key()), GpuAcArrays.toIntArray(mt.reactiveLimitEntry()),
-                GpuAcArrays.toIntArray(mt.groupStart()), GpuAcArrays.toIntArray(mt.groupCount()),
-                GpuAcArrays.toIntArray(mt.row()), hasRow, GpuAcArrays.toIntArray(relocationGroupList),
-                GpuAcArrays.toDoubleArray(mt.targetQ()), GpuAcArrays.toIntArray(mt.busNum()),
+                new DistrQMembers(GpuAcArrays.toDoubleArray(memberTables.key()), GpuAcArrays.toIntArray(memberTables.reactiveLimitEntry()),
+                GpuAcArrays.toIntArray(memberTables.groupStart()), GpuAcArrays.toIntArray(memberTables.groupCount()),
+                GpuAcArrays.toIntArray(memberTables.row()), hasRow, GpuAcArrays.toIntArray(relocationGroupList),
+                GpuAcArrays.toDoubleArray(memberTables.targetQ()), GpuAcArrays.toIntArray(memberTables.busNum()),
                 tgtPtr, GpuAcArrays.toIntArray(tgtPeer)));
     }
 
@@ -190,20 +190,20 @@ public final class DistrQPacker {
                                                  int[] dummyQCol, int[] spanningTreeParentBranch, List<int[]> out, List<Double> weights,
                                                  java.util.Map<Integer, Integer> memberIdxByBusNum) {
         for (LfBus pilot : network.getBuses()) {
-            GeneratorVoltageControl gvc = pilot.getGeneratorVoltageControl()
+            GeneratorVoltageControl voltageControl = pilot.getGeneratorVoltageControl()
                     .filter(c -> c.getMergeStatus() == VoltageControl.MergeStatus.MAIN)
                     .filter(c -> pilot.isGeneratorVoltageControlled() && !c.isLocalControl())
                     .orElse(null);
-            if (gvc == null) {
+            if (voltageControl == null) {
                 continue;
             }
-            List<LfBus> controllers = gvc.getMergedControllerElements();
+            List<LfBus> controllers = voltageControl.getMergedControllerElements();
             // CANONICAL for a group with a candidate table: the free (reference) controller is the FIRST
             // member, as in the all-enabled state — the per-scenario row modes and the carrier gate decide
             // which DISTR_Q rows are live. Else (no table) the extraction-time free member, as before.
-            LfBus freeCtl = GpuAcRowIndexing.hasCandidateTable(gvc, es)
+            LfBus freeCtl = GpuAcRowIndexing.hasCandidateTable(voltageControl, es)
                     ? controllers.get(0)
-                    : controllers.stream().filter(b -> !b.isDisabled() && gvc.isControllerEnabled(b)).findFirst().orElse(null);
+                    : controllers.stream().filter(b -> !b.isDisabled() && voltageControl.isControllerEnabled(b)).findFirst().orElse(null);
             for (LfBus gk : controllers) {
                 // EXISTENCE-keyed (the A1 lesson): pack every non-free member whose DISTR_Q equation
                 // EXISTS — a base-PINNED member's row is inactive (mode 4, own Q) but an in-flight

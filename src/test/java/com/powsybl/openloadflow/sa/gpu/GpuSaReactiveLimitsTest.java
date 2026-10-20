@@ -340,14 +340,14 @@ class GpuSaReactiveLimitsTest extends AbstractGpuSaTest {
         // CPU only: the flag must move B4 by more than any tolerance below, or this test proves nothing.
         java.util.Set<String> vls = network.getVoltageLevelStream().map(vl -> vl.getId())
                 .collect(java.util.stream.Collectors.toSet());
-        List<com.powsybl.security.monitor.StateMonitor> mon = List.of(new com.powsybl.security.monitor.StateMonitor(
+        List<com.powsybl.security.monitor.StateMonitor> monitors = List.of(new com.powsybl.security.monitor.StateMonitor(
                 com.powsybl.contingency.ContingencyContext.all(), java.util.Set.of(), vls, java.util.Set.of()));
         double maxShift = 0;
         SecurityAnalysisResult[] cpu = new SecurityAnalysisResult[2];
         for (int f = 0; f < 2; f++) {
             com.powsybl.security.SecurityAnalysisParameters sap = new com.powsybl.security.SecurityAnalysisParameters();
             sap.setLoadFlowParameters(params.apply(f == 1));
-            cpu[f] = runSecurityAnalysis(network, ctgs, mon, sap);
+            cpu[f] = runSecurityAnalysis(network, ctgs, monitors, sap);
         }
         for (int i = 0; i < ctgs.size(); i++) {
             var off = cpu[0].getPostContingencyResults().get(i).getNetworkResult().getBusResults();
@@ -417,13 +417,13 @@ class GpuSaReactiveLimitsTest extends AbstractGpuSaTest {
         };
         java.util.Set<String> vls = network.getVoltageLevelStream().map(vl -> vl.getId())
                 .collect(java.util.stream.Collectors.toSet());
-        List<com.powsybl.security.monitor.StateMonitor> mon = List.of(new com.powsybl.security.monitor.StateMonitor(
+        List<com.powsybl.security.monitor.StateMonitor> monitors = List.of(new com.powsybl.security.monitor.StateMonitor(
                 com.powsybl.contingency.ContingencyContext.all(), java.util.Set.of(), vls, java.util.Set.of()));
         SecurityAnalysisResult[] cpu = new SecurityAnalysisResult[2];
         for (int f = 0; f < 2; f++) {
             com.powsybl.security.SecurityAnalysisParameters sap = new com.powsybl.security.SecurityAnalysisParameters();
             sap.setLoadFlowParameters(params.apply(f == 1));
-            cpu[f] = runSecurityAnalysis(network, ctgs, mon, sap);
+            cpu[f] = runSecurityAnalysis(network, ctgs, monitors, sap);
         }
         double maxShift = 0;
         for (int i = 0; i < ctgs.size(); i++) {

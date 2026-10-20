@@ -1343,18 +1343,18 @@ final class GpuSaTestNetworks {
         line.accept(new String[] {"ln2h", "b2", "b2h"}, new double[] {0.002, 0.02});
         // PQ converter buses: a voltage-controlled converter bus pins |V| and the lost increment
         // then moves only the ANGLES, which the bus-voltage comparison does not see
-        for (String[] st : new String[][] {{"cs1", "b1h", "false"}, {"cs2", "b2h", "false"}, {"cs1b", "b1h", "false"}, {"cs2b", "b2h", "false"}}) {
-            network.getVoltageLevel("vl_" + st[1]).newVscConverterStation().setId(st[0]).setBus(st[1]).setConnectableBus(st[1])
-                    .setVoltageRegulatorOn(Boolean.parseBoolean(st[2])).setVoltageSetpoint(1).setReactivePowerSetpoint(0)
+        for (String[] station : new String[][] {{"cs1", "b1h", "false"}, {"cs2", "b2h", "false"}, {"cs1b", "b1h", "false"}, {"cs2b", "b2h", "false"}}) {
+            network.getVoltageLevel("vl_" + station[1]).newVscConverterStation().setId(station[0]).setBus(station[1]).setConnectableBus(station[1])
+                    .setVoltageRegulatorOn(Boolean.parseBoolean(station[2])).setVoltageSetpoint(1).setReactivePowerSetpoint(0)
                     .setLossFactor(1.1f).add();
         }
-        for (String[] hv : new String[][] {{"hvdc12", "cs1", "cs2", "0"}, {"hvdc12_BIS", "cs1b", "cs2b", "1"}}) {
-            network.newHvdcLine().setId(hv[0]).setConverterStationId1(hv[1]).setConverterStationId2(hv[2])
+        for (String[] hvdcLine : new String[][] {{"hvdc12", "cs1", "cs2", "0"}, {"hvdc12_BIS", "cs1b", "cs2b", "1"}}) {
+            network.newHvdcLine().setId(hvdcLine[0]).setConverterStationId1(hvdcLine[1]).setConverterStationId2(hvdcLine[2])
                     .setNominalV(400).setR(0.1).setActivePowerSetpoint(2)
                     .setConvertersMode(com.powsybl.iidm.network.HvdcLine.ConvertersMode.SIDE_1_INVERTER_SIDE_2_RECTIFIER)
                     .setMaxP(10).add()
                     .newExtension(com.powsybl.iidm.network.extensions.HvdcAngleDroopActivePowerControlAdder.class)
-                    .withDroop(1).withP0(Float.parseFloat(hv[3])).withEnabled(true).add();
+                    .withDroop(1).withP0(Float.parseFloat(hvdcLine[3])).withEnabled(true).add();
         }
         return network;
     }

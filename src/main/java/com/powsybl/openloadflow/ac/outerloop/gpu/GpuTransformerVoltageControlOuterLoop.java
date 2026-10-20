@@ -151,7 +151,7 @@ public final class GpuTransformerVoltageControlOuterLoop {
     public static boolean transformerControlSupported(LfNetwork network) {
         double maxControlledNominalV = network.<LfBranch>getControllerElements(com.powsybl.openloadflow.network.VoltageControl.Type.TRANSFORMER).stream()
                 .flatMap(b -> b.getVoltageControl().stream())
-                .map(vc -> vc.getControlledBus().getNominalV())
+                .map(voltageControl -> voltageControl.getControlledBus().getNominalV())
                 .mapToDouble(Double::doubleValue).max().orElse(-1);
         if (maxControlledNominalV < 0) {
             return true;                                     // no transformer controls at all: loop is a no-op
@@ -177,12 +177,12 @@ public final class GpuTransformerVoltageControlOuterLoop {
             if (bus.isDisabled() || !bus.isTransformerVoltageControlled()) {
                 continue;
             }
-            TransformerVoltageControl tvc = bus.getTransformerVoltageControl().orElse(null);
-            if (tvc == null) {
+            TransformerVoltageControl voltageControl = bus.getTransformerVoltageControl().orElse(null);
+            if (voltageControl == null) {
                 continue;
             }
             boolean valid = true;
-            for (LfBranch branch : tvc.getControllerElements()) {
+            for (LfBranch branch : voltageControl.getControllerElements()) {
                 if (!branch.isConnectedAtBothSides() || branch.getBus1().getNominalV() == branch.getBus2().getNominalV()) {
                     valid = false;
                 }
@@ -224,11 +224,11 @@ public final class GpuTransformerVoltageControlOuterLoop {
             if (bus.getNominalV() > limit) {
                 continue;
             }
-            var vc = bus.getGeneratorVoltageControl().orElse(null);
-            if (vc == null) {
+            var voltageControl = bus.getGeneratorVoltageControl().orElse(null);
+            if (voltageControl == null) {
                 continue;
             }
-            for (LfBus controller : vc.getMergedControllerElements()) {
+            for (LfBus controller : voltageControl.getMergedControllerElements()) {
                 if (hasStepUpTransformers(controller, limit)) {
                     continue;
                 }
@@ -312,7 +312,7 @@ public final class GpuTransformerVoltageControlOuterLoop {
      *  branches — at the base neither exists yet; the kernel then asks which of those buses is still ON).
      *  Null when a candidate is a remote controller. */
     public static FreezeTables buildFreezeTables(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
-                                                 List<TransformerController> tcs, double minNominalVOverride,
+                                                 List<TransformerController> transformerControllers, double minNominalVOverride,
                                                  int[] reactiveLimitBusNum) {
         double limit = minNominalVoltageLimit(network, minNominalVOverride);
         List<LfBus> candidates = freezeCandidates(network, limit);
@@ -351,8 +351,8 @@ public final class GpuTransformerVoltageControlOuterLoop {
             }
         }
         int nMembers = 0;
-        for (TransformerController tc : tcs) {
-            nMembers += tc.members().length;
+        for (TransformerController transformerController : transformerControllers) {
+            nMembers += transformerController.members().length;
         }
         // The universe of the connectivity fix: every generator-voltage-CONTROLLED bus, in bus order.
         // OLF's test is isGeneratorVoltageControlled() && isGeneratorVoltageControlEnabled(); the first
@@ -370,9 +370,9 @@ public final class GpuTransformerVoltageControlOuterLoop {
         int[] fixPvRow = pvRows.stream().mapToInt(Integer::intValue).toArray();
         int[] memberBranchNum = new int[nMembers];
         int mi = 0;
-        for (TransformerController tc : tcs) {
-            for (Member mem : tc.members()) {
-                memberBranchNum[mi++] = mem.branchNum();
+        for (TransformerController transformerController : transformerControllers) {
+            for (Member member : transformerController.members()) {
+                memberBranchNum[mi++] = member.branchNum();
             }
         }
         FixMaskBuilder builder = new FixMaskBuilder(network, memberBranchNum, pvBuses, words);
@@ -454,13 +454,13 @@ public final class GpuTransformerVoltageControlOuterLoop {
                 }
                 for (int m = 0; m < memberBranchNum.length; m++) {
                     LfBranch branch = network.getBranch(memberBranchNum[m]);
-                    var vc = branch != null ? branch.getVoltageControl().orElse(null) : null;
+                    var voltageControl = branch != null ? branch.getVoltageControl().orElse(null) : null;
                     int[] src;
-                    if (vc == null) {
+                    if (voltageControl == null) {
                         src = all;                             // defensive: OLF never disables such a member
                     } else {
-                        LfBus notControlled = vc.getControlledBus() == branch.getBus1() ? branch.getBus2()
-                                : vc.getControlledBus() == branch.getBus2() ? branch.getBus1() : null;
+                        LfBus notControlled = voltageControl.getControlledBus() == branch.getBus1() ? branch.getBus2()
+                                : voltageControl.getControlledBus() == branch.getBus2() ? branch.getBus1() : null;
                         Integer comp = notControlled != null ? componentOf(connectivity, notControlled) : null;
                         src = comp == null ? all : byComponent.getOrDefault(comp, new int[words]);
                     }
@@ -483,15 +483,15 @@ public final class GpuTransformerVoltageControlOuterLoop {
 
     /** Install the freeze tables on a context whose discrete TVC tables {@link #uploadToDevice} just
      *  installed (AFTER_GENERATOR only). */
-    public static void uploadFreeze(long handle, FreezeTables fz) {
-        if (fz == null) {
+    public static void uploadFreeze(long handle, FreezeTables freezeTables) {
+        if (freezeTables == null) {
             TransformerVoltageControlNative.setBatchGeneratorVoltageControlFreeze(handle, null, null, null, null);
             return;
         }
-        TransformerVoltageControlNative.setBatchGeneratorVoltageControlFreeze(handle, fz.vRow(), fz.loadQ(), fz.reactiveLimitEntry(), fz.fixPvRow());
+        TransformerVoltageControlNative.setBatchGeneratorVoltageControlFreeze(handle, freezeTables.vRow(), freezeTables.loadQ(), freezeTables.reactiveLimitEntry(), freezeTables.fixPvRow());
         if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
             System.err.printf("TVD_FREEZE_UPLOAD nCandidates=%d fixPvBuses=%d members=%d%n",
-                    fz.vRow().length, fz.fixPvRow().length, fz.nMembers());
+                    freezeTables.vRow().length, freezeTables.fixPvRow().length, freezeTables.nMembers());
         }
     }
 
@@ -501,25 +501,25 @@ public final class GpuTransformerVoltageControlOuterLoop {
      * own pair. Padding slots repeat the base-topology masks, which is what an unused slot would have
      * used anyway.
      */
-    public static void uploadFixMasks(long handle, FreezeTables fz, List<BatchContingency> scenarios, int chunkSize) {
-        if (fz == null || !fz.hasFix()) {
+    public static void uploadFixMasks(long handle, FreezeTables freezeTables, List<BatchContingency> scenarios, int chunkSize) {
+        if (freezeTables == null || !freezeTables.hasFix()) {
             TransformerVoltageControlNative.setBatchTransformerVoltageControlFixMasks(handle, null, null, 0);
             return;
         }
-        int stride = fz.nMembers() * fz.fixWords();
+        int stride = freezeTables.nMembers() * freezeTables.fixWords();
         int[] minMask = new int[chunkSize * stride];
         int[] maxMask = new int[chunkSize * stride];
         for (int s = 0; s < chunkSize; s++) {
             if (s < scenarios.size()) {
                 List<LfBranch> outaged = new ArrayList<>(scenarios.get(s).outagedBranches());
                 outaged.addAll(scenarios.get(s).outagedZeroImpedanceBranches());
-                fz.builder().fill(outaged, minMask, s * stride, maxMask, s * stride);
+                freezeTables.builder().fill(outaged, minMask, s * stride, maxMask, s * stride);
             } else {
-                System.arraycopy(fz.minMask(), 0, minMask, s * stride, stride);
-                System.arraycopy(fz.maxMask(), 0, maxMask, s * stride, stride);
+                System.arraycopy(freezeTables.minMask(), 0, minMask, s * stride, stride);
+                System.arraycopy(freezeTables.maxMask(), 0, maxMask, s * stride, stride);
             }
         }
-        TransformerVoltageControlNative.setBatchTransformerVoltageControlFixMasks(handle, minMask, maxMask, fz.fixWords());
+        TransformerVoltageControlNative.setBatchTransformerVoltageControlFixMasks(handle, minMask, maxMask, freezeTables.fixWords());
     }
 
     /** Give the freeze state back to the network (batch-of-one): a frozen candidate is
@@ -527,19 +527,19 @@ public final class GpuTransformerVoltageControlOuterLoop {
      *  generation target is the net injection), an unfrozen one whose network state still shows OUR
      *  freeze (control off, target frozen, no reactive-limit type) is re-enabled like
      *  {@code enableGeneratorVoltageControlsUnderMaxControlledNominalVoltage}. */
-    public static void applyFreezeToNetwork(LfNetwork network, FreezeTables fz, double[] state) {
-        if (fz == null || state == null) {
+    public static void applyFreezeToNetwork(LfNetwork network, FreezeTables freezeTables, double[] state) {
+        if (freezeTables == null || state == null) {
             return;
         }
-        for (int c = 0; c < fz.vRow().length && c * 2 + 1 < state.length; c++) {
-            LfBus bus = network.getBus(fz.busNum()[c]);
+        for (int c = 0; c < freezeTables.vRow().length && c * 2 + 1 < state.length; c++) {
+            LfBus bus = network.getBus(freezeTables.busNum()[c]);
             if (bus == null) {
                 continue;
             }
             boolean frozen = (int) state[c * 2] != 0;
             if (frozen) {
                 if (bus.isGeneratorVoltageControlEnabled()) {
-                    bus.freezeGenerationTargetQAndDisableGeneratorVoltageControl(state[c * 2 + 1] + fz.loadQ()[c]);
+                    bus.freezeGenerationTargetQAndDisableGeneratorVoltageControl(state[c * 2 + 1] + freezeTables.loadQ()[c]);
                 }
             } else if (!bus.isGeneratorVoltageControlEnabled() && bus.isGenerationTargetQFrozen()
                     && bus.getQLimitType().isEmpty()) {
@@ -567,13 +567,13 @@ public final class GpuTransformerVoltageControlOuterLoop {
             }
         }
         for (LfBus controlled : network.getControlledBuses(com.powsybl.openloadflow.network.VoltageControl.Type.TRANSFORMER)) {
-            var vc = controlled.getTransformerVoltageControl()
+            var voltageControl = controlled.getTransformerVoltageControl()
                     .filter(c -> c.getMergeStatus() == com.powsybl.openloadflow.network.VoltageControl.MergeStatus.MAIN)
                     .orElse(null);
-            if (vc == null) {
+            if (voltageControl == null) {
                 continue;
             }
-            List<LfBranch> memberBranches = vc.getMergedControllerElements().stream()
+            List<LfBranch> memberBranches = voltageControl.getMergedControllerElements().stream()
                     .filter(LfBranch::isConnectedAtBothSides)
                     .filter(b -> !b.isDisabled())
                     .toList();
@@ -587,7 +587,7 @@ public final class GpuTransformerVoltageControlOuterLoop {
                         controlled.getId());
                 continue;
             }
-            double halfDeadband = vc.getTargetDeadband().orElse(0.1 / controlled.getNominalV()) / 2;
+            double halfDeadband = voltageControl.getTargetDeadband().orElse(0.1 / controlled.getNominalV()) / 2;
             boolean[] wasEnabled = new boolean[memberBranches.size()];
             for (int m = 0; m < memberBranches.size(); m++) {
                 wasEnabled[m] = memberBranches.get(m).isVoltageControlEnabled();
@@ -664,7 +664,7 @@ public final class GpuTransformerVoltageControlOuterLoop {
             for (int m = 0; m < memberBranches.size(); m++) {
                 memberBranches.get(m).setVoltageControlEnabled(wasEnabled[m]);
             }
-            out.add(new TransformerController(vCol, vc.getTargetValue(), halfDeadband,
+            out.add(new TransformerController(vCol, voltageControl.getTargetValue(), halfDeadband,
                     deltaRows, deltaModesOn, deltaTargetsOn, members, useInitialTapPosition,
                     deltaModesOff, deltaTargetsOff));
         }
@@ -675,15 +675,15 @@ public final class GpuTransformerVoltageControlOuterLoop {
      *  {@code mode} a GpuTransformerVoltageControlMode; {@code entryOn} = the activation the solve starts from
      *  already carries the control ON (the WITH_GENERATOR base load flow — OLF's initialize ran on the
      *  network). Returns true when the kernel loop owns them (every member has a tap table). */
-    public static boolean uploadToDevice(long handle, List<TransformerController> tcs, int mode, boolean entryOn) {
-        if (tcs == null || tcs.isEmpty()) {
+    public static boolean uploadToDevice(long handle, List<TransformerController> transformerControllers, int mode, boolean entryOn) {
+        if (transformerControllers == null || transformerControllers.isEmpty()) {
             TransformerVoltageControlNative.setBatchTransformerVoltageControl(handle,
                     GpuTransformerVoltageControlMode.AFTER_GENERATOR_VOLTAGE_CONTROL, 0, null, null, null, null, null,
                     null, null, null, null,
                     null, null, null, null, null, null, null, null, null, null);
             return false;
         }
-        int nG = tcs.size();
+        int nG = transformerControllers.size();
         int[] groupMemberStart = new int[nG + 1];
         int[] groupControlledBusVRow = new int[nG];
         double[] groupTargetV = new double[nG];
@@ -705,21 +705,21 @@ public final class GpuTransformerVoltageControlOuterLoop {
         List<Double> tapRows = new ArrayList<>();
         boolean tables = true;
         for (int g = 0; g < nG; g++) {
-            TransformerController tc = tcs.get(g);
+            TransformerController transformerController = transformerControllers.get(g);
             groupMemberStart[g] = memberRhoRow.size();
-            groupControlledBusVRow[g] = tc.vCol();
-            groupTargetV[g] = tc.targetV();
-            groupHalfTargetDeadband[g] = tc.halfDeadband();
-            groupUseInitialTapPosition[g] = tc.useInitialTapPosition() ? 1 : 0;
+            groupControlledBusVRow[g] = transformerController.vCol();
+            groupTargetV[g] = transformerController.targetV();
+            groupHalfTargetDeadband[g] = transformerController.halfDeadband();
+            groupUseInitialTapPosition[g] = transformerController.useInitialTapPosition() ? 1 : 0;
             deltaStart[g] = dRow.size();
-            for (int k = 0; k < tc.deltaRows().length; k++) {
-                dRow.add(tc.deltaRows()[k]);
-                dModeOn.add(tc.deltaModesOn()[k]);
-                dModeOff.add(tc.deltaModesOff()[k]);
-                dTgtOn.add(tc.deltaTargetsOn()[k]);
-                dTgtOff.add(tc.deltaTargetsOff()[k]);
+            for (int k = 0; k < transformerController.deltaRows().length; k++) {
+                dRow.add(transformerController.deltaRows()[k]);
+                dModeOn.add(transformerController.deltaModesOn()[k]);
+                dModeOff.add(transformerController.deltaModesOff()[k]);
+                dTgtOn.add(transformerController.deltaTargetsOn()[k]);
+                dTgtOff.add(transformerController.deltaTargetsOff()[k]);
             }
-            for (Member m : tc.members()) {
+            for (Member m : transformerController.members()) {
                 memberRhoRow.add(m.rhoRow());
                 memberElement.add(m.elemIndex());
                 memberBaseTap.add(m.baseTapIndex());
@@ -768,28 +768,28 @@ public final class GpuTransformerVoltageControlOuterLoop {
      *  OLF's own loop leaves it: a FIXED member had {@code setR1(roundFrom); roundR1ToClosestTap()} and
      *  its control disabled ({@code roundR1ToExtremeTapPosition} / {@code roundVoltageRatios}); a member
      *  never enabled keeps its base tap. {@code state} is readBatchTransformerVoltageControlState's layout. */
-    public static void applyToNetwork(LfNetwork network, List<TransformerController> tcs, double[] state) {
-        if (tcs == null || tcs.isEmpty() || state == null) {
+    public static void applyToNetwork(LfNetwork network, List<TransformerController> transformerControllers, double[] state) {
+        if (transformerControllers == null || transformerControllers.isEmpty() || state == null) {
             return;
         }
         int m = 0;
-        for (TransformerController tc : tcs) {
-            for (Member mem : tc.members()) {
+        for (TransformerController transformerController : transformerControllers) {
+            for (Member member : transformerController.members()) {
                 int k = m++ * 3;
                 if (k + 2 >= state.length) {
                     return;
                 }
-                LfBranch branch = network.getBranch(mem.branchNum());
+                LfBranch branch = network.getBranch(member.branchNum());
                 if (branch == null || (int) state[k] != GpuDiscreteControlMemberState.ROUNDED) {
                     continue;
                 }
-                var pm = branch.getPiModel();
-                int pos = pm.getTapPositionRange().getMinimum() + (int) state[k + 1];
-                if (pm.getTapPosition() != pos) {
-                    pm.setR1(state[k + 2]);
-                    pm.roundR1ToClosestTap();
-                    if (pm.getTapPosition() != pos) {        // tie on a different start tap: take the device's
-                        pm.setTapPosition(pos);
+                var piModel = branch.getPiModel();
+                int pos = piModel.getTapPositionRange().getMinimum() + (int) state[k + 1];
+                if (piModel.getTapPosition() != pos) {
+                    piModel.setR1(state[k + 2]);
+                    piModel.roundR1ToClosestTap();
+                    if (piModel.getTapPosition() != pos) {        // tie on a different start tap: take the device's
+                        piModel.setTapPosition(pos);
                     }
                 }
                 if (branch.isVoltageControlEnabled()) {

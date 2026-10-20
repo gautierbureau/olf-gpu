@@ -76,11 +76,11 @@ OLF_JNI(ac_outerloop_gpu, TransformerVoltageControlNative, readBatchIncrementalT
     if (ctx == nullptr || ctx->nIncrementalTransformerVoltageControlControllerBranches <= 0 || !ctx->dIncrementalTransformerVoltageControlCurrentTap.p) {
         return nullptr;
     }
-    size_t cnt = static_cast<size_t>(ctx->nIncrementalTransformerVoltageControlControllerBranches) * ctx->nScenarios;
-    std::vector<int> host(cnt);
-    cudaMemcpy(host.data(), ctx->dIncrementalTransformerVoltageControlCurrentTap.p, cnt * sizeof(int), cudaMemcpyDeviceToHost);
-    jintArray out = env->NewIntArray(static_cast<jsize>(cnt));
-    env->SetIntArrayRegion(out, 0, static_cast<jsize>(cnt), host.data());
+    size_t count = static_cast<size_t>(ctx->nIncrementalTransformerVoltageControlControllerBranches) * ctx->nScenarios;
+    std::vector<int> host(count);
+    cudaMemcpy(host.data(), ctx->dIncrementalTransformerVoltageControlCurrentTap.p, count * sizeof(int), cudaMemcpyDeviceToHost);
+    jintArray out = env->NewIntArray(static_cast<jsize>(count));
+    env->SetIntArrayRegion(out, 0, static_cast<jsize>(count), host.data());
     return out;
 }
 
@@ -276,17 +276,17 @@ OLF_JNI(ac_outerloop_gpu, TransformerVoltageControlNative, readBatchGeneratorVol
         return nullptr;
     }
     int n = ctx->n;
-    size_t cnt = static_cast<size_t>(ctx->nGeneratorVoltageControlFreezeCandidates) * ctx->nScenarios;
-    std::vector<int> fz(cnt), vrow(ctx->nGeneratorVoltageControlFreezeCandidates);
-    std::vector<double> tgt(static_cast<size_t>(n) * ctx->nScenarios), out(cnt * 2);
-    cudaMemcpy(fz.data(), ctx->dGeneratorVoltageControlFrozen.p, cnt * sizeof(int), cudaMemcpyDeviceToHost);
-    cudaMemcpy(vrow.data(), ctx->dGeneratorVoltageControlFreezeVRow.p, vrow.size() * sizeof(int), cudaMemcpyDeviceToHost);
-    cudaMemcpy(tgt.data(), ctx->dTarget.p, tgt.size() * sizeof(double), cudaMemcpyDeviceToHost);
+    size_t count = static_cast<size_t>(ctx->nGeneratorVoltageControlFreezeCandidates) * ctx->nScenarios;
+    std::vector<int> frozen(count), voltageRow(ctx->nGeneratorVoltageControlFreezeCandidates);
+    std::vector<double> target(static_cast<size_t>(n) * ctx->nScenarios), out(count * 2);
+    cudaMemcpy(frozen.data(), ctx->dGeneratorVoltageControlFrozen.p, count * sizeof(int), cudaMemcpyDeviceToHost);
+    cudaMemcpy(voltageRow.data(), ctx->dGeneratorVoltageControlFreezeVRow.p, voltageRow.size() * sizeof(int), cudaMemcpyDeviceToHost);
+    cudaMemcpy(target.data(), ctx->dTarget.p, target.size() * sizeof(double), cudaMemcpyDeviceToHost);
     for (int s = 0; s < ctx->nScenarios; s++) {
         for (int c = 0; c < ctx->nGeneratorVoltageControlFreezeCandidates; c++) {
             size_t i = static_cast<size_t>(s) * ctx->nGeneratorVoltageControlFreezeCandidates + c;
-            out[i * 2] = fz[i];
-            out[i * 2 + 1] = tgt[static_cast<size_t>(s) * n + vrow[c]];
+            out[i * 2] = frozen[i];
+            out[i * 2 + 1] = target[static_cast<size_t>(s) * n + voltageRow[c]];
         }
     }
     jdoubleArray res = env->NewDoubleArray(static_cast<jsize>(out.size()));
@@ -303,16 +303,16 @@ OLF_JNI(ac_outerloop_gpu, TransformerVoltageControlNative, readBatchTransformerV
     if (ctx == nullptr || ctx->nTransformerVoltageControlMembers <= 0 || !ctx->dTransformerVoltageControlMemberState.p) {
         return nullptr;
     }
-    size_t cnt = static_cast<size_t>(ctx->nTransformerVoltageControlMembers) * ctx->nScenarios;
-    std::vector<int> st(cnt), tap(cnt);
-    std::vector<double> rf(cnt), out(cnt * 3);
-    cudaMemcpy(st.data(), ctx->dTransformerVoltageControlMemberState.p, cnt * sizeof(int), cudaMemcpyDeviceToHost);
-    cudaMemcpy(tap.data(), ctx->dTransformerVoltageControlMemberTap.p, cnt * sizeof(int), cudaMemcpyDeviceToHost);
-    cudaMemcpy(rf.data(), ctx->dTransformerVoltageControlMemberRoundingR1.p, cnt * sizeof(double), cudaMemcpyDeviceToHost);
-    for (size_t i = 0; i < cnt; i++) {
-        out[i * 3] = st[i];
+    size_t count = static_cast<size_t>(ctx->nTransformerVoltageControlMembers) * ctx->nScenarios;
+    std::vector<int> memberState(count), tap(count);
+    std::vector<double> roundingR1(count), out(count * 3);
+    cudaMemcpy(memberState.data(), ctx->dTransformerVoltageControlMemberState.p, count * sizeof(int), cudaMemcpyDeviceToHost);
+    cudaMemcpy(tap.data(), ctx->dTransformerVoltageControlMemberTap.p, count * sizeof(int), cudaMemcpyDeviceToHost);
+    cudaMemcpy(roundingR1.data(), ctx->dTransformerVoltageControlMemberRoundingR1.p, count * sizeof(double), cudaMemcpyDeviceToHost);
+    for (size_t i = 0; i < count; i++) {
+        out[i * 3] = memberState[i];
         out[i * 3 + 1] = tap[i];
-        out[i * 3 + 2] = rf[i];
+        out[i * 3 + 2] = roundingR1[i];
     }
     jdoubleArray res = env->NewDoubleArray(static_cast<jsize>(out.size()));
     env->SetDoubleArrayRegion(res, 0, static_cast<jsize>(out.size()), out.data());

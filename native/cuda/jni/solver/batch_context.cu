@@ -69,7 +69,7 @@ void setupBatchMatricesFallback(BatchSolverContext* ctx) {
     CUDSS_CHECK(cudssMatrixCreateDn(&ctx->solver.solutionMatrix, n, 1, n, ctx->dDx.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
 }
 
-BatchSolverContext* createBatchContext(const SharedStructurePtr& st, int nScenarios, int mode,
+BatchSolverContext* createBatchContext(const SharedStructurePtr& structure, int nScenarios, int mode,
                                        int nReactiveLimitEntries, const int* reactiveLimitVoltageRow, const double* reactiveLimitMinQ,
                                        const double* reactiveLimitMaxQ, const double* reactiveLimitLoadQ, const double* reactiveLimitTargetV,
                                        const signed char* reactiveLimitFlags, const double* rowSlope,
@@ -79,24 +79,24 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& st, int nScenar
                                        int distributedSlackFactorMode, const double* distributedSlackBusMarginUp, const double* distributedSlackBusMarginDown,
                                        double slackBusMarginUp, double slackBusMarginDown) {
     auto ctx = std::make_unique<BatchSolverContext>();
-    ctx->st = st;
-    int n = st->n;
+    ctx->st = structure;
+    int n = structure->n;
     ctx->n = n;
-    ctx->nnz = st->nnz;
+    ctx->nnz = structure->nnz;
     ctx->nScenarios = nScenarios;
     ctx->mode = mode;
-    ctx->nElements = st->nElements;
-    ctx->closedBranchOffset = st->closedBranchOffset;
-    ctx->openBranchOffset = st->openBranchOffset;
-    ctx->shuntOffset = st->shuntOffset;
-    ctx->hvdcAcEmulationOffset = st->hvdcAcEmulationOffset;
-    ctx->nDistrQ = st->nDistrQ;
-    ctx->nDistrRho = st->nDistrRho;
-    ctx->nDistrShuntB = st->nDistrShuntB;
-    ctx->nZeroImpedanceBranch = st->nZeroImpedanceBranch;
-    const std::vector<int>& rowMap = st->rowMap;
-    const std::vector<int>& rowPtr = st->rowPtr;
-    const std::vector<int>& colIdx = st->colIdx;
+    ctx->nElements = structure->nElements;
+    ctx->closedBranchOffset = structure->closedBranchOffset;
+    ctx->openBranchOffset = structure->openBranchOffset;
+    ctx->shuntOffset = structure->shuntOffset;
+    ctx->hvdcAcEmulationOffset = structure->hvdcAcEmulationOffset;
+    ctx->nDistrQ = structure->nDistrQ;
+    ctx->nDistrRho = structure->nDistrRho;
+    ctx->nDistrShuntB = structure->nDistrShuntB;
+    ctx->nZeroImpedanceBranch = structure->nZeroImpedanceBranch;
+    const std::vector<int>& rowMap = structure->rowMap;
+    const std::vector<int>& rowPtr = structure->rowPtr;
+    const std::vector<int>& colIdx = structure->colIdx;
 
     // ---- per-scenario device state ----
     size_t nS = static_cast<size_t>(n) * nScenarios;
@@ -138,10 +138,10 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& st, int nScenar
         std::vector<int> pilotSelfReactiveLimitEntry(nRelocationGroups, -1);
         for (int g = 0; g < nRelocationGroups; g++) {
             int p0 = ctx->st->hReactiveRelocationGroupStart[g];
-            int cnt = ctx->st->hReactiveRelocationGroupStart[g + 1] - p0;
+            int count = ctx->st->hReactiveRelocationGroupStart[g + 1] - p0;
             int fallbackRow = ctx->st->hReactiveRelocationCandidateRows[p0];
             bool pilotSelf = false;
-            for (int c = 1; c < cnt; c++) {
+            for (int c = 1; c < count; c++) {
                 if (ctx->st->hReactiveRelocationCandidateRows[p0 + c] == fallbackRow) {
                     pilotSelf = true;
                     break;
@@ -169,13 +169,13 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& st, int nScenar
             ctx->dPilotSelfReactiveLimitEntry.upload(pilotSelfReactiveLimitEntry.data(), pilotSelfReactiveLimitEntry.size() * sizeof(int));
             ctx->dPilotSelfCarrierSkip.alloc(static_cast<size_t>(nRelocationGroups) * ctx->nScenarios * sizeof(char));
             if (std::getenv("OLF_GPU_RL_TRACE") != nullptr) {
-                int cnt = 0, noEntry = 0;
+                int count = 0, noEntry = 0;
                 for (int g = 0; g < nRelocationGroups; g++) {
-                    cnt += pilotSelfReactiveLimitEntry[g] >= 0 ? 1 : 0;
+                    count += pilotSelfReactiveLimitEntry[g] >= 0 ? 1 : 0;
                     noEntry += pilotSelfReactiveLimitEntry[g] == PILOT_SELF_NO_REACTIVE_LIMIT_ENTRY ? 1 : 0;
                 }
                 std::fprintf(stderr, "PILOTSELF_GATE groups=%d(+%d never-pinnable) of %d nReactiveLimitEntries=%d\n",
-                             cnt, noEntry, nRelocationGroups, nReactiveLimitEntries);
+                             count, noEntry, nRelocationGroups, nReactiveLimitEntries);
             }
         }
     }

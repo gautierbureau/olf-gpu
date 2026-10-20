@@ -130,12 +130,12 @@ __device__ inline void transformerVoltageControlLayoutGroup(const TransformerVol
     for (int m = T.groupMemberStart[g]; m < T.groupMemberStart[g + 1]; m++) {
         if (disabled[(size_t) s * nElements + T.memberElement[m]]) continue;   // outaged: base identity as uploaded
         size_t mr = sn + T.memberRhoRow[m];
-        int st = T.memberState[(size_t) s * T.nMembers + m];
-        if (anyCont && st == GpuDiscreteControlMemberState::CONTINUOUS) {  // ALIVE continuous: carrier (pilot Q) or DISTR_RHO (0)
+        int memberState = T.memberState[(size_t) s * T.nMembers + m];
+        if (anyCont && memberState == GpuDiscreteControlMemberState::CONTINUOUS) {  // ALIVE continuous: carrier (pilot Q) or DISTR_RHO (0)
             mode[mr] = GpuRowMode::EQUATION;
             target[mr] = carrier ? 0.0 : pilotQ;
             carrier = true;
-        } else if (st == GpuDiscreteControlMemberState::ROUNDED) {  // identity pin at the rounded tap's r1
+        } else if (memberState == GpuDiscreteControlMemberState::ROUNDED) {  // identity pin at the rounded tap's r1
             int tap = T.memberTap[(size_t) s * T.nMembers + m];
             double r1 = T.tapRows[(size_t) (T.memberTapStart[m] + tap) * GpuPiModelColumn::COUNT + GpuPiModelColumn::R1];
             mode[mr] = GpuRowMode::FIXED_VARIABLE;
@@ -250,13 +250,13 @@ __global__ void transformerVoltageControlCheckBatch(TransformerVoltageControlTab
                 // reads to drop a member, so it has to be set, and GpuQLimitType::FROZEN keeps it
                 // distinguishable from a real Q-limit pin (which the switch-back may undo; this must
                 // not be, OLF's reactive-limits loop never sees a bus whose voltage control is off).
-                size_t st = (size_t) s * T.nReactiveLimitEntries + re;
-                if (mode[sr] != GpuRowMode::EQUATION || T.reactiveLimitQLimitType[st] != GpuQLimitType::NONE) continue;  // pinned already, or not live
+                size_t scenarioEntry = (size_t) s * T.nReactiveLimitEntries + re;
+                if (mode[sr] != GpuRowMode::EQUATION || T.reactiveLimitQLimitType[scenarioEntry] != GpuQLimitType::NONE) continue;  // pinned already, or not live
                 T.generatorVoltageControlFreezeSavedMode[sc] = mode[sr];
                 T.generatorVoltageControlFreezeSavedTarget[sc] = target[sr];
                 mode[sr] = GpuRowMode::BUS_TARGET_Q;
                 target[sr] = qBuf[sr] - T.generatorVoltageControlFreezeLoadTargetQ[c];
-                T.reactiveLimitQLimitType[st] = GpuQLimitType::FROZEN;
+                T.reactiveLimitQLimitType[scenarioEntry] = GpuQLimitType::FROZEN;
                 T.generatorVoltageControlFrozen[sc] = 1;
                 continue;
             }
@@ -421,11 +421,11 @@ void transformerVoltageControlStep(BatchSolverContext* ctx, DriverPass& drv) {
     rebuildTapOverrides(ctx);
     if (std::getenv("OLF_GPU_BATCH_TRACE") != nullptr) {
         size_t nsm = static_cast<size_t>(nS) * ctx->nTransformerVoltageControlMembers;
-        std::vector<int> st(nsm), step(nS);
-        CUDA_CHECK(cudaMemcpy(st.data(), ctx->dTransformerVoltageControlMemberState.p, nsm * sizeof(int), cudaMemcpyDeviceToHost));
+        std::vector<int> memberState(nsm), step(nS);
+        CUDA_CHECK(cudaMemcpy(memberState.data(), ctx->dTransformerVoltageControlMemberState.p, nsm * sizeof(int), cudaMemcpyDeviceToHost));
         CUDA_CHECK(cudaMemcpy(step.data(), ctx->dTransformerVoltageControlStep.p, nS * sizeof(int), cudaMemcpyDeviceToHost));
         int nCont = 0, nFixed = 0, nRej = 0;
-        for (size_t k = 0; k < nsm; k++) { nCont += st[k] == GpuDiscreteControlMemberState::CONTINUOUS; nFixed += st[k] == GpuDiscreteControlMemberState::ROUNDED; }
+        for (size_t k = 0; k < nsm; k++) { nCont += memberState[k] == GpuDiscreteControlMemberState::CONTINUOUS; nFixed += memberState[k] == GpuDiscreteControlMemberState::ROUNDED; }
         for (int s2 = 0; s2 < nS; s2++) nRej += rej[s2] ? 1 : 0;
         std::fprintf(stderr, "TVD_KERNEL mode=%d nS=%d nMembers=%d continuous=%d fixed=%d rejected=%d step0=%d nR1Ov=%d\n",
                      ctx->transformerVoltageControlMode, nS, ctx->nTransformerVoltageControlMembers, nCont, nFixed, nRej, step[0], ctx->nR1Ov);

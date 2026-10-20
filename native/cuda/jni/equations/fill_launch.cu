@@ -26,16 +26,16 @@
 namespace olfgpu {
 
 // The GROUP relocation tables of one family, or all-null when the structure has none (plan-A6).
-ReactiveRelocationTables relocationTablesOf(Family& f, SharedStructure* st) {
+ReactiveRelocationTables relocationTablesOf(Family& f, SharedStructure* structure) {
     ReactiveRelocationTables rt;
     if (f.relocationCandidateDestinations.p != nullptr) {
         rt.relocationGroup = f.relocationGroup.as<int>();
         rt.relocationCandidateOffset = f.relocationCandidateOffset.as<int>();
         rt.relocationCandidateDestinations = f.relocationCandidateDestinations.as<int>();
         rt.relocationDependentPilot = f.relocationDependentPilot.p != nullptr ? f.relocationDependentPilot.as<char>() : nullptr;
-        rt.reactiveRelocationGroupStart = st->dReactiveRelocationGroupStart.as<int>();
-        rt.reactiveRelocationCandidateRows = st->dReactiveRelocationCandidateRows.as<int>();
-        rt.relocatedChildOwnRow = st->dRelocatedChildOwnRow.p != nullptr ? st->dRelocatedChildOwnRow.as<int>() : nullptr;
+        rt.reactiveRelocationGroupStart = structure->dReactiveRelocationGroupStart.as<int>();
+        rt.reactiveRelocationCandidateRows = structure->dReactiveRelocationCandidateRows.as<int>();
+        rt.relocatedChildOwnRow = structure->dRelocatedChildOwnRow.p != nullptr ? structure->dRelocatedChildOwnRow.as<int>() : nullptr;
     }
     return rt;
 }
@@ -56,16 +56,16 @@ ReactiveRelocationTables withPilotSelf(ReactiveRelocationTables rt, BatchSolverC
     return rt;
 }
 
-ReactiveRelocationTables zeroImpedanceRelocationTables(SharedStructure* st) {
+ReactiveRelocationTables zeroImpedanceRelocationTables(SharedStructure* structure) {
     ReactiveRelocationTables rt;
-    if (st->dZeroImpedanceRelocationCandidateDestinations.p != nullptr) {
-        rt.relocationGroup = st->dZeroImpedanceRelocationGroup.as<int>();
-        rt.relocationCandidateOffset = st->dZeroImpedanceRelocationCandidateOffset.as<int>();
-        rt.relocationCandidateDestinations = st->dZeroImpedanceRelocationCandidateDestinations.as<int>();
-        rt.relocationDependentPilot = st->dZeroImpedanceRelocationDependentPilot.p != nullptr ? st->dZeroImpedanceRelocationDependentPilot.as<char>() : nullptr;
-        rt.reactiveRelocationGroupStart = st->dReactiveRelocationGroupStart.as<int>();
-        rt.reactiveRelocationCandidateRows = st->dReactiveRelocationCandidateRows.as<int>();
-        rt.relocatedChildOwnRow = st->dRelocatedChildOwnRow.p != nullptr ? st->dRelocatedChildOwnRow.as<int>() : nullptr;
+    if (structure->dZeroImpedanceRelocationCandidateDestinations.p != nullptr) {
+        rt.relocationGroup = structure->dZeroImpedanceRelocationGroup.as<int>();
+        rt.relocationCandidateOffset = structure->dZeroImpedanceRelocationCandidateOffset.as<int>();
+        rt.relocationCandidateDestinations = structure->dZeroImpedanceRelocationCandidateDestinations.as<int>();
+        rt.relocationDependentPilot = structure->dZeroImpedanceRelocationDependentPilot.p != nullptr ? structure->dZeroImpedanceRelocationDependentPilot.as<char>() : nullptr;
+        rt.reactiveRelocationGroupStart = structure->dReactiveRelocationGroupStart.as<int>();
+        rt.reactiveRelocationCandidateRows = structure->dReactiveRelocationCandidateRows.as<int>();
+        rt.relocatedChildOwnRow = structure->dRelocatedChildOwnRow.p != nullptr ? structure->dRelocatedChildOwnRow.as<int>() : nullptr;
     }
     return rt;
 }
@@ -150,13 +150,13 @@ __global__ void writeIdentityForInactive(int n, int nScenarios, int nnz, const i
     F[(size_t) s * n + r] = 0.0;
 }
 
-// Per-scenario target overrides: each entry writes target[ovIndex[k]] = ovValue[k], where ovIndex is the
+// Per-scenario target overrides: each entry writes target[targetOverrideIndex[k]] = targetOverrideValue[k], where targetOverrideIndex is the
 // FLAT dTarget index (scenarioSlot*n + row). Used by generator contingencies to set a scenario's bus P/Q
 // target (remove the lost generator's P, set BUS_TARGET_Q on a PV→PQ flip) after the base row is tiled.
-__global__ void applyTargetOverrideBatch(int nOv, const int* ovIndex, const double* ovValue, double* target) {
+__global__ void applyTargetOverrideBatch(int nTargetOverrides, const int* targetOverrideIndex, const double* targetOverrideValue, double* target) {
     int k = blockIdx.x * blockDim.x + threadIdx.x;
-    if (k < nOv) {
-        target[ovIndex[k]] = ovValue[k];
+    if (k < nTargetOverrides) {
+        target[targetOverrideIndex[k]] = targetOverrideValue[k];
     }
 }
 

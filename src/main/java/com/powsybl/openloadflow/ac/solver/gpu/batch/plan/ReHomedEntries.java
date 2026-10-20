@@ -39,10 +39,10 @@ final class ReHomedEntries {
         }
         List<Integer> out = new ArrayList<>();
         for (var e : reHomed.subgroupOf().entrySet()) {
-            var vc = e.getKey().getGeneratorVoltageControl().orElse(null);
-            List<LfBus> controllers = vc != null ? vc.getControllerElements() : List.of(e.getKey());
-            for (LfBus ce : controllers) {
-                int slot = GpuBatchInjectionOutages.distrQMemberSlot(gpuData, ce);
+            var voltageControl = e.getKey().getGeneratorVoltageControl().orElse(null);
+            List<LfBus> controllers = voltageControl != null ? voltageControl.getControllerElements() : List.of(e.getKey());
+            for (LfBus controller : controllers) {
+                int slot = GpuBatchInjectionOutages.distrQMemberSlot(gpuData, controller);
                 if (slot < 0) {
                     reject[0] = "PLAN:VC_REMERGE_SUBGROUP_UNPACKED";
                     return null;
@@ -130,8 +130,8 @@ final class ReHomedEntries {
             }
             int[] reloc = relocatedChildRows.get(vVar.getRow());
             boolean blockCovers = reloc != null && outagedZeroImpedanceBranchNums.contains(reloc[0]);
-            int rl = RelocatedRows.reactiveLimitEntryOf(gpuData, e.getKey());
-            boolean switchedPvToPqInBase = gpuData.switchedPvToPqInBase(rl);
+            int reactiveLimitEntry = RelocatedRows.reactiveLimitEntryOf(gpuData, e.getKey());
+            boolean switchedPvToPqInBase = gpuData.switchedPvToPqInBase(reactiveLimitEntry);
             if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {
                 System.err.printf("QUALIFY_TRACE remoteMain bus=%s vRow=%d target=%.6f blockCovers=%b switchedPvToPqInBase=%b%n",
                         e.getKey().getId(), vVar.getRow(), e.getValue(), blockCovers, switchedPvToPqInBase);
@@ -154,14 +154,14 @@ final class ReHomedEntries {
                 // is still refused.
                 int mainLabel = reHomed.subgroupOf().getOrDefault(e.getKey(), 0);
                 List<GenOutage> guards = new ArrayList<>();
-                for (LfBus cb : reHomed.remoteClusterBuses()) {
-                    if (reHomed.subgroupOf().getOrDefault(cb, 0) != mainLabel) {
+                for (LfBus clusterBus : reHomed.remoteClusterBuses()) {
+                    if (reHomed.subgroupOf().getOrDefault(clusterBus, 0) != mainLabel) {
                         continue;
                     }
-                    var cvc = cb.getGeneratorVoltageControl().orElse(null);
-                    List<LfBus> ctl = cvc != null ? cvc.getControllerElements() : List.of(cb);
-                    for (LfBus ce : ctl) {
-                        int controllerElementReactiveLimitEntry = RelocatedRows.reactiveLimitEntryOf(gpuData, ce);
+                    var clusterVoltageControl = clusterBus.getGeneratorVoltageControl().orElse(null);
+                    List<LfBus> controllers = clusterVoltageControl != null ? clusterVoltageControl.getControllerElements() : List.of(clusterBus);
+                    for (LfBus controller : controllers) {
+                        int controllerElementReactiveLimitEntry = RelocatedRows.reactiveLimitEntryOf(gpuData, controller);
                         if (!gpuData.switchedPvToPqInBase(controllerElementReactiveLimitEntry)) {
                             reject[0] = "PLAN:VC_REMERGE_PINNED_MAIN";
                             return null;
@@ -178,10 +178,10 @@ final class ReHomedEntries {
             if (reloc != null) {
                 // its own row carries a LIVE coupler's ZERO_V: the identity goes on the parent's DUMMY_Q row as
                 // a cross identity (rte6515 BUS-6029_BBS_1/2: the elected main two couplers from the island)
-                out.add(reHomedCrossEntry(reloc[1], e.getValue(), rl, false, 0));
+                out.add(reHomedCrossEntry(reloc[1], e.getValue(), reactiveLimitEntry, false, 0));
                 continue;
             }
-            out.add(reHomedPvEntry(vVar.getRow(), e.getValue(), rl));
+            out.add(reHomedPvEntry(vVar.getRow(), e.getValue(), reactiveLimitEntry));
         }
         return out;
     }
@@ -194,8 +194,8 @@ final class ReHomedEntries {
                                                                   GpuAcData gpuData, String[] reject) {
         List<GenOutage> out = new ArrayList<>();
         for (var e : reHomed.reHomedRemoteControllers().entrySet()) {
-            int rl = RelocatedRows.reactiveLimitEntryOf(gpuData, e.getKey());
-            if (rl < 0) {
+            int reactiveLimitEntry = RelocatedRows.reactiveLimitEntryOf(gpuData, e.getKey());
+            if (reactiveLimitEntry < 0) {
                 continue;
             }
             var pilotV = es.getVariableSet().getVariable(e.getValue().getNum(), AcVariableType.BUS_V);
@@ -206,10 +206,10 @@ final class ReHomedEntries {
             }
             if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {
                 System.err.printf("QUALIFY_TRACE reHomeRemoteCtl controller=%s reactiveLimitEntry=%d pilot=%s pilotVRow=%d target=%.6f%n",
-                        e.getKey().getId(), rl, e.getValue().getId(), pilotV.getRow(), target);
+                        e.getKey().getId(), reactiveLimitEntry, e.getValue().getId(), pilotV.getRow(), target);
             }
             out.add(new GenOutage(-1, 0, -1, target, false, false,
-                    -1, 0, 0, 0, 0, rl, 0, 0, false, java.util.Set.of(), 0, 0, 0, -1, new int[0],
+                    -1, 0, 0, 0, 0, reactiveLimitEntry, 0, 0, false, java.util.Set.of(), 0, 0, 0, -1, new int[0],
                     new int[0], new double[0], GenOutage.ROW_REMOTE_REHOME, -1, 0, -1, 0, -1, 0, -1, -1, 0, false,
                     pilotV.getRow(), 0, 0));
         }

@@ -148,35 +148,37 @@ __global__ void incrementalShuntVoltageControlApplyBatch(int nIncrementalShuntVo
  *  every pass that moved a section and on a driver RESUME. */
 void rebuildShuntAdmittanceOverrides(BatchSolverContext* ctx) {
     int nS = ctx->nScenarios;
-    std::vector<int> pos(static_cast<size_t>(nS) * ctx->nIncrementalShuntVoltageControlShuntCompensators);
-    CUDA_CHECK(cudaMemcpy(pos.data(), ctx->dIncrementalShuntVoltageControlPosition.p, pos.size() * sizeof(int), cudaMemcpyDeviceToHost));
-    std::vector<int> slot(ctx->hShuntAdmittanceOverrideBaseScenarioElement);
-    std::vector<double> val(ctx->hShuntAdmittanceOverrideBaseDelta);
+    std::vector<int> sectionPosition(static_cast<size_t>(nS) * ctx->nIncrementalShuntVoltageControlShuntCompensators);
+    CUDA_CHECK(cudaMemcpy(sectionPosition.data(), ctx->dIncrementalShuntVoltageControlPosition.p, sectionPosition.size() * sizeof(int), cudaMemcpyDeviceToHost));
+    std::vector<int> scenarioElement(ctx->hShuntAdmittanceOverrideBaseScenarioElement);
+    std::vector<double> delta(ctx->hShuntAdmittanceOverrideBaseDelta);
     for (int s = 0; s < nS; s++) {
         for (int c = 0; c < ctx->nIncrementalShuntVoltageControlControllerShunts; c++) {
             if (ctx->hIncrementalShuntVoltageControlShuntAdmittanceOverrideElement[c] < 0) continue;          // no packed element: b rides SHUNT_B only
-            double db = 0.0, dg = 0.0;
+            double deltaB = 0.0, deltaG = 0.0;
             for (int u = ctx->hIncrementalShuntVoltageControlShuntCompensatorStart[c]; u < ctx->hIncrementalShuntVoltageControlShuntCompensatorStart[c + 1]; u++) {
-                int p0 = ctx->hIncrementalShuntVoltageControlSectionStart[u];
-                int pc = pos[static_cast<size_t>(s) * ctx->nIncrementalShuntVoltageControlShuntCompensators + u];
-                db += ctx->hIncrementalShuntVoltageControlSectionB[p0 + pc] - ctx->hIncrementalShuntVoltageControlSectionB[p0 + ctx->hIncrementalShuntVoltageControlShuntCompensatorBasePosition[u]];
-                dg += ctx->hIncrementalShuntVoltageControlSectionG[p0 + pc] - ctx->hIncrementalShuntVoltageControlSectionG[p0 + ctx->hIncrementalShuntVoltageControlShuntCompensatorBasePosition[u]];
+                int firstSection = ctx->hIncrementalShuntVoltageControlSectionStart[u];
+                int position = sectionPosition[static_cast<size_t>(s) * ctx->nIncrementalShuntVoltageControlShuntCompensators + u];
+                deltaB += ctx->hIncrementalShuntVoltageControlSectionB[firstSection + position]
+                        - ctx->hIncrementalShuntVoltageControlSectionB[firstSection + ctx->hIncrementalShuntVoltageControlShuntCompensatorBasePosition[u]];
+                deltaG += ctx->hIncrementalShuntVoltageControlSectionG[firstSection + position]
+                        - ctx->hIncrementalShuntVoltageControlSectionG[firstSection + ctx->hIncrementalShuntVoltageControlShuntCompensatorBasePosition[u]];
             }
-            if (db == 0.0 && dg == 0.0) continue;
-            slot.push_back(s);
-            slot.push_back(ctx->hIncrementalShuntVoltageControlShuntAdmittanceOverrideElement[c]);
-            val.push_back(dg);
-            val.push_back(db);
+            if (deltaB == 0.0 && deltaG == 0.0) continue;
+            scenarioElement.push_back(s);
+            scenarioElement.push_back(ctx->hIncrementalShuntVoltageControlShuntAdmittanceOverrideElement[c]);
+            delta.push_back(deltaG);
+            delta.push_back(deltaB);
         }
     }
-    int nOv = static_cast<int>(slot.size() / 2);
-    if (nOv > 0) {
-        ctx->dShuntAdmittanceOverrideScenarioElement.ensure(slot.size() * sizeof(int));
-        ctx->dShuntAdmittanceOverrideDelta.ensure(val.size() * sizeof(double));
-        CUDA_CHECK(cudaMemcpy(ctx->dShuntAdmittanceOverrideScenarioElement.p, slot.data(), slot.size() * sizeof(int), cudaMemcpyHostToDevice));
-        CUDA_CHECK(cudaMemcpy(ctx->dShuntAdmittanceOverrideDelta.p, val.data(), val.size() * sizeof(double), cudaMemcpyHostToDevice));
+    int nOverrides = static_cast<int>(scenarioElement.size() / 2);
+    if (nOverrides > 0) {
+        ctx->dShuntAdmittanceOverrideScenarioElement.ensure(scenarioElement.size() * sizeof(int));
+        ctx->dShuntAdmittanceOverrideDelta.ensure(delta.size() * sizeof(double));
+        CUDA_CHECK(cudaMemcpy(ctx->dShuntAdmittanceOverrideScenarioElement.p, scenarioElement.data(), scenarioElement.size() * sizeof(int), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(ctx->dShuntAdmittanceOverrideDelta.p, delta.data(), delta.size() * sizeof(double), cudaMemcpyHostToDevice));
     }
-    ctx->nShuntAdmittanceOverrides = nOv;
+    ctx->nShuntAdmittanceOverrides = nOverrides;
 }
 
 // Per-solve reset. Incremental shunt VC: base sections, fresh ratchets, the identity row's target as the base b.

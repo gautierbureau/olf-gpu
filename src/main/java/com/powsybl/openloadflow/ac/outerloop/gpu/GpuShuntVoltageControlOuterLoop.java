@@ -81,18 +81,18 @@ public final class GpuShuntVoltageControlOuterLoop {
             }
         }
         for (LfBus controlled : network.getControlledBuses(com.powsybl.openloadflow.network.VoltageControl.Type.SHUNT)) {
-            var vc = controlled.getShuntVoltageControl()
+            var voltageControl = controlled.getShuntVoltageControl()
                     .filter(c -> c.getMergeStatus() == com.powsybl.openloadflow.network.VoltageControl.MergeStatus.MAIN)
                     .orElse(null);
-            if (vc == null) {
+            if (voltageControl == null) {
                 continue;
             }
-            List<LfShunt> memberShunts = vc.getMergedControllerElements().stream()
-                    .filter(sh -> !sh.isDisabled())
-                    .filter(sh -> !sh.getControllers().isEmpty())
+            List<LfShunt> memberShunts = voltageControl.getMergedControllerElements().stream()
+                    .filter(shunt -> !shunt.isDisabled())
+                    .filter(shunt -> !shunt.getControllers().isEmpty())
                     .toList();
             boolean representable = !memberShunts.isEmpty()
-                    && memberShunts.stream().allMatch(sh -> shuntBRows.get(sh.getNum()) != null);
+                    && memberShunts.stream().allMatch(shunt -> shuntBRows.get(shunt.getNum()) != null);
             if (!representable) {
                 GpuBatchSkips.record(GpuBatchSkips.Slot.SHUNT, LOGGER,
                         "Shunt voltage control of {} not representable on the GPU batch — skipped "
@@ -101,10 +101,10 @@ public final class GpuShuntVoltageControlOuterLoop {
             }
             List<Member> members = new ArrayList<>();
             boolean ok = true;
-            for (LfShunt sh : memberShunts) {
+            for (LfShunt shunt : memberShunts) {
                 List<GpuIncrementalShuntVoltageControlOuterLoop.Sub> subs = new ArrayList<>();
                 boolean gVaries = false;
-                for (LfShunt.Controller c : sh.getControllers()) {
+                for (LfShunt.Controller c : shunt.getControllers()) {
                     double[] sb = c.getSectionsB().stream().mapToDouble(Double::doubleValue).toArray();
                     double[] sg = new double[sb.length];
                     for (int i = 0; i < sb.length; i++) {
@@ -113,14 +113,14 @@ public final class GpuShuntVoltageControlOuterLoop {
                     }
                     subs.add(new GpuIncrementalShuntVoltageControlOuterLoop.Sub(sb, sg, c.getPosition(), c.getMinPosition()));
                 }
-                int elemIndex = elementMapper.getElementIndex(sh);
+                int elemIndex = elementMapper.getElementIndex(shunt);
                 if (elemIndex < 0 && gVaries) {              // static G follows the section: needs a packed element
                     LOGGER.info("Shunt VC controller {} has section-G variation but no packed element — group skipped",
-                            sh.getId());
+                            shunt.getId());
                     ok = false;
                     break;
                 }
-                members.add(new Member(shuntBRows.get(sh.getNum()), subs, elemIndex - shuntPackOffset, elemIndex, sh.getNum()));
+                members.add(new Member(shuntBRows.get(shunt.getNum()), subs, elemIndex - shuntPackOffset, elemIndex, shunt.getNum()));
             }
             if (!ok) {
                 continue;
@@ -246,14 +246,14 @@ public final class GpuShuntVoltageControlOuterLoop {
         int m = 0;
         int u = 0;
         for (Group g : groups) {
-            for (Member mem : g.members()) {
+            for (Member member : g.members()) {
                 int k = m++ * 2;
                 int u0 = u;
-                u += mem.subs().size();
+                u += member.subs().size();
                 if (k + 1 >= state.length || (int) state[k] != GpuDiscreteControlMemberState.ROUNDED) {
                     continue;
                 }
-                LfShunt shunt = network.getShunt(mem.shuntNum());
+                LfShunt shunt = network.getShunt(member.shuntNum());
                 if (shunt == null) {
                     continue;
                 }

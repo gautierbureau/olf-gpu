@@ -33,11 +33,11 @@ using namespace powsybl::openloadflow;
 
 namespace olfgpu {
 
-void buildDistrQDest(SharedStructure* st, const CsrPattern& pos, const std::vector<int>& rowMap,
+void buildDistrQDest(SharedStructure* structure, const CsrPattern& pos, const std::vector<int>& rowMap,
                      int nDistrQ, const int* distrQElement, const int* distrQSide, const int* distrQKind,
                      const double* distrQWeight, const int* distrQRow,
                      const int* closedBranchIndices, const int* openBranchIndices, const int* shuntIndices, const int* relocatedChildOwnRow) {
-    st->nDistrQ = nDistrQ;
+    structure->nDistrQ = nDistrQ;
     if (nDistrQ > 0) {
         std::vector<int> distrQDestination(static_cast<size_t>(nDistrQ) * 6, -1);
         // The COUPLER-TREE stock placement for a DISTR_Q row: a relocated child's sharing equation sits on
@@ -71,8 +71,8 @@ void buildDistrQDest(SharedStructure* st, const CsrPattern& pos, const std::vect
                 if (distrQKind[c] == GpuReactiveTermKind::SHUNT_COMPENSATOR_REACTIVE_FLOW) {  // shunt: dq/dv on the bus V column
                     d[1] = pos.at(row, shuntIndices[static_cast<size_t>(distrQElement[c]) * 5 + 2]);
                 } else if (distrQKind[c] == GpuReactiveTermKind::OPEN_BRANCH_REACTIVE_FLOW) {  // half-open: dq/dv on the connected-side V col
-                    const int* oq = openBranchIndices + static_cast<size_t>(distrQElement[c]) * 6;
-                    d[1] = pos.at(row, distrQSide[c] == 0 ? oq[4] : oq[5]);
+                    const int* openBranch = openBranchIndices + static_cast<size_t>(distrQElement[c]) * 6;
+                    d[1] = pos.at(row, distrQSide[c] == 0 ? openBranch[4] : openBranch[5]);
                 } else if (distrQKind[c] == GpuReactiveTermKind::DUMMY_Q) {  // zero-impedance: J slot on the dummyQ column
                     d[1] = pos.at(row, distrQElement[c]);
                 } else {                                     // closed branch
@@ -85,20 +85,20 @@ void buildDistrQDest(SharedStructure* st, const CsrPattern& pos, const std::vect
                 }
             }
         }
-        st->dDistrQElement.upload(distrQElement, nDistrQ * sizeof(int));
-        st->dDistrQSide.upload(distrQSide, nDistrQ * sizeof(int));
-        st->dDistrQKind.upload(distrQKind, nDistrQ * sizeof(int));
-        st->dDistrQWeight.upload(distrQWeight, nDistrQ * sizeof(double));
-        st->dDistrQDestination.upload(distrQDestination.data(), distrQDestination.size() * sizeof(int));
-        st->dDistrQAlternateDestination.upload(distrQAlternateDestination.data(), distrQAlternateDestination.size() * sizeof(int));
-        st->dDistrQSelectorRow.upload(distrQSelectorRow.data(), distrQSelectorRow.size() * sizeof(int));
-        st->dDistrQDummyQRow.upload(distrQDummyQRow.data(), distrQDummyQRow.size() * sizeof(int));
+        structure->dDistrQElement.upload(distrQElement, nDistrQ * sizeof(int));
+        structure->dDistrQSide.upload(distrQSide, nDistrQ * sizeof(int));
+        structure->dDistrQKind.upload(distrQKind, nDistrQ * sizeof(int));
+        structure->dDistrQWeight.upload(distrQWeight, nDistrQ * sizeof(double));
+        structure->dDistrQDestination.upload(distrQDestination.data(), distrQDestination.size() * sizeof(int));
+        structure->dDistrQAlternateDestination.upload(distrQAlternateDestination.data(), distrQAlternateDestination.size() * sizeof(int));
+        structure->dDistrQSelectorRow.upload(distrQSelectorRow.data(), distrQSelectorRow.size() * sizeof(int));
+        structure->dDistrQDummyQRow.upload(distrQDummyQRow.data(), distrQDummyQRow.size() * sizeof(int));
     }
 }
 
-void buildDistrRhoDest(SharedStructure* st, const CsrPattern& pos, const std::vector<int>& rowMap,
+void buildDistrRhoDest(SharedStructure* structure, const CsrPattern& pos, const std::vector<int>& rowMap,
                        int nDistrRho, const int* distrRhoRow, const int* distrRhoColumn, const double* distrRhoCoefficient) {
-    st->nDistrRho = nDistrRho;
+    structure->nDistrRho = nDistrRho;
     if (nDistrRho > 0) {
         std::vector<int> distrRhoDestination(static_cast<size_t>(nDistrRho) * 2);
         std::vector<int> distrRhoRelocationGroup(nDistrRho, -1);
@@ -110,28 +110,28 @@ void buildDistrRhoDest(SharedStructure* st, const CsrPattern& pos, const std::ve
             // the free role RE-PICKS to this row per scenario, it hosts the relocated pilot Q and
             // its DISTR_RHO emissions must stop — the SEQUENTIAL fill suppresses in-kernel by the
             // same mode-scan the scatter uses (the batch machine instead pushes zero coefficient overrides).
-            for (int g = 0; g < st->nReactiveRelocationGroups && distrRhoRelocationGroup[c] < 0; g++) {
-                for (int k = st->hReactiveRelocationGroupStart[g] + 1; k < st->hReactiveRelocationGroupStart[g + 1]; k++) {
-                    if (st->hReactiveRelocationCandidateRows[k] == mappedRow) {
+            for (int g = 0; g < structure->nReactiveRelocationGroups && distrRhoRelocationGroup[c] < 0; g++) {
+                for (int k = structure->hReactiveRelocationGroupStart[g] + 1; k < structure->hReactiveRelocationGroupStart[g + 1]; k++) {
+                    if (structure->hReactiveRelocationCandidateRows[k] == mappedRow) {
                         distrRhoRelocationGroup[c] = g;
-                        st->hasDistrRhoRelocationGroups = 1;
+                        structure->hasDistrRhoRelocationGroups = 1;
                         break;
                     }
                 }
             }
         }
-        st->dDistrRhoColumn.upload(distrRhoColumn, nDistrRho * sizeof(int));
-        st->dDistrRhoCoefficient.upload(distrRhoCoefficient, nDistrRho * sizeof(double));
-        st->dDistrRhoDestination.upload(distrRhoDestination.data(), distrRhoDestination.size() * sizeof(int));
-        if (st->hasDistrRhoRelocationGroups) {
-            st->dDistrRhoRelocationGroup.upload(distrRhoRelocationGroup.data(), distrRhoRelocationGroup.size() * sizeof(int));
+        structure->dDistrRhoColumn.upload(distrRhoColumn, nDistrRho * sizeof(int));
+        structure->dDistrRhoCoefficient.upload(distrRhoCoefficient, nDistrRho * sizeof(double));
+        structure->dDistrRhoDestination.upload(distrRhoDestination.data(), distrRhoDestination.size() * sizeof(int));
+        if (structure->hasDistrRhoRelocationGroups) {
+            structure->dDistrRhoRelocationGroup.upload(distrRhoRelocationGroup.data(), distrRhoRelocationGroup.size() * sizeof(int));
         }
     }
 }
 
-void buildDistrShuntBDest(SharedStructure* st, const CsrPattern& pos, const std::vector<int>& rowMap,
+void buildDistrShuntBDest(SharedStructure* structure, const CsrPattern& pos, const std::vector<int>& rowMap,
                           int nDistrShuntB, const int* distrShuntBRow, const int* distrShuntBColumn, const double* distrShuntBCoefficient) {
-    st->nDistrShuntB = nDistrShuntB;
+    structure->nDistrShuntB = nDistrShuntB;
     if (nDistrShuntB > 0) {
         std::vector<int> distrShuntBDestination(static_cast<size_t>(nDistrShuntB) * 2);
         for (int c = 0; c < nDistrShuntB; c++) {
@@ -139,9 +139,9 @@ void buildDistrShuntBDest(SharedStructure* st, const CsrPattern& pos, const std:
             distrShuntBDestination[c * 2 + 0] = -2 - mappedRow;              // DISTR_SHUNT_B F row
             distrShuntBDestination[c * 2 + 1] = pos.at(mappedRow, distrShuntBColumn[c]); // J slot
         }
-        st->dDistrShuntBColumn.upload(distrShuntBColumn, nDistrShuntB * sizeof(int));
-        st->dDistrShuntBCoefficient.upload(distrShuntBCoefficient, nDistrShuntB * sizeof(double));
-        st->dDistrShuntBDestination.upload(distrShuntBDestination.data(), distrShuntBDestination.size() * sizeof(int));
+        structure->dDistrShuntBColumn.upload(distrShuntBColumn, nDistrShuntB * sizeof(int));
+        structure->dDistrShuntBCoefficient.upload(distrShuntBCoefficient, nDistrShuntB * sizeof(double));
+        structure->dDistrShuntBDestination.upload(distrShuntBDestination.data(), distrShuntBDestination.size() * sizeof(int));
     }
 }
 

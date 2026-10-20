@@ -32,10 +32,10 @@ using namespace powsybl::openloadflow;
 
 namespace olfgpu {
 
-void buildZeroImpedanceBranchDestination(SharedStructure* st, const CsrPattern& pos, const std::vector<int>& rowMap,
+void buildZeroImpedanceBranchDestination(SharedStructure* structure, const CsrPattern& pos, const std::vector<int>& rowMap,
                       int nZeroImpedanceBranch, const double* zeroImpedanceBranchParameters, const int* zeroImpedanceBranchIndices, const int* zeroImpedanceBranchAlternateReactiveDestination,
                       const int* relocatedChildOwnRow, const int* reactiveRelocationDependentGroupOfRow) {
-    st->nZeroImpedanceBranch = nZeroImpedanceBranch;
+    structure->nZeroImpedanceBranch = nZeroImpedanceBranch;
     if (nZeroImpedanceBranch > 0) {
         std::vector<int> zeroImpedanceBranchDestination(static_cast<size_t>(nZeroImpedanceBranch) * 14, -1);
         // zero-impedance dynamic Q-routing (ob/zero-impedance channels): 4 q slots per element {F side1, F side2, J side1,
@@ -77,15 +77,15 @@ void buildZeroImpedanceBranchDestination(SharedStructure* st, const CsrPattern& 
                     int g = -2 - alternateRow;
                     zeroImpedanceRelocationGroup[fSlot] = g;
                     relocationCandidateOffset[fSlot] = static_cast<int>(zeroImpedanceRelocationCandidateDestinations.size());
-                    for (int c = st->hReactiveRelocationGroupStart[g]; c < st->hReactiveRelocationGroupStart[g + 1]; c++) {
-                        zeroImpedanceRelocationCandidateDestinations.push_back(-2 - st->hReactiveRelocationCandidateRows[c]);
+                    for (int c = structure->hReactiveRelocationGroupStart[g]; c < structure->hReactiveRelocationGroupStart[g + 1]; c++) {
+                        zeroImpedanceRelocationCandidateDestinations.push_back(-2 - structure->hReactiveRelocationCandidateRows[c]);
                     }
                     zeroImpedanceRelocationGroup[jSlot] = g;
                     relocationCandidateOffset[jSlot] = static_cast<int>(zeroImpedanceRelocationCandidateDestinations.size());
-                    for (int c = st->hReactiveRelocationGroupStart[g]; c < st->hReactiveRelocationGroupStart[g + 1]; c++) {
-                        zeroImpedanceRelocationCandidateDestinations.push_back(pos.at(st->hReactiveRelocationCandidateRows[c], z[5]));
+                    for (int c = structure->hReactiveRelocationGroupStart[g]; c < structure->hReactiveRelocationGroupStart[g + 1]; c++) {
+                        zeroImpedanceRelocationCandidateDestinations.push_back(pos.at(structure->hReactiveRelocationCandidateRows[c], z[5]));
                     }
-                    dd[2 + side] = -2 - st->hReactiveRelocationCandidateRows[st->hReactiveRelocationGroupStart[g]];   // frozen F -> fallback (qBuf)
+                    dd[2 + side] = -2 - structure->hReactiveRelocationCandidateRows[structure->hReactiveRelocationGroupStart[g]];   // frozen F -> fallback (qBuf)
                     anyDynamicRelocation = true;
                 } else if (stockPairOut(frozenQ[side], alternateRow, relocatedChildOwnRow)) {
                     // STOCK PAIR for this endpoint's +-dummyQ, exactly as the cb/sh raw-q families encode it
@@ -112,16 +112,16 @@ void buildZeroImpedanceBranchDestination(SharedStructure* st, const CsrPattern& 
                 } else if (dependentGroupOfHomeRow(frozenQ[side], stockPlacementAlternateRow(frozenQ[side], alternateRow, relocatedChildOwnRow), relocatedChildOwnRow, reactiveRelocationDependentGroupOfRow) >= 0) {
                     // DEPENDENT pilot (dependentPilotDestination): the group's pool for this +-dummyQ, plus the two-way home row
                     int own = stockPlacementAlternateRow(frozenQ[side], alternateRow, relocatedChildOwnRow);
-                    int dg = dependentGroupOfHomeRow(frozenQ[side], own, relocatedChildOwnRow, reactiveRelocationDependentGroupOfRow);
-                    zeroImpedanceRelocationGroup[fSlot] = dg;
+                    int dependentGroup = dependentGroupOfHomeRow(frozenQ[side], own, relocatedChildOwnRow, reactiveRelocationDependentGroupOfRow);
+                    zeroImpedanceRelocationGroup[fSlot] = dependentGroup;
                     relocationCandidateOffset[fSlot] = static_cast<int>(zeroImpedanceRelocationCandidateDestinations.size());
-                    for (int c = st->hReactiveRelocationGroupStart[dg]; c < st->hReactiveRelocationGroupStart[dg + 1]; c++) {
-                        zeroImpedanceRelocationCandidateDestinations.push_back(-2 - st->hReactiveRelocationCandidateRows[c]);
+                    for (int c = structure->hReactiveRelocationGroupStart[dependentGroup]; c < structure->hReactiveRelocationGroupStart[dependentGroup + 1]; c++) {
+                        zeroImpedanceRelocationCandidateDestinations.push_back(-2 - structure->hReactiveRelocationCandidateRows[c]);
                     }
-                    zeroImpedanceRelocationGroup[jSlot] = dg;
+                    zeroImpedanceRelocationGroup[jSlot] = dependentGroup;
                     relocationCandidateOffset[jSlot] = static_cast<int>(zeroImpedanceRelocationCandidateDestinations.size());
-                    for (int c = st->hReactiveRelocationGroupStart[dg]; c < st->hReactiveRelocationGroupStart[dg + 1]; c++) {
-                        zeroImpedanceRelocationCandidateDestinations.push_back(pos.at(st->hReactiveRelocationCandidateRows[c], z[5]));
+                    for (int c = structure->hReactiveRelocationGroupStart[dependentGroup]; c < structure->hReactiveRelocationGroupStart[dependentGroup + 1]; c++) {
+                        zeroImpedanceRelocationCandidateDestinations.push_back(pos.at(structure->hReactiveRelocationCandidateRows[c], z[5]));
                     }
                     zeroImpedanceRelocationDependentPilot[fSlot] = 1;
                     zeroImpedanceRelocationDependentPilot[jSlot] = 1;
@@ -179,19 +179,19 @@ void buildZeroImpedanceBranchDestination(SharedStructure* st, const CsrPattern& 
                 dd[13] = pos.at(zpRow, z[9]);                // J(ZERO_PHI, ph2)
             }
         }
-        st->dZeroImpedanceBranchParameters.upload(zeroImpedanceBranchParameters, nZeroImpedanceBranch * sizeof(double));
-        st->dZeroImpedanceBranchIndices.upload(zeroImpedanceBranchIndices, static_cast<size_t>(nZeroImpedanceBranch) * 11 * sizeof(int));
-        st->dZeroImpedanceBranchDestination.upload(zeroImpedanceBranchDestination.data(), zeroImpedanceBranchDestination.size() * sizeof(int));
+        structure->dZeroImpedanceBranchParameters.upload(zeroImpedanceBranchParameters, nZeroImpedanceBranch * sizeof(double));
+        structure->dZeroImpedanceBranchIndices.upload(zeroImpedanceBranchIndices, static_cast<size_t>(nZeroImpedanceBranch) * 11 * sizeof(int));
+        structure->dZeroImpedanceBranchDestination.upload(zeroImpedanceBranchDestination.data(), zeroImpedanceBranchDestination.size() * sizeof(int));
         if (anyDynamicRelocation) {
-            st->dZeroImpedanceAlternateDestination.upload(zeroImpedanceAlternateDestination.data(), zeroImpedanceAlternateDestination.size() * sizeof(int));
-            st->dZeroImpedanceSelectorRow.upload(zeroImpedanceSelectorRow.data(), zeroImpedanceSelectorRow.size() * sizeof(int));
+            structure->dZeroImpedanceAlternateDestination.upload(zeroImpedanceAlternateDestination.data(), zeroImpedanceAlternateDestination.size() * sizeof(int));
+            structure->dZeroImpedanceSelectorRow.upload(zeroImpedanceSelectorRow.data(), zeroImpedanceSelectorRow.size() * sizeof(int));
             if (!zeroImpedanceRelocationCandidateDestinations.empty()) {
-                st->dZeroImpedanceRelocationGroup.upload(zeroImpedanceRelocationGroup.data(), zeroImpedanceRelocationGroup.size() * sizeof(int));
-                st->dZeroImpedanceRelocationCandidateOffset.upload(relocationCandidateOffset.data(), relocationCandidateOffset.size() * sizeof(int));
-                st->dZeroImpedanceRelocationCandidateDestinations.upload(zeroImpedanceRelocationCandidateDestinations.data(), zeroImpedanceRelocationCandidateDestinations.size() * sizeof(int));
-                st->dZeroImpedanceRelocationDependentPilot.upload(zeroImpedanceRelocationDependentPilot.data(), zeroImpedanceRelocationDependentPilot.size());
+                structure->dZeroImpedanceRelocationGroup.upload(zeroImpedanceRelocationGroup.data(), zeroImpedanceRelocationGroup.size() * sizeof(int));
+                structure->dZeroImpedanceRelocationCandidateOffset.upload(relocationCandidateOffset.data(), relocationCandidateOffset.size() * sizeof(int));
+                structure->dZeroImpedanceRelocationCandidateDestinations.upload(zeroImpedanceRelocationCandidateDestinations.data(), zeroImpedanceRelocationCandidateDestinations.size() * sizeof(int));
+                structure->dZeroImpedanceRelocationDependentPilot.upload(zeroImpedanceRelocationDependentPilot.data(), zeroImpedanceRelocationDependentPilot.size());
             }
-            st->zeroImpedanceDynamicRelocation = true;
+            structure->zeroImpedanceDynamicRelocation = true;
         }
     }
 }

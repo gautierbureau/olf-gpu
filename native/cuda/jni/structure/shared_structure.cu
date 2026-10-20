@@ -47,17 +47,17 @@ SharedStructure* buildStructure(int n,
                                 int nReactiveRelocationGroups, const int* reactiveRelocationGroupStart, const int* reactiveRelocationCandidateRowsIn,
                                 const int* openBranchAlternateReactiveDestinationIn, const int* zeroImpedanceBranchAlternateReactiveDestinationIn,
                                 const int* reactiveRelocationDependentBaseGroupIn, const int* reactiveRelocationBaseTargetRowIn, const int* reactiveRelocationDependentGroupOfRowIn) {
-    auto st = std::make_unique<SharedStructure>();
-    st->n = n;
-    st->nElements = nClosedBranch + nOpenBranch + nShunt + nHvdcAcEmulation;
-    st->closedBranchOffset = 0;
-    st->openBranchOffset = nClosedBranch;
-    st->shuntOffset = nClosedBranch + nOpenBranch;
-    st->hvdcAcEmulationOffset = nClosedBranch + nOpenBranch + nShunt;
+    auto structure = std::make_unique<SharedStructure>();
+    structure->n = n;
+    structure->nElements = nClosedBranch + nOpenBranch + nShunt + nHvdcAcEmulation;
+    structure->closedBranchOffset = 0;
+    structure->openBranchOffset = nClosedBranch;
+    structure->shuntOffset = nClosedBranch + nOpenBranch;
+    structure->hvdcAcEmulationOffset = nClosedBranch + nOpenBranch + nShunt;
 
     // ---- diagonal-pairing row permutation + index packs rewritten through it ----
-    st->rowMap = buildRowMap(n, nClosedBranch, closedBranchIndices, nOpenBranch, openBranchIndices, nShunt, shuntIndices, nHvdcAcEmulation, hvdcAcEmulationIndices, nDistrQ, distrQRow, nZeroImpedanceBranch, zeroImpedanceBranchIndices);
-    const std::vector<int>& rowMap = st->rowMap;
+    structure->rowMap = buildRowMap(n, nClosedBranch, closedBranchIndices, nOpenBranch, openBranchIndices, nShunt, shuntIndices, nHvdcAcEmulation, hvdcAcEmulationIndices, nDistrQ, distrQRow, nZeroImpedanceBranch, zeroImpedanceBranchIndices);
+    const std::vector<int>& rowMap = structure->rowMap;
     // COUPLER-TREE relocation, per-scenario placement: map each coupler DUMMY row that hosts a child bus's
     // relocated P/Q equation to that bus's OWN row, so a scenario OPENING the coupler can put the equation
     // back where the stock layout has it (see stockPlacementAlternateRow). zeroImpedanceBranchIndices is not row-mapped and its slots 4..9 are
@@ -84,7 +84,7 @@ SharedStructure* buildStructure(int n,
     }
     const int* relocatedChildOwnRow = anyRelocatedChild ? relocatedChildOwnRows.data() : nullptr;
     if (anyRelocatedChild) {                                       // the kernels that divert per scenario need it
-        st->dRelocatedChildOwnRow.upload(relocatedChildOwnRows.data(), relocatedChildOwnRows.size() * sizeof(int));
+        structure->dRelocatedChildOwnRow.upload(relocatedChildOwnRows.data(), relocatedChildOwnRows.size() * sizeof(int));
     }
     auto mapRows = [&](const int* idx, int elementCount, int stride, std::initializer_list<int> rowSlots) {
         std::vector<int> out(idx, idx + static_cast<size_t>(elementCount) * stride);
@@ -98,34 +98,34 @@ SharedStructure* buildStructure(int n,
         }
         return out;
     };
-    st->nReactiveRelocationGroups = nReactiveRelocationGroups;
+    structure->nReactiveRelocationGroups = nReactiveRelocationGroups;
     if (nReactiveRelocationGroups > 0) {
-        st->hReactiveRelocationGroupStart.assign(reactiveRelocationGroupStart, reactiveRelocationGroupStart + nReactiveRelocationGroups + 1);
-        st->hReactiveRelocationCandidateRows.assign(reactiveRelocationCandidateRowsIn, reactiveRelocationCandidateRowsIn + reactiveRelocationGroupStart[nReactiveRelocationGroups]);
-        for (int& r : st->hReactiveRelocationCandidateRows) {
+        structure->hReactiveRelocationGroupStart.assign(reactiveRelocationGroupStart, reactiveRelocationGroupStart + nReactiveRelocationGroups + 1);
+        structure->hReactiveRelocationCandidateRows.assign(reactiveRelocationCandidateRowsIn, reactiveRelocationCandidateRowsIn + reactiveRelocationGroupStart[nReactiveRelocationGroups]);
+        for (int& r : structure->hReactiveRelocationCandidateRows) {
             r = rowMap[r];                                   // device row space (self-paired rows: identity)
         }
-        st->dReactiveRelocationGroupStart.upload(st->hReactiveRelocationGroupStart.data(), st->hReactiveRelocationGroupStart.size() * sizeof(int));
-        st->dReactiveRelocationCandidateRows.upload(st->hReactiveRelocationCandidateRows.data(), st->hReactiveRelocationCandidateRows.size() * sizeof(int));
-        st->hReactiveRelocationDependentBaseGroup.assign(reactiveRelocationDependentBaseGroupIn, reactiveRelocationDependentBaseGroupIn + nReactiveRelocationGroups);
-        st->hReactiveRelocationBaseTargetRow.assign(reactiveRelocationBaseTargetRowIn, reactiveRelocationBaseTargetRowIn + nReactiveRelocationGroups);
-        for (int& r : st->hReactiveRelocationBaseTargetRow) {
+        structure->dReactiveRelocationGroupStart.upload(structure->hReactiveRelocationGroupStart.data(), structure->hReactiveRelocationGroupStart.size() * sizeof(int));
+        structure->dReactiveRelocationCandidateRows.upload(structure->hReactiveRelocationCandidateRows.data(), structure->hReactiveRelocationCandidateRows.size() * sizeof(int));
+        structure->hReactiveRelocationDependentBaseGroup.assign(reactiveRelocationDependentBaseGroupIn, reactiveRelocationDependentBaseGroupIn + nReactiveRelocationGroups);
+        structure->hReactiveRelocationBaseTargetRow.assign(reactiveRelocationBaseTargetRowIn, reactiveRelocationBaseTargetRowIn + nReactiveRelocationGroups);
+        for (int& r : structure->hReactiveRelocationBaseTargetRow) {
             if (r >= 0) {
                 r = rowMap[r];
             }
         }
-        st->dReactiveRelocationDependentBaseGroup.upload(st->hReactiveRelocationDependentBaseGroup.data(), st->hReactiveRelocationDependentBaseGroup.size() * sizeof(int));
-        st->dReactiveRelocationBaseTargetRow.upload(st->hReactiveRelocationBaseTargetRow.data(), st->hReactiveRelocationBaseTargetRow.size() * sizeof(int));
+        structure->dReactiveRelocationDependentBaseGroup.upload(structure->hReactiveRelocationDependentBaseGroup.data(), structure->hReactiveRelocationDependentBaseGroup.size() * sizeof(int));
+        structure->dReactiveRelocationBaseTargetRow.upload(structure->hReactiveRelocationBaseTargetRow.data(), structure->hReactiveRelocationBaseTargetRow.size() * sizeof(int));
     }
-    st->hReactiveRelocationDependentGroupOfRow.assign(n, -1);
+    structure->hReactiveRelocationDependentGroupOfRow.assign(n, -1);
     bool anyDependentGroup = false;
     for (int r = 0; r < n; r++) {
         if (reactiveRelocationDependentGroupOfRowIn[r] >= 0) {
-            st->hReactiveRelocationDependentGroupOfRow[rowMap[r]] = reactiveRelocationDependentGroupOfRowIn[r];
+            structure->hReactiveRelocationDependentGroupOfRow[rowMap[r]] = reactiveRelocationDependentGroupOfRowIn[r];
             anyDependentGroup = true;
         }
     }
-    const int* reactiveRelocationDependentGroupOfRow = anyDependentGroup ? st->hReactiveRelocationDependentGroupOfRow.data() : nullptr;
+    const int* reactiveRelocationDependentGroupOfRow = anyDependentGroup ? structure->hReactiveRelocationDependentGroupOfRow.data() : nullptr;
     std::vector<int> closedBranchIndicesMapped = mapRows(closedBranchIndices, nClosedBranch, 12, {0, 1, 2, 3, 10, 11});
     std::vector<int> openBranchIndicesMapped = mapRows(openBranchIndices, nOpenBranch, 6, {0, 1, 2, 3});
     std::vector<int> openBranchAlternateReactiveDestinationMapped = mapRows(openBranchAlternateReactiveDestinationIn, nOpenBranch, 2, {0, 1});   // negative encodings pass through
@@ -147,8 +147,9 @@ SharedStructure* buildStructure(int n,
     bool dynamicRelocation = anyRelocatedChild || anyDependentGroup || hasRelocatable(nClosedBranch, closedBranchIndices, nShunt, shuntIndices)
             || hasAlternateRows(openBranchAlternateReactiveDestination, nOpenBranch * 2) || hasAlternateRows(zeroImpedanceBranchAlternateReactiveDestination, nZeroImpedanceBranch * 2);
     if (dynamicRelocation) {
-        collectClosedBranchRelocationPattern(nClosedBranch, closedBranchIndices, relocatedChildOwnRow, pat, st->nReactiveRelocationGroups,        // union the alternate Q rows into the pattern
-                st->hReactiveRelocationGroupStart.data(), st->hReactiveRelocationCandidateRows.data(), reactiveRelocationDependentGroupOfRow);      // (+ every GROUP candidate's slots, plan-A6)
+        collectClosedBranchRelocationPattern(nClosedBranch, closedBranchIndices, relocatedChildOwnRow, pat, structure->nReactiveRelocationGroups,        // union the alternate Q rows into the pattern
+                structure->hReactiveRelocationGroupStart.data(), structure->hReactiveRelocationCandidateRows.data(),
+                        reactiveRelocationDependentGroupOfRow);      // (+ every GROUP candidate's slots, plan-A6)
     }
     bool hasPhaseControl = false;
     for (int e = 0; e < nClosedBranch; e++) {
@@ -159,11 +160,11 @@ SharedStructure* buildStructure(int n,
     }
     collectPattern(nOpenBranch, openBranchIndices, 6, OB_SCATTER, OB_NOUT, resolveOpenBranch, pat);
     if (dynamicRelocation) {
-        collectOpenBranchRelocationPattern(nOpenBranch, openBranchIndices, openBranchAlternateReactiveDestination, relocatedChildOwnRow, pat, st->nReactiveRelocationGroups, st->hReactiveRelocationGroupStart.data(), st->hReactiveRelocationCandidateRows.data(), reactiveRelocationDependentGroupOfRow);
+        collectOpenBranchRelocationPattern(nOpenBranch, openBranchIndices, openBranchAlternateReactiveDestination, relocatedChildOwnRow, pat, structure->nReactiveRelocationGroups, structure->hReactiveRelocationGroupStart.data(), structure->hReactiveRelocationCandidateRows.data(), reactiveRelocationDependentGroupOfRow);
     }
     collectPattern(nShunt, shuntIndices, 5, SH_SCATTER, SH_NOUT, resolveShunt, pat);
     if (dynamicRelocation) {
-        collectShuntRelocationPattern(nShunt, shuntIndices, relocatedChildOwnRow, pat, st->nReactiveRelocationGroups, st->hReactiveRelocationGroupStart.data(), st->hReactiveRelocationCandidateRows.data(), reactiveRelocationDependentGroupOfRow);
+        collectShuntRelocationPattern(nShunt, shuntIndices, relocatedChildOwnRow, pat, structure->nReactiveRelocationGroups, structure->hReactiveRelocationGroupStart.data(), structure->hReactiveRelocationCandidateRows.data(), reactiveRelocationDependentGroupOfRow);
     }
     collectPattern(nHvdcAcEmulation, hvdcAcEmulationIndices, 4, HVDC_SCATTER, HVDC_NOUT, resolveHvdcAcEmulation, pat);
     if (dynamicRelocation) {
@@ -196,12 +197,12 @@ SharedStructure* buildStructure(int n,
             for (int side = 0; side < 2; side++) {
                 int fr = qrows[side];
                 int own = fr >= 0 && relocatedChildOwnRow != nullptr && relocatedChildOwnRow[fr] >= 0 ? relocatedChildOwnRow[fr] : fr;
-                int dg = own >= 0 ? reactiveRelocationDependentGroupOfRow[own] : -1;
-                if (dg < 0) {
+                int dependentGroup = own >= 0 ? reactiveRelocationDependentGroupOfRow[own] : -1;
+                if (dependentGroup < 0) {
                     continue;
                 }
-                for (int c = st->hReactiveRelocationGroupStart[dg]; c < st->hReactiveRelocationGroupStart[dg + 1]; c++) {
-                    pat.emplace_back(st->hReactiveRelocationCandidateRows[c], z[5]);
+                for (int c = structure->hReactiveRelocationGroupStart[dependentGroup]; c < structure->hReactiveRelocationGroupStart[dependentGroup + 1]; c++) {
+                    pat.emplace_back(structure->hReactiveRelocationCandidateRows[c], z[5]);
                 }
             }
         }
@@ -212,8 +213,8 @@ SharedStructure* buildStructure(int n,
                 int alternateRow = zeroImpedanceBranchAlternateReactiveDestination[e * 2 + side];
                 if (alternateRow <= -2) {
                     int g = -2 - alternateRow;
-                    for (int c = st->hReactiveRelocationGroupStart[g]; c < st->hReactiveRelocationGroupStart[g + 1]; c++) {
-                        pat.emplace_back(st->hReactiveRelocationCandidateRows[c], dummyQColumn);
+                    for (int c = structure->hReactiveRelocationGroupStart[g]; c < structure->hReactiveRelocationGroupStart[g + 1]; c++) {
+                        pat.emplace_back(structure->hReactiveRelocationCandidateRows[c], dummyQColumn);
                     }
                 } else if (alternateRow >= 0) {
                     pat.emplace_back(alternateRow, dummyQColumn);
@@ -236,8 +237,8 @@ SharedStructure* buildStructure(int n,
     std::vector<std::vector<int>> zeroDiagonalDonors;
     std::vector<char> zeroDiagonalRepairSigns;
     {
-        std::map<int, int> zeroDiagonalIndexOfRow;                          // physical row -> hazard slot
-        auto slotOf = [&](int row, char sign) {
+        std::map<int, int> zeroDiagonalIndexOfRow;                          // physical row -> its repair entry
+        auto repairEntryOf = [&](int row, char sign) {
             auto it = zeroDiagonalIndexOfRow.find(row);
             if (it != zeroDiagonalIndexOfRow.end()) return it->second;
             int i = static_cast<int>(zeroDiagonalRows.size());
@@ -247,9 +248,9 @@ SharedStructure* buildStructure(int n,
             zeroDiagonalRepairSigns.push_back(sign);
             return i;
         };
-        auto addDonor = [&](int slot, int donor) {
-            if (donor < 0 || donor == zeroDiagonalRows[slot]) return;
-            auto& v = zeroDiagonalDonors[slot];
+        auto addDonor = [&](int repairEntry, int donor) {
+            if (donor < 0 || donor == zeroDiagonalRows[repairEntry]) return;
+            auto& v = zeroDiagonalDonors[repairEntry];
             if (std::find(v.begin(), v.end(), donor) == v.end()) v.push_back(donor);
         };
         for (int e = 0; e < nZeroImpedanceBranch; e++) {
@@ -272,8 +273,8 @@ SharedStructure* buildStructure(int n,
                 int parV = child == 1 ? z[7] : z[6];
                 int zPhi = rowMap[zeroPhiRowOf(z)];
                 int zV = rowMap[zeroVRowOf(z)];
-                if (parPhi >= 0) addDonor(slotOf(rowMap[parPhi], 1), zPhi);
-                if (parV >= 0) addDonor(slotOf(rowMap[parV], -1), zV);
+                if (parPhi >= 0) addDonor(repairEntryOf(rowMap[parPhi], 1), zPhi);
+                if (parV >= 0) addDonor(repairEntryOf(rowMap[parV], -1), zV);
                 continue;
             }
             // The DUMMY_P row (diagonal column dummy-P, carried by the endpoint P rows) hosts ZERO_PHI and the
@@ -308,8 +309,8 @@ SharedStructure* buildStructure(int n,
             // whose determinant is 1 - the product of the four signs, and all-bus-rows-+1 gave det 0 there -
             // a singular, CONSISTENT system cuDSS solved to 1e-11 with the wrong answer: rte6515 500 busbars,
             // 175 contingencies above 1e-9 kV where the tree-only borrowing had 3.)
-            int sP = slotOf(dP, -1);
-            int sQ = slotOf(dQ, 1);
+            int sP = repairEntryOf(dP, -1);
+            int sQ = repairEntryOf(dQ, 1);
             addDonor(sP, pa);
             addDonor(sP, pb);
             addDonor(sQ, qa);
@@ -320,19 +321,19 @@ SharedStructure* buildStructure(int n,
             addDonor(sQ, vB);
             for (int side = 0; side < 2; side++) {           // endpoint Q riding a relocation group
                 int alt = zeroImpedanceBranchAlternateReactiveDestination[e * 2 + side];
-                if (alt <= -2 && !st->hReactiveRelocationGroupStart.empty()) {
+                if (alt <= -2 && !structure->hReactiveRelocationGroupStart.empty()) {
                     int g = -2 - alt;
-                    for (int c = st->hReactiveRelocationGroupStart[g]; c < st->hReactiveRelocationGroupStart[g + 1]; c++) addDonor(sQ, st->hReactiveRelocationCandidateRows[c]);
+                    for (int c = structure->hReactiveRelocationGroupStart[g]; c < structure->hReactiveRelocationGroupStart[g + 1]; c++) addDonor(sQ, structure->hReactiveRelocationCandidateRows[c]);
                 }
             }
-            if (pa >= 0) addDonor(slotOf(pa, 1), dP);       // phi_a is carried by ZERO_PHI, on the DUMMY_P row
-            if (pb >= 0) addDonor(slotOf(pb, 1), dP);
-            if (qa >= 0) addDonor(slotOf(qa, -1), dQ);      // v_a is carried by ZERO_V, on the DUMMY_Q row
-            if (qb >= 0) addDonor(slotOf(qb, -1), dQ);
-            if (phA >= 0 && phA != pa) addDonor(slotOf(phA, 1), dP);
-            if (phB >= 0 && phB != pb) addDonor(slotOf(phB, 1), dP);
-            if (vA >= 0 && vA != qa) addDonor(slotOf(vA, -1), dQ);
-            if (vB >= 0 && vB != qb) addDonor(slotOf(vB, -1), dQ);
+            if (pa >= 0) addDonor(repairEntryOf(pa, 1), dP);       // phi_a is carried by ZERO_PHI, on the DUMMY_P row
+            if (pb >= 0) addDonor(repairEntryOf(pb, 1), dP);
+            if (qa >= 0) addDonor(repairEntryOf(qa, -1), dQ);      // v_a is carried by ZERO_V, on the DUMMY_Q row
+            if (qb >= 0) addDonor(repairEntryOf(qb, -1), dQ);
+            if (phA >= 0 && phA != pa) addDonor(repairEntryOf(phA, 1), dP);
+            if (phB >= 0 && phB != pb) addDonor(repairEntryOf(phB, 1), dP);
+            if (vA >= 0 && vA != qa) addDonor(repairEntryOf(vA, -1), dQ);
+            if (vB >= 0 && vB != qb) addDonor(repairEntryOf(vB, -1), dQ);
         }
         if (!zeroDiagonalRows.empty()) {
             // DONOR ORDER decides LU stability without pivoting. The kernel takes the FIRST candidate
@@ -383,27 +384,27 @@ SharedStructure* buildStructure(int n,
     }                                                        // row-mode mask writes 1.0 there
     std::sort(pat.begin(), pat.end());
     pat.erase(std::unique(pat.begin(), pat.end()), pat.end());
-    st->nnz = static_cast<int>(pat.size());
-    if (st->nnz == 0) throw std::runtime_error("empty Jacobian pattern");
+    structure->nnz = static_cast<int>(pat.size());
+    if (structure->nnz == 0) throw std::runtime_error("empty Jacobian pattern");
 
-    st->rowPtr.assign(n + 1, 0);
-    st->colIdx.resize(st->nnz);
-    for (int i = 0; i < st->nnz; i++) {                      // pat is row-major sorted
-        st->colIdx[i] = pat[i].second;
-        st->rowPtr[pat[i].first + 1]++;
+    structure->rowPtr.assign(n + 1, 0);
+    structure->colIdx.resize(structure->nnz);
+    for (int i = 0; i < structure->nnz; i++) {                      // pat is row-major sorted
+        structure->colIdx[i] = pat[i].second;
+        structure->rowPtr[pat[i].first + 1]++;
     }
-    for (int r = 0; r < n; r++) st->rowPtr[r + 1] += st->rowPtr[r];
-    CsrPattern pos{st->rowPtr.data(), st->colIdx.data()};    // (row,col) -> slot by binary search
-    st->nZeroDiagonalRows = static_cast<int>(zeroDiagonalRows.size());
-    if (st->nZeroDiagonalRows > 0) {
-        std::vector<int> zeroDiagonalRowValueStart(st->nZeroDiagonalRows + 1, 0);
-        std::vector<int> donorPtr(st->nZeroDiagonalRows + 1, 0);
+    for (int r = 0; r < n; r++) structure->rowPtr[r + 1] += structure->rowPtr[r];
+    CsrPattern pos{structure->rowPtr.data(), structure->colIdx.data()};    // (row,col) -> slot by binary search
+    structure->nZeroDiagonalRows = static_cast<int>(zeroDiagonalRows.size());
+    if (structure->nZeroDiagonalRows > 0) {
+        std::vector<int> zeroDiagonalRowValueStart(structure->nZeroDiagonalRows + 1, 0);
+        std::vector<int> donorPtr(structure->nZeroDiagonalRows + 1, 0);
         std::vector<int> donor;
         std::vector<int> donorOwnIndex;
         std::map<int, int> zeroDiagonalIndexOfRow;
-        for (int i = 0; i < st->nZeroDiagonalRows; i++) zeroDiagonalIndexOfRow[zeroDiagonalRows[i]] = i;
-        for (int i = 0; i < st->nZeroDiagonalRows; i++) {
-            zeroDiagonalRowValueStart[i + 1] = zeroDiagonalRowValueStart[i] + (st->rowPtr[zeroDiagonalRows[i] + 1] - st->rowPtr[zeroDiagonalRows[i]]);
+        for (int i = 0; i < structure->nZeroDiagonalRows; i++) zeroDiagonalIndexOfRow[zeroDiagonalRows[i]] = i;
+        for (int i = 0; i < structure->nZeroDiagonalRows; i++) {
+            zeroDiagonalRowValueStart[i + 1] = zeroDiagonalRowValueStart[i] + (structure->rowPtr[zeroDiagonalRows[i] + 1] - structure->rowPtr[zeroDiagonalRows[i]]);
             for (int d : zeroDiagonalDonors[i]) {
                 donor.push_back(d);
                 auto it = zeroDiagonalIndexOfRow.find(d);
@@ -411,23 +412,23 @@ SharedStructure* buildStructure(int n,
             }
             donorPtr[i + 1] = static_cast<int>(donor.size());
         }
-        st->nZeroDiagonalRowValues = zeroDiagonalRowValueStart[st->nZeroDiagonalRows];
-        st->hZeroDiagonalRow = zeroDiagonalRows;
-        st->dZeroDiagonalRow.upload(zeroDiagonalRows.data(), zeroDiagonalRows.size() * sizeof(int));
-        st->dZeroDiagonalRowValueStart.upload(zeroDiagonalRowValueStart.data(), zeroDiagonalRowValueStart.size() * sizeof(int));
-        st->dZeroDiagonalDonorStart.upload(donorPtr.data(), donorPtr.size() * sizeof(int));
-        st->dZeroDiagonalDonor.upload(donor.data(), donor.size() * sizeof(int));
-        st->dZeroDiagonalDonorOwnIndex.upload(donorOwnIndex.data(), donorOwnIndex.size() * sizeof(int));
-        st->dZeroDiagonalRepairSign.upload(zeroDiagonalRepairSigns.data(), zeroDiagonalRepairSigns.size() * sizeof(char));
+        structure->nZeroDiagonalRowValues = zeroDiagonalRowValueStart[structure->nZeroDiagonalRows];
+        structure->hZeroDiagonalRow = zeroDiagonalRows;
+        structure->dZeroDiagonalRow.upload(zeroDiagonalRows.data(), zeroDiagonalRows.size() * sizeof(int));
+        structure->dZeroDiagonalRowValueStart.upload(zeroDiagonalRowValueStart.data(), zeroDiagonalRowValueStart.size() * sizeof(int));
+        structure->dZeroDiagonalDonorStart.upload(donorPtr.data(), donorPtr.size() * sizeof(int));
+        structure->dZeroDiagonalDonor.upload(donor.data(), donor.size() * sizeof(int));
+        structure->dZeroDiagonalDonorOwnIndex.upload(donorOwnIndex.data(), donorOwnIndex.size() * sizeof(int));
+        structure->dZeroDiagonalRepairSign.upload(zeroDiagonalRepairSigns.data(), zeroDiagonalRepairSigns.size() * sizeof(char));
         if (std::getenv("OLF_GPU_TRACE") != nullptr) {
-            std::fprintf(stderr, "zero-diagonal repair: %d hazard rows, %zu donor candidates\n", st->nZeroDiagonalRows, donor.size());
+            std::fprintf(stderr, "zero-diagonal repair: %d hazard rows, %zu donor candidates\n", structure->nZeroDiagonalRows, donor.size());
         }
     }
-    st->dRowPtr.upload(st->rowPtr.data(), (n + 1) * sizeof(int));
-    st->dColIdx.upload(st->colIdx.data(), st->nnz * sizeof(int));
+    structure->dRowPtr.upload(structure->rowPtr.data(), (n + 1) * sizeof(int));
+    structure->dColIdx.upload(structure->colIdx.data(), structure->nnz * sizeof(int));
 
     // ---- family device data (inputs, indices, role-folded destinations) + static trig ----
-    setupFamily(st->closedBranch, nClosedBranch, closedBranchParameters, 8, closedBranchIndices, 12, CB_SCATTER, CB_NOUT, resolveClosedBranch, pos);
+    setupFamily(structure->closedBranch, nClosedBranch, closedBranchParameters, 8, closedBranchIndices, 12, CB_SCATTER, CB_NOUT, resolveClosedBranch, pos);
     if (dynamicRelocation && nClosedBranch) {                                   // Dynamic Q-relocation: alt-dest + frozen-row select map
         std::vector<int> alternateDestination;
         std::vector<int> selectorRow;
@@ -435,33 +436,33 @@ SharedStructure* buildStructure(int n,
         std::vector<int> relocationCandidateOffset;
         std::vector<int> relocationCandidateDestinations;
         std::vector<char> relocationDependentPilot;
-        buildClosedBranchRelocationDestination(nClosedBranch, closedBranchIndices, relocatedChildOwnRow, pos, alternateDestination, selectorRow, st->nReactiveRelocationGroups, st->hReactiveRelocationGroupStart.data(), st->hReactiveRelocationCandidateRows.data(),
+        buildClosedBranchRelocationDestination(nClosedBranch, closedBranchIndices, relocatedChildOwnRow, pos, alternateDestination, selectorRow, structure->nReactiveRelocationGroups, structure->hReactiveRelocationGroupStart.data(), structure->hReactiveRelocationCandidateRows.data(),
                 relocationGroup, relocationCandidateOffset, relocationCandidateDestinations, reactiveRelocationDependentGroupOfRow, relocationDependentPilot);
-        st->closedBranch.alternateDestination.upload(alternateDestination.data(), alternateDestination.size() * sizeof(int));
-        st->closedBranch.selectorRow.upload(selectorRow.data(), selectorRow.size() * sizeof(int));
+        structure->closedBranch.alternateDestination.upload(alternateDestination.data(), alternateDestination.size() * sizeof(int));
+        structure->closedBranch.selectorRow.upload(selectorRow.data(), selectorRow.size() * sizeof(int));
         if (!relocationCandidateDestinations.empty()) {
-            st->closedBranch.relocationGroup.upload(relocationGroup.data(), relocationGroup.size() * sizeof(int));
-            st->closedBranch.relocationCandidateOffset.upload(relocationCandidateOffset.data(), relocationCandidateOffset.size() * sizeof(int));
-            st->closedBranch.relocationCandidateDestinations.upload(relocationCandidateDestinations.data(), relocationCandidateDestinations.size() * sizeof(int));
-            st->closedBranch.relocationDependentPilot.upload(relocationDependentPilot.data(), relocationDependentPilot.size());
+            structure->closedBranch.relocationGroup.upload(relocationGroup.data(), relocationGroup.size() * sizeof(int));
+            structure->closedBranch.relocationCandidateOffset.upload(relocationCandidateOffset.data(), relocationCandidateOffset.size() * sizeof(int));
+            structure->closedBranch.relocationCandidateDestinations.upload(relocationCandidateDestinations.data(), relocationCandidateDestinations.size() * sizeof(int));
+            structure->closedBranch.relocationDependentPilot.upload(relocationDependentPilot.data(), relocationDependentPilot.size());
             static int cbRoles[CB_NOUT];
             for (int k = 0; k < CB_NOUT; k++) {
                 cbRoles[k] = CB_SCATTER[k].role;
             }
-            patchGroupFrozenDestinations(st->closedBranch.destination, relocationGroup, relocationCandidateOffset, CB_NOUT, cbRoles,
-                    st->hReactiveRelocationGroupStart.data(), st->hReactiveRelocationCandidateRows.data());
+            patchGroupFrozenDestinations(structure->closedBranch.destination, relocationGroup, relocationCandidateOffset, CB_NOUT, cbRoles,
+                    structure->hReactiveRelocationGroupStart.data(), structure->hReactiveRelocationCandidateRows.data());
         }
-        st->closedBranch.dynamicRelocation = true;
+        structure->closedBranch.dynamicRelocation = true;
     }
     if (hasPhaseControl) {                                          // continuous phase control: P-flow row at a1
         std::vector<int> phaseControlDestination;
         std::vector<int> phaseControlSelector;
         buildClosedBranchPhaseControlDestination(nClosedBranch, closedBranchIndices, closedBranchPhaseControlSide, rowMap, pos, phaseControlDestination, phaseControlSelector);
-        st->closedBranch.phaseControlDestination.upload(phaseControlDestination.data(), phaseControlDestination.size() * sizeof(int));
-        st->closedBranch.phaseControlSelector.upload(phaseControlSelector.data(), phaseControlSelector.size() * sizeof(int));
-        st->closedBranch.hasPhaseControl = true;
+        structure->closedBranch.phaseControlDestination.upload(phaseControlDestination.data(), phaseControlDestination.size() * sizeof(int));
+        structure->closedBranch.phaseControlSelector.upload(phaseControlSelector.data(), phaseControlSelector.size() * sizeof(int));
+        structure->closedBranch.hasPhaseControl = true;
     }
-    setupFamily(st->openBranch, nOpenBranch, openBranchParameters, 7, openBranchIndices, 6, OB_SCATTER, OB_NOUT, resolveOpenBranch, pos);
+    setupFamily(structure->openBranch, nOpenBranch, openBranchParameters, 7, openBranchIndices, 6, OB_SCATTER, OB_NOUT, resolveOpenBranch, pos);
     if (dynamicRelocation && nOpenBranch) {                                   // ob dynamic Q-routing: alt-dest + selector
         std::vector<int> openBranchAlternateDestination;
         std::vector<int> openBranchSelectorRow;
@@ -469,25 +470,25 @@ SharedStructure* buildStructure(int n,
         std::vector<int> openBranchRelocationCandidateOffset;
         std::vector<int> openBranchRelocationCandidateDestinations;
         std::vector<char> openBranchRelocationDependentPilot;
-        buildOpenBranchRelocationDestination(nOpenBranch, openBranchIndices, openBranchAlternateReactiveDestination, relocatedChildOwnRow, pos, openBranchAlternateDestination, openBranchSelectorRow, st->nReactiveRelocationGroups, st->hReactiveRelocationGroupStart.data(), st->hReactiveRelocationCandidateRows.data(),
+        buildOpenBranchRelocationDestination(nOpenBranch, openBranchIndices, openBranchAlternateReactiveDestination, relocatedChildOwnRow, pos, openBranchAlternateDestination, openBranchSelectorRow, structure->nReactiveRelocationGroups, structure->hReactiveRelocationGroupStart.data(), structure->hReactiveRelocationCandidateRows.data(),
                 openBranchRelocationGroup, openBranchRelocationCandidateOffset, openBranchRelocationCandidateDestinations, reactiveRelocationDependentGroupOfRow, openBranchRelocationDependentPilot);
-        st->openBranch.alternateDestination.upload(openBranchAlternateDestination.data(), openBranchAlternateDestination.size() * sizeof(int));
-        st->openBranch.selectorRow.upload(openBranchSelectorRow.data(), openBranchSelectorRow.size() * sizeof(int));
+        structure->openBranch.alternateDestination.upload(openBranchAlternateDestination.data(), openBranchAlternateDestination.size() * sizeof(int));
+        structure->openBranch.selectorRow.upload(openBranchSelectorRow.data(), openBranchSelectorRow.size() * sizeof(int));
         if (!openBranchRelocationCandidateDestinations.empty()) {
-            st->openBranch.relocationGroup.upload(openBranchRelocationGroup.data(), openBranchRelocationGroup.size() * sizeof(int));
-            st->openBranch.relocationCandidateOffset.upload(openBranchRelocationCandidateOffset.data(), openBranchRelocationCandidateOffset.size() * sizeof(int));
-            st->openBranch.relocationCandidateDestinations.upload(openBranchRelocationCandidateDestinations.data(), openBranchRelocationCandidateDestinations.size() * sizeof(int));
-            st->openBranch.relocationDependentPilot.upload(openBranchRelocationDependentPilot.data(), openBranchRelocationDependentPilot.size());
+            structure->openBranch.relocationGroup.upload(openBranchRelocationGroup.data(), openBranchRelocationGroup.size() * sizeof(int));
+            structure->openBranch.relocationCandidateOffset.upload(openBranchRelocationCandidateOffset.data(), openBranchRelocationCandidateOffset.size() * sizeof(int));
+            structure->openBranch.relocationCandidateDestinations.upload(openBranchRelocationCandidateDestinations.data(), openBranchRelocationCandidateDestinations.size() * sizeof(int));
+            structure->openBranch.relocationDependentPilot.upload(openBranchRelocationDependentPilot.data(), openBranchRelocationDependentPilot.size());
             static int obRoles[OB_NOUT];
             for (int k = 0; k < OB_NOUT; k++) {
                 obRoles[k] = OB_SCATTER[k].role;
             }
-            patchGroupFrozenDestinations(st->openBranch.destination, openBranchRelocationGroup, openBranchRelocationCandidateOffset, OB_NOUT, obRoles,
-                    st->hReactiveRelocationGroupStart.data(), st->hReactiveRelocationCandidateRows.data());
+            patchGroupFrozenDestinations(structure->openBranch.destination, openBranchRelocationGroup, openBranchRelocationCandidateOffset, OB_NOUT, obRoles,
+                    structure->hReactiveRelocationGroupStart.data(), structure->hReactiveRelocationCandidateRows.data());
         }
-        st->openBranch.dynamicRelocation = true;
+        structure->openBranch.dynamicRelocation = true;
     }
-    setupFamily(st->shunt, nShunt, shuntParameters, 2, shuntIndices, 5, SH_SCATTER, SH_NOUT, resolveShunt, pos);
+    setupFamily(structure->shunt, nShunt, shuntParameters, 2, shuntIndices, 5, SH_SCATTER, SH_NOUT, resolveShunt, pos);
     if (dynamicRelocation && nShunt) {                                   // Dynamic Q-relocation: shunt alt-dest + selector
         std::vector<int> shuntAlternateDestination;
         std::vector<int> shuntSelectorRow;
@@ -495,57 +496,57 @@ SharedStructure* buildStructure(int n,
         std::vector<int> shuntRelocationCandidateOffset;
         std::vector<int> shuntRelocationCandidateDestinations;
         std::vector<char> shuntRelocationDependentPilot;
-        buildShuntRelocationDestination(nShunt, shuntIndices, relocatedChildOwnRow, pos, shuntAlternateDestination, shuntSelectorRow, st->nReactiveRelocationGroups, st->hReactiveRelocationGroupStart.data(), st->hReactiveRelocationCandidateRows.data(),
+        buildShuntRelocationDestination(nShunt, shuntIndices, relocatedChildOwnRow, pos, shuntAlternateDestination, shuntSelectorRow, structure->nReactiveRelocationGroups, structure->hReactiveRelocationGroupStart.data(), structure->hReactiveRelocationCandidateRows.data(),
                 shuntRelocationGroup, shuntRelocationCandidateOffset, shuntRelocationCandidateDestinations, reactiveRelocationDependentGroupOfRow, shuntRelocationDependentPilot);
-        st->shunt.alternateDestination.upload(shuntAlternateDestination.data(), shuntAlternateDestination.size() * sizeof(int));
-        st->shunt.selectorRow.upload(shuntSelectorRow.data(), shuntSelectorRow.size() * sizeof(int));
+        structure->shunt.alternateDestination.upload(shuntAlternateDestination.data(), shuntAlternateDestination.size() * sizeof(int));
+        structure->shunt.selectorRow.upload(shuntSelectorRow.data(), shuntSelectorRow.size() * sizeof(int));
         if (!shuntRelocationCandidateDestinations.empty()) {
-            st->shunt.relocationGroup.upload(shuntRelocationGroup.data(), shuntRelocationGroup.size() * sizeof(int));
-            st->shunt.relocationCandidateOffset.upload(shuntRelocationCandidateOffset.data(), shuntRelocationCandidateOffset.size() * sizeof(int));
-            st->shunt.relocationCandidateDestinations.upload(shuntRelocationCandidateDestinations.data(), shuntRelocationCandidateDestinations.size() * sizeof(int));
-            st->shunt.relocationDependentPilot.upload(shuntRelocationDependentPilot.data(), shuntRelocationDependentPilot.size());
+            structure->shunt.relocationGroup.upload(shuntRelocationGroup.data(), shuntRelocationGroup.size() * sizeof(int));
+            structure->shunt.relocationCandidateOffset.upload(shuntRelocationCandidateOffset.data(), shuntRelocationCandidateOffset.size() * sizeof(int));
+            structure->shunt.relocationCandidateDestinations.upload(shuntRelocationCandidateDestinations.data(), shuntRelocationCandidateDestinations.size() * sizeof(int));
+            structure->shunt.relocationDependentPilot.upload(shuntRelocationDependentPilot.data(), shuntRelocationDependentPilot.size());
             static int shRoles[SH_NOUT];
             for (int k = 0; k < SH_NOUT; k++) {
                 shRoles[k] = SH_SCATTER[k].role;
             }
-            patchGroupFrozenDestinations(st->shunt.destination, shuntRelocationGroup, shuntRelocationCandidateOffset, SH_NOUT, shRoles,
-                    st->hReactiveRelocationGroupStart.data(), st->hReactiveRelocationCandidateRows.data());
+            patchGroupFrozenDestinations(structure->shunt.destination, shuntRelocationGroup, shuntRelocationCandidateOffset, SH_NOUT, shRoles,
+                    structure->hReactiveRelocationGroupStart.data(), structure->hReactiveRelocationCandidateRows.data());
         }
-        st->shunt.dynamicRelocation = true;
+        structure->shunt.dynamicRelocation = true;
     }
-    setupFamily(st->hvdcAcEmulation, nHvdcAcEmulation, hvdcAcEmulationParameters, 5, hvdcAcEmulationIndices, 4, HVDC_SCATTER, HVDC_NOUT, resolveHvdcAcEmulation, pos);
+    setupFamily(structure->hvdcAcEmulation, nHvdcAcEmulation, hvdcAcEmulationParameters, 5, hvdcAcEmulationIndices, 4, HVDC_SCATTER, HVDC_NOUT, resolveHvdcAcEmulation, pos);
     if (dynamicRelocation && nHvdcAcEmulation) {                                   // a converter bus under a coupler the scenario opens
         std::vector<int> hvdcAcEmulationAlternateDestination;
         std::vector<int> hvdcAcEmulationSelectorRow;
         buildHvdcAcEmulationRelocationDestination(nHvdcAcEmulation, hvdcAcEmulationIndices, relocatedChildOwnRow, pos, hvdcAcEmulationAlternateDestination, hvdcAcEmulationSelectorRow);
-        st->hvdcAcEmulation.alternateDestination.upload(hvdcAcEmulationAlternateDestination.data(), hvdcAcEmulationAlternateDestination.size() * sizeof(int));
-        st->hvdcAcEmulation.selectorRow.upload(hvdcAcEmulationSelectorRow.data(), hvdcAcEmulationSelectorRow.size() * sizeof(int));
-        st->hvdcAcEmulation.dynamicRelocation = true;
+        structure->hvdcAcEmulation.alternateDestination.upload(hvdcAcEmulationAlternateDestination.data(), hvdcAcEmulationAlternateDestination.size() * sizeof(int));
+        structure->hvdcAcEmulation.selectorRow.upload(hvdcAcEmulationSelectorRow.data(), hvdcAcEmulationSelectorRow.size() * sizeof(int));
+        structure->hvdcAcEmulation.dynamicRelocation = true;
     }
 
     // ---- DISTR_Q destinations: per contribution {F-row, dq/dv1, dq/dv2, dq/dph1, dq/dph2, dq/dr1}
     //      (-2-row encodes an F row, >=0 a J slot, -1 skip) ----
-    buildDistrQDest(st.get(), pos, rowMap, nDistrQ, distrQElement, distrQSide, distrQKind, distrQWeight, distrQRow, closedBranchIndices, openBranchIndices, shuntIndices, relocatedChildOwnRow);
+    buildDistrQDest(structure.get(), pos, rowMap, nDistrQ, distrQElement, distrQSide, distrQKind, distrQWeight, distrQRow, closedBranchIndices, openBranchIndices, shuntIndices, relocatedChildOwnRow);
 
     // ---- zero-impedance destinations: per branch the 8 dummy couplings + (tree) the 6 ZERO_V/ZERO_PHI ----
-    buildZeroImpedanceBranchDestination(st.get(), pos, rowMap, nZeroImpedanceBranch, zeroImpedanceBranchParameters, zeroImpedanceBranchIndices, zeroImpedanceBranchAlternateReactiveDestination, relocatedChildOwnRow, reactiveRelocationDependentGroupOfRow);
+    buildZeroImpedanceBranchDestination(structure.get(), pos, rowMap, nZeroImpedanceBranch, zeroImpedanceBranchParameters, zeroImpedanceBranchIndices, zeroImpedanceBranchAlternateReactiveDestination, relocatedChildOwnRow, reactiveRelocationDependentGroupOfRow);
 
     // ---- DISTR_RHO destinations: per contribution {F row, J slot (row, r1 col)} ----
-    buildDistrRhoDest(st.get(), pos, rowMap, nDistrRho, distrRhoRow, distrRhoColumn, distrRhoCoefficient);
+    buildDistrRhoDest(structure.get(), pos, rowMap, nDistrRho, distrRhoRow, distrRhoColumn, distrRhoCoefficient);
 
     // ---- DISTR_SHUNT_B destinations: per contribution {F row, J slot (row, b col)} ----
-    buildDistrShuntBDest(st.get(), pos, rowMap, nDistrShuntB, distrShuntBRow, distrShuntBColumn, distrShuntBCoefficient);
+    buildDistrShuntBDest(structure.get(), pos, rowMap, nDistrShuntB, distrShuntBRow, distrShuntBColumn, distrShuntBCoefficient);
 
     // ---- voltage-dependent load (ZIP/exponential) destinations: one J slot (row, own-V) per term ----
-    st->nLoadModelTerms = nLoadModelTerms;
+    structure->nLoadModelTerms = nLoadModelTerms;
     if (nLoadModelTerms > 0) {
         std::vector<int> loadModelDestination(nLoadModelTerms);
         for (int e = 0; e < nLoadModelTerms; e++) {
             loadModelDestination[e] = pos.at(loadModelIndices[e * 2], loadModelIndices[e * 2 + 1]);
         }
-        st->dLoadModelParameters.upload(loadModelParameters, static_cast<size_t>(nLoadModelTerms) * 3 * sizeof(double));
-        st->dLoadModelIndices.upload(loadModelIndices, static_cast<size_t>(nLoadModelTerms) * 2 * sizeof(int));
-        st->dLoadModelDestination.upload(loadModelDestination.data(), static_cast<size_t>(nLoadModelTerms) * sizeof(int));
+        structure->dLoadModelParameters.upload(loadModelParameters, static_cast<size_t>(nLoadModelTerms) * 3 * sizeof(double));
+        structure->dLoadModelIndices.upload(loadModelIndices, static_cast<size_t>(nLoadModelTerms) * 2 * sizeof(int));
+        structure->dLoadModelDestination.upload(loadModelDestination.data(), static_cast<size_t>(nLoadModelTerms) * sizeof(int));
         std::vector<int> loadModelAlternateRow(nLoadModelTerms, -1);
         std::vector<int> loadModelAlternateDestination(nLoadModelTerms, -1);
         bool anyAlternateRow = false;
@@ -557,18 +558,18 @@ SharedStructure* buildStructure(int n,
                 anyAlternateRow = true;
             }
         }
-        st->loadModelRelocated = anyAlternateRow;
+        structure->loadModelRelocated = anyAlternateRow;
         if (anyAlternateRow) {
-            st->dLoadModelAlternateRow.upload(loadModelAlternateRow.data(), static_cast<size_t>(nLoadModelTerms) * sizeof(int));
-            st->dLoadModelAlternateDestination.upload(loadModelAlternateDestination.data(), static_cast<size_t>(nLoadModelTerms) * sizeof(int));
+            structure->dLoadModelAlternateRow.upload(loadModelAlternateRow.data(), static_cast<size_t>(nLoadModelTerms) * sizeof(int));
+            structure->dLoadModelAlternateDestination.upload(loadModelAlternateDestination.data(), static_cast<size_t>(nLoadModelTerms) * sizeof(int));
         }
     }
 
     std::vector<int> diagPos(n);
     for (int r = 0; r < n; r++) diagPos[r] = pos.at(r, r);
-    st->dDiagPos.upload(diagPos.data(), n * sizeof(int));
+    structure->dDiagPos.upload(diagPos.data(), n * sizeof(int));
     CUDA_CHECK(cudaDeviceSynchronize());                     // every structure upload done before first use
-    return st.release();
+    return structure.release();
 }
 
 constexpr double LU_FILL = 12.0;     // heuristic LU-fill multiplier over nnz (fallback when LU_NNZ is unavailable)
@@ -578,32 +579,33 @@ constexpr double LU_FILL = 12.0;     // heuristic LU-fill multiplier over nnz (f
 // and read cuDSS's reported CUDSS_DATA_LU_NNZ; fall back to the LU_FILL heuristic if that is
 // unavailable (older cuDSS, query failure). The result is CACHED on the structure, so repeated
 // chunk-size queries (one per SA run) probe only once per extraction.
-double luBytesPerScenario(SharedStructure& st) {
-    if (st.luBytes > 0) {
-        return st.luBytes;
+double luBytesPerScenario(SharedStructure& structure) {
+    if (structure.luBytes > 0) {
+        return structure.luBytes;
     }
-    int n = st.n;
+    int n = structure.n;
 #if OLF_GPU_CUDSS_LU_NNZ
     try {
         DeviceBuf dVals;
         DeviceBuf dB;
         DeviceBuf dX;
-        dVals.alloc(st.nnz * sizeof(double));                // ANALYSIS is symbolic — values unused
-        CUDA_CHECK(cudaMemset(dVals.p, 0, st.nnz * sizeof(double)));
+        dVals.alloc(structure.nnz * sizeof(double));                // ANALYSIS is symbolic — values unused
+        CUDA_CHECK(cudaMemset(dVals.p, 0, structure.nnz * sizeof(double)));
         dB.alloc(n * sizeof(double));
         dX.alloc(n * sizeof(double));
-        CudssCtx ds;
-        CUDSS_CHECK(cudssCreate(&ds.handle));
-        CUDSS_CHECK(cudssConfigCreate(&ds.config));
-        applyReorderAlg(ds.config, st.nZeroImpedanceBranch > 0);
-        CUDSS_CHECK(cudssDataCreate(ds.handle, &ds.data));
-        CUDSS_CHECK(cudssMatrixCreateCsr(&ds.systemMatrix, n, n, st.nnz, st.dRowPtr.as<int>(), nullptr,
-                                         st.dColIdx.as<int>(), dVals.as<double>(), OLF_CUDSS_CSR_TYPES,
+        CudssCtx solver;
+        CUDSS_CHECK(cudssCreate(&solver.handle));
+        CUDSS_CHECK(cudssConfigCreate(&solver.config));
+        applyReorderAlg(solver.config, structure.nZeroImpedanceBranch > 0);
+        CUDSS_CHECK(cudssDataCreate(solver.handle, &solver.data));
+        CUDSS_CHECK(cudssMatrixCreateCsr(&solver.systemMatrix, n, n, structure.nnz, structure.dRowPtr.as<int>(), nullptr,
+                                         structure.dColIdx.as<int>(), dVals.as<double>(), OLF_CUDSS_CSR_TYPES,
                                          CUDSS_MTYPE_GENERAL, CUDSS_MVIEW_FULL, CUDSS_BASE_ZERO));
-        CUDSS_CHECK(cudssMatrixCreateDn(&ds.rightHandSideMatrix, n, 1, n, dB.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
-        CUDSS_CHECK(cudssMatrixCreateDn(&ds.solutionMatrix, n, 1, n, dX.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
+        CUDSS_CHECK(cudssMatrixCreateDn(&solver.rightHandSideMatrix, n, 1, n, dB.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
+        CUDSS_CHECK(cudssMatrixCreateDn(&solver.solutionMatrix, n, 1, n, dX.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
         gAnalysesMain++;
-        { AnalysisTimer at_(__LINE__); CUDSS_CHECK(cudssExecute(ds.handle, CUDSS_PHASE_ANALYSIS, ds.config, ds.data, ds.systemMatrix, ds.solutionMatrix, ds.rightHandSideMatrix)); }
+        { AnalysisTimer at_(__LINE__); CUDSS_CHECK(cudssExecute(solver.handle, CUDSS_PHASE_ANALYSIS, solver.config, solver.data, solver.systemMatrix, solver.solutionMatrix,
+                solver.rightHandSideMatrix)); }
         // cuDSS's OWN device-memory estimate for one matrix with this pattern — [0] permanent,
         // [1] peak (16 int64 entries). This is the number to size with: the LU numeric factors are
         // only part of what a factorization allocates, and the workspace is the part our model used
@@ -614,29 +616,29 @@ double luBytesPerScenario(SharedStructure& st) {
         {
             int64_t est[16] = {0};
             size_t writtenEst = 0;
-            if (cudssDataGet(ds.handle, ds.data, CUDSS_DATA_MEMORY_ESTIMATES,
+            if (cudssDataGet(solver.handle, solver.data, CUDSS_DATA_MEMORY_ESTIMATES,
                              est, sizeof(est), &writtenEst) == CUDSS_STATUS_SUCCESS
                     && writtenEst >= 2 * sizeof(int64_t)) {
                 int64_t deviceBytes = std::max(est[0], est[1]);
                 if (deviceBytes > 0) {
-                    st.luBytes = static_cast<double>(deviceBytes);
-                    return st.luBytes;
+                    structure.luBytes = static_cast<double>(deviceBytes);
+                    return structure.luBytes;
                 }
             }
         }
         int64_t luNnz = 0;
         size_t written = 0;
-        CUDSS_CHECK(cudssDataGet(ds.handle, ds.data, CUDSS_DATA_LU_NNZ, &luNnz, sizeof(luNnz), &written));
+        CUDSS_CHECK(cudssDataGet(solver.handle, solver.data, CUDSS_DATA_LU_NNZ, &luNnz, sizeof(luNnz), &written));
         if (luNnz > 0) {
-            st.luBytes = static_cast<double>(luNnz) * sizeof(double);
-            return st.luBytes;
+            structure.luBytes = static_cast<double>(luNnz) * sizeof(double);
+            return structure.luBytes;
         }
     } catch (...) {
         // fall through to the heuristic
     }
 #endif
-    st.luBytes = LU_FILL * static_cast<double>(st.nnz) * sizeof(double);
-    return st.luBytes;
+    structure.luBytes = LU_FILL * static_cast<double>(structure.nnz) * sizeof(double);
+    return structure.luBytes;
 }
 
 
@@ -651,7 +653,7 @@ double luBytesPerScenario(SharedStructure& st) {
 // the shared structure is the correct semantic — one extraction has ONE value set; any context sharing
 // it must see the new values (the Java side then re-keys the structure cache to the new extraction,
 // GpuAcStructures.rebind, so content matching never aliases stale values).
-void refreshStructureValues(SharedStructure& st, int nClosedBranch, const double* closedBranchParameters, int nOpenBranch, const double* openBranchParameters,
+void refreshStructureValues(SharedStructure& structure, int nClosedBranch, const double* closedBranchParameters, int nOpenBranch, const double* openBranchParameters,
                             int nShunt, const double* shuntParameters, int nHvdcAcEmulation, const double* hvdcAcEmulationParameters,
                             int nZeroImpedanceBranch, const double* zeroImpedanceBranchParameters) {
     auto refresh = [](Family& f, int elementCount, const double* in) {
@@ -663,15 +665,15 @@ void refreshStructureValues(SharedStructure& st, int nClosedBranch, const double
                                   cudaMemcpyHostToDevice));
         }
     };
-    refresh(st.closedBranch, nClosedBranch, closedBranchParameters);
-    refresh(st.openBranch, nOpenBranch, openBranchParameters);
-    refresh(st.shunt, nShunt, shuntParameters);
-    refresh(st.hvdcAcEmulation, nHvdcAcEmulation, hvdcAcEmulationParameters);
-    if (nZeroImpedanceBranch != st.nZeroImpedanceBranch) {
+    refresh(structure.closedBranch, nClosedBranch, closedBranchParameters);
+    refresh(structure.openBranch, nOpenBranch, openBranchParameters);
+    refresh(structure.shunt, nShunt, shuntParameters);
+    refresh(structure.hvdcAcEmulation, nHvdcAcEmulation, hvdcAcEmulationParameters);
+    if (nZeroImpedanceBranch != structure.nZeroImpedanceBranch) {
         throw std::runtime_error("refreshStructureValues: zero-impedance count changed (not a VALUES event)");
     }
     if (nZeroImpedanceBranch) {
-        CUDA_CHECK(cudaMemcpy(st.dZeroImpedanceBranchParameters.p, zeroImpedanceBranchParameters, static_cast<size_t>(nZeroImpedanceBranch) * sizeof(double), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(structure.dZeroImpedanceBranchParameters.p, zeroImpedanceBranchParameters, static_cast<size_t>(nZeroImpedanceBranch) * sizeof(double), cudaMemcpyHostToDevice));
     }
 }
 

@@ -99,8 +99,8 @@ __device__ inline ReactiveRelocationTables relocationTablesForScenario(ReactiveR
 
 __device__ inline int chooseCarrierRow(int g, const int* reactiveRelocationGroupStart, const int* reactiveRelocationCandidateRows, const int* mode) {
     int p0 = reactiveRelocationGroupStart[g];
-    int cnt = reactiveRelocationGroupStart[g + 1] - p0;
-    for (int c = 1; c < cnt; c++) {
+    int count = reactiveRelocationGroupStart[g + 1] - p0;
+    for (int c = 1; c < count; c++) {
         int m = mode[reactiveRelocationCandidateRows[p0 + c]];
         if (m != GpuRowMode::FIXED_VARIABLE && m != GpuRowMode::BUS_TARGET_Q && m != GpuRowMode::CROSS_FIXED_VARIABLE) {
             return c;
@@ -118,8 +118,8 @@ __device__ inline int chooseCarrierRowInSubgroup(int g, const int* reactiveReloc
         return chooseCarrierRow(g, reactiveRelocationGroupStart, reactiveRelocationCandidateRows, mode);
     }
     int p0 = reactiveRelocationGroupStart[g];
-    int cnt = reactiveRelocationGroupStart[g + 1] - p0;
-    for (int c = 1; c < cnt; c++) {
+    int count = reactiveRelocationGroupStart[g + 1] - p0;
+    for (int c = 1; c < count; c++) {
         if (sub[reactiveRelocationDistrQMemberStart[g] + c - 1] != 0) continue;
         int m = mode[reactiveRelocationCandidateRows[p0 + c]];
         if (m != GpuRowMode::FIXED_VARIABLE && m != GpuRowMode::BUS_TARGET_Q && m != GpuRowMode::CROSS_FIXED_VARIABLE) {

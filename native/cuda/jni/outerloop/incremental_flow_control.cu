@@ -119,12 +119,12 @@ __global__ void incrementalFlowControlDecisionBatch(int nIncrementalFlowControlC
         while (true) {
             int next = -1;                                   // OLF nextTapPositionIndex
             if (remaining != 0.0) {
-                double vc = tapRows[(size_t) (base + best) * GpuPiModelColumn::COUNT + col];
+                double currentTapValue = tapRows[(size_t) (base + best) * GpuPiModelColumn::COUNT + col];
                 auto descending = [&](int n1, int n2) {
                     double a = tapRows[(size_t) (base + n1) * GpuPiModelColumn::COUNT + col], b = tapRows[(size_t) (base + n2) * GpuPiModelColumn::COUNT + col];
                     return remaining > 0 ? a < b : a > b;
                 };
-                (void) vc;
+                (void) currentTapValue;
                 if (best == 0 && last >= 1 && descending(1, 0)) next = -1;
                 else if (best > 0 && descending(best, best - 1)) next = best - 1;
                 else if (best < last && descending(best, best + 1)) next = best + 1;

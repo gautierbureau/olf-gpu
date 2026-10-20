@@ -135,9 +135,9 @@ abstract class AbstractGpuSaTest extends AbstractOpenSecurityAnalysisTest {
     void assertAllPinnedCornerSemantics(Network network, List<Contingency> ctgs) {
         com.powsybl.security.SecurityAnalysisParameters sap = new com.powsybl.security.SecurityAnalysisParameters();
         sap.setLoadFlowParameters(remotePinParameters());
-        List<com.powsybl.security.monitor.StateMonitor> mon = List.of(new com.powsybl.security.monitor.StateMonitor(
+        List<com.powsybl.security.monitor.StateMonitor> monitors = List.of(new com.powsybl.security.monitor.StateMonitor(
                 com.powsybl.contingency.ContingencyContext.all(), java.util.Set.of(), java.util.Set.of("vl4"), java.util.Set.of()));
-        SecurityAnalysisResult cpu = runSecurityAnalysis(network, ctgs, mon, sap);
+        SecurityAnalysisResult cpu = runSecurityAnalysis(network, ctgs, monitors, sap);
         double targetV = network.getGenerator("g1").getTargetV();
         double basePilotV = cpu.getPreContingencyResult().getNetworkResult().getBusResults().stream()
                 .filter(b -> "b4".equals(b.getBusId())).findFirst().orElseThrow().getV();
@@ -159,22 +159,22 @@ abstract class AbstractGpuSaTest extends AbstractOpenSecurityAnalysisTest {
         sap.setLoadFlowParameters(lfp);
         java.util.Set<String> allVls = network.getVoltageLevelStream().map(vl -> vl.getId())
                 .collect(java.util.stream.Collectors.toSet());
-        List<com.powsybl.security.monitor.StateMonitor> mon = List.of(new com.powsybl.security.monitor.StateMonitor(
+        List<com.powsybl.security.monitor.StateMonitor> monitors = List.of(new com.powsybl.security.monitor.StateMonitor(
                 com.powsybl.contingency.ContingencyContext.all(), java.util.Set.of(), allVls, java.util.Set.of()));
-        SecurityAnalysisResult cpu = runSecurityAnalysis(network, ctgs, mon, sap);
+        SecurityAnalysisResult cpu = runSecurityAnalysis(network, ctgs, monitors, sap);
         securityAnalysisProvider = new GpuSecurityAnalysisProvider(commonTestConfig.matrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>());
         try {
-            SecurityAnalysisResult gpu = runSecurityAnalysis(network, ctgs, mon, sap);
+            SecurityAnalysisResult gpu = runSecurityAnalysis(network, ctgs, monitors, sap);
             assertTrue(GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get() <= 0,
                     "the scope gate must route this run to the CPU (batching it was 3.7e-3 kV wrong)");
             assertEquals(cpu.getPostContingencyResults().size(), gpu.getPostContingencyResults().size());
             for (int i = 0; i < cpu.getPostContingencyResults().size(); i++) {
-                var cb = cpu.getPostContingencyResults().get(i).getNetworkResult().getBusResults();
-                var gb = gpu.getPostContingencyResults().get(i).getNetworkResult().getBusResults();
-                assertEquals(cb.size(), gb.size());
-                for (int b = 0; b < cb.size(); b++) {
-                    org.junit.jupiter.api.Assertions.assertEquals(cb.get(b).getV(), gb.get(b).getV(), 0.0,
-                            "bus " + cb.get(b).getBusId());
+                var cpuBuses = cpu.getPostContingencyResults().get(i).getNetworkResult().getBusResults();
+                var gpuBuses = gpu.getPostContingencyResults().get(i).getNetworkResult().getBusResults();
+                assertEquals(cpuBuses.size(), gpuBuses.size());
+                for (int b = 0; b < cpuBuses.size(); b++) {
+                    org.junit.jupiter.api.Assertions.assertEquals(cpuBuses.get(b).getV(), gpuBuses.get(b).getV(), 0.0,
+                            "bus " + cpuBuses.get(b).getBusId());
                 }
             }
         } finally {
@@ -378,12 +378,12 @@ abstract class AbstractGpuSaTest extends AbstractOpenSecurityAnalysisTest {
                 assertEquals(cpuC.getStatus(), gpuC.getStatus(), "contingency status of " + ctgId);
                 assertEquals(cpuC.getDistributedActivePower(), gpuC.getDistributedActivePower(), 1e-9,
                         "contingency distributed active power of " + ctgId);
-                var cb = cpuC.getNetworkResult().getBusResults();
-                var gb = gpuC.getNetworkResult().getBusResults();
-                assertEquals(cb.size(), gb.size());
-                for (int b = 0; b < cb.size(); b++) {
-                    org.junit.jupiter.api.Assertions.assertEquals(cb.get(b).getV(), gb.get(b).getV(), 1e-12,
-                            "contingency " + ctgId + " bus voltage " + cb.get(b).getBusId());
+                var cpuBuses = cpuC.getNetworkResult().getBusResults();
+                var gpuBuses = gpuC.getNetworkResult().getBusResults();
+                assertEquals(cpuBuses.size(), gpuBuses.size());
+                for (int b = 0; b < cpuBuses.size(); b++) {
+                    org.junit.jupiter.api.Assertions.assertEquals(cpuBuses.get(b).getV(), gpuBuses.get(b).getV(), 1e-12,
+                            "contingency " + ctgId + " bus voltage " + cpuBuses.get(b).getBusId());
                 }
             }
             assertEquals(cpu.getOperatorStrategyResults().size(), gpu.getOperatorStrategyResults().size());
@@ -396,9 +396,9 @@ abstract class AbstractGpuSaTest extends AbstractOpenSecurityAnalysisTest {
                         gpuS.getLimitViolationsResult().getLimitViolations().size(), "strategy violation count of " + strategyId);
                 assertEquals(cpuS.getDistributedActivePower(), gpuS.getDistributedActivePower(), 1e-9,
                         "strategy distributed active power of " + strategyId);
-                var cb = cpuS.getNetworkResult().getBusResults();
-                var gb = gpuS.getNetworkResult().getBusResults();
-                assertEquals(cb.size(), gb.size());
+                var cpuBuses = cpuS.getNetworkResult().getBusResults();
+                var gpuBuses = gpuS.getNetworkResult().getBusResults();
+                assertEquals(cpuBuses.size(), gpuBuses.size());
                 if ("1".equals(System.getenv("OLF_GPU_DBG_BUSDUMP"))) {
                     var cpb = cpu.getPostContingencyResults().get(r).getNetworkResult().getBusResults();
                     var gpb = gpu.getPostContingencyResults().get(r).getNetworkResult().getBusResults();
@@ -406,14 +406,14 @@ abstract class AbstractGpuSaTest extends AbstractOpenSecurityAnalysisTest {
                         System.err.printf("PARENTDUMP %-8s cpu=%9.4f gpu=%9.4f d=%+8.4f%n", cpb.get(b).getBusId(),
                                 cpb.get(b).getV(), gpb.get(b).getV(), gpb.get(b).getV() - cpb.get(b).getV());
                     }
-                    for (int b = 0; b < cb.size(); b++) {
-                        System.err.printf("BUSDUMP %-8s cpu=%9.4f gpu=%9.4f d=%+8.4f%n", cb.get(b).getBusId(),
-                                cb.get(b).getV(), gb.get(b).getV(), gb.get(b).getV() - cb.get(b).getV());
+                    for (int b = 0; b < cpuBuses.size(); b++) {
+                        System.err.printf("BUSDUMP %-8s cpu=%9.4f gpu=%9.4f d=%+8.4f%n", cpuBuses.get(b).getBusId(),
+                                cpuBuses.get(b).getV(), gpuBuses.get(b).getV(), gpuBuses.get(b).getV() - cpuBuses.get(b).getV());
                     }
                 }
-                for (int b = 0; b < cb.size(); b++) {
-                    org.junit.jupiter.api.Assertions.assertEquals(cb.get(b).getV(), gb.get(b).getV(), 1e-12,
-                            "strategy bus voltage " + cb.get(b).getBusId());
+                for (int b = 0; b < cpuBuses.size(); b++) {
+                    org.junit.jupiter.api.Assertions.assertEquals(cpuBuses.get(b).getV(), gpuBuses.get(b).getV(), 1e-12,
+                            "strategy bus voltage " + cpuBuses.get(b).getBusId());
                 }
             }
         } finally {

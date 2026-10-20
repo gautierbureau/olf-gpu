@@ -185,16 +185,16 @@ class GpuBatchedGenOverrideDiagnosticTest {
         // transfer the override solution (es ordering) into the removal state vector (esR ordering), by bus id + var type
         double[] stateR = svR.get().clone();
         for (Bus iidmBus : rmNet.getBusView().getBuses()) {
-            LfBus rb = netR.getBusById(iidmBus.getId());
-            LfBus ob = net.getBusById(iidmBus.getId());
-            if (rb == null || ob == null) {
+            LfBus removalBus = netR.getBusById(iidmBus.getId());
+            LfBus overrideBus = net.getBusById(iidmBus.getId());
+            if (removalBus == null || overrideBus == null) {
                 continue;
             }
             for (AcVariableType vt : new AcVariableType[] {AcVariableType.BUS_V, AcVariableType.BUS_PHI}) {
-                var rv = esR.getVariableSet().getVariable(rb.getNum(), vt);
-                var ovv = es.getVariableSet().getVariable(ob.getNum(), vt);
-                if (rv != null && rv.getRow() >= 0 && ovv != null && ovv.getRow() >= 0) {
-                    stateR[rv.getRow()] = overrideState[ovv.getRow()];
+                var removalVariable = esR.getVariableSet().getVariable(removalBus.getNum(), vt);
+                var overrideVariable = es.getVariableSet().getVariable(overrideBus.getNum(), vt);
+                if (removalVariable != null && removalVariable.getRow() >= 0 && overrideVariable != null && overrideVariable.getRow() >= 0) {
+                    stateR[removalVariable.getRow()] = overrideState[overrideVariable.getRow()];
                 }
             }
         }
@@ -230,18 +230,18 @@ class GpuBatchedGenOverrideDiagnosticTest {
         double tightRemovalVsOverride = 0;
         double loadFlowVsTightRemoval = 0;
         for (Bus iidmBus : rmNet.getBusView().getBuses()) {
-            LfBus rb = netR.getBusById(iidmBus.getId());
-            LfBus ob = net.getBusById(iidmBus.getId());
+            LfBus removalBus = netR.getBusById(iidmBus.getId());
+            LfBus overrideBus = net.getBusById(iidmBus.getId());
             Bus lfBus = cpu.getBusView().getBus(iidmBus.getId());
-            if (rb == null || ob == null) {
+            if (removalBus == null || overrideBus == null) {
                 continue;
             }
-            tightRemovalVsOverride = Math.max(tightRemovalVsOverride, Math.abs(rb.getV() - ob.getV()));
-            tightRemovalVsOverride = Math.max(tightRemovalVsOverride, Math.abs(rb.getAngle() - ob.getAngle()));
+            tightRemovalVsOverride = Math.max(tightRemovalVsOverride, Math.abs(removalBus.getV() - overrideBus.getV()));
+            tightRemovalVsOverride = Math.max(tightRemovalVsOverride, Math.abs(removalBus.getAngle() - overrideBus.getAngle()));
             if (lfBus != null && !Double.isNaN(lfBus.getV())) {
                 double lfV = lfBus.getV() / lfBus.getVoltageLevel().getNominalV();
-                loadFlowVsTightRemoval = Math.max(loadFlowVsTightRemoval, Math.abs(lfV - rb.getV()));
-                loadFlowVsTightRemoval = Math.max(loadFlowVsTightRemoval, Math.abs(Math.toRadians(lfBus.getAngle()) - rb.getAngle()));
+                loadFlowVsTightRemoval = Math.max(loadFlowVsTightRemoval, Math.abs(lfV - removalBus.getV()));
+                loadFlowVsTightRemoval = Math.max(loadFlowVsTightRemoval, Math.abs(Math.toRadians(lfBus.getAngle()) - removalBus.getAngle()));
             }
         }
         System.out.printf("%n[5] tight in-process REMOVAL (TOL=1e-13) vs OVERRIDE/GPU : %.3e%n", tightRemovalVsOverride);

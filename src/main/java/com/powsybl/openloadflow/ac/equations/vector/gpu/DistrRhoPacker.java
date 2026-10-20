@@ -64,13 +64,13 @@ public final class DistrRhoPacker {
             // member is the FIRST enabled one — OLF's updateRemoteVoltageControlEquations pick and
             // computeAlternateQRow's, so its row carries the relocated pilot Q, never DISTR_RHO. Rows
             // inactive in a scenario are identity-wiped by the row-mode pass (superset principle).
-            TransformerVoltageControl tvc = pilot.getTransformerVoltageControl()
+            TransformerVoltageControl voltageControl = pilot.getTransformerVoltageControl()
                     .filter(c -> c.getMergeStatus() == VoltageControl.MergeStatus.MAIN)
                     .orElse(null);
-            if (tvc == null) {
+            if (voltageControl == null) {
                 continue;
             }
-            List<LfBranch> controllers = tvc.getMergedControllerElements().stream()
+            List<LfBranch> controllers = voltageControl.getMergedControllerElements().stream()
                     .filter(c -> !c.isDisabled())
                     .filter(c -> es.getEquation(c.getNum(), AcEquationType.DISTR_RHO).isPresent())
                     .toList();
@@ -102,13 +102,13 @@ public final class DistrRhoPacker {
             // — at an AFTER_GENERATOR base the control is DISABLED and that predicate is false, which
             // silently emptied this set and let a member outage batch with the coupling missing
             // (measured 3.7e-3 kV wrong, 2026-09-06).
-            TransformerVoltageControl tvc = pilot.getTransformerVoltageControl()
+            TransformerVoltageControl voltageControl = pilot.getTransformerVoltageControl()
                     .filter(c -> c.getMergeStatus() == VoltageControl.MergeStatus.MAIN)
                     .orElse(null);
-            if (tvc == null) {
+            if (voltageControl == null) {
                 continue;
             }
-            List<LfBranch> group = tvc.getMergedControllerElements();
+            List<LfBranch> group = voltageControl.getMergedControllerElements();
             // EXISTENCE-keyed (row()/getColumn() is -1 for INACTIVE equations — the same trap):
             // a shared group's equations exist whether or not the control is on at base.
             boolean distrRho = group.stream().filter(c -> !c.isDisabled())

@@ -48,69 +48,69 @@ public final class DeviceFlowControllers {
     /** Install the controllers for the in-kernel loops (RPC at OLF order 9, incremental phase at order 7).
      *  Returns true when the kernel loops OWN them, false when there are none or one controlled branch is
      *  not a closed branch (the host orchestrator then runs). */
-    public static boolean uploadToDevice(long handle, List<Controller> ctrls) {
-        if (ctrls == null || ctrls.isEmpty()) {
+    public static boolean uploadToDevice(long handle, List<Controller> controllers) {
+        if (controllers == null || controllers.isEmpty()) {
             PhaseControlNative.setBatchFlowControllers(handle,
                     null, null, null, null, null, null, null, null, null, null, null, null);
             return false;
         }
-        int nc = ctrls.size();
-        int[] kind = new int[nc];
-        int[] pinRow = new int[nc];
-        int[] tapColumn = new int[nc];
-        int[] side = new int[nc];
-        double[] targetValue = new double[nc];
-        double[] halfTargetDeadband = new double[nc];
-        int[] elem = new int[nc];
-        int[] controlledElement = new int[nc];
-        int[] tapStart = new int[nc + 1];
-        int[] baseTap = new int[nc];
-        int[] maxShift = new int[nc];
+        int nControllers = controllers.size();
+        int[] kind = new int[nControllers];
+        int[] pinRow = new int[nControllers];
+        int[] tapColumn = new int[nControllers];
+        int[] side = new int[nControllers];
+        double[] targetValue = new double[nControllers];
+        double[] halfTargetDeadband = new double[nControllers];
+        int[] elem = new int[nControllers];
+        int[] controlledElement = new int[nControllers];
+        int[] tapStart = new int[nControllers + 1];
+        int[] baseTap = new int[nControllers];
+        int[] maxShift = new int[nControllers];
         List<Double> tapRows = new ArrayList<>();
-        for (int c = 0; c < nc; c++) {
-            Controller ctl = ctrls.get(c);
-            kind[c] = ctl.kind();
-            pinRow[c] = ctl.pinRow();
-            tapColumn[c] = ctl.tapColumn();
-            side[c] = ctl.controlledSide();
-            targetValue[c] = ctl.targetValue();
-            halfTargetDeadband[c] = ctl.halfDeadband();
-            elem[c] = ctl.elemIndex();
-            controlledElement[c] = ctl.controlledElementIndex();
+        for (int c = 0; c < nControllers; c++) {
+            Controller controller = controllers.get(c);
+            kind[c] = controller.kind();
+            pinRow[c] = controller.pinRow();
+            tapColumn[c] = controller.tapColumn();
+            side[c] = controller.controlledSide();
+            targetValue[c] = controller.targetValue();
+            halfTargetDeadband[c] = controller.halfDeadband();
+            elem[c] = controller.elemIndex();
+            controlledElement[c] = controller.controlledElementIndex();
             tapStart[c] = tapRows.size() / GpuPiModelColumn.COUNT;
-            for (double[] row : ctl.tapRows()) {
+            for (double[] row : controller.tapRows()) {
                 for (double d : row) {
                     tapRows.add(d);
                 }
             }
-            baseTap[c] = ctl.baseTapIndex();
-            maxShift[c] = ctl.maxTapShift() == Integer.MAX_VALUE ? 1 << 20 : ctl.maxTapShift();
+            baseTap[c] = controller.baseTapIndex();
+            maxShift[c] = controller.maxTapShift() == Integer.MAX_VALUE ? 1 << 20 : controller.maxTapShift();
         }
-        tapStart[nc] = tapRows.size() / GpuPiModelColumn.COUNT;
+        tapStart[nControllers] = tapRows.size() / GpuPiModelColumn.COUNT;
         boolean owned = PhaseControlNative.setBatchFlowControllers(handle,
                 kind, pinRow, tapColumn, side, targetValue, halfTargetDeadband, elem, controlledElement, tapStart,
                 tapRows.stream().mapToDouble(Double::doubleValue).toArray(), baseTap, maxShift) != 0;
-        LOGGER.info("Uploaded {} flow-observed incremental controllers to device: {}", nc, owned ? "in-kernel loops" : "host orchestrator");
+        LOGGER.info("Uploaded {} flow-observed incremental controllers to device: {}", nControllers, owned ? "in-kernel loops" : "host orchestrator");
         if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
-            System.err.printf("FLOW_UPLOAD nControllers=%d kernel=%b%n", nc, owned);
+            System.err.printf("FLOW_UPLOAD nControllers=%d kernel=%b%n", nControllers, owned);
         }
         return owned;
     }
 
     /** Give the driver's final taps (scenario 0) back to the network through the pi model. */
-    public static void applyToNetwork(LfNetwork network, List<Controller> ctrls, int[] taps) {
-        if (ctrls == null || ctrls.isEmpty() || taps == null) {
+    public static void applyToNetwork(LfNetwork network, List<Controller> controllers, int[] taps) {
+        if (controllers == null || controllers.isEmpty() || taps == null) {
             return;
         }
-        for (int c = 0; c < ctrls.size() && c < taps.length; c++) {
-            Controller ctl = ctrls.get(c);
-            if (taps[c] == ctl.baseTapIndex()) {
+        for (int c = 0; c < controllers.size() && c < taps.length; c++) {
+            Controller controller = controllers.get(c);
+            if (taps[c] == controller.baseTapIndex()) {
                 continue;
             }
-            LfBranch branch = network.getBranch(ctl.branchNum());
+            LfBranch branch = network.getBranch(controller.branchNum());
             if (branch != null) {
-                var pm = branch.getPiModel();
-                pm.setTapPosition(pm.getTapPositionRange().getMinimum() + taps[c]);
+                var piModel = branch.getPiModel();
+                piModel.setTapPosition(piModel.getTapPositionRange().getMinimum() + taps[c]);
             }
         }
     }

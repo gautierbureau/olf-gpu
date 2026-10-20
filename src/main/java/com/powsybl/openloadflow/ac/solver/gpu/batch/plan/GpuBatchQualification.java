@@ -191,9 +191,9 @@ public final class GpuBatchQualification {
                 var phiVar = es.getVariableSet().getVariable(newSlack.getNum(), AcVariableType.BUS_PHI);
                 int phiRow = phiVar == null ? -1 : phiVar.getRow();
                 LfBus baseSlack = newSlack.getNetwork().getSynchronousNetworks().getFirst().getSlackBuses().getFirst();
-                boolean ds = gpuData.distributedSlack().slackPhiRow() >= 0;
-                boolean participates = ds && (distributedSlackParameters.busFactor(baseSlack) != 0 || distributedSlackParameters.busFactor(newSlack) != 0);
-                boolean slackOnly = ds && gpuData.distributedSlack().busPhiRow().length == 0;
+                boolean distributedSlack = gpuData.distributedSlack().slackPhiRow() >= 0;
+                boolean participates = distributedSlack && (distributedSlackParameters.busFactor(baseSlack) != 0 || distributedSlackParameters.busFactor(newSlack) != 0);
+                boolean slackOnly = distributedSlack && gpuData.distributedSlack().busPhiRow().length == 0;
                 // the slack's balance is read from the injection buffer, which carries no AC-emulation HVDC term
                 boolean emulatedHvdc = newSlack.getHvdcs().stream().anyMatch(com.powsybl.openloadflow.network.LfHvdc::isAcEmulation);
                 boolean balanceActive = es.getEquation(newSlack.getNum(), AcEquationType.BUS_TARGET_P)
@@ -204,7 +204,7 @@ public final class GpuBatchQualification {
                     continue;
                 }
                 pb.relocatedSlackRow[i] = phiRow;
-                pb.relocatedSlackShift[i] = ds ? newSlack.getTargetP() - gpuData.distributedSlack().slackTargetP() : 0;
+                pb.relocatedSlackShift[i] = distributedSlack ? newSlack.getTargetP() - gpuData.distributedSlack().slackTargetP() : 0;
                 com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("PLAN:SLACK_RELOCATED");
             }
             java.util.Set<Integer> outagedZeroImpedanceBranchNums = c.outagedZeroImpedanceBranches().stream()

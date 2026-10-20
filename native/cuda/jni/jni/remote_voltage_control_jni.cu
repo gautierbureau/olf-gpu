@@ -46,44 +46,44 @@ OLF_JNI(ac_equations_vector_gpu, RemoteVoltageControlNative, setBatchDistrQSubgr
 
 extern "C" JNIEXPORT void JNICALL
 OLF_JNI(ac_equations_vector_gpu, RemoteVoltageControlNative, setBatchDistrQWeightOverrides)(
-        JNIEnv* env, jclass, jlong handle, jintArray jIdx, jdoubleArray jW) {
+        JNIEnv* env, jclass, jlong handle, jintArray jScenarioTerm, jdoubleArray jWeight) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx == nullptr) {
         return;
     }
-    if (jIdx == nullptr || jW == nullptr || env->GetArrayLength(jW) == 0) {
+    if (jScenarioTerm == nullptr || jWeight == nullptr || env->GetArrayLength(jWeight) == 0) {
         ctx->nDistrQWeightOverrides = 0;
         return;
     }
-    int nOv = env->GetArrayLength(jW);
-    jint* idx = env->GetIntArrayElements(jIdx, nullptr);
-    jdouble* w = env->GetDoubleArrayElements(jW, nullptr);
-    ctx->dDistrQWeightOverrideScenarioTerm.upload(idx, static_cast<size_t>(nOv) * 2 * sizeof(int));
-    ctx->dDistrQWeightOverrideWeight.upload(w, static_cast<size_t>(nOv) * sizeof(double));
-    env->ReleaseIntArrayElements(jIdx, idx, JNI_ABORT);
-    env->ReleaseDoubleArrayElements(jW, w, JNI_ABORT);
-    ctx->nDistrQWeightOverrides = nOv;
+    int nDistrQWeightOverrides = env->GetArrayLength(jWeight);
+    jint* scenarioTerm = env->GetIntArrayElements(jScenarioTerm, nullptr);
+    jdouble* weight = env->GetDoubleArrayElements(jWeight, nullptr);
+    ctx->dDistrQWeightOverrideScenarioTerm.upload(scenarioTerm, static_cast<size_t>(nDistrQWeightOverrides) * 2 * sizeof(int));
+    ctx->dDistrQWeightOverrideWeight.upload(weight, static_cast<size_t>(nDistrQWeightOverrides) * sizeof(double));
+    env->ReleaseIntArrayElements(jScenarioTerm, scenarioTerm, JNI_ABORT);
+    env->ReleaseDoubleArrayElements(jWeight, weight, JNI_ABORT);
+    ctx->nDistrQWeightOverrides = nDistrQWeightOverrides;
 }
 
 extern "C" JNIEXPORT void JNICALL
 OLF_JNI(ac_equations_vector_gpu, RemoteVoltageControlNative, setBatchDistrQKeyOverrides)(
-        JNIEnv* env, jclass, jlong handle, jintArray jIdx, jdoubleArray jKey) {
+        JNIEnv* env, jclass, jlong handle, jintArray jScenarioMember, jdoubleArray jKey) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx == nullptr) {
         return;
     }
-    if (jIdx == nullptr || jKey == nullptr || env->GetArrayLength(jKey) == 0) {
+    if (jScenarioMember == nullptr || jKey == nullptr || env->GetArrayLength(jKey) == 0) {
         ctx->nDistrQKeyOverrides = 0;
         return;
     }
-    int nOv = env->GetArrayLength(jKey);
-    jint* idx = env->GetIntArrayElements(jIdx, nullptr);
+    int nDistrQKeyOverrides = env->GetArrayLength(jKey);
+    jint* scenarioMember = env->GetIntArrayElements(jScenarioMember, nullptr);
     jdouble* key = env->GetDoubleArrayElements(jKey, nullptr);
-    ctx->dDistrQKeyOverrideScenarioMember.upload(idx, static_cast<size_t>(nOv) * 2 * sizeof(int));
-    ctx->dDistrQKeyOverrideKey.upload(key, static_cast<size_t>(nOv) * sizeof(double));
-    env->ReleaseIntArrayElements(jIdx, idx, JNI_ABORT);
+    ctx->dDistrQKeyOverrideScenarioMember.upload(scenarioMember, static_cast<size_t>(nDistrQKeyOverrides) * 2 * sizeof(int));
+    ctx->dDistrQKeyOverrideKey.upload(key, static_cast<size_t>(nDistrQKeyOverrides) * sizeof(double));
+    env->ReleaseIntArrayElements(jScenarioMember, scenarioMember, JNI_ABORT);
     env->ReleaseDoubleArrayElements(jKey, key, JNI_ABORT);
-    ctx->nDistrQKeyOverrides = nOv;
+    ctx->nDistrQKeyOverrides = nDistrQKeyOverrides;
 }
 
 // Per-scenario member targetQ overrides for the DISTR_Q target kernel: {key, value} where key is
@@ -154,19 +154,19 @@ OLF_JNI(ac_equations_vector_gpu, RemoteVoltageControlNative, setBatchPilotAllPin
     jint* slots = env->GetIntArrayElements(jSlots, nullptr);
     jint* rows = env->GetIntArrayElements(jRows, nullptr);
     jdouble* qt = env->GetDoubleArrayElements(jQTargets, nullptr);
-    jint* cnt = env->GetIntArrayElements(jSurvivorReactiveLimitEntryCounts, nullptr);
+    jint* survivorReactiveLimitEntryCounts = env->GetIntArrayElements(jSurvivorReactiveLimitEntryCounts, nullptr);
     jint* pool = env->GetIntArrayElements(jSurvivorReactiveLimitEntries, nullptr);
     int poolLen = env->GetArrayLength(jSurvivorReactiveLimitEntries);
     std::vector<int> off(ne);
     int acc = 0;
     for (int i = 0; i < ne; i++) {
         off[i] = acc;
-        acc += cnt[i];
+        acc += survivorReactiveLimitEntryCounts[i];
     }
     ctx->dPfSlot.upload(slots, static_cast<size_t>(ne) * sizeof(int));
     ctx->dPfRow.upload(rows, static_cast<size_t>(ne) * sizeof(int));
     ctx->dPfQTarget.upload(qt, static_cast<size_t>(ne) * sizeof(double));
-    ctx->dPfCount.upload(cnt, static_cast<size_t>(ne) * sizeof(int));
+    ctx->dPfCount.upload(survivorReactiveLimitEntryCounts, static_cast<size_t>(ne) * sizeof(int));
     ctx->dPfOff.upload(off.data(), static_cast<size_t>(ne) * sizeof(int));
     ctx->dPilotFlipSurvivorReactiveLimitEntries.upload(pool, static_cast<size_t>(poolLen > 0 ? poolLen : 1) * sizeof(int));
     std::vector<char> zeroC(ne, 0);
@@ -177,7 +177,7 @@ OLF_JNI(ac_equations_vector_gpu, RemoteVoltageControlNative, setBatchPilotAllPin
     env->ReleaseIntArrayElements(jSlots, slots, JNI_ABORT);
     env->ReleaseIntArrayElements(jRows, rows, JNI_ABORT);
     env->ReleaseDoubleArrayElements(jQTargets, qt, JNI_ABORT);
-    env->ReleaseIntArrayElements(jSurvivorReactiveLimitEntryCounts, cnt, JNI_ABORT);
+    env->ReleaseIntArrayElements(jSurvivorReactiveLimitEntryCounts, survivorReactiveLimitEntryCounts, JNI_ABORT);
     env->ReleaseIntArrayElements(jSurvivorReactiveLimitEntries, pool, JNI_ABORT);
 }
 
@@ -186,21 +186,21 @@ OLF_JNI(ac_equations_vector_gpu, RemoteVoltageControlNative, setBatchPilotAllPin
 // member outaged in that scenario — plan-group-member-dynamics A5).
 extern "C" JNIEXPORT void JNICALL
 OLF_JNI(ac_equations_vector_gpu, RemoteVoltageControlNative, setBatchDistrRhoCoefficientOverrides)(
-        JNIEnv* env, jclass, jlong handle, jintArray jIdx, jdoubleArray jC) {
+        JNIEnv* env, jclass, jlong handle, jintArray jScenarioTerm, jdoubleArray jCoefficient) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx == nullptr) {
         return;
     }
-    if (jIdx == nullptr || jC == nullptr || env->GetArrayLength(jC) == 0) {
+    if (jScenarioTerm == nullptr || jCoefficient == nullptr || env->GetArrayLength(jCoefficient) == 0) {
         ctx->nDistrRhoCoefficientOverrides = 0;
         return;
     }
-    int nOv = env->GetArrayLength(jC);
-    jint* idx = env->GetIntArrayElements(jIdx, nullptr);
-    jdouble* c = env->GetDoubleArrayElements(jC, nullptr);
-    ctx->dDistrRhoOverrideScenarioTerm.upload(idx, static_cast<size_t>(nOv) * 2 * sizeof(int));
-    ctx->dDistrRhoOverrideCoefficient.upload(c, static_cast<size_t>(nOv) * sizeof(double));
-    env->ReleaseIntArrayElements(jIdx, idx, JNI_ABORT);
-    env->ReleaseDoubleArrayElements(jC, c, JNI_ABORT);
-    ctx->nDistrRhoCoefficientOverrides = nOv;
+    int nDistrRhoCoefficientOverrides = env->GetArrayLength(jCoefficient);
+    jint* scenarioTerm = env->GetIntArrayElements(jScenarioTerm, nullptr);
+    jdouble* coefficient = env->GetDoubleArrayElements(jCoefficient, nullptr);
+    ctx->dDistrRhoOverrideScenarioTerm.upload(scenarioTerm, static_cast<size_t>(nDistrRhoCoefficientOverrides) * 2 * sizeof(int));
+    ctx->dDistrRhoOverrideCoefficient.upload(coefficient, static_cast<size_t>(nDistrRhoCoefficientOverrides) * sizeof(double));
+    env->ReleaseIntArrayElements(jScenarioTerm, scenarioTerm, JNI_ABORT);
+    env->ReleaseDoubleArrayElements(jCoefficient, coefficient, JNI_ABORT);
+    ctx->nDistrRhoCoefficientOverrides = nDistrRhoCoefficientOverrides;
 }

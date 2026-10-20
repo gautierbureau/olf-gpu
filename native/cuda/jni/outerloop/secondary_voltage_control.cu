@@ -73,13 +73,13 @@ __global__ void secondaryVoltageControlTriggerBatch(SecondaryVoltageControlTable
     if (nPinned > 0 && nPinned < hi - lo) {
         for (int k = lo; k < hi; k++) {
             int c = T.zoneControllerBus[k];
-            size_t st = (size_t) s * T.nReactiveLimitEntries + T.reactiveLimitEntry[c];
-            if (limitType[st] == GpuQLimitType::NONE) continue;
+            size_t scenarioEntry = (size_t) s * T.nReactiveLimitEntries + T.reactiveLimitEntry[c];
+            if (limitType[scenarioEntry] == GpuQLimitType::NONE) continue;
             size_t idx = (size_t) s * n + T.controllerBusVRow[c];
-            char sm = savedMode[st];
+            char sm = savedMode[scenarioEntry];
             mode[idx] = (sm == GpuRowMode::BUS_TARGET_V_WITH_SLOPE) ? GpuRowMode::BUS_TARGET_V_WITH_SLOPE : GpuRowMode::FIXED_VARIABLE;                  // back to its PV form
             target[idx] = T.controlledBusTargetV[(size_t) s * T.nControllerBuses + c];
-            limitType[st] = GpuQLimitType::NONE;
+            limitType[scenarioEntry] = GpuQLimitType::NONE;
         }
     }
     // ---- the zone's trigger: pilot deadband, or K spread while not all controllers are at a limit ----
@@ -197,12 +197,12 @@ __global__ void secondaryVoltageControlAssembleBatch(SecondaryVoltageControlTabl
     int z = controllerBusZone[i];
     int lo = T.zoneStart[z];
     int hi = T.zoneStart[z + 1];
-    int cnt = 0;
+    int count = 0;
     int last = -1;
     for (int k = lo; k < hi; k++) {
         int c = T.zoneControllerBus[k];
         if (T.controllerBusEnabled[(size_t) s * nC + c]) {
-            cnt++;
+            count++;
             last = c;
         }
     }
@@ -223,7 +223,7 @@ __global__ void secondaryVoltageControlAssembleBatch(SecondaryVoltageControlTabl
         for (int k = lo; k < hi; k++) {
             int c = T.zoneControllerBus[k];
             if (!T.controllerBusEnabled[(size_t) s * nC + c]) continue;
-            double a = (c == i) ? 1.0 - 1.0 / cnt : -1.0 / cnt;
+            double a = (c == i) ? 1.0 - 1.0 / count : -1.0 / count;
             v += a * T.jk[((size_t) s * nC + j) * nC + c];
         }
         m[(size_t) j * nC + i] = v;
@@ -232,7 +232,7 @@ __global__ void secondaryVoltageControlAssembleBatch(SecondaryVoltageControlTabl
     for (int k = lo; k < hi; k++) {
         int c = T.zoneControllerBus[k];
         if (!T.controllerBusEnabled[(size_t) s * nC + c]) continue;
-        double a = (c == i) ? 1.0 - 1.0 / cnt : -1.0 / cnt;
+        double a = (c == i) ? 1.0 - 1.0 / count : -1.0 / count;
         rv += a * T.k0[(size_t) s * nC + c];
     }
     r[i] = -rv;

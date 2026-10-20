@@ -192,11 +192,11 @@ class GpuBatchedN1FixedIterTest {
                 BatchSolveRequest.of(network, baseState, contingencies, es, target, params, ReportNode.NO_OP)
                         .withTol(TOL));
         long gpuMs = (System.nanoTime() - g0) / 1_000_000;
-        long cb = cold.stream().filter(b -> !b.needsCpuFallback()).count();
+        long batchedCount = cold.stream().filter(b -> !b.needsCpuFallback()).count();
         String baseWhere = System.getenv("OLF_GPU_BASE_ON_GPU") != null ? "GPU" : "CPU";
         System.out.printf("  [%s K=%d] base %s loadflow %d ms + cold GPU SA %d ms = %d ms total | %d ctg | %.2f ms/ctg%n",
                 label, kE2E, baseWhere, baseLfMs, gpuMs,
-                baseLfMs + gpuMs, cb, (baseLfMs + gpuMs) / (double) Math.max(1, cb));
+                baseLfMs + gpuMs, batchedCount, (baseLfMs + gpuMs) / (double) Math.max(1, batchedCount));
     }
 
     /**
@@ -280,11 +280,11 @@ class GpuBatchedN1FixedIterTest {
                     BatchSolveRequest.of(network, baseState, contingencies, es, target, params, ReportNode.NO_OP)
                             .withTol(TOL));
             long gpuMs = (System.nanoTime() - g0) / 1_000_000;
-            long cb = cold.stream().filter(b -> !b.needsCpuFallback()).count();
+            long batchedCount = cold.stream().filter(b -> !b.needsCpuFallback()).count();
             String baseWhere = System.getenv("OLF_GPU_BASE_ON_GPU") != null ? "GPU" : "CPU";
             System.out.printf("  [E2E K=%d] base %s loadflow %d ms + %s GPU SA %d ms = %d ms total | %d ctg | %.2f ms/ctg%n",
                     kE2E, baseWhere, baseLfMs, "GPU".equals(baseWhere) ? "warm" : "cold", gpuMs,
-                    baseLfMs + gpuMs, cb, (baseLfMs + gpuMs) / (double) Math.max(1, cb));
+                    baseLfMs + gpuMs, batchedCount, (baseLfMs + gpuMs) / (double) Math.max(1, batchedCount));
         }
 
         long totalBatched = 0;

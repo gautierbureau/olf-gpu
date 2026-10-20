@@ -63,53 +63,53 @@ class StableRowsAcrossControlLayoutsTest {
                 pairRc.accept(vcol, vcol);
             }
         };
-        int[] cb = d.closedBranch().indices();
-        for (int e = 0; e < cb.length / 12; e++) {          // closedBranchIndices stride 12 (…a1col r1col alternateQRow1 alternateQRow2)
+        int[] closedBranchIndices = d.closedBranch().indices();
+        for (int e = 0; e < closedBranchIndices.length / 12; e++) {          // closedBranchIndices stride 12 (…a1col r1col alternateQRow1 alternateQRow2)
             int b = e * 12;
-            pairRc.accept(cb[b], cb[b + 4]);
-            pairRc.accept(cb[b + 2], cb[b + 6]);
-            pairRc.accept(cb[b + 1], cb[b + 1]);
-            pairRc.accept(cb[b + 3], cb[b + 3]);
-            claimMovedV.accept(cb[b + 1], cb[b + 5]);
-            claimMovedV.accept(cb[b + 3], cb[b + 7]);
-            if (cb[b + 9] >= 0) {
-                pairRc.accept(cb[b + 9], cb[b + 9]);
+            pairRc.accept(closedBranchIndices[b], closedBranchIndices[b + 4]);
+            pairRc.accept(closedBranchIndices[b + 2], closedBranchIndices[b + 6]);
+            pairRc.accept(closedBranchIndices[b + 1], closedBranchIndices[b + 1]);
+            pairRc.accept(closedBranchIndices[b + 3], closedBranchIndices[b + 3]);
+            claimMovedV.accept(closedBranchIndices[b + 1], closedBranchIndices[b + 5]);
+            claimMovedV.accept(closedBranchIndices[b + 3], closedBranchIndices[b + 7]);
+            if (closedBranchIndices[b + 9] >= 0) {
+                pairRc.accept(closedBranchIndices[b + 9], closedBranchIndices[b + 9]);
             }
-            if (cb[b + 8] >= 0) {
-                pairRc.accept(cb[b + 8], cb[b + 8]);
+            if (closedBranchIndices[b + 8] >= 0) {
+                pairRc.accept(closedBranchIndices[b + 8], closedBranchIndices[b + 8]);
             }
         }
-        int[] ob = d.openBranch().indices();
-        for (int e = 0; e < ob.length / 6; e++) {
+        int[] openBranchIndices = d.openBranch().indices();
+        for (int e = 0; e < openBranchIndices.length / 6; e++) {
             int b = e * 6;
-            pairRc.accept(ob[b + 1], ob[b + 1]);
-            pairRc.accept(ob[b + 3], ob[b + 3]);
-            claimMovedV.accept(ob[b + 1], ob[b + 4]);
-            claimMovedV.accept(ob[b + 3], ob[b + 5]);
+            pairRc.accept(openBranchIndices[b + 1], openBranchIndices[b + 1]);
+            pairRc.accept(openBranchIndices[b + 3], openBranchIndices[b + 3]);
+            claimMovedV.accept(openBranchIndices[b + 1], openBranchIndices[b + 4]);
+            claimMovedV.accept(openBranchIndices[b + 3], openBranchIndices[b + 5]);
         }
-        int[] sh = d.shunt().indices();
-        for (int e = 0; e < sh.length / 4; e++) {
+        int[] shuntIndices = d.shunt().indices();
+        for (int e = 0; e < shuntIndices.length / 4; e++) {
             int b = e * 4;
-            pairRc.accept(sh[b + 1], sh[b + 1]);
-            claimMovedV.accept(sh[b + 1], sh[b + 2]);
-            if (sh[b + 3] >= 0) {
-                pairRc.accept(sh[b + 3], sh[b + 3]);
+            pairRc.accept(shuntIndices[b + 1], shuntIndices[b + 1]);
+            claimMovedV.accept(shuntIndices[b + 1], shuntIndices[b + 2]);
+            if (shuntIndices[b + 3] >= 0) {
+                pairRc.accept(shuntIndices[b + 3], shuntIndices[b + 3]);
             }
         }
-        int[] hv = d.hvdcAcEmulation().indices();
-        for (int e = 0; e < hv.length / 4; e++) {
+        int[] hvdcAcEmulationIndices = d.hvdcAcEmulation().indices();
+        for (int e = 0; e < hvdcAcEmulationIndices.length / 4; e++) {
             int b = e * 4;
-            pairRc.accept(hv[b], hv[b + 2]);
-            pairRc.accept(hv[b + 1], hv[b + 3]);
+            pairRc.accept(hvdcAcEmulationIndices[b], hvdcAcEmulationIndices[b + 2]);
+            pairRc.accept(hvdcAcEmulationIndices[b + 1], hvdcAcEmulationIndices[b + 3]);
         }
         int[] distrQRow = d.distrQ().row();
         for (int c = 0; c < distrQRow.length; c++) {
             pairRc.accept(distrQRow[c], distrQRow[c]);
         }
-        int[] zi = d.zeroImpedanceBranch().indices();
-        for (int e = 0; e < zi.length / 11; e++) {
+        int[] zeroImpedanceBranchIndices = d.zeroImpedanceBranch().indices();
+        for (int e = 0; e < zeroImpedanceBranchIndices.length / 11; e++) {
             for (int s = 0; s < 6; s++) {
-                pairRc.accept(zi[e * 11 + s], zi[e * 11 + s]);
+                pairRc.accept(zeroImpedanceBranchIndices[e * 11 + s], zeroImpedanceBranchIndices[e * 11 + s]);
             }
         }
         boolean[] colUsed = new boolean[n];

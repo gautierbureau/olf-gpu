@@ -40,13 +40,13 @@ final class GpuSimpleTransformerVoltageControlOuterLoop {
     /** Pre-solve mutation: apply every live controller's VC-ON activation deltas to each real
      *  scenario's row modes and target overrides (OLF's initialize() enables VC before the first
      *  solve). Returns the extended override lists to hand to the first batch pass. */
-    static void applyVcOn(int realCount, int n, List<GpuTransformerVoltageControlOuterLoop.TransformerController> tcs,
+    static void applyVcOn(int realCount, int n, List<GpuTransformerVoltageControlOuterLoop.TransformerController> transformerControllers,
                           int[][] rowModePerScenario, int[] baseRowMode, boolean[][] disabledMask,
                           double[] baseState, List<Integer> ovIndexList, List<Double> ovValueList) {
         for (int slot = 0; slot < realCount; slot++) {
-            for (GpuTransformerVoltageControlOuterLoop.TransformerController tc : tcs) {
+            for (GpuTransformerVoltageControlOuterLoop.TransformerController transformerController : transformerControllers) {
                 boolean anySurvivor = false;                 // plan-A6: free-member outages re-pick on-device
-                for (GpuTransformerVoltageControlOuterLoop.Member m : tc.members()) {
+                for (GpuTransformerVoltageControlOuterLoop.Member m : transformerController.members()) {
                     anySurvivor |= !disabledMask[slot][m.elemIndex()];
                 }
                 if (!anySurvivor) {
@@ -57,20 +57,20 @@ final class GpuSimpleTransformerVoltageControlOuterLoop {
                 // rows owned by an OUTAGED member get their own override below — the same row must
                 // NEVER carry two target overrides (parallel scatter, no ordering)
                 java.util.Set<Integer> ownRows = new java.util.HashSet<>();
-                for (GpuTransformerVoltageControlOuterLoop.Member m : tc.members()) {
+                for (GpuTransformerVoltageControlOuterLoop.Member m : transformerController.members()) {
                     if (disabledMask[slot][m.elemIndex()]) {
                         ownRows.add(m.rhoRow());
                     }
                 }
-                for (int k = 0; k < tc.deltaRows().length; k++) {
-                    if (ownRows.contains(tc.deltaRows()[k])) {
+                for (int k = 0; k < transformerController.deltaRows().length; k++) {
+                    if (ownRows.contains(transformerController.deltaRows()[k])) {
                         continue;
                     }
-                    row[tc.deltaRows()[k]] = tc.deltaModesOn()[k];
-                    ovIndexList.add(slot * n + tc.deltaRows()[k]);
-                    ovValueList.add(tc.deltaTargetsOn()[k]);
+                    row[transformerController.deltaRows()[k]] = transformerController.deltaModesOn()[k];
+                    ovIndexList.add(slot * n + transformerController.deltaRows()[k]);
+                    ovValueList.add(transformerController.deltaTargetsOn()[k]);
                 }
-                for (GpuTransformerVoltageControlOuterLoop.Member m : tc.members()) {
+                for (GpuTransformerVoltageControlOuterLoop.Member m : transformerController.members()) {
                     if (!disabledMask[slot][m.elemIndex()]) {
                         continue;
                     }

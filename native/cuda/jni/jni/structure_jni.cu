@@ -60,7 +60,7 @@ OLF_JNI(ac_equations_vector_gpu, StructureNative, createStructure)(
     int nLoadModelTerms = env->GetArrayLength(jLoadModelIndices) / 2;             // loadModelIndices stride 2 (row, vCol)
 
     std::string error;
-    SharedStructurePtr* st = nullptr;
+    SharedStructurePtr* structurePointer = nullptr;
     try {
         // DEFENSIVE input validation (an intermittent SIGSEGV at buildStructure+0xe43 — three
         // hs_err logs 2026-09-06 — is a one-past-the-end host read that only faults at a page
@@ -112,7 +112,7 @@ OLF_JNI(ac_equations_vector_gpu, StructureNative, createStructure)(
                         + ": a1Col " + std::to_string(closedBranchPhaseControlSide[e] >> 1) + " >= n " + std::to_string(n));
             }
         }
-        st = new SharedStructurePtr(buildStructure(n, nClosedBranch, closedBranchParameters, closedBranchIndices, nOpenBranch, openBranchParameters, openBranchIndices,
+        structurePointer = new SharedStructurePtr(buildStructure(n, nClosedBranch, closedBranchParameters, closedBranchIndices, nOpenBranch, openBranchParameters, openBranchIndices,
                                                    nShunt, shuntParameters, shuntIndices, nHvdcAcEmulation, hvdcAcEmulationParameters, hvdcAcEmulationIndices,
                                                    nDistrQ, distrQElement, distrQSide, distrQWeight, distrQRow, distrQKind,
                                                    nZeroImpedanceBranch, zeroImpedanceBranchParameters, zeroImpedanceBranchIndices,
@@ -163,7 +163,7 @@ OLF_JNI(ac_equations_vector_gpu, StructureNative, createStructure)(
                       ("GPU structure creation failed: " + error).c_str());
         return 0;
     }
-    return reinterpret_cast<jlong>(st);
+    return reinterpret_cast<jlong>(structurePointer);
 }
 
 extern "C" JNIEXPORT void JNICALL
@@ -181,7 +181,7 @@ extern "C" JNIEXPORT void JNICALL
 OLF_JNI(ac_equations_vector_gpu, StructureNative, refreshStructureValues)(
         JNIEnv* env, jclass, jlong structureHandle, jdoubleArray jClosedBranchParameters, jdoubleArray jOpenBranchParameters,
         jdoubleArray jShuntParameters, jdoubleArray jHvdcAcEmulationParameters, jdoubleArray jZeroImpedanceBranchParameters) {
-    auto* stp = reinterpret_cast<SharedStructurePtr*>(structureHandle);
+    auto* structurePointer = reinterpret_cast<SharedStructurePtr*>(structureHandle);
     jdouble* closedBranchParameters = env->GetDoubleArrayElements(jClosedBranchParameters, nullptr);
     jdouble* openBranchParameters = env->GetDoubleArrayElements(jOpenBranchParameters, nullptr);
     jdouble* shuntParameters = env->GetDoubleArrayElements(jShuntParameters, nullptr);
@@ -189,10 +189,10 @@ OLF_JNI(ac_equations_vector_gpu, StructureNative, refreshStructureValues)(
     jdouble* zeroImpedanceBranchParameters = env->GetDoubleArrayElements(jZeroImpedanceBranchParameters, nullptr);
     std::string error;
     try {
-        if (stp == nullptr || !*stp) {
+        if (structurePointer == nullptr || !*structurePointer) {
             throw std::runtime_error("invalid structure handle");
         }
-        refreshStructureValues(**stp, env->GetArrayLength(jClosedBranchParameters) / 8, closedBranchParameters, env->GetArrayLength(jOpenBranchParameters) / 7, openBranchParameters,
+        refreshStructureValues(**structurePointer, env->GetArrayLength(jClosedBranchParameters) / 8, closedBranchParameters, env->GetArrayLength(jOpenBranchParameters) / 7, openBranchParameters,
                                env->GetArrayLength(jShuntParameters) / 2, shuntParameters, env->GetArrayLength(jHvdcAcEmulationParameters) / 5, hvdcAcEmulationParameters,
                                env->GetArrayLength(jZeroImpedanceBranchParameters), zeroImpedanceBranchParameters);
     } catch (const std::exception& e) {
@@ -214,19 +214,19 @@ OLF_JNI(ac_equations_vector_gpu, StructureNative, refreshStructureValues)(
 extern "C" JNIEXPORT jint JNICALL
 OLF_JNI(ac_equations_vector_gpu, StructureNative, recommendBatchSize)(
         JNIEnv* env, jclass, jlong structureHandle, jint maxCap) {
-    auto* stp = reinterpret_cast<SharedStructurePtr*>(structureHandle);
+    auto* structurePointer = reinterpret_cast<SharedStructurePtr*>(structureHandle);
     int rec = 1;
     try {
-        if (stp == nullptr || !*stp) {
+        if (structurePointer == nullptr || !*structurePointer) {
             throw std::runtime_error("invalid structure handle");
         }
-        SharedStructure& st = **stp;
+        SharedStructure& structure = **structurePointer;
         // Per-scenario device footprint: the dominant term is cuDSS's LU numeric factors
         // (the exact fill from a probe analysis — cached on the structure — or the heuristic),
         // plus the value/state arrays (vals + x/target/F/B/dx). The LU index structure is
         // shared across the batch.
         constexpr double SAFETY = 0.7;                       // leave headroom for cuDSS workspace + fragmentation
-        double luBytes = luBytesPerScenario(st);
+        double luBytes = luBytesPerScenario(structure);
         size_t freeBytes = 0;
         size_t totalBytes = 0;
         CUDA_CHECK(cudaMemGetInfo(&freeBytes, &totalBytes));  // after the probe freed its buffers
@@ -234,9 +234,9 @@ OLF_JNI(ac_equations_vector_gpu, StructureNative, recommendBatchSize)(
         // accumulator) and dLineSearchPreviousX (the line-search previous state, allocated under the RTE
         // parameters' MAX_VOLTAGE_CHANGE scaling).
         double perScenarioBytes = luBytes
-                + (static_cast<double>(st.nnz) + 7.0 * st.n) * sizeof(double)
-                + static_cast<double>(st.n) * sizeof(int)    // dMode
-                + static_cast<double>(st.nElements);         // dDisabled (char)
+                + (static_cast<double>(structure.nnz) + 7.0 * structure.n) * sizeof(double)
+                + static_cast<double>(structure.n) * sizeof(int)    // dMode
+                + static_cast<double>(structure.nElements);         // dDisabled (char)
         double budget = static_cast<double>(freeBytes) * SAFETY;
         long fit = perScenarioBytes > 0 ? static_cast<long>(budget / perScenarioBytes) : maxCap;
         rec = static_cast<int>(std::max<long>(1, std::min<long>(maxCap, fit)));

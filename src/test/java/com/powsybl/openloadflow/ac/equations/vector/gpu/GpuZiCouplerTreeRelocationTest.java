@@ -152,9 +152,9 @@ class GpuZiCouplerTreeRelocationTest extends AbstractLoadFlowNetworkFactory {
         assumeTrue(GpuAcNewtonSolver.isAvailable(), "GPU native lib not available");
         LfNetwork network = Networks.load(zeroImpedancePhaseShifter(),
                 new LfNetworkParameters().setSlackBusSelector(new FirstSlackBusSelector())).get(0);
-        LfBranch ps = network.getBranchById("ps01");
-        assertTrue(ps.isZeroImpedance(LoadFlowModel.AC) && ps.isSpanningTreeEdge(LoadFlowModel.AC), "a zero-impedance tree edge");
-        assertTrue(Math.abs(LfBranch.getA(ps)) > 1e-3, "with a phase shift: the ZERO_PHI target is not 0");
+        LfBranch phaseShifter = network.getBranchById("ps01");
+        assertTrue(phaseShifter.isZeroImpedance(LoadFlowModel.AC) && phaseShifter.isSpanningTreeEdge(LoadFlowModel.AC), "a zero-impedance tree edge");
+        assertTrue(Math.abs(LfBranch.getA(phaseShifter)) > 1e-3, "with a phase shift: the ZERO_PHI target is not 0");
         assertFirstStepIsOlfs(zeroImpedancePhaseShifter(), "zero-impedance phase shifter, relocated");
     }
 

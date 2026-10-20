@@ -151,10 +151,10 @@ SharedStructure* buildStructure(int n,
                                 const int* reactiveRelocationDependentBaseGroupIn, const int* reactiveRelocationBaseTargetRowIn, const int* reactiveRelocationDependentGroupOfRowIn);
 
 // The device bytes one scenario's LU factors take, from a cuDSS probe analysis (cached on the structure).
-double luBytesPerScenario(SharedStructure& st);
+double luBytesPerScenario(SharedStructure& structure);
 
 // Re-upload the per-element parameter packs in place (a tap or shunt-susceptance move): same pattern, new values.
-void refreshStructureValues(SharedStructure& st, int nClosedBranch, const double* closedBranchParameters, int nOpenBranch, const double* openBranchParameters,
+void refreshStructureValues(SharedStructure& structure, int nClosedBranch, const double* closedBranchParameters, int nOpenBranch, const double* openBranchParameters,
                             int nShunt, const double* shuntParameters, int nHvdcAcEmulation, const double* hvdcAcEmulationParameters,
                             int nZeroImpedanceBranch, const double* zeroImpedanceBranchParameters);
 

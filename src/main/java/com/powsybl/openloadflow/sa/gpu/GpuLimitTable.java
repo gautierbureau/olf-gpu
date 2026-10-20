@@ -248,11 +248,11 @@ final class GpuLimitTable {
         if (System.getenv("OLF_GPU_PHASE_TIME") != null) {
             // What one contingency's scan actually costs is this table's size, so print it: it is the
             // denominator of every per-entry number, and the work a device kernel would take over.
-            long nI = quantities.stream().filter(q -> q == QTY_I).count();
-            long nP = quantities.stream().filter(q -> q == QTY_P).count();
-            long nS = quantities.stream().filter(q -> q == QTY_S).count();
+            long nCurrent = quantities.stream().filter(q -> q == QTY_I).count();
+            long nActivePower = quantities.stream().filter(q -> q == QTY_P).count();
+            long nApparentPower = quantities.stream().filter(q -> q == QTY_S).count();
             System.err.printf("LIMIT_TABLE branches=%d withLimits=%d groups=%d (I=%d P=%d S=%d) limits=%d buses=%d%n",
-                    branches.length, countBranchesWithLimits(groupStart, groupEnd), sides.size(), nI, nP, nS,
+                    branches.length, countBranchesWithLimits(groupStart, groupEnd), sides.size(), nCurrent, nActivePower, nApparentPower,
                     thresholds.size(), buses.length);
         }
         return table;

@@ -58,16 +58,16 @@ __global__ void hvdcSlackBalanceBatch(int nS, int nh, int n, int nElements, int 
         int r1 = hvdcBus1PRow[h] < 0 ? ~hvdcBus1PRow[h] : hvdcBus1PRow[h];
         int r2 = hvdcBus2PRow[h] < 0 ? ~hvdcBus2PRow[h] : hvdcBus2PRow[h];
         if (r1 != slackRow && r2 != slackRow) continue;
-        size_t sh = (size_t) s * nh + h;
+        size_t scenarioHvdc = (size_t) s * nh + h;
         const double* p = hvdcAcEmulationParameters + (size_t) h * 9;
-        bool live = status[sh] == GpuAcEmulationStatus::LINEAR_MODE && !ctgOut[sh] && !disabled[(size_t) s * nElements + hvdcElement[h]];
+        bool live = status[scenarioHvdc] == GpuAcEmulationStatus::LINEAR_MODE && !ctgOut[scenarioHvdc] && !disabled[(size_t) s * nElements + hvdcElement[h]];
         double ph1 = xs[hvdcBus1PhiColumn[h]];
         double ph2 = xs[hvdcBus2PhiColumn[h]];
         if (r1 == slackRow) {
-            corr += (live ? hvdc::p1(p[0], p[1], p[4], p[5], p[6], ph1, ph2) : 0.0) - d1[sh];
+            corr += (live ? hvdc::p1(p[0], p[1], p[4], p[5], p[6], ph1, ph2) : 0.0) - d1[scenarioHvdc];
         }
         if (r2 == slackRow) {
-            corr += (live ? hvdc::p2(p[0], p[1], p[4], p[5], p[6], ph1, ph2) : 0.0) - d2[sh];
+            corr += (live ? hvdc::p2(p[0], p[1], p[4], p[5], p[6], ph1, ph2) : 0.0) - d2[scenarioHvdc];
         }
     }
     qBuf[(size_t) s * n + slackRow] += corr;
@@ -189,8 +189,8 @@ __global__ void computeSlackRetain(int nScenarios, int n, int nDistributedSlackB
             }                                                // the stranded margins IS the renormalization
             double m = tot > 0 ? distributedSlackBusMarginUp[i] : distributedSlackBusMarginDown[i];
             if (distributedSlackBusAnchorShift != nullptr) {
-                double sh = distributedSlackBusAnchorShift[(size_t) s * nDistributedSlackBuses + i];
-                m = fmax(0.0, m - (tot > 0 ? sh : -sh));
+                double anchorShift = distributedSlackBusAnchorShift[(size_t) s * nDistributedSlackBuses + i];
+                m = fmax(0.0, m - (tot > 0 ? anchorShift : -anchorShift));
             }
             sum += m;
         }
@@ -257,8 +257,8 @@ __global__ void distributeSlackBatch(int nDistributedSlackBuses, int nScenarios,
             }
             double m = dirUp ? distributedSlackBusMarginUp[i] : distributedSlackBusMarginDown[i];
             if (distributedSlackBusAnchorShift != nullptr) {
-                double sh = distributedSlackBusAnchorShift[(size_t) s * nDistributedSlackBuses + i];
-                m = fmax(0.0, m - (dirUp ? sh : -sh));
+                double anchorShift = distributedSlackBusAnchorShift[(size_t) s * nDistributedSlackBuses + i];
+                m = fmax(0.0, m - (dirUp ? anchorShift : -anchorShift));
             }
             sumM += m;
         }
@@ -540,9 +540,9 @@ __global__ void distributeSlackBatch(int nDistributedSlackBuses, int nScenarios,
                 continue;
             }
             double f = distributedSlackBusFactor[i], base = distributedSlackBusBaseTargetP[i], maxD = distributedSlackBusMaxDelta[i], minD = distributedSlackBusMinDelta[i];
-            double sh = distributedSlackBusAnchorShift != nullptr ? distributedSlackBusAnchorShift[(size_t) s * nDistributedSlackBuses + i] : 0.0;
-            if (distributedSlackBusAnchorShift != nullptr) { base += sh; maxD -= sh; minD -= sh; }
-            if (distributedSlackFactorMode == GpuDistributedSlackFactorMode::REMAINING_MARGIN) { f = fmax(0.0, (dirUp ? distributedSlackBusMarginUp[i] : distributedSlackBusMarginDown[i]) - (dirUp ? sh : -sh)); }
+            double anchorShift = distributedSlackBusAnchorShift != nullptr ? distributedSlackBusAnchorShift[(size_t) s * nDistributedSlackBuses + i] : 0.0;
+            if (distributedSlackBusAnchorShift != nullptr) { base += anchorShift; maxD -= anchorShift; minD -= anchorShift; }
+            if (distributedSlackFactorMode == GpuDistributedSlackFactorMode::REMAINING_MARGIN) { f = fmax(0.0, (dirUp ? distributedSlackBusMarginUp[i] : distributedSlackBusMarginDown[i]) - (dirUp ? anchorShift : -anchorShift)); }
             if (overriddenBus == i) { f -= distributedSlackOverrideFactorDelta[s]; base -= distributedSlackOverrideBaseTargetPDelta[s]; maxD -= distributedSlackOverrideMaxDelta[s]; minD -= distributedSlackOverrideMinDelta[s]; }
             double cum = target[(size_t) s * n + distributedSlackBusRowOf(distributedSlackBusPhiRow, distributedSlackBusRowOverride, s, nDistributedSlackBuses, i)] - base;
             bool sat = (rem > 0) ? (cum >= maxD) : (cum <= minD);
@@ -559,9 +559,9 @@ __global__ void distributeSlackBatch(int nDistributedSlackBuses, int nScenarios,
                 continue;                                    // writing here would land on a frozen row
             }
             double f = distributedSlackBusFactor[i], base = distributedSlackBusBaseTargetP[i], maxD = distributedSlackBusMaxDelta[i], minD = distributedSlackBusMinDelta[i];
-            double sh = distributedSlackBusAnchorShift != nullptr ? distributedSlackBusAnchorShift[(size_t) s * nDistributedSlackBuses + i] : 0.0;
-            if (distributedSlackBusAnchorShift != nullptr) { base += sh; maxD -= sh; minD -= sh; }
-            if (distributedSlackFactorMode == GpuDistributedSlackFactorMode::REMAINING_MARGIN) { f = fmax(0.0, (dirUp ? distributedSlackBusMarginUp[i] : distributedSlackBusMarginDown[i]) - (dirUp ? sh : -sh)); }
+            double anchorShift = distributedSlackBusAnchorShift != nullptr ? distributedSlackBusAnchorShift[(size_t) s * nDistributedSlackBuses + i] : 0.0;
+            if (distributedSlackBusAnchorShift != nullptr) { base += anchorShift; maxD -= anchorShift; minD -= anchorShift; }
+            if (distributedSlackFactorMode == GpuDistributedSlackFactorMode::REMAINING_MARGIN) { f = fmax(0.0, (dirUp ? distributedSlackBusMarginUp[i] : distributedSlackBusMarginDown[i]) - (dirUp ? anchorShift : -anchorShift)); }
             if (overriddenBus == i) { f -= distributedSlackOverrideFactorDelta[s]; base -= distributedSlackOverrideBaseTargetPDelta[s]; maxD -= distributedSlackOverrideMaxDelta[s]; minD -= distributedSlackOverrideMinDelta[s]; }
             size_t idx = (size_t) s * n + distributedSlackBusRowOf(distributedSlackBusPhiRow, distributedSlackBusRowOverride, s, nDistributedSlackBuses, i);
             double cum = target[idx] - base;

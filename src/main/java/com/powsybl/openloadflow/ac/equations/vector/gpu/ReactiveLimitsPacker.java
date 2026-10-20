@@ -173,14 +173,14 @@ public final class ReactiveLimitsPacker {
                     // all-pinned-group fixture, 0.68 kV at the pilot.
                     boolean pilotSelf = PilotSelfPacker.isPilotSelfEntry(bus);
                     if ((remoteMember || pilotSelf) && vCol[bn] >= 0) {
-                        var vc = RemoteMemberQPacker.mainGenVc(bus);                   // the GROUP's control: the group identity, the pilot's V row
+                        var groupVoltageControl = RemoteMemberQPacker.mainGenVc(bus);                   // the GROUP's control: the group identity, the pilot's V row
                         // ...but the switch-back test is the member's OWN control's: OLF's ReactiveLimitsOuterLoop reads
                         // getBusV / getBusTargetV off bus.getGeneratorVoltageControl(), which for a control MERGED into
                         // the group (a dependent section) keeps its own controlled bus and its own target while the
                         // cluster sits at the main's. Compared against the main's target a base-pinned dependent at
                         // 405 kV in a 406 kV cluster never saw its "voltage above target" and stayed pinned where OLF
                         // unpins it (deviceMergedDependentSwitchesBackAgainstItsOwnTargetMatchesCpu).
-                        var own = bus.getGeneratorVoltageControl().orElse(vc);
+                        var own = bus.getGeneratorVoltageControl().orElse(groupVoltageControl);
                         int pilotV = vCol[own.getControlledBus().getNum()];
                         if (pilotV >= 0 && bus.getMinQ() < bus.getMaxQ()) {
                             reactiveLimitVoltageRow.add(vCol[bn]);                  // transition WRITE row: the member's own bus row
@@ -278,35 +278,35 @@ public final class ReactiveLimitsPacker {
                 bus.setV(Double.NaN);
             }
         }
-        byte[] mon = new byte[reactiveLimitFlags.size()];
-        byte[] rem = new byte[reactiveLimitVoltageControlRole.size()];
-        for (int i = 0; i < mon.length; i++) {
-            mon[i] = reactiveLimitFlags.get(i);
-            rem[i] = reactiveLimitVoltageControlRole.get(i);
+        byte[] flags = new byte[reactiveLimitFlags.size()];
+        byte[] voltageControlRoles = new byte[reactiveLimitVoltageControlRole.size()];
+        for (int i = 0; i < flags.length; i++) {
+            flags[i] = reactiveLimitFlags.get(i);
+            voltageControlRoles[i] = reactiveLimitVoltageControlRole.get(i);
         }
         if (System.getenv("OLF_GPU_RL_TRACE") != null) {
             // The pilot-self groups this extraction sees, with their member ENTRIES: the rotation the device
             // still owes OLF is computed from those entries' pin states (see PilotSelfPacker.PilotSelfPack).
-            PilotSelfPacker.PilotSelfPack ps = PilotSelfPacker.pilotSelfGroups(network, columns, GpuAcArrays.toIntArray(reactiveLimitBusNum));
+            PilotSelfPacker.PilotSelfPack pilotSelfPack = PilotSelfPacker.pilotSelfGroups(network, columns, GpuAcArrays.toIntArray(reactiveLimitBusNum));
             java.util.Map<Integer, Integer> bySize = new java.util.TreeMap<>();
-            for (int g = 0; g < ps.groupCount(); g++) {
-                bySize.merge(ps.ptr()[g + 1] - ps.ptr()[g], 1, Integer::sum);
+            for (int g = 0; g < pilotSelfPack.groupCount(); g++) {
+                bySize.merge(pilotSelfPack.ptr()[g + 1] - pilotSelfPack.ptr()[g], 1, Integer::sum);
             }
-            System.err.println("GPU_PILOTSELF groups=" + ps.groupCount() + " bySize=" + bySize);
+            System.err.println("GPU_PILOTSELF groups=" + pilotSelfPack.groupCount() + " bySize=" + bySize);
         }
 
-        byte[] baseLt = new byte[reactiveLimitBaseQLimitType.size()];
-        for (int i = 0; i < baseLt.length; i++) {
-            baseLt[i] = reactiveLimitBaseQLimitType.get(i);
+        byte[] baseQLimitTypes = new byte[reactiveLimitBaseQLimitType.size()];
+        for (int i = 0; i < baseQLimitTypes.length; i++) {
+            baseQLimitTypes[i] = reactiveLimitBaseQLimitType.get(i);
         }
         return new ReactiveLimitEntries(GpuAcArrays.toIntArray(reactiveLimitVoltageRow), GpuAcArrays.toDoubleArray(reactiveLimitMinQ),
                 GpuAcArrays.toDoubleArray(reactiveLimitMaxQ), GpuAcArrays.toDoubleArray(reactiveLimitLoadQ),
                 GpuAcArrays.toDoubleArray(reactiveLimitTargetV), GpuAcArrays.toDoubleArray(reactiveLimitSvcMinB),
                 GpuAcArrays.toDoubleArray(reactiveLimitSvcMaxB), GpuAcArrays.toDoubleArray(reactiveLimitBaseVSquared),
-                mon, rem, GpuAcArrays.toIntArray(reactiveLimitComparedVoltageRow),
+                flags, voltageControlRoles, GpuAcArrays.toIntArray(reactiveLimitComparedVoltageRow),
                 GpuAcArrays.toIntArray(reactiveLimitBusNum),
                 GpuAcArrays.toDoubleArray(reactiveLimitNominalV), GpuAcArrays.toIntArray(reactiveLimitActivePowerRow), GpuAcArrays.toDoubleArray(reactiveLimitTargetP),
-                idRanks(reactiveLimitBusId), GpuAcArrays.toDoubleArray(reactiveLimitInitialTargetQ), baseLt);
+                idRanks(reactiveLimitBusId), GpuAcArrays.toDoubleArray(reactiveLimitInitialTargetQ), baseQLimitTypes);
     }
 
     /** The targetQ OLF gives a member once the reactive-limits loop UNPINS it. A member pinned in the

@@ -50,10 +50,10 @@ final class GpuStrategyComposer {
         // post-contingency violations) BEFORE our runActionSimulation override is invoked, so the pair
         // state is precomputed SPECULATIVELY and simply goes unused when the condition does not pass.
         // Condition semantics therefore stay 100% stock — the batch only accelerates the solve.
-        var ctx = strategy.getContingencyContext();
-        return switch (ctx.getContextType()) {
+        var contingencyContext = strategy.getContingencyContext();
+        return switch (contingencyContext.getContextType()) {
             case ALL, ONLY_CONTINGENCIES -> true;
-            case SPECIFIC -> contingencyId.equals(ctx.getContingencyId());
+            case SPECIFIC -> contingencyId.equals(contingencyContext.getContingencyId());
             case NONE -> false;
         };
     }
@@ -137,46 +137,46 @@ final class GpuStrategyComposer {
         }
         for (String actionId : actionIds) {
             Action a = actionById.get(actionId);
-            if (a instanceof com.powsybl.action.TerminalsConnectionAction tca) {
+            if (a instanceof com.powsybl.action.TerminalsConnectionAction terminalsConnectionAction) {
                 // OLF operates every LfBranch of the equipment (getBranchesByOriginalId): the three legs of a
                 // three-winding transformer, the branch itself otherwise
-                LfBranch single = net.getBranchById(tca.getElementId());
-                List<LfBranch> legs = single != null ? List.of(single) : net.getBranchesByOriginalId(tca.getElementId());
+                LfBranch single = net.getBranchById(terminalsConnectionAction.getElementId());
+                List<LfBranch> legs = single != null ? List.of(single) : net.getBranchesByOriginalId(terminalsConnectionAction.getElementId());
                 if (legs == null || legs.isEmpty()) {
                     // Not a branch: a SHUNT compensator's terminals (OLF supports (re)connection since
                     // the olf-local-patches shuntIdsToClose retention) — composed as a per-scenario
                     // admittance shift: the retained base-open compensator contributes 0 at base, so
                     // close = +its full section admittance; open of a connected one = -it. LINEAR only.
-                    com.powsybl.iidm.network.ShuntCompensator sc = network.getShuntCompensator(tca.getElementId());
-                    LfShunt lfShunt = sc != null ? net.getShuntById(tca.getElementId()) : null;
-                    if (sc == null || lfShunt == null
-                            || !(sc.getModel() instanceof com.powsybl.iidm.network.ShuntCompensatorLinearModel lin)) {
+                    com.powsybl.iidm.network.ShuntCompensator shuntCompensator = network.getShuntCompensator(terminalsConnectionAction.getElementId());
+                    LfShunt lfShunt = shuntCompensator != null ? net.getShuntById(terminalsConnectionAction.getElementId()) : null;
+                    if (shuntCompensator == null || lfShunt == null
+                            || !(shuntCompensator.getModel() instanceof com.powsybl.iidm.network.ShuntCompensatorLinearModel linearModel)) {
                         return null;
                     }
                     // NEVER from the iidm terminal: during the SA the working variant is the TEMPORARY
                     // one where the retention machinery already connected the closable shunt — ask the
                     // LF model, which tracks the compensator's true base state.
-                    boolean connectedAtBase = !lfShunt.isCompensatorInitiallyDisconnected(tca.getElementId());
-                    if (tca.isOpen() == !connectedAtBase) {
+                    boolean connectedAtBase = !lfShunt.isCompensatorInitiallyDisconnected(terminalsConnectionAction.getElementId());
+                    if (terminalsConnectionAction.isOpen() == !connectedAtBase) {
                         continue;                            // open-of-disconnected / close-of-connected: no-op
                     }
-                    double gPerSection = Double.isNaN(lin.getGPerSection()) ? 0 : lin.getGPerSection();
-                    double zb = sc.getTerminal().getVoltageLevel().getNominalV()
-                            * sc.getTerminal().getVoltageLevel().getNominalV() / PerUnit.SB;
-                    double sign = tca.isOpen() ? -1 : 1;
-                    double n = sc.getSectionCount();
+                    double gPerSection = Double.isNaN(linearModel.getGPerSection()) ? 0 : linearModel.getGPerSection();
+                    double zb = shuntCompensator.getTerminal().getVoltageLevel().getNominalV()
+                            * shuntCompensator.getTerminal().getVoltageLevel().getNominalV() / PerUnit.SB;
+                    double sign = terminalsConnectionAction.isOpen() ? -1 : 1;
+                    double n = shuntCompensator.getSectionCount();
                     shifts.add(new ShuntShift(lfShunt,
-                            sign * gPerSection * n * zb, sign * lin.getBPerSection() * n * zb));
+                            sign * gPerSection * n * zb, sign * linearModel.getBPerSection() * n * zb));
                     continue;
                 }
                 for (LfBranch b : legs) {
                     if (b.getBus1() == null || b.getBus2() == null) {
                         continue;                            // OLF operates a branch with both ends only: as it is
                     }
-                    if (ctgSideOpens.stream().anyMatch(so -> so.branch() == b)) {
+                    if (ctgSideOpens.stream().anyMatch(sideOpen -> sideOpen.branch() == b)) {
                         return null;                         // the contingency opened ONE side of it: CPU
                     }
-                    if (tca.isOpen()) {
+                    if (terminalsConnectionAction.isOpen()) {
                         if (!branches.contains(b)) {
                             branches.add(b);
                             opened.add(b);
@@ -195,13 +195,13 @@ final class GpuStrategyComposer {
                         }
                     }
                 }
-            } else if (a instanceof com.powsybl.action.SwitchAction sw) {
-                LfBranch b = net.getBranchById(sw.getSwitchId());
-                if (b != null && ctgSideOpens.stream().anyMatch(so -> so.branch() == b)) {
+            } else if (a instanceof com.powsybl.action.SwitchAction switchAction) {
+                LfBranch b = net.getBranchById(switchAction.getSwitchId());
+                if (b != null && ctgSideOpens.stream().anyMatch(sideOpen -> sideOpen.branch() == b)) {
                     return null;                             // the contingency opened ONE side of it: CPU
                 }
-                if (b == null || (sw.isOpen() ? branches.contains(b) : !branches.remove(b))) {
-                    if (b != null && sw.isOpen()) {
+                if (b == null || (switchAction.isOpen() ? branches.contains(b) : !branches.remove(b))) {
+                    if (b != null && switchAction.isOpen()) {
                         branches.add(b);
                     } else if (b != null && b.isDisabled()
                             && b.isZeroImpedance(com.powsybl.openloadflow.network.LoadFlowModel.AC)) {
@@ -209,13 +209,13 @@ final class GpuStrategyComposer {
                         // spanning-tree MERGE shape is batched: distinct zero-impedance groups (or
                         // none) on the two sides. A loop-closing switch is an electrical no-op on
                         // the CPU too (non-tree edge: dummies stay pinned) — compose nothing.
-                        LfBus zb1 = b.getBus1();
-                        LfBus zb2 = b.getBus2();
-                        if (zb1 == null || zb2 == null || zb1.isDisabled() || zb2.isDisabled()) {
+                        LfBus bus1 = b.getBus1();
+                        LfBus bus2 = b.getBus2();
+                        if (bus1 == null || bus2 == null || bus1.isDisabled() || bus2.isDisabled()) {
                             return null;                     // dead-island re-energization — CPU
                         }
-                        var zn1 = zb1.getZeroImpedanceNetwork(com.powsybl.openloadflow.network.LoadFlowModel.AC);
-                        var zn2 = zb2.getZeroImpedanceNetwork(com.powsybl.openloadflow.network.LoadFlowModel.AC);
+                        var zn1 = bus1.getZeroImpedanceNetwork(com.powsybl.openloadflow.network.LoadFlowModel.AC);
+                        var zn2 = bus2.getZeroImpedanceNetwork(com.powsybl.openloadflow.network.LoadFlowModel.AC);
                         if (zn1 == null || zn2 == null || zn1 != zn2) {
                             reclosed.add(b);                 // tree merge — batched
                         }
@@ -224,76 +224,76 @@ final class GpuStrategyComposer {
                         return null;
                     }
                 }
-            } else if (a instanceof com.powsybl.action.LoadAction la) {
-                com.powsybl.iidm.network.Load load = network.getLoad(la.getLoadId());
+            } else if (a instanceof com.powsybl.action.LoadAction loadAction) {
+                com.powsybl.iidm.network.Load load = network.getLoad(loadAction.getLoadId());
                 if (load == null) {
                     return null;
                 }
                 // OLF's own load -> LfBus map, never the bus view (see GpuContingencyMapper.loadOutages)
-                com.powsybl.openloadflow.network.LfLoad lfLoad = net.getLoadById(la.getLoadId());
+                com.powsybl.openloadflow.network.LfLoad lfLoad = net.getLoadById(loadAction.getLoadId());
                 LfBus bus = lfLoad != null ? lfLoad.getBus() : null;
                 if (bus == null) {
                     return null;
                 }
-                if (ctgLostLoadIds.contains(la.getLoadId())) {
+                if (ctgLostLoadIds.contains(loadAction.getLoadId())) {
                     continue;                                // OLF's LfLoadAction does nothing on a load the contingency lost
                 }
                 // LfLoadAction's power shift: the value itself when relative, value - P0 (Q0) when absolute, 0 for
                 // the part the action leaves out. LoadLoss carries the load REMOVED, hence the sign (pu).
-                double dP = la.getActivePowerValue().isPresent()
-                        ? -(la.isRelativeValue() ? la.getActivePowerValue().getAsDouble() : la.getActivePowerValue().getAsDouble() - load.getP0())
+                double dP = loadAction.getActivePowerValue().isPresent()
+                        ? -(loadAction.isRelativeValue() ? loadAction.getActivePowerValue().getAsDouble() : loadAction.getActivePowerValue().getAsDouble() - load.getP0())
                         : 0.0;
-                double dQ = la.getReactivePowerValue().isPresent()
-                        ? -(la.isRelativeValue() ? la.getReactivePowerValue().getAsDouble() : la.getReactivePowerValue().getAsDouble() - load.getQ0())
+                double dQ = loadAction.getReactivePowerValue().isPresent()
+                        ? -(loadAction.isRelativeValue() ? loadAction.getReactivePowerValue().getAsDouble() : loadAction.getReactivePowerValue().getAsDouble() - load.getQ0())
                         : 0.0;
                 loads.add(new LoadLoss(bus, dP / PerUnit.SB, dQ / PerUnit.SB));
-            } else if (a instanceof com.powsybl.action.RatioTapChangerTapPositionAction rtca) {
-                var tapChanger = network.getTwoWindingsTransformer(rtca.getTransformerId()) != null
-                        ? network.getTwoWindingsTransformer(rtca.getTransformerId()).getRatioTapChanger() : null;
+            } else if (a instanceof com.powsybl.action.RatioTapChangerTapPositionAction ratioTapChangerAction) {
+                var tapChanger = network.getTwoWindingsTransformer(ratioTapChangerAction.getTransformerId()) != null
+                        ? network.getTwoWindingsTransformer(ratioTapChangerAction.getTransformerId()).getRatioTapChanger() : null;
                 /** Compiles a tap-position action (RTC or PST) into a per-scenario full-row override — the
                  *  target tap's [y, g1, g2, b1, b2, ksi, r1, a1] replaces the branch's static inputs, so
                  *  per-tap impedance changes are covered. Null when out of batch scope: unknown transformer /
                  *  tap changer, no tap table, or out-of-range position. */
-                TapR1Override ov = tapOverride(net, rtca.getTransformerId(),
-                        tapChanger, rtca.isRelativeValue(), rtca.getTapPosition());
-                if (ov == null) {
+                TapR1Override override = tapOverride(net, ratioTapChangerAction.getTransformerId(),
+                        tapChanger, ratioTapChangerAction.isRelativeValue(), ratioTapChangerAction.getTapPosition());
+                if (override == null) {
                     return null;
                 }
-                taps.add(ov);
-            } else if (a instanceof com.powsybl.action.PhaseTapChangerTapPositionAction ptca) {
-                var tapChanger = network.getTwoWindingsTransformer(ptca.getTransformerId()) != null
-                        ? network.getTwoWindingsTransformer(ptca.getTransformerId()).getPhaseTapChanger() : null;
-                TapR1Override ov = tapOverride(net, ptca.getTransformerId(),
-                        tapChanger, ptca.isRelativeValue(), ptca.getTapPosition());
-                if (ov == null) {
+                taps.add(override);
+            } else if (a instanceof com.powsybl.action.PhaseTapChangerTapPositionAction phaseTapChangerAction) {
+                var tapChanger = network.getTwoWindingsTransformer(phaseTapChangerAction.getTransformerId()) != null
+                        ? network.getTwoWindingsTransformer(phaseTapChangerAction.getTransformerId()).getPhaseTapChanger() : null;
+                TapR1Override override = tapOverride(net, phaseTapChangerAction.getTransformerId(),
+                        tapChanger, phaseTapChangerAction.isRelativeValue(), phaseTapChangerAction.getTapPosition());
+                if (override == null) {
                     return null;
                 }
-                taps.add(ov);
-            } else if (a instanceof com.powsybl.action.ShuntCompensatorPositionAction spa) {
-                com.powsybl.iidm.network.ShuntCompensator sc = network.getShuntCompensator(spa.getShuntCompensatorId());
-                LfShunt shunt = net.getShuntById(spa.getShuntCompensatorId());
-                if (sc == null || shunt == null
-                        || !(sc.getModel() instanceof com.powsybl.iidm.network.ShuntCompensatorLinearModel lin)) {
+                taps.add(override);
+            } else if (a instanceof com.powsybl.action.ShuntCompensatorPositionAction shuntCompensatorPositionAction) {
+                com.powsybl.iidm.network.ShuntCompensator shuntCompensator = network.getShuntCompensator(shuntCompensatorPositionAction.getShuntCompensatorId());
+                LfShunt shunt = net.getShuntById(shuntCompensatorPositionAction.getShuntCompensatorId());
+                if (shuntCompensator == null || shunt == null
+                        || !(shuntCompensator.getModel() instanceof com.powsybl.iidm.network.ShuntCompensatorLinearModel linearModel)) {
                     return null;                                 // unpacked / non-linear model — CPU
                 }
-                double dSections = spa.getSectionCount() - sc.getSectionCount();
-                double zb = sc.getTerminal().getVoltageLevel().getNominalV()
-                        * sc.getTerminal().getVoltageLevel().getNominalV() / PerUnit.SB;
-                double gPerSection = Double.isNaN(lin.getGPerSection()) ? 0 : lin.getGPerSection();   // optional in iidm
+                double dSections = shuntCompensatorPositionAction.getSectionCount() - shuntCompensator.getSectionCount();
+                double zb = shuntCompensator.getTerminal().getVoltageLevel().getNominalV()
+                        * shuntCompensator.getTerminal().getVoltageLevel().getNominalV() / PerUnit.SB;
+                double gPerSection = Double.isNaN(linearModel.getGPerSection()) ? 0 : linearModel.getGPerSection();   // optional in iidm
                 shifts.add(new ShuntShift(shunt,
-                        gPerSection * dSections * zb, lin.getBPerSection() * dSections * zb));
-            } else if (a instanceof com.powsybl.action.GeneratorAction ga) {
+                        gPerSection * dSections * zb, linearModel.getBPerSection() * dSections * zb));
+            } else if (a instanceof com.powsybl.action.GeneratorAction generatorAction) {
                 // OLF's LfGeneratorAction reads the active power value and its relative flag ONLY (it refuses an action
                 // without them): a target V, a target Q or a regulator flag on the action changes nothing in OLF's
                 // equations, so it changes nothing here. The P delta is composed like a load delta with q=0.
-                if (ga.getActivePowerValue().isEmpty() || ga.isActivePowerRelativeValue().isEmpty()) {
+                if (generatorAction.getActivePowerValue().isEmpty() || generatorAction.isActivePowerRelativeValue().isEmpty()) {
                     return null;                             // OLF does not build such an action
                 }
-                com.powsybl.iidm.network.Generator gen = network.getGenerator(ga.getGeneratorId());
+                com.powsybl.iidm.network.Generator gen = network.getGenerator(generatorAction.getGeneratorId());
                 if (gen == null) {
                     return null;
                 }
-                com.powsybl.openloadflow.network.LfGenerator lfGen = net.getGeneratorById(ga.getGeneratorId());
+                com.powsybl.openloadflow.network.LfGenerator lfGen = net.getGeneratorById(generatorAction.getGeneratorId());
                 LfBus bus = lfGen != null ? lfGen.getBus() : null;    // OLF's own map, never the bus view
                 if (bus == null) {
                     return null;
@@ -301,36 +301,36 @@ final class GpuStrategyComposer {
                 if (ctgGens.contains(lfGen)) {
                     continue;                                // OLF's LfGeneratorAction does nothing on a generator the contingency lost
                 }
-                boolean relative = ga.isActivePowerRelativeValue().orElse(false);
+                boolean relative = generatorAction.isActivePowerRelativeValue().orElse(false);
                 // An absolute value is measured from the generator's target in the BASE solution the device anchors
                 // at, which the base load flow's distribution moved for a participant - not from the network's own
                 // target (measured: B2-G set to 70 MW landed at 66.97, its base share of a 27 MW distribution short).
-                double deltaP = relative ? ga.getActivePowerValue().getAsDouble() / PerUnit.SB
-                                         : ga.getActivePowerValue().getAsDouble() / PerUnit.SB - lfGen.getTargetP();
+                double deltaP = relative ? generatorAction.getActivePowerValue().getAsDouble() / PerUnit.SB
+                                         : generatorAction.getActivePowerValue().getAsDouble() / PerUnit.SB - lfGen.getTargetP();
                 // the bus injection moves by the generator's NET change: an absolute action replaces what the
                 // actions before it did (measured: 70 then 50 MW on B2-G injected both, 34 MW too much)
                 generatorNetMove.merge(lfGen, deltaP, (before, d) -> relative ? before + d : d);
                 // absolute: the value replaces the parent's distributed target
                 generatorActions.add(new BatchContingency.GeneratorMove(lfGen, deltaP, !relative,
-                        ga.getActivePowerValue().getAsDouble() / PerUnit.SB,
+                        generatorAction.getActivePowerValue().getAsDouble() / PerUnit.SB,
                         com.powsybl.openloadflow.ac.solver.gpu.batch.GpuGeneratorParticipation.atTargetP(lfGen, gen,
                                 networkParameters, balanceType)));
-            } else if (a instanceof com.powsybl.action.HvdcAction ha) {
+            } else if (a instanceof com.powsybl.action.HvdcAction hvdcAction) {
                 // OLF's LfHvdcAction: only "AC emulation off" does anything (any other content is a logged no-op, and
                 // "on" is refused when the action is built); the link then holds each station at the flow of the state
                 // the strategy starts from, unclamped, for the whole strategy load flow.
-                if (ha.isAcEmulationEnabled().isEmpty()) {
+                if (hvdcAction.isAcEmulationEnabled().isEmpty()) {
                     continue;
                 }
-                com.powsybl.openloadflow.network.LfHvdc hv = net.getHvdcById(ha.getHvdcId());
-                if (ha.isAcEmulationEnabled().get() || hv == null || !hv.isAcEmulation()) {
+                com.powsybl.openloadflow.network.LfHvdc hvdc = net.getHvdcById(hvdcAction.getHvdcId());
+                if (hvdcAction.isAcEmulationEnabled().get() || hvdc == null || !hvdc.isAcEmulation()) {
                     return null;                             // refused by OLF, unknown or not emulated: CPU
                 }
-                if (hv.isDisabled() || ctgHvdcs.contains(hv)) {
+                if (hvdc.isDisabled() || ctgHvdcs.contains(hvdc)) {
                     continue;                                // a link without power: OLF's action changes nothing
                 }
-                if (!acEmulationOff.contains(hv)) {
-                    acEmulationOff.add(hv);
+                if (!acEmulationOff.contains(hvdc)) {
+                    acEmulationOff.add(hvdc);
                 }
             } else {
                 return null;                                 // out of stage-1 scope — CPU per-strategy path
@@ -342,7 +342,7 @@ final class GpuStrategyComposer {
             // at both ends (AbstractLfBranchAction.updateBusesAndBranchStatus), even one the contingency outaged
             List<LfBranch> ctgCut = new java.util.ArrayList<>(contingencyZeroImpedanceBranchOutages);
             ctgBranches.stream().filter(b -> b.getBus1() != null && b.getBus2() != null).forEach(ctgCut::add);
-            ctgSideOpens.forEach(so -> ctgCut.add(so.branch()));
+            ctgSideOpens.forEach(sideOpen -> ctgCut.add(sideOpen.branch()));
             for (LfBus bus : busesBroughtBack(net, ctgCut, reenabled, opened)) {
                 for (LfBranch b : bus.getBranches()) {
                     if (b.getBus1() == null || b.getBus2() == null) {

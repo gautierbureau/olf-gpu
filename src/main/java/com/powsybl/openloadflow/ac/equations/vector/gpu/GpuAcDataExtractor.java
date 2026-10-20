@@ -118,13 +118,13 @@ public final class GpuAcDataExtractor {
         GpuAcValidation.validate(es);
         ExtractionColumns columns = ExtractionColumns.of(network, es);
         GpuAcFamilyPacker.Packs family = GpuAcFamilyPacker.pack(network, columns, baseOpenBranchIds, baseOpenZeroImpedanceBranchIdList);
-        ReactiveLimitEntries rl = ReactiveLimitsPacker.reactiveLimitsPack(network, es, columns, reactiveLimits);
-        DistrQPacker.Pack dq = DistrQPacker.distrQPack(network, es, columns, family, rl);
+        ReactiveLimitEntries reactiveLimitEntries = ReactiveLimitsPacker.reactiveLimitsPack(network, es, columns, reactiveLimits);
+        DistrQPacker.Pack distrQ = DistrQPacker.distrQPack(network, es, columns, family, reactiveLimitEntries);
         LinearDistributionTerms distrRho = DistrRhoPacker.distrRhoPack(network, es, columns);
         LinearDistributionTerms distrShuntB = DistrShuntBPacker.distrShuntBPack(network, es, columns);
 
         RemoteMemberReactiveTerms remoteMemberReactiveTerms = RemoteMemberQPacker.remoteMemberQPack(network, es, columns, family, reactiveLimits);
-        DistributedSlackParticipants ds = DistributedSlackPacker.distributedSlackPack(network, es, columns, distributedSlack, distributedSlackParameters);
+        DistributedSlackParticipants distributedSlackParticipants = DistributedSlackPacker.distributedSlackPack(network, es, columns, distributedSlack, distributedSlackParameters);
         // SLOPE-SVC rows (V + slope*sumQ = target, row mode 2): per-row slope, 0 everywhere else
         double[] rowSlope = new double[es.getIndex().getSortedVariablesToFind().size()];
         for (com.powsybl.openloadflow.network.LfBus bus : network.getBuses()) {
@@ -160,13 +160,13 @@ public final class GpuAcDataExtractor {
                         GpuAcArrays.flatI(family.openBranchAlternateReactiveDestination(), 2)),
                 new ElementPack(GpuAcArrays.flatD(family.shuntParameters(), 2), GpuAcArrays.flatI(family.shuntIndices(), 5)),
                 new ElementPack(GpuAcArrays.flatD(family.hvdcAcEmulationParameters(), 5), GpuAcArrays.flatI(family.hvdcAcEmulationIndices(), 4)),
-                dq.terms(), dq.members(),
+                distrQ.terms(), distrQ.members(),
                 new ZeroImpedanceBranchPack(GpuAcArrays.flatD(family.zeroImpedanceBranchParameters(), 1), GpuAcArrays.flatI(family.zeroImpedanceBranchIndices(), 11),
                         family.zeroImpedanceBranchNums().stream().mapToInt(Integer::intValue).toArray(), GpuAcArrays.flatI(family.zeroImpedanceBranchAlternateReactiveDestination(), 2)),
                 distrRho, distrShuntB,
-                rl,
+                reactiveLimitEntries,
                 remoteMemberReactiveTerms, new VoltageRowParameters(rowSlope, rowNominalV),
-                ds,
+                distributedSlackParticipants,
                 new BaseOpenBranches(family.baseOpenCb().stream().mapToInt(Integer::intValue).toArray(),
                         family.baseOpenZeroImpedanceBranches().stream().mapToInt(Integer::intValue).toArray(),
                         family.baseOpenZeroImpedanceBranchNums().stream().mapToInt(Integer::intValue).toArray()),

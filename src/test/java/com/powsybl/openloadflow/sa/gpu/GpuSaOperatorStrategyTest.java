@@ -286,12 +286,12 @@ class GpuSaOperatorStrategyTest extends AbstractGpuSaTest {
                     gpuS.getLimitViolationsResult().getLimitViolations().size(), "strategy violation count");
             assertEquals(cpuS.getDistributedActivePower(), gpuS.getDistributedActivePower(), 1e-9,
                     "strategy distributed active power");
-            var cb = cpuS.getNetworkResult().getBusResults();
-            var gb = gpuS.getNetworkResult().getBusResults();
-            assertEquals(cb.size(), gb.size());
-            for (int b = 0; b < cb.size(); b++) {
-                org.junit.jupiter.api.Assertions.assertEquals(cb.get(b).getV(), gb.get(b).getV(), 1e-12,
-                        "strategy bus voltage " + cb.get(b).getBusId());
+            var cpuBuses = cpuS.getNetworkResult().getBusResults();
+            var gpuBuses = gpuS.getNetworkResult().getBusResults();
+            assertEquals(cpuBuses.size(), gpuBuses.size());
+            for (int b = 0; b < cpuBuses.size(); b++) {
+                org.junit.jupiter.api.Assertions.assertEquals(cpuBuses.get(b).getV(), gpuBuses.get(b).getV(), 1e-12,
+                        "strategy bus voltage " + cpuBuses.get(b).getBusId());
             }
         } finally {
             securityAnalysisProvider = new OpenSecurityAnalysisProvider(commonTestConfig.matrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>());

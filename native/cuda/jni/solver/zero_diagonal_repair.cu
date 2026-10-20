@@ -132,34 +132,38 @@ __global__ void repairZeroDiagonalRightHandSideBatch(int nZeroDiagonalRows, int 
 }
 
 void repairZeroDiagonalRows(BatchSolverContext* ctx, int nS, double* vals) {
-    auto* st = ctx->st.get();
-    if (st->nZeroDiagonalRows == 0 || !repairsZeroDiagonals(ctx)) return;
+    auto* structure = ctx->st.get();
+    if (structure->nZeroDiagonalRows == 0 || !repairsZeroDiagonals(ctx)) return;
     if (ctx->zeroDiagonalRepairCapacity < nS) {
-        ctx->dZeroDiagonalRowSnapshot.alloc((size_t) nS * st->nZeroDiagonalRowValues * sizeof(double));
-        ctx->dZeroDiagonalRightHandSideSnapshot.alloc((size_t) nS * st->nZeroDiagonalRows * sizeof(double));
-        ctx->dZeroDiagonalDonorChoice.alloc((size_t) nS * st->nZeroDiagonalRows * sizeof(int));
+        ctx->dZeroDiagonalRowSnapshot.alloc((size_t) nS * structure->nZeroDiagonalRowValues * sizeof(double));
+        ctx->dZeroDiagonalRightHandSideSnapshot.alloc((size_t) nS * structure->nZeroDiagonalRows * sizeof(double));
+        ctx->dZeroDiagonalDonorChoice.alloc((size_t) nS * structure->nZeroDiagonalRows * sizeof(int));
         ctx->zeroDiagonalRepairCapacity = nS;
     }
-    int nnz = st->nnz;
-    snapshotZeroDiagonalRowsBatch<<<((st->nZeroDiagonalRows * nS + BLOCK - 1) / BLOCK), BLOCK, 0, ctx->stream>>>(st->nZeroDiagonalRows, nS, nnz, st->nZeroDiagonalRowValues,
-            st->dZeroDiagonalRow.template as<int>(), st->dZeroDiagonalRowValueStart.template as<int>(), st->dRowPtr.template as<int>(), vals, ctx->dZeroDiagonalRowSnapshot.template as<double>());
-    repairZeroDiagonalRowsBatch<<<((st->nZeroDiagonalRows * nS + BLOCK - 1) / BLOCK), BLOCK, 0, ctx->stream>>>(st->nZeroDiagonalRows, nS, nnz, st->nZeroDiagonalRowValues,
-            st->dZeroDiagonalRow.template as<int>(), st->dZeroDiagonalRowValueStart.template as<int>(), st->dZeroDiagonalDonorStart.template as<int>(), st->dZeroDiagonalDonor.template as<int>(),
-            st->dZeroDiagonalDonorOwnIndex.template as<int>(), st->dZeroDiagonalRepairSign.template as<char>(), st->dRowPtr.template as<int>(), st->dColIdx.template as<int>(),
-            st->dDiagPos.template as<int>(), ctx->dZeroDiagonalRowSnapshot.template as<double>(), vals, ctx->dZeroDiagonalDonorChoice.template as<int>());
+    int nnz = structure->nnz;
+    snapshotZeroDiagonalRowsBatch<<<((structure->nZeroDiagonalRows * nS + BLOCK - 1) / BLOCK), BLOCK, 0, ctx->stream>>>(structure->nZeroDiagonalRows, nS, nnz, structure->nZeroDiagonalRowValues,
+            structure->dZeroDiagonalRow.template as<int>(), structure->dZeroDiagonalRowValueStart.template as<int>(), structure->dRowPtr.template as<int>(), vals,
+                    ctx->dZeroDiagonalRowSnapshot.template as<double>());
+    repairZeroDiagonalRowsBatch<<<((structure->nZeroDiagonalRows * nS + BLOCK - 1) / BLOCK), BLOCK, 0, ctx->stream>>>(structure->nZeroDiagonalRows, nS, nnz, structure->nZeroDiagonalRowValues,
+            structure->dZeroDiagonalRow.template as<int>(), structure->dZeroDiagonalRowValueStart.template as<int>(), structure->dZeroDiagonalDonorStart.template as<int>(),
+                    structure->dZeroDiagonalDonor.template as<int>(),
+            structure->dZeroDiagonalDonorOwnIndex.template as<int>(), structure->dZeroDiagonalRepairSign.template as<char>(), structure->dRowPtr.template as<int>(),
+                    structure->dColIdx.template as<int>(),
+            structure->dDiagPos.template as<int>(), ctx->dZeroDiagonalRowSnapshot.template as<double>(), vals, ctx->dZeroDiagonalDonorChoice.template as<int>());
 }
 
 /** The same combination on a right-hand side (nS scenarios from {@code B}, choices from the last
  *  repairZeroDiagonalRows on this context; {@code sOff} selects the scenario block for a per-scenario call). */
 void repairZeroDiagonalRightHandSide(BatchSolverContext* ctx, int nS, double* B, int sOff) {
-    auto* st = ctx->st.get();
-    if (st->nZeroDiagonalRows == 0 || ctx->zeroDiagonalRepairCapacity < sOff + nS || !repairsZeroDiagonals(ctx)) return;
-    int n = st->n;
-    double* bsnap = ctx->dZeroDiagonalRightHandSideSnapshot.template as<double>() + (size_t) sOff * st->nZeroDiagonalRows;
-    snapshotZeroDiagonalRightHandSideBatch<<<((st->nZeroDiagonalRows * nS + BLOCK - 1) / BLOCK), BLOCK, 0, ctx->stream>>>(st->nZeroDiagonalRows, nS, n, st->dZeroDiagonalRow.template as<int>(), B, bsnap);
-    repairZeroDiagonalRightHandSideBatch<<<((st->nZeroDiagonalRows * nS + BLOCK - 1) / BLOCK), BLOCK, 0, ctx->stream>>>(st->nZeroDiagonalRows, nS, n, st->dZeroDiagonalRow.template as<int>(),
-            st->dZeroDiagonalDonor.template as<int>(), st->dZeroDiagonalDonorOwnIndex.template as<int>(), st->dZeroDiagonalRepairSign.template as<char>(),
-            ctx->dZeroDiagonalDonorChoice.template as<int>() + (size_t) sOff * st->nZeroDiagonalRows, bsnap, B);
+    auto* structure = ctx->st.get();
+    if (structure->nZeroDiagonalRows == 0 || ctx->zeroDiagonalRepairCapacity < sOff + nS || !repairsZeroDiagonals(ctx)) return;
+    int n = structure->n;
+    double* bsnap = ctx->dZeroDiagonalRightHandSideSnapshot.template as<double>() + (size_t) sOff * structure->nZeroDiagonalRows;
+    snapshotZeroDiagonalRightHandSideBatch<<<((structure->nZeroDiagonalRows * nS + BLOCK - 1) / BLOCK), BLOCK, 0, ctx->stream>>>(structure->nZeroDiagonalRows, nS, n, structure->dZeroDiagonalRow.template as<int>(), B, bsnap);
+    repairZeroDiagonalRightHandSideBatch<<<((structure->nZeroDiagonalRows * nS + BLOCK - 1) / BLOCK), BLOCK, 0, ctx->stream>>>(structure->nZeroDiagonalRows, nS, n,
+            structure->dZeroDiagonalRow.template as<int>(),
+            structure->dZeroDiagonalDonor.template as<int>(), structure->dZeroDiagonalDonorOwnIndex.template as<int>(), structure->dZeroDiagonalRepairSign.template as<char>(),
+            ctx->dZeroDiagonalDonorChoice.template as<int>() + (size_t) sOff * structure->nZeroDiagonalRows, bsnap, B);
 }
 
 }  // namespace olfgpu

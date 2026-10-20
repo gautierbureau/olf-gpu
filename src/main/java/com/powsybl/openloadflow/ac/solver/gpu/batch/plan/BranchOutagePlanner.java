@@ -119,9 +119,9 @@ final class BranchOutagePlanner {
                 pb.busRows = com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcDataExtractor
                         .busPowerRows(stationResets.get(0).bus().getNetwork(), es);
             }
-            GenOutage[] st = GpuBatchInjectionOutages.computeInjectionOutages(es, gpuData, distributedSlackRawFactorSum, slackParticipates,
+            GenOutage[] injectionOutages = GpuBatchInjectionOutages.computeInjectionOutages(es, gpuData, distributedSlackRawFactorSum, slackParticipates,
                     distributedSlackParameters, List.of(), stationResets, pb.busRows);
-            if (st == null) {
+            if (injectionOutages == null) {
                 GpuBatchQualification.refuse(c, "PLAN:INJECTION_OUTAGE_SHAPE");
                 return;
             }
@@ -129,7 +129,7 @@ final class BranchOutagePlanner {
             if (pb.genOutagesByIndex[i] != null) {
                 merged.addAll(java.util.Arrays.asList(pb.genOutagesByIndex[i]));
             }
-            merged.addAll(java.util.Arrays.asList(st));
+            merged.addAll(java.util.Arrays.asList(injectionOutages));
             pb.genOutagesByIndex[i] = merged.toArray(new GenOutage[0]);
         }
         if (!planReHomedControls(reHomed, pb, i, es, gpuData, outagedZeroImpedanceBranchNums, c)) {
@@ -154,14 +154,14 @@ final class BranchOutagePlanner {
             pb.distrQKeyOverrideMemberByIndex[i] = java.util.Arrays.stream(vcOv[2]).mapToInt(d -> (int) d).toArray();
             pb.distrQKeyOverrideKeyByIndex[i] = vcOv[3];
             // and the survivors' DISTR_Q row TARGETS + the islanded members' inactive entries
-            List<GenOutage> dq = GpuBatchInjectionOutages.islandedDistrQEntries(gpuData, lostVcControllers, pb.relocatedDummyQRows, outagedZeroImpedanceBranchNums,
+            List<GenOutage> islandedDistrQEntries = GpuBatchInjectionOutages.islandedDistrQEntries(gpuData, lostVcControllers, pb.relocatedDummyQRows, outagedZeroImpedanceBranchNums,
                     GpuBatchInjectionOutages.labelsOf(pb.distrQSubgroupByIndex[i]));
-            if (!dq.isEmpty()) {
+            if (!islandedDistrQEntries.isEmpty()) {
                 List<GenOutage> merged = new ArrayList<>();
                 if (pb.genOutagesByIndex[i] != null) {
                     merged.addAll(java.util.Arrays.asList(pb.genOutagesByIndex[i]));
                 }
-                merged.addAll(dq);
+                merged.addAll(islandedDistrQEntries);
                 pb.genOutagesByIndex[i] = merged.toArray(new GenOutage[0]);
             }
         }
@@ -216,7 +216,7 @@ final class BranchOutagePlanner {
                 // Everything the island still COUPLES to the main component through: an HVDC
                 // whose other station is live, a controller in a remote group, a controlled
                 // shunt. Each is a place a frozen 1<0 row can leak a spurious injection.
-                var vc = b.getGeneratorVoltageControl().orElse(null);
+                var voltageControl = b.getGeneratorVoltageControl().orElse(null);
                 System.err.println("  ISLANDED-BUS " + b.getId() + " num=" + b.getNum()
                         + " participating=" + b.isParticipating()
                         + " participatingGens=" + b.getGenerators().stream()
@@ -226,9 +226,9 @@ final class BranchOutagePlanner {
                         + " shunts=" + (b.getShunt().isPresent() ? 1 : 0)
                         + " controllerShunt=" + (b.getControllerShunt().isPresent() ? 1 : 0)
                         + " svcShunt=" + (b.getSvcShunt().isPresent() ? 1 : 0)
-                        + " genVc=" + (vc != null)
-                        + " genVcControlledBus=" + (vc != null ? vc.getControlledBus().getId() : "-")
-                        + " genVcControllers=" + (vc != null ? vc.getMergedControllerElements().size() : 0)
+                        + " genVc=" + (voltageControl != null)
+                        + " genVcControlledBus=" + (voltageControl != null ? voltageControl.getControlledBus().getId() : "-")
+                        + " genVcControllers=" + (voltageControl != null ? voltageControl.getMergedControllerElements().size() : 0)
                         + " loads=" + b.getLoads().size());
             }
         }

@@ -213,16 +213,16 @@ public final class GpuHvdcAcEmulationLimitsOuterLoop {
      * with what they did on the device — otherwise the orchestrators that run next re-upload a
      * pre-freeze override list and re-apply a freeze the kernel already lifted.
      */
-    public static void applyStatusOverrides(int chunkSize, int realCount, int n, List<Controller> ctls,
+    public static void applyStatusOverrides(int chunkSize, int realCount, int n, List<Controller> controllers,
                                      int[][] status, byte[] ctgOut, boolean[][] disabledMask,
                                      double[] baseTargets, GpuBatchOverrides overrides,
                                      double[] appliedDelta1, double[] appliedDelta2, int[][] rowModePerScenario) {
-        int nh = ctls.size();
+        int nControllers = controllers.size();
         for (int s = 0; s < realCount; s++) {
             int[] rm = rowModePerScenario == null ? null : rowModePerScenario[s];
-            for (int h = 0; h < nh; h++) {
-                Controller c = ctls.get(h);
-                if (ctgOut[s * nh + h] != 0) {
+            for (int h = 0; h < nControllers; h++) {
+                Controller c = controllers.get(h);
+                if (ctgOut[s * nControllers + h] != 0) {
                     continue;                                // the contingency owns that bit
                 }
                 if (status[s][h] == GpuAcEmulationStatus.LINEAR_MODE) {
@@ -244,8 +244,8 @@ public final class GpuHvdcAcEmulationLimitsOuterLoop {
                     // silently dropped its override.
                     double[] d = status[s][h] == GpuAcEmulationStatus.SATURATION_MODE_FROM_CS1_TO_CS2 ? saturationDeltas(c, true)
                             : status[s][h] == GpuAcEmulationStatus.SATURATION_MODE_FROM_CS2_TO_CS1 ? saturationDeltas(c, false)
-                            : new double[] {appliedDelta1[s * nh + h] + c.baseD1(),
-                                            appliedDelta2[s * nh + h] + c.baseD2()};
+                            : new double[] {appliedDelta1[s * nControllers + h] + c.baseD1(),
+                                            appliedDelta2[s * nControllers + h] + c.baseD2()};
                     if (c.bus1PActive()) {
                         overrides.merge(s * n + c.bus1WriteRow(rm), baseTargets[c.bus1WriteRow(rm)], c.baseD1(), d[0]);
                     }
@@ -262,10 +262,10 @@ public final class GpuHvdcAcEmulationLimitsOuterLoop {
      *  the hv bit set and NO target override (baseTargets already carry the base injections), and
      *  PADDING slots get the base bits so they still converge at iteration 0. An entry whose bit is
      *  already set while its status is LINEAR is a contingency outage — left alone. */
-    public static void seedBaseStatuses(int chunkSize, int realCount, List<Controller> ctls,
+    public static void seedBaseStatuses(int chunkSize, int realCount, List<Controller> controllers,
                                  int[][] status, boolean[][] disabledMask) {
-        for (int h = 0; h < ctls.size(); h++) {
-            Controller c = ctls.get(h);
+        for (int h = 0; h < controllers.size(); h++) {
+            Controller c = controllers.get(h);
             if (c.baseStatus() == GpuAcEmulationStatus.LINEAR_MODE) {
                 continue;
             }
@@ -285,22 +285,22 @@ public final class GpuHvdcAcEmulationLimitsOuterLoop {
      *  host-side freeze already applied. Shared by the batched SA's chunk contexts and the base load
      *  flow's batch-of-one. Returns the flat ctgOut bits (null when there is nothing to install — the
      *  context's HVDC loops are then cleared). */
-    public static byte[] installDriverLoops(long handle, List<Controller> ctls, int chunkSize, int[][] hvdcStatus,
+    public static byte[] installDriverLoops(long handle, List<Controller> controllers, int chunkSize, int[][] hvdcStatus,
                                             boolean[][] disabledMask, double[] appliedDelta1, double[] appliedDelta2,
                                             boolean limits) {
-        if (ctls == null || ctls.isEmpty()) {
+        if (controllers == null || controllers.isEmpty()) {
             HvdcNative.setBatchHvdcLoops(handle, null, null, null, null, null, null, null, null, null, null, 0);
             return null;
         }
-        int nh = ctls.size();
-        int[] hvdcElement = new int[nh];
-        int[] hvdcBus1PRows = new int[nh];
-        int[] hvdcBus2PRows = new int[nh];
-        int[] hvdcBus1PhiColumns = new int[nh];
-        int[] hvdcBus2PhiColumns = new int[nh];
-        double[] hvdcAcEmulationParameters = new double[nh * 9];
-        for (int h = 0; h < nh; h++) {
-            Controller c = ctls.get(h);
+        int nControllers = controllers.size();
+        int[] hvdcElement = new int[nControllers];
+        int[] hvdcBus1PRows = new int[nControllers];
+        int[] hvdcBus2PRows = new int[nControllers];
+        int[] hvdcBus1PhiColumns = new int[nControllers];
+        int[] hvdcBus2PhiColumns = new int[nControllers];
+        double[] hvdcAcEmulationParameters = new double[nControllers * 9];
+        for (int h = 0; h < nControllers; h++) {
+            Controller c = controllers.get(h);
             hvdcElement[h] = c.hvdcElementIndex();          // GLOBAL element index
             hvdcBus1PRows[h] = c.bus1PRow();               // where the P target is WRITTEN (relocated row, ~ when inactive)
             hvdcBus2PRows[h] = c.bus2PRow();
@@ -316,14 +316,14 @@ public final class GpuHvdcAcEmulationLimitsOuterLoop {
             hvdcAcEmulationParameters[h * 9 + 7] = c.baseD1();
             hvdcAcEmulationParameters[h * 9 + 8] = c.baseD2();
         }
-        byte[] ctgOut = new byte[chunkSize * nh];
-        int[] flatStatus = new int[chunkSize * nh];
+        byte[] ctgOut = new byte[chunkSize * nControllers];
+        int[] flatStatus = new int[chunkSize * nControllers];
         for (int s2 = 0; s2 < chunkSize; s2++) {
-            for (int h = 0; h < nh; h++) {
-                flatStatus[s2 * nh + h] = hvdcStatus[s2][h];
+            for (int h = 0; h < nControllers; h++) {
+                flatStatus[s2 * nControllers + h] = hvdcStatus[s2][h];
                 // "the contingency outaged it" is the bit set on a LINEAR entry
-                ctgOut[s2 * nh + h] = (byte) (hvdcStatus[s2][h] == GpuAcEmulationStatus.LINEAR_MODE
-                        && disabledMask[s2][ctls.get(h).hvdcElementIndex()] ? 1 : 0);
+                ctgOut[s2 * nControllers + h] = (byte) (hvdcStatus[s2][h] == GpuAcEmulationStatus.LINEAR_MODE
+                        && disabledMask[s2][controllers.get(h).hvdcElementIndex()] ? 1 : 0);
             }
         }
         HvdcNative.setBatchHvdcLoops(handle, hvdcElement, hvdcBus1PRows, hvdcBus2PRows, hvdcBus1PhiColumns, hvdcBus2PhiColumns, hvdcAcEmulationParameters, ctgOut,
@@ -334,14 +334,14 @@ public final class GpuHvdcAcEmulationLimitsOuterLoop {
     /** Give the driver's final AC-emulation statuses (scenario 0) back to the network the way OLF's own
      *  loops do — the same {@code AcEmulationControl} switches, which set the converter stations'
      *  targetP and re-activate/deactivate the emulation terms through OLF's listeners. */
-    public static void applyToNetwork(LfNetwork network, List<Controller> ctls, int[] deviceStatus, int nElements) {
-        if (ctls == null || ctls.isEmpty() || deviceStatus == null) {
+    public static void applyToNetwork(LfNetwork network, List<Controller> controllers, int[] deviceStatus, int nElements) {
+        if (controllers == null || controllers.isEmpty() || deviceStatus == null) {
             return;
         }
         java.util.Map<Integer, LfHvdc> byElem = new java.util.HashMap<>();
         elementIndices(network, nElements).forEach((h, e) -> byElem.put(e, h));
-        for (int h = 0; h < ctls.size() && h < deviceStatus.length; h++) {
-            LfHvdc hvdc = byElem.get(ctls.get(h).hvdcElementIndex());
+        for (int h = 0; h < controllers.size() && h < deviceStatus.length; h++) {
+            LfHvdc hvdc = byElem.get(controllers.get(h).hvdcElementIndex());
             if (hvdc == null) {
                 continue;
             }

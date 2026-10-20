@@ -130,17 +130,17 @@ public final class ControlReHoming {
                 var newMain = cluster.stream().map(controlOf::get)
                         .sorted(java.util.Comparator.<com.powsybl.openloadflow.network.VoltageControl<LfBus>>comparingDouble(
                                 com.powsybl.openloadflow.network.VoltageControl::getTargetValue).reversed()
-                                .thenComparing(vc -> vc.getControlledBus().getId()))
+                                .thenComparing(voltageControl -> voltageControl.getControlledBus().getId()))
                         .findFirst().orElseThrow();
                 boolean local = cluster.size() == 1
-                        && newMain.getControllerElements().stream().allMatch(ce -> ce == newMain.getControlledBus());
+                        && newMain.getControllerElements().stream().allMatch(controller -> controller == newMain.getControlledBus());
                 if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {
                     System.err.printf("QUALIFY_TRACE reHome ctg=%s main=%s cluster=%s newMain=%s target=%.6f local=%b%n",
                             contingencyId, main.getControlledBus().getId(), cluster.stream().map(LfBus::getId).toList(),
                             newMain.getControlledBus().getId(), newMain.getTargetValue(), local);
                 }
                 boolean remoteControllers = !local && cluster.stream().map(controlOf::get)
-                        .flatMap(vc -> vc.getControllerElements().stream()).anyMatch(ce -> !cluster.contains(ce));
+                        .flatMap(voltageControl -> voltageControl.getControllerElements().stream()).anyMatch(controller -> !cluster.contains(controller));
                 if (remoteControllers) {
                     // The re-merged group is REMOTE: generators behind their own line or transformer regulate the
                     // cluster. OLF puts BUS_TARGET_V on the elected main, keeps that bus's reactive balance and frees
@@ -168,16 +168,16 @@ public final class ControlReHoming {
                     }
                     remoteMains.put(newMain.getControlledBus(), newMain.getTargetValue());
                     remoteCluster.addAll(cluster);
-                    for (LfBus cb : cluster) {
-                        for (LfBus ce : controlOf.get(cb).getControllerElements()) {
-                            reHomedRemoteControllers.put(ce, newMain.getControlledBus());
+                    for (LfBus controlledBus : cluster) {
+                        for (LfBus controller : controlOf.get(controlledBus).getControllerElements()) {
+                            reHomedRemoteControllers.put(controller, newMain.getControlledBus());
                         }
                     }
-                    for (LfBus cb : controlOf.keySet()) {   // the controllers the group LOST with the islanded sections
-                        if (!alive.contains(cb)) {
-                            for (LfBus ce : controlOf.get(cb).getControllerElements()) {
-                                if (!left.contains(ce)) {
-                                    left.add(ce);
+                    for (LfBus controlledBus : controlOf.keySet()) {   // the controllers the group LOST with the islanded sections
+                        if (!alive.contains(controlledBus)) {
+                            for (LfBus controller : controlOf.get(controlledBus).getControllerElements()) {
+                                if (!left.contains(controller)) {
+                                    left.add(controller);
                                 }
                             }
                         }
@@ -213,11 +213,11 @@ public final class ControlReHoming {
                     }
                     remoteMains.put(newMain.getControlledBus(), newMain.getTargetValue());
                     remoteCluster.addAll(cluster);
-                    for (LfBus cb : controlOf.keySet()) {   // the controllers the group LOST: the islanded/disabled
-                        if (!alive.contains(cb)) {          // sections' own controllers leave the group's keys
-                            for (LfBus ce : controlOf.get(cb).getControllerElements()) {
-                                if (!left.contains(ce)) {
-                                    left.add(ce);
+                    for (LfBus controlledBus : controlOf.keySet()) {   // the controllers the group LOST: the islanded/disabled
+                        if (!alive.contains(controlledBus)) {          // sections' own controllers leave the group's keys
+                            for (LfBus controller : controlOf.get(controlledBus).getControllerElements()) {
+                                if (!left.contains(controller)) {
+                                    left.add(controller);
                                 }
                             }
                         }
@@ -225,9 +225,9 @@ public final class ControlReHoming {
                     continue;
                 }
                 pv.put(newMain.getControlledBus(), newMain.getTargetValue());
-                for (LfBus ce : newMain.getControllerElements()) {
-                    if (!left.contains(ce)) {
-                        left.add(ce);
+                for (LfBus controller : newMain.getControllerElements()) {
+                    if (!left.contains(controller)) {
+                        left.add(controller);
                     }
                 }
                 // A locally re-homed bus is its OWN OLF group too: label it so the base pilot's "enabled
@@ -245,8 +245,8 @@ public final class ControlReHoming {
 
     /** Whether the generator's reactive limits are a capability CURVE (they then depend on its target P). */
     static boolean hasCurve(com.powsybl.openloadflow.network.LfGenerator g) {
-        return g instanceof com.powsybl.openloadflow.network.impl.AbstractLfGenerator alg
-                && alg.getReactiveLimits().map(rl -> rl.getKind() == com.powsybl.iidm.network.ReactiveLimitsKind.CURVE)
+        return g instanceof com.powsybl.openloadflow.network.impl.AbstractLfGenerator abstractLfGenerator
+                && abstractLfGenerator.getReactiveLimits().map(reactiveLimits -> reactiveLimits.getKind() == com.powsybl.iidm.network.ReactiveLimitsKind.CURVE)
                         .orElse(false);
     }
 

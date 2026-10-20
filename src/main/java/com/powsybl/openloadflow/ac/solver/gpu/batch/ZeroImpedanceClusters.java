@@ -34,17 +34,17 @@ final class ZeroImpedanceClusters {
      *  for every contingency, against 0.16 when they are carried. The device starts the same way, so both
      *  arms take the same first step from the same state. */
     static double[] zeroZeroImpedanceBranchFlows(GpuAcData gpuData, double[] baseState) {
-        int[] zi = gpuData.zeroImpedanceBranch().indices();
-        if (zi == null || zi.length == 0) {
+        int[] zeroImpedanceBranchIndices = gpuData.zeroImpedanceBranch().indices();
+        if (zeroImpedanceBranchIndices == null || zeroImpedanceBranchIndices.length == 0) {
             return baseState;
         }
         double[] x0 = baseState.clone();
-        for (int k = 0; k + 10 < zi.length; k += 11) {
-            if (zi[k + 4] >= 0) {
-                x0[zi[k + 4]] = 0;                           // DUMMY_P column
+        for (int k = 0; k + 10 < zeroImpedanceBranchIndices.length; k += 11) {
+            if (zeroImpedanceBranchIndices[k + 4] >= 0) {
+                x0[zeroImpedanceBranchIndices[k + 4]] = 0;                           // DUMMY_P column
             }
-            if (zi[k + 5] >= 0) {
-                x0[zi[k + 5]] = 0;                           // DUMMY_Q column
+            if (zeroImpedanceBranchIndices[k + 5] >= 0) {
+                x0[zeroImpedanceBranchIndices[k + 5]] = 0;                           // DUMMY_Q column
             }
         }
         return x0;
@@ -95,17 +95,18 @@ final class ZeroImpedanceClusters {
         }
         if (System.getenv("OLF_GPU_ZITREE_TRACE") != null) {
             System.err.println("ZITREE_CLUSTER ctg=" + contingencyId + " child=" + child.getId() + " cluster=" + cluster.stream()
-                    .map(bb -> bb.getId() + bb.getGeneratorVoltageControl().filter(vc -> vc.getControlledBus() == bb)
-                            .map(vc -> "(vt=" + vc.getTargetValue() + "," + vc.getMergeStatus() + ",enabled=" + bb.isGeneratorVoltageControlEnabled() + ")")
+                    .map(clusterBus -> clusterBus.getId() + clusterBus.getGeneratorVoltageControl().filter(voltageControl -> voltageControl.getControlledBus() == clusterBus)
+                            .map(voltageControl -> "(vt=" + voltageControl.getTargetValue() + "," + voltageControl.getMergeStatus()
+                                    + ",enabled=" + clusterBus.isGeneratorVoltageControlEnabled() + ")")
                             .orElse(""))
                     .toList());
         }
         return cluster.stream()
-                .map(bb -> bb.getGeneratorVoltageControl().filter(vc -> vc.getControlledBus() == bb).orElse(null))
+                .map(clusterBus -> clusterBus.getGeneratorVoltageControl().filter(voltageControl -> voltageControl.getControlledBus() == clusterBus).orElse(null))
                 .filter(java.util.Objects::nonNull)
-                .min(java.util.Comparator.<GeneratorVoltageControl>comparingDouble(vc -> -vc.getTargetValue())
-                        .thenComparing(vc -> vc.getControlledBus().getId()))
-                .map(vc -> vc.getControlledBus() == child)
+                .min(java.util.Comparator.<GeneratorVoltageControl>comparingDouble(voltageControl -> -voltageControl.getTargetValue())
+                        .thenComparing(voltageControl -> voltageControl.getControlledBus().getId()))
+                .map(voltageControl -> voltageControl.getControlledBus() == child)
                 .orElse(true);
     }
 

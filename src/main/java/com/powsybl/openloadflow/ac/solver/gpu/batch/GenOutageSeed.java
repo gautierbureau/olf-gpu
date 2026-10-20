@@ -221,8 +221,8 @@ final class GenOutageSeed {
                     cl.pfRow.add(go.pinnedPilotVRow());
                     cl.pfQTarget.add(go.pinnedPilotQTarget());
                     cl.pilotFlipSurvivorReactiveLimitEntryCounts.add(go.pilotGroupSurvivorReactiveLimitEntries().length);
-                    for (int rl : go.pilotGroupSurvivorReactiveLimitEntries()) {
-                        cl.pilotFlipSurvivorReactiveLimitEntries.add(rl);
+                    for (int entry : go.pilotGroupSurvivorReactiveLimitEntries()) {
+                        cl.pilotFlipSurvivorReactiveLimitEntries.add(entry);
                     }
                 }
                 if (go.shrinksReactiveLimits()) {

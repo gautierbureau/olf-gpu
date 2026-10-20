@@ -186,8 +186,8 @@ __global__ void fillDistrQBatch(int nDistrQ, int nScenarios, int n, int nnz, int
     }
     if (kind == GpuReactiveTermKind::OPEN_BRANCH_REACTIVE_FLOW) {  // half-open branch: connected-side q + dq/dv
         const double* op = openBranchParameters + e * 7;
-        const int* oq = openBranchIndices + e * 6;
-        int vcol = distrQSide[c] == 0 ? oq[4] : oq[5];
+        const int* openBranch = openBranchIndices + e * 6;
+        int vcol = distrQSide[c] == 0 ? openBranch[4] : openBranch[5];
         double v1 = distrQSide[c] == 0 ? xs[vcol] : 1.0;
         double v2 = distrQSide[c] == 1 ? xs[vcol] : 1.0;
         double oo[OB_NOUT];

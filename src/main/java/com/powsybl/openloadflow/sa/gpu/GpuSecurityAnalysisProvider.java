@@ -104,16 +104,16 @@ public class GpuSecurityAnalysisProvider extends OpenSecurityAnalysisProvider {
      * is unaffected and remains the way to use many threads.
      */
     private static int forceSinglePartition(SecurityAnalysisParameters securityAnalysisParameters) {
-        OpenSecurityAnalysisParameters ext =
+        OpenSecurityAnalysisParameters securityAnalysisParametersExt =
                 securityAnalysisParameters.getExtension(OpenSecurityAnalysisParameters.class);
-        if (ext == null || ext.getThreadCount() <= 1) {
+        if (securityAnalysisParametersExt == null || securityAnalysisParametersExt.getThreadCount() <= 1) {
             return -1;
         }
-        int requested = ext.getThreadCount();
+        int requested = securityAnalysisParametersExt.getThreadCount();
         LOGGER.warn("GPU security analysis: threadCount {} ignored, running single-partition so the BASE "
                 + "load flow also runs on the device (a CPU-solved base and device-solved contingencies "
                 + "disagree about violations). Use the CPU provider for multi-threading", requested);
-        ext.setThreadCount(1);
+        securityAnalysisParametersExt.setThreadCount(1);
         return requested;
     }
 
@@ -121,10 +121,10 @@ public class GpuSecurityAnalysisProvider extends OpenSecurityAnalysisProvider {
      *  who may well reuse them for a CPU run — silently leaving them at 1 would change THAT run. */
     private static void restoreThreadCount(SecurityAnalysisParameters securityAnalysisParameters, int requested) {
         if (requested > 1) {
-            OpenSecurityAnalysisParameters ext =
+            OpenSecurityAnalysisParameters securityAnalysisParametersExt =
                     securityAnalysisParameters.getExtension(OpenSecurityAnalysisParameters.class);
-            if (ext != null) {
-                ext.setThreadCount(requested);
+            if (securityAnalysisParametersExt != null) {
+                securityAnalysisParametersExt.setThreadCount(requested);
             }
         }
     }

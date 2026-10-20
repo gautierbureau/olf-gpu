@@ -89,7 +89,7 @@ public class ZeroImpedanceTreeReplayTest extends AbstractLoadFlowNetworkFactory 
                         new Contingency("lC", new BranchContingency("lC")),
                         new Contingency("c1lC", new BranchContingency("c1"), new BranchContingency("lC"))),
                 new LfTopoConfig(), new PropagatedContingencyCreationParameters()).stream()
-                .collect(Collectors.toMap(pc -> pc.getContingency().getId(), Function.identity()));
+                .collect(Collectors.toMap(propagatedContingency -> propagatedContingency.getContingency().getId(), Function.identity()));
         Set<String> otherSide = Set.of("m_vl_0", "n_vl_0", "a_vl_0", "c_vl_0");
         assertEquals(otherSide, lostWhenCut(network, "l0"), "before: the main component is the slack's");
 
@@ -118,7 +118,7 @@ public class ZeroImpedanceTreeReplayTest extends AbstractLoadFlowNetworkFactory 
                         new Contingency("z12", new BranchContingency("z12")),
                         new Contingency("l34", new BranchContingency("l34"))),
                 new LfTopoConfig(), new PropagatedContingencyCreationParameters()).stream()
-                .collect(Collectors.toMap(pc -> pc.getContingency().getId(), Function.identity()));
+                .collect(Collectors.toMap(propagatedContingency -> propagatedContingency.getContingency().getId(), Function.identity()));
 
         ZeroImpedanceTreeReplay replay = new ZeroImpedanceTreeReplay(network);
         assertEquals(List.of("z23"), ids(replay.nonTree()), "z23 closes the loop");

@@ -140,13 +140,13 @@ final class GpuViolationScreen {
     /** Every state column the flow evaluation reads is present at base. */
     private static boolean hasColumns(byte family, int elem, GpuAcData data) {
         if (family == FAMILY_CLOSED) {
-            int[] ix = data.closedBranch().indices();
+            int[] indices = data.closedBranch().indices();
             int c = elem * 12;
-            return ix[c + 4] >= 0 && ix[c + 5] >= 0 && ix[c + 6] >= 0 && ix[c + 7] >= 0;
+            return indices[c + 4] >= 0 && indices[c + 5] >= 0 && indices[c + 6] >= 0 && indices[c + 7] >= 0;
         }
-        int[] ix = data.openBranch().indices();
+        int[] indices = data.openBranch().indices();
         int c = elem * 6;
-        return ix[c + 4] >= 0 || ix[c + 5] >= 0;             // an open branch carries one side only
+        return indices[c + 4] >= 0 || indices[c + 5] >= 0;        // an open branch carries one side only
     }
 
     /** True when this branch's flows can be screened at all — a branch that cannot is scanned on
@@ -389,28 +389,28 @@ final class GpuViolationScreen {
     private double[] flows(int branchIndex, double[] state) {
         int e = branchElem[branchIndex];
         if (branchFamily[branchIndex] == FAMILY_CLOSED) {
-            double[] in = closedBranchParameters;
-            int[] ix = closedBranchIndices;
+            double[] parameters = closedBranchParameters;
+            int[] indices = closedBranchIndices;
             int o = e * 8;
             int c = e * 12;
-            int ph1Col = ix[c + 4];
-            int v1Col = ix[c + 5];
-            int ph2Col = ix[c + 6];
-            int v2Col = ix[c + 7];
+            int ph1Col = indices[c + 4];
+            int v1Col = indices[c + 5];
+            int ph2Col = indices[c + 6];
+            int v2Col = indices[c + 7];
             if (ph1Col < 0 || v1Col < 0 || ph2Col < 0 || v2Col < 0) {
                 return null;
             }
-            double y = in[o];
-            double g1 = in[o + 1];
-            double g2 = in[o + 2];
-            double b1 = in[o + 3];
-            double b2 = in[o + 4];
-            double ksi = in[o + 5];
+            double y = parameters[o];
+            double g1 = parameters[o + 1];
+            double g2 = parameters[o + 2];
+            double b1 = parameters[o + 3];
+            double b2 = parameters[o + 4];
+            double ksi = parameters[o + 5];
             // A controlled ratio / phase shift is a STATE variable, so the scenario's own value is in
             // the state vector, not in the pack (which carries the base tap) — the fill kernels make
             // exactly this choice, and a screen that took the pack value would evaluate the wrong tap.
-            double r1 = ix[c + 9] >= 0 ? state[ix[c + 9]] : in[o + 6];
-            double a1 = ix[c + 8] >= 0 ? state[ix[c + 8]] : in[o + 7];
+            double r1 = indices[c + 9] >= 0 ? state[indices[c + 9]] : parameters[o + 6];
+            double a1 = indices[c + 8] >= 0 ? state[indices[c + 8]] : parameters[o + 7];
             double v1 = state[v1Col];
             double ph1 = state[ph1Col];
             double v2 = state[v2Col];
@@ -431,19 +431,19 @@ final class GpuViolationScreen {
                 v1, v2,
             };
         }
-        double[] in = openBranchParameters;
-        int[] ix = openBranchIndices;
+        double[] parameters = openBranchParameters;
+        int[] indices = openBranchIndices;
         int o = e * 7;
         int c = e * 6;
-        int v1Col = ix[c + 4];
-        int v2Col = ix[c + 5];
-        double y = in[o];
-        double ksi = in[o + 1];
-        double g1 = in[o + 2];
-        double b1 = in[o + 3];
-        double g2 = in[o + 4];
-        double b2 = in[o + 5];
-        double r1 = in[o + 6];
+        int v1Col = indices[c + 4];
+        int v2Col = indices[c + 5];
+        double y = parameters[o];
+        double ksi = parameters[o + 1];
+        double g1 = parameters[o + 2];
+        double b1 = parameters[o + 3];
+        double g2 = parameters[o + 4];
+        double b2 = parameters[o + 5];
+        double r1 = parameters[o + 6];
         double sinKsi = Math.sin(ksi);
         double cosKsi = Math.cos(ksi);
         // Each side's flow sees the OTHER side's shunt through the series admittance, so side 1's

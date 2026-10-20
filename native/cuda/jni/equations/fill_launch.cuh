@@ -13,10 +13,10 @@
 namespace olfgpu {
 
 // The GROUP relocation tables of one family, or all-null when the structure has none.
-ReactiveRelocationTables relocationTablesOf(Family& f, SharedStructure* st);
+ReactiveRelocationTables relocationTablesOf(Family& f, SharedStructure* structure);
 
 // The same for the zero-impedance couplers.
-ReactiveRelocationTables zeroImpedanceRelocationTables(SharedStructure* st);
+ReactiveRelocationTables zeroImpedanceRelocationTables(SharedStructure* structure);
 
 // Per-scenario slack/PV identity rows over the fixed superset pattern.
 __global__ void applyRowModeBatch(int n, int nScenarios, int nnz, const int* mode, const int* rowPtr,
@@ -32,7 +32,7 @@ __global__ void writeIdentityForInactive(int n, int nScenarios, int nnz, const i
                                          const int* diagPos, const char* active, double* vals, double* F);
 
 // Per-scenario target overrides on the tiled base targets (flat index -> value).
-__global__ void applyTargetOverrideBatch(int nOv, const int* ovIndex, const double* ovValue, double* target);
+__global__ void applyTargetOverrideBatch(int nTargetOverrides, const int* targetOverrideIndex, const double* targetOverrideValue, double* target);
 
 }  // namespace olfgpu
 

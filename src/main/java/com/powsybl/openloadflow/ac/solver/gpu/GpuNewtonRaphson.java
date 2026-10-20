@@ -390,9 +390,9 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
         if (acLoadFlowParameters == null) {
             return null;
         }
-        for (var ol : acLoadFlowParameters.getOuterLoops()) {
-            if (name.equals(ol.getName())) {
-                return ol;
+        for (var outerLoop : acLoadFlowParameters.getOuterLoops()) {
+            if (name.equals(outerLoop.getName())) {
+                return outerLoop;
             }
         }
         return null;
@@ -402,9 +402,9 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
         if (acLoadFlowParameters == null) {
             return null;
         }
-        for (var ol : acLoadFlowParameters.getOuterLoops()) {
-            if (ol instanceof com.powsybl.openloadflow.ac.outerloop.DistributedSlackOuterLoop ds) {
-                return ds;
+        for (var outerLoop : acLoadFlowParameters.getOuterLoops()) {
+            if (outerLoop instanceof com.powsybl.openloadflow.ac.outerloop.DistributedSlackOuterLoop distributedSlackOuterLoop) {
+                return distributedSlackOuterLoop;
             }
         }
         return null;
@@ -414,9 +414,9 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
         if (acLoadFlowParameters == null) {
             return null;
         }
-        for (var ol : acLoadFlowParameters.getOuterLoops()) {
-            if (ol instanceof com.powsybl.openloadflow.ac.outerloop.ReactiveLimitsOuterLoop rl) {
-                return rl;
+        for (var outerLoop : acLoadFlowParameters.getOuterLoops()) {
+            if (outerLoop instanceof com.powsybl.openloadflow.ac.outerloop.ReactiveLimitsOuterLoop reactiveLimitsOuterLoop) {
+                return reactiveLimitsOuterLoop;
             }
         }
         return null;
@@ -424,11 +424,11 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
 
     /** The run's own DistributedSlack settings (balance type, active limits) — never defaults. */
     private com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDistributedSlackParameters driverDistributedSlackParameters() {
-        var ds = driverDistributedSlackLoop();
-        return ds == null
+        var distributedSlackOuterLoop = driverDistributedSlackLoop();
+        return distributedSlackOuterLoop == null
                 ? com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDistributedSlackParameters.DEFAULT
                 : new com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDistributedSlackParameters(
-                        ds.getActivePowerDistribution().getBalanceType(), ds.getActivePowerDistribution().isUseActiveLimits(),
+                        distributedSlackOuterLoop.getActivePowerDistribution().getBalanceType(), distributedSlackOuterLoop.getActivePowerDistribution().isUseActiveLimits(),
                         true);                               // OLF re-derives from the INITIAL targets at every check
     }
 
@@ -924,8 +924,8 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
             int[][] hvdcAcEmulationStatus = new int[1][nh];
             double[] appliedDelta1 = new double[nh];
             double[] appliedDelta2 = new double[nh];
-            for (var ctl : hvdcAcEmulationControllers) {
-                elementMask[0][ctl.hvdcElementIndex()] = false;   // set back below from the status, as a BASE status
+            for (var controller : hvdcAcEmulationControllers) {
+                elementMask[0][controller.hvdcElementIndex()] = false;   // set back below from the status, as a BASE status
             }
             GpuHvdcAcEmulationLimitsOuterLoop.seedBaseStatuses(1, 1, hvdcAcEmulationControllers, hvdcAcEmulationStatus, elementMask);
             GpuHvdcAcEmulationLimitsOuterLoop.installDriverLoops(handle, hvdcAcEmulationControllers, 1, hvdcAcEmulationStatus, elementMask,
@@ -1010,23 +1010,23 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                 instanceof com.powsybl.openloadflow.ac.outerloop.IncrementalShuntVoltageControlOuterLoop l ? l : null;
         var incrementalTransformerReactivePowerControlLoop = driverLoop("IncrementalTransformerReactivePowerControl");
         boolean hasIncrementalPhaseControlLoop = driverLoop("IncrementalPhaseControl") != null;
-        boolean cph = driverLoop("PhaseControl") != null;
+        boolean hasPhaseControlLoop = driverLoop("PhaseControl") != null;
         var transformerVoltageControlLoop = driverLoop("TransformerVoltageControl");
         var simpleTransformerVoltageControlLoop = driverLoop("SimpleTransformerVoltageControl");
         boolean afterGen = transformerVoltageControlLoop instanceof com.powsybl.openloadflow.ac.outerloop.TransformerVoltageControlOuterLoop;
-        boolean svd = driverLoop("ShuntVoltageControl") != null;
+        boolean hasShuntVoltageControlLoop = driverLoop("ShuntVoltageControl") != null;
         var installed = com.powsybl.openloadflow.ac.outerloop.gpu.DevicePhaseInstaller.install(handle,
                 new com.powsybl.openloadflow.ac.outerloop.gpu.DevicePhaseInstaller.Request(
                         incrementalTransformerVoltageControlLoop != null ? phases.incrementalTransformerVoltageControllers() : null,
                         incrementalTransformerVoltageControlLoop != null ? incrementalTransformerVoltageControlLoop.getMaxTapShift() : 1,
 
-                        incrementalTransformerReactivePowerControlLoop != null || hasIncrementalPhaseControlLoop ? phases.flow() : null, cph ? phases.continuousPhase() : null,
+                        incrementalTransformerReactivePowerControlLoop != null || hasIncrementalPhaseControlLoop ? phases.flow() : null, hasPhaseControlLoop ? phases.continuousPhase() : null,
                         incrementalShuntVoltageControlLoop != null ? phases.incrementalShunt() : null,
                         incrementalShuntVoltageControlLoop != null ? incrementalShuntVoltageControlLoop.getMaxSectionShift() : 3,
 
                         transformerVoltageControlLoop != null || simpleTransformerVoltageControlLoop != null ? phases.discreteTransformerVoltageControl() : null,
                         simpleTransformerVoltageControlLoop != null,
-                        afterGen, phases.freeze(), svd ? phases.simpleShunt() : null, true));
+                        afterGen, phases.freeze(), hasShuntVoltageControlLoop ? phases.simpleShunt() : null, true));
         if (incrementalTransformerVoltageControlLoop != null) {
             incrementalTransformerVoltageControlControllers = phases.incrementalTransformerVoltageControllers();
         }
@@ -1036,13 +1036,13 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
         if (incrementalTransformerReactivePowerControlLoop != null || hasIncrementalPhaseControlLoop) {
             flowControllers = phases.flow();
         }
-        if (cph) {
+        if (hasPhaseControlLoop) {
             phaseControlControllers = phases.continuousPhase();
         }
         if (transformerVoltageControlLoop != null || simpleTransformerVoltageControlLoop != null) {
             transformerVoltageControlControllers = phases.discreteTransformerVoltageControl();
         }
-        if (svd) {
+        if (hasShuntVoltageControlLoop) {
             shuntVoltageControlGroups = phases.simpleShunt();
         }
         incrementalTransformerVoltageControlOwned = installed.incrementalTransformerVoltageControllers();

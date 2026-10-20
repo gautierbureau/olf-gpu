@@ -40,21 +40,21 @@ final class GpuPostContingencyState {
      * per bus.
      */
     static boolean updateBusesFromState(double[] state, PrecomputedBatch precomputed, LfNetwork network,
-                                                AcLoadFlowParameters parameters, GpuSaRunState rs) {
+                                                AcLoadFlowParameters parameters, GpuSaRunState run) {
         Map<Variable<AcVariableType>, Integer> baseRows = precomputed.baseVariableRows();
-        if (rs.busRowsFor != baseRows) {
-            rs.busRowsFor = baseRows;
-            int nb = network.getBuses().size();
-            int[] vRow = new int[nb];
-            int[] phiRow = new int[nb];
+        if (run.busRowsFor != baseRows) {
+            run.busRowsFor = baseRows;
+            int nBuses = network.getBuses().size();
+            int[] vRow = new int[nBuses];
+            int[] phiRow = new int[nBuses];
             java.util.Arrays.fill(vRow, -1);
             java.util.Arrays.fill(phiRow, -1);
             boolean usable = true;
             for (Map.Entry<Variable<AcVariableType>, Integer> e : baseRows.entrySet()) {
                 Variable<AcVariableType> v = e.getKey();
-                if (v.getType() == AcVariableType.BUS_V && v.getElementNum() < nb) {
+                if (v.getType() == AcVariableType.BUS_V && v.getElementNum() < nBuses) {
                     vRow[v.getElementNum()] = e.getValue();
-                } else if (v.getType() == AcVariableType.BUS_PHI && v.getElementNum() < nb) {
+                } else if (v.getType() == AcVariableType.BUS_PHI && v.getElementNum() < nBuses) {
                     phiRow[v.getElementNum()] = e.getValue();
                 } else if (v.getType() != AcVariableType.DUMMY_P && v.getType() != AcVariableType.DUMMY_Q) {
                     // another kind the network update WRITES (BRANCH_RHO1/ALPHA1, SHUNT_B, the asymmetrical
@@ -65,31 +65,31 @@ final class GpuPostContingencyState {
                     usable = false;
                 }
             }
-            for (int b = 0; b < nb && usable; b++) {
+            for (int b = 0; b < nBuses && usable; b++) {
                 usable = vRow[b] >= 0 && phiRow[b] >= 0;
             }
-            rs.vRowOfBus = vRow;
-            rs.phiRowOfBus = phiRow;
-            rs.busRowsUsable = usable;
+            run.vRowOfBus = vRow;
+            run.phiRowOfBus = phiRow;
+            run.busRowsUsable = usable;
         }
-        if (!rs.busRowsUsable || state == null) {
-            return updateNetworkAndCheckRealistic(precomputed.equationSystem(), network, parameters, rs);
+        if (!run.busRowsUsable || state == null) {
+            return updateNetworkAndCheckRealistic(precomputed.equationSystem(), network, parameters, run);
         }
-        if (rs.realisticBandApplies == null || rs.realisticBandNetwork != network) {
+        if (run.realisticBandApplies == null || run.realisticBandNetwork != network) {
             double minNominalV = parameters.getMinNominalVoltageRealisticVoltageCheck();
             boolean[] applies = new boolean[network.getBuses().size()];
             for (LfBus b : network.getBuses()) {
                 applies[b.getNum()] = !b.isFictitious() && b.getNominalV() >= minNominalV;
             }
-            rs.realisticBandApplies = applies;
-            rs.realisticBandNetwork = network;
+            run.realisticBandApplies = applies;
+            run.realisticBandNetwork = network;
         }
-        boolean[] applies = rs.realisticBandApplies;
+        boolean[] applies = run.realisticBandApplies;
         double minV = parameters.getMinRealisticVoltage();
         double maxV = parameters.getMaxRealisticVoltage();
         boolean trace = System.getenv("OLF_GPU_UNREALISTIC_TRACE") != null;
-        int[] vRow = rs.vRowOfBus;
-        int[] phiRow = rs.phiRowOfBus;
+        int[] vRow = run.vRowOfBus;
+        int[] phiRow = run.phiRowOfBus;
         List<LfBus> buses = network.getBuses();
         boolean unrealistic = false;
         for (int num = 0; num < vRow.length; num++) {
@@ -120,7 +120,7 @@ final class GpuPostContingencyState {
      */
     static boolean updateNetworkAndCheckRealistic(EquationSystem<AcVariableType, AcEquationType> es,
                                                           LfNetwork network, AcLoadFlowParameters parameters,
-                                                          GpuSaRunState rs) {
+                                                          GpuSaRunState run) {
         List<Variable<AcVariableType>> vars = es.getIndex().getSortedVariablesToFind();
         for (Variable<AcVariableType> v : vars) {
             if (v.getType() != AcVariableType.BUS_V && v.getType() != AcVariableType.BUS_PHI) {
@@ -128,23 +128,23 @@ final class GpuPostContingencyState {
                 return isStateUnrealistic(es, network, parameters);
             }
         }
-        if (rs.realisticBandApplies == null || rs.realisticBandNetwork != network) {
+        if (run.realisticBandApplies == null || run.realisticBandNetwork != network) {
             double minNominalV = parameters.getMinNominalVoltageRealisticVoltageCheck();
             boolean[] applies = new boolean[network.getBuses().size()];
             for (LfBus b : network.getBuses()) {
                 applies[b.getNum()] = !b.isFictitious() && b.getNominalV() >= minNominalV;
             }
-            rs.realisticBandApplies = applies;
-            rs.realisticBandNetwork = network;
+            run.realisticBandApplies = applies;
+            run.realisticBandNetwork = network;
         }
-        boolean[] applies = rs.realisticBandApplies;
+        boolean[] applies = run.realisticBandApplies;
         double minV = parameters.getMinRealisticVoltage();
         double maxV = parameters.getMaxRealisticVoltage();
         boolean trace = System.getenv("OLF_GPU_UNREALISTIC_TRACE") != null;
-        com.powsybl.openloadflow.equations.StateVector sv = es.getStateVector();
+        com.powsybl.openloadflow.equations.StateVector stateVector = es.getStateVector();
         boolean unrealistic = false;
         for (Variable<AcVariableType> v : vars) {
-            double value = sv.get(v.getRow());
+            double value = stateVector.get(v.getRow());
             LfBus bus = network.getBus(v.getElementNum());
             if (v.getType() == AcVariableType.BUS_PHI) {
                 bus.setAngle(value);

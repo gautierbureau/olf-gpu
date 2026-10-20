@@ -73,12 +73,12 @@ class GpuSaShuntControlTest extends AbstractGpuSaTest {
             for (int i = 0; i < cpu.getPostContingencyResults().size(); i++) {
                 assertEquals(cpu.getPostContingencyResults().get(i).getStatus(),
                         gpu.getPostContingencyResults().get(i).getStatus());
-                var cb = cpu.getPostContingencyResults().get(i).getNetworkResult().getBusResults();
-                var gb = gpu.getPostContingencyResults().get(i).getNetworkResult().getBusResults();
-                assertEquals(cb.size(), gb.size());
-                for (int b = 0; b < cb.size(); b++) {
-                    org.junit.jupiter.api.Assertions.assertEquals(cb.get(b).getV(), gb.get(b).getV(), 1e-12,
-                            "shunt-VC bus voltage " + cb.get(b).getBusId());
+                var cpuBuses = cpu.getPostContingencyResults().get(i).getNetworkResult().getBusResults();
+                var gpuBuses = gpu.getPostContingencyResults().get(i).getNetworkResult().getBusResults();
+                assertEquals(cpuBuses.size(), gpuBuses.size());
+                for (int b = 0; b < cpuBuses.size(); b++) {
+                    org.junit.jupiter.api.Assertions.assertEquals(cpuBuses.get(b).getV(), gpuBuses.get(b).getV(), 1e-12,
+                            "shunt-VC bus voltage " + cpuBuses.get(b).getBusId());
                 }
             }
         } finally {

@@ -92,9 +92,9 @@ struct ViolationTable {
 
 /** Emit one candidate, or count past the capacity so the host can fall back for this scenario. */
 __device__ inline void emit(int* records, int* counts, int scenario, int capacity, int record) {
-    int slot = atomicAdd(counts + scenario, 1);
-    if (slot < capacity) {
-        records[(size_t) scenario * capacity + slot] = record;
+    int recordIndex = atomicAdd(counts + scenario, 1);
+    if (recordIndex < capacity) {
+        records[(size_t) scenario * capacity + recordIndex] = record;
     }
 }
 

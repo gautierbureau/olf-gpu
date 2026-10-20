@@ -68,7 +68,7 @@ public final class ReactiveCapabilityCurves {
     public static boolean hasCurveGenerators(LfNetwork network) {
         return network.getBuses().stream().flatMap(b -> b.getGenerators().stream())
                 .anyMatch(g -> g instanceof AbstractLfGenerator alg
-                        && alg.getReactiveLimits().map(rl -> rl.getKind() == ReactiveLimitsKind.CURVE).orElse(false));
+                        && alg.getReactiveLimits().map(reactiveLimits -> reactiveLimits.getKind() == ReactiveLimitsKind.CURVE).orElse(false));
     }
 
     /** Build the channel by replaying the RL pack's bus enumeration (verified against
@@ -112,8 +112,8 @@ public final class ReactiveCapabilityCurves {
             boolean remoteMember = com.powsybl.openloadflow.ac.equations.vector.gpu.RemoteMemberQPacker.isRemoteMemberEntry(bus);
             boolean pilotSelf = com.powsybl.openloadflow.ac.equations.vector.gpu.PilotSelfPacker.isPilotSelfEntry(bus);
             if (remoteMember || pilotSelf) {
-                var vc = com.powsybl.openloadflow.ac.equations.vector.gpu.RemoteMemberQPacker.mainGenVc(bus);
-                var pilotVar = es.getVariableSet().getVariable(vc.getControlledBus().getNum(), AcVariableType.BUS_V);
+                var voltageControl = com.powsybl.openloadflow.ac.equations.vector.gpu.RemoteMemberQPacker.mainGenVc(bus);
+                var pilotVar = es.getVariableSet().getVariable(voltageControl.getControlledBus().getNum(), AcVariableType.BUS_V);
                 // a row < 0 is a bus a contingency disabled: the pack skips it (vCol < 0) and so must the replay
                 if (vVar == null || vVar.getRow() < 0 || pilotVar == null || pilotVar.getRow() < 0
                         || !(bus.getMinQ() < bus.getMaxQ())) {
@@ -200,7 +200,7 @@ public final class ReactiveCapabilityCurves {
         double busFactor = distributedSlackParameters != null ? bus.getGenerators().stream().mapToDouble(distributedSlackParameters::factor).sum() : 0;
         for (LfGenerator gen : bus.getGenerators()) {
             var curve = gen instanceof AbstractLfGenerator alg
-                    ? alg.getReactiveLimits().filter(rl -> rl.getKind() == ReactiveLimitsKind.CURVE).orElse(null)
+                    ? alg.getReactiveLimits().filter(reactiveLimits -> reactiveLimits.getKind() == ReactiveLimitsKind.CURVE).orElse(null)
                     : null;
             int[] hvdcSide = hvdcSides.get(gen);
             if (curve == null || hvdcSide == null && (busFactor <= 0 || distributedSlackParameters.factor(gen) <= 0)) {

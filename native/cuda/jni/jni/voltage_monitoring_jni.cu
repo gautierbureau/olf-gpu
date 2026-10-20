@@ -47,9 +47,9 @@ OLF_JNI(ac_outerloop_gpu, VoltageMonitoringNative, readBatchMonitoringActivation
     if (ctx == nullptr || ctx->nMonitoringVoltageControllers == 0 || !ctx->dMonitoringVoltageActivatedTargetV.p) {
         return 0;
     }
-    size_t cnt = static_cast<size_t>(ctx->nMonitoringVoltageControllers) * ctx->nScenarios;
-    std::vector<double> host(cnt);
-    cudaMemcpy(host.data(), ctx->dMonitoringVoltageActivatedTargetV.p, cnt * sizeof(double), cudaMemcpyDeviceToHost);
+    size_t count = static_cast<size_t>(ctx->nMonitoringVoltageControllers) * ctx->nScenarios;
+    std::vector<double> host(count);
+    cudaMemcpy(host.data(), ctx->dMonitoringVoltageActivatedTargetV.p, count * sizeof(double), cudaMemcpyDeviceToHost);
     jint fired = 0;
     for (double v : host) {
         if (!std::isnan(v)) {
@@ -66,10 +66,10 @@ OLF_JNI(ac_outerloop_gpu, VoltageMonitoringNative, readBatchMonitoringTargets)(
     if (ctx == nullptr || ctx->nMonitoringVoltageControllers == 0 || !ctx->dMonitoringVoltageActivatedTargetV.p) {
         return nullptr;
     }
-    size_t cnt = static_cast<size_t>(ctx->nMonitoringVoltageControllers) * ctx->nScenarios;
-    std::vector<double> host(cnt);
-    cudaMemcpy(host.data(), ctx->dMonitoringVoltageActivatedTargetV.p, cnt * sizeof(double), cudaMemcpyDeviceToHost);
-    jdoubleArray out = env->NewDoubleArray(static_cast<jsize>(cnt));
-    env->SetDoubleArrayRegion(out, 0, static_cast<jsize>(cnt), host.data());
+    size_t count = static_cast<size_t>(ctx->nMonitoringVoltageControllers) * ctx->nScenarios;
+    std::vector<double> host(count);
+    cudaMemcpy(host.data(), ctx->dMonitoringVoltageActivatedTargetV.p, count * sizeof(double), cudaMemcpyDeviceToHost);
+    jdoubleArray out = env->NewDoubleArray(static_cast<jsize>(count));
+    env->SetDoubleArrayRegion(out, 0, static_cast<jsize>(count), host.data());
     return out;
 }

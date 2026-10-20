@@ -32,10 +32,10 @@ void launchDistrQTargetsInner(BatchSolverContext* ctx, DriverPass& drv);
 // OLF_GPU_REJECT_TRACE=1: WHY a scenario left the batch for the CPU replay (status -2). The census
 // counts them under one tag ("RUNTIME:status=-2"); this names the gate, per slot, so the Java side
 // can pair it with the contingency id (GpuBatchPrecomputer prints the id under the same switch).
-static inline void traceReject(int slot, const char* reason, int outer, int it) {
+static inline void traceReject(int scenario, const char* reason, int outer, int it) {
     static const bool on = std::getenv("OLF_GPU_REJECT_TRACE") != nullptr;
     if (on) {
-        std::fprintf(stderr, "GPU_REJECT slot=%d reason=%s outer=%d it=%d\n", slot, reason, outer, it);
+        std::fprintf(stderr, "GPU_REJECT slot=%d reason=%s outer=%d it=%d\n", scenario, reason, outer, it);
     }
 }
 

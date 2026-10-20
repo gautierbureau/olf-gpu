@@ -72,21 +72,22 @@ OLF_JNI(ac_solver_gpu, TransposedSolveNative, solveTransposedExplicit)(
         dB.upload(b.data(), nn * sizeof(double));
         dX.alloc(nn * sizeof(double));
 
-        CudssCtx ds;
-        CUDSS_CHECK(cudssCreate(&ds.handle));
-        CUDSS_CHECK(cudssConfigCreate(&ds.config));
-        applyReorderAlg(ds.config, false);   // adjoint: its own matrix, matching enabled
-        applyMatchingAlg(ds.config);
-        CUDSS_CHECK(cudssDataCreate(ds.handle, &ds.data));
-        CUDSS_CHECK(cudssMatrixCreateCsr(&ds.systemMatrix, nn, nn, nnz, dRowPtr.as<int>(), nullptr,
+        CudssCtx solver;
+        CUDSS_CHECK(cudssCreate(&solver.handle));
+        CUDSS_CHECK(cudssConfigCreate(&solver.config));
+        applyReorderAlg(solver.config, false);   // adjoint: its own matrix, matching enabled
+        applyMatchingAlg(solver.config);
+        CUDSS_CHECK(cudssDataCreate(solver.handle, &solver.data));
+        CUDSS_CHECK(cudssMatrixCreateCsr(&solver.systemMatrix, nn, nn, nnz, dRowPtr.as<int>(), nullptr,
                                          dColIdx.as<int>(), dVals.as<double>(), OLF_CUDSS_CSR_TYPES,
                                          CUDSS_MTYPE_GENERAL, CUDSS_MVIEW_FULL, CUDSS_BASE_ZERO));
-        CUDSS_CHECK(cudssMatrixCreateDn(&ds.rightHandSideMatrix, nn, 1, nn, dB.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
-        CUDSS_CHECK(cudssMatrixCreateDn(&ds.solutionMatrix, nn, 1, nn, dX.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
+        CUDSS_CHECK(cudssMatrixCreateDn(&solver.rightHandSideMatrix, nn, 1, nn, dB.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
+        CUDSS_CHECK(cudssMatrixCreateDn(&solver.solutionMatrix, nn, 1, nn, dX.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
         gAnalysesMain++;
-        { AnalysisTimer at_(__LINE__); CUDSS_CHECK(cudssExecute(ds.handle, CUDSS_PHASE_ANALYSIS, ds.config, ds.data, ds.systemMatrix, ds.solutionMatrix, ds.rightHandSideMatrix)); }
-        { AnalysisTimer at_(__LINE__, 'F'); CUDSS_CHECK(cudssExecute(ds.handle, CUDSS_PHASE_FACTORIZATION | CUDSS_PHASE_SOLVE,
-                                 ds.config, ds.data, ds.systemMatrix, ds.solutionMatrix, ds.rightHandSideMatrix)); }
+        { AnalysisTimer at_(__LINE__); CUDSS_CHECK(cudssExecute(solver.handle, CUDSS_PHASE_ANALYSIS, solver.config, solver.data, solver.systemMatrix, solver.solutionMatrix,
+                solver.rightHandSideMatrix)); }
+        { AnalysisTimer at_(__LINE__, 'F'); CUDSS_CHECK(cudssExecute(solver.handle, CUDSS_PHASE_FACTORIZATION | CUDSS_PHASE_SOLVE,
+                                 solver.config, solver.data, solver.systemMatrix, solver.solutionMatrix, solver.rightHandSideMatrix)); }
         CUDA_CHECK(cudaDeviceSynchronize());
 
         std::vector<double> x(nn);

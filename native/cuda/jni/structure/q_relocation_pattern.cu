@@ -144,9 +144,9 @@ void collectClosedBranchRelocationPattern(int nClosedBranch, const int* closedBr
             if (rc.col < 0) {
                 continue;
             }
-            int dg = dependentGroupOfHomeRow(rc.row, alternateRow, relocatedChildOwnRow, reactiveRelocationDependentGroupOfRow);
-            if (dg >= 0) {                                   // DEPENDENT pilot: every candidate row of ITS group
-                for (int c = reactiveRelocationGroupStart[dg]; c < reactiveRelocationGroupStart[dg + 1]; c++) {
+            int dependentGroup = dependentGroupOfHomeRow(rc.row, alternateRow, relocatedChildOwnRow, reactiveRelocationDependentGroupOfRow);
+            if (dependentGroup >= 0) {                                   // DEPENDENT pilot: every candidate row of ITS group
+                for (int c = reactiveRelocationGroupStart[dependentGroup]; c < reactiveRelocationGroupStart[dependentGroup + 1]; c++) {
                     pat.emplace_back(reactiveRelocationCandidateRows[c], rc.col);
                 }
             }
@@ -222,12 +222,12 @@ void buildClosedBranchRelocationDestination(int nClosedBranch, const int* closed
                 }
                 continue;
             }
-            int dg = dependentGroupOfHomeRow(rc.row, alternateRow, relocatedChildOwnRow, reactiveRelocationDependentGroupOfRow);
-            if (dg >= 0) {                                   // DEPENDENT pilot (dependentPilotDestination): the group's pool, plus the
+            int dependentGroup = dependentGroupOfHomeRow(rc.row, alternateRow, relocatedChildOwnRow, reactiveRelocationDependentGroupOfRow);
+            if (dependentGroup >= 0) {                                   // DEPENDENT pilot (dependentPilotDestination): the group's pool, plus the
                 if ((s.role == 1 && rc.col >= 0) || s.role == 0) {   // two-way home row of a relocated child
-                    relocationGroup[o] = dg;
+                    relocationGroup[o] = dependentGroup;
                     relocationCandidateOffset[o] = static_cast<int>(relocationCandidateDestinations.size());
-                    for (int c = reactiveRelocationGroupStart[dg]; c < reactiveRelocationGroupStart[dg + 1]; c++) {
+                    for (int c = reactiveRelocationGroupStart[dependentGroup]; c < reactiveRelocationGroupStart[dependentGroup + 1]; c++) {
                         relocationCandidateDestinations.push_back(s.role == 1 ? pos.at(reactiveRelocationCandidateRows[c], rc.col) : -2 - reactiveRelocationCandidateRows[c]);
                     }
                     relocationDependentPilot[o] = 1;
@@ -279,9 +279,9 @@ void collectShuntRelocationPattern(int nShunt, const int* shuntIndices, const in
             if (rc.col < 0) {
                 continue;
             }
-            int dg = dependentGroupOfHomeRow(rc.row, alternateRow, relocatedChildOwnRow, reactiveRelocationDependentGroupOfRow);
-            if (dg >= 0) {                                   // DEPENDENT pilot: every candidate row of ITS group
-                for (int c = reactiveRelocationGroupStart[dg]; c < reactiveRelocationGroupStart[dg + 1]; c++) {
+            int dependentGroup = dependentGroupOfHomeRow(rc.row, alternateRow, relocatedChildOwnRow, reactiveRelocationDependentGroupOfRow);
+            if (dependentGroup >= 0) {                                   // DEPENDENT pilot: every candidate row of ITS group
+                for (int c = reactiveRelocationGroupStart[dependentGroup]; c < reactiveRelocationGroupStart[dependentGroup + 1]; c++) {
                     pat.emplace_back(reactiveRelocationCandidateRows[c], rc.col);
                 }
             }
@@ -353,12 +353,12 @@ void buildShuntRelocationDestination(int nShunt, const int* shuntIndices, const 
                 }
                 continue;
             }
-            int dg = dependentGroupOfHomeRow(rc.row, alternateRow, relocatedChildOwnRow, reactiveRelocationDependentGroupOfRow);
-            if (dg >= 0) {                                   // DEPENDENT pilot (dependentPilotDestination): the group's pool, plus the
+            int dependentGroup = dependentGroupOfHomeRow(rc.row, alternateRow, relocatedChildOwnRow, reactiveRelocationDependentGroupOfRow);
+            if (dependentGroup >= 0) {                                   // DEPENDENT pilot (dependentPilotDestination): the group's pool, plus the
                 if ((s.role == 1 && rc.col >= 0) || s.role == 0) {   // two-way home row of a relocated child
-                    relocationGroup[o] = dg;
+                    relocationGroup[o] = dependentGroup;
                     relocationCandidateOffset[o] = static_cast<int>(relocationCandidateDestinations.size());
-                    for (int c = reactiveRelocationGroupStart[dg]; c < reactiveRelocationGroupStart[dg + 1]; c++) {
+                    for (int c = reactiveRelocationGroupStart[dependentGroup]; c < reactiveRelocationGroupStart[dependentGroup + 1]; c++) {
                         relocationCandidateDestinations.push_back(s.role == 1 ? pos.at(reactiveRelocationCandidateRows[c], rc.col) : -2 - reactiveRelocationCandidateRows[c]);
                     }
                     relocationDependentPilot[o] = 1;
@@ -457,9 +457,9 @@ void collectOpenBranchRelocationPattern(int nOpenBranch, const int* openBranchIn
             if (rc.col < 0) {
                 continue;
             }
-            int dg = dependentGroupOfHomeRow(rc.row, alternateRow, relocatedChildOwnRow, reactiveRelocationDependentGroupOfRow);
-            if (dg >= 0) {                                   // DEPENDENT pilot: every candidate row of ITS group
-                for (int c = reactiveRelocationGroupStart[dg]; c < reactiveRelocationGroupStart[dg + 1]; c++) {
+            int dependentGroup = dependentGroupOfHomeRow(rc.row, alternateRow, relocatedChildOwnRow, reactiveRelocationDependentGroupOfRow);
+            if (dependentGroup >= 0) {                                   // DEPENDENT pilot: every candidate row of ITS group
+                for (int c = reactiveRelocationGroupStart[dependentGroup]; c < reactiveRelocationGroupStart[dependentGroup + 1]; c++) {
                     pat.emplace_back(reactiveRelocationCandidateRows[c], rc.col);
                 }
             }
@@ -531,12 +531,12 @@ void buildOpenBranchRelocationDestination(int nOpenBranch, const int* openBranch
                 }
                 continue;
             }
-            int dg = dependentGroupOfHomeRow(rc.row, alternateRow, relocatedChildOwnRow, reactiveRelocationDependentGroupOfRow);
-            if (dg >= 0) {                                   // DEPENDENT pilot (dependentPilotDestination): the group's pool, plus the
+            int dependentGroup = dependentGroupOfHomeRow(rc.row, alternateRow, relocatedChildOwnRow, reactiveRelocationDependentGroupOfRow);
+            if (dependentGroup >= 0) {                                   // DEPENDENT pilot (dependentPilotDestination): the group's pool, plus the
                 if ((s.role == 1 && rc.col >= 0) || s.role == 0) {   // two-way home row of a relocated child
-                    relocationGroup[o] = dg;
+                    relocationGroup[o] = dependentGroup;
                     relocationCandidateOffset[o] = static_cast<int>(relocationCandidateDestinations.size());
-                    for (int c = reactiveRelocationGroupStart[dg]; c < reactiveRelocationGroupStart[dg + 1]; c++) {
+                    for (int c = reactiveRelocationGroupStart[dependentGroup]; c < reactiveRelocationGroupStart[dependentGroup + 1]; c++) {
                         relocationCandidateDestinations.push_back(s.role == 1 ? pos.at(reactiveRelocationCandidateRows[c], rc.col) : -2 - reactiveRelocationCandidateRows[c]);
                     }
                     relocationDependentPilot[o] = 1;

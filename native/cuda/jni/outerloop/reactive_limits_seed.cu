@@ -54,7 +54,7 @@ __global__ void initReactiveLimitQLimitTypeBatch(int nReactiveLimitEntries, int 
     }
     size_t idx = (size_t) s * n + vrow;
     size_t qix = (size_t) s * n + qrow;
-    size_t st = (size_t) s * nReactiveLimitEntries + i;
+    size_t scenarioEntry = (size_t) s * nReactiveLimitEntries + i;
     // OLF's own reason for the base pin, when the host carried it: it distinguishes a
     // realistic-voltage pin (3/4, target = generation targetQ) from a Q-limit pin (1/2, target =
     // the limit). The nearest-limit guess below turns the former into the latter, and the
@@ -66,7 +66,7 @@ __global__ void initReactiveLimitQLimitTypeBatch(int nReactiveLimitEntries, int 
         // base solution (the survivors keep controlling), so the v-vs-target heuristic is
         // DEGENERATE here — key the direction on WHICH limit the extracted BUS_TARGET_Q target
         // equals instead (target = limit − loadQ was written by the base activation).
-        limitType[st] = GpuQLimitType::NONE;
+        limitType[scenarioEntry] = GpuQLimitType::NONE;
         if (isEnrolledPilot(pilotSelfReactiveLimitEntry, nReactiveRelocationGroups, i)) {
             // An ENROLLED pilot-self pilot (rotation) keeps its V row an identity while PINNED: the pin's
             // balance rides the carrier (or its own row flipped to a power row once the group lost control),
@@ -74,12 +74,12 @@ __global__ void initReactiveLimitQLimitTypeBatch(int nReactiveLimitEntries, int 
             // base pin — and without it the seeding left the pilot UNPINNED (pilotSelfCarrierSkip = 1, raw q dropped) on a
             // base that had it pinned: every scenario of the [5000,6000) busbar window failed its first
             // linear solve (976 x LINEAR_SOLVE_FAILED).
-            limitType[st] = olfKind >= GpuQLimitType::MIN_Q && olfKind <= GpuQLimitType::MAX_REALISTIC_V ? olfKind : GpuQLimitType::NONE;
+            limitType[scenarioEntry] = olfKind >= GpuQLimitType::MIN_Q && olfKind <= GpuQLimitType::MAX_REALISTIC_V ? olfKind : GpuQLimitType::NONE;
             return;
         }
         if (baseMode[qrow] == GpuRowMode::BUS_TARGET_Q) {
             double tgt = target[qix];
-            limitType[st] = olfKind != GpuQLimitType::NONE ? olfKind
+            limitType[scenarioEntry] = olfKind != GpuQLimitType::NONE ? olfKind
                     : (fabs(tgt - (reactiveLimitBaseMaxQ[i] - reactiveLimitBaseLoadQ[i])) <= fabs(tgt - (reactiveLimitBaseMinQ[i] - reactiveLimitBaseLoadQ[i])) ? GpuQLimitType::MAX_Q : GpuQLimitType::MIN_Q);
         }
         return;
@@ -91,11 +91,11 @@ __global__ void initReactiveLimitQLimitTypeBatch(int nReactiveLimitEntries, int 
     if (baseMode[qrow] == GpuRowMode::EQUATION && (reactiveLimitFlags[i] & GpuReactiveLimitsEntryFlag::STAND_BY_AUTOMATON) == 0) {       // PQ in the base case (a real Q-limit switch —
         // NOT a monitoring SVC standing by: that one seeds UNPINNED so only the VoltageMonitoring
         // orchestrator may activate it, exactly like the CPU's null qLimitType)
-        double vt = reactiveLimitTargetVOf(nReactiveLimitTargetVOverrides, reactiveLimitTargetVOverrideScenarioEntry, reactiveLimitTargetVOverrideValue, secondaryVoltageControlReactiveLimitTargetV, nReactiveLimitEntries, s, i, reactiveLimitTargetV[i]);
-        limitType[st] = olfKind != GpuQLimitType::NONE ? olfKind
-                : ((x[idx] < vt) ? GpuQLimitType::MAX_Q : GpuQLimitType::MIN_Q);                  // v below target ⇒ maxQ pinned; above ⇒ minQ pinned
+        double targetV = reactiveLimitTargetVOf(nReactiveLimitTargetVOverrides, reactiveLimitTargetVOverrideScenarioEntry, reactiveLimitTargetVOverrideValue, secondaryVoltageControlReactiveLimitTargetV, nReactiveLimitEntries, s, i, reactiveLimitTargetV[i]);
+        limitType[scenarioEntry] = olfKind != GpuQLimitType::NONE ? olfKind
+                : ((x[idx] < targetV) ? GpuQLimitType::MAX_Q : GpuQLimitType::MIN_Q);                  // v below target ⇒ maxQ pinned; above ⇒ minQ pinned
     } else {
-        limitType[st] = GpuQLimitType::NONE;  // base PV (incl. a per-scenario gen-override flip)
+        limitType[scenarioEntry] = GpuQLimitType::NONE;  // base PV (incl. a per-scenario gen-override flip)
     }
 }
 
@@ -115,16 +115,16 @@ __global__ void seedReactiveLimitRowModeFromState(int nReactiveLimitEntries, int
     // the continued pin turned its V row into a reactive balance at the frozen target, an island equation OLF does not
     // have, which the first solve then iterated on (rte6515 LINE-3477-2893: 0.0075 MW on every strategy that moves P).
     if (reactiveLimitIslanded != nullptr && reactiveLimitIslanded[(size_t) s * nReactiveLimitEntries + i]) return;
-    char lt = limitType[(size_t) s * nReactiveLimitEntries + i];
+    char qLimitType = limitType[(size_t) s * nReactiveLimitEntries + i];
     // A LOCAL controller pinned in the BASE case that the previous solve released (its exported state says PV): the
     // base activation still has it pinned, and OLF's strategy starts with the bus back on voltage control, exactly as
     // the reactive-limit switch-back left it - the PV form (6 on a cross row) at its voltage target. Left alone it
     // stayed pinned at the base limit: a strategy pair of rte6515 LINE-3273-1812 solved two generators the parent had
     // released at their base Q limits, 0.016 kV at VL-2968 even for a strategy that changes nothing.
-    if (lt == GpuQLimitType::NONE && reactiveLimitBaseQLimitType != nullptr && reactiveLimitBaseQLimitType[i] >= GpuQLimitType::MIN_Q && reactiveLimitBaseQLimitType[i] <= GpuQLimitType::MAX_REALISTIC_V && (reactiveLimitVoltageControlRole == nullptr || reactiveLimitVoltageControlRole[i] == GpuVoltageControlRole::LOCAL)
+    if (qLimitType == GpuQLimitType::NONE && reactiveLimitBaseQLimitType != nullptr && reactiveLimitBaseQLimitType[i] >= GpuQLimitType::MIN_Q && reactiveLimitBaseQLimitType[i] <= GpuQLimitType::MAX_REALISTIC_V && (reactiveLimitVoltageControlRole == nullptr || reactiveLimitVoltageControlRole[i] == GpuVoltageControlRole::LOCAL)
             && !isEnrolledPilot(pilotSelfReactiveLimitEntry, nReactiveRelocationGroups, i)) {
-        size_t st = (size_t) s * nReactiveLimitEntries + i;
-        bool localOv = reactiveLimitLocalOverride != nullptr && reactiveLimitLocalOverride[st];
+        size_t scenarioEntry = (size_t) s * nReactiveLimitEntries + i;
+        bool localOv = reactiveLimitLocalOverride != nullptr && reactiveLimitLocalOverride[scenarioEntry];
         int vrow = reactiveLimitVoltageRow[i];
         int pinRow = vrow;
         if (localOv && reactiveLimitReactivePowerRow != nullptr && reactiveLimitReactivePowerRow[i] >= 0 && reactiveLimitReactivePowerRow[i] != vrow) {
@@ -136,7 +136,7 @@ __global__ void seedReactiveLimitRowModeFromState(int nReactiveLimitEntries, int
         size_t pidx = (size_t) s * n + pinRow;
         if (mode[pidx] == GpuRowMode::EQUATION || mode[pidx] == GpuRowMode::BUS_TARGET_Q) {  // still holding the base pin
             mode[pidx] = pinRow != vrow ? GpuRowMode::CROSS_FIXED_VARIABLE : GpuRowMode::FIXED_VARIABLE;
-            target[pidx] = localOv ? reactiveLimitLocalTargetV[st] : reactiveLimitTargetVOf(nReactiveLimitTargetVOverrides, reactiveLimitTargetVOverrideScenarioEntry, reactiveLimitTargetVOverrideValue, secondaryVoltageControlReactiveLimitTargetV, nReactiveLimitEntries, s, i, reactiveLimitTargetV[i]);
+            target[pidx] = localOv ? reactiveLimitLocalTargetV[scenarioEntry] : reactiveLimitTargetVOf(nReactiveLimitTargetVOverrides, reactiveLimitTargetVOverrideScenarioEntry, reactiveLimitTargetVOverrideValue, secondaryVoltageControlReactiveLimitTargetV, nReactiveLimitEntries, s, i, reactiveLimitTargetV[i]);
         }
         return;
     }
@@ -144,7 +144,7 @@ __global__ void seedReactiveLimitRowModeFromState(int nReactiveLimitEntries, int
     // form - the DISTR_Q share (mode 1), whose target the DISTR_Q pass recomputes, or a self-controlling pilot's voltage
     // identity (mode 0). Left pinned at the base limit, its group shared the pilot's reactive balance one member short
     // (network.xiidm LLJP, the member on bus 5779: mode 4 at -0.2954 where the parent had released it, 5.46 kV).
-    if (lt == GpuQLimitType::NONE && reactiveLimitBaseQLimitType != nullptr && reactiveLimitBaseQLimitType[i] >= GpuQLimitType::MIN_Q && reactiveLimitBaseQLimitType[i] <= GpuQLimitType::MAX_REALISTIC_V && reactiveLimitVoltageControlRole != nullptr && reactiveLimitVoltageControlRole[i] != GpuVoltageControlRole::LOCAL
+    if (qLimitType == GpuQLimitType::NONE && reactiveLimitBaseQLimitType != nullptr && reactiveLimitBaseQLimitType[i] >= GpuQLimitType::MIN_Q && reactiveLimitBaseQLimitType[i] <= GpuQLimitType::MAX_REALISTIC_V && reactiveLimitVoltageControlRole != nullptr && reactiveLimitVoltageControlRole[i] != GpuVoltageControlRole::LOCAL
             && !isEnrolledPilot(pilotSelfReactiveLimitEntry, nReactiveRelocationGroups, i)) {
         int vrow = reactiveLimitVoltageRow[i];
         int qrow = reactiveLimitReactivePowerRow != nullptr && reactiveLimitReactivePowerRow[i] >= 0 && reactiveLimitReactivePowerRow[i] != vrow && mode[(size_t) s * n + reactiveLimitReactivePowerRow[i]] != GpuRowMode::FIXED_VARIABLE
@@ -158,7 +158,7 @@ __global__ void seedReactiveLimitRowModeFromState(int nReactiveLimitEntries, int
         return;
     }
     if (isEnrolledPilot(pilotSelfReactiveLimitEntry, nReactiveRelocationGroups, i)) return;           // its pin never lives on its own V row (rotation)
-    if (lt != GpuQLimitType::NONE) {
+    if (qLimitType != GpuQLimitType::NONE) {
         // the pin's row (see dReactiveLimitReactivePowerRow), with the relocation's per-scenario diversion: mode 0 at the relocated row
         // means its coupler is open this scenario and the equations are back on the bus's own rows
         int seedRow = reactiveLimitReactivePowerRow != nullptr ? reactiveLimitReactivePowerRow[i] : reactiveLimitVoltageRow[i];
@@ -182,7 +182,7 @@ __global__ void seedReactiveLimitRowModeFromState(int nReactiveLimitEntries, int
         // target Q from the parent's end, which is not the current limit when that limit moved by less than the
         // re-freeze tolerance (rte6515 LINE-3273-1812, VL-6095: 0.7518298 frozen, the curve at 0.7518918)
         double pin = pinTargetIn != nullptr ? pinTargetIn[(size_t) s * nReactiveLimitEntries + i] : NAN;
-        target[idx] = !isnan(pin) ? pin : (lt == GpuQLimitType::MIN_Q ? reactiveLimitMinQ[li] : reactiveLimitMaxQ[li]) - reactiveLimitLoadQ[li];
+        target[idx] = !isnan(pin) ? pin : (qLimitType == GpuQLimitType::MIN_Q ? reactiveLimitMinQ[li] : reactiveLimitMaxQ[li]) - reactiveLimitLoadQ[li];
     }
 }
 
@@ -196,18 +196,18 @@ __global__ void exportReactiveLimitTargetQ(int nReactiveLimitEntries, int nScena
     if (tid >= nReactiveLimitEntries * nScenarios) return;
     int i = tid % nReactiveLimitEntries;
     int s = tid / nReactiveLimitEntries;
-    char lt = limitType[(size_t) s * nReactiveLimitEntries + i];
+    char qLimitType = limitType[(size_t) s * nReactiveLimitEntries + i];
     // an enrolled pilot's pin is its group's flip: the flipped row's target when the group is flipped (what a
     // continued solve's seed flip restores), nothing otherwise (its balance rides a carrier, never its own rows)
     for (int g = 0; pilotSelfReactiveLimitEntry != nullptr && g < nReactiveRelocationGroups; g++) {
         if (pilotSelfReactiveLimitEntry[g] != i) continue;
-        bool flipped = lt != GpuQLimitType::NONE && pilotTargetVDeactivated != nullptr && pilotTargetVDeactivated[(size_t) s * nReactiveRelocationGroups + g] && (reactiveRelocationDependentBaseGroup == nullptr || reactiveRelocationDependentBaseGroup[g] < 0);
+        bool flipped = qLimitType != GpuQLimitType::NONE && pilotTargetVDeactivated != nullptr && pilotTargetVDeactivated[(size_t) s * nReactiveRelocationGroups + g] && (reactiveRelocationDependentBaseGroup == nullptr || reactiveRelocationDependentBaseGroup[g] < 0);
         out[tid] = flipped ? target[(size_t) s * n + reactiveRelocationCandidateRows[reactiveRelocationGroupStart[g]]] : NAN;
         return;
     }
     // an islanded controller's row holds its bus's frozen value, not a Q: a pair that brings the bus back seeds the
     // pin from its limit, the target the bus kept while it was out
-    if (lt == GpuQLimitType::NONE || (reactiveLimitIslanded != nullptr && reactiveLimitIslanded[(size_t) s * nReactiveLimitEntries + i])) {
+    if (qLimitType == GpuQLimitType::NONE || (reactiveLimitIslanded != nullptr && reactiveLimitIslanded[(size_t) s * nReactiveLimitEntries + i])) {
         out[tid] = NAN;
         return;
     }

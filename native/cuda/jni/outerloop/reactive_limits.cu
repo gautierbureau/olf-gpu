@@ -81,14 +81,14 @@ __global__ void reactiveLimitsBatch(const double* secondaryVoltageControlReactiv
     // that DECIDED something, for every scenario - the whole batch's decision set in ~40 records per
     // scenario, which is what two runs have to be compared on when the contingency that flips is not
     // known in advance.
-    auto putReactiveLimitsDecision = [&](int act, double q, double mn, double mx, double vOwn, double cmpV, double vt) {
+    auto putReactiveLimitsDecision = [&](int decision, double q, double minQ, double maxQ, double vOwn, double cmpV, double targetV) {
         if (reactiveLimitsDecisionLog == nullptr) return;
-        if (reactiveLimitsDecisionLogScenario == -2 ? act == 0 : s != reactiveLimitsDecisionLogScenario) return;
+        if (reactiveLimitsDecisionLogScenario == -2 ? decision == 0 : s != reactiveLimitsDecisionLogScenario) return;
         int k = atomicAdd(reactiveLimitsDecisionLogCount, 1);
         if (k >= REACTIVE_LIMITS_DECISION_LOG_CAPACITY) return;
         double* r = reactiveLimitsDecisionLog + (size_t) k * REACTIVE_LIMITS_DECISION_LOG_WIDTH;
-        r[0] = passId; r[1] = i; r[2] = act; r[3] = q; r[4] = mn; r[5] = mx;
-        r[6] = vOwn; r[7] = cmpV; r[8] = vt; r[9] = limitType[(size_t) s * nReactiveLimitEntries + i];
+        r[0] = passId; r[1] = i; r[2] = decision; r[3] = q; r[4] = minQ; r[5] = maxQ;
+        r[6] = vOwn; r[7] = cmpV; r[8] = targetV; r[9] = limitType[(size_t) s * nReactiveLimitEntries + i];
         r[10] = switchCount[(size_t) s * nReactiveLimitEntries + i]; r[11] = s;
     };
     // A RE-HOMED voltage control (GpuBatchQualification.reHomedControls): this scenario the bus is a plain PV
@@ -187,7 +187,7 @@ __global__ void reactiveLimitsBatch(const double* secondaryVoltageControlReactiv
         } else {                                            // pinned — switch-back tests the PILOT
             // a controller re-homed onto a NEW pilot this scenario reads that pilot's voltage (reactiveLimitComparedVoltageRowOverride)
             double v = x[(size_t) s * n + (reactiveLimitComparedVoltageRowOverride != nullptr && reactiveLimitComparedVoltageRowOverride[rst] >= 0 ? reactiveLimitComparedVoltageRowOverride[rst] : reactiveLimitComparedVoltageRow[i])];
-            double vt = reactiveLimitTargetVOf(nReactiveLimitTargetVOverrides, reactiveLimitTargetVOverrideScenarioEntry, reactiveLimitTargetVOverrideValue, secondaryVoltageControlReactiveLimitTargetV, nReactiveLimitEntries, s, i, reactiveLimitTargetV[i]);
+            double targetV = reactiveLimitTargetVOf(nReactiveLimitTargetVOverrides, reactiveLimitTargetVOverrideScenarioEntry, reactiveLimitTargetVOverrideValue, secondaryVoltageControlReactiveLimitTargetV, nReactiveLimitEntries, s, i, reactiveLimitTargetV[i]);
             bool minPin = isMinLimit(limitType[rst]);
             // OLF's checkPqBusWithQLimitType PROPOSES the unpin whenever the pilot's voltage asks for
             // it; the per-bus cap (maxPqPvSwitch) then blocks the switch itself in switchPqPv. Only
@@ -197,7 +197,7 @@ __global__ void reactiveLimitsBatch(const double* secondaryVoltageControlReactiv
             // network.xiidm / GBMK, CQEM_0 and CQEM_5 kept -0.181175517 / -0.184950765 where OLF had
             // re-frozen at -0.181173957 / -0.184949017 (a reactive-capability curve moving with the
             // distributed slack), 2.079e-05 kV network-wide.
-            bool wantsBack = (!minPin && v > vt) || (minPin && v < vt);
+            bool wantsBack = (!minPin && v > targetV) || (minPin && v < targetV);
             bool back = wantsBack && switchCount[rst] < maxSwitch;
             if (back && reactiveLimitPqPvSwitchForbidden != nullptr && reactiveLimitPqPvSwitchForbidden[rst]) {
                 // a pinned member of a re-homed cluster with no enabled controller: OLF would re-activate the
@@ -249,8 +249,8 @@ __global__ void reactiveLimitsBatch(const double* secondaryVoltageControlReactiv
     // worst such difference on the whole busbar scope.
     size_t qIdx = (reactiveLimitReactivePowerRow != nullptr && reactiveLimitReactivePowerRow[i] >= 0 && reactiveLimitReactivePowerRow[i] != vrow)
             ? (size_t) s * n + reactiveLimitReactivePowerRow[i] : idx;
-    size_t st = (size_t) s * nReactiveLimitEntries + i;
-    size_t li = perScenarioReactiveLimits ? st : (size_t) i;                 // curve limits are per (scenario, entry)
+    size_t scenarioEntry = (size_t) s * nReactiveLimitEntries + i;
+    size_t li = perScenarioReactiveLimits ? scenarioEntry : (size_t) i;                 // curve limits are per (scenario, entry)
     bool slopeRow = rowSlope[vrow] != 0;                    // SLOPE-SVC bus: its PV form is row mode 2
     double dv2 = svcLim ? x[idx] * x[idx] - reactiveLimitBaseVSquared[i] : 0.0;   // see the remote branch: NaN base v² otherwise
     double liMin = reactiveLimitMinQ[li] + (svcLim ? svcBMin * dv2 : 0.0);
@@ -279,7 +279,7 @@ __global__ void reactiveLimitsBatch(const double* secondaryVoltageControlReactiv
     // back to PV at the first reactive-limit pass, the device never tested it, and CQEM_0 then pinned a pass late
     // (the one contingency of 24,376 whose outer-loop sequence differed from the 1-thread CPU's).
     if (liMin >= liMax && (reactiveLimitFlags == nullptr || (reactiveLimitFlags[i] & GpuReactiveLimitsEntryFlag::NOT_CONTROLLER_ELEMENT) != 0)) {
-        putReactiveLimitsDecision(passSwitched[st], qBuf[qIdx] + reactiveLimitLoadQ[li], liMin, liMax, x[idx], x[idx],
+        putReactiveLimitsDecision(passSwitched[scenarioEntry], qBuf[qIdx] + reactiveLimitLoadQ[li], liMin, liMax, x[idx], x[idx],
                  reactiveLimitTargetVOf(nReactiveLimitTargetVOverrides, reactiveLimitTargetVOverrideScenarioEntry, reactiveLimitTargetVOverrideValue, secondaryVoltageControlReactiveLimitTargetV, nReactiveLimitEntries, s, i, reactiveLimitTargetV[i]));
         return;
     }
@@ -294,61 +294,61 @@ __global__ void reactiveLimitsBatch(const double* secondaryVoltageControlReactiv
         }
     }
     const bool crossRow = pinIdx != idx;
-    if ((mode[pinIdx] == GpuRowMode::FIXED_VARIABLE || mode[pinIdx] == GpuRowMode::BUS_TARGET_V_WITH_SLOPE || mode[pinIdx] == GpuRowMode::CROSS_FIXED_VARIABLE) && limitType[st] == GpuQLimitType::NONE) {  // currently PV — check the reactive limits
+    if ((mode[pinIdx] == GpuRowMode::FIXED_VARIABLE || mode[pinIdx] == GpuRowMode::BUS_TARGET_V_WITH_SLOPE || mode[pinIdx] == GpuRowMode::CROSS_FIXED_VARIABLE) && limitType[scenarioEntry] == GpuQLimitType::NONE) {  // currently PV — check the reactive limits
         double q = qBuf[qIdx] + reactiveLimitLoadQ[li];
         if (q < liMin - tol) {
-            savedTarget[st] = target[pinIdx];                // remember the row target for the switch-back
-            savedMode[st] = static_cast<char>(mode[pinIdx]);   // and the PV form (0, 2 for a slope SVC, 6 cross)
+            savedTarget[scenarioEntry] = target[pinIdx];                // remember the row target for the switch-back
+            savedMode[scenarioEntry] = static_cast<char>(mode[pinIdx]);   // and the PV form (0, 2 for a slope SVC, 6 cross)
             mode[pinIdx] = localOv ? GpuRowMode::BUS_TARGET_Q : GpuRowMode::EQUATION;             // a re-homed member: own Q through its ALTERNATE dest
             target[pinIdx] = liMin - reactiveLimitLoadQ[li];
-            limitType[st] = GpuQLimitType::MIN_Q;
-            switchCount[st]++;
+            limitType[scenarioEntry] = GpuQLimitType::MIN_Q;
+            switchCount[scenarioEntry]++;
             switched[s] = 1;
-            passSwitched[st] = 1;
+            passSwitched[scenarioEntry] = 1;
         } else if (q > liMax + tol) {
-            savedTarget[st] = target[pinIdx];
-            savedMode[st] = static_cast<char>(mode[pinIdx]);
+            savedTarget[scenarioEntry] = target[pinIdx];
+            savedMode[scenarioEntry] = static_cast<char>(mode[pinIdx]);
             mode[pinIdx] = localOv ? GpuRowMode::BUS_TARGET_Q : GpuRowMode::EQUATION;             // a re-homed member: own Q through its ALTERNATE dest
             target[pinIdx] = liMax - reactiveLimitLoadQ[li];
-            limitType[st] = GpuQLimitType::MAX_Q;
-            switchCount[st]++;
+            limitType[scenarioEntry] = GpuQLimitType::MAX_Q;
+            switchCount[scenarioEntry]++;
             switched[s] = 1;
-            passSwitched[st] = 1;
+            passSwitched[scenarioEntry] = 1;
         }
-    } else if (limitType[st] != GpuQLimitType::NONE) {  // pinned at a limit — check switchback
+    } else if (limitType[scenarioEntry] != GpuQLimitType::NONE) {  // pinned at a limit — check switchback
         double v = x[idx];
-        double vt = localOv ? reactiveLimitLocalTargetV[(size_t) s * nReactiveLimitEntries + i]
+        double targetV = localOv ? reactiveLimitLocalTargetV[(size_t) s * nReactiveLimitEntries + i]
                   : reactiveLimitTargetVOf(nReactiveLimitTargetVOverrides, reactiveLimitTargetVOverrideScenarioEntry, reactiveLimitTargetVOverrideValue, secondaryVoltageControlReactiveLimitTargetV, nReactiveLimitEntries, s, i, reactiveLimitTargetV[i]);
         // OLF never back-switches a slope-SVC bus: checkPqBus runs with
         // canSwitchToPv = !bus.hasGeneratorsWithSlope() ("we don't support switching PQ to PV
         // for bus with one controller with slope") — once pinned, a slope row stays PQ.
-        bool maxPin = isMaxLimit(limitType[st]);
-        bool minPin = isMinLimit(limitType[st]);
+        bool maxPin = isMaxLimit(limitType[scenarioEntry]);
+        bool minPin = isMinLimit(limitType[scenarioEntry]);
         // the cap bounds the SWITCH, not the limit refresh below (see the remote branch)
         bool wantsBack = !slopeRow
-                && ((maxPin && v > vt)                               // maxQ-pinned but v above target
-                 || (minPin && v < vt));                             // minQ-pinned but v below target
-        bool back = wantsBack && switchCount[st] < maxSwitch;
+                && ((maxPin && v > targetV)                               // maxQ-pinned but v above target
+                 || (minPin && v < targetV));                             // minQ-pinned but v below target
+        bool back = wantsBack && switchCount[scenarioEntry] < maxSwitch;
         if (back) {
             mode[pinIdx] = crossRow ? GpuRowMode::CROSS_FIXED_VARIABLE : GpuRowMode::FIXED_VARIABLE;               // PQ → PV: resume voltage control (cross identity stays cross)
-            target[pinIdx] = vt;
-            limitType[st] = GpuQLimitType::NONE;
+            target[pinIdx] = targetV;
+            limitType[scenarioEntry] = GpuQLimitType::NONE;
             switched[s] = 1;
-            passSwitched[st] = 2;
-        } else if (!wantsBack && (perScenarioReactiveLimits || svcLim) && (limitType[st] == GpuQLimitType::MIN_Q || limitType[st] == GpuQLimitType::MAX_Q)) {  // a realistic-V freeze keeps its target Q
+            passSwitched[scenarioEntry] = 2;
+        } else if (!wantsBack && (perScenarioReactiveLimits || svcLim) && (limitType[scenarioEntry] == GpuQLimitType::MIN_Q || limitType[scenarioEntry] == GpuQLimitType::MAX_Q)) {  // a realistic-V freeze keeps its target Q
             // Q-limit UPDATE while pinned (OLF checkPqBusWithQLimitType): a CURVE limit that moved
             // (DS moved the gen's P) or an SVC limit that moved (B*v^2 at the live V) re-freezes
             // the pinned Q at the NEW limit when it drifted by more than the mismatch tol.
             // Unreachable with static limits — gated on the channels.
-            double lim = limitType[st] == GpuQLimitType::MIN_Q ? liMin : liMax;
+            double lim = limitType[scenarioEntry] == GpuQLimitType::MIN_Q ? liMin : liMax;
             if (fabs(lim - (target[pinIdx] + reactiveLimitLoadQ[li])) > tol) {
                 target[pinIdx] = lim - reactiveLimitLoadQ[li];
                 switched[s] = 1;
-                passSwitched[st] = 3;
+                passSwitched[scenarioEntry] = 3;
             }
         }
     }
-    putReactiveLimitsDecision(passSwitched[st], qBuf[qIdx] + reactiveLimitLoadQ[li], liMin, liMax, x[idx], x[idx],
+    putReactiveLimitsDecision(passSwitched[scenarioEntry], qBuf[qIdx] + reactiveLimitLoadQ[li], liMin, liMax, x[idx], x[idx],
              reactiveLimitTargetVOf(nReactiveLimitTargetVOverrides, reactiveLimitTargetVOverrideScenarioEntry, reactiveLimitTargetVOverrideValue, secondaryVoltageControlReactiveLimitTargetV, nReactiveLimitEntries, s, i, reactiveLimitTargetV[i]));
 }
 
@@ -400,11 +400,11 @@ __global__ void reactiveLimitsForcedPvBatch(int nReactiveLimitEntries, int nScen
     double bestP = -1e300;
     int bestId = 0x7fffffff;
     for (int i = 0; i < nReactiveLimitEntries; i++) {
-        size_t st = (size_t) s * nReactiveLimitEntries + i;
-        if (reactiveLimitIslanded != nullptr && reactiveLimitIslanded[st]) continue;   // not a controller in this component
+        size_t scenarioEntry = (size_t) s * nReactiveLimitEntries + i;
+        if (reactiveLimitIslanded != nullptr && reactiveLimitIslanded[scenarioEntry]) continue;   // not a controller in this component
         bool remote = reactiveLimitVoltageControlRole != nullptr && reactiveLimitVoltageControlRole[i] != GpuVoltageControlRole::LOCAL;
         int m = mode[(size_t) s * n + reactiveLimitVoltageRow[i]];
-        if (passSwitched[st] == 1) {
+        if (passSwitched[scenarioEntry] == 1) {
             cand++;
             double v = nomV[i];
             double p = pRow[i] >= 0 ? target[(size_t) s * n + pRow[i]] : staticP[i];
@@ -416,20 +416,20 @@ __global__ void reactiveLimitsForcedPvBatch(int nReactiveLimitEntries, int nScen
                 bestP = p;
                 bestId = idRank[i];
             }
-        } else if (limitType[st] == GpuQLimitType::NONE && (reactiveLimitVoltageControlRole != nullptr && reactiveLimitVoltageControlRole[i] == GpuVoltageControlRole::PILOT_SELF ? m == GpuRowMode::FIXED_VARIABLE
+        } else if (limitType[scenarioEntry] == GpuQLimitType::NONE && (reactiveLimitVoltageControlRole != nullptr && reactiveLimitVoltageControlRole[i] == GpuVoltageControlRole::PILOT_SELF ? m == GpuRowMode::FIXED_VARIABLE
                                           : remote ? m == GpuRowMode::EQUATION : (m == GpuRowMode::FIXED_VARIABLE || m == GpuRowMode::BUS_TARGET_V_WITH_SLOPE))) {
             remaining++;                                     // still PV after this pass
         }
     }
     if (cand == 0 || remaining > 0 || best < 0) return;
-    size_t st = (size_t) s * nReactiveLimitEntries + best;
+    size_t scenarioEntry = (size_t) s * nReactiveLimitEntries + best;
     size_t idx = (size_t) s * n + reactiveLimitVoltageRow[best];
     mode[idx] = (reactiveLimitVoltageControlRole != nullptr && reactiveLimitVoltageControlRole[best] == GpuVoltageControlRole::PILOT_SELF) ? 0
-              : (reactiveLimitVoltageControlRole != nullptr && reactiveLimitVoltageControlRole[best] != GpuVoltageControlRole::LOCAL) ? 1 : savedMode[st];
-    target[idx] = savedTarget[st];
-    limitType[st] = GpuQLimitType::NONE;
-    switchCount[st]--;
-    passSwitched[st] = 0;
+              : (reactiveLimitVoltageControlRole != nullptr && reactiveLimitVoltageControlRole[best] != GpuVoltageControlRole::LOCAL) ? 1 : savedMode[scenarioEntry];
+    target[idx] = savedTarget[scenarioEntry];
+    limitType[scenarioEntry] = GpuQLimitType::NONE;
+    switchCount[scenarioEntry]--;
+    passSwitched[scenarioEntry] = 0;
     char any = 0;
     for (int i = 0; i < nReactiveLimitEntries && !any; i++) {
         any = passSwitched[(size_t) s * nReactiveLimitEntries + i] != 0;
@@ -489,17 +489,17 @@ __global__ void reactiveLimitsPqPvSwitchBatch(int nPairs, int nS, int n, int nRe
     int s = pairs[2 * k];
     int i = pairs[2 * k + 1];
     if (s < 0 || s >= nS || i < 0 || i >= nReactiveLimitEntries) return;
-    size_t st = (size_t) s * nReactiveLimitEntries + i;
-    if (limitType[st] == GpuQLimitType::NONE) return;  // not pinned: nothing to give back
+    size_t scenarioEntry = (size_t) s * nReactiveLimitEntries + i;
+    if (limitType[scenarioEntry] == GpuQLimitType::NONE) return;  // not pinned: nothing to give back
     // A member FROZEN by the generator voltage control manager is not a reactive-limit pin: giving it
     // back would restore a V identity on a row that holds the group's DISTR_Q share, and would undo a
     // decision the transformer phase owns and will undo itself at COMPLETE.
-    if (limitType[st] == GpuQLimitType::FROZEN) return;
+    if (limitType[scenarioEntry] == GpuQLimitType::FROZEN) return;
     size_t idx = (size_t) s * n + reactiveLimitVoltageRow[i];
-    char sm = savedMode[st];
+    char sm = savedMode[scenarioEntry];
     mode[idx] = (sm == GpuRowMode::BUS_TARGET_V_WITH_SLOPE) ? GpuRowMode::BUS_TARGET_V_WITH_SLOPE : GpuRowMode::FIXED_VARIABLE;                          // the PV form saved at pin time (2 = slope SVC)
     target[idx] = newTarget[k];
-    limitType[st] = GpuQLimitType::NONE;
+    limitType[scenarioEntry] = GpuQLimitType::NONE;
 }
 
 // One check of ReactiveLimitsOuterLoop on every live scenario (GpuOuterLoopKind::REACTIVE_LIMITS): the curve limits at the current

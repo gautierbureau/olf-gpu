@@ -118,8 +118,8 @@ final class GpuBatchPrecomputer {
             // the device extracted its structure on the base tree, and every coupler OLF has out of its
             // tree when it reaches a contingency must be pinned there, ALL of them, not one per network.
             ZeroImpedanceTreeReplay ziTree = new ZeroImpedanceTreeReplay(net);
-            for (PropagatedContingency pc : contingencies) {
-                addBatchScenarios(net, network, pc, context, ziTree, batch, strategies, config, actions);
+            for (PropagatedContingency propagatedContingency : contingencies) {
+                addBatchScenarios(net, network, propagatedContingency, context, ziTree, batch, strategies, config, actions);
             }
             if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
                 System.err.println("PRECOMP_BATCH size=" + batch.size());
@@ -240,41 +240,41 @@ final class GpuBatchPrecomputer {
     /** Translate one propagated contingency into the batch: its BatchContingency (branches, injections, shunt
      *  shifts, HVDCs, side-opens, coupler outages, spanning tree) and one entry per operator strategy the device
      *  can solve after it, or the census entry that names why it stays on the CPU. */
-    private static void addBatchScenarios(final LfNetwork net, final Network network, final PropagatedContingency pc,
+    private static void addBatchScenarios(final LfNetwork net, final Network network, final PropagatedContingency propagatedContingency,
                                           final AcLoadFlowContext context, final ZeroImpedanceTreeReplay ziTree,
                                           final List<BatchContingency> batch,
                                           final List<OperatorStrategy> strategies, final BatchConfig config,
                                           final List<Action> actions) {
-        java.util.Set<String> lostLfBusIds = GpuContingencyMapper.lostLfBusIds(net, network, pc);
-        List<LfGenerator> gens = pc.getGeneratorIdsToLose().isEmpty() ? List.of() : GpuContingencyMapper.generatorOutages(net,
-                                                          pc, lostLfBusIds);
+        java.util.Set<String> lostLfBusIds = GpuContingencyMapper.lostLfBusIds(net, network, propagatedContingency);
+        List<LfGenerator> gens = propagatedContingency.getGeneratorIdsToLose().isEmpty() ? List.of() : GpuContingencyMapper.generatorOutages(net,
+                                                          propagatedContingency, lostLfBusIds);
         // ZIP/voltage-dependent load model: per-scenario load removal is not a target override — CPU.
         boolean loadsBatchable = !context.getParameters().getNetworkParameters().isUseLoadModel();
         List<LoadLoss> loads =
-                pc.getLoadIdsToLose().isEmpty() ? List.of() : (loadsBatchable ? GpuContingencyMapper.loadOutages(network, net, pc, lostLfBusIds) : null);
+                propagatedContingency.getLoadIdsToLose().isEmpty() ? List.of() : (loadsBatchable ? GpuContingencyMapper.loadOutages(network, net, propagatedContingency, lostLfBusIds) : null);
         // Node-breaker contingency PROPAGATION opens the target's breakers alongside it, and
         // switches are zero-impedance LfBranches — split them out so the impedant part still
         // meets the <=2-branch mask rule; the switch part becomes a per-scenario zero-impedance-element
         // outage (validator: dead-stub shape only).
-        List<LfBranch> zeroImpedanceBranchOutages = pc.getBranchIdsToOpen().keySet().stream()
+        List<LfBranch> zeroImpedanceBranchOutages = propagatedContingency.getBranchIdsToOpen().keySet().stream()
                 .map(net::getBranchById).filter(Objects::nonNull)
                 .filter(b -> b.isZeroImpedance(com.powsybl.openloadflow.network.LoadFlowModel.AC))
                 .toList();
         // The tree OLF SOLVES this contingency on: the one it reached it with, re-elected by this
         // contingency's own disabled couplers (opened, or sitting on a lost bus).
-        List<LfBranch> nonSpanningTreeBranches = ziTree.applyAndRevert(pc);
+        List<LfBranch> nonSpanningTreeBranches = ziTree.applyAndRevert(propagatedContingency);
         if (System.getenv("OLF_GPU_ZITREE_TRACE") != null && nonSpanningTreeBranches.size() > 40) {
-            System.err.println("ZITREE_REPLAY_WIDE ctg=" + pc.getContingency().getId() + " nonTree=" + nonSpanningTreeBranches.size());
+            System.err.println("ZITREE_REPLAY_WIDE ctg=" + propagatedContingency.getContingency().getId() + " nonTree=" + nonSpanningTreeBranches.size());
         }
-        List<LfBranch> branches = pc.getBranchIdsToOpen().isEmpty() ? List.of()
-                : GpuContingencyMapper.closedBranchOutages(net, pc, zeroImpedanceBranchOutages);
+        List<LfBranch> branches = propagatedContingency.getBranchIdsToOpen().isEmpty() ? List.of()
+                : GpuContingencyMapper.closedBranchOutages(net, propagatedContingency, zeroImpedanceBranchOutages);
         List<BatchContingency.SideOpen> sideOpens =
-                pc.getBranchIdsToOpen().isEmpty() && pc.getBusIdsToLose().isEmpty() ? List.of()
-                : GpuContingencyMapper.sideOpens(net, pc);
+                propagatedContingency.getBranchIdsToOpen().isEmpty() && propagatedContingency.getBusIdsToLose().isEmpty() ? List.of()
+                : GpuContingencyMapper.sideOpens(net, propagatedContingency);
         // Shunt section shifts (both directions; full disconnection of any aggregate = minus the
         // section admittance): per-scenario admittance overrides, combinable with everything.
         List<ShuntShift> shifts =
-                pc.getShuntIdsToShift().isEmpty() ? List.of() : GpuContingencyMapper.shuntShifts(net, pc);
+                propagatedContingency.getShuntIdsToShift().isEmpty() ? List.of() : GpuContingencyMapper.shuntShifts(net, propagatedContingency);
         // A lost static var compensator takes its stand-by automaton shunt with it (OLF's
         // processLostGenerators), and that shunt is NOT in the propagation's shift list.
         if (shifts != null && gens != null && !gens.isEmpty()) {
@@ -285,9 +285,9 @@ final class GpuBatchPrecomputer {
         }
         // AC-emulation HVDC outage: the hv element's per-scenario disabled bit (the stations'
         // injection losses ride the generator channel above); unresolvable/setpoint -> CPU.
-        List<com.powsybl.openloadflow.network.LfHvdc> hvdcs = GpuContingencyMapper.hvdcOutages(net, pc);
+        List<com.powsybl.openloadflow.network.LfHvdc> hvdcs = GpuContingencyMapper.hvdcOutages(net, propagatedContingency);
         if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {
-            System.err.println("QUALIFY_TRACE compose " + pc.getContingency().getId()
+            System.err.println("QUALIFY_TRACE compose " + propagatedContingency.getContingency().getId()
                     + " branches=" + (branches == null ? "null" : branches.size())
                     + " gens=" + (gens == null ? "null" : gens.size())
                     + " loads=" + (loads == null ? "null" : loads.size())
@@ -302,23 +302,23 @@ final class GpuBatchPrecomputer {
             // propagated. A busbar outage loses its loads through the propagation rather than
             // by naming them, and "loads=1" does not say whether the bus, the active part or
             // the reactive part is the one that differs.
-            for (var ll : loads == null ? List.<LoadLoss>of() : loads) {
+            for (var loadLoss : loads == null ? List.<LoadLoss>of() : loads) {
                 System.err.printf("QUALIFY_TRACE   load bus=%s p=%.9f q=%.9f%n",
-                        ll.bus() == null ? "?" : ll.bus().getId(), ll.p(), ll.q());
+                        loadLoss.bus() == null ? "?" : loadLoss.bus().getId(), loadLoss.p(), loadLoss.q());
             }
             // Each shunt shift as the DEVICE will apply it (dg/db added to the packed g/b) next to
             // the RAW AdmittanceShift the propagation carries and the shunt's CURRENT admittance:
             // "shifts=1" does not say whether the two arms remove the same susceptance.
-            for (var sh : shifts == null ? List.<ShuntShift>of() : shifts) {
+            for (var shift : shifts == null ? List.<ShuntShift>of() : shifts) {
                 System.err.printf("QUALIFY_TRACE   shunt=%s dg=%.9f db=%.9f baseG=%.9f baseB=%.9f bus=%s%n",
-                        sh.shunt().getId(), sh.dg(), sh.db(), sh.shunt().getG(), sh.shunt().getB(),
+                        shift.shunt().getId(), shift.dg(), shift.db(), shift.shunt().getG(), shift.shunt().getB(),
                         "n/a");
             }
-            for (var e : pc.getShuntIdsToShift().entrySet()) {
+            for (var e : propagatedContingency.getShuntIdsToShift().entrySet()) {
                 System.err.printf("QUALIFY_TRACE   olfShift shunt=%s g=%.9f b=%.9f%n",
                         e.getKey(), e.getValue().getG(), e.getValue().getB());
             }
-            for (var e : pc.getLoadIdsToLose().entrySet()) {
+            for (var e : propagatedContingency.getLoadIdsToLose().entrySet()) {
                 System.err.printf("QUALIFY_TRACE   olfShift load=%s active=%.9f variableActive=%.9f"
                         + " reactive=%.9f%n", e.getKey(), e.getValue().getActive(),
                         e.getValue().getVariableActive(), e.getValue().getReactive());
@@ -327,32 +327,32 @@ final class GpuBatchPrecomputer {
             // r1 != 1 or a1 != 0 means danglingClosedBranchParameterRow takes its TRANSFORMER path, where r1^2
             // multiplies OLF's whole open-side-2 bracket and side-1-open uses the constant R2 —
             // analytically verified but, until something prints this, never known to have run.
-            for (var so : sideOpens == null ? List.<BatchContingency.SideOpen>of() : sideOpens) {
-                var pi = so.branch().getPiModel();
-                var vcO = so.branch().getVoltageControl();
+            for (var sideOpen : sideOpens == null ? List.<BatchContingency.SideOpen>of() : sideOpens) {
+                var pi = sideOpen.branch().getPiModel();
+                var transformerVoltageControl = sideOpen.branch().getVoltageControl();
                 System.err.printf("QUALIFY_TRACE   sideOpen %s side=%d r1=%.9f a1=%.9f y=%.6e ksi=%.6e"
                                 + " vcCtl=%b vc=%s members=%d%n",
-                        so.branch().getId(), so.side(), pi.getR1(), pi.getA1(), pi.getY(), pi.getKsi(),
-                        so.branch().isVoltageController(),
-                        vcO.map(vc -> vc.getControlledBus().getId()).orElse("-"),
-                        vcO.map(vc -> vc.getMergedControllerElements().size()).orElse(0));
+                        sideOpen.branch().getId(), sideOpen.side(), pi.getR1(), pi.getA1(), pi.getY(), pi.getKsi(),
+                        sideOpen.branch().isVoltageController(),
+                        transformerVoltageControl.map(voltageControl -> voltageControl.getControlledBus().getId()).orElse("-"),
+                        transformerVoltageControl.map(voltageControl -> voltageControl.getMergedControllerElements().size()).orElse(0));
             }
-            for (var zi : zeroImpedanceBranchOutages) {
-                LfBranch br = net.getBranchById(zi.toString());
-                if (br == null) {
-                    System.err.println("QUALIFY_TRACE   zi " + zi);
+            for (var zeroImpedanceBranch : zeroImpedanceBranchOutages) {
+                LfBranch branch = net.getBranchById(zeroImpedanceBranch.toString());
+                if (branch == null) {
+                    System.err.println("QUALIFY_TRACE   zi " + zeroImpedanceBranch);
                 } else {
-                    System.err.printf("QUALIFY_TRACE   zi %s: b1=%s b2=%s spanningTree=%b%n", br.getId(),
-                            br.getBus1() == null ? "?" : br.getBus1().getId(),
-                            br.getBus2() == null ? "?" : br.getBus2().getId(),
-                            br.isSpanningTreeEdge(com.powsybl.openloadflow.network.LoadFlowModel.AC));
+                    System.err.printf("QUALIFY_TRACE   zi %s: b1=%s b2=%s spanningTree=%b%n", branch.getId(),
+                            branch.getBus1() == null ? "?" : branch.getBus1().getId(),
+                            branch.getBus2() == null ? "?" : branch.getBus2().getId(),
+                            branch.isSpanningTreeEdge(com.powsybl.openloadflow.network.LoadFlowModel.AC));
                 }
             }
         }
         if (branches != null && gens != null && loads != null && shifts != null && hvdcs != null && sideOpens != null
                 && (!branches.isEmpty() || !gens.isEmpty() || !loads.isEmpty() || !shifts.isEmpty()
                     || !zeroImpedanceBranchOutages.isEmpty() || !hvdcs.isEmpty() || !sideOpens.isEmpty())) {
-            batch.add(new BatchContingency(pc.getContingency().getId(), branches, gens, loads,
+            batch.add(new BatchContingency(propagatedContingency.getContingency().getId(), branches, gens, loads,
                     shifts, List.of(), List.of(), List.of(), zeroImpedanceBranchOutages, hvdcs, sideOpens,
                     nonSpanningTreeBranches));
             // Batched OPERATOR STRATEGIES stage 1: TrueCondition (always-applied) strategies
@@ -362,7 +362,7 @@ final class GpuBatchPrecomputer {
             // extra open = extend it; load/gen actions = injection deltas). Unsupported
             // action types or shapes leave the pair to the CPU path (super).
             for (OperatorStrategy strategy : strategies) {
-                if (!GpuStrategyComposer.strategyApplies(strategy, pc.getContingency().getId())) {
+                if (!GpuStrategyComposer.strategyApplies(strategy, propagatedContingency.getContingency().getId())) {
                     continue;
                 }
                 // Strategy pairs batch only under ANCHOR-INDEPENDENT factor types (P_MAX,
@@ -377,8 +377,8 @@ final class GpuBatchPrecomputer {
                 }
                 // one pair per action list OLF may apply (a multi-stage strategy's stage combinations)
                 for (List<String> actionIds : GpuStrategyComposer.candidateActionLists(strategy)) {
-                    BatchContingency pair = GpuStrategyComposer.composeStrategyScenario(network, net, pc.getContingency().getId(), strategy, actionIds, actions,
-                            zeroImpedanceBranchOutages, branches, gens, loads, pc.getLoadIdsToLose().keySet(), shifts, hvdcs,
+                    BatchContingency pair = GpuStrategyComposer.composeStrategyScenario(network, net, propagatedContingency.getContingency().getId(), strategy, actionIds, actions,
+                            zeroImpedanceBranchOutages, branches, gens, loads, propagatedContingency.getLoadIdsToLose().keySet(), shifts, hvdcs,
                             sideOpens, nonSpanningTreeBranches, context.getParameters().getNetworkParameters(), pairBt);
                     // An absolute GeneratorAction on a participant restarts that generator from the value, over
                     // its share of the parent's distribution. The pair leg drops the parent's anchor shift of the
@@ -399,27 +399,27 @@ final class GpuBatchPrecomputer {
                         pair = null;
                     }
                     if (pair != null) {
-                        pair = withPairTree(pair, pc, branches, zeroImpedanceBranchOutages, ziTree);
+                        pair = withPairTree(pair, propagatedContingency, branches, zeroImpedanceBranchOutages, ziTree);
                         batch.add(pair);
                     }
                 }
             }
             return;
         }
-        LfShunt shunt = GpuContingencyMapper.singleShuntOutage(net, pc);
+        LfShunt shunt = GpuContingencyMapper.singleShuntOutage(net, propagatedContingency);
         if (shunt != null) {
-            batch.add(BatchContingency.shunt(pc.getContingency().getId(), shunt));
+            batch.add(BatchContingency.shunt(propagatedContingency.getContingency().getId(), shunt));
         } else {
             String rejectReason = composeRejectReason(branches, gens, loads, shifts, hvdcs, sideOpens,
                     loadsBatchable);
             GpuBatchScopeCensus.record(rejectReason);
             // ...and by id: a mapper reject never reaches the device, so the harness's verdict must count it
             // with the plan refusals (a scope gap), not as a scenario the device tried and failed.
-            GpuBatchScopeCensus.planRefused(pc.getContingency().getId(), rejectReason);
+            GpuBatchScopeCensus.planRefused(propagatedContingency.getContingency().getId(), rejectReason);
             if (System.getenv("OLF_GPU_REJECT_TRACE") != null) {
                 // the census counts these by KIND; the id is what lets a scope report say
                 // whether a non-batched contingency is one OLF itself does not answer
-                System.err.println("GPU_REJECT_CTG ctg=" + pc.getContingency().getId()
+                System.err.println("GPU_REJECT_CTG ctg=" + propagatedContingency.getContingency().getId()
                         + " reason=" + rejectReason);
             }
         }
@@ -554,7 +554,7 @@ final class GpuBatchPrecomputer {
 
     /** A pair whose actions open or close couplers is solved on the tree OLF elects after those actions, not on its
      *  contingency's: a coupler the strategy recloses (open at base, or opened by the contingency) goes back in it. */
-    private static BatchContingency withPairTree(BatchContingency pair, PropagatedContingency pc, List<LfBranch> ctgBranches,
+    private static BatchContingency withPairTree(BatchContingency pair, PropagatedContingency propagatedContingency, List<LfBranch> ctgBranches,
                                                  List<LfBranch> contingencyZeroImpedanceBranchOutages, ZeroImpedanceTreeReplay ziTree) {
         java.util.Set<LfBranch> ctgOut = new java.util.HashSet<>(ctgBranches);
         ctgOut.addAll(contingencyZeroImpedanceBranchOutages);
@@ -571,7 +571,7 @@ final class GpuBatchPrecomputer {
         }
         return new BatchContingency(pair.contingencyId(), pair.outagedBranches(), pair.lostGenerators(), pair.lostLoads(),
                 pair.shuntShifts(), pair.tapOverrides(), pair.outagedShunts(), pair.reclosedBranches(), pair.outagedZeroImpedanceBranches(),
-                pair.outagedHvdcs(), pair.sideOpenBranches(), ziTree.applyAndRevert(pc, opened, closed), pair.generatorActions(),
+                pair.outagedHvdcs(), pair.sideOpenBranches(), ziTree.applyAndRevert(propagatedContingency, opened, closed), pair.generatorActions(),
                 pair.acEmulationOffHvdcs());
     }
 
@@ -616,11 +616,11 @@ final class GpuBatchPrecomputer {
      */
 
     private static NewtonRaphsonParameters deviceSolverParameters(AcLoadFlowContext context) {
-        NewtonRaphsonParameters nrp = new NewtonRaphsonParameters();
-        if (context.getParameters().getAcSolverParameters() instanceof AbstractNewtonParameters<?> run) {
-            nrp.setMaxIterations(run.getMaxIterations());
+        NewtonRaphsonParameters newtonRaphsonParameters = new NewtonRaphsonParameters();
+        if (context.getParameters().getAcSolverParameters() instanceof AbstractNewtonParameters<?> newtonParameters) {
+            newtonRaphsonParameters.setMaxIterations(newtonParameters.getMaxIterations());
         }
-        return nrp;
+        return newtonRaphsonParameters;
     }
 
     /** The device's own loss pre-distribution and distributed total for a scenario, where it reported them. */
@@ -641,10 +641,10 @@ final class GpuBatchPrecomputer {
         if (want != null) {
             for (String w : want.split(",")) {
                 if (w.trim().equals(r.contingencyId())) {
-                    double pre = r.preDistributedActivePower() * com.powsybl.openloadflow.util.PerUnit.SB;
-                    double tot = r.distributedActivePower() * com.powsybl.openloadflow.util.PerUnit.SB;
+                    double preDistributedMw = r.preDistributedActivePower() * com.powsybl.openloadflow.util.PerUnit.SB;
+                    double totalMw = r.distributedActivePower() * com.powsybl.openloadflow.util.PerUnit.SB;
                     System.err.printf("DAP_CTG ctg=%s preDistributedMW=%.9f totalMW=%.9f ownDsMW=%.9f iterations=%d status=%d%n",
-                            r.contingencyId(), pre, tot, tot - pre, r.iterations(), r.convergenceStatus());
+                            r.contingencyId(), preDistributedMw, totalMw, totalMw - preDistributedMw, r.iterations(), r.convergenceStatus());
                 }
             }
         }

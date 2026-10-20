@@ -114,11 +114,11 @@ public final class GpuIncrementalTransformerVoltageControlOuterLoop {
         // getControllerElements flat-maps the same lists in the same bus-index order).
         for (com.powsybl.openloadflow.network.LfBus bus
                 : network.getControlledBuses(com.powsybl.openloadflow.network.VoltageControl.Type.TRANSFORMER)) {
-            var vc = bus.getTransformerVoltageControl().orElseThrow();
+            var voltageControl = bus.getTransformerVoltageControl().orElseThrow();
             Integer vRow = busVRows.get(bus.getNum());
-            double halfDeadband = vc.getTargetDeadband()
+            double halfDeadband = voltageControl.getTargetDeadband()
                     .orElse(MIN_TARGET_DEADBAND_KV / bus.getNominalV()) / 2;
-            for (LfBranch branch : vc.getMergedControllerElements()) {
+            for (LfBranch branch : voltageControl.getMergedControllerElements()) {
                 if (branch.isDisabled() || !branch.isConnectedAtBothSides()) {
                     continue;
                 }
@@ -137,7 +137,7 @@ public final class GpuIncrementalTransformerVoltageControlOuterLoop {
                         baseTap = t;
                     }
                 }
-                out.add(new Controller(rhoRow, vRow, bus.getNum(), branch.getNum(), vc.getTargetValue(), halfDeadband,
+                out.add(new Controller(rhoRow, vRow, bus.getNum(), branch.getNum(), voltageControl.getTargetValue(), halfDeadband,
                         tapRows, baseTap, elemIndex));
             }
         }
@@ -147,51 +147,51 @@ public final class GpuIncrementalTransformerVoltageControlOuterLoop {
     /** Install the controllers for the in-kernel loop, flattened into the CSR-packed arrays
      *  {@link TransformerVoltageControlNative#setBatchIncrementalTransformerVoltageControl} expects. Returns true when the kernel loop OWNS them
      *  (shared controlled buses included), false when there are none. */
-    public static boolean uploadToDevice(long handle, List<Controller> ctrls, int maxTapShift) {
-        if (ctrls == null || ctrls.isEmpty()) {
+    public static boolean uploadToDevice(long handle, List<Controller> controllers, int maxTapShift) {
+        if (controllers == null || controllers.isEmpty()) {
             TransformerVoltageControlNative.setBatchIncrementalTransformerVoltageControl(
                     handle, null, null, null, null, null, null, null, null, null, null, maxTapShift);   // clears a cached context
             return false;
         }
-        int nc = ctrls.size();
-        int[] rhoRow = new int[nc];
-        int[] vRow = new int[nc];
-        double[] targetV = new double[nc];
-        double[] halfTargetDeadband = new double[nc];
-        int[] elemIndex = new int[nc];
-        int[] baseTap = new int[nc];
+        int nControllers = controllers.size();
+        int[] rhoRow = new int[nControllers];
+        int[] vRow = new int[nControllers];
+        double[] targetV = new double[nControllers];
+        double[] halfTargetDeadband = new double[nControllers];
+        int[] elemIndex = new int[nControllers];
+        int[] baseTap = new int[nControllers];
         // CSR tap table: tapStart[c] = offset into flat tapRows for controller c
-        int[] tapStart = new int[nc + 1];
+        int[] tapStart = new int[nControllers + 1];
         int totalTaps = 0;
-        for (int c = 0; c < nc; c++) {
-            Controller ctl = ctrls.get(c);
-            rhoRow[c] = ctl.rhoRow();
-            vRow[c] = ctl.vRow();
-            targetV[c] = ctl.targetV();
-            halfTargetDeadband[c] = ctl.halfDeadband();
-            elemIndex[c] = ctl.elemIndex();
-            baseTap[c] = ctl.baseTapIndex();
+        for (int c = 0; c < nControllers; c++) {
+            Controller controller = controllers.get(c);
+            rhoRow[c] = controller.rhoRow();
+            vRow[c] = controller.vRow();
+            targetV[c] = controller.targetV();
+            halfTargetDeadband[c] = controller.halfDeadband();
+            elemIndex[c] = controller.elemIndex();
+            baseTap[c] = controller.baseTapIndex();
             tapStart[c] = totalTaps;
-            totalTaps += ctl.tapRows().length;
+            totalTaps += controller.tapRows().length;
         }
-        tapStart[nc] = totalTaps;
+        tapStart[nControllers] = totalTaps;
         // Flat tap data: totalTaps pi model rows (GpuPiModelColumn), row-major
         double[] tapRows = new double[totalTaps * GpuPiModelColumn.COUNT];
         int off = 0;
-        for (Controller ctl : ctrls) {
-            for (double[] row : ctl.tapRows()) {
+        for (Controller controller : controllers) {
+            for (double[] row : controller.tapRows()) {
                 System.arraycopy(row, 0, tapRows, off, GpuPiModelColumn.COUNT);
                 off += GpuPiModelColumn.COUNT;
             }
         }
         // Group structure: controllers sharing a controlled bus (keyed by controlledBusNum)
         java.util.Map<Integer, java.util.List<Integer>> byBus = new java.util.LinkedHashMap<>();
-        for (int c = 0; c < nc; c++) {
-            byBus.computeIfAbsent(ctrls.get(c).controlledBusNum(), k -> new java.util.ArrayList<>()).add(c);
+        for (int c = 0; c < nControllers; c++) {
+            byBus.computeIfAbsent(controllers.get(c).controlledBusNum(), k -> new java.util.ArrayList<>()).add(c);
         }
         int nGroups = byBus.size();
         int[] groupControllerStart = new int[nGroups + 1];
-        int[] groupController = new int[nc];
+        int[] groupController = new int[nControllers];
         int gi = 0;
         int ci = 0;
         for (var group : byBus.values()) {
@@ -206,30 +206,30 @@ public final class GpuIncrementalTransformerVoltageControlOuterLoop {
                 handle, rhoRow, vRow, targetV, halfTargetDeadband, elemIndex, tapStart, tapRows, baseTap,
                 groupControllerStart, groupController, maxTapShift) != 0;
         LOGGER.info("Uploaded {} incremental TVC controllers to device ({} taps, {} groups): {}",
-                nc, totalTaps, nGroups, owned ? "in-kernel loop" : "host orchestrator");
+                nControllers, totalTaps, nGroups, owned ? "in-kernel loop" : "host orchestrator");
         if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
-            System.err.printf("TVC_UPLOAD nControllers=%d totalTaps=%d nGroups=%d kernel=%b%n", nc, totalTaps, nGroups, owned);
+            System.err.printf("TVC_UPLOAD nControllers=%d totalTaps=%d nGroups=%d kernel=%b%n", nControllers, totalTaps, nGroups, owned);
         }
         return owned;
     }
 
     /** Give the driver's final taps (scenario 0) back to the network — the tap position OLF's own loop
      *  would have left through updateTapPositionToReachNewR1; the pi model's listeners refresh r1. */
-    public static void applyToNetwork(LfNetwork network, List<Controller> ctrls, int[] taps) {
-        if (ctrls == null || ctrls.isEmpty() || taps == null) {
+    public static void applyToNetwork(LfNetwork network, List<Controller> controllers, int[] taps) {
+        if (controllers == null || controllers.isEmpty() || taps == null) {
             return;
         }
-        for (int c = 0; c < ctrls.size() && c < taps.length; c++) {
-            Controller ctl = ctrls.get(c);
-            if (taps[c] == ctl.baseTapIndex()) {
+        for (int c = 0; c < controllers.size() && c < taps.length; c++) {
+            Controller controller = controllers.get(c);
+            if (taps[c] == controller.baseTapIndex()) {
                 continue;
             }
-            LfBranch branch = network.getBranch(ctl.branchNum());
+            LfBranch branch = network.getBranch(controller.branchNum());
             if (branch == null) {
                 continue;
             }
-            var pm = branch.getPiModel();
-            pm.setTapPosition(pm.getTapPositionRange().getMinimum() + taps[c]);
+            var piModel = branch.getPiModel();
+            piModel.setTapPosition(piModel.getTapPositionRange().getMinimum() + taps[c]);
         }
     }
 }

@@ -52,11 +52,11 @@ final class VoltageControlOverrides {
             return null;                                     // multi-member outage — CPU
         }
         LfBranch d = members.get(0);
-        var tvc = d.getVoltageControl().orElse(null);
-        if (tvc == null) {
+        var voltageControl = d.getVoltageControl().orElse(null);
+        if (voltageControl == null) {
             return null;
         }
-        List<LfBranch> group = tvc.getMergedControllerElements().stream()
+        List<LfBranch> group = voltageControl.getMergedControllerElements().stream()
                 .filter(b -> !b.isDisabled()).toList();
         // The INCREMENTAL transformer mode never activates a DISTR_RHO equation (each tap is a fixed ratio the outer
         // loop moves), so an outage has no sharing coefficient to renormalize and no free role to re-pick: the
@@ -169,27 +169,27 @@ final class VoltageControlOverrides {
             // like a whole group leaving with the island. rte6515 BUS-1115_BBS_1: pilot VL-1115_0
             // islanded, merged survivor VL-1115_1 left with a DISTR_Q row and no Q balance of its
             // own, V frozen at the base value, 0.373 kV.
-            var vc = bus.getGeneratorVoltageControl()
+            var voltageControl = bus.getGeneratorVoltageControl()
                     .<com.powsybl.openloadflow.network.GeneratorVoltageControl>map(
                             com.powsybl.openloadflow.network.VoltageControl::getMainVoltageControl)
                     .orElse(null);
             if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {
                 System.err.printf("QUALIFY_TRACE vcSplit-enter bus=%s hasVc=%b distrQ=%b merge=%s%n", bus.getId(),
-                        vc != null, es.getEquation(bus.getNum(), AcEquationType.DISTR_Q).isPresent(),
-                        vc == null ? "-" : vc.getMergeStatus());
+                        voltageControl != null, es.getEquation(bus.getNum(), AcEquationType.DISTR_Q).isPresent(),
+                        voltageControl == null ? "-" : voltageControl.getMergeStatus());
             }
             boolean remoteGroupMember = es.getEquation(bus.getNum(), AcEquationType.DISTR_Q).isPresent()
-                    || vc != null && (vc.getControlledBus() != bus
-                            || vc.getMergedControllerElements().stream().anyMatch(cb -> cb != bus));
+                    || voltageControl != null && (voltageControl.getControlledBus() != bus
+                            || voltageControl.getMergedControllerElements().stream().anyMatch(member -> member != bus));
             if (!remoteGroupMember) {
                 continue;
             }
-            if (vc == null) {
+            if (voltageControl == null) {
                 return VcSplit.UNMODELED;                    // DISTR_Q row with no reachable control handle
             }
-            boolean pilotIslanded = islanded.contains(vc.getControlledBus());
-            List<LfBus> surviving = vc.getMergedControllerElements().stream()
-                    .filter(cb -> !islanded.contains(cb))
+            boolean pilotIslanded = islanded.contains(voltageControl.getControlledBus());
+            List<LfBus> surviving = voltageControl.getMergedControllerElements().stream()
+                    .filter(member -> !islanded.contains(member))
                     .toList();
             if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {
                 // The group decision, with BOTH element lists: a MAIN control's own controllerElements
@@ -197,9 +197,9 @@ final class VoltageControlOverrides {
                 // merged list is invisible to this decision.
                 System.err.printf("QUALIFY_TRACE vcSplit bus=%s merge=%s pilot=%s pilotIslanded=%b"
                                 + " controllers=%s merged=%s surviving=%s%n",
-                        bus.getId(), vc.getMergeStatus(), vc.getControlledBus().getId(), pilotIslanded,
-                        vc.getControllerElements().stream().map(LfBus::getId).toList(),
-                        vc.getMergedControllerElements().stream().map(LfBus::getId).toList(),
+                        bus.getId(), voltageControl.getMergeStatus(), voltageControl.getControlledBus().getId(), pilotIslanded,
+                        voltageControl.getControllerElements().stream().map(LfBus::getId).toList(),
+                        voltageControl.getMergedControllerElements().stream().map(LfBus::getId).toList(),
                         surviving.stream().map(LfBus::getId).toList());
             }
             if (pilotIslanded && surviving.isEmpty()) {
@@ -213,11 +213,11 @@ final class VoltageControlOverrides {
                 // that is exactly a PV->PQ row-mode flip with the bus's own Q target.
                 List<LfBus> survivors = new ArrayList<>(surviving);
                 if (!pilotIslanded) {
-                    survivors.add(vc.getControlledBus());
+                    survivors.add(voltageControl.getControlledBus());
                 }
-                for (LfBus sb : survivors) {
-                    if (!deadControlBuses.contains(sb)) {
-                        deadControlBuses.add(sb);
+                for (LfBus survivor : survivors) {
+                    if (!deadControlBuses.contains(survivor)) {
+                        deadControlBuses.add(survivor);
                     }
                 }
                 result = result == VcSplit.CONTAINED ? VcSplit.CONTROL_DIES : result;

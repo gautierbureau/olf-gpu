@@ -1167,12 +1167,12 @@ class GpuSaRemoteVoltageControlTest extends AbstractGpuSaTest {
             var c = cpu.getPostContingencyResults().get(i);
             var g = gpu.getPostContingencyResults().get(i);
             assertEquals(c.getStatus(), g.getStatus(), c.getContingency().getId());
-            var cb = c.getNetworkResult().getBusResults();
-            var gb = g.getNetworkResult().getBusResults();
-            assertEquals(cb.size(), gb.size());
-            for (int b = 0; b < cb.size(); b++) {
-                assertEquals(cb.get(b).getV(), gb.get(b).getV(), 1e-12,
-                        "bus voltage " + cb.get(b).getBusId() + " for " + c.getContingency().getId());
+            var cpuBuses = c.getNetworkResult().getBusResults();
+            var gpuBuses = g.getNetworkResult().getBusResults();
+            assertEquals(cpuBuses.size(), gpuBuses.size());
+            for (int b = 0; b < cpuBuses.size(); b++) {
+                assertEquals(cpuBuses.get(b).getV(), gpuBuses.get(b).getV(), 1e-12,
+                        "bus voltage " + cpuBuses.get(b).getBusId() + " for " + c.getContingency().getId());
             }
         }
     }

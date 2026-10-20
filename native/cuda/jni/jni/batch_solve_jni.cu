@@ -34,7 +34,7 @@ OLF_JNI(ac_solver_gpu, BatchSolveNative, createBatchContext)(
         jdoubleArray jDistributedSlackBusBaseTargetP, jdoubleArray jDistributedSlackBusMaxDelta, jdoubleArray jDistributedSlackBusMinDelta,
         jint jDistributedSlackFactorMode, jdoubleArray jDistributedSlackBusMarginUp, jdoubleArray jDistributedSlackBusMarginDown,
         jdouble jSlackBusMarginUp, jdouble jSlackBusMarginDown) {
-    auto* st = reinterpret_cast<SharedStructurePtr*>(structureHandle);
+    auto* structurePointer = reinterpret_cast<SharedStructurePtr*>(structureHandle);
     jint* reactiveLimitVoltageRow = env->GetIntArrayElements(jReactiveLimitVoltageRow, nullptr);
     jdouble* reactiveLimitMinQ = env->GetDoubleArrayElements(jReactiveLimitMinQ, nullptr);
     jdouble* reactiveLimitMaxQ = env->GetDoubleArrayElements(jReactiveLimitMaxQ, nullptr);
@@ -56,10 +56,10 @@ OLF_JNI(ac_solver_gpu, BatchSolveNative, createBatchContext)(
     std::string error;
     BatchSolverContext* ctx = nullptr;
     try {
-        if (st == nullptr || !*st) {
+        if (structurePointer == nullptr || !*structurePointer) {
             throw std::runtime_error("invalid structure handle");
         }
-        ctx = createBatchContext(*st, nScenarios, mode,
+        ctx = createBatchContext(*structurePointer, nScenarios, mode,
                                  nReactiveLimitEntries, reactiveLimitVoltageRow, reactiveLimitMinQ, reactiveLimitMaxQ, reactiveLimitLoadQ, reactiveLimitTargetV, reactiveLimitFlags, rowSlope,
                                  nDistributedSlackBuses, distributedSlackBusPhiRow, distributedSlackBusFactor, jSlackBusPhiRow, jSlackBusTargetP,
                                  distributedSlackBusBaseTargetP, distributedSlackBusMaxDelta, distributedSlackBusMinDelta,
@@ -244,12 +244,12 @@ OLF_JNI(ac_solver_gpu, BatchSolveNative, solveBatchContext)(
             env->DeleteLocalRef(dRow);
         }
 
-        int nOv = env->GetArrayLength(jtargetOverrideIndex);
-        std::vector<int> ovIndex(nOv);
-        std::vector<double> ovValue(nOv);
-        if (nOv > 0) {
-            env->GetIntArrayRegion(jtargetOverrideIndex, 0, nOv, ovIndex.data());
-            env->GetDoubleArrayRegion(jtargetOverrideValue, 0, nOv, ovValue.data());
+        int nTargetOverrides = env->GetArrayLength(jtargetOverrideIndex);
+        std::vector<int> targetOverrideIndex(nTargetOverrides);
+        std::vector<double> targetOverrideValue(nTargetOverrides);
+        if (nTargetOverrides > 0) {
+            env->GetIntArrayRegion(jtargetOverrideIndex, 0, nTargetOverrides, targetOverrideIndex.data());
+            env->GetDoubleArrayRegion(jtargetOverrideValue, 0, nTargetOverrides, targetOverrideValue.data());
         }
 
         // Per-scenario distributed-slack reweight: present (length nS) only when a generator-loss scenario
@@ -307,7 +307,7 @@ OLF_JNI(ac_solver_gpu, BatchSolveNative, solveBatchContext)(
         res = solveBatchContext(ctx, x0.data(), target.data(), rowMode.data(),
                                 rowModeSlots.empty() ? kNoModeSlots : rowModeSlots.data(),
                                 static_cast<int>(rowModeSlots.size()), baseRowMode.data(), disabledData,
-                                nOv, ovIndex.data(), ovValue.data(),
+                                nTargetOverrides, targetOverrideIndex.data(), targetOverrideValue.data(),
                                 nDistributedSlackOverrides > 0 ? distributedSlackOverrideBus.data() : nullptr, distributedSlackOverrideFactorDelta.data(),
                                 distributedSlackOverrideBaseTargetPDelta.data(), distributedSlackOverrideMaxDelta.data(), distributedSlackOverrideMinDelta.data(),
                                 distributedSlackBusAnchorShiftVec.empty() ? nullptr : distributedSlackBusAnchorShiftVec.data(),
@@ -388,14 +388,14 @@ OLF_JNI(ac_solver_gpu, BatchSolveNative, solveBatchContext)(
                 calls, marshalNs / 1000000, solveNs / 1000000, packNs / 1000000,
                 gOuterPasses, gSolvePasses, gNewtonIters, gActiveIterSum, gWidthIterSum, gCompactIters,
                 gAnalysesMain, gAnalysesCompact, gIterativeRefinementChecks, gIterativeRefinementExtraSolves);
-        double tot[4] = {0, 0, 0, 0};
-        long long cnt[4] = {0, 0, 0, 0};
+        double phaseMilliseconds[4] = {0, 0, 0, 0};
+        long long phaseCount[4] = {0, 0, 0, 0};
         for (const auto& kv : gAnalysisSites) {
-            int ph = kv.first / 100000, line = kv.first % 100000;
-            int k = ph == 'A' ? 0 : ph == 'F' ? 1 : ph == 'S' ? 2 : 3;
-            tot[k] += kv.second.second;
-            cnt[k] += kv.second.first;
-            fprintf(stderr, "CUDSS_PHASE_SITE %c line=%d count=%lld ms=%.1f\n", ph, line, kv.second.first, kv.second.second);
+            int phase = kv.first / 100000, line = kv.first % 100000;
+            int k = phase == 'A' ? 0 : phase == 'F' ? 1 : phase == 'S' ? 2 : 3;
+            phaseMilliseconds[k] += kv.second.second;
+            phaseCount[k] += kv.second.first;
+            fprintf(stderr, "CUDSS_PHASE_SITE %c line=%d count=%lld ms=%.1f\n", phase, line, kv.second.first, kv.second.second);
         }
         for (int k = 1; k < 16; k++) {
             if (gOuterLoopPassHistogramCount[k] == 0) continue;
@@ -417,7 +417,8 @@ OLF_JNI(ac_solver_gpu, BatchSolveNative, solveBatchContext)(
             }
         }
         fprintf(stderr, "CUDSS_PHASE_TIME analysis=%lld x %.1f ms | factorization=%lld x %.1f ms | solve=%lld x %.1f ms"
-                " | factorization+solve=%lld x %.1f ms\n", cnt[0], tot[0], cnt[1], tot[1], cnt[2], tot[2], cnt[3], tot[3]);
+                " | factorization+solve=%lld x %.1f ms\n", phaseCount[0], phaseMilliseconds[0], phaseCount[1], phaseMilliseconds[1], phaseCount[2], phaseMilliseconds[2], phaseCount[3],
+                        phaseMilliseconds[3]);
     }
     return out;
 }

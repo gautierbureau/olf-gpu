@@ -33,8 +33,8 @@ __global__ void monitoringVoltageLoopBatch(int nMonitoringVoltageControllers, in
     int c = k % nMonitoringVoltageControllers;
     int s = k / nMonitoringVoltageControllers;
     if (!outerLoopCheckActive[s]) return;
-    size_t slot = (size_t) s * nMonitoringVoltageControllers + c;
-    if (!isnan(activated[slot])) return;                     // already switched — a normal PV bus now
+    size_t scenarioController = (size_t) s * nMonitoringVoltageControllers + c;
+    if (!isnan(activated[scenarioController])) return;                     // already switched — a normal PV bus now
     double v = x[(size_t) s * n + monitoringVoltageBusVRow[c]];
     double lowThr = monitoringVoltageBand[c * 4];
     double highThr = monitoringVoltageBand[c * 4 + 1];
@@ -48,7 +48,7 @@ __global__ void monitoringVoltageLoopBatch(int nMonitoringVoltageControllers, in
     } else {
         return;
     }
-    activated[slot] = chosen;
+    activated[scenarioController] = chosen;
     for (int d = deltaStart[c]; d < deltaStart[c + 1]; d++) {
         int row = deltaRow[d];
         mode[(size_t) s * n + row] = deltaMode[d];

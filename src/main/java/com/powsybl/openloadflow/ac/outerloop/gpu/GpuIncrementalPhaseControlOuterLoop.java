@@ -54,12 +54,12 @@ public final class GpuIncrementalPhaseControlOuterLoop {
             }
         }
         for (LfBranch controller : network.getBranches()) {
-            var pcOpt = controller.getPhaseControl();
-            if (pcOpt.isEmpty() || controller.isDisabled() || !controller.isPhaseController()) {
+            var optionalPhaseControl = controller.getPhaseControl();
+            if (optionalPhaseControl.isEmpty() || controller.isDisabled() || !controller.isPhaseController()) {
                 continue;
             }
-            var pc = pcOpt.orElseThrow();
-            int kind = switch (pc.getMode()) {
+            var phaseControl = optionalPhaseControl.orElseThrow();
+            int kind = switch (phaseControl.getMode()) {
                 case CONTROLLER -> GpuControlledFlow.ACTIVE_POWER;
                 case LIMITER -> GpuControlledFlow.CURRENT;
                 default -> -1;
@@ -67,7 +67,7 @@ public final class GpuIncrementalPhaseControlOuterLoop {
             if (kind < 0) {
                 continue;
             }
-            LfBranch controlled = pc.getControlledBranch();
+            LfBranch controlled = phaseControl.getControlledBranch();
             Integer pinRow = a1Rows.get(controller.getNum());
             int elemIndex = elementMapper.getElementIndex(controller);
             int controlledElementIndex = elementMapper.getElementIndex(controlled);
@@ -77,10 +77,10 @@ public final class GpuIncrementalPhaseControlOuterLoop {
                         "Incremental phase controller {} not representable on the GPU batch — skipped", controller.getId());
                 continue;
             }
-            double halfTargetDeadband = Math.max(pc.getTargetDeadband(), MIN_TARGET_DEADBAND_P) / 2;
-            out.add(new DeviceFlowControllers.Controller(kind, pinRow, GpuPiModelColumn.A1, pc.getTargetValue(), halfTargetDeadband,
+            double halfTargetDeadband = Math.max(phaseControl.getTargetDeadband(), MIN_TARGET_DEADBAND_P) / 2;
+            out.add(new DeviceFlowControllers.Controller(kind, pinRow, GpuPiModelColumn.A1, phaseControl.getTargetValue(), halfTargetDeadband,
                     tapRows, DeviceFlowControllers.closestTap(tapRows, GpuPiModelColumn.A1, controller.getPiModel().getA1()),
-                    elemIndex, controlledElementIndex, Integer.MAX_VALUE, pc.getControlledSide() == TwoSides.ONE ? 1 : 2, controller.getNum()));
+                    elemIndex, controlledElementIndex, Integer.MAX_VALUE, phaseControl.getControlledSide() == TwoSides.ONE ? 1 : 2, controller.getNum()));
         }
         return out;
     }

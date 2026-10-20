@@ -46,47 +46,9 @@ public final class GpuAcDataExtractor {
     private GpuAcDataExtractor() {
     }
 
+    /** Extract the GPU data with OLF's default distributed-slack settings and no base-open branch. */
     public static GpuAcData extract(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es) {
-        // Default to OLF's own defaults (slack distribution + reactive limits ON). The batched SA path passes
-        // the RUN's actual outer-loop set so a disabled outer loop is never run on the device (an outer loop
-        // must not run unconditionally).
-        return extract(network, es, true, true);
-    }
-
-    /**
-     * Extract the GPU data, building the distributed-slack (DS) and reactive-limits (RL) outer-loop packs
-     * ONLY when the corresponding outer loop is enabled for this run. The batched device solver gates each
-     * outer-loop pass on its pack being non-empty, so an empty pack means "do not run that outer loop" —
-     * mirroring OLF, which only runs an outer loop when it is in the configured outer-loop list. Building a
-     * pack from network capability alone (participating gens / PV buses) would make the device distribute
-     * slack or switch PV→PQ even when the run disabled it, diverging from the CPU under any non-trivial
-     * mismatch (latent on balanced networks, where the retarget is negligible).
-     */
-    public static GpuAcData extract(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
-                                    boolean distributedSlack, boolean reactiveLimits) {
-        return extract(network, es, distributedSlack, reactiveLimits, java.util.Set.of(), java.util.Set.of());
-    }
-
-    public static GpuAcData extract(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
-                                    boolean distributedSlack, boolean reactiveLimits,
-                                    java.util.Set<String> baseOpenBranchIds) {
-        return extract(network, es, distributedSlack, reactiveLimits, baseOpenBranchIds, java.util.Set.of());
-    }
-
-    /**
-     * Batch-SA flavor: additionally packs the given BASE-OPEN branches (disabled at base, both buses
-     * present and energized — the shape {@code Networks.loadWithReconnectableElements} produces for
-     * branches closable by an action: loaded CLOSED in a temp variant, then re-opened by connectivity,
-     * so the pi model and both buses are valid). They are appended to the closed-branch pack and
-     * reported in {@code baseOpenClosedBranchElements}; the batch solver DISABLES them in every scenario's mask
-     * by default — a reclose action clears the bit. The plain-LF path never packs them (empty set).
-     */
-    public static GpuAcData extract(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
-                                    boolean distributedSlack, boolean reactiveLimits,
-                                    java.util.Set<String> baseOpenBranchIds,
-                                    java.util.Set<String> baseOpenZeroImpedanceBranchIdList) {
-        return extract(network, es, distributedSlack, reactiveLimits, baseOpenBranchIds, baseOpenZeroImpedanceBranchIdList,
-                GpuDistributedSlackParameters.DEFAULT);
+        return extract(network, es, java.util.Set.of(), java.util.Set.of(), GpuDistributedSlackParameters.DEFAULT);
     }
 
     /**
@@ -113,20 +75,29 @@ public final class GpuAcDataExtractor {
         return new int[][] {columns.pRow(), columns.qRow(), columns.spanningTreeParentBranch(), columns.alternateQRow()};
     }
 
+    /**
+     * Extract the GPU data. The distributed-slack and reactive-limit tables and the remote-member Q terms are packed
+     * whatever the run's outer loops: which loops run is the run's own decision (DriverNative.setBatchOuterLoops),
+     * never read from a table being empty. The batched security analysis additionally packs the given BASE-OPEN
+     * branches (disabled at base, both buses present and energized — the shape
+     * {@code Networks.loadWithReconnectableElements} produces for branches closable by an action: loaded CLOSED in a
+     * temp variant, then re-opened by connectivity, so the pi model and both buses are valid). They are appended to
+     * the closed-branch pack and reported in {@code baseOpenClosedBranchElements}; the batch solver DISABLES them in
+     * every scenario's mask by default — a reclose action clears the bit. The plain-LF path never packs them.
+     */
     public static GpuAcData extract(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
-                                    boolean distributedSlack, boolean reactiveLimits,
                                     java.util.Set<String> baseOpenBranchIds,
                                     java.util.Set<String> baseOpenZeroImpedanceBranchIdList, GpuDistributedSlackParameters distributedSlackParameters) {
         GpuAcValidation.validate(es);
         ExtractionColumns columns = ExtractionColumns.of(network, es);
         GpuAcFamilyPacker.Packs family = GpuAcFamilyPacker.pack(network, columns, baseOpenBranchIds, baseOpenZeroImpedanceBranchIdList);
-        ReactiveLimitEntries reactiveLimitEntries = ReactiveLimitsPacker.reactiveLimitsPack(network, es, columns, reactiveLimits);
+        ReactiveLimitEntries reactiveLimitEntries = ReactiveLimitsPacker.reactiveLimitsPack(network, es, columns);
         DistrQPacker.Pack distrQ = DistrQPacker.distrQPack(network, es, columns, family, reactiveLimitEntries);
         LinearDistributionTerms distrRho = DistrRhoPacker.distrRhoPack(network, es, columns);
         LinearDistributionTerms distrShuntB = DistrShuntBPacker.distrShuntBPack(network, es, columns);
 
-        RemoteMemberReactiveTerms remoteMemberReactiveTerms = RemoteMemberQPacker.remoteMemberQPack(network, es, columns, family, reactiveLimits);
-        DistributedSlackParticipants distributedSlackParticipants = DistributedSlackPacker.distributedSlackPack(network, es, columns, distributedSlack, distributedSlackParameters);
+        RemoteMemberReactiveTerms remoteMemberReactiveTerms = RemoteMemberQPacker.remoteMemberQPack(network, es, columns, family);
+        DistributedSlackParticipants distributedSlackParticipants = DistributedSlackPacker.distributedSlackPack(network, es, columns, distributedSlackParameters);
         // SLOPE-SVC rows (V + slope*sumQ = target, row mode 2): per-row slope, 0 everywhere else
         double[] rowSlope = new double[es.getIndex().getSortedVariablesToFind().size()];
         for (com.powsybl.openloadflow.network.LfBus bus : network.getBuses()) {

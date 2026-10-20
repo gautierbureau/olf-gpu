@@ -14,6 +14,7 @@
 #include "../common/check.cuh"
 #include "../common/launch.cuh"
 #include "../common/stats.cuh"
+#include "../common/codes/gpu_q_limit_type.cuh"
 #include "../common/codes/gpu_reactive_limits_state.cuh"
 #include "../outerloop/distributed_slack.cuh"
 #include "../outerloop/forced_target_q.cuh"
@@ -129,7 +130,9 @@ void seedSolve(BatchSolverContext* ctx, DriverPass& drv, const int* reactiveLimi
             }
         }
     }
-    if (reactiveLimitsSeedState != nullptr && ctx->nReactiveLimitEntries > 0) {
+    // Pins exist only for a run with OLF's ReactiveLimitsOuterLoop: without it every entry stays NONE (all PV), as OLF,
+    // whatever the packed entries or a caller's seed state hold.
+    if (reactiveLimitsSeedState != nullptr && ctx->reactiveLimitsOuterLoop && ctx->nReactiveLimitEntries > 0) {
         // WARM CONTINUATION: seed each (controller, scenario)'s pinned limit type AND switch
         // count from the state the caller passes. A re-solve inside one load flow passes both; a
         // strategy pair passes its parent's pins with zero counts, since OLF's reactive-limit
@@ -185,7 +188,10 @@ void seedSolve(BatchSolverContext* ctx, DriverPass& drv, const int* reactiveLimi
                 ctx->nReactiveLimitIslanded > 0 ? ctx->dReactiveLimitIslanded.as<char>() : nullptr);
     } else {
         CUDA_CHECK(cudaMemsetAsync(ctx->dReactiveLimitPvPqSwitchCount.p, 0, static_cast<size_t>(ctx->nReactiveLimitEntries) * nS * sizeof(char), ctx->stream));
-        if (ctx->nReactiveLimitEntries > 0) {                              // seed the pinned limit for base-PQ controllers (else all PV)
+        if (!ctx->reactiveLimitsOuterLoop && ctx->nReactiveLimitEntries > 0) {   // no ReactiveLimits loop: no pin, a base-PQ
+            CUDA_CHECK(cudaMemsetAsync(ctx->dReactiveLimitQLimitType.p, GpuQLimitType::NONE,   // controller included
+                    static_cast<size_t>(ctx->nReactiveLimitEntries) * nS * sizeof(char), ctx->stream));
+        } else if (ctx->nReactiveLimitEntries > 0) {                       // seed the pinned limit for base-PQ controllers (else all PV)
             initReactiveLimitQLimitTypeBatch<<<grid(ctx->nReactiveLimitEntries * nS), BLOCK, 0, ctx->stream>>>(ctx->nReactiveLimitEntries, nS, n, ctx->dReactiveLimitVoltageRow.as<int>(),
                     ctx->dReactiveLimitReactivePowerRow.p ? ctx->dReactiveLimitReactivePowerRow.as<int>() : nullptr,
                     ctx->dReactiveLimitTargetV.as<double>(), ctx->dReactiveLimitFlags.as<char>(), dBaseMode.as<int>(), ctx->dX.as<double>(),
@@ -247,7 +253,7 @@ void seedSolve(BatchSolverContext* ctx, DriverPass& drv, const int* reactiveLimi
     }
     launchPilotTargetVEquationUpdate(ctx, drv, true, true);                     // seed: base limits, or the previous solve's flip
     launchDistrQTargetsInner(ctx, drv);
-    if (ctx->nDistributedSlackBuses > 0) {
+    if (ctx->distributedSlackOuterLoop && ctx->nDistributedSlackBuses > 0) {   // the run's loop, not the packed table
         distributedSlackResetSolve(ctx, drv);
     }
     if (ctx->nMonitoringVoltageControllers > 0) {
@@ -274,7 +280,7 @@ void seedSolve(BatchSolverContext* ctx, DriverPass& drv, const int* reactiveLimi
     if (ctx->nIncrementalShuntVoltageControlControllerShunts > 0) {
         incrementalShuntVoltageControlResetSolve(ctx, drv);
     }
-    if (ctx->slackOnlyDistribution) {
+    if (ctx->distributedSlackOuterLoop && ctx->slackOnlyDistribution) {
         slackOnlyDistributionResetSolve(ctx, drv, slackBusAnchorShift);
     }
 }

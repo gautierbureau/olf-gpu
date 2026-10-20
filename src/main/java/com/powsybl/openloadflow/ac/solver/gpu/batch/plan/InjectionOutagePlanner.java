@@ -111,7 +111,7 @@ final class InjectionOutagePlanner {
                         .busPowerRows(anyBus.getNetwork(), es);   // no bus is looked up either
             }
         }
-        GenOutage[] gos = GpuBatchInjectionOutages.computeInjectionOutages(es, gpuData, distributedSlackRawFactorSum, slackParticipates,
+        GenOutage[] gos = GpuBatchInjectionOutages.computeInjectionOutages(es, gpuData, ctx.distributedSlack(), distributedSlackRawFactorSum, slackParticipates,
                 distributedSlackParameters, liveLostGens, liveLostLoads, pb.busRows);
         if (gos == null) {                           // slack / >1 DS bus / remote gen — route to CPU
             // (was tagged SHUNT_SHAPE, a copy-paste from the block above: this is the INJECTION

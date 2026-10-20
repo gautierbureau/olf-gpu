@@ -310,10 +310,12 @@ public final class GpuTransformerVoltageControlOuterLoop {
      *  per member the V rows of the generator-controlled buses in its not-controlled side's component with
      *  every transformer controller edge removed (OLF removes the ENABLED ones and the contingency's
      *  branches — at the base neither exists yet; the kernel then asks which of those buses is still ON).
-     *  Null when a candidate is a remote controller. */
+     *  Null when a candidate is a remote controller. A remote candidate is frozen through its reactive-limit entry,
+     *  whose DISTR_Q renormalization the device runs only for a run with OLF's ReactiveLimitsOuterLoop
+     *  ({@code reactiveLimitsOuterLoop}): without it such a candidate is refused. */
     public static FreezeTables buildFreezeTables(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
                                                  List<TransformerController> transformerControllers, double minNominalVOverride,
-                                                 int[] reactiveLimitBusNum) {
+                                                 int[] reactiveLimitBusNum, boolean reactiveLimitsOuterLoop) {
         double limit = minNominalVoltageLimit(network, minNominalVOverride);
         List<LfBus> candidates = freezeCandidates(network, limit);
         if (candidates == null) {
@@ -341,7 +343,7 @@ public final class GpuTransformerVoltageControlOuterLoop {
             // REMOTE controller (the controlled bus is not this one): the kernel freezes it as a
             // reactive-limit remote pin and marks its ENTRY, so the DISTR_Q shares renormalize.
             boolean remote = bus.getGeneratorVoltageControl().map(c2 -> c2.getControlledBus() != bus).orElse(false);
-            reactiveLimitEntry[c] = remote ? reactiveLimitEntryOf(reactiveLimitBusNum, bus.getNum()) : -1;
+            reactiveLimitEntry[c] = remote && reactiveLimitsOuterLoop ? reactiveLimitEntryOf(reactiveLimitBusNum, bus.getNum()) : -1;
             if (remote && reactiveLimitEntry[c] < 0) {
                 // The gate admitted it on the network-only condition but the pack has no entry, so
                 // nothing would carry the frozen limit type and the group's DISTR_Q shares would not

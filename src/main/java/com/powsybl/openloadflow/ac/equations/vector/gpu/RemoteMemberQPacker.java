@@ -81,67 +81,65 @@ public final class RemoteMemberQPacker {
     }
 
     static RemoteMemberReactiveTerms remoteMemberQPack(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
-                                     ExtractionColumns columns, GpuAcFamilyPacker.Packs family, boolean reactiveLimits) {
+                                     ExtractionColumns columns, GpuAcFamilyPacker.Packs family) {
         List<int[]> out = new ArrayList<>();
         List<Double> w = new ArrayList<>();
         int[] vCol = columns.vCol();
-        if (reactiveLimits) {
-            for (LfBus bus : network.getBuses()) {
-                boolean member = GeneratorVoltageControlRoles.isRemoteGeneratorVoltageControlControllerElement(bus);   // incl. a pilot that is a controller
-                if (!member || vCol[bus.getNum()] < 0 || !(bus.getMinQ() < bus.getMaxQ())) {
-                    continue;                                // mirror the RL pack's remote-entry condition
-                }
-                // A pilot-self pilot whose Q is RE-ROUTED through a candidate table (alternateQRow = -2-g) already gets
-                // its own injection at its own row from the diagnostic fill: patchGroupFrozenDestinations points the
-                // group's frozen role-0 dest at the table's FALLBACK row, which for such a pilot IS its own row.
-                // Adding the remoteMemberReactiveTerms twin on top counted it TWICE. Measured on rte6515 VL-6112_0 with the rotation
-                // property on: q read 0.603080467 where OLF has 0.910540234, and
-                // 1.218 (loadQ) + 2 * (0.910540234 - 1.218) = 0.603080 — the doubled injection, to six digits.
-                // The reactive-limit check then never saw the pilot beyond its limit and never pinned it, which
-                // is what kept the rotation path from ever reaching the pinned arrangement it exists for.
-                if (PilotSelfPacker.isPilotSelfEntry(bus) && columns.alternateQRow()[bus.getNum()] <= -2) {
+        for (LfBus bus : network.getBuses()) {
+            boolean member = GeneratorVoltageControlRoles.isRemoteGeneratorVoltageControlControllerElement(bus);   // incl. a pilot that is a controller
+            if (!member || vCol[bus.getNum()] < 0 || !(bus.getMinQ() < bus.getMaxQ())) {
+                continue;                                // mirror the RL pack's remote-entry condition
+            }
+            // A pilot-self pilot whose Q is RE-ROUTED through a candidate table (alternateQRow = -2-g) already gets
+            // its own injection at its own row from the diagnostic fill: patchGroupFrozenDestinations points the
+            // group's frozen role-0 dest at the table's FALLBACK row, which for such a pilot IS its own row.
+            // Adding the remoteMemberReactiveTerms twin on top counted it TWICE. Measured on rte6515 VL-6112_0 with the rotation
+            // property on: q read 0.603080467 where OLF has 0.910540234, and
+            // 1.218 (loadQ) + 2 * (0.910540234 - 1.218) = 0.603080 — the doubled injection, to six digits.
+            // The reactive-limit check then never saw the pilot beyond its limit and never pinned it, which
+            // is what kept the rotation path from ever reaching the pinned arrangement it exists for.
+            if (PilotSelfPacker.isPilotSelfEntry(bus) && columns.alternateQRow()[bus.getNum()] <= -2) {
+                continue;
+            }
+            var voltageControl = bus.getGeneratorVoltageControl().orElseThrow();
+            if (vCol[voltageControl.getControlledBus().getNum()] < 0) {
+                continue;
+            }
+            // The row the reactive-limit check READS (native reactiveLimitReactivePowerRow): for a relocated child that is the
+            // parent coupler's DUMMY_Q row, not its own V row, which now holds the coupler's ZERO_V. Filling
+            // the own row left the check reading ZERO for every relocated member, so it could never pin one —
+            // measured on rte6515's full busbar scope: the device's base stopped after its first
+            // ReactiveLimits pass where OLF takes three, and came back MAX_ITERATION_REACHED.
+            int row = ReactiveRelocation.relocatedQRow(bus.getNum(), columns.spanningTreeParentBranch(),
+                    columns.dummyQCol(), vCol);
+            if (bus.getShunt().isPresent()) {
+                out.add(new int[] {row, family.shuntElementOf()[bus.getNum()], GpuTwoSides.NONE, GpuReactiveTermKind.SHUNT_COMPENSATOR_REACTIVE_FLOW});
+                w.add(1.0);
+            }
+            for (LfBranch br : bus.getBranches()) {
+                if (br.isDisabled()) {
                     continue;
                 }
-                var voltageControl = bus.getGeneratorVoltageControl().orElseThrow();
-                if (vCol[voltageControl.getControlledBus().getNum()] < 0) {
-                    continue;
-                }
-                // The row the reactive-limit check READS (native reactiveLimitReactivePowerRow): for a relocated child that is the
-                // parent coupler's DUMMY_Q row, not its own V row, which now holds the coupler's ZERO_V. Filling
-                // the own row left the check reading ZERO for every relocated member, so it could never pin one —
-                // measured on rte6515's full busbar scope: the device's base stopped after its first
-                // ReactiveLimits pass where OLF takes three, and came back MAX_ITERATION_REACHED.
-                int row = ReactiveRelocation.relocatedQRow(bus.getNum(), columns.spanningTreeParentBranch(),
-                        columns.dummyQCol(), vCol);
-                if (bus.getShunt().isPresent()) {
-                    out.add(new int[] {row, family.shuntElementOf()[bus.getNum()], GpuTwoSides.NONE, GpuReactiveTermKind.SHUNT_COMPENSATOR_REACTIVE_FLOW});
+                int side = br.getBus1() == bus ? GpuTwoSides.ONE : GpuTwoSides.TWO;
+                int e = family.closedBranchElementOf()[br.getNum()];
+                if (e >= 0) {
+                    out.add(new int[] {row, e, side, GpuReactiveTermKind.CLOSED_BRANCH_REACTIVE_FLOW});
                     w.add(1.0);
+                    continue;
                 }
-                for (LfBranch br : bus.getBranches()) {
-                    if (br.isDisabled()) {
-                        continue;
-                    }
-                    int side = br.getBus1() == bus ? GpuTwoSides.ONE : GpuTwoSides.TWO;
-                    int e = family.closedBranchElementOf()[br.getNum()];
-                    if (e >= 0) {
-                        out.add(new int[] {row, e, side, GpuReactiveTermKind.CLOSED_BRANCH_REACTIVE_FLOW});
-                        w.add(1.0);
-                        continue;
-                    }
-                    int oe = family.openBranchElementOf()[br.getNum()];
-                    if (oe >= 0) {
-                        out.add(new int[] {row, oe, side, GpuReactiveTermKind.OPEN_BRANCH_REACTIVE_FLOW});
-                        w.add(1.0);
-                        continue;
-                    }
-                    // every coupler, not just the base tree's: a coupler out of it is pinned at dummyQ = 0 and adds
-                    // nothing, and one a contingency brings into OLF's tree carries this member's reactive flow
-                    if (br.isZeroImpedance(LoadFlowModel.AC)) {
-                        int dummyQColumn = columns.dummyQCol()[br.getNum()];
-                        if (dummyQColumn >= 0) {
-                            out.add(new int[] {row, dummyQColumn, side, GpuReactiveTermKind.DUMMY_Q});
-                            w.add(side == GpuTwoSides.ONE ? 1.0 : -1.0);
-                        }
+                int oe = family.openBranchElementOf()[br.getNum()];
+                if (oe >= 0) {
+                    out.add(new int[] {row, oe, side, GpuReactiveTermKind.OPEN_BRANCH_REACTIVE_FLOW});
+                    w.add(1.0);
+                    continue;
+                }
+                // every coupler, not just the base tree's: a coupler out of it is pinned at dummyQ = 0 and adds
+                // nothing, and one a contingency brings into OLF's tree carries this member's reactive flow
+                if (br.isZeroImpedance(LoadFlowModel.AC)) {
+                    int dummyQColumn = columns.dummyQCol()[br.getNum()];
+                    if (dummyQColumn >= 0) {
+                        out.add(new int[] {row, dummyQColumn, side, GpuReactiveTermKind.DUMMY_Q});
+                        w.add(side == GpuTwoSides.ONE ? 1.0 : -1.0);
                     }
                 }
             }

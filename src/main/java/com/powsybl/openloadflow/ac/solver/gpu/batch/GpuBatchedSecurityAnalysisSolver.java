@@ -120,8 +120,8 @@ public final class GpuBatchedSecurityAnalysisSolver {
                 .collect(java.util.stream.Collectors.toSet());
         com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDistributedSlackParameters distributedSlackParameters = config.distributedSlackParameters();
         GpuAcData gpuData = baseOpenIds.isEmpty() && baseOpenZeroImpedanceBranchIds.isEmpty()
-                ? GpuAcDataCache.extract(network, equationSystem, distributedSlack, reactiveLimits, distributedSlackParameters)
-                : GpuAcDataExtractor.extract(network, equationSystem, distributedSlack, reactiveLimits, baseOpenIds, baseOpenZeroImpedanceBranchIds, distributedSlackParameters);
+                ? GpuAcDataCache.extract(network, equationSystem, distributedSlackParameters)
+                : GpuAcDataExtractor.extract(network, equationSystem, baseOpenIds, baseOpenZeroImpedanceBranchIds, distributedSlackParameters);
         GpuAcActivation baseActivation = GpuAcActivation.fromEquationSystem(network, equationSystem);
         String saEqDump = System.getenv("OLF_GPU_SA_EQ_DUMP");   // the SA extraction's row map (GpuEquationDump)
         if (saEqDump != null && !saEqDump.isEmpty()) {
@@ -184,7 +184,7 @@ public final class GpuBatchedSecurityAnalysisSolver {
         Set<LfBranch> relocatedCouplers = GpuAcDataExtractor.relocatedCouplerBranches(network, equationSystem);
         GpuBatchQualification.ScenarioPlan plan = GpuBatchQualification.planScenarios(contingencies, qualifications,
                 elementMapper, gpuData, equationSystem, distributedSlackRawFactorSum, slackParticipates, distributedSlackParameters, distrRhoControllers,
-                relocatedCouplers, reactiveLimits, config.incrementalTransformerControl());
+                relocatedCouplers, distributedSlack, reactiveLimits, config.incrementalTransformerControl());
         List<Integer> batchedIndices = plan.batchedIndices();
         if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
             System.err.println("PLAN batched=" + batchedIndices.size() + " of " + contingencies.size());
@@ -227,7 +227,7 @@ public final class GpuBatchedSecurityAnalysisSolver {
                     config.continuousPhaseControl(),
                     config.transformerControl() || config.simpleTransformerControl(),
                     config.transformerVoltageControlUseInitialTapPosition(), config.genVcMinNominalV(),
-                    config.secondaryVoltageControl(), config.minPlausibleTargetV(), config.maxPlausibleTargetV()),
+                    config.secondaryVoltageControl(), config.minPlausibleTargetV(), config.maxPlausibleTargetV(), reactiveLimits),
                     network, equationSystem, targetVector, baseActivation, baseTargets,
                     gpuData.reactiveLimits().voltageRow(), gpuData.reactiveLimits().busNum(), n);
             // All-or-nothing, the same rule the base load flow applies: a loop the builders represented

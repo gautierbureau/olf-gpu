@@ -133,7 +133,7 @@ final class GpuBatchPrecomputer {
             // it is the cache hit the solver is about to take, and the plain (no base-open) flavor is
             // self-consistent with the plain mapper below — a base-open branch simply maps to no
             // element and falls back to the host scan.
-            GpuAcData screenData = GpuAcDataCache.extract(net, es, distributedSlack, reactiveLimits, config.distributedSlackParameters());
+            GpuAcData screenData = GpuAcDataCache.extract(net, es, config.distributedSlackParameters());
             GpuAcElementMapper screenMapper = new GpuAcElementMapper(net);
 
             // Every batched scenario's state is held until the analysis ends (the violation screen decides on all of

@@ -62,7 +62,7 @@ class GpuBatchContextCacheTest {
         int mode = GpuBatchContextCache.resolveBatchMode();
         GpuBatchContextCache.clearContextCache();
 
-        GpuAcData before = GpuAcDataExtractor.extract(network, es, true, true);
+        GpuAcData before = GpuAcDataExtractor.extract(network, es);
         long builds = GpuBatchContextCache.buildCount();
         GpuBatchContextCache.acquireBatchContext(before, 1, mode, n);
         assertEquals(builds + 1, GpuBatchContextCache.buildCount(), "first request: a context is built");
@@ -73,7 +73,7 @@ class GpuBatchContextCacheTest {
         // structure's device values are refreshed in place and the key moves with them
         LfBranch trafo = network.getBranchById("NHV2_NLOAD");
         trafo.getPiModel().setR1(trafo.getPiModel().getR1() * 1.1);
-        GpuAcData after = GpuAcDataExtractor.extract(network, es, true, true);
+        GpuAcData after = GpuAcDataExtractor.extract(network, es);
         assertTrue(before.sameStructureAs(after));
         assertFalse(before.sameAs(after));
         StructureNative.refreshStructureValues(GpuAcStructures.handle(n, before),

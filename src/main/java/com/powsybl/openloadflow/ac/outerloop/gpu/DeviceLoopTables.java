@@ -72,7 +72,7 @@ public final class DeviceLoopTables {
                 gpuData.reactiveLimits().targetP(), gpuData.reactiveLimits().idRank());
     }
 
-    public static void install(long handle, GpuAcData gpuData, ReactiveCapabilityCurves.Channel reactiveCapabilityCurves,
+    public static void install(long handle, GpuAcData gpuData, boolean reactiveLimitsOuterLoop, ReactiveCapabilityCurves.Channel reactiveCapabilityCurves,
                                ForceTargetQInReactiveLimits.Channel forcedTargetQ,
                                boolean reactiveLimitsRobustMode, double minRealisticVoltage, double maxRealisticVoltage,
                                double minNominalVoltageRealisticVoltageCheck, int realisticFixingLoop) {
@@ -131,10 +131,12 @@ public final class DeviceLoopTables {
                     + Thread.currentThread().getStackTrace()[2].getClassName().replaceAll(".*\\.", ""));
         }
         ReactiveLimitsNative.setBatchReactiveLimitBaseQLimitType(handle, anyBaseLt ? baseLimitTypes : null);
-        // Remote-member RL entries (plan-B1): install (or clear, on a cached context) the kinds.
+        // Remote-member RL entries (plan-B1): install (or clear, on a cached context) the kinds. They carry the DISTR_Q
+        // re-pinning (dynamic reactive keys, the pilot-Q carrier pick, the members' own q): what a ReactiveLimits pin
+        // changes, so only a run with OLF's ReactiveLimitsOuterLoop installs them, whatever the pack holds.
         boolean anyReactiveLimitRemoteEntry = false;
         for (byte b : gpuData.reactiveLimits().voltageControlRole()) {
-            anyReactiveLimitRemoteEntry |= b != GpuVoltageControlRole.LOCAL;
+            anyReactiveLimitRemoteEntry |= reactiveLimitsOuterLoop && b != GpuVoltageControlRole.LOCAL;
         }
         ReactiveLimitsNative.setBatchReactiveLimitRemoteEntries(handle,
                 anyReactiveLimitRemoteEntry ? gpuData.reactiveLimits().voltageControlRole() : null,

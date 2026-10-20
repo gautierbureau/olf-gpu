@@ -300,7 +300,7 @@ final class VoltageControlOverrides {
             if (newW == null) {
                 // the free role of a table-less group may move with the loss: re-extract, as before
                 newW = com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcDataExtractor
-                        .extract(network, es, false, false).distrQ().weight();
+                        .extract(network, es).distrQ().weight();
             }
             if (newW.length != baseW.length) {
                 return null;                                 // structural drift — not a pure reweight

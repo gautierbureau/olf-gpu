@@ -49,6 +49,10 @@ public final class DevicePhases {
      * <p>{@code incrementalTransformerReactivePowerControlMaxTapShift} belongs to the incremental transformer REACTIVE POWER loop, not to the
      * transformer voltage one — the config field it comes from is named after the ratio tap control and
      * reads like the latter. Feeding it the wrong loop's shift moved a bus by 1.3e-4 kV.
+     *
+     * <p>{@code reactiveLimitsOuterLoop}: the run has OLF's ReactiveLimitsOuterLoop. The reactive-limit entries are
+     * packed either way; the secondary voltage control and the generator freeze of a remote controller key on their
+     * pin state, which only that loop moves.
      */
     public record Request(boolean monitoring,
                           boolean incrementalTransformerVoltageControllers,
@@ -57,7 +61,8 @@ public final class DevicePhases {
                           boolean reactivePowerControl, boolean incrementalPhase, int incrementalTransformerReactivePowerControlMaxTapShift,
                           boolean continuousPhase,
                           boolean discreteTransformerVoltageControl, boolean transformerVoltageControlUseInitialTapPosition, double genVcMinNominalV,
-                          boolean secondaryVoltageControlControllers, double minPlausibleTargetV, double maxPlausibleTargetV) {
+                          boolean secondaryVoltageControlControllers, double minPlausibleTargetV, double maxPlausibleTargetV,
+                          boolean reactiveLimitsOuterLoop) {
     }
 
     /** Every phase's controllers, null where the run does not configure the loop. */
@@ -118,10 +123,10 @@ public final class DevicePhases {
                 discreteTransformerVoltageControl,
                 discreteTransformerVoltageControl != null
                         ? GpuTransformerVoltageControlOuterLoop.buildFreezeTables(network, es, discreteTransformerVoltageControl,
-                                request.genVcMinNominalV(), reactiveLimitBusNum)
+                                request.genVcMinNominalV(), reactiveLimitBusNum, request.reactiveLimitsOuterLoop())
                         : null,
                 request.secondaryVoltageControlControllers() && GpuSecondaryVoltageControlOuterLoop.supported(network)
-                        ? GpuSecondaryVoltageControlOuterLoop.build(network, es, reactiveLimitVoltageRow,
+                        ? GpuSecondaryVoltageControlOuterLoop.build(network, es, reactiveLimitVoltageRow, request.reactiveLimitsOuterLoop(),
                                 new EsContext(es.getStateVector(), n),
                                 request.minPlausibleTargetV(), request.maxPlausibleTargetV(), mapper)
                         : null,

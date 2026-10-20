@@ -105,7 +105,7 @@ class GpuBatchedPegaseOutlierDiagnosticTest {
         int n = baseState.length;
 
         // Dump the device RL data for the mis-switching controller bus (VL-7616_0) vs the true values.
-        GpuAcData dbg = GpuAcDataExtractor.extract(network, es, !NO_DS, true);
+        GpuAcData dbg = GpuAcDataExtractor.extract(network, es);
         String probeBusId = System.getenv().getOrDefault("OLF_GPU_PROBE_BUS", "VL-7616_0");
         var probeBus = network.getBusById(probeBusId);
         if (probeBus != null) {

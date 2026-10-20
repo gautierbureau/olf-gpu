@@ -21,7 +21,8 @@ import java.util.Set;
 /**
  * What every planner of {@link GpuBatchQualification#planScenarios} reads besides the contingency it plans: the
  * contingencies and their qualifications, the base extraction and its element numbering, the equation system, the
- * distributed-slack settings, the DISTR_RHO controllers and relocated couplers, and which control loops run.
+ * distributed-slack settings, the DISTR_RHO controllers and relocated couplers, and which control loops run (the
+ * run's DistributedSlackOuterLoop and ReactiveLimitsOuterLoop among them: their tables are packed either way).
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
@@ -29,5 +30,5 @@ record PlanContext(List<BatchContingency> contingencies, List<GpuBatchContingenc
                    GpuAcElementMapper elementMapper, GpuAcData gpuData,
                    EquationSystem<AcVariableType, AcEquationType> es, double distributedSlackRawFactorSum, boolean slackParticipates,
                    GpuDistributedSlackParameters distributedSlackParameters, Set<LfBranch> distrRhoControllers, Set<LfBranch> relocatedCouplers,
-                   boolean reactiveLimits, boolean incrementalTransformerVoltageControllers) {
+                   boolean distributedSlack, boolean reactiveLimits, boolean incrementalTransformerVoltageControllers) {
 }

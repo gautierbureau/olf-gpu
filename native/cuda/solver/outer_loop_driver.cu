@@ -292,8 +292,11 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     // Full-loadflow mode (tol > 0) with local PV controllers runs the reactive-limits (PV→PQ) OUTER loop:
     // converge the inner Newton, switch any generator over its Q limit, re-converge the switched scenarios,
     // repeat until a pass switches nothing. Fixed-iter mode (tol <= 0, the throughput benchmark) and
-    // family-free networks with no controllers do ONE pass (no outer loop) — byte-identical to before.
-    bool fullLoadflow = !deviceFixedIter && (ctx->nReactiveLimitEntries > 0 || ctx->nDistributedSlackBuses > 0 || ctx->slackOnlyDistribution
+    // family-free networks with no controllers do ONE pass (no outer loop) — byte-identical to before. The
+    // distributed-slack and reactive-limit tables are packed whatever the run's loops: they count only for a run
+    // that has the loop (distributedSlackOuterLoop / reactiveLimitsOuterLoop).
+    bool fullLoadflow = !deviceFixedIter && ((ctx->reactiveLimitsOuterLoop && ctx->nReactiveLimitEntries > 0)
+                                             || (ctx->distributedSlackOuterLoop && (ctx->nDistributedSlackBuses > 0 || ctx->slackOnlyDistribution))
                                              || ctx->nMonitoringVoltageControllers > 0 || ctx->nIncrementalTransformerVoltageControlControllerBranches > 0 || ctx->nIncrementalShuntVoltageControlControllerShunts > 0 || ctx->nIncrementalFlowControlControllerBranches > 0 || ctx->nPhaseControlControllerBranches > 0
                                              || ctx->nTransformerVoltageControlMembers > 0 || ctx->nShuntVoltageControlMembers > 0 || ctx->nSecondaryVoltageControlControllerBuses > 0);
     const int MAX_OUTER_LOOP_ITERATIONS = maxOuterProductive > 0 ? maxOuterProductive : 20;   // OLF maxOuterLoopIterations
@@ -790,7 +793,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                 ctx->nClosedBranchParameterOverrides, ctx->dClosedBranchParameterOverrideScenarioElement.as<int>(), ctx->dClosedBranchParameterOverrideValues.as<double>(),
                 ctx->nShuntAdmittanceOverrides, ctx->dShuntAdmittanceOverrideScenarioElement.as<int>(), ctx->dShuntAdmittanceOverrideDelta.as<double>());
     }
-    if (ctx->nHvdcAcEmulation > 0 && ctx->slackBusPhiRow >= 0) {           // a link on the slack bus, as OLF's slack mismatch sees it
+    // a link on the slack bus, as OLF's slack mismatch sees it: read by the DistributedSlack check alone
+    if (ctx->distributedSlackOuterLoop && ctx->nHvdcAcEmulation > 0 && ctx->slackBusPhiRow >= 0) {
         hvdcSlackBalanceBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(nS, ctx->nHvdcAcEmulation, n, ctx->nElements, ctx->slackBusPhiRow,
                 ctx->hasSlackBusRowOverride ? ctx->dSlackBusRowOverride.as<int>() : nullptr,
                 ctx->dHvdcBus1PRow.as<int>(), ctx->dHvdcBus2PRow.as<int>(), ctx->dHvdcBus1PhiColumn.as<int>(), ctx->dHvdcBus2PhiColumn.as<int>(),

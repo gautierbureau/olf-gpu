@@ -128,7 +128,7 @@ public final class GpuSecondaryVoltageControlOuterLoop {
 
     @SuppressWarnings("unchecked")
     public static Controllers build(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
-                             int[] reactiveLimitVoltageRow, DevicePhases.EsContext esCtx,
+                             int[] reactiveLimitVoltageRow, boolean reactiveLimitsOuterLoop, DevicePhases.EsContext esCtx,
                              double minPlausibleTargetV, double maxPlausibleTargetV,
                              GpuAcElementMapper elementMapper) {
         Map<Integer, Integer> busVRows = new LinkedHashMap<>();
@@ -152,7 +152,9 @@ public final class GpuSecondaryVoltageControlOuterLoop {
                 var voltageControl = controller.getGeneratorVoltageControl().orElseThrow();
                 Integer vRow = busVRows.get(controller.getNum());
                 Integer controlledBusVRow = busVRows.get(voltageControl.getControlledBus().getNum());
-                Integer reactiveLimitEntry = vRow != null ? reactiveLimitEntryByVoltageRow.get(vRow) : null;
+                // a controller is keyed by its reactive-limit entry, whose pin state the phase reads: only a run with
+                // OLF's ReactiveLimitsOuterLoop has one to read (the entry is packed either way)
+                Integer reactiveLimitEntry = vRow != null && reactiveLimitsOuterLoop ? reactiveLimitEntryByVoltageRow.get(vRow) : null;
                 if (vRow == null || controlledBusVRow == null || reactiveLimitEntry == null) {
                     GpuBatchSkips.record(GpuBatchSkips.Slot.SVC, LOGGER,
                             "Secondary VC controller {} not representable on the GPU batch — skipped zone {}",

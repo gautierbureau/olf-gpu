@@ -202,7 +202,7 @@ final class GpuBatchChunkSolver {
         NewtonSettingsNative.setBatchLineSearch(handle, parameters.getLineSearchStateVectorScalingMaxIteration(),
                 parameters.getLineSearchStateVectorScalingStepFold());
         // The run-constant outer-loop tables, shared with the base load flow's batch-of-one.
-        DeviceLoopTables.install(handle, gpuData, reactiveCapabilityCurves, forcedTargetQ,
+        DeviceLoopTables.install(handle, gpuData, in.settings().reactiveLimitsOuterLoop(), reactiveCapabilityCurves, forcedTargetQ,
                 config.reactiveLimitsRobustMode(), config.minRealisticVoltage(), config.maxRealisticVoltage(),
                 config.minNominalVoltageRealisticVoltageCheck(), config.realisticFixingLoop());
 
@@ -234,7 +234,7 @@ final class GpuBatchChunkSolver {
             return;
         }
 
-        RunScratch rs = new RunScratch(chunkSize, nElements, gpuData, elementMapper, baseRowMode);
+        RunScratch rs = new RunScratch(chunkSize, nElements, gpuData, elementMapper, baseRowMode, in.settings().distributedSlackOuterLoop());
         // TWO-PHASE ordering (operator strategies, warm continuation): plain contingencies first,
         // then (ctg, strategy) PAIRS — each pair chunk is seeded with its PARENT contingency's
         // solved state (x0PerScenario) and reactive-limits pinning (reactiveLimitsSeedState), so the strategy
@@ -255,20 +255,27 @@ final class GpuBatchChunkSolver {
         // ctg index -> its FINAL distributed-slack targets at the DS participant rows (the device DS mutates
         // targets in place; read back after each ctg chunk). The pair phase re-anchors its distribution here,
         // mirroring OLF's setGeneratorsInitialTargetPToTargetP before the strategy re-solve.
-        int nDistributedSlackBuses = gpuData.distributedSlack().busPhiRow().length;
+        // The run's DistributedSlackOuterLoop decides whether anything distributes, not the pack (packed either way):
+        // without the loop no participant, no loss pre-distribution, the slack bus absorbs, as OLF.
+        boolean distributedSlackOuterLoop = in.settings().distributedSlackOuterLoop();
+        boolean reactiveLimitsOuterLoop = in.settings().reactiveLimitsOuterLoop();
+        int nDistributedSlackBuses = distributedSlackOuterLoop ? gpuData.distributedSlack().busPhiRow().length : 0;
         java.util.Map<Integer, double[]> distributedSlackTargetsByIndex = new java.util.HashMap<>();
         // ctg index -> each participating generator's final move from its base target (the device's distributedSlackGeneratorMove, or the
         // loss pre-distribution alone when no slack pass fired): its pairs' per-generator anchors
-        int nDistributedSlackGenerators = gpuData.distributedSlack().generatorBus() == null ? 0 : gpuData.distributedSlack().generatorBus().length;
+        int packedDistributedSlackGenerators = gpuData.distributedSlack().generatorBus() == null ? 0 : gpuData.distributedSlack().generatorBus().length;
+        int nDistributedSlackGenerators = distributedSlackOuterLoop ? packedDistributedSlackGenerators : 0;
         java.util.Map<Integer, double[]> genMovesByIndex = new java.util.HashMap<>();
         // ctg index -> the state its pairs start from when it ran out of Newton iterations (see the capture)
         java.util.Map<Integer, double[]> exhaustedStartByIndex = new java.util.HashMap<>();
         java.util.Map<Integer, Double> slackAbsorbedByIndex = new java.util.HashMap<>();   // slack-only DS parents
-        boolean slackOnlyDistribution = gpuData.distributedSlack().busPhiRow().length == 0 && gpuData.distributedSlack().slackPhiRow() >= 0;
-        // Host-side base RL seed (mirrors initReactiveLimitQLimitTypeBatch) for PADDING slots of pair chunks.
+        boolean slackOnlyDistribution = distributedSlackOuterLoop && gpuData.distributedSlack().busPhiRow().length == 0
+                && gpuData.distributedSlack().slackPhiRow() >= 0;
+        // Host-side base RL seed (mirrors initReactiveLimitQLimitTypeBatch) for PADDING slots of pair chunks: all NONE
+        // (all PV) without the run's ReactiveLimitsOuterLoop, as the device seeds it.
         int[] baseReactiveLimitsState = new int[nReactiveLimitEntries];
         byte[] baseLimitTypes = gpuData.reactiveLimits().baseQLimitType();
-        for (int i = 0; i < nReactiveLimitEntries; i++) {
+        for (int i = 0; reactiveLimitsOuterLoop && i < nReactiveLimitEntries; i++) {
             int vrow = gpuData.reactiveLimits().voltageRow()[i];
             // remote entries (plan-B3): base mode 1 = UNPINNED DISTR_Q share; only mode 4 is a pin.
             // The pilot's V equals the group target at the base (degenerate) — key the direction on
@@ -607,7 +614,7 @@ final class GpuBatchChunkSolver {
                     //    leg's starting operating point (losses are nonlinear along the path).
                     if (pairPhase) {
                         x0Full = new double[chunkSize * n];
-                        reactiveLimitsSeedState = nReactiveLimitEntries > 0 ? new int[chunkSize * nReactiveLimitEntries] : null;
+                        reactiveLimitsSeedState = reactiveLimitsOuterLoop && nReactiveLimitEntries > 0 ? new int[chunkSize * nReactiveLimitEntries] : null;
                         if (nDistributedSlackBuses > 0) {
                             distributedSlackBusAnchorShift = new double[chunkSize * nDistributedSlackBuses];
                             slackBusAnchorShift = new double[chunkSize];
@@ -928,6 +935,9 @@ final class GpuBatchChunkSolver {
                     // the whole check on the device. Where the kernel refuses the zone set (wider than its
                     // dense system, or an observable on an unpacked element) the driver PAUSES at the same
                     // slot and the same decision runs on the host instead.
+                    // the run's own loops, before the phase uploads that read them (the secondary voltage control refuses
+                    // the device without the ReactiveLimits loop)
+                    DriverNative.setBatchOuterLoops(handle, in.settings().distributedSlackOuterLoop(), in.settings().reactiveLimitsOuterLoop());
                     boolean secondaryVoltageControlInKernel = secondaryVoltageControlActive && GpuSecondaryVoltageControlOuterLoop.uploadToDevice(handle, phases.secondaryVoltageControlControllers());
                     if (!secondaryVoltageControlInKernel) {
                         GpuSecondaryVoltageControlOuterLoop.uploadToDevice(handle, null);   // clear a cached context's table
@@ -935,7 +945,6 @@ final class GpuBatchChunkSolver {
                     boolean secondaryVoltageControlAsDriverPause = secondaryVoltageControlActive && reactiveLimitsFinalState != null && !secondaryVoltageControlInKernel;
                     DriverNative.setBatchHostLoop(handle, secondaryVoltageControlAsDriverPause
                             ? GpuOuterLoopKind.hostMaskBit(GpuOuterLoopKind.HOST_SECONDARY_VOLTAGE_CONTROL) : 0);
-                    DriverNative.setBatchOuterLoops(handle, in.settings().distributedSlackOuterLoop(), in.settings().reactiveLimitsOuterLoop());
                     long solveCountBefore = BatchReadbackNative.readBatchSolveCount(handle);
                     // Seeds only where no full per-scenario state goes (the pair phase builds its own from the parents).
                     NewtonSettingsNative.setBatchX0Seeds(handle, x0Full == null ? x0SeedIdx : null, x0Full == null ? x0SeedVal : null);
@@ -996,9 +1005,10 @@ final class GpuBatchChunkSolver {
                     if (nReactiveLimitEntries > 0) {
                         ReactiveLimitsNative.setBatchReactiveLimitSeedTargetQ(handle, pairPhase ? reactiveLimitSeedTargetQ : null);
                     }
-                    if (nDistributedSlackGenerators > 0) {
+                    if (packedDistributedSlackGenerators > 0) {         // set, or cleared on a cached context, whatever the run's loops
                         DistributedSlackNative.setBatchDistributedSlackGeneratorAnchors(handle, pairPhase ? distributedSlackGeneratorAnchor : null,
-                                pairPhase ? null : ChunkArrays.flat(cl.genPreMovesBySlot, chunkSize, nDistributedSlackGenerators), pairPhase ? distributedSlackGeneratorSeedAnchor : null);
+                                pairPhase || nDistributedSlackGenerators == 0 ? null : ChunkArrays.flat(cl.genPreMovesBySlot, chunkSize, nDistributedSlackGenerators),
+                                pairPhase ? distributedSlackGeneratorSeedAnchor : null);
                     }
                     double[][] chunkResults = BatchSolveNative.solveBatchContext(handle, baseState, baseTargets,
                             rs.rowModePerScenario, baseRowMode, rs.disabledMask, targetOverrideIndex, targetOverrideValue,

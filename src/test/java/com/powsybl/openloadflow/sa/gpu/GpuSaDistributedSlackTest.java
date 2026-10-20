@@ -470,6 +470,39 @@ class GpuSaDistributedSlackTest extends AbstractGpuSaTest {
         }
     }
 
+    /** Distributed slack OFF on a network with a mismatch to distribute: the distributed-slack pack is extracted
+     *  whatever the run's loops (Q15), so only the run's switch keeps the device from distributing. Losing B9's load
+     *  (29.5 MW) or B6-GP (20 MW) leaves the mismatch on the slack bus in OLF, which has no DistributedSlackOuterLoop
+     *  and no loss pre-distribution; the branch outages leave their loss change there too. Non-vacuity, on the CPU:
+     *  the load outage with the slack distributed moves B2-G, so a device that distributed could not match. GPU SA ==
+     *  CPU SA at 1e-12 (bus voltages and the distributed active power, 0), every outage on the device. */
+    @Test
+    void deviceWithoutDistributedSlackLeavesTheMismatchOnTheSlackMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        java.util.function.Supplier<Network> fixture = () -> {
+            Network n = IeeeCdfNetworkFactory.create14();
+            n.getVoltageLevel("VL6").newGenerator().setId("B6-GP").setBus("B6").setConnectableBus("B6")
+                    .setTargetP(20).setTargetQ(0).setVoltageRegulatorOn(false).setMinP(0).setMaxP(80).add();
+            return n;
+        };
+        java.util.function.ToDoubleFunction<Boolean> postOutageB2P = distributed -> {
+            Network post = fixture.get();
+            post.getLoad("B9-L").remove();
+            assertTrue(com.powsybl.loadflow.LoadFlow.find("OpenLoadFlow").run(post, new com.powsybl.loadflow.LoadFlowParameters()
+                    .setDistributedSlack(distributed).setUseReactiveLimits(true)).isFullyConverged());
+            return post.getGenerator("B2-G").getTerminal().getP();
+        };
+        double distributedGap = Math.abs(postOutageB2P.applyAsDouble(true) - postOutageB2P.applyAsDouble(false));
+        assertTrue(distributedGap > 1, "distributing the lost B9 load must move B2-G (gap " + distributedGap + " MW)");
+        List<Contingency> ctgs = List.of(new Contingency("B9-L", new com.powsybl.contingency.LoadContingency("B9-L")),
+                new Contingency("B6-GP", new com.powsybl.contingency.GeneratorContingency("B6-GP")),
+                new Contingency("L1-2-1", new BranchContingency("L1-2-1")),
+                new Contingency("L1-5-1", new BranchContingency("L1-5-1")));
+        assertGpuMatchesCpu(fixture.get(), ctgs, 1e-12, false);
+        assertEquals(ctgs.size(), GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(), "every outage on the device");
+    }
+
     @Test
     void participatingGeneratorOutageWithAParticipatingSlackMatchesCpu() {
         // The slack bus's generator takes part in the distribution. Losing another participant renormalizes

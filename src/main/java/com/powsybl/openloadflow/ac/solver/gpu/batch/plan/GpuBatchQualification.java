@@ -112,10 +112,11 @@ public final class GpuBatchQualification {
             EquationSystem<AcVariableType, AcEquationType> es,
             double distributedSlackRawFactorSum, boolean slackParticipates,
             com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDistributedSlackParameters distributedSlackParameters, Set<LfBranch> distrRhoControllers,
-            Set<LfBranch> relocatedCouplers, boolean reactiveLimits, boolean incrementalTransformerVoltageControllers) {
+            Set<LfBranch> relocatedCouplers, boolean distributedSlack, boolean reactiveLimits, boolean incrementalTransformerVoltageControllers) {
         ScenarioPlanBuilder pb = new ScenarioPlanBuilder(contingencies.size(), gpuData);
         PlanContext ctx = new PlanContext(contingencies, qualifications, elementMapper, gpuData, es, distributedSlackRawFactorSum,
-                slackParticipates, distributedSlackParameters, distrRhoControllers, relocatedCouplers, reactiveLimits, incrementalTransformerVoltageControllers);
+                slackParticipates, distributedSlackParameters, distrRhoControllers, relocatedCouplers, distributedSlack, reactiveLimits,
+                incrementalTransformerVoltageControllers);
         for (int i = 0; i < qualifications.size(); i++) {
             GpuBatchContingencyValidator.Qualification q = qualifications.get(i);
             if (!q.qualified()) {
@@ -160,18 +161,20 @@ public final class GpuBatchQualification {
                 }
             }
             // A GeneratorAction moves its generator's target P, and with reactive limits its capability curve moves
-            // with it. The curve and forced-target-Q channels track a generator's P only when it is in the
-            // distributed-slack generator pack (its anchor and its own move); any other curve generator keeps its
-            // limits at the base target P - CPU.
+            // with it. The curve and forced-target-Q channels track a generator's P only when the run distributes the
+            // slack and it is in the distributed-slack generator pack (its anchor and its own move); any other curve
+            // generator keeps its limits at the base target P - CPU.
             if (reactiveLimits && c.generatorActions().stream()
-                    .anyMatch(m -> VoltageControlReMerge.hasCurve(m.generator()) && !VoltageControlReMerge.inGeneratorPack(gpuData, m.generator().getId()))) {
+                    .anyMatch(m -> VoltageControlReMerge.hasCurve(m.generator())
+                            && !(distributedSlack && VoltageControlReMerge.inGeneratorPack(gpuData, m.generator().getId())))) {
                 refuse(c, "PLAN:PAIR_ACTION_UNTRACKED_CURVE");
                 continue;
             }
             // ...and re-checks its participation at the new target, which the device applies to the generator pack.
             // A participant outside a non-empty pack (its bus has no active P balance row) has nowhere to sit out. (In
-            // a slack-only distribution there is no pack, and any action there moves the slack bus: SLACK_BUS.)
-            if (gpuData.distributedSlack().generatorId() != null && gpuData.distributedSlack().generatorId().length > 0 && c.generatorActions().stream()
+            // a slack-only distribution there is no pack, and any action there moves the slack bus: SLACK_BUS.) Without the
+            // run's DistributedSlackOuterLoop nobody participates.
+            if (distributedSlack && gpuData.distributedSlack().generatorId() != null && gpuData.distributedSlack().generatorId().length > 0 && c.generatorActions().stream()
                     .anyMatch(m -> distributedSlackParameters.factor(m.generator()) != 0 && !VoltageControlReMerge.inGeneratorPack(gpuData, m.generator().getId()))) {
                 refuse(c, "PLAN:PAIR_ACTION_UNTRACKED_PARTICIPANT");
                 continue;
@@ -191,7 +194,7 @@ public final class GpuBatchQualification {
                 var phiVar = es.getVariableSet().getVariable(newSlack.getNum(), AcVariableType.BUS_PHI);
                 int phiRow = phiVar == null ? -1 : phiVar.getRow();
                 LfBus baseSlack = newSlack.getNetwork().getSynchronousNetworks().getFirst().getSlackBuses().getFirst();
-                boolean distributedSlack = gpuData.distributedSlack().slackPhiRow() >= 0;
+                // the run's DistributedSlackOuterLoop, not the pack: the pack is there either way
                 boolean participates = distributedSlack && (distributedSlackParameters.busFactor(baseSlack) != 0 || distributedSlackParameters.busFactor(newSlack) != 0);
                 boolean slackOnly = distributedSlack && gpuData.distributedSlack().busPhiRow().length == 0;
                 // the slack's balance is read from the injection buffer, which carries no AC-emulation HVDC term

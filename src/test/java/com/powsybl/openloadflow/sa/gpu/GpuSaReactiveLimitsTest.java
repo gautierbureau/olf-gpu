@@ -492,6 +492,36 @@ class GpuSaReactiveLimitsTest extends AbstractGpuSaTest {
                 "the outage must batch (or the test proves nothing)");
     }
 
+    /** Reactive limits OFF with a generator beyond its limits: the reactive-limit entries are extracted whatever the
+     *  run's loops (Q15), so only the run's switch keeps the device from pinning. B6-G holds B6 with a [-5, 5] MVAr
+     *  range it cannot keep in the base nor after the outages; OLF, with no ReactiveLimitsOuterLoop, keeps it PV.
+     *  Non-vacuity, on the CPU: B6-G's Q leaves its range with limits off and B6 moves with limits on. GPU SA ==
+     *  CPU SA at 1e-12, every outage on the device. */
+    @Test
+    void deviceWithoutReactiveLimitsKeepsAGeneratorBeyondItsLimitsPvMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        java.util.function.Supplier<Network> fixture = () -> {
+            Network n = IeeeCdfNetworkFactory.create14();
+            n.getGenerator("B6-G").newMinMaxReactiveLimits().setMinQ(-5).setMaxQ(5).add();
+            return n;
+        };
+        Network limitsOff = fixture.get();
+        assertTrue(com.powsybl.loadflow.LoadFlow.find("OpenLoadFlow").run(limitsOff, new com.powsybl.loadflow.LoadFlowParameters()
+                .setDistributedSlack(true).setUseReactiveLimits(false)).isFullyConverged());
+        double q6 = -limitsOff.getGenerator("B6-G").getTerminal().getQ();
+        assertTrue(Math.abs(q6) > 5, "B6-G must need more than its 5 MVAr: q=" + q6);
+        Network limitsOn = fixture.get();
+        assertTrue(com.powsybl.loadflow.LoadFlow.find("OpenLoadFlow").run(limitsOn, new com.powsybl.loadflow.LoadFlowParameters()
+                .setDistributedSlack(true).setUseReactiveLimits(true)).isFullyConverged());
+        double gap = Math.abs(limitsOn.getBusBreakerView().getBus("B6").getV() - limitsOff.getBusBreakerView().getBus("B6").getV());
+        assertTrue(gap > 1e-3, "pinning B6-G must move B6 (gap " + gap + " kV)");
+        List<Contingency> ctgs = List.of(new Contingency("L1-2-1", new BranchContingency("L1-2-1")),
+                new Contingency("L6-13-1", new BranchContingency("L6-13-1")));
+        assertGpuMatchesCpu(fixture.get(), ctgs, 1e-12, true, false);
+        assertEquals(ctgs.size(), GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(), "every outage on the device");
+    }
+
     /** maxPqPvSwitch = 0: OLF's switchPqPv blocks EVERY PQ -> PV switch (a bus's pvPqSwitchCount is never
      *  below 0), so a bus pinned in the base stays pinned through every contingency. The device read 0 as
      *  "unset" and applied OLF's default of 3: on the fixture above both members un-pin on the device

@@ -121,7 +121,7 @@ final class BranchOutagePlanner {
                 pb.busRows = com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcDataExtractor
                         .busPowerRows(stationResets.get(0).bus().getNetwork(), es);
             }
-            GenOutage[] injectionOutages = GpuBatchInjectionOutages.computeInjectionOutages(es, gpuData, distributedSlackRawFactorSum, slackParticipates,
+            GenOutage[] injectionOutages = GpuBatchInjectionOutages.computeInjectionOutages(es, gpuData, ctx.distributedSlack(), distributedSlackRawFactorSum, slackParticipates,
                     distributedSlackParameters, List.of(), stationResets, pb.busRows);
             if (injectionOutages == null) {
                 GpuBatchQualification.refuse(c, "PLAN:INJECTION_OUTAGE_SHAPE");

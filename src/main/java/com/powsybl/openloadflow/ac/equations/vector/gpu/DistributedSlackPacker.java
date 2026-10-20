@@ -44,7 +44,7 @@ final class DistributedSlackPacker {
     }
 
     static DistributedSlackParticipants distributedSlackPack(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
-                                       ExtractionColumns columns, boolean distributedSlack, GpuDistributedSlackParameters distributedSlackParameters) {
+                                       ExtractionColumns columns, GpuDistributedSlackParameters distributedSlackParameters) {
         int[] phiCol = columns.phiCol();
         int[] pRow = columns.pRow();       // a DS target is written at the bus's P ROW, relocated under a coupler tree
         // Distributed-slack pack: the single slack/reference bus (BUS_TARGET_PHI active, BUS_TARGET_P
@@ -88,9 +88,6 @@ final class DistributedSlackPacker {
         List<Double> distributedSlackBusMarginUp = new ArrayList<>();                    // REMAINING_MARGIN per-bus margins
         List<Double> distributedSlackBusMarginDown = new ArrayList<>();
         for (LfBus bus : network.getBuses()) {
-            if (!distributedSlack) {                                    // empty pack when the DS outer loop is disabled
-                break;
-            }
             int bn = bus.getNum();
             if (StableRowIndexing.row(es, bn, AcEquationType.BUS_TARGET_PHI) >= 0) {       // the slack/reference bus
                 slackBusPhiRow = pRow[bn];

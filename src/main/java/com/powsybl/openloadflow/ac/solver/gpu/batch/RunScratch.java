@@ -55,7 +55,7 @@ final class RunScratch {
     final int shuntPackOffset;
     // Per-scenario distributed-slack reweight (a generator loss at a DS-participant bus): one affected DS
     // bus per slot (distributedSlackOverrideBus[s] = its DS-pack index, -1 = none) whose factor/base/headroom/footroom and the
-    // factor sum shrink by the lost gen's share. Only allocated when the network has distributed slack.
+    // factor sum shrink by the lost gen's share. Only allocated when the run distributes the slack over participant rows.
     final boolean hasDistributedSlack;
     final int[] distributedSlackOverrideBus;
     final double[] distributedSlackOverrideFactorDelta;
@@ -65,7 +65,8 @@ final class RunScratch {
     private final int[] baseRowMode;
     private final int[] baseOpenClosedBranchElements;
 
-    RunScratch(int chunkSize, int nElements, GpuAcData gpuData, GpuAcElementMapper elementMapper, int[] baseRowMode) {
+    RunScratch(int chunkSize, int nElements, GpuAcData gpuData, GpuAcElementMapper elementMapper, int[] baseRowMode,
+               boolean distributedSlackOuterLoop) {
         this.disabledMask = new boolean[chunkSize][nElements];
         this.disabledIdx = new int[chunkSize][];
         this.elementsAtVCol = new java.util.HashMap<>();
@@ -100,7 +101,8 @@ final class RunScratch {
         this.closedBranchParameterOverrideScenarioElementList = new ArrayList<>();
         this.closedBranchParameterOverrideValueList = new ArrayList<>();
         this.shuntPackOffset = elementMapper.getClosedBranchCount() + elementMapper.getOpenBranchCount();
-        this.hasDistributedSlack = gpuData.distributedSlack().busPhiRow().length > 0;
+        // the run's DistributedSlackOuterLoop with participant rows to distribute to: the pack is there either way
+        this.hasDistributedSlack = distributedSlackOuterLoop && gpuData.distributedSlack().busPhiRow().length > 0;
         this.distributedSlackOverrideBus = hasDistributedSlack ? new int[chunkSize] : new int[0];
         this.distributedSlackOverrideFactorDelta = hasDistributedSlack ? new double[chunkSize] : new double[0];
         this.distributedSlackOverrideBaseTargetPDelta = hasDistributedSlack ? new double[chunkSize] : new double[0];

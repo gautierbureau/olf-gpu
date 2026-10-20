@@ -216,11 +216,15 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
             com.powsybl.openloadflow.ac.outerloop.gpu.GpuSecondaryVoltageControlOuterLoop.applyToNetwork(network, secondaryVoltageControlControllers,
                     SecondaryVoltageControlNative.readBatchSecondaryVoltageControlTargets(handle));
         }
-        lastDistributedActivePower = GpuDistributedSlackOuterLoop.applyToNetwork(network, equationSystem, handle, driverDistributedSlackParameters(),
-                loadAnchorTargetP, deviceTargets,
-                BatchReadbackNative.readBatchDistributedSlackGeneratorMove(handle), BatchReadbackNative.readBatchSlackRetainedShare(handle), data);
-        GpuReactiveLimitsOuterLoop.applyToNetwork(network, reactiveLimitsFinalState, data, deviceTargets,
-                data.reactiveLimits().voltageControlRole() != null ? BatchReadbackNative.readBatchRowModes(handle) : null);
+        // Only a loop the run has moved anything: its tables are packed either way.
+        lastDistributedActivePower = driverDistributedSlackLoop() == null ? Double.NaN
+                : GpuDistributedSlackOuterLoop.applyToNetwork(network, equationSystem, handle, driverDistributedSlackParameters(),
+                        loadAnchorTargetP, deviceTargets,
+                        BatchReadbackNative.readBatchDistributedSlackGeneratorMove(handle), BatchReadbackNative.readBatchSlackRetainedShare(handle), data);
+        if (driverReactiveLimitsOuterLoop() != null) {
+            GpuReactiveLimitsOuterLoop.applyToNetwork(network, reactiveLimitsFinalState, data, deviceTargets,
+                    data.reactiveLimits().voltageControlRole() != null ? BatchReadbackNative.readBatchRowModes(handle) : null);
+        }
         if (incrementalTransformerVoltageControlOwned && incrementalTransformerVoltageControlControllers != null) {
             GpuIncrementalTransformerVoltageControlOuterLoop.applyToNetwork(network, incrementalTransformerVoltageControlControllers,
                                                                TransformerVoltageControlNative.readBatchIncrementalTransformerVoltageControlTaps(handle));
@@ -595,7 +599,9 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
             }
             double[] target = activation.applyTargets(targetVector.getArray());
             double[] x0 = equationSystem.getStateVector().get().clone();
-            reactiveLimitsFinalState = cachedData.reactiveLimits().voltageRow().length > 0 ? new int[cachedData.reactiveLimits().voltageRow().length] : null;
+            // the RL state only a run with the ReactiveLimits loop moves (every entry stays NONE otherwise)
+            reactiveLimitsFinalState = driverReactiveLimitsOuterLoop() != null && cachedData.reactiveLimits().voltageRow().length > 0
+                    ? new int[cachedData.reactiveLimits().voltageRow().length] : null;
             int[] reactiveLimitsSeedState = null;
             if (restart && reactiveLimitsStateCarry != null && reactiveLimitsFinalState != null) {
                 reactiveLimitsSeedState = new int[reactiveLimitsFinalState.length];
@@ -652,6 +658,9 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
             // ran it on device; a pause whose mutation dirties the structure is also what forces the
             // driver RESTART, so the divergence was not only a throughput one.
             secondaryVoltageControlControllers = phases.secondaryVoltageControlControllers();
+            // the run's own loops, before the phase uploads that read them (the secondary voltage control refuses
+            // the device without the ReactiveLimits loop)
+            DriverNative.setBatchOuterLoops(handle, driverDistributedSlackLoop() != null, driverReactiveLimitsOuterLoop() != null);
             if (com.powsybl.openloadflow.ac.outerloop.gpu.GpuSecondaryVoltageControlOuterLoop.uploadToDevice(handle, secondaryVoltageControlControllers)) {
                 hostMask &= ~GpuOuterLoopKind.hostMaskBit(GpuOuterLoopKind.HOST_SECONDARY_VOLTAGE_CONTROL);
             } else {
@@ -667,7 +676,6 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                     handle, hostMask);
             activeHostMask = hostMask;
             DriverNative.setBatchHostLoop(handle, hostMask);
-            DriverNative.setBatchOuterLoops(handle, driverDistributedSlackLoop() != null, driverReactiveLimitsOuterLoop() != null);
             if (restart && restartLoopKind != GpuOuterLoopKind.NOT_PAUSED) {        // re-check the loop that went UNSTABLE first
                 DriverNative.setBatchDriverStartLoop(handle, restartLoopKind);
             }
@@ -841,7 +849,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                             lfNetworkParameters.isForceTargetQInReactiveLimits() && lfNetworkParameters.isReactiveLimits(),
                             true, target, activation.rowMode(), lfNetworkParameters.isExtrapolateReactiveLimits())
                     : null;
-            DeviceLoopTables.install(context.handle.get(), cachedData, reactiveCapabilityCurves, forcedTargetQ,
+            DeviceLoopTables.install(context.handle.get(), cachedData, driverReactiveLimitsOuterLoop() != null, reactiveCapabilityCurves, forcedTargetQ,
                     acLoadFlowParameters.isVoltageRemoteControlRobustMode(),
                     acLoadFlowParameters.getMinRealisticVoltage(), acLoadFlowParameters.getMaxRealisticVoltage(),
                     acLoadFlowParameters.getMinNominalVoltageRealisticVoltageCheck(),
@@ -904,7 +912,8 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                                 ? tg2.getMaxControlledNominalVoltageOverride() : -1,
                         driverLoop("SecondaryVoltageControl") != null,
                         acLoadFlowParameters.getNetworkParameters().getMinPlausibleTargetVoltage(),
-                        acLoadFlowParameters.getNetworkParameters().getMaxPlausibleTargetVoltage()),
+                        acLoadFlowParameters.getNetworkParameters().getMaxPlausibleTargetVoltage(),
+                        driverReactiveLimitsOuterLoop() != null),
                 network, equationSystem, targetVector, activation, target,
                 cachedData.reactiveLimits().voltageRow(), cachedData.reactiveLimits().busNum(), n);
         invalidation.structureDirty = sdAll;
@@ -942,11 +951,9 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
         boolean rebuilt = false;
         if (invalidation.structureDirty) {
             // validate + build, through the shared cache (the batched SA reuses this extraction)
-            // The RUN's outer-loop set and its DistributedSlack settings — the device must not
-            // distribute with a default balance type, nor run a loop the run does not configure.
-            GpuAcData data = GpuAcDataCache.extract(network, equationSystem,
-                    driverDistributedSlackLoop() != null, driverReactiveLimitsOuterLoop() != null,
-                    driverDistributedSlackParameters());
+            // The RUN's DistributedSlack settings — the device must not distribute with a default balance type.
+            // Which loops run is the run's own list (setBatchOuterLoops), not the extraction.
+            GpuAcData data = GpuAcDataCache.extract(network, equationSystem, driverDistributedSlackParameters());
             // Three-level reconciliation, decided by the DATA not the event: a changed CSR pattern
             // (index packs) is STRUCTURE -> rebuild + cuDSS re-analysis; an unchanged pattern with
             // only changed element PARAMETERS (tap r1/a1, shunt b) is VALUES -> a cheap in-place
@@ -1158,8 +1165,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                     // channel carries targets only) — OLF re-solves the mutated system and restarts
                     // its sweep, and so does the driver: cancel the pause, carry the RL state, and
                     // let runImpl re-extract and start over. Target-only changes resume in place.
-                    GpuAcData probe = GpuAcDataCache.extract(network, equationSystem,
-                            driverDistributedSlackLoop() != null, driverReactiveLimitsOuterLoop() != null, driverDistributedSlackParameters());
+                    GpuAcData probe = GpuAcDataCache.extract(network, equationSystem, driverDistributedSlackParameters());
                     var act2 = GpuAcActivationExtractor.extractActivation(network, equationSystem, n);
                     boolean modesChanged = !Arrays.equals(act2.rowMode(), activation.rowMode());
                     if (!probe.sameAs(cachedData) || modesChanged) {

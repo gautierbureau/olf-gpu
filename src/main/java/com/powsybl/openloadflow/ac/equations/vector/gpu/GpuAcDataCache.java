@@ -58,21 +58,19 @@ public final class GpuAcDataCache {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(GpuAcDataCache.class);
 
-    /** The (distributedSlack, reactiveLimits, distributedSlackParameters) extraction flavor — different outer-loop packs. */
-    private record Flavor(boolean distributedSlack, boolean reactiveLimits, GpuDistributedSlackParameters distributedSlackParameters) {
-    }
-
     private static final class Entry implements EquationSystemIndexListener<AcVariableType, AcEquationType>, LfNetworkListener {
 
         private final LfNetwork network;
-        private final Map<Flavor, GpuAcData> byFlavor = new java.util.HashMap<>();
+        /** One extraction per distributed-slack setting (balance type, active limits): the distributed-slack pack
+         *  embeds its factors and rooms. Every other table is packed whatever the run's outer loops. */
+        private final Map<GpuDistributedSlackParameters, GpuAcData> byDistributedSlackParameters = new java.util.HashMap<>();
 
         private Entry(LfNetwork network) {
             this.network = network;
         }
 
         private synchronized void clear() {
-            byFlavor.clear();
+            byDistributedSlackParameters.clear();
         }
 
         // --- EquationSystemIndexListener: every event clears ---
@@ -223,20 +221,17 @@ public final class GpuAcDataCache {
     }
 
     /**
-     * The extraction for (network, es, flags), reusing the cached result when no equation-index or
-     * network event occurred since it was produced. Same contract as
-     * {@link GpuAcDataExtractor#extract(LfNetwork, EquationSystem, boolean, boolean)} — including
-     * throwing on an unsupported system.
+     * The extraction for (network, es), reusing the cached result when no equation-index or network event occurred
+     * since it was produced. Same contract as {@link GpuAcDataExtractor#extract(LfNetwork, EquationSystem)} —
+     * including throwing on an unsupported system.
      */
     public static synchronized GpuAcData extract(LfNetwork network,
-                                                 EquationSystem<AcVariableType, AcEquationType> es,
-                                                 boolean distributedSlack, boolean reactiveLimits) {
-        return extract(network, es, distributedSlack, reactiveLimits, GpuDistributedSlackParameters.DEFAULT);
+                                                 EquationSystem<AcVariableType, AcEquationType> es) {
+        return extract(network, es, GpuDistributedSlackParameters.DEFAULT);
     }
 
     public static synchronized GpuAcData extract(LfNetwork network,
                                                  EquationSystem<AcVariableType, AcEquationType> es,
-                                                 boolean distributedSlack, boolean reactiveLimits,
                                                  GpuDistributedSlackParameters distributedSlackParameters) {
         Entry entry = ENTRIES.get(es);
         if (entry == null || entry.network != network) {
@@ -245,15 +240,13 @@ public final class GpuAcDataCache {
             network.addListener(entry);
             ENTRIES.put(es, entry);
         }
-        Flavor flavor = new Flavor(distributedSlack, reactiveLimits, distributedSlackParameters);
         synchronized (entry) {
-            GpuAcData data = entry.byFlavor.get(flavor);
+            GpuAcData data = entry.byDistributedSlackParameters.get(distributedSlackParameters);
             if (data == null) {
-                data = GpuAcDataExtractor.extract(network, es, distributedSlack, reactiveLimits,
-                        java.util.Set.of(), java.util.Set.of(), distributedSlackParameters);
-                entry.byFlavor.put(flavor, data);
+                data = GpuAcDataExtractor.extract(network, es, java.util.Set.of(), java.util.Set.of(), distributedSlackParameters);
+                entry.byDistributedSlackParameters.put(distributedSlackParameters, data);
             } else {
-                LOGGER.debug("GPU extraction cache hit ({})", flavor);
+                LOGGER.debug("GPU extraction cache hit ({})", distributedSlackParameters);
             }
             return data;
         }

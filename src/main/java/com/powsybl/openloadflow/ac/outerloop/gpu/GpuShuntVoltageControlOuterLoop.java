@@ -12,6 +12,7 @@ import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcActivation;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcElementMapper;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchSkips;
+import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuDiscreteControlMemberState;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.TargetVector;
 import com.powsybl.openloadflow.equations.Variable;
@@ -249,7 +250,7 @@ public final class GpuShuntVoltageControlOuterLoop {
                 int k = m++ * 2;
                 int u0 = u;
                 u += mem.subs().size();
-                if (k + 1 >= state.length || (int) state[k] != 2) {
+                if (k + 1 >= state.length || (int) state[k] != GpuDiscreteControlMemberState.ROUNDED) {
                     continue;
                 }
                 LfShunt shunt = network.getShunt(mem.shuntNum());

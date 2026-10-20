@@ -179,3 +179,4 @@ constants carry OLF's constant names.
 | `GpuControlledFlow` | the flow a flow-observed controller acts on: IncrementalTransformerReactivePowerControl, IncrementalPhaseControl CONTROLLER / LIMITER | `REACTIVE_POWER` 0, `ACTIVE_POWER` 1, `CURRENT` 2; the driver selects kinds with `controlledFlowMaskBit` |
 | `GpuPhaseControlMode` | `TransformerPhaseControl.Mode` of a continuous phase control (OLF ordinals) | `CONTROLLER` 0, `LIMITER` 1 |
 | `GpuPiModelColumn` | a `PiModel` as 8 doubles, in its getters' order (tap tables, `cbIn`) | `Y` 0, `G1` 1, `G2` 2, `B1` 3, `B2` 4, `KSI` 5, `R1` 6, `A1` 7, `COUNT` 8 |
+| `GpuDiscreteControlMemberState` | a discrete transformer / shunt voltage control member: continuous first, then rounded and disabled | `DISABLED` 0, `CONTINUOUS` 1, `ROUNDED` 2 |

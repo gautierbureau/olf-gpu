@@ -15,6 +15,7 @@
 #include "../common/launch.cuh"
 #include "../common/codes/gpu_q_limit_type.cuh"
 #include "../common/codes/gpu_pi_model_column.cuh"
+#include "../common/codes/gpu_discrete_control_member_state.cuh"
 #include "../solver/driver_steps.cuh"
 #include "incremental_transformer_voltage_control.cuh"
 #include "transformer_voltage_control.cuh"
@@ -89,7 +90,7 @@ __device__ inline void tvdLayoutGroup(const TvdTables& T, int s, int n, int nEle
     size_t sn = (size_t) s * n;
     bool anyCont = false;
     for (int m = T.grpPtr[g]; m < T.grpPtr[g + 1]; m++) {
-        if (!disabled[(size_t) s * nElements + T.memElem[m]] && T.memState[(size_t) s * T.nM + m] == 1) anyCont = true;
+        if (!disabled[(size_t) s * nElements + T.memElem[m]] && T.memState[(size_t) s * T.nM + m] == GpuDiscreteControlMemberState::CONTINUOUS) anyCont = true;
     }
     int m0 = T.grpPtr[g];
     double pilotQ = 0.0;
@@ -128,11 +129,11 @@ __device__ inline void tvdLayoutGroup(const TvdTables& T, int s, int n, int nEle
         if (disabled[(size_t) s * nElements + T.memElem[m]]) continue;   // outaged: base identity as uploaded
         size_t mr = sn + T.memRhoRow[m];
         int st = T.memState[(size_t) s * T.nM + m];
-        if (anyCont && st == 1) {                            // ALIVE continuous: carrier (pilot Q) or DISTR_RHO (0)
+        if (anyCont && st == GpuDiscreteControlMemberState::CONTINUOUS) {  // ALIVE continuous: carrier (pilot Q) or DISTR_RHO (0)
             mode[mr] = 1;
             target[mr] = carrier ? 0.0 : pilotQ;
             carrier = true;
-        } else if (st == 2) {                                // FIXED: identity pin at the rounded tap's r1
+        } else if (st == GpuDiscreteControlMemberState::ROUNDED) {  // identity pin at the rounded tap's r1
             int tap = T.memTap[(size_t) s * T.nM + m];
             double r1 = T.tapData[(size_t) (T.memTapPtr[m] + tap) * GpuPiModelColumn::COUNT + GpuPiModelColumn::R1];
             mode[mr] = 0;
@@ -157,9 +158,9 @@ __global__ void tvdEntryBatch(TvdTables T, int nScenarios, int n, int nElements,
             if (disabled[(size_t) s * nElements + T.memElem[m]]) continue;
             size_t sm = (size_t) s * T.nM + m;
             if (entryOn) {
-                T.memState[sm] = mode[sn + T.memRhoRow[m]] == 1 ? 1 : 0;
+                T.memState[sm] = mode[sn + T.memRhoRow[m]] == 1 ? GpuDiscreteControlMemberState::CONTINUOUS : GpuDiscreteControlMemberState::DISABLED;
             } else if (T.mode == 1) {
-                T.memState[sm] = 1;
+                T.memState[sm] = GpuDiscreteControlMemberState::CONTINUOUS;
                 any = true;
             }
         }
@@ -183,12 +184,12 @@ __global__ void tvdCheckBatch(TvdTables T, int nScenarios, int n, int nElements,
                 if (disabled[(size_t) s * nElements + T.memElem[m]]) continue;
                 anyCtl = true;
                 size_t sm = (size_t) s * T.nM + m;
-                if (T.memState[sm] != 1) continue;
+                if (T.memState[sm] != GpuDiscreteControlMemberState::CONTINUOUS) continue;
                 T.memRoundFrom[sm] = x[sn + T.memRhoRow[m]];
                 int tap;
                 tvdRoundToTap(T, m, T.memRoundFrom[sm], &tap);
                 T.memTap[sm] = tap;
-                T.memState[sm] = 2;
+                T.memState[sm] = GpuDiscreteControlMemberState::ROUNDED;
                 touched = true;
             }
             T.grpStep[sg] = 2;
@@ -211,7 +212,7 @@ __global__ void tvdCheckBatch(TvdTables T, int nScenarios, int n, int nElements,
             double sumMin = 0.0, sumMax = 0.0, a = 0.0, b = 0.0;
             for (int m = T.grpPtr[g]; m < T.grpPtr[g + 1]; m++) {
                 if (disabled[(size_t) s * nElements + T.memElem[m]]) continue;
-                T.memState[(size_t) s * T.nM + m] = 1;
+                T.memState[(size_t) s * T.nM + m] = GpuDiscreteControlMemberState::CONTINUOUS;
                 sumMin += T.memMin[m];
                 sumMax += T.memMax[m];
                 if (T.memMax[m] != T.memMin[m]) {
@@ -275,7 +276,7 @@ __global__ void tvdCheckBatch(TvdTables T, int nScenarios, int n, int nElements,
             for (int g = 0; g < T.nG; g++) {
                 for (int m = T.grpPtr[g]; m < T.grpPtr[g + 1]; m++) {
                     size_t sm = (size_t) s * T.nM + m;
-                    if (T.memState[sm] != 1) continue;
+                    if (T.memState[sm] != GpuDiscreteControlMemberState::CONTINUOUS) continue;
                     size_t base = ((size_t) s * T.nM + m) * T.fixWords;
                     bool pvMin = tvdAnyPv(T, sn, mode, T.fixMinMask + base);
                     if (pvMin) continue;                       // OLF keeps this control enabled
@@ -283,13 +284,13 @@ __global__ void tvdCheckBatch(TvdTables T, int nScenarios, int n, int nElements,
                         T.reject[s] = 1;                       // ambiguous without the enabled set
                         return;
                     }
-                    T.memState[sm] = 0;                        // OLF disables it
+                    T.memState[sm] = GpuDiscreteControlMemberState::DISABLED;  // OLF disables it
                 }
             }
         }
         for (int g = 0; g < T.nG; g++) {
             bool any = false;
-            for (int m = T.grpPtr[g]; m < T.grpPtr[g + 1]; m++) any |= T.memState[(size_t) s * T.nM + m] == 1;
+            for (int m = T.grpPtr[g]; m < T.grpPtr[g + 1]; m++) any |= T.memState[(size_t) s * T.nM + m] == GpuDiscreteControlMemberState::CONTINUOUS;
             if (any) tvdLayoutGroup(T, s, n, nElements, g, disabled, mode, target, x);
         }
         T.scnStep[s] = 1;
@@ -305,7 +306,7 @@ __global__ void tvdCheckBatch(TvdTables T, int nScenarios, int n, int nElements,
         for (int m = T.grpPtr[g]; m < T.grpPtr[g + 1]; m++) {
             if (disabled[(size_t) s * nElements + T.memElem[m]]) continue;
             size_t sm = (size_t) s * T.nM + m;
-            if (T.memState[sm] != 1) continue;
+            if (T.memState[sm] != GpuDiscreteControlMemberState::CONTINUOUS) continue;
             double r1 = x[sn + T.memRhoRow[m]];
             double lo = useInit ? T.grpShMin[sg] : T.memMin[m];
             double hi = useInit ? T.grpShMax[sg] : T.memMax[m];
@@ -315,7 +316,7 @@ __global__ void tvdCheckBatch(TvdTables T, int nScenarios, int n, int nElements,
             int tap;
             tvdRoundToTap(T, m, v, &tap);
             T.memTap[sm] = tap;
-            T.memState[sm] = 2;
+            T.memState[sm] = GpuDiscreteControlMemberState::ROUNDED;
             touched = true;
         }
         if (touched) {
@@ -335,7 +336,7 @@ __global__ void tvdCheckBatch(TvdTables T, int nScenarios, int n, int nElements,
         for (int m = T.grpPtr[g]; m < T.grpPtr[g + 1]; m++) {
             if (disabled[(size_t) s * nElements + T.memElem[m]]) continue;
             size_t sm = (size_t) s * T.nM + m;
-            if (T.memState[sm] != 1) continue;
+            if (T.memState[sm] != GpuDiscreteControlMemberState::CONTINUOUS) continue;
             double v = x[sn + T.memRhoRow[m]];
             if (useInit) {
                 double init = T.grpShInit[sg];
@@ -347,7 +348,7 @@ __global__ void tvdCheckBatch(TvdTables T, int nScenarios, int n, int nElements,
             int tap;
             tvdRoundToTap(T, m, v, &tap);
             T.memTap[sm] = tap;
-            T.memState[sm] = 2;
+            T.memState[sm] = GpuDiscreteControlMemberState::ROUNDED;
             touched = true;
         }
         if (touched) tvdLayoutGroup(T, s, n, nElements, g, disabled, mode, target, x);
@@ -422,7 +423,7 @@ void tvdStep(BatchSolverContext* ctx, DriverPass& drv) {
         CUDA_CHECK(cudaMemcpy(st.data(), ctx->dTvdMemState.p, nsm * sizeof(int), cudaMemcpyDeviceToHost));
         CUDA_CHECK(cudaMemcpy(step.data(), ctx->dTvdScnStep.p, nS * sizeof(int), cudaMemcpyDeviceToHost));
         int nCont = 0, nFixed = 0, nRej = 0;
-        for (size_t k = 0; k < nsm; k++) { nCont += st[k] == 1; nFixed += st[k] == 2; }
+        for (size_t k = 0; k < nsm; k++) { nCont += st[k] == GpuDiscreteControlMemberState::CONTINUOUS; nFixed += st[k] == GpuDiscreteControlMemberState::ROUNDED; }
         for (int s2 = 0; s2 < nS; s2++) nRej += rej[s2] ? 1 : 0;
         std::fprintf(stderr, "TVD_KERNEL mode=%d nS=%d nMembers=%d continuous=%d fixed=%d rejected=%d step0=%d nR1Ov=%d\n",
                      ctx->tvdMode, nS, ctx->nTvd, nCont, nFixed, nRej, step[0], ctx->nR1Ov);

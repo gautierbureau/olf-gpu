@@ -13,6 +13,7 @@
 
 #include "../common/check.cuh"
 #include "../common/launch.cuh"
+#include "../common/codes/gpu_discrete_control_member_state.cuh"
 #include "../solver/driver_steps.cuh"
 #include "shunt_voltage_control.cuh"
 
@@ -64,7 +65,7 @@ __device__ inline void svdLayoutGroup(const SvdTables& T, int s, int n, int g, b
     }
     if (!on) {
         for (int m = T.grpPtr[g]; m < T.grpPtr[g + 1]; m++) {
-            if (T.memState[(size_t) s * T.nM + m] != 2) continue;
+            if (T.memState[(size_t) s * T.nM + m] != GpuDiscreteControlMemberState::ROUNDED) continue;
             double bSum = 0.0;
             for (int u = T.memSubPtr[m]; u < T.memSubPtr[m + 1]; u++) bSum += T.secB[T.secPtr[u] + T.subPos[(size_t) s * T.nSubs + u]];
             size_t br = sn + T.memBRow[m];
@@ -83,7 +84,7 @@ __global__ void svdEntryBatch(SvdTables T, int nScenarios, int n, int nElements,
     for (int g = 0; g < T.nG; g++) {
         if (!svdGroupLive(T, s, nElements, g, disabled)) continue;
         for (int m = T.grpPtr[g]; m < T.grpPtr[g + 1]; m++) {
-            T.memState[(size_t) s * T.nM + m] = entryOn ? (mode[sn + T.memBRow[m]] == 1 ? 1 : 0) : 1;
+            T.memState[(size_t) s * T.nM + m] = entryOn ? (mode[sn + T.memBRow[m]] == 1 ? GpuDiscreteControlMemberState::CONTINUOUS : GpuDiscreteControlMemberState::DISABLED) : GpuDiscreteControlMemberState::CONTINUOUS;
         }
         if (!entryOn) svdLayoutGroup(T, s, n, g, true, mode, target, x);
     }
@@ -109,7 +110,7 @@ __global__ void svdCheckBatch(SvdTables T, int nScenarios, int n, int nElements,
         bool touched = false;
         for (int m = T.grpPtr[g]; m < T.grpPtr[g + 1]; m++) {
             size_t sm = (size_t) s * T.nM + m;
-            if (T.memState[sm] != 1) continue;
+            if (T.memState[sm] != GpuDiscreteControlMemberState::CONTINUOUS) continue;
             double residue = x[sn + T.memBRow[m]];
             T.memContB[sm] = residue;
             int remaining = T.memSubPtr[m + 1] - T.memSubPtr[m];
@@ -129,7 +130,7 @@ __global__ void svdCheckBatch(SvdTables T, int nScenarios, int n, int nElements,
                 T.subPos[(size_t) s * T.nSubs + u] = best;
                 residue -= T.secB[p0 + best];
             }
-            T.memState[sm] = 2;
+            T.memState[sm] = GpuDiscreteControlMemberState::ROUNDED;
             touched = true;
         }
         if (touched) svdLayoutGroup(T, s, n, g, false, mode, target, x);
@@ -163,7 +164,7 @@ void svdStep(BatchSolverContext* ctx, DriverPass& drv) {
         std::vector<int> st(nsm);
         CUDA_CHECK(cudaMemcpy(st.data(), ctx->dSvdMemState.p, nsm * sizeof(int), cudaMemcpyDeviceToHost));
         int nCont = 0, nFixed = 0;
-        for (size_t k = 0; k < nsm; k++) { nCont += st[k] == 1; nFixed += st[k] == 2; }
+        for (size_t k = 0; k < nsm; k++) { nCont += st[k] == GpuDiscreteControlMemberState::CONTINUOUS; nFixed += st[k] == GpuDiscreteControlMemberState::ROUNDED; }
         std::fprintf(stderr, "SVD_KERNEL nS=%d nMembers=%d continuous=%d dispatched=%d\n", nS, ctx->nSvd, nCont, nFixed);
     }
 }

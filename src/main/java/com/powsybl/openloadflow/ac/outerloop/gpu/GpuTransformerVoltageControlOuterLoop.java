@@ -13,6 +13,7 @@ import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcActivation;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcElementMapper;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchSkips;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.BatchContingency;
+import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuDiscreteControlMemberState;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuPiModelColumn;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.TargetVector;
@@ -773,7 +774,7 @@ public final class GpuTransformerVoltageControlOuterLoop {
                     return;
                 }
                 LfBranch branch = network.getBranch(mem.branchNum());
-                if (branch == null || (int) state[k] != 2) {
+                if (branch == null || (int) state[k] != GpuDiscreteControlMemberState.ROUNDED) {
                     continue;
                 }
                 var pm = branch.getPiModel();

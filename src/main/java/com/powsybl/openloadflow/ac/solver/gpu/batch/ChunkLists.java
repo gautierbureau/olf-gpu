@@ -116,7 +116,7 @@ final class ChunkLists {
 
     ChunkLists(int chunkSize, int n, GpuAcData gpuData, ForceTargetQInReactiveLimits.Channel forcedTargetQ, int ngen) {
         this.dsRowOvBySlot = new int[chunkSize][];
-        this.nDqMembersAll = gpuData.dqMemberBusNum() != null ? gpuData.dqMemberBusNum().length : 0;
+        this.nDqMembersAll = gpuData.distrQMembers().busNum() != null ? gpuData.distrQMembers().busNum().length : 0;
         this.dqSubDense = new byte[chunkSize * nDqMembersAll];
         this.nActive = new int[chunkSize];
         java.util.Arrays.fill(nActive, n);

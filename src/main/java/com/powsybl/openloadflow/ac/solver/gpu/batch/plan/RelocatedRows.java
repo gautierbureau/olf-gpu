@@ -27,9 +27,9 @@ public final class RelocatedRows {
         int[] start = qrMemberStart(gpuData);
         int[] qrPtr = gpuData.reactiveRelocation().groupStart();
         int[] qrRows = gpuData.reactiveRelocation().candidateRows();
-        int[] mRow = gpuData.dqMemberRow();
-        byte[] mHasRow = gpuData.dqMemberHasRow();
-        int[] mQrGroup = gpuData.dqMemberQrGroup();
+        int[] mRow = gpuData.distrQMembers().row();
+        byte[] mHasRow = gpuData.distrQMembers().hasRow();
+        int[] mQrGroup = gpuData.distrQMembers().relocationGroup();
         if (start == null || qrPtr == null || mRow == null || mQrGroup == null) {
             return false;
         }
@@ -48,7 +48,7 @@ public final class RelocatedRows {
 
     /** qr group -> its first dq member, -1 for a group without packed members. */
     public static int[] qrMemberStart(GpuAcData gpuData) {
-        int[] mQrGroup = gpuData.dqMemberQrGroup();
+        int[] mQrGroup = gpuData.distrQMembers().relocationGroup();
         int[] qrPtr = gpuData.reactiveRelocation().groupStart();
         if (mQrGroup == null || qrPtr == null || qrPtr.length < 2) {
             return null;

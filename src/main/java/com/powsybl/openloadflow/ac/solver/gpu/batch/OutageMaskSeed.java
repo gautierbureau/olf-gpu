@@ -67,8 +67,8 @@ final class OutageMaskSeed {
                     // there with its FULL series admittance instead of the dangling
                     // equivalent.
                     int hits = 0;
-                    for (int k = 0; k < gpuData.dqElem().length; k++) {
-                        if (gpuData.dqElem()[k] == soElem) {
+                    for (int k = 0; k < gpuData.distrQ().element().length; k++) {
+                        if (gpuData.distrQ().element()[k] == soElem) {
                             hits++;
                         }
                     }

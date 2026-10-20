@@ -8,6 +8,8 @@
 package com.powsybl.openloadflow.ac.solver.gpu.batch;
 
 import com.powsybl.openloadflow.ac.equations.vector.gpu.BaseOpenBranches;
+import com.powsybl.openloadflow.ac.equations.vector.gpu.DistrQMembers;
+import com.powsybl.openloadflow.ac.equations.vector.gpu.DistrQTerms;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.LinearDistributionTerms;
@@ -34,10 +36,7 @@ class GpuBatchedSecurityAnalysisSolverTest {
 
     private static final GpuAcData EMPTY = new GpuAcData(new double[0], new int[0], new int[0], new double[0], new int[0],
             new double[0], new int[0], new double[0], new int[0],
-            new int[0], new int[0], new double[0], new int[0], new int[0],
-            new int[0], new int[0], new double[0], new int[0], new int[0], new int[0],
-            new int[0], new byte[0], new int[0], new double[0], new int[0],
-            new int[0], new int[0],
+            DistrQTerms.empty(), DistrQMembers.empty(),
             new double[0], new int[0],
             LinearDistributionTerms.empty(), LinearDistributionTerms.empty(),
             ReactiveLimitEntries.empty(),

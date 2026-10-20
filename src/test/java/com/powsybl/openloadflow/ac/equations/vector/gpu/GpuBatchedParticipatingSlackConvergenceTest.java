@@ -116,7 +116,7 @@ class GpuBatchedParticipatingSlackConvergenceTest {
                 new int[0], new double[0], new double[0], new double[0], new double[0],
                 d.dsPhiRow(), d.dsFactor(), d.dsSlackPhiRow(), d.dsSlackTargetP(),
                 d.dsBaseTargetP(), d.dsMaxDelta(), d.dsMinDelta(),
-                d.dqElem(), d.dqSide(), d.dqWeight(), d.dqRow(), d.dqKind(),
+                d.distrQ().element(), d.distrQ().side(), d.distrQ().weight(), d.distrQ().row(), d.distrQ().kind(),
                 d.distrRho().row(), d.distrRho().column(), d.distrRho().coefficient(), d.distrShuntB().row(), d.distrShuntB().column(), d.distrShuntB().coefficient(), d.ziIn(), d.ziIdx());
         int n = baseState.length;
         if ((int) batch[0][n + 2] != 0) {

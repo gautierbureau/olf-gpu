@@ -127,7 +127,7 @@ public final class GpuAcDataExtractor {
         ExtractionColumns columns = ExtractionColumns.of(network, es);
         GpuAcFamilyPacker.Packs family = GpuAcFamilyPacker.pack(network, columns, baseOpenBranchIds, baseOpenZiBranchIds);
         ReactiveLimitEntries rl = ReactiveLimitsPacker.reactiveLimitsPack(network, es, columns, reactiveLimits);
-        DistrQPacker.DqPack dq = DistrQPacker.distrQPack(network, es, columns, family, rl);
+        DistrQPacker.Pack dq = DistrQPacker.distrQPack(network, es, columns, family, rl);
         LinearDistributionTerms dr = DistrRhoPacker.distrRhoPack(network, es, columns);
         LinearDistributionTerms dsb = DistrShuntBPacker.distrShuntBPack(network, es, columns);
 
@@ -167,11 +167,7 @@ public final class GpuAcDataExtractor {
                 GpuAcArrays.flatD(family.obIn(), 7), GpuAcArrays.flatI(family.obIdx(), 6),
                 GpuAcArrays.flatD(family.shIn(), 2), GpuAcArrays.flatI(family.shIdx(), 5),
                 GpuAcArrays.flatD(family.hvIn(), 5), GpuAcArrays.flatI(family.hvIdx(), 4),
-                dq.dqElem(), dq.dqSide(), dq.dqWeight(), dq.dqRow(), dq.dqKind(),
-                dq.dqKMember(), dq.dqJMember(), dq.dqMemberKey(), dq.dqMemberRlEntry(),
-                dq.dqMemberGroupStart(), dq.dqMemberGroupCount(), dq.dqMemberRow(), dq.dqMemberHasRow(),
-                dq.dqMemberQrGroup(), dq.dqMemberTargetQ(), dq.dqMemberBusNum(),
-                dq.dqMemberTgtPtr(), dq.dqMemberTgtPeer(),
+                dq.terms(), dq.members(),
                 GpuAcArrays.flatD(family.ziIn(), 1), GpuAcArrays.flatI(family.ziIdx(), 11),
                 dr, dsb,
                 rl,

@@ -103,43 +103,43 @@ class GpuMergedGenVoltageControlTest extends AbstractLoadFlowNetworkFactory {
         AcSolverUtil.initStateVector(network, es, new UniformValueVoltageInitializer());
         var data = GpuAcDataExtractor.extract(network, es);
 
-        int members = data.dqMemberKey().length;
+        int members = data.distrQMembers().key().length;
         assertEquals(2, members, "the merged group must pack both controllers");
-        assertEquals(members + 1, data.dqMemberTgtPtr().length);
+        assertEquals(members + 1, data.distrQMembers().targetPeerStart().length);
         for (int k = 0; k < members; k++) {
-            LfBus bus = network.getBus(data.dqMemberBusNum()[k]);
+            LfBus bus = network.getBus(data.distrQMembers().busNum()[k]);
             List<Integer> packedPeers = new java.util.ArrayList<>();
-            for (int t = data.dqMemberTgtPtr()[k]; t < data.dqMemberTgtPtr()[k + 1]; t++) {
-                packedPeers.add(data.dqMemberBusNum()[data.dqMemberTgtPeer()[t]]);
+            for (int t = data.distrQMembers().targetPeerStart()[k]; t < data.distrQMembers().targetPeerStart()[k + 1]; t++) {
+                packedPeers.add(data.distrQMembers().busNum()[data.distrQMembers().targetPeer()[t]]);
             }
             List<Integer> olfPeers = bus.getGeneratorVoltageControl().orElseThrow()
                     .getMergedControllerElements().stream().map(LfBus::getNum).sorted().toList();
             assertEquals(olfPeers, packedPeers.stream().sorted().toList(),
                     "the peers summed for " + bus.getId() + " must be its OWN control's elements");
             // and the target the device computes from them is OLF's own, for the member that has a row
-            if (data.dqMemberHasRow()[k] == 0) {
+            if (data.distrQMembers().hasRow()[k] == 0) {
                 continue;
             }
             double keySum = 0;
-            int start = data.dqMemberGroupStart()[k];
-            for (int m = start; m < start + data.dqMemberGroupCount()[k]; m++) {
-                keySum += data.dqMemberKey()[m];
+            int start = data.distrQMembers().groupStart()[k];
+            for (int m = start; m < start + data.distrQMembers().groupCount()[k]; m++) {
+                keySum += data.distrQMembers().key()[m];
             }
             double sumTargetQ = 0;
-            for (int t = data.dqMemberTgtPtr()[k]; t < data.dqMemberTgtPtr()[k + 1]; t++) {
-                sumTargetQ += data.dqMemberTargetQ()[data.dqMemberTgtPeer()[t]];
+            for (int t = data.distrQMembers().targetPeerStart()[k]; t < data.distrQMembers().targetPeerStart()[k + 1]; t++) {
+                sumTargetQ += data.distrQMembers().targetQ()[data.distrQMembers().targetPeer()[t]];
             }
-            double device = data.dqMemberKey()[k] / keySum * sumTargetQ - data.dqMemberTargetQ()[k];
+            double device = data.distrQMembers().key()[k] / keySum * sumTargetQ - data.distrQMembers().targetQ()[k];
             int column = es.getEquation(bus.getNum(), AcEquationType.DISTR_Q).orElseThrow().getColumn();
             assertEquals(new AcTargetVector(network, es).getArray()[column], device, 1e-15,
                     "the device's DISTR_Q target for " + bus.getId() + " must be AcTargetVector's");
             // and summing the WHOLE merged group instead — what the device used to do — must differ here,
             // or this fixture would pass either way
             double wholeGroup = 0;
-            for (int m = start; m < start + data.dqMemberGroupCount()[k]; m++) {
-                wholeGroup += data.dqMemberTargetQ()[m];
+            for (int m = start; m < start + data.distrQMembers().groupCount()[k]; m++) {
+                wholeGroup += data.distrQMembers().targetQ()[m];
             }
-            assertNotEquals(data.dqMemberKey()[k] / keySum * wholeGroup - data.dqMemberTargetQ()[k], device,
+            assertNotEquals(data.distrQMembers().key()[k] / keySum * wholeGroup - data.distrQMembers().targetQ()[k], device,
                     "the fixture must separate the member's peers from the whole group");
         }
     }

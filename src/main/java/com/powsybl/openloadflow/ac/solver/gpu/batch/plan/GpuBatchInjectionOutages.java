@@ -53,7 +53,7 @@ public final class GpuBatchInjectionOutages {
      *  of any group. Used both to locate the group for target seeding and to decide whether a load
      *  loss on it is expressible as a per-scenario member targetQ override. */
     static int dqMemberSlot(GpuAcData gpuData, LfBus bus) {
-        int[] busNums = gpuData.dqMemberBusNum();
+        int[] busNums = gpuData.distrQMembers().busNum();
         if (busNums == null) {
             return -1;
         }
@@ -101,7 +101,7 @@ public final class GpuBatchInjectionOutages {
                                                 java.util.Set<Integer> outagedZiNums,
                                                 java.util.Map<Integer, Integer> labelOf) {
         List<GenOutage> out = new ArrayList<>();
-        int[] mBusNum = gpuData.dqMemberBusNum();
+        int[] mBusNum = gpuData.distrQMembers().busNum();
         if (mBusNum == null || islandedControllers.isEmpty()) {
             return out;
         }
@@ -112,11 +112,11 @@ public final class GpuBatchInjectionOutages {
                 inactive.add(m);
             }
         }
-        int[] groupStart = gpuData.dqMemberGroupStart();
-        int[] groupCount = gpuData.dqMemberGroupCount();
-        double[] mKey = gpuData.dqMemberKey();
-        byte[] mHasRow = gpuData.dqMemberHasRow();
-        int[] mRow = gpuData.dqMemberRow();
+        int[] groupStart = gpuData.distrQMembers().groupStart();
+        int[] groupCount = gpuData.distrQMembers().groupCount();
+        double[] mKey = gpuData.distrQMembers().key();
+        byte[] mHasRow = gpuData.distrQMembers().hasRow();
+        int[] mRow = gpuData.distrQMembers().row();
         LfBus any = islandedControllers.get(0);
         java.util.Set<Integer> groupsDone = new java.util.HashSet<>();
         for (int im : inactive) {
@@ -161,8 +161,8 @@ public final class GpuBatchInjectionOutages {
                     r.add(RelocatedRows.unrelocQRow(mRow[m], relocDummyQRows, outagedZiNums));
                     // targetQ over THIS member's peers — its own control's elements, as AcTargetVector sums them
                     double sumTargetQ = 0;
-                    for (int t = gpuData.dqMemberTgtPtr()[m]; t < gpuData.dqMemberTgtPtr()[m + 1]; t++) {
-                        sumTargetQ += baseTargetQ(any, mBusNum[gpuData.dqMemberTgtPeer()[t]]);
+                    for (int t = gpuData.distrQMembers().targetPeerStart()[m]; t < gpuData.distrQMembers().targetPeerStart()[m + 1]; t++) {
+                        sumTargetQ += baseTargetQ(any, mBusNum[gpuData.distrQMembers().targetPeer()[t]]);
                     }
                     v.add(qpk * sumTargetQ - baseTargetQ(any, mBusNum[m]));
                 }
@@ -276,10 +276,10 @@ public final class GpuBatchInjectionOutages {
             if (!out[a].deactivatesDqMember()) {
                 continue;
             }
-            int ga = gpuData.dqMemberGroupStart()[out[a].inactiveDqMember()];
+            int ga = gpuData.distrQMembers().groupStart()[out[a].inactiveDqMember()];
             for (int b = a + 1; b < out.length; b++) {
                 if (out[b].deactivatesDqMember()
-                        && gpuData.dqMemberGroupStart()[out[b].inactiveDqMember()] == ga) {
+                        && gpuData.distrQMembers().groupStart()[out[b].inactiveDqMember()] == ga) {
                     return reject("DISTR_Q_TWO_MEMBERS_LOST", null);
                 }
             }
@@ -555,7 +555,7 @@ public final class GpuBatchInjectionOutages {
         // is not DS power and must not move any curve. All three need per-generator identity.
         int inactiveDqMember = -1;
         if (vcSurvives) {
-            int[] mBus = gpuData.dqMemberBusNum();
+            int[] mBus = gpuData.distrQMembers().busNum();
             for (int m = 0; mBus != null && m < mBus.length; m++) {
                 if (mBus[m] == busNum) {
                     inactiveDqMember = m;
@@ -581,9 +581,9 @@ public final class GpuBatchInjectionOutages {
         // of VL-1263_1 = qPct (0.5, two equal-key members) x the pilot's 0.092 pu of lost load Q.
         int dqTargetQOvMember = -1;
         double dqTargetQOvValue = 0;
-        if (ownDqMember >= 0 && lostLoadQ != 0 && gpuData.dqMemberTargetQ() != null) {
+        if (ownDqMember >= 0 && lostLoadQ != 0 && gpuData.distrQMembers().targetQ() != null) {
             dqTargetQOvMember = ownDqMember;
-            dqTargetQOvValue = gpuData.dqMemberTargetQ()[ownDqMember] + lostLoadQ;
+            dqTargetQOvValue = gpuData.distrQMembers().targetQ()[ownDqMember] + lostLoadQ;
         }
         int dqAnchor = vcSurvives ? inactiveDqMember : ownDqMember;
         double dqOwnTargetQDelta = vcSurvives ? 0 : lostLoadQ;
@@ -832,12 +832,12 @@ public final class GpuBatchInjectionOutages {
             // OWNS a DISTR_Q row (the base free member's row carries the pilot's relocated balance
             // instead) and which device row it is were both decided at extraction, and a predicate
             // re-derived here would seed the wrong rows the moment the two disagreed.
-            int gs = gpuData.dqMemberGroupStart()[dqAnchor];
-            int gc = gpuData.dqMemberGroupCount()[dqAnchor];
-            int[] mBusNum = gpuData.dqMemberBusNum();
-            double[] mKey = gpuData.dqMemberKey();
-            byte[] mHasRow = gpuData.dqMemberHasRow();
-            int[] mRow = gpuData.dqMemberRow();
+            int gs = gpuData.distrQMembers().groupStart()[dqAnchor];
+            int gc = gpuData.distrQMembers().groupCount()[dqAnchor];
+            int[] mBusNum = gpuData.distrQMembers().busNum();
+            double[] mKey = gpuData.distrQMembers().key();
+            byte[] mHasRow = gpuData.distrQMembers().hasRow();
+            int[] mRow = gpuData.distrQMembers().row();
             double keySum = 0;
             for (int m = gs; m < gs + gc; m++) {             // live keys over the whole merged group
                 keySum += memberKeepsKey(bus, mBusNum[m], m, inactiveDqMember) ? mKey[m] : 0;
@@ -866,8 +866,8 @@ public final class GpuBatchInjectionOutages {
                 // targetQ over THIS member's peers — the elements of its own control (see the peer CSR):
                 // a member whose control is merged INTO the group sums only its own, as AcTargetVector does.
                 double sumTargetQ = 0;
-                for (int t = gpuData.dqMemberTgtPtr()[m]; t < gpuData.dqMemberTgtPtr()[m + 1]; t++) {
-                    int peer = gpuData.dqMemberTgtPeer()[t];
+                for (int t = gpuData.distrQMembers().targetPeerStart()[m]; t < gpuData.distrQMembers().targetPeerStart()[m + 1]; t++) {
+                    int peer = gpuData.distrQMembers().targetPeer()[t];
                     sumTargetQ += baseTargetQ(bus, mBusNum[peer])
                             + (mBusNum[peer] == bus.getNum() ? dqOwnTargetQDelta : 0);
                 }

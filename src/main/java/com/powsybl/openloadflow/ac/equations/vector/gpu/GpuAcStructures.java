@@ -114,7 +114,7 @@ public final class GpuAcStructures {
                 structure = new Structure(StructureNative.createStructure(n,
                         data.cbIn(), data.cbIdx(), data.obIn(), data.obIdx(),
                         data.shIn(), data.shIdx(), data.hvIn(), data.hvIdx(),
-                        data.dqElem(), data.dqSide(), data.dqWeight(), data.dqRow(), data.dqKind(),
+                        data.distrQ().element(), data.distrQ().side(), data.distrQ().weight(), data.distrQ().row(), data.distrQ().kind(),
                         data.ziIn(), data.ziIdx(),
                         data.distrRho().row(), data.distrRho().column(), data.distrRho().coefficient(),
                         data.distrShuntB().row(), data.distrShuntB().column(), data.distrShuntB().coefficient(), data.cbPcSide(),

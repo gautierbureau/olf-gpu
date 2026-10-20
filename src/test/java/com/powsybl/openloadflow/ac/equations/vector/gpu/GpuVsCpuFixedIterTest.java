@@ -122,7 +122,7 @@ class GpuVsCpuFixedIterTest {
             for (int k : FIXED_ITERS) {
                 double[] out = GpuAcNewtonSolver.solve(x0.clone(), stableTargets, activation.rowMode(), k, 0.0,
                         d.cbIn(), d.cbIdx(), d.obIn(), d.obIdx(), d.shIn(), d.shIdx(), d.hvIn(), d.hvIdx(),
-                        d.dqElem(), d.dqSide(), d.dqWeight(), d.dqRow(), d.dqKind(),
+                        d.distrQ().element(), d.distrQ().side(), d.distrQ().weight(), d.distrQ().row(), d.distrQ().kind(),
                         d.ziIn(), d.ziIdx(),
                         d.distrRho().row(), d.distrRho().column(), d.distrRho().coefficient(), d.distrShuntB().row(), d.distrShuntB().column(), d.distrShuntB().coefficient());
                 double gpuNorm = out[n + 1];

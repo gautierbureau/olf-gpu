@@ -31,12 +31,8 @@ import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuQLimitType;
  *       idx {@code nhv*4} (Prow1 Prow2 ph1col ph2col)</li>
  * </ul>
  *
- * <p>DISTR_Q (remote generator voltage control) reactive-distribution rows are assembled from a list
- * of weighted closed-branch reactive contributions, one per (controller branch side, DISTR_Q row):
- * {@code dqElem} the closed-branch element index, {@code dqSide} 0/1 (side 1/2 reactive q), {@code dqRow}
- * the stable DISTR_Q row (a controller's BUS_V row), {@code dqWeight} the coefficient
- * ({@code qPercent_k} for a foreign controller, {@code qPercent_k - 1} for the row's own controller).
- * Empty when no remote generator voltage control is active.
+ * <p>DISTR_Q (remote generator voltage control): {@link DistrQTerms} and {@link DistrQMembers}. Empty when no
+ * remote generator voltage control is active.
  *
  * <p>Zero-impedance branches (bus couplers) are a LINEAR family: {@code ziIn} {@code nzi*1} (rho = R2/r1),
  * idx {@code nzi*11} (b1Prow b1Qrow b2Prow b2Qrow dpRow dqRow v1col v2col ph1col ph2col enabledTree). Each
@@ -65,11 +61,7 @@ import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuQLimitType;
  */
 public record GpuAcData(double[] cbIn, int[] cbIdx, int[] cbPcSide, double[] obIn, int[] obIdx,
                         double[] shIn, int[] shIdx, double[] hvIn, int[] hvIdx,
-                        int[] dqElem, int[] dqSide, double[] dqWeight, int[] dqRow, int[] dqKind,
-                        int[] dqKMember, int[] dqJMember, double[] dqMemberKey, int[] dqMemberRlEntry,
-                        int[] dqMemberGroupStart, int[] dqMemberGroupCount, int[] dqMemberRow, byte[] dqMemberHasRow,
-                        int[] dqMemberQrGroup, double[] dqMemberTargetQ, int[] dqMemberBusNum,
-                        int[] dqMemberTgtPtr, int[] dqMemberTgtPeer,
+                        DistrQTerms distrQ, DistrQMembers distrQMembers,
                         double[] ziIn, int[] ziIdx,
                         LinearDistributionTerms distrRho, LinearDistributionTerms distrShuntB,
                         ReactiveLimitEntries reactiveLimits,
@@ -121,9 +113,7 @@ public record GpuAcData(double[] cbIn, int[] cbIdx, int[] cbPcSide, double[] obI
                 && java.util.Arrays.equals(obIn, other.obIn) && java.util.Arrays.equals(obIdx, other.obIdx)
                 && java.util.Arrays.equals(shIn, other.shIn) && java.util.Arrays.equals(shIdx, other.shIdx)
                 && java.util.Arrays.equals(hvIn, other.hvIn) && java.util.Arrays.equals(hvIdx, other.hvIdx)
-                && java.util.Arrays.equals(dqElem, other.dqElem) && java.util.Arrays.equals(dqSide, other.dqSide)
-                && java.util.Arrays.equals(dqWeight, other.dqWeight) && java.util.Arrays.equals(dqRow, other.dqRow)
-                && java.util.Arrays.equals(dqKind, other.dqKind)
+                && distrQ.sameTermsAs(other.distrQ)
                 && java.util.Arrays.equals(ziIn, other.ziIn) && java.util.Arrays.equals(ziIdx, other.ziIdx)
                 && distrRho.sameAs(other.distrRho) && distrShuntB.sameAs(other.distrShuntB)
                 && java.util.Arrays.equals(vdlIn, other.vdlIn) && java.util.Arrays.equals(vdlIdx, other.vdlIdx)
@@ -146,9 +136,7 @@ public record GpuAcData(double[] cbIn, int[] cbIdx, int[] cbPcSide, double[] obI
         return other != null
                 && java.util.Arrays.equals(cbIdx, other.cbIdx) && java.util.Arrays.equals(obIdx, other.obIdx)
                 && java.util.Arrays.equals(shIdx, other.shIdx) && java.util.Arrays.equals(hvIdx, other.hvIdx)
-                && java.util.Arrays.equals(dqElem, other.dqElem) && java.util.Arrays.equals(dqSide, other.dqSide)
-                && java.util.Arrays.equals(dqRow, other.dqRow) && java.util.Arrays.equals(dqWeight, other.dqWeight)
-                && java.util.Arrays.equals(dqKind, other.dqKind)
+                && distrQ.sameAs(other.distrQ)
                 && java.util.Arrays.equals(ziIdx, other.ziIdx)
                 && distrRho.sameAs(other.distrRho) && distrShuntB.sameAs(other.distrShuntB)
                 && reactiveLimits.sameAs(other.reactiveLimits)
@@ -158,16 +146,7 @@ public record GpuAcData(double[] cbIn, int[] cbIdx, int[] cbPcSide, double[] obI
                 && java.util.Arrays.equals(dsMaxDelta, other.dsMaxDelta) && java.util.Arrays.equals(dsMinDelta, other.dsMinDelta)
                 && reactiveRelocation.sameGroupsAs(other.reactiveRelocation)
                 && java.util.Arrays.equals(obQAlt, other.obQAlt) && java.util.Arrays.equals(ziQAlt, other.ziQAlt)
-                && java.util.Arrays.equals(dqKMember, other.dqKMember) && java.util.Arrays.equals(dqJMember, other.dqJMember)
-                && java.util.Arrays.equals(dqMemberKey, other.dqMemberKey)
-                && java.util.Arrays.equals(dqMemberRlEntry, other.dqMemberRlEntry)
-                && java.util.Arrays.equals(dqMemberGroupStart, other.dqMemberGroupStart)
-                && java.util.Arrays.equals(dqMemberGroupCount, other.dqMemberGroupCount)
-                && java.util.Arrays.equals(dqMemberRow, other.dqMemberRow)
-                && java.util.Arrays.equals(dqMemberHasRow, other.dqMemberHasRow)
-                && java.util.Arrays.equals(dqMemberQrGroup, other.dqMemberQrGroup)
-                && java.util.Arrays.equals(dqMemberTargetQ, other.dqMemberTargetQ)
-                && java.util.Arrays.equals(dqMemberBusNum, other.dqMemberBusNum)
+                && distrQMembers.sameAs(other.distrQMembers)
                 && remoteMemberReactiveTerms.sameAs(other.remoteMemberReactiveTerms)
                 && voltageRows.sameAs(other.voltageRows)
                 && java.util.Arrays.equals(cbPcSide, other.cbPcSide)
@@ -194,7 +173,7 @@ public record GpuAcData(double[] cbIn, int[] cbIdx, int[] cbPcSide, double[] obI
     }
 
     public int getDistrQContributionCount() {
-        return dqElem.length;
+        return distrQ.size();
     }
 
     public int getZeroImpedanceCount() {

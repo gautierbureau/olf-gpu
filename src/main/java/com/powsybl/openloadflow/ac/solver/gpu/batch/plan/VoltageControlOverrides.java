@@ -264,7 +264,7 @@ final class VoltageControlOverrides {
             for (LfBus bus : touched) {
                 updateMainReactiveKeys(bus);
             }
-            double[] baseW = gpuData.dqWeight();
+            double[] baseW = gpuData.distrQ().weight();
             double[] newW = reweightedDqWeights(es, gpuData, touched);
             // The member KEYS after the loss (OLF's qPct on the touched groups' MAIN controls, just updated): the
             // kernels renormalize them over the members a pin leaves enabled, so the loss and an in-flight pin in the
@@ -273,7 +273,7 @@ final class VoltageControlOverrides {
             boolean keyed = newW != null;                    // the analytic path: the pack's structure is the base's
             List<Double> keyMember = new ArrayList<>();
             List<Double> keyValue = new ArrayList<>();
-            int[] memberBusNum = gpuData.dqMemberBusNum();
+            int[] memberBusNum = gpuData.distrQMembers().busNum();
             if (memberBusNum != null) {
                 java.util.Map<Integer, Integer> memberOfBusNum = new java.util.HashMap<>();
                 for (int m = 0; m < memberBusNum.length; m++) {
@@ -301,7 +301,7 @@ final class VoltageControlOverrides {
                 // the free role of a table-less group may move with the loss: re-extract, as before
                 nd = com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcDataExtractor
                         .extract(network, es, false, false);
-                newW = nd.dqWeight();
+                newW = nd.distrQ().weight();
             }
             if (newW.length != baseW.length) {
                 return null;                                 // structural drift — not a pure reweight
@@ -310,7 +310,7 @@ final class VoltageControlOverrides {
             List<Double> w = new ArrayList<>();
             boolean dqOvTrace = System.getenv("OLF_GPU_DQOV_TRACE") != null;
             int traced = 0;
-            int[] kMemberOf = gpuData.dqKMember();
+            int[] kMemberOf = gpuData.distrQ().rowMember();
             for (int k = 0; k < newW.length; k++) {
                 if (newW[k] != baseW[k]) {
                     if (keyed && kMemberOf != null && kMemberOf[k] >= 0) {
@@ -320,8 +320,8 @@ final class VoltageControlOverrides {
                     w.add(newW[k]);
                     if (dqOvTrace && traced++ < 12 && nd != null) {   // the two packs' metadata at a differing index
                         System.err.printf("DQOV_PACK k=%d old(row=%d kind=%d elem=%d side=%d w=%.6f) new(row=%d kind=%d elem=%d side=%d w=%.6f)%n",
-                                k, gpuData.dqRow()[k], gpuData.dqKind()[k], gpuData.dqElem()[k], gpuData.dqSide()[k], baseW[k],
-                                nd.dqRow()[k], nd.dqKind()[k], nd.dqElem()[k], nd.dqSide()[k], newW[k]);
+                                k, gpuData.distrQ().row()[k], gpuData.distrQ().kind()[k], gpuData.distrQ().element()[k], gpuData.distrQ().side()[k], baseW[k],
+                                nd.distrQ().row()[k], nd.distrQ().kind()[k], nd.distrQ().element()[k], nd.distrQ().side()[k], newW[k]);
                     }
                 }
             }
@@ -355,14 +355,14 @@ final class VoltageControlOverrides {
      */
     static double[] reweightedDqWeights(EquationSystem<AcVariableType, AcEquationType> es, GpuAcData gpuData,
                                                 java.util.Set<LfBus> touched) {
-        int[] kMember = gpuData.dqKMember();
-        int[] jMember = gpuData.dqJMember();
-        int[] memberBus = gpuData.dqMemberBusNum();
-        double[] baseW = gpuData.dqWeight();
+        int[] kMember = gpuData.distrQ().rowMember();
+        int[] jMember = gpuData.distrQ().injectionMember();
+        int[] memberBus = gpuData.distrQMembers().busNum();
+        double[] baseW = gpuData.distrQ().weight();
         if (kMember == null || jMember == null || memberBus == null || baseW == null) {
             return null;
         }
-        int[] memberQrGroup = gpuData.dqMemberQrGroup();
+        int[] memberQrGroup = gpuData.distrQMembers().relocationGroup();
         java.util.Map<Integer, Integer> memberOfBus = new java.util.HashMap<>();
         for (int m = 0; m < memberBus.length; m++) {
             memberOfBus.put(memberBus[m], m);
@@ -385,8 +385,8 @@ final class VoltageControlOverrides {
                 qPctByBus.put(m.getNum(), m.getRemoteControlReactivePercent());
             }
         }
-        int[] kind = gpuData.dqKind();
-        int[] side = gpuData.dqSide();
+        int[] kind = gpuData.distrQ().kind();
+        int[] side = gpuData.distrQ().side();
         double[] w = baseW.clone();
         for (int i = 0; i < w.length; i++) {
             int k = kMember[i];

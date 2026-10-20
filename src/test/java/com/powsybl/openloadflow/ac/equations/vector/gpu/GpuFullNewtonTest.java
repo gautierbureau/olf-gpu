@@ -92,7 +92,7 @@ class GpuFullNewtonTest {
 
         double[] out = GpuAcNewtonSolver.solve(x0, stableTargets, activation.rowMode(), MAX_ITER, TOL,
                 d.cbIn(), d.cbIdx(), d.obIn(), d.obIdx(), d.shIn(), d.shIdx(), d.hvIn(), d.hvIdx(),
-                d.dqElem(), d.dqSide(), d.dqWeight(), d.dqRow(), d.dqKind(),
+                d.distrQ().element(), d.distrQ().side(), d.distrQ().weight(), d.distrQ().row(), d.distrQ().kind(),
                 d.ziIn(), d.ziIdx(),
                 d.distrRho().row(), d.distrRho().column(), d.distrRho().coefficient(), d.distrShuntB().row(), d.distrShuntB().column(), d.distrShuntB().coefficient());
         int iters = (int) out[n];

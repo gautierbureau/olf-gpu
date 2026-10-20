@@ -130,10 +130,10 @@ public final class GpuEquationDump {
                 add(terms, zp, tag + ".ZERO_PHI");
             }
         }
-        int[] dqRow = d.dqRow();
+        int[] dqRow = d.distrQ().row();
         for (int k = 0; k < dqRow.length; k++) {
             add(terms, dqRow[k], String.format("dq[k=%d elem=%d side=%d kind=%d w=%.6g]",
-                    k, d.dqElem()[k], d.dqSide()[k], d.dqKind()[k], d.dqWeight()[k]));
+                    k, d.distrQ().element()[k], d.distrQ().side()[k], d.distrQ().kind()[k], d.distrQ().weight()[k]));
         }
         for (int k = 0; k < d.distrRho().row().length; k++) {
             add(terms, d.distrRho().row()[k], "dr[col=" + d.distrRho().column()[k] + "]");

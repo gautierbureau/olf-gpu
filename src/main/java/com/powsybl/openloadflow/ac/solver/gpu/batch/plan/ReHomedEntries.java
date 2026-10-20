@@ -47,7 +47,7 @@ final class ReHomedEntries {
                     reject[0] = "PLAN:VC_REMERGE_SUBGROUP_UNPACKED";
                     return null;
                 }
-                if (gpuData.dqMemberQrGroup() == null || gpuData.dqMemberQrGroup()[slot] < 0) {
+                if (gpuData.distrQMembers().relocationGroup() == null || gpuData.distrQMembers().relocationGroup()[slot] < 0) {
                     reject[0] = "PLAN:VC_REMERGE_SUBGROUP_TABLE";    // no candidate table: no per-scenario carrier pick
                     return null;
                 }
@@ -70,13 +70,13 @@ final class ReHomedEntries {
         }
         java.util.Set<Integer> groups = new java.util.HashSet<>();
         for (int m : labelled) {
-            groups.add(gpuData.dqMemberGroupStart()[m]);
+            groups.add(gpuData.distrQMembers().groupStart()[m]);
         }
         List<Integer> keep = new ArrayList<>();
         for (int k = 0; k < ov[0].length; k++) {
             int c = (int) ov[0][k];
-            int kM = gpuData.dqKMember() != null ? gpuData.dqKMember()[c] : -1;
-            if (kM >= 0 && groups.contains(gpuData.dqMemberGroupStart()[kM])) {
+            int kM = gpuData.distrQ().rowMember() != null ? gpuData.distrQ().rowMember()[c] : -1;
+            if (kM >= 0 && groups.contains(gpuData.distrQMembers().groupStart()[kM])) {
                 continue;
             }
             keep.add(k);
@@ -84,7 +84,7 @@ final class ReHomedEntries {
         List<Integer> keepKey = new ArrayList<>();
         for (int k = 0; ov.length > 3 && k < ov[2].length; k++) {
             int m = (int) ov[2][k];
-            if (!groups.contains(gpuData.dqMemberGroupStart()[m])) {
+            if (!groups.contains(gpuData.distrQMembers().groupStart()[m])) {
                 keepKey.add(k);
             }
         }

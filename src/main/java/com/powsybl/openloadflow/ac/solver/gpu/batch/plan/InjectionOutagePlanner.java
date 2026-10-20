@@ -175,14 +175,14 @@ final class InjectionOutagePlanner {
             pb.dqKeyOvByIndex[i] = ov[3];
             String dqOvTrace = System.getenv("OLF_GPU_DQOV_TRACE");   // <contingency id>: every reweighted entry
             if (dqOvTrace != null && dqOvTrace.equals(c.contingencyId())) {
-                int[] mBus = gpuData.dqMemberBusNum();
+                int[] mBus = gpuData.distrQMembers().busNum();
                 for (int k = 0; k < ov[0].length; k++) {
                     int cc = (int) ov[0][k];
-                    int kM = gpuData.dqKMember() != null ? gpuData.dqKMember()[cc] : -1;
-                    int jM = gpuData.dqJMember() != null ? gpuData.dqJMember()[cc] : -1;
+                    int kM = gpuData.distrQ().rowMember() != null ? gpuData.distrQ().rowMember()[cc] : -1;
+                    int jM = gpuData.distrQ().injectionMember() != null ? gpuData.distrQ().injectionMember()[cc] : -1;
                     System.err.printf("DQOV_TRACE ctg=%s c=%d row=%d kind=%d elem=%d oldW=%.6f newW=%.6f kMember=%s jMember=%s%n",
-                            c.contingencyId(), cc, gpuData.dqRow()[cc], gpuData.dqKind()[cc], gpuData.dqElem()[cc],
-                            gpuData.dqWeight()[cc], ov[1][k],
+                            c.contingencyId(), cc, gpuData.distrQ().row()[cc], gpuData.distrQ().kind()[cc], gpuData.distrQ().element()[cc],
+                            gpuData.distrQ().weight()[cc], ov[1][k],
                             kM >= 0 && mBus != null ? goneForKeys.get(0).getBus().getNetwork().getBus(mBus[kM]).getId() : "?",
                             jM >= 0 && mBus != null ? goneForKeys.get(0).getBus().getNetwork().getBus(mBus[jM]).getId() : "?");
                 }

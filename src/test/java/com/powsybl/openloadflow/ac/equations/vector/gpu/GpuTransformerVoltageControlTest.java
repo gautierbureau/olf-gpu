@@ -121,7 +121,7 @@ class GpuTransformerVoltageControlTest {
 
         double[] out = GpuAcNewtonSolver.solve(x0, stableTargets, activation.rowMode(), MAX_ITER, TOL,
                 d.cbIn(), d.cbIdx(), d.obIn(), d.obIdx(), d.shIn(), d.shIdx(), d.hvIn(), d.hvIdx(),
-                d.dqElem(), d.dqSide(), d.dqWeight(), d.dqRow(), d.dqKind(),
+                d.distrQ().element(), d.distrQ().side(), d.distrQ().weight(), d.distrQ().row(), d.distrQ().kind(),
                 d.ziIn(), d.ziIdx(),
                 d.distrRho().row(), d.distrRho().column(), d.distrRho().coefficient(), d.distrShuntB().row(), d.distrShuntB().column(), d.distrShuntB().coefficient());
         int iters = (int) out[n];
@@ -253,7 +253,7 @@ class GpuTransformerVoltageControlTest {
         // (3) solve the OFF structure with the ON activation
         double[] out = GpuAcNewtonSolver.solve(x0, onTargets, onAct.rowMode(), MAX_ITER, TOL,
                 dOff.cbIn(), dOff.cbIdx(), dOff.obIn(), dOff.obIdx(), dOff.shIn(), dOff.shIdx(), dOff.hvIn(), dOff.hvIdx(),
-                dOff.dqElem(), dOff.dqSide(), dOff.dqWeight(), dOff.dqRow(), dOff.dqKind(),
+                dOff.distrQ().element(), dOff.distrQ().side(), dOff.distrQ().weight(), dOff.distrQ().row(), dOff.distrQ().kind(),
                 dOff.ziIn(), dOff.ziIdx(),
                 dOff.distrRho().row(), dOff.distrRho().column(), dOff.distrRho().coefficient(), dOff.distrShuntB().row(), dOff.distrShuntB().column(), dOff.distrShuntB().coefficient());
         double norm = out[n + 1];

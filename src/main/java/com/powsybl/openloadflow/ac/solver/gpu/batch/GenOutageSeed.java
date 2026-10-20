@@ -185,8 +185,8 @@ final class GenOutageSeed {
                     cl.pilotQDeltas.merge(s * (gpuData.reactiveRelocation().groupStart().length - 1) + go.pilotQGroup(),
                             go.pilotQDelta(), Double::sum);
                 }
-                if (go.overridesDqMemberTargetQ() && gpuData.dqMemberBusNum() != null) {
-                    cl.dqTqOvKey.add(s * gpuData.dqMemberBusNum().length
+                if (go.overridesDqMemberTargetQ() && gpuData.distrQMembers().busNum() != null) {
+                    cl.dqTqOvKey.add(s * gpuData.distrQMembers().busNum().length
                             + go.dqTargetQOvMember());
                     cl.dqTqOvVal.add(go.dqTargetQOvValue());
                 }

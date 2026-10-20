@@ -33,12 +33,8 @@ public final class DistrQPacker {
     private DistrQPacker() {
     }
 
-    /** DISTR_Q contributions in the flat device layout: {@code {elem, side, dqRow, kind}} per row + weight. */
-    record DqPack(int[] dqElem, int[] dqSide, double[] dqWeight, int[] dqRow, int[] dqKind,
-                  int[] dqKMember, int[] dqJMember,
-                  double[] dqMemberKey, int[] dqMemberRlEntry, int[] dqMemberGroupStart, int[] dqMemberGroupCount,
-                  int[] dqMemberRow, byte[] dqMemberHasRow, int[] dqMemberQrGroup, double[] dqMemberTargetQ,
-                  int[] dqMemberBusNum, int[] dqMemberTgtPtr, int[] dqMemberTgtPeer) {
+    /** The DISTR_Q terms and the members they refer to. */
+    record Pack(DistrQTerms terms, DistrQMembers members) {
     }
 
     /** Per-group member table for the IN-KERNEL reactive-key renormalization on a remote RL pin
@@ -58,7 +54,7 @@ public final class DistrQPacker {
                                 List<List<Integer>> tgtPeers) {
     }
 
-    static DqPack distrQPack(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
+    static Pack distrQPack(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
                              ExtractionColumns columns, GpuAcFamilyPacker.Packs family, ReactiveLimitEntries rl) {
         // member tables (plan-B3): raw keys + RL-entry mapping + group ranges, in group member order
         MemberTables mt = new MemberTables(new java.util.HashMap<>(), new ArrayList<>(), new ArrayList<>(),
@@ -180,12 +176,12 @@ public final class DistrQPacker {
             }
         }
         tgtPtr[tgtPtr.length - 1] = tgtPeer.size();
-        return new DqPack(dqElem, dqSide, dqWeight, dqRow, dqKind, dqKMember, dqJMember,
-                GpuAcArrays.toDoubleArray(mt.key()), GpuAcArrays.toIntArray(mt.rlEntry()),
+        return new Pack(new DistrQTerms(dqElem, dqSide, dqWeight, dqRow, dqKind, dqKMember, dqJMember),
+                new DistrQMembers(GpuAcArrays.toDoubleArray(mt.key()), GpuAcArrays.toIntArray(mt.rlEntry()),
                 GpuAcArrays.toIntArray(mt.groupStart()), GpuAcArrays.toIntArray(mt.groupCount()),
                 GpuAcArrays.toIntArray(mt.row()), hasRow, GpuAcArrays.toIntArray(qrGroupList),
                 GpuAcArrays.toDoubleArray(mt.targetQ()), GpuAcArrays.toIntArray(mt.busNum()),
-                tgtPtr, GpuAcArrays.toIntArray(tgtPeer));
+                tgtPtr, GpuAcArrays.toIntArray(tgtPeer)));
     }
 
     /**

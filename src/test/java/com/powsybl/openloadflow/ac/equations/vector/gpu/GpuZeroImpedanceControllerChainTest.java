@@ -102,7 +102,7 @@ class GpuZeroImpedanceControllerChainTest extends AbstractLoadFlowNetworkFactory
         // maxIter = k with a tolerance nothing meets: exactly k steps
         return GpuAcNewtonSolver.solve(x0, stableTargets, activation.rowMode(), k, 0.0,
                 d.cbIn(), d.cbIdx(), d.obIn(), d.obIdx(), d.shIn(), d.shIdx(), d.hvIn(), d.hvIdx(),
-                d.dqElem(), d.dqSide(), d.dqWeight(), d.dqRow(), d.dqKind(),
+                d.distrQ().element(), d.distrQ().side(), d.distrQ().weight(), d.distrQ().row(), d.distrQ().kind(),
                 d.ziIn(), d.ziIdx(),
                 d.distrRho().row(), d.distrRho().column(), d.distrRho().coefficient(), d.distrShuntB().row(), d.distrShuntB().column(), d.distrShuntB().coefficient(),
                 // the group tables + ob/zi alternates travel with the packs: a pilot-self group enrolled

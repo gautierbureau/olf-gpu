@@ -16,6 +16,7 @@
 #include "../common/codes/gpu_row_mode.cuh"
 #include "scatter.cuh"
 #include "../fixedmatrix/reactive_relocation.cuh"
+#include "../fixedmatrix/cross_identity.cuh"
 #include "../solver/driver_steps.cuh"
 #include "branch_fill.cuh"
 #include "bus_injection_fill.cuh"
@@ -87,15 +88,7 @@ __global__ void applyRowModeBatch(int n, int nScenarios, int nnz, const int* mod
     int m = mode[(size_t) s * n + r];
     double* valsS = vals + (size_t) s * nnz;
     if (m == GpuRowMode::CROSS_FIXED_VARIABLE) {
-        // CROSS identity (tasks #70, VC_REMERGE_RELOC_VROW): this coupler DUMMY_Q row hosts the relocated child's
-        // reactive equation, and the child is a re-merged voltage-controlled bus whose own V row carries the live
-        // coupler's ZERO_V — so BUS_TARGET_V lands HERE on the child's V column (relocatedChildOwnRow[r] = its own V row =
-        // its V column), the slot the child's own dq/dV term already reserves in the pattern.
-        int col = relocatedChildOwnRow != nullptr ? relocatedChildOwnRow[r] : -1;
-        for (int k = rowPtr[r]; k < rowPtr[r + 1]; k++) {
-            valsS[k] = colIdx[k] == col ? 1.0 : 0.0;
-        }
-        F[(size_t) s * n + r] = (col >= 0 ? x[(size_t) s * n + col] : 0.0) - target[(size_t) s * n + r];
+        writeCrossIdentityRow(r, s, n, rowPtr, colIdx, relocatedChildOwnRow, x, target, valsS, F);
     } else if (m == GpuRowMode::FIXED_VARIABLE) {  // identity: v/phi/rho/a1/b pinned to target
         for (int k = rowPtr[r]; k < rowPtr[r + 1]; k++) {
             valsS[k] = 0.0;

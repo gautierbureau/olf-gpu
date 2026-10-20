@@ -107,7 +107,10 @@ add_library(olfgpu SHARED
     native/cuda/jni/structure/phase_control_pattern.cu
     native/cuda/jni/structure/distribution_dests.cu
     native/cuda/jni/structure/zero_impedance_dests.cu
+    native/cuda/jni/fixedmatrix/zero_impedance_relocation.cu
     native/cuda/jni/structure/shared_structure.cu
+    native/cuda/jni/fixedmatrix/relocated_rows.cu
+    native/cuda/jni/fixedmatrix/zero_diagonal_repair_tables.cu
     native/cuda/jni/diagnostics/matrix_scan.cu
     native/cuda/jni/diagnostics/driver_traces.cu
     native/cuda/jni/solver/outer_loop_driver.cu

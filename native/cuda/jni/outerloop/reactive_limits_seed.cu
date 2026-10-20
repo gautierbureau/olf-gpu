@@ -19,6 +19,7 @@
 #include "../common/codes/gpu_row_mode.cuh"
 #include "../equations/scatter.cuh"
 #include "../fixedmatrix/reactive_relocation.cuh"
+#include "../fixedmatrix/cross_identity.cuh"
 #include "../equations/scenario_overrides.cuh"
 #include "reactive_limits_seed.cuh"
 
@@ -130,13 +131,11 @@ __global__ void seedReactiveLimitRowModeFromState(int nReactiveLimitEntries, int
         int pinRow = vrow;
         if (localOv && reactiveLimitReactivePowerRow != nullptr && reactiveLimitReactivePowerRow[i] >= 0 && reactiveLimitReactivePowerRow[i] != vrow) {
             size_t r2 = (size_t) s * n + reactiveLimitReactivePowerRow[i];
-            if (mode[r2] == GpuRowMode::CROSS_FIXED_VARIABLE || (mode[r2] == GpuRowMode::BUS_TARGET_Q && mode[(size_t) s * n + vrow] != GpuRowMode::BUS_TARGET_Q)) {
-                pinRow = reactiveLimitReactivePowerRow[i];
-            }
+            pinRow = crossIdentityPinRow(mode, r2, (size_t) s * n + vrow, reactiveLimitReactivePowerRow[i], vrow);
         }
         size_t pidx = (size_t) s * n + pinRow;
         if (mode[pidx] == GpuRowMode::EQUATION || mode[pidx] == GpuRowMode::BUS_TARGET_Q) {  // still holding the base pin
-            mode[pidx] = pinRow != vrow ? GpuRowMode::CROSS_FIXED_VARIABLE : GpuRowMode::FIXED_VARIABLE;
+            mode[pidx] = fixedVariableMode(pinRow != vrow);
             target[pidx] = localOv ? reactiveLimitLocalTargetV[scenarioEntry] : reactiveLimitTargetVOf(nReactiveLimitTargetVOverrides, reactiveLimitTargetVOverrideScenarioEntry, reactiveLimitTargetVOverrideValue, secondaryVoltageControlReactiveLimitTargetV, nReactiveLimitEntries, s, i, reactiveLimitTargetV[i]);
         }
         return;

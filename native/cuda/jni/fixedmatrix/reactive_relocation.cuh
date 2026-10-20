@@ -8,6 +8,7 @@
 
 #include <cuda_runtime.h>
 #include "../common/codes/gpu_row_mode.cuh"
+#include "cross_identity.cuh"
 
 namespace olfgpu {
 
@@ -114,7 +115,7 @@ __device__ inline int dependentPilotDestination(int slot, int frozen, int altern
         if (mf == 1 || mf == 4) return frozen;               // the coupler lives (or the pin sits there)
         if (mf == 0) {                                       // the coupler is dead: home, unless home is the identity
             int mo = mode[rt.relocatedChildOwnRow[fr]];
-            if (mo != GpuRowMode::FIXED_VARIABLE && mo != GpuRowMode::CROSS_FIXED_VARIABLE) return alternateDestination;
+            if (!holdsFixedVariable(mo)) return alternateDestination;
         }
     } else if (mf != 0 && mf != 6) {                         // a root: its own row, unless that is the identity
         return frozen;

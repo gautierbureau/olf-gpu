@@ -18,6 +18,7 @@
 #include "../equations/scenario_overrides.cuh"
 #include "../solver/driver_steps.cuh"
 #include "../fixedmatrix/reactive_relocation.cuh"
+#include "../fixedmatrix/cross_identity.cuh"
 #include "pilot_voltage.cuh"
 
 
@@ -91,7 +92,7 @@ __global__ void applyPilotQDeltasBatch(int nDelta, const int* key, const double*
             distrQSubgroup != nullptr ? distrQSubgroup + (size_t) s * nDistrQMembers : nullptr, reactiveRelocationDistrQMemberStart);
     int row = reactiveRelocationCandidateRows[reactiveRelocationGroupStart[g] + c];
     int m = mode[(size_t) s * n + row];
-    if (m != GpuRowMode::FIXED_VARIABLE && m != GpuRowMode::CROSS_FIXED_VARIABLE) {
+    if (!holdsFixedVariable(m)) {
         target[(size_t) s * n + row] += val[k];
     }
 }
@@ -257,7 +258,7 @@ __global__ void updatePilotTargetVEquationBatch(int nReactiveRelocationGroups, i
         pilotTargetVDeactivated[fi] = 1;
         switched[s] = act ? 1 : switched[s];                 // only the RL phase drives the outer loop's stability
     } else if (layoutNow && !lost && pilotTargetVDeactivated[fi]) {
-        mode[pi] = dependent && relocatedChildOwnRow != nullptr && relocatedChildOwnRow[pilotRow] >= 0 ? GpuRowMode::CROSS_FIXED_VARIABLE : GpuRowMode::FIXED_VARIABLE;  // a cross identity stays cross
+        mode[pi] = fixedVariableMode(dependent && relocatedChildOwnRow != nullptr && relocatedChildOwnRow[pilotRow] >= 0);  // a cross identity stays cross
         target[pi] = savedVTarget[fi];
         pilotTargetVDeactivated[fi] = 0;
         switched[s] = act ? 1 : switched[s];

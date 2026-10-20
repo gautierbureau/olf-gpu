@@ -15,6 +15,7 @@
 #include "../common/launch.cuh"
 #include "../equations/scatter.cuh"
 #include "../fixedmatrix/reactive_relocation.cuh"
+#include "../fixedmatrix/cross_identity.cuh"
 #include "../equations/scenario_overrides.cuh"
 #include "../solver/driver_steps.cuh"
 #include "../common/stats.cuh"
@@ -290,9 +291,7 @@ __global__ void reactiveLimitsBatch(const double* secondaryVoltageControlReactiv
     size_t pinIdx = idx;
     if (localOv && reactiveLimitReactivePowerRow != nullptr && reactiveLimitReactivePowerRow[i] >= 0 && reactiveLimitReactivePowerRow[i] != vrow) {
         size_t r2 = (size_t) s * n + reactiveLimitReactivePowerRow[i];
-        if (mode[r2] == GpuRowMode::CROSS_FIXED_VARIABLE || (mode[r2] == GpuRowMode::BUS_TARGET_Q && mode[idx] != GpuRowMode::BUS_TARGET_Q)) {
-            pinIdx = r2;
-        }
+        pinIdx = crossIdentityPinRow(mode, r2, idx, r2, idx);
     }
     const bool crossRow = pinIdx != idx;
     if ((mode[pinIdx] == GpuRowMode::FIXED_VARIABLE || mode[pinIdx] == GpuRowMode::BUS_TARGET_V_WITH_SLOPE || mode[pinIdx] == GpuRowMode::CROSS_FIXED_VARIABLE) && limitType[scenarioEntry] == GpuQLimitType::NONE) {  // currently PV — check the reactive limits
@@ -331,7 +330,7 @@ __global__ void reactiveLimitsBatch(const double* secondaryVoltageControlReactiv
                  || (minPin && v < targetV));                             // minQ-pinned but v below target
         bool back = wantsBack && switchCount[scenarioEntry] < maxSwitch;
         if (back) {
-            mode[pinIdx] = crossRow ? GpuRowMode::CROSS_FIXED_VARIABLE : GpuRowMode::FIXED_VARIABLE;               // PQ → PV: resume voltage control (cross identity stays cross)
+            mode[pinIdx] = fixedVariableMode(crossRow);               // PQ → PV: resume voltage control (cross identity stays cross)
             target[pinIdx] = targetV;
             limitType[scenarioEntry] = GpuQLimitType::NONE;
             switched[s] = 1;

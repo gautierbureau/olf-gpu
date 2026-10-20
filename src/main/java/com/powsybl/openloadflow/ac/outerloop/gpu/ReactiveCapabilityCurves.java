@@ -13,7 +13,7 @@ import com.powsybl.iidm.network.ReactiveLimitsKind;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
-import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDsParams;
+import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDistributedSlackParameters;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfGenerator;
@@ -75,7 +75,7 @@ public final class ReactiveCapabilityCurves {
      *  {@code gpuData.reactiveLimits().voltageRow()} — a drift throws, falling back to CPU). Returns null when no
      *  PARTICIPATING curve generator exists (static snapshots stay exact). */
     public static Channel build(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
-                                GpuAcData gpuData, GpuDsParams distributedSlackParameters, boolean distributedSlack,
+                                GpuAcData gpuData, GpuDistributedSlackParameters distributedSlackParameters, boolean distributedSlack,
                                 double[] baseTargets, boolean extrapolate) {
         // the AC-emulation stations, in the HVDC loop tables' order: station -> {hvdc, side}
         java.util.Map<LfGenerator, int[]> hvdcSides = new java.util.IdentityHashMap<>();
@@ -191,7 +191,7 @@ public final class ReactiveCapabilityCurves {
     }
 
     private static void packBusCurves(LfBus bus, int reactiveLimitEntry, EquationSystem<AcVariableType, AcEquationType> es,
-                                      GpuDsParams distributedSlackParameters, double[] baseTargets, int[] busPRow,
+                                      GpuDistributedSlackParameters distributedSlackParameters, double[] baseTargets, int[] busPRow,
                                       List<int[]> reactiveCapabilityCurveIndices, List<double[]> reactiveCapabilityCurveParameters, List<Double> reactiveCapabilityCurvePoints,
                                       List<String> reactiveCapabilityCurveGeneratorId, List<Double> reactiveCapabilityCurveBusFactor, GpuAcData gpuData,
                                       java.util.Map<LfGenerator, int[]> hvdcSides, List<Integer> reactiveCapabilityCurveHvdcStation) {

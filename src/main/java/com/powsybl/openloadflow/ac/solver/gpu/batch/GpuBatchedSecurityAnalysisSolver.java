@@ -118,7 +118,7 @@ public final class GpuBatchedSecurityAnalysisSolver {
                 .filter(b -> b.isZeroImpedance(com.powsybl.openloadflow.network.LoadFlowModel.AC))
                 .map(LfBranch::getId)
                 .collect(java.util.stream.Collectors.toSet());
-        com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDsParams distributedSlackParameters = config.distributedSlackParameters();
+        com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDistributedSlackParameters distributedSlackParameters = config.distributedSlackParameters();
         GpuAcData gpuData = baseOpenIds.isEmpty() && baseOpenZeroImpedanceBranchIds.isEmpty()
                 ? GpuAcDataCache.extract(network, equationSystem, distributedSlack, reactiveLimits, distributedSlackParameters)
                 : GpuAcDataExtractor.extract(network, equationSystem, distributedSlack, reactiveLimits, baseOpenIds, baseOpenZeroImpedanceBranchIds, distributedSlackParameters);

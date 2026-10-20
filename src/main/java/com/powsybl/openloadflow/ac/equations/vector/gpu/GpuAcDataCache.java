@@ -59,7 +59,7 @@ public final class GpuAcDataCache {
     private static final Logger LOGGER = LoggerFactory.getLogger(GpuAcDataCache.class);
 
     /** The (distributedSlack, reactiveLimits, distributedSlackParameters) extraction flavor — different outer-loop packs. */
-    private record Flavor(boolean distributedSlack, boolean reactiveLimits, GpuDsParams distributedSlackParameters) {
+    private record Flavor(boolean distributedSlack, boolean reactiveLimits, GpuDistributedSlackParameters distributedSlackParameters) {
     }
 
     private static final class Entry implements EquationSystemIndexListener<AcVariableType, AcEquationType>, LfNetworkListener {
@@ -231,13 +231,13 @@ public final class GpuAcDataCache {
     public static synchronized GpuAcData extract(LfNetwork network,
                                                  EquationSystem<AcVariableType, AcEquationType> es,
                                                  boolean distributedSlack, boolean reactiveLimits) {
-        return extract(network, es, distributedSlack, reactiveLimits, GpuDsParams.DEFAULT);
+        return extract(network, es, distributedSlack, reactiveLimits, GpuDistributedSlackParameters.DEFAULT);
     }
 
     public static synchronized GpuAcData extract(LfNetwork network,
                                                  EquationSystem<AcVariableType, AcEquationType> es,
                                                  boolean distributedSlack, boolean reactiveLimits,
-                                                 GpuDsParams distributedSlackParameters) {
+                                                 GpuDistributedSlackParameters distributedSlackParameters) {
         Entry entry = ENTRIES.get(es);
         if (entry == null || entry.network != network) {
             entry = new Entry(network);

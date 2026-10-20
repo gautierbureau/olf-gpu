@@ -142,14 +142,14 @@ __global__ void computeSlackRetain(int nScenarios, int n, int nDistributedSlackB
     double absorbed = 0.0;
     double fsActive = 0.0;                                   // Σ f over the participants still in the main component
     double fsAll = 0.0;
-    int ov = distributedSlackOverrideBus != nullptr ? distributedSlackOverrideBus[s] : -1;
+    int overriddenBus = distributedSlackOverrideBus != nullptr ? distributedSlackOverrideBus[s] : -1;
     for (int i = 0; i < nDistributedSlackBuses; i++) {
         fsAll += distributedSlackBusFactor[i];
         if (distributedSlackIslanded != nullptr && distributedSlackIslanded[(size_t) s * nDistributedSlackBuses + i]) {
             continue;                                        // in another component: not a participant here
         }
         // a lost participating generator leaves the participation like a stranded one: its factor goes
-        fsActive += distributedSlackBusFactor[i] - (ov == i && distributedSlackOverrideFactorDelta != nullptr ? distributedSlackOverrideFactorDelta[s] : 0.0);
+        fsActive += distributedSlackBusFactor[i] - (overriddenBus == i && distributedSlackOverrideFactorDelta != nullptr ? distributedSlackOverrideFactorDelta[s] : 0.0);
         // A composed injection override on a participant bus (redispatch action, load delta) shifts
         // the row target WITHOUT being distributed power — the effective base must shift with it,
         // or the retain math counts the override as absorbed slack and the waterfill CANCELS it
@@ -158,7 +158,7 @@ __global__ void computeSlackRetain(int nScenarios, int n, int nDistributedSlackB
         if (distributedSlackBusAnchorShift != nullptr) {
             base += distributedSlackBusAnchorShift[(size_t) s * nDistributedSlackBuses + i];     // pair leg: cumulative reference re-anchored at the
         }                                                    // PARENT contingency's distributed targets (OLF's
-        if (ov == i) {                                       // setGeneratorsInitialTargetPToTargetP before the
+        if (overriddenBus == i) {                                       // setGeneratorsInitialTargetPToTargetP before the
             base -= distributedSlackOverrideBaseTargetPDelta[s];                        // strategy re-solve)
         }
         absorbed += target[(size_t) s * n + distributedSlackBusRowOf(distributedSlackBusPhiRow, distributedSlackBusRowOverride, s, nDistributedSlackBuses, i)] - base;
@@ -210,7 +210,7 @@ __global__ void computeSlackRetain(int nScenarios, int n, int nDistributedSlackB
 __global__ void distributeSlackBatch(int nDistributedSlackBuses, int nScenarios, int n, double slackDistTol, double residueEps,
                                               int slackPhiRowBase, const int* slackRowOv, double slackTargetP, const int* distributedSlackBusPhiRow, const int* distributedSlackBusRowOverride,
                                               const double* distributedSlackBusFactor, const double* distributedSlackBusBaseTargetP, const double* distributedSlackBusAnchorShift, const double* slackBusAnchorShift,
-                                              const double* dsMaxDelta, const double* dsMinDelta, const double* slackRetainedShare,
+                                              const double* distributedSlackBusMaxDelta, const double* distributedSlackBusMinDelta, const double* slackRetainedShare,
                                               const double* qBuf, const char* outerLoopCheckActive,
                                               const int* distributedSlackOverrideBus, const double* distributedSlackOverrideFactorDelta, const double* distributedSlackOverrideBaseTargetPDelta,
                                               const double* distributedSlackOverrideMaxDelta, const double* distributedSlackOverrideMinDelta,
@@ -235,7 +235,7 @@ __global__ void distributeSlackBatch(int nDistributedSlackBuses, int nScenarios,
     // past the slackBusPMaxMismatch outer gate, exactly like OLF's DistributedSlackOuterLoop.check.
     double slackTgt = slackTargetP + (slackBusAnchorShift != nullptr ? slackBusAnchorShift[s] : 0.0);
     double rem = (qBuf[(size_t) s * n + slackPhiRow] - slackTgt) - slackRetainedShare[s];
-    int ov = (distributedSlackOverrideBus != nullptr) ? distributedSlackOverrideBus[s] : -1;        // the bus losing a participating gen (gen contingency), -1 = none
+    int overriddenBus = (distributedSlackOverrideBus != nullptr) ? distributedSlackOverrideBus[s] : -1;        // the bus losing a participating gen (gen contingency), -1 = none
     // REMAINING_MARGIN: factors are the per-bus margins in the DIRECTION of the pass's remaining mismatch,
     // picked ONCE at entry (OLF evaluates them once per run at the anchor); a moved anchor (+delta) eats
     // headroom and frees footroom symmetrically.
@@ -276,7 +276,7 @@ __global__ void distributeSlackBatch(int nDistributedSlackBuses, int nScenarios,
             if (distributedSlackIslanded != nullptr && distributedSlackIslanded[(size_t) s * nDistributedSlackBuses + i]) {
                 continue;
             }
-            fsActive += distributedSlackBusFactor[i] - (ov == i && distributedSlackOverrideFactorDelta != nullptr ? distributedSlackOverrideFactorDelta[s] : 0.0);
+            fsActive += distributedSlackBusFactor[i] - (overriddenBus == i && distributedSlackOverrideFactorDelta != nullptr ? distributedSlackOverrideFactorDelta[s] : 0.0);
         }
         // With every participant present this is Σf, bit-for-bit what it was. With some stranded or a
         // participating generator lost it is the survivors' share of the RENORMALIZED set, 1 - rho' = fsActive/(fsActive + rho) with
@@ -361,7 +361,7 @@ __global__ void distributeSlackBatch(int nDistributedSlackBuses, int nScenarios,
         }
         double base = distributedSlackBusBaseTargetP[i];
         if (distributedSlackBusAnchorShift != nullptr) { base += distributedSlackBusAnchorShift[(size_t) s * nDistributedSlackBuses + i]; }
-        if (ov == i) { base -= distributedSlackOverrideBaseTargetPDelta[s]; }
+        if (overriddenBus == i) { base -= distributedSlackOverrideBaseTargetPDelta[s]; }
         size_t idx = (size_t) s * n + distributedSlackBusRowOf(distributedSlackBusPhiRow, distributedSlackBusRowOverride, s, nDistributedSlackBuses, i);
         absorbedNow += target[idx] - base;
         target[idx] = base;                                 // reset to the anchor
@@ -410,7 +410,7 @@ __global__ void distributeSlackBatch(int nDistributedSlackBuses, int nScenarios,
         // lost generator outside the DS pack never participated and has nothing to remove, but its
         // participating siblings still need their own P — leaving them on the aggregate entry is what
         // keeps their distributedSlackGeneratorMove at zero and sends the curve channel back to the share model.
-        bool ovPerGen = ov >= 0;
+        bool overriddenBusPerGenerator = overriddenBus >= 0;
         for (int g = 0; g < nDistributedSlackGenerators; g++) {                     // fresh list, fresh cumulative deltas
             distributedSlackGeneratorMove[(size_t) s * nDistributedSlackGenerators + g] = 0.0;
             bool lost = false;
@@ -435,7 +435,7 @@ __global__ void distributeSlackBatch(int nDistributedSlackBuses, int nScenarios,
             double fsumActive = 0.0;                         // normalizeParticipationFactors, over the remaining
             for (int g = 0; g < nDistributedSlackGenerators; g++) {
                 int i = distributedSlackGeneratorBus[g];                            // -1: a slack generator, never islanded nor outaged here
-                if (distributedSlackGeneratorRemoved[(size_t) s * nDistributedSlackGenerators + g] || (i >= 0 && ((ov == i && !ovPerGen)
+                if (distributedSlackGeneratorRemoved[(size_t) s * nDistributedSlackGenerators + g] || (i >= 0 && ((overriddenBus == i && !overriddenBusPerGenerator)
                         || (distributedSlackIslanded != nullptr && distributedSlackIslanded[(size_t) s * nDistributedSlackBuses + i])))) {
                     continue;
                 }
@@ -445,21 +445,21 @@ __global__ void distributeSlackBatch(int nDistributedSlackBuses, int nScenarios,
             // carries {factor, base, headroom, footroom} deltas for the bus, not the identity of the
             // generator, so a per-generator entry cannot express it. Its share is added to the same
             // denominator, so the normalization is the one the old loop used.
-            double ovF = 0.0;
-            double ovBase = 0.0;
-            double ovMaxD = 0.0;
-            double ovMinD = 0.0;
-            bool ovActive = false;
-            if (ov >= 0 && !ovPerGen && (distributedSlackIslanded == nullptr || !distributedSlackIslanded[(size_t) s * nDistributedSlackBuses + ov])) {
-                ovBase = distributedSlackBusBaseTargetP[ov] - distributedSlackOverrideBaseTargetPDelta[s];
-                ovMaxD = dsMaxDelta[ov] - distributedSlackOverrideMaxDelta[s];
-                ovMinD = dsMinDelta[ov] - distributedSlackOverrideMinDelta[s];
-                ovF = distributedSlackFactorMode == GpuDistributedSlackFactorMode::REMAINING_MARGIN ? fmax(0.0, dirUp ? distributedSlackBusMarginUp[ov] : distributedSlackBusMarginDown[ov])
-                                  : distributedSlackBusFactor[ov] - distributedSlackOverrideFactorDelta[s];
-                double ovCum = target[(size_t) s * n + distributedSlackBusRowOf(distributedSlackBusPhiRow, distributedSlackBusRowOverride, s, nDistributedSlackBuses, ov)] - ovBase;
-                ovActive = ovF > 0 && !((rem > 0) ? (ovCum >= ovMaxD) : (ovCum <= ovMinD));
-                if (ovActive) {
-                    fsumActive += ovF;
+            double overriddenBusFactor = 0.0;
+            double overriddenBusBaseTargetP = 0.0;
+            double overriddenBusMaxDelta = 0.0;
+            double overriddenBusMinDelta = 0.0;
+            bool overriddenBusActive = false;
+            if (overriddenBus >= 0 && !overriddenBusPerGenerator && (distributedSlackIslanded == nullptr || !distributedSlackIslanded[(size_t) s * nDistributedSlackBuses + overriddenBus])) {
+                overriddenBusBaseTargetP = distributedSlackBusBaseTargetP[overriddenBus] - distributedSlackOverrideBaseTargetPDelta[s];
+                overriddenBusMaxDelta = distributedSlackBusMaxDelta[overriddenBus] - distributedSlackOverrideMaxDelta[s];
+                overriddenBusMinDelta = distributedSlackBusMinDelta[overriddenBus] - distributedSlackOverrideMinDelta[s];
+                overriddenBusFactor = distributedSlackFactorMode == GpuDistributedSlackFactorMode::REMAINING_MARGIN ? fmax(0.0, dirUp ? distributedSlackBusMarginUp[overriddenBus] : distributedSlackBusMarginDown[overriddenBus])
+                                  : distributedSlackBusFactor[overriddenBus] - distributedSlackOverrideFactorDelta[s];
+                double overriddenBusMove = target[(size_t) s * n + distributedSlackBusRowOf(distributedSlackBusPhiRow, distributedSlackBusRowOverride, s, nDistributedSlackBuses, overriddenBus)] - overriddenBusBaseTargetP;
+                overriddenBusActive = overriddenBusFactor > 0 && !((rem > 0) ? (overriddenBusMove >= overriddenBusMaxDelta) : (overriddenBusMove <= overriddenBusMinDelta));
+                if (overriddenBusActive) {
+                    fsumActive += overriddenBusFactor;
                 }
             }
             if (fsumActive <= 0.0) {
@@ -468,7 +468,7 @@ __global__ void distributeSlackBatch(int nDistributedSlackBuses, int nScenarios,
             double done = 0.0;
             for (int g = 0; g < nDistributedSlackGenerators; g++) {
                 int i = distributedSlackGeneratorBus[g];                            // -1: a slack generator, never islanded nor outaged here
-                if (distributedSlackGeneratorRemoved[(size_t) s * nDistributedSlackGenerators + g] || (i >= 0 && ((ov == i && !ovPerGen)
+                if (distributedSlackGeneratorRemoved[(size_t) s * nDistributedSlackGenerators + g] || (i >= 0 && ((overriddenBus == i && !overriddenBusPerGenerator)
                         || (distributedSlackIslanded != nullptr && distributedSlackIslanded[(size_t) s * nDistributedSlackBuses + i])))) {
                     continue;
                 }
@@ -496,20 +496,20 @@ __global__ void distributeSlackBatch(int nDistributedSlackBuses, int nScenarios,
                     changed = true;
                 }
             }
-            if (ovActive) {
-                size_t idx = (size_t) s * n + distributedSlackBusRowOf(distributedSlackBusPhiRow, distributedSlackBusRowOverride, s, nDistributedSlackBuses, ov);
-                double cum = target[idx] - ovBase;
-                double newCum = fmin(fmax(cum + rem * (ovF / fsumActive), ovMinD), ovMaxD);
+            if (overriddenBusActive) {
+                size_t idx = (size_t) s * n + distributedSlackBusRowOf(distributedSlackBusPhiRow, distributedSlackBusRowOverride, s, nDistributedSlackBuses, overriddenBus);
+                double cum = target[idx] - overriddenBusBaseTargetP;
+                double newCum = fmin(fmax(cum + rem * (overriddenBusFactor / fsumActive), overriddenBusMinDelta), overriddenBusMaxDelta);
                 if (newCum != cum) {
-                    target[idx] = ovBase + newCum;
+                    target[idx] = overriddenBusBaseTargetP + newCum;
                     done += newCum - cum;
                     changed = true;
                 }
             }
             // The bus rows: anchor + Σ over the bus's generators, whose slice is contiguous.
             for (int i = 0; i < nDistributedSlackBuses; i++) {
-                if ((ov == i && !ovPerGen) || (distributedSlackIslanded != nullptr && distributedSlackIslanded[(size_t) s * nDistributedSlackBuses + i])) {
-                    continue;                                // ov keeps its own value; a frozen row is not written
+                if ((overriddenBus == i && !overriddenBusPerGenerator) || (distributedSlackIslanded != nullptr && distributedSlackIslanded[(size_t) s * nDistributedSlackBuses + i])) {
+                    continue;                                // overriddenBus keeps its own value; a frozen row is not written
                 }
                 double sum = 0.0;
                 for (int g = distributedSlackBusGeneratorStart[i]; g < distributedSlackBusGeneratorEnd[i]; g++) {
@@ -519,7 +519,7 @@ __global__ void distributeSlackBatch(int nDistributedSlackBuses, int nScenarios,
                 // does a strategy pair's parent distribution (the bus's share of distributedSlackGeneratorAnchor).
                 target[(size_t) s * n + distributedSlackBusRowOf(distributedSlackBusPhiRow, distributedSlackBusRowOverride, s, nDistributedSlackBuses, i)] =
                         distributedSlackBusBaseTargetP[i] + (distributedSlackBusAnchorShift != nullptr ? distributedSlackBusAnchorShift[(size_t) s * nDistributedSlackBuses + i] : 0.0)
-                        - (ov == i ? distributedSlackOverrideBaseTargetPDelta[s] : 0.0) + sum;
+                        - (overriddenBus == i ? distributedSlackOverrideBaseTargetPDelta[s] : 0.0) + sum;
             }
             rem -= done;
         }
@@ -539,11 +539,11 @@ __global__ void distributeSlackBatch(int nDistributedSlackBuses, int nScenarios,
             if (distributedSlackIslanded != nullptr && distributedSlackIslanded[(size_t) s * nDistributedSlackBuses + i]) {
                 continue;
             }
-            double f = distributedSlackBusFactor[i], base = distributedSlackBusBaseTargetP[i], maxD = dsMaxDelta[i], minD = dsMinDelta[i];
+            double f = distributedSlackBusFactor[i], base = distributedSlackBusBaseTargetP[i], maxD = distributedSlackBusMaxDelta[i], minD = distributedSlackBusMinDelta[i];
             double sh = distributedSlackBusAnchorShift != nullptr ? distributedSlackBusAnchorShift[(size_t) s * nDistributedSlackBuses + i] : 0.0;
             if (distributedSlackBusAnchorShift != nullptr) { base += sh; maxD -= sh; minD -= sh; }
             if (distributedSlackFactorMode == GpuDistributedSlackFactorMode::REMAINING_MARGIN) { f = fmax(0.0, (dirUp ? distributedSlackBusMarginUp[i] : distributedSlackBusMarginDown[i]) - (dirUp ? sh : -sh)); }
-            if (ov == i) { f -= distributedSlackOverrideFactorDelta[s]; base -= distributedSlackOverrideBaseTargetPDelta[s]; maxD -= distributedSlackOverrideMaxDelta[s]; minD -= distributedSlackOverrideMinDelta[s]; }
+            if (overriddenBus == i) { f -= distributedSlackOverrideFactorDelta[s]; base -= distributedSlackOverrideBaseTargetPDelta[s]; maxD -= distributedSlackOverrideMaxDelta[s]; minD -= distributedSlackOverrideMinDelta[s]; }
             double cum = target[(size_t) s * n + distributedSlackBusRowOf(distributedSlackBusPhiRow, distributedSlackBusRowOverride, s, nDistributedSlackBuses, i)] - base;
             bool sat = (rem > 0) ? (cum >= maxD) : (cum <= minD);
             if (!sat) {
@@ -558,11 +558,11 @@ __global__ void distributeSlackBatch(int nDistributedSlackBuses, int nScenarios,
             if (distributedSlackIslanded != nullptr && distributedSlackIslanded[(size_t) s * nDistributedSlackBuses + i]) {
                 continue;                                    // writing here would land on a frozen row
             }
-            double f = distributedSlackBusFactor[i], base = distributedSlackBusBaseTargetP[i], maxD = dsMaxDelta[i], minD = dsMinDelta[i];
+            double f = distributedSlackBusFactor[i], base = distributedSlackBusBaseTargetP[i], maxD = distributedSlackBusMaxDelta[i], minD = distributedSlackBusMinDelta[i];
             double sh = distributedSlackBusAnchorShift != nullptr ? distributedSlackBusAnchorShift[(size_t) s * nDistributedSlackBuses + i] : 0.0;
             if (distributedSlackBusAnchorShift != nullptr) { base += sh; maxD -= sh; minD -= sh; }
             if (distributedSlackFactorMode == GpuDistributedSlackFactorMode::REMAINING_MARGIN) { f = fmax(0.0, (dirUp ? distributedSlackBusMarginUp[i] : distributedSlackBusMarginDown[i]) - (dirUp ? sh : -sh)); }
-            if (ov == i) { f -= distributedSlackOverrideFactorDelta[s]; base -= distributedSlackOverrideBaseTargetPDelta[s]; maxD -= distributedSlackOverrideMaxDelta[s]; minD -= distributedSlackOverrideMinDelta[s]; }
+            if (overriddenBus == i) { f -= distributedSlackOverrideFactorDelta[s]; base -= distributedSlackOverrideBaseTargetPDelta[s]; maxD -= distributedSlackOverrideMaxDelta[s]; minD -= distributedSlackOverrideMinDelta[s]; }
             size_t idx = (size_t) s * n + distributedSlackBusRowOf(distributedSlackBusPhiRow, distributedSlackBusRowOverride, s, nDistributedSlackBuses, i);
             double cum = target[idx] - base;
             bool sat = (rem > 0) ? (cum >= maxD) : (cum <= minD);

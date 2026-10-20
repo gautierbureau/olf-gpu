@@ -43,7 +43,7 @@ public final class BatchSolveNative {
                                                   double[] reactiveLimitTargetV, byte[] reactiveLimitFlags, double[] rowSlope,
                                                   int[] distributedSlackBusPhiRow, double[] distributedSlackBusFactor,
                                                   int slackBusPhiRow, double slackBusTargetP,
-                                                  double[] distributedSlackBusBaseTargetP, double[] dsMaxDelta, double[] dsMinDelta,
+                                                  double[] distributedSlackBusBaseTargetP, double[] distributedSlackBusMaxDelta, double[] distributedSlackBusMinDelta,
                                                   int distributedSlackFactorMode, double[] distributedSlackBusMarginUp, double[] distributedSlackBusMarginDown,
                                                   double slackBusMarginUp, double slackBusMarginDown);
 

@@ -44,7 +44,7 @@ import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuStateVectorScalingMode;
  */
 public record BatchConfig(int stateVectorScalingMode, double maxDv, double maxDphi, boolean transformerControl,
                           int maxOuterIterations, int maxPqPvSwitch, boolean rejectSlackDistributionFailure,
-                          com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDsParams distributedSlackParameters,
+                          com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDistributedSlackParameters distributedSlackParameters,
                           boolean incrementalTransformerControl, int incrementalTransformerVoltageControlMaxTapShift,
                           boolean incrementalShuntControl, int incrementalShuntVoltageControlMaxSectionShift,
                           boolean simpleShuntControl,
@@ -78,7 +78,7 @@ public record BatchConfig(int stateVectorScalingMode, double maxDv, double maxDp
     public static final BatchConfig DEVICE_DEFAULTS = new BatchConfig(GpuStateVectorScalingMode.NONE, 0, 0, false, 0,
             com.powsybl.openloadflow.ac.outerloop.ReactiveLimitsOuterLoop.MAX_SWITCH_PQ_PV_DEFAULT_VALUE,   // OLF's cap: 0 means never switch back
             false,
-            com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDsParams.DEFAULT, false, 3, false, 3, false, false, false, false, false, false, false,
+            com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDistributedSlackParameters.DEFAULT, false, 3, false, 3, false, false, false, false, false, false, false,
             false, 0.8, 1.2, false, false, false, false, false, null, -1,
             true, com.powsybl.openloadflow.ac.AcLoadFlowParameters.DEFAULT_MIN_REALISTIC_VOLTAGE,
             com.powsybl.openloadflow.ac.AcLoadFlowParameters.DEFAULT_MAX_REALISTIC_VOLTAGE,

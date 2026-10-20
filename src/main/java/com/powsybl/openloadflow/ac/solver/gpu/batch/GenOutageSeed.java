@@ -265,8 +265,8 @@ final class GenOutageSeed {
                     rs.distributedSlackOverrideBus[s] = go.distributedSlackOverrideBusIndex();
                     rs.distributedSlackOverrideFactorDelta[s] = go.distributedSlackFactorDelta();
                     rs.distributedSlackOverrideBaseTargetPDelta[s] = go.distributedSlackBaseTargetPDelta();
-                    rs.distributedSlackOverrideMaxDelta[s] = go.dsMaxDelta();
-                    rs.distributedSlackOverrideMinDelta[s] = go.dsMinDelta();
+                    rs.distributedSlackOverrideMaxDelta[s] = go.distributedSlackOverrideMaxDelta();
+                    rs.distributedSlackOverrideMinDelta[s] = go.distributedSlackOverrideMinDelta();
                     // ...and WHICH generators left, as slots in the DS generator pack. With the
                     // identity the outaged bus's SURVIVORS can take part in the per-generator
                     // water-fill like any others, instead of the bus riding on one aggregate

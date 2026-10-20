@@ -156,6 +156,12 @@ Only notions with no OLF counterpart. Everything else uses OLF's name.
 | refusal | a contingency handed back to OLF before any solve | 5 |
 | pilot-self | the controlled bus of a remote voltage control that is also one of its own controllers (`GpuVoltageControlRole.PILOT_SELF`) | 2.3 |
 
+Names in the code spell every notion out (`distributedSlackBusFactor`, `reactiveLimitVoltageRow`); a `d` prefix is
+a device buffer, `h` its host copy, `j` the JNI argument that carries it. Only loop indices keep one letter, each
+with one meaning everywhere: `s` the scenario (lane) of a chunk, `e` an element of a family, `g` a distributed
+slack generator, `c` a DISTR_Q / DISTR_RHO term, `m` a DISTR_Q member, `n` the number of rows. Per-scenario arrays
+are indexed `[s * count + index]`.
+
 ## 7. Codes shared with the device
 
 Java and the native library exchange some OLF notions as integers. Each code family has one definition per side,

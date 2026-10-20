@@ -62,7 +62,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
-class GpuBatchedGeneratorContingencyDsTest {
+class GpuBatchedGeneratorContingencyDistributedSlackTest {
 
     private static final int MAX_ITER = 30;
     private static final double TOL = 1e-8;

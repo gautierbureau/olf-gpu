@@ -542,7 +542,7 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& st, int nScenar
                                        const signed char* reactiveLimitFlags, const double* rowSlope,
                                        int nDistributedSlackBuses, const int* distributedSlackBusPhiRow, const double* distributedSlackBusFactor,
                                        int slackBusPhiRow, double slackBusTargetP,
-                                       const double* distributedSlackBusBaseTargetP, const double* dsMaxDelta, const double* dsMinDelta,
+                                       const double* distributedSlackBusBaseTargetP, const double* distributedSlackBusMaxDelta, const double* distributedSlackBusMinDelta,
                                        int distributedSlackFactorMode, const double* distributedSlackBusMarginUp, const double* distributedSlackBusMarginDown,
                                        double slackBusMarginUp, double slackBusMarginDown);
 

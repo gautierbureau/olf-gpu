@@ -36,7 +36,9 @@ import java.util.Arrays;
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
 public record GenOutage(int pRow, double pTarget, int vRow, double qTarget, boolean toPq, boolean qOverride,
-                        int distributedSlackOverrideBusIndex, double distributedSlackFactorDelta, double distributedSlackBaseTargetPDelta, double dsMaxDelta, double dsMinDelta,
+                        int distributedSlackOverrideBusIndex, double distributedSlackFactorDelta,
+                        double distributedSlackBaseTargetPDelta, double distributedSlackOverrideMaxDelta,
+                        double distributedSlackOverrideMinDelta,
                         int reactiveLimitEntry, double minQDelta, double maxQDelta, boolean allGensLost,
                         java.util.Set<String> lostGenIds, double lostFactorSum, double pStep, double loadQDelta,
                         int inactiveDistrQMember, int[] pilotGroupSurvivorReactiveLimitEntries,
@@ -79,7 +81,7 @@ public record GenOutage(int pRow, double pTarget, int vRow, double qTarget, bool
             return this;
         }
         return new GenOutage(newPRow, pTarget, vRow, qTarget, toPq, qOverride, distributedSlackOverrideBusIndex, distributedSlackFactorDelta, distributedSlackBaseTargetPDelta,
-                dsMaxDelta, dsMinDelta, reactiveLimitEntry, minQDelta, maxQDelta, allGensLost, lostGenIds, lostFactorSum, pStep,
+                distributedSlackOverrideMaxDelta, distributedSlackOverrideMinDelta, reactiveLimitEntry, minQDelta, maxQDelta, allGensLost, lostGenIds, lostFactorSum, pStep,
                 loadQDelta, inactiveDistrQMember, pilotGroupSurvivorReactiveLimitEntries, distrQTargetRows, distrQTargetValues,
                 pqRowMode, deadPilotVRow, deadPilotQTarget, pinnedPilotVRow, pinnedPilotQTarget, distrQTargetQOverrideMember,
                 distrQTargetQOverrideValue, newQTargetRow, pilotQGroup, pilotQDelta, onSlack, reHomePilotVRow, svcBminDelta, svcBmaxDelta);
@@ -104,7 +106,7 @@ public record GenOutage(int pRow, double pTarget, int vRow, double qTarget, bool
             return this;
         }
         return new GenOutage(pRow, pTarget, vRow, qTarget, toPq, qOverride, distributedSlackOverrideBusIndex, distributedSlackFactorDelta, distributedSlackBaseTargetPDelta,
-                dsMaxDelta, dsMinDelta, reactiveLimitEntry, minQDelta, maxQDelta, allGensLost, lostGenIds, lostFactorSum, pStep,
+                distributedSlackOverrideMaxDelta, distributedSlackOverrideMinDelta, reactiveLimitEntry, minQDelta, maxQDelta, allGensLost, lostGenIds, lostFactorSum, pStep,
                 loadQDelta, inactiveDistrQMember, pilotGroupSurvivorReactiveLimitEntries,
                 rows.stream().mapToInt(Integer::intValue).toArray(), values.stream().mapToDouble(Double::doubleValue).toArray(),
                 pqRowMode, deadPilotVRow, deadPilotQTarget, pinnedPilotVRow, pinnedPilotQTarget, distrQTargetQOverrideMember,

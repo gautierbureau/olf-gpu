@@ -10,7 +10,7 @@ package com.powsybl.openloadflow.ac.solver.gpu.batch.plan;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
-import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDsParams;
+import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDistributedSlackParameters;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
@@ -37,7 +37,7 @@ final class BranchOutagePlanner {
     static void plan(PlanContext ctx, ScenarioPlanBuilder pb, int i, BatchContingency c,
                      GpuBatchContingencyValidator.Qualification q, java.util.Set<Integer> outagedZeroImpedanceBranchNums) {
         final Set<LfBranch> distrRhoControllers = ctx.distrRhoControllers();
-        final GpuDsParams distributedSlackParameters = ctx.distributedSlackParameters();
+        final GpuDistributedSlackParameters distributedSlackParameters = ctx.distributedSlackParameters();
         final double distributedSlackRawFactorSum = ctx.distributedSlackRawFactorSum();
         final EquationSystem<AcVariableType, AcEquationType> es = ctx.es();
         final GpuAcData gpuData = ctx.gpuData();

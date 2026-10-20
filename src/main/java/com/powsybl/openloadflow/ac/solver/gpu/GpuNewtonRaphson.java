@@ -423,11 +423,11 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
     }
 
     /** The run's own DistributedSlack settings (balance type, active limits) — never defaults. */
-    private com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDsParams driverDistributedSlackParameters() {
+    private com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDistributedSlackParameters driverDistributedSlackParameters() {
         var ds = driverDistributedSlackLoop();
         return ds == null
-                ? com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDsParams.DEFAULT
-                : new com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDsParams(
+                ? com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDistributedSlackParameters.DEFAULT
+                : new com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDistributedSlackParameters(
                         ds.getActivePowerDistribution().getBalanceType(), ds.getActivePowerDistribution().isUseActiveLimits(),
                         true);                               // OLF re-derives from the INITIAL targets at every check
     }

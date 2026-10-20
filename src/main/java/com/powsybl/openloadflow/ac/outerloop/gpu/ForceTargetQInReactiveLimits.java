@@ -13,7 +13,7 @@ import com.powsybl.iidm.network.ReactiveLimitsKind;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
-import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDsParams;
+import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDistributedSlackParameters;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuVoltageControlRole;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.network.LfBus;
@@ -82,7 +82,7 @@ public final class ForceTargetQInReactiveLimits {
 
     /** Null when nothing can move: the flag off, no distributed slack, or no clamping curve generator. */
     public static Channel build(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
-                                GpuAcData gpuData, GpuDsParams distributedSlackParameters, boolean forceTargetQ,
+                                GpuAcData gpuData, GpuDistributedSlackParameters distributedSlackParameters, boolean forceTargetQ,
                                 boolean distributedSlack, double[] baseTargets, int[] baseRowMode,
                                 boolean extrapolate) {
         if (!forceTargetQ || !distributedSlack || gpuData.distributedSlack().generatorId() == null) {

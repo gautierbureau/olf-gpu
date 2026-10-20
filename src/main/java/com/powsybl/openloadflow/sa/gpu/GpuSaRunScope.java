@@ -184,11 +184,11 @@ final class GpuSaRunScope {
         // active limits — any other balance type or unlimited distribution must fall back whole-run.
         boolean distributedSlackLoopActive = acParameters.getOuterLoops().stream()
                 .anyMatch(ol -> DistributedSlackOuterLoop.NAME.equals(ol.getName()));
-        // The device DS pass models EVERY balance type (GpuDsParams.supports returns true for all
+        // The device DS pass models EVERY balance type (GpuDistributedSlackParameters.supports returns true for all
         // six — incl. the load-based types and REMAINING_MARGIN via the margin factors, GpuDistributedSlackFactorMode)
         // and both useActiveLimits settings, so this guard is future-proofing for balance types
         // OLF adds later, not a live fallback.
-        if (distributedSlackLoopActive && !com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDsParams.supports(lfGuardParams.getBalanceType())) {
+        if (distributedSlackLoopActive && !com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDistributedSlackParameters.supports(lfGuardParams.getBalanceType())) {
             unsupportedOuterLoops.add("DistributedSlack[balanceType=" + lfGuardParams.getBalanceType() + "]");
         }
         // loadPowerFactorConstant rescales each distributed load's targetQ alongside targetP — a per-round
@@ -306,7 +306,7 @@ final class GpuSaRunScope {
         // Assemble the run's per-call batched config (replaces the solver's former JVM-global statics).
         BatchConfig batchConfig = new BatchConfig(configuredStateVectorScalingMode, cfgMaxDv, cfgMaxDphi,
                 cfgTransformerControl, cfgMaxOuterIterations, cfgMaxPqPvSwitch, cfgRejectSlackDistributionFailure,
-                new com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDsParams(
+                new com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDistributedSlackParameters(
                         lfGuardParams.getBalanceType(), olfGuardParams.isUseActiveLimits()),
                 cfgIncrementalTransformerVoltageControl, olfGuardParams.getIncrementalTransformerRatioTapControlOuterLoopMaxTapShift(),
                 cfgIncrementalShunt, olfGuardParams.getIncrementalShuntControlOuterLoopMaxSectionShift(),

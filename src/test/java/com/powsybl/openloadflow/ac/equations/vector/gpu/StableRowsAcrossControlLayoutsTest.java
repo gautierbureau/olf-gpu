@@ -28,15 +28,13 @@ import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 
 /**
- * Empirical feasibility probe (no native build) for Dynamic Q-relocation (§11):
- *  - REGIME check (Q on bus-V row vs. control-var row per control state),
- *  - PRECONDITION check (control-var column persists when control is rounded OFF),
- *  - BIJECTION GATE: a faithful Java port of the native buildRowMap, run on the extracted packs in
- *    BOTH the control-off and control-on layouts of the same network. If rowMap is identical the
- *    shared static pivot assignment serves both layouts (the union only needs to supply the
- *    off-diagonal entries) and buildRowMap needs no change. Prints only.
+ * Stable rows (docs/gpu-vs-olf.md section 2.1) hold across transformer voltage control layouts: a Java port of the
+ * native buildRowMap, run on the packs extracted with the control OFF and with it ON, must give the same row
+ * pairing. The device keeps one fixed matrix for both, so the union pattern only has to supply the off-diagonal
+ * entries and buildRowMap needs no layout-specific case. Also checks the regime (Q on the bus V row vs the control
+ * variable's row) and that the control variable's column persists when the control is rounded off.
  */
-class DynQRelocationProbeTest {
+class StableRowsAcrossControlLayoutsTest {
 
     private static int row(EquationSystem<AcVariableType, AcEquationType> es, int bus, AcEquationType t) {
         return GpuAcRowIndexing.row(es, bus, t);

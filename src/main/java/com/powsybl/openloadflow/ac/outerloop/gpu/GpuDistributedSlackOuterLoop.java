@@ -10,7 +10,7 @@ package com.powsybl.openloadflow.ac.outerloop.gpu;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
-import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDsParams;
+import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDistributedSlackParameters;
 import com.powsybl.openloadflow.ac.solver.gpu.BatchReadbackNative;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.network.LfBranch;
@@ -41,7 +41,7 @@ public final class GpuDistributedSlackOuterLoop {
      *  measures. A solve whose DistributedSlack phase never fired leaves the generators alone.
      *  Returns what it distributed (pu, see GpuNewtonRaphson#lastDistributedActivePower), NaN when nothing. */
     public static double applyToNetwork(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> equationSystem, long handle,
-                            GpuDsParams distributedSlackParameters,
+                            GpuDistributedSlackParameters distributedSlackParameters,
                             Map<LfLoad, Double> loadAnchorTargetP,
                             double[] deviceTargets, double[] distributedSlackGeneratorMove, double[] retain, GpuAcData data) {
         double lastDistributedActivePower = Double.NaN;
@@ -165,7 +165,7 @@ public final class GpuDistributedSlackOuterLoop {
 
     /** Give a bus's participating generators {@code anchor + delta × f / Σf} — OLF's split of a
      *  bus-level amount from the anchor, with the run's balance-type factors. */
-    private static void setAnchoredShare(LfBus bus, double delta, GpuDsParams distributedSlackParameters) {
+    private static void setAnchoredShare(LfBus bus, double delta, GpuDistributedSlackParameters distributedSlackParameters) {
         double factorSum = 0;
         for (LfGenerator g : bus.getGenerators()) {
             factorSum += distributedSlackParameters.factor(g);

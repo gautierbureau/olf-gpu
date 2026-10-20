@@ -26,19 +26,19 @@ import java.util.Objects;
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
-public record GpuDsParams(LoadFlowParameters.BalanceType balanceType, boolean useActiveLimits, boolean anchorOnInitialTargetP) {
+public record GpuDistributedSlackParameters(LoadFlowParameters.BalanceType balanceType, boolean useActiveLimits, boolean anchorOnInitialTargetP) {
 
     /** OLF's defaults: PROPORTIONAL_TO_GENERATION_P_MAX with active limits. */
-    public static final GpuDsParams DEFAULT =
-            new GpuDsParams(LoadFlowParameters.BalanceType.PROPORTIONAL_TO_GENERATION_P_MAX, true);
+    public static final GpuDistributedSlackParameters DEFAULT =
+            new GpuDistributedSlackParameters(LoadFlowParameters.BalanceType.PROPORTIONAL_TO_GENERATION_P_MAX, true);
 
-    public GpuDsParams {
+    public GpuDistributedSlackParameters {
         Objects.requireNonNull(balanceType);
     }
 
     /** Anchor at the CURRENT target P (the batched SA's contract: its base is converged and every
      *  per-scenario channel is relative to the row targets it starts from). */
-    public GpuDsParams(LoadFlowParameters.BalanceType balanceType, boolean useActiveLimits) {
+    public GpuDistributedSlackParameters(LoadFlowParameters.BalanceType balanceType, boolean useActiveLimits) {
         this(balanceType, useActiveLimits, false);
     }
 

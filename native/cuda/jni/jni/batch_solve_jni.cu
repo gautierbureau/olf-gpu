@@ -45,8 +45,8 @@ OLF_JNI(ac_solver_gpu, BatchSolveNative, createBatchContext)(
     jint* distributedSlackBusPhiRow = env->GetIntArrayElements(jDistributedSlackBusPhiRow, nullptr);
     jdouble* distributedSlackBusFactor = env->GetDoubleArrayElements(jDistributedSlackBusFactor, nullptr);
     jdouble* distributedSlackBusBaseTargetP = env->GetDoubleArrayElements(jDistributedSlackBusBaseTargetP, nullptr);
-    jdouble* dsMaxDelta = env->GetDoubleArrayElements(jDistributedSlackBusMaxDelta, nullptr);
-    jdouble* dsMinDelta = env->GetDoubleArrayElements(jDistributedSlackBusMinDelta, nullptr);
+    jdouble* distributedSlackBusMaxDelta = env->GetDoubleArrayElements(jDistributedSlackBusMaxDelta, nullptr);
+    jdouble* distributedSlackBusMinDelta = env->GetDoubleArrayElements(jDistributedSlackBusMinDelta, nullptr);
     jdouble* distributedSlackBusMarginUp = env->GetDoubleArrayElements(jDistributedSlackBusMarginUp, nullptr);
     jdouble* distributedSlackBusMarginDown = env->GetDoubleArrayElements(jDistributedSlackBusMarginDown, nullptr);
 
@@ -62,7 +62,7 @@ OLF_JNI(ac_solver_gpu, BatchSolveNative, createBatchContext)(
         ctx = createBatchContext(*st, nScenarios, mode,
                                  nReactiveLimitEntries, reactiveLimitVoltageRow, reactiveLimitMinQ, reactiveLimitMaxQ, reactiveLimitLoadQ, reactiveLimitTargetV, reactiveLimitFlags, rowSlope,
                                  nDistributedSlackBuses, distributedSlackBusPhiRow, distributedSlackBusFactor, jSlackBusPhiRow, jSlackBusTargetP,
-                                 distributedSlackBusBaseTargetP, dsMaxDelta, dsMinDelta,
+                                 distributedSlackBusBaseTargetP, distributedSlackBusMaxDelta, distributedSlackBusMinDelta,
                                  jDistributedSlackFactorMode, distributedSlackBusMarginUp, distributedSlackBusMarginDown, jSlackBusMarginUp, jSlackBusMarginDown);
     } catch (const std::exception& e) {
         error = e.what();
@@ -80,8 +80,8 @@ OLF_JNI(ac_solver_gpu, BatchSolveNative, createBatchContext)(
     env->ReleaseIntArrayElements(jDistributedSlackBusPhiRow, distributedSlackBusPhiRow, JNI_ABORT);
     env->ReleaseDoubleArrayElements(jDistributedSlackBusFactor, distributedSlackBusFactor, JNI_ABORT);
     env->ReleaseDoubleArrayElements(jDistributedSlackBusBaseTargetP, distributedSlackBusBaseTargetP, JNI_ABORT);
-    env->ReleaseDoubleArrayElements(jDistributedSlackBusMaxDelta, dsMaxDelta, JNI_ABORT);
-    env->ReleaseDoubleArrayElements(jDistributedSlackBusMinDelta, dsMinDelta, JNI_ABORT);
+    env->ReleaseDoubleArrayElements(jDistributedSlackBusMaxDelta, distributedSlackBusMaxDelta, JNI_ABORT);
+    env->ReleaseDoubleArrayElements(jDistributedSlackBusMinDelta, distributedSlackBusMinDelta, JNI_ABORT);
     env->ReleaseDoubleArrayElements(jDistributedSlackBusMarginUp, distributedSlackBusMarginUp, JNI_ABORT);
     env->ReleaseDoubleArrayElements(jDistributedSlackBusMarginDown, distributedSlackBusMarginDown, JNI_ABORT);
 

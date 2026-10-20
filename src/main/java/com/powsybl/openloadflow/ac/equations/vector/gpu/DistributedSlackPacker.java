@@ -32,7 +32,7 @@ final class DistributedSlackPacker {
     /** Σ over the bus's participating generators of (current − anchor target P): what OLF's
      *  resetToInitialState undoes and adds back as previousMismatch. 0 when anchoring at the current
      *  targets. The anchor row target = the row's current target minus this. */
-    static double anchorOffset(LfBus bus, GpuDsParams distributedSlackParameters) {
+    static double anchorOffset(LfBus bus, GpuDistributedSlackParameters distributedSlackParameters) {
         double off = 0;
         for (LfGenerator g : bus.getGenerators()) {
             if (distributedSlackParameters.factor(g) != 0) {
@@ -43,7 +43,7 @@ final class DistributedSlackPacker {
     }
 
     static DistributedSlackParticipants distributedSlackPack(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
-                                       ExtractionColumns columns, boolean distributedSlack, GpuDsParams distributedSlackParameters) {
+                                       ExtractionColumns columns, boolean distributedSlack, GpuDistributedSlackParameters distributedSlackParameters) {
         int[] phiCol = columns.phiCol();
         int[] pRow = columns.pRow();       // a DS target is written at the bus's P ROW, relocated under a coupler tree
         // Distributed-slack pack: the single slack/reference bus (BUS_TARGET_PHI active, BUS_TARGET_P
@@ -82,8 +82,8 @@ final class DistributedSlackPacker {
         List<String> distributedSlackGeneratorId = new ArrayList<>();                       // WHICH generator each slot is
         List<Double> distributedSlackBusRawFactor = new ArrayList<>();
         List<Double> distributedSlackBusBaseTargetP = new ArrayList<>();                 // each bus's initial BUS_TARGET_P
-        List<Double> dsMaxDelta = new ArrayList<>();                    // headroom ≥ 0
-        List<Double> dsMinDelta = new ArrayList<>();                    // footroom ≤ 0
+        List<Double> distributedSlackBusMaxDelta = new ArrayList<>();                    // headroom ≥ 0
+        List<Double> distributedSlackBusMinDelta = new ArrayList<>();                    // footroom ≤ 0
         List<Double> distributedSlackBusMarginUp = new ArrayList<>();                    // REMAINING_MARGIN per-bus margins
         List<Double> distributedSlackBusMarginDown = new ArrayList<>();
         for (LfBus bus : network.getBuses()) {
@@ -144,8 +144,8 @@ final class DistributedSlackPacker {
                 distributedSlackBusNum.add(bn);
                 distributedSlackBusRawFactor.add(factor);
                 distributedSlackBusBaseTargetP.add(bus.getTargetP() - anchorOffset(bus, distributedSlackParameters));   // the row's ANCHOR target
-                dsMaxDelta.add(headroom);
-                dsMinDelta.add(footroom);
+                distributedSlackBusMaxDelta.add(headroom);
+                distributedSlackBusMinDelta.add(footroom);
                 if (distributedSlackParameters.isRemainingMargin()) {
                     double[] m = distributedSlackParameters.busMargins(bus);
                     distributedSlackBusMarginUp.add(m[0]);
@@ -199,8 +199,8 @@ final class DistributedSlackPacker {
             distributedSlackBusPhiRow.clear();
             distributedSlackBusFactor = new double[0];
             distributedSlackBusBaseTargetP.clear();
-            dsMaxDelta.clear();
-            dsMinDelta.clear();
+            distributedSlackBusMaxDelta.clear();
+            distributedSlackBusMinDelta.clear();
             distributedSlackBusMarginUp.clear();
             distributedSlackBusMarginDown.clear();
             slackBusPhiRow = -1;
@@ -216,8 +216,8 @@ final class DistributedSlackPacker {
             distributedSlackGeneratorId.clear();
         }
         return new DistributedSlackParticipants(GpuAcArrays.toIntArray(distributedSlackBusPhiRow), distributedSlackBusFactor, slackBusPhiRow, slackBusTargetP,
-                GpuAcArrays.toDoubleArray(distributedSlackBusBaseTargetP), GpuAcArrays.toDoubleArray(dsMaxDelta),
-                GpuAcArrays.toDoubleArray(dsMinDelta),
+                GpuAcArrays.toDoubleArray(distributedSlackBusBaseTargetP), GpuAcArrays.toDoubleArray(distributedSlackBusMaxDelta),
+                GpuAcArrays.toDoubleArray(distributedSlackBusMinDelta),
                 GpuDistributedSlackFactorMode.of(distributedSlackParameters.isRemainingMargin()),
                 GpuAcArrays.toDoubleArray(distributedSlackBusMarginUp), GpuAcArrays.toDoubleArray(distributedSlackBusMarginDown),
                 slackBusMarginUp, slackBusMarginDown, slackBusRoomUp, slackBusRoomDown,
@@ -230,7 +230,7 @@ final class DistributedSlackPacker {
 
     /** One participating generator of the slack distribution, on DS row {@code distributedSlackBusRow} (-1: the slack bus's own,
      *  which has no row): its factor, its rooms from the anchor and, for REMAINING_MARGIN, its margins. */
-    private static void addPackGenerator(LfGenerator g, int distributedSlackBusRow, GpuDsParams distributedSlackParameters, List<Integer> distributedSlackGeneratorBus,
+    private static void addPackGenerator(LfGenerator g, int distributedSlackBusRow, GpuDistributedSlackParameters distributedSlackParameters, List<Integer> distributedSlackGeneratorBus,
                                          List<String> distributedSlackGeneratorId, List<Double> distributedSlackGeneratorRawFactor, List<Double> distributedSlackGeneratorMaxDelta,
                                          List<Double> distributedSlackGeneratorMinDelta, List<Double> distributedSlackGeneratorMarginUp, List<Double> distributedSlackGeneratorMarginDown) {
         double gf = distributedSlackParameters.factor(g);

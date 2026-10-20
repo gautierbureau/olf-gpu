@@ -27,7 +27,7 @@
 #include "linear_solver_settings.cuh"
 #include "realistic_voltage_check.cuh"
 #include "state_vector_scaling.cuh"
-#include "zero_diagonal_repair.cuh"
+#include "../fixedmatrix/zero_diagonal_repair.cuh"
 #include "newton_iteration.cuh"
 
 namespace olfgpu {

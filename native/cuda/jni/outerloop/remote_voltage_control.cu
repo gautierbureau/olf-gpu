@@ -24,6 +24,7 @@
 #include "shunt_scatter.h"
 #include "../equations/scenario_overrides.cuh"
 #include "../solver/driver_steps.cuh"
+#include "../fixedmatrix/reactive_relocation.cuh"
 #include "remote_voltage_control.cuh"
 
 using namespace powsybl::openloadflow;

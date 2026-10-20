@@ -27,6 +27,7 @@
 #include "../common/stats.cuh"
 #include "../solver/linear_solver_settings.cuh"
 #include "structure_build.cuh"
+#include "../fixedmatrix/relocation_pattern.cuh"
 
 using namespace powsybl::openloadflow;
 

@@ -18,6 +18,7 @@
 #include "../common/codes/gpu_reactive_limits_entry_flag.cuh"
 #include "../common/codes/gpu_row_mode.cuh"
 #include "../equations/scatter.cuh"
+#include "../fixedmatrix/reactive_relocation.cuh"
 #include "../equations/scenario_overrides.cuh"
 #include "reactive_limits_seed.cuh"
 

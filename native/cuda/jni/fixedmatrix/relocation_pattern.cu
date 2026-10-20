@@ -1,8 +1,8 @@
 // Copyright (c) 2026, RTE (http://www.rte-france.com)
 // SPDX-License-Identifier: MPL-2.0
 //
-// Dynamic Q-relocation: the alternate pattern entries and the per-scenario destinations of a reactive balance
-// that moves between its own row, a pilot carrier and a coupler dummy row, plus continuous phase control.
+// docs/gpu-vs-olf.md section 2.3 (equations placed on another bus's row): the union pattern and the per-scenario
+// destinations of a reactive balance that moves between its own row, a pilot carrier and a coupler dummy row.
 #include <cudss.h>
 
 #include <algorithm>
@@ -26,7 +26,9 @@
 #include "../common/check.cuh"
 #include "../common/stats.cuh"
 #include "../solver/linear_solver_settings.cuh"
-#include "structure_build.cuh"
+#include "../structure/structure_build.cuh"
+#include "stock_placement.cuh"
+#include "relocation_pattern.cuh"
 
 using namespace powsybl::openloadflow;
 
@@ -72,58 +74,6 @@ bool hasRelocatable(int nClosedBranch, const int* closedBranchIndices, int nShun
 
 inline int closedBranchAlternateRow(const CbScatter& s, const int* ix) {
     return s.rowEq == 1 ? ix[10 + s.rowEnd] : -1;
-}
-
-// CONTINUOUS PHASE CONTROL (BRANCH_TARGET_P): when a phase-controller branch's control is enabled
-// per scenario (row mode 3 on the CONTROLLER's a1-paired row), the controlled side's P-flow outputs
-// are emitted AGAIN at that row — the p-flow equation replacing the a1 identity. Union those
-// (a1Row, col) positions into the pattern; closedBranchPhaseControlSide[e] = -1 none, else (controllerA1Col << 1) | side
-// — the entry sits on the CONTROLLED element, whose own a1 may be absent (REMOTE control).
-void collectClosedBranchPhaseControlPattern(int nClosedBranch, const int* closedBranchIndices, const int* closedBranchPhaseControlSide,
-                           const std::vector<int>& rowMap, std::vector<std::pair<int, int>>& pat) {
-    for (int e = 0; e < nClosedBranch; e++) {
-        if (closedBranchPhaseControlSide[e] < 0) {
-            continue;
-        }
-        int side = closedBranchPhaseControlSide[e] & 1;
-        int a1Col = closedBranchPhaseControlSide[e] >> 1;
-        const int* ix = closedBranchIndices + static_cast<size_t>(e) * 12;
-        int pcRow = rowMap[a1Col];
-        int k0 = side == 0 ? 0 : 14;                         // p1 block / p2 block of CB_SCATTER
-        for (int k = k0 + 1; k <= k0 + 6; k++) {             // the 6 derivative outputs
-            RC rc = resolveClosedBranch(CB_SCATTER[k], ix);
-            if (rc.col >= 0) {
-                pat.emplace_back(pcRow, rc.col);
-            }
-        }
-    }
-}
-
-// Per (closed branch, output): the phase-row destination (J slot, or -2-row for the P residual) and
-// the a1 row whose per-scenario mode gates the emission (mode 3 = control enabled). -1 = no emission.
-void buildClosedBranchPhaseControlDestination(int nClosedBranch, const int* closedBranchIndices, const int* closedBranchPhaseControlSide, const std::vector<int>& rowMap,
-                      const CsrPattern& pos, std::vector<int>& phaseControlDestination, std::vector<int>& phaseControlSelector) {
-    phaseControlDestination.assign(static_cast<size_t>(nClosedBranch) * CB_NOUT, -1);
-    phaseControlSelector.assign(static_cast<size_t>(nClosedBranch) * CB_NOUT, -1);
-    for (int e = 0; e < nClosedBranch; e++) {
-        if (closedBranchPhaseControlSide[e] < 0) {
-            continue;
-        }
-        int side = closedBranchPhaseControlSide[e] & 1;
-        int a1Col = closedBranchPhaseControlSide[e] >> 1;
-        const int* ix = closedBranchIndices + static_cast<size_t>(e) * 12;
-        int pcRow = rowMap[a1Col];
-        int k0 = side == 0 ? 0 : 14;
-        phaseControlDestination[static_cast<size_t>(e) * CB_NOUT + k0] = -2 - pcRow;    // the P residual
-        phaseControlSelector[static_cast<size_t>(e) * CB_NOUT + k0] = a1Col;          // mode-3 gate lives at the CONTROLLER's a1 row
-        for (int k = k0 + 1; k <= k0 + 6; k++) {
-            RC rc = resolveClosedBranch(CB_SCATTER[k], ix);
-            if (rc.col >= 0) {
-                phaseControlDestination[static_cast<size_t>(e) * CB_NOUT + k] = pos.at(pcRow, rc.col);
-                phaseControlSelector[static_cast<size_t>(e) * CB_NOUT + k] = a1Col;
-            }
-        }
-    }
 }
 
 // Union the alternate Q rows into the CSR pattern: for each closed-branch role-1 Q output emit an
@@ -559,6 +509,29 @@ void buildOpenBranchRelocationDestination(int nOpenBranch, const int* openBranch
                 alternateDestination[o] = -2 - alternateRow;
                 selectorRow[o] = stockSelectorRow <= -2 ? stockSelectorRow : (rc.row >= 0 ? rc.row : alternateRow);
             }
+        }
+    }
+}
+
+// plan-B4: the FROZEN role-0 dest of a GROUP-relocated output backs only the qBuf DIAGNOSTIC
+// fill (dynamicRelocation = 0; every Newton fill selects a pool slot instead) — point it at the group's
+// FALLBACK row (the pilot's own row, read by no outer loop) so a remote member's diagnostic q
+// row carries ONLY its own injection (fillRemoteMemberQBatch). Without this the pilot's whole
+// balance lands on the base carrier's row and corrupts the free member's reactive-limit check.
+void patchGroupFrozenDestinations(DeviceBuf& dest, const std::vector<int>& relocationGroup,
+                           const std::vector<int>& relocationCandidateOffset, int outputCount,
+                           const int* scatterRole, const int* reactiveRelocationGroupStart, const int* reactiveRelocationCandidateRows) {
+    for (size_t o = 0; o < relocationGroup.size(); o++) {
+        int g = relocationGroup[o];
+        // A STOCK PAIR (negative offset) parks the DUMMY ROW in the group slot, not a group id — reading
+        // reactiveRelocationGroupStart[row] there walked off the candidate table and wrote a garbage dest, which the device then
+        // used: "CUDA error: an illegal memory access" out of createBatchContext.
+        if (g >= 0 && relocationCandidateOffset[o] < 0) {
+            continue;
+        }
+        if (g >= 0 && scatterRole[o % outputCount] == 0) {
+            int v = -2 - reactiveRelocationCandidateRows[reactiveRelocationGroupStart[g]];
+            CUDA_CHECK(cudaMemcpy(dest.as<int>() + o, &v, sizeof(int), cudaMemcpyHostToDevice));
         }
     }
 }

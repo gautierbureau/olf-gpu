@@ -14,6 +14,8 @@
 #include "../common/check.cuh"
 #include "../common/launch.cuh"
 #include "scatter.cuh"
+#include "../fixedmatrix/reactive_relocation.cuh"
+#include "../fixedmatrix/relocated_scatter.cuh"
 #include "scenario_overrides.cuh"
 #include "zero_impedance_fill.cuh"
 

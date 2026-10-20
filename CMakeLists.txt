@@ -103,7 +103,8 @@ add_library(olfgpu SHARED
     native/cuda/jni/common/stats.cu
     native/cuda/jni/solver/linear_solver_settings.cu
     native/cuda/jni/structure/csr_pattern.cu
-    native/cuda/jni/structure/q_relocation_pattern.cu
+    native/cuda/jni/fixedmatrix/relocation_pattern.cu
+    native/cuda/jni/structure/phase_control_pattern.cu
     native/cuda/jni/structure/distribution_dests.cu
     native/cuda/jni/structure/zero_impedance_dests.cu
     native/cuda/jni/structure/shared_structure.cu
@@ -135,7 +136,7 @@ add_library(olfgpu SHARED
     native/cuda/jni/solver/state_vector_scaling.cu
     native/cuda/jni/solver/convergence.cu
     native/cuda/jni/solver/realistic_voltage_check.cu
-    native/cuda/jni/solver/zero_diagonal_repair.cu
+    native/cuda/jni/fixedmatrix/zero_diagonal_repair.cu
     native/cuda/jni/solver/iterative_refinement.cu
     native/cuda/jni/solver/compact_solve.cu
     native/cuda/jni/solver/batch_context.cu

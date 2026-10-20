@@ -17,6 +17,7 @@
 #include "../common/codes/gpu_row_mode.cuh"
 #include "../equations/scenario_overrides.cuh"
 #include "../solver/driver_steps.cuh"
+#include "../fixedmatrix/reactive_relocation.cuh"
 #include "pilot_voltage.cuh"
 
 

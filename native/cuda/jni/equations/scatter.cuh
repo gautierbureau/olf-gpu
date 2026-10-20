@@ -2,8 +2,9 @@
 // SPDX-License-Identifier: MPL-2.0
 //
 // The device helpers every fill kernel shares: scattering an output into the Jacobian values / the
-// mismatch through a role-folded destination, the dynamic Q-relocation choice of that destination
-// (ReactiveRelocationTables, chooseCarrierRow, dependentPilotDestination, zeroImpedanceRelocationDestination), and the CSR slot lookup.
+// mismatch through a role-folded destination, and the CSR slot lookup. The relocated destinations of
+// docs/gpu-vs-olf.md section 2.3 are in ../fixedmatrix/ (relocated_scatter.cuh, reactive_relocation.cuh,
+// stock_placement.cuh).
 #ifndef OLF_GPU_EQUATIONS_SCATTER_CUH
 #define OLF_GPU_EQUATIONS_SCATTER_CUH
 
@@ -12,204 +13,9 @@
 
 namespace olfgpu {
 
-/**
- * Pool order of a stock pair: [0] = the bus's OWN row, [1] = the parent coupler's DUMMY_Q row. Which one takes
- * the bus's raw q depends on TWO modes, not one:
- *   dummy row mode 4                      -> the dummy row: a reactive limit pins it there, coupler alive;
- *   dummy row mode 0 and own row mode 4   -> the OWN row: the coupler is dead, so the equations are back home
- *                                            and the pin is there (measured: rte6515 BUS-11_BBS_1 put mode 4 on
- *                                            BUS_V(VL-11_1), which holds zero-impedance#1's ZERO_V, and writing nothing left
- *                                            that row with a zero diagonal — 20 of the 6667 scenarios failed
- *                                            their linear solve exactly this way, all of them _BBS_1 outages);
- *   anything else                         -> nothing: while it SHARES, its DISTR_Q row (diverted home when the
- *                                            coupler dies) carries its q, and writing the raw q too double-counts.
- */
-__host__ __device__ inline int stockPairPick(int m, const int* pool, int p, int frozen,
-                                             const int* mode, const int* relocatedChildOwnRow, int dummyRow) {
-    if (m == GpuRowMode::BUS_TARGET_Q) {
-        return pool[p + 1];
-    }
-    if (m == GpuRowMode::FIXED_VARIABLE && relocatedChildOwnRow != nullptr) {
-        int own = relocatedChildOwnRow[dummyRow];
-        if (own >= 0 && mode[own] == GpuRowMode::BUS_TARGET_Q) {
-            return pool[p];
-        }
-    }
-    return frozen;
-}
-
 static __device__ void scatterAdd(int outputCount, const int* dest, const double* o, double* vals, double* F) {
     for (int k = 0; k < outputCount; k++) {
         int d = dest[k];
-        if (d >= 0) {
-            atomicAdd(&vals[d], o[k]);
-        } else if (d <= -2) {
-            atomicAdd(&F[-2 - d], o[k]);
-        }
-    }
-}
-
-// Dynamic Q-relocation scatter: when an output's frozen Q row is an identity this scenario
-// (mode[selectorRow] == 0), route it to the alternate candidate row instead. mode is this scenario's
-// row-mode slice (length n). dest/alternateDestination/selectorRow share the per-output layout of scatterAdd.
-// Mode 4 ("pinned remote gen-VC member" — the member row hosts its OWN Q balance, plan-B2) also
-// selects the alternate: those entries carry a SUPPRESSED frozen dest and their own row as the
-// alternate, with selectorRow = the member row itself. TVC/shunt select rows never carry mode 4.
-// GROUP pilot-Q relocation tables (plan-A6), bundled to keep the fill signatures stable. All
-// nullptr when the structure has no relocation groups.
-struct ReactiveRelocationTables {
-    const int* relocationGroup = nullptr;                              // per output: group id, -1 = not grouped
-    const int* relocationCandidateOffset = nullptr;                                // per output: offset into pool
-    const int* relocationCandidateDestinations = nullptr;                               // one slot (or -2-row) per (output, candidate)
-    const int* reactiveRelocationGroupStart = nullptr;                              // group -> candidate range
-    const int* reactiveRelocationCandidateRows = nullptr;                             // candidate DEVICE rows ([0] = fallback)
-    // PILOT-SELF gate: per (scenario, group), 1 = this group's pilot is one of its OWN controllers and is
-    // NOT pinned this scenario, so it has no Q balance to relocate (its q feeds the DISTR_Q rows weighted)
-    // and its raw q must NOT be emitted at the carrier row. Null = no such group, every pick as before.
-    const char* pilotSelfCarrierSkip = nullptr;
-    int pilotSelfCarrierSkipStride = 0;                                        // stride of pilotSelfCarrierSkip (= nReactiveRelocationGroups)
-    // Per row: the relocated child's OWN row for a coupler dummy row, -1 elsewhere. A stock pair needs it to
-    // tell "the coupler is dead AND this bus is PINNED at home" (its own q belongs on its own row) from
-    // "the coupler is dead and it still SHARES" (its DISTR_Q, diverted home, carries its q).
-    const int* relocatedChildOwnRow = nullptr;
-    // Per (scenario, dq member): the member's SUBGROUP this scenario (0 = the base pilot's group). A contingency
-    // that splits a merged group behind its surviving main leaves two OLF groups on ONE candidate table (tasks
-    // #71): keys and q contributions pair only within a subgroup, and the base pilot's carrier is picked among
-    // subgroup-0 members only. Null = no split anywhere in the batch.
-    const char* distrQSubgroup = nullptr;
-    const int* reactiveRelocationDistrQMemberStart = nullptr;                      // qr group -> its first dq member (candidate 1)
-    int nDistrQMembers = 0;
-    const char* relocationDependentPilot = nullptr;                               // per output: dependent-pilot routing (see dependentPilotDestination)
-};
-
-// GROUP pilot-Q relocation (plan-A6): candidates = [fallback row, member rows in merged order];
-// pick the FIRST member row whose per-scenario mode is neither identity (0: outaged/clamped/off)
-// nor pinned (4) — exactly OLF's "first enabled" free-role rule — else the fallback (control off).
-// pilotSelfCarrierSkip is per (scenario, group); the picks read it for the current scenario, exactly as they read `mode`
-// already offset. Offset a by-value copy rather than indexing with s inside every pick.
-__device__ inline ReactiveRelocationTables relocationTablesForScenario(ReactiveRelocationTables rt, int s) {
-    if (rt.pilotSelfCarrierSkip != nullptr) {
-        rt.pilotSelfCarrierSkip += (size_t) s * rt.pilotSelfCarrierSkipStride;
-    }
-    if (rt.distrQSubgroup != nullptr) {
-        rt.distrQSubgroup += (size_t) s * rt.nDistrQMembers;
-    }
-    return rt;
-}
-
-__device__ inline int chooseCarrierRow(int g, const int* reactiveRelocationGroupStart, const int* reactiveRelocationCandidateRows, const int* mode) {
-    int p0 = reactiveRelocationGroupStart[g];
-    int count = reactiveRelocationGroupStart[g + 1] - p0;
-    for (int c = 1; c < count; c++) {
-        int m = mode[reactiveRelocationCandidateRows[p0 + c]];
-        if (m != GpuRowMode::FIXED_VARIABLE && m != GpuRowMode::BUS_TARGET_Q && m != GpuRowMode::CROSS_FIXED_VARIABLE) {
-            return c;
-        }
-    }
-    return 0;
-}
-
-// chooseCarrierRow restricted to the base pilot's SUBGROUP (tasks #71): candidate c is member reactiveRelocationDistrQMemberStart[g] + c - 1,
-// and a member the scenario moved to another subgroup can host neither the pilot's balance nor be its carrier.
-// sub is already offset to the scenario (relocationTablesForScenario / the caller).
-__device__ inline int chooseCarrierRowInSubgroup(int g, const int* reactiveRelocationGroupStart, const int* reactiveRelocationCandidateRows, const int* mode,
-                                     const char* sub, const int* reactiveRelocationDistrQMemberStart) {
-    if (sub == nullptr || reactiveRelocationDistrQMemberStart == nullptr || reactiveRelocationDistrQMemberStart[g] < 0) {
-        return chooseCarrierRow(g, reactiveRelocationGroupStart, reactiveRelocationCandidateRows, mode);
-    }
-    int p0 = reactiveRelocationGroupStart[g];
-    int count = reactiveRelocationGroupStart[g + 1] - p0;
-    for (int c = 1; c < count; c++) {
-        if (sub[reactiveRelocationDistrQMemberStart[g] + c - 1] != 0) continue;
-        int m = mode[reactiveRelocationCandidateRows[p0 + c]];
-        if (m != GpuRowMode::FIXED_VARIABLE && m != GpuRowMode::BUS_TARGET_Q && m != GpuRowMode::CROSS_FIXED_VARIABLE) {
-            return c;
-        }
-    }
-    return 0;
-}
-
-// The pilot of an ENROLLED pilot-self group (rotation property): its Q is re-routed through the candidate
-// table, so a pin must NOT turn its own row into a Q balance — the row keeps BUS_TARGET_V while the pinned
-// balance rides the carrier (updateDistrQTargetsBatch puts the pin limit there). Measured before this:
-// the pilot's row went mode 4 with target -0.444 and NO q content (its q had gone to the carrier), F = -target.
-// pilotEntryOfPilotSelfGroup marker: a PILOT-SELF group whose pilot has no reactive-limit entry (see pilotSelfGateBatch).
-// Distinct from -1 ("not a pilot-self group"), and negative so every `pe >= 0` test still reads it as "no entry".
-static constexpr int PILOT_SELF_NO_REACTIVE_LIMIT_ENTRY = -2;
-
-__device__ inline bool isEnrolledPilot(const int* pilotSelfReactiveLimitEntry, int nReactiveRelocationGroups, int i) {
-    if (pilotSelfReactiveLimitEntry == nullptr) return false;
-    for (int g = 0; g < nReactiveRelocationGroups; g++) {
-        if (pilotSelfReactiveLimitEntry[g] == i) return true;
-    }
-    return false;
-}
-
-// DEPENDENT-PILOT routing (ExtractionColumns: a merged remote group's dependent controlled bus has a candidate
-// group of its own, the same member rows as its base group's). The bus keeps its two-way reactive row - its
-// parent coupler's dummy row while that coupler lives, its own row once the coupler is dead - UNLESS its own
-// row has become the voltage identity (OLF re-elected it the main of the survivors): then its balance rides the
-// first free member row of its group, exactly as the base pilot's does, and so does a cross identity on the
-// dummy row (mode 6, the main under a live coupler). A root (no relocation) reads its own row the same way.
-__device__ inline int dependentPilotDestination(int slot, int frozen, int alternateDestination, int selectorRow, const int* mode, ReactiveRelocationTables rt) {
-    int fr = selectorRow <= -2 ? -2 - selectorRow : selectorRow;
-    int mf = mode[fr];
-    if (selectorRow <= -2) {                                      // a relocated child: fr is the parent's dummy row
-        if (mf == 1 || mf == 4) return frozen;               // the coupler lives (or the pin sits there)
-        if (mf == 0) {                                       // the coupler is dead: home, unless home is the identity
-            int mo = mode[rt.relocatedChildOwnRow[fr]];
-            if (mo != GpuRowMode::FIXED_VARIABLE && mo != GpuRowMode::CROSS_FIXED_VARIABLE) return alternateDestination;
-        }
-    } else if (mf != 0 && mf != 6) {                         // a root: its own row, unless that is the identity
-        return frozen;
-    }
-    return rt.relocationCandidateDestinations[rt.relocationCandidateOffset[slot] + chooseCarrierRowInSubgroup(rt.relocationGroup[slot], rt.reactiveRelocationGroupStart, rt.reactiveRelocationCandidateRows, mode, rt.distrQSubgroup, rt.reactiveRelocationDistrQMemberStart)];
-}
-
-// zero-impedance q-slot dynamic pick (F/J slots {0..3} per element): group -> mode-scan candidate slot,
-// two-way -> alt when the select row is identity/pinned this scenario, else the frozen dest.
-__device__ inline int zeroImpedanceRelocationDestination(int frozen, int slot, const int* alt, const int* sel,
-                                const int* mode, ReactiveRelocationTables rt) {
-    int rg = rt.relocationGroup != nullptr ? rt.relocationGroup[slot] : -1;
-    if (rg >= 0) {
-        if (rt.relocationDependentPilot != nullptr && rt.relocationDependentPilot[slot]) {
-            return dependentPilotDestination(slot, frozen, alt[slot], sel[slot], mode, rt);
-        }
-        if (rt.relocationCandidateOffset[slot] < 0) {                              // STOCK PAIR: group slot holds the dummy ROW
-            return stockPairPick(mode[rg], rt.relocationCandidateDestinations, -rt.relocationCandidateOffset[slot] - 1, frozen, mode, rt.relocatedChildOwnRow, rg);
-        }
-        if (rt.pilotSelfCarrierSkip != nullptr && rt.pilotSelfCarrierSkip[rg]) {
-            return -1;                                       // pilot-self group, pilot unpinned: no raw q
-        }
-        return rt.relocationCandidateDestinations[rt.relocationCandidateOffset[slot] + chooseCarrierRowInSubgroup(rg, rt.reactiveRelocationGroupStart, rt.reactiveRelocationCandidateRows, mode, rt.distrQSubgroup, rt.reactiveRelocationDistrQMemberStart)];
-    }
-    int sr = sel != nullptr ? sel[slot] : -1;
-    if (sr <= -2) {
-        return mode[-2 - sr] == GpuRowMode::FIXED_VARIABLE ? alt[slot] : frozen;       // stock-placement: identity only (see stockPlacementAlternateRow)
-    }
-    return (sr >= 0 && (mode[sr] == GpuRowMode::FIXED_VARIABLE || mode[sr] == GpuRowMode::BUS_TARGET_Q)) ? alt[slot] : frozen;
-}
-
-static __device__ void scatterAddRelocated(int outputCount, const int* dest, const int* alternateDestination, const int* selectorRow,
-                              const int* mode, const double* o, double* vals, double* F,
-                              ReactiveRelocationTables rt, int eOff) {
-    for (int k = 0; k < outputCount; k++) {
-        int d;
-        int rg = rt.relocationGroup != nullptr ? rt.relocationGroup[eOff + k] : -1;
-        if (rg >= 0 && rt.relocationDependentPilot != nullptr && rt.relocationDependentPilot[eOff + k]) {
-            d = dependentPilotDestination(eOff + k, dest[k], alternateDestination[k], selectorRow[k], mode, rt);
-        } else if (rg >= 0 && rt.relocationCandidateOffset[eOff + k] < 0) {        // STOCK PAIR: group slot holds the dummy ROW
-            d = stockPairPick(mode[rg], rt.relocationCandidateDestinations, -rt.relocationCandidateOffset[eOff + k] - 1, dest[k], mode, rt.relocatedChildOwnRow, rg);
-        } else if (rg >= 0 && rt.pilotSelfCarrierSkip != nullptr && rt.pilotSelfCarrierSkip[rg]) {
-            continue;                                        // pilot-self group, pilot unpinned: no raw q
-        } else if (rg >= 0) {
-            d = rt.relocationCandidateDestinations[rt.relocationCandidateOffset[eOff + k] + chooseCarrierRowInSubgroup(rg, rt.reactiveRelocationGroupStart, rt.reactiveRelocationCandidateRows, mode, rt.distrQSubgroup, rt.reactiveRelocationDistrQMemberStart)];
-        } else {
-            int sr = selectorRow[k];
-            bool useAlternate = sr >= 0 ? (mode[sr] == GpuRowMode::FIXED_VARIABLE || mode[sr] == GpuRowMode::BUS_TARGET_Q)
-                                  : (sr <= -2 && mode[-2 - sr] == GpuRowMode::FIXED_VARIABLE);   // stock-placement: identity only
-            d = useAlternate ? alternateDestination[k] : dest[k];
-        }
         if (d >= 0) {
             atomicAdd(&vals[d], o[k]);
         } else if (d <= -2) {
@@ -244,36 +50,6 @@ __device__ inline int csrFind(const int* rowPtr, const int* colIdx, int row, int
 static __device__ void scatterAddF(int nres, const int* dest, const int* pos, const double* o, double* F) {
     for (int k = 0; k < nres; k++) {
         int d = dest[pos[k]];
-        if (d <= -2) {
-            atomicAdd(&F[-2 - d], o[k]);
-        }
-    }
-}
-
-// Dynamic Q-relocation, residual-only variant: route each residual to its alternate F row when the
-// frozen row is an identity this scenario. dest/alternateDestination/selectorRow are the element's per-output slices;
-// pos maps each of the nres residuals to its CB_NOUT output index.
-static __device__ void scatterAddFRelocated(int nres, const int* dest, const int* alternateDestination, const int* selectorRow,
-                               const int* pos, const int* mode, const double* o, double* F,
-                               ReactiveRelocationTables rt, int eOff) {
-    for (int k = 0; k < nres; k++) {
-        int idx = pos[k];
-        int d;
-        int rg = rt.relocationGroup != nullptr ? rt.relocationGroup[eOff + idx] : -1;
-        if (rg >= 0 && rt.relocationDependentPilot != nullptr && rt.relocationDependentPilot[eOff + idx]) {
-            d = dependentPilotDestination(eOff + idx, dest[idx], alternateDestination[idx], selectorRow[idx], mode, rt);
-        } else if (rg >= 0 && rt.relocationCandidateOffset[eOff + idx] < 0) {      // STOCK PAIR: group slot holds the dummy ROW
-            d = stockPairPick(mode[rg], rt.relocationCandidateDestinations, -rt.relocationCandidateOffset[eOff + idx] - 1, dest[idx], mode, rt.relocatedChildOwnRow, rg);
-        } else if (rg >= 0 && rt.pilotSelfCarrierSkip != nullptr && rt.pilotSelfCarrierSkip[rg]) {
-            continue;                                        // pilot-self group, pilot unpinned: no raw q
-        } else if (rg >= 0) {
-            d = rt.relocationCandidateDestinations[rt.relocationCandidateOffset[eOff + idx] + chooseCarrierRowInSubgroup(rg, rt.reactiveRelocationGroupStart, rt.reactiveRelocationCandidateRows, mode, rt.distrQSubgroup, rt.reactiveRelocationDistrQMemberStart)];
-        } else {
-            int sr = selectorRow[idx];
-            bool useAlternate = sr >= 0 ? (mode[sr] == GpuRowMode::FIXED_VARIABLE || mode[sr] == GpuRowMode::BUS_TARGET_Q)
-                                  : (sr <= -2 && mode[-2 - sr] == GpuRowMode::FIXED_VARIABLE);   // stock-placement: identity only
-            d = useAlternate ? alternateDestination[idx] : dest[idx];
-        }
         if (d <= -2) {
             atomicAdd(&F[-2 - d], o[k]);
         }

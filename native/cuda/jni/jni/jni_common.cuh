@@ -79,7 +79,7 @@
 #include "../solver/realistic_voltage_check.cuh"
 #include "../solver/solve_seed.cuh"
 #include "../solver/state_vector_scaling.cuh"
-#include "../solver/zero_diagonal_repair.cuh"
+#include "../fixedmatrix/zero_diagonal_repair.cuh"
 #include "../structure/csr_pattern.cuh"
 #include "../structure/shared_structure.cuh"
 #include "../solver/outer_loop_driver.cuh"

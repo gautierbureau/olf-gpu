@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include "../equations/scatter.cuh"
+#include "../fixedmatrix/reactive_relocation.cuh"
 #include "driver_pass.cuh"
 
 namespace olfgpu {

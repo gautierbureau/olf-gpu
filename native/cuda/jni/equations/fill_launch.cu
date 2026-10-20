@@ -15,6 +15,7 @@
 #include "../common/launch.cuh"
 #include "../common/codes/gpu_row_mode.cuh"
 #include "scatter.cuh"
+#include "../fixedmatrix/reactive_relocation.cuh"
 #include "../solver/driver_steps.cuh"
 #include "branch_fill.cuh"
 #include "bus_injection_fill.cuh"

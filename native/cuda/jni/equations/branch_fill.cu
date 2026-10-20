@@ -24,6 +24,8 @@
 #include "hvdc_scatter.h"
 #include "vdl.cuh"
 #include "scatter.cuh"
+#include "../fixedmatrix/reactive_relocation.cuh"
+#include "../fixedmatrix/relocated_scatter.cuh"
 #include "scenario_overrides.cuh"
 #include "branch_fill.cuh"
 

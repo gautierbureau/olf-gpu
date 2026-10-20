@@ -8,6 +8,7 @@
 
 #include "../solver/driver_pass.cuh"
 #include "scatter.cuh"
+#include "../fixedmatrix/reactive_relocation.cuh"
 
 namespace olfgpu {
 

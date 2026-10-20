@@ -145,27 +145,4 @@ void buildDistrShuntBDest(SharedStructure* structure, const CsrPattern& pos, con
     }
 }
 
-// plan-B4: the FROZEN role-0 dest of a GROUP-relocated output backs only the qBuf DIAGNOSTIC
-// fill (dynamicRelocation = 0; every Newton fill selects a pool slot instead) — point it at the group's
-// FALLBACK row (the pilot's own row, read by no outer loop) so a remote member's diagnostic q
-// row carries ONLY its own injection (fillRemoteMemberQBatch). Without this the pilot's whole
-// balance lands on the base carrier's row and corrupts the free member's reactive-limit check.
-void patchGroupFrozenDestinations(DeviceBuf& dest, const std::vector<int>& relocationGroup,
-                           const std::vector<int>& relocationCandidateOffset, int outputCount,
-                           const int* scatterRole, const int* reactiveRelocationGroupStart, const int* reactiveRelocationCandidateRows) {
-    for (size_t o = 0; o < relocationGroup.size(); o++) {
-        int g = relocationGroup[o];
-        // A STOCK PAIR (negative offset) parks the DUMMY ROW in the group slot, not a group id — reading
-        // reactiveRelocationGroupStart[row] there walked off the candidate table and wrote a garbage dest, which the device then
-        // used: "CUDA error: an illegal memory access" out of createBatchContext.
-        if (g >= 0 && relocationCandidateOffset[o] < 0) {
-            continue;
-        }
-        if (g >= 0 && scatterRole[o % outputCount] == 0) {
-            int v = -2 - reactiveRelocationCandidateRows[reactiveRelocationGroupStart[g]];
-            CUDA_CHECK(cudaMemcpy(dest.as<int>() + o, &v, sizeof(int), cudaMemcpyHostToDevice));
-        }
-    }
-}
-
 }  // namespace olfgpu

@@ -21,7 +21,7 @@
 #include "../equations/fill_launch.cuh"
 #include "../equations/zero_impedance_fill.cuh"
 #include "../solver/driver_steps.cuh"
-#include "../solver/zero_diagonal_repair.cuh"
+#include "../fixedmatrix/zero_diagonal_repair.cuh"
 #include "pilot_voltage.cuh"
 #include "sensitivity.cuh"
 

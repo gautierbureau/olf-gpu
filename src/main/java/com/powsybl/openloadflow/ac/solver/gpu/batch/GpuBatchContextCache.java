@@ -136,10 +136,10 @@ public final class GpuBatchContextCache {
         long handle = BatchSolveNative.createBatchContext(structure, chunkSize, mode,
                 data.reactiveLimits().voltageRow(), data.reactiveLimits().minQ(), data.reactiveLimits().maxQ(),
                 data.reactiveLimits().loadQ(), data.reactiveLimits().targetV(), data.reactiveLimits().flags(), data.voltageRows().slope(),
-                data.dsPhiRow(), data.dsFactor(), data.dsSlackPhiRow(), data.dsSlackTargetP(),
-                data.dsBaseTargetP(), data.dsMaxDelta(), data.dsMinDelta(),
-                data.dsMode(), data.dsMarginUp(), data.dsMarginDown(),
-                data.dsSlackMarginUp(), data.dsSlackMarginDown());
+                data.distributedSlack().busPhiRow(), data.distributedSlack().busFactor(), data.distributedSlack().slackPhiRow(), data.distributedSlack().slackTargetP(),
+                data.distributedSlack().busBaseTargetP(), data.distributedSlack().busMaxDelta(), data.distributedSlack().busMinDelta(),
+                data.distributedSlack().factorMode(), data.distributedSlack().busMarginUp(), data.distributedSlack().busMarginDown(),
+                data.distributedSlack().slackMarginUp(), data.distributedSlack().slackMarginDown());
         DeviceLoopTables.installRlElection(handle, data);
         cachedContext = new CachedBatchContext(handle, data, chunkSize, mode, structure);
         BUILDS.incrementAndGet();

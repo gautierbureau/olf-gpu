@@ -60,12 +60,12 @@ public final class GpuBatchLossPreDistribution {
                                int ovBus, double ovFactorDelta, double ovBaseDelta,
                                double ovMaxDelta, double ovMinDelta, boolean[] islanded,
                                int[] lostGenSlots, double[] genMovesOut) {
-        int nds = gpuData.dsPhiRow().length;
+        int nds = gpuData.distributedSlack().busPhiRow().length;
         if (nds == 0 || mismatch == 0) {
             return null;
         }
         boolean dirUp = mismatch > 0;
-        int ngen = gpuData.dgBus() == null ? 0 : gpuData.dgBus().length;
+        int ngen = gpuData.distributedSlack().generatorBus() == null ? 0 : gpuData.distributedSlack().generatorBus().length;
         // The slack bus's own generators in the generator pack (dgBus -1): they are water-filled with the others,
         // clamped at their own limits, so the whole mismatch goes into the list and the slack's share is theirs.
         boolean slackInPack = slackInPack(gpuData);
@@ -78,27 +78,27 @@ public final class GpuBatchLossPreDistribution {
         // trajectory: the device then re-derived 13.481 where OLF re-derived 13.477, and the two
         // arms converged to different in-band points 5.7e-3 kV apart.
         double fs;
-        if (gpuData.dsMode() == GpuDistributedSlackFactorMode.REMAINING_MARGIN) {                        // REMAINING_MARGIN: direction-dependent margins
+        if (gpuData.distributedSlack().factorMode() == GpuDistributedSlackFactorMode.REMAINING_MARGIN) {                        // REMAINING_MARGIN: direction-dependent margins
             double sumM = 0;
             for (int i = 0; i < nds; i++) {
                 if (islanded != null && islanded[i]) {
                     continue;                                // in another synchronous component now
                 }
-                sumM += dirUp ? gpuData.dsMarginUp()[i] : gpuData.dsMarginDown()[i];
+                sumM += dirUp ? gpuData.distributedSlack().busMarginUp()[i] : gpuData.distributedSlack().busMarginDown()[i];
             }
-            double slackM = dirUp ? gpuData.dsSlackMarginUp() : gpuData.dsSlackMarginDown();
+            double slackM = dirUp ? gpuData.distributedSlack().slackMarginUp() : gpuData.distributedSlack().slackMarginDown();
             // Already the renormalized share: dropping the stranded margins IS the renormalization.
             fs = sumM + slackM > 0 ? sumM / (sumM + slackM) : 0.0;
         } else {
             double fsAll = 0;
             double fsActive = 0;
             for (int i = 0; i < nds; i++) {
-                fsAll += gpuData.dsFactor()[i];
+                fsAll += gpuData.distributedSlack().busFactor()[i];
                 if (islanded != null && islanded[i]) {
                     continue;                                // in another synchronous component now
                 }
                 // a lost participating generator leaves the participation like a stranded one
-                fsActive += gpuData.dsFactor()[i] - (i == ovBus ? ovFactorDelta : 0.0);
+                fsActive += gpuData.distributedSlack().busFactor()[i] - (i == ovBus ? ovFactorDelta : 0.0);
             }
             double rho = 1.0 - fsAll;                        // the slack's own share, over the FULL set
             fs = fsActive == fsAll || fsActive + rho <= 0
@@ -148,7 +148,7 @@ public final class GpuBatchLossPreDistribution {
             for (int iter = 0; iter < ngen && Math.abs(rem) > P_RESIDUE_EPS; iter++) {
                 double fsumActive = 0.0;
                 for (int g = 0; g < ngen; g++) {
-                    if (removed[g] || excluded(gpuData.dgBus()[g], ovBus, ovPerGen, islanded)) {
+                    if (removed[g] || excluded(gpuData.distributedSlack().generatorBus()[g], ovBus, ovPerGen, islanded)) {
                         continue;
                     }
                     fsumActive += fWork[g];
@@ -158,14 +158,14 @@ public final class GpuBatchLossPreDistribution {
                 double ovMinD = 0.0;
                 boolean ovActive = false;
                 if (ovBus >= 0 && !ovPerGen && (islanded == null || !islanded[ovBus])) {
-                    ovMaxD = gpuData.dsMaxDelta()[ovBus] - ovMaxDelta;
-                    ovMinD = gpuData.dsMinDelta()[ovBus] - ovMinDelta;
+                    ovMaxD = gpuData.distributedSlack().busMaxDelta()[ovBus] - ovMaxDelta;
+                    ovMinD = gpuData.distributedSlack().busMinDelta()[ovBus] - ovMinDelta;
                     // The kernel does NOT take the factor delta off a REMAINING_MARGIN factor; mirror
                     // it rather than "improve" on it (that shape is CPU-routed upstream anyway, and
                     // the seed must be the same function as the fill it seeds).
-                    ovF = gpuData.dsMode() == GpuDistributedSlackFactorMode.REMAINING_MARGIN
-                            ? Math.max(0.0, dirUp ? gpuData.dsMarginUp()[ovBus] : gpuData.dsMarginDown()[ovBus])
-                            : gpuData.dsFactor()[ovBus] - ovFactorDelta;
+                    ovF = gpuData.distributedSlack().factorMode() == GpuDistributedSlackFactorMode.REMAINING_MARGIN
+                            ? Math.max(0.0, dirUp ? gpuData.distributedSlack().busMarginUp()[ovBus] : gpuData.distributedSlack().busMarginDown()[ovBus])
+                            : gpuData.distributedSlack().busFactor()[ovBus] - ovFactorDelta;
                     ovActive = ovF > 0 && !(rem > 0 ? ovCum >= ovMaxD : ovCum <= ovMinD);
                     if (ovActive) {
                         fsumActive += ovF;
@@ -176,17 +176,17 @@ public final class GpuBatchLossPreDistribution {
                 }
                 double done = 0.0;
                 for (int g = 0; g < ngen; g++) {
-                    if (removed[g] || excluded(gpuData.dgBus()[g], ovBus, ovPerGen, islanded)) {
+                    if (removed[g] || excluded(gpuData.distributedSlack().generatorBus()[g], ovBus, ovPerGen, islanded)) {
                         continue;
                     }
                     fWork[g] /= fsumActive;
                     double newCum = genCum[g] + rem * fWork[g];
                     // OLF removes on a STRICT overshoot only.
-                    if (rem > 0 && newCum > gpuData.dgMaxDelta()[g]) {
-                        newCum = gpuData.dgMaxDelta()[g];
+                    if (rem > 0 && newCum > gpuData.distributedSlack().generatorMaxDelta()[g]) {
+                        newCum = gpuData.distributedSlack().generatorMaxDelta()[g];
                         removed[g] = true;
-                    } else if (rem < 0 && newCum < gpuData.dgMinDelta()[g]) {
-                        newCum = gpuData.dgMinDelta()[g];
+                    } else if (rem < 0 && newCum < gpuData.distributedSlack().generatorMinDelta()[g]) {
+                        newCum = gpuData.distributedSlack().generatorMinDelta()[g];
                         removed[g] = true;
                     }
                     if (newCum != genCum[g]) {
@@ -209,7 +209,7 @@ public final class GpuBatchLossPreDistribution {
                     for (int g = 0; g < ngen; g++) {
                         if (removed[g] && genCum[g] != 0) {
                             System.err.printf("  SEED_SAT gen=%d bus=%d cum=%.12f maxD=%.12f%n",
-                                    g, gpuData.dgBus()[g], genCum[g], gpuData.dgMaxDelta()[g]);
+                                    g, gpuData.distributedSlack().generatorBus()[g], genCum[g], gpuData.distributedSlack().generatorMaxDelta()[g]);
                         }
                     }
                 }
@@ -219,7 +219,7 @@ public final class GpuBatchLossPreDistribution {
                 System.arraycopy(genCum, 0, genMovesOut, 0, ngen);
             }
             for (int g = 0; g < ngen; g++) {
-                if (gpuData.dgBus()[g] < 0) {
+                if (gpuData.distributedSlack().generatorBus()[g] < 0) {
                     slackShare += genCum[g];
                 }
             }
@@ -232,7 +232,7 @@ public final class GpuBatchLossPreDistribution {
                     continue;
                 }
                 double sum = 0;
-                for (int g = gpuData.busGenStart()[i]; g < gpuData.busGenEnd()[i]; g++) {
+                for (int g = gpuData.distributedSlack().busGeneratorStart()[i]; g < gpuData.distributedSlack().busGeneratorEnd()[i]; g++) {
                     sum += genCum[g];
                 }
                 cum[i] = sum;
@@ -242,8 +242,8 @@ public final class GpuBatchLossPreDistribution {
                 double fsumActive = 0.0;                         // re-normalize over the still-unsaturated buses
                 for (int i = 0; i < nds; i++) {
                     double f = effFactor(gpuData, dirUp, i, ovBus, ovFactorDelta, islanded);
-                    double maxD = gpuData.dsMaxDelta()[i] - (ovBus == i ? ovMaxDelta : 0.0);
-                    double minD = gpuData.dsMinDelta()[i] - (ovBus == i ? ovMinDelta : 0.0);
+                    double maxD = gpuData.distributedSlack().busMaxDelta()[i] - (ovBus == i ? ovMaxDelta : 0.0);
+                    double minD = gpuData.distributedSlack().busMinDelta()[i] - (ovBus == i ? ovMinDelta : 0.0);
                     boolean sat = rem > 0 ? cum[i] >= maxD : cum[i] <= minD;
                     if (!sat) {
                         fsumActive += f;
@@ -255,8 +255,8 @@ public final class GpuBatchLossPreDistribution {
                 double done = 0.0;
                 for (int i = 0; i < nds; i++) {
                     double f = effFactor(gpuData, dirUp, i, ovBus, ovFactorDelta, islanded);
-                    double maxD = gpuData.dsMaxDelta()[i] - (ovBus == i ? ovMaxDelta : 0.0);
-                    double minD = gpuData.dsMinDelta()[i] - (ovBus == i ? ovMinDelta : 0.0);
+                    double maxD = gpuData.distributedSlack().busMaxDelta()[i] - (ovBus == i ? ovMaxDelta : 0.0);
+                    double minD = gpuData.distributedSlack().busMinDelta()[i] - (ovBus == i ? ovMinDelta : 0.0);
                     boolean sat = rem > 0 ? cum[i] >= maxD : cum[i] <= minD;
                     if (sat) {
                         continue;
@@ -283,7 +283,7 @@ public final class GpuBatchLossPreDistribution {
 
     /** Whether the slack bus's own participating generators are in the generator pack (DS row -1). */
     public static boolean slackInPack(GpuAcData gpuData) {
-        int[] dgBus = gpuData.dgBus();
+        int[] dgBus = gpuData.distributedSlack().generatorBus();
         for (int g = 0; dgBus != null && g < dgBus.length; g++) {
             if (dgBus[g] < 0) {
                 return true;
@@ -300,9 +300,9 @@ public final class GpuBatchLossPreDistribution {
 
     /** A generator's factor under the run's balance type — the margins are direction-dependent. */
     private static double genFactor(GpuAcData gpuData, boolean dirUp, int g) {
-        return gpuData.dsMode() == GpuDistributedSlackFactorMode.REMAINING_MARGIN
-                ? (dirUp ? gpuData.dgMarginUp()[g] : gpuData.dgMarginDown()[g])
-                : gpuData.dgFactor()[g];
+        return gpuData.distributedSlack().factorMode() == GpuDistributedSlackFactorMode.REMAINING_MARGIN
+                ? (dirUp ? gpuData.distributedSlack().generatorMarginUp()[g] : gpuData.distributedSlack().generatorMarginDown()[g])
+                : gpuData.distributedSlack().generatorFactor()[g];
     }
 
     private static double effFactor(GpuAcData gpuData, boolean dirUp, int i, int ovBus, double ovFactorDelta,
@@ -310,9 +310,9 @@ public final class GpuBatchLossPreDistribution {
         if (islanded != null && islanded[i]) {
             return 0.0;                                      // excluded: it is not in this component any more
         }
-        double f = gpuData.dsMode() == GpuDistributedSlackFactorMode.REMAINING_MARGIN
-                ? Math.max(0.0, dirUp ? gpuData.dsMarginUp()[i] : gpuData.dsMarginDown()[i])
-                : gpuData.dsFactor()[i];
+        double f = gpuData.distributedSlack().factorMode() == GpuDistributedSlackFactorMode.REMAINING_MARGIN
+                ? Math.max(0.0, dirUp ? gpuData.distributedSlack().busMarginUp()[i] : gpuData.distributedSlack().busMarginDown()[i])
+                : gpuData.distributedSlack().busFactor()[i];
         if (ovBus == i) {
             f -= ovFactorDelta;
         }

@@ -187,7 +187,7 @@ final class GpuBatchPrecomputer {
             // handle to name the bus; OLF's own side (OLF_DS_SPLIT) is keyed by bus id. This map is
             // what joins the two, which is the only way to compare the SPLIT rather than the total.
             String dsBusMap = System.getenv("OLF_GPU_DS_BUSMAP");
-            if (dsBusMap != null && screenData != null && screenData.dsPhiRow() != null) {
+            if (dsBusMap != null && screenData != null && screenData.distributedSlack().busPhiRow() != null) {
                 java.util.Map<Integer, String> busByPhiRow = new java.util.HashMap<>();
                 for (var b : net.getBuses()) {
                     var v = es.getVariableSet().getVariable(b.getNum(), AcVariableType.BUS_PHI);
@@ -196,7 +196,7 @@ final class GpuBatchPrecomputer {
                     }
                 }
                 try (java.io.PrintWriter w = new java.io.PrintWriter(new java.io.FileWriter(dsBusMap))) {
-                    int[] rows = screenData.dsPhiRow();
+                    int[] rows = screenData.distributedSlack().busPhiRow();
                     for (int i = 0; i < rows.length; i++) {
                         w.printf("%d %s%n", i, busByPhiRow.getOrDefault(rows[i], "?row" + rows[i]));
                     }

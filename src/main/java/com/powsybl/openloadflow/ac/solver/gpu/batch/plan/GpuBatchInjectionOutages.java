@@ -344,7 +344,7 @@ public final class GpuBatchInjectionOutages {
         // participation, and a slack-only distribution reports what it absorbed through that same accumulator: both
         // stay on the CPU.
         boolean slackBus = es.getEquation(busNum, AcEquationType.BUS_TARGET_PHI).isPresent();
-        if (slackBus && (!lost.isEmpty() || gpuData.dsPhiRow().length == 0 && gpuData.dsSlackPhiRow() >= 0)) {
+        if (slackBus && (!lost.isEmpty() || gpuData.distributedSlack().busPhiRow().length == 0 && gpuData.distributedSlack().slackPhiRow() >= 0)) {
             return reject("SLACK_BUS", bus);
         }
         // DISTR_Q controller bus (remote/distributed VC): the qPct weights are BAKED into the
@@ -387,7 +387,7 @@ public final class GpuBatchInjectionOutages {
         double preLostLoadP = lostLoads.stream().mapToDouble(LoadLoss::p).sum();
         int dsBus = -1;
         if (!lost.isEmpty() || preLostLoadP != 0) {
-            int[] dsPhiRow = gpuData.dsPhiRow();
+            int[] dsPhiRow = gpuData.distributedSlack().busPhiRow();
             for (int i = 0; i < dsPhiRow.length; i++) {
                 if (dsPhiRow[i] == pRow) {
                     dsBus = i;

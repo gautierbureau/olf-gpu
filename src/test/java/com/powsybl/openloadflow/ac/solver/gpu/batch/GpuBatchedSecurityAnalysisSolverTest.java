@@ -10,6 +10,7 @@ package com.powsybl.openloadflow.ac.solver.gpu.batch;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.BaseOpenBranches;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.DistrQMembers;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.DistrQTerms;
+import com.powsybl.openloadflow.ac.equations.vector.gpu.DistributedSlackParticipants;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.LinearDistributionTerms;
@@ -41,12 +42,7 @@ class GpuBatchedSecurityAnalysisSolverTest {
             LinearDistributionTerms.empty(), LinearDistributionTerms.empty(),
             ReactiveLimitEntries.empty(),
             RemoteMemberReactiveTerms.empty(), VoltageRowParameters.empty(),
-            new int[0], new double[0], -1, 0.0,
-            new double[0], new double[0], new double[0],
-            0, new double[0], new double[0], 0.0, 0.0, Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY,
-            new int[0], new double[0], new double[0], new double[0], new double[0], new double[0],
-            new int[0], new int[0],
-            new int[0], new String[0],
+            DistributedSlackParticipants.empty(),
             BaseOpenBranches.empty(), new int[0], new double[0], new int[0], ReactiveRelocationCandidates.empty(),
             new int[0], new int[0]);
 

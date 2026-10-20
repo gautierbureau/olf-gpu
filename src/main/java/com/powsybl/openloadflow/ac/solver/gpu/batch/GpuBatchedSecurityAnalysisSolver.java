@@ -167,7 +167,7 @@ public final class GpuBatchedSecurityAnalysisSolver {
                 }
             }
         }
-        boolean slackParticipates = java.util.Arrays.stream(gpuData.dsFactor()).sum() < 1 - 1e-9;
+        boolean slackParticipates = java.util.Arrays.stream(gpuData.distributedSlack().busFactor()).sum() < 1 - 1e-9;
         // Reactive capability CURVES at runtime P (ReactiveCapabilityCurves): each tracked generator is evaluated at its own
         // P (its anchor plus its own slack move); a strategy pair moving an untracked curve generator -> CPU.
         ReactiveCapabilityCurves.Channel rlCurves = reactiveLimits

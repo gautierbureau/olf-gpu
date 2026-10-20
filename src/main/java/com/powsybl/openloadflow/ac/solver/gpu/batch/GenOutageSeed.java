@@ -297,7 +297,7 @@ final class GenOutageSeed {
                     // entry — which is what leaves their own P unknown (genCum stays zero
                     // there) and sends the curve channel back to the share model that
                     // per-generator clamping breaks.
-                    String[] dgIds = gpuData.dgGenId();
+                    String[] dgIds = gpuData.distributedSlack().generatorId();
                     for (int g = 0; dgIds != null && g < dgIds.length; g++) {
                         if (go.lostGenIds().contains(dgIds[g])) {
                             cl.dsLostGenList.add(s);

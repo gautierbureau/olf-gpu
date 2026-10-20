@@ -67,17 +67,7 @@ public record GpuAcData(double[] cbIn, int[] cbIdx, int[] cbPcSide, double[] obI
                         ReactiveLimitEntries reactiveLimits,
                         RemoteMemberReactiveTerms remoteMemberReactiveTerms,
                         VoltageRowParameters voltageRows,
-                        int[] dsPhiRow, double[] dsFactor, int dsSlackPhiRow, double dsSlackTargetP,
-                        double[] dsBaseTargetP, double[] dsMaxDelta, double[] dsMinDelta,
-                        int dsMode, double[] dsMarginUp, double[] dsMarginDown,
-                        double dsSlackMarginUp, double dsSlackMarginDown,
-                        /** The slack bus's participating generators' total rooms from their anchor targets: what a
-                         *  slack-only distribution can place before OLF's water-fill leaves a remaining mismatch
-                         *  (infinite for a load-based slack). */
-                        double dsSlackRoomUp, double dsSlackRoomDown,
-                        int[] dgBus, double[] dgFactor, double[] dgMaxDelta, double[] dgMinDelta,
-                        double[] dgMarginUp, double[] dgMarginDown, int[] busGenStart, int[] busGenEnd,
-                        int[] dsBusNum, String[] dgGenId,
+                        DistributedSlackParticipants distributedSlack,
                         BaseOpenBranches baseOpenBranches,
                         int[] ziBranchNums, double[] vdlIn, int[] vdlIdx, ReactiveRelocationCandidates reactiveRelocation,
                         int[] obQAlt, int[] ziQAlt) {
@@ -140,20 +130,13 @@ public record GpuAcData(double[] cbIn, int[] cbIdx, int[] cbPcSide, double[] obI
                 && java.util.Arrays.equals(ziIdx, other.ziIdx)
                 && distrRho.sameAs(other.distrRho) && distrShuntB.sameAs(other.distrShuntB)
                 && reactiveLimits.sameAs(other.reactiveLimits)
-                && java.util.Arrays.equals(dsPhiRow, other.dsPhiRow) && java.util.Arrays.equals(dsFactor, other.dsFactor)
-                && dsSlackPhiRow == other.dsSlackPhiRow && dsSlackTargetP == other.dsSlackTargetP
-                && java.util.Arrays.equals(dsBaseTargetP, other.dsBaseTargetP)
-                && java.util.Arrays.equals(dsMaxDelta, other.dsMaxDelta) && java.util.Arrays.equals(dsMinDelta, other.dsMinDelta)
+                && distributedSlack.sameAs(other.distributedSlack)
                 && reactiveRelocation.sameGroupsAs(other.reactiveRelocation)
                 && java.util.Arrays.equals(obQAlt, other.obQAlt) && java.util.Arrays.equals(ziQAlt, other.ziQAlt)
                 && distrQMembers.sameAs(other.distrQMembers)
                 && remoteMemberReactiveTerms.sameAs(other.remoteMemberReactiveTerms)
                 && voltageRows.sameAs(other.voltageRows)
-                && java.util.Arrays.equals(cbPcSide, other.cbPcSide)
-                && dsMode == other.dsMode
-                && java.util.Arrays.equals(dsMarginUp, other.dsMarginUp) && java.util.Arrays.equals(dsMarginDown, other.dsMarginDown)
-                && dsSlackMarginUp == other.dsSlackMarginUp && dsSlackMarginDown == other.dsSlackMarginDown
-                && dsSlackRoomUp == other.dsSlackRoomUp && dsSlackRoomDown == other.dsSlackRoomDown;
+                && java.util.Arrays.equals(cbPcSide, other.cbPcSide);
     }
 
     public int getClosedBranchCount() {
@@ -241,7 +224,7 @@ public record GpuAcData(double[] cbIn, int[] cbIdx, int[] cbPcSide, double[] obI
 
     /** Number of participating buses in the batched distributed-slack outer loop (0 = no distribution). */
     public int getDistributedSlackBusCount() {
-        return dsPhiRow.length;
+        return distributedSlack.size();
     }
 
     public int getTotalElementCount() {

@@ -680,8 +680,8 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                 DriverNative.setBatchDriverStartLoop(handle, restartLoopKind);
             }
             restartLoopKind = GpuOuterLoopKind.NOT_PAUSED;
-            if (driverDsRejectResidual && driverDsLoop() != null && cachedData.dsPhiRow().length == 0
-                    && (cachedData.dsSlackPhiRow() < 0 || Double.isInfinite(cachedData.dsSlackRoomUp()))) {
+            if (driverDsRejectResidual && driverDsLoop() != null && cachedData.distributedSlack().busPhiRow().length == 0
+                    && (cachedData.distributedSlack().slackPhiRow() < 0 || Double.isInfinite(cachedData.distributedSlack().slackRoomUp()))) {
                 // No participant row and no slack generator to bound the slack's own share: either nobody
                 // participates (the pack dropped the distribution, the mismatch simply stays at the slack) or the
                 // slack's share has no generator limits (a load-based slack). The device cannot tell where OLF's
@@ -977,10 +977,10 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                         robustModeForRun ? GpuLinearSolveMode.ROBUST : GpuBatchContextCache.resolveBatchMode(),
                         data.reactiveLimits().voltageRow(), data.reactiveLimits().minQ(), data.reactiveLimits().maxQ(), data.reactiveLimits().loadQ(), data.reactiveLimits().targetV(),
                         data.reactiveLimits().flags(), data.voltageRows().slope(),
-                        data.dsPhiRow(), data.dsFactor(), data.dsSlackPhiRow(), data.dsSlackTargetP(),
-                        data.dsBaseTargetP(), data.dsMaxDelta(), data.dsMinDelta(),
-                        data.dsMode(), data.dsMarginUp(), data.dsMarginDown(),
-                        data.dsSlackMarginUp(), data.dsSlackMarginDown()));
+                        data.distributedSlack().busPhiRow(), data.distributedSlack().busFactor(), data.distributedSlack().slackPhiRow(), data.distributedSlack().slackTargetP(),
+                        data.distributedSlack().busBaseTargetP(), data.distributedSlack().busMaxDelta(), data.distributedSlack().busMinDelta(),
+                        data.distributedSlack().factorMode(), data.distributedSlack().busMarginUp(), data.distributedSlack().busMarginDown(),
+                        data.distributedSlack().slackMarginUp(), data.distributedSlack().slackMarginDown()));
                 // OLF's forced-PV election keys are part of creating a context with RL entries.
                 DeviceLoopTables.installRlElection(context.handle.get(), data);
                 cachedData = data;

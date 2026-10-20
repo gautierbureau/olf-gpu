@@ -29,31 +29,6 @@ final class DistributedSlackPacker {
     private DistributedSlackPacker() {
     }
 
-    /** Distributed-slack pack: per-participating-bus factor/headroom + the slack bus's own share.
-     *  {@code dsMode} GpuDistributedSlackFactorMode: STATIC ({@code dsFactor}) or REMAINING_MARGIN (factors are the
-     *  direction-dependent per-bus margins {@code dsMarginUp}/{@code dsMarginDown} + the slack's own
-     *  {@code dsSlackMarginUp}/{@code Down}, normalized in-kernel per scenario and pass).
-     *
-     * @param dgBus       per participating GENERATOR, the index of its bus in {@code dsPhiRow}
-     * @param dgFactor    per generator, its RAW participation factor (same normalization as dsFactor)
-     * @param dgMaxDelta  per generator, {@code maxTargetP - targetP} under OLF's no-sign-change rule
-     * @param dgMinDelta  per generator, {@code minTargetP - targetP}
-     * @param dgMarginUp  per generator, REMAINING_MARGIN's own direction-dependent factor (up)
-     * @param dgMarginDown same, down
-     * @param busGenStart per bus, the first index into the generator arrays (generators are grouped
-     *                    by bus and contiguous, so a bus's row value is the sum over its slice)
-     * @param busGenEnd   per bus, one past its last generator
-     */
-    record DsPack(int[] dsPhiRow, double[] dsFactor, int dsSlackPhiRow, double dsSlackTargetP,
-                  double[] dsBaseTargetP, double[] dsMaxDelta, double[] dsMinDelta,
-                  int dsMode, double[] dsMarginUp, double[] dsMarginDown,
-                  double dsSlackMarginUp, double dsSlackMarginDown,
-                  double dsSlackRoomUp, double dsSlackRoomDown,
-                  int[] dgBus, double[] dgFactor, double[] dgMaxDelta, double[] dgMinDelta,
-                  double[] dgMarginUp, double[] dgMarginDown, int[] busGenStart, int[] busGenEnd,
-                  int[] dsBusNum, String[] dgGenId) {
-    }
-
     /** Σ over the bus's participating generators of (current − anchor target P): what OLF's
      *  resetToInitialState undoes and adds back as previousMismatch. 0 when anchoring at the current
      *  targets. The anchor row target = the row's current target minus this. */
@@ -67,7 +42,7 @@ final class DistributedSlackPacker {
         return off;
     }
 
-    static DsPack distributedSlackPack(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
+    static DistributedSlackParticipants distributedSlackPack(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
                                        ExtractionColumns columns, boolean distributedSlack, GpuDsParams dsParams) {
         int[] phiCol = columns.phiCol();
         int[] pRow = columns.pRow();       // a DS target is written at the bus's P ROW, relocated under a coupler tree
@@ -255,7 +230,7 @@ final class DistributedSlackPacker {
             dsBusNum.clear();
             dgGenId.clear();
         }
-        return new DsPack(GpuAcArrays.toIntArray(dsPhiRow), dsFactor, dsSlackPhiRow, dsSlackTargetP,
+        return new DistributedSlackParticipants(GpuAcArrays.toIntArray(dsPhiRow), dsFactor, dsSlackPhiRow, dsSlackTargetP,
                 GpuAcArrays.toDoubleArray(dsBaseTargetP), GpuAcArrays.toDoubleArray(dsMaxDelta),
                 GpuAcArrays.toDoubleArray(dsMinDelta),
                 GpuDistributedSlackFactorMode.of(dsParams.isRemainingMargin()),

@@ -152,7 +152,7 @@ final class CouplerSeed {
                     // The DS participant on that bus has to follow its equation. Its
                     // structural row is this coupler's DUMMY_P, now an identity.
                     for (int i = 0; i < nds; i++) {
-                        if (gpuData.dsPhiRow()[i] != dpRow) {
+                        if (gpuData.distributedSlack().busPhiRow()[i] != dpRow) {
                             continue;
                         }
                         cl.dsRowOvList.add(s);
@@ -270,7 +270,7 @@ final class CouplerSeed {
                     rs.overrides.put(s * n + childPhiRow, baseTargets[dpRow]);
                 }
                 for (int i = 0; i < nds; i++) {   // the DS participant follows its equation
-                    if (gpuData.dsPhiRow()[i] != dpRow) {
+                    if (gpuData.distributedSlack().busPhiRow()[i] != dpRow) {
                         continue;
                     }
                     cl.dsRowOvList.add(s);

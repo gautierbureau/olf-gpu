@@ -185,7 +185,7 @@ public final class ReactiveCapabilityCurves {
 
     /** The bus's index in the distributed-slack BUS pack, or -1 when it does not participate. */
     private static int dsBusIndexOf(GpuAcData gpuData, int busNum) {
-        int[] nums = gpuData.dsBusNum();
+        int[] nums = gpuData.distributedSlack().busNum();
         if (nums == null) {
             return -1;
         }
@@ -216,7 +216,7 @@ public final class ReactiveCapabilityCurves {
                                       List<int[]> cvIdx, List<double[]> cvIn, List<Double> cvPts,
                                       List<String> cvGenId, List<Double> cvBusFactor, GpuAcData gpuData,
                                       java.util.Map<LfGenerator, int[]> hvdcSides, List<Integer> cvHv) {
-        String[] dgGenId = gpuData.dgGenId();
+        String[] dgGenId = gpuData.distributedSlack().generatorId();
         // dsParams == null: no slack distribution, only the AC-emulation stations' P moves
         double busFactor = dsParams != null ? bus.getGenerators().stream().mapToDouble(dsParams::factor).sum() : 0;
         for (LfGenerator gen : bus.getGenerators()) {
@@ -255,7 +255,7 @@ public final class ReactiveCapabilityCurves {
             // this only asserts the two packs agree); the kernel resolves the per-scenario row (dsRowOv) itself.
             int dsIdx = dsBusIndexOf(gpuData, bus.getNum());
             if (dsIdx >= 0) {
-                pRow = gpuData.dsPhiRow()[dsIdx];
+                pRow = gpuData.distributedSlack().busPhiRow()[dsIdx];
             }
             // ...and WHICH generator this is in the distributed-slack generator pack. The kernel reads
             // that generator's own cumulative P movement (genCum) instead of splitting its bus's

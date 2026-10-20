@@ -85,7 +85,7 @@ public final class ForceTargetQInReactiveLimits {
                                 GpuAcData gpuData, GpuDsParams dsParams, boolean forceTargetQ,
                                 boolean distributedSlack, double[] baseTargets, int[] baseRowMode,
                                 boolean extrapolate) {
-        if (!forceTargetQ || !distributedSlack || gpuData.dgGenId() == null) {
+        if (!forceTargetQ || !distributedSlack || gpuData.distributedSlack().generatorId() == null) {
             return null;
         }
         int[][] busRows = com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcDataExtractor.busPowerRows(network, es);
@@ -105,11 +105,11 @@ public final class ForceTargetQInReactiveLimits {
                 }
                 var curve = ((AbstractLfGenerator) gen).getReactiveLimits()
                         .filter(rl -> rl.getKind() == ReactiveLimitsKind.CURVE).orElse(null);
-                int slot = dsSlotOf(gpuData.dgGenId(), gen.getId());
+                int slot = dsSlotOf(gpuData.distributedSlack().generatorId(), gen.getId());
                 if (curve == null || slot < 0 || dsParams.factor(gen) <= 0) {
                     continue;                                // its clamp cannot move: the base target stays exact
                 }
-                if (gpuData.dgBus()[slot] < 0) {
+                if (gpuData.distributedSlack().generatorBus()[slot] < 0) {
                     continue;                                // the slack bus's own (no row): its clamp stays at base P
                 }
                 if (gen.getGeneratorControlType() == LfGenerator.GeneratorControlType.REMOTE_REACTIVE_POWER) {
@@ -150,7 +150,7 @@ public final class ForceTargetQInReactiveLimits {
                     pts.add(pt.getMinQ());
                     pts.add(pt.getMaxQ());
                 }
-                int pRow = gpuData.dsPhiRow()[dsIdx];
+                int pRow = gpuData.distributedSlack().busPhiRow()[dsIdx];
                 idx.add(new int[] {qRow, slot, ptsOff, points.size(), dsIdx, qRow >= 0 ? baseRowMode[qRow] : 0, rlIdx});
                 in.add(new double[] {gen.getTargetP(), gen.getRawTargetQ(), gen.getTargetQ(),
                     dsParams.factor(gen) / busFactor, baseTargets[pRow]});
@@ -193,7 +193,7 @@ public final class ForceTargetQInReactiveLimits {
     }
 
     private static int dsBusIndexOf(GpuAcData gpuData, int busNum) {
-        int[] nums = gpuData.dsBusNum();
+        int[] nums = gpuData.distributedSlack().busNum();
         if (nums == null) {
             return -1;
         }

@@ -132,7 +132,7 @@ public final class GpuAcDataExtractor {
         LinearDistributionTerms dsb = DistrShuntBPacker.distrShuntBPack(network, es, columns);
 
         RemoteMemberReactiveTerms rmq = RemoteMemberQPacker.remoteMemberQPack(network, es, columns, family, reactiveLimits);
-        DistributedSlackPacker.DsPack ds = DistributedSlackPacker.distributedSlackPack(network, es, columns, distributedSlack, dsParams);
+        DistributedSlackParticipants ds = DistributedSlackPacker.distributedSlackPack(network, es, columns, distributedSlack, dsParams);
         // SLOPE-SVC rows (V + slope*sumQ = target, row mode 2): per-row slope, 0 everywhere else
         double[] rowSlope = new double[es.getIndex().getSortedVariablesToFind().size()];
         for (com.powsybl.openloadflow.network.LfBus bus : network.getBuses()) {
@@ -172,13 +172,7 @@ public final class GpuAcDataExtractor {
                 dr, dsb,
                 rl,
                 rmq, new VoltageRowParameters(rowSlope, rowNominalV),
-                ds.dsPhiRow(), ds.dsFactor(), ds.dsSlackPhiRow(), ds.dsSlackTargetP(),
-                ds.dsBaseTargetP(), ds.dsMaxDelta(), ds.dsMinDelta(),
-                ds.dsMode(), ds.dsMarginUp(), ds.dsMarginDown(), ds.dsSlackMarginUp(), ds.dsSlackMarginDown(),
-                ds.dsSlackRoomUp(), ds.dsSlackRoomDown(),
-                ds.dgBus(), ds.dgFactor(), ds.dgMaxDelta(), ds.dgMinDelta(),
-                ds.dgMarginUp(), ds.dgMarginDown(), ds.busGenStart(), ds.busGenEnd(),
-                ds.dsBusNum(), ds.dgGenId(),
+                ds,
                 new BaseOpenBranches(family.baseOpenCb().stream().mapToInt(Integer::intValue).toArray(),
                         family.baseOpenZi().stream().mapToInt(Integer::intValue).toArray(),
                         family.baseOpenZiNums().stream().mapToInt(Integer::intValue).toArray()),

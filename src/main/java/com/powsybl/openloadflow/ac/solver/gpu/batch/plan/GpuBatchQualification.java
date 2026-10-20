@@ -171,7 +171,7 @@ public final class GpuBatchQualification {
             // ...and re-checks its participation at the new target, which the device applies to the generator pack.
             // A participant outside a non-empty pack (its bus has no active P balance row) has nowhere to sit out. (In
             // a slack-only distribution there is no pack, and any action there moves the slack bus: SLACK_BUS.)
-            if (gpuData.dgGenId() != null && gpuData.dgGenId().length > 0 && c.generatorActions().stream()
+            if (gpuData.distributedSlack().generatorId() != null && gpuData.distributedSlack().generatorId().length > 0 && c.generatorActions().stream()
                     .anyMatch(m -> dsParams.factor(m.generator()) != 0 && !ControlReHoming.inGeneratorPack(gpuData, m.generator().getId()))) {
                 refuse(c, "PLAN:PAIR_ACTION_UNTRACKED_PARTICIPANT");
                 continue;
@@ -191,9 +191,9 @@ public final class GpuBatchQualification {
                 var phiVar = es.getVariableSet().getVariable(newSlack.getNum(), AcVariableType.BUS_PHI);
                 int phiRow = phiVar == null ? -1 : phiVar.getRow();
                 LfBus baseSlack = newSlack.getNetwork().getSynchronousNetworks().getFirst().getSlackBuses().getFirst();
-                boolean ds = gpuData.dsSlackPhiRow() >= 0;
+                boolean ds = gpuData.distributedSlack().slackPhiRow() >= 0;
                 boolean participates = ds && (dsParams.busFactor(baseSlack) != 0 || dsParams.busFactor(newSlack) != 0);
-                boolean slackOnly = ds && gpuData.dsPhiRow().length == 0;
+                boolean slackOnly = ds && gpuData.distributedSlack().busPhiRow().length == 0;
                 // the slack's balance is read from the injection buffer, which carries no AC-emulation HVDC term
                 boolean emulatedHvdc = newSlack.getHvdcs().stream().anyMatch(com.powsybl.openloadflow.network.LfHvdc::isAcEmulation);
                 boolean balanceActive = es.getEquation(newSlack.getNum(), AcEquationType.BUS_TARGET_P)
@@ -204,7 +204,7 @@ public final class GpuBatchQualification {
                     continue;
                 }
                 pb.relocatedSlackRow[i] = phiRow;
-                pb.relocatedSlackShift[i] = ds ? newSlack.getTargetP() - gpuData.dsSlackTargetP() : 0;
+                pb.relocatedSlackShift[i] = ds ? newSlack.getTargetP() - gpuData.distributedSlack().slackTargetP() : 0;
                 com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("PLAN:SLACK_RELOCATED");
             }
             java.util.Set<Integer> outagedZiNums = c.outagedZiBranches().stream()

@@ -100,7 +100,7 @@ final class RunScratch {
         this.r1OvSlotElemList = new ArrayList<>();
         this.r1OvValList = new ArrayList<>();
         this.shPackOffset = elementMapper.getClosedBranchCount() + elementMapper.getOpenBranchCount();
-        this.hasDs = gpuData.dsPhiRow().length > 0;
+        this.hasDs = gpuData.distributedSlack().busPhiRow().length > 0;
         this.dsOvBus = hasDs ? new int[chunkSize] : new int[0];
         this.dsOvFactorDelta = hasDs ? new double[chunkSize] : new double[0];
         this.dsOvBaseDelta = hasDs ? new double[chunkSize] : new double[0];

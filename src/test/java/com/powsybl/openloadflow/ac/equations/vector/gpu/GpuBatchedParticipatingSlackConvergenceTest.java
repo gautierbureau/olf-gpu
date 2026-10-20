@@ -114,8 +114,8 @@ class GpuBatchedParticipatingSlackConvergenceTest {
                 GpuBatchContextCache.resolveBatchMode(), MAX_ITER, 1e-10, 1e-4, dsTolPu,
                 d.cbIn(), d.cbIdx(), d.obIn(), d.obIdx(), d.shIn(), d.shIdx(), d.hvIn(), d.hvIdx(),
                 new int[0], new double[0], new double[0], new double[0], new double[0],
-                d.dsPhiRow(), d.dsFactor(), d.dsSlackPhiRow(), d.dsSlackTargetP(),
-                d.dsBaseTargetP(), d.dsMaxDelta(), d.dsMinDelta(),
+                d.distributedSlack().busPhiRow(), d.distributedSlack().busFactor(), d.distributedSlack().slackPhiRow(), d.distributedSlack().slackTargetP(),
+                d.distributedSlack().busBaseTargetP(), d.distributedSlack().busMaxDelta(), d.distributedSlack().busMinDelta(),
                 d.distrQ().element(), d.distrQ().side(), d.distrQ().weight(), d.distrQ().row(), d.distrQ().kind(),
                 d.distrRho().row(), d.distrRho().column(), d.distrRho().coefficient(), d.distrShuntB().row(), d.distrShuntB().column(), d.distrShuntB().coefficient(), d.ziIn(), d.ziIdx());
         int n = baseState.length;

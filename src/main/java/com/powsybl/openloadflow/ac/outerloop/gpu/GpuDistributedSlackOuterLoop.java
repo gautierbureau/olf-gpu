@@ -49,10 +49,10 @@ public final class GpuDistributedSlackOuterLoop {
             return lastDistributedActivePower;
         }
         LfBus slackBus = null;
-        if (data.dsSlackPhiRow() >= 0) {
+        if (data.distributedSlack().slackPhiRow() >= 0) {
             for (LfBus bus : network.getBuses()) {
                 var v = equationSystem.getVariableSet().getVariable(bus.getNum(), AcVariableType.BUS_PHI);
-                if (v != null && v.getRow() == data.dsSlackPhiRow()) {
+                if (v != null && v.getRow() == data.distributedSlack().slackPhiRow()) {
                     slackBus = bus;
                     break;
                 }
@@ -64,10 +64,10 @@ public final class GpuDistributedSlackOuterLoop {
                 // converged state against stale targets: on rte6515's full busbar scope the device's own norm was
                 // 9.45e-06 (OLF's own final 9.50e-06) while OLF re-evaluated 1.67 and called the base
                 // MAX_ITERATION_REACHED, which took the whole security analysis with it.
-                slackBus = relocatedChildOfPRow(network, data, data.dsSlackPhiRow());
+                slackBus = relocatedChildOfPRow(network, data, data.distributedSlack().slackPhiRow());
             }
         }
-        if (data.dsPhiRow().length == 0) {
+        if (data.distributedSlack().busPhiRow().length == 0) {
             // slack-only participation: the whole distribution is the slack's absorbed total
             double[] absorbed = BatchReadbackNative.readBatchSlackAbsorbed(handle);
             if (slackBus != null && absorbed != null && absorbed.length > 0 && absorbed[0] != 0) {
@@ -88,31 +88,31 @@ public final class GpuDistributedSlackOuterLoop {
         }
         double distributed = retain[0];                     // the slack's retained share + the participants' below
         boolean slackInPack = false;                        // the slack's own generators listed (DS row -1)
-        if (genCum != null && data.dgGenId() != null && genCum.length >= data.dgGenId().length) {
-            for (int g = 0; g < data.dgGenId().length; g++) {
-                if (data.dgBus()[g] < 0) {
+        if (genCum != null && data.distributedSlack().generatorId() != null && genCum.length >= data.distributedSlack().generatorId().length) {
+            for (int g = 0; g < data.distributedSlack().generatorId().length; g++) {
+                if (data.distributedSlack().generatorBus()[g] < 0) {
                     slackInPack = true;                     // its move is the retained share already counted
                 } else {
                     distributed += genCum[g];
                 }
-                LfGenerator gen = genById.get(data.dgGenId()[g]);
+                LfGenerator gen = genById.get(data.distributedSlack().generatorId()[g]);
                 if (gen != null) {
                     gen.setTargetP(dsParams.anchorTargetP(gen) + genCum[g]);
                 }
             }
         } else {
-            for (int i = 0; i < data.dsPhiRow().length; i++) {        // bus-level fallback: split by factor
-                int row = data.dsPhiRow()[i];
+            for (int i = 0; i < data.distributedSlack().busPhiRow().length; i++) {        // bus-level fallback: split by factor
+                int row = data.distributedSlack().busPhiRow()[i];
                 if (row < 0 || row >= deviceTargets.length) {
                     continue;
                 }
-                LfBus bus = data.dsBusNum() != null && i < data.dsBusNum().length ? network.getBus(data.dsBusNum()[i]) : null;
-                distributed += deviceTargets[row] - data.dsBaseTargetP()[i];
+                LfBus bus = data.distributedSlack().busNum() != null && i < data.distributedSlack().busNum().length ? network.getBus(data.distributedSlack().busNum()[i]) : null;
+                distributed += deviceTargets[row] - data.distributedSlack().busBaseTargetP()[i];
                 if (bus != null) {
                     if (dsParams.isLoadBased()) {
-                        moveLoads(bus, deviceTargets[row] - data.dsBaseTargetP()[i], loadAnchorTargetP);
+                        moveLoads(bus, deviceTargets[row] - data.distributedSlack().busBaseTargetP()[i], loadAnchorTargetP);
                     } else {
-                        setAnchoredShare(bus, deviceTargets[row] - data.dsBaseTargetP()[i], dsParams);
+                        setAnchoredShare(bus, deviceTargets[row] - data.distributedSlack().busBaseTargetP()[i], dsParams);
                     }
                 }
             }

@@ -252,6 +252,6 @@ public final class ControlReHoming {
 
     /** Whether the generator is in the distributed-slack generator pack (the device then knows its own P). */
     static boolean inGeneratorPack(GpuAcData gpuData, String genId) {
-        return gpuData.dgGenId() != null && java.util.Arrays.asList(gpuData.dgGenId()).contains(genId);
+        return gpuData.distributedSlack().generatorId() != null && java.util.Arrays.asList(gpuData.distributedSlack().generatorId()).contains(genId);
     }
 }

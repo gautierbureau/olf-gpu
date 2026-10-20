@@ -157,10 +157,10 @@ public final class DeviceLoopTables {
                 anyRlRemote ? gpuData.distrQMembers().targetPeerStart() : null,
                 anyRlRemote ? gpuData.distrQMembers().targetPeer() : null);
         // Per-generator DistributedSlack participants (OLF's water-fill saturates per generator).
-        DistributedSlackNative.setBatchDsGenerators(handle, gpuData.dgBus(), gpuData.dgFactor(),
-                gpuData.dgMaxDelta(), gpuData.dgMinDelta(),
-                gpuData.dgMarginUp(), gpuData.dgMarginDown(),
-                gpuData.busGenStart(), gpuData.busGenEnd());
-        DistributedSlackNative.setBatchDsSlackRooms(handle, gpuData.dsSlackRoomUp(), gpuData.dsSlackRoomDown());
+        DistributedSlackNative.setBatchDsGenerators(handle, gpuData.distributedSlack().generatorBus(), gpuData.distributedSlack().generatorFactor(),
+                gpuData.distributedSlack().generatorMaxDelta(), gpuData.distributedSlack().generatorMinDelta(),
+                gpuData.distributedSlack().generatorMarginUp(), gpuData.distributedSlack().generatorMarginDown(),
+                gpuData.distributedSlack().busGeneratorStart(), gpuData.distributedSlack().busGeneratorEnd());
+        DistributedSlackNative.setBatchDsSlackRooms(handle, gpuData.distributedSlack().slackRoomUp(), gpuData.distributedSlack().slackRoomDown());
     }
 }

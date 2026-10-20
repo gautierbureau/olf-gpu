@@ -115,7 +115,7 @@ final class IslandedBuses {
      *  {@code getSynchronousNetworks().getFirst()}, so these are simply not participants for this
      *  scenario, and the device renormalizes the remaining factors over the survivors. */
     static int[] islandedDsParticipants(int[] frozenRows, GpuAcData gpuData, List<LfBus> islandedBuses) {
-        int[] dsPhiRow = gpuData.dsPhiRow();
+        int[] dsPhiRow = gpuData.distributedSlack().busPhiRow();
         if (dsPhiRow == null || dsPhiRow.length == 0 || frozenRows.length == 0) {
             return NO_ISLANDED_DS;
         }
@@ -129,7 +129,7 @@ final class IslandedBuses {
         for (LfBus b : islandedBuses) {
             islandedNums.add(b.getNum());
         }
-        int[] dsBusNum = gpuData.dsBusNum();
+        int[] dsBusNum = gpuData.distributedSlack().busNum();
         int[] found = new int[dsPhiRow.length];
         int count = 0;
         for (int i = 0; i < dsPhiRow.length; i++) {

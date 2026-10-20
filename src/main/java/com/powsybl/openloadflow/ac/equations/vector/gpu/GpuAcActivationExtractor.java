@@ -10,6 +10,7 @@ package com.powsybl.openloadflow.ac.equations.vector.gpu;
 import com.powsybl.commons.PowsyblException;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
+import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuStepClampVariable;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.SingleEquation;
 import com.powsybl.openloadflow.equations.Variable;
@@ -497,20 +498,20 @@ public final class GpuAcActivationExtractor {
     }
 
     /**
-     * Per-row variable kind for the MAX_VOLTAGE_CHANGE device step scaling: {@code 0} = BUS_PHI (clamp
-     * the angle step to maxDphi), {@code 1} = BUS_V (clamp the magnitude step to maxDv), {@code 2} = any
-     * other variable (BRANCH_RHO1, …) — scaled by the global step factor but never itself a clamp source,
+     * Per-row variable kind for the MAX_VOLTAGE_CHANGE device step scaling, a {@link GpuStepClampVariable}:
+     * BUS_PHI (clamp the angle step to maxDphi), BUS_V (clamp the magnitude step to maxDv), OTHER (BRANCH_RHO1,
+     * …) — scaled by the global step factor but never itself a clamp source,
      * mirroring {@code MaxVoltageChangeStateVectorScaling} (which only inspects BUS_V / BUS_PHI). Indexed by
      * the variable row, which is the column index of the Newton step.
      */
     public static int[] extractVarType(EquationSystem<AcVariableType, AcEquationType> es, int n) {
         int[] varType = new int[n];
-        java.util.Arrays.fill(varType, 2);
+        java.util.Arrays.fill(varType, GpuStepClampVariable.OTHER);
         for (Variable<AcVariableType> v : es.getIndex().getSortedVariablesToFind()) {
             varType[v.getRow()] = switch (v.getType()) {
-                case BUS_PHI -> 0;
-                case BUS_V -> 1;
-                default -> 2;
+                case BUS_PHI -> GpuStepClampVariable.BUS_PHI;
+                case BUS_V -> GpuStepClampVariable.BUS_V;
+                default -> GpuStepClampVariable.OTHER;
             };
         }
         return varType;

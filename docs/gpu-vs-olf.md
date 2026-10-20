@@ -181,3 +181,4 @@ constants carry OLF's constant names.
 | `GpuPiModelColumn` | a `PiModel` as 8 doubles, in its getters' order (tap tables, `cbIn`) | `Y` 0, `G1` 1, `G2` 2, `B1` 3, `B2` 4, `KSI` 5, `R1` 6, `A1` 7, `COUNT` 8 |
 | `GpuDiscreteControlMemberState` | a discrete transformer / shunt voltage control member: continuous first, then rounded and disabled | `DISABLED` 0, `CONTINUOUS` 1, `ROUNDED` 2 |
 | `GpuTransformerVoltageControlMode` | `TransformerVoltageControlMode` (device numbering) | `AFTER_GENERATOR_VOLTAGE_CONTROL` 0, `WITH_GENERATOR_VOLTAGE_CONTROL` 1 |
+| `GpuStepClampVariable` | `AcVariableType` as `MaxVoltageChangeStateVectorScaling` sees it (device numbering) | `BUS_PHI` 0, `BUS_V` 1, `OTHER` 2 |

@@ -10,7 +10,6 @@ package com.powsybl.openloadflow.ac.outerloop.gpu;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcActivation;
-import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchSkips;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.Variable;
 import com.powsybl.openloadflow.network.LfBus;

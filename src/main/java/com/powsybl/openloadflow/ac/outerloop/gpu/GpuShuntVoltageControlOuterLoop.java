@@ -11,7 +11,6 @@ import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcActivation;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcElementMapper;
-import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchSkips;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuDiscreteControlMemberState;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.TargetVector;

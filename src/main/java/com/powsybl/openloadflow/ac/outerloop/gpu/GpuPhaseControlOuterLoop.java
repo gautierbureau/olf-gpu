@@ -13,7 +13,6 @@ import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcActivation;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcElementMapper;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchOverrides;
-import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchSkips;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuPhaseControlMode;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuPiModelColumn;
 import com.powsybl.openloadflow.equations.EquationSystem;

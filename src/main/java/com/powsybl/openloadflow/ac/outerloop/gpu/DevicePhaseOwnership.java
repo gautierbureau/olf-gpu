@@ -8,7 +8,6 @@
 package com.powsybl.openloadflow.ac.outerloop.gpu;
 
 import com.powsybl.commons.PowsyblException;
-import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchSkips;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 

@@ -26,6 +26,7 @@
 #include "flow_observation.cuh"
 #include "sensitivity.cuh"
 #include "secondary_voltage_control.cuh"
+#include "../common/trace.cuh"
 
 namespace olfgpu {
 
@@ -415,7 +416,7 @@ void secondaryVoltageControlStep(BatchSolverContext* ctx, DriverPass& drv) {
     for (int s2 = 0; s2 < nS; s2++) {
         if (rej[s2]) { loopRejected[s2] = 1; nRej++; traceReject(s2, "svc-kernel-reject", outer, 0); }
     }
-    if (std::getenv("OLF_GPU_BATCH_TRACE") != nullptr) {
+    if (traceOn(Trace::BATCH_TRACE)) {
         int nNeed = 0;
         for (char c : need) nNeed += c ? 1 : 0;
         std::fprintf(stderr, "SVC_KERNEL nS=%d nControllerBuses=%d nZones=%d adjusting=%d rejected=%d\n",

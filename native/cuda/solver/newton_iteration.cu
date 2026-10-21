@@ -29,6 +29,7 @@
 #include "state_vector_scaling.cuh"
 #include "../fixedmatrix/zero_diagonal_repair.cuh"
 #include "newton_iteration.cuh"
+#include "../common/trace.cuh"
 
 namespace olfgpu {
 
@@ -181,13 +182,13 @@ void newtonSolve(BatchSolverContext* ctx, DriverPass& drv) {
                 // PerEquationTypeStoppingCriteria — stop when EVERY row clears its type threshold.
                 bool converged = ctx->perRowCriteria ? (finite && maxRatio < 1.0)
                         : convEpsPerEq > 0.0 ? (std::sqrt(ssq) < norm2ThresholdOf(s)) : (norm < tol);
-                static const char* sdEnv = std::getenv("OLF_GPU_STATE_DUMP");
+                static const char* sdEnv = traceValue(Trace::STATE_DUMP);
                 if (sdEnv != nullptr && s == 0 && it <= std::atoi(sdEnv) && n <= 64) {
                     stateDumpBatch<<<1, 1, 0, ctx->stream>>>(n, ctx->dF.as<double>(), ctx->dMode.as<int>(),
                             ctx->dTarget.as<double>(), ctx->dX.as<double>(), s, it);
                     CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
                 }
-                if (std::getenv("OLF_GPU_BATCH_TRACE") != nullptr) {
+                if (traceOn(Trace::BATCH_TRACE)) {
                     std::fprintf(stderr, "BATCH_TRACE s=%d it=%d infnorm=%.17e norm2=%.17e thr=%.17e conv=%d\n",
                                  s, it, norm, std::sqrt(ssq), norm2ThresholdOf(s), converged ? 1 : 0);
                 }
@@ -256,7 +257,7 @@ void newtonSolve(BatchSolverContext* ctx, DriverPass& drv) {
                     bool badSolve = !(lastSolveRatio[s] <= LIN_SOLVE_FAIL_RATIO);
                     if (badSolve) {
                         traceReject(s, "max-iter-bad-solve", outer, it);
-                        if (std::getenv("OLF_GPU_REJECT_TRACE") != nullptr) {
+                        if (traceOn(Trace::REJECT_TRACE)) {
                             std::fprintf(stderr, "GPU_REJECT slot=%d reason=max-iter-bad-solve ratio=%.3e norm=%.6e\n",
                                          s, lastSolveRatio[s], norm);
                         }
@@ -299,7 +300,7 @@ void newtonSolve(BatchSolverContext* ctx, DriverPass& drv) {
         negateIntoBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n * nS, ctx->dF.as<double>(), ctx->dB.as<double>());
         repairZeroDiagonalRightHandSide(ctx, nS, ctx->dB.as<double>());
         if (!ctx->analyzed) {
-            bool timeIt = std::getenv("OLF_GPU_TRACE") != nullptr;
+            bool timeIt = traceOn(Trace::TRACE);
             long long t0 = 0;
             if (timeIt) {
                 CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
@@ -465,7 +466,7 @@ void newtonSolve(BatchSolverContext* ctx, DriverPass& drv) {
                 if (!active[s]) continue;
                 double ratio = hsc[3 * s + 2];
                 if (!(ratio <= LIN_SOLVE_FAIL_RATIO)) {         // NaN counts as failed
-                    if (std::getenv("OLF_GPU_REJECT_TRACE") != nullptr) {
+                    if (traceOn(Trace::REJECT_TRACE)) {
                         std::fprintf(stderr, "GPU_REJECT slot=%d reason=linear-solve ratio=%.3e ||J.dx-B||inf=%.3e ||F||inf=%.3e\n",
                                      s, ratio, hsc[3 * s], hsc[3 * s + 1]);
                     }
@@ -473,7 +474,7 @@ void newtonSolve(BatchSolverContext* ctx, DriverPass& drv) {
                     // that only shows in a full run (the rte6515 busbar flap: one -3 per run on a different section
                     // each time, the identical ratio 3.06e+06 every time, never reproduced alone). The dump happens
                     // AFTER the verdict, so it cannot perturb what it catches.
-                    static const char* rejectDumpDir = std::getenv("OLF_GPU_DX_DUMP_ON_REJECT");
+                    static const char* rejectDumpDir = traceValue(Trace::DX_DUMP_ON_REJECT);
                     static int rejectDumps = 0;
                     if (rejectDumpDir != nullptr && rejectDumps < 8) {
                         std::string p = std::string(rejectDumpDir) + "/reject-" + std::to_string(rejectDumps++)

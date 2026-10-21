@@ -30,6 +30,7 @@
 #include "../fixedmatrix/reactive_relocation.cuh"
 #include "scenario_overrides.cuh"
 #include "distribution_fill.cuh"
+#include "../common/trace.cuh"
 
 using namespace powsybl::openloadflow;
 
@@ -37,7 +38,7 @@ namespace olfgpu {
 
 int gpuDistrQTraceRow() {
     // OLF_GPU_DQ_TRACE=<deviceRow>: every DISTR_Q residual contribution landing in that row.
-    static const char* e = std::getenv("OLF_GPU_DQ_TRACE");
+    static const char* e = traceValue(Trace::DQ_TRACE);
     static int v = e != nullptr ? std::atoi(e) : -1;
     return v;
 }

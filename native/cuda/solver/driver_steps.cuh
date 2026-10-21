@@ -11,6 +11,7 @@
 #include "../equations/scatter.cuh"
 #include "../fixedmatrix/reactive_relocation.cuh"
 #include "driver_pass.cuh"
+#include "../common/trace.cuh"
 
 namespace olfgpu {
 
@@ -34,7 +35,7 @@ void launchDistrQTargetsInner(BatchSolverContext* ctx, DriverPass& drv);
 // counts them under one tag ("RUNTIME:status=-2"); this names the gate, per slot, so the Java side
 // can pair it with the contingency id (GpuBatchPrecomputer prints the id under the same switch).
 static inline void traceReject(int scenario, const char* reason, int outer, int it) {
-    static const bool on = std::getenv("OLF_GPU_REJECT_TRACE") != nullptr;
+    static const bool on = traceOn(Trace::REJECT_TRACE);
     if (on) {
         std::fprintf(stderr, "GPU_REJECT slot=%d reason=%s outer=%d it=%d\n", scenario, reason, outer, it);
     }

@@ -18,6 +18,7 @@
 #include "../equations/scenario_overrides.cuh"
 #include "flow_observation.cuh"
 #include "phase_control.cuh"
+#include "../common/trace.cuh"
 
 namespace olfgpu {
 
@@ -109,7 +110,7 @@ void phaseControlStep(BatchSolverContext* ctx, DriverPass& drv) {
         CUDA_CHECK(cudaMemcpy(ctx->dPhaseControlCheckCount.p, it.data(), nS * sizeof(int), cudaMemcpyHostToDevice));
     }
     rebuildTapOverrides(ctx);
-    if (std::getenv("OLF_GPU_BATCH_TRACE") != nullptr) {
+    if (traceOn(Trace::BATCH_TRACE)) {
         std::vector<int> cur(nst);
         CUDA_CHECK(cudaMemcpy(cur.data(), ctx->dPhaseControlTap.p, nst * sizeof(int), cudaMemcpyDeviceToHost));
         int nMoved = 0;

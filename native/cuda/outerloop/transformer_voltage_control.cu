@@ -21,6 +21,7 @@
 #include "../solver/driver_steps.cuh"
 #include "incremental_transformer_voltage_control.cuh"
 #include "transformer_voltage_control.cuh"
+#include "../common/trace.cuh"
 
 namespace olfgpu {
 
@@ -419,7 +420,7 @@ void transformerVoltageControlStep(BatchSolverContext* ctx, DriverPass& drv) {
     CUDA_CHECK(cudaMemcpy(rej.data(), ctx->dTransformerVoltageControlRejected.p, nS, cudaMemcpyDeviceToHost));
     for (int s2 = 0; s2 < nS; s2++) if (rej[s2]) { loopRejected[s2] = 1; traceReject(s2, "tvd-kernel-reject", outer, 0); }
     rebuildTapOverrides(ctx);
-    if (std::getenv("OLF_GPU_BATCH_TRACE") != nullptr) {
+    if (traceOn(Trace::BATCH_TRACE)) {
         size_t nsm = static_cast<size_t>(nS) * ctx->nTransformerVoltageControlMembers;
         std::vector<int> memberState(nsm), step(nS);
         CUDA_CHECK(cudaMemcpy(memberState.data(), ctx->dTransformerVoltageControlMemberState.p, nsm * sizeof(int), cudaMemcpyDeviceToHost));

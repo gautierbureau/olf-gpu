@@ -15,6 +15,7 @@
 
 #include "loop_kinds.cuh"
 #include "codes/gpu_outer_loop_kind.cuh"
+#include "trace.cuh"
 
 // OLF_GPU_PHASE_TIME accounting: how much of a solveBatchContext call is device outer-loop passes
 // vs Newton iterations. A pass that re-solves is the expensive one; a pass that only re-checks is not.
@@ -60,7 +61,7 @@ struct AnalysisTimer {
     int line;
     bool on;
     std::chrono::steady_clock::time_point t0;
-    explicit AnalysisTimer(int l, char ph = 'A') : line(ph * 100000 + l), on(std::getenv("OLF_GPU_PHASE_TIME") != nullptr) {
+    explicit AnalysisTimer(int l, char ph = 'A') : line(ph * 100000 + l), on(traceOn(Trace::PHASE_TIME)) {
         if (on) {
             cudaDeviceSynchronize();
             t0 = std::chrono::steady_clock::now();

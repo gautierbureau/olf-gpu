@@ -14,6 +14,7 @@
 #include "../common/codes/gpu_two_sides.cuh"
 #include "../structure/shared_structure.cuh"
 #include "zero_diagonal_repair_tables.cuh"
+#include "../common/trace.cuh"
 
 namespace olfgpu {
 
@@ -194,7 +195,7 @@ void storeZeroDiagonalRepairTables(SharedStructure* structure, const std::vector
         structure->dZeroDiagonalDonor.upload(donor.data(), donor.size() * sizeof(int));
         structure->dZeroDiagonalDonorOwnIndex.upload(donorOwnIndex.data(), donorOwnIndex.size() * sizeof(int));
         structure->dZeroDiagonalRepairSign.upload(zeroDiagonalRepairSigns.data(), zeroDiagonalRepairSigns.size() * sizeof(char));
-        if (std::getenv("OLF_GPU_TRACE") != nullptr) {
+        if (traceOn(Trace::TRACE)) {
             std::fprintf(stderr, "zero-diagonal repair: %d hazard rows, %zu donor candidates\n", structure->nZeroDiagonalRows, donor.size());
         }
     }

@@ -17,6 +17,7 @@
 #include "../solver/driver_steps.cuh"
 #include "sensitivity.cuh"
 #include "incremental_shunt_voltage_control.cuh"
+#include "../common/trace.cuh"
 
 namespace olfgpu {
 
@@ -267,7 +268,7 @@ void incrementalShuntVoltageControlStep(BatchSolverContext* ctx, DriverPass& drv
             ctx->nIncrementalShuntVoltageControlShuntCompensators, ctx->dIncrementalShuntVoltageControlBaseB.as<double>(), ctx->dIncrementalShuntVoltageControlAppliedDeltaB.as<double>(), ctx->dTarget.as<double>(), ctx->dX.as<double>());
     CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
     rebuildShuntAdmittanceOverrides(ctx);
-    if (std::getenv("OLF_GPU_BATCH_TRACE") != nullptr) {
+    if (traceOn(Trace::BATCH_TRACE)) {
         std::vector<int> pos(static_cast<size_t>(nS) * ctx->nIncrementalShuntVoltageControlShuntCompensators);
         CUDA_CHECK(cudaMemcpy(pos.data(), ctx->dIncrementalShuntVoltageControlPosition.p, pos.size() * sizeof(int), cudaMemcpyDeviceToHost));
         int nOut = 0, nMoved = 0;

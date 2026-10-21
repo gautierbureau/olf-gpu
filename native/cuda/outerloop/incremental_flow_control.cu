@@ -22,6 +22,7 @@
 #include "flow_observation.cuh"
 #include "sensitivity.cuh"
 #include "incremental_flow_control.cuh"
+#include "../common/trace.cuh"
 
 namespace olfgpu {
 
@@ -221,7 +222,7 @@ void incrementalFlowControlStep(BatchSolverContext* ctx, DriverPass& drv, int ki
             ctx->dTarget.as<double>(), ctx->dX.as<double>());
     CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
     rebuildTapOverrides(ctx);
-    if (std::getenv("OLF_GPU_BATCH_TRACE") != nullptr) {
+    if (traceOn(Trace::BATCH_TRACE)) {
         std::vector<int> cur(nst);
         CUDA_CHECK(cudaMemcpy(cur.data(), ctx->dIncrementalFlowControlCurrentTap.p, nst * sizeof(int), cudaMemcpyDeviceToHost));
         int nOut = 0, nMoved = 0;

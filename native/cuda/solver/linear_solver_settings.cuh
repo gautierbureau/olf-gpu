@@ -17,6 +17,7 @@
 #include <string>
 
 #include "../common/check.cuh"
+#include "../common/trace.cuh"
 
 namespace olfgpu {
 
@@ -130,7 +131,7 @@ inline void applyRobustSingleMatrixConfig(cudssConfig_t config) {
         double thr = gLinearSolver.pivotThreshold;
         CUDSS_CHECK(cudssConfigSet(config, CUDSS_CONFIG_PIVOT_THRESHOLD, &thr, sizeof(thr)));
     }
-    if (std::getenv("OLF_GPU_BATCH_TRACE") != nullptr) {
+    if (traceOn(Trace::BATCH_TRACE)) {
         std::fprintf(stderr, "ROBUST_CFG reorder=%d pivot=%d matching=%d threshold=%g\n",
                      reorder, static_cast<int>(pt), gLinearSolver.matching, gLinearSolver.pivotThreshold);
     }
@@ -164,7 +165,7 @@ inline void applyReorderAlg(cudssConfig_t config, bool hasZeroImpedance) {
 // combinations do not expose CUDSS_DATA_LU_NNZ.
 inline void traceLuNnz(cudssHandle_t handle, cudssData_t data, const char* where, int nScenarios = 0,
                        double ms = -1.0) {
-    if (std::getenv("OLF_GPU_TRACE") == nullptr) {
+    if (!traceOn(Trace::TRACE)) {
         return;
     }
 #if OLF_GPU_CUDSS_LU_NNZ

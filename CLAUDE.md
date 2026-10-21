@@ -67,6 +67,9 @@ own) then `codegen/regenerate.sh` + commit kernels (+ golden if math changed).
 
 - **Never hand-edit** `native/cuda/equations/generated/*` / `codegen/scatter/*.scatter.json` — they are generated
   from the Java (CI flags any diff).
+- Diagnostics read the environment only through the trace channels: `util.gpu.GpuTrace` (Java) and
+  `native/cuda/common/trace.cuh` (native), each read once. A new trace is a new channel there plus its row in
+  `docs/env-vars.md`, never a direct `getenv`; and a channel only prints, it never changes a result.
 - The parser handles OLF's expression-only Java subset (locals + single return,
   helper calls, boolean predicates, ternaries, Math/FastMath); anything else
   fails the parse loudly.

@@ -16,6 +16,7 @@
 #include "../common/codes/gpu_ac_solver_status.cuh"
 #include "../solver/driver_steps.cuh"
 #include "realistic_voltage_check.cuh"
+#include "../common/trace.cuh"
 
 namespace olfgpu {
 
@@ -62,7 +63,7 @@ void rejectUnrealistic(BatchSolverContext* ctx, DriverPass& drv, const std::vect
     std::vector<char> bad(nS);
     CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
     CUDA_CHECK(cudaMemcpy(bad.data(), ctx->dRealisticBad.p, nS * sizeof(char), cudaMemcpyDeviceToHost));
-    static const bool traceUnrealistic = std::getenv("OLF_GPU_UNREALISTIC_TRACE") != nullptr;
+    static const bool traceUnrealistic = traceOn(Trace::UNREALISTIC_TRACE);
     for (int s = 0; s < nS; s++) {
         if (bad[s]) {
             if (traceUnrealistic) {

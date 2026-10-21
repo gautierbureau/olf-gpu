@@ -18,8 +18,9 @@ import java.util.stream.Stream;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /**
- * The environment is read only through the trace channels of {@link GpuTrace}. A direct read elsewhere would be a
- * switch nobody lists, read at any time. No device needed.
+ * The environment is read only through the trace channels: {@link GpuTrace} on the Java side and
+ * {@code native/cuda/common/trace.cuh} on the native side. A direct read elsewhere would be a switch nobody lists,
+ * read at any time. No device needed.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
@@ -29,6 +30,12 @@ class GpuTraceTest {
     void javaReadsTheEnvironmentOnlyThroughGpuTrace() throws IOException {
         assertEquals(List.of(), filesContaining(Path.of("src/main/java"), ".java", "System.getenv",
                 Path.of("src/main/java/com/powsybl/openloadflow/util/gpu/GpuTrace.java")));
+    }
+
+    @Test
+    void nativeCodeReadsTheEnvironmentOnlyThroughTheTraceHeader() throws IOException {
+        assertEquals(List.of(), filesContaining(Path.of("native/cuda"), ".cu", "getenv(",
+                Path.of("native/cuda/common/trace.cuh")));
     }
 
     /** The files under {@code root} whose name contains {@code extension} and whose text contains {@code text}. */

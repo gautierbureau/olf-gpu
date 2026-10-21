@@ -20,14 +20,55 @@ Anything in the third table should be treated as unverified until someone reads 
 | property | effect |
 |---|---|
 
-## Diagnostics (58) — print only, cannot change a result
+## Trace channels (36) — print only, cannot change a result
 
-Safe to add. These are the instruments; several are the only reason a defect was found at all.
+Each one is read once: on the Java side by the enum `com.powsybl.openloadflow.util.gpu.GpuTrace`, on the native
+side by `native/cuda/common/trace.cuh`. A variable both sides read is listed on both. This table is generated
+from those two lists; add a channel there, then here.
+
+| variable | side | prints |
+|---|---|---|
+| `OLF_GPU_BATCH_TRACE` | java + native | Per-pass and per-iteration convergence of the batched solves, and what every outer loop decided. Native: per-iteration convergence, and what every outer loop decided |
+| `OLF_GPU_CHUNK_DUMP` | java | `<file>`: every chunk's contingencies in slot order, one line per chunk. |
+| `OLF_GPU_CPU_ROUTED` | java | The contingencies the device hands back to the CPU, and why. |
+| `OLF_GPU_DBG_BUSDUMP` | java | `1`: the buses, rows and islands a branch outage touches, and the bus values injected back. |
+| `OLF_GPU_DQ_TRACE` | native | `<row>`: every DISTR_Q residual contribution landing in that row |
+| `OLF_GPU_DS_ACCOUNT` | java | The distributed active power booked when a load flow's distributed slack check falls back to OLF's own. |
+| `OLF_GPU_DX_DUMP_ON_REJECT` | native | `<dir>`: J, F, B, dx and modes of the slots the linear-solve guard rejects |
+| `OLF_GPU_EQ_DUMP` | java | `<file>`: the GPU equation system of the load flow as text, once (the first pinned pass). |
+| `OLF_GPU_EQ_DUMP_CTG` | java | `<contingency id>`: OLF's post-contingency equation system of that contingency, as text. |
+| `OLF_GPU_EQ_DUMP_CTG_FILE` | java | `<file>`: where `OLF_GPU_EQ_DUMP_CTG` writes (default: the contingency id + `.olf.post`). |
+| `OLF_GPU_EQ_DUMP_WHEN` | java | `any`: `OLF_GPU_EQ_DUMP` writes the first pass, pinned or not. |
+| `OLF_GPU_HVDC_TRACE` | java | `<phiRow>` or `all`: the AC emulation HVDC links the pack carries and their loop decisions. |
+| `OLF_GPU_ITER_TRACE_CTG` | java | `<id>[,<id>]`: iteration count, final mismatch and distributed active power of those contingencies. |
+| `OLF_GPU_LOOP_TRACE` | native | `<slot>`: that slot's outer-loop passes (or the OLF_GPU_LOOP_TRACE_CTG slot) |
+| `OLF_GPU_LOOP_TRACE_CTG` | java | `<contingency id>`: the native outer-loop trace of that contingency's slot, in every chunk. |
+| `OLF_GPU_PHASE_TIME` | java + native | Where the run's time goes: phases of the security analysis, chunk sizing, context reuse. Native: where the time goes (analysis, outer-loop passes, solves) |
+| `OLF_GPU_PRELOSS_TRACE` | java | The replayed loss pre-distribution: what each contingency's generators take before the first solve. |
+| `OLF_GPU_QUALIFY_TRACE` | java | Why each contingency is batched, or which rule sends it to the CPU. |
+| `OLF_GPU_REJECT_TRACE` | java + native | The scenarios the device rejects, with the reason. |
+| `OLF_GPU_RL_AUDIT` | native | `<tol>`: the final state audited against the rule that ends OLF's reactive-limit loop |
+| `OLF_GPU_RL_TRACE` | java + native | The reactive-limit entries the pack builds, and the device's pin decisions per scenario. Native: the reactive-limit tables a context is built with |
+| `OLF_GPU_SA_EQ_DUMP` | java | `<file>`: the security analysis extraction's equation system as text. |
+| `OLF_GPU_SA_RESID` | java | `<n>`: the n worst rows of OLF's residual at the device's post-contingency state, with their equation. |
+| `OLF_GPU_SA_VAR_DUMP` | java | `<file>`: the device's post-contingency state per OLF variable (scoped by `OLF_TRACE_CTG`). |
+| `OLF_GPU_SEED_DUMP` | java | `<file>`: the per-generator seed of the loss pre-distribution of every contingency. |
+| `OLF_GPU_SHUNT_TRACE` | java | The incremental shunt voltage control's sensitivities and decisions. |
+| `OLF_GPU_SLOT_DUMP` | native | `<prefix>`: the traced slot's row targets, state and modes at driver start and pass 0 |
+| `OLF_GPU_STATE_DUMP` | native | `<n>`: slot 0's rows (mode, target, state, residual) for iterations 0..n |
+| `OLF_GPU_SW_LOG` | native | `<slot>` or `all`: every reactive-limit check of that slot, logged on the device |
+| `OLF_GPU_SW_TRACE` | native | `<slot>`: every controller that switches in that slot's reactive-limit passes |
+| `OLF_GPU_TRACE` | native | cuDSS analysis timing and the zero-diagonal repair's tables |
+| `OLF_GPU_UNREALISTIC_TRACE` | java + native | The post-contingency realistic-voltage check: which buses make a state unrealistic. Native: the buses that make a post-contingency state unrealistic |
+| `OLF_GPU_VIOL_CROSSCHECK` | java | Every contingency's violations compared with OLF's stock detection over every branch. |
+| `OLF_GPU_ZITREE_TRACE` | java | The zero-impedance coupler trees relocated, and the seeds of their couplers. |
+| `OLF_OL_STATS` | java | Each contingency's outer-loop passes and Newton iterations, in the shape of OLF's own `CPU_OL_STATS`. |
+| `OLF_TRACE_CTG` | java | `<contingency id>`: OLF's own filter for its debug dumps, which `OLF_GPU_SA_VAR_DUMP` follows. |
+
+## Test diagnostics (29) — print only, read by the tests
 
 | variable | read at |
 |---|---|
-| `OLF_EQ_DUMP` | OLF patch, NewtonRaphson — writes the equation system OLF is about to solve as text (variable rows, column->equation map, `writeToString(true)`). The one question a residual cannot answer is WHICH equation sits on a row, and OLF will simply print it |
-| `OLF_GPU_BATCH_TRACE` | src/main/java/com/powsybl/openloadflow/sa/gpu/GpuBatchPrecomputer.java:71 +35 |
 | `OLF_GPU_CENSUS_BASE_VIOLATIONS` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuRteScopeCensusTest.java:300 |
 | `OLF_GPU_CENSUS_BUS_DUMP` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuRteScopeCensusTest.java:309 |
 | `OLF_GPU_CENSUS_CASE` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuRteScopeCensusTest.java:69 |
@@ -46,44 +87,23 @@ Safe to add. These are the instruments; several are the only reason a defect was
 | `OLF_GPU_CENSUS_SVC` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuRteScopeCensusTest.java:229 |
 | `OLF_GPU_CENSUS_VIOL_TOL` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuRteScopeCensusTest.java:122 |
 | `OLF_GPU_CENSUS_VIOLATION_DUMP` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuRteScopeCensusTest.java:354 |
-| `OLF_GPU_CPU_ROUTED` | src/main/java/com/powsybl/openloadflow/ac/solver/gpu/batch/GpuBatchChunkSolver.java:1383 |
-| `OLF_GPU_DBG_BUSDUMP` | src/main/java/com/powsybl/openloadflow/sa/gpu/GpuStateInjector.java:139 +6 |
 | `OLF_GPU_DBG_CENSUS` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuBatchedAcSecurityAnalysisTest.java:3112 |
 | `OLF_GPU_DBG_REPORT` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuBatchedAcSecurityAnalysisTest.java:3100 +2 |
 | `OLF_GPU_DBG_RL` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuVsCpuRte6515SaTest.java:313 +2 |
-| `OLF_GPU_DQ_TRACE` | native/cuda/equations/distribution_fill.cu:40 |
-| `OLF_GPU_DX_DUMP_ON_REJECT` | native/cuda/solver/newton_iteration.cu, native/cuda/diagnostics/matrix_scan.cu — `<dir>`: the same dump (J, F, B, dx, modes) of every slot the pass-0 linear-solve guard rejects (status -3), as the guard scored it, at most 8 per process: `<dir>/reject-<k>-slot<s>.dump`. Written after the verdict, so it cannot perturb what it catches; for a reject that shows only in a full run and never alone (the rte6515 busbar one-per-run flap) | native/cuda/solver/newton_iteration.cu (linear-solve guard) — the slot's contingency is the `CHUNK_REJECT slot=<s>` line of the same chunk |
-| `OLF_GPU_E2E` | src/test/java/com/powsybl/openloadflow/ac/solver/gpu/batch/GpuBatchedN1FixedIterTest.java:176 +1 |
-| `OLF_GPU_E2E_WARMJIT` | src/test/java/com/powsybl/openloadflow/ac/solver/gpu/batch/GpuBatchedN1FixedIterTest.java:176 |
-| `OLF_GPU_ITER_TRACE_CTG` | src/main/java/com/powsybl/openloadflow/ac/solver/gpu/batch/GpuBatchChunkSolver.java — `<id>[,<id>]`: the main-solve iteration count of NAMED scenarios at any chunk size; line it up against OLF_LF_STEPS_TRACE on the CPU arm; also prints `DAP_CTG` (GpuBatchPrecomputer): the replayed loss pre-distribution and the device's own slack passes of the named scenario in MW, so a differing total can be split into its two halves |
-| `OLF_GPU_CHUNK_DUMP` | src/main/java/com/powsybl/openloadflow/ac/solver/gpu/batch/GpuBatchChunkSolver.java — `<file>`: appends one line per chunk, `<pairPhase> <chunkStart> <chunkSize> <id>...` in slot order; the composition a chunk-mate-dependent scenario has to be reproduced in |
-| `OLF_GPU_REJECT_TRACE` | native/cuda/solver/driver_steps.cuh (`traceReject`, called from every status −2 gate: solver/, outerloop/) + native/cuda/solver/newton_iteration.cu + GpuBatchPrecomputer (now the MAPPER rejects too, one `GPU_REJECT_CTG ctg= reason=` per contingency, which is what tells a scope report whether a non-batched contingency is one OLF itself does not answer) — `GPU_REJECT slot= reason=` (straggler-exit, unrealistic-state, device-loop-routed, tvd-kernel-reject, svc-kernel-reject, ds-residual-saturated, outer-loop-budget) and `GPU_REJECT_CTG ctg=` so the census's one RUNTIME tag gets a reason per contingency |
-| `OLF_GPU_LOOP_TRACE` | native/cuda/solver/outer_loop_driver.cu, native/cuda/diagnostics/driver_traces.cu — `<slot>`: `LOOP_PASS` per pass, the device side of OLF's `OLF_OL_TRACE` `OL_CHECK`: which loop ran, whether the slot was found UNSTABLE, whether the phase is still unstable; since 2026-09-28 each line also carries the DS gate that slot last evaluated (`dsRem=`, `dsFire=` — the device side of OLF's DS_PASS mismatch, read from a per-scenario record the water-fill kernel writes, no printf) and the slot's iteration count for the pass (`nrIters=`); the traced slot also prints `SLOT_TRACE` per Newton iteration (host-side: inf/2-norms, the 2-norm threshold, the convergence decision, the MAX_VOLTAGE_CHANGE factor, the worst residual row with its mode/target/x, and the largest raw step entry) — OLF's NR_EXIT prints the same norms per iteration |
-| `OLF_GPU_LOOP_TRACE_CTG` | src/main/java/com/powsybl/openloadflow/ac/solver/gpu/batch/GpuBatchChunkSolver.java + native (setBatchLoopTraceSlot) — `<contingency id>`: the same trace addressed by CONTINGENCY; the host resolves the slot per chunk (`LOOP_TRACE_CTG ctg= slot=`). A fixed slot number follows the chunk composition, which moves with the resolved chunk size (IZUZ sat at slot 170 in one run and 18 in the next) |
 | `OLF_GPU_SA_SELF_DUMP` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuVsCpuRte6515SaTest.java — `<file>`: with a warm run (no `OLF_GPU_SA_COLD_ONLY`), every contingency's status and distributed active power cold and warm; the `POST GPU-vs-GPU` line prints the same comparison summarized |
-| `OLF_GPU_SLOT_DUMP` | native/cuda/solver/outer_loop_driver.cu (driver start + first outer pass) — `<prefix>`: the `OLF_GPU_LOOP_TRACE_CTG` scenario's row targets, initial state and row modes when the driver starts (`<prefix>.<k>`) and its state and bus balances (qBuf) after the first solve (`<prefix>.<k>.pass0`); diff two runs of one scenario row by row |
-| (no switch) | the replay is APPLIED, not optional: setBatchSpanningTreeOverrides carries OLF's tree per scenario, the pattern reserves the ZERO_V/ZERO_PHI entries for every coupler, and each scenario starts with the coupler flows at zero as AcSolverUtil.initStateVector leaves them |
-| `OLF_GPU_SW_LOG` | native/cuda/solver/outer_loop_driver.cu, native/cuda/solver/batch_context.cu, native/cuda/diagnostics/driver_traces.cu (reactive-limit kernel) — `<slot>` records EVERY check of that scenario, `all` records only the checks that DECIDED something, for every scenario. The log is written ON THE DEVICE (one atomicAdd per record) and copied out once per chunk as `SW_LOG s= pass= entry= act= lt= sc= q= min= max= v= cmpV= vt=`. The host-side traces copy hundreds of MB per pass, which serializes the stream and changes the kernel scheduling whose effect is being traced — a run-to-run flip disappears while you watch it. This one found the zero-range pilot entries: two runs of one window, aligned by (chunk, slot, pass, entry), differed on 430 decisions and every one was such an entry |
-| `OLF_GPU_ZITREE_TRACE` | src/main/java/com/powsybl/openloadflow/ac/equations/vector/gpu/GpuAcRowIndexing.java (+ the batch path) — `ZITREE root=<bus> couplers=<n>` per relocated zero-impedance tree, `ZITREE_SUMMARY treeCouplers= relocated= stock=` per extraction (a STOCK tree coupler keeps two zero diagonals the numeric repair fills; network.xiidm busbar scope: 71 before the 2026-10-11 root order, 58 after) and `ZITREE_OPEN ctg= coupler= childSide=` where a scenario opens a relocated coupler | Also `ZITREE_STOCK coupler= dummyCols= <end>{root|child,phiId,vId,hostsOtherQ,ownQ|remoteCtl|qElsewhere,imp|noImp} <end>{...}` per stock tree coupler (why neither end is its child), `ZITREE_REPLAY_WIDE ctg= nonTree=` (GpuBatchPrecomputer: a contingency the tree replay reports more than 40 couplers out of the tree for) and `ZITREE_LEAVE_WIDE slot= ctg= nonTree=` (GpuBatchChunkSolver: the same at the chunk) - the 2026-10-11 connectivity-anchor leak showed as nonTree=366 on one random section per run
-| `OLF_GPU_RL_AUDIT` | `OLF_GPU_SW_TRACE` | native/cuda/solver/outer_loop_driver.cu, native/cuda/diagnostics/driver_traces.cu (reactive-limits phase) — `<slot>`: `SW_PASS`, every controller that slot's RL check CHANGED this pass with the quantities the decision turned on (q, live min/max, its own V, the pilot's V and the group target). `OLF_GPU_LOOP_TRACE` says a pass found the slot unstable; this says WHICH controller and by how much |
-| `OLF_GPU_HVDC_TRACE` | GpuBatchHvdcAcEmulation / GpuBatchChunkSolver — `<phiRow>` or `all`: `HVDC_BUILD` (every AC-emulation hvdc the pack carries: id, element, OLF status, station targetP), `HVDC_SLOT` (slot -> contingency), `HVDC_PREOV` (pre-freeze override entries already on a converter-bus P row — the freeze composes on top of them), `HVDC_CTL` (per slot and hvdc: base status/deltas, mask bit, warm-point flows, base target), `HVDC_FREEZE` (the flows each scenario's freeze fixed an hvdc at, vs the base deltas) and `HVDC_END` (the status each scenario ended with). Found the doubled-corridor unfreeze race (two links on one bus pair, 2026-09-22) |
-| `OLF_GPU_PHASE_TIME` | src/main/java/com/powsybl/openloadflow/sa/gpu/GpuStateInjector.java:86 +9 |
-| `OLF_GPU_PRELOSS_TRACE` | src/main/java/com/powsybl/openloadflow/ac/solver/gpu/batch/GpuBatchChunkSolver.java:697 +2 |
-| `OLF_GPU_QUALIFY_TRACE` | src/main/java/com/powsybl/openloadflow/sa/gpu/GpuContingencyMapper.java:219 +9 |
-| `OLF_GPU_RL_TRACE` | src/main/java/com/powsybl/openloadflow/ac/equations/vector/gpu/GpuAcOuterLoopPacks.java — `GPU_RL_ENTRY idx=<n> vRow=<row> bus=<id>` for every reactive-limit entry, LOCAL and REMOTE (a remote member also prints its class and its pilot's V row): the map that lines the device's per-entry `RL_TRACE` pin states up against OLF's `RL_SWITCH` bus names |
 | `OLF_GPU_SA_BUSDIFF` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuVsCpuRte6515SaTest.java:348 |
 | `OLF_GPU_SA_BUSDIFF_CTG` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuVsCpuRte6515SaTest.java — `<id>[,<id>]`: bus-diff those contingencies INSIDE the full scope (one scoped StateMonitor per id, so the heap holds a handful of results, not 10540 x 13202). The list decides the retained switches on a node-breaker network, so a contingency that differs in the full scope cannot be studied alone (CTG_ONLY) |
 | `OLF_GPU_SA_DEBUG_CTG` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuVsCpuProductionSaBenchmarkTest.java:164 |
 | `OLF_GPU_SA_INVENTORY` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuVsCpuRte6515SaTest.java:205 |
 | `OLF_GPU_SA_MON_BRANCH` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuVsCpuRte6515SaTest.java:353 +1 |
 | `OLF_GPU_SA_MON_BUS` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuVsCpuRte6515SaTest.java:523 +1 |
-| `OLF_GPU_SA_RESID` | src/main/java/com/powsybl/openloadflow/sa/gpu/GpuBatchedAcSecurityAnalysis.java:791 +3 |
 | `OLF_GPU_SCOPE_CENSUS` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuRteScopeCensusTest.java:77 |
-| `OLF_GPU_SHUNT_TRACE` | src/main/java/com/powsybl/openloadflow/ac/solver/gpu/batch/GpuBatchIncrementalShuntVc.java:98 |
-| `OLF_GPU_STATE_DUMP` | native/cuda/solver/newton_iteration.cu, native/cuda/diagnostics/driver_traces.cu — for slot 0 and iterations 0..&lt;value&gt;, EVERY row's mode/target/state/residual (systems up to 64 rows). On a reproducer it shows at a glance which variable ran away and which equation let it |
-| `OLF_GPU_SVC_TRACE` | src/main/java/com/powsybl/openloadflow/ac/solver/gpu/batch/GpuBatchSecondaryVc.java:464 +2 |
-| `OLF_GPU_TRACE` | native/cuda/solver/newton_iteration.cu:302 +2 |
-| `OLF_GPU_UNREALISTIC_TRACE` | src/main/java/com/powsybl/openloadflow/sa/gpu/GpuBatchedAcSecurityAnalysis.java:808 +1 |
+
+## Read by the patched OLF (2)
+
+| variable | read at |
+|---|---|
+| `OLF_EQ_DUMP` | OLF patch, NewtonRaphson — writes the equation system OLF is about to solve as text (variable rows, column->equation map, `writeToString(true)`). The one question a residual cannot answer is WHICH equation sits on a row, and OLF will simply print it |
 | `OLF_RL_PROBE_BUS` | (OLF repo, branch olf-local-patches) src/main/java/com/powsybl/openloadflow/ac/outerloop/ReactiveLimitsOuterLoop.java |
 
 ## Test scope selectors (8)
@@ -130,7 +150,7 @@ Also in the list and wrong by construction, useful only as momentary bisection l
 run with one set cannot match the CPU. They should be deleted once the question that motivated them is
 answered — the three removed above were removed on exactly that ground.
 
-## BEHAVIOUR-CHANGING (23) — REVIEW
+## BEHAVIOUR-CHANGING (22) — REVIEW
 
 Each selects a different computation. Several disable an outer loop or loosen a tolerance, which is wrong by construction (and note the standing rule: never loosen a tolerance to make the GPU agree with the CPU). These should be justified individually or deleted.
 
@@ -158,4 +178,3 @@ Each selects a different computation. Several disable an outer loop or loosen a 
 | `OLF_GPU_SA_SLACK_TOL` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuVsCpuProductionSaBenchmarkTest.java:205 |
 | `OLF_GPU_SVC` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuVsCpuRte6515SaTest.java:310 |
 | `OLF_GPU_SVC_PILOT_SHIFT` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuVsCpuRte6515SaTest.java:317 |
-| `OLF_GPU_VIOL_CROSSCHECK` | src/main/java/com/powsybl/openloadflow/sa/gpu/GpuBatchedAcSecurityAnalysis.java:305 +1 |

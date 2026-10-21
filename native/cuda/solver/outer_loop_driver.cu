@@ -61,6 +61,7 @@
 #include "../solver/state_vector_scaling.cuh"
 #include "../fixedmatrix/zero_diagonal_repair.cuh"
 #include "outer_loop_driver.cuh"
+#include "../common/trace.cuh"
 
 namespace olfgpu {
 
@@ -279,7 +280,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     // per-bus PV→PQ count cap (OLF maxPqPvSwitch): 0 is OLF's "never switch back" and is honoured as such;
     // only a negative value (no cap given) takes OLF's default of 3.
     drv.maxPqPvSwitch = maxPqPvSwitch >= 0 ? maxPqPvSwitch : 3;
-    static const char* reactiveLimitsDecisionLogEnv = std::getenv("OLF_GPU_SW_LOG");
+    static const char* reactiveLimitsDecisionLogEnv = traceValue(Trace::SW_LOG);
     drv.reactiveLimitsDecisionLogScenario = reactiveLimitsDecisionLogEnv == nullptr ? -1 : (std::string(reactiveLimitsDecisionLogEnv) == "all" ? -2 : std::atoi(reactiveLimitsDecisionLogEnv));
     // Outer-loop convergence tolerances (pu) — passed in so the device uses the SAME criteria as the CPU
     // loadflow that built the base case (maxReactivePowerMismatch / slackBusPMaxMismatch, per-unitized), NOT
@@ -396,9 +397,9 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     // scenarios the end-of-solve audit flags. The failing scenario is not known until the solve is
     // over and the flip is rare, so the only way to see its trajectory is to record every scenario's
     // and throw away the rest.
-    const bool reactiveLimitsAuditOn = std::getenv("OLF_GPU_RL_AUDIT") != nullptr;
+    const bool reactiveLimitsAuditOn = traceOn(Trace::RL_AUDIT);
     std::vector<std::vector<std::string>> auditLog(reactiveLimitsAuditOn ? nS : 0);
-    if (std::getenv("OLF_GPU_BATCH_TRACE") != nullptr && nS == 1) {
+    if (traceOn(Trace::BATCH_TRACE) && nS == 1) {
         std::fprintf(stderr, "CTX_FLAGS nS=1 nReactiveLimitEntries=%d nReactiveLimitRemoteEntries=%d hasDistrQRelocationGroups=%d nReactiveRelocationGroups=%d nDistrQ=%d nDistributedSlackBuses=%d nDistributedSlackGenerators=%d nZeroImpedanceBranch=%d nBaseClosedZeroImpedanceBranches=%d nRemoteMemberReactiveTerms=%d fullLoadflow=%d\n",
                      ctx->nReactiveLimitEntries, ctx->nReactiveLimitRemoteEntries, ctx->hasDistrQRelocationGroups ? 1 : 0, ctx->structure->nReactiveRelocationGroups, ctx->nDistrQ, ctx->nDistributedSlackBuses, ctx->nDistributedSlackGenerators, ctx->nZeroImpedanceBranch, ctx->nBaseClosedZeroImpedanceBranches, ctx->nRemoteMemberReactiveTerms, fullLoadflow ? 1 : 0);
     }
@@ -520,7 +521,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     // (<prefix>.<k>), "<row> <target> <x> <mode>" with every double exact. Two runs of one scenario that should be
     // identical are diffed row by row: the rows that differ name the writer.
     if (ctx->loopTraceSlot >= 0 && ctx->loopTraceSlot < nS) {
-        static const char* slotDump = std::getenv("OLF_GPU_SLOT_DUMP");
+        static const char* slotDump = traceValue(Trace::SLOT_DUMP);
         static int slotDumps = 0;
         if (slotDump != nullptr) {
             const size_t off = static_cast<size_t>(ctx->loopTraceSlot) * n;
@@ -539,7 +540,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             }
         }
     }
-    static const bool outerLoopTimingRequested = std::getenv("OLF_GPU_PHASE_TIME") != nullptr;
+    static const bool outerLoopTimingRequested = traceOn(Trace::PHASE_TIME);
     drv.outerLoopTiming = outerLoopTimingRequested;
     const bool& outerLoopTiming = drv.outerLoopTiming;
     int& outerLoopPassSolvedScenarios = drv.outerLoopPassSolvedScenarios;
@@ -708,7 +709,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     if (outer == 0 && ctx->loopTraceSlot >= 0 && ctx->loopTraceSlot < nS) {
         // OLF_GPU_SLOT_DUMP, second point: the traced scenario's state and bus balances (qBuf) at the FIRST
         // outer-loop check, i.e. after the first solve - "<prefix>.<k>.pass0", "<row> <x> <qBuf>".
-        static const char* slotDump0 = std::getenv("OLF_GPU_SLOT_DUMP");
+        static const char* slotDump0 = traceValue(Trace::SLOT_DUMP);
         static int slotDumps0 = 0;
         if (slotDump0 != nullptr) {
             const size_t off = static_cast<size_t>(ctx->loopTraceSlot) * n;
@@ -770,7 +771,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     // quantities its decision turned on. A scenario that ends one outer pass short of the CPU's
     // trajectory did so because one of these decisions went the other way; without the list there is
     // no way to name WHICH controller, and the margin of that one decision is the whole question.
-    static const char* reactiveLimitsTraceEnv = std::getenv("OLF_GPU_SW_TRACE");
+    static const char* reactiveLimitsTraceEnv = traceValue(Trace::SW_TRACE);
     static const int reactiveLimitsTraceScenarioEnv = reactiveLimitsTraceEnv != nullptr ? std::atoi(reactiveLimitsTraceEnv) : -1;
     // the contingency-id slot of OLF_GPU_LOOP_TRACE_CTG wins (chunk composition moves fixed slots)
     const int reactiveLimitsTraceScenario = ctx->loopTraceSlot >= 0 ? ctx->loopTraceSlot : reactiveLimitsTraceScenarioEnv;
@@ -801,7 +802,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     // OLF_GPU_LOOP_TRACE=<slot>: the device side of OLF's OL_CHECK - which loop this pass ran, whether
     // it found the slot UNSTABLE (a re-solve follows) and whether the whole phase is still unstable.
     // Two arms that agree on every residual and still stop apart differ in this SEQUENCE.
-    static const char* loopTraceEnv = std::getenv("OLF_GPU_LOOP_TRACE");
+    static const char* loopTraceEnv = traceValue(Trace::LOOP_TRACE);
     // a slot resolved per chunk from a contingency id (setBatchLoopTraceSlot) wins over the env slot:
     // chunk composition moves with the resolved chunk size, so a fixed slot traces a different
     // scenario from one run to the next (IZUZ: slot 170, then 18)

@@ -25,6 +25,7 @@
 #include "batch_context.cuh"
 #include "driver_steps.cuh"
 #include "linear_solver_settings.cuh"
+#include "../common/trace.cuh"
 
 namespace olfgpu {
 
@@ -169,7 +170,7 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& structure, int 
         if (ctx->hasPilotSelf) {
             ctx->dPilotSelfReactiveLimitEntry.upload(pilotSelfReactiveLimitEntry.data(), pilotSelfReactiveLimitEntry.size() * sizeof(int));
             ctx->dPilotSelfCarrierSkip.alloc(static_cast<size_t>(nRelocationGroups) * ctx->nScenarios * sizeof(char));
-            if (std::getenv("OLF_GPU_RL_TRACE") != nullptr) {
+            if (traceOn(Trace::RL_TRACE)) {
                 int count = 0, noEntry = 0;
                 for (int g = 0; g < nRelocationGroups; g++) {
                     count += pilotSelfReactiveLimitEntry[g] >= 0 ? 1 : 0;
@@ -215,7 +216,7 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& structure, int 
                     moved++;
                 }
             }
-            if (moved > 0 && std::getenv("OLF_GPU_RL_TRACE") != nullptr) {
+            if (moved > 0 && traceOn(Trace::RL_TRACE)) {
                 std::fprintf(stderr, "RL_QROW %d of %d entries follow the coupler relocation\n", moved, nReactiveLimitEntries);
             }
         }
@@ -238,7 +239,7 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& structure, int 
         // buffers over PCIe every pass. The host-side traces cost hundreds of MB per pass, which
         // serializes the stream and changes the very kernel scheduling whose effect is being traced:
         // a run-to-run flip disappears while you watch it.
-        if (std::getenv("OLF_GPU_SW_LOG") != nullptr) {
+        if (traceOn(Trace::SW_LOG)) {
             ctx->dReactiveLimitsDecisionLog.alloc(REACTIVE_LIMITS_DECISION_LOG_CAPACITY * REACTIVE_LIMITS_DECISION_LOG_WIDTH * sizeof(double));
             ctx->dReactiveLimitsDecisionLogCount.alloc(sizeof(int));
             CUDA_CHECK(cudaMemset(ctx->dReactiveLimitsDecisionLogCount.p, 0, sizeof(int)));
@@ -381,7 +382,7 @@ void uploadBatchOverrides(BatchSolverContext* ctx, int stateVectorScalingMode, d
             ctx->dSpanningTreeOverrideMask.upload(tree.data(), len);
         }
         ctx->hasZeroImpedanceBranchMasks = true;
-        if (std::getenv("OLF_GPU_PHASE_TIME") != nullptr) {
+        if (traceOn(Trace::PHASE_TIME)) {
             std::fprintf(stderr, "ZI_LISTS nZeroImpedanceBranch=%d nScenarios=%d nZeroImpedanceBranchOpenOverrides=%d nZeroImpedanceBranchCloseOverrides=%d\n", ctx->nZeroImpedanceBranch, ctx->nScenarios, nZeroImpedanceBranchOpenOverrides, nZeroImpedanceBranchCloseOverrides);
         }
     }

@@ -32,6 +32,7 @@
 #include "../outerloop/voltage_monitoring.cuh"
 #include "driver_steps.cuh"
 #include "solve_seed.cuh"
+#include "../common/trace.cuh"
 
 namespace olfgpu {
 
@@ -109,7 +110,7 @@ void seedSolve(BatchSolverContext* ctx, DriverPass& drv, const int* reactiveLimi
             }
             ctx->dReactiveRelocationPilotReactiveLimitEntry.upload(pe.data(), pe.size() * sizeof(int));
         }
-        if (nS == 1 && std::getenv("OLF_GPU_BATCH_TRACE") != nullptr) {
+        if (nS == 1 && traceOn(Trace::BATCH_TRACE)) {
             CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
             int nReactiveRelocationGroups = ctx->structure->nReactiveRelocationGroups;
             std::vector<int> ptr(nReactiveRelocationGroups + 1);

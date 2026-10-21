@@ -30,6 +30,7 @@
 #include "../solver/convergence.cuh"
 #include "../solver/driver_steps.cuh"
 #include "driver_traces.cuh"
+#include "../common/trace.cuh"
 
 namespace olfgpu {
 
@@ -52,7 +53,7 @@ void traceBatchPass(BatchSolverContext* ctx, DriverPass& drv, int nLoops, bool s
     const int& outer = drv.outer;
     int& loopIdx = drv.loopIdx;
     int (&loopOrder)[MAX_DEVICE_LOOPS] = drv.loopOrder;
-    if (std::getenv("OLF_GPU_BATCH_TRACE") != nullptr) {
+    if (traceOn(Trace::BATCH_TRACE)) {
         const char* kindName = "?";
         switch (loopOrder[loopIdx]) {
             case GpuOuterLoopKind::DISTRIBUTED_SLACK:           kindName = "DistributedSlack"; break;
@@ -190,7 +191,7 @@ void traceReactiveLimitsState(BatchSolverContext* ctx, DriverPass& drv, bool inD
     const int& nS = drv.nS;
     const int& outer = drv.outer;
     if (!inDistributedSlackPhase && (ctx->nReactiveLimitRemoteEntries > 0 || nS == 1) && ctx->nReactiveLimitEntries > 0
-            && std::getenv("OLF_GPU_BATCH_TRACE") != nullptr) {   // RL trace
+            && traceOn(Trace::BATCH_TRACE)) {   // RL trace
         std::vector<char> qLimitType(static_cast<size_t>(ctx->nReactiveLimitEntries) * nS);
         std::vector<char> voltageControlRole(ctx->nReactiveLimitEntries);
         std::vector<int> voltageRow(ctx->nReactiveLimitEntries);
@@ -231,7 +232,7 @@ void traceReactiveLimitsState(BatchSolverContext* ctx, DriverPass& drv, bool inD
         // whether updatePilotTargetVEquationBatch flipped it (pilotTargetVDeactivated), and every candidate row with its mode, so a
         // "control lost" verdict can be checked against the members it was taken over.
         if (ctx->hasPilotSelf && ctx->dPilotSelfReactiveLimitEntry.p && ctx->structure->nReactiveRelocationGroups > 0 && !ctx->structure->hReactiveRelocationGroupStart.empty()
-                && std::getenv("OLF_GPU_BATCH_TRACE") != nullptr) {
+                && traceOn(Trace::BATCH_TRACE)) {
             std::vector<int> pilotSelfEntry(ctx->structure->nReactiveRelocationGroups, -1);
             std::vector<char> hPilotTargetVDeactivated(static_cast<size_t>(ctx->structure->nReactiveRelocationGroups) * nS, 0);
             CUDA_CHECK(cudaMemcpy(pilotSelfEntry.data(), ctx->dPilotSelfReactiveLimitEntry.p, pilotSelfEntry.size() * sizeof(int), cudaMemcpyDeviceToHost));
@@ -335,8 +336,8 @@ void traceReactiveLimitsAudit(BatchSolverContext* ctx, DriverPass& drv, std::vec
     DeviceBuf& dReactiveLimitDeltaOverrideList = drv.dReactiveLimitDeltaOverrideList;
     DeviceBuf& dReactiveCapabilityCurveOverrideStart = drv.dReactiveCapabilityCurveOverrideStart;
     DeviceBuf& dReactiveCapabilityCurveOverrideCurve = drv.dReactiveCapabilityCurveOverrideCurve;
-    if (ctx->nReactiveLimitEntries > 0 && std::getenv("OLF_GPU_RL_AUDIT") != nullptr) {
-        double auditTol = std::atof(std::getenv("OLF_GPU_RL_AUDIT"));
+    if (ctx->nReactiveLimitEntries > 0 && traceOn(Trace::RL_AUDIT)) {
+        double auditTol = std::atof(traceValue(Trace::RL_AUDIT));
         if (auditTol <= 0.0) auditTol = 1e-6;
         std::vector<char> allLive(nS), auditDumped(nS, 0);
         for (int s = 0; s < nS; s++) allLive[s] = (res.status[s] == GpuAcSolverStatus::CONVERGED) ? 1 : 0;
@@ -520,7 +521,7 @@ void traceReactiveLimitsAudit(BatchSolverContext* ctx, DriverPass& drv, std::vec
 void tracePhaseTime(BatchSolverContext* ctx, DriverPass& drv) {
     const int& nS = drv.nS;
     BatchResult& res = drv.res;
-    if (std::getenv("OLF_GPU_PHASE_TIME") != nullptr && ctx->outerLoopSolvePasses.size() == static_cast<size_t>(nS)) {
+    if (traceOn(Trace::PHASE_TIME) && ctx->outerLoopSolvePasses.size() == static_cast<size_t>(nS)) {
         for (int s = 0; s < nS; s++) {
             if (ctx->outerLoopSolvePasses[s] == 0) continue;
             if (res.status[s] != GpuAcSolverStatus::CONVERGED) {                         // not finished converged on device (CPU replay,

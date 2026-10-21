@@ -4,16 +4,12 @@
 // JNI entry points of GpuAcNewtonSolver: The batched context and its solve.
 #include "jni_common.cuh"
 #include "../common/codes/gpu_outer_loop_kind.cuh"
+#include "../common/trace.cuh"
 
 // OLF_GPU_PHASE_TIME: split one solveBatchContext JNI call into the three things it does —
 // marshalling the Java arrays in, the solve itself, and packing the per-scenario result arrays out.
 // The Java-side timer sees only the total, and on a 642-scenario chunk the total carries roughly a
 // second of fixed cost that the Newton iterations do not explain.
-static bool jniPhaseTime() {
-    static const bool on = std::getenv("OLF_GPU_PHASE_TIME") != nullptr;
-    return on;
-}
-
 static long long nowNs() {
     return std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -128,7 +124,7 @@ OLF_JNI(ac_solver_gpu, BatchSolveNative, solveBatchContext)(
                       "cannot be reproduced on the device");
         return nullptr;
     }
-    long long tMarshal0 = jniPhaseTime() ? nowNs() : 0;
+    long long tMarshal0 = traceOn(Trace::PHASE_TIME) ? nowNs() : 0;
     std::vector<int> closedBranchParameterOverrideScenarioElementVec;
     std::vector<double> closedBranchParameterOverrideValueVec;
     if (jR1OvSlotElem != nullptr) {
@@ -299,10 +295,10 @@ OLF_JNI(ac_solver_gpu, BatchSolveNative, solveBatchContext)(
             env->GetDoubleArrayRegion(jReactiveLimitTargetVOverrideValue, 0, static_cast<jsize>(reactiveLimitTargetVOverrideValueVec.size()), reactiveLimitTargetVOverrideValueVec.data());
         }
 
-        if (jniPhaseTime()) {
+        if (traceOn(Trace::PHASE_TIME)) {
             marshalNs += nowNs() - tMarshal0;
         }
-        long long tSolve0 = jniPhaseTime() ? nowNs() : 0;
+        long long tSolve0 = traceOn(Trace::PHASE_TIME) ? nowNs() : 0;
         static const int kNoModeSlots[1] = {0};              // non-null: COMPACT mode even when no scenario differs
         res = solveBatchContext(ctx, x0.data(), target.data(), rowMode.data(),
                                 rowModeSlots.empty() ? kNoModeSlots : rowModeSlots.data(),
@@ -337,7 +333,7 @@ OLF_JNI(ac_solver_gpu, BatchSolveNative, solveBatchContext)(
                                 zeroImpedanceBranchCloseScenarioElementVec.empty() ? nullptr : zeroImpedanceBranchCloseScenarioElementVec.data(),
                                 static_cast<int>(zeroImpedanceBranchOpenScenarioElementVec.size() / 2),
                                 zeroImpedanceBranchOpenScenarioElementVec.empty() ? nullptr : zeroImpedanceBranchOpenScenarioElementVec.data());
-        if (jniPhaseTime()) {
+        if (traceOn(Trace::PHASE_TIME)) {
             solveNs += nowNs() - tSolve0;
         }
         if (jReactiveLimitsFinalState != nullptr && !reactiveLimitsFinalStateVec.empty()) {
@@ -356,7 +352,7 @@ OLF_JNI(ac_solver_gpu, BatchSolveNative, solveBatchContext)(
     }
 
     // Pack per-scenario results: [state(n), iterations, finalMismatch, convergenceStatus].
-    long long tPack0 = jniPhaseTime() ? nowNs() : 0;
+    long long tPack0 = traceOn(Trace::PHASE_TIME) ? nowNs() : 0;
     int n = ctx->n;
     int nS = ctx->nScenarios;
     jclass doubleArrayClass = env->FindClass("[D");
@@ -379,7 +375,7 @@ OLF_JNI(ac_solver_gpu, BatchSolveNative, solveBatchContext)(
         env->SetObjectArrayElement(out, s, row);
         env->DeleteLocalRef(row);
     }
-    if (jniPhaseTime()) {
+    if (traceOn(Trace::PHASE_TIME)) {
         packNs += nowNs() - tPack0;
         calls++;
         fprintf(stderr, "JNI_PHASE_TIME calls=%lld marshal=%lld ms solve=%lld ms pack=%lld ms "

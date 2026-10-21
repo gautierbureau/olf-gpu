@@ -3,6 +3,7 @@
 //
 // JNI entry points of GpuAcNewtonSolver: Zero-impedance couplers: per-scenario spanning-tree overrides.
 #include "jni_common.cuh"
+#include "../common/trace.cuh"
 
 // plan-B4 (JAVA hybrid): install ONLY the carrier-row suppression tables — distrQInjectionMember (per DISTR_Q
 // contribution: row-owner member) + distrQMemberRelocationGroup (per member: pilot's relocation group) — so a
@@ -40,7 +41,7 @@ OLF_JNI(ac_equations_vector_gpu, ZeroImpedanceNative, setBatchSpanningTreeOverri
             env->ReleaseIntArrayElements(jSlotElemVal, p, JNI_ABORT);
         }
         ctx->dSpanningTreeOverrideMask.upload(tree.data(), mlen);
-        if (std::getenv("OLF_GPU_PHASE_TIME") != nullptr) {
+        if (traceOn(Trace::PHASE_TIME)) {
             std::fprintf(stderr, "ZI_LISTS nSpanningTreeOverrides=%d\n", len / 3);
         }
     }

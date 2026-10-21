@@ -18,6 +18,7 @@
 #include "../solver/driver_steps.cuh"
 #include "sensitivity.cuh"
 #include "incremental_transformer_voltage_control.cuh"
+#include "../common/trace.cuh"
 
 namespace olfgpu {
 
@@ -340,7 +341,7 @@ void incrementalTransformerVoltageControlStep(BatchSolverContext* ctx, DriverPas
             ctx->dIncrementalTransformerVoltageControlCurrentTap.as<int>(), ctx->dIncrementalTransformerVoltageControlAppliedTap.as<int>(), ctx->dTarget.as<double>(), ctx->dX.as<double>());
     CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
     rebuildTapOverrides(ctx);
-    if (std::getenv("OLF_GPU_BATCH_TRACE") != nullptr) {
+    if (traceOn(Trace::BATCH_TRACE)) {
         std::vector<int> cur(nst), base(ctx->hIncrementalTransformerVoltageControlBaseTap);
         CUDA_CHECK(cudaMemcpy(cur.data(), ctx->dIncrementalTransformerVoltageControlCurrentTap.p, nst * sizeof(int), cudaMemcpyDeviceToHost));
         int nOut = 0, nMoved = 0;

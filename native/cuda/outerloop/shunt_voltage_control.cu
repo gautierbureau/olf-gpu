@@ -17,6 +17,7 @@
 #include "../common/codes/gpu_row_mode.cuh"
 #include "../solver/driver_steps.cuh"
 #include "shunt_voltage_control.cuh"
+#include "../common/trace.cuh"
 
 namespace olfgpu {
 
@@ -160,7 +161,7 @@ void shuntVoltageControlStep(BatchSolverContext* ctx, DriverPass& drv) {
     shuntVoltageControlCheckBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(shuntVoltageControlTables(ctx), nS, n, ctx->nElements, ctx->dDisabled.as<char>(),
             ctx->dOuterLoopCheckActive.as<char>(), ctx->dMode.as<int>(), ctx->dTarget.as<double>(), ctx->dX.as<double>(), ctx->dOuterLoopUnstable.as<char>());
     CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
-    if (std::getenv("OLF_GPU_BATCH_TRACE") != nullptr) {
+    if (traceOn(Trace::BATCH_TRACE)) {
         size_t nsm = static_cast<size_t>(nS) * ctx->nShuntVoltageControlMembers;
         std::vector<int> memberState(nsm);
         CUDA_CHECK(cudaMemcpy(memberState.data(), ctx->dShuntVoltageControlMemberState.p, nsm * sizeof(int), cudaMemcpyDeviceToHost));

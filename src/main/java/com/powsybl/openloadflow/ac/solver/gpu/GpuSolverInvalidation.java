@@ -37,10 +37,7 @@ import java.util.List;
  * itself would keep it strongly reachable forever and the cleanup would never run).
  *
  * <p>Event classification. STRUCTURE = the extracted element packs / variable rows may
- * have changed -> full re-extract + validation. {@code run()} then splits STRUCTURE into two
- * levels by comparing the fresh data: a changed CSR pattern (index packs) rebuilds +
- * re-analyzes, while an unchanged pattern with only changed element PARAMETERS (a tap or
- * shunt-b move) takes the cheap VALUES re-upload (refreshStructureValues, analysis reused).
+ * have changed -> full re-extract + validation, and {@code run()} rebuilds the context from it.
  * ACTIVATION = only which equations are active changed -> refresh rowMode/targetMap.
  * Target-value events need nothing: targets are re-read from the TargetVector (which
  * maintains itself through its own listeners) on every solve.

@@ -171,7 +171,7 @@ final class GpuAcValidation {
         // a single Newton/outer-loop sequence — so for any one fixed configuration the extracted pattern is
         // correct. A currently-closed candidate is modelled as a normal closed branch; when a contingency
         // outages it, its terms deactivate and it drops out of the index packs, so the structure changes and
-        // GpuNewtonRaphson rebuilds its context (sameStructureAs is false) while the batch masks it
+        // GpuNewtonRaphson rebuilds its context from the new extraction while the batch masks it
         // per-scenario. The throw that used to live here was therefore over-conservative.
     }
 

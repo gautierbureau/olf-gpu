@@ -19,7 +19,6 @@ import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcDataExtractor;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcStructures;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuEquationDump;
-import com.powsybl.openloadflow.ac.equations.vector.gpu.StructureNative;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DeviceFlowControllers;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DeviceLoopTables;
 import com.powsybl.openloadflow.ac.outerloop.gpu.ForceTargetQInReactiveLimits;
@@ -135,20 +134,6 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
     /** Set by the first device reject of a run: the batch-of-one context is rebuilt in mode 6 (the
      *  robust pivoted single-matrix solve) and stays there for the run. See the retry in runImpl. */
     private boolean robustModeForRun;
-
-    // Diagnostics for the invalidation taxonomy: how the cached native context is reconciled across
-    // solves — STRUCTURE rebuilds (pattern + cuDSS re-analysis) vs cheap VALUES re-uploads (a transformer
-    // tap / shunt-susceptance move keeps the pattern, only the element packs change). Process-wide totals.
-    private static final java.util.concurrent.atomic.AtomicLong CONTEXT_REBUILDS = new java.util.concurrent.atomic.AtomicLong();
-    private static final java.util.concurrent.atomic.AtomicLong VALUE_REFRESHES = new java.util.concurrent.atomic.AtomicLong();
-
-    public static long contextRebuildCount() {
-        return CONTEXT_REBUILDS.get();
-    }
-
-    public static long valueRefreshCount() {
-        return VALUE_REFRESHES.get();
-    }
 
     protected final NewtonRaphsonParameters parameters;
 
@@ -490,9 +475,9 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
             boolean rebuilt = false;
             // A REACTIVE-LIMIT PIN of a remote gen-VC member (row mode 4) renormalizes OLF's DISTR_Q reactive
             // keys (updateReactiveKeys) and fires NO equation-system event, so the cached extraction would keep
-            // its pre-pin static qPct. Watch the pinned SET and re-extract when it changes: the fresh pack's
-            // distrQWeight differs, sameStructureAs compares it, so the structure is rebuilt with OLF's renormalized
-            // keys. That is what used to make every post-pin solve CPU-routed; it now solves on the device.
+            // its pre-pin static qPct. Watch the pinned SET and re-extract when it changes: the context is
+            // rebuilt from the fresh extraction with OLF's renormalized keys. That is what used to make every
+            // post-pin solve CPU-routed; it now solves on the device.
             java.util.BitSet pinnedNow = GpuAcActivationExtractor.pinnedRemoteMembers(network, equationSystem);
             if (!pinnedNow.equals(pinnedAtExtraction)) {
                 invalidation.structureDirty = true;
@@ -844,61 +829,43 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
         }
     }
 
-    /** When the structure is dirty: re-extract through the shared cache and rebuild or refresh the device context;
-     *  true when it was rebuilt. */
+    /** When the structure is dirty: re-extract through the shared cache and rebuild the device context from the
+     *  new extraction; true when it was rebuilt. */
     private boolean rebuildStructureIfDirty(final int n, final java.util.BitSet pinnedNow) {
-        boolean rebuilt = false;
-        if (invalidation.structureDirty) {
-            // validate + build, through the shared cache (the batched SA reuses this extraction)
-            // The RUN's DistributedSlack settings — the device must not distribute with a default balance type.
-            // Which loops run is the run's own list (setBatchOuterLoops), not the extraction.
-            GpuAcData data = GpuAcDataCache.extract(network, equationSystem, driverDistributedSlackParameters());
-            // Three-level reconciliation, decided by the DATA not the event: a changed CSR pattern
-            // (index packs) is STRUCTURE -> rebuild + cuDSS re-analysis; an unchanged pattern with
-            // only changed element PARAMETERS (tap r1/a1, shunt b) is VALUES -> a cheap in-place
-            // pack re-upload reusing the analysis; an unchanged data is a no-op (context reused).
-            if (!data.sameStructureAs(cachedData)) {
-                BatchSolveNative.destroyBatchContext(context.handle.getAndSet(0));
-                // BATCH-OF-1: the load flow runs on a BATCH context of one scenario, so per-row
-                // PER_EQUATION_TYPE criteria, slope-SVC (mode 2), continuous phase (mode 3) and
-                // the load model (ZIP) fills come from the batch pipeline instead of being ported twice.
-                // The shared structure comes from the per-extraction cache — the batched SA
-                // building its context from the SAME extraction reuses it device-side.
-                context.handle.set(BatchSolveNative.createBatchContext(GpuAcStructures.handle(n, data), 1,
-                        robustModeForRun ? GpuLinearSolveMode.ROBUST : GpuBatchContextCache.resolveBatchMode(),
-                        data.reactiveLimits().voltageRow(), data.reactiveLimits().minQ(), data.reactiveLimits().maxQ(), data.reactiveLimits().loadQ(), data.reactiveLimits().targetV(),
-                        data.reactiveLimits().flags(), data.voltageRows().slope(),
-                        data.distributedSlack().busPhiRow(), data.distributedSlack().busFactor(), data.distributedSlack().slackPhiRow(), data.distributedSlack().slackTargetP(),
-                        data.distributedSlack().busBaseTargetP(), data.distributedSlack().busMaxDelta(), data.distributedSlack().busMinDelta(),
-                        data.distributedSlack().factorMode(), data.distributedSlack().busMarginUp(), data.distributedSlack().busMarginDown(),
-                        data.distributedSlack().slackMarginUp(), data.distributedSlack().slackMarginDown()));
-                // OLF's forced-PV election keys are part of creating a context with RL entries.
-                DeviceLoopTables.installReactiveLimitStrongestPvKeys(context.handle.get(), data);
-                cachedData = data;
-                loadAnchorTargetP = GpuDistributedSlackOuterLoop.captureLoadAnchors(network);
-                rebuilt = true;
-                criteriaDirty = true;
-                tablesDirty = true;
-                CONTEXT_REBUILDS.incrementAndGet();
-            } else if (!data.sameAs(cachedData)) {
-                StructureNative.refreshStructureValues(GpuAcStructures.handle(n, cachedData),
-                        data.closedBranch().parameters(), data.openBranch().parameters(), data.shunt().parameters(), data.hvdcAcEmulation().parameters(), data.zeroImpedanceBranch().parameters());
-                // the SHARED structure now holds the new values — re-key it to the new
-                // extraction so content matching never aliases it under the old one
-                GpuAcStructures.rebind(cachedData, data);
-                cachedData = data;
-                loadAnchorTargetP = GpuDistributedSlackOuterLoop.captureLoadAnchors(network);
-                // The election keys are per-extraction (nominal V, live target P, id rank), so a
-                // value refresh re-installs them too.
-                DeviceLoopTables.installReactiveLimitStrongestPvKeys(context.handle.get(), data);
-                tablesDirty = true;
-                VALUE_REFRESHES.incrementAndGet();
-            }
-            pinnedAtExtraction = pinnedNow;           // the packs now carry this pin set's qPct
-            invalidation.structureDirty = false;
-            invalidation.activationDirty = true;
+        if (!invalidation.structureDirty) {
+            return false;
         }
-        return rebuilt;
+        // validate + build, through the shared cache (the batched SA reuses this extraction)
+        // The RUN's DistributedSlack settings — the device must not distribute with a default balance type.
+        // Which loops run is the run's own list (setBatchOuterLoops), not the extraction.
+        GpuAcData data = GpuAcDataCache.extract(network, equationSystem, driverDistributedSlackParameters());
+        // Always a rebuild: comparing the new extraction with the old one to skip it missed arrays the tables are
+        // installed from, and no solver re-extracted within a run (measured 2026-10-21 over the suite and the six
+        // gate scopes).
+        BatchSolveNative.destroyBatchContext(context.handle.getAndSet(0));
+        // BATCH-OF-1: the load flow runs on a BATCH context of one scenario, so per-row
+        // PER_EQUATION_TYPE criteria, slope-SVC (mode 2), continuous phase (mode 3) and
+        // the load model (ZIP) fills come from the batch pipeline instead of being ported twice.
+        // The shared structure comes from the per-extraction cache — the batched SA
+        // building its context from the SAME extraction reuses it device-side.
+        context.handle.set(BatchSolveNative.createBatchContext(GpuAcStructures.handle(n, data), 1,
+                robustModeForRun ? GpuLinearSolveMode.ROBUST : GpuBatchContextCache.resolveBatchMode(),
+                data.reactiveLimits().voltageRow(), data.reactiveLimits().minQ(), data.reactiveLimits().maxQ(), data.reactiveLimits().loadQ(), data.reactiveLimits().targetV(),
+                data.reactiveLimits().flags(), data.voltageRows().slope(),
+                data.distributedSlack().busPhiRow(), data.distributedSlack().busFactor(), data.distributedSlack().slackPhiRow(), data.distributedSlack().slackTargetP(),
+                data.distributedSlack().busBaseTargetP(), data.distributedSlack().busMaxDelta(), data.distributedSlack().busMinDelta(),
+                data.distributedSlack().factorMode(), data.distributedSlack().busMarginUp(), data.distributedSlack().busMarginDown(),
+                data.distributedSlack().slackMarginUp(), data.distributedSlack().slackMarginDown()));
+        // OLF's forced-PV election keys are part of creating a context with RL entries.
+        DeviceLoopTables.installReactiveLimitStrongestPvKeys(context.handle.get(), data);
+        cachedData = data;
+        loadAnchorTargetP = GpuDistributedSlackOuterLoop.captureLoadAnchors(network);
+        criteriaDirty = true;
+        tablesDirty = true;
+        pinnedAtExtraction = pinnedNow;           // the packs now carry this pin set's qPct
+        invalidation.structureDirty = false;
+        invalidation.activationDirty = true;
+        return true;
     }
 
     /** The incremental and discrete transformer, shunt and phase loops (OLF orders 7 to 10) installed on the device

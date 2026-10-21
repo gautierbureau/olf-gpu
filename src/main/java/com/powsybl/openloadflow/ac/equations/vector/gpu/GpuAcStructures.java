@@ -24,14 +24,14 @@ import java.util.concurrent.atomic.AtomicLong;
  * and the batch's build becomes a cache hit (previously each rebuilt it: duplicated host pattern
  * work, device uploads and allocations).
  *
- * <p>CROSS-FLAVOR sharing: the base load flow always extracts with the distributed slack and reactive limits tables while an SA run
- * extracts with ITS distributed-slack / reactive-limits flags — different {@code GpuAcData}
- * instances for the same equation-system state. The flavor flags only select the outer-loop
- * RL/DS packs, which are batch-CONTEXT inputs, not structure inputs — so on an instance miss the
- * cache falls back to CONTENT matching over the structure inputs
- * ({@link GpuAcData#sameStructureInputsAs}) and aliases the existing structure instead of
- * rebuilding it. The native handle is therefore held through a refcounting holder shared by all
- * aliased keys.
+ * <p>CONTENT sharing: two {@code GpuAcData} instances can describe the same equation-system state — one
+ * extraction per distributed-slack setting ({@link GpuAcDataCache}'s key), or a re-extraction of a state whose
+ * cached extraction was dropped (the base load flow's structure rebuild, the security analysis' chunk-size query
+ * and batch context). The distributed-slack and reactive-limits packs are batch-CONTEXT inputs, not structure
+ * inputs, so on an instance miss the cache falls back to CONTENT matching over the structure inputs
+ * ({@link GpuAcData#sameStructureInputsAs}) and aliases the existing structure instead of rebuilding it
+ * (measured 2026-10-21: ~430 such hits over the test suite, one per rte6515 scope). The native handle is
+ * therefore held through a refcounting holder shared by all aliased keys.
  *
  * <p>Lifetime: the holder releases the native handle through a {@link Cleaner} once every
  * extraction mapped to it is garbage-collected. That only drops the Java-side reference — a
@@ -75,7 +75,7 @@ public final class GpuAcStructures {
 
     // Diagnostics (process-wide totals), mirroring GpuNewtonRaphson's context counters: a HIT is a
     // consumer reusing a structure another already built — same-instance (the GpuAcDataCache
-    // base->batch hand-off, the chunk-size query) or cross-flavor content match (DS/RL flags off).
+    // base->batch hand-off, the chunk-size query) or content match (another extraction of the same state).
     private static final AtomicLong BUILDS = new AtomicLong();
     private static final AtomicLong HITS = new AtomicLong();
 
@@ -92,8 +92,8 @@ public final class GpuAcStructures {
 
     /**
      * The native shared-structure handle for this extraction, building it on first use. An
-     * instance miss falls back to content matching over the structure inputs, so a different
-     * FLAVOR of an already-cached equation-system state aliases the existing structure.
+     * instance miss falls back to content matching over the structure inputs, so another
+     * extraction of an already-cached equation-system state aliases the existing structure.
      *
      * @param n    number of variables / equations
      * @param data the extraction (the caller must keep a strong reference for as long as it uses
@@ -105,8 +105,8 @@ public final class GpuAcStructures {
         if (structure == null) {
             for (Map.Entry<GpuAcData, Structure> entry : CACHE.entrySet()) {
                 if (entry.getValue().n == n && entry.getKey().sameStructureInputsAs(data)) {
-                    structure = entry.getValue();            // another flavor of the same state
-                    LOGGER.debug("GPU shared-structure cross-flavor content match");
+                    structure = entry.getValue();            // another extraction of the same state
+                    LOGGER.debug("GPU shared-structure content match");
                     break;
                 }
             }
@@ -155,7 +155,7 @@ public final class GpuAcStructures {
     public static synchronized void rebind(GpuAcData from, GpuAcData to) {
         Structure structure = CACHE.remove(from);
         if (structure != null) {
-            CACHE.values().removeIf(v -> v == structure);    // stale cross-flavor aliases
+            CACHE.values().removeIf(v -> v == structure);    // stale content-matched aliases
             CACHE.putIfAbsent(to, structure);
         } else {
             // the refreshed structure is unknown here — conservatively drop any key holding the

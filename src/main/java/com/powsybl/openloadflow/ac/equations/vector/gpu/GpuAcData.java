@@ -90,9 +90,9 @@ public record GpuAcData(ClosedBranchPack closedBranch, OpenBranchPack openBranch
      * Content equality over the SHARED-STRUCTURE inputs only — the family packs (values AND indices),
      * DISTR_Q, zero-impedance and DISTR_RHO — i.e. exactly what {@code GpuAcNewtonSolver.createStructure}
      * consumes. The reactive-limits / distributed-slack packs are EXCLUDED: they are batch-CONTEXT
-     * inputs, not structure inputs, so two extractions of one equation-system state (the base load flow always
-     * extracts with the distributed slack and reactive limits tables; an SA run may extract without one) compare
-     * equal here and can share one device-resident structure (see {@code GpuAcStructures}).
+     * inputs, not structure inputs, so two extractions of one equation-system state (another distributed-slack
+     * setting, or a re-extraction) compare equal here and share one device-resident structure (see
+     * {@code GpuAcStructures}).
      */
     public boolean sameStructureInputsAs(GpuAcData other) {
         if (other != null && !baseOpenBranches.sameElementsAs(other.baseOpenBranches)) {

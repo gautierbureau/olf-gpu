@@ -126,13 +126,14 @@ own) then `codegen/regenerate.sh` + commit kernels (+ golden if math changed).
   key aliased to the refreshed structure and re-keys it to the new extraction, so
   content matching never aliases stale values. The hand-off is ASSERTED in
   `GpuSaSolverTest#gpuBatchedEngagesAndMatchesCpuOnDevice` via
-  `GpuAcStructures.hitCount()`. Sharing is instance-first with a CROSS-FLAVOR content
-  fallback: the base always extracts DS_RL while an SA run with DS or RL disabled
-  extracts another flavor (a different `GpuAcData` instance) — the flags only select
-  the RL/DS packs, which are batch-CONTEXT inputs, so on an instance miss the cache
-  content-matches the structure inputs (`GpuAcData.sameStructureInputsAs`) and
-  aliases the existing structure (refcounting `Structure` holder — Cleaner fires when
-  the last aliased key is collected; `GpuAcStructuresTest`). Rows use the STABLE
+  `GpuAcStructures.hitCount()`. Sharing is instance-first with a CONTENT fallback:
+  another extraction of the same state (another distributed-slack setting, the
+  `GpuAcDataCache` key, or a re-extraction after the cache dropped one) is a different
+  `GpuAcData` instance; the RL/DS packs are batch-CONTEXT inputs, so on an instance
+  miss the cache content-matches the structure inputs (`GpuAcData.sameStructureInputsAs`)
+  and aliases the existing structure (refcounting `Structure` holder — Cleaner fires
+  when the last aliased key is collected). Measured 2026-10-21: ~430 content hits over
+  the suite, one per rte6515 gate scope — not dead code. Rows use the STABLE
   indexing (P row = the bus's `BUS_PHI` variable row,
   Q row = `BUS_V` — OLF's renumbered equation columns are NOT in the GPU structure), so
   PV→PQ switching is value-only: per solve, `extractRowMode` (power-eq vs slack/PV

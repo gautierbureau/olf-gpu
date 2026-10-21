@@ -13,7 +13,6 @@ import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.equations.HvdcAcEmulationSide1ActiveFlowEquationTerm;
 import com.powsybl.openloadflow.ac.equations.HvdcAcEmulationSide2ActiveFlowEquationTerm;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.fixedmatrix.CouplerTreeReHoming;
-import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchOverrides;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuAcEmulationStatus;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuRowMode;
 import com.powsybl.openloadflow.equations.EquationSystem;
@@ -216,7 +215,7 @@ public final class GpuHvdcAcEmulationLimitsOuterLoop {
      */
     public static void applyStatusOverrides(int chunkSize, int realCount, int n, List<Controller> controllers,
                                      int[][] status, byte[] ctgOut, boolean[][] disabledMask,
-                                     double[] baseTargets, GpuBatchOverrides overrides,
+                                     double[] baseTargets, ScenarioTargetOverrides overrides,
                                      double[] appliedDelta1, double[] appliedDelta2, int[][] rowModePerScenario) {
         int nControllers = controllers.size();
         for (int s = 0; s < realCount; s++) {

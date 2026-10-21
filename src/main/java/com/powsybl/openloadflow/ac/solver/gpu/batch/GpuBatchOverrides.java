@@ -7,6 +7,7 @@
  */
 package com.powsybl.openloadflow.ac.solver.gpu.batch;
 
+import com.powsybl.openloadflow.ac.outerloop.gpu.ScenarioTargetOverrides;
 import gnu.trove.list.array.TDoubleArrayList;
 import gnu.trove.list.array.TIntArrayList;
 import gnu.trove.map.hash.TIntIntHashMap;
@@ -36,7 +37,7 @@ import gnu.trove.map.hash.TIntIntHashMap;
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
-public final class GpuBatchOverrides {
+public final class GpuBatchOverrides implements ScenarioTargetOverrides {
 
     private final TIntArrayList index = new TIntArrayList();
     private final TDoubleArrayList value = new TDoubleArrayList();
@@ -79,6 +80,7 @@ public final class GpuBatchOverrides {
      *  +197 violations against OLF) and won in a 3-contingency batch (slot 0, bit-identical to OLF). The
      *  entries handed to the device now never hold a row twice; a conflicting duplicate is still COUNTED
      *  (always, one compare on a rare path) so the chunk solver can name it. */
+    @Override
     public void add(int flat, double v) {
         int prev = positionOf.get(flat);
         if (prev >= 0) {
@@ -121,6 +123,7 @@ public final class GpuBatchOverrides {
 
     /** The HVDC freeze's update: the row's current override (or {@code baseTarget}) minus {@code baseD} plus
      *  {@code d}, in that order — the arithmetic its list-based form used. */
+    @Override
     public void merge(int flat, double baseTarget, double baseD, double d) {
         int at = positionOf.get(flat);
         double from = at >= 0 ? value.getQuick(at) : baseTarget;

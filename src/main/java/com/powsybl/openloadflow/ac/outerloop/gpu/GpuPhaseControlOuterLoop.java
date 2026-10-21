@@ -12,7 +12,6 @@ import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcActivation;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcElementMapper;
-import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchOverrides;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuPhaseControlMode;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuPiModelColumn;
 import com.powsybl.openloadflow.equations.EquationSystem;
@@ -140,7 +139,7 @@ public final class GpuPhaseControlOuterLoop {
      *  becomes the P-flow equation (row mode 3) for the first solve. */
     public static void applyPhaseOn(int realCount, int n, List<Controller> controllers,
                              int[][] rowModePerScenario, int[] baseRowMode, boolean[][] disabledMask,
-                             GpuBatchOverrides overrides) {
+                             ScenarioTargetOverrides overrides) {
         for (int slot = 0; slot < realCount; slot++) {
             for (Controller c : controllers) {
                 if (c.kind() != GpuPhaseControlMode.CONTROLLER || disabledMask[slot][c.elemIndex()]) {

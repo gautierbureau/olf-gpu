@@ -7,7 +7,6 @@
  */
 package com.powsybl.openloadflow.ac.outerloop.gpu;
 
-import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchOverrides;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuAcEmulationStatus;
 
 import java.util.List;
@@ -55,7 +54,7 @@ public final class GpuFreezingHvdcACEmulationOuterloop {
      */
     public static int[][] applyFreeze(int chunkSize, int realCount, int n, List<GpuHvdcAcEmulationLimitsOuterLoop.Controller> controllers,
                                double[] baseState, double[] x0PerScenario, int[] seedIdx, double[] seedVal,
-                               boolean[][] disabledMask, double[] baseTargets, GpuBatchOverrides overrides,
+                               boolean[][] disabledMask, double[] baseTargets, ScenarioTargetOverrides overrides,
                                double[] appliedDelta1, double[] appliedDelta2, int[][] rowModePerScenario) {
         int[][] status = new int[chunkSize][controllers.size()];
         double[] warm = baseState.clone();

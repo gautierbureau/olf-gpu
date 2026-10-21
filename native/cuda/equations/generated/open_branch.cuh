@@ -62,7 +62,7 @@ OB_FN inline double dq1dv1(double y, double cosKsi, double sinKsi, double b1, do
 // are computed once and shared. A real branch has only ONE side open: the host
 // stamps that side's pair and resolves the other pair's scatter rows to -1
 // (absent), exactly like the closed-branch fill.
-OB_FN inline void evalOpenBranch(
+OB_FN inline void updateOpenBranch(
         double y, double ksi, double g1, double b1, double g2, double b2,
         double v1, double r1, double v2,
         int i,
@@ -86,10 +86,10 @@ OB_FN inline void evalOpenBranch(
     dq1dv1_out[i] = dq1dv1(y, cosKsi, sinKsi, b1, g2, b2, v1, r1);
 }
 
-// F-ONLY variant: the residual values alone (no Jacobian outputs) — for fill
-// sites that never factorize: residual/convergence checks, line-search
-// backtracks, frozen-Jacobian iterations.
-OB_FN inline void evalOpenBranchF(
+// VALUES-ONLY variant (OLF's withDerivatives = false): the residual values alone,
+// no Jacobian outputs — for fill sites that never factorize: residual/convergence
+// checks, line-search backtracks, frozen-Jacobian iterations.
+OB_FN inline void updateOpenBranchWithoutDerivatives(
         double y, double ksi, double g1, double b1, double g2, double b2,
         double v1, double r1, double v2,
         int i,
@@ -107,7 +107,7 @@ OB_FN inline void evalOpenBranchF(
 
 }  // namespace open_branch
 
-using open_branch::evalOpenBranch;
-using open_branch::evalOpenBranchF;
+using open_branch::updateOpenBranch;
+using open_branch::updateOpenBranchWithoutDerivatives;
 
 }}  // namespace powsybl::openloadflow

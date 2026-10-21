@@ -13,7 +13,7 @@ branch formulation, borrow the structural machinery) is on the
 |---|---|---|---|
 | build `J` structure | **CPU** | **once / topology** | fixed CSR pattern + per-branch scatter map (each of a branch's 28 outputs → flat slot in the `J` value array / `F` row) |
 | cuDSS analysis | CPU-driven | **once** | symbolic factorization of that fixed pattern |
-| fill `J`/`F` values | **GPU** | **every NR iter** | one thread per branch: run the fused `evalClosedBranch` (28 values), scatter into the prebuilt slots |
+| fill `J`/`F` values | **GPU** | **every NR iter** | one thread per branch: run the fused `updateClosedBranch` (28 values), scatter into the prebuilt slots |
 | cuDSS refactor + solve | GPU | every iter | numeric re-LU on the analyzed pattern, then `J·Δx = -g` |
 
 The pattern is invariant across iterations **and** across the N-1 batch (a branch trip is

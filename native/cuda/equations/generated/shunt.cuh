@@ -44,7 +44,7 @@ SH_FN inline double dqdb(double v) {
 // + their three non-zero derivatives for one shunt, writing into Struct-of-Arrays
 // at index i. No trig at all — the cheapest fill of the families; dqdb only
 // matters when the shunt is controllable (SHUNT_B is a skip column in plain PF).
-SH_FN inline void evalShunt(
+SH_FN inline void updateShunt(
         double v, double g, double b,
         int i,
         double* p_out,
@@ -59,10 +59,10 @@ SH_FN inline void evalShunt(
     dqdb_out[i] = dqdb(v);
 }
 
-// F-ONLY variant: the residual values alone (no Jacobian outputs) — for fill
-// sites that never factorize: residual/convergence checks, line-search
-// backtracks, frozen-Jacobian iterations.
-SH_FN inline void evalShuntF(
+// VALUES-ONLY variant (OLF's withDerivatives = false): the residual values alone,
+// no Jacobian outputs — for fill sites that never factorize: residual/convergence
+// checks, line-search backtracks, frozen-Jacobian iterations.
+SH_FN inline void updateShuntWithoutDerivatives(
         double v, double g, double b,
         int i,
         double* p_out,
@@ -73,7 +73,7 @@ SH_FN inline void evalShuntF(
 
 }  // namespace shunt
 
-using shunt::evalShunt;
-using shunt::evalShuntF;
+using shunt::updateShunt;
+using shunt::updateShuntWithoutDerivatives;
 
 }}  // namespace powsybl::openloadflow

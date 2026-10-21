@@ -145,7 +145,7 @@ CB_FN inline double dq2dr1(double y, double v1, double v2, double cosTheta) {
 // theta1, theta2 are computed once and shared as kernel locals — the per-element
 // device routine the GPU assembly kernel calls (one thread = one branch, inline
 // trig, SoA output — a fused per-branch kernel).
-CB_FN inline void evalClosedBranch(
+CB_FN inline void updateClosedBranch(
         double y, double g1, double g2, double b1, double b2,
         double v1, double r1, double v2, double ksi, double a1, double ph1, double ph2,
         int i,
@@ -215,10 +215,10 @@ CB_FN inline void evalClosedBranch(
     dq2dr1_out[i] = dq2dr1(y, v1, v2, cosTheta2);
 }
 
-// F-ONLY variant: the residual values alone (no Jacobian outputs) — for fill
-// sites that never factorize: residual/convergence checks, line-search
-// backtracks, frozen-Jacobian iterations.
-CB_FN inline void evalClosedBranchF(
+// VALUES-ONLY variant (OLF's withDerivatives = false): the residual values alone,
+// no Jacobian outputs — for fill sites that never factorize: residual/convergence
+// checks, line-search backtracks, frozen-Jacobian iterations.
+CB_FN inline void updateClosedBranchWithoutDerivatives(
         double y, double g1, double g2, double b1, double b2,
         double v1, double r1, double v2, double ksi, double a1, double ph1, double ph2,
         int i,
@@ -242,7 +242,7 @@ CB_FN inline void evalClosedBranchF(
 
 }  // namespace closed_branch
 
-using closed_branch::evalClosedBranch;
-using closed_branch::evalClosedBranchF;
+using closed_branch::updateClosedBranch;
+using closed_branch::updateClosedBranchWithoutDerivatives;
 
 }}  // namespace powsybl::openloadflow

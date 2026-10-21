@@ -33,7 +33,7 @@ VDL_FN inline double dfdv(double v, double target, double c, double n) {
 // own-V Jacobian slot; the sum over a load model's terms is the per-entry
 // scatter (atomicAdd), exactly the accumulation loop in
 // AbstractLoadModelEquationTerm.f/dfdv.
-VDL_FN inline void evalVdl(
+VDL_FN inline void updateLoadModel(
         double v, double target, double c, double n,
         int i,
         double* f_out,
@@ -44,6 +44,6 @@ VDL_FN inline void evalVdl(
 
 }  // namespace vdl
 
-using vdl::evalVdl;
+using vdl::updateLoadModel;
 
 }}  // namespace powsybl::openloadflow

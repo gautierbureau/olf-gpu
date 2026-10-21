@@ -49,7 +49,7 @@ HVDC_FN inline double dp2dph2(double p0, double k, double lossFactor1, double lo
 // derivatives for one hvdc, writing into Struct-of-Arrays at index i. The control
 // side is piecewise on the sign of rawP = p0 + k*(ph1 - ph2) — branchless ternaries,
 // no trig; rawP is shared as a kernel local.
-HVDC_FN inline void evalHvdc(
+HVDC_FN inline void updateHvdcAcEmulation(
         double p0, double k, double lossFactor1, double lossFactor2, double r,
         double ph1, double ph2,
         int i,
@@ -67,10 +67,10 @@ HVDC_FN inline void evalHvdc(
     dp2dph2_out[i] = dp2dph2(p0, k, lossFactor1, lossFactor2, ph1, ph2);
 }
 
-// F-ONLY variant: the residual values alone (no Jacobian outputs) — for fill
-// sites that never factorize: residual/convergence checks, line-search
-// backtracks, frozen-Jacobian iterations.
-HVDC_FN inline void evalHvdcF(
+// VALUES-ONLY variant (OLF's withDerivatives = false): the residual values alone,
+// no Jacobian outputs — for fill sites that never factorize: residual/convergence
+// checks, line-search backtracks, frozen-Jacobian iterations.
+HVDC_FN inline void updateHvdcAcEmulationWithoutDerivatives(
         double p0, double k, double lossFactor1, double lossFactor2, double r,
         double ph1, double ph2,
         int i,
@@ -82,7 +82,7 @@ HVDC_FN inline void evalHvdcF(
 
 }  // namespace hvdc
 
-using hvdc::evalHvdc;
-using hvdc::evalHvdcF;
+using hvdc::updateHvdcAcEmulation;
+using hvdc::updateHvdcAcEmulationWithoutDerivatives;
 
 }}  // namespace powsybl::openloadflow

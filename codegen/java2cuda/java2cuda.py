@@ -331,8 +331,9 @@ def render_fused(mod, temps, out, pool):
     SAME body (the flattened parse) — inside a per-family namespace (the Java class
     scoping), plus thin ASSEMBLER routines that only call them, exactly like AcNetworkVector
     on the CPU (raw angles: they compute the theta/trig locals):
-      eval<X>       values and Jacobian entries
-      eval<X>F      residual values only
+      update<X>                     values and Jacobian entries
+      update<X>WithoutDerivatives   residual values only
+    (named after OLF's AcNetworkVector.updateClosedBranch(branchNum, state, withDerivatives))
     A spec's "cuda_routines" keeps only the ones a device kernel calls."""
     env = Environment(loader=FileSystemLoader(os.path.join(CODEGEN, "templates")),
                       trim_blocks=False, lstrip_blocks=False, keep_trailing_newline=True)
@@ -390,14 +391,14 @@ def render_fused(mod, temps, out, pool):
     # methods are called one by one (the current magnitudes) has none.
     variants = {
         "": {"doc": mod.get("cuda_fused_doc", ""), "outputs": all_names, "temps": raw_temps},
-        "F": {"doc": "// F-ONLY variant: the residual values alone (no Jacobian outputs) — for fill\n"
-                     "// sites that never factorize: residual/convergence checks, line-search\n"
-                     "// backtracks, frozen-Jacobian iterations.",
+        "WithoutDerivatives": {"doc": "// VALUES-ONLY variant (OLF's withDerivatives = false): the residual values alone,\n"
+                     "// no Jacobian outputs — for fill sites that never factorize: residual/convergence\n"
+                     "// checks, line-search backtracks, frozen-Jacobian iterations.",
               "outputs": f_names, "temps": _prune_temps(raw_temps, [(n, None, calls[n]) for n in f_names])},
     }
     routines = [{"name": mod["cuda_routine"] + suffix, "doc": v["doc"], "outputs": v["outputs"],
                  "temps": v["temps"], "calls": calls, "param_rows": param_rows}
-                for suffix, v in variants.items() if suffix in mod.get("cuda_routines", ["", "F"])]
+                for suffix, v in variants.items() if suffix in mod.get("cuda_routines", ["", "WithoutDerivatives"])]
     return env.get_template("fused.cuh.j2").render(
         doc=mod["doc"], regen=REGEN, ns_open=ns_open, ns_close=ns_close,
         fn_macro=mod["cuda_fn_macro"], family=mod["family"],

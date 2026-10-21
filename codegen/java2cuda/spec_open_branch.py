@@ -44,7 +44,7 @@ MODULE = {
     "scatter_path": "codegen/scatter/open_branch.scatter.json",
     "scatter_header_path": "native/cuda/equations/generated/open_branch_scatter.h",
     "cuda_namespace": "powsybl::openloadflow",
-    "cuda_routine": "evalOpenBranch",
+    "cuda_routine": "updateOpenBranch",
     "cuda_fn_macro": "OB_FN",
     "scatter_prefix": "OB",
     "cuda_params": [["y", "ksi", "g1", "b1", "g2", "b2"],

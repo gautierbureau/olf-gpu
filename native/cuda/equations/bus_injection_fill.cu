@@ -55,7 +55,7 @@ __global__ void fillShuntBatch(int elementCount, int nScenarios, int n, int nnz,
     if (bcol >= 0) b = x[(size_t) s * n + bcol];
     double v = x[(size_t) s * n + ix[e * 5 + 2]];
     double o[SH_NOUT];
-    evalShunt(v, g, b, 0, o + 0, o + 1, o + 2, o + 3, o + 4);
+    updateShunt(v, g, b, 0, o + 0, o + 1, o + 2, o + 3, o + 4);
     if (dynamicRelocation) {
         scatterAddRelocated(SH_NOUT, dest + e * SH_NOUT, alternateDestination + e * SH_NOUT, selectorRow + e * SH_NOUT,
                       mode + (size_t) s * n, o, vals + (size_t) s * nnz, F + (size_t) s * n,
@@ -80,7 +80,7 @@ __global__ void fillHvdcBatch(int elementCount, int nScenarios, int n, int nnz, 
     const double* xs = x + (size_t) s * n;
     double ph1 = xs[q[2]], ph2 = xs[q[3]];
     double o[HVDC_NOUT];
-    evalHvdc(p[0], p[1], p[2], p[3], p[4], ph1, ph2, 0, o + 0, o + 1, o + 2, o + 3, o + 4, o + 5);
+    updateHvdcAcEmulation(p[0], p[1], p[2], p[3], p[4], ph1, ph2, 0, o + 0, o + 1, o + 2, o + 3, o + 4, o + 5);
     if (dynamicRelocation) {
         scatterAddRelocated(HVDC_NOUT, dest + e * HVDC_NOUT, alternateDestination + e * HVDC_NOUT, selectorRow + e * HVDC_NOUT,
                       mode + (size_t) s * n, o, vals + (size_t) s * nnz, F + (size_t) s * n, ReactiveRelocationTables{}, e * HVDC_NOUT);
@@ -103,7 +103,7 @@ __global__ void fillLoadModelBatch(int elementCount, int nScenarios, int n, int 
     if (t >= elementCount * nScenarios) return;
     int e = t % elementCount;
     int s = t / elementCount;
-    // GENERATED evalVdl (codegen family "vdl", parsed from OLF's
+    // GENERATED updateLoadModel (codegen family "vdl", parsed from OLF's
     // AbstractLoadModelEquationTerm.f/dfdv): one packed element per exp term, the sum over a
     // load model's terms IS the per-entry atomicAdd — exactly the Java accumulation loop.
     double c = in[e * 3];
@@ -111,7 +111,7 @@ __global__ void fillLoadModelBatch(int elementCount, int nScenarios, int n, int 
     double target = in[e * 3 + 2];
     double v = x[(size_t) s * n + ix[e * 2 + 1]];
     double o[2];
-    evalVdl(v, target, c, expn, 0, o + 0, o + 1);
+    updateLoadModel(v, target, c, expn, 0, o + 0, o + 1);
     int row = ix[e * 2];
     int destination = dest[e];
     // A load on a relocated coupler-tree child: its term sits on the parent coupler's dummy row, and goes HOME
@@ -147,7 +147,7 @@ __global__ void fillShuntBatchF(int elementCount, int nScenarios, int n, int nnz
     if (bcol >= 0) b = x[(size_t) s * n + bcol];             // voltage-controlling shunt: b from state
     double v = x[(size_t) s * n + ix[e * 5 + 2]];
     double o[2];
-    evalShuntF(v, g, b, 0, o + 0, o + 1);
+    updateShuntWithoutDerivatives(v, g, b, 0, o + 0, o + 1);
     const int pos[2] = {0, 2};
     if (dynamicRelocation) {
         scatterAddFRelocated(2, dest + e * SH_NOUT, alternateDestination + e * SH_NOUT, selectorRow + e * SH_NOUT,
@@ -172,7 +172,7 @@ __global__ void fillHvdcBatchF(int elementCount, int nScenarios, int n, int nnz,
     const double* xs = x + (size_t) s * n;
     double ph1 = xs[q[2]], ph2 = xs[q[3]];
     double o[2];
-    evalHvdcF(p[0], p[1], p[2], p[3], p[4], ph1, ph2, 0, o + 0, o + 1);
+    updateHvdcAcEmulationWithoutDerivatives(p[0], p[1], p[2], p[3], p[4], ph1, ph2, 0, o + 0, o + 1);
     const int pos[2] = {0, 3};
     if (dynamicRelocation) {
         scatterAddFRelocated(2, dest + e * HVDC_NOUT, alternateDestination + e * HVDC_NOUT, selectorRow + e * HVDC_NOUT,

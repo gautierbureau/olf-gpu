@@ -54,7 +54,7 @@ MODULE = {
     "scatter_path": "codegen/scatter/hvdc.scatter.json",
     "scatter_header_path": "native/cuda/equations/generated/hvdc_scatter.h",
     "cuda_namespace": "powsybl::openloadflow",
-    "cuda_routine": "evalHvdc",
+    "cuda_routine": "updateHvdcAcEmulation",
     "cuda_fn_macro": "HVDC_FN",
     "scatter_prefix": "HVDC",
     "cuda_params": [["p0", "k", "lossFactor1", "lossFactor2", "r"],

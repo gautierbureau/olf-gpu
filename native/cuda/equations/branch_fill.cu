@@ -62,7 +62,7 @@ __global__ void fillClosedBranchBatch(int elementCount, int nScenarios, int n, i
     // residuals agree bit for bit. The F-only fill used to derive the angles by angle addition from per-branch
     // statics: faster, but another rounding than OLF's.
     double o[CB_NOUT];
-    evalClosedBranch(p[0], p[1], p[2], p[3], p[4], v1, r1, v2, p[5], a1, ph1, ph2, 0,
+    updateClosedBranch(p[0], p[1], p[2], p[3], p[4], v1, r1, v2, p[5], a1, ph1, ph2, 0,
                      o + 0, o + 1, o + 2, o + 3, o + 4, o + 5, o + 6, o + 7, o + 8, o + 9,
                      o + 10, o + 11, o + 12, o + 13, o + 14, o + 15, o + 16, o + 17, o + 18,
                      o + 19, o + 20, o + 21, o + 22, o + 23, o + 24, o + 25, o + 26, o + 27);
@@ -90,8 +90,8 @@ __global__ void fillClosedBranchBatch(int elementCount, int nScenarios, int n, i
     }
 }
 
-// The fused fill's residual half alone, for the reactive-limit / slack Q buffer: evalClosedBranchF evaluates
-// p1 q1 p2 q2 from the SAME generated expressions and raw-angle trig as evalClosedBranch (bit-identical), with
+// The fused fill's residual half alone, for the reactive-limit / slack Q buffer: updateClosedBranchWithoutDerivatives evaluates
+// p1 q1 p2 q2 from the SAME generated expressions and raw-angle trig as updateClosedBranch (bit-identical), with
 // the frozen routing (dynamicRelocation 0, no phase-control re-emission) and no Jacobian at all - neither its 24
 // derivatives nor their atomics.
 __global__ void fillClosedBranchQbufBatch(int elementCount, int nScenarios, int n, int nElements, int elemOffset,
@@ -113,8 +113,8 @@ __global__ void fillClosedBranchQbufBatch(int elementCount, int nScenarios, int 
     double v1 = xs[q[5]], v2 = xs[q[7]], ph1 = xs[q[4]], ph2 = xs[q[6]];
     double r1 = q[9] >= 0 ? xs[q[9]] : p[6];
     double a1 = q[8] >= 0 ? xs[q[8]] : p[7];
-    double o[4];                                             // p1 q1 p2 q2: evalClosedBranch's own expressions
-    evalClosedBranchF(p[0], p[1], p[2], p[3], p[4], v1, r1, v2, p[5], a1, ph1, ph2, 0, o + 0, o + 1, o + 2, o + 3);
+    double o[4];                                             // p1 q1 p2 q2: updateClosedBranch's own expressions
+    updateClosedBranchWithoutDerivatives(p[0], p[1], p[2], p[3], p[4], v1, r1, v2, p[5], a1, ph1, ph2, 0, o + 0, o + 1, o + 2, o + 3);
     const int pos[4] = {0, 7, 14, 21};                       // their output slots (static_assert-pinned below)
     const int* d = dest + e * CB_NOUT;
     for (int k = 0; k < 4; k++) {
@@ -141,7 +141,7 @@ __global__ void fillOpenBranchBatch(int elementCount, int nScenarios, int n, int
     double v1 = q[4] >= 0 ? xs[q[4]] : 1.0;
     double v2 = q[5] >= 0 ? xs[q[5]] : 1.0;
     double o[OB_NOUT];
-    evalOpenBranch(p[0], p[1], p[2], p[3], p[4], p[5], v1, p[6], v2, 0,
+    updateOpenBranch(p[0], p[1], p[2], p[3], p[4], p[5], v1, p[6], v2, 0,
                    o + 0, o + 1, o + 2, o + 3, o + 4, o + 5, o + 6, o + 7);
     if (dynamicRelocation) {
         scatterAddRelocated(OB_NOUT, dest + e * OB_NOUT, alternateDestination + e * OB_NOUT, selectorRow + e * OB_NOUT,
@@ -195,7 +195,7 @@ __global__ void fillClosedBranchBatchF(int elementCount, int nScenarios, int n, 
     double r1 = q[9] >= 0 ? xs[q[9]] : p[6];
     double a1 = q[8] >= 0 ? xs[q[8]] : p[7];
     double o[4];                                             // p1 q1 p2 q2: the fused fill's own expressions
-    evalClosedBranchF(p[0], p[1], p[2], p[3], p[4], v1, r1, v2, p[5], a1, ph1, ph2, 0, o + 0, o + 1, o + 2, o + 3);
+    updateClosedBranchWithoutDerivatives(p[0], p[1], p[2], p[3], p[4], v1, r1, v2, p[5], a1, ph1, ph2, 0, o + 0, o + 1, o + 2, o + 3);
     const int pos[4] = {0, 7, 14, 21};
     if (dynamicRelocation) {
         scatterAddFRelocated(4, dest + e * CB_NOUT, alternateDestination + e * CB_NOUT, selectorRow + e * CB_NOUT,
@@ -230,7 +230,7 @@ __global__ void fillOpenBranchBatchF(int elementCount, int nScenarios, int n, in
     double v1 = q[4] >= 0 ? xs[q[4]] : 1.0;
     double v2 = q[5] >= 0 ? xs[q[5]] : 1.0;
     double o[4];
-    evalOpenBranchF(p[0], p[1], p[2], p[3], p[4], p[5], v1, p[6], v2, 0, o + 0, o + 1, o + 2, o + 3);
+    updateOpenBranchWithoutDerivatives(p[0], p[1], p[2], p[3], p[4], p[5], v1, p[6], v2, 0, o + 0, o + 1, o + 2, o + 3);
     const int pos[4] = {0, 2, 4, 6};
     if (dynamicRelocation) {
         scatterAddFRelocated(4, dest + e * OB_NOUT, alternateDestination + e * OB_NOUT, selectorRow + e * OB_NOUT,

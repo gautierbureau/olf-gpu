@@ -3583,7 +3583,7 @@ IncrementalTvc and IncrementalShuntVc are NOT blocked on task #40.
 |------|-------|-----------|---------|---------|
 | IncrementalTvc | Forward ✓ | variable column | Upload tap tables | **LANDED 2026-09-14/15** (`LOOP_TVC_KERNEL`; shared groups too since 2026-09-15 — `tvcGroupDecisionBatch`, OLF's adjustWithSeveralControllers per (scenario, group)) |
 | IncrementalShuntVc | Forward ✓ | variable column | Upload section tables | **LANDED 2026-09-15** (`LOOP_SHUNT_KERNEL`, OLF adjustB round-robin per controlled-bus group in-kernel — several controller shunts and sub-controllers per group) |
-| IncrementalFlowControl | Forward ✓ | J-row · dx on device | — | **LANDED 2026-09-15** (`LOOP_PHASE_KERNEL` order 7 / `LOOP_TRPC_KERNEL` order 9: the controlled branch's P/Q gradient from `evalClosedBranch`, I from OLF's reI/imI decomposition incl. the I = 0 one-sided rule, dotted with the unit-RHS solution at the branch's six variable columns) |
+| IncrementalFlowControl | Forward ✓ | J-row · dx on device | — | **LANDED 2026-09-15** (`LOOP_PHASE_KERNEL` order 7 / `LOOP_TRPC_KERNEL` order 9: the controlled branch's P/Q gradient from `updateClosedBranch`, I from OLF's reI/imI decomposition incl. the I = 0 one-sided rule, dotted with the unit-RHS solution at the branch's six variable columns) |
 | SecondaryVc | Forward ✓ (**corrected 2026-09-15**: OLF's `j.solveTransposed` IS the Newton direction — NewtonRaphson.java:62 takes its step with the same call; `GpuBatchSecondaryVc` already solves it with `solveBatchSensitivities`) | branch Q + shunt Q gradients · dx, pilot dx (all on device since the flow-observed port) | none — the observables were kept on OLF's EquationTerms by CHOICE (device-target-writers risk), not by necessity | **Not blocked; deferred** (host-paused slot; SVC off by default, 0 occurrences on rte6515) |
 
 To port IncrementalTvc to kernel: upload per-branch tap model tables (y,g1,g2,b1,b2,ksi,r1,a1
@@ -3610,7 +3610,7 @@ layout). Task #40 is needed by the GNN adjoint (reverse mode) only.
 
 `LOOP_SVC_KERNEL` (OLF order 4) is the whole loop on the device. Nothing is hand-derived: a
 controller bus's reactive injection is its CLOSED-BRANCH side flows, whose gradient comes from the
-codegen'd `evalClosedBranch` exactly as `flcGatherSensiBatch` takes it, plus its shunts' q = -b*v^2 —
+codegen'd `updateClosedBranch` exactly as `flcGatherSensiBatch` takes it, plus its shunts' q = -b*v^2 —
 and that one OLF exposes as three static lines (`ShuntCompensatorReactiveFlowEquationTerm`:
 dq/dv = -2bv, dq/db = -v^2). The pilot's calculated V is the BUS_V variable itself, so its
 sensitivity is dx at the pilot row. The pieces, in `check()`'s order:
@@ -3806,7 +3806,7 @@ starting with the host-paused loops (order 7–10) on the base.
 `LOOP_PHASE_KERNEL` (OLF order 7, phase CONTROLLER + LIMITER) and `LOOP_TRPC_KERNEL` (order 9, RPC)
 share one controller table and one step (`flcStep(kindMask)`). Per (scenario, controller):
 `flcCheckBatch` evaluates the CONTROLLED branch's flow at the current state — P/Q through the
-codegen'd `evalClosedBranch` (the very functions the fill scatters, with the branch's tap override
+codegen'd `updateClosedBranch` (the very functions the fill scatters, with the branch's tap override
 applied), I through OLF's `ClosedBranchSide{1,2}CurrentMagnitudeEquationTerm` decomposition
 (reI/imI and their eight partials) — and OLF's deadband test (LIMITER one-sided). One unit-RHS
 solve per needed controller at its rho/a1 identity row on the driver's own factors;

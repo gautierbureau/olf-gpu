@@ -69,7 +69,7 @@ violations) is proven at equal tolerance; the split run is a timing comparison o
 | 2026-09-08 | 608a923 | 21.51 | 18.92 | 26.97 | x1.43 | 0/0/0 | 7.48 | 4.45 | 499/500 | 117/129 (91%) | LINE_SEARCH ported to the batch loop (per-scenario backtracking, fillActiveBatch lambda extraction); legacy seq dispatch retired from production |
 | 2026-09-08 | 1c1e31c | 21.04 | 19.14 | 26.71 | x1.40 | 0/0/0 | 7.69 | 4.47 | 499/500 | 118/130 (91%) | N-k branch outages (caps lifted, N-3/N-4 at 1e-12) + monitoring-SVC base activation (cpuBaseOnly = frozen-HVDC only) |
 | 2026-09-08 | 3e5bec0 | 21.98 | 19.57 | 26.64 | x1.36 | 0/0/0 | 7.57 | 4.44 | 499/500 | 119/130 (92%) | single-side openings + bus/busbar loss (SIDE_x = full-out per OLF semantics, bus loss = incident side-opens + islanding; pure-zi shape fix) |
-| 2026-09-08 | 78c796f | 22.38 | 19.27 | 26.75 | x1.39 | 0/0/0 | 7.41 | 4.44 | 499/500 | 119/130 (92%) | vdl codegen family: generated evalVdl consumed (verbatim c,n,target stride 3) |
+| 2026-09-08 | 78c796f | 22.38 | 19.27 | 26.75 | x1.39 | 0/0/0 | 7.41 | 4.44 | 499/500 | 119/130 (92%) | vdl codegen family: generated updateLoadModel consumed (verbatim c,n,target stride 3) |
 | 2026-09-08 | 51e4395 | 21.10 | 19.15 | 26.05 | x1.36 | 0/0/0 | 7.76 | 4.45 | 499/500 | 122/133 (92%) | RL parity: slope pinned-stays-PQ + live SVC B*v^2 limits (setBatchRlSvcLimits) |
 | 2026-09-08 | 26d3dfa | 20.76 | 18.74 | 26.74 | x1.43 | 0/0/0 | 7.58 | 4.44 | 499/500 | 122/133 (92%) | continuous shunt VC batched (GpuBatchSimpleShuntVc, WITH_GENERATOR default mode) |
 | 2026-09-08 | c4430d2 | 21.52 | 18.76 | 26.50 | x1.41 | 0/0/0 | 7.63 | 4.44 | 499/500 | 122/133 (92%) | saturated-base HVDC batched + last cpu-base-only condition retired |

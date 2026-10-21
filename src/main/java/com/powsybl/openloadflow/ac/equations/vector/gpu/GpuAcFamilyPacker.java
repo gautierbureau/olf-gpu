@@ -362,7 +362,7 @@ final class GpuAcFamilyPacker {
                 throw new com.powsybl.commons.PowsyblException("GPU AC solver: load model on bus "
                         + bus.getId() + " with a suppressed/absent P/Q/V row not supported");
             }
-            // VERBATIM OLF parameters (c, n, target) — consumed by the GENERATED evalVdl
+            // VERBATIM OLF parameters (c, n, target) — consumed by the GENERATED updateLoadModel
             // (codegen family "vdl", parsed from AbstractLoadModelEquationTerm.f/dfdv); the
             // n != 0 skip mirrors the Java loop's guard (constant terms live in the targets)
             for (var t : lm.getExpTermsP()) {

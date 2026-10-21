@@ -74,7 +74,7 @@ public final class GpuSecondaryVoltageControlOuterLoop {
 
     /** One Q observable of a controller bus, as the DEVICE sees it: {@code kind} a {@link GpuReactiveTermKind},
      *  CLOSED_BRANCH_REACTIVE_FLOW = the closed branch's reactive flow on {@code side} (a {@link GpuTwoSides}), whose
-     *  gradient comes from the codegen'd evalClosedBranch (the very function the fill scatters);
+     *  gradient comes from the codegen'd updateClosedBranch (the very function the fill scatters);
      *  SHUNT_COMPENSATOR_REACTIVE_FLOW = a SHUNT's q = -b*v^2, i.e. OLF's ShuntCompensatorReactiveFlowEquationTerm
      *  (dq/dv = -2bv, dq/db = -v^2), side NONE. {@code elem} is the PACK-relative element index; {@code bRow} a
      *  derived shunt's SHUNT_B row, -1 when b is fixed. */

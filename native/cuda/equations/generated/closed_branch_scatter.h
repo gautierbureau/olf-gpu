@@ -3,7 +3,7 @@
 //
 // Scatter table for the fused closed-branch fill kernel. GENERATED — DO NOT EDIT. Regenerate with: python3 codegen/java2cuda/java2cuda.py (parsed from the OLF Java).
 //
-// One row per output of evalClosedBranch, IN ORDER. role: 0=residual (add to F at its
+// One row per output of updateClosedBranch, IN ORDER. role: 0=residual (add to F at its
 // equation row), 1=jacobian (add to J at (row,col)), 2=skip (column variable is never a state
 // variable in plain AC PF, e.g. SHUNT_B). Branch control columns (BRANCH_ALPHA1/RHO1) are
 // emitted as jacobian (role 1) on the branch endpoint: they resolve to a real column only when

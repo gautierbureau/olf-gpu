@@ -20,7 +20,7 @@ namespace olfgpu {
 using namespace powsybl::openloadflow;
 
 // The controlled branch's P or Q flow and its gradient at the current state, through the codegen'd
-// evalClosedBranch (the very functions the fill scatters). side is a GpuTwoSides; kind is ACTIVE_POWER or
+// updateClosedBranch (the very functions the fill scatters). side is a GpuTwoSides; kind is ACTIVE_POWER or
 // REACTIVE_POWER. g[0..5] = d/d(v1, v2, ph1, ph2, a1, r1).
 __device__ inline double controlledFlowAndGradient(int side, int kind, const double* p, const double* xs, const int* q, double* g) {
     double v1 = xs[q[5]], v2 = xs[q[7]], ph1 = xs[q[4]], ph2 = xs[q[6]];
@@ -29,7 +29,7 @@ __device__ inline double controlledFlowAndGradient(int side, int kind, const dou
     double y = p[GpuPiModelColumn::Y], g1 = p[GpuPiModelColumn::G1], g2 = p[GpuPiModelColumn::G2], b1 = p[GpuPiModelColumn::B1], b2 = p[GpuPiModelColumn::B2];
     double ksi = p[GpuPiModelColumn::KSI];
     double o[CB_NOUT];
-    evalClosedBranch(y, g1, g2, b1, b2, v1, r1, v2, ksi, a1, ph1, ph2, 0,
+    updateClosedBranch(y, g1, g2, b1, b2, v1, r1, v2, ksi, a1, ph1, ph2, 0,
                      o + 0, o + 1, o + 2, o + 3, o + 4, o + 5, o + 6, o + 7, o + 8, o + 9,
                      o + 10, o + 11, o + 12, o + 13, o + 14, o + 15, o + 16, o + 17, o + 18,
                      o + 19, o + 20, o + 21, o + 22, o + 23, o + 24, o + 25, o + 26, o + 27);

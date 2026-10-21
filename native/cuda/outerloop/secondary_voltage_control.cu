@@ -32,7 +32,7 @@ namespace olfgpu {
 // OLF's SecondaryVoltageControlOuterLoop, per (scenario, zone), with nothing left on the host. The
 // observables are the SAME quantities OLF's EquationTerms compute, reached the device's way: a
 // controller bus's reactive injection is the sum of its CLOSED-BRANCH side flows (gradient from the
-// codegen'd evalClosedBranch, exactly as incrementalFlowControlGatherSensitivityBatch does it) plus its shunts' q = -b*v^2
+// codegen'd updateClosedBranch, exactly as incrementalFlowControlGatherSensitivityBatch does it) plus its shunts' q = -b*v^2
 // (ShuntCompensatorReactiveFlowEquationTerm: dq/dv = -2bv, dq/db = -v^2), and the pilot's calculated V
 // is the BUS_V variable itself, so its sensitivity is dx at the pilot row.
 constexpr double SECONDARY_VOLTAGE_CONTROL_DV_EPS = 1e-4;                          // OLF DV_EPS (0.1 kV)

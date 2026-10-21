@@ -53,7 +53,7 @@ MODULE = {
     "scatter_path": "codegen/scatter/closed_branch.scatter.json",
     "scatter_header_path": "native/cuda/equations/generated/closed_branch_scatter.h",
     "cuda_namespace": "powsybl::openloadflow",
-    "cuda_routine": "evalClosedBranch",
+    "cuda_routine": "updateClosedBranch",
     "cuda_fn_macro": "CB_FN",
     "scatter_prefix": "CB",
     "cuda_params": [["y", "g1", "g2", "b1", "b2"],

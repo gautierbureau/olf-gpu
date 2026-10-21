@@ -49,6 +49,14 @@ struct SecondaryVoltageControlTables {
     double minPlausibleV, maxPlausibleV;
 };
 
+// A controller at a reactive limit (OLF: its generator voltage control disabled, its QLimitType set). Only a run with
+// OLF's ReactiveLimitsOuterLoop pins one, and only that run keys the controller by a reactive-limit entry: entry -1 is
+// a controller OLF never switches PV -> PQ.
+__device__ inline bool secondaryVoltageControlControllerAtLimit(const SecondaryVoltageControlTables& T, const char* limitType, int s, int c) {
+    int e = T.reactiveLimitEntry[c];
+    return e >= 0 && limitType[(size_t) s * T.nReactiveLimitEntries + e] != GpuQLimitType::NONE;
+}
+
 __device__ inline double secondaryVoltageControlQToK(double q, double minQ, double maxQ) {
     return (2.0 * q - maxQ - minQ) / (maxQ - minQ);          // OLF qToK
 }
@@ -70,13 +78,13 @@ __global__ void secondaryVoltageControlTriggerBatch(SecondaryVoltageControlTable
     // ---- tryToReEnableHelpfulControllerBuses ----
     int nPinned = 0;
     for (int k = lo; k < hi; k++) {
-        if (limitType[(size_t) s * T.nReactiveLimitEntries + T.reactiveLimitEntry[T.zoneControllerBus[k]]] != GpuQLimitType::NONE) nPinned++;
+        if (secondaryVoltageControlControllerAtLimit(T, limitType, s, T.zoneControllerBus[k])) nPinned++;
     }
     if (nPinned > 0 && nPinned < hi - lo) {
         for (int k = lo; k < hi; k++) {
             int c = T.zoneControllerBus[k];
+            if (!secondaryVoltageControlControllerAtLimit(T, limitType, s, c)) continue;
             size_t scenarioEntry = (size_t) s * T.nReactiveLimitEntries + T.reactiveLimitEntry[c];
-            if (limitType[scenarioEntry] == GpuQLimitType::NONE) continue;
             size_t idx = (size_t) s * n + T.controllerBusVRow[c];
             char sm = savedMode[scenarioEntry];
             mode[idx] = (sm == GpuRowMode::BUS_TARGET_V_WITH_SLOPE) ? GpuRowMode::BUS_TARGET_V_WITH_SLOPE : GpuRowMode::FIXED_VARIABLE;                  // back to its PV form
@@ -99,7 +107,7 @@ __global__ void secondaryVoltageControlTriggerBatch(SecondaryVoltageControlTable
         kMax = fmax(kMax, kk);
         allAbove &= kk > 1.0;
         allBelow &= kk < -1.0;
-        T.controllerBusEnabled[(size_t) s * T.nControllerBuses + c] = limitType[(size_t) s * T.nReactiveLimitEntries + T.reactiveLimitEntry[c]] == GpuQLimitType::NONE ? 1 : 0;
+        T.controllerBusEnabled[(size_t) s * T.nControllerBuses + c] = secondaryVoltageControlControllerAtLimit(T, limitType, s, c) ? 0 : 1;
     }
     // OLF filters the zone OUT of the check when it has no controller whose voltage control is enabled
     // (findAnyControlledBusWithAtLeastOneControllerBusWithVoltageControlEnabled): every controller at a
@@ -278,7 +286,8 @@ __global__ void secondaryVoltageControlCommitBatch(SecondaryVoltageControlTables
 }
 
 // Give the moved zone targets to the system: an UNPINNED controller's controlled-bus V identity takes the
-// new target; a PINNED one keeps its Q pin but its switch-back must compare against the moved target.
+// new target; a PINNED one keeps its Q pin but its switch-back must compare against the moved target. Without
+// the ReactiveLimits loop no controller has an entry and the BUS_TARGET_V row is the only place the target lives.
 __global__ void secondaryVoltageControlApplyBatch(SecondaryVoltageControlTables T, int nScenarios, int n, const char* outerLoopCheckActive,
                               const char* limitType, double* target) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -288,8 +297,10 @@ __global__ void secondaryVoltageControlApplyBatch(SecondaryVoltageControlTables 
     if (!outerLoopCheckActive[s]) return;
     double tv = T.controlledBusTargetV[(size_t) s * T.nControllerBuses + c];
     if (tv == T.baseTargetV[c]) return;
-    T.secondaryVoltageControlReactiveLimitTargetV[(size_t) s * T.nReactiveLimitEntries + T.reactiveLimitEntry[c]] = tv;
-    if (limitType[(size_t) s * T.nReactiveLimitEntries + T.reactiveLimitEntry[c]] == GpuQLimitType::NONE) {
+    if (T.reactiveLimitEntry[c] >= 0) {
+        T.secondaryVoltageControlReactiveLimitTargetV[(size_t) s * T.nReactiveLimitEntries + T.reactiveLimitEntry[c]] = tv;
+    }
+    if (!secondaryVoltageControlControllerAtLimit(T, limitType, s, c)) {
         target[(size_t) s * n + T.controlledBusVRow[c]] = tv;
     }
 }

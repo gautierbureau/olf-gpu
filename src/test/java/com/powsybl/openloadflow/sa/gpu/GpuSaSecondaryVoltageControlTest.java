@@ -104,6 +104,34 @@ class GpuSaSecondaryVoltageControlTest extends AbstractGpuSaTest {
         }
     }
 
+    /** SecondaryVoltageControl in a run WITHOUT reactive limits (OLF's SecondaryVoltageControlTest#testNoReactiveLimits
+     *  zone: ieee14 z1, pilot B10 at 13 kV, B6-G and B8-G, B8-G's range widened). OLF has no ReactiveLimitsOuterLoop, so no
+     *  controller is ever switched PV -> PQ and the zone moves the BUS_TARGET_V targets alone. The device phase keyed every
+     *  controller by its reactive-limit pin and refused such a run, which then went whole to the CPU: it must batch.
+     *  One contingency per analysis, as in the two-zone case (OLF does not restore a moved target between contingencies). */
+    @Test
+    void deviceSecondaryVoltageControlWithoutReactiveLimitsMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = com.powsybl.ieeecdf.converter.IeeeCdfNetworkFactory.create14();
+        network.getGenerator("B8-G").newMinMaxReactiveLimits().setMinQ(-6).setMaxQ(200).add();
+        network.newExtension(com.powsybl.iidm.network.extensions.SecondaryVoltageControlAdder.class)
+                .newControlZone().withName("z1")
+                .newPilotPoint().withTargetV(13).withBusbarSectionsOrBusesIds(List.of("B10")).add()
+                .newControlUnit().withId("B6-G").add()
+                .newControlUnit().withId("B8-G").add()
+                .add().add();
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setDistributedSlack(true).setUseReactiveLimits(false);
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
+                .setSecondaryVoltageControl(true).setMaxPlausibleTargetVoltage(1.6);
+        for (String id : List.of("L1-2-1", "L2-3-1")) {
+            GpuBatchScopeCensus.reset();
+            assertGpuMatchesCpu(network, List.of(new Contingency(id, new BranchContingency(id))), 1e-11, lfp);
+            assertEquals(1, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(), "census=" + GpuBatchScopeCensus.snapshot());
+        }
+    }
+
     /** DEVICE-mode SecondaryVoltageControl (GpuSecondaryVoltageControlOuterLoop): device-batched dV/dVtarget
      *  sensitivities + OLF's zone system (A/K0/Jk/Jvpp + tiny LU) replayed per scenario on the host;
      *  GPU SA == CPU SA (1e-11: the SVC math amplifies inner-solve ULP noise to ~1e-12). */

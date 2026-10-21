@@ -24,11 +24,9 @@ OLF_JNI(ac_outerloop_gpu, SecondaryVoltageControlNative, setBatchSecondaryVoltag
     }
     ctx->nSecondaryVoltageControlControllerBuses = 0;
     ctx->nSecondaryVoltageControlZones = 0;
-    // The phase keys each controller by its reactive-limit entry and reads that entry's pin state (limitType, the saved
-    // row mode, the target V it moves): a ReactiveLimits loop's state. A run without OLF's ReactiveLimitsOuterLoop has
-    // the entries packed but no such state, so the phase stays OLF's own (the driver pauses at its slot).
-    if (jControlledBusVRow == nullptr || env->GetArrayLength(jControlledBusVRow) == 0 || !ctx->reactiveLimitsOuterLoop
-            || ctx->nReactiveLimitEntries <= 0) {
+    // A controller's reactive-limit entry is -1 in a run without OLF's ReactiveLimitsOuterLoop: nothing pins it, and the
+    // phase moves its target on the controlled bus's BUS_TARGET_V row alone.
+    if (jControlledBusVRow == nullptr || env->GetArrayLength(jControlledBusVRow) == 0) {
         return 0;
     }
     auto readI = [&](jintArray a, std::vector<int>& v) {

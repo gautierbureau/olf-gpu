@@ -17,6 +17,7 @@ import com.powsybl.loadflow.LoadFlowResult;
 import com.powsybl.math.matrix.DenseMatrixFactory;
 import com.powsybl.openloadflow.OpenLoadFlowParameters;
 import com.powsybl.openloadflow.OpenLoadFlowProvider;
+import com.powsybl.openloadflow.ac.outerloop.gpu.GpuSecondaryVoltageControlOuterLoop;
 import com.powsybl.openloadflow.ac.solver.gpu.GpuNewtonRaphson;
 import com.powsybl.openloadflow.ac.solver.gpu.GpuNewtonRaphsonFactory;
 import org.junit.jupiter.api.BeforeEach;
@@ -89,11 +90,16 @@ class GpuSecondaryVoltageControlTest {
                 .setNewtonRaphsonConvEpsPerEq(1e-8)
                 .setAcSolverType(GpuNewtonRaphsonFactory.NAME);
         long fallbacksBefore = GpuNewtonRaphson.CPU_FALLBACK_COUNT.get();
+        long adjustedBefore = GpuSecondaryVoltageControlOuterLoop.ADJUSTED_CONTROLLED_BUS_TARGETS.sum();
         LoadFlowResult gpuResult = runner.run(gpuNetwork, gpuParameters);
         assertTrue(gpuResult.isFullyConverged(), "GPU load flow must converge");
         assertEquals(0, GpuNewtonRaphson.CPU_FALLBACK_COUNT.get() - fallbacksBefore,
                 "the GPU must actually SOLVE this — a silent fallback leaves every other assertion here "
                         + "passing on CPU-vs-CPU results");
+        // OLF's own loop run at a driver pause gives the very same voltages: only the device phase giving its moved
+        // targets back shows that the device drove the zone (no ReactiveLimitsOuterLoop in this run)
+        assertEquals(2, GpuSecondaryVoltageControlOuterLoop.ADJUSTED_CONTROLLED_BUS_TARGETS.sum() - adjustedBefore,
+                "the device's SecondaryVoltageControl phase must move both controlled bus targets");
 
         double worstV = 0;
         for (Bus cpuBus : cpuNetwork.getBusView().getBuses()) {

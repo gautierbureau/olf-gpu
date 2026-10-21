@@ -935,8 +935,7 @@ final class GpuBatchChunkSolver {
                     // the whole check on the device. Where the kernel refuses the zone set (wider than its
                     // dense system, or an observable on an unpacked element) the driver PAUSES at the same
                     // slot and the same decision runs on the host instead.
-                    // the run's own loops, before the phase uploads that read them (the secondary voltage control refuses
-                    // the device without the ReactiveLimits loop)
+                    // the run's own loops, before the phase uploads
                     DriverNative.setBatchOuterLoops(handle, in.settings().distributedSlackOuterLoop(), in.settings().reactiveLimitsOuterLoop());
                     boolean secondaryVoltageControlInKernel = secondaryVoltageControlActive && GpuSecondaryVoltageControlOuterLoop.uploadToDevice(handle, phases.secondaryVoltageControlControllers());
                     if (!secondaryVoltageControlInKernel) {

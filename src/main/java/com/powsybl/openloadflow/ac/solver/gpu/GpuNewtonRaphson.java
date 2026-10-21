@@ -658,8 +658,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
             // ran it on device; a pause whose mutation dirties the structure is also what forces the
             // driver RESTART, so the divergence was not only a throughput one.
             secondaryVoltageControlControllers = phases.secondaryVoltageControlControllers();
-            // the run's own loops, before the phase uploads that read them (the secondary voltage control refuses
-            // the device without the ReactiveLimits loop)
+            // the run's own loops, before the phase uploads
             DriverNative.setBatchOuterLoops(handle, driverDistributedSlackLoop() != null, driverReactiveLimitsOuterLoop() != null);
             if (com.powsybl.openloadflow.ac.outerloop.gpu.GpuSecondaryVoltageControlOuterLoop.uploadToDevice(handle, secondaryVoltageControlControllers)) {
                 hostMask &= ~GpuOuterLoopKind.hostMaskBit(GpuOuterLoopKind.HOST_SECONDARY_VOLTAGE_CONTROL);

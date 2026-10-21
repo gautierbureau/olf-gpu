@@ -20,8 +20,9 @@ import com.powsybl.openloadflow.network.LfNetwork;
  *
  * <p>The pack's slot layout (written by {@code GpuAcFamilyPacker}): 0-3 the endpoint P / Q rows, {@link #DUMMY_P}
  * / {@link #DUMMY_Q} the coupler's dummy columns, {@link #V1} / {@link #V2} and {@link #PHI1} / {@link #PHI2} the
- * endpoints' own rows, {@link #FLAGS} = bit 0 spanning-tree edge, bits 1-2 the child side ({@link #encodeChildSide}), bit 3
- * the child side came from the coupler-tree walk.
+ * endpoints' own rows, {@link #FLAGS} = bit 0 spanning-tree edge, bits 1-2 the child side ({@link #encodeChildSide}). A
+ * child side is only ever set by the coupler-tree walk, so a side other than NONE is what marks a coupler whose child
+ * needs the per-scenario stock-placement fallback.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
@@ -45,8 +46,6 @@ public final class CouplerTreeReHoming {
     public static final int FLAG_SPANNING_TREE_EDGE = 1;
     /** Flags bits 1-2: the child side, shifted by this (see {@link #encodeChildSide}). */
     public static final int CHILD_SIDE_SHIFT = 1;
-    /** Flag bit 3: the child side came from the COUPLER-TREE walk (per-scenario stock-placement fallback). */
-    public static final int FLAG_TREE_WALK = 8;
 
     private CouplerTreeReHoming() {
     }

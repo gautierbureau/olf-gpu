@@ -25,8 +25,8 @@ std::vector<int> buildRelocatedChildOwnRows(SharedStructure* structure, int n, i
     for (int e = 0; e < nZeroImpedanceBranch; e++) {
         const int* z = zeroImpedanceBranchIndices + static_cast<size_t>(e) * 11;
         int childSide = zeroImpedanceDeadEndSideOf(z);
-        if (childSide == GpuTwoSides::NONE || (z[10] & 8) == 0) {
-            continue;                                        // dead-end stub (bit 3 clear): long-standing case
+        if (childSide == GpuTwoSides::NONE) {
+            continue;                                        // no relocated child on this coupler
         }
         int ownPhiCol = childSide == GpuTwoSides::ONE ? z[8] : z[9];
         int ownVCol = childSide == GpuTwoSides::ONE ? z[6] : z[7];

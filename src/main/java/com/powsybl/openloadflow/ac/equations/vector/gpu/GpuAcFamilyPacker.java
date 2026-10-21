@@ -124,10 +124,7 @@ final class GpuAcFamilyPacker {
                 int childSide = child == b1n ? GpuTwoSides.ONE : (child == b2n ? GpuTwoSides.TWO : GpuTwoSides.NONE);
                 zeroImpedanceBranchIndices.add(new int[] {pRow[b1n], qRow[b1n], pRow[b2n], qRow[b2n], dpRow, distrQRow,
                     vCol[b1n], vCol[b2n], phiCol[b1n], phiCol[b2n],
-                    (br.isSpanningTreeEdge(LoadFlowModel.AC) ? CouplerTreeReHoming.FLAG_SPANNING_TREE_EDGE : 0) | CouplerTreeReHoming.encodeChildSide(childSide)
-                        // bit 3: the child side came from the COUPLER-TREE walk; these need the per-scenario
-                        // stock-placement fallback (native stockPlacementAlternateRow)
-                        | (childSide != GpuTwoSides.NONE ? CouplerTreeReHoming.FLAG_TREE_WALK : 0)});
+                    (br.isSpanningTreeEdge(LoadFlowModel.AC) ? CouplerTreeReHoming.FLAG_SPANNING_TREE_EDGE : 0) | CouplerTreeReHoming.encodeChildSide(childSide)});
                 zeroImpedanceBranchAlternateReactiveDestination.add(new int[] {alternateQRow[b1n], alternateQRow[b2n]});
                 continue;
             }

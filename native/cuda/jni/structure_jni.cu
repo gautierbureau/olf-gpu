@@ -95,11 +95,11 @@ OLF_JNI(ac_equations_vector_gpu, StructureNative, createStructure)(
         checkRange("hvdcAcEmulationIndices", hvdcAcEmulationIndices, nHvdcAcEmulation, 4, {0, 1, 2, 3}, -1, n);
         checkRange("distrQRow", distrQRow, nDistrQ, 1, {0}, 0, n);
         checkRange("zeroImpedanceBranchIndices", zeroImpedanceBranchIndices, nZeroImpedanceBranch, 11, {0, 1, 2, 3, 4, 5, 6, 7, 8, 9}, -1, n);
-        // slot 10 is the FLAGS word, not a row: bit 0 spanning-tree, bits 1-2 the relocated child side + 1,
-        // bit 3 "the side came from the coupler-tree walk". Checking it against n rejected a valid
+        // slot 10 is the FLAGS word, not a row: bit 0 spanning-tree, bits 1-2 the relocated child side + 1.
+        // Checking it against n rejected a valid
         // structure on any network with fewer than 14 rows once the relocation went on by default
         // ("bad zeroImpedanceBranchIndices at elem 0 slot 10: 13 (allowed [-1, 10))", four fixtures).
-        checkRange("zeroImpedanceBranchIndices.flags", zeroImpedanceBranchIndices, nZeroImpedanceBranch, 11, {10}, 0, 16);
+        checkRange("zeroImpedanceBranchIndices.flags", zeroImpedanceBranchIndices, nZeroImpedanceBranch, 11, {10}, 0, 8);
         checkRange("zeroImpedanceBranchAlternateReactiveDestination", zeroImpedanceBranchAlternateReactiveDestination, nZeroImpedanceBranch, 2, {0, 1}, -1 - nReactiveRelocationGroups, n);
         checkRange("distrRhoRow", distrRhoRow, nDistrRho, 1, {0}, 0, n);
         checkRange("distrRhoColumn", distrRhoColumn, nDistrRho, 1, {0}, 0, n);

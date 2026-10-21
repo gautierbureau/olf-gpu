@@ -79,9 +79,8 @@ final class CouplerSeed {
             // through the stock-placement fallback, but nothing restores the V identity.
             // Only for a bus that is still VOLTAGE-CONTROLLED: a PQ child's reactive
             // balance returns to this row through that same fallback instead.
-            int spanningTreeFlags = gpuData.zeroImpedanceBranch().indices()[ze * 11 + 10];
-            int childSide = CouplerTreeReHoming.childSide(spanningTreeFlags);
-            if ((spanningTreeFlags & 8) != 0 && childSide != GpuTwoSides.NONE) {
+            int childSide = CouplerTreeReHoming.childSide(gpuData.zeroImpedanceBranch().indices()[ze * 11 + 10]);
+            if (childSide != GpuTwoSides.NONE) {
                 LfBus child = childSide == GpuTwoSides.ONE ? outagedZeroImpedanceBranchOfContingency.getBus1() : outagedZeroImpedanceBranchOfContingency.getBus2();
                 int childVRow = gpuData.zeroImpedanceBranch().indices()[ze * 11 + (childSide == GpuTwoSides.ONE ? 6 : 7)];
                 var childVc = child == null ? java.util.Optional.<GeneratorVoltageControl>empty()
@@ -247,9 +246,8 @@ final class CouplerSeed {
             // NB no BUS_TARGET_V identity here, unlike the opening path: the coupler is only
             // leaving the TREE, not opening, so the replacement edge still couples the child
             // and its voltage is not its own to set.
-            int treeBits = gpuData.zeroImpedanceBranch().indices()[ze * 11 + 10];
-            int treeChildSide = CouplerTreeReHoming.childSide(treeBits);
-            if ((treeBits & 8) == 0 || treeChildSide == GpuTwoSides.NONE) {
+            int treeChildSide = CouplerTreeReHoming.childSide(gpuData.zeroImpedanceBranch().indices()[ze * 11 + 10]);
+            if (treeChildSide == GpuTwoSides.NONE) {
                 continue;                // not a relocated coupler: nothing moved onto it
             }
             int childPhiRow = treeChildSide == GpuTwoSides.ONE ? gpuData.zeroImpedanceBranch().indices()[ze * 11 + 8]

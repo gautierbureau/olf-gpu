@@ -326,11 +326,14 @@ final class GpuBatchChunkSolver {
                     // fixTransformerVoltageControls is a POST-CONTINGENCY check on the CPU, so its
                     // connectivity masks are per scenario and belong to the chunk, not to the run.
                     if (installed.discreteTransformerVoltageControl() && config.transformerControl() && phases.freeze() != null && phases.freeze().hasFix()) {
-                        List<BatchContingency> slotCtgs = new ArrayList<>(realCount);
+                        List<List<LfBranch>> slotOutaged = new ArrayList<>(realCount);
                         for (int s = 0; s < realCount; s++) {
-                            slotCtgs.add(contingencies.get(group.get(chunkStart + s)));
+                            BatchContingency ctg = contingencies.get(group.get(chunkStart + s));
+                            List<LfBranch> outaged = new ArrayList<>(ctg.outagedBranches());
+                            outaged.addAll(ctg.outagedZeroImpedanceBranches());
+                            slotOutaged.add(outaged);
                         }
-                        GpuTransformerVoltageControlOuterLoop.uploadFixMasks(handle, phases.freeze(), slotCtgs, chunkSize);
+                        GpuTransformerVoltageControlOuterLoop.uploadFixMasks(handle, phases.freeze(), slotOutaged, chunkSize);
                     }
                     ChunkLists cl = new ChunkLists(chunkSize, n, gpuData, forcedTargetQ, nDistributedSlackGenerators);
                     SlotSeeding seeding = new SlotSeeding(chunkSize, pairPhase, n, gpuData, elementMapper, contingencies,

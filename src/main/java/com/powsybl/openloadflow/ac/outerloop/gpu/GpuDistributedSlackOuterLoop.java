@@ -12,7 +12,6 @@ import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDistributedSlackParameters;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.fixedmatrix.CouplerTreeReHoming;
-import com.powsybl.openloadflow.ac.solver.gpu.BatchReadbackNative;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfGenerator;
@@ -38,12 +37,14 @@ public final class GpuDistributedSlackOuterLoop {
      *  ({@code distributedSlackGeneratorMove}, per generator — each saturates at its own limits); the slack bus's own
      *  generators, which have no device row, split the slack's retained share by factor — the value
      *  captured at the last check that actually DISTRIBUTED, not the sub-tolerance one a STABLE check
-     *  measures. A solve whose DistributedSlack phase never fired leaves the generators alone.
+     *  measures. With slack-only participation the slack takes the whole absorbed total ({@code slackAbsorbed}, null
+     *  when the context is not slack-only). A solve whose DistributedSlack phase never fired leaves the generators alone.
      *  Returns what it distributed (pu, see GpuNewtonRaphson#lastDistributedActivePower), NaN when nothing. */
-    public static double applyToNetwork(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> equationSystem, long handle,
+    public static double applyToNetwork(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> equationSystem,
                             GpuDistributedSlackParameters distributedSlackParameters,
                             Map<LfLoad, Double> loadAnchorTargetP,
-                            double[] deviceTargets, double[] distributedSlackGeneratorMove, double[] retain, GpuAcData data) {
+                            double[] deviceTargets, double[] distributedSlackGeneratorMove, double[] retain, double[] slackAbsorbed,
+                            GpuAcData data) {
         double lastDistributedActivePower = Double.NaN;
         if (deviceTargets == null || data == null) {
             return lastDistributedActivePower;
@@ -70,10 +71,9 @@ public final class GpuDistributedSlackOuterLoop {
         }
         if (data.distributedSlack().busPhiRow().length == 0) {
             // slack-only participation: the whole distribution is the slack's absorbed total
-            double[] absorbed = BatchReadbackNative.readBatchSlackAbsorbed(handle);
-            if (slackBus != null && absorbed != null && absorbed.length > 0 && absorbed[0] != 0) {
-                setAnchoredShare(slackBus, absorbed[0], distributedSlackParameters);
-                lastDistributedActivePower = absorbed[0];
+            if (slackBus != null && slackAbsorbed != null && slackAbsorbed.length > 0 && slackAbsorbed[0] != 0) {
+                setAnchoredShare(slackBus, slackAbsorbed[0], distributedSlackParameters);
+                lastDistributedActivePower = slackAbsorbed[0];
             }
             return lastDistributedActivePower;
         }

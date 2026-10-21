@@ -11,7 +11,6 @@ import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcActivation;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcElementMapper;
-import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.BatchContingency;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuDiscreteControlMemberState;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuPiModelColumn;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuTransformerVoltageControlMode;
@@ -499,10 +498,10 @@ public final class GpuTransformerVoltageControlOuterLoop {
     /**
      * Per-scenario connectivity masks for the chunk about to solve: OLF re-runs
      * {@code fixTransformerVoltageControls} on the POST-CONTINGENCY network, so each scenario gets its
-     * own pair. Padding slots repeat the base-topology masks, which is what an unused slot would have
-     * used anyway.
+     * own pair, built from the branches the scenario's contingency opens (zero-impedance ones included).
+     * Padding slots repeat the base-topology masks, which is what an unused slot would have used anyway.
      */
-    public static void uploadFixMasks(long handle, FreezeTables freezeTables, List<BatchContingency> scenarios, int chunkSize) {
+    public static void uploadFixMasks(long handle, FreezeTables freezeTables, List<List<LfBranch>> outagedBranchesPerScenario, int chunkSize) {
         if (freezeTables == null || !freezeTables.hasFix()) {
             TransformerVoltageControlNative.setBatchTransformerVoltageControlFixMasks(handle, null, null, 0);
             return;
@@ -511,10 +510,8 @@ public final class GpuTransformerVoltageControlOuterLoop {
         int[] minMask = new int[chunkSize * stride];
         int[] maxMask = new int[chunkSize * stride];
         for (int s = 0; s < chunkSize; s++) {
-            if (s < scenarios.size()) {
-                List<LfBranch> outaged = new ArrayList<>(scenarios.get(s).outagedBranches());
-                outaged.addAll(scenarios.get(s).outagedZeroImpedanceBranches());
-                freezeTables.builder().fill(outaged, minMask, s * stride, maxMask, s * stride);
+            if (s < outagedBranchesPerScenario.size()) {
+                freezeTables.builder().fill(outagedBranchesPerScenario.get(s), minMask, s * stride, maxMask, s * stride);
             } else {
                 System.arraycopy(freezeTables.minMask(), 0, minMask, s * stride, stride);
                 System.arraycopy(freezeTables.maxMask(), 0, maxMask, s * stride, stride);

@@ -198,9 +198,10 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
         }
         // Only a loop the run has moved anything: its tables are packed either way.
         lastDistributedActivePower = driverDistributedSlackLoop() == null ? Double.NaN
-                : GpuDistributedSlackOuterLoop.applyToNetwork(network, equationSystem, handle, driverDistributedSlackParameters(),
+                : GpuDistributedSlackOuterLoop.applyToNetwork(network, equationSystem, driverDistributedSlackParameters(),
                         loadAnchorTargetP, deviceTargets,
-                        BatchReadbackNative.readBatchDistributedSlackGeneratorMove(handle), BatchReadbackNative.readBatchSlackRetainedShare(handle), data);
+                        BatchReadbackNative.readBatchDistributedSlackGeneratorMove(handle), BatchReadbackNative.readBatchSlackRetainedShare(handle),
+                        BatchReadbackNative.readBatchSlackAbsorbed(handle), data);
         if (driverReactiveLimitsOuterLoop() != null) {
             GpuReactiveLimitsOuterLoop.applyToNetwork(network, reactiveLimitsFinalState, data, deviceTargets,
                     data.reactiveLimits().voltageControlRole() != null ? BatchReadbackNative.readBatchRowModes(handle) : null);

@@ -1,6 +1,6 @@
 {
-  "family": "hvdc",
-  "doc": "Scatter map: how each hvdc output lands in OLF's fixed-pattern AC Jacobian. GENERATED — DO NOT EDIT. Regenerate with: python3 codegen/java2cuda/java2cuda.py (parsed from the OLF Java).",
+  "family": "hvdc_ac_emulation",
+  "doc": "Scatter map: how each hvdc-ac-emulation output lands in OLF's fixed-pattern AC Jacobian. GENERATED — DO NOT EDIT. Regenerate with: python3 codegen/java2cuda/java2cuda.py (parsed from the OLF Java).",
   "endpoints": [
     "bus1",
     "bus2"

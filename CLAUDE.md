@@ -35,8 +35,8 @@ ONLY (files, trig params, hoisted helpers, CUDA identity, scatter stamp); the on
 declared formula exception is HVDC's `extern_methods` (powsybl-iidm's
 getHvdcLineLosses closed form, another repo).
 
-Families: closed_branch, open_branch, shunt, hvdc (the GPU fill kernels, with
-scatter) + closed_branch_i (current magnitude, read by the current-limiter loops:
+Families: closed_branch, open_branch, shunt, hvdc_ac_emulation (the GPU fill kernels, with
+scatter) + closed_branch_current_magnitude (current magnitude, read by the current-limiter loops:
 per-method functions and calculateSensi's private components, no assembler
 routine; outerloop/flow_observation.cuh mirrors calculateSensi line for line).
 

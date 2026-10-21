@@ -7,8 +7,8 @@
 #pragma once
 #include <math.h>
 
-#ifndef VDL_FN
-#define VDL_FN __host__ __device__   // also compiles host-side for the diff test
+#ifndef LOAD_MODEL_FN
+#define LOAD_MODEL_FN __host__ __device__   // also compiles host-side for the diff test
 #endif
 
 namespace powsybl { namespace openloadflow {
@@ -18,13 +18,13 @@ namespace powsybl { namespace openloadflow {
 // (the CPU methods are the optimized precomputed-trig form; the family namespace
 // mirrors the Java class scoping). The eval* routines below only assemble calls,
 // exactly like AcNetworkVector on the CPU.
-namespace vdl {
+namespace load_model {
 
-VDL_FN inline double f(double v, double target, double c, double n) {
+LOAD_MODEL_FN inline double f(double v, double target, double c, double n) {
     return (c * pow(v, n)) * target;
 }
 
-VDL_FN inline double dfdv(double v, double target, double c, double n) {
+LOAD_MODEL_FN inline double dfdv(double v, double target, double c, double n) {
     return (c * n * pow(v, n - 1)) * target;
 }
 
@@ -33,7 +33,7 @@ VDL_FN inline double dfdv(double v, double target, double c, double n) {
 // own-V Jacobian slot; the sum over a load model's terms is the per-entry
 // scatter (atomicAdd), exactly the accumulation loop in
 // AbstractLoadModelEquationTerm.f/dfdv.
-VDL_FN inline void updateLoadModel(
+LOAD_MODEL_FN inline void updateLoadModel(
         double v, double target, double c, double n,
         int i,
         double* f_out,
@@ -42,8 +42,8 @@ VDL_FN inline void updateLoadModel(
     dfdv_out[i] = dfdv(v, target, c, n);
 }
 
-}  // namespace vdl
+}  // namespace load_model
 
-using vdl::updateLoadModel;
+using load_model::updateLoadModel;
 
 }}  // namespace powsybl::openloadflow

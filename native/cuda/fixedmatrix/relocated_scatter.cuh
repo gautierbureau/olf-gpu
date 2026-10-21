@@ -74,7 +74,7 @@ static __device__ void scatterAddRelocated(int outputCount, const int* dest, con
 
 // Dynamic Q-relocation, residual-only variant: route each residual to its alternate F row when the
 // frozen row is an identity this scenario. dest/alternateDestination/selectorRow are the element's per-output slices;
-// pos maps each of the nres residuals to its CB_NOUT output index.
+// pos maps each of the nres residuals to its CLOSED_BRANCH_OUTPUT_COUNT output index.
 static __device__ void scatterAddFRelocated(int nres, const int* dest, const int* alternateDestination, const int* selectorRow,
                                const int* pos, const int* mode, const double* o, double* F,
                                ReactiveRelocationTables rt, int eOff) {

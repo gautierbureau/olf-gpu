@@ -32,8 +32,8 @@ MODULE = {
     "scatter_header_path": "native/cuda/equations/generated/shunt_scatter.h",
     "cuda_namespace": "powsybl::openloadflow",
     "cuda_routine": "updateShunt",
-    "cuda_fn_macro": "SH_FN",
-    "scatter_prefix": "SH",
+    "cuda_fn_macro": "SHUNT_FN",
+    "scatter_prefix": "SHUNT",
     "cuda_params": [["v", "g", "b"]],
     "cuda_consts": [],
     "doc": "Shunt-compensator AC flow residuals and Jacobian entries, parsed from "

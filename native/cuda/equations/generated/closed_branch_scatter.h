@@ -16,10 +16,10 @@
 
 namespace powsybl { namespace openloadflow {
 
-struct CbScatter { int role; int rowEnd; int rowEq; int colEnd; int colVar; };
+struct ClosedBranchScatter { int role; int rowEnd; int rowEq; int colEnd; int colVar; };
 
-constexpr int CB_NOUT = 28;
-constexpr CbScatter CB_SCATTER[CB_NOUT] = {
+constexpr int CLOSED_BRANCH_OUTPUT_COUNT = 28;
+constexpr ClosedBranchScatter CLOSED_BRANCH_SCATTER[CLOSED_BRANCH_OUTPUT_COUNT] = {
     {0, 0, 0, -1, -1},  // [0] p1
     {1, 0, 0, 0, 1},  // [1] dp1dv1
     {1, 0, 0, 1, 1},  // [2] dp1dv2

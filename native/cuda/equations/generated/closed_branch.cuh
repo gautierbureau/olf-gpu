@@ -7,8 +7,8 @@
 #pragma once
 #include <math.h>
 
-#ifndef CB_FN
-#define CB_FN __host__ __device__   // also compiles host-side for the diff test
+#ifndef CLOSED_BRANCH_FN
+#define CLOSED_BRANCH_FN __host__ __device__   // also compiles host-side for the diff test
 #endif
 
 namespace powsybl { namespace openloadflow {
@@ -28,115 +28,115 @@ constexpr double A2 = 0.0;
 // exactly like AcNetworkVector on the CPU.
 namespace closed_branch {
 
-CB_FN inline double p1(double y, double sinKsi, double g1, double v1, double r1, double v2, double sinTheta) {
+CLOSED_BRANCH_FN inline double p1(double y, double sinKsi, double g1, double v1, double r1, double v2, double sinTheta) {
     return r1 * v1 * (g1 * r1 * v1 + y * r1 * v1 * sinKsi - y * R2 * v2 * sinTheta);
 }
 
-CB_FN inline double dp1dv1(double y, double sinKsi, double g1, double v1, double r1, double v2, double sinTheta) {
+CLOSED_BRANCH_FN inline double dp1dv1(double y, double sinKsi, double g1, double v1, double r1, double v2, double sinTheta) {
     return r1 * (2 * g1 * r1 * v1 + 2 * y * r1 * v1 * sinKsi - y * R2 * v2 * sinTheta);
 }
 
-CB_FN inline double dp1dv2(double y, double v1, double r1, double sinTheta) {
+CLOSED_BRANCH_FN inline double dp1dv2(double y, double v1, double r1, double sinTheta) {
     return -y * r1 * R2 * v1 * sinTheta;
 }
 
-CB_FN inline double dp1dph1(double y, double v1, double r1, double v2, double cosTheta) {
+CLOSED_BRANCH_FN inline double dp1dph1(double y, double v1, double r1, double v2, double cosTheta) {
     return y * r1 * R2 * v1 * v2 * cosTheta;
 }
 
-CB_FN inline double dp1dph2(double y, double v1, double r1, double v2, double cosTheta) {
+CLOSED_BRANCH_FN inline double dp1dph2(double y, double v1, double r1, double v2, double cosTheta) {
     return -(y * r1 * R2 * v1 * v2 * cosTheta);
 }
 
-CB_FN inline double dp1da1(double y, double v1, double r1, double v2, double cosTheta) {
+CLOSED_BRANCH_FN inline double dp1da1(double y, double v1, double r1, double v2, double cosTheta) {
     return (y * r1 * R2 * v1 * v2 * cosTheta);
 }
 
-CB_FN inline double dp1dr1(double y, double sinKsi, double g1, double v1, double r1, double v2, double sinTheta) {
+CLOSED_BRANCH_FN inline double dp1dr1(double y, double sinKsi, double g1, double v1, double r1, double v2, double sinTheta) {
     return v1 * (2 * r1 * v1 * (g1 + y * sinKsi) - y * R2 * v2 * sinTheta);
 }
 
-CB_FN inline double q1(double y, double cosKsi, double b1, double v1, double r1, double v2, double cosTheta) {
+CLOSED_BRANCH_FN inline double q1(double y, double cosKsi, double b1, double v1, double r1, double v2, double cosTheta) {
     return r1 * v1 * (-b1 * r1 * v1 + y * r1 * v1 * cosKsi - y * R2 * v2 * cosTheta);
 }
 
-CB_FN inline double dq1dv1(double y, double cosKsi, double b1, double v1, double r1, double v2, double cosTheta) {
+CLOSED_BRANCH_FN inline double dq1dv1(double y, double cosKsi, double b1, double v1, double r1, double v2, double cosTheta) {
     return r1 * (-2 * b1 * r1 * v1 + 2 * y * r1 * v1 * cosKsi - y * R2 * v2 * cosTheta);
 }
 
-CB_FN inline double dq1dv2(double y, double v1, double r1, double cosTheta) {
+CLOSED_BRANCH_FN inline double dq1dv2(double y, double v1, double r1, double cosTheta) {
     return -y * r1 * R2 * v1 * cosTheta;
 }
 
-CB_FN inline double dq1dph1(double y, double v1, double r1, double v2, double sinTheta) {
+CLOSED_BRANCH_FN inline double dq1dph1(double y, double v1, double r1, double v2, double sinTheta) {
     return -y * r1 * R2 * v1 * v2 * sinTheta;
 }
 
-CB_FN inline double dq1dph2(double y, double v1, double r1, double v2, double sinTheta) {
+CLOSED_BRANCH_FN inline double dq1dph2(double y, double v1, double r1, double v2, double sinTheta) {
     return -(-y * r1 * R2 * v1 * v2 * sinTheta);
 }
 
-CB_FN inline double dq1da1(double y, double v1, double r1, double v2, double sinTheta) {
+CLOSED_BRANCH_FN inline double dq1da1(double y, double v1, double r1, double v2, double sinTheta) {
     return (-y * r1 * R2 * v1 * v2 * sinTheta);
 }
 
-CB_FN inline double dq1dr1(double y, double cosKsi, double b1, double v1, double r1, double v2, double cosTheta) {
+CLOSED_BRANCH_FN inline double dq1dr1(double y, double cosKsi, double b1, double v1, double r1, double v2, double cosTheta) {
     return v1 * (2 * r1 * v1 * (-b1 + y * cosKsi) - y * R2 * v2 * cosTheta);
 }
 
-CB_FN inline double p2(double y, double sinKsi, double g2, double v1, double r1, double v2, double sinTheta) {
+CLOSED_BRANCH_FN inline double p2(double y, double sinKsi, double g2, double v1, double r1, double v2, double sinTheta) {
     return R2 * v2 * (g2 * R2 * v2 - y * r1 * v1 * sinTheta + y * R2 * v2 * sinKsi);
 }
 
-CB_FN inline double dp2dv1(double y, double r1, double v2, double sinTheta) {
+CLOSED_BRANCH_FN inline double dp2dv1(double y, double r1, double v2, double sinTheta) {
     return -y * r1 * R2 * v2 * sinTheta;
 }
 
-CB_FN inline double dp2dv2(double y, double sinKsi, double g2, double v1, double r1, double v2, double sinTheta) {
+CLOSED_BRANCH_FN inline double dp2dv2(double y, double sinKsi, double g2, double v1, double r1, double v2, double sinTheta) {
     return R2 * (2 * g2 * R2 * v2 - y * r1 * v1 * sinTheta + 2 * y * R2 * v2 * sinKsi);
 }
 
-CB_FN inline double dp2dph1(double y, double v1, double r1, double v2, double cosTheta) {
+CLOSED_BRANCH_FN inline double dp2dph1(double y, double v1, double r1, double v2, double cosTheta) {
     return -y * r1 * R2 * v1 * v2 * cosTheta;
 }
 
-CB_FN inline double dp2dph2(double y, double v1, double r1, double v2, double cosTheta) {
+CLOSED_BRANCH_FN inline double dp2dph2(double y, double v1, double r1, double v2, double cosTheta) {
     return -(-y * r1 * R2 * v1 * v2 * cosTheta);
 }
 
-CB_FN inline double dp2da1(double y, double v1, double r1, double v2, double cosTheta) {
+CLOSED_BRANCH_FN inline double dp2da1(double y, double v1, double r1, double v2, double cosTheta) {
     return (-y * r1 * R2 * v1 * v2 * cosTheta);
 }
 
-CB_FN inline double dp2dr1(double y, double v1, double v2, double sinTheta) {
+CLOSED_BRANCH_FN inline double dp2dr1(double y, double v1, double v2, double sinTheta) {
     return -y * R2 * v1 * v2 * sinTheta;
 }
 
-CB_FN inline double q2(double y, double cosKsi, double b2, double v1, double r1, double v2, double cosTheta) {
+CLOSED_BRANCH_FN inline double q2(double y, double cosKsi, double b2, double v1, double r1, double v2, double cosTheta) {
     return R2 * v2 * (-b2 * R2 * v2 - y * r1 * v1 * cosTheta + y * R2 * v2 * cosKsi);
 }
 
-CB_FN inline double dq2dv1(double y, double r1, double v2, double cosTheta) {
+CLOSED_BRANCH_FN inline double dq2dv1(double y, double r1, double v2, double cosTheta) {
     return -y * r1 * R2 * v2 * cosTheta;
 }
 
-CB_FN inline double dq2dv2(double y, double cosKsi, double b2, double v1, double r1, double v2, double cosTheta) {
+CLOSED_BRANCH_FN inline double dq2dv2(double y, double cosKsi, double b2, double v1, double r1, double v2, double cosTheta) {
     return R2 * (-2 * b2 * R2 * v2 - y * r1 * v1 * cosTheta + 2 * y * R2 * v2 * cosKsi);
 }
 
-CB_FN inline double dq2dph1(double y, double v1, double r1, double v2, double sinTheta) {
+CLOSED_BRANCH_FN inline double dq2dph1(double y, double v1, double r1, double v2, double sinTheta) {
     return y * r1 * R2 * v1 * v2 * sinTheta;
 }
 
-CB_FN inline double dq2dph2(double y, double v1, double r1, double v2, double sinTheta) {
+CLOSED_BRANCH_FN inline double dq2dph2(double y, double v1, double r1, double v2, double sinTheta) {
     return -(y * r1 * R2 * v1 * v2 * sinTheta);
 }
 
-CB_FN inline double dq2da1(double y, double v1, double r1, double v2, double sinTheta) {
+CLOSED_BRANCH_FN inline double dq2da1(double y, double v1, double r1, double v2, double sinTheta) {
     return (y * r1 * R2 * v1 * v2 * sinTheta);
 }
 
-CB_FN inline double dq2dr1(double y, double v1, double v2, double cosTheta) {
+CLOSED_BRANCH_FN inline double dq2dr1(double y, double v1, double v2, double cosTheta) {
     return -y * R2 * v1 * v2 * cosTheta;
 }
 
@@ -145,7 +145,7 @@ CB_FN inline double dq2dr1(double y, double v1, double v2, double cosTheta) {
 // theta1, theta2 are computed once and shared as kernel locals — the per-element
 // device routine the GPU assembly kernel calls (one thread = one branch, inline
 // trig, SoA output — a fused per-branch kernel).
-CB_FN inline void updateClosedBranch(
+CLOSED_BRANCH_FN inline void updateClosedBranch(
         double y, double g1, double g2, double b1, double b2,
         double v1, double r1, double v2, double ksi, double a1, double ph1, double ph2,
         int i,
@@ -218,7 +218,7 @@ CB_FN inline void updateClosedBranch(
 // VALUES-ONLY variant (OLF's withDerivatives = false): the residual values alone,
 // no Jacobian outputs — for fill sites that never factorize: residual/convergence
 // checks, line-search backtracks, frozen-Jacobian iterations.
-CB_FN inline void updateClosedBranchWithoutDerivatives(
+CLOSED_BRANCH_FN inline void updateClosedBranchWithoutDerivatives(
         double y, double g1, double g2, double b1, double b2,
         double v1, double r1, double v2, double ksi, double a1, double ph1, double ph2,
         int i,

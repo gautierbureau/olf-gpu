@@ -21,7 +21,7 @@
 # Raw-trig family: no precomputed sin/cos parameters — the angles stay inline.
 
 MODULE = {
-    "family": "closed_branch_i",
+    "family": "closed_branch_current_magnitude",
 
     # --- parse inputs: the hand-written OLF Java (source of truth) --------------
     "java_sources": [
@@ -46,10 +46,10 @@ MODULE = {
     "constants": {"R2": 1, "A2": 0},
 
     # --- CUDA emission identity ------------------------------------------------
-    "cuda_path": "native/cuda/equations/generated/closed_branch_i.cuh",
+    "cuda_path": "native/cuda/equations/generated/closed_branch_current_magnitude.cuh",
     "cuda_namespace": "powsybl::openloadflow",
     "cuda_routines": [],
-    "cuda_fn_macro": "CBI_FN",
+    "cuda_fn_macro": "CLOSED_BRANCH_CURRENT_MAGNITUDE_FN",
     "cuda_params": [["y", "g1", "g2", "b1", "b2"],
                     ["v1", "r1", "v2", "ksi", "a1", "ph1", "ph2"]],
     "cuda_consts": ["constexpr double R2 = 1.0;", "constexpr double A2 = 0.0;"],

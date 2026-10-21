@@ -18,7 +18,7 @@
 #include "../common/codes/gpu_distributed_slack_factor_mode.cuh"
 #include "../common/codes/gpu_outer_loop_kind.cuh"
 #include "../common/codes/gpu_ac_emulation_status.cuh"
-#include "../equations/generated/hvdc.cuh"
+#include "../equations/generated/hvdc_ac_emulation.cuh"
 #include "forced_target_q.cuh"
 #include "slack_participants.cuh"
 #include "distributed_slack.cuh"
@@ -64,10 +64,10 @@ __global__ void hvdcSlackBalanceBatch(int nS, int nh, int n, int nElements, int 
         double ph1 = xs[hvdcBus1PhiColumn[h]];
         double ph2 = xs[hvdcBus2PhiColumn[h]];
         if (r1 == slackRow) {
-            corr += (live ? hvdc::p1(p[0], p[1], p[4], p[5], p[6], ph1, ph2) : 0.0) - d1[scenarioHvdc];
+            corr += (live ? hvdc_ac_emulation::p1(p[0], p[1], p[4], p[5], p[6], ph1, ph2) : 0.0) - d1[scenarioHvdc];
         }
         if (r2 == slackRow) {
-            corr += (live ? hvdc::p2(p[0], p[1], p[4], p[5], p[6], ph1, ph2) : 0.0) - d2[scenarioHvdc];
+            corr += (live ? hvdc_ac_emulation::p2(p[0], p[1], p[4], p[5], p[6], ph1, ph2) : 0.0) - d2[scenarioHvdc];
         }
     }
     qBuf[(size_t) s * n + slackRow] += corr;

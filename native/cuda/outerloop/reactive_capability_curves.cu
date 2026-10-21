@@ -15,7 +15,7 @@
 #include "../common/launch.cuh"
 #include "../common/codes/gpu_ac_emulation_status.cuh"
 #include "../common/codes/gpu_two_sides.cuh"
-#include "../equations/generated/hvdc.cuh"
+#include "../equations/generated/hvdc_ac_emulation.cuh"
 #include "reactive_capability_curve.cuh"
 #include "slack_participants.cuh"
 #include "reactive_capability_curves.cuh"
@@ -32,8 +32,8 @@ __device__ inline double hvdcStationReactiveLimitsActivePower(const CurveHvdcAcE
         const double* xs = c.x + (size_t) s * n;
         double ph1 = xs[c.bus1PhiColumn[h]];
         double ph2 = xs[c.bus2PhiColumn[h]];
-        return side == GpuTwoSides::ONE ? -hvdc::p1(p[0], p[1], p[4], p[5], p[6], ph1, ph2)
-                                        : -hvdc::p2(p[0], p[1], p[4], p[5], p[6], ph1, ph2);
+        return side == GpuTwoSides::ONE ? -hvdc_ac_emulation::p1(p[0], p[1], p[4], p[5], p[6], ph1, ph2)
+                                        : -hvdc_ac_emulation::p2(p[0], p[1], p[4], p[5], p[6], ph1, ph2);
     }
     return side == GpuTwoSides::ONE ? c.appliedDelta1[scenarioHvdc] + p[7] : c.appliedDelta2[scenarioHvdc] + p[8];
 }

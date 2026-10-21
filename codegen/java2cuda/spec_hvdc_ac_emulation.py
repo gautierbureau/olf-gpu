@@ -20,7 +20,7 @@
 #   CSE temp x0 and OLF's own `double rawP = rawP(...)` local.
 
 MODULE = {
-    "family": "hvdc",
+    "family": "hvdc_ac_emulation",
 
     # --- parse inputs: the hand-written OLF Java (source of truth) --------------
     "java_sources": [
@@ -50,13 +50,13 @@ MODULE = {
     "constants": {},
 
     # --- CUDA emission identity ------------------------------------------------
-    "cuda_path": "native/cuda/equations/generated/hvdc.cuh",
-    "scatter_path": "codegen/scatter/hvdc.scatter.json",
-    "scatter_header_path": "native/cuda/equations/generated/hvdc_scatter.h",
+    "cuda_path": "native/cuda/equations/generated/hvdc_ac_emulation.cuh",
+    "scatter_path": "codegen/scatter/hvdc_ac_emulation.scatter.json",
+    "scatter_header_path": "native/cuda/equations/generated/hvdc_ac_emulation_scatter.h",
     "cuda_namespace": "powsybl::openloadflow",
     "cuda_routine": "updateHvdcAcEmulation",
-    "cuda_fn_macro": "HVDC_FN",
-    "scatter_prefix": "HVDC",
+    "cuda_fn_macro": "HVDC_AC_EMULATION_FN",
+    "scatter_prefix": "HVDC_AC_EMULATION",
     "cuda_params": [["p0", "k", "lossFactor1", "lossFactor2", "r"],
                     ["ph1", "ph2"]],
     "cuda_consts": [],
@@ -66,7 +66,7 @@ MODULE = {
     "cuda_fused_doc": (
         "// FUSED per-element kernel body: one routine computes the two HVDC AC-emulation\n"
         "// injections p1/p2 + their four (approximated, loss-derivative-neglecting) angle\n"
-        "// derivatives for one hvdc, writing into Struct-of-Arrays at index i. The control\n"
+        "// derivatives for one HVDC line, writing into Struct-of-Arrays at index i. The control\n"
         "// side is piecewise on the sign of rawP = p0 + k*(ph1 - ph2) — branchless ternaries,\n"
         "// no trig; rawP is shared as a kernel local."),
 

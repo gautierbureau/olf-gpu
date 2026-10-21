@@ -13,7 +13,7 @@
 # expTerm.n()) becoming the scalar parameters c and n (extract_golden's REDUCTION
 # pass). The n = 0 constant part lives in the target vector, mirrored at pack time.
 #
-# NO scatter stamp: the vdl landing rows are DYNAMIC per entry (the bus P row for
+# NO scatter stamp: the load-model landing rows are DYNAMIC per entry (the bus P row for
 # expTermsP entries, the Q row for expTermsQ — carried by vdlIdx), so the fill
 # kernel scatters through its own index pack, not a fixed-role table. The wiring
 # guarantee stays with the packer + the 1e-12 parity suites; what this family adds
@@ -21,7 +21,7 @@
 # committed), like every other family.
 
 MODULE = {
-    "family": "vdl",
+    "family": "load_model",
 
     # --- parse inputs: the hand-written OLF Java (source of truth) --------------
     "java_sources": [
@@ -37,12 +37,12 @@ MODULE = {
     "constants": {},
 
     # --- CUDA emission identity ------------------------------------------------
-    "cuda_path": "native/cuda/equations/generated/vdl.cuh",
+    "cuda_path": "native/cuda/equations/generated/load_model.cuh",
     "cuda_namespace": "powsybl::openloadflow",
     "cuda_routines": [""],                                # updateLoadModelWithoutDerivatives: no caller
     "cuda_routine": "updateLoadModel",
-    "cuda_fn_macro": "VDL_FN",
-    "scatter_prefix": "VDL",
+    "cuda_fn_macro": "LOAD_MODEL_FN",
+    "scatter_prefix": "LOAD_MODEL",
     "cuda_params": [["v", "target", "c", "n"]],
     "cuda_consts": [],
     "doc": "Voltage-dependent (ZIP/exponential) load model per-exp-term value and "

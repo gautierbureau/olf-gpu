@@ -37,10 +37,10 @@ import java2cuda  # noqa: E402  (resolves OLF_SRC, the OLF checkout the stamps a
 import spec_closed_branch  # noqa: E402
 import spec_open_branch  # noqa: E402
 import spec_shunt  # noqa: E402
-import spec_hvdc  # noqa: E402
+import spec_hvdc_ac_emulation  # noqa: E402
 
 MODULES = [spec_closed_branch.MODULE, spec_open_branch.MODULE,
-           spec_shunt.MODULE, spec_hvdc.MODULE]
+           spec_shunt.MODULE, spec_hvdc_ac_emulation.MODULE]
 
 # variableSet.getVariable(bus1Num, AcVariableType.BUS_V), 0)
 COL = re.compile(r"getVariable\(\s*(\w+)\s*,\s*AcVariableType\.(\w+)\s*\)\s*,\s*(\d+)\s*\)")

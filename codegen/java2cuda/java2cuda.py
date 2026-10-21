@@ -47,14 +47,14 @@ import extract_golden as eg  # noqa: E402  (the proven Java-method parser, stdli
 import spec_closed_branch  # noqa: E402
 import spec_open_branch  # noqa: E402
 import spec_shunt  # noqa: E402
-import spec_hvdc  # noqa: E402
-import spec_closed_branch_i  # noqa: E402
-import spec_vdl  # noqa: E402
+import spec_hvdc_ac_emulation  # noqa: E402
+import spec_closed_branch_current_magnitude  # noqa: E402
+import spec_load_model  # noqa: E402
 
 MODULES = [spec_closed_branch.MODULE, spec_open_branch.MODULE,
-           spec_shunt.MODULE, spec_hvdc.MODULE,
-           spec_closed_branch_i.MODULE,
-           spec_vdl.MODULE]
+           spec_shunt.MODULE, spec_hvdc_ac_emulation.MODULE,
+           spec_closed_branch_current_magnitude.MODULE,
+           spec_load_model.MODULE]
 
 # Math calls a flattened body may legitimately keep (extract_golden strips the
 # Math./FastMath. prefix); anything else left as a call is an unresolved helper.
@@ -469,8 +469,8 @@ def render_scatter_header(mod, out):
     stamp = mod["stamp"]
     req, vcol = stamp["residual_equation"], stamp["variable_column"]
     family_dash = mod["family"].replace("_", "-")
-    prefix = mod["scatter_prefix"]                     # e.g. "CB" -> CbScatter / CB_NOUT / CB_SCATTER
-    struct = prefix.capitalize() + "Scatter"
+    prefix = mod["scatter_prefix"]                     # e.g. "CLOSED_BRANCH" -> CLOSED_BRANCH_OUTPUT_COUNT / CLOSED_BRANCH_SCATTER
+    struct = "".join(w.capitalize() for w in mod["family"].split("_")) + "Scatter"   # ClosedBranchScatter
     rows = []
     for res, var in _scatter_outputs(mod, out):
         eq, at = req[res]
@@ -511,8 +511,8 @@ def render_scatter_header(mod, out):
 
 struct {struct} {{ int role; int rowEnd; int rowEq; int colEnd; int colVar; }};
 
-constexpr int {prefix}_NOUT = {len(rows)};
-constexpr {struct} {prefix}_SCATTER[{prefix}_NOUT] = {{
+constexpr int {prefix}_OUTPUT_COUNT = {len(rows)};
+constexpr {struct} {prefix}_SCATTER[{prefix}_OUTPUT_COUNT] = {{
 {body}
 }};
 

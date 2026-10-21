@@ -9,7 +9,7 @@
 #include <cmath>
 
 #include "../equations/generated/closed_branch.cuh"
-#include "../equations/generated/closed_branch_i.cuh"
+#include "../equations/generated/closed_branch_current_magnitude.cuh"
 #include "../equations/generated/closed_branch_scatter.h"
 #include "../common/codes/gpu_controlled_flow.cuh"
 #include "../common/codes/gpu_pi_model_column.cuh"
@@ -28,7 +28,7 @@ __device__ inline double controlledFlowAndGradient(int side, int kind, const dou
     double a1 = q[8] >= 0 ? xs[q[8]] : p[GpuPiModelColumn::A1];
     double y = p[GpuPiModelColumn::Y], g1 = p[GpuPiModelColumn::G1], g2 = p[GpuPiModelColumn::G2], b1 = p[GpuPiModelColumn::B1], b2 = p[GpuPiModelColumn::B2];
     double ksi = p[GpuPiModelColumn::KSI];
-    double o[CB_NOUT];
+    double o[CLOSED_BRANCH_OUTPUT_COUNT];
     updateClosedBranch(y, g1, g2, b1, b2, v1, r1, v2, ksi, a1, ph1, ph2, 0,
                      o + 0, o + 1, o + 2, o + 3, o + 4, o + 5, o + 6, o + 7, o + 8, o + 9,
                      o + 10, o + 11, o + 12, o + 13, o + 14, o + 15, o + 16, o + 17, o + 18,
@@ -49,8 +49,8 @@ __device__ inline double controlledCurrent(int side, const double* p, const doub
     double a1 = q[8] >= 0 ? xs[q[8]] : p[GpuPiModelColumn::A1];
     double y = p[GpuPiModelColumn::Y], ksi = p[GpuPiModelColumn::KSI];
     return side == GpuTwoSides::ONE
-            ? closed_branch_i::i1(y, ksi, p[GpuPiModelColumn::G1], p[GpuPiModelColumn::B1], v1, ph1, r1, a1, v2, ph2)
-            : closed_branch_i::i2(y, ksi, p[GpuPiModelColumn::G2], p[GpuPiModelColumn::B2], v1, ph1, r1, a1, v2, ph2);
+            ? closed_branch_current_magnitude::i1(y, ksi, p[GpuPiModelColumn::G1], p[GpuPiModelColumn::B1], v1, ph1, r1, a1, v2, ph2)
+            : closed_branch_current_magnitude::i2(y, ksi, p[GpuPiModelColumn::G2], p[GpuPiModelColumn::B2], v1, ph1, r1, a1, v2, ph2);
 }
 
 // The current's derivative with respect to a1: OLF's getI1()/getI2().der(a1Var), read by PhaseControlOuterLoop's
@@ -61,8 +61,8 @@ __device__ inline double controlledCurrentDerivativeWithRespectToA1(int side, co
     double a1 = q[8] >= 0 ? xs[q[8]] : p[GpuPiModelColumn::A1];
     double y = p[GpuPiModelColumn::Y], ksi = p[GpuPiModelColumn::KSI];
     return side == GpuTwoSides::ONE
-            ? closed_branch_i::di1da1(y, ksi, p[GpuPiModelColumn::G1], p[GpuPiModelColumn::B1], v1, ph1, r1, a1, v2, ph2)
-            : closed_branch_i::di2da1(y, ksi, p[GpuPiModelColumn::G2], p[GpuPiModelColumn::B2], v1, ph1, r1, a1, v2, ph2);
+            ? closed_branch_current_magnitude::di1da1(y, ksi, p[GpuPiModelColumn::G1], p[GpuPiModelColumn::B1], v1, ph1, r1, a1, v2, ph2)
+            : closed_branch_current_magnitude::di2da1(y, ksi, p[GpuPiModelColumn::G2], p[GpuPiModelColumn::B2], v1, ph1, r1, a1, v2, ph2);
 }
 
 // OLF's ClosedBranchSide1CurrentMagnitudeEquationTerm.calculateSensi, line for line on the generated methods.
@@ -70,10 +70,10 @@ __device__ inline double controlledCurrentDerivativeWithRespectToA1(int side, co
 __device__ inline double closedBranchSide1CurrentSensitivity(double y, double ksi, double g1, double b1,
                                                              double v1, double ph1, double r1, double a1, double v2, double ph2,
                                                              double dph1, double dph2, double dv1, double dv2, double da1) {
-    using namespace closed_branch_i;
+    using namespace closed_branch_current_magnitude;
     if (i1(y, ksi, g1, b1, v1, ph1, r1, a1, v2, ph2) < ZERO_CURRENT_THRESHOLD) {
         // At I=0 the standard formula reI·∂reI/∂u / |I| is 0/0. One-sided limit: ∂|I1|/∂u = hypot(∂reI1/∂u, ∂imI1/∂u).
-        using namespace closed_branch_i::ClosedBranchSide1CurrentMagnitudeEquationTerm;
+        using namespace closed_branch_current_magnitude::ClosedBranchSide1CurrentMagnitudeEquationTerm;
         double dreI1Dph1 = dreI1dph1(y, ksi, g1, b1, v1, ph1, r1);
         double dreI1Dph2 = dreI1dph2(y, ksi, r1, a1, v2, ph2);
         double dreI1Dv1 = dreI1dv1(y, ksi, g1, b1, ph1, r1);
@@ -99,10 +99,10 @@ __device__ inline double closedBranchSide1CurrentSensitivity(double y, double ks
 __device__ inline double closedBranchSide2CurrentSensitivity(double y, double ksi, double g2, double b2,
                                                              double v1, double ph1, double r1, double a1, double v2, double ph2,
                                                              double dph1, double dph2, double dv1, double dv2, double da1) {
-    using namespace closed_branch_i;
+    using namespace closed_branch_current_magnitude;
     if (i2(y, ksi, g2, b2, v1, ph1, r1, a1, v2, ph2) < ZERO_CURRENT_THRESHOLD) {
         // At I=0 the standard formula reI·∂reI/∂u / |I| is 0/0. One-sided limit: ∂|I2|/∂u = hypot(∂reI2/∂u, ∂imI2/∂u).
-        using namespace closed_branch_i::ClosedBranchSide2CurrentMagnitudeEquationTerm;
+        using namespace closed_branch_current_magnitude::ClosedBranchSide2CurrentMagnitudeEquationTerm;
         double theta = ClosedBranchSide2CurrentMagnitudeEquationTerm::theta(ksi, ph1, a1);
         double dreI2Dph1 = dreI2dph1(y, ksi, v1, ph1, r1, a1);
         double dreI2Dph2 = dreI2dph2(y, ksi, g2, b2, v2, ph2);

@@ -20,9 +20,9 @@
 #include "generated/open_branch_scatter.h"
 #include "generated/shunt.cuh"
 #include "generated/shunt_scatter.h"
-#include "generated/hvdc.cuh"
-#include "generated/hvdc_scatter.h"
-#include "generated/vdl.cuh"
+#include "generated/hvdc_ac_emulation.cuh"
+#include "generated/hvdc_ac_emulation_scatter.h"
+#include "generated/load_model.cuh"
 #include "scatter.cuh"
 #include "../fixedmatrix/reactive_relocation.cuh"
 #include "../fixedmatrix/relocated_scatter.cuh"
@@ -54,14 +54,14 @@ __global__ void fillShuntBatch(int elementCount, int nScenarios, int n, int nnz,
     int bcol = ix[e * 5 + 3];
     if (bcol >= 0) b = x[(size_t) s * n + bcol];
     double v = x[(size_t) s * n + ix[e * 5 + 2]];
-    double o[SH_NOUT];
+    double o[SHUNT_OUTPUT_COUNT];
     updateShunt(v, g, b, 0, o + 0, o + 1, o + 2, o + 3, o + 4);
     if (dynamicRelocation) {
-        scatterAddRelocated(SH_NOUT, dest + e * SH_NOUT, alternateDestination + e * SH_NOUT, selectorRow + e * SH_NOUT,
+        scatterAddRelocated(SHUNT_OUTPUT_COUNT, dest + e * SHUNT_OUTPUT_COUNT, alternateDestination + e * SHUNT_OUTPUT_COUNT, selectorRow + e * SHUNT_OUTPUT_COUNT,
                       mode + (size_t) s * n, o, vals + (size_t) s * nnz, F + (size_t) s * n,
-                      relocationTablesForScenario(rt, s), e * SH_NOUT);
+                      relocationTablesForScenario(rt, s), e * SHUNT_OUTPUT_COUNT);
     } else {
-        scatterAdd(SH_NOUT, dest + e * SH_NOUT, o, vals + (size_t) s * nnz, F + (size_t) s * n);
+        scatterAdd(SHUNT_OUTPUT_COUNT, dest + e * SHUNT_OUTPUT_COUNT, o, vals + (size_t) s * nnz, F + (size_t) s * n);
     }
 }
 
@@ -79,13 +79,13 @@ __global__ void fillHvdcBatch(int elementCount, int nScenarios, int n, int nnz, 
     const int* q = ix + e * 4;
     const double* xs = x + (size_t) s * n;
     double ph1 = xs[q[2]], ph2 = xs[q[3]];
-    double o[HVDC_NOUT];
+    double o[HVDC_AC_EMULATION_OUTPUT_COUNT];
     updateHvdcAcEmulation(p[0], p[1], p[2], p[3], p[4], ph1, ph2, 0, o + 0, o + 1, o + 2, o + 3, o + 4, o + 5);
     if (dynamicRelocation) {
-        scatterAddRelocated(HVDC_NOUT, dest + e * HVDC_NOUT, alternateDestination + e * HVDC_NOUT, selectorRow + e * HVDC_NOUT,
-                      mode + (size_t) s * n, o, vals + (size_t) s * nnz, F + (size_t) s * n, ReactiveRelocationTables{}, e * HVDC_NOUT);
+        scatterAddRelocated(HVDC_AC_EMULATION_OUTPUT_COUNT, dest + e * HVDC_AC_EMULATION_OUTPUT_COUNT, alternateDestination + e * HVDC_AC_EMULATION_OUTPUT_COUNT, selectorRow + e * HVDC_AC_EMULATION_OUTPUT_COUNT,
+                      mode + (size_t) s * n, o, vals + (size_t) s * nnz, F + (size_t) s * n, ReactiveRelocationTables{}, e * HVDC_AC_EMULATION_OUTPUT_COUNT);
     } else {
-        scatterAdd(HVDC_NOUT, dest + e * HVDC_NOUT, o, vals + (size_t) s * nnz, F + (size_t) s * n);
+        scatterAdd(HVDC_AC_EMULATION_OUTPUT_COUNT, dest + e * HVDC_AC_EMULATION_OUTPUT_COUNT, o, vals + (size_t) s * nnz, F + (size_t) s * n);
     }
 }
 
@@ -150,10 +150,10 @@ __global__ void fillShuntBatchF(int elementCount, int nScenarios, int n, int nnz
     updateShuntWithoutDerivatives(v, g, b, 0, o + 0, o + 1);
     const int pos[2] = {0, 2};
     if (dynamicRelocation) {
-        scatterAddFRelocated(2, dest + e * SH_NOUT, alternateDestination + e * SH_NOUT, selectorRow + e * SH_NOUT,
-                       pos, mode + (size_t) s * n, o, F + (size_t) s * n, rt, e * SH_NOUT);
+        scatterAddFRelocated(2, dest + e * SHUNT_OUTPUT_COUNT, alternateDestination + e * SHUNT_OUTPUT_COUNT, selectorRow + e * SHUNT_OUTPUT_COUNT,
+                       pos, mode + (size_t) s * n, o, F + (size_t) s * n, rt, e * SHUNT_OUTPUT_COUNT);
     } else {
-        scatterAddF(2, dest + e * SH_NOUT, pos, o, F + (size_t) s * n);
+        scatterAddF(2, dest + e * SHUNT_OUTPUT_COUNT, pos, o, F + (size_t) s * n);
     }
 }
 
@@ -175,10 +175,10 @@ __global__ void fillHvdcBatchF(int elementCount, int nScenarios, int n, int nnz,
     updateHvdcAcEmulationWithoutDerivatives(p[0], p[1], p[2], p[3], p[4], ph1, ph2, 0, o + 0, o + 1);
     const int pos[2] = {0, 3};
     if (dynamicRelocation) {
-        scatterAddFRelocated(2, dest + e * HVDC_NOUT, alternateDestination + e * HVDC_NOUT, selectorRow + e * HVDC_NOUT,
-                       pos, mode + (size_t) s * n, o, F + (size_t) s * n, ReactiveRelocationTables{}, e * HVDC_NOUT);
+        scatterAddFRelocated(2, dest + e * HVDC_AC_EMULATION_OUTPUT_COUNT, alternateDestination + e * HVDC_AC_EMULATION_OUTPUT_COUNT, selectorRow + e * HVDC_AC_EMULATION_OUTPUT_COUNT,
+                       pos, mode + (size_t) s * n, o, F + (size_t) s * n, ReactiveRelocationTables{}, e * HVDC_AC_EMULATION_OUTPUT_COUNT);
     } else {
-        scatterAddF(2, dest + e * HVDC_NOUT, pos, o, F + (size_t) s * n);
+        scatterAddF(2, dest + e * HVDC_AC_EMULATION_OUTPUT_COUNT, pos, o, F + (size_t) s * n);
     }
 }
 

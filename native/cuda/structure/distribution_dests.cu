@@ -21,7 +21,7 @@
 #include "../equations/generated/closed_branch_scatter.h"
 #include "../equations/generated/open_branch_scatter.h"
 #include "../equations/generated/shunt_scatter.h"
-#include "../equations/generated/hvdc_scatter.h"
+#include "../equations/generated/hvdc_ac_emulation_scatter.h"
 
 #include "../common/check.cuh"
 #include "../common/stats.cuh"

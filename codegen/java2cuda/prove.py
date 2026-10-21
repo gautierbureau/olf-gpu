@@ -42,18 +42,18 @@ import java2cuda  # noqa: E402
 import spec_closed_branch  # noqa: E402
 import spec_open_branch  # noqa: E402
 import spec_shunt  # noqa: E402
-import spec_hvdc  # noqa: E402
-import spec_closed_branch_i  # noqa: E402
-import spec_vdl  # noqa: E402
+import spec_hvdc_ac_emulation  # noqa: E402
+import spec_closed_branch_current_magnitude  # noqa: E402
+import spec_load_model  # noqa: E402
 
 # (spec, golden file): the golden is the independent extraction frozen at swap time.
 FAMILIES = [
     (spec_closed_branch.MODULE, "closed_branch.golden.json"),
     (spec_open_branch.MODULE, "open_branch.golden.json"),
     (spec_shunt.MODULE, "shunt.golden.json"),
-    (spec_hvdc.MODULE, "hvdc.golden.json"),
-    (spec_closed_branch_i.MODULE, "closed_branch_i.golden.json"),
-    (spec_vdl.MODULE, "vdl.golden.json"),
+    (spec_hvdc_ac_emulation.MODULE, "hvdc_ac_emulation.golden.json"),
+    (spec_closed_branch_current_magnitude.MODULE, "closed_branch_current_magnitude.golden.json"),
+    (spec_load_model.MODULE, "load_model.golden.json"),
 ]
 
 EQUIV_TOL = 1e-12      # algebraic identity, parsed-vs-golden / rendered-vs-committed

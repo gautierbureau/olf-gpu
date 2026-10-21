@@ -12,7 +12,7 @@
 #include "../equations/generated/closed_branch_scatter.h"
 #include "../equations/generated/open_branch_scatter.h"
 #include "../equations/generated/shunt_scatter.h"
-#include "../equations/generated/hvdc_scatter.h"
+#include "../equations/generated/hvdc_ac_emulation_scatter.h"
 
 #include "csr_pattern.cuh"
 #include "shared_structure.cuh"
@@ -22,10 +22,10 @@ namespace olfgpu {
 using namespace powsybl::openloadflow;
 
 // csr_pattern.cu: one scatter-table row of one element -> (equation row, variable column), absent for role 2.
-RC resolveClosedBranch(const CbScatter& s, const int* ix);             // P1 Q1 P2 Q2 ph1 v1 ph2 v2 a1col r1col
-RC resolveOpenBranch(const ObScatter& s, const int* ix);             // P1 Q1 P2 Q2 v1 v2
-RC resolveShunt(const ShScatter& s, const int* ix);             // P Q v bcol
-RC resolveHvdcAcEmulation(const HvdcScatter& s, const int* ix);           // P1 P2 ph1 ph2
+RC resolveClosedBranch(const ClosedBranchScatter& s, const int* ix);             // P1 Q1 P2 Q2 ph1 v1 ph2 v2 a1col r1col
+RC resolveOpenBranch(const OpenBranchScatter& s, const int* ix);             // P1 Q1 P2 Q2 v1 v2
+RC resolveShunt(const ShuntScatter& s, const int* ix);             // P Q v bcol
+RC resolveHvdcAcEmulation(const HvdcAcEmulationScatter& s, const int* ix);           // P1 P2 ph1 ph2
 
 // One pass per family: collect the J pattern entries (role 1, both indices present).
 template <typename S, typename F>

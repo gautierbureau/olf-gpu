@@ -20,9 +20,9 @@
 #include "generated/open_branch_scatter.h"
 #include "generated/shunt.cuh"
 #include "generated/shunt_scatter.h"
-#include "generated/hvdc.cuh"
-#include "generated/hvdc_scatter.h"
-#include "generated/vdl.cuh"
+#include "generated/hvdc_ac_emulation.cuh"
+#include "generated/hvdc_ac_emulation_scatter.h"
+#include "generated/load_model.cuh"
 #include "scatter.cuh"
 #include "../fixedmatrix/reactive_relocation.cuh"
 #include "../fixedmatrix/relocated_scatter.cuh"
@@ -61,22 +61,22 @@ __global__ void fillClosedBranchBatch(int elementCount, int nScenarios, int n, i
     // this one, the F-only fill and the bus-balance fill - goes through the same generated assembler, so their
     // residuals agree bit for bit. The F-only fill used to derive the angles by angle addition from per-branch
     // statics: faster, but another rounding than OLF's.
-    double o[CB_NOUT];
+    double o[CLOSED_BRANCH_OUTPUT_COUNT];
     updateClosedBranch(p[0], p[1], p[2], p[3], p[4], v1, r1, v2, p[5], a1, ph1, ph2, 0,
                      o + 0, o + 1, o + 2, o + 3, o + 4, o + 5, o + 6, o + 7, o + 8, o + 9,
                      o + 10, o + 11, o + 12, o + 13, o + 14, o + 15, o + 16, o + 17, o + 18,
                      o + 19, o + 20, o + 21, o + 22, o + 23, o + 24, o + 25, o + 26, o + 27);
     if (dynamicRelocation) {
-        scatterAddRelocated(CB_NOUT, dest + e * CB_NOUT, alternateDestination + e * CB_NOUT, selectorRow + e * CB_NOUT,
+        scatterAddRelocated(CLOSED_BRANCH_OUTPUT_COUNT, dest + e * CLOSED_BRANCH_OUTPUT_COUNT, alternateDestination + e * CLOSED_BRANCH_OUTPUT_COUNT, selectorRow + e * CLOSED_BRANCH_OUTPUT_COUNT,
                       mode + (size_t) s * n, o, vals + (size_t) s * nnz, F + (size_t) s * n,
-                      relocationTablesForScenario(rt, s), e * CB_NOUT);
+                      relocationTablesForScenario(rt, s), e * CLOSED_BRANCH_OUTPUT_COUNT);
     } else {
-        scatterAdd(CB_NOUT, dest + e * CB_NOUT, o, vals + (size_t) s * nnz, F + (size_t) s * n);
+        scatterAdd(CLOSED_BRANCH_OUTPUT_COUNT, dest + e * CLOSED_BRANCH_OUTPUT_COUNT, o, vals + (size_t) s * nnz, F + (size_t) s * n);
     }
     if (phaseControlDestination != nullptr) {                                 // continuous phase control: emit the controlled
-        const int* pd = phaseControlDestination + e * CB_NOUT;                // side's P outputs AGAIN at the a1 row when this
-        const int* psl = phaseControlSelector + e * CB_NOUT;                // scenario has the control enabled (row mode 3)
-        for (int k = 0; k < CB_NOUT; k++) {
+        const int* pd = phaseControlDestination + e * CLOSED_BRANCH_OUTPUT_COUNT;                // side's P outputs AGAIN at the a1 row when this
+        const int* psl = phaseControlSelector + e * CLOSED_BRANCH_OUTPUT_COUNT;                // scenario has the control enabled (row mode 3)
+        for (int k = 0; k < CLOSED_BRANCH_OUTPUT_COUNT; k++) {
             int d = pd[k];
             if (d == -1 || mode[(size_t) s * n + psl[k]] != GpuRowMode::BRANCH_TARGET_P) {
                 continue;
@@ -116,7 +116,7 @@ __global__ void fillClosedBranchQbufBatch(int elementCount, int nScenarios, int 
     double o[4];                                             // p1 q1 p2 q2: updateClosedBranch's own expressions
     updateClosedBranchWithoutDerivatives(p[0], p[1], p[2], p[3], p[4], v1, r1, v2, p[5], a1, ph1, ph2, 0, o + 0, o + 1, o + 2, o + 3);
     const int pos[4] = {0, 7, 14, 21};                       // their output slots (static_assert-pinned below)
-    const int* d = dest + e * CB_NOUT;
+    const int* d = dest + e * CLOSED_BRANCH_OUTPUT_COUNT;
     for (int k = 0; k < 4; k++) {
         if (d[pos[k]] <= -2) {
             atomicAdd(F + (size_t) s * n + (-2 - d[pos[k]]), o[k]);
@@ -140,15 +140,15 @@ __global__ void fillOpenBranchBatch(int elementCount, int nScenarios, int n, int
     const double* xs = x + s * n;
     double v1 = q[4] >= 0 ? xs[q[4]] : 1.0;
     double v2 = q[5] >= 0 ? xs[q[5]] : 1.0;
-    double o[OB_NOUT];
+    double o[OPEN_BRANCH_OUTPUT_COUNT];
     updateOpenBranch(p[0], p[1], p[2], p[3], p[4], p[5], v1, p[6], v2, 0,
                    o + 0, o + 1, o + 2, o + 3, o + 4, o + 5, o + 6, o + 7);
     if (dynamicRelocation) {
-        scatterAddRelocated(OB_NOUT, dest + e * OB_NOUT, alternateDestination + e * OB_NOUT, selectorRow + e * OB_NOUT,
+        scatterAddRelocated(OPEN_BRANCH_OUTPUT_COUNT, dest + e * OPEN_BRANCH_OUTPUT_COUNT, alternateDestination + e * OPEN_BRANCH_OUTPUT_COUNT, selectorRow + e * OPEN_BRANCH_OUTPUT_COUNT,
                       mode + (size_t) s * n, o, vals + (size_t) s * nnz, F + (size_t) s * n,
-                      relocationTablesForScenario(rt, s), e * OB_NOUT);
+                      relocationTablesForScenario(rt, s), e * OPEN_BRANCH_OUTPUT_COUNT);
     } else {
-        scatterAdd(OB_NOUT, dest + e * OB_NOUT, o, vals + (size_t) s * nnz, F + (size_t) s * n);
+        scatterAdd(OPEN_BRANCH_OUTPUT_COUNT, dest + e * OPEN_BRANCH_OUTPUT_COUNT, o, vals + (size_t) s * nnz, F + (size_t) s * n);
     }
 }
 
@@ -160,15 +160,15 @@ __global__ void fillOpenBranchBatch(int elementCount, int nScenarios, int n, int
 // static_asserts, so a codegen output-order change fails the build loudly.
 // ---------------------------------------------------------------------------------
 
-static_assert(CB_SCATTER[0].role == 0 && CB_SCATTER[7].role == 0
-           && CB_SCATTER[14].role == 0 && CB_SCATTER[21].role == 0,
+static_assert(CLOSED_BRANCH_SCATTER[0].role == 0 && CLOSED_BRANCH_SCATTER[7].role == 0
+           && CLOSED_BRANCH_SCATTER[14].role == 0 && CLOSED_BRANCH_SCATTER[21].role == 0,
               "closed-branch residual outputs moved — update fillClosedBranchBatchF");
-static_assert(OB_SCATTER[0].role == 0 && OB_SCATTER[2].role == 0
-           && OB_SCATTER[4].role == 0 && OB_SCATTER[6].role == 0,
+static_assert(OPEN_BRANCH_SCATTER[0].role == 0 && OPEN_BRANCH_SCATTER[2].role == 0
+           && OPEN_BRANCH_SCATTER[4].role == 0 && OPEN_BRANCH_SCATTER[6].role == 0,
               "open-branch residual outputs moved — update fillOpenBranchBatchF");
-static_assert(SH_SCATTER[0].role == 0 && SH_SCATTER[2].role == 0,
+static_assert(SHUNT_SCATTER[0].role == 0 && SHUNT_SCATTER[2].role == 0,
               "shunt residual outputs moved — update fillShuntBatchF");
-static_assert(HVDC_SCATTER[0].role == 0 && HVDC_SCATTER[3].role == 0,
+static_assert(HVDC_AC_EMULATION_SCATTER[0].role == 0 && HVDC_AC_EMULATION_SCATTER[3].role == 0,
               "hvdc residual outputs moved — update fillHvdcBatchF");
 
 __global__ void fillClosedBranchBatchF(int elementCount, int nScenarios, int n, int nnz, int nElements, int elemOffset,
@@ -198,15 +198,15 @@ __global__ void fillClosedBranchBatchF(int elementCount, int nScenarios, int n, 
     updateClosedBranchWithoutDerivatives(p[0], p[1], p[2], p[3], p[4], v1, r1, v2, p[5], a1, ph1, ph2, 0, o + 0, o + 1, o + 2, o + 3);
     const int pos[4] = {0, 7, 14, 21};
     if (dynamicRelocation) {
-        scatterAddFRelocated(4, dest + e * CB_NOUT, alternateDestination + e * CB_NOUT, selectorRow + e * CB_NOUT,
-                       pos, mode + (size_t) s * n, o, F + (size_t) s * n, rt, e * CB_NOUT);
+        scatterAddFRelocated(4, dest + e * CLOSED_BRANCH_OUTPUT_COUNT, alternateDestination + e * CLOSED_BRANCH_OUTPUT_COUNT, selectorRow + e * CLOSED_BRANCH_OUTPUT_COUNT,
+                       pos, mode + (size_t) s * n, o, F + (size_t) s * n, rt, e * CLOSED_BRANCH_OUTPUT_COUNT);
     } else {
-        scatterAddF(4, dest + e * CB_NOUT, pos, o, F + (size_t) s * n);
+        scatterAddF(4, dest + e * CLOSED_BRANCH_OUTPUT_COUNT, pos, o, F + (size_t) s * n);
     }
     if (phaseControlDestination != nullptr) {                                 // continuous phase control: the P residual at a1
         for (int j = 0; j < 4; j += 2) {                     // outputs 0 (p1) / 2 (p2) at table pos 0 / 14
-            int d = phaseControlDestination[e * CB_NOUT + pos[j]];
-            if (d < -1 && mode[(size_t) s * n + phaseControlSelector[e * CB_NOUT + pos[j]]] == GpuRowMode::BRANCH_TARGET_P) {
+            int d = phaseControlDestination[e * CLOSED_BRANCH_OUTPUT_COUNT + pos[j]];
+            if (d < -1 && mode[(size_t) s * n + phaseControlSelector[e * CLOSED_BRANCH_OUTPUT_COUNT + pos[j]]] == GpuRowMode::BRANCH_TARGET_P) {
                 atomicAdd(F + (size_t) s * n + (-2 - d), o[j]);
             }
         }
@@ -233,10 +233,10 @@ __global__ void fillOpenBranchBatchF(int elementCount, int nScenarios, int n, in
     updateOpenBranchWithoutDerivatives(p[0], p[1], p[2], p[3], p[4], p[5], v1, p[6], v2, 0, o + 0, o + 1, o + 2, o + 3);
     const int pos[4] = {0, 2, 4, 6};
     if (dynamicRelocation) {
-        scatterAddFRelocated(4, dest + e * OB_NOUT, alternateDestination + e * OB_NOUT, selectorRow + e * OB_NOUT,
-                       pos, mode + (size_t) s * n, o, F + (size_t) s * n, rt, e * OB_NOUT);
+        scatterAddFRelocated(4, dest + e * OPEN_BRANCH_OUTPUT_COUNT, alternateDestination + e * OPEN_BRANCH_OUTPUT_COUNT, selectorRow + e * OPEN_BRANCH_OUTPUT_COUNT,
+                       pos, mode + (size_t) s * n, o, F + (size_t) s * n, rt, e * OPEN_BRANCH_OUTPUT_COUNT);
     } else {
-        scatterAddF(4, dest + e * OB_NOUT, pos, o, F + (size_t) s * n);
+        scatterAddF(4, dest + e * OPEN_BRANCH_OUTPUT_COUNT, pos, o, F + (size_t) s * n);
     }
 }
 

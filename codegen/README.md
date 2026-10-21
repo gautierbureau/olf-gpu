@@ -30,10 +30,10 @@ factoring OLF's own Java does with its locals and helpers.
 - `java2cuda/spec_<family>.py` — one thin per-family spec, metadata only
   (declared exception: HVDC's `extern_methods` carries powsybl-iidm's
   `getHvdcLineLosses` closed form, which lives in another repo).
-  Families: closed_branch, open_branch, shunt, hvdc (the GPU fill kernels, with
-  scatter stamps) + closed_branch_i (current magnitude, read by the current-limiter
+  Families: closed_branch, open_branch, shunt, hvdc_ac_emulation (the GPU fill kernels, with
+  scatter stamps) + closed_branch_current_magnitude (current magnitude, read by the current-limiter
   loops; per-method functions only, no scatter)
-  + vdl (ZIP/exponential load models: OLF's accumulation loop in
+  + load_model (ZIP/exponential load models: OLF's accumulation loop in
   AbstractLoadModelEquationTerm is parsed to a per-exp-term body, the sum over a
   load model's terms is the batch kernel's per-entry atomicAdd; no scatter —
   landing rows are dynamic vdlIdx, wired by the packer + parity tests).

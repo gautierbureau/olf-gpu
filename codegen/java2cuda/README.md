@@ -2,13 +2,12 @@
 
 THE equation codegen (see ../README.md for the overview): the untouched,
 hand-written OLF Java is the single source of truth; the fused CUDA kernels +
-scatter tables in `native/cuda/equations/generated/` are parsed and transpiled from it. Covers all
-seven families: closed-branch, open-branch P/Q, shunt, HVDC AC emulation and the
-ZIP/exponential load models (`vdl` — the GPU fill kernels) plus the two
-current-magnitude families (closed/open) as NEW GPU
-targets — groundwork for future on-device current-limit monitoring (no consumer
-yet; note their derivatives divide by hypot(re, im) UNGUARDED at I=0, exactly
-like the CPU der() they replicate — upstream guards only calculateSensi).
+scatter tables in `native/cuda/equations/generated/` are parsed and transpiled from it. Covers six
+families: closed-branch, open-branch P/Q, shunt, HVDC AC emulation and the
+ZIP/exponential load models (`load_model` — the GPU fill kernels) plus the
+closed-branch current magnitude read by the current-limiter loops (its derivatives
+divide by hypot(re, im) UNGUARDED at I=0, exactly like the CPU der() they
+replicate; `outerloop/flow_observation.cuh` mirrors calculateSensi, which guards it).
 
 ## The idea
 
@@ -55,7 +54,7 @@ exactly the factoring `AcNetworkVector` does on the CPU.
     (`shunt1` = g1/b1, `shunt2` = g2/b2), the same factoring OLF's own
     `double shunt = shunt(...)` local does.
   - **shunt** — the degenerate case: no trig, no helpers, zero kernel locals.
-  - **hvdc** — the old pipeline's EXPLICIT-family machinery disappears: the Java
+  - **hvdc_ac_emulation** — the old pipeline's EXPLICIT-family machinery disappears: the Java
     `?:` ternary is ALSO valid C and passes straight through; each side's private
     `isController` (`>= 0` vs `< 0`, same name/arity) resolves by PER-FILE helper
     scope (defining file's locals win over the global pool); `rawP` is hoisted
@@ -65,7 +64,7 @@ exactly the factoring `AcNetworkVector` does on the CPU.
     `r*p*p/(v*v)` is DECLARED in the spec (`extern_methods`) — the one formula in
     any spec, guarded by the golden equivalence (the residual pipeline's proof
     supplied the identical closed form).
-  - **closed_branch_i** — the current magnitude the current-limiter loops read.
+  - **closed_branch_current_magnitude** — the current magnitude the current-limiter loops read.
     The value `i1` is OVERLOADED (public over a private `(..., theta)` core) — the
     parser picks the public one by visibility and inlines the private overload
     through it; each side's own `theta` resolves per-file. No assembler routine
@@ -76,7 +75,7 @@ exactly the factoring `AcNetworkVector` does on the CPU.
     namespace named after their Java class. No `dr1` output, matching OLF
     (`calculateSensi` throws on `dr1`), and the FD audit verifies the chain rule
     to 1.9e-9.
-  - **vdl** (ZIP/exponential load models) — the parser's REDUCTION shape:
+  - **load_model** (ZIP/exponential load models) — the parser's REDUCTION shape:
     `AbstractLoadModelEquationTerm.f/dfdv` are ACCUMULATION LOOPS
     (`Σ c·vⁿ · target` over a model's exp terms, `n == 0` skipped), extracted as
     the per-term loop BODY with the term accessors (`expTerm.c()/n()`) promoted

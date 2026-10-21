@@ -30,9 +30,9 @@ void collectClosedBranchPhaseControlPattern(int nClosedBranch, const int* closed
         int a1Col = closedBranchPhaseControlSide[e] >> 1;
         const int* ix = closedBranchIndices + static_cast<size_t>(e) * 12;
         int pcRow = rowMap[a1Col];
-        int k0 = side == GpuTwoSides::ONE ? 0 : 14;          // p1 block / p2 block of CB_SCATTER
+        int k0 = side == GpuTwoSides::ONE ? 0 : 14;          // p1 block / p2 block of CLOSED_BRANCH_SCATTER
         for (int k = k0 + 1; k <= k0 + 6; k++) {             // the 6 derivative outputs
-            RC rc = resolveClosedBranch(CB_SCATTER[k], ix);
+            RC rc = resolveClosedBranch(CLOSED_BRANCH_SCATTER[k], ix);
             if (rc.col >= 0) {
                 pat.emplace_back(pcRow, rc.col);
             }
@@ -44,8 +44,8 @@ void collectClosedBranchPhaseControlPattern(int nClosedBranch, const int* closed
 // the a1 row whose per-scenario mode gates the emission (mode 3 = control enabled). -1 = no emission.
 void buildClosedBranchPhaseControlDestination(int nClosedBranch, const int* closedBranchIndices, const int* closedBranchPhaseControlSide, const std::vector<int>& rowMap,
                       const CsrPattern& pos, std::vector<int>& phaseControlDestination, std::vector<int>& phaseControlSelector) {
-    phaseControlDestination.assign(static_cast<size_t>(nClosedBranch) * CB_NOUT, -1);
-    phaseControlSelector.assign(static_cast<size_t>(nClosedBranch) * CB_NOUT, -1);
+    phaseControlDestination.assign(static_cast<size_t>(nClosedBranch) * CLOSED_BRANCH_OUTPUT_COUNT, -1);
+    phaseControlSelector.assign(static_cast<size_t>(nClosedBranch) * CLOSED_BRANCH_OUTPUT_COUNT, -1);
     for (int e = 0; e < nClosedBranch; e++) {
         if (closedBranchPhaseControlSide[e] < 0) {
             continue;
@@ -55,13 +55,13 @@ void buildClosedBranchPhaseControlDestination(int nClosedBranch, const int* clos
         const int* ix = closedBranchIndices + static_cast<size_t>(e) * 12;
         int pcRow = rowMap[a1Col];
         int k0 = side == GpuTwoSides::ONE ? 0 : 14;
-        phaseControlDestination[static_cast<size_t>(e) * CB_NOUT + k0] = -2 - pcRow;    // the P residual
-        phaseControlSelector[static_cast<size_t>(e) * CB_NOUT + k0] = a1Col;          // mode-3 gate lives at the CONTROLLER's a1 row
+        phaseControlDestination[static_cast<size_t>(e) * CLOSED_BRANCH_OUTPUT_COUNT + k0] = -2 - pcRow;    // the P residual
+        phaseControlSelector[static_cast<size_t>(e) * CLOSED_BRANCH_OUTPUT_COUNT + k0] = a1Col;          // mode-3 gate lives at the CONTROLLER's a1 row
         for (int k = k0 + 1; k <= k0 + 6; k++) {
-            RC rc = resolveClosedBranch(CB_SCATTER[k], ix);
+            RC rc = resolveClosedBranch(CLOSED_BRANCH_SCATTER[k], ix);
             if (rc.col >= 0) {
-                phaseControlDestination[static_cast<size_t>(e) * CB_NOUT + k] = pos.at(pcRow, rc.col);
-                phaseControlSelector[static_cast<size_t>(e) * CB_NOUT + k] = a1Col;
+                phaseControlDestination[static_cast<size_t>(e) * CLOSED_BRANCH_OUTPUT_COUNT + k] = pos.at(pcRow, rc.col);
+                phaseControlSelector[static_cast<size_t>(e) * CLOSED_BRANCH_OUTPUT_COUNT + k] = a1Col;
             }
         }
     }

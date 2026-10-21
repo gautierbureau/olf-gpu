@@ -7,8 +7,8 @@
 #pragma once
 #include <math.h>
 
-#ifndef SH_FN
-#define SH_FN __host__ __device__   // also compiles host-side for the diff test
+#ifndef SHUNT_FN
+#define SHUNT_FN __host__ __device__   // also compiles host-side for the diff test
 #endif
 
 namespace powsybl { namespace openloadflow {
@@ -20,23 +20,23 @@ namespace powsybl { namespace openloadflow {
 // exactly like AcNetworkVector on the CPU.
 namespace shunt {
 
-SH_FN inline double p(double v, double g) {
+SHUNT_FN inline double p(double v, double g) {
     return g * v * v;
 }
 
-SH_FN inline double dpdv(double v, double g) {
+SHUNT_FN inline double dpdv(double v, double g) {
     return 2 * g * v;
 }
 
-SH_FN inline double q(double v, double b) {
+SHUNT_FN inline double q(double v, double b) {
     return -b * v * v;
 }
 
-SH_FN inline double dqdv(double v, double b) {
+SHUNT_FN inline double dqdv(double v, double b) {
     return -2 * b * v;
 }
 
-SH_FN inline double dqdb(double v) {
+SHUNT_FN inline double dqdb(double v) {
     return -v * v;
 }
 
@@ -44,7 +44,7 @@ SH_FN inline double dqdb(double v) {
 // + their three non-zero derivatives for one shunt, writing into Struct-of-Arrays
 // at index i. No trig at all — the cheapest fill of the families; dqdb only
 // matters when the shunt is controllable (SHUNT_B is a skip column in plain PF).
-SH_FN inline void updateShunt(
+SHUNT_FN inline void updateShunt(
         double v, double g, double b,
         int i,
         double* p_out,
@@ -62,7 +62,7 @@ SH_FN inline void updateShunt(
 // VALUES-ONLY variant (OLF's withDerivatives = false): the residual values alone,
 // no Jacobian outputs — for fill sites that never factorize: residual/convergence
 // checks, line-search backtracks, frozen-Jacobian iterations.
-SH_FN inline void updateShuntWithoutDerivatives(
+SHUNT_FN inline void updateShuntWithoutDerivatives(
         double v, double g, double b,
         int i,
         double* p_out,

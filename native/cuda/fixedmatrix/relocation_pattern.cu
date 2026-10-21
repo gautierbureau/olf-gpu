@@ -21,7 +21,7 @@
 #include "../equations/generated/closed_branch_scatter.h"
 #include "../equations/generated/open_branch_scatter.h"
 #include "../equations/generated/shunt_scatter.h"
-#include "../equations/generated/hvdc_scatter.h"
+#include "../equations/generated/hvdc_ac_emulation_scatter.h"
 
 #include "../common/check.cuh"
 #include "../common/stats.cuh"
@@ -72,7 +72,7 @@ bool hasRelocatable(int nClosedBranch, const int* closedBranchIndices, int nShun
     return false;
 }
 
-inline int closedBranchAlternateRow(const CbScatter& s, const int* ix) {
+inline int closedBranchAlternateRow(const ClosedBranchScatter& s, const int* ix) {
     return s.rowEq == 1 ? ix[10 + s.rowEnd] : -1;
 }
 
@@ -82,8 +82,8 @@ void collectClosedBranchRelocationPattern(int nClosedBranch, const int* closedBr
                          int nReactiveRelocationGroups, const int* reactiveRelocationGroupStart, const int* reactiveRelocationCandidateRows, const int* reactiveRelocationDependentGroupOfRow) {
     for (int e = 0; e < nClosedBranch; e++) {
         const int* ix = closedBranchIndices + static_cast<size_t>(e) * 12;
-        for (int k = 0; k < CB_NOUT; k++) {
-            const CbScatter& s = CB_SCATTER[k];
+        for (int k = 0; k < CLOSED_BRANCH_OUTPUT_COUNT; k++) {
+            const ClosedBranchScatter& s = CLOSED_BRANCH_SCATTER[k];
             if (s.role != 1) {
                 continue;
             }
@@ -119,27 +119,27 @@ void collectClosedBranchRelocationPattern(int nClosedBranch, const int* closedBr
 
 // Per (closed branch, output): the alternate destination (CSR slot for a role-1 J entry, -2-row for
 // a role-0 F residual) and the FROZEN row to test the per-scenario row-mode against. selectorRow == -1
-// marks an output that never relocates (the fill then always uses the frozen dest). Sized nClosedBranch*CB_NOUT
+// marks an output that never relocates (the fill then always uses the frozen dest). Sized nClosedBranch*CLOSED_BRANCH_OUTPUT_COUNT
 // like the frozen dest, so the fill indexes all three arrays identically.
 void buildClosedBranchRelocationDestination(int nClosedBranch, const int* closedBranchIndices, const int* relocatedChildOwnRow, const CsrPattern& pos,
                     std::vector<int>& alternateDestination, std::vector<int>& selectorRow,
                     int nReactiveRelocationGroups, const int* reactiveRelocationGroupStart, const int* reactiveRelocationCandidateRows,
                     std::vector<int>& relocationGroup, std::vector<int>& relocationCandidateOffset, std::vector<int>& relocationCandidateDestinations,
                     const int* reactiveRelocationDependentGroupOfRow, std::vector<char>& relocationDependentPilot) {
-    alternateDestination.assign(static_cast<size_t>(nClosedBranch) * CB_NOUT, -1);
-    selectorRow.assign(static_cast<size_t>(nClosedBranch) * CB_NOUT, -1);
-    relocationGroup.assign(static_cast<size_t>(nClosedBranch) * CB_NOUT, -1);
-    relocationCandidateOffset.assign(static_cast<size_t>(nClosedBranch) * CB_NOUT, -1);
-    relocationDependentPilot.assign(static_cast<size_t>(nClosedBranch) * CB_NOUT, 0);
+    alternateDestination.assign(static_cast<size_t>(nClosedBranch) * CLOSED_BRANCH_OUTPUT_COUNT, -1);
+    selectorRow.assign(static_cast<size_t>(nClosedBranch) * CLOSED_BRANCH_OUTPUT_COUNT, -1);
+    relocationGroup.assign(static_cast<size_t>(nClosedBranch) * CLOSED_BRANCH_OUTPUT_COUNT, -1);
+    relocationCandidateOffset.assign(static_cast<size_t>(nClosedBranch) * CLOSED_BRANCH_OUTPUT_COUNT, -1);
+    relocationDependentPilot.assign(static_cast<size_t>(nClosedBranch) * CLOSED_BRANCH_OUTPUT_COUNT, 0);
     for (int e = 0; e < nClosedBranch; e++) {
         const int* ix = closedBranchIndices + static_cast<size_t>(e) * 12;
-        for (int k = 0; k < CB_NOUT; k++) {
-            const CbScatter& s = CB_SCATTER[k];
+        for (int k = 0; k < CLOSED_BRANCH_OUTPUT_COUNT; k++) {
+            const ClosedBranchScatter& s = CLOSED_BRANCH_SCATTER[k];
             RC rc = resolveClosedBranch(s, ix);
             int packedAlternateRow = closedBranchAlternateRow(s, ix);
             int alternateRow = stockPlacementAlternateRow(rc.row, packedAlternateRow, relocatedChildOwnRow);
             int stockSelectorRow = stockPlacementSelectorRow(rc.row, packedAlternateRow, relocatedChildOwnRow);
-            size_t o = static_cast<size_t>(e) * CB_NOUT + k;
+            size_t o = static_cast<size_t>(e) * CLOSED_BRANCH_OUTPUT_COUNT + k;
             if (stockPairOut(rc.row, packedAlternateRow, relocatedChildOwnRow)) {
                 // THREE destinations (see stockPairOut): the coupler's DUMMY_Q row while an RL pin holds it
                 // there (mode 4), NOTHING while the coupler is dead (that row is an identity — the bus is an
@@ -209,7 +209,7 @@ void buildClosedBranchRelocationDestination(int nClosedBranch, const int* closed
 // shunt on a transformer/shunt-controlled bus also relocates (alternateQRow was set for that bus). This is
 // the one-terminal case dynamic relocation exists for: SHUNT_B has no second terminal to hold its
 // column, so a frozen structure freezes it at warm-start.
-inline int shuntAlternateRow(const ShScatter& s, const int* ix) {
+inline int shuntAlternateRow(const ShuntScatter& s, const int* ix) {
     return s.rowEq == 1 ? ix[4] : -1;
 }
 
@@ -217,8 +217,8 @@ void collectShuntRelocationPattern(int nShunt, const int* shuntIndices, const in
                          int nReactiveRelocationGroups, const int* reactiveRelocationGroupStart, const int* reactiveRelocationCandidateRows, const int* reactiveRelocationDependentGroupOfRow) {
     for (int e = 0; e < nShunt; e++) {
         const int* ix = shuntIndices + static_cast<size_t>(e) * 5;
-        for (int k = 0; k < SH_NOUT; k++) {
-            const ShScatter& s = SH_SCATTER[k];
+        for (int k = 0; k < SHUNT_OUTPUT_COUNT; k++) {
+            const ShuntScatter& s = SHUNT_SCATTER[k];
             if (s.role != 1) {
                 continue;
             }
@@ -257,20 +257,20 @@ void buildShuntRelocationDestination(int nShunt, const int* shuntIndices, const 
                     int nReactiveRelocationGroups, const int* reactiveRelocationGroupStart, const int* reactiveRelocationCandidateRows,
                     std::vector<int>& relocationGroup, std::vector<int>& relocationCandidateOffset, std::vector<int>& relocationCandidateDestinations,
                     const int* reactiveRelocationDependentGroupOfRow, std::vector<char>& relocationDependentPilot) {
-    alternateDestination.assign(static_cast<size_t>(nShunt) * SH_NOUT, -1);
-    selectorRow.assign(static_cast<size_t>(nShunt) * SH_NOUT, -1);
-    relocationGroup.assign(static_cast<size_t>(nShunt) * SH_NOUT, -1);
-    relocationCandidateOffset.assign(static_cast<size_t>(nShunt) * SH_NOUT, -1);
-    relocationDependentPilot.assign(static_cast<size_t>(nShunt) * SH_NOUT, 0);
+    alternateDestination.assign(static_cast<size_t>(nShunt) * SHUNT_OUTPUT_COUNT, -1);
+    selectorRow.assign(static_cast<size_t>(nShunt) * SHUNT_OUTPUT_COUNT, -1);
+    relocationGroup.assign(static_cast<size_t>(nShunt) * SHUNT_OUTPUT_COUNT, -1);
+    relocationCandidateOffset.assign(static_cast<size_t>(nShunt) * SHUNT_OUTPUT_COUNT, -1);
+    relocationDependentPilot.assign(static_cast<size_t>(nShunt) * SHUNT_OUTPUT_COUNT, 0);
     for (int e = 0; e < nShunt; e++) {
         const int* ix = shuntIndices + static_cast<size_t>(e) * 5;
-        for (int k = 0; k < SH_NOUT; k++) {
-            const ShScatter& s = SH_SCATTER[k];
+        for (int k = 0; k < SHUNT_OUTPUT_COUNT; k++) {
+            const ShuntScatter& s = SHUNT_SCATTER[k];
             RC rc = resolveShunt(s, ix);
             int packedAlternateRow = shuntAlternateRow(s, ix);
             int alternateRow = stockPlacementAlternateRow(rc.row, packedAlternateRow, relocatedChildOwnRow);
             int stockSelectorRow = stockPlacementSelectorRow(rc.row, packedAlternateRow, relocatedChildOwnRow);
-            size_t o = static_cast<size_t>(e) * SH_NOUT + k;
+            size_t o = static_cast<size_t>(e) * SHUNT_OUTPUT_COUNT + k;
             if (stockPairOut(rc.row, packedAlternateRow, relocatedChildOwnRow)) {
                 // THREE destinations (see stockPairOut): the coupler's DUMMY_Q row while an RL pin holds it
                 // there (mode 4), NOTHING while the coupler is dead (that row is an identity — the bus is an
@@ -346,9 +346,9 @@ void collectHvdcAcEmulationRelocationPattern(int nHvdcAcEmulation, const int* hv
     }
     for (int e = 0; e < nHvdcAcEmulation; e++) {
         const int* ix = hvdcAcEmulationIndices + static_cast<size_t>(e) * 4;
-        for (int k = 0; k < HVDC_NOUT; k++) {
-            RC rc = resolveHvdcAcEmulation(HVDC_SCATTER[k], ix);
-            if (HVDC_SCATTER[k].role == 1 && rc.row >= 0 && rc.col >= 0 && relocatedChildOwnRow[rc.row] >= 0) {
+        for (int k = 0; k < HVDC_AC_EMULATION_OUTPUT_COUNT; k++) {
+            RC rc = resolveHvdcAcEmulation(HVDC_AC_EMULATION_SCATTER[k], ix);
+            if (HVDC_AC_EMULATION_SCATTER[k].role == 1 && rc.row >= 0 && rc.col >= 0 && relocatedChildOwnRow[rc.row] >= 0) {
                 pat.emplace_back(relocatedChildOwnRow[rc.row], rc.col);
             }
         }
@@ -357,21 +357,21 @@ void collectHvdcAcEmulationRelocationPattern(int nHvdcAcEmulation, const int* hv
 
 void buildHvdcAcEmulationRelocationDestination(int nHvdcAcEmulation, const int* hvdcAcEmulationIndices, const int* relocatedChildOwnRow, const CsrPattern& pos,
                     std::vector<int>& alternateDestination, std::vector<int>& selectorRow) {
-    alternateDestination.assign(static_cast<size_t>(nHvdcAcEmulation) * HVDC_NOUT, -1);
-    selectorRow.assign(static_cast<size_t>(nHvdcAcEmulation) * HVDC_NOUT, -1);
+    alternateDestination.assign(static_cast<size_t>(nHvdcAcEmulation) * HVDC_AC_EMULATION_OUTPUT_COUNT, -1);
+    selectorRow.assign(static_cast<size_t>(nHvdcAcEmulation) * HVDC_AC_EMULATION_OUTPUT_COUNT, -1);
     if (relocatedChildOwnRow == nullptr) {
         return;
     }
     for (int e = 0; e < nHvdcAcEmulation; e++) {
         const int* ix = hvdcAcEmulationIndices + static_cast<size_t>(e) * 4;
-        for (int k = 0; k < HVDC_NOUT; k++) {
-            const HvdcScatter& sc = HVDC_SCATTER[k];
+        for (int k = 0; k < HVDC_AC_EMULATION_OUTPUT_COUNT; k++) {
+            const HvdcAcEmulationScatter& sc = HVDC_AC_EMULATION_SCATTER[k];
             RC rc = resolveHvdcAcEmulation(sc, ix);
             if (rc.row < 0 || relocatedChildOwnRow[rc.row] < 0) {
                 continue;
             }
             int own = relocatedChildOwnRow[rc.row];
-            size_t o = static_cast<size_t>(e) * HVDC_NOUT + k;
+            size_t o = static_cast<size_t>(e) * HVDC_AC_EMULATION_OUTPUT_COUNT + k;
             if (sc.role == 1 && rc.col >= 0) {
                 alternateDestination[o] = pos.at(own, rc.col);
                 selectorRow[o] = stockPlacementSelectorRow(rc.row, -1, relocatedChildOwnRow);   // divert only while the dummy row is an identity
@@ -387,7 +387,7 @@ void buildHvdcAcEmulationRelocationDestination(int nHvdcAcEmulation, const int* 
 // of each side's bus travels in a SEPARATE openBranchAlternateReactiveDestination array (nOpenBranch*2) rather than inside openBranchIndices —
 // the connected side's half-open charging q follows a pinned remote member's mode-4 row or a
 // relocation group's carrier exactly like its closed-branch terms.
-inline int openBranchAlternateRow(const ObScatter& s, const int* alternateQRows, int e) {
+inline int openBranchAlternateRow(const OpenBranchScatter& s, const int* alternateQRows, int e) {
     return s.rowEq == 1 ? alternateQRows[e * 2 + s.rowEnd] : -1;
 }
 
@@ -395,8 +395,8 @@ void collectOpenBranchRelocationPattern(int nOpenBranch, const int* openBranchIn
                          int nReactiveRelocationGroups, const int* reactiveRelocationGroupStart, const int* reactiveRelocationCandidateRows, const int* reactiveRelocationDependentGroupOfRow) {
     for (int e = 0; e < nOpenBranch; e++) {
         const int* ix = openBranchIndices + static_cast<size_t>(e) * 6;
-        for (int k = 0; k < OB_NOUT; k++) {
-            const ObScatter& s = OB_SCATTER[k];
+        for (int k = 0; k < OPEN_BRANCH_OUTPUT_COUNT; k++) {
+            const OpenBranchScatter& s = OPEN_BRANCH_SCATTER[k];
             if (s.role != 1) {
                 continue;
             }
@@ -435,20 +435,20 @@ void buildOpenBranchRelocationDestination(int nOpenBranch, const int* openBranch
                     int nReactiveRelocationGroups, const int* reactiveRelocationGroupStart, const int* reactiveRelocationCandidateRows,
                     std::vector<int>& relocationGroup, std::vector<int>& relocationCandidateOffset, std::vector<int>& relocationCandidateDestinations,
                     const int* reactiveRelocationDependentGroupOfRow, std::vector<char>& relocationDependentPilot) {
-    alternateDestination.assign(static_cast<size_t>(nOpenBranch) * OB_NOUT, -1);
-    selectorRow.assign(static_cast<size_t>(nOpenBranch) * OB_NOUT, -1);
-    relocationGroup.assign(static_cast<size_t>(nOpenBranch) * OB_NOUT, -1);
-    relocationCandidateOffset.assign(static_cast<size_t>(nOpenBranch) * OB_NOUT, -1);
-    relocationDependentPilot.assign(static_cast<size_t>(nOpenBranch) * OB_NOUT, 0);
+    alternateDestination.assign(static_cast<size_t>(nOpenBranch) * OPEN_BRANCH_OUTPUT_COUNT, -1);
+    selectorRow.assign(static_cast<size_t>(nOpenBranch) * OPEN_BRANCH_OUTPUT_COUNT, -1);
+    relocationGroup.assign(static_cast<size_t>(nOpenBranch) * OPEN_BRANCH_OUTPUT_COUNT, -1);
+    relocationCandidateOffset.assign(static_cast<size_t>(nOpenBranch) * OPEN_BRANCH_OUTPUT_COUNT, -1);
+    relocationDependentPilot.assign(static_cast<size_t>(nOpenBranch) * OPEN_BRANCH_OUTPUT_COUNT, 0);
     for (int e = 0; e < nOpenBranch; e++) {
         const int* ix = openBranchIndices + static_cast<size_t>(e) * 6;
-        for (int k = 0; k < OB_NOUT; k++) {
-            const ObScatter& s = OB_SCATTER[k];
+        for (int k = 0; k < OPEN_BRANCH_OUTPUT_COUNT; k++) {
+            const OpenBranchScatter& s = OPEN_BRANCH_SCATTER[k];
             RC rc = resolveOpenBranch(s, ix);
             int packedAlternateRow = openBranchAlternateRow(s, openBranchAlternateReactiveDestination, e);
             int alternateRow = stockPlacementAlternateRow(rc.row, packedAlternateRow, relocatedChildOwnRow);
             int stockSelectorRow = stockPlacementSelectorRow(rc.row, packedAlternateRow, relocatedChildOwnRow);
-            size_t o = static_cast<size_t>(e) * OB_NOUT + k;
+            size_t o = static_cast<size_t>(e) * OPEN_BRANCH_OUTPUT_COUNT + k;
             if (stockPairOut(rc.row, packedAlternateRow, relocatedChildOwnRow)) {
                 // THREE destinations (see stockPairOut): the coupler's DUMMY_Q row while an RL pin holds it
                 // there (mode 4), NOTHING while the coupler is dead (that row is an identity — the bus is an

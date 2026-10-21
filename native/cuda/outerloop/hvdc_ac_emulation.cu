@@ -16,7 +16,7 @@
 #include "../common/codes/gpu_outer_loop_kind.cuh"
 #include "../common/codes/gpu_ac_emulation_status.cuh"
 #include "../common/codes/gpu_row_mode.cuh"
-#include "../equations/generated/hvdc.cuh"
+#include "../equations/generated/hvdc_ac_emulation.cuh"
 
 #include "hvdc_ac_emulation.cuh"
 
@@ -65,8 +65,8 @@ __global__ void hvdcAcEmulationLoopBatch(int nh, int nScenarios, int n, int nEle
         // it at the target row made a relocated converter bus read a DUMMY_P variable as its angle).
         double ph1 = xs[hvdcBus1PhiColumn[h]];
         double ph2 = xs[hvdcBus2PhiColumn[h]];
-        double pp1 = hvdc::p1(p[0], p[1], p[4], p[5], p[6], ph1, ph2);
-        double pp2 = hvdc::p2(p[0], p[1], p[4], p[5], p[6], ph1, ph2);
+        double pp1 = hvdc_ac_emulation::p1(p[0], p[1], p[4], p[5], p[6], ph1, ph2);
+        double pp2 = hvdc_ac_emulation::p2(p[0], p[1], p[4], p[5], p[6], ph1, ph2);
         if (acEmulationStatus == GpuAcEmulationStatus::LINEAR_MODE) {  // OLF checkAcEmulationMode
             if (pp1 >= 0) {
                 if (pp1 > p[2]) { next = GpuAcEmulationStatus::SATURATION_MODE_FROM_CS1_TO_CS2; }

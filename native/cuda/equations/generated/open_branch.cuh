@@ -7,8 +7,8 @@
 #pragma once
 #include <math.h>
 
-#ifndef OB_FN
-#define OB_FN __host__ __device__   // also compiles host-side for the diff test
+#ifndef OPEN_BRANCH_FN
+#define OPEN_BRANCH_FN __host__ __device__   // also compiles host-side for the diff test
 #endif
 
 namespace powsybl { namespace openloadflow {
@@ -24,35 +24,35 @@ constexpr double R2 = 1.0;
 // exactly like AcNetworkVector on the CPU.
 namespace open_branch {
 
-OB_FN inline double p2(double y, double cosKsi, double sinKsi, double g1, double b1, double g2, double v2) {
+OPEN_BRANCH_FN inline double p2(double y, double cosKsi, double sinKsi, double g1, double b1, double g2, double v2) {
     return R2 * R2 * v2 * v2 * (g2 + y * y * g1 / ((g1 + y * sinKsi) * (g1 + y * sinKsi) + (-b1 + y * cosKsi) * (-b1 + y * cosKsi)) + (b1 * b1 + g1 * g1) * y * sinKsi / ((g1 + y * sinKsi) * (g1 + y * sinKsi) + (-b1 + y * cosKsi) * (-b1 + y * cosKsi)));
 }
 
-OB_FN inline double dp2dv2(double y, double cosKsi, double sinKsi, double g1, double b1, double g2, double v2) {
+OPEN_BRANCH_FN inline double dp2dv2(double y, double cosKsi, double sinKsi, double g1, double b1, double g2, double v2) {
     return 2 * R2 * R2 * v2 * (g2 + y * y * g1 / ((g1 + y * sinKsi) * (g1 + y * sinKsi) + (-b1 + y * cosKsi) * (-b1 + y * cosKsi)) + (b1 * b1 + g1 * g1) * y * sinKsi / ((g1 + y * sinKsi) * (g1 + y * sinKsi) + (-b1 + y * cosKsi) * (-b1 + y * cosKsi)));
 }
 
-OB_FN inline double q2(double y, double cosKsi, double sinKsi, double g1, double b1, double b2, double v2) {
+OPEN_BRANCH_FN inline double q2(double y, double cosKsi, double sinKsi, double g1, double b1, double b2, double v2) {
     return -R2 * R2 * v2 * v2 * (b2 + y * y * b1 / ((g1 + y * sinKsi) * (g1 + y * sinKsi) + (-b1 + y * cosKsi) * (-b1 + y * cosKsi)) - (b1 * b1 + g1 * g1) * y * cosKsi / ((g1 + y * sinKsi) * (g1 + y * sinKsi) + (-b1 + y * cosKsi) * (-b1 + y * cosKsi)));
 }
 
-OB_FN inline double dq2dv2(double y, double cosKsi, double sinKsi, double g1, double b1, double b2, double v2) {
+OPEN_BRANCH_FN inline double dq2dv2(double y, double cosKsi, double sinKsi, double g1, double b1, double b2, double v2) {
     return -2 * v2 * R2 * R2 * (b2 + y * y * b1 / ((g1 + y * sinKsi) * (g1 + y * sinKsi) + (-b1 + y * cosKsi) * (-b1 + y * cosKsi)) - (b1 * b1 + g1 * g1) * y * cosKsi / ((g1 + y * sinKsi) * (g1 + y * sinKsi) + (-b1 + y * cosKsi) * (-b1 + y * cosKsi)));
 }
 
-OB_FN inline double p1(double y, double cosKsi, double sinKsi, double g1, double g2, double b2, double v1, double r1) {
+OPEN_BRANCH_FN inline double p1(double y, double cosKsi, double sinKsi, double g1, double g2, double b2, double v1, double r1) {
     return r1 * r1 * v1 * v1 * (g1 + y * y * g2 / ((g2 + y * sinKsi) * (g2 + y * sinKsi) + (-b2 + y * cosKsi) * (-b2 + y * cosKsi)) + (b2 * b2 + g2 * g2) * y * sinKsi / ((g2 + y * sinKsi) * (g2 + y * sinKsi) + (-b2 + y * cosKsi) * (-b2 + y * cosKsi)));
 }
 
-OB_FN inline double dp1dv1(double y, double cosKsi, double sinKsi, double g1, double g2, double b2, double v1, double r1) {
+OPEN_BRANCH_FN inline double dp1dv1(double y, double cosKsi, double sinKsi, double g1, double g2, double b2, double v1, double r1) {
     return 2 * r1 * r1 * v1 * (g1 + y * y * g2 / ((g2 + y * sinKsi) * (g2 + y * sinKsi) + (-b2 + y * cosKsi) * (-b2 + y * cosKsi)) + (b2 * b2 + g2 * g2) * y * sinKsi / ((g2 + y * sinKsi) * (g2 + y * sinKsi) + (-b2 + y * cosKsi) * (-b2 + y * cosKsi)));
 }
 
-OB_FN inline double q1(double y, double cosKsi, double sinKsi, double b1, double g2, double b2, double v1, double r1) {
+OPEN_BRANCH_FN inline double q1(double y, double cosKsi, double sinKsi, double b1, double g2, double b2, double v1, double r1) {
     return -r1 * r1 * v1 * v1 * (b1 + y * y * b2 / ((g2 + y * sinKsi) * (g2 + y * sinKsi) + (-b2 + y * cosKsi) * (-b2 + y * cosKsi)) - (b2 * b2 + g2 * g2) * y * cosKsi / ((g2 + y * sinKsi) * (g2 + y * sinKsi) + (-b2 + y * cosKsi) * (-b2 + y * cosKsi)));
 }
 
-OB_FN inline double dq1dv1(double y, double cosKsi, double sinKsi, double b1, double g2, double b2, double v1, double r1) {
+OPEN_BRANCH_FN inline double dq1dv1(double y, double cosKsi, double sinKsi, double b1, double g2, double b2, double v1, double r1) {
     return -2 * v1 * r1 * r1 * (b1 + y * y * b2 / ((g2 + y * sinKsi) * (g2 + y * sinKsi) + (-b2 + y * cosKsi) * (-b2 + y * cosKsi)) - (b2 * b2 + g2 * g2) * y * cosKsi / ((g2 + y * sinKsi) * (g2 + y * sinKsi) + (-b2 + y * cosKsi) * (-b2 + y * cosKsi)));
 }
 
@@ -62,7 +62,7 @@ OB_FN inline double dq1dv1(double y, double cosKsi, double sinKsi, double b1, do
 // are computed once and shared. A real branch has only ONE side open: the host
 // stamps that side's pair and resolves the other pair's scatter rows to -1
 // (absent), exactly like the closed-branch fill.
-OB_FN inline void updateOpenBranch(
+OPEN_BRANCH_FN inline void updateOpenBranch(
         double y, double ksi, double g1, double b1, double g2, double b2,
         double v1, double r1, double v2,
         int i,
@@ -89,7 +89,7 @@ OB_FN inline void updateOpenBranch(
 // VALUES-ONLY variant (OLF's withDerivatives = false): the residual values alone,
 // no Jacobian outputs — for fill sites that never factorize: residual/convergence
 // checks, line-search backtracks, frozen-Jacobian iterations.
-OB_FN inline void updateOpenBranchWithoutDerivatives(
+OPEN_BRANCH_FN inline void updateOpenBranchWithoutDerivatives(
         double y, double ksi, double g1, double b1, double g2, double b2,
         double v1, double r1, double v2,
         int i,

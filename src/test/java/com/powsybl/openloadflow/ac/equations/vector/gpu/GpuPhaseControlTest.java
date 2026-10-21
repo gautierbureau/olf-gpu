@@ -45,7 +45,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  * </ul>
  *
  * <p>Everything else was already in place before this test: the closed-branch kernel reads a1
- * from the state vector when the branch derives it ({@code closedBranchIndices[8]}) and {@code CB_SCATTER}
+ * from the state vector when the branch derives it ({@code closedBranchIndices[8]}) and {@code CLOSED_BRANCH_SCATTER}
  * already emits dp1da1/dq1da1/dp2da1/dq2da1 into the branch-owned alpha column.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}

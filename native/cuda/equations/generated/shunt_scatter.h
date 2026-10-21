@@ -16,10 +16,10 @@
 
 namespace powsybl { namespace openloadflow {
 
-struct ShScatter { int role; int rowEnd; int rowEq; int colEnd; int colVar; };
+struct ShuntScatter { int role; int rowEnd; int rowEq; int colEnd; int colVar; };
 
-constexpr int SH_NOUT = 5;
-constexpr ShScatter SH_SCATTER[SH_NOUT] = {
+constexpr int SHUNT_OUTPUT_COUNT = 5;
+constexpr ShuntScatter SHUNT_SCATTER[SHUNT_OUTPUT_COUNT] = {
     {0, 0, 0, -1, -1},  // [0] p
     {1, 0, 0, 0, 1},  // [1] dpdv
     {0, 0, 1, -1, -1},  // [2] q

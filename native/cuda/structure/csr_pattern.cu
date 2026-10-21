@@ -21,7 +21,7 @@
 #include "../equations/generated/closed_branch_scatter.h"
 #include "../equations/generated/open_branch_scatter.h"
 #include "../equations/generated/shunt_scatter.h"
-#include "../equations/generated/hvdc_scatter.h"
+#include "../equations/generated/hvdc_ac_emulation_scatter.h"
 
 #include "../common/check.cuh"
 #include "../common/stats.cuh"
@@ -34,7 +34,7 @@ using namespace powsybl::openloadflow;
 
 namespace olfgpu {
 
-RC resolveClosedBranch(const CbScatter& s, const int* ix) {            // P1 Q1 P2 Q2 ph1 v1 ph2 v2 a1col r1col
+RC resolveClosedBranch(const ClosedBranchScatter& s, const int* ix) {            // P1 Q1 P2 Q2 ph1 v1 ph2 v2 a1col r1col
     RC rc;
     if (s.role == 2) return rc;
     rc.row = ix[s.rowEnd * 2 + s.rowEq];
@@ -45,7 +45,7 @@ RC resolveClosedBranch(const CbScatter& s, const int* ix) {            // P1 Q1 
     return rc;
 }
 
-RC resolveOpenBranch(const ObScatter& s, const int* ix) {            // P1 Q1 P2 Q2 v1 v2
+RC resolveOpenBranch(const OpenBranchScatter& s, const int* ix) {            // P1 Q1 P2 Q2 v1 v2
     RC rc;
     if (s.role == 2) return rc;
     rc.row = ix[s.rowEnd * 2 + s.rowEq];
@@ -53,7 +53,7 @@ RC resolveOpenBranch(const ObScatter& s, const int* ix) {            // P1 Q1 P2
     return rc;
 }
 
-RC resolveShunt(const ShScatter& s, const int* ix) {            // P Q v bcol
+RC resolveShunt(const ShuntScatter& s, const int* ix) {            // P Q v bcol
     RC rc;
     if (s.role == 2) return rc;
     rc.row = ix[s.rowEq];                                    // single bus: rowEnd == 0
@@ -63,7 +63,7 @@ RC resolveShunt(const ShScatter& s, const int* ix) {            // P Q v bcol
     return rc;
 }
 
-RC resolveHvdcAcEmulation(const HvdcScatter& s, const int* ix) {          // P1 P2 ph1 ph2
+RC resolveHvdcAcEmulation(const HvdcAcEmulationScatter& s, const int* ix) {          // P1 P2 ph1 ph2
     RC rc;
     if (s.role == 2) return rc;
     rc.row = ix[s.rowEnd];                                   // P rows only: rowEq == 0

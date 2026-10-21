@@ -1,7 +1,7 @@
 // Copyright (c) 2026, RTE (http://www.rte-france.com)
 // SPDX-License-Identifier: MPL-2.0
 //
-// Scatter table for the fused hvdc fill kernel. GENERATED — DO NOT EDIT. Regenerate with: python3 codegen/java2cuda/java2cuda.py (parsed from the OLF Java).
+// Scatter table for the fused hvdc-ac-emulation fill kernel. GENERATED — DO NOT EDIT. Regenerate with: python3 codegen/java2cuda/java2cuda.py (parsed from the OLF Java).
 //
 // One row per output of updateHvdcAcEmulation, IN ORDER. role: 0=residual (add to F at its
 // equation row), 1=jacobian (add to J at (row,col)), 2=skip (column variable is never a state
@@ -16,10 +16,10 @@
 
 namespace powsybl { namespace openloadflow {
 
-struct HvdcScatter { int role; int rowEnd; int rowEq; int colEnd; int colVar; };
+struct HvdcAcEmulationScatter { int role; int rowEnd; int rowEq; int colEnd; int colVar; };
 
-constexpr int HVDC_NOUT = 6;
-constexpr HvdcScatter HVDC_SCATTER[HVDC_NOUT] = {
+constexpr int HVDC_AC_EMULATION_OUTPUT_COUNT = 6;
+constexpr HvdcAcEmulationScatter HVDC_AC_EMULATION_SCATTER[HVDC_AC_EMULATION_OUTPUT_COUNT] = {
     {0, 0, 0, -1, -1},  // [0] p1
     {1, 0, 0, 0, 0},  // [1] dp1dph1
     {1, 0, 0, 1, 0},  // [2] dp1dph2

@@ -84,68 +84,68 @@ endif()
 # cannot perturb the solver's codegen (adding a parameter to a solve kernel has flipped a 1e-12
 # test before).
 add_library(olfgpu SHARED
-    native/cuda/jni/structure_jni.cu
-    native/cuda/jni/batch_solve_jni.cu
     native/cuda/jni/batch_readback_jni.cu
-    native/cuda/jni/newton_settings_jni.cu
-    native/cuda/jni/driver_jni.cu
+    native/cuda/jni/batch_solve_jni.cu
     native/cuda/jni/distributed_slack_jni.cu
+    native/cuda/jni/driver_jni.cu
+    native/cuda/jni/hvdc_jni.cu
+    native/cuda/jni/newton_settings_jni.cu
+    native/cuda/jni/phase_control_jni.cu
     native/cuda/jni/reactive_limits_jni.cu
     native/cuda/jni/remote_voltage_control_jni.cu
-    native/cuda/jni/zero_impedance_jni.cu
-    native/cuda/jni/hvdc_jni.cu
-    native/cuda/jni/voltage_monitoring_jni.cu
     native/cuda/jni/secondary_voltage_control_jni.cu
-    native/cuda/jni/transformer_voltage_control_jni.cu
     native/cuda/jni/shunt_voltage_control_jni.cu
-    native/cuda/jni/phase_control_jni.cu
+    native/cuda/jni/structure_jni.cu
+    native/cuda/jni/transformer_voltage_control_jni.cu
     native/cuda/jni/transposed_solve_jni.cu
-    native/cuda/sa/olf_gpu_violations.cu
+    native/cuda/jni/voltage_monitoring_jni.cu
+    native/cuda/jni/zero_impedance_jni.cu
     native/cuda/common/stats.cu
-    native/cuda/solver/linear_solver_settings.cu
     native/cuda/structure/csr_pattern.cu
-    native/cuda/fixedmatrix/relocation_pattern.cu
-    native/cuda/structure/phase_control_pattern.cu
     native/cuda/structure/distribution_dests.cu
-    native/cuda/structure/zero_impedance_dests.cu
-    native/cuda/fixedmatrix/zero_impedance_relocation.cu
+    native/cuda/structure/phase_control_pattern.cu
     native/cuda/structure/shared_structure.cu
+    native/cuda/structure/zero_impedance_dests.cu
     native/cuda/fixedmatrix/relocated_rows.cu
+    native/cuda/fixedmatrix/relocation_pattern.cu
+    native/cuda/fixedmatrix/zero_diagonal_repair.cu
     native/cuda/fixedmatrix/zero_diagonal_repair_tables.cu
-    native/cuda/diagnostics/matrix_scan.cu
-    native/cuda/diagnostics/driver_traces.cu
-    native/cuda/solver/outer_loop_driver.cu
-    native/cuda/outerloop/phase_control.cu
-    native/cuda/outerloop/voltage_monitoring.cu
-    native/cuda/outerloop/hvdc_ac_emulation.cu
-    native/cuda/outerloop/forced_target_q.cu
-    native/cuda/outerloop/distributed_slack.cu
-    native/cuda/outerloop/sensitivity.cu
-    native/cuda/outerloop/secondary_voltage_control.cu
-    native/cuda/outerloop/incremental_transformer_voltage_control.cu
-    native/cuda/outerloop/incremental_flow_control.cu
-    native/cuda/outerloop/incremental_shunt_voltage_control.cu
-    native/cuda/outerloop/transformer_voltage_control.cu
-    native/cuda/outerloop/shunt_voltage_control.cu
-    native/cuda/outerloop/remote_voltage_control.cu
-    native/cuda/outerloop/pilot_voltage.cu
-    native/cuda/outerloop/reactive_capability_curves.cu
-    native/cuda/outerloop/reactive_limits_seed.cu
-    native/cuda/outerloop/reactive_limits.cu
+    native/cuda/fixedmatrix/zero_impedance_relocation.cu
     native/cuda/equations/branch_fill.cu
     native/cuda/equations/bus_injection_fill.cu
     native/cuda/equations/distribution_fill.cu
-    native/cuda/equations/zero_impedance_fill.cu
     native/cuda/equations/fill_launch.cu
-    native/cuda/solver/state_vector_scaling.cu
-    native/cuda/solver/convergence.cu
-    native/cuda/solver/realistic_voltage_check.cu
-    native/cuda/fixedmatrix/zero_diagonal_repair.cu
-    native/cuda/solver/iterative_refinement.cu
-    native/cuda/solver/compact_solve.cu
+    native/cuda/equations/zero_impedance_fill.cu
     native/cuda/solver/batch_context.cu
+    native/cuda/solver/compact_solve.cu
+    native/cuda/solver/convergence.cu
+    native/cuda/solver/iterative_refinement.cu
+    native/cuda/solver/linear_solver_settings.cu
     native/cuda/solver/newton_iteration.cu
+    native/cuda/solver/outer_loop_driver.cu
+    native/cuda/solver/realistic_voltage_check.cu
     native/cuda/solver/solve_seed.cu
+    native/cuda/solver/state_vector_scaling.cu
+    native/cuda/outerloop/distributed_slack.cu
+    native/cuda/outerloop/forced_target_q.cu
+    native/cuda/outerloop/hvdc_ac_emulation.cu
+    native/cuda/outerloop/incremental_flow_control.cu
+    native/cuda/outerloop/incremental_shunt_voltage_control.cu
+    native/cuda/outerloop/incremental_transformer_voltage_control.cu
+    native/cuda/outerloop/phase_control.cu
+    native/cuda/outerloop/pilot_voltage.cu
+    native/cuda/outerloop/reactive_capability_curves.cu
+    native/cuda/outerloop/reactive_limits.cu
+    native/cuda/outerloop/reactive_limits_seed.cu
+    native/cuda/outerloop/remote_voltage_control.cu
+    native/cuda/outerloop/secondary_voltage_control.cu
+    native/cuda/outerloop/sensitivity.cu
+    native/cuda/outerloop/shunt_voltage_control.cu
+    native/cuda/outerloop/transformer_voltage_control.cu
+    native/cuda/outerloop/voltage_monitoring.cu
+    native/cuda/diagnostics/driver_traces.cu
+    native/cuda/diagnostics/matrix_scan.cu
+    native/cuda/sa/olf_gpu_violations.cu
 )
 target_include_directories(olfgpu
     PRIVATE

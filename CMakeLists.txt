@@ -99,7 +99,6 @@ add_library(olfgpu SHARED
     native/cuda/jni/transformer_voltage_control_jni.cu
     native/cuda/jni/shunt_voltage_control_jni.cu
     native/cuda/jni/phase_control_jni.cu
-    native/cuda/jni/sensitivity_jni.cu
     native/cuda/jni/transposed_solve_jni.cu
     native/cuda/sa/olf_gpu_violations.cu
     native/cuda/common/stats.cu

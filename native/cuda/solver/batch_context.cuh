@@ -274,30 +274,8 @@ struct BatchSolverContext {
     // tables alone decide.
     bool distributedSlackOuterLoop = true;
     bool reactiveLimitsOuterLoop = true;
-    // DRIVER PAUSE/RESUME. Some of OLF's outer loops cannot run on the device without RE-DERIVING
-    // what OLF already computes in Java (SecondaryVoltageControl's sensitivity observables; the
-    // discrete tap/section tables of the transformer and shunt loops). Rather than port that maths —
-    // a wrong target converges cleanly and nothing flags it — the driver PAUSES at their slot in
-    // OLF's order, hands control back, and RESUMES where it stopped. The per-solve device state
-    // (RL pins, monitoring activations, DS absorbed totals, HVDC statuses, x/targets/modes) simply
-    // stays in the context across the pause; only the host-side driver locals need saving.
-    int hostLoopMask = 0;                                    // bitmask of enabled host-owned loops
-                                                             // one hostLoopMaskBit per GpuOuterLoopKind::HOST_* kind
-    int driverResume = 0;                                    // this call continues a paused driver
-    int driverPaused = 0;                                    // the last call stopped at a GpuOuterLoopKind::HOST_*
-    int pausedLoopKind = GpuOuterLoopKind::NOT_PAUSED;       // WHICH host loop the driver stopped at
-    std::vector<int> pausedStatus;                           // per-scenario solve status at the pause: the resumed
-                                                             // call's checks (outerLoopCheckActive = converged) need it back
-    int startLoopKind = GpuOuterLoopKind::NONE;              // a RESTARTED sequence resumes its sweep AT this
-                                                             // loop (OLF re-checks the loop that went UNSTABLE
-                                                             // after the re-solve, before restarting the sweep)
-    int pausedLoopIdx = 0;
-    int pausedSeqChanged = 0;
-    std::vector<int> pausedProdIters;
     std::vector<int> outerLoopFirstSolveIterations, outerLoopIterations, outerLoopSolvePasses;              // OLF_GPU_PHASE_TIME: per-scenario Newton work by
-                                                             // solve pass (kept across a host-loop pause)
-    std::vector<char> pausedLive, pausedActive;
-    std::vector<char> hostChanged;                           // per scenario: the host loop was UNSTABLE
+                                                             // solve pass
     int nMonitoringVoltageControllers = 0;
     DeviceBuf dMonitoringVoltageBusVRow, dMonitoringVoltageBand, dMonitoringVoltageDeltaStart, dMonitoringVoltageDeltaRow, dMonitoringVoltageDeltaMode, dMonitoringVoltageDeltaTarget, dMonitoringVoltageActivatedTargetV;
     // INCREMENTAL TRANSFORMER VOLTAGE CONTROL — in-kernel outer loop (GpuOuterLoopKind::INCREMENTAL_TRANSFORMER_VOLTAGE_CONTROL).

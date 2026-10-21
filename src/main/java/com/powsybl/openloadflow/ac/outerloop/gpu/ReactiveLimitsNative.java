@@ -119,10 +119,4 @@ public final class ReactiveLimitsNative {
      *  Bmin/Bmax*(v*nomV)^2 evaluation (and the pinned re-freeze via busesWithUpdatedQLimits). */
     public static native void setBatchReactiveLimitSvcSusceptanceLimits(long handle, double[] svcBmin, double[] svcBmax,
                                                   double[] v2Base);
-
-    /** Un-pin reactive-limit entries at a driver pause (SecondaryVoltageControl's re-enable step):
-     *  {@code pairs} is (scenario, RL entry) flattened, {@code newTargets} the voltage target each row
-     *  returns to. A resume skips the RL seeding, so this is the only way a host-side un-pin reaches
-     *  the device. No-op for an entry that is not pinned. */
-    public static native void setBatchReactiveLimitPqPvSwitches(long handle, int[] pairs, double[] newTargets);
 }

@@ -17,9 +17,8 @@ import java.util.Arrays;
  * <p>Every builder walks OLF's controllers and skips the ones it cannot express — a control whose
  * variable is not in the equation system, a branch the extraction does not pack. Skipping was only ever
  * logged, which hides the case that matters: when a builder skips SOME of a loop's controllers the list
- * is still non-empty, the kernel takes the loop, the host-pause slot is cleared, and the skipped
- * controllers are silently dropped — the device then runs a loop OLF runs differently. An EMPTY list is
- * the benign case, because the kernel declines and the pause runs OLF's own loop.
+ * is still non-empty, the kernel takes the loop, and the skipped controllers are silently dropped — the
+ * device then runs a loop OLF runs differently.
  *
  * <p>So the rule a caller wants is all-or-nothing: drive a loop on the device only when its
  * representation is COMPLETE. This is what lets it ask.
@@ -30,7 +29,7 @@ import java.util.Arrays;
  */
 public final class GpuBatchSkips {
 
-    /** The host-pause slot a skipped controller belongs to. */
+    /** The outer loop a skipped controller belongs to. */
     public enum Slot {
         TVC, SHUNT, PHASE, RPC, SVC, MONITORING
     }

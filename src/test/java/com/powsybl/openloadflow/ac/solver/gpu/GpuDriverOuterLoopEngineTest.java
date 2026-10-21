@@ -81,8 +81,6 @@ class GpuDriverOuterLoopEngineTest {
 
             assertEquals(1, real.initializations, "OLF initializes its loop once");
             assertEquals(1, real.checks);
-        } finally {
-            GpuNewtonRaphson.GPU_ENGINE_CONTEXT.remove();
         }
     }
 }

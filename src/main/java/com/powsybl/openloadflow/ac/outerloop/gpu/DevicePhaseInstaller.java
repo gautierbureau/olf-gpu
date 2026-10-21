@@ -44,8 +44,8 @@ public final class DevicePhaseInstaller {
 
     /** Install every control-loop table of the run on the (possibly cached) context, or clear it when the run has
      *  none of that loop. Returns which loops the device owns; a loop the run has and the device does not own is
-     *  listed in {@link InstalledPhases#refused()}, and the caller decides what runs it (the security analysis
-     *  sends the whole run to the CPU, the base load flow leaves OLF's own loop at its pause slot). */
+     *  listed in {@link InstalledPhases#refused()}, and the caller sends the work to the CPU (the security analysis
+     *  the whole run, the base load flow its solve). */
     public static InstalledPhases install(long handle, Request r) {
         // IncrementalTransformerVoltageControl as a DRIVER PHASE (OLF order 8), shared controlled
         // buses included (the one-tap-at-a-time round robin runs in the group kernel).

@@ -16,6 +16,7 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 
 import static com.powsybl.openloadflow.sa.gpu.GpuSaTestNetworks.*;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /**
  * GPU-batched security analysis against the CPU: phase control, incremental and continuous, and the transformer reactive power control.
@@ -195,12 +196,17 @@ class GpuSaPhaseControlTest extends AbstractGpuSaTest {
      *  PhaseControlOuterLoop is local BY CONSTRUCTION there and not by restriction — changeTapPositions
      *  caps {@code controllerBranch.getI1()} against the target and differentiates that same term for
      *  the shift direction, so the controlled branch never enters the decision. The device builds its I
-     *  term from the controller too, which is why this batches at 1e-12 rather than routing to the CPU. */
+     *  term from the controller too, which is why this batches at 1e-12 rather than routing to the CPU.
+     *  The base load flow has the PhaseControl loop and no controller the device tables hold: the device owns the
+     *  loop with nothing to do, and the base solve stays on the device (it used to pause the driver for OLF's loop). */
     @Test
     void deviceRemoteContinuousPhaseControlCurrentLimiterMatchesCpu() {
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        long fallbacksBefore = com.powsybl.openloadflow.ac.solver.gpu.GpuNewtonRaphson.CPU_FALLBACK_COUNT.get();
         assertGpuMatchesCpu(remoteCurrentLimiterNetwork(), remoteCurrentLimiterContingencies(), 1e-12,
                 remoteCurrentLimiterParameters());
+        assertEquals(fallbacksBefore, com.powsybl.openloadflow.ac.solver.gpu.GpuNewtonRaphson.CPU_FALLBACK_COUNT.get(),
+                "the base load flow must solve on the device");
     }
 }

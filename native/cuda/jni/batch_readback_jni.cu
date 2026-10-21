@@ -76,7 +76,7 @@ OLF_JNI(ac_solver_gpu, BatchReadbackNative, readBatchDistributedSlackGeneratorMo
     return out;
 }
 
-// Per scenario of the last solveBatchContext call (and its host-loop resumes): {solve passes, first pass's
+// Per scenario of the last solveBatchContext call: {solve passes, first pass's
 // Newton iterations, total Newton iterations}, flattened s*3. The per-contingency counterpart of
 // GPU_OL_HIST, for matching OLF's CPU_OL_STATS contingency by contingency.
 extern "C" JNIEXPORT jintArray JNICALL

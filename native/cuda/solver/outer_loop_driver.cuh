@@ -1,8 +1,8 @@
 // Copyright (c) 2026, RTE (http://www.rte-france.com)
 // SPDX-License-Identifier: MPL-2.0
 //
-// The outer-loop driver of a batched solve (OLF AcloadFlowEngine.run / runOuterLoop): the per-call set-up and
-// resume, the loop order, the sweep that drives each in-kernel outer loop to stable, the Newton re-solves and
+// The outer-loop driver of a batched solve (OLF AcloadFlowEngine.run / runOuterLoop): the per-call set-up,
+// the loop order, the sweep that drives each in-kernel outer loop to stable, the Newton re-solves and
 // the stable/unstable bookkeeping.
 #ifndef OLF_GPU_SOLVER_OUTER_LOOP_DRIVER_CUH
 #define OLF_GPU_SOLVER_OUTER_LOOP_DRIVER_CUH

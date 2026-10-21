@@ -58,13 +58,8 @@ void traceBatchPass(BatchSolverContext* ctx, DriverPass& drv, int nLoops, bool s
             case GpuOuterLoopKind::DISTRIBUTED_SLACK:           kindName = "DistributedSlack"; break;
             case GpuOuterLoopKind::FREEZING_HVDC_AC_EMULATION:  kindName = "FreezingHvdcACEmulation"; break;
             case GpuOuterLoopKind::HVDC_AC_EMULATION_LIMITS:  kindName = "AcHvdcAcEmulationLimits"; break;
-            case GpuOuterLoopKind::HOST_SECONDARY_VOLTAGE_CONTROL:     kindName = "HOST:SecondaryVoltageControl"; break;
             case GpuOuterLoopKind::MONITORING_VOLTAGE:   kindName = "MonitoringVoltage"; break;
             case GpuOuterLoopKind::REACTIVE_LIMITS:           kindName = "ReactiveLimits"; break;
-            case GpuOuterLoopKind::HOST_PHASE_CONTROL:   kindName = "HOST:PhaseControl"; break;
-            case GpuOuterLoopKind::HOST_TRANSFORMER_VOLTAGE_CONTROL:     kindName = "HOST:TransformerVoltageControl"; break;
-            case GpuOuterLoopKind::HOST_TRANSFORMER_REACTIVE_POWER_CONTROL:    kindName = "HOST:TransformerReactivePowerControl"; break;
-            case GpuOuterLoopKind::HOST_SHUNT_VOLTAGE_CONTROL:   kindName = "HOST:ShuntVoltageControl"; break;
             case GpuOuterLoopKind::INCREMENTAL_TRANSFORMER_VOLTAGE_CONTROL:   kindName = "TransformerVoltageControl"; break;
             case GpuOuterLoopKind::INCREMENTAL_SHUNT_VOLTAGE_CONTROL: kindName = "ShuntVoltageControl"; break;
             case GpuOuterLoopKind::INCREMENTAL_PHASE_CONTROL: kindName = ctx->nPhaseControlControllerBranches > 0 ? "PhaseControl" : "IncrementalPhaseControl"; break;
@@ -525,7 +520,7 @@ void traceReactiveLimitsAudit(BatchSolverContext* ctx, DriverPass& drv, std::vec
 void tracePhaseTime(BatchSolverContext* ctx, DriverPass& drv) {
     const int& nS = drv.nS;
     BatchResult& res = drv.res;
-    if (!ctx->driverPaused && std::getenv("OLF_GPU_PHASE_TIME") != nullptr && ctx->outerLoopSolvePasses.size() == static_cast<size_t>(nS)) {
+    if (std::getenv("OLF_GPU_PHASE_TIME") != nullptr && ctx->outerLoopSolvePasses.size() == static_cast<size_t>(nS)) {
         for (int s = 0; s < nS; s++) {
             if (ctx->outerLoopSolvePasses[s] == 0) continue;
             if (res.status[s] != GpuAcSolverStatus::CONVERGED) {                         // not finished converged on device (CPU replay,

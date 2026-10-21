@@ -133,32 +133,6 @@ OLF_JNI(ac_solver_gpu, NewtonSettingsNative, setBatchActiveRowCounts)(
     }
 }
 
-/** Write absolute target values at (scenario, row) positions — how a host-owned loop applies its
- *  decision without disturbing the device-side targets the sequence has already accumulated. */
-extern "C" JNIEXPORT void JNICALL
-OLF_JNI(ac_solver_gpu, NewtonSettingsNative, setBatchTargetDeltas)(
-        JNIEnv* env, jclass, jlong handle, jintArray jRows, jdoubleArray jVals) {
-    auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
-    if (ctx == nullptr || jRows == nullptr) {
-        return;
-    }
-    jsize count = env->GetArrayLength(jRows);
-    if (count == 0) {
-        return;
-    }
-    std::vector<int> rows(count);
-    std::vector<double> vals(count);
-    env->GetIntArrayRegion(jRows, 0, count, rows.data());
-    env->GetDoubleArrayRegion(jVals, 0, count, vals.data());
-    DeviceBuf dR;
-    DeviceBuf dV;
-    dR.upload(rows.data(), (size_t) count * sizeof(int));
-    dV.upload(vals.data(), (size_t) count * sizeof(double));
-    applyTargetOverrideBatch<<<grid(count), BLOCK, 0, ctx->stream>>>(count, dR.as<int>(), dV.as<double>(),
-                                                                  ctx->dTarget.as<double>());
-    CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
-}
-
 extern "C" JNIEXPORT void JNICALL
 OLF_JNI(ac_solver_gpu, NewtonSettingsNative, setBatchFrozenRows)(
         JNIEnv* env, jclass, jlong handle, jintArray jSlotRow) {

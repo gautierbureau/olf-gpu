@@ -14,7 +14,6 @@ import com.powsybl.openloadflow.ac.outerloop.AcActivePowerDistributionOuterLoop;
 import com.powsybl.openloadflow.ac.outerloop.AcOuterLoop;
 import com.powsybl.openloadflow.ac.outerloop.DistributedSlackOuterLoop;
 import com.powsybl.openloadflow.ac.outerloop.ReactiveLimitsOuterLoop;
-import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuOuterLoopKind;
 import org.apache.commons.lang3.tuple.Pair;
 
 import java.util.List;
@@ -22,8 +21,8 @@ import java.util.List;
 /**
  * The engine of a GPU load flow — a plain load flow with {@link GpuNewtonRaphsonFactory} and the base
  * load flow of the GPU security analysis alike: the device driver solves it as a batch of one and owns
- * the outer loops, in-kernel or as host-owned pause points at their OLF positions. This engine
- * suppresses those loops from OLF's standard outer-loop cycle, or they would run twice.
+ * the outer loops, in-kernel at their OLF positions. This engine suppresses those loops from OLF's
+ * standard outer-loop cycle, or they would run twice.
  *
  * <p>Dropping them HERE rather than from {@code parameters.getOuterLoops()} is deliberate: the GPU
  * security analysis derives its own batch configuration and qualification gates from that shared
@@ -39,9 +38,6 @@ public class GpuDriverOuterLoopEngine extends AcloadFlowEngine {
 
     public GpuDriverOuterLoopEngine(AcLoadFlowContext context) {
         super(context);
-        // Make the engine's AcLoadFlowContext available to the solver's host-loop pause cycle,
-        // so outer-loop contexts share the engine's equation system and Jacobian (not duplicates).
-        com.powsybl.openloadflow.ac.solver.gpu.GpuNewtonRaphson.GPU_ENGINE_CONTEXT.set(context);
     }
 
     @Override
@@ -65,21 +61,20 @@ public class GpuDriverOuterLoopEngine extends AcloadFlowEngine {
                 ? gpu.lastDistributedActivePower() : Double.NaN;
     }
 
-    /** True for loops the device driver runs itself — in-kernel (DS, RL) or host-paused (SVC,
-     *  TVC, Phase, TRPC, Shunt). These must not also run in OLF's engine, or they apply twice. */
+    /** True for loops the device driver runs itself, in-kernel. These must not also run in OLF's engine, or they
+     *  apply twice. A loop the device cannot own fails the device solve, which goes to OLF's CPU Newton-Raphson. */
     static boolean drivenOnDevice(AcOuterLoop outerLoop) {
         if (outerLoop instanceof DistributedSlackOuterLoop || outerLoop instanceof ReactiveLimitsOuterLoop) {
-            return true;  // in-kernel driver phases
+            return true;
         }
-        switch (outerLoop.getName()) {                       // in-kernel driver phases with their own tables
-            case "FreezingHvdcACEmulation", "AcHvdcAcEmulationLimits", "VoltageMonitoring" -> {
-                return true;
-            }
-            default -> { }
-        }
-        // Host-paused loops: anything with a LOOP_HOST_* kind
-        return GpuOuterLoopKind.hostKindOf(outerLoop.getName())
-                >= GpuOuterLoopKind.HOST_SECONDARY_VOLTAGE_CONTROL;
+        return switch (outerLoop.getName()) {
+            case "FreezingHvdcACEmulation", "AcHvdcAcEmulationLimits", "VoltageMonitoring", "SecondaryVoltageControl",
+                 "PhaseControl", "IncrementalPhaseControl",
+                 "TransformerVoltageControl", "SimpleTransformerVoltageControl", "IncrementalTransformerVoltageControl",
+                 "IncrementalTransformerReactivePowerControl",
+                 "ShuntVoltageControl", "IncrementalShuntVoltageControl" -> true;
+            default -> false;
+        };
     }
 
     /**

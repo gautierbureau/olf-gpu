@@ -186,8 +186,7 @@ __global__ void incrementalTransformerVoltageControlApplyRhoBatch(int nIncrement
  *  from its base tap, as the tap's full 8-double pi row] ++ [the caller's own overrides]. The TVC
  *  entries go FIRST because findTapOverride returns the first (slot, elem) match, so a contingency
  *  tap action on the same transformer must not shadow the loop's move. Runs after every pass that
- *  moved a tap, and on a driver RESUME (the caller's list is re-uploaded at solve entry and would
- *  otherwise erase the moves the paused sequence had already made). */
+ *  moved a tap. */
 void rebuildTapOverrides(BatchSolverContext* ctx) {
     int nS = ctx->nScenarios;
     int nIncrementalTransformerVoltageControlControllerBranches = ctx->nIncrementalTransformerVoltageControlControllerBranches;

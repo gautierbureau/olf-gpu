@@ -16,11 +16,6 @@ inline const char* outerLoopKindName(int k) {
         case GpuOuterLoopKind::HVDC_AC_EMULATION_LIMITS: return "AcHvdcAcEmulationLimits";
         case GpuOuterLoopKind::MONITORING_VOLTAGE: return "MonitoringVoltage";
         case GpuOuterLoopKind::REACTIVE_LIMITS: return "ReactiveLimits";
-        case GpuOuterLoopKind::HOST_SECONDARY_VOLTAGE_CONTROL: return "HOST:SecondaryVoltageControl";
-        case GpuOuterLoopKind::HOST_PHASE_CONTROL: return "HOST:PhaseControl";
-        case GpuOuterLoopKind::HOST_TRANSFORMER_VOLTAGE_CONTROL: return "HOST:TransformerVoltageControl";
-        case GpuOuterLoopKind::HOST_TRANSFORMER_REACTIVE_POWER_CONTROL: return "HOST:TransformerReactivePowerControl";
-        case GpuOuterLoopKind::HOST_SHUNT_VOLTAGE_CONTROL: return "HOST:ShuntVoltageControl";
         case GpuOuterLoopKind::INCREMENTAL_TRANSFORMER_VOLTAGE_CONTROL: return "TransformerVoltageControl";
         case GpuOuterLoopKind::INCREMENTAL_SHUNT_VOLTAGE_CONTROL: return "ShuntVoltageControl";
         case GpuOuterLoopKind::INCREMENTAL_PHASE_CONTROL: return "PhaseControl";

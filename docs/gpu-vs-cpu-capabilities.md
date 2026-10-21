@@ -756,8 +756,7 @@ the histogram counts rejected pairs alongside rejected contingencies.
    ~~non-INCREMENTAL shunt voltage-control mode co-present with another decision orchestrator~~
    (retired 2026-09-15 — every control loop is a driver phase swept in OLF's order);
    ~~SecondaryVoltageControl co-present with a control loop~~ (gated for part of 2026-09-15, retired
-   the same day — SVC now runs as a DRIVER PAUSE at its own OLF slot on the chunk path, so the order
-   is OLF's; tasks #48);
+   the same day — SVC runs at its own OLF slot on the chunk path, so the order is OLF's; tasks #48);
    SecondaryVc with non-LOCAL generator VC; continuous PhaseControl LIMITER with a
    remote controlled branch; monitoring SVCs failing `GpuBatchVoltageMonitoring.supported`;
    AC-emu HVDC not all-LINEAR at base ONLY when neither the freeze nor the limits loop
@@ -777,8 +776,7 @@ the histogram counts rejected pairs alongside rejected contingencies.
    two in a chain discarded each other's target moves (measured 2.4e-1 kV). The refusals that can still
    fire: a transformer control whose tap table the reflection cannot read, a flow/phase controller whose
    controlled element is not a packed closed branch, and a secondary-VC zone set wider than the
-   in-kernel dense system (that one falls back to the driver PAUSE at the same slot, which IS in OLF's
-   order, not to an orchestrator).
+   in-kernel dense system (2026-10-21: the run goes to the CPU too; the driver pause it used is gone).
 5. Base-only CPU (contingencies still batch): threadCount>1 disables base-on-GPU only
    (~~frozen-HVDC base~~ retired 2026-09-08 — the batch-of-1 route derives the hv bits
    from the live AC-emulation statuses per solve).

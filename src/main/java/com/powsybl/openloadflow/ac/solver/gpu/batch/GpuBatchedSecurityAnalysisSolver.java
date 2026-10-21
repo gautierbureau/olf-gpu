@@ -231,8 +231,8 @@ public final class GpuBatchedSecurityAnalysisSolver {
                     network, equationSystem, targetVector, baseActivation, baseTargets,
                     gpuData.reactiveLimits().voltageRow(), gpuData.reactiveLimits().busNum(), n);
             // All-or-nothing, the same rule the base load flow applies: a loop the builders represented
-            // only PARTIALLY would have the device drive a SUBSET of it, and this path has no host-pause
-            // slot to hand it back to, so the whole run goes to the CPU (resultsByIndex stays null).
+            // only PARTIALLY would have the device drive a SUBSET of it, so the whole run goes to the CPU
+            // (resultsByIndex stays null).
             if (DevicePhaseOwnership.batchable()) {
                 // built in the order the call evaluated them when they were its arguments
                 var hvdcElemIndex = GpuHvdcAcEmulationLimitsOuterLoop.elementIndices(network, nElements);

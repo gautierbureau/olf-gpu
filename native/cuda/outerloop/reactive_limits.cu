@@ -476,32 +476,6 @@ __global__ void pilotSelfMixedPvPqGate(int nReactiveLimitEntries, int nScenarios
     }
 }
 
-// SecondaryVoltageControl's tryToReEnableHelpfulControllerBuses, applied to the DEVICE pin state at a
-// driver pause: a zone whose controllers are only PARTLY at a reactive limit un-pins the limited ones so
-// they can help the zone realign. OLF does it with setGeneratorVoltageControlEnabledAndRecomputeTargetQ
-// (back to PV) + setQLimitType(null); here that is the row's saved PV form, the zone's CURRENT voltage
-// target, and limitType 0. The host orchestrator got this for free by re-seeding reactiveLimitsSeedState on its own
-// re-solve — a RESUME skips the RL seeding, so without this channel the un-pin never reached the device.
-__global__ void reactiveLimitsPqPvSwitchBatch(int nPairs, int nS, int n, int nReactiveLimitEntries, const int* pairs, const double* newTarget,
-                             const int* reactiveLimitVoltageRow, char* limitType, const char* savedMode, int* mode, double* target) {
-    int k = blockIdx.x * blockDim.x + threadIdx.x;
-    if (k >= nPairs) return;
-    int s = pairs[2 * k];
-    int i = pairs[2 * k + 1];
-    if (s < 0 || s >= nS || i < 0 || i >= nReactiveLimitEntries) return;
-    size_t scenarioEntry = (size_t) s * nReactiveLimitEntries + i;
-    if (limitType[scenarioEntry] == GpuQLimitType::NONE) return;  // not pinned: nothing to give back
-    // A member FROZEN by the generator voltage control manager is not a reactive-limit pin: giving it
-    // back would restore a V identity on a row that holds the group's DISTR_Q share, and would undo a
-    // decision the transformer phase owns and will undo itself at COMPLETE.
-    if (limitType[scenarioEntry] == GpuQLimitType::FROZEN) return;
-    size_t idx = (size_t) s * n + reactiveLimitVoltageRow[i];
-    char sm = savedMode[scenarioEntry];
-    mode[idx] = (sm == GpuRowMode::BUS_TARGET_V_WITH_SLOPE) ? GpuRowMode::BUS_TARGET_V_WITH_SLOPE : GpuRowMode::FIXED_VARIABLE;                          // the PV form saved at pin time (2 = slope SVC)
-    target[idx] = newTarget[k];
-    limitType[scenarioEntry] = GpuQLimitType::NONE;
-}
-
 // One check of ReactiveLimitsOuterLoop on every live scenario (GpuOuterLoopKind::REACTIVE_LIMITS): the curve limits at the current
 // targets, the PV->PQ pins and releases, robust mode's realistic-voltage pins and the forced-PV election.
 void reactiveLimitsCheck(BatchSolverContext* ctx, DriverPass& drv, int loopKind) {

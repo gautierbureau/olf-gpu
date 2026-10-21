@@ -37,7 +37,6 @@ import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.GpuBatchLossPreDistribu
 import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.GpuBatchQualification;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuAcSolverStatus;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuLinearSolveMode;
-import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuOuterLoopKind;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuQLimitType;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuReactiveLimitsState;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuRowMode;
@@ -231,6 +230,17 @@ final class GpuBatchChunkSolver {
         if (!installed.refused().isEmpty()) {
             LOGGER.warn("GPU batched N-1 disabled for this run: the device cannot own {} — every contingency "
                     + "runs on the CPU rather than through a host orchestrator out of OLF's loop order", installed.refused());
+            return;
+        }
+        // SecondaryVoltageControl (OLF order 4), the whole check on the device, by the same rule: a zone set the kernel
+        // refuses (wider than its dense system, or an observable on an unpacked element) sends the run to the CPU. An
+        // empty table clears a cached context's.
+        GpuSecondaryVoltageControlOuterLoop.Controllers secondaryVoltageControlControllers = phases.secondaryVoltageControlControllers();
+        boolean secondaryVoltageControlActive = secondaryVoltageControlControllers != null && !secondaryVoltageControlControllers.controllerBuses().isEmpty();
+        if (!GpuSecondaryVoltageControlOuterLoop.uploadToDevice(handle, secondaryVoltageControlActive ? secondaryVoltageControlControllers : null)
+                && secondaryVoltageControlActive) {
+            LOGGER.warn("GPU batched N-1 disabled for this run: the device cannot own SecondaryVoltageControl — every contingency "
+                    + "runs on the CPU");
             return;
         }
 
@@ -900,9 +910,8 @@ final class GpuBatchChunkSolver {
                         GpuHvdcAcEmulationLimitsOuterLoop.seedBaseStatuses(chunkSize, realCount, hvdcControllers,
                                 hvdcStatus, rs.disabledMask);
                     }
-                    boolean secondaryVoltageControlActive = phases.secondaryVoltageControlControllers() != null && !phases.secondaryVoltageControlControllers().controllerBuses().isEmpty();
                     boolean monitoringVoltageActive = phases.monitoring() != null && !phases.monitoring().isEmpty();
-                    int[] reactiveLimitsFinalState = (!pairPhase && !pairIdxList.isEmpty() || secondaryVoltageControlActive || monitoringVoltageActive
+                    int[] reactiveLimitsFinalState = (!pairPhase && !pairIdxList.isEmpty() || monitoringVoltageActive
                             || System.getenv("OLF_GPU_RL_TRACE") != null) && nReactiveLimitEntries > 0 ? new int[chunkSize * nReactiveLimitEntries] : null;
                     cl.upload(handle, gpuData);
                     // The two HVDC AC-emulation loops run as DRIVER PHASES, in OLF's own position
@@ -924,26 +933,8 @@ final class GpuBatchChunkSolver {
                     // solve. Run-constant table, but the context is per chunk.
                     boolean monitoringVoltageInKernel = monitoringVoltageActive;
                     GpuMonitoringVoltageOuterLoop.installDriverLoop(handle, monitoringVoltageInKernel ? phases.monitoring() : null);
-                    // SecondaryVoltageControl as a DRIVER PAUSE at its OLF slot (order 4). Run as a host
-                    // orchestrator it executed AFTER the whole device sweep — i.e. after the control loops
-                    // OLF puts at orders 7-10 — so each decided on a state the other had already moved
-                    // (1.7e-3 kV on a zone whose pilot bus feeds an AFTER_GENERATOR transformer; the
-                    // pre-2026-09-15 host chain was worse still at 2.4e-1 kV, its re-solves not composing).
-                    // Pausing puts it back in OLF's order with no new maths: the same decision code runs on
-                    // the paused states and hands its target moves back as flat deltas.
-                    // SecondaryVoltageControl, in OLF's order (order 4). Preferred form: an IN-KERNEL phase,
-                    // the whole check on the device. Where the kernel refuses the zone set (wider than its
-                    // dense system, or an observable on an unpacked element) the driver PAUSES at the same
-                    // slot and the same decision runs on the host instead.
-                    // the run's own loops, before the phase uploads
+                    // the run's own loops
                     DriverNative.setBatchOuterLoops(handle, in.settings().distributedSlackOuterLoop(), in.settings().reactiveLimitsOuterLoop());
-                    boolean secondaryVoltageControlInKernel = secondaryVoltageControlActive && GpuSecondaryVoltageControlOuterLoop.uploadToDevice(handle, phases.secondaryVoltageControlControllers());
-                    if (!secondaryVoltageControlInKernel) {
-                        GpuSecondaryVoltageControlOuterLoop.uploadToDevice(handle, null);   // clear a cached context's table
-                    }
-                    boolean secondaryVoltageControlAsDriverPause = secondaryVoltageControlActive && reactiveLimitsFinalState != null && !secondaryVoltageControlInKernel;
-                    DriverNative.setBatchHostLoop(handle, secondaryVoltageControlAsDriverPause
-                            ? GpuOuterLoopKind.hostMaskBit(GpuOuterLoopKind.HOST_SECONDARY_VOLTAGE_CONTROL) : 0);
                     long solveCountBefore = BatchReadbackNative.readBatchSolveCount(handle);
                     // Seeds only where no full per-scenario state goes (the pair phase builds its own from the parents).
                     NewtonSettingsNative.setBatchX0Seeds(handle, x0Full == null ? x0SeedIdx : null, x0Full == null ? x0SeedVal : null);
@@ -1047,76 +1038,6 @@ final class GpuBatchChunkSolver {
                         }
                     }
                     tMainSolveNs += System.nanoTime() - tSolve0;
-                    if (secondaryVoltageControlAsDriverPause) {
-                        long secondaryVoltageControlStartNanos = System.nanoTime();
-                        int nSecondaryVoltageControlControllerBuses = phases.secondaryVoltageControlControllers().controllerBuses().size();
-                        double[][] secondaryVoltageControlTargetV = new double[chunkSize][nSecondaryVoltageControlControllerBuses];
-                        for (int s2 = 0; s2 < chunkSize; s2++) {
-                            for (int c = 0; c < nSecondaryVoltageControlControllerBuses; c++) {
-                                secondaryVoltageControlTargetV[s2][c] = phases.secondaryVoltageControlControllers().controllerBuses().get(c).baseTargetV();
-                            }
-                        }
-                        // The driver re-pauses at the SVC slot on EVERY sweep restart, and a reactive-limit
-                        // switch restarts the sweep — so the pause count is bounded by the whole outer-loop
-                        // budget, not by the number of zone adjustments. The kernel retires a scenario whose
-                        // budget a host-UNSTABLE verdict exhausts, so this cap is only a safety net; stopping
-                        // early would leave the context PAUSED and the chunk holding mid-sweep states.
-                        int maxSecondaryVoltageControlRounds = 16 * (config.maxOuterIterations() > 0 ? config.maxOuterIterations() : 20);
-                        int secondaryVoltageControlRounds = 0;
-                        while (DriverNative.readBatchDriverPaused(handle) == GpuOuterLoopKind.HOST_SECONDARY_VOLTAGE_CONTROL
-                                && secondaryVoltageControlRounds++ < maxSecondaryVoltageControlRounds) {
-                            var dec = GpuSecondaryVoltageControlOuterLoop.decideAtPause(handle, chunkSize, realCount, n, nReactiveLimitEntries,
-                                    chunkResults, phases.secondaryVoltageControlControllers(), reactiveLimitsFinalState, secondaryVoltageControlTargetV, baseState);
-                            if (dec.targetRows() != null && dec.targetRows().length > 0) {
-                                NewtonSettingsNative.setBatchTargetDeltas(handle, dec.targetRows(), dec.targetValues());
-                            }
-                            if (dec.unpinPairs() != null && dec.unpinPairs().length > 0) {
-                                ReactiveLimitsNative.setBatchReactiveLimitPqPvSwitches(handle, dec.unpinPairs(), dec.unpinTargets());
-                            }
-                            DriverNative.setBatchDriverResume(handle, dec.hostChanged());
-                            chunkResults = BatchSolveNative.solveBatchContext(handle, baseState, baseTargets,
-                                    rs.rowModePerScenario, baseRowMode, rs.disabledMask, targetOverrideIndex, targetOverrideValue,
-                                    rs.distributedSlackOverrideBus, rs.distributedSlackOverrideFactorDelta,
-                                    rs.distributedSlackOverrideBaseTargetPDelta, rs.distributedSlackOverrideMaxDelta,
-                                    rs.distributedSlackOverrideMinDelta, distributedSlackBusAnchorShift,
-                                    slackBusAnchorShift,
-                                    ChunkArrays.concatInts(cl.reactiveLimitTargetVOverrideScenarioEntryList, dec.secondaryVoltageControlTargetVScenarioEntry()),
-                                    ChunkArrays.concatDoubles(cl.reactiveLimitTargetVOverrideValue, dec.secondaryVoltageControlTargetVValues()),
-
-                                    cl.reactiveLimitDeltaOverrideScenarioEntryList.stream().mapToInt(Integer::intValue).toArray(),
-                                    cl.reactiveLimitDeltaOverrideValueList.stream().mapToDouble(Double::doubleValue).toArray(),
-                                    cl.reactiveCapabilityCurveOverrideScenarioCurve.stream().mapToInt(Integer::intValue).toArray(),
-                                    cl.reactiveCapabilityCurveOverrideStepScale.stream().mapToDouble(Double::doubleValue).toArray(),
-                                                                        parameters.getMaxIterations(), tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
-                                    config.stateVectorScalingMode(), config.maxDv(), config.maxDphi(),
-                                    config.stateVectorScalingMode() == GpuStateVectorScalingMode.MAX_VOLTAGE_CHANGE ? varType : null, x0Full,
-                                    rs.shuntAdmittanceOverrideScenarioElementList.stream().mapToInt(Integer::intValue).toArray(),
-                                    rs.shuntAdmittanceOverrideDeltaList.stream().mapToDouble(Double::doubleValue).toArray(),
-                                    null, reactiveLimitsFinalState,
-                                    rs.closedBranchParameterOverrideScenarioElementList.stream().mapToInt(Integer::intValue).toArray(),
-                                    rs.closedBranchParameterOverrideValueList.stream().mapToDouble(Double::doubleValue).toArray(),
-                                    config.maxOuterIterations(), config.maxPqPvSwitch(), config.rejectSlackDistributionFailureFlag(), 0,
-                                    rs.nBaseClosedZeroImpedanceBranches, rs.zeroImpedanceBranchCloseScenarioElementList.stream().mapToInt(Integer::intValue).toArray(),
-                                    rs.zeroImpedanceBranchOpenScenarioElementList.stream().mapToInt(Integer::intValue).toArray());
-                        }
-                        if (DriverNative.readBatchDriverPaused(handle) != GpuOuterLoopKind.NOT_PAUSED) {
-                            // Safety net only: the budget bookkeeping above should always end the cycle.
-                            // Mid-sweep states must never be reported — cancel and let the CPU replay them.
-                            LOGGER.warn("Secondary VC driver pause did not settle in {} rounds — chunk routed to the CPU",
-                                    maxSecondaryVoltageControlRounds);
-                            DriverNative.cancelBatchDriverPause(handle);
-                            for (int s2 = 0; s2 < realCount; s2++) {
-                                if (chunkResults[s2] != null) {
-                                    chunkResults[s2][n + 2] = GpuAcSolverStatus.REJECTED;
-                                }
-                            }
-                        }
-                        if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
-                            System.err.printf("SVC_PAUSE rounds=%d stillPaused=%d%n", secondaryVoltageControlRounds,
-                                    DriverNative.readBatchDriverPaused(handle));
-                        }
-                        orchNs.merge("SecondaryVc.driverPause", System.nanoTime() - secondaryVoltageControlStartNanos, Long::sum);
-                    }
                     if (OUTER_LOOP_STATS) {
                         // OLF_OL_STATS: the device's per-contingency Newton work, in the same shape as OLF's
                         // CPU_OL_STATS lines, so the two arms can be matched contingency by contingency.

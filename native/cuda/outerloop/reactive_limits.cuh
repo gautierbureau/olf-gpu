@@ -47,9 +47,6 @@ __global__ void pilotSelfMixedPvPqGate(int nReactiveLimitEntries, int nScenarios
                                      const int* pilotSelfReactiveLimitEntry, int nReactiveRelocationGroups,
                                 int nDistrQMembers, const int* distrQMemberReactiveLimitEntry, const char* distrQSubgroup);
 
-__global__ void reactiveLimitsPqPvSwitchBatch(int nPairs, int nS, int n, int nReactiveLimitEntries, const int* pairs, const double* newTarget,
-                             const int* reactiveLimitVoltageRow, char* limitType, const char* savedMode, int* mode, double* target);
-
 
 // One check of ReactiveLimitsOuterLoop on every live scenario (loopKind GpuOuterLoopKind::REACTIVE_LIMITS).
 void reactiveLimitsCheck(BatchSolverContext* ctx, DriverPass& drv, int loopKind);

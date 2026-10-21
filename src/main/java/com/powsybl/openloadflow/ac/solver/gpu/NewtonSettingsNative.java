@@ -57,9 +57,6 @@ public final class NewtonSettingsNative {
      *  GpuAcActivationExtractor.extractRowCriteria); nulls clear them. Call after {@link #setBatchRowCriteria}. */
     public static native void setBatchRowCriteriaAlternate(long handle, double[] alternateRowMaxMismatch, int[] alternateRowMaxMismatchSelector);
 
-    /** Absolute target writes at flat {@code (scenario * n + row)} positions, for a host-owned loop. */
-    public static native void setBatchTargetDeltas(long handle, int[] rows, double[] values);
-
     /** Starting values for the next batch solve that is given no full per-scenario state: {@code s * n + row} ->
      *  value, written over the base state the device tiles; consumed by that solve. Null clears. */
     public static native void setBatchX0Seeds(long handle, int[] flatIndex, double[] value);

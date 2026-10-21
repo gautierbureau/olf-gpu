@@ -31,11 +31,10 @@ class GpuSaSecondaryVoltageControlTest extends AbstractGpuSaTest {
 
     /** SecondaryVoltageControl CO-PRESENT with an AFTER_GENERATOR transformer voltage control: the zone
      *  moves GEN_1's target to bring the 132 kV pilot BUS_2 to its target while T2wT drives the 33 kV
-     *  BUS_3. SVC is OLF order 4, the transformer loop order 8, and SVC is the last HOST orchestrator on
-     *  the chunk path — it runs AFTER the whole device sweep, so each decides on a state the other has
-     *  already moved. Measured: 1.7e-3 kV with the control loops in-kernel, 2.4e-1 kV with the
-     *  pre-2026-09-15 host-orchestrator chain (silently wrong, its re-solves not composing). Fixed by
-     *  running SVC as a DRIVER PAUSE at its own slot: the same decision code, in OLF's order. */
+     *  BUS_3. SVC is OLF order 4, the transformer loop order 8. Run as a host orchestrator after the whole
+     *  device sweep, each decided on a state the other had already moved: 1.7e-3 kV with the control loops
+     *  in-kernel, 2.4e-1 kV with the pre-2026-09-15 host-orchestrator chain (silently wrong, its re-solves not
+     *  composing). The in-kernel phase runs at its own slot, in OLF's order. */
     @Test
     void deviceSecondaryVcWithAfterGeneratorTvcMatchesCpu() {
         org.junit.jupiter.api.Assumptions.assumeTrue(
@@ -63,7 +62,7 @@ class GpuSaSecondaryVoltageControlTest extends AbstractGpuSaTest {
                 .setSecondaryVoltageControl(true).setMaxPlausibleTargetVoltage(1.6);
         assertGpuMatchesCpu(network, ctgs, 1e-11, lfp);
         assertEquals(1, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(),
-                "SVC co-present with a control loop must batch (the driver pause keeps OLF's order)");
+                "SVC co-present with a control loop must batch (the in-kernel phase keeps OLF's order)");
     }
 
     /** TWO secondary voltage control zones in one system. OLF assembles one system over every enabled controller of

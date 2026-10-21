@@ -159,8 +159,8 @@ final class GpuSaRunScope {
         // RPC 9, shunt 10). As a HOST ORCHESTRATOR it ran AFTER the whole device sweep, so each decided on
         // a state the other had already moved — the inverse of OLF's order (1.7e-3 kV on a zone whose pilot
         // bus feeds an AFTER_GENERATOR transformer; 2.4e-1 kV with the pre-2026-09-15 host chain, whose
-        // re-solves do not compose). Since 2026-09-15 the chunk path runs SVC as a DRIVER PAUSE at its own
-        // slot, so the order is OLF's and no co-presence gate is needed (tasks #48).
+        // re-solves do not compose). The chunk path runs it as an in-kernel driver phase at its own slot, so
+        // the order is OLF's and no co-presence gate is needed (tasks #48).
         LoadFlowParameters lfGuardParams = securityAnalysisParameters.getLoadFlowParameters();
         List<String> unsupportedOuterLoops;
         unsupportedOuterLoops = new ArrayList<>(acParameters.getOuterLoops().stream()

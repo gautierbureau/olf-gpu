@@ -454,34 +454,6 @@ OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, readBatchReactiveLimitTargetQ)(
     return arr;
 }
 
-/** Un-pin reactive-limit entries at a driver pause (SecondaryVoltageControl's re-enable step):
- *  {@code pairs} is (scenario, RL entry) flattened, {@code newTarget} the voltage target each row goes
- *  back to. No-op for an entry that is not pinned. */
-extern "C" JNIEXPORT void JNICALL
-OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchReactiveLimitPqPvSwitches)(
-        JNIEnv* env, jclass, jlong handle, jintArray jPairs, jdoubleArray jTargets) {
-    auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
-    if (ctx == nullptr || ctx->nReactiveLimitEntries <= 0 || jPairs == nullptr || jTargets == nullptr) {
-        return;
-    }
-    int nPairs = env->GetArrayLength(jTargets);
-    if (nPairs == 0 || env->GetArrayLength(jPairs) != 2 * nPairs) {
-        return;
-    }
-    std::vector<int> pairs(2 * nPairs);
-    std::vector<double> targets(nPairs);
-    env->GetIntArrayRegion(jPairs, 0, 2 * nPairs, pairs.data());
-    env->GetDoubleArrayRegion(jTargets, 0, nPairs, targets.data());
-    DeviceBuf dPairs;
-    DeviceBuf dTargets;
-    dPairs.upload(pairs.data(), pairs.size() * sizeof(int));
-    dTargets.upload(targets.data(), targets.size() * sizeof(double));
-    reactiveLimitsPqPvSwitchBatch<<<grid(nPairs), BLOCK, 0, ctx->stream>>>(nPairs, ctx->nScenarios, ctx->n, ctx->nReactiveLimitEntries,
-            dPairs.as<int>(), dTargets.as<double>(), ctx->dReactiveLimitVoltageRow.as<int>(), ctx->dReactiveLimitQLimitType.as<char>(),
-            ctx->dReactiveLimitSavedRowMode.as<char>(), ctx->dMode.as<int>(), ctx->dTarget.as<double>());
-    CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
-}
-
 // Reactive-limits controllers STRANDED in another synchronous component: install (or clear, with
 // null) the per-scenario mask as {slot, controller} pairs.
 extern "C" JNIEXPORT void JNICALL

@@ -7,25 +7,23 @@
  */
 package com.powsybl.openloadflow.ac.outerloop.gpu;
 
+import com.powsybl.commons.PowsyblException;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchSkips;
-import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuOuterLoopKind;
-import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuTransformerVoltageControlMode;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
  * The one rule both routes apply to decide whether the device OWNS an outer loop: all of it, or none.
  *
- * <p>A phase builder walks OLF's controllers and skips the ones it cannot express. An EMPTY list is
- * benign — the kernel declines and the base load flow's host-pause slot runs OLF's own loop, while the
- * batched security analysis refuses the run. A PARTIAL list is the dangerous one: the kernel takes the
- * loop, the pause slot is cleared, and the controllers the builder skipped are silently dropped, so the
- * device drives a loop on a subset of what OLF drives and every equation still converges.
+ * <p>A phase builder walks OLF's controllers and skips the ones it cannot express. A PARTIAL list is the dangerous
+ * one: the kernel takes the loop and the controllers the builder skipped are silently dropped, so the device drives
+ * a loop on a subset of what OLF drives and every equation still converges.
  *
- * <p>{@link GpuBatchSkips} counts those skips; this turns the count into the decision. It is here, and
- * not in either caller, because the base load flow and the security analysis kept drifting apart on
- * exactly this kind of question — the secondary voltage control phase ran on one route and paused on
- * the other for a whole release.
+ * <p>{@link GpuBatchSkips} counts those skips; this turns the count into the decision: the batched security analysis
+ * sends the whole run to the CPU, the base load flow's solve goes to the CPU Newton-Raphson, where OLF's own loops
+ * run. It is here, and not in either caller, because the base load flow and the security analysis kept drifting
+ * apart on exactly this kind of question — the secondary voltage control phase ran on one route and paused on the
+ * other for a whole release.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
@@ -37,43 +35,19 @@ public final class DevicePhaseOwnership {
     }
 
     /**
-     * Hand back any loop whose representation is incomplete: clear the kernel's tables for it and
-     * restore its host-pause bit, so OLF's own loop runs at its own slot instead of the device running
-     * part of it. Returns the corrected mask.
+     * The base load flow: a loop whose representation is incomplete fails the device solve, which goes to the CPU
+     * Newton-Raphson with OLF's own loops, as {@link #batchable()} sends the security analysis run to the CPU.
      */
-    public static int enforceComplete(long handle, int hostMask) {
-        int mask = hostMask;
-        if (!GpuBatchSkips.complete(GpuBatchSkips.Slot.TVC)) {
-            GpuIncrementalTransformerVoltageControlOuterLoop.uploadToDevice(handle, null, 1);
-            GpuTransformerVoltageControlOuterLoop.uploadToDevice(handle, null, GpuTransformerVoltageControlMode.AFTER_GENERATOR_VOLTAGE_CONTROL, false);
-            GpuTransformerVoltageControlOuterLoop.uploadFreeze(handle, null);
-            mask |= GpuOuterLoopKind.hostMaskBit(GpuOuterLoopKind.HOST_TRANSFORMER_VOLTAGE_CONTROL);
+    public static void requireComplete() {
+        if (!GpuBatchSkips.summary().isEmpty()) {
+            throw new PowsyblException("GPU driver: the phase builders could not represent every controller ("
+                    + GpuBatchSkips.summary() + ") and the device would drive those loops on a SUBSET of what OLF drives; "
+                    + "the solve goes to the CPU");
         }
-        if (!GpuBatchSkips.complete(GpuBatchSkips.Slot.SHUNT)) {
-            GpuIncrementalShuntVoltageControlOuterLoop.uploadToDevice(handle, null, 3);
-            GpuShuntVoltageControlOuterLoop.uploadToDevice(handle, null, true);
-            mask |= GpuOuterLoopKind.hostMaskBit(GpuOuterLoopKind.HOST_SHUNT_VOLTAGE_CONTROL);
-        }
-        if (!GpuBatchSkips.complete(GpuBatchSkips.Slot.PHASE) || !GpuBatchSkips.complete(GpuBatchSkips.Slot.RPC)) {
-            DeviceFlowControllers.uploadToDevice(handle, null);
-            GpuPhaseControlOuterLoop.uploadToDevice(handle, null);
-            mask |= GpuOuterLoopKind.hostMaskBit(GpuOuterLoopKind.HOST_PHASE_CONTROL);
-            mask |= GpuOuterLoopKind.hostMaskBit(GpuOuterLoopKind.HOST_TRANSFORMER_REACTIVE_POWER_CONTROL);
-        }
-        if (!GpuBatchSkips.complete(GpuBatchSkips.Slot.SVC)) {
-            GpuSecondaryVoltageControlOuterLoop.uploadToDevice(handle, null);
-            mask |= GpuOuterLoopKind.hostMaskBit(GpuOuterLoopKind.HOST_SECONDARY_VOLTAGE_CONTROL);
-        }
-        if (mask != hostMask) {
-            LOGGER.warn("GPU base load flow: handing loops back to OLF's engine, the phase builders could not "
-                    + "represent every controller ({})", GpuBatchSkips.summary());
-        }
-        return mask;
     }
 
     /**
-     * The batched security analysis has no host-pause slot for anything but secondary voltage control,
-     * so a partially represented loop there can only mean the whole run goes to the CPU.
+     * The batched security analysis: a partially represented loop sends the whole run to the CPU.
      */
     public static boolean batchable() {
         if (GpuBatchSkips.summary().isEmpty()) {

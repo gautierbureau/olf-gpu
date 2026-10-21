@@ -26,8 +26,8 @@ import java.util.List;
  * <p>The base load flow and the batched security analysis solve the same equations with the same
  * kernels, and they used to build these tables in two places — 150 lines against 60, calling the same
  * nine builders with the same arguments in two orders. The duplication was not free: SecondaryVoltageControl
- * was wired into one and not the other for a whole release, so every load flow with a zone paused the
- * driver while the same network ran it on device under the analysis. A new phase added here reaches both
+ * was wired into one and not the other for a whole release, so every load flow with a zone handed it back
+ * to OLF while the same network ran it on device under the analysis. A new phase added here reaches both
  * routes or neither.
  *
  * <p>Building is shared; INSTALLING is not, and cannot be. The base load flow uploads straight onto its
@@ -125,9 +125,8 @@ public final class DevicePhases {
                         ? GpuTransformerVoltageControlOuterLoop.buildFreezeTables(network, es, discreteTransformerVoltageControl,
                                 request.genVcMinNominalV(), reactiveLimitBusNum, request.reactiveLimitsOuterLoop())
                         : null,
-                request.secondaryVoltageControlControllers() && GpuSecondaryVoltageControlOuterLoop.supported(network)
+                request.secondaryVoltageControlControllers()
                         ? GpuSecondaryVoltageControlOuterLoop.build(network, es, reactiveLimitVoltageRow, request.reactiveLimitsOuterLoop(),
-                                new EsContext(es.getStateVector(), n),
                                 request.minPlausibleTargetV(), request.maxPlausibleTargetV(), mapper)
                         : null,
                 new EsContext(es.getStateVector(), n));

@@ -20,6 +20,7 @@ import com.powsybl.openloadflow.ac.solver.gpu.GpuMatchingAlgorithm;
 import com.powsybl.openloadflow.ac.solver.gpu.GpuPivotType;
 import com.powsybl.openloadflow.ac.solver.gpu.GpuReorderingAlgorithm;
 import com.powsybl.openloadflow.ac.solver.gpu.NewtonSettingsNative;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.GpuBatchScopeCensus;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuLinearSolveMode;
 import com.powsybl.openloadflow.graph.EvenShiloachGraphDecrementalConnectivityFactory;
 import com.powsybl.openloadflow.sa.AcSecurityAnalysis;

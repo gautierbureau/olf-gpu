@@ -11,6 +11,7 @@ import com.powsybl.contingency.BranchContingency;
 import com.powsybl.contingency.Contingency;
 import com.powsybl.iidm.network.Network;
 import com.powsybl.openloadflow.CommonTestConfig;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.GpuBatchScopeCensus;
 import com.powsybl.openloadflow.graph.EvenShiloachGraphDecrementalConnectivityFactory;
 import com.powsybl.openloadflow.sa.AbstractOpenSecurityAnalysisTest;
 import com.powsybl.openloadflow.sa.OpenSecurityAnalysisParameters;
@@ -248,14 +249,14 @@ abstract class AbstractGpuSaTest extends AbstractOpenSecurityAnalysisTest {
         try {
             SecurityAnalysisResult gpu = runSecurityAnalysis(network, contingencies, monitors, sap);
             if (System.getenv("OLF_GPU_DBG_CENSUS") != null) {
-                System.err.println("CENSUS " + com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.snapshot());
+                System.err.println("CENSUS " + GpuBatchScopeCensus.snapshot());
             }
             assertEquals(cpu.getPreContingencyResult().getStatus(), gpu.getPreContingencyResult().getStatus(),
                     "pre-contingency status");
             if (requireEngage) {
                 assertTrue(GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get() > 0,
                         "the batch must ENGAGE (fallen-back run proves nothing); census="
-                                + com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.snapshot());
+                                + GpuBatchScopeCensus.snapshot());
             }
             assertEquals(cpu.getPostContingencyResults().size(), gpu.getPostContingencyResults().size());
             for (int i = 0; i < cpu.getPostContingencyResults().size(); i++) {

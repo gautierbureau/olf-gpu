@@ -58,8 +58,8 @@ public final class GpuBatchQualification {
     /** A plan refusal, counted in the census AND named by contingency id: the census counts are per attempt and
      *  carry no id, which made 19 refusals read as device failures (tasks #70). */
     static void refuse(BatchContingency c, String tag) {
-        com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record(tag);
-        com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.planRefused(c.contingencyId(), tag);
+        GpuBatchScopeCensus.record(tag);
+        GpuBatchScopeCensus.planRefused(c.contingencyId(), tag);
     }
 
     /** The batched-scenario plan: which contingencies qualified ({@code batchedIndices}) and, per
@@ -124,9 +124,9 @@ public final class GpuBatchQualification {
                 // verdict, so recording "SIDE_OPEN_UNPACKED" for all of them misreports the census — the one
                 // entry at rte6515's full scope is an ISLANDS_SLACK outage, which reads as a side-open shape.
                 String tag = "PLAN:" + (q.reason() != null ? q.reason() : "UNQUALIFIED");
-                com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record(tag);
+                GpuBatchScopeCensus.record(tag);
                 // ...and by id, so a scope report names the reason of every refusal (it printed "?" for these)
-                com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.planRefused(contingencies.get(i).contingencyId(), tag);
+                GpuBatchScopeCensus.planRefused(contingencies.get(i).contingencyId(), tag);
                 continue;
             }
             BatchContingency c = contingencies.get(i);
@@ -208,7 +208,7 @@ public final class GpuBatchQualification {
                 }
                 pb.relocatedSlackRow[i] = phiRow;
                 pb.relocatedSlackShift[i] = distributedSlack ? newSlack.getTargetP() - gpuData.distributedSlack().slackTargetP() : 0;
-                com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("PLAN:SLACK_RELOCATED");
+                GpuBatchScopeCensus.record("PLAN:SLACK_RELOCATED");
             }
             java.util.Set<Integer> outagedZeroImpedanceBranchNums = c.outagedZeroImpedanceBranches().stream()
                     .map(LfBranch::getNum).collect(java.util.stream.Collectors.toSet());

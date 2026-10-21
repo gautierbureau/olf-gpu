@@ -25,6 +25,7 @@ import com.powsybl.openloadflow.ac.solver.gpu.batch.BatchScenarioResult;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.BatchSolveRequest;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchedSecurityAnalysisSolver;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.BatchContingency;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.GpuBatchScopeCensus;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.LoadLoss;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.ShuntShift;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuAcSolverStatus;

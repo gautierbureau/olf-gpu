@@ -21,6 +21,7 @@ import com.powsybl.openloadflow.CommonTestConfig;
 import com.powsybl.openloadflow.OpenLoadFlowParameters;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 import com.powsybl.openloadflow.ac.solver.gpu.GpuNewtonRaphson;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.GpuBatchScopeCensus;
 import com.powsybl.openloadflow.graph.EvenShiloachGraphDecrementalConnectivityFactory;
 import com.powsybl.openloadflow.network.SlackBusSelectionMode;
 import com.powsybl.openloadflow.sa.AbstractOpenSecurityAnalysisTest;

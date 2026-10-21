@@ -11,6 +11,7 @@ import com.powsybl.contingency.BranchContingency;
 import com.powsybl.contingency.Contingency;
 import com.powsybl.iidm.network.Network;
 import com.powsybl.openloadflow.CommonTestConfig;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.GpuBatchScopeCensus;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;

@@ -13,6 +13,7 @@ import com.powsybl.ieeecdf.converter.IeeeCdfNetworkFactory;
 import com.powsybl.iidm.network.Network;
 import com.powsybl.openloadflow.CommonTestConfig;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.GpuBatchScopeCensus;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;

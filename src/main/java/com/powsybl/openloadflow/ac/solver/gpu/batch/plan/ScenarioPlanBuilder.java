@@ -97,7 +97,7 @@ final class ScenarioPlanBuilder {
         for (int[] m : islandedDistributedSlackByIndex) {
             maskedDistributedSlackParticipants += m == null ? 0 : m.length;
         }
-        com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.LAST_ISLANDED_DS_MASKED.set(maskedDistributedSlackParticipants);
+        GpuBatchScopeCensus.LAST_ISLANDED_DS_MASKED.set(maskedDistributedSlackParticipants);
         return new GpuBatchQualification.ScenarioPlan(batchedIndices, frozenRowsByIndex, islandedNumsByIndex,
                 frozenTargetsByIndex, genOutagesByIndex, islandingCount, activePowerLossByIndex,
                 distrQWeightOverrideTermByIndex, distrQWeightOverrideWeightByIndex, distrQKeyOverrideMemberByIndex,

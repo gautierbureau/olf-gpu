@@ -35,6 +35,7 @@ import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.BatchContingency;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.GenOutage;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.GpuBatchLossPreDistribution;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.GpuBatchQualification;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.GpuBatchScopeCensus;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuAcSolverStatus;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuLinearSolveMode;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuQLimitType;
@@ -594,7 +595,7 @@ final class GpuBatchChunkSolver {
                         // row). Name it.
                         LOGGER.warn("GPU batched SA: {} conflicting target overrides in chunk at {} (resolved to the later"
                                 + " writer)", rs.overrides.conflictingAddCount(), chunkStart);
-                        com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("HOST:OVERRIDE_CONFLICT");
+                        GpuBatchScopeCensus.record("HOST:OVERRIDE_CONFLICT");
                     }
                     // Pair phase: warm continuation from each parent contingency's state + RL pinning.
                     double[] x0Full = null;
@@ -670,7 +671,7 @@ final class GpuBatchChunkSolver {
                                     }
                                     rejectAfterSolve[s] = true;
                                     if (s < realCount) {
-                                        com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("PAIR:PARENT_NOT_ON_DEVICE");
+                                        GpuBatchScopeCensus.record("PAIR:PARENT_NOT_ON_DEVICE");
                                     }
                                 }
                             }
@@ -873,7 +874,7 @@ final class GpuBatchChunkSolver {
                                 rejectAfterSolve = new boolean[chunkSize];
                             }
                             rejectAfterSolve[s] = true;
-                            com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("PAIR:HVDC_ACTION_PARENT_NOT_CONVERGED");
+                            GpuBatchScopeCensus.record("PAIR:HVDC_ACTION_PARENT_NOT_CONVERGED");
                         }
                     }
                     if (hvdcControllers != null && !hvdcControllers.isEmpty()) {
@@ -1329,7 +1330,7 @@ final class GpuBatchChunkSolver {
                             row[n + 2] = GpuAcSolverStatus.REJECTED;   // the census names the reason where it is decided
                         } else if (pairPhase && (int) row[n + 2] != GpuAcSolverStatus.CONVERGED) {
                             // a pair the device solved and did not converge: a device failure wherever OLF converges it
-                            com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.pairDeviceFailed(
+                            GpuBatchScopeCensus.pairDeviceFailed(
                                     contingencies.get(group.get(chunkStart + s)).contingencyId());
                         }
                         if (config.stateSink() != null && (int) row[n + 2] == GpuAcSolverStatus.CONVERGED) {

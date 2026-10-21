@@ -10,6 +10,7 @@ package com.powsybl.openloadflow.ac.solver.gpu.batch;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
 import com.powsybl.openloadflow.ac.outerloop.gpu.ReactiveCapabilityCurves;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.GenOutage;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.GpuBatchScopeCensus;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuRowMode;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuVoltageControlRole;
 
@@ -210,7 +211,7 @@ final class GenOutageSeed {
                         // know about: keep the more specific one, and count it so a composition gap
                         // (two seeds for one row from two paths) is measurable, never a race.
                         if (rs.overrides.has(s * n + distrQTargetRow)) {
-                            com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("HOST:DQSEED_SHADOWED");
+                            GpuBatchScopeCensus.record("HOST:DQSEED_SHADOWED");
                             continue;
                         }
                         rs.overrides.add(s * n + distrQTargetRow, go.distrQTargetValues()[t]);

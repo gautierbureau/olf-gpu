@@ -728,7 +728,7 @@ boundary with chunk shapes different enough to expose it.
 
 ### F.-1 Measuring it: the scope census
 
-`GpuBatchScopeCensus` (public, `sa.gpu`) counts WHY contingencies leave the batched path, at the
+`GpuBatchScopeCensus` (public, `ac.solver.gpu.batch.plan`) counts WHY contingencies leave the batched path, at the
 three funnels below — `MAPPER:*` (elements could not be composed), `VALIDATOR:*` (composed but
 disqualified by shape) and `RUNTIME:*` (solved on the device, result rejected). `reset()` before a
 run, `snapshot()` after. Two consumers:

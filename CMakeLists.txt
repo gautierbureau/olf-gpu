@@ -158,7 +158,7 @@ target_include_directories(olfgpu
 # no linear algebra is written by hand. It is already present wherever cuDSS is (cuDSS links it).
 target_link_libraries(olfgpu PRIVATE ${CUDSS_LIBRARY} CUDA::cublas)
 # cuDSS >= 0.7.1 is required
-# (static_assert in olf_gpu_nr_jni.cu); the cudssMatrixCreate* data-type args are shimmed by
+# (static_assert in native/cuda/common/check.cuh); the cudssMatrixCreate* data-type args are shimmed by
 # CUDSS_VERSION so the same source builds against 0.7.x and 0.8 (CUDSS_ROOT picks the install).
 set_target_properties(olfgpu PROPERTIES CUDA_RUNTIME_LIBRARY Static)
 # Only the JNI entry points (JNIEXPORT) are exported; everything in namespace olfgpu stays internal to the library.

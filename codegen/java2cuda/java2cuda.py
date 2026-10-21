@@ -410,7 +410,7 @@ def render_fused(mod, temps, out, pool):
 # Driven by the PARSED output order (value then non-zero derivatives per residual)
 # and the spec's stamp; validated against the real term-class wiring by
 # codegen/check_scatter.py. Packing convention shared with the GPU fill kernels
-# (native/cuda/jni/olf_gpu_nr_jni.cu): a bus owns two equation rows (P, Q) and two
+# (native/cuda/equations/*_fill.cu): a bus owns two equation rows (P, Q) and two
 # variable columns (PHI, V); endpoints index which element. Codes: 0/1 = the
 # element's first/only and second bus, 2 = the element itself (branch, shunt —
 # only ever the endpoint of skip columns like BRANCH_ALPHA1/RHO1, SHUNT_B, which

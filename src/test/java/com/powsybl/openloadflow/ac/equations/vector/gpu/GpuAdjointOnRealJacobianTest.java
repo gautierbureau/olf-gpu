@@ -81,7 +81,7 @@ class GpuAdjointOnRealJacobianTest {
         //   AMD + MC64-style matching (CUDSS_CONFIG_MATCHING_ALG) 3.553e-15   <-- the fix
         // The batched NR never hit this because it builds a superset pattern with a GUARANTEED
         // nonzero diagonal; a raw Jacobian handed over unpermuted has no such guarantee. See
-        // applyAdjointMatching in olf_gpu_nr_jni.cu.
+        // applyMatchingAlg in native/cuda/solver/linear_solver_settings.cuh (called by jni/transposed_solve_jni.cu).
         // ieee14 with default (no transformer/phase control) so the system is plain AC power flow —
         // the shape #40 step 1 asks for: no binding limits, nothing to confuse a mismatch with.
         Network iidm = IeeeCdfNetworkFactory.create14();

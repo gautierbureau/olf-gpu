@@ -10,7 +10,7 @@ predicate list. The goal is that "replace all CPU runs with GPU" is a checklist,
 guess — including the corner cases.
 
 Last full review: 2026-07-18 (commits `cc41597`/`a082092`; Part II from a line-level
-mine of `GpuAcDataExtractor`, `GpuBatchContingencyValidator`, `olf_gpu_nr_jni.cu`,
+mine of `GpuAcDataExtractor`, `GpuBatchContingencyValidator`, `olf_gpu_nr_jni.cu` (the native library, since split under `native/cuda/`),
 `GpuBatchedSecurityAnalysisSolver`, and the stock OLF `ac/outerloop` sources).
 
 ## Legend
@@ -380,7 +380,8 @@ schedule only when a concrete SPI implementation shows up).
 # Part II — Corner-case matrices
 
 Line references: `EXT` = `src/main/java/.../gpu/GpuAcDataExtractor.java`, `VAL` =
-`.../solver/GpuBatchContingencyValidator.java`, `CU` = `native/cuda/jni/olf_gpu_nr_jni.cu`,
+`.../solver/GpuBatchContingencyValidator.java`, `CU` = `native/cuda/jni/olf_gpu_nr_jni.cu` (the single-file native library of that review, since split under
+`native/cuda/`; `CU` line numbers refer to it),
 `SOLVER` = `.../solver/GpuBatchedSecurityAnalysisSolver.java`; OLF refs are stock
 open-loadflow sources.
 
@@ -491,7 +492,7 @@ doesn't rediscover them.
   in INCREMENTAL mode (outer loops run on CPU there by construction). (2) `BRANCH_TARGET_P` —
   the genuinely new piece, a BRANCH-owned row fed by one closed-branch p1/p2 term; precedent is
   the DISTR_RHO family, which already scatters into a branch-owned extra row
-  (`olf_gpu_nr_jni.cu:519`). `computeQRow` also throws on phase-control shapes today.
+  (`fillDistrRhoBatch`, `native/cuda/equations/distribution_fill.cu`). `computeQRow` also throws on phase-control shapes today.
   (3) Batched SA is the expensive tier: per-scenario transposed solve + the discrete tap finders
   + the direction-change guard.
 - **IncrementalTransformerVoltageControl**: BRANCH_TARGET_RHO1 sensitivities, insensitivity

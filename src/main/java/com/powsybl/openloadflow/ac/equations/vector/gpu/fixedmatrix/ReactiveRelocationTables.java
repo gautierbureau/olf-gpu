@@ -189,9 +189,9 @@ public record ReactiveRelocationTables(ReactiveRelocationCandidates candidates, 
             // ...but only WHILE IT CONTROLS. Once a reactive limit PINS such a pilot, OLF activates its
             // BUS_TARGET_Q, which needs a row, and its own row still carries BUS_TARGET_V because a sibling
             // controller keeps the voltage — so the group DOES need the table, with the pilot's raw-q
-            // emission GATED on it being pinned (psPilotPinned in olf_gpu_nr_jni.cu). Property-gated while
-            // this lands; without it such a group keeps a relocation frozen at extraction, which is what
-            // leaves rte6515's busbar base rank-deficient.
+            // emission GATED on it being pinned (pilotSelfGateBatch in native/cuda/outerloop/pilot_voltage.cu,
+            // recomputed before every fill). Without it such a group keeps a relocation frozen at extraction,
+            // which left rte6515's busbar base rank-deficient.
             boolean pilotSelf = voltageControl != null && voltageControl.getMergedControllerElements().contains(bus);
             // the ONE enrolment predicate (ReactiveRelocation.hasCandidateTable): the same answer decides the
             // canonical, pin-state-independent encoding of the group's q rows and DISTR_Q pack

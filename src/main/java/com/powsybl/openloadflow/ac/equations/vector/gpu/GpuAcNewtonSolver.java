@@ -16,7 +16,7 @@ import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuLinearSolveMode;
 
 /**
  * JNI binding: a FULL Newton-Raphson AC power flow run on the GPU behind one native call.
- * The native library libolfgpu (native/cuda/jni/olf_gpu_nr_jni.cu, built by the root
+ * The native library libolfgpu (native/cuda/, JNI entry points in native/cuda/jni/, built by the root
  * CMakeLists — see native/build-gpu.sh) keeps the fixed-pattern CSR Jacobian, the
  * mismatch and the state resident on the device: the four generated fused kernels
  * (closed-branch / open-branch / shunt / HVDC AC emulation) fill J and F each

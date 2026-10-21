@@ -565,7 +565,7 @@ class GpuSaTransformerControlTest extends AbstractGpuSaTest {
 
         // (B) SA ORCHESTRATION difference (NOT the solver, proven identical above). Both SA implementations
         //     warm-start each contingency from the base N state (the GPU batch tiles the base row as x0 —
-        //     olf_gpu_nr_jni.cu ~L2878 — so warm-start is NOT the differentiator). Yet, at the SAME default
+        //     tileBaseRow in native/cuda/solver/outer_loop_driver.cu — so warm-start is NOT the differentiator). Yet, at the SAME default
         //     convEps, the GPU batch converges each contingency close to the fresh LF while the CPU sequential
         //     SA stops ~6e-3 short — a post-contingency outer-loop-convergence difference between the two SA
         //     code paths (exact mechanism still under investigation), not a GPU error.

@@ -2,7 +2,7 @@
 
 Status as of 2026-06-12 (branch `claude/level-a-closed-branch-formulas`, through
 commit `93dfd89b`). Companion documents: `codegen/README.md` (the equation codegen),
-`codegen/gpu_assembly.md` (the rung-by-rung journal).
+`docs/archive/gpu_assembly.md` (the rung-by-rung journal).
 
 ## 1. Where we are
 

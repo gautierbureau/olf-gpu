@@ -4,7 +4,7 @@ One row per bench-affecting commit — the single place to see where performance
 equivalence stand over time. Cold numbers first (the honest end-to-end story), warm second.
 Append a row with `native/track-numbers.sh` after every change touching the batched GPU
 path; never edit old rows (history is the point). Context/analysis for each row lives in
-`codegen/gpu_benchmark.md` under the matching date; capability state in
+`docs/archive/gpu_benchmark.md` under the matching date; capability state in
 `docs/gpu-vs-cpu-capabilities.md`.
 
 Production bench = `GpuVsCpuProductionSaBenchmarkTest`: case9241pegase, 500 matched

@@ -181,7 +181,7 @@ own) then `codegen/regenerate.sh` + commit kernels (+ golden if math changed).
   (`GpuBatchedN1FixedIterTest`, tol=0, K=4, 500 matched ctg) + the
   `/gpu-bench-compare` skill. Report COLD FIRST. `OLF_GPU_TOL=1e-6` switches the same
   bench to the production path (per-iteration convergence + retirement) — see the
-  2026-07-17 tol>0 entry in `codegen/gpu_benchmark.md` (straggler dominates, 8.4x).
+  2026-07-17 tol>0 entry in `docs/archive/gpu_benchmark.md` (straggler dominates, 8.4x).
 - **Production SA vs CPU OLF**: `GpuVsCpuProductionSaBenchmarkTest` (sa package) —
   real AcSecurityAnalysis both sides, RTE params from `rte-loadflow-default-parameters.json`
   (repo root), same 500 ctg, violations included. SPARSE factory forced (the harness

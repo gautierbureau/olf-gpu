@@ -3,7 +3,7 @@
 How the codegen feeds the GPU AC power flow: the CPU/GPU split and the one place the
 scatter accumulates. The production implementation is
 `native/cuda/jni/olf_gpu_nr_jni.cu` (→ `libolfgpu`); companion docs:
-`codegen/gpu_roadmap.md`, `codegen/gpu_rte_full_support.md`. Strategy context (keep OLF's
+`docs/archive/gpu_roadmap.md`, `docs/archive/gpu_rte_full_support.md`. Strategy context (keep OLF's
 branch formulation, borrow the structural machinery) is on the
 `claude/codegen-experimental` branch (`codegen/experimental/gpu_fit.md`).
 
@@ -54,4 +54,4 @@ pattern (`GpuBatchedSecurityAnalysisSolver`).
 Validated against OLF's own `JacobianMatrix` Newton by `GpuFullNewtonTest` and end to end
 by `GpuLoadFlowTest` (run via `native/run_gpu_tests.sh`). Earlier CPU-reference and
 single-system GPU spike prototypes were removed once the device path subsumed them; see
-`codegen/gpu_roadmap.md` for the rung history.
+`docs/archive/gpu_roadmap.md` for the rung history.

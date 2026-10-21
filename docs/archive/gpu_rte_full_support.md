@@ -4,8 +4,8 @@ Goal: run a plain `LoadFlow.run` on **real RTE networks with the RTE default
 parameters** entirely on the GPU solver (`GPU_NEWTON_RAPHSON`), converging to the
 same state OLF's CPU solver reaches, with **no extractor rejection and no silent
 loss of an outer-loop effect**. This document is the live tracker for closing that
-gap. Companion docs: `codegen/gpu_roadmap.md` (the rung journal + Priority 2/3/4),
-`codegen/README.md` (equation codegen), `codegen/gpu_participating_slack_retain.md`
+gap. Companion docs: `docs/archive/gpu_roadmap.md` (the rung journal + Priority 2/3/4),
+`codegen/README.md` (equation codegen), `docs/archive/gpu_participating_slack_retain.md`
 (the one bounded ~4e-7 device-vs-OLF gap: participating-slack distribution). Status
 date: 2026-06-16, branch `claude/level-a-closed-branch-formulas`.
 

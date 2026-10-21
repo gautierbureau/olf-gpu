@@ -3,8 +3,8 @@
 Design note on the one place the device batched security-analysis solver cannot
 reproduce OLF's distributed-slack outer loop *exactly*: when the **slack/reference
 bus's own generators participate** in the distribution. Companion docs:
-`codegen/gpu_assembly.md` (CPU/GPU split), `codegen/gpu_roadmap.md` (rung journal),
-`codegen/gpu_rte_full_support.md` (RTE parameter coverage). Status: 2026-07-02,
+`docs/archive/gpu_assembly.md` (CPU/GPU split), `docs/archive/gpu_roadmap.md` (rung journal),
+`docs/archive/gpu_rte_full_support.md` (RTE parameter coverage). Status: 2026-07-02,
 branch `claude/level-a-closed-branch-formulas`, characterized in commit `ec7b5751`.
 
 Code: `native/cuda/jni/olf_gpu_nr_jni.cu` (`computeSlackRetain`,

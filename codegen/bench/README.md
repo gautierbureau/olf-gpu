@@ -2,7 +2,7 @@
 
 Measures the throughput of the test6 GPU batched security-analysis solver
 (`GpuBatchedN1FixedIterTest`) on a single-branch N-1 workload. Reported numbers live
-in `codegen/gpu_benchmark.md`.
+in `docs/archive/gpu_benchmark.md`.
 
 1. **Generate a reproducible contingency set** (non-islanding, unique-pair branches
    straight from the IIDM network — needs `networkx`):

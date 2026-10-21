@@ -839,5 +839,5 @@ Update this file whenever a row changes state (the PR that lands a capability fl
 mark), and re-run the two benches plus `GpuBatchedAcSecurityAnalysisTest` before flipping
 anything to ✅. ⚠️ rows are standing corner-case debts INSIDE supported scope — each
 needs either a device fix or a guard extension (they are enumerated in gap-list item 5).
-Numbers and dated evidence live in `codegen/gpu_benchmark.md`; this file holds only the
+Numbers and dated evidence live in `docs/archive/gpu_benchmark.md`; this file holds only the
 current truth.

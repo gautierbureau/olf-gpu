@@ -16,7 +16,7 @@ UBATCH (the only batch mode), `OLF_GPU_MAXBATCH=500` (the bench test's chunk-siz
 non-islanding contingencies from `~/Projects/powsybl/cuda/matched_contingencies/`.
 
 Report BOTH lines and compare to the recorded baseline
-(`codegen/gpu_benchmark.md`, 2026-07-13 section):
+(`docs/archive/gpu_benchmark.md`, 2026-07-13 section):
 - `[E2E K=4] ... | N ms/ctg` = **TRUE cold end-to-end** (CPU base LF + ONE cold GPU
   SA pass; the ~2 s one-time CUDA init is inside the GPU SA term). Baseline: **11.41 ms/ctg**.
 - `K=4 : ... ms/scenario` = **warm steady-state** contingency solve. Baseline:

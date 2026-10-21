@@ -2,7 +2,7 @@
 
 Status: draft for an upstream discussion (powsybl-core + powsybl-open-loadflow), written
 2026-07-17/18 from the GPU-vs-CPU production benchmark investigation (see
-`codegen/gpu_benchmark.md`, entries "The 6,137 diff SOLVED" and the drill that followed).
+`docs/archive/gpu_benchmark.md`, entries "The 6,137 diff SOLVED" and the drill that followed).
 
 ## The observed problem (measured)
 

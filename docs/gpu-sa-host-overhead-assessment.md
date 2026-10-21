@@ -332,7 +332,7 @@ solves) is ~3.7 s of it.
   the primary case (decision 2026-09-22), so cross-run context reuse is warm-only gain.
 - **D2 — `fillClosedBranchBatch` (~1.06 s, 410 launches, ~2.6 ms each):** heavy for a fill; atomicAdd scatter is
   the prime suspect. **PARKED (2026-09-22):** already tried — a fused fill was slower, "the fill's floor is its
-  atomics" (`codegen/gpu_benchmark.md` ~L135-182).
+  atomics" (`docs/archive/gpu_benchmark.md` ~L135-182).
 - **D3 — host round trips:** device-to-host `cudaMemcpyAsync` 3,942 calls over two runs, 2.93 s of API time of which
   2.91 s waits for the queued kernels (52 MB copied in 0.007 s). **Corrected:** these are NOT our per-iteration
   syncs — attributed by the kernel preceding each copy, they are cuDSS ANALYSIS internals (34 scalar readbacks per

@@ -34,14 +34,14 @@ export LD_LIBRARY_PATH=$HOME/Projects/powsybl/cuda/cudss/lib:$CUDA_HOME/lib64
 ```
 Take `one-time build: base_case BC ... | chunks C` and `total TT ms`
 → theirs cold E2E = BC + TT (their GPU base + CUDA init live in BC), warm ≈ chunks.
-(If the venv is missing, rebuild per `codegen/gpu_benchmark.md` / the
+(If the venv is missing, rebuild per `docs/archive/gpu_benchmark.md` / the
 gpu-n1-benchmark-howto memory: venv + vendored eigen + CMAKE_ARGS with
 `cudss_DIR=$HOME/Projects/powsybl/cuda/cudss/lib/cmake/cudss`; needs grid2op.)
 
 **3. Compare — END-TO-END TOTALS ONLY** (CUDA init lands in different phases on the
 two sides; phase-by-phase comparisons lie). Build the table: cold E2E ms/ctg, warm
 ms/ctg, convergence (n/500 @1e-6, med ‖F‖∞) — and diff against the recorded
-2026-07-13 rerun in `codegen/gpu_benchmark.md`:
+2026-07-13 rerun in `docs/archive/gpu_benchmark.md`:
 ours 11.41 vs theirs 8.81 cold (1.30×); warm 4.87 vs 3.76–4.29.
 Measured contributors on our side: base placement (fixed — the SA base runs on the
 GPU solver since a94135a) and host extraction; the residual chunk-speed difference is

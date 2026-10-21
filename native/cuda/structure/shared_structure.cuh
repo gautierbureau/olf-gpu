@@ -155,11 +155,6 @@ SharedStructure* buildStructure(int n,
 // The device bytes one scenario's LU factors take, from a cuDSS probe analysis (cached on the structure).
 double luBytesPerScenario(SharedStructure& structure);
 
-// Re-upload the per-element parameter packs in place (a tap or shunt-susceptance move): same pattern, new values.
-void refreshStructureValues(SharedStructure& structure, int nClosedBranch, const double* closedBranchParameters, int nOpenBranch, const double* openBranchParameters,
-                            int nShunt, const double* shuntParameters, int nHvdcAcEmulation, const double* hvdcAcEmulationParameters,
-                            int nZeroImpedanceBranch, const double* zeroImpedanceBranchParameters);
-
 }  // namespace olfgpu
 
 #endif  // OLF_GPU_STRUCTURE_SHARED_STRUCTURE_CUH

@@ -120,11 +120,7 @@ own) then `codegen/regenerate.sh` + commit kernels (+ golden if math changed).
   device-resident structure: `createBatchContext(structHandle, nS, mode, rl/ds packs)`
   and `recommendBatchSize(structHandle, maxCap)` no longer rebuild the pattern, and
   the chunk-size LU probe result is cached ON the structure (one probe per
-  extraction, not per SA run). `refreshContextValues` mutates the SHARED structure in
-  place (families + `ziIn` + re-derived static trig — one extraction = one value set)
-  and the refresher then calls `GpuAcStructures.rebind(old, new)`, which drops EVERY
-  key aliased to the refreshed structure and re-keys it to the new extraction, so
-  content matching never aliases stale values. The hand-off is ASSERTED in
+  extraction, not per SA run). The hand-off is ASSERTED in
   `GpuSaSolverTest#gpuBatchedEngagesAndMatchesCpuOnDevice` via
   `GpuAcStructures.hitCount()`. Sharing is instance-first with a CONTENT fallback:
   another extraction of the same state (another distributed-slack setting, the

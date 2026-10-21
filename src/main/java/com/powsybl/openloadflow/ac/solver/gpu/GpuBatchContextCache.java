@@ -83,10 +83,8 @@ public final class GpuBatchContextCache {
         final GpuAcData data;
         final int chunkSize;
         final int mode;
-        /** The shared device structure the context was built on. The base load flow's VALUES path refreshes a
-         *  structure's device values in place and re-keys it (GpuAcStructures.rebind), after which this context
-         *  solves the refreshed values while {@code data} still describes the old ones: a request for the old
-         *  extraction must then resolve to ANOTHER structure and rebuild, not be handed this context. */
+        /** The shared device structure the context was built on: a request whose extraction resolves to another
+         *  structure gets a new context. */
         final long structure;
 
         CachedBatchContext(long handle, GpuAcData data, int chunkSize, int mode, long structure) {

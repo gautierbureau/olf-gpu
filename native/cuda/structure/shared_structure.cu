@@ -425,40 +425,4 @@ double luBytesPerScenario(SharedStructure& structure) {
     return structure.luBytes;
 }
 
-
-// VALUES-level refresh: re-upload only the per-element PARAMETER packs (closedBranchParameters/openBranchParameters/shuntParameters/hvdcAcEmulationParameters/zeroImpedanceBranchParameters)
-// into the SHARED structure, in place. The CSR pattern, the diagonal pairing, the index/dest packs and
-// cuDSS's symbolic ANALYSIS are UNCHANGED — they depend on the index packs and structure, not on these
-// values (a transformer tap or shunt-b move changes r1/a1/b — or a coupler's rho, zeroImpedanceBranchParameters — only). The
-// fill kernels read in[] every iteration, so the next batched solve refactorizes on the fresh values.
-// Element COUNTS must match the cached structure (the Java side only takes this path when the index
-// packs are identical), so we copy into the EXISTING device buffers (no realloc — DeviceBuf::alloc
-// would leak the old pointer). The static trig is re-derived (a tap move can change ksi/a1). Mutating
-// the shared structure is the correct semantic — one extraction has ONE value set; any context sharing
-// it must see the new values (the Java side then re-keys the structure cache to the new extraction,
-// GpuAcStructures.rebind, so content matching never aliases stale values).
-void refreshStructureValues(SharedStructure& structure, int nClosedBranch, const double* closedBranchParameters, int nOpenBranch, const double* openBranchParameters,
-                            int nShunt, const double* shuntParameters, int nHvdcAcEmulation, const double* hvdcAcEmulationParameters,
-                            int nZeroImpedanceBranch, const double* zeroImpedanceBranchParameters) {
-    auto refresh = [](Family& f, int elementCount, const double* in) {
-        if (elementCount != f.elementCount) {
-            throw std::runtime_error("refreshStructureValues: element count changed (not a VALUES event)");
-        }
-        if (elementCount) {
-            CUDA_CHECK(cudaMemcpy(f.parameters.p, in, static_cast<size_t>(elementCount) * f.parameterStride * sizeof(double),
-                                  cudaMemcpyHostToDevice));
-        }
-    };
-    refresh(structure.closedBranch, nClosedBranch, closedBranchParameters);
-    refresh(structure.openBranch, nOpenBranch, openBranchParameters);
-    refresh(structure.shunt, nShunt, shuntParameters);
-    refresh(structure.hvdcAcEmulation, nHvdcAcEmulation, hvdcAcEmulationParameters);
-    if (nZeroImpedanceBranch != structure.nZeroImpedanceBranch) {
-        throw std::runtime_error("refreshStructureValues: zero-impedance count changed (not a VALUES event)");
-    }
-    if (nZeroImpedanceBranch) {
-        CUDA_CHECK(cudaMemcpy(structure.dZeroImpedanceBranchParameters.p, zeroImpedanceBranchParameters, static_cast<size_t>(nZeroImpedanceBranch) * sizeof(double), cudaMemcpyHostToDevice));
-    }
-}
-
 }  // namespace olfgpu

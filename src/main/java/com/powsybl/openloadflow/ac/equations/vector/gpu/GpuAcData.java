@@ -73,17 +73,28 @@ public record GpuAcData(ClosedBranchPack closedBranch, OpenBranchPack openBranch
                         ElementPack loadModel, ReactiveRelocationCandidates reactiveRelocation) {
 
     /**
-     * Content equality over every array — true means a cached solver context built from
-     * {@code other} (structure AND element parameters) is still valid for this data. With
-     * the stable row indexing this holds across activation switching (PV→PQ), so outer
-     * loops virtually always reuse; it goes false only on real topology/parameter changes.
+     * Content equality over the packs a cached batched context depends on: the element packs (indices and
+     * parameters), the DISTR_Q / DISTR_RHO / zero-impedance terms, and the reactive-limit, voltage-row and
+     * distributed-slack inputs {@code createBatchContext} takes. Arrays the per-chunk table install re-reads from
+     * the current extraction are left out (see {@link ReactiveLimitEntries#sameAs} and
+     * {@link DistributedSlackParticipants#sameAs}).
      */
     public boolean sameAs(GpuAcData other) {
-        return sameStructureAs(other)
+        return other != null
+                && closedBranch.sameIndicesAs(other.closedBranch) && openBranch.sameIndicesAs(other.openBranch)
+                && shunt.sameIndicesAs(other.shunt) && hvdcAcEmulation.sameIndicesAs(other.hvdcAcEmulation)
+                && distrQ.sameAs(other.distrQ)
+                && zeroImpedanceBranch.sameIndicesAs(other.zeroImpedanceBranch)
+                && distrRho.sameAs(other.distrRho) && distrShuntB.sameAs(other.distrShuntB)
+                && reactiveLimits.sameAs(other.reactiveLimits)
+                && distributedSlack.sameAs(other.distributedSlack)
+                && reactiveRelocation.sameGroupsAs(other.reactiveRelocation)
+                && distrQMembers.sameAs(other.distrQMembers)
+                && remoteMemberReactiveTerms.sameAs(other.remoteMemberReactiveTerms)
+                && voltageRows.sameAs(other.voltageRows)
                 && closedBranch.sameParametersAs(other.closedBranch) && openBranch.sameParametersAs(other.openBranch)
                 && shunt.sameParametersAs(other.shunt) && hvdcAcEmulation.sameParametersAs(other.hvdcAcEmulation)
                 && zeroImpedanceBranch.sameParametersAs(other.zeroImpedanceBranch) && loadModel.sameParametersAs(other.loadModel);
-        // distrRho's coefficients are structural (qPct/count-derived); covered by sameStructureAs below.
     }
 
     /**
@@ -110,29 +121,6 @@ public record GpuAcData(ClosedBranchPack closedBranch, OpenBranchPack openBranch
                 && loadModel.sameParametersAs(other.loadModel) && loadModel.sameIndicesAs(other.loadModel)
                 // the candidate tables build the group relocation pools (buildClosedBranchRelocationDestination & co.)
                 && reactiveRelocation.sameAs(other.reactiveRelocation);
-    }
-
-    /**
-     * Structural equality over the INDEX packs ONLY (the variable columns each element touches, hence
-     * the CSR pattern + diagonal pairing). True means a cached context's pattern and cuDSS symbolic
-     * analysis are still valid and only the element PARAMETER packs may differ — the VALUES invalidation
-     * level: a cheap in-place re-upload (refreshStructureValues) instead of a full rebuild + re-analysis.
-     * A transformer tap or shunt-susceptance move changes {@code closedBranchParameters}/{@code shuntParameters} values but not the
-     * indices, so it is {@code sameStructureAs} but not {@code sameAs}.
-     */
-    public boolean sameStructureAs(GpuAcData other) {
-        return other != null
-                && closedBranch.sameIndicesAs(other.closedBranch) && openBranch.sameIndicesAs(other.openBranch)
-                && shunt.sameIndicesAs(other.shunt) && hvdcAcEmulation.sameIndicesAs(other.hvdcAcEmulation)
-                && distrQ.sameAs(other.distrQ)
-                && zeroImpedanceBranch.sameIndicesAs(other.zeroImpedanceBranch)
-                && distrRho.sameAs(other.distrRho) && distrShuntB.sameAs(other.distrShuntB)
-                && reactiveLimits.sameAs(other.reactiveLimits)
-                && distributedSlack.sameAs(other.distributedSlack)
-                && reactiveRelocation.sameGroupsAs(other.reactiveRelocation)
-                && distrQMembers.sameAs(other.distrQMembers)
-                && remoteMemberReactiveTerms.sameAs(other.remoteMemberReactiveTerms)
-                && voltageRows.sameAs(other.voltageRows);
     }
 
     public int getClosedBranchCount() {

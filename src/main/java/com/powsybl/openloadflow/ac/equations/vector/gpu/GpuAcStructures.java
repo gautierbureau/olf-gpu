@@ -38,11 +38,6 @@ import java.util.concurrent.atomic.AtomicLong;
  * context built from the handle holds shared native ownership, so the structure lives until the
  * last context is destroyed.
  *
- * <p>VALUES refresh: {@code refreshStructureValues} mutates the shared structure's device values in
- * place (tap/shunt moves). The refresher must then call {@link #rebind} so the cache maps the NEW
- * extraction (whose arrays match the device state) and drops the stale one — otherwise a later
- * extraction content-equal to the OLD values could alias a structure that no longer holds them.
- *
  * <p>{@code GpuAcData} is a record whose array components compare by reference, so instance-level
  * map lookups are effectively identity-based: distinct extractions never collide, and the
  * instance handed out by {@link GpuAcDataCache} always hits without any array comparison.
@@ -144,23 +139,5 @@ public final class GpuAcStructures {
      */
     public static synchronized void clear() {
         CACHE.clear();
-    }
-
-    /**
-     * Re-key after a VALUES-level device refresh: the structure mapped from {@code from} now holds
-     * {@code to}'s element values, so EVERY key aliased to it is dropped (their arrays no longer
-     * describe the device state — leaving any would let a later content-equal extraction alias
-     * wrong values) and {@code to} becomes its key (unless it already has its own structure).
-     */
-    public static synchronized void rebind(GpuAcData from, GpuAcData to) {
-        Structure structure = CACHE.remove(from);
-        if (structure != null) {
-            CACHE.values().removeIf(v -> v == structure);    // stale content-matched aliases
-            CACHE.putIfAbsent(to, structure);
-        } else {
-            // the refreshed structure is unknown here — conservatively drop any key holding the
-            // old content (its structure may be the refreshed one); consumers just rebuild
-            CACHE.keySet().removeIf(k -> k.sameStructureInputsAs(from));
-        }
     }
 }

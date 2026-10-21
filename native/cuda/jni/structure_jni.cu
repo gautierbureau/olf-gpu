@@ -1,7 +1,7 @@
 // Copyright (c) 2026, RTE (http://www.rte-france.com)
 // SPDX-License-Identifier: MPL-2.0
 //
-// JNI entry points of GpuAcNewtonSolver: GpuAcStructures: the shared structure built once per extraction, its values refresh and the chunk sizing.
+// JNI entry points of GpuAcNewtonSolver: GpuAcStructures: the shared structure built once per extraction and the chunk sizing.
 #include "jni_common.cuh"
 
 extern "C" JNIEXPORT jlong JNICALL
@@ -172,43 +172,6 @@ OLF_JNI(ac_equations_vector_gpu, StructureNative, destroyStructure)(
     // Drops the Java-side owner reference only: contexts hold their own shared_ptr copies,
     // so the device-resident structure lives until the last context is destroyed.
     delete reinterpret_cast<SharedStructurePtr*>(handle);
-}
-
-// VALUES refresh addressed by the SHARED STRUCTURE handle (no solver context needed): the
-// sequential batch-of-1 path reconciles tap/shunt moves the same way the seq context did —
-// one extraction has ONE value set, and every context sharing the structure sees the update.
-extern "C" JNIEXPORT void JNICALL
-OLF_JNI(ac_equations_vector_gpu, StructureNative, refreshStructureValues)(
-        JNIEnv* env, jclass, jlong structureHandle, jdoubleArray jClosedBranchParameters, jdoubleArray jOpenBranchParameters,
-        jdoubleArray jShuntParameters, jdoubleArray jHvdcAcEmulationParameters, jdoubleArray jZeroImpedanceBranchParameters) {
-    auto* structurePointer = reinterpret_cast<SharedStructurePtr*>(structureHandle);
-    jdouble* closedBranchParameters = env->GetDoubleArrayElements(jClosedBranchParameters, nullptr);
-    jdouble* openBranchParameters = env->GetDoubleArrayElements(jOpenBranchParameters, nullptr);
-    jdouble* shuntParameters = env->GetDoubleArrayElements(jShuntParameters, nullptr);
-    jdouble* hvdcAcEmulationParameters = env->GetDoubleArrayElements(jHvdcAcEmulationParameters, nullptr);
-    jdouble* zeroImpedanceBranchParameters = env->GetDoubleArrayElements(jZeroImpedanceBranchParameters, nullptr);
-    std::string error;
-    try {
-        if (structurePointer == nullptr || !*structurePointer) {
-            throw std::runtime_error("invalid structure handle");
-        }
-        refreshStructureValues(**structurePointer, env->GetArrayLength(jClosedBranchParameters) / 8, closedBranchParameters, env->GetArrayLength(jOpenBranchParameters) / 7, openBranchParameters,
-                               env->GetArrayLength(jShuntParameters) / 2, shuntParameters, env->GetArrayLength(jHvdcAcEmulationParameters) / 5, hvdcAcEmulationParameters,
-                               env->GetArrayLength(jZeroImpedanceBranchParameters), zeroImpedanceBranchParameters);
-    } catch (const std::exception& e) {
-        error = e.what();
-    } catch (...) {
-        error = "unknown native error";
-    }
-    env->ReleaseDoubleArrayElements(jClosedBranchParameters, closedBranchParameters, JNI_ABORT);
-    env->ReleaseDoubleArrayElements(jOpenBranchParameters, openBranchParameters, JNI_ABORT);
-    env->ReleaseDoubleArrayElements(jShuntParameters, shuntParameters, JNI_ABORT);
-    env->ReleaseDoubleArrayElements(jHvdcAcEmulationParameters, hvdcAcEmulationParameters, JNI_ABORT);
-    env->ReleaseDoubleArrayElements(jZeroImpedanceBranchParameters, zeroImpedanceBranchParameters, JNI_ABORT);
-    if (!error.empty()) {
-        env->ThrowNew(env->FindClass("java/lang/RuntimeException"),
-                      ("GPU structure values refresh failed: " + error).c_str());
-    }
 }
 
 extern "C" JNIEXPORT jint JNICALL

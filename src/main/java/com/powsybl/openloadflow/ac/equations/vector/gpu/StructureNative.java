@@ -80,11 +80,4 @@ public final class StructureNative {
      * @return a recommended chunk size in {@code [1, maxCap]}
      */
     public static native int recommendBatchSize(long structureHandle, int maxCap);
-
-    /** VALUES refresh addressed by the SHARED STRUCTURE handle: same semantics as
-     *  {@link #refreshStructureValues} (tap r1/a1 or shunt-b moves with an unchanged pattern), but
-     *  usable when the caller holds a BATCH context — one extraction has ONE value set, every
-     *  context sharing the structure sees the update. */
-    public static native void refreshStructureValues(long structureHandle, double[] closedBranchParameters, double[] openBranchParameters,
-                                                     double[] shuntParameters, double[] hvdcAcEmulationParameters, double[] zeroImpedanceBranchParameters);
 }

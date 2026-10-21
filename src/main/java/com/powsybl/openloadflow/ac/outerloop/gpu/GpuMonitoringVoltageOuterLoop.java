@@ -10,11 +10,7 @@ package com.powsybl.openloadflow.ac.outerloop.gpu;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcActivation;
-import com.powsybl.openloadflow.ac.solver.NewtonRaphsonParameters;
-import com.powsybl.openloadflow.ac.solver.gpu.BatchSolveNative;
-import com.powsybl.openloadflow.ac.solver.gpu.batch.BatchConfig;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchSkips;
-import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuStateVectorScalingMode;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.Variable;
 import com.powsybl.openloadflow.network.LfBus;
@@ -140,54 +136,6 @@ public final class GpuMonitoringVoltageOuterLoop {
                     deltaRows, deltaModesOn, deltaTargetsOn));
         }
         return out;
-    }
-
-    @SuppressWarnings("java:S107")
-    private static double[][] resolve(long handle, int chunkSize, int n, int nReactiveLimitEntries, List<Controller> controllers,
-            double[][] activatedTargetV, int[] reactiveLimitsState, int skipReactiveLimits,
-            int[][] rowModePerScenario, int[] baseRowMode, boolean[][] disabledMask,
-            List<Integer> ovIdx, List<Double> ovVal, double[] x0Full,
-            int[] distributedSlackOverrideBus, double[] distributedSlackOverrideFactorDelta,
-            double[] distributedSlackOverrideBaseTargetPDelta, double[] distributedSlackOverrideMaxDelta,
-            double[] distributedSlackOverrideMinDelta,
-            double[] distributedSlackBusAnchorCarry, double[] slackBusAnchorCarry,
-            int[] closedBranchParameterOverrideScenarioElement, double[] closedBranchParameterOverrideValues, int[] shuntAdmittanceOverrideScenarioElement, double[] shuntAdmittanceOverrideDelta,
-            int nBaseClosedZeroImpedanceBranches, int[] zeroImpedanceBranchCloseScenarioElement, int[] zeroImpedanceBranchOpenScenarioElement,
-            double[] baseState, double[] baseTargets, NewtonRaphsonParameters parameters,
-            double tol, double reactiveLimitTol, double slackDistTol, double convEpsPerEq, int[] varType,
-            BatchConfig config, int realCount) {
-        List<Integer> vtSlotIdx = new ArrayList<>();
-        List<Double> vtVal = new ArrayList<>();
-        for (int s = 0; s < realCount; s++) {
-            for (int c = 0; c < controllers.size(); c++) {
-                if (!Double.isNaN(activatedTargetV[s][c])) {
-                    vtSlotIdx.add(s);
-                    vtSlotIdx.add(controllers.get(c).reactiveLimitEntry());
-                    vtVal.add(activatedTargetV[s][c]);       // the RL kernel's checks use the moved target
-                }
-            }
-        }
-        int[] reactiveLimitsFinalState = new int[chunkSize * nReactiveLimitEntries];
-        double[][] r2 = BatchSolveNative.solveBatchContext(handle, baseState, baseTargets,
-                rowModePerScenario, baseRowMode, disabledMask,
-                ovIdx.stream().mapToInt(Integer::intValue).toArray(),
-                ovVal.stream().mapToDouble(Double::doubleValue).toArray(),
-                distributedSlackOverrideBus, distributedSlackOverrideFactorDelta,
-                distributedSlackOverrideBaseTargetPDelta, distributedSlackOverrideMaxDelta,
-                distributedSlackOverrideMinDelta, distributedSlackBusAnchorCarry, slackBusAnchorCarry,
-                vtSlotIdx.stream().mapToInt(Integer::intValue).toArray(),
-                vtVal.stream().mapToDouble(Double::doubleValue).toArray(),
-                null, null,
-                null, null,
-                parameters.getMaxIterations(), tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
-                config.stateVectorScalingMode(), config.maxDv(), config.maxDphi(),
-                config.stateVectorScalingMode() == GpuStateVectorScalingMode.MAX_VOLTAGE_CHANGE ? varType : null, x0Full,
-                shuntAdmittanceOverrideScenarioElement, shuntAdmittanceOverrideDelta, reactiveLimitsState, reactiveLimitsFinalState,
-                closedBranchParameterOverrideScenarioElement, closedBranchParameterOverrideValues,
-                config.maxOuterIterations(), config.maxPqPvSwitch(), config.rejectSlackDistributionFailureFlag(), skipReactiveLimits,
-                nBaseClosedZeroImpedanceBranches, zeroImpedanceBranchCloseScenarioElement, zeroImpedanceBranchOpenScenarioElement);
-        System.arraycopy(reactiveLimitsFinalState, 0, reactiveLimitsState, 0, reactiveLimitsFinalState.length);
-        return r2;
     }
 
     /** Install the MonitoringVoltage driver phase's table on a batch context (null/empty clears it).

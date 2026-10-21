@@ -16,6 +16,7 @@ import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfGenerator;
 import com.powsybl.openloadflow.network.LfNetwork;
 import com.powsybl.openloadflow.network.LfStaticVarCompensator;
+import com.powsybl.openloadflow.util.gpu.GpuTrace;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -186,7 +187,7 @@ public final class GpuMonitoringVoltageOuterLoop {
                 continue;
             }
             LfBus bus = network.getBus(reactiveLimitBusNum[controller.reactiveLimitEntry()]);
-            if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
+            if (GpuTrace.BATCH_TRACE.isOn()) {
                 System.err.println("WB_MON bus=" + (bus == null ? "?" : bus.getId()) + " activatedTarget=" + t
                         + " vcEnabled=" + (bus != null && bus.isGeneratorVoltageControlEnabled()));
             }

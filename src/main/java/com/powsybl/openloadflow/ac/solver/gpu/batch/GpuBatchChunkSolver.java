@@ -45,6 +45,7 @@ import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuStateVectorScalingMode;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuVoltageControlRole;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfShunt;
+import com.powsybl.openloadflow.util.gpu.GpuTrace;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -63,7 +64,7 @@ import java.util.List;
  */
 final class GpuBatchChunkSolver {
 
-    private static final boolean OUTER_LOOP_STATS = System.getenv("OLF_OL_STATS") != null;
+    private static final boolean OUTER_LOOP_STATS = GpuTrace.OL_STATS.isOn();
 
     private static final Logger LOGGER = LoggerFactory.getLogger(GpuBatchChunkSolver.class);
 
@@ -426,7 +427,7 @@ final class GpuBatchChunkSolver {
                                     slackBusAnchorShift = new double[chunkSize];
                                 }
                                 slackBusAnchorShift[s] = placed;
-                                if (System.getenv("OLF_GPU_PRELOSS_TRACE") != null) {
+                                if (GpuTrace.PRELOSS_TRACE.isOn()) {
                                     System.err.printf("PRELOSS_SLACKONLY ctg=%s loss=%s slackBase=%s -> slackTarget=%s%n",
                                             contingencies.get(group.get(chunkStart + s)).contingencyId(),
                                             Double.toString(cl.preLossBySlot[s]),
@@ -485,9 +486,9 @@ final class GpuBatchChunkSolver {
                             // OLF_DS_SPLIT. The two totals can agree while the SPLIT does not, and the
                             // split is what the first solve sees — so the mismatch the DS loop then
                             // measures, and everything after it, inherits the difference.
-                            if (System.getenv("OLF_GPU_SEED_DUMP") != null && shares != null) {
+                            if (GpuTrace.SEED_DUMP.isOn() && shares != null) {
                                 try (java.io.PrintWriter w = new java.io.PrintWriter(
-                                        new java.io.FileWriter(System.getenv("OLF_GPU_SEED_DUMP"), true))) {
+                                        new java.io.FileWriter(GpuTrace.SEED_DUMP.value(), true))) {
                                     w.printf("# SEED ctg=%s%n",
                                             contingencies.get(group.get(chunkStart + s)).contingencyId());
                                     for (int i = 0; i < nDistributedSlackBuses; i++) {
@@ -499,7 +500,7 @@ final class GpuBatchChunkSolver {
                                     throw new java.io.UncheckedIOException(e);
                                 }
                             }
-                            if (System.getenv("OLF_GPU_PRELOSS_TRACE") != null) {
+                            if (GpuTrace.PRELOSS_TRACE.isOn()) {
                                 double absorbed = 0;
                                 if (shares != null) {
                                     for (int i = 0; i < nDistributedSlackBuses; i++) {
@@ -881,7 +882,7 @@ final class GpuBatchChunkSolver {
                         hvdcAppliedDelta1 = new double[chunkSize * hvdcControllers.size()];
                         hvdcAppliedDelta2 = new double[chunkSize * hvdcControllers.size()];
                         preHvdcOverrides = rs.overrides.snapshot();
-                        if (System.getenv("OLF_GPU_HVDC_TRACE") != null) {
+                        if (GpuTrace.HVDC_TRACE.isOn()) {
                             for (int s = 0; s < realCount; s++) {
                                 System.err.println("HVDC_SLOT s=" + s + " ctg="
                                         + contingencies.get(group.get(chunkStart + s)).contingencyId());
@@ -916,7 +917,7 @@ final class GpuBatchChunkSolver {
                     }
                     boolean monitoringVoltageActive = phases.monitoring() != null && !phases.monitoring().isEmpty();
                     int[] reactiveLimitsFinalState = (!pairPhase && !pairIdxList.isEmpty() || monitoringVoltageActive
-                            || System.getenv("OLF_GPU_RL_TRACE") != null) && nReactiveLimitEntries > 0 ? new int[chunkSize * nReactiveLimitEntries] : null;
+                            || GpuTrace.RL_TRACE.isOn()) && nReactiveLimitEntries > 0 ? new int[chunkSize * nReactiveLimitEntries] : null;
                     cl.upload(handle, gpuData);
                     // The two HVDC AC-emulation loops run as DRIVER PHASES, in OLF's own position
                     // between DistributedSlack and ReactiveLimits. Running them instead as host
@@ -949,7 +950,7 @@ final class GpuBatchChunkSolver {
                     // structure was extracted on (empty clears the previous chunk's list).
                     ZeroImpedanceNative.setBatchSpanningTreeOverrides(handle,
                             rs.spanningTreeOverrideScenarioElementValueList.stream().mapToInt(Integer::intValue).toArray());
-                    String traceCtg = System.getenv("OLF_GPU_LOOP_TRACE_CTG");
+                    String traceCtg = GpuTrace.LOOP_TRACE_CTG.value();
                     int traceSlot = -1;
                     if (traceCtg != null) {
                         for (int s = 0; s < realCount; s++) {
@@ -965,7 +966,7 @@ final class GpuBatchChunkSolver {
                     // OLF_GPU_CHUNK_DUMP=<file>: every chunk's members in slot order, appended one line per chunk
                     // ("<pairPhase> <chunkStart> <chunkSize> <id> <id> ..."). A scenario whose answer moves with
                     // its chunk mates can only be reproduced in the chunk it was solved in.
-                    String chunkDump = System.getenv("OLF_GPU_CHUNK_DUMP");
+                    String chunkDump = GpuTrace.CHUNK_DUMP.value();
                     if (chunkDump != null) {
                         StringBuilder line = new StringBuilder().append(pairPhase).append(' ').append(chunkStart)
                                 .append(' ').append(chunkSize);
@@ -1030,7 +1031,7 @@ final class GpuBatchChunkSolver {
                             0,
                             rs.nBaseClosedZeroImpedanceBranches, rs.zeroImpedanceBranchCloseScenarioElementList.stream().mapToInt(Integer::intValue).toArray(),
                             rs.zeroImpedanceBranchOpenScenarioElementList.stream().mapToInt(Integer::intValue).toArray());
-                    if (System.getenv("OLF_GPU_REJECT_TRACE") != null) {
+                    if (GpuTrace.REJECT_TRACE.isOn()) {
                         // slot -> contingency for every scenario the device rejected in this chunk: the native
                         // GPU_REJECT lines name slots, and a slot only means something with the chunk's composition.
                         for (int s = 0; s < realCount; s++) {
@@ -1072,7 +1073,7 @@ final class GpuBatchChunkSolver {
                             for (int s2 = 0; s2 < chunkSize; s2++) {
                                 System.arraycopy(devStatus, s2 * nh, hvdcStatus[s2], 0, nh);
                             }
-                            if (System.getenv("OLF_GPU_HVDC_TRACE") != null) {
+                            if (GpuTrace.HVDC_TRACE.isOn()) {
                                 // the status each scenario ENDED with (0 linear, 1/2 saturated, 3 frozen)
                                 for (int s2 = 0; s2 < realCount; s2++) {
                                     StringBuilder sb = new StringBuilder();
@@ -1100,7 +1101,7 @@ final class GpuBatchChunkSolver {
                     // chunk size. Two implementations that solve the same system in the same number of
                     // iterations agree to machine precision, so the count is the first thing to compare
                     // against OLF's own (OLF_LF_STEPS_TRACE) when the answers differ.
-                    String iterCtg = System.getenv("OLF_GPU_ITER_TRACE_CTG");
+                    String iterCtg = GpuTrace.ITER_TRACE_CTG.value();
                     if (iterCtg != null && !pairPhase) {
                         for (int s = 0; s < realCount; s++) {
                             String id = contingencies.get(group.get(chunkStart + s)).contingencyId();
@@ -1115,7 +1116,7 @@ final class GpuBatchChunkSolver {
                             }
                         }
                     }
-                    if (System.getenv("OLF_GPU_PRELOSS_TRACE") != null && nDistributedSlackBuses > 0 && !pairPhase) {
+                    if (GpuTrace.PRELOSS_TRACE.isOn() && nDistributedSlackBuses > 0 && !pairPhase) {
                         // Did the DEVICE's own distributed-slack pass move power AFTER the host-side
                         // pre-distribution? The CPU's loop should see only the loss-nonlinearity
                         // residual and stay inside the slack band; if ours redistributes again, the
@@ -1157,7 +1158,7 @@ final class GpuBatchChunkSolver {
                         GpuBatchPhaseStats.add("main.iterMax", itMax);
                         GpuBatchPhaseStats.bump("main.solves");
                     }
-                    if (System.getenv("OLF_GPU_RL_TRACE") != null && reactiveLimitsFinalState != null) {
+                    if (GpuTrace.RL_TRACE.isOn() && reactiveLimitsFinalState != null) {
                         // reactiveLimitsFinalState packs a GpuReactiveLimitsState per (controller, scenario):
                         // switchCount > 0 means the DEVICE switched that controller during THIS solve, which
                         // is exactly the decision OLF's ReactiveLimitsOuterLoop makes (and logs) on the CPU.
@@ -1293,7 +1294,7 @@ final class GpuBatchChunkSolver {
                     // Post-RL host orchestrators below: SVC(4), Monitoring(5), Phase(7), TVC(8), TRPC(9), Shunt(10).
 
                     tOrchestratorNs += System.nanoTime() - tOrch0;
-                    if (System.getenv("OLF_GPU_RL_TRACE") != null && reactiveLimitsFinalState != null) {
+                    if (GpuTrace.RL_TRACE.isOn() && reactiveLimitsFinalState != null) {
                         // The FINAL reactive-limits state, after every orchestrator re-solve. The
                         // per-solve trace above only sees the main solve, and OLF pins late in its
                         // outer-loop sequence (DS, HVDC freeze, monitoring, THEN ReactiveLimits), so
@@ -1344,7 +1345,7 @@ final class GpuBatchChunkSolver {
                         // OLF_GPU_CPU_ROUTED=1: name every scenario the device hands back to the CPU, with
                         // the status that decided it (-2 rejected, -1 diverged, 1 max-iter). The aggregate
                         // "precomputed on device: N / M" says how many, never which.
-                        if (System.getenv("OLF_GPU_CPU_ROUTED") != null && chunkResults[s] != null
+                        if (GpuTrace.CPU_ROUTED.isOn() && chunkResults[s] != null
                                 && (int) chunkResults[s][n + 2] != GpuAcSolverStatus.CONVERGED) {
                             System.err.printf("GPU_CPU_ROUTED ctg=%s status=%d%n",
                                     contingencies.get(group.get(chunkStart + s)).contingencyId(),
@@ -1356,7 +1357,7 @@ final class GpuBatchChunkSolver {
             long elapsed = System.currentTimeMillis() - startTime;
             LOGGER.info("Batched N-1: {} GPU scenarios in {} chunk(s) of <= {} solved in {} ms ({} ms/scenario)",
                     nb, nChunks, chunkSize, elapsed, (double) elapsed / nb);
-            if (System.getenv("OLF_GPU_PHASE_TIME") != null) {
+            if (GpuTrace.PHASE_TIME.isOn()) {
                 System.err.printf("BATCH_PHASE_TIME total=%d ms | batched main solves=%d ms | "
                         + "outer-loop orchestrators=%d ms | %d scenarios in %d chunk(s) of <= %d%n",
                         elapsed, tMainSolveNs / 1_000_000, tOrchestratorNs / 1_000_000, nb, nChunks, chunkSize);

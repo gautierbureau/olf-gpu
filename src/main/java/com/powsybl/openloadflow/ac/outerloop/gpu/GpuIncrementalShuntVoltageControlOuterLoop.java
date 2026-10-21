@@ -14,6 +14,7 @@ import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.Variable;
 import com.powsybl.openloadflow.network.LfNetwork;
 import com.powsybl.openloadflow.network.LfShunt;
+import com.powsybl.openloadflow.util.gpu.GpuTrace;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -94,7 +95,7 @@ public final class GpuIncrementalShuntVoltageControlOuterLoop {
                 shuntBRows.put(v.getElementNum(), v.getRow());
             }
         }
-        if (System.getenv("OLF_GPU_SHUNT_TRACE") != null) {
+        if (GpuTrace.SHUNT_TRACE.isOn()) {
             System.err.println("SHUNT_TRACE build: controllerElements="
                     + network.getControllerElements(com.powsybl.openloadflow.network.VoltageControl.Type.SHUNT).size()
                     + " shuntBRows=" + shuntBRows.size());
@@ -214,7 +215,7 @@ public final class GpuIncrementalShuntVoltageControlOuterLoop {
                 shuntCompensatorBasePosition.stream().mapToInt(Integer::intValue).toArray(), maxSectionShift) != 0;
         LOGGER.info("Uploaded {} incremental shunt controllers to device ({} groups, {} subs): {}",
                 nControllers, byBus.size(), shuntCompensatorMinPosition.size(), owned ? "in-kernel loop" : "host orchestrator");
-        if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
+        if (GpuTrace.BATCH_TRACE.isOn()) {
             System.err.printf("SHUNT_UPLOAD nControllers=%d nGroups=%d nSubs=%d kernel=%b%n", nControllers, byBus.size(), shuntCompensatorMinPosition.size(), owned);
         }
         return owned;

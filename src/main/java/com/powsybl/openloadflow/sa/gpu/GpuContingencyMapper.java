@@ -18,6 +18,7 @@ import com.powsybl.openloadflow.network.LfGenerator;
 import com.powsybl.openloadflow.network.LfNetwork;
 import com.powsybl.openloadflow.network.LfShunt;
 import com.powsybl.openloadflow.network.impl.PropagatedContingency;
+import com.powsybl.openloadflow.util.gpu.GpuTrace;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -291,7 +292,7 @@ final class GpuContingencyMapper {
         // its own equations trivial; it does NOT stop a branch from injecting into the LIVE bus at the
         // far end. So every branch incident to a lost bus needs a side-open, and any shortfall leaves
         // a phantom flow into the surviving network.
-        if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {
+        if (GpuTrace.QUALIFY_TRACE.isOn()) {
             int incident = 0;
             for (String busId : propagatedContingency.getBusIdsToLose()) {
                 var b = net.getBusById(busId);
@@ -309,7 +310,7 @@ final class GpuContingencyMapper {
     }
 
     private static void trace(PropagatedContingency propagatedContingency, String why) {
-        if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {   // test logback is broken — stderr lever
+        if (GpuTrace.QUALIFY_TRACE.isOn()) {   // test logback is broken — stderr lever
             System.err.println("QUALIFY_TRACE mapper drops " + propagatedContingency.getContingency().getId() + ": " + why);
         }
     }

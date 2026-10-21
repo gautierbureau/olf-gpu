@@ -12,6 +12,7 @@ import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcStructures;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.StructureNative;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DeviceLoopTables;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuLinearSolveMode;
+import com.powsybl.openloadflow.util.gpu.GpuTrace;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -121,7 +122,7 @@ public final class GpuBatchContextCache {
             return cachedContext.handle;
         }
         if (cachedContext != null) {                         // evict a stale context (different network/chunk/mode)
-            if (System.getenv("OLF_GPU_PHASE_TIME") != null) {
+            if (GpuTrace.PHASE_TIME.isOn()) {
                 System.err.printf("CONTEXT_EVICT cached chunk=%d -> requested chunk=%d (a cuDSS ANALYSIS is "
                         + "paid again)%n", cachedContext.chunkSize, chunkSize);
             }
@@ -191,7 +192,7 @@ public final class GpuBatchContextCache {
      */
     public static int resolveChunkSize(int nb, int n, GpuAcData gpuData) {
         Integer explicit = chunkSizeForTests;
-        if (System.getenv("OLF_GPU_PHASE_TIME") != null) {
+        if (GpuTrace.PHASE_TIME.isOn()) {
             System.err.printf("CHUNK_SIZING nb=%d explicit=%s%n", nb, explicit);
         }
         if (explicit != null && explicit > 0) {

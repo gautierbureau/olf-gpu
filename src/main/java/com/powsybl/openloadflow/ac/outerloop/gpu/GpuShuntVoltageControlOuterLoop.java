@@ -18,6 +18,7 @@ import com.powsybl.openloadflow.equations.Variable;
 import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfNetwork;
 import com.powsybl.openloadflow.network.LfShunt;
+import com.powsybl.openloadflow.util.gpu.GpuTrace;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -228,7 +229,7 @@ public final class GpuShuntVoltageControlOuterLoop {
                 shuntCompensatorMinPosition.stream().mapToInt(Integer::intValue).toArray(), shuntCompensatorBasePosition.stream().mapToInt(Integer::intValue).toArray()) != 0;
         LOGGER.info("Uploaded {} shunt voltage-control groups ({} shunts, {} sub-controllers) to device: {}",
                 nG, memberShuntBRow.size(), shuntCompensatorBasePosition.size(), owned ? "in-kernel loop" : "host orchestrator");
-        if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
+        if (GpuTrace.BATCH_TRACE.isOn()) {
             System.err.printf("SVD_UPLOAD entryOn=%b nGroups=%d nMembers=%d nSubs=%d kernel=%b%n", entryOn, nG, memberShuntBRow.size(), shuntCompensatorBasePosition.size(), owned);
         }
         return owned;

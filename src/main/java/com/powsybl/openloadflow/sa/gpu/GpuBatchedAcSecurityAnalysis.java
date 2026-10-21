@@ -39,6 +39,7 @@ import com.powsybl.openloadflow.sa.OpenSecurityAnalysisParameters;
 import com.powsybl.openloadflow.sa.PostContingencyNetworkResult;
 import com.powsybl.openloadflow.sa.PreContingencyNetworkResult;
 import com.powsybl.openloadflow.util.PerUnit;
+import com.powsybl.openloadflow.util.gpu.GpuTrace;
 import com.powsybl.security.LimitViolationsResult;
 import com.powsybl.security.PostContingencyComputationStatus;
 import com.powsybl.security.SecurityAnalysisParameters;
@@ -278,8 +279,8 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
     private int[] flowReadSet(GpuSaRunState run, String contingencyId) {
         if (run.violationScreen == null || run.candidates == null || flowsMonitored()
                 || targetedByOperatorStrategy(run.operatorStrategies, contingencyId)
-                || System.getenv("OLF_GPU_SA_RESID") != null
-                || System.getenv("OLF_GPU_VIOL_CROSSCHECK") != null) {
+                || GpuTrace.SA_RESID.isOn()
+                || GpuTrace.VIOL_CROSSCHECK.isOn()) {
             return null;
         }
         GpuLimitTable table = run.limitTable;
@@ -464,7 +465,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         if (scope.batchDisabled()) {
             LOGGER.info("GPU batched SA: outer loops {} are not implemented in the batched device path — "
                     + "falling back to the sequential CPU path for all contingencies", scope.unsupportedOuterLoops());
-            if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
+            if (GpuTrace.BATCH_TRACE.isOn()) {
                 System.err.println("SCOPE_FALLBACK " + scope.unsupportedOuterLoops());   // test logback is broken
             }
         }
@@ -537,7 +538,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
             restoreStaleVoltages(runState.get(), null);      // the network leaves the loop in its base state
             closeStateStore(runState.get());                 // a file-backed state map is dropped with the run
             runState.remove();                               // pooled partition threads must not leak a run's state
-            if (System.getenv("OLF_GPU_PHASE_TIME") != null) {
+            if (GpuTrace.PHASE_TIME.isOn()) {
                 // CUMULATIVE over the JVM, never cleared: threadCount > 1 runs one partition per
                 // thread through this same static map, and clearing here would hand whichever
                 // partition finished first the whole run's numbers and the rest almost nothing.
@@ -545,7 +546,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                 PHASE_NS.forEach((k, v) ->
                         System.err.printf("SA_PHASE_TIME  %-40s %6d ms (cumulative)%n", k, v.sum() / 1_000_000));
             }
-            if (System.getenv("OLF_GPU_VIOL_CROSSCHECK") != null) {
+            if (GpuTrace.VIOL_CROSSCHECK.isOn()) {
                 System.err.println("VIOL_CROSSCHECK contingencies compared against the stock detection: "
                         + GpuSaDiagnostics.CROSSCHECKED.sum());
             }
@@ -570,7 +571,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                 uncovered.add(b);
             }
         }
-        if (System.getenv("OLF_GPU_PHASE_TIME") != null) {
+        if (GpuTrace.PHASE_TIME.isOn()) {
             System.err.println("VIOL_SCREEN branches with limits not covered by the screen: " + uncovered.size());
         }
         return uncovered.stream().mapToInt(Integer::intValue).toArray();
@@ -604,7 +605,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                         run.precomputed.baseVariableRows().size());
                 PHASE_NS.computeIfAbsent("  violation screen (all scenarios)",
                         k -> new java.util.concurrent.atomic.LongAdder()).add(System.nanoTime() - tScreen);
-                if (System.getenv("OLF_GPU_PHASE_TIME") != null) {
+                if (GpuTrace.PHASE_TIME.isOn()) {
                     System.err.println("VIOL_SCREEN scenarios=" + run.candidates.size()
                             + " screened on the device=" + run.violationScreen.onDevice()
                             + " overflowed to the host scan=" + run.violationScreen.overflows()
@@ -621,7 +622,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         } else {
             run.limitScanner.detectViolations(network, manager);
         }
-        if (System.getenv("OLF_GPU_VIOL_CROSSCHECK") != null) {
+        if (GpuTrace.VIOL_CROSSCHECK.isOn()) {
             GpuSaDiagnostics.crossCheck(network, manager, limitReductions, reference, saParameters, contingencyId);
         }
     }
@@ -809,9 +810,9 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         // means the device solved a DIFFERENT equation there — a row-assembly bug — not that it failed
         // to converge. Prints the n worst rows with the equation OLF has on each, which names the family
         // to look at.
-        if (System.getenv("OLF_GPU_SA_RESID") != null) {
+        if (GpuTrace.SA_RESID.isOn()) {
             GpuSaDiagnostics.reportOlfResidual(context, precomputed.equationSystem(), contingency.getId(),
-                    Integer.parseInt(System.getenv("OLF_GPU_SA_RESID")), precomputed.baseVariableRows(),
+                    Integer.parseInt(GpuTrace.SA_RESID.value()), precomputed.baseVariableRows(),
                     precomputed.islandedBuses().get(contingency.getId()));
         }
         boolean unrealistic = GpuPostContingencyState.updateBusesFromState(state, precomputed, network, context.getParameters(), runState.get());

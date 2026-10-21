@@ -60,6 +60,7 @@ import com.powsybl.openloadflow.network.LfNetwork;
 import com.powsybl.openloadflow.network.LfNetworkListener;
 import com.powsybl.openloadflow.network.LfSynchronousNetwork;
 import com.powsybl.openloadflow.network.util.VoltageInitializer;
+import com.powsybl.openloadflow.util.gpu.GpuTrace;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -252,7 +253,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
      * Jacobian was traced to, and a dump of a healthy pass would not show it.
      */
     private void dumpEquationsOnce(int[] rowMode, int n) {
-        String path = System.getenv("OLF_GPU_EQ_DUMP");
+        String path = GpuTrace.EQ_DUMP.value();
         if (equationsDumped || path == null || path.isEmpty() || cachedData == null) {
             return;
         }
@@ -260,7 +261,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
         for (int m : rowMode) {
             pinned |= m >= 4;
         }
-        if (!pinned && !"any".equals(System.getenv("OLF_GPU_EQ_DUMP_WHEN"))) {
+        if (!pinned && !"any".equals(GpuTrace.EQ_DUMP_WHEN.value())) {
             return;                                          // wait for the pinned pass, the one under suspicion
         }
         try (java.io.Writer w = java.nio.file.Files.newBufferedWriter(java.nio.file.Path.of(path))) {
@@ -612,7 +613,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                 // and the whole analysis reported nothing) and converges on the device in mode 0.
                 // A base load flow that works on the CPU has to work on the GPU.
                 LOGGER.info("GPU Newton-Raphson: device rejected the batch-of-one solve; retrying on the device in the robust single-matrix mode");
-                if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
+                if (GpuTrace.BATCH_TRACE.isOn()) {
                     System.err.println("GPU_BASE_ROBUST_RETRY status=-2 -> mode 6 (pivoted single matrix)");
                 }
                 robustModeForRun = true;
@@ -674,7 +675,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
             BatchSolveNative.destroyBatchContext(context.handle.getAndSet(0));
             cachedData = null;
             invalidation.structureDirty = true;
-            if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
+            if (GpuTrace.BATCH_TRACE.isOn()) {
                 System.err.println("GPU_BASE_FALLBACK " + e);   // test logback is broken — stderr lever
                 // "equation row N has no diagonal pairing" names a row INDEX, which on its own says
                 // nothing about which equation could not be paired. Resolve it against the CURRENT

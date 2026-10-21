@@ -19,6 +19,7 @@ import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.Variable;
 import com.powsybl.openloadflow.network.LfHvdc;
 import com.powsybl.openloadflow.network.LfNetwork;
+import com.powsybl.openloadflow.util.gpu.GpuTrace;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -48,8 +49,8 @@ public final class GpuHvdcAcEmulationLimitsOuterLoop {
     private GpuHvdcAcEmulationLimitsOuterLoop() {
     }
 
-    static final int HVDC_TRACE_ROW = System.getenv("OLF_GPU_HVDC_TRACE") == null ? -1
-            : "all".equals(System.getenv("OLF_GPU_HVDC_TRACE")) ? -2 : Integer.parseInt(System.getenv("OLF_GPU_HVDC_TRACE"));
+    static final int HVDC_TRACE_ROW = !GpuTrace.HVDC_TRACE.isOn() ? -1
+            : "all".equals(GpuTrace.HVDC_TRACE.value()) ? -2 : Integer.parseInt(GpuTrace.HVDC_TRACE.value());
 
     /** One packed AC-emulation HVDC: the hv element index (per-scenario disabled bit), the two
      *  converter buses' P-target rows, OLF's own linear p1/p2 terms, the emulation limits, and the

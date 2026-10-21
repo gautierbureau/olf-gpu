@@ -19,6 +19,7 @@ import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfNetwork;
 import com.powsybl.openloadflow.network.LfSecondaryVoltageControl;
 import com.powsybl.openloadflow.network.LfShunt;
+import com.powsybl.openloadflow.util.gpu.GpuTrace;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -291,7 +292,7 @@ public final class GpuSecondaryVoltageControlOuterLoop {
                 controllers.minPlausibleTargetV(), controllers.maxPlausibleTargetV()) != 0;
         LOGGER.info("Uploaded {} secondary voltage-control zones ({} controllers) to device: {}",
                 nZones, nControllerBuses, owned ? "in-kernel loop" : "refused");
-        if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
+        if (GpuTrace.BATCH_TRACE.isOn()) {
             System.err.printf("SVC_UPLOAD nZones=%d nControllerBuses=%d kernel=%b%n", nZones, nControllerBuses, owned);
         }
         return owned;

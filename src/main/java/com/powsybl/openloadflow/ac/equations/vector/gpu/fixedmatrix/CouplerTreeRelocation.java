@@ -17,6 +17,7 @@ import com.powsybl.openloadflow.network.LfNetwork;
 import com.powsybl.openloadflow.network.LoadFlowModel;
 import com.powsybl.openloadflow.network.VoltageControl;
 import com.powsybl.openloadflow.network.gpu.GeneratorVoltageControlRoles;
+import com.powsybl.openloadflow.util.gpu.GpuTrace;
 
 import java.util.List;
 
@@ -139,7 +140,7 @@ public final class CouplerTreeRelocation {
                     queue.add(other);
                 }
             }
-            if (System.getenv("OLF_GPU_ZITREE_TRACE") != null) {
+            if (GpuTrace.ZITREE_TRACE.isOn()) {
                 System.err.println("ZITREE root=" + bus.getId() + " couplers=" + childrenOfThisTree.size());
             }
         }
@@ -163,7 +164,7 @@ public final class CouplerTreeRelocation {
                 childBusOfEdge[parent] = -1;
             }
         }
-        if (System.getenv("OLF_GPU_ZITREE_TRACE") != null) {
+        if (GpuTrace.ZITREE_TRACE.isOn()) {
             int tree = 0;
             int relocated = 0;
             for (LfBranch br : network.getBranches()) {

@@ -10,6 +10,7 @@ package com.powsybl.openloadflow.ac.outerloop.gpu;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuPiModelColumn;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfNetwork;
+import com.powsybl.openloadflow.util.gpu.GpuTrace;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -91,7 +92,7 @@ public final class DeviceFlowControllers {
                 kind, pinRow, tapColumn, side, targetValue, halfTargetDeadband, elem, controlledElement, tapStart,
                 tapRows.stream().mapToDouble(Double::doubleValue).toArray(), baseTap, maxShift) != 0;
         LOGGER.info("Uploaded {} flow-observed incremental controllers to device: {}", nControllers, owned ? "in-kernel loops" : "host orchestrator");
-        if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
+        if (GpuTrace.BATCH_TRACE.isOn()) {
             System.err.printf("FLOW_UPLOAD nControllers=%d kernel=%b%n", nControllers, owned);
         }
         return owned;

@@ -15,6 +15,7 @@ import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuRowMode;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuTwoSides;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuVoltageControlRole;
 import com.powsybl.openloadflow.network.LfBranch;
+import com.powsybl.openloadflow.util.gpu.GpuTrace;
 
 import java.util.List;
 
@@ -71,7 +72,7 @@ final class IslandSeed {
             }
         }
         cl.nActive[s] -= frozenRowsByIndex[ci].length;  // islanded buses' equations leave the CPU index
-        if (System.getenv("OLF_GPU_SA_RESID") != null) {
+        if (GpuTrace.SA_RESID.isOn()) {
             System.err.printf("DEV_NACTIVE ctg=%s n=%d frozen=%d nActive=%d%n",
                     contingencies.get(ci).contingencyId(), n,
                     frozenRowsByIndex[ci].length, cl.nActive[s]);
@@ -110,7 +111,7 @@ final class IslandSeed {
                 cl.frozenSeedSlot.add(s);
                 cl.frozenSeedRow.add(frozen[k]);
                 cl.frozenSeedValue.add(frozenTargets[k]);
-                if (System.getenv("OLF_GPU_SA_RESID") != null) {
+                if (GpuTrace.SA_RESID.isOn()) {
                     System.err.printf("FROZEN ctg=%s row=%d target=%.9f base=%.9f |F0|=%.9f%n",
                             contingencies.get(ci).contingencyId(), frozen[k], frozenTargets[k],
                             baseState[frozen[k]], Math.abs(baseState[frozen[k]] - frozenTargets[k]));
@@ -157,7 +158,7 @@ final class IslandSeed {
                         && row[baseCarrier] == GpuRowMode.FIXED_VARIABLE && baseRowMode[baseCarrier] != GpuRowMode.FIXED_VARIABLE && !unpinnedPilotSelf) {
                     rs.overrides.add(s * n + newCarrier, baseTargets[baseCarrier]);
                     pilotBalanceRows.add(newCarrier);
-                    if (System.getenv("OLF_GPU_SA_RESID") != null) {
+                    if (GpuTrace.SA_RESID.isOn()) {
                         System.err.printf("CARRIER_MOVED ctg=%s group=%d from=%d to=%d pilotQ=%.9f%n",
                                 contingencies.get(ci).contingencyId(), g, baseCarrier, newCarrier,
                                 baseTargets[baseCarrier]);

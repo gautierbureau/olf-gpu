@@ -35,6 +35,7 @@ import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfGenerator;
 import com.powsybl.openloadflow.network.LfNetwork;
+import com.powsybl.openloadflow.util.gpu.GpuTrace;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -124,7 +125,7 @@ public final class GpuBatchedSecurityAnalysisSolver {
                 ? GpuAcDataCache.extract(network, equationSystem, distributedSlackParameters)
                 : GpuAcDataExtractor.extract(network, equationSystem, baseOpenIds, baseOpenZeroImpedanceBranchIds, distributedSlackParameters);
         GpuAcActivation baseActivation = GpuAcActivation.fromEquationSystem(network, equationSystem);
-        String saEqDump = System.getenv("OLF_GPU_SA_EQ_DUMP");   // the SA extraction's row map (GpuEquationDump)
+        String saEqDump = GpuTrace.SA_EQ_DUMP.value();   // the SA extraction's row map (GpuEquationDump)
         if (saEqDump != null && !saEqDump.isEmpty()) {
             try (java.io.Writer w = java.nio.file.Files.newBufferedWriter(java.nio.file.Path.of(saEqDump))) {
                 // The REAL base row modes, not a zero-filled placeholder. This dump is half of the
@@ -187,7 +188,7 @@ public final class GpuBatchedSecurityAnalysisSolver {
                 elementMapper, gpuData, equationSystem, distributedSlackRawFactorSum, slackParticipates, distributedSlackParameters, distrRhoControllers,
                 relocatedCouplers, distributedSlack, reactiveLimits, config.incrementalTransformerControl());
         List<Integer> batchedIndices = plan.batchedIndices();
-        if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
+        if (GpuTrace.BATCH_TRACE.isOn()) {
             System.err.println("PLAN batched=" + batchedIndices.size() + " of " + contingencies.size());
         }
         int islandingCount = plan.islandingCount();

@@ -16,6 +16,7 @@ import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuRowMode;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuVoltageControlRole;
 import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfNetwork;
+import com.powsybl.openloadflow.util.gpu.GpuTrace;
 
 /**
  * DEVICE port of OLF's {@code ReactiveLimitsOuterLoop}, Java side: the loop runs in the kernel (reactive_limits.cu);
@@ -46,7 +47,7 @@ public final class GpuReactiveLimitsOuterLoop {
             if (bus == null) {
                 continue;
             }
-            if (System.getenv("OLF_GPU_BATCH_TRACE") != null && (limitType != GpuQLimitType.NONE || GpuReactiveLimitsState.pvPqSwitchCount(reactiveLimitsFinalState[i]) != 0)) {
+            if (GpuTrace.BATCH_TRACE.isOn() && (limitType != GpuQLimitType.NONE || GpuReactiveLimitsState.pvPqSwitchCount(reactiveLimitsFinalState[i]) != 0)) {
                 System.err.println("WB_RL bus=" + bus.getId() + " limitType=" + limitType + " switchCount=" + GpuReactiveLimitsState.pvPqSwitchCount(reactiveLimitsFinalState[i])
                         + " vcEnabled=" + bus.isGeneratorVoltageControlEnabled() + " qLimitType=" + bus.getQLimitType().map(Object::toString).orElse("-")
                         + " remote=" + data.reactiveLimits().voltageControlRole()[i]);

@@ -15,6 +15,7 @@ import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfNetwork;
 import com.powsybl.openloadflow.network.VoltageControl;
 import com.powsybl.openloadflow.network.gpu.GeneratorVoltageControlRoles;
+import com.powsybl.openloadflow.util.gpu.GpuTrace;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -240,7 +241,7 @@ public record ReactiveRelocationTables(ReactiveRelocationCandidates candidates, 
                 reactiveRelocationBaseTargetRow.add(dependentPilotQRow);
                 reactiveRelocationDependentGroupOfRow[vCol[dependentBusNum]] = dependentGroup;
             }
-            if (pilotSelf && System.getenv("OLF_GPU_RL_TRACE") != null) {
+            if (pilotSelf && GpuTrace.RL_TRACE.isOn()) {
                 System.err.println("PILOTSELF_ENROL group=" + g + " pilot=" + bus.getId()
                         + " members=" + voltageControl.getMergedControllerElements().size()
                         + " fallbackRow=" + vCol[bus.getNum()]);

@@ -12,6 +12,7 @@ import com.powsybl.openloadflow.graph.GraphConnectivity;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfNetwork;
+import com.powsybl.openloadflow.util.gpu.GpuTrace;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -76,7 +77,7 @@ public final class GpuBatchContingencyValidator {
 
         static Qualification rejected(BatchContingency c, Disqualification reason, String detail) {
             GpuBatchScopeCensus.record("VALIDATOR:" + reason);
-            if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {   // test logback is broken — stderr lever
+            if (GpuTrace.QUALIFY_TRACE.isOn()) {   // test logback is broken — stderr lever
                 System.err.println("QUALIFY_TRACE rejected " + c.contingencyId() + " reason=" + reason
                         + (detail.isEmpty() ? "" : " (" + detail + ")"));
             }
@@ -200,7 +201,7 @@ public final class GpuBatchContingencyValidator {
             // PropagatedContingency does (setMainComponentVertex + getVerticesRemovedFromMainComponent).
             connectivity.setMainComponentVertex(anchor);
             Set<LfBus> islanded = connectivity.getVerticesRemovedFromMainComponent();
-            if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {
+            if (GpuTrace.QUALIFY_TRACE.isOn()) {
                 // What this pass CUT and what it FOUND. The CPU derives its lost buses from the same
                 // kind of pass on its own per-contingency topology; when the two disagree on a bus,
                 // the edge lists are the only way to see whether the graphs differ or the cuts do.

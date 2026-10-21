@@ -7,6 +7,8 @@
  */
 package com.powsybl.openloadflow.ac.solver.gpu.batch;
 
+import com.powsybl.openloadflow.util.gpu.GpuTrace;
+
 import java.util.Map;
 import java.util.TreeMap;
 import java.util.concurrent.ConcurrentSkipListMap;
@@ -28,7 +30,7 @@ import java.util.concurrent.atomic.LongAdder;
  */
 final class GpuBatchPhaseStats {
 
-    static final boolean ENABLED = System.getenv("OLF_GPU_PHASE_TIME") != null;
+    static final boolean ENABLED = GpuTrace.PHASE_TIME.isOn();
 
     private static final Map<String, LongAdder> COUNTS = new ConcurrentSkipListMap<>();
     private static final Map<String, LongAdder> NANOS = new ConcurrentSkipListMap<>();

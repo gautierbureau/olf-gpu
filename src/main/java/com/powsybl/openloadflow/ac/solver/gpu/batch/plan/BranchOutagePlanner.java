@@ -16,6 +16,7 @@ import com.powsybl.openloadflow.ac.equations.vector.gpu.fixedmatrix.CrossIdentit
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
+import com.powsybl.openloadflow.util.gpu.GpuTrace;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -78,7 +79,7 @@ final class BranchOutagePlanner {
             pb.islandedHvdcsByIndex[i] = islandedHvdcs;
         }
         if (vcSplit == VoltageControlOverrides.VcSplit.UNMODELED) {
-            if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {
+            if (GpuTrace.QUALIFY_TRACE.isOn()) {
                 System.err.printf("QUALIFY_TRACE reject %s tag=ISLANDS_REMOTE_VC_MEMBER site=tail-unmodeled"
                         + " lostControllers=%s deadControl=%s%n", c.contingencyId(),
                         lostVcControllers.stream().map(LfBus::getId).toList(),
@@ -106,7 +107,7 @@ final class BranchOutagePlanner {
                                 sb), -1, 0, -1, 0, -1, 0, -1, -1, 0, false, -1, 0, 0));
             }
             if (vcOff == null) {
-                if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {
+                if (GpuTrace.QUALIFY_TRACE.isOn()) {
                     System.err.printf("QUALIFY_TRACE reject %s tag=ISLANDS_REMOTE_VC_MEMBER site=tail-deadControl-noVrow"
                             + " deadControl=%s%n", c.contingencyId(), deadControlBuses.stream().map(LfBus::getId).toList());
                 }
@@ -170,7 +171,7 @@ final class BranchOutagePlanner {
         double[][] distrRhoOverrideTable = VoltageControlOverrides.distrRhoOverrides(es, gpuData, distrRhoControllers,
                                                                     c.outagedBranches(), incrementalTransformerVoltageControllers);
         if (distrRhoOverrideTable == null) {
-            if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
+            if (GpuTrace.BATCH_TRACE.isOn()) {
                 System.err.println("QUAL_REJECT distrRhoOverrides (branch) " + c.contingencyId());
             }
             GpuBatchQualification.refuse(c, "PLAN:DISTR_RHO_GROUP_OUTAGE2");
@@ -191,7 +192,7 @@ final class BranchOutagePlanner {
         // set and derives BOTH the shares and the stopping gate from it.
         pb.islandedDistributedSlackByIndex[i] = IslandedBuses.islandedDistributedSlackParticipants(fi.rows(), gpuData, q.islandedBuses());
         pb.islandedReactiveLimitEntriesByIndex[i] = IslandedBuses.islandedReactiveLimitControllers(fi.rows(), gpuData);
-        if ("1".equals(System.getenv("OLF_GPU_DBG_BUSDUMP")) && fi.rows().length > 0) {
+        if ("1".equals(GpuTrace.DBG_BUSDUMP.value()) && fi.rows().length > 0) {
             // Which reactive-limits ENTRIES the island masks, and which frozen rows are an
             // reactiveLimitVoltageRow at all: an unmasked frozen controller row is a row the RL pass can pin,
             // and a pin on a frozen row survives every later target override.
@@ -200,7 +201,7 @@ final class BranchOutagePlanner {
                     + java.util.Arrays.toString(pb.islandedReactiveLimitEntriesByIndex[i]) + " rlVrowOfMasked="
                     + java.util.Arrays.stream(pb.islandedReactiveLimitEntriesByIndex[i]).map(e -> gpuData.reactiveLimits().voltageRow()[e]).boxed().toList());
         }
-        if ("1".equals(System.getenv("OLF_GPU_DBG_BUSDUMP")) && q.islandedBuses().size() > 0) {
+        if ("1".equals(GpuTrace.DBG_BUSDUMP.value()) && q.islandedBuses().size() > 0) {
             // The count that must match OLF's participant drop: OLF re-runs
             // filterParticipatingBuses on the surviving component, so if it loses N buses and
             // this masks fewer, the device still distributes to a bus OLF has dropped.
@@ -236,7 +237,7 @@ final class BranchOutagePlanner {
         }
         pb.batchedIndices.add(i);
         pb.islandedNumsByIndex[i] = q.islandedBuses().stream().mapToInt(LfBus::getNum).toArray();
-        if ("1".equals(System.getenv("OLF_GPU_DBG_BUSDUMP"))) {
+        if ("1".equals(GpuTrace.DBG_BUSDUMP.value())) {
             System.err.println("FROZEN-ISLAND '" + c.contingencyId().replace(BatchContingency.STRATEGY_KEY_SEP, '|') + "' buses="
                     + q.islandedBuses().stream().map(b -> b.getId() + "#" + b.getNum()).toList()
                     + " rows=" + java.util.Arrays.toString(fi.rows()));

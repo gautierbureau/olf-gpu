@@ -19,6 +19,7 @@ import com.powsybl.openloadflow.network.LfContingency;
 import com.powsybl.openloadflow.network.LfGenerator;
 import com.powsybl.openloadflow.network.LfNetwork;
 import com.powsybl.openloadflow.sa.LimitViolationManager;
+import com.powsybl.openloadflow.util.gpu.GpuTrace;
 import com.powsybl.security.SecurityAnalysisParameters;
 import com.powsybl.security.limitreduction.LimitReduction;
 import org.slf4j.Logger;
@@ -251,8 +252,8 @@ final class GpuSaDiagnostics {
      */
     static void dumpDeviceStateVariables(double[] state, PrecomputedBatch precomputed, LfNetwork network,
                                           Contingency contingency) {
-        String path = System.getenv("OLF_GPU_SA_VAR_DUMP");
-        String want = System.getenv("OLF_TRACE_CTG");
+        String path = GpuTrace.SA_VAR_DUMP.value();
+        String want = GpuTrace.TRACE_CTG.value();
         if (path == null || want != null && !want.equals(contingency.getId())) {
             return;
         }
@@ -306,11 +307,11 @@ final class GpuSaDiagnostics {
      */
     static void dumpPostContingencyEquations(AcLoadFlowContext context, Contingency contingency,
                                               LfContingency lfContingency, LfNetwork network) {
-        String want = System.getenv("OLF_GPU_EQ_DUMP_CTG");
+        String want = GpuTrace.EQ_DUMP_CTG.value();
         if (want == null || !want.equals(contingency.getId())) {
             return;
         }
-        String path = System.getenv().getOrDefault("OLF_GPU_EQ_DUMP_CTG_FILE",
+        String path = GpuTrace.EQ_DUMP_CTG_FILE.valueOr(
                 contingency.getId().replaceAll("[^A-Za-z0-9_.-]", "_") + ".olf.post");
         try (java.io.Writer w = java.nio.file.Files.newBufferedWriter(java.nio.file.Path.of(path))) {
             w.write("# OLF's POST-CONTINGENCY equation system for " + contingency.getId()

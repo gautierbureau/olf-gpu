@@ -16,6 +16,7 @@ import com.powsybl.openloadflow.graph.EvenShiloachGraphDecrementalConnectivityFa
 import com.powsybl.openloadflow.sa.AbstractOpenSecurityAnalysisTest;
 import com.powsybl.openloadflow.sa.OpenSecurityAnalysisParameters;
 import com.powsybl.openloadflow.sa.OpenSecurityAnalysisProvider;
+import com.powsybl.openloadflow.util.gpu.GpuTrace;
 import com.powsybl.security.SecurityAnalysisResult;
 
 import java.util.List;
@@ -231,7 +232,7 @@ abstract class AbstractGpuSaTest extends AbstractOpenSecurityAnalysisTest {
         // equality is blind on limit-free test networks (a wrong Q injection still "matches").
         java.util.Set<String> allVls = network.getVoltageLevelStream().map(vl -> vl.getId())
                 .collect(java.util.stream.Collectors.toSet());
-        java.util.Set<String> monBranches = "1".equals(System.getenv("OLF_GPU_DBG_BUSDUMP"))
+        java.util.Set<String> monBranches = "1".equals(GpuTrace.DBG_BUSDUMP.value())
                 ? network.getBranchStream().map(b -> b.getId()).collect(java.util.stream.Collectors.toSet())
                 : java.util.Set.of();
         List<com.powsybl.security.monitor.StateMonitor> monitors = List.of(new com.powsybl.security.monitor.StateMonitor(
@@ -262,7 +263,7 @@ abstract class AbstractGpuSaTest extends AbstractOpenSecurityAnalysisTest {
             for (int i = 0; i < cpu.getPostContingencyResults().size(); i++) {
                 assertEquals(cpu.getPostContingencyResults().get(i).getStatus(),
                         gpu.getPostContingencyResults().get(i).getStatus());
-                if ("1".equals(System.getenv("OLF_GPU_DBG_BUSDUMP"))) {
+                if ("1".equals(GpuTrace.DBG_BUSDUMP.value())) {
                     var cbr = cpu.getPostContingencyResults().get(i).getNetworkResult().getBranchResults();
                     var gbr = gpu.getPostContingencyResults().get(i).getNetworkResult().getBranchResults();
                     for (int z = 0; z < Math.min(cbr.size(), gbr.size()); z++) {
@@ -400,7 +401,7 @@ abstract class AbstractGpuSaTest extends AbstractOpenSecurityAnalysisTest {
                 var cpuBuses = cpuS.getNetworkResult().getBusResults();
                 var gpuBuses = gpuS.getNetworkResult().getBusResults();
                 assertEquals(cpuBuses.size(), gpuBuses.size());
-                if ("1".equals(System.getenv("OLF_GPU_DBG_BUSDUMP"))) {
+                if ("1".equals(GpuTrace.DBG_BUSDUMP.value())) {
                     var cpb = cpu.getPostContingencyResults().get(r).getNetworkResult().getBusResults();
                     var gpb = gpu.getPostContingencyResults().get(r).getNetworkResult().getBusResults();
                     for (int b = 0; b < cpb.size(); b++) {

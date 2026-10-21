@@ -14,6 +14,7 @@ import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.Variable;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
+import com.powsybl.openloadflow.util.gpu.GpuTrace;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -143,7 +144,7 @@ final class IslandedBuses {
             if (islanded) {
                 found[count++] = i;
             }
-            if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {
+            if (GpuTrace.QUALIFY_TRACE.isOn()) {
                 System.err.printf("QUALIFY_TRACE dsPart i=%d row=%d busNum=%s islanded=%b%n", i, distributedSlackBusPhiRow[i],
                         distributedSlackBusNum != null && i < distributedSlackBusNum.length ? Integer.toString(distributedSlackBusNum[i]) : "-", islanded);
             }

@@ -15,6 +15,7 @@ import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.Variable;
 import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfNetwork;
+import com.powsybl.openloadflow.util.gpu.GpuTrace;
 
 import java.util.List;
 import java.util.Map;
@@ -87,7 +88,7 @@ final class GpuPostContingencyState {
         boolean[] applies = run.realisticBandApplies;
         double minV = parameters.getMinRealisticVoltage();
         double maxV = parameters.getMaxRealisticVoltage();
-        boolean trace = System.getenv("OLF_GPU_UNREALISTIC_TRACE") != null;
+        boolean trace = GpuTrace.UNREALISTIC_TRACE.isOn();
         int[] vRow = run.vRowOfBus;
         int[] phiRow = run.phiRowOfBus;
         List<LfBus> buses = network.getBuses();
@@ -140,7 +141,7 @@ final class GpuPostContingencyState {
         boolean[] applies = run.realisticBandApplies;
         double minV = parameters.getMinRealisticVoltage();
         double maxV = parameters.getMaxRealisticVoltage();
-        boolean trace = System.getenv("OLF_GPU_UNREALISTIC_TRACE") != null;
+        boolean trace = GpuTrace.UNREALISTIC_TRACE.isOn();
         com.powsybl.openloadflow.equations.StateVector stateVector = es.getStateVector();
         boolean unrealistic = false;
         for (Variable<AcVariableType> v : vars) {
@@ -179,7 +180,7 @@ final class GpuPostContingencyState {
     static boolean isStateUnrealistic(EquationSystem<AcVariableType, AcEquationType> es,
                                               LfNetwork network, AcLoadFlowParameters parameters) {
         double minNominalV = parameters.getMinNominalVoltageRealisticVoltageCheck();
-        boolean trace = System.getenv("OLF_GPU_UNREALISTIC_TRACE") != null;
+        boolean trace = GpuTrace.UNREALISTIC_TRACE.isOn();
         boolean unrealistic = false;
         for (Variable<AcVariableType> v : es.getIndex().getSortedVariablesToFind()) {
             if (v.getType() != AcVariableType.BUS_V || network.getBus(v.getElementNum()).isFictitious()) {

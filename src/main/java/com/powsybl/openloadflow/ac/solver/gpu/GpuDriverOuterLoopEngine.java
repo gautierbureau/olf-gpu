@@ -14,6 +14,7 @@ import com.powsybl.openloadflow.ac.outerloop.AcActivePowerDistributionOuterLoop;
 import com.powsybl.openloadflow.ac.outerloop.AcOuterLoop;
 import com.powsybl.openloadflow.ac.outerloop.DistributedSlackOuterLoop;
 import com.powsybl.openloadflow.ac.outerloop.ReactiveLimitsOuterLoop;
+import com.powsybl.openloadflow.util.gpu.GpuTrace;
 import org.apache.commons.lang3.tuple.Pair;
 
 import java.util.List;
@@ -181,7 +182,7 @@ public class GpuDriverOuterLoopEngine extends AcloadFlowEngine {
             }
             if (!engine.deviceDroveLastSolve()) {
                 fellBack = true;
-                if (System.getenv("OLF_GPU_DS_ACCOUNT") != null) {
+                if (GpuTrace.DS_ACCOUNT.isOn()) {
                     // The mismatch OLF's own loop is about to gate on: a loop that books nothing either saw
                     // nothing to distribute (the state was already balanced before this run) or was asked on
                     // the wrong context. The two look identical from the account alone.
@@ -200,7 +201,7 @@ public class GpuDriverOuterLoopEngine extends AcloadFlowEngine {
             int mainSc = context.getNetwork().getSynchronousNetworks().getFirst().getNumSC();
             double onDevice = numSC == mainSc ? deviceDistributed : 0.0;
             double onCpu = fellBack ? realDistribution.getDistributedActivePower(context, numSC) : 0.0;
-            if (System.getenv("OLF_GPU_DS_ACCOUNT") != null) {
+            if (GpuTrace.DS_ACCOUNT.isOn()) {
                 System.err.printf("GPU_DS_ACCOUNT ask numSC=%d mainSC=%d fellBack=%b device=%.9f cpu=%.9f%n",
                         numSC, mainSc, fellBack, onDevice, onCpu);
             }
@@ -210,7 +211,7 @@ public class GpuDriverOuterLoopEngine extends AcloadFlowEngine {
         @Override
         public double getDistributedActivePower(AcOuterLoopContext context) {
             double onCpu = fellBack ? realDistribution.getDistributedActivePower(context) : 0.0;
-            if (System.getenv("OLF_GPU_DS_ACCOUNT") != null) {
+            if (GpuTrace.DS_ACCOUNT.isOn()) {
                 // Which of the two accounts holds the run's distribution, asked of the loop itself: a base
                 // reported as 0.0 is either a device that recorded nothing or a fallback whose real loop was
                 // never asked. Guessing between them cost a wrong fix once.
@@ -240,7 +241,7 @@ public class GpuDriverOuterLoopEngine extends AcloadFlowEngine {
                 out.add(Pair.of(new DeviceDrivenLoop(this, loop), p.getRight()));
             }
         }
-        if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
+        if (GpuTrace.BATCH_TRACE.isOn()) {
             System.err.println("GPU_DRIVER_ENGINE loops=" + all.stream().map(p -> p.getLeft().getName()).toList()
                     + " keptOnHost=" + all.stream().filter(p -> !drivenOnDevice(p.getLeft())).map(p -> p.getLeft().getName()).toList());
         }

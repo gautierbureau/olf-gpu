@@ -11,6 +11,7 @@ import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
 import com.powsybl.openloadflow.network.GeneratorVoltageControl;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
+import com.powsybl.openloadflow.util.gpu.GpuTrace;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -93,7 +94,7 @@ final class ZeroImpedanceClusters {
         if (cluster.size() == 1) {
             return true;
         }
-        if (System.getenv("OLF_GPU_ZITREE_TRACE") != null) {
+        if (GpuTrace.ZITREE_TRACE.isOn()) {
             System.err.println("ZITREE_CLUSTER ctg=" + contingencyId + " child=" + child.getId() + " cluster=" + cluster.stream()
                     .map(clusterBus -> clusterBus.getId() + clusterBus.getGeneratorVoltageControl().filter(voltageControl -> voltageControl.getControlledBus() == clusterBus)
                             .map(voltageControl -> "(vt=" + voltageControl.getTargetValue() + "," + voltageControl.getMergeStatus()

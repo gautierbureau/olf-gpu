@@ -17,6 +17,7 @@ import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuTwoSides;
 import com.powsybl.openloadflow.network.GeneratorVoltageControl;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
+import com.powsybl.openloadflow.util.gpu.GpuTrace;
 
 import java.util.List;
 
@@ -54,7 +55,7 @@ final class CouplerSeed {
             // which the relocation put on the CHILD bus's rows, and pins its dummies with
             // DUMMY_TARGET identities those rows no longer host — the per-scenario gap.
             // childSide (zeroImpedanceBranchIndices slot 10, bits 1-2) is not NONE exactly when rows moved.
-            if (System.getenv("OLF_GPU_ZITREE_TRACE") != null
+            if (GpuTrace.ZITREE_TRACE.isOn()
                     && CouplerTreeReHoming.childSide(gpuData.zeroImpedanceBranch().indices()[ze * 11 + 10]) != GpuTwoSides.NONE) {
                 System.err.println("ZITREE_OPEN ctg=" + contingencies.get(ci).contingencyId()
                         + " coupler=" + outagedZeroImpedanceBranchOfContingency.getId()
@@ -182,7 +183,7 @@ final class CouplerSeed {
                 if (!applied && !planHasV && childVRow >= 0 && distrQRow >= 0) {
                     rs.overrides.add(s * n + childVRow, baseTargets[distrQRow]);
                 }
-                if (System.getenv("OLF_GPU_ZITREE_TRACE") != null) {
+                if (GpuTrace.ZITREE_TRACE.isOn()) {
                     System.err.println("ZITREE_VID coupler=" + outagedZeroImpedanceBranchOfContingency.getId()
                             + " child=" + (child == null ? "-" : child.getId())
                             + " vRow=" + childVRow
@@ -202,7 +203,7 @@ final class CouplerSeed {
         // rows (target 0) and the one it replaced takes the ZERO_V/ZERO_PHI coupling
         // back. The split is physically equivalent either way - this is about solving
         // the system OLF solves, from the state OLF solves it at.
-        if (System.getenv("OLF_GPU_ZITREE_TRACE") != null && contingencies.get(ci).stickyNonSpanningTreeBranches().size() > 40) {
+        if (GpuTrace.ZITREE_TRACE.isOn() && contingencies.get(ci).stickyNonSpanningTreeBranches().size() > 40) {
             System.err.println("ZITREE_LEAVE_WIDE slot=" + s + " ctg=" + contingencies.get(ci).contingencyId()
                     + " nonTree=" + contingencies.get(ci).stickyNonSpanningTreeBranches().size());
         }

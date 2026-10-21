@@ -15,6 +15,7 @@ import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuTwoSides;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
+import com.powsybl.openloadflow.util.gpu.GpuTrace;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -174,7 +175,7 @@ final class VoltageControlOverrides {
                     .<com.powsybl.openloadflow.network.GeneratorVoltageControl>map(
                             com.powsybl.openloadflow.network.VoltageControl::getMainVoltageControl)
                     .orElse(null);
-            if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {
+            if (GpuTrace.QUALIFY_TRACE.isOn()) {
                 System.err.printf("QUALIFY_TRACE vcSplit-enter bus=%s hasVc=%b distrQ=%b merge=%s%n", bus.getId(),
                         voltageControl != null, es.getEquation(bus.getNum(), AcEquationType.DISTR_Q).isPresent(),
                         voltageControl == null ? "-" : voltageControl.getMergeStatus());
@@ -192,7 +193,7 @@ final class VoltageControlOverrides {
             List<LfBus> surviving = voltageControl.getMergedControllerElements().stream()
                     .filter(member -> !islanded.contains(member))
                     .toList();
-            if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {
+            if (GpuTrace.QUALIFY_TRACE.isOn()) {
                 // The group decision, with BOTH element lists: a MAIN control's own controllerElements
                 // omits the members that were MERGED into it, so a survivor that lives only in the
                 // merged list is invisible to this decision.

@@ -9,6 +9,7 @@ package com.powsybl.openloadflow.ac.solver.gpu.batch.plan;
 
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
+import com.powsybl.openloadflow.util.gpu.GpuTrace;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -59,7 +60,7 @@ final class ScheduledLoss {
                 if (p != 0) {
                     out.add(new LoadLoss(other, -p, 0));   // generation removed: the row target drops by p
                 }
-                if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {
+                if (GpuTrace.QUALIFY_TRACE.isOn()) {
                     System.err.printf("QUALIFY_TRACE hvdc %s without power in %s: station %s on %s targetP %.6f -> 0%n",
                             h.getId(), c.contingencyId(), survivor.getId(), other.getId(), p);
                 }

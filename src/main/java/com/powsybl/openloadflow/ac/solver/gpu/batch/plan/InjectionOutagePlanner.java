@@ -17,6 +17,7 @@ import com.powsybl.openloadflow.ac.equations.vector.gpu.fixedmatrix.CrossIdentit
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
+import com.powsybl.openloadflow.util.gpu.GpuTrace;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -125,7 +126,7 @@ final class InjectionOutagePlanner {
             double[][] distrRhoOverrideTable = VoltageControlOverrides.distrRhoOverrides(es, gpuData, distrRhoControllers,
                     c.outagedBranches(), incrementalTransformerVoltageControllers);
             if (distrRhoOverrideTable == null) {
-                if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
+                if (GpuTrace.BATCH_TRACE.isOn()) {
                     System.err.println("QUAL_REJECT distrRhoOverrides (injection) " + c.contingencyId());
                 }
                 GpuBatchQualification.refuse(c, "PLAN:DISTR_RHO_GROUP_OUTAGE");
@@ -242,7 +243,7 @@ final class InjectionOutagePlanner {
                 pb.islandedHvdcsByIndex[i] = islandedHvdcs;   // masked in the chunk solver, as on the tail
             }
             if (vcSplit == VoltageControlOverrides.VcSplit.UNMODELED) {
-                if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {
+                if (GpuTrace.QUALIFY_TRACE.isOn()) {
                     System.err.printf("QUALIFY_TRACE reject %s tag=ISLANDS_REMOTE_VC_MEMBER site=island split=%s"
                             + " islandedHvdcs=%d lostControllers=%s%n", c.contingencyId(), vcSplit, islandedHvdcs.size(),
                             lostVcControllers.stream().map(LfBus::getId).toList());
@@ -282,7 +283,7 @@ final class InjectionOutagePlanner {
                                     sb), -1, 0, -1, 0, -1, 0, -1, -1, 0, false, -1, 0, 0));
                 }
                 if (live == null) {
-                    if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {
+                    if (GpuTrace.QUALIFY_TRACE.isOn()) {
                         System.err.printf("QUALIFY_TRACE reject %s tag=ISLANDS_REMOTE_VC_MEMBER site=island-deadControl-frozenV"
                                 + " deadControl=%s%n", c.contingencyId(), deadControlBuses.stream().map(LfBus::getId).toList());
                     }
@@ -303,7 +304,7 @@ final class InjectionOutagePlanner {
                     // its own row carries a LIVE coupler's ZERO_V: cross identity on the parent's
                     // DUMMY_Q row (rte6515 BUS-6014_BBS_1/2 VL-6014_3, BUS-6029_BBS_4 VL-6029_2)
                     int crossRow = CrossIdentity.row(vVar.getRow(), pb.relocatedChildRows, outagedZeroImpedanceBranchNums);
-                    if (crossRow < 0 && System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {
+                    if (crossRow < 0 && GpuTrace.QUALIFY_TRACE.isOn()) {
                         // Is the bus we are about to give a VOLTAGE IDENTITY already PINNED at its
                         // reactive limit? A pinned bus cannot hold its voltage — OLF has it as PQ —
                         // and the RL kernel's "limit drift while pinned" branch writes only the
@@ -360,7 +361,7 @@ final class InjectionOutagePlanner {
                                 : crossIdentity ? "PLAN:VC_REMERGE_RELOC_VROW" : "PLAN:VC_REMERGE_NO_VROW");
                 return null;
             }
-            if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {
+            if (GpuTrace.QUALIFY_TRACE.isOn()) {
                 System.err.printf("QUALIFY_TRACE island-outage %s: split=%s frozenRows=%d dropped=%d"
                         + " deadControl=%s%n", c.contingencyId(), vcSplit, fi.rows().length,
                         gos.length - (live.size() - deadControlBuses.size()),

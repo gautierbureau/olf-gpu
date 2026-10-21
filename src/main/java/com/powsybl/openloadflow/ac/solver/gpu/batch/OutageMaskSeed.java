@@ -12,6 +12,7 @@ import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcElementMapper;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.BatchContingency;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfShunt;
+import com.powsybl.openloadflow.util.gpu.GpuTrace;
 
 import java.util.List;
 
@@ -59,7 +60,7 @@ final class OutageMaskSeed {
                 eis[ei++] = closedBranchElementIndex;
             } else {
                 int soElem = elementMapper.getElementIndex(so.branch());
-                if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {
+                if (GpuTrace.QUALIFY_TRACE.isOn()) {
                     // Does this branch also feed a DISTR_Q row? fillDistrQBatch reads
                     // closedBranchParameters with NO closedBranchParameterOverrides parameters, so it cannot see the per-scenario
                     // pi override: a side-opened branch that contributes to a remote

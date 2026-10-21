@@ -18,6 +18,7 @@ import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfGenerator;
 import com.powsybl.openloadflow.network.LfNetwork;
 import com.powsybl.openloadflow.network.gpu.GeneratorVoltageControlRoles;
+import com.powsybl.openloadflow.util.gpu.GpuTrace;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -185,7 +186,7 @@ public final class ReactiveLimitsPacker {
                         reactiveLimitVoltageControlRole.add(remoteClass);
                         reactiveLimitComparedVoltageRow.add(pilotV);                 // switch conditions compare the PILOT's V
                         reactiveLimitBusNum.add(bn);
-                        if (System.getenv("OLF_GPU_RL_TRACE") != null) {
+                        if (GpuTrace.RL_TRACE.isOn()) {
                             System.err.println("GPU_RL_ENTRY idx=" + (reactiveLimitVoltageRow.size() - 1) + " vRow=" + vCol[bn]
                                     + " bus=" + bus.getId() + " remote=" + remoteClass + " pilotVRow=" + pilotV);
                         }
@@ -223,7 +224,7 @@ public final class ReactiveLimitsPacker {
                         addSvcQuadratic(bus, reactiveLimitSvcMinB, reactiveLimitSvcMaxB, reactiveLimitBaseVSquared);
                     }
                     reactiveLimitVoltageRow.add(vCol[bn]);
-                    if (System.getenv("OLF_GPU_RL_TRACE") != null) {
+                    if (GpuTrace.RL_TRACE.isOn()) {
                         // entry -> bus, so a device pin can be named and lined up against OLF's RL_SWITCH
                         System.err.println("GPU_RL_ENTRY idx=" + (reactiveLimitVoltageRow.size() - 1) + " vRow=" + vCol[bn]
                                 + " bus=" + bus.getId() + " minQ=" + minQ + " maxQ=" + maxQ
@@ -267,7 +268,7 @@ public final class ReactiveLimitsPacker {
             flags[i] = reactiveLimitFlags.get(i);
             voltageControlRoles[i] = reactiveLimitVoltageControlRole.get(i);
         }
-        if (System.getenv("OLF_GPU_RL_TRACE") != null) {
+        if (GpuTrace.RL_TRACE.isOn()) {
             // The pilot-self groups this extraction sees, with their member ENTRIES: the rotation the device
             // still owes OLF is computed from those entries' pin states (see PilotSelfPacker.PilotSelfPack).
             PilotSelfPacker.PilotSelfPack pilotSelfPack = PilotSelfPacker.pilotSelfGroups(network, columns, GpuAcArrays.toIntArray(reactiveLimitBusNum));

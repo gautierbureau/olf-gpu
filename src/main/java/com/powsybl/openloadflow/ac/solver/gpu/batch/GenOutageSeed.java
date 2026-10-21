@@ -13,6 +13,7 @@ import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.GenOutage;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.GpuBatchScopeCensus;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuRowMode;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuVoltageControlRole;
+import com.powsybl.openloadflow.util.gpu.GpuTrace;
 
 /**
  * The seeding of one slot's generator and injection outages ({@link GenOutage} plan entries): the per-bus target
@@ -81,7 +82,7 @@ final class GenOutageSeed {
                     // OLF's re-merged control: this remote member's reactive-limit check reads the
                     // NEW pilot's voltage against the new pilot's target; its row stays the base
                     // table's sharing row, which the dependent pilot's pool uses as the carrier.
-                    if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {
+                    if (GpuTrace.QUALIFY_TRACE.isOn()) {
                         System.err.printf("QUALIFY_TRACE reMergeRemoteController slot=%d entry=%d of %d cmpRow=%d vt=%.6f%n",
                                 s, go.reactiveLimitEntry(), gpuData.reactiveLimits().voltageRow().length, go.reMergePilotVRow(), go.qTarget());
                     }

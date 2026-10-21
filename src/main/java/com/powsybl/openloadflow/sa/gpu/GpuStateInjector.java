@@ -14,6 +14,7 @@ import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.Variable;
 import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfNetwork;
+import com.powsybl.openloadflow.util.gpu.GpuTrace;
 import com.powsybl.security.results.NetworkResult;
 
 import java.util.List;
@@ -123,7 +124,7 @@ final class GpuStateInjector {
         // spent inside OLF's index. The equation side stays lazy for the next solver that needs it.
         List<Variable<AcVariableType>> vars = es.getIndex().getSortedVariablesToFindOnly();
         if (remap.vars != vars) {                            // identity: the variable set changed, rebuild
-            if (System.getenv("OLF_GPU_PHASE_TIME") != null) {
+            if (GpuTrace.PHASE_TIME.isOn()) {
                 GpuBatchedAcSecurityAnalysis.PHASE_NS.computeIfAbsent("    inject: remap rebuilds (count)",
                         k -> new java.util.concurrent.atomic.LongAdder()).add(1_000_000);   // printed in "ms" = count
             }
@@ -196,7 +197,7 @@ final class GpuStateInjector {
             return result;
         }
         java.util.Set<String> islandedBusIds = new java.util.HashSet<>();
-        boolean busDumpTrace = "1".equals(System.getenv("OLF_GPU_DBG_BUSDUMP"));
+        boolean busDumpTrace = "1".equals(GpuTrace.DBG_BUSDUMP.value());
         for (int num : nums) {
             LfBus b = network.getBuses().get(num);
             b.createBusResults().forEach(busResult -> islandedBusIds.add(busResult.getBusId()));

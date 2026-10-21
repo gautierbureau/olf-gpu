@@ -13,6 +13,7 @@ import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
+import com.powsybl.openloadflow.util.gpu.GpuTrace;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -135,7 +136,7 @@ public final class VoltageControlReMerge {
                         .findFirst().orElseThrow();
                 boolean local = cluster.size() == 1
                         && newMain.getControllerElements().stream().allMatch(controller -> controller == newMain.getControlledBus());
-                if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {
+                if (GpuTrace.QUALIFY_TRACE.isOn()) {
                     System.err.printf("QUALIFY_TRACE reMerge ctg=%s main=%s cluster=%s newMain=%s target=%.6f local=%b%n",
                             contingencyId, main.getControlledBus().getId(), cluster.stream().map(LfBus::getId).toList(),
                             newMain.getControlledBus().getId(), newMain.getTargetValue(), local);
@@ -160,7 +161,7 @@ public final class VoltageControlReMerge {
                     // only (a subgroup label the pools do not read yet): CPU, tagged.
                     boolean baseMainAlive = alive.contains(main.getControlledBus());
                     if (baseMainAlive || cluster.size() != alive.size() || !remoteMains.isEmpty()) {
-                        if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {
+                        if (GpuTrace.QUALIFY_TRACE.isOn()) {
                             System.err.printf("QUALIFY_TRACE reMerge ctg=%s main=%s cluster=%s REMOTE controllers behind a surviving main -> CPU%n",
                                     contingencyId, main.getControlledBus().getId(), cluster.stream().map(LfBus::getId).toList());
                         }

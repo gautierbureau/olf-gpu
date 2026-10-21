@@ -15,6 +15,7 @@ import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.Variable;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfNetwork;
+import com.powsybl.openloadflow.util.gpu.GpuTrace;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -205,7 +206,7 @@ public final class GpuIncrementalTransformerVoltageControlOuterLoop {
                 groupControllerStart, groupController, maxTapShift) != 0;
         LOGGER.info("Uploaded {} incremental TVC controllers to device ({} taps, {} groups): {}",
                 nControllers, totalTaps, nGroups, owned ? "in-kernel loop" : "host orchestrator");
-        if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
+        if (GpuTrace.BATCH_TRACE.isOn()) {
             System.err.printf("TVC_UPLOAD nControllers=%d totalTaps=%d nGroups=%d kernel=%b%n", nControllers, totalTaps, nGroups, owned);
         }
         return owned;

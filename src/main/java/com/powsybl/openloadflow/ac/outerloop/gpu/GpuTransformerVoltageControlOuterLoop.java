@@ -25,6 +25,7 @@ import com.powsybl.openloadflow.network.PiModel;
 import com.powsybl.openloadflow.network.PiModelArray;
 import com.powsybl.openloadflow.network.TransformerVoltageControl;
 import com.powsybl.openloadflow.network.VoltageControl;
+import com.powsybl.openloadflow.util.gpu.GpuTrace;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -489,7 +490,7 @@ public final class GpuTransformerVoltageControlOuterLoop {
             return;
         }
         TransformerVoltageControlNative.setBatchGeneratorVoltageControlFreeze(handle, freezeTables.vRow(), freezeTables.loadQ(), freezeTables.reactiveLimitEntry(), freezeTables.fixPvRow());
-        if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
+        if (GpuTrace.BATCH_TRACE.isOn()) {
             System.err.printf("TVD_FREEZE_UPLOAD nCandidates=%d fixPvBuses=%d members=%d%n",
                     freezeTables.vRow().length, freezeTables.fixPvRow().length, freezeTables.nMembers());
         }
@@ -756,7 +757,7 @@ public final class GpuTransformerVoltageControlOuterLoop {
                 nG, memberRhoRow.size(),
                 mode == GpuTransformerVoltageControlMode.WITH_GENERATOR_VOLTAGE_CONTROL ? "WITH_GENERATOR" : "AFTER_GENERATOR",
                 owned ? "in-kernel loop" : "host orchestrator");
-        if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
+        if (GpuTrace.BATCH_TRACE.isOn()) {
             System.err.printf("TVD_UPLOAD mode=%d entryOn=%b nGroups=%d nMembers=%d kernel=%b%n", mode, entryOn, nG, memberRhoRow.size(), owned);
         }
         return owned;

@@ -21,6 +21,7 @@ import com.powsybl.openloadflow.equations.Variable;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfNetwork;
 import com.powsybl.openloadflow.network.TransformerPhaseControl;
+import com.powsybl.openloadflow.util.gpu.GpuTrace;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -192,7 +193,7 @@ public final class GpuPhaseControlOuterLoop {
         boolean owned = PhaseControlNative.setBatchContinuousPhase(handle,
                 kind, a1Row, side, limit, elem, tapStart, tapRows.stream().mapToDouble(Double::doubleValue).toArray(), baseTap) != 0;
         LOGGER.info("Uploaded {} continuous phase controllers to device: {}", nControllers, owned ? "in-kernel loop" : "host orchestrator");
-        if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
+        if (GpuTrace.BATCH_TRACE.isOn()) {
             System.err.printf("CPHASE_UPLOAD nControllers=%d kernel=%b%n", nControllers, owned);
         }
         return owned;

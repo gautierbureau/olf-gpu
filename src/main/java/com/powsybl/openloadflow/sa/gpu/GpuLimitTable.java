@@ -15,6 +15,7 @@ import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfNetwork;
 import com.powsybl.openloadflow.sa.LimitReductionManager;
 import com.powsybl.openloadflow.util.PerUnit;
+import com.powsybl.openloadflow.util.gpu.GpuTrace;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -245,7 +246,7 @@ final class GpuLimitTable {
                 toIntArray(limitStarts), toIntArray(limitEnds),
                 toDoubleArray(thresholds), flatLimits.toArray(new LfBranch.LfLimit[0]),
                 buses, busHigh, busLow, busScale);
-        if (System.getenv("OLF_GPU_PHASE_TIME") != null) {
+        if (GpuTrace.PHASE_TIME.isOn()) {
             // What one contingency's scan actually costs is this table's size, so print it: it is the
             // denominator of every per-entry number, and the work a device kernel would take over.
             long nCurrent = quantities.stream().filter(q -> q == QTY_I).count();

@@ -37,6 +37,7 @@ import com.powsybl.openloadflow.network.LfNetwork;
 import com.powsybl.openloadflow.network.LfShunt;
 import com.powsybl.openloadflow.network.gpu.ZeroImpedanceTreeReplay;
 import com.powsybl.openloadflow.network.impl.PropagatedContingency;
+import com.powsybl.openloadflow.util.gpu.GpuTrace;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -76,7 +77,7 @@ final class GpuBatchPrecomputer {
                                        List<Action> actions, boolean distributedSlack, boolean reactiveLimits,
                                        double reactiveLimitTol, double slackDistTol, double convEpsPerEq,
                                        BatchConfig config, ReportNode reportNode) {
-        if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {   // the network the batch starts from
+        if (GpuTrace.BATCH_TRACE.isOn()) {   // the network the batch starts from
             for (var b : net.getBuses()) {
                 for (var g : b.getGenerators()) {
                     System.err.println("BASE_GEN " + g.getId() + " targetP=" + g.getTargetP() + " targetQ=" + g.getTargetQ()
@@ -97,13 +98,13 @@ final class GpuBatchPrecomputer {
                                                      BatchConfig configIn, ReportNode reportNode) {
         BatchConfig config = configIn;
         if (!GpuAcNewtonSolver.isAvailable() || net == null || context == null || contingencies.isEmpty()) {
-            if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
+            if (GpuTrace.BATCH_TRACE.isOn()) {
                 System.err.println("PRECOMP_BAIL avail=" + GpuAcNewtonSolver.isAvailable() + " net=" + (net != null)
                         + " ctx=" + (context != null) + " nCtg=" + contingencies.size());
             }
             return PrecomputedBatch.empty();
         }
-        if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
+        if (GpuTrace.BATCH_TRACE.isOn()) {
             System.err.println("PRECOMP_ENTER nCtg=" + contingencies.size());
         }
         try {
@@ -122,7 +123,7 @@ final class GpuBatchPrecomputer {
             for (PropagatedContingency propagatedContingency : contingencies) {
                 addBatchScenarios(net, network, propagatedContingency, context, ziTree, batch, strategies, config, actions);
             }
-            if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
+            if (GpuTrace.BATCH_TRACE.isOn()) {
                 System.err.println("PRECOMP_BATCH size=" + batch.size());
             }
             if (batch.isEmpty()) {
@@ -165,7 +166,7 @@ final class GpuBatchPrecomputer {
             Map<String, Double> preDistributed = new HashMap<>();
             Map<String, Double> distributed = new HashMap<>();
             for (BatchScenarioResult r : results) {
-                if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {
+                if (GpuTrace.QUALIFY_TRACE.isOn()) {
                     System.err.println("QUALIFY_TRACE result " + r.contingencyId() + " status=" + r.convergenceStatus()
                             + " iters=" + r.iterations() + " norm=" + r.finalMismatch()
                             + (GpuBatchScopeCensus.planRefusedIds().contains(r.contingencyId())
@@ -195,7 +196,7 @@ final class GpuBatchPrecomputer {
                     GpuBatchScopeCensus.record("DEVICE:MAX_ITERATION_REACHED");
                 } else {
                     GpuBatchScopeCensus.record("RUNTIME:status=" + r.convergenceStatus());
-                    if (System.getenv("OLF_GPU_REJECT_TRACE") != null) {
+                    if (GpuTrace.REJECT_TRACE.isOn()) {
                         // pairs with the kernel's GPU_REJECT slot= reason= lines (same switch)
                         System.err.println("GPU_REJECT_CTG ctg=" + r.contingencyId() + " status=" + r.convergenceStatus());
                     }
@@ -231,7 +232,7 @@ final class GpuBatchPrecomputer {
             for (int i = 0; i < Math.min(6, frames.length); i++) {
                 System.err.println("    at " + frames[i]);
             }
-            if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
+            if (GpuTrace.BATCH_TRACE.isOn()) {
                 e.printStackTrace();                         // the test harness's logback appenders are broken
             }                                                // (core/classic version mismatch) — surface it here
             return PrecomputedBatch.empty();
@@ -264,7 +265,7 @@ final class GpuBatchPrecomputer {
         // The tree OLF SOLVES this contingency on: the one it reached it with, re-elected by this
         // contingency's own disabled couplers (opened, or sitting on a lost bus).
         List<LfBranch> nonSpanningTreeBranches = ziTree.applyAndRevert(propagatedContingency);
-        if (System.getenv("OLF_GPU_ZITREE_TRACE") != null && nonSpanningTreeBranches.size() > 40) {
+        if (GpuTrace.ZITREE_TRACE.isOn() && nonSpanningTreeBranches.size() > 40) {
             System.err.println("ZITREE_REPLAY_WIDE ctg=" + propagatedContingency.getContingency().getId() + " nonTree=" + nonSpanningTreeBranches.size());
         }
         List<LfBranch> branches = propagatedContingency.getBranchIdsToOpen().isEmpty() ? List.of()
@@ -287,7 +288,7 @@ final class GpuBatchPrecomputer {
         // AC-emulation HVDC outage: the hv element's per-scenario disabled bit (the stations'
         // injection losses ride the generator channel above); unresolvable/setpoint -> CPU.
         List<com.powsybl.openloadflow.network.LfHvdc> hvdcs = GpuContingencyMapper.hvdcOutages(net, propagatedContingency);
-        if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {
+        if (GpuTrace.QUALIFY_TRACE.isOn()) {
             System.err.println("QUALIFY_TRACE compose " + propagatedContingency.getContingency().getId()
                     + " branches=" + (branches == null ? "null" : branches.size())
                     + " gens=" + (gens == null ? "null" : gens.size())
@@ -417,7 +418,7 @@ final class GpuBatchPrecomputer {
             // ...and by id: a mapper reject never reaches the device, so the harness's verdict must count it
             // with the plan refusals (a scope gap), not as a scenario the device tried and failed.
             GpuBatchScopeCensus.planRefused(propagatedContingency.getContingency().getId(), rejectReason);
-            if (System.getenv("OLF_GPU_REJECT_TRACE") != null) {
+            if (GpuTrace.REJECT_TRACE.isOn()) {
                 // the census counts these by KIND; the id is what lets a scope report say
                 // whether a non-batched contingency is one OLF itself does not answer
                 System.err.println("GPU_REJECT_CTG ctg=" + propagatedContingency.getContingency().getId()
@@ -541,7 +542,7 @@ final class GpuBatchPrecomputer {
                 recovered++;
             }
         }
-        if (System.getenv("OLF_GPU_REJECT_TRACE") != null) {
+        if (GpuTrace.REJECT_TRACE.isOn()) {
             System.err.println("GPU_ROBUST_RETRY attempted=" + retry.size() + " recovered=" + recovered
                     + " statuses=" + retriedStatus);
         }
@@ -638,7 +639,7 @@ final class GpuBatchPrecomputer {
         // OLF reports their sum, so a total that differs cannot say which half moved; OLF's own
         // LF-level part is on OLF_LF_STEPS_TRACE and its pre-distribution is the reported total minus
         // that.
-        String want = System.getenv("OLF_GPU_ITER_TRACE_CTG");
+        String want = GpuTrace.ITER_TRACE_CTG.value();
         if (want != null) {
             for (String w : want.split(",")) {
                 if (w.trim().equals(r.contingencyId())) {

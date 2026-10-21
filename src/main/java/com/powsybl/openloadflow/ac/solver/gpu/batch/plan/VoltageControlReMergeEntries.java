@@ -14,6 +14,7 @@ import com.powsybl.openloadflow.ac.equations.vector.gpu.fixedmatrix.CrossIdentit
 import com.powsybl.openloadflow.ac.equations.vector.gpu.fixedmatrix.ReactiveRelocationTables;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.network.LfBus;
+import com.powsybl.openloadflow.util.gpu.GpuTrace;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -135,7 +136,7 @@ final class VoltageControlReMergeEntries {
             boolean blockCovers = reloc != null && outagedZeroImpedanceBranchNums.contains(reloc[0]);
             int reactiveLimitEntry = gpuData.reactiveLimits().entryOf(e.getKey().getNum());
             boolean switchedPvToPqInBase = gpuData.switchedPvToPqInBase(reactiveLimitEntry);
-            if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {
+            if (GpuTrace.QUALIFY_TRACE.isOn()) {
                 System.err.printf("QUALIFY_TRACE remoteMain bus=%s vRow=%d target=%.6f blockCovers=%b switchedPvToPqInBase=%b%n",
                         e.getKey().getId(), vVar.getRow(), e.getValue(), blockCovers, switchedPvToPqInBase);
             }
@@ -207,7 +208,7 @@ final class VoltageControlReMergeEntries {
                 reject[0] = "PLAN:VC_REMERGE_NO_VROW";
                 return null;
             }
-            if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {
+            if (GpuTrace.QUALIFY_TRACE.isOn()) {
                 System.err.printf("QUALIFY_TRACE reMergeRemoteController controller=%s reactiveLimitEntry=%d pilot=%s pilotVRow=%d target=%.6f%n",
                         e.getKey().getId(), reactiveLimitEntry, e.getValue().getId(), pilotV.getRow(), target);
             }

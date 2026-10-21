@@ -16,6 +16,7 @@ import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfGenerator;
 import com.powsybl.openloadflow.network.gpu.GeneratorVoltageControlRoles;
+import com.powsybl.openloadflow.util.gpu.GpuTrace;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -76,7 +77,7 @@ public final class GpuBatchInjectionOutages {
      *  not a packed DISTR_Q member keeps the plain reactive row. */
     static int deadControlRowMode(GpuAcData gpuData, LfBus survivor) {
         int slot = distrQMemberSlot(gpuData, survivor);
-        if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {
+        if (GpuTrace.QUALIFY_TRACE.isOn()) {
             System.err.println("QUALIFY_TRACE deadControlRowMode survivor=" + survivor.getId() + " distrQMemberSlot=" + slot
                     + " -> mode " + (slot >= 0 ? 4 : 1));
         }
@@ -305,7 +306,7 @@ public final class GpuBatchInjectionOutages {
             int newP = p ? toP : go.pRow();
             int newQ = q ? (toQ == go.vRow() ? -1 : toQ) : go.qTargetRow();
             out[k] = go.withBalanceRows(newP, newQ);
-            if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {
+            if (GpuTrace.QUALIFY_TRACE.isOn()) {
                 System.err.printf("QUALIFY_TRACE injection rows home: pRow %d -> %d, qTargetRow %d -> %d%n",
                         go.pRow(), newP, go.qTargetRow(), newQ);
             }
@@ -801,7 +802,7 @@ public final class GpuBatchInjectionOutages {
             }
             distrQTargetRows = rows.stream().mapToInt(Integer::intValue).toArray();
             distrQTargetValues = values.stream().mapToDouble(Double::doubleValue).toArray();
-            if (System.getenv("OLF_GPU_RL_TRACE") != null) {
+            if (GpuTrace.RL_TRACE.isOn()) {
                 StringBuilder sb = new StringBuilder();
                 for (int m = gs; m < gs + gc; m++) {
                     sb.append(" m").append(m).append("[bus=").append(mBusNum[m]).append(" hasRow=").append(mHasRow[m])

@@ -25,6 +25,18 @@ public final class NewtonSettingsNative {
     private NewtonSettingsNative() {
     }
 
+    /** Installs the four arrays of GpuAcActivationExtractor.extractRowCriteria, or clears every threshold. */
+    public static void installRowCriteria(long handle, double[][] rowCriteria) {
+        setBatchRowCriteria(handle, rowCriteria != null ? rowCriteria[0] : null, rowCriteria != null ? rowCriteria[1] : null);
+        if (rowCriteria != null && rowCriteria.length >= 4) {
+            int[] sel = new int[rowCriteria[3].length];
+            for (int i = 0; i < sel.length; i++) {
+                sel[i] = (int) rowCriteria[3][i];
+            }
+            setBatchRowCriteriaAlternate(handle, rowCriteria[2], sel);
+        }
+    }
+
     /** The installed linear-solver settings, in {@link #setLinearSolverSettings}'s order. */
     public static native double[] readLinearSolverSettings();
 

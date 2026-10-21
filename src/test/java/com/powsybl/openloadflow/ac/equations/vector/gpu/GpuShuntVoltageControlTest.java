@@ -98,7 +98,7 @@ class GpuShuntVoltageControlTest {
         GpuAcActivation activation = GpuAcActivationExtractor.extractActivation(network, es, n);
         double[] stableTargets = activation.applyTargets(target.getArray());
 
-        double[] out = GpuAcNewtonSolver.solve(x0, stableTargets, activation.rowMode(), MAX_ITER, TOL,
+        double[] out = PackedNewtonRaphson.solve(x0, stableTargets, activation.rowMode(), MAX_ITER, TOL,
                 d.closedBranch().parameters(), d.closedBranch().indices(), d.openBranch().parameters(),
                 d.openBranch().indices(), d.shunt().parameters(), d.shunt().indices(), d.hvdcAcEmulation().parameters(),
                 d.hvdcAcEmulation().indices(),
@@ -208,7 +208,7 @@ class GpuShuntVoltageControlTest {
         double[] onTargets = onAct.applyTargets(target.getArray());
 
         // (3) Solve the OFF structure with the ON activation.
-        double[] out = GpuAcNewtonSolver.solve(x0, onTargets, onAct.rowMode(), MAX_ITER, TOL,
+        double[] out = PackedNewtonRaphson.solve(x0, onTargets, onAct.rowMode(), MAX_ITER, TOL,
                 dOff.closedBranch().parameters(), dOff.closedBranch().indices(), dOff.openBranch().parameters(),
                 dOff.openBranch().indices(), dOff.shunt().parameters(), dOff.shunt().indices(),
                 dOff.hvdcAcEmulation().parameters(), dOff.hvdcAcEmulation().indices(),

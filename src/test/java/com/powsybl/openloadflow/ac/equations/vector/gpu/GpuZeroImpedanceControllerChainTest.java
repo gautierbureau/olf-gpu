@@ -101,7 +101,7 @@ class GpuZeroImpedanceControllerChainTest extends AbstractLoadFlowNetworkFactory
         GpuAcActivation activation = GpuAcActivationExtractor.extractActivation(network, es, n);
         double[] stableTargets = activation.applyTargets(target.getArray());
         // maxIter = k with a tolerance nothing meets: exactly k steps
-        return GpuAcNewtonSolver.solve(x0, stableTargets, activation.rowMode(), k, 0.0,
+        return PackedNewtonRaphson.solve(x0, stableTargets, activation.rowMode(), k, 0.0,
                 d.closedBranch().parameters(), d.closedBranch().indices(), d.openBranch().parameters(),
                 d.openBranch().indices(), d.shunt().parameters(), d.shunt().indices(), d.hvdcAcEmulation().parameters(),
                 d.hvdcAcEmulation().indices(),

@@ -232,7 +232,7 @@ class GpuZiCouplerTreeRelocationTest extends AbstractLoadFlowNetworkFactory {
         GpuAcData d = GpuAcDataExtractor.extract(network, es);
         GpuAcActivation activation = GpuAcActivationExtractor.extractActivation(network, es, n);
         double[] stableTargets = activation.applyTargets(target.getArray());
-        double[] gpu = GpuAcNewtonSolver.solve(x0, stableTargets, activation.rowMode(), 1, 0.0,
+        double[] gpu = PackedNewtonRaphson.solve(x0, stableTargets, activation.rowMode(), 1, 0.0,
                 d.closedBranch().parameters(), d.closedBranch().indices(), d.openBranch().parameters(),
                 d.openBranch().indices(), d.shunt().parameters(), d.shunt().indices(), d.hvdcAcEmulation().parameters(),
                 d.hvdcAcEmulation().indices(),

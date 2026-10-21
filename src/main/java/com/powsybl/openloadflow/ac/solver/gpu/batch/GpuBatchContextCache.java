@@ -186,7 +186,7 @@ public final class GpuBatchContextCache {
      * batched factorization holds an LU per scenario, so the footprint scales with the chunk).
      * <ul>
      *   <li>AUTO-SIZED from free device memory via
-     *       {@link GpuAcNewtonSolver#recommendBatchSize} (real Jacobian nnz + heuristic LU
+     *       {@link com.powsybl.openloadflow.ac.equations.vector.gpu.StructureNative#recommendBatchSize} (real Jacobian nnz + heuristic LU
      *       estimate + safety margin).</li>
      *   <li>if auto-sizing is unavailable (no GPU / query error) — {@value #DEFAULT_MAX_BATCH}.</li>
      * </ul>

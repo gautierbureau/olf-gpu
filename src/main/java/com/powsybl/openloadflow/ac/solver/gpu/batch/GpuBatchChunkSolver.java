@@ -9,7 +9,6 @@ package com.powsybl.openloadflow.ac.solver.gpu.batch;
 
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcElementMapper;
-import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.ZeroImpedanceNative;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DeviceLoopTables;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DevicePhaseInstaller;
@@ -196,7 +195,7 @@ final class GpuBatchChunkSolver {
                 config.robustSolveMode() ? GpuLinearSolveMode.ROBUST : GpuBatchContextCache.resolveBatchMode(), n);
         // PER_EQUATION_TYPE criterion: install the per-row thresholds on the (possibly cached)
         // context — or CLEAR a previous run's thresholds under UNIFORM_CRITERIA.
-        GpuAcNewtonSolver.installRowCriteria(handle, rowCriteria);
+        NewtonSettingsNative.installRowCriteria(handle, rowCriteria);
         // LINE_SEARCH: OLF's backtracking budget and step fold, on the (possibly cached) context; read only in stateVectorScalingMode 1.
         NewtonSettingsNative.setBatchLineSearch(handle, parameters.getLineSearchStateVectorScalingMaxIteration(),
                 parameters.getLineSearchStateVectorScalingStepFold());

@@ -33,7 +33,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /**
  * BATCHED N-1: many post-contingency scenarios solved in one batched Newton-Raphson on
- * the GPU ({@link GpuAcNewtonSolver#solveBatch}), against ONE shared structure (CSR
+ * the GPU ({@link PackedNewtonRaphson#solveBatch}), against ONE shared structure (CSR
  * pattern + cuDSS symbolic analysis built once, amortized over the whole batch). Each
  * scenario gets its own value/state/mismatch arrays and a per-scenario disabled-element
  * mask; converged scenarios retire from the batch.
@@ -100,7 +100,7 @@ class GpuBatchedN1Test {
         int[][] rowModes = new int[k][];                  // per-scenario row mode; here every scenario = base
         java.util.Arrays.fill(rowModes, activation.rowMode());
 
-        double[][] batch = GpuAcNewtonSolver.solveBatch(x0, stableTargets, rowModes, disabledMask,
+        double[][] batch = PackedNewtonRaphson.solveBatch(x0, stableTargets, rowModes, disabledMask,
                 0, MAX_ITER, TOL, 1e-4, 1e-2, d.closedBranch().parameters(), d.closedBranch().indices(),
                 d.openBranch().parameters(), d.openBranch().indices(), d.shunt().parameters(), d.shunt().indices(),
                 d.hvdcAcEmulation().parameters(), d.hvdcAcEmulation().indices(),
@@ -159,7 +159,7 @@ class GpuBatchedN1Test {
         disabledMask[1][0] = true;
         int[][] rowModes = {activation.rowMode(), activation.rowMode()};   // per-scenario; both = base
 
-        double[][] batch = GpuAcNewtonSolver.solveBatch(x0, stableTargets, rowModes, disabledMask,
+        double[][] batch = PackedNewtonRaphson.solveBatch(x0, stableTargets, rowModes, disabledMask,
                 0, MAX_ITER, TOL, 1e-4, 1e-2, d.closedBranch().parameters(), d.closedBranch().indices(),
                 d.openBranch().parameters(), d.openBranch().indices(), d.shunt().parameters(), d.shunt().indices(),
                 d.hvdcAcEmulation().parameters(), d.hvdcAcEmulation().indices(),

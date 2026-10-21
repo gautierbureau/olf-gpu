@@ -90,11 +90,11 @@ class GpuMaxVoltageChangeScalingTest {
         double[] stableTargets = activation.applyTargets(target.getArray());
 
         long structure = GpuAcStructures.handle(n, d);
-        double[] clamped = GpuAcNewtonSolver.solveOnStructure(structure, x0, stableTargets, activation.rowMode(),
+        double[] clamped = PackedNewtonRaphson.solveOnStructure(structure, x0, stableTargets, activation.rowMode(),
                 MAX_ITER, TOL, 2, MAX_DV, MAX_DPHI, varType);
         int clampedIters = (int) clamped[n];
         // same start, no clamp (stateVectorScalingMode 0) — the clamp must cost extra iterations, else the test is vacuous
-        double[] undamped = GpuAcNewtonSolver.solveOnStructure(structure, x0, stableTargets, activation.rowMode(),
+        double[] undamped = PackedNewtonRaphson.solveOnStructure(structure, x0, stableTargets, activation.rowMode(),
                 MAX_ITER, TOL, 0, 0.0, 0.0, varType);
         int undampedIters = (int) undamped[n];
 

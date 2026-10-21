@@ -122,7 +122,7 @@ class GpuBatchedDistributedSlackSaturationTest {
         boolean[][] disabledMask = {new boolean[d.getTotalElementCount()]};
         int[][] rowModes = {act.rowMode()};
 
-        double[][] batch = GpuAcNewtonSolver.solveBatch(baseState, stableTargets, rowModes, disabledMask,
+        double[][] batch = PackedNewtonRaphson.solveBatch(baseState, stableTargets, rowModes, disabledMask,
                 GpuBatchContextCache.resolveBatchMode(), MAX_ITER, TOL, 1e-4, 1e-2,
                 d.closedBranch().parameters(), d.closedBranch().indices(), d.openBranch().parameters(),
                 d.openBranch().indices(), d.shunt().parameters(), d.shunt().indices(), d.hvdcAcEmulation().parameters(),

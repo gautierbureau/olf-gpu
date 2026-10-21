@@ -110,7 +110,7 @@ class GpuBatchedParticipatingSlackConvergenceTest {
         double[] stableTargets = act.applyTargets(target.getArray());
         boolean[][] disabledMask = {new boolean[d.getTotalElementCount()]};
         int[][] rowModes = {act.rowMode()};
-        double[][] batch = GpuAcNewtonSolver.solveBatch(baseState, stableTargets, rowModes, disabledMask,
+        double[][] batch = PackedNewtonRaphson.solveBatch(baseState, stableTargets, rowModes, disabledMask,
                 GpuBatchContextCache.resolveBatchMode(), MAX_ITER, 1e-10, 1e-4, distributedSlackTolerancePerUnit,
                 d.closedBranch().parameters(), d.closedBranch().indices(), d.openBranch().parameters(),
                 d.openBranch().indices(), d.shunt().parameters(), d.shunt().indices(), d.hvdcAcEmulation().parameters(),

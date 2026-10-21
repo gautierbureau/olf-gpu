@@ -31,7 +31,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 /**
  * Validates the VALUES level of the GPU invalidation taxonomy: when only element PARAMETERS change
  * (a transformer tap / shunt-susceptance move) but the CSR pattern is unchanged, the cached structure's
- * parameter packs are re-uploaded in place ({@link GpuAcNewtonSolver#refreshStructureValues}) reusing the
+ * parameter packs are re-uploaded in place ({@link StructureNative#refreshStructureValues}) reusing the
  * CSR pattern — instead of a full rebuild.
  *
  * <p>The substantive property: a values-REFRESHED structure must solve BYTE-IDENTICALLY to one built from
@@ -67,7 +67,7 @@ class GpuValuesRefreshTest {
         double[] targets = act.applyTargets(target.getArray());          // structure/activation unchanged by an r1 move
 
         long s1 = GpuAcStructures.handle(n, d1);
-        double[] out1 = GpuAcNewtonSolver.solveOnStructure(s1, x0, targets, rowMode, MAX_ITER, TOL, 0, 0.0, 0.0, new int[n]);
+        double[] out1 = PackedNewtonRaphson.solveOnStructure(s1, x0, targets, rowMode, MAX_ITER, TOL, 0, 0.0, 0.0, new int[n]);
 
         // Values-only change: move the NHV2_NLOAD transformer's ratio. Same topology -> same CSR pattern.
         LfBranch trafo = network.getBranchById("NHV2_NLOAD");
@@ -79,7 +79,7 @@ class GpuValuesRefreshTest {
 
         // Reference: a structure built FROM SCRATCH on the new values - built BEFORE the refresh below, so the
         // structure cache cannot alias it onto the refreshed one (the two extractions differ in values).
-        double[] outRebuilt = GpuAcNewtonSolver.solveOnStructure(GpuAcStructures.handle(n, d2), x0, targets, rowMode,
+        double[] outRebuilt = PackedNewtonRaphson.solveOnStructure(GpuAcStructures.handle(n, d2), x0, targets, rowMode,
                 MAX_ITER, TOL, 0, 0.0, 0.0, new int[n]);
 
         // VALUES path: re-upload the packs into the existing structure (no rebuild). The structure is the
@@ -90,7 +90,7 @@ class GpuValuesRefreshTest {
         StructureNative.refreshStructureValues(s1, d2.closedBranch().parameters(), d2.openBranch().parameters(),
                 d2.shunt().parameters(), d2.hvdcAcEmulation().parameters(), d2.zeroImpedanceBranch().parameters());
         GpuAcStructures.rebind(d1, d2);
-        double[] outRefreshed = GpuAcNewtonSolver.solveOnStructure(s1, x0, targets, rowMode, MAX_ITER, TOL, 0, 0.0, 0.0, new int[n]);
+        double[] outRefreshed = PackedNewtonRaphson.solveOnStructure(s1, x0, targets, rowMode, MAX_ITER, TOL, 0, 0.0, 0.0, new int[n]);
 
         double worst = 0;
         double moved = 0;

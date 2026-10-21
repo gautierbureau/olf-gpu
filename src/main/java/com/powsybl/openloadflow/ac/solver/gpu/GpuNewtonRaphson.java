@@ -406,7 +406,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                     c.getMaxActivePowerMismatch(), c.getMaxReactivePowerMismatch(), c.getMaxVoltageMismatch(),
                     c.getMaxDefaultAngleMismatch(), c.getMaxDefaultRatioMismatch(),
                     c.getMaxDefaultSusceptanceMismatch(), c.getConvEpsPerEq());
-            GpuAcNewtonSolver.installRowCriteria(context.handle.get(), thr);
+            NewtonSettingsNative.installRowCriteria(context.handle.get(), thr);
         } else {
             NewtonSettingsNative.setBatchRowCriteria(context.handle.get(), null, null);
         }

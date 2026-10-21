@@ -16,7 +16,7 @@ import java.util.WeakHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * Per-extraction cache of the native SHARED STRUCTURE ({@link GpuAcNewtonSolver#createStructure}):
+ * Per-extraction cache of the native SHARED STRUCTURE ({@link StructureNative#createStructure}):
  * the device-resident pattern / families / destination arrays / static trig that BOTH solver
  * contexts derive from one {@link GpuAcData}. Keyed weakly by the extraction — and since
  * {@link GpuAcDataCache} hands the base-case load flow and the batched security analysis the

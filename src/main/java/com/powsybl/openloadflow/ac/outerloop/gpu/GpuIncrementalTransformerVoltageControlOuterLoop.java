@@ -10,7 +10,6 @@ package com.powsybl.openloadflow.ac.outerloop.gpu;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcElementMapper;
-import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchSkips;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuPiModelColumn;
 import com.powsybl.openloadflow.equations.EquationSystem;
@@ -32,7 +31,7 @@ import java.util.Map;
  * <ol>
  *   <li>after a converged batch pass, find the (scenario, controlled bus) pairs whose |targetV − V|
  *       exceeds the half deadband;</li>
- *   <li>batched SENSITIVITY solve on the device ({@link GpuAcNewtonSolver#solveBatchSensitivities}):
+ *   <li>batched SENSITIVITY solve on the device (native/cuda/outerloop/sensitivity.cu):
  *       J at the converged states, unit RHS at each out-of-deadband controller's pinned
  *       {@code BRANCH_TARGET_RHO1} identity row, dV/dρ read at the controlled bus's V column — the
  *       exact device analogue of the loop's {@code SensitivityContext} (OLF's {@code solveTransposed}

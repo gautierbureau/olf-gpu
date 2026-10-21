@@ -47,9 +47,9 @@ public record DistributedSlackParticipants(int[] busPhiRow, double[] busFactor, 
     }
 
     /**
-     * What a cached device context depends on: the bus and slack arrays and scalars, as before the grouping. The
-     * generator arrays, busGeneratorStart / End and busNum were not compared and still are not (recorded in the
-     * cleanup plan, step 6).
+     * What a cached batched context depends on: the bus and slack arrays and scalars it is created from (and the
+     * slack rooms). The generator arrays and busGeneratorStart / End are installed again from the current extraction
+     * before every chunk ({@code DeviceLoopTables.install}); busNum and generatorId stay on the host.
      */
     public boolean sameAs(DistributedSlackParticipants other) {
         return Arrays.equals(busPhiRow, other.busPhiRow) && Arrays.equals(busFactor, other.busFactor)

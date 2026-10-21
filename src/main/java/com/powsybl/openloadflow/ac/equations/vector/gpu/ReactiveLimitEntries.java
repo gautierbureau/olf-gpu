@@ -61,8 +61,9 @@ public record ReactiveLimitEntries(int[] voltageRow, double[] minQ, double[] max
     }
 
     /**
-     * What a cached device context depends on. busNum, nominalV, activePowerRow, targetP and idRank are not compared
-     * (as before the grouping; whether they should be is recorded in the cleanup plan, step 6).
+     * What a cached batched context depends on. busNum, nominalV, activePowerRow, targetP and idRank are not
+     * compared: the context is not created from them, and the strongest-PV keys they make are installed again from
+     * the current extraction before every chunk ({@code DeviceLoopTables.install}).
      */
     public boolean sameAs(ReactiveLimitEntries other) {
         return Arrays.equals(voltageRow, other.voltageRow) && Arrays.equals(minQ, other.minQ)

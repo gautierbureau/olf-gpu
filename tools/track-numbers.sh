@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Global number tracker: runs the production SA bench + the fixed-iter bench and appends
 # one row to docs/numbers.md. Run after every change touching the batched GPU path.
-# Usage: native/track-numbers.sh ["note for the row"]
+# Usage: tools/track-numbers.sh ["note for the row"]
 set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO"
@@ -16,7 +16,7 @@ mvn -s "$HOME/Projects/powsybl/tmp/settings.xml" test -Dcheckstyle.skip \
     -Dtest='GpuVsCpuProductionSaBenchmarkTest' -DfailIfNoTests=false >"$LOG_P" 2>&1 \
     || { echo "production bench FAILED — see $LOG_P"; exit 1; }
 echo ">> fixed-iter bench (K=4, UBATCH 500)"
-bash native/run_bench.sh --no-build >"$LOG_F" 2>&1 \
+bash tools/run_bench.sh --no-build >"$LOG_F" 2>&1 \
     || { echo "fixed-iter bench FAILED — see $LOG_F"; exit 1; }
 
 num() { grep -aoE "$1" "$2" | head -1 | grep -oE '[0-9]+[.][0-9]+' | head -1; }

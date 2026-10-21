@@ -1,8 +1,23 @@
 # tools/
 
-Temporary helpers: not part of the build, not called by it, and not needed to build, test or benchmark the
-extension (those live in `native/`: `build-gpu.sh`, `run_gpu_tests.sh`, `run_bench.sh`, `sweep_ordering.sh`,
-`track-numbers.sh`, `setup-gpu-deps.sh`). Delete a helper here once the investigation it served is over.
+Scripts and helpers that are not part of the build. Building the native library stays in `native/`
+(`build-gpu.sh`, and `setup-gpu-deps.sh` for a fresh machine); every script here sources `native/local-env.sh`
+for the machine paths.
+
+## Runners
+
+Tests and benchmarks of the built extension. Each runs from any directory (it changes to the repository root).
+
+| Script | What it does |
+|---|---|
+| `run_gpu_tests.sh` | builds libolfgpu, then runs `GpuFullNewtonTest` and `GpuLoadFlowTest` with the library loaded from the classpath (the packaging path) |
+| `run_bench.sh` | the fixed-iteration batched N-1 benchmark (`GpuBatchedN1FixedIterTest`, case9241pegase, 500 contingencies, K=4); `--no-build` skips the native build |
+| `sweep_ordering.sh` | the benchmark (or, with `suite`, the whole test suite) once per cuDSS reordering algorithm |
+| `track-numbers.sh` | the production SA benchmark and `run_bench.sh`, then one row appended to `docs/numbers.md` |
+
+## Investigation helpers
+
+Temporary: delete one once the investigation it served is over.
 
 | Helper | What it does |
 |---|---|

@@ -7,8 +7,8 @@ Run the repo's N-1 throughput benchmark and report the results.
 
 ```bash
 cd ~/Projects/powsybl/powsybl-open-loadflow-gpu
-native/run_bench.sh              # builds libolfgpu vs the pinned cuDSS first
-# native/run_bench.sh --no-build # if the native lib is already current
+tools/run_bench.sh              # builds libolfgpu vs the pinned cuDSS first
+# tools/run_bench.sh --no-build # if the native lib is already current
 ```
 
 Defaults (in the script): cuDSS 0.8.0 (`CUDSS_ROOT=~/Projects/powsybl/cuda/cudss`),

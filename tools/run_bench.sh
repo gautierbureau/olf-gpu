@@ -4,10 +4,10 @@
 # MUST be run (and stay at the recorded baseline) after every change touching the batched GPU path.
 #
 # Usage:
-#   native/run_bench.sh                 # K=4 regression check (builds vs the pinned cuDSS first)
-#   native/run_bench.sh --no-build      # skip the native rebuild (lib already vs the pinned cuDSS)
-#   OLF_GPU_FIXED_ITERS="4,6,10" native/run_bench.sh   # K-sweep instead of just K=4
-#   native/run_bench.sh --no-build -Dpowsybl.config.dirs=<dir>   # further arguments go to mvn (here: the
+#   tools/run_bench.sh                 # K=4 regression check (builds vs the pinned cuDSS first)
+#   tools/run_bench.sh --no-build      # skip the native rebuild (lib already vs the pinned cuDSS)
+#   OLF_GPU_FIXED_ITERS="4,6,10" tools/run_bench.sh   # K-sweep instead of just K=4
+#   tools/run_bench.sh --no-build -Dpowsybl.config.dirs=<dir>   # further arguments go to mvn (here: the
 #                                            # GPU solver parameters of <dir>/config.yml, see sweep_ordering.sh)
 #
 # Recorded baseline (RTX A1000, cuDSS 0.8.0, UBATCH, K=4, maxBatch=500): warm ~4.9 ms/scn (205 scn/s);

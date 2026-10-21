@@ -9,7 +9,7 @@
 # block per ordering.
 #
 # Usage:
-#   native/sweep_ordering.sh [bench|suite] [ORDERING...]
+#   tools/sweep_ordering.sh [bench|suite] [ORDERING...]
 #   ORDERING: a GpuReorderingAlgorithm. Default: AUTO LIBRARY_DEFAULT BTF_COLAMD COLAMD AMD NESTED_DISSECTION.
 #   NONE (natural order) only when named: its fill can exhaust device memory.
 #
@@ -42,7 +42,7 @@ for ordering in "${ORDERINGS[@]}"; do
     log="$WORK/$ordering.log"
     echo ">> $MODE with reorderingAlgorithm=$ordering (log: $log)"
     if [[ "$MODE" == bench ]]; then
-        OLF_GPU_TRACE=1 native/run_bench.sh --no-build -Dpowsybl.config.dirs="$dir" > "$log" 2>&1 || true
+        OLF_GPU_TRACE=1 tools/run_bench.sh --no-build -Dpowsybl.config.dirs="$dir" > "$log" 2>&1 || true
         {
             echo "=== $ordering"
             grep -aE "OLF_GPU_CUDSS" "$log" | sort | uniq -c || true

@@ -3,7 +3,7 @@
 
 Counts every capability table row by its status mark (first cell that starts with one).
 "GPU now" = full (v) + partial (~ / warn); total excludes N/A rows. Prints a per-section
-breakdown and a one-line summary used by native/track-numbers.sh for docs/numbers.md.
+breakdown and a one-line summary used by tools/track-numbers.sh for docs/numbers.md.
 """
 import re
 import sys

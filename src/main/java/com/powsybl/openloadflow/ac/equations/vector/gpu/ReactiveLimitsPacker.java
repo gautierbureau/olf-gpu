@@ -17,6 +17,7 @@ import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfGenerator;
 import com.powsybl.openloadflow.network.LfNetwork;
+import com.powsybl.openloadflow.network.gpu.GeneratorVoltageControlRoles;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -147,7 +148,7 @@ public final class ReactiveLimitsPacker {
                 int bn = bus.getNum();
                 boolean vActive = StableRowIndexing.row(es, bn, AcEquationType.BUS_TARGET_V) >= 0;
                 boolean qActive = StableRowIndexing.row(es, bn, AcEquationType.BUS_TARGET_Q) >= 0;
-                boolean remoteMember = RemoteMemberQPacker.isRemoteMemberEntry(bus);
+                boolean remoteMember = GeneratorVoltageControlRoles.isRemoteGenVcMember(bus);
                 // A pilot that is one of its OWN controllers is packed as a remote entry of class 2: its
                 // q feeds the group's DISTR_Q rows like a remote member's (read through the remote q
                 // pack, not its row), a pin puts its own Q balance on its row (mode 4, alternate dest),
@@ -156,7 +157,7 @@ public final class ReactiveLimitsPacker {
                 // all-pinned-group fixture, 0.68 kV at the pilot.
                 boolean pilotSelf = PilotSelfPacker.isPilotSelfEntry(bus);
                 if ((remoteMember || pilotSelf) && vCol[bn] >= 0) {
-                    var groupVoltageControl = RemoteMemberQPacker.mainGeneratorVoltageControl(bus);                   // the GROUP's control: the group identity, the pilot's V row
+                    var groupVoltageControl = GeneratorVoltageControlRoles.mainGeneratorVoltageControl(bus);                   // the GROUP's control: the group identity, the pilot's V row
                     // ...but the switch-back test is the member's OWN control's: OLF's ReactiveLimitsOuterLoop reads
                     // getBusV / getBusTargetV off bus.getGeneratorVoltageControl(), which for a control MERGED into
                     // the group (a dependent section) keeps its own controlled bus and its own target while the

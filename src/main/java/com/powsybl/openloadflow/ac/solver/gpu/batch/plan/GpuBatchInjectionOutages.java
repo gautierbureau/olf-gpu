@@ -15,6 +15,7 @@ import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuRowMode;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfGenerator;
+import com.powsybl.openloadflow.network.gpu.GeneratorVoltageControlRoles;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -318,7 +319,7 @@ public final class GpuBatchInjectionOutages {
      *  (members=1 alive=0). See the merged-voltage-control note on GeneratorVoltageControlRoles.mainGeneratorVoltageControl. */
     private static java.util.Optional<com.powsybl.openloadflow.network.GeneratorVoltageControl> mainVcOf(LfBus bus) {
         return java.util.Optional.ofNullable(
-                com.powsybl.openloadflow.ac.equations.vector.gpu.RemoteMemberQPacker.mainGeneratorVoltageControl(bus));
+                GeneratorVoltageControlRoles.mainGeneratorVoltageControl(bus));
     }
 
     private static GenOutage computeBusGenOutage(EquationSystem<AcVariableType, AcEquationType> es, GpuAcData gpuData, boolean distributedSlack,

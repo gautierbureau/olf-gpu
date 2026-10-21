@@ -115,7 +115,7 @@ public final class PilotSelfPacker {
 
     /** A class-2 entry: a pilot that is one of its own controllers (packed as a remote entry). */
     public static boolean isPilotSelfEntry(LfBus bus) {
-        GeneratorVoltageControl voltageControl = RemoteMemberQPacker.mainGeneratorVoltageControl(bus);
+        GeneratorVoltageControl voltageControl = GeneratorVoltageControlRoles.mainGeneratorVoltageControl(bus);
         return voltageControl != null && GeneratorVoltageControlRoles.isRemoteGeneratorVoltageControlControllerElement(bus) && voltageControl.getControlledBus() == bus;
     }
 }

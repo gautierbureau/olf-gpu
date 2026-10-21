@@ -19,6 +19,7 @@ import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfGenerator;
 import com.powsybl.openloadflow.network.LfNetwork;
+import com.powsybl.openloadflow.network.gpu.GeneratorVoltageControlRoles;
 import com.powsybl.openloadflow.network.impl.AbstractLfGenerator;
 
 import java.util.ArrayList;
@@ -110,10 +111,10 @@ public final class ReactiveCapabilityCurves {
             // the SAME predicates as the reactive-limit pack (a local copy drifted on rte6515's full
             // busbar scope at VL-5_0: a pilot whose own control is merged is reached through the
             // main control there)
-            boolean remoteMember = com.powsybl.openloadflow.ac.equations.vector.gpu.RemoteMemberQPacker.isRemoteMemberEntry(bus);
+            boolean remoteMember = GeneratorVoltageControlRoles.isRemoteGenVcMember(bus);
             boolean pilotSelf = com.powsybl.openloadflow.ac.equations.vector.gpu.PilotSelfPacker.isPilotSelfEntry(bus);
             if (remoteMember || pilotSelf) {
-                var voltageControl = com.powsybl.openloadflow.ac.equations.vector.gpu.RemoteMemberQPacker.mainGeneratorVoltageControl(bus);
+                var voltageControl = GeneratorVoltageControlRoles.mainGeneratorVoltageControl(bus);
                 var pilotVar = es.getVariableSet().getVariable(voltageControl.getControlledBus().getNum(), AcVariableType.BUS_V);
                 // a row < 0 is a bus a contingency disabled: the pack skips it (vCol < 0) and so must the replay
                 if (vVar == null || vVar.getRow() < 0 || pilotVar == null || pilotVar.getRow() < 0

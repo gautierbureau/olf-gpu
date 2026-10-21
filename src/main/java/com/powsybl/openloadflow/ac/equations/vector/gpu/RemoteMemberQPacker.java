@@ -13,7 +13,6 @@ import com.powsybl.openloadflow.ac.equations.vector.gpu.fixedmatrix.ReactiveRelo
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuReactiveTermKind;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuTwoSides;
 import com.powsybl.openloadflow.equations.EquationSystem;
-import com.powsybl.openloadflow.network.GeneratorVoltageControl;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfNetwork;
@@ -34,14 +33,6 @@ public final class RemoteMemberQPacker {
     private RemoteMemberQPacker() {
     }
 
-    /** A REMOTE member entry of the reactive-limit pack: a controller of a MAIN remote group that is
-     *  not the group's controlled bus. Shared with ReactiveCapabilityCurves, which REPLAYS this enumeration
-     *  and must count exactly the same buses (a drift throws and the run falls to the CPU). */
-    public static boolean isRemoteMemberEntry(LfBus bus) {
-        GeneratorVoltageControl voltageControl = mainGeneratorVoltageControl(bus);
-        return voltageControl != null && GeneratorVoltageControlRoles.isRemoteGeneratorVoltageControlControllerElement(bus) && voltageControl.getControlledBus() != bus;
-    }
-
     /**
      * OLF's OWN test for "is this a remote controller", which gates robust mode's unrealistic-voltage
      * PV→PQ freeze — copied verbatim from {@code ReactiveLimitsOuterLoop.isGeneratorRemoteController}:
@@ -49,7 +40,7 @@ public final class RemoteMemberQPacker {
      * <pre>return controllerBus.getGeneratorVoltageControl().map(c -&gt; c.getControlledBus() != controllerBus).orElse(false);</pre>
      *
      * <p>Note which control it asks: the bus's OWN {@code getGeneratorVoltageControl()}, NOT
-     * {@link #mainGeneratorVoltageControl}. For a MERGED group every member keeps its own DEPENDENT control whose
+     * {@link GeneratorVoltageControlRoles#mainGeneratorVoltageControl}. For a MERGED group every member keeps its own DEPENDENT control whose
      * controlled bus is ITSELF, so OLF reads every such member as a LOCAL controller and skips the
      * whole {@code robustMode && generatorRemoteController && …} block for it — while the device's
      * {@code reactiveLimitVoltageControlRole} class, built from the MAIN control, calls that member "remote" and applies the
@@ -61,23 +52,6 @@ public final class RemoteMemberQPacker {
      */
     public static boolean isOlfRobustRemoteController(LfBus bus) {
         return bus.getGeneratorVoltageControl().map(c -> c.getControlledBus() != bus).orElse(false);
-    }
-
-    /**
-     * The bus's MAIN generator voltage control, which is the only one that can answer a question about the
-     * GROUP: who the controlled bus is, what the target is, which nominal V it refers to.
-     *
-     * <p>A merged group keeps ONE main control (on the bus OLF picked) and leaves every other member holding
-     * a DEPENDENT control that regulates ITSELF. Asking {@code bus.getGeneratorVoltageControl()} therefore
-     * answered "I control my own bus" for every member, so each one was classified as the pilot
-     * ({@code isPilotSelfEntry}) with its own row as the pilot row. Since class 2 means "unpinned, my row is
-     * the group's voltage IDENTITY (mode 0)" while a member's row actually carries DISTR_Q (mode 1), the
-     * reactive-limit kernel's {@code if (mode[ridx] != pvForm) return;} dropped every member before it ever
-     * looked at q: rte6515's base pinned 16 where OLF pinned 19 (VL-5997_1, VL-6003_1, VL-6003_2 missing,
-     * each with a correct q of 1.921012507 pu against a 0.7536 limit), then diverged at outer pass 7.
-     */
-    public static GeneratorVoltageControl mainGeneratorVoltageControl(LfBus bus) {
-        return GeneratorVoltageControlRoles.mainGeneratorVoltageControl(bus);              // ONE definition, shared with the row indexing
     }
 
     static RemoteMemberReactiveTerms remoteMemberQPack(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,

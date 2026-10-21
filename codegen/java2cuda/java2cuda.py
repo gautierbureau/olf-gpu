@@ -353,6 +353,20 @@ def render_fused(mod, temps, out, pool):
         methods.append({"name": name, "params": params,
                         "sig": ", ".join("double " + p for p in params), "body": flat})
 
+    # Per-class helpers (spec "class_methods"): OLF private methods a hand-written device mirror of a
+    # control-flow method calls (calculateSensi's one-sided rule at I = 0), emitted in a namespace named
+    # after their Java class, each resolved in ITS file's scope (both sides define a private theta).
+    classes = []
+    for cls, names in mod.get("class_methods", {}).items():
+        fm = next(f for path, f in zip(mod["java_sources"], pool["files"])
+                  if os.path.basename(path) == cls + ".java")
+        scope = {"files": [fm], "global": pool["global"]}
+        cms = []
+        for name in names:
+            params, flat = flatten(scope, name)
+            cms.append({"name": name, "sig": ", ".join("double " + p for p in params), "body": flat})
+        classes.append({"name": cls, "methods": cms})
+
     # Call-argument mapping: a precomputed-trig parameter binds to the SIDE's value
     # (sinTheta -> sinTheta1 for a side-1 method) — like the Java call sites, which
     # pass FastMath.sin(theta1) into the sinTheta parameter.
@@ -414,7 +428,7 @@ def render_fused(mod, temps, out, pool):
     return env.get_template("fused.cuh.j2").render(
         doc=mod["doc"], regen=REGEN, ns_open=ns_open, ns_close=ns_close,
         fn_macro=mod["cuda_fn_macro"], family=mod["family"],
-        consts_block=consts_block, methods=methods, routines=routines)
+        consts_block=consts_block, methods=methods, classes=classes, routines=routines)
 
 
 # --------------------------------------------------------------------------------

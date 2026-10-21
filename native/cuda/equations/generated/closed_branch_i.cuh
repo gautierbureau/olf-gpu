@@ -76,6 +76,84 @@ CBI_FN inline double di2da1(double y, double ksi, double g2, double b2, double v
     return (((R2 * (R2 * v2 * (g2 * cos(ph2) - b2 * sin(ph2) + y * sin(ph2 + ksi)) - y * r1 * v1 * sin(ksi + a1 - A2 + ph1))) * (R2 * (-y * r1 * v1 * cos(ksi + a1 - A2 + ph1))) + (R2 * (R2 * v2 * (g2 * sin(ph2) + b2 * cos(ph2) - y * cos(ph2 + ksi)) + y * r1 * v1 * cos(ksi + a1 - A2 + ph1))) * (R2 * (-y * r1 * v1 * sin(ksi + a1 - A2 + ph1)))) / (hypot((R2 * (R2 * v2 * (g2 * cos(ph2) - b2 * sin(ph2) + y * sin(ph2 + ksi)) - y * r1 * v1 * sin(ksi + a1 - A2 + ph1))), (R2 * (R2 * v2 * (g2 * sin(ph2) + b2 * cos(ph2) - y * cos(ph2 + ksi)) + y * r1 * v1 * cos(ksi + a1 - A2 + ph1))))));
 }
 
+// ClosedBranchSide1CurrentMagnitudeEquationTerm's private helpers, as OLF scopes them (per class: both sides define their own theta).
+namespace ClosedBranchSide1CurrentMagnitudeEquationTerm {
+
+CBI_FN inline double dreI1dph1(double y, double ksi, double g1, double b1, double v1, double ph1, double r1) {
+    return r1 * r1 * v1 * (-g1 * sin(ph1) - b1 * cos(ph1) + y * cos(ph1 + ksi));
+}
+
+CBI_FN inline double dreI1dph2(double y, double ksi, double r1, double a1, double v2, double ph2) {
+    return r1 * (-y * R2 * v2 * cos(ksi - a1 + A2 + ph2));
+}
+
+CBI_FN inline double dreI1dv1(double y, double ksi, double g1, double b1, double ph1, double r1) {
+    return r1 * r1 * (g1 * cos(ph1) - b1 * sin(ph1) + y * sin(ph1 + ksi));
+}
+
+CBI_FN inline double dreI1dv2(double y, double ksi, double r1, double a1, double ph2) {
+    return r1 * (-y * R2 * sin(ksi - a1 + A2 + ph2));
+}
+
+CBI_FN inline double dimI1dph1(double y, double ksi, double g1, double b1, double v1, double ph1, double r1) {
+    return r1 * r1 * v1 * (g1 * cos(ph1) - b1 * sin(ph1) + y * sin(ph1 + ksi));
+}
+
+CBI_FN inline double dimI1dph2(double y, double ksi, double r1, double a1, double v2, double ph2) {
+    return r1 * (-y * R2 * v2 * sin(ksi - a1 + A2 + ph2));
+}
+
+CBI_FN inline double dimI1dv1(double y, double ksi, double g1, double b1, double ph1, double r1) {
+    return r1 * r1 * (g1 * sin(ph1) + b1 * cos(ph1) - y * cos(ph1 + ksi));
+}
+
+CBI_FN inline double dimI1dv2(double y, double ksi, double r1, double a1, double ph2) {
+    return r1 * (y * R2 * cos(ksi - a1 + A2 + ph2));
+}
+
+}  // namespace ClosedBranchSide1CurrentMagnitudeEquationTerm
+
+// ClosedBranchSide2CurrentMagnitudeEquationTerm's private helpers, as OLF scopes them (per class: both sides define their own theta).
+namespace ClosedBranchSide2CurrentMagnitudeEquationTerm {
+
+CBI_FN inline double theta(double ksi, double ph1, double a1) {
+    return ksi + a1 - A2 + ph1;
+}
+
+CBI_FN inline double dreI2dph1(double y, double ksi, double v1, double ph1, double r1, double a1) {
+    return R2 * (-y * r1 * v1 * cos(ksi + a1 - A2 + ph1));
+}
+
+CBI_FN inline double dreI2dph2(double y, double ksi, double g2, double b2, double v2, double ph2) {
+    return R2 * R2 * v2 * (-g2 * sin(ph2) - b2 * cos(ph2) + y * cos(ph2 + ksi));
+}
+
+CBI_FN inline double dreI2dv1(double y, double r1, double theta) {
+    return R2 * (-y * r1 * sin(theta));
+}
+
+CBI_FN inline double dreI2dv2(double y, double ksi, double g2, double b2, double ph2) {
+    return R2 * R2 * (g2 * cos(ph2) - b2 * sin(ph2) + y * sin(ph2 + ksi));
+}
+
+CBI_FN inline double dimI2dph1(double y, double v1, double r1, double theta) {
+    return R2 * (-y * r1 * v1 * sin(theta));
+}
+
+CBI_FN inline double dimI2dph2(double y, double ksi, double g2, double b2, double v2, double ph2) {
+    return R2 * R2 * v2 * (g2 * cos(ph2) - b2 * sin(ph2) + y * sin(ph2 + ksi));
+}
+
+CBI_FN inline double dimI2dv1(double y, double ksi, double ph1, double r1, double a1) {
+    return R2 * (y * r1 * cos(ksi + a1 - A2 + ph1));
+}
+
+CBI_FN inline double dimI2dv2(double y, double ksi, double g2, double b2, double ph2) {
+    return R2 * R2 * (g2 * sin(ph2) + b2 * cos(ph2) - y * cos(ph2 + ksi));
+}
+
+}  // namespace ClosedBranchSide2CurrentMagnitudeEquationTerm
+
 // FUSED per-element kernel body: one routine computes the two closed-branch
 // current magnitudes i1/i2 + their ten chain-rule derivatives for one branch,
 // writing into Struct-of-Arrays at index i. The complex-current components

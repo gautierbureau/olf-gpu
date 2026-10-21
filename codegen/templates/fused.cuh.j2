@@ -24,6 +24,16 @@ namespace {{ family }} {
     return {{ m.body }};
 }
 {% endfor %}
+{%- for c in classes %}
+// {{ c.name }}'s private helpers, as OLF scopes them (per class: both sides define their own theta).
+namespace {{ c.name }} {
+{% for m in c.methods %}
+{{ fn_macro }} inline double {{ m.name }}({{ m.sig }}) {
+    return {{ m.body }};
+}
+{% endfor %}
+}  // namespace {{ c.name }}
+{% endfor %}
 {%- for r in routines %}
 {{ r.doc }}
 {{ fn_macro }} inline void {{ r.name }}(

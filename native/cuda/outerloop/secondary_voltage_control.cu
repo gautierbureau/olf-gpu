@@ -153,7 +153,7 @@ __global__ void secondaryVoltageControlGatherSensitivityBatch(SecondaryVoltageCo
             double pOv[8];
             if (findTapOverride(nClosedBranchParameterOverrides, closedBranchParameterOverrideScenarioElement, closedBranchParameterOverrideValues, s, e, pOv)) p = pOv;
             const int* q = closedBranchIndices + e * 12;
-            double g[18];
+            double g[6];
             controlledFlowAndGradient(T.reactiveTermSide[k], GpuControlledFlow::REACTIVE_POWER, p, xs, q, g);  // the closed branch's reactive flow on its side
             double d[6] = { dxs[q[5]], dxs[q[7]], dxs[q[4]], dxs[q[6]],
                             q[8] >= 0 ? dxs[q[8]] : 0.0, q[9] >= 0 ? dxs[q[9]] : 0.0 };

@@ -61,10 +61,9 @@ __global__ void phaseControlCheckBatch(int nPhaseControlControllerBranches, int 
     const double* p = closedBranchParameters + e * GpuPiModelColumn::COUNT;
     double pOv[8];
     if (findTapOverride(nClosedBranchParameterOverrides, closedBranchParameterOverrideScenarioElement, closedBranchParameterOverrideValues, s, e, pOv)) p = pOv;
-    double g[18];
-    double i = controlledFlowAndGradient(side[c], GpuControlledFlow::CURRENT, p, x + (size_t) s * n, closedBranchIndices + e * 12, g);
+    double i = controlledCurrent(side[c], p, x + (size_t) s * n, closedBranchIndices + e * 12);
     if (!(i > limit[c])) return;
-    double dida1 = g[0] == 1e300 ? 0.0 : g[4];
+    double dida1 = controlledCurrentDerivativeWithRespectToA1(side[c], p, x + (size_t) s * n, closedBranchIndices + e * 12);
     int dir = dida1 > 0 ? -1 : 1;                            // reduce I: move a1 against the slope
     int cur = tap[tid];
     double a1 = tapRows[(size_t) (base + cur) * GpuPiModelColumn::COUNT + GpuPiModelColumn::A1];

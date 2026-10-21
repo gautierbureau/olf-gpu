@@ -40,6 +40,13 @@ MODULE = {
     "theta_methods": {},
     "precomputed": {},
     "hoist_helpers": ["reI1", "imI1", "reI2", "imI2"],
+    # the components calculateSensi's one-sided rule at I = 0 combines (flow_observation.cuh mirrors it)
+    "class_methods": {
+        "ClosedBranchSide1CurrentMagnitudeEquationTerm": [
+            "dreI1dph1", "dreI1dph2", "dreI1dv1", "dreI1dv2", "dimI1dph1", "dimI1dph2", "dimI1dv1", "dimI1dv2"],
+        "ClosedBranchSide2CurrentMagnitudeEquationTerm": [
+            "theta", "dreI2dph1", "dreI2dph2", "dreI2dv1", "dreI2dv2", "dimI2dph1", "dimI2dph2", "dimI2dv1", "dimI2dv2"],
+    },
 
     "base_symbols": ["v1", "v2", "ph1", "ph2", "a1", "r1", "ksi", "y",
                      "g1", "g2", "b1", "b2"],

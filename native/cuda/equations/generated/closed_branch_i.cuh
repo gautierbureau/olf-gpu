@@ -1,7 +1,7 @@
 // Copyright (c) 2026, RTE (http://www.rte-france.com)
 // SPDX-License-Identifier: MPL-2.0
 //
-// Closed-branch current magnitudes and their Jacobian entries, parsed from the hand-written OLF equation-term Java (the source of truth).
+// Closed-branch current magnitudes and their derivatives, parsed from the hand-written OLF equation-term Java (the source of truth).
 //
 // GENERATED — DO NOT EDIT. Regenerate with: python3 codegen/java2cuda/java2cuda.py (parsed from the OLF Java).
 #pragma once
@@ -154,59 +154,7 @@ CBI_FN inline double dimI2dv2(double y, double ksi, double g2, double b2, double
 
 }  // namespace ClosedBranchSide2CurrentMagnitudeEquationTerm
 
-// FUSED per-element kernel body: one routine computes the two closed-branch
-// current magnitudes i1/i2 + their ten chain-rule derivatives for one branch,
-// writing into Struct-of-Arrays at index i. The complex-current components
-// reI1/imI1/reI2/imI2 are computed once as kernel locals and every derivative is
-// (re*dred<var> + im*dimd<var>) / hypot(re, im) — OLF's own chain-rule shape.
-// NEW GPU target (the residual pipeline emitted no CUDA for current magnitude);
-// no derivative w.r.t. r1 exists, matching OLF (calculateSensi throws on dr1).
-CBI_FN inline void evalClosedBranchI(
-        double y, double g1, double g2, double b1, double b2,
-        double v1, double r1, double v2, double ksi, double a1, double ph1, double ph2,
-        int i,
-        double* i1_out,
-        double* di1dv1_out,
-        double* di1dv2_out,
-        double* di1dph1_out,
-        double* di1dph2_out,
-        double* di1da1_out,
-        double* i2_out,
-        double* di2dv1_out,
-        double* di2dv2_out,
-        double* di2dph1_out,
-        double* di2dph2_out,
-        double* di2da1_out) {
-    i1_out[i] = i1(y, ksi, g1, b1, v1, ph1, r1, a1, v2, ph2);
-    di1dv1_out[i] = di1dv1(y, ksi, g1, b1, v1, ph1, r1, a1, v2, ph2);
-    di1dv2_out[i] = di1dv2(y, ksi, g1, b1, v1, ph1, r1, a1, v2, ph2);
-    di1dph1_out[i] = di1dph1(y, ksi, g1, b1, v1, ph1, r1, a1, v2, ph2);
-    di1dph2_out[i] = di1dph2(y, ksi, g1, b1, v1, ph1, r1, a1, v2, ph2);
-    di1da1_out[i] = di1da1(y, ksi, g1, b1, v1, ph1, r1, a1, v2, ph2);
-    i2_out[i] = i2(y, ksi, g2, b2, v1, ph1, r1, a1, v2, ph2);
-    di2dv1_out[i] = di2dv1(y, ksi, g2, b2, v1, ph1, r1, a1, v2, ph2);
-    di2dv2_out[i] = di2dv2(y, ksi, g2, b2, v1, ph1, r1, a1, v2, ph2);
-    di2dph1_out[i] = di2dph1(y, ksi, g2, b2, v1, ph1, r1, a1, v2, ph2);
-    di2dph2_out[i] = di2dph2(y, ksi, g2, b2, v1, ph1, r1, a1, v2, ph2);
-    di2da1_out[i] = di2da1(y, ksi, g2, b2, v1, ph1, r1, a1, v2, ph2);
-}
-
-// F-ONLY variant: the residual values alone (no Jacobian outputs) — for fill
-// sites that never factorize: residual/convergence checks, line-search
-// backtracks, frozen-Jacobian iterations.
-CBI_FN inline void evalClosedBranchIF(
-        double y, double g1, double g2, double b1, double b2,
-        double v1, double r1, double v2, double ksi, double a1, double ph1, double ph2,
-        int i,
-        double* i1_out,
-        double* i2_out) {
-    i1_out[i] = i1(y, ksi, g1, b1, v1, ph1, r1, a1, v2, ph2);
-    i2_out[i] = i2(y, ksi, g2, b2, v1, ph1, r1, a1, v2, ph2);
-}
-
 }  // namespace closed_branch_i
 
-using closed_branch_i::evalClosedBranchI;
-using closed_branch_i::evalClosedBranchIF;
 
 }}  // namespace powsybl::openloadflow

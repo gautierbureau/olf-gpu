@@ -42,19 +42,8 @@ VDL_FN inline void evalVdl(
     dfdv_out[i] = dfdv(v, target, c, n);
 }
 
-// F-ONLY variant: the residual values alone (no Jacobian outputs) — for fill
-// sites that never factorize: residual/convergence checks, line-search
-// backtracks, frozen-Jacobian iterations.
-VDL_FN inline void evalVdlF(
-        double v, double target, double c, double n,
-        int i,
-        double* f_out) {
-    f_out[i] = f(v, target, c, n);
-}
-
 }  // namespace vdl
 
 using vdl::evalVdl;
-using vdl::evalVdlF;
 
 }}  // namespace powsybl::openloadflow

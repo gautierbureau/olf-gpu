@@ -105,54 +105,9 @@ OB_FN inline void evalOpenBranchF(
     q1_out[i] = q1(y, cosKsi, sinKsi, b1, g2, b2, v1, r1);
 }
 
-// PRECOMPUTED-TRIG variant — the caller supplies the trig (per-element
-// statics + one sincos via angle addition in the fill kernel), matching
-// how AcNetworkVector feeds the same methods on the CPU.
-OB_FN inline void evalOpenBranchPre(
-        double y, double g1, double b1, double g2, double b2,
-        double v1, double r1, double v2,
-        double sinKsi, double cosKsi,
-        int i,
-        double* p2_out,
-        double* dp2dv2_out,
-        double* q2_out,
-        double* dq2dv2_out,
-        double* p1_out,
-        double* dp1dv1_out,
-        double* q1_out,
-        double* dq1dv1_out) {
-    p2_out[i] = p2(y, cosKsi, sinKsi, g1, b1, g2, v2);
-    dp2dv2_out[i] = dp2dv2(y, cosKsi, sinKsi, g1, b1, g2, v2);
-    q2_out[i] = q2(y, cosKsi, sinKsi, g1, b1, b2, v2);
-    dq2dv2_out[i] = dq2dv2(y, cosKsi, sinKsi, g1, b1, b2, v2);
-    p1_out[i] = p1(y, cosKsi, sinKsi, g1, g2, b2, v1, r1);
-    dp1dv1_out[i] = dp1dv1(y, cosKsi, sinKsi, g1, g2, b2, v1, r1);
-    q1_out[i] = q1(y, cosKsi, sinKsi, b1, g2, b2, v1, r1);
-    dq1dv1_out[i] = dq1dv1(y, cosKsi, sinKsi, b1, g2, b2, v1, r1);
-}
-
-// PRECOMPUTED-TRIG + F-ONLY variant: residual values alone, trig supplied
-// by the caller.
-OB_FN inline void evalOpenBranchPreF(
-        double y, double g1, double b1, double g2, double b2,
-        double v1, double r1, double v2,
-        double sinKsi, double cosKsi,
-        int i,
-        double* p2_out,
-        double* q2_out,
-        double* p1_out,
-        double* q1_out) {
-    p2_out[i] = p2(y, cosKsi, sinKsi, g1, b1, g2, v2);
-    q2_out[i] = q2(y, cosKsi, sinKsi, g1, b1, b2, v2);
-    p1_out[i] = p1(y, cosKsi, sinKsi, g1, g2, b2, v1, r1);
-    q1_out[i] = q1(y, cosKsi, sinKsi, b1, g2, b2, v1, r1);
-}
-
 }  // namespace open_branch
 
 using open_branch::evalOpenBranch;
 using open_branch::evalOpenBranchF;
-using open_branch::evalOpenBranchPre;
-using open_branch::evalOpenBranchPreF;
 
 }}  // namespace powsybl::openloadflow

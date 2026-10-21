@@ -44,7 +44,6 @@ import spec_open_branch  # noqa: E402
 import spec_shunt  # noqa: E402
 import spec_hvdc  # noqa: E402
 import spec_closed_branch_i  # noqa: E402
-import spec_open_branch_i  # noqa: E402
 import spec_vdl  # noqa: E402
 
 # (spec, golden file): the golden is the independent extraction frozen at swap time.
@@ -54,7 +53,6 @@ FAMILIES = [
     (spec_shunt.MODULE, "shunt.golden.json"),
     (spec_hvdc.MODULE, "hvdc.golden.json"),
     (spec_closed_branch_i.MODULE, "closed_branch_i.golden.json"),
-    (spec_open_branch_i.MODULE, "open_branch_i.golden.json"),
     (spec_vdl.MODULE, "vdl.golden.json"),
 ]
 
@@ -221,6 +219,7 @@ def check_fd(mod, out, parsed_eval):
 _CUH_TEMP = re.compile(r"^\s*double (\w+) = (.*);$")
 _CUH_OUT = re.compile(r"^\s*(\w+?)(?:_out)?\[i\] = (.*);$")
 _CUH_METHOD = re.compile(r"^\w+ inline double (\w+)\(([^)]*)\) \{$")
+_CUH_CLASS = re.compile(r"^namespace (\w+EquationTerm) \{$")
 
 
 def parse_cuh(text):
@@ -230,11 +229,17 @@ def parse_cuh(text):
     (the raw and Pre assemblers emit the same calls)."""
     lines = text.splitlines()
     methods = []
+    cls = None                                         # inside a "class_methods" namespace
     for i, line in enumerate(lines):
+        c = _CUH_CLASS.match(line)
+        if c:
+            cls = c.group(1)
+        elif cls and line.startswith(f"}}  // namespace {cls}"):
+            cls = None
         m = _CUH_METHOD.match(line)
         if m and i + 1 < len(lines) and lines[i + 1].strip().startswith("return "):
             params = [p.split()[-1] for p in m.group(2).split(",") if p.strip()]
-            methods.append({"name": m.group(1), "params": params,
+            methods.append({"name": m.group(1), "params": params, "cls": cls,
                             "body": lines[i + 1].strip().removeprefix("return ").rstrip(";")})
     temps = []
     seen_t = set()
@@ -248,8 +253,8 @@ def parse_cuh(text):
         if m and m.group(1) not in seen_o:
             seen_o.add(m.group(1))
             outs.append((m.group(1), m.group(2)))
-    if not outs:
-        raise AssertionError("no SoA assignments found in kernel text")
+    if not outs:                                       # no assembler routine: the methods are the outputs
+        outs = [(m["name"], f"{m['name']}({', '.join(m['params'])})") for m in methods if not m["cls"]]
     return methods, temps, outs
 
 

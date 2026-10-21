@@ -36,9 +36,9 @@ declared formula exception is HVDC's `extern_methods` (powsybl-iidm's
 getHvdcLineLosses closed form, another repo).
 
 Families: closed_branch, open_branch, shunt, hvdc (the GPU fill kernels, with
-scatter) + closed_branch_i / open_branch_i (current magnitude — NEW GPU targets,
-no consumer yet; their derivatives are UNGUARDED at I=0 exactly like the CPU
-der() they replicate — upstream guards only calculateSensi).
+scatter) + closed_branch_i (current magnitude, read by the current-limiter loops:
+per-method functions and calculateSensi's private components, no assembler
+routine; outerloop/flow_observation.cuh mirrors calculateSensi line for line).
 
 Parser mechanisms (all general, no special cases): local-decl + recursive
 helper/sibling inlining, per-file helper scope (defining file wins — HVDC's two

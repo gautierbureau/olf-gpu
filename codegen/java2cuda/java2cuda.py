@@ -49,12 +49,11 @@ import spec_open_branch  # noqa: E402
 import spec_shunt  # noqa: E402
 import spec_hvdc  # noqa: E402
 import spec_closed_branch_i  # noqa: E402
-import spec_open_branch_i  # noqa: E402
 import spec_vdl  # noqa: E402
 
 MODULES = [spec_closed_branch.MODULE, spec_open_branch.MODULE,
            spec_shunt.MODULE, spec_hvdc.MODULE,
-           spec_closed_branch_i.MODULE, spec_open_branch_i.MODULE,
+           spec_closed_branch_i.MODULE,
            spec_vdl.MODULE]
 
 # Math calls a flattened body may legitimately keep (extract_golden strips the
@@ -330,13 +329,11 @@ def render_fused(mod, temps, out, pool):
     """Render the family header MIRRORING OLF's CPU structure: one device function per
     Java method — SAME name, SAME signature (the golden-locked precomputed-trig form),
     SAME body (the flattened parse) — inside a per-family namespace (the Java class
-    scoping), plus four thin ASSEMBLER routines that only call them, exactly like
-    AcNetworkVector on the CPU:
-      eval<X>       raw angles: computes theta/trig locals, calls the methods
-      eval<X>F      raw angles, residual values only
-      eval<X>Pre    precomputed-trig parameters (the caller supplies sinKsi/…)
-      eval<X>PreF   precomputed-trig, residual values only
-    Pre variants are emitted only when the family HAS precomputed-trig parameters."""
+    scoping), plus thin ASSEMBLER routines that only call them, exactly like AcNetworkVector
+    on the CPU (raw angles: they compute the theta/trig locals):
+      eval<X>       values and Jacobian entries
+      eval<X>F      residual values only
+    A spec's "cuda_routines" keeps only the ones a device kernel calls."""
     env = Environment(loader=FileSystemLoader(os.path.join(CODEGEN, "templates")),
                       trim_blocks=False, lstrip_blocks=False, keep_trailing_newline=True)
     parts = mod["cuda_namespace"].split("::")
@@ -380,51 +377,27 @@ def render_fused(mod, temps, out, pool):
     for m, (name, side, _b) in zip(methods, out):
         calls[name] = call_of(name, side, m["params"])
 
+    theta_syms = [t["sym"] for t in temps if re.fullmatch(r"theta\d+", t["sym"])]
     trig_syms = [t["sym"] for t in temps
                  if any(t["sym"] == p or t["sym"].startswith(p) for p in pre)]
-    theta_syms = [t["sym"] for t in temps if re.fullmatch(r"theta\d+", t["sym"])]
     raw_temps = [t for t in temps if t["sym"] in set(trig_syms) | set(theta_syms)]
 
     resid_names = {res for res, _side in mod["residuals"]}
     all_names = [n for n, _s, _e in out]
     f_names = [n for n in all_names if n in resid_names]
 
-    def used_trig(names):
-        u = set()
-        for n in names:
-            u.update(re.findall(r"\b[A-Za-z_]\w*\b", calls[n]))
-        return u
-
-    routines = [
-        {"name": mod["cuda_routine"], "doc": mod["cuda_fused_doc"],
-         "outputs": all_names, "temps": raw_temps, "calls": calls,
-         "param_rows": param_rows},
-        {"name": mod["cuda_routine"] + "F", "doc":
-         "// F-ONLY variant: the residual values alone (no Jacobian outputs) — for fill\n"
-         "// sites that never factorize: residual/convergence checks, line-search\n"
-         "// backtracks, frozen-Jacobian iterations.",
-         "outputs": f_names, "temps": _prune_temps(raw_temps, [(n, None, calls[n]) for n in f_names]),
-         "calls": calls, "param_rows": param_rows},
-    ]
-    if trig_syms:
-        for names, suffix, doc in (
-                (all_names, "Pre",
-                 "// PRECOMPUTED-TRIG variant — the caller supplies the trig (per-element\n"
-                 "// statics + one sincos via angle addition in the fill kernel), matching\n"
-                 "// how AcNetworkVector feeds the same methods on the CPU."),
-                (f_names, "PreF",
-                 "// PRECOMPUTED-TRIG + F-ONLY variant: residual values alone, trig supplied\n"
-                 "// by the caller.")):
-            u = used_trig(names)
-            pre_rows = []
-            for row in mod["cuda_params"]:
-                kept = [a for a in row if a in u]
-                if kept:
-                    pre_rows.append(kept)
-            pre_rows.append([tsym for tsym in trig_syms if tsym in u])
-            routines.append({"name": mod["cuda_routine"] + suffix, "doc": doc,
-                             "outputs": names, "temps": [], "calls": calls,
-                             "param_rows": ["double " + ", double ".join(r) + "," for r in pre_rows]})
+    # Only the routines a device kernel calls (spec "cuda_routines", default both): a family whose
+    # methods are called one by one (the current magnitudes) has none.
+    variants = {
+        "": {"doc": mod.get("cuda_fused_doc", ""), "outputs": all_names, "temps": raw_temps},
+        "F": {"doc": "// F-ONLY variant: the residual values alone (no Jacobian outputs) — for fill\n"
+                     "// sites that never factorize: residual/convergence checks, line-search\n"
+                     "// backtracks, frozen-Jacobian iterations.",
+              "outputs": f_names, "temps": _prune_temps(raw_temps, [(n, None, calls[n]) for n in f_names])},
+    }
+    routines = [{"name": mod["cuda_routine"] + suffix, "doc": v["doc"], "outputs": v["outputs"],
+                 "temps": v["temps"], "calls": calls, "param_rows": param_rows}
+                for suffix, v in variants.items() if suffix in mod.get("cuda_routines", ["", "F"])]
     return env.get_template("fused.cuh.j2").render(
         doc=mod["doc"], regen=REGEN, ns_open=ns_open, ns_close=ns_close,
         fn_macro=mod["cuda_fn_macro"], family=mod["family"],

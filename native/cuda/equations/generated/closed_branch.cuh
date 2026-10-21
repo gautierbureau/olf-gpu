@@ -240,94 +240,9 @@ CB_FN inline void evalClosedBranchF(
     q2_out[i] = q2(y, cosKsi, b2, v1, r1, v2, cosTheta2);
 }
 
-// PRECOMPUTED-TRIG variant — the caller supplies the trig (per-element
-// statics + one sincos via angle addition in the fill kernel), matching
-// how AcNetworkVector feeds the same methods on the CPU.
-CB_FN inline void evalClosedBranchPre(
-        double y, double g1, double g2, double b1, double b2,
-        double v1, double r1, double v2,
-        double sinKsi, double sinTheta1, double cosTheta1, double cosKsi, double sinTheta2, double cosTheta2,
-        int i,
-        double* p1_out,
-        double* dp1dv1_out,
-        double* dp1dv2_out,
-        double* dp1dph1_out,
-        double* dp1dph2_out,
-        double* dp1da1_out,
-        double* dp1dr1_out,
-        double* q1_out,
-        double* dq1dv1_out,
-        double* dq1dv2_out,
-        double* dq1dph1_out,
-        double* dq1dph2_out,
-        double* dq1da1_out,
-        double* dq1dr1_out,
-        double* p2_out,
-        double* dp2dv1_out,
-        double* dp2dv2_out,
-        double* dp2dph1_out,
-        double* dp2dph2_out,
-        double* dp2da1_out,
-        double* dp2dr1_out,
-        double* q2_out,
-        double* dq2dv1_out,
-        double* dq2dv2_out,
-        double* dq2dph1_out,
-        double* dq2dph2_out,
-        double* dq2da1_out,
-        double* dq2dr1_out) {
-    p1_out[i] = p1(y, sinKsi, g1, v1, r1, v2, sinTheta1);
-    dp1dv1_out[i] = dp1dv1(y, sinKsi, g1, v1, r1, v2, sinTheta1);
-    dp1dv2_out[i] = dp1dv2(y, v1, r1, sinTheta1);
-    dp1dph1_out[i] = dp1dph1(y, v1, r1, v2, cosTheta1);
-    dp1dph2_out[i] = dp1dph2(y, v1, r1, v2, cosTheta1);
-    dp1da1_out[i] = dp1da1(y, v1, r1, v2, cosTheta1);
-    dp1dr1_out[i] = dp1dr1(y, sinKsi, g1, v1, r1, v2, sinTheta1);
-    q1_out[i] = q1(y, cosKsi, b1, v1, r1, v2, cosTheta1);
-    dq1dv1_out[i] = dq1dv1(y, cosKsi, b1, v1, r1, v2, cosTheta1);
-    dq1dv2_out[i] = dq1dv2(y, v1, r1, cosTheta1);
-    dq1dph1_out[i] = dq1dph1(y, v1, r1, v2, sinTheta1);
-    dq1dph2_out[i] = dq1dph2(y, v1, r1, v2, sinTheta1);
-    dq1da1_out[i] = dq1da1(y, v1, r1, v2, sinTheta1);
-    dq1dr1_out[i] = dq1dr1(y, cosKsi, b1, v1, r1, v2, cosTheta1);
-    p2_out[i] = p2(y, sinKsi, g2, v1, r1, v2, sinTheta2);
-    dp2dv1_out[i] = dp2dv1(y, r1, v2, sinTheta2);
-    dp2dv2_out[i] = dp2dv2(y, sinKsi, g2, v1, r1, v2, sinTheta2);
-    dp2dph1_out[i] = dp2dph1(y, v1, r1, v2, cosTheta2);
-    dp2dph2_out[i] = dp2dph2(y, v1, r1, v2, cosTheta2);
-    dp2da1_out[i] = dp2da1(y, v1, r1, v2, cosTheta2);
-    dp2dr1_out[i] = dp2dr1(y, v1, v2, sinTheta2);
-    q2_out[i] = q2(y, cosKsi, b2, v1, r1, v2, cosTheta2);
-    dq2dv1_out[i] = dq2dv1(y, r1, v2, cosTheta2);
-    dq2dv2_out[i] = dq2dv2(y, cosKsi, b2, v1, r1, v2, cosTheta2);
-    dq2dph1_out[i] = dq2dph1(y, v1, r1, v2, sinTheta2);
-    dq2dph2_out[i] = dq2dph2(y, v1, r1, v2, sinTheta2);
-    dq2da1_out[i] = dq2da1(y, v1, r1, v2, sinTheta2);
-    dq2dr1_out[i] = dq2dr1(y, v1, v2, cosTheta2);
-}
-
-// PRECOMPUTED-TRIG + F-ONLY variant: residual values alone, trig supplied
-// by the caller.
-CB_FN inline void evalClosedBranchPreF(
-        double y, double g1, double g2, double b1, double b2,
-        double v1, double r1, double v2,
-        double sinKsi, double sinTheta1, double cosTheta1, double cosKsi, double sinTheta2, double cosTheta2,
-        int i,
-        double* p1_out,
-        double* q1_out,
-        double* p2_out,
-        double* q2_out) {
-    p1_out[i] = p1(y, sinKsi, g1, v1, r1, v2, sinTheta1);
-    q1_out[i] = q1(y, cosKsi, b1, v1, r1, v2, cosTheta1);
-    p2_out[i] = p2(y, sinKsi, g2, v1, r1, v2, sinTheta2);
-    q2_out[i] = q2(y, cosKsi, b2, v1, r1, v2, cosTheta2);
-}
-
 }  // namespace closed_branch
 
 using closed_branch::evalClosedBranch;
 using closed_branch::evalClosedBranchF;
-using closed_branch::evalClosedBranchPre;
-using closed_branch::evalClosedBranchPreF;
 
 }}  // namespace powsybl::openloadflow

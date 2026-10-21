@@ -65,23 +65,17 @@ exactly the factoring `AcNetworkVector` does on the CPU.
     `r*p*p/(v*v)` is DECLARED in the spec (`extern_methods`) — the one formula in
     any spec, guarded by the golden equivalence (the residual pipeline's proof
     supplied the identical closed form).
-  - **closed_branch_i** (NEW kernel) — the old pipeline's structured-magnitudes
-    machinery disappears: OLF's chain-rule methods are parsed flat. The value `i1`
-    is OVERLOADED (public over a private `(..., theta)` core) — the parser picks
-    the public one by visibility and inlines the private overload through it; each
-    side's own `theta` resolves per-file; `reI/imI` are hoisted (one instance
-    each), so every derivative is `(re*dred<var> + im*dimd<var>)/hypot(re, im)`
-    over shared locals — OLF's own factoring. No `dr1` output, matching OLF
+  - **closed_branch_i** — the current magnitude the current-limiter loops read.
+    The value `i1` is OVERLOADED (public over a private `(..., theta)` core) — the
+    parser picks the public one by visibility and inlines the private overload
+    through it; each side's own `theta` resolves per-file. No assembler routine
+    (`cuda_routines: []`): `outerloop/flow_observation.cuh` calls the methods one
+    by one, mirroring `calculateSensi` (control flow the parser does not
+    transpile) line for line; `class_methods` emits the private `dreI/dimI`
+    components its one-sided rule at I < ZERO_CURRENT_THRESHOLD combines, in a
+    namespace named after their Java class. No `dr1` output, matching OLF
     (`calculateSensi` throws on `dr1`), and the FD audit verifies the chain rule
     to 1.9e-9.
-  - **open_branch_i** (NEW kernel) — mixed trig (precomputed `sinKsi/cosKsi`
-    locals + raw `ph`); the private value methods `i1/i2` (the old `--output`
-    promotion) resolve like any method; `gres/bres` differ per side under the
-    same name/arity (per-file scope again — they can't be hoisted, and inline
-    into the components); hoist DEPENDENCIES: `shunt` is listed before `reI/imI`,
-    and a post-pass rewrites hoisted expressions against earlier-listed helpers'
-    locals. Only `di/dv` exists — the FD audit CONFIRMS the dropped angle
-    derivatives are ~0 (the rotation-invariance claim).
   - **vdl** (ZIP/exponential load models) — the parser's REDUCTION shape:
     `AbstractLoadModelEquationTerm.f/dfdv` are ACCUMULATION LOOPS
     (`Σ c·vⁿ · target` over a model's exp terms, `n == 0` skipped), extracted as

@@ -31,8 +31,8 @@ factoring OLF's own Java does with its locals and helpers.
   (declared exception: HVDC's `extern_methods` carries powsybl-iidm's
   `getHvdcLineLosses` closed form, which lives in another repo).
   Families: closed_branch, open_branch, shunt, hvdc (the GPU fill kernels, with
-  scatter stamps) + closed_branch_i, open_branch_i (current magnitude — NEW GPU
-  targets for future on-device current monitoring; no consumer, no scatter)
+  scatter stamps) + closed_branch_i (current magnitude, read by the current-limiter
+  loops; per-method functions only, no scatter)
   + vdl (ZIP/exponential load models: OLF's accumulation loop in
   AbstractLoadModelEquationTerm is parsed to a per-exp-term body, the sum over a
   load model's terms is the batch kernel's per-entry atomicAdd; no scatter —

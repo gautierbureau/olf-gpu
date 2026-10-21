@@ -43,10 +43,9 @@ __global__ void incrementalFlowControlCheckBatch(int nIncrementalFlowControlCont
     const double* p = closedBranchParameters + e * GpuPiModelColumn::COUNT;
     double pOv[8];
     if (findTapOverride(nClosedBranchParameterOverrides, closedBranchParameterOverrideScenarioElement, closedBranchParameterOverrideValues, s, e, pOv)) p = pOv;
-    double g[6];
     double flow = kind[c] == GpuControlledFlow::CURRENT
             ? controlledCurrent(side[c], p, x + (size_t) s * n, closedBranchIndices + e * 12)
-            : controlledFlowAndGradient(side[c], kind[c], p, x + (size_t) s * n, closedBranchIndices + e * 12, g);
+            : controlledFlow(side[c], kind[c], p, x + (size_t) s * n, closedBranchIndices + e * 12);
     double d = targetValue[c] - flow;
     diff[tid] = d;
     outOfDeadband[tid] = (kind[c] == GpuControlledFlow::CURRENT ? flow > targetValue[c] : fabs(d) > halfTargetDeadband[c]) ? 1 : 0;
@@ -66,16 +65,9 @@ __global__ void incrementalFlowControlGatherSensitivityBatch(int nScenarios, int
     if (findTapOverride(nClosedBranchParameterOverrides, closedBranchParameterOverrideScenarioElement, closedBranchParameterOverrideValues, s, e, pOv)) p = pOv;
     const int* q = closedBranchIndices + e * 12;
     const double* dxs = dx + (size_t) s * n;
-    double sv;
-    if (kind[c] == GpuControlledFlow::CURRENT) {
-        sv = controlledCurrentSensitivity(side[c], p, x + (size_t) s * n, q, dxs);
-    } else {
-        double g[6];
-        controlledFlowAndGradient(side[c], kind[c], p, x + (size_t) s * n, q, g);
-        double d[6] = { dxs[q[5]], dxs[q[7]], dxs[q[4]], dxs[q[6]], q[8] >= 0 ? dxs[q[8]] : 0.0, q[9] >= 0 ? dxs[q[9]] : 0.0 };
-        sv = 0.0;
-        for (int k = 0; k < 6; k++) sv += g[k] * d[k];
-    }
+    double sv = kind[c] == GpuControlledFlow::CURRENT
+            ? controlledCurrentSensitivity(side[c], p, x + (size_t) s * n, q, dxs)
+            : controlledFlowSensitivity(side[c], kind[c], p, x + (size_t) s * n, q, dxs);
     sensitivity[(size_t) s * nIncrementalFlowControlControllerBranches + c] = sv;
 }
 

@@ -10,7 +10,6 @@
 
 #include "../equations/generated/closed_branch.cuh"
 #include "../equations/generated/closed_branch_current_magnitude.cuh"
-#include "../equations/generated/closed_branch_scatter.h"
 #include "../common/codes/gpu_controlled_flow.cuh"
 #include "../common/codes/gpu_pi_model_column.cuh"
 #include "../common/codes/gpu_two_sides.cuh"
@@ -19,23 +18,71 @@ namespace olfgpu {
 
 using namespace powsybl::openloadflow;
 
-// The controlled branch's P or Q flow and its gradient at the current state, through the codegen'd
-// updateClosedBranch (the very functions the fill scatters). side is a GpuTwoSides; kind is ACTIVE_POWER or
-// REACTIVE_POWER. g[0..5] = d/d(v1, v2, ph1, ph2, a1, r1).
-__device__ inline double controlledFlowAndGradient(int side, int kind, const double* p, const double* xs, const int* q, double* g) {
+// The controlled branch's P or Q flow at the current state: OLF's getP1()/getQ1()/getP2()/getQ2().eval(), through
+// the codegen'd updateClosedBranchWithoutDerivatives (the very functions the fill scatters). side is a GpuTwoSides;
+// kind is ACTIVE_POWER or REACTIVE_POWER.
+__device__ inline double controlledFlow(int side, int kind, const double* p, const double* xs, const int* q) {
     double v1 = xs[q[5]], v2 = xs[q[7]], ph1 = xs[q[4]], ph2 = xs[q[6]];
     double r1 = q[9] >= 0 ? xs[q[9]] : p[GpuPiModelColumn::R1];
     double a1 = q[8] >= 0 ? xs[q[8]] : p[GpuPiModelColumn::A1];
-    double y = p[GpuPiModelColumn::Y], g1 = p[GpuPiModelColumn::G1], g2 = p[GpuPiModelColumn::G2], b1 = p[GpuPiModelColumn::B1], b2 = p[GpuPiModelColumn::B2];
-    double ksi = p[GpuPiModelColumn::KSI];
-    double o[CLOSED_BRANCH_OUTPUT_COUNT];
-    updateClosedBranch(y, g1, g2, b1, b2, v1, r1, v2, ksi, a1, ph1, ph2, 0,
-                     o + 0, o + 1, o + 2, o + 3, o + 4, o + 5, o + 6, o + 7, o + 8, o + 9,
-                     o + 10, o + 11, o + 12, o + 13, o + 14, o + 15, o + 16, o + 17, o + 18,
-                     o + 19, o + 20, o + 21, o + 22, o + 23, o + 24, o + 25, o + 26, o + 27);
-    int blk = (kind == GpuControlledFlow::REACTIVE_POWER ? 7 : 0) + (side == GpuTwoSides::ONE ? 0 : 14);  // p1 0, q1 7, p2 14, q2 21: [val dv1 dv2 dph1 dph2 da1 dr1]
-    for (int k = 0; k < 6; k++) g[k] = o[blk + 1 + k];
-    return o[blk];
+    double o[4];                                                       // p1 q1 p2 q2
+    updateClosedBranchWithoutDerivatives(p[GpuPiModelColumn::Y], p[GpuPiModelColumn::G1], p[GpuPiModelColumn::G2], p[GpuPiModelColumn::B1], p[GpuPiModelColumn::B2],
+                                         v1, r1, v2, p[GpuPiModelColumn::KSI], a1, ph1, ph2, 0, o + 0, o + 1, o + 2, o + 3);
+    return o[(kind == GpuControlledFlow::REACTIVE_POWER ? 1 : 0) + (side == GpuTwoSides::ONE ? 0 : 2)];
+}
+
+// OLF's ClosedBranchSide{1,2}{Active,Reactive}FlowEquationTerm.calculateSensi(dx, column), line for line on the
+// generated methods: the controlled P or Q flow's sensitivity to the unit-RHS solution dx (a non-variable a1 or r1
+// column contributes nothing). side is a GpuTwoSides; kind is ACTIVE_POWER or REACTIVE_POWER.
+__device__ inline double controlledFlowSensitivity(int side, int kind, const double* p, const double* xs, const int* q, const double* dxs) {
+    using namespace closed_branch;
+    double v1 = xs[q[5]], v2 = xs[q[7]], ph1 = xs[q[4]], ph2 = xs[q[6]];
+    double r1 = q[9] >= 0 ? xs[q[9]] : p[GpuPiModelColumn::R1];
+    double a1 = q[8] >= 0 ? xs[q[8]] : p[GpuPiModelColumn::A1];
+    double y = p[GpuPiModelColumn::Y], ksi = p[GpuPiModelColumn::KSI];
+    double dph1 = dxs[q[4]], dph2 = dxs[q[6]], dv1 = dxs[q[5]], dv2 = dxs[q[7]];
+    double da1 = q[8] >= 0 ? dxs[q[8]] : 0.0;
+    double dr1 = q[9] >= 0 ? dxs[q[9]] : 0.0;
+    if (side == GpuTwoSides::ONE) {
+        double theta = AbstractClosedBranchAcFlowEquationTerm::theta1(ksi, ph1, a1, ph2);
+        double cosTheta = cos(theta);
+        double sinTheta = sin(theta);
+        if (kind == GpuControlledFlow::ACTIVE_POWER) {
+            double g1 = p[GpuPiModelColumn::G1];
+            double sinKsi = sin(ksi);
+            return dp1dph1(y, v1, r1, v2, cosTheta) * dph1
+                    + dp1dph2(y, v1, r1, v2, cosTheta) * dph2
+                    + dp1dv1(y, sinKsi, g1, v1, r1, v2, sinTheta) * dv1
+                    + dp1dv2(y, v1, r1, sinTheta) * dv2
+                    + dp1da1(y, v1, r1, v2, cosTheta) * da1
+                    + dp1dr1(y, sinKsi, g1, v1, r1, v2, sinTheta) * dr1;
+        }
+        double b1 = p[GpuPiModelColumn::B1];
+        double cosKsi = cos(ksi);
+        return dq1dph1(y, v1, r1, v2, sinTheta) * dph1
+                + dq1dph2(y, v1, r1, v2, sinTheta) * dph2
+                + dq1dv1(y, cosKsi, b1, v1, r1, v2, cosTheta) * dv1
+                + dq1dv2(y, v1, r1, cosTheta) * dv2
+                + dq1da1(y, v1, r1, v2, sinTheta) * da1
+                + dq1dr1(y, cosKsi, b1, v1, r1, v2, cosTheta) * dr1;
+    }
+    double theta = AbstractClosedBranchAcFlowEquationTerm::theta2(ksi, ph1, a1, ph2);
+    double cosTheta = cos(theta);
+    double sinTheta = sin(theta);
+    if (kind == GpuControlledFlow::ACTIVE_POWER) {
+        return dp2dph1(y, v1, r1, v2, cosTheta) * dph1
+                + dp2dph2(y, v1, r1, v2, cosTheta) * dph2
+                + dp2dv1(y, r1, v2, sinTheta) * dv1
+                + dp2dv2(y, sin(ksi), p[GpuPiModelColumn::G2], v1, r1, v2, sinTheta) * dv2
+                + dp2da1(y, v1, r1, v2, cosTheta) * da1
+                + dp2dr1(y, v1, v2, sinTheta) * dr1;
+    }
+    return dq2dph1(y, v1, r1, v2, sinTheta) * dph1
+            + dq2dph2(y, v1, r1, v2, sinTheta) * dph2
+            + dq2dv1(y, r1, v2, cosTheta) * dv1
+            + dq2dv2(y, cos(ksi), p[GpuPiModelColumn::B2], v1, r1, v2, cosTheta) * dv2
+            + dq2da1(y, v1, r1, v2, sinTheta) * da1
+            + dq2dr1(y, v1, v2, cosTheta) * dr1;
 }
 
 // OLF's AbstractClosedBranchAcFlowEquationTerm.ZERO_CURRENT_THRESHOLD.

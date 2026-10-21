@@ -140,6 +140,19 @@ CLOSED_BRANCH_FN inline double dq2dr1(double y, double v1, double v2, double cos
     return -y * R2 * v1 * v2 * cosTheta;
 }
 
+// AbstractClosedBranchAcFlowEquationTerm's private helpers, as OLF scopes them (per class: both sides define their own theta).
+namespace AbstractClosedBranchAcFlowEquationTerm {
+
+CLOSED_BRANCH_FN inline double theta1(double ksi, double ph1, double a1, double ph2) {
+    return ksi - a1 + A2 - ph1 + ph2;
+}
+
+CLOSED_BRANCH_FN inline double theta2(double ksi, double ph1, double a1, double ph2) {
+    return ksi + a1 - A2 + ph1 - ph2;
+}
+
+}  // namespace AbstractClosedBranchAcFlowEquationTerm
+
 // FUSED per-element kernel body: one routine computes p1/q1/p2/q2 + all 24 Jacobian
 // entries for one branch, writing into Struct-of-Arrays at index i. sin/cos of ksi,
 // theta1, theta2 are computed once and shared as kernel locals — the per-element

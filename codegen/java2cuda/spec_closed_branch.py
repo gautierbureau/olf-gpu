@@ -36,6 +36,8 @@ MODULE = {
     # The branch-angle helper methods, parsed from the Java too (theta1/theta2 in
     # AbstractClosedBranchAcFlowEquationTerm) — NOT re-authored here.
     "theta_methods": {1: "theta1", 2: "theta2"},
+    # ... and emitted, for the device mirror of the terms' calculateSensi (outerloop/flow_observation.cuh)
+    "class_methods": {"AbstractClosedBranchAcFlowEquationTerm": ["theta1", "theta2"]},
 
     # Precomputed-trig parameters -> raw-angle expressions. `theta` resolves to the
     # residual side's parsed angle. This is how the scalar precomputed-trig API is

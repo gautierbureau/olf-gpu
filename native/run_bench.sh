@@ -4,17 +4,17 @@
 # MUST be run (and stay at the recorded baseline) after every change touching the batched GPU path.
 #
 # Usage:
-#   native/cuda/run_bench.sh                 # K=4 regression check (builds vs the pinned cuDSS first)
-#   native/cuda/run_bench.sh --no-build      # skip the native rebuild (lib already vs the pinned cuDSS)
-#   OLF_GPU_FIXED_ITERS="4,6,10" native/cuda/run_bench.sh   # K-sweep instead of just K=4
-#   native/cuda/run_bench.sh --no-build -Dpowsybl.config.dirs=<dir>   # further arguments go to mvn (here: the
+#   native/run_bench.sh                 # K=4 regression check (builds vs the pinned cuDSS first)
+#   native/run_bench.sh --no-build      # skip the native rebuild (lib already vs the pinned cuDSS)
+#   OLF_GPU_FIXED_ITERS="4,6,10" native/run_bench.sh   # K-sweep instead of just K=4
+#   native/run_bench.sh --no-build -Dpowsybl.config.dirs=<dir>   # further arguments go to mvn (here: the
 #                                            # GPU solver parameters of <dir>/config.yml, see sweep_ordering.sh)
 #
 # Recorded baseline (RTX A1000, cuDSS 0.8.0, UBATCH, K=4, maxBatch=500): warm ~4.9 ms/scn (205 scn/s);
 # 499/500 reached 1e-6, med ||F||inf ~3.5e-12. Old 0.7.1/maxBatch=32 baseline was ~8.2 ms/scn.
 set -euo pipefail
 
-REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO"
 [ -f "$REPO/native/local-env.sh" ] && . "$REPO/native/local-env.sh"   # machine paths (CUDSS_ROOT, OLF_GPU_CASE_DIR, ...)
 

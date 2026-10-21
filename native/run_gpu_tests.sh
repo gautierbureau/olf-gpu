@@ -16,7 +16,7 @@
 #   CUDA_ARCH     default 86
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT="$(cd "$HERE/../.." && pwd)"
+ROOT="$(cd "$HERE/.." && pwd)"
 [ -f "$ROOT/native/local-env.sh" ] && . "$ROOT/native/local-env.sh"   # optional local machine paths (gitignored)
 
 echo "[1/2] build libolfgpu.so (CMake, static cudart, dynamic cuDSS)"

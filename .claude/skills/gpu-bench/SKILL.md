@@ -7,8 +7,8 @@ Run the repo's N-1 throughput benchmark and report the results.
 
 ```bash
 cd ~/Projects/powsybl/powsybl-open-loadflow-gpu
-native/cuda/run_bench.sh              # builds libolfgpu vs the pinned cuDSS first
-# native/cuda/run_bench.sh --no-build # if the native lib is already current
+native/run_bench.sh              # builds libolfgpu vs the pinned cuDSS first
+# native/run_bench.sh --no-build # if the native lib is already current
 ```
 
 Defaults (in the script): cuDSS 0.8.0 (`CUDSS_ROOT=~/Projects/powsybl/cuda/cudss`),
@@ -24,5 +24,5 @@ Report BOTH lines and compare to the recorded baseline
 
 A warm regression > ~10% or convergence below 499/500 is a finding — bisect against
 the last change to native/, the kernels, or the cuDSS pin (see
-`source native/cudss-swap.sh 0.7.1|0.8.0` for version A/B; chunk size is decisive on
+`source tools/cudss-swap.sh 0.7.1|0.8.0` for version A/B; chunk size is decisive on
 0.8.0 — never bench it at MAXBATCH=32).

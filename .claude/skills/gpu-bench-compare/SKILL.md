@@ -10,7 +10,7 @@ on case9241pegase, same GPU.
 
 **1. Ours:**
 ```bash
-cd ~/Projects/powsybl/powsybl-open-loadflow-gpu && native/cuda/run_bench.sh
+cd ~/Projects/powsybl/powsybl-open-loadflow-gpu && native/run_bench.sh
 ```
 Take `[E2E K=4] base CPU loadflow B + cold GPU SA S = T total | N ms/ctg`
 → ours cold E2E = T (CUDA init sits inside S), warm = the `K=4 :` line.

@@ -326,7 +326,7 @@ the mismatch copy, sort-based CSR position lookup instead of `std::map` in
 ## 6. Priority 4 — infrastructure
 
 - GPU CI job (self-hosted runner) executing `GpuFullNewtonTest` + `GpuLoadFlowTest`
-  (`native/cuda/run_gpu_tests.sh`); CPU CI stays GPU-free (tests skip).
+  (`native/run_gpu_tests.sh`); CPU CI stays GPU-free (tests skip).
 - Windows `libolfgpu` build (CMake is already arch-aware).
 - If upstreaming to powsybl: split the branch into reviewable units
   (codegen | native packaging | solver SPI | benchmarks) — to execute AFTER the GPU

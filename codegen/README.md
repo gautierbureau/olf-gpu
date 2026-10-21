@@ -62,7 +62,7 @@ An upstream change to a formula method lands in the Java with NO conflicts
 codegen/regenerate.sh          # prove -> check scatter -> render
 git diff                       # review the kernel change against the Java change
 mvn -o validate                # checkstyle (the Java itself did not change here)
-native/build-gpu.sh && native/cuda/run_gpu_tests.sh   # the end-to-end gate
+native/build-gpu.sh && native/run_gpu_tests.sh   # the end-to-end gate
 ```
 
 A formula change makes `prove.py`'s golden check fail loudly (the goldens

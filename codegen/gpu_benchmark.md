@@ -1017,7 +1017,7 @@ production bench parity unchanged (22/6; GPU warm 12.2 s ≈ CPU-4t).
 - NOTE: production bench MUST run with `OLF_GPU_BATCHMODE=3 OLF_GPU_MAXBATCH=500` exported —
   bare `mvn test` defaults to mode 0/32 and reads ~2× slower (26→52 ms/ctg), which is env,
   not a regression. `native/run_bench.sh` is a stale copy whose REPO resolution is broken;
-  the canonical script is `native/cuda/run_bench.sh` (delete or symlink the stray one).
+  the canonical script is `native/run_bench.sh` (delete or symlink the stray one).
 
 ## 2026-07-18 (2) — #24 stage 2b bis: PST actions + FULL-ROW tap override (RTC r1-only was subtly wrong)
 - Upgrading the tap override to the target tap's FULL static row [y g1 g2 b1 b2 ksi r1 a1]

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# LOCAL dev tool (untracked, like local-env.sh): build ONCE per cuDSS version and
+# LOCAL dev tool (see tools/README.md): build ONCE per cuDSS version and
 # swap the whole native stack between versions for A/B testing.
 #
-#   source native/cudss-swap.sh 0.7.1     # or 0.8.0
+#   source tools/cudss-swap.sh 0.7.1     # or 0.8.0
 #
 # What one swap does:
 #   1. libolfgpu.so     — built against the version if not cached
@@ -30,7 +30,7 @@ _cudss_swap() {
     case "$ver" in
         0.7.1) root="$HOME/Projects/powsybl/cuda/cudss-0.7.1" ;;
         0.8.0) root="$HOME/Projects/powsybl/cuda/cudss" ;;
-        *) echo "usage: source native/cudss-swap.sh 0.7.1|0.8.0" >&2; return 1 ;;
+        *) echo "usage: source tools/cudss-swap.sh 0.7.1|0.8.0" >&2; return 1 ;;
     esac
     [ -e "$root/include/cudss.h" ] || { echo "error: no cudss.h under $root" >&2; return 1; }
 

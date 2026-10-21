@@ -52,6 +52,6 @@ The batched N-1 path adds a per-scenario disabled mask + rowMode over the one sh
 pattern (`GpuBatchedSecurityAnalysisSolver`).
 
 Validated against OLF's own `JacobianMatrix` Newton by `GpuFullNewtonTest` and end to end
-by `GpuLoadFlowTest` (run via `native/cuda/run_gpu_tests.sh`). Earlier CPU-reference and
+by `GpuLoadFlowTest` (run via `native/run_gpu_tests.sh`). Earlier CPU-reference and
 single-system GPU spike prototypes were removed once the device path subsumed them; see
 `codegen/gpu_roadmap.md` for the rung history.

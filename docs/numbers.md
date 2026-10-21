@@ -9,7 +9,7 @@ path; never edit old rows (history is the point). Context/analysis for each row 
 
 Production bench = `GpuVsCpuProductionSaBenchmarkTest`: case9241pegase, 500 matched
 contingencies, RTE JSON parameters, CPU arm 4 threads, sparse forced.
-Fixed-iter bench = `native/cuda/run_bench.sh`: same case/contingencies, K=4, tol=0,
+Fixed-iter bench = `native/run_bench.sh`: same case/contingencies, K=4, tol=0,
 UBATCH chunk 500 (the gpusim2grid-comparable configuration).
 "viol diff" = onlyCPU/onlyGPU violation-report differences (ctg = contingencies affected);
 statuses have been identical on every run since 2026-07-17. The diff target is ZERO:

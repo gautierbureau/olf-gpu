@@ -152,7 +152,7 @@ own) then `codegen/regenerate.sh` + commit kernels (+ golden if math changed).
   `GpuFullNewtonTest` (rung 2: one per family network; reference = OLF's own
   `JacobianMatrix` Newton on the SAME equation system — any missed/duplicated term makes
   states diverge). Both gated on `isAvailable()` → CUDA-free builds skip. Runner:
-  `native/cuda/run_gpu_tests.sh` (build + both suites).
+  `native/run_gpu_tests.sh` (build + both suites).
 
 ## Repo / git
 
@@ -177,7 +177,7 @@ own) then `codegen/regenerate.sh` + commit kernels (+ golden if math changed).
 
 ## Benchmarks (two tracks — keep both)
 
-- **Fixed-iter throughput vs gpusim2grid**: `native/cuda/run_bench.sh`
+- **Fixed-iter throughput vs gpusim2grid**: `native/run_bench.sh`
   (`GpuBatchedN1FixedIterTest`, tol=0, K=4, 500 matched ctg) + the
   `/gpu-bench-compare` skill. Report COLD FIRST. `OLF_GPU_TOL=1e-6` switches the same
   bench to the production path (per-iteration convergence + retirement) — see the

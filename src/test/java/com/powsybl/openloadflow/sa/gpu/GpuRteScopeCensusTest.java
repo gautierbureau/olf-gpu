@@ -193,7 +193,7 @@ class GpuRteScopeCensusTest extends AbstractOpenSecurityAnalysisTest {
         }
         String chunk = System.getenv("OLF_GPU_CENSUS_CHUNK");
         if (chunk != null) {
-            com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchContextCache.forceChunkSizeForTests(Integer.valueOf(chunk));
+            com.powsybl.openloadflow.ac.solver.gpu.GpuBatchContextCache.forceChunkSizeForTests(Integer.valueOf(chunk));
         }
 
         // OLF_GPU_CENSUS_MONITOR_VL=<vl,vl,...>: monitor those voltage levels so BOTH arms report the

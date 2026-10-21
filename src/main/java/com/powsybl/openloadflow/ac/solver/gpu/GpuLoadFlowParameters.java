@@ -14,7 +14,6 @@ import com.powsybl.commons.parameters.ParameterScope;
 import com.powsybl.commons.parameters.ParameterType;
 import com.powsybl.loadflow.LoadFlowParameters;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
-import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchContextCache;
 
 import java.util.Arrays;
 import java.util.LinkedHashMap;

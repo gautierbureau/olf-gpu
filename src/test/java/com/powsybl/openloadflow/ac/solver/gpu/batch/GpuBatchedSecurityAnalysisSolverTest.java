@@ -22,6 +22,7 @@ import com.powsybl.openloadflow.ac.equations.vector.gpu.RemoteMemberReactiveTerm
 import com.powsybl.openloadflow.ac.equations.vector.gpu.VoltageRowParameters;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.ZeroImpedanceBranchPack;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.fixedmatrix.ReactiveRelocationCandidates;
+import com.powsybl.openloadflow.ac.solver.gpu.GpuBatchContextCache;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;

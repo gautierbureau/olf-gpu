@@ -14,12 +14,12 @@ import com.powsybl.iidm.network.Network;
 import com.powsybl.openloadflow.CommonTestConfig;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcStructures;
+import com.powsybl.openloadflow.ac.solver.gpu.GpuBatchContextCache;
 import com.powsybl.openloadflow.ac.solver.gpu.GpuLoadFlowParameters;
 import com.powsybl.openloadflow.ac.solver.gpu.GpuMatchingAlgorithm;
 import com.powsybl.openloadflow.ac.solver.gpu.GpuPivotType;
 import com.powsybl.openloadflow.ac.solver.gpu.GpuReorderingAlgorithm;
 import com.powsybl.openloadflow.ac.solver.gpu.NewtonSettingsNative;
-import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchContextCache;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuLinearSolveMode;
 import com.powsybl.openloadflow.graph.EvenShiloachGraphDecrementalConnectivityFactory;
 import com.powsybl.openloadflow.sa.AcSecurityAnalysis;
@@ -174,7 +174,7 @@ class GpuSaSolverTest extends AbstractGpuSaTest {
         try {
             SecurityAnalysisResult together = runSecurityAnalysis(network, ctgs, monitors, sap);
             long engagedTogether = GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get();
-            com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchContextCache.forceChunkSizeForTests(1);
+            com.powsybl.openloadflow.ac.solver.gpu.GpuBatchContextCache.forceChunkSizeForTests(1);
             SecurityAnalysisResult alone = runSecurityAnalysis(network, ctgs, monitors, sap);
             assertEquals(ctgs.size(), engagedTogether, "every tie outage on the device");
             assertEquals(engagedTogether, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(), "the same scenarios on the device");
@@ -191,7 +191,7 @@ class GpuSaSolverTest extends AbstractGpuSaTest {
                 }
             }
         } finally {
-            com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchContextCache.forceChunkSizeForTests(null);
+            com.powsybl.openloadflow.ac.solver.gpu.GpuBatchContextCache.forceChunkSizeForTests(null);
             securityAnalysisProvider = new OpenSecurityAnalysisProvider(commonTestConfig.matrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>());
         }
     }

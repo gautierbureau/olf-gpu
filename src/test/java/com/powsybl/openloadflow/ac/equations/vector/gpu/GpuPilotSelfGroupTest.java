@@ -30,15 +30,15 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * The PILOT-SELF voltage-control group: a generator voltage control whose controlled bus is ALSO one of its
  * controllers, with other controller buses alongside it. OLF's rule
  * ({@code AcEquationSystemCreator.updateRemoteVoltageControlEquations}) is a ROTATION over the live enabled
- * controllers — {@code BUS_TARGET_V} active while any is enabled, {@code BUS_TARGET_Q} for every pinned one,
+ * controllers — {@code BUS_TARGET_V} active while any is enabled, {@code BUS_TARGET_Q} for every one switched to PQ,
  * {@code DISTR_Q} for every enabled one except the FIRST — so which controller is "free" changes every time
- * one pins.
+ * one switches to PQ.
  *
  * <p>In this layout rows are VARIABLES, so the rotation cannot move {@code BUS_TARGET_V} (a mode-0 identity
- * constrains its OWN row's variable; on a member's row it would pin that member's v to the pilot's target).
- * What moves is a PINNED pilot's reactive balance, onto the first ENABLED member's row. {@code computeQRow}
- * already places it there, but frozen at extraction, while the device's reactive-limits loop changes pin
- * states mid-solve — the mismatch that left rte6515's busbar base rank-deficient.
+ * constrains its OWN row's variable; on a member's row it would hold that member's v at the pilot's target).
+ * What moves is the reactive balance of a pilot SWITCHED TO PQ, onto the first ENABLED member's row. {@code computeQRow}
+ * already places it there, but frozen at extraction, while the device's reactive-limits loop switches buses
+ * between PV and PQ mid-solve — the mismatch that left rte6515's busbar base rank-deficient.
  *
  * <p>This fixture exists because rte6515's instances of the shape are buried in a 13k-variable system: here
  * the group is three buses and the table can be asserted directly. The pack is keyed by RL ENTRY rather than

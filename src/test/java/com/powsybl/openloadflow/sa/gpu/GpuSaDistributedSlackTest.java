@@ -273,7 +273,7 @@ class GpuSaDistributedSlackTest extends AbstractGpuSaTest {
      *  produced — and it used to drop to a BUS-aggregate fill for every generator outage, because the
      *  per-generator path was gated on there being no gen-outage override bus.
      *
-     *  <p>b2 carries three generators; g2c is given just 3 MW of headroom so the pre-distribution pins
+     *  <p>b2 carries three generators; g2c is given just 3 MW of headroom so the pre-distribution saturates
      *  it while g2 and g2b still have room. A bus aggregate cannot see that: b2's combined headroom is
      *  never exhausted, so the bus-level fill saturates nobody and spreads the loss differently. On
      *  rte6515 that difference put GEN-6372's line current 1.11e-05 out (relative) and flipped a
@@ -284,7 +284,7 @@ class GpuSaDistributedSlackTest extends AbstractGpuSaTest {
      *  (8.02e-08 kV -> 2.81e-09 kV at b2) and closes rte6515's GEN-6372 completely (1.11e-05 relative
      *  -> 3.64e-13, and the 1389-generator set from 1 differing violation to 0), but 2.81e-09 kV is
      *  still above the bar, so something smaller-order in the saturating path is still wrong. The seed
-     *  and OLF now agree on WHICH generator pins and at WHAT value (both clamp g2c at
+     *  and OLF now agree on WHICH generator saturates and at WHAT value (both clamp g2c at
      *  0.23 - 0.217443120 = 0.01255688), so the remaining difference is
      *  elsewhere. Sweeping g2c's headroom shows the split cleanly: at maxP 50/30/26 nobody saturates
      *  and BOTH arms agree at 1e-11; only at 23 does anything differ. That is also why this network
@@ -298,7 +298,7 @@ class GpuSaDistributedSlackTest extends AbstractGpuSaTest {
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
         Network network = distributedSlackNetworkWithExtras();
-        network.getGenerator("g2c").setMaxP(23);              // targetP 20 -> 3 MW of headroom: pins first
+        network.getGenerator("g2c").setMaxP(23);              // targetP 20 -> 3 MW of headroom: saturates first
         List<Contingency> ctgs = List.of(
                 new Contingency("g3", new com.powsybl.contingency.GeneratorContingency("g3")));
         // The factory's generators carry a DROOP, not a participation factor, so the default
@@ -643,7 +643,7 @@ class GpuSaDistributedSlackTest extends AbstractGpuSaTest {
 
     @Test
     void l121SevereContingencyMatchesCpuAtTightSlackTol() {
-        // The L1-2-1 outage (main B1-B2 tie) pins ALL PV buses — an ill-conditioned state where the
+        // The L1-2-1 outage (main B1-B2 tie) switches ALL PV buses to PQ — an ill-conditioned state where the
         // DS stopping band (slackBusPMaxMismatch, default 1 MW) leaves ~0.1 kV of legitimate
         // ambiguity between arms (measured: 0.105 kV @1 MW, 0.055 @0.1, match @0.01 — scales with
         // the band, NOT a defect). This regression asserts exact machinery parity with the band

@@ -107,7 +107,7 @@ class GpuSaSecondaryVoltageControlTest extends AbstractGpuSaTest {
     /** SecondaryVoltageControl in a run WITHOUT reactive limits (OLF's SecondaryVoltageControlTest#testNoReactiveLimits
      *  zone: ieee14 z1, pilot B10 at 13 kV, B6-G and B8-G, B8-G's range widened). OLF has no ReactiveLimitsOuterLoop, so no
      *  controller is ever switched PV -> PQ and the zone moves the BUS_TARGET_V targets alone. The device phase keyed every
-     *  controller by its reactive-limit pin and refused such a run, which then went whole to the CPU: it must batch.
+     *  controller by its reactive-limit entry and refused such a run, which then went whole to the CPU: it must batch.
      *  One contingency per analysis, as in the two-zone case (OLF does not restore a moved target between contingencies). */
     @Test
     void deviceSecondaryVoltageControlWithoutReactiveLimitsMatchesCpu() {
@@ -142,12 +142,12 @@ class GpuSaSecondaryVoltageControlTest extends AbstractGpuSaTest {
 
     /** DEVICE-mode SecondaryVoltageControl with a REMOTE controller (was rejected by the LOCAL-only
      *  stage-1 scope): B6-G regulates B5 through a line terminal — the zone system's sensitivity
-     *  unit row and the moved zone target now live on the CONTROLLED bus B5's pinned V row while
+     *  unit row and the moved zone target now live on the CONTROLLED bus B5's BUS_TARGET_V row while
      *  the controller's RL entry is the reactiveLimitVoltageControlRole member entry (pilot-referenced switch-back via
-     *  reactiveLimitTargetVOverrides). B6-G keeps its stock (pinnable) limits: the singleton remote group batches since
+     *  reactiveLimitTargetVOverrides). B6-G keeps its stock limits (it can switch to PQ): the singleton remote group batches since
      *  the table-less-free-member gate retired (backlog item 4, folded in here — the singleton's
-     *  relocation table is [pilot fallback, member], its only member's pin IS the all-pinned
-     *  pilot-vEq corner). B8-G stays local in the same zone (controllers <-> controlled buses
+     *  relocation table is [pilot fallback, member], its only member's switch to PQ IS the
+     *  no-enabled-controller pilot-vEq corner). B8-G stays local in the same zone (controllers <-> controlled buses
      *  stay a bijection: {B5, B8}). 1e-11 (the established SecondaryVc knife-edge tolerance). */
     @Test
     void deviceSecondaryVoltageControlRemoteMatchesCpu() {

@@ -43,7 +43,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 /**
  * Reactive limits (PV→PQ) on the batched full-loadflow GPU path — an outer loop a bare fixed-iteration N-1 batch lacks.
  * A two-bus network where the b2 generator must inject more reactive than its tight {@code maxQ} to hold
- * its voltage target: the full-loadflow batched solve must switch it to PQ (pinned at maxQ, voltage
+ * its voltage target: the full-loadflow batched solve must switch it to PQ (its target Q frozen at maxQ, voltage
  * released) exactly as OLF's {@link com.powsybl.openloadflow.ac.outerloop.ReactiveLimitsOuterLoop}, so the
  * GPU bus voltages must match a CPU {@code LoadFlow.run} (reactive limits on) — to machine precision once the
  * reference's inner Newton is driven tight ({@code convEpsPerEq=1e-12}), not just load-flow tolerance.
@@ -65,7 +65,7 @@ class GpuBatchedReactiveLimitsTest {
 
     @Test
     void generatorHitsMaxQSwitchesToPq() {
-        // CPU reference: a plain LoadFlow.run with reactive limits ON (default) — b2's gen pins at maxQ.
+        // CPU reference: a plain LoadFlow.run with reactive limits ON (default) — b2's gen switches to PQ at maxQ.
         Network cpu = twoBusTightQ();
         LoadFlow.Runner runner = new LoadFlow.Runner(new OpenLoadFlowProvider(new DenseMatrixFactory()));
         LoadFlowParameters lfp = new LoadFlowParameters().setUseReactiveLimits(true).setDistributedSlack(false);
@@ -129,10 +129,10 @@ class GpuBatchedReactiveLimitsTest {
                 cpuB2V = cpuBus.getV();
             }
         }
-        System.out.printf("  %d buses compared, max|v_gpu - v_cpu| = %.2e (CPU b2 V = %.4f kV, below 100 ⇒ maxQ pinned)%n",
+        System.out.printf("  %d buses compared, max|v_gpu - v_cpu| = %.2e (CPU b2 V = %.4f kV, below 100 ⇒ switched to PQ at maxQ)%n",
                 compared, worst, cpuB2V);
         assertTrue(compared >= 2, "must compare both buses");
-        assertTrue(cpuB2V < 99.9, "the CPU reference must actually pin b2 at maxQ (V below target), else the test is vacuous");
+        assertTrue(cpuB2V < 99.9, "the CPU reference must actually switch b2 to PQ at maxQ (V below target), else the test is vacuous");
         assertTrue(worst < 1e-12, "GPU reactive-limits solution must match the CPU LoadFlow (max dV = " + worst + " pu)");
     }
 

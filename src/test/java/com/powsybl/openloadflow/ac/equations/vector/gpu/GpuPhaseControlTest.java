@@ -36,7 +36,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  * <ul>
  *   <li>INCREMENTAL: the loop never calls {@code setPhaseControlEnabled}, so
  *       {@code BRANCH_TARGET_ALPHA1} (the a1−target identity) stays active for the whole run —
- *       a1 is a variable PINNED to its tap value and the outer loop moves TAPS between solves.
+ *       a1 is a variable HELD at its tap value and the outer loop moves TAPS between solves.
  *       That is the row this test exercises on the GPU.</li>
  *   <li>CONTINUOUS_WITH_DISCRETISATION with control enabled: {@code BRANCH_TARGET_P} on the
  *       CONTROLLED branch instead — a branch-owned power row the GPU packs no family for, so

@@ -172,8 +172,8 @@ final class PackedNewtonRaphson {
                 // (the caller hands raw rows), so the keys are NEUTRAL: equal nominal voltage, no
                 // live target-P row, and the entry order as the id rank — which reduces the rule to
                 // OLF's last tie-break, "lowest id stays PV". A context that reaches a solve without
-                // any keys is refused, and the rule can only fire at all when every PV bus is
-                // pinnable, so this keeps the low-level entry usable without inventing a ranking.
+                // any keys is refused, and the rule can only fire at all when every PV bus can
+                // switch to PQ, so this keeps the low-level entry usable without inventing a ranking.
                 int[] idRank = new int[reactiveLimitVoltageRow.length];
                 int[] pRow = new int[reactiveLimitVoltageRow.length];
                 for (int i = 0; i < idRank.length; i++) {

@@ -45,22 +45,22 @@ abstract class AbstractGpuSaTest extends AbstractOpenSecurityAnalysisTest {
         assertSplitGroupMatchesCpu(sections, java.util.Set.of());
     }
 
-    void assertSplitGroupMatchesCpu(int sections, java.util.Set<Integer> pinnedGens) {
-        assertSplitGroupMatchesCpu(sections, pinnedGens, java.util.Set.of());
+    void assertSplitGroupMatchesCpu(int sections, java.util.Set<Integer> switchedToPqGenerators) {
+        assertSplitGroupMatchesCpu(sections, switchedToPqGenerators, java.util.Set.of());
     }
 
-    void assertSplitGroupMatchesCpu(int sections, java.util.Set<Integer> pinnedGens, java.util.Set<Integer> noControl) {
-        assertSplitGroupMatchesCpu(sections, pinnedGens, noControl, java.util.Set.of());
+    void assertSplitGroupMatchesCpu(int sections, java.util.Set<Integer> switchedToPqGenerators, java.util.Set<Integer> noControl) {
+        assertSplitGroupMatchesCpu(sections, switchedToPqGenerators, noControl, java.util.Set.of());
     }
 
-    void assertSplitGroupMatchesCpu(int sections, java.util.Set<Integer> pinnedGens, java.util.Set<Integer> noControl,
+    void assertSplitGroupMatchesCpu(int sections, java.util.Set<Integer> switchedToPqGenerators, java.util.Set<Integer> noControl,
                                             java.util.Set<Integer> noLine) {
         List<Contingency> ctgs = new java.util.ArrayList<>();
         for (int k = 0; k < sections; k++) {
             ctgs.add(new Contingency("bus-" + k, new com.powsybl.contingency.BusbarSectionContingency("bbs" + k)));
         }
         GpuBatchScopeCensus.reset();
-        assertMergedPilotLossMatchesCpu(splitGroupNetwork(sections, pinnedGens, noControl, noLine), ctgs, sections);
+        assertMergedPilotLossMatchesCpu(splitGroupNetwork(sections, switchedToPqGenerators, noControl, noLine), ctgs, sections);
         assertEquals(0L, GpuBatchScopeCensus.snapshot().getOrDefault("HOST:OVERRIDE_CONFLICT", 0L).longValue(),
                 "a sound plan writes every row's target once");
     }
@@ -136,9 +136,9 @@ abstract class AbstractGpuSaTest extends AbstractOpenSecurityAnalysisTest {
                 "generators under the controlled level must not gate " + mode);
     }
 
-    void assertAllPinnedCornerSemantics(Network network, List<Contingency> ctgs) {
+    void assertNoEnabledControllerCornerSemantics(Network network, List<Contingency> ctgs) {
         com.powsybl.security.SecurityAnalysisParameters sap = new com.powsybl.security.SecurityAnalysisParameters();
-        sap.setLoadFlowParameters(remotePinParameters());
+        sap.setLoadFlowParameters(remoteReactiveLimitParameters());
         List<com.powsybl.security.monitor.StateMonitor> monitors = List.of(new com.powsybl.security.monitor.StateMonitor(
                 com.powsybl.contingency.ContingencyContext.all(), java.util.Set.of(), java.util.Set.of("vl4"), java.util.Set.of()));
         SecurityAnalysisResult cpu = runSecurityAnalysis(network, ctgs, monitors, sap);
@@ -152,7 +152,7 @@ abstract class AbstractGpuSaTest extends AbstractOpenSecurityAnalysisTest {
                 .filter(b -> "b4".equals(b.getBusId())).findFirst().orElseThrow().getV();
         assertTrue(Math.abs(pilotV - targetV) > 0.1,
                 "the scenario must LOSE group control (pilot " + pilotV + " vs target " + targetV
-                        + ") — otherwise it does not exercise the all-pinned corner");
+                        + ") — otherwise it does not exercise the no-enabled-controller corner");
     }
 
     /** The whole-run-fallback contract: the batch must NOT engage (the scope routed the run to the

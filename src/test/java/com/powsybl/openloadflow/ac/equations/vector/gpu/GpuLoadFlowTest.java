@@ -382,21 +382,21 @@ class GpuLoadFlowTest extends com.powsybl.openloadflow.network.AbstractLoadFlowN
     }
 
     /** A pilot-self group whose second controller sits on a dead-end STUB behind a zero-impedance coupler
-     *  (rte6515 VL-5997: sections _0 and _1 coupled), and whose stub generator PINS at a non-zero limit in
+     *  (rte6515 VL-5997: sections _0 and _1 coupled), and whose stub generator SWITCHES TO PQ at a non-zero limit in
      *  the base load flow. The stub's V row hosts the coupler's ZERO_V equation; its reactive balance lives
-     *  on the coupler's DUMMY_Q row — a pin written on the V row turns "v_stub − v_pilot = 0" into
+     *  on the coupler's DUMMY_Q row — the frozen target Q written on the V row turns "v_stub − v_pilot = 0" into
      *  "= limit − loadQ" (BUS-6088_BBS in the [5000,6000) batch, 30 iterations and a bad solve). */
     @Test
-    void pilotSelfGroupWithStubMemberPinning() {
+    void pilotSelfGroupWithStubMemberSwitchingToPq() {
         long before = com.powsybl.openloadflow.ac.solver.gpu.GpuNewtonRaphson.CPU_FALLBACK_COUNT.get();
-        compareWithParams(GpuLoadFlowTest::pilotSelfStubMemberNetwork, "pilot-self group, stub member pins",
+        compareWithParams(GpuLoadFlowTest::pilotSelfStubMemberNetwork, "pilot-self group, stub member switches to PQ",
                 p -> {
                     p.setDistributedSlack(true).setUseReactiveLimits(true);
                     OpenLoadFlowParameters.create(p).setVoltageRemoteControl(true);
                 }, 1e-10);
         org.junit.jupiter.api.Assertions.assertEquals(before,
                 com.powsybl.openloadflow.ac.solver.gpu.GpuNewtonRaphson.CPU_FALLBACK_COUNT.get(),
-                "the stub-member pin must solve ON the GPU (no CPU fallback)");
+                "the stub member's switch to PQ must solve ON the GPU (no CPU fallback)");
     }
 
     private static Network pilotSelfStubMemberNetwork() {
@@ -420,7 +420,7 @@ class GpuLoadFlowTest extends com.powsybl.openloadflow.network.AbstractLoadFlowN
                 .setTargetV(1.02 * b1.getVoltageLevel().getNominalV())
                 .setRegulatingTerminal(network.getGenerator("g1").getTerminal())
                 .add();
-        g2.newMinMaxReactiveLimits().setMinQ(-0.5).setMaxQ(0.5).add();      // pins at maxQ = 0.005 pu, not 0
+        g2.newMinMaxReactiveLimits().setMinQ(-0.5).setMaxQ(0.5).add();      // switches to PQ at maxQ = 0.005 pu, not 0
         return network;
     }
 

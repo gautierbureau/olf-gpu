@@ -65,7 +65,7 @@ class GpuSaSolverTest extends AbstractGpuSaTest {
         Network network = IeeeCdfNetworkFactory.create14();
         // ORDER MATTERS. Generator outages carry a scheduled active-power loss, so they go through
         // the loss pre-distribution, which COMPOSES per-scenario DS-row overrides onto the chunk's
-        // override list — the per-chunk scratch this test exists to pin. With the chunk capped at 2:
+        // override list — the per-chunk scratch this test exists to guard. With the chunk capped at 2:
         //   chunk 1 = (gen, gen)   -> a LONG override list, DS rows sitting at high positions
         //   chunk 2 = (branch, gen) -> slot 0 contributes nothing, so the list is SHORT when slot 1
         //                              composes its DS rows under the SAME slot-keyed keys

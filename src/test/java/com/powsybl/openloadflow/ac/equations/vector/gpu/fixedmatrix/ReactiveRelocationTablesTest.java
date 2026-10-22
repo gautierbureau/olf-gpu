@@ -15,7 +15,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 /**
  * The Java carrier pick must choose the row the kernel chooses (native chooseCarrierRow,
  * fixedmatrix/reactive_relocation.cuh): the first member candidate whose row holds neither a fixed variable
- * ({@code FIXED_VARIABLE}, {@code CROSS_FIXED_VARIABLE}) nor a pinned balance ({@code BUS_TARGET_Q}). Otherwise the
+ * ({@code FIXED_VARIABLE}, {@code CROSS_FIXED_VARIABLE}) nor a bus's own reactive balance ({@code BUS_TARGET_Q}). Otherwise the
  * host seeds the pilot's reactive target on a row the device does not read.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
@@ -31,7 +31,7 @@ class ReactiveRelocationTablesTest {
     }
 
     @Test
-    void skipsEveryRowThatHoldsAFixedVariableOrAPinnedBalance() {
+    void skipsEveryRowThatHoldsAFixedVariableOrABusTargetQ() {
         // a member whose own V row now holds a cross identity (a re-merged control under a live coupler) is not free
         assertEquals(3, ReactiveRelocationTables.chooseCarrierRow(ONE_GROUP, 0,
                 modes(GpuRowMode.CROSS_FIXED_VARIABLE, GpuRowMode.BUS_TARGET_Q, GpuRowMode.EQUATION)));

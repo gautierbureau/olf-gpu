@@ -32,7 +32,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /**
  * {@code fixTransformerVoltageControls} is a POST-CONTINGENCY check on the CPU — OLF cuts the
  * contingency's branches before it looks for a PV bus on the not-controlled side — so the device's
- * connectivity masks are a property of the SCENARIO, not of the run. This pins that down on the
+ * connectivity masks are a property of the SCENARIO, not of the run. This checks that on the
  * builder itself rather than through a whole security analysis, where the same scenario can be routed
  * to the CPU for unrelated reasons and hide the difference.
  *

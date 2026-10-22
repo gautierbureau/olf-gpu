@@ -91,7 +91,7 @@ class GpuMergedGenVoltageControlTest extends AbstractLoadFlowNetworkFactory {
      * member's target off by {@code qPct x} the other members' targetQ: on rte6515 a SINGLE busbar section
      * (BUS-2226_BBS_1) retained the coupler that merges two local controls and the base load flow then
      * failed, 1.85 MVar out, on OLF's own re-test of the device state. The peers the device sums are packed
-     * per member, and this pins both the packing and the resulting target against OLF's own vector.
+     * per member, and this checks both the packing and the resulting target against OLF's own vector.
      */
     @Test
     void distrQTargetSumsTheMembersOwnControlPeers() {
@@ -188,8 +188,8 @@ class GpuMergedGenVoltageControlTest extends AbstractLoadFlowNetworkFactory {
 
     /**
      * The consequence the row indexing exists to prevent, asserted on the assembled structure: every
-     * variable must appear in at least one equation. {@link #dependentControllerKeepsNoOwnQRow} pins the
-     * cause; this pins the effect, so a future routing change that empties a column some other way is
+     * variable must appear in at least one equation. {@link #dependentControllerKeepsNoOwnQRow} checks the
+     * cause; this checks the effect, so a future routing change that empties a column some other way is
      * caught too.
      */
     @Test

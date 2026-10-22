@@ -216,7 +216,7 @@ class GpuSaTransformerControlTest extends AbstractGpuSaTest {
      *  one bus (DISTR_RHO coupling) — plan A3/A4/A5: the parallel-line outage orchestrates the full
      *  group on the device; the T2wT2 (NON-free) MEMBER outage BATCHES with the survivors'
      *  coefficients renormalized per scenario (coefficient overrides: 1/3-based -> 1/2-based, cross terms to the
-     *  outaged rho zeroed, its identity pinned at base — plan A5); the T2wT (FREE member) outage is
+     *  outaged rho zeroed, its identity held at base — plan A5); the T2wT (FREE member) outage is
      *  routed to the CPU per-contingency (role re-pick, plan A6). All at 1e-12. */
     @Test
     void deviceSharedTransformerControlMatchesCpu() {
@@ -315,7 +315,7 @@ class GpuSaTransformerControlTest extends AbstractGpuSaTest {
      *  GeneratorVoltageControlManager walks {@code getMergedControllerElements()} and freezes every
      *  enabled one at {@code getQ().eval()}, local or remote alike; the device used to gate the whole
      *  run to the CPU because a remote controller's own row is the group's DISTR_Q SHARE, not a V
-     *  identity. It is now frozen the way the reactive-limits pass pins one — row mode 4 with the
+     *  identity. It is now frozen the way the reactive-limits pass switches one to PQ — row mode 4 with the
      *  current injection as the target — and marked with limit type 5, which is what makes the group's
      *  DISTR_Q shares renormalize over the members that are left. */
     @Test
@@ -459,7 +459,7 @@ class GpuSaTransformerControlTest extends AbstractGpuSaTest {
     }
 
     /** WITH_GENERATOR + useInitialTapPosition: the Simple loop never uses the ratio manager, so
-     *  the flag is behavior-neutral there — this pins the gate lift (was whole-run CPU). */
+     *  the flag is behavior-neutral there — this checks the gate lift (was whole-run CPU). */
     @Test
     void deviceSharedSimpleUseInitialMatchesCpu() {
         org.junit.jupiter.api.Assumptions.assumeTrue(
@@ -587,7 +587,7 @@ class GpuSaTransformerControlTest extends AbstractGpuSaTest {
                     .setTransformerVoltageControlOn(true).setDistributedSlack(true).setUseReactiveLimits(true);
             com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
                     .setTransformerVoltageControlMode(com.powsybl.openloadflow.OpenLoadFlowParameters.TransformerVoltageControlMode.AFTER_GENERATOR_VOLTAGE_CONTROL)
-                    .setNewtonRaphsonConvEpsPerEq(1e-4);  // pin EXACTLY the fresh-LF convEps — no hidden mismatch
+                    .setNewtonRaphsonConvEpsPerEq(1e-4);  // set EXACTLY the fresh-LF convEps — no hidden mismatch
             return lfp;
         };
         Network saNet = baseNet.get();

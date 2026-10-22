@@ -37,7 +37,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  * solve proven on synthetic matrices in {@link GpuTransposedSolveTest} and exercise it on a REAL
  * OLF Jacobian, against OLF's own KLU solve.
  *
- * <p>This is the test that pins the CPU/GPU orientation claim empirically rather than by reasoning.
+ * <p>This is the test that settles the CPU/GPU orientation claim empirically rather than by reasoning.
  * The claim under test: powsybl-math stores {@code M = Jᵀ} (its CSC-as-CSR convention), so its
  * plain {@code solve()} IS the adjoint direction {@code J⁻ᵀ}; our GPU builds true CSR of {@code J},
  * so it needs an explicit transpose to reach the same direction. If that is right, feeding the

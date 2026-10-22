@@ -101,9 +101,9 @@ final class GpuSaTestNetworks {
 
     static Network switchedToPqInBaseDeadBusNetwork() {
         // A 400 kV mesh: gs at vl0 is the slack; g1 at vlb (250 MW, Q range [0, 20] MVar) regulates vlb locally at
-        // 399.646 kV, under the 399.797 kV the bus reaches at Q = 0, so the base pins it at its MIN_Q; with g1 lost
+        // 399.646 kV, under the 399.797 kV the bus reaches at Q = 0, so the base switches it to PQ at its MIN_Q; with g1 lost
         // vlb falls to 399.496 kV, under the target, which is what makes OLF switch the dead bus back to PV.
-        Network network = Network.create("base-pinned-dead-bus", "code");
+        Network network = Network.create("base-switched-to-pq-dead-bus", "code");
         com.powsybl.iidm.network.Substation s = network.newSubstation().setId("s").add();
         for (String vl : List.of("vl0", "vlb", "vl2", "vld")) {
             com.powsybl.iidm.network.VoltageLevel v = s.newVoltageLevel().setId(vl).setNominalV(400)
@@ -136,7 +136,7 @@ final class GpuSaTestNetworks {
         // A 400 kV mesh: the pilot bus vlp carries its own generator g1 (regulating vlp) and reactive load; g2 at
         // vlc regulates vlp REMOTELY, capped at 15 MVar; gs at vl0 is the slack. The reactive keys follow the
         // ranges, so g1 (+-300) carries the base need and g2 stays inside its ceiling; with g1 lost, g2 alone
-        // cannot hold vlp and pins.
+        // cannot hold vlp and switches to PQ.
         Network network = Network.create("pilot-self-single-survivor", "code");
         com.powsybl.iidm.network.Substation s = network.newSubstation().setId("s").add();
         for (String vl : List.of("vl0", "vlp", "vlc", "vld")) {
@@ -222,18 +222,18 @@ final class GpuSaTestNetworks {
         return splitGroupNetwork(sections, java.util.Set.of());
     }
 
-    /** @param pinnedGens sections whose generator gets a 5 MVar reactive ceiling, so the BASE load flow pins it. */
-    static Network splitGroupNetwork(int sections, java.util.Set<Integer> pinnedGens) {
-        return splitGroupNetwork(sections, pinnedGens, java.util.Set.of());
+    /** @param switchedToPqGenerators sections whose generator gets a 5 MVar reactive ceiling, so the BASE load flow switches it to PQ. */
+    static Network splitGroupNetwork(int sections, java.util.Set<Integer> switchedToPqGenerators) {
+        return splitGroupNetwork(sections, switchedToPqGenerators, java.util.Set.of());
     }
 
     /** @param noControl sections whose generator does NOT regulate voltage (a plain PQ section in the chain). */
-    static Network splitGroupNetwork(int sections, java.util.Set<Integer> pinnedGens, java.util.Set<Integer> noControl) {
-        return splitGroupNetwork(sections, pinnedGens, noControl, java.util.Set.of());
+    static Network splitGroupNetwork(int sections, java.util.Set<Integer> switchedToPqGenerators, java.util.Set<Integer> noControl) {
+        return splitGroupNetwork(sections, switchedToPqGenerators, noControl, java.util.Set.of());
     }
 
     /** @param noLine sections without their line to the external network: joined to the rest by couplers only. */
-    static Network splitGroupNetwork(int sections, java.util.Set<Integer> pinnedGens, java.util.Set<Integer> noControl,
+    static Network splitGroupNetwork(int sections, java.util.Set<Integer> switchedToPqGenerators, java.util.Set<Integer> noControl,
                                              java.util.Set<Integer> noLine) {
         Network network = Network.create("split-group-" + sections, "code");
         com.powsybl.iidm.network.Substation s = network.newSubstation().setId("s").add();
@@ -263,7 +263,7 @@ final class GpuSaTestNetworks {
             vl12.newGenerator().setId("g" + k).setNode(gNode)
                     .setMinP(0).setMaxP(500).setTargetP(80).setTargetQ(0).setTargetV(k == 0 ? 406 : 405)
                     .setVoltageRegulatorOn(!noControl.contains(k)).add();
-            network.getGenerator("g" + k).newMinMaxReactiveLimits().setMinQ(-300).setMaxQ(pinnedGens.contains(k) ? 5 : 300).add();
+            network.getGenerator("g" + k).newMinMaxReactiveLimits().setMinQ(-300).setMaxQ(switchedToPqGenerators.contains(k) ? 5 : 300).add();
             if (noLine.contains(k)) {
                 continue;
             }
@@ -416,7 +416,7 @@ final class GpuSaTestNetworks {
             }
             vl12.newGenerator().setId("g" + k).setNode(gNode)
                     .setMinP(0).setMaxP(500).setTargetP(60 + 10 * k).setTargetQ(0).setTargetV(405).setVoltageRegulatorOn(true).add();
-            // g4's ceiling binds under OLF's equal reactive shares: which generator pins depends on the SHARING,
+            // g4's ceiling binds under OLF's equal reactive shares: which generator switches to PQ depends on the SHARING,
             // the one thing a free circulating coupler flow leaves undetermined
             network.getGenerator("g" + k).newMinMaxReactiveLimits().setMinQ(-300).setMaxQ(k == 4 ? 25 : 300).add();
             String ext = k % 2 == 0 ? "vl0" : "vl3";
@@ -436,7 +436,7 @@ final class GpuSaTestNetworks {
     /** Three sections in a chain (bbs0-bbs1-bbs2, couplers c01 and c12), each with a generator regulating it (equal
      *  targets, so OLF merges the three controls under vl12_0) and a line to the meshed network. The coupler tree is
      *  rooted at vl12_0: losing bbs0 opens c01 and OLF re-elects vl12_1, the opened coupler's CHILD, as the main of the
-     *  two sections left. The reactive keys (60/20/20) leave g1 free in the base (1.29 pu of its 1.6) and pinned once
+     *  two sections left. The reactive keys (60/20/20) leave g1 free in the base (1.29 pu of its 1.6) and switched to PQ once
      *  g0 is gone (1.97 pu), and g2's 2.2 pu ceiling binds too once it holds the sections alone. */
     static Network selfControlledSectionChainNetwork() {
         return selfControlledSectionChainNetwork(new double[][] {{-300, 3000, 60}, {-300, 160, 20}, {-300, 220, 20}}, new double[3]);
@@ -505,15 +505,15 @@ final class GpuSaTestNetworks {
         return lostPilotSectionNetwork(pilotLine, false);
     }
 
-    /** @param pilotPinned cap g0's reactive ceiling so the BASE load flow pins the pilot at MAX_Q before it is
-     *  lost (rte6515 BUS-6194_BBS_1 / BUS-6003_BBS_1: the islanded pilot's limit type still read its base pin,
+    /** @param pilotSwitchedToPq cap g0's reactive ceiling so the BASE load flow switches the pilot to PQ at MAX_Q before it is
+     *  lost (rte6515 BUS-6194_BBS_1 / BUS-6003_BBS_1: the islanded pilot's limit type still read its base switch to PQ,
      *  which the pilot-self gate took as "its balance rides the carrier"). */
-    static Network lostPilotSectionNetwork(boolean pilotLine, boolean pilotPinned) {
-        return lostPilotSectionNetwork(pilotLine, pilotPinned, false);
+    static Network lostPilotSectionNetwork(boolean pilotLine, boolean pilotSwitchedToPq) {
+        return lostPilotSectionNetwork(pilotLine, pilotSwitchedToPq, false);
     }
 
     /** @param remoteSurvivors g1/g2 regulate bbs0 remotely (one REMOTE group) instead of their own sections. */
-    static Network lostPilotSectionNetwork(boolean pilotLine, boolean pilotPinned, boolean remoteSurvivors) {
+    static Network lostPilotSectionNetwork(boolean pilotLine, boolean pilotSwitchedToPq, boolean remoteSurvivors) {
         Network network = Network.create("lost-pilot-section", "code");
         com.powsybl.iidm.network.Substation s = network.newSubstation().setId("s").add();
         for (String vl : List.of("vl0", "vl3", "vl4")) {
@@ -556,10 +556,10 @@ final class GpuSaTestNetworks {
             adder.add();
         }
         for (String g : List.of("g0", "g1", "g2")) {
-            // pilotPinned: g0 cannot cover its share of the base reactive need, so the BASE load flow pins it at
+            // pilotSwitchedToPq: g0 cannot cover its share of the base reactive need, so the BASE load flow switches it to PQ at
             // MAX_Q while g1/g2 keep holding 406 kV (OLF: BUS_TARGET_V stays on the main, g0 PQ at its limit).
             network.getGenerator(g).newMinMaxReactiveLimits().setMinQ(-300)
-                    .setMaxQ(pilotPinned && "g0".equals(g) ? 5 : 300).add();
+                    .setMaxQ(pilotSwitchedToPq && "g0".equals(g) ? 5 : 300).add();
         }
         network.getVoltageLevel("vl0").newGenerator().setId("gs").setBus("vl0_b").setConnectableBus("vl0_b")
                 .setMinP(0).setMaxP(2000).setTargetP(500).setTargetV(400).setVoltageRegulatorOn(true).add();
@@ -611,7 +611,7 @@ final class GpuSaTestNetworks {
         network.getVoltageLevel("vl0").newGenerator().setId("g0").setBus("vl0_b").setConnectableBus("vl0_b")
                 .setMinP(0).setMaxP(2000).setTargetP(500).setTargetV(400).setVoltageRegulatorOn(true).add();
         // g0's reactive output goes from -44 MVar in the base to +150 MVar once bbs1 is gone (OLF's
-        // RL probe): the ceiling below pins it post-contingency only, so the reactive-limits loop
+        // RL probe): the ceiling below switches it to PQ post-contingency only, so the reactive-limits loop
         // runs a pass and RE-SOLVES after it. That pass is where the DISTR_Q target maintenance used
         // to put the base target back on the survivor's row; without a re-solve the stamp changes
         // nothing and the test proves nothing.
@@ -619,7 +619,7 @@ final class GpuSaTestNetworks {
         network.getVoltageLevel("vl0").newLoad().setId("ld0").setBus("vl0_b").setConnectableBus("vl0_b").setP0(600).setQ0(150).add();
         network.getVoltageLevel("vl3").newLoad().setId("ld3").setBus("vl3_b").setConnectableBus("vl3_b").setP0(200).setQ0(80).add();
         // a second PV bus that outlives the contingency: OLF never switches its LAST PV bus to PQ, and
-        // without g3 the pin on g0 above would be refused (RL loop STABLE, no re-solve).
+        // without g3 the switch of g0 to PQ above would be refused (RL loop STABLE, no re-solve).
         network.getVoltageLevel("vl3").newGenerator().setId("g3").setBus("vl3_b").setConnectableBus("vl3_b")
                 .setMinP(0).setMaxP(500).setTargetP(100).setTargetV(400).setVoltageRegulatorOn(true).add();
         network.getGenerator("g3").newMinMaxReactiveLimits().setMinQ(-1000).setMaxQ(1000).add();
@@ -698,14 +698,14 @@ final class GpuSaTestNetworks {
         return network;
     }
 
-    /** A remote gen-VC group whose controllers are ALL pinned at their reactive ceiling in the BASE
+    /** A remote gen-VC group whose controllers are ALL switched to PQ at their reactive ceiling in the BASE
      *  state (rte6515 VL-6003_0 on the full busbar scope): gp on the pilot itself, c1 and c2 remotely
      *  regulate p at 412 kV with 20 MVar each against a 260 MVar load, so the base reactive-limits
-     *  loop pins all three and the control is off before any contingency. The extractor used to ask for "the first enabled
+     *  loop switches all three to PQ and the control is off before any contingency. The extractor used to ask for "the first enabled
      *  controller" to host the pilot's DISTR_Q, found none, and the whole precompute fell to the CPU
      *  (GPU_PRECOMPUTE_FAILED); the choice is structural now and the row modes say what is live. */
-    static Network allPinnedRemoteGroupNetwork() {
-        Network network = Network.create("all-pinned-remote-group", "code");
+    static Network noEnabledControllerRemoteGroupNetwork() {
+        Network network = Network.create("no-enabled-controller-remote-group", "code");
         com.powsybl.iidm.network.Substation s = network.newSubstation().setId("s").add();
         for (String vl : List.of("vl0", "vlp", "vlc1", "vlc2")) {
             com.powsybl.iidm.network.VoltageLevel v = s.newVoltageLevel().setId(vl).setNominalV(400)
@@ -738,11 +738,11 @@ final class GpuSaTestNetworks {
         return network;
     }
 
-    /** A remote voltage-control group whose members are ALL pinned at MAX_Q in the base (a radial 200 MVar
-     *  load at vlq) and all UNPINNED by the contingency (losing that radial line) - see
-     *  {@link #deviceRemoteGroupUnpinnedByContingencyRecomputesTargetQMatchesCpu()}. */
-    static Network unpinnedRemoteGroupNetwork() {
-        Network network = Network.create("unpinned-remote-group", "code");
+    /** A remote voltage-control group whose members are ALL switched to PQ at MAX_Q in the base (a radial 200 MVar
+     *  load at vlq) and all SWITCHED BACK TO PV by the contingency (losing that radial line) - see
+     *  {@link #deviceRemoteGroupSwitchedBackToPvByContingencyRecomputesTargetQMatchesCpu()}. */
+    static Network remoteGroupSwitchedBackToPvNetwork() {
+        Network network = Network.create("remote-group-switched-back-to-pv", "code");
         com.powsybl.iidm.network.Substation s = network.newSubstation().setId("s").add();
         for (String vl : List.of("vl0", "vlp", "vlq", "vlc1", "vlc2")) {
             com.powsybl.iidm.network.VoltageLevel v = s.newVoltageLevel().setId(vl).setNominalV(400)
@@ -754,7 +754,7 @@ final class GpuSaTestNetworks {
         network.getVoltageLevel("vl0").newLoad().setId("ld0").setBus("vl0_b").setConnectableBus("vl0_b").setP0(100).setQ0(0).add();
         network.getVoltageLevel("vlp").newLoad().setId("ldp").setBus("vlp_b").setConnectableBus("vlp_b").setP0(400).setQ0(60).add();
         network.getVoltageLevel("vlq").newLoad().setId("ldq").setBus("vlq_b").setConnectableBus("vlq_b").setP0(0).setQ0(200).add();
-        // ASYMMETRIC limits: the reactive keys come from the Q RANGES (90 : 60) while the pins sit at
+        // ASYMMETRIC limits: the reactive keys come from the Q RANGES (90 : 60) while the switches to PQ happen at
         // maxQ (30 : 50) - with symmetric limits the two ratios coincide and so do both sharings
         for (String[] c : new String[][] {{"c1", "-60", "30"}, {"c2", "-10", "50"}}) {
             network.getVoltageLevel("vl" + c[0]).newGenerator().setId("g" + c[0]).setBus("vl" + c[0] + "_b")
@@ -1032,7 +1032,7 @@ final class GpuSaTestNetworks {
         return network;
     }
 
-    static com.powsybl.loadflow.LoadFlowParameters remotePinParameters() {
+    static com.powsybl.loadflow.LoadFlowParameters remoteReactiveLimitParameters() {
         com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
                 .setDistributedSlack(true).setUseReactiveLimits(true);
         com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp).setVoltageRemoteControl(true);
@@ -1040,9 +1040,9 @@ final class GpuSaTestNetworks {
     }
 
     /** Remote gen-VC group (g1/g2/g3 behind tr1/tr2/tr3 regulating b4) + a Q-heavy load bus b5 on
-     *  two parallel lines; the named generator gets the given maxQ (the pin knob), the others stay
-     *  unlimited — the plan-B4 all-members-pinnable gate always passes and the batch engages. */
-    static Network remotePinNetwork(String genId, double maxQ) {
+     *  two parallel lines; the named generator gets the given maxQ (the knob of its switch to PQ), the others stay
+     *  unlimited — the plan-B4 gate on groups whose every member can switch to PQ always passes and the batch engages. */
+    static Network remoteReactiveLimitNetwork(String genId, double maxQ) {
         Network network = com.powsybl.openloadflow.network.VoltageControlNetworkFactory.createWithGeneratorRemoteControl();
         var s = network.getSubstation("s");
         var vl5 = s.newVoltageLevel().setId("vl5").setNominalV(400)
@@ -1059,13 +1059,13 @@ final class GpuSaTestNetworks {
         return network;
     }
 
-    /** {@link #remotePinNetwork} whose g2 can only produce {@code q} MVar over its operating range: a capability
+    /** {@link #remoteReactiveLimitNetwork} whose g2 can only produce {@code q} MVar over its operating range: a capability
      *  curve [-1000, 1000] MVar at 0 MW, [q, q] from 50 to 400 MW (g2 runs at 100 MW plus its slack share). OLF keeps
      *  g2 as a remote controller, since its curve's largest range is 2000 MVar (ReactiveRangeCheckMode.MAX), and its
      *  reactive-limit loop checks it like any other controller. The three generators go up to 400 MW, so that the
      *  other two can take a lost one's power (at 200 MW the slack distribution saturates). */
     static Network singleValueRangeRemoteMemberNetwork(double q) {
-        Network network = remotePinNetwork("g2", 1000.0);
+        Network network = remoteReactiveLimitNetwork("g2", 1000.0);
         for (String id : List.of("g1", "g2", "g3")) {
             network.getGenerator(id).setMaxP(400);
         }
@@ -1077,14 +1077,14 @@ final class GpuSaTestNetworks {
         return network;
     }
 
-    /** ALL THREE members pin under the l45b outage and the group LOSES control (in-flight pilot
+    /** ALL THREE members switch to PQ under the l45b outage and the group LOSES control (in-flight pilot
      *  vEq deactivation). g5, a DISTANT unlimited PV behind a 400-ohm line, keeps OLF's global
-     *  "keep one PV bus" rule out of the way AND keeps the all-pinned system regular (with no
+     *  "keep one PV bus" rule out of the way AND keeps the system with no enabled controller regular (with no
      *  voltage reference at all the CPU itself hits MAX_ITERATION — a nearer/stronger keeper
      *  instead holds the group's job, which is why the caps sit in the narrow 185-vs-183
      *  window). */
-    static Network allPinnedCornerNetwork() {
-        Network network = remotePinNetwork("g1", 185.0);
+    static Network noEnabledControllerCornerNetwork() {
+        Network network = remoteReactiveLimitNetwork("g1", 185.0);
         network.getGenerator("g2").newMinMaxReactiveLimits().setMinQ(-1000).setMaxQ(185.0).add();
         network.getGenerator("g3").newMinMaxReactiveLimits().setMinQ(-1000).setMaxQ(185.0).add();
         var vl7 = network.getSubstation("s").newVoltageLevel().setId("vl7").setNominalV(400)
@@ -1103,9 +1103,9 @@ final class GpuSaTestNetworks {
 
     /** g2/g3 turned LOCAL (own-bus 1.05 pu) so g1 alone carries the b4 group; maxQ 800 is the
      *  swept knob (750: the BASE already loses control at 411.3 kV; 850: the outage no longer
-     *  pins) — the singleton holds in the base and PINS under l45b. */
-    static Network singletonRemotePinNetwork() {
-        Network network = remotePinNetwork("g1", 800);
+     *  switches it to PQ) — the singleton holds in the base and SWITCHES TO PQ under l45b. */
+    static Network singletonRemoteReactiveLimitNetwork() {
+        Network network = remoteReactiveLimitNetwork("g1", 800);
         for (String id : new String[] {"g2", "g3"}) {
             var g = network.getGenerator(id);
             g.setRegulatingTerminal(g.getTerminal())
@@ -1434,7 +1434,7 @@ final class GpuSaTestNetworks {
         line.accept(new String[] {"l12_BIS", "b1", "b2"}, new double[] {0, 0.2});
         line.accept(new String[] {"ln1h", "b1", "b1h"}, new double[] {0.002, 0.02});
         line.accept(new String[] {"ln2h", "b2", "b2h"}, new double[] {0.002, 0.02});
-        // PQ converter buses: a voltage-controlled converter bus pins |V| and the lost increment
+        // PQ converter buses: a voltage-controlled converter bus holds |V| and the lost increment
         // then moves only the ANGLES, which the bus-voltage comparison does not see
         for (String[] station : new String[][] {{"cs1", "b1h", "false"}, {"cs2", "b2h", "false"}, {"cs1b", "b1h", "false"}, {"cs2b", "b2h", "false"}}) {
             network.getVoltageLevel("vl_" + station[1]).newVscConverterStation().setId(station[0]).setBus(station[1]).setConnectableBus(station[1])
@@ -1463,7 +1463,7 @@ final class GpuSaTestNetworks {
             g.newExtension(com.powsybl.iidm.network.extensions.CoordinatedReactiveControlAdder.class)
                     .withQPercent(qPercent[i - 1]).add();
             if (i == 2) {
-                g.newMinMaxReactiveLimits().setMinQ(-30).setMaxQ(30).add();   // base share 95 MVar: pinned
+                g.newMinMaxReactiveLimits().setMinQ(-30).setMaxQ(30).add();   // base share 95 MVar: switched to PQ
             } else {
                 g.newMinMaxReactiveLimits().setMinQ(-5).setMaxQ(300).add();   // base 105 MVar, -22 once lq is lost
             }

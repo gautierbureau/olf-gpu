@@ -36,8 +36,8 @@ class GpuSaOperatorStrategyTest extends AbstractGpuSaTest {
 
     /** Strategy pairs on the coupler-joined curve sections. Opening the coupler (c01) brings the child's balance home
      *  to its own angle row: the pair re-anchors its distribution on what the parent absorbed THERE, not on the
-     *  coupler's dummy row, a pinned stub the parent's capture read as absorption (rte6515 BUS-1359_BBS_2: 19.27 MW).
-     *  Losing g3 (the slack out of the distribution) moves the slack's share of the parent: none. Losing g3 pins both sections, so the group loses control and the pilot's
+     *  coupler's dummy row, a fixed stub the parent's capture read as absorption (rte6515 BUS-1359_BBS_2: 19.27 MW).
+     *  Losing g3 (the slack out of the distribution) moves the slack's share of the parent: none. Losing g3 switches both sections to PQ, so the group loses control and the pilot's
      *  own row hosts its reactive balance: a pair starts with that flip at the parent's frozen target, which the
      *  seed took from the base limit instead (rte6515 BUS-6066_BBS_1, VL-6231_0: 3.8e-5 kV even for a no-op). */
     @Test
@@ -66,9 +66,9 @@ class GpuSaOperatorStrategyTest extends AbstractGpuSaTest {
                         .setSlackBusesIds(List.of("vl0_b")));
     }
 
-    /** A merged control whose group is lost in the BASE (both sections pinned at MAX_Q under a heavy local reactive
-     *  load) and pinned at the other limit by the contingency (the load lost: both absorb down to MIN_Q). A pair starts
-     *  with the pilot's row as the reactive balance the base activation laid out, at the BASE pin; OLF continues the
+    /** A merged control whose group is lost in the BASE (both sections switched to PQ at MAX_Q under a heavy local reactive
+     *  load) and switched to PQ at the other limit by the contingency (the load lost: both absorb down to MIN_Q). A pair starts
+     *  with the pilot's row as the reactive balance the base activation laid out, at the BASE frozen target Q; OLF continues the
      *  contingency's (rte6515 BUS-6230_BBS, VL-6229_0: MAX_Q 0.0 in the base, MIN_Q -0.06 after it, the pair at 0.0). */
     @Test
     void strategiesOnABaseLostMergedControlMatchCpu() {
@@ -94,11 +94,11 @@ class GpuSaOperatorStrategyTest extends AbstractGpuSaTest {
                         .setSlackBusesIds(List.of("vl0_b")));
     }
 
-    /** A remote member pinned in the BASE that the contingency's reactive-limit pass RELEASES: g2's 40% key is far over
-     *  its 30 MVAr ceiling under the base need, so the base pins it MAX_Q; losing the reactive load lq leaves the group
-     *  absorbing, pins g1 and g3 at their -5 MVAr floor (g5 keeps the network a PV bus), the voltage climbs over its
+    /** A remote member switched to PQ in the BASE that the contingency's reactive-limit pass RELEASES: g2's 40% key is far over
+     *  its 30 MVAr ceiling under the base need, so the base switches it to PQ at MAX_Q; losing the reactive load lq leaves the group
+     *  absorbing, switches g1 and g3 to PQ at their -5 MVAr floor (g5 keeps the network a PV bus), the voltage climbs over its
      *  target and g2 goes back on control. A pair starts from that state, g2 a DISTR_Q member again; the seed released
-     *  only LOCAL base pins, so the pair solved g2 at its base pin first (network.xiidm LLJP: a member at -0.2954 the
+     *  only LOCAL buses switched to PQ in the base, so the pair solved g2 at its base frozen target Q first (network.xiidm LLJP: a member at -0.2954 the
      *  parent had released, 5.46 kV). */
     @Test
     void strategiesAfterTheReleaseOfASwitchedToPqInBaseRemoteMemberMatchCpu() {
@@ -115,7 +115,7 @@ class GpuSaOperatorStrategyTest extends AbstractGpuSaTest {
     }
 
     /** OLF runs a strategy as a new load flow, and its reactive-limit loop counts PV -> PQ switches afresh in every
-     *  load flow. Losing the capacitor pins g1 at its 100 MVAr ceiling, its one switch allowed; the strategy takes the
+     *  load flow. Losing the capacitor switches g1 to PQ at its 100 MVAr ceiling, its one switch allowed; the strategy takes the
      *  reactive load off its bus, the voltage climbs over the target and OLF puts g1 back on control. The pair took
      *  its parent's count along and kept g1 blocked at the ceiling (network.xiidm LLFP: IZSV_0 and IZTH_0/2 at three
      *  switches each after the contingency's oscillation, 8.5e-4 kV at IZTK). */
@@ -383,7 +383,7 @@ class GpuSaOperatorStrategyTest extends AbstractGpuSaTest {
     @Test
     void baseOpenSwitchCloseStrategyBatchMatchesCpu() {
         // #31: SwitchAction CLOSING a base-open busbar coupler (zero-impedance branch). The retained
-        // switch's dummy variables already have rows (identity-pinned to 0 while open), so the close
+        // switch's dummy variables already have rows (identities held at 0 while open), so the close
         // is a per-scenario zero-impedance-element enable + identity->coupling row flip on the device. Node-breaker
         // network: coupler C open at base splits VL1 into BBS1 (lines L1+L3) and BBS2 (G + L2); the
         // L1 outage keeps both sides energized, the strategy merges them back.
@@ -817,13 +817,13 @@ class GpuSaOperatorStrategyTest extends AbstractGpuSaTest {
         assertStrategyMatchesCpu(network, contingencies, strategies, actions, 5);
     }
 
-    /** A synchronous condenser pinned at its reactive limit in the base, islanded by the contingency. A pair keeping
-     *  the island must leave its frozen rows alone: stamping the continued pin turned the islanded bus's V row into a
+    /** A synchronous condenser switched to PQ at its reactive limit in the base, islanded by the contingency. A pair keeping
+     *  the island must leave its frozen rows alone: stamping the continued switch to PQ turned the islanded bus's V row into a
      *  reactive balance (rte6515 LINE-3477-2893, 0.0075 MW). A pair reclosing it re-energizes the bus where OLF does:
-     *  from its stored voltage (not the frozen 1 pu at angle 0), pinned at its limit (not at the frozen row's value,
-     *  which the pin export read as a reactive power). */
+     *  from its stored voltage (not the frozen 1 pu at angle 0), PQ at its limit (not at the frozen row's value,
+     *  which the export of the frozen target Q read as a reactive power). */
     @Test
-    void strategiesAroundAnIslandedPinnedCondenserMatchCpu() {
+    void strategiesAroundAnIslandedCondenserSwitchedToPqMatchCpu() {
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
         Network network = ieee14WithRadialBus(vl -> vl.newGenerator().setId("B15-G").setBus("B15").setConnectableBus("B15")
@@ -854,12 +854,12 @@ class GpuSaOperatorStrategyTest extends AbstractGpuSaTest {
         assertStrategyMatchesCpu(network, contingencies, strategiesOf(loadId, "start8"), actions, 2);
     }
 
-    /** A generator pinned at its reactive limit in the base and released by the contingency: its strategy pairs
-     *  start with it back on voltage control, as OLF's strategies do. The base activation still held the pin, and a
+    /** A generator switched to PQ at its reactive limit in the base and released by the contingency: its strategy pairs
+     *  start with it back on voltage control, as OLF's strategies do. The base activation still held it PQ, and a
      *  pair solved the generator at its base limit (rte6515 LINE-3273-1812: 0.016 kV for a strategy that changes
-     *  nothing). B6-G is pinned at 5 MVar in the base and released once B6's load is lost. */
+     *  nothing). B6-G is switched to PQ at 5 MVar in the base and released once B6's load is lost. */
     @Test
-    void strategyAfterAContingencyReleasingABasePinMatchesCpu() {
+    void strategyAfterAContingencySwitchingBackToPvMatchesCpu() {
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
         Network network = IeeeCdfNetworkFactory.create14();
@@ -871,9 +871,9 @@ class GpuSaOperatorStrategyTest extends AbstractGpuSaTest {
                 strategiesOf(loadId, "more9"), actions, 2);
     }
 
-    /** A pinned bus keeps the reactive power it was frozen at until the limit moves by more than the reactive
+    /** A bus switched to PQ keeps the reactive power it was frozen at until the limit moves by more than the reactive
      *  power mismatch: OLF's strategy starts from that frozen value, which the parent's distribution may leave a little
-     *  off the curve. The pair stamped its pin at the curve instead (rte6515 VL-6095: frozen 0.7518298, the curve at
+     *  off the curve. The pair stamped its frozen target Q at the curve instead (rte6515 VL-6095: frozen 0.7518298, the curve at
      *  0.7518918). B2-G sits on a sloped curve at its maximum, takes a small share of the contingency's distribution,
      *  and the strategy switches the B9 shunt off. */
     @Test
@@ -1027,7 +1027,7 @@ class GpuSaOperatorStrategyTest extends AbstractGpuSaTest {
     @Test
     void generatorActionStressAcrossContingencies() {
         // Freeze-semantics hunt: every non-fragmenting ieee14 line contingency x a LARGE redispatch
-        // (+60 MW on B2-G) that pushes pinned controllers around. Any surviving CPU-vs-device RL
+        // (+60 MW on B2-G) that pushes controllers switched to PQ around. Any surviving CPU-vs-device RL
         // freeze divergence must surface as a >0.05 kV bus mismatch on some pair.
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");

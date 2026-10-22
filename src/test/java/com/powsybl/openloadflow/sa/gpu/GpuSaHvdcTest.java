@@ -303,7 +303,7 @@ class GpuSaHvdcTest extends AbstractGpuSaTest {
         assertEquals(2, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(), "census=" + GpuBatchScopeCensus.snapshot());
     }
 
-    /** An AC-emulation VSC pinned at its curve limit: OLF reads the curve at the live flow of the link
+    /** An AC-emulation VSC switched to PQ at its curve limit: OLF reads the curve at the live flow of the link
      *  (LfVscConverterStationImpl.getReactiveLimitsActivePower), so the limit moves with the flow inside the solve.
      *  l13 carries nothing (the limit must stay where the base left it), l12a moves the flow (and the limit). */
     @Test
@@ -344,7 +344,7 @@ class GpuSaHvdcTest extends AbstractGpuSaTest {
 
     /** DEVICE-mode HVDC AC emulation with a SATURATED BASE (was a whole-run CPU gate — the pack
      *  assumed every AC-emu HVDC starts LINEAR): maxP 100 MW sits under the ~135 MW unconstrained
-     *  droop flow, so the BASE limits loop pins hvdc23 at SAT_1_TO_2 (CPU-probed: base cs2.P = 100).
+     *  droop flow, so the BASE limits loop saturates hvdc23 at SAT_1_TO_2 (CPU-probed: base cs2.P = 100).
      *  The orchestrator's base frame composes every status override as (existing override |
      *  baseTargets) - baseD + d(status) and seeds the base statuses/hv bits (padding slots
      *  included). The l4 load outage (NOT a converter bus, so the strip rows are clean) RELIEVES
@@ -380,7 +380,7 @@ class GpuSaHvdcTest extends AbstractGpuSaTest {
      *  override already present at that row — a row must never carry two target overrides (the
      *  parallel scatter has no ordering; the first cut duplicated the row and the result depended
      *  on a scatter race). The other converter bus is the SLACK (its P row is the phi identity).
-     *  opr 1.0 MW under the ~2.4 MW droop flow pins the base; the l2 outage relieves. 1e-12. */
+     *  opr 1.0 MW under the ~2.4 MW droop flow saturates the base; the l2 outage relieves. 1e-12. */
     @Test
     void deviceHvdcSaturatedBaseConverterBusLoadLossMatchesCpu() {
         org.junit.jupiter.api.Assumptions.assumeTrue(

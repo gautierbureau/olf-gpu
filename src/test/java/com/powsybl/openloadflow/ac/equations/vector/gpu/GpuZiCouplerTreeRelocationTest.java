@@ -52,7 +52,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  * couplers, 2.1e+00 at 63), and on rte6515 it fixes the busbar window [5000,6000) (base on the device, violations
  * 0 differing against the CPU) while REGRESSING others — the base fails on the 500-section window and on
  * [0,1000), [2000,3000) reports 154 violations differently, and two security-analysis fixtures stop engaging the
- * batch (deviceMiddleSectionLoss*). The pairing has to agree with islanding, reactive-limit pins and the
+ * batch (deviceMiddleSectionLoss*). The pairing has to agree with islanding, reactive-limit switches and the
  * per-scenario coupler changes a busbar outage makes, which it does not yet.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}

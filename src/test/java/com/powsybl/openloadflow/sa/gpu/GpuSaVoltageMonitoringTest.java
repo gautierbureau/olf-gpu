@@ -37,7 +37,7 @@ class GpuSaVoltageMonitoringTest extends AbstractGpuSaTest {
     /** Two voltage-controlling SVCs on one bus, losing one: the bus keeps voltage control. An SVC's reactive limit
      *  is b*v^2 at the live voltage, so the bus limit after the loss is the SURVIVOR's b times v^2. The device takes
      *  the lost SVC's limit at the base voltage off the aggregate (minQDelta/maxQDelta), and must also take its b off
-     *  the quadratic term, otherwise the pinned survivor's target moves with the lost SVC's coefficient: 4.5e-3 kV
+     *  the quadratic term, otherwise the survivor's frozen target Q moves with the lost SVC's coefficient: 4.5e-3 kV
      *  at B4 before. */
     @Test
     void deviceLostSvcOnABusKeepingVoltageControlMatchesCpu() {
@@ -73,7 +73,7 @@ class GpuSaVoltageMonitoringTest extends AbstractGpuSaTest {
      *  <ul>
      *    <li>WIDE band: no monitored bus leaves it, phase A never re-solves, and the HVDC unfreeze
      *        solve has already stabilised the reactive limits for every scenario — phase B would
-     *        re-derive the state it was handed, so it is skipped. The assertion pins that the skip
+     *        re-derive the state it was handed, so it is skipped. The assertion checks that the skip
      *        actually fired (a passing test that quietly took the old path would prove nothing).</li>
      *    <li>Band that the base voltage is already outside: the automaton switches PQ -&gt; PV, phase A
      *        re-solves, and the skip must NOT fire.</li>
@@ -133,7 +133,7 @@ class GpuSaVoltageMonitoringTest extends AbstractGpuSaTest {
     }
 
     /** DEVICE-mode VoltageMonitoring with a MONITORING SVC (stand-by automaton): the standing-by bus
-     *  seeds UNPINNED in the device RL pack (reactiveLimitFlags) and activates PQ->PV at the automaton
+     *  seeds with qLimitType NONE in the device RL pack (reactiveLimitFlags) and activates PQ->PV at the automaton
      *  setpoint when a contingency pushes its V outside the threshold band (VoltageMonitoring);
      *  GPU SA == CPU SA at 1e-12. */
     @Test
@@ -163,11 +163,11 @@ class GpuSaVoltageMonitoringTest extends AbstractGpuSaTest {
     }
 
     /** Reactive limits OFF with MONITORING SVCs (stand-by automaton): the device packs a reactive-limit entry for each
-     *  monitored bus (the VoltageMonitoring phase activates it through the pin machinery), but the run has no
-     *  ReactiveLimitsOuterLoop, so nothing may pin it. The outage takes b2 and b3 below the automaton's low threshold, both
+     *  monitored bus (the VoltageMonitoring phase activates it through the PV/PQ switch machinery), but the run has no
+     *  ReactiveLimitsOuterLoop, so nothing may switch it to PQ. The outage takes b2 and b3 below the automaton's low threshold, both
      *  SVCs go PV at their low setpoint, and svc1 then needs more reactive power than its Bmax gives: OLF holds the
-     *  setpoint, a ReactiveLimits phase run on the packed entries pins svc1 at its limit. svc2 stays inside its limits,
-     *  so that pin is not the "last PV bus" OLF's loop would keep PV. GPU SA == CPU SA at 1e-12. */
+     *  setpoint, a ReactiveLimits phase run on the packed entries switches svc1 to PQ at its limit. svc2 stays inside its limits,
+     *  so that switch is not the "last PV bus" OLF's loop would keep PV. GPU SA == CPU SA at 1e-12. */
     @Test
     void deviceMonitoringSvcBeyondItsLimitsWithoutReactiveLimitsMatchesCpu() {
         org.junit.jupiter.api.Assumptions.assumeTrue(
@@ -229,15 +229,15 @@ class GpuSaVoltageMonitoringTest extends AbstractGpuSaTest {
         return n;
     }
 
-    /** DEVICE-mode SLOPE SVC pinned at a limit stays PQ like the CPU: OLF's ReactiveLimitsOuterLoop
+    /** DEVICE-mode SLOPE SVC switched to PQ at a limit stays PQ like the CPU: OLF's ReactiveLimitsOuterLoop
      *  runs checkPqBus with canSwitchToPv = !hasGeneratorsWithSlope() ("we don't support switching
-     *  PQ to PV for bus with one controller with slope"), so a pinned slope bus NEVER back-switches.
-     *  The base pins svc1 absorbing at its min limit (setpoint 385 below what full absorption can
-     *  reach: V stays 387.35); the parallel-line outage drops the pinned V below the setpoint — the
+     *  PQ to PV for bus with one controller with slope"), so a slope bus switched to PQ NEVER switches back.
+     *  The base switches svc1 to PQ absorbing at its min limit (setpoint 385 below what full absorption can
+     *  reach: V stays 387.35); the parallel-line outage drops the PQ bus's V below the setpoint — the
      *  once-divergent condition where the device used to resume the mode-2 slope row. CPU-probed:
-     *  a FRESH post-outage LF regulates at 385.06, so an un-pinned arm visibly diverges. 1e-12. */
+     *  a FRESH post-outage LF regulates at 385.06, so an arm that switches it back to PV visibly diverges. 1e-12. */
     @Test
-    void deviceSlopeSvcPinnedStaysPqMatchesCpu() {
+    void deviceSlopeSvcSwitchedToPqStaysPqMatchesCpu() {
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
         Network network = com.powsybl.openloadflow.network.VoltageControlNetworkFactory.createWithStaticVarCompensator();
@@ -262,8 +262,8 @@ class GpuSaVoltageMonitoringTest extends AbstractGpuSaTest {
 
     /** DEVICE-mode SLOPE SVC (VoltagePerReactivePowerControl): the bus V row becomes
      *  V + slope*sumQ = target — the device scales the natural reactive fill (row mode 2);
-     *  GPU SA == CPU SA at 1e-12. A pinned slope row never back-switches (see
-     *  deviceSlopeSvcPinnedStaysPqMatchesCpu). */
+     *  GPU SA == CPU SA at 1e-12. A slope row switched to PQ never switches back (see
+     *  deviceSlopeSvcSwitchedToPqStaysPqMatchesCpu). */
     @Test
     void deviceSlopeSvcMatchesCpu() {
         org.junit.jupiter.api.Assumptions.assumeTrue(

@@ -14,7 +14,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /**
  * The invariants the batched SA's per-chunk override list must hold. These are the ones a
- * network-level test cannot pin: the batch solver reuses ONE list across chunks, and no case small
+ * network-level test cannot catch: the batch solver reuses ONE list across chunks, and no case small
  * enough for the suite spans a chunk boundary with chunk shapes different enough to expose a
  * desynchronised row index — the real failure took 4 chunks of 643 scenarios on a 6.5k-bus network
  * (IndexOutOfBounds on the second chunk, or, in range, a silently rewritten override).

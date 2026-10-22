@@ -28,14 +28,14 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /**
  * A network that once needed the GPU load flow's DEVICE-BROKEN safety net, and no longer does: a
  * remote gen-VC group, a zero-impedance branch at member b2 feeding a LOADED far bus b8, and a Q-heavy
- * area that PINS g2 during the run. The first device solve used to return an exploded state (phi ~1e22
+ * area that SWITCHES g2 TO PQ during the run. The first device solve used to return an exploded state (phi ~1e22
  * at b8) while the same system solved fine on the CPU, and the safety net reran it on the CPU — never
  * wrong, only un-accelerated, with the device-side cause recorded as open.
  *
- * <p>The cause was the pin: OLF renormalizes a group's reactive keys ({@code updateReactiveKeys}) and
- * fires NO equation-system event, so the cached extraction kept its PRE-pin static {@code qPct} and the
- * device distributed reactive power with stale weights. {@code GpuNewtonRaphson} now watches the pinned
- * set ({@code GpuAcActivationExtractor.pinnedRemoteMembers}) and re-extracts when it changes, so this
+ * <p>The cause was the switch to PQ: OLF renormalizes a group's reactive keys ({@code updateReactiveKeys}) and
+ * fires NO equation-system event, so the cached extraction kept its static {@code qPct} from BEFORE the switch and the
+ * device distributed reactive power with stale weights. {@code GpuNewtonRaphson} now watches the set of members
+ * switched to PQ ({@code GpuAcActivationExtractor.remoteMembersSwitchedToPq}) and re-extracts when it changes, so this
  * run stays on the device from end to end. The test therefore asserts the OPPOSITE of what it once did —
  * no fallback, counted by GpuNewtonRaphson.CPU_FALLBACK_COUNT — and keeps the CPU comparison that is the real
  * contract.
@@ -87,14 +87,14 @@ class GpuSeqBaseFallbackTest {
     }
 
     @org.junit.jupiter.api.Test
-    void pinnedRemoteMemberRunStaysOnTheDevice() {
+    void remoteMemberSwitchedToPqRunStaysOnTheDevice() {
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
         double[] cpu = run(zeroImpedanceMemberNetwork(), false);
         long fallbacksBefore = GpuNewtonRaphson.CPU_FALLBACK_COUNT.get();
         double[] gpu = run(zeroImpedanceMemberNetwork(), true);
         assertEquals(fallbacksBefore, GpuNewtonRaphson.CPU_FALLBACK_COUNT.get(),
-                "the pinned remote gen-VC run must need no CPU fallback: its re-extracted qPct is OLF's");
+                "the remote gen-VC run with a member switched to PQ must need no CPU fallback: its re-extracted qPct is OLF's");
         double worst = 0;
         for (int i = 0; i < cpu.length; i++) {
             worst = Math.max(worst, Math.abs(cpu[i] - gpu[i]));

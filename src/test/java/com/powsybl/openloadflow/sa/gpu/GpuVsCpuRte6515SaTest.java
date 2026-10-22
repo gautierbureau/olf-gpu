@@ -802,8 +802,8 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
         // tell a real state difference from convergence slack is to squeeze the slack and watch what
         // survives — see the standing rule against calling a difference a tolerance artefact unproven.
         // OLF_GPU_DBG_RL: TRACE the CPU arm's ReactiveLimitsOuterLoop, so every PV<->PQ switch it
-        // makes (bus id, q, qLimit) can be diffed against the device's GPU_RL / GPU_RL_FINAL pin
-        // list. A pin the device makes and OLF does not is invisible in any residual - the device
+        // makes (bus id, q, qLimit) can be diffed against the device's GPU_RL / GPU_RL_FINAL switch
+        // list. A PV -> PQ switch the device makes and OLF does not is invisible in any residual - the device
         // converges cleanly against the WRONG equation - so the two switch lists are the only
         // direct evidence. Ported from GpuVsCpuProductionSaBenchmarkTest; the harness has no
         // appender configured (core/classic version mismatch), so attach one.
@@ -816,9 +816,9 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
         applyReactiveLimitsDebug();
         // OLF_GPU_SA_NO_RL / OLF_GPU_SA_NO_DS: disable an outer loop on BOTH arms. Stage isolation -
         // inner Newton only, vs +DS, vs +DS+RL - to find which stage first introduces a divergence.
-        // Decisive for a suspected PIN mismatch: if the arms agree with reactive limits OFF, the
-        // underlying power flow (and every bus q) agrees and the fault is in the pin DECISION; if
-        // they still disagree, q itself is wrong and the pin is only reporting it.
+        // Decisive for a suspected PV -> PQ SWITCH mismatch: if the arms agree with reactive limits OFF, the
+        // underlying power flow (and every bus q) agrees and the fault is in the switch DECISION; if
+        // they still disagree, q itself is wrong and the switch is only reporting it.
         if ("1".equals(System.getenv("OLF_GPU_SA_NO_RL"))) {
             lfp.setUseReactiveLimits(false);
             System.out.println("  reactive limits DISABLED on both arms (OLF_GPU_SA_NO_RL=1)");
@@ -1150,7 +1150,7 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
                     .getLogger("com.powsybl.openloadflow.ac.outerloop.ReactiveLimitsOuterLoop");
             reactiveLimitsLogger.setLevel(ch.qos.logback.classic.Level.TRACE);
             // The voltage-MONITORING loop too (standby SVC automata): its PQ->PV activations are the
-            // other per-contingency DECISION the two arms can disagree on, and like a pin they leave
+            // other per-contingency DECISION the two arms can disagree on, and like a PV -> PQ switch they leave
             // no residual - only the two decision logs tell them apart.
             ch.qos.logback.classic.Logger monLog = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory
                     .getLogger("com.powsybl.openloadflow.ac.outerloop.MonitoringVoltageOuterLoop");
@@ -1292,7 +1292,7 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
             // it. By ID (GpuBatchScopeCensus.planRefusedIds): the census COUNTS are per attempt — cold + warm
             // runs and the robust retry each count a refusal again — and subtracting them from a
             // per-contingency list printed "-20 of them tried and failed" and called 12 plan refusals
-            // (VC_REMERGE_PINNED_MAIN / RELOC_VROW) device failures (2026-10-04).
+            // (re-merged mains switched to PQ in the base / RELOC_VROW) device failures (2026-10-04).
             java.util.Set<String> planRefusedIds = GpuBatchScopeCensus.planRefusedIds();
             List<String> triedAndFailedOlfConverged = declinedButOlfConverged.stream()
                     .filter(id -> !planRefusedIds.contains(id)).toList();
@@ -1404,9 +1404,9 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
                         worstAbs, worstRel, cpuOnly, gpuOnly);
                 worst.forEach(w -> System.out.printf("      %s%n", w));
                 // OLF_GPU_SA_MON_BUS=<id>[,<id>]: both arms' voltage at NAMED buses, whether or not they
-                // are among the worst. A bus the two arms disagree about because one PINNED it and the
+                // are among the worst. A bus the two arms disagree about because one SWITCHED it to PQ and the
                 // other did not shows up here as a target-V vs off-target pair, which the worst-8 list
-                // will not surface when the pin's effect lands somewhere else in the network.
+                // will not surface when the switch's effect lands somewhere else in the network.
                 String monBus = System.getenv("OLF_GPU_SA_MON_BUS");
                 if (monBus != null) {
                     java.util.Set<String> want = java.util.Set.of(monBus.split(","));

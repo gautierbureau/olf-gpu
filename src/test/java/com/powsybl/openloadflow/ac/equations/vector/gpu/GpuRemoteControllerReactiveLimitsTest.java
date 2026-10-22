@@ -81,7 +81,7 @@ class GpuRemoteControllerReactiveLimitsTest {
     /** Plan-B1 pack acceptance: every remote group member with finite limits is packed as an
      *  reactiveLimitVoltageControlRole=1 entry whose COMPARE row is the PILOT's v column (both RL switch conditions test
      *  the pilot's V against the GROUP target — B0), the write row stays the member's own bus row,
-     *  and a base-PINNED remote member must NOT leak into the local basePqCapable shape. */
+     *  and a remote member SWITCHED TO PQ in the base must NOT leak into the local basePqCapable shape. */
     @org.junit.jupiter.api.Test
     void remoteMembersPackedAsRemoteReactiveLimitEntries() {
         LfNetwork network = Networks.load(VoltageControlNetworkFactory.createWithGeneratorRemoteControl(),
@@ -90,15 +90,15 @@ class GpuRemoteControllerReactiveLimitsTest {
                         .setGeneratorVoltageRemoteControl(true))
                 .get(0);
         EquationSystem<AcVariableType, AcEquationType> es = new AcEquationSystemCreator(network).create();
-        // base-pin one member (RL-disabled controller), like the base loadflow would
-        LfBus pinned = network.getBuses().stream()
+        // switch one member to PQ in the base (RL-disabled controller), like the base loadflow would
+        LfBus memberSwitchedToPq = network.getBuses().stream()
                 .filter(bus -> bus.getGenerators().stream().anyMatch(g -> g.getId().equals("g1")))
                 .findFirst().orElseThrow();
-        pinned.setGeneratorVoltageControlEnabledAndRecomputeTargetQ(false);
-        AcEquationSystemCreator.updateGeneratorVoltageControl(pinned.getGeneratorVoltageControl().orElseThrow(), es);
+        memberSwitchedToPq.setGeneratorVoltageControlEnabledAndRecomputeTargetQ(false);
+        AcEquationSystemCreator.updateGeneratorVoltageControl(memberSwitchedToPq.getGeneratorVoltageControl().orElseThrow(), es);
 
         GpuAcData d = GpuAcDataExtractor.extract(network, es);
-        LfBus pilot = pinned.getGeneratorVoltageControl().orElseThrow().getControlledBus();
+        LfBus pilot = memberSwitchedToPq.getGeneratorVoltageControl().orElseThrow().getControlledBus();
         long members = network.getBuses().stream()
                 .filter(bus -> bus.getGeneratorVoltageControl()
                         .filter(c -> c.getControlledBus() != bus).isPresent())
@@ -111,7 +111,7 @@ class GpuRemoteControllerReactiveLimitsTest {
                 assertNotEquals(d.reactiveLimits().voltageRow()[i], d.reactiveLimits().comparedVoltageRow()[i],
                         "a remote entry's compare row must be the pilot's v column, not its own row");
                 assertEquals(d.reactiveLimits().targetV()[i],
-                        pinned.getGeneratorVoltageControl().orElseThrow().getTargetValue(), 0,
+                        memberSwitchedToPq.getGeneratorVoltageControl().orElseThrow().getTargetValue(), 0,
                         "remote entries carry the GROUP target");
             } else {
                 assertEquals(d.reactiveLimits().voltageRow()[i], d.reactiveLimits().comparedVoltageRow()[i], "local entries compare at their own row");
@@ -122,8 +122,8 @@ class GpuRemoteControllerReactiveLimitsTest {
     }
 
     /** Plan-B2 engagement proof (the deadband-vacuous lesson: never trust a pass without showing
-     *  the machinery FIRED): on the remote group with one member base-pinned, the canonical
-     *  encoding must be in force — the pinned member's frozen q dest SUPPRESSED, its own row the
+     *  the machinery FIRED): on the remote group with one member switched to PQ in the base, the canonical
+     *  encoding must be in force — that member's frozen q dest SUPPRESSED, its own row the
      *  ALTERNATE, and the activation extractor emitting row mode 4 there (not 1). */
     @org.junit.jupiter.api.Test
     void canonicalRemoteMemberEncodingEngages() {
@@ -133,21 +133,21 @@ class GpuRemoteControllerReactiveLimitsTest {
                         .setGeneratorVoltageRemoteControl(true))
                 .get(0);
         EquationSystem<AcVariableType, AcEquationType> es = new AcEquationSystemCreator(network).create();
-        LfBus pinned = network.getBuses().stream()
+        LfBus memberSwitchedToPq = network.getBuses().stream()
                 .filter(bus -> bus.getGenerators().stream().anyMatch(g -> g.getId().equals("g2")))
                 .findFirst().orElseThrow();
-        pinned.setGeneratorVoltageControlEnabledAndRecomputeTargetQ(false);
-        AcEquationSystemCreator.updateGeneratorVoltageControl(pinned.getGeneratorVoltageControl().orElseThrow(), es);
+        memberSwitchedToPq.setGeneratorVoltageControlEnabledAndRecomputeTargetQ(false);
+        AcEquationSystemCreator.updateGeneratorVoltageControl(memberSwitchedToPq.getGeneratorVoltageControl().orElseThrow(), es);
 
         int n = es.getIndex().getSortedVariablesToFind().size();     // force the index (row assignment)
         ExtractionColumns cols = ExtractionColumns.of(network, es);
-        int bn = pinned.getNum();
-        int vColPinned = cols.vCol()[bn];
-        assertEquals(-1, cols.qRow()[bn], "canonical: the pinned member's frozen q dest is SUPPRESSED");
-        assertEquals(vColPinned, cols.alternateQRow()[bn], "canonical: the member's own row is the ALTERNATE");
+        int bn = memberSwitchedToPq.getNum();
+        int vColSwitchedToPq = cols.vCol()[bn];
+        assertEquals(-1, cols.qRow()[bn], "canonical: the frozen q dest of the member switched to PQ is SUPPRESSED");
+        assertEquals(vColSwitchedToPq, cols.alternateQRow()[bn], "canonical: the member's own row is the ALTERNATE");
 
         GpuAcActivation act = GpuAcActivationExtractor.extractActivation(network, es, n);
-        assertEquals(4, act.rowMode()[vColPinned],
+        assertEquals(4, act.rowMode()[vColSwitchedToPq],
                 "an active BUS_TARGET_Q at a non-free remote member must extract as row mode 4");
     }
 }

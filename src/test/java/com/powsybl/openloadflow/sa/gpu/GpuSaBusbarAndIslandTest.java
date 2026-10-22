@@ -340,8 +340,8 @@ class GpuSaBusbarAndIslandTest extends AbstractGpuSaTest {
      *  answer moving with run-to-run noise; HFUS/HFUT: linear solve failed in every run). Every section on the device,
      *  bus voltages to 1e-9 kV.
      *  By exception 1e-8 kV under nested dissection: a generator sits on its reactive limit with a margin of exactly
-     *  zero, which OLF's KLU and AMD solve exactly while nested dissection lands one ulp above it; the generator unpins
-     *  for one outer pass and pins back at the same fixed point, 4.97e-9 kV from OLF's answer in each of 8 runs
+     *  zero, which OLF's KLU and AMD solve exactly while nested dissection lands one ulp above it; the generator switches
+     *  back to PV for one outer pass and to PQ again at the same fixed point, 4.97e-9 kV from OLF's answer in each of 8 runs
      *  (5.7e-14 under AMD; it passes at convEps 1e-12). */
     @Test
     void deviceDoubleStarSectionsReTreeMatchesCpu() {
@@ -363,11 +363,11 @@ class GpuSaBusbarAndIslandTest extends AbstractGpuSaTest {
 
     /** Losing bbs2 re-merges the other two sections' controls onto vl12_3. OLF keeps BUS_TARGET_V on that main while
      *  ANY merged controller is enabled; the device tied the voltage identity to the main's own controller, so when g3
-     *  pinned (100 MVAr, a 10% key) the cluster was left with no voltage equation while g4 still had 300 MVAr of
+     *  switched to PQ (100 MVAr, a 10% key) the cluster was left with no voltage equation while g4 still had 300 MVAr of
      *  headroom: the solve diverged (status -2) and the scenario went back to the CPU. g4 takes the target, every
      *  contingency on device, bus voltages to 1e-9 kV. */
     @Test
-    void deviceReMergedMainPinsAndTheNextControllerHoldsTheVoltageMatchesCpu() {
+    void deviceReMergedMainSwitchesToPqAndTheNextControllerHoldsTheVoltageMatchesCpu() {
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
         Network network = doubleStarSectionsNetwork();
@@ -391,12 +391,12 @@ class GpuSaBusbarAndIslandTest extends AbstractGpuSaTest {
         assertEquals(5, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(), "census=" + GpuBatchScopeCensus.snapshot());
     }
 
-    /** The same re-merge with the main PINNED in the base (g3 at its 30 MVAr ceiling) while g4 has 400 MVAr of headroom.
-     *  OLF keeps vl12_3 PQ at its limit and its BUS_TARGET_V through g4; the device refused the contingency
-     *  (VC_REMERGE_PINNED_MAIN). vl12_3 sits under the live coupler c03: its pinned balance starts on c03's DUMMY_Q row and
+    /** The same re-merge with the main SWITCHED TO PQ in the base (g3 at its 30 MVAr ceiling) while g4 has 400 MVAr of headroom.
+     *  OLF keeps vl12_3 PQ at its limit and its BUS_TARGET_V through g4; the device refused a contingency whose re-merged
+     *  main was PQ in the base. vl12_3 sits under the live coupler c03: its own reactive balance starts on c03's DUMMY_Q row and
      *  g4's sharing row holds the target. Every contingency on device, bus voltages to 1e-9 kV. */
     @Test
-    void deviceReMergedMainPinnedInTheBaseUnderALiveCouplerMatchesCpu() {
+    void deviceReMergedMainSwitchedToPqInTheBaseUnderALiveCouplerMatchesCpu() {
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
         Network network = doubleStarSectionsNetwork();
@@ -423,10 +423,10 @@ class GpuSaBusbarAndIslandTest extends AbstractGpuSaTest {
     /** Losing the chain's root section bbs0 opens c01 and re-merges the other two sections' controls onto vl12_1, the
      *  opened coupler's child, whose voltage identity the opening path installs. Its own controller was never tested
      *  against its limits there: g1 kept 1.97 pu against its 1.6 pu ceiling and the sections held 405 kV, where OLF
-     *  pins g1, hands the target to g2, pins g2 (2.2 pu) too and lets the sections fall to 404.79 kV. Every
+     *  switches g1 to PQ, hands the target to g2, switches g2 (2.2 pu) to PQ too and lets the sections fall to 404.79 kV. Every
      *  contingency on device, bus voltages to 1e-9 kV. */
     @Test
-    void deviceReMergedMainBehindItsOpenedCouplerPinsMatchesCpu() {
+    void deviceReMergedMainBehindItsOpenedCouplerSwitchesToPqMatchesCpu() {
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
         List<Contingency> ctgs = new java.util.ArrayList<>();
@@ -443,12 +443,12 @@ class GpuSaBusbarAndIslandTest extends AbstractGpuSaTest {
         assertEquals(3, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(), "census=" + GpuBatchScopeCensus.snapshot());
     }
 
-    /** Every generator of the chain pinned at its ceiling in the base (a 1200 MVAr load on bbs0 holds the sections at
+    /** Every generator of the chain switched to PQ at its ceiling in the base (a 1200 MVAr load on bbs0 holds the sections at
      *  396.5 kV): losing bbs0 re-merges the other two onto vl12_1 with no enabled controller, OLF's BUS_TARGET_V off. Their
-     *  6 pu then push the sections to 408.3 kV, above the target, and OLF unpins both in one pass: the main takes the
-     *  voltage back, g2 shares. The device forbade that unpin and sent the contingency back to the CPU. */
+     *  6 pu then push the sections to 408.3 kV, above the target, and OLF switches both back to PV in one pass: the main takes the
+     *  voltage back, g2 shares. The device forbade that switch back to PV and sent the contingency back to the CPU. */
     @Test
-    void deviceReMergedAllPinnedControllersUnpinMatchesCpu() {
+    void deviceReMergedControllersAllSwitchBackToPvMatchesCpu() {
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
         List<Contingency> ctgs = new java.util.ArrayList<>();
@@ -700,10 +700,10 @@ class GpuSaBusbarAndIslandTest extends AbstractGpuSaTest {
     /** A coupler opened by a SwitchContingency that islands nothing still SPLITS the merged voltage control of its two
      *  sections: OLF re-merges per zero-impedance cluster, so g1 regulates bbs1 on its own, at its own target. The
      *  device planned that re-merging only for outages that island a bus; here the entries stayed the base group's, and a
-     *  member the base pinned went back, once released, to the group's sharing row while the group's voltage identity
-     *  came back on bbs0, whose generator is still pinned: a system OLF does not have. Both sections pinned MAX_Q in the
+     *  member the base switched to PQ went back, once released, to the group's sharing row while the group's voltage identity
+     *  came back on bbs0, whose generator is still PQ: a system OLF does not have. Both sections switched to PQ at MAX_Q in the
      *  base: the device diverged (MAX_ITERATION_REACHED) where OLF converges after releasing g1; both MIN_Q: the same;
-     *  g1 alone pinned MIN_Q: converged 5.6 kV off at vl3. */
+     *  g1 alone switched to PQ at MIN_Q: converged 5.6 kV off at vl3. */
     @Test
     void deviceCouplerOpeningSplitsASwitchedToPqInBaseMergedControlMatchesCpu() {
         org.junit.jupiter.api.Assumptions.assumeTrue(

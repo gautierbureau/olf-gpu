@@ -61,8 +61,8 @@ class GpuSaContingencyKindsTest extends AbstractGpuSaTest {
      *  TARGET Q otherwise. So B6-Q, regulating nothing, contributes its 5 MVAr target to the aggregate
      *  and not its +-100 MVAr capability, and that 5 MVAr is all the outage may take off.
      *
-     *  <p>B6-G survives and holds B6 in voltage control with tight limits, so the bus pins and the
-     *  aggregate reaches the answer; charging the lost generator's limit instead moves the pinned
+     *  <p>B6-G survives and holds B6 in voltage control with tight limits, so the bus switches to PQ and the
+     *  aggregate reaches the answer; charging the lost generator's limit instead moves the frozen
      *  target by 100 MVAr rather than 5. Measured on rte6515 GEN-2899 and GEN-820#0 as 0.32 kV and
      *  0.19 kV, five differing violations between them — invisible until the generator set was widened
      *  below 220 kV, where the fixed-Q machines live. VERIFIED by reverting to the plain sum and
@@ -86,9 +86,9 @@ class GpuSaContingencyKindsTest extends AbstractGpuSaTest {
         bq.newExtension(com.powsybl.iidm.network.extensions.ActivePowerControlAdder.class)
                 .withParticipate(false).withParticipationFactor(0).add();
         network.getGenerator("B6-G").newMinMaxReactiveLimits().setMinQ(-5).setMaxQ(5).add();
-        for (String wide : List.of("B1-G", "B2-G", "B3-G", "B8-G")) {    // only B6 pins: the all-pinned
+        for (String wide : List.of("B1-G", "B2-G", "B3-G", "B8-G")) {    // only B6 switches to PQ: every PV bus
             network.getGenerator(wide).newMinMaxReactiveLimits().setMinQ(-990).setMaxQ(990).add();
-        }                                                                // corner is a CPU route by design
+        }                                                                // at its limit is a CPU route by design
         List<Contingency> ctgs = List.of(
                 new Contingency("B6-Q", new com.powsybl.contingency.GeneratorContingency("B6-Q")));
         com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
@@ -240,7 +240,7 @@ class GpuSaContingencyKindsTest extends AbstractGpuSaTest {
                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
         Network network = IeeeCdfNetworkFactory.create14();
         // Injections kept MODEST on purpose. At 25/10 MW ieee14's generators saturate their reactive
-        // limits and the driver rejects the base solve outright ("all-pinned / forced-PV election"),
+        // limits and the driver rejects the base solve outright (every PV bus switching to PQ: the forced-PV election),
         // which has nothing to do with boundary lines — verified by adding the same two lines with
         // ZERO injection, which passes. A test that big would be measuring that limitation instead.
         // Injection ZERO, and that is the honest limit of what this can assert today. The boundary BUS
@@ -251,7 +251,7 @@ class GpuSaContingencyKindsTest extends AbstractGpuSaTest {
         // It is the BOUNDARY LINE carrying the injection, not the injection: with the generators given
         // ±2000 MVAr of headroom, the same 8/3 and 5/2 MW added as ORDINARY LOADS passes, while the
         // same amounts on these two boundary lines does not. So it is also NOT the reactive-limit
-        // election that the rejection message blames — that reproduces at pinned=0. Open, and the
+        // election that the rejection message blames — that reproduces with no bus switched to PQ. Open, and the
         // trigger is not yet identified.
         addBoundaryLine(network, "VL4", "DL-4", 0, 0);
         addBoundaryLine(network, "VL9", "DL-9", 0, 0);

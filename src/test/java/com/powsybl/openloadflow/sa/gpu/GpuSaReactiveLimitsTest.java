@@ -25,7 +25,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * GPU-batched security analysis against the CPU: reactive limits: pins, capability curves, forced target Q and the realistic-voltage check.
+ * GPU-batched security analysis against the CPU: reactive limits: switches to PQ and back, capability curves, forced target Q and the realistic-voltage check.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
@@ -68,7 +68,7 @@ class GpuSaReactiveLimitsTest extends AbstractGpuSaTest {
     }
 
     /** Reactive capability CURVE limits at runtime P: B2's curve makes maxQ fall as DS RAISES its
-     *  targetP post-outage — the RL pin must use the limit at the MOVED P (reactiveCapabilityCurveLimitsBatch), not
+     *  targetP post-outage — the switch to PQ must use the limit at the MOVED P (reactiveCapabilityCurveLimitsBatch), not
      *  the base snapshot; a sloped curve segment spans the DS range so the two differ materially. */
     @Test
     void deviceCurveReactiveLimitsAtRuntimePMatchesCpu() {
@@ -90,7 +90,7 @@ class GpuSaReactiveLimitsTest extends AbstractGpuSaTest {
     }
 
     /** A generator outage whose loss is PRE-distributed, followed by a slack round that FIRES (slackBusPMaxMismatch
-     *  1e-4), with the curve generator B2-G pinned at its limit.
+     *  1e-4), with the curve generator B2-G switched to PQ at its limit.
      *
      *  <p>OPEN, measured 2026-10-08: at the default convEps the device ends 1.5e-5 kV off at B2 (B3-G outage); at
      *  convEps 1e-12 both arms agree to 1e-11, so the curve is evaluated at the right P (the suspicion that the curve
@@ -99,7 +99,7 @@ class GpuSaReactiveLimitsTest extends AbstractGpuSaTest {
      *  the same equation system at some solve: find the first pass whose targets, row modes or limits differ (OLF_DS_TRACE
      *  / OLF_RL_TRACE against the device's per-pass state). The assert is not loosened. */
     @org.junit.jupiter.api.Disabled("OPEN: pre-distribution + slack round: the arms solve different systems at some pass "
-            + "(1.6e-7 kV, 1.5e-5 kV with a pinned curve generator, at default tolerance)")
+            + "(1.6e-7 kV, 1.5e-5 kV with a curve generator switched to PQ, at default tolerance)")
     @Test
     void deviceCurveLimitsAtPreDistributedPlusSlackRoundMatchesCpu() {
         org.junit.jupiter.api.Assumptions.assumeTrue(
@@ -132,25 +132,25 @@ class GpuSaReactiveLimitsTest extends AbstractGpuSaTest {
                 "both generator outages must run on the DEVICE");
     }
 
-    /** A Q-carrying LOAD shed at a bus PINNED on its reactive limit. The reactive-limit pack holds the
-     *  bus's load target Q as a run-constant, and reads it in two paired forms: the pinned row target is
+    /** A Q-carrying LOAD shed at a bus SWITCHED TO PQ at its reactive limit. The reactive-limit pack holds the
+     *  bus's load target Q as a run-constant, and reads it in two paired forms: the frozen row target is
      *  limit - loadQ, and the controller's own q is the net injection + loadQ. Shedding the load makes
-     *  both stale. B6-G is given tight limits (+-5 MVAr) so B6 certainly pins, and B6's load carries
+     *  both stale. B6-G is given tight limits (+-5 MVAr) so B6 certainly switches to PQ, and B6's load carries
      *  7.5 MVAr, so the stale term is larger than the limit itself. B6 rather than the bigger B3: its
      *  load is 11 MW, small enough that the slack distribution does not saturate and reject.
      *
      *  <p>This used to be TWO defects on the two halves of one condition: a PV bus was routed to the CPU
-     *  for it, and a bus the base loadflow had ALREADY pinned reads busPv=false, fell through that gate,
+     *  for it, and a bus the base loadflow had ALREADY switched to PQ reads busPv=false, fell through that gate,
      *  batched, and was silently wrong (rte6515 LOAD-6157, 0.37 kV — found only by widening the load set
      *  past the top 50). One per-scenario load Q closes both. VERIFIED by disabling the fix and watching
      *  this test fail. */
     @Test
-    void devicePinnedBusLosingReactiveLoadMatchesCpu() {
+    void deviceBusSwitchedToPqLosingReactiveLoadMatchesCpu() {
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
         Network network = IeeeCdfNetworkFactory.create14();
-        // ONLY B3 is tight. Pin every PV bus in the case instead and the run hits the all-pinned
-        // corner, which the device rejects by design (OLF's global "strongest stays PV" election is
+        // ONLY B3 is tight. Make every PV bus of the case switch to PQ instead and the run hits the corner
+        // where all switch at once, which the device rejects by design (OLF's global "strongest stays PV" election is
         // not a kernel) — the scenario would go to the CPU and the test would prove nothing.
         network.getGenerator("B6-G").newMinMaxReactiveLimits().setMinQ(-5).setMaxQ(5).add();
         for (String wide : List.of("B1-G", "B2-G", "B3-G", "B8-G")) {
@@ -175,7 +175,7 @@ class GpuSaReactiveLimitsTest extends AbstractGpuSaTest {
      *  over their working range, so the production set exercises this path without testing its
      *  arithmetic; B2 cannot host it, that is the slack bus and its P is free.)
      *
-     *  <p>The curve sits low enough that B3 is genuinely PINNED at its maxQ, which is what makes the
+     *  <p>The curve sits low enough that B3 is genuinely SWITCHED TO PQ at its maxQ, which is what makes the
      *  evaluated limit reach the answer — VERIFIED by disabling each of the three repairs in turn and
      *  watching this test fail on each. An earlier version of it, with the same shape but a curve the
      *  bus never reached, passed with all three disabled and proved nothing. */
@@ -235,7 +235,7 @@ class GpuSaReactiveLimitsTest extends AbstractGpuSaTest {
      *  <p>B3 carries B3-G in voltage control and B3-G2 with its regulator OFF; both participate in the
      *  distributed slack and both carry a curve sloped over the whole working range, so the slack moves
      *  both generators' P while only B3-G's slope belongs in B3's limit. B3-G2's fixed targetQ is low
-     *  enough that B3 is genuinely PINNED at its maxQ (Q_PROBE: genTargetQ == maxQ, and the bus sits
+     *  enough that B3 is genuinely SWITCHED TO PQ at its maxQ (Q_PROBE: genTargetQ == maxQ, and the bus sits
      *  0.0004 pu over), which is what makes the evaluated limit reach the answer — an earlier version
      *  with B3 1.9 MVAr short of its limit passed with the filter removed and proved nothing. With the
      *  filter removed this fails at 136.35 kV against the CPU's 134.44. The same shape on network.xiidm
@@ -365,7 +365,7 @@ class GpuSaReactiveLimitsTest extends AbstractGpuSaTest {
 
     /** forceTargetQInReactiveLimits on a voltage-controlled bus, through its LIMITS: B3-G controls B3 and B3-G2 sits
      *  on the same bus with its regulator OFF, so AbstractLfBus.getLimitQ counts B3-G2's target Q - its IIDM 40 MVAr
-     *  clamped into its own curve at its CURRENT P - in B3's min and max limits. The base load flow pins B3 at that
+     *  clamped into its own curve at its CURRENT P - in B3's min and max limits. The base load flow switches B3 to PQ at that
      *  max and FREEZES its generation target; losing B8-G (30 MW) pre-distributes onto B3's two units, both curves
      *  fall, and OLF re-freezes B3 at the moved limit (RL_REFREEZE -0.1368 -> -0.2173 pu). Without the limit entries
      *  the device is 0.86 kV off at B3; routing a frozen bus's clamp to its Q row instead is just as far off; adding
@@ -384,8 +384,8 @@ class GpuSaReactiveLimitsTest extends AbstractGpuSaTest {
                 .setTargetP(60).setMinP(0).setMaxP(200)
                 .setTargetQ(40).setVoltageRegulatorOn(false)
                 .add();
-        // 35 MVAr lower than the fixture B3-G2 normally pins against, to make room for B3-G2's +34 MVAr clamped
-        // target: B3's max limit stays where it pins (-5 - 35 + 24 = -16 MVAr at the base P)
+        // 35 MVAr lower than the fixture B3-G2 normally switches to PQ against, to make room for B3-G2's +34 MVAr clamped
+        // target: B3's max limit stays where it switches to PQ (-5 - 35 + 24 = -16 MVAr at the base P)
         g3.newReactiveCapabilityCurve()
                 .beginPoint().setP(0).setMinQ(-80).setMaxQ(-30).endPoint()
                 .beginPoint().setP(200).setMinQ(-80).setMaxQ(-80).endPoint()
@@ -397,7 +397,7 @@ class GpuSaReactiveLimitsTest extends AbstractGpuSaTest {
         com.powsybl.iidm.network.Generator g1 = network.getGenerator("B1-G");
         g1.newMinMaxReactiveLimits().setMinQ(-990).setMaxQ(990).add();
         // two more units with real power: losing one pre-distributes it onto B3's generators, RAISING B3-G2's P,
-        // which lowers its clamped target and so B3's max limit - B3 stays pinned, at a lower value
+        // which lowers its clamped target and so B3's max limit - B3 stays PQ, at a lower value
         network.getGenerator("B6-G").setTargetP(20).setMinP(0).setMaxP(100);
         network.getGenerator("B8-G").setTargetP(30).setMinP(0).setMaxP(100);
         g1.setTargetP(g1.getTargetP() - 150);
@@ -468,12 +468,12 @@ class GpuSaReactiveLimitsTest extends AbstractGpuSaTest {
                 "the extrapolating curve run must ENGAGE the batch (was a whole-run CPU gate)");
     }
 
-    /** A base-PINNED controller that loses its only generator is still checked by OLF's reactive-limits loop
+    /** A controller SWITCHED TO PQ in the base that loses its only generator is still checked by OLF's reactive-limits loop
      *  (#80, network.xiidm/FBQV). g1 regulates vlb at a target between the bus's voltage with the generator in
-     *  (399.80 kV at Q = 0) and without it (399.50 kV): the base pins it MIN_Q at 0. Losing g1, OLF's
+     *  (399.80 kV at Q = 0) and without it (399.50 kV): the base switches it to PQ at its MIN_Q of 0. Losing g1, OLF's
      *  processLostGenerators disables the voltage control but keeps the qLimitType and the controller-element
-     *  place, so the first reactive-limit pass sees a MIN_Q pin under its target and switches the bus back to PV,
-     *  and the next pins it MAX_Q at its now-empty [0, 0] range. The device had put the entry on the islanded
+     *  place, so the first reactive-limit pass sees a MIN_Q bus under its target and switches the bus back to PV,
+     *  and the next switches it to PQ at MAX_Q, its now-empty [0, 0] range. The device had put the entry on the islanded
      *  channel and never checked it: one solve fewer than OLF, and a state that stops elsewhere.
      *  GPU SA == CPU SA at 1e-12, and the outage must BATCH. */
     @Test
@@ -494,7 +494,7 @@ class GpuSaReactiveLimitsTest extends AbstractGpuSaTest {
     }
 
     /** Reactive limits OFF with a generator beyond its limits: the reactive-limit entries are extracted whatever the
-     *  run's loops (Q15), so only the run's switch keeps the device from pinning. B6-G holds B6 with a [-5, 5] MVAr
+     *  run's loops (Q15), so only the run's switch keeps the device from switching a bus to PQ. B6-G holds B6 with a [-5, 5] MVAr
      *  range it cannot keep in the base nor after the outages; OLF, with no ReactiveLimitsOuterLoop, keeps it PV.
      *  Non-vacuity, on the CPU: B6-G's Q leaves its range with limits off and B6 moves with limits on. GPU SA ==
      *  CPU SA at 1e-12, every outage on the device. */
@@ -516,7 +516,7 @@ class GpuSaReactiveLimitsTest extends AbstractGpuSaTest {
         assertTrue(com.powsybl.loadflow.LoadFlow.find("OpenLoadFlow").run(limitsOn, new com.powsybl.loadflow.LoadFlowParameters()
                 .setDistributedSlack(true).setUseReactiveLimits(true)).isFullyConverged());
         double gap = Math.abs(limitsOn.getBusBreakerView().getBus("B6").getV() - limitsOff.getBusBreakerView().getBus("B6").getV());
-        assertTrue(gap > 1e-3, "pinning B6-G must move B6 (gap " + gap + " kV)");
+        assertTrue(gap > 1e-3, "switching B6-G to PQ must move B6 (gap " + gap + " kV)");
         List<Contingency> ctgs = List.of(new Contingency("L1-2-1", new BranchContingency("L1-2-1")),
                 new Contingency("L6-13-1", new BranchContingency("L6-13-1")));
         assertGpuMatchesCpu(fixture.get(), ctgs, 1e-12, true, false);
@@ -524,15 +524,15 @@ class GpuSaReactiveLimitsTest extends AbstractGpuSaTest {
     }
 
     /** maxPqPvSwitch = 0: OLF's switchPqPv blocks EVERY PQ -> PV switch (a bus's pvPqSwitchCount is never
-     *  below 0), so a bus pinned in the base stays pinned through every contingency. The device read 0 as
-     *  "unset" and applied OLF's default of 3: on the fixture above both members un-pin on the device
-     *  where the CPU keeps them pinned. The two CPU answers (cap 0 / default cap) are first shown to
+     *  below 0), so a bus switched to PQ in the base stays PQ through every contingency. The device read 0 as
+     *  "unset" and applied OLF's default of 3: on the fixture above both members switch back to PV on the device
+     *  where the CPU keeps them PQ. The two CPU answers (cap 0 / default cap) are first shown to
      *  differ on a member bus, or the cap would not be exercised. GPU SA == CPU SA at 1e-12. */
     @Test
     void deviceHonoursZeroPqPvSwitchCapMatchesCpu() {
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
-        Network network = unpinnedRemoteGroupNetwork();
+        Network network = remoteGroupSwitchedBackToPvNetwork();
         List<Contingency> contingencies = List.of(new Contingency("lpq", new com.powsybl.contingency.LineContingency("lpq")));
         java.util.function.IntFunction<com.powsybl.loadflow.LoadFlowParameters> params = cap -> {
             com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
@@ -543,7 +543,7 @@ class GpuSaReactiveLimitsTest extends AbstractGpuSaTest {
                     .setReactiveLimitsMaxPqPvSwitch(cap);
             return lfp;
         };
-        // the cap must matter here: the CPU keeps both members pinned at 0 and un-pins them at the default
+        // the cap must matter here: the CPU keeps both members PQ at 0 and switches them back to PV at the default
         double vCapped = cpuPostContingencyV(network, contingencies, params.apply(0), "vlc1");
         double vDefault = cpuPostContingencyV(network, contingencies, params.apply(3), "vlc1");
         assertTrue(Math.abs(vCapped - vDefault) > 0.1,
@@ -611,7 +611,7 @@ class GpuSaReactiveLimitsTest extends AbstractGpuSaTest {
 
     /** A member FROZEN by the realistic-voltage check (OLF: generation target Q frozen at its INITIAL value,
      *  MIN/MAX_REALISTIC_V) enters its peers' DISTR_Q targets at that frozen value (AcTargetVector sums
-     *  otherControllerBus.getTargetQ()). The device rebuilt a pinned peer's targetQ from its Q limit, which for a
+     *  otherControllerBus.getTargetQ()). The device rebuilt the targetQ of a peer switched to PQ from its Q limit, which for a
      *  realistic-voltage freeze is not where OLF froze it. g1 (10 MVar initial, 6000 MVar ceiling) frozen on l23b,
      *  g4/g5 sharing: at 1e-12. */
     @Test
@@ -641,20 +641,20 @@ class GpuSaReactiveLimitsTest extends AbstractGpuSaTest {
 
     /** Two merged sections (retained coupler), both generators regulating the main's own bus — a PILOT-SELF
      *  group — with a reactive-capability CURVE on the main's generator. A line loss drives both sections past
-     *  MAX_Q and the pins change the losses enough for a distributed-slack round to run AFTER them, which moves
-     *  the curve limit by LESS than maxReactivePowerMismatch. OLF leaves such a pin at its pin-time limit
+     *  MAX_Q and the switches to PQ change the losses enough for a distributed-slack round to run AFTER them, which moves
+     *  the curve limit by LESS than maxReactivePowerMismatch. OLF leaves such a bus at the limit it switched at
      *  (checkPqBusWithQLimitType re-freezes only past the threshold); the device's member path did the same but
      *  its enrolled-pilot re-stamp fired above 1e-12 (tasks #73, rte6515 BUS-6029_BBS_1: VL-6231_0 stamped
      *  0.570758104 against OLF's 0.570780403, 5.68e-05 kV). GPU SA == CPU SA at 1e-12 at the DEFAULT criteria. */
     @Test
-    void devicePinnedPilotSelfKeepsItsLimitUnderThresholdMatchesCpu() {
+    void devicePilotSelfSwitchedToPqKeepsItsLimitUnderThresholdMatchesCpu() {
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
         Network network = pilotSelfCurveNetwork();
         com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
                 .setDistributedSlack(true).setUseReactiveLimits(true);
         com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
-                .setSlackBusPMaxMismatch(1e-4)               // a slack round fires AFTER the pins, moving the curve
+                .setSlackBusPMaxMismatch(1e-4)               // a slack round fires AFTER the switches to PQ, moving the curve
                 .setSlackBusSelectionMode(com.powsybl.openloadflow.network.SlackBusSelectionMode.NAME)
                 .setSlackBusesIds(List.of("vl0_b"));
         // the section loss is LISTED so the coupler is retained and the two sections are two buses (OLF
@@ -669,16 +669,16 @@ class GpuSaReactiveLimitsTest extends AbstractGpuSaTest {
     }
 
     /** A curve generator on the CHILD section of a coupler-joined pair (g1 on bbs1, relocated under the
-     *  retained coupler), pinned by the loss of a generator whose active power the security analysis
+     *  retained coupler), switched to PQ by the loss of a generator whose active power the security analysis
      *  PRE-DISTRIBUTES: both arms must evaluate g1's curve at the pre-distributed P. The device's share
      *  reconstruction read the child's own PHI row, which hosts ZERO_PHI (target 0) under the relocation,
-     *  so it evaluated the curve at the BASE P and pinned 8e-4 pu off while OLF pinned at the moved P
-     *  (tasks #66/#73 tail, rte6515 BUS-4467_BBS: VL-6231_1 pinned at 0.576013 against OLF's 0.566571,
+     *  so it evaluated the curve at the BASE P and froze its target Q 8e-4 pu off while OLF froze it at the moved P
+     *  (tasks #66/#73 tail, rte6515 BUS-4467_BBS: VL-6231_1 frozen at 0.576013 against OLF's 0.566571,
      *  the pilot VL-6231_0 — same unit, same P — exact; 9.56e-4 MW of distributed power). The slack
-     *  threshold stays at its DEFAULT so no slack round runs before the pin and the fallback is what
+     *  threshold stays at its DEFAULT so no slack round runs before the switch to PQ and the fallback is what
      *  evaluates the curve. GPU SA == CPU SA at 1e-12. */
     @Test
-    void deviceRelocatedChildCurvePinnedAtPreDistributedPMatchesCpu() {
+    void deviceRelocatedChildCurveLimitAtPreDistributedPMatchesCpu() {
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
         Network network = pilotSelfCurveNetwork(true, 100);
@@ -699,19 +699,19 @@ class GpuSaReactiveLimitsTest extends AbstractGpuSaTest {
                 "every contingency must batch (or the test proves nothing)");
     }
 
-    /** A bus pinned at a reactive limit that MOVES, once it has used up its PV-PQ switch budget. OLF
-     *  caps the SWITCH (maxPqPvSwitch, applied in switchPqPv) but keeps re-freezing a pinned bus at its
-     *  current limit every check; the device gated its whole pinned-bus block on that cap, so a capped
+    /** A bus switched to PQ at a reactive limit that MOVES, once it has used up its PV-PQ switch budget. OLF
+     *  caps the SWITCH (maxPqPvSwitch, applied in switchPqPv) but keeps re-freezing a PQ bus at its
+     *  current limit every check; the device gated its whole PQ-bus block on that cap, so a capped
      *  bus stopped following its limit. The limit here is a reactive-capability CURVE, which moves with
      *  the generator's targetP as the distributed slack shifts it - exactly the real case
      *  (network.xiidm / GBMK: CQEM_0 and CQEM_5 stayed at -0.181175517 / -0.184950765 where OLF had
      *  re-frozen at -0.181173957 / -0.184949017, 2.079e-05 kV network-wide and invariant to the
-     *  convergence criterion). The cap is set to 1 so a single pin exhausts it. GPU SA == CPU SA at 1e-12. */
+     *  convergence criterion). The cap is set to 1 so a single switch exhausts it. GPU SA == CPU SA at 1e-12. */
     @Test
-    void deviceCappedPinStillFollowsItsMovingLimitMatchesCpu() {
+    void deviceCappedPqBusStillFollowsItsMovingLimitMatchesCpu() {
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
-        Network network = Network.create("capped-pin-moving-limit", "code");
+        Network network = Network.create("capped-pq-moving-limit", "code");
         com.powsybl.iidm.network.Substation s = network.newSubstation().setId("s").add();
         for (String vl : List.of("vl0", "vlp", "vlc", "vlg")) {
             com.powsybl.iidm.network.VoltageLevel v = s.newVoltageLevel().setId(vl).setNominalV(400)
@@ -722,12 +722,12 @@ class GpuSaReactiveLimitsTest extends AbstractGpuSaTest {
                 .setMinP(0).setMaxP(2000).setTargetP(200).setTargetV(400).setVoltageRegulatorOn(true).add();
         network.getVoltageLevel("vlp").newLoad().setId("ldp").setBus("vlp_b").setConnectableBus("vlp_b").setP0(300).setQ0(150).add();
         // the load whose loss makes the distributed slack move gc's P by tens of MW, which MOVES gc's
-        // capability curve while it is pinned; it sits far from gc so the reactive picture there barely
-        // changes and the pin holds
+        // capability curve while it is PQ; it sits far from gc so the reactive picture there barely
+        // changes and gc stays PQ
         network.getVoltageLevel("vlg").newLoad().setId("ld1").setBus("vlg_b").setConnectableBus("vlg_b").setP0(200).setQ0(0).add();
         // the curve generator: minQ rises steeply with P, so the distributed slack MOVES its limit
         // a reactive load at the generator's own bus and a target it cannot reach: gc saturates at
-        // MAX_Q and its voltage stays BELOW target, so it never wants to unpin - the case that must
+        // MAX_Q and its voltage stays BELOW target, so it never wants to switch back to PV - the case that must
         // keep following the moving limit
         network.getVoltageLevel("vlc").newLoad().setId("ldc").setBus("vlc_b").setConnectableBus("vlc_b").setP0(100).setQ0(130).add();
         network.getVoltageLevel("vlc").newGenerator().setId("gc").setBus("vlc_b").setConnectableBus("vlc_b")
@@ -748,10 +748,10 @@ class GpuSaReactiveLimitsTest extends AbstractGpuSaTest {
         com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
                 .setDistributedSlack(true).setUseReactiveLimits(true);
         com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
-                .setReactiveLimitsMaxPqPvSwitch(1)           // one pin exhausts the budget
-                .setSlackBusPMaxMismatch(1e-4)               // a slack round fires AFTER the pin, moving the curve
+                .setReactiveLimitsMaxPqPvSwitch(1)           // one switch exhausts the budget
+                .setSlackBusPMaxMismatch(1e-4)               // a slack round fires AFTER the switch to PQ, moving the curve
                 // UNIFORM_CRITERIA ties the reactive-limit tolerance to this value on BOTH arms
-                // (AbstractAcOuterLoopConfig.createReactiveLimitsOuterLoop), and the post-pin curve
+                // (AbstractAcOuterLoopConfig.createReactiveLimitsOuterLoop), and the post-switch curve
                 // drift is ~1e-5 pu: at the default 1e-4 neither arm re-freezes and the path under
                 // test never runs. The comparison tolerance below is untouched.
                 .setNewtonRaphsonConvEpsPerEq(1e-8)

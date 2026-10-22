@@ -175,7 +175,7 @@ class GpuShuntVoltageControlTest {
     /**
      * Dynamic Q-relocation (§11) on the ONE-TERMINAL shunt case, at the single-solve level so no SA /
      * JAVA machinery is needed. Reproduces the shared-structure batch condition directly: the structure
-     * is extracted with shunt control OFF (Q frozen on the bus-V row, SHUNT_B pinned), then solved with
+     * is extracted with shunt control OFF (Q frozen on the bus-V row, SHUNT_B fixed), then solved with
      * the control-ON activation (bus-V row becomes the v-target identity, SHUNT_B a free Newton row) —
      * exactly what the batch does per round on its fixed structure. Without relocation the frozen
      * structure would keep Q on the (now-identity) bus-V row so SHUNT_B never receives it and freezes at

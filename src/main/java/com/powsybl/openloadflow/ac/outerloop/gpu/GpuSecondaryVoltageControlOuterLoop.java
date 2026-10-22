@@ -84,8 +84,8 @@ public final class GpuSecondaryVoltageControlOuterLoop {
      *  generator VC with DISTINCT controlled buses (controllers <-> controlled is a BIJECTION —
      *  OLF's own zone system requires it: b = A*Jk^T is nControllers x nControlled and its LU
      *  needs a square matrix, so a shared controlled bus is outside OLF's effective scope too),
-     *  and every REMOTE controller carries a real Q range (its K divides by it, and the reactive-limit
-     *  pack gives a remote controller an entry only then). */
+     *  and every REMOTE controller carries a real Q range (its K divides by it, as OLF's qToK does with
+     *  no guard). */
     public static boolean supported(LfNetwork network) {
         java.util.Set<LfBus> controlled = new java.util.HashSet<>();
         for (LfSecondaryVoltageControl secondaryVoltageControl : network.getEnabledSecondaryVoltageControls()) {
@@ -98,7 +98,7 @@ public final class GpuSecondaryVoltageControlOuterLoop {
                     return false;                            // shared controlled bus — not bijective
                 }
                 if (voltageControl.getControlledBus() != controller && !(controller.getMinQ() < controller.getMaxQ())) {
-                    return false;                            // remote controller without an RL entry
+                    return false;                            // remote controller with a single-value range
                 }
             }
         }
@@ -111,7 +111,7 @@ public final class GpuSecondaryVoltageControlOuterLoop {
                              GpuAcElementMapper elementMapper) {
         if (!supported(network)) {
             GpuBatchSkips.record(GpuBatchSkips.Slot.SVC, LOGGER,
-                    "Secondary VC zones not representable on the GPU batch (a shared controlled bus, or a remote controller without a reactive range)");
+                    "Secondary VC zones not representable on the GPU batch (a shared controlled bus, or a remote controller with a single-value reactive range)");
             return new Controllers(List.of(), List.of(), minPlausibleTargetV, maxPlausibleTargetV);
         }
         Map<Integer, Integer> busVRows = new LinkedHashMap<>();

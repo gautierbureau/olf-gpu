@@ -106,8 +106,8 @@ public final class ReactiveCapabilityCurves {
             int bn = bus.getNum();
             var vVar = es.getVariableSet().getVariable(bn, AcVariableType.BUS_V);
             // REPLAY the RL pack's enumeration exactly (ReactiveLimitsPacker.reactiveLimitsPack):
-            // a remote group member with finite limits is an reactiveLimitVoltageControlRole entry regardless of its base
-            // pin state; a local bus enters as basePv or basePqCapable.
+            // a remote group member is an reactiveLimitVoltageControlRole entry whatever its reactive range and its base
+            // PV/PQ state; a local bus enters as basePv or basePqCapable.
             // the SAME predicates as the reactive-limit pack (a local copy drifted on rte6515's full
             // busbar scope at VL-5_0: a pilot whose own control is merged is reached through the
             // main control there)
@@ -117,8 +117,7 @@ public final class ReactiveCapabilityCurves {
                 var voltageControl = GeneratorVoltageControlRoles.mainGeneratorVoltageControl(bus);
                 var pilotVar = es.getVariableSet().getVariable(voltageControl.getControlledBus().getNum(), AcVariableType.BUS_V);
                 // a row < 0 is a bus a contingency disabled: the pack skips it (vCol < 0) and so must the replay
-                if (vVar == null || vVar.getRow() < 0 || pilotVar == null || pilotVar.getRow() < 0
-                        || !(bus.getMinQ() < bus.getMaxQ())) {
+                if (vVar == null || vVar.getRow() < 0 || pilotVar == null || pilotVar.getRow() < 0) {
                     continue;                                // not packed
                 }
                 if (reactiveLimitEntry >= gpuData.reactiveLimits().voltageRow().length || gpuData.reactiveLimits().voltageRow()[reactiveLimitEntry] != vVar.getRow()) {

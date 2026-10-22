@@ -61,7 +61,7 @@ public final class RemoteMemberQPacker {
         int[] vCol = columns.vCol();
         for (LfBus bus : network.getBuses()) {
             boolean member = GeneratorVoltageControlRoles.isRemoteGeneratorVoltageControlControllerElement(bus);   // incl. a pilot that is a controller
-            if (!member || vCol[bus.getNum()] < 0 || !(bus.getMinQ() < bus.getMaxQ())) {
+            if (!member || vCol[bus.getNum()] < 0) {
                 continue;                                // mirror the RL pack's remote-entry condition
             }
             // A pilot-self pilot whose Q is RE-ROUTED through a candidate table (alternateQRow = -2-g) already gets

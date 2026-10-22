@@ -828,6 +828,25 @@ class GpuSaRemoteVoltageControlTest extends AbstractGpuSaTest {
         assertGpuMatchesCpu(network, ctgs, 1e-12, remotePinParameters());
     }
 
+    /** A remote controller whose reactive range is a single value at its active power (g2: [100, 100] MVar) is still
+     *  one of OLF's controllers: its share of the group's reactive need is not 100 MVar, so ReactiveLimitsOuterLoop
+     *  switches it PV -> PQ at that value in the base and in every contingency. The device gave a remote controller a
+     *  reactive-limit entry only for minQ < maxQ, so it never checked g2, which kept sharing like an unlimited
+     *  controller. 1e-12 on device. */
+    @Test
+    void deviceRemoteControllerWithASingleValueRangeSwitchesToPqMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = singleValueRangeRemoteMemberNetwork(100.0);
+        List<Contingency> ctgs = List.of(
+                new Contingency("l45b", new BranchContingency("l45b")),
+                new Contingency("l5", new com.powsybl.contingency.LoadContingency("l5")),
+                new Contingency("g1", new com.powsybl.contingency.GeneratorContingency("g1")));
+        GpuBatchScopeCensus.reset();
+        assertGpuMatchesCpu(network, ctgs, 1e-12, remotePinParameters());
+        assertEquals(3, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(), "census=" + GpuBatchScopeCensus.snapshot());
+    }
+
     /** A merged DEPENDENT control keeps its own target (OLF's ReactiveLimitsOuterLoop compares the bus's own control:
      *  getBusV / getBusTargetV read bus.getGeneratorVoltageControl(), the dependent's), while the cluster sits at the
      *  MAIN's target. Two sections: g0 (main, 401 kV, +-300 MVar) and g1 (dependent, 400.5 kV, 5 MVar ceiling), g1

@@ -862,6 +862,19 @@ final class GpuSaTestNetworks {
         return network;
     }
 
+    /** {@link #remoteFreezeNetwork} whose GEN_R can only produce {@code q} MVar over its operating range: a capability
+     *  curve [-20, 20] MVar at 0 MW, [q, q] from 1 to 20 MW. OLF keeps it as a remote controller (its curve's largest
+     *  range is 40 MVar) and its reactive-limit loop switches it PV -> PQ at q. */
+    static Network singleValueRangeRemoteFreezeNetwork(double q) {
+        Network network = remoteFreezeNetwork();
+        network.getGenerator("GEN_R").newReactiveCapabilityCurve()
+                .beginPoint().setP(0).setMinQ(-20).setMaxQ(20).endPoint()
+                .beginPoint().setP(1).setMinQ(q).setMaxQ(q).endPoint()
+                .beginPoint().setP(20).setMinQ(q).setMaxQ(q).endPoint()
+                .add();
+        return network;
+    }
+
     static List<Contingency> remoteFreezeContingencies() {
         return List.of(new Contingency("LINE_3R_BIS", new BranchContingency("LINE_3R_BIS")));
     }
@@ -1043,6 +1056,24 @@ final class GpuSaTestNetworks {
                     .setR(1.5).setX(40.0).setG1(0).setB1(0).setG2(0).setB2(0).add();
         }
         network.getGenerator(genId).newMinMaxReactiveLimits().setMinQ(-1000).setMaxQ(maxQ).add();
+        return network;
+    }
+
+    /** {@link #remotePinNetwork} whose g2 can only produce {@code q} MVar over its operating range: a capability
+     *  curve [-1000, 1000] MVar at 0 MW, [q, q] from 50 to 400 MW (g2 runs at 100 MW plus its slack share). OLF keeps
+     *  g2 as a remote controller, since its curve's largest range is 2000 MVar (ReactiveRangeCheckMode.MAX), and its
+     *  reactive-limit loop checks it like any other controller. The three generators go up to 400 MW, so that the
+     *  other two can take a lost one's power (at 200 MW the slack distribution saturates). */
+    static Network singleValueRangeRemoteMemberNetwork(double q) {
+        Network network = remotePinNetwork("g2", 1000.0);
+        for (String id : List.of("g1", "g2", "g3")) {
+            network.getGenerator(id).setMaxP(400);
+        }
+        network.getGenerator("g2").newReactiveCapabilityCurve()
+                .beginPoint().setP(0).setMinQ(-1000).setMaxQ(1000).endPoint()
+                .beginPoint().setP(50).setMinQ(q).setMaxQ(q).endPoint()
+                .beginPoint().setP(400).setMinQ(q).setMaxQ(q).endPoint()
+                .add();
         return network;
     }
 

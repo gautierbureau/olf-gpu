@@ -215,8 +215,8 @@ public final class GpuTransformerVoltageControlOuterLoop {
      *  have no step-up exemption. OLF freezes a REMOTE controller exactly like a local one, and so does the
      *  kernel — through the reactive-limit remote PIN (row mode 4) rather than a V identity flip — as long
      *  as the member has a reactive-limit ENTRY, which is what carries the limit type the DISTR_Q key
-     *  renormalization reads. A remote candidate without one (equal Q limits, no pilot column) has no slot
-     *  to mark and still gates the run: null. */
+     *  renormalization reads. A remote candidate without one (a merged control's) has no slot to mark and
+     *  still gates the run: null. */
     private static List<LfBus> freezeCandidates(LfNetwork network, double limit) {
         List<LfBus> out = new ArrayList<>();
         for (LfBus bus : network.getControlledBuses(VoltageControl.Type.GENERATOR)) {
@@ -242,13 +242,13 @@ public final class GpuTransformerVoltageControlOuterLoop {
 
     /** Can a REMOTE controller be frozen in-kernel? It is frozen as a reactive-limit remote PIN, and the
      *  limit type that marks it lives on its reactive-limit ENTRY — which the pack creates for a MAIN
-     *  generator voltage control with distinct Q limits. This is the network-only half of the condition,
-     *  so the whole-run gate can be decided before the extraction exists; {@link #buildFreezeTables}
+     *  generator voltage control, whatever the controller's reactive range. This is the network-only half of
+     *  the condition, so the whole-run gate can be decided before the extraction exists; {@link #buildFreezeTables}
      *  checks the entry really is there and fails loudly if the two ever disagree. */
     private static boolean remoteFreezeRepresentable(LfBus controller) {
         return controller.getGeneratorVoltageControl()
                 .filter(c -> c.getMergeStatus() == VoltageControl.MergeStatus.MAIN)
-                .isPresent() && controller.getMinQ() < controller.getMaxQ();
+                .isPresent();
     }
 
     /** The reactive-limit pack entry of a bus, or −1. */

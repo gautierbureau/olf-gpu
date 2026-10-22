@@ -167,7 +167,9 @@ public final class ReactiveLimitsPacker {
                     // unpins it (deviceMergedDependentSwitchesBackAgainstItsOwnTargetMatchesCpu).
                     var own = bus.getGeneratorVoltageControl().orElse(groupVoltageControl);
                     int pilotV = vCol[own.getControlledBus().getNum()];
-                    if (pilotV >= 0 && bus.getMinQ() < bus.getMaxQ()) {
+                    // whatever its range: a controller whose curve closes to a single value at its active power is
+                    // still one OLF checks, and switches PV -> PQ at that value (it used to need minQ < maxQ here)
+                    if (pilotV >= 0) {
                         reactiveLimitVoltageRow.add(vCol[bn]);                  // transition WRITE row: the member's own bus row
                         reactiveLimitMinQ.add(bus.getMinQ());
                         reactiveLimitMaxQ.add(bus.getMaxQ());

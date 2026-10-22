@@ -336,6 +336,19 @@ class GpuSaTransformerControlTest extends AbstractGpuSaTest {
                 remoteFreezeParameters(150));
     }
 
+    /** The same remote controller with a single-value range at its active power ([2, 2] MVar). It is still one of
+     *  OLF's controllers and a freeze candidate under the transformer-controlled level; the device refused any
+     *  remote candidate without minQ < maxQ, because the reactive-limit pack gave it no entry, and sent the whole run
+     *  to the CPU. 1e-12 on device. */
+    @Test
+    void deviceRemoteGeneratorWithASingleValueRangeUnderControlledLevelMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        assertGpuMatchesCpu(singleValueRangeRemoteFreezeNetwork(2.0), remoteFreezeContingencies(), 1e-12, remoteFreezeParameters(-1));
+        assertEquals(1, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(),
+                "a remote freeze candidate with a single-value range must batch in-kernel");
+    }
+
     /** OLF's testGeneratorVoltageControlMinNominalVoltage network (several transformer voltage controls,
      *  generators at 90 kV): the automatic limit freezes the 90 kV generators while three transformers act;
      *  forcing the limit to 230 kV freezes every generator and fixTransformerVoltageControls disables all

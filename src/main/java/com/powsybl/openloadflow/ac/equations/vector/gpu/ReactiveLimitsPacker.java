@@ -25,7 +25,7 @@ import java.util.List;
 
 /**
  * The reactive-limits pack (ReactiveLimitsOuterLoop): one entry per voltage-controlling bus with its limits, its
- * voltage target and the rows it pins to, plus the static var compensators' quadratic limits.
+ * voltage target and the rows its switch to PQ writes, plus the static var compensators' quadratic limits.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
@@ -50,7 +50,7 @@ public final class ReactiveLimitsPacker {
     }
 
     /** SVC reactive limits are VOLTAGE-DEPENDENT: {@code LfStaticVarCompensatorImpl} evaluates
-     *  Bmin/Bmax*(v*nomV)^2 at the LIVE bus V on every CPU RL check, and a pinned bus re-freezes at
+     *  Bmin/Bmax*(v*nomV)^2 at the LIVE bus V on every CPU RL check, and a bus switched to PQ re-freezes at
      *  the moved limit ({@code busesWithUpdatedQLimits}). Per RL entry, capture the quadratic
      *  coefficients (pu: SVC limit contribution = b*v^2) and the base v^2, so the kernel evaluates
      *  limit(v) = packedLimit + b*(v^2 - v2Base) — exact for the SVC part, identically zero on
@@ -85,8 +85,8 @@ public final class ReactiveLimitsPacker {
         //    control that OLF disabled during the base loadflow because it hit a Q limit): MUST be packed too, so
         //    a contingency that RELIEVES its reactive loading can switch it BACK to PV. Omitting these froze such
         //    a bus at its base-case limit for every scenario — a real ~1e-3 error vs OLF when a contingency eased
-        //    it (e.g. losing a nearby transformer). The device seeds the pinned limit type from the base state
-        //    (v below target ⇒ maxQ-pinned, above ⇒ minQ-pinned) so the switch-back fires.
+        //    it (e.g. losing a nearby transformer). The device seeds its limit type from the base state
+        //    (v below target ⇒ MAX_Q, above ⇒ MIN_Q) so the switch-back fires.
         // REMOTE group members (a MAIN generator voltage control whose controlled bus is NOT the member —
         // plan-group-member-dynamics Part B): packed as reactiveLimitVoltageControlRole=1 entries with the PILOT's v column as the
         // compare row (both RL switch conditions test the pilot's V against the GROUP target — verified B0).
@@ -107,20 +107,20 @@ public final class ReactiveLimitsPacker {
         List<Integer> reactiveLimitActivePowerRow = new ArrayList<>();
         List<Double> reactiveLimitTargetP = new ArrayList<>();
         List<String> reactiveLimitBusId = new ArrayList<>();
-        // Robust-mode pin target (ReactiveLimitsOuterLoop.getInitialGenerationTargetQ): the sum of the
+        // Robust-mode frozen target Q (ReactiveLimitsOuterLoop.getInitialGenerationTargetQ): the sum of the
         // bus generators' targetQ, which is what OLF freezes a REMOTE controller at when its own voltage
         // leaves the realistic band while its Q is still inside its limits.
         List<Double> reactiveLimitInitialTargetQ = new ArrayList<>();
-        // OLF's OWN reason for a base pin (LfBus.getQLimitType): 1 MIN_Q, 2 MAX_Q, 3 MIN_REALISTIC_V,
-        // 4 MAX_REALISTIC_V, 0 none. The device used to guess the KIND of a base pin from which Q
-        // limit the row's target was nearest to - which turns a realistic-voltage pin (target = the
-        // generation targetQ, nowhere near a limit) into a MIN_Q/MAX_Q pin, and the curve-limit drift
-        // then legitimately re-freezes that "limit pin" AT the limit. rte6515 VL-1251_1: OLF pins it
+        // OLF's OWN reason for a PV -> PQ switch in the base (LfBus.getQLimitType): 1 MIN_Q, 2 MAX_Q, 3 MIN_REALISTIC_V,
+        // 4 MAX_REALISTIC_V, 0 none. The device used to guess the KIND of a base switch from which Q
+        // limit the row's target was nearest to - which turns a realistic-voltage freeze (target = the
+        // generation targetQ, nowhere near a limit) into a MIN_Q/MAX_Q switch, and the curve-limit drift
+        // then legitimately re-freezes that "limit switch" AT the limit. rte6515 VL-1251_1: OLF freezes it
         // at -0.0035 (V < 16 kV), the device at -1.0000, in every one of 366 contingencies.
         List<Byte> reactiveLimitBaseQLimitType = new ArrayList<>();
         // A never-solved network has NaN bus voltages, and an SVC's reactive limits are Bmin/Bmax·V²:
         // packing them (and the quadratic reference v²) at NaN left the entry's limits NaN and the
-        // device never pinned it (the base load flow on the driver; a chunk extracts after a solve).
+        // device never switched it to PQ (the base load flow on the driver; a chunk extracts after a solve).
         // Evaluate at a flat 1 pu instead — the kernel's limit(v) = base + B·(v² − v²ref) is exact at
         // any finite reference — and put the NaN back.
         List<LfBus> flatVBuses = new ArrayList<>();
@@ -132,7 +132,7 @@ public final class ReactiveLimitsPacker {
         }
         try {
             // Every voltage controller is packed, whatever the run's outer loops: the ReactiveLimits phase and every
-            // pin/seed of an entry run only when the run has OLF's ReactiveLimitsOuterLoop (BatchSolverContext
+            // PV -> PQ switch or seed of an entry run only when the run has OLF's ReactiveLimitsOuterLoop (BatchSolverContext
             // reactiveLimitsOuterLoop); without it every limit type stays NONE, all PV, as OLF. The VoltageMonitoring
             // phase activates a standby-automaton SVC through its entry either way.
             // This enumeration is WIDER than OLF's, on purpose but knowingly:
@@ -140,9 +140,9 @@ public final class ReactiveLimitsPacker {
             // getGeneratorVoltageControl().isPresent() also answers yes on the CONTROLLED (pilot)
             // bus of a remote group. A pilot with no generators of its own therefore enters as a
             // local entry whose limits are a sum over ZERO generators - minQ = maxQ = 0 - and whose
-            // q is the bus's own reactive balance, zero up to rounding on a transit node. Its PIN is
+            // q is the bus's own reactive balance, zero up to rounding on a transit node. Its PV -> PQ SWITCH is
             // refused in the kernel (reactiveLimitsBatch, degenerate range) because at convEps 1e-12
-            // it fired on the last bits; its entry is kept because a pilot row that came in PINNED
+            // it fired on the last bits; its entry is kept because a pilot row that came in SWITCHED TO PQ
             // from the base still needs the switch-back to hand the group's voltage identity back.
             // 7 such buses here: CQHT_0/1/3/5, HMDR_0, IZUM_0, KUNQ_3.
             for (LfBus bus : network.getBuses()) {
@@ -152,19 +152,19 @@ public final class ReactiveLimitsPacker {
                 boolean remoteMember = GeneratorVoltageControlRoles.isRemoteGenVcMember(bus);
                 // A pilot that is one of its OWN controllers is packed as a remote entry of class 2: its
                 // q feeds the group's DISTR_Q rows like a remote member's (read through the remote q
-                // pack, not its row), a pin puts its own Q balance on its row (mode 4, alternate dest),
-                // and an UNPIN gives the row back its voltage IDENTITY (mode 0), not a DISTR_Q form. As
-                // a LOCAL entry its pin used to land on mode 1, an EMPTY row: measured on the
-                // all-pinned-group fixture, 0.68 kV at the pilot.
+                // pack, not its row), a PV -> PQ switch puts its own Q balance on its row (mode 4, alternate dest),
+                // and a switch BACK TO PV gives the row back its voltage IDENTITY (mode 0), not a DISTR_Q form. As
+                // a LOCAL entry its switch to PQ used to land on mode 1, an EMPTY row: measured on the
+                // no-enabled-controller remote group fixture, 0.68 kV at the pilot.
                 boolean pilotSelf = PilotSelfPacker.isPilotSelfEntry(bus);
                 if ((remoteMember || pilotSelf) && vCol[bn] >= 0) {
                     var groupVoltageControl = GeneratorVoltageControlRoles.mainGeneratorVoltageControl(bus);                   // the GROUP's control: the group identity, the pilot's V row
                     // ...but the switch-back test is the member's OWN control's: OLF's ReactiveLimitsOuterLoop reads
                     // getBusV / getBusTargetV off bus.getGeneratorVoltageControl(), which for a control MERGED into
                     // the group (a dependent section) keeps its own controlled bus and its own target while the
-                    // cluster sits at the main's. Compared against the main's target a base-pinned dependent at
-                    // 405 kV in a 406 kV cluster never saw its "voltage above target" and stayed pinned where OLF
-                    // unpins it (deviceMergedDependentSwitchesBackAgainstItsOwnTargetMatchesCpu).
+                    // cluster sits at the main's. Compared against the main's target a dependent switched to PQ in the
+                    // base at 405 kV in a 406 kV cluster never saw its "voltage above target" and stayed PQ where OLF
+                    // switches it back to PV (deviceMergedDependentSwitchesBackAgainstItsOwnTargetMatchesCpu).
                     var own = bus.getGeneratorVoltageControl().orElse(groupVoltageControl);
                     int pilotV = vCol[own.getControlledBus().getNum()];
                     // whatever its range: a controller whose curve closes to a single value at its active power is
@@ -199,7 +199,7 @@ public final class ReactiveLimitsPacker {
                         reactiveLimitInitialTargetQ.add(initialGenerationTargetQ(bus));
                         reactiveLimitBaseQLimitType.add(GpuQLimitType.of(bus));
                     }
-                    continue;                                  // never let a base-pinned remote member
+                    continue;                                  // never let a remote member switched to PQ in the base
                 }                                              // masquerade as a LOCAL basePqCapable entry
                 boolean basePv = vActive && !qActive;          // voltage-controlling in the base case
                 boolean basePqCapable = qActive && !vActive    // switched to PQ in the base case but still capable
@@ -211,10 +211,10 @@ public final class ReactiveLimitsPacker {
                     double minQ;
                     double maxQ;
                     if (monitoringSvc != null) {
-                        // A standing-by monitored bus never reads its RL limits (mode 1, seeded unpinned) —
+                        // A standing-by monitored bus never reads its RL limits (mode 1, seeded with limit type NONE) —
                         // it reads them only AFTER the VoltageMonitoring activation turns it PV, when the
                         // CPU evaluates them with the SVC in VOLTAGE control. Capture the ACTIVATED limits
-                        // (a standby capture of ~[0,0] would pin the bus right back, undoing the activation).
+                        // (a standby capture of ~[0,0] would switch the bus right back to PQ, undoing the activation).
                         monitoringSvc.setGeneratorControlType(LfGenerator.GeneratorControlType.VOLTAGE);
                         minQ = bus.getMinQ();
                         maxQ = bus.getMaxQ();
@@ -227,7 +227,7 @@ public final class ReactiveLimitsPacker {
                     }
                     reactiveLimitVoltageRow.add(vCol[bn]);
                     if (GpuTrace.RL_TRACE.isOn()) {
-                        // entry -> bus, so a device pin can be named and lined up against OLF's RL_SWITCH
+                        // entry -> bus, so a device PV -> PQ switch can be named and lined up against OLF's RL_SWITCH
                         System.err.println("GPU_RL_ENTRY idx=" + (reactiveLimitVoltageRow.size() - 1) + " vRow=" + vCol[bn]
                                 + " bus=" + bus.getId() + " minQ=" + minQ + " maxQ=" + maxQ
                                 + " loadQ=" + bus.getLoadTargetQ() + " basePv=" + basePv
@@ -272,7 +272,7 @@ public final class ReactiveLimitsPacker {
         }
         if (GpuTrace.RL_TRACE.isOn()) {
             // The pilot-self groups this extraction sees, with their member ENTRIES: the rotation the device
-            // still owes OLF is computed from those entries' pin states (see PilotSelfPacker.PilotSelfPack).
+            // still owes OLF is computed from those entries' PV/PQ states (see PilotSelfPacker.PilotSelfPack).
             PilotSelfPacker.PilotSelfPack pilotSelfPack = PilotSelfPacker.pilotSelfGroups(network, columns, GpuAcArrays.toIntArray(reactiveLimitBusNum));
             java.util.Map<Integer, Integer> bySize = new java.util.TreeMap<>();
             for (int g = 0; g < pilotSelfPack.groupCount(); g++) {
@@ -295,16 +295,16 @@ public final class ReactiveLimitsPacker {
                 idRanks(reactiveLimitBusId), GpuAcArrays.toDoubleArray(reactiveLimitInitialTargetQ), baseQLimitTypes);
     }
 
-    /** The targetQ OLF gives a member once the reactive-limits loop UNPINS it. A member pinned in the
-     *  base has its generation targetQ FROZEN at the limit (freezeGenerationTargetQAndDisableGenerator
-     *  VoltageControl), so {@code getTargetQ()} returns the pin, not what the kernel needs for an
-     *  unpinned member. OLF's unpin (setGeneratorVoltageControlEnabledAndRecomputeTargetQ) invalidates
+    /** The targetQ OLF gives a member once the reactive-limits loop switches it BACK TO PV. A member switched to
+     *  PQ in the base has its generation targetQ FROZEN at the limit (freezeGenerationTargetQAndDisableGenerator
+     *  VoltageControl), so {@code getTargetQ()} returns that frozen value, not what the kernel needs for a
+     *  member back on PV. OLF's switch back (setGeneratorVoltageControlEnabledAndRecomputeTargetQ) invalidates
      *  the frozen value and getGenerationTargetQ recomputes it as the sum over the non-voltage-
      *  controlling, enabled generators - replayed here verbatim. Measured on network.xiidm / LJYK: a
-     *  three-member group pinned in the base and unpinned by the contingency kept sharing its
-     *  deviation from the PINNED targets, every member landed 1.4 MVar inside its own limit, and the
-     *  CPU's re-pin of two of them never happened (6e-3 kV at convEps 1e-12 on both arms). */
-    static double unpinnedTargetQ(LfBus m) {
+     *  three-member group switched to PQ in the base and back to PV by the contingency kept sharing its
+     *  deviation from the FROZEN targets, every member landed 1.4 MVar inside its own limit, and the
+     *  CPU's second switch to PQ of two of them never happened (6e-3 kV at convEps 1e-12 on both arms). */
+    static double recomputedTargetQ(LfBus m) {
         if (!m.isGenerationTargetQFrozen()) {
             return m.getTargetQ();
         }

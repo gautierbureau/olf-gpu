@@ -13,7 +13,7 @@ package com.powsybl.openloadflow.ac.equations.vector.gpu.fixedmatrix;
  * relocation put it there, {@link CouplerTreeRelocation}) keeps its {@code BUS_TARGET_V} on the parent coupler's
  * {@code DUMMY_Q} row, on the bus's own V column: row mode 6, {@code GpuRowMode.CROSS_FIXED_VARIABLE}. The planners
  * choose the row here; the device writes it in four kernels (native {@code fixedmatrix/cross_identity.cuh}): the
- * fills' {@code applyRowModeBatch}, the reactive-limit pass and its seed (the pin row), and the pilot voltage and
+ * fills' {@code applyRowModeBatch}, the reactive-limit pass and its seed (the target Q row), and the pilot voltage and
  * remote voltage control kernels (a row holding a fixed variable).
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}

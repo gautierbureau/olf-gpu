@@ -15,7 +15,7 @@ import static com.powsybl.openloadflow.ac.outerloop.gpu.GpuHvdcAcEmulationLimits
 
 /**
  * DEVICE port of OLF's {@code FreezingHvdcACEmulationOuterloop}: initialize() FREEZES every AC-emulation HVDC at
- * its scenario's warm-start flows BEFORE the first solve (VSC injections pinned, coupling off); its first check,
+ * its scenario's warm-start flows BEFORE the first solve (VSC injections fixed, coupling off); its first check,
  * which UNFREEZES them all, runs in the kernel (hvdc_ac_emulation.cu) on the statuses
  * {@link GpuHvdcAcEmulationLimitsOuterLoop} installs.
  *
@@ -27,7 +27,7 @@ public final class GpuFreezingHvdcACEmulationOuterloop {
     }
 
     /** OLF switchToFrozenState at the given (warm-start) evaluation point: pMax-clamped when the
-     *  linear flows overpass the limits, else pinned at the current flows. */
+     *  linear flows overpass the limits, else fixed at the current flows. */
     private static double[] frozenDeltas(GpuHvdcAcEmulationLimitsOuterLoop.Controller c, double p1, double p2) {
         if (p1 > c.pMax12()) {
             return GpuHvdcAcEmulationLimitsOuterLoop.saturationDeltas(c, true);
@@ -39,7 +39,7 @@ public final class GpuFreezingHvdcACEmulationOuterloop {
 
     /**
      * Pre-solve freeze (OLF FreezingHvdcACEmulation.initialize): every live hvdc frozen at its scenario's WARM-START
-     * flows — hv disabled bits set, converter-bus targets pinned, on the batch's own override list. Returns the
+     * flows — hv disabled bits set, converter-bus targets fixed, on the batch's own override list. Returns the
      * per-(scenario, hvdc) status matrix seeded GpuAcEmulationStatus.FROZEN (or GpuAcEmulationStatus.LINEAR_MODE where the freeze cannot apply), and records in
      * {@code appliedDelta1}/{@code appliedDelta2} the converter-row delta each freeze APPLIED (relative to the base-status
      * delta), which the in-kernel loops need to keep applying transitions incrementally.

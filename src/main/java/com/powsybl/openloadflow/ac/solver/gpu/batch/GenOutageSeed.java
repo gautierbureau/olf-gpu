@@ -105,14 +105,14 @@ final class GenOutageSeed {
                 if (go.silencesReactiveLimitEntry()) {
                     // Nothing left to control voltage at that bus: its reactive-limit
                     // entry is seeded FROZEN for this scenario (setBatchReactiveLimitGeneratorsLost) - no
-                    // pin, no switch back to PV with its only generator gone, and not a
+                    // switch to PQ, no switch back to PV with its only generator gone, and not a
                     // live controller to the pilot-self layout. NOT the islanded channel
                     // a contingency-stranded controller uses: "islanded" means the bus
                     // itself is gone and closes the pilot-self gate (no balance to
                     // emit), while this bus is alive and its reactive balance must be
                     // emitted - on the carrier, then on its own row once every survivor
-                    // pins. Measured on rte6515 GEN-1522 (the pilot VL-1522_0 loses its
-                    // only generator, the survivor VL-1522_1 pins): islanded, the gate
+                    // switches to PQ. Measured on rte6515 GEN-1522 (the pilot VL-1522_0 loses its
+                    // only generator, the survivor VL-1522_1 switches to PQ): islanded, the gate
                     // suppressed the pilot's q, its row flipped to host it assembled
                     // EMPTY and the bus sat at its 1.122 target against OLF's 1.0811,
                     // 3.2 kV at VL-1525.
@@ -121,13 +121,13 @@ final class GenOutageSeed {
                     // inactive-member weights on the survivors' DISTR_Q rows, and frozen it
                     // would also be emitted raw on the carrier (deviceGenOutageAtDistrQBus,
                     // deviceTwoMemberPilotControllerLosingAController: 0.37 kV).
-                    // EXCEPT a LOCAL controller the base had PINNED: OLF's processLostGenerators disables its
+                    // EXCEPT a LOCAL controller the base had SWITCHED TO PQ: OLF's processLostGenerators disables its
                     // voltage control but leaves its qLimitType and its place among the controller elements,
                     // so the reactive-limits loop still runs checkPqBus on it - the bus switches back to PV
-                    // when its voltage asks (MIN_Q pin, V under target) and pins again at its now-empty
+                    // when its voltage asks (at MIN_Q, V under target) and switches to PQ again at its now-empty
                     // range ([0, 0]: no generator left) on the next pass. Measured on network.xiidm/FBQV:
-                    // FBQF_0 back to PV at OLF's first reactive-limit pass and pinned MAX_Q at the second;
-                    // silenced, the device kept it pinned and CQEM_0 pinned one pass late - the only
+                    // FBQF_0 back to PV at OLF's first reactive-limit pass and switched to PQ at MAX_Q at the second;
+                    // silenced, the device kept it PQ and CQEM_0 switched to PQ one pass late - the only
                     // contingency of 24,376 whose outer-loop sequence differed from the 1-thread CPU's.
                     // Its limits already collapse with the outage (minQDelta/maxQDelta, the curve channel),
                     // so the entry is simply left live (fixture:
@@ -137,16 +137,16 @@ final class GenOutageSeed {
                             && gpuData.switchedPvToPqInBase(go.reactiveLimitEntry());
                     if (liveDeadLocal) {
                         // left live: no channel
-                    } else if (go.flipsPilotRowWhenAllPinned() || gpuData.switchedPvToPqInBase(go.reactiveLimitEntry())) {
-                        // ...and a MEMBER the base PINNED: its reactive balance already sits on
-                        // its own mode-4 row (its pin row), and OLF recomputes that balance's
+                    } else if (go.flipsPilotRowWithoutEnabledController() || gpuData.switchedPvToPqInBase(go.reactiveLimitEntry())) {
+                        // ...and a MEMBER the base SWITCHED TO PQ: its reactive balance already sits on
+                        // its own mode-4 row (its target Q row), and OLF recomputes that balance's
                         // target over the generators left - none - the moment the last one goes
                         // (setGeneratorVoltageControlEnabledAndRecomputeTargetQ). Frozen gen-lost,
                         // the seed stamps 0 - loadQ there and the check never touches it again;
-                        // islanded, the row kept the pinned LIMIT as its target: measured on the
+                        // islanded, the row kept the frozen LIMIT as its target: measured on the
                         // merged-control fixture as 0.36 kV at b1 (row 7 at 0.05 against OLF's 0),
                         // and the shape of rte6515's VL-5997 / VL-6003 / VL-6194 / VL-6229
-                        // relocated pins.
+                        // relocated members switched to PQ.
                         cl.reactiveLimitGeneratorsLostScenarioEntryList.add(s);
                         cl.reactiveLimitGeneratorsLostScenarioEntryList.add(go.reactiveLimitEntry());
                     } else {
@@ -179,8 +179,8 @@ final class GenOutageSeed {
                         int distrQRowMode = rs.rowModePerScenario[s] != null
                                 ? rs.rowModePerScenario[s][distrQTargetRow] : baseRowMode[distrQTargetRow];
                         // Seed only where the row still HOSTS a DISTR_Q equation this
-                        // scenario. Mode 4 means it hosts its own reactive balance (an RL
-                        // pin, or a control the contingency killed and whose BUS_TARGET_Q
+                        // scenario. Mode 4 means it hosts its own reactive balance (a PV -> PQ
+                        // switch, or a control the contingency killed and whose BUS_TARGET_Q
                         // the injection override owns); mode 0 means it is an IDENTITY —
                         // a re-merged control's voltage target (reMergedPvEntry, the remote
                         // main of a split group) or a frozen/outaged row. updateDistrQ-
@@ -223,10 +223,10 @@ final class GenOutageSeed {
                         rs.overrides.add(s * n + distrQTargetRow, go.distrQTargetValues()[t]);
                     }
                 }
-                if (go.flipsPilotRowWhenAllPinned()) {
+                if (go.flipsPilotRowWithoutEnabledController()) {
                     cl.pfSlot.add(s);                     // handled IN the solve
-                    cl.pfRow.add(go.pinnedPilotVRow());
-                    cl.pfQTarget.add(go.pinnedPilotQTarget());
+                    cl.pfRow.add(go.pilotVRowWithoutEnabledController());
+                    cl.pfQTarget.add(go.pilotQTargetWithoutEnabledController());
                     cl.pilotFlipSurvivorReactiveLimitEntryCounts.add(go.pilotGroupSurvivorReactiveLimitEntries().length);
                     for (int entry : go.pilotGroupSurvivorReactiveLimitEntries()) {
                         cl.pilotFlipSurvivorReactiveLimitEntries.add(entry);

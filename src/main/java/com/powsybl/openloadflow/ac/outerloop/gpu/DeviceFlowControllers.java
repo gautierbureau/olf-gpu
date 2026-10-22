@@ -25,7 +25,7 @@ import java.util.List;
  * {@link GpuIncrementalPhaseControlOuterLoop} build the controllers, this class uploads them as one table
  * (reactive power controllers first) and writes the final taps back; the
  * loops run in the kernel (incremental_flow_control.cu): batched sensitivities with a unit RHS at each
- * controller's pinned identity row (BRANCH_TARGET_RHO1 / BRANCH_TARGET_ALPHA1), the controlled branch
+ * controller's target row, the identity holding rho or a1 at its tap (BRANCH_TARGET_RHO1 / BRANCH_TARGET_ALPHA1), the controlled branch
  * flow and its gradient through the codegen'd closed-branch terms (flow_observation.cuh), OLF's tap
  * decisions and its direction ratchet.
  *
@@ -42,7 +42,7 @@ public final class DeviceFlowControllers {
     private DeviceFlowControllers() {
     }
 
-    public record Controller(int kind, int pinRow, int tapColumn, double targetValue, double halfDeadband, double[][] tapRows, int baseTapIndex,
+    public record Controller(int kind, int targetRow, int tapColumn, double targetValue, double halfDeadband, double[][] tapRows, int baseTapIndex,
                       int elemIndex, int controlledElementIndex, int maxTapShift, int controlledSide, int branchNum) {
     }
 
@@ -57,7 +57,7 @@ public final class DeviceFlowControllers {
         }
         int nControllers = controllers.size();
         int[] kind = new int[nControllers];
-        int[] pinRow = new int[nControllers];
+        int[] targetRow = new int[nControllers];
         int[] tapColumn = new int[nControllers];
         int[] side = new int[nControllers];
         double[] targetValue = new double[nControllers];
@@ -71,7 +71,7 @@ public final class DeviceFlowControllers {
         for (int c = 0; c < nControllers; c++) {
             Controller controller = controllers.get(c);
             kind[c] = controller.kind();
-            pinRow[c] = controller.pinRow();
+            targetRow[c] = controller.targetRow();
             tapColumn[c] = controller.tapColumn();
             side[c] = controller.controlledSide();
             targetValue[c] = controller.targetValue();
@@ -89,7 +89,7 @@ public final class DeviceFlowControllers {
         }
         tapStart[nControllers] = tapRows.size() / GpuPiModelColumn.COUNT;
         boolean owned = PhaseControlNative.setBatchFlowControllers(handle,
-                kind, pinRow, tapColumn, side, targetValue, halfTargetDeadband, elem, controlledElement, tapStart,
+                kind, targetRow, tapColumn, side, targetValue, halfTargetDeadband, elem, controlledElement, tapStart,
                 tapRows.stream().mapToDouble(Double::doubleValue).toArray(), baseTap, maxShift) != 0;
         LOGGER.info("Uploaded {} flow-observed incremental controllers to device: {}", nControllers, owned ? "in-kernel loops" : "host orchestrator");
         if (GpuTrace.BATCH_TRACE.isOn()) {

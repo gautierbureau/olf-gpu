@@ -24,7 +24,7 @@ import java.util.Set;
 
 /**
  * The plan of a contingency that only takes branches out, islanding buses or not: the voltage controls the islands
- * cut or re-merge (DISTR_Q weights and keys, re-merged and pinned controllers, split groups), the distributed-slack
+ * cut or re-merge (DISTR_Q weights and keys, re-merged controllers and those switched to PQ, split groups), the distributed-slack
  * participants and reactive-limit controllers they strand, the islanded HVDCs, and the islanded rows frozen at a flat
  * state; or a refusal to the CPU when a shape is outside what the device models.
  *
@@ -194,8 +194,8 @@ final class BranchOutagePlanner {
         pb.islandedReactiveLimitEntriesByIndex[i] = IslandedBuses.islandedReactiveLimitControllers(fi.rows(), gpuData);
         if ("1".equals(GpuTrace.DBG_BUSDUMP.value()) && fi.rows().length > 0) {
             // Which reactive-limits ENTRIES the island masks, and which frozen rows are an
-            // reactiveLimitVoltageRow at all: an unmasked frozen controller row is a row the RL pass can pin,
-            // and a pin on a frozen row survives every later target override.
+            // reactiveLimitVoltageRow at all: an unmasked frozen controller row is a row the RL pass can switch to PQ,
+            // and a switch to PQ on a frozen row survives every later target override.
             System.err.println("ISLANDED-RL '" + c.contingencyId() + "' frozenRows="
                     + java.util.Arrays.toString(fi.rows()) + " maskedEntries="
                     + java.util.Arrays.toString(pb.islandedReactiveLimitEntriesByIndex[i]) + " rlVrowOfMasked="
@@ -271,9 +271,9 @@ final class BranchOutagePlanner {
                 }
                 int reMergedReactiveLimitEntry = gpuData.reactiveLimits().entryOf(e.getKey().getNum());
                 int crossRow = CrossIdentity.row(vVar.getRow(), pb.relocatedChildRows, outagedZeroImpedanceBranchNums);
-                // Same rule as the island site above: a bus PINNED at its reactive limit in the base
+                // Same rule as the island site above: a bus SWITCHED TO PQ at its reactive limit in the base
                 // cannot hold a voltage identity (OLF has it PQ). This site lacked the check, so a
-                // middle-section loss whose surviving section is base-pinned batched with the
+                // middle-section loss whose surviving section is switched to PQ in the base batched with the
                 // identity: rte6515 BUS-6157_BBS_1 (VL-6157_1, baseLimitType=1), BUS-6194_BBS_2
                 // (VL-6194_2, 2) and BUS-6229_BBS_1 (VL-6229_1, 2) — three device failures on
                 // systems OLF converges, replayed on the CPU.

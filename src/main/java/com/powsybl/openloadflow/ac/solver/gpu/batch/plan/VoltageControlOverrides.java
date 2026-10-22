@@ -128,7 +128,7 @@ final class VoltageControlOverrides {
      * Classify the island, and collect into {@code lostControllers} the islanded controller buses
      * whose group survives without them.
      *
-     * <p>A group that goes into the island WHOLE is not a split: {@link #islandedFrozen} pins the
+     * <p>A group that goes into the island WHOLE is not a split: {@link #islandedFrozen} freezes the
      * BUS_V and BUS_PHI row of every islanded bus, so the pilot's target-V row and every
      * controller's DISTR_Q row leave the solved system together.
      *
@@ -262,16 +262,17 @@ final class VoltageControlOverrides {
             // contingency (0, 10, 15, 27, 35, 45, 51, 56 ...), each late contingency carrying bogus overrides
             // for every group an earlier one had touched; BUS-612_BBS_2's VL-5967 DISTR_Q row became the
             // pilot's raw q alone (weights 1.0 / 0), the split (1.694, -1.574) against OLF's (0.912, -0.782)
-            // pinned both members spuriously, and the distributed power ended 0.141 MW off.
+            // switched both members to PQ spuriously, and the distributed power ended 0.141 MW off.
             for (LfBus bus : touched) {
                 updateMainReactiveKeys(bus);
             }
             double[] baseW = gpuData.distrQ().weight();
             double[] newW = reweightedDistrQWeights(es, gpuData, touched);
             // The member KEYS after the loss (OLF's qPct on the touched groups' MAIN controls, just updated): the
-            // kernels renormalize them over the members a pin leaves enabled, so the loss and an in-flight pin in the
-            // same group compose - which fixed per-contribution weights cannot do (the fill applied them over its
-            // pin-aware recompute and the rows kept the outage-only split while the targets followed the pin).
+            // kernels renormalize them over the members a PV -> PQ switch leaves enabled, so the loss and an in-flight
+            // switch in the same group compose - which fixed per-contribution weights cannot do (the fill applied them
+            // over its PV/PQ-aware recompute and the rows kept the outage-only split while the targets followed the
+            // switch).
             boolean keyed = newW != null;                    // the analytic path: the pack's structure is the base's
             List<Double> keyMember = new ArrayList<>();
             List<Double> keyValue = new ArrayList<>();

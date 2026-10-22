@@ -159,7 +159,7 @@ public final class GpuBatchInjectionOutages {
                     if (mHasRow[m] == 0 || mRow[m] < 0 || inactive.contains(m)) {
                         continue;                            // an islanded member's own row is frozen
                     }
-                    // ...and a member PINNED in the base has no DISTR_Q equation: its row hosts its
+                    // ...and a member SWITCHED TO PQ in the base has no DISTR_Q equation: its row hosts its
                     // own reactive balance at the frozen limit, which OLF never rewrites (see the
                     // generator-outage loop below for the measurement - this is the loop a BRANCH
                     // outage that islands a member reaches, network.xiidm/IZUZ included).
@@ -169,8 +169,8 @@ public final class GpuBatchInjectionOutages {
                     double keySum = keySumByLabel.getOrDefault(labelOf != null ? labelOf.getOrDefault(m, 0) : 0, 0.0);
                     double qpk = keySum == 0 || !memberKeepsKey(any, mBusNum[m], m, -1) ? 0 : mKey[m] / keySum;
                     // distrQMemberRow is STRUCTURAL: under the coupler-tree relocation a child controller's
-                    // reactive row is its parent coupler's DUMMY_Q. A scenario that OPENS that coupler pins
-                    // the dummy to a DUMMY_TARGET identity and OLF's DISTR_Q sits on the bus's own row
+                    // reactive row is its parent coupler's DUMMY_Q. A scenario that OPENS that coupler fixes
+                    // the dummy with a DUMMY_TARGET identity and OLF's DISTR_Q sits on the bus's own row
                     // instead (read off OLF's post-contingency dump for the middle-section fixture:
                     // distr_q5 ACTIVE with keys 0.5/0.5, bus_target_q[5] inactive). Seeding the
                     // renormalized target on the dummy left the live row at its BASE target, so the device
@@ -194,9 +194,9 @@ public final class GpuBatchInjectionOutages {
         return out;
     }
 
-    /** A member's targetQ in the BASE state these seeds describe: a base-pinned member IS frozen at its
-     *  limit there. The device table holds the UNPINNED value instead (what the kernel needs once a pin
-     *  lifts), so the seeds read the bus. */
+    /** A member's targetQ in the BASE state these seeds describe: a member switched to PQ in the base IS frozen
+     *  at its limit there. The device table holds the RECOMPUTED value instead (what the kernel needs once the
+     *  member switches back to PV), so the seeds read the bus. */
     private static double baseTargetQ(LfBus anyMember, int memberBusNum) {
         return anyMember.getNetwork().getBus(memberBusNum).getTargetQ();
     }
@@ -253,7 +253,7 @@ public final class GpuBatchInjectionOutages {
         for (GenOutage go : out) {
             movesPilotQ |= go.pilotQGroup() >= 0;
             changesControl |= go.toPq() || go.deactivatesDistrQMember() || go.killsPilotVoltageIdentity()
-                    || go.flipsPilotRowWhenAllPinned();
+                    || go.flipsPilotRowWithoutEnabledController();
         }
         if (movesPilotQ && changesControl) {
             return null;
@@ -280,7 +280,7 @@ public final class GpuBatchInjectionOutages {
 
     /** The entries whose balance rows the scenario's structure moves HOME: a bus whose balances the coupler-tree
      *  relocation put on a coupler's DUMMY rows gets them back on its own rows when that coupler opens or leaves the
-     *  tree (the chunk solver pins the dummies to identities and the kernel's stock-placement fallback brings the
+     *  tree (the chunk solver fixes the dummies with identities and the kernel's stock-placement fallback brings the
      *  equations home), so a target the plan wrote at the relocated row would land on an identity and be lost.
      *  Measured on network.xiidm DBIG: a section loss that opens the coupler DBIS while both sides stay energized and
      *  takes a 20 MW load off the child DBIE_1 - the override sat on the DUMMY_P row, the load stayed in the balance,
@@ -429,9 +429,9 @@ public final class GpuBatchInjectionOutages {
         // rte6515 LOAD-5958, the solve oscillates (1.111 -> 0.995 -> 0.880 -> 0.765 -> 1.598 -> 1.410
         // ...) and exhausts its iterations instead of converging.
         // REMOTELY is the operative word, and the narrower test is load-bearing: a LOCALLY controlled
-        // bus that the base pinned PV->PQ also has busPv false, and its V row DOES solve the reactive
+        // bus that the base switched PV->PQ also has busPv false, and its V row DOES solve the reactive
         // equation, so it must keep shedding the lost Q. Suppressing it there moves
-        // devicePinnedBusLosingReactiveLoadMatchesCpu's B4 by 1.0e-08 kV.
+        // deviceBusSwitchedToPqLosingReactiveLoadMatchesCpu's B4 by 1.0e-08 kV.
         boolean qOverride = toPq || !busPv && !remotelyControlled;
         // ...but a remotely controlled bus still HAS a reactive balance - OLF keeps its BUS_TARGET_Q, generation
         // minus load like any PQ bus - and the extraction moved it onto the relocation group's CARRIER (alternateQRow =
@@ -458,13 +458,13 @@ public final class GpuBatchInjectionOutages {
         }
         double qTarget = 0;
         if (qOverride) {
-            // A bus the BASE loadflow pinned at a reactive limit has its generation target Q FROZEN at
+            // A bus the BASE loadflow switched to PQ at a reactive limit has its generation target Q FROZEN at
             // that limit, and OLF keeps that value as long as a VOLTAGE-type generator survives:
             // processLostGenerators calls setGeneratorVoltageControlEnabledAndRecomputeTargetQ only when
             // none does, and invalidateGenerationTargetP leaves a frozen bus frozen. Summing the
             // survivors' own targetQ instead hands the first inner solve a target 1.7 pu off the one
             // OLF solves (measured at rte6515 VL-6003_0: 1.03 vs 2.69 pu) — the reactive-limit pass
-            // then makes its pin/unpin decisions along a trajectory the CPU never takes. When the last
+            // then makes its switch decisions along a trajectory the CPU never takes. When the last
             // VOLTAGE generator goes, OLF unfreezes and recomputes over what is left, which is what the
             // survivor sum gives (rte6515 GEN-6095/6130/6226/6239, one generator on the bus: keeping the
             // frozen value there injects the dead generator's reactive limit, ~1 kV).
@@ -490,10 +490,10 @@ public final class GpuBatchInjectionOutages {
         // device's run-constant aggregate, while OLF's bus.getMinQ()/getMaxQ() sum only the generators
         // that are still there. Name the reactive-limit entry and how much to take off it. (A bus the
         // outage takes to PQ needs nothing: its entry stops being a controller and the limits are never
-        // read.) A bus the BASE loadflow already PINNED at a limit is NOT that case, though it reads
-        // busPv=false: its entry is still a controller, its pinned target Q IS the limit, and it can
-        // switch back to PV. Measured on rte6515 GEN-6003 — one generator of three lost at a pinned
-        // bus, the stale capability injected as Q, and 1.9 kV network-wide.
+        // read.) A bus the BASE loadflow already SWITCHED TO PQ at a limit is NOT that case, though it
+        // reads busPv=false: its entry is still a controller, its frozen target Q IS the limit, and it can
+        // switch back to PV. Measured on rte6515 GEN-6003 — one generator of three lost at a bus switched
+        // to PQ, the stale capability injected as Q, and 1.9 kV network-wide.
         int[] reactiveLimitBusNum = gpuData.reactiveLimits().busNum();
         ReactiveLimitDeltas reactiveLimitDeltasOut = reactiveLimitDeltas(reactiveLimitBusNum, bus, toPq, lost, lostLoadQ);
         int reactiveLimitEntry = reactiveLimitDeltasOut.reactiveLimitEntry();
@@ -503,7 +503,7 @@ public final class GpuBatchInjectionOutages {
         double svcBminDelta = reactiveLimitDeltasOut.svcBminDelta();
         double svcBmaxDelta = reactiveLimitDeltasOut.svcBmaxDelta();
         // No generator left at all. The reactive-limit entry must stop being a controller for this
-        // scenario: a bus the BASE loadflow had already pinned PQ keeps a seeded limit type so a
+        // scenario: a bus the BASE loadflow had already switched to PQ keeps a seeded limit type so a
         // relieving contingency can switch it back to PV — and with its only generator gone there is
         // nothing to switch back to. OLF simply has no controller there. (Measured on rte6515 GEN-6130:
         // 0.995 kV at that node against 2.2e-4 everywhere else, and one apparent-power violation.)
@@ -552,20 +552,20 @@ public final class GpuBatchInjectionOutages {
         distrQTargetRows = distrQSeed.rows();
         distrQTargetValues = distrQSeed.values();
         int[] pilotSurvivorReactiveLimitEntries = vcSurvives ? survivorReactiveLimitEntriesOf(bus, lostSet, reactiveLimitBusNum) : new int[0];
-        // The pilot's OWN row, for the runtime flip when every survivor pins. Only when the outaged
+        // The pilot's OWN row, for the runtime flip when every survivor switches to PQ. Only when the outaged
         // bus IS the pilot: that is the case where losing its generators makes the pilot stop being
         // one of its own controllers and ACQUIRE a reactive balance. See
-        // GenOutage.flipsPilotRowWhenAllPinned.
-        int pinnedPilotVRow = -1;
-        double pinnedPilotQTarget = 0;
+        // GenOutage.flipsPilotRowWithoutEnabledController.
+        int pilotVRowWithoutEnabledController = -1;
+        double pilotQTargetWithoutEnabledController = 0;
         if (vcSurvives && pilotSurvivorReactiveLimitEntries.length > 0
                 && mainVcOf(bus).orElseThrow().getControlledBus() == bus) {
             var pilotV = es.getVariableSet().getVariable(bus.getNum(), AcVariableType.BUS_V);
             if (pilotV != null && pilotV.getRow() >= 0) {
-                pinnedPilotVRow = pilotV.getRow();
+                pilotVRowWithoutEnabledController = pilotV.getRow();
                 // generationTargetQ - loadTargetQ. A VOLTAGE generator contributes 0 to
                 // generationTargetQ, so losing one leaves this unchanged.
-                pinnedPilotQTarget = bus.getTargetQ();
+                pilotQTargetWithoutEnabledController = bus.getTargetQ();
             }
         }
         java.util.Set<String> lostGenIds = lost.stream().map(LfGenerator::getId)
@@ -577,9 +577,9 @@ public final class GpuBatchInjectionOutages {
         // a DISTR_Q bus keeps its Q on its own group row and is never relocated (ExtractionColumns).
         int qTargetRow = busRows[2][busNum] >= 0 && busRows[1][busNum] >= 0 && busRows[1][busNum] != vRow
                 ? busRows[1][busNum] : -1;
-        // A relocated DISTR_Q member the BASE PINNED has no static Q row (its balance rides the group's rows)
+        // A relocated DISTR_Q member the BASE SWITCHED TO PQ has no static Q row (its balance rides the group's rows)
         // but a mode-4 ALTERNATE row - its coupler's DUMMY_Q - that hosts its own balance from the start, with
-        // the pinned limit as target. That is the row the override belongs on: OLF recomputes the target over the
+        // the frozen limit as target. That is the row the override belongs on: OLF recomputes the target over the
         // generators left the moment the last one goes, and nothing on the device rewrites a base-set target
         // otherwise. Written at the bus's own V row (the coupler's ZERO_V, target 0) the override was a no-op:
         // measured on the merged-control fixture as 0.36 kV at b1, row 7 ending at 0.05 against OLF's 0.
@@ -592,7 +592,7 @@ public final class GpuBatchInjectionOutages {
                 distributedSlackOverrideMaxDelta, distributedSlackOverrideMinDelta, reactiveLimitEntry, minQDelta, maxQDelta, allGensLost, lostGenIds, lostFactorSum,
                 lostLoadP - lostP, loadQDelta, inactiveDistrQMember, pilotSurvivorReactiveLimitEntries,
                 distrQTargetRows, distrQTargetValues, deadRemoteMember ? GpuRowMode.BUS_TARGET_Q : GpuRowMode.EQUATION,
-                deadPilotVRow, deadPilotQTarget, pinnedPilotVRow, pinnedPilotQTarget,
+                deadPilotVRow, deadPilotQTarget, pilotVRowWithoutEnabledController, pilotQTargetWithoutEnabledController,
                 distrQTargetQOverrideMember, distrQTargetQOverrideValue, qTargetRow, pilotQGroup, pilotQDelta, slackBus, -1, svcBminDelta, svcBmaxDelta);
     }
 
@@ -622,7 +622,7 @@ public final class GpuBatchInjectionOutages {
         // carrier's DISTR_Q is suppressed. Two or more survivors used to route to the CPU
         // on a 0.149 kV measurement, which was the seed-time stamps reading the dynamic
         // limit arrays before anything had filled them on the cold path (carrier target
-        // 0 - 0, a pinned peer's target 0 - 0): devicePilotControllerLosingItsOwnGenerator
+        // 0 - 0, a PQ peer's target 0 - 0): devicePilotControllerLosingItsOwnGenerator
         // MatchesCpu is exact at 1e-11 since, and rte6515's 50 such outages batch.
         return survivors > 0;
     }
@@ -648,13 +648,13 @@ public final class GpuBatchInjectionOutages {
         // the CPU, as does a Q-carrying load loss here.
         // Admit exactly the shape the degeneration argument covers, and no more:
         //  (a) another controller survives, so the group still holds this bus's voltage;
-        //  (b) the survivors MAY all pin: a pinned survivor's row takes its own balance (mode 4), and
-        //      a pinned pilot's too, so nothing is evicted - a runtime reject used to replay such a
-        //      scenario on the CPU (DISTR_Q_PILOT_ALL_PINNED), for the case where the outaged bus
+        //  (b) the survivors MAY all switch to PQ: the row of a survivor switched to PQ takes its own
+        //      balance (mode 4), and a pilot's switched to PQ too, so nothing is evicted - a runtime reject
+        //      used to replay such a scenario on the CPU, for the case where the outaged bus
         //      IS the pilot and its balance rode a survivor's row (GEN-1522: q 0.601 vs OLF's 0);
-        //      that case flips the pilot's own row in the solve since (flipsPilotRowWhenAllPinned),
-        //      and the member case was measured exact without the reject (runtime-pin fixture,
-        //      rte6515 GEN-6231#0). Where the survivors keep headroom the degeneration
+        //      that case flips the pilot's own row in the solve since (flipsPilotRowWithoutEnabledController),
+        //      and the member case was measured exact without the reject (the fixture whose survivor
+        //      switches to PQ at runtime, rte6515 GEN-6231#0). Where the survivors keep headroom the degeneration
         //      holds exactly — GEN-1523 at overMaxBy -0.149 and GEN-5958 at -0.900 both land at
         //      ~4e-11 kV;
         //  (c) the pilot carries no reactive load. Lifting this leaves GEN-1264 at 0.134 kV and
@@ -774,14 +774,14 @@ public final class GpuBatchInjectionOutages {
                 if (mHasRow[m] == 0 || mRow[m] < 0) {
                     continue;
                 }
-                // A member PINNED in the base has no DISTR_Q equation: its row hosts its own reactive
-                // balance at the frozen limit (targetQ_pinned - loadQ), and OLF's updateReactiveKeys /
+                // A member SWITCHED TO PQ in the base has no DISTR_Q equation: its row hosts its own reactive
+                // balance at the frozen limit (targetQ_frozen - loadQ), and OLF's updateReactiveKeys /
                 // AcTargetVector never write a share there. Seeding the share formula on it anyway
-                // handed the row -targetQ_m (no live key, so qpk = 0): the pinned Q with its sign
-                // flipped. Measured on network.xiidm/IZUZ (IZSV_0 islanded, IZTH_0 base-pinned MIN_Q):
+                // handed the row -targetQ_m (no live key, so qpk = 0): the frozen Q with its sign
+                // flipped. Measured on network.xiidm/IZUZ (IZSV_0 islanded, IZTH_0 switched to PQ at MIN_Q in the base):
                 // +0.276956953 against OLF's -0.276956953, a 0.5539 pu entry residual, one Newton
                 // iteration more than OLF on the first solve, and the slack pass read 0.000845 pu
-                // less - the 0.0845 MW the arms reported apart. If the member unpins later, the
+                // less - the 0.0845 MW the arms reported apart. If the member switches back to PV later, the
                 // kernel that maintains these targets (updateDistrQTargetsBatch) writes its share then.
                 if (!bus.getNetwork().getBus(mBusNum[m]).isGeneratorVoltageControlEnabled()) {
                     continue;
@@ -849,10 +849,10 @@ public final class GpuBatchInjectionOutages {
                 }
             }
             // The pack's loadQ is the bus's load target Q as EXTRACTED, and the reactive-limit
-            // machinery reads it in two paired forms: the pinned target is limit - loadQ, and the
+            // machinery reads it in two paired forms: the frozen target is limit - loadQ, and the
             // controller's own q is the net injection + loadQ. Shed a Q-carrying load and both go
             // stale. This used to be a CPU gate for a PV bus; the bus the base loadflow had already
-            // PINNED fell through it and was silently wrong instead (rte6515 LOAD-6157, 0.37 kV).
+            // SWITCHED TO PQ fell through it and was silently wrong instead (rte6515 LOAD-6157, 0.37 kV).
             loadQDelta = -lostLoadQ;
         }
         return new ReactiveLimitDeltas(reactiveLimitEntry, minQDelta, maxQDelta, loadQDelta, svcBminDelta, svcBmaxDelta);

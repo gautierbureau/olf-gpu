@@ -131,14 +131,14 @@ final class GpuSaRunScope {
         boolean simpleTransformerVoltageControlBatchable =
                 olfGuardParams.getTransformerVoltageControlMode() == OpenLoadFlowParameters.TransformerVoltageControlMode.WITH_GENERATOR_VOLTAGE_CONTROL;
         // REMOTE/DISTRIBUTED generator VC groups + reactive limits. Both modes run the full
-        // pin/unpin dynamics: NON-free members via mode-4 transitions + own-q accumulation
+        // PV -> PQ / PQ -> PV switch dynamics: NON-free members via mode-4 transitions + own-q accumulation
         // (plan-B3), the FREE member via the pilot-Q relocation candidate groups (plan-B4), and
-        // the ALL-PINNED corner (control lost) via the pilot-vEq flip — on-device by
+        // the NO-ENABLED-CONTROLLER corner (control lost) via the pilot-vEq flip — on-device by
         // updatePilotTargetVEquationBatch (mode-scan fallback = candidate 0, the pilot's own row). Still whole-run CPU:
-        //  - a pinnable free member whose group has NO relocation table (fewer than 2 merged
+        //  - a free member with reactive limits whose group has NO relocation table (fewer than 2 merged
         //    members). Half-open / zero-impedance q terms at members and pilots ride the ob/zero-impedance
         //    alternate-dest channels since 2026-09-07 — the unclean-member/pilot conditions are
-        //    gone (the pre-channel gap was 3.3e-4 kV on a pinned member with one open line).
+        //    gone (the pre-channel gap was 3.3e-4 kV on a member switched to PQ with one open line).
         boolean remoteReactiveLimitsUnsupported = remoteReactiveLimitsUnrepresentable(lfNetwork);
         boolean noSvc = lfNetwork.getBuses().stream()
                 .flatMap(b -> b.getGenerators().stream())
@@ -206,7 +206,7 @@ final class GpuSaRunScope {
         }
         if (remoteReactiveLimitsUnsupported && acParameters.getOuterLoops().stream()
                 .anyMatch(outerLoop -> ReactiveLimitsOuterLoop.NAME.equals(outerLoop.getName()))) {
-            unsupportedOuterLoops.add("ReactiveLimits[remoteGroupPinDynamicsUnrepresentable]");
+            unsupportedOuterLoops.add("ReactiveLimits[remoteGroupPvPqSwitchesUnrepresentable]");
         }
         // Parameterization the device loops DO model — wire the run's values in place of the
         // device defaults (maxOuterLoopIterations, reactiveLimitsMaxPqPvSwitch), and make a
@@ -246,7 +246,7 @@ final class GpuSaRunScope {
                 && acParameters.getOuterLoops().stream().anyMatch(outerLoop -> "ShuntVoltageControl".equals(outerLoop.getName()));
         // The flow-observed incremental family (GpuIncrementalTransformerReactivePowerControlOuterLoop,
         // GpuIncrementalPhaseControlOuterLoop): rho -> branch Q, and a1 -> branch P / I. Both are decision-only loops
-        // over pinned identity rows — always batchable when their loop is configured (continuous "PhaseControl" stays
+        // over identity rows held at the tap's value — always batchable when their loop is configured (continuous "PhaseControl" stays
         // CPU via the extraction guard).
         boolean cfgIncrementalTransformerReactivePowerControl = acParameters.getOuterLoops().stream().anyMatch(outerLoop -> "IncrementalTransformerReactivePowerControl".equals(outerLoop.getName()));
         boolean cfgIncrementalPhase = acParameters.getOuterLoops().stream().anyMatch(outerLoop -> "IncrementalPhaseControl".equals(outerLoop.getName()));
@@ -349,8 +349,8 @@ final class GpuSaRunScope {
         return new SlackRelocation(networkParameters.getSlackBusSelector(), 1);
     }
 
-    /** The remote-group pin-dynamics residual gate — RETIRED 2026-09-08: singleton remote groups
-     *  get a relocation table too (their only member's pin IS the all-pinned corner, handled by
+    /** The residual gate on remote-group PV/PQ switch dynamics — RETIRED 2026-09-08: singleton remote groups
+     *  get a relocation table too (their only member's switch to PQ IS the no-enabled-controller corner, handled by
      *  the pilot-vEq flip), so every clean group shape is representable. Kept as a method so a
      *  future unrepresentable shape has a place to land. */
     private static boolean remoteReactiveLimitsUnrepresentable(LfNetwork lfNetwork) {

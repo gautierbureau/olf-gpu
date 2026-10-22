@@ -35,7 +35,7 @@ import java.util.Map;
  * (unit right-hand side at each controlled bus's BUS_TARGET_V row), the dense zone system and the moved targets.
  *
  * <p>Per-scenario mechanics: a moved generator voltage control target lands on the CONTROLLED bus's V row; in a run with
- * OLF's ReactiveLimitsOuterLoop a controller is keyed by its reactive-limit entry, whose pin the re-enable step clears
+ * OLF's ReactiveLimitsOuterLoop a controller is keyed by its reactive-limit entry, whose PQ state the re-enable step clears
  * and whose switch-back compares against the MOVED target. Scope: LOCAL and REMOTE generator voltage control with
  * DISTINCT controlled buses (a controller<->controlled bijection — see {@link #supported}); a remote controller's
  * reactive-limit entry is the reactiveLimitVoltageControlRole member entry.
@@ -66,7 +66,7 @@ public final class GpuSecondaryVoltageControlOuterLoop {
     /** One (controller, controlled) PAIR — a bijection under {@link #supported}: {@code vRow} is
      *  the CONTROLLER bus's V row (keys its RL entry — for a REMOTE controller that is the
      *  reactiveLimitVoltageControlRole member entry; -1 in a run without OLF's ReactiveLimitsOuterLoop, where no controller
-     *  is ever pinned), {@code controlledBusVRow} the CONTROLLED bus's pinned BUS_TARGET_V row (the
+     *  ever switches to PQ), {@code controlledBusVRow} the CONTROLLED bus's BUS_TARGET_V row (the
      *  sensitivity unit row and the row the moved zone target lands on — OLF adjusts the
      *  CONTROLLED bus's VC target). Local control collapses the two. */
     public record ControllerBus(int vRow, int controlledBusVRow, int controlledBusNum, int reactiveLimitEntry, double baseTargetV, double minQ, double maxQ,
@@ -135,7 +135,7 @@ public final class GpuSecondaryVoltageControlOuterLoop {
                 var voltageControl = controller.getGeneratorVoltageControl().orElseThrow();
                 Integer vRow = busVRows.get(controller.getNum());
                 Integer controlledBusVRow = busVRows.get(voltageControl.getControlledBus().getNum());
-                // a controller is keyed by its reactive-limit entry, whose pin state the phase reads, only in a run with
+                // a controller is keyed by its reactive-limit entry, whose PV/PQ state the phase reads, only in a run with
                 // OLF's ReactiveLimitsOuterLoop: without it OLF never switches a controller PV -> PQ, so every controller
                 // keeps its voltage control and the phase moves its target on the BUS_TARGET_V row alone (-1: no entry)
                 Integer reactiveLimitEntry = -1;
@@ -198,7 +198,7 @@ public final class GpuSecondaryVoltageControlOuterLoop {
      * pre-regulation targets while the device solved at the moved ones.
      *
      * <p>The moved target comes from the phase's OWN state, not from the controlled bus's row. Reading
-     * the row looks right and is not: that row carries a Q target the moment the bus is pinned or is a
+     * the row looks right and is not: that row carries a Q target the moment the bus is switched to PQ or is a
      * shared-distribution member, and writing 0.165 pu in as a target voltage puts the control outside
      * the plausible band and OLF drops it.
      */

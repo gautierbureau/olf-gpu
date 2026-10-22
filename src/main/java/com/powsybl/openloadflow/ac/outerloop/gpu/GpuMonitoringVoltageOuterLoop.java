@@ -27,11 +27,11 @@ import java.util.Map;
 
 /**
  * DEVICE port of OLF's {@code MonitoringVoltageOuterLoop} (SVC stand-by automatons): a monitoring
- * SVC's bus stands by as PQ (its base-PQ RL entry seeds UNPINNED via {@code reactiveLimitFlags} — the CPU's
+ * SVC's bus stands by as PQ (its base-PQ RL entry seeds with no limit type via {@code reactiveLimitFlags} — the CPU's
  * null qLimitType, so the reactive-limits loop never touches it spontaneously) until the bus voltage
  * leaves the automaton's [low, high] threshold band; then the bus switches PQ → PV at the automaton's
  * LOW/HIGH target voltage (OLF's {@code switchPqPv}) and stays a normal voltage controller for the
- * rest of the run (the RL loop may then pin it at its Q limits like any PV bus — the moved target
+ * rest of the run (the RL loop may then switch it PV → PQ at its Q limits like any PV bus — the moved target
  * reaches the RL kernel through the {@code reactiveLimitTargetVOverrides} channel).
  *
  * <p>Per-scenario activation = the bus's VC-ON activation deltas (captured by enable-toggle diff,

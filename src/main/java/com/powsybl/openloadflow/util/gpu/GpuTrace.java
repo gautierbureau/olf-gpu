@@ -30,9 +30,9 @@ public enum GpuTrace {
     DBG_BUSDUMP("OLF_GPU_DBG_BUSDUMP"),
     /** The distributed active power booked when a load flow's distributed slack check falls back to OLF's own. */
     DS_ACCOUNT("OLF_GPU_DS_ACCOUNT"),
-    /** {@code <file>}: the GPU equation system of the load flow as text, once (the first pinned pass). */
+    /** {@code <file>}: the GPU equation system of the load flow as text, once (the first pass with a bus switched to PQ). */
     EQ_DUMP("OLF_GPU_EQ_DUMP"),
-    /** {@code any}: {@link #EQ_DUMP} writes the first pass, pinned or not. */
+    /** {@code any}: {@link #EQ_DUMP} writes the first pass, with a bus switched to PQ or not. */
     EQ_DUMP_WHEN("OLF_GPU_EQ_DUMP_WHEN"),
     /** {@code <contingency id>}: OLF's post-contingency equation system of that contingency, as text. */
     EQ_DUMP_CTG("OLF_GPU_EQ_DUMP_CTG"),
@@ -54,7 +54,7 @@ public enum GpuTrace {
     QUALIFY_TRACE("OLF_GPU_QUALIFY_TRACE"),
     /** The scenarios the device rejects, with the reason. */
     REJECT_TRACE("OLF_GPU_REJECT_TRACE"),
-    /** The reactive-limit entries the pack builds, and the device's pin decisions per scenario. */
+    /** The reactive-limit entries the pack builds, and the device's switches to PQ and back to PV per scenario. */
     RL_TRACE("OLF_GPU_RL_TRACE"),
     /** {@code <file>}: the security analysis extraction's equation system as text. */
     SA_EQ_DUMP("OLF_GPU_SA_EQ_DUMP"),

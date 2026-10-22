@@ -70,8 +70,8 @@ public final class RemoteMemberQPacker {
             // Adding the remoteMemberReactiveTerms twin on top counted it TWICE. Measured on rte6515 VL-6112_0 with the rotation
             // property on: q read 0.603080467 where OLF has 0.910540234, and
             // 1.218 (loadQ) + 2 * (0.910540234 - 1.218) = 0.603080 — the doubled injection, to six digits.
-            // The reactive-limit check then never saw the pilot beyond its limit and never pinned it, which
-            // is what kept the rotation path from ever reaching the pinned arrangement it exists for.
+            // The reactive-limit check then never saw the pilot beyond its limit and never switched it to PQ, which
+            // is what kept the rotation path from ever reaching the PQ arrangement it exists for.
             if (PilotSelfPacker.isPilotSelfEntry(bus) && columns.alternateQRow()[bus.getNum()] <= -2) {
                 continue;
             }
@@ -81,7 +81,7 @@ public final class RemoteMemberQPacker {
             }
             // The row the reactive-limit check READS (native reactiveLimitReactivePowerRow): for a relocated child that is the
             // parent coupler's DUMMY_Q row, not its own V row, which now holds the coupler's ZERO_V. Filling
-            // the own row left the check reading ZERO for every relocated member, so it could never pin one —
+            // the own row left the check reading ZERO for every relocated member, so it could never switch one to PQ —
             // measured on rte6515's full busbar scope: the device's base stopped after its first
             // ReactiveLimits pass where OLF takes three, and came back MAX_ITERATION_REACHED.
             int row = ReactiveRelocation.relocatedQRow(bus.getNum(), columns.spanningTreeParentBranch(),
@@ -107,7 +107,7 @@ public final class RemoteMemberQPacker {
                     w.add(1.0);
                     continue;
                 }
-                // every coupler, not just the base tree's: a coupler out of it is pinned at dummyQ = 0 and adds
+                // every coupler, not just the base tree's: a coupler out of it is held at dummyQ = 0 and adds
                 // nothing, and one a contingency brings into OLF's tree carries this member's reactive flow
                 if (br.isZeroImpedance(LoadFlowModel.AC)) {
                     int dummyQColumn = columns.dummyQCol()[br.getNum()];

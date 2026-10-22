@@ -124,7 +124,7 @@ final class IslandSeed {
             // that stamps the pilot's target on the carrier runs only inside the
             // outer-loop passes, and the host re-applies its overrides at every pass.
             // Stamp it here, by the kernel's own rule (chooseCarrierRow: first candidate
-            // whose mode is neither identity nor pinned). Measured on the remote-control
+            // whose mode is neither identity nor switched to PQ). Measured on the remote-control
             // fixture, b1 islanded: OLF's BUS_TARGET_Q at the pilot off by exactly its
             // load, b2 0.45 kV; rte6515: five busbar sections up to 1.3 kV.
             int[] reactiveRelocationGroupStart = gpuData.reactiveRelocation().groupStart();
@@ -133,29 +133,29 @@ final class IslandSeed {
                 int baseCarrier = ReactiveRelocationTables.chooseCarrierRow(gpuData.reactiveRelocation(), g, baseRowMode);
                 int newCarrier = ReactiveRelocationTables.chooseCarrierRow(gpuData.reactiveRelocation(), g, row);
                 // A PILOT-SELF group (rotation: the fallback row is itself a candidate) whose pilot is
-                // UNPINNED in the base carries no pilot balance on its carrier: that row hosts its OWN
+                // still PV in the base carries no pilot balance on its carrier: that row hosts its OWN
                 // DISTR_Q, and the base carrier's target is that member's DISTR_Q target, not a pilot
                 // Q — stamping it on the next member overwrote the renormalized target the outage
                 // seeding had just put there (middle-section fixture: −0.1333 over −0.2, bus-mid
-                // 0.32 kV off). Only a PINNED pilot's balance travels with the carrier.
-                boolean unpinnedPilotSelf = false;
+                // 0.32 kV off). Only the balance of a pilot SWITCHED TO PQ travels with the carrier.
+                boolean pilotSelfStillPv = false;
                 int fallbackRow = reactiveRelocationCandidateRows[reactiveRelocationGroupStart[g]];
                 for (int c = reactiveRelocationGroupStart[g] + 1; c < reactiveRelocationGroupStart[g + 1]; c++) {
                     if (reactiveRelocationCandidateRows[c] == fallbackRow) {
-                        unpinnedPilotSelf = true;
+                        pilotSelfStillPv = true;
                         break;
                     }
                 }
-                if (unpinnedPilotSelf && gpuData.reactiveLimits().voltageRow() != null && gpuData.reactiveLimits().voltageControlRole() != null) {
+                if (pilotSelfStillPv && gpuData.reactiveLimits().voltageRow() != null && gpuData.reactiveLimits().voltageControlRole() != null) {
                     for (int e = 0; e < gpuData.reactiveLimits().voltageRow().length; e++) {
                         if (gpuData.reactiveLimits().voltageRow()[e] == fallbackRow && gpuData.reactiveLimits().voltageControlRole()[e] == GpuVoltageControlRole.PILOT_SELF) {
-                            unpinnedPilotSelf = !gpuData.switchedPvToPqInBase(e);
+                            pilotSelfStillPv = !gpuData.switchedPvToPqInBase(e);
                             break;
                         }
                     }
                 }
                 if (baseCarrier >= 0 && newCarrier >= 0 && newCarrier != baseCarrier
-                        && row[baseCarrier] == GpuRowMode.FIXED_VARIABLE && baseRowMode[baseCarrier] != GpuRowMode.FIXED_VARIABLE && !unpinnedPilotSelf) {
+                        && row[baseCarrier] == GpuRowMode.FIXED_VARIABLE && baseRowMode[baseCarrier] != GpuRowMode.FIXED_VARIABLE && !pilotSelfStillPv) {
                     rs.overrides.add(s * n + newCarrier, baseTargets[baseCarrier]);
                     pilotBalanceRows.add(newCarrier);
                     if (GpuTrace.SA_RESID.isOn()) {

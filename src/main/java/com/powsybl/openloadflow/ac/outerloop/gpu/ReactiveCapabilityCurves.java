@@ -212,7 +212,7 @@ public final class ReactiveCapabilityCurves {
             // control, and its fixed targetQ otherwise - so a machine that is not controlling
             // contributes a CONSTANT to the bus limit and its curve must not move that limit when
             // the distributed slack moves its P. Packing it anyway made the device re-freeze a
-            // pinned bus at a limit OLF never computed. Measured on network.xiidm/DJXY: a BATTERY
+            // bus switched to PQ at a limit OLF never computed. Measured on network.xiidm/DJXY: a BATTERY
             // (FQHV, curve points p=-9.45/+9.45) shares bus FQHL_0 with a voltage-controlling
             // generator; the slack moved the battery's P by 0.06 MW, the device moved the bus's
             // MAX_Q by the battery's curve slope (-7.9087e-06 pu, which IIDM's own curve confirms

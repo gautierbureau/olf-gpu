@@ -21,7 +21,7 @@ import java.util.List;
  *       {@code GpuTransformerVoltageControlOuterLoop.buildTransformerControllers});</li>
  *   <li>the loop's first check ({@code roundVoltageRatios}) disables VC and rounds each continuous
  *       rho to the CLOSEST TAP → one warm re-solve with the VC-OFF (base) activation and the rho
- *       identity rows pinned at the rounded taps ({@link #roundAndResolve}); further checks are
+ *       identity rows held at the rounded taps ({@link #roundAndResolve}); further checks are
  *       STABLE by construction.</li>
  * </ol>
  *
@@ -81,7 +81,7 @@ final class GpuSimpleTransformerVoltageControlOuterLoop {
                             ovValueList.add(m.offDeltaTargets()[k]);
                         }
                     }
-                    // pin the re-activated rho identity at the BASE-STATE rho — matching the warm
+                    // hold the re-activated rho identity at the BASE-STATE rho — matching the warm
                     // start, so the row's residual is exactly 0 (the CPU REMOVES the equation; the
                     // captured stale target injected a UNIT residual and an extra Newton iterate)
                     ovIndexList.add(slot * n + m.rhoRow());

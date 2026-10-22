@@ -1,6 +1,6 @@
 """Official pypowsybl: a security analysis with ONE contingency on network.xiidm, RTE load-flow parameters, 1 thread.
 OLF's report shows the ReactiveLimits oscillation of the three controllers of IZUM_0's remote voltage control
-(IZTH_0, IZTH_2, IZSV_0): released PQ->PV on a ~1e-7 pu voltage deficit, pinned again, until maxPqPvSwitch.
+(IZTH_0, IZTH_2, IZSV_0): switched back PQ->PV on a ~1e-7 pu voltage deficit, switched to PQ again, until maxPqPvSwitch.
 usage: python pp_rl_oscillation.py [contingencyBranchId=LIRN] [network=network.xiidm] [params=rte-loadflow-default-parameters.json]"""
 import re, sys
 import pypowsybl as pp

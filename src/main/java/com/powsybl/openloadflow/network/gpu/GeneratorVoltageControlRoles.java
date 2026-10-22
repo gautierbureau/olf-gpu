@@ -42,17 +42,17 @@ public final class GeneratorVoltageControlRoles {
      *
      * <p>Both predicates here did filter that way, so {@code ExtractionColumns}'s own-row alternate loop
      * skipped those members and left them with {@code alternateQRow = -1}. A row then put in mode 4 by a
-     * reactive-limit pin assembles EMPTY: measured on rte6515's base, where the pinned pass gave F = -target
+     * reactive-limit switch to PQ assembles EMPTY: measured on rte6515's base, where the pass with that switch gave F = -target
      * exactly on both members of a pilot-self group, two identical rows and a dead DUMMY_Q column — a
      * singular matrix KLU refuses to factor.
      *
      * <p>A merged group keeps ONE main control (on the bus OLF picked) and leaves every other member holding
      * a DEPENDENT control that regulates ITSELF. Asking {@code bus.getGeneratorVoltageControl()} therefore
      * answered "I control my own bus" for every member, so each one was classified as the pilot
-     * ({@code isPilotSelfEntry}) with its own row as the pilot row. Since class 2 means "unpinned, my row is
+     * ({@code isPilotSelfEntry}) with its own row as the pilot row. Since class 2 means "still PV, my row is
      * the group's voltage IDENTITY (mode 0)" while a member's row actually carries DISTR_Q (mode 1), the
      * reactive-limit kernel's {@code if (mode[ridx] != pvForm) return;} dropped every member before it ever
-     * looked at q: rte6515's base pinned 16 where OLF pinned 19 (VL-5997_1, VL-6003_1, VL-6003_2 missing,
+     * looked at q: rte6515's base switched 16 to PQ where OLF switched 19 (VL-5997_1, VL-6003_1, VL-6003_2 missing,
      * each with a correct q of 1.921012507 pu against a 0.7536 limit), then diverged at outer pass 7.
      */
     public static GeneratorVoltageControl mainGeneratorVoltageControl(LfBus bus) {
@@ -91,7 +91,7 @@ public final class GeneratorVoltageControlRoles {
                 .orElse(false);
     }
 
-    /** The FREE member: the first ENABLED merged controller. None when every controller is pinned. */
+    /** The FREE member: the first ENABLED merged controller. None when no controller is enabled. */
     public static boolean isFreeRemoteGeneratorVoltageControlMember(LfBus bus) {
         GeneratorVoltageControl voltageControl = mainGeneratorVoltageControl(bus);
         return voltageControl != null && isRemoteGeneratorVoltageControlControllerElement(bus)

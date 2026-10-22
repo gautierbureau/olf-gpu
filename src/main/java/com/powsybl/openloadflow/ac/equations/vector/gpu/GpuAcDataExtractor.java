@@ -67,7 +67,7 @@ public final class GpuAcDataExtractor {
      *
      * @return {@code {pRow, qRow, spanningTreeParentBranch, alternateQRow}} — the third names the coupler hosting each bus's power
      *         equations, or -1 when the bus was not relocated; the fourth is the ALTERNATE reactive row, where a
-     *         reactive-limit pin puts the bus's own balance (mode 4): a relocated child's is its coupler's DUMMY_Q
+     *         reactive-limit switch to PQ puts the bus's own balance (mode 4): a relocated child's is its coupler's DUMMY_Q
      *         row, -1 or a negative group code otherwise.
      */
     public static int[][] busPowerRows(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es) {

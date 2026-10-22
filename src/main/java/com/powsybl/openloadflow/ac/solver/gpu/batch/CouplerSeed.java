@@ -52,7 +52,7 @@ final class CouplerSeed {
             Integer ze = rs.zeroImpedanceElementByNumAll.get(outagedZeroImpedanceBranchOfContingency.getNum());
             // OLF_GPU_ZITREE_TRACE: does this scenario OPEN a coupler the tree relocation
             // moved rows onto? Such a scenario deactivates the coupler's ZERO_V/ZERO_PHI,
-            // which the relocation put on the CHILD bus's rows, and pins its dummies with
+            // which the relocation put on the CHILD bus's rows, and holds its dummies with
             // DUMMY_TARGET identities those rows no longer host — the per-scenario gap.
             // childSide (zeroImpedanceBranchIndices slot 10, bits 1-2) is not NONE exactly when rows moved.
             if (GpuTrace.ZITREE_TRACE.isOn()
@@ -64,7 +64,7 @@ final class CouplerSeed {
             rs.zeroImpedanceBranchOpenScenarioElementList.add(s);
             rs.zeroImpedanceBranchOpenScenarioElementList.add(ze);
             // the decoupled branch's ZERO_V/ZERO_PHI rows become identities again
-            // (dummies pinned to 0) — the inverse of a close
+            // (dummies held at 0) — the inverse of a close
             int dpRow = gpuData.zeroImpedanceBranch().indices()[ze * 11 + 4];
             int distrQRow = gpuData.zeroImpedanceBranch().indices()[ze * 11 + 5];
             int[] rowModesWithZeroImpedanceBranch = rs.rowModePerScenario[s] == baseRowMode ? baseRowMode.clone() : rs.rowModePerScenario[s];
@@ -134,12 +134,12 @@ final class CouplerSeed {
                                 contingencies.get(ci).outagedZeroImpedanceBranches(), rs.zeroImpedanceElementByNumAll, gpuData.zeroImpedanceBranch().indices(),
                                 frozenForCtg);
                 int childReactiveLimitEntry = gpuData.reactiveLimits().entryOf(child.getNum());
-                boolean childPinned = applied
+                boolean childSwitchedToPq = applied
                         && gpuData.switchedPvToPqInBase(childReactiveLimitEntry);
-                if (applied && childPinned) {
+                if (applied && childSwitchedToPq) {
                     // The child is PQ in the base (reactive limit): its balance comes home at
-                    // the pinned value, no identity (the qualification refused such a child as
-                    // VC_REMERGE_PINNED_MAIN until the entry channels below existed).
+                    // the frozen target Q, no identity (the qualification refused such a child
+                    // until the entry channels below existed).
                     rowModesWithZeroImpedanceBranch[childVRow] = GpuRowMode.BUS_TARGET_Q;
                     rs.overrides.add(s * n + childVRow, child.getTargetQ());
                 } else if (applied) {
@@ -234,13 +234,13 @@ final class CouplerSeed {
             rs.rowModePerScenario[s] = row;
             // ...and if the RELOCATION put a child bus's power balance on those dummy rows,
             // its TARGETS have to travel with it, exactly as on the coupler-OPENING path
-            // above. Pinning the row to an identity is what makes the kernel's
+            // above. Holding the row with an identity is what makes the kernel's
             // stock-placement fallback move the EQUATIONS back to the child's own PHI / V
             // rows; leaving the targets behind erases the bus's injection. This path is the
             // one the 2026-09-28 tree overrides never covered, because they were written
             // while the relocation was off and a non-tree coupler's dummies carried nothing.
             // Measured on network.xiidm: LJIN re-picks OLF's tree from LMQ to LMK, and
-            // LMQ's DUMMY_P (row 14822) went from -1.029778 to a pinned 0 while LLJ_2's own
+            // LMQ's DUMMY_P (row 14822) went from -1.029778 to a fixed 0 while LLJ_2's own
             // row got nothing — the bus's 102.98 MW vanished and the slack placed 87.8 MW of
             // it, on 100 LJ* contingencies (cpu=0.0 against gpu=-87.8 MW each).
             //

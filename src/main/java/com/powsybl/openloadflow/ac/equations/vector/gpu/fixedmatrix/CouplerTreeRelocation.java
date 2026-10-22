@@ -150,12 +150,12 @@ public final class CouplerTreeRelocation {
             if (parent < 0) {
                 continue;
             }
-            // CANONICAL, i.e. pin-state independent (the lesson of the canonical extraction): a remote gen-VC
+            // CANONICAL, i.e. independent of the PV/PQ state (the lesson of the canonical extraction): a remote gen-VC
             // controller element's q is SUPPRESSED at extraction (qRow = -1) and its own V row is where its balance
-            // comes back — its DISTR_Q while it shares, its own Q once a limit pins it — so its row is the home of
-            // its reactive balance whatever the pin state. Reading the pin state here made the base and the
+            // comes back — its DISTR_Q while it shares, its own Q once a limit switches it to PQ — so its row is the home of
+            // its reactive balance whether it is PV or PQ. Reading the PV/PQ state here made the base and the
             // security analysis relocate DIFFERENTLY (measured: 44 of 47 couplers in the base extraction against
-            // 41 in the SA's, the three differing ones exactly the pilot-self groups the base load flow pins), so
+            // 41 in the SA's, the three differing ones exactly the pilot-self groups the base load flow switches to PQ), so
             // the two ran on different structures and every scenario failed.
             boolean ownReactiveOnItsVRow = qRow[bn] == vCol[bn] || GeneratorVoltageControlRoles.isRemoteGeneratorVoltageControlControllerElement(bus);
             if (dummyPCol[parent] < 0 || dummyQCol[parent] < 0 || hostsAnotherReactiveRow[bn]
@@ -203,9 +203,9 @@ public final class CouplerTreeRelocation {
      * True when this bus owns a {@code BUS_TARGET_V} identity row: it is where OLF puts the voltage equation of
      * a control it takes part in, so that row is not free for a coupler's {@code ZERO_V}.
      *
-     * <p>Pin-state INDEPENDENT, which asking whether the equation is active right now is not — a pilot whose
-     * controllers a reactive limit has pinned has no active identity, yet the row is still its own and comes
-     * back the moment the limit releases. The owner is OLF's own answer, {@link
+     * <p>INDEPENDENT of the PV/PQ state, which asking whether the equation is active right now is not — a pilot whose
+     * controllers a reactive limit has switched to PQ has no active identity, yet the row is still its own and comes
+     * back the moment they switch back to PV. The owner is OLF's own answer, {@link
      * VoltageControl#findMainVisibleControlledBus()}: of the controls merged over a zero-impedance component
      * exactly ONE is main and visible, and its controlled bus carries the single identity the component gets.
      * Asking instead whether the bus has a control AT ALL excluded every merged dependent controlled bus and
@@ -340,7 +340,7 @@ public final class CouplerTreeRelocation {
                 qRow[bn] = dummyQCol[parent];
             }
             // ...and so does the ALTERNATE row, the one every family writes the bus's OWN q to when a reactive
-            // limit puts it in mode 4. For a relocated child that pin lands on this coupler's DUMMY_Q row (the
+            // limit puts it in mode 4. For a relocated child that switch to PQ lands on this coupler's DUMMY_Q row (the
             // native pass diverts it there through reactiveLimitReactivePowerRow, since that is where its balance lives), so leaving the
             // alternate on the bus's own BUS_V row sent its own q onto the row now holding the coupler's ZERO_V
             // and left the DUMMY_Q column held by nothing but the DISTR_Q terms the mode-4 flip gates off —

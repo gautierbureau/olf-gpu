@@ -249,7 +249,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
 
     /**
      * Writes the GPU equation system and OLF's own dump of the same state, once, when {@code OLF_GPU_EQ_DUMP}
-     * names a path. Prefers a state that carries an RL pin (row mode 4): that is the assembly a rank-deficient
+     * names a path. Prefers a state that carries a PV -> PQ switch (row mode 4): that is the assembly a rank-deficient
      * Jacobian was traced to, and a dump of a healthy pass would not show it.
      */
     private void dumpEquationsOnce(int[] rowMode, int n) {
@@ -257,12 +257,12 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
         if (equationsDumped || path == null || path.isEmpty() || cachedData == null) {
             return;
         }
-        boolean pinned = false;
+        boolean anyBusTargetQRow = false;
         for (int m : rowMode) {
-            pinned |= m >= 4;
+            anyBusTargetQRow |= m >= 4;
         }
-        if (!pinned && !"any".equals(GpuTrace.EQ_DUMP_WHEN.value())) {
-            return;                                          // wait for the pinned pass, the one under suspicion
+        if (!anyBusTargetQRow && !"any".equals(GpuTrace.EQ_DUMP_WHEN.value())) {
+            return;                                          // wait for a pass with a PV -> PQ switch, the one under suspicion
         }
         try (java.io.Writer w = java.nio.file.Files.newBufferedWriter(java.nio.file.Path.of(path))) {
             GpuEquationDump.write(w, network, equationSystem, cachedData, rowMode);
@@ -281,14 +281,14 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                 m4.append(' ').append(r);
             }
         }
-        // The HOST's pinned rows, to line up against the device's: if they differ, the device moved a pin,
-        // and the row it moved it to is the defect.
-        System.err.println("EQ_DUMP wrote " + path + " and " + path + ".olf (n=" + n + " pinned=" + pinned
+        // The HOST's BUS_TARGET_Q rows, to line up against the device's: if they differ, the device moved a bus's
+        // switch to PQ, and the row it moved it to is the defect.
+        System.err.println("EQ_DUMP wrote " + path + " and " + path + ".olf (n=" + n + " anyBusTargetQRow=" + anyBusTargetQRow
                 + ") hostMode4Rows=[" + m4.toString().trim() + "]");
     }
 
-    /** The remote gen-VC pin set the cached extraction's DISTR_Q weights were built from (see runImpl). */
-    private java.util.BitSet pinnedAtExtraction;
+    /** The remote gen-VC members switched to PQ the cached extraction's DISTR_Q weights were built from (see runImpl). */
+    private java.util.BitSet remoteMembersSwitchedToPqAtExtraction;
 
     /** OLF_GPU_EQ_DUMP: written once per run (see dumpEquationsOnce). */
     private boolean equationsDumped;
@@ -474,16 +474,16 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
         try {
             long t0 = System.nanoTime();
             boolean rebuilt = false;
-            // A REACTIVE-LIMIT PIN of a remote gen-VC member (row mode 4) renormalizes OLF's DISTR_Q reactive
+            // A REACTIVE-LIMIT switch to PQ of a remote gen-VC member (row mode 4) renormalizes OLF's DISTR_Q reactive
             // keys (updateReactiveKeys) and fires NO equation-system event, so the cached extraction would keep
-            // its pre-pin static qPct. Watch the pinned SET and re-extract when it changes: the context is
-            // rebuilt from the fresh extraction with OLF's renormalized keys. That is what used to make every
-            // post-pin solve CPU-routed; it now solves on the device.
-            java.util.BitSet pinnedNow = GpuAcActivationExtractor.pinnedRemoteMembers(network, equationSystem);
-            if (!pinnedNow.equals(pinnedAtExtraction)) {
+            // its static qPct from before the switch. Watch the SET of members switched to PQ and re-extract when it
+            // changes: the context is rebuilt from the fresh extraction with OLF's renormalized keys. That is what used
+            // to make every solve after such a switch CPU-routed; it now solves on the device.
+            java.util.BitSet remoteMembersSwitchedToPqNow = GpuAcActivationExtractor.remoteMembersSwitchedToPq(network, equationSystem);
+            if (!remoteMembersSwitchedToPqNow.equals(remoteMembersSwitchedToPqAtExtraction)) {
                 invalidation.structureDirty = true;
             }
-            rebuilt = rebuildStructureIfDirty(n, pinnedNow);
+            rebuilt = rebuildStructureIfDirty(n, remoteMembersSwitchedToPqNow);
             if (invalidation.activationDirty) {
                 activation = GpuAcActivationExtractor.extractActivation(network, equationSystem, n);
                 varType = GpuAcActivationExtractor.extractVarType(equationSystem, n);
@@ -496,13 +496,13 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
             }
             // OLF_GPU_EQ_DUMP=<path>: the GPU equation system as TEXT, next to OLF's own write() of the same
             // state (<path>.olf). OLF can print its equations, so a wrong one is readable there; ours only
-            // existed as index packs until now. Written once per run, at the FIRST solve carrying a pin
+            // existed as index packs until now. Written once per run, at the FIRST solve carrying a PV -> PQ switch
             // (row mode 4) when there is one, since that is the assembly under suspicion.
             dumpEquationsOnce(activation.rowMode(), n);
             // Since the batch-of-1 route (2026-09-08) modes 2 (slope-SVC) and 3 (continuous phase) solve
-            // on-device. Mode 4 (a PINNED remote gen-VC member) used to be CPU-routed here because the pack's
-            // DISTR_Q weights were the STATIC extraction-time qPct while OLF's pin renormalizes them; the
-            // pinned-set watch above re-extracts on a pin, so the weights are OLF's and the solve stays on
+            // on-device. Mode 4 (a remote gen-VC member SWITCHED TO PQ) used to be CPU-routed here because the pack's
+            // DISTR_Q weights were the STATIC extraction-time qPct while OLF's switch to PQ renormalizes them; the
+            // watch above re-extracts when that set changes, so the weights are OLF's and the solve stays on
             // the device. Anything ABOVE the modes the kernels implement is still a fallback, not a guess.
             for (int mode : activation.rowMode()) {
                 if (mode > 4) {
@@ -832,7 +832,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
 
     /** When the structure is dirty: re-extract through the shared cache and rebuild the device context from the
      *  new extraction; true when it was rebuilt. */
-    private boolean rebuildStructureIfDirty(final int n, final java.util.BitSet pinnedNow) {
+    private boolean rebuildStructureIfDirty(final int n, final java.util.BitSet remoteMembersSwitchedToPqNow) {
         if (!invalidation.structureDirty) {
             return false;
         }
@@ -863,7 +863,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
         loadAnchorTargetP = GpuDistributedSlackOuterLoop.captureLoadAnchors(network);
         criteriaDirty = true;
         tablesDirty = true;
-        pinnedAtExtraction = pinnedNow;           // the packs now carry this pin set's qPct
+        remoteMembersSwitchedToPqAtExtraction = remoteMembersSwitchedToPqNow;           // the packs now carry this set's qPct
         invalidation.structureDirty = false;
         invalidation.activationDirty = true;
         return true;

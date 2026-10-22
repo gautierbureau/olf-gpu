@@ -66,7 +66,7 @@ public final class GpuEquationDump {
 
     /**
      * Writes the dump. {@code rowMode} may be null (then no mode column); pass the activation's row modes to
-     * see which rows are identities, power equations (1), slope (2), phase (3) or RL-pinned members (4).
+     * see which rows are identities, power equations (1), slope (2), phase (3) or members switched to PQ (4).
      */
     @SuppressWarnings("unchecked")
     public static void write(Writer w, LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
@@ -194,7 +194,7 @@ public final class GpuEquationDump {
 
         // The GROUPS behind the suppressed rows: a member's Q row is suppressed because its balance lives in
         // the group's DISTR_Q row, and the pilot's own balance rides the FREE member's row. Whether that
-        // arrangement survives an RL pin depends on the candidate table (alternateQRow = -2-group) and on each
+        // arrangement survives a switch to PQ depends on the candidate table (alternateQRow = -2-group) and on each
         // member's alternate, so print them together with the reasons a table is skipped.
         w.write("\n# remote generator voltage-control groups (pilot, members, rows, candidate table)\n");
         ExtractionColumns cols = ExtractionColumns.of(network, es);

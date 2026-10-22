@@ -69,11 +69,11 @@ public final class DistributedSlackNative {
      * indexes {@code distributedSlackBusPhiRow}, {@code row} is an equation row in the same space as {@code distributedSlackBusPhiRow}).
      *
      * <p>{@code distributedSlackBusPhiRow} is structural, and under the coupler-tree relocation a child bus's P balance
-     * sits on its parent coupler's {@code DUMMY_P} row. A contingency that OPENS that coupler pins the
-     * dummy row to a {@code DUMMY_TARGET} identity and the stock-placement fallback returns the balance
+     * sits on its parent coupler's {@code DUMMY_P} row. A contingency that OPENS that coupler fixes the
+     * dummy row with a {@code DUMMY_TARGET} identity and the stock-placement fallback returns the balance
      * to the child's own {@code BUS_PHI} row — so for that scenario the participant's row is the
      * child's, and the distribution must read its anchor and write its share there. Writing to the
-     * pinned row instead loses the share AND feeds the retain/water-fill totals a spurious
+     * fixed row instead loses the share AND feeds the retain/water-fill totals a spurious
      * {@code (0 - anchor)} of absorbed power, which makes the slack loop redistribute what OLF placed
      * once.
      */
@@ -92,8 +92,8 @@ public final class DistributedSlackNative {
      *  target, or a GeneratorAction's value; null = the base); {@code start}, its move from that anchor when the solve
      *  starts (a contingency's loss pre-distribution; null = none). The curve and forced-target-Q channels evaluate a
      *  generator at anchor + its water-fill move once a slack pass ran, at anchor + start before. {@code seedAnchor}
-     *  (strategy pairs): the anchor without the strategy's GeneratorActions, the P the pins continued from the parent
-     *  are stamped at (OLF keeps their restored target Q until its reactive-limit check); null = the anchor. */
+     *  (strategy pairs): the anchor without the strategy's GeneratorActions, the P at which the buses still PQ from the
+     *  parent are stamped (OLF keeps their restored target Q until its reactive-limit check); null = the anchor. */
     public static native void setBatchDistributedSlackGeneratorAnchors(long handle, double[] anchor, double[] start, double[] seedAnchor);
 
     /** Slack-only distribution: per scenario, the slack generators' initial target relative to the slack's target P

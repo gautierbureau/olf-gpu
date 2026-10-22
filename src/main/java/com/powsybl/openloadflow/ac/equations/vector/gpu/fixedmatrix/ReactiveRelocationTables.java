@@ -48,7 +48,7 @@ public record ReactiveRelocationTables(ReactiveRelocationCandidates candidates, 
         // balance rides on the FREE member's rho column — "first enabled", which an outage or clamp
         // of the free member RE-PICKS per scenario. Encode such pilots' alternate as -2-groupId and
         // ship the candidate table [pilot v row (fallback), member rho cols in merged order]; the
-        // fill kernels select the FIRST member row whose per-scenario mode is not identity/pinned
+        // fill kernels select the FIRST member row whose per-scenario mode is neither an identity nor a BUS_TARGET_Q balance
         // (exactly OLF's free-role rule), falling back to the pilot's own row when control is off.
         List<Integer> reactiveRelocationGroupStart = new ArrayList<>();
         List<Integer> reactiveRelocationCandidateRows = new ArrayList<>();
@@ -85,30 +85,30 @@ public record ReactiveRelocationTables(ReactiveRelocationCandidates candidates, 
             reactiveRelocationBaseTargetRow.add(-1);
         }
         // Remote gen-VC pilot-Q relocation (plan-B4): the pilot's reactive balance rides on the
-        // FREE member's BUS_V row — "first controller-enabled", which an RL pin of the free member
+        // FREE member's BUS_V row — "first controller-enabled", which a PV -> PQ switch of the free member
         // RE-PICKS per scenario. Same candidate table + in-kernel mode-scan select as the TVC
         // groups above: [pilot v row (fallback = group control lost), member v cols in merged
         // order]. Since the ob/zero-impedance alternate-dest channels landed, half-open and zero-impedance q
         // terms at the pilot ride the relocation too — no branch-shape guard remains. SINGLETON
         // groups (one remote controller) get a table too since 2026-09-08: their candidate list
-        // [pilot fallback, the member] is structurally a 2-member table, and the only member's pin
-        // IS the all-pinned corner (updatePilotTargetVEquationBatch flips the pilot's V identity) — this
-        // retired the last remote-pin-dynamics whole-run gate (table-less pinnable free member).
+        // [pilot fallback, the member] is structurally a 2-member table, and the only member's switch to PQ
+        // IS the no-enabled-controller corner (updatePilotTargetVEquationBatch flips the pilot's V identity) — this
+        // retired the last whole-run gate on remote PV/PQ switch dynamics (a free member with reactive limits and no table).
         java.util.Set<Integer> reactiveRelocationPilotBuses = new java.util.HashSet<>();
         addRemoteVoltageControlGroups(network, es, spanningTreeParentBranch, reactiveRelocationPilotBuses, dummyQCol, vCol, reactiveRelocationGroupStart, reactiveRelocationCandidateRows,
                                       alternateQRow, reactiveRelocationDependentBaseGroup, reactiveRelocationBaseTargetRow, reactiveRelocationDependentGroupOfRow);
         reactiveRelocationGroupStart.add(reactiveRelocationCandidateRows.size());
 
-        // Remote gen-VC group members (plan-B2), CANONICAL encoding independent of the base pin
+        // Remote gen-VC group members (plan-B2), CANONICAL encoding independent of the base PV/PQ
         // state: the frozen q dest is SUPPRESSED and the member's OWN row is the ALTERNATE,
-        // selected per scenario by row mode 4 ("member row hosts its own Q balance" — RL pinned).
+        // selected per scenario by row mode 4 ("member row hosts its own Q balance" — switched to PQ).
         // The FREE member joins the canonical encoding when its pilot carries a relocation group
         // (plan-B4: the pilot's Q follows the mode-scan carrier, so the free member's row is free
-        // to host its own Q balance when pinned); without a group it keeps the structure-frozen
-        // pilot-carrier encoding and free pins stay whole-run CPU.
-        // Every member is canonical since the ob/zero-impedance alternate-dest channels: a pinned (mode 4)
-        // member's half-open charging and dummy-Q terms follow the same per-scenario routing as
-        // its cb/sh terms (the pre-channel gap measured 3.3e-4 kV on a pinned member with one
+        // to host its own Q balance when switched to PQ); without a group it keeps the structure-frozen
+        // pilot-carrier encoding and a free member's switches to PQ stay whole-run CPU.
+        // Every member is canonical since the ob/zero-impedance alternate-dest channels: the half-open
+        // charging and dummy-Q terms of a member switched to PQ (mode 4) follow the same per-scenario routing as
+        // its cb/sh terms (the pre-channel gap measured 3.3e-4 kV on a member switched to PQ with one
         // open line, then guarded — the guard is gone).
         for (LfBus bus : network.getBuses()) {
             int bn = bus.getNum();
@@ -136,8 +136,8 @@ public record ReactiveRelocationTables(ReactiveRelocationCandidates candidates, 
             int bn = bus.getNum();
             // `== -1` and NOT `< 0`: a group encoding is -2-groupId, which is also negative, so a `< 0`
             // test CLOBBERED the enrolment the loop above had just made — silently, and only for the
-            // pilots whose q is suppressed at extraction, which is exactly the unpinned pilot-self case the
-            // rotation exists for. Measured on rte6515's VL-6112 group: with the rotation property ON the
+            // pilots whose q is suppressed at extraction, which is exactly the case of a pilot-self still PV that
+            // the rotation exists for. Measured on rte6515's VL-6112 group: with the rotation property ON the
             // DISTR_Q contributions still reported pilotRelocationGroup=-1, so the carrier gate in fillDistrQBatch could
             // never fire and the re-picked free member kept a DISTR_Q equation OLF had deactivated.
             if (vCol[bn] >= 0 && qRow[bn] < 0 && alternateQRow[bn] == -1
@@ -187,21 +187,21 @@ public record ReactiveRelocationTables(ReactiveRelocationCandidates candidates, 
             // A pilot that is ALSO one of its controllers has NO Q balance of its own to relocate —
             // its q feeds the group's DISTR_Q rows instead (ReactiveRelocation.distrQRow), and leaving
             // it in this table double-counted that q on top of the DISTR_Q terms.
-            // ...but only WHILE IT CONTROLS. Once a reactive limit PINS such a pilot, OLF activates its
+            // ...but only WHILE IT CONTROLS. Once a reactive limit SWITCHES such a pilot TO PQ, OLF activates its
             // BUS_TARGET_Q, which needs a row, and its own row still carries BUS_TARGET_V because a sibling
             // controller keeps the voltage — so the group DOES need the table, with the pilot's raw-q
-            // emission GATED on it being pinned (pilotSelfGateBatch in native/cuda/outerloop/pilot_voltage.cu,
+            // emission GATED on it being switched to PQ (pilotSelfGateBatch in native/cuda/outerloop/pilot_voltage.cu,
             // recomputed before every fill). Without it such a group keeps a relocation frozen at extraction,
             // which left rte6515's busbar base rank-deficient.
             boolean pilotSelf = voltageControl != null && voltageControl.getMergedControllerElements().contains(bus);
             // the ONE enrolment predicate (ReactiveRelocation.hasCandidateTable): the same answer decides the
-            // canonical, pin-state-independent encoding of the group's q rows and DISTR_Q pack
+            // canonical encoding, independent of the PV/PQ states, of the group's q rows and DISTR_Q pack
             if (!ReactiveRelocation.hasCandidateTable(voltageControl, es)) {
                 continue;
             }
             // Each member's row is the one that HOSTS its reactive balance, which the coupler-tree relocation can
             // move to the parent coupler's DUMMY_Q column (exactly as ReactiveRelocation.distrQRow's tree overload
-            // already moves its DISTR_Q). Naming its own V row instead sent a pinned pilot's raw q onto a row the
+            // already moves its DISTR_Q). Naming its own V row instead sent the raw q of a pilot switched to PQ onto a row the
             // relocation had given to the coupler's ZERO_V, and left the pilot's own row empty: measured on
             // rte6515's [5000,6000) window with the relocation on, the failing slot's residual sat on
             // BUS_V(VL-6003_1) at 6.5e+02 and on the empty pilot row BUS_V(VL-6003_0) at 1.09e+02, every iteration.
@@ -252,8 +252,8 @@ public record ReactiveRelocationTables(ReactiveRelocationCandidates candidates, 
     /**
      * The carrier of candidate group {@code g} under the row modes {@code modes}: the first member candidate (after
      * candidate 0, the fallback) whose row holds neither a fixed variable ({@code FIXED_VARIABLE}, or
-     * {@code CROSS_FIXED_VARIABLE}: a re-merged control's identity on its coupler's row) nor a pinned balance
-     * ({@code BUS_TARGET_Q}), or -1 when none is. The Java twin of the native {@code chooseCarrierRow}
+     * {@code CROSS_FIXED_VARIABLE}: a re-merged control's identity on its coupler's row) nor the own balance of a bus
+     * switched to PQ ({@code BUS_TARGET_Q}), or -1 when none is. The Java twin of the native {@code chooseCarrierRow}
      * (fixedmatrix/reactive_relocation.cuh): the host must pick the row the device reads.
      */
     public static int chooseCarrierRow(ReactiveRelocationCandidates candidates, int g, int[] modes) {

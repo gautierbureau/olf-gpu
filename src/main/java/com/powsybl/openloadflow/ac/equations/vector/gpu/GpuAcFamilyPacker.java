@@ -83,7 +83,7 @@ final class GpuAcFamilyPacker {
         List<int[]> openBranchIndices = new ArrayList<>();
         // Dynamic Q-relocation for the ob/zero-impedance families (the cb/sh channels' twin): per element, the
         // ALTERNATE Q row of each side's bus — a two-way row (>= 0), a -2-groupId relocation-group
-        // encoding, or -1 (no second candidate). Lets a pinned remote member's / relocated pilot's
+        // encoding, or -1 (no second candidate). Lets a remote member switched to PQ / a relocated pilot have its
         // half-open-charging and dummy-Q terms follow the per-scenario routing instead of the
         // frozen dests (the guarded 3.3e-4 kV gap).
         List<int[]> openBranchAlternateReactiveDestination = new ArrayList<>();
@@ -188,7 +188,7 @@ final class GpuAcFamilyPacker {
                                    closedBranchIndices, closedBranchPhaseControlSide);
 
         // BASE-OPEN closable ZERO-IMPEDANCE branches (retained-open switches, batch SA only): a
-        // DISABLED zero-impedance branch keeps its DUMMY_TARGET_P/Q identity rows ACTIVE (dummies pinned 0) and
+        // DISABLED zero-impedance branch keeps its DUMMY_TARGET_P/Q identity rows ACTIVE (dummies held at 0) and
         // its dummy variables therefore HAVE rows — packing it adds the coupling slots to the
         // superset pattern; the solver enables the element and flips the two dummy rows to the
         // ZERO_V/ZERO_PHI coupling only in scenarios that CLOSE the switch (always a spanning-tree

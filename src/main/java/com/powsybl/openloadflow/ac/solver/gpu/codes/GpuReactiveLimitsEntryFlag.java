@@ -16,7 +16,7 @@ package com.powsybl.openloadflow.ac.solver.gpu.codes;
 public final class GpuReactiveLimitsEntryFlag {
 
     /** The bus holds a static var compensator standing by under OLF's voltage monitoring (OLF's StandByAutomaton):
-     *  seeded unpinned, only the monitoring loop activates it. */
+     *  seeded with no limit type, only the monitoring loop activates it. */
     public static final int STAND_BY_AUTOMATON = 1;
     /** The bus is not one of its voltage control's controller elements, so the degenerate-range guard may skip it
      *  (OLF's loop walks controller elements only). */

@@ -32,15 +32,15 @@ import java.util.Map;
  *   <li>after a converged batch pass, find the (scenario, controlled bus) pairs whose |targetV − V|
  *       exceeds the half deadband;</li>
  *   <li>batched SENSITIVITY solve on the device (native/cuda/outerloop/sensitivity.cu):
- *       J at the converged states, unit RHS at each out-of-deadband controller's pinned
- *       {@code BRANCH_TARGET_RHO1} identity row, dV/dρ read at the controlled bus's V column — the
+ *       J at the converged states, unit RHS at each out-of-deadband controller's
+ *       {@code BRANCH_TARGET_RHO1} identity row (rho held at its target), dV/dρ read at the controlled bus's V column — the
  *       exact device analogue of the loop's {@code SensitivityContext} (OLF's {@code solveTransposed}
  *       is the forward direction in powsybl-math's transposed storage);</li>
  *   <li>OLF's tap decisions replicated verbatim per scenario: {@code deltaR1 = diffV / sensitivity},
  *       closest-tap search within {@code maxTapShift}, the {@code AllowedDirection} ratchet
  *       (MAX_DIRECTION_CHANGE = 3), the {@code MIN_SENSI_FILTER} (0.05) insensitivity cut, and the
  *       one-tap-at-a-time round-robin when several controllers hold one bus;</li>
- *   <li>tap moves land as per-scenario rho-row TARGET overrides (the identity row's pinned value),
+ *   <li>tap moves land as per-scenario rho-row TARGET overrides (the value the identity row holds),
  *       full 8-double pi-model row overrides (per-step R/X/G/B tables), and a rho state seed at the
  *       new tap (the CPU's PreviousValueVoltageInitializer re-reads r1 from the pi model);
  *       re-solve warm and iterate until every scenario is in deadband or nothing moves.</li>
@@ -63,7 +63,7 @@ public final class GpuIncrementalTransformerVoltageControlOuterLoop {
     private GpuIncrementalTransformerVoltageControlOuterLoop() {
     }
 
-    /** One incremental controller: the rho variable row (pinned identity — unit-RHS row, target index
+    /** One incremental controller: the rho variable row (its identity — unit-RHS row, target index
      *  and state index all coincide in the device's paired layout), the controlled bus V row, targets,
      *  and the discrete tap table ([y g1 g2 b1 b2 ksi r1 a1] per tap). */
     public record Controller(int rhoRow, int vRow, int controlledBusNum, int branchNum, double targetV, double halfDeadband,
@@ -92,7 +92,7 @@ public final class GpuIncrementalTransformerVoltageControlOuterLoop {
     }
 
     /** Collect the network's incremental transformer voltage controllers (INCREMENTAL mode keeps the
-     *  branch VC DISABLED — rho stays a variable pinned by its BRANCH_TARGET_RHO1 identity row). */
+     *  branch VC DISABLED — rho stays a variable held by its BRANCH_TARGET_RHO1 identity row). */
     public static List<Controller> buildControllers(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
                                              GpuAcElementMapper elementMapper) {
         List<Controller> out = new ArrayList<>();

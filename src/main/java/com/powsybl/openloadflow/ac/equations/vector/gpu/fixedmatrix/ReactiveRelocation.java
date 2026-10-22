@@ -60,12 +60,13 @@ public final class ReactiveRelocation {
             // If the controller is switched to PQ by reactive limits, BUS_TARGET_Q becomes active again and the
             // bus must recover its own BUS_V-backed Q row.
             // CANONICAL encoding for a group with a candidate table (hasCandidateTable): the layout of the
-            // all-controllers-enabled state, whatever the network's pin state at extraction time. The row
+            // all-controllers-enabled state, whatever the network's PV/PQ state at extraction time. The row
             // modes carry the state per scenario, and the batched security analysis extracts AFTER the base
-            // load flow has pinned buses: measured on rte6515's busbar window, the pilot-self pilot VL-5997_0
-            // was pinned at SA extraction, so its q was frozen onto the member VL-5997_1's row and the member
-            // lost its own alternate — the member's pin then assembled an EMPTY row (slot 893, BUS-6088_BBS)
-            // while the base extraction (taken before any pin) had the layout the kernels are built for.
+            // load flow has switched buses to PQ: measured on rte6515's busbar window, the pilot-self pilot
+            // VL-5997_0 was switched to PQ at SA extraction, so its q was frozen onto the member VL-5997_1's row
+            // and the member lost its own alternate — the member's switch to PQ then assembled an EMPTY row
+            // (slot 893, BUS-6088_BBS) while the base extraction (taken before any switch) had the layout the
+            // kernels are built for.
             GeneratorVoltageControl mainVc = GeneratorVoltageControlRoles.mainGeneratorVoltageControl(bus);
             boolean canonical = mainVc != null && hasCandidateTable(mainVc, es);
             if (GeneratorVoltageControlRoles.isRemoteGeneratorVoltageControlControllerElement(bus) && (!qActive || canonical)) {
@@ -164,7 +165,7 @@ public final class ReactiveRelocation {
      *  BUS_V row — but when the controller IS the group's CONTROLLED bus, that row already carries
      *  the pilot's BUS_TARGET_V identity, so the DISTR_Q moves to the FREE controller's row: the
      *  row that hosts the pilot bus's reactive equation in every other form too (its Q balance when
-     *  the pilot is a plain bus, or when this member is RL-pinned). Without this the two equations
+     *  the pilot is a plain bus, or when the reactive limits switched this member to PQ). Without this the two equations
      *  collide on one row — one silently overwrites the other and the group's reactive sharing is
      *  left unsatisfied (measured on a richer-modelling RTE-like network: the device "converged"
      *  with a 0.45 pu DISTR_Q residual and OLF's own re-test then failed the load flow). */
@@ -184,18 +185,18 @@ public final class ReactiveRelocation {
     }
 
     /** The member row that HOSTS the pilot's DISTR_Q when the pilot is one of its own controllers:
-     *  OLF's reference controller (the first ENABLED merged controller), else - every controller
-     *  pinned in the base state - the first merged controller. In that case the pilot's DISTR_Q is
-     *  inactive and only needs a slot; the row modes carry the pinned state (mode 4 on every row).
-     *  Measured on rte6515's full busbar scope: the base pins EVERY controller of VL-6003_0's
-     *  group, "first enabled" found none and the whole precompute fell to the CPU.
-     *  NOT the free-member predicate below: a pinned member is never free (its row hosts its own
-     *  Q balance, canonical encoding) - calling it free left a pinned singleton at mode 1 with the
-     *  structure-frozen encoding (deviceRemoteSingletonMemberPin, deviceRemoteRobustRealisticVoltage). */
+     *  OLF's reference controller (the first ENABLED merged controller), else - no enabled
+     *  controller in the base state - the first merged controller. In that case the pilot's DISTR_Q is
+     *  inactive and only needs a slot; the row modes carry the PQ state (mode 4 on every row).
+     *  Measured on rte6515's full busbar scope: the base switches EVERY controller of VL-6003_0's
+     *  group to PQ, "first enabled" found none and the whole precompute fell to the CPU.
+     *  NOT the free-member predicate below: a member switched to PQ is never free (its row hosts its own
+     *  Q balance, canonical encoding) - calling it free left a singleton switched to PQ at mode 1 with the
+     *  structure-frozen encoding (deviceRemoteSingletonMemberSwitchToPq, deviceRemoteRobustRealisticVoltage). */
     static LfBus distrQHostMember(GeneratorVoltageControl voltageControl, EquationSystem<AcVariableType, AcEquationType> es) {
         List<LfBus> members = voltageControl.getMergedControllerElements();
         if (hasCandidateTable(voltageControl, es)) {
-            return members.get(0);                           // canonical: the first member, whatever is pinned
+            return members.get(0);                           // canonical: the first member, whatever is switched to PQ
         }
         return members.stream().filter(voltageControl::isControllerEnabled).findFirst()
                 .orElse(members.isEmpty() ? null : members.get(0));
@@ -205,7 +206,7 @@ public final class ReactiveRelocation {
      * The row that hosts a bus's reactive balance once the COUPLER-TREE RELOCATION has had its say: its own
      * {@code BUS_V} row, or its parent coupler's {@code DUMMY_Q} row when the relocation moved its power
      * equations there. Every consumer of "where does this bus's q live" has to ask this — the reactive-limit
-     * pass reads the pin and the q at that row (native {@code reactiveLimitReactivePowerRow}), the candidate table enrols it, the
+     * pass switches that row to PQ and reads the q there (native {@code reactiveLimitReactivePowerRow}), the candidate table enrols it, the
      * activation extractor targets it, the families write the bus's own q to it in mode 4, and the diagnostic
      * remote-member fill accumulates into it. A consumer left on the own row silently reads ZERO there.
      */
@@ -215,9 +216,9 @@ public final class ReactiveRelocation {
     }
 
     /** The row that hosts a bus's ACTIVE Q balance in the CURRENT state when its group has a candidate table
-     *  (see GpuAcActivationExtractor): a pinned member's own V row; the pilot (a controller of its own group
-     *  or not) rides the first ENABLED member's V row (the carrier) and falls back to its own V row when every
-     *  controller is pinned — the row the in-kernel mode scan selects. */
+     *  (see GpuAcActivationExtractor): for a member switched to PQ, its own V row; the pilot (a controller of its own
+     *  group or not) rides the first ENABLED member's V row (the carrier) and falls back to its own V row when no
+     *  controller is enabled — the row the in-kernel mode scan selects. */
     static int stateQRow(LfBus bus, int[] vCol) {
         return vCol[stateQCarrier(bus).getNum()];
     }
@@ -234,8 +235,8 @@ public final class ReactiveRelocation {
     }
 
     /** The bus whose row carries {@code bus}'s active Q balance: itself, or — for the pilot of a
-     *  candidate-table group — the first ENABLED member (the carrier), falling back to itself when every
-     *  controller is pinned. */
+     *  candidate-table group — the first ENABLED member (the carrier), falling back to itself when no
+     *  controller is enabled. */
     private static LfBus stateQCarrier(LfBus bus) {
         GeneratorVoltageControl voltageControl = GeneratorVoltageControlRoles.mainGeneratorVoltageControl(bus);
         if (voltageControl != null && voltageControl.getControlledBus() == bus) {
@@ -250,7 +251,7 @@ public final class ReactiveRelocation {
      * candidate table (plan-B4 / pilot-self rotation): every member and the pilot have a BUS_V column, and a
      * pilot that is one of its own controllers rotates (property on, at least two controllers). Such a
      * group is encoded CANONICALLY — as if every controller were enabled — because the table's in-kernel
-     * mode scan re-picks the carrier per scenario; the pin state at extraction time must not leak into the
+     * mode scan re-picks the carrier per scenario; the PV/PQ state at extraction time must not leak into the
      * structure (see computeQRow). Keep in step with the enrolment in ExtractionColumns.
      */
     public static boolean hasCandidateTable(GeneratorVoltageControl voltageControl, EquationSystem<AcVariableType, AcEquationType> es) {
@@ -278,7 +279,7 @@ public final class ReactiveRelocation {
      * extraction; this returns the OTHER one so the fill kernel can follow a per-scenario control
      * toggle on the shared structure. {@code -1} for a bus that is not transformer/shunt voltage
      * controlled (no second candidate — its Q row is fixed). The control-var COLUMN persists whether
-     * the control is on or off (pinned by BRANCH_TARGET_RHO1 / SHUNT_TARGET_B when off), so the row is
+     * the control is on or off (fixed by BRANCH_TARGET_RHO1 / SHUNT_TARGET_B when off), so the row is
      * always resolvable. The free controller is selected identically to {@link #computeQRow}: the one
      * whose distribution equation is inactive (with all inactive, the first — stable across states).
      */

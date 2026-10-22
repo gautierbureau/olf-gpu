@@ -39,9 +39,9 @@ public final class DistrQPacker {
     record Pack(DistrQTerms terms, DistrQMembers members) {
     }
 
-    /** Per-group member table for the IN-KERNEL reactive-key renormalization on a remote RL pin
+    /** Per-group member table for the IN-KERNEL reactive-key renormalization on a remote member's switch to PQ
      *  (plan-B3): OLF's updateReactiveKeys zeroes a controller-DISABLED member's key and
-     *  renormalizes over the survivors — so the DISTR_Q weights are PIN-STATE-DEPENDENT and the
+     *  renormalizes over the survivors — so the DISTR_Q weights DEPEND ON THE PV/PQ STATES and the
      *  kernel recomputes them per scenario from the RAW keys (Control.createReactiveKeys) and the
      *  per-(entry, scenario) limitType, replicating the CPU's zero-then-sum-in-member-order
      *  arithmetic bit-for-bit. distrQRowMember/distrQInjectionMember are −1 for non-group contributions. */
@@ -113,10 +113,10 @@ public final class DistrQPacker {
                 // member (whose row carries the pilot's relocated Q)
                 memberTables.hasRow().add((byte) (m != freeMember && !m.isDisabled()
                         && es.getEquation(m.getNum(), AcEquationType.DISTR_Q).isPresent() ? 1 : 0));
-                // the member's UNPINNED targetQ (generationTargetQ - loadTargetQ), which is what
+                // the member's targetQ as a PV bus (generationTargetQ - loadTargetQ), which is what
                 // AcTargetVector reads for every member the RL loop has not frozen; a frozen
                 // member's targetQ is its q limit and the kernel derives that from the RL tables.
-                memberTables.targetQ().add(ReactiveLimitsPacker.unpinnedTargetQ(m));
+                memberTables.targetQ().add(ReactiveLimitsPacker.recomputedTargetQ(m));
                 memberTables.busNum().add(m.getNum());
                 // AcTargetVector reads the member's OWN control's merged elements, so a control merged INTO this
                 // group (DEPENDENT: its own list is just its controller) sums only its own targetQ. Recorded as bus
@@ -208,8 +208,8 @@ public final class DistrQPacker {
                     : controllers.stream().filter(b -> !b.isDisabled() && voltageControl.isControllerEnabled(b)).findFirst().orElse(null);
             for (LfBus gk : controllers) {
                 // EXISTENCE-keyed (the A1 lesson): pack every non-free member whose DISTR_Q equation
-                // EXISTS — a base-PINNED member's row is inactive (mode 4, own Q) but an in-flight
-                // UNPIN re-activates it, and the union pattern must already hold its slots. The row-
+                // EXISTS — the row of a member SWITCHED TO PQ in the base is inactive (mode 4, own Q) but an
+                // in-flight switch BACK TO PV re-activates it, and the union pattern must already hold its slots. The row-
                 // mode/fill gates decide per scenario which face the row shows.
                 if (gk == freeCtl || gk.isDisabled() || es.getEquation(gk.getNum(), AcEquationType.DISTR_Q).isEmpty()) {
                     continue;                                // the free controller carries the pilot's Q; a disabled

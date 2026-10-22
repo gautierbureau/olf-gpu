@@ -49,7 +49,7 @@ public record BatchContingency(String contingencyId, List<LfBranch> outagedBranc
                                List<LfHvdc> acEmulationOffHvdcs) {
 
     /** Separator inside a (contingency, strategy) pair's BatchContingency id — pairs are solved in a
-     *  SECOND phase, WARM-CONTINUED from their parent contingency's state and reactive-limits pinning. */
+     *  SECOND phase, WARM-CONTINUED from their parent contingency's state and PV/PQ states. */
     public static final char STRATEGY_KEY_SEP = '\u0001';
 
     @SuppressWarnings("java:S107")

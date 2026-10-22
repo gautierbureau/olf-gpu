@@ -57,11 +57,11 @@ public final class GpuIncrementalTransformerReactivePowerControlOuterLoop {
             }
             var rc = controlled.getTransformerReactivePowerControl().orElseThrow();
             LfBranch controller = rc.getControllerBranch();
-            Integer pinRow = rhoRows.get(controller.getNum());
+            Integer targetRow = rhoRows.get(controller.getNum());
             int elemIndex = elementMapper.getElementIndex(controller);
             int controlledElementIndex = elementMapper.getElementIndex(controlled);
             double[][] tapRows = GpuTransformerVoltageControlOuterLoop.tapModels(controller.getPiModel());
-            if (pinRow == null || elemIndex < 0 || controlledElementIndex < 0 || tapRows.length == 0) {
+            if (targetRow == null || elemIndex < 0 || controlledElementIndex < 0 || tapRows.length == 0) {
                 GpuBatchSkips.record(GpuBatchSkips.Slot.RPC, LOGGER,
                         "Incremental RPC controller {} not representable on the GPU batch — skipped", controller.getId());
                 continue;
@@ -71,7 +71,7 @@ public final class GpuIncrementalTransformerReactivePowerControlOuterLoop {
                     .map(com.powsybl.openloadflow.network.GeneratorReactivePowerControl::getTargetValue)
                     .orElse(rc.getTargetValue());
             double halfTargetDeadband = rc.getTargetDeadband().orElse(MIN_TARGET_DEADBAND_MVAR) / 2;
-            out.add(new DeviceFlowControllers.Controller(GpuControlledFlow.REACTIVE_POWER, pinRow, GpuPiModelColumn.R1, target, halfTargetDeadband,
+            out.add(new DeviceFlowControllers.Controller(GpuControlledFlow.REACTIVE_POWER, targetRow, GpuPiModelColumn.R1, target, halfTargetDeadband,
                     tapRows, DeviceFlowControllers.closestTap(tapRows, GpuPiModelColumn.R1, controller.getPiModel().getR1()),
                     elemIndex, controlledElementIndex, incrementalTransformerReactivePowerControlMaxTapShift, rc.getControlledSide().ordinal(), controller.getNum()));
         }

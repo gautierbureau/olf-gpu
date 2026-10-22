@@ -17,7 +17,7 @@ import java.util.Arrays;
  *       target {@code targetV} <-> the limit - {@code loadQ}); {@code comparedVoltageRow}: the row whose voltage the
  *       switch conditions compare (the pilot's, for a remote member);</li>
  *   <li>{@code minQ} / {@code maxQ}: its reactive limits (pu); {@code loadQ}: its load target Q; {@code targetV}: its
- *       controlled voltage target; {@code initialTargetQ}: its generation target Q before any pin;</li>
+ *       controlled voltage target; {@code initialTargetQ}: its generation target Q before any switch to PQ;</li>
  *   <li>{@code svcMinB} / {@code svcMaxB} / {@code baseVSquared}: a static var compensator's susceptance limits and
  *       base voltage squared, for its live limits {@code B * V^2};</li>
  *   <li>{@code flags}: GpuReactiveLimitsEntryFlag bits; {@code voltageControlRole}: a GpuVoltageControlRole;</li>
@@ -46,7 +46,7 @@ public record ReactiveLimitEntries(int[] voltageRow, double[] minQ, double[] max
     }
 
     /** The bus's reactive-limit entry, or -1: a re-merged bus is checked as a LOCAL controller by the device
-     *  (OLF checks it as the PV bus it now is; BUS-6113_BBS_1 pinned VL-6113_1 at RL#1, the device never
+     *  (OLF checks it as the PV bus it now is; BUS-6113_BBS_1 switched VL-6113_1 to PQ at RL#1, the device never
      *  looked — 7.1 kV). */
     public int entryOf(int busNum) {
         int[] reactiveLimitBusNum = busNum();

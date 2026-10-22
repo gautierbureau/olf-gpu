@@ -21,7 +21,7 @@ import java.util.List;
 
 /**
  * The per-scenario reactive-limit and DISTR_Q entries of re-merged voltage controls: the split sub-groups, the
- * remote mains turned identities, and the PV / pinned PV / cross entries of the new controllers.
+ * remote mains turned identities, and the PV entries (plain, switched to PQ in the base, or cross) of the new controllers.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
@@ -116,7 +116,7 @@ final class VoltageControlReMergeEntries {
      * VL-2640_1) gets an explicit ROW_V_IDENTITY here. Emitting it in BOTH places would be a duplicate
      * override on one row (#62's race), so a main whose own row is the relocated child row of an OUTAGED
      * coupler only gets its reactive-limit entry ({@link #reMergedMainLimitsEntry}). A main whose own row carries a
-     * LIVE coupler's ZERO_V takes a cross identity on the parent coupler's DUMMY_Q row, and a main PINNED in the base
+     * LIVE coupler's ZERO_V takes a cross identity on the parent coupler's DUMMY_Q row, and a main SWITCHED TO PQ in the base
      * starts as its reactive balance ({@link #pvEntry}). Returns null when the main has no voltage row to hold the
      * target (none, or frozen), with the reject tag in {@code reject[0]}.
      */
@@ -139,28 +139,28 @@ final class VoltageControlReMergeEntries {
                 System.err.printf("QUALIFY_TRACE remoteMain bus=%s vRow=%d target=%.6f blockCovers=%b switchedPvToPqInBase=%b%n",
                         e.getKey().getId(), vVar.getRow(), e.getValue(), blockCovers, switchedPvToPqInBase);
             }
-            // the cluster's other controllers that can pin: the first enabled one holds the target while the main is pinned
+            // the cluster's other controllers that can switch to PQ: the first enabled one holds the target while the main is PQ
             int[] otherControllerEntries = reMerged.otherControllers().getOrDefault(e.getKey(), List.of()).stream()
                     .mapToInt(controller -> gpuData.reactiveLimits().entryOf(controller.getNum()))
                     .filter(entry -> entry >= 0)
                     .toArray();
             if (blockCovers) {
                 // The opening path (CouplerSeed) lays the main's own row out: the voltage identity, or its reactive balance
-                // at the pinned value when the base pinned it. But the main's controller is still one of the control's:
+                // at the frozen value when the base switched it to PQ. But the main's controller is still one of the control's:
                 // packed as a member of the base group, its entry read its balance on the opened coupler's DUMMY_Q row, an
                 // identity now, and was never tested. Measured on a three-section chain losing its root: the elected main's
-                // generator kept 1.97 pu against its 1.6 pu ceiling, where OLF pins it and the next controller holds the
-                // voltage.
+                // generator kept 1.97 pu against its 1.6 pu ceiling, where OLF switches it to PQ and the next controller holds
+                // the voltage.
                 out.add(reMergedMainLimitsEntry(vVar.getRow(), e.getValue(), reactiveLimitEntry, otherControllerEntries));
                 continue;
             }
-            // A main PINNED in the base is PQ in OLF, and it must not hold the identity (on a base-pinned child the RL
-            // kernel's limit drift once wrote the reactive limit as the identity's target: rte6515 BUS-6194_BBS_1, V held
-            // at 0.6251 = maxQ - loadQ). Its row starts as its reactive balance at the pinned value, its entry is checked
-            // as a LOCAL PV bus at the control's target so that an unpin gives the main the identity back, and meanwhile
-            // the first enabled other controller holds the target; with every controller pinned no row does, as OLF's
-            // BUS_TARGET_V is off. Such a contingency used to be refused (VC_REMERGE_PINNED_MAIN) and, with every
-            // controller pinned, rejected to the CPU at its first unpin. Under a LIVE coupler the main's own row carries
+            // A main SWITCHED TO PQ in the base is PQ in OLF, and it must not hold the identity (on a child switched to PQ
+            // in the base the RL kernel's limit drift once wrote the reactive limit as the identity's target: rte6515
+            // BUS-6194_BBS_1, V held at 0.6251 = maxQ - loadQ). Its row starts as its reactive balance at the frozen value,
+            // its entry is checked as a LOCAL PV bus at the control's target so that a switch back to PV gives the main the
+            // identity back, and meanwhile the first enabled other controller holds the target; with no enabled controller
+            // no row does, as OLF's BUS_TARGET_V is off. Such a contingency used to be refused and, with no enabled
+            // controller, rejected to the CPU at its first switch back to PV. Under a LIVE coupler the main's own row carries
             // that coupler's ZERO_V, so the main's equations go on the parent's DUMMY_Q row (a cross identity; rte6515
             // BUS-6029_BBS_1/2: the elected main two couplers from the island).
             out.add(pvEntry(vVar.getRow(), reloc != null ? reloc[1] : -1, e.getValue(), reactiveLimitEntry, switchedPvToPqInBase,
@@ -201,7 +201,7 @@ final class VoltageControlReMergeEntries {
 
     /** Row-mode-only GenOutage: the bus's V row becomes a VOLTAGE IDENTITY at {@code vTarget} (a re-merged control);
      *  {@code otherControllerEntries}: the reactive-limit entries of the control's other controllers, in OLF's merged
-     *  order, that take the identity while the bus's own controller is pinned (empty for a control of one bus). */
+     *  order, that take the identity while the bus's own controller is switched to PQ (empty for a control of one bus). */
     static GenOutage reMergedPvEntry(int vRow, double vTarget, int reactiveLimitEntry, int[] otherControllerEntries) {
         return new GenOutage(-1, 0, vRow, vTarget, true, true,
                 -1, 0, 0, 0, 0, reactiveLimitEntry, 0, 0, false, java.util.Set.of(), 0, 0, 0, -1, otherControllerEntries,
@@ -210,30 +210,31 @@ final class VoltageControlReMergeEntries {
 
     /** The reactive-limit entry of a re-merged main whose voltage identity another path installs (the opened coupler's
      *  child, CouplerSeed): no row change, its controller checked as a LOCAL PV bus at {@code vTarget}, and the target
-     *  handed to {@code otherControllerEntries} (as in {@link #reMergedPvEntry}) while it is pinned. */
+     *  handed to {@code otherControllerEntries} (as in {@link #reMergedPvEntry}) while it is switched to PQ. */
     static GenOutage reMergedMainLimitsEntry(int vRow, double vTarget, int reactiveLimitEntry, int[] otherControllerEntries) {
         return new GenOutage(-1, 0, vRow, vTarget, false, false,
                 -1, 0, 0, 0, 0, reactiveLimitEntry, 0, 0, false, java.util.Set.of(), 0, 0, 0, -1, otherControllerEntries,
                 new int[0], new double[0], GenOutage.ROW_V_IDENTITY, -1, 0, -1, 0, -1, 0, -1, -1, 0, false, -1, 0, 0);
     }
 
-    /** A re-merged control whose bus the BASE pinned: its own row starts as its reactive balance at the pinned
+    /** A re-merged control whose bus the BASE switched to PQ: its own row starts as its reactive balance at the frozen
      *  value (mode 4, {@code qTarget} = LfBus.getTargetQ(), the frozen generation minus the load) and its entry is a
-     *  LOCAL PV bus at {@code vTarget}, so an unpin restores the identity as OLF re-activates BUS_TARGET_V.
+     *  LOCAL PV bus at {@code vTarget}, so a switch back to PV restores the identity as OLF re-activates BUS_TARGET_V.
      *  {@code otherControllerEntries} as in {@link #reMergedPvEntry}: the first enabled one holds the target meanwhile. */
-    static GenOutage reMergedPinnedPvEntry(int vRow, double qTarget, double vTarget, int reactiveLimitEntry, int[] otherControllerEntries) {
+    static GenOutage reMergedSwitchedToPqEntry(int vRow, double qTarget, double vTarget, int reactiveLimitEntry, int[] otherControllerEntries) {
         return new GenOutage(-1, 0, vRow, qTarget, true, true,
                 -1, 0, 0, 0, 0, reactiveLimitEntry, 0, 0, false, java.util.Set.of(), 0, 0, 0, -1, otherControllerEntries,
-                new int[0], new double[0], GenOutage.ROW_PINNED_V, -1, vTarget, -1, 0, -1, 0, -1, -1, 0, false, -1, 0, 0);
+                new int[0], new double[0], GenOutage.ROW_SWITCHED_TO_PQ_V, -1, vTarget, -1, 0, -1, 0, -1, -1, 0, false, -1, 0, 0);
     }
 
     /** A re-merged control whose own V row hosts a LIVE coupler's ZERO_V (tasks #70, VC_REMERGE_RELOC_VROW): its
-     *  identity is a CROSS identity on the parent coupler's DUMMY_Q row (mode 6, the bus's V column), or — base
-     *  pinned — that row starts as the balance at the pinned value and the entry unpins back to the cross form.
+     *  identity is a CROSS identity on the parent coupler's DUMMY_Q row (mode 6, the bus's V column), or — switched
+     *  to PQ in the base — that row starts as the balance at the frozen value and the entry switches back to PV in the
+     *  cross form.
      *  {@code otherControllerEntries} as in {@link #reMergedPvEntry}. */
-    static GenOutage reMergedCrossEntry(int dummyQRow, double vTarget, int reactiveLimitEntry, boolean pinned, double qTarget,
+    static GenOutage reMergedCrossEntry(int dummyQRow, double vTarget, int reactiveLimitEntry, boolean switchedToPq, double qTarget,
                                         int[] otherControllerEntries) {
-        return pinned ? reMergedPinnedPvEntry(dummyQRow, qTarget, vTarget, reactiveLimitEntry, otherControllerEntries)
+        return switchedToPq ? reMergedSwitchedToPqEntry(dummyQRow, qTarget, vTarget, reactiveLimitEntry, otherControllerEntries)
                 : new GenOutage(-1, 0, dummyQRow, vTarget, true, true,
                     -1, 0, 0, 0, 0, reactiveLimitEntry, 0, 0, false, java.util.Set.of(), 0, 0, 0, -1, otherControllerEntries,
                     new int[0], new double[0], GenOutage.ROW_CROSS_V_IDENTITY, -1, 0, -1, 0, -1, 0, -1, -1, 0, false, -1, 0, 0);
@@ -241,7 +242,8 @@ final class VoltageControlReMergeEntries {
 
     /** The PV entry of a re-merged control of one bus (the bus whose own {@code BUS_V} row is {@code vRow}): a cross
      *  identity when {@code crossRow >= 0} ({@link CrossIdentity#row}: its own row carries a LIVE coupler's ZERO_V),
-     *  else the base-pinned form when the base pinned it ({@code switchedPvToPqInBase}), else the plain voltage identity. */
+     *  else the switched-to-PQ form when the base switched it to PQ ({@code switchedPvToPqInBase}), else the plain voltage
+     *  identity. */
     static GenOutage pvEntry(int vRow, int crossRow, double vTarget, int reactiveLimitEntry, boolean switchedPvToPqInBase, double qTarget) {
         return pvEntry(vRow, crossRow, vTarget, reactiveLimitEntry, switchedPvToPqInBase, qTarget, new int[0]);
     }
@@ -254,7 +256,7 @@ final class VoltageControlReMergeEntries {
             return reMergedCrossEntry(crossRow, vTarget, reactiveLimitEntry, switchedPvToPqInBase, qTarget, otherControllerEntries);
         }
         if (switchedPvToPqInBase) {
-            return reMergedPinnedPvEntry(vRow, qTarget, vTarget, reactiveLimitEntry, otherControllerEntries);
+            return reMergedSwitchedToPqEntry(vRow, qTarget, vTarget, reactiveLimitEntry, otherControllerEntries);
         }
         return reMergedPvEntry(vRow, vTarget, reactiveLimitEntry, otherControllerEntries);
     }

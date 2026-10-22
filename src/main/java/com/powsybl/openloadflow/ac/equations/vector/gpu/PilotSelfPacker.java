@@ -18,7 +18,7 @@ import java.util.List;
 
 /**
  * The pilot-self groups of remote voltage control: a group whose pilot is also one of its controllers, whose
- * reactive balance is relocated to a carrier once a reactive limit pins it.
+ * reactive balance is relocated to a carrier once a reactive limit switches it to PQ.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
@@ -29,24 +29,24 @@ public final class PilotSelfPacker {
 
     /**
      * PILOT-SELF voltage-control groups, keyed by RL ENTRY so the free-role rotation can be computed from the
-     * pin state rather than from row modes. One group per MAIN remote generator voltage control whose merged
+     * PV/PQ state rather than from row modes. One group per MAIN remote generator voltage control whose merged
      * controllers CONTAIN the controlled bus, with at least two controllers.
      *
      * <p>OLF's rule ({@code AcEquationSystemCreator.updateRemoteVoltageControlEquations}) is a rotation over
-     * the LIVE ENABLED controllers: {@code BUS_TARGET_V} is active while any is enabled, every PINNED
-     * controller gets its own {@code BUS_TARGET_Q}, and {@code DISTR_Q} is active for every enabled
-     * controller except the FIRST — so which controller is "free" changes each time one pins. In this layout
-     * (rows are VARIABLES) that means: {@code BUS_TARGET_V} stays on the controlled bus's own row, because a
-     * mode-0 identity constrains its OWN row's variable and moving it would pin a member's v to the pilot's
-     * target; and a PINNED pilot's reactive balance has to ride the first ENABLED member's row instead.
+     * the LIVE ENABLED controllers: {@code BUS_TARGET_V} is active while any is enabled, every controller
+     * SWITCHED TO PQ gets its own {@code BUS_TARGET_Q}, and {@code DISTR_Q} is active for every enabled
+     * controller except the FIRST — so which controller is "free" changes each time one switches to PQ. In this
+     * layout (rows are VARIABLES) that means: {@code BUS_TARGET_V} stays on the controlled bus's own row, because a
+     * mode-0 identity constrains its OWN row's variable and moving it would fix a member's v at the pilot's
+     * target; and the reactive balance of a pilot SWITCHED TO PQ has to ride the first ENABLED member's row instead.
      * {@code computeQRow} already places it there, but statically, frozen at extraction — while the device's
-     * reactive-limits loop changes pin states mid-solve. That mismatch is the rank-deficient base on
+     * reactive-limits loop changes PV/PQ states mid-solve. That mismatch is the rank-deficient base on
      * rte6515's busbar windows.
      *
      * <p>The choice cannot be read off the row modes: the row to pick is mode 4 BECAUSE it carries the
      * relocated balance, which is circular. {@code limitType} per RL entry is the ground truth OLF itself
      * uses, hence the entry keying here. {@code memberEntry} is {@code -1} for a controller with no RL entry
-     * (it can never pin), and a group is dropped when the pilot has no entry or no row.
+     * (it never switches to PQ), and a group is dropped when the pilot has no entry or no row.
      *
      * @param ptr group boundaries into {@code memberEntry}/{@code memberRow} ({@code nGroups + 1} entries)
      * @param memberEntry RL entry per controller, in merged order, or -1
@@ -88,7 +88,7 @@ public final class PilotSelfPacker {
             }
             Integer pe = entryOfBus.get(bus.getNum());
             if (pe == null || vCol[bus.getNum()] < 0) {
-                continue;                                    // the pilot cannot pin: nothing rotates
+                continue;                                    // the pilot never switches to PQ: nothing rotates
             }
             List<LfBus> members = voltageControl.getMergedControllerElements();
             boolean rowsResolvable = members.stream().allMatch(m -> vCol[m.getNum()] >= 0);

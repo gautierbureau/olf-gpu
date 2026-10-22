@@ -74,10 +74,10 @@ final class IslandedBuses {
      * coupler's {@code ZERO_V} / {@code ZERO_PHI} moved onto that bus's V / PHI rows — which the freeze above turns
      * into identities, erasing them. Freezing the coupler's dummy rows as well makes EVERY row of the island an
      * identity again, which is what an island wants (it has no equation left to satisfy): without it the child
-     * bus's power balance is stranded on a dummy row nobody pins, and the island cannot converge.
+     * bus's power balance is stranded on a dummy row nobody holds, and the island cannot converge.
      *
      * <p>Only couplers with BOTH endpoints islanded are frozen here; the boundary coupler the contingency opened
-     * already has its dummy rows pinned by the chunk solver's zero-impedance-outage path. The set is empty when the relocation
+     * already has its dummy rows held by the chunk solver's zero-impedance-outage path. The set is empty when the relocation
      * is off, so the default path keeps its exact row list (and with it {@code nActive}).
      */
     static void freezeRelocatedCouplerRows(EquationSystem<AcVariableType, AcEquationType> es,
@@ -154,7 +154,7 @@ final class IslandedBuses {
 
     /** The reactive-limits controllers this contingency puts in another synchronous component: their
      *  BUS_V row is one of the frozen island rows. OLF disables those buses, so its ReactiveLimits
-     *  loop never sees them; the device must not either, or it pins a PV bus OLF leaves alone. */
+     *  loop never sees them; the device must not either, or it switches to PQ a PV bus OLF leaves alone. */
     static int[] islandedReactiveLimitControllers(int[] frozenRows, GpuAcData gpuData) {
         int[] reactiveLimitVoltageRow = gpuData.reactiveLimits().voltageRow();
         if (reactiveLimitVoltageRow == null || reactiveLimitVoltageRow.length == 0 || frozenRows.length == 0) {

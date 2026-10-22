@@ -196,7 +196,7 @@ constants carry OLF's constant names.
 | `GpuAcSolverStatus` | `AcSolverStatus` | `CONVERGED` 0, `MAX_ITERATION_REACHED` 1; device only: `DIVERGED` -1 (NaN/Inf mismatch), `REJECTED` -2 (replayed by the CPU), `LINEAR_SOLVE_FAILED` -3 (first linear solve failed, retried in robust mode; closest OLF notion `SOLVER_FAILED`) |
 | `GpuOuterLoopKind` | the outer loops, by OLF loop name | `NONE` -1; `DISTRIBUTED_SLACK` 0 … `SECONDARY_VOLTAGE_CONTROL` 11; `COUNT` 12 |
 | `GpuAcEmulationStatus` | `LfHvdc.AcEmulationControl.AcEmulationStatus` | `LINEAR_MODE` 0, `SATURATION_MODE_FROM_CS1_TO_CS2` 1, `SATURATION_MODE_FROM_CS2_TO_CS1` 2, `FROZEN` 3 (OLF ordinals) |
-| `GpuQLimitType` | `LfBus.QLimitType` (ordinal + 1) | `NONE` 0 (not pinned), `MIN_Q` 1, `MAX_Q` 2, `MIN_REALISTIC_V` 3, `MAX_REALISTIC_V` 4; device only: `FROZEN` 5 (voltage control frozen or all generators lost). Native helpers `isMinLimit` / `isMaxLimit` are OLF's |
+| `GpuQLimitType` | `LfBus.QLimitType` (ordinal + 1) | `NONE` 0 (not switched to PQ), `MIN_Q` 1, `MAX_Q` 2, `MIN_REALISTIC_V` 3, `MAX_REALISTIC_V` 4; device only: `FROZEN` 5 (voltage control frozen or all generators lost). Native helpers `isMinLimit` / `isMaxLimit` are OLF's |
 | `GpuReactiveLimitsState` | a bus's QLimitType + `pvPqSwitchCount` | `LIMIT_TYPE_MASK` 7 (a `GpuQLimitType`), `PV_PQ_SWITCH_COUNT_SHIFT` 3 |
 | `GpuVoltageControlRole` | a bus's place in its `GeneratorVoltageControl` | `LOCAL` 0, `REMOTE` 1 (robust mode rule applies), `PILOT_SELF` 2 (device term, section 6), `REMOTE_ROBUST_MODE_EXEMPT` 3 (own control local) |
 | `GpuReactiveLimitsEntryFlag` | bit flags of a reactive-limit entry | `STAND_BY_AUTOMATON` 1 (an SVC under OLF's `StandByAutomaton`), `NOT_CONTROLLER_ELEMENT` 2 |

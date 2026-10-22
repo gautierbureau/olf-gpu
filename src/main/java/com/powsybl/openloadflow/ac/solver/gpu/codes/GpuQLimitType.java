@@ -11,7 +11,7 @@ import com.powsybl.openloadflow.network.LfBus;
 
 /**
  * A reactive-limit entry's limit type as the device holds it (the low bits of reactiveLimitsState, reactiveLimitBaseQLimitType): OLF's
- * {@link LfBus.QLimitType} (ordinal + 1), {@link #NONE} when the entry is not pinned, and {@link #FROZEN}, the
+ * {@link LfBus.QLimitType} (ordinal + 1), {@link #NONE} when the entry is not switched to PQ, and {@link #FROZEN}, the
  * device's mark for a voltage control OLF's GeneratorVoltageControlManager froze or whose generators are all lost.
  * Mirrored by native/cuda/common/codes/gpu_q_limit_type.cuh.
  *
@@ -19,7 +19,7 @@ import com.powsybl.openloadflow.network.LfBus;
  */
 public final class GpuQLimitType {
 
-    /** Not pinned: the bus controls its voltage (OLF: no QLimitType). */
+    /** Not switched to PQ: the bus controls its voltage (OLF: no QLimitType). */
     public static final int NONE = 0;
     public static final int MIN_Q = 1;
     public static final int MAX_Q = 2;
@@ -41,7 +41,7 @@ public final class GpuQLimitType {
         }).orElse(NONE).byteValue();
     }
 
-    /** OLF's QLimitType of a pinned entry (MIN_Q to MAX_REALISTIC_V). */
+    /** OLF's QLimitType of an entry switched to PQ (MIN_Q to MAX_REALISTIC_V). */
     public static LfBus.QLimitType toOlf(int limitType) {
         return switch (limitType) {
             case MIN_Q -> LfBus.QLimitType.MIN_Q;

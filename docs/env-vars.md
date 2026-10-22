@@ -35,10 +35,10 @@ from those two lists; add a channel there, then here.
 | `OLF_GPU_DQ_TRACE` | native | `<row>`: every DISTR_Q residual contribution landing in that row |
 | `OLF_GPU_DS_ACCOUNT` | java | The distributed active power booked when a load flow's distributed slack check falls back to OLF's own. |
 | `OLF_GPU_DX_DUMP_ON_REJECT` | native | `<dir>`: J, F, B, dx and modes of the slots the linear-solve guard rejects |
-| `OLF_GPU_EQ_DUMP` | java | `<file>`: the GPU equation system of the load flow as text, once (the first pinned pass). |
+| `OLF_GPU_EQ_DUMP` | java | `<file>`: the GPU equation system of the load flow as text, once (the first pass with a bus switched to PQ). |
 | `OLF_GPU_EQ_DUMP_CTG` | java | `<contingency id>`: OLF's post-contingency equation system of that contingency, as text. |
 | `OLF_GPU_EQ_DUMP_CTG_FILE` | java | `<file>`: where `OLF_GPU_EQ_DUMP_CTG` writes (default: the contingency id + `.olf.post`). |
-| `OLF_GPU_EQ_DUMP_WHEN` | java | `any`: `OLF_GPU_EQ_DUMP` writes the first pass, pinned or not. |
+| `OLF_GPU_EQ_DUMP_WHEN` | java | `any`: `OLF_GPU_EQ_DUMP` writes the first pass, with a bus switched to PQ or not. |
 | `OLF_GPU_HVDC_TRACE` | java | `<phiRow>` or `all`: the AC emulation HVDC links the pack carries and their loop decisions. |
 | `OLF_GPU_ITER_TRACE_CTG` | java | `<id>[,<id>]`: iteration count, final mismatch and distributed active power of those contingencies. |
 | `OLF_GPU_LOOP_TRACE` | native | `<slot>`: that slot's outer-loop passes (or the OLF_GPU_LOOP_TRACE_CTG slot) |
@@ -48,7 +48,7 @@ from those two lists; add a channel there, then here.
 | `OLF_GPU_QUALIFY_TRACE` | java | Why each contingency is batched, or which rule sends it to the CPU. |
 | `OLF_GPU_REJECT_TRACE` | java + native | The scenarios the device rejects, with the reason. |
 | `OLF_GPU_RL_AUDIT` | native | `<tol>`: the final state audited against the rule that ends OLF's reactive-limit loop |
-| `OLF_GPU_RL_TRACE` | java + native | The reactive-limit entries the pack builds, and the device's pin decisions per scenario. Native: the reactive-limit tables a context is built with |
+| `OLF_GPU_RL_TRACE` | java + native | The reactive-limit entries the pack builds, and the device's switches to PQ and back to PV per scenario. Native: the reactive-limit tables a context is built with |
 | `OLF_GPU_SA_EQ_DUMP` | java | `<file>`: the security analysis extraction's equation system as text. |
 | `OLF_GPU_SA_RESID` | java | `<n>`: the n worst rows of OLF's residual at the device's post-contingency state, with their equation. |
 | `OLF_GPU_SA_VAR_DUMP` | java | `<file>`: the device's post-contingency state per OLF variable (scoped by `OLF_TRACE_CTG`). |

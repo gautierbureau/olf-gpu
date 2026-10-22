@@ -51,7 +51,7 @@ public final class DevicePhases {
      *
      * <p>{@code reactiveLimitsOuterLoop}: the run has OLF's ReactiveLimitsOuterLoop. The reactive-limit entries are
      * packed either way; the secondary voltage control and the generator freeze of a remote controller key on their
-     * pin state, which only that loop moves.
+     * PV/PQ state, which only that loop moves.
      */
     public record Request(boolean monitoring,
                           boolean incrementalTransformerVoltageControllers,

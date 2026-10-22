@@ -38,7 +38,7 @@ import java.util.Map;
  *       BEFORE the first solve (per scenario, the a1-paired row flips to the P-flow equation, row
  *       mode 3 — the cb family re-emits the controlled side's P outputs there and a1 solves free);
  *       the loop's first check switches control OFF and rounds a1 to the CLOSEST TAP
- *       ({@code roundA1ToClosestTap}) → one warm re-solve with the a1 identity pinned at the rounded
+ *       ({@code roundA1ToClosestTap}) → one warm re-solve with the a1 identity fixed at the rounded
  *       tap and the tap's full pi row (per-step R/X/G/B) applied;</li>
  *   <li>LIMITER mode — from the second iteration: while the controlled side's current exceeds the
  *       limit, shift ONE tap per round in the direction that reduces it (the SIGN of dI/da1, read

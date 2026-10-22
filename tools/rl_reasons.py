@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Why the ReactiveLimits outer loop costs what it does.
 CPU (log with OLF_OL_STATS=1): every reactive-limit check's causes (CPU_RL_CHECK): a PV->PQ switch, a PQ->PV switch,
-a limit update of a pinned bus, a reactive controller pinned; checks per contingency.
+a limit update of a bus switched to PQ, a reactive power controller switched to PQ; checks per contingency.
 usage: rl_reasons.py cpu <log>"""
 import re, sys, collections
 arm, log = sys.argv[1], sys.argv[2]

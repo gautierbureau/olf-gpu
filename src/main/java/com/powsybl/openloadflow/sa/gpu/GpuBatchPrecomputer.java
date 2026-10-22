@@ -118,7 +118,7 @@ final class GpuBatchPrecomputer {
             List<BatchContingency> batch = new ArrayList<>();
             // OLF's zero-impedance spanning trees, replayed contingency by contingency (ZeroImpedanceTreeReplay):
             // the device extracted its structure on the base tree, and every coupler OLF has out of its
-            // tree when it reaches a contingency must be pinned there, ALL of them, not one per network.
+            // tree when it reaches a contingency must be held out of it there, ALL of them, not one per network.
             ZeroImpedanceTreeReplay ziTree = new ZeroImpedanceTreeReplay(net);
             for (PropagatedContingency propagatedContingency : contingencies) {
                 addBatchScenarios(net, network, propagatedContingency, context, ziTree, batch, strategies, config, actions);

@@ -10,8 +10,8 @@ package com.powsybl.openloadflow.ac.outerloop.gpu;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 
 /**
- * The device's reactive-limit tables and per-scenario overrides (ReactiveLimitsOuterLoop): the pin entries,
- * the capability curves, forced target Q, the realistic-voltage check and the remote member pins.
+ * The device's reactive-limit tables and per-scenario overrides (ReactiveLimitsOuterLoop): the entries it switches
+ * to PQ, the capability curves, forced target Q, the realistic-voltage check and the remote members' switches.
  *
  * <p>JNI glue: {@code native/cuda/jni/reactive_limits_jni.cu}.
  *
@@ -26,7 +26,7 @@ public final class ReactiveLimitsNative {
     private ReactiveLimitsNative() {
     }
 
-    /** Per (scenario, reactive-limit entry): the pinned target the last solve ended with, NaN when not pinned. */
+    /** Per (scenario, reactive-limit entry): the frozen target Q the last solve ended with, NaN when not switched to PQ. */
     public static native double[] readBatchReactiveLimitTargetQ(long handle);
 
     /** Install (or clear, with nulls) the forceTargetQInReactiveLimits channel on a batch context: the Q
@@ -44,7 +44,7 @@ public final class ReactiveLimitsNative {
     public static native void setBatchRealisticCheck(long handle, byte[] rowChecked, double minV, double maxV,
                                                      int enabled, int fixingLoop);
 
-    /** OLF's own base pin kind per RL entry (0 none, 1 MIN_Q, 2 MAX_Q, 3 MIN_REALISTIC_V,
+    /** OLF's own base QLimitType per RL entry (0 none, 1 MIN_Q, 2 MAX_Q, 3 MIN_REALISTIC_V,
      *  4 MAX_REALISTIC_V); null clears it on a cached context and the device falls back to its
      *  nearest-limit guess. */
     public static native void setBatchReactiveLimitBaseQLimitType(long handle, byte[] reactiveLimitBaseQLimitType);
@@ -76,8 +76,8 @@ public final class ReactiveLimitsNative {
      * contingency strands in another synchronous component, as {@code {slot, controller}} pairs.
      *
      * <p>OLF disables those buses, so its ReactiveLimits loop never sees them. The device holds their
-     * rows frozen at a flat 1&#8736;0, so the q it would read is a placeholder — switching on it pins a
-     * PV bus OLF leaves alone and perturbs the main component through the controller's group.
+     * rows frozen at a flat 1&#8736;0, so the q it would read is a placeholder — switching on it switches to PQ
+     * a PV bus OLF leaves alone and perturbs the main component through the controller's group.
      */
     public static native void setBatchReactiveLimitIslanded(long handle, int[] slotControllerPairs);
 
@@ -86,8 +86,8 @@ public final class ReactiveLimitsNative {
      *  bus this scenario, whatever its base packing. Null clears the context's list. */
     public static native void setBatchReactiveLimitLocalOverrides(long handle, int[] slotEntryPairs, double[] vTargets);
 
-    /** Per (scenario, reactive-limit entry): the pinned target a continued solve restores (a strategy pair takes its
-     *  parent's, as OLF restores the parent's target Q), NaN = stamp the pin at its limit. Null clears it. */
+    /** Per (scenario, reactive-limit entry): the frozen target Q a continued solve restores (a strategy pair takes its
+     *  parent's, as OLF restores the parent's target Q), NaN = freeze it at its limit. Null clears it. */
     public static native void setBatchReactiveLimitSeedTargetQ(long handle, double[] targets);
 
     /** Remote-member RL entries (plan-B1): per-entry remote kinds + compare rows (PILOT v column for
@@ -105,14 +105,14 @@ public final class ReactiveLimitsNative {
                                                int[] distrQMemberTargetPeerStart, int[] distrQMemberTargetPeer);
 
     /** {@code voltageRemoteControlRobustMode} (OLF's default): per RL entry, the initial generation
-     *  target Q a realistic-V freeze pins at, plus the two thresholds the controller's OWN voltage is
+     *  target Q a realistic-V freeze holds, plus the two thresholds the controller's OWN voltage is
      *  tested against ({@code minRealisticVoltage * 1.02} and {@code maxRealisticVoltage / 1.02}).
      *  {@code robust = 0} clears the channel on a cached context. */
     public static native void setBatchReactiveLimitsRobustMode(long handle, double[] reactiveLimitInitialTargetQ, double vLo, double vHi, int robust);
 
     /** Install the voltage-dependent SVC reactive-limit coefficients on a batch context:
      *  per RL entry, limit(v) = packed base limit + svcB*(v^2 - v2Base) — exactly OLF's live
-     *  Bmin/Bmax*(v*nomV)^2 evaluation (and the pinned re-freeze via busesWithUpdatedQLimits). */
+     *  Bmin/Bmax*(v*nomV)^2 evaluation (and the re-freeze of a PQ bus via busesWithUpdatedQLimits). */
     public static native void setBatchReactiveLimitSvcSusceptanceLimits(long handle, double[] svcBmin, double[] svcBmax,
                                                   double[] v2Base);
 }

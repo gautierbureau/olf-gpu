@@ -22,7 +22,7 @@ public final class GpuDiscreteControlMemberState {
     public static final int DISABLED = 0;
     /** The ratio or susceptance is solved continuously. */
     public static final int CONTINUOUS = 1;
-    /** Rounded to a tap or section and pinned there. */
+    /** Rounded to a tap or section and held there. */
     public static final int ROUNDED = 2;
 
     private GpuDiscreteControlMemberState() {

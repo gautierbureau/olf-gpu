@@ -14,7 +14,8 @@ import java.util.Arrays;
  * member, its reactive {@code key} (OLF's qPct numerator), its reactive limits {@code reactiveLimitEntry}, its group's
  * {@code groupStart} / {@code groupCount}, its DISTR_Q {@code row} and whether it has one ({@code hasRow}), its
  * relocation candidate group ({@code relocationGroup}), its {@code targetQ} and {@code busNum}; and, as CSR
- * ({@code targetPeerStart} / {@code targetPeer}), the peers whose pinned targetQ enters its DISTR_Q target.
+ * ({@code targetPeerStart} / {@code targetPeer}), the peers whose targetQ (frozen once switched to PQ) enters its DISTR_Q
+ * target.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */

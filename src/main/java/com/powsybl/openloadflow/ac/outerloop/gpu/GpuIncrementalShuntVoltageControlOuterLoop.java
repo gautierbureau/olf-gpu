@@ -27,13 +27,13 @@ import java.util.Map;
 /**
  * DEVICE port of OLF's {@code IncrementalShuntVoltageControlOuterLoop}, sharing the incremental-family
  * machinery with {@link GpuIncrementalTransformerVoltageControlOuterLoop}: batched in-kernel dV/dB sensitivities (unit RHS at
- * each controller shunt's pinned {@code SHUNT_TARGET_B} identity row), then OLF's section decisions
+ * each controller shunt's {@code SHUNT_TARGET_B} identity row), then OLF's section decisions
  * replicated verbatim per scenario — the |B|-magnitude-descending shunt ordering, the per-round
  * {@code maxSectionShift} cap (OLF's {@code > maxSectionShift} guard, checked BEFORE the increment),
  * one-section-at-a-time moves via the closest-B search, and the {@code AllowedDirection} ratchet per
  * SUB-controller (an aggregated LfShunt can carry several). No sensitivity filter exists in this loop
  * (unlike the transformer one). Section moves land as per-scenario {@code SHUNT_TARGET_B} target
- * overrides + a B state seed (the pinned identity value) and additive (dG, dB) shunt-admittance
+ * overrides + a B state seed (the value the identity fixes) and additive (dG, dB) shunt-admittance
  * overrides (the static G follows the section; the static B is shadowed by the SHUNT_B variable);
  * re-solve warm and iterate until every scenario is in deadband or nothing moves.
  *
@@ -60,7 +60,7 @@ public final class GpuIncrementalShuntVoltageControlOuterLoop {
         }
     }
 
-    /** One controller shunt: the SHUNT_B variable row (pinned identity — unit-RHS row, target index and
+    /** One controller shunt: the SHUNT_B variable row (fixed by its identity — unit-RHS row, target index and
      *  state index coincide), the controlled bus V row, and its sub-controllers. */
     public record Controller(int bRow, int vRow, int controlledBusNum, double targetV, double halfDeadband,
                       List<Sub> subs, double bMagnitude, int shuntAdmittanceOverrideElement, int elemIndexAbs, int shuntNum) {

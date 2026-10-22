@@ -44,7 +44,7 @@ public final class VoltageControlReMerge {
                    java.util.LinkedHashMap<LfBus, LfBus> reMergedRemoteControllers,
                    /** Per elected main of a cluster whose controllers are its own sections: the cluster's controllers
                     *  other than the main, in OLF's merged order. The first enabled of them takes the voltage target
-                    *  while the main's own controller is pinned. */
+                    *  while the main's own controller is switched to PQ. */
                    java.util.LinkedHashMap<LfBus, List<LfBus>> otherControllers) {
 
         /** Whether OLF's re-merge changes any control at all (or the device refuses the shape). */
@@ -238,8 +238,8 @@ public final class VoltageControlReMerge {
                 }
                 // A locally re-merged bus is its OWN OLF group too: label it so the base pilot's "enabled
                 // controller" scan and the DISTR_Q rows of the main's side stop counting it (rte6515
-                // BUS-6194_BBS_2: the re-merged VL-6194_2 unpinned, the kernel read it as a live controller of the
-                // pinned main VL-6194_0 and restored the main's identity OLF has off — 4.775 kV).
+                // BUS-6194_BBS_2: the re-merged VL-6194_2 switched back to PV, the kernel read it as a live controller
+                // of the main VL-6194_0, switched to PQ, and restored the main's identity OLF has off — 4.775 kV).
                 if (!alive.isEmpty() && alive.stream().anyMatch(b -> b == main.getControlledBus())) {
                     int label = subgroupOf.values().stream().mapToInt(Integer::intValue).max().orElse(0) + 1;
                     subgroupOf.put(newMain.getControlledBus(), label);

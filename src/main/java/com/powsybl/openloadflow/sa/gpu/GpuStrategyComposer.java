@@ -208,7 +208,7 @@ final class GpuStrategyComposer {
                         // CLOSE of a retained-open switch (zero-impedance branch). Only the
                         // spanning-tree MERGE shape is batched: distinct zero-impedance groups (or
                         // none) on the two sides. A loop-closing switch is an electrical no-op on
-                        // the CPU too (non-tree edge: dummies stay pinned) — compose nothing.
+                        // the CPU too (non-tree edge: dummies stay fixed) — compose nothing.
                         LfBus bus1 = b.getBus1();
                         LfBus bus2 = b.getBus2();
                         if (bus1 == null || bus2 == null || bus1.isDisabled() || bus2.isDisabled()) {

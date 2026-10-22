@@ -118,7 +118,7 @@ public final class CouplerTreeReHoming {
     /** The relocated {@code DUMMY_Q} row that hosts the reactive balance of the bus whose own {@code BUS_V} row
      *  is {@code vRow}, or {@code vRow} itself when that bus is not a relocated coupler child. The Java twin of
      *  the native {@code reactiveLimitReactivePowerRow} map, derived from the same zero-impedance pack. */
-    public static int relocatedPinRow(int[] zeroImpedanceBranchIndices, int vRow) {
+    public static int relocatedTargetQRow(int[] zeroImpedanceBranchIndices, int vRow) {
         if (zeroImpedanceBranchIndices == null || vRow < 0) {
             return vRow;
         }

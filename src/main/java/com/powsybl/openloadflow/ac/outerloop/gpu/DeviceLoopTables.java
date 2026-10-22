@@ -20,9 +20,9 @@ import com.powsybl.openloadflow.util.gpu.GpuTrace;
  * channel, the voltage-dependent SVC limits, the remote-member RL kinds and the per-generator
  * DistributedSlack participants. One place, so a batch of one never drives a different loop than a
  * batch of five hundred. The base load flow used to skip these: without the remote kinds the driver
- * read every remote member's DISTR_Q share row as a base PQ pin (limit type seeded at solve start,
+ * read every remote member's DISTR_Q share row as switched to PQ in the base (limit type seeded at solve start,
  * never re-checked, switched back on the pilot's voltage) — three of rte6515's remote controllers
- * came out pinned where OLF's loop had never touched them.
+ * came out switched to PQ where OLF's loop had never touched them.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
@@ -133,8 +133,9 @@ public final class DeviceLoopTables {
         }
         ReactiveLimitsNative.setBatchReactiveLimitBaseQLimitType(handle, anyBaseLt ? baseLimitTypes : null);
         // Remote-member RL entries (plan-B1): install (or clear, on a cached context) the kinds. They carry the DISTR_Q
-        // re-pinning (dynamic reactive keys, the pilot-Q carrier pick, the members' own q): what a ReactiveLimits pin
-        // changes, so only a run with OLF's ReactiveLimitsOuterLoop installs them, whatever the pack holds.
+        // side of a switch to PQ (dynamic reactive keys, the pilot-Q carrier pick, the members' own q): what a
+        // ReactiveLimits switch changes, so only a run with OLF's ReactiveLimitsOuterLoop installs them, whatever the
+        // pack holds.
         boolean anyReactiveLimitRemoteEntry = false;
         for (byte b : gpuData.reactiveLimits().voltageControlRole()) {
             anyReactiveLimitRemoteEntry |= reactiveLimitsOuterLoop && b != GpuVoltageControlRole.LOCAL;

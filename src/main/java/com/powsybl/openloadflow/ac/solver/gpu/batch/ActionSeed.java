@@ -41,7 +41,7 @@ final class ActionSeed {
                 Integer ze = rs.zeroImpedanceElementByBranchNumChunk.get(reclosed.getNum());
                 rs.zeroImpedanceBranchCloseScenarioElementList.add(s);
                 rs.zeroImpedanceBranchCloseScenarioElementList.add(ze);
-                // flip the two dummy rows from identity (pinned 0) to the ZERO_V/ZERO_PHI
+                // flip the two dummy rows from identity (held at 0) to the ZERO_V/ZERO_PHI
                 // coupling; targets stay 0 (switch: rho=1, phase shift 0)
                 int dpRow = gpuData.zeroImpedanceBranch().indices()[ze * 11 + 4];
                 int distrQRow = gpuData.zeroImpedanceBranch().indices()[ze * 11 + 5];

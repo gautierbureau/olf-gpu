@@ -141,8 +141,8 @@ final class InjectionOutagePlanner {
         // the control's sections: OLF re-merges per surviving zero-impedance cluster, and a separated section
         // with a local control becomes a PV bus at its own target. The island tail below plans that re-merging
         // (with an empty island nothing is frozen or masked). Without it the entries stayed the base group's:
-        // a member pinned in the base and released after the opening went back to the GROUP's sharing row and
-        // put the group's voltage identity back on the pinned main's section, an equation system OLF does not
+        // a member switched to PQ in the base and back to PV after the opening went back to the GROUP's sharing row and
+        // put the group's voltage identity back on the section of the main switched to PQ, an equation system OLF does not
         // have (the split-group fixture: the device diverged where OLF converges in one release).
         boolean splitsMergedControl = q.islandedBuses().isEmpty() && !c.outagedZeroImpedanceBranches().isEmpty()
                 && VoltageControlReMerge.reMergedControls(List.of(), c.outagedZeroImpedanceBranches(), c.contingencyId(),
@@ -303,9 +303,9 @@ final class InjectionOutagePlanner {
                     // DUMMY_Q row (rte6515 BUS-6014_BBS_1/2 VL-6014_3, BUS-6029_BBS_4 VL-6029_2)
                     int crossRow = CrossIdentity.row(vVar.getRow(), pb.relocatedChildRows, outagedZeroImpedanceBranchNums);
                     if (crossRow < 0 && GpuTrace.QUALIFY_TRACE.isOn()) {
-                        // Is the bus we are about to give a VOLTAGE IDENTITY already PINNED at its
-                        // reactive limit? A pinned bus cannot hold its voltage — OLF has it as PQ —
-                        // and the RL kernel's "limit drift while pinned" branch writes only the
+                        // Is the bus we are about to give a VOLTAGE IDENTITY already SWITCHED TO PQ at its
+                        // reactive limit? Such a bus cannot hold its voltage — OLF has it as PQ —
+                        // and the RL kernel's "limit drift while switched to PQ" branch writes only the
                         // TARGET, leaving the host's mode 0 in place, so the identity then holds v
                         // at a reactive value.
                         byte baseLt = gpuData.reactiveLimits().baseQLimitType() != null && reMergedReactiveLimitEntry >= 0
@@ -314,10 +314,10 @@ final class InjectionOutagePlanner {
                                         + " reactiveLimitEntry=%d baseLimitType=%d%n",
                                 e.getKey().getId(), vVar.getRow(), e.getValue(), reMergedReactiveLimitEntry, baseLt);
                     }
-                    // A bus PINNED at its reactive limit cannot also hold its voltage: OLF has it
+                    // A bus SWITCHED TO PQ at its reactive limit cannot also hold its voltage: OLF has it
                     // as PQ, and giving it a V identity here is a state the device cannot represent.
                     // The RL kernel then never takes the switch path that would set mode 4 — the
-                    // entry is already pinned, so it takes the "limit drift while pinned" branch,
+                    // entry is already PQ, so it takes the "limit drift while switched to PQ" branch,
                     // which writes only the TARGET. The host's mode 0 stays, and a mode-0 identity
                     // means x = target, so the bus's VOLTAGE becomes its reactive limit. Measured on
                     // rte6515 BUS-6194_BBS_2: VL-6194_2 re-merged to a 1.123 pu identity with
@@ -325,9 +325,10 @@ final class InjectionOutagePlanner {
                     // loadQ), outside the realistic band [0.8, 1.2] — the run reported FAILED where
                     // OLF reports CONVERGED, losing all 71 of its violations, the WHOLE violation
                     // gap of the full busbar scope.
-                    // Base-pinned: start as the reactive balance at the pinned value, checked as a
-                    // LOCAL PV bus at the re-merged voltage target (ROW_PINNED_V). rte6515
-                    // BUS-6157_BBS_1 (unpins, re-pins MAX_Q), BUS-6194_BBS_2 (unpins), BUS-6229_BBS_1.
+                    // Switched to PQ in the base: start as the reactive balance at the frozen target Q, checked as a
+                    // LOCAL PV bus at the re-merged voltage target (ROW_SWITCHED_TO_PQ_V). rte6515
+                    // BUS-6157_BBS_1 (switches back to PV, then to PQ again at MAX_Q), BUS-6194_BBS_2 (switches back
+                    // to PV), BUS-6229_BBS_1.
                     live.add(VoltageControlReMergeEntries.pvEntry(vVar.getRow(), crossRow, e.getValue(), reMergedReactiveLimitEntry,
                             gpuData.switchedPvToPqInBase(reMergedReactiveLimitEntry), e.getKey().getTargetQ()));
                 }

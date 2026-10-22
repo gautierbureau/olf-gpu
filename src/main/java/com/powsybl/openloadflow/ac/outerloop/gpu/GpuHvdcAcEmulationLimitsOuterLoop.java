@@ -71,7 +71,7 @@ public final class GpuHvdcAcEmulationLimitsOuterLoop {
         //   bus{1,2}PhiCol = the ANGLE COLUMN the emulation formula reads. Always the bus's OWN BUS_PHI
         //                    column, relocation or not — a relocation moves EQUATIONS, never variables.
         // A converter bus whose BUS_TARGET_P is INACTIVE (the slack) keeps the ~ encoding on PRow: it must
-        // never receive a P target — OLF's slack simply absorbs the station's targetP. Writing there pinned
+        // never receive a P target — OLF's slack simply absorbs the station's targetP. Writing there fixed
         // the base LF's slack angle at the freeze delta (BUS_TARGET_PHI residual 0.014, base MAX_ITER).
         public int bus1PhiRow() {
             return bus1PhiCol;

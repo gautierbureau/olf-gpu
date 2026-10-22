@@ -74,7 +74,7 @@ public final class GpuTransformerVoltageControlOuterLoop {
 
         /** The FULL 8-double pi row of the tap whose r1 is closest to {@code r1}, or null without a
          *  table. Rounding a tap on the CPU switches the branch's per-step R/X/G/B, not just rho —
-         *  pinning rho alone left the base impedance in the fills (a DIFFERENT model: 2.4e-4 kV on a
+         *  fixing rho alone left the base impedance in the fills (a DIFFERENT model: 2.4e-4 kV on a
          *  non-base tap, found via the shared-group member-outage test). */
         double[] closestTapRow(double r1) {
             if (tapRows.length == 0) {
@@ -213,7 +213,7 @@ public final class GpuTransformerVoltageControlOuterLoop {
     /** The generator voltage controls OLF's manager would freeze under the transformer-controlled level:
      *  the controller buses (in merged order) of every generator-controlled bus at or under the limit that
      *  have no step-up exemption. OLF freezes a REMOTE controller exactly like a local one, and so does the
-     *  kernel — through the reactive-limit remote PIN (row mode 4) rather than a V identity flip — as long
+     *  kernel — through the remote member's switch to PQ (row mode 4) rather than a V identity flip — as long
      *  as the member has a reactive-limit ENTRY, which is what carries the limit type the DISTR_Q key
      *  renormalization reads. A remote candidate without one (a merged control's) has no slot to mark and
      *  still gates the run: null. */
@@ -240,7 +240,7 @@ public final class GpuTransformerVoltageControlOuterLoop {
         return out;
     }
 
-    /** Can a REMOTE controller be frozen in-kernel? It is frozen as a reactive-limit remote PIN, and the
+    /** Can a REMOTE controller be frozen in-kernel? It is frozen as a remote member's switch to PQ, and the
      *  limit type that marks it lives on its reactive-limit ENTRY — which the pack creates for a MAIN
      *  generator voltage control, whatever the controller's reactive range. This is the network-only half of
      *  the condition, so the whole-run gate can be decided before the extraction exists; {@link #buildFreezeTables}
@@ -340,7 +340,7 @@ public final class GpuTransformerVoltageControlOuterLoop {
             loadQ[c] = bus.getLoadTargetQ();
             busNum[c] = bus.getNum();
             // REMOTE controller (the controlled bus is not this one): the kernel freezes it as a
-            // reactive-limit remote pin and marks its ENTRY, so the DISTR_Q shares renormalize.
+            // remote member's PV -> PQ switch and marks its ENTRY, so the DISTR_Q shares renormalize.
             boolean remote = bus.getGeneratorVoltageControl().map(c2 -> c2.getControlledBus() != bus).orElse(false);
             reactiveLimitEntry[c] = remote && reactiveLimitsOuterLoop ? reactiveLimitEntryOf(reactiveLimitBusNum, bus.getNum()) : -1;
             if (remote && reactiveLimitEntry[c] < 0) {

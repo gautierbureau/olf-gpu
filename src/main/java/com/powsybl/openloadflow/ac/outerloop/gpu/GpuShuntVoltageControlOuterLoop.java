@@ -39,7 +39,7 @@ import java.util.List;
  *   <li>the loop's first check disables VC and dispatches each shunt's continuous b to the CLOSEST
  *       SECTIONS ({@code LfShuntImpl.dispatchB}: per sub-controller, round {@code residue/remaining}
  *       from the current position over [minPosition, size), walking the residue) → one warm
- *       re-solve with the base (VC-OFF) activation, the SHUNT_TARGET_B identities pinned at the
+ *       re-solve with the base (VC-OFF) activation, the SHUNT_TARGET_B identities held at the
  *       dispatched totals and the section-driven (dG, dB) admittance deltas applied
  *       ({@link #roundAndResolve}); further checks are STABLE by construction.</li>
  * </ol>

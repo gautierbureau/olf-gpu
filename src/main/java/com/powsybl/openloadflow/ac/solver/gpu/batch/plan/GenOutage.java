@@ -237,13 +237,13 @@ public record GenOutage(int pRow, double pTarget, int vRow, double qTarget, bool
         return (pqRowMode == ROW_V_IDENTITY || pqRowMode == ROW_PINNED_V || pqRowMode == ROW_CROSS_V_IDENTITY) && reactiveLimitEntry >= 0;
     }
 
-    /** A re-merged control's voltage identity on its elected main ({@link #ROW_V_IDENTITY}, {@link #ROW_CROSS_V_IDENTITY}),
-     *  the main being one of the control's controllers, with the cluster's other controllers'
+    /** A re-merged control's elected main ({@link #ROW_V_IDENTITY}, {@link #ROW_CROSS_V_IDENTITY}, or {@link #ROW_PINNED_V}
+     *  when the base pinned it), the main being one of the control's controllers, with the cluster's other controllers'
      *  reactive-limit entries in {@code pilotGroupSurvivorReactiveLimitEntries} (OLF's merged order). OLF keeps the
-     *  target on the main while ANY merged controller is enabled: when the main's own controller pins, the first
-     *  enabled of the others takes the identity on its sharing row (updateReMergedVoltageTargetRowBatch). */
+     *  target on the main while ANY merged controller is enabled: while the main's own controller is pinned, the first
+     *  enabled of the others holds the identity on its sharing row (updateReMergedVoltageTargetRowBatch). */
     public boolean movesVoltageTargetToFirstEnabledController() {
-        return (pqRowMode == ROW_V_IDENTITY || pqRowMode == ROW_CROSS_V_IDENTITY) && reactiveLimitEntry >= 0
+        return (pqRowMode == ROW_V_IDENTITY || pqRowMode == ROW_CROSS_V_IDENTITY || pqRowMode == ROW_PINNED_V) && reactiveLimitEntry >= 0
                 && pilotGroupSurvivorReactiveLimitEntries.length > 0;
     }
 

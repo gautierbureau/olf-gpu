@@ -263,8 +263,6 @@ final class BranchOutagePlanner {
                 pvOn.addAll(java.util.Arrays.asList(pb.genOutagesByIndex[i]));
             }
             boolean ok = true;
-            boolean crossIdentity = false;
-            boolean pinnedMain = false;
             for (var e : reMerged.pvTargets().entrySet()) {
                 var vVar = es.getVariableSet().getVariable(e.getKey().getNum(), AcVariableType.BUS_V);
                 if (vVar == null || vVar.getRow() < 0) {
@@ -283,9 +281,7 @@ final class BranchOutagePlanner {
                         gpuData.switchedPvToPqInBase(reMergedReactiveLimitEntry), e.getKey().getTargetQ()));
             }
             if (!ok) {
-                GpuBatchQualification.refuse(c,
-                        pinnedMain ? "PLAN:VC_REMERGE_PINNED_MAIN"
-                                : crossIdentity ? "PLAN:VC_REMERGE_RELOC_VROW" : "PLAN:VC_REMERGE_NO_VROW");
+                GpuBatchQualification.refuse(c, "PLAN:VC_REMERGE_NO_VROW");
                 return false;
             }
             if (!reMerged.remoteMainTargets().isEmpty()) {

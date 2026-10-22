@@ -425,13 +425,24 @@ class GpuSaRemoteVoltageControlTest extends AbstractGpuSaTest {
     }
 
     /** Three sections with BOTH survivors pinned in the base: the re-merged cluster has no enabled controller, so
-     *  OLF keeps BUS_TARGET_V off — plain PQ at the limits; the device installs no identity and forbids an unpin
-     *  (rte6515 BUS-6194_BBS_1, BUS-6003_BBS_1: OLF never unpins them). */
+     *  OLF keeps BUS_TARGET_V off — plain PQ at the limits, and the device installs no identity while every controller
+     *  stays pinned (rte6515 BUS-6194_BBS_1, BUS-6003_BBS_1: OLF never unpins them). */
     @Test
     void deviceLostPilotAllPinnedClusterMatchesCpu() {
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
         assertSplitGroupMatchesCpu(3, java.util.Set.of(1, 2));
+    }
+
+    /** Three sections, the elected main's generator (bbs1) pinned in the base and bbs2's free: losing bbs0 re-merges
+     *  them onto vl12_1, the opened coupler's child. OLF keeps the main PQ at its limit and its BUS_TARGET_V through
+     *  bbs2's generator; the device refused the contingency (VC_REMERGE_PINNED_MAIN). The main starts as its pinned
+     *  balance and bbs2's sharing row holds the voltage target. */
+    @Test
+    void deviceLostPilotPinnedMainWithAnEnabledControllerMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        assertSplitGroupMatchesCpu(3, java.util.Set.of(1));
     }
 
     /** Three sections, the middle one WITHOUT voltage control: losing the main re-merges a LOCAL control to bbs2,

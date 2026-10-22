@@ -387,6 +387,35 @@ class GpuSaBusbarAndIslandTest extends AbstractGpuSaTest {
         assertEquals(5, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(), "census=" + GpuBatchScopeCensus.snapshot());
     }
 
+    /** The same re-merge with the main PINNED in the base (g3 at its 30 MVAr ceiling) while g4 has 400 MVAr of headroom.
+     *  OLF keeps vl12_3 PQ at its limit and its BUS_TARGET_V through g4; the device refused the contingency
+     *  (VC_REMERGE_PINNED_MAIN). vl12_3 sits under the live coupler c03: its pinned balance starts on c03's DUMMY_Q row and
+     *  g4's sharing row holds the target. Every contingency on device, bus voltages to 1e-9 kV. */
+    @Test
+    void deviceReMergedMainPinnedInTheBaseUnderALiveCouplerMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = doubleStarSectionsNetwork();
+        String[][] generators = {{"g2", "3000", "80"}, {"g3", "30", "10"}, {"g4", "400", "10"}};   // id, max MVAr, key
+        for (String[] g : generators) {
+            network.getGenerator(g[0]).newMinMaxReactiveLimits().setMinQ(-300).setMaxQ(Double.parseDouble(g[1])).add();
+            network.getGenerator(g[0]).newExtension(com.powsybl.iidm.network.extensions.CoordinatedReactiveControlAdder.class)
+                    .withQPercent(Double.parseDouble(g[2])).add();
+        }
+        List<Contingency> ctgs = new java.util.ArrayList<>();
+        for (int k = 0; k < 5; k++) {
+            ctgs.add(new Contingency("bus-" + k, new com.powsybl.contingency.BusbarSectionContingency("bbs" + k)));
+        }
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters();
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
+                .setSlackBusSelectionMode(com.powsybl.openloadflow.network.SlackBusSelectionMode.NAME)
+                .setSlackBusesIds(List.of("vl0"));
+        GpuBatchScopeCensus.reset();
+        assertGpuMatchesCpu(network, ctgs, 1e-9, lfp, true);
+        assertEquals(java.util.Set.of(), GpuBatchScopeCensus.planRefusedIds(), "census=" + GpuBatchScopeCensus.snapshot());
+        assertEquals(5, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(), "census=" + GpuBatchScopeCensus.snapshot());
+    }
+
     /** Losing the chain's root section bbs0 opens c01 and re-merges the other two sections' controls onto vl12_1, the
      *  opened coupler's child, whose voltage identity the opening path installs. Its own controller was never tested
      *  against its limits there: g1 kept 1.97 pu against its 1.6 pu ceiling and the sections held 405 kV, where OLF
@@ -406,6 +435,30 @@ class GpuSaBusbarAndIslandTest extends AbstractGpuSaTest {
                 .setSlackBusesIds(List.of("vl0"));
         GpuBatchScopeCensus.reset();
         assertGpuMatchesCpu(selfControlledSectionChainNetwork(), ctgs, 1e-9, lfp, true);
+        assertEquals(java.util.Set.of(), GpuBatchScopeCensus.planRefusedIds(), "census=" + GpuBatchScopeCensus.snapshot());
+        assertEquals(3, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(), "census=" + GpuBatchScopeCensus.snapshot());
+    }
+
+    /** Every generator of the chain pinned at its ceiling in the base (a 1200 MVAr load on bbs0 holds the sections at
+     *  396.5 kV): losing bbs0 re-merges the other two onto vl12_1 with no enabled controller, OLF's BUS_TARGET_V off. Their
+     *  6 pu then push the sections to 408.3 kV, above the target, and OLF unpins both in one pass: the main takes the
+     *  voltage back, g2 shares. The device forbade that unpin and sent the contingency back to the CPU. */
+    @Test
+    void deviceReMergedAllPinnedControllersUnpinMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        List<Contingency> ctgs = new java.util.ArrayList<>();
+        for (int k = 0; k < 3; k++) {
+            ctgs.add(new Contingency("bus-" + k, new com.powsybl.contingency.BusbarSectionContingency("bbs" + k)));
+        }
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters();
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
+                .setSlackBusSelectionMode(com.powsybl.openloadflow.network.SlackBusSelectionMode.NAME)
+                .setSlackBusesIds(List.of("vl0"));
+        Network network = selfControlledSectionChainNetwork(new double[][] {{-300, 300, 60}, {-300, 300, 20}, {-300, 300, 20}},
+                new double[] {1200, 0, 0});
+        GpuBatchScopeCensus.reset();
+        assertGpuMatchesCpu(network, ctgs, 1e-9, lfp, true);
         assertEquals(java.util.Set.of(), GpuBatchScopeCensus.planRefusedIds(), "census=" + GpuBatchScopeCensus.snapshot());
         assertEquals(3, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(), "census=" + GpuBatchScopeCensus.snapshot());
     }

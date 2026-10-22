@@ -291,8 +291,6 @@ final class InjectionOutagePlanner {
                     return null;
                 }
             }
-            boolean crossIdentity = false;
-            boolean pinnedMain = false;
             if (live != null) {
                 for (var e : reMerged.pvTargets().entrySet()) {
                     var vVar = es.getVariableSet().getVariable(e.getKey().getNum(), AcVariableType.BUS_V);
@@ -356,9 +354,7 @@ final class InjectionOutagePlanner {
                 return null;
             }
             if (live == null) {
-                GpuBatchQualification.refuse(c,
-                        pinnedMain ? "PLAN:VC_REMERGE_PINNED_MAIN"
-                                : crossIdentity ? "PLAN:VC_REMERGE_RELOC_VROW" : "PLAN:VC_REMERGE_NO_VROW");
+                GpuBatchQualification.refuse(c, "PLAN:VC_REMERGE_NO_VROW");
                 return null;
             }
             if (GpuTrace.QUALIFY_TRACE.isOn()) {

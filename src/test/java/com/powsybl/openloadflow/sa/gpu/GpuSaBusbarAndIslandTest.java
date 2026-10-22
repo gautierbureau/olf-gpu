@@ -387,6 +387,29 @@ class GpuSaBusbarAndIslandTest extends AbstractGpuSaTest {
         assertEquals(5, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(), "census=" + GpuBatchScopeCensus.snapshot());
     }
 
+    /** Losing the chain's root section bbs0 opens c01 and re-merges the other two sections' controls onto vl12_1, the
+     *  opened coupler's child, whose voltage identity the opening path installs. Its own controller was never tested
+     *  against its limits there: g1 kept 1.97 pu against its 1.6 pu ceiling and the sections held 405 kV, where OLF
+     *  pins g1, hands the target to g2, pins g2 (2.2 pu) too and lets the sections fall to 404.79 kV. Every
+     *  contingency on device, bus voltages to 1e-9 kV. */
+    @Test
+    void deviceReMergedMainBehindItsOpenedCouplerPinsMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        List<Contingency> ctgs = new java.util.ArrayList<>();
+        for (int k = 0; k < 3; k++) {
+            ctgs.add(new Contingency("bus-" + k, new com.powsybl.contingency.BusbarSectionContingency("bbs" + k)));
+        }
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters();
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
+                .setSlackBusSelectionMode(com.powsybl.openloadflow.network.SlackBusSelectionMode.NAME)
+                .setSlackBusesIds(List.of("vl0"));
+        GpuBatchScopeCensus.reset();
+        assertGpuMatchesCpu(selfControlledSectionChainNetwork(), ctgs, 1e-9, lfp, true);
+        assertEquals(java.util.Set.of(), GpuBatchScopeCensus.planRefusedIds(), "census=" + GpuBatchScopeCensus.snapshot());
+        assertEquals(3, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(), "census=" + GpuBatchScopeCensus.snapshot());
+    }
+
     @Test
     void deviceMiddleSectionLossRenormalizesDistrQTargetMatchesCpu() {
         org.junit.jupiter.api.Assumptions.assumeTrue(

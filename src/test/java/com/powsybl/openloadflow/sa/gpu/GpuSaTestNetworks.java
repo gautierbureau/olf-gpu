@@ -433,6 +433,55 @@ final class GpuSaTestNetworks {
         return network;
     }
 
+    /** Three sections in a chain (bbs0-bbs1-bbs2, couplers c01 and c12), each with a generator regulating it (equal
+     *  targets, so OLF merges the three controls under vl12_0) and a line to the meshed network. The coupler tree is
+     *  rooted at vl12_0: losing bbs0 opens c01 and OLF re-elects vl12_1, the opened coupler's CHILD, as the main of the
+     *  two sections left. The reactive keys (60/20/20) leave g1 free in the base (1.29 pu of its 1.6) and pinned once
+     *  g0 is gone (1.97 pu), and g2's 2.2 pu ceiling binds too once it holds the sections alone. */
+    static Network selfControlledSectionChainNetwork() {
+        Network network = Network.create("self-controlled-section-chain", "code");
+        com.powsybl.iidm.network.Substation s = network.newSubstation().setId("s").add();
+        for (String vl : List.of("vl0", "vl3")) {
+            s.newVoltageLevel().setId(vl).setNominalV(400).setTopologyKind(com.powsybl.iidm.network.TopologyKind.BUS_BREAKER)
+                    .add().getBusBreakerView().newBus().setId(vl + "_b").add();
+        }
+        com.powsybl.iidm.network.VoltageLevel vl12 = s.newVoltageLevel().setId("vl12").setNominalV(400)
+                .setTopologyKind(com.powsybl.iidm.network.TopologyKind.NODE_BREAKER).add();
+        for (int k = 0; k < 3; k++) {
+            vl12.getNodeBreakerView().newBusbarSection().setId("bbs" + k).setNode(k).add();
+            if (k > 0) {
+                vl12.getNodeBreakerView().newBreaker().setId("c" + (k - 1) + k).setNode1(k - 1).setNode2(k)
+                        .setRetained(true).setOpen(false).add();
+            }
+        }
+        String[][] generators = {{"g0", "3000", "60"}, {"g1", "160", "20"}, {"g2", "220", "20"}};   // id, max MVAr, key
+        int node = 100;
+        for (int k = 0; k < 3; k++) {
+            int gNode = node++;
+            int lNode = node++;
+            for (int[] pair : new int[][] {{gNode, 0}, {lNode, 1}}) {
+                vl12.getNodeBreakerView().newDisconnector().setId("d" + k + "_" + pair[1]).setNode1(k).setNode2(pair[0] + 50).setOpen(false).add();
+                vl12.getNodeBreakerView().newBreaker().setId("b" + k + "_" + pair[1]).setNode1(pair[0] + 50).setNode2(pair[0]).setOpen(false).add();
+            }
+            vl12.newGenerator().setId(generators[k][0]).setNode(gNode)
+                    .setMinP(0).setMaxP(500).setTargetP(60).setTargetQ(0).setTargetV(405).setVoltageRegulatorOn(true).add();
+            network.getGenerator(generators[k][0]).newMinMaxReactiveLimits().setMinQ(-300).setMaxQ(Double.parseDouble(generators[k][1])).add();
+            network.getGenerator(generators[k][0]).newExtension(com.powsybl.iidm.network.extensions.CoordinatedReactiveControlAdder.class)
+                    .withQPercent(Double.parseDouble(generators[k][2])).add();
+            String ext = k % 2 == 0 ? "vl0" : "vl3";
+            network.newLine().setId("l" + k).setVoltageLevel1("vl12").setNode1(lNode)
+                    .setVoltageLevel2(ext).setBus2(ext + "_b").setConnectableBus2(ext + "_b")
+                    .setR(0.4).setX(8 + k).setG1(0).setB1(0).setG2(0).setB2(0).add();
+        }
+        network.getVoltageLevel("vl0").newGenerator().setId("gs").setBus("vl0_b").setConnectableBus("vl0_b")
+                .setMinP(0).setMaxP(2000).setTargetP(400).setTargetV(400).setVoltageRegulatorOn(true).add();
+        network.getVoltageLevel("vl0").newLoad().setId("lds").setBus("vl0_b").setConnectableBus("vl0_b").setP0(400).setQ0(100).add();
+        network.getVoltageLevel("vl3").newLoad().setId("ld3").setBus("vl3_b").setConnectableBus("vl3_b").setP0(210).setQ0(160).add();
+        network.newLine().setId("l03").setVoltageLevel1("vl0").setBus1("vl0_b").setConnectableBus1("vl0_b")
+                .setVoltageLevel2("vl3").setBus2("vl3_b").setConnectableBus2("vl3_b").setR(0.4).setX(10).setG1(0).setB1(0).setG2(0).setB2(0).add();
+        return network;
+    }
+
     /** @param pilotLine whether the pilot section bbs0 carries a line. WITH it bbs0 is the coupler tree's ROOT
      *  (CouplerTreeRelocation roots a tree at the first bus with an impedant branch) and the elected main vl12_1 is
      *  the killed coupler's CHILD — its identity comes from the stock placement. WITHOUT it bbs0 cannot root

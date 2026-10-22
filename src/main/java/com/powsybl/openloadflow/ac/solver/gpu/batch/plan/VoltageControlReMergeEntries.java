@@ -115,7 +115,7 @@ final class VoltageControlReMergeEntries {
      * ({@code blockCovers}); a main whose own row is NOT relocated (the tree's root, BUS-2640_BBS_1's
      * VL-2640_1) gets an explicit ROW_V_IDENTITY here. Emitting it in BOTH places would be a duplicate
      * override on one row (#62's race), so a main whose own row is the relocated child row of an OUTAGED
-     * coupler is skipped. A main whose own row carries a LIVE coupler's ZERO_V (BUS-6029_BBS_1: the lost
+     * coupler only gets its reactive-limit entry ({@link #reMergedMainLimitsEntry}). A main whose own row carries a LIVE coupler's ZERO_V (BUS-6029_BBS_1: the lost
      * pilot's neighbour has no control, the elected main is two couplers away) is refused: its identity
      * would displace that equation. Returns null when an identity cannot be hosted (no V row, frozen, that
      * relocation, or the bus is PINNED at a reactive limit — a pinned bus cannot also hold its voltage, see
@@ -176,14 +176,20 @@ final class VoltageControlReMergeEntries {
                 out.addAll(guards);
                 continue;
             }
-            if (blockCovers) {
-                continue;
-            }
             // the cluster's other controllers that can pin: the first enabled one takes the identity while the main pins
             int[] otherControllerEntries = reMerged.otherControllers().getOrDefault(e.getKey(), List.of()).stream()
                     .mapToInt(controller -> gpuData.reactiveLimits().entryOf(controller.getNum()))
                     .filter(entry -> entry >= 0)
                     .toArray();
+            if (blockCovers) {
+                // The identity is the opening path's (CouplerSeed), but the main's own controller is still one of the
+                // control's: packed as a member of the base group, its entry read its reactive balance on the opened
+                // coupler's DUMMY_Q row, an identity now, and was never tested. Measured on a three-section chain
+                // losing its root: the elected main's generator kept 1.97 pu against its 1.6 pu ceiling, where OLF pins
+                // it and the next controller holds the voltage.
+                out.add(reMergedMainLimitsEntry(vVar.getRow(), e.getValue(), reactiveLimitEntry, otherControllerEntries));
+                continue;
+            }
             if (reloc != null) {
                 // its own row carries a LIVE coupler's ZERO_V: the identity goes on the parent's DUMMY_Q row as
                 // a cross identity (rte6515 BUS-6029_BBS_1/2: the elected main two couplers from the island)
@@ -230,6 +236,15 @@ final class VoltageControlReMergeEntries {
      *  order, that take the identity while the bus's own controller is pinned (empty for a control of one bus). */
     static GenOutage reMergedPvEntry(int vRow, double vTarget, int reactiveLimitEntry, int[] otherControllerEntries) {
         return new GenOutage(-1, 0, vRow, vTarget, true, true,
+                -1, 0, 0, 0, 0, reactiveLimitEntry, 0, 0, false, java.util.Set.of(), 0, 0, 0, -1, otherControllerEntries,
+                new int[0], new double[0], GenOutage.ROW_V_IDENTITY, -1, 0, -1, 0, -1, 0, -1, -1, 0, false, -1, 0, 0);
+    }
+
+    /** The reactive-limit entry of a re-merged main whose voltage identity another path installs (the opened coupler's
+     *  child, CouplerSeed): no row change, its controller checked as a LOCAL PV bus at {@code vTarget}, and the target
+     *  handed to {@code otherControllerEntries} (as in {@link #reMergedPvEntry}) while it is pinned. */
+    static GenOutage reMergedMainLimitsEntry(int vRow, double vTarget, int reactiveLimitEntry, int[] otherControllerEntries) {
+        return new GenOutage(-1, 0, vRow, vTarget, false, false,
                 -1, 0, 0, 0, 0, reactiveLimitEntry, 0, 0, false, java.util.Set.of(), 0, 0, 0, -1, otherControllerEntries,
                 new int[0], new double[0], GenOutage.ROW_V_IDENTITY, -1, 0, -1, 0, -1, 0, -1, -1, 0, false, -1, 0, 0);
     }

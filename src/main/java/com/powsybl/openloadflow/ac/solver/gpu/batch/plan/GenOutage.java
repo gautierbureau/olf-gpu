@@ -154,10 +154,6 @@ public record GenOutage(int pRow, double pTarget, int vRow, double qTarget, bool
      *  an unpin restores the voltage identity exactly as OLF re-activates BUS_TARGET_V (tasks #70,
      *  VC_REMERGE_PINNED_MAIN; rte6515 BUS-6157_BBS_1 unpins and re-pins at the other limit). */
     public static final int ROW_PINNED_V = -5;
-    /** A base-pinned member of a re-merged cluster with NO enabled controller left (every controller pinned):
-     *  no row change — the stock placement already keeps its balance at the limit — but an UNPIN would need a
-     *  voltage identity the device cannot host, so the kernel rejects the scenario instead (CPU replay). */
-    public static final int ROW_PINNED_NO_UNPIN = -6;
     /** A re-merged control whose own V row hosts a LIVE coupler's ZERO_V: the voltage identity goes on the parent
      *  coupler's DUMMY_Q row (where the bus's reactive equation lives) as a CROSS identity on the bus's own V
      *  column — device row mode 6 — with {@code vRow} = that dummy row and {@code qTarget} the voltage target
@@ -186,10 +182,6 @@ public record GenOutage(int pRow, double pTarget, int vRow, double qTarget, bool
      *  {@link #ROW_PINNED_V}: carried in deadPilotQTarget, the row target being the pinned Q). */
     public double reMergeVTarget() {
         return pqRowMode == ROW_PINNED_V ? deadPilotQTarget : qTarget;
-    }
-
-    public boolean forbidsUnpin() {
-        return pqRowMode == ROW_PINNED_NO_UNPIN && reactiveLimitEntry >= 0;
     }
 
     /**

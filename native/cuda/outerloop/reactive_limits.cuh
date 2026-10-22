@@ -28,7 +28,7 @@ __global__ void reactiveLimitsBatch(const double* secondaryVoltageControlReactiv
                                     int reactiveLimitsDecisionLogScenario, double* reactiveLimitsDecisionLog, int* reactiveLimitsDecisionLogCount, int passId,
                                     const int* pilotSelfReactiveLimitEntry, int nReactiveRelocationGroups,
                                     const char* reactiveLimitLocalOverride, const double* reactiveLimitLocalTargetV,
-                                    const char* reactiveLimitPqPvSwitchForbidden, char* unpinBad, const char* reactiveLimitFlags,
+                                    const char* reactiveLimitFlags,
                                     const int* reactiveLimitComparedVoltageRowOverride,
                                     const char* reactiveLimitHoldsReMergedVoltageTarget, const int* reactiveLimitReMergedVoltageRow);
 

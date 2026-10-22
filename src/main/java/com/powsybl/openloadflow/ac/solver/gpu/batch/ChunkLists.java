@@ -46,7 +46,6 @@ final class ChunkLists {
     // after this loop and composes its shares onto the participants' rows).
     final int[][] distributedSlackBusRowOverrideByScenario;
     final List<Integer> reactiveLimitIslandedScenarioEntryList = new ArrayList<>();
-    final List<Integer> reactiveLimitPqPvSwitchForbiddenScenarioEntryList = new ArrayList<>();   // (scenario, entry): an unpin rejects the scenario
     final List<Integer> reactiveLimitGeneratorsLostScenarioEntryList = new ArrayList<>();   // (scenario, entry): the bus lost every generator
     // tasks #71: per (scenario, dq member) subgroup labels of a split group, dense, null when none
     final int nDistrQMembersAll;
@@ -168,8 +167,6 @@ final class ChunkLists {
                 ChunkArrays.intsOrNull(distributedSlackBusRowOverrideList));
         ReactiveLimitsNative.setBatchReactiveLimitIslanded(handle,
                 ChunkArrays.intsOrNull(reactiveLimitIslandedScenarioEntryList));
-        ReactiveLimitsNative.setBatchReactiveLimitPqPvSwitchForbidden(handle,
-                ChunkArrays.intsOrNull(reactiveLimitPqPvSwitchForbiddenScenarioEntryList));
         ReactiveLimitsNative.setBatchReactiveLimitGeneratorsLost(handle,
                 ChunkArrays.intsOrNull(reactiveLimitGeneratorsLostScenarioEntryList));
         RemoteVoltageControlNative.setBatchDistrQSubgroups(handle, anyDistrQSubgroup ? distrQSubgroupDense : null,

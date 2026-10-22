@@ -86,10 +86,6 @@ public final class ReactiveLimitsNative {
      *  bus this scenario, whatever its base packing. Null clears the context's list. */
     public static native void setBatchReactiveLimitLocalOverrides(long handle, int[] slotEntryPairs, double[] vTargets);
 
-    /** (scenario, reactive-limit entry) pairs whose UNPIN the device cannot host (a pinned member of a re-merged
-     *  cluster with no enabled controller): the kernel rejects the scenario instead of switching (CPU replay). */
-    public static native void setBatchReactiveLimitPqPvSwitchForbidden(long handle, int[] slotEntryPairs);
-
     /** Per (scenario, reactive-limit entry): the pinned target a continued solve restores (a strategy pair takes its
      *  parent's, as OLF restores the parent's target Q), NaN = stamp the pin at its limit. Null clears it. */
     public static native void setBatchReactiveLimitSeedTargetQ(long handle, double[] targets);

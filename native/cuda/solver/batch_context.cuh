@@ -418,8 +418,6 @@ struct BatchSolverContext {
     // Same idea for the reactive-limits pass: per (scenario, controller), 1 = its bus is in another
     // synchronous component in this scenario, so the loop must not look at it.
     int nReactiveLimitIslanded = 0;
-    DeviceBuf dReactiveLimitPqPvSwitchForbidden, dReactiveLimitPqPvSwitchRejected;                       // (scenario, entry) unpin forbidden; per-scenario flag
-    int nReactiveLimitPqPvSwitchForbidden = 0;
     DeviceBuf dReactiveLimitGeneratorsLost;                                    // (scenario, entry): the bus lost every generator this
     int nReactiveLimitGeneratorsLost = 0;                                      // scenario — not a controller, seeded FROZEN
     DeviceBuf dReactiveLimitLocalOverride, dReactiveLimitLocalTargetV;                        // re-merged PV buses: (scenario, entry) mask + own V target

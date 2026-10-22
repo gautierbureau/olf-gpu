@@ -454,37 +454,6 @@ OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, readBatchReactiveLimitTargetQ)(
     return arr;
 }
 
-// Reactive-limits controllers STRANDED in another synchronous component: install (or clear, with
-// null) the per-scenario mask as {slot, controller} pairs.
-extern "C" JNIEXPORT void JNICALL
-OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchReactiveLimitPqPvSwitchForbidden)(
-        JNIEnv* env, jclass, jlong handle, jintArray jPairs) {
-    auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
-    if (ctx == nullptr) {
-        return;
-    }
-    if (jPairs == nullptr || env->GetArrayLength(jPairs) == 0 || ctx->nReactiveLimitEntries == 0) {
-        ctx->nReactiveLimitPqPvSwitchForbidden = 0;
-        return;
-    }
-    size_t len = static_cast<size_t>(ctx->nScenarios) * ctx->nReactiveLimitEntries;
-    std::vector<char> mask(len, 0);
-    int nPairs = env->GetArrayLength(jPairs) / 2;
-    jint* pairs = env->GetIntArrayElements(jPairs, nullptr);
-    for (int k = 0; k < nPairs; k++) {
-        int s = pairs[2 * k];
-        int i = pairs[2 * k + 1];
-        if (s >= 0 && s < ctx->nScenarios && i >= 0 && i < ctx->nReactiveLimitEntries) {
-            mask[(size_t) s * ctx->nReactiveLimitEntries + i] = 1;
-        }
-    }
-    env->ReleaseIntArrayElements(jPairs, pairs, JNI_ABORT);
-    ctx->dReactiveLimitPqPvSwitchForbidden.upload(mask.data(), len);
-    std::vector<char> zero(ctx->nScenarios, 0);
-    ctx->dReactiveLimitPqPvSwitchRejected.upload(zero.data(), ctx->nScenarios);
-    ctx->nReactiveLimitPqPvSwitchForbidden = nPairs;
-}
-
 // (scenario, entry) pairs whose bus lost EVERY generator this scenario: seeded FROZEN by initReactiveLimitQLimitTypeBatch.
 extern "C" JNIEXPORT void JNICALL
 OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchReactiveLimitGeneratorsLost)(

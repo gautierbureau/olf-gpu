@@ -102,10 +102,6 @@ final class GenOutageSeed {
                     cl.reactiveLimitTargetVOverrideScenarioEntryList.add(go.reactiveLimitEntry());
                     cl.reactiveLimitTargetVOverrideValue.add(go.qTarget());
                 }
-                if (go.forbidsUnpin()) {
-                    cl.reactiveLimitPqPvSwitchForbiddenScenarioEntryList.add(s);
-                    cl.reactiveLimitPqPvSwitchForbiddenScenarioEntryList.add(go.reactiveLimitEntry());
-                }
                 if (go.silencesReactiveLimitEntry()) {
                     // Nothing left to control voltage at that bus: its reactive-limit
                     // entry is seeded FROZEN for this scenario (setBatchReactiveLimitGeneratorsLost) - no

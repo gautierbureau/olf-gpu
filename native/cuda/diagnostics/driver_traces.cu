@@ -426,7 +426,6 @@ void traceReactiveLimitsAudit(BatchSolverContext* ctx, DriverPass& drv, std::vec
                     pilotSelfReactiveLimitEntryOrNull(ctx), ctx->structure->nReactiveRelocationGroups,
                     ctx->nReactiveLimitLocalOverrides > 0 ? ctx->dReactiveLimitLocalOverride.as<char>() : nullptr,
                     ctx->nReactiveLimitLocalOverrides > 0 ? ctx->dReactiveLimitLocalTargetV.as<double>() : nullptr,
-                    ctx->nReactiveLimitPqPvSwitchForbidden > 0 ? ctx->dReactiveLimitPqPvSwitchForbidden.as<char>() : nullptr, ctx->nReactiveLimitPqPvSwitchForbidden > 0 ? ctx->dReactiveLimitPqPvSwitchRejected.as<char>() : nullptr,
                     ctx->dReactiveLimitFlags.p ? ctx->dReactiveLimitFlags.as<char>() : nullptr,
                     ctx->nReactiveLimitComparedVoltageRowOverrides > 0 ? ctx->dReactiveLimitComparedVoltageRowOverride.as<int>() : nullptr,
                     ctx->nReMergedVoltageTargets > 0 ? ctx->dReactiveLimitHoldsReMergedVoltageTarget.as<char>() : nullptr,

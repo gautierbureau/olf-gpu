@@ -50,7 +50,7 @@ __global__ void reactiveLimitsBatch(const double* secondaryVoltageControlReactiv
                                     int reactiveLimitsDecisionLogScenario, double* reactiveLimitsDecisionLog, int* reactiveLimitsDecisionLogCount, int passId,
                                     const int* pilotSelfReactiveLimitEntry, int nReactiveRelocationGroups,
                                     const char* reactiveLimitLocalOverride, const double* reactiveLimitLocalTargetV,
-                                    const char* reactiveLimitPqPvSwitchForbidden, char* unpinBad, const char* reactiveLimitFlags,
+                                    const char* reactiveLimitFlags,
                                     const int* reactiveLimitComparedVoltageRowOverride,
                                     const char* reactiveLimitHoldsReMergedVoltageTarget, const int* reactiveLimitReMergedVoltageRow) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -205,12 +205,6 @@ __global__ void reactiveLimitsBatch(const double* secondaryVoltageControlReactiv
             // distributed slack), 2.079e-05 kV network-wide.
             bool wantsBack = (!minPin && v > targetV) || (minPin && v < targetV);
             bool back = wantsBack && switchCount[rst] < maxSwitch;
-            if (back && reactiveLimitPqPvSwitchForbidden != nullptr && reactiveLimitPqPvSwitchForbidden[rst]) {
-                // a pinned member of a re-merged cluster with no enabled controller: OLF would re-activate the
-                // cluster's BUS_TARGET_V, which this table cannot host for a lost pilot — reject, CPU replay
-                unpinBad[s] = 1;
-                back = false;
-            }
             if (back) {
                 if (!enrolledPilot) {
                     mode[qidx] = pvForm;                     // back to the DISTR_Q share row (the V identity for a pilot)
@@ -559,7 +553,6 @@ void reactiveLimitsCheck(BatchSolverContext* ctx, DriverPass& drv, int loopKind)
                 pilotSelfReactiveLimitEntryOrNull(ctx), ctx->structure->nReactiveRelocationGroups,
                 ctx->nReactiveLimitLocalOverrides > 0 ? ctx->dReactiveLimitLocalOverride.as<char>() : nullptr,
                 ctx->nReactiveLimitLocalOverrides > 0 ? ctx->dReactiveLimitLocalTargetV.as<double>() : nullptr,
-                ctx->nReactiveLimitPqPvSwitchForbidden > 0 ? ctx->dReactiveLimitPqPvSwitchForbidden.as<char>() : nullptr, ctx->nReactiveLimitPqPvSwitchForbidden > 0 ? ctx->dReactiveLimitPqPvSwitchRejected.as<char>() : nullptr,
                 ctx->dReactiveLimitFlags.p ? ctx->dReactiveLimitFlags.as<char>() : nullptr,
                 ctx->nReactiveLimitComparedVoltageRowOverrides > 0 ? ctx->dReactiveLimitComparedVoltageRowOverride.as<int>() : nullptr,
                 ctx->nReMergedVoltageTargets > 0 ? ctx->dReactiveLimitHoldsReMergedVoltageTarget.as<char>() : nullptr,
@@ -581,19 +574,6 @@ void reactiveLimitsCheck(BatchSolverContext* ctx, DriverPass& drv, int loopKind)
             for (int s = 0; s < nS; s++) {
                 if (mixed[s] && live[s]) {
                     traceReject(s, "pilot-self-mixed-pin", outer, 0);
-                    res.status[s] = GpuAcSolverStatus::REJECTED;
-                    active[s] = 0;
-                    live[s] = 0;
-                }
-            }
-        }
-        if (ctx->nReactiveLimitPqPvSwitchForbidden > 0) {
-            std::vector<char> ub(nS);
-            CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
-            CUDA_CHECK(cudaMemcpy(ub.data(), ctx->dReactiveLimitPqPvSwitchRejected.p, nS * sizeof(char), cudaMemcpyDeviceToHost));
-            for (int s = 0; s < nS; s++) {
-                if (ub[s] && live[s]) {
-                    traceReject(s, "unpin-unrepresentable", outer, 0);
                     res.status[s] = GpuAcSolverStatus::REJECTED;
                     active[s] = 0;
                     live[s] = 0;

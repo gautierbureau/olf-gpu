@@ -42,7 +42,7 @@ void buildDistrQDest(SharedStructure* structure, const CsrPattern& pos, const st
     if (nDistrQ > 0) {
         std::vector<int> distrQDestination(static_cast<size_t>(nDistrQ) * 6, -1);
         // The COUPLER-TREE stock placement for a DISTR_Q row: a relocated child's sharing equation sits on
-        // its parent coupler's DUMMY_Q row, and a scenario that kills that coupler pins the row to an
+        // its parent coupler's DUMMY_Q row, and a scenario that kills that coupler fixes the row with an
         // identity — the equation then has to be back on the bus's OWN row, exactly where OLF keeps a
         // controller's DISTR_Q. distrQAlternateDestination holds the same six destinations recomputed there and distrQSelectorRow the dummy
         // row whose per-scenario mode decides (0 = dead). Without it the middle-section-loss fixtures

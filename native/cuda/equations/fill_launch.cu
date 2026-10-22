@@ -89,7 +89,7 @@ __global__ void applyRowModeBatch(int n, int nScenarios, int nnz, const int* mod
     double* valsS = vals + (size_t) s * nnz;
     if (m == GpuRowMode::CROSS_FIXED_VARIABLE) {
         writeCrossIdentityRow(r, s, n, rowPtr, colIdx, relocatedChildOwnRow, x, target, valsS, F);
-    } else if (m == GpuRowMode::FIXED_VARIABLE) {  // identity: v/phi/rho/a1/b pinned to target
+    } else if (m == GpuRowMode::FIXED_VARIABLE) {  // identity: v/phi/rho/a1/b held at target
         for (int k = rowPtr[r]; k < rowPtr[r + 1]; k++) {
             valsS[k] = 0.0;
         }
@@ -116,9 +116,9 @@ __global__ void initFBatch(int n, int nScenarios, const double* target, double* 
 
 // Seed the per-(controller, scenario) limitType from the BASE state, so a controller that OLF had already
 // switched to PQ in the base case (packed by the extractor as a voltage-CAPABLE PQ bus, base row mode 1)
-// starts pinned at the RIGHT limit and can be switched BACK to PV by a relieving contingency. A base-PV
+// starts PQ at the RIGHT limit and can be switched BACK to PV by a relieving contingency. A base-PV
 // controller (mode 0) starts at limitType 0. For a base-PQ controller, v below its target ⇒ it is producing
-// max reactive yet cannot reach target ⇒ maxQ-pinned (2); v above target ⇒ minQ-pinned (1). switchCount
+// max reactive yet cannot reach target ⇒ PQ at maxQ (2); v above target ⇒ PQ at minQ (1). switchCount
 // starts at 0 either way (a separate memset).
 const int* pilotSelfReactiveLimitEntryOrNull(BatchSolverContext* ctx) {
     return ctx->hasPilotSelf && ctx->dPilotSelfReactiveLimitEntry.p != nullptr ? ctx->dPilotSelfReactiveLimitEntry.template as<int>() : nullptr;
@@ -160,11 +160,11 @@ void fillActiveBatch(BatchSolverContext* ctx, DriverPass& drv, bool fOnly) {
     const int& nS = drv.nS;
     const bool& deviceFixedIter = drv.deviceFixedIter;
     if (ctx->hasPilotSelf && ctx->dPilotSelfCarrierSkip.p != nullptr && ctx->structure->nReactiveRelocationGroups > 0) {
-        // Recompute the PILOT-SELF gate from the CURRENT pin states BEFORE any family fill: such a pilot
-        // has a Q balance to relocate only once a reactive limit has pinned it, and the RL pass moves
-        // pins between passes. The closed/open-branch and shunt fills are what route the pilot's raw q
+        // Recompute the PILOT-SELF gate from the CURRENT reactive-limit states BEFORE any family fill: such a pilot
+        // has a Q balance to relocate only once a reactive limit has switched it to PQ, and the RL pass switches
+        // buses between passes. The closed/open-branch and shunt fills are what route the pilot's raw q
         // through it (zeroImpedanceRelocationDestination), so it must be current when THEY run — launched after them (before the
-        // DISTR_Q fill only) the FIRST fill of every context read an unset gate and put the unpinned
+        // DISTR_Q fill only) the FIRST fill of every context read an unset gate and put the PV
         // pilot's raw q on the carrier row on top of its DISTR_Q terms: row 0 of the 4-bus
         // pilot-as-controller fixture assembled -1.451 against OLF's -5.715 (= OLF + 1.0 * q_pilot), and
         // rte6515's base started from |f(x0)| 117.908 against OLF's 117.845.

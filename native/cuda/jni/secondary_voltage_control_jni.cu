@@ -24,7 +24,7 @@ OLF_JNI(ac_outerloop_gpu, SecondaryVoltageControlNative, setBatchSecondaryVoltag
     }
     ctx->nSecondaryVoltageControlControllerBuses = 0;
     ctx->nSecondaryVoltageControlZones = 0;
-    // A controller's reactive-limit entry is -1 in a run without OLF's ReactiveLimitsOuterLoop: nothing pins it, and the
+    // A controller's reactive-limit entry is -1 in a run without OLF's ReactiveLimitsOuterLoop: nothing switches it to PQ, and the
     // phase moves its target on the controlled bus's BUS_TARGET_V row alone.
     if (jControlledBusVRow == nullptr || env->GetArrayLength(jControlledBusVRow) == 0) {
         return 0;
@@ -118,8 +118,8 @@ OLF_JNI(ac_outerloop_gpu, SecondaryVoltageControlNative, setBatchSecondaryVoltag
     {
         // NaN = "this zone has not moved the controller's target", which is what reactiveLimitTargetVOf tests. The
         // reactive-limit SEEDING reads this buffer before the per-solve reset further down runs, so an
-        // uninitialised one hands the switch-back a garbage comparison voltage and un-pins controllers
-        // that should stay pinned (measured on ieee14's z1: pins 4 -> 2 instead of 4 -> 6, and 1.0e-10 kV).
+        // uninitialised one hands the switch-back a garbage comparison voltage and switches back to PV controllers
+        // that should stay PQ (measured on ieee14's z1: controllers switched to PQ 4 -> 2 instead of 4 -> 6, and 1.0e-10 kV).
         std::vector<double> nanv(nS * std::max(ctx->nReactiveLimitEntries, 1), std::nan(""));
         CUDA_CHECK(cudaMemcpy(ctx->dSecondaryVoltageControlReactiveLimitTargetV.p, nanv.data(), nanv.size() * sizeof(double), cudaMemcpyHostToDevice));
     }

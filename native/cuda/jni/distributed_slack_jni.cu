@@ -29,7 +29,7 @@ OLF_JNI(ac_outerloop_gpu, DistributedSlackNative, setBatchSlackOnlyAnchor)(
 // slack's water-fill starts it (a strategy pair: the parent's final target, or a GeneratorAction's value; null = the
 // base), start = its move from that anchor at the solve's start (a contingency's loss pre-distribution; null = none).
 // The curve and forced-target-Q channels evaluate a generator at anchor + (distributedSlackGeneratorMove once a pass ran, else start).
-// seedAnchor (pairs): the anchor WITHOUT the strategy's GeneratorActions - where the continued pins are stamped.
+// seedAnchor (pairs): the anchor WITHOUT the strategy's GeneratorActions - where the continued PV -> PQ switches are stamped.
 extern "C" JNIEXPORT void JNICALL
 OLF_JNI(ac_outerloop_gpu, DistributedSlackNative, setBatchDistributedSlackGeneratorAnchors)(
         JNIEnv* env, jclass, jlong handle, jdoubleArray jAnchor, jdoubleArray jStart, jdoubleArray jSeedAnchor) {

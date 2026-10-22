@@ -141,8 +141,8 @@ __global__ void incrementalFlowControlDecisionBatch(int nIncrementalFlowControlC
     moved[s] = 1;
 }
 
-// Per (scenario, controller) whose tap moved: pin the identity row (rho or a1) at the tap's value.
-__global__ void incrementalFlowControlApplyBatch(int nIncrementalFlowControlControllerBranches, int nScenarios, int n, const int* pinRow, const int* tapColumn,
+// Per (scenario, controller) whose tap moved: hold the controller's target row (the rho or a1 identity) at the tap's value.
+__global__ void incrementalFlowControlApplyBatch(int nIncrementalFlowControlControllerBranches, int nScenarios, int n, const int* targetRow, const int* tapColumn,
                               const int* tapStart, const double* tapRows, const int* currentTap, int* appliedTap,
                               double* target, double* x) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -152,8 +152,8 @@ __global__ void incrementalFlowControlApplyBatch(int nIncrementalFlowControlCont
     int t = currentTap[tid];
     if (t == appliedTap[tid]) return;
     double v = tapRows[(size_t) (tapStart[c] + t) * GpuPiModelColumn::COUNT + tapColumn[c]];
-    target[(size_t) s * n + pinRow[c]] = v;
-    x[(size_t) s * n + pinRow[c]] = v;
+    target[(size_t) s * n + targetRow[c]] = v;
+    x[(size_t) s * n + targetRow[c]] = v;
     appliedTap[tid] = t;
 }
 
@@ -202,7 +202,7 @@ void incrementalFlowControlStep(BatchSolverContext* ctx, DriverPass& drv, int ki
     bool first = true;
     for (int c = 0; c < nF; c++) {
         if (!needC[c]) continue;
-        int row = ctx->structure->rowMap[ctx->hIncrementalFlowControlPinRow[c]];
+        int row = ctx->structure->rowMap[ctx->hIncrementalFlowControlTargetRow[c]];
         if (row < 0) continue;
         setUnitRhsBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, row, ctx->dB.as<double>());
         repairZeroDiagonalRightHandSide(ctx, nS, ctx->dB.as<double>());
@@ -217,7 +217,7 @@ void incrementalFlowControlStep(BatchSolverContext* ctx, DriverPass& drv, int ki
             ctx->dIncrementalFlowControlControlledFlow.as<int>(), ctx->dIncrementalFlowControlTapColumn.as<int>(), ctx->dIncrementalFlowControlTapStart.as<int>(), ctx->dIncrementalFlowControlTapRows.as<double>(), ctx->dIncrementalFlowControlMaxTapShift.as<int>(),
             ctx->dIncrementalFlowControlOutOfDeadband.as<char>(), ctx->dIncrementalFlowControlDiff.as<double>(), ctx->dIncrementalFlowControlSensitivity.as<double>(),
             ctx->dIncrementalFlowControlCurrentTap.as<int>(), ctx->dIncrementalFlowControlCurrentDirection.as<int>(), ctx->dIncrementalFlowControlDirectionChangeCount.as<int>(), ctx->dIncrementalFlowControlAllowedDirection.as<int>(), ctx->dOuterLoopUnstable.as<char>());
-    incrementalFlowControlApplyBatch<<<grid(static_cast<int>(nst)), BLOCK, 0, ctx->stream>>>(nF, nS, n, ctx->dIncrementalFlowControlPinRow.as<int>(), ctx->dIncrementalFlowControlTapColumn.as<int>(),
+    incrementalFlowControlApplyBatch<<<grid(static_cast<int>(nst)), BLOCK, 0, ctx->stream>>>(nF, nS, n, ctx->dIncrementalFlowControlTargetRow.as<int>(), ctx->dIncrementalFlowControlTapColumn.as<int>(),
             ctx->dIncrementalFlowControlTapStart.as<int>(), ctx->dIncrementalFlowControlTapRows.as<double>(), ctx->dIncrementalFlowControlCurrentTap.as<int>(), ctx->dIncrementalFlowControlAppliedTap.as<int>(),
             ctx->dTarget.as<double>(), ctx->dX.as<double>());
     CUDA_CHECK(cudaStreamSynchronize(ctx->stream));

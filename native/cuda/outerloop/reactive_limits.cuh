@@ -1,8 +1,8 @@
 // Copyright (c) 2026, RTE (http://www.rte-france.com)
 // SPDX-License-Identifier: MPL-2.0
 //
-// ReactiveLimitsOuterLoop as an in-kernel driver phase: a PV controller over its Q limit is pinned PQ at the limit,
-// a pinned one whose voltage relieves is released, and robust mode's realistic-voltage pins.
+// ReactiveLimitsOuterLoop as an in-kernel driver phase: a PV controller over its Q limit is switched PV -> PQ at the limit,
+// one switched to PQ whose voltage relieves is switched back PQ -> PV, and robust mode's realistic-voltage switches.
 #ifndef OLF_GPU_OUTERLOOP_REACTIVE_LIMITS_CUH
 #define OLF_GPU_OUTERLOOP_REACTIVE_LIMITS_CUH
 

@@ -115,7 +115,7 @@ __global__ void fillClosedBranchQbufBatch(int elementCount, int nScenarios, int 
     double a1 = q[8] >= 0 ? xs[q[8]] : p[7];
     double o[4];                                             // p1 q1 p2 q2: updateClosedBranch's own expressions
     updateClosedBranchWithoutDerivatives(p[0], p[1], p[2], p[3], p[4], v1, r1, v2, p[5], a1, ph1, ph2, 0, o + 0, o + 1, o + 2, o + 3);
-    const int pos[4] = {0, 7, 14, 21};                       // their output slots (static_assert-pinned below)
+    const int pos[4] = {0, 7, 14, 21};                       // their output slots (static_assert-checked below)
     const int* d = dest + e * CLOSED_BRANCH_OUTPUT_COUNT;
     for (int k = 0; k < 4; k++) {
         if (d[pos[k]] <= -2) {
@@ -156,7 +156,7 @@ __global__ void fillOpenBranchBatch(int elementCount, int nScenarios, int n, int
 // F-ONLY batch fills: evaluate just the residual values (the generated eval<X>F
 // routines) and scatter only the F rows — for iterations that never consume the
 // Jacobian (the final residual/convergence fill). The residual positions in
-// each family's dest stride are pinned to the generated scatter tables by
+// each family's dest stride are checked against the generated scatter tables by
 // static_asserts, so a codegen output-order change fails the build loudly.
 // ---------------------------------------------------------------------------------
 

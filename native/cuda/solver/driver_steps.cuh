@@ -27,8 +27,8 @@ void repairZeroDiagonalRightHandSide(BatchSolverContext* ctx, int nS, double* B,
 ReactiveRelocationTables withPilotSelf(ReactiveRelocationTables rt, BatchSolverContext* ctx);
 const int* pilotSelfReactiveLimitEntryOrNull(BatchSolverContext* ctx);
 
-// Lay a remote-voltage-control group's rows out from the current pin states.
-void launchPilotTargetVEquationUpdate(BatchSolverContext* ctx, DriverPass& drv, bool staticLimits = false, bool continuedPins = false);
+// Lay a remote-voltage-control group's rows out from the current PV/PQ states.
+void launchPilotTargetVEquationUpdate(BatchSolverContext* ctx, DriverPass& drv, bool staticLimits = false, bool useSeedTargetQ = false);
 void launchDistrQTargetsInner(BatchSolverContext* ctx, DriverPass& drv);
 // The row holding each re-merged control's voltage target (updateReMergedVoltageTargetRowBatch). solveStart: the solve's
 // first layout, every target on its main's own row before it is laid out.

@@ -33,10 +33,10 @@ final class ChunkLists {
     // {slot, participant, row} triples: a DS participant whose P-balance row this
     // scenario MOVES. Under the coupler-tree relocation a child bus's P balance lives on
     // its parent coupler's DUMMY_P row, and distributedSlackBusPhiRow — a STRUCTURAL array — points there.
-    // A contingency that opens that coupler pins the dummy row to a DUMMY_TARGET identity
+    // A contingency that opens that coupler holds the dummy row with a DUMMY_TARGET identity
     // and the stock-placement fallback puts the balance back on the child's OWN phi row,
     // so for THAT scenario the participant's row is the child's. Without this the whole DS
-    // machinery kept writing to the pinned row: measured on the middle-section fixture,
+    // machinery kept writing to the held row: measured on the middle-section fixture,
     // g2's 0.173869 pu share landed on a dead row while both DS kernels read its
     // (0 - anchor) as -1.043213 of "absorbed", so the slack loop fired four times where
     // OLF fires once and over-placed 0.0687 pu on the rows that still worked (0.34 kV on
@@ -79,7 +79,7 @@ final class ChunkLists {
     final List<Integer> frozenSeedRow = new ArrayList<>();
     final List<Double> frozenSeedValue = new ArrayList<>();
     // slot -> the RL entries of the controllers still holding a deactivated pilot's
-    // voltage. All pinned = its Q balance lost its row; the CPU replays that scenario.
+    // voltage. All switched to PQ = its Q balance lost its row; the CPU replays that scenario.
     // Pilot-row flip entries: the scenarios that used to be REJECTED by that check are
     // FIXED in the solve instead. Per chunk, like every other list here — the scenario
     // index is a chunk SLOT.
@@ -184,7 +184,7 @@ final class ChunkLists {
         RemoteVoltageControlNative.setBatchPilotQDeltas(handle,
                 pilotQDeltas.isEmpty() ? null : pilotQDeltas.keySet().stream().mapToInt(Integer::intValue).toArray(),
                 pilotQDeltas.isEmpty() ? null : pilotQDeltas.values().stream().mapToDouble(Double::doubleValue).toArray());
-        RemoteVoltageControlNative.setBatchPilotAllPinnedFlip(handle,
+        RemoteVoltageControlNative.setBatchPilotNoEnabledControllerFlip(handle,
                 ChunkArrays.intsOrNull(pfSlot),
                 pfSlot.isEmpty() ? null : pfRow.stream().mapToInt(Integer::intValue).toArray(),
                 pfSlot.isEmpty() ? null : pfQTarget.stream().mapToDouble(Double::doubleValue).toArray(),

@@ -165,7 +165,7 @@ __global__ void incrementalTransformerVoltageControlGatherSensitivityBatch(int n
     sensitivity[(size_t) s * nIncrementalTransformerVoltageControlControllerBranches + c] = dx[(size_t) s * n + incrementalTransformerVoltageControlControlledBusVRow[c]];
 }
 
-// Per (scenario, controller) whose tap moved this pass: pin the rho identity row's TARGET at the
+// Per (scenario, controller) whose tap moved this pass: set the rho identity row's TARGET to the
 // new tap's r1 and seed the rho STATE there — exactly what the host orchestrator writes before its
 // warm re-solve (ovVal.add(row[6]); x0Full[rhoRow] = row[6]). Then remember the tap as applied.
 __global__ void incrementalTransformerVoltageControlApplyRhoBatch(int nIncrementalTransformerVoltageControlControllerBranches, int nScenarios, int n,

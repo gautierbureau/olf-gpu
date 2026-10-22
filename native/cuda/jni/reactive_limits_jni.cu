@@ -161,7 +161,7 @@ OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchReactiveLimitStrongestPv
 }
 
 // voltageRemoteControlRobustMode (OLF's default): install the robust-mode channel on a batch context —
-// the per-entry initial generation target Q that a realistic-V freeze pins at, and the two thresholds
+// the per-entry initial generation target Q that a realistic-V freeze holds, and the two thresholds
 // ReactiveLimitsOuterLoop tests the controller's OWN voltage against (minRealisticVoltage ·
 // REALISTIC_VOLTAGE_MARGIN and maxRealisticVoltage / REALISTIC_VOLTAGE_MARGIN, margin 1.02). robust = 0
 // clears the channel, so a cached context reused by a run with the mode off stops applying it.
@@ -329,7 +329,7 @@ OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchReactiveLimitRemoteEntri
     // Keyed on the MEMBER list, not on the DISTR_Q rows: a SINGLETON remote group has members (and a
     // pilot-Q relocation group, so its pilot's control-loss flip must be armed) but no DISTR_Q row at
     // all — gating on distrQRowMember left hasDistrQRelocationGroups at 0 for it, and the base load flow on the driver
-    // kept the pilot's V equation after pinning its only member (2.4e-3 pu on the pilot's Q).
+    // kept the pilot's V equation after switching its only member to PQ (2.4e-3 pu on the pilot's Q).
     if (jDistrQMemberKey != nullptr && env->GetArrayLength(jDistrQMemberKey) > 0) {
         int nDistrQTermMembers = jDistrQRowMember != nullptr ? env->GetArrayLength(jDistrQRowMember) : 0;
         int nDistrQMembers = env->GetArrayLength(jDistrQMemberKey);

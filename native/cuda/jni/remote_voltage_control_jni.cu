@@ -133,13 +133,13 @@ OLF_JNI(ac_equations_vector_gpu, RemoteVoltageControlNative, setBatchPilotQDelta
     env->ReleaseDoubleArrayElements(jVals, vals, JNI_ABORT);
 }
 
-// Pilot-row flip entries (see pilotRowAllPinnedBatch): one per (scenario, pilot) where the outage
+// Pilot-row flip entries (see pilotRowWithoutEnabledControllerBatch): one per (scenario, pilot) where the outage
 // made the pilot stop being one of its own controllers. slots/rows/qTargets are per entry; survivorReactiveLimitEntryCounts
 // says how many surviving-controller RL entries each one owns and survivorReactiveLimitEntries concatenates them in order.
 // Nulls clear. Flip state (flipped/savedVTarget) is allocated zeroed here, so each solve starts with
 // every pilot row unflipped.
 extern "C" JNIEXPORT void JNICALL
-OLF_JNI(ac_equations_vector_gpu, RemoteVoltageControlNative, setBatchPilotAllPinnedFlip)(
+OLF_JNI(ac_equations_vector_gpu, RemoteVoltageControlNative, setBatchPilotNoEnabledControllerFlip)(
         JNIEnv* env, jclass, jlong handle, jintArray jSlots, jintArray jRows, jdoubleArray jQTargets,
         jintArray jSurvivorReactiveLimitEntryCounts, jintArray jSurvivorReactiveLimitEntries) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);

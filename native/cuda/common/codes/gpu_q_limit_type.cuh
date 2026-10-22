@@ -2,14 +2,14 @@
 // SPDX-License-Identifier: MPL-2.0
 //
 // A reactive-limit entry's limit type, per scenario (limitType, the low 3 bits of reactiveLimitsState, reactiveLimitBaseQLimitType):
-// OLF's LfBus.QLimitType (ordinal + 1), NONE when the entry is not pinned, and FROZEN, the device's mark for a
+// OLF's LfBus.QLimitType (ordinal + 1), NONE when the entry is not switched to PQ, and FROZEN, the device's mark for a
 // voltage control OLF's GeneratorVoltageControlManager froze or whose generators are all lost. Mirrors
 // com.powsybl.openloadflow.ac.solver.gpu.codes.GpuQLimitType (GpuCodesMirrorTest checks they agree).
 #ifndef OLF_GPU_COMMON_CODES_GPU_Q_LIMIT_TYPE_CUH
 #define OLF_GPU_COMMON_CODES_GPU_Q_LIMIT_TYPE_CUH
 
 namespace GpuQLimitType {
-constexpr int NONE = 0;              // not pinned: the bus controls its voltage
+constexpr int NONE = 0;              // still PV: the bus controls its voltage
 constexpr int MIN_Q = 1;             // OLF's QLimitType.MIN_Q
 constexpr int MAX_Q = 2;             // OLF's QLimitType.MAX_Q
 constexpr int MIN_REALISTIC_V = 3;   // OLF's QLimitType.MIN_REALISTIC_V (robust mode)

@@ -25,9 +25,9 @@
 namespace olfgpu {
 
 // PILOT-SELF gate, per (scenario, group): 1 = skip this group's relocated raw q because its pilot is one of
-// its own controllers and is NOT pinned this scenario. While the pilot controls, its q belongs in the
+// its own controllers and is NOT switched to PQ this scenario. While the pilot controls, its q belongs in the
 // group's DISTR_Q rows WEIGHTED (it has no Q balance of its own), so emitting it raw at the carrier row
-// would double-count it. Once a reactive limit pins it, OLF activates its BUS_TARGET_Q and the carrier row
+// would double-count it. Once a reactive limit switches it PV -> PQ, OLF activates its BUS_TARGET_Q and the carrier row
 // is exactly where that balance goes — the relocation the CPU does statically, here per scenario.
 __global__ void pilotSelfGateBatch(int nReactiveRelocationGroups, int nScenarios, int nReactiveLimitEntries, const int* pilotEntryOfPilotSelfGroup,
                                    const char* limitType, const char* reactiveLimitIslanded, char* pilotSelfCarrierSkip) {
@@ -38,15 +38,15 @@ __global__ void pilotSelfGateBatch(int nReactiveRelocationGroups, int nScenarios
     int e = pilotEntryOfPilotSelfGroup[g];
     char skip;
     if (e == PILOT_SELF_NO_REACTIVE_LIMIT_ENTRY) {
-        skip = 1;                                            // pilot-self, never pinnable ⇒ always controlling
+        skip = 1;                                            // pilot-self, never switches to PQ ⇒ always controlling
     } else if (e >= 0 && e < nReactiveLimitEntries) {
         // An ISLANDED pilot (its section lost with the contingency) has no balance anywhere — OLF removed
-        // the bus. Its limit type still reads its BASE pin (initReactiveLimitQLimitTypeBatch seeds an enrolled pilot's
-        // kind from the base), and "pinned" here means "its balance rides the carrier": the carrier's own
+        // the bus. Its limit type still reads its BASE switch to PQ (initReactiveLimitQLimitTypeBatch seeds an enrolled
+        // pilot's kind from the base), and "switched to PQ" here means "its balance rides the carrier": the carrier's own
         // DISTR_Q was suppressed for a balance that does not exist and the row went empty. Measured on
-        // rte6515 BUS-6194_BBS_1 (pilot VL-6194_0 base-pinned MAX_Q then islanded: FAILED where OLF
+        // rte6515 BUS-6194_BBS_1 (pilot VL-6194_0 switched to PQ at MAX_Q in the base, then islanded: FAILED where OLF
         // converges with 60 violations) and BUS-6003_BBS_1 (0.473 MW of distributed active power).
-        // Unpinned or islanded ⇒ skip; pinned and alive ⇒ its balance rides the carrier.
+        // Still PV or islanded ⇒ skip; switched to PQ and alive ⇒ its balance rides the carrier.
         bool islanded = reactiveLimitIslanded != nullptr && reactiveLimitIslanded[(size_t) s * nReactiveLimitEntries + e];
         skip = (islanded || limitType[(size_t) s * nReactiveLimitEntries + e] == GpuQLimitType::NONE) ? 1 : 0;
     } else {
@@ -59,7 +59,7 @@ __global__ void pilotSelfGateBatch(int nReactiveRelocationGroups, int nScenarios
 // row — the base target upload and the per-scenario injection overrides both address the pilot's
 // reactive balance at that row (structure-time qRow). updateDistrQTargetsBatch hands the value to
 // whichever member row currently carries the relocated pilot Q. Runs BEFORE the RL mode seeding so
-// a warm-continuation pin cannot overwrite the value first.
+// a warm-continuation PV -> PQ switch cannot overwrite the value first.
 __global__ void capturePilotQBatch(int nReactiveRelocationGroups, int nScenarios, int n, const int* reactiveRelocationGroupStart, const int* reactiveRelocationCandidateRows,
                                    const int* baseMode, const double* targetBase, double* pilotQ,
                                    const int* reactiveRelocationBaseTargetRow) {
@@ -97,21 +97,21 @@ __global__ void applyPilotQDeltasBatch(int nDelta, const int* key, const double*
     }
 }
 
-// DEVICE all-pinned corner (plan-B4 follow-up): when the LAST live member of a remote gen-VC
-// relocation group pins (the mode-scan finds no candidate with mode not in {0, 4} and falls back
+// DEVICE no-enabled-controller corner (plan-B4 follow-up): when the LAST live member of a remote gen-VC
+// relocation group switches to PQ (the mode-scan finds no candidate with mode not in {0, 4} and falls back
 // to candidate 0 = the pilot's own row), OLF deactivates the pilot's V equation — control lost.
 // Flip the pilot row to a POWER row carrying the group's captured pilot-Q target (the scatter
-// already lands the pilot's balance there via the same fallback); when a member unpins again,
+// already lands the pilot's balance there via the same fallback); when a member switches back to PV,
 // restore the V identity and its saved target. Flag-guarded per (scenario, group): only rows
 // THIS kernel flipped are ever flipped back — with one exception. A group that lost control in the
-// BASE (every member pinned there) has its pilot row pushed as a power row with no flag, and when a
-// member unpins in a contingency OLF gives the pilot its V equation back IN THAT SAME PASS
+// BASE (every member switched to PQ there) has its pilot row pushed as a power row with no flag, and when a
+// member switches back to PV in a contingency OLF gives the pilot its V equation back IN THAT SAME PASS
 // (updateRemoteVoltageControlEquations runs on every switch). Nothing did that here: the pilot's own
-// local entry — an empty reactive range with a guessed pin type — restored the row on ITS OWN
+// local entry — an empty reactive range with a guessed limit type — restored the row on ITS OWN
 // voltage test, which is the wrong trigger and fires a pass late or never. Measured on
-// network.xiidm/LNER: the three members of IZUM_0's group unpinned on a 1.2e-6 pu knife-edge, the
-// device solved one pass with three sharing rows and no voltage identity, re-pinned two of the three
-// where OLF re-pinned all three, and the distributed slack ended 0.151 MW apart. The restore below
+// network.xiidm/LNER: the three members of IZUM_0's group switched back to PV on a 1.2e-6 pu knife-edge, the
+// device solved one pass with three sharing rows and no voltage identity, switched two of the three to PQ again
+// where OLF switched all three, and the distributed slack ended 0.151 MW apart. The restore below
 // takes the group's V target from the pilot's local entry (reactiveRelocationPilotReactiveLimitEntry), per-scenario overrides
 // included, and the local entry itself no longer decides anything. A flip (either direction) marks
 // the scenario switched: the row swap needs a re-solve even when it rides a no-switch
@@ -133,17 +133,17 @@ __global__ void updatePilotTargetVEquationBatch(int nReactiveRelocationGroups, i
                                     const char* reactiveLimitIslanded,
                                 const char* distrQSubgroup, const int* reactiveRelocationDistrQMemberStart, double tol,
                                 const char* reactiveLimitGeneratorsLost, const int* reactiveRelocationDependentBaseGroup, const int* relocatedChildOwnRow,
-                                const double* pinTargetIn) {
+                                const double* reactiveLimitSeedTargetQ) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nReactiveRelocationGroups * nScenarios) return;
     int g = tid % nReactiveRelocationGroups;
     int s = tid / nReactiveRelocationGroups;
     if (!reactiveRelocationIsGeneratorVoltageControl[g]) return;
     // The RL phase owns the flip/restore below (outerLoopCheckActive); the BOOKING of a group lost in the base runs at the
-    // post-seed launch too, when outerLoopCheckActive is still 0 — without it the unpin of such a pilot at its first RL pass
-    // found pilotTargetVDeactivated = 0, restored nothing, and the pilot's row stayed a power row with its raw q gated off
-    // (unpinned ⇒ pilotSelfCarrierSkip): an empty row and a bad solve (rte6515 [5000,6000] BUS-6003_BBS_2, slot 797,
-    // max-iter-bad-solve at RL#2).
+    // post-seed launch too, when outerLoopCheckActive is still 0 — without it the switch back to PV of such a pilot at its
+    // first RL pass found pilotTargetVDeactivated = 0, restored nothing, and the pilot's row stayed a power row with its raw
+    // q gated off (back on PV ⇒ pilotSelfCarrierSkip): an empty row and a bad solve (rte6515 [5000,6000] BUS-6003_BBS_2,
+    // slot 797, max-iter-bad-solve at RL#2).
     bool act = outerLoopCheckActive[s] != 0;
     int pilotRow = reactiveRelocationCandidateRows[reactiveRelocationGroupStart[g]];
     // A DEPENDENT pilot (reactiveRelocationDependentBaseGroup): its identity sits on its own V row once its parent coupler is dead (the dummy
@@ -158,12 +158,12 @@ __global__ void updatePilotTargetVEquationBatch(int nReactiveRelocationGroups, i
         if (pm != 0 && pm != 6 && !pilotTargetVDeactivated[(size_t) s * nReactiveRelocationGroups + g]) return;
     }
     // PILOT-SELF group (the pilot is merged controller #0, so its OWN row is also candidate 1): "control
-    // lost" is OLF's "no enabled controller" — every OTHER member pinned/off AND the pilot itself pinned.
+    // lost" is OLF's "no enabled controller" — every OTHER member switched to PQ/off AND the pilot itself switched to PQ.
     // The candidate scan must skip the pilot's row: once flipped to a power row it reads as a live member
     // and the next pass restores it — the kernel toggling its own verdict (rte6515 busbar base, groups 17
     // and 19: mode 1/0 every pass to the outer-loop budget). And the flipped row hosts the pilot's
-    // BUS_TARGET_Q, whose target is its Q LIMIT (the RL pin's value), not the group's captured pilot-Q
-    // target (0 here — a pin with the wrong target moved V past the group target and unpinned it again).
+    // BUS_TARGET_Q, whose target is its Q LIMIT (the target Q the RL switch froze), not the group's captured pilot-Q
+    // target (0 here — a PV -> PQ switch with the wrong target moved V past the group target and switched it back to PV).
     int pe = pilotSelfReactiveLimitEntry != nullptr ? pilotSelfReactiveLimitEntry[g] : -1;
     char plt = pe >= 0 && limitType != nullptr ? limitType[(size_t) s * nReactiveLimitEntries + pe] : 0;
     double flipTarget = pilotQ[(size_t) s * nReactiveRelocationGroups + g];
@@ -173,10 +173,10 @@ __global__ void updatePilotTargetVEquationBatch(int nReactiveRelocationGroups, i
         double lim = (plt == GpuQLimitType::MIN_REALISTIC_V || plt == GpuQLimitType::MAX_REALISTIC_V) && reactiveLimitInitialTargetQ != nullptr ? reactiveLimitInitialTargetQ[pe]
                    : isMinLimit(plt) ? reactiveLimitMinQ[li] : reactiveLimitMaxQ[li];
         // A pilot whose bus LOST EVERY GENERATOR this scenario (seeded GpuQLimitType::FROZEN through setBatchReactiveLimitGeneratorsLost)
-        // is not pinned at any limit: OLF's BUS_TARGET_Q there has no generator term at all, only the bus's
+        // is not at any reactive limit: OLF's BUS_TARGET_Q there has no generator term at all, only the bus's
         // load. Falling through to reactiveLimitMaxQ asked the bus for its lost generator's MAXIMUM reactive output:
         // rte6515 GEN-1251 with every busbar section in the list (VL-1251_0, the pilot of a two-section group
-        // whose other member is pinned), target 1.0 pu against OLF's 0.0, the bus driven from 0.572 to 0.94 pu
+        // whose other member is switched to PQ), target 1.0 pu against OLF's 0.0, the bus driven from 0.572 to 0.94 pu
         // for the first passes, 4.18 MW of slack read where OLF reads -0.33, and -0.384 MW distributed against 0.
         if (plt == GpuQLimitType::FROZEN && reactiveLimitGeneratorsLost != nullptr && reactiveLimitGeneratorsLost[(size_t) s * nReactiveLimitEntries + pe]) {
             lim = 0.0;
@@ -187,8 +187,8 @@ __global__ void updatePilotTargetVEquationBatch(int nReactiveRelocationGroups, i
         // seed launch reads the base limits, which a curve moved since (rte6515 BUS-6066_BBS_1, VL-6231_0: flipped
         // at 0.576013 against the parent's 0.574331, then re-frozen at the pair's limit - 3.8e-5 kV on every
         // strategy, even one changing nothing).
-        if (pinTargetIn != nullptr && plt >= 1 && plt <= 4 && !isnan(pinTargetIn[(size_t) s * nReactiveLimitEntries + pe])) {
-            flipTarget = pinTargetIn[(size_t) s * nReactiveLimitEntries + pe];
+        if (reactiveLimitSeedTargetQ != nullptr && plt >= 1 && plt <= 4 && !isnan(reactiveLimitSeedTargetQ[(size_t) s * nReactiveLimitEntries + pe])) {
+            flipTarget = reactiveLimitSeedTargetQ[(size_t) s * nReactiveLimitEntries + pe];
             continuedFlip = true;
         }
     }
@@ -208,7 +208,7 @@ __global__ void updatePilotTargetVEquationBatch(int nReactiveRelocationGroups, i
     // unlike the row modes this kernel used to infer it from, which at seed time are still ambiguous (a member
     // row reads mode 0 both for a frozen island and for an identity that means the member controls). With the
     // fact in hand the layout can follow it from the FIRST fill, which is where OLF has it: a pilot whose only
-    // sibling this contingency islands, and which the base itself pinned, has no BUS_TARGET_V at all in OLF,
+    // sibling this contingency islands, and which the base itself switched to PQ, has no BUS_TARGET_V at all in OLF,
     // while the device used to hold that identity until its reactive-limits phase (rte6515 BUS-6112_BBS_2: the
     // pilot VL-6112_0 sat at v = 1.055 through the whole slack phase, VL-6055_0's q read 1.474 against OLF's
     // 1.902, and the run ended 3.7e-3 MW apart in distributed active power).
@@ -235,7 +235,7 @@ __global__ void updatePilotTargetVEquationBatch(int nReactiveRelocationGroups, i
     if (factKnown) {
         lost = !anyEnabled;
     } else if (pe >= 0) {
-        lost = plt != GpuQLimitType::NONE;  // an unpinned pilot still controls its own bus
+        lost = plt != GpuQLimitType::NONE;  // a pilot still PV controls its own bus
         int p0 = reactiveRelocationGroupStart[g];
         int count = reactiveRelocationGroupStart[g + 1] - p0;
         for (int c = 1; lost && c < count; c++) {
@@ -263,9 +263,9 @@ __global__ void updatePilotTargetVEquationBatch(int nReactiveRelocationGroups, i
         pilotTargetVDeactivated[fi] = 0;
         switched[s] = act ? 1 : switched[s];
     } else if (act && lost && pilotTargetVDeactivated[fi] && pe >= 0 && fabs(target[pi] - flipTarget) > tol) {
-        // The pinned pilot's limit moved (curve limits). OLF re-freezes a pinned bus at its moved limit only
+        // The PQ pilot's limit moved (curve limits). OLF re-freezes a bus switched to PQ at its moved limit only
         // past maxReactivePowerMismatch (checkPqBusWithQLimitType: |maxQ - q| > tol), the same gate the member
-        // path above this kernel applies; a 1e-12 gate here re-stamped a pilot OLF leaves at its pin-time
+        // path above this kernel applies; a 1e-12 gate here re-stamped a pilot OLF leaves at its switch-time
         // limit. Measured on rte6515 BUS-6029_BBS_1 (#73): VL-6231_0's curve moved 2.23e-5 pu with the second
         // slack distribution, under the 1e-4 pu threshold - OLF kept 0.570780403, the device stamped
         // 0.570758104 and the network sat 5.68e-5 kV off.
@@ -279,26 +279,26 @@ __global__ void updatePilotTargetVEquationBatch(int nReactiveRelocationGroups, i
         pilotTargetVDeactivated[fi] = 1;
         savedVTarget[fi] = reactiveLimitTargetV[pe];
         // ...and if this scenario's outage took the pilot bus's every generator, its balance target loses the
-        // generator's pinned output NOW, from the first fill: OLF's BUS_TARGET_Q there has no generator term.
+        // generator's frozen output NOW, from the first fill: OLF's BUS_TARGET_Q there has no generator term.
         // The re-stamp branch above only runs inside the reactive-limits phase, so the slack phase solved with
-        // the lost generator's pin still injected - rte6515 GEN-6003 with every busbar section in the list:
+        // the lost generator's frozen target Q still injected - rte6515 GEN-6003 with every busbar section in the list:
         // VL-6003_0 kept 0.7477 pu against OLF's 0.0 through the first passes, and the first slack read was
         // 0.049 MW off (238.816 MW distributed against OLF's 238.865).
         if (plt == GpuQLimitType::FROZEN && reactiveLimitGeneratorsLost != nullptr && reactiveLimitGeneratorsLost[(size_t) s * nReactiveLimitEntries + pe]) {
             target[pi] = flipTarget;
         }
-        // ...and a group the previous solve had flipped at another pin (a strategy pair continuing its
+        // ...and a group the previous solve had flipped at another limit (a strategy pair continuing its
         // contingency) holds THAT target, not the base one the activation laid out (rte6515 BUS-6230_BBS: VL-6229_0
-        // pinned at MAX_Q 0.0 in the base, at MIN_Q -0.06 after the contingency; the pair kept 0.0, 8.8e-5 kV)
+        // switched to PQ at MAX_Q 0.0 in the base, at MIN_Q -0.06 after the contingency; the pair kept 0.0, 8.8e-5 kV)
         if (continuedFlip) {
             target[pi] = flipTarget;
         }
     } else if (!lost && pe < 0 && mode[pi] == GpuRowMode::EQUATION && reactiveRelocationPilotReactiveLimitEntry != nullptr && reactiveRelocationPilotReactiveLimitEntry[g] >= 0) {
         // The same base-lost case for a PURE-TRANSIT pilot (not one of its own controllers, so no
         // pilotSelfReactiveLimitEntry): the base carried no saved V target - the pilot's own local reactive-limit entry
-        // holds the group's target (per-scenario overrides included). A member just unpinned, and
+        // holds the group's target (per-scenario overrides included). A member just switched back to PV, and
         // OLF gives the pilot its V equation back IN THAT PASS (network.xiidm/LNER: IZUM_0's three
-        // members unpinned on a 7.85e-07 pu margin; restoring a pass late cost 0.151 MW of slack).
+        // members switched back to PV on a 7.85e-07 pu margin; restoring a pass late cost 0.151 MW of slack).
         int le = reactiveRelocationPilotReactiveLimitEntry[g];
         mode[pi] = GpuRowMode::FIXED_VARIABLE;
         target[pi] = reactiveLimitTargetVOf(nReactiveLimitTargetVOverrides, reactiveLimitTargetVOverrideScenarioEntry, reactiveLimitTargetVOverrideValue, secondaryVoltageControlReactiveLimitTargetV, nReactiveLimitEntries, s, le, reactiveLimitTargetV[le]);
@@ -306,7 +306,7 @@ __global__ void updatePilotTargetVEquationBatch(int nReactiveRelocationGroups, i
     }
 }
 
-void launchPilotTargetVEquationUpdate(BatchSolverContext* ctx, DriverPass& drv, bool staticLimits, bool continuedPins) {
+void launchPilotTargetVEquationUpdate(BatchSolverContext* ctx, DriverPass& drv, bool staticLimits, bool useSeedTargetQ) {
     const int& n = drv.n;
     const int& nS = drv.nS;
     const bool& usePerScenarioReactiveLimits = drv.usePerScenarioReactiveLimits;
@@ -341,24 +341,25 @@ void launchPilotTargetVEquationUpdate(BatchSolverContext* ctx, DriverPass& drv, 
                 REACTIVE_LIMIT_TOL, ctx->nReactiveLimitGeneratorsLost > 0 ? ctx->dReactiveLimitGeneratorsLost.as<char>() : nullptr,
                 ctx->structure->dReactiveRelocationDependentBaseGroup.p ? ctx->structure->dReactiveRelocationDependentBaseGroup.as<int>() : nullptr,
                 ctx->structure->dRelocatedChildOwnRow.p ? ctx->structure->dRelocatedChildOwnRow.as<int>() : nullptr,
-                continuedPins && ctx->hasReactiveLimitSeedTargetQ ? ctx->dReactiveLimitSeedTargetQ.as<double>() : nullptr);
+                useSeedTargetQ && ctx->hasReactiveLimitSeedTargetQ ? ctx->dReactiveLimitSeedTargetQ.as<double>() : nullptr);
     }
 }
 
 // OLF keeps a re-merged control's BUS_TARGET_V on its elected main while ANY merged controller is enabled, and the FIRST
 // enabled one (merged order: the main's own controllers, then each dependent control's) carries no DISTR_Q
 // (AcEquationSystemCreator.updateRemoteVoltageControlEquations). On the device the main's own row holds the voltage
-// target while the main's controller is enabled, and that controller's pin turns the row into its own reactive
+// target while the main's controller is enabled, and that controller's PV -> PQ switch turns the row into its own reactive
 // balance. The target then belongs on the first enabled controller's sharing row, as an identity on that controller's
 // own voltage, which the cluster's couplers tie to the main's (a cross identity when the row is its relocated DUMMY_Q).
-// Nothing used to move it, so a pinned main left the cluster with no voltage equation: on the double-star fixture under
-// nested dissection, g4 unpinned on a zero voltage margin in the pass g3 pinned, and the sections floated to 399.78 kV
-// against OLF's 400.00; under AMD, a main pinning beside a controller with headroom made the solve diverge (status -2,
-// CPU replay). The holder is recomputed from the pin states every pass, so it always is OLF's first enabled controller;
-// with every controller pinned no row holds the target, as OLF deactivates BUS_TARGET_V. While a controller holds it,
-// the main's switch-back reads the voltage that identity holds (reactiveLimitReMergedVoltageRow), as OLF reads the main's
-// own, identity-held voltage: the main's is then only tied to it through the couplers, and a last-bit excess on a zero
-// margin would unpin it. One thread per re-merged control.
+// Nothing used to move it, so a main switched to PQ left the cluster with no voltage equation: on the double-star
+// fixture under nested dissection, g4 switched back to PV on a zero voltage margin in the pass g3 switched to PQ, and the
+// sections floated to 399.78 kV against OLF's 400.00; under AMD, a main switching to PQ beside a controller with headroom
+// made the solve diverge (status -2, CPU replay). The holder is recomputed from the reactive-limit states every pass, so
+// it always is OLF's first enabled controller; with no enabled controller no row holds the target, as OLF deactivates
+// BUS_TARGET_V. While a controller holds it, the main's switch-back reads the voltage that identity holds
+// (reactiveLimitReMergedVoltageRow), as OLF reads the main's own, identity-held voltage: the main's is then only tied to
+// it through the couplers, and a last-bit excess on a zero margin would switch it back to PV. One thread per re-merged
+// control.
 __global__ void updateReMergedVoltageTargetRowBatch(int nReMergedVoltageTargets, int nScenarios, int n, int nReactiveLimitEntries,
                                                     const int* reMergedVoltageTargetSlot, const int* reMergedVoltageTargetMainEntry,
                                                     const double* reMergedVoltageTargetValue, const int* reMergedVoltageTargetControllerStart,
@@ -406,7 +407,7 @@ __global__ void updateReMergedVoltageTargetRowBatch(int nReMergedVoltageTargets,
     if (held >= 0) {                                         // back to its sharing equation (its DISTR_Q target follows)
         int entry = controllers[held];
         size_t r = (size_t) s * n + sharingRow(entry);
-        if (holdsFixedVariable(mode[r])) {                   // ...unless its own pin made the row its balance already
+        if (holdsFixedVariable(mode[r])) {                   // ...unless its own switch to PQ made the row its balance already
             mode[r] = GpuRowMode::EQUATION;
         }
         reactiveLimitHoldsReMergedVoltageTarget[(size_t) s * nReactiveLimitEntries + entry] = 0;

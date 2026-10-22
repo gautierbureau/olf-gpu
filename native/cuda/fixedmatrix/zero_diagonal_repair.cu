@@ -58,7 +58,7 @@ bool repairsZeroDiagonals(const BatchSolverContext* ctx) {
 // spanning tree the borrowing closes only in 2-cycles P <-> ZERO_PHI and Q <-> ZERO_V, whose
 // determinant 1 - s_h*s_d is 2). Candidates are structural — a dummy row's two endpoint rows (and the pilot-Q relocation
 // candidates when an endpoint's Q rides there), an endpoint row's incident couplers' dummy rows —
-// and the choice is numeric, so a coupler switched off or a section pinned to identity this scenario
+// and the choice is numeric, so a coupler switched off or a section turned into an identity this scenario
 // simply is not a donor (an identity row has nothing but its own 1). Every right-hand side handed to
 // those factors goes through the same combination (the unit vectors of the sensitivity solves too).
 // The pattern carries the union of each row with its candidates so the addition lands in place.

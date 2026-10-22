@@ -13,15 +13,15 @@ namespace olfgpu {
 
 // Reactive-limits (PV↔PQ) pass: thread = (controller, scenario), state per (controller, scenario) in
 // limitType (0 PV / 1 minQ / 2 maxQ) + switchCount (PV→PQ transitions, capped to block oscillation).
-//  - PV (mode 0): generator q = (Σ branch q at the BUS_V row, in qBuf) + loadQ. If q < minQ−tol, pin to
-//    minQ; if q > maxQ+tol, pin to maxQ → flip the row PV→PQ (mode 0→1, target = qLimit − loadQ), record
+//  - PV (mode 0): generator q = (Σ branch q at the BUS_V row, in qBuf) + loadQ. If q < minQ−tol, freeze it at
+//    minQ; if q > maxQ+tol, freeze it at maxQ → flip the row PV→PQ (mode 0→1, target = qLimit − loadQ), record
 //    the limit type, increment the switch count.
-//  - PQ (mode 1, pinned): if it has not yet switched MAX_SWITCH times, resume voltage control (PQ→PV) when
-//    the voltage indicates the limit is no longer binding: a maxQ-pinned bus whose v rose ABOVE target, or
-//    a minQ-pinned bus whose v fell BELOW target (mirrors ReactiveLimitsOuterLoop). Restore mode 1→0,
+//  - PQ (mode 1, switched): if it has not yet switched MAX_SWITCH times, resume voltage control (PQ→PV) when
+//    the voltage indicates the limit is no longer binding: a bus at maxQ whose v rose ABOVE target, or
+//    a bus at minQ whose v fell BELOW target (mirrors ReactiveLimitsOuterLoop). Restore mode 1→0,
 //    target → Vtarget. The count cap (matching OLF's maxPqPvSwitch) bounds oscillation. SLOPE-SVC buses
 //    never back-switch (OLF: canSwitchToPv = !hasGeneratorsWithSlope()), and SVC limits are re-evaluated
-//    at the live V (B*v^2 quadratic channel) at every check plus the pinned re-freeze.
+//    at the live V (B*v^2 quadratic channel) at every check plus the PQ bus's re-freeze.
 // Either switch marks the scenario for another inner Newton solve.
 // ReactiveCapabilityCurveImpl.getReactiveLimit, verbatim: exact point hit -> the point's value;
 // inside [minP,maxP] -> floor/ceiling interpolation; outside -> CLAMP to the first/last point, or

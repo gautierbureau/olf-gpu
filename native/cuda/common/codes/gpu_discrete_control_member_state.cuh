@@ -9,7 +9,7 @@
 namespace GpuDiscreteControlMemberState {
 constexpr int DISABLED = 0;    // the member's voltage control is disabled
 constexpr int CONTINUOUS = 1;  // the ratio or susceptance is solved continuously
-constexpr int ROUNDED = 2;     // rounded to a tap or section and pinned there
+constexpr int ROUNDED = 2;     // rounded to a tap or section and held there
 }
 
 #endif

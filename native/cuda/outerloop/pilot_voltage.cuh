@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MPL-2.0
 //
 // The pilot (controlled bus) of a remote voltage control group: the pilot-self gate, the pilot Q target captured
-// from the base, its per-scenario deltas, and the pilot row laid out from the current pin states.
+// from the base, its per-scenario deltas, and the pilot row laid out from the current reactive-limit states.
 #ifndef OLF_GPU_OUTERLOOP_PILOT_VOLTAGE_CUH
 #define OLF_GPU_OUTERLOOP_PILOT_VOLTAGE_CUH
 
@@ -40,7 +40,7 @@ __global__ void updatePilotTargetVEquationBatch(int nReactiveRelocationGroups, i
                                     const char* reactiveLimitIslanded,
                                 const char* distrQSubgroup, const int* reactiveRelocationDistrQMemberStart, double tol,
                                 const char* reactiveLimitGeneratorsLost, const int* reactiveRelocationDependentBaseGroup, const int* relocatedChildOwnRow,
-                                const double* pinTargetIn);
+                                const double* reactiveLimitSeedTargetQ);
 
 __global__ void updateReMergedVoltageTargetRowBatch(int nReMergedVoltageTargets, int nScenarios, int n, int nReactiveLimitEntries,
                                                     const int* reMergedVoltageTargetSlot, const int* reMergedVoltageTargetMainEntry,

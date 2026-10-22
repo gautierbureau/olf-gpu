@@ -46,7 +46,7 @@ __device__ inline bool shuntVoltageControlGroupLive(const ShuntVoltageControlTab
 
 // ON: every captured delta (the pilot's V identity, the member SHUNT_B power rows — pilot Q relocation and
 // DISTR_SHUNT_B — as the toggled equation system produced them); OFF: the pilot back to its saved/OFF
-// target, every member's SHUNT_B identity pinned at its dispatched section total.
+// target, every member's SHUNT_B identity held at its dispatched section total.
 __device__ inline void shuntVoltageControlLayoutGroup(const ShuntVoltageControlTables& T, int s, int n, int g, bool on,
                                       int* mode, double* target, double* x) {
     size_t sn = (size_t) s * n;

@@ -77,22 +77,22 @@ __global__ void fillDistrQBatch(int nDistrQ, int nScenarios, int n, int nnz, int
     int s = tid / nDistrQ;
     if (!active[s]) return;
     // STOCK PLACEMENT: a relocated child's sharing row moves to the bus's OWN row in any scenario that
-    // kills its parent coupler, which pins that coupler's DUMMY_Q row to an identity (see buildDistrQDest).
+    // kills its parent coupler, which turns that coupler's DUMMY_Q row into an identity (see buildDistrQDest).
     if (distrQSelectorRow != nullptr && distrQSelectorRow[c] >= 0 && distrQAlternateDestination != nullptr
             && mode[(size_t) s * n + distrQSelectorRow[c]] == GpuRowMode::FIXED_VARIABLE && distrQAlternateDestination[c * 6] <= -2) {
         distrQDestination = distrQAlternateDestination;
     }
-    // an RL-PINNED remote member's row (mode 4) hosts its OWN Q balance — its DISTR_Q emissions
+    // the row of a remote member the RL check SWITCHED TO PQ (mode 4) hosts its OWN Q balance — its DISTR_Q emissions
     // stop for this scenario (the CPU deactivates only that member's DISTR_Q equation)
     {
         int d0 = distrQDestination[c * 6];
         if (d0 <= -2 && mode[(size_t) s * n + (-2 - d0)] == GpuRowMode::BUS_TARGET_Q) return;
         // plan-B4: the CURRENT pilot-Q carrier's row (a re-picked free role after the base free
-        // member pinned) hosts the group's relocated pilot balance — its DISTR_Q row is inactive
+        // member switched to PQ) hosts the group's relocated pilot balance — its DISTR_Q row is inactive
         // this scenario, exactly like OLF deactivating the new free member's DISTR_Q equation.
         if (memberRelocationGroup != nullptr && distrQInjectionMember[c] >= 0) {
             int g = memberRelocationGroup[distrQInjectionMember[c]];
-            // A PILOT-SELF group carries no relocated balance while its pilot is unpinned (its q feeds these
+            // A PILOT-SELF group carries no relocated balance while its pilot is still PV (its q feeds these
             // very DISTR_Q rows, weighted), so the carrier's row is NOT hosting anything and its DISTR_Q must
             // stay ACTIVE. Suppressing it there dropped an equation without gaining one: one short, singular.
             bool skipPilotSelfCarrier = pilotSelfCarrierSkip != nullptr && g >= 0 && pilotSelfCarrierSkip[(size_t) s * pilotSelfCarrierSkipStride + g];
@@ -108,7 +108,7 @@ __global__ void fillDistrQBatch(int nDistrQ, int nScenarios, int n, int nnz, int
     if (kind == GpuReactiveTermKind::CLOSED_BRANCH_REACTIVE_FLOW && disabled[s * nElements + closedBranchOffset + e]) return;  // outaged closed contributor
     if (kind == GpuReactiveTermKind::OPEN_BRANCH_REACTIVE_FLOW && disabled[s * nElements + openBranchOffset + e]) return;  // outaged open contributor
     // kind 3 is a COUPLER's DUMMY_Q as part of this controller's reactive injection, and its element index
-    // IS that dummy column (= its row). A scenario that kills the coupler pins that row to an identity, and
+    // IS that dummy column (= its row). A scenario that kills the coupler turns that row into an identity, and
     // the coupler then carries no reactive flow at all — the contribution has to go with it. Measured on the
     // middle-section-loss fixtures: the surviving section's DISTR_Q row kept a coefficient 1 on the dead
     // coupler's DUMMY_Q and the solve landed 0.34 kV off (bus vl3_b 401.35 against OLF's 401.69).
@@ -116,7 +116,7 @@ __global__ void fillDistrQBatch(int nDistrQ, int nScenarios, int n, int nnz, int
     double w = distrQWeight[c];
     int kM = distrQRowMember != nullptr ? distrQRowMember[c] : -1;
     if (kM >= 0) {
-        // DYNAMIC reactive keys (plan-B3): an RL pin disables the member's controller, which zeroes
+        // DYNAMIC reactive keys (plan-B3): an RL switch to PQ disables the member's controller, which zeroes
         // its key and renormalizes qPct over the survivors (updateReactiveKeys). Replicate OLF's
         // zero-then-sum arithmetic in member order, driven by the per-(entry, scenario) limitType.
         int gs = mGroupStart[kM];
@@ -129,18 +129,18 @@ __global__ void fillDistrQBatch(int nDistrQ, int nScenarios, int n, int nnz, int
         double sum = 0.0;
         for (int m = gs; m < gs + gc; m++) {
             int re = distrQMemberReactiveLimitEntry[m];
-            bool pinned = re >= 0 && limitType[(size_t) s * nReactiveLimitEntries + re] != GpuQLimitType::NONE;
+            bool switchedToPq = re >= 0 && limitType[(size_t) s * nReactiveLimitEntries + re] != GpuQLimitType::NONE;
             bool otherSub = subS != nullptr && subS[m] != subK;
-            sum += (pinned || otherSub || distrQMemberInactive(nDistrQInactiveMembers, distrQInactiveScenarioMember, s, m))
+            sum += (switchedToPq || otherSub || distrQMemberInactive(nDistrQInactiveMembers, distrQInactiveScenarioMember, s, m))
                     ? 0.0 : distrQKeyOf(nDistrQKeyOverrides, distrQKeyOverrideScenarioMember, distrQKeyOverrideKey, s, m, mKey);
         }
-        // the PINNED member's q terms STAY in every survivor's row (weight = the renormalized
-        // qPct of the ROW OWNER); the pin is balanced on the TARGET side instead — OLF's
+        // the q terms of a member SWITCHED TO PQ STAY in every survivor's row (weight = the renormalized
+        // qPct of the ROW OWNER); its frozen target Q is balanced on the TARGET side instead — OLF's
         // getGeneratorReactivePowerDistributionTarget adds qPct_k * targetQ_j for each frozen j
-        // (updateDistrQTargetsBatch keeps the per-scenario targets in step with the pin states)
+        // (updateDistrQTargetsBatch keeps the per-scenario targets in step with the reactive-limit states)
         int reK = distrQMemberReactiveLimitEntry[kM];
-        bool kPinned = reK >= 0 && limitType[(size_t) s * nReactiveLimitEntries + reK] != GpuQLimitType::NONE;
-        double qpk = (sum == 0.0 || kPinned || distrQMemberInactive(nDistrQInactiveMembers, distrQInactiveScenarioMember, s, kM))
+        bool kSwitchedToPq = reK >= 0 && limitType[(size_t) s * nReactiveLimitEntries + reK] != GpuQLimitType::NONE;
+        double qpk = (sum == 0.0 || kSwitchedToPq || distrQMemberInactive(nDistrQInactiveMembers, distrQInactiveScenarioMember, s, kM))
                 ? 0.0 : distrQKeyOf(nDistrQKeyOverrides, distrQKeyOverrideScenarioMember, distrQKeyOverrideKey, s, kM, mKey) / sum;
         w = qpk - (distrQInjectionMember[c] == kM ? 1.0 : 0.0);
         if (kind == GpuReactiveTermKind::DUMMY_Q && distrQSide[c] == GpuTwoSides::TWO) {
@@ -210,7 +210,7 @@ __global__ void fillDistrQBatch(int nDistrQ, int nScenarios, int n, int nnz, int
     // admittance through it, NOT by the disabled mask. Reading the base pi instead kept three
     // transformers into an outaged busbar live against a far bus frozen at v=1.0 and injected
     // +0.813908 of phantom reactive into one DISTR_Q row (rte6515 BUS-1265_BBS, measured residual
-    // -0.814738) - which moved the sharing solution 2.1 kV and then tripped a spurious RL pin.
+    // -0.814738) - which moved the sharing solution 2.1 kV and then tripped a spurious RL switch to PQ.
     const double* p0 = closedBranchParameters + e * 8;
     double p[8];
     for (int i = 0; i < 8; i++) {

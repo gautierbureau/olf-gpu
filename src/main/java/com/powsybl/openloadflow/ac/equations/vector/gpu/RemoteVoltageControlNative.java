@@ -33,7 +33,7 @@ public final class RemoteVoltageControlNative {
 
     /** Per-scenario member reactive keys: {@code idx} = flat {scenario, member} pairs, {@code key} = OLF's
      *  qPct after the scenario's generator losses (updateReactiveKeys); the DISTR_Q fill and the target kernel
-     *  renormalize them over the members a pin leaves enabled. Per-chunk state; nulls clear it. */
+     *  renormalize them over the members still enabled after the switches to PQ. Per-chunk state; nulls clear it. */
     public static native void setBatchDistrQKeyOverrides(long handle, int[] idx, double[] key);
 
     /** Per-scenario member targetQ overrides for the DISTR_Q target kernel, as {@code key = slot *
@@ -59,16 +59,16 @@ public final class RemoteVoltageControlNative {
 
     /** Pilot-row flip entries: one per (scenario, pilot) where the outage made the pilot stop being one
      *  of its OWN controllers. While the survivors hold its voltage the pilot keeps BUS_TARGET_V and its
-     *  acquired reactive balance rides one of THEIR rows; when every survivor pins, those rows take their
-     *  own pinned balances and the pilot's is evicted. The kernel then puts it on the pilot's freed row,
+     *  acquired reactive balance rides one of THEIR rows; when every survivor switches to PQ, those rows take their
+     *  own reactive balances and the pilot's is evicted. The kernel then puts it on the pilot's freed row,
      *  as OLF does. {@code survivorReactiveLimitEntryCounts} sizes each entry's slice of {@code survivorReactiveLimitEntries} (the surviving
      *  controllers' reactive-limit entries). Nulls clear. */
-    public static native void setBatchPilotAllPinnedFlip(long handle, int[] slots, int[] rows,
+    public static native void setBatchPilotNoEnabledControllerFlip(long handle, int[] slots, int[] rows,
                                                          double[] qTargets, int[] survivorReactiveLimitEntryCounts, int[] survivorReactiveLimitEntries);
 
     /** Re-merged voltage controls whose elected main is one of their controllers: per control its slot, the main's
      *  reactive-limit entry and the control's voltage target. OLF keeps that target on the main while any merged
-     *  controller is enabled; when the main's own controller pins, the device moves it to the first enabled one of
+     *  controller is enabled; when the main's own controller switches to PQ, the device moves it to the first enabled one of
      *  the cluster's other controllers, whose entries {@code controllerEntries} concatenates in OLF's merged order
      *  ({@code controllerCounts} sizes each control's slice). Nulls clear. */
     public static native void setBatchReMergedVoltageTargets(long handle, int[] slots, int[] mainEntries,

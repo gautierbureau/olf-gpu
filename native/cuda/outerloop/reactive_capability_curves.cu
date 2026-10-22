@@ -101,7 +101,7 @@ __global__ void reactiveCapabilityCurveLimitsBatch(int nReactiveLimitEntries, in
         // PHI row by distributedSlackBusRowOverride when the coupler dies. The static pRow is the bus's own PHI row, which for a
         // relocated child hosts ZERO_PHI (target 0, never moved): read there, the share reconstruction
         // put the child's generator at its BASE P while its pilot sibling sat at the pre-distributed
-        // one. Measured on rte6515 BUS-4467_BBS: VL-6231_1 pinned at 0.576013 where OLF (and the pilot
+        // one. Measured on rte6515 BUS-4467_BBS: VL-6231_1 switched to PQ at 0.576013 where OLF (and the pilot
         // VL-6231_0) had 0.566571 - the same unit halves at the same P - and the 9.4e-3 pu of reactive
         // power that put on the coupler moved the slack mismatch by 9.6e-6 pu, the whole 9.56e-4 MW
         // distributed-power gap.
@@ -150,7 +150,7 @@ __global__ void reactiveCapabilityCurveLimitsBatch(int nReactiveLimitEntries, in
         if (qOvSlotEntry[2 * k + 1] == i) {
             mn += qOvMinMax[5 * k];
             mx += qOvMinMax[5 * k + 1];
-            lq += qOvMinMax[5 * k + 2];                      // a SHED load's reactive power: the pinned
+            lq += qOvMinMax[5 * k + 2];                      // a SHED load's reactive power: the frozen
         }                                                    // target and the controller's own q both
     }                                                        // measure against the bus's load target Q
     minQDyn[(size_t) s * nReactiveLimitEntries + i] = mn;

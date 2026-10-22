@@ -37,7 +37,7 @@
 namespace olfgpu {
 
 // The per-solve seed of a fresh (non-resumed) full load flow: the generators' slack moves cleared, the pilot Q targets
-// captured, every reactive-limit pin seeded (from the base or a previous solve) and stamped on the rows, and every
+// captured, every reactive-limit PV -> PQ switch seeded (from the base or a previous solve) and stamped on the rows, and every
 // in-kernel loop reset to its entry state.
 void seedSolve(BatchSolverContext* ctx, DriverPass& drv, const int* reactiveLimitsSeedState, const double* slackBusAnchorShift) {
     const int& n = drv.n;
@@ -85,9 +85,9 @@ void seedSolve(BatchSolverContext* ctx, DriverPass& drv, const int* reactiveLimi
         }
         if (!ctx->dReactiveRelocationPilotReactiveLimitEntry.p) {
             // Per group, the pilot's own LOCAL reactive-limit entry: a pilot whose group lost control
-            // in the BASE (every member pinned there) enters the pack as a local entry with an empty
+            // in the BASE (every member switched to PQ there) enters the pack as a local entry with an empty
             // reactive range, and that entry carries the group's V target — the value the pilot row
-            // takes back when a member unpins (updatePilotTargetVEquationBatch). Built once per context.
+            // takes back when a member switches back to PV (updatePilotTargetVEquationBatch). Built once per context.
             int nReactiveRelocationGroups = ctx->structure->nReactiveRelocationGroups;
             std::vector<int> ptr(nReactiveRelocationGroups + 1);
             CUDA_CHECK(cudaMemcpy(ptr.data(), ctx->structure->dReactiveRelocationGroupStart.p, ptr.size() * sizeof(int), cudaMemcpyDeviceToHost));
@@ -131,12 +131,12 @@ void seedSolve(BatchSolverContext* ctx, DriverPass& drv, const int* reactiveLimi
             }
         }
     }
-    // Pins exist only for a run with OLF's ReactiveLimitsOuterLoop: without it every entry stays NONE (all PV), as OLF,
+    // PV -> PQ switches exist only for a run with OLF's ReactiveLimitsOuterLoop: without it every entry stays NONE (all PV), as OLF,
     // whatever the packed entries or a caller's seed state hold.
     if (reactiveLimitsSeedState != nullptr && ctx->reactiveLimitsOuterLoop && ctx->nReactiveLimitEntries > 0) {
-        // WARM CONTINUATION: seed each (controller, scenario)'s pinned limit type AND switch
+        // WARM CONTINUATION: seed each (controller, scenario)'s limit type (switched to PQ or not) AND switch
         // count from the state the caller passes. A re-solve inside one load flow passes both; a
-        // strategy pair passes its parent's pins with zero counts, since OLF's reactive-limit
+        // strategy pair passes its parent's PV -> PQ switches with zero counts, since OLF's reactive-limit
         // loop counts afresh in every load flow.
         std::vector<char> qLimitType(static_cast<size_t>(ctx->nReactiveLimitEntries) * nS), sc(static_cast<size_t>(ctx->nReactiveLimitEntries) * nS);
         for (size_t k = 0; k < qLimitType.size(); k++) {
@@ -145,7 +145,7 @@ void seedSolve(BatchSolverContext* ctx, DriverPass& drv, const int* reactiveLimi
         }
         CUDA_CHECK(cudaMemcpyAsync(ctx->dReactiveLimitQLimitType.p, qLimitType.data(), qLimitType.size(), cudaMemcpyHostToDevice, ctx->stream));
         CUDA_CHECK(cudaMemcpy(ctx->dReactiveLimitPvPqSwitchCount.p, sc.data(), sc.size(), cudaMemcpyHostToDevice));
-        // The limits the continued pins are STAMPED at: OLF restores each pinned bus's generation target Q from
+        // The limits the continued PV -> PQ switches are STAMPED at: OLF restores the generation target Q of each bus switched to PQ from
         // the parent's end, and a GeneratorAction only invalidates the bus's target P, so the first solve keeps
         // the limit at the parent's P (distributedSlackGeneratorSeedAnchor) and the reactive-limit check refreshes it afterwards.
         if (usePerScenarioReactiveLimits) {                            // curve limits at the CURRENT (seeded) targets,
@@ -189,10 +189,10 @@ void seedSolve(BatchSolverContext* ctx, DriverPass& drv, const int* reactiveLimi
                 ctx->nReactiveLimitIslanded > 0 ? ctx->dReactiveLimitIslanded.as<char>() : nullptr);
     } else {
         CUDA_CHECK(cudaMemsetAsync(ctx->dReactiveLimitPvPqSwitchCount.p, 0, static_cast<size_t>(ctx->nReactiveLimitEntries) * nS * sizeof(char), ctx->stream));
-        if (!ctx->reactiveLimitsOuterLoop && ctx->nReactiveLimitEntries > 0) {   // no ReactiveLimits loop: no pin, a base-PQ
+        if (!ctx->reactiveLimitsOuterLoop && ctx->nReactiveLimitEntries > 0) {   // no ReactiveLimits loop: no PV -> PQ switch, a base-PQ
             CUDA_CHECK(cudaMemsetAsync(ctx->dReactiveLimitQLimitType.p, GpuQLimitType::NONE,   // controller included
                     static_cast<size_t>(ctx->nReactiveLimitEntries) * nS * sizeof(char), ctx->stream));
-        } else if (ctx->nReactiveLimitEntries > 0) {                       // seed the pinned limit for base-PQ controllers (else all PV)
+        } else if (ctx->nReactiveLimitEntries > 0) {                       // seed the limit type of base-PQ controllers (else all PV)
             initReactiveLimitQLimitTypeBatch<<<grid(ctx->nReactiveLimitEntries * nS), BLOCK, 0, ctx->stream>>>(ctx->nReactiveLimitEntries, nS, n, ctx->dReactiveLimitVoltageRow.as<int>(),
                     ctx->dReactiveLimitReactivePowerRow.p ? ctx->dReactiveLimitReactivePowerRow.as<int>() : nullptr,
                     ctx->dReactiveLimitTargetV.as<double>(), ctx->dReactiveLimitFlags.as<char>(), dBaseMode.as<int>(), ctx->dX.as<double>(),
@@ -209,7 +209,7 @@ void seedSolve(BatchSolverContext* ctx, DriverPass& drv, const int* reactiveLimi
                     ctx->nReactiveLimitGeneratorsLost > 0 ? ctx->dReactiveLimitGeneratorsLost.as<char>() : nullptr);
         }
     }
-    // The seeded pin states must reach the ROWS before the first fill: a pinned enrolled pilot's balance
+    // The seeded PV/PQ states must reach the ROWS before the first fill: the balance of an enrolled pilot switched to PQ
     // goes on the carrier's target (its DISTR_Q target otherwise), and a group that lost control in the
     // base has its pilot row flipped already. Both kernels are idempotent; the RL pass runs them again.
     // Every scenario takes the seed stamps: updateDistrQTargetsBatch returns on !outerLoopCheckActive[s], and outerLoopCheckActive is
@@ -227,7 +227,7 @@ void seedSolve(BatchSolverContext* ctx, DriverPass& drv, const int* reactiveLimi
     }
     // The dynamic reactive limits BEFORE the seed stamps, on the cold path too. They were first computed in the
     // reactive-limit pass, after the first solve, so the stamps read the arrays unfilled: a gen-lost pilot's
-    // carrier target came out 0 - 0 instead of 0 - loadQ, and a survivor's sharing target summed a pinned
+    // carrier target came out 0 - 0 instead of 0 - loadQ, and a survivor's sharing target summed a switched-to-PQ
     // peer's (limit - loadQ) as 0 - 0 - measured on devicePilotControllerLosingItsOwnGeneratorMatchesCpu
     // as rows 2 and 4 both at target 0 during the solve (OLF: -0.6 and -0.3). The warm path already ran
     // this before seeding; here it runs after initReactiveLimitQLimitTypeBatch has set the scenario's limit types.
@@ -252,7 +252,7 @@ void seedSolve(BatchSolverContext* ctx, DriverPass& drv, const int* reactiveLimi
                 ctx->dReactiveLimitLoadQPerScenario.as<double>());
         launchForcedTargetQLimits(ctx, nS, n);
     }
-    launchReMergedVoltageTargetRowUpdate(ctx, drv, true);                       // a main seeded pinned (a continued solve)
+    launchReMergedVoltageTargetRowUpdate(ctx, drv, true);                       // a main seeded switched to PQ (a continued solve)
     launchPilotTargetVEquationUpdate(ctx, drv, true, true);                     // seed: base limits, or the previous solve's flip
     launchDistrQTargetsInner(ctx, drv);
     if (ctx->distributedSlackOuterLoop && ctx->nDistributedSlackBuses > 0) {   // the run's loop, not the packed table

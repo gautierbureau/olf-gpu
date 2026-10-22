@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MPL-2.0
 //
 // The per-solve seed of a fresh (non-resumed) full load flow: the generators' slack moves cleared, the pilot Q
-// targets captured, every reactive-limit pin seeded (from the base or a previous solve) and stamped on the rows,
+// targets captured, every reactive-limit state (PV or PQ) seeded (from the base or a previous solve) and stamped on the rows,
 // and every in-kernel outer loop reset to its entry state.
 #ifndef OLF_GPU_SOLVER_SOLVE_SEED_CUH
 #define OLF_GPU_SOLVER_SOLVE_SEED_CUH
@@ -11,7 +11,7 @@
 
 namespace olfgpu {
 
-// Seed one fresh full load flow; reactiveLimitsSeedState = a previous solve's pins (or null), slackBusAnchorShift = a strategy
+// Seed one fresh full load flow; reactiveLimitsSeedState = a previous solve's reactive-limit states (or null), slackBusAnchorShift = a strategy
 // pair's parent slack total (or null).
 void seedSolve(BatchSolverContext* ctx, DriverPass& drv, const int* reactiveLimitsSeedState, const double* slackBusAnchorShift);
 

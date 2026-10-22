@@ -39,12 +39,12 @@ __device__ inline void writeCrossIdentityRow(int r, int s, int n, const int* row
     F[(size_t) s * n + r] = (col >= 0 ? x[(size_t) s * n + col] : 0.0) - target[(size_t) s * n + r];
 }
 
-// The row a re-merged LOCAL control's reactive-limit pin and switch-back write: its relocated reactive row (the
-// parent coupler's DUMMY_Q, mode[relocatedIdx]) when that row holds the cross identity, or the pinned balance while
+// The row a re-merged LOCAL control's PV -> PQ switch and switch-back write: its relocated reactive row (the
+// parent coupler's DUMMY_Q, mode[relocatedIdx]) when that row holds the cross identity, or its own reactive balance while
 // its own V row (mode[ownIdx]) does not: relocatedRow then, else ownRow. Row is the caller's row type (a row number or
 // an index into the all-scenario arrays).
 template <typename Row>
-__device__ inline Row crossIdentityPinRow(const int* mode, size_t relocatedIdx, size_t ownIdx, Row relocatedRow, Row ownRow) {
+__device__ inline Row crossIdentityTargetQRow(const int* mode, size_t relocatedIdx, size_t ownIdx, Row relocatedRow, Row ownRow) {
     if (mode[relocatedIdx] == GpuRowMode::CROSS_FIXED_VARIABLE || (mode[relocatedIdx] == GpuRowMode::BUS_TARGET_Q && mode[ownIdx] != GpuRowMode::BUS_TARGET_Q)) {
         return relocatedRow;
     }

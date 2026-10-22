@@ -103,7 +103,7 @@ struct BatchSolverContext {
     int nReactiveLimitEntries = 0;
     DeviceBuf dReactiveLimitVoltageRow, dReactiveLimitMinQ, dReactiveLimitMaxQ, dReactiveLimitLoadQ, dReactiveLimitTargetV;   // per controller (nReactiveLimitEntries)
     DeviceBuf dReactiveLimitReactivePowerRow;                                       // per controller: the row its reactive BALANCE and its
-                                                             // pin live on — its own V row, or, when the coupler-tree
+                                                             // PQ form live on — its own V row, or, when the coupler-tree
                                                              // relocation moved its power equations onto the parent
                                                              // coupler's dummy columns, that coupler's DUMMY_Q row
     // PILOT-SELF rotation: per qr group, the RL entry of a pilot that is one of its OWN controllers (-1 when
@@ -144,9 +144,9 @@ struct BatchSolverContext {
     int nDistrQWeightOverrides = 0;
     DeviceBuf dDistrQWeightOverrideScenarioTerm, dDistrQWeightOverrideWeight;
     // Per-scenario member reactive KEYS (setBatchDistrQKeyOverrides, {slot, member} -> OLF's qPct after the scenario's
-    // generator losses): the DISTR_Q fill and the target kernel renormalize these over the members a pin leaves
-    // enabled, so an outage and an in-flight pin in one group compose. The per-contribution weight overrides stay
-    // for what keys cannot express (a re-extracted pack whose free role moved).
+    // generator losses): the DISTR_Q fill and the target kernel renormalize these over the members a PV -> PQ switch
+    // leaves enabled, so an outage and an in-flight switch to PQ in one group compose. The per-contribution weight
+    // overrides stay for what keys cannot express (a re-extracted pack whose free role moved).
     int nDistrQKeyOverrides = 0;
     DeviceBuf dDistrQKeyOverrideScenarioMember, dDistrQKeyOverrideKey;
     // DISTR_RHO coefficient overrides (setBatchDistrRhoCoefficientOverrides): a member outage renormalizes the
@@ -159,7 +159,7 @@ struct BatchSolverContext {
     // threshold skew that lands stops up to the criterion apart. Empty = use n for every scenario.
     std::vector<int> hNActive;
     DeviceBuf dReactiveLimitFlags;                                // per controller: 1 = MONITORING_VOLTAGE SVC standing by
-    int allPvPinnable = 0;                                 // every non-monitored RL entry has finite limits — the
+    int everyPvBusCanSwitchToPq = 0;                                 // every non-monitored RL entry has finite limits — the
                                                            // ONLY networks where OLF's global "strongest stays PV"
                                                            // rule (remainingPvBusCount 0) is reachable
     DeviceBuf dRowSlope;                                   // per row: SLOPE-SVC slope (mode-2 V rows), 0 elsewhere
@@ -167,14 +167,14 @@ struct BatchSolverContext {
     int nReactiveLimitPilotSelfEntries = 0;                                  // reactiveLimitVoltageControlRole == 2 entries (a pilot that is its own controller)
     DeviceBuf dPilotSelfMixedPvPqRejected;                                 // nS chars: pilotSelfMixedPvPqGate flags
     DeviceBuf dReactiveLimitVoltageControlRole;                                   // per-entry remote kind (1 = remote group member)
-    DeviceBuf dReactiveLimitBaseQLimitType;                            // OLF's base pin kind per entry (0..4); see hasReactiveLimitBaseQLimitType
+    DeviceBuf dReactiveLimitBaseQLimitType;                            // OLF's base QLimitType per entry (0..4); see hasReactiveLimitBaseQLimitType
     int hasReactiveLimitBaseQLimitType = 0;
     DeviceBuf dReactiveLimitComparedVoltageRow;                                  // per-entry compare row (PILOT v col for remote members)
     DeviceBuf dReactiveLimitSvcMinBPerScenario, dReactiveLimitSvcMaxBPerScenario;                // per (scenario, entry) coefs when a lost SVC takes its share
     DeviceBuf dReactiveLimitSvcMinB, dReactiveLimitSvcMaxB, dReactiveLimitBaseVSquared;           // per-entry SVC quadratic limit coefs + packed base v^2
                                                            // (limit(v) = static + b*(v^2 - v2Base)); zeroed default
-    int nDistrQDynamicKeys = 0;                                        // dynamic reactive keys (plan-B3): an RL pin zeroes the
-    DeviceBuf dDistrQRowMember;                                  // pinned member's key and renormalizes the DISTR_Q
+    int nDistrQDynamicKeys = 0;                                        // dynamic reactive keys (plan-B3): an RL switch to PQ zeroes the
+    DeviceBuf dDistrQRowMember;                                  // switched member's key and renormalizes the DISTR_Q
     DeviceBuf dDistrQInjectionMember;                                  // weights over the survivors (updateReactiveKeys) — the
     DeviceBuf dDistrQMemberKey;                                // kernel recomputes each contribution's weight from the
     DeviceBuf dDistrQMemberReactiveLimitEntry;                            // RAW keys + the per-(entry, scenario) limitType,
@@ -182,7 +182,7 @@ struct BatchSolverContext {
     DeviceBuf dDistrQMemberGroupCount;
     DeviceBuf dDistrQMemberRow;                                // per member: its own row (vCol) + whether it OWNS a
     DeviceBuf dDistrQMemberHasRow;                             // packed DISTR_Q row (non-free with existing equation)
-    DeviceBuf dDistrQMemberTargetQ;                            // per member: its UNPINNED targetQ (generationTargetQ -
+    DeviceBuf dDistrQMemberTargetQ;                            // per member: its UNFROZEN targetQ (generationTargetQ -
                                                            // loadTargetQ), the value AcTargetVector reads for every
                                                            // member the RL loop has not frozen
     DeviceBuf dLinRp, dLinRm, dLinSc;                      // linear-solve guard scratch, reused across passes
@@ -196,7 +196,7 @@ struct BatchSolverContext {
                                                            // at solve init from the BASE carrier's row and handed to
                                                            // the CURRENT carrier's row on every re-pick
     DeviceBuf dReactiveRelocationIsGeneratorVoltageControl;                                    // per qr group: 1 = remote gen-VC group (vs TVC — only
-                                                           // those get the all-pinned pilot-vEq flip)
+                                                           // those get the no-enabled-controller pilot-vEq flip)
     DeviceBuf dReactiveRelocationPilotTargetVDeactivated;                                   // per (scenario, qr group): 1 = the pilot's V equation was
     DeviceBuf dReactiveRelocationSavedPilotTargetV;                                  // flipped OFF by updatePilotTargetVEquationBatch (+ the saved V target)
     DeviceBuf dReactiveRelocationPilotReactiveLimitEntry;                             // per qr group: the pilot's own LOCAL reactive-limit entry
@@ -208,11 +208,11 @@ struct BatchSolverContext {
     DeviceBuf dRemoteMemberReactiveTermKind;
     DeviceBuf dRemoteMemberReactiveTermWeight;
     DeviceBuf dReactiveLimitSavedTarget;                              // per (controller, scenario): the row target saved at a
-                                                           // PV->PQ pin, restored on switch-back for mode-2 rows
+                                                           // PV->PQ switch, restored on switch-back for mode-2 rows
     DeviceBuf dQbuf, dOuterLoopCheckActive, dOuterLoopUnstable;               // dQbuf nS*n, dOuterLoopCheckActive/dOuterLoopUnstable nS
     DeviceBuf dReactiveLimitQLimitType, dReactiveLimitPvPqSwitchCount;               // per (controller, scenario): 0 PV / 1 minQ / 2 maxQ; PV→PQ count
     // OLF's GLOBAL forced-PV election ("all PV buses should switch — the strongest stays PV"): what each
-    // entry did THIS pass (1 = pinned PV→PQ, 2 = switched back, 3 = limit re-freeze), the row mode a pin
+    // entry did THIS pass (1 = switched PV→PQ, 2 = switched back, 3 = limit re-freeze), the row mode a PV→PQ switch
     // replaced (to undo the elected one), and the static election keys (controlled bus nominal V, the
     // bus's P row for its LIVE target P, the static target P when it has no row, the id rank).
     DeviceBuf dReactiveLimitCheckDecision, dReactiveLimitSavedRowMode;
@@ -324,10 +324,10 @@ struct BatchSolverContext {
     // branch's flow; kind = the GpuControlledFlow: REACTIVE_POWER (rho, closest-r1), ACTIVE_POWER (phase
     // CONTROLLER, closest-a1), CURRENT (phase LIMITER, first-above-a1, one-sided).
     int nIncrementalFlowControlControllerBranches = 0, nIncrementalPhaseControlControllerBranches = 0, nIncrementalTransformerReactivePowerControlControllerBranches = 0;
-    DeviceBuf dIncrementalFlowControlControlledFlow, dIncrementalFlowControlPinRow, dIncrementalFlowControlTapColumn, dIncrementalFlowControlControlledSide, dIncrementalFlowControlTargetValue, dIncrementalFlowControlHalfTargetDeadband, dIncrementalFlowControlElement, dIncrementalFlowControlControlledClosedBranch,
+    DeviceBuf dIncrementalFlowControlControlledFlow, dIncrementalFlowControlTargetRow, dIncrementalFlowControlTapColumn, dIncrementalFlowControlControlledSide, dIncrementalFlowControlTargetValue, dIncrementalFlowControlHalfTargetDeadband, dIncrementalFlowControlElement, dIncrementalFlowControlControlledClosedBranch,
               dIncrementalFlowControlTapStart, dIncrementalFlowControlTapRows, dIncrementalFlowControlBaseTap, dIncrementalFlowControlMaxTapShift;
     DeviceBuf dIncrementalFlowControlCurrentTap, dIncrementalFlowControlAppliedTap, dIncrementalFlowControlCurrentDirection, dIncrementalFlowControlDirectionChangeCount, dIncrementalFlowControlAllowedDirection, dIncrementalFlowControlSensitivity, dIncrementalFlowControlDiff, dIncrementalFlowControlOutOfDeadband;
-    std::vector<int> hIncrementalFlowControlControlledFlow, hIncrementalFlowControlPinRow, hIncrementalFlowControlElement, hIncrementalFlowControlTapStart, hIncrementalFlowControlBaseTap;
+    std::vector<int> hIncrementalFlowControlControlledFlow, hIncrementalFlowControlTargetRow, hIncrementalFlowControlElement, hIncrementalFlowControlTapStart, hIncrementalFlowControlBaseTap;
     std::vector<double> hIncrementalFlowControlTapRows;
     // CONTINUOUS phase control (OLF PhaseControlOuterLoop, CONTINUOUS_WITH_DISCRETISATION), sharing the
     // phase slot: kind = the GpuPhaseControlMode: CONTROLLER (a1 solved free under row mode 3 for the first
@@ -393,7 +393,7 @@ struct BatchSolverContext {
     int nFrozenRow = 0;                                    // outage froze to a flat identity state
     DeviceBuf dDistributedSlackLostGenerators;                                  // (scenario, DS generator slot) pairs: the
     int nDistributedSlackLostGenerators = 0;                                    // generators an outage removes, by identity
-    DeviceBuf dReactiveLimitSeedTargetQ;                                 // per (scenario, entry): the pinned target a continued
+    DeviceBuf dReactiveLimitSeedTargetQ;                                 // per (scenario, entry): the frozen target Q a continued
     bool hasReactiveLimitSeedTargetQ = false;                            // solve restores (setBatchReactiveLimitSeedTargetQ), NaN = the limit
     DeviceBuf dDistributedSlackRemovedGenerators;                                   // (scenario, DS generator slot) pairs: participants
     int nDistributedSlackRemovedGenerators = 0;                                     // a GeneratorAction took out of the distribution
@@ -433,7 +433,7 @@ struct BatchSolverContext {
     int nReactiveRelocationPilotTargetQDeltas = 0;                                    // per-scenario moves of a pilot's captured Q target
     DeviceBuf dReactiveRelocationPilotTargetQDeltaKey;                               // slot * nReactiveRelocationGroups + group
     DeviceBuf dReactiveRelocationPilotTargetQDeltaValue;
-    int nPilotFlip = 0;                                    // pilot-row flip entries (all-survivors-pinned)
+    int nPilotFlip = 0;                                    // pilot-row flip entries (no enabled controller left)
     DeviceBuf dPfSlot;
     DeviceBuf dPfRow;
     DeviceBuf dPfQTarget;
@@ -455,7 +455,7 @@ struct BatchSolverContext {
     // HVDC AC-emulation outer loops (FreezingHvdcACEmulation + AcHvdcAcEmulationLimits) as DRIVER
     // PHASES rather than host orchestrators. OLF runs both BETWEEN DistributedSlack and
     // ReactiveLimits; run from the host after the whole solve they land after RL instead, which is
-    // what put the device's last DS check on a pre-pin state.
+    // what put the device's last DS check on a state before the PV -> PQ switches.
     int nHvdcAcEmulation = 0;                                             // AC-emulation HVDCs in the loop tables
     int hvdcAcEmulationLimitsActive = 0;                                  // AcHvdcAcEmulationLimits configured
     DeviceBuf dHvdcElement, dHvdcBus1PRow, dHvdcBus2PRow;               // per hvdc: the rows the P TARGETS are written to
@@ -478,7 +478,7 @@ struct BatchSolverContext {
     DeviceBuf dDistributedSlackGeneratorInitialMove;                                      // nS * nDistributedSlackGenerators doubles — each participating generator's move
     bool hasDistributedSlackGeneratorInitialMove = false;                                 // from its anchor at the solve's start (setBatchDistributedSlackGeneratorAnchors)
     DeviceBuf dDistributedSlackGeneratorSeedAnchor;                                 // nS * nDistributedSlackGenerators doubles — strategy pairs: the parent's own end,
-    bool hasDistributedSlackGeneratorSeedAnchor = false;                            // without the actions (the continued pins' stamps)
+    bool hasDistributedSlackGeneratorSeedAnchor = false;                            // without the actions (the stamps of the continued PQ switches)
                                                              // (OLF distributes into the slack gen and re-solves; no flow change,
                                                              // but the extra polish run must happen to match the CPU trajectory)
     CudssCtx solver;

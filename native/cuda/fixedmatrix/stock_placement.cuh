@@ -15,9 +15,9 @@ namespace olfgpu {
 /**
  * Pool order of a stock pair: [0] = the bus's OWN row, [1] = the parent coupler's DUMMY_Q row. Which one takes
  * the bus's raw q depends on TWO modes, not one:
- *   dummy row mode 4                      -> the dummy row: a reactive limit pins it there, coupler alive;
+ *   dummy row mode 4                      -> the dummy row: its PV -> PQ switch put its balance there, coupler alive;
  *   dummy row mode 0 and own row mode 4   -> the OWN row: the coupler is dead, so the equations are back home
- *                                            and the pin is there (measured: rte6515 BUS-11_BBS_1 put mode 4 on
+ *                                            and its PQ balance is there (measured: rte6515 BUS-11_BBS_1 put mode 4 on
  *                                            BUS_V(VL-11_1), which holds zero-impedance#1's ZERO_V, and writing nothing left
  *                                            that row with a zero diagonal — 20 of the 6667 scenarios failed
  *                                            their linear solve exactly this way, all of them _BBS_1 outages);
@@ -43,11 +43,11 @@ __host__ __device__ inline int stockPairPick(int m, const int* pool, int p, int 
 // STOCK-PLACEMENT fallback for the COUPLER-TREE relocation. A child bus whose P/Q equations were relocated
 // onto its parent coupler's DUMMY_P / DUMMY_Q rows must get them BACK on its own rows in any scenario that
 // OPENS that coupler: the coupler's element is then skipped (no ZERO_V / ZERO_PHI, no +-dummy coupling) and
-// the host pins the dummy rows with DUMMY_TARGET identities, so the relocated equations would be zeroed and
+// the host fixes the dummy rows with DUMMY_TARGET identities, so the relocated equations would be zeroed and
 // the bus left with no balance at all. relocatedChildOwnRow[dummyRow] = that bus's own row.
 //
 // The selector is the DUMMY ROW itself, whose mode the host sets to 0 exactly when the coupler opens — but
-// it must divert on mode 0 ONLY, not on mode 4: a relocated child that is RL-PINNED carries mode 4 on that
+// it must divert on mode 0 ONLY, not on mode 4: a relocated child SWITCHED TO PQ by its reactive limits carries mode 4 on that
 // same dummy row, where its own Q balance legitimately lives. Encoded as -2-row in selectorRow, which the picks
 // decode as "divert only while this row is an identity".
 // The DEPENDENT-PILOT group of the bus owning an output's home row (see dependentPilotDestination), or -1.
@@ -71,7 +71,7 @@ inline int stockPlacementSelectorRow(int frozenRow, int alt, const int* relocate
 
 // A relocated child whose own q row is SUPPRESSED (a remote gen-VC member has no frozen dest: its q
 // feeds the DISTR_Q rows) needs THREE destinations, not two:
-//   the coupler's DUMMY_Q row  while a reactive limit PINS it there (that row is mode 4),
+//   the coupler's DUMMY_Q row  while it is SWITCHED TO PQ there (that row is mode 4),
 //   its OWN row                while the parent coupler is dead this scenario (the dummy row is an
 //                              identity, mode 0 — the stock placement),
 //   nowhere at all             while it shares (mode 1: the DISTR_Q terms carry its q).

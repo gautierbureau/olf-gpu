@@ -232,7 +232,7 @@ void newtonSolve(BatchSolverContext* ctx, DriverPass& drv) {
                 } else if (converged && it > 0 && it < maxIter) {
                     // Force >=1 iteration, like CPU NewtonRaphson: a warm-started
                     // state may already meet the global 2-norm threshold yet leave a just-flipped identity row
-                    // (PV target) unpinned — one Newton step pins it. Retiring at it==0 skips that solve.
+                    // (PV target) unmet — one Newton step meets it. Retiring at it==0 skips that solve.
                     // And NOT at the budget: OLF's NewtonRaphson.run counts a step before testing it and
                     // reports MAX_ITERATION_REACHED whenever iterations >= maxIterations, so a test that
                     // passes after the LAST allowed step is not CONVERGED there — the it == maxIter branch
@@ -439,13 +439,13 @@ void newtonSolve(BatchSolverContext* ctx, DriverPass& drv) {
         // here (status -2): the base throws into the CPU fallback, a chunk scenario replays on the
         // CPU - never wrong, only un-accelerated. One SpMV per scenario, once per solve. Checked at
         // the SECOND iteration of the first pass: a first step from the flat start can be garbage
-        // on a row that the first refactorization then heals (deviceRemoteSingletonMemberPin:
+        // on a row that the first refactorization then heals (deviceRemoteSingletonMemberSwitchToPq:
         // ratio 0.17, dx 2e13, converged to 1e-12 all the same), while a wrong factorization stays
         // at 1e6..1e13 on every iteration.
         // Pass 0 only: two n*nS kernels and a sync per pass cost 34 s of a 19 s rte6515 run (measured), and a
-        // factorization that goes wrong LATER - after a reactive-limits pin rewrites its rows - is caught by the
+        // factorization that goes wrong LATER - after a reactive-limits PV -> PQ switch rewrites its rows - is caught by the
         // no-progress reject at the end of that pass instead (see the it == maxIter branch).
-        if (outer == 0 && it == 1 && !deviceFixedIter) {   // it=1: a flat-start first step may be garbage and heal (singleton-pin fixture); a wrong factorization never moves
+        if (outer == 0 && it == 1 && !deviceFixedIter) {   // it=1: a flat-start first step may be garbage and heal (singleton-member fixture); a wrong factorization never moves
             if (!ctx->dLinRp.p) {
                 ctx->dLinRp.alloc((size_t) n * nS * sizeof(double));
                 ctx->dLinRm.alloc((size_t) n * nS * sizeof(double));

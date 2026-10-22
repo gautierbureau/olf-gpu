@@ -51,7 +51,7 @@ struct SecondaryVoltageControlTables {
 };
 
 // A controller at a reactive limit (OLF: its generator voltage control disabled, its QLimitType set). Only a run with
-// OLF's ReactiveLimitsOuterLoop pins one, and only that run keys the controller by a reactive-limit entry: entry -1 is
+// OLF's ReactiveLimitsOuterLoop switches one to PQ, and only that run keys the controller by a reactive-limit entry: entry -1 is
 // a controller OLF never switches PV -> PQ.
 __device__ inline bool secondaryVoltageControlControllerAtLimit(const SecondaryVoltageControlTables& T, const char* limitType, int s, int c) {
     int e = T.reactiveLimitEntry[c];
@@ -77,11 +77,11 @@ __global__ void secondaryVoltageControlTriggerBatch(SecondaryVoltageControlTable
     int lo = T.zoneStart[z];
     int hi = T.zoneStart[z + 1];
     // ---- tryToReEnableHelpfulControllerBuses ----
-    int nPinned = 0;
+    int nSwitchedToPq = 0;
     for (int k = lo; k < hi; k++) {
-        if (secondaryVoltageControlControllerAtLimit(T, limitType, s, T.zoneControllerBus[k])) nPinned++;
+        if (secondaryVoltageControlControllerAtLimit(T, limitType, s, T.zoneControllerBus[k])) nSwitchedToPq++;
     }
-    if (nPinned > 0 && nPinned < hi - lo) {
+    if (nSwitchedToPq > 0 && nSwitchedToPq < hi - lo) {
         for (int k = lo; k < hi; k++) {
             int c = T.zoneControllerBus[k];
             if (!secondaryVoltageControlControllerAtLimit(T, limitType, s, c)) continue;
@@ -286,8 +286,8 @@ __global__ void secondaryVoltageControlCommitBatch(SecondaryVoltageControlTables
     }
 }
 
-// Give the moved zone targets to the system: an UNPINNED controller's controlled-bus V identity takes the
-// new target; a PINNED one keeps its Q pin but its switch-back must compare against the moved target. Without
+// Give the moved zone targets to the system: a PV controller's controlled-bus V identity takes the
+// new target; one SWITCHED TO PQ keeps its frozen target Q but its switch-back must compare against the moved target. Without
 // the ReactiveLimits loop no controller has an entry and the BUS_TARGET_V row is the only place the target lives.
 __global__ void secondaryVoltageControlApplyBatch(SecondaryVoltageControlTables T, int nScenarios, int n, const char* outerLoopCheckActive,
                               const char* limitType, double* target) {

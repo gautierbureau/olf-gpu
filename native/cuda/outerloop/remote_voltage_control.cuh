@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MPL-2.0
 //
 // Remote generator voltage control (GeneratorVoltageControl with a remote controlled bus) under reactive limits:
-// the DISTR_Q row targets recomputed from the live pin states, the all-pinned pilot row, and the members' Q.
+// the DISTR_Q row targets recomputed from the live reactive-limit states, the pilot row with no enabled controller, and the members' Q.
 #ifndef OLF_GPU_OUTERLOOP_REMOTE_VOLTAGE_CONTROL_CUH
 #define OLF_GPU_OUTERLOOP_REMOTE_VOLTAGE_CONTROL_CUH
 
@@ -11,7 +11,7 @@
 namespace olfgpu {
 
 // Kernels the driver launches.
-__global__ void pilotRowAllPinnedBatch(int nEntries, int nScenarios, int n, int nReactiveLimitEntries,
+__global__ void pilotRowWithoutEnabledControllerBatch(int nEntries, int nScenarios, int n, int nReactiveLimitEntries,
                                        const int* entSlot, const int* entRow, const double* entQTarget,
                                        const int* entOff, const int* entCount, const int* survivorReactiveLimitEntries,
                                        const char* limitType, int* mode, double* target,

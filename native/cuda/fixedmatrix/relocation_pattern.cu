@@ -141,7 +141,7 @@ void buildClosedBranchRelocationDestination(int nClosedBranch, const int* closed
             int stockSelectorRow = stockPlacementSelectorRow(rc.row, packedAlternateRow, relocatedChildOwnRow);
             size_t o = static_cast<size_t>(e) * CLOSED_BRANCH_OUTPUT_COUNT + k;
             if (stockPairOut(rc.row, packedAlternateRow, relocatedChildOwnRow)) {
-                // THREE destinations (see stockPairOut): the coupler's DUMMY_Q row while an RL pin holds it
+                // THREE destinations (see stockPairOut): the coupler's DUMMY_Q row while an RL switch to PQ holds it
                 // there (mode 4), NOTHING while the coupler is dead (that row is an identity — the bus is an
                 // ordinary group controller again and its DISTR_Q row, diverted to its own row, carries its q),
                 // and nothing while it shares. Writing the raw q into the dead coupler's identity row, which
@@ -272,7 +272,7 @@ void buildShuntRelocationDestination(int nShunt, const int* shuntIndices, const 
             int stockSelectorRow = stockPlacementSelectorRow(rc.row, packedAlternateRow, relocatedChildOwnRow);
             size_t o = static_cast<size_t>(e) * SHUNT_OUTPUT_COUNT + k;
             if (stockPairOut(rc.row, packedAlternateRow, relocatedChildOwnRow)) {
-                // THREE destinations (see stockPairOut): the coupler's DUMMY_Q row while an RL pin holds it
+                // THREE destinations (see stockPairOut): the coupler's DUMMY_Q row while an RL switch to PQ holds it
                 // there (mode 4), NOTHING while the coupler is dead (that row is an identity — the bus is an
                 // ordinary group controller again and its DISTR_Q row, diverted to its own row, carries its q),
                 // and nothing while it shares. Writing the raw q into the dead coupler's identity row, which
@@ -385,7 +385,7 @@ void buildHvdcAcEmulationRelocationDestination(int nHvdcAcEmulation, const int* 
 
 // Open-branch analogue of shuntAlternateRow / collectShuntRelocationPattern / buildShuntRelocationDestination: the ALTERNATE Q row
 // of each side's bus travels in a SEPARATE openBranchAlternateReactiveDestination array (nOpenBranch*2) rather than inside openBranchIndices —
-// the connected side's half-open charging q follows a pinned remote member's mode-4 row or a
+// the connected side's half-open charging q follows the mode-4 row of a remote member switched to PQ or a
 // relocation group's carrier exactly like its closed-branch terms.
 inline int openBranchAlternateRow(const OpenBranchScatter& s, const int* alternateQRows, int e) {
     return s.rowEq == 1 ? alternateQRows[e * 2 + s.rowEnd] : -1;
@@ -450,7 +450,7 @@ void buildOpenBranchRelocationDestination(int nOpenBranch, const int* openBranch
             int stockSelectorRow = stockPlacementSelectorRow(rc.row, packedAlternateRow, relocatedChildOwnRow);
             size_t o = static_cast<size_t>(e) * OPEN_BRANCH_OUTPUT_COUNT + k;
             if (stockPairOut(rc.row, packedAlternateRow, relocatedChildOwnRow)) {
-                // THREE destinations (see stockPairOut): the coupler's DUMMY_Q row while an RL pin holds it
+                // THREE destinations (see stockPairOut): the coupler's DUMMY_Q row while an RL switch to PQ holds it
                 // there (mode 4), NOTHING while the coupler is dead (that row is an identity — the bus is an
                 // ordinary group controller again and its DISTR_Q row, diverted to its own row, carries its q),
                 // and nothing while it shares. Writing the raw q into the dead coupler's identity row, which

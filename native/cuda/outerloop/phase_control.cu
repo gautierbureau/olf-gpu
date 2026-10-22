@@ -23,7 +23,7 @@
 namespace olfgpu {
 
 // One thread per (scenario, controller). iter[s] = the loop's check count in this solve. First check:
-// every live CONTROLLER-mode control is switched OFF (row mode 3 -> 0, the identity pinned at the tap
+// every live CONTROLLER-mode control is switched OFF (row mode 3 -> 0, the identity held at the tap
 // closest to the solved a1) and the scenario is UNSTABLE when it has any live controller (OLF returns
 // UNSTABLE on a non-empty controller list, LIMITER-only included — a no-change re-solve). Later checks:
 // a live LIMITER whose current exceeds the limit shifts one tap against the sign of dI/da1

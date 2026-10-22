@@ -46,8 +46,8 @@ __global__ void residualNormsBatch(int n, const double* F, const char* active, d
             ssq += v * v;
             if (fixedVariableRowMaxMismatch != nullptr) {
                 // PER_EQUATION_TYPE: identity/slope rows (mode 0/2) use the row's identity-type
-                // threshold; power rows (mode 1), the phase P row (mode 3) and the pinned
-                // remote-member Q row (mode 4) the power-type one
+                // threshold; power rows (mode 1), the phase P row (mode 3) and the BUS_TARGET_Q
+                // row of a remote member switched to PQ (mode 4) the power-type one
                 int m = mode[(size_t) s * n + i];
                 double thr = (m == GpuRowMode::EQUATION || m == GpuRowMode::BRANCH_TARGET_P || m == GpuRowMode::BUS_TARGET_Q) ? equationRowMaxMismatch[i] : fixedVariableRowMaxMismatch[i];
                 if (alternateRowMaxMismatch != nullptr) {

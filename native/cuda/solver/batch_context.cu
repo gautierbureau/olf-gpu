@@ -127,13 +127,13 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& structure, int 
     CUDA_CHECK(cudaMemset(ctx->dOuterLoopCheckActive.p, 0, static_cast<size_t>(nScenarios) * sizeof(char)));
     CUDA_CHECK(cudaMemset(ctx->dOuterLoopUnstable.p, 0, static_cast<size_t>(nScenarios) * sizeof(char)));
     // OUTSIDE the `nReactiveLimitEntries > 0` block: a run with reactive limits DISABLED has no entries at all, and that is
-    // exactly when every pilot-self group needs the gate — its pilot can never pin, so it controls throughout.
+    // exactly when every pilot-self group needs the gate — its pilot can never switch to PQ, so it controls throughout.
     // Built inside, the gate did not exist for such a run: the pilots' raw q was emitted at their carrier rows
     // on top of the DISTR_Q terms and rte6515's base (limits off) started at |f(x0)| 117.908 against OLF's
     // 117.845 and never converged.
     // Derive the PILOT-SELF groups from the candidate table itself: the fallback row repeated among the
     // member rows means the controlled bus is one of its own controllers. The pilot's RL entry is the one
-    // whose (row-mapped) V row is that row; without an entry the pilot can never pin and the group needs
+    // whose (row-mapped) V row is that row; without an entry the pilot can never switch to PQ and the group needs
     // no gate. nReactiveRelocationGroups is small (groups), nReactiveLimitEntries a few thousand, and this runs once per context.
     int nRelocationGroups = ctx->structure != nullptr ? ctx->structure->nReactiveRelocationGroups : 0;
     if (nRelocationGroups > 0) {
@@ -152,9 +152,9 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& structure, int 
             if (!pilotSelf) {
                 continue;                                // not a pilot-self group: -1, no gate (raw q as always)
             }
-            // PILOT_SELF_NO_REACTIVE_LIMIT_ENTRY (-2), not -1: a pilot-self pilot with NO reactive-limit entry can never be PINNED
+            // PILOT_SELF_NO_REACTIVE_LIMIT_ENTRY (-2), not -1: a pilot-self pilot with NO reactive-limit entry can never SWITCH TO PQ
             // (limits off for the run, or an empty q range), so it controls for the whole solve and its raw q
-            // must ALWAYS be skipped — the gate is needed MORE, not less, than for a pinnable one. Read as
+            // must ALWAYS be skipped — the gate is needed MORE, not less, than for one that can switch. Read as
             // "no gate" (-1, the non-pilot-self value) it was emitted at the carrier row on top of the very
             // DISTR_Q terms it feeds: with reactive limits disabled on rte6515 the base started at
             // |f(x0)| 117.908 against OLF's 117.845 and the device's load flow never converged.
@@ -176,7 +176,7 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& structure, int 
                     count += pilotSelfReactiveLimitEntry[g] >= 0 ? 1 : 0;
                     noEntry += pilotSelfReactiveLimitEntry[g] == PILOT_SELF_NO_REACTIVE_LIMIT_ENTRY ? 1 : 0;
                 }
-                std::fprintf(stderr, "PILOTSELF_GATE groups=%d(+%d never-pinnable) of %d nReactiveLimitEntries=%d\n",
+                std::fprintf(stderr, "PILOTSELF_GATE groups=%d(+%d without a reactive-limit entry) of %d nReactiveLimitEntries=%d\n",
                              count, noEntry, nRelocationGroups, nReactiveLimitEntries);
             }
         }
@@ -190,10 +190,10 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& structure, int 
         // A bus whose power equations the COUPLER-TREE relocation moved onto its parent coupler's dummy columns has
         // its reactive balance — and its BUS_TARGET_Q, which GpuAcActivationExtractor already puts there — at that
         // coupler's DUMMY_Q row, while its OWN V row carries the coupler's ZERO_V. The reactive-limit pass must read
-        // q and flip the pin at THAT row; its VOLTAGE reads stay on the bus's own row (dReactiveLimitVoltageRow). Without the split
+        // q and make the PV -> PQ switch at THAT row; its VOLTAGE reads stay on the bus's own row (dReactiveLimitVoltageRow). Without the split
         // the check compared a voltage residual against reactive limits: measured on rte6515's full busbar scope
-        // with the relocation enabled, entries read -78.0 and 4767.3 MVAr and 20 buses were pinned that OLF never
-        // pins, after which the pinned solve burned all 30 iterations.
+        // with the relocation enabled, entries read -78.0 and 4767.3 MVAr and 20 buses were switched to PQ that OLF never
+        // switches, after which the solve with those switches burned all 30 iterations.
         std::vector<int> reactiveLimitReactivePowerRowMapped(reactiveLimitVoltageRowMapped);
         if (ctx->nZeroImpedanceBranch > 0 && ctx->structure->dZeroImpedanceBranchIndices.p != nullptr) {
             std::vector<int> zidx(static_cast<size_t>(ctx->nZeroImpedanceBranch) * 11);
@@ -226,10 +226,10 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& structure, int 
         ctx->dReactiveLimitLoadQ.upload(reactiveLimitLoadQ, nReactiveLimitEntries * sizeof(double));
         ctx->dReactiveLimitTargetV.upload(reactiveLimitTargetV, nReactiveLimitEntries * sizeof(double));
         ctx->dReactiveLimitFlags.upload(reactiveLimitFlags, nReactiveLimitEntries * sizeof(char));
-        ctx->allPvPinnable = 1;
+        ctx->everyPvBusCanSwitchToPq = 1;
         for (int i = 0; i < nReactiveLimitEntries; i++) {
             if (!(reactiveLimitFlags[i] & GpuReactiveLimitsEntryFlag::STAND_BY_AUTOMATON) && !((reactiveLimitMinQ[i] > -1e7 || reactiveLimitMaxQ[i] < 1e7) && reactiveLimitMinQ[i] < reactiveLimitMaxQ[i])) {
-                ctx->allPvPinnable = 0;                      // an unlimited PV bus: the rule never fires
+                ctx->everyPvBusCanSwitchToPq = 0;                      // an unlimited PV bus: the rule never fires
             }
         }
         ctx->dReactiveLimitSavedTarget.alloc(static_cast<size_t>(nReactiveLimitEntries) * nScenarios * sizeof(double));

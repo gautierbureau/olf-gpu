@@ -34,8 +34,8 @@ namespace olfgpu {
 
 // DISTR_Q target compensation (plan-B3): OLF's DISTR_Q row target is
 // (qPct_k - 1)*targetQ_k + qPct_k*sum_{j!=k} targetQ_j, and targetQ_j is nonzero exactly for a
-// FROZEN member (pinned at a limit). Recompute every UNPINNED member row's target from the
-// per-scenario limitType so an in-flight pin/unpin keeps the targets consistent with the live
+// FROZEN member (switched to PQ at a limit). Recompute every PV member row's target from the
+// per-scenario limitType so an in-flight PV -> PQ or PQ -> PV switch keeps the targets consistent with the live
 // renormalized weights. Idempotent per pass; one thread per (member, scenario).
 // Per-scenario member targetQ. A member bus that loses reactive LOAD changes its own targetQ
 // (targetQ = generation - load), and every DISTR_Q target in its group reads that value twice: once
@@ -57,16 +57,16 @@ __device__ inline double distrQTargetQOf(int nTqOv, const int* tqOvKey, const do
     return mTargetQ[idx];
 }
 
-// OLF's frozen targetQ (generation minus load) of a PINNED reactive-limit entry this scenario, the value its peers'
+// OLF's frozen targetQ (generation minus load) of a reactive-limit entry SWITCHED TO PQ this scenario, the value its peers'
 // DISTR_Q targets sum (AcTargetVector: otherControllerBus.getTargetQ()) and a pilot-self carrier hosts. The
-// entry's own balance row carries that value whenever the pin gave it one (mode 4): the reactive-limit kernel's
+// entry's own balance row carries that value whenever the switch gave it one (mode 4): the reactive-limit kernel's
 // limit, reactiveLimitInitialTargetQ for a realistic-voltage freeze (OLF freezes at the INITIAL generation target Q), the injection
 // channel's target for a bus that lost generators, the limit drift included - one source for the member's own
-// row and for its peers. A pinned entry whose row is not a balance (a pilot-self pilot keeps its voltage identity)
-// takes the pin rule directly. Rebuilding every pinned peer from `qLimitType == 1 ? reactiveLimitMinQ : reactiveLimitMaxQ` put a realistic-
+// row and for its peers. An entry switched to PQ whose row is not a balance (a pilot-self pilot keeps its voltage identity)
+// takes the freeze rule directly. Rebuilding every peer switched to PQ from `qLimitType == 1 ? reactiveLimitMinQ : reactiveLimitMaxQ` put a realistic-
 // voltage freeze at its CEILING (g1 frozen at 10 MVar with a 6000 MVar maxQ on the three-controller fixture)
 // and a generator-lost member at its lost generator's maximum.
-__device__ inline double pinnedTargetQ(int s, int e, int n, int nReactiveLimitEntries, const int* mode, const double* target,
+__device__ inline double switchedToPqTargetQ(int s, int e, int n, int nReactiveLimitEntries, const int* mode, const double* target,
                                        const int* reactiveLimitVoltageRow, const int* reactiveLimitReactivePowerRow, const int* relocatedChildOwnRow,
                                        const char* limitType, const double* reactiveLimitMinQ, const double* reactiveLimitMaxQ,
                                        const double* reactiveLimitLoadQ, int perScenarioReactiveLimits, const double* reactiveLimitInitialTargetQ,
@@ -119,7 +119,7 @@ __global__ void updateDistrQTargetsBatch(int nMembers, int nScenarios, int n, in
     if (!mHasRow[k] && qg < 0) return;                       // only members owning a packed DISTR_Q row
                                                              // (or linked to a relocation group, plan-B4)
     // STOCK PLACEMENT: this member's packed DISTR_Q row is its parent coupler's DUMMY_Q row, and a
-    // scenario that kills that coupler pins it to an identity — the sharing equation (and so its target)
+    // scenario that kills that coupler fixes it with an identity — the sharing equation (and so its target)
     // is then on the bus's OWN row, where fillDistrQBatch puts it. Without the same diversion here the
     // identity test below returned and the diverted row kept target 0: measured on the middle-section-loss
     // fixtures as 401.35 kV against OLF's 401.69 once the equation itself had moved.
@@ -139,7 +139,7 @@ __global__ void updateDistrQTargetsBatch(int nMembers, int nScenarios, int n, in
         return;
     }
     if (mrow >= 0 && mode[(size_t) s * n + mrow] == GpuRowMode::BUS_TARGET_Q) {
-        // The row hosts its OWN reactive balance this scenario (mode 4): an RL pin (the RL kernel
+        // The row hosts its OWN reactive balance this scenario (mode 4): an RL PV -> PQ switch (the RL kernel
         // owns the target) or a control the contingency KILLED (the injection override owns it,
         // OLF's BUS_TARGET_Q). A DISTR_Q target has no business here — fillDistrQBatch already
         // skips the row's DISTR_Q emissions for the same reason. Measured on rte6515 BUS-1055_BBS_1:
@@ -148,12 +148,12 @@ __global__ void updateDistrQTargetsBatch(int nMembers, int nScenarios, int n, in
         return;
     }
     int reK = distrQMemberReactiveLimitEntry[k];
-    if (reK >= 0 && limitType[(size_t) s * nReactiveLimitEntries + reK] != GpuQLimitType::NONE) return;  // pinned: the RL kernel owns its row
+    if (reK >= 0 && limitType[(size_t) s * nReactiveLimitEntries + reK] != GpuQLimitType::NONE) return;  // switched to PQ: the RL kernel owns its row
     if (qg >= 0) {
         // plan-B4: the member whose row CURRENTLY hosts the relocated pilot Q carries the pilot's
         // Q target (captured at solve init); its DISTR_Q compensation does not apply. A non-carrier
         // member without a packed DISTR_Q row (the base free member, superseded mid-scenario) has
-        // no row to maintain here — the RL kernel owns it while pinned.
+        // no row to maintain here — the RL kernel owns it while it is switched to PQ.
         int carrier = reactiveRelocationCandidateRows[reactiveRelocationGroupStart[qg] + chooseCarrierRowInSubgroup(qg, reactiveRelocationGroupStart, reactiveRelocationCandidateRows, mode + (size_t) s * n,
                 distrQSubgroup != nullptr ? distrQSubgroup + (size_t) s * nMembers : nullptr, reactiveRelocationDistrQMemberStart)];
         // A group whose PILOT ROW is frozen this scenario has lost its pilot to an island (tasks #69): its
@@ -189,17 +189,17 @@ __global__ void updateDistrQTargetsBatch(int nMembers, int nScenarios, int n, in
             }
             char plt = limitType[(size_t) s * nReactiveLimitEntries + pe];
             if (plt != GpuQLimitType::NONE) {
-                // pilot-self, pilot PINNED: the carrier hosts the pilot's own balance at OLF's frozen targetQ (the RL
-                // kernel leaves the pilot's row a V identity in this case, so pinnedTargetQ takes the pin rule: the
+                // pilot-self, pilot SWITCHED TO PQ: the carrier hosts the pilot's own balance at OLF's frozen targetQ (the RL
+                // kernel leaves the pilot's row a V identity in this case, so switchedToPqTargetQ takes the freeze rule: the
                 // limit, the initial generation target Q of a realistic-voltage freeze, nothing for a bus whose every
                 // generator is lost - rte6515 GEN-676 with every busbar section in the list read its lost generator's
                 // maximum here: the carrier's target 0.957 against OLF's -0.043, VL-676_1 supplying the 100 MVAr,
-                // pinned, unpinned, and 1.133 MW distributed where OLF distributes nothing).
-                target[(size_t) s * n + mrow] = pinnedTargetQ(s, pe, n, nReactiveLimitEntries, mode, target, reactiveLimitVoltageRow, reactiveLimitReactivePowerRow, relocatedChildOwnRow,
+                // switched to PQ, switched back to PV, and 1.133 MW distributed where OLF distributes nothing).
+                target[(size_t) s * n + mrow] = switchedToPqTargetQ(s, pe, n, nReactiveLimitEntries, mode, target, reactiveLimitVoltageRow, reactiveLimitReactivePowerRow, relocatedChildOwnRow,
                         limitType, reactiveLimitMinQ, reactiveLimitMaxQ, reactiveLimitLoadQ, perScenarioReactiveLimits, reactiveLimitInitialTargetQ, reactiveLimitGeneratorsLost);
                 return;
             }
-            // pilot-self, pilot UNPINNED: its q feeds the DISTR_Q rows weighted and the carrier hosts its OWN
+            // pilot-self, pilot still PV: its q feeds the DISTR_Q rows weighted and the carrier hosts its OWN
             // DISTR_Q (pilotSelfCarrierSkip keeps the gate off), so this row wants the normal DISTR_Q target below — not a
             // relocated pilot balance that does not exist. Writing pilotQ here is what churned the batch.
         }
@@ -212,10 +212,10 @@ __global__ void updateDistrQTargetsBatch(int nMembers, int nScenarios, int n, in
     char subK = subS != nullptr ? subS[k] : 0;
     for (int m = gs; m < gs + gc; m++) {                     // live keys over the WHOLE merged group (updateReactiveKeys)
         int re = distrQMemberReactiveLimitEntry[m];
-        bool pinned = re >= 0 && limitType[(size_t) s * nReactiveLimitEntries + re] != GpuQLimitType::NONE;
+        bool switchedToPq = re >= 0 && limitType[(size_t) s * nReactiveLimitEntries + re] != GpuQLimitType::NONE;
         bool inactive = distrQMemberInactive(nDistrQInactiveMembers, distrQInactiveScenarioMember, s, m);
         bool otherSub = subS != nullptr && subS[m] != subK;  // a split group's other subgroup (tasks #71)
-        sum += (pinned || inactive || otherSub) ? 0.0 : distrQKeyOf(nDistrQKeyOverrides, distrQKeyOverrideScenarioMember, distrQKeyOverrideKey, s, m, mKey);
+        sum += (switchedToPq || inactive || otherSub) ? 0.0 : distrQKeyOf(nDistrQKeyOverrides, distrQKeyOverrideScenarioMember, distrQKeyOverrideKey, s, m, mKey);
     }
     // targetQ over the peers AcTargetVector sums for THIS member: the elements of its OWN control
     // (getGeneratorVoltageControl().getMergedControllerElements()), which for a control merged INTO this
@@ -226,12 +226,12 @@ __global__ void updateDistrQTargetsBatch(int nMembers, int nScenarios, int n, in
     for (int t = mTgtPtr[k]; t < mTgtPtr[k + 1]; t++) {
         int m = mTgtPeer[t];
         int re = distrQMemberReactiveLimitEntry[m];
-        bool pinned = re >= 0 && limitType[(size_t) s * nReactiveLimitEntries + re] != GpuQLimitType::NONE;
-        if (pinned) {
+        bool switchedToPq = re >= 0 && limitType[(size_t) s * nReactiveLimitEntries + re] != GpuQLimitType::NONE;
+        if (switchedToPq) {
             // a FROZEN member's targetQ is what OLF froze it at (freezeGenerationTargetQ...: the limit on a
             // reactive-limit switch, the INITIAL generation target Q on a realistic-voltage freeze), minus its
-            // load - the value the member's own balance row enforces. Unpinned members keep their packed targetQ.
-            sumTargetQ += pinnedTargetQ(s, re, n, nReactiveLimitEntries, mode, target, reactiveLimitVoltageRow, reactiveLimitReactivePowerRow, relocatedChildOwnRow,
+            // load - the value the member's own balance row enforces. PV members keep their packed targetQ.
+            sumTargetQ += switchedToPqTargetQ(s, re, n, nReactiveLimitEntries, mode, target, reactiveLimitVoltageRow, reactiveLimitReactivePowerRow, relocatedChildOwnRow,
                     limitType, reactiveLimitMinQ, reactiveLimitMaxQ, reactiveLimitLoadQ, perScenarioReactiveLimits, reactiveLimitInitialTargetQ, reactiveLimitGeneratorsLost);
         } else {
             sumTargetQ += distrQTargetQOf(nTqOv, tqOvKey, tqOvVal, s, nMembers, m, mTargetQ);
@@ -241,12 +241,12 @@ __global__ void updateDistrQTargetsBatch(int nMembers, int nScenarios, int n, in
             ? 0.0 : distrQKeyOf(nDistrQKeyOverrides, distrQKeyOverrideScenarioMember, distrQKeyOverrideKey, s, k, mKey) / sum;
     // AcTargetVector.getGeneratorReactivePowerDistributionTarget, verbatim:
     //   (qPct_k - 1) * targetQ_k + qPct_k * sum_{j != k} targetQ_j
-    // which is qPct_k * sum_over_its_PEERS targetQ_j - targetQ_k (k is always one of its own peers). k is never pinned here (the RL kernel
-    // owns a pinned member's row and we returned above), so its own term is the packed targetQ.
-    // This used to read `qpk * frozen` — the same expression with every UNPINNED targetQ assumed
+    // which is qPct_k * sum_over_its_PEERS targetQ_j - targetQ_k (k is always one of its own peers). k is never switched to PQ here (the RL kernel
+    // owns the row of a member switched to PQ and we returned above), so its own term is the packed targetQ.
+    // This used to read `qpk * frozen` — the same expression with every PV member's targetQ assumed
     // zero. That assumption holds only for groups whose members carry no load and no generator
     // targetQ; anywhere else the device solved the row against a target short by exactly
-    // qPct_k * sum_unpinned targetQ_j - targetQ_k, and drove the members to equal reactive
+    // qPct_k * sum_{j PV} targetQ_j - targetQ_k, and drove the members to equal reactive
     // injections instead of equally-shared DEVIATIONS from their targets.
     target[(size_t) s * n + mrow] = qpk * sumTargetQ
             - distrQTargetQOf(nTqOv, tqOvKey, tqOvVal, s, nMembers, k, mTargetQ);
@@ -254,8 +254,8 @@ __global__ void updateDistrQTargetsBatch(int nMembers, int nScenarios, int n, in
 
 // A pilot that STOPPED being one of its OWN controllers (this scenario outaged its generators) keeps
 // its BUS_TARGET_V while the surviving controllers still hold its voltage — the reactive balance it
-// just acquired rides one of THEIR rows. When every survivor PINS, each of those rows flips to mode 4
-// to host its own pinned balance, and the pilot's balance is evicted with nowhere left to go: the
+// just acquired rides one of THEIR rows. When every survivor SWITCHES TO PQ, each of those rows flips to mode 4
+// to host its own reactive balance, and the pilot's balance is evicted with nowhere left to go: the
 // solve converges happily on a system one equation short (rte6515 GEN-1522: OLF's residual 0.601 pu
 // on BUS_TARGET_Q of the pilot, every device equation converged). OLF drops the now-uncontrollable
 // BUS_TARGET_V and activates the pilot's own BUS_TARGET_Q on the freed row; this makes the same move
@@ -264,8 +264,8 @@ __global__ void updateDistrQTargetsBatch(int nMembers, int nScenarios, int n, in
 // Mode 4 is "row hosts its own Q balance" via the member ALTERNATE dest. It only reaches the pilot's
 // q because the extraction now gives a pilot-that-is-its-own-controller that alternate; without it
 // the row assembles EMPTY and the flip is a measured no-op (state unchanged to 10 digits).
-// Reversible: if a later pass unpins a survivor, the V identity and its target come back.
-__global__ void pilotRowAllPinnedBatch(int nEntries, int nScenarios, int n, int nReactiveLimitEntries,
+// Reversible: if a later pass switches a survivor back to PV, the V identity and its target come back.
+__global__ void pilotRowWithoutEnabledControllerBatch(int nEntries, int nScenarios, int n, int nReactiveLimitEntries,
                                        const int* entSlot, const int* entRow, const double* entQTarget,
                                        const int* entOff, const int* entCount, const int* survivorReactiveLimitEntries,
                                        const char* limitType, int* mode, double* target,
@@ -278,21 +278,21 @@ __global__ void pilotRowAllPinnedBatch(int nEntries, int nScenarios, int n, int 
     int row = entRow[e];
     if (row < 0 || row >= n) return;
     size_t ri = (size_t) s * n + row;
-    bool allPinned = entCount[e] > 0;
+    bool noEnabledController = entCount[e] > 0;
     for (int k = 0; k < entCount[e]; k++) {
         int survivorEntry = survivorReactiveLimitEntries[entOff[e] + k];
         if (survivorEntry < 0 || survivorEntry >= nReactiveLimitEntries || limitType[(size_t) s * nReactiveLimitEntries + survivorEntry] == GpuQLimitType::NONE) {
-            allPinned = false;                              // this one still carries its DISTR_Q row
+            noEnabledController = false;                              // this one still carries its DISTR_Q row
             break;
         }
     }
-    if (allPinned && !flipped[e] && mode[ri] == GpuRowMode::FIXED_VARIABLE) {
+    if (noEnabledController && !flipped[e] && mode[ri] == GpuRowMode::FIXED_VARIABLE) {
         savedVTarget[e] = target[ri];
         mode[ri] = GpuRowMode::BUS_TARGET_Q;
         target[ri] = entQTarget[e];
         flipped[e] = 1;
         switched[s] = 1;
-    } else if (!allPinned && flipped[e]) {
+    } else if (!noEnabledController && flipped[e]) {
         mode[ri] = GpuRowMode::FIXED_VARIABLE;
         target[ri] = savedVTarget[e];
         flipped[e] = 0;

@@ -35,7 +35,7 @@ namespace olfgpu {
 // A group's ON/OFF activations are the toggle-diffed row deltas the Java side captured; member rows are
 // laid out by ROLE per scenario — the first alive continuous member hosts the relocated pilot Q (the
 // fills' mode scan picks the same row), the others host DISTR_RHO (target 0), fixed/outaged members are
-// identity pins — so a member outage or a clamp re-forms the group exactly as OLF's "first enabled" rule.
+// held by identities — so a member outage or a clamp re-forms the group exactly as OLF's "first enabled" rule.
 struct TransformerVoltageControlTables {
     int nGroups, nMembers, nDeltaRows, mode;
     const int* groupMemberStart; const int* groupControlledBusVRow; const double* groupTargetV; const double* groupHalfTargetDeadband; const int* groupUseInitialTapPosition;
@@ -54,8 +54,8 @@ struct TransformerVoltageControlTables {
 };
 
 // Does any generator-voltage-CONTROLLED bus in this mask still carry an ENABLED control? Row mode 0 is
-// a plain V identity and 2 a slope SVC — both are voltage control ON; a frozen or reactive-limit-pinned
-// bus is a power row, which is exactly OLF's isGeneratorVoltageControlEnabled() == false.
+// a plain V identity and 2 a slope SVC — both are voltage control ON; a frozen bus or one its reactive limits
+// switched PV -> PQ is a power row, which is exactly OLF's isGeneratorVoltageControlEnabled() == false.
 __device__ inline bool anyGeneratorVoltageControlEnabled(const TransformerVoltageControlTables& T, size_t sn, const int* mode, const int* mask) {
     for (int w = 0; w < T.fixMaskWords; w++) {
         unsigned int bits = (unsigned int) mask[w];
@@ -136,7 +136,7 @@ __device__ inline void transformerVoltageControlLayoutGroup(const TransformerVol
             mode[mr] = GpuRowMode::EQUATION;
             target[mr] = carrier ? 0.0 : pilotQ;
             carrier = true;
-        } else if (memberState == GpuDiscreteControlMemberState::ROUNDED) {  // identity pin at the rounded tap's r1
+        } else if (memberState == GpuDiscreteControlMemberState::ROUNDED) {  // identity holding the rounded tap's r1
             int tap = T.memberTap[(size_t) s * T.nMembers + m];
             double r1 = T.tapRows[(size_t) (T.memberTapStart[m] + tap) * GpuPiModelColumn::COUNT + GpuPiModelColumn::R1];
             mode[mr] = GpuRowMode::FIXED_VARIABLE;
@@ -237,7 +237,7 @@ __global__ void transformerVoltageControlCheckBatch(TransformerVoltageControlTab
             return;
         }
         // GeneratorVoltageControlManager.disableGeneratorVoltageControlsUnderMaxControlledNominalVoltage:
-        // every candidate whose control is ON right now (not RL-pinned) freezes at its current Q
+        // every candidate whose control is ON right now (not switched to PQ by its reactive limits) freezes at its current Q
         for (int c = 0; c < T.nGeneratorVoltageControlFreezeCandidates; c++) {
             size_t sr = sn + T.generatorVoltageControlFreezeVRow[c];
             size_t sc = (size_t) s * T.nGeneratorVoltageControlFreezeCandidates + c;
@@ -246,13 +246,13 @@ __global__ void transformerVoltageControlCheckBatch(TransformerVoltageControlTab
             if (re >= 0) {
                 // REMOTE controller. OLF freezes it exactly like a local one, but its own row is the
                 // group's DISTR_Q SHARE, not a V identity — so the freeze is the reactive-limit remote
-                // PIN (mode 4, "the row hosts its own Q balance") with the CURRENT injection as the
+                // PV -> PQ SWITCH (mode 4, "the row hosts its own Q balance") with the CURRENT injection as the
                 // target instead of a Q limit. The limit type is what the DISTR_Q key renormalization
                 // reads to drop a member, so it has to be set, and GpuQLimitType::FROZEN keeps it
-                // distinguishable from a real Q-limit pin (which the switch-back may undo; this must
+                // distinguishable from a real Q-limit PV -> PQ switch (which the switch-back may undo; this must
                 // not be, OLF's reactive-limits loop never sees a bus whose voltage control is off).
                 size_t scenarioEntry = (size_t) s * T.nReactiveLimitEntries + re;
-                if (mode[sr] != GpuRowMode::EQUATION || T.reactiveLimitQLimitType[scenarioEntry] != GpuQLimitType::NONE) continue;  // pinned already, or not live
+                if (mode[sr] != GpuRowMode::EQUATION || T.reactiveLimitQLimitType[scenarioEntry] != GpuQLimitType::NONE) continue;  // switched to PQ already, or not live
                 T.generatorVoltageControlFreezeSavedMode[sc] = mode[sr];
                 T.generatorVoltageControlFreezeSavedTarget[sc] = target[sr];
                 mode[sr] = GpuRowMode::BUS_TARGET_Q;
@@ -269,7 +269,7 @@ __global__ void transformerVoltageControlCheckBatch(TransformerVoltageControlTab
             T.generatorVoltageControlFrozen[sc] = 1;
         }
         // LfNetwork.fixTransformerVoltageControls: a just-enabled controller whose not-controlled side's
-        // component holds no ENABLED generator voltage control (frozen and pinned buses count as off)
+        // component holds no ENABLED generator voltage control (frozen buses and buses switched to PQ count as off)
         // is disabled again. OLF cuts the CONTINGENCY's branches and the ENABLED controller branches;
         // the host knows the first and brackets the second with two masks (see FreezeTables), so a PV
         // bus in the MIN mask is one OLF sees too, and no PV bus in the MAX mask means OLF sees none.
@@ -409,7 +409,7 @@ void transformerVoltageControlStep(BatchSolverContext* ctx, DriverPass& drv) {
     // Freezing a REMOTE controller can take the LAST live member of its group, and then the group
     // controls nothing: OLF's freeze disables the voltage control, so the CONTROLLED bus stops
     // carrying a V identity. That flip lives in its own kernel, which the reactive-limits phase runs
-    // after its pins; the freeze happens two loops later and would otherwise leave the pilot holding
+    // after its PV -> PQ switches; the freeze happens two loops later and would otherwise leave the pilot holding
     // a target for a control that no longer exists until the next sweep reached RL again (measured
     // 0.6 kV). Same kernel, run again here — it restores the identity at COMPLETE on the same rule.
     if (ctx->hasDistrQRelocationGroups && ctx->structure->nReactiveRelocationGroups > 0 && ctx->nGeneratorVoltageControlFreezeCandidates > 0) {

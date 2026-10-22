@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MPL-2.0
 //
 // ReactiveLimitsOuterLoop state carried across solves: the per-(controller, scenario) limit type seeded from the
-// base or from a previous solve's pins, and the pins exported for the next one.
+// base or from a previous solve's PV -> PQ switches, and the switches and their frozen target Q exported for the next one.
 #ifndef OLF_GPU_OUTERLOOP_REACTIVE_LIMITS_SEED_CUH
 #define OLF_GPU_OUTERLOOP_REACTIVE_LIMITS_SEED_CUH
 
@@ -26,7 +26,7 @@ __global__ void seedReactiveLimitRowModeFromState(int nReactiveLimitEntries, int
                                     const char* reactiveLimitBaseQLimitType, const int* pilotSelfReactiveLimitEntry, int nReactiveRelocationGroups,
                                     const double* reactiveLimitTargetV, int nReactiveLimitTargetVOverrides, const int* reactiveLimitTargetVOverrideScenarioEntry, const double* reactiveLimitTargetVOverrideValue,
                                     const double* secondaryVoltageControlReactiveLimitTargetV, const char* reactiveLimitLocalOverride, const double* reactiveLimitLocalTargetV,
-                                    const double* pinTargetIn, const char* reactiveLimitIslanded);
+                                    const double* reactiveLimitSeedTargetQ, const char* reactiveLimitIslanded);
 
 __global__ void exportReactiveLimitTargetQ(int nReactiveLimitEntries, int nScenarios, int n, const int* reactiveLimitVoltageRow, const int* reactiveLimitReactivePowerRow,
                                    const char* limitType, const int* mode, const double* target, const char* reactiveLimitIslanded,

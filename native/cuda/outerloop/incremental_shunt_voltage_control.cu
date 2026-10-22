@@ -123,7 +123,7 @@ __global__ void incrementalShuntVoltageControlAdjustBatch(int nGroups, int nScen
     if (moved) switched[s] = 1;
 }
 
-// Per (scenario, controller): the section total B pins the SHUNT_B identity row (target + state
+// Per (scenario, controller): the section total B fixes the SHUNT_B identity row (target + state
 // seed), exactly the host orchestrator's ovVal.add(baseB + db) / x0Full[bRow] = newB.
 __global__ void incrementalShuntVoltageControlApplyBatch(int nIncrementalShuntVoltageControlControllerShunts, int nScenarios, int n, const int* bRow, const int* shuntCompensatorStart,
                               const int* sectionStart, const double* sectionB, const int* shuntCompensatorBasePosition, const int* pos,

@@ -380,8 +380,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         ctx->dReactiveLimitMaxQPerScenario.alloc(static_cast<size_t>(ctx->nScenarios) * ctx->nReactiveLimitEntries * sizeof(double));
     }
     int maxOuter = fullLoadflow ? 8 * MAX_OUTER_LOOP_ITERATIONS : 1;
-    // The two kernels that lay a group's rows out from the CURRENT pin states (the RL pass runs them after
-    // its pins; the seeding below runs them once so the FIRST fill sees the seeded pins on the rows).
+    // The two kernels that lay a group's rows out from the CURRENT PV/PQ states (the RL pass runs them after
+    // its switches; the seeding below runs them once so the FIRST fill sees the seeded PV -> PQ switches on the rows).
     // `staticLimits`: use the STATIC reactive-limit arrays rather than the curve-evaluated ones. At SEED time the
     // dynamic arrays are still zero (reactiveCapabilityCurveLimitsBatch runs in the reactive-limits phase), so a seed-time flip
     // stamped the pilot's own-Q target as 0 instead of (limit - loadQ) and the whole slack phase ran against it —
@@ -590,7 +590,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     loopRejected.assign(nS, 0);                   // a device loop routed the scenario to the CPU this pass
     // ---- IncrementalShuntVoltageControl as a DRIVER PHASE (OLF order 10): deadband per controlled bus,
     //      dV/dB from a unit RHS at each needed controller's SHUNT_B identity row (the driver's own
-    //      factors), OLF's adjustB round-robin per group, the section total pinned at the identity row
+    //      factors), OLF's adjustB round-robin per group, the section total held at the identity row
     //      and the static (dG, dB) through the shunt-override list. Groups with several controller
     //      shunts ARE handled (the round-robin runs in the group kernel). ----
     // ---- the FLOW-OBSERVED incremental loops as DRIVER PHASES: kindMask selects the phase controllers
@@ -606,7 +606,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     //      the per-zone trigger on the converged state's own qBuf, one unit-RHS solve per controlled bus on the
     //      driver's own factors for the K and pilot sensitivities, the small dense zone system per scenario,
     //      and the moved targets applied to the controlled buses' V rows (plus the switch-back comparison
-    //      target for a pinned controller). Nothing goes back to the host, so the loop sits in OLF's order
+    //      target for a controller switched to PQ). Nothing goes back to the host, so the loop sits in OLF's order
     //      instead of after the sweep. ----
     if (solvePass) {
         newtonSolve(ctx, drv);
@@ -852,8 +852,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     traceSwitchLog(ctx, drv);
     // ---- OLF_GPU_RL_AUDIT=<pu threshold>: audit the FINAL state against the reactive-limit rule
     //      itself. OLF's outer loop ends only after a check found NOTHING to switch, so in OLF's
-    //      answer every UNPINNED controller sits inside its reactive limits (within the switch
-    //      tolerance). A device scenario that returns with an unpinned controller beyond its limit
+    //      answer every controller still PV sits inside its reactive limits (within the switch
+    //      tolerance). A device scenario that returns with a PV controller beyond its limit
     //      did not reach that fixpoint - it stopped one check short - and that is a defect no
     //      comparison with the CPU is needed to see. Re-fills the diagnostic q at the final state
     //      for every live scenario, refreshes the curve limits at the final targets, and prints one

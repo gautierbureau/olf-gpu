@@ -75,14 +75,14 @@ void traceBatchPass(BatchSolverContext* ctx, DriverPass& drv, int nLoops, bool s
             CUDA_CHECK(cudaMemcpy(unstable.data(), ctx->dOuterLoopUnstable.p, nS, cudaMemcpyDeviceToHost));
             for (char c : unstable) nUnstableScenarios += c ? 1 : 0;
         }
-        int nPinned = 0;
+        int nSwitchedToPq = 0;
         if (ctx->nReactiveLimitEntries > 0) {
             std::vector<char> qLimitType(static_cast<size_t>(ctx->nReactiveLimitEntries) * nS);
             CUDA_CHECK(cudaMemcpy(qLimitType.data(), ctx->dReactiveLimitQLimitType.p, qLimitType.size(), cudaMemcpyDeviceToHost));
-            for (char c : qLimitType) nPinned += c ? 1 : 0;
+            for (char c : qLimitType) nSwitchedToPq += c ? 1 : 0;
         }
-        std::fprintf(stderr, "BATCH_TRACE pass done: outer=%d loop=%d/%d kind=%s solved=%d changedScenarios=%d iters=%d pinned=%d",
-                     outer, loopIdx, nLoops, kindName, solvePass ? 1 : 0, nUnstableScenarios, gLastPassIters, nPinned);
+        std::fprintf(stderr, "BATCH_TRACE pass done: outer=%d loop=%d/%d kind=%s solved=%d changedScenarios=%d iters=%d switchedToPq=%d",
+                     outer, loopIdx, nLoops, kindName, solvePass ? 1 : 0, nUnstableScenarios, gLastPassIters, nSwitchedToPq);
         std::fprintf(stderr, "\n");
     }
 }
@@ -132,7 +132,7 @@ void traceReactiveLimitsSwitches(BatchSolverContext* ctx, DriverPass& drv, std::
                 double q = rowQ[(size_t) s * n + voltageRow[entry]] + loadQ[entry];
                 // the q the decision READ: at reactiveLimitReactivePowerRow when the entry's balance was relocated (a coupler-tree
                 // child reads its parent's DUMMY_Q row), not at its V row - printing the V-row value logged a
-                // relocated child as q=0 while the kernel pinned it on its real q
+                // relocated child as q=0 while the kernel switched it to PQ on its real q
                 static const std::vector<int> reactivePowerRow = [&] {
                     std::vector<int> v(ctx->nReactiveLimitEntries, -1);
                     if (ctx->dReactiveLimitReactivePowerRow.p) CUDA_CHECK(cudaMemcpy(v.data(), ctx->dReactiveLimitReactivePowerRow.p, v.size() * sizeof(int), cudaMemcpyDeviceToHost));
@@ -210,7 +210,7 @@ void traceReactiveLimitsState(BatchSolverContext* ctx, DriverPass& drv, bool inD
         CUDA_CHECK(cudaMemcpy(hMaxQ.data(), ctx->nReactiveCapabilityCurves > 0 ? ctx->dReactiveLimitMaxQPerScenario.p : ctx->dReactiveLimitMaxQ.p, hMaxQ.size() * sizeof(double), cudaMemcpyDeviceToHost));
         std::vector<char> hOuterLoopCheckActive(nS);
         CUDA_CHECK(cudaMemcpy(hOuterLoopCheckActive.data(), ctx->dOuterLoopCheckActive.p, nS, cudaMemcpyDeviceToHost));
-        // The STATE the pin decision is taken at. Without it, a q that disagrees with OLF cannot be
+        // The STATE the PV -> PQ decision is taken at. Without it, a q that disagrees with OLF cannot be
         // told apart from a q evaluated at a different (or not yet converged) operating point - the
         // same quantity at a different V is not evidence of a wrong formula.
         std::vector<double> hStateVector(static_cast<size_t>(n) * nS);
@@ -228,7 +228,7 @@ void traceReactiveLimitsState(BatchSolverContext* ctx, DriverPass& drv, bool inD
                 }
             }
         }
-        // PSG: every pilot-self group's layout this pass — the pilot's pin state, its own row's mode/target,
+        // PSG: every pilot-self group's layout this pass — the pilot's PV/PQ state, its own row's mode/target,
         // whether updatePilotTargetVEquationBatch flipped it (pilotTargetVDeactivated), and every candidate row with its mode, so a
         // "control lost" verdict can be checked against the members it was taken over.
         if (ctx->hasPilotSelf && ctx->dPilotSelfReactiveLimitEntry.p && ctx->structure->nReactiveRelocationGroups > 0 && !ctx->structure->hReactiveRelocationGroupStart.empty()
@@ -387,7 +387,7 @@ void traceReactiveLimitsAudit(BatchSolverContext* ctx, DriverPass& drv, std::vec
         }
         CUDA_CHECK(cudaMemsetAsync(ctx->dReactiveLimitCheckDecision.p, 0, static_cast<size_t>(ctx->nReactiveLimitEntries) * nS, ctx->stream));
         CUDA_CHECK(cudaMemsetAsync(ctx->dOuterLoopUnstable.p, 0, nS, ctx->stream));
-        // The check writes pin state, row modes and row targets. The context is REUSED by the next
+        // The check writes the PV/PQ state, row modes and row targets. The context is REUSED by the next
         // chunk, so the audit stashes everything the kernel can touch and puts it back: an
         // instrument that changes the next chunk's answer is not an instrument. dDx/dB are dead
         // here (the solve is over) and are exactly n*nS wide, so they carry the two big ones.
@@ -479,7 +479,7 @@ void traceReactiveLimitsAudit(BatchSolverContext* ctx, DriverPass& drv, std::vec
                 if (!auditCheckDecision[scenarioEntry]) continue;
                 size_t limitIndex = ctx->nReactiveCapabilityCurves > 0 ? scenarioEntry : (size_t) i;
                 double comparedV = (auditComparedVoltageRow[i] >= 0) ? auditStateVector[(size_t) s * n + auditComparedVoltageRow[i]] : 0.0;
-                // act 1 = a pin this check owed, 2 = an unpin, 3 = a moved limit it owed
+                // act 1 = a PV -> PQ switch this check owed, 2 = a switch back to PV, 3 = a moved limit it owed
                 std::fprintf(stderr, "RL_OWED s=%d entry=%d vrow=%d act=%d ltBefore=%d ltAfter=%d q=%.15e min=%.15e max=%.15e v=%.15e cmpV=%.15e vt=%.15e margin=%.3e\n",
                              s, i, auditVoltageRow[i], (int) auditCheckDecision[scenarioEntry], (int) auditQLimitTypeBefore[scenarioEntry], (int) auditQLimitTypeAfter[scenarioEntry],
                              auditRowQ[(size_t) s * n + auditVoltageRow[i]] + auditLoadQ[i], auditMinQ[limitIndex], auditMaxQ[limitIndex],
@@ -496,7 +496,7 @@ void traceReactiveLimitsAudit(BatchSolverContext* ctx, DriverPass& drv, std::vec
             if (!allLive[s]) continue;
             for (int i = 0; i < ctx->nReactiveLimitEntries; i++) {
                 size_t scenarioEntry = (size_t) s * ctx->nReactiveLimitEntries + i;
-                if (auditQLimitTypeBefore[scenarioEntry] != 0) continue;                  // pinned: its row holds the limit by construction
+                if (auditQLimitTypeBefore[scenarioEntry] != 0) continue;                  // switched to PQ: its row holds the limit by construction
                 if (!auditIslanded.empty() && auditIslanded[scenarioEntry]) continue;     // not a controller in this component
                 int m = auditMode[(size_t) s * n + auditVoltageRow[i]];
                 if (m == GpuRowMode::BUS_TARGET_Q) continue;  // row owns its own Q balance this scenario

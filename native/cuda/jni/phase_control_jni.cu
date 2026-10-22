@@ -6,14 +6,14 @@
 #include "../common/codes/gpu_controlled_flow.cuh"
 
 /** Upload the FLOW-OBSERVED incremental controllers (RPC / incremental phase). Per controller: kind
- *  (0 RPC, 1 phase CONTROLLER, 2 phase LIMITER), pinRow (the rho/a1 identity row), tapColumn (6 r1 / 7 a1),
+ *  (0 RPC, 1 phase CONTROLLER, 2 phase LIMITER), targetRow (the rho/a1 identity row), tapColumn (6 r1 / 7 a1),
  *  side (a GpuTwoSides) of the controlled flow, targetValue, halfTargetDeadband, elem (controller's global element),
  *  controlledElement (controlled branch's global element — a closed branch), tapStart/tapRows ([y g1 g2 b1 b2 ksi r1
  *  a1] per tap), baseTap, maxShift. Returns 1 when the kernel loops own them. */
 extern "C" JNIEXPORT jint JNICALL
 OLF_JNI(ac_outerloop_gpu, PhaseControlNative, setBatchFlowControllers)(
         JNIEnv* env, jclass, jlong handle,
-        jintArray jKind, jintArray jPinRow, jintArray jTapColumn, jintArray jSide, jdoubleArray jTargetValue, jdoubleArray jHalfTargetDeadband,
+        jintArray jKind, jintArray jTargetRow, jintArray jTapColumn, jintArray jSide, jdoubleArray jTargetValue, jdoubleArray jHalfTargetDeadband,
         jintArray jElem, jintArray jControlledElement, jintArray jTapStart, jdoubleArray jTapRows, jintArray jBaseTap, jintArray jMaxTapShift) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx == nullptr) {
@@ -36,7 +36,7 @@ OLF_JNI(ac_outerloop_gpu, PhaseControlNative, setBatchFlowControllers)(
     std::vector<int> tapColumn, side, controlledElement, maxShift;
     std::vector<double> targetValue, halfTargetDeadband;
     readI(jKind, ctx->hIncrementalFlowControlControlledFlow);
-    readI(jPinRow, ctx->hIncrementalFlowControlPinRow);
+    readI(jTargetRow, ctx->hIncrementalFlowControlTargetRow);
     readI(jTapColumn, tapColumn);
     readI(jSide, side);
     readD(jTargetValue, targetValue);
@@ -57,7 +57,7 @@ OLF_JNI(ac_outerloop_gpu, PhaseControlNative, setBatchFlowControllers)(
         if (ctx->hIncrementalFlowControlControlledFlow[c] == GpuControlledFlow::REACTIVE_POWER) ctx->nIncrementalTransformerReactivePowerControlControllerBranches++; else ctx->nIncrementalPhaseControlControllerBranches++;
     }
     ctx->dIncrementalFlowControlControlledFlow.upload(ctx->hIncrementalFlowControlControlledFlow.data(), nc * sizeof(int));
-    ctx->dIncrementalFlowControlPinRow.upload(ctx->hIncrementalFlowControlPinRow.data(), nc * sizeof(int));
+    ctx->dIncrementalFlowControlTargetRow.upload(ctx->hIncrementalFlowControlTargetRow.data(), nc * sizeof(int));
     ctx->dIncrementalFlowControlTapColumn.upload(tapColumn.data(), nc * sizeof(int));
     ctx->dIncrementalFlowControlControlledSide.upload(side.data(), nc * sizeof(int));
     ctx->dIncrementalFlowControlTargetValue.upload(targetValue.data(), nc * sizeof(double));

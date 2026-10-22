@@ -57,7 +57,7 @@ __device__ __forceinline__ bool rowIsFrozen(int nFrozen, const int* frozenSlotRo
 
 // A DISTR_Q controller that stops controlling in ONE scenario (its bus lost its last voltage
 // generator while the group's other controllers survive). OLF's updateReactiveKeys zeroes its key
-// and renormalizes over the rest — the same treatment a PINNED member gets, except its target
+// and renormalizes over the rest — the same treatment a member SWITCHED TO PQ gets, except its target
 // contribution stays its own targetQ instead of a reactive limit.
 __device__ __forceinline__ bool distrQMemberInactive(int nInact, const int* inactSlotMember, int s, int m) {
     for (int k = 0; k < nInact; k++) {

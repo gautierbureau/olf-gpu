@@ -45,7 +45,7 @@ void buildZeroImpedanceRelocationDestinations(const SharedStructure* structure, 
             // STOCK PAIR for this endpoint's +-dummyQ, exactly as the cb/sh raw-q families encode it
             // (stockPairOut / stockPairPick): a DISTR_Q controller whose own Q balance is SUPPRESSED
             // and relocated onto its PARENT coupler's dummy row has three destinations for this
-            // coupler's dummy term — the parent's DUMMY_Q row while a pin holds its balance there
+            // coupler's dummy term — the parent's DUMMY_Q row while a PV -> PQ switch holds its balance there
             // (mode 4), its OWN row while the parent coupler is dead this scenario (the dummy row is
             // an identity and the balance is back home), nothing while it shares. The plain two-way
             // alternate selected on the dummy row sent the term INTO the dead coupler's identity row

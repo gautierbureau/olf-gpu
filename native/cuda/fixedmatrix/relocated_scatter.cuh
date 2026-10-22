@@ -15,7 +15,7 @@
 namespace olfgpu {
 
 // zero-impedance q-slot dynamic pick (F/J slots {0..3} per element): group -> mode-scan candidate slot,
-// two-way -> alt when the select row is identity/pinned this scenario, else the frozen dest.
+// two-way -> alt when the select row is an identity or a BUS_TARGET_Q this scenario, else the frozen dest.
 __device__ inline int zeroImpedanceRelocationDestination(int frozen, int slot, const int* alt, const int* sel,
                                 const int* mode, ReactiveRelocationTables rt) {
     int rg = rt.relocationGroup != nullptr ? rt.relocationGroup[slot] : -1;
@@ -27,7 +27,7 @@ __device__ inline int zeroImpedanceRelocationDestination(int frozen, int slot, c
             return stockPairPick(mode[rg], rt.relocationCandidateDestinations, -rt.relocationCandidateOffset[slot] - 1, frozen, mode, rt.relocatedChildOwnRow, rg);
         }
         if (rt.pilotSelfCarrierSkip != nullptr && rt.pilotSelfCarrierSkip[rg]) {
-            return -1;                                       // pilot-self group, pilot unpinned: no raw q
+            return -1;                                       // pilot-self group, pilot still PV: no raw q
         }
         return rt.relocationCandidateDestinations[rt.relocationCandidateOffset[slot] + chooseCarrierRowInSubgroup(rg, rt.reactiveRelocationGroupStart, rt.reactiveRelocationCandidateRows, mode, rt.distrQSubgroup, rt.reactiveRelocationDistrQMemberStart)];
     }
@@ -41,7 +41,7 @@ __device__ inline int zeroImpedanceRelocationDestination(int frozen, int slot, c
 // Dynamic Q-relocation scatter: when an output's frozen Q row is an identity this scenario
 // (mode[selectorRow] == 0), route it to the alternate candidate row instead. mode is this scenario's
 // row-mode slice (length n). dest/alternateDestination/selectorRow share the per-output layout of scatterAdd.
-// Mode 4 ("pinned remote gen-VC member" — the member row hosts its OWN Q balance, plan-B2) also
+// Mode 4 ("remote gen-VC member switched to PQ" — the member row hosts its OWN Q balance, plan-B2) also
 // selects the alternate: those entries carry a SUPPRESSED frozen dest and their own row as the
 // alternate, with selectorRow = the member row itself. TVC/shunt select rows never carry mode 4.
 static __device__ void scatterAddRelocated(int outputCount, const int* dest, const int* alternateDestination, const int* selectorRow,
@@ -55,7 +55,7 @@ static __device__ void scatterAddRelocated(int outputCount, const int* dest, con
         } else if (rg >= 0 && rt.relocationCandidateOffset[eOff + k] < 0) {        // STOCK PAIR: group slot holds the dummy ROW
             d = stockPairPick(mode[rg], rt.relocationCandidateDestinations, -rt.relocationCandidateOffset[eOff + k] - 1, dest[k], mode, rt.relocatedChildOwnRow, rg);
         } else if (rg >= 0 && rt.pilotSelfCarrierSkip != nullptr && rt.pilotSelfCarrierSkip[rg]) {
-            continue;                                        // pilot-self group, pilot unpinned: no raw q
+            continue;                                        // pilot-self group, pilot still PV: no raw q
         } else if (rg >= 0) {
             d = rt.relocationCandidateDestinations[rt.relocationCandidateOffset[eOff + k] + chooseCarrierRowInSubgroup(rg, rt.reactiveRelocationGroupStart, rt.reactiveRelocationCandidateRows, mode, rt.distrQSubgroup, rt.reactiveRelocationDistrQMemberStart)];
         } else {
@@ -87,7 +87,7 @@ static __device__ void scatterAddFRelocated(int nres, const int* dest, const int
         } else if (rg >= 0 && rt.relocationCandidateOffset[eOff + idx] < 0) {      // STOCK PAIR: group slot holds the dummy ROW
             d = stockPairPick(mode[rg], rt.relocationCandidateDestinations, -rt.relocationCandidateOffset[eOff + idx] - 1, dest[idx], mode, rt.relocatedChildOwnRow, rg);
         } else if (rg >= 0 && rt.pilotSelfCarrierSkip != nullptr && rt.pilotSelfCarrierSkip[rg]) {
-            continue;                                        // pilot-self group, pilot unpinned: no raw q
+            continue;                                        // pilot-self group, pilot still PV: no raw q
         } else if (rg >= 0) {
             d = rt.relocationCandidateDestinations[rt.relocationCandidateOffset[eOff + idx] + chooseCarrierRowInSubgroup(rg, rt.reactiveRelocationGroupStart, rt.reactiveRelocationCandidateRows, mode, rt.distrQSubgroup, rt.reactiveRelocationDistrQMemberStart)];
         } else {

@@ -41,7 +41,11 @@ public final class VoltageControlReMerge {
                     *  controlled bus OLF elects as the cluster's new main: their rows stay the base table's sharing rows
                     *  (the new pilot's balance rides the first free one through its dependent-pilot pool) and their
                     *  reactive-limit check reads the new pilot's voltage against the new pilot's target. */
-                   java.util.LinkedHashMap<LfBus, LfBus> reMergedRemoteControllers) {
+                   java.util.LinkedHashMap<LfBus, LfBus> reMergedRemoteControllers,
+                   /** Per elected main of a cluster whose controllers are its own sections: the cluster's controllers
+                    *  other than the main, in OLF's merged order. The first enabled of them takes the voltage target
+                    *  while the main's own controller is pinned. */
+                   java.util.LinkedHashMap<LfBus, List<LfBus>> otherControllers) {
 
         /** Whether OLF's re-merge changes any control at all (or the device refuses the shape). */
         boolean changesControls() {
@@ -85,6 +89,7 @@ public final class VoltageControlReMerge {
         java.util.Set<LfBus> remoteCluster = new java.util.LinkedHashSet<>();
         java.util.LinkedHashMap<LfBus, Integer> subgroupOf = new java.util.LinkedHashMap<>();
         java.util.LinkedHashMap<LfBus, LfBus> reMergedRemoteControllers = new java.util.LinkedHashMap<>();
+        java.util.LinkedHashMap<LfBus, List<LfBus>> otherControllers = new java.util.LinkedHashMap<>();
         for (var main : mains) {
             java.util.Map<LfBus, com.powsybl.openloadflow.network.VoltageControl<LfBus>> controlOf = new java.util.LinkedHashMap<>();
             controlOf.put(main.getControlledBus(), main);
@@ -130,9 +135,7 @@ public final class VoltageControlReMerge {
                     continue;                                // the base main keeps this cluster
                 }
                 var newMain = cluster.stream().map(controlOf::get)
-                        .sorted(java.util.Comparator.<com.powsybl.openloadflow.network.VoltageControl<LfBus>>comparingDouble(
-                                com.powsybl.openloadflow.network.VoltageControl::getTargetValue).reversed()
-                                .thenComparing(voltageControl -> voltageControl.getControlledBus().getId()))
+                        .sorted(MERGE_ORDER)
                         .findFirst().orElseThrow();
                 boolean local = cluster.size() == 1
                         && newMain.getControllerElements().stream().allMatch(controller -> controller == newMain.getControlledBus());
@@ -166,7 +169,7 @@ public final class VoltageControlReMerge {
                                     contingencyId, main.getControlledBus().getId(), cluster.stream().map(LfBus::getId).toList());
                         }
                         return new ReMerged(pv, left, "VC_REMERGE_REMOTE_SUBGROUP", remoteMains, remoteCluster, subgroupOf,
-                                reMergedRemoteControllers);
+                                reMergedRemoteControllers, otherControllers);
                     }
                     remoteMains.put(newMain.getControlledBus(), newMain.getTargetValue());
                     remoteCluster.addAll(cluster);
@@ -214,6 +217,7 @@ public final class VoltageControlReMerge {
                         }
                     }
                     remoteMains.put(newMain.getControlledBus(), newMain.getTargetValue());
+                    otherControllers.put(newMain.getControlledBus(), otherControllersInMergedOrder(cluster, controlOf, newMain.getControlledBus()));
                     remoteCluster.addAll(cluster);
                     for (LfBus controlledBus : controlOf.keySet()) {   // the controllers the group LOST: the islanded/disabled
                         if (!alive.contains(controlledBus)) {          // sections' own controllers leave the group's keys
@@ -242,7 +246,27 @@ public final class VoltageControlReMerge {
                 }
             }
         }
-        return new ReMerged(pv, left, null, remoteMains, remoteCluster, subgroupOf, reMergedRemoteControllers);
+        return new ReMerged(pv, left, null, remoteMains, remoteCluster, subgroupOf, reMergedRemoteControllers, otherControllers);
+    }
+
+    /** OLF's merge order of a zero-impedance network's voltage controls (LfZeroImpedanceNetwork
+     *  .updateVoltageControlMergeStatus): highest target first, then the controlled bus id. The first one is the MAIN. */
+    private static final java.util.Comparator<com.powsybl.openloadflow.network.VoltageControl<LfBus>> MERGE_ORDER =
+            java.util.Comparator.<com.powsybl.openloadflow.network.VoltageControl<LfBus>>comparingDouble(
+                    com.powsybl.openloadflow.network.VoltageControl::getTargetValue).reversed()
+                    .thenComparing(voltageControl -> voltageControl.getControlledBus().getId());
+
+    /** The controllers of a re-merged cluster other than its elected main, in OLF's merged order
+     *  (VoltageControl.getMergedControllerElements: the main control's controllers, then each dependent's). */
+    private static List<LfBus> otherControllersInMergedOrder(List<LfBus> cluster,
+                                                            java.util.Map<LfBus, com.powsybl.openloadflow.network.VoltageControl<LfBus>> controlOf,
+                                                            LfBus main) {
+        List<LfBus> others = new ArrayList<>();
+        cluster.stream().map(controlOf::get).sorted(MERGE_ORDER)
+                .forEach(voltageControl -> voltageControl.getControllerElements().stream()
+                        .filter(controller -> controller != main && !others.contains(controller))
+                        .forEach(others::add));
+        return others;
     }
 
     /** Whether the generator's reactive limits are a capability CURVE (they then depend on its target P). */

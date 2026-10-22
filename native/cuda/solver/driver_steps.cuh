@@ -30,6 +30,9 @@ const int* pilotSelfReactiveLimitEntryOrNull(BatchSolverContext* ctx);
 // Lay a remote-voltage-control group's rows out from the current pin states.
 void launchPilotTargetVEquationUpdate(BatchSolverContext* ctx, DriverPass& drv, bool staticLimits = false, bool continuedPins = false);
 void launchDistrQTargetsInner(BatchSolverContext* ctx, DriverPass& drv);
+// The row holding each re-merged control's voltage target (updateReMergedVoltageTargetRowBatch). solveStart: the solve's
+// first layout, every target on its main's own row before it is laid out.
+void launchReMergedVoltageTargetRowUpdate(BatchSolverContext* ctx, DriverPass& drv, bool solveStart);
 
 // OLF_GPU_REJECT_TRACE=1: WHY a scenario left the batch for the CPU replay (status -2). The census
 // counts them under one tag ("RUNTIME:status=-2"); this names the gate, per slot, so the Java side

@@ -179,13 +179,18 @@ final class VoltageControlReMergeEntries {
             if (blockCovers) {
                 continue;
             }
+            // the cluster's other controllers that can pin: the first enabled one takes the identity while the main pins
+            int[] otherControllerEntries = reMerged.otherControllers().getOrDefault(e.getKey(), List.of()).stream()
+                    .mapToInt(controller -> gpuData.reactiveLimits().entryOf(controller.getNum()))
+                    .filter(entry -> entry >= 0)
+                    .toArray();
             if (reloc != null) {
                 // its own row carries a LIVE coupler's ZERO_V: the identity goes on the parent's DUMMY_Q row as
                 // a cross identity (rte6515 BUS-6029_BBS_1/2: the elected main two couplers from the island)
-                out.add(reMergedCrossEntry(reloc[1], e.getValue(), reactiveLimitEntry, false, 0));
+                out.add(reMergedCrossEntry(reloc[1], e.getValue(), reactiveLimitEntry, false, 0, otherControllerEntries));
                 continue;
             }
-            out.add(reMergedPvEntry(vVar.getRow(), e.getValue(), reactiveLimitEntry));
+            out.add(reMergedPvEntry(vVar.getRow(), e.getValue(), reactiveLimitEntry, otherControllerEntries));
         }
         return out;
     }
@@ -220,10 +225,12 @@ final class VoltageControlReMergeEntries {
         return out;
     }
 
-    /** Row-mode-only GenOutage: the bus's V row becomes a VOLTAGE IDENTITY at {@code vTarget} (a re-merged control). */
-    static GenOutage reMergedPvEntry(int vRow, double vTarget, int reactiveLimitEntry) {
+    /** Row-mode-only GenOutage: the bus's V row becomes a VOLTAGE IDENTITY at {@code vTarget} (a re-merged control);
+     *  {@code otherControllerEntries}: the reactive-limit entries of the control's other controllers, in OLF's merged
+     *  order, that take the identity while the bus's own controller is pinned (empty for a control of one bus). */
+    static GenOutage reMergedPvEntry(int vRow, double vTarget, int reactiveLimitEntry, int[] otherControllerEntries) {
         return new GenOutage(-1, 0, vRow, vTarget, true, true,
-                -1, 0, 0, 0, 0, reactiveLimitEntry, 0, 0, false, java.util.Set.of(), 0, 0, 0, -1, new int[0],
+                -1, 0, 0, 0, 0, reactiveLimitEntry, 0, 0, false, java.util.Set.of(), 0, 0, 0, -1, otherControllerEntries,
                 new int[0], new double[0], GenOutage.ROW_V_IDENTITY, -1, 0, -1, 0, -1, 0, -1, -1, 0, false, -1, 0, 0);
     }
 
@@ -238,11 +245,13 @@ final class VoltageControlReMergeEntries {
 
     /** A re-merged control whose own V row hosts a LIVE coupler's ZERO_V (tasks #70, VC_REMERGE_RELOC_VROW): its
      *  identity is a CROSS identity on the parent coupler's DUMMY_Q row (mode 6, the bus's V column), or — base
-     *  pinned — that row starts as the balance at the pinned value and the entry unpins back to the cross form. */
-    static GenOutage reMergedCrossEntry(int dummyQRow, double vTarget, int reactiveLimitEntry, boolean pinned, double qTarget) {
+     *  pinned — that row starts as the balance at the pinned value and the entry unpins back to the cross form.
+     *  {@code otherControllerEntries} as in {@link #reMergedPvEntry}. */
+    static GenOutage reMergedCrossEntry(int dummyQRow, double vTarget, int reactiveLimitEntry, boolean pinned, double qTarget,
+                                        int[] otherControllerEntries) {
         return pinned ? reMergedPinnedPvEntry(dummyQRow, qTarget, vTarget, reactiveLimitEntry)
                 : new GenOutage(-1, 0, dummyQRow, vTarget, true, true,
-                    -1, 0, 0, 0, 0, reactiveLimitEntry, 0, 0, false, java.util.Set.of(), 0, 0, 0, -1, new int[0],
+                    -1, 0, 0, 0, 0, reactiveLimitEntry, 0, 0, false, java.util.Set.of(), 0, 0, 0, -1, otherControllerEntries,
                     new int[0], new double[0], GenOutage.ROW_CROSS_V_IDENTITY, -1, 0, -1, 0, -1, 0, -1, -1, 0, false, -1, 0, 0);
     }
 
@@ -251,12 +260,12 @@ final class VoltageControlReMergeEntries {
      *  base-pinned form when the base pinned it ({@code switchedPvToPqInBase}), else the plain voltage identity. */
     static GenOutage pvEntry(int vRow, int crossRow, double vTarget, int reactiveLimitEntry, boolean switchedPvToPqInBase, double qTarget) {
         if (crossRow >= 0) {
-            return reMergedCrossEntry(crossRow, vTarget, reactiveLimitEntry, switchedPvToPqInBase, qTarget);
+            return reMergedCrossEntry(crossRow, vTarget, reactiveLimitEntry, switchedPvToPqInBase, qTarget, new int[0]);
         }
         if (switchedPvToPqInBase) {
             return reMergedPinnedPvEntry(vRow, qTarget, vTarget, reactiveLimitEntry);
         }
-        return reMergedPvEntry(vRow, vTarget, reactiveLimitEntry);
+        return reMergedPvEntry(vRow, vTarget, reactiveLimitEntry, new int[0]);
     }
 
     /** A base-pinned member of a re-merged cluster with no enabled controller: no row change, unpin forbidden. */

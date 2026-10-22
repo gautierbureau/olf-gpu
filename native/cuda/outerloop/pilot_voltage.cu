@@ -345,4 +345,110 @@ void launchPilotTargetVEquationUpdate(BatchSolverContext* ctx, DriverPass& drv, 
     }
 }
 
+// OLF keeps a re-merged control's BUS_TARGET_V on its elected main while ANY merged controller is enabled, and the FIRST
+// enabled one (merged order: the main's own controllers, then each dependent control's) carries no DISTR_Q
+// (AcEquationSystemCreator.updateRemoteVoltageControlEquations). On the device the main's own row holds the voltage
+// target while the main's controller is enabled, and that controller's pin turns the row into its own reactive
+// balance. The target then belongs on the first enabled controller's sharing row, as an identity on that controller's
+// own voltage, which the cluster's couplers tie to the main's (a cross identity when the row is its relocated DUMMY_Q).
+// Nothing used to move it, so a pinned main left the cluster with no voltage equation: on the double-star fixture under
+// nested dissection, g4 unpinned on a zero voltage margin in the pass g3 pinned, and the sections floated to 399.78 kV
+// against OLF's 400.00; under AMD, a main pinning beside a controller with headroom made the solve diverge (status -2,
+// CPU replay). The holder is recomputed from the pin states every pass, so it always is OLF's first enabled controller;
+// with every controller pinned no row holds the target, as OLF deactivates BUS_TARGET_V. While a controller holds it,
+// the main's switch-back reads the voltage that identity holds (reactiveLimitReMergedVoltageRow), as OLF reads the main's
+// own, identity-held voltage: the main's is then only tied to it through the couplers, and a last-bit excess on a zero
+// margin would unpin it. One thread per re-merged control.
+__global__ void updateReMergedVoltageTargetRowBatch(int nReMergedVoltageTargets, int nScenarios, int n, int nReactiveLimitEntries,
+                                                    const int* reMergedVoltageTargetSlot, const int* reMergedVoltageTargetMainEntry,
+                                                    const double* reMergedVoltageTargetValue, const int* reMergedVoltageTargetControllerStart,
+                                                    const int* reMergedVoltageTargetControllerCount, const int* reMergedVoltageTargetControllerEntries,
+                                                    const int* reactiveLimitVoltageRow, const int* reactiveLimitReactivePowerRow, const int* relocatedChildOwnRow,
+                                                    const char* limitType, const char* reactiveLimitIslanded, int nFrozen, const int* frozenSlotRow,
+                                                    int* reMergedVoltageTargetHolder, char* reactiveLimitHoldsReMergedVoltageTarget,
+                                                    int* reactiveLimitReMergedVoltageRow, int* mode, double* target,
+                                                    const char* outerLoopCheckActive, char* switched) {
+    int e = blockIdx.x * blockDim.x + threadIdx.x;
+    if (e >= nReMergedVoltageTargets) return;
+    int s = reMergedVoltageTargetSlot[e];
+    if (s < 0 || s >= nScenarios || !outerLoopCheckActive[s]) return;
+    auto enabled = [&](int entry) {
+        size_t k = (size_t) s * nReactiveLimitEntries + entry;
+        return limitType[k] == GpuQLimitType::NONE && !(reactiveLimitIslanded != nullptr && reactiveLimitIslanded[k]);
+    };
+    // the row an entry's reactive equation lives on this scenario: its relocated DUMMY_Q row, or its own voltage row once
+    // the contingency opened that coupler (the dummy row a DUMMY_TARGET identity then) - the reactive-limit kernel's rule
+    auto sharingRow = [&](int entry) {
+        int r = reactiveLimitReactivePowerRow != nullptr ? reactiveLimitReactivePowerRow[entry] : -1;
+        if (r >= 0 && r != reactiveLimitVoltageRow[entry] && mode[(size_t) s * n + r] != GpuRowMode::FIXED_VARIABLE) {
+            return r;
+        }
+        return reactiveLimitVoltageRow[entry];
+    };
+    const int* controllers = reMergedVoltageTargetControllerEntries + reMergedVoltageTargetControllerStart[e];
+    const int held = reMergedVoltageTargetHolder[e];
+    int wanted = -1;
+    if (!enabled(reMergedVoltageTargetMainEntry[e])) {
+        for (int c = 0; c < reMergedVoltageTargetControllerCount[e] && wanted < 0; c++) {
+            int entry = controllers[c];
+            int r = sharingRow(entry);
+            int m = mode[(size_t) s * n + r];
+            // an identity on the controller's own voltage: its own row, or the relocated row whose cross slot is that voltage
+            bool hostable = r == reactiveLimitVoltageRow[entry]
+                    || (relocatedChildOwnRow != nullptr && relocatedChildOwnRow[r] == reactiveLimitVoltageRow[entry]);
+            if (enabled(entry) && hostable && !rowIsFrozen(nFrozen, frozenSlotRow, s, r)
+                    && (m == GpuRowMode::EQUATION || (held == c && holdsFixedVariable(m)))) {
+                wanted = c;
+            }
+        }
+    }
+    if (held == wanted) return;
+    if (held >= 0) {                                         // back to its sharing equation (its DISTR_Q target follows)
+        int entry = controllers[held];
+        size_t r = (size_t) s * n + sharingRow(entry);
+        if (holdsFixedVariable(mode[r])) {                   // ...unless its own pin made the row its balance already
+            mode[r] = GpuRowMode::EQUATION;
+        }
+        reactiveLimitHoldsReMergedVoltageTarget[(size_t) s * nReactiveLimitEntries + entry] = 0;
+    }
+    size_t mainKey = (size_t) s * nReactiveLimitEntries + reMergedVoltageTargetMainEntry[e];
+    if (wanted >= 0) {
+        int entry = controllers[wanted];
+        int r = sharingRow(entry);
+        mode[(size_t) s * n + r] = fixedVariableMode(r != reactiveLimitVoltageRow[entry]);
+        target[(size_t) s * n + r] = reMergedVoltageTargetValue[e];
+        reactiveLimitHoldsReMergedVoltageTarget[(size_t) s * nReactiveLimitEntries + entry] = 1;
+        reactiveLimitReMergedVoltageRow[mainKey] = reactiveLimitVoltageRow[entry];
+    } else {
+        reactiveLimitReMergedVoltageRow[mainKey] = -1;
+    }
+    reMergedVoltageTargetHolder[e] = wanted;
+    switched[s] = 1;
+}
+
+void launchReMergedVoltageTargetRowUpdate(BatchSolverContext* ctx, DriverPass& drv, bool solveStart) {
+    if (ctx->nReMergedVoltageTargets == 0) {
+        return;
+    }
+    const int& n = drv.n;
+    const int& nS = drv.nS;
+    if (solveStart) {
+        size_t scenarioEntries = static_cast<size_t>(ctx->nScenarios) * ctx->nReactiveLimitEntries;
+        CUDA_CHECK(cudaMemsetAsync(ctx->dReMergedVoltageTargetHolder.p, 0xFF, static_cast<size_t>(ctx->nReMergedVoltageTargets) * sizeof(int), ctx->stream));
+        CUDA_CHECK(cudaMemsetAsync(ctx->dReactiveLimitHoldsReMergedVoltageTarget.p, 0, scenarioEntries, ctx->stream));
+        CUDA_CHECK(cudaMemsetAsync(ctx->dReactiveLimitReMergedVoltageRow.p, 0xFF, scenarioEntries * sizeof(int), ctx->stream));
+    }
+    updateReMergedVoltageTargetRowBatch<<<grid(ctx->nReMergedVoltageTargets), BLOCK, 0, ctx->stream>>>(ctx->nReMergedVoltageTargets, nS, n,
+            ctx->nReactiveLimitEntries, ctx->dReMergedVoltageTargetSlot.as<int>(), ctx->dReMergedVoltageTargetMainEntry.as<int>(),
+            ctx->dReMergedVoltageTargetValue.as<double>(), ctx->dReMergedVoltageTargetControllerStart.as<int>(),
+            ctx->dReMergedVoltageTargetControllerCount.as<int>(), ctx->dReMergedVoltageTargetControllerEntries.as<int>(),
+            ctx->dReactiveLimitVoltageRow.as<int>(), ctx->dReactiveLimitReactivePowerRow.p ? ctx->dReactiveLimitReactivePowerRow.as<int>() : nullptr,
+            ctx->structure->dRelocatedChildOwnRow.p ? ctx->structure->dRelocatedChildOwnRow.as<int>() : nullptr,
+            ctx->dReactiveLimitQLimitType.as<char>(), ctx->nReactiveLimitIslanded > 0 ? ctx->dReactiveLimitIslanded.as<char>() : nullptr,
+            ctx->nFrozenRow, ctx->nFrozenRow ? ctx->dFrozenRow.as<int>() : nullptr,
+            ctx->dReMergedVoltageTargetHolder.as<int>(), ctx->dReactiveLimitHoldsReMergedVoltageTarget.as<char>(),
+            ctx->dReactiveLimitReMergedVoltageRow.as<int>(), ctx->dMode.as<int>(), ctx->dTarget.as<double>(),
+            ctx->dOuterLoopCheckActive.as<char>(), ctx->dOuterLoopUnstable.as<char>());
+}
+
 }  // namespace olfgpu

@@ -51,7 +51,8 @@ __global__ void reactiveLimitsBatch(const double* secondaryVoltageControlReactiv
                                     const int* pilotSelfReactiveLimitEntry, int nReactiveRelocationGroups,
                                     const char* reactiveLimitLocalOverride, const double* reactiveLimitLocalTargetV,
                                     const char* reactiveLimitPqPvSwitchForbidden, char* unpinBad, const char* reactiveLimitFlags,
-                                    const int* reactiveLimitComparedVoltageRowOverride) {
+                                    const int* reactiveLimitComparedVoltageRowOverride,
+                                    const char* reactiveLimitHoldsReMergedVoltageTarget, const int* reactiveLimitReMergedVoltageRow) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nReactiveLimitEntries * nScenarios) return;
     int i = tid % nReactiveLimitEntries;
@@ -130,8 +131,11 @@ __global__ void reactiveLimitsBatch(const double* secondaryVoltageControlReactiv
         // is a remote member's. As a LOCAL entry its pin landed on mode 1, an EMPTY row.
         int pvForm = reactiveLimitVoltageControlRole[i] == GpuVoltageControlRole::PILOT_SELF ? GpuRowMode::FIXED_VARIABLE : GpuRowMode::EQUATION;
         bool enrolledPilot = reactiveLimitVoltageControlRole[i] == GpuVoltageControlRole::PILOT_SELF && isEnrolledPilot(pilotSelfReactiveLimitEntry, nReactiveRelocationGroups, i);
+        // its sharing row may hold its re-merged control's voltage target (updateReMergedVoltageTargetRowBatch): it is
+        // the control's first enabled controller then, and tested like any other
+        bool holdsVoltageTarget = reactiveLimitHoldsReMergedVoltageTarget != nullptr && reactiveLimitHoldsReMergedVoltageTarget[rst];
         if (limitType[rst] == GpuQLimitType::NONE) {
-            if (mode[qidx] != pvForm) return;                // islanded / frozen this scenario
+            if (mode[qidx] != pvForm && !(holdsVoltageTarget && holdsFixedVariable(mode[qidx]))) return;   // islanded / frozen this scenario
             double q = qBuf[qidx] + reactiveLimitLoadQ[remoteLimitIndex];            // own q via fillRemoteMemberQBatch
             // voltageRemoteControlRobustMode (ReactiveLimitsOuterLoop.checkControllerBus): the criteria
             // below test this REMOTE controller's OWN voltage — the same x row the quadratic SVC delta
@@ -316,7 +320,9 @@ __global__ void reactiveLimitsBatch(const double* secondaryVoltageControlReactiv
             passSwitched[scenarioEntry] = 1;
         }
     } else if (limitType[scenarioEntry] != GpuQLimitType::NONE) {  // pinned at a limit — check switchback
-        double v = x[idx];
+        // a re-merged main whose control's voltage target another controller holds reads the voltage that target holds
+        int heldVoltageRow = reactiveLimitReMergedVoltageRow != nullptr ? reactiveLimitReMergedVoltageRow[scenarioEntry] : -1;
+        double v = heldVoltageRow >= 0 ? x[(size_t) s * n + heldVoltageRow] : x[idx];
         double targetV = localOv ? reactiveLimitLocalTargetV[(size_t) s * nReactiveLimitEntries + i]
                   : reactiveLimitTargetVOf(nReactiveLimitTargetVOverrides, reactiveLimitTargetVOverrideScenarioEntry, reactiveLimitTargetVOverrideValue, secondaryVoltageControlReactiveLimitTargetV, nReactiveLimitEntries, s, i, reactiveLimitTargetV[i]);
         // OLF never back-switches a slope-SVC bus: checkPqBus runs with
@@ -555,7 +561,9 @@ void reactiveLimitsCheck(BatchSolverContext* ctx, DriverPass& drv, int loopKind)
                 ctx->nReactiveLimitLocalOverrides > 0 ? ctx->dReactiveLimitLocalTargetV.as<double>() : nullptr,
                 ctx->nReactiveLimitPqPvSwitchForbidden > 0 ? ctx->dReactiveLimitPqPvSwitchForbidden.as<char>() : nullptr, ctx->nReactiveLimitPqPvSwitchForbidden > 0 ? ctx->dReactiveLimitPqPvSwitchRejected.as<char>() : nullptr,
                 ctx->dReactiveLimitFlags.p ? ctx->dReactiveLimitFlags.as<char>() : nullptr,
-                ctx->nReactiveLimitComparedVoltageRowOverrides > 0 ? ctx->dReactiveLimitComparedVoltageRowOverride.as<int>() : nullptr);
+                ctx->nReactiveLimitComparedVoltageRowOverrides > 0 ? ctx->dReactiveLimitComparedVoltageRowOverride.as<int>() : nullptr,
+                ctx->nReMergedVoltageTargets > 0 ? ctx->dReactiveLimitHoldsReMergedVoltageTarget.as<char>() : nullptr,
+                ctx->nReMergedVoltageTargets > 0 ? ctx->dReactiveLimitReMergedVoltageRow.as<int>() : nullptr);
         if (ctx->nReactiveLimitPilotSelfEntries > 0) {
             // a pilot that is its own controller pinned while a member of its group is not (or
             // the reverse): the device has no row for OLF's layout of that state - CPU replay
@@ -622,6 +630,9 @@ void reactiveLimitsCheck(BatchSolverContext* ctx, DriverPass& drv, int loopKind)
         // 1.0811, 3.2 kV at VL-1525 and 1.98e-2 MW of distributed power. Mode 4 - the own-Q balance the
         // member ALTERNATE dest routes the pilot's q to - is what the outage composer armed; run first, the
         // pilot-self kernel then finds the row already off its identity and leaves it alone.
+        // A re-merged control's voltage target follows its first enabled controller first: the DISTR_Q targets below
+        // are then written on the sharing rows that are left.
+        launchReMergedVoltageTargetRowUpdate(ctx, drv, false);
         if (ctx->nPilotFlip > 0) {                      // pilot stopped controlling AND every survivor pinned
             pilotRowAllPinnedBatch<<<grid(ctx->nPilotFlip), BLOCK, 0, ctx->stream>>>(
                     ctx->nPilotFlip, nS, n, ctx->nReactiveLimitEntries,

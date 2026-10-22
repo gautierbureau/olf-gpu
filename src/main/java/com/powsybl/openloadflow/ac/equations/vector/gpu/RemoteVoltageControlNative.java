@@ -66,6 +66,14 @@ public final class RemoteVoltageControlNative {
     public static native void setBatchPilotAllPinnedFlip(long handle, int[] slots, int[] rows,
                                                          double[] qTargets, int[] survivorReactiveLimitEntryCounts, int[] survivorReactiveLimitEntries);
 
+    /** Re-merged voltage controls whose elected main is one of their controllers: per control its slot, the main's
+     *  reactive-limit entry and the control's voltage target. OLF keeps that target on the main while any merged
+     *  controller is enabled; when the main's own controller pins, the device moves it to the first enabled one of
+     *  the cluster's other controllers, whose entries {@code controllerEntries} concatenates in OLF's merged order
+     *  ({@code controllerCounts} sizes each control's slice). Nulls clear. */
+    public static native void setBatchReMergedVoltageTargets(long handle, int[] slots, int[] mainEntries,
+                                                             double[] voltageTargets, int[] controllerCounts, int[] controllerEntries);
+
     /** Per-scenario moves of a remote-control pilot's own reactive target ({key = slot * nReactiveRelocationGroups + group, delta pu}, one
      *  entry per key): added to the value captured from the base carrier and to the first fill's carrier target.
      *  Nulls clear. */

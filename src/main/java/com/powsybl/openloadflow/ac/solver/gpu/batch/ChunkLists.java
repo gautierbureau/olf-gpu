@@ -94,6 +94,11 @@ final class ChunkLists {
     final List<Double> pfQTarget = new ArrayList<>();
     final List<Integer> pilotFlipSurvivorReactiveLimitEntryCounts = new ArrayList<>();
     final List<Integer> pilotFlipSurvivorReactiveLimitEntries = new ArrayList<>();
+    final List<Integer> reMergedVoltageTargetSlot = new ArrayList<>();     // re-merged controls whose main is a controller
+    final List<Integer> reMergedVoltageTargetMainEntry = new ArrayList<>();
+    final List<Double> reMergedVoltageTargetValue = new ArrayList<>();
+    final List<Integer> reMergedVoltageTargetControllerCounts = new ArrayList<>();
+    final List<Integer> reMergedVoltageTargetControllerEntries = new ArrayList<>();
     final List<Integer> distrQWeightOverrideScenarioTermList = new ArrayList<>();   // {s, contrib} pairs (DISTR_Q reweight)
     final List<Double> distrQWeightOverrideWeightList = new ArrayList<>();
     final List<Integer> distrQKeyOverrideScenarioMemberList = new ArrayList<>();
@@ -188,5 +193,11 @@ final class ChunkLists {
                 pfSlot.isEmpty() ? null : pfQTarget.stream().mapToDouble(Double::doubleValue).toArray(),
                 pfSlot.isEmpty() ? null : pilotFlipSurvivorReactiveLimitEntryCounts.stream().mapToInt(Integer::intValue).toArray(),
                 pfSlot.isEmpty() ? null : pilotFlipSurvivorReactiveLimitEntries.stream().mapToInt(Integer::intValue).toArray());
+        RemoteVoltageControlNative.setBatchReMergedVoltageTargets(handle,
+                ChunkArrays.intsOrNull(reMergedVoltageTargetSlot),
+                ChunkArrays.intsOrNull(reMergedVoltageTargetMainEntry),
+                reMergedVoltageTargetSlot.isEmpty() ? null : reMergedVoltageTargetValue.stream().mapToDouble(Double::doubleValue).toArray(),
+                ChunkArrays.intsOrNull(reMergedVoltageTargetControllerCounts),
+                ChunkArrays.intsOrNull(reMergedVoltageTargetControllerEntries));
     }
 }

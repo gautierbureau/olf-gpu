@@ -42,6 +42,16 @@ __global__ void updatePilotTargetVEquationBatch(int nReactiveRelocationGroups, i
                                 const char* reactiveLimitGeneratorsLost, const int* reactiveRelocationDependentBaseGroup, const int* relocatedChildOwnRow,
                                 const double* pinTargetIn);
 
+__global__ void updateReMergedVoltageTargetRowBatch(int nReMergedVoltageTargets, int nScenarios, int n, int nReactiveLimitEntries,
+                                                    const int* reMergedVoltageTargetSlot, const int* reMergedVoltageTargetMainEntry,
+                                                    const double* reMergedVoltageTargetValue, const int* reMergedVoltageTargetControllerStart,
+                                                    const int* reMergedVoltageTargetControllerCount, const int* reMergedVoltageTargetControllerEntries,
+                                                    const int* reactiveLimitVoltageRow, const int* reactiveLimitReactivePowerRow, const int* relocatedChildOwnRow,
+                                                    const char* limitType, const char* reactiveLimitIslanded, int nFrozen, const int* frozenSlotRow,
+                                                    int* reMergedVoltageTargetHolder, char* reactiveLimitHoldsReMergedVoltageTarget,
+                                                    int* reactiveLimitReMergedVoltageRow, int* mode, double* target,
+                                                    const char* outerLoopCheckActive, char* switched);
+
 }  // namespace olfgpu
 
 #endif  // OLF_GPU_OUTERLOOP_PILOT_VOLTAGE_CUH

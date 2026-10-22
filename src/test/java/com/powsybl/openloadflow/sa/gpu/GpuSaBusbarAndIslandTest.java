@@ -357,6 +357,36 @@ class GpuSaBusbarAndIslandTest extends AbstractGpuSaTest {
         assertEquals(5, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(), "census=" + GpuBatchScopeCensus.snapshot());
     }
 
+    /** Losing bbs2 re-merges the other two sections' controls onto vl12_3. OLF keeps BUS_TARGET_V on that main while
+     *  ANY merged controller is enabled; the device tied the voltage identity to the main's own controller, so when g3
+     *  pinned (100 MVAr, a 10% key) the cluster was left with no voltage equation while g4 still had 300 MVAr of
+     *  headroom: the solve diverged (status -2) and the scenario went back to the CPU. g4 takes the target, every
+     *  contingency on device, bus voltages to 1e-9 kV. */
+    @Test
+    void deviceReMergedMainPinsAndTheNextControllerHoldsTheVoltageMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = doubleStarSectionsNetwork();
+        String[][] generators = {{"g2", "3000", "80"}, {"g3", "100", "10"}, {"g4", "300", "10"}};   // id, max MVAr, key
+        for (String[] g : generators) {
+            network.getGenerator(g[0]).newMinMaxReactiveLimits().setMinQ(-300).setMaxQ(Double.parseDouble(g[1])).add();
+            network.getGenerator(g[0]).newExtension(com.powsybl.iidm.network.extensions.CoordinatedReactiveControlAdder.class)
+                    .withQPercent(Double.parseDouble(g[2])).add();
+        }
+        List<Contingency> ctgs = new java.util.ArrayList<>();
+        for (int k = 0; k < 5; k++) {
+            ctgs.add(new Contingency("bus-" + k, new com.powsybl.contingency.BusbarSectionContingency("bbs" + k)));
+        }
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters();
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
+                .setSlackBusSelectionMode(com.powsybl.openloadflow.network.SlackBusSelectionMode.NAME)
+                .setSlackBusesIds(List.of("vl0"));
+        GpuBatchScopeCensus.reset();
+        assertGpuMatchesCpu(network, ctgs, 1e-9, lfp, true);
+        assertEquals(java.util.Set.of(), GpuBatchScopeCensus.planRefusedIds(), "census=" + GpuBatchScopeCensus.snapshot());
+        assertEquals(5, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(), "census=" + GpuBatchScopeCensus.snapshot());
+    }
+
     @Test
     void deviceMiddleSectionLossRenormalizesDistrQTargetMatchesCpu() {
         org.junit.jupiter.api.Assumptions.assumeTrue(

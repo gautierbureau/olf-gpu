@@ -181,6 +181,56 @@ OLF_JNI(ac_equations_vector_gpu, RemoteVoltageControlNative, setBatchPilotAllPin
     env->ReleaseIntArrayElements(jSurvivorReactiveLimitEntries, pool, JNI_ABORT);
 }
 
+// Re-merged controls whose elected main is one of its controllers (see updateReMergedVoltageTargetRowBatch): per control
+// its slot, the main's reactive-limit entry and the control's voltage target; controllerCounts says how many of the
+// cluster's other controllers each one has and controllerEntries concatenates their entries in OLF's merged order.
+// Nulls clear. The holder state is per solve (launchReMergedVoltageTargetRowUpdate resets it).
+extern "C" JNIEXPORT void JNICALL
+OLF_JNI(ac_equations_vector_gpu, RemoteVoltageControlNative, setBatchReMergedVoltageTargets)(
+        JNIEnv* env, jclass, jlong handle, jintArray jSlots, jintArray jMainEntries, jdoubleArray jVoltageTargets,
+        jintArray jControllerCounts, jintArray jControllerEntries) {
+    auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
+    if (ctx == nullptr) {
+        return;
+    }
+    if (jSlots == nullptr || env->GetArrayLength(jSlots) == 0 || ctx->nReactiveLimitEntries == 0) {
+        ctx->nReMergedVoltageTargets = 0;
+        return;
+    }
+    int ne = env->GetArrayLength(jSlots);
+    jint* slots = env->GetIntArrayElements(jSlots, nullptr);
+    jint* mainEntries = env->GetIntArrayElements(jMainEntries, nullptr);
+    jdouble* voltageTargets = env->GetDoubleArrayElements(jVoltageTargets, nullptr);
+    jint* controllerCounts = env->GetIntArrayElements(jControllerCounts, nullptr);
+    jint* controllerEntries = env->GetIntArrayElements(jControllerEntries, nullptr);
+    int nControllerEntries = env->GetArrayLength(jControllerEntries);
+    std::vector<int> start(ne);
+    int acc = 0;
+    for (int i = 0; i < ne; i++) {
+        start[i] = acc;
+        acc += controllerCounts[i];
+    }
+    ctx->dReMergedVoltageTargetSlot.upload(slots, static_cast<size_t>(ne) * sizeof(int));
+    ctx->dReMergedVoltageTargetMainEntry.upload(mainEntries, static_cast<size_t>(ne) * sizeof(int));
+    ctx->dReMergedVoltageTargetValue.upload(voltageTargets, static_cast<size_t>(ne) * sizeof(double));
+    ctx->dReMergedVoltageTargetControllerStart.upload(start.data(), static_cast<size_t>(ne) * sizeof(int));
+    ctx->dReMergedVoltageTargetControllerCount.upload(controllerCounts, static_cast<size_t>(ne) * sizeof(int));
+    ctx->dReMergedVoltageTargetControllerEntries.upload(controllerEntries, static_cast<size_t>(nControllerEntries > 0 ? nControllerEntries : 1) * sizeof(int));
+    std::vector<int> noHolder(ne, -1);
+    ctx->dReMergedVoltageTargetHolder.upload(noHolder.data(), static_cast<size_t>(ne) * sizeof(int));
+    size_t scenarioEntries = static_cast<size_t>(ctx->nScenarios) * ctx->nReactiveLimitEntries;
+    std::vector<char> holds(scenarioEntries, 0);
+    std::vector<int> voltageRow(scenarioEntries, -1);
+    ctx->dReactiveLimitHoldsReMergedVoltageTarget.upload(holds.data(), scenarioEntries);
+    ctx->dReactiveLimitReMergedVoltageRow.upload(voltageRow.data(), scenarioEntries * sizeof(int));
+    ctx->nReMergedVoltageTargets = ne;
+    env->ReleaseIntArrayElements(jSlots, slots, JNI_ABORT);
+    env->ReleaseIntArrayElements(jMainEntries, mainEntries, JNI_ABORT);
+    env->ReleaseDoubleArrayElements(jVoltageTargets, voltageTargets, JNI_ABORT);
+    env->ReleaseIntArrayElements(jControllerCounts, controllerCounts, JNI_ABORT);
+    env->ReleaseIntArrayElements(jControllerEntries, controllerEntries, JNI_ABORT);
+}
+
 // DISTR_RHO coefficient overrides: install (or clear, with nulls) the per-scenario 1/count'
 // renormalization pairs {s, contrib} + new coefficients on a batch context (a shared-TVC group
 // member outaged in that scenario — plan-group-member-dynamics A5).

@@ -78,6 +78,15 @@ final class GenOutageSeed {
                     cl.reactiveLimitLocalOverrideScenarioEntryList.add(go.reactiveLimitEntry());
                     cl.reactiveLimitLocalTargetV.add(go.reMergeVTarget());
                 }
+                if (go.movesVoltageTargetToFirstEnabledController()) {
+                    cl.reMergedVoltageTargetSlot.add(s);
+                    cl.reMergedVoltageTargetMainEntry.add(go.reactiveLimitEntry());
+                    cl.reMergedVoltageTargetValue.add(go.reMergeVTarget());
+                    cl.reMergedVoltageTargetControllerCounts.add(go.pilotGroupSurvivorReactiveLimitEntries().length);
+                    for (int entry : go.pilotGroupSurvivorReactiveLimitEntries()) {
+                        cl.reMergedVoltageTargetControllerEntries.add(entry);
+                    }
+                }
                 if (go.reMergesRemoteController()) {
                     // OLF's re-merged control: this remote member's reactive-limit check reads the
                     // NEW pilot's voltage against the new pilot's target; its row stays the base

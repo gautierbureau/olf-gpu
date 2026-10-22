@@ -428,7 +428,9 @@ void traceReactiveLimitsAudit(BatchSolverContext* ctx, DriverPass& drv, std::vec
                     ctx->nReactiveLimitLocalOverrides > 0 ? ctx->dReactiveLimitLocalTargetV.as<double>() : nullptr,
                     ctx->nReactiveLimitPqPvSwitchForbidden > 0 ? ctx->dReactiveLimitPqPvSwitchForbidden.as<char>() : nullptr, ctx->nReactiveLimitPqPvSwitchForbidden > 0 ? ctx->dReactiveLimitPqPvSwitchRejected.as<char>() : nullptr,
                     ctx->dReactiveLimitFlags.p ? ctx->dReactiveLimitFlags.as<char>() : nullptr,
-                    ctx->nReactiveLimitComparedVoltageRowOverrides > 0 ? ctx->dReactiveLimitComparedVoltageRowOverride.as<int>() : nullptr);
+                    ctx->nReactiveLimitComparedVoltageRowOverrides > 0 ? ctx->dReactiveLimitComparedVoltageRowOverride.as<int>() : nullptr,
+                    ctx->nReMergedVoltageTargets > 0 ? ctx->dReactiveLimitHoldsReMergedVoltageTarget.as<char>() : nullptr,
+                    ctx->nReMergedVoltageTargets > 0 ? ctx->dReactiveLimitReMergedVoltageRow.as<int>() : nullptr);
         CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
         std::vector<char> auditOuterLoopUnstable(nS), auditCheckDecision(static_cast<size_t>(ctx->nReactiveLimitEntries) * nS);
         CUDA_CHECK(cudaMemcpy(auditOuterLoopUnstable.data(), ctx->dOuterLoopUnstable.p, nS, cudaMemcpyDeviceToHost));

@@ -444,6 +444,16 @@ struct BatchSolverContext {
     DeviceBuf dPilotFlipSurvivorReactiveLimitEntries;
     DeviceBuf dPfFlipped;
     DeviceBuf dPfSavedVT;
+    int nReMergedVoltageTargets = 0;                       // re-merged controls whose main is one of its controllers
+    DeviceBuf dReMergedVoltageTargetSlot;                  // per control: its scenario, the main's reactive-limit entry,
+    DeviceBuf dReMergedVoltageTargetMainEntry;             // its voltage target, and the cluster's other controllers'
+    DeviceBuf dReMergedVoltageTargetValue;                 // entries in OLF's merged order (start/count into the list)
+    DeviceBuf dReMergedVoltageTargetControllerStart;
+    DeviceBuf dReMergedVoltageTargetControllerCount;
+    DeviceBuf dReMergedVoltageTargetControllerEntries;
+    DeviceBuf dReMergedVoltageTargetHolder;                // per control: which of those controllers' rows holds the target, -1 = the main's own
+    DeviceBuf dReactiveLimitHoldsReMergedVoltageTarget;    // per (scenario, entry): its sharing row holds its control's voltage target
+    DeviceBuf dReactiveLimitReMergedVoltageRow;            // per (scenario, entry) of a main: the voltage row that target is held on, -1 = its own
     // HVDC AC-emulation outer loops (FreezingHvdcACEmulation + AcHvdcAcEmulationLimits) as DRIVER
     // PHASES rather than host orchestrators. OLF runs both BETWEEN DistributedSlack and
     // ReactiveLimits; run from the host after the whole solve they land after RL instead, which is

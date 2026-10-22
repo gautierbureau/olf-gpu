@@ -252,6 +252,7 @@ void seedSolve(BatchSolverContext* ctx, DriverPass& drv, const int* reactiveLimi
                 ctx->dReactiveLimitLoadQPerScenario.as<double>());
         launchForcedTargetQLimits(ctx, nS, n);
     }
+    launchReMergedVoltageTargetRowUpdate(ctx, drv, true);                       // a main seeded pinned (a continued solve)
     launchPilotTargetVEquationUpdate(ctx, drv, true, true);                     // seed: base limits, or the previous solve's flip
     launchDistrQTargetsInner(ctx, drv);
     if (ctx->distributedSlackOuterLoop && ctx->nDistributedSlackBuses > 0) {   // the run's loop, not the packed table

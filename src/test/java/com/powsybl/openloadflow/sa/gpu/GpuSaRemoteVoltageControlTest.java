@@ -797,6 +797,100 @@ class GpuSaRemoteVoltageControlTest extends AbstractGpuSaTest {
         assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
     }
 
+    /** OLF's "strongest stays PV" rule (switchPvPq at remainingPvBusCount 0) counts the buses its check leaves PV, so g6,
+     *  whose reactive range is the single value 5 MVar at its 10 MW and which the base switched to PQ, changes nothing:
+     *  losing c4 drives g1, g2 and g3 over their limits and OLF keeps one of them PV. The device decided once per
+     *  network whether the rule could fire, and read a single-value range as a bus that never switches to PQ. */
+    @Test
+    void deviceForcedPvElectionBesideASingleValueRangeControllerMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = capacitorLossForcedPvNetworkWithSingleValueRangeController();
+        List<Contingency> ctgs = List.of(new Contingency("c4", new com.powsybl.contingency.ShuntCompensatorContingency("c4")));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setDistributedSlack(true).setUseReactiveLimits(true);
+        assertTrue(cpuForcedPvElections(network, ctgs, lfp) > 0, "OLF must keep a bus PV after c4, or the test proves nothing");
+        assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
+        assertEquals(1, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(), "c4 must solve on the device");
+    }
+
+    /** g6 has no reactive limits, so while it is connected OLF's "strongest stays PV" rule cannot fire: losing c4 alone
+     *  switches g1, g2 and g3 to PQ and leaves g6 PV. Losing g6 with c4 leaves the three as the only PV buses, all over
+     *  their limits, and OLF keeps one of them PV. The device ruled the election out for the whole network because one
+     *  of its PV buses had no limits. */
+    @Test
+    void deviceForcedPvElectionAfterLosingTheUnlimitedControllerMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = capacitorLossForcedPvNetworkWithUnlimitedController();
+        List<Contingency> ctgs = List.of(
+                new Contingency("c4", new com.powsybl.contingency.ShuntCompensatorContingency("c4")),
+                new Contingency("g6+c4", new com.powsybl.contingency.GeneratorContingency("g6"),
+                        new com.powsybl.contingency.ShuntCompensatorContingency("c4")));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setDistributedSlack(true).setUseReactiveLimits(true);
+        assertEquals(0, cpuForcedPvElections(network, ctgs.subList(0, 1), lfp), "OLF must not keep a bus PV after c4 alone");
+        assertTrue(cpuForcedPvElections(network, ctgs, lfp) > 0, "OLF must keep a bus PV after g6+c4, or the test proves nothing");
+        assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
+        assertEquals(2, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(), "both contingencies must solve on the device");
+    }
+
+    /** OLF counts the buses its check leaves PV before it switches anything. Losing c4 and c6 drives g1, g2 and g3 over
+     *  their limits in the very check where g6, switched to PQ at MIN_Q in the base, switches back to PV: g6 is not one
+     *  of the buses left PV, so OLF keeps g1 PV, and keeps it PV in the next check, where g6 switches to PQ at MAX_Q.
+     *  The device counted the buses PV after its check, g6 among them, and switched all three to PQ. */
+    @Test
+    void deviceForcedPvElectionWhileAControllerSwitchesBackToPvMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = capacitorLossForcedPvNetworkWithControllerSwitchingBack();
+        List<Contingency> ctgs = List.of(new Contingency("c4+c6", new com.powsybl.contingency.ShuntCompensatorContingency("c4"),
+                new com.powsybl.contingency.ShuntCompensatorContingency("c6")));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setDistributedSlack(true).setUseReactiveLimits(true);
+        assertTrue(cpuForcedPvElections(network, ctgs, lfp) > 0, "OLF must keep a bus PV after c4+c6, or the test proves nothing");
+        assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
+        assertEquals(1, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(), "c4+c6 must solve on the device");
+    }
+
+    /** OLF keeps g1 PV when losing c2 drives g0 and g1 over their limits (both control a 400 kV bus, g1 has the higher
+     *  target P). The coupler-tree relocation puts g1's reactive balance, and its switch to PQ, on the coupler's DUMMY_Q
+     *  row, while its own V row carries the coupler's voltage equation. Opening c01, the second contingency, is what
+     *  keeps the coupler in the network. */
+    @Test
+    void deviceForcedPvElectionOfARelocatedControllerMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = coupledSectionsForcedPvNetwork();
+        List<Contingency> ctgs = List.of(
+                new Contingency("c2", new com.powsybl.contingency.ShuntCompensatorContingency("c2")),
+                new Contingency("c01", new com.powsybl.contingency.SwitchContingency("c01")));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setDistributedSlack(true).setUseReactiveLimits(true);
+        assertTrue(cpuForcedPvElections(network, ctgs, lfp) > 0, "OLF must keep a bus PV after c2, or the test proves nothing");
+        assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
+        assertEquals(2, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(), "both contingencies must solve on the device");
+    }
+
+    /** How many times OLF's reactive-limit loop kept the strongest bus PV in a CPU run, read from its report. */
+    private int cpuForcedPvElections(Network network, List<Contingency> ctgs, com.powsybl.loadflow.LoadFlowParameters lfp) {
+        com.powsybl.commons.report.ReportNode report = com.powsybl.commons.report.ReportNode.newRootReportNode()
+                .withResourceBundles(com.powsybl.openloadflow.util.report.PowsyblOpenLoadFlowReportResourceBundle.BASE_NAME)
+                .withMessageTemplate("olf.saReport").build();
+        com.powsybl.security.SecurityAnalysisParameters sap = new com.powsybl.security.SecurityAnalysisParameters();
+        sap.setLoadFlowParameters(lfp);
+        runSecurityAnalysis(network, ctgs, List.of(), sap, report);
+        return countReports(report, "olf.busForcedToBePv");
+    }
+
+    private static int countReports(com.powsybl.commons.report.ReportNode node, String messageKey) {
+        int count = messageKey.equals(node.getMessageKey()) ? 1 : 0;
+        for (com.powsybl.commons.report.ReportNode child : node.getChildren()) {
+            count += countReports(child, messageKey);
+        }
+        return count;
+    }
+
     /** Plan-B3/B5: a POST-CONTINGENCY PV -> PQ switch of a NON-free remote group member runs
      *  on-device (mode-4 transition + own-q accumulation + pilot-referenced switch conditions) at
      *  1e-12. g2 (non-free member: free = g1, unlimited) has maxQ between its base Q (~183 MVAr)

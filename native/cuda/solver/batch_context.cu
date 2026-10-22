@@ -19,7 +19,6 @@
 #include "../common/stats.cuh"
 #include "../common/codes/gpu_state_vector_scaling_mode.cuh"
 #include "../common/codes/gpu_distributed_slack_factor_mode.cuh"
-#include "../common/codes/gpu_reactive_limits_entry_flag.cuh"
 #include "../common/codes/gpu_linear_solve_mode.cuh"
 #include "../common/codes/gpu_two_sides.cuh"
 #include "batch_context.cuh"
@@ -226,12 +225,6 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& structure, int 
         ctx->dReactiveLimitLoadQ.upload(reactiveLimitLoadQ, nReactiveLimitEntries * sizeof(double));
         ctx->dReactiveLimitTargetV.upload(reactiveLimitTargetV, nReactiveLimitEntries * sizeof(double));
         ctx->dReactiveLimitFlags.upload(reactiveLimitFlags, nReactiveLimitEntries * sizeof(char));
-        ctx->everyPvBusCanSwitchToPq = 1;
-        for (int i = 0; i < nReactiveLimitEntries; i++) {
-            if (!(reactiveLimitFlags[i] & GpuReactiveLimitsEntryFlag::STAND_BY_AUTOMATON) && !((reactiveLimitMinQ[i] > -1e7 || reactiveLimitMaxQ[i] < 1e7) && reactiveLimitMinQ[i] < reactiveLimitMaxQ[i])) {
-                ctx->everyPvBusCanSwitchToPq = 0;                      // an unlimited PV bus: the rule never fires
-            }
-        }
         ctx->dReactiveLimitSavedTarget.alloc(static_cast<size_t>(nReactiveLimitEntries) * nScenarios * sizeof(double));
         ctx->dReactiveLimitCheckDecision.alloc(static_cast<size_t>(nReactiveLimitEntries) * nScenarios * sizeof(char));
         // OLF_GPU_SW_LOG=<slot>: record one scenario's reactive-limit decisions ON THE DEVICE (one
@@ -245,6 +238,7 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& structure, int 
             CUDA_CHECK(cudaMemset(ctx->dReactiveLimitsDecisionLogCount.p, 0, sizeof(int)));
         }
         ctx->dReactiveLimitSavedRowMode.alloc(static_cast<size_t>(nReactiveLimitEntries) * nScenarios * sizeof(char));
+        ctx->dReactiveLimitRemainingPvBusCount.alloc(static_cast<size_t>(nScenarios) * sizeof(int));
         ctx->dReactiveLimitQLimitType.alloc(static_cast<size_t>(nReactiveLimitEntries) * nScenarios * sizeof(char));
         ctx->dReactiveLimitPvPqSwitchCount.alloc(static_cast<size_t>(nReactiveLimitEntries) * nScenarios * sizeof(char));
         std::vector<double> svcZero(nReactiveLimitEntries, 0.0);              // neutral until setBatchReactiveLimitSvcSusceptanceLimits installs

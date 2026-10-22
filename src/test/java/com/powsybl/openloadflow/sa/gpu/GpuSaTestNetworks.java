@@ -862,6 +862,106 @@ final class GpuSaTestNetworks {
         return network;
     }
 
+    /** OLF's three-generator remote voltage control regulating b4, every generator limited to [-1000, 1000] MVar, with
+     *  3200 MVar more reactive load at b4 that the capacitor bank c4 there compensates: the generators share almost
+     *  nothing in the base, and losing c4 drives all three over their limits. */
+    static Network capacitorLossForcedPvNetwork() {
+        Network network = com.powsybl.openloadflow.network.VoltageControlNetworkFactory.createWithGeneratorRemoteControl();
+        for (String g : new String[] {"g1", "g2", "g3"}) {
+            network.getGenerator(g).newMinMaxReactiveLimits().setMinQ(-1000).setMaxQ(1000).add();
+        }
+        var vl4 = network.getVoltageLevel("vl4");
+        vl4.newLoad().setId("l4q").setBus("b4").setConnectableBus("b4").setP0(0).setQ0(3200).add();
+        vl4.newShuntCompensator().setId("c4").setBus("b4").setConnectableBus("b4").setSectionCount(1)
+                .newLinearModel().setBPerSection(0.0199).setMaximumSectionCount(1).add().add();
+        return network;
+    }
+
+    /** A fourth voltage controller for {@link #capacitorLossForcedPvNetwork}: g6, 10 MW on its own 400 kV bus b6, one
+     *  line away from b4, regulating b6 at {@code targetV}. The caller gives it its reactive limits. */
+    static com.powsybl.iidm.network.Generator addControllerNextToPilot(Network network, double targetV) {
+        var vl6 = network.getSubstation("s").newVoltageLevel().setId("vl6").setNominalV(400)
+                .setTopologyKind(com.powsybl.iidm.network.TopologyKind.BUS_BREAKER).add();
+        vl6.getBusBreakerView().newBus().setId("b6").add();
+        network.newLine().setId("L46")
+                .setVoltageLevel1("vl4").setBus1("b4").setVoltageLevel2("vl6").setBus2("b6")
+                .setR(0.4).setX(4).setG1(0).setB1(0).setG2(0).setB2(0).add();
+        return vl6.newGenerator().setId("g6").setBus("b6").setConnectableBus("b6")
+                .setMinP(0).setMaxP(20).setTargetP(10).setTargetV(targetV).setVoltageRegulatorOn(true).add();
+    }
+
+    /** {@link #capacitorLossForcedPvNetwork} whose g6 can only produce 5 MVar at its 10 MW: a capability curve [-20, 20]
+     *  MVar at 0 MW and [5, 5] from 1 to 20 MW (OLF keeps it as a controller, its curve's largest range is 40 MVar). It
+     *  regulates b6 at 415 kV, above what b4's 413.4 kV leaves there, so the base switches it PV -> PQ at MAX_Q and it
+     *  stays there. */
+    static Network capacitorLossForcedPvNetworkWithSingleValueRangeController() {
+        Network network = capacitorLossForcedPvNetwork();
+        addControllerNextToPilot(network, 415).newReactiveCapabilityCurve()
+                .beginPoint().setP(0).setMinQ(-20).setMaxQ(20).endPoint()
+                .beginPoint().setP(1).setMinQ(5).setMaxQ(5).endPoint()
+                .beginPoint().setP(20).setMinQ(5).setMaxQ(5).endPoint()
+                .add();
+        return network;
+    }
+
+    /** {@link #capacitorLossForcedPvNetwork} whose g6, limited to [-5, 50] MVar, regulates b6 at 412 kV, where a 300 MVar
+     *  load and the capacitor bank c6 sit: c6 lifts b6 above 412 kV and the base switches g6 PV -> PQ at MIN_Q. Losing
+     *  c6 drops b6 below 412 kV and g6 switches back to PV. */
+    static Network capacitorLossForcedPvNetworkWithControllerSwitchingBack() {
+        Network network = capacitorLossForcedPvNetwork();
+        addControllerNextToPilot(network, 412).newMinMaxReactiveLimits().setMinQ(-5).setMaxQ(50).add();
+        var vl6 = network.getVoltageLevel("vl6");
+        vl6.newLoad().setId("l6").setBus("b6").setConnectableBus("b6").setP0(0).setQ0(300).add();
+        vl6.newShuntCompensator().setId("c6").setBus("b6").setConnectableBus("b6").setSectionCount(1)
+                .newLinearModel().setBPerSection(0.0035).setMaximumSectionCount(1).add().add();
+        return network;
+    }
+
+    /** {@link #capacitorLossForcedPvNetwork} whose g6 has no reactive limits and regulates b6 at b4's 413.4 kV: while it
+     *  is connected, a PV bus that never switches to PQ. */
+    static Network capacitorLossForcedPvNetworkWithUnlimitedController() {
+        Network network = capacitorLossForcedPvNetwork();
+        addControllerNextToPilot(network, 413.4);
+        return network;
+    }
+
+    /** Two busbar sections bbs0 and bbs1 joined by the retained coupler c01, g0 (80 MW, 406 kV) on bbs0 and g1 (200 MW,
+     *  405 kV) on bbs1, both limited to [-300, 300] MVar: OLF merges their controls. Each section feeds b2 by a line,
+     *  where 1200 MVar of load sit and the capacitor bank c2 compensates 1000 of them: losing c2 drives g0 and g1 over
+     *  their limits. */
+    static Network coupledSectionsForcedPvNetwork() {
+        Network network = Network.create("coupled-sections-forced-pv", "code");
+        com.powsybl.iidm.network.Substation s = network.newSubstation().setId("s").add();
+        com.powsybl.iidm.network.VoltageLevel vl1 = s.newVoltageLevel().setId("vl1").setNominalV(400)
+                .setTopologyKind(com.powsybl.iidm.network.TopologyKind.NODE_BREAKER).add();
+        vl1.getNodeBreakerView().newBusbarSection().setId("bbs0").setNode(0).add();
+        vl1.getNodeBreakerView().newBusbarSection().setId("bbs1").setNode(1).add();
+        vl1.getNodeBreakerView().newBreaker().setId("c01").setNode1(0).setNode2(1).setRetained(true).setOpen(false).add();
+        com.powsybl.iidm.network.VoltageLevel vl2 = s.newVoltageLevel().setId("vl2").setNominalV(400)
+                .setTopologyKind(com.powsybl.iidm.network.TopologyKind.BUS_BREAKER).add();
+        vl2.getBusBreakerView().newBus().setId("b2").add();
+        double[] targetP = {80, 200};
+        double[] targetV = {406, 405};
+        for (int k = 0; k < 2; k++) {
+            int gNode = 10 + 2 * k;
+            int lNode = 11 + 2 * k;
+            for (int node : new int[] {gNode, lNode}) {
+                vl1.getNodeBreakerView().newDisconnector().setId("d" + node).setNode1(k).setNode2(node + 50).setOpen(false).add();
+                vl1.getNodeBreakerView().newBreaker().setId("b" + node).setNode1(node + 50).setNode2(node).setOpen(false).add();
+            }
+            vl1.newGenerator().setId("g" + k).setNode(gNode).setMinP(0).setMaxP(500).setTargetP(targetP[k]).setTargetQ(0)
+                    .setTargetV(targetV[k]).setVoltageRegulatorOn(true).add()
+                    .newMinMaxReactiveLimits().setMinQ(-300).setMaxQ(300).add();
+            network.newLine().setId("l" + k).setVoltageLevel1("vl1").setNode1(lNode)
+                    .setVoltageLevel2("vl2").setBus2("b2").setConnectableBus2("b2")
+                    .setR(0.4).setX(10).setG1(0).setB1(0).setG2(0).setB2(0).add();
+        }
+        vl2.newLoad().setId("ld2").setBus("b2").setConnectableBus("b2").setP0(280).setQ0(1200).add();
+        vl2.newShuntCompensator().setId("c2").setBus("b2").setConnectableBus("b2").setSectionCount(1)
+                .newLinearModel().setBPerSection(0.00625).setMaximumSectionCount(1).add().add();
+        return network;
+    }
+
     /** {@link #remoteFreezeNetwork} whose GEN_R can only produce {@code q} MVar over its operating range: a capability
      *  curve [-20, 20] MVar at 0 MW, [q, q] from 1 to 20 MW. OLF keeps it as a remote controller (its curve's largest
      *  range is 40 MVar) and its reactive-limit loop switches it PV -> PQ at q. */

@@ -52,7 +52,8 @@ __global__ void reactiveLimitsBatch(const double* secondaryVoltageControlReactiv
                                     const char* reactiveLimitLocalOverride, const double* reactiveLimitLocalTargetV,
                                     const char* reactiveLimitFlags,
                                     const int* reactiveLimitComparedVoltageRowOverride,
-                                    const char* reactiveLimitHoldsReMergedVoltageTarget, const int* reactiveLimitReMergedVoltageRow) {
+                                    const char* reactiveLimitHoldsReMergedVoltageTarget, const int* reactiveLimitReMergedVoltageRow,
+                                    int* remainingPvBusCount) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nReactiveLimitEntries * nScenarios) return;
     int i = tid % nReactiveLimitEntries;
@@ -93,6 +94,15 @@ __global__ void reactiveLimitsBatch(const double* secondaryVoltageControlReactiv
         r[0] = passId; r[1] = i; r[2] = decision; r[3] = q; r[4] = minQ; r[5] = maxQ;
         r[6] = vOwn; r[7] = cmpV; r[8] = targetV; r[9] = limitType[(size_t) s * nReactiveLimitEntries + i];
         r[10] = switchCount[(size_t) s * nReactiveLimitEntries + i]; r[11] = s;
+    };
+    // OLF's remainingPvBusCount (ReactiveLimitsOuterLoop.checkControllerBus): a bus this check finds PV and leaves PV,
+    // counted where the check decides it. A bus that switches back to PV in this check is not one, as in OLF, which
+    // counts before it switches anything. Nor is a pilot packed without being one of its control's controller elements
+    // (GpuReactiveLimitsEntryFlag::NOT_CONTROLLER_ELEMENT): OLF's loop never sees it.
+    auto countRemainingPvBus = [&]() {
+        if (remainingPvBusCount != nullptr && (reactiveLimitFlags == nullptr || (reactiveLimitFlags[i] & GpuReactiveLimitsEntryFlag::NOT_CONTROLLER_ELEMENT) == 0)) {
+            atomicAdd(&remainingPvBusCount[s], 1);
+        }
     };
     // A RE-MERGED voltage control (GpuBatchQualification.reMergedControls): this scenario the bus is a plain PV
     // bus, so its entry — packed as a remote member of the base group — takes the LOCAL path below, at its
@@ -186,6 +196,8 @@ __global__ void reactiveLimitsBatch(const double* secondaryVoltageControlReactiv
                 switchCount[rst]++;
                 switched[s] = 1;
                 passSwitched[rst] = 1;
+            } else {
+                countRemainingPvBus();
             }
             // OLF also sets the controller's V to a safe 1 pu for the next computation, under BOTH
             // robust criteria. That WRITES the state vector every other entry is still reading here,
@@ -312,6 +324,8 @@ __global__ void reactiveLimitsBatch(const double* secondaryVoltageControlReactiv
             switchCount[scenarioEntry]++;
             switched[s] = 1;
             passSwitched[scenarioEntry] = 1;
+        } else {
+            countRemainingPvBus();
         }
     } else if (limitType[scenarioEntry] != GpuQLimitType::NONE) {  // switched to PQ at a limit — check switchback
         // a re-merged main whose control's voltage target another controller holds reads the voltage that target holds
@@ -377,51 +391,41 @@ __global__ void reactiveLimitsRobustVoltageResetBatch(int nReactiveLimitEntries,
     }
 }
 
-// OLF's GLOBAL forced-PV election (ReactiveLimitsOuterLoop.switchPvPq): when EVERY bus still PV
-// would switch PV→PQ in this check (remainingPvBusCount == 0), the strongest candidate stays PV —
-// highest controlled-bus nominal V, then highest bus target P (LIVE: the DistributedSlack may have
-// moved it), then lowest id. One thread per scenario, after the reactive-limit check kernel: it UNDOES the elected
-// candidate's PV -> PQ switch (row mode and target back, limit type and switch count back) and re-derives the scenario's
-// "changed" flag from what the pass still did. Before this the device switched every candidate to PQ and a
-// per-scenario DETECTOR routed the scenario to the CPU (1.9 kV wrong on the forced-PV network).
-__global__ void reactiveLimitsForcedPvBatch(int nReactiveLimitEntries, int nScenarios, int n,
-                                     const int* reactiveLimitVoltageRow, const char* reactiveLimitVoltageControlRole, const char* reactiveLimitIslanded,
+// OLF's GLOBAL forced-PV election (ReactiveLimitsOuterLoop.switchPvPq): when no bus that was PV at this check stays PV
+// (remainingPvBusCount == 0, counted by reactiveLimitsBatch), the strongest candidate stays PV — highest controlled-bus
+// nominal V, then highest bus target P (LIVE: the DistributedSlack may have moved it), then lowest id. One thread per
+// scenario, after the reactive-limit check kernel: it UNDOES the elected candidate's PV -> PQ switch (row mode and
+// target back, limit type and switch count back) and re-derives the scenario's "changed" flag from what the pass still
+// did. Before this the device switched every candidate to PQ and a per-scenario DETECTOR routed the scenario to the CPU
+// (1.9 kV wrong on the forced-PV network).
+__global__ void reactiveLimitsForcedPvBatch(int nReactiveLimitEntries, int nScenarios, int n, const int* remainingPvBusCount,
+                                     const int* reactiveLimitVoltageRow, const char* reactiveLimitVoltageControlRole, const char* reactiveLimitFlags,
                                      const double* nomV, const int* pRow, const double* staticP, const int* idRank,
                                      char* limitType, char* switchCount, char* passSwitched, const char* savedMode,
                                      const double* savedTarget, int* mode, double* target,
                                      const char* outerLoopCheckActive, char* switched) {
     int s = blockIdx.x * blockDim.x + threadIdx.x;
     if (s >= nScenarios) return;
-    if (!outerLoopCheckActive[s]) return;
-    int remaining = 0;
-    int cand = 0;
+    if (!outerLoopCheckActive[s] || remainingPvBusCount[s] > 0) return;
     int best = -1;
     double bestV = -1.0;
     double bestP = -1e300;
     int bestId = 0x7fffffff;
     for (int i = 0; i < nReactiveLimitEntries; i++) {
-        size_t scenarioEntry = (size_t) s * nReactiveLimitEntries + i;
-        if (reactiveLimitIslanded != nullptr && reactiveLimitIslanded[scenarioEntry]) continue;   // not a controller in this component
-        bool remote = reactiveLimitVoltageControlRole != nullptr && reactiveLimitVoltageControlRole[i] != GpuVoltageControlRole::LOCAL;
-        int m = mode[(size_t) s * n + reactiveLimitVoltageRow[i]];
-        if (passSwitched[scenarioEntry] == 1) {
-            cand++;
-            double v = nomV[i];
-            double p = pRow[i] >= 0 ? target[(size_t) s * n + pRow[i]] : staticP[i];
-            bool better = best < 0 || v > bestV
-                    || (v == bestV && (p > bestP || (p == bestP && idRank[i] < bestId)));
-            if (better) {
-                best = i;
-                bestV = v;
-                bestP = p;
-                bestId = idRank[i];
-            }
-        } else if (limitType[scenarioEntry] == GpuQLimitType::NONE && (reactiveLimitVoltageControlRole != nullptr && reactiveLimitVoltageControlRole[i] == GpuVoltageControlRole::PILOT_SELF ? m == GpuRowMode::FIXED_VARIABLE
-                                          : remote ? m == GpuRowMode::EQUATION : (m == GpuRowMode::FIXED_VARIABLE || m == GpuRowMode::BUS_TARGET_V_WITH_SLOPE))) {
-            remaining++;                                     // still PV after this pass
+        if (passSwitched[(size_t) s * nReactiveLimitEntries + i] != 1) continue;          // not switched PV -> PQ in this check
+        if (reactiveLimitFlags != nullptr && (reactiveLimitFlags[i] & GpuReactiveLimitsEntryFlag::NOT_CONTROLLER_ELEMENT) != 0) continue;   // not OLF's
+        double v = nomV[i];
+        double p = pRow[i] >= 0 ? target[(size_t) s * n + pRow[i]] : staticP[i];
+        bool better = best < 0 || v > bestV
+                || (v == bestV && (p > bestP || (p == bestP && idRank[i] < bestId)));
+        if (better) {
+            best = i;
+            bestV = v;
+            bestP = p;
+            bestId = idRank[i];
         }
     }
-    if (cand == 0 || remaining > 0 || best < 0) return;
+    if (best < 0) return;
     size_t scenarioEntry = (size_t) s * nReactiveLimitEntries + best;
     size_t idx = (size_t) s * n + reactiveLimitVoltageRow[best];
     mode[idx] = (reactiveLimitVoltageControlRole != nullptr && reactiveLimitVoltageControlRole[best] == GpuVoltageControlRole::PILOT_SELF) ? 0
@@ -526,6 +530,7 @@ void reactiveLimitsCheck(BatchSolverContext* ctx, DriverPass& drv, int loopKind)
             launchForcedTargetQLimits(ctx, nS, n);
         }
         CUDA_CHECK(cudaMemsetAsync(ctx->dReactiveLimitCheckDecision.p, 0, static_cast<size_t>(ctx->nReactiveLimitEntries) * nS, ctx->stream));
+        CUDA_CHECK(cudaMemsetAsync(ctx->dReactiveLimitRemainingPvBusCount.p, 0, static_cast<size_t>(nS) * sizeof(int), ctx->stream));
         reactiveLimitsBatch<<<grid(ctx->nReactiveLimitEntries * nS), BLOCK, 0, ctx->stream>>>(
                 ctx->nSecondaryVoltageControlControllerBuses > 0 ? ctx->dSecondaryVoltageControlReactiveLimitTargetV.as<double>() : nullptr,
                 ctx->nReactiveLimitEntries, nS, n, REACTIVE_LIMIT_TOL, MAX_PQ_PV_SWITCH,
@@ -556,7 +561,8 @@ void reactiveLimitsCheck(BatchSolverContext* ctx, DriverPass& drv, int loopKind)
                 ctx->dReactiveLimitFlags.p ? ctx->dReactiveLimitFlags.as<char>() : nullptr,
                 ctx->nReactiveLimitComparedVoltageRowOverrides > 0 ? ctx->dReactiveLimitComparedVoltageRowOverride.as<int>() : nullptr,
                 ctx->nReMergedVoltageTargets > 0 ? ctx->dReactiveLimitHoldsReMergedVoltageTarget.as<char>() : nullptr,
-                ctx->nReMergedVoltageTargets > 0 ? ctx->dReactiveLimitReMergedVoltageRow.as<int>() : nullptr);
+                ctx->nReMergedVoltageTargets > 0 ? ctx->dReactiveLimitReMergedVoltageRow.as<int>() : nullptr,
+                ctx->dReactiveLimitRemainingPvBusCount.as<int>());
         if (ctx->nReactiveLimitPilotSelfEntries > 0) {
             // a pilot that is its own controller switched to PQ while a member of its group is not (or
             // the reverse): the device has no row for OLF's layout of that state - CPU replay
@@ -586,11 +592,11 @@ void reactiveLimitsCheck(BatchSolverContext* ctx, DriverPass& drv, int loopKind)
                     ctx->dOuterLoopCheckActive.as<char>(), ctx->dReactiveLimitCheckDecision.as<char>(), ctx->dX.as<double>(),
                     ctx->reactiveLimitsRobustMinRealisticVoltage, ctx->reactiveLimitsRobustMaxRealisticVoltage);
         }
-        if (ctx->hasReactiveLimitStrongestPvKeys && ctx->everyPvBusCanSwitchToPq) {  // the rule can only fire when every PV bus can switch to PQ
+        if (ctx->hasReactiveLimitStrongestPvKeys) {
             reactiveLimitsForcedPvBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(ctx->nReactiveLimitEntries, nS, n,
-                    ctx->dReactiveLimitVoltageRow.as<int>(),
+                    ctx->dReactiveLimitRemainingPvBusCount.as<int>(), ctx->dReactiveLimitVoltageRow.as<int>(),
                     ctx->nReactiveLimitRemoteEntries > 0 ? ctx->dReactiveLimitVoltageControlRole.as<char>() : nullptr,
-                    ctx->nReactiveLimitIslanded > 0 ? ctx->dReactiveLimitIslanded.as<char>() : nullptr,
+                    ctx->dReactiveLimitFlags.p ? ctx->dReactiveLimitFlags.as<char>() : nullptr,
                     ctx->dReactiveLimitNominalV.as<double>(), ctx->dReactiveLimitActivePowerRow.as<int>(),
                     ctx->dReactiveLimitTargetP.as<double>(), ctx->dReactiveLimitIdRank.as<int>(),
                     ctx->dReactiveLimitQLimitType.as<char>(), ctx->dReactiveLimitPvPqSwitchCount.as<char>(), ctx->dReactiveLimitCheckDecision.as<char>(),

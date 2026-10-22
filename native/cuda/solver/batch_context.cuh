@@ -159,9 +159,6 @@ struct BatchSolverContext {
     // threshold skew that lands stops up to the criterion apart. Empty = use n for every scenario.
     std::vector<int> hNActive;
     DeviceBuf dReactiveLimitFlags;                                // per controller: 1 = MONITORING_VOLTAGE SVC standing by
-    int everyPvBusCanSwitchToPq = 0;                                 // every non-monitored RL entry has finite limits — the
-                                                           // ONLY networks where OLF's global "strongest stays PV"
-                                                           // rule (remainingPvBusCount 0) is reachable
     DeviceBuf dRowSlope;                                   // per row: SLOPE-SVC slope (mode-2 V rows), 0 elsewhere
     int nReactiveLimitRemoteEntries = 0;                                     // remote-member RL entries present (plan-B1/B3)
     int nReactiveLimitPilotSelfEntries = 0;                                  // reactiveLimitVoltageControlRole == 2 entries (a pilot that is its own controller)
@@ -213,9 +210,10 @@ struct BatchSolverContext {
     DeviceBuf dReactiveLimitQLimitType, dReactiveLimitPvPqSwitchCount;               // per (controller, scenario): 0 PV / 1 minQ / 2 maxQ; PV→PQ count
     // OLF's GLOBAL forced-PV election ("all PV buses should switch — the strongest stays PV"): what each
     // entry did THIS pass (1 = switched PV→PQ, 2 = switched back, 3 = limit re-freeze), the row mode a PV→PQ switch
-    // replaced (to undo the elected one), and the static election keys (controlled bus nominal V, the
-    // bus's P row for its LIVE target P, the static target P when it has no row, the id rank).
-    DeviceBuf dReactiveLimitCheckDecision, dReactiveLimitSavedRowMode;
+    // replaced (to undo the elected one), per scenario the buses the check left PV (OLF's remainingPvBusCount), and
+    // the static election keys (controlled bus nominal V, the bus's P row for its LIVE target P, the static target P
+    // when it has no row, the id rank).
+    DeviceBuf dReactiveLimitCheckDecision, dReactiveLimitSavedRowMode, dReactiveLimitRemainingPvBusCount;
     DeviceBuf dReactiveLimitsDecisionLog, dReactiveLimitsDecisionLogCount;                           // OLF_GPU_SW_LOG: on-DEVICE decision log for one slot
     DeviceBuf dReactiveLimitNominalV, dReactiveLimitActivePowerRow, dReactiveLimitTargetP, dReactiveLimitIdRank;
     int hasReactiveLimitStrongestPvKeys = 0;

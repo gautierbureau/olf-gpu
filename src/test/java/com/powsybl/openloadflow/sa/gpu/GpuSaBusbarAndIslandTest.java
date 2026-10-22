@@ -338,7 +338,11 @@ class GpuSaBusbarAndIslandTest extends AbstractGpuSaTest {
      *  reactive coupler terms for the BASE tree only and put a voltage identity on every child of an opened coupler:
      *  the re-coupled star's reactive flow was in no equation (network.xiidm busbar HFU: 1.25e12 pu circulating, the
      *  answer moving with run-to-run noise; HFUS/HFUT: linear solve failed in every run). Every section on the device,
-     *  bus voltages to 1e-9 kV. */
+     *  bus voltages to 1e-9 kV.
+     *  By exception 1e-8 kV under nested dissection: a generator sits on its reactive limit with a margin of exactly
+     *  zero, which OLF's KLU and AMD solve exactly while nested dissection lands one ulp above it; the generator unpins
+     *  for one outer pass and pins back at the same fixed point, 4.97e-9 kV from OLF's answer in each of 8 runs
+     *  (5.7e-14 under AMD; it passes at convEps 1e-12). */
     @Test
     void deviceDoubleStarSectionsReTreeMatchesCpu() {
         org.junit.jupiter.api.Assumptions.assumeTrue(
@@ -352,7 +356,7 @@ class GpuSaBusbarAndIslandTest extends AbstractGpuSaTest {
                 .setSlackBusSelectionMode(com.powsybl.openloadflow.network.SlackBusSelectionMode.NAME)
                 .setSlackBusesIds(List.of("vl0"));
         GpuBatchScopeCensus.reset();
-        assertGpuMatchesCpu(doubleStarSectionsNetwork(), ctgs, 1e-9, lfp, true);
+        assertGpuMatchesCpu(doubleStarSectionsNetwork(), ctgs, nestedDissectionOrdering(lfp) ? 1e-8 : 1e-9, lfp, true);
         assertEquals(java.util.Set.of(), GpuBatchScopeCensus.planRefusedIds(), "census=" + GpuBatchScopeCensus.snapshot());
         assertEquals(5, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(), "census=" + GpuBatchScopeCensus.snapshot());
     }

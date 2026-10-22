@@ -150,8 +150,11 @@ class GpuSaSolverTest extends AbstractGpuSaTest {
      *  coupler systems used to refine EVERY lane while the worst one was above tolerance, so a lane took a different
      *  number of steps in a batch than alone (network.xiidm busbar JZDQ: 0.125 MW off the CPU in a 700-wide chunk,
      *  1.7e-8 MW in another). Every tie of a coupler chain solved as one chunk and one by one must give the same bus
-     *  voltages to 1e-11 kV - the worst-lane rule put t17 1.8e-9 kV apart; what is left is the fill kernels'
-     *  atomicAdd order, a few ulps (<= 1.3e-13 kV) that also differ from one run to the next. */
+     *  voltages to 1e-11 kV - the worst-lane rule put t17 1.8e-9 kV apart; what is left is cuDSS's rounding, which
+     *  changes from one run to the next (<= 2.8e-13 kV over 8 runs under AMD, 0 in cuDSS's deterministic mode).
+     *  By exception 1e-8 kV under nested dissection, where that rounding reaches 1.2e-9 kV (8 runs: the chunk against
+     *  each scenario alone 3e-13 to 1.2e-9, the same chunk twice up to 6.2e-10): there the test only catches a
+     *  dependence above that noise. */
     @Test
     void deviceScenarioDoesNotDependOnItsChunkMates() {
         org.junit.jupiter.api.Assumptions.assumeTrue(
@@ -167,6 +170,7 @@ class GpuSaSolverTest extends AbstractGpuSaTest {
         com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters();
         com.powsybl.security.SecurityAnalysisParameters sap = new com.powsybl.security.SecurityAnalysisParameters();
         sap.setLoadFlowParameters(lfp);
+        double tolerance = nestedDissectionOrdering(lfp) ? 1e-8 : 1e-11;
         java.util.Set<String> allVls = network.getVoltageLevelStream().map(vl -> vl.getId())
                 .collect(java.util.stream.Collectors.toSet());
         List<com.powsybl.security.monitor.StateMonitor> monitors = List.of(new com.powsybl.security.monitor.StateMonitor(
@@ -187,7 +191,7 @@ class GpuSaSolverTest extends AbstractGpuSaTest {
                 var ab = a.getNetworkResult().getBusResults();
                 assertEquals(ab.size(), tb.size());
                 for (int b = 0; b < ab.size(); b++) {
-                    assertEquals(ab.get(b).getV(), tb.get(b).getV(), 1e-11,
+                    assertEquals(ab.get(b).getV(), tb.get(b).getV(), tolerance,
                             "bus " + ab.get(b).getBusId() + " for " + t.getContingency().getId() + ": chunk of " + ctgs.size() + " vs alone");
                 }
             }

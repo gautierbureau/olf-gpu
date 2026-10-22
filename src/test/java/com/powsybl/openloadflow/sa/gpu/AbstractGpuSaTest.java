@@ -11,6 +11,8 @@ import com.powsybl.contingency.BranchContingency;
 import com.powsybl.contingency.Contingency;
 import com.powsybl.iidm.network.Network;
 import com.powsybl.openloadflow.CommonTestConfig;
+import com.powsybl.openloadflow.ac.solver.gpu.GpuLoadFlowParameters;
+import com.powsybl.openloadflow.ac.solver.gpu.GpuReorderingAlgorithm;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.GpuBatchScopeCensus;
 import com.powsybl.openloadflow.graph.EvenShiloachGraphDecrementalConnectivityFactory;
 import com.powsybl.openloadflow.sa.AbstractOpenSecurityAnalysisTest;
@@ -182,6 +184,14 @@ abstract class AbstractGpuSaTest extends AbstractOpenSecurityAnalysisTest {
         } finally {
             securityAnalysisProvider = new OpenSecurityAnalysisProvider(commonTestConfig.matrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>());
         }
+    }
+
+    /** Whether the run orders the Jacobian by cuDSS's nested dissection (LIBRARY_DEFAULT orders these matrices the
+     *  same way). Under it cuDSS rounds differently from one factorization to the next, and two tests take a looser
+     *  tolerance there by exception; every other test holds its tolerance under both orderings. */
+    static boolean nestedDissectionOrdering(com.powsybl.loadflow.LoadFlowParameters lfp) {
+        GpuReorderingAlgorithm ordering = GpuLoadFlowParameters.get(lfp).getReorderingAlgorithm();
+        return ordering == GpuReorderingAlgorithm.NESTED_DISSECTION || ordering == GpuReorderingAlgorithm.LIBRARY_DEFAULT;
     }
 
     void assertGpuMatchesCpu(Network network, List<Contingency> contingencies) {

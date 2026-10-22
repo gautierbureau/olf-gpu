@@ -872,6 +872,25 @@ class GpuSaRemoteVoltageControlTest extends AbstractGpuSaTest {
         assertEquals(2, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(), "both contingencies must solve on the device");
     }
 
+    /** {@link #deviceForcedPvElectionOfARelocatedControllerMatchesCpu} with a load on bbs1, so that the reactive power
+     *  distribution equation g1's switch to PQ replaces on the coupler's DUMMY_Q row has a target that is not 0. Keeping
+     *  g1 PV must give that row its equation and target back, and leave the coupler's voltage equation on g1's own V row
+     *  alone. */
+    @Test
+    void deviceForcedPvElectionOfARelocatedControllerWithALoadMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = coupledSectionsForcedPvNetworkWithLoadOnBbs1();
+        List<Contingency> ctgs = List.of(
+                new Contingency("c2", new com.powsybl.contingency.ShuntCompensatorContingency("c2")),
+                new Contingency("c01", new com.powsybl.contingency.SwitchContingency("c01")));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setDistributedSlack(true).setUseReactiveLimits(true);
+        assertTrue(cpuForcedPvElections(network, ctgs, lfp) > 0, "OLF must keep a bus PV after c2, or the test proves nothing");
+        assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
+        assertEquals(2, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(), "both contingencies must solve on the device");
+    }
+
     /** How many times OLF's reactive-limit loop kept the strongest bus PV in a CPU run, read from its report. */
     private int cpuForcedPvElections(Network network, List<Contingency> ctgs, com.powsybl.loadflow.LoadFlowParameters lfp) {
         com.powsybl.commons.report.ReportNode report = com.powsybl.commons.report.ReportNode.newRootReportNode()

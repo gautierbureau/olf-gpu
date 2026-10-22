@@ -962,6 +962,17 @@ final class GpuSaTestNetworks {
         return network;
     }
 
+    /** {@link #coupledSectionsForcedPvNetwork} with a 50 MVar load ld1 on bbs1, which OLF's reactive power distribution
+     *  equation of bbs1 takes in its target: that target is then not 0. */
+    static Network coupledSectionsForcedPvNetworkWithLoadOnBbs1() {
+        Network network = coupledSectionsForcedPvNetwork();
+        com.powsybl.iidm.network.VoltageLevel vl1 = network.getVoltageLevel("vl1");
+        vl1.getNodeBreakerView().newDisconnector().setId("d20").setNode1(1).setNode2(70).setOpen(false).add();
+        vl1.getNodeBreakerView().newBreaker().setId("b20").setNode1(70).setNode2(20).setOpen(false).add();
+        vl1.newLoad().setId("ld1").setNode(20).setP0(0).setQ0(50).add();
+        return network;
+    }
+
     /** {@link #remoteFreezeNetwork} whose GEN_R can only produce {@code q} MVar over its operating range: a capability
      *  curve [-20, 20] MVar at 0 MW, [q, q] from 1 to 20 MW. OLF keeps it as a remote controller (its curve's largest
      *  range is 40 MVar) and its reactive-limit loop switches it PV -> PQ at q. */

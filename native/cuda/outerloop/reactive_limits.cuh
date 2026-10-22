@@ -31,16 +31,15 @@ __global__ void reactiveLimitsBatch(const double* secondaryVoltageControlReactiv
                                     const char* reactiveLimitFlags,
                                     const int* reactiveLimitComparedVoltageRowOverride,
                                     const char* reactiveLimitHoldsReMergedVoltageTarget, const int* reactiveLimitReMergedVoltageRow,
-                                    int* remainingPvBusCount);
+                                    int* remainingPvBusCount, int* switchedRow);
 
 __global__ void reactiveLimitsRobustVoltageResetBatch(int nReactiveLimitEntries, int nScenarios, int n, const int* reactiveLimitVoltageRow, const char* reactiveLimitVoltageControlRole,
                                     const char* outerLoopCheckActive, const char* passSwitched, double* x,
                                     double vLoRobust, double vHiRobust);
 
 __global__ void reactiveLimitsForcedPvBatch(int nReactiveLimitEntries, int nScenarios, int n, const int* remainingPvBusCount,
-                                     const int* reactiveLimitVoltageRow, const char* reactiveLimitVoltageControlRole, const char* reactiveLimitFlags,
-                                     const double* nomV, const int* pRow, const double* staticP, const int* idRank,
-                                     char* limitType, char* switchCount, char* passSwitched, const char* savedMode,
+                                     const char* reactiveLimitFlags, const double* nomV, const int* pRow, const double* staticP, const int* idRank,
+                                     char* limitType, char* switchCount, char* passSwitched, const int* switchedRow, const char* savedMode,
                                      const double* savedTarget, int* mode, double* target,
                                      const char* outerLoopCheckActive, char* switched);
 

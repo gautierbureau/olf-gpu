@@ -210,10 +210,10 @@ struct BatchSolverContext {
     DeviceBuf dReactiveLimitQLimitType, dReactiveLimitPvPqSwitchCount;               // per (controller, scenario): 0 PV / 1 minQ / 2 maxQ; PV→PQ count
     // OLF's GLOBAL forced-PV election ("all PV buses should switch — the strongest stays PV"): what each
     // entry did THIS pass (1 = switched PV→PQ, 2 = switched back, 3 = limit re-freeze), the row mode a PV→PQ switch
-    // replaced (to undo the elected one), per scenario the buses the check left PV (OLF's remainingPvBusCount), and
-    // the static election keys (controlled bus nominal V, the bus's P row for its LIVE target P, the static target P
-    // when it has no row, the id rank).
-    DeviceBuf dReactiveLimitCheckDecision, dReactiveLimitSavedRowMode, dReactiveLimitRemainingPvBusCount;
+    // replaced and the row it wrote (to undo the elected one), per scenario the buses the check left PV (OLF's
+    // remainingPvBusCount), and the static election keys (controlled bus nominal V, the bus's P row for its LIVE
+    // target P, the static target P when it has no row, the id rank).
+    DeviceBuf dReactiveLimitCheckDecision, dReactiveLimitSavedRowMode, dReactiveLimitSwitchedRow, dReactiveLimitRemainingPvBusCount;
     DeviceBuf dReactiveLimitsDecisionLog, dReactiveLimitsDecisionLogCount;                           // OLF_GPU_SW_LOG: on-DEVICE decision log for one slot
     DeviceBuf dReactiveLimitNominalV, dReactiveLimitActivePowerRow, dReactiveLimitTargetP, dReactiveLimitIdRank;
     int hasReactiveLimitStrongestPvKeys = 0;

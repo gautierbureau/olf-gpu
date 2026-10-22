@@ -238,6 +238,7 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& structure, int 
             CUDA_CHECK(cudaMemset(ctx->dReactiveLimitsDecisionLogCount.p, 0, sizeof(int)));
         }
         ctx->dReactiveLimitSavedRowMode.alloc(static_cast<size_t>(nReactiveLimitEntries) * nScenarios * sizeof(char));
+        ctx->dReactiveLimitSwitchedRow.alloc(static_cast<size_t>(nReactiveLimitEntries) * nScenarios * sizeof(int));
         ctx->dReactiveLimitRemainingPvBusCount.alloc(static_cast<size_t>(nScenarios) * sizeof(int));
         ctx->dReactiveLimitQLimitType.alloc(static_cast<size_t>(nReactiveLimitEntries) * nScenarios * sizeof(char));
         ctx->dReactiveLimitPvPqSwitchCount.alloc(static_cast<size_t>(nReactiveLimitEntries) * nScenarios * sizeof(char));

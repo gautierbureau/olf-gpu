@@ -69,7 +69,7 @@ public class GpuDriverOuterLoopEngine extends AcloadFlowEngine {
             return true;
         }
         return switch (outerLoop.getName()) {
-            case "FreezingHvdcACEmulation", "AcHvdcAcEmulationLimits", "VoltageMonitoring", "SecondaryVoltageControl",
+            case "FreezingHvdcACEmulation", "AcHvdcAcEmulationLimits", "AreaInterchangeControl", "VoltageMonitoring", "SecondaryVoltageControl",
                  "PhaseControl", "IncrementalPhaseControl",
                  "TransformerVoltageControl", "SimpleTransformerVoltageControl", "IncrementalTransformerVoltageControl",
                  "IncrementalTransformerReactivePowerControl",

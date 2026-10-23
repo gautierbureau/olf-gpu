@@ -19,9 +19,12 @@ import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcDataExtractor;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcStructures;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuEquationDump;
+import com.powsybl.openloadflow.ac.outerloop.gpu.AreaInterchangeControlNative;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DeviceFlowControllers;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DeviceLoopTables;
+import com.powsybl.openloadflow.ac.outerloop.gpu.DistributedSlackNative;
 import com.powsybl.openloadflow.ac.outerloop.gpu.ForceTargetQInReactiveLimits;
+import com.powsybl.openloadflow.ac.outerloop.gpu.GpuAreaInterchangeControlOuterLoop;
 import com.powsybl.openloadflow.ac.outerloop.gpu.GpuDistributedSlackOuterLoop;
 import com.powsybl.openloadflow.ac.outerloop.gpu.GpuHvdcAcEmulationLimitsOuterLoop;
 import com.powsybl.openloadflow.ac.outerloop.gpu.GpuIncrementalShuntVoltageControlOuterLoop;
@@ -182,11 +185,23 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                     SecondaryVoltageControlNative.readBatchSecondaryVoltageControlTargets(handle));
         }
         // Only a loop the run has moved anything: its tables are packed either way.
-        lastDistributedActivePower = driverDistributedSlackLoop() == null ? Double.NaN
-                : GpuDistributedSlackOuterLoop.applyToNetwork(network, equationSystem, driverDistributedSlackParameters(),
-                        loadAnchorTargetP, deviceTargets,
-                        BatchReadbackNative.readBatchDistributedSlackGeneratorMove(handle), BatchReadbackNative.readBatchSlackRetainedShare(handle),
-                        BatchReadbackNative.readBatchSlackAbsorbed(handle), data);
+        if (areaInterchangeControlTables != null && areaInterchangeControlTables.areaCount() > 0) {
+            // AreaInterchangeControl: every participant at its initial target plus its move; what the run distributed is
+            // what OLF's context data accumulates over the checks of every solve
+            GpuAreaInterchangeControlOuterLoop.applyToNetwork(network, data, BatchReadbackNative.readBatchDistributedSlackGeneratorMove(handle));
+            double[] distributed = AreaInterchangeControlNative.readBatchAreaInterchangeControlDistributedActivePower(handle);
+            areaInterchangeControlDistributedActivePower += distributed != null ? distributed[0] : 0.0;
+            lastDistributedActivePower = areaInterchangeControlDistributedActivePower;
+        } else {
+            lastDistributedActivePower = !driverDistributesActivePower() ? Double.NaN
+                    : GpuDistributedSlackOuterLoop.applyToNetwork(network, equationSystem, driverDistributedSlackParameters(),
+                            loadAnchorTargetP, deviceTargets,
+                            BatchReadbackNative.readBatchDistributedSlackGeneratorMove(handle), BatchReadbackNative.readBatchSlackRetainedShare(handle),
+                            BatchReadbackNative.readBatchSlackAbsorbed(handle), data);
+            if (areaInterchangeControlTables != null && !Double.isNaN(lastDistributedActivePower)) {
+                GpuAreaInterchangeControlOuterLoop.DEVICE_DISTRIBUTIONS.increment();   // no area: OLF's DistributedSlack form
+            }
+        }
         if (driverReactiveLimitsOuterLoop() != null) {
             GpuReactiveLimitsOuterLoop.applyToNetwork(network, reactiveLimitsFinalState, data, deviceTargets,
                     data.reactiveLimits().voltageControlRole() != null ? BatchReadbackNative.readBatchRowModes(handle) : null);
@@ -223,6 +238,12 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
      *  what OLF's DistributedSlackOuterLoop would have accumulated. NaN when that solve distributed nothing —
      *  the targets then still hold an earlier solve's distribution, whose amount stands. */
     private double lastDistributedActivePower = Double.NaN;
+
+    /** The run's AreaInterchangeControl tables as the last solve installed them, null without that loop. */
+    private GpuAreaInterchangeControlOuterLoop.Tables areaInterchangeControlTables;
+
+    /** What the AreaInterchangeControl checks of this run's device solves distributed (pu). */
+    private double areaInterchangeControlDistributedActivePower;
 
     public double lastDistributedActivePower() {
         return lastDistributedActivePower;
@@ -361,6 +382,15 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
         return null;
     }
 
+    private com.powsybl.openloadflow.ac.outerloop.AcAreaInterchangeControlOuterLoop driverAreaInterchangeControlLoop() {
+        return acLoadFlowParameters == null ? null : GpuAreaInterchangeControlOuterLoop.find(acLoadFlowParameters.getOuterLoops());
+    }
+
+    /** The run distributes active power: OLF's DistributedSlack loop, or AreaInterchangeControl, which replaces it. */
+    private boolean driverDistributesActivePower() {
+        return driverDistributedSlackLoop() != null || driverAreaInterchangeControlLoop() != null;
+    }
+
     private com.powsybl.openloadflow.ac.outerloop.ReactiveLimitsOuterLoop driverReactiveLimitsOuterLoop() {
         if (acLoadFlowParameters == null) {
             return null;
@@ -376,6 +406,12 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
     /** The run's own DistributedSlack settings (balance type, active limits) — never defaults. */
     private com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDistributedSlackParameters driverDistributedSlackParameters() {
         var distributedSlackOuterLoop = driverDistributedSlackLoop();
+        var areaInterchangeControlOuterLoop = driverAreaInterchangeControlLoop();
+        if (distributedSlackOuterLoop == null && areaInterchangeControlOuterLoop != null) {
+            return new com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDistributedSlackParameters(
+                    areaInterchangeControlOuterLoop.getActivePowerDistribution().getBalanceType(),
+                    areaInterchangeControlOuterLoop.getActivePowerDistribution().isUseActiveLimits(), true);
+        }
         return distributedSlackOuterLoop == null
                 ? com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDistributedSlackParameters.DEFAULT
                 : new com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDistributedSlackParameters(
@@ -558,7 +594,19 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
             monitoringVoltageControllers = phases.monitoring();
             GpuMonitoringVoltageOuterLoop.installDriverLoop(handle, monitoringVoltageControllers);
             // the run's own loops
-            DriverNative.setBatchOuterLoops(handle, driverDistributedSlackLoop() != null, driverReactiveLimitsOuterLoop() != null);
+            DriverNative.setBatchOuterLoops(handle, driverDistributesActivePower(), driverReactiveLimitsOuterLoop() != null);
+            // AreaInterchangeControl (OLF order 3) in place of DistributedSlack, moving the same participants area by area
+            var areaInterchangeControlOuterLoop = driverAreaInterchangeControlLoop();
+            areaInterchangeControlTables = areaInterchangeControlOuterLoop == null ? null
+                    : GpuAreaInterchangeControlOuterLoop.build(network, areaInterchangeControlOuterLoop, cachedData,
+                            new com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcElementMapper(network));
+            if (areaInterchangeControlOuterLoop != null && areaInterchangeControlTables == null) {
+                throw new PowsyblException("GPU driver: the device cannot own AreaInterchangeControl; the solve goes to the CPU");
+            }
+            GpuAreaInterchangeControlOuterLoop.uploadToDevice(handle, areaInterchangeControlTables);
+            DistributedSlackNative.setBatchDistributedSlackGeneratorAnchors(handle, null,
+                    areaInterchangeControlTables != null && areaInterchangeControlTables.areaCount() > 0
+                            ? GpuAreaInterchangeControlOuterLoop.initialMoves(network, cachedData) : null, null);
             // SecondaryVoltageControl (OLF order 4) IN-KERNEL — the same phase, built the same way, as the batched
             // security analysis. The device owns every loop of the run or the solve goes to the CPU, the same rule
             // the batched security analysis applies to a whole run: a zone set the kernel refuses, a control loop
@@ -574,7 +622,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                 throw new PowsyblException("GPU driver: the device cannot own " + refusedLoops + "; the solve goes to the CPU");
             }
             com.powsybl.openloadflow.ac.outerloop.gpu.DevicePhaseOwnership.requireComplete();
-            if (driverRejectSlackDistributionFailure && driverDistributedSlackLoop() != null && cachedData.distributedSlack().busPhiRow().length == 0
+            if (driverRejectSlackDistributionFailure && driverDistributesActivePower() && cachedData.distributedSlack().busPhiRow().length == 0
                     && (cachedData.distributedSlack().slackPhiRow() < 0 || Double.isInfinite(cachedData.distributedSlack().slackRoomUp()))) {
                 // No participant row and no slack generator to bound the slack's own share: either nobody
                 // participates (the pack dropped the distribution, the mismatch simply stays at the slack) or the
@@ -722,14 +770,14 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
         if (tablesDirty) {
             // The SAME run-constant outer-loop tables the batched SA installs on its chunk
             // contexts — a batch of one drives the same loops as a batch of five hundred.
-            var distributedSlackOuterLoop = driverDistributedSlackLoop();
+            boolean distributesActivePower = driverDistributesActivePower();
             ReactiveCapabilityCurves.Channel reactiveCapabilityCurves = driverReactiveLimitsOuterLoop() != null
-                    ? ReactiveCapabilityCurves.build(network, equationSystem, cachedData, driverDistributedSlackParameters(), distributedSlackOuterLoop != null, target,
+                    ? ReactiveCapabilityCurves.build(network, equationSystem, cachedData, driverDistributedSlackParameters(), distributesActivePower, target,
                             acLoadFlowParameters.getNetworkParameters().isExtrapolateReactiveLimits())
                     : null;
             // forceTargetQInReactiveLimits: the base load flow's slack moves P too, and OLF re-clamps.
             var lfNetworkParameters = acLoadFlowParameters.getNetworkParameters();
-            ForceTargetQInReactiveLimits.Channel forcedTargetQ = driverReactiveLimitsOuterLoop() != null && distributedSlackOuterLoop != null
+            ForceTargetQInReactiveLimits.Channel forcedTargetQ = driverReactiveLimitsOuterLoop() != null && distributesActivePower
                     ? ForceTargetQInReactiveLimits.build(network, equationSystem, cachedData, driverDistributedSlackParameters(),
                             lfNetworkParameters.isForceTargetQInReactiveLimits() && lfNetworkParameters.isReactiveLimits(),
                             true, target, activation.rowMode(), lfNetworkParameters.isExtrapolateReactiveLimits())

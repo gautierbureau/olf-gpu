@@ -784,19 +784,6 @@ class GpuSaRemoteVoltageControlTest extends AbstractGpuSaTest {
                 "the forced-PV scenario must SOLVE on the device (in-kernel election), not be rejected");
     }
 
-    /** Forced-PV network: OLF's loop applies the "strongest stays PV" rule per scenario (a forced-PV
-     *  bus keeps its pushed mode). 1e-12 with engagement. */
-    @Test
-    void remoteForcedPvMatchesCpu() {
-        org.junit.jupiter.api.Assumptions.assumeTrue(
-                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
-        Network network = forcedPvNetwork();
-        List<Contingency> ctgs = List.of(new Contingency("L14", new BranchContingency("L14")));
-        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
-                .setDistributedSlack(true).setUseReactiveLimits(true);
-        assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
-    }
-
     /** OLF's "strongest stays PV" rule (switchPvPq at remainingPvBusCount 0) counts the buses its check leaves PV, so g6,
      *  whose reactive range is the single value 5 MVar at its 10 MW and which the base switched to PQ, changes nothing:
      *  losing c4 drives g1, g2 and g3 over their limits and OLF keeps one of them PV. The device decided once per

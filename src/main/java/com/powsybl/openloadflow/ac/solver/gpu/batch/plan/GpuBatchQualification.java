@@ -88,6 +88,49 @@ public final class GpuBatchQualification {
                         int[][] distrQSubgroupByIndex,
                         /** Per scenario, the slack OLF re-picks when the outage isolates the base one. */
                         SlackRelocations slackRelocations) {
+
+        /** This plan with only {@code indices} batched. */
+        public ScenarioPlan withBatchedIndices(List<Integer> indices) {
+            return new ScenarioPlan(indices, frozenRowsByIndex, islandedNumsByIndex, frozenTargetsByIndex, genOutagesByIndex,
+                    islandingCount, activePowerLossByIndex, distrQWeightOverrideTermByIndex, distrQWeightOverrideWeightByIndex,
+                    distrQKeyOverrideMemberByIndex, distrQKeyOverrideKeyByIndex, distrRhoOverrideTermByIndex,
+                    distrRhoOverrideCoefficientByIndex, islandedDistributedSlackByIndex, islandedReactiveLimitEntriesByIndex,
+                    islandedHvdcsByIndex, distrQSubgroupByIndex, slackRelocations);
+        }
+    }
+
+    /**
+     * The plan with the scenarios AreaInterchangeControl cannot balance on the device left out (each one recorded as a
+     * plan refusal, so it runs on the CPU). OLF's security analysis distributes a contingency's active power loss over the
+     * whole synchronous network before the post-contingency load flow, resetting every participant to its initial target,
+     * which the area phase does not replay; a contingency that loses an injection or an HVDC, leaves an island (its buses
+     * leave their areas and its boundaries leave the interchanges) or moves the slack, and a strategy, keep that to OLF.
+     * {@code tablesBuilt} false (a boundary the device does not model): every scenario.
+     */
+    public static ScenarioPlan refuseAreaInterchangeControlShapes(ScenarioPlan plan, List<BatchContingency> contingencies, boolean tablesBuilt) {
+        List<Integer> kept = new java.util.ArrayList<>();
+        for (int i : plan.batchedIndices()) {
+            BatchContingency c = contingencies.get(i);
+            String tag = null;
+            if (!tablesBuilt) {
+                tag = "PLAN:AREA_INTERCHANGE_CONTROL_BOUNDARY_UNMODELED";
+            } else if (c.contingencyId().indexOf(BatchContingency.STRATEGY_KEY_SEP) >= 0) {
+                tag = "PLAN:AREA_INTERCHANGE_CONTROL_STRATEGY";
+            } else if (!c.lostGenerators().isEmpty() || !c.lostLoads().isEmpty() || !c.outagedHvdcs().isEmpty()
+                    || plan.activePowerLossByIndex()[i] != 0) {
+                tag = "PLAN:AREA_INTERCHANGE_CONTROL_ACTIVE_POWER_LOSS";
+            } else if (plan.islandedNumsByIndex()[i] != null && plan.islandedNumsByIndex()[i].length > 0) {
+                tag = "PLAN:AREA_INTERCHANGE_CONTROL_ISLAND";
+            } else if (plan.slackRelocations() != null && plan.slackRelocations().row(i) >= 0) {
+                tag = "PLAN:AREA_INTERCHANGE_CONTROL_SLACK_RELOCATION";
+            }
+            if (tag != null) {
+                refuse(c, tag);
+            } else {
+                kept.add(i);
+            }
+        }
+        return plan.withBatchedIndices(kept);
     }
 
     /** Per contingency index: the angle row of the bus OLF makes the slack when the outage isolates the base one

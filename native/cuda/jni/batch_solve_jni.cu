@@ -114,9 +114,9 @@ OLF_JNI(ac_solver_gpu, BatchSolveNative, solveBatchContext)(
     // a network reach zero PV buses ("all PV buses should switch PQ, strongest one will stay PV"),
     // and reactiveLimitsForcedPvBatch is the only thing on the device that reproduces it. A context that
     // installed RL entries without the keys would switch every candidate to PQ and silently diverge from the
-    // CPU (measured 1.9 kV on the forced-PV network). GpuBatchOuterLoopTables.install always sets
-    // them, so reaching this is a table-installation bug — say so instead of routing the scenario
-    // away and hiding it.
+    // CPU (measured 1.9 kV on the forced-PV network). Every context with RL entries gets them when it
+    // is created (DeviceLoopTables.installReactiveLimitStrongestPvKeys), so reaching this is a
+    // table-installation bug — say so instead of routing the scenario away and hiding it.
     if (ctx != nullptr && ctx->nReactiveLimitEntries > 0 && !ctx->hasReactiveLimitStrongestPvKeys) {
         env->ThrowNew(env->FindClass("java/lang/IllegalStateException"),
                       "solveBatchContext: reactive-limit entries installed without the forced-PV "

@@ -149,9 +149,8 @@ class GpuSaReactiveLimitsTest extends AbstractGpuSaTest {
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
         Network network = IeeeCdfNetworkFactory.create14();
-        // ONLY B3 is tight. Make every PV bus of the case switch to PQ instead and the run hits the corner
-        // where all switch at once, which the device rejects by design (OLF's global "strongest stays PV" election is
-        // not a kernel) — the scenario would go to the CPU and the test would prove nothing.
+        // ONLY B6 is tight. The other generators get room enough never to reach a limit, so B6 is the only bus
+        // switched to PQ and the test measures the shed load and nothing else.
         network.getGenerator("B6-G").newMinMaxReactiveLimits().setMinQ(-5).setMaxQ(5).add();
         for (String wide : List.of("B1-G", "B2-G", "B3-G", "B8-G")) {
             network.getGenerator(wide).newMinMaxReactiveLimits().setMinQ(-990).setMaxQ(990).add();

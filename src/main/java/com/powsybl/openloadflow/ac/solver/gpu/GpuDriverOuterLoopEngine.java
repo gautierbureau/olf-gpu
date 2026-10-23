@@ -81,10 +81,10 @@ public class GpuDriverOuterLoopEngine extends AcloadFlowEngine {
     /**
      * A loop the device driver owns. While the solver runs on the device the driver has already
      * made this loop's decisions inside the solve, so the check is STABLE. The moment a solve FALLS
-     * BACK to the CPU Newton-Raphson (a device-broken shape, a forced-PV election the kernel does not
-     * run, a rejected extraction) the driver made no decision at all, and OLF's real loop must run
-     * exactly as it does without the GPU. Dropping the loop instead left the fallback base without any
-     * DistributedSlack/ReactiveLimits (1.3e-4 kV on the zero-impedance member network).
+     * BACK to the CPU Newton-Raphson (a device-broken shape, a rejected extraction) the driver made
+     * no decision at all, and OLF's real loop must run exactly as it does without the GPU. Dropping
+     * the loop instead left the fallback base without any DistributedSlack/ReactiveLimits (1.3e-4 kV
+     * on the zero-impedance member network).
      *
      * <p>OLF initialized the real loop when the engine created it (createOuterLoopsAndContexts), before
      * it was wrapped here — the driver starts from that state too (FreezingHvdcACEmulation's frozen

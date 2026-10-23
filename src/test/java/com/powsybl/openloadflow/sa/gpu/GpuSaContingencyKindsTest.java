@@ -86,9 +86,9 @@ class GpuSaContingencyKindsTest extends AbstractGpuSaTest {
         bq.newExtension(com.powsybl.iidm.network.extensions.ActivePowerControlAdder.class)
                 .withParticipate(false).withParticipationFactor(0).add();
         network.getGenerator("B6-G").newMinMaxReactiveLimits().setMinQ(-5).setMaxQ(5).add();
-        for (String wide : List.of("B1-G", "B2-G", "B3-G", "B8-G")) {    // only B6 switches to PQ: every PV bus
+        for (String wide : List.of("B1-G", "B2-G", "B3-G", "B8-G")) {    // only B6 switches to PQ
             network.getGenerator(wide).newMinMaxReactiveLimits().setMinQ(-990).setMaxQ(990).add();
-        }                                                                // at its limit is a CPU route by design
+        }
         List<Contingency> ctgs = List.of(
                 new Contingency("B6-Q", new com.powsybl.contingency.GeneratorContingency("B6-Q")));
         com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
@@ -239,20 +239,12 @@ class GpuSaContingencyKindsTest extends AbstractGpuSaTest {
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
         Network network = IeeeCdfNetworkFactory.create14();
-        // Injections kept MODEST on purpose. At 25/10 MW ieee14's generators saturate their reactive
-        // limits and the driver rejects the base solve outright (every PV bus switching to PQ: the forced-PV election),
-        // which has nothing to do with boundary lines — verified by adding the same two lines with
-        // ZERO injection, which passes. A test that big would be measuring that limitation instead.
-        // Injection ZERO, and that is the honest limit of what this can assert today. The boundary BUS
-        // and its branch exist either way, so the shape IS exercised — but give either line a non-zero
-        // P0/Q0 and the driver rejects the BASE solve (status -2) and the whole run falls back to the
-        // CPU: correct answers, no GPU at all.
-        //
-        // It is the BOUNDARY LINE carrying the injection, not the injection: with the generators given
-        // ±2000 MVAr of headroom, the same 8/3 and 5/2 MW added as ORDINARY LOADS passes, while the
-        // same amounts on these two boundary lines does not. So it is also NOT the reactive-limit
-        // election that the rejection message blames — that reproduces with no bus switched to PQ. Open, and the
-        // trigger is not yet identified.
+        // Injection ZERO. The boundary BUS and its branch exist either way, so the shape IS exercised; the
+        // outage of a boundary line WITH its injection is deviceBoundaryLineOutageMatchesCpu. DL-9 could
+        // not carry one here anyway: 12 ohm on the 12 kV level is 8.3 pu, which delivers about 4 MW at most
+        // at the power factor of the 5/2 MW once tried on it, so OLF's own base load flow stops at its
+        // iteration limit, and the device's with it (measured 2026-10-23; 8/3 MW on DL-4 alone converges
+        // on both).
         addBoundaryLine(network, "VL4", "DL-4", 0, 0);
         addBoundaryLine(network, "VL9", "DL-9", 0, 0);
         List<Contingency> ctgs = List.of(

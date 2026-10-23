@@ -11,6 +11,7 @@ import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcElementMapper;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DevicePhases;
 import com.powsybl.openloadflow.ac.outerloop.gpu.ForceTargetQInReactiveLimits;
+import com.powsybl.openloadflow.ac.outerloop.gpu.GpuAreaInterchangeControlOuterLoop;
 import com.powsybl.openloadflow.ac.outerloop.gpu.GpuHvdcAcEmulationLimitsOuterLoop;
 import com.powsybl.openloadflow.ac.outerloop.gpu.ReactiveCapabilityCurves;
 import com.powsybl.openloadflow.ac.solver.NewtonRaphsonParameters;
@@ -45,10 +46,17 @@ record ChunkInputs(List<BatchContingency> contingencies, ChunkInputs.BaseCase ba
                          double tol, double reactiveLimitTol, double slackDistTol, double convEpsPerEq, double[][] rowCriteria) {
     }
 
-    /** The run's driver phases, its AC-emulation HVDC controllers (null without the HVDC loops) and the
-     *  reactive-capability curve and forced-target-Q channels. */
+    /** The run's driver phases, its AC-emulation HVDC controllers (null without the HVDC loops), the
+     *  reactive-capability curve and forced-target-Q channels, and the AreaInterchangeControl tables with each
+     *  participating generator's move from its initial target in the base (null without areas). */
     record DevicePhaseInputs(DevicePhases.Built phases, List<GpuHvdcAcEmulationLimitsOuterLoop.Controller> hvdcControllers,
-                             ReactiveCapabilityCurves.Channel reactiveCapabilityCurves, ForceTargetQInReactiveLimits.Channel forcedTargetQ) {
+                             ReactiveCapabilityCurves.Channel reactiveCapabilityCurves, ForceTargetQInReactiveLimits.Channel forcedTargetQ,
+                             GpuAreaInterchangeControlOuterLoop.Tables areaInterchangeControl, double[] areaInterchangeControlBaseMoves) {
+
+        /** The run balances areas on the device. */
+        boolean areaInterchangeControlWithAreas() {
+            return areaInterchangeControl != null && areaInterchangeControl.areaCount() > 0;
+        }
     }
 
     /** Where the results go, per contingency index: the result row (null = route to the CPU), the replayed loss

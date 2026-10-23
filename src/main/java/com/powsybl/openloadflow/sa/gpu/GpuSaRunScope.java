@@ -162,6 +162,20 @@ final class GpuSaRunScope {
         // re-solves do not compose). The chunk path runs it as an in-kernel driver phase at its own slot, so
         // the order is OLF's and no co-presence gate is needed (tasks #48).
         LoadFlowParameters lfGuardParams = securityAnalysisParameters.getLoadFlowParameters();
+        // AreaInterchangeControl takes DistributedSlack's place in a run (OLF drops that loop) and runs as a driver phase
+        // (outerloop/area_interchange_control.cu) that moves the distribution's own per-generator participants: it needs
+        // them (no load-based balance type) and one slack bus when the network has areas; OLF itself refuses a network
+        // with several synchronous components, which the CPU path then reports. Its scenarios with an active power loss,
+        // an island, an HVDC or a strategy go to the CPU (GpuBatchQualification.refuseAreaInterchangeControlShapes).
+        var areaInterchangeControlLoop = com.powsybl.openloadflow.ac.outerloop.gpu.GpuAreaInterchangeControlOuterLoop.find(acParameters.getOuterLoops());
+        boolean areaInterchangeControlLoadBased = lfGuardParams.getBalanceType() == LoadFlowParameters.BalanceType.PROPORTIONAL_TO_LOAD
+                || lfGuardParams.getBalanceType() == LoadFlowParameters.BalanceType.PROPORTIONAL_TO_CONFORM_LOAD;
+        boolean areaInterchangeControlBatchable = areaInterchangeControlLoop != null && lfNetwork.getSynchronousNetworks().size() == 1
+                && (!lfNetwork.hasArea() || !areaInterchangeControlLoadBased
+                        && lfNetwork.getSynchronousNetworks().getFirst().getSlackBuses().size() == 1);
+        // the run distributes active power: DistributedSlack, or AreaInterchangeControl in its place
+        boolean distributesActivePower = areaInterchangeControlLoop != null || acParameters.getOuterLoops().stream()
+                .anyMatch(outerLoop -> DistributedSlackOuterLoop.NAME.equals(outerLoop.getName()));
         List<String> unsupportedOuterLoops;
         unsupportedOuterLoops = new ArrayList<>(acParameters.getOuterLoops().stream()
                 .map(AcOuterLoop::getName)
@@ -177,13 +191,13 @@ final class GpuSaRunScope {
                         && !"IncrementalTransformerReactivePowerControl".equals(name)
                         && !(continuousPhaseBatchable && "PhaseControl".equals(name))
                         && !(hvdcBatchable && ("AcHvdcAcEmulationLimits".equals(name) || "FreezingHvdcACEmulation".equals(name)))
-                        && !(monitoringBatchable && "VoltageMonitoring".equals(name)))
+                        && !(monitoringBatchable && "VoltageMonitoring".equals(name))
+                        && !(areaInterchangeControlBatchable && "AreaInterchangeControl".equals(name)))
                 .toList());
         // Parameterization corner cases the device DS loop does not model (see
         // docs/gpu-vs-cpu-capabilities.md Part II §A): the device weights are always maxP/droop with
         // active limits — any other balance type or unlimited distribution must fall back whole-run.
-        boolean distributedSlackLoopActive = acParameters.getOuterLoops().stream()
-                .anyMatch(outerLoop -> DistributedSlackOuterLoop.NAME.equals(outerLoop.getName()));
+        boolean distributedSlackLoopActive = distributesActivePower;
         // The device DS pass models EVERY balance type (GpuDistributedSlackParameters.supports returns true for all
         // six — incl. the load-based types and REMAINING_MARGIN via the margin factors, GpuDistributedSlackFactorMode)
         // and both useActiveLimits settings, so this guard is future-proofing for balance types
@@ -223,8 +237,7 @@ final class GpuSaRunScope {
                 .getOrDefault(securityAnalysisParameters).getContingencyActivePowerLossDistribution();
         boolean defaultLossDist = com.powsybl.openloadflow.sa.OpenSecurityAnalysisParameters
                 .CONTINGENCY_ACTIVE_POWER_LOSS_DISTRIBUTION_DEFAULT_VALUE.equals(lossDistName);
-        boolean distributedSlackActive = acParameters.getOuterLoops().stream()
-                .anyMatch(outerLoop -> DistributedSlackOuterLoop.NAME.equals(outerLoop.getName()));
+        boolean distributedSlackActive = distributesActivePower;
         if (!defaultLossDist && distributedSlackActive) {
             unsupportedOuterLoops.add("ContingencyActivePowerLossDistribution[" + lossDistName + "]");
         }
@@ -232,8 +245,7 @@ final class GpuSaRunScope {
         // Capture which outer loops this run actually applies, so the batched device solver runs the
         // distributed-slack / reactive-limits passes only when OLF does (presence in the resolved outer-loop
         // list is the definitive signal — gens may report participation / buses may be PV regardless).
-        boolean distributedSlack = acParameters.getOuterLoops().stream()
-                .anyMatch(outerLoop -> DistributedSlackOuterLoop.NAME.equals(outerLoop.getName()));
+        boolean distributedSlack = distributesActivePower;
         boolean reactiveLimits = acParameters.getOuterLoops().stream()
                 .anyMatch(outerLoop -> ReactiveLimitsOuterLoop.NAME.equals(outerLoop.getName()));
         boolean cfgTransformerControl = transformerControlBatchable
@@ -306,8 +318,11 @@ final class GpuSaRunScope {
         // Assemble the run's per-call batched config (replaces the solver's former JVM-global statics).
         BatchConfig batchConfig = new BatchConfig(configuredStateVectorScalingMode, cfgMaxDv, cfgMaxDphi,
                 cfgTransformerControl, cfgMaxOuterIterations, cfgMaxPqPvSwitch, cfgRejectSlackDistributionFailure,
+                // OLF's area distributions reset every participant to its INITIAL target (resetToInitialState) and the
+                // device keeps their moves from there; the plain distributed slack anchors at the converged base
                 new com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDistributedSlackParameters(
-                        lfGuardParams.getBalanceType(), olfGuardParams.isUseActiveLimits()),
+                        lfGuardParams.getBalanceType(), olfGuardParams.isUseActiveLimits(),
+                        areaInterchangeControlLoop != null && lfNetwork.hasArea()),
                 cfgIncrementalTransformerVoltageControl, olfGuardParams.getIncrementalTransformerRatioTapControlOuterLoopMaxTapShift(),
                 cfgIncrementalShunt, olfGuardParams.getIncrementalShuntControlOuterLoopMaxSectionShift(),
                 cfgSimpleShunt,
@@ -333,7 +348,8 @@ final class GpuSaRunScope {
                 false,                                       // the robust retry pass derives its own config
                 slackRelocation(acParameters),
                 null,                                        // the precomputer picks the state sink per run
-                GpuLoadFlowParameters.get(securityAnalysisParameters.getLoadFlowParameters()));
+                GpuLoadFlowParameters.get(securityAnalysisParameters.getLoadFlowParameters()),
+                areaInterchangeControlBatchable ? areaInterchangeControlLoop : null);
         return new Scope(batchDisabled, unsupportedOuterLoops, distributedSlack, reactiveLimits,
                 slackDistTol, reactiveLimitTol, convEpsPerEq, batchConfig);
     }

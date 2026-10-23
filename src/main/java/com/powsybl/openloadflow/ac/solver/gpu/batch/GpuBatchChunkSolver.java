@@ -10,11 +10,13 @@ package com.powsybl.openloadflow.ac.solver.gpu.batch;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcElementMapper;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.ZeroImpedanceNative;
+import com.powsybl.openloadflow.ac.outerloop.gpu.AreaInterchangeControlNative;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DeviceLoopTables;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DevicePhaseInstaller;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DevicePhases;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DistributedSlackNative;
 import com.powsybl.openloadflow.ac.outerloop.gpu.ForceTargetQInReactiveLimits;
+import com.powsybl.openloadflow.ac.outerloop.gpu.GpuAreaInterchangeControlOuterLoop;
 import com.powsybl.openloadflow.ac.outerloop.gpu.GpuFreezingHvdcACEmulationOuterloop;
 import com.powsybl.openloadflow.ac.outerloop.gpu.GpuHvdcAcEmulationLimitsOuterLoop;
 import com.powsybl.openloadflow.ac.outerloop.gpu.GpuMonitoringVoltageOuterLoop;
@@ -940,6 +942,8 @@ final class GpuBatchChunkSolver {
                     GpuMonitoringVoltageOuterLoop.installDriverLoop(handle, monitoringVoltageInKernel ? phases.monitoring() : null);
                     // the run's own loops
                     DriverNative.setBatchOuterLoops(handle, in.settings().distributedSlackOuterLoop(), in.settings().reactiveLimitsOuterLoop());
+                    // AreaInterchangeControl (in DistributedSlack's place), or cleared on a cached context
+                    GpuAreaInterchangeControlOuterLoop.uploadToDevice(handle, in.phases().areaInterchangeControl());
                     long solveCountBefore = BatchReadbackNative.readBatchSolveCount(handle);
                     // Seeds only where no full per-scenario state goes (the pair phase builds its own from the parents).
                     NewtonSettingsNative.setBatchX0Seeds(handle, x0Full == null ? x0SeedIdx : null, x0Full == null ? x0SeedVal : null);
@@ -1001,9 +1005,17 @@ final class GpuBatchChunkSolver {
                         ReactiveLimitsNative.setBatchReactiveLimitSeedTargetQ(handle, pairPhase ? reactiveLimitSeedTargetQ : null);
                     }
                     if (packedDistributedSlackGenerators > 0) {         // set, or cleared on a cached context, whatever the run's loops
+                        double[] start = pairPhase || nDistributedSlackGenerators == 0 ? null : ChunkArrays.flat(cl.genPreMovesBySlot, chunkSize, nDistributedSlackGenerators);
+                        if (start != null && in.phases().areaInterchangeControlWithAreas()) {
+                            // the area phase keeps the moves from the INITIAL targets: every scenario starts at the base's
+                            for (int s = 0; s < chunkSize; s++) {
+                                for (int g = 0; g < nDistributedSlackGenerators; g++) {
+                                    start[s * nDistributedSlackGenerators + g] += in.phases().areaInterchangeControlBaseMoves()[g];
+                                }
+                            }
+                        }
                         DistributedSlackNative.setBatchDistributedSlackGeneratorAnchors(handle, pairPhase ? distributedSlackGeneratorAnchor : null,
-                                pairPhase || nDistributedSlackGenerators == 0 ? null : ChunkArrays.flat(cl.genPreMovesBySlot, chunkSize, nDistributedSlackGenerators),
-                                pairPhase ? distributedSlackGeneratorSeedAnchor : null);
+                                start, pairPhase ? distributedSlackGeneratorSeedAnchor : null);
                     }
                     double[][] chunkResults = BatchSolveNative.solveBatchContext(handle, baseState, baseTargets,
                             rs.rowModePerScenario, baseRowMode, rs.disabledMask, targetOverrideIndex, targetOverrideValue,
@@ -1318,7 +1330,13 @@ final class GpuBatchChunkSolver {
                                     contingencies.get(group.get(chunkStart + s)).contingencyId(), switchedToPq, ids);
                         }
                     }
-                    if ((rs.hasDistributedSlack || slackOnlyDistribution)
+                    if (in.phases().areaInterchangeControlWithAreas() && BatchReadbackNative.readBatchSolveCount(handle) - solveCountBefore == 1) {
+                        // what the area phase's checks distributed (its scenarios lose no active power: nothing pre-distributed)
+                        double[] distributed = AreaInterchangeControlNative.readBatchAreaInterchangeControlDistributedActivePower(handle);
+                        for (int s = 0; s < realCount && distributed != null; s++) {
+                            distributedByIndex[group.get(chunkStart + s)] = distributed[s];
+                        }
+                    } else if ((rs.hasDistributedSlack || slackOnlyDistribution)
                             && BatchReadbackNative.readBatchSolveCount(handle) - solveCountBefore == 1) {
                         recordDistributedActivePower(handle, gpuData, realCount, chunkSize, n, group, chunkStart,
                                 slackOnlyDistribution, rs.distributedSlackOverrideBus, rs.distributedSlackOverrideBaseTargetPDelta, pairPhase ? distributedSlackBusAnchorShift : null,

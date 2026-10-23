@@ -20,6 +20,7 @@ import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcElementMapper;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DevicePhaseOwnership;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DevicePhases;
 import com.powsybl.openloadflow.ac.outerloop.gpu.ForceTargetQInReactiveLimits;
+import com.powsybl.openloadflow.ac.outerloop.gpu.GpuAreaInterchangeControlOuterLoop;
 import com.powsybl.openloadflow.ac.outerloop.gpu.GpuHvdcAcEmulationLimitsOuterLoop;
 import com.powsybl.openloadflow.ac.outerloop.gpu.ReactiveCapabilityCurves;
 import com.powsybl.openloadflow.ac.solver.NewtonRaphsonParameters;
@@ -187,6 +188,16 @@ public final class GpuBatchedSecurityAnalysisSolver {
         GpuBatchQualification.ScenarioPlan plan = GpuBatchQualification.planScenarios(contingencies, qualifications,
                 elementMapper, gpuData, equationSystem, distributedSlackRawFactorSum, slackParticipates, distributedSlackParameters, distrRhoControllers,
                 relocatedCouplers, distributedSlack, reactiveLimits, config.incrementalTransformerControl());
+        // AreaInterchangeControl with areas: the device balances them in its own phase, on the scenarios whose areas keep
+        // the base's participants (GpuBatchQualification.refuseAreaInterchangeControlShapes); without the tables (a
+        // boundary the device does not model) every scenario goes to the CPU
+        GpuAreaInterchangeControlOuterLoop.Tables areaInterchangeControl = config.areaInterchangeControl() == null ? null
+                : GpuAreaInterchangeControlOuterLoop.build(network, config.areaInterchangeControl(), gpuData, elementMapper);
+        double[] areaInterchangeControlBaseMoves = null;
+        if (config.areaInterchangeControl() != null && network.hasArea()) {
+            plan = GpuBatchQualification.refuseAreaInterchangeControlShapes(plan, contingencies, areaInterchangeControl != null);
+            areaInterchangeControlBaseMoves = GpuAreaInterchangeControlOuterLoop.initialMoves(network, gpuData);
+        }
         List<Integer> batchedIndices = plan.batchedIndices();
         if (GpuTrace.BATCH_TRACE.isOn()) {
             System.err.println("PLAN batched=" + batchedIndices.size() + " of " + contingencies.size());
@@ -248,7 +259,8 @@ public final class GpuBatchedSecurityAnalysisSolver {
                         plan,
                         new ChunkInputs.SolveSettings(parameters, distributedSlack, reactiveLimits, tol, reactiveLimitTol, slackDistTol,
                                 convEpsPerEq, rowCriteria),
-                        new ChunkInputs.DevicePhaseInputs(phases, hvdcControllers, reactiveCapabilityCurves, forcedTargetQ),
+                        new ChunkInputs.DevicePhaseInputs(phases, hvdcControllers, reactiveCapabilityCurves, forcedTargetQ,
+                                areaInterchangeControl, areaInterchangeControlBaseMoves),
                         new ChunkInputs.ResultSinks(resultsByIndex, preDistributedByIndex, distributedByIndex),
                         config));
             }

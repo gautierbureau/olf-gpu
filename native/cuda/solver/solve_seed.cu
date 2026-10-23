@@ -16,6 +16,7 @@
 #include "../common/stats.cuh"
 #include "../common/codes/gpu_q_limit_type.cuh"
 #include "../common/codes/gpu_reactive_limits_state.cuh"
+#include "../outerloop/area_interchange_control.cuh"
 #include "../outerloop/distributed_slack.cuh"
 #include "../outerloop/forced_target_q.cuh"
 #include "../outerloop/incremental_flow_control.cuh"
@@ -257,6 +258,9 @@ void seedSolve(BatchSolverContext* ctx, DriverPass& drv, const int* reactiveLimi
     launchDistrQTargetsInner(ctx, drv);
     if (ctx->distributedSlackOuterLoop && ctx->nDistributedSlackBuses > 0) {   // the run's loop, not the packed table
         distributedSlackResetSolve(ctx, drv);
+    }
+    if (ctx->areaInterchangeControlOuterLoop) {
+        areaInterchangeControlResetSolve(ctx, drv);
     }
     if (ctx->nMonitoringVoltageControllers > 0) {
         monitoringVoltageResetSolve(ctx, drv);

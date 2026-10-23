@@ -272,6 +272,24 @@ struct BatchSolverContext {
     // tables alone decide.
     bool distributedSlackOuterLoop = true;
     bool reactiveLimitsOuterLoop = true;
+    // AreaInterchangeControl (setBatchAreaInterchangeControl, GpuOuterLoopKind::AREA_INTERCHANGE_CONTROL): OLF's
+    // AcAreaInterchangeControlOuterLoop. OLF drops the DistributedSlack loop from a run that has it and runs it after the
+    // HVDC loops; it moves the distributed slack's own participants (dDistributedSlackGeneratorMove and the bus rows),
+    // one area at a time. Per area: its interchange target and its share of the slack bus mismatch (pu) and the slice
+    // of its boundaries (dAreaBoundaryStart, nAreas + 1). Per boundary: a GpuAreaBoundaryKind, the branch element of its
+    // family, its slot in the disabled mask and its side; a tie line's half also carries {r, x, g, b, nominalV, SB} (SI),
+    // OLF's SV.otherSideP inputs. Per distributed-slack bus and generator: its area, -1 for a bus without area. With no
+    // area the phase is OLF's DistributedSlackOuterLoop at that place.
+    bool areaInterchangeControlOuterLoop = false;
+    int nAreas = 0, nAreaBoundaries = 0, slackBusArea = -1;
+    double areaInterchangePMaxMismatch = 0.0;                                        // pu
+    DeviceBuf dAreaInterchangeTarget, dAreaSlackDistributionFactor, dAreaBoundaryStart;
+    DeviceBuf dAreaBoundaryKind, dAreaBoundaryElement, dAreaBoundaryMaskSlot, dAreaBoundarySide, dAreaBoundaryTieLineHalf;
+    DeviceBuf dDistributedSlackBusArea, dDistributedSlackGeneratorArea;
+    DeviceBuf dAreaInterchangeControlAreaScratch;                                   // per (scenario, area): the check's working values
+    DeviceBuf dAreaInterchangeControlPreviousMove;                                  // per (scenario, generator): its move before a distribution
+    DeviceBuf dAreaInterchangeControlParticipant;                                   // per (scenario, generator): still a participant
+    DeviceBuf dAreaInterchangeControlDistributedActivePower;                        // per scenario: what OLF's context data accumulates (pu)
     std::vector<int> outerLoopFirstSolveIterations, outerLoopIterations, outerLoopSolvePasses;              // OLF_GPU_PHASE_TIME: per-scenario Newton work by
                                                              // solve pass
     int nMonitoringVoltageControllers = 0;

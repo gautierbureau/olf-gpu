@@ -41,8 +41,10 @@ public final class GpuOuterLoopKind {
     public static final int SHUNT_VOLTAGE_CONTROL = 10;
     /** SecondaryVoltageControl. */
     public static final int SECONDARY_VOLTAGE_CONTROL = 11;
+    /** AreaInterchangeControl. */
+    public static final int AREA_INTERCHANGE_CONTROL = 12;
     /** number of kinds. */
-    public static final int COUNT = 12;
+    public static final int COUNT = 13;
 
     private GpuOuterLoopKind() {
     }

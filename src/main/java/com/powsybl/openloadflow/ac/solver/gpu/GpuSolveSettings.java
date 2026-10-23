@@ -29,6 +29,9 @@ final class GpuSolveSettings {
         for (var outerLoop : p.getOuterLoops()) {
             if (outerLoop instanceof com.powsybl.openloadflow.ac.outerloop.DistributedSlackOuterLoop distributedSlackOuterLoop) {
                 slackTol = distributedSlackOuterLoop.getSlackBusPMaxMismatch() / com.powsybl.openloadflow.util.PerUnit.SB;
+            } else if (outerLoop instanceof com.powsybl.openloadflow.ac.outerloop.AcAreaInterchangeControlOuterLoop areaInterchangeControlOuterLoop) {
+                // AreaInterchangeControl replaces DistributedSlack in a run and decides on the slack mismatch with its own band
+                slackTol = areaInterchangeControlOuterLoop.getSlackBusPMaxMismatch() / com.powsybl.openloadflow.util.PerUnit.SB;
             } else if (outerLoop instanceof com.powsybl.openloadflow.ac.outerloop.ReactiveLimitsOuterLoop reactiveLimitsOuterLoop) {
                 // OLF builds the loop with its EFFECTIVE band, already in per unit
                 // (AbstractAcOuterLoopConfig: convEpsPerEq under UNIFORM_CRITERIA, maxReactivePowerMismatch / SB

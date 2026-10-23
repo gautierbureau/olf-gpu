@@ -20,7 +20,8 @@ constexpr int INCREMENTAL_TRANSFORMER_REACTIVE_POWER_CONTROL = 8;   // Increment
 constexpr int TRANSFORMER_VOLTAGE_CONTROL = 9;                      // TransformerVoltageControl (AFTER_GENERATOR) and SimpleTransformerVoltageControl (WITH_GENERATOR)
 constexpr int SHUNT_VOLTAGE_CONTROL = 10;                           // ShuntVoltageControl (WITH_GENERATOR)
 constexpr int SECONDARY_VOLTAGE_CONTROL = 11;                       // SecondaryVoltageControl
-constexpr int COUNT = 12;                                           // number of kinds
+constexpr int AREA_INTERCHANGE_CONTROL = 12;                        // AreaInterchangeControl
+constexpr int COUNT = 13;                                           // number of kinds
 }
 
 #endif

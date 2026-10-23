@@ -29,6 +29,7 @@
 #include "../equations/scatter.cuh"
 #include "../equations/scenario_overrides.cuh"
 #include "../equations/zero_impedance_fill.cuh"
+#include "../outerloop/area_interchange_control.cuh"
 #include "../outerloop/distributed_slack.cuh"
 #include "../outerloop/forced_target_q.cuh"
 #include "../outerloop/hvdc_ac_emulation.cuh"
@@ -443,7 +444,9 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     // it is not. Folding them needs the discrete tap/section tables on the device.
     int (&loopOrder)[MAX_DEVICE_LOOPS] = drv.loopOrder;
     int nLoops = 0;
-    if (ctx->distributedSlackOuterLoop && (ctx->nDistributedSlackBuses > 0 || ctx->slackOnlyDistribution)) {
+    // OLF drops the DistributedSlack loop from a run with AreaInterchangeControl, which runs after the HVDC loops instead
+    bool distributionInLoopOrder = ctx->distributedSlackOuterLoop && (ctx->nDistributedSlackBuses > 0 || ctx->slackOnlyDistribution);
+    if (distributionInLoopOrder && !ctx->areaInterchangeControlOuterLoop) {
         loopOrder[nLoops++] = GpuOuterLoopKind::DISTRIBUTED_SLACK;
     }
     if (ctx->nHvdcAcEmulation > 0) {
@@ -451,6 +454,9 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         if (ctx->hvdcAcEmulationLimitsActive) {
             loopOrder[nLoops++] = GpuOuterLoopKind::HVDC_AC_EMULATION_LIMITS;  // OLF: AcHvdcAcEmulationLimits
         }
+    }
+    if (distributionInLoopOrder && ctx->areaInterchangeControlOuterLoop) {
+        loopOrder[nLoops++] = GpuOuterLoopKind::AREA_INTERCHANGE_CONTROL;  // OLF order 3: AreaInterchangeControl
     }
     if (ctx->nSecondaryVoltageControlControllerBuses > 0) {
         loopOrder[nLoops++] = GpuOuterLoopKind::SECONDARY_VOLTAGE_CONTROL;  // OLF order 4: SecondaryVoltageControl
@@ -750,6 +756,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         monitoringVoltageStep(ctx, drv);
     } else if (loopKind == GpuOuterLoopKind::FREEZING_HVDC_AC_EMULATION || loopKind == GpuOuterLoopKind::HVDC_AC_EMULATION_LIMITS) {
         hvdcStep(ctx, drv, loopKind);
+    } else if (loopKind == GpuOuterLoopKind::AREA_INTERCHANGE_CONTROL) {
+        areaInterchangeControlCheck(ctx, drv);
     } else if (inDistributedSlackPhase) {                                // distributed-slack outer loop: spread the slack mismatch
         distributedSlackCheck(ctx, drv);
     } else {                                               // reactive-limits outer loop: switch PV->PQ over Q limit
@@ -777,7 +785,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     const int reactiveLimitsTraceScenario = ctx->loopTraceSlot >= 0 ? ctx->loopTraceSlot : reactiveLimitsTraceScenarioEnv;
     traceReactiveLimitsSwitches(ctx, drv, auditLog, reactiveLimitsAuditOn, reactiveLimitsTraceScenario);
     traceReactiveLimitsState(ctx, drv, inDistributedSlackPhase, reactiveLimitTol, outerLoopUnstable);
-    if (inDistributedSlackPhase && (ctx->nDistributedSlackBuses > 0 || ctx->slackOnlyDistribution) && rejectSlackDistributionFailure) {
+    bool inDistributionPhase = inDistributedSlackPhase || loopKind == GpuOuterLoopKind::AREA_INTERCHANGE_CONTROL;
+    if (inDistributionPhase && (ctx->nDistributedSlackBuses > 0 || ctx->slackOnlyDistribution) && rejectSlackDistributionFailure) {
         // slackDistributionFailureBehavior != LEAVE_ON_SLACK_BUS: a scenario whose participants all
         // saturated must NOT be reported converged with the residual absorbed at the slack — route it
         // to the CPU fallback (status -2), which replays it with the run's real failure behavior.

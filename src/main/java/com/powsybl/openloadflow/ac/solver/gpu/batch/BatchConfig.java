@@ -69,7 +69,10 @@ public record BatchConfig(int stateVectorScalingMode, double maxDv, double maxDp
                           GpuLoadFlowParameters gpuParameters,
                           /** The run's AreaInterchangeControl loop, null without it: it replaces DistributedSlack, and with
                            *  areas the device balances them in its own phase (GpuAreaInterchangeControlOuterLoop). */
-                          com.powsybl.openloadflow.ac.outerloop.AcAreaInterchangeControlOuterLoop areaInterchangeControl) {
+                          com.powsybl.openloadflow.ac.outerloop.AcAreaInterchangeControlOuterLoop areaInterchangeControl,
+                          /** The run's AutomationSystem loop switches branches on the device, in its own phase
+                           *  (GpuAutomationSystemOuterLoop): the network has overload management systems it represents. */
+                          boolean automationSystem) {
 
     /** PER_EQUATION_TYPE stopping thresholds (OLF PerEquationTypeStoppingCriteria ctor order;
      *  p/q in MW/MVAr, the rest pu/rad); null = UNIFORM_CRITERIA. */
@@ -86,7 +89,7 @@ public record BatchConfig(int stateVectorScalingMode, double maxDv, double maxDp
             true, com.powsybl.openloadflow.ac.AcLoadFlowParameters.DEFAULT_MIN_REALISTIC_VOLTAGE,
             com.powsybl.openloadflow.ac.AcLoadFlowParameters.DEFAULT_MAX_REALISTIC_VOLTAGE,
             com.powsybl.openloadflow.ac.AcLoadFlowParameters.DEFAULT_MIN_NOMINAL_VOLTAGE_REALISTIC_VOLTAGE_CHECK, -1,
-            false, null, null, null, null);
+            false, null, null, null, null, false);
 
     /**
      * This config with the ROBUST single-matrix solve (mode 6) selected, for the SECOND device pass over
@@ -107,7 +110,7 @@ public record BatchConfig(int stateVectorScalingMode, double maxDv, double maxDp
                 continuousPhaseControl, contingencyLossPreDistribution, extrapolateReactiveLimits, forceTargetQ, perEqCriteria,
                 genVcMinNominalV, reactiveLimitsRobustMode, minRealisticVoltage, maxRealisticVoltage,
                 minNominalVoltageRealisticVoltageCheck, realisticFixingLoop, true, slackRelocation, stateSink,
-                gpuParameters, areaInterchangeControl);
+                gpuParameters, areaInterchangeControl, automationSystem);
     }
 
     /** This config with the given state sink (see {@link #stateSink()}). */
@@ -120,7 +123,7 @@ public record BatchConfig(int stateVectorScalingMode, double maxDv, double maxDp
                 continuousPhaseControl, contingencyLossPreDistribution, extrapolateReactiveLimits, forceTargetQ, perEqCriteria,
                 genVcMinNominalV, reactiveLimitsRobustMode, minRealisticVoltage, maxRealisticVoltage,
                 minNominalVoltageRealisticVoltageCheck, realisticFixingLoop, robustSolveMode, slackRelocation, sink,
-                gpuParameters, areaInterchangeControl);
+                gpuParameters, areaInterchangeControl, automationSystem);
     }
 
     /** This config with the given GPU solver parameters (see {@link #gpuParameters()}). */
@@ -133,7 +136,7 @@ public record BatchConfig(int stateVectorScalingMode, double maxDv, double maxDp
                 continuousPhaseControl, contingencyLossPreDistribution, extrapolateReactiveLimits, forceTargetQ, perEqCriteria,
                 genVcMinNominalV, reactiveLimitsRobustMode, minRealisticVoltage, maxRealisticVoltage,
                 minNominalVoltageRealisticVoltageCheck, realisticFixingLoop, robustSolveMode, slackRelocation, stateSink,
-                parameters, areaInterchangeControl);
+                parameters, areaInterchangeControl, automationSystem);
     }
 
     /** The GPU solver's parameters the device runs with: the run's, or the configuration module's. */

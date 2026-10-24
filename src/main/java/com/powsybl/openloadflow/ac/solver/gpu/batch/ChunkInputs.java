@@ -12,6 +12,7 @@ import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcElementMapper;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DevicePhases;
 import com.powsybl.openloadflow.ac.outerloop.gpu.ForceTargetQInReactiveLimits;
 import com.powsybl.openloadflow.ac.outerloop.gpu.GpuAreaInterchangeControlOuterLoop;
+import com.powsybl.openloadflow.ac.outerloop.gpu.GpuAutomationSystemOuterLoop;
 import com.powsybl.openloadflow.ac.outerloop.gpu.GpuHvdcAcEmulationLimitsOuterLoop;
 import com.powsybl.openloadflow.ac.outerloop.gpu.ReactiveCapabilityCurves;
 import com.powsybl.openloadflow.ac.solver.NewtonRaphsonParameters;
@@ -47,11 +48,13 @@ record ChunkInputs(List<BatchContingency> contingencies, ChunkInputs.BaseCase ba
     }
 
     /** The run's driver phases, its AC-emulation HVDC controllers (null without the HVDC loops), the
-     *  reactive-capability curve and forced-target-Q channels, and the AreaInterchangeControl tables with each
-     *  participating generator's move from its initial target in the base (null without areas). */
+     *  reactive-capability curve and forced-target-Q channels, the AreaInterchangeControl tables with each
+     *  participating generator's move from its initial target in the base (null without areas), and the AutomationSystem
+     *  tables (null without the device's systems). */
     record DevicePhaseInputs(DevicePhases.Built phases, List<GpuHvdcAcEmulationLimitsOuterLoop.Controller> hvdcControllers,
                              ReactiveCapabilityCurves.Channel reactiveCapabilityCurves, ForceTargetQInReactiveLimits.Channel forcedTargetQ,
-                             GpuAreaInterchangeControlOuterLoop.Tables areaInterchangeControl, double[] areaInterchangeControlBaseMoves) {
+                             GpuAreaInterchangeControlOuterLoop.Tables areaInterchangeControl, double[] areaInterchangeControlBaseMoves,
+                             GpuAutomationSystemOuterLoop.Tables automationSystem) {
 
         /** The run balances areas on the device. */
         boolean areaInterchangeControlWithAreas() {
@@ -60,8 +63,10 @@ record ChunkInputs(List<BatchContingency> contingencies, ChunkInputs.BaseCase ba
     }
 
     /** Where the results go, per contingency index: the result row (null = route to the CPU), the replayed loss
-     *  pre-distribution and the total distributed active power (pu, NaN = unknown). */
-    record ResultSinks(double[][] resultsByIndex, double[] preDistributedByIndex, double[] distributedByIndex) {
+     *  pre-distribution, the total distributed active power (pu, NaN = unknown) and the nums of the branches the
+     *  AutomationSystem phase switched (null = none). */
+    record ResultSinks(double[][] resultsByIndex, double[] preDistributedByIndex, double[] distributedByIndex,
+                       int[][] automationSystemSwitchedByIndex) {
     }
 
     /** The same inputs from another base state. */

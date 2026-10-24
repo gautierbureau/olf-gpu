@@ -195,11 +195,18 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                 && lfContingency.getId().equals(run.deviceStateInjectedFor);
         run.lossReplayedFor = null;
         run.deviceStateInjectedFor = null;
+        List<LfBranch> automationSystemSwitched = run.automationSystemSwitched;
+        run.automationSystemSwitched = List.of();
         if (targeted) {
             java.util.Set<LfBus> buses = touchedBuses(network, lfContingency, run);
+            java.util.Collection<LfBranch> branches = lfContingency.getDisabledNetwork().getBranchesStatus().keySet();
+            if (!automationSystemSwitched.isEmpty()) {
+                branches = new java.util.ArrayList<>(branches);
+                branches.addAll(automationSystemSwitched);
+            }
             // the voltage loop over every bus is redundant when the next contingency is device-answered: its injection
             // writes every live bus (restoreStaleVoltages covers the rest)
-            networkState.restore(buses, lfContingency.getDisabledNetwork().getBranchesStatus().keySet(), false);
+            networkState.restore(buses, branches, false);
             run.staleVoltages = networkState;
             LAST_TARGETED_RESTORE_COUNT.incrementAndGet();
         } else {
@@ -298,7 +305,28 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
             nums.set(table.branches()[b].getNum());
         }
         run.sideOpened.forEach(branch -> nums.set(branch.getNum()));
+        run.automationSystemSwitched.forEach(branch -> nums.set(branch.getNum()));
         return nums.stream().toArray();
+    }
+
+    /**
+     * Gives the network the branches the device's AutomationSystem phase switched for a contingency, as OLF's loop leaves
+     * them: an opened branch disabled, a closed one enabled, and nothing else, the device switching only where every bus
+     * stays connected. The contingency leaves an operated branch as it is in the base (GpuBatchQualification
+     * .refuseAutomationSystemShapes), so each one changes state; restoreBaseState puts them back.
+     */
+    private static List<LfBranch> applyAutomationSystemSwitches(LfNetwork network, int[] switchedBranchNums) {
+        if (switchedBranchNums == null) {
+            return List.of();
+        }
+        List<LfBranch> switched = new java.util.ArrayList<>(switchedBranchNums.length);
+        for (int num : switchedBranchNums) {
+            LfBranch branch = network.getBranch(num);
+            branch.setDisabled(!branch.isDisabled());
+            switched.add(branch);
+        }
+        com.powsybl.openloadflow.ac.outerloop.gpu.GpuAutomationSystemOuterLoop.DEVICE_SWITCHED_BRANCHES.add(switched.size());
+        return switched;
     }
 
     /** The branches a contingency opened at one side only: still in the network, but in a topology the screen — built
@@ -799,6 +827,9 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         long tInj = System.nanoTime();
         runState.get().deviceStateInjectedFor = contingency.getId();
         runState.get().sideOpened = sideOpenedBranches(lfContingency);
+        // before the state: the injection refreshes the flows of the enabled branches only
+        runState.get().automationSystemSwitched = applyAutomationSystemSwitches(network,
+                precomputed.automationSystemSwitched().get(contingency.getId()));
         int[] flowReadSet = flowReadSet(runState.get(), contingency.getId());
         GpuStateInjector.injectState(precomputed.equationSystem(), precomputed.baseVariableRows(), state,
                 runState.get().remap, flowReadSet);

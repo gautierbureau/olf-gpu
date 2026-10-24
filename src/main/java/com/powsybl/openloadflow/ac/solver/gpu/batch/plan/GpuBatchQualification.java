@@ -12,8 +12,10 @@ import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcElementMapper;
 import com.powsybl.openloadflow.equations.EquationSystem;
+import com.powsybl.openloadflow.graph.GraphConnectivity;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
+import com.powsybl.openloadflow.network.LfNetwork;
 import com.powsybl.openloadflow.network.LfShunt;
 
 import java.util.List;
@@ -131,6 +133,67 @@ public final class GpuBatchQualification {
             }
         }
         return plan.withBatchedIndices(kept);
+    }
+
+    /**
+     * The plan with the scenarios AutomationSystem cannot switch on the device left out (each one recorded as a plan
+     * refusal, so it runs on the CPU). The device switches an operated branch by its bit in the scenario's disabled-element
+     * mask, which keeps the scenario's connectivity: a contingency that leaves an island, or would leave one with every
+     * branch an opening tripping operates open at once ({@code openedBranches}), stays with OLF whatever its systems end up
+     * switching. So does a contingency that outages or opens a side of a monitored or operated branch
+     * ({@code systemBranches}), and a strategy, which starts from what its contingency's systems switched.
+     * {@code systemBranches} null (a system branch outside the device's closed-branch pack): every scenario.
+     */
+    public static ScenarioPlan refuseAutomationSystemShapes(ScenarioPlan plan, List<BatchContingency> contingencies, LfNetwork network,
+                                                            Set<LfBranch> systemBranches, Set<LfBranch> openedBranches) {
+        List<Integer> kept = new java.util.ArrayList<>();
+        for (int i : plan.batchedIndices()) {
+            BatchContingency c = contingencies.get(i);
+            String tag = null;
+            if (systemBranches == null) {
+                tag = "PLAN:AUTOMATION_SYSTEM_BRANCH_UNMODELED";
+            } else if (c.contingencyId().indexOf(BatchContingency.STRATEGY_KEY_SEP) >= 0) {
+                tag = "PLAN:AUTOMATION_SYSTEM_STRATEGY";
+            } else if (touchesAny(c, systemBranches)) {
+                tag = "PLAN:AUTOMATION_SYSTEM_BRANCH_OUTAGE";
+            } else if (plan.islandedNumsByIndex()[i] != null && plan.islandedNumsByIndex()[i].length > 0) {
+                tag = "PLAN:AUTOMATION_SYSTEM_ISLAND";
+            } else if (!keepsConnectivity(network, c, openedBranches)) {
+                tag = "PLAN:AUTOMATION_SYSTEM_ISLAND_IF_OPENED";
+            }
+            if (tag != null) {
+                refuse(c, tag);
+            } else {
+                kept.add(i);
+            }
+        }
+        return plan.withBatchedIndices(kept);
+    }
+
+    /** Whether the contingency outages, opens a side of or recloses one of {@code branches}. */
+    private static boolean touchesAny(BatchContingency c, Set<LfBranch> branches) {
+        return c.outagedBranches().stream().anyMatch(branches::contains)
+                || c.outagedZeroImpedanceBranches().stream().anyMatch(branches::contains)
+                || c.sideOpenBranches().stream().anyMatch(sideOpen -> branches.contains(sideOpen.branch()))
+                || c.reclosedBranches().stream().anyMatch(branches::contains);
+    }
+
+    /** Whether every bus stays in the main component with the contingency applied and {@code openedBranches} open. */
+    private static boolean keepsConnectivity(LfNetwork network, BatchContingency c, Set<LfBranch> openedBranches) {
+        GraphConnectivity<LfBus, LfBranch> connectivity = network.getConnectivity();
+        connectivity.startTemporaryChanges();
+        try {
+            c.outagedBranches().forEach(connectivity::removeEdge);
+            c.outagedZeroImpedanceBranches().forEach(connectivity::removeEdge);
+            c.sideOpenBranches().forEach(sideOpen -> connectivity.removeEdge(sideOpen.branch()));
+            c.reclosedBranches().stream()
+                    .filter(branch -> branch.getBus1() != null && branch.getBus2() != null)
+                    .forEach(branch -> connectivity.addEdge(branch.getBus1(), branch.getBus2(), branch));
+            openedBranches.forEach(connectivity::removeEdge);
+            return connectivity.getVerticesRemovedFromMainComponent().isEmpty();
+        } finally {
+            connectivity.undoTemporaryChanges();
+        }
     }
 
     /** Per contingency index: the angle row of the bus OLF makes the slack when the outage isolates the base one

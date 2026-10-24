@@ -27,9 +27,13 @@ import java.util.Objects;
  */
 public record BatchScenarioResult(String contingencyId, double[] state, int iterations,
                                   double finalMismatch, int convergenceStatus, int[] islandedBusNums,
-                                  double preDistributedActivePower, double distributedActivePower) {
+                                  double preDistributedActivePower, double distributedActivePower,
+                                  /** The nums of the branches the scenario's AutomationSystem phase switched from their
+                                   *  pre-contingency state (opened or closed): its systems' doing, not the contingency's. */
+                                  int[] automationSystemSwitchedBranchNums) {
     public BatchScenarioResult {
         Objects.requireNonNull(contingencyId);
+        Objects.requireNonNull(automationSystemSwitchedBranchNums);
         // state may be null: the chunk solver put it in the run's state sink (BatchConfig.stateSink) as its chunk completed
     }
 
@@ -37,7 +41,7 @@ public record BatchScenarioResult(String contingencyId, double[] state, int iter
      *  NaN: whoever needs it must ask OLF's own distribution). */
     public BatchScenarioResult(String contingencyId, double[] state, int iterations,
                                double finalMismatch, int convergenceStatus, int[] islandedBusNums) {
-        this(contingencyId, state, iterations, finalMismatch, convergenceStatus, islandedBusNums, Double.NaN, Double.NaN);
+        this(contingencyId, state, iterations, finalMismatch, convergenceStatus, islandedBusNums, Double.NaN, Double.NaN, new int[0]);
     }
 
     public boolean hasConverged() {

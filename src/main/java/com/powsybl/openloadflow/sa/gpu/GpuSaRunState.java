@@ -96,6 +96,9 @@ final class GpuSaRunState {
     /** The current contingency's branches opened at ONE side (a bus or busbar loss): the screen evaluates every
      *  branch in the base topology, so their records are not used and they are scanned on the host. */
     List<LfBranch> sideOpened = List.of();
+    /** The branches the current contingency's automation systems switched on the device, given to the network with its
+     *  state and restored with its own elements. */
+    List<LfBranch> automationSystemSwitched = List.of();
     /** Limit-table index per branch num, -1 = no limits (built with the table). */
     int[] tableIndexOfBranchNum;
     /** Every scenario's screened candidates, computed in one pass over the precomputed states. */

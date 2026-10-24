@@ -21,6 +21,7 @@ import com.powsybl.openloadflow.ac.outerloop.gpu.DevicePhaseOwnership;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DevicePhases;
 import com.powsybl.openloadflow.ac.outerloop.gpu.ForceTargetQInReactiveLimits;
 import com.powsybl.openloadflow.ac.outerloop.gpu.GpuAreaInterchangeControlOuterLoop;
+import com.powsybl.openloadflow.ac.outerloop.gpu.GpuAutomationSystemOuterLoop;
 import com.powsybl.openloadflow.ac.outerloop.gpu.GpuHvdcAcEmulationLimitsOuterLoop;
 import com.powsybl.openloadflow.ac.outerloop.gpu.ReactiveCapabilityCurves;
 import com.powsybl.openloadflow.ac.solver.NewtonRaphsonParameters;
@@ -115,7 +116,11 @@ public final class GpuBatchedSecurityAnalysisSolver {
                 .flatMap(c -> c.reclosedBranches().stream())
                 .filter(b -> !b.isZeroImpedance(com.powsybl.openloadflow.network.LoadFlowModel.AC))
                 .map(LfBranch::getId)
-                .collect(java.util.stream.Collectors.toSet());
+                .collect(java.util.stream.Collectors.toCollection(java.util.HashSet::new));
+        if (config.automationSystem()) {
+            // a branch an automation system closes is packed open, closed by its bit in the scenario's mask
+            baseOpenIds.addAll(GpuAutomationSystemOuterLoop.baseOpenOperatedBranchIds(network));
+        }
         java.util.Set<String> baseOpenZeroImpedanceBranchIds = contingencies.stream()
                 .flatMap(c -> c.reclosedBranches().stream())
                 .filter(b -> b.isZeroImpedance(com.powsybl.openloadflow.network.LoadFlowModel.AC))
@@ -198,6 +203,16 @@ public final class GpuBatchedSecurityAnalysisSolver {
             plan = GpuBatchQualification.refuseAreaInterchangeControlShapes(plan, contingencies, areaInterchangeControl != null);
             areaInterchangeControlBaseMoves = com.powsybl.openloadflow.ac.outerloop.gpu.GpuDistributedSlackOuterLoop.initialMoves(network, gpuData);
         }
+        // AutomationSystem: the device switches the operated branches in its own phase, on the scenarios that keep every bus
+        // connected whatever their systems switch (GpuBatchQualification.refuseAutomationSystemShapes); without the tables (a
+        // system branch outside the closed-branch pack) every scenario goes to the CPU
+        GpuAutomationSystemOuterLoop.Tables automationSystem = config.automationSystem()
+                ? GpuAutomationSystemOuterLoop.build(network, elementMapper) : null;
+        if (config.automationSystem()) {
+            plan = GpuBatchQualification.refuseAutomationSystemShapes(plan, contingencies, network,
+                    automationSystem != null ? GpuAutomationSystemOuterLoop.systemBranches(network) : null,
+                    GpuAutomationSystemOuterLoop.openableBranches(network));
+        }
         List<Integer> batchedIndices = plan.batchedIndices();
         if (GpuTrace.BATCH_TRACE.isOn()) {
             System.err.println("PLAN batched=" + batchedIndices.size() + " of " + contingencies.size());
@@ -219,6 +234,8 @@ public final class GpuBatchedSecurityAnalysisSolver {
         // What the device distributed in all (pre-distribution + its own distributed-slack passes, pu); NaN = unknown.
         double[] distributedByIndex = new double[contingencies.size()];
         java.util.Arrays.fill(distributedByIndex, Double.NaN);
+        // The nums of the branches the AutomationSystem phase switched per contingency (null = none).
+        int[][] automationSystemSwitchedByIndex = new int[contingencies.size()][];
         if (!batchedIndices.isEmpty()) {
             // PER_EQUATION_TYPE stopping criterion: per-row thresholds from the equation system's
             // variable pairing (null under UNIFORM_CRITERIA — the chunk solver then CLEARS the cached
@@ -260,8 +277,9 @@ public final class GpuBatchedSecurityAnalysisSolver {
                         new ChunkInputs.SolveSettings(parameters, distributedSlack, reactiveLimits, tol, reactiveLimitTol, slackDistTol,
                                 convEpsPerEq, rowCriteria),
                         new ChunkInputs.DevicePhaseInputs(phases, hvdcControllers, reactiveCapabilityCurves, forcedTargetQ,
-                                areaInterchangeControl, areaInterchangeControlBaseMoves),
-                        new ChunkInputs.ResultSinks(resultsByIndex, preDistributedByIndex, distributedByIndex),
+                                areaInterchangeControl, areaInterchangeControlBaseMoves, automationSystem),
+                        new ChunkInputs.ResultSinks(resultsByIndex, preDistributedByIndex, distributedByIndex,
+                                automationSystemSwitchedByIndex),
                         config));
             }
         }
@@ -275,21 +293,25 @@ public final class GpuBatchedSecurityAnalysisSolver {
             if (result != null && result.length == 3) {    // the state went to the sink: the result carries no state
                 results.add(new BatchScenarioResult(id, null, (int) result[0], result[1], (int) result[2],
                         plan.islandedNumsByIndex()[i] != null ? plan.islandedNumsByIndex()[i] : new int[0],
-                        preDistributedByIndex[i], distributedByIndex[i]));
+                        preDistributedByIndex[i], distributedByIndex[i], switchedOrNone(automationSystemSwitchedByIndex[i])));
             } else if (result != null) {                   // the state is the result row's first n entries
                 results.add(new BatchScenarioResult(id, result, (int) result[n], result[n + 1], (int) result[n + 2],
                         plan.islandedNumsByIndex()[i] != null ? plan.islandedNumsByIndex()[i] : new int[0],
-                        preDistributedByIndex[i], distributedByIndex[i]));
+                        preDistributedByIndex[i], distributedByIndex[i], switchedOrNone(automationSystemSwitchedByIndex[i])));
             } else {
                 // Never batched: the plan refused it. Named by id for the harness, because the same
                 // GpuAcSolverStatus.REJECTED also comes back for a scenario the device TRIED and threw away, and the
                 // census counts cannot tell the two apart per contingency.
                 GpuBatchScopeCensus.planRefused(id);
                 results.add(new BatchScenarioResult(id, baseState.clone(), 0, Double.NaN, GpuAcSolverStatus.REJECTED, new int[0],
-                        Double.NaN, Double.NaN));
+                        Double.NaN, Double.NaN, new int[0]));
             }
         }
         return results;
+    }
+
+    private static int[] switchedOrNone(int[] switched) {
+        return switched != null ? switched : new int[0];
     }
 
     private GpuBatchedSecurityAnalysisSolver() {

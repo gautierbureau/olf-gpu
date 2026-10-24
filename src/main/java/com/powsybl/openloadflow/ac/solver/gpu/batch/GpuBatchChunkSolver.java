@@ -11,12 +11,14 @@ import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcElementMapper;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.ZeroImpedanceNative;
 import com.powsybl.openloadflow.ac.outerloop.gpu.AreaInterchangeControlNative;
+import com.powsybl.openloadflow.ac.outerloop.gpu.AutomationSystemNative;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DeviceLoopTables;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DevicePhaseInstaller;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DevicePhases;
 import com.powsybl.openloadflow.ac.outerloop.gpu.DistributedSlackNative;
 import com.powsybl.openloadflow.ac.outerloop.gpu.ForceTargetQInReactiveLimits;
 import com.powsybl.openloadflow.ac.outerloop.gpu.GpuAreaInterchangeControlOuterLoop;
+import com.powsybl.openloadflow.ac.outerloop.gpu.GpuAutomationSystemOuterLoop;
 import com.powsybl.openloadflow.ac.outerloop.gpu.GpuFreezingHvdcACEmulationOuterloop;
 import com.powsybl.openloadflow.ac.outerloop.gpu.GpuHvdcAcEmulationLimitsOuterLoop;
 import com.powsybl.openloadflow.ac.outerloop.gpu.GpuMonitoringVoltageOuterLoop;
@@ -179,6 +181,7 @@ final class GpuBatchChunkSolver {
         double[][] resultsByIndex = in.sinks().resultsByIndex();
         double[] preDistributedByIndex = in.sinks().preDistributedByIndex();
         double[] distributedByIndex = in.sinks().distributedByIndex();
+        int[][] automationSystemSwitchedByIndex = in.sinks().automationSystemSwitchedByIndex();
         BatchConfig config = in.config();
         int nb = batchedIndices.size();
         int nChunks = (nb + chunkCap - 1) / chunkCap;
@@ -944,6 +947,8 @@ final class GpuBatchChunkSolver {
                     DriverNative.setBatchOuterLoops(handle, in.settings().distributedSlackOuterLoop(), in.settings().reactiveLimitsOuterLoop());
                     // AreaInterchangeControl (in DistributedSlack's place), or cleared on a cached context
                     GpuAreaInterchangeControlOuterLoop.uploadToDevice(handle, in.phases().areaInterchangeControl());
+                    // AutomationSystem (the last loop), or cleared on a cached context
+                    GpuAutomationSystemOuterLoop.uploadToDevice(handle, in.phases().automationSystem());
                     long solveCountBefore = BatchReadbackNative.readBatchSolveCount(handle);
                     // Seeds only where no full per-scenario state goes (the pair phase builds its own from the parents).
                     NewtonSettingsNative.setBatchX0Seeds(handle, x0Full == null ? x0SeedIdx : null, x0Full == null ? x0SeedVal : null);
@@ -1328,6 +1333,24 @@ final class GpuBatchChunkSolver {
                             }
                             System.err.printf("GPU_RL_FINAL ctg=%s switchedToPqTotal=%d%s%n",
                                     contingencies.get(group.get(chunkStart + s)).contingencyId(), switchedToPq, ids);
+                        }
+                    }
+                    if (in.phases().automationSystem() != null) {
+                        // the branches each scenario's AutomationSystem phase left switched: in the mask the solve ended with,
+                        // which a second solve of this chunk would have re-uploaded from the host's (none runs: then reject)
+                        byte[] operatedDisabled = BatchReadbackNative.readBatchSolveCount(handle) - solveCountBefore == 1
+                                ? AutomationSystemNative.readBatchAutomationSystemOperatedDisabled(handle) : null;
+                        for (int s = 0; s < realCount; s++) {
+                            if (operatedDisabled == null) {
+                                if (rejectAfterSolve == null) {
+                                    rejectAfterSolve = new boolean[chunkSize];
+                                }
+                                rejectAfterSolve[s] = true;
+                                GpuBatchScopeCensus.record("RUNTIME:AUTOMATION_SYSTEM_SWITCHES_UNREAD");
+                            } else {
+                                int[] switched = GpuAutomationSystemOuterLoop.switchedBranchNums(in.phases().automationSystem(), operatedDisabled, s);
+                                automationSystemSwitchedByIndex[group.get(chunkStart + s)] = switched.length > 0 ? switched : null;
+                            }
                         }
                     }
                     if (in.phases().areaInterchangeControlWithAreas() && BatchReadbackNative.readBatchSolveCount(handle) - solveCountBefore == 1) {

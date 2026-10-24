@@ -73,7 +73,6 @@ public final class GpuAutomationSystemOuterLoop {
         if (systems.isEmpty()) {
             return false;
         }
-        Set<LfBranch> opened = new LinkedHashSet<>();
         for (LfOverloadManagementSystem system : systems) {
             LfBranch monitored = system.getMonitoredBranch();
             if (monitored.isZeroImpedance(LoadFlowModel.AC) || monitored.getBus1() == null || monitored.getBus2() == null) {
@@ -87,20 +86,55 @@ public final class GpuAutomationSystemOuterLoop {
                         || branch.isTransformerReactivePowerController() || branch.isTransformerReactivePowerControlled()) {
                     return false;
                 }
-                if (tripping.branchOpen() && !branch.isDisabled()) {
-                    opened.add(branch);
-                }
             }
         }
         // every branch an opening tripping operates open at once: the main component must keep every bus
         GraphConnectivity<LfBus, LfBranch> connectivity = network.getConnectivity();
         connectivity.startTemporaryChanges();
         try {
-            opened.forEach(connectivity::removeEdge);
+            openableBranches(network).forEach(connectivity::removeEdge);
             return connectivity.getVerticesRemovedFromMainComponent().isEmpty();
         } finally {
             connectivity.undoTemporaryChanges();
         }
+    }
+
+    /** The branches the network's opening trippings operate that are in service: with all of them open at once, the most
+     *  any sequence of the systems' switches can take out of the network. */
+    public static Set<LfBranch> openableBranches(LfNetwork network) {
+        Set<LfBranch> opened = new LinkedHashSet<>();
+        for (LfOverloadManagementSystem system : network.getOverloadManagementSystems()) {
+            for (LfOverloadManagementSystem.LfBranchTripping tripping : system.getBranchTrippingList()) {
+                if (tripping.branchOpen() && !tripping.branchToOperate().isDisabled()) {
+                    opened.add(tripping.branchToOperate());
+                }
+            }
+        }
+        return opened;
+    }
+
+    /** Every branch the network's automation systems monitor or operate. */
+    public static Set<LfBranch> systemBranches(LfNetwork network) {
+        Set<LfBranch> branches = new LinkedHashSet<>();
+        for (LfOverloadManagementSystem system : network.getOverloadManagementSystems()) {
+            branches.add(system.getMonitoredBranch());
+            system.getBranchTrippingList().forEach(tripping -> branches.add(tripping.branchToOperate()));
+        }
+        return branches;
+    }
+
+    /** The nums of the operated branches scenario {@code s} of a solve left in the other state than the network's, from
+     *  the solve's AutomationSystemNative.readBatchAutomationSystemOperatedDisabled: the switches the scenario ended with. */
+    public static int[] switchedBranchNums(Tables tables, byte[] operatedDisabled, int s) {
+        int nTrippings = tables.operatedBranches().size();
+        Set<Integer> nums = new LinkedHashSet<>();
+        for (int t = 0; t < nTrippings; t++) {
+            LfBranch branch = tables.operatedBranches().get(t);
+            if ((operatedDisabled[s * nTrippings + t] != 0) != branch.isDisabled()) {
+                nums.add(branch.getNum());
+            }
+        }
+        return nums.stream().mapToInt(Integer::intValue).toArray();
     }
 
     /** The tables of the network's automation systems, with the element numbering of {@code mapper} (which must pack the

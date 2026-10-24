@@ -173,6 +173,15 @@ final class GpuSaRunScope {
         boolean areaInterchangeControlBatchable = areaInterchangeControlLoop != null && lfNetwork.getSynchronousNetworks().size() == 1
                 && (!lfNetwork.hasArea() || !areaInterchangeControlLoadBased
                         && lfNetwork.getSynchronousNetworks().getFirst().getSlackBuses().size() == 1);
+        // AutomationSystem (outerloop/automation_system.cu): the device switches an operated branch by its bit in the scenario's
+        // disabled-element mask, where every switch keeps the network connected and its equation structure
+        // (GpuAutomationSystemOuterLoop.representable); a network without overload management systems leaves the loop with
+        // nothing to do. A contingency that touches a system's branches, leaves an island or would leave one with every
+        // opening tripping's branch open, and every strategy, go to the CPU (GpuBatchQualification.refuseAutomationSystemShapes);
+        // a system the device does not represent (a switch to operate) keeps the run on the CPU.
+        boolean automationSystemOnDevice = !lfNetwork.getOverloadManagementSystems().isEmpty()
+                && com.powsybl.openloadflow.ac.outerloop.gpu.GpuAutomationSystemOuterLoop.representable(lfNetwork);
+        boolean automationSystemBatchable = lfNetwork.getOverloadManagementSystems().isEmpty() || automationSystemOnDevice;
         // the run distributes active power: DistributedSlack, or AreaInterchangeControl in its place
         boolean distributesActivePower = areaInterchangeControlLoop != null || acParameters.getOuterLoops().stream()
                 .anyMatch(outerLoop -> DistributedSlackOuterLoop.NAME.equals(outerLoop.getName()));
@@ -192,7 +201,8 @@ final class GpuSaRunScope {
                         && !(continuousPhaseBatchable && "PhaseControl".equals(name))
                         && !(hvdcBatchable && ("AcHvdcAcEmulationLimits".equals(name) || "FreezingHvdcACEmulation".equals(name)))
                         && !(monitoringBatchable && "VoltageMonitoring".equals(name))
-                        && !(areaInterchangeControlBatchable && "AreaInterchangeControl".equals(name)))
+                        && !(areaInterchangeControlBatchable && "AreaInterchangeControl".equals(name))
+                        && !(automationSystemBatchable && "AutomationSystem".equals(name)))
                 .toList());
         // Parameterization corner cases the device DS loop does not model (see
         // docs/gpu-vs-cpu-capabilities.md Part II §A): the device weights are always maxP/droop with
@@ -349,7 +359,8 @@ final class GpuSaRunScope {
                 slackRelocation(acParameters),
                 null,                                        // the precomputer picks the state sink per run
                 GpuLoadFlowParameters.get(securityAnalysisParameters.getLoadFlowParameters()),
-                areaInterchangeControlBatchable ? areaInterchangeControlLoop : null);
+                areaInterchangeControlBatchable ? areaInterchangeControlLoop : null,
+                automationSystemOnDevice && acParameters.getOuterLoops().stream().anyMatch(outerLoop -> "AutomationSystem".equals(outerLoop.getName())));
         return new Scope(batchDisabled, unsupportedOuterLoops, distributedSlack, reactiveLimits,
                 slackDistTol, reactiveLimitTol, convEpsPerEq, batchConfig);
     }

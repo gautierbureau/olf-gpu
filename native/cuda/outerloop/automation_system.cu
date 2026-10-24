@@ -6,8 +6,10 @@
 
 #include "../common/check.cuh"
 #include "../common/launch.cuh"
+#include "../common/codes/gpu_pi_model_column.cuh"
 #include "../common/codes/gpu_two_sides.cuh"
 #include "../equations/generated/closed_branch_current_magnitude.cuh"
+#include "../equations/scenario_overrides.cuh"
 #include "flow_observation.cuh"
 #include "automation_system.cuh"
 
@@ -19,7 +21,8 @@ namespace {
 
 // AutomationSystemOuterLoop.check on one scenario. For each system, the current at its monitored branch's side (getI1 /
 // getI2, pu: OLF tests the branch is connected at both sides, not that it is enabled, so a monitored branch the contingency
-// took out reads the current its closed-branch term evaluates on the buses' state) against each tripping's threshold, in
+// took out reads the current its closed-branch term evaluates on the buses' state), at the scenario's tap (a contingency's
+// tap action, a tap the transformer voltage control moved), against each tripping's threshold, in
 // order: past it, a tripping whose branch is not already in the wanted state opens it (it is in service) or closes it (it
 // is not), and the system stops at that tripping. The decisions are taken on the state the check found and applied
 // together afterwards, as OLF collects branchesToOpen and branchesToClose before it touches the connectivity.
@@ -27,7 +30,8 @@ __global__ void automationSystemBatch(int nS, int n, int nElements, int nSystems
                                       const int* monitoredElement, const int* monitoredSide,
                                       const int* trippingStart, const int* operatedMaskSlot, const char* openAction,
                                       const double* threshold, const double* closedBranchParameters, const int* closedBranchIndices,
-                                      const double* x, const char* outerLoopCheckActive, char* disabled, char* switched, char* unstable) {
+                                      int nClosedBranchParameterOverrides, const int* closedBranchParameterOverrideScenarioElement,
+                                      const double* closedBranchParameterOverrideValues, const double* x, const char* outerLoopCheckActive, char* disabled, char* switched, char* unstable) {
     int s = blockIdx.x * blockDim.x + threadIdx.x;
     if (s >= nS || !outerLoopCheckActive[s]) {
         return;
@@ -39,7 +43,12 @@ __global__ void automationSystemBatch(int nS, int n, int nElements, int nSystems
     bool anyToSwitch = false;
     for (int m = 0; m < nSystems; m++) {
         int e = monitoredElement[m];
-        double i = controlledCurrent(monitoredSide[m], closedBranchParameters + (size_t) e * 8, xs, closedBranchIndices + (size_t) e * 12);
+        const double* p = closedBranchParameters + (size_t) e * GpuPiModelColumn::COUNT;
+        double pOv[GpuPiModelColumn::COUNT];
+        if (findTapOverride(nClosedBranchParameterOverrides, closedBranchParameterOverrideScenarioElement, closedBranchParameterOverrideValues, s, e, pOv)) {
+            p = pOv;
+        }
+        double i = controlledCurrent(monitoredSide[m], p, xs, closedBranchIndices + (size_t) e * 12);
         for (int t = trippingStart[m]; t < trippingStart[m + 1]; t++) {
             // an operated branch is a closed-branch element: connected at both sides, in service when enabled
             if (i > threshold[t] && (openAction[t] != 0) != (scenarioDisabled[operatedMaskSlot[t]] != 0)) {
@@ -75,7 +84,8 @@ void automationSystemCheck(BatchSolverContext* ctx, DriverPass& drv) {
             ctx->dOverloadManagementSystemTrippingStart.as<int>(), ctx->dOverloadManagementSystemOperatedMaskSlot.as<int>(),
             ctx->dOverloadManagementSystemOpenAction.as<char>(), ctx->dOverloadManagementSystemThreshold.as<double>(),
             ctx->structure->closedBranch.parameters.as<double>(), ctx->structure->closedBranch.indices.as<int>(),
-            ctx->dX.as<double>(), ctx->dOuterLoopCheckActive.as<char>(), ctx->dDisabled.as<char>(),
+            ctx->nClosedBranchParameterOverrides, ctx->dClosedBranchParameterOverrideScenarioElement.as<int>(),
+            ctx->dClosedBranchParameterOverrideValues.as<double>(), ctx->dX.as<double>(), ctx->dOuterLoopCheckActive.as<char>(), ctx->dDisabled.as<char>(),
             ctx->dAutomationSystemSwitched.as<char>(), ctx->dOuterLoopUnstable.as<char>());
     CUDA_CHECK(cudaGetLastError());
 }

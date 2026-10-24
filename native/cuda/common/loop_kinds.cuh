@@ -24,6 +24,7 @@ inline const char* outerLoopKindName(int k) {
         case GpuOuterLoopKind::SHUNT_VOLTAGE_CONTROL: return "ShuntVoltageControl(with-gen)";
         case GpuOuterLoopKind::SECONDARY_VOLTAGE_CONTROL: return "SecondaryVoltageControl";
         case GpuOuterLoopKind::AREA_INTERCHANGE_CONTROL: return "AreaInterchangeControl";
+        case GpuOuterLoopKind::AUTOMATION_SYSTEM: return "AutomationSystem";
         default: return "?";
     }
 }

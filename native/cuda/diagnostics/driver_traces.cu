@@ -69,6 +69,7 @@ void traceBatchPass(BatchSolverContext* ctx, DriverPass& drv, int nLoops, bool s
             case GpuOuterLoopKind::SHUNT_VOLTAGE_CONTROL:   kindName = "ShuntVoltageControl"; break;
             case GpuOuterLoopKind::SECONDARY_VOLTAGE_CONTROL:   kindName = "SecondaryVoltageControl"; break;
             case GpuOuterLoopKind::AREA_INTERCHANGE_CONTROL:   kindName = "AreaInterchangeControl"; break;
+            case GpuOuterLoopKind::AUTOMATION_SYSTEM:   kindName = "AutomationSystem"; break;
         }
         int nUnstableScenarios = 0;
         {

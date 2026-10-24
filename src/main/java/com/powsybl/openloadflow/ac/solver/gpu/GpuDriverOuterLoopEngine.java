@@ -230,10 +230,18 @@ public class GpuDriverOuterLoopEngine extends AcloadFlowEngine {
     @Override
     protected List<Pair<AcOuterLoop, AcOuterLoopContext>> engineOuterLoopsAndContexts(AcLoadFlowContext context) {
         var all = super.engineOuterLoopsAndContexts(context);
+        // AutomationSystem: the device owns it where every switch it can make keeps the connectivity; elsewhere (a
+        // switch to operate, a branch whose opening islands buses) OLF's loop stays on the host, around device solves
+        boolean automationSystemOnDevice = currentSolver instanceof com.powsybl.openloadflow.ac.solver.gpu.GpuNewtonRaphson
+                && all.stream().anyMatch(p -> "AutomationSystem".equals(p.getLeft().getName()))
+                && com.powsybl.openloadflow.ac.outerloop.gpu.GpuAutomationSystemOuterLoop.representable(context.getNetwork());
+        if (currentSolver instanceof com.powsybl.openloadflow.ac.solver.gpu.GpuNewtonRaphson gpu) {
+            gpu.setAutomationSystemOnDevice(automationSystemOnDevice);
+        }
         List<Pair<AcOuterLoop, AcOuterLoopContext>> out = new java.util.ArrayList<>();
         for (var p : all) {
             AcOuterLoop loop = p.getLeft();
-            if (!drivenOnDevice(loop)) {
+            if (!drivenOnDevice(loop) && !(automationSystemOnDevice && "AutomationSystem".equals(loop.getName()))) {
                 out.add(p);
             } else if (loop instanceof AcActivePowerDistributionOuterLoop distribution) {
                 out.add(Pair.of(new DeviceDrivenDistributionLoop(this, loop, distribution), p.getRight()));

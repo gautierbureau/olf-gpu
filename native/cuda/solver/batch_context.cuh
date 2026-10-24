@@ -290,6 +290,15 @@ struct BatchSolverContext {
     DeviceBuf dAreaInterchangeControlPreviousMove;                                  // per (scenario, generator): its move before a distribution
     DeviceBuf dAreaInterchangeControlParticipant;                                   // per (scenario, generator): still a participant
     DeviceBuf dAreaInterchangeControlDistributedActivePower;                        // per scenario: what OLF's context data accumulates (pu)
+    // AutomationSystem (setBatchAutomationSystem, GpuOuterLoopKind::AUTOMATION_SYSTEM): OLF's AutomationSystemOuterLoop, its
+    // last loop. Per overload management system: its monitored closed-branch element and side (GpuTwoSides) and the slice
+    // of its trippings (dOverloadManagementSystemTrippingStart, nSystems + 1). Per tripping: the disabled-mask slot of the
+    // closed branch it operates (also kept host-side for the read-back), whether it opens it, its current threshold (pu).
+    int nOverloadManagementSystems = 0, nOverloadManagementSystemTrippings = 0;
+    DeviceBuf dOverloadManagementSystemMonitoredElement, dOverloadManagementSystemMonitoredSide, dOverloadManagementSystemTrippingStart;
+    DeviceBuf dOverloadManagementSystemOperatedMaskSlot, dOverloadManagementSystemOpenAction, dOverloadManagementSystemThreshold;
+    std::vector<int> hOverloadManagementSystemOperatedMaskSlot;
+    DeviceBuf dAutomationSystemSwitched;                                            // per (scenario, tripping): a check's decisions
     std::vector<int> outerLoopFirstSolveIterations, outerLoopIterations, outerLoopSolvePasses;              // OLF_GPU_PHASE_TIME: per-scenario Newton work by
                                                              // solve pass
     int nMonitoringVoltageControllers = 0;

@@ -85,6 +85,7 @@ endif()
 # test before).
 add_library(olfgpu SHARED
     native/cuda/jni/area_interchange_control_jni.cu
+    native/cuda/jni/automation_system_jni.cu
     native/cuda/jni/batch_readback_jni.cu
     native/cuda/jni/batch_solve_jni.cu
     native/cuda/jni/distributed_slack_jni.cu
@@ -128,6 +129,7 @@ add_library(olfgpu SHARED
     native/cuda/solver/solve_seed.cu
     native/cuda/solver/state_vector_scaling.cu
     native/cuda/outerloop/area_interchange_control.cu
+    native/cuda/outerloop/automation_system.cu
     native/cuda/outerloop/distributed_slack.cu
     native/cuda/outerloop/forced_target_q.cu
     native/cuda/outerloop/hvdc_ac_emulation.cu

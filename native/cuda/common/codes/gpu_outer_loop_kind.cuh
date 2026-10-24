@@ -21,7 +21,8 @@ constexpr int TRANSFORMER_VOLTAGE_CONTROL = 9;                      // Transform
 constexpr int SHUNT_VOLTAGE_CONTROL = 10;                           // ShuntVoltageControl (WITH_GENERATOR)
 constexpr int SECONDARY_VOLTAGE_CONTROL = 11;                       // SecondaryVoltageControl
 constexpr int AREA_INTERCHANGE_CONTROL = 12;                        // AreaInterchangeControl
-constexpr int COUNT = 13;                                           // number of kinds
+constexpr int AUTOMATION_SYSTEM = 13;                               // AutomationSystem
+constexpr int COUNT = 14;                                           // number of kinds
 }
 
 #endif

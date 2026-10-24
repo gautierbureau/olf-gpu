@@ -630,9 +630,13 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                 throw new PowsyblException("GPU driver: the device cannot own AreaInterchangeControl; the solve goes to the CPU");
             }
             GpuAreaInterchangeControlOuterLoop.uploadToDevice(handle, areaInterchangeControlTables);
+            // every distribution starts at the moves the run's earlier solves applied (none in its first)
             DistributedSlackNative.setBatchDistributedSlackGeneratorAnchors(handle, null,
-                    areaInterchangeControlTables != null && areaInterchangeControlTables.areaCount() > 0
-                            ? GpuAreaInterchangeControlOuterLoop.initialMoves(network, cachedData) : null, null);
+                    driverDistributesActivePower() ? GpuDistributedSlackOuterLoop.initialMoves(network, cachedData) : null, null);
+            LfBus distributionSlackBus = driverDistributesActivePower() && cachedData.distributedSlack().busPhiRow().length == 0
+                    ? GpuDistributedSlackOuterLoop.slackBusOf(network, equationSystem, cachedData) : null;
+            double[] slackOnlyInitialMove = distributionSlackBus == null ? null
+                    : new double[] {GpuDistributedSlackOuterLoop.slackInitialMove(distributionSlackBus, driverDistributedSlackParameters())};
             // AutomationSystem (OLF's last loop) when the engine gave it to the device
             automationSystemTables = automationSystemOnDevice && driverLoop("AutomationSystem") != null
                     ? com.powsybl.openloadflow.ac.outerloop.gpu.GpuAutomationSystemOuterLoop.build(network, elementMapper) : null;
@@ -670,7 +674,8 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                     x0, target, new int[][] {activation.rowMode()}, activation.rowMode(),
                     elementMask,
                     ovIdx, ovVal,
-                    new int[0], new double[0], new double[0], new double[0], new double[0], null, null,
+                    new int[0], new double[0], new double[0], new double[0], new double[0], null,
+                    slackOnlyInitialMove,                    // a slack-only distribution's absorbed total starts there
                     null, null, null, null, null, null,
                     parameters.getMaxIterations(), GPU_TOLERANCE,
                     driverReactiveLimitTol, driverSlackDistTol, convEpsPerEq,

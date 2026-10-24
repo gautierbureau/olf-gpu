@@ -58,10 +58,6 @@ class GpuAutomationSystemTest {
 
     /** Run plain OLF and the GPU on two copies and compare; {@code deviceSwitches}: the branches the device must switch. */
     private static void compare(String label, Supplier<Network> networkSupplier, int deviceSwitches) {
-        compare(label, networkSupplier, deviceSwitches, true);
-    }
-
-    private static void compare(String label, Supplier<Network> networkSupplier, int deviceSwitches, boolean noFallback) {
         LoadFlow.Runner runner = new LoadFlow.Runner(new OpenLoadFlowProvider(new DenseMatrixFactory()));
         Network cpuNetwork = networkSupplier.get();
         LoadFlowResult cpuResult = runner.run(cpuNetwork, parameters());
@@ -112,9 +108,7 @@ class GpuAutomationSystemTest {
         assertTrue(worstV < TOLERANCE, label + ": bus voltages (max dV = " + worstV + " kV)");
         assertTrue(worstAngle < TOLERANCE, label + ": bus angles (max dAngle = " + worstAngle + " deg)");
         assertTrue(worstI < TOLERANCE, label + ": branch currents (max dI = " + worstI + " A)");
-        if (noFallback) {
-            assertEquals(0, fallbacks, label + ": no fallback to the CPU");
-        }
+        assertEquals(0, fallbacks, label + ": no fallback to the CPU");
         assertEquals(deviceSwitches, switched, label + ": branches the device switched");
     }
 
@@ -151,24 +145,44 @@ class GpuAutomationSystemTest {
         }, 0);
     }
 
-    /** br1 is a switch, a zero-impedance coupler in breaker mode: OLF's loop opens it on the host. The device solve after
-     *  that falls back to the CPU (its extraction finds b3p's reactive balance empty once the coupler is open, an open gap
-     *  of the base extraction), so the results are OLF's own either way. */
+    /** br1 is a switch, a zero-impedance coupler in breaker mode: OLF's loop opens it on the host, and the run's next solve
+     *  stays on the device (the opened coupler's dummy variables packed base-open, the distribution starting at what the
+     *  first solve placed). */
     @Test
     void switchTrippingStaysOnTheHost() {
-        compare("br1 opened by OLF's loop", AutomationSystemNetworkFactory::create, 0, false);
+        compare("br1 opened by OLF's loop", AutomationSystemNetworkFactory::create, 0);
     }
 
     @Test
     void switchClosingStaysOnTheHost() {
-        compare("br1 closed by OLF's loop", AutomationSystemNetworkFactory::createWithSwitchToClose, 0, false);
+        compare("br1 closed by OLF's loop", AutomationSystemNetworkFactory::createWithSwitchToClose, 0);
+    }
+
+    /** The same switch tripping with a second generator sharing the slack mismatch: the distribution then has participants
+     *  besides the slack bus's own generator, and the run's second solve starts from what the first gave each of them. */
+    @Test
+    void switchTrippingWithTwoParticipatingGenerators() {
+        compare("br1 opened by OLF's loop, two participants", () -> {
+            Network network = AutomationSystemNetworkFactory.create();
+            network.getVoltageLevel("b4_vl").newGenerator()
+                    .setId("g4")
+                    .setBus("b4")
+                    .setConnectableBus("b4")
+                    .setMinP(0)
+                    .setMaxP(100)
+                    .setTargetP(20)
+                    .setTargetQ(0)
+                    .setVoltageRegulatorOn(false)
+                    .add();
+            return network;
+        }, 0);
     }
 
     /** A tripping whose opening leaves b5 alone: OLF disables the island it makes, which the device does not, so OLF's loop
      *  stays on the host for the run. */
     @Test
     void trippingThatIslandsABusStaysOnTheHost() {
-        compare("l45 opened by OLF's loop", GpuAutomationSystemTest::radialBusTrippedByAnOverload, 0, false);
+        compare("l45 opened by OLF's loop", GpuAutomationSystemTest::radialBusTrippedByAnOverload, 0);
     }
 
     /** OLF's branch tripping network with b5 fed by l45 from b4 alone, and l34's overload opening l45 instead of l33p. */

@@ -90,7 +90,18 @@ public final class GpuAcDataExtractor {
                                     java.util.Set<String> baseOpenZeroImpedanceBranchIdList, GpuDistributedSlackParameters distributedSlackParameters) {
         GpuAcValidation.validate(es);
         ExtractionColumns columns = ExtractionColumns.of(network, es);
-        GpuAcFamilyPacker.Packs family = GpuAcFamilyPacker.pack(network, columns, baseOpenBranchIds, baseOpenZeroImpedanceBranchIdList);
+        // A coupler disabled after OLF built its equation system (an action or an automation system opened it) keeps its
+        // DUMMY_P / DUMMY_Q variables, held at 0 by DUMMY_TARGET_P / DUMMY_TARGET_Q: packed base-open, the device claims
+        // their rows and the coupler couples nothing until a scenario closes it. Skipping it left both rows unpaired and
+        // the structure refused (an automation system's opened switch sent every later solve of its run to the CPU).
+        java.util.Set<String> zeroImpedanceBaseOpen = new java.util.LinkedHashSet<>(baseOpenZeroImpedanceBranchIdList);
+        for (com.powsybl.openloadflow.network.LfBranch branch : network.getBranches()) {
+            if (branch.isDisabled() && branch.isZeroImpedance(com.powsybl.openloadflow.network.LoadFlowModel.AC)
+                    && columns.dummyPCol()[branch.getNum()] >= 0 && columns.dummyQCol()[branch.getNum()] >= 0) {
+                zeroImpedanceBaseOpen.add(branch.getId());
+            }
+        }
+        GpuAcFamilyPacker.Packs family = GpuAcFamilyPacker.pack(network, columns, baseOpenBranchIds, zeroImpedanceBaseOpen);
         ReactiveLimitEntries reactiveLimitEntries = ReactiveLimitsPacker.reactiveLimitsPack(network, es, columns);
         DistrQPacker.Pack distrQ = DistrQPacker.distrQPack(network, es, columns, family, reactiveLimitEntries);
         LinearDistributionTerms distrRho = DistrRhoPacker.distrRhoPack(network, es, columns);

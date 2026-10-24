@@ -730,7 +730,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                 // active index -- and read it as a hint, not an identification: activation changes
                 // between solves, so the same row index is a different equation on a later fallback.
                 java.util.regex.Matcher m = java.util.regex.Pattern
-                        .compile("equation row (\\d+) has no diagonal pairing").matcher(String.valueOf(e.getMessage()));
+                        .compile("equation row (\\d+) (?:of \\d+ )?has no diagonal pairing").matcher(String.valueOf(e.getMessage()));
                 if (m.find()) {
                     int row = Integer.parseInt(m.group(1));
                     var eq = equationSystem.getIndex().getEquationAtColumn(row);

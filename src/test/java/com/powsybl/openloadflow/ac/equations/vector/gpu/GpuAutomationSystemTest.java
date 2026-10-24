@@ -9,7 +9,9 @@ package com.powsybl.openloadflow.ac.equations.vector.gpu;
 
 import com.powsybl.iidm.network.Branch;
 import com.powsybl.iidm.network.Bus;
+import com.powsybl.iidm.network.Line;
 import com.powsybl.iidm.network.Network;
+import com.powsybl.iidm.network.RatioTapChanger;
 import com.powsybl.iidm.network.Switch;
 import com.powsybl.iidm.network.ThreeSides;
 import com.powsybl.iidm.network.TwoSides;
@@ -23,6 +25,7 @@ import com.powsybl.openloadflow.ac.outerloop.gpu.GpuAutomationSystemOuterLoop;
 import com.powsybl.openloadflow.ac.solver.gpu.GpuNewtonRaphson;
 import com.powsybl.openloadflow.ac.solver.gpu.GpuNewtonRaphsonFactory;
 import com.powsybl.openloadflow.network.AutomationSystemNetworkFactory;
+import com.powsybl.openloadflow.network.VoltageControlNetworkFactory;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -58,12 +61,17 @@ class GpuAutomationSystemTest {
 
     /** Run plain OLF and the GPU on two copies and compare; {@code deviceSwitches}: the branches the device must switch. */
     private static void compare(String label, Supplier<Network> networkSupplier, int deviceSwitches) {
+        compare(label, networkSupplier, GpuAutomationSystemTest::parameters, deviceSwitches);
+    }
+
+    private static void compare(String label, Supplier<Network> networkSupplier, Supplier<LoadFlowParameters> parametersSupplier,
+                                int deviceSwitches) {
         LoadFlow.Runner runner = new LoadFlow.Runner(new OpenLoadFlowProvider(new DenseMatrixFactory()));
         Network cpuNetwork = networkSupplier.get();
-        LoadFlowResult cpuResult = runner.run(cpuNetwork, parameters());
+        LoadFlowResult cpuResult = runner.run(cpuNetwork, parametersSupplier.get());
 
         Network gpuNetwork = networkSupplier.get();
-        LoadFlowParameters gpuParameters = parameters();
+        LoadFlowParameters gpuParameters = parametersSupplier.get();
         OpenLoadFlowParameters.get(gpuParameters).setAcSolverType(GpuNewtonRaphsonFactory.NAME);
         long fallbacksBefore = GpuNewtonRaphson.CPU_FALLBACK_COUNT.get();
         long switchedBefore = GpuAutomationSystemOuterLoop.DEVICE_SWITCHED_BRANCHES.sum();
@@ -207,5 +215,50 @@ class GpuAutomationSystemTest {
                 .add()
                 .add();
         return network;
+    }
+
+    /**
+     * OLF's createNetworkWithT2wt with LINE_12 doubled and T2wT's ratio tap changer regulating BUS_3 (1 kV deadband), its
+     * steps 1 to 3 at twice the transformer's reactance; T2wT's system opens LINE_12b above 100 A at its side 2.
+     */
+    private static Network regulatedTransformer() {
+        Network network = VoltageControlNetworkFactory.createNetworkWithT2wt();
+        Line line = network.getLine("LINE_12");
+        network.newLine().setId("LINE_12b").setBus1("BUS_1").setConnectableBus1("BUS_1").setBus2("BUS_2").setConnectableBus2("BUS_2")
+                .setR(line.getR()).setX(line.getX()).setG1(line.getG1()).setB1(line.getB1()).setG2(line.getG2()).setB2(line.getB2())
+                .add();
+        RatioTapChanger tapChanger = network.getTwoWindingsTransformer("T2wT").getRatioTapChanger();
+        tapChanger.setTargetDeadband(1.0).setRegulating(true);
+        for (int step = 1; step <= 3; step++) {
+            tapChanger.getStep(step).setX(100);
+        }
+        network.getSubstation("SUBSTATION").newOverloadManagementSystem()
+                .setId("T2wT_opens_LINE_12b")
+                .setEnabled(true)
+                .setMonitoredElementId("T2wT")
+                .setMonitoredElementSide(ThreeSides.TWO)
+                .newBranchTripping()
+                .setKey("LINE_12b key")
+                .setBranchToOperateId("LINE_12b")
+                .setSideToOperate(TwoSides.ONE)
+                .setCurrentLimit(100.)
+                .add()
+                .add();
+        return network;
+    }
+
+    /**
+     * OLF's incremental voltage control moves T2wT from tap 0 to tap 2, and its system then reads 88.6 A at that tap: below
+     * 100 A, LINE_12b stays closed. The moved tap reaches the device as a tap override; read at the base tap's impedance,
+     * the current came out above 110 A and the device opened the line.
+     */
+    @Test
+    void monitoredTransformerAtTheTapItsVoltageControlMoved() {
+        compare("T2wT at its moved tap", GpuAutomationSystemTest::regulatedTransformer, () -> {
+            LoadFlowParameters parameters = parameters().setTransformerVoltageControlOn(true);
+            OpenLoadFlowParameters.get(parameters)
+                    .setTransformerVoltageControlMode(OpenLoadFlowParameters.TransformerVoltageControlMode.INCREMENTAL_VOLTAGE_CONTROL);
+            return parameters;
+        }, 0);
     }
 }

@@ -196,7 +196,7 @@ public final class GpuBatchedSecurityAnalysisSolver {
         double[] areaInterchangeControlBaseMoves = null;
         if (config.areaInterchangeControl() != null && network.hasArea()) {
             plan = GpuBatchQualification.refuseAreaInterchangeControlShapes(plan, contingencies, areaInterchangeControl != null);
-            areaInterchangeControlBaseMoves = GpuAreaInterchangeControlOuterLoop.initialMoves(network, gpuData);
+            areaInterchangeControlBaseMoves = com.powsybl.openloadflow.ac.outerloop.gpu.GpuDistributedSlackOuterLoop.initialMoves(network, gpuData);
         }
         List<Integer> batchedIndices = plan.batchedIndices();
         if (GpuTrace.BATCH_TRACE.isOn()) {

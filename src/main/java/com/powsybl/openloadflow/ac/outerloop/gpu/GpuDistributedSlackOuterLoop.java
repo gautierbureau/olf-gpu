@@ -49,6 +49,21 @@ public final class GpuDistributedSlackOuterLoop {
         if (deviceTargets == null || data == null) {
             return lastDistributedActivePower;
         }
+        LfBus slackBus = slackBusOf(network, equationSystem, data);
+        if (data.distributedSlack().busPhiRow().length == 0) {
+            // slack-only participation: the whole distribution is the slack's absorbed total
+            if (slackBus != null && slackAbsorbed != null && slackAbsorbed.length > 0 && slackAbsorbed[0] != 0) {
+                setAnchoredShare(slackBus, slackAbsorbed[0], distributedSlackParameters);
+                lastDistributedActivePower = slackAbsorbed[0];
+            }
+            return lastDistributedActivePower;
+        }
+        return applyParticipantsToNetwork(network, distributedSlackParameters, loadAnchorTargetP, deviceTargets, distributedSlackGeneratorMove,
+                retain, data, slackBus);
+    }
+
+    /** The bus the distribution pack's slack row belongs to, null without one. */
+    public static LfBus slackBusOf(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> equationSystem, GpuAcData data) {
         LfBus slackBus = null;
         if (data.distributedSlack().slackPhiRow() >= 0) {
             for (LfBus bus : network.getBuses()) {
@@ -69,14 +84,45 @@ public final class GpuDistributedSlackOuterLoop {
                         data.distributedSlack().slackPhiRow());
             }
         }
-        if (data.distributedSlack().busPhiRow().length == 0) {
-            // slack-only participation: the whole distribution is the slack's absorbed total
-            if (slackBus != null && slackAbsorbed != null && slackAbsorbed.length > 0 && slackAbsorbed[0] != 0) {
-                setAnchoredShare(slackBus, slackAbsorbed[0], distributedSlackParameters);
-                lastDistributedActivePower = slackAbsorbed[0];
+        return slackBus;
+    }
+
+    /** Each participating generator's move from its initial target (the distribution's anchor) when a solve starts: zero in a
+     *  run's first solve, the earlier solves' distribution in a later one (a loop on the host made the run solve again).
+     *  OLF's distribution resets them there and adds the move back to the mismatch, so a solve starting without them reads
+     *  the earlier solves' distribution as a new mismatch and distributes again. */
+    public static double[] initialMoves(LfNetwork network, GpuAcData data) {
+        Map<String, LfGenerator> genById = new java.util.HashMap<>();
+        for (LfBus bus : network.getBuses()) {
+            for (LfGenerator g : bus.getGenerators()) {
+                genById.put(g.getId(), g);
             }
-            return lastDistributedActivePower;
         }
+        String[] generatorId = data.distributedSlack().generatorId();
+        double[] moves = new double[generatorId.length];
+        for (int g = 0; g < moves.length; g++) {
+            LfGenerator generator = genById.get(generatorId[g]);
+            moves[g] = generator != null ? generator.getTargetP() - generator.getInitialTargetP() : 0.0;
+        }
+        return moves;
+    }
+
+    /** The slack-only distribution's counterpart of {@link #initialMoves}: the slack bus's participating generators' total
+     *  move from their initial targets, which seeds what the slack has absorbed. */
+    public static double slackInitialMove(LfBus slackBus, GpuDistributedSlackParameters distributedSlackParameters) {
+        double move = 0.0;
+        for (LfGenerator g : slackBus.getGenerators()) {
+            if (distributedSlackParameters.factor(g) != 0) {
+                move += g.getTargetP() - g.getInitialTargetP();
+            }
+        }
+        return move;
+    }
+
+    private static double applyParticipantsToNetwork(LfNetwork network, GpuDistributedSlackParameters distributedSlackParameters,
+                                                     Map<LfLoad, Double> loadAnchorTargetP, double[] deviceTargets,
+                                                     double[] distributedSlackGeneratorMove, double[] retain, GpuAcData data, LfBus slackBus) {
+        double lastDistributedActivePower = Double.NaN;
         boolean fired = retain != null && retain.length > 0 && !Double.isNaN(retain[0]);
         if (!fired) {
             return lastDistributedActivePower;

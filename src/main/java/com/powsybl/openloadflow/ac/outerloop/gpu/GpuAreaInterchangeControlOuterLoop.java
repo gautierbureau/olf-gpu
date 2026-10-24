@@ -169,19 +169,6 @@ public final class GpuAreaInterchangeControlOuterLoop {
                 tables.busArea(), tables.generatorArea());
     }
 
-    /** Each participating generator's move from its initial target when the solve starts: OLF's distribution resets them
-     *  there and adds the move back to the mismatch. */
-    public static double[] initialMoves(LfNetwork network, GpuAcData data) {
-        Map<String, LfGenerator> generatorById = generatorsById(network);
-        String[] generatorId = data.distributedSlack().generatorId();
-        double[] moves = new double[generatorId.length];
-        for (int g = 0; g < moves.length; g++) {
-            LfGenerator generator = generatorById.get(generatorId[g]);
-            moves[g] = generator != null ? generator.getTargetP() - generator.getInitialTargetP() : 0.0;
-        }
-        return moves;
-    }
-
     /** Give every participating generator its initial target plus the move the device left it at. */
     public static void applyToNetwork(LfNetwork network, GpuAcData data, double[] moves) {
         if (moves == null) {

@@ -1,0 +1,197 @@
+/**
+ * Copyright (c) 2026, RTE (http://www.rte-france.com)
+ * This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ * SPDX-License-Identifier: MPL-2.0
+ */
+package com.powsybl.openloadflow.ac.equations.vector.gpu;
+
+import com.powsybl.iidm.network.Branch;
+import com.powsybl.iidm.network.Bus;
+import com.powsybl.iidm.network.Network;
+import com.powsybl.iidm.network.Switch;
+import com.powsybl.iidm.network.ThreeSides;
+import com.powsybl.iidm.network.TwoSides;
+import com.powsybl.loadflow.LoadFlow;
+import com.powsybl.loadflow.LoadFlowParameters;
+import com.powsybl.loadflow.LoadFlowResult;
+import com.powsybl.math.matrix.DenseMatrixFactory;
+import com.powsybl.openloadflow.OpenLoadFlowParameters;
+import com.powsybl.openloadflow.OpenLoadFlowProvider;
+import com.powsybl.openloadflow.ac.outerloop.gpu.GpuAutomationSystemOuterLoop;
+import com.powsybl.openloadflow.ac.solver.gpu.GpuNewtonRaphson;
+import com.powsybl.openloadflow.ac.solver.gpu.GpuNewtonRaphsonFactory;
+import com.powsybl.openloadflow.network.AutomationSystemNetworkFactory;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+
+import java.util.function.Supplier;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
+
+/**
+ * AutomationSystem driven on the device ({@code GpuOuterLoopKind.AUTOMATION_SYSTEM}) against plain OLF, on the networks of
+ * OLF's own AutomationSystemTest: a line an overload opens, a line one closes, a system that never trips. Each run must
+ * agree with OLF on the status, the iteration count, the bus voltages and angles, the branch currents and every terminal
+ * and switch state; where the device owns the loop it must switch the branch itself, with no fallback. A switch to operate
+ * is a zero-impedance coupler, which the device does not switch: OLF's loop stays on the host and the results still match.
+ *
+ * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
+ */
+class GpuAutomationSystemTest {
+
+    private static final double TOLERANCE = 1e-9;
+
+    @BeforeEach
+    void checkGpu() {
+        assumeTrue(GpuAcNewtonSolver.isAvailable(), "GPU full-NR native lib not available (build it with native/build-gpu.sh + cuDSS)");
+    }
+
+    private static LoadFlowParameters parameters() {
+        LoadFlowParameters parameters = new LoadFlowParameters();
+        OpenLoadFlowParameters.create(parameters).setSimulateAutomationSystems(true);
+        return parameters;
+    }
+
+    /** Run plain OLF and the GPU on two copies and compare; {@code deviceSwitches}: the branches the device must switch. */
+    private static void compare(String label, Supplier<Network> networkSupplier, int deviceSwitches) {
+        compare(label, networkSupplier, deviceSwitches, true);
+    }
+
+    private static void compare(String label, Supplier<Network> networkSupplier, int deviceSwitches, boolean noFallback) {
+        LoadFlow.Runner runner = new LoadFlow.Runner(new OpenLoadFlowProvider(new DenseMatrixFactory()));
+        Network cpuNetwork = networkSupplier.get();
+        LoadFlowResult cpuResult = runner.run(cpuNetwork, parameters());
+
+        Network gpuNetwork = networkSupplier.get();
+        LoadFlowParameters gpuParameters = parameters();
+        OpenLoadFlowParameters.get(gpuParameters).setAcSolverType(GpuNewtonRaphsonFactory.NAME);
+        long fallbacksBefore = GpuNewtonRaphson.CPU_FALLBACK_COUNT.get();
+        long switchedBefore = GpuAutomationSystemOuterLoop.DEVICE_SWITCHED_BRANCHES.sum();
+        LoadFlowResult gpuResult = runner.run(gpuNetwork, gpuParameters);
+        long fallbacks = GpuNewtonRaphson.CPU_FALLBACK_COUNT.get() - fallbacksBefore;
+        long switched = GpuAutomationSystemOuterLoop.DEVICE_SWITCHED_BRANCHES.sum() - switchedBefore;
+
+        var cpuComponent = cpuResult.getComponentResults().get(0);
+        var gpuComponent = gpuResult.getComponentResults().get(0);
+        assertEquals(cpuComponent.getStatus(), gpuComponent.getStatus(), label + ": status");
+        assertEquals(cpuComponent.getIterationCount(), gpuComponent.getIterationCount(), label + ": iteration count");
+        double worstV = 0;
+        double worstAngle = 0;
+        for (Bus cpuBus : cpuNetwork.getBusView().getBuses()) {
+            Bus gpuBus = gpuNetwork.getBusView().getBus(cpuBus.getId());
+            if (gpuBus == null || Double.isNaN(cpuBus.getV())) {
+                continue;
+            }
+            worstV = Math.max(worstV, Math.abs(cpuBus.getV() - gpuBus.getV()));
+            worstAngle = Math.max(worstAngle, Math.abs(cpuBus.getAngle() - gpuBus.getAngle()));
+        }
+        double worstI = 0;
+        for (Branch<?> cpuBranch : cpuNetwork.getBranches()) {
+            Branch<?> gpuBranch = gpuNetwork.getBranch(cpuBranch.getId());
+            for (TwoSides side : TwoSides.values()) {
+                assertEquals(cpuBranch.getTerminal(side).isConnected(), gpuBranch.getTerminal(side).isConnected(),
+                        label + ": " + cpuBranch.getId() + " side " + side + " connection");
+                double cpuI = cpuBranch.getTerminal(side).getI();
+                double gpuI = gpuBranch.getTerminal(side).getI();
+                assertEquals(Double.isNaN(cpuI), Double.isNaN(gpuI), label + ": " + cpuBranch.getId() + " side " + side + " current set");
+                if (!Double.isNaN(cpuI)) {
+                    worstI = Math.max(worstI, Math.abs(cpuI - gpuI));
+                }
+            }
+        }
+        for (Switch cpuSwitch : cpuNetwork.getSwitches()) {
+            assertEquals(cpuSwitch.isOpen(), gpuNetwork.getSwitch(cpuSwitch.getId()).isOpen(), label + ": switch " + cpuSwitch.getId());
+        }
+        System.out.printf("AutomationSystem GPU vs CPU [%s]: %s, %d iterations, max dV %.2e kV, dAngle %.2e deg, dI %.2e A,"
+                        + " fallbacks %d, branches switched on device %d%n",
+                label, gpuComponent.getStatus(), gpuComponent.getIterationCount(), worstV, worstAngle, worstI, fallbacks, switched);
+        assertTrue(worstV < TOLERANCE, label + ": bus voltages (max dV = " + worstV + " kV)");
+        assertTrue(worstAngle < TOLERANCE, label + ": bus angles (max dAngle = " + worstAngle + " deg)");
+        assertTrue(worstI < TOLERANCE, label + ": branch currents (max dI = " + worstI + " A)");
+        if (noFallback) {
+            assertEquals(0, fallbacks, label + ": no fallback to the CPU");
+        }
+        assertEquals(deviceSwitches, switched, label + ": branches the device switched");
+    }
+
+    /** l34 overloaded: its system opens l33p, and l34's current drops below the threshold. */
+    @Test
+    void branchTripping() {
+        compare("l33p opened", AutomationSystemNetworkFactory::createWithBranchTripping, 1);
+    }
+
+    /** l12 overloaded: its system closes l33p, open in the base. */
+    @Test
+    void branchClosing() {
+        compare("l33p closed", AutomationSystemNetworkFactory::createWithBranchTripping2, 1);
+    }
+
+    /** A system whose monitored line never reaches its threshold: nothing switches. */
+    @Test
+    void noTripping() {
+        compare("no tripping", () -> {
+            Network network = AutomationSystemNetworkFactory.createWithBadAutomationSystems();
+            network.getSubstation("s1").newOverloadManagementSystem()
+                    .setId("l34_opens_l12")
+                    .setEnabled(true)
+                    .setMonitoredElementId("l34")
+                    .setMonitoredElementSide(ThreeSides.ONE)
+                    .newBranchTripping()
+                    .setKey("key")
+                    .setBranchToOperateId("l33p")
+                    .setSideToOperate(TwoSides.TWO)
+                    .setCurrentLimit(2000.)
+                    .add()
+                    .add();
+            return network;
+        }, 0);
+    }
+
+    /** br1 is a switch, a zero-impedance coupler in breaker mode: OLF's loop opens it on the host. The device solve after
+     *  that falls back to the CPU (its extraction finds b3p's reactive balance empty once the coupler is open, an open gap
+     *  of the base extraction), so the results are OLF's own either way. */
+    @Test
+    void switchTrippingStaysOnTheHost() {
+        compare("br1 opened by OLF's loop", AutomationSystemNetworkFactory::create, 0, false);
+    }
+
+    @Test
+    void switchClosingStaysOnTheHost() {
+        compare("br1 closed by OLF's loop", AutomationSystemNetworkFactory::createWithSwitchToClose, 0, false);
+    }
+
+    /** A tripping whose opening leaves b5 alone: OLF disables the island it makes, which the device does not, so OLF's loop
+     *  stays on the host for the run. */
+    @Test
+    void trippingThatIslandsABusStaysOnTheHost() {
+        compare("l45 opened by OLF's loop", GpuAutomationSystemTest::radialBusTrippedByAnOverload, 0, false);
+    }
+
+    /** OLF's branch tripping network with b5 fed by l45 from b4 alone, and l34's overload opening l45 instead of l33p. */
+    private static Network radialBusTrippedByAnOverload() {
+        Network network = AutomationSystemNetworkFactory.createWithBranchTripping();
+        var vl5 = network.getSubstation("s2").newVoltageLevel().setId("vl5").setNominalV(63)
+                .setTopologyKind(com.powsybl.iidm.network.TopologyKind.BUS_BREAKER).add();
+        vl5.getBusBreakerView().newBus().setId("b5").add();
+        vl5.newLoad().setId("ld5").setBus("b5").setP0(2).setQ0(1).add();
+        network.newLine().setId("l45").setBus1("b4").setBus2("b5").setR(0.1).setX(3).add();
+        network.getOverloadManagementSystem("l34_opens_l12").remove();
+        network.getSubstation("s1").newOverloadManagementSystem()
+                .setId("l34_opens_l45")
+                .setEnabled(true)
+                .setMonitoredElementId("l34")
+                .setMonitoredElementSide(ThreeSides.ONE)
+                .newBranchTripping()
+                .setKey("l45 key")
+                .setBranchToOperateId("l45")
+                .setSideToOperate(TwoSides.TWO)
+                .setCurrentLimit(200.)
+                .add()
+                .add();
+        return network;
+    }
+}

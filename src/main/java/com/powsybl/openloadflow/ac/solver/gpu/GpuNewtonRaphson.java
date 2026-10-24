@@ -128,6 +128,24 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
         this.robustModeForRun = false;
     }
 
+    /** Set by {@code GpuDriverOuterLoopEngine}: the device owns the run's AutomationSystem loop (every switch it can make
+     *  keeps the connectivity, GpuAutomationSystemOuterLoop.representable), else OLF's loop runs on the host. */
+    private boolean automationSystemOnDevice;
+
+    public void setAutomationSystemOnDevice(boolean onDevice) {
+        if (onDevice != automationSystemOnDevice) {
+            invalidation.structureDirty = true;              // the base-open branches it may close enter the extraction
+        }
+        this.automationSystemOnDevice = onDevice;
+    }
+
+    /** The branches the extraction packs open in the base (the closings of a device-driven AutomationSystem), which every
+     *  element numbering of the solve has to share. */
+    private java.util.Set<String> extractionBaseOpenBranchIds = java.util.Set.of();
+
+    /** The run's AutomationSystem tables as the last solve installed them, null when OLF's loop runs on the host. */
+    private com.powsybl.openloadflow.ac.outerloop.gpu.GpuAutomationSystemOuterLoop.Tables automationSystemTables;
+
     /** A solve of the CURRENT engine run fell back to the CPU Newton-Raphson (a rejected shape): the
      *  driver made no decision there and OLF's real loops took over — they hold the loop state for
      *  the rest of the run, so the device must NOT drive the loops of the run's later solves (its
@@ -231,6 +249,10 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
         if (shuntVoltageControlOwned && shuntVoltageControlGroups != null) {
             com.powsybl.openloadflow.ac.outerloop.gpu.GpuShuntVoltageControlOuterLoop.applyToNetwork(network, shuntVoltageControlGroups,
                     ShuntVoltageControlNative.readBatchShuntVoltageControlState(handle), ShuntVoltageControlNative.readBatchShuntVoltageControlPositions(handle));
+        }
+        if (automationSystemTables != null) {                // last: the switches change the network's topology
+            com.powsybl.openloadflow.ac.outerloop.gpu.GpuAutomationSystemOuterLoop.applyToNetwork(network, automationSystemTables,
+                    com.powsybl.openloadflow.ac.outerloop.gpu.AutomationSystemNative.readBatchAutomationSystemOperatedDisabled(handle));
         }
     }
 
@@ -574,6 +596,11 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                     elementMask[0][hvdcAcEmulationOffset + h] = true;
                 }
             }
+            // the branches an AutomationSystem tripping may close are packed open: disabled until the device closes one
+            var elementMapper = new com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcElementMapper(network, extractionBaseOpenBranchIds);
+            for (String id : extractionBaseOpenBranchIds) {
+                elementMask[0][elementMapper.getElementIndex(network.getBranchById(id))] = true;
+            }
             int[] ovIdx = new int[0];
             double[] ovVal = new double[0];
             resetDriverPhases();
@@ -598,8 +625,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
             // AreaInterchangeControl (OLF order 3) in place of DistributedSlack, moving the same participants area by area
             var areaInterchangeControlOuterLoop = driverAreaInterchangeControlLoop();
             areaInterchangeControlTables = areaInterchangeControlOuterLoop == null ? null
-                    : GpuAreaInterchangeControlOuterLoop.build(network, areaInterchangeControlOuterLoop, cachedData,
-                            new com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcElementMapper(network));
+                    : GpuAreaInterchangeControlOuterLoop.build(network, areaInterchangeControlOuterLoop, cachedData, elementMapper);
             if (areaInterchangeControlOuterLoop != null && areaInterchangeControlTables == null) {
                 throw new PowsyblException("GPU driver: the device cannot own AreaInterchangeControl; the solve goes to the CPU");
             }
@@ -607,6 +633,13 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
             DistributedSlackNative.setBatchDistributedSlackGeneratorAnchors(handle, null,
                     areaInterchangeControlTables != null && areaInterchangeControlTables.areaCount() > 0
                             ? GpuAreaInterchangeControlOuterLoop.initialMoves(network, cachedData) : null, null);
+            // AutomationSystem (OLF's last loop) when the engine gave it to the device
+            automationSystemTables = automationSystemOnDevice && driverLoop("AutomationSystem") != null
+                    ? com.powsybl.openloadflow.ac.outerloop.gpu.GpuAutomationSystemOuterLoop.build(network, elementMapper) : null;
+            if (automationSystemOnDevice && driverLoop("AutomationSystem") != null && automationSystemTables == null) {
+                throw new PowsyblException("GPU driver: the device cannot own AutomationSystem; the solve goes to the CPU");
+            }
+            com.powsybl.openloadflow.ac.outerloop.gpu.GpuAutomationSystemOuterLoop.uploadToDevice(handle, automationSystemTables);
             // SecondaryVoltageControl (OLF order 4) IN-KERNEL — the same phase, built the same way, as the batched
             // security analysis. The device owns every loop of the run or the solve goes to the CPU, the same rule
             // the batched security analysis applies to a whole run: a zone set the kernel refuses, a control loop
@@ -887,7 +920,11 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
         // validate + build, through the shared cache (the batched SA reuses this extraction)
         // The RUN's DistributedSlack settings — the device must not distribute with a default balance type.
         // Which loops run is the run's own list (setBatchOuterLoops), not the extraction.
-        GpuAcData data = GpuAcDataCache.extract(network, equationSystem, driverDistributedSlackParameters());
+        extractionBaseOpenBranchIds = automationSystemOnDevice
+                ? com.powsybl.openloadflow.ac.outerloop.gpu.GpuAutomationSystemOuterLoop.baseOpenOperatedBranchIds(network) : java.util.Set.of();
+        GpuAcData data = extractionBaseOpenBranchIds.isEmpty()
+                ? GpuAcDataCache.extract(network, equationSystem, driverDistributedSlackParameters())
+                : GpuAcDataExtractor.extract(network, equationSystem, extractionBaseOpenBranchIds, java.util.Set.of(), driverDistributedSlackParameters());
         // Always a rebuild: comparing the new extraction with the old one to skip it missed arrays the tables are
         // installed from, and no solver re-extracted within a run (measured 2026-10-21 over the suite and the six
         // gate scopes).

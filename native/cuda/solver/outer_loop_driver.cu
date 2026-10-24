@@ -30,6 +30,7 @@
 #include "../equations/scenario_overrides.cuh"
 #include "../equations/zero_impedance_fill.cuh"
 #include "../outerloop/area_interchange_control.cuh"
+#include "../outerloop/automation_system.cuh"
 #include "../outerloop/distributed_slack.cuh"
 #include "../outerloop/forced_target_q.cuh"
 #include "../outerloop/hvdc_ac_emulation.cuh"
@@ -276,7 +277,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     bool fullLoadflow = !deviceFixedIter && ((ctx->reactiveLimitsOuterLoop && ctx->nReactiveLimitEntries > 0)
                                              || (ctx->distributedSlackOuterLoop && (ctx->nDistributedSlackBuses > 0 || ctx->slackOnlyDistribution))
                                              || ctx->nMonitoringVoltageControllers > 0 || ctx->nIncrementalTransformerVoltageControlControllerBranches > 0 || ctx->nIncrementalShuntVoltageControlControllerShunts > 0 || ctx->nIncrementalFlowControlControllerBranches > 0 || ctx->nPhaseControlControllerBranches > 0
-                                             || ctx->nTransformerVoltageControlMembers > 0 || ctx->nShuntVoltageControlMembers > 0 || ctx->nSecondaryVoltageControlControllerBuses > 0);
+                                             || ctx->nTransformerVoltageControlMembers > 0 || ctx->nShuntVoltageControlMembers > 0 || ctx->nSecondaryVoltageControlControllerBuses > 0
+                                             || ctx->nOverloadManagementSystems > 0);
     const int MAX_OUTER_LOOP_ITERATIONS = maxOuterProductive > 0 ? maxOuterProductive : 20;   // OLF maxOuterLoopIterations
     // per-bus PV→PQ count cap (OLF maxPqPvSwitch): 0 is OLF's "never switch back" and is honoured as such;
     // only a negative value (no cap given) takes OLF's default of 3.
@@ -483,6 +485,9 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         loopOrder[nLoops++] = GpuOuterLoopKind::INCREMENTAL_SHUNT_VOLTAGE_CONTROL;  // OLF order 10: ShuntVoltageControl, IN-KERNEL
     } else if (ctx->nShuntVoltageControlMembers > 0) {
         loopOrder[nLoops++] = GpuOuterLoopKind::SHUNT_VOLTAGE_CONTROL;  // OLF order 10: WITH_GENERATOR shunt VC, IN-KERNEL
+    }
+    if (ctx->nOverloadManagementSystems > 0) {
+        loopOrder[nLoops++] = GpuOuterLoopKind::AUTOMATION_SYSTEM;  // OLF's last loop: AutomationSystem
     }
     if (nLoops == 0) {
         // nothing to drive: one slot so the sweep runs its first solve. Its check is a ReactiveLimits one only
@@ -758,6 +763,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         hvdcStep(ctx, drv, loopKind);
     } else if (loopKind == GpuOuterLoopKind::AREA_INTERCHANGE_CONTROL) {
         areaInterchangeControlCheck(ctx, drv);
+    } else if (loopKind == GpuOuterLoopKind::AUTOMATION_SYSTEM) {
+        automationSystemCheck(ctx, drv);
     } else if (inDistributedSlackPhase) {                                // distributed-slack outer loop: spread the slack mismatch
         distributedSlackCheck(ctx, drv);
     } else {                                               // reactive-limits outer loop: switch PV->PQ over Q limit

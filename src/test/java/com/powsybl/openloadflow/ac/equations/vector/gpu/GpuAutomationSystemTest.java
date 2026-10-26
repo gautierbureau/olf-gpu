@@ -41,6 +41,8 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  * agree with OLF on the status, the iteration count, the bus voltages and angles, the branch currents and every terminal
  * and switch state; where the device owns the loop it must switch the branch itself, with no fallback. A switch to operate
  * is a zero-impedance coupler, which the device does not switch: OLF's loop stays on the host and the results still match.
+ * A monitored transformer is read at the tap its voltage control moved; a monitored branch another system opened is not
+ * read at all.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
@@ -260,5 +262,44 @@ class GpuAutomationSystemTest {
                     .setTransformerVoltageControlMode(OpenLoadFlowParameters.TransformerVoltageControlMode.INCREMENTAL_VOLTAGE_CONTROL);
             return parameters;
         }, 0);
+    }
+
+    /** OLF's createMeshed with two systems: l34's opens l34b above 100 A (106 A in the base), l34b's opens l3b4 above 140 A. */
+    private static Network meshedWithChainedSystems() {
+        Network network = AutomationSystemNetworkFactory.createMeshed();
+        network.getSubstation("s1").newOverloadManagementSystem()
+                .setId("l34_opens_l34b")
+                .setEnabled(true)
+                .setMonitoredElementId("l34")
+                .setMonitoredElementSide(ThreeSides.ONE)
+                .newBranchTripping()
+                .setKey("l34b key")
+                .setBranchToOperateId("l34b")
+                .setSideToOperate(TwoSides.TWO)
+                .setCurrentLimit(100.)
+                .add()
+                .add();
+        network.getSubstation("s1").newOverloadManagementSystem()
+                .setId("l34b_opens_l3b4")
+                .setEnabled(true)
+                .setMonitoredElementId("l34b")
+                .setMonitoredElementSide(ThreeSides.ONE)
+                .newBranchTripping()
+                .setKey("l3b4 key")
+                .setBranchToOperateId("l3b4")
+                .setSideToOperate(TwoSides.TWO)
+                .setCurrentLimit(140.)
+                .add()
+                .add();
+        return network;
+    }
+
+    /**
+     * Once l34's system has opened l34b, l34b is out of service and l34b's system has nothing to read. Read closed, l34b
+     * would carry the 174 A l34 carries: the device opened l3b4 too.
+     */
+    @Test
+    void monitoredBranchOpenedByAnotherSystem() {
+        compare("l34b opened, then not read", GpuAutomationSystemTest::meshedWithChainedSystems, 1);
     }
 }

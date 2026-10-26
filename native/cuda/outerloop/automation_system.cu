@@ -19,10 +19,10 @@ namespace olfgpu {
 
 namespace {
 
-// AutomationSystemOuterLoop.check on one scenario. For each system, the current at its monitored branch's side (getI1 /
-// getI2, pu: OLF tests the branch is connected at both sides, not that it is enabled, so a monitored branch the contingency
-// took out reads the current its closed-branch term evaluates on the buses' state), at the scenario's tap (a contingency's
-// tap action, a tap the transformer voltage control moved), against each tripping's threshold, in
+// AutomationSystemOuterLoop.check on one scenario. For each system whose monitored branch is in service (OLF's isInService:
+// a branch another system opened carries no current, whatever its closed-branch term computes from its buses' voltages),
+// the current at that branch's side (getI1 / getI2, pu), at the scenario's tap (a contingency's tap action, a tap the
+// transformer voltage control moved), against each tripping's threshold, in
 // order: past it, a tripping whose branch is not already in the wanted state opens it (it is in service) or closes it (it
 // is not), and the system stops at that tripping. The decisions are taken on the state the check found and applied
 // together afterwards, as OLF collects branchesToOpen and branchesToClose before it touches the connectivity.
@@ -43,6 +43,9 @@ __global__ void automationSystemBatch(int nS, int n, int nElements, int nSystems
     bool anyToSwitch = false;
     for (int m = 0; m < nSystems; m++) {
         int e = monitoredElement[m];
+        if (scenarioDisabled[e]) {
+            continue;                                                 // a closed-branch element's mask slot is its index
+        }
         const double* p = closedBranchParameters + (size_t) e * GpuPiModelColumn::COUNT;
         double pOv[GpuPiModelColumn::COUNT];
         if (findTapOverride(nClosedBranchParameterOverrides, closedBranchParameterOverrideScenarioElement, closedBranchParameterOverrideValues, s, e, pOv)) {

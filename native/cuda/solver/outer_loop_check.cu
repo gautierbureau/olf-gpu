@@ -58,6 +58,7 @@ void checkOuterLoop(BatchSolverContext* ctx, DriverPass& drv, bool solvePass, st
     std::vector<char>& active = drv.active;
     std::vector<char>& live = drv.live;
     BatchResult& res = drv.res;
+    gCheckRounds++;
     CUDA_CHECK(cudaMemcpy(ctx->dOuterLoopCheckActive.p, outerLoopCheckActive.data(), nS * sizeof(char), cudaMemcpyHostToDevice));
     // generator Q per controller = (Σ branch q + shunt q) at its BUS_V row + load Q: qBuf[row] is the raw bus balance
     // (no −target, no applyRowModeBatch) on the FROZEN routing - the relocation only concerns the Newton residual. The

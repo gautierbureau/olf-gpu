@@ -135,6 +135,7 @@ add_library(olfgpu SHARED
     native/cuda/solver/iterative_refinement.cu
     native/cuda/solver/linear_solver_settings.cu
     native/cuda/solver/newton_iteration.cu
+    native/cuda/solver/outer_loop_check.cu
     native/cuda/solver/outer_loop_driver.cu
     native/cuda/solver/realistic_voltage_check.cu
     native/cuda/solver/singleton_substitution.cu

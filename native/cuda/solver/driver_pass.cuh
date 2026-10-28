@@ -52,7 +52,11 @@ struct DriverPass {
     std::vector<char> outerLoopCheckActive;
     std::vector<char> loopRejected;
     int loopIdx = 0;
+    int nLoops = 0;
     int loopOrder[MAX_DEVICE_LOOPS] = {};
+    bool rejectSlackDistributionFailure = false;
+    bool reactiveLimitsAuditOn = false;
+    std::vector<std::vector<std::string>> reactiveLimitsAuditLog;   // OLF_GPU_RL_AUDIT: per scenario
     BatchResult res;
     bool usePerScenarioReactiveLimits = false;
     bool deviceFixedIter = false;

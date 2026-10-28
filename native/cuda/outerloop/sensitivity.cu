@@ -53,6 +53,15 @@ __global__ void setUnitRhsBatch(int n, int nScenarios, int unitRow, double* b) {
     b[t] = (t % n == unitRow) ? 1.0 : 0.0;
 }
 
+// One unit-right-hand-side sensitivity solve on every scenario's CURRENT Jacobian (dVals, filled for all
+// scenarios by the caller; dB = the right-hand sides, dDx = the solutions), for the in-kernel outer loops.
+// The UBATCH mode (3) solves the whole batch in one call on the factors they hold - the analysis once per
+// context, the factorization with the first controller's solve. The robust mode (6) holds ONE matrix object
+// repointed per scenario and keeps no factors from one scenario to the next, so it factors and solves scenario
+// by scenario - a refactorization per (scenario, controller), affordable at the robust retry's chunk sizes and
+// the price of the loops running there at all: they used to report themselves STABLE in mode 6, so a scenario
+// retried in it (or a base load flow that fell into it) with a transformer, shunt, flow or secondary voltage
+// control out of its deadband got a wrong answer and nothing flagged it.
 void sensitivitySolve(BatchSolverContext* ctx, DriverPass& drv, bool& first) {
     const int& n = drv.n;
     const int& nS = drv.nS;

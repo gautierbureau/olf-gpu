@@ -281,6 +281,9 @@ if (ctx->nDistrQ) fillDistrQBatch<<<grid(ctx->nDistrQ * nS), BLOCK, 0, ctx->stre
                 ctx->structure->dColIdx.as<int>(), ctx->structure->dRelocatedChildOwnRow.p != nullptr ? ctx->structure->dRelocatedChildOwnRow.as<int>() : nullptr, layout);
 }
 
+// The batched fill of every active scenario: J and F, or F only (the iteration at the Newton budget tests the residual
+// alone, and dVals keeps the last factorized Jacobian for the bad-solve score). The LINE_SEARCH backtrack re-evaluates
+// through it at a reduced step.
 void fillActiveBatch(BatchSolverContext* ctx, DriverPass& drv, bool fOnly) {
     const int& n = drv.n;
     const int& nnz = drv.nnz;

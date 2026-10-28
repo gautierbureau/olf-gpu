@@ -41,6 +41,14 @@ extern long long gCompactIters;
 extern long long gBatchedLuFactorizations;                   // factorizations of our batched LU
 extern long long gBatchedLuPivotedLanes;                     // ...and the lanes of them its pivoting engine factorized
 extern long long gBatchedLuPivotDelayOrders;                 // fast-engine orders built with learned pivot delays
+// Factorizations by kind (the compacted ones are gCompactIters): full-width uniform-batch Newton iterations, robust ones
+// (one scenario each), and those of the in-kernel loops' sensitivities, with their unit right-hand-side solves. A check
+// round is one outer loop checked on the scenarios standing at it.
+extern long long gFullFactorizations;
+extern long long gRobustFactorizations;
+extern long long gSensitivityFactorizations;
+extern long long gSensitivitySolves;
+extern long long gCheckRounds;
 // Per scenario at the end of a completed batch call: how many SOLVE PASSES it took part in (1 = the state came
 // right out of the first inner Newton; each further pass is an outer loop that changed something and
 // re-solved), the first pass's iterations and the total. Histogram key = passes (capped at 15).

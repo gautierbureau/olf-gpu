@@ -467,13 +467,14 @@ __global__ void reactiveLimitsForcedPvBatch(int nReactiveLimitEntries, int nScen
 // The other mixed state (members switched to PQ, pilot controlling) is an ordinary layout: pilot identity,
 // members at their own Q. One thread per (scenario, class-2 entry).
 __global__ void pilotSelfMixedPvPqGate(int nReactiveLimitEntries, int nScenarios, const char* reactiveLimitVoltageControlRole, const int* reactiveLimitComparedVoltageRow,
-                                     const char* limitType, const char* reactiveLimitIslanded, char* bad,
+                                     const char* limitType, const char* reactiveLimitIslanded, const char* outerLoopCheckActive, char* bad,
                                      const int* pilotSelfReactiveLimitEntry, int nReactiveRelocationGroups,
                                 int nDistrQMembers, const int* distrQMemberReactiveLimitEntry, const char* distrQSubgroup) {
     int t = blockIdx.x * blockDim.x + threadIdx.x;
     if (t >= nReactiveLimitEntries * nScenarios) return;
     int i = t % nReactiveLimitEntries;
     int s = t / nReactiveLimitEntries;
+    if (!outerLoopCheckActive[s]) return;                    // the scenarios this check judges, not their chunk mates
     if (reactiveLimitVoltageControlRole[i] != GpuVoltageControlRole::PILOT_SELF || limitType[(size_t) s * nReactiveLimitEntries + i] == GpuQLimitType::NONE) return;  // only a pilot SWITCHED TO PQ
     // ...that is still ON this component: an islanded pilot keeps its base limit type but has no frozen target Q and no
     // balance (OLF removed the bus), and an islanded member is not "still controlling" either.
@@ -587,7 +588,7 @@ void reactiveLimitsCheck(BatchSolverContext* ctx, DriverPass& drv, int loopKind)
             pilotSelfMixedPvPqGate<<<grid(ctx->nReactiveLimitEntries * nS), BLOCK, 0, ctx->stream>>>(ctx->nReactiveLimitEntries, nS,
                     ctx->dReactiveLimitVoltageControlRole.as<char>(), ctx->dReactiveLimitComparedVoltageRow.as<int>(), ctx->dReactiveLimitQLimitType.as<char>(),
                     ctx->nReactiveLimitIslanded > 0 ? ctx->dReactiveLimitIslanded.as<char>() : nullptr,
-                    ctx->dPilotSelfMixedPvPqRejected.as<char>(),
+                    ctx->dOuterLoopCheckActive.as<char>(), ctx->dPilotSelfMixedPvPqRejected.as<char>(),
                     pilotSelfReactiveLimitEntryOrNull(ctx), ctx->structure->nReactiveRelocationGroups,
                 ctx->nDistrQMembers, ctx->dDistrQMemberReactiveLimitEntry.p != nullptr ? ctx->dDistrQMemberReactiveLimitEntry.as<int>() : nullptr, ctx->hasDistrQSubgroups ? ctx->dDistrQSubgroup.as<char>() : nullptr);
             std::vector<char> mixed(nS);

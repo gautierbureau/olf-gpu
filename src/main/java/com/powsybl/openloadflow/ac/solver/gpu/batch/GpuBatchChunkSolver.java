@@ -70,6 +70,9 @@ final class GpuBatchChunkSolver {
 
     private static final boolean OUTER_LOOP_STATS = GpuTrace.OL_STATS.isOn();
 
+    /** Test hook: where each batched contingency's outer-loop statistics go, by contingency id, or null. */
+    static volatile java.util.Map<String, int[]> outerLoopStatsForTests;
+
     private static final Logger LOGGER = LoggerFactory.getLogger(GpuBatchChunkSolver.class);
 
     private GpuBatchChunkSolver() {
@@ -1061,16 +1064,23 @@ final class GpuBatchChunkSolver {
                         }
                     }
                     tMainSolveNs += System.nanoTime() - tSolve0;
-                    if (OUTER_LOOP_STATS) {
+                    java.util.Map<String, int[]> outerLoopStatsSink = outerLoopStatsForTests;
+                    if (OUTER_LOOP_STATS || outerLoopStatsSink != null) {
                         // OLF_OL_STATS: the device's per-contingency Newton work, in the same shape as OLF's
                         // CPU_OL_STATS lines, so the two arms can be matched contingency by contingency.
                         int[] outerLoopStats = BatchReadbackNative.readBatchOuterLoopStats(handle);
                         if (outerLoopStats != null) {
                             for (int s2 = 0; s2 < realCount; s2++) {
-                                int status = chunkResults[s2] == null ? Integer.MIN_VALUE : (int) chunkResults[s2][n + 2];
-                                System.err.println("GPU_OL_STATS ctg=" + contingencies.get(group.get(chunkStart + s2)).contingencyId()
-                                        + " passes=" + outerLoopStats[s2 * 3] + " firstNr=" + outerLoopStats[s2 * 3 + 1] + " totalNr=" + outerLoopStats[s2 * 3 + 2]
-                                        + " status=" + status);
+                                String id = contingencies.get(group.get(chunkStart + s2)).contingencyId();
+                                int[] stats = java.util.Arrays.copyOfRange(outerLoopStats, s2 * 4, s2 * 4 + 4);
+                                if (outerLoopStatsSink != null) {
+                                    outerLoopStatsSink.put(id, stats);
+                                }
+                                if (OUTER_LOOP_STATS) {
+                                    int status = chunkResults[s2] == null ? Integer.MIN_VALUE : (int) chunkResults[s2][n + 2];
+                                    System.err.println("GPU_OL_STATS ctg=" + id + " passes=" + stats[0] + " firstNr=" + stats[1]
+                                            + " totalNr=" + stats[2] + " status=" + status + " checks=" + stats[3]);
+                                }
                             }
                         }
                     }

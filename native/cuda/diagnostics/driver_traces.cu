@@ -48,7 +48,7 @@ __global__ void stateDumpBatch(int n, const double* F, const int* mode, const do
 }
 
 // OLF_GPU_BATCH_TRACE: the pass's per-scenario state before the loop check.
-void traceBatchPass(BatchSolverContext* ctx, DriverPass& drv, int nLoops, bool solvePass) {
+void traceBatchPass(BatchSolverContext* ctx, DriverPass& drv, int nLoops, int nChecked) {
     const int& nS = drv.nS;
     const int& outer = drv.outer;
     int& loopIdx = drv.loopIdx;
@@ -83,8 +83,8 @@ void traceBatchPass(BatchSolverContext* ctx, DriverPass& drv, int nLoops, bool s
             CUDA_CHECK(cudaMemcpy(qLimitType.data(), ctx->dReactiveLimitQLimitType.p, qLimitType.size(), cudaMemcpyDeviceToHost));
             for (char c : qLimitType) nSwitchedToPq += c ? 1 : 0;
         }
-        std::fprintf(stderr, "BATCH_TRACE pass done: outer=%d loop=%d/%d kind=%s solved=%d changedScenarios=%d iters=%d switchedToPq=%d",
-                     outer, loopIdx, nLoops, kindName, solvePass ? 1 : 0, nUnstableScenarios, gLastPassIters, nSwitchedToPq);
+        std::fprintf(stderr, "BATCH_TRACE check: outer=%d loop=%d/%d kind=%s checked=%d changedScenarios=%d iters=%d switchedToPq=%d",
+                     outer, loopIdx, nLoops, kindName, nChecked, nUnstableScenarios, gLastPassIters, nSwitchedToPq);
         std::fprintf(stderr, "\n");
     }
 }
@@ -269,7 +269,7 @@ void traceReactiveLimitsState(BatchSolverContext* ctx, DriverPass& drv, bool inD
 }
 
 // OLF_GPU_LOOP_TRACE: one scenario's loop sequence (which slot found it unstable).
-void traceLoopSlot(BatchSolverContext* ctx, DriverPass& drv, int loopTraceSlot, int nChanged, std::vector<char>& outerLoopUnstable, bool solvePass) {
+void traceLoopSlot(BatchSolverContext* ctx, DriverPass& drv, int loopTraceSlot, int nChanged, std::vector<char>& outerLoopUnstable, bool solved) {
     const int& nS = drv.nS;
     const int& outer = drv.outer;
     int& loopIdx = drv.loopIdx;
@@ -284,7 +284,7 @@ void traceLoopSlot(BatchSolverContext* ctx, DriverPass& drv, int loopTraceSlot, 
         std::fprintf(stderr, "LOOP_PASS s=%d outer=%d loopIdx=%d kind=%d solved=%d switched=%d nChanged=%d live=%d status=%d"
                      " dsRem=%.12f dsFire=%d nrIters=%d dsSlackP=%.12f dsSlackTgt=%.12f dsSlackMismatch=%.12f"
                      " slackRetainedShare=%.12f fsGlobal=%.12f dsPlaced=%.12f\n",
-                     loopTraceSlot, outer, loopIdx, loopOrder[loopIdx], solvePass ? 1 : 0,
+                     loopTraceSlot, outer, loopIdx, loopOrder[loopIdx], solved ? 1 : 0,
                      (int) outerLoopUnstable[loopTraceSlot], nChanged, (int) live[loopTraceSlot], res.status[loopTraceSlot],
                      gate[0], (int) gate[1], res.iters[loopTraceSlot],
                      gate[2], gate[3], gate[4], gate[5], gate[6], gate[7]);

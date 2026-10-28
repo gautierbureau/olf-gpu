@@ -172,6 +172,42 @@ final class GpuSaTestNetworks {
         return network;
     }
 
+    /** A pilot that is its own controller and keeps a remote member: g1 at vlp regulates vlp, g2 at vlc regulates vlp
+     *  remotely, gs at vl0 is the slack, every line alike. With g1's ceiling at 80 MVar g1 gives 75 before any outage:
+     *  losing l0d feeds vld through the pilot and takes g1 to its ceiling, where it switches to PQ while g2 (142 of its
+     *  300 MVar) keeps vlp at 401 kV; losing l0p lowers the reactive need at vlp and switches nothing. */
+    static Network pilotSelfSwitchingToPqNetwork(double g1MaxQ) {
+        Network network = Network.create("pilot-self-switching-to-pq", "code");
+        com.powsybl.iidm.network.Substation s = network.newSubstation().setId("s").add();
+        for (String vl : List.of("vl0", "vlp", "vlc", "vld")) {
+            com.powsybl.iidm.network.VoltageLevel v = s.newVoltageLevel().setId(vl).setNominalV(400)
+                    .setTopologyKind(com.powsybl.iidm.network.TopologyKind.BUS_BREAKER).add();
+            v.getBusBreakerView().newBus().setId(vl + "_b").add();
+        }
+        network.getVoltageLevel("vl0").newGenerator().setId("gs").setBus("vl0_b").setConnectableBus("vl0_b")
+                .setMinP(0).setMaxP(2000).setTargetP(400).setTargetV(400).setVoltageRegulatorOn(true).add();
+        network.getVoltageLevel("vl0").newLoad().setId("ld0").setBus("vl0_b").setConnectableBus("vl0_b").setP0(300).setQ0(60).add();
+        network.getVoltageLevel("vlp").newGenerator().setId("g1").setBus("vlp_b").setConnectableBus("vlp_b")
+                .setMinP(0).setMaxP(500).setTargetP(100).setTargetV(401).setVoltageRegulatorOn(true).add();
+        network.getGenerator("g1").newMinMaxReactiveLimits().setMinQ(-300).setMaxQ(g1MaxQ).add();
+        network.getVoltageLevel("vlp").newLoad().setId("ldp").setBus("vlp_b").setConnectableBus("vlp_b").setP0(80).setQ0(40).add();
+        network.getVoltageLevel("vlc").newGenerator().setId("g2").setBus("vlc_b").setConnectableBus("vlc_b")
+                .setMinP(0).setMaxP(500).setTargetP(100).setTargetV(401).setVoltageRegulatorOn(true)
+                .setRegulatingTerminal(network.getGenerator("g1").getTerminal()).add();
+        network.getGenerator("g2").newMinMaxReactiveLimits().setMinQ(-300).setMaxQ(300).add();
+        network.getVoltageLevel("vld").newLoad().setId("ldd").setBus("vld_b").setConnectableBus("vld_b").setP0(200).setQ0(50).add();
+        java.util.function.BiConsumer<String, String[]> line = (id, ends) -> network.newLine().setId(id)
+                .setVoltageLevel1(ends[0]).setBus1(ends[0] + "_b").setConnectableBus1(ends[0] + "_b")
+                .setVoltageLevel2(ends[1]).setBus2(ends[1] + "_b").setConnectableBus2(ends[1] + "_b")
+                .setR(0.5).setX(12).setG1(0).setB1(0).setG2(0).setB2(0).add();
+        line.accept("l0p", new String[] {"vl0", "vlp"});
+        line.accept("lpc", new String[] {"vlp", "vlc"});
+        line.accept("l0c", new String[] {"vl0", "vlc"});
+        line.accept("lpd", new String[] {"vlp", "vld"});
+        line.accept("l0d", new String[] {"vl0", "vld"});
+        return network;
+    }
+
     static Network pilotIsControllerNetwork() {
         Network network = com.powsybl.openloadflow.network.VoltageControlNetworkFactory
                 .createWithGeneratorRemoteControl();

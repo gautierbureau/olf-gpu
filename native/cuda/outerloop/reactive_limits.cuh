@@ -44,7 +44,7 @@ __global__ void reactiveLimitsForcedPvBatch(int nReactiveLimitEntries, int nScen
                                      const char* outerLoopCheckActive, char* switched);
 
 __global__ void pilotSelfMixedPvPqGate(int nReactiveLimitEntries, int nScenarios, const char* reactiveLimitVoltageControlRole, const int* reactiveLimitComparedVoltageRow,
-                                     const char* limitType, const char* reactiveLimitIslanded, char* bad,
+                                     const char* limitType, const char* reactiveLimitIslanded, const char* outerLoopCheckActive, char* bad,
                                      const int* pilotSelfReactiveLimitEntry, int nReactiveRelocationGroups,
                                 int nDistrQMembers, const int* distrQMemberReactiveLimitEntry, const char* distrQSubgroup);
 

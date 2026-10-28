@@ -139,12 +139,14 @@ __global__ void updatePilotTargetVEquationBatch(int nReactiveRelocationGroups, i
     int g = tid % nReactiveRelocationGroups;
     int s = tid / nReactiveRelocationGroups;
     if (!reactiveRelocationIsGeneratorVoltageControl[g]) return;
-    // The RL phase owns the flip/restore below (outerLoopCheckActive); the BOOKING of a group lost in the base runs at the
-    // post-seed launch too, when outerLoopCheckActive is still 0 — without it the switch back to PV of such a pilot at its
-    // first RL pass found pilotTargetVDeactivated = 0, restored nothing, and the pilot's row stayed a power row with its raw
-    // q gated off (back on PV ⇒ pilotSelfCarrierSkip): an empty row and a bad solve (rte6515 [5000,6000] BUS-6003_BBS_2,
-    // slot 797, max-iter-bad-solve at RL#2).
-    bool act = outerLoopCheckActive[s] != 0;
+    // The scenarios being checked only: every one at the seed (it marks them all), and at a ReactiveLimits or discrete
+    // TransformerVoltageControl check the scenarios standing at that loop. A scenario's layout follows its own facts at its
+    // own checks; laid out at another scenario's check, it would depend on its chunk mates, and its own later check would
+    // find no transition to flag. The seed also books a group lost in the base (below): without it the switch back to PV of
+    // such a pilot at its first RL pass found pilotTargetVDeactivated = 0, restored nothing, and the pilot's row stayed a
+    // power row with its raw q gated off (back on PV ⇒ pilotSelfCarrierSkip): an empty row and a bad solve (rte6515
+    // [5000,6000] BUS-6003_BBS_2, slot 797, max-iter-bad-solve at RL#2).
+    if (!outerLoopCheckActive[s]) return;
     int pilotRow = reactiveRelocationCandidateRows[reactiveRelocationGroupStart[g]];
     // A DEPENDENT pilot (reactiveRelocationDependentBaseGroup): its identity sits on its own V row once its parent coupler is dead (the dummy
     // row an identity) and on the dummy row as a cross identity while the coupler lives; the group is live only
@@ -248,21 +250,18 @@ __global__ void updatePilotTargetVEquationBatch(int nReactiveRelocationGroups, i
         lost = chooseCarrierRowInSubgroup(g, reactiveRelocationGroupStart, reactiveRelocationCandidateRows, mode + (size_t) s * n,
                 distrQSubgroup != nullptr ? distrQSubgroup + (size_t) s * nDistrQMembers : nullptr, reactiveRelocationDistrQMemberStart) == 0;
     }
-    // With the fact known the layout is applied EVERY pass, the first fill included; otherwise it stays where it
-    // was — inside the reactive-limits phase, which is all the row-mode inference could support.
-    const bool layoutNow = factKnown || act;
-    if (layoutNow && lost && !pilotTargetVDeactivated[fi] && mode[pi] == GpuRowMode::FIXED_VARIABLE) {
+    if (lost && !pilotTargetVDeactivated[fi] && mode[pi] == GpuRowMode::FIXED_VARIABLE) {
         savedVTarget[fi] = target[pi];
         mode[pi] = GpuRowMode::EQUATION;
         target[pi] = flipTarget;
         pilotTargetVDeactivated[fi] = 1;
-        switched[s] = act ? 1 : switched[s];                 // only the RL phase drives the outer loop's stability
-    } else if (layoutNow && !lost && pilotTargetVDeactivated[fi]) {
+        switched[s] = 1;
+    } else if (!lost && pilotTargetVDeactivated[fi]) {
         mode[pi] = fixedVariableMode(dependent && relocatedChildOwnRow != nullptr && relocatedChildOwnRow[pilotRow] >= 0);  // a cross identity stays cross
         target[pi] = savedVTarget[fi];
         pilotTargetVDeactivated[fi] = 0;
-        switched[s] = act ? 1 : switched[s];
-    } else if (act && lost && pilotTargetVDeactivated[fi] && pe >= 0 && fabs(target[pi] - flipTarget) > tol) {
+        switched[s] = 1;
+    } else if (lost && pilotTargetVDeactivated[fi] && pe >= 0 && fabs(target[pi] - flipTarget) > tol) {
         // The PQ pilot's limit moved (curve limits). OLF re-freezes a bus switched to PQ at its moved limit only
         // past maxReactivePowerMismatch (checkPqBusWithQLimitType: |maxQ - q| > tol), the same gate the member
         // path above this kernel applies; a 1e-12 gate here re-stamped a pilot OLF leaves at its switch-time

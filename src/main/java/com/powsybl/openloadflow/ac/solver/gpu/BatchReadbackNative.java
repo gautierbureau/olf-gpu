@@ -38,7 +38,8 @@ public final class BatchReadbackNative {
      *  converged: what OLF's network holds after a run that failed, where it starts that contingency's strategies. */
     public static native double[] readBatchLastConvergedState(long handle, int slot);
 
-    /** Per scenario of the last batch solve: {solve passes, first pass's Newton iterations, total}, flattened. */
+    /** Per scenario of the last batch solve: {solve passes, first pass's Newton iterations, total, outer-loop checks},
+     *  flattened. */
     public static native int[] readBatchOuterLoopStats(long handle);
 
     /** The per-scenario ROW MODES the device ended with — the companion to {@link #readBatchTargets}.

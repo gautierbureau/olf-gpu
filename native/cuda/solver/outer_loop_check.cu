@@ -40,7 +40,7 @@
 
 namespace olfgpu {
 
-void checkOuterLoop(BatchSolverContext* ctx, DriverPass& drv, bool solvePass, std::vector<char>& outerLoopUnstable) {
+void checkOuterLoop(BatchSolverContext* ctx, DriverPass& drv, std::vector<char>& outerLoopUnstable) {
     const int& n = drv.n;
     const int& nnz = drv.nnz;
     const int& nS = drv.nS;
@@ -59,14 +59,21 @@ void checkOuterLoop(BatchSolverContext* ctx, DriverPass& drv, bool solvePass, st
     std::vector<char>& live = drv.live;
     BatchResult& res = drv.res;
     gCheckRounds++;
+    int nChecked = 0;
+    for (int s = 0; s < nS; s++) {
+        if (outerLoopCheckActive[s]) {
+            ctx->outerLoopChecks[s]++;
+            nChecked++;
+        }
+    }
     CUDA_CHECK(cudaMemcpy(ctx->dOuterLoopCheckActive.p, outerLoopCheckActive.data(), nS * sizeof(char), cudaMemcpyHostToDevice));
     // generator Q per controller = (Σ branch q + shunt q) at its BUS_V row + load Q: qBuf[row] is the raw bus balance
     // (no −target, no applyRowModeBatch) on the FROZEN routing - the relocation only concerns the Newton residual. The
     // closed branches' part is dQbufClosed: every Newton fill zeroes it on its active scenarios and adds the closed
     // branches' p and q from the very outputs it puts in F (fillClosedBranchBatch), so a scenario holds them at the
     // state of its last fill - the state its convergence test passed on, and the state every check reads: a check that
-    // changes a scenario sends it to the next pass's solve, and a stable one re-checks every live scenario against the
-    // SAME state (the else branch at the end of the pass), so no state moves between a scenario's last fill and its
+    // changes a scenario sends it to the next pass's solve, and a STABLE one moves it on to its next loop against the
+    // SAME state (a pass checks only the scenarios it solved), so no state moves between a scenario's last fill and its
     // checks (a retired scenario's step is exactly 0). It used to be recomputed by a pass of its own at every check, the
     // same expressions on the same state: 0.71 s of 3.2 s of kernels on rte6515 call 0, 74 of its 106 passes checking
     // an unchanged batch. The smaller families add theirs for the checked scenarios; disabled elements are skipped
@@ -107,7 +114,8 @@ void checkOuterLoop(BatchSolverContext* ctx, DriverPass& drv, bool solvePass, st
                 ctx->dDisabled.as<char>(), ctx->dX.as<double>(), ctx->dOuterLoopCheckActive.as<char>(), ctx->dQbuf.as<double>());
     }
     CUDA_CHECK(cudaMemsetAsync(ctx->dOuterLoopUnstable.p, 0, nS * sizeof(char), ctx->stream));
-    if (outer == 0 && ctx->loopTraceSlot >= 0 && ctx->loopTraceSlot < nS) {
+    if (ctx->loopTraceSlot >= 0 && ctx->loopTraceSlot < nS && outerLoopCheckActive[ctx->loopTraceSlot]
+            && ctx->outerLoopChecks[ctx->loopTraceSlot] == 1) {
         // OLF_GPU_SLOT_DUMP, second point: the traced scenario's state and bus balances (qBuf) at the FIRST
         // outer-loop check, i.e. after the first solve - "<prefix>.<k>.pass0", "<row> <x> <qBuf>".
         static const char* slotDump0 = traceValue(Trace::SLOT_DUMP);
@@ -129,7 +137,7 @@ void checkOuterLoop(BatchSolverContext* ctx, DriverPass& drv, bool solvePass, st
     }
     // Apply ONLY the current phase's outer loop this pass (sequential, like OLF) — never both at once.
     bool inDistributedSlackPhase = (loopOrder[loopIdx] == GpuOuterLoopKind::DISTRIBUTED_SLACK);
-    traceBatchPass(ctx, drv, nLoops, solvePass);
+    traceBatchPass(ctx, drv, nLoops, nChecked);
     // ---- IncrementalTransformerVoltageControl as a DRIVER PHASE (OLF order 8). OLF's own rule, per
     //      controlled bus: if |targetV - V| > halfDeadband, take dV/drho from the Jacobian at the converged
     //      state (unit RHS at the rho identity row, read the bus V entry), deltaR1 = diffV / sensitivity, move to

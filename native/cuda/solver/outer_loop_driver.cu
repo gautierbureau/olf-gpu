@@ -175,6 +175,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     ctx->outerLoopFirstSolveIterations.assign(nS, 0);
     ctx->outerLoopIterations.assign(nS, 0);
     ctx->outerLoopSolvePasses.assign(nS, 0);
+    ctx->outerLoopChecks.assign(nS, 0);
     dBaseMode.upload(baseRowMode, n * sizeof(int));         // base (contingency-free) row mode for the RL limit-type seed
     if (x0Full != nullptr) {
         CUDA_CHECK(cudaMemcpy(ctx->dX.p, x0Full, (size_t) nTot * sizeof(double), cudaMemcpyHostToDevice));
@@ -503,20 +504,28 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             realisticFixingIdx = i;
         }
     }
-    int& loopIdx = drv.loopIdx;
+    // OLF's AcloadFlowEngine.runOuterLoops, scenario by scenario. Each scenario stands at its own loop of loopOrder:
+    // after a solve it is checked at that loop (runOuterLoop re-checks the loop that made it re-solve), a STABLE check
+    // moves it on to the next loop against the SAME state, and an UNSTABLE one makes it re-solve in the next pass. Its
+    // outer loops end when a sweep re-solved nothing, or when a new sweep reaches the loop it was last UNSTABLE at
+    // (OLF's lastUnstableOuterLoop: every loop since has been checked STABLE on this state). The Newton solves stay
+    // batched: a pass solves every scenario that has a solve due, then checks each of them along its own loops, several
+    // loops in one pass. The batch used to move every scenario from loop to loop together and restart the sweep of all
+    // of them when any one re-solved, so a scenario was re-checked for its chunk mates' sake.
+    int& loopIdx = drv.loopIdx;                              // the loop the current check round runs
     loopIdx = 0;
-    bool seqChanged = false;                                 // did any outer loop re-solve during the current RL->DS sequence
+    std::vector<int> scenarioLoopIdx(nS, 0);                 // the loop each scenario stands at
+    std::vector<int> lastUnstableLoopIdx(nS, -1);            // the loop each scenario was last UNSTABLE at, -1: none yet
+    std::vector<char> sweepResolved(nS, 0);                  // the scenario re-solved during its current sweep
+    std::vector<char> checkPending(nS, 0);                   // a check is due on the scenario's current state
     std::vector<int> prodIters(nS, 0);                       // PER-SCENARIO productive outer iterations: OLF's
                                                              // maxOuterLoopIterations is a per-RUN budget — a global
                                                              // counter capped busy chunks collectively (violation-diff
                                                              // root cause: a scenario solved solo matched the CPU
                                                              // exactly but diverged inside a full 500-chunk)
-    // A phase transition after a NO-SWITCH pass must NOT re-solve: OLF's runOuterLoop re-solves only on an
-    // UNSTABLE check — a STABLE loop is followed by checking the NEXT loop against the SAME state. The device
-    // Newton forces >=1 iteration per solve (matching OLF's per-run behavior), so an extra no-op pass would
-    // move an already-converged state off the CPU's by ~the stopping residual (measured 4e-4 kV on the
-    // DS->RL transition with a distributed base). solvePass=false skips the inner Newton for such a pass.
-    bool solvePass = true;
+    // STABLE never re-solves: OLF's runOuterLoop re-solves only on an UNSTABLE check, and the device Newton forces >= 1
+    // iteration per solve (matching OLF's per-run behavior), so a no-op solve would move a converged state off the
+    // CPU's by about the stopping residual (measured 4e-4 kV on the DS->RL transition with a distributed base).
     // OLF_GPU_SLOT_DUMP=<prefix>: the traced scenario's (OLF_GPU_LOOP_TRACE_CTG) row targets, initial state and row
     // modes as the driver starts - after every host override and every device seed - one file per solve
     // (<prefix>.<k>), "<row> <target> <x> <mode>" with every double exact. Two runs of one scenario that should be
@@ -547,53 +556,44 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     int& outerLoopPassSolvedScenarios = drv.outerLoopPassSolvedScenarios;
     outerLoopPassSolvedScenarios = 0;
     bool outerLoopFirstSolveDone = false;
-    int outerLoopTriggerKind = GpuOuterLoopKind::NONE;  // the loop whose check made the next pass re-solve
+    std::vector<int> triggeredBy(GpuOuterLoopKind::COUNT, 0);   // the loops whose checks made the next pass's solves due
     int& outer = drv.outer;
-    for (outer = 0; outer < maxOuter && loopIdx < nLoops; outer++) {
-    gOuterPasses++;
-    if (outerLoopTiming) CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
-    const double outerLoopPassStartMilliseconds = outerLoopTiming ? nowMilliseconds() : 0.0;
-    const long long outerLoopPassStartActiveIterations = gActiveIterSum, outerLoopPassStartWidthIterations = gWidthIterSum;
-    const bool outerLoopPassSolving = solvePass;
-    if (solvePass) {
-        gSolvePasses++;
-    }
-    std::copy(active.begin(), active.end(), wasActive.begin());   // scenarios (re)solved in this inner pass
-    CUDA_CHECK(cudaMemcpy(ctx->dActive.p, active.data(), nS * sizeof(char), cudaMemcpyHostToDevice));
+    for (outer = 0; outer < maxOuter; outer++) {
     int& nActive = drv.nActive;
     nActive = 0;
     for (char a : active) {
         if (a) nActive++;
     }
+    if (nActive == 0) {
+        break;                                              // every scenario has ended its outer loops
+    }
+    gOuterPasses++;
+    gSolvePasses++;
+    if (outerLoopTiming) CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+    const double outerLoopPassStartMilliseconds = outerLoopTiming ? nowMilliseconds() : 0.0;
+    const long long outerLoopPassStartActiveIterations = gActiveIterSum, outerLoopPassStartWidthIterations = gWidthIterSum;
+    std::copy(active.begin(), active.end(), wasActive.begin());   // scenarios (re)solved in this pass
+    CUDA_CHECK(cudaMemcpy(ctx->dActive.p, active.data(), nS * sizeof(char), cudaMemcpyHostToDevice));
     std::vector<char>& loopRejected = drv.loopRejected;
     loopRejected.assign(nS, 0);                   // a device loop routed the scenario to the CPU this pass
-    if (solvePass) {
-        newtonSolve(ctx, drv);
-    }   // ---- end if (solvePass) ----
+    newtonSolve(ctx, drv);
     if (outerLoopTiming) {
         CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
         double ms = nowMilliseconds() - outerLoopPassStartMilliseconds;
         long long ai = gActiveIterSum - outerLoopPassStartActiveIterations, wi = gWidthIterSum - outerLoopPassStartWidthIterations;
-        if (outerLoopPassSolving && !outerLoopFirstSolveDone) {
+        if (!outerLoopFirstSolveDone) {
             gOuterLoopFirstSolveMilliseconds += ms; gOuterLoopFirstSolveScenarios += outerLoopPassSolvedScenarios; gOuterLoopFirstSolveLaneIterations += ai; gOuterLoopFirstSolveWidthIterations += wi;
             gOuterLoopFirstSolvePasses++;
             outerLoopFirstSolveDone = true;
-        } else if (outerLoopPassSolving) {
-            int k = outerLoopTriggerKind >= 0 && outerLoopTriggerKind < GpuOuterLoopKind::COUNT ? outerLoopTriggerKind : 0;
+        } else {
+            // the scenarios of one pass may have been made UNSTABLE by different loops: the pass goes to the loop
+            // behind most of them
+            int k = static_cast<int>(std::max_element(triggeredBy.begin(), triggeredBy.end()) - triggeredBy.begin());
             gOuterLoopReSolveMilliseconds[k] += ms; gOuterLoopReSolveScenarios[k] += outerLoopPassSolvedScenarios; gOuterLoopReSolveLaneIterations[k] += ai;
             gOuterLoopReSolveWidthIterations[k] += wi; gOuterLoopReSolvePasses[k]++;
         }
+        std::fill(triggeredBy.begin(), triggeredBy.end(), 0);
     }
-    // the CHECK part of the pass, charged to the loop being checked when the pass body ends (break/continue too)
-    struct OuterLoopCheckTimer {
-        bool on; double t0; int kind;
-        ~OuterLoopCheckTimer() {
-            if (on && kind >= 0 && kind < GpuOuterLoopKind::COUNT) {
-                gOuterLoopCheckMilliseconds[kind] += nowMilliseconds() - t0;
-                gOuterLoopCheckPasses[kind]++;
-            }
-        }
-    } outerLoopCheckTimer{outerLoopTiming, outerLoopTiming ? nowMilliseconds() : 0.0, -1};
 
     // ---- AcloadFlowEngine's realistic-voltage check, on this INTERMEDIATE state ----
     // OLF re-checks after every solver run once the last loop that can fix an unrealistic state has
@@ -603,81 +603,128 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     // scenario that is EVER unrealistic to the CPU replay, which applies OLF's rule itself. That is
     // stricter than OLF (a state it would have let a later loop fix also leaves the batch), so it
     // can cost batching share and can never change an answer.
-    // One check over the scenarios gate selects: any whose state leaves the band goes to the CPU replay.
-    if (ctx->realisticCheck && solvePass && loopIdx > realisticFixingIdx) {
+    // One check over the scenarios this pass solved past that loop: any whose state leaves the band goes to the CPU
+    // replay.
+    if (ctx->realisticCheck) {
         std::vector<char> gate(nS);
+        bool anyGate = false;
         for (int s = 0; s < nS; s++) {
-            gate[s] = (wasActive[s] && res.status[s] == GpuAcSolverStatus::CONVERGED && live[s]) ? 1 : 0;
+            gate[s] = (wasActive[s] && res.status[s] == GpuAcSolverStatus::CONVERGED && live[s] && scenarioLoopIdx[s] > realisticFixingIdx) ? 1 : 0;
+            anyGate = anyGate || gate[s];
         }
-        rejectUnrealistic(ctx, drv, gate);
+        if (anyGate) {
+            rejectUnrealistic(ctx, drv, gate);
+        }
     }
 
     if (!fullLoadflow) {
         break;                                              // fixed-iter / no controllers: one pass only
     }
 
-    // ---- this pass's check: the scenarios the pass (re)solved, or every live one on a check-only pass, that converged ----
+    // ---- the checks: each scenario this pass solved, at its own loop, then on along the next loops while STABLE ----
     for (int s = 0; s < nS; s++) {
-        outerLoopCheckActive[s] = (wasActive[s] && res.status[s] == GpuAcSolverStatus::CONVERGED) ? 1 : 0;
+        checkPending[s] = (wasActive[s] && res.status[s] == GpuAcSolverStatus::CONVERGED && live[s]) ? 1 : 0;
     }
-    outerLoopCheckTimer.kind = loopOrder[loopIdx];
-    outerLoopTriggerKind = loopOrder[loopIdx];                     // a re-solve in the next pass was triggered by this check
-    checkOuterLoop(ctx, drv, solvePass, outerLoopUnstable);
-    int nChanged = 0;
-    for (int s = 0; s < nS; s++) {
-        if (outerLoopUnstable[s]) {
-            nChanged++;
-        }
-    }
-    // OLF_GPU_LOOP_TRACE=<slot>: the device side of OLF's OL_CHECK - which loop this pass ran, whether
-    // it found the slot UNSTABLE (a re-solve follows) and whether the whole phase is still unstable.
+    // OLF_GPU_LOOP_TRACE=<slot>: the device side of OLF's OL_CHECK - which loop this round ran, whether
+    // it found the slot UNSTABLE (a re-solve follows) and how many scenarios that loop found unstable.
     // Two arms that agree on every residual and still stop apart differ in this SEQUENCE.
     static const char* loopTraceEnv = traceValue(Trace::LOOP_TRACE);
     // a slot resolved per chunk from a contingency id (setBatchLoopTraceSlot) wins over the env slot:
     // chunk composition moves with the resolved chunk size, so a fixed slot traces a different
     // scenario from one run to the next (IZUZ: slot 170, then 18)
     const int loopTraceSlot = ctx->loopTraceSlot >= 0 ? ctx->loopTraceSlot : (loopTraceEnv != nullptr ? std::atoi(loopTraceEnv) : -1);
-    traceLoopSlot(ctx, drv, loopTraceSlot, nChanged, outerLoopUnstable, solvePass);
-    if (nChanged > 0) {                                     // this outer loop is still unstable
+    // A scenario wraps to the first loop at most once per pass (its sweep restarts only after a re-solve, and a
+    // re-solve takes it out of this pass's checks), so this runs the loops at most twice.
+    while (std::find(checkPending.begin(), checkPending.end(), 1) != checkPending.end()) {
+    for (int i = 0; i < nLoops; i++) {
+        bool anyChecked = false;
         for (int s = 0; s < nS; s++) {
-            if (outerLoopUnstable[s] && ++prodIters[s] >= MAX_OUTER_LOOP_ITERATIONS) {
+            outerLoopCheckActive[s] = (checkPending[s] && scenarioLoopIdx[s] == i) ? 1 : 0;
+            anyChecked = anyChecked || outerLoopCheckActive[s];
+        }
+        if (!anyChecked) {
+            continue;
+        }
+        loopIdx = i;
+        const double checkStartMilliseconds = outerLoopTiming ? nowMilliseconds() : 0.0;
+        checkOuterLoop(ctx, drv, outerLoopUnstable);
+        int nChanged = 0;
+        for (int s = 0; s < nS; s++) {
+            if (outerLoopUnstable[s]) {
+                nChanged++;
+            }
+        }
+        if (loopTraceSlot >= 0 && loopTraceSlot < nS && outerLoopCheckActive[loopTraceSlot]) {
+            traceLoopSlot(ctx, drv, loopTraceSlot, nChanged, outerLoopUnstable, wasActive[loopTraceSlot] != 0);
+        }
+        for (int s = 0; s < nS; s++) {
+            if (!outerLoopCheckActive[s]) {
+                continue;
+            }
+            if (!live[s]) {
+                checkPending[s] = 0;                        // the check routed it to the CPU, whatever its verdict
+                continue;
+            }
+            if (!outerLoopUnstable[s]) {
+                continue;                                   // STABLE: on to the next loop, below
+            }
+            checkPending[s] = 0;                            // UNSTABLE: re-solve, then this loop checks again
+            if (++prodIters[s] >= MAX_OUTER_LOOP_ITERATIONS) {
                 // This scenario exhausted ITS outer-iteration budget mid-sequence. Never report it
                 // converged on a half-finished RL/DS fixpoint — reject to the CPU fallback, which
                 // replays it under OLF's own maxOuterLoopIterations/UNSTABLE handling.
                 traceReject(s, "outer-loop-budget", outer, 0);
                 res.status[s] = GpuAcSolverStatus::REJECTED;
-                outerLoopUnstable[s] = 0;
                 live[s] = 0;
+                continue;
             }
-            active[s] = outerLoopUnstable[s];                      // re-solve only the scenarios it changed, stay in this phase
+            active[s] = 1;
+            sweepResolved[s] = 1;
+            lastUnstableLoopIdx[s] = i;
+            triggeredBy[loopOrder[i]]++;
         }
-        seqChanged = true;
-        solvePass = true;                                   // mutated targets/modes -> a real re-solve is due
-    } else {                                               // this outer loop stabilized
         // The last loop that can fix an unrealistic state is done for this sweep: AcloadFlowEngine checks the
         // state it leaves (runOuterLoop, after its do-while), whether or not the loop re-solved. The solve gate
         // above only sees the solves of the LATER loops, so with that loop last in the order (the discrete
         // TransformerVoltageControl under the validation parameters) only the final state was ever checked.
-        if (ctx->realisticCheck && realisticFixingIdx >= 0 && loopIdx == realisticFixingIdx) {
+        if (ctx->realisticCheck && i == realisticFixingIdx) {
             std::vector<char> gate(nS);
             for (int s = 0; s < nS; s++) {
-                gate[s] = (res.status[s] == GpuAcSolverStatus::CONVERGED && live[s]) ? 1 : 0;
+                gate[s] = (outerLoopCheckActive[s] && !outerLoopUnstable[s] && res.status[s] == GpuAcSolverStatus::CONVERGED && live[s]) ? 1 : 0;
             }
             rejectUnrealistic(ctx, drv, gate);
         }
-        if (++loopIdx >= nLoops) {                          // ...move to the next loop in OLF's order
-            if (!seqChanged) {
-                break;                                      // a full sweep re-solved nothing -> converged
+        for (int s = 0; s < nS; s++) {                      // STABLE: the next loop, against the same state
+            if (!outerLoopCheckActive[s] || !checkPending[s] || outerLoopUnstable[s]) {
+                continue;
             }
-            seqChanged = false;
-            loopIdx = 0;                                    // restart the sweep at the first loop
+            int next = i + 1;
+            if (!live[s]) {
+                next = -1;                                  // unrealistic at the fixing loop: routed to the CPU
+            } else if (next == nLoops) {                    // the end of the sweep
+                if (sweepResolved[s]) {
+                    sweepResolved[s] = 0;
+                    next = 0;                               // the next sweep, from the first loop
+                } else {
+                    next = -1;                              // a whole sweep re-solved nothing: done
+                }
+            }
+            if (next >= 0 && next == lastUnstableLoopIdx[s]) {
+                next = -1;                                  // back at the loop last UNSTABLE: done
+            }
+            if (next < 0) {
+                checkPending[s] = 0;
+            } else {
+                scenarioLoopIdx[s] = next;
+            }
         }
-        for (int s = 0; s < nS; s++) {
-            active[s] = live[s];                            // re-CHECK every live scenario in the next phase...
+        if (outerLoopTiming) {
+            gOuterLoopCheckMilliseconds[loopOrder[i]] += nowMilliseconds() - checkStartMilliseconds;
+            gOuterLoopCheckPasses[loopOrder[i]]++;
         }
-        solvePass = false;                                  // ...against the SAME state: STABLE never re-solves (OLF)
     }
-    }   // ---- end sequential outer-loop driver ----
+    }
+    }   // ---- end of the passes ----
 
     traceSwitchLog(ctx, drv);
     // ---- OLF_GPU_RL_AUDIT=<pu threshold>: audit the FINAL state against the reactive-limit rule

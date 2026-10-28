@@ -22,6 +22,7 @@ import com.powsybl.openloadflow.ac.solver.gpu.GpuMatchingAlgorithm;
 import com.powsybl.openloadflow.ac.solver.gpu.GpuPivotType;
 import com.powsybl.openloadflow.ac.solver.gpu.GpuReorderingAlgorithm;
 import com.powsybl.openloadflow.ac.solver.gpu.NewtonSettingsNative;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchedSecurityAnalysisSolver;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.GpuBatchScopeCensus;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuLinearSolveMode;
 import com.powsybl.openloadflow.graph.EvenShiloachGraphDecrementalConnectivityFactory;
@@ -31,7 +32,9 @@ import com.powsybl.security.SecurityAnalysisResult;
 import com.powsybl.security.results.PostContingencyResult;
 import org.junit.jupiter.api.Test;
 
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 import static com.powsybl.openloadflow.sa.gpu.GpuSaTestNetworks.*;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
@@ -270,6 +273,43 @@ class GpuSaSolverTest extends AbstractGpuSaTest {
         } finally {
             com.powsybl.openloadflow.ac.solver.gpu.GpuBatchContextCache.forceChunkSizeForTests(null);
             securityAnalysisProvider = new OpenSecurityAnalysisProvider(commonTestConfig.matrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>());
+        }
+    }
+
+    /** Each scenario runs OLF's outer-loop sequence on its own (AcloadFlowEngine.runOuterLoops): checked after every
+     *  solve at the loop that made it re-solve, on along the next loops while they are STABLE, and done when a sweep
+     *  re-solved nothing or a new sweep reaches the loop it was last UNSTABLE at. With ReactiveLimits the only loop, OLF
+     *  checks once per solve: l0p switches nothing (one solve, one check), l0d switches g1 to PQ (two and two). The batch
+     *  used to move every scenario from loop to loop together and restart every sweep when one re-solved: l0p was
+     *  checked a second time for l0d's sake, and l0d a third time, past its last unstable loop. The counts must not
+     *  depend on the chunk either. */
+    @Test
+    void deviceChecksEachScenarioLikeOlfWhateverItsChunkMates() {
+        assumeTrue(GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = pilotSelfSwitchingToPqNetwork(80);
+        List<Contingency> ctgs = List.of(new Contingency("l0p", new BranchContingency("l0p")),
+                new Contingency("l0d", new BranchContingency("l0d")));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setDistributedSlack(false).setUseReactiveLimits(true);
+        Map<String, int[]> together = new HashMap<>();
+        Map<String, int[]> alone = new HashMap<>();
+        try {
+            GpuBatchedSecurityAnalysisSolver.recordOuterLoopStatsForTests(together);
+            assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
+            assertEquals(2, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(), "both outages on the device");
+            GpuBatchContextCache.forceChunkSizeForTests(1);
+            GpuBatchedSecurityAnalysisSolver.recordOuterLoopStatsForTests(alone);
+            assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
+        } finally {
+            GpuBatchedSecurityAnalysisSolver.recordOuterLoopStatsForTests(null);
+            GpuBatchContextCache.forceChunkSizeForTests(null);
+        }
+        // {solve passes, first solve's Newton iterations, total Newton iterations, checks}
+        for (Map<String, int[]> stats : List.of(together, alone)) {
+            assertEquals(1, stats.get("l0p")[0], "l0p switches nothing: one solve");
+            assertEquals(1, stats.get("l0p")[3], "l0p: one check");
+            assertEquals(2, stats.get("l0d")[0], "l0d switches g1 to PQ: two solves");
+            assertEquals(2, stats.get("l0d")[3], "l0d: a check after each solve");
         }
     }
 

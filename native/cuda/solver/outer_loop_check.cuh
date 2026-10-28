@@ -12,11 +12,11 @@
 
 namespace olfgpu {
 
-// Checks loopOrder[drv.loopIdx] on the scenarios drv.outerLoopCheckActive selects. outerLoopUnstable[s] = 1: the loop
-// changed something for s, which re-solves. A scenario the loop routed to the CPU, or whose slack distribution failed
-// under a failure behaviour that does not leave the residual on the slack bus, leaves the batch here (REJECTED).
-// solvePass: the states were just solved (traces only).
-void checkOuterLoop(BatchSolverContext* ctx, DriverPass& drv, bool solvePass, std::vector<char>& outerLoopUnstable);
+// Checks loopOrder[drv.loopIdx] on the scenarios drv.outerLoopCheckActive selects (each one counted in
+// ctx->outerLoopChecks). outerLoopUnstable[s] = 1: the loop changed something for s, which re-solves. A scenario the
+// loop routed to the CPU, or whose slack distribution failed under a failure behaviour that does not leave the
+// residual on the slack bus, leaves the batch here (REJECTED).
+void checkOuterLoop(BatchSolverContext* ctx, DriverPass& drv, std::vector<char>& outerLoopUnstable);
 
 }  // namespace olfgpu
 

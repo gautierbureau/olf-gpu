@@ -72,6 +72,12 @@ public final class GpuBatchedSecurityAnalysisSolver {
     public static final double DEFAULT_REACTIVE_LIMIT_TOL = 1e-4;
     public static final double DEFAULT_SLACK_DIST_TOL = 1e-2;
 
+    /** TESTS ONLY: record every batched contingency's outer-loop statistics into {@code sink}, by contingency id: {solve
+     *  passes, first solve's Newton iterations, total Newton iterations, outer-loop checks}. Null stops recording. */
+    public static void recordOuterLoopStatsForTests(java.util.Map<String, int[]> sink) {
+        GpuBatchChunkSolver.outerLoopStatsForTests = sink;
+    }
+
     /**
      * Solve the request's contingencies on the GPU: extract one batched context from the base case and run every
      * scenario in one Newton-Raphson loop with the device outer loops the request declares.

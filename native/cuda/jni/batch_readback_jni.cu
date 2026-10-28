@@ -77,7 +77,7 @@ OLF_JNI(ac_solver_gpu, BatchReadbackNative, readBatchDistributedSlackGeneratorMo
 }
 
 // Per scenario of the last solveBatchContext call: {solve passes, first pass's
-// Newton iterations, total Newton iterations}, flattened s*3. The per-contingency counterpart of
+// Newton iterations, total Newton iterations, outer-loop checks}, flattened s*4. The per-contingency counterpart of
 // GPU_OL_HIST, for matching OLF's CPU_OL_STATS contingency by contingency.
 extern "C" JNIEXPORT jintArray JNICALL
 OLF_JNI(ac_solver_gpu, BatchReadbackNative, readBatchOuterLoopStats)(
@@ -86,11 +86,12 @@ OLF_JNI(ac_solver_gpu, BatchReadbackNative, readBatchOuterLoopStats)(
     if (ctx == nullptr || ctx->outerLoopSolvePasses.size() != static_cast<size_t>(ctx->nScenarios)) {
         return nullptr;
     }
-    std::vector<jint> host(static_cast<size_t>(ctx->nScenarios) * 3);
+    std::vector<jint> host(static_cast<size_t>(ctx->nScenarios) * 4);
     for (int s = 0; s < ctx->nScenarios; s++) {
-        host[s * 3] = ctx->outerLoopSolvePasses[s];
-        host[s * 3 + 1] = ctx->outerLoopFirstSolveIterations[s];
-        host[s * 3 + 2] = ctx->outerLoopIterations[s];
+        host[s * 4] = ctx->outerLoopSolvePasses[s];
+        host[s * 4 + 1] = ctx->outerLoopFirstSolveIterations[s];
+        host[s * 4 + 2] = ctx->outerLoopIterations[s];
+        host[s * 4 + 3] = ctx->outerLoopChecks[s];
     }
     jintArray out = env->NewIntArray(static_cast<jsize>(host.size()));
     env->SetIntArrayRegion(out, 0, static_cast<jsize>(host.size()), host.data());

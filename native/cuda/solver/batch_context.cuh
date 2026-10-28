@@ -314,7 +314,7 @@ struct BatchSolverContext {
     DeviceBuf dOverloadManagementSystemOperatedMaskSlot, dOverloadManagementSystemOpenAction, dOverloadManagementSystemThreshold;
     std::vector<int> hOverloadManagementSystemOperatedMaskSlot;
     DeviceBuf dAutomationSystemSwitched;                                            // per (scenario, tripping): a check's decisions
-    std::vector<int> outerLoopFirstSolveIterations, outerLoopIterations, outerLoopSolvePasses;              // OLF_GPU_PHASE_TIME: per-scenario Newton work by
+    std::vector<int> outerLoopFirstSolveIterations, outerLoopIterations, outerLoopSolvePasses, outerLoopChecks;              // OLF_GPU_PHASE_TIME: per-scenario Newton work by
                                                              // solve pass
     int nMonitoringVoltageControllers = 0;
     DeviceBuf dMonitoringVoltageBusVRow, dMonitoringVoltageBand, dMonitoringVoltageDeltaStart, dMonitoringVoltageDeltaRow, dMonitoringVoltageDeltaMode, dMonitoringVoltageDeltaTarget, dMonitoringVoltageActivatedTargetV;

@@ -435,6 +435,42 @@ class GpuSaSolverTest extends AbstractGpuSaTest {
         }
     }
 
+    /** A security analysis prices its chunk against device memory WITHOUT the batched context the JVM's previous
+     *  analysis left behind, which it destroys anyway. Priced while that context still held its LU factors, the
+     *  second analysis of a JVM on rte6515's 1000 branch contingencies took 3 chunks of 334 where the first took 2 of
+     *  500. The pricing stand-in records what the device would see: whether a batched context is allocated. */
+    @Test
+    void chunkIsPricedWithoutThePreviousAnalysisContext() {
+        assumeTrue(GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = IeeeCdfNetworkFactory.create14();
+        List<Contingency> contingencies = network.getLineStream()
+                .limit(8)
+                .map(line -> new Contingency(line.getId(), new BranchContingency(line.getId())))
+                .toList();
+        List<Boolean> contextAllocatedAtPricing = new java.util.ArrayList<>();
+        securityAnalysisProvider = new GpuSecurityAnalysisProvider(commonTestConfig.matrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>());
+        GpuBatchContextCache.clearContextCache();
+        GpuBatchContextCache.priceChunksForTests(() -> {
+            contextAllocatedAtPricing.add(GpuBatchContextCache.holdsAContextForTests());
+            return 3;
+        });
+        try {
+            runSecurityAnalysis(network, contingencies);
+            assertTrue(GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get() > 0, "the first analysis ran on the device");
+            // another extraction for the second analysis, so its chunk is priced again
+            var line = network.getLine("L1-2-1");
+            line.setR(line.getR() * 1.01);
+            runSecurityAnalysis(network, contingencies);
+            assertTrue(GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get() > 0, "the second analysis ran on the device");
+        } finally {
+            GpuBatchContextCache.priceChunksForTests(null);
+            GpuBatchContextCache.clearContextCache();
+            securityAnalysisProvider = new OpenSecurityAnalysisProvider(commonTestConfig.matrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>());
+        }
+        assertEquals(List.of(false, false), contextAllocatedAtPricing,
+                "each analysis prices its chunk once, with no batched context allocated");
+    }
+
     /** The batched contingency solves run with the GPU solver parameters of the security analysis's own load flow
      *  parameters, not the configuration module's nor a previous run's. */
     @Test

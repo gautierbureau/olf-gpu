@@ -37,6 +37,19 @@ public final class GpuBatchContextCache {
         chunkSizeForTests = size;
     }
 
+    /** Test hook: what a chunk pricing returns instead of the device's answer, or null. */
+    private static volatile java.util.function.IntSupplier chunkPricingForTests;
+
+    /** TESTS ONLY: price every chunk with {@code pricing} instead of the device's free memory, until reset with null. */
+    public static void priceChunksForTests(java.util.function.IntSupplier pricing) {
+        chunkPricingForTests = pricing;
+    }
+
+    /** TESTS ONLY: whether a batched context is allocated. */
+    public static synchronized boolean holdsAContextForTests() {
+        return cachedContext != null;
+    }
+
     /** Fallback chunk size used when auto-sizing is unavailable (no GPU / memory-query failure). */
     public static final int DEFAULT_MAX_BATCH = 256;
     static final int AUTO_MAX_CHUNK = 4096;
@@ -95,6 +108,11 @@ public final class GpuBatchContextCache {
             this.mode = mode;
             this.structure = structure;
         }
+
+        /** Whether this context was built on that extraction and the structure it resolves to. */
+        boolean builtOn(GpuAcData other, long otherStructure) {
+            return data.sameAs(other) && structure == otherStructure;
+        }
     }
 
     /** Test hook: a mode every context of this JVM is built in instead of {@link GpuLinearSolveMode#UBATCH}, or null. */
@@ -117,17 +135,12 @@ public final class GpuBatchContextCache {
         // rebuilt context would need anyway); a cached context built on another one solves other values
         long structure = GpuAcStructures.handle(n, data);
         if (cachedContext != null && cachedContext.chunkSize == chunkSize && cachedContext.mode == mode
-                && cachedContext.data.sameAs(data) && cachedContext.structure == structure) {
+                && cachedContext.builtOn(data, structure)) {
             LOGGER.debug("Batched N-1: reusing cached GPU context (chunk {}, mode {})", chunkSize, mode);
             return cachedContext.handle;
         }
         if (cachedContext != null) {                         // evict a stale context (different network/chunk/mode)
-            if (GpuTrace.PHASE_TIME.isOn()) {
-                System.err.printf("CONTEXT_EVICT cached chunk=%d -> requested chunk=%d (a cuDSS ANALYSIS is "
-                        + "paid again)%n", cachedContext.chunkSize, chunkSize);
-            }
-            BatchSolveNative.destroyBatchContext(cachedContext.handle);
-            cachedContext = null;
+            evictCachedContext("requested chunk=" + chunkSize);
         }
         // the shared structure comes from the per-extraction cache — when the base load flow ran
         // on the GPU with the same extraction (GpuAcDataCache hand-off), this is a device-side hit
@@ -142,6 +155,16 @@ public final class GpuBatchContextCache {
         cachedContext = new CachedBatchContext(handle, data, chunkSize, mode, structure);
         BUILDS.incrementAndGet();
         return handle;
+    }
+
+    /** Destroy the cached batched native context (the caller holds the class lock and checked it is there). */
+    private static void evictCachedContext(String why) {
+        if (GpuTrace.PHASE_TIME.isOn()) {
+            System.err.printf("CONTEXT_EVICT cached chunk=%d -> %s (a cuDSS ANALYSIS is paid again)%n",
+                    cachedContext.chunkSize, why);
+        }
+        BatchSolveNative.destroyBatchContext(cachedContext.handle);
+        cachedContext = null;
     }
 
     /** Free the cached batched native context, if any. Safe to call repeatedly. */
@@ -174,7 +197,17 @@ public final class GpuBatchContextCache {
         }
         // sized on the shared structure (its exact nnz + a cuDSS LU probe cached there, so
         // only the first query per extraction pays the probe analysis)
-        recommendedChunk = StructureNative.recommendBatchSize(GpuAcStructures.handle(n, gpuData), AUTO_MAX_CHUNK);
+        long structure = GpuAcStructures.handle(n, gpuData);
+        // The price is the FREE device memory. A context built on another extraction still holds its LU factors, and
+        // acquireBatchContext destroys it for this one anyway: free it first. Priced while it was alive, the second
+        // security analysis of a JVM on rte6515's 1000 branch contingencies took 3 chunks of 334 where the first took
+        // 2 of 500: one more factorization per Newton iteration, each of more matrices than the 320 that cuDSS's
+        // batched factorization runs at once on a 20-SM card.
+        if (cachedContext != null && !cachedContext.builtOn(gpuData, structure)) {
+            evictCachedContext("built on another extraction, freed before this one's chunk is priced");
+        }
+        java.util.function.IntSupplier pricing = chunkPricingForTests;
+        recommendedChunk = pricing != null ? pricing.getAsInt() : StructureNative.recommendBatchSize(structure, AUTO_MAX_CHUNK);
         recommendedFor = gpuData;
         return recommendedChunk;
     }

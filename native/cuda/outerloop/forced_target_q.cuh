@@ -14,7 +14,7 @@ namespace olfgpu {
 __global__ void forcedTargetQInitBatch(int nForcedTargetQ, int nS, int n, int nDistributedSlackBuses, int extrapolate, const int* forcedTargetQIndices,
                                        const double* forcedTargetQParameters, const double* forcedTargetQPoints, const double* forcedTargetQPreDistribution,
                                        SlotEntries lost, const char* distributedSlackIslanded, const int* mode,
-                                       double* target, double* applied);
+                                       double* target, double* applied, const char* installed);
 
 __global__ void forcedTargetQBatch(int nForcedTargetQ, int nS, int n, int nDistributedSlackBuses, int nDistributedSlackGenerators, int extrapolate, const int* forcedTargetQIndices,
                                    const double* forcedTargetQParameters, const double* forcedTargetQPoints, const double* forcedTargetQPreDistribution,

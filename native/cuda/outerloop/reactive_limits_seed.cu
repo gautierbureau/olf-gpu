@@ -32,11 +32,12 @@ __global__ void initReactiveLimitQLimitTypeBatch(int nReactiveLimitEntries, int 
                                      const char* reactiveLimitVoltageControlRole, const int* reactiveLimitComparedVoltageRow,
                                      const double* target, const double* reactiveLimitBaseMinQ, const double* reactiveLimitBaseMaxQ,
                                      const double* reactiveLimitBaseLoadQ, const char* reactiveLimitBaseQLimitType,
-                                     const int* pilotSelfReactiveLimitEntry, int nReactiveRelocationGroups, const char* reactiveLimitGeneratorsLost) {
+                                     const int* pilotSelfReactiveLimitEntry, int nReactiveRelocationGroups, const char* reactiveLimitGeneratorsLost, const char* installed) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nReactiveLimitEntries * nScenarios) return;
     int i = tid % nReactiveLimitEntries;
     int s = tid / nReactiveLimitEntries;
+    if (installed != nullptr && !installed[s]) return;   // a slot this install does not seed
     // A bus that LOST every generator this scenario (GenOutage, setBatchReactiveLimitGeneratorsLost) is no controller: OLF has no
     // voltage control there at all. Seeded FROZEN, the entry is skipped by the reactive-limit check, reads as
     // "not enabled" to the pilot-self layout and, for a pilot that was one of its own controllers, opens the
@@ -108,11 +109,12 @@ __global__ void seedReactiveLimitRowModeFromState(int nReactiveLimitEntries, int
                                     const char* reactiveLimitBaseQLimitType, const int* pilotSelfReactiveLimitEntry, int nReactiveRelocationGroups,
                                     const double* reactiveLimitTargetV, SlotEntries reactiveLimitTargetVOverrides,
                                     const double* secondaryVoltageControlReactiveLimitTargetV, const char* reactiveLimitLocalOverride, const double* reactiveLimitLocalTargetV,
-                                    const double* reactiveLimitSeedTargetQ, const char* reactiveLimitIslanded) {
+                                    const double* reactiveLimitSeedTargetQ, const char* reactiveLimitIslanded, const char* installed) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nReactiveLimitEntries * nScenarios) return;
     int i = tid % nReactiveLimitEntries;
     int s = tid / nReactiveLimitEntries;
+    if (installed != nullptr && !installed[s]) return;   // a slot this install does not seed
     // A controller this scenario islanded: its bus is out of the system and its rows are FROZEN identities. Stamping
     // the continued PV -> PQ switch turned its V row into a reactive balance at the frozen target, an island equation OLF does not
     // have, which the first solve then iterated on (rte6515 LINE-3477-2893: 0.0075 MW on every strategy that moves P).

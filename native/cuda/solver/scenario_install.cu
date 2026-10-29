@@ -27,19 +27,6 @@ __global__ void copyRowToSlots(int n, int nSlots, const int* slots, const T* src
     d[static_cast<size_t>(slots[j]) * n + i] = src[i];
 }
 
-// Host rows, `width` values per installed slot in the install's order, into the bank's device array.
-template <typename T>
-void writeInstalledRows(const BatchSolverContext* ctx, T* device, const T* rows, size_t width) {
-    if (ctx->installSlots.empty()) {
-        CUDA_CHECK(cudaMemcpy(device, rows, static_cast<size_t>(ctx->nScenarios) * width * sizeof(T), cudaMemcpyHostToDevice));
-        return;
-    }
-    for (int j = 0; j < installedSlotCount(ctx); j++) {
-        CUDA_CHECK(cudaMemcpy(device + static_cast<size_t>(installedSlot(ctx, j)) * width, rows + static_cast<size_t>(j) * width,
-                              width * sizeof(T), cudaMemcpyHostToDevice));
-    }
-}
-
 }  // namespace
 
 void installScenarios(BatchSolverContext* ctx, const ScenarioInputs& in) {
@@ -51,6 +38,8 @@ void installScenarios(BatchSolverContext* ctx, const ScenarioInputs& in) {
         slots[j] = installedSlot(ctx, j);
     }
     ctx->dInstallSlots.upload(slots.data(), slots.size() * sizeof(int));
+    std::vector<char> flags = installedFlags(ctx);
+    ctx->dInstallMask.upload(flags.data(), flags.size());
     const int* dSlots = ctx->dInstallSlots.as<int>();
     ctx->dXBase.upload(in.x0, static_cast<size_t>(n) * sizeof(double));
     ctx->dBaseMode.upload(in.baseRowMode, static_cast<size_t>(n) * sizeof(int));

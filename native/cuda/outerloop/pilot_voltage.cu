@@ -17,6 +17,7 @@
 #include "../common/codes/gpu_row_mode.cuh"
 #include "../equations/scenario_overrides.cuh"
 #include "../solver/driver_steps.cuh"
+#include "../solver/scenario_install.cuh"
 #include "../fixedmatrix/reactive_relocation.cuh"
 #include "../fixedmatrix/cross_identity.cuh"
 #include "pilot_voltage.cuh"
@@ -62,11 +63,12 @@ __global__ void pilotSelfGateBatch(int nReactiveRelocationGroups, int nScenarios
 // a warm-continuation PV -> PQ switch cannot overwrite the value first.
 __global__ void capturePilotQBatch(int nReactiveRelocationGroups, int nScenarios, int n, const int* reactiveRelocationGroupStart, const int* reactiveRelocationCandidateRows,
                                    const int* baseMode, const double* targetBase, double* pilotQ,
-                                   const int* reactiveRelocationBaseTargetRow) {
+                                   const int* reactiveRelocationBaseTargetRow, const char* installed) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nReactiveRelocationGroups * nScenarios) return;
     int g = tid % nReactiveRelocationGroups;
     int s = tid / nReactiveRelocationGroups;
+    if (installed != nullptr && !installed[s]) return;   // a slot this install does not seed
     // a DEPENDENT pilot's target sits on its own base reactive row, not on a carrier
     int row = reactiveRelocationBaseTargetRow != nullptr && reactiveRelocationBaseTargetRow[g] >= 0 ? reactiveRelocationBaseTargetRow[g]
             : reactiveRelocationCandidateRows[reactiveRelocationGroupStart[g] + chooseCarrierRow(g, reactiveRelocationGroupStart, reactiveRelocationCandidateRows, baseMode)];
@@ -82,10 +84,11 @@ __global__ void capturePilotQBatch(int nReactiveRelocationGroups, int nScenarios
 __global__ void applyPilotQDeltasBatch(int nScenarios, SlotEntries deltas, int nReactiveRelocationGroups, int n,
                                        const int* reactiveRelocationGroupStart, const int* reactiveRelocationCandidateRows, const int* mode,
                                        const char* distrQSubgroup, int nDistrQMembers, const int* reactiveRelocationDistrQMemberStart,
-                                       double* pilotQ, double* target) {
+                                       double* pilotQ, double* target, const char* installed) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nScenarios * deltas.capacity) return;
     int s = tid / deltas.capacity;
+    if (installed != nullptr && !installed[s]) return;   // a slot this install does not seed
     int k = tid % deltas.capacity;
     if (k >= deltas.countOf(s)) return;
     int g = deltas.intOf(s, k);
@@ -435,11 +438,11 @@ void launchReMergedVoltageTargetRowUpdate(BatchSolverContext* ctx, DriverPass& d
     const int& n = drv.n;
     const int& nS = drv.nS;
     SlotEntries reMergedVoltageTargets = ctx->reMergedVoltageTargets.view();
-    if (solveStart) {
-        size_t scenarioEntries = static_cast<size_t>(ctx->nScenarios) * ctx->nReactiveLimitEntries;
-        ctx->reMergedVoltageTargets.resetState({}, ctx->stream);
-        CUDA_CHECK(cudaMemsetAsync(ctx->dReactiveLimitHoldsReMergedVoltageTarget.p, 0, scenarioEntries, ctx->stream));
-        CUDA_CHECK(cudaMemsetAsync(ctx->dReactiveLimitReMergedVoltageRow.p, 0xFF, scenarioEntries * sizeof(int), ctx->stream));
+    if (solveStart) {                                        // the installed slots' re-merges start afresh
+        const size_t entries = static_cast<size_t>(ctx->nReactiveLimitEntries);
+        ctx->reMergedVoltageTargets.resetState(ctx->installSlots, ctx->stream);
+        memsetInstalledRows(ctx, ctx->dReactiveLimitHoldsReMergedVoltageTarget.p, entries, 0);
+        memsetInstalledRows(ctx, ctx->dReactiveLimitReMergedVoltageRow.p, entries * sizeof(int), 0xFF);
     }
     updateReMergedVoltageTargetRowBatch<<<grid(nS * reMergedVoltageTargets.capacity), BLOCK, 0, ctx->stream>>>(nS, n,
             ctx->nReactiveLimitEntries, reMergedVoltageTargets, ctx->reMergedVoltageTargetControllers.view(),

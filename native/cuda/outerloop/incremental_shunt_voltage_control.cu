@@ -19,6 +19,7 @@
 #include "sensitivity.cuh"
 #include "incremental_shunt_voltage_control.cuh"
 #include "../common/trace.cuh"
+#include "../solver/scenario_install.cuh"
 
 namespace olfgpu {
 
@@ -144,28 +145,34 @@ __global__ void incrementalShuntVoltageControlApplyBatch(int nIncrementalShuntVo
     appliedDeltaB[tid] = db;
 }
 
+// Per (installed scenario, controller): the base b, the SHUNT_B identity row's target as the install left it.
+__global__ void incrementalShuntVoltageControlBaseBBatch(int nIncrementalShuntVoltageControlControllerShunts, int nScenarios, int n, const int* bRow,
+                              const double* target, double* baseB, const char* installed) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= nIncrementalShuntVoltageControlControllerShunts * nScenarios) return;
+    int c = tid % nIncrementalShuntVoltageControlControllerShunts;
+    int s = tid / nIncrementalShuntVoltageControlControllerShunts;
+    if (installed != nullptr && !installed[s]) return;   // a slot this install does not seed
+    baseB[tid] = target[(size_t) s * n + bRow[c]];
+}
+
 // Per-solve reset. Incremental shunt VC: base sections, fresh ratchets, the identity row's target as the base b.
 void incrementalShuntVoltageControlResetSolve(BatchSolverContext* ctx, DriverPass& drv) {
     const int& n = drv.n;
     const int& nS = drv.nS;
-    size_t nsu = static_cast<size_t>(nS) * ctx->nIncrementalShuntVoltageControlShuntCompensators;
-    std::vector<int> pos(nsu);
-    for (int s2 = 0; s2 < nS; s2++) {
-        for (int u = 0; u < ctx->nIncrementalShuntVoltageControlShuntCompensators; u++) pos[static_cast<size_t>(s2) * ctx->nIncrementalShuntVoltageControlShuntCompensators + u] = ctx->hIncrementalShuntVoltageControlShuntCompensatorBasePosition[u];
-    }
-    CUDA_CHECK(cudaMemcpy(ctx->dIncrementalShuntVoltageControlPosition.p, pos.data(), nsu * sizeof(int), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemset(ctx->dIncrementalShuntVoltageControlCurrentDirection.p, 0, nsu * sizeof(int)));
-    CUDA_CHECK(cudaMemset(ctx->dIncrementalShuntVoltageControlDirectionChangeCount.p, 0, nsu * sizeof(int)));
-    CUDA_CHECK(cudaMemset(ctx->dIncrementalShuntVoltageControlAllowedDirection.p, 0, nsu * sizeof(int)));
-    size_t nsc = static_cast<size_t>(nS) * ctx->nIncrementalShuntVoltageControlControllerShunts;
-    CUDA_CHECK(cudaMemset(ctx->dIncrementalShuntVoltageControlAppliedDeltaB.p, 0, nsc * sizeof(double)));
-    std::vector<double> tgt(static_cast<size_t>(n) * nS), bb(nsc);
+    const size_t nu = static_cast<size_t>(ctx->nIncrementalShuntVoltageControlShuntCompensators);
+    resetInstalledRows(ctx, ctx->dIncrementalShuntVoltageControlPosition.as<int>(), nu,
+                       ctx->hIncrementalShuntVoltageControlShuntCompensatorBasePosition.data());
+    resetInstalledRows(ctx, ctx->dIncrementalShuntVoltageControlCurrentDirection.as<int>(), nu, nullptr, 0);
+    resetInstalledRows(ctx, ctx->dIncrementalShuntVoltageControlDirectionChangeCount.as<int>(), nu, nullptr, 0);
+    resetInstalledRows(ctx, ctx->dIncrementalShuntVoltageControlAllowedDirection.as<int>(), nu, nullptr, 0);
+    const size_t nc = static_cast<size_t>(ctx->nIncrementalShuntVoltageControlControllerShunts);
+    resetInstalledRows(ctx, ctx->dIncrementalShuntVoltageControlAppliedDeltaB.as<double>(), nc, nullptr, 0.0);
+    const int nc32 = static_cast<int>(nc);
     CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
-    CUDA_CHECK(cudaMemcpy(tgt.data(), ctx->dTarget.p, tgt.size() * sizeof(double), cudaMemcpyDeviceToHost));
-    for (int s2 = 0; s2 < nS; s2++) {
-        for (int c = 0; c < ctx->nIncrementalShuntVoltageControlControllerShunts; c++) bb[static_cast<size_t>(s2) * ctx->nIncrementalShuntVoltageControlControllerShunts + c] = tgt[static_cast<size_t>(s2) * n + ctx->hIncrementalShuntVoltageControlShuntBRow[c]];
-    }
-    CUDA_CHECK(cudaMemcpy(ctx->dIncrementalShuntVoltageControlBaseB.p, bb.data(), nsc * sizeof(double), cudaMemcpyHostToDevice));
+    incrementalShuntVoltageControlBaseBBatch<<<grid(nc32 * nS), BLOCK, 0, ctx->stream>>>(nc32, nS, n, ctx->dIncrementalShuntVoltageControlShuntBRow.as<int>(),
+            ctx->dTarget.as<double>(), ctx->dIncrementalShuntVoltageControlBaseB.as<double>(), installMaskOrNull(ctx));
+    CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
 }
 
 void incrementalShuntVoltageControlStep(BatchSolverContext* ctx, DriverPass& drv) {

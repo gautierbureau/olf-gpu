@@ -24,6 +24,7 @@
 #include "incremental_flow_control.cuh"
 #include "../common/trace.cuh"
 #include "../solver/scenario_override_tables.cuh"
+#include "../solver/scenario_install.cuh"
 
 namespace olfgpu {
 
@@ -159,16 +160,14 @@ __global__ void incrementalFlowControlApplyBatch(int nIncrementalFlowControlCont
 }
 
 // Per-solve reset. Incremental flow control: base taps, fresh ratchets.
-void incrementalFlowControlResetSolve(BatchSolverContext* ctx, DriverPass& drv) {
-    const int& nS = drv.nS;
-    size_t nst = static_cast<size_t>(nS) * ctx->nIncrementalFlowControlControllerBranches;
-    std::vector<int> cur(nst);
-    for (int s2 = 0; s2 < nS; s2++) for (int c = 0; c < ctx->nIncrementalFlowControlControllerBranches; c++) cur[static_cast<size_t>(s2) * ctx->nIncrementalFlowControlControllerBranches + c] = ctx->hIncrementalFlowControlBaseTap[c];
-    CUDA_CHECK(cudaMemcpy(ctx->dIncrementalFlowControlCurrentTap.p, cur.data(), nst * sizeof(int), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(ctx->dIncrementalFlowControlAppliedTap.p, cur.data(), nst * sizeof(int), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemset(ctx->dIncrementalFlowControlCurrentDirection.p, 0, nst * sizeof(int)));
-    CUDA_CHECK(cudaMemset(ctx->dIncrementalFlowControlDirectionChangeCount.p, 0, nst * sizeof(int)));
-    CUDA_CHECK(cudaMemset(ctx->dIncrementalFlowControlAllowedDirection.p, 0, nst * sizeof(int)));
+void incrementalFlowControlResetSolve(BatchSolverContext* ctx, DriverPass&) {
+    const size_t nc = static_cast<size_t>(ctx->nIncrementalFlowControlControllerBranches);
+    const int* baseTap = ctx->hIncrementalFlowControlBaseTap.data();
+    resetInstalledRows(ctx, ctx->dIncrementalFlowControlCurrentTap.as<int>(), nc, baseTap);
+    resetInstalledRows(ctx, ctx->dIncrementalFlowControlAppliedTap.as<int>(), nc, baseTap);
+    resetInstalledRows(ctx, ctx->dIncrementalFlowControlCurrentDirection.as<int>(), nc, nullptr, 0);
+    resetInstalledRows(ctx, ctx->dIncrementalFlowControlDirectionChangeCount.as<int>(), nc, nullptr, 0);
+    resetInstalledRows(ctx, ctx->dIncrementalFlowControlAllowedDirection.as<int>(), nc, nullptr, 0);
 }
 
 void incrementalFlowControlStep(BatchSolverContext* ctx, DriverPass& drv, int kindMask) {

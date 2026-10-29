@@ -22,6 +22,7 @@
 #include "forced_target_q.cuh"
 #include "slack_participants.cuh"
 #include "distributed_slack.cuh"
+#include "../solver/scenario_install.cuh"
 
 using namespace powsybl::openloadflow;
 
@@ -695,30 +696,24 @@ void distributedSlackCheck(BatchSolverContext* ctx, DriverPass& drv) {
 void distributedSlackResetSolve(BatchSolverContext* ctx, DriverPass& drv) {
     const int& n = drv.n;
     const int& nS = drv.nS;
-    CUDA_CHECK(cudaMemsetAsync(ctx->dSlackRetainedShare.p, 0, nS * sizeof(double), ctx->stream));
-    {
-        std::vector<double> nanv(nS, std::numeric_limits<double>::quiet_NaN());
-        CUDA_CHECK(cudaMemcpyAsync(ctx->dSlackRetainedShareApplied.p, nanv.data(), nS * sizeof(double), cudaMemcpyHostToDevice, ctx->stream));
-        CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
-    }
+    resetInstalledRows(ctx, ctx->dSlackRetainedShare.as<double>(), 1, nullptr, 0.0);
+    resetInstalledRows(ctx, ctx->dSlackRetainedShareApplied.as<double>(), 1, nullptr, std::numeric_limits<double>::quiet_NaN());
     if (ctx->nForcedTargetQ > 0) {                              // forced target Q: the clamp at each scenario's start P
         forcedTargetQInitBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(ctx->nForcedTargetQ, nS, n, ctx->nDistributedSlackBuses, ctx->forcedTargetQExtrapolate,
                 ctx->dForcedTargetQIndices.as<int>(), ctx->dForcedTargetQParameters.as<double>(), ctx->dForcedTargetQPoints.as<double>(),
                 ctx->forcedTargetQPreDistribution.deviceOrNull(),
                 ctx->distributedSlackLostGenerators.view(),
                 ctx->distributedSlackIslanded.deviceOrNull(), ctx->dMode.as<int>(),
-                ctx->dTarget.as<double>(), ctx->dForcedTargetQApplied.as<double>());
+                ctx->dTarget.as<double>(), ctx->dForcedTargetQApplied.as<double>(), installMaskOrNull(ctx));
     }
 }
 
 // Per-solve reset of the slack-only distribution: nothing absorbed yet, or a strategy pair's parent total.
-void slackOnlyDistributionResetSolve(BatchSolverContext* ctx, DriverPass& drv) {
-    const int& nS = drv.nS;
-    if (ctx->slackBusAnchorShift.on()) {                    // strategy pairs: seed with the parent contingency's
-        CUDA_CHECK(cudaMemcpyAsync(ctx->dSlackOnlyAbsorbed.p, ctx->slackBusAnchorShift.device(),   // absorbed total (the
-                nS * sizeof(double), cudaMemcpyDeviceToDevice, ctx->stream));                       // device analogue of the CPU re-anchor)
-    } else {
-        CUDA_CHECK(cudaMemsetAsync(ctx->dSlackOnlyAbsorbed.p, 0, nS * sizeof(double), ctx->stream));
+void slackOnlyDistributionResetSolve(BatchSolverContext* ctx, DriverPass&) {
+    if (ctx->slackBusAnchorShift.on()) {                    // strategy pairs: seed with the parent contingency's absorbed
+        copyInstalledRows(ctx, ctx->dSlackOnlyAbsorbed.as<double>(), ctx->slackBusAnchorShift.device(), 1);   // total (the
+    } else {                                                                                                     // device analogue
+        resetInstalledRows(ctx, ctx->dSlackOnlyAbsorbed.as<double>(), 1, nullptr, 0.0);                        // of the CPU re-anchor)
     }
 }
 

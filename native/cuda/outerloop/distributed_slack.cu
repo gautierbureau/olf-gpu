@@ -223,6 +223,7 @@ __global__ void distributeSlackBatch(int nDistributedSlackBuses, int nScenarios,
                                               const int* distributedSlackBusGeneratorStart, const int* distributedSlackBusGeneratorEnd,
                                               double* distributedSlackGeneratorMove, char* distributedSlackGeneratorMoveValid, const double* distributedSlackGeneratorAnchor, const double* distributedSlackGeneratorInitialMove, char* distributedSlackGeneratorRemoved, double* distributedSlackGeneratorWorkingFactor,
                                               int nDistributedSlackLostGenerators, const int* distributedSlackLostGenerators, int nDistributedSlackRemovedGenerators, const int* distributedSlackRemovedGenerators,
+                                              double* previousGeneratorMove, double* previousBusTarget,
                                               double* target, char* switched, char* slackDistributionFailure, double* retainApplied, double* gateLast) {
     int s = blockIdx.x * blockDim.x + threadIdx.x;
     if (s >= nScenarios) return;
@@ -344,6 +345,8 @@ __global__ void distributeSlackBatch(int nDistributedSlackBuses, int nScenarios,
     if (fabs(rem) <= fsGlobal * gateTol) {
         return;
     }
+    // What the last distribution left the slack, before this one replaces it (NaN before any: nothing).
+    const double previousRetain = retainApplied != nullptr && !isnan(retainApplied[s]) ? retainApplied[s] : 0.0;
     if (retainApplied != nullptr) {
         retainApplied[s] = slackRetainedShare[s];                      // the slack's share of THIS distribution (applied to the network)
     }
@@ -364,6 +367,7 @@ __global__ void distributeSlackBatch(int nDistributedSlackBuses, int nScenarios,
         if (overriddenBus == i) { base -= distributedSlackOverrideBaseTargetPDelta[s]; }
         size_t idx = (size_t) s * n + distributedSlackBusRowOf(distributedSlackBusPhiRow, distributedSlackBusRowOverride, s, nDistributedSlackBuses, i);
         absorbedNow += target[idx] - base;
+        previousBusTarget[(size_t) s * nDistributedSlackBuses + i] = target[idx];
         target[idx] = base;                                 // reset to the anchor
     }
     rem = fsGlobal * ((qBuf[(size_t) s * n + slackPhiRow] - slackTgt) + absorbedNow);
@@ -375,7 +379,6 @@ __global__ void distributeSlackBatch(int nDistributedSlackBuses, int nScenarios,
         // read off a firing pass was therefore the wrong quantity.
         gateLast[8 * s + 7] = rem;                           // what this pass places over the participants
     }
-    bool changed = false;
     // PER-GENERATOR water-fill, the shape of OLF's GenerationActivePowerDistributionStep.run: factors
     // renormalized over the elements still in the list at each iteration start, one pass using the
     // mismatch as of that start, each element clamped at its OWN limit and REMOVED when it strictly
@@ -412,6 +415,7 @@ __global__ void distributeSlackBatch(int nDistributedSlackBuses, int nScenarios,
         // keeps their distributedSlackGeneratorMove at zero and sends the curve channel back to the share model.
         bool overriddenBusPerGenerator = overriddenBus >= 0;
         for (int g = 0; g < nDistributedSlackGenerators; g++) {                     // fresh list, fresh cumulative deltas
+            previousGeneratorMove[(size_t) s * nDistributedSlackGenerators + g] = distributedSlackGeneratorMove[(size_t) s * nDistributedSlackGenerators + g];
             distributedSlackGeneratorMove[(size_t) s * nDistributedSlackGenerators + g] = 0.0;
             bool lost = false;
             for (int k = 0; k < nDistributedSlackLostGenerators; k++) {
@@ -493,7 +497,6 @@ __global__ void distributeSlackBatch(int nDistributedSlackBuses, int nScenarios,
                 if (newCum != cum) {
                     distributedSlackGeneratorMove[(size_t) s * nDistributedSlackGenerators + g] = newCum;
                     done += newCum - cum;
-                    changed = true;
                 }
             }
             if (overriddenBusActive) {
@@ -503,7 +506,6 @@ __global__ void distributeSlackBatch(int nDistributedSlackBuses, int nScenarios,
                 if (newCum != cum) {
                     target[idx] = overriddenBusBaseTargetP + newCum;
                     done += newCum - cum;
-                    changed = true;
                 }
             }
             // The bus rows: anchor + Σ over the bus's generators, whose slice is contiguous.
@@ -573,13 +575,36 @@ __global__ void distributeSlackBatch(int nDistributedSlackBuses, int nScenarios,
             if (newCum != cum) {
                 target[idx] = base + newCum;
                 done += newCum - cum;
-                changed = true;
             }
         }
         rem -= done;
     }
     }
-    if (changed) {
+    // OLF's verdict (ActivePowerDistribution.PreviousStateInfo.moved): UNSTABLE when the targets moved, in total, by more
+    // than 0.9 P_RESIDUE_EPS from where the last distribution left them, not when the water-fill wrote anything from the
+    // anchor. A saturated distribution re-derives the same targets at every check: OLF is STABLE and, under
+    // LEAVE_ON_SLACK_BUS, leaves the rest at the slack, where the device re-solved the same state until the outer-loop
+    // budget routed it to the CPU. One with nothing left to place after the reset puts the targets back to the anchor:
+    // OLF is UNSTABLE, where the device found nothing written and stopped on targets it had not solved.
+    double moved = 0.0;
+    if (perGen) {
+        for (int g = 0; g < nDistributedSlackGenerators; g++) {          // the slack's own generators among them
+            size_t k = (size_t) s * nDistributedSlackGenerators + g;
+            moved += fabs(distributedSlackGeneratorMove[k] - previousGeneratorMove[k]);
+        }
+    } else {
+        for (int i = 0; i < nDistributedSlackBuses; i++) {
+            if (distributedSlackIslanded != nullptr && distributedSlackIslanded[(size_t) s * nDistributedSlackBuses + i]) {
+                continue;                                    // not reset, not written
+            }
+            size_t idx = (size_t) s * n + distributedSlackBusRowOf(distributedSlackBusPhiRow, distributedSlackBusRowOverride, s, nDistributedSlackBuses, i);
+            moved += fabs(target[idx] - previousBusTarget[(size_t) s * nDistributedSlackBuses + i]);
+        }
+    }
+    if (retainApplied != nullptr && !slackInPack) {
+        moved += fabs(retainApplied[s] - previousRetain);   // the slack's generators' share
+    }
+    if (moved > 0.9 * residueEps) {
         switched[s] = 1;
     }
     // OLF decides the distribution FAILED on ActivePowerDistribution.P_RESIDUE_EPS (1e-5 pu, 1 kW),
@@ -641,6 +666,8 @@ void distributedSlackCheck(BatchSolverContext* ctx, DriverPass& drv) {
                 ctx->hasDistributedSlackGeneratorInitialMove ? ctx->dDistributedSlackGeneratorInitialMove.as<double>() : nullptr, ctx->dSlackRetainedShareApplied.as<double>());
         if (!ctx->dSlackDistributionFailure.p) ctx->dSlackDistributionFailure.alloc(nS * sizeof(char));
         CUDA_CHECK(cudaMemsetAsync(ctx->dSlackDistributionFailure.p, 0, nS * sizeof(char), ctx->stream));
+        ctx->dDistributedSlackPreviousGeneratorMove.ensure(static_cast<size_t>(nS) * std::max(ctx->nDistributedSlackGenerators, 1) * sizeof(double));
+        ctx->dDistributedSlackPreviousBusTarget.ensure(static_cast<size_t>(nS) * std::max(ctx->nDistributedSlackBuses, 1) * sizeof(double));
         distributeSlackBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(ctx->nDistributedSlackBuses, nS, n, SLACK_DIST_TOL, P_RESIDUE_EPS,
                 ctx->slackBusPhiRow, ctx->hasSlackBusRowOverride ? ctx->dSlackBusRowOverride.as<int>() : nullptr, ctx->slackBusTargetP, ctx->dDistributedSlackBusPhiRow.as<int>(),
                 ctx->nDistributedSlackBusRowOverrides > 0 ? ctx->dDistributedSlackBusRowOverride.as<int>() : nullptr,
@@ -663,6 +690,7 @@ void distributedSlackCheck(BatchSolverContext* ctx, DriverPass& drv) {
                 ctx->dDistributedSlackGeneratorRemoved.as<char>(), ctx->dDistributedSlackGeneratorWorkingFactor.as<double>(),
                 ctx->nDistributedSlackLostGenerators, ctx->nDistributedSlackLostGenerators > 0 ? ctx->dDistributedSlackLostGenerators.as<int>() : nullptr,
                 ctx->nDistributedSlackRemovedGenerators, ctx->nDistributedSlackRemovedGenerators > 0 ? ctx->dDistributedSlackRemovedGenerators.as<int>() : nullptr,
+                ctx->dDistributedSlackPreviousGeneratorMove.as<double>(), ctx->dDistributedSlackPreviousBusTarget.as<double>(),
                 ctx->dTarget.as<double>(), ctx->dOuterLoopUnstable.as<char>(), ctx->dSlackDistributionFailure.as<char>(),
                 ctx->dSlackRetainedShareApplied.as<double>(),
                 ctx->dDistributedSlackLastPassAccounting.p ? ctx->dDistributedSlackLastPassAccounting.as<double>() : nullptr);

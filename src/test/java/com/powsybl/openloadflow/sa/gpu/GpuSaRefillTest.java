@@ -26,43 +26,41 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
-import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /**
- * GPU-batched security analysis against the CPU with the scenarios installed into chosen slots of a bank wider than the
- * chunk: each chunk goes into slots earlier chunks used, at other local positions, the slots it does not take keep what
- * their last scenarios left, and only its own scenarios solve. Every scenario must still match the CPU, its strategy
- * pairs too, and the device must solve the scenarios it solves in a bank of the chunk's size: a seed, a reset or a
- * readback that took a scenario's local slot for its bank slot would hand it another scenario's state, and a scenario
- * the device then gave up on would be replayed on the CPU, which the comparison alone would not see.
+ * GPU-batched security analysis against the CPU with the bank refilled from the queue while its other scenarios still
+ * solve: a bank narrower than the contingencies, each slot handed back for the next scenario as soon as its own ends.
+ * Every scenario must still match the CPU, its strategy pairs too, and the device must solve the scenarios it solves
+ * when the bank holds them all: a scenario that found its slot's previous occupant's state, or whose install disturbed
+ * a scenario still solving, would differ from the CPU or be given up on by the device - and a scenario the device gives
+ * up on is replayed on the CPU, which the comparison alone would not see.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
-class GpuSaSlotInstallTest extends AbstractGpuSaTest {
+class GpuSaRefillTest extends AbstractGpuSaTest {
 
-    GpuSaSlotInstallTest(CommonTestConfig commonTestConfig) {
+    GpuSaRefillTest(CommonTestConfig commonTestConfig) {
         super(commonTestConfig);
     }
 
-    /** Chunks of 2 scattered over a bank of 5: generator and branch outages interleaved, so a slot holds a generator loss
-     *  (distributed slack overrides, a loss pre-distribution) in one chunk and a branch outage in the next. */
+    /** A bank of 2: generator and branch outages interleaved, so a slot holds a generator loss (distributed slack
+     *  overrides, a loss pre-distribution) and then a branch outage, installed while the other slot's scenario solves. */
     @Test
-    void chunksScatteredOverAWiderBankMatchCpu() {
-        assertScenariosMatchCpu(2, 3, 3);
+    void eachSlotRefilledAsSoonAsItsScenarioEndsMatchesCpu() {
+        assertRefilledScenariosMatchCpu(2);
     }
 
-    /** Chunks of 1 in a bank of 3: every scenario from the fourth on goes alone into a slot an earlier one used, and
-     *  solves while the two other slots keep what their scenarios left. */
+    /** A bank of 3: each new scenario goes into a slot an earlier one used while two others solve. */
     @Test
-    void eachScenarioAloneInAUsedSlotMatchesCpu() {
-        assertScenariosMatchCpu(1, 2, 6);
+    void scenariosInstalledWhileOthersSolveMatchCpu() {
+        assertRefilledScenariosMatchCpu(3);
     }
 
-    private void assertScenariosMatchCpu(int chunkSize, int extraSlots, int minChunks) {
+    private void assertRefilledScenariosMatchCpu(int bankSize) {
         assumeTrue(GpuAcNewtonSolver.isAvailable(), "GPU lib required");
         Network network = IeeeCdfNetworkFactory.create14();
         List<Contingency> contingencies = List.of(
@@ -82,39 +80,22 @@ class GpuSaSlotInstallTest extends AbstractGpuSaTest {
                         .withRelativeValue(false).withActivePowerValue(load12.getP0() * 3 / 4).build());
         List<OperatorStrategy> strategies = new ArrayList<>(strategiesOf("L2-3-1", "shed12-half"));
         strategies.addAll(strategiesOf("B3-G", "shed12-quarter"));
-        AtomicInteger chunks = new AtomicInteger();
-        GpuBatchContextCache.forceChunkSizeForTests(chunkSize);
-        GpuBatchedSecurityAnalysisSolver.InstallLayout scattered = new GpuBatchedSecurityAnalysisSolver.InstallLayout() {
-            @Override
-            public int bankSize(int size) {
-                return size + extraSlots;
-            }
-
-            // Chunk c's scenario j in bank slot (2c + 2j) mod bankSize: the bank is odd, so a chunk's slots are distinct,
-            // and a slot comes back to a later chunk at another local position.
-            @Override
-            public int[] bankSlots(int chunk, int size, int bankSize) {
-                chunks.incrementAndGet();
-                int[] slots = new int[size];
-                for (int j = 0; j < size; j++) {
-                    slots[j] = (2 * chunk + 2 * j) % bankSize;
-                }
-                return slots;
-            }
-        };
+        int refills;
         try {
-            // the same chunks in a bank of their own size: the scenarios the device solves
+            // a bank that holds every scenario: nothing to refill, the scenarios the device solves
             assertStrategyMatchesCpu(network, contingencies, strategies, actions, -1, true);
             Set<String> onDevice = new HashSet<>(GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_IDS);
             assertTrue(onDevice.size() >= 5, "the device must solve most scenarios: " + onDevice.size());
-            GpuBatchedSecurityAnalysisSolver.installChunksForTests(scattered);
+            GpuBatchContextCache.forceChunkSizeForTests(bankSize);
+            GpuBatchedSecurityAnalysisSolver.refillAtForTests(1);
             assertStrategyMatchesCpu(network, contingencies, strategies, actions, -1, true);
             assertEquals(onDevice, new HashSet<>(GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_IDS),
-                    "the device must solve the same scenarios in the wider bank");
+                    "the device must solve the same scenarios in the refilled bank");
+            refills = GpuBatchedSecurityAnalysisSolver.refillsForTests();
         } finally {
-            GpuBatchedSecurityAnalysisSolver.installChunksForTests(null);
+            GpuBatchedSecurityAnalysisSolver.refillAtForTests(null);
             GpuBatchContextCache.forceChunkSizeForTests(null);
         }
-        assertTrue(chunks.get() >= minChunks, "the scenarios must span several chunks laid out in the bank: " + chunks.get());
+        assertTrue(refills >= 2, "scenarios must be installed while others still solve: " + refills);
     }
 }

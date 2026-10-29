@@ -73,8 +73,14 @@ final class GpuBatchChunkSolver {
     /** Test hook: where each batched contingency's outer-loop statistics go, by contingency id, or null. */
     static volatile java.util.Map<String, int[]> outerLoopStatsForTests;
 
-    /** Test hook: where each chunk's scenarios go in a bank wider than the chunk, or null (the bank is the chunk). */
-    static volatile GpuBatchedSecurityAnalysisSolver.InstallLayout installLayoutForTests;
+    /** Test hook: how many scenarios must have ended before the solve hands their slots back for a refill, or null. */
+    static volatile Integer refillAtForTests;
+
+    /** Test hook: the installs into a bank whose other slots still held scenarios solving. */
+    static final java.util.concurrent.atomic.AtomicInteger REFILLS_FOR_TESTS = new java.util.concurrent.atomic.AtomicInteger();
+
+    /** A refill waits for this share of the bank (1 / REFILL_SHARE) to be free, or for the rest of the queue to fit. */
+    private static final int REFILL_SHARE = 8;
 
     private static final Logger LOGGER = LoggerFactory.getLogger(GpuBatchChunkSolver.class);
 
@@ -82,13 +88,11 @@ final class GpuBatchChunkSolver {
     }
 
     /**
-     * Solve the qualified scenarios on the GPU in chunks sized by {@link GpuBatchContextCache#resolveChunkSize}
-     * (auto from device memory, or a manual cap). ONE native context, sized to the chunk, is created and reused across all
-     * chunks: cuDSS's symbolic ANALYSIS (on the shared pattern, identical for every chunk) is
-     * done once on the first chunk and reused, so chunking costs nothing in amortization — it
-     * only bounds the resident per-scenario LU factors. The last (partial) chunk is padded
-     * with base-case scenarios (no element disabled): they converge at iteration 0 and their
-     * results are discarded.
+     * Solve the qualified scenarios on the GPU in a bank of slots sized by {@link GpuBatchContextCache#resolveChunkSize}
+     * (auto from device memory, or a manual cap) and balanced over the run, refilled from each phase's queue as its
+     * scenarios end. ONE native context, sized to the bank, is created and reused for every install: cuDSS's symbolic
+     * ANALYSIS (on the shared pattern, identical for every scenario) is done once and reused, so the bank's size costs
+     * nothing in amortization - it only bounds the resident per-scenario LU factors.
      */
     static void solveQualifiedInChunks(ChunkInputs inputs) {
         GpuAcData gpuData = inputs.base().gpuData();
@@ -196,10 +200,10 @@ final class GpuBatchChunkSolver {
         // tail chunk holding 72 of 642 slots still solves a 642-wide batch — 570 of them padding.
         // Splitting 1998 scenarios as 4 x 500 rather than 3 x 642 + 72 measured 13.7 s vs 15.6 s of
         // batched time on rte6515, at LOWER device memory (the size only ever goes down from the cap).
-        int chunkSize = (nb + nChunks - 1) / nChunks;
-
-        GpuBatchedSecurityAnalysisSolver.InstallLayout installLayout = installLayoutForTests;
-        int bankSize = installLayout == null ? chunkSize : installLayout.bankSize(chunkSize);
+        // The bank has that many slots, refilled from each phase's queue as its scenarios end (below). Balanced still: at the
+        // cap (641 slots on rte6515) or narrower (320 on rte6515, 320, 240 or 160 on network.xiidm) it was no faster, a
+        // narrower bank paying more per lane in the batched factorization than the slots its tail leaves idle (2026-10-29).
+        int bankSize = (nb + nChunks - 1) / nChunks;
         // Reuse a cached analyzed context when the pattern/admittances/chunk/mode match (across
         // SA runs on the same network) — the context is NOT destroyed here, it stays cached.
         // MODE: the run's configured batch mode, or the ROBUST single-matrix solve on the retry pass
@@ -260,7 +264,7 @@ final class GpuBatchChunkSolver {
             return;
         }
 
-        RunScratch rs = new RunScratch(chunkSize, nElements, gpuData, elementMapper, baseRowMode, in.settings().distributedSlackOuterLoop());
+        RunScratch rs = new RunScratch(bankSize, nElements, gpuData, elementMapper, baseRowMode, in.settings().distributedSlackOuterLoop());
         // TWO-PHASE ordering (operator strategies, warm continuation): plain contingencies first,
         // then (ctg, strategy) PAIRS — each pair chunk is seeded with its PARENT contingency's
         // solved state (x0PerScenario) and PV/PQ states (reactiveLimitsSeedState), so the strategy
@@ -334,17 +338,34 @@ final class GpuBatchChunkSolver {
             // every one of them back except its still-out set, and scanning all zeroImpedanceBranchNumbers per scenario with a
             // boxed set was 1.4 s of host time on network.xiidm (2653 elements x every such scenario).
             int[] baseNonSpanningTreeBranches = ZeroImpedanceClusters.baseNonTreeElements(gpuData);
-            int chunkIndex = 0;
+            Integer refillAtTest = refillAtForTests;
+            int refillAt = refillAtTest != null ? refillAtTest : Math.max(1, bankSize / REFILL_SHARE);
             for (List<Integer> group : List.of(ctgIdxList, pairIdxList)) {
                 boolean pairPhase = group == pairIdxList;
                 int nbg = group.size();
-                for (int chunkStart = 0; chunkStart < nbg; chunkStart += chunkSize) {
-                    int realCount = Math.min(chunkSize, nbg - chunkStart);
-                    // the chunk's scenarios go into the whole bank, slot s for scenario s, unless a test lays them out:
-                    // before anything per scenario
-                    BatchSolveNative.beginBatchInstall(handle, installLayout == null ? null
-                            : installLayout.bankSlots(chunkIndex, chunkSize, bankSize));
-                    chunkIndex++;
+                // The phase's scenarios queue for the bank's slots: the first ones fill it, and as scenarios end the solve
+                // hands their slots back, refilled with the next ones while the others go on solving - one tail per phase
+                // instead of one per chunk. Each install is a chunk: the scenarios that go into the free slots.
+                SlotOccupant[] bank = new SlotOccupant[bankSize];
+                java.util.TreeSet<Integer> freeSlots = new java.util.TreeSet<>();
+                for (int b = 0; b < bankSize; b++) {
+                    freeSlots.add(b);
+                }
+                int lastInstall = 0;
+                for (int chunkStart = 0; chunkStart < nbg; chunkStart += lastInstall) {
+                    int chunkSize = Math.min(freeSlots.size(), nbg - chunkStart);
+                    int realCount = chunkSize;
+                    lastInstall = chunkSize;
+                    if (freeSlots.size() < bankSize) {
+                        REFILLS_FOR_TESTS.incrementAndGet();
+                    }
+                    int[] installSlots = new int[chunkSize];
+                    for (int j = 0; j < chunkSize; j++) {
+                        installSlots[j] = freeSlots.pollFirst();
+                    }
+                    // before anything per scenario: the bank slots the chunk's scenarios go into (the whole bank, in order, at a
+                    // phase's start)
+                    BatchSolveNative.beginBatchInstall(handle, chunkSize == bankSize ? null : installSlots);
                     rs.overrides.clear();
                     // fixTransformerVoltageControls is a POST-CONTINGENCY check on the CPU, so its
                     // connectivity masks are per scenario and belong to the chunk, not to the run.
@@ -985,7 +1006,9 @@ final class GpuBatchChunkSolver {
                             System.err.println("LOOP_TRACE_CTG ctg=" + traceCtg + " slot=" + traceSlot);
                         }
                     }
-                    NewtonSettingsNative.setBatchLoopTraceSlot(handle, traceSlot);
+                    if (traceSlot >= 0 || chunkStart == 0) {
+                        NewtonSettingsNative.setBatchLoopTraceSlot(handle, traceSlot);
+                    }
                     // OLF_GPU_CHUNK_DUMP=<file>: every chunk's members in slot order, appended one line per chunk
                     // ("<pairPhase> <chunkStart> <chunkSize> <id> <id> ..."). A scenario whose answer moves with
                     // its chunk mates can only be reproduced in the chunk it was solved in.
@@ -1052,9 +1075,14 @@ final class GpuBatchChunkSolver {
                                 pairPhase && (distributedSlackBusAnchorShift != null || pairSlackAbsorbedSeed != null),
                                 pairPhase && distributedSlackGeneratorAnchor != null,
                                 rejectAfterSolve != null && rejectAfterSolve[s]);
+                        bank[installSlots[s]] = occupants[s];
                     }
+                    // more scenarios queue: the solve returns once refillAt of them can go in, the others still solving
+                    int queued = nbg - chunkStart - chunkSize;
+                    int pauseAtEnded = queued > 0 ? Math.min(queued, refillAt) : 0;
                     double[][] chunkResults = BatchSolveNative.solveBatchContext(handle, baseState, baseTargets,
-                            rs.rowModePerScenario, baseRowMode, rs.disabledMask, targetOverrideIndex, targetOverrideValue,
+                            java.util.Arrays.copyOf(rs.rowModePerScenario, chunkSize), baseRowMode,
+                            java.util.Arrays.copyOf(rs.disabledMask, chunkSize), targetOverrideIndex, targetOverrideValue,
                             rs.distributedSlackOverrideBus, rs.distributedSlackOverrideFactorDelta,
                             rs.distributedSlackOverrideBaseTargetPDelta, rs.distributedSlackOverrideMaxDelta,
                             rs.distributedSlackOverrideMinDelta, distributedSlackBusAnchorShift, slackBusAnchorShift,
@@ -1079,16 +1107,25 @@ final class GpuBatchChunkSolver {
                             0,
                             rs.nBaseClosedZeroImpedanceBranches, rs.zeroImpedanceBranchCloseScenarioElementList.stream().mapToInt(Integer::intValue).toArray(),
                             rs.zeroImpedanceBranchOpenScenarioElementList.stream().mapToInt(Integer::intValue).toArray(),
-                            0);
+                            pauseAtEnded);
+                    // the scenarios the solve handed back, in the order of its rows: their occupants, whose slots go back to the bank
+                    int[] handedBack = BatchSolveNative.readBatchHandedBackSlots(handle);
+                    SlotOccupant[] harvested = new SlotOccupant[handedBack.length];
+                    for (int j = 0; j < handedBack.length; j++) {
+                        harvested[j] = bank[handedBack[j]];
+                        bank[handedBack[j]] = null;
+                        freeSlots.add(handedBack[j]);
+                    }
+                    int harvestedCount = handedBack.length;
                     // each scenario's PV/PQ states as its solve ended: what its pairs continue from, and the traces
                     int[] reactiveLimitsFinalState = readReactiveLimitsFinalState ? ReactiveLimitsNative.readBatchReactiveLimitsFinalState(handle) : null;
                     if (GpuTrace.REJECT_TRACE.isOn()) {
                         // slot -> contingency for every scenario the device rejected in this chunk: the native
                         // GPU_REJECT lines name slots, and a slot only means something with the chunk's composition.
-                        for (int s = 0; s < realCount; s++) {
+                        for (int s = 0; s < harvestedCount; s++) {
                             int status = chunkResults[s].length > n + 2 ? (int) chunkResults[s][n + 2] : 0;
                             if (status <= GpuAcSolverStatus.REJECTED) {
-                                System.err.println("CHUNK_REJECT slot=" + s + " ctg=" + contingencies.get(occupants[s].index()).contingencyId()
+                                System.err.println("CHUNK_REJECT slot=" + s + " ctg=" + contingencies.get(harvested[s].index()).contingencyId()
                                         + " status=" + status);
                             }
                         }
@@ -1101,8 +1138,8 @@ final class GpuBatchChunkSolver {
                         int[] outerLoopStats = BatchReadbackNative.readBatchOuterLoopStats(handle);
                         int newtonLoopIterations = BatchReadbackNative.readBatchNewtonLoopIterations(handle);
                         if (outerLoopStats != null) {
-                            for (int s2 = 0; s2 < realCount; s2++) {
-                                String id = contingencies.get(occupants[s2].index()).contingencyId();
+                            for (int s2 = 0; s2 < harvestedCount; s2++) {
+                                String id = contingencies.get(harvested[s2].index()).contingencyId();
                                 int[] stats = java.util.Arrays.copyOf(java.util.Arrays.copyOfRange(outerLoopStats, s2 * 4, s2 * 4 + 4), 5);
                                 stats[4] = newtonLoopIterations;
                                 if (outerLoopStatsSink != null) {
@@ -1126,13 +1163,13 @@ final class GpuBatchChunkSolver {
                         // the status each scenario ENDED with (0 linear, 1/2 saturated, 3 frozen), as the driver phases left it
                         int[] devStatus = HvdcNative.readBatchHvdcStatus(handle);
                         int nh = hvdcControllers.size();
-                        for (int s2 = 0; devStatus != null && s2 < realCount; s2++) {
+                        for (int s2 = 0; devStatus != null && s2 < harvestedCount; s2++) {
                             StringBuilder sb = new StringBuilder();
                             for (int h = 0; h < nh; h++) {
                                 sb.append(' ').append(devStatus[s2 * nh + h]);
                             }
                             System.err.println("HVDC_END s=" + s2 + " ctg="
-                                    + contingencies.get(occupants[s2].index()).contingencyId() + " status:" + sb);
+                                    + contingencies.get(harvested[s2].index()).contingencyId() + " status:" + sb);
                         }
                     }
                     // OLF_GPU_ITER_TRACE_CTG=<id>[,<id>]: the iteration count of NAMED scenarios, at any
@@ -1141,8 +1178,8 @@ final class GpuBatchChunkSolver {
                     // against OLF's own (OLF_LF_STEPS_TRACE) when the answers differ.
                     String iterCtg = GpuTrace.ITER_TRACE_CTG.value();
                     if (iterCtg != null && !pairPhase) {
-                        for (int s = 0; s < realCount; s++) {
-                            String id = contingencies.get(occupants[s].index()).contingencyId();
+                        for (int s = 0; s < harvestedCount; s++) {
+                            String id = contingencies.get(harvested[s].index()).contingencyId();
                             boolean named = false;
                             for (String w : iterCtg.split(",")) {
                                 named = named || w.trim().equals(id);
@@ -1160,14 +1197,14 @@ final class GpuBatchChunkSolver {
                         // residual and stay inside the slack band; if ours redistributes again, the
                         // two land at different points inside that band.
                         double[] ft = BatchReadbackNative.readBatchTargets(handle);
-                        for (int s = 0; s < realCount; s++) {
-                            if (occupants[s].preLoss() == 0) {
+                        for (int s = 0; s < harvestedCount; s++) {
+                            if (harvested[s].preLoss() == 0) {
                                 continue;
                             }
-                            int ci = occupants[s].index();
+                            int ci = harvested[s].index();
                             double moved = 0;
                             for (int i = 0; i < nDistributedSlackBuses; i++) {
-                                int row = occupants[s].distributedSlackBusRow(i, gpuData.distributedSlack().busPhiRow());
+                                int row = harvested[s].distributedSlackBusRow(i, gpuData.distributedSlack().busPhiRow());
                                 // A participant this contingency ISLANDED has its row frozen to a flat
                                 // identity, so (final - base) there is minus its whole anchor and not a
                                 // distribution at all: counting it read the middle-section fixture's
@@ -1183,13 +1220,13 @@ final class GpuBatchChunkSolver {
                             // device DS loop resets to, so the delta is what that loop added on top.
                             System.err.printf("PRELOSS_AFTER ctg=%s preLossMismatch=%.6f seededOnParticipants=%.6f "
                                     + "deviceFinal=%.6f deltaFromDeviceDsLoop=%.6f pu%n",
-                                    contingencies.get(occupants[s].index()).contingencyId(),
-                                    occupants[s].preLoss(), occupants[s].preAbsorbed(), moved, moved - occupants[s].preAbsorbed());
+                                    contingencies.get(harvested[s].index()).contingencyId(),
+                                    harvested[s].preLoss(), harvested[s].preAbsorbed(), moved, moved - harvested[s].preAbsorbed());
                         }
                     }
                     if (GpuBatchPhaseStats.ENABLED) {
                         int itMax = 0;
-                        for (int s = 0; s < realCount; s++) {
+                        for (int s = 0; s < harvestedCount; s++) {
                             itMax = Math.max(itMax, (int) chunkResults[s][n]);
                         }
                         GpuBatchPhaseStats.add("main.iterMax", itMax);
@@ -1199,7 +1236,7 @@ final class GpuBatchChunkSolver {
                         // reactiveLimitsFinalState packs a GpuReactiveLimitsState per (controller, scenario):
                         // switchCount > 0 means the DEVICE switched that controller during THIS solve, which
                         // is exactly the decision OLF's ReactiveLimitsOuterLoop makes (and logs) on the CPU.
-                        for (int s = 0; s < realCount; s++) {
+                        for (int s = 0; s < harvestedCount; s++) {
                             int switched = 0;
                             int switchedToPq = 0;
                             StringBuilder ids = new StringBuilder();
@@ -1223,7 +1260,7 @@ final class GpuBatchChunkSolver {
                                 }
                             }
                             System.err.printf("GPU_RL ctg=%s switchedThisSolve=%d switchedToPqTotal=%d%s%n",
-                                    contingencies.get(occupants[s].index()).contingencyId(), switched, switchedToPq, ids);
+                                    contingencies.get(harvested[s].index()).contingencyId(), switched, switchedToPq, ids);
                         }
                     }
                     long tOrch0 = System.nanoTime();
@@ -1231,21 +1268,21 @@ final class GpuBatchChunkSolver {
                         // ...and the frozen target Q its PQ buses ENDED with, which its pairs restore (OLF restores the parent's
                         // generation target Q; a limit that moved by less than the re-freeze tolerance kept the old one)
                         double[] finalTargetQ = ReactiveLimitsNative.readBatchReactiveLimitTargetQ(handle);
-                        for (int s = 0; s < realCount; s++) {
+                        for (int s = 0; s < harvestedCount; s++) {
                             if (finalTargetQ != null) {
-                                reactiveLimitTargetQByIndex.put(occupants[s].index(), java.util.Arrays.copyOfRange(finalTargetQ, s * nReactiveLimitEntries, (s + 1) * nReactiveLimitEntries));
+                                reactiveLimitTargetQByIndex.put(harvested[s].index(), java.util.Arrays.copyOfRange(finalTargetQ, s * nReactiveLimitEntries, (s + 1) * nReactiveLimitEntries));
                             }
                             int[] slice = new int[nReactiveLimitEntries];
                             System.arraycopy(reactiveLimitsFinalState, s * nReactiveLimitEntries, slice, 0, nReactiveLimitEntries);
-                            reactiveLimitsStateByIndex.put(occupants[s].index(), slice);
+                            reactiveLimitsStateByIndex.put(harvested[s].index(), slice);
                         }
                     }
                     if (!pairPhase && slackOnlyDistribution && !pairIdxList.isEmpty()) {
                         // capture each ctg's slack-only-DS absorbed total for its pairs' seeding
                         double[] absorbed = BatchReadbackNative.readBatchSlackAbsorbed(handle);
                         if (absorbed != null) {
-                            for (int s = 0; s < realCount; s++) {
-                                slackAbsorbedByIndex.put(occupants[s].index(), absorbed[s]);
+                            for (int s = 0; s < harvestedCount; s++) {
+                                slackAbsorbedByIndex.put(harvested[s].index(), absorbed[s]);
                             }
                         }
                     }
@@ -1254,9 +1291,9 @@ final class GpuBatchChunkSolver {
                         // OLF still runs its strategies, from what the failed run left - the voltages of its last
                         // converged solve (NewtonRaphson updates the network only then), and the targets and bus
                         // types its outer loops had moved, which the captures below read as they read a converged one.
-                        for (int s = 0; s < realCount; s++) {
+                        for (int s = 0; s < harvestedCount; s++) {
                             if ((int) chunkResults[s][n + 2] == GpuAcSolverStatus.MAX_ITERATION_REACHED) {
-                                exhaustedStartByIndex.put(occupants[s].index(),
+                                exhaustedStartByIndex.put(harvested[s].index(),
                                         BatchReadbackNative.readBatchLastConvergedState(handle, s));
                             }
                         }
@@ -1267,10 +1304,10 @@ final class GpuBatchChunkSolver {
                         // the device analogue of OLF's setGeneratorsInitialTargetPToTargetP before a
                         // strategy re-solve.
                         double[] finalTargets = BatchReadbackNative.readBatchTargets(handle);
-                        for (int s = 0; s < realCount; s++) {
+                        for (int s = 0; s < harvestedCount; s++) {
                             double[] slice = new double[nDistributedSlackBuses + 1];
                             double fs = 0;
-                            int[] islandedDistributedSlackMask = islandedDistributedSlackByIndex != null ? islandedDistributedSlackByIndex[occupants[s].index()] : null;
+                            int[] islandedDistributedSlackMask = islandedDistributedSlackByIndex != null ? islandedDistributedSlackByIndex[harvested[s].index()] : null;
                             for (int i = 0; i < nDistributedSlackBuses; i++) {
                                 if (islandedDistributedSlackMask != null && ChunkArrays.contains(islandedDistributedSlackMask, i)) {
                                     // A participant this contingency islanded absorbed nothing. Its row is a FROZEN
@@ -1283,17 +1320,17 @@ final class GpuBatchChunkSolver {
                                 // brought a relocated balance home to the bus's own phi row, and the coupler's dummy
                                 // row left behind holds a fixed stub (rte6515 BUS-1359_BBS_2: read there, -0.1926 pu
                                 // of "absorption" that the pairs' first distribution took back, 19.27 MW)
-                                int row = occupants[s].distributedSlackBusRow(i, gpuData.distributedSlack().busPhiRow());
+                                int row = harvested[s].distributedSlackBusRow(i, gpuData.distributedSlack().busPhiRow());
                                 double effBase = baseTargets[gpuData.distributedSlack().busPhiRow()[i]]
-                                        - (occupants[s].distributedSlackOverrideBus() == i ? occupants[s].distributedSlackOverrideBaseTargetPDelta() : 0.0);
+                                        - (harvested[s].distributedSlackOverrideBus() == i ? harvested[s].distributedSlackOverrideBaseTargetPDelta() : 0.0);
                                 slice[i] = finalTargets[s * n + row] - effBase;
                                 // the factors the parent's distribution renormalized over: an islanded participant
                                 // is out of them, a lost generator's share leaves its bus
                                 fs += gpuData.distributedSlack().busFactor()[i]
-                                        - (occupants[s].distributedSlackOverrideBus() == i ? occupants[s].distributedSlackOverrideFactorDelta() : 0.0);
+                                        - (harvested[s].distributedSlackOverrideBus() == i ? harvested[s].distributedSlackOverrideFactorDelta() : 0.0);
                             }
                             slice[nDistributedSlackBuses] = fs;
-                            distributedSlackTargetsByIndex.put(occupants[s].index(), slice);
+                            distributedSlackTargetsByIndex.put(harvested[s].index(), slice);
                         }
                         if (nDistributedSlackGenerators > 0) {
                             // ...and each GENERATOR's final move, which is what OLF's setGeneratorsInitialTargetPToTargetP
@@ -1302,14 +1339,14 @@ final class GpuBatchChunkSolver {
                             // targets, so distributedSlackGeneratorMove holds it all when one fired; otherwise the pre-distribution alone moved.
                             double[] distributedSlackGeneratorMove = BatchReadbackNative.readBatchDistributedSlackGeneratorMove(handle);
                             double[] retain = BatchReadbackNative.readBatchSlackRetainedShare(handle);
-                            for (int s = 0; s < realCount; s++) {
+                            for (int s = 0; s < harvestedCount; s++) {
                                 double[] moves = new double[nDistributedSlackGenerators];
                                 if (distributedSlackGeneratorMove != null && retain != null && !Double.isNaN(retain[s])) {
                                     System.arraycopy(distributedSlackGeneratorMove, s * nDistributedSlackGenerators, moves, 0, nDistributedSlackGenerators);
-                                } else if (occupants[s].genPreMoves() != null) {
-                                    System.arraycopy(occupants[s].genPreMoves(), 0, moves, 0, nDistributedSlackGenerators);
+                                } else if (harvested[s].genPreMoves() != null) {
+                                    System.arraycopy(harvested[s].genPreMoves(), 0, moves, 0, nDistributedSlackGenerators);
                                 }
-                                genMovesByIndex.put(occupants[s].index(), moves);
+                                genMovesByIndex.put(harvested[s].index(), moves);
                             }
                         }
                     }
@@ -1324,7 +1361,7 @@ final class GpuBatchChunkSolver {
                         // outer-loop sequence (DS, HVDC freeze, monitoring, THEN ReactiveLimits), so
                         // comparing the main solve's count against the CPU's compares two different
                         // points in the trajectory.
-                        for (int s = 0; s < realCount; s++) {
+                        for (int s = 0; s < harvestedCount; s++) {
                             int switchedToPq = 0;
                             for (int i = 0; i < nReactiveLimitEntries; i++) {
                                 if (GpuReactiveLimitsState.limitType(reactiveLimitsFinalState[s * nReactiveLimitEntries + i]) != GpuQLimitType.NONE) {
@@ -1339,72 +1376,72 @@ final class GpuBatchChunkSolver {
                                 }
                             }
                             System.err.printf("GPU_RL_FINAL ctg=%s switchedToPqTotal=%d%s%n",
-                                    contingencies.get(occupants[s].index()).contingencyId(), switchedToPq, ids);
+                                    contingencies.get(harvested[s].index()).contingencyId(), switchedToPq, ids);
                         }
                     }
-                    boolean[] switchesUnread = new boolean[realCount];
+                    boolean[] switchesUnread = new boolean[harvestedCount];
                     if (in.phases().automationSystem() != null) {
                         // the branches each scenario's AutomationSystem phase left switched: in the mask the solve ended with,
                         // which a second solve of this chunk would have re-uploaded from the host's (none runs: then reject)
                         byte[] operatedDisabled = BatchReadbackNative.readBatchSolveCount(handle) - solveCountBefore == 1
                                 ? AutomationSystemNative.readBatchAutomationSystemOperatedDisabled(handle) : null;
-                        for (int s = 0; s < realCount; s++) {
+                        for (int s = 0; s < harvestedCount; s++) {
                             if (operatedDisabled == null) {
                                 switchesUnread[s] = true;
                                 GpuBatchScopeCensus.record("RUNTIME:AUTOMATION_SYSTEM_SWITCHES_UNREAD");
                             } else {
                                 int[] switched = GpuAutomationSystemOuterLoop.switchedBranchNums(in.phases().automationSystem(), operatedDisabled, s);
-                                automationSystemSwitchedByIndex[occupants[s].index()] = switched.length > 0 ? switched : null;
+                                automationSystemSwitchedByIndex[harvested[s].index()] = switched.length > 0 ? switched : null;
                             }
                         }
                     }
                     if (in.phases().areaInterchangeControlWithAreas() && BatchReadbackNative.readBatchSolveCount(handle) - solveCountBefore == 1) {
                         // what the area phase's checks distributed (its scenarios lose no active power: nothing pre-distributed)
                         double[] distributed = AreaInterchangeControlNative.readBatchAreaInterchangeControlDistributedActivePower(handle);
-                        for (int s = 0; s < realCount && distributed != null; s++) {
-                            distributedByIndex[occupants[s].index()] = distributed[s];
+                        for (int s = 0; s < harvestedCount && distributed != null; s++) {
+                            distributedByIndex[harvested[s].index()] = distributed[s];
                         }
                     } else if ((rs.hasDistributedSlack || slackOnlyDistribution)
                             && BatchReadbackNative.readBatchSolveCount(handle) - solveCountBefore == 1) {
-                        recordDistributedActivePower(handle, gpuData, occupants, realCount, n, slackOnlyDistribution,
+                        recordDistributedActivePower(handle, gpuData, harvested, harvestedCount, n, slackOnlyDistribution,
                                 preDistributedByIndex, distributedByIndex);
                     }
-                    for (int s = 0; s < realCount; s++) {
+                    for (int s = 0; s < harvestedCount; s++) {
                         double[] row = chunkResults[s];
-                        if (occupants[s].rejectAfterSolve() || switchesUnread[s]) {
+                        if (harvested[s].rejectAfterSolve() || switchesUnread[s]) {
                             row[n + 2] = GpuAcSolverStatus.REJECTED;   // the census names the reason where it is decided
                         } else if (pairPhase && (int) row[n + 2] != GpuAcSolverStatus.CONVERGED) {
                             // a pair the device solved and did not converge: a device failure wherever OLF converges it
                             GpuBatchScopeCensus.pairDeviceFailed(
-                                    contingencies.get(occupants[s].index()).contingencyId());
+                                    contingencies.get(harvested[s].index()).contingencyId());
                         }
                         if (config.stateSink() != null && (int) row[n + 2] == GpuAcSolverStatus.CONVERGED) {
                             // the state leaves the heap now, as its chunk completes; the result keeps the tail
                             // (iterations, norm, status) - see sunkTail / fullRow
-                            config.stateSink().put(contingencies.get(occupants[s].index()).contingencyId(),
+                            config.stateSink().put(contingencies.get(harvested[s].index()).contingencyId(),
                                     java.util.Arrays.copyOf(row, n));
                             row = new double[] {row[n], row[n + 1], row[n + 2]};
                         }
-                        resultsByIndex[occupants[s].index()] = row;
+                        resultsByIndex[harvested[s].index()] = row;
                         // OLF_GPU_CPU_ROUTED=1: name every scenario the device hands back to the CPU, with
                         // the status that decided it (-2 rejected, -1 diverged, 1 max-iter). The aggregate
                         // "precomputed on device: N / M" says how many, never which.
                         if (GpuTrace.CPU_ROUTED.isOn() && chunkResults[s] != null
                                 && (int) chunkResults[s][n + 2] != GpuAcSolverStatus.CONVERGED) {
                             System.err.printf("GPU_CPU_ROUTED ctg=%s status=%d%n",
-                                    contingencies.get(occupants[s].index()).contingencyId(),
+                                    contingencies.get(harvested[s].index()).contingencyId(),
                                     (int) chunkResults[s][n + 2]);
                         }
                     }
                 }
             }
             long elapsed = System.currentTimeMillis() - startTime;
-            LOGGER.info("Batched N-1: {} GPU scenarios in {} chunk(s) of <= {} solved in {} ms ({} ms/scenario)",
-                    nb, nChunks, chunkSize, elapsed, (double) elapsed / nb);
+            LOGGER.info("Batched N-1: {} GPU scenarios in a bank of {} slots solved in {} ms ({} ms/scenario)",
+                    nb, bankSize, elapsed, (double) elapsed / nb);
             if (GpuTrace.PHASE_TIME.isOn()) {
                 System.err.printf("BATCH_PHASE_TIME total=%d ms | batched main solves=%d ms | "
-                        + "outer-loop orchestrators=%d ms | %d scenarios in %d chunk(s) of <= %d%n",
-                        elapsed, tMainSolveNs / 1_000_000, tOrchestratorNs / 1_000_000, nb, nChunks, chunkSize);
+                        + "outer-loop orchestrators=%d ms | %d scenarios in a bank of %d slots%n",
+                        elapsed, tMainSolveNs / 1_000_000, tOrchestratorNs / 1_000_000, nb, bankSize);
                 orchNs.forEach((k, v) -> System.err.printf("BATCH_PHASE_TIME    %-38s %6d ms%n", k, v / 1_000_000));
                 GpuBatchPhaseStats.snapshot().forEach((k, v) ->
                         System.err.printf("BATCH_PHASE_TIME    %-38s %6d x%n", k, v));

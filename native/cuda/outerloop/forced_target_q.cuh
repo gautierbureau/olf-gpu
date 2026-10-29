@@ -22,8 +22,9 @@ __global__ void forcedTargetQBatch(int nForcedTargetQ, int nS, int n, int nDistr
                                    const double* distributedSlackGeneratorInitialMove, const int* distributedSlackBusPhiRow, const int* distributedSlackBusRowOverride, int nLost, const int* lost, const char* distributedSlackIslanded,
                                    const int* mode, const char* outerLoopCheckActive, double* target, double* applied);
 
-// Clamp the reactive limits of the forced-target-Q generators at their current active power.
-void launchForcedTargetQLimits(BatchSolverContext* ctx, int nS, int n);
+// Clamp the reactive limits of the forced-target-Q generators at their current active power, on the scenarios of
+// active (nullptr: every scenario).
+void launchForcedTargetQLimits(BatchSolverContext* ctx, int nS, int n, const char* active = nullptr);
 
 }  // namespace olfgpu
 

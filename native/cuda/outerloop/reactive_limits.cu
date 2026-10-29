@@ -543,8 +543,8 @@ void reactiveLimitsCheck(BatchSolverContext* ctx, DriverPass& drv, int loopKind)
                     ctx->nDistributedSlackBusRowOverrides > 0 ? ctx->dDistributedSlackBusRowOverride.as<int>() : nullptr, ctx->nDistributedSlackBuses,
                     ctx->nDistributedSlackGenerators > 0 ? ctx->distributedSlackGeneratorBus.as<int>() : nullptr,
                     ctx->dReactiveLimitMinQPerScenario.as<double>(), ctx->dReactiveLimitMaxQPerScenario.as<double>(),
-                    ctx->dReactiveLimitLoadQPerScenario.as<double>());
-            launchForcedTargetQLimits(ctx, nS, n);
+                    ctx->dReactiveLimitLoadQPerScenario.as<double>(), ctx->dOuterLoopCheckActive.as<char>());
+            launchForcedTargetQLimits(ctx, nS, n, ctx->dOuterLoopCheckActive.as<char>());
         }
         CUDA_CHECK(cudaMemsetAsync(ctx->dReactiveLimitCheckDecision.p, 0, static_cast<size_t>(ctx->nReactiveLimitEntries) * nS, ctx->stream));
         CUDA_CHECK(cudaMemsetAsync(ctx->dReactiveLimitRemainingPvBusCount.p, 0, static_cast<size_t>(nS) * sizeof(int), ctx->stream));

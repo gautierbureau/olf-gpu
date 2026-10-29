@@ -70,12 +70,12 @@ void checkOuterLoop(BatchSolverContext* ctx, DriverPass& drv, std::vector<char>&
     CUDA_CHECK(cudaMemcpy(ctx->dOuterLoopCheckActive.p, outerLoopCheckActive.data(), nS * sizeof(char), cudaMemcpyHostToDevice));
     // generator Q per controller = (Σ branch q + shunt q) at its BUS_V row + load Q: qBuf[row] is the raw bus balance
     // (no −target, no applyRowModeBatch) on the FROZEN routing - the relocation only concerns the Newton residual. The
-    // closed branches' part is dQbufClosed: every Newton fill zeroes it on its active scenarios and adds the closed
-    // branches' p and q from the very outputs it puts in F (fillClosedBranchBatch), so a scenario holds them at the
-    // state of its last fill - the state its convergence test passed on, and the state every check reads: a check that
-    // changes a scenario sends it to the next pass's solve, and a STABLE one moves it on to its next loop against the
-    // SAME state (a pass checks only the scenarios it solved), so no state moves between a scenario's last fill and its
-    // checks (a retired scenario's step is exactly 0). It used to be recomputed by a pass of its own at every check, the
+    // closed branches' part is dQbufClosed: every Newton fill, the convergence test's F-only one included, zeroes it on
+    // its active scenarios and adds the closed branches' p and q from the very outputs it puts in F
+    // (fillClosedBranchBatch, fillClosedBranchBatchF), so a scenario holds them at the state of its last fill - the state
+    // its convergence test passed on, in the iteration its checks run, and the state every check reads: a check that
+    // changes a scenario restarts its Newton, and a STABLE one moves it on to its next loop against the SAME state, so
+    // no state moves between a scenario's last fill and its checks (a retired scenario's step is exactly 0). It used to be recomputed by a pass of its own at every check, the
     // same expressions on the same state: 0.71 s of 3.2 s of kernels on rte6515 call 0, 74 of its 106 passes checking
     // an unchanged batch. The smaller families add theirs for the checked scenarios; disabled elements are skipped
     // (outage); they write no Jacobian (vals null): a retired scenario keeps its identity system.

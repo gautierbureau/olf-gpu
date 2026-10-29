@@ -5,16 +5,17 @@
 #include "stats.cuh"
 #include "codes/gpu_outer_loop_kind.cuh"
 
-long long gOuterPasses = 0;
+long long gNewtonLoops = 0;
+long long gRestarts = 0;
 
-double gOuterLoopFirstSolveMilliseconds = 0, gOuterLoopReSolveMilliseconds[GpuOuterLoopKind::COUNT] = {0}, gOuterLoopCheckMilliseconds[GpuOuterLoopKind::COUNT] = {0};
-long long gOuterLoopFirstSolveScenarios = 0, gOuterLoopReSolveScenarios[GpuOuterLoopKind::COUNT] = {0}, gOuterLoopReSolvePasses[GpuOuterLoopKind::COUNT] = {0};
-long long gOuterLoopFirstSolveLaneIterations = 0, gOuterLoopReSolveLaneIterations[GpuOuterLoopKind::COUNT] = {0}, gOuterLoopFirstSolveWidthIterations = 0, gOuterLoopReSolveWidthIterations[GpuOuterLoopKind::COUNT] = {0};
-long long gOuterLoopCheckPasses[GpuOuterLoopKind::COUNT] = {0}, gOuterLoopFirstSolvePasses = 0;
+double gNewtonLoopMilliseconds = 0, gOuterLoopCheckMilliseconds[GpuOuterLoopKind::COUNT] = {0};
+long long gNewtonLoopWidthIterations = 0;
+long long gOuterLoopFirstSolveScenarios = 0, gOuterLoopReSolveScenarios[GpuOuterLoopKind::COUNT] = {0};
+long long gOuterLoopFirstSolveLaneIterations = 0, gOuterLoopReSolveLaneIterations[GpuOuterLoopKind::COUNT] = {0};
+long long gOuterLoopCheckRounds[GpuOuterLoopKind::COUNT] = {0};
 
 long long gNewtonIters = 0;
-int gLastPassIters = 0;
-long long gSolvePasses = 0;
+int gNewtonLoopIteration = 0;
 long long gActiveIterSum = 0;
 long long gWidthIterSum = 0;
 long long gCompactIters = 0;

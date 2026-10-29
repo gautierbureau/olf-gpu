@@ -24,9 +24,8 @@ struct DriverPass {
     int stateVectorScalingMode = GpuStateVectorScalingMode::NONE;
     double convEpsPerEq = 0.0;
     bool outerLoopTiming = false;
-    int outerLoopPassSolvedScenarios = 0;
     int nActive = 0;
-    std::vector<char> wasActive;
+    int maxBatchedIterations = 0;                           // the Newton loop's safety cap (see solveBatchContext)
     std::vector<double> hF;
     int maxPqPvSwitch = 0;
     int reactiveLimitsDecisionLogScenario = -1;

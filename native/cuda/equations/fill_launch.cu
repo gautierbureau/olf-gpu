@@ -193,7 +193,7 @@ __global__ void zeroActiveInterleavedValues(int nnz, BatchLayout layout, const c
 // whole batch) and its state is frozen (dx = 0). A scenario retired THIS iteration still
 // holds its filled values, so the row is zeroed before the diagonal is set — this is
 // correct whether the scenario was just filled or has been inactive (zero) for a while. A scenario whose identity
-// this pass already wrote (identityLane, see markIdentityLanes) holds it still and is skipped.
+// an earlier iteration of this solve already wrote (identityLane, see markIdentityLanes) holds it still and is skipped.
 __global__ void writeIdentityForInactive(int n, int nScenarios, int nnz, const int* rowPtr,
                                          const int* diagPos, const char* active, const char* identityLane,
                                          double* vals, double* F, BatchLayout layout) {

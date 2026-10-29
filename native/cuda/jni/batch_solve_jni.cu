@@ -379,12 +379,12 @@ OLF_JNI(ac_solver_gpu, BatchSolveNative, solveBatchContext)(
         packNs += nowNs() - tPack0;
         calls++;
         fprintf(stderr, "JNI_PHASE_TIME calls=%lld marshal=%lld ms solve=%lld ms pack=%lld ms "
-                "| outerPasses=%lld (solving=%lld) newtonIters=%lld activeIterSum=%lld widthIterSum=%lld compactIters=%lld"
+                "| newtonLoops=%lld restarts=%lld newtonIters=%lld activeIterSum=%lld widthIterSum=%lld compactIters=%lld"
                 " | cuDSS analyses main=%lld compaction=%lld | iterativeRefinementChecks=%ld iterativeRefinementExtraSolves=%ld"
                 " | factorizations full=%lld compacted=%lld robust=%lld sensitivity=%lld sensitivitySolves=%lld refinement=%lld | checkRounds=%lld"
                 " | batchedLu factorizations=%lld pivotedLanes=%lld pivotDelayOrders=%lld\n",
                 calls, marshalNs / 1000000, solveNs / 1000000, packNs / 1000000,
-                gOuterPasses, gSolvePasses, gNewtonIters, gActiveIterSum, gWidthIterSum, gCompactIters,
+                gNewtonLoops, gRestarts, gNewtonIters, gActiveIterSum, gWidthIterSum, gCompactIters,
                 gAnalysesMain, gAnalysesCompact, gIterativeRefinementChecks, gIterativeRefinementExtraSolves,
                 gFullFactorizations, gCompactIters, gRobustFactorizations, gSensitivityFactorizations, gSensitivitySolves, gRefinementFactorizations, gCheckRounds,
                 gBatchedLuFactorizations, gBatchedLuPivotedLanes, gBatchedLuPivotDelayOrders);
@@ -403,17 +403,17 @@ OLF_JNI(ac_solver_gpu, BatchSolveNative, solveBatchContext)(
                     k == 15 ? "+" : "", gOuterLoopPassHistogramCount[k], gOuterLoopPassHistogramFirstSolveIterations[k], gOuterLoopPassHistogramTotalIterations[k]);
         }
         fprintf(stderr, "GPU_OL_HIST notConvergedOnDevice=%lld iters=%lld\n", gOuterLoopNotConverged, gOuterLoopNotConvergedIterations);
-        fprintf(stderr, "GPU_OL_TIME first-solve passes=%lld ms=%.1f scenarioSolves=%lld laneIters=%lld widthIters=%lld\n",
-                gOuterLoopFirstSolvePasses, gOuterLoopFirstSolveMilliseconds, gOuterLoopFirstSolveScenarios, gOuterLoopFirstSolveLaneIterations, gOuterLoopFirstSolveWidthIterations);
+        fprintf(stderr, "GPU_OL_TIME newton loops=%lld ms=%.1f widthIters=%lld\n", gNewtonLoops, gNewtonLoopMilliseconds, gNewtonLoopWidthIterations);
+        fprintf(stderr, "GPU_OL_TIME first-solve scenarioSolves=%lld laneIters=%lld\n", gOuterLoopFirstSolveScenarios, gOuterLoopFirstSolveLaneIterations);
         for (int k = 0; k < GpuOuterLoopKind::COUNT; k++) {
-            if (gOuterLoopReSolvePasses[k] > 0) {
-                fprintf(stderr, "GPU_OL_TIME re-solve trigger=%s passes=%lld ms=%.1f scenarioSolves=%lld laneIters=%lld widthIters=%lld\n",
-                        outerLoopKindName(k), gOuterLoopReSolvePasses[k], gOuterLoopReSolveMilliseconds[k], gOuterLoopReSolveScenarios[k], gOuterLoopReSolveLaneIterations[k], gOuterLoopReSolveWidthIterations[k]);
+            if (gOuterLoopReSolveScenarios[k] > 0) {
+                fprintf(stderr, "GPU_OL_TIME re-solve trigger=%s scenarioSolves=%lld laneIters=%lld\n",
+                        outerLoopKindName(k), gOuterLoopReSolveScenarios[k], gOuterLoopReSolveLaneIterations[k]);
             }
         }
         for (int k = 0; k < GpuOuterLoopKind::COUNT; k++) {
-            if (gOuterLoopCheckPasses[k] > 0) {
-                fprintf(stderr, "GPU_OL_TIME check loop=%s passes=%lld ms=%.1f\n", outerLoopKindName(k), gOuterLoopCheckPasses[k], gOuterLoopCheckMilliseconds[k]);
+            if (gOuterLoopCheckRounds[k] > 0) {
+                fprintf(stderr, "GPU_OL_TIME check loop=%s rounds=%lld ms=%.1f\n", outerLoopKindName(k), gOuterLoopCheckRounds[k], gOuterLoopCheckMilliseconds[k]);
             }
         }
         fprintf(stderr, "CUDSS_PHASE_TIME analysis=%lld x %.1f ms | factorization=%lld x %.1f ms | solve=%lld x %.1f ms"

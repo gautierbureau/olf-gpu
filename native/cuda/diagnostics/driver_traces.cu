@@ -84,8 +84,8 @@ void traceBatchPass(BatchSolverContext* ctx, DriverPass& drv, int nLoops, int nC
             CUDA_CHECK(cudaMemcpy(qLimitType.data(), ctx->dReactiveLimitQLimitType.p, qLimitType.size(), cudaMemcpyDeviceToHost));
             for (char c : qLimitType) nSwitchedToPq += c ? 1 : 0;
         }
-        std::fprintf(stderr, "BATCH_TRACE check: outer=%d loop=%d/%d kind=%s checked=%d changedScenarios=%d iters=%d switchedToPq=%d",
-                     outer, loopIdx, nLoops, kindName, nChecked, nUnstableScenarios, gLastPassIters, nSwitchedToPq);
+        std::fprintf(stderr, "BATCH_TRACE check: outer=%d loop=%d/%d kind=%s checked=%d changedScenarios=%d iteration=%d switchedToPq=%d",
+                     outer, loopIdx, nLoops, kindName, nChecked, nUnstableScenarios, gNewtonLoopIteration, nSwitchedToPq);
         std::fprintf(stderr, "\n");
     }
 }
@@ -386,7 +386,7 @@ void traceReactiveLimitsAudit(BatchSolverContext* ctx, DriverPass& drv, std::vec
                     ctx->nDistributedSlackBusRowOverrides > 0 ? ctx->dDistributedSlackBusRowOverride.as<int>() : nullptr, ctx->nDistributedSlackBuses,
                     ctx->nDistributedSlackGenerators > 0 ? ctx->distributedSlackGeneratorBus.as<int>() : nullptr,
                     ctx->dReactiveLimitMinQPerScenario.as<double>(), ctx->dReactiveLimitMaxQPerScenario.as<double>(),
-                    ctx->dReactiveLimitLoadQPerScenario.as<double>());
+                    ctx->dReactiveLimitLoadQPerScenario.as<double>(), nullptr);
             launchForcedTargetQLimits(ctx, nS, n);
         }
         CUDA_CHECK(cudaMemsetAsync(ctx->dReactiveLimitCheckDecision.p, 0, static_cast<size_t>(ctx->nReactiveLimitEntries) * nS, ctx->stream));

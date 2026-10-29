@@ -17,7 +17,6 @@
 #include "../common/stats.cuh"
 #include "../common/codes/gpu_ac_solver_status.cuh"
 #include "../common/codes/gpu_outer_loop_kind.cuh"
-#include "../common/codes/gpu_reactive_limits_state.cuh"
 #include "../common/codes/gpu_realistic_voltage_fixing_loop.cuh"
 #include "../common/codes/gpu_transformer_voltage_control_mode.cuh"
 #include "../diagnostics/driver_traces.cuh"
@@ -88,7 +87,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                               double reactiveLimitTol, double slackDistTol, double convEpsPerEq,
                               int stateVectorScalingMode, double maxDv, double maxDphi, const int* varType,
                               const double* x0Full, int nShuntAdmittanceOverrides, const int* shuntAdmittanceOverrideScenarioElement, const double* shuntAdmittanceOverrideDelta,
-                              const int* reactiveLimitsSeedState, int* reactiveLimitsFinalState,
+                              const int* reactiveLimitsSeedState,
                               int nClosedBranchParameterOverrides, const int* closedBranchParameterOverrideScenarioElement, const double* closedBranchParameterOverrideValues,
                               int maxOuterProductive, int maxPqPvSwitch, int rejectSlackDistributionFailure, int skipReactiveLimitsPhase,
                               int nBaseClosedZeroImpedanceBranches, int nZeroImpedanceBranchCloseOverrides, const int* zeroImpedanceBranchCloseScenarioElement,
@@ -419,14 +418,6 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     //      for every live scenario, refreshes the curve limits at the final targets, and prints one
     //      line per violating (scenario, entry).
     traceReactiveLimitsAudit(ctx, drv, drv.reactiveLimitsAuditLog);
-    if (reactiveLimitsFinalState != nullptr && ctx->nReactiveLimitEntries > 0) {             // export per-(controller, installed scenario) RL state
-        std::vector<char> qLimitType, sc;
-        CUDA_CHECK(readInstalledRows(ctx, ctx->dReactiveLimitQLimitType.p, static_cast<size_t>(ctx->nReactiveLimitEntries), qLimitType));
-        CUDA_CHECK(readInstalledRows(ctx, ctx->dReactiveLimitPvPqSwitchCount.p, static_cast<size_t>(ctx->nReactiveLimitEntries), sc));
-        for (size_t k = 0; k < qLimitType.size(); k++) {
-            reactiveLimitsFinalState[k] = reactiveLimitsState(qLimitType[k], sc[k]);
-        }
-    }
     tracePhaseTime(ctx, drv);
     ctx->newtonLoopIterations = static_cast<int>(gNewtonIters - newtonIterationsAtStart);
     CUDA_CHECK(cudaMemcpy(res.x.data(), ctx->dX.p, nTot * sizeof(double), cudaMemcpyDeviceToHost));

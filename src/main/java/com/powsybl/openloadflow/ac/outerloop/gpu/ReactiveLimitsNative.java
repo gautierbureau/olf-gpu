@@ -29,6 +29,10 @@ public final class ReactiveLimitsNative {
     /** Per (scenario, reactive-limit entry): the frozen target Q the last solve ended with, NaN when not switched to PQ. */
     public static native double[] readBatchReactiveLimitTargetQ(long handle);
 
+    /** Per (scenario, reactive-limit entry): the PV/PQ state the last solve ended with, a GpuReactiveLimitsState (limit type
+     *  and PV -> PQ switch count); null without entries. */
+    public static native int[] readBatchReactiveLimitsFinalState(long handle);
+
     /** Install (or clear, with nulls) the forceTargetQInReactiveLimits channel on a batch context: the Q
      *  targets of generators OLF clamps into their curve limits at their current P (see ForceTargetQInReactiveLimits). */
     public static native void setBatchForcedTargetQ(long handle, int[] forcedTargetQIndices, double[] forcedTargetQParameters, double[] forcedTargetQPoints,

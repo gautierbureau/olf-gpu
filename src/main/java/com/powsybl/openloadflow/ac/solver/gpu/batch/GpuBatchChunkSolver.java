@@ -936,8 +936,8 @@ final class GpuBatchChunkSolver {
                                 hvdcStatus, rs.disabledMask);
                     }
                     boolean monitoringVoltageActive = phases.monitoring() != null && !phases.monitoring().isEmpty();
-                    int[] reactiveLimitsFinalState = (!pairPhase && !pairIdxList.isEmpty() || monitoringVoltageActive
-                            || GpuTrace.RL_TRACE.isOn()) && nReactiveLimitEntries > 0 ? new int[chunkSize * nReactiveLimitEntries] : null;
+                    boolean readReactiveLimitsFinalState = (!pairPhase && !pairIdxList.isEmpty() || monitoringVoltageActive
+                            || GpuTrace.RL_TRACE.isOn()) && nReactiveLimitEntries > 0;
                     cl.upload(handle, gpuData);
                     // The two HVDC AC-emulation loops run as DRIVER PHASES, in OLF's own position
                     // between DistributedSlack and ReactiveLimits. Running them instead as host
@@ -1053,7 +1053,7 @@ final class GpuBatchChunkSolver {
                             config.stateVectorScalingMode() == GpuStateVectorScalingMode.MAX_VOLTAGE_CHANGE ? varType : null, x0Full,
                             rs.shuntAdmittanceOverrideScenarioElementList.stream().mapToInt(Integer::intValue).toArray(),
                             rs.shuntAdmittanceOverrideDeltaList.stream().mapToDouble(Double::doubleValue).toArray(),
-                            reactiveLimitsSeedState, reactiveLimitsFinalState,
+                            reactiveLimitsSeedState,
                             rs.closedBranchParameterOverrideScenarioElementList.stream().mapToInt(Integer::intValue).toArray(),
                             rs.closedBranchParameterOverrideValueList.stream().mapToDouble(Double::doubleValue).toArray(),
                             config.maxOuterIterations(), config.maxPqPvSwitch(), config.rejectSlackDistributionFailureFlag(),
@@ -1063,6 +1063,8 @@ final class GpuBatchChunkSolver {
                             0,
                             rs.nBaseClosedZeroImpedanceBranches, rs.zeroImpedanceBranchCloseScenarioElementList.stream().mapToInt(Integer::intValue).toArray(),
                             rs.zeroImpedanceBranchOpenScenarioElementList.stream().mapToInt(Integer::intValue).toArray());
+                    // each scenario's PV/PQ states as its solve ended: what its pairs continue from, and the traces
+                    int[] reactiveLimitsFinalState = readReactiveLimitsFinalState ? ReactiveLimitsNative.readBatchReactiveLimitsFinalState(handle) : null;
                     if (GpuTrace.REJECT_TRACE.isOn()) {
                         // slot -> contingency for every scenario the device rejected in this chunk: the native
                         // GPU_REJECT lines name slots, and a slot only means something with the chunk's composition.

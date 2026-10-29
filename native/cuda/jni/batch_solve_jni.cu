@@ -103,7 +103,7 @@ OLF_JNI(ac_solver_gpu, BatchSolveNative, solveBatchContext)(
         jdouble reactiveLimitTol, jdouble slackDistTol, jdouble convEpsPerEq,
         jint stateVectorScalingMode, jdouble maxDv, jdouble maxDphi, jintArray jvarType, jdoubleArray jx0Full,
         jintArray jShuntOvSlotElem, jdoubleArray jShuntOvGb,
-        jintArray jReactiveLimitsSeedState, jintArray jReactiveLimitsFinalState,
+        jintArray jReactiveLimitsSeedState,
         jintArray jR1OvSlotElem, jdoubleArray jR1OvVal,
         jint maxOuterProductive, jint maxPqPvSwitch, jint rejectSlackDistributionFailure, jint skipReactiveLimitsPhase,
         jint nBaseClosedZeroImpedanceBranches, jintArray jZeroImpedanceBranchCloseScenarioElement, jintArray jZeroImpedanceBranchOpenScenarioElement) {
@@ -152,10 +152,6 @@ OLF_JNI(ac_solver_gpu, BatchSolveNative, solveBatchContext)(
         jsize rn = env->GetArrayLength(jReactiveLimitsSeedState);
         reactiveLimitsSeedStateVec.resize(rn);
         env->GetIntArrayRegion(jReactiveLimitsSeedState, 0, rn, reactiveLimitsSeedStateVec.data());
-    }
-    std::vector<int> reactiveLimitsFinalStateVec;
-    if (jReactiveLimitsFinalState != nullptr) {
-        reactiveLimitsFinalStateVec.resize(env->GetArrayLength(jReactiveLimitsFinalState));
     }
     std::vector<int> shuntAdmittanceOverrideScenarioElementVec;
     std::vector<double> shuntAdmittanceOverrideDeltaVec;
@@ -297,7 +293,6 @@ OLF_JNI(ac_solver_gpu, BatchSolveNative, solveBatchContext)(
                                 shuntAdmittanceOverrideScenarioElementVec.empty() ? nullptr : shuntAdmittanceOverrideScenarioElementVec.data(),
                                 shuntAdmittanceOverrideDeltaVec.empty() ? nullptr : shuntAdmittanceOverrideDeltaVec.data(),
                                 reactiveLimitsSeedStateVec.empty() ? nullptr : reactiveLimitsSeedStateVec.data(),
-                                reactiveLimitsFinalStateVec.empty() ? nullptr : reactiveLimitsFinalStateVec.data(),
                                 static_cast<int>(closedBranchParameterOverrideScenarioElementVec.size() / 2),
                                 closedBranchParameterOverrideScenarioElementVec.empty() ? nullptr : closedBranchParameterOverrideScenarioElementVec.data(),
                                 closedBranchParameterOverrideValueVec.empty() ? nullptr : closedBranchParameterOverrideValueVec.data(),
@@ -308,9 +303,6 @@ OLF_JNI(ac_solver_gpu, BatchSolveNative, solveBatchContext)(
                                 zeroImpedanceBranchOpenScenarioElementVec.empty() ? nullptr : zeroImpedanceBranchOpenScenarioElementVec.data());
         if (traceOn(Trace::PHASE_TIME)) {
             solveNs += nowNs() - tSolve0;
-        }
-        if (jReactiveLimitsFinalState != nullptr && !reactiveLimitsFinalStateVec.empty()) {
-            env->SetIntArrayRegion(jReactiveLimitsFinalState, 0, static_cast<jsize>(reactiveLimitsFinalStateVec.size()), reactiveLimitsFinalStateVec.data());
         }
     } catch (const std::exception& e) {
         error = e.what();

@@ -3,6 +3,7 @@
 //
 // JNI entry points of AreaInterchangeControlNative: the AreaInterchangeControl phase's tables and its read-back.
 #include "jni_common.cuh"
+#include "../solver/scenario_install.cuh"
 
 // Install (or clear, with outerLoop false) the run's AreaInterchangeControl: per area its interchange target and slack
 // distribution factor (pu) and the slice of its boundaries (boundaryStart, nAreas + 1); per boundary its
@@ -58,9 +59,9 @@ OLF_JNI(ac_outerloop_gpu, AreaInterchangeControlNative, readBatchAreaInterchange
     if (ctx == nullptr || !ctx->dAreaInterchangeControlDistributedActivePower.p) {
         return nullptr;
     }
-    std::vector<double> host(static_cast<size_t>(ctx->nScenarios));
+    std::vector<double> host;
     CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
-    CUDA_CHECK(cudaMemcpy(host.data(), ctx->dAreaInterchangeControlDistributedActivePower.p, host.size() * sizeof(double), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(readInstalledRows(ctx, ctx->dAreaInterchangeControlDistributedActivePower.p, 1, host));
     jdoubleArray out = env->NewDoubleArray(static_cast<jsize>(host.size()));
     env->SetDoubleArrayRegion(out, 0, static_cast<jsize>(host.size()), host.data());
     return out;

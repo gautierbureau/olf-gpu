@@ -3,6 +3,7 @@
 //
 // JNI entry points of GpuAcNewtonSolver: SecondaryVoltageControlOuterLoop.
 #include "jni_common.cuh"
+#include "../solver/scenario_install.cuh"
 
 /** Install the SecondaryVoltageControl zones for the in-kernel phase (OLF order 4). Controllers are
  *  addressed by their controlled bus's V row (the sensitivity's unit row and where a moved target lands)
@@ -140,10 +141,9 @@ OLF_JNI(ac_outerloop_gpu, SecondaryVoltageControlNative, readBatchSecondaryVolta
     if (ctx == nullptr || ctx->nSecondaryVoltageControlControllerBuses <= 0 || !ctx->dSecondaryVoltageControlTargetV.p) {
         return nullptr;
     }
-    size_t count = static_cast<size_t>(ctx->nSecondaryVoltageControlControllerBuses) * ctx->nScenarios;
-    std::vector<double> host(count);
-    cudaMemcpy(host.data(), ctx->dSecondaryVoltageControlTargetV.p, count * sizeof(double), cudaMemcpyDeviceToHost);
-    jdoubleArray out = env->NewDoubleArray(static_cast<jsize>(count));
-    env->SetDoubleArrayRegion(out, 0, static_cast<jsize>(count), host.data());
+    std::vector<double> host;
+    readInstalledRows(ctx, ctx->dSecondaryVoltageControlTargetV.p, static_cast<size_t>(ctx->nSecondaryVoltageControlControllerBuses), host);
+    jdoubleArray out = env->NewDoubleArray(static_cast<jsize>(host.size()));
+    env->SetDoubleArrayRegion(out, 0, static_cast<jsize>(host.size()), host.data());
     return out;
 }

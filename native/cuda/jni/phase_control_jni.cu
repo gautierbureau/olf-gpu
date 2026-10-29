@@ -3,6 +3,7 @@
 //
 // JNI entry points of GpuAcNewtonSolver: Phase control and transformer reactive power control, incremental and continuous.
 #include "jni_common.cuh"
+#include "../solver/scenario_install.cuh"
 #include "../common/codes/gpu_controlled_flow.cuh"
 
 /** Upload the FLOW-OBSERVED incremental controllers (RPC / incremental phase). Per controller: kind
@@ -88,11 +89,10 @@ OLF_JNI(ac_outerloop_gpu, PhaseControlNative, readBatchFlowTaps)(
     if (ctx == nullptr || ctx->nIncrementalFlowControlControllerBranches <= 0 || !ctx->dIncrementalFlowControlCurrentTap.p) {
         return nullptr;
     }
-    size_t count = static_cast<size_t>(ctx->nIncrementalFlowControlControllerBranches) * ctx->nScenarios;
-    std::vector<int> host(count);
-    cudaMemcpy(host.data(), ctx->dIncrementalFlowControlCurrentTap.p, count * sizeof(int), cudaMemcpyDeviceToHost);
-    jintArray out = env->NewIntArray(static_cast<jsize>(count));
-    env->SetIntArrayRegion(out, 0, static_cast<jsize>(count), host.data());
+    std::vector<int> host;
+    readInstalledRows(ctx, ctx->dIncrementalFlowControlCurrentTap.p, static_cast<size_t>(ctx->nIncrementalFlowControlControllerBranches), host);
+    jintArray out = env->NewIntArray(static_cast<jsize>(host.size()));
+    env->SetIntArrayRegion(out, 0, static_cast<jsize>(host.size()), host.data());
     return out;
 }
 
@@ -159,10 +159,9 @@ OLF_JNI(ac_outerloop_gpu, PhaseControlNative, readBatchContinuousPhaseTaps)(
     if (ctx == nullptr || ctx->nPhaseControlControllerBranches <= 0 || !ctx->dPhaseControlTap.p) {
         return nullptr;
     }
-    size_t count = static_cast<size_t>(ctx->nPhaseControlControllerBranches) * ctx->nScenarios;
-    std::vector<int> host(count);
-    cudaMemcpy(host.data(), ctx->dPhaseControlTap.p, count * sizeof(int), cudaMemcpyDeviceToHost);
-    jintArray out = env->NewIntArray(static_cast<jsize>(count));
-    env->SetIntArrayRegion(out, 0, static_cast<jsize>(count), host.data());
+    std::vector<int> host;
+    readInstalledRows(ctx, ctx->dPhaseControlTap.p, static_cast<size_t>(ctx->nPhaseControlControllerBranches), host);
+    jintArray out = env->NewIntArray(static_cast<jsize>(host.size()));
+    env->SetIntArrayRegion(out, 0, static_cast<jsize>(host.size()), host.data());
     return out;
 }

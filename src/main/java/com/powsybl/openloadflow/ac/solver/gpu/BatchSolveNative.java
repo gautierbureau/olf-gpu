@@ -51,6 +51,14 @@ public final class BatchSolveNative {
     public static native void destroyBatchContext(long handle);
 
     /**
+     * Choose the bank slots the next scenarios go into: local slot {@code j} of every per-scenario setter, of the solve
+     * and of the readbacks after it is bank slot {@code bankSlots[j]}, until the next call. Each bank slot appears at
+     * most once; the other slots keep what they hold. Null or empty: every slot of the bank, local slot {@code j} into
+     * slot {@code j}.
+     */
+    public static native void beginBatchInstall(long handle, int[] bankSlots);
+
+    /**
      * Run batched Newton-Raphson AC power flow on the GPU: one iteration loop over all
      * scenarios, with per-scenario convergence retirement (stop filling/solving once
      * converged). Scenarios remain in the batch until they converge or hit maxIter.

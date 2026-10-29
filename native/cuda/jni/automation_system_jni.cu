@@ -3,6 +3,7 @@
 //
 // JNI entry points of AutomationSystemNative: the AutomationSystem phase's tables and its read-back.
 #include "jni_common.cuh"
+#include "../solver/scenario_install.cuh"
 
 // Install (or clear, with null systems) the run's overload management systems: per system its monitored closed-branch
 // element and side (GpuTwoSides) and the slice of its trippings (trippingStart, nSystems + 1); per tripping the
@@ -51,11 +52,12 @@ OLF_JNI(ac_outerloop_gpu, AutomationSystemNative, readBatchAutomationSystemOpera
         return nullptr;
     }
     int nTrippings = ctx->nOverloadManagementSystemTrippings;
-    std::vector<char> disabled(static_cast<size_t>(ctx->nScenarios) * ctx->nElements);
+    std::vector<char> disabled;
     CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
-    CUDA_CHECK(cudaMemcpy(disabled.data(), ctx->dDisabled.p, disabled.size(), cudaMemcpyDeviceToHost));
-    std::vector<jbyte> host(static_cast<size_t>(ctx->nScenarios) * nTrippings);
-    for (int s = 0; s < ctx->nScenarios; s++) {
+    CUDA_CHECK(readInstalledRows(ctx, ctx->dDisabled.p, static_cast<size_t>(ctx->nElements), disabled));
+    const int nRows = installedSlotCount(ctx);
+    std::vector<jbyte> host(static_cast<size_t>(nRows) * nTrippings);
+    for (int s = 0; s < nRows; s++) {
         for (int t = 0; t < nTrippings; t++) {
             host[(size_t) s * nTrippings + t] = disabled[(size_t) s * ctx->nElements + ctx->hOverloadManagementSystemOperatedMaskSlot[t]];
         }

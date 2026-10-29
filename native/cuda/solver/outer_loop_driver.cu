@@ -422,10 +422,10 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     //      for every live scenario, refreshes the curve limits at the final targets, and prints one
     //      line per violating (scenario, entry).
     traceReactiveLimitsAudit(ctx, drv, drv.reactiveLimitsAuditLog);
-    if (reactiveLimitsFinalState != nullptr && ctx->nReactiveLimitEntries > 0) {             // export per-(controller, scenario) RL state
-        std::vector<char> qLimitType(static_cast<size_t>(ctx->nReactiveLimitEntries) * nS), sc(static_cast<size_t>(ctx->nReactiveLimitEntries) * nS);
-        CUDA_CHECK(cudaMemcpy(qLimitType.data(), ctx->dReactiveLimitQLimitType.p, qLimitType.size(), cudaMemcpyDeviceToHost));
-        CUDA_CHECK(cudaMemcpy(sc.data(), ctx->dReactiveLimitPvPqSwitchCount.p, sc.size(), cudaMemcpyDeviceToHost));
+    if (reactiveLimitsFinalState != nullptr && ctx->nReactiveLimitEntries > 0) {             // export per-(controller, installed scenario) RL state
+        std::vector<char> qLimitType, sc;
+        CUDA_CHECK(readInstalledRows(ctx, ctx->dReactiveLimitQLimitType.p, static_cast<size_t>(ctx->nReactiveLimitEntries), qLimitType));
+        CUDA_CHECK(readInstalledRows(ctx, ctx->dReactiveLimitPvPqSwitchCount.p, static_cast<size_t>(ctx->nReactiveLimitEntries), sc));
         for (size_t k = 0; k < qLimitType.size(); k++) {
             reactiveLimitsFinalState[k] = reactiveLimitsState(qLimitType[k], sc[k]);
         }

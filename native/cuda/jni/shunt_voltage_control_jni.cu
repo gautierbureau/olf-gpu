@@ -3,6 +3,7 @@
 //
 // JNI entry points of GpuAcNewtonSolver: Shunt voltage control, incremental and discrete.
 #include "jni_common.cuh"
+#include "../solver/scenario_install.cuh"
 
 /** Upload the incremental SHUNT voltage-control tables for the in-kernel loop. Per controller:
  *  bRow (SHUNT_B identity row), vRow (controlled bus), targetV, halfTargetDeadband, controllerElement (global element, -1),
@@ -90,11 +91,10 @@ OLF_JNI(ac_outerloop_gpu, ShuntVoltageControlNative, readBatchIncrementalShuntVo
     if (ctx == nullptr || ctx->nIncrementalShuntVoltageControlControllerShunts <= 0 || !ctx->dIncrementalShuntVoltageControlPosition.p) {
         return nullptr;
     }
-    size_t count = static_cast<size_t>(ctx->nIncrementalShuntVoltageControlShuntCompensators) * ctx->nScenarios;
-    std::vector<int> host(count);
-    cudaMemcpy(host.data(), ctx->dIncrementalShuntVoltageControlPosition.p, count * sizeof(int), cudaMemcpyDeviceToHost);
-    jintArray out = env->NewIntArray(static_cast<jsize>(count));
-    env->SetIntArrayRegion(out, 0, static_cast<jsize>(count), host.data());
+    std::vector<int> host;
+    readInstalledRows(ctx, ctx->dIncrementalShuntVoltageControlPosition.p, static_cast<size_t>(ctx->nIncrementalShuntVoltageControlShuntCompensators), host);
+    jintArray out = env->NewIntArray(static_cast<jsize>(host.size()));
+    env->SetIntArrayRegion(out, 0, static_cast<jsize>(host.size()), host.data());
     return out;
 }
 
@@ -182,11 +182,13 @@ OLF_JNI(ac_outerloop_gpu, ShuntVoltageControlNative, readBatchShuntVoltageContro
     if (ctx == nullptr || ctx->nShuntVoltageControlMembers <= 0 || !ctx->dShuntVoltageControlMemberState.p) {
         return nullptr;
     }
-    size_t count = static_cast<size_t>(ctx->nShuntVoltageControlMembers) * ctx->nScenarios;
-    std::vector<int> memberState(count);
-    std::vector<double> continuousB(count), out(count * 2);
-    cudaMemcpy(memberState.data(), ctx->dShuntVoltageControlMemberState.p, count * sizeof(int), cudaMemcpyDeviceToHost);
-    cudaMemcpy(continuousB.data(), ctx->dShuntVoltageControlMemberContinuousB.p, count * sizeof(double), cudaMemcpyDeviceToHost);
+    const size_t nMembers = static_cast<size_t>(ctx->nShuntVoltageControlMembers);
+    std::vector<int> memberState;
+    std::vector<double> continuousB;
+    readInstalledRows(ctx, ctx->dShuntVoltageControlMemberState.p, nMembers, memberState);
+    readInstalledRows(ctx, ctx->dShuntVoltageControlMemberContinuousB.p, nMembers, continuousB);
+    const size_t count = memberState.size();
+    std::vector<double> out(count * 2);
     for (size_t i = 0; i < count; i++) {
         out[i * 2] = memberState[i];
         out[i * 2 + 1] = continuousB[i];
@@ -204,10 +206,9 @@ OLF_JNI(ac_outerloop_gpu, ShuntVoltageControlNative, readBatchShuntVoltageContro
     if (ctx == nullptr || ctx->nShuntVoltageControlMembers <= 0 || ctx->nShuntVoltageControlShuntCompensators <= 0 || !ctx->dShuntVoltageControlShuntCompensatorPosition.p) {
         return nullptr;
     }
-    size_t count = static_cast<size_t>(ctx->nShuntVoltageControlShuntCompensators) * ctx->nScenarios;
-    std::vector<int> host(count);
-    cudaMemcpy(host.data(), ctx->dShuntVoltageControlShuntCompensatorPosition.p, count * sizeof(int), cudaMemcpyDeviceToHost);
-    jintArray out = env->NewIntArray(static_cast<jsize>(count));
-    env->SetIntArrayRegion(out, 0, static_cast<jsize>(count), host.data());
+    std::vector<int> host;
+    readInstalledRows(ctx, ctx->dShuntVoltageControlShuntCompensatorPosition.p, static_cast<size_t>(ctx->nShuntVoltageControlShuntCompensators), host);
+    jintArray out = env->NewIntArray(static_cast<jsize>(host.size()));
+    env->SetIntArrayRegion(out, 0, static_cast<jsize>(host.size()), host.data());
     return out;
 }

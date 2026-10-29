@@ -334,6 +334,8 @@ final class GpuBatchChunkSolver {
                 int nbg = group.size();
                 for (int chunkStart = 0; chunkStart < nbg; chunkStart += chunkSize) {
                     int realCount = Math.min(chunkSize, nbg - chunkStart);
+                    // the chunk's scenarios go into the whole bank, slot s for scenario s: before anything per scenario
+                    BatchSolveNative.beginBatchInstall(handle, null);
                     rs.overrides.clear();
                     // fixTransformerVoltageControls is a POST-CONTINGENCY check on the CPU, so its
                     // connectivity masks are per scenario and belong to the chunk, not to the run.

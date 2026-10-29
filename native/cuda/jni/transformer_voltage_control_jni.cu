@@ -3,6 +3,7 @@
 //
 // JNI entry points of GpuAcNewtonSolver: Transformer voltage control, incremental and discrete.
 #include "jni_common.cuh"
+#include "../solver/scenario_install.cuh"
 #include "slot_table_install.cuh"
 
 /** Upload the incremental TVC controller data for the in-kernel outer loop.
@@ -77,11 +78,11 @@ OLF_JNI(ac_outerloop_gpu, TransformerVoltageControlNative, readBatchIncrementalT
     if (ctx == nullptr || ctx->nIncrementalTransformerVoltageControlControllerBranches <= 0 || !ctx->dIncrementalTransformerVoltageControlCurrentTap.p) {
         return nullptr;
     }
-    size_t count = static_cast<size_t>(ctx->nIncrementalTransformerVoltageControlControllerBranches) * ctx->nScenarios;
-    std::vector<int> host(count);
-    cudaMemcpy(host.data(), ctx->dIncrementalTransformerVoltageControlCurrentTap.p, count * sizeof(int), cudaMemcpyDeviceToHost);
-    jintArray out = env->NewIntArray(static_cast<jsize>(count));
-    env->SetIntArrayRegion(out, 0, static_cast<jsize>(count), host.data());
+    std::vector<int> host;
+    readInstalledRows(ctx, ctx->dIncrementalTransformerVoltageControlCurrentTap.p,
+                      static_cast<size_t>(ctx->nIncrementalTransformerVoltageControlControllerBranches), host);
+    jintArray out = env->NewIntArray(static_cast<jsize>(host.size()));
+    env->SetIntArrayRegion(out, 0, static_cast<jsize>(host.size()), host.data());
     return out;
 }
 
@@ -268,13 +269,14 @@ OLF_JNI(ac_outerloop_gpu, TransformerVoltageControlNative, readBatchGeneratorVol
         return nullptr;
     }
     int n = ctx->n;
-    size_t count = static_cast<size_t>(ctx->nGeneratorVoltageControlFreezeCandidates) * ctx->nScenarios;
-    std::vector<int> frozen(count), voltageRow(ctx->nGeneratorVoltageControlFreezeCandidates);
-    std::vector<double> target(static_cast<size_t>(n) * ctx->nScenarios), out(count * 2);
-    cudaMemcpy(frozen.data(), ctx->dGeneratorVoltageControlFrozen.p, count * sizeof(int), cudaMemcpyDeviceToHost);
+    const int nRows = installedSlotCount(ctx);
+    size_t count = static_cast<size_t>(ctx->nGeneratorVoltageControlFreezeCandidates) * nRows;
+    std::vector<int> frozen, voltageRow(ctx->nGeneratorVoltageControlFreezeCandidates);
+    std::vector<double> target, out(count * 2);
+    readInstalledRows(ctx, ctx->dGeneratorVoltageControlFrozen.p, static_cast<size_t>(ctx->nGeneratorVoltageControlFreezeCandidates), frozen);
     cudaMemcpy(voltageRow.data(), ctx->dGeneratorVoltageControlFreezeVRow.p, voltageRow.size() * sizeof(int), cudaMemcpyDeviceToHost);
-    cudaMemcpy(target.data(), ctx->dTarget.p, target.size() * sizeof(double), cudaMemcpyDeviceToHost);
-    for (int s = 0; s < ctx->nScenarios; s++) {
+    readInstalledRows(ctx, ctx->dTarget.p, static_cast<size_t>(n), target);
+    for (int s = 0; s < nRows; s++) {
         for (int c = 0; c < ctx->nGeneratorVoltageControlFreezeCandidates; c++) {
             size_t i = static_cast<size_t>(s) * ctx->nGeneratorVoltageControlFreezeCandidates + c;
             out[i * 2] = frozen[i];
@@ -295,12 +297,14 @@ OLF_JNI(ac_outerloop_gpu, TransformerVoltageControlNative, readBatchTransformerV
     if (ctx == nullptr || ctx->nTransformerVoltageControlMembers <= 0 || !ctx->dTransformerVoltageControlMemberState.p) {
         return nullptr;
     }
-    size_t count = static_cast<size_t>(ctx->nTransformerVoltageControlMembers) * ctx->nScenarios;
-    std::vector<int> memberState(count), tap(count);
-    std::vector<double> roundingR1(count), out(count * 3);
-    cudaMemcpy(memberState.data(), ctx->dTransformerVoltageControlMemberState.p, count * sizeof(int), cudaMemcpyDeviceToHost);
-    cudaMemcpy(tap.data(), ctx->dTransformerVoltageControlMemberTap.p, count * sizeof(int), cudaMemcpyDeviceToHost);
-    cudaMemcpy(roundingR1.data(), ctx->dTransformerVoltageControlMemberRoundingR1.p, count * sizeof(double), cudaMemcpyDeviceToHost);
+    const size_t nMembers = static_cast<size_t>(ctx->nTransformerVoltageControlMembers);
+    std::vector<int> memberState, tap;
+    std::vector<double> roundingR1;
+    readInstalledRows(ctx, ctx->dTransformerVoltageControlMemberState.p, nMembers, memberState);
+    readInstalledRows(ctx, ctx->dTransformerVoltageControlMemberTap.p, nMembers, tap);
+    readInstalledRows(ctx, ctx->dTransformerVoltageControlMemberRoundingR1.p, nMembers, roundingR1);
+    const size_t count = memberState.size();
+    std::vector<double> out(count * 3);
     for (size_t i = 0; i < count; i++) {
         out[i * 3] = memberState[i];
         out[i * 3 + 1] = tap[i];

@@ -277,6 +277,7 @@ struct BatchSolverContext {
                                                              // NaN while no distribution happened in this solve
     long long solveCount = 0;                                // solveBatchContext calls on this context: the DS
                                                              // read-backs above describe the LAST solve only
+    int newtonLoopIterations = 0;                            // the batched Newton iterations of the last solveBatchContext call
     // Per-GENERATOR participants (setBatchDistributedSlackGenerators). OLF's water-fill participates and saturates
     // per generator — ParticipatingElement wraps an LfGenerator and step.run clamps each at its OWN
     // limits and REMOVES it — so a bus-level aggregate only reproduces OLF while nothing saturates.

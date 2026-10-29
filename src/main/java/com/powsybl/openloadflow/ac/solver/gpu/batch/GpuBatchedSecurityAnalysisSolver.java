@@ -73,7 +73,8 @@ public final class GpuBatchedSecurityAnalysisSolver {
     public static final double DEFAULT_SLACK_DIST_TOL = 1e-2;
 
     /** TESTS ONLY: record every batched contingency's outer-loop statistics into {@code sink}, by contingency id: {solve
-     *  passes, first solve's Newton iterations, total Newton iterations, outer-loop checks}. Null stops recording. */
+     *  passes, first solve's Newton iterations, total Newton iterations, outer-loop checks, its chunk's batched Newton
+     *  iterations}. Null stops recording. */
     public static void recordOuterLoopStatsForTests(java.util.Map<String, int[]> sink) {
         GpuBatchChunkSolver.outerLoopStatsForTests = sink;
     }

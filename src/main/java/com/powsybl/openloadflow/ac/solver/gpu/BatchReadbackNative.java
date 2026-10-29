@@ -57,6 +57,9 @@ public final class BatchReadbackNative {
      *  every solve: they describe the whole distribution only when one solve covered it. */
     public static native long readBatchSolveCount(long handle);
 
+    /** The batched Newton iterations of the last {@code solveBatchContext} call: every scenario's solves together. */
+    public static native int readBatchNewtonLoopIterations(long handle);
+
     /** Read back the batch context's per-scenario TARGET buffer (n * nScenarios) after a solve — the device
      *  outer loops mutate targets in place; the strategy/pair phase re-anchors its slack distribution at the
      *  PARENT contingency's final distributed targets (OLF's setGeneratorsInitialTargetPToTargetP). */

@@ -1069,10 +1069,12 @@ final class GpuBatchChunkSolver {
                         // OLF_OL_STATS: the device's per-contingency Newton work, in the same shape as OLF's
                         // CPU_OL_STATS lines, so the two arms can be matched contingency by contingency.
                         int[] outerLoopStats = BatchReadbackNative.readBatchOuterLoopStats(handle);
+                        int newtonLoopIterations = BatchReadbackNative.readBatchNewtonLoopIterations(handle);
                         if (outerLoopStats != null) {
                             for (int s2 = 0; s2 < realCount; s2++) {
                                 String id = contingencies.get(group.get(chunkStart + s2)).contingencyId();
-                                int[] stats = java.util.Arrays.copyOfRange(outerLoopStats, s2 * 4, s2 * 4 + 4);
+                                int[] stats = java.util.Arrays.copyOf(java.util.Arrays.copyOfRange(outerLoopStats, s2 * 4, s2 * 4 + 4), 5);
+                                stats[4] = newtonLoopIterations;
                                 if (outerLoopStatsSink != null) {
                                     outerLoopStatsSink.put(id, stats);
                                 }

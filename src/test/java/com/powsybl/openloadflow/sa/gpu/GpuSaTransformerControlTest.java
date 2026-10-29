@@ -239,6 +239,14 @@ class GpuSaTransformerControlTest extends AbstractGpuSaTest {
                 "the FREE-member outage must batch on-device (plan A6)");
     }
 
+    /** The same contingencies refilled into a bank of 2 as each ends: an install while a scenario whose tap the loop moved
+     *  still solves must leave that tap moved (TapMoved is per slot; clearing the bank's let the next fills read the base
+     *  tap: the distributed active power came out 5.1e-4 MW off the CPU's). */
+    @Test
+    void sharedTransformerControlRefilledMatchesCpu() {
+        refilled(this::deviceSharedTransformerControlMatchesCpu);
+    }
+
     /** Clamping the CURRENT CARRIER mid-flight (T2wT capped at rho 1.0 clamps under the T2wT2
      *  outage) re-picks the pilot-Q role. The host machine routed the scenario to the CPU (its
      *  re-solve trajectory sat 1.7e-9 off the CPU's, on a 1-MW DS knife edge — plan A6); the

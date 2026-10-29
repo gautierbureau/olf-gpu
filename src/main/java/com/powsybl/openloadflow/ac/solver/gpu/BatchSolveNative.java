@@ -92,6 +92,10 @@ public final class BatchSolveNative {
      *         installed): [state(n), iterations, finalMismatch, convergenceStatus] where convergenceStatus is:
      *         0 = converged, 1 = max_iter, -1 = diverged/NaN
      */
+    /** The bank slots of the scenarios the last solve handed back, in the order of its result rows (every slot, in order,
+     *  when it handed back the whole bank). */
+    public static native int[] readBatchHandedBackSlots(long handle);
+
     public static native double[][] solveBatchContext(long handle, double[] x0Base, double[] targetBase,
                                                        int[][] rowMode, int[] baseRowMode, boolean[][] disabledElementMask,
                                                        int[] targetOverrideIndex, double[] targetOverrideValue,

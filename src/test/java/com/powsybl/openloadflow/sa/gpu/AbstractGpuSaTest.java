@@ -49,6 +49,23 @@ abstract class AbstractGpuSaTest extends AbstractOpenSecurityAnalysisTest {
         GpuBatchScopeCensus.reset();
     }
 
+    /** {@code check} with its scenarios in a bank of 2 slots, each refilled as soon as its scenario ends: a scenario installed
+     *  while another still solves must find its slot afresh and leave the other as it was. The check must refill at least
+     *  once. */
+    void refilled(Runnable check) {
+        com.powsybl.openloadflow.ac.solver.gpu.GpuBatchContextCache.forceChunkSizeForTests(2);
+        com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchedSecurityAnalysisSolver.refillAtForTests(1);
+        int refills;
+        try {
+            check.run();
+            refills = com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchedSecurityAnalysisSolver.refillsForTests();
+        } finally {
+            com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchedSecurityAnalysisSolver.refillAtForTests(null);
+            com.powsybl.openloadflow.ac.solver.gpu.GpuBatchContextCache.forceChunkSizeForTests(null);
+        }
+        org.junit.jupiter.api.Assertions.assertTrue(refills > 0, "a scenario must be installed while another still solves");
+    }
+
     void assertSplitGroupMatchesCpu(int sections) {
         assertSplitGroupMatchesCpu(sections, java.util.Set.of());
     }

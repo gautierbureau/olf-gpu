@@ -4,6 +4,7 @@
 // JNI entry points of GpuAcNewtonSolver: The batched context and its solve.
 #include "jni_common.cuh"
 #include "slot_table_install.cuh"
+#include "../solver/scenario_install.cuh"
 #include "../common/codes/gpu_outer_loop_kind.cuh"
 #include "../common/trace.cuh"
 
@@ -396,6 +397,22 @@ extern "C" JNIEXPORT void JNICALL
 OLF_JNI(ac_solver_gpu, BatchSolveNative, destroyBatchContext)(
         JNIEnv*, jclass, jlong handle) {
     delete reinterpret_cast<BatchSolverContext*>(handle);
+}
+
+// The bank slots of the scenarios the last solve handed back, in the order of its result rows.
+extern "C" JNIEXPORT jintArray JNICALL
+OLF_JNI(ac_solver_gpu, BatchSolveNative, readBatchHandedBackSlots)(
+        JNIEnv* env, jclass, jlong handle) {
+    auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
+    if (ctx == nullptr) {
+        return nullptr;
+    }
+    std::vector<int> slots = installedSlots(ctx);
+    jintArray arr = env->NewIntArray(static_cast<jsize>(slots.size()));
+    if (arr != nullptr) {
+        env->SetIntArrayRegion(arr, 0, static_cast<jsize>(slots.size()), slots.data());
+    }
+    return arr;
 }
 
 // The bank slots the next install writes its scenarios into (BatchSolveNative.beginBatchInstall): local slot j is bank

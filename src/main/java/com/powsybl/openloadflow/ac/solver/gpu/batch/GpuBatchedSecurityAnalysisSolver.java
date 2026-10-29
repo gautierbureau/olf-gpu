@@ -79,21 +79,17 @@ public final class GpuBatchedSecurityAnalysisSolver {
         GpuBatchChunkSolver.outerLoopStatsForTests = sink;
     }
 
-    /** TESTS ONLY: put each chunk's scenarios into slots of a bank wider than the chunk, where {@code layout} says. Null
-     *  goes back to a bank of the chunk's size, scenario s in slot s. */
-    public static void installChunksForTests(InstallLayout layout) {
-        GpuBatchChunkSolver.installLayoutForTests = layout;
+    /** TESTS ONLY: refill the bank as soon as {@code ended} scenarios have ended (1: each slot as soon as its scenario
+     *  ends), instead of when a share of it is free. Null goes back to the share. */
+    public static void refillAtForTests(Integer ended) {
+        GpuBatchChunkSolver.refillAtForTests = ended;
+        GpuBatchChunkSolver.REFILLS_FOR_TESTS.set(0);
     }
 
-    /** Where the chunks' scenarios go in a bank wider than the chunk (TESTS ONLY, see {@link #installChunksForTests}). */
-    public interface InstallLayout {
-
-        /** How many slots the bank has for chunks of {@code chunkSize} scenarios: at least chunkSize. */
-        int bankSize(int chunkSize);
-
-        /** The bank slot of each of the {@code chunkSize} scenarios of the run's {@code chunk}-th chunk (counted over the
-         *  contingencies' chunks, then the strategy pairs'), each slot at most once. */
-        int[] bankSlots(int chunk, int chunkSize, int bankSize);
+    /** TESTS ONLY: how many installs went into a bank whose other slots still held scenarios solving, since the last
+     *  {@link #refillAtForTests} call. */
+    public static int refillsForTests() {
+        return GpuBatchChunkSolver.REFILLS_FOR_TESTS.get();
     }
 
     /**

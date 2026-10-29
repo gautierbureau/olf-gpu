@@ -1078,7 +1078,8 @@ final class GpuBatchChunkSolver {
                             // and finishes with the full RL-enabled solves.
                             0,
                             rs.nBaseClosedZeroImpedanceBranches, rs.zeroImpedanceBranchCloseScenarioElementList.stream().mapToInt(Integer::intValue).toArray(),
-                            rs.zeroImpedanceBranchOpenScenarioElementList.stream().mapToInt(Integer::intValue).toArray());
+                            rs.zeroImpedanceBranchOpenScenarioElementList.stream().mapToInt(Integer::intValue).toArray(),
+                            0);
                     // each scenario's PV/PQ states as its solve ended: what its pairs continue from, and the traces
                     int[] reactiveLimitsFinalState = readReactiveLimitsFinalState ? ReactiveLimitsNative.readBatchReactiveLimitsFinalState(handle) : null;
                     if (GpuTrace.REJECT_TRACE.isOn()) {

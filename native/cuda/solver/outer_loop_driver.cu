@@ -91,7 +91,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                               int nClosedBranchParameterOverrides, const int* closedBranchParameterOverrideScenarioElement, const double* closedBranchParameterOverrideValues,
                               int maxOuterProductive, int maxPqPvSwitch, int rejectSlackDistributionFailure, int skipReactiveLimitsPhase,
                               int nBaseClosedZeroImpedanceBranches, int nZeroImpedanceBranchCloseOverrides, const int* zeroImpedanceBranchCloseScenarioElement,
-                              int nZeroImpedanceBranchOpenOverrides, const int* zeroImpedanceBranchOpenScenarioElement) {
+                              int nZeroImpedanceBranchOpenOverrides, const int* zeroImpedanceBranchOpenScenarioElement,
+                              int pauseAtEnded) {
     DriverPass drv(ctx->slotState);
     drv.n = ctx->n;
     drv.nnz = ctx->nnz;
@@ -111,6 +112,9 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     const long long newtonIterationsAtStart = gNewtonIters;
     drv.stateVectorScalingMode = stateVectorScalingMode;
     drv.convEpsPerEq = convEpsPerEq;
+    // The caller refilling the bank asks the call to return once that many of its scenarios have ended, the others still
+    // solving (0: when every scenario has ended); the next call goes on with them and the scenarios it installs.
+    drv.pauseAtEnded = pauseAtEnded;
     // The scenarios of this solve into their slots (scenario_install.cuh): each starts from the base state, targets and
     // row modes, then takes its own. The row modes are PER-SCENARIO and mutated in place by the outer loops; x0 is either
     // the base or a FULL per-scenario state (the warm restart of a strategy pair re-solving from its parent's state).
@@ -152,7 +156,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     CUDA_CHECK(cudaMemsetAsync(ctx->dIdentityLane.p, 0, static_cast<size_t>(nS) * sizeof(char), ctx->stream));
     // The installed scenarios start their solve (SlotSolveState): solving, live, MAX_ITERATION_REACHED until they converge
     // or fail, at the first loop of OLF's sequence.
-    ctx->slotState.start(installedFlags(ctx));
+    ctx->slotState.start(nS, installedSlots(ctx));
     std::vector<char>& active = drv.active;
 
     BatchResult& res = drv.res;
@@ -239,12 +243,12 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         CUDA_CHECK(cudaMemcpy(ctx->dReactiveLimitSvcMaxBPerScenario.p, dynMax.data(), dynMax.size() * sizeof(double), cudaMemcpyHostToDevice));
     }
     drv.usePerScenarioReactiveLimits = ctx->nReactiveLimitEntries > 0 && (ctx->nReactiveCapabilityCurves > 0 || reactiveLimitDeltaOverrides.entries() > 0 || ctx->nForcedTargetQLimitEntries > 0);
-    const bool& usePerScenarioReactiveLimits = drv.usePerScenarioReactiveLimits;
-    if (usePerScenarioReactiveLimits && (!ctx->dReactiveLimitMinQPerScenario.p || !ctx->dReactiveLimitLoadQPerScenario.p)) {   // curves allocate these on their own
-                                                            // table upload; a Q override alone must too, and a
-                                                            // guard that names only ONE of them silently leaves
-                                                            // the others null on a curve network (measured: the
-                                                            // whole precompute fell back to the CPU)
+    // The per-scenario limits exist, and the seed computes each installed scenario's (solve_seed.cu), whether or not this
+    // call's scenarios read them: an install whose overrides turn usePerScenarioReactiveLimits on, while scenarios of
+    // earlier calls still solve, has them read theirs. Curves allocate these on their own table upload; a Q override
+    // alone must too, and a guard that names only ONE of them silently leaves the others null on a curve network
+    // (measured: the whole precompute fell back to the CPU).
+    if (ctx->nReactiveLimitEntries > 0 && (!ctx->dReactiveLimitMinQPerScenario.p || !ctx->dReactiveLimitLoadQPerScenario.p)) {
         ctx->dReactiveLimitLoadQPerScenario.alloc(static_cast<size_t>(ctx->nScenarios) * ctx->nReactiveLimitEntries * sizeof(double));
         ctx->dReactiveLimitMinQPerScenario.alloc(static_cast<size_t>(ctx->nScenarios) * ctx->nReactiveLimitEntries * sizeof(double));
         ctx->dReactiveLimitMaxQPerScenario.alloc(static_cast<size_t>(ctx->nScenarios) * ctx->nReactiveLimitEntries * sizeof(double));
@@ -417,8 +421,19 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     //      comparison with the CPU is needed to see. Re-fills the diagnostic q at the final state
     //      for every live scenario, refreshes the curve limits at the final targets, and prints one
     //      line per violating (scenario, entry).
-    traceReactiveLimitsAudit(ctx, drv, drv.reactiveLimitsAuditLog);
+    if (drv.nActive == 0) {                                  // it recomputes limits: not while scenarios still solve
+        traceReactiveLimitsAudit(ctx, drv, drv.reactiveLimitsAuditLog);
+    }
     tracePhaseTime(ctx, drv);
+    // The scenarios that ended - every one, or those that had when the call paused for a refill - are what the call hands
+    // back: they become the selection, so the result rows and every readback return their rows, in the order they were
+    // installed. A paused call has at least pauseAtEnded of them, a finished one every scenario it held.
+    std::vector<int> ended = ctx->slotState.handBack();
+    bool wholeBank = static_cast<int>(ended.size()) == nS;
+    for (int j = 0; wholeBank && j < nS; j++) {
+        wholeBank = ended[j] == j;
+    }
+    ctx->installSlots = wholeBank ? std::vector<int>() : std::move(ended);
     ctx->newtonLoopIterations = static_cast<int>(gNewtonIters - newtonIterationsAtStart);
     CUDA_CHECK(cudaMemcpy(res.x.data(), ctx->dX.p, nTot * sizeof(double), cudaMemcpyDeviceToHost));
     // The n x nS state is handed over, not copied (the next call sizes it again); the per-slot status, iterations and

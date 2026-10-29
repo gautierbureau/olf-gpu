@@ -25,6 +25,15 @@ inline const char* installMaskOrNull(const BatchSolverContext* ctx) {
     return ctx->installSlots.empty() ? nullptr : static_cast<const char*>(ctx->dInstallMask.p);
 }
 
+// The installed slots' bank slots, in the install's order.
+inline std::vector<int> installedSlots(const BatchSolverContext* ctx) {
+    std::vector<int> slots(installedSlotCount(ctx));
+    for (int j = 0; j < static_cast<int>(slots.size()); j++) {
+        slots[j] = installedSlot(ctx, j);
+    }
+    return slots;
+}
+
 // Per slot of the bank, 1 for an installed one (every slot when the install covers the bank).
 inline std::vector<char> installedFlags(const BatchSolverContext* ctx) {
     std::vector<char> flags(ctx->nScenarios, ctx->installSlots.empty() ? 1 : 0);

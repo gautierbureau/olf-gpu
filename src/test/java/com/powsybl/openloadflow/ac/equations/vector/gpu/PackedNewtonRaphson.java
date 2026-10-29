@@ -128,7 +128,7 @@ final class PackedNewtonRaphson {
                     new int[0], new double[0], new int[0], new double[0], new double[0], new double[0], new double[0], null, null, null, null, null, null, null, null,
                     maxIter, tol, 0.0, 0.0, 0.0, stateVectorScalingMode, maxDv, maxDphi, varType, null, null, null, null, null, null, 0,
                     com.powsybl.openloadflow.ac.outerloop.ReactiveLimitsOuterLoop.MAX_SWITCH_PQ_PV_DEFAULT_VALUE,
-                    0, 0, 0, null, null)[0];
+                    0, 0, 0, null, null, 0)[0];
         } finally {
             BatchSolveNative.destroyBatchContext(handle);
         }
@@ -188,7 +188,7 @@ final class PackedNewtonRaphson {
                         new int[0], new double[0], new int[0], new double[0], new double[0], new double[0], new double[0], null, null, null, null, null, null, null, null,
                         maxIter, tol, reactiveLimitTol, slackDistTol, 0.0, 0, 0.0, 0.0, null, null, null, null, null, null, null, 0,
                         com.powsybl.openloadflow.ac.outerloop.ReactiveLimitsOuterLoop.MAX_SWITCH_PQ_PV_DEFAULT_VALUE,   // OLF's cap: 0 means never switch back
-                        0, 0, 0, null, null);
+                        0, 0, 0, null, null, 0);
             } finally {
                 BatchSolveNative.destroyBatchContext(handle);
             }

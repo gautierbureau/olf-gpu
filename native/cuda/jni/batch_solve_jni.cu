@@ -106,7 +106,8 @@ OLF_JNI(ac_solver_gpu, BatchSolveNative, solveBatchContext)(
         jintArray jReactiveLimitsSeedState,
         jintArray jR1OvSlotElem, jdoubleArray jR1OvVal,
         jint maxOuterProductive, jint maxPqPvSwitch, jint rejectSlackDistributionFailure, jint skipReactiveLimitsPhase,
-        jint nBaseClosedZeroImpedanceBranches, jintArray jZeroImpedanceBranchCloseScenarioElement, jintArray jZeroImpedanceBranchOpenScenarioElement) {
+        jint nBaseClosedZeroImpedanceBranches, jintArray jZeroImpedanceBranchCloseScenarioElement, jintArray jZeroImpedanceBranchOpenScenarioElement,
+        jint pauseAtEnded) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx != nullptr) {
         ctx->solveCount++;
@@ -300,7 +301,8 @@ OLF_JNI(ac_solver_gpu, BatchSolveNative, solveBatchContext)(
                                 nBaseClosedZeroImpedanceBranches, static_cast<int>(zeroImpedanceBranchCloseScenarioElementVec.size() / 2),
                                 zeroImpedanceBranchCloseScenarioElementVec.empty() ? nullptr : zeroImpedanceBranchCloseScenarioElementVec.data(),
                                 static_cast<int>(zeroImpedanceBranchOpenScenarioElementVec.size() / 2),
-                                zeroImpedanceBranchOpenScenarioElementVec.empty() ? nullptr : zeroImpedanceBranchOpenScenarioElementVec.data());
+                                zeroImpedanceBranchOpenScenarioElementVec.empty() ? nullptr : zeroImpedanceBranchOpenScenarioElementVec.data(),
+                                pauseAtEnded);
         if (traceOn(Trace::PHASE_TIME)) {
             solveNs += nowNs() - tSolve0;
         }
@@ -316,8 +318,8 @@ OLF_JNI(ac_solver_gpu, BatchSolveNative, solveBatchContext)(
         return nullptr;
     }
 
-    // Pack per-scenario results: [state(n), iterations, finalMismatch, convergenceStatus], one row per installed scenario
-    // in the install's order.
+    // Pack per-scenario results: [state(n), iterations, finalMismatch, convergenceStatus], one row per scenario the solve
+    // handed back (the selection), in the order they were installed.
     long long tPack0 = traceOn(Trace::PHASE_TIME) ? nowNs() : 0;
     int n = ctx->n;
     int nS = installedSlotCount(ctx);

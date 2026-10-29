@@ -28,6 +28,7 @@ struct DriverPass {
     bool outerLoopTiming = false;
     int nActive = 0;
     int maxBatchedIterations = 0;                           // the Newton loop's safety cap (see solveBatchContext)
+    int pauseAtEnded = 0;                                    // return once that many scenarios have ended (0: at the end)
     std::vector<double> hF;
     int maxPqPvSwitch = 0;
     int reactiveLimitsDecisionLogScenario = -1;

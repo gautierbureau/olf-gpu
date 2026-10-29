@@ -688,7 +688,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                     null, null, null, null, null,
                     driverMaxOuterIterations, driverMaxPqPvSwitch, driverRejectSlackDistributionFailure ? 1 : 0,
                     0,                                       // skipReactiveLimitsPhase: the driver owns RL
-                    0, null, null)[0];
+                    0, null, null, 0)[0];
             long t2 = System.nanoTime();
             // the RL state only a run with the ReactiveLimits loop moves (every entry stays NONE otherwise)
             reactiveLimitsFinalState = driverReactiveLimitsOuterLoop() != null && cachedData.reactiveLimits().voltageRow().length > 0

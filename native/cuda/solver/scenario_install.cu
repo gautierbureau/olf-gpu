@@ -33,10 +33,7 @@ void installScenarios(BatchSolverContext* ctx, const ScenarioInputs& in) {
     const int n = ctx->n;
     const int nS = ctx->nScenarios;
     const int nLocal = installedSlotCount(ctx);
-    std::vector<int> slots(nLocal);
-    for (int j = 0; j < nLocal; j++) {
-        slots[j] = installedSlot(ctx, j);
-    }
+    std::vector<int> slots = installedSlots(ctx);
     ctx->dInstallSlots.upload(slots.data(), slots.size() * sizeof(int));
     std::vector<char> flags = installedFlags(ctx);
     ctx->dInstallMask.upload(flags.data(), flags.size());

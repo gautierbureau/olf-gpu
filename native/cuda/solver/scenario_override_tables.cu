@@ -10,6 +10,7 @@
 #include "../common/check.cuh"
 #include "../common/launch.cuh"
 #include "../common/codes/gpu_pi_model_column.cuh"
+#include "scenario_install.cuh"
 #include "scenario_override_tables.cuh"
 
 namespace olfgpu {
@@ -124,7 +125,8 @@ void installClosedBranchParameterOverrides(BatchSolverContext* ctx, int nOverrid
     if (nsc > 0) {
         ctx->dClosedBranchParameterOverrideTapMoved.ensure(nsc);
         ctx->dClosedBranchParameterOverridePiModel.ensure(nsc * GpuPiModelColumn::COUNT * sizeof(double));
-        CUDA_CHECK(cudaMemset(ctx->dClosedBranchParameterOverrideTapMoved.p, 0, nsc));
+        // the installed slots' taps start where their scenarios put them; a slot still solving keeps the ones its loops moved
+        memsetInstalledRows(ctx, ctx->dClosedBranchParameterOverrideTapMoved.p, ctx->nClosedBranchParameterOverrideControllers, 0);
     }
 }
 
@@ -137,7 +139,8 @@ void installShuntAdmittanceOverrides(BatchSolverContext* ctx, int nOverrides, co
     if (nsc > 0) {
         ctx->dShuntAdmittanceOverrideSectionsMoved.ensure(nsc);
         ctx->dShuntAdmittanceOverrideControllerDelta.ensure(nsc * 2 * sizeof(double));
-        CUDA_CHECK(cudaMemset(ctx->dShuntAdmittanceOverrideSectionsMoved.p, 0, nsc));
+        // the installed slots' sections start where their scenarios put them; a slot still solving keeps its loop's moves
+        memsetInstalledRows(ctx, ctx->dShuntAdmittanceOverrideSectionsMoved.p, ctx->nShuntAdmittanceOverrideControllers, 0);
     }
 }
 

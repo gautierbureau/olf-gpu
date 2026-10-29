@@ -119,12 +119,13 @@ OLF_JNI(ac_equations_vector_gpu, RemoteVoltageControlNative, setBatchReMergedVol
                                         voltageTargets.data());
     ctx->reMergedVoltageTargetControllers.install(ctx->nScenarios, ctx->installSlots, static_cast<int>(runs.itemInts.size() / 2),
                                                   runs.itemInts.data(), nullptr);
-    if (ctx->reMergedVoltageTargets.entries() > 0) {
-        size_t scenarioEntries = static_cast<size_t>(ctx->nScenarios) * ctx->nReactiveLimitEntries;
-        std::vector<char> holds(scenarioEntries, 0);
-        std::vector<int> voltageRow(scenarioEntries, -1);
-        ctx->dReactiveLimitHoldsReMergedVoltageTarget.upload(holds.data(), scenarioEntries);
-        ctx->dReactiveLimitReMergedVoltageRow.upload(voltageRow.data(), scenarioEntries * sizeof(int));
+    size_t scenarioEntries = static_cast<size_t>(ctx->nScenarios) * ctx->nReactiveLimitEntries;
+    if (ctx->reMergedVoltageTargets.entries() > 0 && ctx->dReactiveLimitReMergedVoltageRow.cap < scenarioEntries * sizeof(int)) {
+        // the bank's first re-merge: nothing held anywhere (a fresh allocation is zeroed, the rows are -1); the solve's
+        // start resets its installed slots' rows (launchReMergedVoltageTargetRowUpdate), never a slot still solving
+        ctx->dReactiveLimitHoldsReMergedVoltageTarget.ensure(scenarioEntries);
+        ctx->dReactiveLimitReMergedVoltageRow.ensure(scenarioEntries * sizeof(int));
+        CUDA_CHECK(cudaMemset(ctx->dReactiveLimitReMergedVoltageRow.p, 0xFF, scenarioEntries * sizeof(int)));
     }
 }
 

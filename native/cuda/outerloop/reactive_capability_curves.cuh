@@ -48,7 +48,7 @@ __global__ void reactiveCapabilityCurveLimitsBatch(int nReactiveLimitEntries, in
                                    const int* reactiveCapabilityCurveOverrideStart, const int* reactiveCapabilityCurveOverrideCurve, const double* reactiveCapabilityCurveOverrideStepScale,
                                    const double* distributedSlackGeneratorMove, const char* distributedSlackGeneratorMoveValid, const double* distributedSlackGeneratorAnchor, const double* distributedSlackGeneratorInitialMove, int nDistributedSlackGenerators,
                                    const int* distributedSlackBusPhiRow, const int* distributedSlackBusRowOverride, int nDistributedSlackBuses, const int* distributedSlackGeneratorBus,
-                                   double* minQDyn, double* maxQDyn, double* loadQDyn);
+                                   double* minQDyn, double* maxQDyn, double* loadQDyn, const char* active);
 
 }  // namespace olfgpu
 

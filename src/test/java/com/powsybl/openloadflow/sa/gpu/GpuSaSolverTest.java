@@ -313,6 +313,34 @@ class GpuSaSolverTest extends AbstractGpuSaTest {
         }
     }
 
+    /** The scenarios' outer loops run inside the batched Newton loop: a scenario whose solve converges is checked at
+     *  once and, when a check is UNSTABLE, restarts its Newton in the same batched iteration, while its chunk mates go
+     *  on with theirs. A chunk then takes one batched iteration more than the most Newton iterations one of its
+     *  scenarios took over all its solves, whatever the others do. The batch used to solve in passes, each as long as
+     *  its slowest scenario's solve plus a test iteration of its own: l0d's re-solve waited for the first pass to end. */
+    @Test
+    void deviceRestartsAScenarioWithoutWaitingForItsChunkMates() {
+        assumeTrue(GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = pilotSelfSwitchingToPqNetwork(80);
+        List<Contingency> ctgs = List.of(new Contingency("l0p", new BranchContingency("l0p")),
+                new Contingency("l0d", new BranchContingency("l0d")));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setDistributedSlack(false).setUseReactiveLimits(true);
+        Map<String, int[]> stats = new HashMap<>();
+        try {
+            GpuBatchedSecurityAnalysisSolver.recordOuterLoopStatsForTests(stats);
+            assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
+            assertEquals(2, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(), "both outages on the device");
+        } finally {
+            GpuBatchedSecurityAnalysisSolver.recordOuterLoopStatsForTests(null);
+        }
+        // {solve passes, first solve's Newton iterations, total Newton iterations, checks, the chunk's batched iterations}
+        assertEquals(2, stats.get("l0d")[0], "l0d switches g1 to PQ: two solves");
+        assertEquals(stats.get("l0p")[4], stats.get("l0d")[4], "one chunk");
+        int mostNewtonIterations = Math.max(stats.get("l0p")[2], stats.get("l0d")[2]);
+        assertEquals(mostNewtonIterations + 1, stats.get("l0d")[4], "the chunk's batched Newton iterations");
+    }
+
     /** The robust solve mode (6: one matrix object repointed per scenario, cuDSS pivoting on the raw matrix - the
      *  retry of a rejected scenario, or a base load flow that fell into it) runs the in-kernel transformer, shunt
      *  and secondary voltage control loops like the UBATCH modes do, solving their sensitivities scenario by
@@ -481,6 +509,51 @@ class GpuSaSolverTest extends AbstractGpuSaTest {
         // one more step allowed: CONVERGED on both arms, solved on the device
         ext.setMaxNewtonRaphsonIterations(budget);
         assertGpuMatchesCpu(network, contingencies, 1e-12, lfp);
+    }
+
+    /** At its Newton budget the device scores the solve's last linear solve, J.dx - B against the mismatch, to tell OLF's
+     *  MAX_ITERATION_REACHED (the budget spent on sound steps) from a factorization that went wrong. It scored it after
+     *  the budget's F-only fill, which keeps the Jacobian of that solve but whose reactive power distribution, zero
+     *  impedance and slack distribution fills add into it all the same: the score saw those terms twice, a sound solve
+     *  looked like a wrong factorization, and the scenario was REJECTED to a robust retry that recovered nothing, then
+     *  to a CPU replay that gave OLF's own MAX_ITERATION_REACHED (rte6515 busbar sections: 57 contingencies; on
+     *  network.xiidm every MAX_ITERATION_REACHED of the branch and busbar scopes). Same budget search as
+     *  {@link #deviceReportsMaxIterationWhenConvergingOnTheLastAllowedStep}, on three generators sharing a remote
+     *  voltage control, whose reactive power distribution equations hold such terms. */
+    @Test
+    void deviceReportsMaxIterationWithSharedRemoteVoltageControl() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = com.powsybl.openloadflow.network.VoltageControlNetworkFactory.createWithGeneratorRemoteControl();
+        network.newLine().setId("L14")
+                .setVoltageLevel1("vl1").setBus1("b1").setVoltageLevel2("vl4").setBus2("b4")
+                .setR(1.5).setX(40).setG1(0).setB1(0).setG2(0).setB2(0).add();
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setDistributedSlack(false).setUseReactiveLimits(false)
+                .setVoltageInitMode(com.powsybl.loadflow.LoadFlowParameters.VoltageInitMode.PREVIOUS_VALUES);
+        com.powsybl.openloadflow.OpenLoadFlowParameters ext = com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp);
+        // the solved base state on the network, so both arms' base load flow needs a single step
+        new com.powsybl.loadflow.LoadFlow.Runner(new com.powsybl.openloadflow.OpenLoadFlowProvider(commonTestConfig.matrixFactory()))
+                .run(network, new com.powsybl.loadflow.LoadFlowParameters().setDistributedSlack(false).setUseReactiveLimits(false));
+        List<Contingency> contingencies = List.of(new Contingency("L14", new BranchContingency("L14")));
+        com.powsybl.security.SecurityAnalysisParameters sap = new com.powsybl.security.SecurityAnalysisParameters();
+        sap.setLoadFlowParameters(lfp);
+        int budget = -1;                                     // the smallest budget the CPU converges under
+        for (int m = 2; m <= 30 && budget < 0; m++) {
+            ext.setMaxNewtonRaphsonIterations(m);
+            SecurityAnalysisResult cpu = runSecurityAnalysis(network, contingencies, java.util.Collections.emptyList(), sap);
+            assertEquals(com.powsybl.loadflow.LoadFlowResult.ComponentResult.Status.CONVERGED,
+                    cpu.getPreContingencyResult().getStatus(), "the base must converge under budget " + m);
+            if (cpu.getPostContingencyResults().get(0).getStatus() == com.powsybl.security.PostContingencyComputationStatus.CONVERGED) {
+                budget = m;
+            }
+        }
+        assertTrue(budget >= 3, "the contingency must need at least two steps, smallest converging budget " + budget);
+        ext.setMaxNewtonRaphsonIterations(budget - 1);
+        GpuBatchScopeCensus.reset();
+        assertGpuMatchesCpuNoEngage(network, contingencies, 1e-12, lfp);
+        assertEquals(1L, GpuBatchScopeCensus.snapshot().getOrDefault("DEVICE:MAX_ITERATION_REACHED", 0L),
+                "the device itself must have decided it; census=" + GpuBatchScopeCensus.snapshot());
     }
 
     @Test

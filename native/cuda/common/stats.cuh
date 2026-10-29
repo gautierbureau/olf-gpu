@@ -17,24 +17,25 @@
 #include "codes/gpu_outer_loop_kind.cuh"
 #include "trace.cuh"
 
-// OLF_GPU_PHASE_TIME accounting: how much of a solveBatchContext call is device outer-loop passes
-// vs Newton iterations. A pass that re-solves is the expensive one; a pass that only re-checks is not.
-extern long long gOuterPasses;
+// OLF_GPU_PHASE_TIME accounting: the batched Newton loops (one per solveBatchContext call) and the scenarios' restarts
+// in place (an UNSTABLE check made the scenario re-solve).
+extern long long gNewtonLoops;
+extern long long gRestarts;
 
-// OLF_GPU_PHASE_TIME: where the outer-loop driver's time goes. Index = the GpuOuterLoopKind that TRIGGERED a
-// re-solve (the loop whose check changed something), or the loop being CHECKED; the first solve of a call is apart.
-extern double gOuterLoopFirstSolveMilliseconds, gOuterLoopReSolveMilliseconds[GpuOuterLoopKind::COUNT], gOuterLoopCheckMilliseconds[GpuOuterLoopKind::COUNT];
-extern long long gOuterLoopFirstSolveScenarios, gOuterLoopReSolveScenarios[GpuOuterLoopKind::COUNT], gOuterLoopReSolvePasses[GpuOuterLoopKind::COUNT];
-extern long long gOuterLoopFirstSolveLaneIterations, gOuterLoopReSolveLaneIterations[GpuOuterLoopKind::COUNT], gOuterLoopFirstSolveWidthIterations, gOuterLoopReSolveWidthIterations[GpuOuterLoopKind::COUNT];
-extern long long gOuterLoopCheckPasses[GpuOuterLoopKind::COUNT], gOuterLoopFirstSolvePasses;
+// OLF_GPU_PHASE_TIME: where the Newton loops' time and work go. The scenarios' solves by what started them, their
+// first solve or the check of the GpuOuterLoopKind (index) that TRIGGERED a re-solve; the checks by the loop CHECKED.
+extern double gNewtonLoopMilliseconds, gOuterLoopCheckMilliseconds[GpuOuterLoopKind::COUNT];
+extern long long gNewtonLoopWidthIterations;
+extern long long gOuterLoopFirstSolveScenarios, gOuterLoopReSolveScenarios[GpuOuterLoopKind::COUNT];
+extern long long gOuterLoopFirstSolveLaneIterations, gOuterLoopReSolveLaneIterations[GpuOuterLoopKind::COUNT];
+extern long long gOuterLoopCheckRounds[GpuOuterLoopKind::COUNT];
 
 inline double nowMilliseconds() {
     return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
 extern long long gNewtonIters;
-extern int gLastPassIters;                                   // inner-Newton steps taken by the pass just finished
-extern long long gSolvePasses;
+extern int gNewtonLoopIteration;                             // the batched iteration the Newton loop is at
 extern long long gActiveIterSum;
 extern long long gWidthIterSum;
 extern long long gCompactIters;

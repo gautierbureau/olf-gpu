@@ -20,7 +20,7 @@ else:
     for l in open(log, errors='replace'):
         m = re.match(r'GPU_OL_STATS ctg=(\S+) passes=(\d+) firstNr=(\d+) totalNr=(\d+) status=(\S+)', l)
         if m: last[m.group(1)] = (int(m.group(2)), int(m.group(3)), int(m.group(4)), m.group(5))
-        m = re.match(r'GPU_OL_TIME re-solve trigger=(\S+) passes=\d+ ms=\S+ scenarioSolves=(\d+)', l)
+        m = re.match(r'GPU_OL_TIME re-solve trigger=(\S+) scenarioSolves=(\d+)', l)
         if m: by_type[m.group(1)] = int(m.group(2))   # cumulative print: the last one wins
     for c, (p, f, t, status) in last.items():
         if status != '0': continue

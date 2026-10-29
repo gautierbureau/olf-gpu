@@ -60,11 +60,12 @@ __global__ void reactiveCapabilityCurveLimitsBatch(int nReactiveLimitEntries, in
                                    const int* reactiveCapabilityCurveOverrideStart, const int* reactiveCapabilityCurveOverrideCurve, const double* reactiveCapabilityCurveOverrideStepScale,
                                    const double* distributedSlackGeneratorMove, const char* distributedSlackGeneratorMoveValid, const double* distributedSlackGeneratorAnchor, const double* distributedSlackGeneratorInitialMove, int nDistributedSlackGenerators,
                                    const int* distributedSlackBusPhiRow, const int* distributedSlackBusRowOverride, int nDistributedSlackBuses, const int* distributedSlackGeneratorBus,
-                                   double* minQDyn, double* maxQDyn, double* loadQDyn) {
+                                   double* minQDyn, double* maxQDyn, double* loadQDyn, const char* active) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nReactiveLimitEntries * nScenarios) return;
     int i = tid % nReactiveLimitEntries;
     int s = tid / nReactiveLimitEntries;
+    if (active != nullptr && !active[s]) return;          // the scenarios being checked: the others may be mid-Newton
     double mn = reactiveLimitMinQ[i];
     double mx = reactiveLimitMaxQ[i];
     double lq = reactiveLimitLoadQ[i];

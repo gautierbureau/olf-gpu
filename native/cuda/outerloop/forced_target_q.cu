@@ -106,9 +106,10 @@ __global__ void forcedTargetQLimitsBatch(int nForcedTargetQ, int nS, int n, int 
                                          const double* forcedTargetQPreDistribution, const double* distributedSlackGeneratorMove, const char* distributedSlackGeneratorMoveValid,
                                          const double* distributedSlackGeneratorAnchor, const double* distributedSlackGeneratorInitialMove, const int* distributedSlackBusPhiRow, const int* distributedSlackBusRowOverride, int nLost, const int* lost,
                                          const char* distributedSlackIslanded, const int* mode, const double* target,
-                                         double* minQDyn, double* maxQDyn) {
+                                         double* minQDyn, double* maxQDyn, const char* active) {
     int s = blockIdx.x * blockDim.x + threadIdx.x;
     if (s >= nS) return;
+    if (active != nullptr && !active[s]) return;
     for (int e = 0; e < nForcedTargetQ; e++) {
         int reactiveLimitEntry = forcedTargetQIndices[e * 7 + 6];
         if (reactiveLimitEntry < 0 || !forcedTargetQEntryLive(s, e, n, nDistributedSlackBuses, forcedTargetQIndices, nLost, lost, distributedSlackIslanded, mode)) continue;
@@ -121,7 +122,7 @@ __global__ void forcedTargetQLimitsBatch(int nForcedTargetQ, int nS, int n, int 
 }
 
 // forceTargetQInReactiveLimits on voltage-controlled buses: after every rebuild of the dynamic reactive limits.
-void launchForcedTargetQLimits(BatchSolverContext* ctx, int nS, int n) {
+void launchForcedTargetQLimits(BatchSolverContext* ctx, int nS, int n, const char* active) {
     if (ctx->nForcedTargetQLimitEntries <= 0) return;
     forcedTargetQLimitsBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(ctx->nForcedTargetQ, nS, n, ctx->nDistributedSlackBuses, ctx->nDistributedSlackGenerators, ctx->nReactiveLimitEntries,
             ctx->forcedTargetQExtrapolate, ctx->dForcedTargetQIndices.as<int>(), ctx->dForcedTargetQParameters.as<double>(), ctx->dForcedTargetQPoints.as<double>(),
@@ -131,7 +132,7 @@ void launchForcedTargetQLimits(BatchSolverContext* ctx, int nS, int n) {
             ctx->nDistributedSlackBuses > 0 ? ctx->dDistributedSlackBusPhiRow.as<int>() : nullptr, ctx->nDistributedSlackBusRowOverrides > 0 ? ctx->dDistributedSlackBusRowOverride.as<int>() : nullptr,
             ctx->nDistributedSlackLostGenerators, ctx->nDistributedSlackLostGenerators > 0 ? ctx->dDistributedSlackLostGenerators.as<int>() : nullptr,
             ctx->nDistributedSlackIslanded > 0 ? ctx->dDistributedSlackIslanded.as<char>() : nullptr, ctx->dMode.as<int>(),
-            ctx->dTarget.as<double>(), ctx->dReactiveLimitMinQPerScenario.as<double>(), ctx->dReactiveLimitMaxQPerScenario.as<double>());
+            ctx->dTarget.as<double>(), ctx->dReactiveLimitMinQPerScenario.as<double>(), ctx->dReactiveLimitMaxQPerScenario.as<double>(), active);
 }
 
 }  // namespace olfgpu

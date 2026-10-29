@@ -158,15 +158,15 @@ void traceReactiveLimitsSwitches(BatchSolverContext* ctx, DriverPass& drv, std::
                     CUDA_CHECK(cudaMemcpy(&switchCount, ctx->dReactiveLimitPvPqSwitchCount.as<char>() + scenarioEntry, 1, cudaMemcpyDeviceToHost));
                     char localOverride = 0;
                     double localTargetV = 0.0;
-                    if (ctx->nReactiveLimitLocalOverrides > 0) {
-                        CUDA_CHECK(cudaMemcpy(&localOverride, ctx->dReactiveLimitLocalOverride.as<char>() + scenarioEntry, 1, cudaMemcpyDeviceToHost));
-                        CUDA_CHECK(cudaMemcpy(&localTargetV, ctx->dReactiveLimitLocalTargetV.as<double>() + scenarioEntry, sizeof(double), cudaMemcpyDeviceToHost));
+                    if (ctx->reactiveLimitLocalOverride.on()) {
+                        CUDA_CHECK(cudaMemcpy(&localOverride, ctx->reactiveLimitLocalOverride.device() + scenarioEntry, 1, cudaMemcpyDeviceToHost));
+                        CUDA_CHECK(cudaMemcpy(&localTargetV, ctx->reactiveLimitLocalTargetV.device() + scenarioEntry, sizeof(double), cudaMemcpyDeviceToHost));
                     }
                     char monitored = 0;
                     CUDA_CHECK(cudaMemcpy(&monitored, ctx->dReactiveLimitFlags.as<char>() + entry, 1, cudaMemcpyDeviceToHost));
                     char islanded = 0;
-                    if (ctx->nReactiveLimitIslanded > 0) {
-                        CUDA_CHECK(cudaMemcpy(&islanded, ctx->dReactiveLimitIslanded.as<char>() + scenarioEntry, 1, cudaMemcpyDeviceToHost));
+                    if (ctx->reactiveLimitIslanded.on()) {
+                        CUDA_CHECK(cudaMemcpy(&islanded, ctx->reactiveLimitIslanded.device() + scenarioEntry, 1, cudaMemcpyDeviceToHost));
                     }
                     char checkActive = 0;
                     CUDA_CHECK(cudaMemcpy(&checkActive, ctx->dOuterLoopCheckActive.as<char>() + s, 1, cudaMemcpyDeviceToHost));
@@ -338,7 +338,7 @@ void traceReactiveLimitsAudit(BatchSolverContext* ctx, DriverPass& drv, std::vec
         if (ctx->structure->openBranch.elementCount) fillOpenBranchBatch<<<grid(ctx->structure->openBranch.elementCount * nS), BLOCK, 0, ctx->stream>>>(ctx->structure->openBranch.elementCount, nS, n, nnz, ctx->nElements, ctx->openBranchOffset, ctx->structure->openBranch.parameters.as<double>(), ctx->structure->openBranch.indices.as<int>(), ctx->structure->openBranch.destination.as<int>(), ctx->dX.as<double>(), nullptr, ctx->dQbuf.as<double>(), ctx->dDisabled.as<char>(), ctx->dOuterLoopCheckActive.as<char>(), nullptr, nullptr, nullptr, 0, ReactiveRelocationTables{}, scenarioMajorLayout(nS));
         if (ctx->structure->shunt.elementCount) fillShuntBatch<<<grid(ctx->structure->shunt.elementCount * nS), BLOCK, 0, ctx->stream>>>(ctx->structure->shunt.elementCount, nS, n, nnz, ctx->nElements, ctx->shuntOffset, ctx->structure->shunt.parameters.as<double>(), ctx->structure->shunt.indices.as<int>(), ctx->structure->shunt.destination.as<int>(), ctx->dX.as<double>(), nullptr, ctx->dQbuf.as<double>(), ctx->dDisabled.as<char>(), ctx->dOuterLoopCheckActive.as<char>(), shuntAdmittanceOverrides(ctx), nullptr, nullptr, nullptr, 0, ReactiveRelocationTables{}, scenarioMajorLayout(nS));
         if (ctx->structure->nLoadModelTerms) fillLoadModelBatch<<<grid(ctx->structure->nLoadModelTerms * nS), BLOCK, 0, ctx->stream>>>(ctx->structure->nLoadModelTerms, nS, n, nnz, ctx->structure->dLoadModelParameters.as<double>(), ctx->structure->dLoadModelIndices.as<int>(), ctx->structure->dLoadModelDestination.as<int>(), ctx->dX.as<double>(), nullptr, ctx->dQbuf.as<double>(), ctx->dOuterLoopCheckActive.as<char>(), nullptr, nullptr, nullptr, scenarioMajorLayout(nS));
-        if (ctx->nZeroImpedanceBranch) fillZeroImpBatch<<<grid(ctx->nZeroImpedanceBranch * nS), BLOCK, 0, ctx->stream>>>(ctx->nZeroImpedanceBranch, nS, n, nnz, ctx->structure->dZeroImpedanceBranchParameters.as<double>(), ctx->structure->dZeroImpedanceBranchIndices.as<int>(), ctx->structure->dZeroImpedanceBranchDestination.as<int>(), ctx->dX.as<double>(), nullptr, ctx->dQbuf.as<double>(), ctx->dOuterLoopCheckActive.as<char>(), ctx->nBaseClosedZeroImpedanceBranches, ctx->nZeroImpedanceBranchCloseOverrides, ctx->dZeroImpedanceBranchCloseScenarioElement.as<int>(), ctx->nZeroImpedanceBranchOpenOverrides, ctx->dZeroImpedanceBranchOpenScenarioElement.as<int>(), nullptr, nullptr, nullptr, 0, ReactiveRelocationTables{}, ctx->nSpanningTreeOverrides, ctx->nSpanningTreeOverrides ? ctx->dSpanningTreeOverrideScenarioElementValue.as<int>() : nullptr, ctx->hasZeroImpedanceBranchMasks ? ctx->dZeroImpedanceBranchOpenMask.as<char>() : nullptr, ctx->hasZeroImpedanceBranchMasks ? ctx->dZeroImpedanceBranchCloseMask.as<char>() : nullptr, ctx->hasZeroImpedanceBranchMasks ? ctx->dSpanningTreeOverrideMask.as<char>() : nullptr, scenarioMajorLayout(nS));
+        if (ctx->nZeroImpedanceBranch) fillZeroImpBatch<<<grid(ctx->nZeroImpedanceBranch * nS), BLOCK, 0, ctx->stream>>>(ctx->nZeroImpedanceBranch, nS, n, nnz, ctx->structure->dZeroImpedanceBranchParameters.as<double>(), ctx->structure->dZeroImpedanceBranchIndices.as<int>(), ctx->structure->dZeroImpedanceBranchDestination.as<int>(), ctx->dX.as<double>(), nullptr, ctx->dQbuf.as<double>(), ctx->dOuterLoopCheckActive.as<char>(), ctx->nBaseClosedZeroImpedanceBranches, nullptr, nullptr, nullptr, 0, ReactiveRelocationTables{}, ctx->zeroImpedanceBranchOpenMask.device(), ctx->zeroImpedanceBranchCloseMask.device(), ctx->spanningTreeOverrideMask.device(), scenarioMajorLayout(nS));
         CUDA_CHECK(cudaMemsetAsync(ctx->dIdentityLane.p, 0, static_cast<size_t>(nS) * sizeof(char), ctx->stream));
         if (ctx->nRemoteMemberReactiveTerms > 0) {
             fillRemoteMemberQBatch<<<grid(ctx->nRemoteMemberReactiveTerms * nS), BLOCK, 0, ctx->stream>>>(ctx->nRemoteMemberReactiveTerms, nS, n,
@@ -364,9 +364,9 @@ void traceReactiveLimitsAudit(BatchSolverContext* ctx, DriverPass& drv, std::vec
                     ctx->dTarget.as<double>(),
                     ctx->reactiveLimitDeltaOverrides.view(), ctx->reactiveCapabilityCurveOverrides.view(),
                     ctx->nDistributedSlackGenerators > 0 ? ctx->dDistributedSlackGeneratorMove.as<double>() : nullptr,
-                    ctx->nDistributedSlackGenerators > 0 ? ctx->dDistributedSlackGeneratorMoveValid.as<char>() : nullptr, ctx->hasDistributedSlackGeneratorAnchor ? ctx->dDistributedSlackGeneratorAnchor.as<double>() : nullptr, ctx->hasDistributedSlackGeneratorInitialMove ? ctx->dDistributedSlackGeneratorInitialMove.as<double>() : nullptr, ctx->nDistributedSlackGenerators,
+                    ctx->nDistributedSlackGenerators > 0 ? ctx->dDistributedSlackGeneratorMoveValid.as<char>() : nullptr, ctx->distributedSlackGeneratorAnchor.deviceOrNull(), ctx->distributedSlackGeneratorInitialMove.deviceOrNull(), ctx->nDistributedSlackGenerators,
                     ctx->nDistributedSlackBuses > 0 ? ctx->dDistributedSlackBusPhiRow.as<int>() : nullptr,
-                    ctx->nDistributedSlackBusRowOverrides > 0 ? ctx->dDistributedSlackBusRowOverride.as<int>() : nullptr, ctx->nDistributedSlackBuses,
+                    ctx->distributedSlackBusRowOverride.deviceOrNull(), ctx->nDistributedSlackBuses,
                     ctx->nDistributedSlackGenerators > 0 ? ctx->distributedSlackGeneratorBus.as<int>() : nullptr,
                     ctx->dReactiveLimitMinQPerScenario.as<double>(), ctx->dReactiveLimitMaxQPerScenario.as<double>(),
                     ctx->dReactiveLimitLoadQPerScenario.as<double>(), nullptr);
@@ -404,16 +404,16 @@ void traceReactiveLimitsAudit(BatchSolverContext* ctx, DriverPass& drv, std::vec
                 ctx->nReactiveLimitRemoteEntries > 0 ? ctx->dReactiveLimitComparedVoltageRow.as<int>() : nullptr,
                 ctx->dReactiveLimitSvcMinB.as<double>(), ctx->dReactiveLimitSvcMaxB.as<double>(), ctx->dReactiveLimitBaseVSquared.as<double>(),
                     hasPerScenarioSvcSusceptanceLimits ? ctx->dReactiveLimitSvcMinBPerScenario.as<double>() : nullptr, hasPerScenarioSvcSusceptanceLimits ? ctx->dReactiveLimitSvcMaxBPerScenario.as<double>() : nullptr,
-                ctx->nReactiveLimitIslanded > 0 ? ctx->dReactiveLimitIslanded.as<char>() : nullptr,
+                ctx->reactiveLimitIslanded.deviceOrNull(),
                 ctx->reactiveLimitsRobustMode ? ctx->dReactiveLimitInitialTargetQ.as<double>() : nullptr,
                 ctx->reactiveLimitsRobustMinRealisticVoltage, ctx->reactiveLimitsRobustMaxRealisticVoltage, ctx->reactiveLimitsRobustMode,
                 reactiveLimitsDecisionLogScenario, ctx->dReactiveLimitsDecisionLog.p ? ctx->dReactiveLimitsDecisionLog.as<double>() : nullptr,
                 ctx->dReactiveLimitsDecisionLogCount.p ? ctx->dReactiveLimitsDecisionLogCount.as<int>() : nullptr, 999999,
                     pilotSelfReactiveLimitEntryOrNull(ctx), ctx->structure->nReactiveRelocationGroups,
-                    ctx->nReactiveLimitLocalOverrides > 0 ? ctx->dReactiveLimitLocalOverride.as<char>() : nullptr,
-                    ctx->nReactiveLimitLocalOverrides > 0 ? ctx->dReactiveLimitLocalTargetV.as<double>() : nullptr,
+                    ctx->reactiveLimitLocalOverride.deviceOrNull(),
+                    ctx->reactiveLimitLocalTargetV.deviceOrNull(),
                     ctx->dReactiveLimitFlags.p ? ctx->dReactiveLimitFlags.as<char>() : nullptr,
-                    ctx->nReactiveLimitComparedVoltageRowOverrides > 0 ? ctx->dReactiveLimitComparedVoltageRowOverride.as<int>() : nullptr,
+                    ctx->reactiveLimitComparedVoltageRowOverride.deviceOrNull(),
                     ctx->reMergedVoltageTargets.entries() > 0 ? ctx->dReactiveLimitHoldsReMergedVoltageTarget.as<char>() : nullptr,
                     ctx->reMergedVoltageTargets.entries() > 0 ? ctx->dReactiveLimitReMergedVoltageRow.as<int>() : nullptr,
                     nullptr, nullptr);
@@ -441,9 +441,9 @@ void traceReactiveLimitsAudit(BatchSolverContext* ctx, DriverPass& drv, std::vec
         CUDA_CHECK(cudaMemcpy(auditQLimitTypeBefore.data(), ctx->dReactiveLimitQLimitType.p, auditQLimitTypeBefore.size(), cudaMemcpyDeviceToHost));
         CUDA_CHECK(cudaMemcpy(auditVoltageRow.data(), ctx->dReactiveLimitVoltageRow.p, auditVoltageRow.size() * sizeof(int), cudaMemcpyDeviceToHost));
         CUDA_CHECK(cudaMemcpy(auditMode.data(), ctx->dMode.p, auditMode.size() * sizeof(int), cudaMemcpyDeviceToHost));
-        if (ctx->nReactiveLimitIslanded > 0) {
+        if (ctx->reactiveLimitIslanded.on()) {
             auditIslanded.resize(static_cast<size_t>(ctx->nReactiveLimitEntries) * nS);
-            CUDA_CHECK(cudaMemcpy(auditIslanded.data(), ctx->dReactiveLimitIslanded.p, auditIslanded.size(), cudaMemcpyDeviceToHost));
+            CUDA_CHECK(cudaMemcpy(auditIslanded.data(), ctx->reactiveLimitIslanded.device(), auditIslanded.size(), cudaMemcpyDeviceToHost));
         }
         std::vector<double> auditMinQ(static_cast<size_t>(ctx->nReactiveLimitEntries) * (ctx->nReactiveCapabilityCurves > 0 ? nS : 1)), auditMaxQ;
         auditMaxQ.resize(auditMinQ.size());

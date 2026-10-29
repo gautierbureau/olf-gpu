@@ -524,7 +524,7 @@ void areaInterchangeControlResetSolve(BatchSolverContext* ctx, DriverPass& drv) 
         return;
     }
     areaInterchangeControlResetSolveBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(nS, ctx->nDistributedSlackGenerators,
-            ctx->hasDistributedSlackGeneratorInitialMove ? ctx->dDistributedSlackGeneratorInitialMove.as<double>() : nullptr,
+            ctx->distributedSlackGeneratorInitialMove.deviceOrNull(),
             ctx->dDistributedSlackGeneratorMove.as<double>(), ctx->dDistributedSlackGeneratorMoveValid.as<char>(),
             ctx->dAreaInterchangeControlDistributedActivePower.as<double>());
 }
@@ -547,9 +547,9 @@ void areaInterchangeControlCheck(BatchSolverContext* ctx, DriverPass& drv) {
     t.nS = nS;
     t.nElements = ctx->nElements;
     t.slackRowBase = ctx->slackBusPhiRow;
-    t.slackRowOverride = ctx->hasSlackBusRowOverride ? ctx->dSlackBusRowOverride.as<int>() : nullptr;
+    t.slackRowOverride = ctx->slackBusRowOverride.deviceOrNull();
     t.slackTargetP = ctx->slackBusTargetP;
-    t.slackBusAnchorShift = drv.hasSlackBusAnchorShift ? drv.dSlackBusAnchorShift.as<double>() : nullptr;
+    t.slackBusAnchorShift = ctx->nDistributedSlackBuses > 0 ? ctx->slackBusAnchorShift.deviceOrNull() : nullptr;
     t.nAreas = ctx->nAreas;
     t.interchangeTarget = ctx->dAreaInterchangeTarget.as<double>();
     t.slackDistributionFactor = ctx->dAreaSlackDistributionFactor.as<double>();
@@ -566,13 +566,13 @@ void areaInterchangeControlCheck(BatchSolverContext* ctx, DriverPass& drv) {
     t.closedBranchParameterOverrides = closedBranchParameterOverrides(ctx);
     t.nBuses = ctx->nDistributedSlackBuses;
     t.busPhiRow = ctx->dDistributedSlackBusPhiRow.as<int>();
-    t.busRowOverride = ctx->nDistributedSlackBusRowOverrides > 0 ? ctx->dDistributedSlackBusRowOverride.as<int>() : nullptr;
+    t.busRowOverride = ctx->distributedSlackBusRowOverride.deviceOrNull();
     t.busArea = ctx->dDistributedSlackBusArea.as<int>();
     t.busGeneratorStart = ctx->dDistributedSlackBusGeneratorStart.as<int>();
     t.busGeneratorEnd = ctx->dDistributedSlackBusGeneratorEnd.as<int>();
     t.busBaseTargetP = ctx->dDistributedSlackBusBaseTargetP.as<double>();
-    t.busAnchorShift = drv.hasDistributedSlackBusAnchorShift ? drv.dDistributedSlackBusAnchorShift.as<double>() : nullptr;
-    t.islanded = ctx->nDistributedSlackIslanded > 0 ? ctx->dDistributedSlackIslanded.as<char>() : nullptr;
+    t.busAnchorShift = ctx->distributedSlackBusAnchorShift.deviceOrNull();
+    t.islanded = ctx->distributedSlackIslanded.deviceOrNull();
     t.nGenerators = nGenerators;
     t.generatorBus = ctx->distributedSlackGeneratorBus.as<int>();
     t.generatorArea = ctx->dDistributedSlackGeneratorArea.as<int>();

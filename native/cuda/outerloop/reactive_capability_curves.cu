@@ -160,16 +160,16 @@ CurveHvdcAcEmulationView curveHvdcAcEmulationView(BatchSolverContext* ctx) {
     c.hvdcStation = ctx->dReactiveCapabilityCurveHvdcStation.as<int>();
     c.nHvdcAcEmulation = ctx->nHvdcAcEmulation;
     if (ctx->nHvdcAcEmulation > 0) {
-        c.status = ctx->dHvdcAcEmulationStatus.as<int>();
-        c.appliedDelta1 = ctx->dHvdcAppliedDelta1.as<double>();
-        c.appliedDelta2 = ctx->dHvdcAppliedDelta2.as<double>();
+        c.status = ctx->hvdcAcEmulationStatus.device();
+        c.appliedDelta1 = ctx->hvdcAppliedDelta1.device();
+        c.appliedDelta2 = ctx->hvdcAppliedDelta2.device();
         c.hvdcAcEmulationParameters = ctx->dHvdcAcEmulationParameters.as<double>();
         c.bus1PhiColumn = ctx->dHvdcBus1PhiColumn.as<int>();
         c.bus2PhiColumn = ctx->dHvdcBus2PhiColumn.as<int>();
         c.hvdcElement = ctx->dHvdcElement.as<int>();
         c.disabled = ctx->dDisabled.as<char>();
         c.nElements = ctx->nElements;
-        c.contingencyOutage = ctx->dHvdcContingencyOutage.as<char>();
+        c.contingencyOutage = ctx->hvdcContingencyOutage.device();
         c.x = ctx->dX.as<double>();
     }
     return c;

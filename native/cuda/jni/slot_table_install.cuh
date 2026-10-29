@@ -10,9 +10,11 @@
 #include <jni.h>
 
 #include <algorithm>
+#include <string>
 #include <vector>
 
 #include "../solver/batch_context.cuh"
+#include "../solver/slot_rows.cuh"
 #include "../solver/slot_table.cuh"
 
 namespace olfgpu {
@@ -107,6 +109,30 @@ inline void installKeyedSlotTable(JNIEnv* env, BatchSolverContext* ctx, SlotTabl
         }
     }
     table.install(ctx->nScenarios, ctx->installSlots, static_cast<int>(values.size()), entries.data(), values.data());
+}
+
+namespace detail {
+inline void regionOf(JNIEnv* env, jdoubleArray a, jsize n, double* to) { env->GetDoubleArrayRegion(a, 0, n, to); }
+inline void regionOf(JNIEnv* env, jintArray a, jsize n, int* to) { env->GetIntArrayRegion(a, 0, n, to); }
+inline void regionOf(JNIEnv* env, jbyteArray a, jsize n, char* to) { env->GetByteArrayRegion(a, 0, n, reinterpret_cast<jbyte*>(to)); }
+}  // namespace detail
+
+// A dense per-scenario channel's Java rows into its SlotRows: `width` values per installed scenario, in the install's
+// order; null leaves the installed slots without values. Another length is the caller's bug: an IllegalArgumentException.
+template <typename T, typename JArray>
+inline void installSlotRows(JNIEnv* env, BatchSolverContext* ctx, SlotRows<T>& rows, size_t width, JArray jRows, const char* who) {
+    std::vector<T> values;
+    if (jRows != nullptr && width > 0) {
+        size_t want = static_cast<size_t>(installedSlotCount(ctx)) * width;
+        if (static_cast<size_t>(env->GetArrayLength(jRows)) != want) {
+            std::string message = std::string(who) + ": expected one row per installed scenario";
+            env->ThrowNew(env->FindClass("java/lang/IllegalArgumentException"), message.c_str());
+            return;
+        }
+        values.resize(want);
+        detail::regionOf(env, jRows, static_cast<jsize>(want), values.data());
+    }
+    rows.install(ctx->nScenarios, ctx->installSlots, width, values.empty() ? nullptr : values.data());
 }
 
 }  // namespace olfgpu

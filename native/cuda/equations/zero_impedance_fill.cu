@@ -28,10 +28,9 @@ namespace olfgpu {
 __global__ void fillZeroImpBatch(int nZeroImpedanceBranch, int nScenarios, int n, int nnz,
                                  const double* in, const int* ix, const int* dest,
                                  const double* x, double* vals, double* F, const char* active,
-                                 int nBaseClosedZeroImpedanceBranches, int nZeroImpedanceBranchCloseOverrides, const int* zeroImpedanceBranchCloseScenarioElement,
-                                 int nZeroImpedanceBranchOpenOverrides, const int* zeroImpedanceBranchOpenScenarioElement,
+                                 int nBaseClosedZeroImpedanceBranches,
                                  const int* zeroImpedanceAlternateDestination, const int* zeroImpedanceSelectorRow, const int* mode, int zeroImpedanceDynamicRelocation,
-                                 ReactiveRelocationTables rt, int nSpanningTreeOverrides, const int* spanningTreeOverrideScenarioElementValue,
+                                 ReactiveRelocationTables rt,
                                  const char* zeroImpedanceBranchOpenMask, const char* zeroImpedanceBranchCloseMask, const char* spanningTreeOverrideMask, BatchLayout layout) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nZeroImpedanceBranch * nScenarios) return;
@@ -39,30 +38,11 @@ __global__ void fillZeroImpBatch(int nZeroImpedanceBranch, int nScenarios, int n
     itemAndScenario(tid, nZeroImpedanceBranch, layout, e, s);
     if (!active[s]) return;
     size_t me = (size_t) s * nZeroImpedanceBranch + e;                        // the dense (scenario, element) masks, when built
-    if (zeroImpedanceBranchOpenMask != nullptr) {
-        if (zeroImpedanceBranchOpenMask[me]) return;                           // per-scenario switch OUTAGE
-    } else {
-        for (int k = 0; k < nZeroImpedanceBranchOpenOverrides; k++) {                   // per-scenario switch OUTAGE (node-breaker
-            if (zeroImpedanceBranchOpenScenarioElement[2 * k] == s && zeroImpedanceBranchOpenScenarioElement[2 * k + 1] == e) {   // contingency propagation)
-                return;
-            }
-        }
-    }
+    if (zeroImpedanceBranchOpenMask[me]) return;                               // per-scenario switch OUTAGE (node-breaker contingency propagation)
     if (e >= nBaseClosedZeroImpedanceBranches) {
         // BASE-OPEN closable switch element: contributes ONLY in scenarios that CLOSE it —
         // sparse (slot, elem) enable list, a handful of entries per run.
-        bool on = false;
-        if (zeroImpedanceBranchCloseMask != nullptr) {
-            on = zeroImpedanceBranchCloseMask[me] != 0;
-        } else {
-            for (int k = 0; k < nZeroImpedanceBranchCloseOverrides; k++) {
-                if (zeroImpedanceBranchCloseScenarioElement[2 * k] == s && zeroImpedanceBranchCloseScenarioElement[2 * k + 1] == e) {
-                    on = true;
-                    break;
-                }
-            }
-        }
-        if (!on) return;
+        if (zeroImpedanceBranchCloseMask[me] == 0) return;
     }
     double rho = in[e];
     const int* q = ix + e * 11;                              // b1P b1Q b2P b2Q dummyPColumn dummyQColumn v1 v2 ph1 ph2 tree
@@ -94,17 +74,8 @@ __global__ void fillZeroImpBatch(int nZeroImpedanceBranch, int nScenarios, int n
     addAt(d6, 1.0, valsS, FS);                               // J(bus1 Q, dummyQ)
     addAt(d7, -1.0, valsS, FS);                              // J(bus2 Q, dummyQ)
     int isTree = q[10] & 1;                                  // the tree at EXTRACTION...
-    if (spanningTreeOverrideMask != nullptr) {
-        char t = spanningTreeOverrideMask[me];                             // ...overridden where OLF's has moved by then
-        if (t >= 0) isTree = t;
-    } else {
-        for (int k = 0; k < nSpanningTreeOverrides; k++) {
-            if (spanningTreeOverrideScenarioElementValue[3 * k] == s && spanningTreeOverrideScenarioElementValue[3 * k + 1] == e) {
-                isTree = spanningTreeOverrideScenarioElementValue[3 * k + 2];
-                break;
-            }
-        }
-    }
+    char t = spanningTreeOverrideMask[me];                                 // ...overridden where OLF's has moved by then
+    if (t >= 0) isTree = t;
     if (isTree) {                                            // spanning-tree edge: voltage/angle coupling
         double v1 = xs[q[6]], v2 = xs[q[7]], ph1 = xs[q[8]], ph2 = xs[q[9]];
         addAt(d[8], v1 - rho * v2, valsS, FS);               // F[ZERO_V row]

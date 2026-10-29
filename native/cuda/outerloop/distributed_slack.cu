@@ -617,23 +617,13 @@ void distributedSlackCheck(BatchSolverContext* ctx, DriverPass& drv) {
     const int& nS = drv.nS;
     const double& SLACK_DIST_TOL = drv.slackDistTol;
     const double& P_RESIDUE_EPS = drv.pResidueEps;
-    const bool& hasDistributedSlackOverride = drv.hasDistributedSlackOverride;
-    const bool& hasDistributedSlackBusAnchorShift = drv.hasDistributedSlackBusAnchorShift;
-    const bool& hasSlackBusAnchorShift = drv.hasSlackBusAnchorShift;
-    DeviceBuf& dDistributedSlackOverrideBus = drv.dDistributedSlackOverrideBus;
-    DeviceBuf& dDistributedSlackOverrideFactorDelta = drv.dDistributedSlackOverrideFactorDelta;
-    DeviceBuf& dDistributedSlackOverrideBaseTargetPDelta = drv.dDistributedSlackOverrideBaseTargetPDelta;
-    DeviceBuf& dDistributedSlackOverrideMaxDelta = drv.dDistributedSlackOverrideMaxDelta;
-    DeviceBuf& dDistributedSlackOverrideMinDelta = drv.dDistributedSlackOverrideMinDelta;
-    DeviceBuf& dDistributedSlackBusAnchorShift = drv.dDistributedSlackBusAnchorShift;
-    DeviceBuf& dSlackBusAnchorShift = drv.dSlackBusAnchorShift;
     if (ctx->slackOnlyDistribution) {
         if (!ctx->dSlackDistributionFailure.p) ctx->dSlackDistributionFailure.alloc(nS * sizeof(char));
         CUDA_CHECK(cudaMemsetAsync(ctx->dSlackDistributionFailure.p, 0, nS * sizeof(char), ctx->stream));
         slackOnlyDistributedSlackCheck<<<grid(nS), BLOCK, 0, ctx->stream>>>(nS, n, ctx->slackBusPhiRow,
-                ctx->hasSlackBusRowOverride ? ctx->dSlackBusRowOverride.as<int>() : nullptr, ctx->slackBusTargetP,
+                ctx->slackBusRowOverride.deviceOrNull(), ctx->slackBusTargetP,
                 SLACK_DIST_TOL, P_RESIDUE_EPS, ctx->dQbuf.as<double>(), ctx->dOuterLoopCheckActive.as<char>(),
-                ctx->hasSlackOnlyAnchor ? ctx->dSlackOnlyAnchor.as<double>() : nullptr,
+                ctx->slackOnlyAnchor.deviceOrNull(),
                 ctx->slackBusRoomUp, ctx->slackBusRoomDown,
                 ctx->dSlackOnlyAbsorbed.as<double>(), ctx->dOuterLoopUnstable.as<char>(), ctx->dSlackDistributionFailure.as<char>());
     }
@@ -641,44 +631,44 @@ void distributedSlackCheck(BatchSolverContext* ctx, DriverPass& drv) {
         // Recompute the slack's retained share from the CURRENT total imbalance every pass (NOT frozen at
         // pass 0) so a participating slack tracks the loss change during redistribution.
         computeSlackRetain<<<grid(nS), BLOCK, 0, ctx->stream>>>(nS, n, ctx->nDistributedSlackBuses, ctx->slackBusPhiRow,
-                ctx->hasSlackBusRowOverride ? ctx->dSlackBusRowOverride.as<int>() : nullptr, ctx->slackBusTargetP,
+                ctx->slackBusRowOverride.deviceOrNull(), ctx->slackBusTargetP,
                 1.0 - ctx->distributedSlackFactorSum, ctx->dDistributedSlackBusPhiRow.as<int>(),
-                ctx->nDistributedSlackBusRowOverrides > 0 ? ctx->dDistributedSlackBusRowOverride.as<int>() : nullptr, ctx->dDistributedSlackBusBaseTargetP.as<double>(),
+                ctx->distributedSlackBusRowOverride.deviceOrNull(), ctx->dDistributedSlackBusBaseTargetP.as<double>(),
                 ctx->dTarget.as<double>(), ctx->dQbuf.as<double>(), ctx->dOuterLoopCheckActive.as<char>(),
                 ctx->dSlackRetainedShare.as<double>(),
-                hasDistributedSlackOverride ? dDistributedSlackOverrideBus.as<int>() : nullptr, dDistributedSlackOverrideBaseTargetPDelta.as<double>(),
-                hasDistributedSlackBusAnchorShift ? dDistributedSlackBusAnchorShift.as<double>() : nullptr,
-                hasSlackBusAnchorShift ? dSlackBusAnchorShift.as<double>() : nullptr,
+                ctx->distributedSlackOverrideBus.deviceOrNull(), ctx->distributedSlackOverrideBaseTargetPDelta.device(),
+                ctx->distributedSlackBusAnchorShift.deviceOrNull(),
+                distributedSlackBusesSlackShift(ctx),
                 ctx->distributedSlackFactorMode, ctx->distributedSlackFactorMode == GpuDistributedSlackFactorMode::REMAINING_MARGIN ? ctx->dDistributedSlackBusMarginUp.as<double>() : nullptr,
                 ctx->distributedSlackFactorMode == GpuDistributedSlackFactorMode::REMAINING_MARGIN ? ctx->dDistributedSlackBusMarginDown.as<double>() : nullptr,
                 ctx->slackBusMarginUp, ctx->slackBusMarginDown,
-                ctx->nDistributedSlackIslanded > 0 ? ctx->dDistributedSlackIslanded.as<char>() : nullptr,
-                ctx->dDistributedSlackBusFactor.as<double>(), hasDistributedSlackOverride ? dDistributedSlackOverrideFactorDelta.as<double>() : nullptr,
+                ctx->distributedSlackIslanded.deviceOrNull(),
+                ctx->dDistributedSlackBusFactor.as<double>(), ctx->distributedSlackOverrideBus.on() ? ctx->distributedSlackOverrideFactorDelta.device() : nullptr,
                 ctx->nDistributedSlackGenerators, ctx->nDistributedSlackGenerators > 0 ? ctx->distributedSlackGeneratorBus.as<int>() : nullptr,
-                ctx->hasDistributedSlackGeneratorInitialMove ? ctx->dDistributedSlackGeneratorInitialMove.as<double>() : nullptr, ctx->dSlackRetainedShareApplied.as<double>());
+                ctx->distributedSlackGeneratorInitialMove.deviceOrNull(), ctx->dSlackRetainedShareApplied.as<double>());
         if (!ctx->dSlackDistributionFailure.p) ctx->dSlackDistributionFailure.alloc(nS * sizeof(char));
         CUDA_CHECK(cudaMemsetAsync(ctx->dSlackDistributionFailure.p, 0, nS * sizeof(char), ctx->stream));
         ctx->dDistributedSlackPreviousGeneratorMove.ensure(static_cast<size_t>(nS) * std::max(ctx->nDistributedSlackGenerators, 1) * sizeof(double));
         ctx->dDistributedSlackPreviousBusTarget.ensure(static_cast<size_t>(nS) * std::max(ctx->nDistributedSlackBuses, 1) * sizeof(double));
         distributeSlackBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(ctx->nDistributedSlackBuses, nS, n, SLACK_DIST_TOL, P_RESIDUE_EPS,
-                ctx->slackBusPhiRow, ctx->hasSlackBusRowOverride ? ctx->dSlackBusRowOverride.as<int>() : nullptr, ctx->slackBusTargetP, ctx->dDistributedSlackBusPhiRow.as<int>(),
-                ctx->nDistributedSlackBusRowOverrides > 0 ? ctx->dDistributedSlackBusRowOverride.as<int>() : nullptr,
+                ctx->slackBusPhiRow, ctx->slackBusRowOverride.deviceOrNull(), ctx->slackBusTargetP, ctx->dDistributedSlackBusPhiRow.as<int>(),
+                ctx->distributedSlackBusRowOverride.deviceOrNull(),
                 ctx->dDistributedSlackBusFactor.as<double>(), ctx->dDistributedSlackBusBaseTargetP.as<double>(),
-                hasDistributedSlackBusAnchorShift ? dDistributedSlackBusAnchorShift.as<double>() : nullptr,
-                hasSlackBusAnchorShift ? dSlackBusAnchorShift.as<double>() : nullptr,
+                ctx->distributedSlackBusAnchorShift.deviceOrNull(),
+                distributedSlackBusesSlackShift(ctx),
                 ctx->dDistributedSlackBusMaxDelta.as<double>(), ctx->dDistributedSlackBusMinDelta.as<double>(), ctx->dSlackRetainedShare.as<double>(),
                 ctx->dQbuf.as<double>(), ctx->dOuterLoopCheckActive.as<char>(),
-                hasDistributedSlackOverride ? dDistributedSlackOverrideBus.as<int>() : nullptr, dDistributedSlackOverrideFactorDelta.as<double>(),
-                dDistributedSlackOverrideBaseTargetPDelta.as<double>(), dDistributedSlackOverrideMaxDelta.as<double>(), dDistributedSlackOverrideMinDelta.as<double>(),
+                ctx->distributedSlackOverrideBus.deviceOrNull(), ctx->distributedSlackOverrideFactorDelta.device(),
+                ctx->distributedSlackOverrideBaseTargetPDelta.device(), ctx->distributedSlackOverrideMaxDelta.device(), ctx->distributedSlackOverrideMinDelta.device(),
                 ctx->distributedSlackFactorMode, ctx->distributedSlackFactorMode == GpuDistributedSlackFactorMode::REMAINING_MARGIN ? ctx->dDistributedSlackBusMarginUp.as<double>() : nullptr,
                 ctx->distributedSlackFactorMode == GpuDistributedSlackFactorMode::REMAINING_MARGIN ? ctx->dDistributedSlackBusMarginDown.as<double>() : nullptr,
                 ctx->slackBusMarginUp, ctx->slackBusMarginDown,
-                ctx->nDistributedSlackIslanded > 0 ? ctx->dDistributedSlackIslanded.as<char>() : nullptr,
+                ctx->distributedSlackIslanded.deviceOrNull(),
                 ctx->nDistributedSlackGenerators, ctx->distributedSlackGeneratorBus.as<int>(), ctx->distributedSlackGeneratorFactor.as<double>(),
                 ctx->distributedSlackGeneratorMaxDelta.as<double>(), ctx->distributedSlackGeneratorMinDelta.as<double>(),
                 ctx->distributedSlackGeneratorMarginUp.as<double>(), ctx->distributedSlackGeneratorMarginDown.as<double>(),
                 ctx->dDistributedSlackBusGeneratorStart.as<int>(), ctx->dDistributedSlackBusGeneratorEnd.as<int>(),
-                ctx->dDistributedSlackGeneratorMove.as<double>(), ctx->nDistributedSlackGenerators > 0 ? ctx->dDistributedSlackGeneratorMoveValid.as<char>() : nullptr, ctx->hasDistributedSlackGeneratorAnchor ? ctx->dDistributedSlackGeneratorAnchor.as<double>() : nullptr, ctx->hasDistributedSlackGeneratorInitialMove ? ctx->dDistributedSlackGeneratorInitialMove.as<double>() : nullptr,
+                ctx->dDistributedSlackGeneratorMove.as<double>(), ctx->nDistributedSlackGenerators > 0 ? ctx->dDistributedSlackGeneratorMoveValid.as<char>() : nullptr, ctx->distributedSlackGeneratorAnchor.deviceOrNull(), ctx->distributedSlackGeneratorInitialMove.deviceOrNull(),
                 ctx->dDistributedSlackGeneratorRemoved.as<char>(), ctx->dDistributedSlackGeneratorWorkingFactor.as<double>(),
                 ctx->distributedSlackLostGenerators.view(),
                 ctx->distributedSlackRemovedGenerators.view(),
@@ -689,12 +679,12 @@ void distributedSlackCheck(BatchSolverContext* ctx, DriverPass& drv) {
         if (ctx->nForcedTargetQ > 0) {                              // forced target Q follows the generators' new P
             forcedTargetQBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(ctx->nForcedTargetQ, nS, n, ctx->nDistributedSlackBuses, ctx->nDistributedSlackGenerators,
                     ctx->forcedTargetQExtrapolate, ctx->dForcedTargetQIndices.as<int>(), ctx->dForcedTargetQParameters.as<double>(), ctx->dForcedTargetQPoints.as<double>(),
-                    ctx->hasForcedTargetQPreDistribution ? ctx->dForcedTargetQPreDistribution.as<double>() : nullptr,
+                    ctx->forcedTargetQPreDistribution.deviceOrNull(),
                     ctx->nDistributedSlackGenerators > 0 ? ctx->dDistributedSlackGeneratorMove.as<double>() : nullptr,
-                    ctx->nDistributedSlackGenerators > 0 ? ctx->dDistributedSlackGeneratorMoveValid.as<char>() : nullptr, ctx->hasDistributedSlackGeneratorAnchor ? ctx->dDistributedSlackGeneratorAnchor.as<double>() : nullptr, ctx->hasDistributedSlackGeneratorInitialMove ? ctx->dDistributedSlackGeneratorInitialMove.as<double>() : nullptr,
-                    ctx->dDistributedSlackBusPhiRow.as<int>(), ctx->nDistributedSlackBusRowOverrides > 0 ? ctx->dDistributedSlackBusRowOverride.as<int>() : nullptr,
+                    ctx->nDistributedSlackGenerators > 0 ? ctx->dDistributedSlackGeneratorMoveValid.as<char>() : nullptr, ctx->distributedSlackGeneratorAnchor.deviceOrNull(), ctx->distributedSlackGeneratorInitialMove.deviceOrNull(),
+                    ctx->dDistributedSlackBusPhiRow.as<int>(), ctx->distributedSlackBusRowOverride.deviceOrNull(),
                     ctx->distributedSlackLostGenerators.view(),
-                    ctx->nDistributedSlackIslanded > 0 ? ctx->dDistributedSlackIslanded.as<char>() : nullptr, ctx->dMode.as<int>(),
+                    ctx->distributedSlackIslanded.deviceOrNull(), ctx->dMode.as<int>(),
                     ctx->dOuterLoopCheckActive.as<char>(), ctx->dTarget.as<double>(), ctx->dForcedTargetQApplied.as<double>());
         }
     }
@@ -714,19 +704,19 @@ void distributedSlackResetSolve(BatchSolverContext* ctx, DriverPass& drv) {
     if (ctx->nForcedTargetQ > 0) {                              // forced target Q: the clamp at each scenario's start P
         forcedTargetQInitBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(ctx->nForcedTargetQ, nS, n, ctx->nDistributedSlackBuses, ctx->forcedTargetQExtrapolate,
                 ctx->dForcedTargetQIndices.as<int>(), ctx->dForcedTargetQParameters.as<double>(), ctx->dForcedTargetQPoints.as<double>(),
-                ctx->hasForcedTargetQPreDistribution ? ctx->dForcedTargetQPreDistribution.as<double>() : nullptr,
+                ctx->forcedTargetQPreDistribution.deviceOrNull(),
                 ctx->distributedSlackLostGenerators.view(),
-                ctx->nDistributedSlackIslanded > 0 ? ctx->dDistributedSlackIslanded.as<char>() : nullptr, ctx->dMode.as<int>(),
+                ctx->distributedSlackIslanded.deviceOrNull(), ctx->dMode.as<int>(),
                 ctx->dTarget.as<double>(), ctx->dForcedTargetQApplied.as<double>());
     }
 }
 
 // Per-solve reset of the slack-only distribution: nothing absorbed yet, or a strategy pair's parent total.
-void slackOnlyDistributionResetSolve(BatchSolverContext* ctx, DriverPass& drv, const double* slackBusAnchorShift) {
+void slackOnlyDistributionResetSolve(BatchSolverContext* ctx, DriverPass& drv) {
     const int& nS = drv.nS;
-    if (slackBusAnchorShift != nullptr) {                   // strategy pairs: seed with the parent contingency's
-        CUDA_CHECK(cudaMemcpyAsync(ctx->dSlackOnlyAbsorbed.p, slackBusAnchorShift,   // absorbed total (the device
-                nS * sizeof(double), cudaMemcpyHostToDevice, ctx->stream)); // analogue of the CPU re-anchor)
+    if (ctx->slackBusAnchorShift.on()) {                    // strategy pairs: seed with the parent contingency's
+        CUDA_CHECK(cudaMemcpyAsync(ctx->dSlackOnlyAbsorbed.p, ctx->slackBusAnchorShift.device(),   // absorbed total (the
+                nS * sizeof(double), cudaMemcpyDeviceToDevice, ctx->stream));                       // device analogue of the CPU re-anchor)
     } else {
         CUDA_CHECK(cudaMemsetAsync(ctx->dSlackOnlyAbsorbed.p, 0, nS * sizeof(double), ctx->stream));
     }

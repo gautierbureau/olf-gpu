@@ -20,7 +20,7 @@ __global__ void hvdcSlackBalanceBatch(int nS, int nh, int n, int nElements, int 
 
 // Per-solve resets.
 void distributedSlackResetSolve(BatchSolverContext* ctx, DriverPass& drv);
-void slackOnlyDistributionResetSolve(BatchSolverContext* ctx, DriverPass& drv, const double* slackBusAnchorShift);
+void slackOnlyDistributionResetSolve(BatchSolverContext* ctx, DriverPass& drv);
 
 // One check of DistributedSlackOuterLoop on every live scenario (GpuOuterLoopKind::DISTRIBUTED_SLACK).
 void distributedSlackCheck(BatchSolverContext* ctx, DriverPass& drv);

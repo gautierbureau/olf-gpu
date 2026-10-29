@@ -136,9 +136,9 @@ void hvdcStep(BatchSolverContext* ctx, DriverPass& drv, int loopKind) {
             ctx->dHvdcElement.as<int>(), ctx->dHvdcBus1PRow.as<int>(), ctx->dHvdcBus2PRow.as<int>(),
             ctx->dHvdcBus1PhiColumn.as<int>(), ctx->dHvdcBus2PhiColumn.as<int>(),
             ctx->dMode.as<int>(), ctx->structure->dRelocatedChildOwnRow.p != nullptr ? ctx->structure->dRelocatedChildOwnRow.as<int>() : nullptr,
-            ctx->dHvdcAcEmulationParameters.as<double>(), ctx->dHvdcContingencyOutage.as<char>(),
+            ctx->dHvdcAcEmulationParameters.as<double>(), ctx->hvdcContingencyOutage.device(),
             ctx->dX.as<double>(), ctx->dTarget.as<double>(), ctx->dDisabled.as<char>(),
-            ctx->dHvdcAcEmulationStatus.as<int>(), ctx->dHvdcAppliedDelta1.as<double>(), ctx->dHvdcAppliedDelta2.as<double>(),
+            ctx->hvdcAcEmulationStatus.device(), ctx->hvdcAppliedDelta1.device(), ctx->hvdcAppliedDelta2.device(),
             ctx->dOuterLoopCheckActive.as<char>(), ctx->dOuterLoopUnstable.as<char>());
 }
 

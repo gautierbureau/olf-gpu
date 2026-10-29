@@ -40,11 +40,11 @@ namespace olfgpu {
 // The per-solve seed of a fresh (non-resumed) full load flow: the generators' slack moves cleared, the pilot Q targets
 // captured, every reactive-limit PV -> PQ switch seeded (from the base or a previous solve) and stamped on the rows, and every
 // in-kernel loop reset to its entry state.
-void seedSolve(BatchSolverContext* ctx, DriverPass& drv, const int* reactiveLimitsSeedState, const double* slackBusAnchorShift) {
+void seedSolve(BatchSolverContext* ctx, DriverPass& drv, const int* reactiveLimitsSeedState) {
     const int& n = drv.n;
     const int& nS = drv.nS;
     const bool& usePerScenarioReactiveLimits = drv.usePerScenarioReactiveLimits;
-    DeviceBuf& dBaseMode = drv.dBaseMode;
+    DeviceBuf& dBaseMode = ctx->dBaseMode;
     // Each generator's own slack move is per-solve state, cleared before ANYTHING reads it: the seed-time curve
     // limits below evaluate a curve at base + distributedSlackGeneratorMove wherever distributedSlackGeneratorMoveValid is set. Cleared only after the seed,
     // a reused context evaluated scenario slot s at the move of the contingency the PREVIOUS chunk solved in
@@ -68,8 +68,8 @@ void seedSolve(BatchSolverContext* ctx, DriverPass& drv, const int* reactiveLimi
             SlotEntries pilotQDeltas = ctx->reactiveRelocationPilotTargetQDeltas.view();
             applyPilotQDeltasBatch<<<grid(nS * pilotQDeltas.capacity), BLOCK, 0, ctx->stream>>>(nS, pilotQDeltas, ctx->structure->nReactiveRelocationGroups, n,
                     ctx->structure->dReactiveRelocationGroupStart.as<int>(), ctx->structure->dReactiveRelocationCandidateRows.as<int>(), ctx->dMode.as<int>(),
-                    ctx->hasDistrQSubgroups ? ctx->dDistrQSubgroup.as<char>() : nullptr, ctx->nDistrQMembers,
-                    ctx->hasDistrQSubgroups ? ctx->dReactiveRelocationDistrQMemberStart.as<int>() : nullptr,
+                    ctx->distrQSubgroup.deviceOrNull(), ctx->nDistrQMembers,
+                    ctx->distrQSubgroup.on() ? ctx->dReactiveRelocationDistrQMemberStart.as<int>() : nullptr,
                     ctx->dReactiveRelocationPilotTargetQ.as<double>(), ctx->dTarget.as<double>());
         }
         if (!ctx->dReactiveRelocationPilotReactiveLimitEntry.p) {
@@ -145,11 +145,10 @@ void seedSolve(BatchSolverContext* ctx, DriverPass& drv, const int* reactiveLimi
                     ctx->dTarget.as<double>(),
                     ctx->reactiveLimitDeltaOverrides.view(), ctx->reactiveCapabilityCurveOverrides.view(),
                     ctx->nDistributedSlackGenerators > 0 ? ctx->dDistributedSlackGeneratorMove.as<double>() : nullptr,
-                    ctx->nDistributedSlackGenerators > 0 ? ctx->dDistributedSlackGeneratorMoveValid.as<char>() : nullptr, ctx->hasDistributedSlackGeneratorSeedAnchor ? ctx->dDistributedSlackGeneratorSeedAnchor.as<double>()
-                            : (ctx->hasDistributedSlackGeneratorAnchor ? ctx->dDistributedSlackGeneratorAnchor.as<double>() : nullptr),
-                    ctx->hasDistributedSlackGeneratorInitialMove ? ctx->dDistributedSlackGeneratorInitialMove.as<double>() : nullptr, ctx->nDistributedSlackGenerators,
+                    ctx->nDistributedSlackGenerators > 0 ? ctx->dDistributedSlackGeneratorMoveValid.as<char>() : nullptr, ctx->distributedSlackGeneratorSeedAnchor.on() ? ctx->distributedSlackGeneratorSeedAnchor.device() : ctx->distributedSlackGeneratorAnchor.deviceOrNull(),
+                    ctx->distributedSlackGeneratorInitialMove.deviceOrNull(), ctx->nDistributedSlackGenerators,
                     ctx->nDistributedSlackBuses > 0 ? ctx->dDistributedSlackBusPhiRow.as<int>() : nullptr,
-                    ctx->nDistributedSlackBusRowOverrides > 0 ? ctx->dDistributedSlackBusRowOverride.as<int>() : nullptr, ctx->nDistributedSlackBuses,
+                    ctx->distributedSlackBusRowOverride.deviceOrNull(), ctx->nDistributedSlackBuses,
                     ctx->nDistributedSlackGenerators > 0 ? ctx->distributedSlackGeneratorBus.as<int>() : nullptr,
                     ctx->dReactiveLimitMinQPerScenario.as<double>(), ctx->dReactiveLimitMaxQPerScenario.as<double>(),
                     ctx->dReactiveLimitLoadQPerScenario.as<double>(), nullptr);
@@ -166,10 +165,10 @@ void seedSolve(BatchSolverContext* ctx, DriverPass& drv, const int* reactiveLimi
                 ctx->hasReactiveLimitBaseQLimitType ? ctx->dReactiveLimitBaseQLimitType.as<char>() : nullptr,
                 pilotSelfReactiveLimitEntryOrNull(ctx), ctx->structure->nReactiveRelocationGroups,
                 ctx->dReactiveLimitTargetV.as<double>(), ctx->reactiveLimitTargetVOverrides.view(), ctx->nSecondaryVoltageControlControllerBuses > 0 ? ctx->dSecondaryVoltageControlReactiveLimitTargetV.as<double>() : nullptr,
-                ctx->nReactiveLimitLocalOverrides > 0 ? ctx->dReactiveLimitLocalOverride.as<char>() : nullptr,
-                ctx->nReactiveLimitLocalOverrides > 0 ? ctx->dReactiveLimitLocalTargetV.as<double>() : nullptr,
-                ctx->hasReactiveLimitSeedTargetQ ? ctx->dReactiveLimitSeedTargetQ.as<double>() : nullptr,
-                ctx->nReactiveLimitIslanded > 0 ? ctx->dReactiveLimitIslanded.as<char>() : nullptr);
+                ctx->reactiveLimitLocalOverride.deviceOrNull(),
+                ctx->reactiveLimitLocalTargetV.deviceOrNull(),
+                ctx->reactiveLimitSeedTargetQ.deviceOrNull(),
+                ctx->reactiveLimitIslanded.deviceOrNull());
     } else {
         CUDA_CHECK(cudaMemsetAsync(ctx->dReactiveLimitPvPqSwitchCount.p, 0, static_cast<size_t>(ctx->nReactiveLimitEntries) * nS * sizeof(char), ctx->stream));
         if (!ctx->reactiveLimitsOuterLoop && ctx->nReactiveLimitEntries > 0) {   // no ReactiveLimits loop: no PV -> PQ switch, a base-PQ
@@ -188,7 +187,7 @@ void seedSolve(BatchSolverContext* ctx, DriverPass& drv, const int* reactiveLimi
                     ctx->dReactiveLimitLoadQ.as<double>(),
                     ctx->hasReactiveLimitBaseQLimitType ? ctx->dReactiveLimitBaseQLimitType.as<char>() : nullptr,
                     pilotSelfReactiveLimitEntryOrNull(ctx), ctx->structure->nReactiveRelocationGroups,
-                    ctx->nReactiveLimitGeneratorsLost > 0 ? ctx->dReactiveLimitGeneratorsLost.as<char>() : nullptr);
+                    ctx->reactiveLimitGeneratorsLost.deviceOrNull());
         }
     }
     // The seeded PV/PQ states must reach the ROWS before the first fill: the balance of an enrolled pilot switched to PQ
@@ -221,9 +220,9 @@ void seedSolve(BatchSolverContext* ctx, DriverPass& drv, const int* reactiveLimi
                 ctx->dTarget.as<double>(),
                 ctx->reactiveLimitDeltaOverrides.view(), ctx->reactiveCapabilityCurveOverrides.view(),
                 ctx->nDistributedSlackGenerators > 0 ? ctx->dDistributedSlackGeneratorMove.as<double>() : nullptr,
-                ctx->nDistributedSlackGenerators > 0 ? ctx->dDistributedSlackGeneratorMoveValid.as<char>() : nullptr, ctx->hasDistributedSlackGeneratorAnchor ? ctx->dDistributedSlackGeneratorAnchor.as<double>() : nullptr, ctx->hasDistributedSlackGeneratorInitialMove ? ctx->dDistributedSlackGeneratorInitialMove.as<double>() : nullptr, ctx->nDistributedSlackGenerators,
+                ctx->nDistributedSlackGenerators > 0 ? ctx->dDistributedSlackGeneratorMoveValid.as<char>() : nullptr, ctx->distributedSlackGeneratorAnchor.deviceOrNull(), ctx->distributedSlackGeneratorInitialMove.deviceOrNull(), ctx->nDistributedSlackGenerators,
                 ctx->nDistributedSlackBuses > 0 ? ctx->dDistributedSlackBusPhiRow.as<int>() : nullptr,
-                ctx->nDistributedSlackBusRowOverrides > 0 ? ctx->dDistributedSlackBusRowOverride.as<int>() : nullptr, ctx->nDistributedSlackBuses,
+                ctx->distributedSlackBusRowOverride.deviceOrNull(), ctx->nDistributedSlackBuses,
                 ctx->nDistributedSlackGenerators > 0 ? ctx->distributedSlackGeneratorBus.as<int>() : nullptr,
                 ctx->dReactiveLimitMinQPerScenario.as<double>(), ctx->dReactiveLimitMaxQPerScenario.as<double>(),
                 ctx->dReactiveLimitLoadQPerScenario.as<double>(), nullptr);
@@ -263,7 +262,7 @@ void seedSolve(BatchSolverContext* ctx, DriverPass& drv, const int* reactiveLimi
         incrementalShuntVoltageControlResetSolve(ctx, drv);
     }
     if (ctx->distributedSlackOuterLoop && ctx->slackOnlyDistribution) {
-        slackOnlyDistributionResetSolve(ctx, drv, slackBusAnchorShift);
+        slackOnlyDistributionResetSolve(ctx, drv);
     }
 }
 

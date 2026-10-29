@@ -3,6 +3,7 @@
 //
 // JNI entry points of GpuAcNewtonSolver: ReactiveLimitsOuterLoop tables, curves, forced target Q and per-scenario overrides.
 #include "jni_common.cuh"
+#include "../solver/scenario_install.cuh"
 #include "slot_table_install.cuh"
 #include "../common/codes/gpu_voltage_control_role.cuh"
 
@@ -433,9 +434,9 @@ OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, readBatchReactiveLimitTargetQ)(
             ctx->hasDistrQRelocationGroups && ctx->structure->nReactiveRelocationGroups > 0 ? ctx->structure->dReactiveRelocationCandidateRows.as<int>() : nullptr,
             ctx->hasDistrQRelocationGroups && ctx->structure->nReactiveRelocationGroups > 0 ? ctx->dReactiveRelocationPilotTargetVDeactivated.as<char>() : nullptr,
             ctx->structure->dReactiveRelocationDependentBaseGroup.p ? ctx->structure->dReactiveRelocationDependentBaseGroup.as<int>() : nullptr, out.as<double>());
-    std::vector<double> host(static_cast<size_t>(ctx->nReactiveLimitEntries) * nS);
+    std::vector<double> host;
     CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
-    CUDA_CHECK(cudaMemcpy(host.data(), out.p, host.size() * sizeof(double), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(readInstalledRows(ctx, out.p, static_cast<size_t>(ctx->nReactiveLimitEntries), host));
     jdoubleArray arr = env->NewDoubleArray(static_cast<jsize>(host.size()));
     env->SetDoubleArrayRegion(arr, 0, static_cast<jsize>(host.size()), host.data());
     return arr;

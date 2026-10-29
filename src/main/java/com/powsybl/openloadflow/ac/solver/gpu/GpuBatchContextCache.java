@@ -150,6 +150,7 @@ public final class GpuBatchContextCache {
         if (cachedContext != null && cachedContext.chunkSize == chunkSize && cachedContext.mode == mode
                 && cachedContext.builtOn(data, structure)) {
             LOGGER.debug("Batched N-1: reusing cached GPU context (chunk {}, mode {})", chunkSize, mode);
+            BatchSolveNative.beginBatchInstall(cachedContext.handle, null);   // a run starts on the whole bank
             return cachedContext.handle;
         }
         if (cachedContext != null) {                         // evict a stale context (different network/chunk/mode)

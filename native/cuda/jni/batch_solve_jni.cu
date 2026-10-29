@@ -324,10 +324,11 @@ OLF_JNI(ac_solver_gpu, BatchSolveNative, solveBatchContext)(
         return nullptr;
     }
 
-    // Pack per-scenario results: [state(n), iterations, finalMismatch, convergenceStatus].
+    // Pack per-scenario results: [state(n), iterations, finalMismatch, convergenceStatus], one row per installed scenario
+    // in the install's order.
     long long tPack0 = traceOn(Trace::PHASE_TIME) ? nowNs() : 0;
     int n = ctx->n;
-    int nS = ctx->nScenarios;
+    int nS = installedSlotCount(ctx);
     jclass doubleArrayClass = env->FindClass("[D");
     // A null from either allocation means the Java HEAP is exhausted and an OutOfMemoryError is pending: return
     // and let it surface in Java. Writing into the null row instead was a SIGSEGV in JNIHandles::resolve that
@@ -337,7 +338,8 @@ OLF_JNI(ac_solver_gpu, BatchSolveNative, solveBatchContext)(
     if (out == nullptr) {
         return nullptr;
     }
-    for (int s = 0; s < nS; s++) {
+    for (int j = 0; j < nS; j++) {
+        const int s = installedSlot(ctx, j);
         jdoubleArray row = env->NewDoubleArray(n + 3);
         if (row == nullptr) {
             return nullptr;
@@ -345,7 +347,7 @@ OLF_JNI(ac_solver_gpu, BatchSolveNative, solveBatchContext)(
         env->SetDoubleArrayRegion(row, 0, n, res.x.data() + (size_t) s * n);
         double tail[3] = {static_cast<double>(res.iters[s]), res.norm[s], static_cast<double>(res.status[s])};
         env->SetDoubleArrayRegion(row, n, 3, tail);
-        env->SetObjectArrayElement(out, s, row);
+        env->SetObjectArrayElement(out, j, row);
         env->DeleteLocalRef(row);
     }
     if (traceOn(Trace::PHASE_TIME)) {
@@ -400,4 +402,27 @@ extern "C" JNIEXPORT void JNICALL
 OLF_JNI(ac_solver_gpu, BatchSolveNative, destroyBatchContext)(
         JNIEnv*, jclass, jlong handle) {
     delete reinterpret_cast<BatchSolverContext*>(handle);
+}
+
+// The bank slots the next install writes its scenarios into (BatchSolveNative.beginBatchInstall): local slot j is bank
+// slot bankSlots[j], each bank slot at most once; null or empty: the whole bank, local slot j in slot j.
+extern "C" JNIEXPORT void JNICALL
+OLF_JNI(ac_solver_gpu, BatchSolveNative, beginBatchInstall)(
+        JNIEnv* env, jclass, jlong handle, jintArray jBankSlots) {
+    auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
+    if (ctx == nullptr) {
+        return;
+    }
+    std::vector<int> slots = jniInts(env, jBankSlots);
+    std::vector<char> taken(ctx->nScenarios, 0);
+    for (int s : slots) {
+        if (s < 0 || s >= ctx->nScenarios || taken[s]) {
+            env->ThrowNew(env->FindClass("java/lang/IllegalArgumentException"),
+                          ("bank slot " + std::to_string(s) + " outside the bank of " + std::to_string(ctx->nScenarios)
+                           + " or installed twice").c_str());
+            return;
+        }
+        taken[s] = 1;
+    }
+    ctx->installSlots = std::move(slots);
 }

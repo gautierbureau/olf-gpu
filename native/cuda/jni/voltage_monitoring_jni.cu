@@ -3,6 +3,7 @@
 //
 // JNI entry points of GpuAcNewtonSolver: MonitoringVoltageOuterLoop.
 #include "jni_common.cuh"
+#include "../solver/scenario_install.cuh"
 
 /** MonitoringVoltage controller table (OLF order 6). Empty array clears it. */
 extern "C" JNIEXPORT void JNICALL
@@ -37,7 +38,7 @@ OLF_JNI(ac_outerloop_gpu, VoltageMonitoringNative, setBatchMonitoringLoops)(
     ctx->dMonitoringVoltageActivatedTargetV.alloc(static_cast<size_t>(ctx->nMonitoringVoltageControllers) * ctx->nScenarios * sizeof(double));
 }
 
-/** How many (controller, scenario) monitoring automatons FIRED in the last solve. The host keeps
+/** How many (controller, installed scenario) monitoring automatons FIRED in the last solve. The host keeps
  *  the ACTIVATIONS counter meaningful now that the loop is a driver phase rather than an
  *  orchestrator — it is the coverage guard that a test case really exercises an activation. */
 extern "C" JNIEXPORT jint JNICALL
@@ -47,9 +48,8 @@ OLF_JNI(ac_outerloop_gpu, VoltageMonitoringNative, readBatchMonitoringActivation
     if (ctx == nullptr || ctx->nMonitoringVoltageControllers == 0 || !ctx->dMonitoringVoltageActivatedTargetV.p) {
         return 0;
     }
-    size_t count = static_cast<size_t>(ctx->nMonitoringVoltageControllers) * ctx->nScenarios;
-    std::vector<double> host(count);
-    cudaMemcpy(host.data(), ctx->dMonitoringVoltageActivatedTargetV.p, count * sizeof(double), cudaMemcpyDeviceToHost);
+    std::vector<double> host;
+    readInstalledRows(ctx, ctx->dMonitoringVoltageActivatedTargetV.p, static_cast<size_t>(ctx->nMonitoringVoltageControllers), host);
     jint fired = 0;
     for (double v : host) {
         if (!std::isnan(v)) {
@@ -66,10 +66,9 @@ OLF_JNI(ac_outerloop_gpu, VoltageMonitoringNative, readBatchMonitoringTargets)(
     if (ctx == nullptr || ctx->nMonitoringVoltageControllers == 0 || !ctx->dMonitoringVoltageActivatedTargetV.p) {
         return nullptr;
     }
-    size_t count = static_cast<size_t>(ctx->nMonitoringVoltageControllers) * ctx->nScenarios;
-    std::vector<double> host(count);
-    cudaMemcpy(host.data(), ctx->dMonitoringVoltageActivatedTargetV.p, count * sizeof(double), cudaMemcpyDeviceToHost);
-    jdoubleArray out = env->NewDoubleArray(static_cast<jsize>(count));
-    env->SetDoubleArrayRegion(out, 0, static_cast<jsize>(count), host.data());
+    std::vector<double> host;
+    readInstalledRows(ctx, ctx->dMonitoringVoltageActivatedTargetV.p, static_cast<size_t>(ctx->nMonitoringVoltageControllers), host);
+    jdoubleArray out = env->NewDoubleArray(static_cast<jsize>(host.size()));
+    env->SetDoubleArrayRegion(out, 0, static_cast<jsize>(host.size()), host.data());
     return out;
 }

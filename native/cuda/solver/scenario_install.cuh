@@ -3,7 +3,8 @@
 //
 // The per-scenario inputs of a solve, written into the install slots (ctx->installSlots, every slot of the bank when
 // empty): local slot j of each array is bank slot installedSlot(ctx, j), and only the installed slots' rows change. An
-// installed slot starts from the base state, targets and row modes, then takes its own.
+// installed slot starts from the base state, targets and row modes, then takes its own. A readback returns the same
+// rows in the same order: a caller reads its scenarios back as it installed them, wherever they sit in the bank.
 #ifndef OLF_GPU_SOLVER_SCENARIO_INSTALL_CUH
 #define OLF_GPU_SOLVER_SCENARIO_INSTALL_CUH
 
@@ -44,6 +45,28 @@ void writeInstalledRows(const BatchSolverContext* ctx, T* device, const T* rows,
         CUDA_CHECK(cudaMemcpy(device + static_cast<size_t>(installedSlot(ctx, j)) * width, rows + static_cast<size_t>(j) * width,
                               width * sizeof(T), cudaMemcpyHostToDevice));
     }
+}
+
+// The installed slots' rows of a per-slot device array (`width` values per slot) into `host`, in the install's order.
+// Returns the first copy's error (cudaSuccess when every copy went), which each readback handles as it handled its own
+// copy.
+template <typename T>
+cudaError_t readInstalledRows(const BatchSolverContext* ctx, const void* device, size_t width, std::vector<T>& host) {
+    const int nRows = installedSlotCount(ctx);
+    host.resize(static_cast<size_t>(nRows) * width);
+    const T* from = static_cast<const T*>(device);
+    if (ctx->installSlots.empty()) {
+        return cudaMemcpy(host.data(), from, host.size() * sizeof(T), cudaMemcpyDeviceToHost);
+    }
+    for (int j = 0; j < nRows; j++) {
+        cudaError_t e = cudaMemcpy(host.data() + static_cast<size_t>(j) * width,
+                                   from + static_cast<size_t>(installedSlot(ctx, j)) * width, width * sizeof(T),
+                                   cudaMemcpyDeviceToHost);
+        if (e != cudaSuccess) {
+            return e;
+        }
+    }
+    return cudaSuccess;
 }
 
 // The installed slots' rows of a per-slot device array copied from another one of the same layout, on the stream.

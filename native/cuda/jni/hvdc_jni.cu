@@ -3,6 +3,7 @@
 //
 // JNI entry points of GpuAcNewtonSolver: HVDC AC emulation loops.
 #include "jni_common.cuh"
+#include "../solver/scenario_install.cuh"
 #include "slot_table_install.cuh"
 
 // The HVDC AC-emulation outer loops' tables + their per-scenario starting state (the statuses and
@@ -57,12 +58,12 @@ OLF_JNI(ac_outerloop_gpu, HvdcNative, readBatchHvdcStatus)(
     if (ctx == nullptr || ctx->nHvdcAcEmulation == 0) {
         return nullptr;
     }
-    size_t len = (size_t) ctx->nScenarios * ctx->nHvdcAcEmulation;
-    std::vector<int> host(len);
-    if (cudaMemcpy(host.data(), ctx->hvdcAcEmulationStatus.device(), len * sizeof(int), cudaMemcpyDeviceToHost) != cudaSuccess) {
+    std::vector<int> host;
+    if (readInstalledRows(ctx, ctx->hvdcAcEmulationStatus.device(), static_cast<size_t>(ctx->nHvdcAcEmulation), host) != cudaSuccess) {
         return nullptr;
     }
-    jintArray out = env->NewIntArray((jsize) len);
-    env->SetIntArrayRegion(out, 0, (jsize) len, host.data());
+    jsize len = static_cast<jsize>(host.size());
+    jintArray out = env->NewIntArray(len);
+    env->SetIntArrayRegion(out, 0, len, host.data());
     return out;
 }

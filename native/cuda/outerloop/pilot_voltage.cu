@@ -432,6 +432,13 @@ __global__ void updateReMergedVoltageTargetRowBatch(int nScenarios, int n, int n
 }
 
 void launchReMergedVoltageTargetRowUpdate(BatchSolverContext* ctx, DriverPass& drv, bool solveStart) {
+    if (solveStart && ctx->dReactiveLimitReMergedVoltageRow.p != nullptr) {
+        // the installed slots' re-merges start afresh, whether or not the bank holds one now: a slot keeps its rows until
+        // its next install, and another install can bring the bank's re-merges back while it solves
+        const size_t entries = static_cast<size_t>(ctx->nReactiveLimitEntries);
+        memsetInstalledRows(ctx, ctx->dReactiveLimitHoldsReMergedVoltageTarget.p, entries, 0);
+        memsetInstalledRows(ctx, ctx->dReactiveLimitReMergedVoltageRow.p, entries * sizeof(int), 0xFF);
+    }
     if (ctx->reMergedVoltageTargets.entries() == 0) {
         return;
     }
@@ -439,10 +446,7 @@ void launchReMergedVoltageTargetRowUpdate(BatchSolverContext* ctx, DriverPass& d
     const int& nS = drv.nS;
     SlotEntries reMergedVoltageTargets = ctx->reMergedVoltageTargets.view();
     if (solveStart) {                                        // the installed slots' re-merges start afresh
-        const size_t entries = static_cast<size_t>(ctx->nReactiveLimitEntries);
         ctx->reMergedVoltageTargets.resetState(ctx->installSlots, ctx->stream);
-        memsetInstalledRows(ctx, ctx->dReactiveLimitHoldsReMergedVoltageTarget.p, entries, 0);
-        memsetInstalledRows(ctx, ctx->dReactiveLimitReMergedVoltageRow.p, entries * sizeof(int), 0xFF);
     }
     updateReMergedVoltageTargetRowBatch<<<grid(nS * reMergedVoltageTargets.capacity), BLOCK, 0, ctx->stream>>>(nS, n,
             ctx->nReactiveLimitEntries, reMergedVoltageTargets, ctx->reMergedVoltageTargetControllers.view(),

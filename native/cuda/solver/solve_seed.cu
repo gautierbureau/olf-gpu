@@ -141,7 +141,9 @@ void seedSolve(BatchSolverContext* ctx, DriverPass& drv, const int* reactiveLimi
         // The limits the continued PV -> PQ switches are STAMPED at: OLF restores the generation target Q of each bus switched to PQ from
         // the parent's end, and a GeneratorAction only invalidates the bus's target P, so the first solve keeps
         // the limit at the parent's P (distributedSlackGeneratorSeedAnchor) and the reactive-limit check refreshes it afterwards.
-        if (usePerScenarioReactiveLimits) {                            // curve limits at the CURRENT (seeded) targets,
+        // curve limits at the CURRENT (seeded) targets, computed whether or not this call reads them (the driver allocates
+        // them with the entries): a later install that turns usePerScenarioReactiveLimits on has this scenario read its own
+        if (ctx->dReactiveLimitMinQPerScenario.p != nullptr) {
             reactiveCapabilityCurveLimitsBatch<<<grid(ctx->nReactiveLimitEntries * nS), BLOCK, 0, ctx->stream>>>(ctx->nReactiveLimitEntries, nS, ctx->nReactiveCapabilityCurves, n, ctx->reactiveCapabilityCurveExtrapolate,
                     ctx->dReactiveCapabilityCurveIndices.as<int>(), ctx->dReactiveCapabilityCurveParameters.as<double>(), ctx->dReactiveCapabilityCurvePoints.as<double>(),
                     ctx->dReactiveLimitEntryCurveStart.as<int>(), ctx->dReactiveLimitEntryCurves.as<int>(), curveHvdcAcEmulationView(ctx),
@@ -216,7 +218,9 @@ void seedSolve(BatchSolverContext* ctx, DriverPass& drv, const int* reactiveLimi
     // peer's (limit - loadQ) as 0 - 0 - measured on devicePilotControllerLosingItsOwnGeneratorMatchesCpu
     // as rows 2 and 4 both at target 0 during the solve (OLF: -0.6 and -0.3). The warm path already ran
     // this before seeding; here it runs after initReactiveLimitQLimitTypeBatch has set the scenario's limit types.
-    if (usePerScenarioReactiveLimits) {                            // curve limits at the CURRENT (seeded) targets,
+    // curve limits at the CURRENT (seeded) targets, computed whether or not this call reads them (the driver allocates them
+    // with the entries): a later install that turns usePerScenarioReactiveLimits on has this scenario read its own
+    if (ctx->dReactiveLimitMinQPerScenario.p != nullptr) {
         reactiveCapabilityCurveLimitsBatch<<<grid(ctx->nReactiveLimitEntries * nS), BLOCK, 0, ctx->stream>>>(ctx->nReactiveLimitEntries, nS, ctx->nReactiveCapabilityCurves, n, ctx->reactiveCapabilityCurveExtrapolate,
                 ctx->dReactiveCapabilityCurveIndices.as<int>(), ctx->dReactiveCapabilityCurveParameters.as<double>(), ctx->dReactiveCapabilityCurvePoints.as<double>(),
                     ctx->dReactiveLimitEntryCurveStart.as<int>(), ctx->dReactiveLimitEntryCurves.as<int>(), curveHvdcAcEmulationView(ctx),

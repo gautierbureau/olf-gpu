@@ -27,7 +27,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                               int nClosedBranchParameterOverrides, const int* closedBranchParameterOverrideScenarioElement, const double* closedBranchParameterOverrideValues,
                               int maxOuterProductive, int maxPqPvSwitch, int rejectSlackDistributionFailure, int skipReactiveLimitsPhase,
                               int nBaseClosedZeroImpedanceBranches, int nZeroImpedanceBranchCloseOverrides, const int* zeroImpedanceBranchCloseScenarioElement,
-                              int nZeroImpedanceBranchOpenOverrides, const int* zeroImpedanceBranchOpenScenarioElement);
+                              int nZeroImpedanceBranchOpenOverrides, const int* zeroImpedanceBranchOpenScenarioElement,
+                              int pauseAtEnded);
 
 }  // namespace olfgpu
 

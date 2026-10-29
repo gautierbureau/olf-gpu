@@ -85,8 +85,12 @@ public final class BatchSolveNative {
      *                            instead of the infinity-norm floor — so a batched SA can stop on the SAME
      *                            decision as the CPU loadflow (apples-to-apples timing). {@code <= 0} keeps the
      *                            {@code tol} infinity-norm floor.
-     * @return {@code [nScenarios][n + 3]}: per-scenario [state(n), iterations, finalMismatch, convergenceStatus]
-     *         where convergenceStatus is: 0 = converged, 1 = max_iter, -1 = diverged/NaN
+     * @param pauseAtEnded        0: return when every scenario has ended; k &gt; 0: return as soon as k of them have, the
+     *                            others still solving, for the caller to install new scenarios into the slots handed back
+     *                            and call again (which goes on with those still solving)
+     * @return per scenario the solve handed back (the selection the readbacks then read, in the order the scenarios were
+     *         installed): [state(n), iterations, finalMismatch, convergenceStatus] where convergenceStatus is:
+     *         0 = converged, 1 = max_iter, -1 = diverged/NaN
      */
     public static native double[][] solveBatchContext(long handle, double[] x0Base, double[] targetBase,
                                                        int[][] rowMode, int[] baseRowMode, boolean[][] disabledElementMask,
@@ -106,5 +110,6 @@ public final class BatchSolveNative {
                                                        int[] reactiveLimitsSeedState,
                                                        int[] closedBranchParameterOverrideScenarioElement, double[] closedBranchParameterOverrideValues,
                                                        int maxOuterIterations, int maxPqPvSwitch, int rejectSlackDistributionFailure, int skipReactiveLimitsPhase,
-                                                       int nBaseClosedZeroImpedanceBranches, int[] zeroImpedanceBranchCloseScenarioElement, int[] zeroImpedanceBranchOpenScenarioElement);
+                                                       int nBaseClosedZeroImpedanceBranches, int[] zeroImpedanceBranchCloseScenarioElement, int[] zeroImpedanceBranchOpenScenarioElement,
+                                                       int pauseAtEnded);
 }

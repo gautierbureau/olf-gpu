@@ -27,6 +27,7 @@
 #include "linear_solver_settings.cuh"
 #include "batched_lu_solve.cuh"
 #include "realistic_voltage_check.cuh"
+#include "scenario_install.cuh"
 #include "state_vector_scaling.cuh"
 #include "../fixedmatrix/zero_diagonal_repair.cuh"
 #include "outer_loop_sequence.cuh"
@@ -123,6 +124,14 @@ void newtonSolve(BatchSolverContext* ctx, DriverPass& drv, OuterLoopSequence& se
     std::vector<char> solveConverged(nS, 0), restarted(nS, 0);
     std::vector<double> hNorms;
     nActive = static_cast<int>(std::count(active.begin(), active.end(), 1));
+    // A call that goes on with scenarios a paused one left solving resumes the iteration it paused in, after its tests and
+    // checks: its first iteration has no test half (k == 0, as for a first one), and it is not a new batched iteration for
+    // them.
+    const std::vector<char> installed = installedFlags(ctx);
+    bool resuming = false;
+    for (int s = 0; s < nS && !resuming; s++) {
+        resuming = active[s] && !installed[s];
+    }
 
     // A scenario's solve ended (converged, out of budget, diverged or rejected): its per-scenario Newton work, and the
     // work by what started the solve (OLF_GPU_PHASE_TIME).
@@ -308,13 +317,15 @@ void newtonSolve(BatchSolverContext* ctx, DriverPass& drv, OuterLoopSequence& se
             CUDA_CHECK(cudaMemcpy(ctx->dActive.p, active.data(), nS * sizeof(char), cudaMemcpyHostToDevice));
         }
         for (int s = 0; s < nS; s++) {
-            if (active[s]) {
+            if (active[s] && (k > 0 || installed[s])) {
                 batchedIterations[s]++;
             }
         }
         drv.outer = k;
         gNewtonLoopIteration = k;
-        gNewtonIters++;
+        if (k > 0 || !resuming) {
+            gNewtonIters++;
+        }
         bool atBudget = false;                               // a scenario is at its Newton budget
         bool allAtBudget = true;                             // every scenario still solving is: the fill computes F only
         for (int s = 0; s < nS; s++) {
@@ -338,8 +349,10 @@ void newtonSolve(BatchSolverContext* ctx, DriverPass& drv, OuterLoopSequence& se
                     if (active[s]) {
                         testScenario(s);
                         endSolve(s);
+                        active[s] = 0;                       // its solve has ended: the call hands it back
                     }
                 }
+                nActive = 0;
                 break;                                       // final residual recorded; done
             }
         } else {
@@ -429,6 +442,12 @@ void newtonSolve(BatchSolverContext* ctx, DriverPass& drv, OuterLoopSequence& se
                     // counted again: a device loop may also have routed a scenario it did not check to the CPU
                     nActive = static_cast<int>(std::count(active.begin(), active.end(), 1));
                     CUDA_CHECK(cudaMemcpy(ctx->dActive.p, active.data(), nS * sizeof(char), cudaMemcpyHostToDevice));
+                }
+                // The caller refills the bank: once pauseAtEnded scenarios have ended, the call returns here, between this
+                // iteration's checks and its fill, with the others still solving; the next call installs new scenarios into
+                // the slots handed back and goes on from here.
+                if (drv.pauseAtEnded > 0 && nActive > 0 && ctx->slotState.ended() >= drv.pauseAtEnded) {
+                    return;
                 }
             }
             if (nActive == 0) {

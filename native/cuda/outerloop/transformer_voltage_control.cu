@@ -22,6 +22,7 @@
 #include "incremental_transformer_voltage_control.cuh"
 #include "transformer_voltage_control.cuh"
 #include "../common/trace.cuh"
+#include "../solver/scenario_override_tables.cuh"
 
 namespace olfgpu {
 
@@ -419,7 +420,7 @@ void transformerVoltageControlStep(BatchSolverContext* ctx, DriverPass& drv) {
     std::vector<char> rej(nS);
     CUDA_CHECK(cudaMemcpy(rej.data(), ctx->dTransformerVoltageControlRejected.p, nS, cudaMemcpyDeviceToHost));
     for (int s2 = 0; s2 < nS; s2++) if (rej[s2]) { loopRejected[s2] = 1; traceReject(s2, "tvd-kernel-reject", outer, 0); }
-    rebuildTapOverrides(ctx);
+    publishClosedBranchParameterOverrides(ctx);
     if (traceOn(Trace::BATCH_TRACE)) {
         size_t nsm = static_cast<size_t>(nS) * ctx->nTransformerVoltageControlMembers;
         std::vector<int> memberState(nsm), step(nS);
@@ -428,8 +429,8 @@ void transformerVoltageControlStep(BatchSolverContext* ctx, DriverPass& drv) {
         int nCont = 0, nFixed = 0, nRej = 0;
         for (size_t k = 0; k < nsm; k++) { nCont += memberState[k] == GpuDiscreteControlMemberState::CONTINUOUS; nFixed += memberState[k] == GpuDiscreteControlMemberState::ROUNDED; }
         for (int s2 = 0; s2 < nS; s2++) nRej += rej[s2] ? 1 : 0;
-        std::fprintf(stderr, "TVD_KERNEL mode=%d nS=%d nMembers=%d continuous=%d fixed=%d rejected=%d step0=%d nClosedBranchParameterOverrides=%d\n",
-                     ctx->transformerVoltageControlMode, nS, ctx->nTransformerVoltageControlMembers, nCont, nFixed, nRej, step[0], ctx->nClosedBranchParameterOverrides);
+        std::fprintf(stderr, "TVD_KERNEL mode=%d nS=%d nMembers=%d continuous=%d fixed=%d rejected=%d step0=%d\n",
+                     ctx->transformerVoltageControlMode, nS, ctx->nTransformerVoltageControlMembers, nCont, nFixed, nRej, step[0]);
     }
 }
 

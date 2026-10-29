@@ -74,8 +74,14 @@ struct BatchSolverContext {
     bool perRowCriteria = false;
     DeviceBuf dAlternateRowMaxMismatch, dAlternateRowMaxMismatchSelector;                              // n each: the alternate threshold and its selector row (see residualNormsBatch)
     bool perRowAlternateCriteria = false;
-    int nShuntAdmittanceOverrides = 0;                                           // per-scenario shunt admittance overrides (set per solve)
-    DeviceBuf dShuntAdmittanceOverrideScenarioElement, dShuntAdmittanceOverrideDelta;                        // nShuntAdmittanceOverrides*2 ints (slot, PACK elem) / nShuntAdmittanceOverrides*2 doubles (dG, dB)
+    // Per-slot shunt admittance overrides (scenario_override_tables.cuh): the caller's, a CSR per slot installed per
+    // solve ((slot + 1) starts, PACK shunt element, (dG, dB)), and the incremental shunt loop's moved sections per
+    // (slot, controller), with the controllers acting on each PACK shunt element.
+    DeviceBuf dShuntAdmittanceOverrideScenarioStart, dShuntAdmittanceOverrideElement, dShuntAdmittanceOverrideDelta;
+    int nShuntAdmittanceOverrideControllers = 0;
+    std::vector<int> hShuntAdmittanceOverrideControllerCounts;                       // the loop sizes the controller tables were built for
+    DeviceBuf dShuntAdmittanceOverrideElementControllerStart, dShuntAdmittanceOverrideElementController;
+    DeviceBuf dShuntAdmittanceOverrideSectionsMoved, dShuntAdmittanceOverrideControllerDelta;
     int nBaseClosedZeroImpedanceBranches = 0;                                         // zero-impedance elements [0,nBaseClosedZeroImpedanceBranches) always enabled; [nBaseClosedZeroImpedanceBranches,nZeroImpedanceBranch) are
                                                              // base-open closable switches gated by the zeroImpedanceBranchCloseOverrides list
     int nZeroImpedanceBranchCloseOverrides = 0;
@@ -89,8 +95,14 @@ struct BatchSolverContext {
     // network.xiidm's full non-busbar scope fillZeroImpBatch was the top kernel, 32 s of 126 s (45 ms a launch).
     DeviceBuf dZeroImpedanceBranchOpenMask, dZeroImpedanceBranchCloseMask, dSpanningTreeOverrideMask;            // off/on: 1 = listed; tree: -1 = no override, else 0/1
     bool hasZeroImpedanceBranchMasks = false;
-    int nClosedBranchParameterOverrides = 0;                                           // per-scenario closed-branch tap overrides (tap/PST actions)
-    DeviceBuf dClosedBranchParameterOverrideScenarioElement, dClosedBranchParameterOverrideValues;                       // nClosedBranchParameterOverrides*2 ints / nClosedBranchParameterOverrides*8 doubles (full closedBranchParameters row per entry)
+    // Per-slot closed-branch tap overrides (scenario_override_tables.cuh): the caller's tap/PST actions, a CSR per slot
+    // installed per solve ((slot + 1) starts, closed-branch element, full closedBranchParameters row), and the tap
+    // loops' moved taps per (slot, controller), with the controllers acting on each closed-branch element.
+    DeviceBuf dClosedBranchParameterOverrideScenarioStart, dClosedBranchParameterOverrideElement, dClosedBranchParameterOverrideValues;
+    int nClosedBranchParameterOverrideControllers = 0;
+    std::vector<int> hClosedBranchParameterOverrideControllerCounts;                 // the loop sizes the controller tables were built for
+    DeviceBuf dClosedBranchParameterOverrideElementControllerStart, dClosedBranchParameterOverrideElementController;
+    DeviceBuf dClosedBranchParameterOverrideTapMoved, dClosedBranchParameterOverridePiModel;
     // ---- solve-only batch compaction (mode 3, tol > 0): lazily allocated on first engage ----
     DeviceBuf dValsCompacted, dBCompacted, dDxCompacted, dCompactedScenarioMap;                      // nnz*cap / n*cap / n*cap / cap ints
     CudssCtx compactedSolver;                                            // dedicated handle/config/data for the compact width
@@ -342,10 +354,6 @@ struct BatchSolverContext {
     // Host mirrors of the static tables, for the tap-override rebuild and the rho-row lookup.
     std::vector<int> hIncrementalTransformerVoltageControlRhoRow, hIncrementalTransformerVoltageControlElement, hIncrementalTransformerVoltageControlBaseTap, hIncrementalTransformerVoltageControlTapStart;
     std::vector<double> hIncrementalTransformerVoltageControlTapRows;
-    // Host copy of the CALLER's tap overrides (contingency tap actions) as uploaded at solve entry:
-    // the TVC loop's moves are merged IN FRONT of them (findTapOverride takes the first match).
-    std::vector<int> hClosedBranchParameterOverrideBaseScenarioElement;
-    std::vector<double> hClosedBranchParameterOverrideBaseValues;
     // INCREMENTAL SHUNT VOLTAGE CONTROL — in-kernel outer loop (GpuOuterLoopKind::INCREMENTAL_SHUNT_VOLTAGE_CONTROL). Controllers are
     // grouped per controlled bus (OLF adjustB round-robin, |b|-descending); each controller shunt has
     // sub-controllers (OLF LfShunt.Controller) with their own section B/G tables and ratchet.
@@ -378,8 +386,6 @@ struct BatchSolverContext {
     DeviceBuf dPhaseControlTap, dPhaseControlAppliedTap, dPhaseControlCheckCount;                // per (scenario, controller) tap; per scenario check count
     std::vector<int> hPhaseControlElement, hPhaseControlTapStart, hPhaseControlBaseTap;
     std::vector<double> hPhaseControlTapRows;
-    std::vector<int> hShuntAdmittanceOverrideBaseScenarioElement;                      // the caller's shunt overrides at solve entry
-    std::vector<double> hShuntAdmittanceOverrideBaseDelta;
     // DISCRETE (non-incremental) TRANSFORMER VOLTAGE CONTROL — GpuOuterLoopKind::TRANSFORMER_VOLTAGE_CONTROL (OLF order 8): OLF's
     // TransformerVoltageControlOuterLoop (AFTER_GENERATOR_VOLTAGE_CONTROL: INITIAL/CONTROL/COMPLETE) or
     // SimpleTransformerVoltageControlOuterLoop (WITH_GENERATOR_VOLTAGE_CONTROL). One group per controlled bus

@@ -10,6 +10,7 @@
 #include "../solver/driver_pass.cuh"
 #include "scatter.cuh"
 #include "../fixedmatrix/reactive_relocation.cuh"
+#include "scenario_overrides.cuh"
 
 namespace olfgpu {
 
@@ -17,7 +18,7 @@ __global__ void fillClosedBranchBatch(int elementCount, int nScenarios, int n, i
                                       const double* in, const int* ix, const int* dest,
                                       const double* x, double* vals, double* F,
                                       const char* disabled, const char* active,
-                                      int nClosedBranchParameterOverrides, const int* closedBranchParameterOverrideScenarioElement, const double* closedBranchParameterOverrideValues,
+                                      ClosedBranchParameterOverrides closedBranchParameterOverrides,
                                       const int* mode, int dynamicRelocation, const char* relocatedElement,
                                       const int* phaseControlDestination, const int* phaseControlSelector, double* qbuf,
                                       BatchLayout layout);
@@ -27,7 +28,7 @@ __global__ void fillRelocatedClosedBranchBatch(int relocatedCount, const int* re
                                                int nElements, int elemOffset, const double* in, const int* ix, const int* dest,
                                                const double* x, double* vals, double* F,
                                                const char* disabled, const char* active,
-                                               int nClosedBranchParameterOverrides, const int* closedBranchParameterOverrideScenarioElement, const double* closedBranchParameterOverrideValues,
+                                               ClosedBranchParameterOverrides closedBranchParameterOverrides,
                                                const int* alternateDestination, const int* selectorRow, const int* mode,
                                                const int* phaseControlDestination, const int* phaseControlSelector,
                                                ReactiveRelocationTables rt, double* qbuf, BatchLayout layout);
@@ -43,7 +44,7 @@ __global__ void fillClosedBranchBatchF(int elementCount, int nScenarios, int n, 
                                        const double* in, const int* ix, const int* dest,
                                        const double* x, double* F,
                                        const char* disabled, const char* active,
-                                       int nClosedBranchParameterOverrides, const int* closedBranchParameterOverrideScenarioElement, const double* closedBranchParameterOverrideValues,
+                                       ClosedBranchParameterOverrides closedBranchParameterOverrides,
                                        const int* alternateDestination, const int* selectorRow, const int* mode, int dynamicRelocation,
                                        const char* relocatedElement, const int* phaseControlDestination, const int* phaseControlSelector,
                                        ReactiveRelocationTables rt, double* qbuf, BatchLayout layout);

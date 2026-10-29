@@ -24,6 +24,7 @@
 #include "batch_context.cuh"
 #include "driver_steps.cuh"
 #include "linear_solver_settings.cuh"
+#include "scenario_override_tables.cuh"
 #include "../common/trace.cuh"
 
 namespace olfgpu {
@@ -346,27 +347,9 @@ void uploadBatchOverrides(BatchSolverContext* ctx, int stateVectorScalingMode, d
     ctx->clampStep = clampStep;
     ctx->maxDv = maxDv;
     ctx->maxDphi = maxDphi;
-    // Per-scenario shunt admittance overrides (section shifts / reconnection). PACK-indexed
-    // elements (shunt family index, not the global element index). Empty = a 1-entry dummy
-    // upload so the kernels' pointers are always valid.
-    ctx->nShuntAdmittanceOverrides = nShuntAdmittanceOverrides;
-    ctx->hShuntAdmittanceOverrideBaseScenarioElement.assign(shuntAdmittanceOverrideScenarioElement, shuntAdmittanceOverrideScenarioElement + (size_t) nShuntAdmittanceOverrides * 2);
-    ctx->hShuntAdmittanceOverrideBaseDelta.assign(shuntAdmittanceOverrideDelta, shuntAdmittanceOverrideDelta + (size_t) nShuntAdmittanceOverrides * 2);
-    if (nShuntAdmittanceOverrides > 0 || ctx->nIncrementalShuntVoltageControlControllerShunts > 0) {
-        // room for the in-kernel shunt loop to append one (dG, dB) per (scenario, controller)
-        size_t capEntries = std::max<size_t>(static_cast<size_t>(nShuntAdmittanceOverrides) + (ctx->nIncrementalShuntVoltageControlControllerShunts > 0 ? static_cast<size_t>(nS) * ctx->nIncrementalShuntVoltageControlControllerShunts : 0), 1);
-        ctx->dShuntAdmittanceOverrideScenarioElement.ensure(capEntries * 2 * sizeof(int));
-        ctx->dShuntAdmittanceOverrideDelta.ensure(capEntries * 2 * sizeof(double));
-        if (nShuntAdmittanceOverrides > 0) {
-            CUDA_CHECK(cudaMemcpy(ctx->dShuntAdmittanceOverrideScenarioElement.p, shuntAdmittanceOverrideScenarioElement, static_cast<size_t>(nShuntAdmittanceOverrides) * 2 * sizeof(int), cudaMemcpyHostToDevice));
-            CUDA_CHECK(cudaMemcpy(ctx->dShuntAdmittanceOverrideDelta.p, shuntAdmittanceOverrideDelta, static_cast<size_t>(nShuntAdmittanceOverrides) * 2 * sizeof(double), cudaMemcpyHostToDevice));
-        }
-    } else if (!ctx->dShuntAdmittanceOverrideScenarioElement.p) {
-        int dummyI[2] = {-1, -1};
-        double dummyD[2] = {0, 0};
-        ctx->dShuntAdmittanceOverrideScenarioElement.upload(dummyI, sizeof(dummyI));
-        ctx->dShuntAdmittanceOverrideDelta.upload(dummyD, sizeof(dummyD));
-    }
+    // Per-scenario shunt admittance overrides (section shifts / reconnection), PACK-indexed elements (shunt family
+    // index, not the global element index).
+    installShuntAdmittanceOverrides(ctx, nShuntAdmittanceOverrides, shuntAdmittanceOverrideScenarioElement, shuntAdmittanceOverrideDelta);
     ctx->nBaseClosedZeroImpedanceBranches = nBaseClosedZeroImpedanceBranches > 0 ? nBaseClosedZeroImpedanceBranches : ctx->nZeroImpedanceBranch;         // default: every zero-impedance element always enabled
     ctx->nZeroImpedanceBranchOpenOverrides = nZeroImpedanceBranchOpenOverrides;
     if (nZeroImpedanceBranchOpenOverrides > 0) {
@@ -404,26 +387,7 @@ void uploadBatchOverrides(BatchSolverContext* ctx, int stateVectorScalingMode, d
             std::fprintf(stderr, "ZI_LISTS nZeroImpedanceBranch=%d nScenarios=%d nZeroImpedanceBranchOpenOverrides=%d nZeroImpedanceBranchCloseOverrides=%d\n", ctx->nZeroImpedanceBranch, ctx->nScenarios, nZeroImpedanceBranchOpenOverrides, nZeroImpedanceBranchCloseOverrides);
         }
     }
-    ctx->nClosedBranchParameterOverrides = nClosedBranchParameterOverrides;
-    ctx->hClosedBranchParameterOverrideBaseScenarioElement.assign(closedBranchParameterOverrideScenarioElement, closedBranchParameterOverrideScenarioElement + (size_t) nClosedBranchParameterOverrides * 2);
-    ctx->hClosedBranchParameterOverrideBaseValues.assign(closedBranchParameterOverrideValues, closedBranchParameterOverrideValues + (size_t) nClosedBranchParameterOverrides * 8);
-    if (nClosedBranchParameterOverrides > 0 || ctx->nIncrementalTransformerVoltageControlControllerBranches > 0 || ctx->nIncrementalFlowControlControllerBranches > 0 || ctx->nPhaseControlControllerBranches > 0) {
-        // Room for the in-kernel TVC loop to merge one moved tap per (scenario, controller) in
-        // front of the caller's list without reallocating mid-solve.
-        size_t capEntries = static_cast<size_t>(nClosedBranchParameterOverrides) + static_cast<size_t>(nS) * (ctx->nIncrementalTransformerVoltageControlControllerBranches + ctx->nIncrementalFlowControlControllerBranches + ctx->nPhaseControlControllerBranches + ctx->nTransformerVoltageControlMembers);
-        capEntries = std::max<size_t>(capEntries, 1);
-        ctx->dClosedBranchParameterOverrideScenarioElement.ensure(capEntries * 2 * sizeof(int));
-        ctx->dClosedBranchParameterOverrideValues.ensure(capEntries * 8 * sizeof(double));
-        if (nClosedBranchParameterOverrides > 0) {
-            CUDA_CHECK(cudaMemcpy(ctx->dClosedBranchParameterOverrideScenarioElement.p, closedBranchParameterOverrideScenarioElement, static_cast<size_t>(nClosedBranchParameterOverrides) * 2 * sizeof(int), cudaMemcpyHostToDevice));
-            CUDA_CHECK(cudaMemcpy(ctx->dClosedBranchParameterOverrideValues.p, closedBranchParameterOverrideValues, static_cast<size_t>(nClosedBranchParameterOverrides) * 8 * sizeof(double), cudaMemcpyHostToDevice));
-        }
-    } else if (!ctx->dClosedBranchParameterOverrideScenarioElement.p) {
-        int dummyI[2] = {-1, -1};
-        double dummyD[1] = {0};
-        ctx->dClosedBranchParameterOverrideScenarioElement.upload(dummyI, sizeof(dummyI));
-        ctx->dClosedBranchParameterOverrideValues.upload(dummyD, sizeof(dummyD));
-    }
+    installClosedBranchParameterOverrides(ctx, nClosedBranchParameterOverrides, closedBranchParameterOverrideScenarioElement, closedBranchParameterOverrideValues);
 }
 
 }  // namespace olfgpu

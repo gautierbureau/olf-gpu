@@ -67,8 +67,8 @@ __global__ void fillDistrQBatch(int nDistrQ, int nScenarios, int n, int nnz, int
                                 const char* limitType, int nReactiveLimitEntries,
                                 const char* pilotSelfCarrierSkip, int pilotSelfCarrierSkipStride,
                                 const int* memberRelocationGroup, const int* reactiveRelocationGroupStart, const int* reactiveRelocationCandidateRows,
-                                int nClosedBranchParameterOverrides, const int* closedBranchParameterOverrideScenarioElement, const double* closedBranchParameterOverrideValues,
-                                int nShuntAdmittanceOverrides, const int* shuntAdmittanceOverrideScenarioElement, const double* shuntAdmittanceOverrideDelta,
+                                ClosedBranchParameterOverrides closedBranchParameterOverrides,
+                                ShuntAdmittanceOverrides shuntAdmittanceOverrides,
                                 int distrQTraceRow,
                                 const char* distrQSubgroup, const int* reactiveRelocationDistrQMemberStart, int nDistrQMembersAll, BatchLayout layout) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -169,7 +169,7 @@ __global__ void fillDistrQBatch(int nDistrQ, int nScenarios, int n, int nnz, int
         int vcol = shuntIndices[e * 5 + 2];
         double g = sp[0];
         double b = sp[1];
-        applyShuntOverride(nShuntAdmittanceOverrides, shuntAdmittanceOverrideScenarioElement, shuntAdmittanceOverrideDelta, s, e, g, b);
+        applyShuntOverride(shuntAdmittanceOverrides, s, e, g, b);
         double so[SHUNT_OUTPUT_COUNT];
         updateShunt(xs[vcol], g, b, 0, so + 0, so + 1, so + 2, so + 3, so + 4);
         if (dst[0] <= -2 && (-2 - dst[0]) == distrQTraceRow) {
@@ -217,7 +217,7 @@ __global__ void fillDistrQBatch(int nDistrQ, int nScenarios, int n, int nnz, int
         p[i] = p0[i];
     }
     double pOv[8];
-    if (findTapOverride(nClosedBranchParameterOverrides, closedBranchParameterOverrideScenarioElement, closedBranchParameterOverrideValues, s, e, pOv)) {
+    if (findTapOverride(closedBranchParameterOverrides, s, e, pOv)) {
         for (int i = 0; i < 8; i++) {
             p[i] = pOv[i];
         }

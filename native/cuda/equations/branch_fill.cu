@@ -40,13 +40,11 @@ namespace {
 // goes through the same generated assembler, so their residuals agree bit for bit. The F-only fill used to derive the
 // angles by angle addition from per-branch statics: faster, but another rounding than OLF's.
 __device__ __forceinline__ void closedBranchOutputs(int e, int s, int n, const double* in, const int* ix, const double* x,
-                                                    int nClosedBranchParameterOverrides,
-                                                    const int* closedBranchParameterOverrideScenarioElement,
-                                                    const double* closedBranchParameterOverrideValues, double* o) {
+                                                    ClosedBranchParameterOverrides closedBranchParameterOverrides, double* o) {
     const double* p = in + e * 8;                            // y g1 g2 b1 b2 ksi r1 a1
     const int* q = ix + e * 12;                              // P1 Q1 P2 Q2 ph1 v1 ph2 v2 a1col r1col
     double pOv[8];
-    if (findTapOverride(nClosedBranchParameterOverrides, closedBranchParameterOverrideScenarioElement, closedBranchParameterOverrideValues, s, e, pOv)) {
+    if (findTapOverride(closedBranchParameterOverrides, s, e, pOv)) {
         p = pOv;
     }
     const double* xs = x + s * n;
@@ -99,7 +97,7 @@ __global__ void fillClosedBranchBatch(int elementCount, int nScenarios, int n, i
                                       const double* in, const int* ix, const int* dest,
                                       const double* x, double* vals, double* F,
                                       const char* disabled, const char* active,
-                                      int nClosedBranchParameterOverrides, const int* closedBranchParameterOverrideScenarioElement, const double* closedBranchParameterOverrideValues,
+                                      ClosedBranchParameterOverrides closedBranchParameterOverrides,
                                       const int* mode, int dynamicRelocation, const char* relocatedElement,
                                       const int* phaseControlDestination, const int* phaseControlSelector, double* qbuf,
                                       BatchLayout layout) {
@@ -109,8 +107,7 @@ __global__ void fillClosedBranchBatch(int elementCount, int nScenarios, int n, i
     itemAndScenario(tid, elementCount, layout, e, s);
     if (!active[s] || disabled[s * nElements + elemOffset + e] || (dynamicRelocation && relocatedElement[e])) return;
     double o[CLOSED_BRANCH_OUTPUT_COUNT];
-    closedBranchOutputs(e, s, n, in, ix, x, nClosedBranchParameterOverrides, closedBranchParameterOverrideScenarioElement,
-                        closedBranchParameterOverrideValues, o);
+    closedBranchOutputs(e, s, n, in, ix, x, closedBranchParameterOverrides, o);
     const ScenarioValues valsS = scenarioEntries(vals, s, nnz, layout);
     const ScenarioValues FS = scenarioEntries(F, s, n, layout);
     scatterAdd(CLOSED_BRANCH_OUTPUT_COUNT, dest + e * CLOSED_BRANCH_OUTPUT_COUNT, o, valsS, FS);
@@ -124,7 +121,7 @@ __global__ void fillRelocatedClosedBranchBatch(int relocatedCount, const int* re
                                                int nElements, int elemOffset, const double* in, const int* ix, const int* dest,
                                                const double* x, double* vals, double* F,
                                                const char* disabled, const char* active,
-                                               int nClosedBranchParameterOverrides, const int* closedBranchParameterOverrideScenarioElement, const double* closedBranchParameterOverrideValues,
+                                               ClosedBranchParameterOverrides closedBranchParameterOverrides,
                                                const int* alternateDestination, const int* selectorRow, const int* mode,
                                                const int* phaseControlDestination, const int* phaseControlSelector,
                                                ReactiveRelocationTables rt, double* qbuf, BatchLayout layout) {
@@ -135,8 +132,7 @@ __global__ void fillRelocatedClosedBranchBatch(int relocatedCount, const int* re
     const int e = relocatedElements[j];
     if (!active[s] || disabled[s * nElements + elemOffset + e]) return;
     double o[CLOSED_BRANCH_OUTPUT_COUNT];
-    closedBranchOutputs(e, s, n, in, ix, x, nClosedBranchParameterOverrides, closedBranchParameterOverrideScenarioElement,
-                        closedBranchParameterOverrideValues, o);
+    closedBranchOutputs(e, s, n, in, ix, x, closedBranchParameterOverrides, o);
     const ScenarioValues valsS = scenarioEntries(vals, s, nnz, layout);
     const ScenarioValues FS = scenarioEntries(F, s, n, layout);
     scatterAddRelocated(CLOSED_BRANCH_OUTPUT_COUNT, dest + e * CLOSED_BRANCH_OUTPUT_COUNT, alternateDestination + e * CLOSED_BRANCH_OUTPUT_COUNT, selectorRow + e * CLOSED_BRANCH_OUTPUT_COUNT,
@@ -198,7 +194,7 @@ __global__ void fillClosedBranchBatchF(int elementCount, int nScenarios, int n, 
                                        const double* in, const int* ix, const int* dest,
                                        const double* x, double* F,
                                        const char* disabled, const char* active,
-                                       int nClosedBranchParameterOverrides, const int* closedBranchParameterOverrideScenarioElement, const double* closedBranchParameterOverrideValues,
+                                       ClosedBranchParameterOverrides closedBranchParameterOverrides,
                                        const int* alternateDestination, const int* selectorRow, const int* mode, int dynamicRelocation,
                                        const char* relocatedElement, const int* phaseControlDestination, const int* phaseControlSelector,
                                        ReactiveRelocationTables rt, double* qbuf, BatchLayout layout) {
@@ -210,7 +206,7 @@ __global__ void fillClosedBranchBatchF(int elementCount, int nScenarios, int n, 
     const double* p = in + e * 8;                            // y g1 g2 b1 b2 ksi r1 a1
     const int* q = ix + e * 12;                              // P1 Q1 P2 Q2 ph1 v1 ph2 v2 a1col r1col
     double pOv[8];
-    bool tapOv = findTapOverride(nClosedBranchParameterOverrides, closedBranchParameterOverrideScenarioElement, closedBranchParameterOverrideValues, s, e, pOv);
+    bool tapOv = findTapOverride(closedBranchParameterOverrides, s, e, pOv);
     if (tapOv) {
         p = pOv;
     }

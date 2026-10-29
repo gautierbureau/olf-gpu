@@ -27,6 +27,7 @@
 #include "sensitivity.cuh"
 #include "secondary_voltage_control.cuh"
 #include "../common/trace.cuh"
+#include "../solver/scenario_override_tables.cuh"
 
 namespace olfgpu {
 
@@ -130,8 +131,8 @@ __global__ void secondaryVoltageControlTriggerBatch(SecondaryVoltageControlTable
 // which is dx_i at the zone's pilot row.
 __global__ void secondaryVoltageControlGatherSensitivityBatch(SecondaryVoltageControlTables T, int nScenarios, int n, int i, int nElements, int closedBranchOffset, int shuntOffset,
                                const double* closedBranchParameters, const int* closedBranchIndices, const double* shuntParameters, const int* shuntIndices,
-                               int nClosedBranchParameterOverrides, const int* closedBranchParameterOverrideScenarioElement, const double* closedBranchParameterOverrideValues,
-                               int nShuntAdmittanceOverrides, const int* shuntAdmittanceOverrideScenarioElement, const double* shuntAdmittanceOverrideDelta,
+                               ClosedBranchParameterOverrides closedBranchParameterOverrides,
+                               ShuntAdmittanceOverrides shuntAdmittanceOverrides,
                                const char* disabled, const double* x, const double* dx) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= T.nControllerBuses * nScenarios) return;
@@ -149,7 +150,7 @@ __global__ void secondaryVoltageControlGatherSensitivityBatch(SecondaryVoltageCo
             if (e < 0) continue;
             double g = shuntParameters[e * 2];
             double b = shuntParameters[e * 2 + 1];
-            applyShuntOverride(nShuntAdmittanceOverrides, shuntAdmittanceOverrideScenarioElement, shuntAdmittanceOverrideDelta, s, e, g, b);
+            applyShuntOverride(shuntAdmittanceOverrides, s, e, g, b);
             int vCol = shuntIndices[e * 5 + 2];
             int bCol = shuntIndices[e * 5 + 3];                      // SHUNT_B row when b is a solved variable
             if (bCol >= 0) b = xs[bCol];
@@ -160,7 +161,7 @@ __global__ void secondaryVoltageControlGatherSensitivityBatch(SecondaryVoltageCo
             if (e < 0) continue;
             const double* p = closedBranchParameters + e * 8;
             double pOv[8];
-            if (findTapOverride(nClosedBranchParameterOverrides, closedBranchParameterOverrideScenarioElement, closedBranchParameterOverrideValues, s, e, pOv)) p = pOv;
+            if (findTapOverride(closedBranchParameterOverrides, s, e, pOv)) p = pOv;
             const int* q = closedBranchIndices + e * 12;
             sq += controlledFlowSensitivity(T.reactiveTermSide[k], GpuControlledFlow::REACTIVE_POWER, p, xs, q, dxs);  // getQ1/getQ2(branch).calculateSensi
         }
@@ -378,8 +379,8 @@ void secondaryVoltageControlStep(BatchSolverContext* ctx, DriverPass& drv) {
                 ctx->nElements, ctx->closedBranchOffset, ctx->shuntOffset,
                 ctx->structure->closedBranch.parameters.as<double>(), ctx->structure->closedBranch.indices.as<int>(),
                 ctx->structure->shunt.parameters.as<double>(), ctx->structure->shunt.indices.as<int>(),
-                ctx->nClosedBranchParameterOverrides, ctx->dClosedBranchParameterOverrideScenarioElement.as<int>(), ctx->dClosedBranchParameterOverrideValues.as<double>(),
-                ctx->nShuntAdmittanceOverrides, ctx->dShuntAdmittanceOverrideScenarioElement.as<int>(), ctx->dShuntAdmittanceOverrideDelta.as<double>(),
+                closedBranchParameterOverrides(ctx),
+                shuntAdmittanceOverrides(ctx),
                 ctx->dDisabled.as<char>(), ctx->dX.as<double>(), ctx->dDx.as<double>());
     }
     CUDA_CHECK(cudaMemcpy(ctx->dActive.p, active.data(), nS, cudaMemcpyHostToDevice));   // as it was

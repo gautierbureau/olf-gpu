@@ -35,6 +35,7 @@ import com.powsybl.openloadflow.ac.outerloop.gpu.GpuReactiveLimitsOuterLoop;
 import com.powsybl.openloadflow.ac.outerloop.gpu.HvdcNative;
 import com.powsybl.openloadflow.ac.outerloop.gpu.PhaseControlNative;
 import com.powsybl.openloadflow.ac.outerloop.gpu.ReactiveCapabilityCurves;
+import com.powsybl.openloadflow.ac.outerloop.gpu.ReactiveLimitsNative;
 import com.powsybl.openloadflow.ac.outerloop.gpu.SecondaryVoltageControlNative;
 import com.powsybl.openloadflow.ac.outerloop.gpu.ShuntVoltageControlNative;
 import com.powsybl.openloadflow.ac.outerloop.gpu.TransformerVoltageControlNative;
@@ -574,9 +575,6 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
             }
             double[] target = activation.applyTargets(targetVector.getArray());
             double[] x0 = equationSystem.getStateVector().get().clone();
-            // the RL state only a run with the ReactiveLimits loop moves (every entry stays NONE otherwise)
-            reactiveLimitsFinalState = driverReactiveLimitsOuterLoop() != null && cachedData.reactiveLimits().voltageRow().length > 0
-                    ? new int[cachedData.reactiveLimits().voltageRow().length] : null;
             // Device-side state-vector scaling: NONE = undamped Newton; LINE_SEARCH backtracks on the
             // device (mirrors LineSearchStateVectorScaling); MAX_VOLTAGE_CHANGE clamps each step so the
             // largest |Δv|/|Δφ| stays within maxDv/maxDphi (mirrors MaxVoltageChangeStateVectorScaling).
@@ -687,11 +685,14 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                     parameters.getMaxVoltageChangeStateVectorScalingMaxDv(),
                     parameters.getMaxVoltageChangeStateVectorScalingMaxDphi(),
                     varType, null,
-                    null, null, null, reactiveLimitsFinalState, null, null,
+                    null, null, null, null, null,
                     driverMaxOuterIterations, driverMaxPqPvSwitch, driverRejectSlackDistributionFailure ? 1 : 0,
                     0,                                       // skipReactiveLimitsPhase: the driver owns RL
                     0, null, null)[0];
             long t2 = System.nanoTime();
+            // the RL state only a run with the ReactiveLimits loop moves (every entry stays NONE otherwise)
+            reactiveLimitsFinalState = driverReactiveLimitsOuterLoop() != null && cachedData.reactiveLimits().voltageRow().length > 0
+                    ? ReactiveLimitsNative.readBatchReactiveLimitsFinalState(context.handle.get()) : null;
             if (out.length > n + 2 && (int) out[n + 2] == GpuAcSolverStatus.LINEAR_SOLVE_FAILED && !robustModeForRun) {
                 // A FAILED LINEAR SOLVE (status -3, and only that: every other reject names a state
                 // the device cannot lay out or OLF's own budget, and goes to the CPU as before -

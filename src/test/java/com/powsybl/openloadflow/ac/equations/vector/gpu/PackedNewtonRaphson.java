@@ -126,7 +126,7 @@ final class PackedNewtonRaphson {
             DriverNative.setBatchOuterLoops(handle, false, false);           // pure Newton-Raphson: no outer loop
             return BatchSolveNative.solveBatchContext(handle, x0, target, new int[][] {rowMode}, rowMode, new boolean[1][0],
                     new int[0], new double[0], new int[0], new double[0], new double[0], new double[0], new double[0], null, null, null, null, null, null, null, null,
-                    maxIter, tol, 0.0, 0.0, 0.0, stateVectorScalingMode, maxDv, maxDphi, varType, null, null, null, null, null, null, null, 0,
+                    maxIter, tol, 0.0, 0.0, 0.0, stateVectorScalingMode, maxDv, maxDphi, varType, null, null, null, null, null, null, 0,
                     com.powsybl.openloadflow.ac.outerloop.ReactiveLimitsOuterLoop.MAX_SWITCH_PQ_PV_DEFAULT_VALUE,
                     0, 0, 0, null, null)[0];
         } finally {
@@ -186,7 +186,7 @@ final class PackedNewtonRaphson {
                 // one-shot: no per-scenario gen-override flips, so any scenario's row mode IS the base row mode
                 return BatchSolveNative.solveBatchContext(handle, x0Base, targetBase, rowMode, rowMode[0], disabledElementMask,
                         new int[0], new double[0], new int[0], new double[0], new double[0], new double[0], new double[0], null, null, null, null, null, null, null, null,
-                        maxIter, tol, reactiveLimitTol, slackDistTol, 0.0, 0, 0.0, 0.0, null, null, null, null, null, null, null, null, 0,
+                        maxIter, tol, reactiveLimitTol, slackDistTol, 0.0, 0, 0.0, 0.0, null, null, null, null, null, null, null, 0,
                         com.powsybl.openloadflow.ac.outerloop.ReactiveLimitsOuterLoop.MAX_SWITCH_PQ_PV_DEFAULT_VALUE,   // OLF's cap: 0 means never switch back
                         0, 0, 0, null, null);
             } finally {

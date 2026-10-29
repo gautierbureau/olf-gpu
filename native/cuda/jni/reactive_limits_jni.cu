@@ -5,6 +5,7 @@
 #include "jni_common.cuh"
 #include "../solver/scenario_install.cuh"
 #include "slot_table_install.cuh"
+#include "../common/codes/gpu_reactive_limits_state.cuh"
 #include "../common/codes/gpu_voltage_control_role.cuh"
 
 // Reactive-capability CURVES at runtime P: install (or clear, with nulls) the per-gen curve channel
@@ -439,6 +440,30 @@ OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, readBatchReactiveLimitTargetQ)(
     CUDA_CHECK(readInstalledRows(ctx, out.p, static_cast<size_t>(ctx->nReactiveLimitEntries), host));
     jdoubleArray arr = env->NewDoubleArray(static_cast<jsize>(host.size()));
     env->SetDoubleArrayRegion(arr, 0, static_cast<jsize>(host.size()), host.data());
+    return arr;
+}
+
+// Per (scenario, reactive-limit entry): the PV/PQ state the last solve ended with, a GpuReactiveLimitsState (its limit type
+// and PV -> PQ switch count), in the install's order; null without entries.
+extern "C" JNIEXPORT jintArray JNICALL
+OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, readBatchReactiveLimitsFinalState)(
+        JNIEnv* env, jclass, jlong handle) {
+    auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
+    if (ctx == nullptr || ctx->nReactiveLimitEntries <= 0) {
+        return nullptr;
+    }
+    std::vector<char> qLimitType, switchCount;
+    CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+    CUDA_CHECK(readInstalledRows(ctx, ctx->dReactiveLimitQLimitType.p, static_cast<size_t>(ctx->nReactiveLimitEntries), qLimitType));
+    CUDA_CHECK(readInstalledRows(ctx, ctx->dReactiveLimitPvPqSwitchCount.p, static_cast<size_t>(ctx->nReactiveLimitEntries), switchCount));
+    std::vector<int> state(qLimitType.size());
+    for (size_t k = 0; k < state.size(); k++) {
+        state[k] = reactiveLimitsState(qLimitType[k], switchCount[k]);
+    }
+    jintArray arr = env->NewIntArray(static_cast<jsize>(state.size()));
+    if (arr != nullptr) {
+        env->SetIntArrayRegion(arr, 0, static_cast<jsize>(state.size()), state.data());
+    }
     return arr;
 }
 

@@ -23,7 +23,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                               double reactiveLimitTol, double slackDistTol, double convEpsPerEq,
                               int stateVectorScalingMode, double maxDv, double maxDphi, const int* varType,
                               const double* x0Full, int nShuntAdmittanceOverrides, const int* shuntAdmittanceOverrideScenarioElement, const double* shuntAdmittanceOverrideDelta,
-                              const int* reactiveLimitsSeedState, int* reactiveLimitsFinalState,
+                              const int* reactiveLimitsSeedState,
                               int nClosedBranchParameterOverrides, const int* closedBranchParameterOverrideScenarioElement, const double* closedBranchParameterOverrideValues,
                               int maxOuterProductive, int maxPqPvSwitch, int rejectSlackDistributionFailure, int skipReactiveLimitsPhase,
                               int nBaseClosedZeroImpedanceBranches, int nZeroImpedanceBranchCloseOverrides, const int* zeroImpedanceBranchCloseScenarioElement,

@@ -93,7 +93,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                               int maxOuterProductive, int maxPqPvSwitch, int rejectSlackDistributionFailure, int skipReactiveLimitsPhase,
                               int nBaseClosedZeroImpedanceBranches, int nZeroImpedanceBranchCloseOverrides, const int* zeroImpedanceBranchCloseScenarioElement,
                               int nZeroImpedanceBranchOpenOverrides, const int* zeroImpedanceBranchOpenScenarioElement) {
-    DriverPass drv;
+    DriverPass drv(ctx->slotState);
     drv.n = ctx->n;
     drv.nnz = ctx->nnz;
     drv.nS = ctx->nScenarios;
@@ -151,14 +151,13 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     // a new chunk's scenarios hold no identity system yet (a lane its scenarios leave unused keeps whatever the last one
     // left there)
     CUDA_CHECK(cudaMemsetAsync(ctx->dIdentityLane.p, 0, static_cast<size_t>(nS) * sizeof(char), ctx->stream));
+    // The installed scenarios start their solve (SlotSolveState): solving, live, MAX_ITERATION_REACHED until they converge
+    // or fail, at the first loop of OLF's sequence.
+    ctx->slotState.start(installedFlags(ctx));
     std::vector<char>& active = drv.active;
-    active = installedFlags(ctx);                            // the installed scenarios solve
 
     BatchResult& res = drv.res;
     res.x.resize(nTot);
-    res.iters.assign(nS, 0);
-    res.norm.assign(nS, 0.0);
-    res.status.assign(nS, GpuAcSolverStatus::MAX_ITERATION_REACHED);  // default (overwritten on converge/diverge)
 
     std::vector<double>& hF = drv.hF;
 
@@ -288,8 +287,6 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     // (distribute + re-solve until balanced), and repeat the whole RL->DS sequence until a full sequence
     // triggers no inner Newton re-solve. Running RL and DS in the SAME pass converges to a different (still
     // in-tolerance) point when switching interacts with slack distribution. phase 0 = reactive limits, 1 = slack.
-    std::vector<char>& live = drv.live;
-    live = active;                          // scenarios still iterating outer loops (dropped on failure)
     // OLF's DefaultAcOuterLoopConfig orders DistributedSlack BEFORE ReactiveLimits (innermost first), and the
     // engine stabilizes them in that order. Match it: phase 0 = distributed slack, phase 1 = reactive limits.
     // (Switching PV->PQ before the slack is balanced leaves a large active imbalance that the undamped device
@@ -367,7 +364,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     // STABLE never re-solves: OLF's runOuterLoop re-solves only on an UNSTABLE check, and the device Newton forces >= 1
     // iteration per solve (matching OLF's per-run behavior), so a no-op solve would move a converged state off the
     // CPU's by about the stopping residual (measured 4e-4 kV on the DS->RL transition with a distributed base).
-    OuterLoopSequence sequence;
+    OuterLoopSequence sequence(ctx->slotState);
     initOuterLoopSequence(sequence, ctx, drv, fullLoadflow, MAX_OUTER_LOOP_ITERATIONS);
     drv.loopIdx = 0;
     // Each scenario's work is bounded: its solves (its outer-loop budget of productive ones, and the sequence's others)
@@ -433,7 +430,14 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     tracePhaseTime(ctx, drv);
     ctx->newtonLoopIterations = static_cast<int>(gNewtonIters - newtonIterationsAtStart);
     CUDA_CHECK(cudaMemcpy(res.x.data(), ctx->dX.p, nTot * sizeof(double), cudaMemcpyDeviceToHost));
-    return std::move(res);                               // drv is this call's: hand its n x nS state over, not a copy
+    // The n x nS state is handed over, not copied (the next call sizes it again); the per-slot status, iterations and
+    // norms are copied: they stay on the context, where SlotSolveState::start reads them for every slot.
+    BatchResult out;
+    out.x = std::move(res.x);
+    out.iters = res.iters;
+    out.norm = res.norm;
+    out.status = res.status;
+    return out;
 }
 
 }  // namespace olfgpu

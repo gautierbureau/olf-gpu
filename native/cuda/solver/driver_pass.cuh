@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: MPL-2.0
 //
 // DriverPass: the per-solve state the outer-loop driver (solveBatchContext) shares with the phase steps it
-// calls, one per batched solve.
+// calls, one per batched solve. What each slot carries from one solve call to the next (active, live, its result) is
+// the context's SlotSolveState, which the pass refers to.
 #ifndef OLF_GPU_SOLVER_DRIVER_PASS_CUH
 #define OLF_GPU_SOLVER_DRIVER_PASS_CUH
 
@@ -17,6 +18,8 @@
 namespace olfgpu {
 
 struct DriverPass {
+    explicit DriverPass(SlotSolveState& slots) : active(slots.active), live(slots.live), res(slots.result) {}
+
     size_t nTot = 0;
     double tol = 0.0;
     int maxIter = 0;
@@ -36,8 +39,8 @@ struct DriverPass {
     int nnz = 0;
     int nS = 0;
     int outer = 0;
-    std::vector<char> active;
-    std::vector<char> live;
+    std::vector<char>& active;
+    std::vector<char>& live;
     std::vector<char> outerLoopCheckActive;
     std::vector<char> loopRejected;
     int loopIdx = 0;
@@ -46,7 +49,7 @@ struct DriverPass {
     bool rejectSlackDistributionFailure = false;
     bool reactiveLimitsAuditOn = false;
     std::vector<std::vector<std::string>> reactiveLimitsAuditLog;   // OLF_GPU_RL_AUDIT: per scenario
-    BatchResult res;
+    BatchResult& res;
     bool usePerScenarioReactiveLimits = false;
     bool deviceFixedIter = false;
     double reactiveLimitTol = 0.0;

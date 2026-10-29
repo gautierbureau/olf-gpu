@@ -28,7 +28,7 @@ namespace olfgpu {
 __global__ void initReactiveLimitQLimitTypeBatch(int nReactiveLimitEntries, int nScenarios, int n, const int* reactiveLimitVoltageRow, const int* reactiveLimitReactivePowerRow,
                                      const double* reactiveLimitTargetV, const char* reactiveLimitFlags,
                                      const int* baseMode, const double* x, char* limitType,
-                                     int nReactiveLimitTargetVOverrides, const int* reactiveLimitTargetVOverrideScenarioEntry, const double* reactiveLimitTargetVOverrideValue, const double* secondaryVoltageControlReactiveLimitTargetV,
+                                     SlotEntries reactiveLimitTargetVOverrides, const double* secondaryVoltageControlReactiveLimitTargetV,
                                      const char* reactiveLimitVoltageControlRole, const int* reactiveLimitComparedVoltageRow,
                                      const double* target, const double* reactiveLimitBaseMinQ, const double* reactiveLimitBaseMaxQ,
                                      const double* reactiveLimitBaseLoadQ, const char* reactiveLimitBaseQLimitType,
@@ -93,7 +93,7 @@ __global__ void initReactiveLimitQLimitTypeBatch(int nReactiveLimitEntries, int 
     if (baseMode[qrow] == GpuRowMode::EQUATION && (reactiveLimitFlags[i] & GpuReactiveLimitsEntryFlag::STAND_BY_AUTOMATON) == 0) {       // PQ in the base case (a real Q-limit switch —
         // NOT a monitoring SVC standing by: that one seeds as PV (NONE) so only the VoltageMonitoring
         // orchestrator may activate it, exactly like the CPU's null qLimitType)
-        double targetV = reactiveLimitTargetVOf(nReactiveLimitTargetVOverrides, reactiveLimitTargetVOverrideScenarioEntry, reactiveLimitTargetVOverrideValue, secondaryVoltageControlReactiveLimitTargetV, nReactiveLimitEntries, s, i, reactiveLimitTargetV[i]);
+        double targetV = reactiveLimitTargetVOf(reactiveLimitTargetVOverrides, secondaryVoltageControlReactiveLimitTargetV, nReactiveLimitEntries, s, i, reactiveLimitTargetV[i]);
         limitType[scenarioEntry] = olfKind != GpuQLimitType::NONE ? olfKind
                 : ((x[idx] < targetV) ? GpuQLimitType::MAX_Q : GpuQLimitType::MIN_Q);                  // v below target ⇒ PQ at maxQ; above ⇒ PQ at minQ
     } else {
@@ -106,7 +106,7 @@ __global__ void seedReactiveLimitRowModeFromState(int nReactiveLimitEntries, int
                                     const char* limitType, int* mode, double* target, int perScenarioReactiveLimits,
                                     const char* reactiveLimitVoltageControlRole, double* savedTarget, char* savedMode,
                                     const char* reactiveLimitBaseQLimitType, const int* pilotSelfReactiveLimitEntry, int nReactiveRelocationGroups,
-                                    const double* reactiveLimitTargetV, int nReactiveLimitTargetVOverrides, const int* reactiveLimitTargetVOverrideScenarioEntry, const double* reactiveLimitTargetVOverrideValue,
+                                    const double* reactiveLimitTargetV, SlotEntries reactiveLimitTargetVOverrides,
                                     const double* secondaryVoltageControlReactiveLimitTargetV, const char* reactiveLimitLocalOverride, const double* reactiveLimitLocalTargetV,
                                     const double* reactiveLimitSeedTargetQ, const char* reactiveLimitIslanded) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -136,7 +136,7 @@ __global__ void seedReactiveLimitRowModeFromState(int nReactiveLimitEntries, int
         size_t pidx = (size_t) s * n + targetQRow;
         if (mode[pidx] == GpuRowMode::EQUATION || mode[pidx] == GpuRowMode::BUS_TARGET_Q) {  // still in the base's PQ form
             mode[pidx] = fixedVariableMode(targetQRow != vrow);
-            target[pidx] = localOv ? reactiveLimitLocalTargetV[scenarioEntry] : reactiveLimitTargetVOf(nReactiveLimitTargetVOverrides, reactiveLimitTargetVOverrideScenarioEntry, reactiveLimitTargetVOverrideValue, secondaryVoltageControlReactiveLimitTargetV, nReactiveLimitEntries, s, i, reactiveLimitTargetV[i]);
+            target[pidx] = localOv ? reactiveLimitLocalTargetV[scenarioEntry] : reactiveLimitTargetVOf(reactiveLimitTargetVOverrides, secondaryVoltageControlReactiveLimitTargetV, nReactiveLimitEntries, s, i, reactiveLimitTargetV[i]);
         }
         return;
     }
@@ -153,7 +153,7 @@ __global__ void seedReactiveLimitRowModeFromState(int nReactiveLimitEntries, int
         if (mode[qidx] == GpuRowMode::BUS_TARGET_Q) {  // still in the base's PQ form
             mode[qidx] = reactiveLimitVoltageControlRole[i] == GpuVoltageControlRole::PILOT_SELF ? GpuRowMode::FIXED_VARIABLE : GpuRowMode::EQUATION;
             target[qidx] = reactiveLimitVoltageControlRole[i] == GpuVoltageControlRole::PILOT_SELF
-                    ? reactiveLimitTargetVOf(nReactiveLimitTargetVOverrides, reactiveLimitTargetVOverrideScenarioEntry, reactiveLimitTargetVOverrideValue, secondaryVoltageControlReactiveLimitTargetV, nReactiveLimitEntries, s, i, reactiveLimitTargetV[i]) : 0.0;
+                    ? reactiveLimitTargetVOf(reactiveLimitTargetVOverrides, secondaryVoltageControlReactiveLimitTargetV, nReactiveLimitEntries, s, i, reactiveLimitTargetV[i]) : 0.0;
         }
         return;
     }

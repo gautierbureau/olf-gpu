@@ -55,9 +55,7 @@ __global__ void reactiveCapabilityCurveLimitsBatch(int nReactiveLimitEntries, in
                                    const int* reactiveLimitEntryCurveStart, const int* reactiveLimitEntryCurves, CurveHvdcAcEmulationView reactiveCapabilityCurveHvdcStation,
                                    const double* reactiveLimitMinQ, const double* reactiveLimitMaxQ, const double* reactiveLimitLoadQ,
                                    const double* target,
-                                   int nQOv, const int* qOvSlotEntry, const double* qOvMinMax,
-                                   const int* qOvPtr, const int* qOvList,
-                                   const int* reactiveCapabilityCurveOverrideStart, const int* reactiveCapabilityCurveOverrideCurve, const double* reactiveCapabilityCurveOverrideStepScale,
+                                   SlotEntries reactiveLimitDeltaOverrides, SlotEntries reactiveCapabilityCurveOverrides,
                                    const double* distributedSlackGeneratorMove, const char* distributedSlackGeneratorMoveValid, const double* distributedSlackGeneratorAnchor, const double* distributedSlackGeneratorInitialMove, int nDistributedSlackGenerators,
                                    const int* distributedSlackBusPhiRow, const int* distributedSlackBusRowOverride, int nDistributedSlackBuses, const int* distributedSlackGeneratorBus,
                                    double* minQDyn, double* maxQDyn, double* loadQDyn, const char* active) {
@@ -69,8 +67,6 @@ __global__ void reactiveCapabilityCurveLimitsBatch(int nReactiveLimitEntries, in
     double mn = reactiveLimitMinQ[i];
     double mx = reactiveLimitMaxQ[i];
     double lq = reactiveLimitLoadQ[i];
-    int ovLo = reactiveCapabilityCurveOverrideStart != nullptr ? reactiveCapabilityCurveOverrideStart[s] : 0;           // this scenario's curve repairs, if any
-    int ovHi = reactiveCapabilityCurveOverrideStart != nullptr ? reactiveCapabilityCurveOverrideStart[s + 1] : 0;       // (CSR by scenario: a handful of entries)
     // This entry's OWN curves, CSR by entry (built at upload, pack order kept so the sums accumulate in the
     // same order). The flat scan over every curve cost nReactiveLimitEntries * nS * nReactiveCapabilityCurves reads per launch - quadratic in the
     // network's size, and this kernel runs before every reactive-limit decision of every chunk.
@@ -85,12 +81,10 @@ __global__ void reactiveCapabilityCurveLimitsBatch(int nReactiveLimitEntries, in
         // capability left with it (its static base share is taken off by the qOv channel below).
         double pStep = 0;
         double shareScale = 1;
-        for (int k = ovLo; k < ovHi; k++) {
-            if (reactiveCapabilityCurveOverrideCurve[k] == g) {
-                pStep = reactiveCapabilityCurveOverrideStepScale[2 * k];
-                shareScale = reactiveCapabilityCurveOverrideStepScale[2 * k + 1];
-                break;
-            }
+        int curveOverride = slotFirstEntryOf(reactiveCapabilityCurveOverrides, s, g);   // this scenario's curve repair, if any
+        if (curveOverride >= 0) {
+            pStep = reactiveCapabilityCurveOverrides.doubleOf(s, curveOverride, 0);
+            shareScale = reactiveCapabilityCurveOverrides.doubleOf(s, curveOverride, 1);
         }
         if (shareScale < 0) continue;
         int pRow = reactiveCapabilityCurveIndices[g * 5 + 1];
@@ -144,14 +138,12 @@ __global__ void reactiveCapabilityCurveLimitsBatch(int nReactiveLimitEntries, in
     // static aggregate is run-constant and still holds it, while OLF's bus.getMinQ()/getMaxQ() sum only
     // the generators still there, so the scenario's own delta comes in here. Without curves this is the
     // ONLY reason the dynamic limits exist, which is why the seeding above starts from the static pair.
-    // ...the scenario's OWN overrides, CSR by slot: the flat {slot, entry} scan cost nReactiveLimitEntries * nS * nQOv reads per
-    // launch, with nQOv about nS on a generator-outage chunk (one override per scenario).
-    for (int c = qOvPtr != nullptr ? qOvPtr[s] : 0; c < (qOvPtr != nullptr ? qOvPtr[s + 1] : 0); c++) {
-        int k = qOvList[c];
-        if (qOvSlotEntry[2 * k + 1] == i) {
-            mn += qOvMinMax[5 * k];
-            mx += qOvMinMax[5 * k + 1];
-            lq += qOvMinMax[5 * k + 2];                      // a SHED load's reactive power: the frozen
+    // ...the scenario's OWN overrides, every one on this entry in the plan's order:
+    for (int k = 0; k < reactiveLimitDeltaOverrides.countOf(s); k++) {
+        if (reactiveLimitDeltaOverrides.intOf(s, k) == i) {
+            mn += reactiveLimitDeltaOverrides.doubleOf(s, k, 0);
+            mx += reactiveLimitDeltaOverrides.doubleOf(s, k, 1);
+            lq += reactiveLimitDeltaOverrides.doubleOf(s, k, 2);   // a SHED load's reactive power: the frozen
         }                                                    // target and the controller's own q both
     }                                                        // measure against the bus's load target Q
     minQDyn[(size_t) s * nReactiveLimitEntries + i] = mn;

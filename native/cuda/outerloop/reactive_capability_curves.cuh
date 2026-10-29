@@ -43,9 +43,7 @@ __global__ void reactiveCapabilityCurveLimitsBatch(int nReactiveLimitEntries, in
                                    const int* reactiveLimitEntryCurveStart, const int* reactiveLimitEntryCurves, CurveHvdcAcEmulationView reactiveCapabilityCurveHvdcStation,
                                    const double* reactiveLimitMinQ, const double* reactiveLimitMaxQ, const double* reactiveLimitLoadQ,
                                    const double* target,
-                                   int nQOv, const int* qOvSlotEntry, const double* qOvMinMax,
-                                   const int* qOvPtr, const int* qOvList,
-                                   const int* reactiveCapabilityCurveOverrideStart, const int* reactiveCapabilityCurveOverrideCurve, const double* reactiveCapabilityCurveOverrideStepScale,
+                                   SlotEntries reactiveLimitDeltaOverrides, SlotEntries reactiveCapabilityCurveOverrides,
                                    const double* distributedSlackGeneratorMove, const char* distributedSlackGeneratorMoveValid, const double* distributedSlackGeneratorAnchor, const double* distributedSlackGeneratorInitialMove, int nDistributedSlackGenerators,
                                    const int* distributedSlackBusPhiRow, const int* distributedSlackBusRowOverride, int nDistributedSlackBuses, const int* distributedSlackGeneratorBus,
                                    double* minQDyn, double* maxQDyn, double* loadQDyn, const char* active);

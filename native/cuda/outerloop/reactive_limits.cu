@@ -39,7 +39,7 @@ __global__ void reactiveLimitsBatch(const double* secondaryVoltageControlReactiv
                                     const double* x, const char* outerLoopCheckActive, int* mode, double* target,
                                     char* limitType, char* switchCount, char* switched,
                                     char* passSwitched, char* savedMode,
-                                    int nReactiveLimitTargetVOverrides, const int* reactiveLimitTargetVOverrideScenarioEntry, const double* reactiveLimitTargetVOverrideValue,
+                                    SlotEntries reactiveLimitTargetVOverrides,
                                     const double* rowSlope, double* savedTarget, int perScenarioReactiveLimits,
                                     const char* reactiveLimitVoltageControlRole, const int* reactiveLimitComparedVoltageRow,
                                     const double* reactiveLimitSvcMinB, const double* reactiveLimitSvcMaxB, const double* reactiveLimitBaseVSquared,
@@ -219,7 +219,7 @@ __global__ void reactiveLimitsBatch(const double* secondaryVoltageControlReactiv
         } else {                                            // switched to PQ — switch-back tests the PILOT
             // a controller re-merged onto a NEW pilot this scenario reads that pilot's voltage (reactiveLimitComparedVoltageRowOverride)
             double v = x[(size_t) s * n + (reactiveLimitComparedVoltageRowOverride != nullptr && reactiveLimitComparedVoltageRowOverride[rst] >= 0 ? reactiveLimitComparedVoltageRowOverride[rst] : reactiveLimitComparedVoltageRow[i])];
-            double targetV = reactiveLimitTargetVOf(nReactiveLimitTargetVOverrides, reactiveLimitTargetVOverrideScenarioEntry, reactiveLimitTargetVOverrideValue, secondaryVoltageControlReactiveLimitTargetV, nReactiveLimitEntries, s, i, reactiveLimitTargetV[i]);
+            double targetV = reactiveLimitTargetVOf(reactiveLimitTargetVOverrides, secondaryVoltageControlReactiveLimitTargetV, nReactiveLimitEntries, s, i, reactiveLimitTargetV[i]);
             bool atMinLimit = isMinLimit(limitType[rst]);
             // OLF's checkPqBusWithQLimitType PROPOSES the switch back to PV whenever the pilot's voltage asks for
             // it; the per-bus cap (maxPqPvSwitch) then blocks the switch itself in switchPqPv. Only
@@ -255,7 +255,7 @@ __global__ void reactiveLimitsBatch(const double* secondaryVoltageControlReactiv
             int cmpR = reactiveLimitComparedVoltageRowOverride != nullptr && reactiveLimitComparedVoltageRowOverride[rst] >= 0 ? reactiveLimitComparedVoltageRowOverride[rst] : (reactiveLimitComparedVoltageRow != nullptr ? reactiveLimitComparedVoltageRow[i] : -1);
             double cmpRec = cmpR >= 0 ? x[(size_t) s * n + cmpR] : x[ridx];
             putReactiveLimitsDecision(passSwitched[rst], qRec, remoteMinQ, remoteMaxQ, x[ridx], cmpRec,
-                     reactiveLimitTargetVOf(nReactiveLimitTargetVOverrides, reactiveLimitTargetVOverrideScenarioEntry, reactiveLimitTargetVOverrideValue, secondaryVoltageControlReactiveLimitTargetV, nReactiveLimitEntries, s, i, reactiveLimitTargetV[i]));
+                     reactiveLimitTargetVOf(reactiveLimitTargetVOverrides, secondaryVoltageControlReactiveLimitTargetV, nReactiveLimitEntries, s, i, reactiveLimitTargetV[i]));
         }
         return;
     }
@@ -306,7 +306,7 @@ __global__ void reactiveLimitsBatch(const double* secondaryVoltageControlReactiv
     // (the one contingency of 24,376 whose outer-loop sequence differed from the 1-thread CPU's).
     if (liMin >= liMax && (reactiveLimitFlags == nullptr || (reactiveLimitFlags[i] & GpuReactiveLimitsEntryFlag::NOT_CONTROLLER_ELEMENT) != 0)) {
         putReactiveLimitsDecision(passSwitched[scenarioEntry], qBuf[qIdx] + reactiveLimitLoadQ[li], liMin, liMax, x[idx], x[idx],
-                 reactiveLimitTargetVOf(nReactiveLimitTargetVOverrides, reactiveLimitTargetVOverrideScenarioEntry, reactiveLimitTargetVOverrideValue, secondaryVoltageControlReactiveLimitTargetV, nReactiveLimitEntries, s, i, reactiveLimitTargetV[i]));
+                 reactiveLimitTargetVOf(reactiveLimitTargetVOverrides, secondaryVoltageControlReactiveLimitTargetV, nReactiveLimitEntries, s, i, reactiveLimitTargetV[i]));
         return;
     }
     // A re-merged LOCAL control whose own V row carries a live coupler's ZERO_V keeps its identity (mode 6, on its
@@ -348,7 +348,7 @@ __global__ void reactiveLimitsBatch(const double* secondaryVoltageControlReactiv
         int heldVoltageRow = reactiveLimitReMergedVoltageRow != nullptr ? reactiveLimitReMergedVoltageRow[scenarioEntry] : -1;
         double v = heldVoltageRow >= 0 ? x[(size_t) s * n + heldVoltageRow] : x[idx];
         double targetV = localOv ? reactiveLimitLocalTargetV[(size_t) s * nReactiveLimitEntries + i]
-                  : reactiveLimitTargetVOf(nReactiveLimitTargetVOverrides, reactiveLimitTargetVOverrideScenarioEntry, reactiveLimitTargetVOverrideValue, secondaryVoltageControlReactiveLimitTargetV, nReactiveLimitEntries, s, i, reactiveLimitTargetV[i]);
+                  : reactiveLimitTargetVOf(reactiveLimitTargetVOverrides, secondaryVoltageControlReactiveLimitTargetV, nReactiveLimitEntries, s, i, reactiveLimitTargetV[i]);
         // OLF never back-switches a slope-SVC bus: checkPqBus runs with
         // canSwitchToPv = !bus.hasGeneratorsWithSlope() ("we don't support switching PQ to PV
         // for bus with one controller with slope") — once switched to PQ, a slope row stays PQ.
@@ -379,7 +379,7 @@ __global__ void reactiveLimitsBatch(const double* secondaryVoltageControlReactiv
         }
     }
     putReactiveLimitsDecision(passSwitched[scenarioEntry], qBuf[qIdx] + reactiveLimitLoadQ[li], liMin, liMax, x[idx], x[idx],
-             reactiveLimitTargetVOf(nReactiveLimitTargetVOverrides, reactiveLimitTargetVOverrideScenarioEntry, reactiveLimitTargetVOverrideValue, secondaryVoltageControlReactiveLimitTargetV, nReactiveLimitEntries, s, i, reactiveLimitTargetV[i]));
+             reactiveLimitTargetVOf(reactiveLimitTargetVOverrides, secondaryVoltageControlReactiveLimitTargetV, nReactiveLimitEntries, s, i, reactiveLimitTargetV[i]));
 }
 
 // voltageRemoteControlRobustMode, second half: "Set V to a safe 1 pu for the next computation".
@@ -512,18 +512,6 @@ void reactiveLimitsCheck(BatchSolverContext* ctx, DriverPass& drv, int loopKind)
     const int& reactiveLimitsDecisionLogScenario = drv.reactiveLimitsDecisionLogScenario;
     const int& skipReactiveLimitsPhase = drv.skipReactiveLimitsPhase;
     const bool& hasPerScenarioSvcSusceptanceLimits = drv.hasPerScenarioSvcSusceptanceLimits;
-    const int& nReactiveLimitTargetVOverrides = drv.nReactiveLimitTargetVOverrides;
-    const int& nReactiveLimitDeltaOverrides = drv.nReactiveLimitDeltaOverrides;
-    const int& nReactiveCapabilityCurveOverrides = drv.nReactiveCapabilityCurveOverrides;
-    DeviceBuf& dReactiveLimitTargetVOverrideScenarioEntry = drv.dReactiveLimitTargetVOverrideScenarioEntry;
-    DeviceBuf& dReactiveLimitTargetVOverrideValue = drv.dReactiveLimitTargetVOverrideValue;
-    DeviceBuf& dReactiveLimitDeltaOverrideScenarioEntry = drv.dReactiveLimitDeltaOverrideScenarioEntry;
-    DeviceBuf& dReactiveLimitDeltaOverrideValues = drv.dReactiveLimitDeltaOverrideValues;
-    DeviceBuf& dReactiveLimitDeltaOverrideStart = drv.dReactiveLimitDeltaOverrideStart;
-    DeviceBuf& dReactiveLimitDeltaOverrideList = drv.dReactiveLimitDeltaOverrideList;
-    DeviceBuf& dReactiveCapabilityCurveOverrideStart = drv.dReactiveCapabilityCurveOverrideStart;
-    DeviceBuf& dReactiveCapabilityCurveOverrideCurve = drv.dReactiveCapabilityCurveOverrideCurve;
-    DeviceBuf& dReactiveCapabilityCurveOverrideStepScale = drv.dReactiveCapabilityCurveOverrideStepScale;
     if (loopKind == GpuOuterLoopKind::REACTIVE_LIMITS && ctx->reactiveLimitsOuterLoop && ctx->nReactiveLimitEntries > 0 && !skipReactiveLimitsPhase) {                  // skipReactiveLimitsPhase: a monitoring interleave solve — the
         if (usePerScenarioReactiveLimits) {                            // curve limits at the CURRENT (post-DS) targets,
             reactiveCapabilityCurveLimitsBatch<<<grid(ctx->nReactiveLimitEntries * nS), BLOCK, 0, ctx->stream>>>(ctx->nReactiveLimitEntries, nS, ctx->nReactiveCapabilityCurves, n, ctx->reactiveCapabilityCurveExtrapolate,
@@ -531,12 +519,7 @@ void reactiveLimitsCheck(BatchSolverContext* ctx, DriverPass& drv, int loopKind)
                     ctx->dReactiveLimitEntryCurveStart.as<int>(), ctx->dReactiveLimitEntryCurves.as<int>(), curveHvdcAcEmulationView(ctx),
                     ctx->dReactiveLimitMinQ.as<double>(), ctx->dReactiveLimitMaxQ.as<double>(), ctx->dReactiveLimitLoadQ.as<double>(),
                     ctx->dTarget.as<double>(),
-                    nReactiveLimitDeltaOverrides, nReactiveLimitDeltaOverrides > 0 ? dReactiveLimitDeltaOverrideScenarioEntry.as<int>() : nullptr,
-                    nReactiveLimitDeltaOverrides > 0 ? dReactiveLimitDeltaOverrideValues.as<double>() : nullptr,
-                    nReactiveLimitDeltaOverrides > 0 ? dReactiveLimitDeltaOverrideStart.as<int>() : nullptr, nReactiveLimitDeltaOverrides > 0 ? dReactiveLimitDeltaOverrideList.as<int>() : nullptr,
-                    nReactiveCapabilityCurveOverrides > 0 ? dReactiveCapabilityCurveOverrideStart.as<int>() : nullptr,
-                    nReactiveCapabilityCurveOverrides > 0 ? dReactiveCapabilityCurveOverrideCurve.as<int>() : nullptr,
-                    nReactiveCapabilityCurveOverrides > 0 ? dReactiveCapabilityCurveOverrideStepScale.as<double>() : nullptr,
+                    ctx->reactiveLimitDeltaOverrides.view(), ctx->reactiveCapabilityCurveOverrides.view(),
                     ctx->nDistributedSlackGenerators > 0 ? ctx->dDistributedSlackGeneratorMove.as<double>() : nullptr,
                     ctx->nDistributedSlackGenerators > 0 ? ctx->dDistributedSlackGeneratorMoveValid.as<char>() : nullptr, ctx->hasDistributedSlackGeneratorAnchor ? ctx->dDistributedSlackGeneratorAnchor.as<double>() : nullptr, ctx->hasDistributedSlackGeneratorInitialMove ? ctx->dDistributedSlackGeneratorInitialMove.as<double>() : nullptr, ctx->nDistributedSlackGenerators,
                     ctx->nDistributedSlackBuses > 0 ? ctx->dDistributedSlackBusPhiRow.as<int>() : nullptr,
@@ -560,8 +543,7 @@ void reactiveLimitsCheck(BatchSolverContext* ctx, DriverPass& drv, int loopKind)
                 ctx->dMode.as<int>(), ctx->dTarget.as<double>(),
                 ctx->dReactiveLimitQLimitType.as<char>(), ctx->dReactiveLimitPvPqSwitchCount.as<char>(), ctx->dOuterLoopUnstable.as<char>(),
                 ctx->dReactiveLimitCheckDecision.as<char>(), ctx->dReactiveLimitSavedRowMode.as<char>(),
-                nReactiveLimitTargetVOverrides, nReactiveLimitTargetVOverrides > 0 ? dReactiveLimitTargetVOverrideScenarioEntry.as<int>() : nullptr,
-                nReactiveLimitTargetVOverrides > 0 ? dReactiveLimitTargetVOverrideValue.as<double>() : nullptr,
+                ctx->reactiveLimitTargetVOverrides.view(),
                 ctx->dRowSlope.as<double>(), ctx->dReactiveLimitSavedTarget.as<double>(), usePerScenarioReactiveLimits ? 1 : 0,
                 ctx->nReactiveLimitRemoteEntries > 0 ? ctx->dReactiveLimitVoltageControlRole.as<char>() : nullptr,
                 ctx->nReactiveLimitRemoteEntries > 0 ? ctx->dReactiveLimitComparedVoltageRow.as<int>() : nullptr,
@@ -577,8 +559,8 @@ void reactiveLimitsCheck(BatchSolverContext* ctx, DriverPass& drv, int loopKind)
                 ctx->nReactiveLimitLocalOverrides > 0 ? ctx->dReactiveLimitLocalTargetV.as<double>() : nullptr,
                 ctx->dReactiveLimitFlags.p ? ctx->dReactiveLimitFlags.as<char>() : nullptr,
                 ctx->nReactiveLimitComparedVoltageRowOverrides > 0 ? ctx->dReactiveLimitComparedVoltageRowOverride.as<int>() : nullptr,
-                ctx->nReMergedVoltageTargets > 0 ? ctx->dReactiveLimitHoldsReMergedVoltageTarget.as<char>() : nullptr,
-                ctx->nReMergedVoltageTargets > 0 ? ctx->dReactiveLimitReMergedVoltageRow.as<int>() : nullptr,
+                ctx->reMergedVoltageTargets.entries() > 0 ? ctx->dReactiveLimitHoldsReMergedVoltageTarget.as<char>() : nullptr,
+                ctx->reMergedVoltageTargets.entries() > 0 ? ctx->dReactiveLimitReMergedVoltageRow.as<int>() : nullptr,
                 ctx->dReactiveLimitRemainingPvBusCount.as<int>(), ctx->dReactiveLimitSwitchedRow.as<int>());
         if (ctx->nReactiveLimitPilotSelfEntries > 0) {
             // a pilot that is its own controller switched to PQ while a member of its group is not (or
@@ -634,13 +616,12 @@ void reactiveLimitsCheck(BatchSolverContext* ctx, DriverPass& drv, int loopKind)
         // A re-merged control's voltage target follows its first enabled controller first: the DISTR_Q targets below
         // are then written on the sharing rows that are left.
         launchReMergedVoltageTargetRowUpdate(ctx, drv, false);
-        if (ctx->nPilotFlip > 0) {                      // pilot stopped controlling AND every survivor switched to PQ
-            pilotRowWithoutEnabledControllerBatch<<<grid(ctx->nPilotFlip), BLOCK, 0, ctx->stream>>>(
-                    ctx->nPilotFlip, nS, n, ctx->nReactiveLimitEntries,
-                    ctx->dPfSlot.as<int>(), ctx->dPfRow.as<int>(), ctx->dPfQTarget.as<double>(),
-                    ctx->dPfOff.as<int>(), ctx->dPfCount.as<int>(), ctx->dPilotFlipSurvivorReactiveLimitEntries.as<int>(),
+        if (ctx->pilotFlips.entries() > 0) {             // pilot stopped controlling AND every survivor switched to PQ
+            SlotEntries flips = ctx->pilotFlips.view();
+            pilotRowWithoutEnabledControllerBatch<<<grid(nS * flips.capacity), BLOCK, 0, ctx->stream>>>(
+                    nS, n, ctx->nReactiveLimitEntries, flips, ctx->pilotFlipSurvivors.view(),
                     ctx->dReactiveLimitQLimitType.as<char>(), ctx->dMode.as<int>(), ctx->dTarget.as<double>(),
-                    ctx->dPfFlipped.as<char>(), ctx->dPfSavedVT.as<double>(),
+                    ctx->pilotFlips.state<char>(0), ctx->pilotFlips.state<double>(1),
                     ctx->dOuterLoopCheckActive.as<char>(), ctx->dOuterLoopUnstable.as<char>());
         }
         if (ctx->hasDistrQRelocationGroups && ctx->structure->nReactiveRelocationGroups > 0) {    // no-enabled-controller corner: pilot vEq flip/restore

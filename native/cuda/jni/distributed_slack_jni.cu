@@ -3,6 +3,7 @@
 //
 // JNI entry points of GpuAcNewtonSolver: DistributedSlackOuterLoop tables and per-scenario overrides.
 #include "jni_common.cuh"
+#include "slot_table_install.cuh"
 
 // Remote-member RL entries (plan-B1): install (or clear) the per-entry remote kinds + compare rows
 // on a batch context. The RL kernel SKIPS remote entries until the B3 transition machinery lands.
@@ -62,36 +63,18 @@ extern "C" JNIEXPORT void JNICALL
 OLF_JNI(ac_outerloop_gpu, DistributedSlackNative, setBatchDistributedSlackLostGenerators)(
         JNIEnv* env, jclass, jlong handle, jintArray jSlotGen) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
-    if (ctx == nullptr) {
-        return;
+    if (ctx != nullptr) {
+        installSlotTable(env, ctx, ctx->distributedSlackLostGenerators, jSlotGen, nullptr);
     }
-    if (jSlotGen == nullptr || env->GetArrayLength(jSlotGen) == 0) {
-        ctx->nDistributedSlackLostGenerators = 0;
-        return;
-    }
-    int n2 = env->GetArrayLength(jSlotGen);
-    jint* sg = env->GetIntArrayElements(jSlotGen, nullptr);
-    ctx->dDistributedSlackLostGenerators.upload(sg, static_cast<size_t>(n2) * sizeof(int));
-    env->ReleaseIntArrayElements(jSlotGen, sg, JNI_ABORT);
-    ctx->nDistributedSlackLostGenerators = n2 / 2;
 }
 
 extern "C" JNIEXPORT void JNICALL
 OLF_JNI(ac_outerloop_gpu, DistributedSlackNative, setBatchDistributedSlackRemovedGenerators)(
         JNIEnv* env, jclass, jlong handle, jintArray jSlotGen) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
-    if (ctx == nullptr) {
-        return;
+    if (ctx != nullptr) {
+        installSlotTable(env, ctx, ctx->distributedSlackRemovedGenerators, jSlotGen, nullptr);
     }
-    if (jSlotGen == nullptr || env->GetArrayLength(jSlotGen) == 0) {
-        ctx->nDistributedSlackRemovedGenerators = 0;
-        return;
-    }
-    int n2 = env->GetArrayLength(jSlotGen);
-    jint* sg = env->GetIntArrayElements(jSlotGen, nullptr);
-    ctx->dDistributedSlackRemovedGenerators.upload(sg, static_cast<size_t>(n2) * sizeof(int));
-    env->ReleaseIntArrayElements(jSlotGen, sg, JNI_ABORT);
-    ctx->nDistributedSlackRemovedGenerators = n2 / 2;
 }
 
 // Per-GENERATOR distributed-slack participants: the factors and limits OLF's water-fill actually

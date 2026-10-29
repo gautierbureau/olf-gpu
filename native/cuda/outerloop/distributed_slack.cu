@@ -222,7 +222,7 @@ __global__ void distributeSlackBatch(int nDistributedSlackBuses, int nScenarios,
                                               const double* distributedSlackGeneratorMarginUp, const double* distributedSlackGeneratorMarginDown,
                                               const int* distributedSlackBusGeneratorStart, const int* distributedSlackBusGeneratorEnd,
                                               double* distributedSlackGeneratorMove, char* distributedSlackGeneratorMoveValid, const double* distributedSlackGeneratorAnchor, const double* distributedSlackGeneratorInitialMove, char* distributedSlackGeneratorRemoved, double* distributedSlackGeneratorWorkingFactor,
-                                              int nDistributedSlackLostGenerators, const int* distributedSlackLostGenerators, int nDistributedSlackRemovedGenerators, const int* distributedSlackRemovedGenerators,
+                                              SlotEntries distributedSlackLostGenerators, SlotEntries distributedSlackRemovedGenerators,
                                               double* previousGeneratorMove, double* previousBusTarget,
                                               double* target, char* switched, char* slackDistributionFailure, double* retainApplied, double* gateLast) {
     int s = blockIdx.x * blockDim.x + threadIdx.x;
@@ -417,19 +417,11 @@ __global__ void distributeSlackBatch(int nDistributedSlackBuses, int nScenarios,
         for (int g = 0; g < nDistributedSlackGenerators; g++) {                     // fresh list, fresh cumulative deltas
             previousGeneratorMove[(size_t) s * nDistributedSlackGenerators + g] = distributedSlackGeneratorMove[(size_t) s * nDistributedSlackGenerators + g];
             distributedSlackGeneratorMove[(size_t) s * nDistributedSlackGenerators + g] = 0.0;
-            bool lost = false;
-            for (int k = 0; k < nDistributedSlackLostGenerators; k++) {
-                if (distributedSlackLostGenerators[2 * k] == s && distributedSlackLostGenerators[2 * k + 1] == g) {
-                    lost = true;
-                    break;
-                }
-            }
+            bool lost = slotFirstEntryOf(distributedSlackLostGenerators, s, g) >= 0;
             // A GeneratorAction can also take a generator out of the participation (OLF's
             // reApplyActivePowerControlChecks: its new target is outside its limits): it stays where the action
             // put it and takes no share, like a lost one, but it is still there for everything else.
-            for (int k = 0; k < nDistributedSlackRemovedGenerators && !lost; k++) {
-                lost = distributedSlackRemovedGenerators[2 * k] == s && distributedSlackRemovedGenerators[2 * k + 1] == g;
-            }
+            lost = lost || slotFirstEntryOf(distributedSlackRemovedGenerators, s, g) >= 0;
             distributedSlackGeneratorRemoved[(size_t) s * nDistributedSlackGenerators + g] = lost ? 1 : 0;
             double a = distributedSlackGeneratorAnchor != nullptr ? distributedSlackGeneratorAnchor[(size_t) s * nDistributedSlackGenerators + g] : 0.0;   // a moved anchor eats headroom
             distributedSlackGeneratorWorkingFactor[(size_t) s * nDistributedSlackGenerators + g] = lost ? 0.0
@@ -688,8 +680,8 @@ void distributedSlackCheck(BatchSolverContext* ctx, DriverPass& drv) {
                 ctx->dDistributedSlackBusGeneratorStart.as<int>(), ctx->dDistributedSlackBusGeneratorEnd.as<int>(),
                 ctx->dDistributedSlackGeneratorMove.as<double>(), ctx->nDistributedSlackGenerators > 0 ? ctx->dDistributedSlackGeneratorMoveValid.as<char>() : nullptr, ctx->hasDistributedSlackGeneratorAnchor ? ctx->dDistributedSlackGeneratorAnchor.as<double>() : nullptr, ctx->hasDistributedSlackGeneratorInitialMove ? ctx->dDistributedSlackGeneratorInitialMove.as<double>() : nullptr,
                 ctx->dDistributedSlackGeneratorRemoved.as<char>(), ctx->dDistributedSlackGeneratorWorkingFactor.as<double>(),
-                ctx->nDistributedSlackLostGenerators, ctx->nDistributedSlackLostGenerators > 0 ? ctx->dDistributedSlackLostGenerators.as<int>() : nullptr,
-                ctx->nDistributedSlackRemovedGenerators, ctx->nDistributedSlackRemovedGenerators > 0 ? ctx->dDistributedSlackRemovedGenerators.as<int>() : nullptr,
+                ctx->distributedSlackLostGenerators.view(),
+                ctx->distributedSlackRemovedGenerators.view(),
                 ctx->dDistributedSlackPreviousGeneratorMove.as<double>(), ctx->dDistributedSlackPreviousBusTarget.as<double>(),
                 ctx->dTarget.as<double>(), ctx->dOuterLoopUnstable.as<char>(), ctx->dSlackDistributionFailure.as<char>(),
                 ctx->dSlackRetainedShareApplied.as<double>(),
@@ -701,7 +693,7 @@ void distributedSlackCheck(BatchSolverContext* ctx, DriverPass& drv) {
                     ctx->nDistributedSlackGenerators > 0 ? ctx->dDistributedSlackGeneratorMove.as<double>() : nullptr,
                     ctx->nDistributedSlackGenerators > 0 ? ctx->dDistributedSlackGeneratorMoveValid.as<char>() : nullptr, ctx->hasDistributedSlackGeneratorAnchor ? ctx->dDistributedSlackGeneratorAnchor.as<double>() : nullptr, ctx->hasDistributedSlackGeneratorInitialMove ? ctx->dDistributedSlackGeneratorInitialMove.as<double>() : nullptr,
                     ctx->dDistributedSlackBusPhiRow.as<int>(), ctx->nDistributedSlackBusRowOverrides > 0 ? ctx->dDistributedSlackBusRowOverride.as<int>() : nullptr,
-                    ctx->nDistributedSlackLostGenerators, ctx->nDistributedSlackLostGenerators > 0 ? ctx->dDistributedSlackLostGenerators.as<int>() : nullptr,
+                    ctx->distributedSlackLostGenerators.view(),
                     ctx->nDistributedSlackIslanded > 0 ? ctx->dDistributedSlackIslanded.as<char>() : nullptr, ctx->dMode.as<int>(),
                     ctx->dOuterLoopCheckActive.as<char>(), ctx->dTarget.as<double>(), ctx->dForcedTargetQApplied.as<double>());
         }
@@ -723,7 +715,7 @@ void distributedSlackResetSolve(BatchSolverContext* ctx, DriverPass& drv) {
         forcedTargetQInitBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(ctx->nForcedTargetQ, nS, n, ctx->nDistributedSlackBuses, ctx->forcedTargetQExtrapolate,
                 ctx->dForcedTargetQIndices.as<int>(), ctx->dForcedTargetQParameters.as<double>(), ctx->dForcedTargetQPoints.as<double>(),
                 ctx->hasForcedTargetQPreDistribution ? ctx->dForcedTargetQPreDistribution.as<double>() : nullptr,
-                ctx->nDistributedSlackLostGenerators, ctx->nDistributedSlackLostGenerators > 0 ? ctx->dDistributedSlackLostGenerators.as<int>() : nullptr,
+                ctx->distributedSlackLostGenerators.view(),
                 ctx->nDistributedSlackIslanded > 0 ? ctx->dDistributedSlackIslanded.as<char>() : nullptr, ctx->dMode.as<int>(),
                 ctx->dTarget.as<double>(), ctx->dForcedTargetQApplied.as<double>());
     }

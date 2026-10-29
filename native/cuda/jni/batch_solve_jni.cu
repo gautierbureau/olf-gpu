@@ -3,6 +3,7 @@
 //
 // JNI entry points of GpuAcNewtonSolver: The batched context and its solve.
 #include "jni_common.cuh"
+#include "slot_table_install.cuh"
 #include "../common/codes/gpu_outer_loop_kind.cuh"
 #include "../common/trace.cuh"
 
@@ -270,30 +271,11 @@ OLF_JNI(ac_solver_gpu, BatchSolveNative, solveBatchContext)(
             slackBusAnchorShiftVec.resize(env->GetArrayLength(jSlackBusAnchorShift));
             env->GetDoubleArrayRegion(jSlackBusAnchorShift, 0, static_cast<jsize>(slackBusAnchorShiftVec.size()), slackBusAnchorShiftVec.data());
         }
-        std::vector<int> reactiveLimitTargetVOverrideScenarioEntryVec;
-        std::vector<double> reactiveLimitTargetVOverrideValueVec;
-        std::vector<int> reactiveLimitDeltaOverrideScenarioEntryVec;
-        std::vector<double> reactiveLimitDeltaOverrideValuesVec;
-        if (jReactiveLimitDeltaOverrideScenarioEntry != nullptr && jReactiveLimitDeltaOverrideValues != nullptr) {
-            reactiveLimitDeltaOverrideScenarioEntryVec.resize(env->GetArrayLength(jReactiveLimitDeltaOverrideScenarioEntry));
-            env->GetIntArrayRegion(jReactiveLimitDeltaOverrideScenarioEntry, 0, static_cast<jsize>(reactiveLimitDeltaOverrideScenarioEntryVec.size()), reactiveLimitDeltaOverrideScenarioEntryVec.data());
-            reactiveLimitDeltaOverrideValuesVec.resize(env->GetArrayLength(jReactiveLimitDeltaOverrideValues));
-            env->GetDoubleArrayRegion(jReactiveLimitDeltaOverrideValues, 0, static_cast<jsize>(reactiveLimitDeltaOverrideValuesVec.size()), reactiveLimitDeltaOverrideValuesVec.data());
-        }
-        std::vector<int> reactiveCapabilityCurveOverrideScenarioCurveVec;
-        std::vector<double> reactiveCapabilityCurveOverrideStepScaleVec;
-        if (jReactiveCapabilityCurveOverrideScenarioCurve != nullptr && jReactiveCapabilityCurveOverrideStepScale != nullptr) {
-            reactiveCapabilityCurveOverrideScenarioCurveVec.resize(env->GetArrayLength(jReactiveCapabilityCurveOverrideScenarioCurve));
-            env->GetIntArrayRegion(jReactiveCapabilityCurveOverrideScenarioCurve, 0, static_cast<jsize>(reactiveCapabilityCurveOverrideScenarioCurveVec.size()), reactiveCapabilityCurveOverrideScenarioCurveVec.data());
-            reactiveCapabilityCurveOverrideStepScaleVec.resize(env->GetArrayLength(jReactiveCapabilityCurveOverrideStepScale));
-            env->GetDoubleArrayRegion(jReactiveCapabilityCurveOverrideStepScale, 0, static_cast<jsize>(reactiveCapabilityCurveOverrideStepScaleVec.size()), reactiveCapabilityCurveOverrideStepScaleVec.data());
-        }
-        if (jReactiveLimitTargetVOverrideScenarioEntry != nullptr && jReactiveLimitTargetVOverrideValue != nullptr) {
-            reactiveLimitTargetVOverrideScenarioEntryVec.resize(env->GetArrayLength(jReactiveLimitTargetVOverrideScenarioEntry));
-            env->GetIntArrayRegion(jReactiveLimitTargetVOverrideScenarioEntry, 0, static_cast<jsize>(reactiveLimitTargetVOverrideScenarioEntryVec.size()), reactiveLimitTargetVOverrideScenarioEntryVec.data());
-            reactiveLimitTargetVOverrideValueVec.resize(env->GetArrayLength(jReactiveLimitTargetVOverrideValue));
-            env->GetDoubleArrayRegion(jReactiveLimitTargetVOverrideValue, 0, static_cast<jsize>(reactiveLimitTargetVOverrideValueVec.size()), reactiveLimitTargetVOverrideValueVec.data());
-        }
+        // the reactive-limit channels of the installed slots: (slot, entry) + {dMinQ, dMaxQ, dLoadQ, dBmin, dBmax},
+        // (slot, curve entry) + {pStep, shareScale}, (slot, entry) + the moved voltage target
+        installSlotTable(env, ctx, ctx->reactiveLimitDeltaOverrides, jReactiveLimitDeltaOverrideScenarioEntry, jReactiveLimitDeltaOverrideValues);
+        installSlotTable(env, ctx, ctx->reactiveCapabilityCurveOverrides, jReactiveCapabilityCurveOverrideScenarioCurve, jReactiveCapabilityCurveOverrideStepScale);
+        installSlotTable(env, ctx, ctx->reactiveLimitTargetVOverrides, jReactiveLimitTargetVOverrideScenarioEntry, jReactiveLimitTargetVOverrideValue);
 
         if (traceOn(Trace::PHASE_TIME)) {
             marshalNs += nowNs() - tMarshal0;
@@ -307,16 +289,7 @@ OLF_JNI(ac_solver_gpu, BatchSolveNative, solveBatchContext)(
                                 nDistributedSlackOverrides > 0 ? distributedSlackOverrideBus.data() : nullptr, distributedSlackOverrideFactorDelta.data(),
                                 distributedSlackOverrideBaseTargetPDelta.data(), distributedSlackOverrideMaxDelta.data(), distributedSlackOverrideMinDelta.data(),
                                 distributedSlackBusAnchorShiftVec.empty() ? nullptr : distributedSlackBusAnchorShiftVec.data(),
-                                slackBusAnchorShiftVec.empty() ? nullptr : slackBusAnchorShiftVec.data(),
-                                static_cast<int>(reactiveLimitTargetVOverrideValueVec.size()),
-                                reactiveLimitTargetVOverrideScenarioEntryVec.empty() ? nullptr : reactiveLimitTargetVOverrideScenarioEntryVec.data(),
-                                reactiveLimitTargetVOverrideValueVec.empty() ? nullptr : reactiveLimitTargetVOverrideValueVec.data(),
-                                static_cast<int>(reactiveLimitDeltaOverrideValuesVec.size() / 5),
-                                reactiveLimitDeltaOverrideScenarioEntryVec.empty() ? nullptr : reactiveLimitDeltaOverrideScenarioEntryVec.data(),
-                                reactiveLimitDeltaOverrideValuesVec.empty() ? nullptr : reactiveLimitDeltaOverrideValuesVec.data(),
-                                static_cast<int>(reactiveCapabilityCurveOverrideStepScaleVec.size() / 2),
-                                reactiveCapabilityCurveOverrideScenarioCurveVec.empty() ? nullptr : reactiveCapabilityCurveOverrideScenarioCurveVec.data(),
-                                reactiveCapabilityCurveOverrideStepScaleVec.empty() ? nullptr : reactiveCapabilityCurveOverrideStepScaleVec.data(), maxIter, tol,
+                                slackBusAnchorShiftVec.empty() ? nullptr : slackBusAnchorShiftVec.data(), maxIter, tol,
                                 reactiveLimitTol, slackDistTol, convEpsPerEq,
                                 stateVectorScalingMode, maxDv, maxDphi, varTypeVec.empty() ? nullptr : varTypeVec.data(),
                                 x0FullVec.empty() ? nullptr : x0FullVec.data(),

@@ -79,21 +79,24 @@ __global__ void capturePilotQBatch(int nReactiveRelocationGroups, int nScenarios
 // updateDistrQTargetsBatch stamps the captured value only inside the outer-loop passes. An identity there (the
 // pilot's own row still holding its voltage target) carries no balance and keeps its target. One entry per
 // (scenario, group): the host merges them.
-__global__ void applyPilotQDeltasBatch(int nDelta, const int* key, const double* val, int nReactiveRelocationGroups, int n,
+__global__ void applyPilotQDeltasBatch(int nScenarios, SlotEntries deltas, int nReactiveRelocationGroups, int n,
                                        const int* reactiveRelocationGroupStart, const int* reactiveRelocationCandidateRows, const int* mode,
                                        const char* distrQSubgroup, int nDistrQMembers, const int* reactiveRelocationDistrQMemberStart,
                                        double* pilotQ, double* target) {
-    int k = blockIdx.x * blockDim.x + threadIdx.x;
-    if (k >= nDelta) return;
-    int s = key[k] / nReactiveRelocationGroups;
-    int g = key[k] % nReactiveRelocationGroups;
-    pilotQ[key[k]] += val[k];
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= nScenarios * deltas.capacity) return;
+    int s = tid / deltas.capacity;
+    int k = tid % deltas.capacity;
+    if (k >= deltas.countOf(s)) return;
+    int g = deltas.intOf(s, k);
+    double delta = deltas.doubleOf(s, k);
+    pilotQ[(size_t) s * nReactiveRelocationGroups + g] += delta;
     int c = chooseCarrierRowInSubgroup(g, reactiveRelocationGroupStart, reactiveRelocationCandidateRows, mode + (size_t) s * n,
             distrQSubgroup != nullptr ? distrQSubgroup + (size_t) s * nDistrQMembers : nullptr, reactiveRelocationDistrQMemberStart);
     int row = reactiveRelocationCandidateRows[reactiveRelocationGroupStart[g] + c];
     int m = mode[(size_t) s * n + row];
     if (!holdsFixedVariable(m)) {
-        target[(size_t) s * n + row] += val[k];
+        target[(size_t) s * n + row] += delta;
     }
 }
 
@@ -121,13 +124,13 @@ __global__ void updatePilotTargetVEquationBatch(int nReactiveRelocationGroups, i
                                     const double* pilotQ, int* mode, double* target,
                                     char* pilotTargetVDeactivated, double* savedVTarget,
                                     const char* outerLoopCheckActive, char* switched,
-                                    int nFrozen, const int* frozenSlotRow,
+                                    SlotEntries frozenRows,
                                     const int* pilotSelfReactiveLimitEntry,
                                     const char* limitType, int nReactiveLimitEntries, const double* reactiveLimitMinQ, const double* reactiveLimitMaxQ,
                                     const double* reactiveLimitLoadQ, const double* reactiveLimitInitialTargetQ, int perScenarioReactiveLimits,
                                     const double* reactiveLimitTargetV,
                                     const int* reactiveRelocationPilotReactiveLimitEntry,
-                                    int nReactiveLimitTargetVOverrides, const int* reactiveLimitTargetVOverrideScenarioEntry, const double* reactiveLimitTargetVOverrideValue,
+                                    SlotEntries reactiveLimitTargetVOverrides,
                                     const double* secondaryVoltageControlReactiveLimitTargetV,
                                     int nDistrQMembers, const int* distrQMemberRelocationGroup, const int* distrQMemberReactiveLimitEntry,
                                     const char* reactiveLimitIslanded,
@@ -201,7 +204,7 @@ __global__ void updatePilotTargetVEquationBatch(int nReactiveRelocationGroups, i
     // that power row, leaving a residual of exactly 1.0 that no Newton step can ever clear, so
     // every later re-solve buys iterations OLF does not run. Measured on LINE-3938-646: the whole
     // network moved 8.8e-08 kV off the CPU answer with identical solve counts.
-    if (rowIsFrozen(nFrozen, frozenSlotRow, s, pilotRow)) return;
+    if (rowIsFrozen(frozenRows, s, pilotRow)) return;
     size_t pi = (size_t) s * n + pilotRow;
     size_t fi = (size_t) s * nReactiveRelocationGroups + g;
     // OLF's own test for "this group has no controller": its ENABLED controllers
@@ -300,7 +303,7 @@ __global__ void updatePilotTargetVEquationBatch(int nReactiveRelocationGroups, i
         // members switched back to PV on a 7.85e-07 pu margin; restoring a pass late cost 0.151 MW of slack).
         int le = reactiveRelocationPilotReactiveLimitEntry[g];
         mode[pi] = GpuRowMode::FIXED_VARIABLE;
-        target[pi] = reactiveLimitTargetVOf(nReactiveLimitTargetVOverrides, reactiveLimitTargetVOverrideScenarioEntry, reactiveLimitTargetVOverrideValue, secondaryVoltageControlReactiveLimitTargetV, nReactiveLimitEntries, s, le, reactiveLimitTargetV[le]);
+        target[pi] = reactiveLimitTargetVOf(reactiveLimitTargetVOverrides, secondaryVoltageControlReactiveLimitTargetV, nReactiveLimitEntries, s, le, reactiveLimitTargetV[le]);
         switched[s] = 1;
     }
 }
@@ -310,9 +313,6 @@ void launchPilotTargetVEquationUpdate(BatchSolverContext* ctx, DriverPass& drv, 
     const int& nS = drv.nS;
     const bool& usePerScenarioReactiveLimits = drv.usePerScenarioReactiveLimits;
     const double& REACTIVE_LIMIT_TOL = drv.reactiveLimitTol;
-    const int& nReactiveLimitTargetVOverrides = drv.nReactiveLimitTargetVOverrides;
-    DeviceBuf& dReactiveLimitTargetVOverrideScenarioEntry = drv.dReactiveLimitTargetVOverrideScenarioEntry;
-    DeviceBuf& dReactiveLimitTargetVOverrideValue = drv.dReactiveLimitTargetVOverrideValue;
     const bool useDyn = usePerScenarioReactiveLimits && !staticLimits;
     if (ctx->hasDistrQRelocationGroups && ctx->structure->nReactiveRelocationGroups > 0) {
         updatePilotTargetVEquationBatch<<<grid(ctx->structure->nReactiveRelocationGroups * nS), BLOCK, 0, ctx->stream>>>(
@@ -321,7 +321,7 @@ void launchPilotTargetVEquationUpdate(BatchSolverContext* ctx, DriverPass& drv, 
                     ctx->dReactiveRelocationPilotTargetQ.as<double>(), ctx->dMode.as<int>(), ctx->dTarget.as<double>(),
                     ctx->dReactiveRelocationPilotTargetVDeactivated.as<char>(), ctx->dReactiveRelocationSavedPilotTargetV.as<double>(),
                     ctx->dOuterLoopCheckActive.as<char>(), ctx->dOuterLoopUnstable.as<char>(),
-                    ctx->nFrozenRow, ctx->nFrozenRow ? ctx->dFrozenRow.as<int>() : nullptr,
+                    ctx->frozenRows.view(),
                     pilotSelfReactiveLimitEntryOrNull(ctx),
                 ctx->dReactiveLimitQLimitType.p ? ctx->dReactiveLimitQLimitType.as<char>() : nullptr, ctx->nReactiveLimitEntries,
                 useDyn ? ctx->dReactiveLimitMinQPerScenario.as<double>() : ctx->dReactiveLimitMinQ.as<double>(),
@@ -330,8 +330,7 @@ void launchPilotTargetVEquationUpdate(BatchSolverContext* ctx, DriverPass& drv, 
                 ctx->reactiveLimitsRobustMode ? ctx->dReactiveLimitInitialTargetQ.as<double>() : nullptr, useDyn ? 1 : 0,
                 ctx->dReactiveLimitTargetV.p ? ctx->dReactiveLimitTargetV.as<double>() : nullptr,
                 ctx->dReactiveRelocationPilotReactiveLimitEntry.p ? ctx->dReactiveRelocationPilotReactiveLimitEntry.as<int>() : nullptr,
-                nReactiveLimitTargetVOverrides, nReactiveLimitTargetVOverrides > 0 ? dReactiveLimitTargetVOverrideScenarioEntry.as<int>() : nullptr,
-                nReactiveLimitTargetVOverrides > 0 ? dReactiveLimitTargetVOverrideValue.as<double>() : nullptr,
+                ctx->reactiveLimitTargetVOverrides.view(),
                 ctx->nSecondaryVoltageControlControllerBuses > 0 ? ctx->dSecondaryVoltageControlReactiveLimitTargetV.as<double>() : nullptr,
                 ctx->nDistrQMembers, ctx->dDistrQMemberRelocationGroup.p ? ctx->dDistrQMemberRelocationGroup.as<int>() : nullptr,
                 ctx->dDistrQMemberReactiveLimitEntry.p ? ctx->dDistrQMemberReactiveLimitEntry.as<int>() : nullptr,
@@ -359,19 +358,22 @@ void launchPilotTargetVEquationUpdate(BatchSolverContext* ctx, DriverPass& drv, 
 // (reactiveLimitReMergedVoltageRow), as OLF reads the main's own, identity-held voltage: the main's is then only tied to
 // it through the couplers, and a last-bit excess on a zero margin would switch it back to PV. One thread per re-merged
 // control.
-__global__ void updateReMergedVoltageTargetRowBatch(int nReMergedVoltageTargets, int nScenarios, int n, int nReactiveLimitEntries,
-                                                    const int* reMergedVoltageTargetSlot, const int* reMergedVoltageTargetMainEntry,
-                                                    const double* reMergedVoltageTargetValue, const int* reMergedVoltageTargetControllerStart,
-                                                    const int* reMergedVoltageTargetControllerCount, const int* reMergedVoltageTargetControllerEntries,
+__global__ void updateReMergedVoltageTargetRowBatch(int nScenarios, int n, int nReactiveLimitEntries,
+                                                    SlotEntries reMergedVoltageTargets, SlotEntries reMergedVoltageTargetControllers,
                                                     const int* reactiveLimitVoltageRow, const int* reactiveLimitReactivePowerRow, const int* relocatedChildOwnRow,
-                                                    const char* limitType, const char* reactiveLimitIslanded, int nFrozen, const int* frozenSlotRow,
+                                                    const char* limitType, const char* reactiveLimitIslanded, SlotEntries frozenRows,
                                                     int* reMergedVoltageTargetHolder, char* reactiveLimitHoldsReMergedVoltageTarget,
                                                     int* reactiveLimitReMergedVoltageRow, int* mode, double* target,
                                                     const char* outerLoopCheckActive, char* switched) {
-    int e = blockIdx.x * blockDim.x + threadIdx.x;
-    if (e >= nReMergedVoltageTargets) return;
-    int s = reMergedVoltageTargetSlot[e];
-    if (s < 0 || s >= nScenarios || !outerLoopCheckActive[s]) return;
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= nScenarios * reMergedVoltageTargets.capacity) return;
+    int s = tid / reMergedVoltageTargets.capacity;
+    int control = tid % reMergedVoltageTargets.capacity;
+    if (control >= reMergedVoltageTargets.countOf(s) || !outerLoopCheckActive[s]) return;
+    size_t e = reMergedVoltageTargets.at(s, control);
+    const int mainEntry = reMergedVoltageTargets.intOf(s, control, 0);
+    const int firstController = reMergedVoltageTargets.intOf(s, control, 1);
+    const int nControllers = reMergedVoltageTargets.intOf(s, control, 2);
     auto enabled = [&](int entry) {
         size_t k = (size_t) s * nReactiveLimitEntries + entry;
         return limitType[k] == GpuQLimitType::NONE && !(reactiveLimitIslanded != nullptr && reactiveLimitIslanded[k]);
@@ -385,18 +387,18 @@ __global__ void updateReMergedVoltageTargetRowBatch(int nReMergedVoltageTargets,
         }
         return reactiveLimitVoltageRow[entry];
     };
-    const int* controllers = reMergedVoltageTargetControllerEntries + reMergedVoltageTargetControllerStart[e];
+    auto controller = [&](int c) { return reMergedVoltageTargetControllers.intOf(s, firstController + c); };
     const int held = reMergedVoltageTargetHolder[e];
     int wanted = -1;
-    if (!enabled(reMergedVoltageTargetMainEntry[e])) {
-        for (int c = 0; c < reMergedVoltageTargetControllerCount[e] && wanted < 0; c++) {
-            int entry = controllers[c];
+    if (!enabled(mainEntry)) {
+        for (int c = 0; c < nControllers && wanted < 0; c++) {
+            int entry = controller(c);
             int r = sharingRow(entry);
             int m = mode[(size_t) s * n + r];
             // an identity on the controller's own voltage: its own row, or the relocated row whose cross slot is that voltage
             bool hostable = r == reactiveLimitVoltageRow[entry]
                     || (relocatedChildOwnRow != nullptr && relocatedChildOwnRow[r] == reactiveLimitVoltageRow[entry]);
-            if (enabled(entry) && hostable && !rowIsFrozen(nFrozen, frozenSlotRow, s, r)
+            if (enabled(entry) && hostable && !rowIsFrozen(frozenRows, s, r)
                     && (m == GpuRowMode::EQUATION || (held == c && holdsFixedVariable(m)))) {
                 wanted = c;
             }
@@ -404,19 +406,19 @@ __global__ void updateReMergedVoltageTargetRowBatch(int nReMergedVoltageTargets,
     }
     if (held == wanted) return;
     if (held >= 0) {                                         // back to its sharing equation (its DISTR_Q target follows)
-        int entry = controllers[held];
+        int entry = controller(held);
         size_t r = (size_t) s * n + sharingRow(entry);
         if (holdsFixedVariable(mode[r])) {                   // ...unless its own switch to PQ made the row its balance already
             mode[r] = GpuRowMode::EQUATION;
         }
         reactiveLimitHoldsReMergedVoltageTarget[(size_t) s * nReactiveLimitEntries + entry] = 0;
     }
-    size_t mainKey = (size_t) s * nReactiveLimitEntries + reMergedVoltageTargetMainEntry[e];
+    size_t mainKey = (size_t) s * nReactiveLimitEntries + mainEntry;
     if (wanted >= 0) {
-        int entry = controllers[wanted];
+        int entry = controller(wanted);
         int r = sharingRow(entry);
         mode[(size_t) s * n + r] = fixedVariableMode(r != reactiveLimitVoltageRow[entry]);
-        target[(size_t) s * n + r] = reMergedVoltageTargetValue[e];
+        target[(size_t) s * n + r] = reMergedVoltageTargets.doubleOf(s, control);
         reactiveLimitHoldsReMergedVoltageTarget[(size_t) s * nReactiveLimitEntries + entry] = 1;
         reactiveLimitReMergedVoltageRow[mainKey] = reactiveLimitVoltageRow[entry];
     } else {
@@ -427,26 +429,25 @@ __global__ void updateReMergedVoltageTargetRowBatch(int nReMergedVoltageTargets,
 }
 
 void launchReMergedVoltageTargetRowUpdate(BatchSolverContext* ctx, DriverPass& drv, bool solveStart) {
-    if (ctx->nReMergedVoltageTargets == 0) {
+    if (ctx->reMergedVoltageTargets.entries() == 0) {
         return;
     }
     const int& n = drv.n;
     const int& nS = drv.nS;
+    SlotEntries reMergedVoltageTargets = ctx->reMergedVoltageTargets.view();
     if (solveStart) {
         size_t scenarioEntries = static_cast<size_t>(ctx->nScenarios) * ctx->nReactiveLimitEntries;
-        CUDA_CHECK(cudaMemsetAsync(ctx->dReMergedVoltageTargetHolder.p, 0xFF, static_cast<size_t>(ctx->nReMergedVoltageTargets) * sizeof(int), ctx->stream));
+        ctx->reMergedVoltageTargets.resetState({}, ctx->stream);
         CUDA_CHECK(cudaMemsetAsync(ctx->dReactiveLimitHoldsReMergedVoltageTarget.p, 0, scenarioEntries, ctx->stream));
         CUDA_CHECK(cudaMemsetAsync(ctx->dReactiveLimitReMergedVoltageRow.p, 0xFF, scenarioEntries * sizeof(int), ctx->stream));
     }
-    updateReMergedVoltageTargetRowBatch<<<grid(ctx->nReMergedVoltageTargets), BLOCK, 0, ctx->stream>>>(ctx->nReMergedVoltageTargets, nS, n,
-            ctx->nReactiveLimitEntries, ctx->dReMergedVoltageTargetSlot.as<int>(), ctx->dReMergedVoltageTargetMainEntry.as<int>(),
-            ctx->dReMergedVoltageTargetValue.as<double>(), ctx->dReMergedVoltageTargetControllerStart.as<int>(),
-            ctx->dReMergedVoltageTargetControllerCount.as<int>(), ctx->dReMergedVoltageTargetControllerEntries.as<int>(),
+    updateReMergedVoltageTargetRowBatch<<<grid(nS * reMergedVoltageTargets.capacity), BLOCK, 0, ctx->stream>>>(nS, n,
+            ctx->nReactiveLimitEntries, reMergedVoltageTargets, ctx->reMergedVoltageTargetControllers.view(),
             ctx->dReactiveLimitVoltageRow.as<int>(), ctx->dReactiveLimitReactivePowerRow.p ? ctx->dReactiveLimitReactivePowerRow.as<int>() : nullptr,
             ctx->structure->dRelocatedChildOwnRow.p ? ctx->structure->dRelocatedChildOwnRow.as<int>() : nullptr,
             ctx->dReactiveLimitQLimitType.as<char>(), ctx->nReactiveLimitIslanded > 0 ? ctx->dReactiveLimitIslanded.as<char>() : nullptr,
-            ctx->nFrozenRow, ctx->nFrozenRow ? ctx->dFrozenRow.as<int>() : nullptr,
-            ctx->dReMergedVoltageTargetHolder.as<int>(), ctx->dReactiveLimitHoldsReMergedVoltageTarget.as<char>(),
+            ctx->frozenRows.view(),
+            ctx->reMergedVoltageTargets.state<int>(0), ctx->dReactiveLimitHoldsReMergedVoltageTarget.as<char>(),
             ctx->dReactiveLimitReMergedVoltageRow.as<int>(), ctx->dMode.as<int>(), ctx->dTarget.as<double>(),
             ctx->dOuterLoopCheckActive.as<char>(), ctx->dOuterLoopUnstable.as<char>());
 }

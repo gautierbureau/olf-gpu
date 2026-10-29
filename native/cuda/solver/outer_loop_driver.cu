@@ -94,9 +94,6 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                               const int* distributedSlackOverrideBus, const double* distributedSlackOverrideFactorDelta, const double* distributedSlackOverrideBaseTargetPDelta,
                               const double* distributedSlackOverrideMaxDelta, const double* distributedSlackOverrideMinDelta, const double* distributedSlackBusAnchorShift,
                               const double* slackBusAnchorShift,
-                              int nReactiveLimitTargetVOverrides, const int* reactiveLimitTargetVOverrideScenarioEntry, const double* reactiveLimitTargetVOverrideValue,
-                              int nReactiveLimitDeltaOverrides, const int* reactiveLimitDeltaOverrideScenarioEntry, const double* reactiveLimitDeltaOverrideValues,
-                              int nReactiveCapabilityCurveOverrides, const int* reactiveCapabilityCurveOverrideScenarioCurve, const double* reactiveCapabilityCurveOverrideStepScale,
                               int maxIter, double tol,
                               double reactiveLimitTol, double slackDistTol, double convEpsPerEq,
                               int stateVectorScalingMode, double maxDv, double maxDphi, const int* varType,
@@ -110,9 +107,6 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     drv.n = ctx->n;
     drv.nnz = ctx->nnz;
     drv.nS = ctx->nScenarios;
-    drv.nReactiveLimitTargetVOverrides = nReactiveLimitTargetVOverrides;
-    drv.nReactiveLimitDeltaOverrides = nReactiveLimitDeltaOverrides;
-    drv.nReactiveCapabilityCurveOverrides = nReactiveCapabilityCurveOverrides;
     drv.skipReactiveLimitsPhase = skipReactiveLimitsPhase;
     drv.rejectSlackDistributionFailure = rejectSlackDistributionFailure != 0;
     const int& n = drv.n;
@@ -146,12 +140,6 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     // minus the extraction-time base — re-anchors the water-fill's cumulative reference at the PARENT
     // contingency's distribution, mirroring OLF's setGeneratorsInitialTargetPToTargetP before a strategy
     // re-solve. nullptr = anchored at the base (plain contingencies).
-    DeviceBuf& dReactiveLimitTargetVOverrideScenarioEntry = drv.dReactiveLimitTargetVOverrideScenarioEntry;
-    DeviceBuf& dReactiveLimitTargetVOverrideValue = drv.dReactiveLimitTargetVOverrideValue;
-    if (nReactiveLimitTargetVOverrides > 0) {
-        dReactiveLimitTargetVOverrideScenarioEntry.upload(reactiveLimitTargetVOverrideScenarioEntry, 2L * nReactiveLimitTargetVOverrides * sizeof(int));
-        dReactiveLimitTargetVOverrideValue.upload(reactiveLimitTargetVOverrideValue, (size_t) nReactiveLimitTargetVOverrides * sizeof(double));
-    }
     DeviceBuf& dDistributedSlackBusAnchorShift = drv.dDistributedSlackBusAnchorShift;
     DeviceBuf& dSlackBusAnchorShift = drv.dSlackBusAnchorShift;
     drv.hasDistributedSlackBusAnchorShift = (distributedSlackBusAnchorShift != nullptr && ctx->nDistributedSlackBuses > 0);
@@ -292,31 +280,16 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     // does not count.
     // The reactive-limit limits become PER-SCENARIO as soon as either channel is live: curve limits at
     // the runtime P, or a generator lost at a bus that keeps voltage control taking its capability away.
-    DeviceBuf& dReactiveLimitDeltaOverrideScenarioEntry = drv.dReactiveLimitDeltaOverrideScenarioEntry;
-    DeviceBuf& dReactiveLimitDeltaOverrideValues = drv.dReactiveLimitDeltaOverrideValues;
-    DeviceBuf& dReactiveLimitDeltaOverrideStart = drv.dReactiveLimitDeltaOverrideStart;
-    DeviceBuf& dReactiveLimitDeltaOverrideList = drv.dReactiveLimitDeltaOverrideList;
-    if (nReactiveLimitDeltaOverrides > 0) {
-        dReactiveLimitDeltaOverrideScenarioEntry.upload(reactiveLimitDeltaOverrideScenarioEntry, static_cast<size_t>(nReactiveLimitDeltaOverrides) * 2 * sizeof(int));
-        dReactiveLimitDeltaOverrideValues.upload(reactiveLimitDeltaOverrideValues, static_cast<size_t>(nReactiveLimitDeltaOverrides) * 5 * sizeof(double));   // {dMinQ, dMaxQ, dLoadQ, dBmin, dBmax}
-        // ...indexed by slot (CSR, entry order kept), so the dynamic-limits kernel reads its scenario's own
-        // overrides instead of scanning the chunk's.
-        std::vector<int> qPtr(nS + 1, 0);
-        std::vector<int> qList(nReactiveLimitDeltaOverrides);
-        for (int k = 0; k < nReactiveLimitDeltaOverrides; k++) qPtr[reactiveLimitDeltaOverrideScenarioEntry[2 * k] + 1]++;
-        for (int t = 0; t < nS; t++) qPtr[t + 1] += qPtr[t];
-        std::vector<int> qCursor(qPtr.begin(), qPtr.end() - 1);
-        for (int k = 0; k < nReactiveLimitDeltaOverrides; k++) qList[qCursor[reactiveLimitDeltaOverrideScenarioEntry[2 * k]]++] = k;
-        dReactiveLimitDeltaOverrideStart.upload(qPtr.data(), qPtr.size() * sizeof(int));
-        dReactiveLimitDeltaOverrideList.upload(qList.data(), qList.size() * sizeof(int));
-    }
     // A lost voltage-controlling SVC also takes its share of the entry's quadratic limit coefficients (an SVC's
     // limit is its susceptance times v^2): per (scenario, entry) coefficients, read by the reactive-limits check
     // in place of the run-constant ones. Built only when some override carries such a share.
+    const SlotTable& reactiveLimitDeltaOverrides = ctx->reactiveLimitDeltaOverrides;
     bool& hasPerScenarioSvcSusceptanceLimits = drv.hasPerScenarioSvcSusceptanceLimits;
     hasPerScenarioSvcSusceptanceLimits = false;
-    for (int k = 0; k < nReactiveLimitDeltaOverrides && !hasPerScenarioSvcSusceptanceLimits; k++) {
-        hasPerScenarioSvcSusceptanceLimits = reactiveLimitDeltaOverrideValues[5 * k + 3] != 0.0 || reactiveLimitDeltaOverrideValues[5 * k + 4] != 0.0;
+    for (int t = 0; t < nS && !hasPerScenarioSvcSusceptanceLimits; t++) {
+        for (int k = 0; k < reactiveLimitDeltaOverrides.countOf(t) && !hasPerScenarioSvcSusceptanceLimits; k++) {
+            hasPerScenarioSvcSusceptanceLimits = reactiveLimitDeltaOverrides.doubleOf(t, k, 3) != 0.0 || reactiveLimitDeltaOverrides.doubleOf(t, k, 4) != 0.0;
+        }
     }
     if (hasPerScenarioSvcSusceptanceLimits && ctx->nReactiveLimitEntries > 0) {
         size_t nReactiveLimitEntries = static_cast<size_t>(ctx->nReactiveLimitEntries);
@@ -328,10 +301,12 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             std::copy(bmin.begin(), bmin.end(), dynMin.begin() + static_cast<size_t>(t) * nReactiveLimitEntries);
             std::copy(bmax.begin(), bmax.end(), dynMax.begin() + static_cast<size_t>(t) * nReactiveLimitEntries);
         }
-        for (int k = 0; k < nReactiveLimitDeltaOverrides; k++) {
-            size_t at = static_cast<size_t>(reactiveLimitDeltaOverrideScenarioEntry[2 * k]) * nReactiveLimitEntries + reactiveLimitDeltaOverrideScenarioEntry[2 * k + 1];
-            dynMin[at] += reactiveLimitDeltaOverrideValues[5 * k + 3];
-            dynMax[at] += reactiveLimitDeltaOverrideValues[5 * k + 4];
+        for (int t = 0; t < nS; t++) {
+            for (int k = 0; k < reactiveLimitDeltaOverrides.countOf(t); k++) {
+                size_t at = static_cast<size_t>(t) * nReactiveLimitEntries + reactiveLimitDeltaOverrides.intOf(t, k);
+                dynMin[at] += reactiveLimitDeltaOverrides.doubleOf(t, k, 3);
+                dynMax[at] += reactiveLimitDeltaOverrides.doubleOf(t, k, 4);
+            }
         }
         if (!ctx->dReactiveLimitSvcMinBPerScenario.p) {
             ctx->dReactiveLimitSvcMinBPerScenario.alloc(static_cast<size_t>(ctx->nScenarios) * nReactiveLimitEntries * sizeof(double));
@@ -340,30 +315,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         CUDA_CHECK(cudaMemcpy(ctx->dReactiveLimitSvcMinBPerScenario.p, dynMin.data(), dynMin.size() * sizeof(double), cudaMemcpyHostToDevice));
         CUDA_CHECK(cudaMemcpy(ctx->dReactiveLimitSvcMaxBPerScenario.p, dynMax.data(), dynMax.size() * sizeof(double), cudaMemcpyHostToDevice));
     }
-    // Per-scenario curve repairs, CSR by scenario: the dynamic-limits kernel runs one thread per
-    // (reactive-limit entry, scenario) and walks the curve entries inside, so a flat {slot, entry}
-    // scan would be paid nReactiveCapabilityCurves times per thread. Bucketing by slot makes it a handful of comparisons.
-    DeviceBuf& dReactiveCapabilityCurveOverrideStart = drv.dReactiveCapabilityCurveOverrideStart;
-    DeviceBuf& dReactiveCapabilityCurveOverrideCurve = drv.dReactiveCapabilityCurveOverrideCurve;
-    DeviceBuf& dReactiveCapabilityCurveOverrideStepScale = drv.dReactiveCapabilityCurveOverrideStepScale;
-    if (nReactiveCapabilityCurveOverrides > 0) {
-        std::vector<int> ptr(nS + 1, 0);
-        for (int k = 0; k < nReactiveCapabilityCurveOverrides; k++) ptr[reactiveCapabilityCurveOverrideScenarioCurve[2 * k] + 1]++;
-        for (int t = 0; t < nS; t++) ptr[t + 1] += ptr[t];
-        std::vector<int> cursor(ptr.begin(), ptr.end() - 1);
-        std::vector<int> entry(nReactiveCapabilityCurveOverrides);
-        std::vector<double> val(static_cast<size_t>(nReactiveCapabilityCurveOverrides) * 2);
-        for (int k = 0; k < nReactiveCapabilityCurveOverrides; k++) {
-            int at = cursor[reactiveCapabilityCurveOverrideScenarioCurve[2 * k]]++;
-            entry[at] = reactiveCapabilityCurveOverrideScenarioCurve[2 * k + 1];
-            val[2 * at] = reactiveCapabilityCurveOverrideStepScale[2 * k];
-            val[2 * at + 1] = reactiveCapabilityCurveOverrideStepScale[2 * k + 1];
-        }
-        dReactiveCapabilityCurveOverrideStart.upload(ptr.data(), ptr.size() * sizeof(int));
-        dReactiveCapabilityCurveOverrideCurve.upload(entry.data(), entry.size() * sizeof(int));
-        dReactiveCapabilityCurveOverrideStepScale.upload(val.data(), val.size() * sizeof(double));
-    }
-    drv.usePerScenarioReactiveLimits = ctx->nReactiveLimitEntries > 0 && (ctx->nReactiveCapabilityCurves > 0 || nReactiveLimitDeltaOverrides > 0 || ctx->nForcedTargetQLimitEntries > 0);
+    drv.usePerScenarioReactiveLimits = ctx->nReactiveLimitEntries > 0 && (ctx->nReactiveCapabilityCurves > 0 || reactiveLimitDeltaOverrides.entries() > 0 || ctx->nForcedTargetQLimitEntries > 0);
     const bool& usePerScenarioReactiveLimits = drv.usePerScenarioReactiveLimits;
     if (usePerScenarioReactiveLimits && (!ctx->dReactiveLimitMinQPerScenario.p || !ctx->dReactiveLimitLoadQPerScenario.p)) {   // curves allocate these on their own
                                                             // table upload; a Q override alone must too, and a

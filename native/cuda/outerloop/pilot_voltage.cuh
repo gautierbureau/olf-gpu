@@ -7,6 +7,7 @@
 #define OLF_GPU_OUTERLOOP_PILOT_VOLTAGE_CUH
 
 #include "../solver/driver_pass.cuh"
+#include "../equations/slot_entries.cuh"
 
 namespace olfgpu {
 
@@ -18,7 +19,7 @@ __global__ void capturePilotQBatch(int nReactiveRelocationGroups, int nScenarios
                                    const int* baseMode, const double* targetBase, double* pilotQ,
                                    const int* reactiveRelocationBaseTargetRow);
 
-__global__ void applyPilotQDeltasBatch(int nDelta, const int* key, const double* val, int nReactiveRelocationGroups, int n,
+__global__ void applyPilotQDeltasBatch(int nScenarios, SlotEntries deltas, int nReactiveRelocationGroups, int n,
                                        const int* reactiveRelocationGroupStart, const int* reactiveRelocationCandidateRows, const int* mode,
                                        const char* distrQSubgroup, int nDistrQMembers, const int* reactiveRelocationDistrQMemberStart,
                                        double* pilotQ, double* target);
@@ -28,13 +29,13 @@ __global__ void updatePilotTargetVEquationBatch(int nReactiveRelocationGroups, i
                                     const double* pilotQ, int* mode, double* target,
                                     char* pilotTargetVDeactivated, double* savedVTarget,
                                     const char* outerLoopCheckActive, char* switched,
-                                    int nFrozen, const int* frozenSlotRow,
+                                    SlotEntries frozenRows,
                                     const int* pilotSelfReactiveLimitEntry,
                                     const char* limitType, int nReactiveLimitEntries, const double* reactiveLimitMinQ, const double* reactiveLimitMaxQ,
                                     const double* reactiveLimitLoadQ, const double* reactiveLimitInitialTargetQ, int perScenarioReactiveLimits,
                                     const double* reactiveLimitTargetV,
                                     const int* reactiveRelocationPilotReactiveLimitEntry,
-                                    int nReactiveLimitTargetVOverrides, const int* reactiveLimitTargetVOverrideScenarioEntry, const double* reactiveLimitTargetVOverrideValue,
+                                    SlotEntries reactiveLimitTargetVOverrides,
                                     const double* secondaryVoltageControlReactiveLimitTargetV,
                                     int nDistrQMembers, const int* distrQMemberRelocationGroup, const int* distrQMemberReactiveLimitEntry,
                                     const char* reactiveLimitIslanded,
@@ -42,12 +43,10 @@ __global__ void updatePilotTargetVEquationBatch(int nReactiveRelocationGroups, i
                                 const char* reactiveLimitGeneratorsLost, const int* reactiveRelocationDependentBaseGroup, const int* relocatedChildOwnRow,
                                 const double* reactiveLimitSeedTargetQ);
 
-__global__ void updateReMergedVoltageTargetRowBatch(int nReMergedVoltageTargets, int nScenarios, int n, int nReactiveLimitEntries,
-                                                    const int* reMergedVoltageTargetSlot, const int* reMergedVoltageTargetMainEntry,
-                                                    const double* reMergedVoltageTargetValue, const int* reMergedVoltageTargetControllerStart,
-                                                    const int* reMergedVoltageTargetControllerCount, const int* reMergedVoltageTargetControllerEntries,
+__global__ void updateReMergedVoltageTargetRowBatch(int nScenarios, int n, int nReactiveLimitEntries,
+                                                    SlotEntries reMergedVoltageTargets, SlotEntries reMergedVoltageTargetControllers,
                                                     const int* reactiveLimitVoltageRow, const int* reactiveLimitReactivePowerRow, const int* relocatedChildOwnRow,
-                                                    const char* limitType, const char* reactiveLimitIslanded, int nFrozen, const int* frozenSlotRow,
+                                                    const char* limitType, const char* reactiveLimitIslanded, SlotEntries frozenRows,
                                                     int* reMergedVoltageTargetHolder, char* reactiveLimitHoldsReMergedVoltageTarget,
                                                     int* reactiveLimitReMergedVoltageRow, int* mode, double* target,
                                                     const char* outerLoopCheckActive, char* switched);

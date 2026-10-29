@@ -22,10 +22,10 @@ __global__ void fillDistrQBatch(int nDistrQ, int nScenarios, int n, int nnz, int
                                 const double* openBranchParameters, const int* openBranchIndices,
                                 const double* x, double* vals, double* F,
                                 const char* disabled, const char* active,
-                                int nDistrQWeightOverrides, const int* distrQWeightOverrideScenarioTerm, const double* distrQWeightOverrideWeight,
-                                int nDistrQKeyOverrides, const int* distrQKeyOverrideScenarioMember, const double* distrQKeyOverrideKey,
+                                SlotEntries distrQWeightOverrides,
+                                SlotEntries distrQKeyOverrides,
                                 const int* mode,
-                                int nDistrQInactiveMembers, const int* distrQInactiveScenarioMember,
+                                SlotEntries distrQInactiveMembers,
                                 const int* distrQRowMember, const int* distrQInjectionMember, const double* mKey,
                                 const int* distrQMemberReactiveLimitEntry, const int* mGroupStart, const int* mGroupCount,
                                 const char* limitType, int nReactiveLimitEntries,
@@ -39,7 +39,7 @@ __global__ void fillDistrQBatch(int nDistrQ, int nScenarios, int n, int nnz, int
 __global__ void fillDistrRhoBatch(int nDistrRho, int nScenarios, int n, int nnz,
                                   const int* distrRhoColumn, const double* distrRhoCoefficient, const int* distrRhoDestination,
                                   const double* x, double* vals, double* F, const char* active,
-                                  int nDistrRhoCoefficientOverrides, const int* distrRhoOverrideScenarioTerm, const double* distrRhoOverrideCoefficient,
+                                  SlotEntries distrRhoCoefficientOverrides,
                                   const int* distrRhoRelocationGroup, const int* mode, const int* reactiveRelocationGroupStart, const int* reactiveRelocationCandidateRows, BatchLayout layout);
 
 __global__ void fillDistrShuntBBatch(int nDistrShuntB, int nScenarios, int n, int nnz,

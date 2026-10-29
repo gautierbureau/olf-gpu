@@ -25,6 +25,7 @@ long long gFullFactorizations = 0;
 long long gRobustFactorizations = 0;
 long long gSensitivityFactorizations = 0;
 long long gSensitivitySolves = 0;
+long long gRefinementFactorizations = 0;
 long long gCheckRounds = 0;
 long long gOuterLoopPassHistogramCount[16] = {0}, gOuterLoopPassHistogramFirstSolveIterations[16] = {0}, gOuterLoopPassHistogramTotalIterations[16] = {0};
 long long gOuterLoopNotConverged = 0, gOuterLoopNotConvergedIterations = 0;

@@ -48,6 +48,7 @@ extern long long gFullFactorizations;
 extern long long gRobustFactorizations;
 extern long long gSensitivityFactorizations;
 extern long long gSensitivitySolves;
+extern long long gRefinementFactorizations;   // compacted factorizations the full-width refinement took
 extern long long gCheckRounds;
 // Per scenario at the end of a completed batch call: how many SOLVE PASSES it took part in (1 = the state came
 // right out of the first inner Newton; each further pass is an outer loop that changed something and

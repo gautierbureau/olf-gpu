@@ -124,6 +124,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     const size_t& nTot = drv.nTot;
     drv.tol = tol;
     drv.maxIter = maxIter;
+    const long long newtonIterationsAtStart = gNewtonIters;
     drv.stateVectorScalingMode = stateVectorScalingMode;
     drv.convEpsPerEq = convEpsPerEq;
     DeviceBuf dTargetOverrideIndex, dTargetOverrideValue;                            // function-scoped: outlive the async override kernel
@@ -745,6 +746,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         }
     }
     tracePhaseTime(ctx, drv);
+    ctx->newtonLoopIterations = static_cast<int>(gNewtonIters - newtonIterationsAtStart);
     CUDA_CHECK(cudaMemcpy(res.x.data(), ctx->dX.p, nTot * sizeof(double), cudaMemcpyDeviceToHost));
     return std::move(res);                               // drv is this call's: hand its n x nS state over, not a copy
 }

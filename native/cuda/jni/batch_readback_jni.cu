@@ -98,6 +98,15 @@ OLF_JNI(ac_solver_gpu, BatchReadbackNative, readBatchOuterLoopStats)(
     return out;
 }
 
+// The batched Newton iterations of the last solveBatchContext call, every scenario's solves together: the length of the
+// chunk's solve, in factorization rounds.
+extern "C" JNIEXPORT jint JNICALL
+OLF_JNI(ac_solver_gpu, BatchReadbackNative, readBatchNewtonLoopIterations)(
+        JNIEnv*, jclass, jlong handle) {
+    auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
+    return ctx == nullptr ? -1 : ctx->newtonLoopIterations;
+}
+
 // How many solveBatchContext calls this context has run. The per-solve DS read-backs (retain, distributedSlackGeneratorMove,
 // slack absorbed) are reset at every solve, so a caller summing them must know they span its solve.
 extern "C" JNIEXPORT jlong JNICALL

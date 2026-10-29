@@ -9,6 +9,7 @@
 #include "../solver/driver_pass.cuh"
 #include "scatter.cuh"
 #include "../fixedmatrix/reactive_relocation.cuh"
+#include "scenario_overrides.cuh"
 
 namespace olfgpu {
 
@@ -16,7 +17,7 @@ __global__ void fillShuntBatch(int elementCount, int nScenarios, int n, int nnz,
                                const double* in, const int* ix, const int* dest,
                                const double* x, double* vals, double* F,
                                const char* disabled, const char* active,
-                               int nShuntAdmittanceOverrides, const int* shuntAdmittanceOverrideScenarioElement, const double* shuntAdmittanceOverrideDelta,
+                               ShuntAdmittanceOverrides shuntAdmittanceOverrides,
                                const int* alternateDestination, const int* selectorRow, const int* mode, int dynamicRelocation,
                                ReactiveRelocationTables rt, BatchLayout layout);
 
@@ -35,7 +36,7 @@ __global__ void fillShuntBatchF(int elementCount, int nScenarios, int n, int nnz
                                 const double* in, const int* ix, const int* dest,
                                 const double* x, double* F,
                                 const char* disabled, const char* active,
-                                int nShuntAdmittanceOverrides, const int* shuntAdmittanceOverrideScenarioElement, const double* shuntAdmittanceOverrideDelta,
+                                ShuntAdmittanceOverrides shuntAdmittanceOverrides,
                                 const int* alternateDestination, const int* selectorRow, const int* mode, int dynamicRelocation,
                                ReactiveRelocationTables rt, BatchLayout layout);
 

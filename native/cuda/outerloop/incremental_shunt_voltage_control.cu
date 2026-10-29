@@ -15,6 +15,7 @@
 #include "../common/launch.cuh"
 #include "../common/codes/gpu_linear_solve_mode.cuh"
 #include "../solver/driver_steps.cuh"
+#include "../solver/scenario_override_tables.cuh"
 #include "sensitivity.cuh"
 #include "incremental_shunt_voltage_control.cuh"
 #include "../common/trace.cuh"
@@ -143,45 +144,6 @@ __global__ void incrementalShuntVoltageControlApplyBatch(int nIncrementalShuntVo
     appliedDeltaB[tid] = db;
 }
 
-/** Rebuild the device shunt-override list = the caller's entries ++ one (dG, dB) per (scenario,
- *  controller) whose sections moved off their base — additive deltas (applyShuntOverride SUMS every
- *  matching entry), so the loop's move composes on top of whatever the caller had. Re-done after
- *  every pass that moved a section and on a driver RESUME. */
-void rebuildShuntAdmittanceOverrides(BatchSolverContext* ctx) {
-    int nS = ctx->nScenarios;
-    std::vector<int> sectionPosition(static_cast<size_t>(nS) * ctx->nIncrementalShuntVoltageControlShuntCompensators);
-    CUDA_CHECK(cudaMemcpy(sectionPosition.data(), ctx->dIncrementalShuntVoltageControlPosition.p, sectionPosition.size() * sizeof(int), cudaMemcpyDeviceToHost));
-    std::vector<int> scenarioElement(ctx->hShuntAdmittanceOverrideBaseScenarioElement);
-    std::vector<double> delta(ctx->hShuntAdmittanceOverrideBaseDelta);
-    for (int s = 0; s < nS; s++) {
-        for (int c = 0; c < ctx->nIncrementalShuntVoltageControlControllerShunts; c++) {
-            if (ctx->hIncrementalShuntVoltageControlShuntAdmittanceOverrideElement[c] < 0) continue;          // no packed element: b rides SHUNT_B only
-            double deltaB = 0.0, deltaG = 0.0;
-            for (int u = ctx->hIncrementalShuntVoltageControlShuntCompensatorStart[c]; u < ctx->hIncrementalShuntVoltageControlShuntCompensatorStart[c + 1]; u++) {
-                int firstSection = ctx->hIncrementalShuntVoltageControlSectionStart[u];
-                int position = sectionPosition[static_cast<size_t>(s) * ctx->nIncrementalShuntVoltageControlShuntCompensators + u];
-                deltaB += ctx->hIncrementalShuntVoltageControlSectionB[firstSection + position]
-                        - ctx->hIncrementalShuntVoltageControlSectionB[firstSection + ctx->hIncrementalShuntVoltageControlShuntCompensatorBasePosition[u]];
-                deltaG += ctx->hIncrementalShuntVoltageControlSectionG[firstSection + position]
-                        - ctx->hIncrementalShuntVoltageControlSectionG[firstSection + ctx->hIncrementalShuntVoltageControlShuntCompensatorBasePosition[u]];
-            }
-            if (deltaB == 0.0 && deltaG == 0.0) continue;
-            scenarioElement.push_back(s);
-            scenarioElement.push_back(ctx->hIncrementalShuntVoltageControlShuntAdmittanceOverrideElement[c]);
-            delta.push_back(deltaG);
-            delta.push_back(deltaB);
-        }
-    }
-    int nOverrides = static_cast<int>(scenarioElement.size() / 2);
-    if (nOverrides > 0) {
-        ctx->dShuntAdmittanceOverrideScenarioElement.ensure(scenarioElement.size() * sizeof(int));
-        ctx->dShuntAdmittanceOverrideDelta.ensure(delta.size() * sizeof(double));
-        CUDA_CHECK(cudaMemcpy(ctx->dShuntAdmittanceOverrideScenarioElement.p, scenarioElement.data(), scenarioElement.size() * sizeof(int), cudaMemcpyHostToDevice));
-        CUDA_CHECK(cudaMemcpy(ctx->dShuntAdmittanceOverrideDelta.p, delta.data(), delta.size() * sizeof(double), cudaMemcpyHostToDevice));
-    }
-    ctx->nShuntAdmittanceOverrides = nOverrides;
-}
-
 // Per-solve reset. Incremental shunt VC: base sections, fresh ratchets, the identity row's target as the base b.
 void incrementalShuntVoltageControlResetSolve(BatchSolverContext* ctx, DriverPass& drv) {
     const int& n = drv.n;
@@ -267,15 +229,14 @@ void incrementalShuntVoltageControlStep(BatchSolverContext* ctx, DriverPass& drv
     incrementalShuntVoltageControlApplyBatch<<<grid(nIncrementalShuntVoltageControlControllerShunts * nS), BLOCK, 0, ctx->stream>>>(nIncrementalShuntVoltageControlControllerShunts, nS, n, ctx->dIncrementalShuntVoltageControlShuntBRow.as<int>(), ctx->dIncrementalShuntVoltageControlShuntCompensatorStart.as<int>(),
             ctx->dIncrementalShuntVoltageControlSectionStart.as<int>(), ctx->dIncrementalShuntVoltageControlSectionB.as<double>(), ctx->dIncrementalShuntVoltageControlShuntCompensatorBasePosition.as<int>(), ctx->dIncrementalShuntVoltageControlPosition.as<int>(),
             ctx->nIncrementalShuntVoltageControlShuntCompensators, ctx->dIncrementalShuntVoltageControlBaseB.as<double>(), ctx->dIncrementalShuntVoltageControlAppliedDeltaB.as<double>(), ctx->dTarget.as<double>(), ctx->dX.as<double>());
-    CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
-    rebuildShuntAdmittanceOverrides(ctx);
+    publishShuntAdmittanceOverrides(ctx);
     if (traceOn(Trace::BATCH_TRACE)) {
         std::vector<int> pos(static_cast<size_t>(nS) * ctx->nIncrementalShuntVoltageControlShuntCompensators);
         CUDA_CHECK(cudaMemcpy(pos.data(), ctx->dIncrementalShuntVoltageControlPosition.p, pos.size() * sizeof(int), cudaMemcpyDeviceToHost));
         int nOut = 0, nMoved = 0;
         for (char c : outOfDeadband) nOut += c ? 1 : 0;
         for (int s2 = 0; s2 < nS; s2++) for (int u = 0; u < ctx->nIncrementalShuntVoltageControlShuntCompensators; u++) if (pos[static_cast<size_t>(s2) * ctx->nIncrementalShuntVoltageControlShuntCompensators + u] != ctx->hIncrementalShuntVoltageControlShuntCompensatorBasePosition[u]) nMoved++;
-        std::fprintf(stderr, "SHUNT_KERNEL nS=%d nControllers=%d nGroups=%d outOfDeadband=%d subsOffBase=%d nShuntAdmittanceOverrides=%d\n", nS, nIncrementalShuntVoltageControlControllerShunts, nG, nOut, nMoved, ctx->nShuntAdmittanceOverrides);
+        std::fprintf(stderr, "SHUNT_KERNEL nS=%d nControllers=%d nGroups=%d outOfDeadband=%d subsOffBase=%d\n", nS, nIncrementalShuntVoltageControlControllerShunts, nG, nOut, nMoved);
     }
 }
 

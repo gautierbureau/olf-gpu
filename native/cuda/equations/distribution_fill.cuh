@@ -7,6 +7,7 @@
 #define OLF_GPU_EQUATIONS_DISTRIBUTION_FILL_CUH
 
 #include "../solver/driver_pass.cuh"
+#include "scenario_overrides.cuh"
 
 namespace olfgpu {
 
@@ -30,8 +31,8 @@ __global__ void fillDistrQBatch(int nDistrQ, int nScenarios, int n, int nnz, int
                                 const char* limitType, int nReactiveLimitEntries,
                                 const char* pilotSelfCarrierSkip, int pilotSelfCarrierSkipStride,
                                 const int* memberRelocationGroup, const int* reactiveRelocationGroupStart, const int* reactiveRelocationCandidateRows,
-                                int nClosedBranchParameterOverrides, const int* closedBranchParameterOverrideScenarioElement, const double* closedBranchParameterOverrideValues,
-                                int nShuntAdmittanceOverrides, const int* shuntAdmittanceOverrideScenarioElement, const double* shuntAdmittanceOverrideDelta,
+                                ClosedBranchParameterOverrides closedBranchParameterOverrides,
+                                ShuntAdmittanceOverrides shuntAdmittanceOverrides,
                                 int distrQTraceRow,
                                 const char* distrQSubgroup, const int* reactiveRelocationDistrQMemberStart, int nDistrQMembersAll, BatchLayout layout);
 

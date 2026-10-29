@@ -15,6 +15,7 @@
 #include "../equations/generated/closed_branch.cuh"
 #include "../equations/generated/open_branch.cuh"
 #include "../equations/scenario_overrides.cuh"
+#include "../solver/scenario_override_tables.cuh"
 #include "distributed_slack.cuh"
 #include "slack_participants.cuh"
 #include "area_interchange_control.cuh"
@@ -54,9 +55,7 @@ struct Tables {
     const int* closedBranchIndices;
     const double* openBranchParameters;
     const int* openBranchIndices;
-    int nClosedBranchParameterOverrides;
-    const int* closedBranchParameterOverrideScenarioElement;
-    const double* closedBranchParameterOverrideValues;
+    ClosedBranchParameterOverrides closedBranchParameterOverrides;
     int nBuses;
     const int* busPhiRow, *busRowOverride, *busArea, *busGeneratorStart, *busGeneratorEnd;
     const double* busBaseTargetP, *busAnchorShift;
@@ -177,8 +176,7 @@ __device__ double boundaryP(const Tables& t, int s, int b) {
     const double* p = t.closedBranchParameters + (size_t) e * 8;        // y g1 g2 b1 b2 ksi r1 a1
     const int* q = t.closedBranchIndices + (size_t) e * 12;              // P1 Q1 P2 Q2 ph1 v1 ph2 v2 a1col r1col
     double pOverride[8];
-    if (findTapOverride(t.nClosedBranchParameterOverrides, t.closedBranchParameterOverrideScenarioElement,
-                        t.closedBranchParameterOverrideValues, s, e, pOverride)) {
+    if (findTapOverride(t.closedBranchParameterOverrides, s, e, pOverride)) {
         p = pOverride;
     }
     double v1 = xs[q[5]];
@@ -571,9 +569,7 @@ void areaInterchangeControlCheck(BatchSolverContext* ctx, DriverPass& drv) {
     t.closedBranchIndices = ctx->structure->closedBranch.indices.as<int>();
     t.openBranchParameters = ctx->structure->openBranch.parameters.as<double>();
     t.openBranchIndices = ctx->structure->openBranch.indices.as<int>();
-    t.nClosedBranchParameterOverrides = ctx->nClosedBranchParameterOverrides;
-    t.closedBranchParameterOverrideScenarioElement = ctx->dClosedBranchParameterOverrideScenarioElement.as<int>();
-    t.closedBranchParameterOverrideValues = ctx->dClosedBranchParameterOverrideValues.as<double>();
+    t.closedBranchParameterOverrides = closedBranchParameterOverrides(ctx);
     t.nBuses = ctx->nDistributedSlackBuses;
     t.busPhiRow = ctx->dDistributedSlackBusPhiRow.as<int>();
     t.busRowOverride = ctx->nDistributedSlackBusRowOverrides > 0 ? ctx->dDistributedSlackBusRowOverride.as<int>() : nullptr;

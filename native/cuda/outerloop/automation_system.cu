@@ -12,6 +12,7 @@
 #include "../equations/scenario_overrides.cuh"
 #include "flow_observation.cuh"
 #include "automation_system.cuh"
+#include "../solver/scenario_override_tables.cuh"
 
 using namespace powsybl::openloadflow;
 
@@ -30,8 +31,7 @@ __global__ void automationSystemBatch(int nS, int n, int nElements, int nSystems
                                       const int* monitoredElement, const int* monitoredSide,
                                       const int* trippingStart, const int* operatedMaskSlot, const char* openAction,
                                       const double* threshold, const double* closedBranchParameters, const int* closedBranchIndices,
-                                      int nClosedBranchParameterOverrides, const int* closedBranchParameterOverrideScenarioElement,
-                                      const double* closedBranchParameterOverrideValues, const double* x, const char* outerLoopCheckActive, char* disabled, char* switched, char* unstable) {
+                                      ClosedBranchParameterOverrides closedBranchParameterOverrides, const double* x, const char* outerLoopCheckActive, char* disabled, char* switched, char* unstable) {
     int s = blockIdx.x * blockDim.x + threadIdx.x;
     if (s >= nS || !outerLoopCheckActive[s]) {
         return;
@@ -48,7 +48,7 @@ __global__ void automationSystemBatch(int nS, int n, int nElements, int nSystems
         }
         const double* p = closedBranchParameters + (size_t) e * GpuPiModelColumn::COUNT;
         double pOv[GpuPiModelColumn::COUNT];
-        if (findTapOverride(nClosedBranchParameterOverrides, closedBranchParameterOverrideScenarioElement, closedBranchParameterOverrideValues, s, e, pOv)) {
+        if (findTapOverride(closedBranchParameterOverrides, s, e, pOv)) {
             p = pOv;
         }
         double i = controlledCurrent(monitoredSide[m], p, xs, closedBranchIndices + (size_t) e * 12);
@@ -87,8 +87,7 @@ void automationSystemCheck(BatchSolverContext* ctx, DriverPass& drv) {
             ctx->dOverloadManagementSystemTrippingStart.as<int>(), ctx->dOverloadManagementSystemOperatedMaskSlot.as<int>(),
             ctx->dOverloadManagementSystemOpenAction.as<char>(), ctx->dOverloadManagementSystemThreshold.as<double>(),
             ctx->structure->closedBranch.parameters.as<double>(), ctx->structure->closedBranch.indices.as<int>(),
-            ctx->nClosedBranchParameterOverrides, ctx->dClosedBranchParameterOverrideScenarioElement.as<int>(),
-            ctx->dClosedBranchParameterOverrideValues.as<double>(), ctx->dX.as<double>(), ctx->dOuterLoopCheckActive.as<char>(), ctx->dDisabled.as<char>(),
+            closedBranchParameterOverrides(ctx), ctx->dX.as<double>(), ctx->dOuterLoopCheckActive.as<char>(), ctx->dDisabled.as<char>(),
             ctx->dAutomationSystemSwitched.as<char>(), ctx->dOuterLoopUnstable.as<char>());
     CUDA_CHECK(cudaGetLastError());
 }

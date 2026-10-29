@@ -23,6 +23,7 @@
 #include "sensitivity.cuh"
 #include "incremental_flow_control.cuh"
 #include "../common/trace.cuh"
+#include "../solver/scenario_override_tables.cuh"
 
 namespace olfgpu {
 
@@ -30,7 +31,7 @@ namespace olfgpu {
 __global__ void incrementalFlowControlCheckBatch(int nIncrementalFlowControlControllerBranches, int nScenarios, int n, int nElements, int closedBranchOffset, int kindMask,
                               const int* kind, const int* side, const double* targetValue, const double* halfTargetDeadband,
                               const int* elem, const int* controlledClosedBranch,
-                              const double* closedBranchParameters, const int* closedBranchIndices, int nClosedBranchParameterOverrides, const int* closedBranchParameterOverrideScenarioElement, const double* closedBranchParameterOverrideValues,
+                              const double* closedBranchParameters, const int* closedBranchIndices, ClosedBranchParameterOverrides closedBranchParameterOverrides,
                               const char* disabled, const double* x, const char* outerLoopCheckActive,
                               char* outOfDeadband, double* diff) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -43,7 +44,7 @@ __global__ void incrementalFlowControlCheckBatch(int nIncrementalFlowControlCont
     if (disabled[(size_t) s * nElements + elem[c]] || disabled[(size_t) s * nElements + closedBranchOffset + e]) return;
     const double* p = closedBranchParameters + e * GpuPiModelColumn::COUNT;
     double pOv[8];
-    if (findTapOverride(nClosedBranchParameterOverrides, closedBranchParameterOverrideScenarioElement, closedBranchParameterOverrideValues, s, e, pOv)) p = pOv;
+    if (findTapOverride(closedBranchParameterOverrides, s, e, pOv)) p = pOv;
     double flow = kind[c] == GpuControlledFlow::CURRENT
             ? controlledCurrent(side[c], p, x + (size_t) s * n, closedBranchIndices + e * 12)
             : controlledFlow(side[c], kind[c], p, x + (size_t) s * n, closedBranchIndices + e * 12);
@@ -56,14 +57,14 @@ __global__ void incrementalFlowControlCheckBatch(int nIncrementalFlowControlCont
 // the controlled branch's variable columns (a non-variable r1/a1 column contributes nothing).
 __global__ void incrementalFlowControlGatherSensitivityBatch(int nScenarios, int n, int c, int nIncrementalFlowControlControllerBranches, int closedBranchOffset,
                                     const int* kind, const int* side, const int* controlledClosedBranch,
-                                    const double* closedBranchParameters, const int* closedBranchIndices, int nClosedBranchParameterOverrides, const int* closedBranchParameterOverrideScenarioElement, const double* closedBranchParameterOverrideValues,
+                                    const double* closedBranchParameters, const int* closedBranchIndices, ClosedBranchParameterOverrides closedBranchParameterOverrides,
                                     const double* x, const double* dx, double* sensitivity) {
     int s = blockIdx.x * blockDim.x + threadIdx.x;
     if (s >= nScenarios) return;
     int e = controlledClosedBranch[c];
     const double* p = closedBranchParameters + e * GpuPiModelColumn::COUNT;
     double pOv[8];
-    if (findTapOverride(nClosedBranchParameterOverrides, closedBranchParameterOverrideScenarioElement, closedBranchParameterOverrideValues, s, e, pOv)) p = pOv;
+    if (findTapOverride(closedBranchParameterOverrides, s, e, pOv)) p = pOv;
     const int* q = closedBranchIndices + e * 12;
     const double* dxs = dx + (size_t) s * n;
     double sv = kind[c] == GpuControlledFlow::CURRENT
@@ -186,7 +187,7 @@ void incrementalFlowControlStep(BatchSolverContext* ctx, DriverPass& drv, int ki
     incrementalFlowControlCheckBatch<<<grid(static_cast<int>(nst)), BLOCK, 0, ctx->stream>>>(nF, nS, n, ctx->nElements, ctx->closedBranchOffset, kindMask,
             ctx->dIncrementalFlowControlControlledFlow.as<int>(), ctx->dIncrementalFlowControlControlledSide.as<int>(), ctx->dIncrementalFlowControlTargetValue.as<double>(), ctx->dIncrementalFlowControlHalfTargetDeadband.as<double>(),
             ctx->dIncrementalFlowControlElement.as<int>(), ctx->dIncrementalFlowControlControlledClosedBranch.as<int>(),
-            ctx->structure->closedBranch.parameters.as<double>(), ctx->structure->closedBranch.indices.as<int>(), ctx->nClosedBranchParameterOverrides, ctx->dClosedBranchParameterOverrideScenarioElement.as<int>(), ctx->dClosedBranchParameterOverrideValues.as<double>(),
+            ctx->structure->closedBranch.parameters.as<double>(), ctx->structure->closedBranch.indices.as<int>(), closedBranchParameterOverrides(ctx),
             ctx->dDisabled.as<char>(), ctx->dX.as<double>(), ctx->dOuterLoopCheckActive.as<char>(),
             ctx->dIncrementalFlowControlOutOfDeadband.as<char>(), ctx->dIncrementalFlowControlDiff.as<double>());
     std::vector<char> outOfDeadband(nst);
@@ -210,7 +211,7 @@ void incrementalFlowControlStep(BatchSolverContext* ctx, DriverPass& drv, int ki
         sensitivitySolve(ctx, drv, first);
         incrementalFlowControlGatherSensitivityBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(nS, n, c, nF, ctx->closedBranchOffset,
                 ctx->dIncrementalFlowControlControlledFlow.as<int>(), ctx->dIncrementalFlowControlControlledSide.as<int>(), ctx->dIncrementalFlowControlControlledClosedBranch.as<int>(),
-                ctx->structure->closedBranch.parameters.as<double>(), ctx->structure->closedBranch.indices.as<int>(), ctx->nClosedBranchParameterOverrides, ctx->dClosedBranchParameterOverrideScenarioElement.as<int>(), ctx->dClosedBranchParameterOverrideValues.as<double>(),
+                ctx->structure->closedBranch.parameters.as<double>(), ctx->structure->closedBranch.indices.as<int>(), closedBranchParameterOverrides(ctx),
                 ctx->dX.as<double>(), ctx->dDx.as<double>(), ctx->dIncrementalFlowControlSensitivity.as<double>());
     }
     CUDA_CHECK(cudaMemcpy(ctx->dActive.p, active.data(), nS, cudaMemcpyHostToDevice));
@@ -221,15 +222,14 @@ void incrementalFlowControlStep(BatchSolverContext* ctx, DriverPass& drv, int ki
     incrementalFlowControlApplyBatch<<<grid(static_cast<int>(nst)), BLOCK, 0, ctx->stream>>>(nF, nS, n, ctx->dIncrementalFlowControlTargetRow.as<int>(), ctx->dIncrementalFlowControlTapColumn.as<int>(),
             ctx->dIncrementalFlowControlTapStart.as<int>(), ctx->dIncrementalFlowControlTapRows.as<double>(), ctx->dIncrementalFlowControlCurrentTap.as<int>(), ctx->dIncrementalFlowControlAppliedTap.as<int>(),
             ctx->dTarget.as<double>(), ctx->dX.as<double>());
-    CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
-    rebuildTapOverrides(ctx);
+    publishClosedBranchParameterOverrides(ctx);
     if (traceOn(Trace::BATCH_TRACE)) {
         std::vector<int> cur(nst);
         CUDA_CHECK(cudaMemcpy(cur.data(), ctx->dIncrementalFlowControlCurrentTap.p, nst * sizeof(int), cudaMemcpyDeviceToHost));
         int nOut = 0, nMoved = 0;
         for (char c : outOfDeadband) nOut += c ? 1 : 0;
         for (int s2 = 0; s2 < nS; s2++) for (int c = 0; c < nF; c++) if (cur[static_cast<size_t>(s2) * nF + c] != ctx->hIncrementalFlowControlBaseTap[c]) nMoved++;
-        std::fprintf(stderr, "FLOW_KERNEL kindMask=%d nS=%d nControllers=%d outOfDeadband=%d pairsOffBaseTap=%d nClosedBranchParameterOverrides=%d\n", kindMask, nS, nF, nOut, nMoved, ctx->nClosedBranchParameterOverrides);
+        std::fprintf(stderr, "FLOW_KERNEL kindMask=%d nS=%d nControllers=%d outOfDeadband=%d pairsOffBaseTap=%d\n", kindMask, nS, nF, nOut, nMoved);
     }
 }
 

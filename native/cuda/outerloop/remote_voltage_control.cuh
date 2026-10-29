@@ -7,6 +7,7 @@
 #define OLF_GPU_OUTERLOOP_REMOTE_VOLTAGE_CONTROL_CUH
 
 #include "../solver/driver_pass.cuh"
+#include "../equations/scenario_overrides.cuh"
 
 namespace olfgpu {
 
@@ -26,8 +27,8 @@ __global__ void fillRemoteMemberQBatch(int nRemoteMemberReactiveTerms, int nScen
                                        const double* openBranchParameters, const int* openBranchIndices,
                                        const double* x, double* qBuf,
                                        const char* disabled, const char* outerLoopCheckActive,
-                                       int nClosedBranchParameterOverrides, const int* closedBranchParameterOverrideScenarioElement, const double* closedBranchParameterOverrideValues,
-                                       int nShuntAdmittanceOverrides, const int* shuntAdmittanceOverrideScenarioElement, const double* shuntAdmittanceOverrideDelta);
+                                       ClosedBranchParameterOverrides closedBranchParameterOverrides,
+                                       ShuntAdmittanceOverrides shuntAdmittanceOverrides);
 
 }  // namespace olfgpu
 

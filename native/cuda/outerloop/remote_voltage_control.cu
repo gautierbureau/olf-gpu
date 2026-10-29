@@ -312,8 +312,8 @@ __global__ void fillRemoteMemberQBatch(int nRemoteMemberReactiveTerms, int nScen
                                        const double* openBranchParameters, const int* openBranchIndices,
                                        const double* x, double* qBuf,
                                        const char* disabled, const char* outerLoopCheckActive,
-                                       int nClosedBranchParameterOverrides, const int* closedBranchParameterOverrideScenarioElement, const double* closedBranchParameterOverrideValues,
-                                       int nShuntAdmittanceOverrides, const int* shuntAdmittanceOverrideScenarioElement, const double* shuntAdmittanceOverrideDelta) {
+                                       ClosedBranchParameterOverrides closedBranchParameterOverrides,
+                                       ShuntAdmittanceOverrides shuntAdmittanceOverrides) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nRemoteMemberReactiveTerms * nScenarios) return;
     int c = tid % nRemoteMemberReactiveTerms;
@@ -334,7 +334,7 @@ __global__ void fillRemoteMemberQBatch(int nRemoteMemberReactiveTerms, int nScen
         const double* sp = shuntParameters + e * 2;
         double g = sp[0];
         double b = sp[1];
-        applyShuntOverride(nShuntAdmittanceOverrides, shuntAdmittanceOverrideScenarioElement, shuntAdmittanceOverrideDelta, s, e, g, b);
+        applyShuntOverride(shuntAdmittanceOverrides, s, e, g, b);
         int vcol = shuntIndices[e * 5 + 2];
         double so[SHUNT_OUTPUT_COUNT];
         updateShunt(xs[vcol], g, b, 0, so + 0, so + 1, so + 2, so + 3, so + 4);
@@ -364,7 +364,7 @@ __global__ void fillRemoteMemberQBatch(int nRemoteMemberReactiveTerms, int nScen
         p[i] = p0[i];
     }
     double pOv[8];
-    if (findTapOverride(nClosedBranchParameterOverrides, closedBranchParameterOverrideScenarioElement, closedBranchParameterOverrideValues, s, e, pOv)) {
+    if (findTapOverride(closedBranchParameterOverrides, s, e, pOv)) {
         for (int i = 0; i < 8; i++) {
             p[i] = pOv[i];
         }

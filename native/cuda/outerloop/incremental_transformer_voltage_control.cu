@@ -16,6 +16,7 @@
 #include "../common/codes/gpu_linear_solve_mode.cuh"
 #include "../common/codes/gpu_pi_model_column.cuh"
 #include "../solver/driver_steps.cuh"
+#include "../solver/scenario_override_tables.cuh"
 #include "sensitivity.cuh"
 #include "incremental_transformer_voltage_control.cuh"
 #include "../common/trace.cuh"
@@ -183,85 +184,6 @@ __global__ void incrementalTransformerVoltageControlApplyRhoBatch(int nIncrement
     appliedTap[tid] = t;
 }
 
-/** Rebuild the device tap-override list = [every (scenario, controller) whose current tap differs
- *  from its base tap, as the tap's full 8-double pi row] ++ [the caller's own overrides]. The TVC
- *  entries go FIRST because findTapOverride returns the first (slot, elem) match, so a contingency
- *  tap action on the same transformer must not shadow the loop's move. Runs after every pass that
- *  moved a tap. */
-void rebuildTapOverrides(BatchSolverContext* ctx) {
-    int nS = ctx->nScenarios;
-    int nIncrementalTransformerVoltageControlControllerBranches = ctx->nIncrementalTransformerVoltageControlControllerBranches;
-    std::vector<int> scenarioElement;
-    std::vector<double> piModelRows;
-    if (nIncrementalTransformerVoltageControlControllerBranches > 0) {
-        std::vector<int> currentTap(static_cast<size_t>(nS) * nIncrementalTransformerVoltageControlControllerBranches);
-        CUDA_CHECK(cudaMemcpy(currentTap.data(), ctx->dIncrementalTransformerVoltageControlCurrentTap.p, currentTap.size() * sizeof(int), cudaMemcpyDeviceToHost));
-        for (int s = 0; s < nS; s++) {
-            for (int c = 0; c < nIncrementalTransformerVoltageControlControllerBranches; c++) {
-                int tap = currentTap[static_cast<size_t>(s) * nIncrementalTransformerVoltageControlControllerBranches + c];
-                if (tap == ctx->hIncrementalTransformerVoltageControlBaseTap[c]) continue;
-                scenarioElement.push_back(s);
-                scenarioElement.push_back(ctx->hIncrementalTransformerVoltageControlElement[c]);
-                const double* row = &ctx->hIncrementalTransformerVoltageControlTapRows[static_cast<size_t>(ctx->hIncrementalTransformerVoltageControlTapStart[c] + tap) * GpuPiModelColumn::COUNT];
-                piModelRows.insert(piModelRows.end(), row, row + GpuPiModelColumn::COUNT);
-            }
-        }
-    }
-    if (ctx->nPhaseControlControllerBranches > 0) {                                     // the continuous phase loop's rounded/shifted taps
-        std::vector<int> currentTap(static_cast<size_t>(nS) * ctx->nPhaseControlControllerBranches);
-        CUDA_CHECK(cudaMemcpy(currentTap.data(), ctx->dPhaseControlTap.p, currentTap.size() * sizeof(int), cudaMemcpyDeviceToHost));
-        for (int s = 0; s < nS; s++) {
-            for (int c = 0; c < ctx->nPhaseControlControllerBranches; c++) {
-                int tap = currentTap[static_cast<size_t>(s) * ctx->nPhaseControlControllerBranches + c];
-                if (tap == ctx->hPhaseControlBaseTap[c]) continue;
-                scenarioElement.push_back(s);
-                scenarioElement.push_back(ctx->hPhaseControlElement[c]);
-                const double* row = &ctx->hPhaseControlTapRows[static_cast<size_t>(ctx->hPhaseControlTapStart[c] + tap) * GpuPiModelColumn::COUNT];
-                piModelRows.insert(piModelRows.end(), row, row + GpuPiModelColumn::COUNT);
-            }
-        }
-    }
-    if (ctx->nIncrementalFlowControlControllerBranches > 0) {                                     // the flow-observed loops' moved taps too
-        std::vector<int> currentTap(static_cast<size_t>(nS) * ctx->nIncrementalFlowControlControllerBranches);
-        CUDA_CHECK(cudaMemcpy(currentTap.data(), ctx->dIncrementalFlowControlCurrentTap.p, currentTap.size() * sizeof(int), cudaMemcpyDeviceToHost));
-        for (int s = 0; s < nS; s++) {
-            for (int c = 0; c < ctx->nIncrementalFlowControlControllerBranches; c++) {
-                int tap = currentTap[static_cast<size_t>(s) * ctx->nIncrementalFlowControlControllerBranches + c];
-                if (tap == ctx->hIncrementalFlowControlBaseTap[c]) continue;
-                scenarioElement.push_back(s);
-                scenarioElement.push_back(ctx->hIncrementalFlowControlElement[c]);
-                const double* row = &ctx->hIncrementalFlowControlTapRows[static_cast<size_t>(ctx->hIncrementalFlowControlTapStart[c] + tap) * GpuPiModelColumn::COUNT];
-                piModelRows.insert(piModelRows.end(), row, row + GpuPiModelColumn::COUNT);
-            }
-        }
-    }
-    if (ctx->nTransformerVoltageControlMembers > 0) {                                     // the discrete TVC loop's fixed (rounded/clamped) taps
-        std::vector<int> memberState(static_cast<size_t>(nS) * ctx->nTransformerVoltageControlMembers), currentTap(static_cast<size_t>(nS) * ctx->nTransformerVoltageControlMembers);
-        CUDA_CHECK(cudaMemcpy(memberState.data(), ctx->dTransformerVoltageControlMemberState.p, memberState.size() * sizeof(int), cudaMemcpyDeviceToHost));
-        CUDA_CHECK(cudaMemcpy(currentTap.data(), ctx->dTransformerVoltageControlMemberTap.p, currentTap.size() * sizeof(int), cudaMemcpyDeviceToHost));
-        for (int s = 0; s < nS; s++) {
-            for (int m = 0; m < ctx->nTransformerVoltageControlMembers; m++) {
-                size_t sm = static_cast<size_t>(s) * ctx->nTransformerVoltageControlMembers + m;
-                if (memberState[sm] != 2 || currentTap[sm] == ctx->hTransformerVoltageControlMemberBaseTap[m]) continue;
-                scenarioElement.push_back(s);
-                scenarioElement.push_back(ctx->hTransformerVoltageControlMemberElement[m]);
-                const double* row = &ctx->hTransformerVoltageControlTapRows[static_cast<size_t>(ctx->hTransformerVoltageControlMemberTapStart[m] + currentTap[sm]) * GpuPiModelColumn::COUNT];
-                piModelRows.insert(piModelRows.end(), row, row + GpuPiModelColumn::COUNT);
-            }
-        }
-    }
-    scenarioElement.insert(scenarioElement.end(), ctx->hClosedBranchParameterOverrideBaseScenarioElement.begin(), ctx->hClosedBranchParameterOverrideBaseScenarioElement.end());
-    piModelRows.insert(piModelRows.end(), ctx->hClosedBranchParameterOverrideBaseValues.begin(), ctx->hClosedBranchParameterOverrideBaseValues.end());
-    int nOverrides = static_cast<int>(scenarioElement.size() / 2);
-    if (nOverrides > 0) {
-        ctx->dClosedBranchParameterOverrideScenarioElement.ensure(scenarioElement.size() * sizeof(int));
-        ctx->dClosedBranchParameterOverrideValues.ensure(piModelRows.size() * sizeof(double));
-        CUDA_CHECK(cudaMemcpy(ctx->dClosedBranchParameterOverrideScenarioElement.p, scenarioElement.data(), scenarioElement.size() * sizeof(int), cudaMemcpyHostToDevice));
-        CUDA_CHECK(cudaMemcpy(ctx->dClosedBranchParameterOverrideValues.p, piModelRows.data(), piModelRows.size() * sizeof(double), cudaMemcpyHostToDevice));
-    }
-    ctx->nClosedBranchParameterOverrides = nOverrides;
-}
-
 // Per-solve reset. Incremental TVC: every scenario starts at the base tap with a fresh ratchet.
 void incrementalTransformerVoltageControlResetSolve(BatchSolverContext* ctx, DriverPass& drv) {
     const int& nS = drv.nS;
@@ -336,12 +258,11 @@ void incrementalTransformerVoltageControlStep(BatchSolverContext* ctx, DriverPas
             ctx->dIncrementalTransformerVoltageControlTapStart.as<int>(), ctx->dIncrementalTransformerVoltageControlTapRows.as<double>(),
             ctx->dIncrementalTransformerVoltageControlCurrentTap.as<int>(), ctx->dIncrementalTransformerVoltageControlCurrentDirection.as<int>(), ctx->dIncrementalTransformerVoltageControlDirectionChangeCount.as<int>(),
             ctx->dIncrementalTransformerVoltageControlAllowedDirection.as<int>(), ctx->incrementalTransformerVoltageControlMaxTapShift, 0.05, ctx->dOuterLoopUnstable.as<char>());
-    // Apply: rho target + state seed on the moved pairs, then the pi rows through the tap-override list.
+    // Apply: rho target + state seed on the moved pairs, then the pi rows through the tap-override tables.
     incrementalTransformerVoltageControlApplyRhoBatch<<<grid(static_cast<int>(nst)), BLOCK, 0, ctx->stream>>>(nIncrementalTransformerVoltageControlControllerBranches, nS, n,
             ctx->dIncrementalTransformerVoltageControlRhoRow.as<int>(), ctx->dIncrementalTransformerVoltageControlTapStart.as<int>(), ctx->dIncrementalTransformerVoltageControlTapRows.as<double>(),
             ctx->dIncrementalTransformerVoltageControlCurrentTap.as<int>(), ctx->dIncrementalTransformerVoltageControlAppliedTap.as<int>(), ctx->dTarget.as<double>(), ctx->dX.as<double>());
-    CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
-    rebuildTapOverrides(ctx);
+    publishClosedBranchParameterOverrides(ctx);
     if (traceOn(Trace::BATCH_TRACE)) {
         std::vector<int> cur(nst), base(ctx->hIncrementalTransformerVoltageControlBaseTap);
         CUDA_CHECK(cudaMemcpy(cur.data(), ctx->dIncrementalTransformerVoltageControlCurrentTap.p, nst * sizeof(int), cudaMemcpyDeviceToHost));
@@ -354,8 +275,8 @@ void incrementalTransformerVoltageControlStep(BatchSolverContext* ctx, DriverPas
                 if (cur[static_cast<size_t>(s2) * nIncrementalTransformerVoltageControlControllerBranches + c] != base[c]) nMoved++;
             }
         }
-        std::fprintf(stderr, "TVC_KERNEL nS=%d nControllers=%d outOfDeadband=%d pairsOffBaseTap=%d nClosedBranchParameterOverrides=%d\n",
-                     nS, nIncrementalTransformerVoltageControlControllerBranches, nOut, nMoved, ctx->nClosedBranchParameterOverrides);
+        std::fprintf(stderr, "TVC_KERNEL nS=%d nControllers=%d outOfDeadband=%d pairsOffBaseTap=%d\n",
+                     nS, nIncrementalTransformerVoltageControlControllerBranches, nOut, nMoved);
         std::vector<double> dv(nst), se(nst);
         CUDA_CHECK(cudaMemcpy(dv.data(), ctx->dIncrementalTransformerVoltageControlDiffV.p, nst * sizeof(double), cudaMemcpyDeviceToHost));
         CUDA_CHECK(cudaMemcpy(se.data(), ctx->dIncrementalTransformerVoltageControlSensitivity.p, nst * sizeof(double), cudaMemcpyDeviceToHost));

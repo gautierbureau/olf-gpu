@@ -16,23 +16,28 @@
 
 namespace olfgpu {
 
+// Each scenario's place in it is the context's SlotSolveState, which a solve call starts for the slots it installs.
 struct OuterLoopSequence {
+    explicit OuterLoopSequence(SlotSolveState& slots)
+        : scenarioLoopIdx(slots.loopIdx), lastUnstableLoopIdx(slots.lastUnstableLoopIdx), sweepResolved(slots.sweepResolved),
+          checkPending(slots.checkPending), productiveIterations(slots.productiveIterations), solveTrigger(slots.solveTrigger) {}
+
     bool checksOn = true;                                    // false: the run has no outer loop, every solve ends it
     int realisticFixingIdx = -1;                             // the last loop that can fix an unrealistic state, -1: none
     int maxOuterLoopIterations = 20;                         // OLF maxOuterLoopIterations, per scenario
     int loopTraceSlot = -1;                                  // OLF_GPU_LOOP_TRACE
-    std::vector<int> scenarioLoopIdx;                        // the loop each scenario stands at
-    std::vector<int> lastUnstableLoopIdx;                    // the loop each scenario was last UNSTABLE at, -1: none yet
-    std::vector<char> sweepResolved;                         // the scenario re-solved during its current sweep
-    std::vector<char> checkPending;                          // a check is due on the scenario's current state
+    std::vector<int>& scenarioLoopIdx;                       // the loop each scenario stands at
+    std::vector<int>& lastUnstableLoopIdx;                   // the loop each scenario was last UNSTABLE at, -1: none yet
+    std::vector<char>& sweepResolved;                        // the scenario re-solved during its current sweep
+    std::vector<char>& checkPending;                         // a check is due on the scenario's current state
     // PER-SCENARIO productive outer iterations: OLF's maxOuterLoopIterations is a per-RUN budget — a global counter
     // capped busy chunks collectively (violation-diff root cause: a scenario solved solo matched the CPU exactly but
     // diverged inside a full 500-chunk)
-    std::vector<int> productiveIterations;
-    std::vector<int> solveTrigger;                           // the loop kind whose check started the current solve, -1: the first
+    std::vector<int>& productiveIterations;
+    std::vector<int>& solveTrigger;                          // the loop kind whose check started the current solve, -1: the first
 };
 
-// The sequence of drv.loopOrder for every scenario, each at its first loop; checksOn false for a run with no outer loop.
+// The run's settings of the sequence of drv.loopOrder; checksOn false for a run with no outer loop.
 void initOuterLoopSequence(OuterLoopSequence& seq, BatchSolverContext* ctx, const DriverPass& drv, bool checksOn,
                            int maxOuterLoopIterations);
 

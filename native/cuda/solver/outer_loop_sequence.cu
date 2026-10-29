@@ -24,7 +24,6 @@ namespace olfgpu {
 
 void initOuterLoopSequence(OuterLoopSequence& seq, BatchSolverContext* ctx, const DriverPass& drv, bool checksOn,
                            int maxOuterLoopIterations) {
-    const int nS = drv.nS;
     seq.checksOn = checksOn;
     // Where the realistic-voltage check STARTS applying in this sweep. AcloadFlowEngine keeps
     // checkUnrealisticStates false up to and including the last loop that can fix an unrealistic state
@@ -54,12 +53,6 @@ void initOuterLoopSequence(OuterLoopSequence& seq, BatchSolverContext* ctx, cons
     // scenario from one run to the next (IZUZ: slot 170, then 18)
     static const char* loopTraceEnv = traceValue(Trace::LOOP_TRACE);
     seq.loopTraceSlot = ctx->loopTraceSlot >= 0 ? ctx->loopTraceSlot : (loopTraceEnv != nullptr ? std::atoi(loopTraceEnv) : -1);
-    seq.scenarioLoopIdx.assign(nS, 0);
-    seq.lastUnstableLoopIdx.assign(nS, -1);
-    seq.sweepResolved.assign(nS, 0);
-    seq.checkPending.assign(nS, 0);
-    seq.productiveIterations.assign(nS, 0);
-    seq.solveTrigger.assign(nS, -1);
 }
 
 void checkSolvedScenarios(BatchSolverContext* ctx, DriverPass& drv, OuterLoopSequence& seq, const std::vector<char>& solved,

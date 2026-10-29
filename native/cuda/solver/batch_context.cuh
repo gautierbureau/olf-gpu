@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MPL-2.0
 //
 // BatchSolverContext: one batched consumer of a shared structure (its per-scenario value and state
-// arrays, outer-loop tables and cuDSS objects), and BatchResult, what a batched solve hands back.
+// arrays, outer-loop tables and cuDSS objects).
 #ifndef OLF_GPU_SOLVER_BATCH_CONTEXT_CUH
 #define OLF_GPU_SOLVER_BATCH_CONTEXT_CUH
 
@@ -26,6 +26,7 @@
 #include "../lu/batched_lu.cuh"
 #include "../structure/shared_structure.cuh"
 #include "slot_rows.cuh"
+#include "slot_solve_state.cuh"
 #include "slot_table.cuh"
 
 namespace olfgpu {
@@ -46,6 +47,7 @@ struct BatchSolverContext {
     std::vector<int> installSlots;
     DeviceBuf dInstallSlots;                                 // the install slots on the device (every slot of an install of the bank)
     DeviceBuf dInstallMask;                                  // per slot, 1: installed by the current install
+    SlotSolveState slotState;                                // per slot: its scenario's solve so far (solveBatchContext)
     DeviceBuf dXBase, dBaseMode;                             // the base state and row modes an installed slot starts from
     // Per slot, a generator loss at a DS participant bus: the bus (-1: none) and its factor, base target P, headroom and
     // footroom deltas.
@@ -593,14 +595,6 @@ inline int installedSlot(const BatchSolverContext* ctx, int j) {
 inline double* distributedSlackBusesSlackShift(const BatchSolverContext* ctx) {
     return ctx->nDistributedSlackBuses > 0 ? ctx->slackBusAnchorShift.deviceOrNull() : nullptr;
 }
-
-struct BatchResult {
-    std::vector<double> x;                                   // nScenarios * n
-    std::vector<int> iters;                                  // nScenarios
-    std::vector<double> norm;                                // nScenarios
-    std::vector<int> status;                                 // nScenarios: a GpuAcSolverStatus
-};
-
 
 // Build a batched context of nScenarios on a shared structure (the createBatchContext JNI entry).
 BatchSolverContext* createBatchContext(const SharedStructurePtr& structure, int nScenarios, int mode,

@@ -106,17 +106,19 @@ void newtonSolve(BatchSolverContext* ctx, DriverPass& drv, OuterLoopSequence& se
     std::vector<double>& hF = drv.hF;
     BatchResult& res = drv.res;
 
-    // Per scenario: the Newton iteration of its current solve, the solves it has ended, and the linear-solve residual
-    // ratio of its LAST solve — scored only when a solve runs its Newton budget out (see the it == maxIter branch), so
-    // a healthy run never pays for it.
-    std::vector<int> it(nS, 0);
-    std::vector<int> solves(nS, 0);
-    std::vector<double> lastSolveRatio(nS, 0.0);
+    // Per scenario (the context's SlotSolveState, which the call started for the scenarios it installed): the Newton
+    // iteration of its current solve, the solves it has ended, the batched iterations since it was installed, and the
+    // linear-solve residual ratio of its LAST solve — scored only when a solve runs its Newton budget out (see the
+    // it == maxIter branch), so a healthy run never pays for it.
+    std::vector<int>& it = ctx->slotState.iteration;
+    std::vector<int>& solves = ctx->slotState.solves;
+    std::vector<int>& batchedIterations = ctx->slotState.batchedIterations;
+    std::vector<double>& lastSolveRatio = ctx->slotState.lastSolveRatio;
     // LINE_SEARCH per-scenario backtracking state (lastNorm2 / haveLast, per solve — a restart retargets the system,
     // voiding the step relation)
     const bool lineSearch = stateVectorScalingMode == GpuStateVectorScalingMode::LINE_SEARCH;
-    std::vector<double> lineSearchLastSumOfSquares(lineSearch ? nS : 0, 0.0);
-    std::vector<char> lineSearchHasLastTestResult(lineSearch ? nS : 0, 0);
+    std::vector<double>& lineSearchLastSumOfSquares = ctx->slotState.lineSearchLastSumOfSquares;
+    std::vector<char>& lineSearchHasLastTestResult = ctx->slotState.lineSearchHasLastTestResult;
     std::vector<double> hMu(lineSearch ? nS : 0, -1.0);
     std::vector<char> solveConverged(nS, 0), restarted(nS, 0);
     std::vector<double> hNorms;
@@ -286,19 +288,29 @@ void newtonSolve(BatchSolverContext* ctx, DriverPass& drv, OuterLoopSequence& se
     };
 
     for (int k = 0; nActive > 0; k++) {
-        if (k > drv.maxBatchedIterations) {
-            // Every scenario's work is bounded (its outer-loop budget of solves, each within maxIter): a loop still
-            // running here would never end. Its scenarios go to the CPU.
-            for (int s = 0; s < nS; s++) {
-                if (!active[s]) continue;
-                traceReject(s, "batched-iteration-cap", k, it[s]);
-                res.status[s] = GpuAcSolverStatus::REJECTED;
-                active[s] = 0;
-                live[s] = 0;
-                endSolve(s);
+        // Every scenario's work is bounded (its outer-loop budget of solves, each within maxIter): one still solving after
+        // that many batched iterations since it was installed would never end. It goes to the CPU.
+        bool capped = false;
+        for (int s = 0; s < nS; s++) {
+            if (!active[s] || batchedIterations[s] <= drv.maxBatchedIterations) continue;
+            traceReject(s, "batched-iteration-cap", k, it[s]);
+            res.status[s] = GpuAcSolverStatus::REJECTED;
+            active[s] = 0;
+            live[s] = 0;
+            nActive--;
+            endSolve(s);
+            capped = true;
+        }
+        if (capped) {
+            if (nActive == 0) {
+                break;
             }
-            nActive = 0;
-            break;
+            CUDA_CHECK(cudaMemcpy(ctx->dActive.p, active.data(), nS * sizeof(char), cudaMemcpyHostToDevice));
+        }
+        for (int s = 0; s < nS; s++) {
+            if (active[s]) {
+                batchedIterations[s]++;
+            }
         }
         drv.outer = k;
         gNewtonLoopIteration = k;

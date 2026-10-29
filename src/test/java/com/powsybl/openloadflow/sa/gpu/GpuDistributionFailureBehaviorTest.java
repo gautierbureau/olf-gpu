@@ -166,6 +166,36 @@ class GpuDistributionFailureBehaviorTest extends AbstractOpenSecurityAnalysisTes
         assertBaseFailureBehaviorFollowsOlf(network, PROPORTIONAL_TO_GENERATION_P_MAX);
     }
 
+    /** Participants with some headroom that the mismatch exhausts: the water-fill saturates both generators, and under
+     *  LEAVE_ON_SLACK_BUS the rest stays at the slack. OLF calls a check UNSTABLE only when the targets MOVED from where
+     *  the last distribution left them (ActivePowerDistribution.PreviousStateInfo.moved), so the check after the
+     *  saturating one re-derives the same targets and is STABLE. The device called it UNSTABLE whenever the water-fill
+     *  wrote something from the anchor, which a saturated distribution does at every check: the base load flow re-solved
+     *  an unchanged state until the outer-loop budget sent it to the CPU, and so did the contingency. */
+    @Test
+    void saturatingParticipantsConvergeOnTheDeviceLikeOlf() {
+        Network network = triangle(0, 120, 100, 100, 250);
+        List<Contingency> contingencies = List.of(new Contingency("lvl1vl2", new BranchContingency("lvl1vl2")));
+        SecurityAnalysisResult cpu = run(false, network, contingencies, params(PROPORTIONAL_TO_GENERATION_P_MAX, LEAVE_ON_SLACK_BUS));
+        assertEquals(CONVERGED, cpu.getPreContingencyResult().getStatus(), "OLF leaves the rest at the slack");
+        assertEquals(PostContingencyComputationStatus.CONVERGED, cpu.getPostContingencyResults().get(0).getStatus());
+        long fallbacks = GpuNewtonRaphson.CPU_FALLBACK_COUNT.get();
+        GpuBatchScopeCensus.reset();
+        SecurityAnalysisResult gpu = run(true, network, contingencies, params(PROPORTIONAL_TO_GENERATION_P_MAX, LEAVE_ON_SLACK_BUS));
+        assertEquals(fallbacks, GpuNewtonRaphson.CPU_FALLBACK_COUNT.get(), "the base load flow must be the device driver's own answer");
+        assertEquals(1, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(),
+                "the contingency must be the device's answer; census=" + GpuBatchScopeCensus.snapshot());
+        assertEquals(PostContingencyComputationStatus.CONVERGED, gpu.getPostContingencyResults().get(0).getStatus());
+        assertEquals(cpu.getPostContingencyResults().get(0).getDistributedActivePower(),
+                gpu.getPostContingencyResults().get(0).getDistributedActivePower(), 1e-9);
+        var cpuBuses = cpu.getPostContingencyResults().get(0).getNetworkResult().getBusResults();
+        var gpuBuses = gpu.getPostContingencyResults().get(0).getNetworkResult().getBusResults();
+        assertEquals(cpuBuses.size(), gpuBuses.size());
+        for (int b = 0; b < cpuBuses.size(); b++) {
+            assertEquals(cpuBuses.get(b).getV(), gpuBuses.get(b).getV(), 1e-12, "bus voltage " + cpuBuses.get(b).getBusId());
+        }
+    }
+
     /** A POST-CONTINGENCY solve with nobody able to move: losing the whole load asks every generator to
      *  go down from its minimum. REMAINING_MARGIN: OLF's participating set is empty and the behaviour
      *  decides; the device's gate read a zero participant share as "already balanced" and converged with

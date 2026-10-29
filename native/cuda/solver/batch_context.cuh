@@ -429,6 +429,7 @@ struct BatchSolverContext {
     DeviceBuf dShuntVoltageControlGroupStep, dShuntVoltageControlMemberState, dShuntVoltageControlMemberContinuousB, dShuntVoltageControlShuntCompensatorPosition, dShuntVoltageControlSavedDeltaTarget;
 
     DeviceBuf dDistributedSlackGeneratorMove, dDistributedSlackGeneratorRemoved;
+    DeviceBuf dDistributedSlackPreviousGeneratorMove, dDistributedSlackPreviousBusTarget;   // nS x generators / buses: before a distribution
     DeviceBuf dFrozenRow;                                  // (scenario, row) pairs: rows an islanding
     int nFrozenRow = 0;                                    // outage froze to a flat identity state
     DeviceBuf dDistributedSlackLostGenerators;                                  // (scenario, DS generator slot) pairs: the

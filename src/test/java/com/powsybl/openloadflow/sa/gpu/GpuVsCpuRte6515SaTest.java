@@ -2005,6 +2005,12 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
         SecurityAnalysisResult gpuWarm;
         long gpuColdMs;
         long gpuWarmMs;
+        // OLF_GPU_SA_BANK=<slots>: cap the GPU arms' bank at that many slots instead of the device-memory sizing (the bank
+        // is balanced over the call's scenarios, then refilled from the queue), to measure what its width costs
+        String bank = System.getenv("OLF_GPU_SA_BANK");
+        if (bank != null && !bank.isEmpty()) {
+            com.powsybl.openloadflow.ac.solver.gpu.GpuBatchContextCache.forceChunkSizeForTests(Integer.parseInt(bank));
+        }
         try {
             SecurityAnalysisParameters sapGpu = new SecurityAnalysisParameters();
             sapGpu.setLoadFlowParameters(lfp);
@@ -2079,6 +2085,7 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
                 reportGpuSelfSpread(gpuCold, gpuWarm);
             }
         } finally {
+            com.powsybl.openloadflow.ac.solver.gpu.GpuBatchContextCache.forceChunkSizeForTests(null);
             securityAnalysisProvider = new OpenSecurityAnalysisProvider(new SparseMatrixFactory(),
                     new EvenShiloachGraphDecrementalConnectivityFactory<>());
         }

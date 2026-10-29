@@ -207,57 +207,6 @@ public final class GpuHvdcAcEmulationLimitsOuterLoop {
         return new double[] {pAbs, -c.pMax21()};
     }
 
-    /**
-     * Re-derive the converter-bus target overrides and the hv element bits from a set of statuses,
-     * onto {@code ovIdx}/{@code ovVal} seeded with the PRE-FREEZE list. This is the orchestrator's
-     * per-round rebuild, extracted so the in-kernel loops can leave the HOST's mirrors consistent
-     * with what they did on the device — otherwise the orchestrators that run next re-upload a
-     * pre-freeze override list and re-apply a freeze the kernel already lifted.
-     */
-    public static void applyStatusOverrides(int chunkSize, int realCount, int n, List<Controller> controllers,
-                                     int[][] status, byte[] ctgOut, boolean[][] disabledMask,
-                                     double[] baseTargets, ScenarioTargetOverrides overrides,
-                                     double[] appliedDelta1, double[] appliedDelta2, int[][] rowModePerScenario) {
-        int nControllers = controllers.size();
-        for (int s = 0; s < realCount; s++) {
-            int[] rm = rowModePerScenario == null ? null : rowModePerScenario[s];
-            for (int h = 0; h < nControllers; h++) {
-                Controller c = controllers.get(h);
-                if (ctgOut[s * nControllers + h] != 0) {
-                    continue;                                // the contingency owns that bit
-                }
-                if (status[s][h] == GpuAcEmulationStatus.LINEAR_MODE) {
-                    disabledMask[s][c.hvdcElementIndex()] = false;
-                    if (c.baseStatus() != GpuAcEmulationStatus.LINEAR_MODE) {  // strip the base injections from the targets
-                        if (c.bus1PActive()) {
-                            overrides.merge(s * n + c.bus1WriteRow(rm), baseTargets[c.bus1WriteRow(rm)], c.baseD1(), 0);
-                        }
-                        if (c.bus2PActive()) {
-                            overrides.merge(s * n + c.bus2WriteRow(rm), baseTargets[c.bus2WriteRow(rm)], c.baseD2(), 0);
-                        }
-                    }
-                } else {
-                    disabledMask[s][c.hvdcElementIndex()] = true;
-                    // A STILL-FROZEN entry (its scenario retired before the unfreeze phase reached
-                    // it) must keep the delta the pre-solve freeze applied — recomputing it here is
-                    // impossible (it was taken at the warm-start flows), but it is exactly what the
-                    // applied-delta arrays hold. Seeding the list PRE-freeze and skipping this entry
-                    // silently dropped its override.
-                    double[] d = status[s][h] == GpuAcEmulationStatus.SATURATION_MODE_FROM_CS1_TO_CS2 ? saturationDeltas(c, true)
-                            : status[s][h] == GpuAcEmulationStatus.SATURATION_MODE_FROM_CS2_TO_CS1 ? saturationDeltas(c, false)
-                            : new double[] {appliedDelta1[s * nControllers + h] + c.baseD1(),
-                                            appliedDelta2[s * nControllers + h] + c.baseD2()};
-                    if (c.bus1PActive()) {
-                        overrides.merge(s * n + c.bus1WriteRow(rm), baseTargets[c.bus1WriteRow(rm)], c.baseD1(), d[0]);
-                    }
-                    if (c.bus2PActive()) {
-                        overrides.merge(s * n + c.bus2WriteRow(rm), baseTargets[c.bus2WriteRow(rm)], c.baseD2(), d[1]);
-                    }
-                }
-            }
-        }
-    }
-
     /** Seed the NON-LINEAR-at-base statuses (a saturated/frozen base — the extraction gate used to
      *  route such runs whole-run CPU): entries the freeze did not claim keep the BASE status with
      *  the hv bit set and NO target override (baseTargets already carry the base injections), and
@@ -284,14 +233,13 @@ public final class GpuHvdcAcEmulationLimitsOuterLoop {
     /** Install the two AC-emulation driver phases (freeze, limits) on a batch context: the controller
      *  tables, each scenario's starting status, the "outaged by the contingency" bits and the deltas the
      *  host-side freeze already applied. Shared by the batched SA's chunk contexts and the base load
-     *  flow's batch-of-one. Returns the flat ctgOut bits (null when there is nothing to install — the
-     *  context's HVDC loops are then cleared). */
-    public static byte[] installDriverLoops(long handle, List<Controller> controllers, int chunkSize, int[][] hvdcStatus,
+     *  flow's batch-of-one. Without controllers the context's HVDC loops are cleared. */
+    public static void installDriverLoops(long handle, List<Controller> controllers, int chunkSize, int[][] hvdcStatus,
                                             boolean[][] disabledMask, double[] appliedDelta1, double[] appliedDelta2,
                                             boolean limits) {
         if (controllers == null || controllers.isEmpty()) {
             HvdcNative.setBatchHvdcLoops(handle, null, null, null, null, null, null, null, null, null, null, 0);
-            return null;
+            return;
         }
         int nControllers = controllers.size();
         int[] hvdcElement = new int[nControllers];
@@ -329,7 +277,6 @@ public final class GpuHvdcAcEmulationLimitsOuterLoop {
         }
         HvdcNative.setBatchHvdcLoops(handle, hvdcElement, hvdcBus1PRows, hvdcBus2PRows, hvdcBus1PhiColumns, hvdcBus2PhiColumns, hvdcAcEmulationParameters, ctgOut,
                 flatStatus, appliedDelta1, appliedDelta2, limits ? 1 : 0);
-        return ctgOut;
     }
 
     /** Give the driver's final AC-emulation statuses (scenario 0) back to the network the way OLF's own

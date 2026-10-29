@@ -13,7 +13,7 @@ namespace olfgpu {
 __global__ void initReactiveLimitQLimitTypeBatch(int nReactiveLimitEntries, int nScenarios, int n, const int* reactiveLimitVoltageRow, const int* reactiveLimitReactivePowerRow,
                                      const double* reactiveLimitTargetV, const char* reactiveLimitFlags,
                                      const int* baseMode, const double* x, char* limitType,
-                                     int nReactiveLimitTargetVOverrides, const int* reactiveLimitTargetVOverrideScenarioEntry, const double* reactiveLimitTargetVOverrideValue, const double* secondaryVoltageControlReactiveLimitTargetV,
+                                     SlotEntries reactiveLimitTargetVOverrides, const double* secondaryVoltageControlReactiveLimitTargetV,
                                      const char* reactiveLimitVoltageControlRole, const int* reactiveLimitComparedVoltageRow,
                                      const double* target, const double* reactiveLimitBaseMinQ, const double* reactiveLimitBaseMaxQ,
                                      const double* reactiveLimitBaseLoadQ, const char* reactiveLimitBaseQLimitType,
@@ -24,7 +24,7 @@ __global__ void seedReactiveLimitRowModeFromState(int nReactiveLimitEntries, int
                                     const char* limitType, int* mode, double* target, int perScenarioReactiveLimits,
                                     const char* reactiveLimitVoltageControlRole, double* savedTarget, char* savedMode,
                                     const char* reactiveLimitBaseQLimitType, const int* pilotSelfReactiveLimitEntry, int nReactiveRelocationGroups,
-                                    const double* reactiveLimitTargetV, int nReactiveLimitTargetVOverrides, const int* reactiveLimitTargetVOverrideScenarioEntry, const double* reactiveLimitTargetVOverrideValue,
+                                    const double* reactiveLimitTargetV, SlotEntries reactiveLimitTargetVOverrides,
                                     const double* secondaryVoltageControlReactiveLimitTargetV, const char* reactiveLimitLocalOverride, const double* reactiveLimitLocalTargetV,
                                     const double* reactiveLimitSeedTargetQ, const char* reactiveLimitIslanded);
 

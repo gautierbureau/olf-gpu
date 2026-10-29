@@ -3,6 +3,7 @@
 //
 // JNI entry points of GpuAcNewtonSolver: The Newton and linear-solver settings of a batched solve.
 #include "jni_common.cuh"
+#include "slot_table_install.cuh"
 
 // The linear-solver settings of the run (GpuLoadFlowParameters): read by every context built after this call and by
 // the adaptive refinement of every solve. -1 reorder / pivotType = AUTO; NaN threshold = the library's.
@@ -133,22 +134,14 @@ OLF_JNI(ac_solver_gpu, NewtonSettingsNative, setBatchActiveRowCounts)(
     }
 }
 
+// (slot, row) pairs: the rows an islanding outage froze to a flat identity state, per installed slot.
 extern "C" JNIEXPORT void JNICALL
 OLF_JNI(ac_solver_gpu, NewtonSettingsNative, setBatchFrozenRows)(
         JNIEnv* env, jclass, jlong handle, jintArray jSlotRow) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
-    if (ctx == nullptr) {
-        return;
+    if (ctx != nullptr) {
+        installSlotTable(env, ctx, ctx->frozenRows, jSlotRow, nullptr);
     }
-    if (jSlotRow == nullptr || env->GetArrayLength(jSlotRow) == 0) {
-        ctx->nFrozenRow = 0;
-        return;
-    }
-    int n2 = env->GetArrayLength(jSlotRow);
-    jint* sr = env->GetIntArrayElements(jSlotRow, nullptr);
-    ctx->dFrozenRow.upload(sr, static_cast<size_t>(n2) * sizeof(int));
-    env->ReleaseIntArrayElements(jSlotRow, sr, JNI_ABORT);
-    ctx->nFrozenRow = n2 / 2;
 }
 
 extern "C" JNIEXPORT void JNICALL

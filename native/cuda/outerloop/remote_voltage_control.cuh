@@ -12,9 +12,8 @@
 namespace olfgpu {
 
 // Kernels the driver launches.
-__global__ void pilotRowWithoutEnabledControllerBatch(int nEntries, int nScenarios, int n, int nReactiveLimitEntries,
-                                       const int* entSlot, const int* entRow, const double* entQTarget,
-                                       const int* entOff, const int* entCount, const int* survivorReactiveLimitEntries,
+__global__ void pilotRowWithoutEnabledControllerBatch(int nScenarios, int n, int nReactiveLimitEntries,
+                                       SlotEntries flips, SlotEntries survivors,
                                        const char* limitType, int* mode, double* target,
                                        char* flipped, double* savedVTarget,
                                        const char* outerLoopCheckActive, char* switched);

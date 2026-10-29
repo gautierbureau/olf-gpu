@@ -64,10 +64,8 @@ struct Tables {
     const int* generatorBus, *generatorArea;
     const double* generatorFactor, *generatorMaxDelta, *generatorMinDelta, *generatorMarginUp, *generatorMarginDown;
     int factorMode;
-    int nLostGenerators;
-    const int* lostGenerators;
-    int nRemovedGenerators;
-    const int* removedGenerators;
+    SlotEntries lostGenerators;
+    SlotEntries removedGenerators;
     double slackBusPMaxMismatch, areaInterchangePMaxMismatch, residueEps;
     const double* x, *qBuf;
     const char* disabled, *outerLoopCheckActive;
@@ -395,12 +393,8 @@ __global__ void areaInterchangeControlBatch(Tables t) {
     for (int g = 0; g < t.nGenerators; g++) {
         int i = t.generatorBus[g];
         bool participates = !(i >= 0 && t.islanded != nullptr && t.islanded[(size_t) s * t.nBuses + i]);
-        for (int k = 0; k < t.nLostGenerators && participates; k++) {
-            participates = !(t.lostGenerators[2 * k] == s && t.lostGenerators[2 * k + 1] == g);
-        }
-        for (int k = 0; k < t.nRemovedGenerators && participates; k++) {
-            participates = !(t.removedGenerators[2 * k] == s && t.removedGenerators[2 * k + 1] == g);
-        }
+        participates = participates && slotFirstEntryOf(t.lostGenerators, s, g) < 0
+                && slotFirstEntryOf(t.removedGenerators, s, g) < 0;
         t.participant[gBase + g] = participates ? 1 : 0;
     }
     // the slack bus mismatch: its P balance against its target, which carries its own generators' moves
@@ -588,10 +582,8 @@ void areaInterchangeControlCheck(BatchSolverContext* ctx, DriverPass& drv) {
     t.generatorMarginUp = ctx->distributedSlackGeneratorMarginUp.as<double>();
     t.generatorMarginDown = ctx->distributedSlackGeneratorMarginDown.as<double>();
     t.factorMode = ctx->distributedSlackFactorMode;
-    t.nLostGenerators = ctx->nDistributedSlackLostGenerators;
-    t.lostGenerators = ctx->nDistributedSlackLostGenerators > 0 ? ctx->dDistributedSlackLostGenerators.as<int>() : nullptr;
-    t.nRemovedGenerators = ctx->nDistributedSlackRemovedGenerators;
-    t.removedGenerators = ctx->nDistributedSlackRemovedGenerators > 0 ? ctx->dDistributedSlackRemovedGenerators.as<int>() : nullptr;
+    t.lostGenerators = ctx->distributedSlackLostGenerators.view();
+    t.removedGenerators = ctx->distributedSlackRemovedGenerators.view();
     t.slackBusPMaxMismatch = drv.slackDistTol;
     t.areaInterchangePMaxMismatch = ctx->areaInterchangePMaxMismatch;
     t.residueEps = drv.pResidueEps;

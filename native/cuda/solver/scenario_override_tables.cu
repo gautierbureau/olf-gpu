@@ -16,30 +16,6 @@ namespace olfgpu {
 
 namespace {
 
-// (slot, element) pairs with `width` doubles each, as a CSR per slot that keeps the pairs' order within a slot: the
-// tap lookup takes a slot's first match and the shunt lookup adds every match in that order. A pair whose slot is
-// outside [0, nS) can never match.
-void slotCsr(int nS, int nEntries, const int* scenarioElement, const double* payload, int width,
-             std::vector<int>& start, std::vector<int>& element, std::vector<double>& values) {
-    start.assign(static_cast<size_t>(nS) + 1, 0);
-    for (int k = 0; k < nEntries; k++) {
-        int s = scenarioElement[2 * k];
-        if (s >= 0 && s < nS) start[s + 1]++;
-    }
-    for (int s = 0; s < nS; s++) start[s + 1] += start[s];
-    element.assign(std::max(start[nS], 1), -1);
-    values.assign(static_cast<size_t>(std::max(start[nS], 1)) * width, 0.0);
-    std::vector<int> next(start.begin(), start.end() - 1);
-    for (int k = 0; k < nEntries; k++) {
-        int s = scenarioElement[2 * k];
-        if (s < 0 || s >= nS) continue;
-        int i = next[s]++;
-        element[i] = scenarioElement[2 * k + 1];
-        std::copy(payload + static_cast<size_t>(k) * width, payload + static_cast<size_t>(k + 1) * width,
-                  values.begin() + static_cast<size_t>(i) * width);
-    }
-}
-
 // Per element of [0, nElements), the controllers acting on it, in the controllers' numbering order. A controller whose
 // element is outside the range acts on none.
 void elementControllers(int nElements, const std::vector<int>& controllerElement, std::vector<int>& start,
@@ -142,12 +118,7 @@ __global__ void publishSectionMovesBatch(int nScenarios, int nControllers, int n
 void installClosedBranchParameterOverrides(BatchSolverContext* ctx, int nOverrides, const int* scenarioElement,
                                            const double* values) {
     int nS = ctx->nScenarios;
-    std::vector<int> start, element;
-    std::vector<double> rows;
-    slotCsr(nS, nOverrides, scenarioElement, values, GpuPiModelColumn::COUNT, start, element, rows);
-    ctx->dClosedBranchParameterOverrideScenarioStart.upload(start.data(), start.size() * sizeof(int));
-    ctx->dClosedBranchParameterOverrideElement.upload(element.data(), element.size() * sizeof(int));
-    ctx->dClosedBranchParameterOverrideValues.upload(rows.data(), rows.size() * sizeof(double));
+    ctx->closedBranchParameterOverrides.install(nS, ctx->installSlots, nOverrides, scenarioElement, values);
     ensureTapControllers(ctx);
     size_t nsc = static_cast<size_t>(nS) * ctx->nClosedBranchParameterOverrideControllers;
     if (nsc > 0) {
@@ -160,12 +131,7 @@ void installClosedBranchParameterOverrides(BatchSolverContext* ctx, int nOverrid
 void installShuntAdmittanceOverrides(BatchSolverContext* ctx, int nOverrides, const int* scenarioElement,
                                      const double* delta) {
     int nS = ctx->nScenarios;
-    std::vector<int> start, element;
-    std::vector<double> deltas;
-    slotCsr(nS, nOverrides, scenarioElement, delta, 2, start, element, deltas);
-    ctx->dShuntAdmittanceOverrideScenarioStart.upload(start.data(), start.size() * sizeof(int));
-    ctx->dShuntAdmittanceOverrideElement.upload(element.data(), element.size() * sizeof(int));
-    ctx->dShuntAdmittanceOverrideDelta.upload(deltas.data(), deltas.size() * sizeof(double));
+    ctx->shuntAdmittanceOverrides.install(nS, ctx->installSlots, nOverrides, scenarioElement, delta);
     ensureShuntControllers(ctx);
     size_t nsc = static_cast<size_t>(nS) * ctx->nShuntAdmittanceOverrideControllers;
     if (nsc > 0) {
@@ -229,31 +195,24 @@ void publishShuntAdmittanceOverrides(BatchSolverContext* ctx) {
 }
 
 ClosedBranchParameterOverrides closedBranchParameterOverrides(BatchSolverContext* ctx) {
-    // a fresh allocation is zeroed: no override before the first install
-    ctx->dClosedBranchParameterOverrideScenarioStart.ensure((static_cast<size_t>(ctx->nScenarios) + 1) * sizeof(int));
     ClosedBranchParameterOverrides o;
     o.nControllers = ctx->nClosedBranchParameterOverrideControllers;
     o.elementControllerStart = ctx->dClosedBranchParameterOverrideElementControllerStart.as<int>();
     o.elementController = ctx->dClosedBranchParameterOverrideElementController.as<int>();
     o.tapMoved = ctx->dClosedBranchParameterOverrideTapMoved.as<char>();
     o.piModel = ctx->dClosedBranchParameterOverridePiModel.as<double>();
-    o.scenarioStart = ctx->dClosedBranchParameterOverrideScenarioStart.as<int>();
-    o.element = ctx->dClosedBranchParameterOverrideElement.as<int>();
-    o.values = ctx->dClosedBranchParameterOverrideValues.as<double>();
+    o.caller = ctx->closedBranchParameterOverrides.view();
     return o;
 }
 
 ShuntAdmittanceOverrides shuntAdmittanceOverrides(BatchSolverContext* ctx) {
-    ctx->dShuntAdmittanceOverrideScenarioStart.ensure((static_cast<size_t>(ctx->nScenarios) + 1) * sizeof(int));
     ShuntAdmittanceOverrides o;
     o.nControllers = ctx->nShuntAdmittanceOverrideControllers;
     o.elementControllerStart = ctx->dShuntAdmittanceOverrideElementControllerStart.as<int>();
     o.elementController = ctx->dShuntAdmittanceOverrideElementController.as<int>();
     o.sectionsMoved = ctx->dShuntAdmittanceOverrideSectionsMoved.as<char>();
     o.controllerDelta = ctx->dShuntAdmittanceOverrideControllerDelta.as<double>();
-    o.scenarioStart = ctx->dShuntAdmittanceOverrideScenarioStart.as<int>();
-    o.element = ctx->dShuntAdmittanceOverrideElement.as<int>();
-    o.delta = ctx->dShuntAdmittanceOverrideDelta.as<double>();
+    o.caller = ctx->shuntAdmittanceOverrides.view();
     return o;
 }
 

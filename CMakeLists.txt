@@ -141,6 +141,7 @@ add_library(olfgpu SHARED
     native/cuda/solver/realistic_voltage_check.cu
     native/cuda/solver/scenario_override_tables.cu
     native/cuda/solver/singleton_substitution.cu
+    native/cuda/solver/slot_table.cu
     native/cuda/solver/solve_seed.cu
     native/cuda/solver/state_vector_scaling.cu
     native/cuda/outerloop/area_interchange_control.cu

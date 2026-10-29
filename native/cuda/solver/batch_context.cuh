@@ -24,6 +24,7 @@
 #include "../common/codes/gpu_transformer_voltage_control_mode.cuh"
 #include "../lu/batched_lu.cuh"
 #include "../structure/shared_structure.cuh"
+#include "slot_table.cuh"
 
 namespace olfgpu {
 
@@ -38,6 +39,9 @@ namespace olfgpu {
 //   its per-scenario on/off overrides (zeroImpedanceBranchOpenOverrides / zeroImpedanceBranchCloseOverrides).
 struct BatchSolverContext {
     int loopTraceSlot = -1;                                  // OLF_GPU_LOOP_TRACE by CONTINGENCY: the slot the host resolved for this chunk
+    // The bank slots the per-scenario setters install: the setters' local slot j is bank slot installSlots[j], and only
+    // those slots' entries are rewritten. Empty: every slot, local slot = bank slot (a whole chunk).
+    std::vector<int> installSlots;
     SharedStructurePtr structure;                                   // built once per extraction, see SharedStructure
     int n = 0;
     int nnz = 0;
@@ -77,7 +81,7 @@ struct BatchSolverContext {
     // Per-slot shunt admittance overrides (scenario_override_tables.cuh): the caller's, a CSR per slot installed per
     // solve ((slot + 1) starts, PACK shunt element, (dG, dB)), and the incremental shunt loop's moved sections per
     // (slot, controller), with the controllers acting on each PACK shunt element.
-    DeviceBuf dShuntAdmittanceOverrideScenarioStart, dShuntAdmittanceOverrideElement, dShuntAdmittanceOverrideDelta;
+    SlotTable shuntAdmittanceOverrides{1, 2};                            // per slot: the caller's (PACK shunt element; dG, dB)
     int nShuntAdmittanceOverrideControllers = 0;
     std::vector<int> hShuntAdmittanceOverrideControllerCounts;                       // the loop sizes the controller tables were built for
     DeviceBuf dShuntAdmittanceOverrideElementControllerStart, dShuntAdmittanceOverrideElementController;
@@ -98,7 +102,7 @@ struct BatchSolverContext {
     // Per-slot closed-branch tap overrides (scenario_override_tables.cuh): the caller's tap/PST actions, a CSR per slot
     // installed per solve ((slot + 1) starts, closed-branch element, full closedBranchParameters row), and the tap
     // loops' moved taps per (slot, controller), with the controllers acting on each closed-branch element.
-    DeviceBuf dClosedBranchParameterOverrideScenarioStart, dClosedBranchParameterOverrideElement, dClosedBranchParameterOverrideValues;
+    SlotTable closedBranchParameterOverrides{1, 8};                      // per slot: the caller's (closed-branch element; its row)
     int nClosedBranchParameterOverrideControllers = 0;
     std::vector<int> hClosedBranchParameterOverrideControllerCounts;                 // the loop sizes the controller tables were built for
     DeviceBuf dClosedBranchParameterOverrideElementControllerStart, dClosedBranchParameterOverrideElementController;
@@ -138,8 +142,7 @@ struct BatchSolverContext {
     DeviceBuf dPilotSelfCarrierSkip;                                       // nReactiveRelocationGroups * nScenarios chars
     bool hasPilotSelf = false;
     DeviceBuf dReactiveLimitLoadQPerScenario;                                       // per (scenario, controller) — shed load Q
-    int nDistrQInactiveMembers = 0;                                            // {slot, distrQMember} pairs: a controller
-    DeviceBuf dDistrQInactiveMembers;                                          // that stops controlling in ONE scenario
+    SlotTable distrQInactiveMembers{1, 0};                                     // per slot: the DISTR_Q members that stop controlling there
     bool hasDistrQSubgroups = false;                                       // tasks #71: per (scenario, dq member) subgroup
     DeviceBuf dDistrQSubgroup;                                            // labels (char, dense nS x nDistrQMembers) and the
     DeviceBuf dReactiveRelocationDistrQMemberStart;                                    // qr group -> first dq member map
@@ -164,19 +167,16 @@ struct BatchSolverContext {
     bool hasForcedTargetQPreDistribution = false;
     DeviceBuf dForcedTargetQIndices, dForcedTargetQParameters, dForcedTargetQPoints, dForcedTargetQApplied, dForcedTargetQPreDistribution;
     // DISTR_Q weight overrides (setBatchDistrQWeightOverrides): a gen outage at a remote-VC controller
-    // bus renormalizes the group's qPct keys per scenario — {s, contrib} pairs + the new weight.
-    int nDistrQWeightOverrides = 0;
-    DeviceBuf dDistrQWeightOverrideScenarioTerm, dDistrQWeightOverrideWeight;
+    // bus renormalizes the group's qPct keys per scenario — per slot, (contribution; new weight), the last one wins.
+    SlotTable distrQWeightOverrides{1, 1};
     // Per-scenario member reactive KEYS (setBatchDistrQKeyOverrides, {slot, member} -> OLF's qPct after the scenario's
     // generator losses): the DISTR_Q fill and the target kernel renormalize these over the members a PV -> PQ switch
     // leaves enabled, so an outage and an in-flight switch to PQ in one group compose. The per-contribution weight
     // overrides stay for what keys cannot express (a re-extracted pack whose free role moved).
-    int nDistrQKeyOverrides = 0;
-    DeviceBuf dDistrQKeyOverrideScenarioMember, dDistrQKeyOverrideKey;
+    SlotTable distrQKeyOverrides{1, 1};                                        // per slot: (member; key), the first one wins
     // DISTR_RHO coefficient overrides (setBatchDistrRhoCoefficientOverrides): a member outage renormalizes the
-    // group's 1/count coefficients per scenario — {s, contrib} pairs + the new coefficient.
-    int nDistrRhoCoefficientOverrides = 0;
-    DeviceBuf dDistrRhoOverrideScenarioTerm, dDistrRhoOverrideCoefficient;
+    // group's 1/count coefficients per scenario — per slot, (contribution; new coefficient), the last one wins.
+    SlotTable distrRhoCoefficientOverrides{1, 1};
     // Per-scenario ACTIVE equation counts (setBatchActiveRowCounts): OLF's L2 stopping threshold is
     // sqrt(eps^2 * nActive) and the CPU REMOVES equations for outaged elements carrying variables
     // (rho/a1 identities) and islanded buses — the padded device n over-counts by those rows, a ~%
@@ -437,14 +437,17 @@ struct BatchSolverContext {
 
     DeviceBuf dDistributedSlackGeneratorMove, dDistributedSlackGeneratorRemoved;
     DeviceBuf dDistributedSlackPreviousGeneratorMove, dDistributedSlackPreviousBusTarget;   // nS x generators / buses: before a distribution
-    DeviceBuf dFrozenRow;                                  // (scenario, row) pairs: rows an islanding
-    int nFrozenRow = 0;                                    // outage froze to a flat identity state
-    DeviceBuf dDistributedSlackLostGenerators;                                  // (scenario, DS generator slot) pairs: the
-    int nDistributedSlackLostGenerators = 0;                                    // generators an outage removes, by identity
+    SlotTable frozenRows{1, 0};                            // per slot: the rows an islanding outage froze to a flat identity state
+    // The reactive-limit channels of each slot's scenario (solveBatchContext installs them): (entry; dMinQ, dMaxQ, dLoadQ,
+    // dBmin, dBmax) - every one on an entry adds, (curve entry; pStep, shareScale) and (entry; moved voltage target) - the
+    // first one wins.
+    SlotTable reactiveLimitDeltaOverrides{1, 5};
+    SlotTable reactiveCapabilityCurveOverrides{1, 2};
+    SlotTable reactiveLimitTargetVOverrides{1, 1};
+    SlotTable distributedSlackLostGenerators{1, 0};                             // per slot: the DS generators an outage removes, by identity
     DeviceBuf dReactiveLimitSeedTargetQ;                                 // per (scenario, entry): the frozen target Q a continued
     bool hasReactiveLimitSeedTargetQ = false;                            // solve restores (setBatchReactiveLimitSeedTargetQ), NaN = the limit
-    DeviceBuf dDistributedSlackRemovedGenerators;                                   // (scenario, DS generator slot) pairs: participants
-    int nDistributedSlackRemovedGenerators = 0;                                     // a GeneratorAction took out of the distribution
+    SlotTable distributedSlackRemovedGenerators{1, 0};                              // per slot: the DS participants a GeneratorAction took out
     DeviceBuf dDistributedSlackGeneratorMoveValid;                                // per scenario: the PER-GENERATOR water-fill ran, so
                                                            // dDistributedSlackGeneratorMove holds each generator's own movement. The
                                                            // anchored path distributes per BUS and leaves it zero,
@@ -473,31 +476,21 @@ struct BatchSolverContext {
     DeviceBuf dReactiveLimitComparedVoltageRowOverride;                                      // remote controllers re-merged onto a NEW pilot: (scenario,
     int nReactiveLimitComparedVoltageRowOverrides = 0;                                          // entry) -> the new pilot's V row, -1 = the base pilot's
     DeviceBuf dReactiveLimitIslanded;
-    int nDistrQMemberTargetQOverrides = 0;                                       // per-scenario member targetQ overrides
-    DeviceBuf dDistrQMemberTargetQOverrideKey;
-    DeviceBuf dDistrQMemberTargetQOverrideValue;
+    SlotTable distrQMemberTargetQOverrides{1, 1};                                // per slot: (member; its own targetQ), the first one wins
     int hasSlackBusRowOverride = 0;                               // per-slot slack row (a relocated slack), device rows
     DeviceBuf dSlackBusRowOverride;                               // -1 = the base slack row
-    int nReactiveRelocationPilotTargetQDeltas = 0;                                    // per-scenario moves of a pilot's captured Q target
-    DeviceBuf dReactiveRelocationPilotTargetQDeltaKey;                               // slot * nReactiveRelocationGroups + group
-    DeviceBuf dReactiveRelocationPilotTargetQDeltaValue;
-    int nPilotFlip = 0;                                    // pilot-row flip entries (no enabled controller left)
-    DeviceBuf dPfSlot;
-    DeviceBuf dPfRow;
-    DeviceBuf dPfQTarget;
-    DeviceBuf dPfOff;
-    DeviceBuf dPfCount;
-    DeviceBuf dPilotFlipSurvivorReactiveLimitEntries;
-    DeviceBuf dPfFlipped;
-    DeviceBuf dPfSavedVT;
-    int nReMergedVoltageTargets = 0;                       // re-merged controls whose main is one of its controllers
-    DeviceBuf dReMergedVoltageTargetSlot;                  // per control: its scenario, the main's reactive-limit entry,
-    DeviceBuf dReMergedVoltageTargetMainEntry;             // its voltage target, and the cluster's other controllers'
-    DeviceBuf dReMergedVoltageTargetValue;                 // entries in OLF's merged order (start/count into the list)
-    DeviceBuf dReMergedVoltageTargetControllerStart;
-    DeviceBuf dReMergedVoltageTargetControllerCount;
-    DeviceBuf dReMergedVoltageTargetControllerEntries;
-    DeviceBuf dReMergedVoltageTargetHolder;                // per control: which of those controllers' rows holds the target, -1 = the main's own
+    SlotTable reactiveRelocationPilotTargetQDeltas{1, 1};   // per slot: (relocation group; the move of its pilot's captured Q target)
+    // Pilot-row flip entries (pilotRowWithoutEnabledControllerBatch), per slot: (pilot row, first and count of its surviving
+    // controllers' reactive-limit entries in pilotFlipSurvivors; the pilot's Q target), and per entry whether the row is
+    // flipped and the voltage target it had.
+    SlotTable pilotFlips{3, 1, {{sizeof(char), 0}, {sizeof(double), 0}}};
+    SlotTable pilotFlipSurvivors{1, 0};
+    // Re-merged controls whose main is one of its controllers (updateReMergedVoltageTargetRowBatch), per slot: (the main's
+    // reactive-limit entry, first and count of the cluster's other controllers in reMergedVoltageTargetControllers, in OLF's
+    // merged order; the control's voltage target), and per entry which of those controllers' rows holds the target (-1: the
+    // main's own).
+    SlotTable reMergedVoltageTargets{3, 1, {{sizeof(int), 0xFF}}};
+    SlotTable reMergedVoltageTargetControllers{1, 0};
     DeviceBuf dReactiveLimitHoldsReMergedVoltageTarget;    // per (scenario, entry): its sharing row holds its control's voltage target
     DeviceBuf dReactiveLimitReMergedVoltageRow;            // per (scenario, entry) of a main: the voltage row that target is held on, -1 = its own
     // HVDC AC-emulation outer loops (FreezingHvdcACEmulation + AcHvdcAcEmulationLimits) as DRIVER

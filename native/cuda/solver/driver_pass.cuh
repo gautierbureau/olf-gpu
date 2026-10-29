@@ -31,10 +31,6 @@ struct DriverPass {
     int reactiveLimitsDecisionLogScenario = -1;
     int skipReactiveLimitsPhase = 0;
     bool hasPerScenarioSvcSusceptanceLimits = false;
-    int nReactiveLimitDeltaOverrides = 0;
-    int nReactiveCapabilityCurveOverrides = 0;
-    DeviceBuf dReactiveLimitDeltaOverrideScenarioEntry, dReactiveLimitDeltaOverrideValues, dReactiveLimitDeltaOverrideStart, dReactiveLimitDeltaOverrideList;
-    DeviceBuf dReactiveCapabilityCurveOverrideStart, dReactiveCapabilityCurveOverrideCurve, dReactiveCapabilityCurveOverrideStepScale;
     double slackDistTol = 0.0;
     double pResidueEps = 0.0;
     bool hasDistributedSlackOverride = false;
@@ -60,9 +56,6 @@ struct DriverPass {
     bool usePerScenarioReactiveLimits = false;
     bool deviceFixedIter = false;
     double reactiveLimitTol = 0.0;
-    int nReactiveLimitTargetVOverrides = 0;
-    DeviceBuf dReactiveLimitTargetVOverrideScenarioEntry;
-    DeviceBuf dReactiveLimitTargetVOverrideValue;
 };
 
 }  // namespace olfgpu

@@ -29,12 +29,10 @@ __device__ double forcedTargetQClamped(double pPu, double raw, const double* pts
 
 // Whether entry e takes part in scenario s: its generator is still there, its bus is not islanded, and - for a
 // Q-row entry - its Q row still is the bus's Q balance (a frozen or repurposed row keeps what the scenario put there).
-__device__ bool forcedTargetQEntryLive(int s, int e, int n, int nDistributedSlackBuses, const int* forcedTargetQIndices, int nLost, const int* lost,
+__device__ bool forcedTargetQEntryLive(int s, int e, int n, int nDistributedSlackBuses, const int* forcedTargetQIndices, SlotEntries lost,
                             const char* distributedSlackIslanded, const int* mode) {
     int distributedSlackGenerator = forcedTargetQIndices[e * 7 + 1];
-    for (int k = 0; k < nLost; k++) {
-        if (lost[2 * k] == s && lost[2 * k + 1] == distributedSlackGenerator) return false;
-    }
+    if (slotFirstEntryOf(lost, s, distributedSlackGenerator) >= 0) return false;
     if (distributedSlackIslanded != nullptr && distributedSlackIslanded[(size_t) s * nDistributedSlackBuses + forcedTargetQIndices[e * 7 + 4]]) return false;
     return forcedTargetQIndices[e * 7] < 0 || mode[(size_t) s * n + forcedTargetQIndices[e * 7]] == forcedTargetQIndices[e * 7 + 5];
 }
@@ -64,14 +62,14 @@ __device__ double forcedTargetQGeneratorTargetP(int s, int e, int n, int nDistri
 // Q-row entries only (qRow >= 0); limit entries are recomputed with the dynamic limits.
 __global__ void forcedTargetQInitBatch(int nForcedTargetQ, int nS, int n, int nDistributedSlackBuses, int extrapolate, const int* forcedTargetQIndices,
                                        const double* forcedTargetQParameters, const double* forcedTargetQPoints, const double* forcedTargetQPreDistribution,
-                                       int nLost, const int* lost, const char* distributedSlackIslanded, const int* mode,
+                                       SlotEntries lost, const char* distributedSlackIslanded, const int* mode,
                                        double* target, double* applied) {
     int s = blockIdx.x * blockDim.x + threadIdx.x;
     if (s >= nS) return;
     for (int e = 0; e < nForcedTargetQ; e++) {
         double base = forcedTargetQParameters[e * 5 + 2];
         applied[(size_t) s * nForcedTargetQ + e] = base;
-        if (forcedTargetQIndices[e * 7] < 0 || !forcedTargetQEntryLive(s, e, n, nDistributedSlackBuses, forcedTargetQIndices, nLost, lost, distributedSlackIslanded, mode)) continue;
+        if (forcedTargetQIndices[e * 7] < 0 || !forcedTargetQEntryLive(s, e, n, nDistributedSlackBuses, forcedTargetQIndices, lost, distributedSlackIslanded, mode)) continue;
         double p = forcedTargetQParameters[e * 5] + (forcedTargetQPreDistribution != nullptr ? forcedTargetQPreDistribution[(size_t) s * nForcedTargetQ + e] : 0.0);
         double q = forcedTargetQClamped(p, forcedTargetQParameters[e * 5 + 1], forcedTargetQPoints + forcedTargetQIndices[e * 7 + 2] * 3, forcedTargetQIndices[e * 7 + 3], extrapolate);
         target[(size_t) s * n + forcedTargetQIndices[e * 7]] += q - base;
@@ -83,12 +81,12 @@ __global__ void forcedTargetQInitBatch(int nForcedTargetQ, int nS, int n, int nD
 __global__ void forcedTargetQBatch(int nForcedTargetQ, int nS, int n, int nDistributedSlackBuses, int nDistributedSlackGenerators, int extrapolate, const int* forcedTargetQIndices,
                                    const double* forcedTargetQParameters, const double* forcedTargetQPoints, const double* forcedTargetQPreDistribution,
                                    const double* distributedSlackGeneratorMove, const char* distributedSlackGeneratorMoveValid, const double* distributedSlackGeneratorAnchor,
-                                   const double* distributedSlackGeneratorInitialMove, const int* distributedSlackBusPhiRow, const int* distributedSlackBusRowOverride, int nLost, const int* lost, const char* distributedSlackIslanded,
+                                   const double* distributedSlackGeneratorInitialMove, const int* distributedSlackBusPhiRow, const int* distributedSlackBusRowOverride, SlotEntries lost, const char* distributedSlackIslanded,
                                    const int* mode, const char* outerLoopCheckActive, double* target, double* applied) {
     int s = blockIdx.x * blockDim.x + threadIdx.x;
     if (s >= nS || !outerLoopCheckActive[s]) return;
     for (int e = 0; e < nForcedTargetQ; e++) {
-        if (forcedTargetQIndices[e * 7] < 0 || !forcedTargetQEntryLive(s, e, n, nDistributedSlackBuses, forcedTargetQIndices, nLost, lost, distributedSlackIslanded, mode)) continue;
+        if (forcedTargetQIndices[e * 7] < 0 || !forcedTargetQEntryLive(s, e, n, nDistributedSlackBuses, forcedTargetQIndices, lost, distributedSlackIslanded, mode)) continue;
         double p = forcedTargetQGeneratorTargetP(s, e, n, nDistributedSlackBuses, nDistributedSlackGenerators, nForcedTargetQ, forcedTargetQIndices, forcedTargetQParameters, forcedTargetQPreDistribution, distributedSlackGeneratorMove, distributedSlackGeneratorMoveValid, distributedSlackGeneratorAnchor, distributedSlackGeneratorInitialMove, distributedSlackBusPhiRow, distributedSlackBusRowOverride, target);
         double q = forcedTargetQClamped(p, forcedTargetQParameters[e * 5 + 1], forcedTargetQPoints + forcedTargetQIndices[e * 7 + 2] * 3, forcedTargetQIndices[e * 7 + 3], extrapolate);
         size_t a = (size_t) s * nForcedTargetQ + e;
@@ -104,7 +102,7 @@ __global__ void forcedTargetQBatch(int nForcedTargetQ, int nS, int n, int nDistr
 __global__ void forcedTargetQLimitsBatch(int nForcedTargetQ, int nS, int n, int nDistributedSlackBuses, int nDistributedSlackGenerators, int nReactiveLimitEntries, int extrapolate,
                                          const int* forcedTargetQIndices, const double* forcedTargetQParameters, const double* forcedTargetQPoints,
                                          const double* forcedTargetQPreDistribution, const double* distributedSlackGeneratorMove, const char* distributedSlackGeneratorMoveValid,
-                                         const double* distributedSlackGeneratorAnchor, const double* distributedSlackGeneratorInitialMove, const int* distributedSlackBusPhiRow, const int* distributedSlackBusRowOverride, int nLost, const int* lost,
+                                         const double* distributedSlackGeneratorAnchor, const double* distributedSlackGeneratorInitialMove, const int* distributedSlackBusPhiRow, const int* distributedSlackBusRowOverride, SlotEntries lost,
                                          const char* distributedSlackIslanded, const int* mode, const double* target,
                                          double* minQDyn, double* maxQDyn, const char* active) {
     int s = blockIdx.x * blockDim.x + threadIdx.x;
@@ -112,7 +110,7 @@ __global__ void forcedTargetQLimitsBatch(int nForcedTargetQ, int nS, int n, int 
     if (active != nullptr && !active[s]) return;
     for (int e = 0; e < nForcedTargetQ; e++) {
         int reactiveLimitEntry = forcedTargetQIndices[e * 7 + 6];
-        if (reactiveLimitEntry < 0 || !forcedTargetQEntryLive(s, e, n, nDistributedSlackBuses, forcedTargetQIndices, nLost, lost, distributedSlackIslanded, mode)) continue;
+        if (reactiveLimitEntry < 0 || !forcedTargetQEntryLive(s, e, n, nDistributedSlackBuses, forcedTargetQIndices, lost, distributedSlackIslanded, mode)) continue;
         double p = forcedTargetQGeneratorTargetP(s, e, n, nDistributedSlackBuses, nDistributedSlackGenerators, nForcedTargetQ, forcedTargetQIndices, forcedTargetQParameters, forcedTargetQPreDistribution, distributedSlackGeneratorMove, distributedSlackGeneratorMoveValid, distributedSlackGeneratorAnchor, distributedSlackGeneratorInitialMove, distributedSlackBusPhiRow, distributedSlackBusRowOverride, target);
         double d = forcedTargetQClamped(p, forcedTargetQParameters[e * 5 + 1], forcedTargetQPoints + forcedTargetQIndices[e * 7 + 2] * 3, forcedTargetQIndices[e * 7 + 3], extrapolate)
                 - forcedTargetQParameters[e * 5 + 2];
@@ -130,7 +128,7 @@ void launchForcedTargetQLimits(BatchSolverContext* ctx, int nS, int n, const cha
             ctx->nDistributedSlackGenerators > 0 ? ctx->dDistributedSlackGeneratorMove.as<double>() : nullptr,
             ctx->nDistributedSlackGenerators > 0 ? ctx->dDistributedSlackGeneratorMoveValid.as<char>() : nullptr, ctx->hasDistributedSlackGeneratorAnchor ? ctx->dDistributedSlackGeneratorAnchor.as<double>() : nullptr, ctx->hasDistributedSlackGeneratorInitialMove ? ctx->dDistributedSlackGeneratorInitialMove.as<double>() : nullptr,
             ctx->nDistributedSlackBuses > 0 ? ctx->dDistributedSlackBusPhiRow.as<int>() : nullptr, ctx->nDistributedSlackBusRowOverrides > 0 ? ctx->dDistributedSlackBusRowOverride.as<int>() : nullptr,
-            ctx->nDistributedSlackLostGenerators, ctx->nDistributedSlackLostGenerators > 0 ? ctx->dDistributedSlackLostGenerators.as<int>() : nullptr,
+            ctx->distributedSlackLostGenerators.view(),
             ctx->nDistributedSlackIslanded > 0 ? ctx->dDistributedSlackIslanded.as<char>() : nullptr, ctx->dMode.as<int>(),
             ctx->dTarget.as<double>(), ctx->dReactiveLimitMinQPerScenario.as<double>(), ctx->dReactiveLimitMaxQPerScenario.as<double>(), active);
 }

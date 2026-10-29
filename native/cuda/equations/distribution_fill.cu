@@ -58,10 +58,10 @@ __global__ void fillDistrQBatch(int nDistrQ, int nScenarios, int n, int nnz, int
                                 const double* openBranchParameters, const int* openBranchIndices,
                                 const double* x, double* vals, double* F,
                                 const char* disabled, const char* active,
-                                int nDistrQWeightOverrides, const int* distrQWeightOverrideScenarioTerm, const double* distrQWeightOverrideWeight,
-                                int nDistrQKeyOverrides, const int* distrQKeyOverrideScenarioMember, const double* distrQKeyOverrideKey,
+                                SlotEntries distrQWeightOverrides,
+                                SlotEntries distrQKeyOverrides,
                                 const int* mode,
-                                int nDistrQInactiveMembers, const int* distrQInactiveScenarioMember,
+                                SlotEntries distrQInactiveMembers,
                                 const int* distrQRowMember, const int* distrQInjectionMember, const double* mKey,
                                 const int* distrQMemberReactiveLimitEntry, const int* mGroupStart, const int* mGroupCount,
                                 const char* limitType, int nReactiveLimitEntries,
@@ -131,8 +131,8 @@ __global__ void fillDistrQBatch(int nDistrQ, int nScenarios, int n, int nnz, int
             int re = distrQMemberReactiveLimitEntry[m];
             bool switchedToPq = re >= 0 && limitType[(size_t) s * nReactiveLimitEntries + re] != GpuQLimitType::NONE;
             bool otherSub = subS != nullptr && subS[m] != subK;
-            sum += (switchedToPq || otherSub || distrQMemberInactive(nDistrQInactiveMembers, distrQInactiveScenarioMember, s, m))
-                    ? 0.0 : distrQKeyOf(nDistrQKeyOverrides, distrQKeyOverrideScenarioMember, distrQKeyOverrideKey, s, m, mKey);
+            sum += (switchedToPq || otherSub || distrQMemberInactive(distrQInactiveMembers, s, m))
+                    ? 0.0 : distrQKeyOf(distrQKeyOverrides, s, m, mKey);
         }
         // the q terms of a member SWITCHED TO PQ STAY in every survivor's row (weight = the renormalized
         // qPct of the ROW OWNER); its frozen target Q is balanced on the TARGET side instead — OLF's
@@ -140,8 +140,8 @@ __global__ void fillDistrQBatch(int nDistrQ, int nScenarios, int n, int nnz, int
         // (updateDistrQTargetsBatch keeps the per-scenario targets in step with the reactive-limit states)
         int reK = distrQMemberReactiveLimitEntry[kM];
         bool kSwitchedToPq = reK >= 0 && limitType[(size_t) s * nReactiveLimitEntries + reK] != GpuQLimitType::NONE;
-        double qpk = (sum == 0.0 || kSwitchedToPq || distrQMemberInactive(nDistrQInactiveMembers, distrQInactiveScenarioMember, s, kM))
-                ? 0.0 : distrQKeyOf(nDistrQKeyOverrides, distrQKeyOverrideScenarioMember, distrQKeyOverrideKey, s, kM, mKey) / sum;
+        double qpk = (sum == 0.0 || kSwitchedToPq || distrQMemberInactive(distrQInactiveMembers, s, kM))
+                ? 0.0 : distrQKeyOf(distrQKeyOverrides, s, kM, mKey) / sum;
         w = qpk - (distrQInjectionMember[c] == kM ? 1.0 : 0.0);
         if (kind == GpuReactiveTermKind::DUMMY_Q && distrQSide[c] == GpuTwoSides::TWO) {
             // The host folds the SIDE SIGN into a kind-3 weight (+dummyQ where the controller is
@@ -154,10 +154,9 @@ __global__ void fillDistrQBatch(int nDistrQ, int nScenarios, int n, int nnz, int
             w = -w;
         }
     }
-    for (int k = 0; k < nDistrQWeightOverrides; k++) {                        // per-scenario qPct renormalization (gen outage)
-        if (distrQWeightOverrideScenarioTerm[k * 2] == s && distrQWeightOverrideScenarioTerm[k * 2 + 1] == c) {
-            w = distrQWeightOverrideWeight[k];
-        }
+    int weightOverride = slotLastEntryOf(distrQWeightOverrides, s, c);       // per-scenario qPct renormalization (gen outage)
+    if (weightOverride >= 0) {
+        w = distrQWeightOverrides.doubleOf(s, weightOverride);
     }
     const int* dst = distrQDestination + c * 6;
     const double* xs = x + (size_t) s * n;
@@ -250,7 +249,7 @@ __global__ void fillDistrQBatch(int nDistrQ, int nScenarios, int n, int nnz, int
 __global__ void fillDistrRhoBatch(int nDistrRho, int nScenarios, int n, int nnz,
                                   const int* distrRhoColumn, const double* distrRhoCoefficient, const int* distrRhoDestination,
                                   const double* x, double* vals, double* F, const char* active,
-                                  int nDistrRhoCoefficientOverrides, const int* distrRhoOverrideScenarioTerm, const double* distrRhoOverrideCoefficient,
+                                  SlotEntries distrRhoCoefficientOverrides,
                                   const int* distrRhoRelocationGroup, const int* mode, const int* reactiveRelocationGroupStart, const int* reactiveRelocationCandidateRows, BatchLayout layout) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nDistrRho * nScenarios) return;
@@ -266,10 +265,9 @@ __global__ void fillDistrRhoBatch(int nDistrRho, int nScenarios, int n, int nnz,
         if (-2 - distrRhoDestination[c * 2] == reactiveRelocationCandidateRows[reactiveRelocationGroupStart[g] + chooseCarrierRow(g, reactiveRelocationGroupStart, reactiveRelocationCandidateRows, mode + (size_t) s * n)]) return;
     }
     double coef = distrRhoCoefficient[c];
-    for (int k = 0; k < nDistrRhoCoefficientOverrides; k++) {                        // per-scenario 1/count' renormalization
-        if (distrRhoOverrideScenarioTerm[k * 2] == s && distrRhoOverrideScenarioTerm[k * 2 + 1] == c) {
-            coef = distrRhoOverrideCoefficient[k];
-        }
+    int coefficientOverride = slotLastEntryOf(distrRhoCoefficientOverrides, s, c);   // per-scenario 1/count' renormalization
+    if (coefficientOverride >= 0) {
+        coef = distrRhoCoefficientOverrides.doubleOf(s, coefficientOverride);
     }
     int dF = distrRhoDestination[c * 2 + 0];
     int dJ = distrRhoDestination[c * 2 + 1];

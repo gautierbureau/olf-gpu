@@ -13,13 +13,13 @@ namespace olfgpu {
 // Kernels launched by the driver and the distributed slack.
 __global__ void forcedTargetQInitBatch(int nForcedTargetQ, int nS, int n, int nDistributedSlackBuses, int extrapolate, const int* forcedTargetQIndices,
                                        const double* forcedTargetQParameters, const double* forcedTargetQPoints, const double* forcedTargetQPreDistribution,
-                                       int nLost, const int* lost, const char* distributedSlackIslanded, const int* mode,
+                                       SlotEntries lost, const char* distributedSlackIslanded, const int* mode,
                                        double* target, double* applied);
 
 __global__ void forcedTargetQBatch(int nForcedTargetQ, int nS, int n, int nDistributedSlackBuses, int nDistributedSlackGenerators, int extrapolate, const int* forcedTargetQIndices,
                                    const double* forcedTargetQParameters, const double* forcedTargetQPoints, const double* forcedTargetQPreDistribution,
                                    const double* distributedSlackGeneratorMove, const char* distributedSlackGeneratorMoveValid, const double* distributedSlackGeneratorAnchor,
-                                   const double* distributedSlackGeneratorInitialMove, const int* distributedSlackBusPhiRow, const int* distributedSlackBusRowOverride, int nLost, const int* lost, const char* distributedSlackIslanded,
+                                   const double* distributedSlackGeneratorInitialMove, const int* distributedSlackBusPhiRow, const int* distributedSlackBusRowOverride, SlotEntries lost, const char* distributedSlackIslanded,
                                    const int* mode, const char* outerLoopCheckActive, double* target, double* applied);
 
 // Clamp the reactive limits of the forced-target-Q generators at their current active power, on the scenarios of

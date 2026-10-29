@@ -73,6 +73,9 @@ final class GpuBatchChunkSolver {
     /** Test hook: where each batched contingency's outer-loop statistics go, by contingency id, or null. */
     static volatile java.util.Map<String, int[]> outerLoopStatsForTests;
 
+    /** Test hook: where each chunk's scenarios go in a bank wider than the chunk, or null (the bank is the chunk). */
+    static volatile GpuBatchedSecurityAnalysisSolver.InstallLayout installLayoutForTests;
+
     private static final Logger LOGGER = LoggerFactory.getLogger(GpuBatchChunkSolver.class);
 
     private GpuBatchChunkSolver() {
@@ -195,6 +198,8 @@ final class GpuBatchChunkSolver {
         // batched time on rte6515, at LOWER device memory (the size only ever goes down from the cap).
         int chunkSize = (nb + nChunks - 1) / nChunks;
 
+        GpuBatchedSecurityAnalysisSolver.InstallLayout installLayout = installLayoutForTests;
+        int bankSize = installLayout == null ? chunkSize : installLayout.bankSize(chunkSize);
         // Reuse a cached analyzed context when the pattern/admittances/chunk/mode match (across
         // SA runs on the same network) — the context is NOT destroyed here, it stays cached.
         // MODE: the run's configured batch mode, or the ROBUST single-matrix solve on the retry pass
@@ -202,7 +207,7 @@ final class GpuBatchChunkSolver {
         // per-scenario loop with matching and global column pivoting, which is what rte6515's full
         // busbar structure needs to factor at all. Switching mode EVICTS the single-entry context cache,
         // so the retry pays one cuDSS analysis; that is the price of keeping the scenarios on device.
-        long handle = GpuBatchContextCache.acquireBatchContext(gpuData, chunkSize,
+        long handle = GpuBatchContextCache.acquireBatchContext(gpuData, bankSize,
                 config.robustSolveMode() ? GpuLinearSolveMode.ROBUST
                         : GpuBatchContextCache.resolveBatchMode(config.resolvedGpuParameters()), n);
         // PER_EQUATION_TYPE criterion: install the per-row thresholds on the (possibly cached)
@@ -329,13 +334,17 @@ final class GpuBatchChunkSolver {
             // every one of them back except its still-out set, and scanning all zeroImpedanceBranchNumbers per scenario with a
             // boxed set was 1.4 s of host time on network.xiidm (2653 elements x every such scenario).
             int[] baseNonSpanningTreeBranches = ZeroImpedanceClusters.baseNonTreeElements(gpuData);
+            int chunkIndex = 0;
             for (List<Integer> group : List.of(ctgIdxList, pairIdxList)) {
                 boolean pairPhase = group == pairIdxList;
                 int nbg = group.size();
                 for (int chunkStart = 0; chunkStart < nbg; chunkStart += chunkSize) {
                     int realCount = Math.min(chunkSize, nbg - chunkStart);
-                    // the chunk's scenarios go into the whole bank, slot s for scenario s: before anything per scenario
-                    BatchSolveNative.beginBatchInstall(handle, null);
+                    // the chunk's scenarios go into the whole bank, slot s for scenario s, unless a test lays them out:
+                    // before anything per scenario
+                    BatchSolveNative.beginBatchInstall(handle, installLayout == null ? null
+                            : installLayout.bankSlots(chunkIndex, chunkSize, bankSize));
+                    chunkIndex++;
                     rs.overrides.clear();
                     // fixTransformerVoltageControls is a POST-CONTINGENCY check on the CPU, so its
                     // connectivity masks are per scenario and belong to the chunk, not to the run.

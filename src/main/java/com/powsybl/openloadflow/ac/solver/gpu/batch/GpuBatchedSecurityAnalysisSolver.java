@@ -79,6 +79,23 @@ public final class GpuBatchedSecurityAnalysisSolver {
         GpuBatchChunkSolver.outerLoopStatsForTests = sink;
     }
 
+    /** TESTS ONLY: put each chunk's scenarios into slots of a bank wider than the chunk, where {@code layout} says. Null
+     *  goes back to a bank of the chunk's size, scenario s in slot s. */
+    public static void installChunksForTests(InstallLayout layout) {
+        GpuBatchChunkSolver.installLayoutForTests = layout;
+    }
+
+    /** Where the chunks' scenarios go in a bank wider than the chunk (TESTS ONLY, see {@link #installChunksForTests}). */
+    public interface InstallLayout {
+
+        /** How many slots the bank has for chunks of {@code chunkSize} scenarios: at least chunkSize. */
+        int bankSize(int chunkSize);
+
+        /** The bank slot of each of the {@code chunkSize} scenarios of the run's {@code chunk}-th chunk (counted over the
+         *  contingencies' chunks, then the strategy pairs'), each slot at most once. */
+        int[] bankSlots(int chunk, int chunkSize, int bankSize);
+    }
+
     /**
      * Solve the request's contingencies on the GPU: extract one batched context from the base case and run every
      * scenario in one Newton-Raphson loop with the device outer loops the request declares.

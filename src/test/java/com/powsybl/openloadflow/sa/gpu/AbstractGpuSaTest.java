@@ -41,6 +41,14 @@ abstract class AbstractGpuSaTest extends AbstractOpenSecurityAnalysisTest {
         super(commonTestConfig);
     }
 
+    /** The scope census is the process's: a test reading it must find its own runs only. The area interchange control
+     *  tests read their plan refusals without a reset, and run after the automation system tests they found that class's
+     *  refusals there too. */
+    @org.junit.jupiter.api.BeforeEach
+    void resetScopeCensus() {
+        GpuBatchScopeCensus.reset();
+    }
+
     void assertSplitGroupMatchesCpu(int sections) {
         assertSplitGroupMatchesCpu(sections, java.util.Set.of());
     }

@@ -34,6 +34,56 @@
 
 namespace olfgpu {
 
+// The compacted solver (straggler compaction, narrow refinement), created the first time a compacted width is
+// needed, for capacity scenarios at most.
+static void ensureCompactedSolver(BatchSolverContext* ctx, int n, int nnz, int capacity) {
+    if (ctx->compactedCapacity != 0) {
+        return;
+    }
+    ctx->compactedCapacity = std::max(1, capacity);
+    ctx->dValsCompacted.alloc(static_cast<size_t>(nnz) * ctx->compactedCapacity * sizeof(double));
+    ctx->dBCompacted.alloc(static_cast<size_t>(n) * ctx->compactedCapacity * sizeof(double));
+    ctx->dDxCompacted.alloc(static_cast<size_t>(n) * ctx->compactedCapacity * sizeof(double));
+    ctx->dCompactedScenarioMap.alloc(static_cast<size_t>(ctx->compactedCapacity) * sizeof(int));
+    CUDSS_CHECK(cudssCreate(&ctx->compactedSolver.handle));
+    CUDSS_CHECK(cudssSetStream(ctx->compactedSolver.handle, ctx->stream));
+    CUDSS_CHECK(cudssConfigCreate(&ctx->compactedSolver.config));
+    applyReorderAlg(ctx->compactedSolver.config, ctx->structure->nZeroImpedanceBranch > 0);
+    int compactedIterativeRefinementSteps = ctx->structure->nZeroImpedanceBranch > 0 ? configuredIterativeRefinementBaseSteps() : ITERATIVE_REFINEMENT_STEPS_WITHOUT_COUPLERS;
+    CUDSS_CHECK(cudssConfigSet(ctx->compactedSolver.config, CUDSS_CONFIG_IR_N_STEPS, &compactedIterativeRefinementSteps, sizeof(compactedIterativeRefinementSteps)));
+    CUDSS_CHECK(cudssMatrixCreateCsr(&ctx->compactedUniformBatchSystemMatrix, n, n, nnz,
+            ctx->structure->dRowPtr.as<int>(), nullptr, ctx->structure->dColIdx.as<int>(), ctx->dValsCompacted.as<double>(),
+            OLF_CUDSS_CSR_TYPES, CUDSS_MTYPE_GENERAL, CUDSS_MVIEW_FULL, CUDSS_BASE_ZERO));
+    CUDSS_CHECK(cudssMatrixCreateDn(&ctx->compactedUniformBatchRightHandSideMatrix, n, 1, n, ctx->dBCompacted.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
+    CUDSS_CHECK(cudssMatrixCreateDn(&ctx->compactedUniformBatchSolutionMatrix, n, 1, n, ctx->dDxCompacted.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
+    ctx->dRCompacted.alloc(static_cast<size_t>(n) * ctx->compactedCapacity * sizeof(double));
+    ctx->dDeltaCompacted.alloc(static_cast<size_t>(n) * ctx->compactedCapacity * sizeof(double));
+    CUDSS_CHECK(cudssMatrixCreateDn(&ctx->compactedUniformBatchResidualMatrix, n, 1, n, ctx->dRCompacted.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
+    CUDSS_CHECK(cudssMatrixCreateDn(&ctx->compactedUniformBatchDeltaMatrix, n, 1, n, ctx->dDeltaCompacted.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
+}
+
+// A new batch size needs a FRESH data object and a fresh ANALYSIS. Setting
+// CUDSS_CONFIG_UBATCH_SIZE on the existing data and skipping the analysis is accepted by
+// cuDSS and even looks faster on a bench -- measured 2026-09-16 at -11% warm with exact
+// violation parity -- and then fails with an illegal memory access on a bigger network:
+// the data object's buffers are sized for the batch size it was analyzed at. The analysis
+// is cheap (~64 ms) and costs the same at any batch size, but its STATE belongs to one.
+// Tier change to a width analyzed before: its own data object, the batch size set back on the
+// (shared) config. A new width: a fresh data object and its single-block ANALYSIS, kept.
+static cudssData_t compactedDataForWidth(BatchSolverContext* ctx, int w) {
+    cudssData_t& cached = ctx->compactData[w];
+    if (cached == nullptr) {
+        CUDSS_CHECK(cudssDataCreate(ctx->compactedSolver.handle, &cached));
+        CUDSS_CHECK(cudssConfigSet(ctx->compactedSolver.config, CUDSS_CONFIG_UBATCH_SIZE, &w, sizeof(w)));
+        gAnalysesCompact++;
+        { AnalysisTimer at_(__LINE__); CUDSS_CHECK(cudssExecute(ctx->compactedSolver.handle, CUDSS_PHASE_ANALYSIS, ctx->compactedSolver.config, cached, ctx->compactedUniformBatchSystemMatrix, ctx->compactedUniformBatchSolutionMatrix, ctx->compactedUniformBatchRightHandSideMatrix)); }
+    } else if (w != ctx->compactWidth) {
+        CUDSS_CHECK(cudssConfigSet(ctx->compactedSolver.config, CUDSS_CONFIG_UBATCH_SIZE, &w, sizeof(w)));
+    }
+    ctx->compactWidth = w;
+    return cached;
+}
+
 // The inner Newton-Raphson of one outer pass on every active scenario: fill, factorize, solve, refine, scale and
 // update until each scenario converges, diverges or exhausts its iterations (OLF NewtonRaphson.run).
 void newtonSolve(BatchSolverContext* ctx, DriverPass& drv) {
@@ -347,28 +397,7 @@ void newtonSolve(BatchSolverContext* ctx, DriverPass& drv) {
             gWidthIterSum += nS;                             // full-width factorization this iteration
         }
         if (compactSolve) {
-            if (ctx->compactedCapacity == 0) {                       // lazy first-engage setup
-                ctx->compactedCapacity = std::max(1, compactLimit);
-                ctx->dValsCompacted.alloc(static_cast<size_t>(nnz) * ctx->compactedCapacity * sizeof(double));
-                ctx->dBCompacted.alloc(static_cast<size_t>(n) * ctx->compactedCapacity * sizeof(double));
-                ctx->dDxCompacted.alloc(static_cast<size_t>(n) * ctx->compactedCapacity * sizeof(double));
-                ctx->dCompactedScenarioMap.alloc(static_cast<size_t>(ctx->compactedCapacity) * sizeof(int));
-                CUDSS_CHECK(cudssCreate(&ctx->compactedSolver.handle));
-                CUDSS_CHECK(cudssSetStream(ctx->compactedSolver.handle, ctx->stream));
-                CUDSS_CHECK(cudssConfigCreate(&ctx->compactedSolver.config));
-                applyReorderAlg(ctx->compactedSolver.config, ctx->structure->nZeroImpedanceBranch > 0);
-                int compactedIterativeRefinementSteps = ctx->structure->nZeroImpedanceBranch > 0 ? configuredIterativeRefinementBaseSteps() : ITERATIVE_REFINEMENT_STEPS_WITHOUT_COUPLERS;
-                CUDSS_CHECK(cudssConfigSet(ctx->compactedSolver.config, CUDSS_CONFIG_IR_N_STEPS, &compactedIterativeRefinementSteps, sizeof(compactedIterativeRefinementSteps)));
-                CUDSS_CHECK(cudssMatrixCreateCsr(&ctx->compactedUniformBatchSystemMatrix, n, n, nnz,
-                        ctx->structure->dRowPtr.as<int>(), nullptr, ctx->structure->dColIdx.as<int>(), ctx->dValsCompacted.as<double>(),
-                        OLF_CUDSS_CSR_TYPES, CUDSS_MTYPE_GENERAL, CUDSS_MVIEW_FULL, CUDSS_BASE_ZERO));
-                CUDSS_CHECK(cudssMatrixCreateDn(&ctx->compactedUniformBatchRightHandSideMatrix, n, 1, n, ctx->dBCompacted.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
-                CUDSS_CHECK(cudssMatrixCreateDn(&ctx->compactedUniformBatchSolutionMatrix, n, 1, n, ctx->dDxCompacted.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
-                ctx->dRCompacted.alloc(static_cast<size_t>(n) * ctx->compactedCapacity * sizeof(double));
-                ctx->dDeltaCompacted.alloc(static_cast<size_t>(n) * ctx->compactedCapacity * sizeof(double));
-                CUDSS_CHECK(cudssMatrixCreateDn(&ctx->compactedUniformBatchResidualMatrix, n, 1, n, ctx->dRCompacted.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
-                CUDSS_CHECK(cudssMatrixCreateDn(&ctx->compactedUniformBatchDeltaMatrix, n, 1, n, ctx->dDeltaCompacted.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
-            }
+            ensureCompactedSolver(ctx, n, nnz, compactLimit);
             std::vector<int> cmap;
             cmap.reserve(ctx->compactedCapacity);
             for (int cs = 0; cs < nS; cs++) {
@@ -392,28 +421,7 @@ void newtonSolve(BatchSolverContext* ctx, DriverPass& drv) {
             CUDA_CHECK(cudaMemcpyAsync(ctx->dCompactedScenarioMap.p, cmap.data(), w * sizeof(int), cudaMemcpyHostToDevice, ctx->stream));
             gatherScenarios<<<grid(nnz * w), BLOCK, 0, ctx->stream>>>(nnz, w, ctx->dCompactedScenarioMap.as<int>(), ctx->dVals.as<double>(), ctx->dValsCompacted.as<double>());
             gatherScenarios<<<grid(n * w), BLOCK, 0, ctx->stream>>>(n, w, ctx->dCompactedScenarioMap.as<int>(), ctx->dB.as<double>(), ctx->dBCompacted.as<double>());
-            // A new batch size needs a FRESH data object and a fresh ANALYSIS. Setting
-            // CUDSS_CONFIG_UBATCH_SIZE on the existing data and skipping the analysis is accepted by
-            // cuDSS and even looks faster on a bench -- measured 2026-09-16 at -11% warm with exact
-            // violation parity -- and then fails with an illegal memory access on a bigger network:
-            // the data object's buffers are sized for the batch size it was analyzed at. The analysis
-            // is cheap (~64 ms) and costs the same at any batch size, but its STATE belongs to one.
-            cudssData_t compactData = nullptr;
-            {
-                // Tier change to a width analyzed before: its own data object, the batch size set back on the
-                // (shared) config. A new width: a fresh data object and its single-block ANALYSIS, kept.
-                cudssData_t& cached = ctx->compactData[w];
-                if (cached == nullptr) {
-                    CUDSS_CHECK(cudssDataCreate(ctx->compactedSolver.handle, &cached));
-                    CUDSS_CHECK(cudssConfigSet(ctx->compactedSolver.config, CUDSS_CONFIG_UBATCH_SIZE, &w, sizeof(w)));
-                    gAnalysesCompact++;
-                    { AnalysisTimer at_(__LINE__); CUDSS_CHECK(cudssExecute(ctx->compactedSolver.handle, CUDSS_PHASE_ANALYSIS, ctx->compactedSolver.config, cached, ctx->compactedUniformBatchSystemMatrix, ctx->compactedUniformBatchSolutionMatrix, ctx->compactedUniformBatchRightHandSideMatrix)); }
-                } else if (w != ctx->compactWidth) {
-                    CUDSS_CHECK(cudssConfigSet(ctx->compactedSolver.config, CUDSS_CONFIG_UBATCH_SIZE, &w, sizeof(w)));
-                }
-                ctx->compactWidth = w;
-                compactData = cached;
-            }
+            cudssData_t compactData = compactedDataForWidth(ctx, w);
             { AnalysisTimer at_(__LINE__, 'F'); CUDSS_CHECK(cudssExecute(ctx->compactedSolver.handle, CUDSS_PHASE_FACTORIZATION | CUDSS_PHASE_SOLVE, ctx->compactedSolver.config, compactData, ctx->compactedUniformBatchSystemMatrix, ctx->compactedUniformBatchSolutionMatrix, ctx->compactedUniformBatchRightHandSideMatrix)); }
             if (ctx->structure->nZeroImpedanceBranch > 0 && ctx->dRCompacted.p != nullptr && ctx->dIterativeRefinementScore.p != nullptr && ctx->dIterativeRefinementScore.cap >= static_cast<size_t>(w) * sizeof(double)) {
                 // adaptive refinement on the compacted lanes (all w are real or a duplicate of a real one)
@@ -429,11 +437,50 @@ void newtonSolve(BatchSolverContext* ctx, DriverPass& drv) {
             gFullFactorizations++;
             { AnalysisTimer at_(__LINE__, ((ubPhase) & (CUDSS_PHASE_FACTORIZATION | CUDSS_PHASE_REFACTORIZATION)) ? 'G' : ((ubPhase) & CUDSS_PHASE_ANALYSIS) ? 'A' : 'S'); CUDSS_CHECK(cudssExecute(ctx->solver.handle, ubPhase, ctx->solver.config, ctx->solver.data, ctx->uniformBatchSystemMatrix, ctx->uniformBatchSolutionMatrix, ctx->uniformBatchRightHandSideMatrix)); }
             if (ctx->structure->nZeroImpedanceBranch > 0 && ctx->dR.p != nullptr && ctx->uniformBatchResidualMatrix != nullptr && ctx->dIterativeRefinementScore.p != nullptr) {
-                // adaptive refinement on the full-width UBATCH solve (see refineLanes)
+                // adaptive refinement on the full-width UBATCH solve (see refineLanes). A uniform-batch solve runs every
+                // lane of its batch, so the lanes that need refinement go to the compacted solver when that is narrower:
+                // gathered and factorized there once, then solved at that width. A full-width refinement solve cost
+                // about 280 ms on network.xiidm, a compacted one 65 ms.
+                std::vector<int> refineMap;
+                int refineReal = 0;
+                cudssData_t refineData = nullptr;
                 refineLanes(ctx, nS, n, nnz, ctx->dVals.as<double>(), ctx->dDx.as<double>(), ctx->dB.as<double>(),
                         ctx->dR.as<double>(), ctx->dDelta.as<double>(), ctx->dActive.as<char>(), configuredIterativeRefinementBaseSteps(), [&](const std::vector<char>&, const char*) {
                     AnalysisTimer at_(__LINE__, 'S');
                     CUDSS_CHECK(cudssExecute(ctx->solver.handle, CUDSS_PHASE_SOLVE, ctx->solver.config, ctx->solver.data, ctx->uniformBatchSystemMatrix, ctx->uniformBatchDeltaMatrix, ctx->uniformBatchResidualMatrix));
+                }, [&](const std::vector<char>& lane, int nLane) {
+                    if (refineData == nullptr) {
+                        int w = 1;
+                        while (w < nLane) {
+                            w <<= 1;
+                        }
+                        if (nLane > compactLimit || w >= nS) {
+                            return false;                    // no narrower than the full width
+                        }
+                        ensureCompactedSolver(ctx, n, nnz, compactLimit);
+                        if (w > ctx->compactedCapacity) {
+                            return false;
+                        }
+                        for (int cs = 0; cs < nS; cs++) {
+                            if (lane[cs]) {
+                                refineMap.push_back(cs);
+                            }
+                        }
+                        refineReal = static_cast<int>(refineMap.size());
+                        while (static_cast<int>(refineMap.size()) < w) {
+                            refineMap.push_back(refineMap[0]);
+                        }
+                        CUDA_CHECK(cudaMemcpyAsync(ctx->dCompactedScenarioMap.p, refineMap.data(), w * sizeof(int), cudaMemcpyHostToDevice, ctx->stream));
+                        gatherScenarios<<<grid(nnz * w), BLOCK, 0, ctx->stream>>>(nnz, w, ctx->dCompactedScenarioMap.as<int>(), ctx->dVals.as<double>(), ctx->dValsCompacted.as<double>());
+                        refineData = compactedDataForWidth(ctx, w);
+                        gRefinementFactorizations++;
+                        { AnalysisTimer at_(__LINE__, 'F'); CUDSS_CHECK(cudssExecute(ctx->compactedSolver.handle, CUDSS_PHASE_FACTORIZATION, ctx->compactedSolver.config, refineData, ctx->compactedUniformBatchSystemMatrix, ctx->compactedUniformBatchDeltaMatrix, ctx->compactedUniformBatchResidualMatrix)); }
+                    }
+                    int w = static_cast<int>(refineMap.size());       // the lanes factorized first: a superset of those left
+                    gatherScenarios<<<grid(n * w), BLOCK, 0, ctx->stream>>>(n, w, ctx->dCompactedScenarioMap.as<int>(), ctx->dR.as<double>(), ctx->dRCompacted.as<double>());
+                    { AnalysisTimer at_(__LINE__, 'S'); CUDSS_CHECK(cudssExecute(ctx->compactedSolver.handle, CUDSS_PHASE_SOLVE, ctx->compactedSolver.config, refineData, ctx->compactedUniformBatchSystemMatrix, ctx->compactedUniformBatchDeltaMatrix, ctx->compactedUniformBatchResidualMatrix)); }
+                    scatterScenarios<<<grid(n * refineReal), BLOCK, 0, ctx->stream>>>(n, refineReal, ctx->dCompactedScenarioMap.as<int>(), ctx->dDeltaCompacted.as<double>(), ctx->dDelta.as<double>());
+                    return true;
                 });
             }
         }

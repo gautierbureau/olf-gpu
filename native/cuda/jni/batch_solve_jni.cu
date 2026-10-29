@@ -381,12 +381,12 @@ OLF_JNI(ac_solver_gpu, BatchSolveNative, solveBatchContext)(
         fprintf(stderr, "JNI_PHASE_TIME calls=%lld marshal=%lld ms solve=%lld ms pack=%lld ms "
                 "| outerPasses=%lld (solving=%lld) newtonIters=%lld activeIterSum=%lld widthIterSum=%lld compactIters=%lld"
                 " | cuDSS analyses main=%lld compaction=%lld | iterativeRefinementChecks=%ld iterativeRefinementExtraSolves=%ld"
-                " | factorizations full=%lld compacted=%lld robust=%lld sensitivity=%lld sensitivitySolves=%lld | checkRounds=%lld"
+                " | factorizations full=%lld compacted=%lld robust=%lld sensitivity=%lld sensitivitySolves=%lld refinement=%lld | checkRounds=%lld"
                 " | batchedLu factorizations=%lld pivotedLanes=%lld pivotDelayOrders=%lld\n",
                 calls, marshalNs / 1000000, solveNs / 1000000, packNs / 1000000,
                 gOuterPasses, gSolvePasses, gNewtonIters, gActiveIterSum, gWidthIterSum, gCompactIters,
                 gAnalysesMain, gAnalysesCompact, gIterativeRefinementChecks, gIterativeRefinementExtraSolves,
-                gFullFactorizations, gCompactIters, gRobustFactorizations, gSensitivityFactorizations, gSensitivitySolves, gCheckRounds,
+                gFullFactorizations, gCompactIters, gRobustFactorizations, gSensitivityFactorizations, gSensitivitySolves, gRefinementFactorizations, gCheckRounds,
                 gBatchedLuFactorizations, gBatchedLuPivotedLanes, gBatchedLuPivotDelayOrders);
         double phaseMilliseconds[4] = {0, 0, 0, 0};
         long long phaseCount[4] = {0, 0, 0, 0};

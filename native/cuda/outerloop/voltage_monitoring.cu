@@ -16,6 +16,7 @@
 #include "../common/codes/gpu_outer_loop_kind.cuh"
 
 #include "voltage_monitoring.cuh"
+#include "../solver/scenario_install.cuh"
 
 namespace olfgpu {
 
@@ -58,12 +59,9 @@ __global__ void monitoringVoltageLoopBatch(int nMonitoringVoltageControllers, in
 }
 
 // Per-solve reset. MonitoringVoltage: nothing has fired yet in this solve.
-void monitoringVoltageResetSolve(BatchSolverContext* ctx, DriverPass& drv) {
-    const int& nS = drv.nS;
-    std::vector<double> nan(static_cast<size_t>(ctx->nMonitoringVoltageControllers) * nS, std::nan(""));
-    CUDA_CHECK(cudaMemcpyAsync(ctx->dMonitoringVoltageActivatedTargetV.p, nan.data(),
-            nan.size() * sizeof(double), cudaMemcpyHostToDevice, ctx->stream));
-    CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+void monitoringVoltageResetSolve(BatchSolverContext* ctx, DriverPass&) {
+    resetInstalledRows(ctx, ctx->dMonitoringVoltageActivatedTargetV.as<double>(), ctx->nMonitoringVoltageControllers, nullptr,
+                       std::nan(""));
 }
 
 // One check of the loop on every live scenario (GpuOuterLoopKind::MONITORING_VOLTAGE).

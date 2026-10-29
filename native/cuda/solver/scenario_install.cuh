@@ -7,9 +7,112 @@
 #ifndef OLF_GPU_SOLVER_SCENARIO_INSTALL_CUH
 #define OLF_GPU_SOLVER_SCENARIO_INSTALL_CUH
 
+#include <cuda_runtime.h>
+
+#include <algorithm>
+#include <cstring>
+#include <vector>
+
+#include "../common/check.cuh"
 #include "batch_context.cuh"
 
 namespace olfgpu {
+
+// The installed slots as a device mask (1: installed), or nullptr when the install covers the bank: a kernel seeding or
+// resetting per-slot state then does every slot, as it did before installs per slot.
+inline const char* installMaskOrNull(const BatchSolverContext* ctx) {
+    return ctx->installSlots.empty() ? nullptr : static_cast<const char*>(ctx->dInstallMask.p);
+}
+
+// Per slot of the bank, 1 for an installed one (every slot when the install covers the bank).
+inline std::vector<char> installedFlags(const BatchSolverContext* ctx) {
+    std::vector<char> flags(ctx->nScenarios, ctx->installSlots.empty() ? 1 : 0);
+    for (int s : ctx->installSlots) {
+        flags[s] = 1;
+    }
+    return flags;
+}
+
+// Host rows, `width` values per installed slot in the install's order, into the bank's per-slot device array.
+template <typename T>
+void writeInstalledRows(const BatchSolverContext* ctx, T* device, const T* rows, size_t width) {
+    if (ctx->installSlots.empty()) {
+        CUDA_CHECK(cudaMemcpy(device, rows, static_cast<size_t>(ctx->nScenarios) * width * sizeof(T), cudaMemcpyHostToDevice));
+        return;
+    }
+    for (int j = 0; j < installedSlotCount(ctx); j++) {
+        CUDA_CHECK(cudaMemcpy(device + static_cast<size_t>(installedSlot(ctx, j)) * width, rows + static_cast<size_t>(j) * width,
+                              width * sizeof(T), cudaMemcpyHostToDevice));
+    }
+}
+
+// The installed slots' rows of a per-slot device array copied from another one of the same layout, on the stream.
+template <typename T>
+void copyInstalledRows(const BatchSolverContext* ctx, T* device, const T* from, size_t width) {
+    if (ctx->installSlots.empty()) {
+        CUDA_CHECK(cudaMemcpyAsync(device, from, static_cast<size_t>(ctx->nScenarios) * width * sizeof(T), cudaMemcpyDeviceToDevice,
+                                   ctx->stream));
+        return;
+    }
+    for (int s : ctx->installSlots) {
+        CUDA_CHECK(cudaMemcpyAsync(device + static_cast<size_t>(s) * width, from + static_cast<size_t>(s) * width, width * sizeof(T),
+                                   cudaMemcpyDeviceToDevice, ctx->stream));
+    }
+}
+
+// Every byte of the installed slots' rows of a per-slot device array (`rowBytes` per slot) set to `byte`, on the stream.
+inline void memsetInstalledRows(const BatchSolverContext* ctx, void* device, size_t rowBytes, int byte) {
+    auto* p = static_cast<unsigned char*>(device);
+    if (ctx->installSlots.empty()) {
+        CUDA_CHECK(cudaMemsetAsync(p, byte, static_cast<size_t>(ctx->nScenarios) * rowBytes, ctx->stream));
+        return;
+    }
+    for (int s : ctx->installSlots) {
+        CUDA_CHECK(cudaMemsetAsync(p + static_cast<size_t>(s) * rowBytes, byte, rowBytes, ctx->stream));
+    }
+}
+
+// A parameter of type T that does not take part in deducing T (C++20's std::type_identity_t): the array a helper writes
+// names the type, and a null row or a literal fill value converts to it.
+template <typename T>
+struct SlotValue {
+    using Type = T;
+};
+
+// The installed slots' rows of a per-slot device array (`width` values per slot) back to `row` (the same `width` values
+// for every slot) or, row null, every value to `value`: a solve's per-slot state starting afresh for the scenarios it
+// installs, the other slots' left as they are.
+template <typename T>
+void resetInstalledRows(const BatchSolverContext* ctx, T* device, size_t width, const typename SlotValue<T>::Type* row,
+                        typename SlotValue<T>::Type value = T()) {
+    if (device == nullptr || width == 0) {
+        return;
+    }
+    T zero{};
+    if (row == nullptr && std::memcmp(&value, &zero, sizeof(T)) == 0) {
+        memsetInstalledRows(ctx, device, width * sizeof(T), 0);
+        return;
+    }
+    const int nRows = installedSlotCount(ctx);
+    std::vector<T> rows(static_cast<size_t>(nRows) * width, value);
+    for (int j = 0; j < nRows && row != nullptr; j++) {
+        std::copy(row, row + width, rows.begin() + static_cast<size_t>(j) * width);
+    }
+    writeInstalledRows(ctx, device, rows.data(), width);
+}
+
+// The installed slots' entries of a per-slot host vector, sized for the bank, back to `value`.
+template <typename T>
+void resetInstalledEntries(const BatchSolverContext* ctx, std::vector<T>& entries, T value) {
+    entries.resize(ctx->nScenarios, value);
+    if (ctx->installSlots.empty()) {
+        std::fill(entries.begin(), entries.end(), value);
+        return;
+    }
+    for (int s : ctx->installSlots) {
+        entries[s] = value;
+    }
+}
 
 struct ScenarioInputs {
     const double* x0 = nullptr;                              // the base state (n)

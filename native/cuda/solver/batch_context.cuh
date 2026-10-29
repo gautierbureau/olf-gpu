@@ -45,6 +45,7 @@ struct BatchSolverContext {
     // those slots' entries are rewritten. Empty: every slot, local slot = bank slot (a whole chunk).
     std::vector<int> installSlots;
     DeviceBuf dInstallSlots;                                 // the install slots on the device (every slot of an install of the bank)
+    DeviceBuf dInstallMask;                                  // per slot, 1: installed by the current install
     DeviceBuf dXBase, dBaseMode;                             // the base state and row modes an installed slot starts from
     // Per slot, a generator loss at a DS participant bus: the bus (-1: none) and its factor, base target P, headroom and
     // footroom deltas.

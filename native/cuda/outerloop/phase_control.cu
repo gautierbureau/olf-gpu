@@ -20,6 +20,7 @@
 #include "phase_control.cuh"
 #include "../common/trace.cuh"
 #include "../solver/scenario_override_tables.cuh"
+#include "../solver/scenario_install.cuh"
 
 namespace olfgpu {
 
@@ -87,14 +88,11 @@ __global__ void phaseControlCountCheckBatch(int nScenarios, const char* outerLoo
 }
 
 // Per-solve reset. Continuous phase control: base taps, check count 0.
-void phaseControlResetSolve(BatchSolverContext* ctx, DriverPass& drv) {
-    const int& nS = drv.nS;
-    size_t nst = static_cast<size_t>(nS) * ctx->nPhaseControlControllerBranches;
-    std::vector<int> cur(nst);
-    for (int s2 = 0; s2 < nS; s2++) for (int c = 0; c < ctx->nPhaseControlControllerBranches; c++) cur[static_cast<size_t>(s2) * ctx->nPhaseControlControllerBranches + c] = ctx->hPhaseControlBaseTap[c];
-    CUDA_CHECK(cudaMemcpy(ctx->dPhaseControlTap.p, cur.data(), nst * sizeof(int), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(ctx->dPhaseControlAppliedTap.p, cur.data(), nst * sizeof(int), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemset(ctx->dPhaseControlCheckCount.p, 0, nS * sizeof(int)));
+void phaseControlResetSolve(BatchSolverContext* ctx, DriverPass&) {
+    const size_t nc = static_cast<size_t>(ctx->nPhaseControlControllerBranches);
+    resetInstalledRows(ctx, ctx->dPhaseControlTap.as<int>(), nc, ctx->hPhaseControlBaseTap.data());
+    resetInstalledRows(ctx, ctx->dPhaseControlAppliedTap.as<int>(), nc, ctx->hPhaseControlBaseTap.data());
+    resetInstalledRows(ctx, ctx->dPhaseControlCheckCount.as<int>(), 1, nullptr, 0);
 }
 
 void phaseControlStep(BatchSolverContext* ctx, DriverPass& drv) {

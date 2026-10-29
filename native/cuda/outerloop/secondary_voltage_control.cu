@@ -28,6 +28,7 @@
 #include "secondary_voltage_control.cuh"
 #include "../common/trace.cuh"
 #include "../solver/scenario_override_tables.cuh"
+#include "../solver/scenario_install.cuh"
 
 namespace olfgpu {
 
@@ -326,18 +327,13 @@ static SecondaryVoltageControlTables secondaryVoltageControlTables(BatchSolverCo
 }
 
 // Per-solve reset. Secondary voltage control: zone targets back at the network's own, nothing adjusted yet.
-void secondaryVoltageControlResetSolve(BatchSolverContext* ctx, DriverPass& drv) {
-    const int& nS = drv.nS;
-    size_t nsc = static_cast<size_t>(nS) * ctx->nSecondaryVoltageControlControllerBuses;
-    std::vector<double> tv(nsc);
-    for (int s2 = 0; s2 < nS; s2++) {
-        for (int c = 0; c < ctx->nSecondaryVoltageControlControllerBuses; c++) tv[static_cast<size_t>(s2) * ctx->nSecondaryVoltageControlControllerBuses + c] = ctx->hSecondaryVoltageControlBaseTargetV[c];
-    }
+void secondaryVoltageControlResetSolve(BatchSolverContext* ctx, DriverPass&) {
+    const size_t nc = static_cast<size_t>(ctx->nSecondaryVoltageControlControllerBuses);
     CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
-    CUDA_CHECK(cudaMemcpy(ctx->dSecondaryVoltageControlTargetV.p, tv.data(), nsc * sizeof(double), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemset(ctx->dSecondaryVoltageControlNeedsAdjustment.p, 0, nS));
-    CUDA_CHECK(cudaMemset(ctx->dSecondaryVoltageControlRejected.p, 0, nS));
-    CUDA_CHECK(cudaMemset(ctx->dSecondaryVoltageControlControllerBusEnabled.p, 1, nsc));
+    resetInstalledRows(ctx, ctx->dSecondaryVoltageControlTargetV.as<double>(), nc, ctx->hSecondaryVoltageControlBaseTargetV.data());
+    resetInstalledRows(ctx, ctx->dSecondaryVoltageControlNeedsAdjustment.as<char>(), 1, nullptr, char(0));
+    resetInstalledRows(ctx, ctx->dSecondaryVoltageControlRejected.as<char>(), 1, nullptr, char(0));
+    resetInstalledRows(ctx, ctx->dSecondaryVoltageControlControllerBusEnabled.as<char>(), nc, nullptr, char(1));
 }
 
 void secondaryVoltageControlStep(BatchSolverContext* ctx, DriverPass& drv) {

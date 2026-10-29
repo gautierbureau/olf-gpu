@@ -142,17 +142,17 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     // the slack (a plain scenario, no anchor shift).
     in.distributedSlackBusAnchorShift = distributedSlackBusAnchorShift;
     in.slackBusAnchorShift = slackBusAnchorShift;
-    ctx->outerLoopFirstSolveIterations.assign(nS, 0);
-    ctx->outerLoopIterations.assign(nS, 0);
-    ctx->outerLoopSolvePasses.assign(nS, 0);
-    ctx->outerLoopChecks.assign(nS, 0);
+    resetInstalledEntries(ctx, ctx->outerLoopFirstSolveIterations, 0);
+    resetInstalledEntries(ctx, ctx->outerLoopIterations, 0);
+    resetInstalledEntries(ctx, ctx->outerLoopSolvePasses, 0);
+    resetInstalledEntries(ctx, ctx->outerLoopChecks, 0);
     installScenarios(ctx, in);
 
     // a new chunk's scenarios hold no identity system yet (a lane its scenarios leave unused keeps whatever the last one
     // left there)
     CUDA_CHECK(cudaMemsetAsync(ctx->dIdentityLane.p, 0, static_cast<size_t>(nS) * sizeof(char), ctx->stream));
     std::vector<char>& active = drv.active;
-    active.assign(nS, 1);
+    active = installedFlags(ctx);                            // the installed scenarios solve
 
     BatchResult& res = drv.res;
     res.x.resize(nTot);
@@ -274,12 +274,11 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     }
     if (fullLoadflow && ctx->nSecondaryVoltageControlControllerBuses > 0) {
         // BEFORE the reactive-limit seeding below, which consults it: no zone has moved a target yet.
-        std::vector<double> nanv(static_cast<size_t>(nS) * std::max(ctx->nReactiveLimitEntries, 1), std::nan(""));
-        CUDA_CHECK(cudaMemcpy(ctx->dSecondaryVoltageControlReactiveLimitTargetV.p, nanv.data(), nanv.size() * sizeof(double), cudaMemcpyHostToDevice));
+        resetInstalledRows(ctx, ctx->dSecondaryVoltageControlReactiveLimitTargetV.as<double>(),
+                           static_cast<size_t>(std::max(ctx->nReactiveLimitEntries, 1)), nullptr, std::nan(""));
     }
     // no inner solve has converged yet: the start
-    CUDA_CHECK(cudaMemcpyAsync(ctx->dXLastConv.p, ctx->dX.p, static_cast<size_t>(nS) * n * sizeof(double),
-                               cudaMemcpyDeviceToDevice, ctx->stream));
+    copyInstalledRows(ctx, ctx->dXLastConv.as<double>(), ctx->dX.as<double>(), static_cast<size_t>(n));
     if (fullLoadflow) {                                      // per-solve PV↔PQ state: 0 switches, limitType from base
         seedSolve(ctx, drv, reactiveLimitsSeedState);
     }

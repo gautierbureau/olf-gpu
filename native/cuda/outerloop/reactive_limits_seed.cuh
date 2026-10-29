@@ -17,7 +17,7 @@ __global__ void initReactiveLimitQLimitTypeBatch(int nReactiveLimitEntries, int 
                                      const char* reactiveLimitVoltageControlRole, const int* reactiveLimitComparedVoltageRow,
                                      const double* target, const double* reactiveLimitBaseMinQ, const double* reactiveLimitBaseMaxQ,
                                      const double* reactiveLimitBaseLoadQ, const char* reactiveLimitBaseQLimitType,
-                                     const int* pilotSelfReactiveLimitEntry, int nReactiveRelocationGroups, const char* reactiveLimitGeneratorsLost);
+                                     const int* pilotSelfReactiveLimitEntry, int nReactiveRelocationGroups, const char* reactiveLimitGeneratorsLost, const char* installed);
 
 __global__ void seedReactiveLimitRowModeFromState(int nReactiveLimitEntries, int nScenarios, int n, const int* reactiveLimitVoltageRow, const int* reactiveLimitReactivePowerRow,
                                     const double* reactiveLimitMinQ, const double* reactiveLimitMaxQ, const double* reactiveLimitLoadQ,
@@ -26,7 +26,7 @@ __global__ void seedReactiveLimitRowModeFromState(int nReactiveLimitEntries, int
                                     const char* reactiveLimitBaseQLimitType, const int* pilotSelfReactiveLimitEntry, int nReactiveRelocationGroups,
                                     const double* reactiveLimitTargetV, SlotEntries reactiveLimitTargetVOverrides,
                                     const double* secondaryVoltageControlReactiveLimitTargetV, const char* reactiveLimitLocalOverride, const double* reactiveLimitLocalTargetV,
-                                    const double* reactiveLimitSeedTargetQ, const char* reactiveLimitIslanded);
+                                    const double* reactiveLimitSeedTargetQ, const char* reactiveLimitIslanded, const char* installed);
 
 __global__ void exportReactiveLimitTargetQ(int nReactiveLimitEntries, int nScenarios, int n, const int* reactiveLimitVoltageRow, const int* reactiveLimitReactivePowerRow,
                                    const char* limitType, const int* mode, const double* target, const char* reactiveLimitIslanded,

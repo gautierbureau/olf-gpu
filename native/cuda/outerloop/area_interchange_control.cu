@@ -15,6 +15,7 @@
 #include "../equations/generated/closed_branch.cuh"
 #include "../equations/generated/open_branch.cuh"
 #include "../equations/scenario_overrides.cuh"
+#include "../solver/scenario_install.cuh"
 #include "../solver/scenario_override_tables.cuh"
 #include "distributed_slack.cuh"
 #include "slack_participants.cuh"
@@ -502,11 +503,12 @@ __global__ void areaInterchangeControlBatch(Tables t) {
 }
 
 __global__ void areaInterchangeControlResetSolveBatch(int nS, int nGenerators, const double* initialMove, double* move, char* moveValid,
-                                                     double* distributedActivePower) {
+                                                     double* distributedActivePower, const char* installed) {
     int s = blockIdx.x * blockDim.x + threadIdx.x;
     if (s >= nS) {
         return;
     }
+    if (installed != nullptr && !installed[s]) return;   // a slot this install does not seed
     for (int g = 0; g < nGenerators; g++) {
         move[(size_t) s * nGenerators + g] = initialMove != nullptr ? initialMove[(size_t) s * nGenerators + g] : 0.0;
     }
@@ -520,13 +522,13 @@ void areaInterchangeControlResetSolve(BatchSolverContext* ctx, DriverPass& drv) 
     const int& nS = drv.nS;
     ctx->dAreaInterchangeControlDistributedActivePower.alloc((size_t) nS * sizeof(double));
     if (ctx->nAreas == 0 || ctx->nDistributedSlackGenerators == 0) {
-        CUDA_CHECK(cudaMemsetAsync(ctx->dAreaInterchangeControlDistributedActivePower.p, 0, (size_t) nS * sizeof(double), ctx->stream));
+        resetInstalledRows(ctx, ctx->dAreaInterchangeControlDistributedActivePower.as<double>(), 1, nullptr, 0.0);
         return;
     }
     areaInterchangeControlResetSolveBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(nS, ctx->nDistributedSlackGenerators,
             ctx->distributedSlackGeneratorInitialMove.deviceOrNull(),
             ctx->dDistributedSlackGeneratorMove.as<double>(), ctx->dDistributedSlackGeneratorMoveValid.as<char>(),
-            ctx->dAreaInterchangeControlDistributedActivePower.as<double>());
+            ctx->dAreaInterchangeControlDistributedActivePower.as<double>(), installMaskOrNull(ctx));
 }
 
 void areaInterchangeControlCheck(BatchSolverContext* ctx, DriverPass& drv) {

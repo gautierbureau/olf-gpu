@@ -18,6 +18,7 @@
 #include "../solver/driver_steps.cuh"
 #include "shunt_voltage_control.cuh"
 #include "../common/trace.cuh"
+#include "../solver/scenario_install.cuh"
 
 namespace olfgpu {
 
@@ -79,9 +80,10 @@ __device__ inline void shuntVoltageControlLayoutGroup(const ShuntVoltageControlT
 }
 
 __global__ void shuntVoltageControlEntryBatch(ShuntVoltageControlTables T, int nScenarios, int n, int nElements, int entryOn,
-                              const char* disabled, int* mode, double* target, double* x) {
+                              const char* disabled, int* mode, double* target, double* x, const char* installed) {
     int s = blockIdx.x * blockDim.x + threadIdx.x;
     if (s >= nScenarios) return;
+    if (installed != nullptr && !installed[s]) return;   // a slot this install does not seed
     size_t sn = (size_t) s * n;
     for (int g = 0; g < T.nGroups; g++) {
         if (!shuntVoltageControlGroupLive(T, s, nElements, g, disabled)) continue;
@@ -175,21 +177,17 @@ void shuntVoltageControlStep(BatchSolverContext* ctx, DriverPass& drv) {
 void shuntVoltageControlResetSolve(BatchSolverContext* ctx, DriverPass& drv) {
     const int& n = drv.n;
     const int& nS = drv.nS;
-    size_t nsm = static_cast<size_t>(nS) * ctx->nShuntVoltageControlMembers;
-    size_t nsg = static_cast<size_t>(nS) * ctx->nShuntVoltageControlGroups;
-    size_t nsd = static_cast<size_t>(nS) * std::max(ctx->nShuntVoltageControlDeltaRows, 1);
-    size_t nsu = static_cast<size_t>(nS) * std::max(ctx->nShuntVoltageControlShuntCompensators, 1);
-    std::vector<int> pos(nsu);
-    for (int s2 = 0; s2 < nS; s2++) for (int u = 0; u < ctx->nShuntVoltageControlShuntCompensators; u++) pos[static_cast<size_t>(s2) * ctx->nShuntVoltageControlShuntCompensators + u] = 0;
-    std::vector<double> nanv(std::max(nsm, nsd), std::nan(""));
+    const double nan = std::nan("");
     CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
-    CUDA_CHECK(cudaMemcpy(ctx->dShuntVoltageControlShuntCompensatorPosition.p, pos.data(), nsu * sizeof(int), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemset(ctx->dShuntVoltageControlMemberState.p, 0, nsm * sizeof(int)));
-    CUDA_CHECK(cudaMemcpy(ctx->dShuntVoltageControlMemberContinuousB.p, nanv.data(), nsm * sizeof(double), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(ctx->dShuntVoltageControlSavedDeltaTarget.p, nanv.data(), nsd * sizeof(double), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemset(ctx->dShuntVoltageControlGroupStep.p, 0, nsg * sizeof(int)));
+    resetInstalledRows(ctx, ctx->dShuntVoltageControlShuntCompensatorPosition.as<int>(),
+                       static_cast<size_t>(std::max(ctx->nShuntVoltageControlShuntCompensators, 1)), nullptr, 0);
+    resetInstalledRows(ctx, ctx->dShuntVoltageControlMemberState.as<int>(), ctx->nShuntVoltageControlMembers, nullptr, 0);
+    resetInstalledRows(ctx, ctx->dShuntVoltageControlMemberContinuousB.as<double>(), ctx->nShuntVoltageControlMembers, nullptr, nan);
+    resetInstalledRows(ctx, ctx->dShuntVoltageControlSavedDeltaTarget.as<double>(),
+                       static_cast<size_t>(std::max(ctx->nShuntVoltageControlDeltaRows, 1)), nullptr, nan);
+    resetInstalledRows(ctx, ctx->dShuntVoltageControlGroupStep.as<int>(), ctx->nShuntVoltageControlGroups, nullptr, 0);
     shuntVoltageControlEntryBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(shuntVoltageControlTables(ctx), nS, n, ctx->nElements, ctx->shuntVoltageControlEntryOn,
-            ctx->dDisabled.as<char>(), ctx->dMode.as<int>(), ctx->dTarget.as<double>(), ctx->dX.as<double>());
+            ctx->dDisabled.as<char>(), ctx->dMode.as<int>(), ctx->dTarget.as<double>(), ctx->dX.as<double>(), installMaskOrNull(ctx));
     CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
 }
 

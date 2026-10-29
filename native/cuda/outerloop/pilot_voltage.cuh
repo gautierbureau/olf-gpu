@@ -17,12 +17,12 @@ __global__ void pilotSelfGateBatch(int nReactiveRelocationGroups, int nScenarios
 
 __global__ void capturePilotQBatch(int nReactiveRelocationGroups, int nScenarios, int n, const int* reactiveRelocationGroupStart, const int* reactiveRelocationCandidateRows,
                                    const int* baseMode, const double* targetBase, double* pilotQ,
-                                   const int* reactiveRelocationBaseTargetRow);
+                                   const int* reactiveRelocationBaseTargetRow, const char* installed);
 
 __global__ void applyPilotQDeltasBatch(int nScenarios, SlotEntries deltas, int nReactiveRelocationGroups, int n,
                                        const int* reactiveRelocationGroupStart, const int* reactiveRelocationCandidateRows, const int* mode,
                                        const char* distrQSubgroup, int nDistrQMembers, const int* reactiveRelocationDistrQMemberStart,
-                                       double* pilotQ, double* target);
+                                       double* pilotQ, double* target, const char* installed);
 
 __global__ void updatePilotTargetVEquationBatch(int nReactiveRelocationGroups, int nScenarios, int n,
                                     const int* reactiveRelocationGroupStart, const int* reactiveRelocationCandidateRows, const char* reactiveRelocationIsGeneratorVoltageControl,

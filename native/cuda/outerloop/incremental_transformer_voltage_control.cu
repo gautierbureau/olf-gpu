@@ -20,6 +20,7 @@
 #include "sensitivity.cuh"
 #include "incremental_transformer_voltage_control.cuh"
 #include "../common/trace.cuh"
+#include "../solver/scenario_install.cuh"
 
 namespace olfgpu {
 
@@ -187,19 +188,15 @@ __global__ void incrementalTransformerVoltageControlApplyRhoBatch(int nIncrement
 // Per-solve reset. Incremental TVC: every scenario starts at the base tap with a fresh ratchet.
 void incrementalTransformerVoltageControlResetSolve(BatchSolverContext* ctx, DriverPass& drv) {
     const int& nS = drv.nS;
-    size_t nst = static_cast<size_t>(nS) * ctx->nIncrementalTransformerVoltageControlControllerBranches;
-    std::vector<int> cur(nst);
-    for (int s2 = 0; s2 < nS; s2++) {
-        for (int c = 0; c < ctx->nIncrementalTransformerVoltageControlControllerBranches; c++) {
-            cur[static_cast<size_t>(s2) * ctx->nIncrementalTransformerVoltageControlControllerBranches + c] = ctx->hIncrementalTransformerVoltageControlBaseTap[c];
-        }
-    }
+    const size_t nc = static_cast<size_t>(ctx->nIncrementalTransformerVoltageControlControllerBranches);
+    const size_t nst = static_cast<size_t>(nS) * nc;
+    const int* baseTap = ctx->hIncrementalTransformerVoltageControlBaseTap.data();
     ctx->dIncrementalTransformerVoltageControlAppliedTap.ensure(nst * sizeof(int));
-    CUDA_CHECK(cudaMemcpy(ctx->dIncrementalTransformerVoltageControlCurrentTap.p, cur.data(), nst * sizeof(int), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(ctx->dIncrementalTransformerVoltageControlAppliedTap.p, cur.data(), nst * sizeof(int), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemset(ctx->dIncrementalTransformerVoltageControlCurrentDirection.p, 0, nst * sizeof(int)));
-    CUDA_CHECK(cudaMemset(ctx->dIncrementalTransformerVoltageControlDirectionChangeCount.p, 0, nst * sizeof(int)));
-    CUDA_CHECK(cudaMemset(ctx->dIncrementalTransformerVoltageControlAllowedDirection.p, 0, nst * sizeof(int)));
+    resetInstalledRows(ctx, ctx->dIncrementalTransformerVoltageControlCurrentTap.as<int>(), nc, baseTap);
+    resetInstalledRows(ctx, ctx->dIncrementalTransformerVoltageControlAppliedTap.as<int>(), nc, baseTap);
+    resetInstalledRows(ctx, ctx->dIncrementalTransformerVoltageControlCurrentDirection.as<int>(), nc, nullptr, 0);
+    resetInstalledRows(ctx, ctx->dIncrementalTransformerVoltageControlDirectionChangeCount.as<int>(), nc, nullptr, 0);
+    resetInstalledRows(ctx, ctx->dIncrementalTransformerVoltageControlAllowedDirection.as<int>(), nc, nullptr, 0);
     ctx->dIncrementalTransformerVoltageControlOutOfDeadband.ensure(nst * sizeof(char));
     ctx->dIncrementalTransformerVoltageControlDiffV.ensure(nst * sizeof(double));
     ctx->dIncrementalTransformerVoltageControlSensitivity.ensure(nst * sizeof(double));

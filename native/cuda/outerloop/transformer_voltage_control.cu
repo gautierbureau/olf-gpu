@@ -23,6 +23,7 @@
 #include "transformer_voltage_control.cuh"
 #include "../common/trace.cuh"
 #include "../solver/scenario_override_tables.cuh"
+#include "../solver/scenario_install.cuh"
 
 namespace olfgpu {
 
@@ -152,9 +153,10 @@ __device__ inline void transformerVoltageControlLayoutGroup(const TransformerVol
 // network OLF's own initialize already switched on (entryOn = 1). AFTER_GENERATOR starts with every
 // control off.
 __global__ void transformerVoltageControlEntryBatch(TransformerVoltageControlTables T, int nScenarios, int n, int nElements, int entryOn,
-                              const char* disabled, int* mode, double* target, double* x) {
+                              const char* disabled, int* mode, double* target, double* x, const char* installed) {
     int s = blockIdx.x * blockDim.x + threadIdx.x;
     if (s >= nScenarios) return;
+    if (installed != nullptr && !installed[s]) return;   // a slot this install does not seed
     size_t sn = (size_t) s * n;
     for (int g = 0; g < T.nGroups; g++) {
         bool any = false;
@@ -438,26 +440,26 @@ void transformerVoltageControlStep(BatchSolverContext* ctx, DriverPass& drv) {
 void transformerVoltageControlResetSolve(BatchSolverContext* ctx, DriverPass& drv) {
     const int& n = drv.n;
     const int& nS = drv.nS;
-    size_t nsm = static_cast<size_t>(nS) * ctx->nTransformerVoltageControlMembers;
-    size_t nsg = static_cast<size_t>(nS) * ctx->nTransformerVoltageControlGroups;
-    size_t nsd = static_cast<size_t>(nS) * std::max(ctx->nTransformerVoltageControlDeltaRows, 1);
-    std::vector<int> tap(nsm);
-    for (int s2 = 0; s2 < nS; s2++) for (int m = 0; m < ctx->nTransformerVoltageControlMembers; m++) tap[static_cast<size_t>(s2) * ctx->nTransformerVoltageControlMembers + m] = ctx->hTransformerVoltageControlMemberBaseTap[m];
-    std::vector<double> nanv(std::max(nsm, nsd), std::nan(""));
+    const double nan = std::nan("");
+    const size_t nm = static_cast<size_t>(ctx->nTransformerVoltageControlMembers);
+    const size_t ng = static_cast<size_t>(ctx->nTransformerVoltageControlGroups);
     CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
-    CUDA_CHECK(cudaMemcpy(ctx->dTransformerVoltageControlMemberTap.p, tap.data(), nsm * sizeof(int), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemset(ctx->dTransformerVoltageControlMemberState.p, 0, nsm * sizeof(int)));
-    CUDA_CHECK(cudaMemcpy(ctx->dTransformerVoltageControlMemberRoundingR1.p, nanv.data(), nsm * sizeof(double), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(ctx->dTransformerVoltageControlSavedDeltaTarget.p, nanv.data(), nsd * sizeof(double), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemset(ctx->dTransformerVoltageControlStep.p, 0, nS * sizeof(int)));
-    CUDA_CHECK(cudaMemset(ctx->dTransformerVoltageControlGroupStep.p, 0, nsg * sizeof(int)));
-    CUDA_CHECK(cudaMemset(ctx->dTransformerVoltageControlGroupSharedMinR1.p, 0, nsg * sizeof(double)));
-    CUDA_CHECK(cudaMemset(ctx->dTransformerVoltageControlGroupSharedMaxR1.p, 0, nsg * sizeof(double)));
-    CUDA_CHECK(cudaMemset(ctx->dTransformerVoltageControlGroupSharedInitialR1.p, 0, nsg * sizeof(double)));
-    CUDA_CHECK(cudaMemset(ctx->dTransformerVoltageControlRejected.p, 0, nS * sizeof(char)));
-    if (ctx->nGeneratorVoltageControlFreezeCandidates > 0) CUDA_CHECK(cudaMemset(ctx->dGeneratorVoltageControlFrozen.p, 0, static_cast<size_t>(nS) * ctx->nGeneratorVoltageControlFreezeCandidates * sizeof(int)));
+    resetInstalledRows(ctx, ctx->dTransformerVoltageControlMemberTap.as<int>(), nm, ctx->hTransformerVoltageControlMemberBaseTap.data());
+    resetInstalledRows(ctx, ctx->dTransformerVoltageControlMemberState.as<int>(), nm, nullptr, 0);
+    resetInstalledRows(ctx, ctx->dTransformerVoltageControlMemberRoundingR1.as<double>(), nm, nullptr, nan);
+    resetInstalledRows(ctx, ctx->dTransformerVoltageControlSavedDeltaTarget.as<double>(),
+                       static_cast<size_t>(std::max(ctx->nTransformerVoltageControlDeltaRows, 1)), nullptr, nan);
+    resetInstalledRows(ctx, ctx->dTransformerVoltageControlStep.as<int>(), 1, nullptr, 0);
+    resetInstalledRows(ctx, ctx->dTransformerVoltageControlGroupStep.as<int>(), ng, nullptr, 0);
+    resetInstalledRows(ctx, ctx->dTransformerVoltageControlGroupSharedMinR1.as<double>(), ng, nullptr, 0.0);
+    resetInstalledRows(ctx, ctx->dTransformerVoltageControlGroupSharedMaxR1.as<double>(), ng, nullptr, 0.0);
+    resetInstalledRows(ctx, ctx->dTransformerVoltageControlGroupSharedInitialR1.as<double>(), ng, nullptr, 0.0);
+    resetInstalledRows(ctx, ctx->dTransformerVoltageControlRejected.as<char>(), 1, nullptr, char(0));
+    if (ctx->nGeneratorVoltageControlFreezeCandidates > 0) {
+        resetInstalledRows(ctx, ctx->dGeneratorVoltageControlFrozen.as<int>(), ctx->nGeneratorVoltageControlFreezeCandidates, nullptr, 0);
+    }
     transformerVoltageControlEntryBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(transformerVoltageControlTables(ctx), nS, n, ctx->nElements, ctx->transformerVoltageControlEntryOn,
-            ctx->dDisabled.as<char>(), ctx->dMode.as<int>(), ctx->dTarget.as<double>(), ctx->dX.as<double>());
+            ctx->dDisabled.as<char>(), ctx->dMode.as<int>(), ctx->dTarget.as<double>(), ctx->dX.as<double>(), installMaskOrNull(ctx));
     CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
 }
 

@@ -63,9 +63,10 @@ __device__ double forcedTargetQGeneratorTargetP(int s, int e, int n, int nDistri
 __global__ void forcedTargetQInitBatch(int nForcedTargetQ, int nS, int n, int nDistributedSlackBuses, int extrapolate, const int* forcedTargetQIndices,
                                        const double* forcedTargetQParameters, const double* forcedTargetQPoints, const double* forcedTargetQPreDistribution,
                                        SlotEntries lost, const char* distributedSlackIslanded, const int* mode,
-                                       double* target, double* applied) {
+                                       double* target, double* applied, const char* installed) {
     int s = blockIdx.x * blockDim.x + threadIdx.x;
     if (s >= nS) return;
+    if (installed != nullptr && !installed[s]) return;   // a slot this install does not seed
     for (int e = 0; e < nForcedTargetQ; e++) {
         double base = forcedTargetQParameters[e * 5 + 2];
         applied[(size_t) s * nForcedTargetQ + e] = base;

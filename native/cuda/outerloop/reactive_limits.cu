@@ -521,9 +521,9 @@ void reactiveLimitsCheck(BatchSolverContext* ctx, DriverPass& drv, int loopKind)
                     ctx->dTarget.as<double>(),
                     ctx->reactiveLimitDeltaOverrides.view(), ctx->reactiveCapabilityCurveOverrides.view(),
                     ctx->nDistributedSlackGenerators > 0 ? ctx->dDistributedSlackGeneratorMove.as<double>() : nullptr,
-                    ctx->nDistributedSlackGenerators > 0 ? ctx->dDistributedSlackGeneratorMoveValid.as<char>() : nullptr, ctx->hasDistributedSlackGeneratorAnchor ? ctx->dDistributedSlackGeneratorAnchor.as<double>() : nullptr, ctx->hasDistributedSlackGeneratorInitialMove ? ctx->dDistributedSlackGeneratorInitialMove.as<double>() : nullptr, ctx->nDistributedSlackGenerators,
+                    ctx->nDistributedSlackGenerators > 0 ? ctx->dDistributedSlackGeneratorMoveValid.as<char>() : nullptr, ctx->distributedSlackGeneratorAnchor.deviceOrNull(), ctx->distributedSlackGeneratorInitialMove.deviceOrNull(), ctx->nDistributedSlackGenerators,
                     ctx->nDistributedSlackBuses > 0 ? ctx->dDistributedSlackBusPhiRow.as<int>() : nullptr,
-                    ctx->nDistributedSlackBusRowOverrides > 0 ? ctx->dDistributedSlackBusRowOverride.as<int>() : nullptr, ctx->nDistributedSlackBuses,
+                    ctx->distributedSlackBusRowOverride.deviceOrNull(), ctx->nDistributedSlackBuses,
                     ctx->nDistributedSlackGenerators > 0 ? ctx->distributedSlackGeneratorBus.as<int>() : nullptr,
                     ctx->dReactiveLimitMinQPerScenario.as<double>(), ctx->dReactiveLimitMaxQPerScenario.as<double>(),
                     ctx->dReactiveLimitLoadQPerScenario.as<double>(), ctx->dOuterLoopCheckActive.as<char>());
@@ -549,16 +549,16 @@ void reactiveLimitsCheck(BatchSolverContext* ctx, DriverPass& drv, int loopKind)
                 ctx->nReactiveLimitRemoteEntries > 0 ? ctx->dReactiveLimitComparedVoltageRow.as<int>() : nullptr,
                 ctx->dReactiveLimitSvcMinB.as<double>(), ctx->dReactiveLimitSvcMaxB.as<double>(), ctx->dReactiveLimitBaseVSquared.as<double>(),
                 hasPerScenarioSvcSusceptanceLimits ? ctx->dReactiveLimitSvcMinBPerScenario.as<double>() : nullptr, hasPerScenarioSvcSusceptanceLimits ? ctx->dReactiveLimitSvcMaxBPerScenario.as<double>() : nullptr,
-                ctx->nReactiveLimitIslanded > 0 ? ctx->dReactiveLimitIslanded.as<char>() : nullptr,
+                ctx->reactiveLimitIslanded.deviceOrNull(),
                 ctx->reactiveLimitsRobustMode ? ctx->dReactiveLimitInitialTargetQ.as<double>() : nullptr,
                 ctx->reactiveLimitsRobustMinRealisticVoltage, ctx->reactiveLimitsRobustMaxRealisticVoltage, ctx->reactiveLimitsRobustMode,
                 reactiveLimitsDecisionLogScenario, ctx->dReactiveLimitsDecisionLog.p ? ctx->dReactiveLimitsDecisionLog.as<double>() : nullptr,
                 ctx->dReactiveLimitsDecisionLogCount.p ? ctx->dReactiveLimitsDecisionLogCount.as<int>() : nullptr, outer,
                 pilotSelfReactiveLimitEntryOrNull(ctx), ctx->structure->nReactiveRelocationGroups,
-                ctx->nReactiveLimitLocalOverrides > 0 ? ctx->dReactiveLimitLocalOverride.as<char>() : nullptr,
-                ctx->nReactiveLimitLocalOverrides > 0 ? ctx->dReactiveLimitLocalTargetV.as<double>() : nullptr,
+                ctx->reactiveLimitLocalOverride.deviceOrNull(),
+                ctx->reactiveLimitLocalTargetV.deviceOrNull(),
                 ctx->dReactiveLimitFlags.p ? ctx->dReactiveLimitFlags.as<char>() : nullptr,
-                ctx->nReactiveLimitComparedVoltageRowOverrides > 0 ? ctx->dReactiveLimitComparedVoltageRowOverride.as<int>() : nullptr,
+                ctx->reactiveLimitComparedVoltageRowOverride.deviceOrNull(),
                 ctx->reMergedVoltageTargets.entries() > 0 ? ctx->dReactiveLimitHoldsReMergedVoltageTarget.as<char>() : nullptr,
                 ctx->reMergedVoltageTargets.entries() > 0 ? ctx->dReactiveLimitReMergedVoltageRow.as<int>() : nullptr,
                 ctx->dReactiveLimitRemainingPvBusCount.as<int>(), ctx->dReactiveLimitSwitchedRow.as<int>());
@@ -569,10 +569,10 @@ void reactiveLimitsCheck(BatchSolverContext* ctx, DriverPass& drv, int loopKind)
             CUDA_CHECK(cudaMemsetAsync(ctx->dPilotSelfMixedPvPqRejected.p, 0, nS * sizeof(char), ctx->stream));
             pilotSelfMixedPvPqGate<<<grid(ctx->nReactiveLimitEntries * nS), BLOCK, 0, ctx->stream>>>(ctx->nReactiveLimitEntries, nS,
                     ctx->dReactiveLimitVoltageControlRole.as<char>(), ctx->dReactiveLimitComparedVoltageRow.as<int>(), ctx->dReactiveLimitQLimitType.as<char>(),
-                    ctx->nReactiveLimitIslanded > 0 ? ctx->dReactiveLimitIslanded.as<char>() : nullptr,
+                    ctx->reactiveLimitIslanded.deviceOrNull(),
                     ctx->dOuterLoopCheckActive.as<char>(), ctx->dPilotSelfMixedPvPqRejected.as<char>(),
                     pilotSelfReactiveLimitEntryOrNull(ctx), ctx->structure->nReactiveRelocationGroups,
-                ctx->nDistrQMembers, ctx->dDistrQMemberReactiveLimitEntry.p != nullptr ? ctx->dDistrQMemberReactiveLimitEntry.as<int>() : nullptr, ctx->hasDistrQSubgroups ? ctx->dDistrQSubgroup.as<char>() : nullptr);
+                ctx->nDistrQMembers, ctx->dDistrQMemberReactiveLimitEntry.p != nullptr ? ctx->dDistrQMemberReactiveLimitEntry.as<int>() : nullptr, ctx->distrQSubgroup.deviceOrNull());
             std::vector<char> mixed(nS);
             CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
             CUDA_CHECK(cudaMemcpy(mixed.data(), ctx->dPilotSelfMixedPvPqRejected.p, nS * sizeof(char), cudaMemcpyDeviceToHost));

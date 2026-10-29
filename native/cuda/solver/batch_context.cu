@@ -351,38 +351,15 @@ void uploadBatchOverrides(BatchSolverContext* ctx, int stateVectorScalingMode, d
     // index, not the global element index).
     installShuntAdmittanceOverrides(ctx, nShuntAdmittanceOverrides, shuntAdmittanceOverrideScenarioElement, shuntAdmittanceOverrideDelta);
     ctx->nBaseClosedZeroImpedanceBranches = nBaseClosedZeroImpedanceBranches > 0 ? nBaseClosedZeroImpedanceBranches : ctx->nZeroImpedanceBranch;         // default: every zero-impedance element always enabled
-    ctx->nZeroImpedanceBranchOpenOverrides = nZeroImpedanceBranchOpenOverrides;
-    if (nZeroImpedanceBranchOpenOverrides > 0) {
-        ctx->dZeroImpedanceBranchOpenScenarioElement.upload(zeroImpedanceBranchOpenScenarioElement, static_cast<size_t>(nZeroImpedanceBranchOpenOverrides) * 2 * sizeof(int));
-    } else if (!ctx->dZeroImpedanceBranchOpenScenarioElement.p) {
-        int noZeroImpedanceBranchOpenOverride[2] = {-1, -1};
-        ctx->dZeroImpedanceBranchOpenScenarioElement.upload(noZeroImpedanceBranchOpenOverride, sizeof(noZeroImpedanceBranchOpenOverride));
-    }
-    ctx->nZeroImpedanceBranchCloseOverrides = nZeroImpedanceBranchCloseOverrides;
-    if (nZeroImpedanceBranchCloseOverrides > 0) {
-        ctx->dZeroImpedanceBranchCloseScenarioElement.upload(zeroImpedanceBranchCloseScenarioElement, static_cast<size_t>(nZeroImpedanceBranchCloseOverrides) * 2 * sizeof(int));
-    } else if (!ctx->dZeroImpedanceBranchCloseScenarioElement.p) {
-        int noZeroImpedanceBranchCloseOverride[2] = {-1, -1};
-        ctx->dZeroImpedanceBranchCloseScenarioElement.upload(noZeroImpedanceBranchCloseOverride, sizeof(noZeroImpedanceBranchCloseOverride));
-    }
-    if (ctx->nZeroImpedanceBranch > 0) {                                      // the dense (scenario, element) forms (see dZeroImpedanceBranchOpenMask)
-        size_t len = static_cast<size_t>(ctx->nScenarios) * ctx->nZeroImpedanceBranch;
-        std::vector<char> off(len, 0), on(len, 0);
-        for (int k = 0; k < nZeroImpedanceBranchOpenOverrides; k++) {
-            int sl = zeroImpedanceBranchOpenScenarioElement[2 * k], e = zeroImpedanceBranchOpenScenarioElement[2 * k + 1];
-            if (sl >= 0 && sl < ctx->nScenarios && e >= 0 && e < ctx->nZeroImpedanceBranch) off[(size_t) sl * ctx->nZeroImpedanceBranch + e] = 1;
+    if (ctx->nZeroImpedanceBranch > 0) {                                      // the dense (slot, element) forms (see zeroImpedanceBranchOpenMask)
+        const size_t width = static_cast<size_t>(ctx->nZeroImpedanceBranch);
+        ctx->zeroImpedanceBranchOpenMask.installEntries(nS, ctx->installSlots, width, nZeroImpedanceBranchOpenOverrides,
+                                                        zeroImpedanceBranchOpenScenarioElement, nullptr, 1);
+        ctx->zeroImpedanceBranchCloseMask.installEntries(nS, ctx->installSlots, width, nZeroImpedanceBranchCloseOverrides,
+                                                         zeroImpedanceBranchCloseScenarioElement, nullptr, 1);
+        if (ctx->spanningTreeOverrideMask.width() != width) {   // no tree override installed yet: the extraction's tree
+            ctx->spanningTreeOverrideMask.installEntries(nS, {}, width, 0, nullptr, nullptr);
         }
-        for (int k = 0; k < nZeroImpedanceBranchCloseOverrides; k++) {
-            int sl = zeroImpedanceBranchCloseScenarioElement[2 * k], e = zeroImpedanceBranchCloseScenarioElement[2 * k + 1];
-            if (sl >= 0 && sl < ctx->nScenarios && e >= 0 && e < ctx->nZeroImpedanceBranch) on[(size_t) sl * ctx->nZeroImpedanceBranch + e] = 1;
-        }
-        ctx->dZeroImpedanceBranchOpenMask.upload(off.data(), len);
-        ctx->dZeroImpedanceBranchCloseMask.upload(on.data(), len);
-        if (!ctx->dSpanningTreeOverrideMask.p) {
-            std::vector<char> tree(len, (char) -1);
-            ctx->dSpanningTreeOverrideMask.upload(tree.data(), len);
-        }
-        ctx->hasZeroImpedanceBranchMasks = true;
         if (traceOn(Trace::PHASE_TIME)) {
             std::fprintf(stderr, "ZI_LISTS nZeroImpedanceBranch=%d nScenarios=%d nZeroImpedanceBranchOpenOverrides=%d nZeroImpedanceBranchCloseOverrides=%d\n", ctx->nZeroImpedanceBranch, ctx->nScenarios, nZeroImpedanceBranchOpenOverrides, nZeroImpedanceBranchCloseOverrides);
         }

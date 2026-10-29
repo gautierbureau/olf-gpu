@@ -124,12 +124,12 @@ void launchForcedTargetQLimits(BatchSolverContext* ctx, int nS, int n, const cha
     if (ctx->nForcedTargetQLimitEntries <= 0) return;
     forcedTargetQLimitsBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(ctx->nForcedTargetQ, nS, n, ctx->nDistributedSlackBuses, ctx->nDistributedSlackGenerators, ctx->nReactiveLimitEntries,
             ctx->forcedTargetQExtrapolate, ctx->dForcedTargetQIndices.as<int>(), ctx->dForcedTargetQParameters.as<double>(), ctx->dForcedTargetQPoints.as<double>(),
-            ctx->hasForcedTargetQPreDistribution ? ctx->dForcedTargetQPreDistribution.as<double>() : nullptr,
+            ctx->forcedTargetQPreDistribution.deviceOrNull(),
             ctx->nDistributedSlackGenerators > 0 ? ctx->dDistributedSlackGeneratorMove.as<double>() : nullptr,
-            ctx->nDistributedSlackGenerators > 0 ? ctx->dDistributedSlackGeneratorMoveValid.as<char>() : nullptr, ctx->hasDistributedSlackGeneratorAnchor ? ctx->dDistributedSlackGeneratorAnchor.as<double>() : nullptr, ctx->hasDistributedSlackGeneratorInitialMove ? ctx->dDistributedSlackGeneratorInitialMove.as<double>() : nullptr,
-            ctx->nDistributedSlackBuses > 0 ? ctx->dDistributedSlackBusPhiRow.as<int>() : nullptr, ctx->nDistributedSlackBusRowOverrides > 0 ? ctx->dDistributedSlackBusRowOverride.as<int>() : nullptr,
+            ctx->nDistributedSlackGenerators > 0 ? ctx->dDistributedSlackGeneratorMoveValid.as<char>() : nullptr, ctx->distributedSlackGeneratorAnchor.deviceOrNull(), ctx->distributedSlackGeneratorInitialMove.deviceOrNull(),
+            ctx->nDistributedSlackBuses > 0 ? ctx->dDistributedSlackBusPhiRow.as<int>() : nullptr, ctx->distributedSlackBusRowOverride.deviceOrNull(),
             ctx->distributedSlackLostGenerators.view(),
-            ctx->nDistributedSlackIslanded > 0 ? ctx->dDistributedSlackIslanded.as<char>() : nullptr, ctx->dMode.as<int>(),
+            ctx->distributedSlackIslanded.deviceOrNull(), ctx->dMode.as<int>(),
             ctx->dTarget.as<double>(), ctx->dReactiveLimitMinQPerScenario.as<double>(), ctx->dReactiveLimitMaxQPerScenario.as<double>(), active);
 }
 

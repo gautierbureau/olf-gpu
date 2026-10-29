@@ -334,12 +334,12 @@ void launchPilotTargetVEquationUpdate(BatchSolverContext* ctx, DriverPass& drv, 
                 ctx->nSecondaryVoltageControlControllerBuses > 0 ? ctx->dSecondaryVoltageControlReactiveLimitTargetV.as<double>() : nullptr,
                 ctx->nDistrQMembers, ctx->dDistrQMemberRelocationGroup.p ? ctx->dDistrQMemberRelocationGroup.as<int>() : nullptr,
                 ctx->dDistrQMemberReactiveLimitEntry.p ? ctx->dDistrQMemberReactiveLimitEntry.as<int>() : nullptr,
-                ctx->nReactiveLimitIslanded > 0 ? ctx->dReactiveLimitIslanded.as<char>() : nullptr,
-                ctx->hasDistrQSubgroups ? ctx->dDistrQSubgroup.as<char>() : nullptr, ctx->hasDistrQSubgroups ? ctx->dReactiveRelocationDistrQMemberStart.as<int>() : nullptr,
-                REACTIVE_LIMIT_TOL, ctx->nReactiveLimitGeneratorsLost > 0 ? ctx->dReactiveLimitGeneratorsLost.as<char>() : nullptr,
+                ctx->reactiveLimitIslanded.deviceOrNull(),
+                ctx->distrQSubgroup.deviceOrNull(), ctx->distrQSubgroup.on() ? ctx->dReactiveRelocationDistrQMemberStart.as<int>() : nullptr,
+                REACTIVE_LIMIT_TOL, ctx->reactiveLimitGeneratorsLost.deviceOrNull(),
                 ctx->structure->dReactiveRelocationDependentBaseGroup.p ? ctx->structure->dReactiveRelocationDependentBaseGroup.as<int>() : nullptr,
                 ctx->structure->dRelocatedChildOwnRow.p ? ctx->structure->dRelocatedChildOwnRow.as<int>() : nullptr,
-                useSeedTargetQ && ctx->hasReactiveLimitSeedTargetQ ? ctx->dReactiveLimitSeedTargetQ.as<double>() : nullptr);
+                useSeedTargetQ ? ctx->reactiveLimitSeedTargetQ.deviceOrNull() : nullptr);
     }
 }
 
@@ -445,7 +445,7 @@ void launchReMergedVoltageTargetRowUpdate(BatchSolverContext* ctx, DriverPass& d
             ctx->nReactiveLimitEntries, reMergedVoltageTargets, ctx->reMergedVoltageTargetControllers.view(),
             ctx->dReactiveLimitVoltageRow.as<int>(), ctx->dReactiveLimitReactivePowerRow.p ? ctx->dReactiveLimitReactivePowerRow.as<int>() : nullptr,
             ctx->structure->dRelocatedChildOwnRow.p ? ctx->structure->dRelocatedChildOwnRow.as<int>() : nullptr,
-            ctx->dReactiveLimitQLimitType.as<char>(), ctx->nReactiveLimitIslanded > 0 ? ctx->dReactiveLimitIslanded.as<char>() : nullptr,
+            ctx->dReactiveLimitQLimitType.as<char>(), ctx->reactiveLimitIslanded.deviceOrNull(),
             ctx->frozenRows.view(),
             ctx->reMergedVoltageTargets.state<int>(0), ctx->dReactiveLimitHoldsReMergedVoltageTarget.as<char>(),
             ctx->dReactiveLimitReMergedVoltageRow.as<int>(), ctx->dMode.as<int>(), ctx->dTarget.as<double>(),

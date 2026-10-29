@@ -91,7 +91,7 @@ void checkOuterLoop(BatchSolverContext* ctx, DriverPass& drv, std::vector<char>&
     // reads the slack row's balance from dQbuf — without the coupler's dummy-P the DS sees a
     // phantom mismatch equal to the through-flow and distributes it FOREVER (measured: +392 MW
     // runaway on the first switch-close scenario until the per-scenario budget rejected it).
-    if (ctx->nZeroImpedanceBranch) fillZeroImpBatch<<<grid(ctx->nZeroImpedanceBranch * nS), BLOCK, 0, ctx->stream>>>(ctx->nZeroImpedanceBranch, nS, n, nnz, ctx->structure->dZeroImpedanceBranchParameters.as<double>(), ctx->structure->dZeroImpedanceBranchIndices.as<int>(), ctx->structure->dZeroImpedanceBranchDestination.as<int>(), ctx->dX.as<double>(), nullptr, ctx->dQbuf.as<double>(), ctx->dOuterLoopCheckActive.as<char>(), ctx->nBaseClosedZeroImpedanceBranches, ctx->nZeroImpedanceBranchCloseOverrides, ctx->dZeroImpedanceBranchCloseScenarioElement.as<int>(), ctx->nZeroImpedanceBranchOpenOverrides, ctx->dZeroImpedanceBranchOpenScenarioElement.as<int>(), nullptr, nullptr, nullptr, 0, ReactiveRelocationTables{}, ctx->nSpanningTreeOverrides, ctx->nSpanningTreeOverrides ? ctx->dSpanningTreeOverrideScenarioElementValue.as<int>() : nullptr, ctx->hasZeroImpedanceBranchMasks ? ctx->dZeroImpedanceBranchOpenMask.as<char>() : nullptr, ctx->hasZeroImpedanceBranchMasks ? ctx->dZeroImpedanceBranchCloseMask.as<char>() : nullptr, ctx->hasZeroImpedanceBranchMasks ? ctx->dSpanningTreeOverrideMask.as<char>() : nullptr, scenarioMajorLayout(nS));
+    if (ctx->nZeroImpedanceBranch) fillZeroImpBatch<<<grid(ctx->nZeroImpedanceBranch * nS), BLOCK, 0, ctx->stream>>>(ctx->nZeroImpedanceBranch, nS, n, nnz, ctx->structure->dZeroImpedanceBranchParameters.as<double>(), ctx->structure->dZeroImpedanceBranchIndices.as<int>(), ctx->structure->dZeroImpedanceBranchDestination.as<int>(), ctx->dX.as<double>(), nullptr, ctx->dQbuf.as<double>(), ctx->dOuterLoopCheckActive.as<char>(), ctx->nBaseClosedZeroImpedanceBranches, nullptr, nullptr, nullptr, 0, ReactiveRelocationTables{}, ctx->zeroImpedanceBranchOpenMask.device(), ctx->zeroImpedanceBranchCloseMask.device(), ctx->spanningTreeOverrideMask.device(), scenarioMajorLayout(nS));
     // Remote-member OWN q (plan-B3): fill each member's own reactive injection into its (suppressed,
     // hence free) qBuf row so the RL kernel evaluates remote entries like local ones.
     if (ctx->nRemoteMemberReactiveTerms > 0) {
@@ -108,10 +108,10 @@ void checkOuterLoop(BatchSolverContext* ctx, DriverPass& drv, std::vector<char>&
     // a link on the slack bus, as OLF's slack mismatch sees it: read by the DistributedSlack check alone
     if (ctx->distributedSlackOuterLoop && ctx->nHvdcAcEmulation > 0 && ctx->slackBusPhiRow >= 0) {
         hvdcSlackBalanceBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(nS, ctx->nHvdcAcEmulation, n, ctx->nElements, ctx->slackBusPhiRow,
-                ctx->hasSlackBusRowOverride ? ctx->dSlackBusRowOverride.as<int>() : nullptr,
+                ctx->slackBusRowOverride.deviceOrNull(),
                 ctx->dHvdcBus1PRow.as<int>(), ctx->dHvdcBus2PRow.as<int>(), ctx->dHvdcBus1PhiColumn.as<int>(), ctx->dHvdcBus2PhiColumn.as<int>(),
-                ctx->dHvdcElement.as<int>(), ctx->dHvdcAcEmulationParameters.as<double>(), ctx->dHvdcAcEmulationStatus.as<int>(),
-                ctx->dHvdcAppliedDelta1.as<double>(), ctx->dHvdcAppliedDelta2.as<double>(), ctx->dHvdcContingencyOutage.as<char>(),
+                ctx->dHvdcElement.as<int>(), ctx->dHvdcAcEmulationParameters.as<double>(), ctx->hvdcAcEmulationStatus.device(),
+                ctx->hvdcAppliedDelta1.device(), ctx->hvdcAppliedDelta2.device(), ctx->hvdcContingencyOutage.device(),
                 ctx->dDisabled.as<char>(), ctx->dX.as<double>(), ctx->dOuterLoopCheckActive.as<char>(), ctx->dQbuf.as<double>());
     }
     CUDA_CHECK(cudaMemsetAsync(ctx->dOuterLoopUnstable.p, 0, nS * sizeof(char), ctx->stream));

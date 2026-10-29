@@ -10,6 +10,7 @@
 #include <cuda_runtime.h>
 #include <cudss.h>
 
+#include <limits>
 #include <map>
 #include <memory>
 #include <vector>
@@ -24,6 +25,7 @@
 #include "../common/codes/gpu_transformer_voltage_control_mode.cuh"
 #include "../lu/batched_lu.cuh"
 #include "../structure/shared_structure.cuh"
+#include "slot_rows.cuh"
 #include "slot_table.cuh"
 
 namespace olfgpu {
@@ -42,6 +44,16 @@ struct BatchSolverContext {
     // The bank slots the per-scenario setters install: the setters' local slot j is bank slot installSlots[j], and only
     // those slots' entries are rewritten. Empty: every slot, local slot = bank slot (a whole chunk).
     std::vector<int> installSlots;
+    DeviceBuf dInstallSlots;                                 // the install slots on the device (every slot of an install of the bank)
+    DeviceBuf dXBase, dBaseMode;                             // the base state and row modes an installed slot starts from
+    // Per slot, a generator loss at a DS participant bus: the bus (-1: none) and its factor, base target P, headroom and
+    // footroom deltas.
+    SlotRows<int> distributedSlackOverrideBus{-1};
+    SlotRows<double> distributedSlackOverrideFactorDelta{0.0}, distributedSlackOverrideBaseTargetPDelta{0.0};
+    SlotRows<double> distributedSlackOverrideMaxDelta{0.0}, distributedSlackOverrideMinDelta{0.0};
+    // Per (slot, DS participant), a strategy pair's anchor shift: the parent's final target minus the base. Per slot, the
+    // slack's own target move (a pair's parent share, or a load lost at the slack).
+    SlotRows<double> distributedSlackBusAnchorShift{0.0}, slackBusAnchorShift{0.0};
     SharedStructurePtr structure;                                   // built once per extraction, see SharedStructure
     int n = 0;
     int nnz = 0;
@@ -88,17 +100,13 @@ struct BatchSolverContext {
     DeviceBuf dShuntAdmittanceOverrideSectionsMoved, dShuntAdmittanceOverrideControllerDelta;
     int nBaseClosedZeroImpedanceBranches = 0;                                         // zero-impedance elements [0,nBaseClosedZeroImpedanceBranches) always enabled; [nBaseClosedZeroImpedanceBranches,nZeroImpedanceBranch) are
                                                              // base-open closable switches gated by the zeroImpedanceBranchCloseOverrides list
-    int nZeroImpedanceBranchCloseOverrides = 0;
-    int nZeroImpedanceBranchOpenOverrides = 0;
-    DeviceBuf dSpanningTreeOverrideScenarioElementValue;                          // per (scenario, coupler) OLF tree flag where it differs from extraction
-    int nSpanningTreeOverrides = 0;
-    DeviceBuf dZeroImpedanceBranchOpenScenarioElement;                                // nZeroImpedanceBranchOpenOverrides*2 ints (slot, zero-impedance elem) — scenarios that OPEN a switch
-    DeviceBuf dZeroImpedanceBranchCloseScenarioElement;                                 // nZeroImpedanceBranchCloseOverrides*2 ints (slot, zero-impedance elem) — scenarios that CLOSE a switch
-    // DENSE (scenario, zero-impedance element) forms of the three lists above and of the tree overrides, nScenarios*nZeroImpedanceBranch chars
-    // each: the fill kernel read them as linear scans PER THREAD, O(nZeroImpedanceBranch * nS * (nZeroImpedanceBranchOpenOverrides + nZeroImpedanceBranchCloseOverrides + nSpanningTreeOverrides)) - on
-    // network.xiidm's full non-busbar scope fillZeroImpBatch was the top kernel, 32 s of 126 s (45 ms a launch).
-    DeviceBuf dZeroImpedanceBranchOpenMask, dZeroImpedanceBranchCloseMask, dSpanningTreeOverrideMask;            // off/on: 1 = listed; tree: -1 = no override, else 0/1
-    bool hasZeroImpedanceBranchMasks = false;
+    // Per (slot, zero-impedance element), dense: the switches the scenario OPENS and the base-open ones it CLOSES (1 = listed),
+    // and OLF's spanning-tree flag where it differs from extraction (-1 = no override, else 0/1). The fill kernel read
+    // them as (slot, element) lists, scanned PER THREAD - on network.xiidm's full non-busbar scope fillZeroImpBatch was the
+    // top kernel, 32 s of 126 s (45 ms a launch).
+    SlotRows<char> zeroImpedanceBranchOpenMask{0};
+    SlotRows<char> zeroImpedanceBranchCloseMask{0};
+    SlotRows<char> spanningTreeOverrideMask{-1};
     // Per-slot closed-branch tap overrides (scenario_override_tables.cuh): the caller's tap/PST actions, a CSR per slot
     // installed per solve ((slot + 1) starts, closed-branch element, full closedBranchParameters row), and the tap
     // loops' moved taps per (slot, controller), with the controllers acting on each closed-branch element.
@@ -143,8 +151,8 @@ struct BatchSolverContext {
     bool hasPilotSelf = false;
     DeviceBuf dReactiveLimitLoadQPerScenario;                                       // per (scenario, controller) — shed load Q
     SlotTable distrQInactiveMembers{1, 0};                                     // per slot: the DISTR_Q members that stop controlling there
-    bool hasDistrQSubgroups = false;                                       // tasks #71: per (scenario, dq member) subgroup
-    DeviceBuf dDistrQSubgroup;                                            // labels (char, dense nS x nDistrQMembers) and the
+    SlotRows<char> distrQSubgroup{0};                                     // tasks #71: per (slot, dq member) subgroup
+                                                                          // labels (0: none) and the
     DeviceBuf dReactiveRelocationDistrQMemberStart;                                    // qr group -> first dq member map
     // Reactive capability CURVES at runtime P (setBatchReactiveCapabilityCurves): per participating curve gen —
     // reactiveCapabilityCurveIndices {reactiveLimitEntry, pRow, ptsOff, npts, distributedSlackGeneratorIndex}, reactiveCapabilityCurveParameters {basePpu, share, baseRowTargetP, baseEvalMinPu, baseEvalMaxPu},
@@ -164,8 +172,8 @@ struct BatchSolverContext {
     int nForcedTargetQ = 0;
     int nForcedTargetQLimitEntries = 0;                                        // of which limit entries (voltage-controlled bus)
     int forcedTargetQExtrapolate = 0;
-    bool hasForcedTargetQPreDistribution = false;
-    DeviceBuf dForcedTargetQIndices, dForcedTargetQParameters, dForcedTargetQPoints, dForcedTargetQApplied, dForcedTargetQPreDistribution;
+    SlotRows<double> forcedTargetQPreDistribution{0.0};
+    DeviceBuf dForcedTargetQIndices, dForcedTargetQParameters, dForcedTargetQPoints, dForcedTargetQApplied;
     // DISTR_Q weight overrides (setBatchDistrQWeightOverrides): a gen outage at a remote-VC controller
     // bus renormalizes the group's qPct keys per scenario — per slot, (contribution; new weight), the last one wins.
     SlotTable distrQWeightOverrides{1, 1};
@@ -425,9 +433,8 @@ struct BatchSolverContext {
     DeviceBuf dGeneratorVoltageControlFrozen, dGeneratorVoltageControlFreezeSavedMode, dGeneratorVoltageControlFreezeSavedTarget;   // per (scenario, candidate)
     DeviceBuf dGeneratorVoltageControlFreezeReactiveLimitEntry;                                 // per candidate: RL entry of a REMOTE one, else -1
     DeviceBuf dTransformerVoltageControlFixPvRow;                                  // the fix universe: every gen-VC bus's V row
-    DeviceBuf dTransformerVoltageControlFixMinMask, dTransformerVoltageControlFixMaxMask;                // per (scenario, member): fixWords ints each
+    SlotRows<int> transformerVoltageControlFixMinMask{0}, transformerVoltageControlFixMaxMask{0};   // per (slot, member): fixWords ints each
     int transformerVoltageControlFixWords = 0;
-    bool hasTransformerVoltageControlFixMasks = false;
     // DISCRETE SHUNT VOLTAGE CONTROL — GpuOuterLoopKind::SHUNT_VOLTAGE_CONTROL (OLF order 10): ShuntVoltageControlOuterLoop
     // (WITH_GENERATOR): control ON for the first solve, LfShuntImpl.dispatchB at the first check.
     int nShuntVoltageControlMembers = 0, nShuntVoltageControlGroups = 0, nShuntVoltageControlDeltaRows = 0, nShuntVoltageControlShuntCompensators = 0, shuntVoltageControlEntryOn = 0;
@@ -445,8 +452,8 @@ struct BatchSolverContext {
     SlotTable reactiveCapabilityCurveOverrides{1, 2};
     SlotTable reactiveLimitTargetVOverrides{1, 1};
     SlotTable distributedSlackLostGenerators{1, 0};                             // per slot: the DS generators an outage removes, by identity
-    DeviceBuf dReactiveLimitSeedTargetQ;                                 // per (scenario, entry): the frozen target Q a continued
-    bool hasReactiveLimitSeedTargetQ = false;                            // solve restores (setBatchReactiveLimitSeedTargetQ), NaN = the limit
+    SlotRows<double> reactiveLimitSeedTargetQ{std::numeric_limits<double>::quiet_NaN()};   // per (slot, entry): the frozen target Q a continued
+                                                                         // solve restores (setBatchReactiveLimitSeedTargetQ), NaN = the limit
     SlotTable distributedSlackRemovedGenerators{1, 0};                              // per slot: the DS participants a GeneratorAction took out
     DeviceBuf dDistributedSlackGeneratorMoveValid;                                // per scenario: the PER-GENERATOR water-fill ran, so
                                                            // dDistributedSlackGeneratorMove holds each generator's own movement. The
@@ -462,23 +469,21 @@ struct BatchSolverContext {
     // this scenario. OLF distributes over getSynchronousNetworks().getFirst(), so an islanded
     // participant is simply not a participant: its share must not be computed, and — decisively — the
     // set it is renormalized against must shrink with it. Empty = every participant participates.
-    int nDistributedSlackIslanded = 0;
-    DeviceBuf dDistributedSlackIslanded;
-    int nDistributedSlackBusRowOverrides = 0;                                        // per-scenario DS participant row diversions
-    DeviceBuf dDistributedSlackBusRowOverride;                                      // nScenarios * nDistributedSlackBuses ints, -1 = use distributedSlackBusPhiRow
+    SlotRows<char> distributedSlackIslanded{0};                                     // per (slot, DS participant): stranded in another component
+    SlotRows<int> distributedSlackBusRowOverride{-1};                                // per (slot, DS participant): its P-balance row diversion,
+                                                                                    // -1 = use distributedSlackBusPhiRow
     // Same idea for the reactive-limits pass: per (scenario, controller), 1 = its bus is in another
     // synchronous component in this scenario, so the loop must not look at it.
-    int nReactiveLimitIslanded = 0;
-    DeviceBuf dReactiveLimitGeneratorsLost;                                    // (scenario, entry): the bus lost every generator this
-    int nReactiveLimitGeneratorsLost = 0;                                      // scenario — not a controller, seeded FROZEN
-    DeviceBuf dReactiveLimitLocalOverride, dReactiveLimitLocalTargetV;                        // re-merged PV buses: (scenario, entry) mask + own V target
-    int nReactiveLimitLocalOverrides = 0;
-    DeviceBuf dReactiveLimitComparedVoltageRowOverride;                                      // remote controllers re-merged onto a NEW pilot: (scenario,
-    int nReactiveLimitComparedVoltageRowOverrides = 0;                                          // entry) -> the new pilot's V row, -1 = the base pilot's
-    DeviceBuf dReactiveLimitIslanded;
+    SlotRows<char> reactiveLimitGeneratorsLost{0};                             // (slot, entry): the bus lost every generator this
+                                                                               // scenario — not a controller, seeded FROZEN
+    SlotRows<char> reactiveLimitLocalOverride{0};                                         // re-merged PV buses: (slot, entry) mask + own V target
+    SlotRows<double> reactiveLimitLocalTargetV{0.0};
+    SlotRows<int> reactiveLimitComparedVoltageRowOverride{-1};                               // remote controllers re-merged onto a NEW pilot: (slot,
+                                                                                                // entry) -> the new pilot's V row, -1 = the base pilot's
+    SlotRows<char> reactiveLimitIslanded{0};                                         // (slot, entry): its bus islanded this scenario
     SlotTable distrQMemberTargetQOverrides{1, 1};                                // per slot: (member; its own targetQ), the first one wins
-    int hasSlackBusRowOverride = 0;                               // per-slot slack row (a relocated slack), device rows
-    DeviceBuf dSlackBusRowOverride;                               // -1 = the base slack row
+    SlotRows<int> slackBusRowOverride{-1};                        // per-slot slack row (a relocated slack), device rows
+                                                                  // -1 = the base slack row
     SlotTable reactiveRelocationPilotTargetQDeltas{1, 1};   // per slot: (relocation group; the move of its pilot's captured Q target)
     // Pilot-row flip entries (pilotRowWithoutEnabledControllerBatch), per slot: (pilot row, first and count of its surviving
     // controllers' reactive-limit entries in pilotFlipSurvivors; the pilot's Q target), and per entry whether the row is
@@ -502,9 +507,9 @@ struct BatchSolverContext {
     DeviceBuf dHvdcElement, dHvdcBus1PRow, dHvdcBus2PRow;               // per hvdc: the rows the P TARGETS are written to
     DeviceBuf dHvdcBus1PhiColumn, dHvdcBus2PhiColumn;                        // per hvdc: the angle COLUMNS the emulation reads (#68)
     DeviceBuf dHvdcAcEmulationParameters;                                         // per hvdc x9: p0 k pMax12 pMax21 loss1 loss2 r baseD1 baseD2
-    DeviceBuf dHvdcContingencyOutage;                                     // per (scenario, hvdc): outaged BY the contingency
-    DeviceBuf dHvdcAcEmulationStatus;                                     // per (scenario, hvdc): LINEAR/SAT_1_2/SAT_2_1/FROZEN
-    DeviceBuf dHvdcAppliedDelta1, dHvdcAppliedDelta2;                    // the converter-row delta currently APPLIED
+    SlotRows<char> hvdcContingencyOutage{0};                              // per (slot, hvdc): outaged BY the contingency
+    SlotRows<int> hvdcAcEmulationStatus{0};                               // per (slot, hvdc): LINEAR/SAT_1_2/SAT_2_1/FROZEN
+    SlotRows<double> hvdcAppliedDelta1{0.0}, hvdcAppliedDelta2{0.0};     // the converter-row delta currently APPLIED
     DeviceBuf dSlackDistributionFailure;                                   // nS chars: waterfill left an out-of-tolerance residual                                   // per scenario (nS): frozen slack-retained mismatch share
     // The slack bus's own participating generators' total rooms from their anchor targets (setBatchSlackBusRooms):
     // what a slack-only distribution can place before OLF's water-fill leaves a remaining mismatch. Unbounded until
@@ -512,14 +517,14 @@ struct BatchSolverContext {
     double slackBusRoomUp = INFINITY, slackBusRoomDown = -INFINITY;
     bool slackOnlyDistribution = false;                                // DS enabled with the SLACK generator as the only participant:
     DeviceBuf dSlackOnlyAbsorbed;                              // nS doubles — mismatch absorbed into the slack's own target so far
-    DeviceBuf dSlackOnlyAnchor;                                // nS doubles — slack-only strategy pairs: the parent's total
-    bool hasSlackOnlyAnchor = false;                           // (setBatchSlackOnlyAnchor; zero anchor when unset)
-    DeviceBuf dDistributedSlackGeneratorAnchor;                                     // nS * nDistributedSlackGenerators doubles — strategy pairs: each participating
-    bool hasDistributedSlackGeneratorAnchor = false;                                // generator's target at the parent's end (setBatchDistributedSlackGeneratorAnchors)
-    DeviceBuf dDistributedSlackGeneratorInitialMove;                                      // nS * nDistributedSlackGenerators doubles — each participating generator's move
-    bool hasDistributedSlackGeneratorInitialMove = false;                                 // from its anchor at the solve's start (setBatchDistributedSlackGeneratorAnchors)
-    DeviceBuf dDistributedSlackGeneratorSeedAnchor;                                 // nS * nDistributedSlackGenerators doubles — strategy pairs: the parent's own end,
-    bool hasDistributedSlackGeneratorSeedAnchor = false;                            // without the actions (the stamps of the continued PQ switches)
+    SlotRows<double> slackOnlyAnchor{0.0};                     // per slot — slack-only strategy pairs: the parent's total
+                                                               // (setBatchSlackOnlyAnchor; zero anchor when unset)
+    SlotRows<double> distributedSlackGeneratorAnchor{0.0};                          // per (slot, DS generator) — strategy pairs: each participating
+                                                                                    // generator's target at the parent's end (setBatchDistributedSlackGeneratorAnchors)
+    SlotRows<double> distributedSlackGeneratorInitialMove{0.0};                           // per (slot, DS generator) — each participating generator's move
+                                                                                          // from its anchor at the solve's start (setBatchDistributedSlackGeneratorAnchors)
+    SlotRows<double> distributedSlackGeneratorSeedAnchor{0.0};                      // per (slot, DS generator) — strategy pairs: the parent's own end,
+                                                                                    // without the actions (the stamps of the continued PQ switches)
                                                              // (OLF distributes into the slack gen and re-solves; no flow change,
                                                              // but the extra polish run must happen to match the CPU trajectory)
     CudssCtx solver;
@@ -571,6 +576,22 @@ struct BatchSolverContext {
         if (compactedUniformBatchSolutionMatrix) cudssMatrixDestroy(compactedUniformBatchSolutionMatrix);
     }
 };
+
+// How many scenarios the setters now install: the install slots', or the whole bank's.
+inline int installedSlotCount(const BatchSolverContext* ctx) {
+    return ctx->installSlots.empty() ? ctx->nScenarios : static_cast<int>(ctx->installSlots.size());
+}
+
+// The bank slot of the install's local slot j.
+inline int installedSlot(const BatchSolverContext* ctx, int j) {
+    return ctx->installSlots.empty() ? j : ctx->installSlots[j];
+}
+
+// The slack's own target move as the distributed slack over DS buses reads it: none on a context without DS buses (a
+// slack-only distribution seeds from it at reset instead).
+inline double* distributedSlackBusesSlackShift(const BatchSolverContext* ctx) {
+    return ctx->nDistributedSlackBuses > 0 ? ctx->slackBusAnchorShift.deviceOrNull() : nullptr;
+}
 
 struct BatchResult {
     std::vector<double> x;                                   // nScenarios * n

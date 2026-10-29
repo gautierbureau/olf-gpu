@@ -16,6 +16,8 @@ OLF_JNI(ac_equations_vector_gpu, RemoteVoltageControlNative, setBatchDistrQInact
     }
 }
 
+// Per (installed scenario, DISTR_Q member): the subgroup label of a group the scenario splits (0: none), and the
+// relocation groups' first member, run-constant, sent along. Null: no installed scenario splits a group.
 extern "C" JNIEXPORT void JNICALL
 OLF_JNI(ac_equations_vector_gpu, RemoteVoltageControlNative, setBatchDistrQSubgroups)(
         JNIEnv* env, jclass, jlong handle, jbyteArray jDense, jintArray jReactiveRelocationDistrQMemberStart) {
@@ -23,17 +25,14 @@ OLF_JNI(ac_equations_vector_gpu, RemoteVoltageControlNative, setBatchDistrQSubgr
     if (ctx == nullptr) {
         return;
     }
-    if (jDense == nullptr || env->GetArrayLength(jDense) == 0) {
-        ctx->hasDistrQSubgroups = false;
-        return;
+    if (jDense != nullptr && env->GetArrayLength(jDense) == 0) {
+        jDense = nullptr;
     }
-    jbyte* d = env->GetByteArrayElements(jDense, nullptr);
-    ctx->dDistrQSubgroup.upload(d, static_cast<size_t>(env->GetArrayLength(jDense)));
-    env->ReleaseByteArrayElements(jDense, d, JNI_ABORT);
-    jint* q = env->GetIntArrayElements(jReactiveRelocationDistrQMemberStart, nullptr);
-    ctx->dReactiveRelocationDistrQMemberStart.upload(q, static_cast<size_t>(env->GetArrayLength(jReactiveRelocationDistrQMemberStart)) * sizeof(int));
-    env->ReleaseIntArrayElements(jReactiveRelocationDistrQMemberStart, q, JNI_ABORT);
-    ctx->hasDistrQSubgroups = true;
+    installSlotRows(env, ctx, ctx->distrQSubgroup, ctx->nDistrQMembers, jDense, "setBatchDistrQSubgroups");
+    if (jDense != nullptr && !env->ExceptionCheck()) {
+        std::vector<int> memberStart = jniInts(env, jReactiveRelocationDistrQMemberStart);
+        ctx->dReactiveRelocationDistrQMemberStart.upload(memberStart.data(), memberStart.size() * sizeof(int));
+    }
 }
 
 // DISTR_Q weight overrides: the per-scenario qPct renormalization, {slot, contribution} pairs + the new weights (a gen

@@ -7,23 +7,15 @@
 
 // Remote-member RL entries (plan-B1): install (or clear) the per-entry remote kinds + compare rows
 // on a batch context. The RL kernel SKIPS remote entries until the B3 transition machinery lands.
-// Slack-only distribution: the slack generators' initial target per scenario (relative to the slack's target P)
-// for the next solves - a strategy pair's parent total; null clears it (zero: a contingency's base).
+// Slack-only distribution: the slack generators' initial target per installed scenario (relative to the slack's target
+// P) for the next solves - a strategy pair's parent total; null: zero, a contingency's base.
 extern "C" JNIEXPORT void JNICALL
 OLF_JNI(ac_outerloop_gpu, DistributedSlackNative, setBatchSlackOnlyAnchor)(
         JNIEnv* env, jclass, jlong handle, jdoubleArray jAnchor) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
-    if (ctx == nullptr) {
-        return;
+    if (ctx != nullptr) {
+        installSlotRows(env, ctx, ctx->slackOnlyAnchor, 1, ctx->slackOnlyDistribution ? jAnchor : nullptr, "setBatchSlackOnlyAnchor");
     }
-    if (jAnchor == nullptr || !ctx->slackOnlyDistribution) {
-        ctx->hasSlackOnlyAnchor = false;
-        return;
-    }
-    jdouble* a = env->GetDoubleArrayElements(jAnchor, nullptr);
-    ctx->dSlackOnlyAnchor.upload(a, static_cast<size_t>(env->GetArrayLength(jAnchor)) * sizeof(double));
-    env->ReleaseDoubleArrayElements(jAnchor, a, JNI_ABORT);
-    ctx->hasSlackOnlyAnchor = true;
 }
 
 // Per scenario and participating generator (s * nDistributedSlackGenerators + g, pu): anchor = its move from its base target P to where the
@@ -38,24 +30,14 @@ OLF_JNI(ac_outerloop_gpu, DistributedSlackNative, setBatchDistributedSlackGenera
     if (ctx == nullptr) {
         return;
     }
-    size_t want = static_cast<size_t>(ctx->nScenarios) * std::max(ctx->nDistributedSlackGenerators, 0);
-    auto put = [&](jdoubleArray arr, DeviceBuf& buf, bool& has) {
-        has = false;
-        if (arr == nullptr || ctx->nDistributedSlackGenerators <= 0) {
-            return true;
-        }
-        if (static_cast<size_t>(env->GetArrayLength(arr)) != want) {
-            env->ThrowNew(env->FindClass("java/lang/IllegalArgumentException"), "setBatchDistributedSlackGeneratorAnchors: expected nScenarios * nDistributedSlackGenerators");
-            return false;
-        }
-        jdouble* a = env->GetDoubleArrayElements(arr, nullptr);
-        buf.upload(a, want * sizeof(double));
-        env->ReleaseDoubleArrayElements(arr, a, JNI_ABORT);
-        has = true;
-        return true;
-    };
-    if (put(jAnchor, ctx->dDistributedSlackGeneratorAnchor, ctx->hasDistributedSlackGeneratorAnchor) && put(jStart, ctx->dDistributedSlackGeneratorInitialMove, ctx->hasDistributedSlackGeneratorInitialMove)) {
-        put(jSeedAnchor, ctx->dDistributedSlackGeneratorSeedAnchor, ctx->hasDistributedSlackGeneratorSeedAnchor);
+    size_t width = static_cast<size_t>(std::max(ctx->nDistributedSlackGenerators, 0));
+    const char* who = "setBatchDistributedSlackGeneratorAnchors";
+    installSlotRows(env, ctx, ctx->distributedSlackGeneratorAnchor, width, jAnchor, who);
+    if (!env->ExceptionCheck()) {
+        installSlotRows(env, ctx, ctx->distributedSlackGeneratorInitialMove, width, jStart, who);
+    }
+    if (!env->ExceptionCheck()) {
+        installSlotRows(env, ctx, ctx->distributedSlackGeneratorSeedAnchor, width, jSeedAnchor, who);
     }
 }
 
@@ -132,8 +114,9 @@ OLF_JNI(ac_outerloop_gpu, DistributedSlackNative, setBatchDistributedSlackGenera
     ctx->nDistributedSlackGenerators = nDistributedSlackGenerators;
 }
 
-// Per slot, the row the distributed-slack kernels read the slack on (host row, -1 = the base slack row): a
-// contingency that isolates the base slack makes OLF re-pick one, whose angle row becomes the reference. Null clears.
+// Per installed slot, the row the distributed-slack kernels read the slack on (host row, -1 = the base slack row): a
+// contingency that isolates the base slack makes OLF re-pick one, whose angle row becomes the reference. Null: the
+// base slack row everywhere.
 extern "C" JNIEXPORT void JNICALL
 OLF_JNI(ac_outerloop_gpu, DistributedSlackNative, setBatchSlackBusRows)(
         JNIEnv* env, jclass, jlong handle, jintArray jRows) {
@@ -141,22 +124,19 @@ OLF_JNI(ac_outerloop_gpu, DistributedSlackNative, setBatchSlackBusRows)(
     if (ctx == nullptr) {
         return;
     }
-    if (jRows == nullptr || env->GetArrayLength(jRows) == 0) {
-        ctx->hasSlackBusRowOverride = 0;
-        return;
-    }
-    int ne = env->GetArrayLength(jRows);
-    std::vector<int> rows(ne);
-    env->GetIntArrayRegion(jRows, 0, ne, rows.data());
+    std::vector<int> rows = jniInts(env, jRows);
     for (int& r : rows) {
         r = r >= 0 ? ctx->structure->rowMap[r] : -1;
     }
-    ctx->dSlackBusRowOverride.upload(rows.data(), static_cast<size_t>(ne) * sizeof(int));
-    ctx->hasSlackBusRowOverride = 1;
+    if (!rows.empty() && static_cast<int>(rows.size()) != installedSlotCount(ctx)) {
+        env->ThrowNew(env->FindClass("java/lang/IllegalArgumentException"), "setBatchSlackBusRows: expected one row per installed scenario");
+        return;
+    }
+    ctx->slackBusRowOverride.install(ctx->nScenarios, ctx->installSlots, 1, rows.empty() ? nullptr : rows.data());
 }
 
-// Distributed-slack participants STRANDED in another synchronous component: install (or clear, with
-// null) the per-scenario mask as {slot, participant} pairs. A contingency that fragments the network
+// Distributed-slack participants STRANDED in another synchronous component: the installed slots' mask as {slot,
+// participant} pairs, null for none. A contingency that fragments the network
 // leaves some participating buses outside the main component; OLF drops them from the participant
 // set, so the device must renormalize over the survivors — see distributeSlackBatch.
 extern "C" JNIEXPORT void JNICALL
@@ -166,27 +146,12 @@ OLF_JNI(ac_outerloop_gpu, DistributedSlackNative, setBatchDistributedSlackIsland
     if (ctx == nullptr) {
         return;
     }
-    if (jPairs == nullptr || env->GetArrayLength(jPairs) == 0 || ctx->nDistributedSlackBuses == 0) {
-        ctx->nDistributedSlackIslanded = 0;
-        return;
-    }
     // Expanded to a dense (scenario, participant) mask on the host: the kernel reads it once per
     // participant inside loops it already walks, so a scan over a pair list would be the only cost
     // the mask adds to scenarios that have no islanded participant at all.
-    size_t maskLen = static_cast<size_t>(ctx->nScenarios) * ctx->nDistributedSlackBuses;
-    std::vector<char> mask(maskLen, 0);
-    int nPairs = env->GetArrayLength(jPairs) / 2;
-    jint* pairs = env->GetIntArrayElements(jPairs, nullptr);
-    for (int k = 0; k < nPairs; k++) {
-        int s = pairs[2 * k];
-        int i = pairs[2 * k + 1];
-        if (s >= 0 && s < ctx->nScenarios && i >= 0 && i < ctx->nDistributedSlackBuses) {
-            mask[(size_t) s * ctx->nDistributedSlackBuses + i] = 1;
-        }
-    }
-    env->ReleaseIntArrayElements(jPairs, pairs, JNI_ABORT);
-    ctx->dDistributedSlackIslanded.upload(mask.data(), maskLen);
-    ctx->nDistributedSlackIslanded = nPairs;
+    std::vector<int> pairs = jniInts(env, jPairs);
+    ctx->distributedSlackIslanded.installEntries(ctx->nScenarios, ctx->installSlots, ctx->nDistributedSlackBuses,
+                                                 static_cast<int>(pairs.size() / 2), pairs.data(), nullptr, 1);
 }
 
 // Per-scenario P-balance row of a DS participant this scenario MOVES: {slot, participant, row}
@@ -201,27 +166,18 @@ OLF_JNI(ac_outerloop_gpu, DistributedSlackNative, setBatchDistributedSlackBusRow
     if (ctx == nullptr) {
         return;
     }
-    if (jTriples == nullptr || env->GetArrayLength(jTriples) == 0 || ctx->nDistributedSlackBuses == 0) {
-        ctx->nDistributedSlackBusRowOverrides = 0;
-        return;
-    }
-    size_t len = static_cast<size_t>(ctx->nScenarios) * ctx->nDistributedSlackBuses;
-    std::vector<int> rows(len, -1);
-    int nTriples = env->GetArrayLength(jTriples) / 3;
-    jint* t = env->GetIntArrayElements(jTriples, nullptr);
+    std::vector<int> triples = jniInts(env, jTriples);
     const std::vector<int>& rowMap = ctx->structure->rowMap;
-    int nOk = 0;
-    for (int k = 0; k < nTriples; k++) {
-        int s = t[3 * k];
-        int i = t[3 * k + 1];
-        int row = t[3 * k + 2];
-        if (s >= 0 && s < ctx->nScenarios && i >= 0 && i < ctx->nDistributedSlackBuses
-                && row >= 0 && row < static_cast<int>(rowMap.size()) && rowMap[row] >= 0) {
-            rows[(size_t) s * ctx->nDistributedSlackBuses + i] = rowMap[row];
-            nOk++;
+    std::vector<int> pairs;
+    std::vector<int> rows;
+    for (size_t k = 0; k + 2 < triples.size(); k += 3) {
+        int row = triples[k + 2];
+        if (row >= 0 && row < static_cast<int>(rowMap.size()) && rowMap[row] >= 0) {
+            pairs.push_back(triples[k]);
+            pairs.push_back(triples[k + 1]);
+            rows.push_back(rowMap[row]);
         }
     }
-    env->ReleaseIntArrayElements(jTriples, t, JNI_ABORT);
-    ctx->dDistributedSlackBusRowOverride.upload(rows.data(), len * sizeof(int));
-    ctx->nDistributedSlackBusRowOverrides = nOk;
+    ctx->distributedSlackBusRowOverride.installEntries(ctx->nScenarios, ctx->installSlots, ctx->nDistributedSlackBuses,
+                                                       static_cast<int>(rows.size()), pairs.data(), rows.data());
 }

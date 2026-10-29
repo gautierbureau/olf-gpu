@@ -389,11 +389,11 @@ static TransformerVoltageControlTables transformerVoltageControlTables(BatchSolv
     T.groupSharedMinR1 = ctx->dTransformerVoltageControlGroupSharedMinR1.as<double>(); T.groupSharedMaxR1 = ctx->dTransformerVoltageControlGroupSharedMaxR1.as<double>(); T.groupSharedInitialR1 = ctx->dTransformerVoltageControlGroupSharedInitialR1.as<double>();
     T.memberState = ctx->dTransformerVoltageControlMemberState.as<int>(); T.memberTap = ctx->dTransformerVoltageControlMemberTap.as<int>(); T.memberRoundingR1 = ctx->dTransformerVoltageControlMemberRoundingR1.as<double>();
     T.savedDeltaTarget = ctx->dTransformerVoltageControlSavedDeltaTarget.as<double>(); T.rejected = ctx->dTransformerVoltageControlRejected.as<char>();
-    T.nGeneratorVoltageControlFreezeCandidates = ctx->nGeneratorVoltageControlFreezeCandidates; T.hasFixMasks = ctx->hasTransformerVoltageControlFixMasks ? 1 : 0; T.fixMaskWords = ctx->transformerVoltageControlFixWords;
+    T.nGeneratorVoltageControlFreezeCandidates = ctx->nGeneratorVoltageControlFreezeCandidates; T.hasFixMasks = ctx->transformerVoltageControlFixMinMask.on() ? 1 : 0; T.fixMaskWords = ctx->transformerVoltageControlFixWords;
     T.generatorVoltageControlFreezeVRow = ctx->dGeneratorVoltageControlFreezeVRow.as<int>(); T.generatorVoltageControlFreezeLoadTargetQ = ctx->dGeneratorVoltageControlFreezeLoadTargetQ.as<double>();
     T.generatorVoltageControlFreezeReactiveLimitEntry = ctx->dGeneratorVoltageControlFreezeReactiveLimitEntry.as<int>(); T.nReactiveLimitEntries = ctx->nReactiveLimitEntries; T.reactiveLimitQLimitType = ctx->dReactiveLimitQLimitType.as<char>();
     T.fixPvRow = ctx->dTransformerVoltageControlFixPvRow.as<int>();
-    T.fixMinMask = ctx->dTransformerVoltageControlFixMinMask.as<int>(); T.fixMaxMask = ctx->dTransformerVoltageControlFixMaxMask.as<int>();
+    T.fixMinMask = ctx->transformerVoltageControlFixMinMask.device(); T.fixMaxMask = ctx->transformerVoltageControlFixMaxMask.device();
     T.generatorVoltageControlFrozen = ctx->dGeneratorVoltageControlFrozen.as<int>(); T.generatorVoltageControlFreezeSavedMode = ctx->dGeneratorVoltageControlFreezeSavedMode.as<int>(); T.generatorVoltageControlFreezeSavedTarget = ctx->dGeneratorVoltageControlFreezeSavedTarget.as<double>();
     return T;
 }

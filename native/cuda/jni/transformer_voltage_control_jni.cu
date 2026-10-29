@@ -3,6 +3,7 @@
 //
 // JNI entry points of GpuAcNewtonSolver: Transformer voltage control, incremental and discrete.
 #include "jni_common.cuh"
+#include "slot_table_install.cuh"
 
 /** Upload the incremental TVC controller data for the in-kernel outer loop.
  *  rhoRow/vRow/elemIndex: [nControllers] int; targetV/halfTargetDeadband: [nControllers] double;
@@ -104,7 +105,8 @@ OLF_JNI(ac_outerloop_gpu, TransformerVoltageControlNative, setBatchTransformerVo
     }
     ctx->nTransformerVoltageControlMembers = 0;
     ctx->nGeneratorVoltageControlFreezeCandidates = 0;
-    ctx->hasTransformerVoltageControlFixMasks = false;
+    ctx->transformerVoltageControlFixMinMask.clear();
+    ctx->transformerVoltageControlFixMaxMask.clear();
     ctx->transformerVoltageControlFixWords = 0;
     if (jMemberRhoRow == nullptr || env->GetArrayLength(jMemberRhoRow) == 0) {
         return 0;
@@ -224,7 +226,8 @@ OLF_JNI(ac_outerloop_gpu, TransformerVoltageControlNative, setBatchGeneratorVolt
         ctx->dGeneratorVoltageControlFreezeSavedTarget.ensure(nsc * sizeof(double));
     }
     ctx->nGeneratorVoltageControlFreezeCandidates = nGeneratorVoltageControlFreezeCandidates;
-    ctx->hasTransformerVoltageControlFixMasks = false;                               // armed by setBatchTransformerVoltageControlFixMasks
+    ctx->transformerVoltageControlFixMinMask.clear();                               // armed by setBatchTransformerVoltageControlFixMasks
+    ctx->transformerVoltageControlFixMaxMask.clear();
     ctx->transformerVoltageControlFixWords = 0;
     if (jFixPvRow != nullptr) {
         readI(jFixPvRow, fixRow);
@@ -245,25 +248,14 @@ OLF_JNI(ac_outerloop_gpu, TransformerVoltageControlNative, setBatchTransformerVo
     if (ctx == nullptr || ctx->nTransformerVoltageControlMembers <= 0) {
         return;
     }
-    ctx->hasTransformerVoltageControlFixMasks = false;
-    ctx->transformerVoltageControlFixWords = 0;
-    if (jMin == nullptr || jMax == nullptr || words <= 0) {
-        return;
+    bool none = jMin == nullptr || jMax == nullptr || words <= 0;
+    size_t width = static_cast<size_t>(ctx->nTransformerVoltageControlMembers) * std::max(static_cast<int>(words), 0);
+    const char* who = "setBatchTransformerVoltageControlFixMasks";
+    installSlotRows(env, ctx, ctx->transformerVoltageControlFixMinMask, width, none ? nullptr : jMin, who);
+    if (!env->ExceptionCheck()) {
+        installSlotRows(env, ctx, ctx->transformerVoltageControlFixMaxMask, width, none ? nullptr : jMax, who);
     }
-    size_t want = static_cast<size_t>(ctx->nScenarios) * ctx->nTransformerVoltageControlMembers * words;
-    if (static_cast<size_t>(env->GetArrayLength(jMin)) != want
-            || static_cast<size_t>(env->GetArrayLength(jMax)) != want) {
-        env->ThrowNew(env->FindClass("java/lang/RuntimeException"),
-                      "setBatchTransformerVoltageControlFixMasks: array length != nScenarios * nMembers * words");
-        return;
-    }
-    std::vector<int> mn(want), mx(want);
-    env->GetIntArrayRegion(jMin, 0, static_cast<jsize>(want), mn.data());
-    env->GetIntArrayRegion(jMax, 0, static_cast<jsize>(want), mx.data());
-    ctx->dTransformerVoltageControlFixMinMask.upload(mn.data(), want * sizeof(int));
-    ctx->dTransformerVoltageControlFixMaxMask.upload(mx.data(), want * sizeof(int));
-    ctx->transformerVoltageControlFixWords = words;
-    ctx->hasTransformerVoltageControlFixMasks = true;
+    ctx->transformerVoltageControlFixWords = none ? 0 : words;
 }
 
 /** Per (scenario, freeze candidate): {frozen (0/1), the row target while frozen (gen − load)} — layout

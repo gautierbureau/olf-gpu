@@ -17,7 +17,6 @@
 namespace olfgpu {
 
 struct DriverPass {
-    DeviceBuf dBaseMode;                                    // the contingency-free base row mode (length n)
     size_t nTot = 0;
     double tol = 0.0;
     int maxIter = 0;
@@ -33,11 +32,6 @@ struct DriverPass {
     bool hasPerScenarioSvcSusceptanceLimits = false;
     double slackDistTol = 0.0;
     double pResidueEps = 0.0;
-    bool hasDistributedSlackOverride = false;
-    bool hasDistributedSlackBusAnchorShift = false;
-    bool hasSlackBusAnchorShift = false;
-    DeviceBuf dDistributedSlackOverrideBus, dDistributedSlackOverrideFactorDelta, dDistributedSlackOverrideBaseTargetPDelta, dDistributedSlackOverrideMaxDelta, dDistributedSlackOverrideMinDelta;
-    DeviceBuf dDistributedSlackBusAnchorShift, dSlackBusAnchorShift;
     int n = 0;
     int nnz = 0;
     int nS = 0;

@@ -186,21 +186,21 @@ OLF_JNI(ac_solver_gpu, BatchSolveNative, solveBatchContext)(
             throw std::runtime_error("invalid batch solver context");
         }
         int n = ctx->n;
-        int nS = ctx->nScenarios;
+        int nS = installedSlotCount(ctx);                    // the scenarios this solve installs, one row each
         int nElem = ctx->nElements;
         if (env->GetArrayLength(jx0Base) != n) {
             throw std::runtime_error("base state length mismatch with batch context");
         }
         if (env->GetArrayLength(jdisabledMask) != nS) {
-            throw std::runtime_error("scenario count mismatch with batch context");
+            throw std::runtime_error("scenario count mismatch with the installed slots");
         }
 
         if (env->GetArrayLength(jrowMode) != nS) {
-            throw std::runtime_error("rowMode scenario count mismatch with batch context");
+            throw std::runtime_error("rowMode scenario count mismatch with the installed slots");
         }
-        // x0/target are the BASE row (length n), identical for every scenario — read once and tiled
-        // across nS on-device. rowMode is PER-SCENARIO ([nS][n]) — read all nS rows. Only the disabled
-        // mask is also per-scenario.
+        // x0/target are the BASE row (length n), identical for every scenario — read once and copied into each
+        // installed slot on the device. rowMode is PER-SCENARIO ([nS][n]) — read every installed scenario's row. Only
+        // the disabled mask is also per-scenario.
         std::vector<double> x0(n);
         std::vector<double> target(n);
         env->GetDoubleArrayRegion(jx0Base, 0, n, x0.data());

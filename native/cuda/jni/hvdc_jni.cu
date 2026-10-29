@@ -3,6 +3,7 @@
 //
 // JNI entry points of GpuAcNewtonSolver: HVDC AC emulation loops.
 #include "jni_common.cuh"
+#include "slot_table_install.cuh"
 
 // The HVDC AC-emulation outer loops' tables + their per-scenario starting state (the statuses and
 // applied converter-row deltas the host's pre-solve freeze produced). Install to run those loops as
@@ -38,13 +39,13 @@ OLF_JNI(ac_outerloop_gpu, HvdcNative, setBatchHvdcLoops)(
     upI(jHvdcBus1PhiColumn, ctx->dHvdcBus1PhiColumn);
     upI(jHvdcBus2PhiColumn, ctx->dHvdcBus2PhiColumn);
     upD(jIn, ctx->dHvdcAcEmulationParameters);
-    upI(jHvdcAcEmulationStatus, ctx->dHvdcAcEmulationStatus);
-    upD(jHvdcAppliedDelta1, ctx->dHvdcAppliedDelta1);
-    upD(jHvdcAppliedDelta2, ctx->dHvdcAppliedDelta2);
-    jbyte* co = env->GetByteArrayElements(jHvdcContingencyOutage, nullptr);
-    ctx->dHvdcContingencyOutage.upload(co, (size_t) env->GetArrayLength(jHvdcContingencyOutage));
-    env->ReleaseByteArrayElements(jHvdcContingencyOutage, co, JNI_ABORT);
+    // the scenarios' starting state, per (installed slot, hvdc): the HVDC phases write it on the device as they go
     ctx->nHvdcAcEmulation = nh;
+    const char* who = "setBatchHvdcLoops";
+    installSlotRows(env, ctx, ctx->hvdcAcEmulationStatus, nh, jHvdcAcEmulationStatus, who);
+    installSlotRows(env, ctx, ctx->hvdcAppliedDelta1, nh, jHvdcAppliedDelta1, who);
+    installSlotRows(env, ctx, ctx->hvdcAppliedDelta2, nh, jHvdcAppliedDelta2, who);
+    installSlotRows(env, ctx, ctx->hvdcContingencyOutage, nh, jHvdcContingencyOutage, who);
     ctx->hvdcAcEmulationLimitsActive = limitsActive;
 }
 
@@ -58,7 +59,7 @@ OLF_JNI(ac_outerloop_gpu, HvdcNative, readBatchHvdcStatus)(
     }
     size_t len = (size_t) ctx->nScenarios * ctx->nHvdcAcEmulation;
     std::vector<int> host(len);
-    if (cudaMemcpy(host.data(), ctx->dHvdcAcEmulationStatus.p, len * sizeof(int), cudaMemcpyDeviceToHost) != cudaSuccess) {
+    if (cudaMemcpy(host.data(), ctx->hvdcAcEmulationStatus.device(), len * sizeof(int), cudaMemcpyDeviceToHost) != cudaSuccess) {
         return nullptr;
     }
     jintArray out = env->NewIntArray((jsize) len);

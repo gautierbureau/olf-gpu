@@ -50,11 +50,12 @@ OLF_JNI(ac_solver_gpu, NewtonSettingsNative, setBatchX0Seeds)(
     if (jIdx == nullptr || jVal == nullptr) {
         return;
     }
-    jsize k = env->GetArrayLength(jIdx);
-    ctx->x0SeedIdx.resize(k);
-    ctx->x0SeedVal.resize(k);
-    env->GetIntArrayRegion(jIdx, 0, k, ctx->x0SeedIdx.data());
-    env->GetDoubleArrayRegion(jVal, 0, k, ctx->x0SeedVal.data());
+    ctx->x0SeedIdx = jniInts(env, jIdx);
+    ctx->x0SeedVal = jniDoubles(env, jVal);
+    const int n = ctx->n;
+    for (int& idx : ctx->x0SeedIdx) {                       // the install's local slot to its bank slot
+        idx = installedSlot(ctx, idx / n) * n + idx % n;
+    }
 }
 
 extern "C" JNIEXPORT void JNICALL
@@ -126,11 +127,16 @@ OLF_JNI(ac_solver_gpu, NewtonSettingsNative, setBatchActiveRowCounts)(
     if (ctx == nullptr) {
         return;
     }
-    ctx->hNActive.clear();
-    if (jNActive != nullptr) {
-        int len = env->GetArrayLength(jNActive);
-        ctx->hNActive.resize(len);
-        env->GetIntArrayRegion(jNActive, 0, len, ctx->hNActive.data());
+    std::vector<int> nActive = jniInts(env, jNActive);
+    if (ctx->installSlots.empty()) {                        // the whole bank: null leaves every slot at the full count
+        ctx->hNActive = nActive;
+        return;
+    }
+    if (ctx->hNActive.empty()) {
+        ctx->hNActive.assign(ctx->nScenarios, ctx->n);
+    }
+    for (int j = 0; j < installedSlotCount(ctx); j++) {
+        ctx->hNActive[installedSlot(ctx, j)] = j < static_cast<int>(nActive.size()) ? nActive[j] : ctx->n;
     }
 }
 
@@ -148,7 +154,7 @@ extern "C" JNIEXPORT void JNICALL
 OLF_JNI(ac_solver_gpu, NewtonSettingsNative, setBatchLoopTraceSlot)(
         JNIEnv*, jclass, jlong handle, jint slot) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
-    if (ctx != nullptr) {
-        ctx->loopTraceSlot = slot;
+    if (ctx != nullptr) {                                    // the install's local slot, as the host resolved it
+        ctx->loopTraceSlot = slot >= 0 && slot < installedSlotCount(ctx) ? installedSlot(ctx, slot) : -1;
     }
 }

@@ -11,9 +11,9 @@
 
 namespace olfgpu {
 
-// Seed one fresh full load flow; reactiveLimitsSeedState = a previous solve's reactive-limit states (or null), slackBusAnchorShift = a strategy
-// pair's parent slack total (or null).
-void seedSolve(BatchSolverContext* ctx, DriverPass& drv, const int* reactiveLimitsSeedState, const double* slackBusAnchorShift);
+// Seed one fresh full load flow; reactiveLimitsSeedState = a previous solve's reactive-limit states (or null). A strategy
+// pair's parent slack total comes from the context (slackBusAnchorShift).
+void seedSolve(BatchSolverContext* ctx, DriverPass& drv, const int* reactiveLimitsSeedState);
 
 }  // namespace olfgpu
 

@@ -44,6 +44,7 @@
 #include "../solver/outer_loop_check.cuh"
 #include "../solver/outer_loop_sequence.cuh"
 #include "../solver/realistic_voltage_check.cuh"
+#include "../solver/scenario_install.cuh"
 #include "../solver/solve_seed.cuh"
 #include "../solver/state_vector_scaling.cuh"
 #include "../fixedmatrix/zero_diagonal_repair.cuh"
@@ -75,17 +76,6 @@ namespace olfgpu {
 // row (-2 - dest).
 // =================================================================================
 
-
-// Tile the base row (row 0, already in d[0..n)) across all nS scenarios: d[s*n+i] = d[i] for
-// s in 1..nS-1. The base state/targets/row-mode are identical for every contingency, so the host
-// uploads ONE n-row and this replicates it on-device — no 32x JNI marshalling / H2D of the base.
-template <typename T>
-__global__ void tileBaseRow(int total, int n, T* d) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= n && idx < total) {                       // rows 1..nS-1 copy from row 0; row 0 is the source
-        d[idx] = d[idx % n];
-    }
-}
 
 BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const double* target,
                               const int* rowMode, const int* rowModeSlots, int nRowModeSlots,
@@ -122,106 +112,41 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     const long long newtonIterationsAtStart = gNewtonIters;
     drv.stateVectorScalingMode = stateVectorScalingMode;
     drv.convEpsPerEq = convEpsPerEq;
-    DeviceBuf dTargetOverrideIndex, dTargetOverrideValue;                            // function-scoped: outlive the async override kernel
-    DeviceBuf& dBaseMode = drv.dBaseMode;                   // the contingency-free base row mode (length n)
-    DeviceBuf dModeSlots, dModeRows;                         // compact row modes: the scenarios that differ from the base
-    DeviceBuf dX0SeedIdx, dX0SeedVal;                        // setBatchX0Seeds, function-scoped like the overrides
-    // Per-scenario distributed-slack reweight (generator loss at a DS-participant bus): one affected DS bus per
-    // scenario (distributedSlackOverrideBus[s], -1 if none) whose factor/base/headroom/footroom shrink by the lost gen's share, and
-    // a per-scenario factor-sum drop so the other buses pick up that share. nullptr when no DS scenarios.
-    DeviceBuf& dDistributedSlackOverrideBus = drv.dDistributedSlackOverrideBus;
-    DeviceBuf& dDistributedSlackOverrideFactorDelta = drv.dDistributedSlackOverrideFactorDelta;
-    DeviceBuf& dDistributedSlackOverrideBaseTargetPDelta = drv.dDistributedSlackOverrideBaseTargetPDelta;
-    DeviceBuf& dDistributedSlackOverrideMaxDelta = drv.dDistributedSlackOverrideMaxDelta;
-    DeviceBuf& dDistributedSlackOverrideMinDelta = drv.dDistributedSlackOverrideMinDelta;
-    drv.hasDistributedSlackOverride = (distributedSlackOverrideBus != nullptr && ctx->nDistributedSlackBuses > 0);
-    const bool& hasDistributedSlackOverride = drv.hasDistributedSlackOverride;
-    // Per-scenario DS ANCHOR SHIFT (pair/strategy legs): shift_i = parent's final target at participant i
-    // minus the extraction-time base — re-anchors the water-fill's cumulative reference at the PARENT
-    // contingency's distribution, mirroring OLF's setGeneratorsInitialTargetPToTargetP before a strategy
-    // re-solve. nullptr = anchored at the base (plain contingencies).
-    DeviceBuf& dDistributedSlackBusAnchorShift = drv.dDistributedSlackBusAnchorShift;
-    DeviceBuf& dSlackBusAnchorShift = drv.dSlackBusAnchorShift;
-    drv.hasDistributedSlackBusAnchorShift = (distributedSlackBusAnchorShift != nullptr && ctx->nDistributedSlackBuses > 0);
-    const bool& hasDistributedSlackBusAnchorShift = drv.hasDistributedSlackBusAnchorShift;
-    if (hasDistributedSlackBusAnchorShift) {
-        dDistributedSlackBusAnchorShift.upload(distributedSlackBusAnchorShift, static_cast<size_t>(nS) * ctx->nDistributedSlackBuses * sizeof(double));
-    }
-    // The slack's own target move, independent of the participants' anchors: a strategy pair's parent share,
-    // and also a contingency's load lost at the slack (a plain scenario, no anchor shift).
-    drv.hasSlackBusAnchorShift = (slackBusAnchorShift != nullptr && ctx->nDistributedSlackBuses > 0);
-    const bool& hasSlackBusAnchorShift = drv.hasSlackBusAnchorShift;
-    if (hasSlackBusAnchorShift) {
-        dSlackBusAnchorShift.upload(slackBusAnchorShift, static_cast<size_t>(nS) * sizeof(double));
-    }
-
-    // x0/target are the BASE row (length n), identical for every scenario: upload once and tile across
-    // nS on-device. rowMode is PER-SCENARIO (length n*nS): a contingency can freeze islanded buses
-    // (Phase 0b) or flip PV↔PQ via reactive limits (Phase 1), so it is NOT tiled — uploaded as-is and
-    // mutated in place on-device by the outer-loop kernels. Only the disabled mask is also per-scenario.
-    // x0: either the BASE row tiled across nS (default), or a FULL per-scenario n*nS state
-    // (x0Full != null) — the warm-restart hook for multi-call outer sequencing (e.g. the
-    // transformer voltage-control orchestrator re-solving scenarios from their previous states).
+    // The scenarios of this solve into their slots (scenario_install.cuh): each starts from the base state, targets and
+    // row modes, then takes its own. The row modes are PER-SCENARIO and mutated in place by the outer loops; x0 is either
+    // the base or a FULL per-scenario state (the warm restart of a strategy pair re-solving from its parent's state).
+    ScenarioInputs in;
+    in.x0 = x0;
+    in.target = target;
+    in.baseRowMode = baseRowMode;
+    in.rowMode = rowMode;
+    in.rowModeSlots = rowModeSlots;
+    in.nRowModeSlots = nRowModeSlots;
+    in.disabled = disabled;
+    in.nTargetOverrides = nTargetOverrides;
+    in.targetOverrideIndex = targetOverrideIndex;
+    in.targetOverrideValue = targetOverrideValue;
+    in.x0Full = x0Full;
+    // Per-scenario distributed-slack reweight (generator loss at a DS-participant bus): one affected DS bus per scenario
+    // whose factor/base/headroom/footroom shrink by the lost gen's share, and a per-scenario factor-sum drop so the other
+    // buses pick up that share.
+    in.distributedSlackOverrideBus = distributedSlackOverrideBus;
+    in.distributedSlackOverrideFactorDelta = distributedSlackOverrideFactorDelta;
+    in.distributedSlackOverrideBaseTargetPDelta = distributedSlackOverrideBaseTargetPDelta;
+    in.distributedSlackOverrideMaxDelta = distributedSlackOverrideMaxDelta;
+    in.distributedSlackOverrideMinDelta = distributedSlackOverrideMinDelta;
+    // Per-scenario DS ANCHOR SHIFT (pair/strategy legs): shift_i = parent's final target at participant i minus the
+    // extraction-time base - re-anchors the water-fill's cumulative reference at the PARENT contingency's distribution,
+    // mirroring OLF's setGeneratorsInitialTargetPToTargetP before a strategy re-solve. The slack's own target move,
+    // independent of the participants' anchors: a strategy pair's parent share, and also a contingency's load lost at
+    // the slack (a plain scenario, no anchor shift).
+    in.distributedSlackBusAnchorShift = distributedSlackBusAnchorShift;
+    in.slackBusAnchorShift = slackBusAnchorShift;
     ctx->outerLoopFirstSolveIterations.assign(nS, 0);
     ctx->outerLoopIterations.assign(nS, 0);
     ctx->outerLoopSolvePasses.assign(nS, 0);
     ctx->outerLoopChecks.assign(nS, 0);
-    dBaseMode.upload(baseRowMode, n * sizeof(int));         // base (contingency-free) row mode for the RL limit-type seed
-    if (x0Full != nullptr) {
-        CUDA_CHECK(cudaMemcpy(ctx->dX.p, x0Full, (size_t) nTot * sizeof(double), cudaMemcpyHostToDevice));
-    } else {
-        CUDA_CHECK(cudaMemcpy(ctx->dX.p, x0, n * sizeof(double), cudaMemcpyHostToDevice));
-    }
-    CUDA_CHECK(cudaMemcpy(ctx->dTarget.p, target, n * sizeof(double), cudaMemcpyHostToDevice));
-    // The BASE targets, kept aside before tiling and the per-scenario overrides: the pilot-Q
-    // capture below reads the base carrier's row, and a scenario may have overridden that row
-    // (a member islanded by a bus loss freezes it to a flat voltage identity). Capturing from the
-    // base keeps the captured value the pilot's reactive target whatever the scenario did to the
-    // row. (The carrier's target itself is stamped host-side when the base carrier is frozen -
-    // GpuBatchChunkSolver - because the device stamp runs only inside the outer-loop passes.)
-    if (!ctx->dTargetBase.p) ctx->dTargetBase.alloc((size_t) n * sizeof(double));
-    CUDA_CHECK(cudaMemcpy(ctx->dTargetBase.p, target, n * sizeof(double), cudaMemcpyHostToDevice));
-    if (rowModeSlots == nullptr) {
-        CUDA_CHECK(cudaMemcpy(ctx->dMode.p, rowMode, nTot * sizeof(int), cudaMemcpyHostToDevice));
-    } else {
-        // COMPACT: every scenario starts from the base row mode, then only those that differ (islanded buses,
-        // switch outages, ...) get their own row — a few rows instead of nS * n ints through PCIe.
-        CUDA_CHECK(cudaMemcpy(ctx->dMode.p, baseRowMode, n * sizeof(int), cudaMemcpyHostToDevice));
-        tileBaseRow<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n * nS, n, ctx->dMode.as<int>());
-        if (nRowModeSlots > 0) {
-            dModeSlots.upload(rowModeSlots, nRowModeSlots * sizeof(int));
-            dModeRows.upload(rowMode, (size_t) nRowModeSlots * n * sizeof(int));
-            scatterRowsInt<<<grid(nRowModeSlots * n), BLOCK, 0, ctx->stream>>>(nRowModeSlots, n,
-                    dModeSlots.as<int>(), dModeRows.as<int>(), ctx->dMode.as<int>());
-        }
-    }
-    if (x0Full == nullptr) {
-        tileBaseRow<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n * nS, n, ctx->dX.as<double>());
-        int nSeeds = static_cast<int>(ctx->x0SeedIdx.size());
-        if (nSeeds > 0) {                                // a few per-scenario starting values over the base
-            dX0SeedIdx.upload(ctx->x0SeedIdx.data(), nSeeds * sizeof(int));
-            dX0SeedVal.upload(ctx->x0SeedVal.data(), nSeeds * sizeof(double));
-            applyTargetOverrideBatch<<<grid(nSeeds), BLOCK, 0, ctx->stream>>>(nSeeds, dX0SeedIdx.as<int>(),
-                    dX0SeedVal.as<double>(), ctx->dX.as<double>());
-        }
-    }
-    ctx->x0SeedIdx.clear();                              // consumed by this solve either way
-    ctx->x0SeedVal.clear();
-    tileBaseRow<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n * nS, n, ctx->dTarget.as<double>());
-    if (nTargetOverrides > 0) {                                       // per-scenario target overrides (generator loss)
-        dTargetOverrideIndex.upload(targetOverrideIndex, nTargetOverrides * sizeof(int));
-        dTargetOverrideValue.upload(targetOverrideValue, nTargetOverrides * sizeof(double));
-        applyTargetOverrideBatch<<<grid(nTargetOverrides), BLOCK, 0, ctx->stream>>>(nTargetOverrides, dTargetOverrideIndex.as<int>(), dTargetOverrideValue.as<double>(), ctx->dTarget.as<double>());
-    }
-    if (hasDistributedSlackOverride) {                                     // per-scenario generator-loss DS reweight
-        dDistributedSlackOverrideBus.upload(distributedSlackOverrideBus, nS * sizeof(int));
-        dDistributedSlackOverrideFactorDelta.upload(distributedSlackOverrideFactorDelta, nS * sizeof(double));
-        dDistributedSlackOverrideBaseTargetPDelta.upload(distributedSlackOverrideBaseTargetPDelta, nS * sizeof(double));
-        dDistributedSlackOverrideMaxDelta.upload(distributedSlackOverrideMaxDelta, nS * sizeof(double));
-        dDistributedSlackOverrideMinDelta.upload(distributedSlackOverrideMinDelta, nS * sizeof(double));
-    }
-    CUDA_CHECK(cudaMemcpy(ctx->dDisabled.p, disabled,
-                          static_cast<size_t>(ctx->nElements) * nS * sizeof(char), cudaMemcpyHostToDevice));
+    installScenarios(ctx, in);
 
     // a new chunk's scenarios hold no identity system yet (a lane its scenarios leave unused keeps whatever the last one
     // left there)
@@ -356,7 +281,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     CUDA_CHECK(cudaMemcpyAsync(ctx->dXLastConv.p, ctx->dX.p, static_cast<size_t>(nS) * n * sizeof(double),
                                cudaMemcpyDeviceToDevice, ctx->stream));
     if (fullLoadflow) {                                      // per-solve PV↔PQ state: 0 switches, limitType from base
-        seedSolve(ctx, drv, reactiveLimitsSeedState, slackBusAnchorShift);
+        seedSolve(ctx, drv, reactiveLimitsSeedState);
     }
 
     // SEQUENTIAL outer loops, exactly like OLF's AcloadFlowEngine: fully stabilize the reactive-limits loop

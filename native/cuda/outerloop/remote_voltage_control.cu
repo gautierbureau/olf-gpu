@@ -407,8 +407,8 @@ void launchDistrQTargetsInner(BatchSolverContext* ctx, DriverPass& drv) {
                     pilotSelfReactiveLimitEntryOrNull(ctx),
                     ctx->structure->dRelocatedChildOwnRow.p != nullptr
                             ? ctx->structure->dRelocatedChildOwnRow.as<int>() : nullptr,
-                ctx->hasDistrQSubgroups ? ctx->dDistrQSubgroup.as<char>() : nullptr, ctx->hasDistrQSubgroups ? ctx->dReactiveRelocationDistrQMemberStart.as<int>() : nullptr,
-                ctx->nReactiveLimitGeneratorsLost > 0 ? ctx->dReactiveLimitGeneratorsLost.as<char>() : nullptr,
+                ctx->distrQSubgroup.deviceOrNull(), ctx->distrQSubgroup.on() ? ctx->dReactiveRelocationDistrQMemberStart.as<int>() : nullptr,
+                ctx->reactiveLimitGeneratorsLost.deviceOrNull(),
                 ctx->structure->dReactiveRelocationDependentBaseGroup.p ? ctx->structure->dReactiveRelocationDependentBaseGroup.as<int>() : nullptr,
                 ctx->dReactiveRelocationPilotTargetVDeactivated.p ? ctx->dReactiveRelocationPilotTargetVDeactivated.as<char>() : nullptr,
                     ctx->dReactiveLimitInitialTargetQ.as<double>(), ctx->dReactiveLimitReactivePowerRow.as<int>(),

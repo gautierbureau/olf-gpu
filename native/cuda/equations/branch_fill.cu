@@ -41,7 +41,8 @@ __global__ void fillClosedBranchBatch(int elementCount, int nScenarios, int n, i
                                       const char* disabled, const char* active,
                                       int nClosedBranchParameterOverrides, const int* closedBranchParameterOverrideScenarioElement, const double* closedBranchParameterOverrideValues,
                                       const int* alternateDestination, const int* selectorRow, const int* mode, int dynamicRelocation,
-                                      const int* phaseControlDestination, const int* phaseControlSelector, ReactiveRelocationTables rt) {
+                                      const char* relocatedElement, const int* phaseControlDestination, const int* phaseControlSelector,
+                                      ReactiveRelocationTables rt) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= elementCount * nScenarios) return;
     int e = tid % elementCount;
@@ -66,7 +67,7 @@ __global__ void fillClosedBranchBatch(int elementCount, int nScenarios, int n, i
                      o + 0, o + 1, o + 2, o + 3, o + 4, o + 5, o + 6, o + 7, o + 8, o + 9,
                      o + 10, o + 11, o + 12, o + 13, o + 14, o + 15, o + 16, o + 17, o + 18,
                      o + 19, o + 20, o + 21, o + 22, o + 23, o + 24, o + 25, o + 26, o + 27);
-    if (dynamicRelocation) {
+    if (dynamicRelocation && relocatedElement[e]) {
         scatterAddRelocated(CLOSED_BRANCH_OUTPUT_COUNT, dest + e * CLOSED_BRANCH_OUTPUT_COUNT, alternateDestination + e * CLOSED_BRANCH_OUTPUT_COUNT, selectorRow + e * CLOSED_BRANCH_OUTPUT_COUNT,
                       mode + (size_t) s * n, o, vals + (size_t) s * nnz, F + (size_t) s * n,
                       relocationTablesForScenario(rt, s), e * CLOSED_BRANCH_OUTPUT_COUNT);
@@ -177,7 +178,8 @@ __global__ void fillClosedBranchBatchF(int elementCount, int nScenarios, int n, 
                                        const char* disabled, const char* active,
                                        int nClosedBranchParameterOverrides, const int* closedBranchParameterOverrideScenarioElement, const double* closedBranchParameterOverrideValues,
                                        const int* alternateDestination, const int* selectorRow, const int* mode, int dynamicRelocation,
-                                       const int* phaseControlDestination, const int* phaseControlSelector, ReactiveRelocationTables rt) {
+                                       const char* relocatedElement, const int* phaseControlDestination, const int* phaseControlSelector,
+                                       ReactiveRelocationTables rt) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= elementCount * nScenarios) return;
     int e = tid % elementCount;
@@ -197,7 +199,7 @@ __global__ void fillClosedBranchBatchF(int elementCount, int nScenarios, int n, 
     double o[4];                                             // p1 q1 p2 q2: the fused fill's own expressions
     updateClosedBranchWithoutDerivatives(p[0], p[1], p[2], p[3], p[4], v1, r1, v2, p[5], a1, ph1, ph2, 0, o + 0, o + 1, o + 2, o + 3);
     const int pos[4] = {0, 7, 14, 21};
-    if (dynamicRelocation) {
+    if (dynamicRelocation && relocatedElement[e]) {
         scatterAddFRelocated(4, dest + e * CLOSED_BRANCH_OUTPUT_COUNT, alternateDestination + e * CLOSED_BRANCH_OUTPUT_COUNT, selectorRow + e * CLOSED_BRANCH_OUTPUT_COUNT,
                        pos, mode + (size_t) s * n, o, F + (size_t) s * n, rt, e * CLOSED_BRANCH_OUTPUT_COUNT);
     } else {

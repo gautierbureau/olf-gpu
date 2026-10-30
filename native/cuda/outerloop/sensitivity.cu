@@ -20,6 +20,7 @@
 #include "../equations/distribution_fill.cuh"
 #include "../equations/fill_launch.cuh"
 #include "../equations/zero_impedance_fill.cuh"
+#include "../solver/batched_lu_solve.cuh"
 #include "../solver/driver_steps.cuh"
 #include "../fixedmatrix/zero_diagonal_repair.cuh"
 #include "pilot_voltage.cuh"
@@ -68,6 +69,11 @@ void sensitivitySolve(BatchSolverContext* ctx, DriverPass& drv, bool& first) {
             { AnalysisTimer at_(__LINE__, 'G'); CUDSS_CHECK(cudssExecute(ctx->solver.handle, CUDSS_PHASE_FACTORIZATION | CUDSS_PHASE_SOLVE,
                     ctx->solver.config, ctx->solver.data, ctx->solver.systemMatrix, ctx->solver.solutionMatrix, ctx->solver.rightHandSideMatrix)); }
         }
+        first = false;
+        return;
+    }
+    if (ctx->mode == GpuLinearSolveMode::BATCHED_LU) {
+        batchedLuSensitivitySolve(ctx, nS, first);
         first = false;
         return;
     }

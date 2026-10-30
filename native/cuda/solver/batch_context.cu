@@ -1,8 +1,8 @@
 // Copyright (c) 2026, RTE (http://www.rte-france.com)
 // SPDX-License-Identifier: MPL-2.0
 //
-// A batched context's life: the cuDSS matrices of the UBATCH and robust modes, the creation on a shared structure,
-// and the per-call upload of the scenario overrides. See batch_context.cuh.
+// A batched context's life: the cuDSS matrices of the UBATCH and robust modes or our batched LU's factors, the
+// creation on a shared structure, and the per-call upload of the scenario overrides. See batch_context.cuh.
 #include <cuda_runtime.h>
 #include <cudss.h>
 
@@ -57,6 +57,16 @@ void setupBatchMatricesUbatch(BatchSolverContext* ctx) {
         CUDSS_CHECK(cudssMatrixCreateDn(&ctx->uniformBatchResidualMatrix, n, 1, n, ctx->dR.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
         CUDSS_CHECK(cudssMatrixCreateDn(&ctx->uniformBatchDeltaMatrix, n, 1, n, ctx->dDelta.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
     }
+}
+
+// Mode 7: our batched LU's factors for every slot, and the refinement buffers the cuDSS batch has.
+void setupBatchedLu(BatchSolverContext* ctx) {
+    ctx->batchedLu = std::make_unique<BatchedLu>();
+    createBatchedLu(*ctx->batchedLu, luPlanOf(*ctx->structure), ctx->nScenarios);
+    const size_t vectorBytes = static_cast<size_t>(ctx->n) * ctx->nScenarios * sizeof(double);
+    ctx->dR.alloc(vectorBytes);                              // zeroed: a lane that never solves keeps a clean 0
+    ctx->dDelta.alloc(vectorBytes);
+    ctx->dIterativeRefinementScore.alloc(static_cast<size_t>(ctx->nScenarios) * sizeof(double));
 }
 
 void setupBatchMatricesFallback(BatchSolverContext* ctx) {
@@ -298,6 +308,8 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& structure, int 
 
     if (mode == GpuLinearSolveMode::UBATCH) {
         setupBatchMatricesUbatch(ctx.get());
+    } else if (mode == GpuLinearSolveMode::BATCHED_LU) {
+        setupBatchedLu(ctx.get());
     } else {
         setupBatchMatricesFallback(ctx.get());
     }

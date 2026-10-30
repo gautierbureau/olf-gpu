@@ -9,6 +9,7 @@
 namespace GpuLinearSolveMode {
 constexpr int UBATCH = 3;  // one per-block matrix, CUDSS_CONFIG_UBATCH_SIZE, no pivoting
 constexpr int ROBUST = 6;  // per-scenario single-matrix solve with pivoting and matching
+constexpr int BATCHED_LU = 7;  // our batched sparse LU on the scenarios still iterating
 }
 
 #endif

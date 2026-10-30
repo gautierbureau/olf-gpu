@@ -7,6 +7,7 @@
  */
 package com.powsybl.openloadflow.ac.solver.gpu;
 
+import com.powsybl.commons.config.PlatformConfig;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcStructures;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.StructureNative;
@@ -118,10 +119,22 @@ public final class GpuBatchContextCache {
     /** Test hook: a mode every context of this JVM is built in instead of {@link GpuLinearSolveMode#UBATCH}, or null. */
     private static volatile Integer modeForTests;
 
-    /** The native batched-solve mode: {@link GpuLinearSolveMode#UBATCH}. */
-    public static int resolveBatchMode() {
+    /**
+     * The native batched-solve mode of a run with these GPU parameters: {@link GpuLinearSolveMode#UBATCH} on cuDSS,
+     * {@link GpuLinearSolveMode#BATCHED_LU} on our batched LU.
+     */
+    public static int resolveBatchMode(GpuLoadFlowParameters parameters) {
         Integer forced = modeForTests;
-        return forced != null ? forced : GpuLinearSolveMode.UBATCH;
+        if (forced != null) {
+            return forced;
+        }
+        return parameters.getLinearSolver() == GpuLinearSolver.BATCHED_LU ? GpuLinearSolveMode.BATCHED_LU
+                : GpuLinearSolveMode.UBATCH;
+    }
+
+    /** The batched-solve mode of the configuration module's GPU parameters: a solver driven without a run's. */
+    public static int resolveBatchMode() {
+        return resolveBatchMode(GpuLoadFlowParameters.load(PlatformConfig.defaultConfig()));
     }
 
     /** TESTS ONLY: build every context in {@code mode} (e.g. {@link GpuLinearSolveMode#ROBUST}) until reset with null. */

@@ -500,6 +500,11 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
         return "GPU Newton-Raphson";
     }
 
+    /** The run's GPU parameters. */
+    private GpuLoadFlowParameters gpuParameters() {
+        return parameters instanceof GpuNewtonRaphsonParameters gpu ? gpu.getGpuParameters() : new GpuLoadFlowParameters();
+    }
+
     @Override
     public AcSolverResult run(VoltageInitializer voltageInitializer, ReportNode reportNode) {
         if (!driverEngineActive || driverFallbackForRun) {
@@ -508,8 +513,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
             lastRunOnDevice = false;
             return cpuNewtonRaphson(voltageInitializer, reportNode);
         }
-        (parameters instanceof GpuNewtonRaphsonParameters gpu ? gpu.getGpuParameters() : new GpuLoadFlowParameters())
-                .install();
+        gpuParameters().install();
         return runImpl(voltageInitializer, reportNode, false);
     }
 
@@ -940,7 +944,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
         // The shared structure comes from the per-extraction cache — the batched SA
         // building its context from the SAME extraction reuses it device-side.
         context.handle.set(BatchSolveNative.createBatchContext(GpuAcStructures.handle(n, data), 1,
-                robustModeForRun ? GpuLinearSolveMode.ROBUST : GpuBatchContextCache.resolveBatchMode(),
+                robustModeForRun ? GpuLinearSolveMode.ROBUST : GpuBatchContextCache.resolveBatchMode(gpuParameters()),
                 data.reactiveLimits().voltageRow(), data.reactiveLimits().minQ(), data.reactiveLimits().maxQ(), data.reactiveLimits().loadQ(), data.reactiveLimits().targetV(),
                 data.reactiveLimits().flags(), data.voltageRows().slope(),
                 data.distributedSlack().busPhiRow(), data.distributedSlack().busFactor(), data.distributedSlack().slackPhiRow(), data.distributedSlack().slackTargetP(),

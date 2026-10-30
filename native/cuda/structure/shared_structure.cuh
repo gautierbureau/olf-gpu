@@ -43,6 +43,9 @@ struct Family {
     DeviceBuf relocationGroup, relocationCandidateOffset, relocationCandidateDestinations;               // GROUP relocation (plan-A6): per-output group id +
     DeviceBuf relocationDependentPilot;                                      // per output: 1 = dependent-pilot routing (dependentPilotDestination)
     bool dynamicRelocation = false;                                   // slot-pool offset; pool = one slot per candidate
+    // Per element (closed branches): 1 when one of its outputs has a destination the scenario decides (a relocation group
+    // or a selector row), 0 when every output keeps its frozen one - the fill then scatters it as a static family.
+    DeviceBuf relocatedElement;
     DeviceBuf phaseControlDestination, phaseControlSelector; // Continuous phase control (cb only): P-flow row at a1
     bool hasPhaseControl = false;                            // phase control destinations populated (mode-3 gated emission)
 };

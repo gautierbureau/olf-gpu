@@ -239,6 +239,19 @@ SharedStructure* buildStructure(int n,
             patchGroupFrozenDestinations(structure->closedBranch.destination, relocationGroup, relocationCandidateOffset, CLOSED_BRANCH_OUTPUT_COUNT, cbRoles,
                     structure->hReactiveRelocationGroupStart.data(), structure->hReactiveRelocationCandidateRows.data());
         }
+        // rte6515 carries a relocatable output on 41 of its 9,042 closed branches, network.xiidm on 238 of 9,959; walking
+        // every output of the others through the relocation tables to land on its frozen destination anyway was 71 % of
+        // the closed-branch fill (the probe of 2026-10-30: 104 of 145 ms against the static scatter)
+        std::vector<char> relocatedElement(nClosedBranch, 0);
+        for (int e = 0; e < nClosedBranch; e++) {
+            for (int k = 0; k < CLOSED_BRANCH_OUTPUT_COUNT; k++) {
+                const int t = e * CLOSED_BRANCH_OUTPUT_COUNT + k;
+                if (selectorRow[t] != -1 || (!relocationCandidateDestinations.empty() && relocationGroup[t] >= 0)) {
+                    relocatedElement[e] = 1;
+                }
+            }
+        }
+        structure->closedBranch.relocatedElement.upload(relocatedElement.data(), relocatedElement.size());
         structure->closedBranch.dynamicRelocation = true;
     }
     if (hasPhaseControl) {                                          // continuous phase control: P-flow row at a1

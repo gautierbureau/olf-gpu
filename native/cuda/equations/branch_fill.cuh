@@ -19,7 +19,8 @@ __global__ void fillClosedBranchBatch(int elementCount, int nScenarios, int n, i
                                       const char* disabled, const char* active,
                                       int nClosedBranchParameterOverrides, const int* closedBranchParameterOverrideScenarioElement, const double* closedBranchParameterOverrideValues,
                                       const int* alternateDestination, const int* selectorRow, const int* mode, int dynamicRelocation,
-                                      const int* phaseControlDestination, const int* phaseControlSelector, ReactiveRelocationTables rt);
+                                      const char* relocatedElement, const int* phaseControlDestination, const int* phaseControlSelector,
+                                      ReactiveRelocationTables rt);
 
 __global__ void fillClosedBranchQbufBatch(int elementCount, int nScenarios, int n, int nElements, int elemOffset,
                                           const double* in, const int* ix, const int* dest,
@@ -39,7 +40,8 @@ __global__ void fillClosedBranchBatchF(int elementCount, int nScenarios, int n, 
                                        const char* disabled, const char* active,
                                        int nClosedBranchParameterOverrides, const int* closedBranchParameterOverrideScenarioElement, const double* closedBranchParameterOverrideValues,
                                        const int* alternateDestination, const int* selectorRow, const int* mode, int dynamicRelocation,
-                                       const int* phaseControlDestination, const int* phaseControlSelector, ReactiveRelocationTables rt);
+                                       const char* relocatedElement, const int* phaseControlDestination, const int* phaseControlSelector,
+                                       ReactiveRelocationTables rt);
 
 __global__ void fillOpenBranchBatchF(int elementCount, int nScenarios, int n, int nnz, int nElements, int elemOffset,
                                      const double* in, const int* ix, const int* dest,

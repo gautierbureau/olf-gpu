@@ -4,6 +4,7 @@
 // JNI entry points of BatchedLuNative: our batched LU alone, on an explicit CSR pattern - its plan's statistics, a
 // factorization and solve on a lane map, and the elimination order cuDSS's analysis picks for the same pattern.
 #include "jni_common.cuh"
+#include "../solver/batched_lu_solve.cuh"
 
 namespace {
 
@@ -141,6 +142,73 @@ OLF_JNI(ac_solver_gpu, BatchedLuNative, factorizeAndSolve)(
         env->SetDoubleArrayRegion(jSolutions, 0, static_cast<jsize>(solutions.size()), solutions.data());
         env->SetIntArrayRegion(jPivoted, 0, static_cast<jsize>(pivoted.size()), pivoted.data());
         env->SetIntArrayRegion(jPivotClamps, 0, static_cast<jsize>(clamps.size()), clamps.data());
+    } catch (const std::exception& e) {
+        throwJava(env, e);
+    }
+}
+
+// The Newton step's linear solve of a structure with couplers (solveNewtonStep: the solve with cuDSS's in-solve
+// refinement steps, then the adaptive refinement) on the scenarios of laneMap, every other scenario's solution left as
+// it is. values: capacity * nnz, rightHandSides and solutions: capacity * n, scenario-major.
+extern "C" JNIEXPORT void JNICALL
+OLF_JNI(ac_solver_gpu, BatchedLuNative, factorizeAndSolveNewtonStep)(
+        JNIEnv* env, jclass, jint n, jintArray jRowPtr, jintArray jColIdx, jintArray jRowOrder, jintArray jColOrder,
+        jint capacity, jdoubleArray jValues, jdoubleArray jRightHandSides, jintArray jLaneMap, jdoubleArray jSolutions) {
+    try {
+        const std::vector<int> rowPtr = intsOf(env, jRowPtr);
+        const std::vector<int> colIdx = intsOf(env, jColIdx);
+        const std::vector<int> rowOrder = intsOf(env, jRowOrder);
+        const std::vector<int> colOrder = intsOf(env, jColOrder);
+        const std::vector<int> laneMap = intsOf(env, jLaneMap);
+        const int nnz = rowPtr[n];
+        std::vector<double> values(static_cast<size_t>(capacity) * nnz);
+        std::vector<double> rightHandSides(static_cast<size_t>(capacity) * n);
+        std::vector<double> solutions(static_cast<size_t>(capacity) * n);
+        env->GetDoubleArrayRegion(jValues, 0, static_cast<jsize>(values.size()), values.data());
+        env->GetDoubleArrayRegion(jRightHandSides, 0, static_cast<jsize>(rightHandSides.size()), rightHandSides.data());
+        env->GetDoubleArrayRegion(jSolutions, 0, static_cast<jsize>(solutions.size()), solutions.data());
+        std::vector<char> lanes(capacity, 0);
+        for (int s : laneMap) {
+            if (s < 0 || s >= capacity) {
+                throw std::runtime_error("lane map entry " + std::to_string(s) + " outside 0.."
+                                         + std::to_string(capacity - 1));
+            }
+            lanes[s] = 1;
+        }
+        const LuPlan plan = buildLuPlan(n, rowPtr.data(), colIdx.data(), rowOrder.data(), colOrder.data());
+        BatchedLu lu;
+        createBatchedLu(lu, plan, capacity);
+        const size_t vectorBytes = static_cast<size_t>(capacity) * n * sizeof(double);
+        DeviceBuf dRowPtr, dColIdx, dValues, dRightHandSides, dSolutions, dLanes, dResidual, dCorrection,
+                dInternalResidual, dInternalCorrection, dScore, dMask;
+        dRowPtr.upload(rowPtr.data(), rowPtr.size() * sizeof(int));
+        dColIdx.upload(colIdx.data(), colIdx.size() * sizeof(int));
+        dValues.upload(values.data(), values.size() * sizeof(double));
+        dRightHandSides.upload(rightHandSides.data(), rightHandSides.size() * sizeof(double));
+        dSolutions.upload(solutions.data(), solutions.size() * sizeof(double));
+        dLanes.upload(lanes.data(), lanes.size());
+        dResidual.alloc(vectorBytes);
+        dCorrection.alloc(vectorBytes);
+        dInternalResidual.alloc(vectorBytes);
+        dInternalCorrection.alloc(vectorBytes);
+        dScore.alloc(static_cast<size_t>(capacity) * sizeof(double));
+        cudaStream_t stream = nullptr;
+        CUDA_CHECK(cudaStreamCreate(&stream));
+        try {
+            factorizeLanes(lu, dValues.as<double>(), laneMap.data(), static_cast<int>(laneMap.size()), stream);
+            const BatchedLuSystems systems{&lu, n, capacity, nnz, dRowPtr.as<int>(), dColIdx.as<int>(), dValues.as<double>(),
+                                           true, dLanes.as<char>(), stream, dResidual.as<double>(), dCorrection.as<double>(),
+                                           dInternalResidual.as<double>(), dInternalCorrection.as<double>(), dScore, dMask};
+            solveNewtonStep(systems, dRightHandSides.as<double>(), dSolutions.as<double>());
+            CUDA_CHECK(cudaStreamSynchronize(stream));
+            CUDA_CHECK(cudaMemcpy(solutions.data(), dSolutions.p, solutions.size() * sizeof(double),
+                                  cudaMemcpyDeviceToHost));
+        } catch (...) {
+            cudaStreamDestroy(stream);
+            throw;
+        }
+        CUDA_CHECK(cudaStreamDestroy(stream));
+        env->SetDoubleArrayRegion(jSolutions, 0, static_cast<jsize>(solutions.size()), solutions.data());
     } catch (const std::exception& e) {
         throwJava(env, e);
     }

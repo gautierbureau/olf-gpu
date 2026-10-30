@@ -66,6 +66,21 @@ public final class BatchedLuNative {
                                                 double[] solutions, int[] pivoted, int[] pivotClamps);
 
     /**
+     * The Newton step's linear solve of a structure with zero-impedance couplers on the scenarios of {@code laneMap}:
+     * a factorization, the solve with cuDSS's in-solve refinement steps and the adaptive refinement, as a batch context
+     * on our LU runs them. Every other scenario's solution is left as it is.
+     *
+     * @param capacity       scenarios in the arrays
+     * @param values         CSR values, {@code capacity * nnz}, scenario-major
+     * @param rightHandSides {@code capacity * n}, scenario-major
+     * @param laneMap        the scenarios to factorize and solve
+     * @param solutions      {@code capacity * n}, scenario-major: the solved scenarios' entries are overwritten
+     */
+    public static native void factorizeAndSolveNewtonStep(int n, int[] rowPtr, int[] colIdx, int[] rowOrder, int[] colOrder,
+                                                          int capacity, double[] values, double[] rightHandSides,
+                                                          int[] laneMap, double[] solutions);
+
+    /**
      * The orders cuDSS's analysis picks for the pattern, written into {@code rowOrder} and {@code colOrder} as cuDSS
      * returns them, and the LU fill it reports.
      */

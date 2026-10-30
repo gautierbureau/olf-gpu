@@ -512,6 +512,9 @@ struct BatchSolverContext {
     int mode = 0;                                            // 3 = UBATCH, 6 = per-scenario loop, robust (pivoted) config,
                                                              // 7 = our batched LU
     std::unique_ptr<BatchedLu> batchedLu;                    // mode 7: the factors, one lane per slot
+    // mode 7 with couplers: the residual and correction of the internal refinement steps inside a refinement's own
+    // correction solve (batched_lu_solve.cu solveWithInternalRefinement)
+    DeviceBuf dInternalRefinementResidual, dInternalRefinementCorrection;
     // mode 7: the exact substitution of the one-variable equations after each solve (singleton_substitution.cuh)
     DeviceBuf dSingletonHazardSlot, dSingletonShortRow, dSingletonFixed, dSingletonOwner, dSingletonProposal,
             dSingletonProposalValue, dSingletonFixedAny;

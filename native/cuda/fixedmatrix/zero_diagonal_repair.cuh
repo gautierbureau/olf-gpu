@@ -26,6 +26,9 @@ void repairZeroDiagonalRows(BatchSolverContext* ctx, int nS, double* vals);
 
 void repairZeroDiagonalRightHandSide(BatchSolverContext* ctx, int nS, double* B, int sOff);
 
+// Whether this context repairs zero diagonals: every mode but the robust one, which pivots and matches.
+bool repairsZeroDiagonals(const BatchSolverContext* ctx);
+
 }  // namespace olfgpu
 
 #endif  // OLF_GPU_FIXEDMATRIX_ZERO_DIAGONAL_REPAIR_CUH

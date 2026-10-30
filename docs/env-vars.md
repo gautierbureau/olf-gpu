@@ -20,7 +20,7 @@ Anything in the third table should be treated as unverified until someone reads 
 | property | effect |
 |---|---|
 
-## Trace channels (36) — print only, cannot change a result
+## Trace channels (37) — print only, cannot change a result
 
 Each one is read once: on the Java side by the enum `com.powsybl.openloadflow.util.gpu.GpuTrace`, on the native
 side by `native/cuda/common/trace.cuh`. A variable both sides read is listed on both. This table is generated
@@ -42,6 +42,7 @@ from those two lists; add a channel there, then here.
 | `OLF_GPU_HVDC_TRACE` | java | `<phiRow>` or `all`: the AC emulation HVDC links the pack carries and their loop decisions. |
 | `OLF_GPU_ITER_TRACE_CTG` | java | `<id>[,<id>]`: iteration count, final mismatch and distributed active power of those contingencies. |
 | `OLF_GPU_LOOP_TRACE` | native | `<slot>`: that slot's outer-loop passes (or the OLF_GPU_LOOP_TRACE_CTG slot) |
+| `OLF_GPU_LU_COMPARE` | native | Every Newton step of our batched LU against cuDSS's uniform batch on the same systems: worst difference, backward errors, clamped pivots |
 | `OLF_GPU_LOOP_TRACE_CTG` | java | `<contingency id>`: the native outer-loop trace of that contingency's slot, in every chunk. |
 | `OLF_GPU_PHASE_TIME` | java + native | Where the run's time goes: phases of the security analysis, chunk sizing, context reuse. Native: where the time goes (analysis, outer-loop passes, solves) |
 | `OLF_GPU_PRELOSS_TRACE` | java | The replayed loss pre-distribution: what each contingency's generators take before the first solve. |

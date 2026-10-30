@@ -25,6 +25,7 @@
 #include "driver_steps.cuh"
 #include "iterative_refinement.cuh"
 #include "linear_solver_settings.cuh"
+#include "batched_lu_solve.cuh"
 #include "realistic_voltage_check.cuh"
 #include "state_vector_scaling.cuh"
 #include "../fixedmatrix/zero_diagonal_repair.cuh"
@@ -291,14 +292,18 @@ void newtonSolve(BatchSolverContext* ctx, DriverPass& drv) {
             CUDA_CHECK(cudaMemcpyAsync(ctx->dLineSearchPreviousX.p, ctx->dX.p, static_cast<size_t>(n) * nS * sizeof(double),
                                        cudaMemcpyDeviceToDevice, ctx->stream));
         }
-        if (ctx->mode == GpuLinearSolveMode::UBATCH) {
+        if (ctx->mode == GpuLinearSolveMode::UBATCH || ctx->mode == GpuLinearSolveMode::BATCHED_LU) {
         // ---- UBATCH solve: ANALYZE one block once (cheap), then a linear solve over all nS systems
         //      via CUDSS_CONFIG_UBATCH_SIZE on the single per-block matrix, FACTORIZED every iteration
-        //      (honest Newton). ----
+        //      (honest Newton). Our batched LU (mode 7) factorizes the active scenarios only; the inactive ones
+        //      get the same identity systems, so every buffer holds what it holds under cuDSS. ----
         writeIdentityForInactive<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, nnz, ctx->structure->dRowPtr.as<int>(),
                 ctx->structure->dDiagPos.as<int>(), ctx->dActive.as<char>(), ctx->dVals.as<double>(), ctx->dF.as<double>());
         negateIntoBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n * nS, ctx->dF.as<double>(), ctx->dB.as<double>());
         repairZeroDiagonalRightHandSide(ctx, nS, ctx->dB.as<double>());
+        if (ctx->mode == GpuLinearSolveMode::BATCHED_LU) {
+            batchedLuNewtonSolve(ctx, drv, it);
+        } else {
         if (!ctx->analyzed) {
             bool timeIt = traceOn(Trace::TRACE);
             long long t0 = 0;
@@ -411,7 +416,7 @@ void newtonSolve(BatchSolverContext* ctx, DriverPass& drv) {
             if (ctx->structure->nZeroImpedanceBranch > 0 && ctx->dRCompacted.p != nullptr && ctx->dIterativeRefinementScore.p != nullptr && ctx->dIterativeRefinementScore.cap >= static_cast<size_t>(w) * sizeof(double)) {
                 // adaptive refinement on the compacted lanes (all w are real or a duplicate of a real one)
                 refineLanes(ctx, w, n, nnz, ctx->dValsCompacted.as<double>(), ctx->dDxCompacted.as<double>(), ctx->dBCompacted.as<double>(),
-                        ctx->dRCompacted.as<double>(), ctx->dDeltaCompacted.as<double>(), nullptr, [&]() {
+                        ctx->dRCompacted.as<double>(), ctx->dDeltaCompacted.as<double>(), nullptr, configuredIterativeRefinementBaseSteps(), [&]() {
                     AnalysisTimer at_(__LINE__, 'S');
                     CUDSS_CHECK(cudssExecute(ctx->compactedSolver.handle, CUDSS_PHASE_SOLVE, ctx->compactedSolver.config, compactData, ctx->compactedUniformBatchSystemMatrix, ctx->compactedUniformBatchDeltaMatrix, ctx->compactedUniformBatchResidualMatrix));
                 });
@@ -423,12 +428,13 @@ void newtonSolve(BatchSolverContext* ctx, DriverPass& drv) {
             if (ctx->structure->nZeroImpedanceBranch > 0 && ctx->dR.p != nullptr && ctx->uniformBatchResidualMatrix != nullptr && ctx->dIterativeRefinementScore.p != nullptr) {
                 // adaptive refinement on the full-width UBATCH solve (see refineLanes)
                 refineLanes(ctx, nS, n, nnz, ctx->dVals.as<double>(), ctx->dDx.as<double>(), ctx->dB.as<double>(),
-                        ctx->dR.as<double>(), ctx->dDelta.as<double>(), ctx->dActive.as<char>(), [&]() {
+                        ctx->dR.as<double>(), ctx->dDelta.as<double>(), ctx->dActive.as<char>(), configuredIterativeRefinementBaseSteps(), [&]() {
                     AnalysisTimer at_(__LINE__, 'S');
                     CUDSS_CHECK(cudssExecute(ctx->solver.handle, CUDSS_PHASE_SOLVE, ctx->solver.config, ctx->solver.data, ctx->uniformBatchSystemMatrix, ctx->uniformBatchDeltaMatrix, ctx->uniformBatchResidualMatrix));
                 });
             }
         }
+        }   // cuDSS
         // LINEAR-SOLVE GUARD, first iteration of the first pass of every batched solve: a
         // factorization the UNPIVOTED uniform batch got wrong shows as a linear residual ratio of
         // 1e6..1e13 (rte6515's full busbar scope, 366 retained couplers: min pivots of 1e-18 under

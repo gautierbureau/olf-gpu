@@ -19,6 +19,7 @@ import com.powsybl.math.matrix.DenseMatrixFactory;
 import com.powsybl.openloadflow.OpenLoadFlowParameters;
 import com.powsybl.openloadflow.OpenLoadFlowProvider;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
+import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuLinearSolveMode;
 import com.powsybl.openloadflow.network.EurostagFactory;
 import org.junit.jupiter.api.Test;
 
@@ -39,6 +40,7 @@ class GpuLoadFlowParametersTest {
     @Test
     void defaultsAreTheDevicesHistoricSettings() {
         GpuLoadFlowParameters p = new GpuLoadFlowParameters();
+        assertEquals(GpuLinearSolver.CUDSS, p.getLinearSolver());
         assertEquals(GpuReorderingAlgorithm.AUTO, p.getReorderingAlgorithm());
         assertEquals(GpuMatchingAlgorithm.AUTO, p.getMatchingAlgorithm());
         assertEquals(GpuPivotType.BY_ORDERING, p.getPivotType());
@@ -53,17 +55,29 @@ class GpuLoadFlowParametersTest {
         try (FileSystem fs = Jimfs.newFileSystem(Configuration.unix())) {
             InMemoryPlatformConfig config = new InMemoryPlatformConfig(fs);
             MapModuleConfig module = config.createModuleConfig(GpuLoadFlowParameters.MODULE);
+            module.setStringProperty(GpuLoadFlowParameters.LINEAR_SOLVER_PARAM_NAME, "BATCHED_LU");
             module.setStringProperty(GpuLoadFlowParameters.REORDERING_ALGORITHM_PARAM_NAME, "NESTED_DISSECTION");
             module.setStringProperty(GpuLoadFlowParameters.PIVOT_TYPE_PARAM_NAME, "GLOBAL_ROW");
             module.setStringProperty(GpuLoadFlowParameters.PIVOT_THRESHOLD_PARAM_NAME, "0.1");
             module.setStringProperty(GpuLoadFlowParameters.ITERATIVE_REFINEMENT_MAX_STEPS_PARAM_NAME, "6");
             GpuLoadFlowParameters p = GpuLoadFlowParameters.load(config);
+            assertEquals(GpuLinearSolver.BATCHED_LU, p.getLinearSolver());
             assertEquals(GpuReorderingAlgorithm.NESTED_DISSECTION, p.getReorderingAlgorithm());
             assertEquals(GpuPivotType.GLOBAL_ROW, p.getPivotType());
             assertEquals(0.1, p.getPivotThreshold());
             assertEquals(6, p.getIterativeRefinementMaxSteps());
             assertEquals(GpuMatchingAlgorithm.AUTO, p.getMatchingAlgorithm(), "unset keeps the default");
         }
+    }
+
+    /** The linear solver is the mode the batch contexts are built in. */
+    @Test
+    void linearSolverPicksTheBatchMode() {
+        assertEquals(GpuLinearSolveMode.UBATCH, GpuBatchContextCache.resolveBatchMode(new GpuLoadFlowParameters()));
+        assertEquals(GpuLinearSolveMode.BATCHED_LU, GpuBatchContextCache.resolveBatchMode(
+                new GpuLoadFlowParameters().setLinearSolver(GpuLinearSolver.BATCHED_LU)));
+        assertEquals(GpuLinearSolver.BATCHED_LU, GpuLoadFlowParameters.load(java.util.Map.of(
+                GpuLoadFlowParameters.LINEAR_SOLVER_PARAM_NAME, "BATCHED_LU")).getLinearSolver());
     }
 
     @Test

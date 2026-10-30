@@ -200,7 +200,8 @@ final class GpuBatchChunkSolver {
         // busbar structure needs to factor at all. Switching mode EVICTS the single-entry context cache,
         // so the retry pays one cuDSS analysis; that is the price of keeping the scenarios on device.
         long handle = GpuBatchContextCache.acquireBatchContext(gpuData, chunkSize,
-                config.robustSolveMode() ? GpuLinearSolveMode.ROBUST : GpuBatchContextCache.resolveBatchMode(), n);
+                config.robustSolveMode() ? GpuLinearSolveMode.ROBUST
+                        : GpuBatchContextCache.resolveBatchMode(config.resolvedGpuParameters()), n);
         // PER_EQUATION_TYPE criterion: install the per-row thresholds on the (possibly cached)
         // context — or CLEAR a previous run's thresholds under UNIFORM_CRITERIA.
         NewtonSettingsNative.installRowCriteria(handle, rowCriteria);

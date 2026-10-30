@@ -14,7 +14,9 @@ import com.powsybl.iidm.network.Network;
 import com.powsybl.openloadflow.CommonTestConfig;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcStructures;
+import com.powsybl.openloadflow.ac.solver.gpu.BatchedLuNative;
 import com.powsybl.openloadflow.ac.solver.gpu.GpuBatchContextCache;
+import com.powsybl.openloadflow.ac.solver.gpu.GpuLinearSolver;
 import com.powsybl.openloadflow.ac.solver.gpu.GpuLoadFlowParameters;
 import com.powsybl.openloadflow.ac.solver.gpu.GpuMatchingAlgorithm;
 import com.powsybl.openloadflow.ac.solver.gpu.GpuPivotType;
@@ -220,6 +222,41 @@ class GpuSaSolverTest extends AbstractGpuSaTest {
         } finally {
             GpuBatchContextCache.forceModeForTests(null);
         }
+    }
+
+    /** Our batched LU (mode 7) runs the in-kernel transformer, shunt and secondary voltage control loops too, their
+     *  sensitivities solved on its own factors of every slot. */
+    @Test
+    void deviceBatchedLuRunsTheInKernelLoops() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        GpuBatchContextCache.forceModeForTests(GpuLinearSolveMode.BATCHED_LU);
+        try {
+            assertIncrementalTvcTapMovesInKernel();
+            assertIncrementalSharedTvcMatchesCpu();
+            assertIncrementalShuntVoltageControlMatchesCpu();
+            assertSecondaryVoltageControlMatchesCpu();
+            assertSecondaryVoltageControlRemoteMatchesCpu();
+        } finally {
+            GpuBatchContextCache.forceModeForTests(null);
+        }
+    }
+
+    /** linearSolver = BATCHED_LU solves the batched Newton steps on our batched LU, which factorizes only the
+     *  contingencies still iterating: outages of different difficulty retire at different iterations, and a retired
+     *  slot must keep its state while the others go on. */
+    @Test
+    void batchedLuParameterSolvesOnOurLuAndMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = IeeeCdfNetworkFactory.create118();
+        List<Contingency> ctgs = network.getLineStream().limit(60)
+                .map(l -> new Contingency(l.getId(), new BranchContingency(l.getId()))).toList();
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters();
+        GpuLoadFlowParameters.create(lfp).setLinearSolver(GpuLinearSolver.BATCHED_LU);
+        long factorizations = BatchedLuNative.factorizationCounts()[0];
+        assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
+        assertTrue(BatchedLuNative.factorizationCounts()[0] > factorizations, "the run factorizes on our batched LU");
     }
 
     /** LINE_SEARCH state-vector scaling in the batched SA. The scope used to map it to an undamped Newton (only

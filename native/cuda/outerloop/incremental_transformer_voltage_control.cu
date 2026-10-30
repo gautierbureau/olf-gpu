@@ -289,9 +289,10 @@ void incrementalTransformerVoltageControlStep(BatchSolverContext* ctx, DriverPas
     std::vector<char>& active = drv.active;
     int nIncrementalTransformerVoltageControlControllerBranches = ctx->nIncrementalTransformerVoltageControlControllerBranches;
     if (nIncrementalTransformerVoltageControlControllerBranches <= 0) return;
-    if (ctx->mode != GpuLinearSolveMode::UBATCH && ctx->mode != GpuLinearSolveMode::ROBUST) {
+    if (ctx->mode != GpuLinearSolveMode::UBATCH && ctx->mode != GpuLinearSolveMode::ROBUST
+            && ctx->mode != GpuLinearSolveMode::BATCHED_LU) {
         static bool warned = false;
-        if (!warned) { std::fprintf(stderr, "in-kernel TVC needs a UBATCH (3) or robust (6) mode; mode %d runs it as stable\n", ctx->mode); warned = true; }
+        if (!warned) { std::fprintf(stderr, "in-kernel TVC needs a UBATCH (3), robust (6) or batched LU (7) mode; mode %d runs it as stable\n", ctx->mode); warned = true; }
         return;
     }
     size_t nst = static_cast<size_t>(nS) * nIncrementalTransformerVoltageControlControllerBranches;

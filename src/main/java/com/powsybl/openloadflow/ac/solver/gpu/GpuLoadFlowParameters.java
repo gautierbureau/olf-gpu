@@ -24,9 +24,9 @@ import java.util.Objects;
 /**
  * The GPU solver's own parameters, the way OLF carries a solver's settings (Newton-Krylov's in
  * OpenLoadFlowParameters): a {@link LoadFlowParameters} extension, read by {@link GpuNewtonRaphsonFactory} into the
- * solver parameters and by the GPU security analysis for its batched solves. They configure cuDSS's linear solve
- * and the iterative refinement on systems with zero-impedance couplers; the defaults are what the device has
- * always used. When a run's parameters carry none, the {@value #MODULE} configuration module provides them.
+ * solver parameters and by the GPU security analysis for its batched solves. They pick the batched linear solver,
+ * configure cuDSS's linear solve and the iterative refinement on systems with zero-impedance couplers; the defaults
+ * are what the device has always used. When a run's parameters carry none, the {@value #MODULE} configuration module provides them.
  * They are the specific parameters of the {@code OpenLoadFlowGpu} load flow provider, next to OLF's own
  * {@code OpenLoadFlowParameters}, so a parameters JSON file, a name/value map or the configuration module can
  * set them like any other provider parameter.
@@ -38,6 +38,7 @@ public class GpuLoadFlowParameters extends AbstractExtension<LoadFlowParameters>
     public static final String NAME = "gpu-load-flow-parameters";
     public static final String MODULE = "open-loadflow-gpu-default-parameters";
 
+    public static final String LINEAR_SOLVER_PARAM_NAME = "linearSolver";
     public static final String REORDERING_ALGORITHM_PARAM_NAME = "reorderingAlgorithm";
     public static final String MATCHING_ALGORITHM_PARAM_NAME = "matchingAlgorithm";
     public static final String PIVOT_TYPE_PARAM_NAME = "pivotType";
@@ -46,6 +47,7 @@ public class GpuLoadFlowParameters extends AbstractExtension<LoadFlowParameters>
     public static final String ITERATIVE_REFINEMENT_MAX_STEPS_PARAM_NAME = "iterativeRefinementMaxSteps";
     public static final String ITERATIVE_REFINEMENT_TOLERANCE_PARAM_NAME = "iterativeRefinementTolerance";
 
+    public static final GpuLinearSolver LINEAR_SOLVER_DEFAULT_VALUE = GpuLinearSolver.CUDSS;
     public static final GpuReorderingAlgorithm REORDERING_ALGORITHM_DEFAULT_VALUE = GpuReorderingAlgorithm.AUTO;
     public static final GpuMatchingAlgorithm MATCHING_ALGORITHM_DEFAULT_VALUE = GpuMatchingAlgorithm.AUTO;
     public static final GpuPivotType PIVOT_TYPE_DEFAULT_VALUE = GpuPivotType.BY_ORDERING;
@@ -58,6 +60,8 @@ public class GpuLoadFlowParameters extends AbstractExtension<LoadFlowParameters>
     private static final String SOLVER_CATEGORY_KEY = "Solver";
 
     public static final List<Parameter> SPECIFIC_PARAMETERS = List.of(
+        new Parameter(LINEAR_SOLVER_PARAM_NAME, ParameterType.STRING, "Linear solver of the batched Newton-Raphson",
+            LINEAR_SOLVER_DEFAULT_VALUE.name(), names(GpuLinearSolver.values()), ParameterScope.TECHNICAL, SOLVER_CATEGORY_KEY),
         new Parameter(REORDERING_ALGORITHM_PARAM_NAME, ParameterType.STRING, "cuDSS fill-reducing ordering",
             REORDERING_ALGORITHM_DEFAULT_VALUE.name(), names(GpuReorderingAlgorithm.values()), ParameterScope.TECHNICAL, SOLVER_CATEGORY_KEY),
         new Parameter(MATCHING_ALGORITHM_PARAM_NAME, ParameterType.STRING, "cuDSS matching algorithm (robust single-matrix solve)",
@@ -78,6 +82,7 @@ public class GpuLoadFlowParameters extends AbstractExtension<LoadFlowParameters>
         return Arrays.stream(values).map(Enum::name).map(Object.class::cast).toList();
     }
 
+    private GpuLinearSolver linearSolver = LINEAR_SOLVER_DEFAULT_VALUE;
     private GpuReorderingAlgorithm reorderingAlgorithm = REORDERING_ALGORITHM_DEFAULT_VALUE;
     private GpuMatchingAlgorithm matchingAlgorithm = MATCHING_ALGORITHM_DEFAULT_VALUE;
     private GpuPivotType pivotType = PIVOT_TYPE_DEFAULT_VALUE;
@@ -121,6 +126,7 @@ public class GpuLoadFlowParameters extends AbstractExtension<LoadFlowParameters>
     /** Sets the parameters the {@value #MODULE} configuration module holds; the others are unchanged. */
     public GpuLoadFlowParameters update(PlatformConfig platformConfig) {
         platformConfig.getOptionalModuleConfig(MODULE).ifPresent(config -> {
+            config.getOptionalEnumProperty(LINEAR_SOLVER_PARAM_NAME, GpuLinearSolver.class).ifPresent(this::setLinearSolver);
             config.getOptionalEnumProperty(REORDERING_ALGORITHM_PARAM_NAME, GpuReorderingAlgorithm.class)
                     .ifPresent(this::setReorderingAlgorithm);
             config.getOptionalEnumProperty(MATCHING_ALGORITHM_PARAM_NAME, GpuMatchingAlgorithm.class)
@@ -140,7 +146,11 @@ public class GpuLoadFlowParameters extends AbstractExtension<LoadFlowParameters>
     /** Sets the parameters named in {@code properties}; the others are unchanged. */
     public GpuLoadFlowParameters update(Map<String, String> properties) {
         Objects.requireNonNull(properties);
-        String value = properties.get(REORDERING_ALGORITHM_PARAM_NAME);
+        String value = properties.get(LINEAR_SOLVER_PARAM_NAME);
+        if (value != null) {
+            setLinearSolver(GpuLinearSolver.valueOf(value));
+        }
+        value = properties.get(REORDERING_ALGORITHM_PARAM_NAME);
         if (value != null) {
             setReorderingAlgorithm(GpuReorderingAlgorithm.valueOf(value));
         }
@@ -174,6 +184,7 @@ public class GpuLoadFlowParameters extends AbstractExtension<LoadFlowParameters>
     /** Every parameter by name, in {@link #SPECIFIC_PARAMETERS} order. */
     public Map<String, Object> toMap() {
         Map<String, Object> map = new LinkedHashMap<>();
+        map.put(LINEAR_SOLVER_PARAM_NAME, linearSolver);
         map.put(REORDERING_ALGORITHM_PARAM_NAME, reorderingAlgorithm);
         map.put(MATCHING_ALGORITHM_PARAM_NAME, matchingAlgorithm);
         map.put(PIVOT_TYPE_PARAM_NAME, pivotType);
@@ -186,7 +197,8 @@ public class GpuLoadFlowParameters extends AbstractExtension<LoadFlowParameters>
 
     /**
      * Hands these settings to the device, for the contexts built from now on and for every solve's refinement.
-     * cuDSS takes its configuration when a context is built, so a change evicts the cached batch context.
+     * cuDSS takes its configuration when a context is built, so a change evicts the cached batch context. The linear
+     * solver is the mode a context is built in ({@link GpuBatchContextCache#resolveBatchMode(GpuLoadFlowParameters)}).
      */
     public void install() {
         if (!GpuAcNewtonSolver.isAvailable()) {
@@ -206,6 +218,7 @@ public class GpuLoadFlowParameters extends AbstractExtension<LoadFlowParameters>
 
     private GpuLoadFlowParameters copy() {
         return new GpuLoadFlowParameters()
+                .setLinearSolver(linearSolver)
                 .setReorderingAlgorithm(reorderingAlgorithm)
                 .setMatchingAlgorithm(matchingAlgorithm)
                 .setPivotType(pivotType)
@@ -216,13 +229,23 @@ public class GpuLoadFlowParameters extends AbstractExtension<LoadFlowParameters>
     }
 
     private boolean sameSettings(GpuLoadFlowParameters other) {
-        return reorderingAlgorithm == other.reorderingAlgorithm
+        return linearSolver == other.linearSolver
+                && reorderingAlgorithm == other.reorderingAlgorithm
                 && matchingAlgorithm == other.matchingAlgorithm
                 && pivotType == other.pivotType
                 && Double.compare(pivotThreshold, other.pivotThreshold) == 0
                 && iterativeRefinementBaseSteps == other.iterativeRefinementBaseSteps
                 && iterativeRefinementMaxSteps == other.iterativeRefinementMaxSteps
                 && Double.compare(iterativeRefinementTolerance, other.iterativeRefinementTolerance) == 0;
+    }
+
+    public GpuLinearSolver getLinearSolver() {
+        return linearSolver;
+    }
+
+    public GpuLoadFlowParameters setLinearSolver(GpuLinearSolver linearSolver) {
+        this.linearSolver = Objects.requireNonNull(linearSolver);
+        return this;
     }
 
     public GpuReorderingAlgorithm getReorderingAlgorithm() {
@@ -306,7 +329,8 @@ public class GpuLoadFlowParameters extends AbstractExtension<LoadFlowParameters>
 
     @Override
     public String toString() {
-        return "GpuLoadFlowParameters(" + REORDERING_ALGORITHM_PARAM_NAME + "=" + reorderingAlgorithm
+        return "GpuLoadFlowParameters(" + LINEAR_SOLVER_PARAM_NAME + "=" + linearSolver
+                + ", " + REORDERING_ALGORITHM_PARAM_NAME + "=" + reorderingAlgorithm
                 + ", " + MATCHING_ALGORITHM_PARAM_NAME + "=" + matchingAlgorithm
                 + ", " + PIVOT_TYPE_PARAM_NAME + "=" + pivotType
                 + ", " + PIVOT_THRESHOLD_PARAM_NAME + "=" + pivotThreshold

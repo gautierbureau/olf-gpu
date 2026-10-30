@@ -14,6 +14,7 @@
 
 #include "../common/device_buf.cuh"
 #include "../common/codes/gpu_two_sides.cuh"
+#include "../lu/lu_plan.cuh"
 #include "csr_pattern.cuh"
 
 namespace olfgpu {
@@ -129,6 +130,7 @@ struct SharedStructure {
     std::vector<int> hZeroDiagonalRow;                                // donor candidates (see repairZeroDiagonalRowsBatch)
     DeviceBuf dZeroDiagonalRow, dZeroDiagonalRowValueStart, dZeroDiagonalDonorStart, dZeroDiagonalDonor, dZeroDiagonalDonorOwnIndex, dZeroDiagonalRepairSign;
     double luBytes = 0.0;                                    // cached LU-probe footprint (0 = not probed yet)
+    std::shared_ptr<const LuPlan> luPlan;                    // our batched LU's plan, built by the first context using it
 };
 
 // The native handle Java holds (GpuAcStructures) is a heap-allocated shared_ptr; each
@@ -154,6 +156,9 @@ SharedStructure* buildStructure(int n,
 
 // The device bytes one scenario's LU factors take, from a cuDSS probe analysis (cached on the structure).
 double luBytesPerScenario(SharedStructure& structure);
+
+// Our batched LU's plan of the structure's pattern in cuDSS's elimination order, built on first use and kept.
+const LuPlan& luPlanOf(SharedStructure& structure);
 
 }  // namespace olfgpu
 

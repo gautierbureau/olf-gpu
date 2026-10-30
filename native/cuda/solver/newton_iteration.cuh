@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MPL-2.0
 //
 // The inner Newton-Raphson of one outer pass (OLF NewtonRaphson.run) on every active scenario: fill, factorize
-// and solve (UBATCH or robust), score and refine the linear solve, scale the step, update, and retire each
+// and solve (UBATCH, our batched LU or robust), score and refine the linear solve, scale the step, update, and retire each
 // scenario once it converges, diverges or exhausts its iterations.
 #ifndef OLF_GPU_SOLVER_NEWTON_ITERATION_CUH
 #define OLF_GPU_SOLVER_NEWTON_ITERATION_CUH

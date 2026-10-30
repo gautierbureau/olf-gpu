@@ -12,6 +12,7 @@
 #include <cstring>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -25,6 +26,8 @@
 
 #include "../common/check.cuh"
 #include "../common/stats.cuh"
+#include "../common/trace.cuh"
+#include "../lu/cudss_order.cuh"
 #include "../solver/linear_solver_settings.cuh"
 #include "structure_build.cuh"
 #include "../fixedmatrix/relocation_pattern.cuh"
@@ -423,6 +426,26 @@ double luBytesPerScenario(SharedStructure& structure) {
 #endif
     structure.luBytes = LU_FILL * static_cast<double>(structure.nnz) * sizeof(double);
     return structure.luBytes;
+}
+
+const LuPlan& luPlanOf(SharedStructure& structure) {
+    static std::mutex buildMutex;                            // contexts on one structure may be built concurrently
+    std::lock_guard<std::mutex> lock(buildMutex);
+    if (!structure.luPlan) {
+        std::vector<int> rowOrder;
+        std::vector<int> colOrder;
+        int64_t cudssLuNnz = 0;
+        cudssEliminationOrder(structure.n, structure.nnz, structure.dRowPtr.as<int>(), structure.dColIdx.as<int>(),
+                              structure.nZeroImpedanceBranch > 0, rowOrder, colOrder, cudssLuNnz);
+        auto plan = std::make_shared<LuPlan>(buildLuPlan(structure.n, structure.rowPtr.data(), structure.colIdx.data(),
+                                                         rowOrder.data(), colOrder.data()));
+        if (traceOn(Trace::TRACE)) {
+            std::fprintf(stderr, "OLF_GPU_LU_PLAN n=%d nnz=%d cudssLuNnz=%lld %s\n", plan->scalar.n, plan->scalar.nnzA,
+                         static_cast<long long>(cudssLuNnz), describeLuPlan(*plan).c_str());
+        }
+        structure.luPlan = std::move(plan);
+    }
+    return *structure.luPlan;
 }
 
 }  // namespace olfgpu

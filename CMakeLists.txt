@@ -127,6 +127,7 @@ add_library(olfgpu SHARED
     native/cuda/lu/supernodal_lu.cu
     native/cuda/lu/supernodal_lu_plan.cu
     native/cuda/solver/batch_context.cu
+    native/cuda/solver/batched_lu_solve.cu
     native/cuda/solver/compact_solve.cu
     native/cuda/solver/convergence.cu
     native/cuda/solver/iterative_refinement.cu
@@ -155,6 +156,7 @@ add_library(olfgpu SHARED
     native/cuda/outerloop/shunt_voltage_control.cu
     native/cuda/outerloop/transformer_voltage_control.cu
     native/cuda/outerloop/voltage_monitoring.cu
+    native/cuda/diagnostics/batched_lu_compare.cu
     native/cuda/diagnostics/driver_traces.cu
     native/cuda/diagnostics/matrix_scan.cu
     native/cuda/sa/olf_gpu_violations.cu

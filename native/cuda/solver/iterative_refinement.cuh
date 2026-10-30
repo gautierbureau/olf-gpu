@@ -33,7 +33,8 @@ __global__ void iterativeRefinementScoreBatch(int n, int nS, const double* r, co
 
 __global__ void axpyLaneMaskBatch(int n, int total, double sign, const double* d, const char* lane, double* x);
 
-// Adaptive iterative refinement (see configuredIterativeRefinementBaseSteps / configuredIterativeRefinementMaxSteps / iterativeRefinementTolerance), decided PER LANE. Each lane refines (r = b - J dx, J d = r,
+// Adaptive iterative refinement (see configuredIterativeRefinementBaseSteps / configuredIterativeRefinementMaxSteps / iterativeRefinementTolerance), decided PER LANE. internalSteps: the refinement steps the solver
+// already ran inside its own solve (cuDSS's base steps; none for our batched LU). Each lane refines (r = b - J dx, J d = r,
 // dx += d) while ITS OWN backward residual ratio is above tol and still falling, and undoes a step that did not
 // lower it - what the same scenario does in a batch of one. The batched solve still runs over every lane; a lane
 // that is done just does not take the correction. It used to be decided on the WORST lane and applied to all of
@@ -42,9 +43,9 @@ __global__ void axpyLaneMaskBatch(int n, int total, double sign, const double* d
 // that over the 1 MW slack-balance threshold - 0.125 MW off the CPU in one chunk, 1.7e-8 MW in another.
 template <typename SolveFn>
 void refineLanes(BatchSolverContext* ctx, int lanes, int n, int nnz, const double* vals, double* dx,
-                        const double* b, double* r, const double* delta, const char* active, SolveFn solve) {
+                        const double* b, double* r, const double* delta, const char* active, int internalSteps,
+                        SolveFn solve) {
     const int iterativeRefinementMaxSteps = configuredIterativeRefinementMaxSteps();
-    const int iterativeRefinementBaseSteps = configuredIterativeRefinementBaseSteps();
     const double tol = iterativeRefinementTolerance();
     std::vector<double> prev(lanes), sc(lanes);
     std::vector<char> lane(lanes), undo(lanes);
@@ -63,7 +64,7 @@ void refineLanes(BatchSolverContext* ctx, int lanes, int n, int nnz, const doubl
         nLane += lane[s];
     }
     ctx->dIterativeRefinementScenarioMask.ensure(static_cast<size_t>(lanes));
-    for (int step = iterativeRefinementBaseSteps; step < iterativeRefinementMaxSteps && nLane > 0; step++) {
+    for (int step = internalSteps; step < iterativeRefinementMaxSteps && nLane > 0; step++) {
         CUDA_CHECK(cudaMemcpy(ctx->dIterativeRefinementScenarioMask.p, lane.data(), lanes, cudaMemcpyHostToDevice));
         solve();                                              // delta = J^-1 r on every lane
         axpyLaneMaskBatch<<<grid(n * lanes), BLOCK, 0, ctx->stream>>>(n, n * lanes, 1.0, delta, ctx->dIterativeRefinementScenarioMask.as<char>(), dx);

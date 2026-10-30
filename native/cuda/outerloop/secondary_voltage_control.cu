@@ -347,9 +347,10 @@ void secondaryVoltageControlStep(BatchSolverContext* ctx, DriverPass& drv) {
     std::vector<char>& loopRejected = drv.loopRejected;
     int nC = ctx->nSecondaryVoltageControlControllerBuses;
     if (nC <= 0) return;
-    if (ctx->mode != GpuLinearSolveMode::UBATCH && ctx->mode != GpuLinearSolveMode::ROBUST) {
+    if (ctx->mode != GpuLinearSolveMode::UBATCH && ctx->mode != GpuLinearSolveMode::ROBUST
+            && ctx->mode != GpuLinearSolveMode::BATCHED_LU) {
         static bool warned = false;
-        if (!warned) { std::fprintf(stderr, "in-kernel SecondaryVc needs a UBATCH (3) or robust (6) mode; mode %d runs it as stable\n", ctx->mode); warned = true; }
+        if (!warned) { std::fprintf(stderr, "in-kernel SecondaryVc needs a UBATCH (3), robust (6) or batched LU (7) mode; mode %d runs it as stable\n", ctx->mode); warned = true; }
         return;
     }
     CUDA_CHECK(cudaMemsetAsync(ctx->dSecondaryVoltageControlNeedsAdjustment.p, 0, nS, ctx->stream));

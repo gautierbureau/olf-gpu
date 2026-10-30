@@ -21,6 +21,7 @@
 #include "../common/codes/gpu_outer_loop_kind.cuh"
 #include "../common/codes/gpu_realistic_voltage_fixing_loop.cuh"
 #include "../common/codes/gpu_transformer_voltage_control_mode.cuh"
+#include "../lu/batched_lu.cuh"
 #include "../structure/shared_structure.cuh"
 
 namespace olfgpu {
@@ -508,7 +509,12 @@ struct BatchSolverContext {
                                                              // but the extra polish run must happen to match the CPU trajectory)
     CudssCtx solver;
     bool analyzed = false;
-    int mode = 0;                                            // 3 = UBATCH, 6 = per-scenario loop, robust (pivoted) config
+    int mode = 0;                                            // 3 = UBATCH, 6 = per-scenario loop, robust (pivoted) config,
+                                                             // 7 = our batched LU
+    std::unique_ptr<BatchedLu> batchedLu;                    // mode 7: the factors, one lane per slot
+    CudssCtx luComparisonSolver;                             // OLF_GPU_LU_COMPARE: cuDSS's uniform batch on the same systems
+    DeviceBuf dLuComparisonDx, dLuComparisonScore;
+    bool luComparisonAnalyzed = false;
     DeviceBuf dR, dDelta, dIterativeRefinementScore, dIterativeRefinementScenarioMask;                 // adaptive refinement: residual, correction, lane scores/mask
     // UBATCH single matrices (mode 3 only): a SINGLE per-block CSR (n, nnz, shared rowPtr/colIdx)
     // whose value/RHS pointers are the batched buffers (dVals = nS*nnz, dB/dDx = nS*n); cuDSS

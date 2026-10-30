@@ -25,6 +25,9 @@ public final class GpuLinearSolveMode {
      *  matching (cuDSS single-matrix API). What the batch-of-one retries in after a linear-solve reject: rte6515's
      *  full busbar structure does not factor in the uniform batch. */
     public static final int ROBUST = 6;
+    /** Our batched sparse LU (GpuLinearSolver.BATCHED_LU): only the scenarios still iterating are factorized, in
+     *  cuDSS's elimination order, without pivoting. */
+    public static final int BATCHED_LU = 7;
 
     private GpuLinearSolveMode() {
     }

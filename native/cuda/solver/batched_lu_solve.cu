@@ -15,6 +15,7 @@
 #include "../diagnostics/batched_lu_compare.cuh"
 #include "../lu/batched_lu.cuh"
 #include "iterative_refinement.cuh"
+#include "singleton_substitution.cuh"
 
 namespace olfgpu {
 
@@ -66,6 +67,8 @@ void batchedLuNewtonSolve(BatchSolverContext* ctx, DriverPass& drv, int iteratio
             solveLanes(lu, ctx->dR.as<double>(), ctx->dDelta.as<double>(), ctx->stream);
         });
     }
+    AnalysisTimer at_(__LINE__, 'S');
+    substituteSingletons(ctx, nS, ctx->dB.as<double>(), ctx->dDx.as<double>());
 }
 
 void batchedLuSensitivitySolve(BatchSolverContext* ctx, int nS, bool first) {
@@ -78,6 +81,7 @@ void batchedLuSensitivitySolve(BatchSolverContext* ctx, int nS, bool first) {
     }
     AnalysisTimer at_(__LINE__, 'S');
     solveLanes(lu, ctx->dB.as<double>(), ctx->dDx.as<double>(), ctx->stream);
+    substituteSingletons(ctx, nS, ctx->dB.as<double>(), ctx->dDx.as<double>());
 }
 
 }  // namespace olfgpu

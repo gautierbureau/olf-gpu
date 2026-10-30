@@ -512,6 +512,9 @@ struct BatchSolverContext {
     int mode = 0;                                            // 3 = UBATCH, 6 = per-scenario loop, robust (pivoted) config,
                                                              // 7 = our batched LU
     std::unique_ptr<BatchedLu> batchedLu;                    // mode 7: the factors, one lane per slot
+    // mode 7: the exact substitution of the one-variable equations after each solve (singleton_substitution.cuh)
+    DeviceBuf dSingletonHazardSlot, dSingletonShortRow, dSingletonFixed, dSingletonOwner, dSingletonProposal,
+            dSingletonProposalValue, dSingletonFixedAny;
     CudssCtx luComparisonSolver;                             // OLF_GPU_LU_COMPARE: cuDSS's uniform batch on the same systems
     DeviceBuf dLuComparisonDx, dLuComparisonScore;
     bool luComparisonAnalyzed = false;

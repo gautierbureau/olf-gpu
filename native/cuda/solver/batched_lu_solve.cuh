@@ -11,10 +11,11 @@
 namespace olfgpu {
 
 // dDx = J^-1 dB for every active scenario, 0 for the others (their state must not move), with the adaptive
-// refinement on a structure with zero-impedance couplers. dVals and dB hold the iteration's system.
+// refinement on a structure with zero-impedance couplers and the one-variable equations solved exactly
+// (singleton_substitution.cuh). dVals and dB hold the iteration's system.
 void batchedLuNewtonSolve(BatchSolverContext* ctx, DriverPass& drv, int iteration);
 
-// dDx = J^-1 dB for every slot; first: factorize every slot's dVals before.
+// dDx = J^-1 dB for every slot, the one-variable equations solved exactly; first: factorize every slot's dVals before.
 void batchedLuSensitivitySolve(BatchSolverContext* ctx, int nS, bool first);
 
 }  // namespace olfgpu

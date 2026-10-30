@@ -8,11 +8,15 @@
 package com.powsybl.openloadflow.ac.equations.vector.gpu;
 
 import com.powsybl.openloadflow.ac.solver.gpu.BatchedLuNative;
+import com.powsybl.openloadflow.ac.solver.gpu.GpuLoadFlowParameters;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.List;
 import java.util.Random;
+import java.util.TreeMap;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -234,6 +238,73 @@ class GpuBatchedLuTest {
         return values;
     }
 
+    private record CouplerSystem(Csr csr, double[] values, double[] rightHandSide) {
+    }
+
+    /**
+     * A system shaped like a Jacobian with zero-impedance couplers as the zero-diagonal repair hands it to our LU: random
+     * couplings on a strong diagonal, then coupler rows - +a and -a on two later columns, no diagonal - each repaired by
+     * adding a donor row that carries the coupler's column, that column's only other entry. Eliminating the donor first
+     * undoes the repair exactly, and the coupler's pivot is zero.
+     */
+    private static CouplerSystem couplerSystem(long seed, int n, int couplers, double density) {
+        Random random = new Random(seed);
+        List<TreeMap<Integer, Double>> rows = new ArrayList<>();
+        for (int i = 0; i < n; i++) {
+            TreeMap<Integer, Double> row = new TreeMap<>();
+            for (int j = 0; j < n; j++) {
+                if (j != i && random.nextDouble() < density) {
+                    row.put(j, random.nextDouble() * 2 - 1);
+                }
+            }
+            double sum = row.values().stream().mapToDouble(Math::abs).sum();
+            row.put(i, (sum + 1) * (0.5 + random.nextDouble()));
+            rows.add(row);
+        }
+        for (int c = 0; c < couplers; c++) {
+            int r = n / 4 + random.nextInt(n / 2);
+            int d = random.nextInt(r);
+            int c1 = r + 1 + random.nextInt(n - r - 1);
+            int c2 = r + 1 + random.nextInt(n - r - 1);
+            if (c1 == c2 || d == r) {
+                continue;
+            }
+            for (int i = 0; i < n; i++) {
+                if (i != d && i != r) {
+                    rows.get(i).remove(r);
+                }
+            }
+            rows.get(d).put(r, 0.5 + random.nextDouble());
+            double a = 1 + random.nextDouble();
+            TreeMap<Integer, Double> repaired = new TreeMap<>();
+            repaired.put(c1, a);
+            repaired.put(c2, -a);
+            for (var e : rows.get(d).entrySet()) {
+                repaired.merge(e.getKey(), e.getValue(), Double::sum);
+            }
+            rows.set(r, repaired);
+        }
+        int[] rowPtr = new int[n + 1];
+        for (int i = 0; i < n; i++) {
+            rows.get(i).putIfAbsent(i, 0.0);
+            rowPtr[i + 1] = rowPtr[i] + rows.get(i).size();
+        }
+        int[] colIdx = new int[rowPtr[n]];
+        double[] values = new double[rowPtr[n]];
+        int p = 0;
+        for (int i = 0; i < n; i++) {
+            for (var e : rows.get(i).entrySet()) {
+                colIdx[p] = e.getKey();
+                values[p++] = e.getValue();
+            }
+        }
+        double[] rightHandSide = new double[n];
+        for (int i = 0; i < n; i++) {
+            rightHandSide[i] = random.nextDouble() * 2 - 1;
+        }
+        return new CouplerSystem(new Csr(n, rowPtr, colIdx), values, rightHandSide);
+    }
+
     private static double[][] dense(Csr csr, double[] values, int scenario) {
         double[][] m = new double[csr.n()][csr.n()];
         for (int i = 0; i < csr.n(); i++) {
@@ -427,6 +498,42 @@ class GpuBatchedLuTest {
     }
 
     /** cuDSS returns its elimination order new -> old: as returned, it gives cuDSS's own LU fill. */
+    /**
+     * Our LU solves a Newton step as cuDSS's SOLVE phase does under the batch configuration: its internal refinement
+     * step inside every solve, the adaptive refinement's corrections included. Here the repair's undoing clamps two
+     * pivots; refined with bare corrections, a correction that did not lower the residual ended the refinement at a
+     * backward ratio of 9e-9 (on a network.xiidm busbar contingency: 1.1, where cuDSS refines the same system to 3e-11).
+     */
+    @Test
+    void newtonStepCorrectionsCarryTheInternalRefinementStep() {
+        new GpuLoadFlowParameters().install();                   // one internal step, at most four solves, 1e-12
+        CouplerSystem system = couplerSystem(32, 80, 3, 0.03);
+        Csr csr = system.csr();
+        int n = csr.n();
+        int[] pivoted = new int[1];
+        int[] clamps = new int[1];
+        BatchedLuNative.factorizeAndSolve(n, csr.rowPtr(), csr.colIdx(), identity(n), identity(n), 1, system.values(),
+                system.rightHandSide(), new int[] {0}, new double[n], pivoted, clamps);
+        assertArrayEquals(new int[] {1}, pivoted);
+        assertArrayEquals(new int[] {2}, clamps, "the repair's undoing leaves two pivots the pivoting engine cannot find");
+        double[] x = new double[n];
+        BatchedLuNative.factorizeAndSolveNewtonStep(n, csr.rowPtr(), csr.colIdx(), identity(n), identity(n), 1,
+                system.values(), system.rightHandSide(), new int[] {0}, x);
+        double[][] m = dense(csr, system.values(), 0);
+        double residual = 0;
+        double scale = 0;
+        for (int i = 0; i < n; i++) {
+            double acc = 0;
+            for (int j = 0; j < n; j++) {
+                acc += m[i][j] * x[j];
+            }
+            residual = Math.max(residual, Math.abs(system.rightHandSide()[i] - acc));
+            scale = Math.max(scale, Math.abs(system.rightHandSide()[i]));
+        }
+        assertTrue(residual / scale < 1e-12, "backward ratio " + residual / scale);
+        assertArrayEquals(denseSolve(m, system.rightHandSide()), x, 1e-10);
+    }
+
     @Test
     void cudssOrderConvention() {
         int side = 12;

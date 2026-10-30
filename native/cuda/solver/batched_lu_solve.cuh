@@ -6,16 +6,55 @@
 #ifndef OLF_GPU_SOLVER_BATCHED_LU_SOLVE_CUH
 #define OLF_GPU_SOLVER_BATCHED_LU_SOLVE_CUH
 
+#include <functional>
+
 #include "../solver/driver_pass.cuh"
 
 namespace olfgpu {
 
-// dDx = J^-1 dB for every active scenario, 0 for the others (their state must not move), with the adaptive
-// refinement on a structure with zero-impedance couplers and the one-variable equations solved exactly
-// (singleton_substitution.cuh). dVals and dB hold the iteration's system.
+struct BatchedLu;
+
+// nS systems on our LU's last factorization, as the Newton step solves and refines them: their CSR pattern and values
+// (scenario-major, nnz each), whether the structure has zero-impedance couplers (the refinement runs on those only),
+// the solved lanes' mask, the stream, and the scratch of n x nS each (the refinement's residual and correction, the
+// internal steps' inside a correction) plus the refinement's per-lane score and mask. A mode-7 context's, or a test's.
+struct BatchedLuSystems {
+    BatchedLu* lu;
+    int n;
+    int nS;
+    int nnz;
+    const int* rowPtr;
+    const int* colIdx;
+    const double* vals;
+    bool couplers;
+    const char* lanes;
+    cudaStream_t stream;
+    double* residual;
+    double* correction;
+    double* internalResidual;
+    double* internalCorrection;
+    DeviceBuf& score;
+    DeviceBuf& mask;
+};
+
+// x = J^-1 b as cuDSS's SOLVE phase computes it under the batch context's configuration: the solve, then its internal
+// refinement steps (on a structure with couplers) on the lanes of lanes (every lane when null). r and d: scratch of
+// n x nS, apart from b and x.
+void solveWithInternalRefinement(const BatchedLuSystems& systems, const double* b, double* x, double* r, double* d,
+                                 const char* lanes);
+
+// The Newton step's linear solve: dx = J^-1 b with the internal steps, then on a structure with couplers the adaptive
+// refinement of the lanes still above the tolerance, each correction solved with the internal steps too. afterSolve,
+// if set, runs between the two (a trace comparing the solve with cuDSS's).
+void solveNewtonStep(const BatchedLuSystems& systems, const double* b, double* dx,
+                     const std::function<void()>& afterSolve = nullptr);
+
+// dDx = J^-1 dB for every active scenario, 0 for the others (their state must not move): solveNewtonStep, then the
+// one-variable equations solved exactly (singleton_substitution.cuh). dVals and dB hold the iteration's system.
 void batchedLuNewtonSolve(BatchSolverContext* ctx, DriverPass& drv, int iteration);
 
-// dDx = J^-1 dB for every slot, the one-variable equations solved exactly; first: factorize every slot's dVals before.
+// dDx = J^-1 dB for every slot, with cuDSS's in-solve refinement steps and the one-variable equations solved exactly;
+// first: factorize every slot's dVals before.
 void batchedLuSensitivitySolve(BatchSolverContext* ctx, int nS, bool first);
 
 }  // namespace olfgpu

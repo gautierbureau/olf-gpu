@@ -67,6 +67,10 @@ void setupBatchedLu(BatchSolverContext* ctx) {
     ctx->dR.alloc(vectorBytes);                              // zeroed: a lane that never solves keeps a clean 0
     ctx->dDelta.alloc(vectorBytes);
     ctx->dIterativeRefinementScore.alloc(static_cast<size_t>(ctx->nScenarios) * sizeof(double));
+    if (ctx->structure->nZeroImpedanceBranch > 0) {
+        ctx->dInternalRefinementResidual.alloc(vectorBytes);
+        ctx->dInternalRefinementCorrection.alloc(vectorBytes);
+    }
 }
 
 void setupBatchMatricesFallback(BatchSolverContext* ctx) {

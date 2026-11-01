@@ -132,6 +132,7 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& structure, int 
     //      permutation (= identity in the batch path, no families, but mapped for correctness) ----
     ctx->nReactiveLimitEntries = nReactiveLimitEntries;
     ctx->dQbuf.alloc(static_cast<size_t>(n) * nScenarios * sizeof(double));
+    ctx->dQbufClosed.alloc(static_cast<size_t>(n) * nScenarios * sizeof(double));
     ctx->dOuterLoopCheckActive.alloc(static_cast<size_t>(nScenarios) * sizeof(char));
     ctx->dOuterLoopUnstable.alloc(static_cast<size_t>(nScenarios) * sizeof(char));
     // The seed launch of updatePilotTargetVEquationBatch / updateDistrQTargetsBatch (before the first solve) READS

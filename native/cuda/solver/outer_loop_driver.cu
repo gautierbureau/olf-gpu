@@ -674,18 +674,18 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         outerLoopCheckActive[s] = (wasActive[s] && res.status[s] == GpuAcSolverStatus::CONVERGED) ? 1 : 0;
     }
     CUDA_CHECK(cudaMemcpy(ctx->dOuterLoopCheckActive.p, outerLoopCheckActive.data(), nS * sizeof(char), cudaMemcpyHostToDevice));
-    // generator Q per controller = (Σ branch q + shunt q) at its BUS_V row + load Q. Compute the first
-    // part by a fill into a ZEROED buffer: no −target init, no applyRowModeBatch, so qBuf[row] is the raw
-    // bus reactive balance. Disabled branches are skipped (outage); dVals is scratch (the next inner
-    // iteration memsets and refills it).
-    CUDA_CHECK(cudaMemsetAsync(ctx->dQbuf.p, 0, nTot * sizeof(double), ctx->stream));
-    // Reactive-limit Q buffer: physical bus-Q for PV-limit detection — keep the FROZEN routing
-    // (dynamicRelocation=0), the relocation only concerns the Newton residual, not this diagnostic Q.
-    // Nothing reads a Jacobian here, and the fused J+F fill paid for one anyway: 46 of the 98 closed-branch
-    // fills of a 485-contingency network.xiidm chunk, at 38 ms each, were this call. This kernel runs the fused
-    // fill's own residual expressions and drops only the 24 Jacobian scatters (an angle-addition variant once
-    // moved transformer-control cases by ~3e-5 kV: the bus balance must be the Newton residual's arithmetic).
-    if (ctx->structure->closedBranch.elementCount) fillClosedBranchQbufBatch<<<grid(ctx->structure->closedBranch.elementCount * nS), BLOCK, 0, ctx->stream>>>(ctx->structure->closedBranch.elementCount, nS, n, ctx->nElements, ctx->closedBranchOffset, ctx->structure->closedBranch.parameters.as<double>(), ctx->structure->closedBranch.indices.as<int>(), ctx->structure->closedBranch.destination.as<int>(), ctx->dX.as<double>(), ctx->dQbuf.as<double>(), ctx->dDisabled.as<char>(), ctx->dOuterLoopCheckActive.as<char>(), ctx->nClosedBranchParameterOverrides, ctx->dClosedBranchParameterOverrideScenarioElement.as<int>(), ctx->dClosedBranchParameterOverrideValues.as<double>());
+    // generator Q per controller = (Σ branch q + shunt q) at its BUS_V row + load Q: qBuf[row] is the raw bus balance
+    // (no −target, no applyRowModeBatch) on the FROZEN routing - the relocation only concerns the Newton residual. The
+    // closed branches' part is dQbufClosed: every Newton fill zeroes it on its active scenarios and adds the closed
+    // branches' p and q from the very outputs it puts in F (fillClosedBranchBatch), so a scenario holds them at the
+    // state of its last fill - the state its convergence test passed on, and the state every check reads: a check that
+    // changes a scenario sends it to the next pass's solve, and a stable one re-checks every live scenario against the
+    // SAME state (the else branch at the end of the pass), so no state moves between a scenario's last fill and its
+    // checks (a retired scenario's step is exactly 0). It used to be recomputed by a pass of its own at every check, the
+    // same expressions on the same state: 0.71 s of 3.2 s of kernels on rte6515 call 0, 74 of its 106 passes checking
+    // an unchanged batch. The smaller families add theirs for the checked scenarios; disabled elements are skipped
+    // (outage); dVals is scratch (the next inner iteration refills it).
+    CUDA_CHECK(cudaMemcpyAsync(ctx->dQbuf.p, ctx->dQbufClosed.p, nTot * sizeof(double), cudaMemcpyDeviceToDevice, ctx->stream));
     if (ctx->structure->openBranch.elementCount) fillOpenBranchBatch<<<grid(ctx->structure->openBranch.elementCount * nS), BLOCK, 0, ctx->stream>>>(ctx->structure->openBranch.elementCount, nS, n, nnz, ctx->nElements, ctx->openBranchOffset, ctx->structure->openBranch.parameters.as<double>(), ctx->structure->openBranch.indices.as<int>(), ctx->structure->openBranch.destination.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dQbuf.as<double>(), ctx->dDisabled.as<char>(), ctx->dOuterLoopCheckActive.as<char>(), nullptr, nullptr, nullptr, 0, ReactiveRelocationTables{});
     if (ctx->structure->shunt.elementCount) fillShuntBatch<<<grid(ctx->structure->shunt.elementCount * nS), BLOCK, 0, ctx->stream>>>(ctx->structure->shunt.elementCount, nS, n, nnz, ctx->nElements, ctx->shuntOffset, ctx->structure->shunt.parameters.as<double>(), ctx->structure->shunt.indices.as<int>(), ctx->structure->shunt.destination.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dQbuf.as<double>(), ctx->dDisabled.as<char>(), ctx->dOuterLoopCheckActive.as<char>(), ctx->nShuntAdmittanceOverrides, ctx->dShuntAdmittanceOverrideScenarioElement.as<int>(), ctx->dShuntAdmittanceOverrideDelta.as<double>(), nullptr, nullptr, nullptr, 0, ReactiveRelocationTables{});
     if (ctx->structure->nLoadModelTerms) fillLoadModelBatch<<<grid(ctx->structure->nLoadModelTerms * nS), BLOCK, 0, ctx->stream>>>(ctx->structure->nLoadModelTerms, nS, n, nnz, ctx->structure->dLoadModelParameters.as<double>(), ctx->structure->dLoadModelIndices.as<int>(), ctx->structure->dLoadModelDestination.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dQbuf.as<double>(), nullptr, nullptr, nullptr);

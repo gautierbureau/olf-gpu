@@ -99,8 +99,8 @@ struct BatchSolverContext {
     std::vector<double> x0SeedVal;
     DeviceBuf dDisabled, dActive;                            // per-scenario masks
     // Reactive limits (full-loadflow PV→PQ outer loop): per local-PV controller bus, its (rowMap-mapped)
-    // BUS_V row + reactive limits + load Q. dQbuf holds Σ branch q at every row (a fill into a zeroed
-    // buffer); dOuterLoopCheckActive marks which scenarios to RL-check this pass; dOuterLoopUnstable flags scenarios that switched.
+    // BUS_V row + reactive limits + load Q. dQbuf holds Σ branch q at every row (dQbufClosed's closed branches plus the
+    // other families, refilled at every check); dOuterLoopCheckActive marks which scenarios to RL-check this pass; dOuterLoopUnstable flags scenarios that switched.
     int nReactiveLimitEntries = 0;
     DeviceBuf dReactiveLimitVoltageRow, dReactiveLimitMinQ, dReactiveLimitMaxQ, dReactiveLimitLoadQ, dReactiveLimitTargetV;   // per controller (nReactiveLimitEntries)
     DeviceBuf dReactiveLimitReactivePowerRow;                                       // per controller: the row its reactive BALANCE and its
@@ -208,6 +208,9 @@ struct BatchSolverContext {
     DeviceBuf dReactiveLimitSavedTarget;                              // per (controller, scenario): the row target saved at a
                                                            // PV->PQ switch, restored on switch-back for mode-2 rows
     DeviceBuf dQbuf, dOuterLoopCheckActive, dOuterLoopUnstable;               // dQbuf nS*n, dOuterLoopCheckActive/dOuterLoopUnstable nS
+    // nS*n: the closed branches' part of dQbuf, written by the Newton fills (each zeroes its active scenarios' rows and
+    // adds the p and q it puts in F, on the frozen rows) and copied into dQbuf by every check's refill
+    DeviceBuf dQbufClosed;
     DeviceBuf dReactiveLimitQLimitType, dReactiveLimitPvPqSwitchCount;               // per (controller, scenario): 0 PV / 1 minQ / 2 maxQ; PV→PQ count
     // OLF's GLOBAL forced-PV election ("all PV buses should switch — the strongest stays PV"): what each
     // entry did THIS pass (1 = switched PV→PQ, 2 = switched back, 3 = limit re-freeze), the row mode a PV→PQ switch

@@ -64,12 +64,14 @@ __global__ void linResidRowBatch(int n, int nS, int nnz, const int* rowPtr, cons
     rMinus[t] = acc + F[t];
 }
 
-// r = b - J dx per scenario (the refinement residual; the right-hand side as SOLVED, row repairs included)
+// r = b - J dx per scenario (the refinement residual; the right-hand side as SOLVED, row repairs included), on the
+// lanes whose mask is set, every lane when it is null
 __global__ void residualBatch(int n, int nS, int nnz, const int* rowPtr, const int* colIdx,
-                              const double* vals, const double* dx, const double* b, double* r) {
+                              const double* vals, const double* dx, const double* b, const char* lanes, double* r) {
     int t = blockIdx.x * blockDim.x + threadIdx.x;
     if (t >= n * nS) return;
     int s = t / n;
+    if (lanes != nullptr && !lanes[s]) return;
     int i = t - s * n;
     const double* v = vals + (size_t) s * nnz;
     const double* d = dx + (size_t) s * n;

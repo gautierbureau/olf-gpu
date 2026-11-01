@@ -49,7 +49,7 @@ void solveWithInternalRefinement(const BatchedLuSystems& systems, const double* 
     const int steps = systems.couplers ? configuredIterativeRefinementBaseSteps() : ITERATIVE_REFINEMENT_STEPS_WITHOUT_COUPLERS;
     for (int step = 0; step < steps; step++) {
         residualBatch<<<grid(n * nS), BLOCK, 0, systems.stream>>>(n, nS, systems.nnz, systems.rowPtr, systems.colIdx,
-                systems.vals, x, b, r);
+                systems.vals, x, b, lanes, r);
         {
             AnalysisTimer at_(__LINE__, 'S');
             solveLanes(*systems.lu, r, d, systems.stream);
@@ -71,7 +71,8 @@ void solveNewtonStep(const BatchedLuSystems& systems, const double* b, double* d
         return;
     }
     // the cuDSS batch's adaptive refinement of the lanes still above the tolerance
-    refineLanes(RefinementContext{systems.stream, systems.rowPtr, systems.colIdx, systems.score, systems.mask}, systems.nS,
+    refineLanes(RefinementContext{systems.stream, systems.rowPtr, systems.colIdx, systems.score, systems.mask,
+                                  systems.lanes}, systems.nS,
                 systems.n, systems.nnz, systems.vals, dx, b, systems.residual, systems.correction, systems.lanes,
                 configuredIterativeRefinementBaseSteps(), [&]() {
         solveWithInternalRefinement(systems, systems.residual, systems.correction, systems.internalResidual,

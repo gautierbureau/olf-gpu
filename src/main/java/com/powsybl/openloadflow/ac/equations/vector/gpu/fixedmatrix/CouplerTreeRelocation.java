@@ -77,17 +77,7 @@ public final class CouplerTreeRelocation {
         // equation moves to the parent's DUMMY_Q, so a bus whose V row hosts ANOTHER bus's reactive balance (a
         // group's free controller carries the pilot's) or whose reactive equation is relocated elsewhere (a
         // transformer- or shunt-controlled bus) keeps its rows, and the numeric repair covers it as before.
-        boolean[] hostsAnotherReactiveRow = new boolean[nBuses];
-        for (int other = 0; other < nBuses; other++) {
-            if (qRow[other] < 0) {
-                continue;
-            }
-            for (int bn = 0; bn < nBuses; bn++) {
-                if (bn != other && qRow[other] == vCol[bn]) {
-                    hostsAnotherReactiveRow[bn] = true;
-                }
-            }
-        }
+        boolean[] hostsAnotherReactiveRow = hostsAnotherReactiveRow(nBuses, qRow, vCol);
         // ROOT ORDER: a bus that cannot be a CHILD roots its tree when it can (an impedant branch gives its P row a
         // diagonal), the reference bus first: its PHI row holds BUS_TARGET_PHI, so a coupler's ZERO_PHI cannot take
         // it at all (made a child, it is a double row assignment and the whole extraction is refused). Then a bus
@@ -185,6 +175,32 @@ public final class CouplerTreeRelocation {
                     + " stock=" + (tree - relocated));
         }
         return new int[][] {parentEdgeOfBus, childBusOfEdge};
+    }
+
+    /**
+     * Per bus, whether ANOTHER bus's reactive balance sits on its V row: some {@code other != bn} with
+     * {@code qRow[other] == vCol[bn]}. Counted per row, linear in the buses: the pairwise scan it replaces was
+     * quadratic, 18 ms a call on rte6515, which a security analysis calls some twenty times per run.
+     */
+    static boolean[] hostsAnotherReactiveRow(int nBuses, int[] qRow, int[] vCol) {
+        int rows = 0;
+        for (int bn = 0; bn < nBuses; bn++) {
+            rows = Math.max(rows, qRow[bn] + 1);
+        }
+        int[] reactiveBalancesOnRow = new int[rows];
+        for (int bn = 0; bn < nBuses; bn++) {
+            if (qRow[bn] >= 0) {
+                reactiveBalancesOnRow[qRow[bn]]++;
+            }
+        }
+        boolean[] hosts = new boolean[nBuses];
+        for (int bn = 0; bn < nBuses; bn++) {
+            int row = vCol[bn];
+            if (row >= 0 && row < rows) {
+                hosts[bn] = reactiveBalancesOnRow[row] - (qRow[bn] == row ? 1 : 0) > 0;     // its own balance is not another's
+            }
+        }
+        return hosts;
     }
 
     /** OLF_GPU_ZITREE_TRACE: one coupler end's placement flags, the inputs of {@link #spanningTreeRelocation}'s decisions. */

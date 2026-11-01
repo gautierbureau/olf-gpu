@@ -42,7 +42,7 @@ __global__ void fillClosedBranchBatch(int elementCount, int nScenarios, int n, i
                                       int nClosedBranchParameterOverrides, const int* closedBranchParameterOverrideScenarioElement, const double* closedBranchParameterOverrideValues,
                                       const int* alternateDestination, const int* selectorRow, const int* mode, int dynamicRelocation,
                                       const char* relocatedElement, const int* phaseControlDestination, const int* phaseControlSelector,
-                                      ReactiveRelocationTables rt) {
+                                      ReactiveRelocationTables rt, double* qbuf) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= elementCount * nScenarios) return;
     int e = tid % elementCount;
@@ -74,6 +74,14 @@ __global__ void fillClosedBranchBatch(int elementCount, int nScenarios, int n, i
     } else {
         scatterAdd(CLOSED_BRANCH_OUTPUT_COUNT, dest + e * CLOSED_BRANCH_OUTPUT_COUNT, o, vals + (size_t) s * nnz, F + (size_t) s * n);
     }
+    if (qbuf != nullptr) {
+        // The bus balances the outer-loop checks read (reactive limits, slack distribution, voltage controls): p1 q1 p2 q2
+        // on their FROZEN rows, raw (no target, no row mode), the same outputs as F - the fill that a scenario's
+        // convergence test passes on is the state its checks read, so no pass of its own recomputes them.
+        const double residuals[4] = {o[0], o[7], o[14], o[21]};
+        const int pos[4] = {0, 7, 14, 21};
+        scatterAddF(4, dest + e * CLOSED_BRANCH_OUTPUT_COUNT, pos, residuals, qbuf + (size_t) s * n);
+    }
     if (phaseControlDestination != nullptr) {                                 // continuous phase control: emit the controlled
         const int* pd = phaseControlDestination + e * CLOSED_BRANCH_OUTPUT_COUNT;                // side's P outputs AGAIN at the a1 row when this
         const int* psl = phaseControlSelector + e * CLOSED_BRANCH_OUTPUT_COUNT;                // scenario has the control enabled (row mode 3)
@@ -87,40 +95,6 @@ __global__ void fillClosedBranchBatch(int elementCount, int nScenarios, int n, i
             } else {
                 atomicAdd(F + (size_t) s * n + (-2 - d), o[k]);
             }
-        }
-    }
-}
-
-// The fused fill's residual half alone, for the reactive-limit / slack Q buffer: updateClosedBranchWithoutDerivatives evaluates
-// p1 q1 p2 q2 from the SAME generated expressions and raw-angle trig as updateClosedBranch (bit-identical), with
-// the frozen routing (dynamicRelocation 0, no phase-control re-emission) and no Jacobian at all - neither its 24
-// derivatives nor their atomics.
-__global__ void fillClosedBranchQbufBatch(int elementCount, int nScenarios, int n, int nElements, int elemOffset,
-                                          const double* in, const int* ix, const int* dest,
-                                          const double* x, double* F, const char* disabled, const char* active,
-                                          int nClosedBranchParameterOverrides, const int* closedBranchParameterOverrideScenarioElement, const double* closedBranchParameterOverrideValues) {
-    int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= elementCount * nScenarios) return;
-    int e = tid % elementCount;
-    int s = tid / elementCount;
-    if (!active[s] || disabled[s * nElements + elemOffset + e]) return;
-    const double* p = in + e * 8;                            // y g1 g2 b1 b2 ksi r1 a1
-    const int* q = ix + e * 12;
-    double pOv[8];
-    if (findTapOverride(nClosedBranchParameterOverrides, closedBranchParameterOverrideScenarioElement, closedBranchParameterOverrideValues, s, e, pOv)) {
-        p = pOv;
-    }
-    const double* xs = x + s * n;
-    double v1 = xs[q[5]], v2 = xs[q[7]], ph1 = xs[q[4]], ph2 = xs[q[6]];
-    double r1 = q[9] >= 0 ? xs[q[9]] : p[6];
-    double a1 = q[8] >= 0 ? xs[q[8]] : p[7];
-    double o[4];                                             // p1 q1 p2 q2: updateClosedBranch's own expressions
-    updateClosedBranchWithoutDerivatives(p[0], p[1], p[2], p[3], p[4], v1, r1, v2, p[5], a1, ph1, ph2, 0, o + 0, o + 1, o + 2, o + 3);
-    const int pos[4] = {0, 7, 14, 21};                       // their output slots (static_assert-checked below)
-    const int* d = dest + e * CLOSED_BRANCH_OUTPUT_COUNT;
-    for (int k = 0; k < 4; k++) {
-        if (d[pos[k]] <= -2) {
-            atomicAdd(F + (size_t) s * n + (-2 - d[pos[k]]), o[k]);
         }
     }
 }
@@ -163,7 +137,7 @@ __global__ void fillOpenBranchBatch(int elementCount, int nScenarios, int n, int
 
 static_assert(CLOSED_BRANCH_SCATTER[0].role == 0 && CLOSED_BRANCH_SCATTER[7].role == 0
            && CLOSED_BRANCH_SCATTER[14].role == 0 && CLOSED_BRANCH_SCATTER[21].role == 0,
-              "closed-branch residual outputs moved — update fillClosedBranchBatchF");
+              "closed-branch residual outputs moved — update fillClosedBranchBatchF and fillClosedBranchBatch's Q buffer");
 static_assert(OPEN_BRANCH_SCATTER[0].role == 0 && OPEN_BRANCH_SCATTER[2].role == 0
            && OPEN_BRANCH_SCATTER[4].role == 0 && OPEN_BRANCH_SCATTER[6].role == 0,
               "open-branch residual outputs moved — update fillOpenBranchBatchF");
@@ -179,7 +153,7 @@ __global__ void fillClosedBranchBatchF(int elementCount, int nScenarios, int n, 
                                        int nClosedBranchParameterOverrides, const int* closedBranchParameterOverrideScenarioElement, const double* closedBranchParameterOverrideValues,
                                        const int* alternateDestination, const int* selectorRow, const int* mode, int dynamicRelocation,
                                        const char* relocatedElement, const int* phaseControlDestination, const int* phaseControlSelector,
-                                       ReactiveRelocationTables rt) {
+                                       ReactiveRelocationTables rt, double* qbuf) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= elementCount * nScenarios) return;
     int e = tid % elementCount;
@@ -204,6 +178,9 @@ __global__ void fillClosedBranchBatchF(int elementCount, int nScenarios, int n, 
                        pos, mode + (size_t) s * n, o, F + (size_t) s * n, rt, e * CLOSED_BRANCH_OUTPUT_COUNT);
     } else {
         scatterAddF(4, dest + e * CLOSED_BRANCH_OUTPUT_COUNT, pos, o, F + (size_t) s * n);
+    }
+    if (qbuf != nullptr) {                                   // the checks' bus balances, as in fillClosedBranchBatch
+        scatterAddF(4, dest + e * CLOSED_BRANCH_OUTPUT_COUNT, pos, o, qbuf + (size_t) s * n);
     }
     if (phaseControlDestination != nullptr) {                                 // continuous phase control: the P residual at a1
         for (int j = 0; j < 4; j += 2) {                     // outputs 0 (p1) / 2 (p2) at table pos 0 / 14

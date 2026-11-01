@@ -193,11 +193,11 @@ OLF_JNI(ac_equations_vector_gpu, StructureNative, recommendBatchSize)(
         size_t freeBytes = 0;
         size_t totalBytes = 0;
         CUDA_CHECK(cudaMemGetInfo(&freeBytes, &totalBytes));  // after the probe freed its buffers
-        // 7n doubles per scenario, not 5: x/target/F/B/dx PLUS dQbuf (the per-scenario reactive
-        // accumulator) and dLineSearchPreviousX (the line-search previous state, allocated under the RTE
-        // parameters' MAX_VOLTAGE_CHANGE scaling).
+        // 8n doubles per scenario, not 5: x/target/F/B/dx PLUS dQbuf (the per-scenario reactive
+        // accumulator), dQbufClosed (its closed-branch part, kept by the Newton fills) and dLineSearchPreviousX (the
+        // line-search previous state, allocated under the RTE parameters' MAX_VOLTAGE_CHANGE scaling).
         double perScenarioBytes = luBytes
-                + (static_cast<double>(structure.nnz) + 7.0 * structure.n) * sizeof(double)
+                + (static_cast<double>(structure.nnz) + 8.0 * structure.n) * sizeof(double)
                 + static_cast<double>(structure.n) * sizeof(int)    // dMode
                 + static_cast<double>(structure.nElements);         // dDisabled (char)
         double budget = static_cast<double>(freeBytes) * SAFETY;

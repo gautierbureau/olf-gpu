@@ -106,12 +106,15 @@ __global__ void applyRowModeBatch(int n, int nScenarios, int nnz, const int* mod
     }
 }
 
-__global__ void initFBatch(int n, int nScenarios, const double* target, double* F, const char* active) {
+__global__ void initFBatch(int n, int nScenarios, const double* target, double* F, const char* active, double* qbuf) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= n * nScenarios) return;
     int s = tid / n;
     if (!active[s]) return;
     F[tid] = -target[tid];
+    if (qbuf != nullptr) {
+        qbuf[tid] = 0.0;
+    }
 }
 
 // Seed the per-(controller, scenario) limitType from the BASE state, so a controller that OLF had already
@@ -176,12 +179,12 @@ void fillActiveBatch(BatchSolverContext* ctx, DriverPass& drv, bool fOnly) {
     if (!fOnly) {
         CUDA_CHECK(cudaMemsetAsync(ctx->dVals.p, 0, static_cast<size_t>(nnz) * nS * sizeof(double), ctx->stream));
     }
-    initFBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, ctx->dTarget.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>());
+    initFBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, ctx->dTarget.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->dQbufClosed.as<double>());
     if (ctx->structure->closedBranch.elementCount) {
         if (fOnly) {
-            fillClosedBranchBatchF<<<grid(ctx->structure->closedBranch.elementCount * nS), BLOCK, 0, ctx->stream>>>(ctx->structure->closedBranch.elementCount, nS, n, nnz, ctx->nElements, ctx->closedBranchOffset, ctx->structure->closedBranch.parameters.as<double>(), ctx->structure->closedBranch.indices.as<int>(), ctx->structure->closedBranch.destination.as<int>(), ctx->dX.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->nClosedBranchParameterOverrides, ctx->dClosedBranchParameterOverrideScenarioElement.as<int>(), ctx->dClosedBranchParameterOverrideValues.as<double>(), ctx->structure->closedBranch.alternateDestination.as<int>(), ctx->structure->closedBranch.selectorRow.as<int>(), ctx->dMode.as<int>(), ctx->structure->closedBranch.dynamicRelocation ? 1 : 0, ctx->structure->closedBranch.relocatedElement.as<char>(), ctx->structure->closedBranch.hasPhaseControl ? ctx->structure->closedBranch.phaseControlDestination.as<int>() : nullptr, ctx->structure->closedBranch.hasPhaseControl ? ctx->structure->closedBranch.phaseControlSelector.as<int>() : nullptr, withPilotSelf(relocationTablesOf(ctx->structure->closedBranch, ctx->structure.get()), ctx));
+            fillClosedBranchBatchF<<<grid(ctx->structure->closedBranch.elementCount * nS), BLOCK, 0, ctx->stream>>>(ctx->structure->closedBranch.elementCount, nS, n, nnz, ctx->nElements, ctx->closedBranchOffset, ctx->structure->closedBranch.parameters.as<double>(), ctx->structure->closedBranch.indices.as<int>(), ctx->structure->closedBranch.destination.as<int>(), ctx->dX.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->nClosedBranchParameterOverrides, ctx->dClosedBranchParameterOverrideScenarioElement.as<int>(), ctx->dClosedBranchParameterOverrideValues.as<double>(), ctx->structure->closedBranch.alternateDestination.as<int>(), ctx->structure->closedBranch.selectorRow.as<int>(), ctx->dMode.as<int>(), ctx->structure->closedBranch.dynamicRelocation ? 1 : 0, ctx->structure->closedBranch.relocatedElement.as<char>(), ctx->structure->closedBranch.hasPhaseControl ? ctx->structure->closedBranch.phaseControlDestination.as<int>() : nullptr, ctx->structure->closedBranch.hasPhaseControl ? ctx->structure->closedBranch.phaseControlSelector.as<int>() : nullptr, withPilotSelf(relocationTablesOf(ctx->structure->closedBranch, ctx->structure.get()), ctx), ctx->dQbufClosed.as<double>());
         } else {
-            fillClosedBranchBatch<<<grid(ctx->structure->closedBranch.elementCount * nS), BLOCK, 0, ctx->stream>>>(ctx->structure->closedBranch.elementCount, nS, n, nnz, ctx->nElements, ctx->closedBranchOffset, ctx->structure->closedBranch.parameters.as<double>(), ctx->structure->closedBranch.indices.as<int>(), ctx->structure->closedBranch.destination.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->nClosedBranchParameterOverrides, ctx->dClosedBranchParameterOverrideScenarioElement.as<int>(), ctx->dClosedBranchParameterOverrideValues.as<double>(), ctx->structure->closedBranch.alternateDestination.as<int>(), ctx->structure->closedBranch.selectorRow.as<int>(), ctx->dMode.as<int>(), ctx->structure->closedBranch.dynamicRelocation ? 1 : 0, ctx->structure->closedBranch.relocatedElement.as<char>(), ctx->structure->closedBranch.hasPhaseControl ? ctx->structure->closedBranch.phaseControlDestination.as<int>() : nullptr, ctx->structure->closedBranch.hasPhaseControl ? ctx->structure->closedBranch.phaseControlSelector.as<int>() : nullptr, withPilotSelf(relocationTablesOf(ctx->structure->closedBranch, ctx->structure.get()), ctx));
+            fillClosedBranchBatch<<<grid(ctx->structure->closedBranch.elementCount * nS), BLOCK, 0, ctx->stream>>>(ctx->structure->closedBranch.elementCount, nS, n, nnz, ctx->nElements, ctx->closedBranchOffset, ctx->structure->closedBranch.parameters.as<double>(), ctx->structure->closedBranch.indices.as<int>(), ctx->structure->closedBranch.destination.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->nClosedBranchParameterOverrides, ctx->dClosedBranchParameterOverrideScenarioElement.as<int>(), ctx->dClosedBranchParameterOverrideValues.as<double>(), ctx->structure->closedBranch.alternateDestination.as<int>(), ctx->structure->closedBranch.selectorRow.as<int>(), ctx->dMode.as<int>(), ctx->structure->closedBranch.dynamicRelocation ? 1 : 0, ctx->structure->closedBranch.relocatedElement.as<char>(), ctx->structure->closedBranch.hasPhaseControl ? ctx->structure->closedBranch.phaseControlDestination.as<int>() : nullptr, ctx->structure->closedBranch.hasPhaseControl ? ctx->structure->closedBranch.phaseControlSelector.as<int>() : nullptr, withPilotSelf(relocationTablesOf(ctx->structure->closedBranch, ctx->structure.get()), ctx), ctx->dQbufClosed.as<double>());
         }
     }
     if (ctx->structure->openBranch.elementCount) {

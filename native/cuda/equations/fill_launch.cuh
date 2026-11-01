@@ -25,8 +25,9 @@ __global__ void applyRowModeBatch(int n, int nScenarios, int nnz, const int* mod
                                   double* vals, double* F, const char* active, const double* rowSlope,
                                   const int* colIdx, const int* relocatedChildOwnRow);
 
-// F = -target for every active scenario, before the fills add the terms.
-__global__ void initFBatch(int n, int nScenarios, const double* target, double* F, const char* active);
+// F = -target for every active scenario, before the fills add the terms; when qbuf is set, the outer-loop checks' bus
+// balances zeroed on them too (the closed-branch fills add theirs).
+__global__ void initFBatch(int n, int nScenarios, const double* target, double* F, const char* active, double* qbuf);
 
 // An identity system for every retired scenario, so a singular sub-block never fails the batch.
 __global__ void writeIdentityForInactive(int n, int nScenarios, int nnz, const int* rowPtr,

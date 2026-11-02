@@ -34,9 +34,6 @@ __global__ void writeIdentityForInactive(int n, int nScenarios, int nnz, const i
                                          const int* diagPos, const char* active, const char* identityLane,
                                          double* vals, double* F);
 
-// A check's refill wrote the values of the scenarios it checked: they no longer hold their identity system.
-__global__ void clearCheckedIdentityLanes(int nScenarios, const char* outerLoopCheckActive, char* identityLane);
-
 // After writeIdentityForInactive: the scenarios that now hold their identity system (the retired ones).
 __global__ void markIdentityLanes(int nScenarios, const char* active, char* identityLane);
 

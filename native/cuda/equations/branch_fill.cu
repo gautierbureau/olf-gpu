@@ -123,7 +123,7 @@ __global__ void fillOpenBranchBatch(int elementCount, int nScenarios, int n, int
                       mode + (size_t) s * n, o, vals + (size_t) s * nnz, F + (size_t) s * n,
                       relocationTablesForScenario(rt, s), e * OPEN_BRANCH_OUTPUT_COUNT);
     } else {
-        scatterAdd(OPEN_BRANCH_OUTPUT_COUNT, dest + e * OPEN_BRANCH_OUTPUT_COUNT, o, vals + (size_t) s * nnz, F + (size_t) s * n);
+        scatterAdd(OPEN_BRANCH_OUTPUT_COUNT, dest + e * OPEN_BRANCH_OUTPUT_COUNT, o, scenarioValues(vals, s, nnz), F + (size_t) s * n);
     }
 }
 

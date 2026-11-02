@@ -67,7 +67,7 @@ __global__ void fillZeroImpBatch(int nZeroImpedanceBranch, int nScenarios, int n
     double rho = in[e];
     const int* q = ix + e * 11;                              // b1P b1Q b2P b2Q dummyPColumn dummyQColumn v1 v2 ph1 ph2 tree
     const double* xs = x + (size_t) s * n;
-    double* valsS = vals + (size_t) s * nnz;
+    double* valsS = scenarioValues(vals, s, nnz);
     double* FS = F + (size_t) s * n;
     const int* d = dest + e * 14;
     double dummyP = xs[q[4]], dummyQ = xs[q[5]];

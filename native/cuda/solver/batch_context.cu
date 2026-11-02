@@ -127,6 +127,8 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& structure, int 
     ctx->dMode.alloc(nS * sizeof(int));
     ctx->dDisabled.alloc(static_cast<size_t>(ctx->nElements) * nScenarios * sizeof(char));
     ctx->dActive.alloc(static_cast<size_t>(nScenarios) * sizeof(char));
+    ctx->dIdentityLane.alloc(static_cast<size_t>(nScenarios) * sizeof(char));
+    CUDA_CHECK(cudaMemset(ctx->dIdentityLane.p, 0, static_cast<size_t>(nScenarios) * sizeof(char)));
 
     // ---- reactive-limits pack: the controller BUS_V rows mapped through the diagonal-pairing
     //      permutation (= identity in the batch path, no families, but mapped for correctness) ----

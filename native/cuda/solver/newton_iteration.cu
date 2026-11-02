@@ -298,7 +298,9 @@ void newtonSolve(BatchSolverContext* ctx, DriverPass& drv) {
         //      (honest Newton). Our batched LU (mode 7) factorizes the active scenarios only; the inactive ones
         //      get the same identity systems, so every buffer holds what it holds under cuDSS. ----
         writeIdentityForInactive<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, nnz, ctx->structure->dRowPtr.as<int>(),
-                ctx->structure->dDiagPos.as<int>(), ctx->dActive.as<char>(), ctx->dVals.as<double>(), ctx->dF.as<double>());
+                ctx->structure->dDiagPos.as<int>(), ctx->dActive.as<char>(), ctx->dIdentityLane.as<char>(),
+                ctx->dVals.as<double>(), ctx->dF.as<double>());
+        markIdentityLanes<<<grid(nS), BLOCK, 0, ctx->stream>>>(nS, ctx->dActive.as<char>(), ctx->dIdentityLane.as<char>());
         negateIntoBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n * nS, ctx->dF.as<double>(), ctx->dB.as<double>());
         repairZeroDiagonalRightHandSide(ctx, nS, ctx->dB.as<double>());
         if (ctx->mode == GpuLinearSolveMode::BATCHED_LU) {

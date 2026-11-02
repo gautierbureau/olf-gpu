@@ -389,13 +389,7 @@ class GpuSaOperatorStrategyTest extends AbstractGpuSaTest {
         // L1 outage keeps both sides energized, the strategy merges them back.
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
-        Network network = com.powsybl.openloadflow.network.NodeBreakerNetworkFactory.create();
-        var vl1 = network.getVoltageLevel("VL1");
-        var vl2 = network.getVoltageLevel("VL2");
-        vl1.getNodeBreakerView().newBreaker().setId("B5").setNode1(0).setNode2(7).add();
-        vl2.getNodeBreakerView().newBreaker().setId("B6").setNode1(0).setNode2(4).add();
-        network.newLine().setId("L3").setVoltageLevel1("VL1").setNode1(7).setVoltageLevel2("VL2").setNode2(4)
-                .setR(3).setX(33).setG1(0).setB1(0).setG2(0).setB2(0).add();
+        Network network = coupledSectionsWithThirdLine();
         network.getSwitch("C").setOpen(true);
         List<Contingency> contingencies = List.of(new Contingency("L1", new BranchContingency("L1")));
         List<com.powsybl.action.Action> actions = List.of(new com.powsybl.action.SwitchAction("closeC", "C", false));
@@ -404,6 +398,52 @@ class GpuSaOperatorStrategyTest extends AbstractGpuSaTest {
                         com.powsybl.contingency.ContingencyContext.all(),
                         new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of("closeC")));
         assertStrategyMatchesCpu(network, contingencies, strategies, actions, 2);
+    }
+
+    @Test
+    void closedCouplerOpenStrategyBatchMatchesCpu() {
+        // SwitchAction OPENING the closed coupler C after the L1 outage: BBS1 keeps L3, BBS2 keeps G and L2, both stay
+        // energized through VL2. The pair solves the contingency's network with the coupler out of its zero-impedance
+        // tree; composing nothing for the open solved the contingency alone.
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = coupledSectionsWithThirdLine();
+        List<Contingency> contingencies = List.of(new Contingency("L1", new BranchContingency("L1")));
+        List<com.powsybl.action.Action> actions = List.of(new com.powsybl.action.SwitchAction("openC", "C", true));
+        List<com.powsybl.contingency.strategy.OperatorStrategy> strategies = List.of(
+                new com.powsybl.contingency.strategy.OperatorStrategy("sOpenC",
+                        com.powsybl.contingency.ContingencyContext.all(),
+                        new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of("openC")));
+        assertStrategyMatchesCpu(network, contingencies, strategies, actions, 2);
+    }
+
+    @Test
+    void lineBreakerOpenStrategyBatchMatchesCpu() {
+        // SwitchAction OPENING the breaker B5 between BBS1 and L3 after the L1 outage: L3's VL1 end is left on a bus of
+        // its own, which leaves the main component with the line, as a busbar outage's dead stub does.
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = coupledSectionsWithThirdLine();
+        List<Contingency> contingencies = List.of(new Contingency("L1", new BranchContingency("L1")));
+        List<com.powsybl.action.Action> actions = List.of(new com.powsybl.action.SwitchAction("openB5", "B5", true));
+        List<com.powsybl.contingency.strategy.OperatorStrategy> strategies = List.of(
+                new com.powsybl.contingency.strategy.OperatorStrategy("sOpenB5",
+                        com.powsybl.contingency.ContingencyContext.all(),
+                        new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of("openB5")));
+        assertStrategyMatchesCpu(network, contingencies, strategies, actions, 2);
+    }
+
+    /** OLF's node-breaker network with a third line L3 from BBS1 (breaker B5) to BBS3 (breaker B6): with the coupler C
+     *  open, VL1 splits into BBS1 (L1 and L3) and BBS2 (G and L2). */
+    private static Network coupledSectionsWithThirdLine() {
+        Network network = com.powsybl.openloadflow.network.NodeBreakerNetworkFactory.create();
+        var vl1 = network.getVoltageLevel("VL1");
+        var vl2 = network.getVoltageLevel("VL2");
+        vl1.getNodeBreakerView().newBreaker().setId("B5").setNode1(0).setNode2(7).add();
+        vl2.getNodeBreakerView().newBreaker().setId("B6").setNode1(0).setNode2(4).add();
+        network.newLine().setId("L3").setVoltageLevel1("VL1").setNode1(7).setVoltageLevel2("VL2").setNode2(4)
+                .setR(3).setX(33).setG1(0).setB1(0).setG2(0).setB2(0).add();
+        return network;
     }
 
     @Test

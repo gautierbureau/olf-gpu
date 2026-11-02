@@ -122,6 +122,7 @@ final class GpuStrategyComposer {
                                                     com.powsybl.openloadflow.network.LfNetworkParameters networkParameters,
                                                     com.powsybl.loadflow.LoadFlowParameters.BalanceType balanceType) {
         List<LfBranch> branches = new java.util.ArrayList<>(ctgBranches);
+        List<LfBranch> zeroImpedanceOutages = new java.util.ArrayList<>(contingencyZeroImpedanceBranchOutages);
         List<LoadLoss> loads = new java.util.ArrayList<>(ctgLoads);
         List<ShuntShift> shifts = new java.util.ArrayList<>(ctgShifts);
         List<TapR1Override> taps = new java.util.ArrayList<>();
@@ -196,33 +197,8 @@ final class GpuStrategyComposer {
                     }
                 }
             } else if (a instanceof com.powsybl.action.SwitchAction switchAction) {
-                LfBranch b = net.getBranchById(switchAction.getSwitchId());
-                if (b != null && ctgSideOpens.stream().anyMatch(sideOpen -> sideOpen.branch() == b)) {
-                    return null;                             // the contingency opened ONE side of it: CPU
-                }
-                if (b == null || (switchAction.isOpen() ? branches.contains(b) : !branches.remove(b))) {
-                    if (b != null && switchAction.isOpen()) {
-                        branches.add(b);
-                    } else if (b != null && b.isDisabled()
-                            && b.isZeroImpedance(com.powsybl.openloadflow.network.LoadFlowModel.AC)) {
-                        // CLOSE of a retained-open switch (zero-impedance branch). Only the
-                        // spanning-tree MERGE shape is batched: distinct zero-impedance groups (or
-                        // none) on the two sides. A loop-closing switch is an electrical no-op on
-                        // the CPU too (non-tree edge: dummies stay fixed) — compose nothing.
-                        LfBus bus1 = b.getBus1();
-                        LfBus bus2 = b.getBus2();
-                        if (bus1 == null || bus2 == null || bus1.isDisabled() || bus2.isDisabled()) {
-                            return null;                     // dead-island re-energization — CPU
-                        }
-                        var zn1 = bus1.getZeroImpedanceNetwork(com.powsybl.openloadflow.network.LoadFlowModel.AC);
-                        var zn2 = bus2.getZeroImpedanceNetwork(com.powsybl.openloadflow.network.LoadFlowModel.AC);
-                        if (zn1 == null || zn2 == null || zn1 != zn2) {
-                            reclosed.add(b);                 // tree merge — batched
-                        }
-                        // same zero-impedance network: loop close, no-op — skip
-                    } else {
-                        return null;
-                    }
+                if (!composeSwitchAction(net, switchAction, ctgSideOpens, branches, zeroImpedanceOutages, opened, reclosed)) {
+                    return null;
                 }
             } else if (a instanceof com.powsybl.action.LoadAction loadAction) {
                 com.powsybl.iidm.network.Load load = network.getLoad(loadAction.getLoadId());
@@ -355,8 +331,52 @@ final class GpuStrategyComposer {
                 // the parent's one-side openings and the zero-impedance tree OLF reaches the strategy with: the pair is
                 // the contingency's topology plus the actions (dropping them solved another network: 0.52 kV at B4 on a
                 // three-winding transformer outage)
-                branches, ctgGens, loads, shifts, taps, List.of(), reclosed, contingencyZeroImpedanceBranchOutages, ctgHvdcs, ctgSideOpens,
+                branches, ctgGens, loads, shifts, taps, List.of(), reclosed, zeroImpedanceOutages, ctgHvdcs, ctgSideOpens,
                 contingencyStickyNonSpanningTreeBranches, generatorActions, acEmulationOff);
+    }
+
+    /** Composes a SwitchAction onto the pair's outages; false when it is out of batch scope (the CPU per-strategy path). */
+    private static boolean composeSwitchAction(LfNetwork net, com.powsybl.action.SwitchAction switchAction,
+                                               List<BatchContingency.SideOpen> ctgSideOpens, List<LfBranch> branches,
+                                               List<LfBranch> zeroImpedanceOutages, List<LfBranch> opened, List<LfBranch> reclosed) {
+        LfBranch b = net.getBranchById(switchAction.getSwitchId());
+        if (b != null && ctgSideOpens.stream().anyMatch(sideOpen -> sideOpen.branch() == b)) {
+            return false;                                    // the contingency opened ONE side of it: CPU
+        }
+        if (b != null && switchAction.isOpen()) {
+            // OPEN: OLF's LfSwitchAction takes the switch out of the connectivity and disables what that islands. A switch
+            // open at base or opened by the contingency stays as it is; otherwise it joins the pair's zero-impedance
+            // outages, as the switches a contingency's propagation opens do
+            if (!b.isDisabled() && !zeroImpedanceOutages.contains(b) && !branches.contains(b)) {
+                if (b.isZeroImpedance(com.powsybl.openloadflow.network.LoadFlowModel.AC)) {
+                    zeroImpedanceOutages.add(b);
+                } else {
+                    branches.add(b);
+                }
+                opened.add(b);
+            }
+            return true;
+        }
+        if (b != null && branches.remove(b)) {
+            return true;
+        }
+        if (b == null || !b.isDisabled() || !b.isZeroImpedance(com.powsybl.openloadflow.network.LoadFlowModel.AC)) {
+            return false;
+        }
+        // CLOSE of a retained-open switch (zero-impedance branch). Only the spanning-tree MERGE shape is batched:
+        // distinct zero-impedance groups (or none) on the two sides. A loop-closing switch is an electrical no-op on
+        // the CPU too (non-tree edge: dummies stay fixed) — compose nothing.
+        LfBus bus1 = b.getBus1();
+        LfBus bus2 = b.getBus2();
+        if (bus1 == null || bus2 == null || bus1.isDisabled() || bus2.isDisabled()) {
+            return false;                                    // dead-island re-energization — CPU
+        }
+        var zn1 = bus1.getZeroImpedanceNetwork(com.powsybl.openloadflow.network.LoadFlowModel.AC);
+        var zn2 = bus2.getZeroImpedanceNetwork(com.powsybl.openloadflow.network.LoadFlowModel.AC);
+        if (zn1 == null || zn2 == null || zn1 != zn2) {
+            reclosed.add(b);                                 // tree merge — batched
+        }
+        return true;                                         // same zero-impedance network: loop close, no-op
     }
 
     /**

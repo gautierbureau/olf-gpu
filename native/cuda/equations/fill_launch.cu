@@ -169,14 +169,6 @@ __global__ void writeIdentityForInactive(int n, int nScenarios, int nnz, const i
     F[(size_t) s * n + r] = 0.0;
 }
 
-// A check's refill writes the values of the scenarios it checks (outerLoopCheckActive): their identity is gone.
-__global__ void clearCheckedIdentityLanes(int nScenarios, const char* outerLoopCheckActive, char* identityLane) {
-    int s = blockIdx.x * blockDim.x + threadIdx.x;
-    if (s < nScenarios && outerLoopCheckActive[s]) {
-        identityLane[s] = 0;
-    }
-}
-
 // After writeIdentityForInactive: every retired scenario holds its identity system, every active one is to be filled.
 __global__ void markIdentityLanes(int nScenarios, const char* active, char* identityLane) {
     int s = blockIdx.x * blockDim.x + threadIdx.x;

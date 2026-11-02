@@ -18,6 +18,9 @@ namespace olfgpu {
 // factorization is wrong (unpivoted LU on a structure that needs pivoting), not merely inaccurate.
 static const double LIN_SOLVE_FAIL_RATIO = 1e-2;
 
+// The per-lane norm kernels below run one block of LANE_NORM_BLOCK threads per lane: grid = the lane count.
+constexpr int LANE_NORM_BLOCK = 256;
+
 __global__ void linResidScoreBatch(int n, int nS, const double* rp, const double* rm, const double* F,
                                    double* score);
 
@@ -65,7 +68,7 @@ void refineLanes(const RefinementContext& ctx, int lanes, int n, int nnz, const 
     auto scores = [&](std::vector<double>& out) {
         residualBatch<<<grid(n * lanes), BLOCK, 0, ctx.stream>>>(n, lanes, nnz, ctx.rowPtr, ctx.colIdx, vals, dx, b,
                                                                  ctx.solvedLanes, r);
-        iterativeRefinementScoreBatch<<<grid(lanes), BLOCK, 0, ctx.stream>>>(n, lanes, r, b, active, ctx.score.as<double>());
+        iterativeRefinementScoreBatch<<<lanes, LANE_NORM_BLOCK, 0, ctx.stream>>>(n, lanes, r, b, active, ctx.score.as<double>());
         CUDA_CHECK(cudaStreamSynchronize(ctx.stream));
         CUDA_CHECK(cudaMemcpy(out.data(), ctx.score.as<double>(), lanes * sizeof(double), cudaMemcpyDeviceToHost));
         gIterativeRefinementChecks++;

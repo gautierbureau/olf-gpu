@@ -135,7 +135,7 @@ void newtonSolve(BatchSolverContext* ctx, DriverPass& drv) {
                 linResidRowBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, nnz, ctx->structure->dRowPtr.as<int>(),
                         ctx->structure->dColIdx.as<int>(), ctx->dVals.as<double>(), ctx->dDx.as<double>(),
                         ctx->dB.as<double>(), ctx->dLinRp.as<double>(), ctx->dLinRm.as<double>());
-                linResidScoreBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(n, nS, ctx->dLinRp.as<double>(),
+                linResidScoreBatch<<<nS, LANE_NORM_BLOCK, 0, ctx->stream>>>(n, nS, ctx->dLinRp.as<double>(),
                         ctx->dLinRm.as<double>(), ctx->dF.as<double>(), ctx->dLinSc.as<double>());
                 std::vector<double> hsc((size_t) 3 * nS);
                 CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
@@ -463,7 +463,7 @@ void newtonSolve(BatchSolverContext* ctx, DriverPass& drv) {
             linResidRowBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, nnz, ctx->structure->dRowPtr.as<int>(),
                     ctx->structure->dColIdx.as<int>(), ctx->dVals.as<double>(), ctx->dDx.as<double>(),
                     ctx->dB.as<double>(), rp.as<double>(), rm.as<double>());
-            linResidScoreBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(n, nS, rp.as<double>(), rm.as<double>(),
+            linResidScoreBatch<<<nS, LANE_NORM_BLOCK, 0, ctx->stream>>>(n, nS, rp.as<double>(), rm.as<double>(),
                     ctx->dF.as<double>(), sc.as<double>());
             std::vector<double> hsc((size_t) 3 * nS);
             CUDA_CHECK(cudaStreamSynchronize(ctx->stream));

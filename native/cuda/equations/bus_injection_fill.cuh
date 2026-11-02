@@ -28,7 +28,7 @@ __global__ void fillHvdcBatch(int elementCount, int nScenarios, int n, int nnz, 
 
 __global__ void fillLoadModelBatch(int elementCount, int nScenarios, int n, int nnz,
                              const double* in, const int* ix, const int* dest,
-                             const double* x, double* vals, double* F,
+                             const double* x, double* vals, double* F, const char* active,
                              const int* alternateRow, const int* alternateDestination, const int* mode);
 
 __global__ void fillShuntBatchF(int elementCount, int nScenarios, int n, int nnz, int nElements, int elemOffset,

@@ -45,6 +45,10 @@ struct BatchSolverContext {
     int closedBranchOffset = 0, openBranchOffset = 0, shuntOffset = 0, hvdcAcEmulationOffset = 0;   // element-mask offsets per family
     int nDistrQ = 0, nDistrRho = 0, nDistrShuntB = 0, nZeroImpedanceBranch = 0;                  // copies of the structure counts
     DeviceBuf dX, dTarget, dF, dB, dDx, dVals, dMode;        // per-scenario (n or nnz strided)
+    // nS: 1 while a retired scenario's values and F hold the identity system writeIdentityForInactive wrote, so the next
+    // identity write skips it. Cleared at every batched solve's start, for every scenario zeroActiveValues zeroes, and
+    // for the scenarios a check's refill writes (clearCheckedIdentityLanes)
+    DeviceBuf dIdentityLane;
     // per scenario: the state at its last CONVERGED inner solve (its starting state before any): what OLF's network
     // holds when a run fails (NewtonRaphson updates the buses only on convergence), and so where OLF starts the
     // strategies of a contingency that ran out of iterations (PreviousValueVoltageInitializer)

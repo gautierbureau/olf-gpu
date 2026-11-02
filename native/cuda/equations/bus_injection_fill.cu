@@ -61,7 +61,7 @@ __global__ void fillShuntBatch(int elementCount, int nScenarios, int n, int nnz,
                       mode + (size_t) s * n, o, vals + (size_t) s * nnz, F + (size_t) s * n,
                       relocationTablesForScenario(rt, s), e * SHUNT_OUTPUT_COUNT);
     } else {
-        scatterAdd(SHUNT_OUTPUT_COUNT, dest + e * SHUNT_OUTPUT_COUNT, o, vals + (size_t) s * nnz, F + (size_t) s * n);
+        scatterAdd(SHUNT_OUTPUT_COUNT, dest + e * SHUNT_OUTPUT_COUNT, o, scenarioValues(vals, s, nnz), F + (size_t) s * n);
     }
 }
 

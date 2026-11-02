@@ -13,11 +13,19 @@
 
 namespace olfgpu {
 
+// A scenario's values in the batch, or null for a fill that writes the mismatch only (a check's refill: its bus
+// balances): scatterAdd and addAt then skip every Jacobian output.
+__device__ inline double* scenarioValues(double* vals, int s, int nnz) {
+    return vals != nullptr ? vals + static_cast<size_t>(s) * nnz : nullptr;
+}
+
 static __device__ void scatterAdd(int outputCount, const int* dest, const double* o, double* vals, double* F) {
     for (int k = 0; k < outputCount; k++) {
         int d = dest[k];
         if (d >= 0) {
-            atomicAdd(&vals[d], o[k]);
+            if (vals != nullptr) {
+                atomicAdd(&vals[d], o[k]);
+            }
         } else if (d <= -2) {
             atomicAdd(&F[-2 - d], o[k]);
         }
@@ -27,7 +35,9 @@ static __device__ void scatterAdd(int outputCount, const int* dest, const double
 // Scatter one (dest, value): dest >= 0 -> J slot, dest <= -2 -> F row, -1 -> skip.
 __device__ inline void addAt(int dest, double val, double* vals, double* F) {
     if (dest >= 0) {
-        atomicAdd(&vals[dest], val);
+        if (vals != nullptr) {
+            atomicAdd(&vals[dest], val);
+        }
     } else if (dest <= -2) {
         atomicAdd(&F[-2 - dest], val);
     }

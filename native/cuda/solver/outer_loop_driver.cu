@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "../common/check.cuh"
@@ -258,13 +259,15 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     res.status.assign(nS, GpuAcSolverStatus::MAX_ITERATION_REACHED);  // default (overwritten on converge/diverge)
 
     std::vector<double>& hF = drv.hF;
-    hF.assign(nTot, 0.0);
 
     // Device-side fixed-iteration mode: tol <= 0 means "run exactly maxIter Newton steps
     // on the device with NO per-iteration host sync and NO convergence retirement" (the
     // a fixed-iteration NR loop). tol > 0 keeps the per-iteration retirement loop.
     drv.deviceFixedIter = (tol <= 0.0);
     const bool& deviceFixedIter = drv.deviceFixedIter;
+    if (deviceFixedIter) {
+        hF.assign(nTot, 0.0);                            // the fixed-iteration mode reads the whole mismatch back once
+    }
     // A scenario that exhausts the budget is reported as MAX_ITERATION_REACHED by the device itself (the
     // precomputer's exhausted set), which is OLF's own answer: no early exit hands stragglers to the CPU.
 
@@ -885,7 +888,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     }
     tracePhaseTime(ctx, drv);
     CUDA_CHECK(cudaMemcpy(res.x.data(), ctx->dX.p, nTot * sizeof(double), cudaMemcpyDeviceToHost));
-    return res;
+    return std::move(res);                               // drv is this call's: hand its n x nS state over, not a copy
 }
 
 }  // namespace olfgpu

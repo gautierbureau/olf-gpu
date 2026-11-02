@@ -13,6 +13,7 @@
 
 #include "../common/check.cuh"
 #include "../common/launch.cuh"
+#include "../common/codes/gpu_linear_solve_mode.cuh"
 #include "../common/codes/gpu_row_mode.cuh"
 #include "scatter.cuh"
 #include "../fixedmatrix/reactive_relocation.cuh"
@@ -127,6 +128,22 @@ const int* pilotSelfReactiveLimitEntryOrNull(BatchSolverContext* ctx) {
     return ctx->hasPilotSelf && ctx->dPilotSelfReactiveLimitEntry.p != nullptr ? ctx->dPilotSelfReactiveLimitEntry.template as<int>() : nullptr;
 }
 
+// Blocks per scenario of zeroActiveValues: each thread zeroes every (blocks x BLOCK)-th value of its scenario.
+constexpr int ZERO_BLOCKS_PER_SCENARIO = 32;
+
+// The Jacobian values of the ACTIVE scenarios zeroed before a fill, one row of blocks per scenario (blockIdx.y). A
+// retired scenario's values are not read before writeIdentityForInactive rewrites them - the fills and the row modes
+// skip it, the zero-diagonal repair finds what it finds there and the identity write replaces it (its F is zeroed, so
+// the right-hand side's repair adds zeros) - so zeroing them was a pass over every scenario's values per fill, most of
+// them retired: 0.19 s of memsets on rte6515's call 0, 0.40 s on network.xiidm's (cold and warm runs).
+__global__ void zeroActiveValues(int nnz, const char* active, double* vals) {
+    if (!active[blockIdx.y]) return;
+    double* v = vals + static_cast<size_t>(blockIdx.y) * nnz;
+    for (int k = blockIdx.x * blockDim.x + threadIdx.x; k < nnz; k += gridDim.x * blockDim.x) {
+        v[k] = 0.0;
+    }
+}
+
 // Make a RETIRED scenario's system an identity (diagonal 1, mismatch 0) so it stays
 // well-posed inside the uniform batched factorization (a singular sub-block would fail the
 // whole batch) and its state is frozen (dx = 0). A scenario retired THIS iteration still
@@ -177,7 +194,13 @@ void fillActiveBatch(BatchSolverContext* ctx, DriverPass& drv, bool fOnly) {
                 ctx->nReactiveLimitIslanded > 0 ? ctx->dReactiveLimitIslanded.as<char>() : nullptr, ctx->dPilotSelfCarrierSkip.as<char>());
     }
     if (!fOnly) {
-        CUDA_CHECK(cudaMemsetAsync(ctx->dVals.p, 0, static_cast<size_t>(nnz) * nS * sizeof(double), ctx->stream));
+        if (ctx->mode == GpuLinearSolveMode::UBATCH || ctx->mode == GpuLinearSolveMode::BATCHED_LU) {
+            // the uniform batches: a retired scenario gets its identity system before every solve (newton_iteration)
+            const dim3 zeroGrid(std::min((nnz + BLOCK - 1) / BLOCK, ZERO_BLOCKS_PER_SCENARIO), nS);
+            zeroActiveValues<<<zeroGrid, BLOCK, 0, ctx->stream>>>(nnz, ctx->dActive.as<char>(), ctx->dVals.as<double>());
+        } else {
+            CUDA_CHECK(cudaMemsetAsync(ctx->dVals.p, 0, static_cast<size_t>(nnz) * nS * sizeof(double), ctx->stream));
+        }
     }
     initFBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, ctx->dTarget.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->dQbufClosed.as<double>());
     if (ctx->structure->closedBranch.elementCount) {

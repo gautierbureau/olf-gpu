@@ -97,12 +97,13 @@ __global__ void fillHvdcBatch(int elementCount, int nScenarios, int n, int nnz, 
 // makes it the residual-only (line-search) variant.
 __global__ void fillLoadModelBatch(int elementCount, int nScenarios, int n, int nnz,
                              const double* in, const int* ix, const int* dest,
-                             const double* x, double* vals, double* F,
+                             const double* x, double* vals, double* F, const char* active,
                              const int* alternateRow, const int* alternateDestination, const int* mode) {
     int t = blockIdx.x * blockDim.x + threadIdx.x;
     if (t >= elementCount * nScenarios) return;
     int e = t % elementCount;
     int s = t / elementCount;
+    if (!active[s]) return;
     // GENERATED updateLoadModel (codegen family "vdl", parsed from OLF's
     // AbstractLoadModelEquationTerm.f/dfdv): one packed element per exp term, the sum over a
     // load model's terms IS the per-entry atomicAdd — exactly the Java accumulation loop.

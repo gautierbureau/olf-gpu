@@ -136,8 +136,11 @@ constexpr int ZERO_BLOCKS_PER_SCENARIO = 32;
 // skip it, the zero-diagonal repair finds what it finds there and the identity write replaces it (its F is zeroed, so
 // the right-hand side's repair adds zeros) - so zeroing them was a pass over every scenario's values per fill, most of
 // them retired: 0.19 s of memsets on rte6515's call 0, 0.40 s on network.xiidm's (cold and warm runs).
-__global__ void zeroActiveValues(int nnz, const char* active, double* vals) {
+__global__ void zeroActiveValues(int nnz, const char* active, double* vals, char* identityLane) {
     if (!active[blockIdx.y]) return;
+    if (blockIdx.x == 0 && threadIdx.x == 0) {
+        identityLane[blockIdx.y] = 0;                        // its values are about to be a Jacobian's again
+    }
     double* v = vals + static_cast<size_t>(blockIdx.y) * nnz;
     for (int k = blockIdx.x * blockDim.x + threadIdx.x; k < nnz; k += gridDim.x * blockDim.x) {
         v[k] = 0.0;
@@ -148,20 +151,38 @@ __global__ void zeroActiveValues(int nnz, const char* active, double* vals) {
 // well-posed inside the uniform batched factorization (a singular sub-block would fail the
 // whole batch) and its state is frozen (dx = 0). A scenario retired THIS iteration still
 // holds its filled values, so the row is zeroed before the diagonal is set — this is
-// correct whether the scenario was just filled or has been inactive (zero) for a while.
+// correct whether the scenario was just filled or has been inactive (zero) for a while. A scenario whose identity
+// this pass already wrote (identityLane, see markIdentityLanes) holds it still and is skipped.
 __global__ void writeIdentityForInactive(int n, int nScenarios, int nnz, const int* rowPtr,
-                                         const int* diagPos, const char* active, double* vals, double* F) {
+                                         const int* diagPos, const char* active, const char* identityLane,
+                                         double* vals, double* F) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= n * nScenarios) return;
     int r = tid % n;
     int s = tid / n;
-    if (active[s]) return;
+    if (active[s] || identityLane[s]) return;
     double* valsS = vals + (size_t) s * nnz;
     for (int k = rowPtr[r]; k < rowPtr[r + 1]; k++) {
         valsS[k] = 0.0;
     }
     valsS[diagPos[r]] = 1.0;
     F[(size_t) s * n + r] = 0.0;
+}
+
+// A check's refill writes the values of the scenarios it checks (outerLoopCheckActive): their identity is gone.
+__global__ void clearCheckedIdentityLanes(int nScenarios, const char* outerLoopCheckActive, char* identityLane) {
+    int s = blockIdx.x * blockDim.x + threadIdx.x;
+    if (s < nScenarios && outerLoopCheckActive[s]) {
+        identityLane[s] = 0;
+    }
+}
+
+// After writeIdentityForInactive: every retired scenario holds its identity system, every active one is to be filled.
+__global__ void markIdentityLanes(int nScenarios, const char* active, char* identityLane) {
+    int s = blockIdx.x * blockDim.x + threadIdx.x;
+    if (s < nScenarios) {
+        identityLane[s] = active[s] ? 0 : 1;
+    }
 }
 
 // Per-scenario target overrides: each entry writes target[targetOverrideIndex[k]] = targetOverrideValue[k], where targetOverrideIndex is the
@@ -197,7 +218,8 @@ void fillActiveBatch(BatchSolverContext* ctx, DriverPass& drv, bool fOnly) {
         if (ctx->mode == GpuLinearSolveMode::UBATCH || ctx->mode == GpuLinearSolveMode::BATCHED_LU) {
             // the uniform batches: a retired scenario gets its identity system before every solve (newton_iteration)
             const dim3 zeroGrid(std::min((nnz + BLOCK - 1) / BLOCK, ZERO_BLOCKS_PER_SCENARIO), nS);
-            zeroActiveValues<<<zeroGrid, BLOCK, 0, ctx->stream>>>(nnz, ctx->dActive.as<char>(), ctx->dVals.as<double>());
+            zeroActiveValues<<<zeroGrid, BLOCK, 0, ctx->stream>>>(nnz, ctx->dActive.as<char>(), ctx->dVals.as<double>(),
+                                                                ctx->dIdentityLane.as<char>());
         } else {
             CUDA_CHECK(cudaMemsetAsync(ctx->dVals.p, 0, static_cast<size_t>(nnz) * nS * sizeof(double), ctx->stream));
         }
@@ -227,7 +249,7 @@ void fillActiveBatch(BatchSolverContext* ctx, DriverPass& drv, bool fOnly) {
     // voltage-dependent load model: own guarded block (NOT inside the shunt guard — a modeled
     // load needs no shunt present); residual always, Jacobian slot unless the F-only pass
     if (ctx->structure->nLoadModelTerms) {
-        fillLoadModelBatch<<<grid(ctx->structure->nLoadModelTerms * nS), BLOCK, 0, ctx->stream>>>(ctx->structure->nLoadModelTerms, nS, n, nnz, ctx->structure->dLoadModelParameters.as<double>(), ctx->structure->dLoadModelIndices.as<int>(), ctx->structure->dLoadModelDestination.as<int>(), ctx->dX.as<double>(), fOnly ? nullptr : ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->structure->loadModelRelocated ? ctx->structure->dLoadModelAlternateRow.as<int>() : nullptr, ctx->structure->loadModelRelocated ? ctx->structure->dLoadModelAlternateDestination.as<int>() : nullptr, ctx->structure->loadModelRelocated ? ctx->dMode.as<int>() : nullptr);
+        fillLoadModelBatch<<<grid(ctx->structure->nLoadModelTerms * nS), BLOCK, 0, ctx->stream>>>(ctx->structure->nLoadModelTerms, nS, n, nnz, ctx->structure->dLoadModelParameters.as<double>(), ctx->structure->dLoadModelIndices.as<int>(), ctx->structure->dLoadModelDestination.as<int>(), ctx->dX.as<double>(), fOnly ? nullptr : ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->structure->loadModelRelocated ? ctx->structure->dLoadModelAlternateRow.as<int>() : nullptr, ctx->structure->loadModelRelocated ? ctx->structure->dLoadModelAlternateDestination.as<int>() : nullptr, ctx->structure->loadModelRelocated ? ctx->dMode.as<int>() : nullptr);
     }
     if (ctx->structure->hvdcAcEmulation.elementCount) {
         if (fOnly) {

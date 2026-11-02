@@ -23,9 +23,10 @@ namespace olfgpu {
 
 constexpr int SINGLETON_MAX_TERMS = 3;
 
-// dx of every active lane (dActive) of the solve of b (as solved: the zero-diagonal repair already applied) gets the
-// exact value of each variable a chain of one-variable equations fixes. nS lanes, scenario-major.
-void substituteSingletons(BatchSolverContext* ctx, int nS, const double* b, double* dx);
+// dx of every lane our batched LU's last factorization solved (its lane map), for the solve of b (as solved: the
+// zero-diagonal repair already applied), gets the exact value of each variable a chain of one-variable equations fixes.
+// b and dx scenario-major, n per scenario; any other scenario's dx is left as it is.
+void substituteSingletons(BatchSolverContext* ctx, const double* b, double* dx);
 
 }  // namespace olfgpu
 

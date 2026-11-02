@@ -102,7 +102,7 @@ void batchedLuNewtonSolve(BatchSolverContext* ctx, DriverPass& drv, int iteratio
         }
     });
     AnalysisTimer at_(__LINE__, 'S');
-    substituteSingletons(ctx, nS, ctx->dB.as<double>(), ctx->dDx.as<double>());
+    substituteSingletons(ctx, ctx->dB.as<double>(), ctx->dDx.as<double>());
 }
 
 void batchedLuSensitivitySolve(BatchSolverContext* ctx, int nS, bool first) {
@@ -115,7 +115,7 @@ void batchedLuSensitivitySolve(BatchSolverContext* ctx, int nS, bool first) {
     solveWithInternalRefinement(systemsOf(ctx, nS, nullptr), ctx->dB.as<double>(), ctx->dDx.as<double>(),
                                 ctx->dR.as<double>(), ctx->dDelta.as<double>(), nullptr);
     AnalysisTimer at_(__LINE__, 'S');
-    substituteSingletons(ctx, nS, ctx->dB.as<double>(), ctx->dDx.as<double>());
+    substituteSingletons(ctx, ctx->dB.as<double>(), ctx->dDx.as<double>());
 }
 
 }  // namespace olfgpu

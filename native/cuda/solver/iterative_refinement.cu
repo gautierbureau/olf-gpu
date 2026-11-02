@@ -21,11 +21,28 @@
 
 namespace olfgpu {
 
+// The largest of the block's values, returned to every thread (blockDim.x == LANE_NORM_BLOCK). fmax drops a NaN and
+// a maximum does not depend on the order it is taken in: the result is the serial walk's, bit for bit.
+static __device__ double blockMax(double v, double* shared) {
+    shared[threadIdx.x] = v;
+    __syncthreads();
+    for (int w = LANE_NORM_BLOCK / 2; w > 0; w >>= 1) {
+        if (threadIdx.x < w) {
+            shared[threadIdx.x] = fmax(shared[threadIdx.x], shared[threadIdx.x + w]);
+        }
+        __syncthreads();
+    }
+    const double largest = shared[0];
+    __syncthreads();                                         // the next blockMax reuses the buffer
+    return largest;
+}
+
 // Per-scenario score of the linear solve just done: max|J.dx-B| under both sign conventions and
-// max|F|, one thread per scenario (n serial reads each; a few thousand per scenario, once per solve).
+// max|F|, one block per scenario.
 __global__ void linResidScoreBatch(int n, int nS, const double* rp, const double* rm, const double* F,
                                    double* score) {
-    int s = blockIdx.x * blockDim.x + threadIdx.x;
+    __shared__ double shared[LANE_NORM_BLOCK];
+    const int s = blockIdx.x;
     if (s >= nS) return;
     double mp = 0.0;
     double mm = 0.0;
@@ -33,11 +50,15 @@ __global__ void linResidScoreBatch(int n, int nS, const double* rp, const double
     const double* rps = rp + (size_t) s * n;
     const double* rms = rm + (size_t) s * n;
     const double* fs = F + (size_t) s * n;
-    for (int i = 0; i < n; i++) {
+    for (int i = threadIdx.x; i < n; i += LANE_NORM_BLOCK) {
         mp = fmax(mp, fabs(rps[i]));
         mm = fmax(mm, fabs(rms[i]));
         mf = fmax(mf, fabs(fs[i]));
     }
+    mp = blockMax(mp, shared);
+    mm = blockMax(mm, shared);
+    mf = blockMax(mf, shared);
+    if (threadIdx.x != 0) return;
     score[3 * s] = fmin(mp, mm);
     score[3 * s + 1] = mf;
     score[3 * s + 2] = (mf > 0.0 && isfinite(mp) && isfinite(mm)) ? fmin(mp, mm) / mf : 1e300;
@@ -82,22 +103,29 @@ __global__ void residualBatch(int n, int nS, int nnz, const int* rowPtr, const i
     r[t] = b[t] - acc;
 }
 
-// per scenario: ||r||inf / ||b||inf (0 for an inactive lane or a zero right-hand side)
+// per scenario: ||r||inf / ||b||inf (0 for an inactive lane or a zero right-hand side), one block per scenario
 __global__ void iterativeRefinementScoreBatch(int n, int nS, const double* r, const double* b, const char* active, double* score) {
-    int s = blockIdx.x * blockDim.x + threadIdx.x;
+    __shared__ double shared[LANE_NORM_BLOCK];
+    const int s = blockIdx.x;
     if (s >= nS) return;
     if (active != nullptr && !active[s]) {
-        score[s] = 0.0;
+        if (threadIdx.x == 0) {
+            score[s] = 0.0;
+        }
         return;
     }
     const double* rs = r + (size_t) s * n;
     const double* bs = b + (size_t) s * n;
     double mr = 0.0, mb = 0.0;
-    for (int i = 0; i < n; i++) {
+    for (int i = threadIdx.x; i < n; i += LANE_NORM_BLOCK) {
         mr = fmax(mr, fabs(rs[i]));
         mb = fmax(mb, fabs(bs[i]));
     }
-    score[s] = mb > 0.0 ? (isfinite(mr) ? mr / mb : 1e300) : 0.0;
+    mr = blockMax(mr, shared);
+    mb = blockMax(mb, shared);
+    if (threadIdx.x == 0) {
+        score[s] = mb > 0.0 ? (isfinite(mr) ? mr / mb : 1e300) : 0.0;
+    }
 }
 
 __global__ void axpyLaneMaskBatch(int n, int total, double sign, const double* d, const char* lane, double* x) {

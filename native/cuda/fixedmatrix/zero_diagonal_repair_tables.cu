@@ -188,9 +188,17 @@ void storeZeroDiagonalRepairTables(SharedStructure* structure, const std::vector
             donorPtr[i + 1] = static_cast<int>(donor.size());
         }
         structure->nZeroDiagonalRowValues = zeroDiagonalRowValueStart[structure->nZeroDiagonalRows];
+        std::vector<int> zeroDiagonalRowValuePosition;
+        zeroDiagonalRowValuePosition.reserve(structure->nZeroDiagonalRowValues);
+        for (int r : zeroDiagonalRows) {
+            for (int k = structure->rowPtr[r]; k < structure->rowPtr[r + 1]; k++) {
+                zeroDiagonalRowValuePosition.push_back(k);
+            }
+        }
         structure->hZeroDiagonalRow = zeroDiagonalRows;
         structure->dZeroDiagonalRow.upload(zeroDiagonalRows.data(), zeroDiagonalRows.size() * sizeof(int));
         structure->dZeroDiagonalRowValueStart.upload(zeroDiagonalRowValueStart.data(), zeroDiagonalRowValueStart.size() * sizeof(int));
+        structure->dZeroDiagonalRowValuePosition.upload(zeroDiagonalRowValuePosition.data(), zeroDiagonalRowValuePosition.size() * sizeof(int));
         structure->dZeroDiagonalDonorStart.upload(donorPtr.data(), donorPtr.size() * sizeof(int));
         structure->dZeroDiagonalDonor.upload(donor.data(), donor.size() * sizeof(int));
         structure->dZeroDiagonalDonorOwnIndex.upload(donorOwnIndex.data(), donorOwnIndex.size() * sizeof(int));

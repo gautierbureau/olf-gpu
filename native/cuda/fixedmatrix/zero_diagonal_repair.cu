@@ -62,25 +62,25 @@ bool repairsZeroDiagonals(const BatchSolverContext* ctx) {
 // simply is not a donor (an identity row has nothing but its own 1). Every right-hand side handed to
 // those factors goes through the same combination (the unit vectors of the sensitivity solves too).
 // The pattern carries the union of each row with its candidates so the addition lands in place.
+//
+// Only the scenarios being filled are repaired: a retired one holds its identity system (diagonal 1), or the values
+// its last fill left repaired, and gets its identity before it is solved again.
 // ---------------------------------------------------------------------------------------------
-__global__ void snapshotZeroDiagonalRowsBatch(int nZeroDiagonalRows, int nS, int nnz, int nZeroDiagonalRowValues, const int* zeroDiagonalRow, const int* zeroDiagonalRowValueStart,
-                                const int* rowPtr, const double* vals, double* snap) {
+// One thread per hazard-row value of a scenario being filled, so a warp copies consecutive values.
+__global__ void snapshotZeroDiagonalRowsBatch(int nZeroDiagonalRowValues, int nS, int nnz, const int* zeroDiagonalRowValuePosition,
+                                const char* active, const double* vals, double* snap) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= nZeroDiagonalRows * nS) return;
-    int i = tid % nZeroDiagonalRows;
-    int s = tid / nZeroDiagonalRows;
-    int r = zeroDiagonalRow[i];
-    const double* v = vals + (size_t) s * nnz;
-    double* o = snap + (size_t) s * nZeroDiagonalRowValues + zeroDiagonalRowValueStart[i];
-    for (int k = rowPtr[r]; k < rowPtr[r + 1]; k++) {
-        o[k - rowPtr[r]] = v[k];
-    }
+    if (tid >= nZeroDiagonalRowValues * nS) return;
+    int j = tid % nZeroDiagonalRowValues;
+    int s = tid / nZeroDiagonalRowValues;
+    if (!active[s]) return;
+    snap[tid] = vals[(size_t) s * nnz + zeroDiagonalRowValuePosition[j]];
 }
 
 __global__ void repairZeroDiagonalRowsBatch(int nZeroDiagonalRows, int nS, int nnz, int nZeroDiagonalRowValues, const int* zeroDiagonalRow, const int* zeroDiagonalRowValueStart,
                               const int* zeroDiagonalDonorStart, const int* zeroDiagonalDonor, const int* zeroDiagonalDonorOwnIndex,
                               const char* zeroDiagonalRepairSign, const int* rowPtr, const int* colIdx, const int* diagPos,
-                              const double* snap, double* vals, int* choice) {
+                              const char* active, const double* snap, double* vals, int* choice) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nZeroDiagonalRows * nS) return;
     int i = tid % nZeroDiagonalRows;
@@ -88,7 +88,7 @@ __global__ void repairZeroDiagonalRowsBatch(int nZeroDiagonalRows, int nS, int n
     int r = zeroDiagonalRow[i];
     double* v = vals + (size_t) s * nnz;
     choice[(size_t) s * nZeroDiagonalRows + i] = -1;
-    if (v[diagPos[r]] != 0.0) return;                        // a real (or identity) diagonal: nothing to do
+    if (!active[s] || v[diagPos[r]] != 0.0) return;         // retired, or a real (or identity) diagonal: nothing to do
     const double* sn = snap + (size_t) s * nZeroDiagonalRowValues;
     double sgn = zeroDiagonalRepairSign[i];
     for (int j = zeroDiagonalDonorStart[i]; j < zeroDiagonalDonorStart[i + 1]; j++) {
@@ -141,15 +141,16 @@ void repairZeroDiagonalRows(BatchSolverContext* ctx, int nS, double* vals) {
         ctx->zeroDiagonalRepairCapacity = nS;
     }
     int nnz = structure->nnz;
-    snapshotZeroDiagonalRowsBatch<<<((structure->nZeroDiagonalRows * nS + BLOCK - 1) / BLOCK), BLOCK, 0, ctx->stream>>>(structure->nZeroDiagonalRows, nS, nnz, structure->nZeroDiagonalRowValues,
-            structure->dZeroDiagonalRow.template as<int>(), structure->dZeroDiagonalRowValueStart.template as<int>(), structure->dRowPtr.template as<int>(), vals,
-                    ctx->dZeroDiagonalRowSnapshot.template as<double>());
+    snapshotZeroDiagonalRowsBatch<<<grid(structure->nZeroDiagonalRowValues * nS), BLOCK, 0, ctx->stream>>>(structure->nZeroDiagonalRowValues, nS, nnz,
+            structure->dZeroDiagonalRowValuePosition.template as<int>(), ctx->dActive.template as<char>(), vals,
+            ctx->dZeroDiagonalRowSnapshot.template as<double>());
     repairZeroDiagonalRowsBatch<<<((structure->nZeroDiagonalRows * nS + BLOCK - 1) / BLOCK), BLOCK, 0, ctx->stream>>>(structure->nZeroDiagonalRows, nS, nnz, structure->nZeroDiagonalRowValues,
             structure->dZeroDiagonalRow.template as<int>(), structure->dZeroDiagonalRowValueStart.template as<int>(), structure->dZeroDiagonalDonorStart.template as<int>(),
                     structure->dZeroDiagonalDonor.template as<int>(),
             structure->dZeroDiagonalDonorOwnIndex.template as<int>(), structure->dZeroDiagonalRepairSign.template as<char>(), structure->dRowPtr.template as<int>(),
                     structure->dColIdx.template as<int>(),
-            structure->dDiagPos.template as<int>(), ctx->dZeroDiagonalRowSnapshot.template as<double>(), vals, ctx->dZeroDiagonalDonorChoice.template as<int>());
+            structure->dDiagPos.template as<int>(), ctx->dActive.template as<char>(), ctx->dZeroDiagonalRowSnapshot.template as<double>(), vals,
+            ctx->dZeroDiagonalDonorChoice.template as<int>());
 }
 
 /** The same combination on a right-hand side (nS scenarios from {@code B}, choices from the last

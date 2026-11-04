@@ -132,6 +132,7 @@ struct SharedStructure {
     int nZeroDiagonalRows = 0, nZeroDiagonalRowValues = 0;                                // zero-diagonal repair: hazard rows and their
     std::vector<int> hZeroDiagonalRow;                                // donor candidates (see repairZeroDiagonalRowsBatch)
     DeviceBuf dZeroDiagonalRow, dZeroDiagonalRowValueStart, dZeroDiagonalDonorStart, dZeroDiagonalDonor, dZeroDiagonalDonorOwnIndex, dZeroDiagonalRepairSign;
+    DeviceBuf dZeroDiagonalRowValuePosition;                 // per hazard-row value (in the snapshot's order): its slot in the values
     double luBytes = 0.0;                                    // cached LU-probe footprint (0 = not probed yet)
     std::shared_ptr<LuPlan> luPlan;                          // our batched LU's plan, built by the first context using it
 };

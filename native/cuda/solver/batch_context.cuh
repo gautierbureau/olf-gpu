@@ -523,8 +523,8 @@ struct BatchSolverContext {
     // correction solve (batched_lu_solve.cu solveWithInternalRefinement)
     DeviceBuf dInternalRefinementResidual, dInternalRefinementCorrection;
     // mode 7: the exact substitution of the one-variable equations after each solve (singleton_substitution.cuh)
-    DeviceBuf dSingletonHazardSlot, dSingletonShortRow, dSingletonFixed, dSingletonOwner, dSingletonProposal,
-            dSingletonProposalValue, dSingletonFixedAny;
+    DeviceBuf dSingletonHazardSlot, dSingletonColumnStart, dSingletonColumnRow, dSingletonList, dSingletonPendingList,
+            dSingletonFixed, dSingletonTouched, dSingletonOwner, dSingletonProposal, dSingletonProposalValue, dSingletonCounters;
     CudssCtx luComparisonSolver;                             // OLF_GPU_LU_COMPARE: cuDSS's uniform batch on the same systems
     DeviceBuf dLuComparisonDx, dLuComparisonScore;
     bool luComparisonAnalyzed = false;

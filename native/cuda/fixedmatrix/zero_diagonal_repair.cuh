@@ -17,7 +17,7 @@ namespace olfgpu {
 __global__ void repairZeroDiagonalRowsBatch(int nZeroDiagonalRows, int nS, int nnz, int nZeroDiagonalRowValues, const int* zeroDiagonalRow, const int* zeroDiagonalRowValueStart,
                               const int* zeroDiagonalDonorStart, const int* zeroDiagonalDonor, const int* zeroDiagonalDonorOwnIndex,
                               const char* zeroDiagonalRepairSign, const int* rowPtr, const int* colIdx, const int* diagPos,
-                              const double* snap, double* vals, int* choice);
+                              const char* active, const double* snap, double* vals, int* choice);
 
 __global__ void repairZeroDiagonalRightHandSideBatch(int nZeroDiagonalRows, int nS, int n, const int* zeroDiagonalRow, const int* zeroDiagonalDonor, const int* zeroDiagonalDonorOwnIndex,
                              const char* zeroDiagonalRepairSign, const int* choice, const double* bsnap, double* B);

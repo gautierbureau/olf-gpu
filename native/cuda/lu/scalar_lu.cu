@@ -69,6 +69,14 @@ __global__ void fromInterleaved(int count, int stride, int width, int capacity, 
     }
 }
 
+// out[e] = lu[e * capacity + lane]: one lane's factors out of the interleaved layout.
+__global__ void gatherLane(int nnzLu, int capacity, int lane, const double* __restrict__ lu, double* __restrict__ out) {
+    const size_t e = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (e < static_cast<size_t>(nnzLu)) {
+        out[e] = lu[e * capacity + lane];
+    }
+}
+
 __global__ void zeroFill(int nFill, int width, int capacity, const int* __restrict__ fillEntry, double* __restrict__ lu) {
     const size_t g = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (g >= static_cast<size_t>(nFill) * width) {
@@ -275,6 +283,18 @@ std::vector<int> readScalarTrouble(ScalarLu& lu, cudaStream_t stream) {
         CUDA_CHECK(cudaStreamSynchronize(stream));
     }
     return clamps;
+}
+
+std::vector<double> readScalarLaneFactors(ScalarLu& lu, int lane, DeviceBuf& scratch, cudaStream_t stream) {
+    std::vector<double> factors(lu.nnzLu);
+    scratch.alloc(factors.size() * sizeof(double));
+    gatherLane<<<blocksFor(factors.size()), LU_BLOCK, 0, stream>>>(lu.nnzLu, lu.capacity, lane, lu.dLu.as<double>(),
+                                                                   scratch.as<double>());
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaMemcpyAsync(factors.data(), scratch.p, factors.size() * sizeof(double), cudaMemcpyDeviceToHost,
+                               stream));
+    CUDA_CHECK(cudaStreamSynchronize(stream));
+    return factors;
 }
 
 }  // namespace olfgpu

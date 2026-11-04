@@ -40,6 +40,7 @@ extern long long gWidthIterSum;
 extern long long gCompactIters;
 extern long long gBatchedLuFactorizations;                   // factorizations of our batched LU
 extern long long gBatchedLuPivotedLanes;                     // ...and the lanes of them its pivoting engine factorized
+extern long long gBatchedLuPivotDelayOrders;                 // fast-engine orders built with learned pivot delays
 // Per scenario at the end of a completed batch call: how many SOLVE PASSES it took part in (1 = the state came
 // right out of the first inner Newton; each further pass is an outer loop that changed something and
 // re-solved), the first pass's iterations and the total. Histogram key = passes (capped at 15).

@@ -381,11 +381,11 @@ OLF_JNI(ac_solver_gpu, BatchSolveNative, solveBatchContext)(
         fprintf(stderr, "JNI_PHASE_TIME calls=%lld marshal=%lld ms solve=%lld ms pack=%lld ms "
                 "| outerPasses=%lld (solving=%lld) newtonIters=%lld activeIterSum=%lld widthIterSum=%lld compactIters=%lld"
                 " | cuDSS analyses main=%lld compaction=%lld | iterativeRefinementChecks=%ld iterativeRefinementExtraSolves=%ld"
-                " | batchedLu factorizations=%lld pivotedLanes=%lld\n",
+                " | batchedLu factorizations=%lld pivotedLanes=%lld pivotDelayOrders=%lld\n",
                 calls, marshalNs / 1000000, solveNs / 1000000, packNs / 1000000,
                 gOuterPasses, gSolvePasses, gNewtonIters, gActiveIterSum, gWidthIterSum, gCompactIters,
                 gAnalysesMain, gAnalysesCompact, gIterativeRefinementChecks, gIterativeRefinementExtraSolves,
-                gBatchedLuFactorizations, gBatchedLuPivotedLanes);
+                gBatchedLuFactorizations, gBatchedLuPivotedLanes, gBatchedLuPivotDelayOrders);
         double phaseMilliseconds[4] = {0, 0, 0, 0};
         long long phaseCount[4] = {0, 0, 0, 0};
         for (const auto& kv : gAnalysisSites) {

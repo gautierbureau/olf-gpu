@@ -38,6 +38,9 @@ class GpuBatchedLuTest {
         }
     }
 
+    /** The line group of {@link #lineGroupValues}: rows {phi1, phi2}, {phi1, phi2, p}, {phi2, phi3}, {phi3, p}. */
+    private static final Csr LINE_GROUP = new Csr(4, new int[] {0, 2, 5, 7, 9}, new int[] {0, 1, 0, 1, 3, 1, 2, 2, 3});
+
     @BeforeEach
     void checkGpu() {
         assumeTrue(GpuAcNewtonSolver.isAvailable(),
@@ -532,6 +535,91 @@ class GpuBatchedLuTest {
         }
         assertTrue(residual / scale < 1e-12, "backward ratio " + residual / scale);
         assertArrayEquals(denseSolve(m, system.rightHandSide()), x, 1e-10);
+    }
+
+    /**
+     * Two buses joined by a line, and to the rest of the network by a coupler only, as breaker mode builds them, in the
+     * variables {phi1, phi2, phi3, p}: the line's balances g1 (phi1 - phi2) and g2 (phi2 - phi1) + p (p the coupler's
+     * flow) depend on the angle difference only; the coupler's ZERO_PHI phi2 - phi3 sits on the third bus's angle row
+     * and that bus's balance s phi3 - p on the coupler's dummy row, as the coupler-tree relocation places them. Per lane
+     * {g1, g2, s}.
+     */
+    private static double[] lineGroupValues(double[][] lanes) {
+        double[] values = new double[lanes.length * 9];
+        for (int s = 0; s < lanes.length; s++) {
+            double g1 = lanes[s][0];
+            double g2 = lanes[s][1];
+            System.arraycopy(new double[] {g1, -g1, -g2, g2, 1, 1, -1, lanes[s][2], -1}, 0, values, s * 9, 9);
+        }
+        return values;
+    }
+
+    /**
+     * Factorizes the line group's lanes four times on one plan: asserts the rounds the pivoting engine took them in, the
+     * delays each round ran on, and the last factorization's solutions against a dense pivoted solve.
+     */
+    private static void assertLineGroupLearns(double[][] lanes, int[] pivotedRounds, int[] delays) {
+        int capacity = lanes.length;
+        double[] values = lineGroupValues(lanes);
+        Random random = new Random(7);
+        double[] rightHandSides = new double[capacity * 4];
+        for (int i = 0; i < rightHandSides.length; i++) {
+            rightHandSides[i] = random.nextDouble() * 2 - 1;
+        }
+        int[] laneMap = identity(capacity);
+        double[] solutions = new double[capacity * 4];
+        int[] pivoted = new int[4 * capacity];
+        int[] roundDelays = new int[4];
+        BatchedLuNative.factorizeRounds(4, LINE_GROUP.rowPtr(), LINE_GROUP.colIdx(), identity(4), identity(4), capacity,
+                values, rightHandSides, laneMap, 4, solutions, pivoted, roundDelays);
+        int[] expected = new int[4 * capacity];
+        for (int round = 0; round < 4; round++) {
+            Arrays.fill(expected, round * capacity, (round + 1) * capacity, pivotedRounds[round]);
+        }
+        assertArrayEquals(expected, pivoted, "lanes the pivoting engine took, round by round");
+        assertArrayEquals(delays, roundDelays, "pivot delays of each round's order");
+        for (int s = 0; s < capacity; s++) {
+            double[] expectedSolution = denseSolve(dense(LINE_GROUP, values, s), Arrays.copyOfRange(rightHandSides, s * 4, s * 4 + 4));
+            double scale = Arrays.stream(expectedSolution).map(Math::abs).max().orElseThrow();
+            for (int i = 0; i < 4; i++) {
+                assertEquals(expectedSolution[i], solutions[s * 4 + i], 1e-12 * scale, "lane " + s + " unknown " + i);
+            }
+        }
+    }
+
+    /**
+     * In the order given the line's balances come first, and the second one cancels on every lane: its row and the
+     * first one's are opposite on the two angles. After the first factorization the fast engine delays that pivot after
+     * the row with its column's largest entry below, the ZERO_PHI row, where it still cancels (the ZERO_PHI row ties the
+     * third angle to the group, not the group to anything); after the second it moves it after the third bus's balance,
+     * which brings that angle in. From the third factorization on, the fast engine keeps every lane and solves it
+     * exactly. Checked to fail with the learning off (every round pivots), with a delay that does not move (the order
+     * stays where the pivot still cancels), and with the batched LU keeping the plan it was created on.
+     */
+    @Test
+    void cancelledPivotIsDelayedUntilARowGivesItAValue() {
+        Random random = new Random(11);
+        double[][] lanes = new double[3][];
+        for (int s = 0; s < lanes.length; s++) {
+            double g = 1 + 9 * random.nextDouble();
+            lanes[s] = new double[] {g, g, 1 + 9 * random.nextDouble()};
+        }
+        assertLineGroupLearns(lanes, new int[] {1, 1, 0, 0}, new int[] {0, 1, 1, 1});
+    }
+
+    /**
+     * A lossy line's balances are opposite on the two angles too, with different coefficients: the second pivot cancels
+     * to rounding, here 1.7e-12 - above the clamp, so only its multipliers flag the lane - and the fast engine delays it
+     * all the same: it is below 1e-8 of its row's and column's largest entry. Checked to fail with clamped pivots alone
+     * learned (the lane keeps going to the pivoting engine).
+     */
+    @Test
+    void pivotCancelledAboveTheClampIsDelayedToo() {
+        double g1 = 31415.9265;
+        double g2 = 27182.8183;
+        double residue = Math.fma(g2 / g1, -g1, g2);       // the fast engine's pivot: the same IEEE operations
+        assertTrue(Math.abs(residue) > 1e-13 && Math.abs(residue) < 1e-8 * g1, "the pivot left by rounding: " + residue);
+        assertLineGroupLearns(new double[][] {{g1, g2, 3}}, new int[] {1, 1, 0, 0}, new int[] {0, 1, 1, 1});
     }
 
     @Test

@@ -18,7 +18,9 @@ import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
  * {@code j} is column {@code colOrder[j]}. Two engines: a fast one without pivoting factorizes every matrix, and a
  * matrix it does not trust (a pivot below 1e-13 in magnitude, or a multiplier above 1e8) is factorized again by a
  * pivoting one, which pivots inside the supernodes of that order (postordered) on its own; a pivot still below 1e-13
- * there is clamped and counted.
+ * there is clamped and counted. The fast engine learns from the matrices it did not trust: a pivot that cancelled
+ * there is delayed after the row that gives it a value back, and the next factorization on the same plan runs on that
+ * order ({@link #factorizeRounds}; every other entry point builds its plan for one factorization).
  *
  * <p>JNI glue: {@code native/cuda/jni/batched_lu_jni.cu}.
  *
@@ -33,7 +35,10 @@ public final class BatchedLuNative {
     private BatchedLuNative() {
     }
 
-    /** {the factorizations our batched LU ran in this process, the lanes of them its pivoting engine factorized}. */
+    /**
+     * {the factorizations our batched LU ran in this process, the lanes of them its pivoting engine factorized, the
+     * fast-engine orders built with learned pivot delays}.
+     */
     public static native long[] factorizationCounts();
 
     /**
@@ -79,6 +84,24 @@ public final class BatchedLuNative {
     public static native void factorizeAndSolveNewtonStep(int n, int[] rowPtr, int[] colIdx, int[] rowOrder, int[] colOrder,
                                                           int capacity, double[] values, double[] rightHandSides,
                                                           int[] laneMap, double[] solutions);
+
+    /**
+     * Factorizes the scenarios of {@code laneMap} {@code rounds} times on one plan, the fast engine's order learning its
+     * pivot delays between rounds, then solves their systems with the last factorization; every other scenario's
+     * solution is left as it is.
+     *
+     * @param capacity       scenarios in the arrays
+     * @param values         CSR values, {@code capacity * nnz}, scenario-major
+     * @param rightHandSides {@code capacity * n}, scenario-major
+     * @param laneMap        the scenarios to factorize and solve
+     * @param solutions      {@code capacity * n}, scenario-major: the solved scenarios' entries are overwritten
+     * @param pivoted        {@code rounds * laneMap.length}, round-major: 1 when the pivoting engine factorized the lane
+     *                       that round (written)
+     * @param delays         per round: the pivot delays the fast engine's order had (written)
+     */
+    public static native void factorizeRounds(int n, int[] rowPtr, int[] colIdx, int[] rowOrder, int[] colOrder,
+                                              int capacity, double[] values, double[] rightHandSides, int[] laneMap,
+                                              int rounds, double[] solutions, int[] pivoted, int[] delays);
 
     /**
      * The orders cuDSS's analysis picks for the pattern, written into {@code rowOrder} and {@code colOrder} as cuDSS

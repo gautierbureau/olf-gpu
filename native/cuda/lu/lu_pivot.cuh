@@ -16,6 +16,10 @@ constexpr double LU_PIVOT_EPSILON = 1e-13;
 // - a voltage target's identity row pivots a whole admittance column with multipliers of the admittances.
 constexpr double LU_MULTIPLIER_LIMIT = 1e8;
 
+// A pivot below this fraction of the largest |A| of its row and column has cancelled in the fast engine's order (it
+// makes multipliers past LU_MULTIPLIER_LIMIT, if it is not clamped): the order learns to delay it (pivot_delays.cuh).
+constexpr double LU_PIVOT_RELATIVE_LIMIT = 1.0 / LU_MULTIPLIER_LIMIT;
+
 }  // namespace olfgpu
 
 #endif  // OLF_GPU_LU_LU_PIVOT_CUH

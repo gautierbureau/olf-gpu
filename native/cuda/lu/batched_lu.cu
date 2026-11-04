@@ -4,18 +4,58 @@
 // See batched_lu.cuh.
 #include "batched_lu.cuh"
 
+#include <mutex>
 #include <stdexcept>
 #include <string>
+#include <utility>
 
+#include "../common/check.cuh"
 #include "../common/stats.cuh"
 
 namespace olfgpu {
 
-void createBatchedLu(BatchedLu& lu, const LuPlan& plan, int capacity) {
+namespace {
+
+// The lanes of a factorization the fast engine did not trust that its next order is learned from: the first ones, a
+// pivot that cancels on every scenario cancels on each of them.
+constexpr int PIVOT_DELAY_LEARNING_LANES = 2;
+
+void learnFromUntrustedLanes(BatchedLu& lu, const double* vals, const std::vector<int>& untrusted,
+                             cudaStream_t stream) {
+    LuPlan& plan = *lu.plan;
+    PivotDelays delays;
+    {
+        std::lock_guard<std::mutex> lock(plan.mutex);
+        if (plan.fast != lu.fast || plan.delays.orders >= PIVOT_DELAY_MAX_ORDERS) {
+            return;                                          // another LU moved the order on, or the learning is over
+        }
+        delays = plan.delays;
+    }
+    const int nnzA = plan.rowPtr[plan.n];
+    std::vector<double> a(nnzA);
+    bool changed = false;
+    for (size_t t = 0; t < untrusted.size() && t < static_cast<size_t>(PIVOT_DELAY_LEARNING_LANES); t++) {
+        const int lane = untrusted[t];
+        const std::vector<double> factors = readScalarLaneFactors(lu.scalar, lane, lu.laneFactors, stream);
+        CUDA_CHECK(cudaMemcpyAsync(a.data(), vals + static_cast<size_t>(lu.hLaneMap[lane]) * nnzA,
+                                   a.size() * sizeof(double), cudaMemcpyDeviceToHost, stream));
+        CUDA_CHECK(cudaStreamSynchronize(stream));
+        changed = learnPivotDelays(delays, *lu.fast, plan.rowPtr.data(), plan.colIdx.data(), factors.data(), a.data())
+                  || changed;
+    }
+    if (changed) {
+        publishPivotDelays(plan, *lu.fast, std::move(delays));
+    }
+}
+
+}  // namespace
+
+void createBatchedLu(BatchedLu& lu, LuPlan& plan, int capacity) {
     lu.capacity = capacity;
     lu.width = 0;
-    lu.supernodalPlan = &plan.supernodal;
-    createScalarLu(lu.scalar, plan.scalar, capacity);
+    lu.plan = &plan;
+    lu.fast = fastLuPlanOf(plan);
+    createScalarLu(lu.scalar, lu.fast->scalar, capacity);
 }
 
 void factorizeLanes(BatchedLu& lu, const double* vals, const int* laneMap, int width, cudaStream_t stream) {
@@ -26,18 +66,26 @@ void factorizeLanes(BatchedLu& lu, const double* vals, const int* laneMap, int w
         return;
     }
     gBatchedLuFactorizations++;
+    std::shared_ptr<const FastLuPlan> current = fastLuPlanOf(*lu.plan);
+    if (current != lu.fast) {                                // the delays grew since this LU's last factorization
+        lu.fast = std::move(current);
+        createScalarLu(lu.scalar, lu.fast->scalar, lu.capacity);
+    }
     factorizeScalarLanes(lu.scalar, vals, laneMap, width, stream);
     const std::vector<int> trouble = readScalarTrouble(lu.scalar, stream);
+    std::vector<int> untrusted;
     for (int a = 0; a < width; a++) {
         if (trouble[a] > 0) {
             lu.hPivoted.push_back(laneMap[a]);
+            untrusted.push_back(a);
         }
     }
     if (lu.hPivoted.empty()) {
         return;
     }
+    learnFromUntrustedLanes(lu, vals, untrusted, stream);
     if (lu.supernodal.capacity == 0) {
-        createSupernodalLu(lu.supernodal, *lu.supernodalPlan, lu.capacity);
+        createSupernodalLu(lu.supernodal, lu.plan->supernodal, lu.capacity);
     }
     gBatchedLuPivotedLanes += static_cast<long long>(lu.hPivoted.size());
     factorizeSupernodalLanes(lu.supernodal, vals, lu.hPivoted.data(), static_cast<int>(lu.hPivoted.size()), stream);

@@ -54,6 +54,10 @@ void solveScalarLanes(ScalarLu& lu, const double* b, double* x, cudaStream_t str
 // the pivoting engine.
 std::vector<int> readScalarTrouble(ScalarLu& lu, cudaStream_t stream);
 
+// One lane of the last factorization's factors: its nnzLu values, in the plan's LU entry order (synchronizes the
+// stream; scratch holds them on the device on the way).
+std::vector<double> readScalarLaneFactors(ScalarLu& lu, int lane, DeviceBuf& scratch, cudaStream_t stream);
+
 }  // namespace olfgpu
 
 #endif  // OLF_GPU_LU_SCALAR_LU_CUH

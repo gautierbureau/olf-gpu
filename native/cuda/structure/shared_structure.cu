@@ -441,7 +441,7 @@ double luBytesPerScenario(SharedStructure& structure) {
     return structure.luBytes;
 }
 
-const LuPlan& luPlanOf(SharedStructure& structure) {
+LuPlan& luPlanOf(SharedStructure& structure) {
     static std::mutex buildMutex;                            // contexts on one structure may be built concurrently
     std::lock_guard<std::mutex> lock(buildMutex);
     if (!structure.luPlan) {
@@ -450,10 +450,10 @@ const LuPlan& luPlanOf(SharedStructure& structure) {
         int64_t cudssLuNnz = 0;
         cudssEliminationOrder(structure.n, structure.nnz, structure.dRowPtr.as<int>(), structure.dColIdx.as<int>(),
                               structure.nZeroImpedanceBranch > 0, rowOrder, colOrder, cudssLuNnz);
-        auto plan = std::make_shared<LuPlan>(buildLuPlan(structure.n, structure.rowPtr.data(), structure.colIdx.data(),
-                                                         rowOrder.data(), colOrder.data()));
+        std::shared_ptr<LuPlan> plan = buildLuPlan(structure.n, structure.rowPtr.data(), structure.colIdx.data(),
+                                                   rowOrder.data(), colOrder.data());
         if (traceOn(Trace::TRACE)) {
-            std::fprintf(stderr, "OLF_GPU_LU_PLAN n=%d nnz=%d cudssLuNnz=%lld %s\n", plan->scalar.n, plan->scalar.nnzA,
+            std::fprintf(stderr, "OLF_GPU_LU_PLAN n=%d nnz=%d cudssLuNnz=%lld %s\n", plan->n, plan->rowPtr[plan->n],
                          static_cast<long long>(cudssLuNnz), describeLuPlan(*plan).c_str());
         }
         structure.luPlan = std::move(plan);

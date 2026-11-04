@@ -20,6 +20,7 @@ long long gWidthIterSum = 0;
 long long gCompactIters = 0;
 long long gBatchedLuFactorizations = 0;
 long long gBatchedLuPivotedLanes = 0;
+long long gBatchedLuPivotDelayOrders = 0;
 long long gOuterLoopPassHistogramCount[16] = {0}, gOuterLoopPassHistogramFirstSolveIterations[16] = {0}, gOuterLoopPassHistogramTotalIterations[16] = {0};
 long long gOuterLoopNotConverged = 0, gOuterLoopNotConvergedIterations = 0;
 long long gAnalysesMain = 0;

@@ -33,8 +33,10 @@ __device__ inline int fixedVariableMode(bool crossRow) {
 __device__ inline void writeCrossIdentityRow(int r, int s, int n, const int* rowPtr, const int* colIdx, const int* relocatedChildOwnRow,
                                              const double* x, const double* target, double* valsS, double* F) {
     int col = relocatedChildOwnRow != nullptr ? relocatedChildOwnRow[r] : -1;
-    for (int k = rowPtr[r]; k < rowPtr[r + 1]; k++) {
-        valsS[k] = colIdx[k] == col ? 1.0 : 0.0;
+    if (valsS != nullptr) {                                  // null on a mismatch-only fill: F alone
+        for (int k = rowPtr[r]; k < rowPtr[r + 1]; k++) {
+            valsS[k] = colIdx[k] == col ? 1.0 : 0.0;
+        }
     }
     F[(size_t) s * n + r] = (col >= 0 ? x[(size_t) s * n + col] : 0.0) - target[(size_t) s * n + r];
 }

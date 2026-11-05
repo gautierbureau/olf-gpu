@@ -322,7 +322,26 @@ class GpuSaSolverTest extends AbstractGpuSaTest {
     void deviceReportsMaxIterationWhenConvergingOnTheLastAllowedStep() {
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
-        Network network = IeeeCdfNetworkFactory.create14();
+        assertDeviceDecidesTheIterationBudget(IeeeCdfNetworkFactory.create14(),
+                List.of(new Contingency("L1-2-1", new BranchContingency("L1-2-1"))));
+    }
+
+    /** The pass that runs the Newton budget out ends with a mismatch-only fill, after which the device scores the
+     *  pass's last linear solve on the values that solve factorized: a sound solve is OLF's MAX_ITERATION_REACHED, a
+     *  junk one a reject the CPU replays. That fill added the couplers' zero-impedance terms and the merged controls'
+     *  DISTR_Q terms into those values a second time (a coupler's +-1 became +-2), so on a coupler chain the sound
+     *  last solve of a contingency one step short scored as junk, and the device handed the contingency to the CPU
+     *  instead of deciding it. */
+    @Test
+    void deviceDecidesTheIterationBudgetOnACouplerChain() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        assertDeviceDecidesTheIterationBudget(couplerChainSaNetwork(8), List.of(new Contingency("t5", new BranchContingency("t5"))));
+    }
+
+    /** One contingency at the exact number of steps it needs on the CPU, and one short: the device itself reports
+     *  MAX_ITERATION_REACHED one short, CONVERGED at the budget. */
+    private void assertDeviceDecidesTheIterationBudget(Network network, List<Contingency> contingencies) {
         com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
                 .setDistributedSlack(false).setUseReactiveLimits(false)
                 .setVoltageInitMode(com.powsybl.loadflow.LoadFlowParameters.VoltageInitMode.PREVIOUS_VALUES);
@@ -330,7 +349,6 @@ class GpuSaSolverTest extends AbstractGpuSaTest {
         // the solved base state on the network, so both arms' base load flow needs a single step
         new com.powsybl.loadflow.LoadFlow.Runner(new com.powsybl.openloadflow.OpenLoadFlowProvider(commonTestConfig.matrixFactory()))
                 .run(network, new com.powsybl.loadflow.LoadFlowParameters().setDistributedSlack(false).setUseReactiveLimits(false));
-        List<Contingency> contingencies = List.of(new Contingency("L1-2-1", new BranchContingency("L1-2-1")));
         com.powsybl.security.SecurityAnalysisParameters sap = new com.powsybl.security.SecurityAnalysisParameters();
         sap.setLoadFlowParameters(lfp);
         int budget = -1;                                     // the smallest budget the CPU converges under

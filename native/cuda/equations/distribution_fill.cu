@@ -161,7 +161,7 @@ __global__ void fillDistrQBatch(int nDistrQ, int nScenarios, int n, int nnz, int
     }
     const int* dst = distrQDestination + c * 6;
     const double* xs = x + (size_t) s * n;
-    double* valsS = vals + (size_t) s * nnz;
+    double* valsS = scenarioValues(vals, s, nnz);           // null on a mismatch-only fill: F alone
     double* FS = F + (size_t) s * n;
 
     if (kind == GpuReactiveTermKind::SHUNT_COMPENSATOR_REACTIVE_FLOW) {  // shunt q: {q -> F, dq/dv -> J(row, vcol)}
@@ -176,7 +176,7 @@ __global__ void fillDistrQBatch(int nDistrQ, int nScenarios, int n, int nnz, int
             printf("DQF kind=1(shunt) elem=%d w=%.6f contrib=%.9f\n", e, w, w * so[2]);
         }
         if (dst[0] <= -2) atomicAdd(&FS[-2 - dst[0]], w * so[2]);
-        if (dst[1] >= 0) atomicAdd(&valsS[dst[1]], w * so[3]);
+        if (valsS != nullptr && dst[1] >= 0) atomicAdd(&valsS[dst[1]], w * so[3]);
         return;
     }
     if (kind == GpuReactiveTermKind::DUMMY_Q) {  // zero-impedance DUMMY_Q: linear w*dummyQ
@@ -184,7 +184,7 @@ __global__ void fillDistrQBatch(int nDistrQ, int nScenarios, int n, int nnz, int
             printf("DQF kind=3(ziDummyQ) col=%d w=%.6f contrib=%.9f\n", e, w, w * xs[e]);
         }
         if (dst[0] <= -2) atomicAdd(&FS[-2 - dst[0]], w * xs[e]);
-        if (dst[1] >= 0) atomicAdd(&valsS[dst[1]], w);
+        if (valsS != nullptr && dst[1] >= 0) atomicAdd(&valsS[dst[1]], w);
         return;
     }
     if (kind == GpuReactiveTermKind::OPEN_BRANCH_REACTIVE_FLOW) {  // half-open branch: connected-side q + dq/dv
@@ -201,7 +201,7 @@ __global__ void fillDistrQBatch(int nDistrQ, int nScenarios, int n, int nnz, int
             printf("DQF kind=2(halfOpen) elem=%d w=%.6f contrib=%.9f\n", e, w, w * oo[qi]);
         }
         if (dst[0] <= -2) atomicAdd(&FS[-2 - dst[0]], w * oo[qi]);
-        if (dst[1] >= 0) atomicAdd(&valsS[dst[1]], w * oo[qi + 1]);
+        if (valsS != nullptr && dst[1] >= 0) atomicAdd(&valsS[dst[1]], w * oo[qi + 1]);
         return;
     }
     // kind 0: closed-branch q1/q2 + its derivatives.
@@ -240,8 +240,7 @@ __global__ void fillDistrQBatch(int nDistrQ, int nScenarios, int n, int nnz, int
             printf("DQF kind=0(closed) elem=%d w=%.6f v1=%.9f v2=%.9f y=%.6f contrib=%.9f\n",
                    e, w, v1, v2, p[0], val);
         }
-        if (d >= 0) atomicAdd(&valsS[d], val);
-        else if (d <= -2) atomicAdd(&FS[-2 - d], val);
+        addAt(d, val, valsS, FS);
     }
 }
 
@@ -275,7 +274,7 @@ __global__ void fillDistrRhoBatch(int nDistrRho, int nScenarios, int n, int nnz,
     int dF = distrRhoDestination[c * 2 + 0];
     int dJ = distrRhoDestination[c * 2 + 1];
     if (dF <= -2) atomicAdd(&F[(size_t) s * n + (-2 - dF)], coef * x[(size_t) s * n + distrRhoColumn[c]]);
-    if (dJ >= 0) atomicAdd(&vals[(size_t) s * nnz + dJ], coef);
+    if (vals != nullptr && dJ >= 0) atomicAdd(&vals[(size_t) s * nnz + dJ], coef);
 }
 
 // Batched DISTR_SHUNT_B fill: the SHUNT_B analogue of fillDistrRhoBatch. Linear coef*b into the controller's
@@ -292,7 +291,7 @@ __global__ void fillDistrShuntBBatch(int nDistrShuntB, int nScenarios, int n, in
     int dF = distrShuntBDestination[c * 2 + 0];
     int dJ = distrShuntBDestination[c * 2 + 1];
     if (dF <= -2) atomicAdd(&F[(size_t) s * n + (-2 - dF)], coef * x[(size_t) s * n + distrShuntBColumn[c]]);
-    if (dJ >= 0) atomicAdd(&vals[(size_t) s * nnz + dJ], coef);
+    if (vals != nullptr && dJ >= 0) atomicAdd(&vals[(size_t) s * nnz + dJ], coef);
 }
 
 }  // namespace olfgpu

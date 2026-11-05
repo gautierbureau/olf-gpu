@@ -87,21 +87,25 @@ __global__ void applyRowModeBatch(int n, int nScenarios, int nnz, const int* mod
     int s = tid / n;
     if (!active[s]) return;
     int m = mode[(size_t) s * n + r];
-    double* valsS = vals + (size_t) s * nnz;
+    double* valsS = scenarioValues(vals, s, nnz);           // null on a mismatch-only fill: F alone
     if (m == GpuRowMode::CROSS_FIXED_VARIABLE) {
         writeCrossIdentityRow(r, s, n, rowPtr, colIdx, relocatedChildOwnRow, x, target, valsS, F);
     } else if (m == GpuRowMode::FIXED_VARIABLE) {  // identity: v/phi/rho/a1/b held at target
-        for (int k = rowPtr[r]; k < rowPtr[r + 1]; k++) {
-            valsS[k] = 0.0;
+        if (valsS != nullptr) {
+            for (int k = rowPtr[r]; k < rowPtr[r + 1]; k++) {
+                valsS[k] = 0.0;
+            }
+            valsS[diagPos[r]] = 1.0;
         }
-        valsS[diagPos[r]] = 1.0;
         F[(size_t) s * n + r] = x[(size_t) s * n + r] - target[(size_t) s * n + r];
     } else if (m == GpuRowMode::BUS_TARGET_V_WITH_SLOPE) {  // SLOPE-SVC: V + slope*sumQ = target — the natural
         double slope = rowSlope[r];                          // reactive fill stands, scaled, plus the v term
-        for (int k = rowPtr[r]; k < rowPtr[r + 1]; k++) {
-            valsS[k] *= slope;
+        if (valsS != nullptr) {
+            for (int k = rowPtr[r]; k < rowPtr[r + 1]; k++) {
+                valsS[k] *= slope;
+            }
+            valsS[diagPos[r]] += 1.0;
         }
-        valsS[diagPos[r]] += 1.0;
         size_t idx = (size_t) s * n + r;
         F[idx] = slope * (F[idx] + target[idx]) + x[idx] - target[idx];
     }
@@ -216,6 +220,13 @@ void fillActiveBatch(BatchSolverContext* ctx, DriverPass& drv, bool fOnly) {
             CUDA_CHECK(cudaMemsetAsync(ctx->dVals.p, 0, static_cast<size_t>(nnz) * nS * sizeof(double), ctx->stream));
         }
     }
+    // A mismatch-only fill (the pass that ends a Newton budget) writes F alone. The values still hold the system the
+    // last solve factorized, which the it == maxIter score of that solve reads (newton_iteration.cu): the DISTR_Q /
+    // DISTR_RHO / DISTR_SHUNT_B, zero-impedance and row-mode passes added their Jacobian terms into them a second time
+    // (a coupler's +-1 became +-2, a slope row was scaled twice), and the zero-diagonal repair took its copy of the
+    // hazard rows and its choices again from the result. The repair has no F part: the right-hand side is repaired at
+    // the solve.
+    double* vals = fOnly ? nullptr : ctx->dVals.as<double>();
     initFBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, ctx->dTarget.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->dQbufClosed.as<double>());
     if (ctx->structure->closedBranch.elementCount) {
         if (fOnly) {
@@ -241,7 +252,7 @@ void fillActiveBatch(BatchSolverContext* ctx, DriverPass& drv, bool fOnly) {
     // voltage-dependent load model: own guarded block (NOT inside the shunt guard — a modeled
     // load needs no shunt present); residual always, Jacobian slot unless the F-only pass
     if (ctx->structure->nLoadModelTerms) {
-        fillLoadModelBatch<<<grid(ctx->structure->nLoadModelTerms * nS), BLOCK, 0, ctx->stream>>>(ctx->structure->nLoadModelTerms, nS, n, nnz, ctx->structure->dLoadModelParameters.as<double>(), ctx->structure->dLoadModelIndices.as<int>(), ctx->structure->dLoadModelDestination.as<int>(), ctx->dX.as<double>(), fOnly ? nullptr : ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->structure->loadModelRelocated ? ctx->structure->dLoadModelAlternateRow.as<int>() : nullptr, ctx->structure->loadModelRelocated ? ctx->structure->dLoadModelAlternateDestination.as<int>() : nullptr, ctx->structure->loadModelRelocated ? ctx->dMode.as<int>() : nullptr);
+        fillLoadModelBatch<<<grid(ctx->structure->nLoadModelTerms * nS), BLOCK, 0, ctx->stream>>>(ctx->structure->nLoadModelTerms, nS, n, nnz, ctx->structure->dLoadModelParameters.as<double>(), ctx->structure->dLoadModelIndices.as<int>(), ctx->structure->dLoadModelDestination.as<int>(), ctx->dX.as<double>(), vals, ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->structure->loadModelRelocated ? ctx->structure->dLoadModelAlternateRow.as<int>() : nullptr, ctx->structure->loadModelRelocated ? ctx->structure->dLoadModelAlternateDestination.as<int>() : nullptr, ctx->structure->loadModelRelocated ? ctx->dMode.as<int>() : nullptr);
     }
     if (ctx->structure->hvdcAcEmulation.elementCount) {
         if (fOnly) {
@@ -251,17 +262,19 @@ void fillActiveBatch(BatchSolverContext* ctx, DriverPass& drv, bool fOnly) {
         }
     }
 int distrQTraceRow = gpuDistrQTraceRow();
-if (ctx->nDistrQ) fillDistrQBatch<<<grid(ctx->nDistrQ * nS), BLOCK, 0, ctx->stream>>>(ctx->nDistrQ, nS, n, nnz, ctx->nElements, ctx->closedBranchOffset, ctx->openBranchOffset, ctx->structure->dDistrQElement.as<int>(), ctx->structure->dDistrQSide.as<int>(), ctx->structure->dDistrQKind.as<int>(), ctx->structure->dDistrQWeight.as<double>(), ctx->structure->dDistrQDestination.as<int>(), ctx->structure->dDistrQAlternateDestination.as<int>(), ctx->structure->dDistrQSelectorRow.as<int>(), ctx->structure->dDistrQDummyQRow.as<int>(), ctx->structure->closedBranch.parameters.as<double>(), ctx->structure->closedBranch.indices.as<int>(), ctx->structure->shunt.parameters.as<double>(), ctx->structure->shunt.indices.as<int>(), ctx->structure->openBranch.parameters.as<double>(), ctx->structure->openBranch.indices.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->nDistrQWeightOverrides, ctx->nDistrQWeightOverrides ? ctx->dDistrQWeightOverrideScenarioTerm.as<int>() : nullptr, ctx->nDistrQWeightOverrides ? ctx->dDistrQWeightOverrideWeight.as<double>() : nullptr,
+if (ctx->nDistrQ) fillDistrQBatch<<<grid(ctx->nDistrQ * nS), BLOCK, 0, ctx->stream>>>(ctx->nDistrQ, nS, n, nnz, ctx->nElements, ctx->closedBranchOffset, ctx->openBranchOffset, ctx->structure->dDistrQElement.as<int>(), ctx->structure->dDistrQSide.as<int>(), ctx->structure->dDistrQKind.as<int>(), ctx->structure->dDistrQWeight.as<double>(), ctx->structure->dDistrQDestination.as<int>(), ctx->structure->dDistrQAlternateDestination.as<int>(), ctx->structure->dDistrQSelectorRow.as<int>(), ctx->structure->dDistrQDummyQRow.as<int>(), ctx->structure->closedBranch.parameters.as<double>(), ctx->structure->closedBranch.indices.as<int>(), ctx->structure->shunt.parameters.as<double>(), ctx->structure->shunt.indices.as<int>(), ctx->structure->openBranch.parameters.as<double>(), ctx->structure->openBranch.indices.as<int>(), ctx->dX.as<double>(), vals, ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->nDistrQWeightOverrides, ctx->nDistrQWeightOverrides ? ctx->dDistrQWeightOverrideScenarioTerm.as<int>() : nullptr, ctx->nDistrQWeightOverrides ? ctx->dDistrQWeightOverrideWeight.as<double>() : nullptr,
             ctx->nDistrQKeyOverrides, ctx->nDistrQKeyOverrides ? ctx->dDistrQKeyOverrideScenarioMember.as<int>() : nullptr, ctx->nDistrQKeyOverrides ? ctx->dDistrQKeyOverrideKey.as<double>() : nullptr, ctx->dMode.as<int>(), ctx->nDistrQInactiveMembers,
             ctx->nDistrQInactiveMembers ? ctx->dDistrQInactiveMembers.as<int>() : nullptr,
             ctx->nDistrQDynamicKeys ? ctx->dDistrQRowMember.as<int>() : nullptr, ctx->nDistrQDynamicKeys || ctx->hasDistrQRelocationGroups ? ctx->dDistrQInjectionMember.as<int>() : nullptr, ctx->nDistrQDynamicKeys ? ctx->dDistrQMemberKey.as<double>() : nullptr, ctx->nDistrQDynamicKeys ? ctx->dDistrQMemberReactiveLimitEntry.as<int>() : nullptr, ctx->nDistrQDynamicKeys ? ctx->dDistrQMemberGroupStart.as<int>() : nullptr, ctx->nDistrQDynamicKeys ? ctx->dDistrQMemberGroupCount.as<int>() : nullptr, ctx->dReactiveLimitQLimitType.as<char>(), ctx->nReactiveLimitEntries, ctx->hasPilotSelf && ctx->dPilotSelfCarrierSkip.p != nullptr ? ctx->dPilotSelfCarrierSkip.as<char>() : nullptr, ctx->structure->nReactiveRelocationGroups, ctx->hasDistrQRelocationGroups ? ctx->dDistrQMemberRelocationGroup.as<int>() : nullptr, ctx->structure->nReactiveRelocationGroups > 0 ? ctx->structure->dReactiveRelocationGroupStart.as<int>() : nullptr, ctx->structure->nReactiveRelocationGroups > 0 ? ctx->structure->dReactiveRelocationCandidateRows.as<int>() : nullptr, ctx->nClosedBranchParameterOverrides, ctx->dClosedBranchParameterOverrideScenarioElement.as<int>(), ctx->dClosedBranchParameterOverrideValues.as<double>(), ctx->nShuntAdmittanceOverrides, ctx->dShuntAdmittanceOverrideScenarioElement.as<int>(), ctx->dShuntAdmittanceOverrideDelta.as<double>(), distrQTraceRow,
                 ctx->hasDistrQSubgroups ? ctx->dDistrQSubgroup.as<char>() : nullptr, ctx->hasDistrQSubgroups ? ctx->dReactiveRelocationDistrQMemberStart.as<int>() : nullptr, ctx->nDistrQMembers);
-    if (ctx->nDistrRho) fillDistrRhoBatch<<<grid(ctx->nDistrRho * nS), BLOCK, 0, ctx->stream>>>(ctx->nDistrRho, nS, n, nnz, ctx->structure->dDistrRhoColumn.as<int>(), ctx->structure->dDistrRhoCoefficient.as<double>(), ctx->structure->dDistrRhoDestination.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->nDistrRhoCoefficientOverrides, ctx->nDistrRhoCoefficientOverrides ? ctx->dDistrRhoOverrideScenarioTerm.as<int>() : nullptr, ctx->nDistrRhoCoefficientOverrides ? ctx->dDistrRhoOverrideCoefficient.as<double>() : nullptr, ctx->structure->hasDistrRhoRelocationGroups ? ctx->structure->dDistrRhoRelocationGroup.as<int>() : nullptr, ctx->dMode.as<int>(), ctx->structure->dReactiveRelocationGroupStart.as<int>(), ctx->structure->dReactiveRelocationCandidateRows.as<int>());
-    if (ctx->nDistrShuntB) fillDistrShuntBBatch<<<grid(ctx->nDistrShuntB * nS), BLOCK, 0, ctx->stream>>>(ctx->nDistrShuntB, nS, n, nnz, ctx->structure->dDistrShuntBColumn.as<int>(), ctx->structure->dDistrShuntBCoefficient.as<double>(), ctx->structure->dDistrShuntBDestination.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>());
-    if (ctx->nZeroImpedanceBranch) fillZeroImpBatch<<<grid(ctx->nZeroImpedanceBranch * nS), BLOCK, 0, ctx->stream>>>(ctx->nZeroImpedanceBranch, nS, n, nnz, ctx->structure->dZeroImpedanceBranchParameters.as<double>(), ctx->structure->dZeroImpedanceBranchIndices.as<int>(), ctx->structure->dZeroImpedanceBranchDestination.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->nBaseClosedZeroImpedanceBranches, ctx->nZeroImpedanceBranchCloseOverrides, ctx->dZeroImpedanceBranchCloseScenarioElement.as<int>(), ctx->nZeroImpedanceBranchOpenOverrides, ctx->dZeroImpedanceBranchOpenScenarioElement.as<int>(), ctx->structure->dZeroImpedanceAlternateDestination.as<int>(), ctx->structure->dZeroImpedanceSelectorRow.as<int>(), ctx->dMode.as<int>(), ctx->structure->zeroImpedanceDynamicRelocation ? 1 : 0, withPilotSelf(zeroImpedanceRelocationTables(ctx->structure.get()), ctx), ctx->nSpanningTreeOverrides, ctx->nSpanningTreeOverrides ? ctx->dSpanningTreeOverrideScenarioElementValue.as<int>() : nullptr, ctx->hasZeroImpedanceBranchMasks ? ctx->dZeroImpedanceBranchOpenMask.as<char>() : nullptr, ctx->hasZeroImpedanceBranchMasks ? ctx->dZeroImpedanceBranchCloseMask.as<char>() : nullptr, ctx->hasZeroImpedanceBranchMasks ? ctx->dSpanningTreeOverrideMask.as<char>() : nullptr);
-    applyRowModeBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, nnz, ctx->dMode.as<int>(), ctx->structure->dRowPtr.as<int>(), ctx->structure->dDiagPos.as<int>(), ctx->dX.as<double>(), ctx->dTarget.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->dRowSlope.as<double>(),
+    if (ctx->nDistrRho) fillDistrRhoBatch<<<grid(ctx->nDistrRho * nS), BLOCK, 0, ctx->stream>>>(ctx->nDistrRho, nS, n, nnz, ctx->structure->dDistrRhoColumn.as<int>(), ctx->structure->dDistrRhoCoefficient.as<double>(), ctx->structure->dDistrRhoDestination.as<int>(), ctx->dX.as<double>(), vals, ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->nDistrRhoCoefficientOverrides, ctx->nDistrRhoCoefficientOverrides ? ctx->dDistrRhoOverrideScenarioTerm.as<int>() : nullptr, ctx->nDistrRhoCoefficientOverrides ? ctx->dDistrRhoOverrideCoefficient.as<double>() : nullptr, ctx->structure->hasDistrRhoRelocationGroups ? ctx->structure->dDistrRhoRelocationGroup.as<int>() : nullptr, ctx->dMode.as<int>(), ctx->structure->dReactiveRelocationGroupStart.as<int>(), ctx->structure->dReactiveRelocationCandidateRows.as<int>());
+    if (ctx->nDistrShuntB) fillDistrShuntBBatch<<<grid(ctx->nDistrShuntB * nS), BLOCK, 0, ctx->stream>>>(ctx->nDistrShuntB, nS, n, nnz, ctx->structure->dDistrShuntBColumn.as<int>(), ctx->structure->dDistrShuntBCoefficient.as<double>(), ctx->structure->dDistrShuntBDestination.as<int>(), ctx->dX.as<double>(), vals, ctx->dF.as<double>(), ctx->dActive.as<char>());
+    if (ctx->nZeroImpedanceBranch) fillZeroImpBatch<<<grid(ctx->nZeroImpedanceBranch * nS), BLOCK, 0, ctx->stream>>>(ctx->nZeroImpedanceBranch, nS, n, nnz, ctx->structure->dZeroImpedanceBranchParameters.as<double>(), ctx->structure->dZeroImpedanceBranchIndices.as<int>(), ctx->structure->dZeroImpedanceBranchDestination.as<int>(), ctx->dX.as<double>(), vals, ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->nBaseClosedZeroImpedanceBranches, ctx->nZeroImpedanceBranchCloseOverrides, ctx->dZeroImpedanceBranchCloseScenarioElement.as<int>(), ctx->nZeroImpedanceBranchOpenOverrides, ctx->dZeroImpedanceBranchOpenScenarioElement.as<int>(), ctx->structure->dZeroImpedanceAlternateDestination.as<int>(), ctx->structure->dZeroImpedanceSelectorRow.as<int>(), ctx->dMode.as<int>(), ctx->structure->zeroImpedanceDynamicRelocation ? 1 : 0, withPilotSelf(zeroImpedanceRelocationTables(ctx->structure.get()), ctx), ctx->nSpanningTreeOverrides, ctx->nSpanningTreeOverrides ? ctx->dSpanningTreeOverrideScenarioElementValue.as<int>() : nullptr, ctx->hasZeroImpedanceBranchMasks ? ctx->dZeroImpedanceBranchOpenMask.as<char>() : nullptr, ctx->hasZeroImpedanceBranchMasks ? ctx->dZeroImpedanceBranchCloseMask.as<char>() : nullptr, ctx->hasZeroImpedanceBranchMasks ? ctx->dSpanningTreeOverrideMask.as<char>() : nullptr);
+    applyRowModeBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, nnz, ctx->dMode.as<int>(), ctx->structure->dRowPtr.as<int>(), ctx->structure->dDiagPos.as<int>(), ctx->dX.as<double>(), ctx->dTarget.as<double>(), vals, ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->dRowSlope.as<double>(),
                 ctx->structure->dColIdx.as<int>(), ctx->structure->dRelocatedChildOwnRow.p != nullptr ? ctx->structure->dRelocatedChildOwnRow.as<int>() : nullptr);
-    repairZeroDiagonalRows(ctx, nS, ctx->dVals.as<double>());
+    if (!fOnly) {
+        repairZeroDiagonalRows(ctx, nS, vals);
+    }
     if (!deviceFixedIter) CUDA_CHECK(cudaStreamSynchronize(ctx->stream));   // fixed-iter: stream-ordered into the solve, no host sync
 }
 

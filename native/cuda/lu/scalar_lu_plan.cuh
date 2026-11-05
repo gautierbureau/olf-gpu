@@ -15,6 +15,8 @@
 #ifndef OLF_GPU_LU_SCALAR_LU_PLAN_CUH
 #define OLF_GPU_LU_SCALAR_LU_PLAN_CUH
 
+#include <limits>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -48,10 +50,24 @@ struct ScalarLuPlan {
     int backwardLevels() const { return static_cast<int>(backwardLevelStart.size()) - 1; }
 };
 
+// The sizes a plan may reach: its LU entries and its contributions (the multiply-adds of one factorization). The plan
+// indexes both with ints, so neither goes past INT_MAX whatever a caller asks.
+struct ScalarLuPlanLimits {
+    long long luEntries = std::numeric_limits<int>::max();
+    long long contributions = std::numeric_limits<int>::max();
+};
+
+// Thrown by buildScalarLuPlan as soon as the plan would pass its limits.
+struct ScalarLuPlanTooLarge : std::length_error {
+    using std::length_error::length_error;
+};
+
 // The plan of A (n x n, CSR rows with ascending columns) eliminated in the order rowOrder / colOrder (each a
 // permutation of 0..n-1, new index -> A's index). A diagonal entry B[i][i] missing from the pattern is added as fill:
-// its pivot then is a structural zero the factorization reports.
-ScalarLuPlan buildScalarLuPlan(int n, const int* rowPtr, const int* colIdx, const int* rowOrder, const int* colOrder);
+// its pivot then is a structural zero the factorization reports. Throws ScalarLuPlanTooLarge as soon as the plan
+// would pass limits, before its contribution lists are allocated.
+ScalarLuPlan buildScalarLuPlan(int n, const int* rowPtr, const int* colIdx, const int* rowOrder, const int* colOrder,
+                               const ScalarLuPlanLimits& limits = ScalarLuPlanLimits());
 
 // One line on how the factorization's work spreads over its steps: the steps narrower than a warp, the widest step,
 // the longest contribution list, and the share of the multiply-adds in the last tenth of the steps.

@@ -17,6 +17,13 @@
 // rescue. The next factorization runs on the analyzed order rebuilt with the delays; a pivot is a position of the
 // analyzed order, its rescue too, so the delays outlive the orders they were learned on.
 //
+// An order is taken only while it can pay: a lane it spares costs today the fast engine on the analyzed order and the
+// pivoting engine, so an order whose plan holds more LU entries than those two plans store, or costs more multiply-adds
+// than the analyzed order's and the pivoting engine's gather, is not built (lu_plan.cuh). Lanes fed values that cancel
+// most of their pivots (a probe corrupting the gather) delay most pivots and undo the analyzed order's fill: on
+// network.xiidm 10,130 delays of 14,874 pivots made a plan of 6.0 M LU entries and 3.7e9 multiply-adds, past what its
+// int indices hold, where the two plans store 0.40 M entries and cost 1.2 M multiply-adds.
+//
 // network.xiidm's fixed contingency list (14,266 contingencies, 1,579 couplers in breaker mode): 34 delays, 0.4 % more
 // multiply-adds and the same levels; the lanes the fast engine does not trust go from all of them to 0.9 %.
 #ifndef OLF_GPU_LU_PIVOT_DELAYS_CUH
@@ -45,7 +52,7 @@ struct PivotDelays {
                                                              // PIVOT_DELAYED_LAST or PIVOT_NOT_DELAYED (empty: none yet)
     std::vector<int> moves;                                  // per analyzed position: how often it moved
     int delayed = 0;
-    int orders = 0;                                          // orders built with delays
+    int orders = 0;                                          // orders built with delays, taken or not
 };
 
 // The fast engine's plan: the analyzed order with the delays learned so far.
@@ -58,8 +65,10 @@ struct FastLuPlan {
 
 // The plan of A (n x n, CSR rows with ascending columns) in the analyzed order rowOrder / colOrder (new index -> A's
 // index) with the delays: each delayed pivot right after its partner (or after every other one), in analyzed order.
+// Throws ScalarLuPlanTooLarge as soon as the plan would pass limits.
 std::shared_ptr<const FastLuPlan> buildFastLuPlan(int n, const int* rowPtr, const int* colIdx, const int* rowOrder,
-                                                  const int* colOrder, const PivotDelays& delays);
+                                                  const int* colOrder, const PivotDelays& delays,
+                                                  const ScalarLuPlanLimits& limits = ScalarLuPlanLimits());
 
 // Learns from one lane factorized on plan - lu: its plan.scalar.nnzLu factor values, a: its values of A (rowPtr[n],
 // on the pattern) - each pivot that cancelled delayed after its rescue, or moved after a new one. True when the delays

@@ -622,6 +622,89 @@ class GpuBatchedLuTest {
         assertLineGroupLearns(new double[][] {{g1, g2, 3}}, new int[] {1, 1, 0, 0}, new int[] {0, 1, 1, 1});
     }
 
+    /**
+     * Pairs of rows {0 x_i + y_i, x_i + y_i + z}, the x of every pair tied to a hub row h (x_1 + ... + x_m) + z with
+     * h > 1: in the order given each pair's first pivot is zero, and the largest entry of its column below is the hub's,
+     * so the fast engine would delay every one of them after the hub - whose elimination then fills the pairs' first rows
+     * with every x, a dense block, where the order given fills one entry per pair. That order costs more than a lane it
+     * would spare costs today (the fast engine on the order given and the pivoting engine together), so it is not taken:
+     * every round runs on the order given, the pivoting engine takes every lane, pivots inside each pair and solves it
+     * exactly. Checked to fail with every learned order taken (the second round on runs on 16 delays).
+     */
+    @Test
+    void orderCostlierThanTheLanesItSparesIsNotTaken() {
+        int pairs = 16;
+        int n = 2 * pairs + 1;
+        int hub = 2 * pairs;
+        int[] rowPtr = new int[n + 1];
+        List<Integer> columns = new ArrayList<>();
+        for (int i = 0; i < pairs; i++) {
+            columns.addAll(List.of(2 * i, 2 * i + 1));
+            rowPtr[2 * i + 1] = columns.size();
+            columns.addAll(List.of(2 * i, 2 * i + 1, hub));
+            rowPtr[2 * i + 2] = columns.size();
+        }
+        for (int i = 0; i < pairs; i++) {
+            columns.add(2 * i);
+        }
+        columns.add(hub);
+        rowPtr[n] = columns.size();
+        Csr csr = new Csr(n, rowPtr, columns.stream().mapToInt(Integer::intValue).toArray());
+        int capacity = 2;
+        double[] values = new double[capacity * csr.nnz()];
+        for (int s = 0; s < capacity; s++) {
+            int k = s * csr.nnz();
+            for (int i = 0; i < pairs; i++) {
+                values[k++] = 0;                             // x_i's pivot
+                values[k++] = 1;
+                values[k++] = 1;
+                values[k++] = 1;
+                values[k++] = 1;
+            }
+            for (int i = 0; i < pairs; i++) {
+                values[k++] = 10 + s;                        // the largest entry of every x column
+            }
+            values[k] = 1;
+        }
+
+        // the order the delays ask for - every pair's second row first, then the hub, then the first rows - against
+        // what a lane costs today
+        int[] delayed = new int[n];
+        for (int i = 0; i < pairs; i++) {
+            delayed[i] = 2 * i + 1;
+            delayed[pairs + 1 + i] = 2 * i;
+        }
+        delayed[pairs] = hub;
+        long[] given = BatchedLuNative.scalarPlanStatistics(n, csr.rowPtr(), csr.colIdx(), identity(n), identity(n));
+        long[] pivoting = BatchedLuNative.supernodalPlanStatistics(n, csr.rowPtr(), csr.colIdx(), identity(n), identity(n));
+        long[] asked = BatchedLuNative.scalarPlanStatistics(n, csr.rowPtr(), csr.colIdx(), delayed, delayed);
+        assertTrue(asked[0] > given[0] + pivoting[0] && asked[1] > given[1] + pivoting[1],
+                "LU entries and contributions: delayed " + asked[0] + ", " + asked[1] + "; given " + given[0] + ", "
+                        + given[1] + "; pivoting engine " + pivoting[0] + ", " + pivoting[1]);
+
+        Random random = new Random(5);
+        double[] rightHandSides = new double[capacity * n];
+        for (int i = 0; i < rightHandSides.length; i++) {
+            rightHandSides[i] = random.nextDouble() * 2 - 1;
+        }
+        double[] solutions = new double[capacity * n];
+        int[] pivoted = new int[4 * capacity];
+        int[] roundDelays = new int[4];
+        BatchedLuNative.factorizeRounds(n, csr.rowPtr(), csr.colIdx(), identity(n), identity(n), capacity, values,
+                rightHandSides, identity(capacity), 4, solutions, pivoted, roundDelays);
+        assertArrayEquals(new int[4], roundDelays, "pivot delays of each round's order");
+        int[] everyLane = new int[4 * capacity];
+        Arrays.fill(everyLane, 1);
+        assertArrayEquals(everyLane, pivoted, "lanes the pivoting engine took, round by round");
+        for (int s = 0; s < capacity; s++) {
+            double[] expected = denseSolve(dense(csr, values, s), Arrays.copyOfRange(rightHandSides, s * n, (s + 1) * n));
+            double scale = Arrays.stream(expected).map(Math::abs).max().orElseThrow();
+            for (int i = 0; i < n; i++) {
+                assertEquals(expected[i], solutions[s * n + i], 1e-12 * scale, "lane " + s + " unknown " + i);
+            }
+        }
+    }
+
     @Test
     void cudssOrderConvention() {
         int side = 12;

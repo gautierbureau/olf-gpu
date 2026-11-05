@@ -63,7 +63,8 @@ std::vector<int> delayedOrder(const PivotDelays& delays, int n) {
 }  // namespace
 
 std::shared_ptr<const FastLuPlan> buildFastLuPlan(int n, const int* rowPtr, const int* colIdx, const int* rowOrder,
-                                                  const int* colOrder, const PivotDelays& delays) {
+                                                  const int* colOrder, const PivotDelays& delays,
+                                                  const ScalarLuPlanLimits& limits) {
     auto plan = std::make_shared<FastLuPlan>();
     plan->analyzedPosition = delayedOrder(delays, n);
     plan->delayed = delays.delayed;
@@ -73,7 +74,7 @@ std::shared_ptr<const FastLuPlan> buildFastLuPlan(int n, const int* rowPtr, cons
         rows[i] = rowOrder[plan->analyzedPosition[i]];
         cols[i] = colOrder[plan->analyzedPosition[i]];
     }
-    plan->scalar = buildScalarLuPlan(n, rowPtr, colIdx, rows.data(), cols.data());
+    plan->scalar = buildScalarLuPlan(n, rowPtr, colIdx, rows.data(), cols.data(), limits);
     const ScalarLuPlan& sp = plan->scalar;
     plan->lowerStart.assign(n + 1, 0);
     for (int i = 0; i < n; i++) {

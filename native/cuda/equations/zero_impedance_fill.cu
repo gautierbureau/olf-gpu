@@ -32,11 +32,11 @@ __global__ void fillZeroImpBatch(int nZeroImpedanceBranch, int nScenarios, int n
                                  int nZeroImpedanceBranchOpenOverrides, const int* zeroImpedanceBranchOpenScenarioElement,
                                  const int* zeroImpedanceAlternateDestination, const int* zeroImpedanceSelectorRow, const int* mode, int zeroImpedanceDynamicRelocation,
                                  ReactiveRelocationTables rt, int nSpanningTreeOverrides, const int* spanningTreeOverrideScenarioElementValue,
-                                 const char* zeroImpedanceBranchOpenMask, const char* zeroImpedanceBranchCloseMask, const char* spanningTreeOverrideMask) {
+                                 const char* zeroImpedanceBranchOpenMask, const char* zeroImpedanceBranchCloseMask, const char* spanningTreeOverrideMask, BatchLayout layout) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nZeroImpedanceBranch * nScenarios) return;
-    int e = tid % nZeroImpedanceBranch;
-    int s = tid / nZeroImpedanceBranch;
+    int e, s;
+    itemAndScenario(tid, nZeroImpedanceBranch, layout, e, s);
     if (!active[s]) return;
     size_t me = (size_t) s * nZeroImpedanceBranch + e;                        // the dense (scenario, element) masks, when built
     if (zeroImpedanceBranchOpenMask != nullptr) {
@@ -67,8 +67,8 @@ __global__ void fillZeroImpBatch(int nZeroImpedanceBranch, int nScenarios, int n
     double rho = in[e];
     const int* q = ix + e * 11;                              // b1P b1Q b2P b2Q dummyPColumn dummyQColumn v1 v2 ph1 ph2 tree
     const double* xs = x + (size_t) s * n;
-    double* valsS = scenarioValues(vals, s, nnz);
-    double* FS = F + (size_t) s * n;
+    const ScenarioValues valsS = scenarioEntries(vals, s, nnz, layout);
+    const ScenarioValues FS = scenarioEntries(F, s, n, layout);
     const int* d = dest + e * 14;
     double dummyP = xs[q[4]], dummyQ = xs[q[5]];
     int d2 = d[2], d3 = d[3], d6 = d[6], d7 = d[7];

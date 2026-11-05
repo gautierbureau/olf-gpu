@@ -8,6 +8,7 @@
 
 #include <functional>
 
+#include "../common/batch_layout.cuh"
 #include "../solver/driver_pass.cuh"
 
 namespace olfgpu {
@@ -15,7 +16,7 @@ namespace olfgpu {
 struct BatchedLu;
 
 // nS systems on our LU's last factorization, as the Newton step solves and refines them: their CSR pattern and values
-// (scenario-major, nnz each), whether the structure has zero-impedance couplers (the refinement runs on those only),
+// (nnz each, laid out by layout), whether the structure has zero-impedance couplers (the refinement runs on those only),
 // the solved lanes' mask, the stream, and the scratch of n x nS each (the refinement's residual and correction, the
 // internal steps' inside a correction) plus the refinement's per-lane score and mask. A mode-7 context's, or a test's.
 struct BatchedLuSystems {
@@ -35,6 +36,7 @@ struct BatchedLuSystems {
     double* internalCorrection;
     DeviceBuf& score;
     DeviceBuf& mask;
+    BatchLayout layout;
 };
 
 // x = J^-1 b as cuDSS's SOLVE phase computes it under the batch context's configuration: the solve, then its internal

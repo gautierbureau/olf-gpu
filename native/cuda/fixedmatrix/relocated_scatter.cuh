@@ -45,7 +45,7 @@ __device__ inline int zeroImpedanceRelocationDestination(int frozen, int slot, c
 // selects the alternate: those entries carry a SUPPRESSED frozen dest and their own row as the
 // alternate, with selectorRow = the member row itself. TVC/shunt select rows never carry mode 4.
 static __device__ void scatterAddRelocated(int outputCount, const int* dest, const int* alternateDestination, const int* selectorRow,
-                              const int* mode, const double* o, double* vals, double* F,
+                              const int* mode, const double* o, ScenarioValues vals, ScenarioValues F,
                               ReactiveRelocationTables rt, int eOff) {
     for (int k = 0; k < outputCount; k++) {
         int d;
@@ -76,7 +76,7 @@ static __device__ void scatterAddRelocated(int outputCount, const int* dest, con
 // frozen row is an identity this scenario. dest/alternateDestination/selectorRow are the element's per-output slices;
 // pos maps each of the nres residuals to its CLOSED_BRANCH_OUTPUT_COUNT output index.
 static __device__ void scatterAddFRelocated(int nres, const int* dest, const int* alternateDestination, const int* selectorRow,
-                               const int* pos, const int* mode, const double* o, double* F,
+                               const int* pos, const int* mode, const double* o, ScenarioValues F,
                                ReactiveRelocationTables rt, int eOff) {
     for (int k = 0; k < nres; k++) {
         int idx = pos[k];

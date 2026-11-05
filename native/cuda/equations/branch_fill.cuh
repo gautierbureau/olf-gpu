@@ -18,16 +18,26 @@ __global__ void fillClosedBranchBatch(int elementCount, int nScenarios, int n, i
                                       const double* x, double* vals, double* F,
                                       const char* disabled, const char* active,
                                       int nClosedBranchParameterOverrides, const int* closedBranchParameterOverrideScenarioElement, const double* closedBranchParameterOverrideValues,
-                                      const int* alternateDestination, const int* selectorRow, const int* mode, int dynamicRelocation,
-                                      const char* relocatedElement, const int* phaseControlDestination, const int* phaseControlSelector,
-                                      ReactiveRelocationTables rt, double* qbuf);
+                                      const int* mode, int dynamicRelocation, const char* relocatedElement,
+                                      const int* phaseControlDestination, const int* phaseControlSelector, double* qbuf,
+                                      BatchLayout layout);
+
+// The closed branches fillClosedBranchBatch leaves out under dynamic relocation (Family::relocatedElements).
+__global__ void fillRelocatedClosedBranchBatch(int relocatedCount, const int* relocatedElements, int nScenarios, int n, int nnz,
+                                               int nElements, int elemOffset, const double* in, const int* ix, const int* dest,
+                                               const double* x, double* vals, double* F,
+                                               const char* disabled, const char* active,
+                                               int nClosedBranchParameterOverrides, const int* closedBranchParameterOverrideScenarioElement, const double* closedBranchParameterOverrideValues,
+                                               const int* alternateDestination, const int* selectorRow, const int* mode,
+                                               const int* phaseControlDestination, const int* phaseControlSelector,
+                                               ReactiveRelocationTables rt, double* qbuf, BatchLayout layout);
 
 __global__ void fillOpenBranchBatch(int elementCount, int nScenarios, int n, int nnz, int nElements, int elemOffset,
                                     const double* in, const int* ix, const int* dest,
                                     const double* x, double* vals, double* F,
                                     const char* disabled, const char* active,
                                     const int* alternateDestination, const int* selectorRow, const int* mode, int dynamicRelocation,
-                                    ReactiveRelocationTables rt);
+                                    ReactiveRelocationTables rt, BatchLayout layout);
 
 __global__ void fillClosedBranchBatchF(int elementCount, int nScenarios, int n, int nnz, int nElements, int elemOffset,
                                        const double* in, const int* ix, const int* dest,
@@ -36,14 +46,14 @@ __global__ void fillClosedBranchBatchF(int elementCount, int nScenarios, int n, 
                                        int nClosedBranchParameterOverrides, const int* closedBranchParameterOverrideScenarioElement, const double* closedBranchParameterOverrideValues,
                                        const int* alternateDestination, const int* selectorRow, const int* mode, int dynamicRelocation,
                                        const char* relocatedElement, const int* phaseControlDestination, const int* phaseControlSelector,
-                                       ReactiveRelocationTables rt, double* qbuf);
+                                       ReactiveRelocationTables rt, double* qbuf, BatchLayout layout);
 
 __global__ void fillOpenBranchBatchF(int elementCount, int nScenarios, int n, int nnz, int nElements, int elemOffset,
                                      const double* in, const int* ix, const int* dest,
                                      const double* x, double* F,
                                      const char* disabled, const char* active,
                                      const int* alternateDestination, const int* selectorRow, const int* mode, int dynamicRelocation,
-                                     ReactiveRelocationTables rt);
+                                     ReactiveRelocationTables rt, BatchLayout layout);
 
 }  // namespace olfgpu
 

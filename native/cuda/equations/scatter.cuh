@@ -9,21 +9,21 @@
 #define OLF_GPU_EQUATIONS_SCATTER_CUH
 
 #include <cuda_runtime.h>
+#include "../common/batch_layout.cuh"
 #include "../common/codes/gpu_row_mode.cuh"
 
 namespace olfgpu {
 
-// A scenario's values in the batch, or null for a fill that writes the mismatch only (a check's refill: its bus
-// balances): scatterAdd and addAt then skip every Jacobian output.
-__device__ inline double* scenarioValues(double* vals, int s, int nnz) {
-    return vals != nullptr ? vals + static_cast<size_t>(s) * nnz : nullptr;
-}
+// A scenario's values and mismatch in the batch (batch_layout.cuh). The values are none for a fill that writes the
+// mismatch only (a check's refill: its bus balances; the fill that ends a Newton budget): scatterAdd and addAt then
+// skip every Jacobian output.
+using ScenarioValues = ScenarioEntries<double>;
 
-static __device__ void scatterAdd(int outputCount, const int* dest, const double* o, double* vals, double* F) {
+static __device__ void scatterAdd(int outputCount, const int* dest, const double* o, ScenarioValues vals, ScenarioValues F) {
     for (int k = 0; k < outputCount; k++) {
         int d = dest[k];
         if (d >= 0) {
-            if (vals != nullptr) {
+            if (vals) {
                 atomicAdd(&vals[d], o[k]);
             }
         } else if (d <= -2) {
@@ -33,9 +33,9 @@ static __device__ void scatterAdd(int outputCount, const int* dest, const double
 }
 
 // Scatter one (dest, value): dest >= 0 -> J slot, dest <= -2 -> F row, -1 -> skip.
-__device__ inline void addAt(int dest, double val, double* vals, double* F) {
+__device__ inline void addAt(int dest, double val, ScenarioValues vals, ScenarioValues F) {
     if (dest >= 0) {
-        if (vals != nullptr) {
+        if (vals) {
             atomicAdd(&vals[dest], val);
         }
     } else if (dest <= -2) {
@@ -57,7 +57,7 @@ __device__ inline int csrFind(const int* rowPtr, const int* colIdx, int row, int
     return (lo < rowPtr[row + 1] && colIdx[lo] == col) ? lo : -1;
 }
 
-static __device__ void scatterAddF(int nres, const int* dest, const int* pos, const double* o, double* F) {
+static __device__ void scatterAddF(int nres, const int* dest, const int* pos, const double* o, ScenarioValues F) {
     for (int k = 0; k < nres; k++) {
         int d = dest[pos[k]];
         if (d <= -2) {

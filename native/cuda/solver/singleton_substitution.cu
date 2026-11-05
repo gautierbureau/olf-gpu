@@ -33,14 +33,15 @@ struct OriginalSystem {
     const int* valueStart = nullptr;
     const double* valueSnapshot = nullptr;                   // null: no repair on this context
     const double* rightHandSideSnapshot = nullptr;
+    BatchLayout layout;                                      // the values' and the value snapshot's
 };
 
 __device__ inline double originalValue(const OriginalSystem& o, int s, int r, int k) {
     const int h = o.hazardSlot[r];
     if (h >= 0 && o.valueSnapshot != nullptr) {
-        return o.valueSnapshot[static_cast<size_t>(s) * o.nZeroDiagonalRowValues + o.valueStart[h] + (k - o.rowPtr[r])];
+        return scenarioEntries(o.valueSnapshot, s, o.nZeroDiagonalRowValues, o.layout)[o.valueStart[h] + (k - o.rowPtr[r])];
     }
-    return o.vals[static_cast<size_t>(s) * o.nnz + k];
+    return scenarioEntries(o.vals, s, o.nnz, o.layout)[k];
 }
 
 __device__ inline double originalRightHandSide(const OriginalSystem& o, int s, int r) {
@@ -51,8 +52,9 @@ __device__ inline double originalRightHandSide(const OriginalSystem& o, int s, i
     return o.b[static_cast<size_t>(s) * o.n + r];
 }
 
-// The sweeps run over the lanes the solve solved: cell t = i * n + r is row r of solved lane i, the scenario
-// laneMap[i]. The per-cell scratch (fixed, owner, touched) is indexed by cell, the systems by scenario. A sweep visits
+// The sweeps run over the lanes the solve solved: cell t = r * width + i is row r of solved lane i, the scenario
+// laneMap[i] - the lanes fastest, so a warp reads one row of consecutive scenarios, side by side in the interleaved
+// values. The per-cell scratch (fixed, owner, touched) is indexed by cell, the systems by scenario. A sweep visits
 // a list of cells: the short rows first, then those a sweep left with two free variables or more - a row with one free
 // variable gets it fixed in that sweep (by itself or by a lower row) and one with none has nothing left to do, so
 // neither proposes again. Of the listed rows, a sweep reads only those a variable fixed by the sweep before touches:
@@ -79,8 +81,8 @@ __global__ void listShortRows(OriginalSystem o, int width, const int* __restrict
     const int t = blockIdx.x * blockDim.x + threadIdx.x;
     bool isShort = false;
     if (t < o.n * width) {
-        const int i = t / o.n;
-        const int r = t - i * o.n;
+        const int i = t % width;
+        const int r = t / width;
         const int s = laneMap[i];
         int terms = 0;
         for (int k = o.rowPtr[r]; k < o.rowPtr[r + 1] && terms <= SINGLETON_MAX_TERMS; k++) {
@@ -94,7 +96,7 @@ __global__ void listShortRows(OriginalSystem o, int width, const int* __restrict
 // Per listed cell: the one variable not yet fixed, if there is exactly one, and its value; the lowest row claims the
 // variable. touched: the cells a variable fixed by the previous sweep touches (null on the first sweep, which reads
 // every listed row), consumed here.
-__global__ void proposeSingletons(OriginalSystem o, int listed, const int* __restrict__ list,
+__global__ void proposeSingletons(OriginalSystem o, int width, int listed, const int* __restrict__ list,
                                   const int* __restrict__ laneMap, const char* __restrict__ fixed,
                                   const double* __restrict__ dx, char* __restrict__ touched, int* __restrict__ owner,
                                   int* __restrict__ proposal, double* __restrict__ proposalValue) {
@@ -110,10 +112,9 @@ __global__ void proposeSingletons(OriginalSystem o, int listed, const int* __res
         }
         touched[t] = 0;
     }
-    const int i = t / o.n;
-    const int r = t - i * o.n;
+    const int i = t % width;
+    const int r = t / width;
     const int s = laneMap[i];
-    const size_t cells = static_cast<size_t>(i) * o.n;      // this lane's cells
     const size_t lane = static_cast<size_t>(s) * o.n;       // its scenario's dx
     double acc = originalRightHandSide(o, s, r);
     int unknowns = 0;
@@ -125,7 +126,7 @@ __global__ void proposeSingletons(OriginalSystem o, int listed, const int* __res
             continue;
         }
         const int j = o.colIdx[k];
-        if (fixed[cells + j]) {
+        if (fixed[static_cast<size_t>(j) * width + i]) {
             acc = fma(-a, dx[lane + j], acc);
         } else {
             unknowns++;
@@ -136,14 +137,14 @@ __global__ void proposeSingletons(OriginalSystem o, int listed, const int* __res
     if (unknowns == 1) {
         proposal[p] = unknown;
         proposalValue[p] = acc / coefficient;
-        atomicMin(owner + cells + unknown, r);
+        atomicMin(owner + static_cast<size_t>(unknown) * width + i, r);
     } else {
         proposal[p] = unknowns == 0 ? NO_PROPOSAL : PENDING;
     }
 }
 
 // The claiming row writes its variable, and marks the rows of its column (the pattern's) for the next sweep.
-__global__ void applySingletons(int n, int listed, const int* __restrict__ list, const int* __restrict__ laneMap,
+__global__ void applySingletons(int n, int width, int listed, const int* __restrict__ list, const int* __restrict__ laneMap,
                                 const int* __restrict__ owner, const int* __restrict__ proposal,
                                 const double* __restrict__ proposalValue, const int* __restrict__ columnStart,
                                 const int* __restrict__ columnRow, char* __restrict__ fixed, double* __restrict__ dx,
@@ -157,21 +158,20 @@ __global__ void applySingletons(int n, int listed, const int* __restrict__ list,
         return;
     }
     const int t = list[p];
-    const int i = t / n;
-    const size_t cells = static_cast<size_t>(i) * n;
-    if (owner[cells + j] != t - static_cast<int>(cells)) {
+    const int i = t % width;
+    if (owner[static_cast<size_t>(j) * width + i] != t / width) {
         return;
     }
     dx[static_cast<size_t>(laneMap[i]) * n + j] = proposalValue[p];
-    fixed[cells + j] = 1;
+    fixed[static_cast<size_t>(j) * width + i] = 1;
     for (int k = columnStart[j]; k < columnStart[j + 1]; k++) {
-        touched[cells + columnRow[k]] = 1;
+        touched[static_cast<size_t>(columnRow[k]) * width + i] = 1;
     }
     *fixedAny = 1;
 }
 
 // Once every claim is applied: the claims cleared, and the cells still PENDING listed for the next sweep.
-__global__ void listPendingRows(int n, int listed, const int* __restrict__ list, const int* __restrict__ proposal,
+__global__ void listPendingRows(int width, int listed, const int* __restrict__ list, const int* __restrict__ proposal,
                                 int* __restrict__ owner, int* __restrict__ next, int* __restrict__ nextCount) {
     const int p = blockIdx.x * blockDim.x + threadIdx.x;
     int t = -1;
@@ -180,7 +180,7 @@ __global__ void listPendingRows(int n, int listed, const int* __restrict__ list,
         t = list[p];
         j = proposal[p];
         if (j >= 0) {
-            owner[static_cast<size_t>(t / n) * n + j] = NO_OWNER;
+            owner[static_cast<size_t>(j) * width + t % width] = NO_OWNER;
         }
     }
     appendCell(j == PENDING, t, next, nextCount);
@@ -238,6 +238,7 @@ void substituteSingletons(BatchSolverContext* ctx, const double* b, double* dx) 
     o.vals = ctx->dVals.as<double>();
     o.b = b;
     o.hazardSlot = ctx->dSingletonHazardSlot.as<int>();
+    o.layout = ctx->layout;
     if (st->nZeroDiagonalRows > 0 && repairsZeroDiagonals(ctx) && ctx->zeroDiagonalRepairCapacity >= ctx->nScenarios) {
         o.nZeroDiagonalRows = st->nZeroDiagonalRows;
         o.nZeroDiagonalRowValues = st->nZeroDiagonalRowValues;
@@ -261,14 +262,14 @@ void substituteSingletons(BatchSolverContext* ctx, const double* b, double* dx) 
     int* next = ctx->dSingletonPendingList.as<int>();
     for (int sweep = 0; sweep < MAX_SWEEPS && listed > 0; sweep++) {
         CUDA_CHECK(cudaMemsetAsync(counters + 1, 0, 2 * sizeof(int), ctx->stream));
-        proposeSingletons<<<grid(listed), BLOCK, 0, ctx->stream>>>(o, listed, list, laneMap, ctx->dSingletonFixed.as<char>(),
+        proposeSingletons<<<grid(listed), BLOCK, 0, ctx->stream>>>(o, width, listed, list, laneMap, ctx->dSingletonFixed.as<char>(),
                 dx, sweep == 0 ? nullptr : ctx->dSingletonTouched.as<char>(), ctx->dSingletonOwner.as<int>(),
                 ctx->dSingletonProposal.as<int>(), ctx->dSingletonProposalValue.as<double>());
-        applySingletons<<<grid(listed), BLOCK, 0, ctx->stream>>>(n, listed, list, laneMap, ctx->dSingletonOwner.as<int>(),
+        applySingletons<<<grid(listed), BLOCK, 0, ctx->stream>>>(n, width, listed, list, laneMap, ctx->dSingletonOwner.as<int>(),
                 ctx->dSingletonProposal.as<int>(), ctx->dSingletonProposalValue.as<double>(), ctx->dSingletonColumnStart.as<int>(),
                 ctx->dSingletonColumnRow.as<int>(), ctx->dSingletonFixed.as<char>(), dx, ctx->dSingletonTouched.as<char>(),
                 counters + 2);
-        listPendingRows<<<grid(listed), BLOCK, 0, ctx->stream>>>(n, listed, list, ctx->dSingletonProposal.as<int>(),
+        listPendingRows<<<grid(listed), BLOCK, 0, ctx->stream>>>(width, listed, list, ctx->dSingletonProposal.as<int>(),
                 ctx->dSingletonOwner.as<int>(), next, counters + 1);
         int pendingAndFixed[2] = {0, 0};
         CUDA_CHECK(cudaMemcpyAsync(pendingAndFixed, counters + 1, 2 * sizeof(int), cudaMemcpyDeviceToHost, ctx->stream));

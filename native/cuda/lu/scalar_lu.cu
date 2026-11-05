@@ -46,6 +46,19 @@ __global__ void toInterleaved(int count, int stride, int width, int capacity, co
     }
 }
 
+// dst[map[k] * capacity + a] = src[k * stride + laneMap[a]]: values already interleaved by scenario
+// (common/batch_layout.cuh) into the lane-interleaved layout, one thread per (entry, lane), the lanes fastest.
+__global__ void fromScenarioInterleaved(int count, int stride, int width, int capacity, const int* __restrict__ laneMap,
+                                        const int* __restrict__ map, const double* __restrict__ src,
+                                        double* __restrict__ dst) {
+    const size_t t = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (t < static_cast<size_t>(count) * width) {
+        const int a = static_cast<int>(t % width);
+        const int k = static_cast<int>(t / width);
+        dst[static_cast<size_t>(map[k]) * capacity + a] = src[static_cast<size_t>(k) * stride + laneMap[a]];
+    }
+}
+
 // The way back: dst[laneMap[a] * stride + k] = src[map[k] * capacity + a].
 __global__ void fromInterleaved(int count, int stride, int width, int capacity, const int* __restrict__ laneMap,
                                 const int* __restrict__ map, const double* __restrict__ src, double* __restrict__ dst) {
@@ -216,7 +229,8 @@ void createScalarLu(ScalarLu& lu, const ScalarLuPlan& plan, int capacity) {
     lu.dTrouble.alloc(static_cast<size_t>(capacity) * sizeof(int));
 }
 
-void factorizeScalarLanes(ScalarLu& lu, const double* vals, const int* laneMap, int width, cudaStream_t stream) {
+void factorizeScalarLanes(ScalarLu& lu, const double* vals, BatchLayout layout, const int* laneMap, int width,
+                          cudaStream_t stream) {
     if (width < 0 || width > lu.capacity) {
         throw std::runtime_error("batched LU width " + std::to_string(width) + " outside 0.."
                                  + std::to_string(lu.capacity));
@@ -228,10 +242,15 @@ void factorizeScalarLanes(ScalarLu& lu, const double* vals, const int* laneMap, 
     }
     CUDA_CHECK(cudaMemcpyAsync(lu.dLaneMap.p, laneMap, width * sizeof(int), cudaMemcpyHostToDevice, stream));
     CUDA_CHECK(cudaMemsetAsync(lu.dTrouble.p, 0, width * sizeof(int), stream));
-    const dim3 tileBlock(TILE, TILE_ROWS);
-    const dim3 valuesGrid((lu.nnzA + TILE - 1) / TILE, (width + TILE - 1) / TILE);
-    toInterleaved<<<valuesGrid, tileBlock, 0, stream>>>(lu.nnzA, lu.nnzA, width, lu.capacity, lu.dLaneMap.as<int>(),
-            lu.dEntryOfA.as<int>(), vals, lu.dLu.as<double>());
+    if (layout.interleaved) {
+        fromScenarioInterleaved<<<blocksFor(static_cast<size_t>(lu.nnzA) * width), LU_BLOCK, 0, stream>>>(lu.nnzA,
+                layout.stride, width, lu.capacity, lu.dLaneMap.as<int>(), lu.dEntryOfA.as<int>(), vals, lu.dLu.as<double>());
+    } else {
+        const dim3 tileBlock(TILE, TILE_ROWS);
+        const dim3 valuesGrid((lu.nnzA + TILE - 1) / TILE, (width + TILE - 1) / TILE);
+        toInterleaved<<<valuesGrid, tileBlock, 0, stream>>>(lu.nnzA, lu.nnzA, width, lu.capacity, lu.dLaneMap.as<int>(),
+                lu.dEntryOfA.as<int>(), vals, lu.dLu.as<double>());
+    }
     if (lu.nFill > 0) {
         zeroFill<<<blocksFor(static_cast<size_t>(lu.nFill) * width), LU_BLOCK, 0, stream>>>(lu.nFill, width,
                 lu.capacity, lu.dFillEntry.as<int>(), lu.dLu.as<double>());

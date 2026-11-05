@@ -17,6 +17,7 @@
 
 #include <vector>
 
+#include "../common/batch_layout.cuh"
 #include "../common/device_buf.cuh"
 #include "lu_pivot.cuh"
 #include "supernodal_lu_plan.cuh"
@@ -45,9 +46,10 @@ struct SupernodalLu {
 // Upload the plan and size the factors for capacity lanes.
 void createSupernodalLu(SupernodalLu& lu, const SupernodalLuPlan& plan, int capacity);
 
-// Factorize scenarios laneMap[0 .. width) (host array, each < capacity) of vals, scenario s's CSR values at
-// vals + s * nnzA. Asynchronous on the stream; the clamp counts restart at zero.
-void factorizeSupernodalLanes(SupernodalLu& lu, const double* vals, const int* laneMap, int width, cudaStream_t stream);
+// Factorize scenarios laneMap[0 .. width) (host array, each < capacity) of vals, scenario s's CSR values laid out by
+// layout (common/batch_layout.cuh). Asynchronous on the stream; the clamp counts restart at zero.
+void factorizeSupernodalLanes(SupernodalLu& lu, const double* vals, BatchLayout layout, const int* laneMap, int width,
+                    cudaStream_t stream);
 
 // Solve with the last factorization's lanes: x[s * n ..] = A_s^-1 b[s * n ..] for every s of its lane map. Scenarios
 // outside the lane map keep their x.

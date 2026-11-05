@@ -252,6 +252,16 @@ SharedStructure* buildStructure(int n,
             }
         }
         structure->closedBranch.relocatedElement.upload(relocatedElement.data(), relocatedElement.size());
+        std::vector<int> relocatedElements;
+        for (int e = 0; e < nClosedBranch; e++) {
+            if (relocatedElement[e]) {
+                relocatedElements.push_back(e);
+            }
+        }
+        structure->closedBranch.relocatedCount = static_cast<int>(relocatedElements.size());
+        if (!relocatedElements.empty()) {
+            structure->closedBranch.relocatedElements.upload(relocatedElements.data(), relocatedElements.size() * sizeof(int));
+        }
         structure->closedBranch.dynamicRelocation = true;
     }
     if (hasPhaseControl) {                                          // continuous phase control: P-flow row at a1

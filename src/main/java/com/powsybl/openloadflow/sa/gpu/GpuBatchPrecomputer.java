@@ -167,6 +167,7 @@ final class GpuBatchPrecomputer {
             Map<String, Double> distributed = new HashMap<>();
             Map<String, int[]> automationSystemSwitched = new HashMap<>();
             for (BatchScenarioResult r : results) {
+                GpuBatchedAcSecurityAnalysis.LAST_DEVICE_FINAL_MISMATCH.put(r.contingencyId(), r.finalMismatch());
                 if (GpuTrace.QUALIFY_TRACE.isOn()) {
                     System.err.println("QUALIFY_TRACE result " + r.contingencyId() + " status=" + r.convergenceStatus()
                             + " iters=" + r.iterations() + " norm=" + r.finalMismatch()

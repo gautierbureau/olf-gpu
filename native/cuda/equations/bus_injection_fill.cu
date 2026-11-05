@@ -152,7 +152,7 @@ __global__ void fillShuntBatchF(int elementCount, int nScenarios, int n, int nnz
     const int pos[2] = {0, 2};
     if (dynamicRelocation) {
         scatterAddFRelocated(2, dest + e * SHUNT_OUTPUT_COUNT, alternateDestination + e * SHUNT_OUTPUT_COUNT, selectorRow + e * SHUNT_OUTPUT_COUNT,
-                       pos, mode + (size_t) s * n, o, F + (size_t) s * n, rt, e * SHUNT_OUTPUT_COUNT);
+                       pos, mode + (size_t) s * n, o, F + (size_t) s * n, relocationTablesForScenario(rt, s), e * SHUNT_OUTPUT_COUNT);
     } else {
         scatterAddF(2, dest + e * SHUNT_OUTPUT_COUNT, pos, o, F + (size_t) s * n);
     }

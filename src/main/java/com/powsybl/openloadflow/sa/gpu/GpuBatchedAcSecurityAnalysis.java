@@ -122,6 +122,11 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
     public static final java.util.Set<String> LAST_GPU_PRECOMPUTED_IDS =
             java.util.concurrent.ConcurrentHashMap.newKeySet();
 
+    /** The device's final mismatch (infinity norm) of every contingency it solved in the last run, converged or not:
+     *  for one that ran its Newton budget out, the only trace of the pass's last fill (OLF reports no network result
+     *  for it). Reset with the counters above. */
+    static final java.util.Map<String, Double> LAST_DEVICE_FINAL_MISMATCH = new java.util.concurrent.ConcurrentHashMap<>();
+
     /** How many contingencies of the last run had their loss distribution answered from the batch's replay
      *  instead of OLF's host call ({@link ReplayedLossDistribution}); reset with the counter above. */
     static final java.util.concurrent.atomic.AtomicInteger LAST_REPLAYED_LOSS_COUNT =

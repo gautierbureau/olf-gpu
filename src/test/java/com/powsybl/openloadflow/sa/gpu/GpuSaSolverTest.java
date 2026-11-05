@@ -203,6 +203,76 @@ class GpuSaSolverTest extends AbstractGpuSaTest {
         }
     }
 
+    /** ... nor at the Newton budget: the pass that runs it out ends with a mismatch-only fill, whose relocated reactive
+     *  outputs took the carrier rows of the chunk's FIRST scenario (its pilot gates and DISTR_Q subgroups) instead of
+     *  their own scenario's. Three merged sections whose main's generator the base switches to PQ, so the pilot's own
+     *  reactive balance rides a carrier row picked per scenario: in one chunk with the other section losses, the loss
+     *  of bbs2 ended its budget on a mismatch of 0.81 where it ends on 2.9e-6 alone. The budget is the smallest the CPU converges
+     *  every section loss under, one short. */
+    @Test
+    void deviceMismatchAtTheBudgetDoesNotDependOnItsChunkMates() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = splitGroupNetwork(3, java.util.Set.of(0));
+        network.getLineStream().forEach(l -> l.setX(30));  // longer lines: a section loss needs a step more than the base
+        List<Contingency> ctgs = new java.util.ArrayList<>();
+        for (int k = 0; k < 3; k++) {                       // every section listed: OLF retains every coupler
+            ctgs.add(new Contingency("bus-" + k, new com.powsybl.contingency.BusbarSectionContingency("bbs" + k)));
+        }
+        java.util.function.Supplier<com.powsybl.loadflow.LoadFlowParameters> parameters = () -> {
+            com.powsybl.loadflow.LoadFlowParameters p = new com.powsybl.loadflow.LoadFlowParameters()
+                    .setDistributedSlack(false).setUseReactiveLimits(true);
+            com.powsybl.openloadflow.OpenLoadFlowParameters.create(p)
+                    .setSlackBusSelectionMode(com.powsybl.openloadflow.network.SlackBusSelectionMode.NAME)
+                    .setSlackBusesIds(List.of("vl0_b"));
+            return p;
+        };
+        // the solved base state on the network, so the base load flow needs as few steps as it can
+        new com.powsybl.loadflow.LoadFlow.Runner(new com.powsybl.openloadflow.OpenLoadFlowProvider(commonTestConfig.matrixFactory()))
+                .run(network, parameters.get());
+        com.powsybl.loadflow.LoadFlowParameters lfp = parameters.get()
+                .setVoltageInitMode(com.powsybl.loadflow.LoadFlowParameters.VoltageInitMode.PREVIOUS_VALUES);
+        com.powsybl.openloadflow.OpenLoadFlowParameters ext = com.powsybl.openloadflow.OpenLoadFlowParameters.get(lfp);
+        com.powsybl.security.SecurityAnalysisParameters sap = new com.powsybl.security.SecurityAnalysisParameters();
+        sap.setLoadFlowParameters(lfp);
+        int budget = -1;                                     // the smallest budget the CPU converges every section loss under
+        int baseBudget = -1;                                 // ... and the base load flow
+        for (int m = 2; m <= 30 && budget < 0; m++) {
+            ext.setMaxNewtonRaphsonIterations(m);
+            SecurityAnalysisResult cpu = runSecurityAnalysis(network, ctgs, java.util.Collections.emptyList(), sap);
+            if (cpu.getPreContingencyResult().getStatus() != com.powsybl.loadflow.LoadFlowResult.ComponentResult.Status.CONVERGED) {
+                continue;                                    // a failed base has no post-contingency results
+            }
+            baseBudget = baseBudget < 0 ? m : baseBudget;
+            if (cpu.getPostContingencyResults().stream()
+                    .allMatch(r -> r.getStatus() == com.powsybl.security.PostContingencyComputationStatus.CONVERGED)) {
+                budget = m;
+            }
+        }
+        assertTrue(budget > baseBudget, "a section loss must need more steps than the base, smallest converging budgets "
+                + budget + " and " + baseBudget);
+        ext.setMaxNewtonRaphsonIterations(budget - 1);
+        securityAnalysisProvider = new GpuSecurityAnalysisProvider(commonTestConfig.matrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>());
+        try {
+            GpuBatchScopeCensus.reset();
+            runSecurityAnalysis(network, ctgs, java.util.Collections.emptyList(), sap);
+            java.util.Map<String, Double> together = new java.util.HashMap<>(GpuBatchedAcSecurityAnalysis.LAST_DEVICE_FINAL_MISMATCH);
+            assertTrue(GpuBatchScopeCensus.snapshot().getOrDefault("DEVICE:MAX_ITERATION_REACHED", 0L) >= 1,
+                    "a section loss runs its budget out on the device; census=" + GpuBatchScopeCensus.snapshot());
+            com.powsybl.openloadflow.ac.solver.gpu.GpuBatchContextCache.forceChunkSizeForTests(1);
+            runSecurityAnalysis(network, ctgs, java.util.Collections.emptyList(), sap);
+            java.util.Map<String, Double> alone = new java.util.HashMap<>(GpuBatchedAcSecurityAnalysis.LAST_DEVICE_FINAL_MISMATCH);
+            assertEquals(ctgs.size(), together.size(), "every section loss on the device: " + together.keySet());
+            assertEquals(together.keySet(), alone.keySet());
+            for (String id : together.keySet()) {
+                assertEquals(alone.get(id), together.get(id), 1e-8, id + ": chunk of " + ctgs.size() + " vs alone");
+            }
+        } finally {
+            com.powsybl.openloadflow.ac.solver.gpu.GpuBatchContextCache.forceChunkSizeForTests(null);
+            securityAnalysisProvider = new OpenSecurityAnalysisProvider(commonTestConfig.matrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>());
+        }
+    }
+
     /** The robust solve mode (6: one matrix object repointed per scenario, cuDSS pivoting on the raw matrix - the
      *  retry of a rejected scenario, or a base load flow that fell into it) runs the in-kernel transformer, shunt
      *  and secondary voltage control loops like the UBATCH modes do, solving their sensitivities scenario by

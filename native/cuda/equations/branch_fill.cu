@@ -175,7 +175,7 @@ __global__ void fillClosedBranchBatchF(int elementCount, int nScenarios, int n, 
     const int pos[4] = {0, 7, 14, 21};
     if (dynamicRelocation && relocatedElement[e]) {
         scatterAddFRelocated(4, dest + e * CLOSED_BRANCH_OUTPUT_COUNT, alternateDestination + e * CLOSED_BRANCH_OUTPUT_COUNT, selectorRow + e * CLOSED_BRANCH_OUTPUT_COUNT,
-                       pos, mode + (size_t) s * n, o, F + (size_t) s * n, rt, e * CLOSED_BRANCH_OUTPUT_COUNT);
+                       pos, mode + (size_t) s * n, o, F + (size_t) s * n, relocationTablesForScenario(rt, s), e * CLOSED_BRANCH_OUTPUT_COUNT);
     } else {
         scatterAddF(4, dest + e * CLOSED_BRANCH_OUTPUT_COUNT, pos, o, F + (size_t) s * n);
     }
@@ -213,7 +213,7 @@ __global__ void fillOpenBranchBatchF(int elementCount, int nScenarios, int n, in
     const int pos[4] = {0, 2, 4, 6};
     if (dynamicRelocation) {
         scatterAddFRelocated(4, dest + e * OPEN_BRANCH_OUTPUT_COUNT, alternateDestination + e * OPEN_BRANCH_OUTPUT_COUNT, selectorRow + e * OPEN_BRANCH_OUTPUT_COUNT,
-                       pos, mode + (size_t) s * n, o, F + (size_t) s * n, rt, e * OPEN_BRANCH_OUTPUT_COUNT);
+                       pos, mode + (size_t) s * n, o, F + (size_t) s * n, relocationTablesForScenario(rt, s), e * OPEN_BRANCH_OUTPUT_COUNT);
     } else {
         scatterAddF(4, dest + e * OPEN_BRANCH_OUTPUT_COUNT, pos, o, F + (size_t) s * n);
     }

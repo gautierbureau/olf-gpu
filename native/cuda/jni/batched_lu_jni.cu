@@ -124,7 +124,8 @@ OLF_JNI(ac_solver_gpu, BatchedLuNative, factorizeAndSolve)(
         std::vector<int> clamps;
         std::vector<int> pivoted(laneMap.size(), 0);
         try {
-            factorizeLanes(lu, dValues.as<double>(), laneMap.data(), static_cast<int>(laneMap.size()), stream);
+            factorizeLanes(lu, dValues.as<double>(), scenarioMajorLayout(capacity), laneMap.data(),
+                           static_cast<int>(laneMap.size()), stream);
             solveLanes(lu, dRightHandSides.as<double>(), dSolutions.as<double>(), stream);
             clamps = readPivotClamps(lu, stream);
             size_t next = 0;
@@ -193,7 +194,8 @@ OLF_JNI(ac_solver_gpu, BatchedLuNative, factorizeRounds)(
         std::vector<int> delays(rounds, 0);
         try {
             for (int round = 0; round < rounds; round++) {
-                factorizeLanes(lu, dValues.as<double>(), laneMap.data(), static_cast<int>(laneMap.size()), stream);
+                factorizeLanes(lu, dValues.as<double>(), scenarioMajorLayout(capacity), laneMap.data(),
+                           static_cast<int>(laneMap.size()), stream);
                 delays[round] = lu.fast->delayed;
                 size_t next = 0;
                 for (size_t a = 0; a < laneMap.size() && next < lu.hPivoted.size(); a++) {
@@ -269,10 +271,12 @@ OLF_JNI(ac_solver_gpu, BatchedLuNative, factorizeAndSolveNewtonStep)(
         cudaStream_t stream = nullptr;
         CUDA_CHECK(cudaStreamCreate(&stream));
         try {
-            factorizeLanes(lu, dValues.as<double>(), laneMap.data(), static_cast<int>(laneMap.size()), stream);
+            factorizeLanes(lu, dValues.as<double>(), scenarioMajorLayout(capacity), laneMap.data(),
+                           static_cast<int>(laneMap.size()), stream);
             const BatchedLuSystems systems{&lu, n, capacity, nnz, dRowPtr.as<int>(), dColIdx.as<int>(), dValues.as<double>(),
                                            true, dLanes.as<char>(), stream, dResidual.as<double>(), dCorrection.as<double>(),
-                                           dInternalResidual.as<double>(), dInternalCorrection.as<double>(), dScore, dMask};
+                                           dInternalResidual.as<double>(), dInternalCorrection.as<double>(), dScore, dMask,
+                                           scenarioMajorLayout(capacity)};
             solveNewtonStep(systems, dRightHandSides.as<double>(), dSolutions.as<double>());
             CUDA_CHECK(cudaStreamSynchronize(stream));
             CUDA_CHECK(cudaMemcpy(solutions.data(), dSolutions.p, solutions.size() * sizeof(double),

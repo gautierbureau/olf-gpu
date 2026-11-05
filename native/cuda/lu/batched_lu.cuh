@@ -42,11 +42,12 @@ struct BatchedLu {
 // Upload the fast engine's current plan and size its factors for capacity lanes; the plan must outlive the solver.
 void createBatchedLu(BatchedLu& lu, LuPlan& plan, int capacity);
 
-// Factorize scenarios laneMap[0 .. width) (host array, each < capacity) of vals, scenario s's CSR values at
-// vals + s * nnz: all of them on the fast engine (on the plan's current order), then the flagged ones on the pivoting
-// engine, after the fast engine learned its next order from the first of them. Synchronizes the stream to read the
-// flags, and once per lane it learns from.
-void factorizeLanes(BatchedLu& lu, const double* vals, const int* laneMap, int width, cudaStream_t stream);
+// Factorize scenarios laneMap[0 .. width) (host array, each < capacity) of vals, scenario s's CSR values laid out by
+// layout (common/batch_layout.cuh): all of them on the fast engine (on the plan's current order), then the flagged ones
+// on the pivoting engine, after the fast engine learned its next order from the first of them. Synchronizes the stream
+// to read the flags, and once per lane it learns from.
+void factorizeLanes(BatchedLu& lu, const double* vals, BatchLayout layout, const int* laneMap, int width,
+                    cudaStream_t stream);
 
 // Solve with the last factorization's lanes, each on the engine that factorized it: x[s * n ..] = A_s^-1 b[s * n ..]
 // for every s of its lane map. Scenarios outside the lane map keep their x.

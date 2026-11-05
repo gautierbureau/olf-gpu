@@ -10,6 +10,7 @@
 #define OLF_GPU_FIXEDMATRIX_CROSS_IDENTITY_CUH
 
 #include <cuda_runtime.h>
+#include "../common/batch_layout.cuh"
 #include "../common/codes/gpu_row_mode.cuh"
 
 namespace olfgpu {
@@ -31,14 +32,15 @@ __device__ inline int fixedVariableMode(bool crossRow) {
 // coupler's ZERO_V — so BUS_TARGET_V lands HERE on the child's V column (relocatedChildOwnRow[r] = its own V row =
 // its V column), the slot the child's own dq/dV term already reserves in the pattern.
 __device__ inline void writeCrossIdentityRow(int r, int s, int n, const int* rowPtr, const int* colIdx, const int* relocatedChildOwnRow,
-                                             const double* x, const double* target, double* valsS, double* F) {
+                                             const double* x, const double* target, ScenarioEntries<double> valsS,
+                                             ScenarioEntries<double> FS) {
     int col = relocatedChildOwnRow != nullptr ? relocatedChildOwnRow[r] : -1;
-    if (valsS != nullptr) {                                  // null on a mismatch-only fill: F alone
+    if (valsS) {                                             // none on a mismatch-only fill: F alone
         for (int k = rowPtr[r]; k < rowPtr[r + 1]; k++) {
             valsS[k] = colIdx[k] == col ? 1.0 : 0.0;
         }
     }
-    F[(size_t) s * n + r] = (col >= 0 ? x[(size_t) s * n + col] : 0.0) - target[(size_t) s * n + r];
+    FS[r] = (col >= 0 ? x[(size_t) s * n + col] : 0.0) - target[(size_t) s * n + r];
 }
 
 // The row a re-merged LOCAL control's PV -> PQ switch and switch-back write: its relocated reactive row (the

@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "../common/check.cuh"
+#include "../equations/fill_layout.cuh"
 #include "../solver/linear_solver_settings.cuh"
 
 namespace olfgpu {
@@ -71,8 +72,9 @@ __global__ void scoreLanes(int n, int nnz, const int* __restrict__ laneMap, cons
     }
 }
 
-// cuDSS's uniform batch over every slot of the context (an idle slot is an identity system), into dLuComparisonDx.
-void solveWithCudss(BatchSolverContext* ctx) {
+// cuDSS's uniform batch over every slot of the context (an idle slot is an identity system), into dLuComparisonDx:
+// on the context's values, or their scenario-major copy when they are interleaved (the one cuDSS reads).
+void solveWithCudss(BatchSolverContext* ctx, const double* vals) {
     const int n = ctx->n;
     const int nS = ctx->nScenarios;
     CudssCtx& solver = ctx->luComparisonSolver;
@@ -89,7 +91,7 @@ void solveWithCudss(BatchSolverContext* ctx) {
         CUDSS_CHECK(cudssConfigSet(solver.config, CUDSS_CONFIG_UBATCH_SIZE, &ctx->nScenarios, sizeof(ctx->nScenarios)));
         CUDSS_CHECK(cudssDataCreate(solver.handle, &solver.data));
         CUDSS_CHECK(cudssMatrixCreateCsr(&solver.systemMatrix, n, n, ctx->nnz, ctx->structure->dRowPtr.as<int>(), nullptr,
-                                         ctx->structure->dColIdx.as<int>(), ctx->dVals.as<double>(), OLF_CUDSS_CSR_TYPES,
+                                         ctx->structure->dColIdx.as<int>(), const_cast<double*>(vals), OLF_CUDSS_CSR_TYPES,
                                          CUDSS_MTYPE_GENERAL, CUDSS_MVIEW_FULL, CUDSS_BASE_ZERO));
         CUDSS_CHECK(cudssMatrixCreateDn(&solver.rightHandSideMatrix, n, 1, n, ctx->dB.as<double>(), OLF_CUDSS_DN_TYPE,
                                         CUDSS_LAYOUT_COL_MAJOR));
@@ -111,10 +113,16 @@ void compareBatchedLuWithCudss(BatchSolverContext* ctx, int outer, int iteration
     if (lanes == 0) {
         return;
     }
-    solveWithCudss(ctx);
+    const double* vals = ctx->dVals.as<double>();
+    if (ctx->layout.interleaved) {
+        ctx->dLuComparisonValues.alloc(static_cast<size_t>(ctx->nnz) * ctx->nScenarios * sizeof(double));
+        copyToScenarioMajor(ctx->nnz, ctx->layout, vals, ctx->dLuComparisonValues.as<double>(), nullptr, ctx->stream);
+        vals = ctx->dLuComparisonValues.as<double>();
+    }
+    solveWithCudss(ctx, vals);
     ctx->dLuComparisonScore.alloc(static_cast<size_t>(ctx->nScenarios) * SCORES * sizeof(double));
     scoreLanes<<<lanes, COMPARE_BLOCK, 0, ctx->stream>>>(ctx->n, ctx->nnz, deviceLaneMap(lu),
-            ctx->structure->dRowPtr.as<int>(), ctx->structure->dColIdx.as<int>(), ctx->dVals.as<double>(),
+            ctx->structure->dRowPtr.as<int>(), ctx->structure->dColIdx.as<int>(), vals,
             ctx->dB.as<double>(), ctx->dDx.as<double>(), ctx->dLuComparisonDx.as<double>(),
             ctx->dLuComparisonScore.as<double>());
     CUDA_CHECK(cudaGetLastError());

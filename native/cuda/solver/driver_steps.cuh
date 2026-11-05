@@ -18,6 +18,11 @@ namespace olfgpu {
 // Fill J and F (or F only) for every active scenario.
 void fillActiveBatch(BatchSolverContext* ctx, DriverPass& drv, bool fOnly);
 
+// Every term family's fill and the row modes on the active scenarios, onto values (none when fOnly), the mismatch F and
+// the closed branches' Q buffer laid out by layout, initialised: fillActiveBatch's, on the context's buffers.
+void fillTerms(BatchSolverContext* ctx, DriverPass& drv, bool fOnly, double* vals, double* F, double* qbufClosed,
+               BatchLayout layout);
+
 // The zero-diagonal row repair on the assembled values, and the same combination on a right-hand side (nS scenarios
 // from B, choices from the last repairZeroDiagonalRows; sOff selects the scenario block of a per-scenario call).
 void repairZeroDiagonalRows(BatchSolverContext* ctx, int nS, double* vals);

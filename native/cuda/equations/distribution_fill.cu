@@ -70,11 +70,11 @@ __global__ void fillDistrQBatch(int nDistrQ, int nScenarios, int n, int nnz, int
                                 int nClosedBranchParameterOverrides, const int* closedBranchParameterOverrideScenarioElement, const double* closedBranchParameterOverrideValues,
                                 int nShuntAdmittanceOverrides, const int* shuntAdmittanceOverrideScenarioElement, const double* shuntAdmittanceOverrideDelta,
                                 int distrQTraceRow,
-                                const char* distrQSubgroup, const int* reactiveRelocationDistrQMemberStart, int nDistrQMembersAll) {
+                                const char* distrQSubgroup, const int* reactiveRelocationDistrQMemberStart, int nDistrQMembersAll, BatchLayout layout) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nDistrQ * nScenarios) return;
-    int c = tid % nDistrQ;
-    int s = tid / nDistrQ;
+    int c, s;
+    itemAndScenario(tid, nDistrQ, layout, c, s);
     if (!active[s]) return;
     // STOCK PLACEMENT: a relocated child's sharing row moves to the bus's OWN row in any scenario that
     // kills its parent coupler, which turns that coupler's DUMMY_Q row into an identity (see buildDistrQDest).
@@ -161,8 +161,8 @@ __global__ void fillDistrQBatch(int nDistrQ, int nScenarios, int n, int nnz, int
     }
     const int* dst = distrQDestination + c * 6;
     const double* xs = x + (size_t) s * n;
-    double* valsS = scenarioValues(vals, s, nnz);           // null on a mismatch-only fill: F alone
-    double* FS = F + (size_t) s * n;
+    const ScenarioValues valsS = scenarioEntries(vals, s, nnz, layout);  // none on a mismatch-only fill: F alone
+    const ScenarioValues FS = scenarioEntries(F, s, n, layout);
 
     if (kind == GpuReactiveTermKind::SHUNT_COMPENSATOR_REACTIVE_FLOW) {  // shunt q: {q -> F, dq/dv -> J(row, vcol)}
         const double* sp = shuntParameters + e * 2;
@@ -176,7 +176,7 @@ __global__ void fillDistrQBatch(int nDistrQ, int nScenarios, int n, int nnz, int
             printf("DQF kind=1(shunt) elem=%d w=%.6f contrib=%.9f\n", e, w, w * so[2]);
         }
         if (dst[0] <= -2) atomicAdd(&FS[-2 - dst[0]], w * so[2]);
-        if (valsS != nullptr && dst[1] >= 0) atomicAdd(&valsS[dst[1]], w * so[3]);
+        if (valsS && dst[1] >= 0) atomicAdd(&valsS[dst[1]], w * so[3]);
         return;
     }
     if (kind == GpuReactiveTermKind::DUMMY_Q) {  // zero-impedance DUMMY_Q: linear w*dummyQ
@@ -184,7 +184,7 @@ __global__ void fillDistrQBatch(int nDistrQ, int nScenarios, int n, int nnz, int
             printf("DQF kind=3(ziDummyQ) col=%d w=%.6f contrib=%.9f\n", e, w, w * xs[e]);
         }
         if (dst[0] <= -2) atomicAdd(&FS[-2 - dst[0]], w * xs[e]);
-        if (valsS != nullptr && dst[1] >= 0) atomicAdd(&valsS[dst[1]], w);
+        if (valsS && dst[1] >= 0) atomicAdd(&valsS[dst[1]], w);
         return;
     }
     if (kind == GpuReactiveTermKind::OPEN_BRANCH_REACTIVE_FLOW) {  // half-open branch: connected-side q + dq/dv
@@ -201,7 +201,7 @@ __global__ void fillDistrQBatch(int nDistrQ, int nScenarios, int n, int nnz, int
             printf("DQF kind=2(halfOpen) elem=%d w=%.6f contrib=%.9f\n", e, w, w * oo[qi]);
         }
         if (dst[0] <= -2) atomicAdd(&FS[-2 - dst[0]], w * oo[qi]);
-        if (valsS != nullptr && dst[1] >= 0) atomicAdd(&valsS[dst[1]], w * oo[qi + 1]);
+        if (valsS && dst[1] >= 0) atomicAdd(&valsS[dst[1]], w * oo[qi + 1]);
         return;
     }
     // kind 0: closed-branch q1/q2 + its derivatives.
@@ -251,11 +251,11 @@ __global__ void fillDistrRhoBatch(int nDistrRho, int nScenarios, int n, int nnz,
                                   const int* distrRhoColumn, const double* distrRhoCoefficient, const int* distrRhoDestination,
                                   const double* x, double* vals, double* F, const char* active,
                                   int nDistrRhoCoefficientOverrides, const int* distrRhoOverrideScenarioTerm, const double* distrRhoOverrideCoefficient,
-                                  const int* distrRhoRelocationGroup, const int* mode, const int* reactiveRelocationGroupStart, const int* reactiveRelocationCandidateRows) {
+                                  const int* distrRhoRelocationGroup, const int* mode, const int* reactiveRelocationGroupStart, const int* reactiveRelocationCandidateRows, BatchLayout layout) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nDistrRho * nScenarios) return;
-    int c = tid % nDistrRho;
-    int s = tid / nDistrRho;
+    int c, s;
+    itemAndScenario(tid, nDistrRho, layout, c, s);
     if (!active[s]) return;
     // the CURRENT pilot-Q carrier's row hosts the relocated pilot balance — its DISTR_RHO row is
     // inactive PER SCENARIO (same rule as fillDistrQBatch; the
@@ -273,25 +273,25 @@ __global__ void fillDistrRhoBatch(int nDistrRho, int nScenarios, int n, int nnz,
     }
     int dF = distrRhoDestination[c * 2 + 0];
     int dJ = distrRhoDestination[c * 2 + 1];
-    if (dF <= -2) atomicAdd(&F[(size_t) s * n + (-2 - dF)], coef * x[(size_t) s * n + distrRhoColumn[c]]);
-    if (vals != nullptr && dJ >= 0) atomicAdd(&vals[(size_t) s * nnz + dJ], coef);
+    if (dF <= -2) atomicAdd(&scenarioEntries(F, s, n, layout)[-2 - dF], coef * x[(size_t) s * n + distrRhoColumn[c]]);
+    if (vals != nullptr && dJ >= 0) atomicAdd(&scenarioEntries(vals, s, nnz, layout)[dJ], coef);
 }
 
 // Batched DISTR_SHUNT_B fill: the SHUNT_B analogue of fillDistrRhoBatch. Linear coef*b into the controller's
 // SHUNT_B row, strided per scenario, active-gated.
 __global__ void fillDistrShuntBBatch(int nDistrShuntB, int nScenarios, int n, int nnz,
                                      const int* distrShuntBColumn, const double* distrShuntBCoefficient, const int* distrShuntBDestination,
-                                     const double* x, double* vals, double* F, const char* active) {
+                                     const double* x, double* vals, double* F, const char* active, BatchLayout layout) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nDistrShuntB * nScenarios) return;
-    int c = tid % nDistrShuntB;
-    int s = tid / nDistrShuntB;
+    int c, s;
+    itemAndScenario(tid, nDistrShuntB, layout, c, s);
     if (!active[s]) return;
     double coef = distrShuntBCoefficient[c];
     int dF = distrShuntBDestination[c * 2 + 0];
     int dJ = distrShuntBDestination[c * 2 + 1];
-    if (dF <= -2) atomicAdd(&F[(size_t) s * n + (-2 - dF)], coef * x[(size_t) s * n + distrShuntBColumn[c]]);
-    if (vals != nullptr && dJ >= 0) atomicAdd(&vals[(size_t) s * nnz + dJ], coef);
+    if (dF <= -2) atomicAdd(&scenarioEntries(F, s, n, layout)[-2 - dF], coef * x[(size_t) s * n + distrShuntBColumn[c]]);
+    if (vals != nullptr && dJ >= 0) atomicAdd(&scenarioEntries(vals, s, nnz, layout)[dJ], coef);
 }
 
 }  // namespace olfgpu

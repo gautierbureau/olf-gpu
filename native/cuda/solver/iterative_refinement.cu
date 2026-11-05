@@ -103,6 +103,107 @@ __global__ void residualBatch(int n, int nS, int nnz, const int* rowPtr, const i
     r[t] = b[t] - acc;
 }
 
+namespace {
+
+constexpr int RESIDUAL_TILE_SCENARIOS = 32;                  // the interleaved residual's block: 32 scenarios x 8 rows
+constexpr int RESIDUAL_TILE_ROWS = 8;
+
+// residualBatch on interleaved values (common/batch_layout.cuh): a warp walks one row for 32 consecutive scenarios,
+// reading the values in whole sectors; b and r, scenario-major, go through shared memory 8 consecutive rows per
+// scenario. Each r is b - (the row's products summed in order), as in residualBatch.
+__global__ void __launch_bounds__(RESIDUAL_TILE_SCENARIOS * RESIDUAL_TILE_ROWS)
+residualInterleavedBatch(int n, int nS, int stride, const int* __restrict__ rowPtr, const int* __restrict__ colIdx,
+                         const double* __restrict__ vals, const double* __restrict__ dx, const double* __restrict__ b,
+                         const char* __restrict__ lanes, double* __restrict__ r) {
+    __shared__ double tile[RESIDUAL_TILE_SCENARIOS][RESIDUAL_TILE_ROWS + 1];
+    const int s0 = blockIdx.y * RESIDUAL_TILE_SCENARIOS;
+    const int i0 = blockIdx.x * RESIDUAL_TILE_ROWS;
+    const int l = threadIdx.y * RESIDUAL_TILE_SCENARIOS + threadIdx.x;
+    const int ls = l / RESIDUAL_TILE_ROWS;                   // the tile entry this thread moves: scenario ls, row lr
+    const int lr = l % RESIDUAL_TILE_ROWS;
+    if (s0 + ls < nS && i0 + lr < n) {
+        tile[ls][lr] = b[static_cast<size_t>(s0 + ls) * n + i0 + lr];
+    }
+    __syncthreads();
+    const int s = s0 + threadIdx.x;
+    const int i = i0 + threadIdx.y;
+    if (s < nS && i < n && (lanes == nullptr || lanes[s])) {
+        const double* d = dx + static_cast<size_t>(s) * n;
+        double acc = 0.0;
+        for (int k = rowPtr[i]; k < rowPtr[i + 1]; k++) {
+            acc += vals[static_cast<size_t>(k) * stride + s] * d[colIdx[k]];
+        }
+        tile[threadIdx.x][threadIdx.y] = tile[threadIdx.x][threadIdx.y] - acc;
+    }
+    __syncthreads();
+    if (s0 + ls < nS && i0 + lr < n && (lanes == nullptr || lanes[s0 + ls])) {
+        r[static_cast<size_t>(s0 + ls) * n + i0 + lr] = tile[ls][lr];
+    }
+}
+
+// linResidRowBatch on interleaved values, shaped as residualInterleavedBatch: F, r+ and r- through shared memory.
+__global__ void __launch_bounds__(RESIDUAL_TILE_SCENARIOS * RESIDUAL_TILE_ROWS)
+linResidRowInterleavedBatch(int n, int nS, int stride, const int* __restrict__ rowPtr, const int* __restrict__ colIdx,
+                            const double* __restrict__ vals, const double* __restrict__ dx, const double* __restrict__ F,
+                            double* __restrict__ rPlus, double* __restrict__ rMinus) {
+    __shared__ double plus[RESIDUAL_TILE_SCENARIOS][RESIDUAL_TILE_ROWS + 1];
+    __shared__ double minus[RESIDUAL_TILE_SCENARIOS][RESIDUAL_TILE_ROWS + 1];
+    const int s0 = blockIdx.y * RESIDUAL_TILE_SCENARIOS;
+    const int i0 = blockIdx.x * RESIDUAL_TILE_ROWS;
+    const int l = threadIdx.y * RESIDUAL_TILE_SCENARIOS + threadIdx.x;
+    const int ls = l / RESIDUAL_TILE_ROWS;
+    const int lr = l % RESIDUAL_TILE_ROWS;
+    if (s0 + ls < nS && i0 + lr < n) {
+        plus[ls][lr] = F[static_cast<size_t>(s0 + ls) * n + i0 + lr];
+    }
+    __syncthreads();
+    const int s = s0 + threadIdx.x;
+    const int i = i0 + threadIdx.y;
+    if (s < nS && i < n) {
+        const double* d = dx + static_cast<size_t>(s) * n;
+        double acc = 0.0;
+        for (int k = rowPtr[i]; k < rowPtr[i + 1]; k++) {
+            acc += vals[static_cast<size_t>(k) * stride + s] * d[colIdx[k]];
+        }
+        const double f = plus[threadIdx.x][threadIdx.y];
+        minus[threadIdx.x][threadIdx.y] = acc + f;
+        plus[threadIdx.x][threadIdx.y] = acc - f;
+    }
+    __syncthreads();
+    if (s0 + ls < nS && i0 + lr < n) {
+        rPlus[static_cast<size_t>(s0 + ls) * n + i0 + lr] = plus[ls][lr];
+        rMinus[static_cast<size_t>(s0 + ls) * n + i0 + lr] = minus[ls][lr];
+    }
+}
+
+}  // namespace
+
+void launchResidual(cudaStream_t stream, int n, int nS, int nnz, const int* rowPtr, const int* colIdx,
+                    const double* vals, BatchLayout layout, const double* dx, const double* b, const char* lanes,
+                    double* r) {
+    if (layout.interleaved) {
+        const dim3 tiles((n + RESIDUAL_TILE_ROWS - 1) / RESIDUAL_TILE_ROWS,
+                         (nS + RESIDUAL_TILE_SCENARIOS - 1) / RESIDUAL_TILE_SCENARIOS);
+        residualInterleavedBatch<<<tiles, dim3(RESIDUAL_TILE_SCENARIOS, RESIDUAL_TILE_ROWS), 0, stream>>>(n, nS,
+                layout.stride, rowPtr, colIdx, vals, dx, b, lanes, r);
+    } else {
+        residualBatch<<<grid(n * nS), BLOCK, 0, stream>>>(n, nS, nnz, rowPtr, colIdx, vals, dx, b, lanes, r);
+    }
+}
+
+void launchLinResidRows(cudaStream_t stream, int n, int nS, int nnz, const int* rowPtr, const int* colIdx,
+                        const double* vals, BatchLayout layout, const double* dx, const double* F, double* rPlus,
+                        double* rMinus) {
+    if (layout.interleaved) {
+        const dim3 tiles((n + RESIDUAL_TILE_ROWS - 1) / RESIDUAL_TILE_ROWS,
+                         (nS + RESIDUAL_TILE_SCENARIOS - 1) / RESIDUAL_TILE_SCENARIOS);
+        linResidRowInterleavedBatch<<<tiles, dim3(RESIDUAL_TILE_SCENARIOS, RESIDUAL_TILE_ROWS), 0, stream>>>(n, nS,
+                layout.stride, rowPtr, colIdx, vals, dx, F, rPlus, rMinus);
+    } else {
+        linResidRowBatch<<<grid(n * nS), BLOCK, 0, stream>>>(n, nS, nnz, rowPtr, colIdx, vals, dx, F, rPlus, rMinus);
+    }
+}
+
 // per scenario: ||r||inf / ||b||inf (0 for an inactive lane or a zero right-hand side), one block per scenario
 __global__ void iterativeRefinementScoreBatch(int n, int nS, const double* r, const double* b, const char* active, double* score) {
     __shared__ double shared[LANE_NORM_BLOCK];

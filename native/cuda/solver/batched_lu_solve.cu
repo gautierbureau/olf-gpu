@@ -27,7 +27,7 @@ BatchedLuSystems systemsOf(BatchSolverContext* ctx, int nS, const char* lanes) {
                             ctx->structure->nZeroImpedanceBranch > 0, lanes, ctx->stream, ctx->dR.as<double>(),
                             ctx->dDelta.as<double>(), ctx->dInternalRefinementResidual.as<double>(),
                             ctx->dInternalRefinementCorrection.as<double>(), ctx->dIterativeRefinementScore,
-                            ctx->dIterativeRefinementScenarioMask};
+                            ctx->dIterativeRefinementScenarioMask, ctx->layout};
 }
 
 }  // namespace
@@ -48,8 +48,8 @@ void solveWithInternalRefinement(const BatchedLuSystems& systems, const double* 
     }
     const int steps = systems.couplers ? configuredIterativeRefinementBaseSteps() : ITERATIVE_REFINEMENT_STEPS_WITHOUT_COUPLERS;
     for (int step = 0; step < steps; step++) {
-        residualBatch<<<grid(n * nS), BLOCK, 0, systems.stream>>>(n, nS, systems.nnz, systems.rowPtr, systems.colIdx,
-                systems.vals, x, b, lanes, r);
+        launchResidual(systems.stream, n, nS, systems.nnz, systems.rowPtr, systems.colIdx, systems.vals, systems.layout,
+                       x, b, lanes, r);
         {
             AnalysisTimer at_(__LINE__, 'S');
             solveLanes(*systems.lu, r, d, systems.stream);
@@ -72,7 +72,7 @@ void solveNewtonStep(const BatchedLuSystems& systems, const double* b, double* d
     }
     // the cuDSS batch's adaptive refinement of the lanes still above the tolerance
     refineLanes(RefinementContext{systems.stream, systems.rowPtr, systems.colIdx, systems.score, systems.mask,
-                                  systems.lanes}, systems.nS,
+                                  systems.lanes, systems.layout}, systems.nS,
                 systems.n, systems.nnz, systems.vals, dx, b, systems.residual, systems.correction, systems.lanes,
                 configuredIterativeRefinementBaseSteps(), [&]() {
         solveWithInternalRefinement(systems, systems.residual, systems.correction, systems.internalResidual,
@@ -94,7 +94,8 @@ void batchedLuNewtonSolve(BatchSolverContext* ctx, DriverPass& drv, int iteratio
     CUDA_CHECK(cudaMemsetAsync(ctx->dDx.p, 0, static_cast<size_t>(n) * nS * sizeof(double), ctx->stream));
     {
         AnalysisTimer at_(__LINE__, 'F');
-        factorizeLanes(*ctx->batchedLu, ctx->dVals.as<double>(), laneMap.data(), static_cast<int>(laneMap.size()), ctx->stream);
+        factorizeLanes(*ctx->batchedLu, ctx->dVals.as<double>(), ctx->layout, laneMap.data(), static_cast<int>(laneMap.size()),
+                       ctx->stream);
     }
     solveNewtonStep(systemsOf(ctx, nS, ctx->dActive.as<char>()), ctx->dB.as<double>(), ctx->dDx.as<double>(), [&]() {
         if (traceOn(Trace::LU_COMPARE)) {
@@ -110,7 +111,7 @@ void batchedLuSensitivitySolve(BatchSolverContext* ctx, int nS, bool first) {
         std::vector<int> laneMap(nS);
         std::iota(laneMap.begin(), laneMap.end(), 0);
         AnalysisTimer at_(__LINE__, 'F');
-        factorizeLanes(*ctx->batchedLu, ctx->dVals.as<double>(), laneMap.data(), nS, ctx->stream);
+        factorizeLanes(*ctx->batchedLu, ctx->dVals.as<double>(), ctx->layout, laneMap.data(), nS, ctx->stream);
     }
     solveWithInternalRefinement(systemsOf(ctx, nS, nullptr), ctx->dB.as<double>(), ctx->dDx.as<double>(),
                                 ctx->dR.as<double>(), ctx->dDelta.as<double>(), nullptr);

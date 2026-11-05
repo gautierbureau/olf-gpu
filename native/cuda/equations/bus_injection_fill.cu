@@ -39,11 +39,11 @@ __global__ void fillShuntBatch(int elementCount, int nScenarios, int n, int nnz,
                                const char* disabled, const char* active,
                                int nShuntAdmittanceOverrides, const int* shuntAdmittanceOverrideScenarioElement, const double* shuntAdmittanceOverrideDelta,
                                const int* alternateDestination, const int* selectorRow, const int* mode, int dynamicRelocation,
-                               ReactiveRelocationTables rt) {
+                               ReactiveRelocationTables rt, BatchLayout layout) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= elementCount * nScenarios) return;
-    int e = tid % elementCount;
-    int s = tid / elementCount;
+    int e, s;
+    itemAndScenario(tid, elementCount, layout, e, s);
     if (!active[s] || disabled[s * nElements + elemOffset + e]) return;
     const double* p = in + e * 2;                            // g b
     double g = p[0];
@@ -58,10 +58,10 @@ __global__ void fillShuntBatch(int elementCount, int nScenarios, int n, int nnz,
     updateShunt(v, g, b, 0, o + 0, o + 1, o + 2, o + 3, o + 4);
     if (dynamicRelocation) {
         scatterAddRelocated(SHUNT_OUTPUT_COUNT, dest + e * SHUNT_OUTPUT_COUNT, alternateDestination + e * SHUNT_OUTPUT_COUNT, selectorRow + e * SHUNT_OUTPUT_COUNT,
-                      mode + (size_t) s * n, o, vals + (size_t) s * nnz, F + (size_t) s * n,
+                      mode + (size_t) s * n, o, scenarioEntries(vals, s, nnz, layout), scenarioEntries(F, s, n, layout),
                       relocationTablesForScenario(rt, s), e * SHUNT_OUTPUT_COUNT);
     } else {
-        scatterAdd(SHUNT_OUTPUT_COUNT, dest + e * SHUNT_OUTPUT_COUNT, o, scenarioValues(vals, s, nnz), F + (size_t) s * n);
+        scatterAdd(SHUNT_OUTPUT_COUNT, dest + e * SHUNT_OUTPUT_COUNT, o, scenarioEntries(vals, s, nnz, layout), scenarioEntries(F, s, n, layout));
     }
 }
 
@@ -69,11 +69,11 @@ __global__ void fillHvdcBatch(int elementCount, int nScenarios, int n, int nnz, 
                               const double* in, const int* ix, const int* dest,
                               const double* x, double* vals, double* F,
                               const char* disabled, const char* active,
-                              const int* alternateDestination, const int* selectorRow, const int* mode, int dynamicRelocation) {
+                              const int* alternateDestination, const int* selectorRow, const int* mode, int dynamicRelocation, BatchLayout layout) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= elementCount * nScenarios) return;
-    int e = tid % elementCount;
-    int s = tid / elementCount;
+    int e, s;
+    itemAndScenario(tid, elementCount, layout, e, s);
     if (!active[s] || disabled[s * nElements + elemOffset + e]) return;
     const double* p = in + e * 5;                            // p0 k lf1 lf2 r
     const int* q = ix + e * 4;
@@ -83,9 +83,9 @@ __global__ void fillHvdcBatch(int elementCount, int nScenarios, int n, int nnz, 
     updateHvdcAcEmulation(p[0], p[1], p[2], p[3], p[4], ph1, ph2, 0, o + 0, o + 1, o + 2, o + 3, o + 4, o + 5);
     if (dynamicRelocation) {
         scatterAddRelocated(HVDC_AC_EMULATION_OUTPUT_COUNT, dest + e * HVDC_AC_EMULATION_OUTPUT_COUNT, alternateDestination + e * HVDC_AC_EMULATION_OUTPUT_COUNT, selectorRow + e * HVDC_AC_EMULATION_OUTPUT_COUNT,
-                      mode + (size_t) s * n, o, vals + (size_t) s * nnz, F + (size_t) s * n, ReactiveRelocationTables{}, e * HVDC_AC_EMULATION_OUTPUT_COUNT);
+                      mode + (size_t) s * n, o, scenarioEntries(vals, s, nnz, layout), scenarioEntries(F, s, n, layout), ReactiveRelocationTables{}, e * HVDC_AC_EMULATION_OUTPUT_COUNT);
     } else {
-        scatterAdd(HVDC_AC_EMULATION_OUTPUT_COUNT, dest + e * HVDC_AC_EMULATION_OUTPUT_COUNT, o, vals + (size_t) s * nnz, F + (size_t) s * n);
+        scatterAdd(HVDC_AC_EMULATION_OUTPUT_COUNT, dest + e * HVDC_AC_EMULATION_OUTPUT_COUNT, o, scenarioEntries(vals, s, nnz, layout), scenarioEntries(F, s, n, layout));
     }
 }
 
@@ -98,11 +98,11 @@ __global__ void fillHvdcBatch(int elementCount, int nScenarios, int n, int nnz, 
 __global__ void fillLoadModelBatch(int elementCount, int nScenarios, int n, int nnz,
                              const double* in, const int* ix, const int* dest,
                              const double* x, double* vals, double* F, const char* active,
-                             const int* alternateRow, const int* alternateDestination, const int* mode) {
+                             const int* alternateRow, const int* alternateDestination, const int* mode, BatchLayout layout) {
     int t = blockIdx.x * blockDim.x + threadIdx.x;
     if (t >= elementCount * nScenarios) return;
-    int e = t % elementCount;
-    int s = t / elementCount;
+    int e, s;
+    itemAndScenario(t, elementCount, layout, e, s);
     if (!active[s]) return;
     // GENERATED updateLoadModel (codegen family "vdl", parsed from OLF's
     // AbstractLoadModelEquationTerm.f/dfdv): one packed element per exp term, the sum over a
@@ -122,9 +122,9 @@ __global__ void fillLoadModelBatch(int elementCount, int nScenarios, int n, int 
         row = alternateRow[e];
         destination = alternateDestination[e];
     }
-    atomicAdd(&F[(size_t) s * n + row], o[0]);
+    atomicAdd(&scenarioEntries(F, s, n, layout)[row], o[0]);
     if (vals != nullptr) {
-        atomicAdd(&vals[(size_t) s * nnz + destination], o[1]);
+        atomicAdd(&scenarioEntries(vals, s, nnz, layout)[destination], o[1]);
     }
 }
 
@@ -134,11 +134,11 @@ __global__ void fillShuntBatchF(int elementCount, int nScenarios, int n, int nnz
                                 const char* disabled, const char* active,
                                 int nShuntAdmittanceOverrides, const int* shuntAdmittanceOverrideScenarioElement, const double* shuntAdmittanceOverrideDelta,
                                 const int* alternateDestination, const int* selectorRow, const int* mode, int dynamicRelocation,
-                               ReactiveRelocationTables rt) {
+                               ReactiveRelocationTables rt, BatchLayout layout) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= elementCount * nScenarios) return;
-    int e = tid % elementCount;
-    int s = tid / elementCount;
+    int e, s;
+    itemAndScenario(tid, elementCount, layout, e, s);
     if (!active[s] || disabled[s * nElements + elemOffset + e]) return;
     const double* p = in + e * 2;                            // g b
     double g = p[0];
@@ -152,9 +152,9 @@ __global__ void fillShuntBatchF(int elementCount, int nScenarios, int n, int nnz
     const int pos[2] = {0, 2};
     if (dynamicRelocation) {
         scatterAddFRelocated(2, dest + e * SHUNT_OUTPUT_COUNT, alternateDestination + e * SHUNT_OUTPUT_COUNT, selectorRow + e * SHUNT_OUTPUT_COUNT,
-                       pos, mode + (size_t) s * n, o, F + (size_t) s * n, relocationTablesForScenario(rt, s), e * SHUNT_OUTPUT_COUNT);
+                       pos, mode + (size_t) s * n, o, scenarioEntries(F, s, n, layout), relocationTablesForScenario(rt, s), e * SHUNT_OUTPUT_COUNT);
     } else {
-        scatterAddF(2, dest + e * SHUNT_OUTPUT_COUNT, pos, o, F + (size_t) s * n);
+        scatterAddF(2, dest + e * SHUNT_OUTPUT_COUNT, pos, o, scenarioEntries(F, s, n, layout));
     }
 }
 
@@ -162,11 +162,11 @@ __global__ void fillHvdcBatchF(int elementCount, int nScenarios, int n, int nnz,
                                const double* in, const int* ix, const int* dest,
                                const double* x, double* F,
                                const char* disabled, const char* active,
-                               const int* alternateDestination, const int* selectorRow, const int* mode, int dynamicRelocation) {
+                               const int* alternateDestination, const int* selectorRow, const int* mode, int dynamicRelocation, BatchLayout layout) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= elementCount * nScenarios) return;
-    int e = tid % elementCount;
-    int s = tid / elementCount;
+    int e, s;
+    itemAndScenario(tid, elementCount, layout, e, s);
     if (!active[s] || disabled[s * nElements + elemOffset + e]) return;
     const double* p = in + e * 5;                            // p0 k lf1 lf2 r
     const int* q = ix + e * 4;
@@ -177,9 +177,9 @@ __global__ void fillHvdcBatchF(int elementCount, int nScenarios, int n, int nnz,
     const int pos[2] = {0, 3};
     if (dynamicRelocation) {
         scatterAddFRelocated(2, dest + e * HVDC_AC_EMULATION_OUTPUT_COUNT, alternateDestination + e * HVDC_AC_EMULATION_OUTPUT_COUNT, selectorRow + e * HVDC_AC_EMULATION_OUTPUT_COUNT,
-                       pos, mode + (size_t) s * n, o, F + (size_t) s * n, ReactiveRelocationTables{}, e * HVDC_AC_EMULATION_OUTPUT_COUNT);
+                       pos, mode + (size_t) s * n, o, scenarioEntries(F, s, n, layout), ReactiveRelocationTables{}, e * HVDC_AC_EMULATION_OUTPUT_COUNT);
     } else {
-        scatterAddF(2, dest + e * HVDC_AC_EMULATION_OUTPUT_COUNT, pos, o, F + (size_t) s * n);
+        scatterAddF(2, dest + e * HVDC_AC_EMULATION_OUTPUT_COUNT, pos, o, scenarioEntries(F, s, n, layout));
     }
 }
 

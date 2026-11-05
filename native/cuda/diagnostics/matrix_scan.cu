@@ -25,7 +25,12 @@ void dumpSlotSystem(BatchSolverContext* ctx, int n, int nnz, int scenario, const
     std::vector<int> mode(n);
     std::vector<double> rightHandSide(n);                               // the RHS as SOLVED (row-repaired, see repairZeroDiagonalRightHandSideBatch)
     CUDA_CHECK(cudaMemcpy(rightHandSide.data(), ctx->dB.template as<double>() + (size_t) scenario * n, (size_t) n * sizeof(double), cudaMemcpyDeviceToHost));
-    CUDA_CHECK(cudaMemcpy(jacobianValues.data(), ctx->dVals.template as<double>() + (size_t) scenario * nnz, (size_t) nnz * sizeof(double), cudaMemcpyDeviceToHost));
+    if (ctx->layout.interleaved) {                           // one value of this scenario every stride values
+        CUDA_CHECK(cudaMemcpy2D(jacobianValues.data(), sizeof(double), ctx->dVals.template as<double>() + scenario,
+                                (size_t) ctx->layout.stride * sizeof(double), sizeof(double), (size_t) nnz, cudaMemcpyDeviceToHost));
+    } else {
+        CUDA_CHECK(cudaMemcpy(jacobianValues.data(), ctx->dVals.template as<double>() + (size_t) scenario * nnz, (size_t) nnz * sizeof(double), cudaMemcpyDeviceToHost));
+    }
     CUDA_CHECK(cudaMemcpy(dx.data(), ctx->dDx.template as<double>() + (size_t) scenario * n, (size_t) n * sizeof(double), cudaMemcpyDeviceToHost));
     CUDA_CHECK(cudaMemcpy(mismatch.data(), ctx->dF.template as<double>() + (size_t) scenario * n, (size_t) n * sizeof(double), cudaMemcpyDeviceToHost));
     CUDA_CHECK(cudaMemcpy(rowStart.data(), ctx->structure->dRowPtr.p, (size_t) (n + 1) * sizeof(int), cudaMemcpyDeviceToHost));

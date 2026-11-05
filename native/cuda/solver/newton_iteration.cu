@@ -132,8 +132,8 @@ void newtonSolve(BatchSolverContext* ctx, DriverPass& drv) {
                     ctx->dLinRm.alloc((size_t) n * nS * sizeof(double));
                     ctx->dLinSc.alloc((size_t) 3 * nS * sizeof(double));
                 }
-                linResidRowBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, nnz, ctx->structure->dRowPtr.as<int>(),
-                        ctx->structure->dColIdx.as<int>(), ctx->dVals.as<double>(), ctx->dDx.as<double>(),
+                launchLinResidRows(ctx->stream, n, nS, nnz, ctx->structure->dRowPtr.as<int>(),
+                        ctx->structure->dColIdx.as<int>(), ctx->dVals.as<double>(), ctx->layout, ctx->dDx.as<double>(),
                         ctx->dB.as<double>(), ctx->dLinRp.as<double>(), ctx->dLinRm.as<double>());
                 linResidScoreBatch<<<nS, LANE_NORM_BLOCK, 0, ctx->stream>>>(n, nS, ctx->dLinRp.as<double>(),
                         ctx->dLinRm.as<double>(), ctx->dF.as<double>(), ctx->dLinSc.as<double>());
@@ -299,7 +299,7 @@ void newtonSolve(BatchSolverContext* ctx, DriverPass& drv) {
         //      get the same identity systems, so every buffer holds what it holds under cuDSS. ----
         writeIdentityForInactive<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, nnz, ctx->structure->dRowPtr.as<int>(),
                 ctx->structure->dDiagPos.as<int>(), ctx->dActive.as<char>(), ctx->dIdentityLane.as<char>(),
-                ctx->dVals.as<double>(), ctx->dF.as<double>());
+                ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->layout);
         markIdentityLanes<<<grid(nS), BLOCK, 0, ctx->stream>>>(nS, ctx->dActive.as<char>(), ctx->dIdentityLane.as<char>());
         negateIntoBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n * nS, ctx->dF.as<double>(), ctx->dB.as<double>());
         repairZeroDiagonalRightHandSide(ctx, nS, ctx->dB.as<double>());
@@ -462,8 +462,8 @@ void newtonSolve(BatchSolverContext* ctx, DriverPass& drv) {
             DeviceBuf& rp = ctx->dLinRp;
             DeviceBuf& rm = ctx->dLinRm;
             DeviceBuf& sc = ctx->dLinSc;
-            linResidRowBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, nnz, ctx->structure->dRowPtr.as<int>(),
-                    ctx->structure->dColIdx.as<int>(), ctx->dVals.as<double>(), ctx->dDx.as<double>(),
+            launchLinResidRows(ctx->stream, n, nS, nnz, ctx->structure->dRowPtr.as<int>(),
+                    ctx->structure->dColIdx.as<int>(), ctx->dVals.as<double>(), ctx->layout, ctx->dDx.as<double>(),
                     ctx->dB.as<double>(), rp.as<double>(), rm.as<double>());
             linResidScoreBatch<<<nS, LANE_NORM_BLOCK, 0, ctx->stream>>>(n, nS, rp.as<double>(), rm.as<double>(),
                     ctx->dF.as<double>(), sc.as<double>());

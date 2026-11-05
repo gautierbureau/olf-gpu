@@ -118,6 +118,7 @@ add_library(olfgpu SHARED
     native/cuda/equations/bus_injection_fill.cu
     native/cuda/equations/distribution_fill.cu
     native/cuda/equations/fill_launch.cu
+    native/cuda/equations/fill_layout.cu
     native/cuda/equations/zero_impedance_fill.cu
     native/cuda/lu/batched_lu.cu
     native/cuda/lu/cudss_order.cu

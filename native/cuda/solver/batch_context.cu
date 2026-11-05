@@ -114,8 +114,9 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& structure, int 
     const std::vector<int>& colIdx = structure->colIdx;
 
     // ---- per-scenario device state ----
+    ctx->layout = mode == GpuLinearSolveMode::BATCHED_LU ? interleavedLayout(nScenarios) : scenarioMajorLayout(nScenarios);
     size_t nS = static_cast<size_t>(n) * nScenarios;
-    size_t nnzS = static_cast<size_t>(ctx->nnz) * nScenarios;
+    size_t nnzS = static_cast<size_t>(ctx->nnz) * ctx->layout.stride;    // an interleaved stride rounds the width up
     ctx->dX.alloc(nS * sizeof(double));
     ctx->dXLastConv.alloc(nS * sizeof(double));
     ctx->dTarget.alloc(nS * sizeof(double));
@@ -123,6 +124,9 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& structure, int 
     ctx->dB.alloc(nS * sizeof(double));
     ctx->dDx.alloc(nS * sizeof(double));
     ctx->dVals.alloc(nnzS * sizeof(double));
+    if (ctx->layout.interleaved) {
+        ctx->dFillMismatch.alloc(static_cast<size_t>(n) * ctx->layout.stride * sizeof(double));
+    }
     ctx->dNorms.alloc(static_cast<size_t>(nScenarios) * 4 * sizeof(double));
     ctx->dMode.alloc(nS * sizeof(int));
     ctx->dDisabled.alloc(static_cast<size_t>(ctx->nElements) * nScenarios * sizeof(char));
@@ -134,7 +138,7 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& structure, int 
     //      permutation (= identity in the batch path, no families, but mapped for correctness) ----
     ctx->nReactiveLimitEntries = nReactiveLimitEntries;
     ctx->dQbuf.alloc(static_cast<size_t>(n) * nScenarios * sizeof(double));
-    ctx->dQbufClosed.alloc(static_cast<size_t>(n) * nScenarios * sizeof(double));
+    ctx->dQbufClosed.alloc(static_cast<size_t>(n) * ctx->layout.stride * sizeof(double));
     ctx->dOuterLoopCheckActive.alloc(static_cast<size_t>(nScenarios) * sizeof(char));
     ctx->dOuterLoopUnstable.alloc(static_cast<size_t>(nScenarios) * sizeof(char));
     // The seed launch of updatePilotTargetVEquationBatch / updateDistrQTargetsBatch (before the first solve) READS

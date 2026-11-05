@@ -14,6 +14,7 @@
 #include <memory>
 #include <vector>
 
+#include "../common/batch_layout.cuh"
 #include "../common/device_buf.cuh"
 #include "../common/loop_kinds.cuh"
 #include "../common/codes/gpu_distributed_slack_factor_mode.cuh"
@@ -45,6 +46,12 @@ struct BatchSolverContext {
     int closedBranchOffset = 0, openBranchOffset = 0, shuntOffset = 0, hvdcAcEmulationOffset = 0;   // element-mask offsets per family
     int nDistrQ = 0, nDistrRho = 0, nDistrShuntB = 0, nZeroImpedanceBranch = 0;                  // copies of the structure counts
     DeviceBuf dX, dTarget, dF, dB, dDx, dVals, dMode;        // per-scenario (n or nnz strided)
+    // Where the fills put a scenario's Jacobian values, mismatch and closed-branch Q buffer (common/batch_layout.cuh):
+    // scenario-interleaved on our batched LU, whose lanes are interleaved too, scenario-major for cuDSS. dVals and
+    // dQbufClosed are laid out so; the mismatch is filled into dFillMismatch and copied into dF, scenario-major for every
+    // reader, once the fill is done (fillMismatch).
+    BatchLayout layout;
+    DeviceBuf dFillMismatch;
     // nS: 1 while a retired scenario's values and F hold the identity system writeIdentityForInactive wrote, so the next
     // identity write skips it. Cleared at every batched solve's start and for every scenario zeroActiveValues zeroes (a
     // check's refill writes no values: its fills get no Jacobian)
@@ -526,7 +533,7 @@ struct BatchSolverContext {
     DeviceBuf dSingletonHazardSlot, dSingletonColumnStart, dSingletonColumnRow, dSingletonList, dSingletonPendingList,
             dSingletonFixed, dSingletonTouched, dSingletonOwner, dSingletonProposal, dSingletonProposalValue, dSingletonCounters;
     CudssCtx luComparisonSolver;                             // OLF_GPU_LU_COMPARE: cuDSS's uniform batch on the same systems
-    DeviceBuf dLuComparisonDx, dLuComparisonScore;
+    DeviceBuf dLuComparisonDx, dLuComparisonScore, dLuComparisonValues;   // the values' scenario-major copy, when interleaved
     bool luComparisonAnalyzed = false;
     DeviceBuf dR, dDelta, dIterativeRefinementScore, dIterativeRefinementScenarioMask;                 // adaptive refinement: residual, correction, lane scores/mask
     // UBATCH single matrices (mode 3 only): a SINGLE per-block CSR (n, nnz, shared rowPtr/colIdx)

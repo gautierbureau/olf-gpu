@@ -45,7 +45,10 @@ void bucketByKey(const std::vector<int>& key, int nKeys, std::vector<int>& start
 
 }  // namespace
 
-ScalarLuPlan buildScalarLuPlan(int n, const int* rowPtr, const int* colIdx, const int* rowOrder, const int* colOrder) {
+ScalarLuPlan buildScalarLuPlan(int n, const int* rowPtr, const int* colIdx, const int* rowOrder, const int* colOrder,
+                               const ScalarLuPlanLimits& limits) {
+    const long long maxLuEntries = std::min<long long>(limits.luEntries, std::numeric_limits<int>::max());
+    const long long maxContributions = std::min<long long>(limits.contributions, std::numeric_limits<int>::max());
     ScalarLuPlan plan;
     plan.n = n;
     plan.nnzA = rowPtr[n];
@@ -99,6 +102,10 @@ ScalarLuPlan buildScalarLuPlan(int n, const int* rowPtr, const int* colIdx, cons
             }
         }
         std::sort(upper.begin(), upper.end());
+        if (static_cast<long long>(plan.luCol.size() + lower.size() + upper.size()) > maxLuEntries) {
+            throw ScalarLuPlanTooLarge("LU plan: more than " + std::to_string(maxLuEntries) + " LU entries by row "
+                                       + std::to_string(i) + " of " + std::to_string(n));
+        }
         plan.luCol.insert(plan.luCol.end(), lower.begin(), lower.end());
         plan.luDiag[i] = static_cast<int>(plan.luCol.size());
         plan.luCol.insert(plan.luCol.end(), upper.begin(), upper.end());
@@ -121,6 +128,7 @@ ScalarLuPlan buildScalarLuPlan(int n, const int* rowPtr, const int* colIdx, cons
     //      Two passes (count, then fill) ----
     std::vector<int> entryOfColumn(n, -1);                   // the current row's LU entry of each column
     plan.contributionStart.assign(plan.nnzLu + 1, 0);
+    long long counted = 0;
     for (int pass = 0; pass < 2; pass++) {
         std::vector<int> cursor;
         if (pass == 1) {
@@ -144,6 +152,11 @@ ScalarLuPlan buildScalarLuPlan(int n, const int* rowPtr, const int* colIdx, cons
                                 || plan.luCol[target] != plan.luCol[u]) {
                             throw std::runtime_error("LU plan: contribution outside the closed pattern of row "
                                                      + std::to_string(i));
+                        }
+                        if (++counted > maxContributions) {
+                            throw ScalarLuPlanTooLarge("LU plan: more than " + std::to_string(maxContributions)
+                                                       + " contributions by row " + std::to_string(i) + " of "
+                                                       + std::to_string(n));
                         }
                         plan.contributionStart[target + 1]++;
                     } else {

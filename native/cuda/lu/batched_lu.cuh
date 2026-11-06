@@ -37,6 +37,9 @@ struct BatchedLu {
     std::vector<int> hLaneMap;                               // the last factorization's lanes
     std::vector<int> hPivoted;                               // ...those the pivoting engine factorized
     DeviceBuf laneFactors;                                   // one lane's fast factors, read to learn from
+    std::vector<int> hSelected;                              // selectLanes': positions in hLaneMap, then in hPivoted
+    int selectedFast = 0;                                    // ...how many of them are hLaneMap's
+    DeviceBuf dSelected;
 };
 
 // Upload the fast engine's current plan and size its factors for capacity lanes; the plan must outlive the solver.
@@ -52,6 +55,14 @@ void factorizeLanes(BatchedLu& lu, const double* vals, BatchLayout layout, const
 // Solve with the last factorization's lanes, each on the engine that factorized it: x[s * n ..] = A_s^-1 b[s * n ..]
 // for every s of its lane map. Scenarios outside the lane map keep their x.
 void solveLanes(BatchedLu& lu, const double* b, double* x, cudaStream_t stream);
+
+// Select the lanes of the last factorization whose scenario is set in scenarios (host, one entry per scenario) for
+// solveSelectedLanes.
+void selectLanes(BatchedLu& lu, const std::vector<char>& scenarios, cudaStream_t stream);
+
+// solveLanes on the selected lanes only: each of them takes the operations solveLanes gives it, every other scenario
+// keeps its x.
+void solveSelectedLanes(BatchedLu& lu, const double* b, double* x, cudaStream_t stream);
 
 // The last factorization's lane map on the device (the fast engine's).
 const int* deviceLaneMap(BatchedLu& lu);

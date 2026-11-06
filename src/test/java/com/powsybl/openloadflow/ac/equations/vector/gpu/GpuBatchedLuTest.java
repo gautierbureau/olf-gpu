@@ -20,6 +20,7 @@ import java.util.TreeMap;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
@@ -535,6 +536,145 @@ class GpuBatchedLuTest {
         }
         assertTrue(residual / scale < 1e-12, "backward ratio " + residual / scale);
         assertArrayEquals(denseSolve(m, system.rightHandSide()), x, 1e-10);
+    }
+
+    /**
+     * Diagonally dominant values whose last pivot is {@code pivot} (the last diagonal entry less its Schur complement):
+     * the fast engine keeps the lane - no multiplier divides by that pivot - and its solution is 1 / pivot times its
+     * right-hand side along one direction, so a solve leaves its backward ratio far above the refinement's tolerance.
+     */
+    private static double[] nearlySingularValues(Csr csr, long seed, double pivot) {
+        int n = csr.n();
+        double[] values = diagonallyDominantValues(csr, 1, seed);
+        double[][] m = dense(csr, values, 0);
+        double[][] leading = new double[n - 1][n - 1];
+        double[] lastColumn = new double[n - 1];
+        for (int i = 0; i < n - 1; i++) {
+            System.arraycopy(m[i], 0, leading[i], 0, n - 1);
+            lastColumn[i] = m[i][n - 1];
+        }
+        double[] y = denseSolve(leading, lastColumn);
+        double schurComplement = m[n - 1][n - 1];
+        for (int j = 0; j < n - 1; j++) {
+            schurComplement -= m[n - 1][j] * y[j];
+        }
+        for (int k = csr.rowPtr()[n - 1]; k < csr.rowPtr()[n]; k++) {
+            if (csr.colIdx()[k] == n - 1) {
+                values[k] += pivot - schurComplement;
+            }
+        }
+        return values;
+    }
+
+    /**
+     * Six scenarios on the coupler system's pattern: the coupler system itself on 1 and doubled on 3 (the pivoting
+     * engine's lanes: the repair's undoing clamps two pivots) and a nearly singular lane on 0 (the fast engine's), all
+     * three refining past the base step; diagonally dominant lanes, done after it, on 2, 4 and 5.
+     */
+    private static double[] refinementBatch(CouplerSystem system) {
+        Csr csr = system.csr();
+        int nnz = csr.nnz();
+        double[][] lanes = {nearlySingularValues(csr, 5, 1e-7), system.values(), diagonallyDominantValues(csr, 1, 6),
+            Arrays.stream(system.values()).map(v -> 2 * v).toArray(), diagonallyDominantValues(csr, 1, 7),
+            diagonallyDominantValues(csr, 1, 8)};
+        double[] values = new double[lanes.length * nnz];
+        for (int s = 0; s < lanes.length; s++) {
+            System.arraycopy(lanes[s], 0, values, s * nnz, nnz);
+        }
+        return values;
+    }
+
+    /**
+     * The refinement batch's lane map: no scenario at its own position, the nearly singular lane last (the fast engine's
+     * lane 4) and the coupler system the pivoting engine's lane 1, behind its double; scenario 5 is not factorized.
+     */
+    private static final int[] REFINEMENT_LANE_MAP = {3, 2, 1, 4, 0};
+
+    private static double[] refinementRightHandSides(int length) {
+        double[] rightHandSides = new double[length];
+        Random random = new Random(23);
+        for (int k = 0; k < rightHandSides.length; k++) {
+            rightHandSides[k] = random.nextDouble() * 2 - 1;
+        }
+        return rightHandSides;
+    }
+
+    private static double[] scenario(double[] batch, int s, int count) {
+        return Arrays.copyOfRange(batch, s * count, (s + 1) * count);
+    }
+
+    private static double[] filled(int length, double value) {
+        double[] a = new double[length];
+        Arrays.fill(a, value);
+        return a;
+    }
+
+    /**
+     * Solving selected lanes - the adaptive refinement's corrections, on the lanes still refining - gives each of them
+     * the solution the solve of every lane gives it, bit for bit, on either engine, and leaves every other scenario's
+     * as it was: scenario 0 is the fast engine's lane 4 here, scenario 1 its lane 2 and the pivoting engine's lane 1.
+     * Checked to fail with the selection taken as scenarios, with either engine solving its first lanes instead of the
+     * selected ones, and without the pivoting engine's solve.
+     */
+    @Test
+    void selectedLanesAreSolvedAsInTheWholeBatch() {
+        CouplerSystem system = couplerSystem(32, 80, 3, 0.03);
+        Csr csr = system.csr();
+        int n = csr.n();
+        double[] values = refinementBatch(system);
+        double[] rightHandSides = refinementRightHandSides(6 * n);
+        double[] whole = filled(6 * n, 42);
+        int[] pivoted = new int[REFINEMENT_LANE_MAP.length];
+        int[] clamps = new int[REFINEMENT_LANE_MAP.length];
+        BatchedLuNative.factorizeAndSolve(n, csr.rowPtr(), csr.colIdx(), identity(n), identity(n), 6, values,
+                rightHandSides, REFINEMENT_LANE_MAP, whole, pivoted, clamps);
+        assertArrayEquals(new int[] {1, 0, 1, 0, 0}, pivoted);
+        double[] selected = filled(6 * n, 42);
+        BatchedLuNative.factorizeAndSolveSelected(n, csr.rowPtr(), csr.colIdx(), identity(n), identity(n), 6, values,
+                rightHandSides, REFINEMENT_LANE_MAP, new int[] {1, 0}, selected);
+        for (int s = 0; s < 6; s++) {
+            double[] expected = s <= 1 ? scenario(whole, s, n) : filled(n, 42);
+            assertArrayEquals(expected, scenario(selected, s, n), "scenario " + s);
+        }
+    }
+
+    /**
+     * The adaptive refinement solves its corrections on the lanes still refining only, and each lane's Newton step in a
+     * batch is the one it takes alone, bit for bit: the coupler systems refine on the pivoting engine and the nearly
+     * singular lane on the fast engine, beside lanes done after the base step and a scenario outside the lane map.
+     * Checked to fail with the selection taken as scenarios and with the fast engine solving its first lanes instead
+     * of the selected ones.
+     */
+    @Test
+    void newtonStepOfEachLaneIsTheOneItTakesAlone() {
+        CouplerSystem system = couplerSystem(32, 80, 3, 0.03);
+        Csr csr = system.csr();
+        int n = csr.n();
+        int nnz = csr.nnz();
+        double[] values = refinementBatch(system);
+        double[] rightHandSides = refinementRightHandSides(6 * n);
+        double[] baseStepOnly = new double[6 * n];
+        try {
+            new GpuLoadFlowParameters().setIterativeRefinementMaxSteps(1).install();
+            BatchedLuNative.factorizeAndSolveNewtonStep(n, csr.rowPtr(), csr.colIdx(), identity(n), identity(n), 6,
+                    values, rightHandSides, REFINEMENT_LANE_MAP, baseStepOnly);
+        } finally {
+            new GpuLoadFlowParameters().install();               // one internal step, at most four solves, 1e-12
+        }
+        double[] batch = filled(6 * n, 42);
+        BatchedLuNative.factorizeAndSolveNewtonStep(n, csr.rowPtr(), csr.colIdx(), identity(n), identity(n), 6, values,
+                rightHandSides, REFINEMENT_LANE_MAP, batch);
+        for (int s : REFINEMENT_LANE_MAP) {
+            double[] alone = new double[n];
+            BatchedLuNative.factorizeAndSolveNewtonStep(n, csr.rowPtr(), csr.colIdx(), identity(n), identity(n), 1,
+                    scenario(values, s, nnz), scenario(rightHandSides, s, n), new int[] {0}, alone);
+            assertArrayEquals(alone, scenario(batch, s, n), "scenario " + s);
+        }
+        assertArrayEquals(filled(n, 42), scenario(batch, 5, n));
+        for (int s : new int[] {0, 1, 3}) {
+            assertFalse(Arrays.equals(scenario(baseStepOnly, s, n), scenario(batch, s, n)),
+                    "scenario " + s + " refines past the base step");
+        }
     }
 
     /**

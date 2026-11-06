@@ -46,8 +46,8 @@ void solveWithInternalRefinement(const BatchedLuSystems& systems, const double* 
                                  const char* lanes);
 
 // The Newton step's linear solve: dx = J^-1 b with the internal steps, then on a structure with couplers the adaptive
-// refinement of the lanes still above the tolerance, each correction solved with the internal steps too. afterSolve,
-// if set, runs between the two (a trace comparing the solve with cuDSS's).
+// refinement of the lanes still above the tolerance, each correction solved with the internal steps too, on those
+// lanes only. afterSolve, if set, runs between the two (a trace comparing the solve with cuDSS's).
 void solveNewtonStep(const BatchedLuSystems& systems, const double* b, double* dx,
                      const std::function<void()>& afterSolve = nullptr);
 

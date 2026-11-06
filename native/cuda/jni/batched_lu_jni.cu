@@ -150,6 +150,70 @@ OLF_JNI(ac_solver_gpu, BatchedLuNative, factorizeAndSolve)(
     }
 }
 
+// factorizeAndSolve's factorization, then the solve of the lanes whose scenario is in selected only (selectLanes,
+// solveSelectedLanes: the adaptive refinement's corrections), every other scenario's solution left as it is.
+extern "C" JNIEXPORT void JNICALL
+OLF_JNI(ac_solver_gpu, BatchedLuNative, factorizeAndSolveSelected)(
+        JNIEnv* env, jclass, jint n, jintArray jRowPtr, jintArray jColIdx, jintArray jRowOrder, jintArray jColOrder,
+        jint capacity, jdoubleArray jValues, jdoubleArray jRightHandSides, jintArray jLaneMap, jintArray jSelected,
+        jdoubleArray jSolutions) {
+    try {
+        const std::vector<int> rowPtr = intsOf(env, jRowPtr);
+        const std::vector<int> colIdx = intsOf(env, jColIdx);
+        const std::vector<int> rowOrder = intsOf(env, jRowOrder);
+        const std::vector<int> colOrder = intsOf(env, jColOrder);
+        const std::vector<int> laneMap = intsOf(env, jLaneMap);
+        const std::vector<int> selected = intsOf(env, jSelected);
+        const int nnz = rowPtr[n];
+        std::vector<double> values(static_cast<size_t>(capacity) * nnz);
+        std::vector<double> rightHandSides(static_cast<size_t>(capacity) * n);
+        std::vector<double> solutions(static_cast<size_t>(capacity) * n);
+        env->GetDoubleArrayRegion(jValues, 0, static_cast<jsize>(values.size()), values.data());
+        env->GetDoubleArrayRegion(jRightHandSides, 0, static_cast<jsize>(rightHandSides.size()), rightHandSides.data());
+        env->GetDoubleArrayRegion(jSolutions, 0, static_cast<jsize>(solutions.size()), solutions.data());
+        std::vector<char> scenarios(capacity, 0);
+        for (const std::vector<int>* list : {&laneMap, &selected}) {
+            for (int s : *list) {
+                if (s < 0 || s >= capacity) {
+                    throw std::runtime_error("scenario " + std::to_string(s) + " outside 0.."
+                                             + std::to_string(capacity - 1));
+                }
+            }
+        }
+        for (int s : selected) {
+            scenarios[s] = 1;
+        }
+        const std::shared_ptr<LuPlan> plan = buildLuPlan(n, rowPtr.data(), colIdx.data(), rowOrder.data(),
+                                                         colOrder.data());
+        BatchedLu lu;
+        createBatchedLu(lu, *plan, capacity);
+        DeviceBuf dValues;
+        DeviceBuf dRightHandSides;
+        DeviceBuf dSolutions;
+        dValues.upload(values.data(), values.size() * sizeof(double));
+        dRightHandSides.upload(rightHandSides.data(), rightHandSides.size() * sizeof(double));
+        dSolutions.upload(solutions.data(), solutions.size() * sizeof(double));
+        cudaStream_t stream = nullptr;
+        CUDA_CHECK(cudaStreamCreate(&stream));
+        try {
+            factorizeLanes(lu, dValues.as<double>(), scenarioMajorLayout(capacity), laneMap.data(),
+                           static_cast<int>(laneMap.size()), stream);
+            selectLanes(lu, scenarios, stream);
+            solveSelectedLanes(lu, dRightHandSides.as<double>(), dSolutions.as<double>(), stream);
+            CUDA_CHECK(cudaStreamSynchronize(stream));
+            CUDA_CHECK(cudaMemcpy(solutions.data(), dSolutions.p, solutions.size() * sizeof(double),
+                                  cudaMemcpyDeviceToHost));
+        } catch (...) {
+            cudaStreamDestroy(stream);
+            throw;
+        }
+        CUDA_CHECK(cudaStreamDestroy(stream));
+        env->SetDoubleArrayRegion(jSolutions, 0, static_cast<jsize>(solutions.size()), solutions.data());
+    } catch (const std::exception& e) {
+        throwJava(env, e);
+    }
+}
+
 // The scenarios of laneMap factorized `rounds` times on one plan - the fast engine's order learning its pivot delays
 // between rounds - then solved with the last factorization. values: capacity * nnz, rightHandSides and solutions:
 // capacity * n, scenario-major; pivoted (rounds * laneMap entries, round-major): 1 when the pivoting engine factorized

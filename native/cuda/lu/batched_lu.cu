@@ -69,6 +69,8 @@ void factorizeLanes(BatchedLu& lu, const double* vals, BatchLayout layout, const
     lu.width = width;
     lu.hLaneMap.assign(laneMap, laneMap + width);
     lu.hPivoted.clear();
+    lu.hSelected.clear();
+    lu.selectedFast = 0;
     if (width == 0) {
         return;
     }
@@ -103,6 +105,34 @@ void solveLanes(BatchedLu& lu, const double* b, double* x, cudaStream_t stream) 
     solveScalarLanes(lu.scalar, b, x, stream);
     if (!lu.hPivoted.empty()) {
         solveSupernodalLanes(lu.supernodal, b, x, stream);  // after the fast engine: the flagged lanes' x is its own
+    }
+}
+
+void selectLanes(BatchedLu& lu, const std::vector<char>& scenarios, cudaStream_t stream) {
+    lu.hSelected.clear();
+    for (int a = 0; a < lu.width; a++) {
+        if (scenarios[lu.hLaneMap[a]]) {
+            lu.hSelected.push_back(a);
+        }
+    }
+    lu.selectedFast = static_cast<int>(lu.hSelected.size());
+    for (size_t p = 0; p < lu.hPivoted.size(); p++) {
+        if (scenarios[lu.hPivoted[p]]) {
+            lu.hSelected.push_back(static_cast<int>(p));
+        }
+    }
+    if (!lu.hSelected.empty()) {
+        lu.dSelected.ensure(lu.hSelected.size() * sizeof(int));
+        CUDA_CHECK(cudaMemcpyAsync(lu.dSelected.p, lu.hSelected.data(), lu.hSelected.size() * sizeof(int),
+                                   cudaMemcpyHostToDevice, stream));
+    }
+}
+
+void solveSelectedLanes(BatchedLu& lu, const double* b, double* x, cudaStream_t stream) {
+    solveScalarSelectedLanes(lu.scalar, lu.dSelected.as<int>(), lu.selectedFast, b, x, stream);
+    const int pivoted = static_cast<int>(lu.hSelected.size()) - lu.selectedFast;
+    if (pivoted > 0) {                                       // after the fast engine, as in solveLanes
+        solveSupernodalSelectedLanes(lu.supernodal, lu.dSelected.as<int>() + lu.selectedFast, pivoted, b, x, stream);
     }
 }
 

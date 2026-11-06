@@ -22,26 +22,34 @@ unsigned int blocksFor(size_t threads) {
     return static_cast<unsigned int>((threads + LU_BLOCK - 1) / LU_BLOCK);
 }
 
+// The lane the k-th lane slot of a launch works on: lane k of the factorization, or the k-th selected lane (a position
+// in its lane map) when there is a selection.
+__device__ __forceinline__ int laneOf(int k, const int* __restrict__ selected) {
+    return selected == nullptr ? k : selected[k];
+}
+
 // dst[map[k] * capacity + a] = src[laneMap[a] * stride + k]: scenario-major rows to the lane-interleaved layout,
-// through a shared tile so both sides stay contiguous (k along the source, lanes along the destination).
+// through a shared tile so both sides stay contiguous (k along the source, lanes along the destination). The lanes:
+// 0 .. width, or the width selected ones.
 __global__ void toInterleaved(int count, int stride, int width, int capacity, const int* __restrict__ laneMap,
-                              const int* __restrict__ map, const double* __restrict__ src, double* __restrict__ dst) {
+                              const int* __restrict__ selected, const int* __restrict__ map,
+                              const double* __restrict__ src, double* __restrict__ dst) {
     __shared__ double tile[TILE][TILE + 1];
     const int k0 = blockIdx.x * TILE;
-    const int a0 = blockIdx.y * TILE;
+    const int c0 = blockIdx.y * TILE;
     for (int r = threadIdx.y; r < TILE; r += TILE_ROWS) {
-        const int a = a0 + r;
+        const int c = c0 + r;
         const int k = k0 + threadIdx.x;
-        if (a < width && k < count) {
-            tile[r][threadIdx.x] = src[static_cast<size_t>(laneMap[a]) * stride + k];
+        if (c < width && k < count) {
+            tile[r][threadIdx.x] = src[static_cast<size_t>(laneMap[laneOf(c, selected)]) * stride + k];
         }
     }
     __syncthreads();
     for (int r = threadIdx.y; r < TILE; r += TILE_ROWS) {
         const int k = k0 + r;
-        const int a = a0 + threadIdx.x;
-        if (a < width && k < count) {
-            dst[static_cast<size_t>(map[k]) * capacity + a] = tile[threadIdx.x][r];
+        const int c = c0 + threadIdx.x;
+        if (c < width && k < count) {
+            dst[static_cast<size_t>(map[k]) * capacity + laneOf(c, selected)] = tile[threadIdx.x][r];
         }
     }
 }
@@ -61,23 +69,24 @@ __global__ void fromScenarioInterleaved(int count, int stride, int width, int ca
 
 // The way back: dst[laneMap[a] * stride + k] = src[map[k] * capacity + a].
 __global__ void fromInterleaved(int count, int stride, int width, int capacity, const int* __restrict__ laneMap,
-                                const int* __restrict__ map, const double* __restrict__ src, double* __restrict__ dst) {
+                                const int* __restrict__ selected, const int* __restrict__ map,
+                                const double* __restrict__ src, double* __restrict__ dst) {
     __shared__ double tile[TILE][TILE + 1];
     const int k0 = blockIdx.x * TILE;
-    const int a0 = blockIdx.y * TILE;
+    const int c0 = blockIdx.y * TILE;
     for (int r = threadIdx.y; r < TILE; r += TILE_ROWS) {
         const int k = k0 + r;
-        const int a = a0 + threadIdx.x;
-        if (a < width && k < count) {
-            tile[r][threadIdx.x] = src[static_cast<size_t>(map[k]) * capacity + a];
+        const int c = c0 + threadIdx.x;
+        if (c < width && k < count) {
+            tile[r][threadIdx.x] = src[static_cast<size_t>(map[k]) * capacity + laneOf(c, selected)];
         }
     }
     __syncthreads();
     for (int r = threadIdx.y; r < TILE; r += TILE_ROWS) {
-        const int a = a0 + r;
+        const int c = c0 + r;
         const int k = k0 + threadIdx.x;
-        if (a < width && k < count) {
-            dst[static_cast<size_t>(laneMap[a]) * stride + k] = tile[threadIdx.x][r];
+        if (c < width && k < count) {
+            dst[static_cast<size_t>(laneMap[laneOf(c, selected)]) * stride + k] = tile[threadIdx.x][r];
         }
     }
 }
@@ -135,15 +144,16 @@ __global__ void factorStep(int nItems, int width, int capacity, const int* __res
 }
 
 // One forward level, L unit lower: z[i] -= sum_k L[i][k] z[k].
-__global__ void forwardLevel(int nRows, int width, int capacity, const int* __restrict__ rows,
-                             const int* __restrict__ luRowPtr, const int* __restrict__ luCol,
-                             const int* __restrict__ luDiag, const double* __restrict__ lu, double* __restrict__ z) {
+__global__ void forwardLevel(int nRows, int width, int capacity, const int* __restrict__ selected,
+                             const int* __restrict__ rows, const int* __restrict__ luRowPtr,
+                             const int* __restrict__ luCol, const int* __restrict__ luDiag,
+                             const double* __restrict__ lu, double* __restrict__ z) {
     const size_t g = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (g >= static_cast<size_t>(nRows) * width) {
         return;
     }
     const int t = static_cast<int>(g / width);
-    const int a = static_cast<int>(g - static_cast<size_t>(t) * width);
+    const int a = laneOf(static_cast<int>(g - static_cast<size_t>(t) * width), selected);
     const int i = rows[t];
     double y = z[static_cast<size_t>(i) * capacity + a];
     const int qEnd = luDiag[i];
@@ -154,15 +164,16 @@ __global__ void forwardLevel(int nRows, int width, int capacity, const int* __re
 }
 
 // One backward level: z[i] = (z[i] - sum_j U[i][j] z[j]) / U[i][i].
-__global__ void backwardLevel(int nRows, int width, int capacity, const int* __restrict__ rows,
-                              const int* __restrict__ luRowPtr, const int* __restrict__ luCol,
-                              const int* __restrict__ luDiag, const double* __restrict__ lu, double* __restrict__ z) {
+__global__ void backwardLevel(int nRows, int width, int capacity, const int* __restrict__ selected,
+                              const int* __restrict__ rows, const int* __restrict__ luRowPtr,
+                              const int* __restrict__ luCol, const int* __restrict__ luDiag,
+                              const double* __restrict__ lu, double* __restrict__ z) {
     const size_t g = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (g >= static_cast<size_t>(nRows) * width) {
         return;
     }
     const int t = static_cast<int>(g / width);
-    const int a = static_cast<int>(g - static_cast<size_t>(t) * width);
+    const int a = laneOf(static_cast<int>(g - static_cast<size_t>(t) * width), selected);
     const int i = rows[t];
     double x = z[static_cast<size_t>(i) * capacity + a];
     const int qEnd = luRowPtr[i + 1];
@@ -177,6 +188,29 @@ void uploadVector(DeviceBuf& buf, const std::vector<T>& v) {
     if (!v.empty()) {
         buf.upload(v.data(), v.size() * sizeof(T));
     }
+}
+
+// The triangular solves on width lanes: every lane of the last factorization (selected null) or the selected ones.
+void solveScalar(ScalarLu& lu, const int* selected, int width, const double* b, double* x, cudaStream_t stream) {
+    const dim3 tileBlock(TILE, TILE_ROWS);
+    const dim3 vectorGrid((lu.n + TILE - 1) / TILE, (width + TILE - 1) / TILE);
+    toInterleaved<<<vectorGrid, tileBlock, 0, stream>>>(lu.n, lu.n, width, lu.capacity, lu.dLaneMap.as<int>(), selected,
+            lu.dRowPosition.as<int>(), b, lu.dWork.as<double>());
+    for (int l = 0; l + 1 < static_cast<int>(lu.forwardLevelStart.size()); l++) {
+        const int rows = lu.forwardLevelStart[l + 1] - lu.forwardLevelStart[l];
+        forwardLevel<<<blocksFor(static_cast<size_t>(rows) * width), LU_BLOCK, 0, stream>>>(rows, width, lu.capacity,
+                selected, lu.dForwardRow.as<int>() + lu.forwardLevelStart[l], lu.dLuRowPtr.as<int>(),
+                lu.dLuCol.as<int>(), lu.dLuDiag.as<int>(), lu.dLu.as<double>(), lu.dWork.as<double>());
+    }
+    for (int l = 0; l + 1 < static_cast<int>(lu.backwardLevelStart.size()); l++) {
+        const int rows = lu.backwardLevelStart[l + 1] - lu.backwardLevelStart[l];
+        backwardLevel<<<blocksFor(static_cast<size_t>(rows) * width), LU_BLOCK, 0, stream>>>(rows, width, lu.capacity,
+                selected, lu.dBackwardRow.as<int>() + lu.backwardLevelStart[l], lu.dLuRowPtr.as<int>(),
+                lu.dLuCol.as<int>(), lu.dLuDiag.as<int>(), lu.dLu.as<double>(), lu.dWork.as<double>());
+    }
+    fromInterleaved<<<vectorGrid, tileBlock, 0, stream>>>(lu.n, lu.n, width, lu.capacity, lu.dLaneMap.as<int>(),
+            selected, lu.dColPosition.as<int>(), lu.dWork.as<double>(), x);
+    CUDA_CHECK(cudaGetLastError());
 }
 
 }  // namespace
@@ -249,7 +283,7 @@ void factorizeScalarLanes(ScalarLu& lu, const double* vals, BatchLayout layout, 
         const dim3 tileBlock(TILE, TILE_ROWS);
         const dim3 valuesGrid((lu.nnzA + TILE - 1) / TILE, (width + TILE - 1) / TILE);
         toInterleaved<<<valuesGrid, tileBlock, 0, stream>>>(lu.nnzA, lu.nnzA, width, lu.capacity, lu.dLaneMap.as<int>(),
-                lu.dEntryOfA.as<int>(), vals, lu.dLu.as<double>());
+                nullptr, lu.dEntryOfA.as<int>(), vals, lu.dLu.as<double>());
     }
     if (lu.nFill > 0) {
         zeroFill<<<blocksFor(static_cast<size_t>(lu.nFill) * width), LU_BLOCK, 0, stream>>>(lu.nFill, width,
@@ -269,29 +303,16 @@ void factorizeScalarLanes(ScalarLu& lu, const double* vals, BatchLayout layout, 
 }
 
 void solveScalarLanes(ScalarLu& lu, const double* b, double* x, cudaStream_t stream) {
-    const int width = lu.width;
-    if (width == 0) {
-        return;
+    if (lu.width > 0) {
+        solveScalar(lu, nullptr, lu.width, b, x, stream);
     }
-    const dim3 tileBlock(TILE, TILE_ROWS);
-    const dim3 vectorGrid((lu.n + TILE - 1) / TILE, (width + TILE - 1) / TILE);
-    toInterleaved<<<vectorGrid, tileBlock, 0, stream>>>(lu.n, lu.n, width, lu.capacity, lu.dLaneMap.as<int>(),
-            lu.dRowPosition.as<int>(), b, lu.dWork.as<double>());
-    for (int l = 0; l + 1 < static_cast<int>(lu.forwardLevelStart.size()); l++) {
-        const int rows = lu.forwardLevelStart[l + 1] - lu.forwardLevelStart[l];
-        forwardLevel<<<blocksFor(static_cast<size_t>(rows) * width), LU_BLOCK, 0, stream>>>(rows, width, lu.capacity,
-                lu.dForwardRow.as<int>() + lu.forwardLevelStart[l], lu.dLuRowPtr.as<int>(), lu.dLuCol.as<int>(),
-                lu.dLuDiag.as<int>(), lu.dLu.as<double>(), lu.dWork.as<double>());
+}
+
+void solveScalarSelectedLanes(ScalarLu& lu, const int* selected, int count, const double* b, double* x,
+                              cudaStream_t stream) {
+    if (count > 0) {
+        solveScalar(lu, selected, count, b, x, stream);
     }
-    for (int l = 0; l + 1 < static_cast<int>(lu.backwardLevelStart.size()); l++) {
-        const int rows = lu.backwardLevelStart[l + 1] - lu.backwardLevelStart[l];
-        backwardLevel<<<blocksFor(static_cast<size_t>(rows) * width), LU_BLOCK, 0, stream>>>(rows, width, lu.capacity,
-                lu.dBackwardRow.as<int>() + lu.backwardLevelStart[l], lu.dLuRowPtr.as<int>(), lu.dLuCol.as<int>(),
-                lu.dLuDiag.as<int>(), lu.dLu.as<double>(), lu.dWork.as<double>());
-    }
-    fromInterleaved<<<vectorGrid, tileBlock, 0, stream>>>(lu.n, lu.n, width, lu.capacity, lu.dLaneMap.as<int>(),
-            lu.dColPosition.as<int>(), lu.dWork.as<double>(), x);
-    CUDA_CHECK(cudaGetLastError());
 }
 
 std::vector<int> readScalarTrouble(ScalarLu& lu, cudaStream_t stream) {

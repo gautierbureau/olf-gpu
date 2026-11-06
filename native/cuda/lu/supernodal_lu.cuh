@@ -55,6 +55,11 @@ void factorizeSupernodalLanes(SupernodalLu& lu, const double* vals, BatchLayout 
 // outside the lane map keep their x.
 void solveSupernodalLanes(SupernodalLu& lu, const double* b, double* x, cudaStream_t stream);
 
+// solveSupernodalLanes on count of the last factorization's lanes only, selected[0 .. count) (device array of positions
+// in its lane map): each of them takes the operations solveSupernodalLanes gives it; every other scenario keeps its x.
+void solveSupernodalSelectedLanes(SupernodalLu& lu, const int* selected, int count, const double* b, double* x,
+                                  cudaStream_t stream);
+
 // The last factorization's clamp counts, per lane of its lane map (synchronizes the stream).
 std::vector<int> readSupernodalClamps(SupernodalLu& lu, cudaStream_t stream);
 

@@ -71,6 +71,22 @@ public final class BatchedLuNative {
                                                 double[] solutions, int[] pivoted, int[] pivotClamps);
 
     /**
+     * Factorizes the scenarios of {@code laneMap} as {@link #factorizeAndSolve} does, then solves the systems of those
+     * in {@code selected} only, as the adaptive refinement solves its corrections on the lanes still refining. Every
+     * other scenario's solution is left as it is.
+     *
+     * @param capacity       scenarios in the arrays
+     * @param values         CSR values, {@code capacity * nnz}, scenario-major
+     * @param rightHandSides {@code capacity * n}, scenario-major
+     * @param laneMap        the scenarios to factorize
+     * @param selected       the scenarios to solve, among them
+     * @param solutions      {@code capacity * n}, scenario-major: the selected scenarios' entries are overwritten
+     */
+    public static native void factorizeAndSolveSelected(int n, int[] rowPtr, int[] colIdx, int[] rowOrder, int[] colOrder,
+                                                        int capacity, double[] values, double[] rightHandSides,
+                                                        int[] laneMap, int[] selected, double[] solutions);
+
+    /**
      * The Newton step's linear solve of a structure with zero-impedance couplers on the scenarios of {@code laneMap}:
      * a factorization, the solve with cuDSS's in-solve refinement steps and the adaptive refinement, as a batch context
      * on our LU runs them. Every other scenario's solution is left as it is.

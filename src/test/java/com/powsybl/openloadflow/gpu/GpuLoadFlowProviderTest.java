@@ -7,6 +7,7 @@
  */
 package com.powsybl.openloadflow.gpu;
 
+import com.powsybl.commons.parameters.Parameter;
 import com.powsybl.ieeecdf.converter.IeeeCdfNetworkFactory;
 import com.powsybl.iidm.network.Bus;
 import com.powsybl.iidm.network.Network;
@@ -22,15 +23,20 @@ import com.powsybl.openloadflow.ac.solver.gpu.GpuMatchingAlgorithm;
 import com.powsybl.openloadflow.ac.solver.gpu.GpuPivotType;
 import com.powsybl.openloadflow.ac.solver.gpu.GpuReorderingAlgorithm;
 import com.powsybl.openloadflow.ac.solver.gpu.NewtonSettingsNative;
+import com.powsybl.openloadflow.dc.equations.DcApproximationType;
 import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
+import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
@@ -141,6 +147,89 @@ class GpuLoadFlowProviderTest {
         assertEquals("GPU_NEWTON_RAPHSON", OpenLoadFlowParameters.get(onDevice).getAcSolverType());
         assertEquals(17, OpenLoadFlowParameters.get(onDevice).getMaxNewtonRaphsonIterations());
         assertEquals(NewtonRaphsonFactory.NAME, OpenLoadFlowParameters.get(parameters).getAcSolverType());
+    }
+
+    /** OLF's parameters by name and value too, as pypowsybl's provider parameters set them. */
+    @Test
+    void olfParametersByNameValue() {
+        LoadFlowProvider provider = new GpuLoadFlowProvider();
+        List<String> names = provider.getRawSpecificParameters().stream().map(Parameter::getName).toList();
+        assertTrue(names.contains(OpenLoadFlowParameters.MAX_NEWTON_RAPHSON_ITERATIONS_PARAM_NAME));
+        assertTrue(names.contains(GpuLoadFlowParameters.REORDERING_ALGORITHM_PARAM_NAME));
+        assertEquals(names.size(), Set.copyOf(names).size(), "no name is both OLF's and the GPU solver's");
+
+        GpuLoadFlowParameters gpu = (GpuLoadFlowParameters) provider.loadSpecificParameters(Map.of(
+                OpenLoadFlowParameters.MAX_NEWTON_RAPHSON_ITERATIONS_PARAM_NAME, "7",
+                GpuLoadFlowParameters.REORDERING_ALGORITHM_PARAM_NAME, "AMD")).orElseThrow();
+        assertEquals(GpuReorderingAlgorithm.AMD, gpu.getReorderingAlgorithm());
+        assertEquals(Map.of(OpenLoadFlowParameters.MAX_NEWTON_RAPHSON_ITERATIONS_PARAM_NAME, "7"), gpu.getOpenLoadFlowParameters());
+
+        provider.updateSpecificParameters(gpu, Map.of(OpenLoadFlowParameters.VOLTAGE_REMOTE_CONTROL_PARAM_NAME, "false"));
+        Map<String, String> map = provider.createMapFromSpecificParameters(gpu);
+        assertEquals("7", map.get(OpenLoadFlowParameters.MAX_NEWTON_RAPHSON_ITERATIONS_PARAM_NAME));
+        assertEquals("false", map.get(OpenLoadFlowParameters.VOLTAGE_REMOTE_CONTROL_PARAM_NAME));
+        assertEquals("AMD", map.get(GpuLoadFlowParameters.REORDERING_ALGORITHM_PARAM_NAME));
+    }
+
+    /** An OLF value OLF rejects fails when it is set, not at the run. */
+    @Test
+    void anInvalidOlfValueFailsWhenSet() {
+        LoadFlowProvider provider = new GpuLoadFlowProvider();
+        Map<String, String> invalid = Map.of(OpenLoadFlowParameters.SLACK_BUS_SELECTION_MODE_PARAM_NAME, "NOT_A_MODE");
+        assertThrows(IllegalArgumentException.class, () -> provider.loadSpecificParameters(invalid));
+    }
+
+    /** They apply over the run's OLF parameters, whose other settings stay, on the copy only. */
+    @Test
+    void olfParametersByNameApplyOverTheRunsOnes() {
+        LoadFlowParameters parameters = new LoadFlowParameters();
+        OpenLoadFlowParameters.create(parameters).setMaxNewtonRaphsonIterations(17).setVoltageRemoteControl(false);
+        parameters.addExtension(GpuLoadFlowParameters.class, (GpuLoadFlowParameters) new GpuLoadFlowProvider()
+                .loadSpecificParameters(Map.of(OpenLoadFlowParameters.MAX_NEWTON_RAPHSON_ITERATIONS_PARAM_NAME, "7")).orElseThrow());
+
+        LoadFlowParameters onDevice = GpuLoadFlowProvider.withGpuSolver(parameters);
+
+        OpenLoadFlowParameters olf = OpenLoadFlowParameters.get(onDevice);
+        assertEquals(7, olf.getMaxNewtonRaphsonIterations());
+        assertFalse(olf.isVoltageRemoteControl());
+        assertEquals("GPU_NEWTON_RAPHSON", olf.getAcSolverType());
+        assertEquals(17, OpenLoadFlowParameters.get(parameters).getMaxNewtonRaphsonIterations());
+    }
+
+    /** With no OLF extension on the run, they apply over OLF's defaults; a DC run keeps OLF's solver. */
+    @Test
+    void olfParametersByNameApplyToADcRun() {
+        LoadFlowParameters parameters = new LoadFlowParameters().setDc(true);
+        parameters.addExtension(GpuLoadFlowParameters.class, new GpuLoadFlowParameters()
+                .setOpenLoadFlowParameters(Map.of("dcApproximationType", "IGNORE_G")));
+
+        LoadFlowParameters run = GpuLoadFlowProvider.withGpuSolver(parameters);
+
+        assertEquals(DcApproximationType.IGNORE_G, OpenLoadFlowParameters.get(run).getDcApproximationType());
+        assertEquals(NewtonRaphsonFactory.NAME, OpenLoadFlowParameters.get(run).getAcSolverType());
+        assertNull(parameters.getExtension(OpenLoadFlowParameters.class), "the caller's parameters are not modified");
+        assertTrue(LoadFlow.find(GpuLoadFlowProvider.NAME).run(IeeeCdfNetworkFactory.create14(), parameters).isFullyConverged());
+    }
+
+    /** A parameters file keeps them. */
+    @Test
+    void aParametersFileKeepsOlfParametersByName() {
+        LoadFlowParameters parameters = new LoadFlowParameters();
+        GpuLoadFlowParameters.create(parameters)
+                .setOpenLoadFlowParameters(Map.of(OpenLoadFlowParameters.MAX_NEWTON_RAPHSON_ITERATIONS_PARAM_NAME, "7"));
+        assertEquals(Map.of(OpenLoadFlowParameters.MAX_NEWTON_RAPHSON_ITERATIONS_PARAM_NAME, "7"),
+                jsonRoundTrip(parameters).getExtension(GpuLoadFlowParameters.class).getOpenLoadFlowParameters());
+    }
+
+    /** On the device, an OLF parameter set by name changes the run: one Newton-Raphson iteration does not converge. */
+    @Test
+    void anOlfParameterByNameChangesTheRunOnTheDevice() {
+        assumeTrue(GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        LoadFlowProvider provider = new GpuLoadFlowProvider();
+        LoadFlowParameters parameters = new LoadFlowParameters();
+        parameters.addExtension(GpuLoadFlowParameters.class, (GpuLoadFlowParameters) provider
+                .loadSpecificParameters(Map.of(OpenLoadFlowParameters.MAX_NEWTON_RAPHSON_ITERATIONS_PARAM_NAME, "1")).orElseThrow());
+        assertFalse(LoadFlow.find(GpuLoadFlowProvider.NAME).run(IeeeCdfNetworkFactory.create14(), parameters).isFullyConverged());
     }
 
     /** A DC load flow has no GPU path: it runs as in OLF. */

@@ -16,6 +16,7 @@ import com.powsybl.loadflow.LoadFlowParameters;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -90,6 +91,14 @@ public class GpuLoadFlowParameters extends AbstractExtension<LoadFlowParameters>
     private int iterativeRefinementBaseSteps = ITERATIVE_REFINEMENT_BASE_STEPS_DEFAULT_VALUE;
     private int iterativeRefinementMaxSteps = ITERATIVE_REFINEMENT_MAX_STEPS_DEFAULT_VALUE;
     private double iterativeRefinementTolerance = ITERATIVE_REFINEMENT_TOLERANCE_DEFAULT_VALUE;
+
+    /**
+     * OLF's parameters set by name through the {@code OpenLoadFlowGpu} provider's specific parameters (pypowsybl's
+     * {@code provider_parameters}), applied over the run's {@code OpenLoadFlowParameters}. The provider SPI gives a
+     * provider ONE specific-parameters extension, this one, so it carries them; they are kept as text, the way they
+     * were given, and validated by the provider when they are set.
+     */
+    private Map<String, String> openLoadFlowParameters = new LinkedHashMap<>();
 
     /** The settings last handed to the device (see {@link #install}). */
     private static GpuLoadFlowParameters installed = new GpuLoadFlowParameters();
@@ -314,6 +323,23 @@ public class GpuLoadFlowParameters extends AbstractExtension<LoadFlowParameters>
         return this;
     }
 
+    /** OLF's parameters set by name through the provider, by OLF parameter name (an unmodifiable view). */
+    public Map<String, String> getOpenLoadFlowParameters() {
+        return Collections.unmodifiableMap(openLoadFlowParameters);
+    }
+
+    /** Replaces OLF's parameters set by name through the provider. */
+    public GpuLoadFlowParameters setOpenLoadFlowParameters(Map<String, String> openLoadFlowParameters) {
+        this.openLoadFlowParameters = new LinkedHashMap<>(Objects.requireNonNull(openLoadFlowParameters));
+        return this;
+    }
+
+    /** Adds OLF's parameters set by name through the provider; a name already set takes the new value. */
+    public GpuLoadFlowParameters putOpenLoadFlowParameters(Map<String, String> openLoadFlowParameters) {
+        this.openLoadFlowParameters.putAll(Objects.requireNonNull(openLoadFlowParameters));
+        return this;
+    }
+
     public double getIterativeRefinementTolerance() {
         return iterativeRefinementTolerance;
     }
@@ -336,6 +362,7 @@ public class GpuLoadFlowParameters extends AbstractExtension<LoadFlowParameters>
                 + ", " + PIVOT_THRESHOLD_PARAM_NAME + "=" + pivotThreshold
                 + ", " + ITERATIVE_REFINEMENT_BASE_STEPS_PARAM_NAME + "=" + iterativeRefinementBaseSteps
                 + ", " + ITERATIVE_REFINEMENT_MAX_STEPS_PARAM_NAME + "=" + iterativeRefinementMaxSteps
-                + ", " + ITERATIVE_REFINEMENT_TOLERANCE_PARAM_NAME + "=" + iterativeRefinementTolerance + ")";
+                + ", " + ITERATIVE_REFINEMENT_TOLERANCE_PARAM_NAME + "=" + iterativeRefinementTolerance
+                + (openLoadFlowParameters.isEmpty() ? "" : ", openLoadFlowParameters=" + openLoadFlowParameters) + ")";
     }
 }

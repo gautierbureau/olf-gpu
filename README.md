@@ -6,7 +6,9 @@ GPU extension for [powsybl-open-loadflow](https://github.com/powsybl/powsybl-ope
   AC Newton-Raphson on the GPU. Select it by provider name; OLF's own parameters apply unchanged, and
   the GPU solver's parameters (`GpuLoadFlowParameters`: ordering, matching, pivoting, iterative
   refinement) are its specific parameters, settable in a parameters JSON file, by name/value or in the
-  `open-loadflow-gpu-default-parameters` configuration module.
+  `open-loadflow-gpu-default-parameters` configuration module. By name/value (pypowsybl's
+  `provider_parameters`) the provider also takes OLF's parameters (`maxNewtonRaphsonIterations`, ...): the GPU
+  extension carries them and each run applies them over its `OpenLoadFlowParameters`.
 - **`GPU_NEWTON_RAPHSON`** — the cuDSS-backed full-Newton-Raphson AC solver behind it, plugged in
   through OLF's `AcSolver` SPI (`OpenLoadFlowParameters.setAcSolverType(GpuNewtonRaphsonFactory.NAME)`
   also selects it under OLF's own provider). One JNI call

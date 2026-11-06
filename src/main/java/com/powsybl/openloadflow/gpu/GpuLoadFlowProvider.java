@@ -30,12 +30,16 @@ import com.powsybl.openloadflow.graph.GraphConnectivityFactory;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
 
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.stream.Collectors;
 
 /**
  * OLF's load flow, with the AC Newton-Raphson on the GPU (name {@value #NAME}, the same as the GPU security
@@ -43,8 +47,10 @@ import java.util.concurrent.CompletableFuture;
  *
  * <p>OLF's own parameters are reused as they are: the {@link OpenLoadFlowParameters} extension, its JSON entry, its
  * configuration module and its defaults. This provider's specific parameters are only the GPU solver's,
- * {@link GpuLoadFlowParameters}, so one parameters file carries both extensions. A DC load flow has no GPU path and
- * runs as in OLF.
+ * {@link GpuLoadFlowParameters}, so one parameters file carries both extensions. By name and value (pypowsybl's
+ * {@code provider_parameters}) this provider also takes OLF's parameters: the provider SPI gives a provider a single
+ * specific-parameters extension, so the GPU one carries them and the run applies them over its OLF parameters. A DC
+ * load flow has no GPU path and runs as in OLF.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
@@ -52,6 +58,24 @@ import java.util.concurrent.CompletableFuture;
 public class GpuLoadFlowProvider extends OpenLoadFlowProvider {
 
     public static final String NAME = "OpenLoadFlowGpu";
+
+    private static final Set<String> OPEN_LOAD_FLOW_PARAMETER_NAMES = OpenLoadFlowParameters.SPECIFIC_PARAMETERS.stream()
+            .map(Parameter::getName)
+            .collect(Collectors.toUnmodifiableSet());
+
+    /** OLF's parameters, then the GPU solver's; no name is both. */
+    static final List<Parameter> SPECIFIC_PARAMETERS = specificParameters();
+
+    private static List<Parameter> specificParameters() {
+        List<Parameter> parameters = new ArrayList<>(OpenLoadFlowParameters.SPECIFIC_PARAMETERS);
+        for (Parameter gpu : GpuLoadFlowParameters.SPECIFIC_PARAMETERS) {
+            if (OPEN_LOAD_FLOW_PARAMETER_NAMES.contains(gpu.getName())) {
+                throw new IllegalStateException("GPU solver parameter " + gpu.getName() + " is also an OLF parameter");
+            }
+            parameters.add(gpu);
+        }
+        return List.copyOf(parameters);
+    }
 
     public GpuLoadFlowProvider() {
         this(new SparseMatrixFactory());
@@ -82,12 +106,16 @@ public class GpuLoadFlowProvider extends OpenLoadFlowProvider {
     }
 
     /**
-     * The caller's parameters with the GPU Newton-Raphson as the AC solver. A copy: the caller's parameters are
-     * left as they were, so reusing them with OLF's provider runs on the CPU. {@link LoadFlowParameters#copy()}
-     * goes through the JSON form, so it keeps every extension, OLF's and the GPU solver's.
+     * The caller's parameters with OLF's parameters set by name through this provider applied, and the GPU
+     * Newton-Raphson as the AC solver. A copy: the caller's parameters are left as they were, so reusing them with
+     * OLF's provider runs on the CPU. {@link LoadFlowParameters#copy()} goes through the JSON form, so it keeps every
+     * extension, OLF's and the GPU solver's. A DC load flow keeps OLF's solver, and is not copied when there is
+     * nothing to apply.
      */
     static LoadFlowParameters withGpuSolver(LoadFlowParameters parameters) {
-        if (parameters.isDc()) {
+        GpuLoadFlowParameters gpu = parameters.getExtension(GpuLoadFlowParameters.class);
+        Map<String, String> openLoadFlowProperties = gpu != null ? gpu.getOpenLoadFlowParameters() : Map.of();
+        if (parameters.isDc() && openLoadFlowProperties.isEmpty()) {
             return parameters;
         }
         LoadFlowParameters copy = parameters.copy();
@@ -95,7 +123,10 @@ public class GpuLoadFlowProvider extends OpenLoadFlowProvider {
         if (parametersExt == null) {
             parametersExt = OpenLoadFlowParameters.create(copy);   // OLF's defaults, as OpenLoadFlowParameters.get gives
         }
-        parametersExt.setAcSolverType(GpuNewtonRaphsonFactory.NAME);
+        parametersExt.update(openLoadFlowProperties);
+        if (!copy.isDc()) {
+            parametersExt.setAcSolverType(GpuNewtonRaphsonFactory.NAME);
+        }
         return copy;
     }
 
@@ -109,19 +140,21 @@ public class GpuLoadFlowProvider extends OpenLoadFlowProvider {
         return Optional.of(GpuLoadFlowParameters.load(platformConfig));
     }
 
+    /** By name and value: the GPU solver's parameters, and OLF's, applied over the run's OLF parameters. */
     @Override
     public Optional<Extension<LoadFlowParameters>> loadSpecificParameters(Map<String, String> properties) {
-        return Optional.of(GpuLoadFlowParameters.load(properties));
+        return Optional.of(GpuLoadFlowParameters.load(properties).setOpenLoadFlowParameters(openLoadFlowProperties(properties)));
     }
 
+    /** OLF's parameters, then the GPU solver's: every name this provider takes by name and value. */
     @Override
     public List<Parameter> getRawSpecificParameters() {
-        return GpuLoadFlowParameters.SPECIFIC_PARAMETERS;
+        return SPECIFIC_PARAMETERS;
     }
 
     @Override
     public void updateSpecificParameters(Extension<LoadFlowParameters> extension, Map<String, String> properties) {
-        ((GpuLoadFlowParameters) extension).update(properties);
+        ((GpuLoadFlowParameters) extension).update(properties).putOpenLoadFlowParameters(openLoadFlowProperties(properties));
     }
 
     @Override
@@ -134,11 +167,28 @@ public class GpuLoadFlowProvider extends OpenLoadFlowProvider {
         return Optional.of(GpuLoadFlowParameters.class);
     }
 
+    /** The GPU solver's parameters, and OLF's set by name through this provider. */
     @Override
     public Map<String, String> createMapFromSpecificParameters(Extension<LoadFlowParameters> extension) {
-        Map<String, String> map = new HashMap<>();
-        ((GpuLoadFlowParameters) extension).toMap().forEach((key, value) -> map.put(key, Objects.toString(value)));
+        GpuLoadFlowParameters gpu = (GpuLoadFlowParameters) extension;
+        Map<String, String> map = new HashMap<>(gpu.getOpenLoadFlowParameters());
+        gpu.toMap().forEach((key, value) -> map.put(key, Objects.toString(value)));
         return map;
+    }
+
+    /**
+     * The OLF parameters among {@code properties}, validated: a value OLF rejects fails here, when it is set, not
+     * at the run. The GPU solver's names are left to {@link GpuLoadFlowParameters#update(Map)}.
+     */
+    static Map<String, String> openLoadFlowProperties(Map<String, String> properties) {
+        Map<String, String> olf = new LinkedHashMap<>();
+        properties.forEach((name, value) -> {
+            if (OPEN_LOAD_FLOW_PARAMETER_NAMES.contains(name)) {
+                olf.put(name, value);
+            }
+        });
+        OpenLoadFlowParameters.load(olf);
+        return olf;
     }
 
     @Override

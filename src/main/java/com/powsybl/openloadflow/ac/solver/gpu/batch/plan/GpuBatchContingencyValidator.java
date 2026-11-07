@@ -113,8 +113,12 @@ public final class GpuBatchContingencyValidator {
         Set<LfBus> slackBuses = network.getSynchronousNetworks().stream()
                 .flatMap(sn -> sn.getSlackBuses().stream())
                 .collect(Collectors.toSet());
+        // The islanding analysis depends only on the cut and on the network, which does not change here: scenarios
+        // cutting the same branches (an operator strategy's pair whose actions open or close nothing cuts exactly its
+        // contingency's) share one analysis.
+        java.util.Map<List<Integer>, Qualification> byCut = new java.util.HashMap<>();
         return contingencies.stream()
-                .map(c -> qualifyOne(network, connectivity, slackBuses, c, elementMapper, handleIslanding, relocation))
+                .map(c -> qualifyOne(network, connectivity, slackBuses, c, elementMapper, handleIslanding, relocation, byCut))
                 .toList();
     }
 
@@ -123,7 +127,8 @@ public final class GpuBatchContingencyValidator {
                                            BatchContingency contingency,
                                            GpuAcElementMapper elementMapper,
                                            boolean handleIslanding,
-                                           SlackRelocation relocation) {
+                                           SlackRelocation relocation,
+                                           java.util.Map<List<Integer>, Qualification> byCut) {
         List<LfBranch> branches = contingency.outagedBranches();
 
         // The GPU disabled mask can only mask branches the element pack contains — the SIDE-OPENED
@@ -158,6 +163,25 @@ public final class GpuBatchContingencyValidator {
         if (closed.isEmpty()) {
             return Qualification.ok(contingency);
         }
+        List<Integer> cut = closed.stream().map(LfBranch::getNum).distinct().sorted().toList();
+        Qualification known = byCut.get(cut);
+        if (known != null) {
+            return known.qualified()
+                    ? new Qualification(contingency, true, null, known.islandedBuses(), known.relocatedSlack())
+                    : Qualification.rejected(contingency, known.reason());
+        }
+        Qualification qualification = islandingQualification(network, connectivity, slackBuses, contingency, closed,
+                handleIslanding, relocation);
+        byCut.put(cut, qualification);
+        return qualification;
+    }
+
+    /** The islanding analysis of an outage cutting {@code closed}: whether the main component loses buses, which,
+     *  and whether OLF relocates the slack. */
+    private static Qualification islandingQualification(LfNetwork network, GraphConnectivity<LfBus, LfBranch> connectivity,
+                                                        Set<LfBus> slackBuses, BatchContingency contingency,
+                                                        List<LfBranch> closed, boolean handleIslanding,
+                                                        SlackRelocation relocation) {
         LfBus slack = network.getSynchronousNetworks().getFirst().getSlackBuses().getFirst();
         connectivity.startTemporaryChanges();
         try {

@@ -352,7 +352,13 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
     /** The current contingency's side-opened branches as limit-table indices (null when none has limits): their
      *  screen records are dropped and the host scans them in full, in table order. */
     private static java.util.BitSet sideOpenedTableIndices(GpuSaRunState run, LfNetwork network) {
-        if (run.sideOpened.isEmpty()) {
+        return tableIndices(run, network, run.sideOpened);
+    }
+
+    /** These branches as limit-table indices (null when none has limits): the host scans them in full, in table order,
+     *  instead of trusting the screen, which evaluates every branch in the base topology with its base parameters. */
+    private static java.util.BitSet tableIndices(GpuSaRunState run, LfNetwork network, java.util.Collection<LfBranch> branches) {
+        if (branches.isEmpty()) {
             return null;
         }
         GpuLimitTable table = run.limitTable;
@@ -364,7 +370,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
             }
         }
         java.util.BitSet sideOpened = new java.util.BitSet();
-        for (LfBranch branch : run.sideOpened) {
+        for (LfBranch branch : branches) {
             int b = run.tableIndexOfBranchNum[branch.getNum()];
             if (b >= 0 && table.groupStart(b) != table.groupEnd(b)) {
                 sideOpened.set(b);
@@ -621,6 +627,14 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
     private void detectViolations(LfNetwork network, LimitViolationManager manager, List<LimitReduction> limitReductions,
                                   LimitViolationManager reference, SecurityAnalysisParameters saParameters,
                                   String contingencyId) {
+        detectViolations(network, manager, limitReductions, reference, saParameters, contingencyId, null);
+    }
+
+    /** {@code scanInFull}: the branches the screen cannot be trusted on for this scenario, scanned in full on the host
+     *  (null: the current contingency's side-opened branches). */
+    private void detectViolations(LfNetwork network, LimitViolationManager manager, List<LimitReduction> limitReductions,
+                                  LimitViolationManager reference, SecurityAnalysisParameters saParameters,
+                                  String contingencyId, java.util.Collection<LfBranch> scanInFull) {
         GpuSaRunState run = runState.get();
         if (run.limitScanner == null) {
             GpuLimitTable table = GpuLimitTable.build(network, LimitReductionManager.create(limitReductions));
@@ -646,7 +660,8 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                 }
             }
         }
-        java.util.BitSet sideOpened = run.violationScreen != null ? sideOpenedTableIndices(run, network) : null;
+        java.util.BitSet sideOpened = run.violationScreen == null ? null
+                : scanInFull != null ? tableIndices(run, network, scanInFull) : sideOpenedTableIndices(run, network);
         if (run.violationScreen != null) {
             int[] candidates = run.candidates.get(contingencyId);
             run.limitScanner.detectFromCandidates(network, manager,
@@ -746,7 +761,24 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                 preContingencyNetworkResult, contingency, loadFlowModel, securityAnalysisParameters.getLoadFlowParameters().getDcPowerFactor(),
                 securityAnalysisParameters.getModifiedMonitoredElementsParameters());
         postActionsNetworkResult.update();
-        postActionsViolationManager.detectViolations(network);
+        // The device screen covers the pair's state like a contingency's (screenAll ran over every precomputed state). It
+        // reads each branch in the base topology with its base parameters, so the branches the contingency opened at one
+        // side and those the actions open, close or retap are scanned in full on the host.
+        java.util.Set<LfBranch> scanInFull = new java.util.LinkedHashSet<>(sideOpenedBranches(lfContingency));
+        for (com.powsybl.openloadflow.network.action.LfAction lfAction : lfActions) {
+            if (lfAction instanceof com.powsybl.openloadflow.network.action.AbstractLfBranchAction<?> branchAction) {
+                scanInFull.addAll(branchAction.getDisabledBranches());
+                scanInFull.addAll(branchAction.getEnabledBranches());
+            } else if (lfAction instanceof com.powsybl.openloadflow.network.action.AbstractLfTapChangerAction<?> tapAction
+                    && tapAction.getChange() != null) {
+                scanInFull.add(tapAction.getChange().getBranch());
+            }
+        }
+        if (contingency.getId().equals(runState.get().deviceStateInjectedFor)) {
+            scanInFull.addAll(runState.get().automationSystemSwitched);
+        }
+        detectViolations(network, postActionsViolationManager, limitReductions, preContingencyLimitViolationManager,
+                securityAnalysisParameters, scId, scanInFull);
         return new OperatorStrategyResult(operatorStrategy,
                 List.of(new OperatorStrategyResult.ConditionalActionsResult(operatorStrategy.getId(),
                         PostContingencyComputationStatus.CONVERGED,

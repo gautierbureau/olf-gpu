@@ -892,6 +892,12 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
             syntheticStrategies(network, contingencies,
                     Integer.parseInt(System.getenv().getOrDefault("OLF_GPU_SA_STRATEGY_EVERY", "20")));
         }
+        // OLF_GPU_SA_STRATEGY_FILE=<json>: the actions and operator strategies of a case file in pypowsybl's names
+        // ("actions" SWITCH / PHASE_TAP_CHANGER_POSITION, "operator_strategies")
+        String strategyFile = System.getenv("OLF_GPU_SA_STRATEGY_FILE");
+        if (strategyFile != null) {
+            strategiesFromFile(Path.of(strategyFile));
+        }
         armMark("cpu start");
         long cpuT0 = System.nanoTime();
         // With a single contingency under the lens, monitor every voltage level: whether the two arms
@@ -1631,6 +1637,50 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
             }
         }
         System.out.printf("  STRATEGIES: %d on %d contingencies (every %d-th), %d actions%n", strats.size(), chosen, every, acts.size());
+    }
+
+    /** Actions and operator strategies from a case file (see OLF_GPU_SA_STRATEGY_FILE): SWITCH (switch_id, open) and
+     *  PHASE_TAP_CHANGER_POSITION (transformer_id, tap_position, relative) actions; strategies on one contingency with
+     *  TRUE_CONDITION (default) or AT_LEAST_ONE_VIOLATION_CONDITION. Counts only are printed (network data rule). */
+    private void strategiesFromFile(Path file) {
+        com.fasterxml.jackson.databind.JsonNode root;
+        try {
+            root = com.powsybl.commons.json.JsonUtil.createObjectMapper().readTree(file.toFile());
+        } catch (java.io.IOException e) {
+            throw new java.io.UncheckedIOException(e);
+        }
+        List<com.powsybl.action.Action> acts = new ArrayList<>();
+        for (com.fasterxml.jackson.databind.JsonNode a : root.get("actions")) {
+            String id = a.get("id").asText();
+            String type = a.get("type").asText();
+            if ("SWITCH".equals(type)) {
+                acts.add(new com.powsybl.action.SwitchActionBuilder().withId(id).withNetworkElementId(a.get("switch_id").asText())
+                        .withOpen(a.get("open").asBoolean()).build());
+            } else if ("PHASE_TAP_CHANGER_POSITION".equals(type)) {
+                acts.add(new com.powsybl.action.PhaseTapChangerTapPositionActionBuilder().withId(id)
+                        .withTransformerId(a.get("transformer_id").asText()).withTapPosition(a.get("tap_position").asInt())
+                        .withRelativeValue(a.path("relative").asBoolean(false)).build());
+            } else {
+                throw new IllegalArgumentException("action type " + type + " not supported");
+            }
+        }
+        List<com.powsybl.contingency.strategy.OperatorStrategy> strats = new ArrayList<>();
+        for (com.fasterxml.jackson.databind.JsonNode s : root.get("operator_strategies")) {
+            String condition = s.path("condition_type").asText("TRUE_CONDITION");
+            com.powsybl.contingency.strategy.condition.Condition c = switch (condition) {
+                case "TRUE_CONDITION" -> new com.powsybl.contingency.strategy.condition.TrueCondition();
+                case "AT_LEAST_ONE_VIOLATION_CONDITION" -> new com.powsybl.contingency.strategy.condition.AnyViolationCondition();
+                default -> throw new IllegalArgumentException("condition " + condition + " not supported");
+            };
+            List<String> ids = new ArrayList<>();
+            s.get("action_ids").forEach(x -> ids.add(x.asText()));
+            strats.add(new com.powsybl.contingency.strategy.OperatorStrategy(s.get("id").asText(),
+                    com.powsybl.contingency.ContingencyContext.specificContingency(s.get("contingency_id").asText()), c, ids));
+        }
+        this.actions = List.copyOf(acts);
+        this.strategies = List.copyOf(strats);
+        System.out.printf("  STRATEGIES from file: %d on %d contingencies, %d actions%n", strats.size(),
+                strats.stream().map(x -> x.getContingencyContext().getContingencyId()).distinct().count(), acts.size());
     }
 
     /** One violation's identity across the arms. The LOCATION is part of it: a voltage level split into several buses

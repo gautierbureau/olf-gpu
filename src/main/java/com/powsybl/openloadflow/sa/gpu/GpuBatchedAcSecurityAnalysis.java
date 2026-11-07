@@ -359,6 +359,35 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
     }
 
     /**
+     * The branches whose flows the detection of a device-answered operator strategy reads (see flowReadSet): those of
+     * the limits the screen flagged for the pair, those it does not cover, and {@code scanInFull}; null for "refresh
+     * them all" when the screen is not available for the pair or another reader of flows is on (a branch or
+     * three-windings transformer state monitor, the diagnostics).
+     */
+    private int[] strategyFlowReadSet(GpuSaRunState run, String pairId, java.util.Collection<LfBranch> scanInFull) {
+        if (run.violationScreen == null || run.candidates == null || flowsMonitored()
+                || GpuTrace.SA_RESID.isOn() || GpuTrace.VIOL_CROSSCHECK.isOn()) {
+            return null;
+        }
+        int[] candidates = run.candidates.get(pairId);
+        if (candidates == null) {
+            return null;                                     // the detection would screen it on the host: read all
+        }
+        GpuLimitTable table = run.limitTable;
+        java.util.BitSet nums = new java.util.BitSet();
+        for (int c : candidates) {
+            if (c < table.limitCount()) {                    // bus records come after the limits: they read bus V only
+                nums.set(table.branches()[table.groupBranch(table.limitGroup(c))].getNum());
+            }
+        }
+        for (int b : run.uncoveredBranches) {
+            nums.set(table.branches()[b].getNum());
+        }
+        scanInFull.forEach(branch -> nums.set(branch.getNum()));
+        return nums.stream().toArray();
+    }
+
+    /**
      * Gives the network the branches the device's AutomationSystem phase switched for a contingency, as OLF's loop leaves
      * them: an opened branch disabled, a closed one enabled, and nothing else, the device switching only where every bus
      * stays connected. The contingency leaves an operated branch as it is in the base (GpuBatchQualification
@@ -806,17 +835,6 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                 }
             }
         }
-        GpuStateInjector.injectState(precomputed.equationSystem(), precomputed.baseVariableRows(), state,
-                runState.get().remap);
-        AcSolverUtil.updateNetwork(network, precomputed.equationSystem());
-        var postActionsViolationManager = new LimitViolationManager(preContingencyLimitViolationManager, limitReductions,
-                securityAnalysisParameters.getIncreasedViolationsParameters());
-        LoadFlowModel loadFlowModel = securityAnalysisParameters.getLoadFlowParameters().isDc() ? LoadFlowModel.DC : LoadFlowModel.AC;
-        var postActionsNetworkResult = new PostContingencyNetworkResult(network,
-                new AbstractNetworkResult.StateMonitorIndexes(monitorIndex, zeroImpedanceMonitoredIndex), createResultExtension,
-                preContingencyNetworkResult, contingency, loadFlowModel, securityAnalysisParameters.getLoadFlowParameters().getDcPowerFactor(),
-                securityAnalysisParameters.getModifiedMonitoredElementsParameters());
-        postActionsNetworkResult.update();
         // The device screen covers the pair's state like a contingency's (screenAll ran over every precomputed state). It
         // reads each branch in the base topology with its base parameters, so the branches the contingency opened at one
         // side and those the actions open, close or retap are scanned in full on the host.
@@ -833,6 +851,18 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         if (contingency.getId().equals(runState.get().deviceStateInjectedFor)) {
             scanInFull.addAll(runState.get().automationSystemSwitched);
         }
+        // only the flows the screened detection reads are refreshed, as for a contingency (flowReadSet)
+        GpuStateInjector.injectState(precomputed.equationSystem(), precomputed.baseVariableRows(), state,
+                runState.get().remap, strategyFlowReadSet(runState.get(), scId, scanInFull));
+        AcSolverUtil.updateNetwork(network, precomputed.equationSystem());
+        var postActionsViolationManager = new LimitViolationManager(preContingencyLimitViolationManager, limitReductions,
+                securityAnalysisParameters.getIncreasedViolationsParameters());
+        LoadFlowModel loadFlowModel = securityAnalysisParameters.getLoadFlowParameters().isDc() ? LoadFlowModel.DC : LoadFlowModel.AC;
+        var postActionsNetworkResult = new PostContingencyNetworkResult(network,
+                new AbstractNetworkResult.StateMonitorIndexes(monitorIndex, zeroImpedanceMonitoredIndex), createResultExtension,
+                preContingencyNetworkResult, contingency, loadFlowModel, securityAnalysisParameters.getLoadFlowParameters().getDcPowerFactor(),
+                securityAnalysisParameters.getModifiedMonitoredElementsParameters());
+        postActionsNetworkResult.update();
         detectViolations(network, postActionsViolationManager, limitReductions, preContingencyLimitViolationManager,
                 securityAnalysisParameters, scId, scanInFull);
         // what restorePostContingencyState must undo: with tap actions only, the retapped branches and the voltages

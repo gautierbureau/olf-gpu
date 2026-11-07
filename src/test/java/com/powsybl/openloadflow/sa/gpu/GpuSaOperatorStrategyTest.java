@@ -428,6 +428,47 @@ class GpuSaOperatorStrategyTest extends AbstractGpuSaTest {
     }
 
     @Test
+    void activePowerViolationAfterAStrategyReadsTheStrategyFlows() {
+        // A device-answered strategy refreshes only the flows its detection reads: the branches the screen flagged for
+        // the pair among them. An active power limit reads the branch's cached flow (unlike a current, evaluated from the
+        // state): L1 carries more after the tap moves flow off PS1's path, over a limit set between its post-contingency
+        // flow and its post-action one, and that violation is found only if L1's flow is refreshed for the pair.
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = com.powsybl.openloadflow.network.PhaseControlFactory.createNetworkWithT2wt();
+        com.powsybl.iidm.network.Line l1 = network.getLine("L1");
+        network.newLine().setId("L1_BIS")
+                .setVoltageLevel1(l1.getTerminal1().getVoltageLevel().getId()).setBus1(l1.getTerminal1().getBusBreakerView().getBus().getId())
+                .setVoltageLevel2(l1.getTerminal2().getVoltageLevel().getId()).setBus2(l1.getTerminal2().getBusBreakerView().getBus().getId())
+                .setR(l1.getR()).setX(l1.getX()).setG1(0).setB1(0).setG2(0).setB2(0).add();
+        com.powsybl.iidm.network.TwoWindingsTransformer ps1 = network.getTwoWindingsTransformer("PS1");
+        // L1's active power after the contingency, at PS1's own tap and at each other tap
+        int baseTap = ps1.getPhaseTapChanger().getTapPosition();
+        network.getLine("L1_BIS").disconnect();
+        java.util.Map<Integer, Double> flowByTap = new java.util.TreeMap<>();
+        for (int tap = ps1.getPhaseTapChanger().getLowTapPosition(); tap <= ps1.getPhaseTapChanger().getHighTapPosition(); tap++) {
+            ps1.getPhaseTapChanger().setTapPosition(tap);
+            new com.powsybl.loadflow.LoadFlow.Runner(new com.powsybl.openloadflow.OpenLoadFlowProvider(commonTestConfig.matrixFactory())).run(network);
+            flowByTap.put(tap, Math.abs(l1.getTerminal1().getP()));
+        }
+        ps1.getPhaseTapChanger().setTapPosition(baseTap);
+        network.getLine("L1_BIS").connect();
+        int actionTap = flowByTap.entrySet().stream().max(java.util.Map.Entry.comparingByValue()).orElseThrow().getKey();
+        double before = flowByTap.get(baseTap);
+        double after = flowByTap.get(actionTap);
+        org.junit.jupiter.api.Assertions.assertTrue(after > 1.2 * before, "the fixture needs a tap that raises L1's flow: " + flowByTap);
+        l1.newActivePowerLimits1().setPermanentLimit((before + after) / 2).add();
+        List<Contingency> contingencies = List.of(new Contingency("L1_BIS", new BranchContingency("L1_BIS")));
+        List<com.powsybl.action.Action> actions = List.of(
+                new com.powsybl.action.PhaseTapChangerTapPositionAction("ps1Shift", "PS1", false, actionTap));
+        List<com.powsybl.contingency.strategy.OperatorStrategy> strategies = List.of(
+                new com.powsybl.contingency.strategy.OperatorStrategy("sPs1Shift",
+                        com.powsybl.contingency.ContingencyContext.all(),
+                        new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of("ps1Shift")));
+        assertStrategyMatchesCpu(network, contingencies, strategies, actions, 2);
+    }
+
+    @Test
     void strategyAfterADeviceTapStrategyStartsFromThePostContingencyState() {
         // Between two strategies of a contingency OLF restores the post-contingency state; after a device-answered
         // strategy with tap actions only, the GPU security analysis restores the retapped branches (and lazily the

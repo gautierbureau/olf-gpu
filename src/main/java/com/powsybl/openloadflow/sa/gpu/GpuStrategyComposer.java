@@ -12,6 +12,7 @@ import com.powsybl.contingency.strategy.OperatorStrategy;
 import com.powsybl.iidm.network.Network;
 import com.powsybl.openloadflow.ac.outerloop.gpu.GpuTransformerVoltageControlOuterLoop;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.BatchContingency;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.GpuBatchScopeCensus;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.LoadLoss;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.ShuntShift;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.TapR1Override;
@@ -420,12 +421,14 @@ final class GpuStrategyComposer {
                                              boolean relative, int tapPosition) {
         LfBranch b = net.getBranchById(transformerId);
         if (b == null || tapChanger == null) {
+            GpuBatchScopeCensus.record(b == null ? "PAIR:TAP_BRANCH_NOT_IN_NETWORK" : "PAIR:TAP_NO_TAP_CHANGER");
             return null;
         }
         double[][] table = GpuTransformerVoltageControlOuterLoop.tapModels(b.getPiModel());
         int low = tapChanger.getLowTapPosition();
         int idx = (relative ? tapChanger.getTapPosition() + tapPosition : tapPosition) - low;
         if (table.length == 0 || idx < 0 || idx >= table.length) {
+            GpuBatchScopeCensus.record(table.length == 0 ? "PAIR:TAP_NO_TABLE" : "PAIR:TAP_OUT_OF_RANGE");
             return null;                                     // no tap table / out-of-range position — CPU
         }
         return new TapR1Override(b, table[idx]);

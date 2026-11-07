@@ -387,6 +387,9 @@ final class GpuBatchPrecomputer {
                     BatchContingency pair = GpuStrategyComposer.composeStrategyScenario(network, net, propagatedContingency.getContingency().getId(), strategy, actionIds, actions,
                             zeroImpedanceBranchOutages, branches, gens, loads, propagatedContingency.getLoadIdsToLose().keySet(), shifts, hvdcs,
                             sideOpens, nonSpanningTreeBranches, context.getParameters().getNetworkParameters(), pairBt);
+                    if (pair == null) {
+                        GpuBatchScopeCensus.record("PAIR:COMPOSE_REFUSED");
+                    }
                     // An absolute GeneratorAction on a participant restarts that generator from the value, over
                     // its share of the parent's distribution. The pair leg drops the parent's anchor shift of the
                     // generator's BUS, which is that share only when no other participant sits on the bus.

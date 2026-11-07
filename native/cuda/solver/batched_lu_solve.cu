@@ -30,17 +30,21 @@ BatchedLuSystems systemsOf(BatchSolverContext* ctx, int nS, const char* lanes) {
                             ctx->dIterativeRefinementScenarioMask, ctx->layout};
 }
 
-// solveWithInternalRefinement with solve(rhs, out) solving the lanes of lanes (every lane when null).
+// The internal refinement steps of a solve: cuDSS's base steps on a structure with couplers, none without.
+int internalRefinementSteps(const BatchedLuSystems& systems) {
+    return systems.couplers ? configuredIterativeRefinementBaseSteps() : ITERATIVE_REFINEMENT_STEPS_WITHOUT_COUPLERS;
+}
+
+// x = A^-1 b with steps internal refinement steps, solve(rhs, out) solving the lanes of lanes (every lane when null).
 template <typename SolveFn>
 void solveRefined(const BatchedLuSystems& systems, const double* b, double* x, double* r, double* d, const char* lanes,
-                  SolveFn solve) {
+                  int steps, SolveFn solve) {
     const int n = systems.n;
     const int nS = systems.nS;
     {
         AnalysisTimer at_(__LINE__, 'S');
         solve(b, x);
     }
-    const int steps = systems.couplers ? configuredIterativeRefinementBaseSteps() : ITERATIVE_REFINEMENT_STEPS_WITHOUT_COUPLERS;
     for (int step = 0; step < steps; step++) {
         launchResidual(systems.stream, n, nS, systems.nnz, systems.rowPtr, systems.colIdx, systems.vals, systems.layout,
                        x, b, lanes, r);
@@ -66,28 +70,43 @@ void solveRefined(const BatchedLuSystems& systems, const double* b, double* x, d
 // backward ratio of 1.1 where cuDSS refines the same system to 3e-11.
 void solveWithInternalRefinement(const BatchedLuSystems& systems, const double* b, double* x, double* r, double* d,
                                  const char* lanes) {
-    solveRefined(systems, b, x, r, d, lanes, [&](const double* rhs, double* out) {
+    solveRefined(systems, b, x, r, d, lanes, internalRefinementSteps(systems), [&](const double* rhs, double* out) {
         solveLanes(*systems.lu, rhs, out, systems.stream);
     });
 }
 
+// The Newton step's own solve is a plain one, and its refinement is the adaptive one alone: every lane's backward
+// residual is checked, and the lanes above the tolerance - on a coupler system, those whose repaired zero diagonals the
+// static pivoting factored inaccurately - take corrections, up to the same configuredIterativeRefinementMaxSteps
+// solves in all. The first correction is a plain solve too: it is the internal step those lanes took after the Newton
+// solve, the same arithmetic on the same lanes. The later ones are solved with the internal steps (a correction step
+// that raised a busbar lane's residual otherwise ended its refinement, see solveWithInternalRefinement). A lane the
+// plain solve already solved to the tolerance takes no refinement: the internal step every lane took after it was half
+// of a coupler system's triangular solves. On a busbar scope, where nearly every lane refines, the first correction
+// solved with its own internal step cost a third solve per lane (network.xiidm busbar: 811 -> 1598 extra solves).
 void solveNewtonStep(const BatchedLuSystems& systems, const double* b, double* dx, const std::function<void()>& afterSolve) {
-    solveWithInternalRefinement(systems, b, dx, systems.residual, systems.correction, systems.lanes);
+    const int steps = systems.couplers ? 0 : internalRefinementSteps(systems);
+    solveRefined(systems, b, dx, systems.residual, systems.correction, systems.lanes, steps,
+                 [&](const double* rhs, double* out) {
+        solveLanes(*systems.lu, rhs, out, systems.stream);
+    });
     if (afterSolve) {
         afterSolve();
     }
     if (!systems.couplers) {
         return;
     }
-    // the cuDSS batch's adaptive refinement of the lanes still above the tolerance, each correction solved on those
-    // lanes only: the other lanes would not take theirs
+    // the adaptive refinement of the lanes above the tolerance, each correction solved on those lanes only: the other
+    // lanes would not take theirs
+    int corrections = 0;
     refineLanes(RefinementContext{systems.stream, systems.rowPtr, systems.colIdx, systems.score, systems.mask,
                                   systems.lanes, systems.layout}, systems.nS,
                 systems.n, systems.nnz, systems.vals, dx, b, systems.residual, systems.correction, systems.lanes,
-                configuredIterativeRefinementBaseSteps(), [&](const std::vector<char>& refining, const char* refiningMask) {
+                steps, [&](const std::vector<char>& refining, const char* refiningMask) {
         selectLanes(*systems.lu, refining, systems.stream);
+        const int internal = corrections++ == 0 ? steps : internalRefinementSteps(systems);
         solveRefined(systems, systems.residual, systems.correction, systems.internalResidual, systems.internalCorrection,
-                     refiningMask, [&](const double* rhs, double* out) {
+                     refiningMask, internal, [&](const double* rhs, double* out) {
             solveSelectedLanes(*systems.lu, rhs, out, systems.stream);
         });
     });

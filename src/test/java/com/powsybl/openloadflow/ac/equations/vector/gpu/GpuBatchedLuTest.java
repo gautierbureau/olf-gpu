@@ -569,12 +569,12 @@ class GpuBatchedLuTest {
     /**
      * Six scenarios on the coupler system's pattern: the coupler system itself on 1 and doubled on 3 (the pivoting
      * engine's lanes: the repair's undoing clamps two pivots) and a nearly singular lane on 0 (the fast engine's), all
-     * three refining past the base step; diagonally dominant lanes, done after it, on 2, 4 and 5.
+     * three refining past the plain solve; diagonally dominant lanes, solved to the tolerance by it, on 2, 4 and 5.
      */
     private static double[] refinementBatch(CouplerSystem system) {
         Csr csr = system.csr();
         int nnz = csr.nnz();
-        double[][] lanes = {nearlySingularValues(csr, 5, 1e-7), system.values(), diagonallyDominantValues(csr, 1, 6),
+        double[][] lanes = {nearlySingularValues(csr, 5, 1e-9), system.values(), diagonallyDominantValues(csr, 1, 6),
             Arrays.stream(system.values()).map(v -> 2 * v).toArray(), diagonallyDominantValues(csr, 1, 7),
             diagonallyDominantValues(csr, 1, 8)};
         double[] values = new double[lanes.length * nnz];
@@ -641,7 +641,7 @@ class GpuBatchedLuTest {
     /**
      * The adaptive refinement solves its corrections on the lanes still refining only, and each lane's Newton step in a
      * batch is the one it takes alone, bit for bit: the coupler systems refine on the pivoting engine and the nearly
-     * singular lane on the fast engine, beside lanes done after the base step and a scenario outside the lane map.
+     * singular lane on the fast engine, beside lanes done after the plain solve and a scenario outside the lane map.
      * Checked to fail with the selection taken as scenarios and with the fast engine solving its first lanes instead
      * of the selected ones.
      */
@@ -653,11 +653,11 @@ class GpuBatchedLuTest {
         int nnz = csr.nnz();
         double[] values = refinementBatch(system);
         double[] rightHandSides = refinementRightHandSides(6 * n);
-        double[] baseStepOnly = new double[6 * n];
+        double[] plainSolve = new double[6 * n];
         try {
-            new GpuLoadFlowParameters().setIterativeRefinementMaxSteps(1).install();
+            new GpuLoadFlowParameters().setIterativeRefinementBaseSteps(0).setIterativeRefinementMaxSteps(0).install();   // no refinement
             BatchedLuNative.factorizeAndSolveNewtonStep(n, csr.rowPtr(), csr.colIdx(), identity(n), identity(n), 6,
-                    values, rightHandSides, REFINEMENT_LANE_MAP, baseStepOnly);
+                    values, rightHandSides, REFINEMENT_LANE_MAP, plainSolve);
         } finally {
             new GpuLoadFlowParameters().install();               // one internal step, at most four solves, 1e-12
         }
@@ -672,8 +672,11 @@ class GpuBatchedLuTest {
         }
         assertArrayEquals(filled(n, 42), scenario(batch, 5, n));
         for (int s : new int[] {0, 1, 3}) {
-            assertFalse(Arrays.equals(scenario(baseStepOnly, s, n), scenario(batch, s, n)),
-                    "scenario " + s + " refines past the base step");
+            assertFalse(Arrays.equals(scenario(plainSolve, s, n), scenario(batch, s, n)),
+                    "scenario " + s + " refines past the plain solve");
+        }
+        for (int s : new int[] {2, 4}) {                     // solved to the tolerance by the plain solve: no refinement
+            assertArrayEquals(scenario(plainSolve, s, n), scenario(batch, s, n), "scenario " + s + " takes no refinement step");
         }
     }
 

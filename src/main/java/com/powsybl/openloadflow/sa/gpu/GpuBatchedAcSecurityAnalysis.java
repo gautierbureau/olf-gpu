@@ -793,7 +793,19 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                 .map(lfActionById::get)
                 .filter(Objects::nonNull)
                 .toList();
-        com.powsybl.openloadflow.network.action.LfActionUtils.applyListOfActions(lfActions, network, lfContingency, networkParameters);
+        if (lfActions.stream().anyMatch(a -> a instanceof com.powsybl.openloadflow.network.action.AbstractLfBranchAction<?>)) {
+            com.powsybl.openloadflow.network.action.LfActionUtils.applyListOfActions(lfActions, network, lfContingency, networkParameters);
+        } else {
+            // applyListOfActions first redoes the post-contingency connectivity and re-derives every bus and branch
+            // status from it (a full connected-components pass per strategy), which without a branch action changes
+            // nothing: the contingency already applied that topology. Then it applies the actions, as here.
+            for (com.powsybl.openloadflow.network.action.LfAction lfAction : lfActions) {
+                if (!lfAction.apply(network, lfContingency, networkParameters)) {
+                    com.powsybl.openloadflow.util.Reports.reportActionApplicationFailure(lfAction.getId(), lfContingency.getId(),
+                            network.getReportNode());
+                }
+            }
+        }
         GpuStateInjector.injectState(precomputed.equationSystem(), precomputed.baseVariableRows(), state,
                 runState.get().remap);
         AcSolverUtil.updateNetwork(network, precomputed.equationSystem());

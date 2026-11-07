@@ -1492,7 +1492,9 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
 
     private SecurityAnalysisResult runSa(Network n, List<Contingency> ctgs, List<com.powsybl.security.monitor.StateMonitor> monitors,
                                          SecurityAnalysisParameters sap) {
-        return strategies.isEmpty() ? runSecurityAnalysis(n, ctgs, monitors, sap)
+        // an empty list (the CPU arm under OLF_GPU_SA_GPU_ONLY) carries no strategy: OLF rejects a strategy whose
+        // contingency is not in the list
+        return strategies.isEmpty() || ctgs.isEmpty() ? runSecurityAnalysis(n, ctgs, monitors, sap)
                 : runSecurityAnalysis(n, ctgs, monitors, sap, strategies, actions,
                                       com.powsybl.commons.report.ReportNode.NO_OP);
     }

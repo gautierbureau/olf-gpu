@@ -387,6 +387,47 @@ class GpuSaOperatorStrategyTest extends AbstractGpuSaTest {
     }
 
     @Test
+    void pstTapActionViolationOnTheRetappedTransformerMatchesCpu() {
+        // The strategy's violations come from the device screen's candidates, and the screen reads every branch with
+        // its BASE parameters: a retapped transformer's own flow is not what the screen evaluates. The tap moves PS1's
+        // current over a limit set between its post-contingency current and its post-action one; that violation is
+        // only found if the retapped branch is scanned in full on the host.
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = com.powsybl.openloadflow.network.PhaseControlFactory.createNetworkWithT2wt();
+        com.powsybl.iidm.network.Line l1 = network.getLine("L1");
+        network.newLine().setId("L1_BIS")
+                .setVoltageLevel1(l1.getTerminal1().getVoltageLevel().getId()).setBus1(l1.getTerminal1().getBusBreakerView().getBus().getId())
+                .setVoltageLevel2(l1.getTerminal2().getVoltageLevel().getId()).setBus2(l1.getTerminal2().getBusBreakerView().getBus().getId())
+                .setR(l1.getR()).setX(l1.getX()).setG1(0).setB1(0).setG2(0).setB2(0).add();
+        com.powsybl.iidm.network.TwoWindingsTransformer ps1 = network.getTwoWindingsTransformer("PS1");
+        // PS1's current after the contingency, at its own tap and at each other tap (OLF load flows on the network itself)
+        int baseTap = ps1.getPhaseTapChanger().getTapPosition();
+        network.getLine("L1_BIS").disconnect();
+        java.util.Map<Integer, Double> currentByTap = new java.util.TreeMap<>();
+        for (int tap = ps1.getPhaseTapChanger().getLowTapPosition(); tap <= ps1.getPhaseTapChanger().getHighTapPosition(); tap++) {
+            ps1.getPhaseTapChanger().setTapPosition(tap);
+            new com.powsybl.loadflow.LoadFlow.Runner(new com.powsybl.openloadflow.OpenLoadFlowProvider(commonTestConfig.matrixFactory())).run(network);
+            currentByTap.put(tap, ps1.getTerminal1().getI());
+        }
+        ps1.getPhaseTapChanger().setTapPosition(baseTap);
+        network.getLine("L1_BIS").connect();
+        int actionTap = currentByTap.entrySet().stream().max(java.util.Map.Entry.comparingByValue()).orElseThrow().getKey();
+        double before = currentByTap.get(baseTap);
+        double after = currentByTap.get(actionTap);
+        org.junit.jupiter.api.Assertions.assertTrue(after > 1.2 * before, "the fixture needs a tap that raises PS1's current: " + currentByTap);
+        ps1.newCurrentLimits1().setPermanentLimit((before + after) / 2).add();
+        List<Contingency> contingencies = List.of(new Contingency("L1_BIS", new BranchContingency("L1_BIS")));
+        List<com.powsybl.action.Action> actions = List.of(
+                new com.powsybl.action.PhaseTapChangerTapPositionAction("ps1Over", "PS1", false, actionTap));
+        List<com.powsybl.contingency.strategy.OperatorStrategy> strategies = List.of(
+                new com.powsybl.contingency.strategy.OperatorStrategy("sPs1Over",
+                        com.powsybl.contingency.ContingencyContext.all(),
+                        new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of("ps1Over")));
+        assertStrategyMatchesCpu(network, contingencies, strategies, actions, 2);
+    }
+
+    @Test
     void baseOpenShuntReconnectionStrategyBatchMatchesCpu() {
         // #32: reconnecting a BASE-OPEN shunt via TerminalsConnectionAction — supported by the
         // olf-local-patches upstream patch (shuntIdsToClose retention: the compensator joins the

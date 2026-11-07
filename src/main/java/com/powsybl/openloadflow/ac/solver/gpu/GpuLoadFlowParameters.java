@@ -71,7 +71,9 @@ public class GpuLoadFlowParameters extends AbstractExtension<LoadFlowParameters>
             PIVOT_TYPE_DEFAULT_VALUE.name(), names(GpuPivotType.values()), ParameterScope.TECHNICAL, SOLVER_CATEGORY_KEY),
         new Parameter(PIVOT_THRESHOLD_PARAM_NAME, ParameterType.DOUBLE, "cuDSS pivot threshold in [0, 1], NaN for cuDSS's own",
             PIVOT_THRESHOLD_DEFAULT_VALUE, ParameterScope.TECHNICAL, SOLVER_CATEGORY_KEY),
-        new Parameter(ITERATIVE_REFINEMENT_BASE_STEPS_PARAM_NAME, ParameterType.INTEGER, "Iterative refinement steps of every linear solve",
+        new Parameter(ITERATIVE_REFINEMENT_BASE_STEPS_PARAM_NAME, ParameterType.INTEGER,
+            "Iterative refinement steps of every linear solve (on the batched LU, of every refinement correction: its Newton solve"
+                + " is refined adaptively only)",
             ITERATIVE_REFINEMENT_BASE_STEPS_DEFAULT_VALUE, ParameterScope.TECHNICAL, SOLVER_CATEGORY_KEY),
         new Parameter(ITERATIVE_REFINEMENT_MAX_STEPS_PARAM_NAME, ParameterType.INTEGER, "Iterative refinement steps at most",
             ITERATIVE_REFINEMENT_MAX_STEPS_DEFAULT_VALUE, ParameterScope.TECHNICAL, SOLVER_CATEGORY_KEY),

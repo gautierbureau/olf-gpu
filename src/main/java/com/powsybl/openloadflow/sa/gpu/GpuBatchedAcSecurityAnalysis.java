@@ -136,6 +136,10 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
     static final java.util.concurrent.atomic.AtomicInteger LAST_TARGETED_RESTORE_COUNT =
             new java.util.concurrent.atomic.AtomicInteger();
 
+    /** How many post-strategy restores of the last run were targeted (see restorePostContingencyState). */
+    static final java.util.concurrent.atomic.AtomicInteger LAST_TARGETED_STRATEGY_RESTORE_COUNT =
+            new java.util.concurrent.atomic.AtomicInteger();
+
     /** Separator inside the precomputed-state key of a (contingency, strategy) pair — the SOLVER's
      *  constant, which also drives its two-phase warm-continuation ordering. */
     private static final char STRATEGY_KEY_SEP = BatchContingency.STRATEGY_KEY_SEP;
@@ -218,6 +222,46 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
             run.staleVoltages = null;                         // the full restore below puts every voltage back
             super.restoreBaseState(networkState, network, lfContingency);
         }
+    }
+
+    /**
+     * After a strategy answered on the device with tap actions only, the network differs from its post-contingency
+     * state in the retapped branches and in what the injection wrote: the bus voltages, restored lazily like the base
+     * state's (restoreStaleVoltages), and the shunt B and transformer alpha/rho state variables, which force OLF's full
+     * restore when the equation system has any. Every other strategy (CPU path, topology or injection actions) gets
+     * the full restore.
+     */
+    @Override
+    protected void restorePostContingencyState(com.powsybl.openloadflow.network.NetworkState postContingencyNetworkState,
+                                               LfNetwork network, com.powsybl.openloadflow.network.LfContingency lfContingency) {
+        GpuSaRunState run = runState.get();
+        List<LfBranch> retapped = run.strategyRetappedOnly;
+        run.strategyRetappedOnly = null;
+        if (retapped == null || run.precomputed == null || run.precomputed.equationSystem() == null
+                || hasControlStateVariables(run.precomputed.equationSystem())) {
+            run.staleVoltages = null;                         // the full restore puts every voltage back
+            super.restorePostContingencyState(postContingencyNetworkState, network, lfContingency);
+            return;
+        }
+        postContingencyNetworkState.restore(List.of(), retapped, false);
+        run.staleVoltages = postContingencyNetworkState;
+        LAST_TARGETED_STRATEGY_RESTORE_COUNT.incrementAndGet();
+    }
+
+    /** True when updateNetwork writes more than bus voltages: shunt B or transformer alpha/rho are state variables. */
+    private static boolean hasControlStateVariables(
+            com.powsybl.openloadflow.equations.EquationSystem<com.powsybl.openloadflow.ac.equations.AcVariableType,
+                    com.powsybl.openloadflow.ac.equations.AcEquationType> equationSystem) {
+        for (var v : equationSystem.getIndex().getSortedVariablesToFind()) {
+            switch (v.getType()) {
+                case SHUNT_B, BRANCH_ALPHA1, BRANCH_RHO1 -> {
+                    return true;
+                }
+                default -> {
+                }
+            }
+        }
+        return false;
     }
 
     /** Drops the run's file-backed state map, if its states went to one (GpuStateStore). */
@@ -779,6 +823,18 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         }
         detectViolations(network, postActionsViolationManager, limitReductions, preContingencyLimitViolationManager,
                 securityAnalysisParameters, scId, scanInFull);
+        // what restorePostContingencyState must undo: with tap actions only, the retapped branches and the voltages
+        List<LfBranch> retapped = new java.util.ArrayList<>();
+        for (com.powsybl.openloadflow.network.action.LfAction lfAction : lfActions) {
+            if (!(lfAction instanceof com.powsybl.openloadflow.network.action.AbstractLfTapChangerAction<?> tapAction)) {
+                retapped = null;
+                break;
+            }
+            if (tapAction.getChange() != null) {
+                retapped.add(tapAction.getChange().getBranch());
+            }
+        }
+        runState.get().strategyRetappedOnly = retapped;
         return new OperatorStrategyResult(operatorStrategy,
                 List.of(new OperatorStrategyResult.ConditionalActionsResult(operatorStrategy.getId(),
                         PostContingencyComputationStatus.CONVERGED,

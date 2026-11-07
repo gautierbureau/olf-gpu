@@ -99,6 +99,9 @@ final class GpuSaRunState {
     /** The branches the current contingency's automation systems switched on the device, given to the network with its
      *  state and restored with its own elements. */
     List<LfBranch> automationSystemSwitched = List.of();
+    /** The branches the last operator strategy retapped, when it was answered on the device with tap actions only (a
+     *  targeted post-contingency restore suffices); null otherwise (OLF's full restore). */
+    List<LfBranch> strategyRetappedOnly;
     /** Limit-table index per branch num, -1 = no limits (built with the table). */
     int[] tableIndexOfBranchNum;
     /** Every scenario's screened candidates, computed in one pass over the precomputed states. */

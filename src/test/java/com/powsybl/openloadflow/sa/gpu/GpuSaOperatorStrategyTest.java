@@ -357,6 +357,36 @@ class GpuSaOperatorStrategyTest extends AbstractGpuSaTest {
     }
 
     @Test
+    void pstTapActionOnDisconnectedTransformerBatchMatchesCpu() {
+        // A tap action on a transformer the LfNetwork does not hold (open at both ends: no LfBranch) is invalid
+        // in OLF (AbstractLfTapChangerAction: branch null, apply does nothing) and the strategy re-solves its
+        // contingency's state unchanged. The pair is that re-solve on the device, not a CPU strategy (network.xiidm:
+        // 3 of the 47 phase shifters of a synthetic PST strategy case, 10 % of its strategies).
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = com.powsybl.openloadflow.network.PhaseControlFactory.createNetworkWithT2wt();
+        com.powsybl.iidm.network.TwoWindingsTransformer ps2 = network.getSubstation("S1").newTwoWindingsTransformer()
+                .setId("PS2").setVoltageLevel1("VL1").setConnectableBus1("B1")
+                .setVoltageLevel2("VL3").setConnectableBus2("B3")      // no bus on either side: open at both ends
+                .setRatedU1(380.0).setRatedU2(380.0).setR(2.0).setX(100.0).setG(0.0).setB(0.0).add();
+        com.powsybl.iidm.network.PhaseTapChangerAdder adder = ps2.newPhaseTapChanger().setTapPosition(1)
+                .setRegulationMode(com.powsybl.iidm.network.PhaseTapChanger.RegulationMode.CURRENT_LIMITER).setRegulationValue(200)
+                .setRegulating(false).setRegulationTerminal(ps2.getTerminal1());
+        for (double alpha : new double[] {-20.0, 0.0, 20.0}) {
+            adder.beginStep().setAlpha(alpha).setRho(1.0).setR(0.0).setX(0.0).setG(0.0).setB(0.0).endStep();
+        }
+        adder.add();
+        List<Contingency> contingencies = List.of(new Contingency("L1", new BranchContingency("L1")));
+        List<com.powsybl.action.Action> actions = List.of(
+                new com.powsybl.action.PhaseTapChangerTapPositionAction("ps2Up", "PS2", false, 2));
+        List<com.powsybl.contingency.strategy.OperatorStrategy> strategies = List.of(
+                new com.powsybl.contingency.strategy.OperatorStrategy("sPs2",
+                        com.powsybl.contingency.ContingencyContext.all(),
+                        new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of("ps2Up")));
+        assertStrategyMatchesCpu(network, contingencies, strategies, actions, 2);
+    }
+
+    @Test
     void baseOpenShuntReconnectionStrategyBatchMatchesCpu() {
         // #32: reconnecting a BASE-OPEN shunt via TerminalsConnectionAction — supported by the
         // olf-local-patches upstream patch (shuntIdsToClose retention: the compensator joins the

@@ -227,6 +227,9 @@ final class GpuStrategyComposer {
             } else if (a instanceof com.powsybl.action.RatioTapChangerTapPositionAction ratioTapChangerAction) {
                 var tapChanger = network.getTwoWindingsTransformer(ratioTapChangerAction.getTransformerId()) != null
                         ? network.getTwoWindingsTransformer(ratioTapChangerAction.getTransformerId()).getRatioTapChanger() : null;
+                if (tapChanger != null && net.getBranchById(ratioTapChangerAction.getTransformerId()) == null) {
+                    continue;                                // no LfBranch: OLF's action is invalid and changes nothing
+                }
                 /** Compiles a tap-position action (RTC or PST) into a per-scenario full-row override — the
                  *  target tap's [y, g1, g2, b1, b2, ksi, r1, a1] replaces the branch's static inputs, so
                  *  per-tap impedance changes are covered. Null when out of batch scope: unknown transformer /
@@ -240,6 +243,9 @@ final class GpuStrategyComposer {
             } else if (a instanceof com.powsybl.action.PhaseTapChangerTapPositionAction phaseTapChangerAction) {
                 var tapChanger = network.getTwoWindingsTransformer(phaseTapChangerAction.getTransformerId()) != null
                         ? network.getTwoWindingsTransformer(phaseTapChangerAction.getTransformerId()).getPhaseTapChanger() : null;
+                if (tapChanger != null && net.getBranchById(phaseTapChangerAction.getTransformerId()) == null) {
+                    continue;                                // no LfBranch: OLF's action is invalid and changes nothing
+                }
                 TapR1Override override = tapOverride(net, phaseTapChangerAction.getTransformerId(),
                         tapChanger, phaseTapChangerAction.isRelativeValue(), phaseTapChangerAction.getTapPosition());
                 if (override == null) {

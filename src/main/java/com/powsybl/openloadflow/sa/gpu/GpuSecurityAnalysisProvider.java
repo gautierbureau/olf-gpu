@@ -83,6 +83,7 @@ public class GpuSecurityAnalysisProvider extends OpenSecurityAnalysisProvider {
         GpuBatchedAcSecurityAnalysis.LAST_DEVICE_FINAL_MISMATCH.clear();
         GpuBatchedAcSecurityAnalysis.LAST_REPLAYED_LOSS_COUNT.set(0);
         GpuBatchedAcSecurityAnalysis.LAST_TARGETED_RESTORE_COUNT.set(0);
+        GpuBatchedAcSecurityAnalysis.LAST_TARGETED_STRATEGY_RESTORE_COUNT.set(0);
     }
 
     /**

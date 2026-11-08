@@ -466,6 +466,33 @@ LuPlan& luPlanOf(SharedStructure& structure) {
             std::fprintf(stderr, "OLF_GPU_LU_PLAN n=%d nnz=%d cudssLuNnz=%lld %s\n", plan->n, plan->rowPtr[plan->n],
                          static_cast<long long>(cudssLuNnz), describeLuPlan(*plan).c_str());
         }
+        if (const char* dump = traceValue(Trace::LU_PATTERN_DUMP)) {
+            // int32 little endian: n, nnz, nSwitchRows, rowPtr[n + 1], colIdx[nnz], rowOrder[n], colOrder[n], the
+            // switches' DUMMY_P / DUMMY_Q rows[nSwitchRows] - structure only, no values
+            std::vector<int> z(static_cast<size_t>(structure.nZeroImpedanceBranch) * 11);
+            if (!z.empty()) {
+                CUDA_CHECK(cudaMemcpy(z.data(), structure.dZeroImpedanceBranchIndices.p, z.size() * sizeof(int), cudaMemcpyDeviceToHost));
+            }
+            std::vector<int> switchRows;
+            for (int e = 0; e < structure.nZeroImpedanceBranch; e++) {
+                for (int slot : {4, 5}) {
+                    if (z[static_cast<size_t>(e) * 11 + slot] >= 0) {
+                        switchRows.push_back(z[static_cast<size_t>(e) * 11 + slot]);
+                    }
+                }
+            }
+            const std::string path = std::string(dump) + "-n" + std::to_string(plan->n);   // one file per structure size
+            if (FILE* f = std::fopen(path.c_str(), "wb")) {
+                const int head[3] = {plan->n, plan->rowPtr[plan->n], static_cast<int>(switchRows.size())};
+                std::fwrite(head, sizeof(int), 3, f);
+                std::fwrite(plan->rowPtr.data(), sizeof(int), plan->n + 1, f);
+                std::fwrite(plan->colIdx.data(), sizeof(int), plan->rowPtr[plan->n], f);
+                std::fwrite(rowOrder.data(), sizeof(int), plan->n, f);
+                std::fwrite(colOrder.data(), sizeof(int), plan->n, f);
+                std::fwrite(switchRows.data(), sizeof(int), switchRows.size(), f);
+                std::fclose(f);
+            }
+        }
         structure.luPlan = std::move(plan);
     }
     return *structure.luPlan;

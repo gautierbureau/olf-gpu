@@ -159,8 +159,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     ctx->slotState.start(nS, installedSlots(ctx));
     std::vector<char>& active = drv.active;
 
-    BatchResult& res = drv.res;
-    res.x.resize(nTot);
+    BatchResult& res = drv.res;                         // res.x is sized when the states are copied back, at the end
 
     std::vector<double>& hF = drv.hF;
 
@@ -435,11 +434,33 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     }
     ctx->installSlots = wholeBank ? std::vector<int>() : std::move(ended);
     ctx->newtonLoopIterations = static_cast<int>(gNewtonIters - newtonIterationsAtStart);
-    CUDA_CHECK(cudaMemcpy(res.x.data(), ctx->dX.p, nTot * sizeof(double), cudaMemcpyDeviceToHost));
-    // The n x nS state is handed over, not copied (the next call sizes it again); the per-slot status, iterations and
-    // norms are copied: they stay on the context, where SlotSolveState::start reads them for every slot.
+    // Only the handed-back scenarios' states reach the host: they are the result rows. A call paused for a refill hands
+    // back a few of the bank's slots, whose states are gathered on the device and copied alone; a call handing back more
+    // than half the bank copies the whole state, which needs no device scratch as large as the state.
+    const int handedBack = wholeBank ? nS : static_cast<int>(ctx->installSlots.size());
+    const bool bySlot = wholeBank || 2 * handedBack > nS;
+    if (bySlot) {
+        res.x.resize(nTot);
+        CUDA_CHECK(cudaMemcpy(res.x.data(), ctx->dX.p, nTot * sizeof(double), cudaMemcpyDeviceToHost));
+    } else {
+        const size_t gathered = static_cast<size_t>(handedBack) * n;
+        res.x.resize(gathered);
+        ctx->dHandBackSlots.ensure(static_cast<size_t>(handedBack) * sizeof(int));
+        ctx->dHandBackStates.ensure(gathered * sizeof(double));
+        CUDA_CHECK(cudaMemcpyAsync(ctx->dHandBackSlots.p, ctx->installSlots.data(), static_cast<size_t>(handedBack) * sizeof(int),
+                                   cudaMemcpyHostToDevice, ctx->stream));
+        gatherScenarios<<<grid(static_cast<int>(gathered)), BLOCK, 0, ctx->stream>>>(n, handedBack, ctx->dHandBackSlots.as<int>(),
+                ctx->dX.as<double>(), ctx->dHandBackStates.as<double>());
+        CUDA_CHECK(cudaGetLastError());
+        CUDA_CHECK(cudaMemcpyAsync(res.x.data(), ctx->dHandBackStates.p, gathered * sizeof(double), cudaMemcpyDeviceToHost,
+                                   ctx->stream));
+        CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+    }
+    // The state is handed over, not copied (the next call sizes it again); the per-slot status, iterations and norms are
+    // copied: they stay on the context, where SlotSolveState::start reads them for every slot.
     BatchResult out;
     out.x = std::move(res.x);
+    out.statesBySlot = bySlot;
     out.iters = res.iters;
     out.norm = res.norm;
     out.status = res.status;

@@ -17,7 +17,8 @@
 namespace olfgpu {
 
 struct BatchResult {
-    std::vector<double> x;                                   // nScenarios * n
+    std::vector<double> x;                                   // the states: by slot (nScenarios * n), or by hand-back order
+    bool statesBySlot = true;                                // x by slot, else row j = the j-th handed-back slot's state
     std::vector<int> iters;                                  // nScenarios
     std::vector<double> norm;                                // nScenarios
     std::vector<int> status;                                 // nScenarios: a GpuAcSolverStatus

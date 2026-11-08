@@ -79,6 +79,7 @@ struct BatchSolverContext {
     // holds when a run fails (NewtonRaphson updates the buses only on convergence), and so where OLF starts the
     // strategies of a contingency that ran out of iterations (PreviousValueVoltageInitializer)
     DeviceBuf dXLastConv;
+    DeviceBuf dHandBackSlots, dHandBackStates;               // a paused call's handed-back slots and their states, gathered
     DeviceBuf dTargetBase;                                   // the base targets (n), before tiling/overrides
     DeviceBuf dZeroDiagonalRowSnapshot, dZeroDiagonalRightHandSideSnapshot, dZeroDiagonalDonorChoice;               // zero-diagonal repair scratch (lazy)
     int zeroDiagonalRepairCapacity = 0;

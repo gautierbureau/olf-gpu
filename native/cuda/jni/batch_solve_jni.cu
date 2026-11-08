@@ -339,7 +339,7 @@ OLF_JNI(ac_solver_gpu, BatchSolveNative, solveBatchContext)(
         if (row == nullptr) {
             return nullptr;
         }
-        env->SetDoubleArrayRegion(row, 0, n, res.x.data() + (size_t) s * n);
+        env->SetDoubleArrayRegion(row, 0, n, res.x.data() + static_cast<size_t>(res.statesBySlot ? s : j) * n);
         double tail[3] = {static_cast<double>(res.iters[s]), res.norm[s], static_cast<double>(res.status[s])};
         env->SetDoubleArrayRegion(row, n, 3, tail);
         env->SetObjectArrayElement(out, j, row);

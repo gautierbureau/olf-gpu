@@ -5,6 +5,7 @@
 // factorization and solve on a lane map, and the elimination order cuDSS's analysis picks for the same pattern.
 #include "jni_common.cuh"
 #include "../solver/batched_lu_solve.cuh"
+#include "../lu/minimum_degree.cuh"
 
 namespace {
 
@@ -52,6 +53,37 @@ OLF_JNI(ac_solver_gpu, BatchedLuNative, scalarPlanStatistics)(
     } catch (const std::exception& e) {
         throwJava(env, e);
         return nullptr;
+    }
+}
+
+// The exact minimum-degree elimination order of A + A^T (position -> original index), as luPlanOf takes it.
+extern "C" JNIEXPORT jintArray JNICALL
+OLF_JNI(ac_solver_gpu, BatchedLuNative, minimumDegreeOrder)(JNIEnv* env, jclass, jint n, jintArray jRowPtr, jintArray jColIdx) {
+    try {
+        const std::vector<int> rowPtr = intsOf(env, jRowPtr);
+        const std::vector<int> colIdx = intsOf(env, jColIdx);
+        const std::vector<int> order = minimumDegreeOrder(n, rowPtr.data(), colIdx.data());
+        jintArray out = env->NewIntArray(n);
+        env->SetIntArrayRegion(out, 0, n, order.data());
+        return out;
+    } catch (const std::exception& e) {
+        throwJava(env, e);
+        return nullptr;
+    }
+}
+
+// The elimination-tree height of A + A^T eliminated in order, as FEWEST_LEVELS compares the orders.
+extern "C" JNIEXPORT jint JNICALL
+OLF_JNI(ac_solver_gpu, BatchedLuNative, eliminationLevels)(JNIEnv* env, jclass, jint n, jintArray jRowPtr, jintArray jColIdx,
+                                                           jintArray jOrder) {
+    try {
+        const std::vector<int> rowPtr = intsOf(env, jRowPtr);
+        const std::vector<int> colIdx = intsOf(env, jColIdx);
+        const std::vector<int> order = intsOf(env, jOrder);
+        return eliminationLevels(n, rowPtr.data(), colIdx.data(), order);
+    } catch (const std::exception& e) {
+        throwJava(env, e);
+        return -1;
     }
 }
 

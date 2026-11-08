@@ -74,7 +74,8 @@ public final class NewtonSettingsNative {
     public static native void setBatchX0Seeds(long handle, int[] flatIndex, double[] value);
 
     /** The run's linear-solver settings (GpuLoadFlowParameters.install): -1 reorder / pivot type = AUTO, NaN threshold =
-     *  cuDSS's own. Read by every context built afterwards and by every solve's iterative refinement. */
+     *  cuDSS's own, batchedLuOrdering a GpuBatchedLuOrdering's native code. Read by every context built afterwards and by every solve's iterative refinement. */
     public static native void setLinearSolverSettings(int reorder, int matching, int pivotType, double pivotThreshold,
-                                                      int iterativeRefinementBaseSteps, int iterativeRefinementMaxSteps, double iterativeRefinementTolerance);
+                                                      int iterativeRefinementBaseSteps, int iterativeRefinementMaxSteps, double iterativeRefinementTolerance,
+                                                      int batchedLuOrdering);
 }

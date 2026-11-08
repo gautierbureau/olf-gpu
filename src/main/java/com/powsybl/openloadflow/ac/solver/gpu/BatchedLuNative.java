@@ -47,6 +47,12 @@ public final class BatchedLuNative {
      */
     public static native long[] scalarPlanStatistics(int n, int[] rowPtr, int[] colIdx, int[] rowOrder, int[] colOrder);
 
+    /** The exact minimum-degree elimination order of A + A^T (position -> original index): GpuBatchedLuOrdering.MINIMUM_DEGREE. */
+    public static native int[] minimumDegreeOrder(int n, int[] rowPtr, int[] colIdx);
+
+    /** The elimination-tree height of A + A^T eliminated in {@code order}: what GpuBatchedLuOrdering.FEWEST_LEVELS compares. */
+    public static native int eliminationLevels(int n, int[] rowPtr, int[] colIdx, int[] order);
+
     /**
      * The pivoting engine's plan: {stored entries, multiply-adds of the gathers of one factorization, supernode levels,
      * supernodes, columns of the largest supernode, L + U entries of the symmetrized structure (the stored entries

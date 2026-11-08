@@ -16,6 +16,7 @@ import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcStructures;
 import com.powsybl.openloadflow.ac.solver.gpu.BatchedLuNative;
 import com.powsybl.openloadflow.ac.solver.gpu.GpuBatchContextCache;
+import com.powsybl.openloadflow.ac.solver.gpu.GpuBatchedLuOrdering;
 import com.powsybl.openloadflow.ac.solver.gpu.GpuLinearSolver;
 import com.powsybl.openloadflow.ac.solver.gpu.GpuLoadFlowParameters;
 import com.powsybl.openloadflow.ac.solver.gpu.GpuMatchingAlgorithm;
@@ -717,6 +718,7 @@ class GpuSaSolverTest extends AbstractGpuSaTest {
         com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters();
         GpuLoadFlowParameters.create(lfp)
                 .setReorderingAlgorithm(GpuReorderingAlgorithm.NESTED_DISSECTION)
+                .setBatchedLuOrdering(GpuBatchedLuOrdering.MINIMUM_DEGREE)
                 .setMatchingAlgorithm(GpuMatchingAlgorithm.MAX_DIAG_SUM)
                 .setPivotType(GpuPivotType.GLOBAL_ROW)
                 .setPivotThreshold(0.25)
@@ -728,7 +730,7 @@ class GpuSaSolverTest extends AbstractGpuSaTest {
         try {
             runSecurityAnalysis(IeeeCdfNetworkFactory.create14(), ctgs, List.of(), lfp);
             assertEquals(1, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(), "solved on the device");
-            assertArrayEquals(new double[] {4, 4, 3, 0.25, 2, 5, 1e-11}, NewtonSettingsNative.readLinearSolverSettings());
+            assertArrayEquals(new double[] {4, 4, 3, 0.25, 2, 5, 1e-11, 1}, NewtonSettingsNative.readLinearSolverSettings());
         } finally {
             securityAnalysisProvider = new OpenSecurityAnalysisProvider(commonTestConfig.matrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>());
             new GpuLoadFlowParameters().install();

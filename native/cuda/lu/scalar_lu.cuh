@@ -28,6 +28,8 @@ struct ScalarLu {
     int capacity = 0;                                        // lanes the factors hold
     int width = 0;                                           // lanes of the last factorization
     std::vector<int> stepStart, forwardLevelStart, backwardLevelStart;
+    std::vector<int> stepLongest, forwardLevelLongest, backwardLevelLongest;   // per step / level: its longest term run
+    size_t residentThreads = 0;                              // threads the device holds resident: what a split may use
     int nFill = 0;
     DeviceBuf dEntryOfA, dFillEntry;                         // A entry -> LU entry; the LU entries without an A entry
     DeviceBuf dStepEntry, dEntryDivisor, dContributionStart, dContributionL, dContributionU;

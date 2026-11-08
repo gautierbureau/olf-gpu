@@ -42,6 +42,7 @@ public class GpuLoadFlowParameters extends AbstractExtension<LoadFlowParameters>
     public static final String LINEAR_SOLVER_PARAM_NAME = "linearSolver";
     public static final String REORDERING_ALGORITHM_PARAM_NAME = "reorderingAlgorithm";
     public static final String BATCHED_LU_ORDERING_PARAM_NAME = "batchedLuOrdering";
+    public static final String BATCHED_LU_SPLIT_LONG_ROWS_PARAM_NAME = "batchedLuSplitLongRows";
     public static final String MATCHING_ALGORITHM_PARAM_NAME = "matchingAlgorithm";
     public static final String PIVOT_TYPE_PARAM_NAME = "pivotType";
     public static final String PIVOT_THRESHOLD_PARAM_NAME = "pivotThreshold";
@@ -52,6 +53,7 @@ public class GpuLoadFlowParameters extends AbstractExtension<LoadFlowParameters>
     public static final GpuLinearSolver LINEAR_SOLVER_DEFAULT_VALUE = GpuLinearSolver.CUDSS;
     public static final GpuReorderingAlgorithm REORDERING_ALGORITHM_DEFAULT_VALUE = GpuReorderingAlgorithm.AUTO;
     public static final GpuBatchedLuOrdering BATCHED_LU_ORDERING_DEFAULT_VALUE = GpuBatchedLuOrdering.CUDSS;
+    public static final boolean BATCHED_LU_SPLIT_LONG_ROWS_DEFAULT_VALUE = true;
     public static final GpuMatchingAlgorithm MATCHING_ALGORITHM_DEFAULT_VALUE = GpuMatchingAlgorithm.AUTO;
     public static final GpuPivotType PIVOT_TYPE_DEFAULT_VALUE = GpuPivotType.BY_ORDERING;
     /** NaN: cuDSS's own threshold. */
@@ -69,6 +71,9 @@ public class GpuLoadFlowParameters extends AbstractExtension<LoadFlowParameters>
             REORDERING_ALGORITHM_DEFAULT_VALUE.name(), names(GpuReorderingAlgorithm.values()), ParameterScope.TECHNICAL, SOLVER_CATEGORY_KEY),
         new Parameter(BATCHED_LU_ORDERING_PARAM_NAME, ParameterType.STRING, "Elimination order of the batched LU",
             BATCHED_LU_ORDERING_DEFAULT_VALUE.name(), names(GpuBatchedLuOrdering.values()), ParameterScope.TECHNICAL, SOLVER_CATEGORY_KEY),
+        new Parameter(BATCHED_LU_SPLIT_LONG_ROWS_PARAM_NAME, ParameterType.BOOLEAN,
+            "Batched LU rows with long term runs summed by several warps when the GPU has threads to spare",
+            BATCHED_LU_SPLIT_LONG_ROWS_DEFAULT_VALUE, ParameterScope.TECHNICAL, SOLVER_CATEGORY_KEY),
         new Parameter(MATCHING_ALGORITHM_PARAM_NAME, ParameterType.STRING, "cuDSS matching algorithm (robust single-matrix solve)",
             MATCHING_ALGORITHM_DEFAULT_VALUE.name(), names(GpuMatchingAlgorithm.values()), ParameterScope.TECHNICAL, SOLVER_CATEGORY_KEY),
         new Parameter(PIVOT_TYPE_PARAM_NAME, ParameterType.STRING, "cuDSS pivoting (robust single-matrix solve)",
@@ -92,6 +97,7 @@ public class GpuLoadFlowParameters extends AbstractExtension<LoadFlowParameters>
     private GpuLinearSolver linearSolver = LINEAR_SOLVER_DEFAULT_VALUE;
     private GpuReorderingAlgorithm reorderingAlgorithm = REORDERING_ALGORITHM_DEFAULT_VALUE;
     private GpuBatchedLuOrdering batchedLuOrdering = BATCHED_LU_ORDERING_DEFAULT_VALUE;
+    private boolean batchedLuSplitLongRows = BATCHED_LU_SPLIT_LONG_ROWS_DEFAULT_VALUE;
     private GpuMatchingAlgorithm matchingAlgorithm = MATCHING_ALGORITHM_DEFAULT_VALUE;
     private GpuPivotType pivotType = PIVOT_TYPE_DEFAULT_VALUE;
     private double pivotThreshold = PIVOT_THRESHOLD_DEFAULT_VALUE;
@@ -147,6 +153,7 @@ public class GpuLoadFlowParameters extends AbstractExtension<LoadFlowParameters>
                     .ifPresent(this::setReorderingAlgorithm);
             config.getOptionalEnumProperty(BATCHED_LU_ORDERING_PARAM_NAME, GpuBatchedLuOrdering.class)
                     .ifPresent(this::setBatchedLuOrdering);
+            config.getOptionalBooleanProperty(BATCHED_LU_SPLIT_LONG_ROWS_PARAM_NAME).ifPresent(this::setBatchedLuSplitLongRows);
             config.getOptionalEnumProperty(MATCHING_ALGORITHM_PARAM_NAME, GpuMatchingAlgorithm.class)
                     .ifPresent(this::setMatchingAlgorithm);
             config.getOptionalEnumProperty(PIVOT_TYPE_PARAM_NAME, GpuPivotType.class).ifPresent(this::setPivotType);
@@ -175,6 +182,10 @@ public class GpuLoadFlowParameters extends AbstractExtension<LoadFlowParameters>
         value = properties.get(BATCHED_LU_ORDERING_PARAM_NAME);
         if (value != null) {
             setBatchedLuOrdering(GpuBatchedLuOrdering.valueOf(value));
+        }
+        value = properties.get(BATCHED_LU_SPLIT_LONG_ROWS_PARAM_NAME);
+        if (value != null) {
+            setBatchedLuSplitLongRows(Boolean.parseBoolean(value));
         }
         value = properties.get(MATCHING_ALGORITHM_PARAM_NAME);
         if (value != null) {
@@ -209,6 +220,7 @@ public class GpuLoadFlowParameters extends AbstractExtension<LoadFlowParameters>
         map.put(LINEAR_SOLVER_PARAM_NAME, linearSolver);
         map.put(REORDERING_ALGORITHM_PARAM_NAME, reorderingAlgorithm);
         map.put(BATCHED_LU_ORDERING_PARAM_NAME, batchedLuOrdering);
+        map.put(BATCHED_LU_SPLIT_LONG_ROWS_PARAM_NAME, batchedLuSplitLongRows);
         map.put(MATCHING_ALGORITHM_PARAM_NAME, matchingAlgorithm);
         map.put(PIVOT_TYPE_PARAM_NAME, pivotType);
         map.put(PIVOT_THRESHOLD_PARAM_NAME, pivotThreshold);
@@ -233,7 +245,7 @@ public class GpuLoadFlowParameters extends AbstractExtension<LoadFlowParameters>
             }
             NewtonSettingsNative.setLinearSolverSettings(reorderingAlgorithm.nativeCode(), matchingAlgorithm.nativeCode(),
                     pivotType.nativeCode(), pivotThreshold, iterativeRefinementBaseSteps, iterativeRefinementMaxSteps,
-                    iterativeRefinementTolerance, batchedLuOrdering.nativeCode());
+                    iterativeRefinementTolerance, batchedLuOrdering.nativeCode(), batchedLuSplitLongRows);
             GpuBatchContextCache.clearContextCache();
             installed = copy();
         }
@@ -244,6 +256,7 @@ public class GpuLoadFlowParameters extends AbstractExtension<LoadFlowParameters>
                 .setLinearSolver(linearSolver)
                 .setReorderingAlgorithm(reorderingAlgorithm)
                 .setBatchedLuOrdering(batchedLuOrdering)
+                .setBatchedLuSplitLongRows(batchedLuSplitLongRows)
                 .setMatchingAlgorithm(matchingAlgorithm)
                 .setPivotType(pivotType)
                 .setPivotThreshold(pivotThreshold)
@@ -256,6 +269,7 @@ public class GpuLoadFlowParameters extends AbstractExtension<LoadFlowParameters>
         return linearSolver == other.linearSolver
                 && reorderingAlgorithm == other.reorderingAlgorithm
                 && batchedLuOrdering == other.batchedLuOrdering
+                && batchedLuSplitLongRows == other.batchedLuSplitLongRows
                 && matchingAlgorithm == other.matchingAlgorithm
                 && pivotType == other.pivotType
                 && Double.compare(pivotThreshold, other.pivotThreshold) == 0
@@ -283,6 +297,15 @@ public class GpuLoadFlowParameters extends AbstractExtension<LoadFlowParameters>
 
     public GpuLoadFlowParameters setBatchedLuOrdering(GpuBatchedLuOrdering batchedLuOrdering) {
         this.batchedLuOrdering = Objects.requireNonNull(batchedLuOrdering);
+        return this;
+    }
+
+    public boolean isBatchedLuSplitLongRows() {
+        return batchedLuSplitLongRows;
+    }
+
+    public GpuLoadFlowParameters setBatchedLuSplitLongRows(boolean batchedLuSplitLongRows) {
+        this.batchedLuSplitLongRows = batchedLuSplitLongRows;
         return this;
     }
 
@@ -383,6 +406,7 @@ public class GpuLoadFlowParameters extends AbstractExtension<LoadFlowParameters>
         return "GpuLoadFlowParameters(" + LINEAR_SOLVER_PARAM_NAME + "=" + linearSolver
                 + ", " + REORDERING_ALGORITHM_PARAM_NAME + "=" + reorderingAlgorithm
                 + ", " + BATCHED_LU_ORDERING_PARAM_NAME + "=" + batchedLuOrdering
+                + ", " + BATCHED_LU_SPLIT_LONG_ROWS_PARAM_NAME + "=" + batchedLuSplitLongRows
                 + ", " + MATCHING_ALGORITHM_PARAM_NAME + "=" + matchingAlgorithm
                 + ", " + PIVOT_TYPE_PARAM_NAME + "=" + pivotType
                 + ", " + PIVOT_THRESHOLD_PARAM_NAME + "=" + pivotThreshold

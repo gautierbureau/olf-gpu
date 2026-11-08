@@ -123,6 +123,7 @@ add_library(olfgpu SHARED
     native/cuda/lu/batched_lu.cu
     native/cuda/lu/cudss_order.cu
     native/cuda/lu/lu_plan.cu
+    native/cuda/lu/minimum_degree.cu
     native/cuda/lu/pivot_delays.cu
     native/cuda/lu/scalar_lu.cu
     native/cuda/lu/scalar_lu_plan.cu

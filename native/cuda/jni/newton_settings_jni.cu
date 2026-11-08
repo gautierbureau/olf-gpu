@@ -10,7 +10,8 @@
 extern "C" JNIEXPORT void JNICALL
 OLF_JNI(ac_solver_gpu, NewtonSettingsNative, setLinearSolverSettings)(
         JNIEnv*, jclass, jint reorder, jint matching, jint pivotType, jdouble pivotThreshold,
-        jint iterativeRefinementBaseSteps, jint iterativeRefinementMaxSteps, jdouble iterativeRefinementTolerance) {
+        jint iterativeRefinementBaseSteps, jint iterativeRefinementMaxSteps, jdouble iterativeRefinementTolerance,
+        jint batchedLuOrdering) {
     gLinearSolver.reorder = reorder;
     gLinearSolver.matching = matching;
     gLinearSolver.pivotType = pivotType;
@@ -18,17 +19,18 @@ OLF_JNI(ac_solver_gpu, NewtonSettingsNative, setLinearSolverSettings)(
     gLinearSolver.iterativeRefinementBaseSteps = iterativeRefinementBaseSteps;
     gLinearSolver.iterativeRefinementMaxSteps = iterativeRefinementMaxSteps;
     gLinearSolver.iterativeRefinementTolerance = iterativeRefinementTolerance;
+    gLinearSolver.batchedLuOrdering = batchedLuOrdering;
 }
 
 // The installed linear-solver settings, in setLinearSolverSettings's order (tests: the parameters reach the device).
 extern "C" JNIEXPORT jdoubleArray JNICALL
 OLF_JNI(ac_solver_gpu, NewtonSettingsNative, readLinearSolverSettings)(JNIEnv* env, jclass) {
-    const double v[7] = {static_cast<double>(gLinearSolver.reorder), static_cast<double>(gLinearSolver.matching),
+    const double v[8] = {static_cast<double>(gLinearSolver.reorder), static_cast<double>(gLinearSolver.matching),
                          static_cast<double>(gLinearSolver.pivotType), gLinearSolver.pivotThreshold,
                          static_cast<double>(gLinearSolver.iterativeRefinementBaseSteps), static_cast<double>(gLinearSolver.iterativeRefinementMaxSteps),
-                         gLinearSolver.iterativeRefinementTolerance};
-    jdoubleArray out = env->NewDoubleArray(7);
-    env->SetDoubleArrayRegion(out, 0, 7, v);
+                         gLinearSolver.iterativeRefinementTolerance, static_cast<double>(gLinearSolver.batchedLuOrdering)};
+    jdoubleArray out = env->NewDoubleArray(8);
+    env->SetDoubleArrayRegion(out, 0, 8, v);
     return out;
 }
 

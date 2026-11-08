@@ -639,6 +639,41 @@ class GpuBatchedLuTest {
     }
 
     /**
+     * The minimum-degree elimination order (GpuBatchedLuOrdering.MINIMUM_DEGREE) on a hub joined to four leaves: three
+     * leaves, then the hub and the last leaf tied at one neighbour each (the lower index first), an elimination tree
+     * three levels deep; eliminated first, the hub makes its leaves a clique and a chain of five levels. Our fast
+     * engine's plan follows: fewer entries and forward levels.
+     */
+    @Test
+    void minimumDegreeEliminatesTheLeavesBeforeTheirHub() {
+        int[] rowPtr = {0, 5, 7, 9, 11, 13};
+        int[] colIdx = {0, 1, 2, 3, 4, 0, 1, 0, 2, 0, 3, 0, 4};
+        int[] order = BatchedLuNative.minimumDegreeOrder(5, rowPtr, colIdx);
+        int[] natural = {0, 1, 2, 3, 4};
+        assertArrayEquals(new int[] {1, 2, 3, 0, 4}, order);
+        assertEquals(3, BatchedLuNative.eliminationLevels(5, rowPtr, colIdx, order));
+        assertEquals(5, BatchedLuNative.eliminationLevels(5, rowPtr, colIdx, natural));
+        long[] minimumDegree = BatchedLuNative.scalarPlanStatistics(5, rowPtr, colIdx, order, order);
+        long[] hubFirst = BatchedLuNative.scalarPlanStatistics(5, rowPtr, colIdx, natural, natural);
+        assertTrue(minimumDegree[0] < hubFirst[0], "LU entries");
+        assertTrue(minimumDegree[3] < hubFirst[3], "forward levels");
+    }
+
+    /** The minimum-degree order of a coupler system's pattern is a permutation of its rows. */
+    @Test
+    void minimumDegreeOrdersEveryRowOnce() {
+        Csr csr = couplerSystem(32, 80, 3, 0.03).csr();
+        int[] order = BatchedLuNative.minimumDegreeOrder(csr.n(), csr.rowPtr(), csr.colIdx());
+        int[] sorted = order.clone();
+        Arrays.sort(sorted);
+        int[] identity = new int[csr.n()];
+        for (int i = 0; i < identity.length; i++) {
+            identity[i] = i;
+        }
+        assertArrayEquals(identity, sorted);
+    }
+
+    /**
      * The adaptive refinement solves its corrections on the lanes still refining only, and each lane's Newton step in a
      * batch is the one it takes alone, bit for bit: the coupler systems refine on the pivoting engine and the nearly
      * singular lane on the fast engine, beside lanes done after the plain solve and a scenario outside the lane map.

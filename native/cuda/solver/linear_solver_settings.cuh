@@ -53,7 +53,13 @@ struct LinearSolverSettings {
     int iterativeRefinementBaseSteps = 1;                                          // cuDSS internal refinement steps (coupler systems)
     int iterativeRefinementMaxSteps = 4;                                           // adaptive refinement: at most this many solves
     double iterativeRefinementTolerance = 1e-12;                                    // adaptive refinement: backward-residual target
+    int batchedLuOrdering = 0;                               // BatchedLuOrdering: the elimination order our batched LU is planned on
 };
+
+// The elimination order of our batched LU (GpuBatchedLuOrdering): cuDSS's analysis order, the host's minimum degree of
+// A + A^T (minimum_degree.cuh), or whichever of the two has the fewer elimination levels on the structure.
+enum BatchedLuOrdering : int { BATCHED_LU_ORDERING_CUDSS = 0, BATCHED_LU_ORDERING_MINIMUM_DEGREE = 1,
+                               BATCHED_LU_ORDERING_FEWEST_LEVELS = 2 };
 extern LinearSolverSettings gLinearSolver;
 
 inline int configuredIterativeRefinementBaseSteps() {

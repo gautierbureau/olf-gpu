@@ -28,6 +28,7 @@
 #include "../common/stats.cuh"
 #include "../common/trace.cuh"
 #include "../lu/cudss_order.cuh"
+#include "../lu/minimum_degree.cuh"
 #include "../solver/linear_solver_settings.cuh"
 #include "structure_build.cuh"
 #include "../fixedmatrix/relocation_pattern.cuh"
@@ -460,11 +461,32 @@ LuPlan& luPlanOf(SharedStructure& structure) {
         int64_t cudssLuNnz = 0;
         cudssEliminationOrder(structure.n, structure.nnz, structure.dRowPtr.as<int>(), structure.dColIdx.as<int>(),
                               structure.nZeroImpedanceBranch > 0, rowOrder, colOrder, cudssLuNnz);
+        // the elimination order the plan is built on (BatchedLuOrdering); cuDSS's row and column orders are the same
+        // permutation on our symmetric-pattern Jacobians, and the minimum degree is symmetric by construction
+        const int ordering = gLinearSolver.batchedLuOrdering;
+        const char* chosen = "cudss";
+        int cudssLevels = -1;
+        int minimumDegreeLevels = -1;
+        if (ordering != BATCHED_LU_ORDERING_CUDSS) {
+            std::vector<int> minimumDegree = minimumDegreeOrder(structure.n, structure.rowPtr.data(), structure.colIdx.data());
+            minimumDegreeLevels = eliminationLevels(structure.n, structure.rowPtr.data(), structure.colIdx.data(), minimumDegree);
+            bool take = ordering == BATCHED_LU_ORDERING_MINIMUM_DEGREE;
+            if (!take) {
+                cudssLevels = eliminationLevels(structure.n, structure.rowPtr.data(), structure.colIdx.data(), rowOrder);
+                take = minimumDegreeLevels < cudssLevels;
+            }
+            if (take) {
+                rowOrder = minimumDegree;
+                colOrder = std::move(minimumDegree);
+                chosen = "minimum-degree";
+            }
+        }
         std::shared_ptr<LuPlan> plan = buildLuPlan(structure.n, structure.rowPtr.data(), structure.colIdx.data(),
                                                    rowOrder.data(), colOrder.data());
         if (traceOn(Trace::TRACE)) {
-            std::fprintf(stderr, "OLF_GPU_LU_PLAN n=%d nnz=%d cudssLuNnz=%lld %s\n", plan->n, plan->rowPtr[plan->n],
-                         static_cast<long long>(cudssLuNnz), describeLuPlan(*plan).c_str());
+            std::fprintf(stderr, "OLF_GPU_LU_PLAN n=%d nnz=%d cudssLuNnz=%lld order=%s cudssLevels=%d minimumDegreeLevels=%d %s\n",
+                         plan->n, plan->rowPtr[plan->n], static_cast<long long>(cudssLuNnz), chosen, cudssLevels,
+                         minimumDegreeLevels, describeLuPlan(*plan).c_str());
         }
         if (const char* dump = traceValue(Trace::LU_PATTERN_DUMP)) {
             // int32 little endian: n, nnz, nSwitchRows, rowPtr[n + 1], colIdx[nnz], rowOrder[n], colOrder[n], the

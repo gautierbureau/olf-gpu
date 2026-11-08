@@ -124,7 +124,7 @@ class GpuLoadFlowProviderTest {
         Network cpuNetwork = IeeeCdfNetworkFactory.create14();
         try {
             assertTrue(LoadFlow.find(GpuLoadFlowProvider.NAME).run(gpuNetwork, parameters).isFullyConverged());
-            assertArrayEquals(new double[] {4, 4, 3, 0.25, 2, 5, 1e-11}, NewtonSettingsNative.readLinearSolverSettings());
+            assertArrayEquals(new double[] {4, 4, 3, 0.25, 2, 5, 1e-11, 0}, NewtonSettingsNative.readLinearSolverSettings());
         } finally {
             new GpuLoadFlowParameters().install();               // the next tests run with the defaults
         }

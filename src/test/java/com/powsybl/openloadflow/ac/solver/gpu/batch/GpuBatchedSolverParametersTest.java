@@ -75,7 +75,7 @@ class GpuBatchedSolverParametersTest {
     void aDirectSolveInstallsTheParametersItIsGiven() {
         assumeTrue(GpuAcNewtonSolver.isAvailable(), "GPU lib required");
         assertTrue(solve(BatchConfig.DEVICE_DEFAULTS.withGpuParameters(nonDefault())).hasConverged());
-        assertArrayEquals(new double[] {4, 4, 3, 0.25, 2, 5, 1e-11, 0}, NewtonSettingsNative.readLinearSolverSettings());
+        assertArrayEquals(new double[] {4, 4, 3, 0.25, 2, 5, 1e-11, 0, 1}, NewtonSettingsNative.readLinearSolverSettings());
     }
 
     @Test

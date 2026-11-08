@@ -11,7 +11,7 @@ extern "C" JNIEXPORT void JNICALL
 OLF_JNI(ac_solver_gpu, NewtonSettingsNative, setLinearSolverSettings)(
         JNIEnv*, jclass, jint reorder, jint matching, jint pivotType, jdouble pivotThreshold,
         jint iterativeRefinementBaseSteps, jint iterativeRefinementMaxSteps, jdouble iterativeRefinementTolerance,
-        jint batchedLuOrdering) {
+        jint batchedLuOrdering, jboolean batchedLuSplitLongRows) {
     gLinearSolver.reorder = reorder;
     gLinearSolver.matching = matching;
     gLinearSolver.pivotType = pivotType;
@@ -20,17 +20,19 @@ OLF_JNI(ac_solver_gpu, NewtonSettingsNative, setLinearSolverSettings)(
     gLinearSolver.iterativeRefinementMaxSteps = iterativeRefinementMaxSteps;
     gLinearSolver.iterativeRefinementTolerance = iterativeRefinementTolerance;
     gLinearSolver.batchedLuOrdering = batchedLuOrdering;
+    gLinearSolver.batchedLuSplitLongRows = batchedLuSplitLongRows == JNI_TRUE;
 }
 
 // The installed linear-solver settings, in setLinearSolverSettings's order (tests: the parameters reach the device).
 extern "C" JNIEXPORT jdoubleArray JNICALL
 OLF_JNI(ac_solver_gpu, NewtonSettingsNative, readLinearSolverSettings)(JNIEnv* env, jclass) {
-    const double v[8] = {static_cast<double>(gLinearSolver.reorder), static_cast<double>(gLinearSolver.matching),
+    const double v[9] = {static_cast<double>(gLinearSolver.reorder), static_cast<double>(gLinearSolver.matching),
                          static_cast<double>(gLinearSolver.pivotType), gLinearSolver.pivotThreshold,
                          static_cast<double>(gLinearSolver.iterativeRefinementBaseSteps), static_cast<double>(gLinearSolver.iterativeRefinementMaxSteps),
-                         gLinearSolver.iterativeRefinementTolerance, static_cast<double>(gLinearSolver.batchedLuOrdering)};
-    jdoubleArray out = env->NewDoubleArray(8);
-    env->SetDoubleArrayRegion(out, 0, 8, v);
+                         gLinearSolver.iterativeRefinementTolerance, static_cast<double>(gLinearSolver.batchedLuOrdering),
+                         gLinearSolver.batchedLuSplitLongRows ? 1.0 : 0.0};
+    jdoubleArray out = env->NewDoubleArray(9);
+    env->SetDoubleArrayRegion(out, 0, 9, v);
     return out;
 }
 

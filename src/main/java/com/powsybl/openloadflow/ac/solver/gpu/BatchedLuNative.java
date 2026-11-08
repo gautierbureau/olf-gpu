@@ -37,7 +37,8 @@ public final class BatchedLuNative {
 
     /**
      * {the factorizations our batched LU ran in this process, the lanes of them its pivoting engine factorized, the
-     * fast-engine orders built with learned pivot delays}.
+     * fast-engine orders built with learned pivot delays, the fast-engine factorization steps and solve levels launched
+     * with their long rows split over several warps}.
      */
     public static native long[] factorizationCounts();
 

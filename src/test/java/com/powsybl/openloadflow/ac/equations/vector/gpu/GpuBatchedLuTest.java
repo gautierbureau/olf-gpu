@@ -638,6 +638,76 @@ class GpuBatchedLuTest {
         }
     }
 
+    /** A hub joined to every other row, plus a chain through those rows; the hub is row n - 1 or row 0. */
+    private static Csr hubAndChain(int n, boolean hubLast) {
+        boolean[][] pattern = new boolean[n][n];
+        int hub = hubLast ? n - 1 : 0;
+        for (int i = 0; i < n; i++) {
+            pattern[i][i] = true;
+            pattern[i][hub] = true;
+            pattern[hub][i] = true;
+            if (i + 1 < n) {
+                pattern[i][i + 1] = true;
+                pattern[i + 1][i] = true;
+            }
+        }
+        return toCsr(pattern);
+    }
+
+    private static void assertSolvesTheDenseWay(Csr csr, int capacity, long seed) {
+        int n = csr.n();
+        double[] values = diagonallyDominantValues(csr, capacity, seed);
+        double[] rightHandSides = new double[capacity * n];
+        Random random = new Random(seed + 1);
+        for (int k = 0; k < rightHandSides.length; k++) {
+            rightHandSides[k] = random.nextDouble() * 2 - 1;
+        }
+        double[] whole = filled(capacity * n, 7);
+        int[] pivoted = new int[capacity];
+        int[] clamps = new int[capacity];
+        BatchedLuNative.factorizeAndSolve(n, csr.rowPtr(), csr.colIdx(), identity(n), identity(n), capacity, values,
+                rightHandSides, identity(capacity), whole, pivoted, clamps);
+        assertArrayEquals(new int[capacity], pivoted, "the fast engine factorizes every lane");
+        assertArrayEquals(new int[capacity], clamps);
+        int[] chosen = {capacity - 1, 0, 33, 5, 31};
+        double[] selected = filled(capacity * n, 7);
+        BatchedLuNative.factorizeAndSolveSelected(n, csr.rowPtr(), csr.colIdx(), identity(n), identity(n), capacity,
+                values, rightHandSides, identity(capacity), chosen, selected);
+        for (int s = 0; s < capacity; s++) {
+            double[] reference = denseSolve(dense(csr, values, s), scenario(rightHandSides, s, n));
+            assertArrayEquals(reference, scenario(whole, s, n), 1e-12, "n=" + n + " scenario " + s);
+            final int scenario = s;
+            boolean isChosen = Arrays.stream(chosen).anyMatch(c -> c == scenario);
+            assertArrayEquals(isChosen ? scenario(whole, s, n) : filled(n, 7), scenario(selected, s, n),
+                    "n=" + n + " selected scenario " + s);
+        }
+    }
+
+    /**
+     * A row with a long run of terms - the L row of a hub eliminated last, 299 terms and its pivot's 299 contributions;
+     * every row of the full matrix a hub eliminated first leaves, on both sides of the diagonal - is summed by several
+     * warps (batchedLuSplitLongRows) when the level leaves the GPU threads to spare, as these 37 lanes do: the warps'
+     * partial sums are added in a fixed order, so the factors and solutions are the dense pivoted solve's to rounding,
+     * on all 37 lanes (a full and a partial group of 32) and on 5 selected ones, which take the solve of every lane bit
+     * for bit. With the parameter off no step or level is split. Checked to fail with the last warp's partial sum left
+     * out of the factorization, or out of the forward or the backward solve.
+     */
+    @Test
+    void longRowsSplitOverSeveralWarpsSolveAsTheDenseSolve() {
+        try {
+            for (boolean split : new boolean[] {true, false}) {
+                new GpuLoadFlowParameters().setBatchedLuSplitLongRows(split).install();
+                long before = BatchedLuNative.factorizationCounts()[3];
+                assertSolvesTheDenseWay(hubAndChain(300, true), 37, 51);
+                assertSolvesTheDenseWay(hubAndChain(64, false), 37, 52);
+                long launches = BatchedLuNative.factorizationCounts()[3] - before;
+                assertTrue(split ? launches > 0 : launches == 0, "split=" + split + ": " + launches + " split launches");
+            }
+        } finally {
+            new GpuLoadFlowParameters().install();                   // the next tests run with the defaults
+        }
+    }
+
     /**
      * The minimum-degree elimination order (GpuBatchedLuOrdering.MINIMUM_DEGREE) on a hub joined to four leaves: three
      * leaves, then the hub and the last leaf tied at one neighbour each (the lower index first), an elimination tree

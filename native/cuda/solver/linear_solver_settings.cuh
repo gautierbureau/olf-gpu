@@ -54,6 +54,7 @@ struct LinearSolverSettings {
     int iterativeRefinementMaxSteps = 4;                                           // adaptive refinement: at most this many solves
     double iterativeRefinementTolerance = 1e-12;                                    // adaptive refinement: backward-residual target
     int batchedLuOrdering = 0;                               // BatchedLuOrdering: the elimination order our batched LU is planned on
+    bool batchedLuSplitLongRows = true;                      // our batched LU's long rows summed by several warps (scalar_lu.cu)
 };
 
 // The elimination order of our batched LU (GpuBatchedLuOrdering): cuDSS's analysis order, the host's minimum degree of

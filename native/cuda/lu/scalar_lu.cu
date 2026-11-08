@@ -4,11 +4,14 @@
 // See scalar_lu.cuh.
 #include "scalar_lu.cuh"
 
+#include <algorithm>
 #include <cmath>
 #include <stdexcept>
 #include <string>
 
 #include "../common/check.cuh"
+#include "../common/stats.cuh"
+#include "../solver/linear_solver_settings.cuh"
 
 namespace olfgpu {
 
@@ -17,6 +20,10 @@ namespace {
 constexpr int LU_BLOCK = 128;
 constexpr int TILE = 32;                                     // transposes: 32 entries x 32 lanes per block
 constexpr int TILE_ROWS = 8;
+// A long row split over several warps (splitSlices): each warp takes 32 lanes of one slice of the row's terms.
+constexpr int SPLIT_LANES = 32;
+constexpr int SPLIT_MAX_SLICES = 32;                         // at most a block of 32 warps per (row, 32 lanes)
+constexpr int SPLIT_MIN_TERMS = 4;                           // a slice gets at least this many of the longest row's terms
 
 unsigned int blocksFor(size_t threads) {
     return static_cast<unsigned int>((threads + LU_BLOCK - 1) / LU_BLOCK);
@@ -109,8 +116,26 @@ __global__ void zeroFill(int nFill, int width, int capacity, const int* __restri
     lu[static_cast<size_t>(fillEntry[f]) * capacity + a] = 0.0;
 }
 
-// One factorization step: every (item, lane) gathers its entry's contributions in pivot order, then an L entry
-// divides by its pivot - an outsized multiplier is trouble - and a pivot is checked.
+// An entry's value once its contributions are in acc: an L entry divides by its pivot - an outsized multiplier is
+// trouble - and a pivot is checked.
+__device__ __forceinline__ void finishEntry(int e, int a, int capacity, const int* __restrict__ entryDivisor, double acc,
+                                            double* __restrict__ lu, int* __restrict__ trouble) {
+    const int d = entryDivisor[e];
+    if (d >= 0) {
+        acc /= lu[static_cast<size_t>(d) * capacity + a];
+        if (!(fabs(acc) <= LU_MULTIPLIER_LIMIT)) {
+            atomicAdd(trouble + a, 1);
+        }
+    } else if (d == SCALAR_ITEM_PIVOT && !(fabs(acc) >= LU_PIVOT_EPSILON)) {
+        if (!isnan(acc)) {
+            acc = acc < 0.0 ? -LU_PIVOT_EPSILON : LU_PIVOT_EPSILON;
+        }
+        atomicAdd(trouble + a, 1);
+    }
+    lu[static_cast<size_t>(e) * capacity + a] = acc;
+}
+
+// One factorization step: every (item, lane) gathers its entry's contributions in pivot order, then finishes it.
 __global__ void factorStep(int nItems, int width, int capacity, const int* __restrict__ stepEntry,
                            const int* __restrict__ entryDivisor, const int* __restrict__ contributionStart,
                            const int* __restrict__ contributionL, const int* __restrict__ contributionU,
@@ -128,19 +153,40 @@ __global__ void factorStep(int nItems, int width, int capacity, const int* __res
         acc = fma(-lu[static_cast<size_t>(contributionL[c]) * capacity + a],
                   lu[static_cast<size_t>(contributionU[c]) * capacity + a], acc);
     }
-    const int d = entryDivisor[e];
-    if (d >= 0) {
-        acc /= lu[static_cast<size_t>(d) * capacity + a];
-        if (!(fabs(acc) <= LU_MULTIPLIER_LIMIT)) {
-            atomicAdd(trouble + a, 1);
+    finishEntry(e, a, capacity, entryDivisor, acc, lu, trouble);
+}
+
+// factorStep with each entry's contributions split over blockDim.y warps (splitSlices): warp k of a block sums the
+// contributions k, k + K, ... of one entry for 32 lanes, then the first warp adds the K partial sums in warp order -
+// a fixed order, the same on every run - and finishes the entry.
+__global__ void factorStepSplit(int nItems, int width, int capacity, const int* __restrict__ stepEntry,
+                                const int* __restrict__ entryDivisor, const int* __restrict__ contributionStart,
+                                const int* __restrict__ contributionL, const int* __restrict__ contributionU,
+                                double* __restrict__ lu, int* __restrict__ trouble) {
+    extern __shared__ double partial[];                      // [slice][lane of the block]
+    const int tiles = (width + SPLIT_LANES - 1) / SPLIT_LANES;
+    const int t = blockIdx.x / tiles;
+    const int a = (blockIdx.x - t * tiles) * SPLIT_LANES + threadIdx.x;
+    const int slices = blockDim.y;
+    const bool active = a < width;
+    const int e = stepEntry[t];
+    double sum = 0.0;
+    if (active) {
+        const int cEnd = contributionStart[e + 1];
+        for (int c = contributionStart[e] + threadIdx.y; c < cEnd; c += slices) {
+            sum = fma(-lu[static_cast<size_t>(contributionL[c]) * capacity + a],
+                      lu[static_cast<size_t>(contributionU[c]) * capacity + a], sum);
         }
-    } else if (d == SCALAR_ITEM_PIVOT && !(fabs(acc) >= LU_PIVOT_EPSILON)) {
-        if (!isnan(acc)) {
-            acc = acc < 0.0 ? -LU_PIVOT_EPSILON : LU_PIVOT_EPSILON;
-        }
-        atomicAdd(trouble + a, 1);
     }
-    lu[static_cast<size_t>(e) * capacity + a] = acc;
+    partial[threadIdx.y * SPLIT_LANES + threadIdx.x] = sum;
+    __syncthreads();
+    if (threadIdx.y == 0 && active) {
+        double acc = lu[static_cast<size_t>(e) * capacity + a];
+        for (int k = 0; k < slices; k++) {
+            acc += partial[k * SPLIT_LANES + threadIdx.x];
+        }
+        finishEntry(e, a, capacity, entryDivisor, acc, lu, trouble);
+    }
 }
 
 // One forward level, L unit lower: z[i] -= sum_k L[i][k] z[k].
@@ -183,6 +229,93 @@ __global__ void backwardLevel(int nRows, int width, int capacity, const int* __r
     z[static_cast<size_t>(i) * capacity + a] = x / lu[static_cast<size_t>(luDiag[i]) * capacity + a];
 }
 
+// forwardLevel (backward false) or backwardLevel (backward true) with each row's terms split over blockDim.y warps, as
+// factorStepSplit splits an entry's contributions: warp k sums the terms k, k + K, ... of one row for 32 lanes, the
+// first warp adds the K partial sums in warp order and finishes the row.
+__global__ void levelSplit(bool backward, int nRows, int width, int capacity, const int* __restrict__ selected,
+                           const int* __restrict__ rows, const int* __restrict__ luRowPtr,
+                           const int* __restrict__ luCol, const int* __restrict__ luDiag,
+                           const double* __restrict__ lu, double* __restrict__ z) {
+    extern __shared__ double partial[];                      // [slice][lane of the block]
+    const int tiles = (width + SPLIT_LANES - 1) / SPLIT_LANES;
+    const int t = blockIdx.x / tiles;
+    const int slot = (blockIdx.x - t * tiles) * SPLIT_LANES + threadIdx.x;
+    const int slices = blockDim.y;
+    const bool active = slot < width;
+    const int a = active ? laneOf(slot, selected) : 0;
+    const int i = rows[t];
+    double sum = 0.0;
+    if (active) {
+        const int qEnd = backward ? luRowPtr[i + 1] : luDiag[i];
+        for (int q = (backward ? luDiag[i] + 1 : luRowPtr[i]) + threadIdx.y; q < qEnd; q += slices) {
+            sum = fma(-lu[static_cast<size_t>(q) * capacity + a], z[static_cast<size_t>(luCol[q]) * capacity + a], sum);
+        }
+    }
+    partial[threadIdx.y * SPLIT_LANES + threadIdx.x] = sum;
+    __syncthreads();
+    if (threadIdx.y == 0 && active) {
+        double y = z[static_cast<size_t>(i) * capacity + a];
+        for (int k = 0; k < slices; k++) {
+            y += partial[k * SPLIT_LANES + threadIdx.x];
+        }
+        z[static_cast<size_t>(i) * capacity + a] = backward ? y / lu[static_cast<size_t>(luDiag[i]) * capacity + a] : y;
+    }
+}
+
+// The warps each (row, 32 lanes) of a level or step is split over: 1 (the unsplit kernels) unless
+// batchedLuSplitLongRows is on, then the most - a power of two up to SPLIT_MAX_SLICES - that leave every slice
+// SPLIT_MIN_TERMS of the longest row's terms and keep the threads within what the GPU holds resident (budget). A level
+// wide enough to fill the GPU keeps one thread per (row, lane): a bigger GPU or a wider batch splits less.
+int splitSlices(int items, int width, int longest, size_t budget) {
+    if (!gLinearSolver.batchedLuSplitLongRows) {
+        return 1;
+    }
+    const size_t threads = static_cast<size_t>(items) * ((width + SPLIT_LANES - 1) / SPLIT_LANES) * SPLIT_LANES;
+    int slices = 1;
+    while (slices * 2 <= SPLIT_MAX_SLICES && longest >= slices * 2 * SPLIT_MIN_TERMS && threads * slices * 2 <= budget) {
+        slices *= 2;
+    }
+    return slices;
+}
+
+void launchLevel(ScalarLu& lu, bool backward, int level, const int* selected, int width, cudaStream_t stream) {
+    const std::vector<int>& start = backward ? lu.backwardLevelStart : lu.forwardLevelStart;
+    const int rows = start[level + 1] - start[level];
+    const int* levelRows = (backward ? lu.dBackwardRow : lu.dForwardRow).as<int>() + start[level];
+    const int slices = splitSlices(rows, width, (backward ? lu.backwardLevelLongest : lu.forwardLevelLongest)[level],
+                                   lu.residentThreads);
+    if (slices > 1) {
+        gBatchedLuSplitLaunches++;
+        const unsigned int blocks = static_cast<unsigned int>(rows) * ((width + SPLIT_LANES - 1) / SPLIT_LANES);
+        levelSplit<<<blocks, dim3(SPLIT_LANES, slices), slices * SPLIT_LANES * sizeof(double), stream>>>(backward, rows,
+                width, lu.capacity, selected, levelRows, lu.dLuRowPtr.as<int>(), lu.dLuCol.as<int>(),
+                lu.dLuDiag.as<int>(), lu.dLu.as<double>(), lu.dWork.as<double>());
+    } else if (backward) {
+        backwardLevel<<<blocksFor(static_cast<size_t>(rows) * width), LU_BLOCK, 0, stream>>>(rows, width, lu.capacity,
+                selected, levelRows, lu.dLuRowPtr.as<int>(), lu.dLuCol.as<int>(), lu.dLuDiag.as<int>(),
+                lu.dLu.as<double>(), lu.dWork.as<double>());
+    } else {
+        forwardLevel<<<blocksFor(static_cast<size_t>(rows) * width), LU_BLOCK, 0, stream>>>(rows, width, lu.capacity,
+                selected, levelRows, lu.dLuRowPtr.as<int>(), lu.dLuCol.as<int>(), lu.dLuDiag.as<int>(),
+                lu.dLu.as<double>(), lu.dWork.as<double>());
+    }
+}
+
+// The longest term run of each level: forward, the L part of its rows; backward, the U part right of the diagonal.
+std::vector<int> levelLongest(const ScalarLuPlan& plan, bool backward) {
+    const std::vector<int>& start = backward ? plan.backwardLevelStart : plan.forwardLevelStart;
+    const std::vector<int>& rows = backward ? plan.backwardRow : plan.forwardRow;
+    std::vector<int> longest(start.empty() ? 0 : start.size() - 1, 0);
+    for (size_t l = 0; l < longest.size(); l++) {
+        for (int k = start[l]; k < start[l + 1]; k++) {
+            const int i = rows[k];
+            const int terms = backward ? plan.luRowPtr[i + 1] - plan.luDiag[i] - 1 : plan.luDiag[i] - plan.luRowPtr[i];
+            longest[l] = std::max(longest[l], terms);
+        }
+    }
+    return longest;
+}
+
 template <typename T>
 void uploadVector(DeviceBuf& buf, const std::vector<T>& v) {
     if (!v.empty()) {
@@ -197,16 +330,10 @@ void solveScalar(ScalarLu& lu, const int* selected, int width, const double* b, 
     toInterleaved<<<vectorGrid, tileBlock, 0, stream>>>(lu.n, lu.n, width, lu.capacity, lu.dLaneMap.as<int>(), selected,
             lu.dRowPosition.as<int>(), b, lu.dWork.as<double>());
     for (int l = 0; l + 1 < static_cast<int>(lu.forwardLevelStart.size()); l++) {
-        const int rows = lu.forwardLevelStart[l + 1] - lu.forwardLevelStart[l];
-        forwardLevel<<<blocksFor(static_cast<size_t>(rows) * width), LU_BLOCK, 0, stream>>>(rows, width, lu.capacity,
-                selected, lu.dForwardRow.as<int>() + lu.forwardLevelStart[l], lu.dLuRowPtr.as<int>(),
-                lu.dLuCol.as<int>(), lu.dLuDiag.as<int>(), lu.dLu.as<double>(), lu.dWork.as<double>());
+        launchLevel(lu, false, l, selected, width, stream);
     }
     for (int l = 0; l + 1 < static_cast<int>(lu.backwardLevelStart.size()); l++) {
-        const int rows = lu.backwardLevelStart[l + 1] - lu.backwardLevelStart[l];
-        backwardLevel<<<blocksFor(static_cast<size_t>(rows) * width), LU_BLOCK, 0, stream>>>(rows, width, lu.capacity,
-                selected, lu.dBackwardRow.as<int>() + lu.backwardLevelStart[l], lu.dLuRowPtr.as<int>(),
-                lu.dLuCol.as<int>(), lu.dLuDiag.as<int>(), lu.dLu.as<double>(), lu.dWork.as<double>());
+        launchLevel(lu, true, l, selected, width, stream);
     }
     fromInterleaved<<<vectorGrid, tileBlock, 0, stream>>>(lu.n, lu.n, width, lu.capacity, lu.dLaneMap.as<int>(),
             selected, lu.dColPosition.as<int>(), lu.dWork.as<double>(), x);
@@ -227,6 +354,22 @@ void createScalarLu(ScalarLu& lu, const ScalarLuPlan& plan, int capacity) {
     lu.stepStart = plan.stepStart;
     lu.forwardLevelStart = plan.forwardLevelStart;
     lu.backwardLevelStart = plan.backwardLevelStart;
+    lu.forwardLevelLongest = levelLongest(plan, false);
+    lu.backwardLevelLongest = levelLongest(plan, true);
+    lu.stepLongest.assign(plan.stepStart.empty() ? 0 : plan.stepStart.size() - 1, 0);
+    for (size_t s = 0; s < lu.stepLongest.size(); s++) {
+        for (int k = plan.stepStart[s]; k < plan.stepStart[s + 1]; k++) {
+            const int e = plan.stepEntry[k];
+            lu.stepLongest[s] = std::max(lu.stepLongest[s], plan.contributionStart[e + 1] - plan.contributionStart[e]);
+        }
+    }
+    int device = 0;
+    int multiprocessors = 0;
+    int threadsPerMultiprocessor = 0;
+    CUDA_CHECK(cudaGetDevice(&device));
+    CUDA_CHECK(cudaDeviceGetAttribute(&multiprocessors, cudaDevAttrMultiProcessorCount, device));
+    CUDA_CHECK(cudaDeviceGetAttribute(&threadsPerMultiprocessor, cudaDevAttrMaxThreadsPerMultiProcessor, device));
+    lu.residentThreads = static_cast<size_t>(multiprocessors) * threadsPerMultiprocessor;
     std::vector<int> entryOfA(plan.nnzA, -1);
     std::vector<int> fillEntry;
     for (int e = 0; e < plan.nnzLu; e++) {
@@ -294,10 +437,20 @@ void factorizeScalarLanes(ScalarLu& lu, const double* vals, BatchLayout layout, 
         if (items == 0) {
             continue;
         }
-        factorStep<<<blocksFor(static_cast<size_t>(items) * width), LU_BLOCK, 0, stream>>>(items, width, lu.capacity,
-                lu.dStepEntry.as<int>() + lu.stepStart[s], lu.dEntryDivisor.as<int>(),
-                lu.dContributionStart.as<int>(), lu.dContributionL.as<int>(), lu.dContributionU.as<int>(),
-                lu.dLu.as<double>(), lu.dTrouble.as<int>());
+        const int slices = splitSlices(items, width, lu.stepLongest[s], lu.residentThreads);
+        if (slices > 1) {
+            gBatchedLuSplitLaunches++;
+            const unsigned int blocks = static_cast<unsigned int>(items) * ((width + SPLIT_LANES - 1) / SPLIT_LANES);
+            factorStepSplit<<<blocks, dim3(SPLIT_LANES, slices), slices * SPLIT_LANES * sizeof(double), stream>>>(items,
+                    width, lu.capacity, lu.dStepEntry.as<int>() + lu.stepStart[s], lu.dEntryDivisor.as<int>(),
+                    lu.dContributionStart.as<int>(), lu.dContributionL.as<int>(), lu.dContributionU.as<int>(),
+                    lu.dLu.as<double>(), lu.dTrouble.as<int>());
+        } else {
+            factorStep<<<blocksFor(static_cast<size_t>(items) * width), LU_BLOCK, 0, stream>>>(items, width,
+                    lu.capacity, lu.dStepEntry.as<int>() + lu.stepStart[s], lu.dEntryDivisor.as<int>(),
+                    lu.dContributionStart.as<int>(), lu.dContributionL.as<int>(), lu.dContributionU.as<int>(),
+                    lu.dLu.as<double>(), lu.dTrouble.as<int>());
+        }
     }
     CUDA_CHECK(cudaGetLastError());
 }

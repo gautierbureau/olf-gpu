@@ -1,20 +1,24 @@
 name: CI
 
+# The Java build and test suite, on Linux. The extension builds against three forks that are not on Maven Central, each
+# built from its branch on github.com/gautierbureau and installed in the local repository first:
+#   powsybl-core          cudss_factory      7.4.0-SNAPSHOT        (CuDssMatrixFactory)
+#   powsybl-math-native   cudss_solver_1     1.6.0-SNAPSHOT        (KLU natives; the cuDSS binding is opt-in, not built)
+#   powsybl-open-loadflow olf-local-patches  2.4.0-SNAPSHOT-gpu    (the OLF the extension builds on)
+# The installed forks are cached under the three branch heads, so they are rebuilt only when one of them moves. The
+# runner has no GPU and the CUDA library is not built: the GPU tests skip themselves, the rest of the suite runs.
+
 on:
   push:
     branches:
       - 'main'
       - 'release-v**'
-      - 'full-sonar-analysis-**'
   pull_request:
 
 jobs:
   build:
-    name: Build OS ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+    name: Build (Linux)
+    runs-on: ubuntu-latest
 
     steps:
       - name: Checkout sources
@@ -26,22 +30,64 @@ jobs:
           distribution: 'temurin'
           java-version: '21'
 
-      - name: Build with Maven (Ubuntu / MacOS)
-        if: matrix.os != 'windows-latest'
-        run: ./mvnw --batch-mode -Pjacoco install
+      - name: Resolve the fork heads
+        id: forks
+        run: |
+          core=$(git ls-remote https://github.com/gautierbureau/powsybl-core.git refs/heads/cudss_factory | cut -f1)
+          mathNative=$(git ls-remote https://github.com/gautierbureau/powsybl-math-native.git refs/heads/cudss_solver_1 | cut -f1)
+          olf=$(git ls-remote https://github.com/gautierbureau/powsybl-open-loadflow.git refs/heads/olf-local-patches | cut -f1)
+          echo "core=$core" >> "$GITHUB_OUTPUT"
+          echo "mathNative=$mathNative" >> "$GITHUB_OUTPUT"
+          echo "olf=$olf" >> "$GITHUB_OUTPUT"
 
-      - name: Build with Maven (Windows)
-        if: matrix.os == 'windows-latest'
-        run: mvnw.cmd --batch-mode install
-        shell: cmd
+      - name: Restore the installed forks
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository
+          key: forks-${{ steps.forks.outputs.core }}-${{ steps.forks.outputs.mathNative }}-${{ steps.forks.outputs.olf }}
 
-      - name: Run SonarCloud analysis
-        if: matrix.os == 'ubuntu-latest'
-        run: >
-          ./mvnw --batch-mode -DskipTests sonar:sonar
-          -Dsonar.host.url=https://sonarcloud.io
-          -Dsonar.organization=powsybl-ci-github
-          -Dsonar.projectKey=com.powsybl:powsybl-open-loadflow
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      - name: Checkout powsybl-core (cudss_factory)
+        if: steps.cache.outputs.cache-hit != 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: gautierbureau/powsybl-core
+          ref: ${{ steps.forks.outputs.core }}
+          path: deps/powsybl-core
+
+      - name: Install powsybl-core
+        if: steps.cache.outputs.cache-hit != 'true'
+        working-directory: deps/powsybl-core
+        run: mvn --batch-mode -T 1C install -DskipTests -Dcheckstyle.skip -Dmaven.javadoc.skip -Dmaven.source.skip -Djacoco.skip
+
+      - name: Checkout powsybl-math-native (cudss_solver_1)
+        if: steps.cache.outputs.cache-hit != 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: gautierbureau/powsybl-math-native
+          ref: ${{ steps.forks.outputs.mathNative }}
+          path: deps/powsybl-math-native
+
+      - name: Install powsybl-math-native
+        if: steps.cache.outputs.cache-hit != 'true'
+        working-directory: deps/powsybl-math-native
+        run: |
+          cmake -DCMAKE_BUILD_TYPE=Release -S . -B build
+          cmake --build build --parallel --config Release
+          ./mvnw --batch-mode install -DskipTests
+
+      - name: Checkout powsybl-open-loadflow (olf-local-patches)
+        if: steps.cache.outputs.cache-hit != 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: gautierbureau/powsybl-open-loadflow
+          ref: ${{ steps.forks.outputs.olf }}
+          path: deps/powsybl-open-loadflow
+
+      - name: Install powsybl-open-loadflow
+        if: steps.cache.outputs.cache-hit != 'true'
+        working-directory: deps/powsybl-open-loadflow
+        run: mvn --batch-mode install -DskipTests -Dcheckstyle.skip
+
+      - name: Build and test
+        run: mvn --batch-mode install -Dpowsybl-math-native.version=1.6.0-SNAPSHOT

@@ -11,25 +11,48 @@ complete. Keep the numbering: it is cited in commit messages.
 
 ## Open
 
-### #86 — OPEN: the device's continuous phase control ends elsewhere than OLF after an outage (2026-11-09)
+### #86 — FIXED (in OLF): the continuous phase control's target P kept the initial tap's admittance (2026-11-09)
 
 Found while proving the device tap write-back (branch `fix-device-tap-moves`): the existing phase-control fixtures
 never move a tap after a contingency (PS1 has three taps; OLF keeps tap 1 for every regulation target from 40 to
 120 MW), so PS1's phase tap changer was rebuilt with 21 steps of one degree (alpha -10..10, R = 0.3·(t+11) %,
 X = 3·(t+11) %, rho 1), ACTIVE_POWER_CONTROL at 83 MW with a 1 MW deadband, plus the `L1_BIS` clone of `L1`.
+In CONTINUOUS_WITH_DISCRETISATION mode, the device ended elsewhere than OLF after `L1_BIS` whenever PS1 STARTED on a tap
+other than the one the base load flow rounds to:
 
-- INCREMENTAL (the device's flow controllers): the device keeps PS1 on its base tap index 17 after `L1_BIS` and moves it
-  to 15 after `L1`, and every bus voltage and branch flow matches OLF at 1e-12 kV / 1e-9 MW
-  (`GpuSaPhaseControlTest.devicePhaseTapMoveIsInTheReportedBranchFlows`).
-- CONTINUOUS_WITH_DISCRETISATION (the device's continuous phase control): from base tap index 16 the device rounds to 17
-  after `L1_BIS` and 15 after `L1`, and after `L1_BIS` bus B2 ends at **383.1265 kV against OLF's 383.6706 kV** — the
-  device's own solved state, independent of the write-back (the same with it disabled).
+| initial tap | base rounds to | OLF's continuous a1 after `L1_BIS` | the device's |
+|---|---|---|---|
+| 7 | 7 | 0.1155236777090457 (tap 7) | the same, every digit |
+| 6 | 7 | 0.11068574169440427 (tap 6) | 0.1155236777090457 (tap 7) |
+| 0 | 6 | 0.0844781497739782 (tap 5) | 0.11384603866416136 (tap 7) — bus B2 383.1265 kV against OLF's 383.6706 |
 
-Reproduce with that test's body in CONTINUOUS_WITH_DISCRETISATION mode (careful: `@EnumSource` runs the modes in the
-enum's declaration order, CONTINUOUS_WITH_DISCRETISATION first, whatever order `names` lists them in). Next: put OLF's
-PhaseControlOuterLoop sequence (the continuous a1 solve, the rounding, the re-solve on the rounded tap) beside the
-device's for `L1_BIS` — a rounding to a different tap, or the re-solve on a tap whose impedance differs from the
-continuous solve's.
+**Cause, in OLF.** The phase control's `BRANCH_TARGET_P` equation holds a flow term of its own
+(`AcEquationSystemCreator.createTransformerPhaseControlEquations` builds a new `ClosedBranchSide1ActiveFlowEquationTerm`),
+and `AbstractBranchAcFlowEquationTerm` copies y, ksi, g and b from the pi model at construction.
+`AcEquationSystemUpdater.onTapPositionChange` refreshed only the branch's six closed terms (`getClosedP1..I2`, which the
+vectorized creator does not even need). A security analysis runs every post-contingency load flow on the base load flow's
+equation system, so after the base rounding each continuous solve held the controlled flow at its target with the
+INITIAL tap's admittance while the bus equations used the rounded tap's. The device uses the current tap's in both. OLF
+alone shows it: PS1's flow after `L1_BIS` was 79.92 MW from initial tap 6 against 85.23 MW from initial tap 7, though
+the base load flow rounds both to tap 7. The same staleness hits every other flow term created beside the six: a
+generator remote reactive power control's `BRANCH_TARGET_Q`, and the additional closed P/Q terms (the reactive keys).
+
+**Fix:** fork commit `61476b592` on `olf-local-patches` (pushed to `gb`). For upstream, the same fix on upstream main is
+branch `refresh-flow-terms-on-tap-change` (`c567a6597`, pushed to `gb`, signed off): upstream main keeps a
+`modifiedTapImpedance` guard and a `notifyEquationTermConstantsChange()` call there, and the new loop sits before the
+notification. On upstream main the test fails the same way without the fix, and the suite runs 1616 tests with 0
+failures and 0 checkstyle violations.
+`onTapPositionChange` also refreshes every closed flow term the equation system attaches to the branch
+(`equationSystem.getEquationTerms(BRANCH, num)`). The fork's new
+`OpenSecurityAnalysisTest.testContinuousPhaseControlAfterBaseTapRounding` fails without it (79.916 against 85.231 MW).
+The fork suite runs 1529 tests with 0 failures and 3 skipped.
+
+**Here:** `GpuSaPhaseControlTest.devicePhaseTapMoveIsInTheReportedBranchFlows` runs INCREMENTAL from tap 0 and
+CONTINUOUS_WITH_DISCRETISATION from taps 0, 6 and 7. Every bus voltage and branch flow matches OLF at 1e-12 kV / 1e-9,
+with the device's tap moves written back. The RTE parameters leave phase-shifter regulation and transformer voltage
+control off, so rte6515 and network.xiidm never move a tap: their CPU references are unchanged. (A trap met on the way:
+`@EnumSource` runs the modes in the enum's declaration order, CONTINUOUS_WITH_DISCRETISATION first, whatever order
+`names` lists them in.)
 
 ### #64 — FIXED: a re-homed member's reactive limit read from the wrong row (2026-09-30)
 

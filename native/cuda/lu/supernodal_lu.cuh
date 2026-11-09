@@ -29,6 +29,8 @@ struct SupernodalLu {
     int capacity = 0;                                        // lanes the factors hold
     int width = 0;                                           // lanes of the last factorization
     std::vector<int> levelStart, levelEntryStart, levelPanelStart;
+    std::vector<int> forwardLevelLongest;                    // per level: its longest row's L terms (forward solve)
+    size_t residentThreads = 0;                              // threads the device holds resident: what a split may use
     int nFill = 0;
     DeviceBuf dStoredOfA, dFillEntry;                        // A entry -> stored entry; the stored entries without one
     DeviceBuf dSupernodeStart, dRowStart, dRows, dDiagonalBase, dLowerBase, dUpperBase, dLevelSupernode;

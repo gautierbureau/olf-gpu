@@ -709,6 +709,83 @@ class GpuBatchedLuTest {
     }
 
     /**
+     * The pivoting engine's forward solve splits its long rows over several warps as the fast engine does: the hub of
+     * hubAndChain(300, true), eliminated last, holds 299 L terms in a level of one supernode. A dense corner of four
+     * rows whose first three diagonals are zero on every lane, its couplings strong, sends every lane to the pivoting engine, which pivots
+     * inside that corner's supernode. The warps' partial sums are added in a fixed order, so the solutions are the dense
+     * pivoted solve's to rounding, on all 37 lanes and on 5 selected ones, which take the solve of every lane bit for
+     * bit. With the parameter off no pivoting-engine level is split. Checked to fail with the last warp's partial sum
+     * left out of the forward solve.
+     */
+    @Test
+    void pivotingEngineSplitsItsLongForwardRows() {
+        int n = 300;
+        int capacity = 37;
+        boolean[][] pattern = new boolean[n][n];
+        for (int i = 0; i < n; i++) {
+            pattern[i][i] = true;
+            pattern[i][n - 1] = true;
+            pattern[n - 1][i] = true;
+            if (i + 1 < n) {
+                pattern[i][i + 1] = true;
+                pattern[i + 1][i] = true;
+            }
+        }
+        for (int i = 0; i < 4; i++) {
+            Arrays.fill(pattern[i], 0, 4, true);
+        }
+        Csr csr = toCsr(pattern);
+        double[] values = diagonallyDominantValues(csr, capacity, 61);
+        Random corner = new Random(63);
+        for (int s = 0; s < capacity; s++) {
+            for (int i = 0; i < 4; i++) {
+                for (int k = csr.rowPtr()[i]; k < csr.rowPtr()[i + 1]; k++) {
+                    int j = csr.colIdx()[k];
+                    if (j < 4) {                                     // zero diagonals, strong couplings in the corner
+                        values[s * csr.nnz() + k] = j == i && i < 3 ? 0.0 : 20 + 5 * corner.nextDouble();
+                    }
+                }
+            }
+        }
+        double[] rightHandSides = new double[capacity * n];
+        Random random = new Random(62);
+        for (int k = 0; k < rightHandSides.length; k++) {
+            rightHandSides[k] = random.nextDouble() * 2 - 1;
+        }
+        int[] all = new int[capacity];
+        Arrays.fill(all, 1);
+        int[] chosen = {capacity - 1, 0, 33, 5, 31};
+        try {
+            for (boolean split : new boolean[] {true, false}) {
+                new GpuLoadFlowParameters().setBatchedLuSplitLongRows(split).install();
+                long before = BatchedLuNative.factorizationCounts()[4];
+                double[] whole = filled(capacity * n, 7);
+                int[] pivoted = new int[capacity];
+                int[] clamps = new int[capacity];
+                BatchedLuNative.factorizeAndSolve(n, csr.rowPtr(), csr.colIdx(), identity(n), identity(n), capacity,
+                        values, rightHandSides, identity(capacity), whole, pivoted, clamps);
+                assertArrayEquals(all, pivoted, "every lane goes to the pivoting engine");
+                assertArrayEquals(new int[capacity], clamps);
+                double[] selected = filled(capacity * n, 7);
+                BatchedLuNative.factorizeAndSolveSelected(n, csr.rowPtr(), csr.colIdx(), identity(n), identity(n),
+                        capacity, values, rightHandSides, identity(capacity), chosen, selected);
+                for (int s = 0; s < capacity; s++) {
+                    double[] reference = denseSolve(dense(csr, values, s), scenario(rightHandSides, s, n));
+                    assertArrayEquals(reference, scenario(whole, s, n), 1e-12, "split=" + split + " scenario " + s);
+                    final int scenario = s;
+                    boolean isChosen = Arrays.stream(chosen).anyMatch(c -> c == scenario);
+                    assertArrayEquals(isChosen ? scenario(whole, s, n) : filled(n, 7), scenario(selected, s, n),
+                            "split=" + split + " selected scenario " + s);
+                }
+                long launches = BatchedLuNative.factorizationCounts()[4] - before;
+                assertTrue(split ? launches > 0 : launches == 0, "split=" + split + ": " + launches + " split launches");
+            }
+        } finally {
+            new GpuLoadFlowParameters().install();                   // the next tests run with the defaults
+        }
+    }
+
+    /**
      * The minimum-degree elimination order (GpuBatchedLuOrdering.MINIMUM_DEGREE) on a hub joined to four leaves: three
      * leaves, then the hub and the last leaf tied at one neighbour each (the lower index first), an elimination tree
      * three levels deep; eliminated first, the hub makes its leaves a clique and a chain of five levels. Our fast

@@ -11,7 +11,7 @@
 
 #include "../common/check.cuh"
 #include "../common/stats.cuh"
-#include "../solver/linear_solver_settings.cuh"
+#include "lu_split.cuh"
 
 namespace olfgpu {
 
@@ -20,10 +20,6 @@ namespace {
 constexpr int LU_BLOCK = 128;
 constexpr int TILE = 32;                                     // transposes: 32 entries x 32 lanes per block
 constexpr int TILE_ROWS = 8;
-// A long row split over several warps (splitSlices): each warp takes 32 lanes of one slice of the row's terms.
-constexpr int SPLIT_LANES = 32;
-constexpr int SPLIT_MAX_SLICES = 32;                         // at most a block of 32 warps per (row, 32 lanes)
-constexpr int SPLIT_MIN_TERMS = 4;                           // a slice gets at least this many of the longest row's terms
 
 unsigned int blocksFor(size_t threads) {
     return static_cast<unsigned int>((threads + LU_BLOCK - 1) / LU_BLOCK);
@@ -262,22 +258,6 @@ __global__ void levelSplit(bool backward, int nRows, int width, int capacity, co
     }
 }
 
-// The warps each (row, 32 lanes) of a level or step is split over: 1 (the unsplit kernels) unless
-// batchedLuSplitLongRows is on, then the most - a power of two up to SPLIT_MAX_SLICES - that leave every slice
-// SPLIT_MIN_TERMS of the longest row's terms and keep the threads within what the GPU holds resident (budget). A level
-// wide enough to fill the GPU keeps one thread per (row, lane): a bigger GPU or a wider batch splits less.
-int splitSlices(int items, int width, int longest, size_t budget) {
-    if (!gLinearSolver.batchedLuSplitLongRows) {
-        return 1;
-    }
-    const size_t threads = static_cast<size_t>(items) * ((width + SPLIT_LANES - 1) / SPLIT_LANES) * SPLIT_LANES;
-    int slices = 1;
-    while (slices * 2 <= SPLIT_MAX_SLICES && longest >= slices * 2 * SPLIT_MIN_TERMS && threads * slices * 2 <= budget) {
-        slices *= 2;
-    }
-    return slices;
-}
-
 void launchLevel(ScalarLu& lu, bool backward, int level, const int* selected, int width, cudaStream_t stream) {
     const std::vector<int>& start = backward ? lu.backwardLevelStart : lu.forwardLevelStart;
     const int rows = start[level + 1] - start[level];
@@ -363,13 +343,7 @@ void createScalarLu(ScalarLu& lu, const ScalarLuPlan& plan, int capacity) {
             lu.stepLongest[s] = std::max(lu.stepLongest[s], plan.contributionStart[e + 1] - plan.contributionStart[e]);
         }
     }
-    int device = 0;
-    int multiprocessors = 0;
-    int threadsPerMultiprocessor = 0;
-    CUDA_CHECK(cudaGetDevice(&device));
-    CUDA_CHECK(cudaDeviceGetAttribute(&multiprocessors, cudaDevAttrMultiProcessorCount, device));
-    CUDA_CHECK(cudaDeviceGetAttribute(&threadsPerMultiprocessor, cudaDevAttrMaxThreadsPerMultiProcessor, device));
-    lu.residentThreads = static_cast<size_t>(multiprocessors) * threadsPerMultiprocessor;
+    lu.residentThreads = residentDeviceThreads();
     std::vector<int> entryOfA(plan.nnzA, -1);
     std::vector<int> fillEntry;
     for (int e = 0; e < plan.nnzLu; e++) {

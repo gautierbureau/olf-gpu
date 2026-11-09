@@ -40,6 +40,11 @@ struct ScalarLu {
     DeviceBuf dLaneMap;                                      // capacity: the last factorization's lane -> scenario
     DeviceBuf dTrouble;                                      // capacity: per lane, clamped pivots and outsized multipliers
     std::vector<int> hLaneMap;
+    // the transposed solve's (transposed_solve.cuh), built by its first one: per column of the LU, its entries above
+    // the diagonal then below it, as (row, LU entry); per level, the longest such run its rows read
+    bool transposedReady = false;
+    DeviceBuf dColumnStart, dColumnSplit, dColumnRow, dColumnEntry;
+    std::vector<int> transposedUpperLongest, transposedLowerLongest;   // per backward / forward level
 };
 
 // Upload the plan and size the factors for capacity lanes.
@@ -58,6 +63,11 @@ void solveScalarLanes(ScalarLu& lu, const double* b, double* x, cudaStream_t str
 // its lane map): each of them takes the operations solveScalarLanes gives it; every other scenario keeps its x.
 void solveScalarSelectedLanes(ScalarLu& lu, const int* selected, int count, const double* b, double* x,
                               cudaStream_t stream);
+
+// The transposed solve of the last factorization's lanes: x[s * n ..] = A_s^-T b[s * n ..] for every s of its lane map,
+// on the same factors (transposed_solve.cuh). Scenarios outside the lane map keep their x. plan: the one lu was created
+// from; the first transposed solve uploads the factors' column lists from it.
+void solveScalarLanesTransposed(ScalarLu& lu, const ScalarLuPlan& plan, const double* b, double* x, cudaStream_t stream);
 
 // The last factorization's trouble counts, per lane of its lane map (synchronizes the stream): a lane with any needs
 // the pivoting engine.

@@ -56,6 +56,11 @@ void factorizeLanes(BatchedLu& lu, const double* vals, BatchLayout layout, const
 // for every s of its lane map. Scenarios outside the lane map keep their x.
 void solveLanes(BatchedLu& lu, const double* b, double* x, cudaStream_t stream);
 
+// The transposed solve on the same factors, each lane on the engine that factorized it: x[s * n ..] = A_s^-T b[s * n ..]
+// for every s of the last factorization's lane map (transposed_solve.cuh) - the adjoint's solve, with no second
+// factorization. Scenarios outside the lane map keep their x.
+void solveLanesTransposed(BatchedLu& lu, const double* b, double* x, cudaStream_t stream);
+
 // Select the lanes of the last factorization whose scenario is set in scenarios (host, one entry per scenario) for
 // solveSelectedLanes.
 void selectLanes(BatchedLu& lu, const std::vector<char>& scenarios, cudaStream_t stream);

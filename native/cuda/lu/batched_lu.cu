@@ -108,6 +108,13 @@ void solveLanes(BatchedLu& lu, const double* b, double* x, cudaStream_t stream) 
     }
 }
 
+void solveLanesTransposed(BatchedLu& lu, const double* b, double* x, cudaStream_t stream) {
+    solveScalarLanesTransposed(lu.scalar, lu.fast->scalar, b, x, stream);
+    if (!lu.hPivoted.empty()) {                              // after the fast engine, as in solveLanes
+        solveSupernodalLanesTransposed(lu.supernodal, lu.plan->supernodal, b, x, stream);
+    }
+}
+
 void selectLanes(BatchedLu& lu, const std::vector<char>& scenarios, cudaStream_t stream) {
     lu.hSelected.clear();
     for (int a = 0; a < lu.width; a++) {

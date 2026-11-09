@@ -78,6 +78,30 @@ public final class BatchedLuNative {
                                                 double[] solutions, int[] pivoted, int[] pivotClamps);
 
     /**
+     * Factorizes the scenarios of {@code laneMap} once, then solves both directions on that one factorization: the
+     * systems {@code A x = b} as {@link #factorizeAndSolve} does, and the transposed systems {@code Aᵀ y = c} - the
+     * adjoint's solve, which cuDSS does not offer (its solve phase has no transpose through 0.8.0), taken here on the
+     * same factors as two more triangular solves. Every other scenario's solutions are left as they are.
+     *
+     * @param capacity                 scenarios in the arrays
+     * @param values                   CSR values of {@code A}, {@code capacity * nnz}, scenario-major
+     * @param rightHandSides           {@code b}, {@code capacity * n}, scenario-major
+     * @param transposedRightHandSides {@code c}, {@code capacity * n}, scenario-major
+     * @param laneMap                  the scenarios to factorize and solve
+     * @param solutions                {@code x}, {@code capacity * n}, scenario-major: the solved scenarios' entries are
+     *                                 overwritten
+     * @param transposedSolutions      {@code y}, {@code capacity * n}, scenario-major: likewise
+     * @param pivoted                  per entry of {@code laneMap}: 1 when the pivoting engine factorized it (written)
+     * @param pivotClamps              per entry of {@code laneMap}: the pivots the pivoting engine clamped (written)
+     */
+    public static native void factorizeAndSolveTransposed(int n, int[] rowPtr, int[] colIdx, int[] rowOrder,
+                                                          int[] colOrder, int capacity, double[] values,
+                                                          double[] rightHandSides, double[] transposedRightHandSides,
+                                                          int[] laneMap, double[] solutions,
+                                                          double[] transposedSolutions, int[] pivoted,
+                                                          int[] pivotClamps);
+
+    /**
      * Factorizes the scenarios of {@code laneMap} as {@link #factorizeAndSolve} does, then solves the systems of those
      * in {@code selected} only, as the adaptive refinement solves its corrections on the lanes still refining. Every
      * other scenario's solution is left as it is.

@@ -183,6 +183,93 @@ OLF_JNI(ac_solver_gpu, BatchedLuNative, factorizeAndSolve)(
     }
 }
 
+// factorizeAndSolve's factorization, then both solves on it: solutions = A^-1 rightHandSides and transposedSolutions =
+// A^-T transposedRightHandSides (solveLanes, solveLanesTransposed: the adjoint's solve on the Newton's factors).
+// pivoted and pivotClamps as factorizeAndSolve's.
+extern "C" JNIEXPORT void JNICALL
+OLF_JNI(ac_solver_gpu, BatchedLuNative, factorizeAndSolveTransposed)(
+        JNIEnv* env, jclass, jint n, jintArray jRowPtr, jintArray jColIdx, jintArray jRowOrder, jintArray jColOrder,
+        jint capacity, jdoubleArray jValues, jdoubleArray jRightHandSides, jdoubleArray jTransposedRightHandSides,
+        jintArray jLaneMap, jdoubleArray jSolutions, jdoubleArray jTransposedSolutions, jintArray jPivoted,
+        jintArray jPivotClamps) {
+    try {
+        const std::vector<int> rowPtr = intsOf(env, jRowPtr);
+        const std::vector<int> colIdx = intsOf(env, jColIdx);
+        const std::vector<int> rowOrder = intsOf(env, jRowOrder);
+        const std::vector<int> colOrder = intsOf(env, jColOrder);
+        const std::vector<int> laneMap = intsOf(env, jLaneMap);
+        const int nnz = rowPtr[n];
+        std::vector<double> values(static_cast<size_t>(capacity) * nnz);
+        std::vector<double> rightHandSides(static_cast<size_t>(capacity) * n);
+        std::vector<double> transposedRightHandSides(static_cast<size_t>(capacity) * n);
+        std::vector<double> solutions(static_cast<size_t>(capacity) * n);
+        std::vector<double> transposedSolutions(static_cast<size_t>(capacity) * n);
+        env->GetDoubleArrayRegion(jValues, 0, static_cast<jsize>(values.size()), values.data());
+        env->GetDoubleArrayRegion(jRightHandSides, 0, static_cast<jsize>(rightHandSides.size()), rightHandSides.data());
+        env->GetDoubleArrayRegion(jTransposedRightHandSides, 0, static_cast<jsize>(transposedRightHandSides.size()),
+                                  transposedRightHandSides.data());
+        env->GetDoubleArrayRegion(jSolutions, 0, static_cast<jsize>(solutions.size()), solutions.data());
+        env->GetDoubleArrayRegion(jTransposedSolutions, 0, static_cast<jsize>(transposedSolutions.size()),
+                                  transposedSolutions.data());
+        for (int s : laneMap) {
+            if (s < 0 || s >= capacity) {
+                throw std::runtime_error("lane map entry " + std::to_string(s) + " outside 0.."
+                                         + std::to_string(capacity - 1));
+            }
+        }
+        const std::shared_ptr<LuPlan> plan = buildLuPlan(n, rowPtr.data(), colIdx.data(), rowOrder.data(),
+                                                         colOrder.data());
+        BatchedLu lu;
+        createBatchedLu(lu, *plan, capacity);
+        DeviceBuf dValues;
+        DeviceBuf dRightHandSides;
+        DeviceBuf dTransposedRightHandSides;
+        DeviceBuf dSolutions;
+        DeviceBuf dTransposedSolutions;
+        dValues.upload(values.data(), values.size() * sizeof(double));
+        dRightHandSides.upload(rightHandSides.data(), rightHandSides.size() * sizeof(double));
+        dTransposedRightHandSides.upload(transposedRightHandSides.data(),
+                                         transposedRightHandSides.size() * sizeof(double));
+        dSolutions.upload(solutions.data(), solutions.size() * sizeof(double));
+        dTransposedSolutions.upload(transposedSolutions.data(), transposedSolutions.size() * sizeof(double));
+        cudaStream_t stream = nullptr;
+        CUDA_CHECK(cudaStreamCreate(&stream));
+        std::vector<int> clamps;
+        std::vector<int> pivoted(laneMap.size(), 0);
+        try {
+            factorizeLanes(lu, dValues.as<double>(), scenarioMajorLayout(capacity), laneMap.data(),
+                           static_cast<int>(laneMap.size()), stream);
+            solveLanes(lu, dRightHandSides.as<double>(), dSolutions.as<double>(), stream);
+            solveLanesTransposed(lu, dTransposedRightHandSides.as<double>(), dTransposedSolutions.as<double>(),
+                                 stream);
+            clamps = readPivotClamps(lu, stream);
+            size_t next = 0;
+            for (size_t a = 0; a < laneMap.size() && next < lu.hPivoted.size(); a++) {
+                if (laneMap[a] == lu.hPivoted[next]) {
+                    pivoted[a] = 1;
+                    next++;
+                }
+            }
+            CUDA_CHECK(cudaStreamSynchronize(stream));
+            CUDA_CHECK(cudaMemcpy(solutions.data(), dSolutions.p, solutions.size() * sizeof(double),
+                                  cudaMemcpyDeviceToHost));
+            CUDA_CHECK(cudaMemcpy(transposedSolutions.data(), dTransposedSolutions.p,
+                                  transposedSolutions.size() * sizeof(double), cudaMemcpyDeviceToHost));
+        } catch (...) {
+            cudaStreamDestroy(stream);
+            throw;
+        }
+        CUDA_CHECK(cudaStreamDestroy(stream));
+        env->SetDoubleArrayRegion(jSolutions, 0, static_cast<jsize>(solutions.size()), solutions.data());
+        env->SetDoubleArrayRegion(jTransposedSolutions, 0, static_cast<jsize>(transposedSolutions.size()),
+                                  transposedSolutions.data());
+        env->SetIntArrayRegion(jPivoted, 0, static_cast<jsize>(pivoted.size()), pivoted.data());
+        env->SetIntArrayRegion(jPivotClamps, 0, static_cast<jsize>(clamps.size()), clamps.data());
+    } catch (const std::exception& e) {
+        throwJava(env, e);
+    }
+}
+
 // factorizeAndSolve's factorization, then the solve of the lanes whose scenario is in selected only (selectLanes,
 // solveSelectedLanes: the adaptive refinement's corrections), every other scenario's solution left as it is.
 extern "C" JNIEXPORT void JNICALL

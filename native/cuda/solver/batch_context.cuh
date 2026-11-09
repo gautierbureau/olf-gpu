@@ -49,6 +49,14 @@ struct SensitivityBasisTables {
     std::vector<int> hUnitDeviceRows;
     DeviceBuf dWeighted;                                     // nWeighted x n
     DeviceBuf dGatherRows;                                   // nGather
+    // The contraction of the basis solutions into the factors' sensitivities (setBatchSensitivityContraction; nFactors 0:
+    // none, the solutions themselves are read back). Unit rows on DEVICE rows; per unit column, whether its bus is the slack.
+    int nFactors = 0;
+    int nGroups = 0;
+    DeviceBuf dUnitRows, dUnitBusPRows, dUnitSlack;          // nUnits each (int, int, char)
+    DeviceBuf dGroupColumnStart, dGroupColumns, dGroupColumnKind;   // CSR by group: nGroups + 1, then one per entry
+    DeviceBuf dFactorGroup, dFactorFunction, dFactorElement; // nFactors each
+    DeviceBuf dFactorGather;                                 // 4 x nFactors: gather positions (ph1 v1 ph2 v2; a voltage: v)
 };
 
 struct BatchSolverContext {
@@ -478,6 +486,7 @@ struct BatchSolverContext {
     SensitivityBasisTables sensitivityBasis;
     SlotRows<double> sensitivityParticipation{0.0};
     DeviceBuf dSensitivityBasisOut;
+    DeviceBuf dSensitivityValuesOut;                         // per slot: nFactors sensitivities, then 2 x nUnits row modes
     SlotTable distributedSlackRemovedGenerators{1, 0};                              // per slot: the DS participants a GeneratorAction took out
     DeviceBuf dDistributedSlackGeneratorMoveValid;                                // per scenario: the PER-GENERATOR water-fill ran, so
                                                            // dDistributedSlackGeneratorMove holds each generator's own movement. The

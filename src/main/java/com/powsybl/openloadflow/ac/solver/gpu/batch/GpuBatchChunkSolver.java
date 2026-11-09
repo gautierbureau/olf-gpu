@@ -636,8 +636,8 @@ final class GpuBatchChunkSolver {
                     // but not with a sensitivity basis, which the device solves once every scenario of the call has ended
                     // (on every slot's factors at once: a refill pause would solve the whole bank for a few of them)
                     int queued = nbg - chunkStart - chunkSize;
-                    SensitivityBasisRequest sensitivityBasis = pairPhase || !SensitivityBasisNative.isAvailable()
-                            ? null : in.settings().sensitivityBasis();
+                    SensitivityBasisRequest sensitivityBasis = !pairPhase && deviceSolves(in.settings().sensitivityBasis())
+                            ? in.settings().sensitivityBasis() : null;
                     int pauseAtEnded = queued > 0 && sensitivityBasis == null ? Math.min(queued, refillAt) : 0;
                     installSensitivityBasis(handle, sensitivityBasis, contingencies, group, chunkStart, chunkSize, realCount, n);
                     double[][] chunkResults = BatchSolveNative.solveBatchContext(handle, baseState, baseTargets,
@@ -1699,6 +1699,12 @@ final class GpuBatchChunkSolver {
         CONTEXTS_WITH_BASIS.add(handle);
         SensitivityBasisNative.setBatchSensitivityBasis(handle, basis.unitRows(), basis.weightedStart(), basis.weightedRows(),
                 basis.weightedValues(), basis.gatherRows(), basis.hasParticipation());
+        SensitivityBasisRequest.Contraction contraction = basis.contraction();
+        if (contraction != null) {
+            SensitivityBasisNative.setBatchSensitivityContraction(handle, contraction.unitBusPRow(), contraction.slackPRow(),
+                    contraction.groupColumnStart(), contraction.groupColumns(), contraction.groupColumnKind(), contraction.factorGroup(),
+                    contraction.factorFunction(), contraction.factorElement(), contraction.factorGather());
+        }
         if (basis.hasParticipation()) {
             double[] participation = new double[chunkSize * n];
             for (int s = 0; s < realCount; s++) {
@@ -1711,13 +1717,20 @@ final class GpuBatchChunkSolver {
         }
     }
 
-    /** Each harvested contingency's sensitivity basis solutions into the run's result sink, when the request asked for them
-     *  (a pair phase solves none). A solution the device did not compute (NaN) is not exported: its contingency's
-     *  sensitivities are solved on the CPU. */
+    /** Whether the device solves this basis request: the device is there, and its library has the entry points the request
+     *  needs (a library built before the contraction solves a basis, but leaves a contracted request to the CPU). */
+    private static boolean deviceSolves(SensitivityBasisRequest basis) {
+        return basis != null && SensitivityBasisNative.isAvailable()
+                && (basis.contraction() == null || SensitivityBasisNative.isContractionAvailable());
+    }
+
+    /** Each harvested contingency's sensitivity basis results into the run's result sink, when the request asked for them
+     *  (a pair phase solves none): its basis solutions, or with a contraction its sensitivities and row modes. A result the
+     *  device did not compute (NaN) is not exported: its contingency's sensitivities are solved on the CPU. */
     private static void exportSensitivityBasis(RunView run, ChunkView chunk, long handle, SlotOccupant[] harvested, int harvestedCount) {
         double[][] sink = run.in().sinks().sensitivityBasisByIndex();
         SensitivityBasisRequest basis = run.in().settings().sensitivityBasis();
-        if (sink == null || basis == null || chunk.pairPhase() || !SensitivityBasisNative.isAvailable()) {
+        if (sink == null || chunk.pairPhase() || !deviceSolves(basis)) {
             return;
         }
         double[] solutions = SensitivityBasisNative.readBatchSensitivityBasis(handle);

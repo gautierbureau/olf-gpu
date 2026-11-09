@@ -427,6 +427,42 @@ first, on the current stack; post-action states once olf-gpu moves to OLF main.
     flow-observed loops use), so only sensitivity values cross PCIe and nothing per contingency waits for OLF's loop; a
     compacted solve for refills; couplers and remote voltage control (the relocated rows); the adjoint direction
     (`runAdjoint`, VJP) is the transposed solve of #40 / PR 25.
+- **M4 - DONE on the host, device code syntax-checked only (branch `gpu-sensitivity-values`, on `gpu-sensitivity-solves`;
+  needs the fork's `calculateSensi` hook, branch `olf-local-patches-sensi-values`): the sensitivity values computed on the
+  device; only they come back.**
+  - **What crosses PCIe per contingency:** its factors' sensitivities, then two row modes per unit column (the modes the
+    device chose its coefficients from, which the host checks): `nFactors + 2 x nUnits` doubles instead of
+    `columns x gather rows`. The function references stay OLF's (`calculateSensi` only is hooked).
+  - **Fork hook** (one commit on top of `olf-local-patches`): `AcSensitivityAnalysis.calculateSensi(factor, states, column,
+    contingencyIndex)`, called where `calculateSensitivityValues` read `getFunctionEquationTerm().calculateSensi`.
+    `GpuBatchedAcSensitivityAnalysis` overrides it with the device's value of a contingency it brought, matched by factor
+    identity (OLF's valid factors, in order) and contingency index; anything else goes to OLF's.
+  - **The coefficients without OLF's equation system:** a group's right-hand side is a combination of its basis columns,
+    with coefficients OLF decides from the contingency's ACTIVE equations. The device reads them from its row modes, one rule
+    mirrored in Java (`SensitivityBasisRequest.Contraction.coefficient`) and CUDA (`sensitivityBasisCoefficient`): an
+    active (P) or reactive (Q) injection's unit column counts when its row is a balance (mode != FIXED_VARIABLE); a target
+    voltage's when its row is an identity and the bus is not islanded (its P row a balance, or the slack's); a weighted or
+    participation column always.
+  - **Kept exact:** at the seam (`solveFactorsStates`) the host still checks the contingency: OLF's own right-hand side
+    must equal, on every row (relative 1e-10), the combination the device contracted with the modes it read back - the
+    combination, not its coefficients, which are not unique when the participation lies on a group's own rows. A mismatch
+    or a NaN value solves that contingency on the CPU as before.
+  - **Device step:** after the basis solves, in the same `sensitivityBasisStep`: `sensitivityRowModesBatch` and
+    `contractSensitivitiesBatch` (per slot and factor: the group's columns combined at the factor's four gather positions,
+    contracted with its function's gradient at the slot's state, `flow_observation.cuh`'s `calculateSensi` mirrors on the
+    tap a loop or the caller moved (`findTapOverride`): both sides' P, Q and I of a closed branch, a bus voltage; NaN for a
+    branch whose a1 or r1 is a variable). Tables: `setBatchSensitivityContraction` (indices checked against the basis and
+    the structure); the readback (`readBatchSensitivityBasis`) returns the values when a contraction is installed. Code
+    families mirrored per `GpuCodesMirrorTest`: `GpuSensitivityBasisKind`, `GpuSensitivityFunction`.
+  - **Scope of the contraction** (else the slice-1 path solves from the basis on the host): groups of active or reactive
+    injections (single or GLSK) and target voltages; functions of a closed branch's flows and currents (side 3 = the leg's
+    side 1, as OLF reads it) and bus voltages. A library built before these entry points
+    (`SensitivityBasisNative.isContractionAvailable()`) gets no contraction asked for.
+  - **Verified on the CPU** (`GpuSensitivityBasisTest`, the device step emulated by `CpuPostContingencyBatches.contract` on
+    OLF's own solves): every contingency's sensitivities are the "device's" values, OLF's to 1e-9, every function kind;
+    a bus reactive injection function goes to the host path; a GLSK losing an element to the CPU.
+    **Not verified:** the CUDA is syntax-checked only (clang 18's CUDA front end against stub runtime/cuDSS headers, host
+    and device passes, here no nvcc); the GPU-gated `deviceContractionGivesOlfsSensitivities` runs it.
 - **Then post-action states:** after the move, the same batch over contingency + operator strategy pairs (the security
   analysis's batch already composes strategies, `GpuStrategyComposer`), on top of #1385.
 

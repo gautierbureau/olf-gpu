@@ -493,9 +493,71 @@ abstract class AbstractGpuSaTest extends AbstractOpenSecurityAnalysisTest {
     void assertIncrementalTvcTapMovesInKernel() {
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = incrementalTvcTapMoveNetwork();
+        assertGpuMatchesCpu(network, incrementalTvcTapMoveContingencies(network), 1e-12, incrementalTvcParameters());
+        assertEquals(2, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(), "both scenarios must batch on-device");
+    }
+
+    /**
+     * GPU against CPU per contingency on what the result REPORTS about the solved state: every bus voltage (1e-12 kV),
+     * then every branch's P, Q and I on both sides (1e-9 MW, MVar, A). The voltages say the device solved the scenario
+     * OLF solved; the flows say the host evaluated them with the same branch models — a device tap move missing from the
+     * host's transformer model leaves the voltages right and the transformer's flow a few percent off. At least one tap
+     * move must have reached the network, so a fixture where no tap moves cannot pass for one where the move is right.
+     */
+    void assertFlowsMatchCpu(Network network, List<Contingency> contingencies, com.powsybl.loadflow.LoadFlowParameters lfp,
+                             int expectedOnDevice) {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        com.powsybl.security.SecurityAnalysisParameters sap = new com.powsybl.security.SecurityAnalysisParameters();
+        sap.setLoadFlowParameters(lfp);
+        java.util.Set<String> branches = network.getBranchStream().map(b -> b.getId())
+                .collect(java.util.stream.Collectors.toSet());
+        java.util.Set<String> voltageLevels = network.getVoltageLevelStream().map(vl -> vl.getId())
+                .collect(java.util.stream.Collectors.toSet());
+        List<com.powsybl.security.monitor.StateMonitor> monitors = List.of(new com.powsybl.security.monitor.StateMonitor(
+                com.powsybl.contingency.ContingencyContext.all(), branches, voltageLevels, java.util.Set.of()));
+        SecurityAnalysisResult cpu = runSecurityAnalysis(network, contingencies, monitors, sap);
+        securityAnalysisProvider = new GpuSecurityAnalysisProvider(commonTestConfig.matrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>());
+        try {
+            GpuDeviceTaps.CHANGES.set(0);
+            SecurityAnalysisResult gpu = runSecurityAnalysis(network, contingencies, monitors, sap);
+            assertEquals(expectedOnDevice, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(),
+                    "scenarios batched on-device; census=" + GpuBatchScopeCensus.snapshot());
+            assertTrue(GpuDeviceTaps.CHANGES.get() > 0, "a device tap move must reach the network: the fixture moves no tap");
+            assertEquals(cpu.getPostContingencyResults().size(), gpu.getPostContingencyResults().size());
+            for (int i = 0; i < cpu.getPostContingencyResults().size(); i++) {
+                String ctg = cpu.getPostContingencyResults().get(i).getContingency().getId();
+                assertEquals(cpu.getPostContingencyResults().get(i).getStatus(), gpu.getPostContingencyResults().get(i).getStatus());
+                var cbv = cpu.getPostContingencyResults().get(i).getNetworkResult().getBusResults();
+                var gbv = gpu.getPostContingencyResults().get(i).getNetworkResult().getBusResults();
+                assertEquals(cbv.size(), gbv.size(), "bus results for " + ctg);
+                for (int b = 0; b < cbv.size(); b++) {
+                    assertEquals(cbv.get(b).getV(), gbv.get(b).getV(), 1e-12, "v " + cbv.get(b).getBusId() + " after " + ctg);
+                }
+                var cbr = cpu.getPostContingencyResults().get(i).getNetworkResult().getBranchResults();
+                var gbr = gpu.getPostContingencyResults().get(i).getNetworkResult().getBranchResults();
+                assertEquals(cbr.size(), gbr.size(), "branch results for " + ctg);
+                for (var c : cbr) {
+                    var g = gbr.stream().filter(r -> r.getBranchId().equals(c.getBranchId())).findFirst().orElseThrow();
+                    String what = c.getBranchId() + " after " + ctg;
+                    assertEquals(c.getP1(), g.getP1(), 1e-9, "p1 " + what);
+                    assertEquals(c.getQ1(), g.getQ1(), 1e-9, "q1 " + what);
+                    assertEquals(c.getI1(), g.getI1(), 1e-9, "i1 " + what);
+                    assertEquals(c.getP2(), g.getP2(), 1e-9, "p2 " + what);
+                    assertEquals(c.getQ2(), g.getQ2(), 1e-9, "q2 " + what);
+                    assertEquals(c.getI2(), g.getI2(), 1e-9, "i2 " + what);
+                }
+            }
+        } finally {
+            securityAnalysisProvider = new OpenSecurityAnalysisProvider(commonTestConfig.matrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>());
+        }
+    }
+
+    /** T2wT regulating at 33.5 kV with a zero deadband: the base load flow lands on tap 2 (of 0..3); the strong-line
+     *  outage moves it to 3 while the clone outage leaves it (both verified against OLF's own OL_CHECK sequence). */
+    static Network incrementalTvcTapMoveNetwork() {
         Network network = com.powsybl.openloadflow.network.VoltageControlNetworkFactory.createNetworkWithT2wt();
-        // 33.5 kV: the base LF lands on tap 2 (of 0..3); the strong-line outage moves it to 3 while
-        // the clone outage leaves it (both verified against OLF's own OL_CHECK sequence)
         network.getTwoWindingsTransformer("T2wT").getRatioTapChanger().setTargetDeadband(0).setRegulating(true)
                 .setTapPosition(0).setRegulationTerminal(network.getTwoWindingsTransformer("T2wT").getTerminal2()).setTargetV(33.5);
         com.powsybl.iidm.network.Line l0 = network.getLines().iterator().next();
@@ -504,14 +566,24 @@ abstract class AbstractGpuSaTest extends AbstractOpenSecurityAnalysisTest {
                 .setVoltageLevel1(l0.getTerminal1().getVoltageLevel().getId()).setBus1(l0.getTerminal1().getBusBreakerView().getBus().getId())
                 .setVoltageLevel2(l0.getTerminal2().getVoltageLevel().getId()).setBus2(l0.getTerminal2().getBusBreakerView().getBus().getId())
                 .setR(l0.getR() * 2).setX(l0.getX() * 2).setG1(l0.getG1()).setB1(l0.getB1()).setG2(l0.getG2()).setB2(l0.getB2()).add();
-        List<Contingency> ctgs = List.of(new Contingency(bis, new BranchContingency(bis)),
+        return network;
+    }
+
+    /** The clone outage (tap stays) and the strong-line outage (tap moves 2 -> 3) of {@link #incrementalTvcTapMoveNetwork}. */
+    static List<Contingency> incrementalTvcTapMoveContingencies(Network network) {
+        com.powsybl.iidm.network.Line l0 = network.getLineStream()
+                .filter(l -> network.getLine(l.getId() + "_BIS") != null).findFirst().orElseThrow();
+        String bis = l0.getId() + "_BIS";
+        return List.of(new Contingency(bis, new BranchContingency(bis)),
                 new Contingency(l0.getId(), new BranchContingency(l0.getId())));
+    }
+
+    static com.powsybl.loadflow.LoadFlowParameters incrementalTvcParameters() {
         com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
                 .setTransformerVoltageControlOn(true).setDistributedSlack(true).setUseReactiveLimits(true);
         com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp).setTransformerVoltageControlMode(
                 com.powsybl.openloadflow.OpenLoadFlowParameters.TransformerVoltageControlMode.INCREMENTAL_VOLTAGE_CONTROL);
-        assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
-        assertEquals(2, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(), "both scenarios must batch on-device");
+        return lfp;
     }
 
     /** The body of {@code deviceIncrementalSharedTvcMatchesCpu} in {@link GpuSaTransformerControlTest}, run again under the robust solve mode by

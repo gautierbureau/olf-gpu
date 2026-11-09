@@ -30,10 +30,14 @@ public record BatchScenarioResult(String contingencyId, double[] state, int iter
                                   double preDistributedActivePower, double distributedActivePower,
                                   /** The nums of the branches the scenario's AutomationSystem phase switched from their
                                    *  pre-contingency state (opened or closed): its systems' doing, not the contingency's. */
-                                  int[] automationSystemSwitchedBranchNums) {
+                                  int[] automationSystemSwitchedBranchNums,
+                                  /** The taps the scenario's outer loops moved from the base, {branchNum, tap index,
+                                   *  rounding r1} per transformer (DeviceTapMoves; empty where none moved). */
+                                  double[] deviceTapMoves) {
     public BatchScenarioResult {
         Objects.requireNonNull(contingencyId);
         Objects.requireNonNull(automationSystemSwitchedBranchNums);
+        Objects.requireNonNull(deviceTapMoves);
         // state may be null: the chunk solver put it in the run's state sink (BatchConfig.stateSink) as its chunk completed
     }
 
@@ -41,7 +45,8 @@ public record BatchScenarioResult(String contingencyId, double[] state, int iter
      *  NaN: whoever needs it must ask OLF's own distribution). */
     public BatchScenarioResult(String contingencyId, double[] state, int iterations,
                                double finalMismatch, int convergenceStatus, int[] islandedBusNums) {
-        this(contingencyId, state, iterations, finalMismatch, convergenceStatus, islandedBusNums, Double.NaN, Double.NaN, new int[0]);
+        this(contingencyId, state, iterations, finalMismatch, convergenceStatus, islandedBusNums, Double.NaN, Double.NaN, new int[0],
+                new double[0]);
     }
 
     public boolean hasConverged() {

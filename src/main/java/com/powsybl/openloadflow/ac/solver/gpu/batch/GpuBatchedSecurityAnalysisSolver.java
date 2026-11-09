@@ -256,6 +256,8 @@ public final class GpuBatchedSecurityAnalysisSolver {
         java.util.Arrays.fill(distributedByIndex, Double.NaN);
         // The nums of the branches the AutomationSystem phase switched per contingency (null = none).
         int[][] automationSystemSwitchedByIndex = new int[contingencies.size()][];
+        // The taps the outer loops moved per contingency (DeviceTapMoves; null = none).
+        double[][] deviceTapMovesByIndex = new double[contingencies.size()][];
         if (!batchedIndices.isEmpty()) {
             // PER_EQUATION_TYPE stopping criterion: per-row thresholds from the equation system's
             // variable pairing (null under UNIFORM_CRITERIA — the chunk solver then CLEARS the cached
@@ -299,7 +301,7 @@ public final class GpuBatchedSecurityAnalysisSolver {
                         new ChunkInputs.DevicePhaseInputs(phases, hvdcControllers, reactiveCapabilityCurves, forcedTargetQ,
                                 areaInterchangeControl, areaInterchangeControlBaseMoves, automationSystem),
                         new ChunkInputs.ResultSinks(resultsByIndex, preDistributedByIndex, distributedByIndex,
-                                automationSystemSwitchedByIndex),
+                                automationSystemSwitchedByIndex, deviceTapMovesByIndex),
                         config));
             }
         }
@@ -313,18 +315,20 @@ public final class GpuBatchedSecurityAnalysisSolver {
             if (result != null && result.length == 3) {    // the state went to the sink: the result carries no state
                 results.add(new BatchScenarioResult(id, null, (int) result[0], result[1], (int) result[2],
                         plan.islandedNumsByIndex()[i] != null ? plan.islandedNumsByIndex()[i] : new int[0],
-                        preDistributedByIndex[i], distributedByIndex[i], switchedOrNone(automationSystemSwitchedByIndex[i])));
+                        preDistributedByIndex[i], distributedByIndex[i], switchedOrNone(automationSystemSwitchedByIndex[i]),
+                        movesOrNone(deviceTapMovesByIndex[i])));
             } else if (result != null) {                   // the state is the result row's first n entries
                 results.add(new BatchScenarioResult(id, result, (int) result[n], result[n + 1], (int) result[n + 2],
                         plan.islandedNumsByIndex()[i] != null ? plan.islandedNumsByIndex()[i] : new int[0],
-                        preDistributedByIndex[i], distributedByIndex[i], switchedOrNone(automationSystemSwitchedByIndex[i])));
+                        preDistributedByIndex[i], distributedByIndex[i], switchedOrNone(automationSystemSwitchedByIndex[i]),
+                        movesOrNone(deviceTapMovesByIndex[i])));
             } else {
                 // Never batched: the plan refused it. Named by id for the harness, because the same
                 // GpuAcSolverStatus.REJECTED also comes back for a scenario the device TRIED and threw away, and the
                 // census counts cannot tell the two apart per contingency.
                 GpuBatchScopeCensus.planRefused(id);
                 results.add(new BatchScenarioResult(id, baseState.clone(), 0, Double.NaN, GpuAcSolverStatus.REJECTED, new int[0],
-                        Double.NaN, Double.NaN, new int[0]));
+                        Double.NaN, Double.NaN, new int[0], new double[0]));
             }
         }
         return results;
@@ -332,6 +336,10 @@ public final class GpuBatchedSecurityAnalysisSolver {
 
     private static int[] switchedOrNone(int[] switched) {
         return switched != null ? switched : new int[0];
+    }
+
+    private static double[] movesOrNone(double[] moves) {
+        return moves != null ? moves : new double[0];
     }
 
     private GpuBatchedSecurityAnalysisSolver() {

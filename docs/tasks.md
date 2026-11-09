@@ -387,13 +387,46 @@ first, on the current stack; post-action states once olf-gpu moves to OLF main.
     brought from the device batch, counted by `BATCHED_CONTINGENCIES`; OLF's sensitivities on the CPU to 1e-6), and its
     time against OLF on the CPU. The decisions are kept per contingency for the run (reactive-limit entries x (int +
     double) each).
-- **M3 - then: the sensitivity solves on the device, per scenario.** At each scenario's converged state: refill its
-  Jacobian (the fused kernels), factorize it (our batched LU or cuDSS UBATCH), build its factor groups' right-hand sides
-  (unit columns for injections and target voltages, scaled by the slack participation; state-dependent ones for phase
-  shifters and branch parameters), solve them (OLF's forward sensitivities are `solveTransposed` on its stored `Jᵀ`: a
-  plain `J⁻¹` solve with our true-CSR `J`, several right-hand sides per factorization), and contract against the functions'
-  derivatives on the device, so only the requested sensitivity values cross PCIe. `solveFactorsStates` is the seam on
-  OLF's side. The adjoint direction (`runAdjoint`, VJP) is the transposed solve of #40 / PR 25.
+- **M3 - first slice DONE, host side verified, device step not compiled nor run (branch `gpu-sensitivity-solves`, on
+  `gpu-sensitivity-batch`): the sensitivity solves in the batch.** Decided with the user: no separate per-contingency
+  solve path (the single-solve context re-extracts on every outage), the batch handles it, the way the batched
+  contingencies already take sensitivities in the driver.
+  - **Why a basis, not OLF's right-hand sides:** OLF builds a contingency's right-hand sides itself, inside its loop, from
+    that contingency's equation system and participation (`fillRhs`: active equations per PV/PQ state, participation
+    renormalized over what the outage leaves, a GLSK rescaled when it loses an element). The batch runs before that loop, so
+    the device solves a BASIS at each converged state: a unit column per equation a factor group writes with its own
+    coefficient (injection P/Q rows, voltage-target rows, branch parameters' four flow rows), a weighted column per
+    multi-variable group (GLSK, HVDC), and the contingency's participation column, which `GpuBatchedAcSensitivityAnalysis`
+    computes with OLF's own `getParticipatingElements` on each contingency's slack component (applied, then restored).
+  - **At the seam** (`solveFactorsStates`, contingencies brought from the batch only): `GpuSensitivityBasis.solve`
+    decomposes OLF's own right-hand side on the basis, group by group (weighted and participation coefficients by least
+    squares on the rows the group writes no coefficient of its own, the own coefficients by difference), checks the residual
+    (relative 1e-10, else the contingency is solved on the CPU as before) and rebuilds the solved states at the rows OLF
+    reads afterwards: `calculateSensi` reads only the function terms' variables. Those rows come from the function types
+    (a branch flow or current: the V and angle of its two buses; a bus voltage; a bus reactive injection: the bus and its
+    neighbours), checked once at the base with a NaN probe through OLF's own `calculateSensi`.
+  - **Device step** (`native/cuda/outerloop/sensitivity_basis.cu`, `sensitivityBasisStep`): in the driver right after
+    `newtonSolve`, the incremental loops' pattern: every slot active, `fillActiveBatch`, unit rows through `rowMap`,
+    `repairZeroDiagonalRightHandSide`, `sensitivitySolve` (one factorization, on the first column), a gather of the
+    solutions at the gather rows into `dSensitivityBasisOut`, read back like every readback (`readInstalledRows`).
+    `SensitivityBasisNative`: the tables (`setBatchSensitivityBasis`, rows mapped through `rowMap` natively) and each
+    install's participation rows (`setBatchSensitivityParticipation`). The chunk solver asks for no refill pause with a basis
+    (the step solves the whole bank at once). UBATCH and batched-LU modes only; robust mode and a paused call write NaN, the
+    host then solves on the CPU. A library built before these entry points (`SensitivityBasisNative.isAvailable()`) solves
+    no basis, and the security analysis never calls them.
+  - **First slice's scope:** no zero-impedance coupler and no remote voltage control group (both move equations off a
+    bus's own rows); factor variables of the types above (not a phase shifter's angle, not an SVC pilot point).
+  - **Verified on the CPU** (`GpuSensitivityBasisTest`, the basis solved by OLF on its own Jacobian in the device's layout,
+    `CpuPostContingencyBatches`): IEEE 14 with PV/PQ switches both ways, an islanding outage, a generator outage
+    (participation renormalized), load injections, a GLSK, reactive flows, currents: every contingency's sensitivities from
+    the basis, OLF's to 1e-9, with and without distributed slack; a GLSK losing an element falls back to the CPU.
+    **Not verified:** the native code is not compiled here (no nvcc), nor run; the GPU-gated
+    `deviceBasisGivesOlfsSensitivities` checks it. Memory: the basis solutions are kept per contingency
+    (columns x gather rows each).
+  - **Next:** contract on the device (the function derivatives at the converged state, the codegen'd branch functions the
+    flow-observed loops use), so only sensitivity values cross PCIe and nothing per contingency waits for OLF's loop; a
+    compacted solve for refills; couplers and remote voltage control (the relocated rows); the adjoint direction
+    (`runAdjoint`, VJP) is the transposed solve of #40 / PR 25.
 - **Then post-action states:** after the move, the same batch over contingency + operator strategy pairs (the security
   analysis's batch already composes strategies, `GpuStrategyComposer`), on top of #1385.
 

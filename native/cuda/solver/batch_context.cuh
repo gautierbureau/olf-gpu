@@ -40,6 +40,17 @@ namespace olfgpu {
 //   is rejected to the CPU (the 1/count coefficients would reform).
 // - Zero-impedance: the base couplers are replicated; a scenario opens or closes couplers through
 //   its per-scenario on/off overrides (zeroImpedanceBranchOpenOverrides / zeroImpedanceBranchCloseOverrides).
+// The sensitivity basis tables of a context (see BatchSolverContext::sensitivityBasis).
+struct SensitivityBasisTables {
+    int nUnits = 0;
+    int nWeighted = 0;
+    int nColumns = 0;                                        // nUnits + nWeighted, + 1 with a participation column
+    int nGather = 0;
+    std::vector<int> hUnitDeviceRows;
+    DeviceBuf dWeighted;                                     // nWeighted x n
+    DeviceBuf dGatherRows;                                   // nGather
+};
+
 struct BatchSolverContext {
     int loopTraceSlot = -1;                                  // OLF_GPU_LOOP_TRACE by CONTINGENCY: the slot the host resolved for this chunk
     // The bank slots the per-scenario setters install: the setters' local slot j is bank slot installSlots[j], and only
@@ -464,6 +475,13 @@ struct BatchSolverContext {
     SlotTable distributedSlackLostGenerators{1, 0};                             // per slot: the DS generators an outage removes, by identity
     SlotRows<double> reactiveLimitSeedTargetQ{std::numeric_limits<double>::quiet_NaN()};   // per (slot, entry): the frozen target Q a continued
                                                                          // solve restores (setBatchReactiveLimitSeedTargetQ), NaN = the limit
+    // The sensitivity basis a batched sensitivity analysis has every converged scenario solve (setBatchSensitivityBasis,
+    // sensitivityBasisStep): the unit columns' device rows (rowMap applied, -1 = no row), the weighted columns dense on
+    // device rows, the gather rows (state rows); per slot its participation column on device rows; and the solutions,
+    // per slot nColumns x nGather (column-major by basis column).
+    SensitivityBasisTables sensitivityBasis;
+    SlotRows<double> sensitivityParticipation{0.0};
+    DeviceBuf dSensitivityBasisOut;
     SlotTable distributedSlackRemovedGenerators{1, 0};                              // per slot: the DS participants a GeneratorAction took out
     DeviceBuf dDistributedSlackGeneratorMoveValid;                                // per scenario: the PER-GENERATOR water-fill ran, so
                                                            // dDistributedSlackGeneratorMove holds each generator's own movement. The

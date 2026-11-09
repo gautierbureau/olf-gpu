@@ -61,12 +61,15 @@ record PrecomputedBatch(Map<String, double[]> states, Map<String, int[]> islande
                         Map<String, GpuGatheredState> gathered,
                         /** The limit table and the screen the candidates index, null without the handback. */
                         GpuLimitTable limitTable, GpuViolationScreen violationScreen,
-                        Map<String, BatchScenarioResult.ReactiveLimitDecisions> reactiveLimitDecisions) {
+                        Map<String, BatchScenarioResult.ReactiveLimitDecisions> reactiveLimitDecisions,
+                        /** Per converged contingency, the device's solutions of the sensitivity basis it was asked for
+                         *  (SensitivityBasisRequest); empty when not asked. */
+                        Map<String, double[]> sensitivityBases) {
 
     /** Nothing precomputed — every contingency falls back to the sequential CPU path. */
     static PrecomputedBatch empty() {
         return new PrecomputedBatch(Map.of(), Map.of(), java.util.Set.of(), Map.of(), null, null, null, Map.of(), Map.of(), Map.of(), Map.of(),
-                Map.of(), Map.of(), Map.of(), Map.of(), null, null, Map.of());
+                Map.of(), Map.of(), Map.of(), Map.of(), null, null, Map.of(), Map.of());
     }
 
     /** True when the device converged scenario {@code id}: its full state, or the rows the host answers it with. */

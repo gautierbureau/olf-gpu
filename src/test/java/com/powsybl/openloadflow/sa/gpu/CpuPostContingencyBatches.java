@@ -8,6 +8,7 @@
 package com.powsybl.openloadflow.sa.gpu;
 
 import com.powsybl.loadflow.LoadFlowParameters;
+import com.powsybl.math.matrix.DenseMatrix;
 import com.powsybl.openloadflow.OpenLoadFlowParameters;
 import com.powsybl.openloadflow.ac.AcLoadFlowContext;
 import com.powsybl.openloadflow.ac.AcLoadFlowResult;
@@ -16,6 +17,7 @@ import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcDataExtractor;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.BatchScenarioResult;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.SensitivityBasisRequest;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuQLimitType;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.Variable;
@@ -55,11 +57,14 @@ public final class CpuPostContingencyBatches {
     /**
      * Solves the contingencies (but {@code leftOut}, which the batch does not bring) from the base state the context
      * holds. With {@code baseDecisions} every contingency's decisions are the base's instead of its own, as if the
-     * device's switches were lost: a control showing that the handback matters.
+     * device's switches were lost: a control showing that the handback matters. With a {@code sensitivityBasis}, each
+     * converged contingency also has that basis solved on OLF's Jacobian at its state, laid out as the device lays it
+     * out ({@link SensitivityBasisRequest#resultLength()} values, column-major).
      */
+    @SuppressWarnings("java:S107")
     public static Made solve(LfNetwork lfNetwork, AcLoadFlowContext context, List<PropagatedContingency> contingencies,
                              LoadFlowParameters lfParameters, OpenLoadFlowParameters lfParametersExt, Set<String> leftOut,
-                             boolean baseDecisions) {
+                             boolean baseDecisions, SensitivityBasisRequest sensitivityBasis) {
         EquationSystem<AcVariableType, AcEquationType> es = context.getEquationSystem();
         Map<Variable<AcVariableType>, Integer> baseRows = new HashMap<>();
         for (Variable<AcVariableType> v : es.getIndex().getSortedVariablesToFind()) {
@@ -73,6 +78,19 @@ public final class CpuPostContingencyBatches {
         Map<String, double[]> states = new HashMap<>();
         Map<String, int[]> islanded = new HashMap<>();
         Map<String, BatchScenarioResult.ReactiveLimitDecisions> decisions = new HashMap<>();
+        Map<String, double[]> sensitivityBases = new HashMap<>();
+        int busCount = lfNetwork.getBuses().size();
+        int[] busPhiRow = new int[busCount];
+        int[] busVRow = new int[busCount];
+        java.util.Arrays.fill(busPhiRow, -1);
+        java.util.Arrays.fill(busVRow, -1);
+        baseRows.forEach((v, row) -> {
+            if (v.getType() == AcVariableType.BUS_PHI && v.getElementNum() < busCount) {
+                busPhiRow[v.getElementNum()] = row;
+            } else if (v.getType() == AcVariableType.BUS_V && v.getElementNum() < busCount) {
+                busVRow[v.getElementNum()] = row;
+            }
+        });
         int switchedToPq = 0;
         int switchedBackToPv = 0;
         for (PropagatedContingency contingency : contingencies) {
@@ -107,13 +125,90 @@ public final class CpuPostContingencyBatches {
                     }
                 }
                 decisions.put(lfContingency.getId(), baseDecisions ? base : own);
+                if (sensitivityBasis != null) {
+                    sensitivityBases.put(lfContingency.getId(), solveBasis(context, lfNetwork, baseRows, busPhiRow, busVRow,
+                            sensitivityBasis, sensitivityBasis.participation(lfContingency.getId())));
+                }
             }
             networkState.restore();
         }
         es.getStateVector().set(baseState);                     // the context at the base state, as the device leaves it
         return new Made(GpuPostContingencyBatch.of(new PrecomputedBatch(states, islanded, Set.of(), baseRows, es, data, null,
-                Map.of(), Map.of(), Map.of(), Map.of(), Map.of(), Map.of(), Map.of(), Map.of(), null, null, decisions)),
-                switchedToPq, switchedBackToPv);
+                Map.of(), Map.of(), Map.of(), Map.of(), Map.of(), Map.of(), Map.of(), Map.of(), null, null, decisions,
+                sensitivityBases)), switchedToPq, switchedBackToPv);
+    }
+
+    /**
+     * The device's sensitivity basis step, on the CPU: each basis column (stable rows) placed on the equation the device
+     * holds on that row (a bus's P row holds its active-power balance, or its angle reference on the slack; its BUS_V row
+     * its voltage target while it holds one, its reactive balance otherwise), solved on OLF's Jacobian at the converged
+     * state, read at the gather rows.
+     */
+    private static double[] solveBasis(AcLoadFlowContext context, LfNetwork lfNetwork, Map<Variable<AcVariableType>, Integer> baseRows,
+                                       int[] busPhiRow, int[] busVRow, SensitivityBasisRequest basis,
+                                       SensitivityBasisRequest.SparseColumn participation) {
+        EquationSystem<AcVariableType, AcEquationType> es = context.getEquationSystem();
+        int columnCount = es.getIndex().getColumnCount();
+        int[] equationOfStableRow = new int[baseRows.size()];
+        java.util.Arrays.fill(equationOfStableRow, -1);
+        for (int num = 0; num < busPhiRow.length; num++) {
+            if (busPhiRow[num] >= 0) {
+                equationOfStableRow[busPhiRow[num]] = firstActiveColumn(es, num, AcEquationType.BUS_TARGET_P, AcEquationType.BUS_TARGET_PHI);
+            }
+            if (busVRow[num] >= 0) {
+                equationOfStableRow[busVRow[num]] = firstActiveColumn(es, num, AcEquationType.BUS_TARGET_V, AcEquationType.BUS_TARGET_Q);
+            }
+        }
+        DenseMatrix rhs = new DenseMatrix(columnCount, basis.columnCount());
+        int[] unitRows = basis.unitRows();
+        for (int j = 0; j < unitRows.length; j++) {
+            place(rhs, equationOfStableRow, unitRows[j], j, 1);
+        }
+        for (int w = 0; w < basis.weightedColumnCount(); w++) {
+            for (int k = basis.weightedStart()[w]; k < basis.weightedStart()[w + 1]; k++) {
+                place(rhs, equationOfStableRow, basis.weightedRows()[k], unitRows.length + w, basis.weightedValues()[k]);
+            }
+        }
+        if (basis.hasParticipation()) {
+            for (int k = 0; k < participation.rows().length; k++) {
+                place(rhs, equationOfStableRow, participation.rows()[k], basis.participationColumn(), participation.values()[k]);
+            }
+        }
+        context.getJacobianMatrix().solveTransposed(rhs);
+        int[] currentRowOfBase = new int[baseRows.size()];
+        java.util.Arrays.fill(currentRowOfBase, -1);
+        for (Variable<AcVariableType> v : es.getIndex().getSortedVariablesToFind()) {
+            Integer baseRow = baseRows.get(v);
+            if (baseRow != null) {
+                currentRowOfBase[baseRow] = v.getRow();
+            }
+        }
+        int[] gatherRows = basis.gatherRows();
+        double[] u = new double[basis.resultLength()];
+        for (int j = 0; j < basis.columnCount(); j++) {
+            for (int f = 0; f < gatherRows.length; f++) {
+                int row = currentRowOfBase[gatherRows[f]];
+                u[j * gatherRows.length + f] = row >= 0 ? rhs.get(row, j) : 0;
+            }
+        }
+        return u;
+    }
+
+    private static int firstActiveColumn(EquationSystem<AcVariableType, AcEquationType> es, int num, AcEquationType... types) {
+        for (AcEquationType type : types) {
+            int column = es.getEquation(num, type).map(e -> e.getColumn()).orElse(-1);
+            if (column >= 0) {
+                return column;
+            }
+        }
+        return -1;
+    }
+
+    private static void place(DenseMatrix rhs, int[] equationOfStableRow, int stableRow, int column, double value) {
+        int equation = stableRow < equationOfStableRow.length ? equationOfStableRow[stableRow] : -1;
+        if (equation >= 0) {
+            rhs.add(equation, column, value);
+        }
     }
 
     /** The network's PV/PQ states in the device's encoding: per entry its limit type (none for a bus holding its voltage,

@@ -35,6 +35,7 @@ import com.powsybl.openloadflow.ac.solver.gpu.BatchSolveNative;
 import com.powsybl.openloadflow.ac.solver.gpu.DriverNative;
 import com.powsybl.openloadflow.ac.solver.gpu.GpuBatchContextCache;
 import com.powsybl.openloadflow.ac.solver.gpu.NewtonSettingsNative;
+import com.powsybl.openloadflow.ac.solver.gpu.SensitivityBasisNative;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.BatchContingency;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.GenOutage;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.GpuBatchLossPreDistribution;
@@ -78,6 +79,9 @@ final class GpuBatchChunkSolver {
 
     /** Test hook: the installs into a bank whose other slots still held scenarios solving. */
     static final java.util.concurrent.atomic.AtomicInteger REFILLS_FOR_TESTS = new java.util.concurrent.atomic.AtomicInteger();
+
+    /** The contexts a sensitivity basis was installed on, which a later call without one clears. */
+    private static final java.util.Set<Long> CONTEXTS_WITH_BASIS = java.util.concurrent.ConcurrentHashMap.newKeySet();
 
     /** A refill waits for this share of the bank (1 / REFILL_SHARE) to be free, or for the rest of the queue to fit. */
     private static final int REFILL_SHARE = 8;
@@ -633,9 +637,14 @@ final class GpuBatchChunkSolver {
                                 rejectAfterSolve != null && rejectAfterSolve[s]);
                         bank[installSlots[s]] = occupants[s];
                     }
-                    // more scenarios queue: the solve returns once refillAt of them can go in, the others still solving
+                    // more scenarios queue: the solve returns once refillAt of them can go in, the others still solving -
+                    // but not with a sensitivity basis, which the device solves once every scenario of the call has ended
+                    // (on every slot's factors at once: a refill pause would solve the whole bank for a few of them)
                     int queued = nbg - chunkStart - chunkSize;
-                    int pauseAtEnded = queued > 0 ? Math.min(queued, refillAt) : 0;
+                    SensitivityBasisRequest sensitivityBasis = pairPhase || !SensitivityBasisNative.isAvailable()
+                            ? null : in.settings().sensitivityBasis();
+                    int pauseAtEnded = queued > 0 && sensitivityBasis == null ? Math.min(queued, refillAt) : 0;
+                    installSensitivityBasis(handle, sensitivityBasis, contingencies, group, chunkStart, chunkSize, realCount, n);
                     double[][] chunkResults = BatchSolveNative.solveBatchContext(handle, baseState, baseTargets,
                             java.util.Arrays.copyOf(rs.rowModePerScenario, chunkSize), baseRowMode,
                             java.util.Arrays.copyOf(rs.disabledMask, chunkSize), targetOverrideIndex, targetOverrideValue,
@@ -702,6 +711,7 @@ final class GpuBatchChunkSolver {
                         }
                     }
                     exportReactiveLimitDecisions(run, chunk, harvested, harvestedCount);
+                    exportSensitivityBasis(run, chunk, handle, harvested, harvestedCount);
                     // HOST ORCHESTRATORS — in OLF's DefaultAcOuterLoopConfig order.
                     // In-kernel: DS(0), HVDC(1,2), Monitoring(5), RL(6) already ran in the main solve.
                     // Post-RL host orchestrators below: SVC(4), Monitoring(5), Phase(7), TVC(8), TRPC(9), Shunt(10).
@@ -1725,6 +1735,62 @@ final class GpuBatchChunkSolver {
                 }
                 System.err.printf("GPU_RL ctg=%s switchedThisSolve=%d switchedToPqTotal=%d%s%n",
                         contingencies.get(harvested[s].index()).contingencyId(), switched, switchedToPq, ids);
+            }
+        }
+    }
+
+    /**
+     * The sensitivity basis on the context for this call (cleared without one: a cached context keeps tables from an
+     * earlier run), and each installed scenario's participation column, dense over stable rows (zeros for a padding slot).
+     */
+    @SuppressWarnings("java:S107")
+    private static void installSensitivityBasis(long handle, SensitivityBasisRequest basis, List<BatchContingency> contingencies,
+                                                List<Integer> group, int chunkStart, int chunkSize, int realCount, int n) {
+        if (basis == null) {
+            // the tables only, and only on a context that held a basis (a cached one keeps an earlier run's): a context
+            // without one never reads its participation rows, and a security analysis never calls these entry points
+            if (CONTEXTS_WITH_BASIS.remove(handle)) {
+                SensitivityBasisNative.setBatchSensitivityBasis(handle, null, null, null, null, null, false);
+            }
+            return;
+        }
+        CONTEXTS_WITH_BASIS.add(handle);
+        SensitivityBasisNative.setBatchSensitivityBasis(handle, basis.unitRows(), basis.weightedStart(), basis.weightedRows(),
+                basis.weightedValues(), basis.gatherRows(), basis.hasParticipation());
+        if (basis.hasParticipation()) {
+            double[] participation = new double[chunkSize * n];
+            for (int s = 0; s < realCount; s++) {
+                SensitivityBasisRequest.SparseColumn column = basis.participation(contingencies.get(group.get(chunkStart + s)).contingencyId());
+                for (int k = 0; k < column.rows().length; k++) {
+                    participation[s * n + column.rows()[k]] += column.values()[k];
+                }
+            }
+            SensitivityBasisNative.setBatchSensitivityParticipation(handle, participation);
+        }
+    }
+
+    /** Each harvested contingency's sensitivity basis solutions into the run's result sink, when the request asked for them
+     *  (a pair phase solves none). A solution the device did not compute (NaN) is not exported: its contingency's
+     *  sensitivities are solved on the CPU. */
+    private static void exportSensitivityBasis(RunView run, ChunkView chunk, long handle, SlotOccupant[] harvested, int harvestedCount) {
+        double[][] sink = run.in().sinks().sensitivityBasisByIndex();
+        SensitivityBasisRequest basis = run.in().settings().sensitivityBasis();
+        if (sink == null || basis == null || chunk.pairPhase() || !SensitivityBasisNative.isAvailable()) {
+            return;
+        }
+        double[] solutions = SensitivityBasisNative.readBatchSensitivityBasis(handle);
+        int width = basis.resultLength();
+        if (solutions == null || solutions.length < harvestedCount * width) {
+            return;
+        }
+        for (int s = 0; s < harvestedCount; s++) {
+            double[] slice = java.util.Arrays.copyOfRange(solutions, s * width, (s + 1) * width);
+            boolean solved = true;
+            for (int k = 0; k < slice.length && solved; k++) {
+                solved = !Double.isNaN(slice[k]);
+            }
+            if (solved) {
+                sink[harvested[s].index()] = slice;
             }
         }
     }

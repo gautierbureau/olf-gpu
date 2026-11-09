@@ -102,23 +102,27 @@ final class GpuBatchPrecomputer {
                                        BatchConfig config, ReportNode reportNode) {
         return precompute(network, net, context, contingencies, strategies, actions,
                 List.of(SolveGroup.run(new SolveSettings(distributedSlack, reactiveLimits, reactiveLimitTol, slackDistTol,
-                        convEpsPerEq, config))), java.util.Set.of(), null, false, reportNode);
+                        convEpsPerEq, config))), java.util.Set.of(), null, false, null, reportNode);
     }
 
     /**
      * As above; with {@code reactiveLimitDecisions} every converged contingency also keeps the reactive-limit decisions
      * its solve ended with ({@link PrecomputedBatch#reactiveLimitDecisions()}), for a caller that brings the contingency's
-     * state into OLF's network itself and needs its equation system to be the one the device converged on.
+     * state into OLF's network itself and needs its equation system to be the one the device converged on; with a
+     * {@code sensitivityBasis}, the solutions of that basis at its converged state ({@link PrecomputedBatch#sensitivityBases()}).
      */
     @SuppressWarnings("java:S107")
     static PrecomputedBatch precompute(Network network, LfNetwork net, AcLoadFlowContext context,
                                        List<PropagatedContingency> contingencies, List<OperatorStrategy> strategies,
                                        List<Action> actions, boolean distributedSlack, boolean reactiveLimits,
                                        double reactiveLimitTol, double slackDistTol, double convEpsPerEq,
-                                       BatchConfig config, boolean reactiveLimitDecisions, ReportNode reportNode) {
+                                       BatchConfig config, boolean reactiveLimitDecisions,
+                                       com.powsybl.openloadflow.ac.solver.gpu.batch.SensitivityBasisRequest sensitivityBasis,
+                                       ReportNode reportNode) {
         return precompute(network, net, context, contingencies, strategies, actions,
                 List.of(SolveGroup.run(new SolveSettings(distributedSlack, reactiveLimits, reactiveLimitTol, slackDistTol,
-                        convEpsPerEq, config))), java.util.Set.of(), null, reactiveLimitDecisions, reportNode);
+                        convEpsPerEq, config))), java.util.Set.of(), null, reactiveLimitDecisions,
+                sensitivityBasis, reportNode);
     }
 
     /**
@@ -141,16 +145,17 @@ final class GpuBatchPrecomputer {
                                        List<Action> actions, List<SolveGroup> groups, java.util.Set<String> leftToCpu,
                                        HandbackSettings handbackSettings, ReportNode reportNode) {
         return precompute(network, net, context, contingencies, strategies, actions, groups, leftToCpu, handbackSettings,
-                false, reportNode);
+                false, null, reportNode);
     }
 
     /** The same, every group's converged contingencies keeping their reactive-limit decisions with
-     *  {@code reactiveLimitDecisions} (see the flat overload above). */
+     *  {@code reactiveLimitDecisions} and having {@code sensitivityBasis} solved (see the flat overload above). */
     @SuppressWarnings("java:S107")
     static PrecomputedBatch precompute(Network network, LfNetwork net, AcLoadFlowContext context,
                                        List<PropagatedContingency> contingencies, List<OperatorStrategy> strategies,
                                        List<Action> actions, List<SolveGroup> groups, java.util.Set<String> leftToCpu,
                                        HandbackSettings handbackSettings, boolean reactiveLimitDecisions,
+                                       com.powsybl.openloadflow.ac.solver.gpu.batch.SensitivityBasisRequest sensitivityBasis,
                                        ReportNode reportNode) {
         if (GpuTrace.BATCH_TRACE.isOn()) {   // the network the batch starts from
             for (var b : net.getBuses()) {
@@ -162,7 +167,7 @@ final class GpuBatchPrecomputer {
         }
         synchronized (GPU_DEVICE_LOCK) {
             return precomputeLocked(network, net, context, contingencies, strategies, actions, groups, leftToCpu,
-                    handbackSettings, reactiveLimitDecisions, reportNode);
+                    handbackSettings, reactiveLimitDecisions, sensitivityBasis, reportNode);
         }
     }
 
@@ -171,6 +176,7 @@ final class GpuBatchPrecomputer {
                                                      List<Action> actions, List<SolveGroup> groups,
                                                      java.util.Set<String> leftToCpu, HandbackSettings handbackSettings,
                                                      boolean reactiveLimitDecisions,
+                                                     com.powsybl.openloadflow.ac.solver.gpu.batch.SensitivityBasisRequest sensitivityBasis,
                                                      ReportNode reportNode) {
         SolveGroup runGroup = groups.stream().filter(g -> g.contingencyIds() == null).findFirst().orElseThrow();
         if (!GpuAcNewtonSolver.isAvailable() || net == null || context == null || contingencies.isEmpty()) {
@@ -310,7 +316,8 @@ final class GpuBatchPrecomputer {
                                 .withOuterLoopTolerances(settings.reactiveLimitTol(), settings.slackDistTol())
                                 .withConvEpsPerEq(settings.convEpsPerEq())
                                 .withConfig(config)
-                                .withReactiveLimitDecisions(reactiveLimitDecisions));
+                                .withReactiveLimitDecisions(reactiveLimitDecisions)
+                                .withSensitivityBasis(sensitivityBasis));
                 results.addAll(retryRejectedOnDevice(groupResults, batch, net, baseState, es, target, context,
                         settings.distributedSlack(), settings.reactiveLimits(), settings.reactiveLimitTol(),
                         settings.slackDistTol(), settings.convEpsPerEq(), reportNode, config, reactiveLimitDecisions));
@@ -326,6 +333,7 @@ final class GpuBatchPrecomputer {
             Map<String, double[]> deviceTapMoves = new HashMap<>();
             Map<String, BatchScenarioResult.GeneratorTargets> generatorTargets = new HashMap<>();
             Map<String, BatchScenarioResult.ReactiveLimitDecisions> decisions = new HashMap<>();
+            Map<String, double[]> sensitivityBases = new HashMap<>();
             for (BatchScenarioResult r : results) {
                 if (r.generatorTargets() != null && r.contingencyId().indexOf(BatchContingency.STRATEGY_KEY_SEP) < 0
                         && (r.hasConverged() || r.convergenceStatus() == GpuAcSolverStatus.MAX_ITERATION_REACHED)) {
@@ -354,6 +362,9 @@ final class GpuBatchPrecomputer {
                     }
                     if (r.reactiveLimitDecisions() != null) {
                         decisions.put(r.contingencyId(), r.reactiveLimitDecisions());
+                    }
+                    if (r.sensitivityBasis() != null) {
+                        sensitivityBases.put(r.contingencyId(), r.sensitivityBasis());
                     }
                 } else if (r.convergenceStatus() == GpuAcSolverStatus.MAX_ITERATION_REACHED
                         && r.contingencyId().indexOf(BatchContingency.STRATEGY_KEY_SEP) < 0) {
@@ -394,7 +405,8 @@ final class GpuBatchPrecomputer {
             return new PrecomputedBatch(states, islandedBuses, exhausted, baseVariableRows, es, screenData, screenMapper,
                     preDistributed, distributed, automationSystemSwitched, deviceTapMoves, generatorTargets, scenarios,
                     handback != null ? handback.candidates : Map.of(), handback != null ? handback.gathered : Map.of(),
-                    limitTable, violationScreen, decisions);
+                    limitTable, violationScreen, decisions,
+                    sensitivityBases);
         } catch (Exception e) {
             // full stack at WARN: a swallowed exception here silently un-accelerates the whole run —
             // the 2026-09-06 bridge AIOOBE hid behind the message-only log for days
@@ -687,6 +699,8 @@ final class GpuBatchPrecomputer {
                             .withConvEpsPerEq(convEpsPerEq)
                             .withConfig(config.withRobustSolveMode())
                             .withReactiveLimitDecisions(reactiveLimitDecisions));
+            // no sensitivity basis here: the robust mode's single-matrix solve refactorizes for every right-hand side,
+            // and a contingency without one has its sensitivities solved on the CPU
         } catch (RuntimeException e) {
             // The retry is an OPTIONAL extra pass: a failure in it must not lose the first pass's
             // results, which are already correct for every scenario that converged.

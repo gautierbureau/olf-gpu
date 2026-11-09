@@ -7,6 +7,10 @@
  */
 package com.powsybl.openloadflow.ac.solver.gpu.batch;
 
+import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuRowMode;
+import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuSensitivityBasisKind;
+import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuSensitivityFunction;
+
 import java.util.Map;
 import java.util.Objects;
 
@@ -22,12 +26,71 @@ import java.util.Objects;
  * {@code gatherRows} are base variable rows: the rows of each solution read back, in that order.
  *
  * <p>A scenario's result is then {@code columnCount() * gatherRows.length} values, column-major: the solution of basis
- * column {@code j} at gather row {@code f} is entry {@code j * gatherRows.length + f}.
+ * column {@code j} at gather row {@code f} is entry {@code j * gatherRows.length + f}. With a {@link Contraction}, the device
+ * combines those solutions into each factor group's solved state and contracts it with each factor's function gradient at
+ * the converged state, and the result is the factors' sensitivities instead ({@link #resultLength}): only those
+ * values leave the device, with the row modes the combination was decided on.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
 public record SensitivityBasisRequest(int[] unitRows, int[] weightedStart, int[] weightedRows, double[] weightedValues,
-                                      int[] gatherRows, Map<String, SparseColumn> participationByContingency) {
+                                      int[] gatherRows, Map<String, SparseColumn> participationByContingency,
+                                      Contraction contraction) {
+
+    /**
+     * The contraction of the basis solutions into the factors' sensitivities, on the device.
+     *
+     * <ul>
+     *   <li>Per unit column {@code u}: the stable row of its bus's active power balance ({@code unitBusPRow}), whose row mode
+     *       the coefficient reads with the unit row's own; {@code slackPRow} the slack bus's.</li>
+     *   <li>Per group, CSR ({@code groupColumnStart}): the basis columns it combines ({@code groupColumns}) and how
+     *       ({@code groupColumnKind}, a {@link GpuSensitivityBasisKind}): see {@link #coefficient}.</li>
+     *   <li>Per factor, in OLF's order of the VALID factors: its group, its function (a {@link GpuSensitivityFunction}), its closed
+     *       branch (the device pack's index, -1 for a bus voltage) and four gather positions: a branch's angle and voltage
+     *       of side 1, then of side 2; a bus voltage's in the first, -1 in the others.</li>
+     * </ul>
+     *
+     * <p>A scenario's result is its factors' sensitivities, then per unit column the modes of its row and of its bus's
+     * active power row: {@code factorGroup.length + 2 * unitRows.length} values.
+     */
+    public record Contraction(int[] unitBusPRow, int slackPRow, int[] groupColumnStart, int[] groupColumns, int[] groupColumnKind,
+                              int[] factorGroup, int[] factorFunction, int[] factorElement, int[] factorGather) {
+        public Contraction {
+            Objects.requireNonNull(unitBusPRow);
+            Objects.requireNonNull(groupColumnStart);
+            Objects.requireNonNull(groupColumns);
+            Objects.requireNonNull(groupColumnKind);
+            Objects.requireNonNull(factorGroup);
+            Objects.requireNonNull(factorFunction);
+            Objects.requireNonNull(factorElement);
+            Objects.requireNonNull(factorGather);
+            if (groupColumns.length != groupColumnKind.length || factorFunction.length != factorGroup.length
+                    || factorElement.length != factorGroup.length || factorGather.length != 4 * factorGroup.length) {
+                throw new IllegalArgumentException("contraction tables of inconsistent lengths");
+            }
+        }
+
+        public int factorCount() {
+            return factorGroup.length;
+        }
+
+        /**
+         * The coefficient a group gives a basis column of {@code kind} in a scenario, from that scenario's row mode on the
+         * column's row ({@code rowMode}) and on its bus's active power row ({@code busPRowMode}): the device's rule
+         * (sensitivity_basis.cu), which this mirrors. A row mode {@link GpuRowMode#FIXED_VARIABLE} is an identity (a voltage
+         * held, an angle reference, an islanded bus's frozen rows), any other a balance. A bus's active power balance (P) and reactive power balance (Q) are active on a balance
+         * row; its voltage target (V) on an identity voltage row of a bus that is not islanded (its active power row a
+         * balance, or the slack's).
+         */
+        public static double coefficient(int kind, int rowMode, int busPRowMode, boolean slackBus) {
+            return switch (kind) {
+                case GpuSensitivityBasisKind.P, GpuSensitivityBasisKind.Q -> rowMode != GpuRowMode.FIXED_VARIABLE ? 1 : 0;
+                case GpuSensitivityBasisKind.V -> rowMode == GpuRowMode.FIXED_VARIABLE
+                        && (busPRowMode != GpuRowMode.FIXED_VARIABLE || slackBus) ? 1 : 0;
+                default -> 1;
+            };
+        }
+    }
 
     /** A sparse column over stable equation rows. */
     public record SparseColumn(int[] rows, double[] values) {
@@ -72,9 +135,10 @@ public record SensitivityBasisRequest(int[] unitRows, int[] weightedStart, int[]
         return hasParticipation() ? unitRows.length + weightedColumnCount() : -1;
     }
 
-    /** The values a scenario's result holds. */
+    /** The values a scenario's result holds: the basis solutions at the gather rows, or with a contraction the factors'
+     *  sensitivities and the unit columns' row modes. */
     public int resultLength() {
-        return columnCount() * gatherRows.length;
+        return contraction != null ? contraction.factorCount() + 2 * unitRows.length : columnCount() * gatherRows.length;
     }
 
     /** The participation column of a contingency (empty when it has none). */

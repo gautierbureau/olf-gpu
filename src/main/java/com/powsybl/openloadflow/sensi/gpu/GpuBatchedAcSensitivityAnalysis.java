@@ -19,6 +19,7 @@ import com.powsybl.openloadflow.OpenLoadFlowParameters;
 import com.powsybl.openloadflow.ac.AcLoadFlowContext;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
+import com.powsybl.openloadflow.ac.solver.gpu.SensitivityBasisNative;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.SensitivityBasisRequest;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.graph.GraphConnectivityFactory;
@@ -43,6 +44,7 @@ import org.slf4j.LoggerFactory;
 
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -79,6 +81,9 @@ public class GpuBatchedAcSensitivityAnalysis extends AcSensitivityAnalysis {
     /** How many contingencies' sensitivities were solved from the device's basis, over the JVM. */
     static final LongAdder BASIS_SOLVED_CONTINGENCIES = new LongAdder();
 
+    /** How many contingencies' sensitivities were the device's own values (contracted there), over the JVM. */
+    static final LongAdder DEVICE_VALUED_CONTINGENCIES = new LongAdder();
+
     /** The run's network, which the batch maps the contingencies on: set for the duration of {@link #analyse}. */
     private volatile Network network;
 
@@ -90,9 +95,18 @@ public class GpuBatchedAcSensitivityAnalysis extends AcSensitivityAnalysis {
     }
 
     /** What a network partition's contingencies are brought and solved from: its batch, its sensitivity basis (null
-     *  without one), and the contingencies brought from the batch (their states are the device's). */
-    private record Partition(GpuPostContingencyBatch batch, GpuSensitivityBasis basis, Set<String> brought) {
+     *  without one), the contingencies brought from the batch (their states are the device's), and the position of each
+     *  factor in the device's values. */
+    private record Partition(GpuPostContingencyBatch batch, GpuSensitivityBasis basis, Set<String> brought,
+                             Map<Object, Integer> factorIndex) {
     }
+
+    /** The device's sensitivities of the contingency this thread is computing ({@code contingencyIndex}), between its
+     *  solveFactorsStates and its calculateSensitivityValues. */
+    private record DeviceValues(int contingencyIndex, double[] values, Map<Object, Integer> factorIndex) {
+    }
+
+    private final ThreadLocal<DeviceValues> deviceValues = new ThreadLocal<>();
 
     /** One per network partition, keyed by that partition's load flow context, closed with the run. */
     private final Map<AcLoadFlowContext, Partition> partitions = new ConcurrentHashMap<>();
@@ -117,6 +131,7 @@ public class GpuBatchedAcSensitivityAnalysis extends AcSensitivityAnalysis {
             partitions.values().forEach(partition -> partition.batch().close());
             partitions.clear();
             capturedFactors.remove();
+            deviceValues.remove();
             this.network = null;
         }
     }
@@ -142,12 +157,18 @@ public class GpuBatchedAcSensitivityAnalysis extends AcSensitivityAnalysis {
             return;
         }
         GpuSensitivityBasis basis = null;
+        Map<Object, Integer> factorIndex = new IdentityHashMap<>();
         if (captured != null) {
+            List<Object> validFactors = GpuSensitivityFactorGroups.validFactors(captured.factors());
+            for (int i = 0; i < validFactors.size(); i++) {
+                factorIndex.put(validFactors.get(i), i);
+            }
             List<GpuSensitivityFactorGroups.Group> groups = GpuSensitivityFactorGroups.of(captured.groups());
             boolean participation = lfParameters.isDistributedSlack() && groups.stream().anyMatch(GpuSensitivityFactorGroups.Group::participation);
             GpuSensitivityBasis.Built built = GpuSensitivityBasis.build(lfNetwork, context.getEquationSystem(), groups,
                     GpuSensitivityFactorGroups.functionVariables(captured.factors()),
                     GpuSensitivityFactorGroups.functionTerms(captured.factors()),
+                    contractsOnDevice() ? GpuSensitivityFactorGroups.functions(captured.factors()) : null,
                     participation ? participationByContingency(lfNetwork, contingencies, lfParameters, contingencyLfParametersExt) : null);
             basis = built.basis();
             if (basis == null) {
@@ -165,10 +186,16 @@ public class GpuBatchedAcSensitivityAnalysis extends AcSensitivityAnalysis {
                     LOGGER.info("GPU sensitivity analysis: contingency sensitivities solved on the CPU, {}", reason));
         }
         Partition previous = partitions.put(context, new Partition(batch,
-                batch.sensitivityBasisNotSolvedReason().isEmpty() ? basis : null, ConcurrentHashMap.newKeySet()));
+                batch.sensitivityBasisNotSolvedReason().isEmpty() ? basis : null, ConcurrentHashMap.newKeySet(), factorIndex));
         if (previous != null) {
             previous.batch().close();
         }
+    }
+
+    /** Whether the device contracts the basis into the factors' sensitivities, so that only they come back, rather than
+     *  the host contracting its solutions: the loaded library decides (one built before the contraction cannot). */
+    protected boolean contractsOnDevice() {
+        return SensitivityBasisNative.isContractionAvailable();
     }
 
     /**
@@ -222,20 +249,46 @@ public class GpuBatchedAcSensitivityAnalysis extends AcSensitivityAnalysis {
         return super.runPostContingencyLoadFlow(context, lfContingency);
     }
 
-    /** A contingency brought from the batch with its basis solved there: its states rebuilt from the basis, when OLF's
-     *  right-hand sides are in it; otherwise solved on the Jacobian, as OLF does. */
+    /**
+     * A contingency brought from the batch with its basis solved there: with the device's contraction, its sensitivities
+     * are the device's values when OLF's right-hand sides are the combinations the device contracted (then the states
+     * are not solved at all, {@link #calculateSensi} gives the values); without it, its states are rebuilt from the
+     * basis when OLF's right-hand sides are in it. Otherwise they are solved on the Jacobian, as OLF does.
+     */
     @Override
     protected void solveFactorsStates(AcLoadFlowContext context, DenseMatrix factorsStates, LfContingency lfContingency) {
+        deviceValues.remove();
         Partition partition = lfContingency != null ? partitions.get(context) : null;
         if (partition != null && partition.basis() != null && partition.brought().contains(lfContingency.getId())) {
-            double[] solutions = partition.batch().sensitivityBasis(lfContingency.getId());
+            double[] result = partition.batch().sensitivityBasis(lfContingency.getId());
             EquationSystem<AcVariableType, AcEquationType> es = context.getEquationSystem();
-            if (solutions != null && partition.basis().solve(factorsStates, es, lfContingency.getId(), solutions,
+            if (result != null && partition.basis().contracted()) {
+                double[] values = partition.basis().verifiedValues(factorsStates, es, lfContingency.getId(), result);
+                if (values != null) {
+                    deviceValues.set(new DeviceValues(lfContingency.getIndex(), values, partition.factorIndex()));
+                    DEVICE_VALUED_CONTINGENCIES.increment();
+                    return;
+                }
+            } else if (result != null && partition.basis().solve(factorsStates, es, lfContingency.getId(), result,
                     partition.batch().currentRows(es, partition.basis().gatherRows()))) {
                 BASIS_SOLVED_CONTINGENCIES.increment();
                 return;
             }
         }
         super.solveFactorsStates(context, factorsStates, lfContingency);
+    }
+
+    /** The device's value of a factor in a contingency whose sensitivities the device contracted, OLF's otherwise. */
+    @Override
+    protected double calculateSensi(LfSensitivityFactor<AcVariableType, AcEquationType> factor, DenseMatrix factorsStates,
+                                    int column, int contingencyIndex) {
+        DeviceValues device = deviceValues.get();
+        if (device != null && device.contingencyIndex() == contingencyIndex) {
+            Integer index = device.factorIndex().get(factor);
+            if (index != null) {
+                return device.values()[index];
+            }
+        }
+        return super.calculateSensi(factor, factorsStates, column, contingencyIndex);
     }
 }

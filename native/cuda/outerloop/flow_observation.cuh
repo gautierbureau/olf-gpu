@@ -31,18 +31,15 @@ __device__ inline double controlledFlow(int side, int kind, const double* p, con
     return o[(kind == GpuControlledFlow::REACTIVE_POWER ? 1 : 0) + (side == GpuTwoSides::ONE ? 0 : 2)];
 }
 
-// OLF's ClosedBranchSide{1,2}{Active,Reactive}FlowEquationTerm.calculateSensi(dx, column), line for line on the
-// generated methods: the controlled P or Q flow's sensitivity to the unit-RHS solution dx (a non-variable a1 or r1
-// column contributes nothing). side is a GpuTwoSides; kind is ACTIVE_POWER or REACTIVE_POWER.
-__device__ inline double controlledFlowSensitivity(int side, int kind, const double* p, const double* xs, const int* q, const double* dxs) {
+// OLF's ClosedBranchSide{1,2}{Active,Reactive}FlowEquationTerm.calculateSensi on explicit state and solution values
+// (da1, dr1 0 where a1, r1 are no variables): the core controlledFlowSensitivity reads its values for, which a batched
+// sensitivity analysis's contraction calls with the solution at the branch's four rows only. side is a GpuTwoSides; kind
+// is ACTIVE_POWER or REACTIVE_POWER.
+__device__ inline double closedBranchFlowSensitivity(int side, int kind, const double* p, double v1, double v2, double ph1, double ph2,
+                                                     double r1, double a1, double dph1, double dph2, double dv1, double dv2,
+                                                     double da1, double dr1) {
     using namespace closed_branch;
-    double v1 = xs[q[5]], v2 = xs[q[7]], ph1 = xs[q[4]], ph2 = xs[q[6]];
-    double r1 = q[9] >= 0 ? xs[q[9]] : p[GpuPiModelColumn::R1];
-    double a1 = q[8] >= 0 ? xs[q[8]] : p[GpuPiModelColumn::A1];
     double y = p[GpuPiModelColumn::Y], ksi = p[GpuPiModelColumn::KSI];
-    double dph1 = dxs[q[4]], dph2 = dxs[q[6]], dv1 = dxs[q[5]], dv2 = dxs[q[7]];
-    double da1 = q[8] >= 0 ? dxs[q[8]] : 0.0;
-    double dr1 = q[9] >= 0 ? dxs[q[9]] : 0.0;
     if (side == GpuTwoSides::ONE) {
         double theta = AbstractClosedBranchAcFlowEquationTerm::theta1(ksi, ph1, a1, ph2);
         double cosTheta = cos(theta);
@@ -83,6 +80,19 @@ __device__ inline double controlledFlowSensitivity(int side, int kind, const dou
             + dq2dv2(y, cos(ksi), p[GpuPiModelColumn::B2], v1, r1, v2, cosTheta) * dv2
             + dq2da1(y, v1, r1, v2, sinTheta) * da1
             + dq2dr1(y, v1, v2, cosTheta) * dr1;
+}
+
+// OLF's ClosedBranchSide{1,2}{Active,Reactive}FlowEquationTerm.calculateSensi(dx, column), line for line on the
+// generated methods: the controlled P or Q flow's sensitivity to the unit-RHS solution dx (a non-variable a1 or r1
+// column contributes nothing). side is a GpuTwoSides; kind is ACTIVE_POWER or REACTIVE_POWER.
+__device__ inline double controlledFlowSensitivity(int side, int kind, const double* p, const double* xs, const int* q, const double* dxs) {
+    double v1 = xs[q[5]], v2 = xs[q[7]], ph1 = xs[q[4]], ph2 = xs[q[6]];
+    double r1 = q[9] >= 0 ? xs[q[9]] : p[GpuPiModelColumn::R1];
+    double a1 = q[8] >= 0 ? xs[q[8]] : p[GpuPiModelColumn::A1];
+    double dph1 = dxs[q[4]], dph2 = dxs[q[6]], dv1 = dxs[q[5]], dv2 = dxs[q[7]];
+    double da1 = q[8] >= 0 ? dxs[q[8]] : 0.0;
+    double dr1 = q[9] >= 0 ? dxs[q[9]] : 0.0;
+    return closedBranchFlowSensitivity(side, kind, p, v1, v2, ph1, ph2, r1, a1, dph1, dph2, dv1, dv2, da1, dr1);
 }
 
 // OLF's AbstractClosedBranchAcFlowEquationTerm.ZERO_CURRENT_THRESHOLD.

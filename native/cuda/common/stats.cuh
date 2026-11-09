@@ -43,6 +43,7 @@ extern long long gBatchedLuFactorizations;                   // factorizations o
 extern long long gBatchedLuPivotedLanes;                     // ...and the lanes of them its pivoting engine factorized
 extern long long gBatchedLuPivotDelayOrders;                 // fast-engine orders built with learned pivot delays
 extern long long gBatchedLuSplitLaunches;                    // fast-engine steps and levels launched with their long rows split
+extern long long gBatchedLuSupernodalSplitLaunches;          // pivoting-engine forward levels with long rows split
 // Factorizations by kind (the compacted ones are gCompactIters): full-width uniform-batch Newton iterations, robust ones
 // (one scenario each), and those of the in-kernel loops' sensitivities, with their unit right-hand-side solves. A check
 // round is one outer loop checked on the scenarios standing at it.

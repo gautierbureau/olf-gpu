@@ -25,14 +25,16 @@ std::vector<int> intsOf(JNIEnv* env, jintArray a) {
 }  // namespace
 
 // The factorizations our batched LU ran in this process, the lanes of them its pivoting engine factorized again, and
-// the fast-engine orders built with learned pivot delays, and the fast-engine steps and levels launched with their long
-// rows split (tests: a run really used it, and how).
+// the fast-engine orders built with learned pivot delays, the fast-engine steps and levels launched with their long
+// rows split, and the pivoting-engine forward levels launched with their long rows split (tests: a run really used it,
+// and how).
 extern "C" JNIEXPORT jlongArray JNICALL
 OLF_JNI(ac_solver_gpu, BatchedLuNative, factorizationCounts)(JNIEnv* env, jclass) {
-    const jlong counts[4] = {static_cast<jlong>(gBatchedLuFactorizations), static_cast<jlong>(gBatchedLuPivotedLanes),
-                             static_cast<jlong>(gBatchedLuPivotDelayOrders), static_cast<jlong>(gBatchedLuSplitLaunches)};
-    jlongArray out = env->NewLongArray(4);
-    env->SetLongArrayRegion(out, 0, 4, counts);
+    const jlong counts[5] = {static_cast<jlong>(gBatchedLuFactorizations), static_cast<jlong>(gBatchedLuPivotedLanes),
+                             static_cast<jlong>(gBatchedLuPivotDelayOrders), static_cast<jlong>(gBatchedLuSplitLaunches),
+                             static_cast<jlong>(gBatchedLuSupernodalSplitLaunches)};
+    jlongArray out = env->NewLongArray(5);
+    env->SetLongArrayRegion(out, 0, 5, counts);
     return out;
 }
 

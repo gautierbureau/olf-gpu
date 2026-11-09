@@ -4,11 +4,14 @@
 // See supernodal_lu.cuh.
 #include "supernodal_lu.cuh"
 
+#include <algorithm>
 #include <cmath>
 #include <stdexcept>
 #include <string>
 
 #include "../common/check.cuh"
+#include "../common/stats.cuh"
+#include "lu_split.cuh"
 
 namespace olfgpu {
 
@@ -354,6 +357,72 @@ __global__ void forwardLevel(int nItems, int width, int capacity, const int* __r
     }
 }
 
+// forwardLevel with each row's L terms split over blockDim.y warps (batchedLuSplitLongRows): a level of one or two
+// supernodes near the root leaves the GPU idle while one thread per lane walks rows that hold every descendant's L run.
+// The terms of a row are numbered across its runs; warp k sums the terms k, k + K, ... for 32 lanes, the first warp
+// adds the K partial sums in warp order, then does the supernode's row order and L^-1 as forwardLevel does.
+__global__ void forwardLevelSplit(int width, int capacity, const int* __restrict__ selected,
+                                  const int* __restrict__ levelSupernode, const int* __restrict__ supernodeStart,
+                                  const int* __restrict__ diagonalBase, const int* __restrict__ forwardRunStart,
+                                  const int* __restrict__ forwardRunLower, const int* __restrict__ forwardRunY,
+                                  const int* __restrict__ forwardRunLength,
+                                  const unsigned char* __restrict__ rowPermutation, const double* __restrict__ lu,
+                                  double* __restrict__ z) {
+    extern __shared__ double partial[];                      // [slice][lane of the block]
+    const int tiles = (width + SPLIT_LANES - 1) / SPLIT_LANES;
+    const int t = blockIdx.x / tiles;
+    const int slot = (blockIdx.x - t * tiles) * SPLIT_LANES + threadIdx.x;
+    const int slices = blockDim.y;
+    const bool active = slot < width;
+    const int a = active ? laneOf(slot, selected) : 0;
+    const int s = levelSupernode[t];
+    const int f = supernodeStart[s];
+    const int b = supernodeStart[s + 1] - f;
+    double v[B];
+    for (int r = 0; r < b; r++) {
+        const int i = f + r;
+        double sum = 0.0;
+        if (active) {
+            int before = 0;                                  // the row's terms in its earlier runs
+            for (int run = forwardRunStart[i]; run < forwardRunStart[i + 1]; run++) {
+                const double* l = lu + static_cast<size_t>(forwardRunLower[run]) * capacity + a;
+                const double* y = z + static_cast<size_t>(forwardRunY[run]) * capacity + a;
+                const int length = forwardRunLength[run];
+                const int first = (static_cast<int>(threadIdx.y) - before % slices + slices) % slices;
+                for (int k = first; k < length; k += slices) {
+                    sum = fma(-l[static_cast<size_t>(k) * capacity], y[static_cast<size_t>(k) * capacity], sum);
+                }
+                before += length;
+            }
+        }
+        partial[threadIdx.y * SPLIT_LANES + threadIdx.x] = sum;
+        __syncthreads();
+        if (threadIdx.y == 0 && active) {
+            double x = z[static_cast<size_t>(i) * capacity + a];
+            for (int k = 0; k < slices; k++) {
+                x += partial[k * SPLIT_LANES + threadIdx.x];
+            }
+            v[r] = x;
+        }
+        __syncthreads();                                     // partial is the next row's
+    }
+    if (threadIdx.y != 0 || !active) {
+        return;
+    }
+    const double* d = lu + static_cast<size_t>(diagonalBase[s]) * capacity + a;
+    double w[B];
+    for (int k = 0; k < b; k++) {
+        double x = v[rowPermutation[static_cast<size_t>(f + k) * capacity + a]];
+        for (int q = 0; q < k; q++) {
+            x = fma(-d[static_cast<size_t>(k * b + q) * capacity], w[q], x);
+        }
+        w[k] = x;
+    }
+    for (int k = 0; k < b; k++) {
+        z[static_cast<size_t>(f + k) * capacity + a] = w[k];
+    }
+}
+
 // Backward, one level: a supernode's slots take its U panel against the solution below, then U^-1, and land on its
 // columns through its column order.
 __global__ void backwardLevel(int nItems, int width, int capacity, const int* __restrict__ selected,
@@ -413,6 +482,18 @@ void solveSupernodal(SupernodalLu& lu, const int* selected, int width, const dou
     const int levels = static_cast<int>(lu.levelStart.size()) - 1;
     for (int l = 0; l < levels; l++) {
         const int supernodes = lu.levelStart[l + 1] - lu.levelStart[l];
+        const int slices = splitSlices(supernodes, width, lu.forwardLevelLongest[l], lu.residentThreads);
+        if (slices > 1) {
+            gBatchedLuSupernodalSplitLaunches++;
+            const unsigned int tiles = static_cast<unsigned int>((width + SPLIT_LANES - 1) / SPLIT_LANES);
+            const unsigned int blocks = static_cast<unsigned int>(supernodes) * tiles;
+            forwardLevelSplit<<<blocks, dim3(SPLIT_LANES, slices), slices * SPLIT_LANES * sizeof(double), stream>>>(
+                    width, lu.capacity, selected, lu.dLevelSupernode.as<int>() + lu.levelStart[l],
+                    lu.dSupernodeStart.as<int>(), lu.dDiagonalBase.as<int>(), lu.dForwardRunStart.as<int>(),
+                    lu.dForwardRunLower.as<int>(), lu.dForwardRunY.as<int>(), lu.dForwardRunLength.as<int>(),
+                    lu.dRowPermutation.as<unsigned char>(), lu.dLu.as<double>(), lu.dWork.as<double>());
+            continue;
+        }
         forwardLevel<<<blocksFor(static_cast<size_t>(supernodes) * width), LU_BLOCK, 0, stream>>>(supernodes, width,
                 lu.capacity, selected, lu.dLevelSupernode.as<int>() + lu.levelStart[l], lu.dSupernodeStart.as<int>(),
                 lu.dDiagonalBase.as<int>(), lu.dForwardRunStart.as<int>(), lu.dForwardRunLower.as<int>(),
@@ -446,6 +527,20 @@ void createSupernodalLu(SupernodalLu& lu, const SupernodalLuPlan& plan, int capa
     lu.levelStart = plan.levelStart;
     lu.levelEntryStart = plan.levelEntryStart;
     lu.levelPanelStart = plan.levelPanelStart;
+    lu.residentThreads = residentDeviceThreads();
+    lu.forwardLevelLongest.assign(plan.levels(), 0);         // per level: its longest row's L terms
+    for (int l = 0; l < plan.levels(); l++) {
+        for (int k = plan.levelStart[l]; k < plan.levelStart[l + 1]; k++) {
+            const int s = plan.levelSupernode[k];
+            for (int i = plan.supernodeStart[s]; i < plan.supernodeStart[s + 1]; i++) {
+                int terms = 0;
+                for (int run = plan.forwardRunStart[i]; run < plan.forwardRunStart[i + 1]; run++) {
+                    terms += plan.forwardRunLength[run];
+                }
+                lu.forwardLevelLongest[l] = std::max(lu.forwardLevelLongest[l], terms);
+            }
+        }
+    }
     std::vector<char> fromA(plan.nStored, 0);
     for (int e : plan.storedOfA) {
         fromA[e] = 1;

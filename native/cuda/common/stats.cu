@@ -23,6 +23,7 @@ long long gBatchedLuFactorizations = 0;
 long long gBatchedLuPivotedLanes = 0;
 long long gBatchedLuPivotDelayOrders = 0;
 long long gBatchedLuSplitLaunches = 0;
+long long gBatchedLuSupernodalSplitLaunches = 0;
 long long gFullFactorizations = 0;
 long long gRobustFactorizations = 0;
 long long gSensitivityFactorizations = 0;

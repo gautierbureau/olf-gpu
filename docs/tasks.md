@@ -338,8 +338,8 @@ first, on the current stack; post-action states once olf-gpu moves to OLF main.
   and `AbstractLfBranchAction.updateBusesAndBranchStatus` gone (#1385's `NetworkActivations`) in
   `GpuAutomationSystemOuterLoop`.
 - **M1 - DONE: hooks in OLF** (branch `olf-local-patches-sensi-hooks` of the OLF fork, on `olf-local-patches`, commit
-  "Let a subclass batch the AC sensitivity analysis's contingencies", 8c7df974, pushed to the fork 2026-11-09; not yet
-  on `olf-local-patches`, which olf-gpu builds against: M2 needs it there). OLF's
+  "Let a subclass batch the AC sensitivity analysis's contingencies", 8c7df974, pushed to the fork 2026-11-09, and
+  cherry-picked onto `olf-local-patches` the same day: olf-gpu builds against it). OLF's
   `AcSensitivityAnalysis` was private all the way through; four protected seams, each doing what the code did before
   (the `sensi` package's 323 tests pass): `OpenSensitivityAnalysisProvider.createAcSensitivityAnalysis` (the analysis a
   run uses), `beforeContingencySimulations` (base solved and written, contingency parameters applied, before the first

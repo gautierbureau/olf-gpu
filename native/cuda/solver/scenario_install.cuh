@@ -50,10 +50,8 @@ void writeInstalledRows(const BatchSolverContext* ctx, T* device, const T* rows,
         CUDA_CHECK(cudaMemcpy(device, rows, static_cast<size_t>(ctx->nScenarios) * width * sizeof(T), cudaMemcpyHostToDevice));
         return;
     }
-    for (int j = 0; j < installedSlotCount(ctx); j++) {
-        CUDA_CHECK(cudaMemcpy(device + static_cast<size_t>(installedSlot(ctx, j)) * width, rows + static_cast<size_t>(j) * width,
-                              width * sizeof(T), cudaMemcpyHostToDevice));
-    }
+    ctx->installRowUpload.write(device, width, installedSlotCount(ctx), ctx->installSlots.data(),
+                                [&](int j) { return rows + static_cast<size_t>(j) * width; });
 }
 
 // The installed slots' rows of a per-slot device array (`width` values per slot) into `host`, in the install's order.

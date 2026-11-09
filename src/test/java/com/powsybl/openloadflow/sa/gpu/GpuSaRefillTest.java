@@ -60,7 +60,18 @@ class GpuSaRefillTest extends AbstractGpuSaTest {
         assertRefilledScenariosMatchCpu(3);
     }
 
+    /** A bank of 3 refilled two slots at a time, then one: an install writes the rows of several slots of the bank, the ones
+     *  handed back, at once - into those slots and no others. */
+    @Test
+    void severalSlotsInstalledAtOnceWhileOthersSolveMatchCpu() {
+        assertRefilledScenariosMatchCpu(3, 2);
+    }
+
     private void assertRefilledScenariosMatchCpu(int bankSize) {
+        assertRefilledScenariosMatchCpu(bankSize, 1);
+    }
+
+    private void assertRefilledScenariosMatchCpu(int bankSize, int refillAt) {
         assumeTrue(GpuAcNewtonSolver.isAvailable(), "GPU lib required");
         Network network = IeeeCdfNetworkFactory.create14();
         List<Contingency> contingencies = List.of(
@@ -87,7 +98,7 @@ class GpuSaRefillTest extends AbstractGpuSaTest {
             Set<String> onDevice = new HashSet<>(GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_IDS);
             assertTrue(onDevice.size() >= 5, "the device must solve most scenarios: " + onDevice.size());
             GpuBatchContextCache.forceChunkSizeForTests(bankSize);
-            GpuBatchedSecurityAnalysisSolver.refillAtForTests(1);
+            GpuBatchedSecurityAnalysisSolver.refillAtForTests(refillAt);
             assertStrategyMatchesCpu(network, contingencies, strategies, actions, -1, true);
             assertEquals(onDevice, new HashSet<>(GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_IDS),
                     "the device must solve the same scenarios in the refilled bank");

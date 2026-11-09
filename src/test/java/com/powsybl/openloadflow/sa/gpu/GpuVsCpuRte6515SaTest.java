@@ -878,8 +878,12 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
         // contingencies had already executed — which is exactly the shape of the "busbar 8.176e-06 kV
         // on a 0%-batched kind" that stood recorded as a GPU/CPU difference. Read before timing, so a
         // second parse never lands inside a measured region.
+        long readCold0 = System.nanoTime();
         Network networkGpuCold = Network.read(CASE_FILE);
+        long readWarm0 = System.nanoTime();
         Network networkGpuWarm = Network.read(CASE_FILE);
+        System.out.printf("  NETWORK_READ gpu-cold arm %d ms | gpu-warm arm %d ms%n",
+                (readWarm0 - readCold0) / 1_000_000, (System.nanoTime() - readWarm0) / 1_000_000);
         // OLF_GPU_SA_CPU_WARM=1: time the CPU arm TWICE, like the GPU arm. The first CPU run is the
         // JVM's first SA and pays JIT compilation the GPU arms never see, so the cold-vs-cold ratio
         // flatters the GPU. The ratios are then quoted against CPU warm.
@@ -2010,6 +2014,14 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
         String bank = System.getenv("OLF_GPU_SA_BANK");
         if (bank != null && !bank.isEmpty()) {
             com.powsybl.openloadflow.ac.solver.gpu.GpuBatchContextCache.forceChunkSizeForTests(Integer.parseInt(bank));
+        }
+        // OLF_GPU_SA_LINEAR_SOLVER=CUDSS|BATCHED_LU: the GPU arms' batched linear solver, set through the provider's own
+        // parameter (GpuLoadFlowParameters.linearSolver) as a user would, to time our batched LU against cuDSS
+        String linearSolver = System.getenv("OLF_GPU_SA_LINEAR_SOLVER");
+        if (linearSolver != null && !linearSolver.isEmpty()) {
+            com.powsybl.openloadflow.ac.solver.gpu.GpuLoadFlowParameters.create(lfp)
+                    .setLinearSolver(com.powsybl.openloadflow.ac.solver.gpu.GpuLinearSolver.valueOf(linearSolver));
+            System.out.printf("  LINEAR_SOLVER %s%n", linearSolver);
         }
         try {
             SecurityAnalysisParameters sapGpu = new SecurityAnalysisParameters();

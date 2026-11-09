@@ -256,22 +256,48 @@ struct LuFixture {
 // values: capacity * nnz, rightHandSides and solutions: capacity * n, scenario-major; laneMap: the scenarios to
 // factorize and solve; pivoted (1 when the pivoting engine factorized the lane) and pivotClamps: per entry of laneMap,
 // written. With interleavedValues, the values reach the factorization interleaved by scenario, as a batch context
-// holds them (the engines read them in place), instead of scenario-major.
+// holds them (the engines read them in place), instead of scenario-major. With transposedRightHandSides and
+// transposedSolutions (capacity * n each, scenario-major), the transposed systems are also solved on the same factors.
 static void factorizeAndSolveIn(JNIEnv* env, jint n, jintArray jRowPtr, jintArray jColIdx, jintArray jRowOrder,
                                 jintArray jColOrder, jint capacity, jdoubleArray jValues, jdoubleArray jRightHandSides,
                                 jintArray jLaneMap, jdoubleArray jSolutions, jintArray jPivoted, jintArray jPivotClamps,
-                                bool interleavedValues) {
+                                bool interleavedValues, jdoubleArray jTransposedRightHandSides = nullptr,
+                                jdoubleArray jTransposedSolutions = nullptr) {
     try {
         LuFixture f(env, n, jRowPtr, jColIdx, jRowOrder, jColOrder, capacity, jValues, jRightHandSides, jLaneMap, jSolutions);
+        const bool transposed = jTransposedRightHandSides != nullptr && jTransposedSolutions != nullptr;
+        std::vector<double> transposedSolutions(transposed ? static_cast<size_t>(capacity) * n : 0);
+        DeviceBuf dTransposedRightHandSides;
+        DeviceBuf dTransposedSolutions;
+        if (transposed) {
+            std::vector<double> transposedRightHandSides(transposedSolutions.size());
+            env->GetDoubleArrayRegion(jTransposedRightHandSides, 0, static_cast<jsize>(transposedRightHandSides.size()),
+                                      transposedRightHandSides.data());
+            env->GetDoubleArrayRegion(jTransposedSolutions, 0, static_cast<jsize>(transposedSolutions.size()),
+                                      transposedSolutions.data());
+            dTransposedRightHandSides.upload(transposedRightHandSides.data(), transposedRightHandSides.size() * sizeof(double));
+            dTransposedSolutions.upload(transposedSolutions.data(), transposedSolutions.size() * sizeof(double));
+        }
         const BatchLayout layout = f.upload(interleavedValues);
         factorizeLanes(f.lu, f.dValues.as<double>(), layout, f.laneMap.data(), static_cast<int>(f.laneMap.size()), f.stream);
         solveLanes(f.lu, f.dRightHandSides.as<double>(), f.dSolutions.as<double>(), f.stream);
+        if (transposed) {
+            solveLanesTransposed(f.lu, dTransposedRightHandSides.as<double>(), dTransposedSolutions.as<double>(), f.stream);
+        }
         const std::vector<int> clamps = readPivotClamps(f.lu, f.stream);
         std::vector<int> pivoted(f.laneMap.size(), 0);
         f.markPivoted(pivoted.data());
         f.readSolutions();
+        if (transposed) {
+            CUDA_CHECK(cudaMemcpy(transposedSolutions.data(), dTransposedSolutions.p, transposedSolutions.size() * sizeof(double),
+                                  cudaMemcpyDeviceToHost));
+        }
         f.close();
         f.writeSolutions(env, jSolutions);
+        if (transposed) {
+            env->SetDoubleArrayRegion(jTransposedSolutions, 0, static_cast<jsize>(transposedSolutions.size()),
+                                      transposedSolutions.data());
+        }
         env->SetIntArrayRegion(jPivoted, 0, static_cast<jsize>(pivoted.size()), pivoted.data());
         env->SetIntArrayRegion(jPivotClamps, 0, static_cast<jsize>(clamps.size()), clamps.data());
     } catch (const std::exception& e) {
@@ -344,6 +370,19 @@ OLF_JNI(ac_solver_gpu, BatchedLuNative, factorizeAndSolveColumns)(
     } catch (const std::exception& e) {
         throwJava(env, e);
     }
+}
+
+// factorizeAndSolve's factorization, then both solves on it: solutions = A^-1 rightHandSides and transposedSolutions =
+// A^-T transposedRightHandSides (solveLanes, solveLanesTransposed: the adjoint's solve on the Newton's factors).
+// pivoted and pivotClamps as factorizeAndSolve's.
+extern "C" JNIEXPORT void JNICALL
+OLF_JNI(ac_solver_gpu, BatchedLuNative, factorizeAndSolveTransposed)(
+        JNIEnv* env, jclass, jint n, jintArray jRowPtr, jintArray jColIdx, jintArray jRowOrder, jintArray jColOrder,
+        jint capacity, jdoubleArray jValues, jdoubleArray jRightHandSides, jdoubleArray jTransposedRightHandSides,
+        jintArray jLaneMap, jdoubleArray jSolutions, jdoubleArray jTransposedSolutions, jintArray jPivoted,
+        jintArray jPivotClamps) {
+    factorizeAndSolveIn(env, n, jRowPtr, jColIdx, jRowOrder, jColOrder, capacity, jValues, jRightHandSides, jLaneMap,
+                        jSolutions, jPivoted, jPivotClamps, false, jTransposedRightHandSides, jTransposedSolutions);
 }
 
 // factorizeAndSolve's factorization, then the solve of the lanes whose scenario is in selected only (selectLanes,

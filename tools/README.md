@@ -14,6 +14,7 @@ Tests and benchmarks of the built extension. Each runs from any directory (it ch
 | `run_bench.sh` | the fixed-iteration batched N-1 benchmark (`GpuBatchedN1FixedIterTest`, case9241pegase, 500 contingencies, K=4); `--no-build` skips the native build |
 | `sweep_ordering.sh` | the benchmark (or, with `suite`, the whole test suite) once per cuDSS reordering algorithm |
 | `track-numbers.sh` | the production SA benchmark and `run_bench.sh`, then one row appended to `docs/numbers.md` |
+| `run_lu_host_check.sh` | the host check of our batched LU's transposed solve (`native/host/lu_transposed_check.cpp`): g++ only, no GPU; CSR systems as arguments are checked too |
 
 ## Investigation helpers
 

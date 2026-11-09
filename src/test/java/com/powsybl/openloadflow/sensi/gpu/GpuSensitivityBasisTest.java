@@ -83,11 +83,22 @@ class GpuSensitivityBasisTest {
 
     /**
      * Active flows per two generators' and a load's injections and per the GLSK, currents per an injection, reactive flows
-     * per a target voltage, and bus voltages per three target voltages: unit, weighted and participation columns, and
-     * right-hand sides on active-power, reactive and voltage-target rows.
+     * per a target voltage and per a reactive injection, and bus voltages per three target voltages: unit, weighted and
+     * participation columns, right-hand sides on active-power, reactive and voltage-target rows, and every function the
+     * device contracts (both sides' active and reactive flows and currents, a bus voltage).
      */
     private static List<SensitivityFactor> factors(Network network) {
+        return factors(network, false);
+    }
+
+    /** With {@code busReactiveInjection}, also the reactive injection of bus 9 per a target voltage: a function the
+     *  device does not contract, so the states are rebuilt from the basis on the host. */
+    private static List<SensitivityFactor> factors(Network network, boolean busReactiveInjection) {
         List<SensitivityFactor> factors = new ArrayList<>();
+        if (busReactiveInjection) {
+            factors.add(new SensitivityFactor(SensitivityFunctionType.BUS_REACTIVE_POWER, "B9-L",
+                    SensitivityVariableType.BUS_TARGET_VOLTAGE, "B6-G", false, ContingencyContext.all()));
+        }
         for (Line line : network.getLines()) {
             for (String injection : List.of("B2-G", "B6-G", "B9-L")) {
                 factors.add(new SensitivityFactor(SensitivityFunctionType.BRANCH_ACTIVE_POWER_1, line.getId(),
@@ -101,6 +112,12 @@ class GpuSensitivityBasisTest {
         for (String line : List.of("L2-4-1", "L6-13-1", "L9-14-1")) {
             factors.add(new SensitivityFactor(SensitivityFunctionType.BRANCH_CURRENT_1, line,
                     SensitivityVariableType.INJECTION_ACTIVE_POWER, "B2-G", false, ContingencyContext.all()));
+            factors.add(new SensitivityFactor(SensitivityFunctionType.BRANCH_CURRENT_2, line,
+                    SensitivityVariableType.INJECTION_ACTIVE_POWER, "B6-G", false, ContingencyContext.all()));
+            factors.add(new SensitivityFactor(SensitivityFunctionType.BRANCH_ACTIVE_POWER_2, line,
+                    SensitivityVariableType.INJECTION_ACTIVE_POWER, "B6-G", false, ContingencyContext.all()));
+            factors.add(new SensitivityFactor(SensitivityFunctionType.BRANCH_REACTIVE_POWER_1, line,
+                    SensitivityVariableType.INJECTION_REACTIVE_POWER, "B9-L", false, ContingencyContext.all()));
         }
         for (String bus : List.of("B4", "B9", "B13")) {
             for (String generator : List.of("B2-G", "B6-G", "B8-G")) {
@@ -129,8 +146,13 @@ class GpuSensitivityBasisTest {
 
     private static Run run(SensitivityAnalysisProvider provider, Network network, List<Contingency> contingencies,
                            SensitivityAnalysisParameters parameters) {
+        return run(provider, network, contingencies, parameters, factors(network));
+    }
+
+    private static Run run(SensitivityAnalysisProvider provider, Network network, List<Contingency> contingencies,
+                           SensitivityAnalysisParameters parameters, List<SensitivityFactor> factors) {
         SensitivityResultModelWriter writer = new SensitivityResultModelWriter(contingencies, List.of());
-        provider.run(network, network.getVariantManager().getWorkingVariantId(), new SensitivityFactorModelReader(factors(network), network),
+        provider.run(network, network.getVariantManager().getWorkingVariantId(), new SensitivityFactorModelReader(factors, network),
                 writer, new SensitivityAnalysisRunParameters().setParameters(parameters).setContingencies(contingencies)
                         .setVariableSets(variableSets())).join();
         Map<List<Integer>, SensitivityValue> values = new HashMap<>();
@@ -158,18 +180,33 @@ class GpuSensitivityBasisTest {
         }
     }
 
-    /** Every contingency brought from the batch, and its sensitivities solved from the basis. */
+    /** Every contingency brought from the batch, and its sensitivities the device's own values: contracted there, OLF's
+     *  right-hand sides checked to be the combinations it contracted. */
     @Test
-    void contingencySensitivitiesSolvedFromTheBasisAreOlfs() {
+    void contingencySensitivitiesContractedOnTheDeviceAreOlfs() {
         List<Contingency> contingencies = contingencies();
         Run olf = run(new OpenSensitivityAnalysisProvider(), network(), contingencies, parameters(true));
         long brought = GpuBatchedAcSensitivityAnalysis.BATCHED_CONTINGENCIES.sum();
-        long solved = GpuBatchedAcSensitivityAnalysis.BASIS_SOLVED_CONTINGENCIES.sum();
+        long valued = GpuBatchedAcSensitivityAnalysis.DEVICE_VALUED_CONTINGENCIES.sum();
         Run batched = run(new CpuBatchedProvider(Set.of(), false, true), network(), contingencies, parameters(true));
         assertEquals(contingencies.size(), olf.solved(), "OLF solves every contingency");
         assertEquals(contingencies.size(), GpuBatchedAcSensitivityAnalysis.BATCHED_CONTINGENCIES.sum() - brought);
-        assertEquals(olf.solved(), GpuBatchedAcSensitivityAnalysis.BASIS_SOLVED_CONTINGENCIES.sum() - solved,
-                "every contingency's sensitivities solved from the basis");
+        assertEquals(olf.solved(), GpuBatchedAcSensitivityAnalysis.DEVICE_VALUED_CONTINGENCIES.sum() - valued,
+                "every contingency's sensitivities contracted on the device");
+        assertSame(olf, batched, 1e-9);
+    }
+
+    /** A function the device does not contract (a bus reactive injection): the states are rebuilt from the basis on the
+     *  host, every contingency's. */
+    @Test
+    void aFunctionTheDeviceDoesNotContractSolvesFromTheBasis() {
+        List<Contingency> contingencies = contingencies();
+        Run olf = run(new OpenSensitivityAnalysisProvider(), network(), contingencies, parameters(true), factors(network(), true));
+        long solved = GpuBatchedAcSensitivityAnalysis.BASIS_SOLVED_CONTINGENCIES.sum();
+        long valued = GpuBatchedAcSensitivityAnalysis.DEVICE_VALUED_CONTINGENCIES.sum();
+        Run batched = run(new CpuBatchedProvider(Set.of(), false, true), network(), contingencies, parameters(true), factors(network(), true));
+        assertEquals(olf.solved(), GpuBatchedAcSensitivityAnalysis.BASIS_SOLVED_CONTINGENCIES.sum() - solved);
+        assertEquals(0, GpuBatchedAcSensitivityAnalysis.DEVICE_VALUED_CONTINGENCIES.sum() - valued);
         assertSame(olf, batched, 1e-9);
     }
 
@@ -178,9 +215,9 @@ class GpuSensitivityBasisTest {
     void withoutDistributedSlackTheBasisIsUnitsAndWeights() {
         List<Contingency> contingencies = contingencies();
         Run olf = run(new OpenSensitivityAnalysisProvider(), network(), contingencies, parameters(false));
-        long solved = GpuBatchedAcSensitivityAnalysis.BASIS_SOLVED_CONTINGENCIES.sum();
+        long valued = GpuBatchedAcSensitivityAnalysis.DEVICE_VALUED_CONTINGENCIES.sum();
         Run batched = run(new CpuBatchedProvider(Set.of(), false, true), network(), contingencies, parameters(false));
-        assertEquals(olf.solved(), GpuBatchedAcSensitivityAnalysis.BASIS_SOLVED_CONTINGENCIES.sum() - solved,
+        assertEquals(olf.solved(), GpuBatchedAcSensitivityAnalysis.DEVICE_VALUED_CONTINGENCIES.sum() - valued,
                 "every contingency OLF solves (L1-2-1's load flow fails without the slack distributed) from the basis");
         assertSame(olf, batched, 1e-9);
     }
@@ -191,23 +228,24 @@ class GpuSensitivityBasisTest {
     void aGlskLosingAnElementIsSolvedOnTheCpu() {
         List<Contingency> contingencies = contingencies(new Contingency("B9-L", new LoadContingency("B9-L")));
         Run olf = run(new OpenSensitivityAnalysisProvider(), network(), contingencies, parameters(true));
-        long solved = GpuBatchedAcSensitivityAnalysis.BASIS_SOLVED_CONTINGENCIES.sum();
+        long valued = GpuBatchedAcSensitivityAnalysis.DEVICE_VALUED_CONTINGENCIES.sum();
         Run batched = run(new CpuBatchedProvider(Set.of(), false, true), network(), contingencies, parameters(true));
-        assertEquals(olf.solved() - 1, GpuBatchedAcSensitivityAnalysis.BASIS_SOLVED_CONTINGENCIES.sum() - solved,
-                "all but the load outage solved from the basis");
+        assertEquals(olf.solved() - 1, GpuBatchedAcSensitivityAnalysis.DEVICE_VALUED_CONTINGENCIES.sum() - valued,
+                "all but the load outage contracted on the device");
         assertSame(olf, batched, 1e-9);
     }
 
-    /** The device: the batch solves the basis at every converged state, and every contingency's sensitivities come from it. */
+    /** The device: the batch solves the basis at every converged state and contracts it, and every contingency's
+     *  sensitivities are its values. */
     @Test
-    void deviceBasisGivesOlfsSensitivities() {
+    void deviceContractionGivesOlfsSensitivities() {
         assumeTrue(GpuAcNewtonSolver.isAvailable(), "GPU lib required");
         List<Contingency> contingencies = contingencies();
         Run olf = run(new OpenSensitivityAnalysisProvider(), network(), contingencies, parameters(true));
-        long solved = GpuBatchedAcSensitivityAnalysis.BASIS_SOLVED_CONTINGENCIES.sum();
+        long valued = GpuBatchedAcSensitivityAnalysis.DEVICE_VALUED_CONTINGENCIES.sum();
         Run gpu = run(new GpuSensitivityAnalysisProvider(), network(), contingencies, parameters(true));
-        assertEquals(olf.solved(), GpuBatchedAcSensitivityAnalysis.BASIS_SOLVED_CONTINGENCIES.sum() - solved,
-                "every contingency's sensitivities solved from the device's basis");
+        assertEquals(olf.solved(), GpuBatchedAcSensitivityAnalysis.DEVICE_VALUED_CONTINGENCIES.sum() - valued,
+                "every contingency's sensitivities contracted on the device");
         assertSame(olf, gpu, 1e-6);
     }
 }

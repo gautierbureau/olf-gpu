@@ -156,6 +156,33 @@ public final class GpuSensitivityFactorGroups {
         return variables;
     }
 
+    /** A factor's function, as the device evaluates it: its type, its element, and its group's right-hand side column. */
+    public record FactorFunction(SensitivityFunctionType type, LfElement element, int groupIndex) {
+    }
+
+    /** The functions of the factors whose sensitivity is read from the solved states (status VALID), in order. */
+    public static List<FactorFunction> functions(List<AbstractSensitivityAnalysis.LfSensitivityFactor<AcVariableType, AcEquationType>> factors) {
+        List<FactorFunction> functions = new ArrayList<>();
+        for (var factor : factors) {
+            if (factor.getStatus() == AbstractSensitivityAnalysis.LfSensitivityFactor.Status.VALID) {
+                functions.add(new FactorFunction(factor.getFunctionType(), factor.getFunctionElement(), factor.getGroup().getIndex()));
+            }
+        }
+        return functions;
+    }
+
+    /** The factors whose sensitivity is read from the solved states (status VALID), in the same order: what a subclass
+     *  matches the factor OLF asks a sensitivity for against. */
+    public static List<Object> validFactors(List<AbstractSensitivityAnalysis.LfSensitivityFactor<AcVariableType, AcEquationType>> factors) {
+        List<Object> valid = new ArrayList<>();
+        for (var factor : factors) {
+            if (factor.getStatus() == AbstractSensitivityAnalysis.LfSensitivityFactor.Status.VALID) {
+                valid.add(factor);
+            }
+        }
+        return valid;
+    }
+
     /** The function terms of the factors whose sensitivity is read from the solved states (status VALID). */
     public static List<Derivable<AcVariableType>> functionTerms(List<AbstractSensitivityAnalysis.LfSensitivityFactor<AcVariableType, AcEquationType>> factors) {
         List<Derivable<AcVariableType>> terms = new ArrayList<>();

@@ -66,6 +66,11 @@ final class CpuBatchedProvider extends OpenSensitivityAnalysisProvider {
                                                                 SensitivityAnalysisParameters sensitivityAnalysisParameters) {
         return new GpuBatchedAcSensitivityAnalysis(matrixFactory, connectivityFactory, sensitivityAnalysisParameters) {
             @Override
+            protected boolean contractsOnDevice() {
+                return true;                                 // the emulated batch contracts as the device does
+            }
+
+            @Override
             protected GpuPostContingencyBatch solveBatch(Network network, LfNetwork lfNetwork, AcLoadFlowContext context,
                                                          List<PropagatedContingency> contingencies, LoadFlowParameters lfParameters,
                                                          OpenLoadFlowParameters contingencyLfParametersExt,

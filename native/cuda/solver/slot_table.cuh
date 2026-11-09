@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "../common/device_buf.cuh"
+#include "../common/slot_row_upload.cuh"
 #include "../equations/slot_entries.cuh"
 
 namespace olfgpu {
@@ -66,6 +67,8 @@ private:
     DeviceBuf count_;
     DeviceBuf ints_;
     DeviceBuf doubles_;
+    SlotRowUpload intUpload_;
+    SlotRowUpload doubleUpload_;
     std::vector<StateField> stateFields_;
     std::vector<std::unique_ptr<DeviceBuf>> states_;
 };

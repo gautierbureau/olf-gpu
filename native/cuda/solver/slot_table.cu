@@ -126,16 +126,20 @@ void SlotTable::install(int nSlots, const std::vector<int>& slots, int nEntries,
         }
         return;
     }
+    // Slot s's region is its capacity_ entries: row s of a per-slot array `capacity_ * width` wide.
+    std::vector<int> bankSlots(nLocal);
     for (int j = 0; j < nLocal; j++) {
-        size_t i = at(bankSlot(j), 0);
-        if (intWidth_ > 0) {
-            CUDA_CHECK(cudaMemcpy(ints_.as<int>() + i * intWidth_, hInts_.data() + i * intWidth_,
-                                  static_cast<size_t>(capacity_) * intWidth_ * sizeof(int), cudaMemcpyHostToDevice));
-        }
-        if (doubleWidth_ > 0) {
-            CUDA_CHECK(cudaMemcpy(doubles_.as<double>() + i * doubleWidth_, hDoubles_.data() + i * doubleWidth_,
-                                  static_cast<size_t>(capacity_) * doubleWidth_ * sizeof(double), cudaMemcpyHostToDevice));
-        }
+        bankSlots[j] = bankSlot(j);
+    }
+    if (intWidth_ > 0) {
+        const size_t width = static_cast<size_t>(capacity_) * intWidth_;
+        intUpload_.write(ints_.as<int>(), width, nLocal, bankSlots.data(),
+                         [&](int j) { return hInts_.data() + static_cast<size_t>(bankSlots[j]) * width; });
+    }
+    if (doubleWidth_ > 0) {
+        const size_t width = static_cast<size_t>(capacity_) * doubleWidth_;
+        doubleUpload_.write(doubles_.as<double>(), width, nLocal, bankSlots.data(),
+                            [&](int j) { return hDoubles_.data() + static_cast<size_t>(bankSlots[j]) * width; });
     }
 }
 

@@ -45,6 +45,8 @@ struct BatchSolverContext {
     // The bank slots the per-scenario setters install: the setters' local slot j is bank slot installSlots[j], and only
     // those slots' entries are rewritten. Empty: every slot, local slot = bank slot (a whole chunk).
     std::vector<int> installSlots;
+    // The installed slots' rows of the per-slot arrays an install writes, in one copy (writeInstalledRows).
+    mutable SlotRowUpload installRowUpload;
     DeviceBuf dInstallSlots;                                 // the install slots on the device (every slot of an install of the bank)
     DeviceBuf dInstallMask;                                  // per slot, 1: installed by the current install
     SlotSolveState slotState;                                // per slot: its scenario's solve so far (solveBatchContext)

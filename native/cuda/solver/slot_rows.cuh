@@ -17,6 +17,7 @@
 
 #include "../common/check.cuh"
 #include "../common/device_buf.cuh"
+#include "../common/slot_row_upload.cuh"
 
 namespace olfgpu {
 
@@ -97,10 +98,12 @@ private:
             buf_.upload(host_.data(), host_.size() * sizeof(T));
             return;
         }
+        bankSlots_.resize(nLocal_);
         for (int j = 0; j < nLocal_; j++) {
-            size_t at = static_cast<size_t>(bank(j)) * width_;
-            CUDA_CHECK(cudaMemcpy(device() + at, host_.data() + at, width_ * sizeof(T), cudaMemcpyHostToDevice));
+            bankSlots_[j] = bank(j);
         }
+        upload_.write(device(), width_, nLocal_, bankSlots_.data(),
+                      [&](int j) { return host_.data() + static_cast<size_t>(bankSlots_[j]) * width_; });
     }
 
     T fallback_;
@@ -112,6 +115,8 @@ private:
     std::vector<char> holds_;
     std::vector<T> host_;
     DeviceBuf buf_;
+    std::vector<int> bankSlots_;
+    SlotRowUpload upload_;
 };
 
 }  // namespace olfgpu

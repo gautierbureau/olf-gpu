@@ -11,6 +11,11 @@
 // couplers, so the fast engine learns to delay them from the lanes it did not trust (pivot_delays.cuh): the pivoting
 // engine eliminates in the analyzed order, the fast engine in that order with the delays learned so far.
 //
+// A lane keeps the engine it ended on: a scenario the pivoting engine factorized goes straight to it at its next
+// factorizations (on network.xiidm's busbar sections 99.6 % of them would be flagged again), until the fast engine's
+// order changes or a new scenario is installed in its slot (forgetLaneRouting) - the fast engine's work on it was
+// thrown away.
+//
 // Values are interleaved by lane in both engines, entry * capacity + lane, and a factorization runs on the lanes of a
 // lane map only: a scenario that no longer iterates costs nothing.
 #ifndef OLF_GPU_LU_BATCHED_LU_CUH
@@ -35,10 +40,13 @@ struct BatchedLu {
     ScalarLu scalar;
     SupernodalLu supernodal;                                 // built on its first lane
     std::vector<int> hLaneMap;                               // the last factorization's lanes
-    std::vector<int> hPivoted;                               // ...those the pivoting engine factorized
+    std::vector<int> hPivoted;                               // ...those the pivoting engine factorized, in its order
+    DeviceBuf dLaneMap;                                      // hLaneMap on the device, when the fast engine's is not it
+    bool fastHasEveryLane = true;                            // ...the last factorization sent no lane straight past it
+    std::vector<char> pivotingRoute;                         // per scenario: the pivoting engine factorized it last
     DeviceBuf laneFactors;                                   // one lane's fast factors, read to learn from
-    std::vector<int> hSelected;                              // selectLanes': positions in hLaneMap, then in hPivoted
-    int selectedFast = 0;                                    // ...how many of them are hLaneMap's
+    std::vector<int> hSelected;                              // selectLanes': positions in the fast engine's lane map,
+    int selectedFast = 0;                                    // ...how many of them, then positions in hPivoted
     DeviceBuf dSelected;
 };
 
@@ -46,11 +54,14 @@ struct BatchedLu {
 void createBatchedLu(BatchedLu& lu, LuPlan& plan, int capacity);
 
 // Factorize scenarios laneMap[0 .. width) (host array, each < capacity) of vals, scenario s's CSR values laid out by
-// layout (common/batch_layout.cuh): all of them on the fast engine (on the plan's current order), then the flagged ones
-// on the pivoting engine, after the fast engine learned its next order from the first of them. Synchronizes the stream
-// to read the flags, and once per lane it learns from.
+// layout (common/batch_layout.cuh): those the pivoting engine did not factorize last on the fast engine (on the plan's
+// current order), then the flagged ones and the others on the pivoting engine, after the fast engine learned its next
+// order from the first flagged ones. Synchronizes the stream to read the flags, and once per lane it learns from.
 void factorizeLanes(BatchedLu& lu, const double* vals, BatchLayout layout, const int* laneMap, int width,
                     cudaStream_t stream);
+
+// The scenarios now installed in slots: each starts again on the fast engine.
+void forgetLaneRouting(BatchedLu& lu, const std::vector<int>& slots);
 
 // Solve with the last factorization's lanes, each on the engine that factorized it: x[s * n ..] = A_s^-1 b[s * n ..]
 // for every s of its lane map. Scenarios outside the lane map keep their x.
@@ -64,7 +75,7 @@ void selectLanes(BatchedLu& lu, const std::vector<char>& scenarios, cudaStream_t
 // keeps its x.
 void solveSelectedLanes(BatchedLu& lu, const double* b, double* x, cudaStream_t stream);
 
-// The last factorization's lane map on the device (the fast engine's).
+// The last factorization's lane map on the device.
 const int* deviceLaneMap(BatchedLu& lu);
 
 // Per lane of the last factorization's lane map: the pivots the pivoting engine clamped (0 for a lane the fast engine

@@ -39,7 +39,8 @@ public final class BatchedLuNative {
      * {the factorizations our batched LU ran in this process, the lanes of them its pivoting engine factorized, the
      * fast-engine orders built with learned pivot delays, the fast-engine factorization steps and solve levels launched
      * with their long rows split over several warps, the pivoting-engine forward solve levels launched with their long
-     * rows split}.
+     * rows split, the lanes sent straight to the pivoting engine, past the fast one, because the pivoting engine
+     * factorized them last}.
      */
     public static native long[] factorizationCounts();
 
@@ -118,6 +119,8 @@ public final class BatchedLuNative {
      * @param values         CSR values, {@code capacity * nnz}, scenario-major
      * @param rightHandSides {@code capacity * n}, scenario-major
      * @param laneMap        the scenarios to factorize and solve
+     * @param installRound   the round before which every lane's scenario is installed anew, as a solve installs a
+     *                       new scenario in a slot: it starts again on the fast engine; -1 for none
      * @param solutions      {@code capacity * n}, scenario-major: the solved scenarios' entries are overwritten
      * @param pivoted        {@code rounds * laneMap.length}, round-major: 1 when the pivoting engine factorized the lane
      *                       that round (written)
@@ -125,7 +128,8 @@ public final class BatchedLuNative {
      */
     public static native void factorizeRounds(int n, int[] rowPtr, int[] colIdx, int[] rowOrder, int[] colOrder,
                                               int capacity, double[] values, double[] rightHandSides, int[] laneMap,
-                                              int rounds, double[] solutions, int[] pivoted, int[] delays);
+                                              int rounds, int installRound, double[] solutions, int[] pivoted,
+                                              int[] delays);
 
     /**
      * The orders cuDSS's analysis picks for the pattern, written into {@code rowOrder} and {@code colOrder} as cuDSS

@@ -2015,14 +2015,6 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
         if (bank != null && !bank.isEmpty()) {
             com.powsybl.openloadflow.ac.solver.gpu.GpuBatchContextCache.forceChunkSizeForTests(Integer.parseInt(bank));
         }
-        // OLF_GPU_SA_LINEAR_SOLVER=CUDSS|BATCHED_LU: the GPU arms' batched linear solver, set through the provider's own
-        // parameter (GpuLoadFlowParameters.linearSolver) as a user would, to time our batched LU against cuDSS
-        String linearSolver = System.getenv("OLF_GPU_SA_LINEAR_SOLVER");
-        if (linearSolver != null && !linearSolver.isEmpty()) {
-            com.powsybl.openloadflow.ac.solver.gpu.GpuLoadFlowParameters.create(lfp)
-                    .setLinearSolver(com.powsybl.openloadflow.ac.solver.gpu.GpuLinearSolver.valueOf(linearSolver));
-            System.out.printf("  LINEAR_SOLVER %s%n", linearSolver);
-        }
         try {
             SecurityAnalysisParameters sapGpu = new SecurityAnalysisParameters();
             sapGpu.setLoadFlowParameters(lfp);

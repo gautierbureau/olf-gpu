@@ -26,15 +26,16 @@ std::vector<int> intsOf(JNIEnv* env, jintArray a) {
 
 // The factorizations our batched LU ran in this process, the lanes of them its pivoting engine factorized again, and
 // the fast-engine orders built with learned pivot delays, the fast-engine steps and levels launched with their long
-// rows split, and the pivoting-engine forward levels launched with their long rows split (tests: a run really used it,
-// and how).
+// rows split, the pivoting-engine forward levels launched with their long rows split, and the lanes sent straight to
+// the pivoting engine, past the fast one (tests: a run really used it, and how).
 extern "C" JNIEXPORT jlongArray JNICALL
 OLF_JNI(ac_solver_gpu, BatchedLuNative, factorizationCounts)(JNIEnv* env, jclass) {
-    const jlong counts[5] = {static_cast<jlong>(gBatchedLuFactorizations), static_cast<jlong>(gBatchedLuPivotedLanes),
+    const jlong counts[6] = {static_cast<jlong>(gBatchedLuFactorizations), static_cast<jlong>(gBatchedLuPivotedLanes),
                              static_cast<jlong>(gBatchedLuPivotDelayOrders), static_cast<jlong>(gBatchedLuSplitLaunches),
-                             static_cast<jlong>(gBatchedLuSupernodalSplitLaunches)};
-    jlongArray out = env->NewLongArray(5);
-    env->SetLongArrayRegion(out, 0, 5, counts);
+                             static_cast<jlong>(gBatchedLuSupernodalSplitLaunches),
+                             static_cast<jlong>(gBatchedLuRoutedLanes)};
+    jlongArray out = env->NewLongArray(6);
+    env->SetLongArrayRegion(out, 0, 6, counts);
     return out;
 }
 
@@ -251,13 +252,14 @@ OLF_JNI(ac_solver_gpu, BatchedLuNative, factorizeAndSolveSelected)(
 
 // The scenarios of laneMap factorized `rounds` times on one plan - the fast engine's order learning its pivot delays
 // between rounds - then solved with the last factorization. values: capacity * nnz, rightHandSides and solutions:
-// capacity * n, scenario-major; pivoted (rounds * laneMap entries, round-major): 1 when the pivoting engine factorized
-// the lane that round; delays (rounds): the pivot delays the fast engine's order had in each round.
+// capacity * n, scenario-major; installRound: the round before which every lane's scenario is installed anew
+// (forgetLaneRouting), -1 for none; pivoted (rounds * laneMap entries, round-major): 1 when the pivoting engine
+// factorized the lane that round; delays (rounds): the pivot delays the fast engine's order had in each round.
 extern "C" JNIEXPORT void JNICALL
 OLF_JNI(ac_solver_gpu, BatchedLuNative, factorizeRounds)(
         JNIEnv* env, jclass, jint n, jintArray jRowPtr, jintArray jColIdx, jintArray jRowOrder, jintArray jColOrder,
         jint capacity, jdoubleArray jValues, jdoubleArray jRightHandSides, jintArray jLaneMap, jint rounds,
-        jdoubleArray jSolutions, jintArray jPivoted, jintArray jDelays) {
+        jint installRound, jdoubleArray jSolutions, jintArray jPivoted, jintArray jDelays) {
     try {
         const std::vector<int> rowPtr = intsOf(env, jRowPtr);
         const std::vector<int> colIdx = intsOf(env, jColIdx);
@@ -293,6 +295,9 @@ OLF_JNI(ac_solver_gpu, BatchedLuNative, factorizeRounds)(
         std::vector<int> delays(rounds, 0);
         try {
             for (int round = 0; round < rounds; round++) {
+                if (round == installRound) {
+                    forgetLaneRouting(lu, laneMap);
+                }
                 factorizeLanes(lu, dValues.as<double>(), scenarioMajorLayout(capacity), laneMap.data(),
                            static_cast<int>(laneMap.size()), stream);
                 delays[round] = lu.fast->delayed;

@@ -157,6 +157,9 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     // The installed scenarios start their solve (SlotSolveState): solving, live, MAX_ITERATION_REACHED until they converge
     // or fail, at the first loop of OLF's sequence.
     ctx->slotState.start(nS, installedSlots(ctx));
+    if (ctx->batchedLu) {                                    // ...on the fast engine, whatever their slots held
+        forgetLaneRouting(*ctx->batchedLu, installedSlots(ctx));
+    }
     std::vector<char>& active = drv.active;
 
     BatchResult& res = drv.res;                         // res.x is sized when the states are copied back, at the end

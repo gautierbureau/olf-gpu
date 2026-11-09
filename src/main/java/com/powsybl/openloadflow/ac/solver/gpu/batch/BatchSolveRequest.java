@@ -34,6 +34,9 @@ import java.util.List;
  * DefaultNewtonRaphsonStoppingCriteria ({@code |F|2 < sqrt(convEpsPerEq^2 n)}) instead of the {@code tol}
  * floor.</li>
  * <li>{@code config}: the run's outer-loop parameterization.</li>
+ * <li>{@code reactiveLimitDecisions}: every scenario's result carries its reactive-limit decisions
+ * ({@link BatchScenarioResult#reactiveLimitDecisions()}), for a caller that hands them to OLF's network (the batched
+ * sensitivity analysis); off by default, the security analysis reads its results from the states alone.</li>
  * </ul>
  *
  * <p>{@link #of} gives the defaults: the GPU tolerance floor, both outer loops on, OLF's default outer-loop
@@ -46,7 +49,8 @@ public record BatchSolveRequest(LfNetwork network, double[] baseState, List<Batc
                                 TargetVector<AcVariableType, AcEquationType> targetVector,
                                 NewtonRaphsonParameters parameters, double tol, boolean distributedSlack,
                                 boolean reactiveLimits, double reactiveLimitTol, double slackDistTol,
-                                double convEpsPerEq, ReportNode reportNode, BatchConfig config) {
+                                double convEpsPerEq, ReportNode reportNode, BatchConfig config,
+                                boolean reactiveLimitDecisions) {
 
     public static BatchSolveRequest of(LfNetwork network, double[] baseState, List<BatchContingency> contingencies,
                                        EquationSystem<AcVariableType, AcEquationType> equationSystem,
@@ -54,31 +58,36 @@ public record BatchSolveRequest(LfNetwork network, double[] baseState, List<Batc
                                        NewtonRaphsonParameters parameters, ReportNode reportNode) {
         return new BatchSolveRequest(network, baseState, contingencies, equationSystem, targetVector, parameters,
                 GpuNewtonRaphson.GPU_TOLERANCE, true, true, GpuBatchedSecurityAnalysisSolver.DEFAULT_REACTIVE_LIMIT_TOL,
-                GpuBatchedSecurityAnalysisSolver.DEFAULT_SLACK_DIST_TOL, 0.0, reportNode, BatchConfig.DEVICE_DEFAULTS);
+                GpuBatchedSecurityAnalysisSolver.DEFAULT_SLACK_DIST_TOL, 0.0, reportNode, BatchConfig.DEVICE_DEFAULTS, false);
     }
 
     public BatchSolveRequest withTol(double tol) {
         return new BatchSolveRequest(network, baseState, contingencies, equationSystem, targetVector, parameters, tol,
-                distributedSlack, reactiveLimits, reactiveLimitTol, slackDistTol, convEpsPerEq, reportNode, config);
+                distributedSlack, reactiveLimits, reactiveLimitTol, slackDistTol, convEpsPerEq, reportNode, config, reactiveLimitDecisions);
     }
 
     public BatchSolveRequest withOuterLoops(boolean distributedSlack, boolean reactiveLimits) {
         return new BatchSolveRequest(network, baseState, contingencies, equationSystem, targetVector, parameters, tol,
-                distributedSlack, reactiveLimits, reactiveLimitTol, slackDistTol, convEpsPerEq, reportNode, config);
+                distributedSlack, reactiveLimits, reactiveLimitTol, slackDistTol, convEpsPerEq, reportNode, config, reactiveLimitDecisions);
     }
 
     public BatchSolveRequest withOuterLoopTolerances(double reactiveLimitTol, double slackDistTol) {
         return new BatchSolveRequest(network, baseState, contingencies, equationSystem, targetVector, parameters, tol,
-                distributedSlack, reactiveLimits, reactiveLimitTol, slackDistTol, convEpsPerEq, reportNode, config);
+                distributedSlack, reactiveLimits, reactiveLimitTol, slackDistTol, convEpsPerEq, reportNode, config, reactiveLimitDecisions);
     }
 
     public BatchSolveRequest withConvEpsPerEq(double convEpsPerEq) {
         return new BatchSolveRequest(network, baseState, contingencies, equationSystem, targetVector, parameters, tol,
-                distributedSlack, reactiveLimits, reactiveLimitTol, slackDistTol, convEpsPerEq, reportNode, config);
+                distributedSlack, reactiveLimits, reactiveLimitTol, slackDistTol, convEpsPerEq, reportNode, config, reactiveLimitDecisions);
     }
 
     public BatchSolveRequest withConfig(BatchConfig config) {
         return new BatchSolveRequest(network, baseState, contingencies, equationSystem, targetVector, parameters, tol,
-                distributedSlack, reactiveLimits, reactiveLimitTol, slackDistTol, convEpsPerEq, reportNode, config);
+                distributedSlack, reactiveLimits, reactiveLimitTol, slackDistTol, convEpsPerEq, reportNode, config, reactiveLimitDecisions);
+    }
+
+    public BatchSolveRequest withReactiveLimitDecisions(boolean reactiveLimitDecisions) {
+        return new BatchSolveRequest(network, baseState, contingencies, equationSystem, targetVector, parameters, tol,
+                distributedSlack, reactiveLimits, reactiveLimitTol, slackDistTol, convEpsPerEq, reportNode, config, reactiveLimitDecisions);
     }
 }

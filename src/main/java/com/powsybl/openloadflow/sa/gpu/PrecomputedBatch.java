@@ -28,8 +28,10 @@ import java.util.Map;
  * ({@code distributedActivePower}, pu — pre-distribution plus its own distributed-slack passes; absent where unknown)
  * the nums of the branches its AutomationSystem phase switched ({@code automationSystemSwitched} — absent where none),
  * the taps its outer loops moved from the base ({@code deviceTapMoves}, DeviceTapMoves' {branchNum, tap index,
- * rounding r1} triples — absent where none moved) and the target P its distribution left each participating generator
- * ({@code generatorTargets} — present for a contingency that has strategy pairs, under distributed slack).
+ * rounding r1} triples — absent where none moved), the target P its distribution left each participating generator
+ * ({@code generatorTargets} — present for a contingency that has strategy pairs, under distributed slack) and, when the
+ * precompute was asked for them, the reactive-limit decisions its solve ended with ({@code reactiveLimitDecisions} —
+ * absent where not read back, empty when not asked).
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
@@ -48,12 +50,13 @@ record PrecomputedBatch(Map<String, double[]> states, Map<String, int[]> islande
                         Map<String, Double> preDistributedActivePower, Map<String, Double> distributedActivePower,
                         Map<String, int[]> automationSystemSwitched,
                         Map<String, double[]> deviceTapMoves,
-                        Map<String, BatchScenarioResult.GeneratorTargets> generatorTargets) {
+                        Map<String, BatchScenarioResult.GeneratorTargets> generatorTargets,
+                        Map<String, BatchScenarioResult.ReactiveLimitDecisions> reactiveLimitDecisions) {
 
     /** Nothing precomputed — every contingency falls back to the sequential CPU path. */
     static PrecomputedBatch empty() {
         return new PrecomputedBatch(Map.of(), Map.of(), java.util.Set.of(), Map.of(), null, null, null, Map.of(), Map.of(), Map.of(), Map.of(),
-                Map.of());
+                Map.of(), Map.of());
     }
 
     /** True when the batch precompute reached the device solve (an equation system is captured). */

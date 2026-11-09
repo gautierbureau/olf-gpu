@@ -13,19 +13,8 @@ import com.powsybl.contingency.ContingencyContext;
 import com.powsybl.ieeecdf.converter.IeeeCdfNetworkFactory;
 import com.powsybl.iidm.network.Line;
 import com.powsybl.iidm.network.Network;
-import com.powsybl.loadflow.LoadFlowParameters;
-import com.powsybl.math.matrix.MatrixFactory;
 import com.powsybl.openloadflow.OpenLoadFlowParameters;
-import com.powsybl.openloadflow.ac.AcLoadFlowContext;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
-import com.powsybl.openloadflow.graph.GraphConnectivityFactory;
-import com.powsybl.openloadflow.network.LfBranch;
-import com.powsybl.openloadflow.network.LfBus;
-import com.powsybl.openloadflow.network.LfNetwork;
-import com.powsybl.openloadflow.network.impl.PropagatedContingency;
-import com.powsybl.openloadflow.sa.gpu.CpuPostContingencyBatches;
-import com.powsybl.openloadflow.sa.gpu.GpuPostContingencyBatch;
-import com.powsybl.openloadflow.sensi.AcSensitivityAnalysis;
 import com.powsybl.openloadflow.sensi.OpenSensitivityAnalysisProvider;
 import com.powsybl.sensitivity.SensitivityAnalysisParameters;
 import com.powsybl.sensitivity.SensitivityAnalysisProvider;
@@ -123,35 +112,6 @@ class GpuBatchedAcSensitivityAnalysisTest {
         return new Run(values, writer.getStateStatuses());
     }
 
-    /** OLF's provider whose AC analysis brings the contingencies from a batch OLF solves on the CPU. */
-    private static final class CpuBatchedProvider extends OpenSensitivityAnalysisProvider {
-
-        private final Set<String> leftOut;
-        private final boolean baseDecisions;
-        private CpuPostContingencyBatches.Made made;
-
-        CpuBatchedProvider(Set<String> leftOut, boolean baseDecisions) {
-            this.leftOut = leftOut;
-            this.baseDecisions = baseDecisions;
-        }
-
-        @Override
-        protected AcSensitivityAnalysis createAcSensitivityAnalysis(MatrixFactory matrixFactory,
-                                                                    GraphConnectivityFactory<LfBus, LfBranch> connectivityFactory,
-                                                                    SensitivityAnalysisParameters sensitivityAnalysisParameters) {
-            return new GpuBatchedAcSensitivityAnalysis(matrixFactory, connectivityFactory, sensitivityAnalysisParameters) {
-                @Override
-                protected GpuPostContingencyBatch solveBatch(Network network, LfNetwork lfNetwork, AcLoadFlowContext context,
-                                                             List<PropagatedContingency> contingencies, LoadFlowParameters lfParameters,
-                                                             OpenLoadFlowParameters contingencyLfParametersExt) {
-                    made = CpuPostContingencyBatches.solve(lfNetwork, context, contingencies, lfParameters, contingencyLfParametersExt,
-                            leftOut, baseDecisions);
-                    return made.batch();
-                }
-            };
-        }
-    }
-
     private static void assertSameSensitivities(Run expected, Run actual, double tolerance) {
         assertEquals(expected.values().keySet(), actual.values().keySet());
         for (Map.Entry<List<Integer>, SensitivityValue> entry : expected.values().entrySet()) {
@@ -184,8 +144,8 @@ class GpuBatchedAcSensitivityAnalysisTest {
         Run batched = run(provider, network(), parameters());
         assertEquals(contingencies().size(), GpuBatchedAcSensitivityAnalysis.BATCHED_CONTINGENCIES.sum() - before,
                 "every contingency brought from the batch");
-        assertTrue(provider.made.switchedToPq() > 0, "a contingency switches a generator to PQ");
-        assertTrue(provider.made.switchedBackToPv() > 0, "a contingency switches the condenser back to PV");
+        assertTrue(provider.made().switchedToPq() > 0, "a contingency switches a generator to PQ");
+        assertTrue(provider.made().switchedBackToPv() > 0, "a contingency switches the condenser back to PV");
         assertSameSensitivities(olf, batched, 1e-9);
     }
 

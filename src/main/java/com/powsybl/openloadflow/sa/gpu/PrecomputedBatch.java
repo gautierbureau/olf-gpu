@@ -72,12 +72,15 @@ record PrecomputedBatch(Map<String, double[]> states, Map<String, int[]> islande
                         /** The variables of the buses with device rows past OLF's (DeadBusRows), with those rows: a pair
                          *  bringing such a bus back finds its voltage there. */
                         Map<Variable<AcVariableType>, Integer> deadBusVariableRows,
-                        Map<String, BatchScenarioResult.ReactiveLimitDecisions> reactiveLimitDecisions) {
+                        Map<String, BatchScenarioResult.ReactiveLimitDecisions> reactiveLimitDecisions,
+                        /** Per converged contingency, the device's solutions of the sensitivity basis it was asked for
+                         *  (SensitivityBasisRequest); empty when not asked. */
+                        Map<String, double[]> sensitivityBases) {
 
     /** Nothing precomputed — every contingency falls back to the sequential CPU path. */
     static PrecomputedBatch empty() {
         return new PrecomputedBatch(Map.of(), Map.of(), java.util.Set.of(), java.util.Set.of(), Map.of(), null, null, null, Map.of(), Map.of(), Map.of(), Map.of(),
-                Map.of(), Map.of(), Map.of(), Map.of(), null, null, Map.of(), Map.of(), Map.of());
+                Map.of(), Map.of(), Map.of(), Map.of(), null, null, Map.of(), Map.of(), Map.of(), Map.of());
     }
 
     /** True when the device converged scenario {@code id}: its full state, or the rows the host answers it with. */

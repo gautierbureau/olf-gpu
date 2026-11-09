@@ -15,6 +15,8 @@ import com.powsybl.openloadflow.ac.AcLoadFlowParameters;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
+import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcDataCache;
+import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 import com.powsybl.openloadflow.ac.outerloop.AcHvdcAcEmulationLimitsOuterLoop;
 import com.powsybl.openloadflow.ac.outerloop.AcOuterLoop;
 import com.powsybl.openloadflow.ac.outerloop.DistributedSlackOuterLoop;
@@ -24,6 +26,7 @@ import com.powsybl.openloadflow.ac.outerloop.ReactiveLimitsOuterLoop;
 import com.powsybl.openloadflow.ac.outerloop.gpu.GpuReactiveLimitsOuterLoop;
 import com.powsybl.openloadflow.ac.solver.AcSolverUtil;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.BatchScenarioResult;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.SensitivityBasisRequest;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfContingency;
@@ -62,20 +65,27 @@ public final class GpuPostContingencyBatch implements AutoCloseable {
 
     private final String notBatchedReason;
 
+    private final String basisNotSolvedReason;
+
     private final GpuStateInjector.Remap remap = new GpuStateInjector.Remap();
 
-    private GpuPostContingencyBatch(PrecomputedBatch precomputed, String notBatchedReason) {
+    private GpuPostContingencyBatch(PrecomputedBatch precomputed, String notBatchedReason, String basisNotSolvedReason) {
         this.precomputed = Objects.requireNonNull(precomputed);
         this.notBatchedReason = notBatchedReason;
+        this.basisNotSolvedReason = basisNotSolvedReason;
     }
 
     private static GpuPostContingencyBatch notBatched(String reason) {
-        return new GpuPostContingencyBatch(PrecomputedBatch.empty(), reason);
+        return new GpuPostContingencyBatch(PrecomputedBatch.empty(), reason, reason);
     }
 
     /** A batch bringing what {@code precomputed} holds: the device's precompute, or states made otherwise in its layout. */
     static GpuPostContingencyBatch of(PrecomputedBatch precomputed) {
-        return new GpuPostContingencyBatch(precomputed, null);
+        return of(precomputed, null);
+    }
+
+    private static GpuPostContingencyBatch of(PrecomputedBatch precomputed, String basisNotSolvedReason) {
+        return new GpuPostContingencyBatch(precomputed, null, basisNotSolvedReason);
     }
 
     /**
@@ -88,6 +98,20 @@ public final class GpuPostContingencyBatch implements AutoCloseable {
     public static GpuPostContingencyBatch solve(Network network, LfNetwork lfNetwork, AcLoadFlowContext context,
                                                 List<PropagatedContingency> contingencies, LoadFlowParameters loadFlowParameters,
                                                 boolean startWithFrozenACEmulation, ReportNode reportNode) {
+        return solve(network, lfNetwork, context, contingencies, loadFlowParameters, startWithFrozenACEmulation, null, reportNode);
+    }
+
+    /**
+     * As above; with a {@code sensitivityBasis}, every converged contingency also has that basis solved on its Jacobian at
+     * its converged state ({@link #sensitivityBasis}), on a network the basis's stable rows describe: no zero-impedance
+     * coupler and no remote voltage control group (both move equations off a bus's own rows). On any other network the
+     * load flows are batched without it ({@link #sensitivityBasisNotSolvedReason}).
+     */
+    @SuppressWarnings("java:S107")
+    public static GpuPostContingencyBatch solve(Network network, LfNetwork lfNetwork, AcLoadFlowContext context,
+                                                List<PropagatedContingency> contingencies, LoadFlowParameters loadFlowParameters,
+                                                boolean startWithFrozenACEmulation, SensitivityBasisRequest sensitivityBasis,
+                                                ReportNode reportNode) {
         Objects.requireNonNull(network);
         Objects.requireNonNull(lfNetwork);
         Objects.requireNonNull(context);
@@ -108,13 +132,22 @@ public final class GpuPostContingencyBatch implements AutoCloseable {
             // analysis when the slack is distributed
             return notBatched("the contingencies' active power loss would not be distributed as the analysis distributes it");
         }
+        SensitivityBasisRequest basis = sensitivityBasis;
+        String basisNotSolvedReason = basis == null ? "no sensitivity basis was asked for" : null;
+        if (basis != null && GpuAcNewtonSolver.isAvailable()) {
+            GpuAcData data = GpuAcDataCache.extract(lfNetwork, context.getEquationSystem(), scope.batchConfig().distributedSlackParameters());
+            if (data.getZeroImpedanceCount() > 0 || data.getDistrQContributionCount() > 0) {
+                basisNotSolvedReason = "the network has zero-impedance couplers or remote voltage control groups";
+                basis = null;
+            }
+        }
         PrecomputedBatch precomputed = GpuBatchPrecomputer.precompute(network, lfNetwork, context, contingencies, List.of(), List.of(),
                 scope.distributedSlack(), scope.reactiveLimits(), scope.reactiveLimitTol(), scope.slackDistTol(), scope.convEpsPerEq(),
-                scope.batchConfig(), true, reportNode);
+                scope.batchConfig(), true, basis, reportNode);
         if (!precomputed.isReady()) {
             return notBatched("the device batch did not run (no GPU, or a network or contingency it does not cover)");
         }
-        return of(precomputed);
+        return of(precomputed, basisNotSolvedReason);
     }
 
     /**
@@ -193,6 +226,22 @@ public final class GpuPostContingencyBatch implements AutoCloseable {
         }
         AcSolverUtil.updateNetwork(network, es);
         return true;
+    }
+
+    /** The device's solutions of the sensitivity basis at a contingency's converged state, null when it has none. */
+    public double[] sensitivityBasis(String contingencyId) {
+        return precomputed.sensitivityBases().get(contingencyId);
+    }
+
+    /** The current variable row of each of {@code baseRows} (variable rows of the base state, the device's layout), -1 for
+     *  a variable the contingency's system no longer finds. */
+    public int[] currentRows(EquationSystem<AcVariableType, AcEquationType> es, int[] baseRows) {
+        return GpuStateInjector.currentRows(es, precomputed.baseVariableRows(), remap, baseRows);
+    }
+
+    /** Why no sensitivity basis was solved, empty when it was. */
+    public Optional<String> sensitivityBasisNotSolvedReason() {
+        return Optional.ofNullable(basisNotSolvedReason);
     }
 
     /** How many contingencies the device converged (whose states this batch can bring). */

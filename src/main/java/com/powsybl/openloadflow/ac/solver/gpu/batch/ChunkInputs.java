@@ -50,7 +50,9 @@ record ChunkInputs(List<BatchContingency> contingencies, ChunkInputs.BaseCase ba
     /** The run's Newton-Raphson parameters, whether its outer loops hold OLF's DistributedSlackOuterLoop and
      *  ReactiveLimitsOuterLoop, its convergence thresholds and the per-row criteria (null under UNIFORM_CRITERIA). */
     record SolveSettings(NewtonRaphsonParameters parameters, boolean distributedSlackOuterLoop, boolean reactiveLimitsOuterLoop,
-                         double tol, double reactiveLimitTol, double slackDistTol, double convEpsPerEq, double[][] rowCriteria) {
+                         double tol, double reactiveLimitTol, double slackDistTol, double convEpsPerEq, double[][] rowCriteria,
+                         /** The sensitivity basis every converged scenario solves, null for none (BatchSolveRequest). */
+                         SensitivityBasisRequest sensitivityBasis) {
     }
 
     /** The run's driver phases, its AC-emulation HVDC controllers (null without the HVDC loops), the
@@ -73,11 +75,13 @@ record ChunkInputs(List<BatchContingency> contingencies, ChunkInputs.BaseCase ba
      *  AutomationSystem phase switched (null = none), the taps the outer loops moved (DeviceTapMoves, null = none),
      *  each distributed-slack generator's final move (null = not read), the strategy pairs left unsolved because OLF
      *  never applies them (StateHandback#pairMayApply) and, when the request asks for them (the array non-null), the
-     *  scenario's reactive-limit decisions (null = none read back). */
+     *  scenario's reactive-limit decisions (null = none read back) and its sensitivity basis solutions (null = not
+     *  solved). */
     record ResultSinks(double[][] resultsByIndex, double[] preDistributedByIndex, double[] distributedByIndex,
                        int[][] automationSystemSwitchedByIndex, double[][] deviceTapMovesByIndex,
                        double[][] distributedSlackGeneratorMovesByIndex, boolean[] notAppliedByIndex,
-                       BatchScenarioResult.ReactiveLimitDecisions[] reactiveLimitDecisionsByIndex) {
+                       BatchScenarioResult.ReactiveLimitDecisions[] reactiveLimitDecisionsByIndex,
+                       double[][] sensitivityBasisByIndex) {
     }
 
     /** The same inputs from another base state. */

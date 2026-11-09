@@ -732,8 +732,10 @@ final class GpuBatchChunkSolver {
         // The chunk's per-slot tables and the run's loops on the device, the anchors of the slack distribution.
         private void uploadChunk() {
             monitoringVoltageActive = phases.monitoring() != null && !phases.monitoring().isEmpty();
+            // ...and a caller that hands each scenario's PV/PQ decisions to OLF's network (the batched sensitivity
+            // analysis) reads them back too
             readReactiveLimitsFinalState = (!pairPhase && !pairIdxList.isEmpty() || monitoringVoltageActive
-                    || GpuTrace.RL_TRACE.isOn()) && nReactiveLimitEntries > 0;
+                    || GpuTrace.RL_TRACE.isOn() || in.sinks().reactiveLimitDecisionsByIndex() != null) && nReactiveLimitEntries > 0;
             cl.upload(handle, gpuData);
             // The two HVDC AC-emulation loops run as DRIVER PHASES, in OLF's own position
             // between DistributedSlack and ReactiveLimits. Running them instead as host
@@ -922,6 +924,7 @@ final class GpuBatchChunkSolver {
                     hasHvdcDriverLoops, monitoringVoltageInKernel);
             tOrch0 = System.nanoTime();
             captureForStrategies(run, chunk, handle, chunkResults, harvested, harvestedCount, reactiveLimitsFinalState, pairIdxList);
+            exportReactiveLimitDecisions(run, chunk, harvested, harvestedCount);
             if (!chunk.pairPhase()) {
                 // ...and the generator moves of a contingency with strategy pairs for the host too: a strategy
                 // condition on a generator's active power reads the target OLF's post-contingency load flow leaves
@@ -2097,6 +2100,25 @@ final class GpuBatchChunkSolver {
                 }
                 System.err.printf("GPU_RL ctg=%s switchedThisSolve=%d switchedToPqTotal=%d%s%n",
                         contingencies.get(harvested[s].index()).contingencyId(), switched, switchedToPq, ids);
+            }
+        }
+    }
+
+    /**
+     * Each harvested contingency's reactive-limit decisions into the run's result sink, when the request asked for them:
+     * the slices {@link #captureForStrategies} has just taken (the same arrays, not copies). A pair phase exports
+     * nothing, its scenarios are no contingency's own.
+     */
+    private static void exportReactiveLimitDecisions(RunView run, ChunkView chunk, SlotOccupant[] harvested, int harvestedCount) {
+        BatchScenarioResult.ReactiveLimitDecisions[] sink = run.in().sinks().reactiveLimitDecisionsByIndex();
+        if (sink == null || chunk.pairPhase()) {
+            return;
+        }
+        for (int s = 0; s < harvestedCount; s++) {
+            int idx = harvested[s].index();
+            int[] finalState = run.captures().reactiveLimitsStateByIndex.get(idx);
+            if (finalState != null) {
+                sink[idx] = new BatchScenarioResult.ReactiveLimitDecisions(finalState, run.captures().reactiveLimitTargetQByIndex.get(idx));
             }
         }
     }

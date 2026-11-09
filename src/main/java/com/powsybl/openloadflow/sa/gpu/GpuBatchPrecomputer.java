@@ -166,6 +166,7 @@ final class GpuBatchPrecomputer {
             Map<String, Double> preDistributed = new HashMap<>();
             Map<String, Double> distributed = new HashMap<>();
             Map<String, int[]> automationSystemSwitched = new HashMap<>();
+            Map<String, double[]> deviceTapMoves = new HashMap<>();
             for (BatchScenarioResult r : results) {
                 GpuBatchedAcSecurityAnalysis.LAST_DEVICE_FINAL_MISMATCH.put(r.contingencyId(), r.finalMismatch());
                 if (GpuTrace.QUALIFY_TRACE.isOn()) {
@@ -184,6 +185,9 @@ final class GpuBatchPrecomputer {
                     }
                     if (r.automationSystemSwitchedBranchNums().length > 0) {
                         automationSystemSwitched.put(r.contingencyId(), r.automationSystemSwitchedBranchNums());
+                    }
+                    if (r.deviceTapMoves().length > 0) {
+                        deviceTapMoves.put(r.contingencyId(), r.deviceTapMoves());
                     }
                 } else if (r.convergenceStatus() == GpuAcSolverStatus.MAX_ITERATION_REACHED
                         && r.contingencyId().indexOf(BatchContingency.STRATEGY_KEY_SEP) < 0) {
@@ -220,7 +224,7 @@ final class GpuBatchPrecomputer {
                     + " census=" + GpuBatchScopeCensus.snapshot());
 
             return new PrecomputedBatch(states, islandedBuses, exhausted, baseVariableRows, es, screenData, screenMapper,
-                    preDistributed, distributed, automationSystemSwitched);
+                    preDistributed, distributed, automationSystemSwitched, deviceTapMoves);
         } catch (Exception e) {
             // full stack at WARN: a swallowed exception here silently un-accelerates the whole run —
             // the 2026-09-06 bridge AIOOBE hid behind the message-only log for days

@@ -198,6 +198,25 @@ class GpuSaTransformerControlTest extends AbstractGpuSaTest {
         assertIncrementalTvcTapMovesInKernel();
     }
 
+    /** The same post-contingency TAP MOVE, seen in the FLOWS the result reports, not only in the voltages: the device
+     *  solves with the moved tap, and the host evaluates the reported flows (and confirms the violations) from OLF's
+     *  branch model, which must then carry the tap the device chose. Every branch, both sides, P, Q and I, against
+     *  the CPU on both contingencies (the strong-line outage moves T2wT from tap 2 to 3). */
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.EnumSource(value = com.powsybl.openloadflow.OpenLoadFlowParameters.TransformerVoltageControlMode.class,
+            names = {"INCREMENTAL_VOLTAGE_CONTROL", "AFTER_GENERATOR_VOLTAGE_CONTROL"})
+    void deviceTapMoveIsInTheReportedBranchFlows(com.powsybl.openloadflow.OpenLoadFlowParameters.TransformerVoltageControlMode mode) {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = incrementalTvcTapMoveNetwork();
+        // the fixture's steps 2 and 3 differ by rho only: give step 3 its own impedance, so the move changes the
+        // branch model, not only its ratio
+        network.getTwoWindingsTransformer("T2wT").getRatioTapChanger().getStep(3).setR(1.0).setX(10.0);
+        com.powsybl.loadflow.LoadFlowParameters lfp = incrementalTvcParameters();
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp).setTransformerVoltageControlMode(mode);
+        assertFlowsMatchCpu(network, incrementalTvcTapMoveContingencies(network), lfp, 2);
+    }
+
     /** INCREMENTAL mode over a SHARED 3-member group (gate lifted 2026-09-07): the loop keeps every
      *  branch VC disabled (no DISTR_RHO ever activates), so the shared group is purely OLF's
      *  one-tap-at-a-time round-robin over the merged controllers (adjustWithSeveralControllers) —

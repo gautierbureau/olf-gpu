@@ -99,6 +99,13 @@ final class GpuSaRunState {
     /** The branches the current contingency's automation systems switched on the device, given to the network with its
      *  state and restored with its own elements. */
     List<LfBranch> automationSystemSwitched = List.of();
+    /** The base tap of every branch a device tap move changed during the current contingency, its own and its strategy
+     *  pairs' (GpuDeviceTaps): each scenario's moves are from the base, so a branch moved earlier and not listed goes back
+     *  to its base tap, and the restores put every one of them back. */
+    final Map<LfBranch, Integer> deviceTapBase = new java.util.LinkedHashMap<>();
+    /** The branches the current contingency's device tap moves changed: the screen read them at their base tap, so they
+     *  are scanned in full on the host and their flows refreshed. */
+    List<LfBranch> deviceRetapped = List.of();
     /** The branches the last operator strategy retapped, when it was answered on the device with tap actions only (a
      *  targeted post-contingency restore suffices); null otherwise (OLF's full restore). */
     List<LfBranch> strategyRetappedOnly;

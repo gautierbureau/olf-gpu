@@ -56,6 +56,66 @@ class GpuSaPhaseControlTest extends AbstractGpuSaTest {
         assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
     }
 
+    /** A PHASE tap the device's loops move after an outage, seen in the reported FLOWS, not only in the voltages
+     *  (assertFlowsMatchCpu): PS1's fixture tap changer has three taps, too coarse for any post-contingency move, so it
+     *  gets 21 steps of one degree, each with its own impedance — a move changes the angle and the branch model. The
+     *  incremental loop (a flow controller) moves PS1 from tap index 17 to 15 after L1. (The continuous loop is not here:
+     *  on this tap changer its device solve ends 0.54 kV from OLF's after L1_BIS — tasks.md #86.) */
+    @Test
+    void devicePhaseTapMoveIsInTheReportedBranchFlows() {
+        Network network = com.powsybl.openloadflow.network.PhaseControlFactory.createNetworkWithT2wt();
+        com.powsybl.iidm.network.TwoWindingsTransformer ps1 = network.getTwoWindingsTransformer("PS1");
+        com.powsybl.iidm.network.PhaseTapChangerAdder ptc = ps1.newPhaseTapChanger().setLowTapPosition(-10).setTapPosition(0)
+                .setRegulationMode(com.powsybl.iidm.network.PhaseTapChanger.RegulationMode.ACTIVE_POWER_CONTROL)
+                .setTargetDeadband(1).setRegulating(true).setRegulationTerminal(ps1.getTerminal1()).setRegulationValue(83);
+        for (int t = -10; t <= 10; t++) {
+            ptc.beginStep().setAlpha(t).setRho(1.0).setR(0.3 * (t + 11)).setX(3.0 * (t + 11)).setG(0).setB(0).endStep();
+        }
+        ptc.add();
+        com.powsybl.iidm.network.Line l1 = network.getLine("L1");
+        network.newLine().setId("L1_BIS")
+                .setVoltageLevel1(l1.getTerminal1().getVoltageLevel().getId()).setBus1(l1.getTerminal1().getBusBreakerView().getBus().getId())
+                .setVoltageLevel2(l1.getTerminal2().getVoltageLevel().getId()).setBus2(l1.getTerminal2().getBusBreakerView().getBus().getId())
+                .setR(l1.getR() * 2).setX(l1.getX() * 2)
+                .setG1(l1.getG1()).setB1(l1.getB1()).setG2(l1.getG2()).setB2(l1.getB2()).add();
+        List<Contingency> ctgs = List.of(new Contingency("L1_BIS", new BranchContingency("L1_BIS")),
+                new Contingency("L1", new BranchContingency("L1")));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setPhaseShifterRegulationOn(true).setDistributedSlack(true).setUseReactiveLimits(true);
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp).setPhaseShifterControlMode(
+                com.powsybl.openloadflow.OpenLoadFlowParameters.PhaseShifterControlMode.INCREMENTAL);
+        assertFlowsMatchCpu(network, ctgs, lfp, 2);
+    }
+
+    /** The same for the reactive-power control's RHO taps (a flow controller on T2wT): 21 steps from 0.7 to 1.3, each
+     *  with its own impedance: the base load flow lands on tap 14 and both outages move it to 15. */
+    @Test
+    void deviceReactivePowerControlTapMoveIsInTheReportedBranchFlows() {
+        Network network = com.powsybl.openloadflow.network.VoltageControlNetworkFactory.createNetworkWithT2wt();
+        com.powsybl.iidm.network.TwoWindingsTransformer t2wt = network.getTwoWindingsTransformer("T2wT");
+        com.powsybl.iidm.network.RatioTapChangerAdder rtc = t2wt.newRatioTapChanger().setLowTapPosition(-10).setTapPosition(0)
+                .setLoadTapChangingCapabilities(true).setTargetDeadband(0).setRegulating(true)
+                .setRegulationMode(com.powsybl.iidm.network.RatioTapChanger.RegulationMode.REACTIVE_POWER)
+                .setRegulationTerminal(t2wt.getTerminal1()).setRegulationValue(-0.55);
+        for (int t = -10; t <= 10; t++) {
+            rtc.beginStep().setRho(1.0 + 0.03 * t).setR(0.3 * (t + 11)).setX(3.0 * (t + 11)).setG(0).setB(0).endStep();
+        }
+        rtc.add();
+        com.powsybl.iidm.network.Line l0 = network.getLines().iterator().next();
+        String bis = l0.getId() + "_BIS";
+        network.newLine().setId(bis)
+                .setVoltageLevel1(l0.getTerminal1().getVoltageLevel().getId()).setBus1(l0.getTerminal1().getBusBreakerView().getBus().getId())
+                .setVoltageLevel2(l0.getTerminal2().getVoltageLevel().getId()).setBus2(l0.getTerminal2().getBusBreakerView().getBus().getId())
+                .setR(l0.getR() * 2).setX(l0.getX() * 2)
+                .setG1(l0.getG1()).setB1(l0.getB1()).setG2(l0.getG2()).setB2(l0.getB2()).add();
+        List<Contingency> ctgs = List.of(new Contingency(bis, new BranchContingency(bis)),
+                new Contingency(l0.getId(), new BranchContingency(l0.getId())));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setTransformerVoltageControlOn(false).setDistributedSlack(true).setUseReactiveLimits(true);
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp).setTransformerReactivePowerControl(true);
+        assertFlowsMatchCpu(network, ctgs, lfp, 2);
+    }
+
     /** DEVICE-mode IncrementalTransformerReactivePowerControl: rho taps drive the controlled branch's Q
      *  via in-kernel dQ/drho sensitivities + OLF's own flow terms; GPU SA == CPU SA at 1e-12. */
     @Test

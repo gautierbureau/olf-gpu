@@ -63,10 +63,10 @@ record ChunkInputs(List<BatchContingency> contingencies, ChunkInputs.BaseCase ba
     }
 
     /** Where the results go, per contingency index: the result row (null = route to the CPU), the replayed loss
-     *  pre-distribution, the total distributed active power (pu, NaN = unknown) and the nums of the branches the
-     *  AutomationSystem phase switched (null = none). */
+     *  pre-distribution, the total distributed active power (pu, NaN = unknown), the nums of the branches the
+     *  AutomationSystem phase switched (null = none) and the taps the outer loops moved (DeviceTapMoves, null = none). */
     record ResultSinks(double[][] resultsByIndex, double[] preDistributedByIndex, double[] distributedByIndex,
-                       int[][] automationSystemSwitchedByIndex) {
+                       int[][] automationSystemSwitchedByIndex, double[][] deviceTapMovesByIndex) {
     }
 
     /** The same inputs from another base state. */

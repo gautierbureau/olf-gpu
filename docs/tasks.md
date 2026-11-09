@@ -11,6 +11,26 @@ complete. Keep the numbering: it is cited in commit messages.
 
 ## Open
 
+### #86 — OPEN: the device's continuous phase control ends elsewhere than OLF after an outage (2026-11-09)
+
+Found while proving the device tap write-back (branch `fix-device-tap-moves`): the existing phase-control fixtures
+never move a tap after a contingency (PS1 has three taps; OLF keeps tap 1 for every regulation target from 40 to
+120 MW), so PS1's phase tap changer was rebuilt with 21 steps of one degree (alpha -10..10, R = 0.3·(t+11) %,
+X = 3·(t+11) %, rho 1), ACTIVE_POWER_CONTROL at 83 MW with a 1 MW deadband, plus the `L1_BIS` clone of `L1`.
+
+- INCREMENTAL (the device's flow controllers): the device keeps PS1 on its base tap index 17 after `L1_BIS` and moves it
+  to 15 after `L1`, and every bus voltage and branch flow matches OLF at 1e-12 kV / 1e-9 MW
+  (`GpuSaPhaseControlTest.devicePhaseTapMoveIsInTheReportedBranchFlows`).
+- CONTINUOUS_WITH_DISCRETISATION (the device's continuous phase control): from base tap index 16 the device rounds to 17
+  after `L1_BIS` and 15 after `L1`, and after `L1_BIS` bus B2 ends at **383.1265 kV against OLF's 383.6706 kV** — the
+  device's own solved state, independent of the write-back (the same with it disabled).
+
+Reproduce with that test's body in CONTINUOUS_WITH_DISCRETISATION mode (careful: `@EnumSource` runs the modes in the
+enum's declaration order, CONTINUOUS_WITH_DISCRETISATION first, whatever order `names` lists them in). Next: put OLF's
+PhaseControlOuterLoop sequence (the continuous a1 solve, the rounding, the re-solve on the rounded tap) beside the
+device's for `L1_BIS` — a rounding to a different tap, or the re-solve on a tap whose impedance differs from the
+continuous solve's.
+
 ### #64 — FIXED: a re-homed member's reactive limit read from the wrong row (2026-09-30)
 
 Worst distributed-active-power difference **1.328 MW -> 7.5e-09 MW** on the contingency, and

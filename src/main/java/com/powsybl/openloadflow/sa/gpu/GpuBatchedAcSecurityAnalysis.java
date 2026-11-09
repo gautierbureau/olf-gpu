@@ -206,12 +206,16 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         run.deviceStateInjectedFor = null;
         List<LfBranch> automationSystemSwitched = run.automationSystemSwitched;
         run.automationSystemSwitched = List.of();
+        List<LfBranch> deviceRetapped = new java.util.ArrayList<>(run.deviceTapBase.keySet());
+        run.deviceTapBase.clear();
+        run.deviceRetapped = List.of();
         if (targeted) {
             java.util.Set<LfBus> buses = touchedBuses(network, lfContingency, run);
             java.util.Collection<LfBranch> branches = lfContingency.getDisabledNetwork().getBranchesStatus().keySet();
-            if (!automationSystemSwitched.isEmpty()) {
+            if (!automationSystemSwitched.isEmpty() || !deviceRetapped.isEmpty()) {
                 branches = new java.util.ArrayList<>(branches);
                 branches.addAll(automationSystemSwitched);
+                branches.addAll(deviceRetapped);              // back on their base tap
             }
             // the voltage loop over every bus is redundant when the next contingency is device-answered: its injection
             // writes every live bus (restoreStaleVoltages covers the rest)
@@ -355,6 +359,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         }
         run.sideOpened.forEach(branch -> nums.set(branch.getNum()));
         run.automationSystemSwitched.forEach(branch -> nums.set(branch.getNum()));
+        run.deviceRetapped.forEach(branch -> nums.set(branch.getNum()));
         return nums.stream().toArray();
     }
 
@@ -422,10 +427,16 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         return sideOpened != null ? sideOpened : List.of();
     }
 
-    /** The current contingency's side-opened branches as limit-table indices (null when none has limits): their
-     *  screen records are dropped and the host scans them in full, in table order. */
+    /** The current contingency's side-opened and device-retapped branches as limit-table indices (null when none has
+     *  limits): the screen read them closed and at their base tap, so their records are dropped and the host scans them
+     *  in full, in table order. */
     private static java.util.BitSet sideOpenedTableIndices(GpuSaRunState run, LfNetwork network) {
-        return tableIndices(run, network, run.sideOpened);
+        if (run.deviceRetapped.isEmpty()) {
+            return tableIndices(run, network, run.sideOpened);
+        }
+        java.util.Set<LfBranch> scanInFull = new java.util.LinkedHashSet<>(run.sideOpened);
+        scanInFull.addAll(run.deviceRetapped);
+        return tableIndices(run, network, scanInFull);
     }
 
     /** These branches as limit-table indices (null when none has limits): the host scans them in full, in table order,
@@ -822,6 +833,15 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                 .map(lfActionById::get)
                 .filter(Objects::nonNull)
                 .toList();
+        // the base tap of each branch a tap action retaps, before the action: the device's tap moves are from the base
+        java.util.Map<LfBranch, Integer> actionBaseTaps = new java.util.HashMap<>();
+        for (com.powsybl.openloadflow.network.action.LfAction lfAction : lfActions) {
+            if (lfAction instanceof com.powsybl.openloadflow.network.action.AbstractLfTapChangerAction<?> tapAction
+                    && tapAction.getChange() != null) {
+                LfBranch branch = tapAction.getChange().getBranch();
+                actionBaseTaps.put(branch, runState.get().deviceTapBase.getOrDefault(branch, branch.getPiModel().getTapPosition()));
+            }
+        }
         if (lfActions.stream().anyMatch(a -> a instanceof com.powsybl.openloadflow.network.action.AbstractLfBranchAction<?>)) {
             com.powsybl.openloadflow.network.action.LfActionUtils.applyListOfActions(lfActions, network, lfContingency, networkParameters);
         } else {
@@ -851,6 +871,11 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         if (contingency.getId().equals(runState.get().deviceStateInjectedFor)) {
             scanInFull.addAll(runState.get().automationSystemSwitched);
         }
+        // the taps the pair's outer loops left (from the base, like its parent's): a branch the actions retapped and the
+        // loops did not move keeps the action's tap
+        List<LfBranch> pairRetapped = GpuDeviceTaps.apply(network, precomputed.deviceTapMoves().get(scId),
+                runState.get().deviceTapBase, actionBaseTaps, actionBaseTaps.keySet());
+        scanInFull.addAll(pairRetapped);
         // only the flows the screened detection reads are refreshed, as for a contingency (flowReadSet)
         GpuStateInjector.injectState(precomputed.equationSystem(), precomputed.baseVariableRows(), state,
                 runState.get().remap, strategyFlowReadSet(runState.get(), scId, scanInFull));
@@ -875,6 +900,9 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
             if (tapAction.getChange() != null) {
                 retapped.add(tapAction.getChange().getBranch());
             }
+        }
+        if (retapped != null) {
+            retapped.addAll(pairRetapped);                    // back to the post-contingency taps
         }
         runState.get().strategyRetappedOnly = retapped;
         return new OperatorStrategyResult(operatorStrategy,
@@ -962,6 +990,9 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         long tInj = System.nanoTime();
         runState.get().deviceStateInjectedFor = contingency.getId();
         runState.get().sideOpened = sideOpenedBranches(lfContingency);
+        // the taps the device's outer loops left: before the state, whose flows are evaluated with them
+        runState.get().deviceRetapped = GpuDeviceTaps.apply(network, precomputed.deviceTapMoves().get(contingency.getId()),
+                runState.get().deviceTapBase, Map.of(), java.util.Set.of());
         // before the state: the injection refreshes the flows of the enabled branches only
         runState.get().automationSystemSwitched = applyAutomationSystemSwitches(network,
                 precomputed.automationSystemSwitched().get(contingency.getId()));

@@ -192,6 +192,7 @@ final class GpuBatchChunkSolver {
         double[] preDistributedByIndex = in.sinks().preDistributedByIndex();
         double[] distributedByIndex = in.sinks().distributedByIndex();
         int[][] automationSystemSwitchedByIndex = in.sinks().automationSystemSwitchedByIndex();
+        double[][] deviceTapMovesByIndex = in.sinks().deviceTapMovesByIndex();
         BatchConfig config = in.config();
         int nb = batchedIndices.size();
         int nChunks = (nb + chunkCap - 1) / chunkCap;
@@ -716,6 +717,13 @@ final class GpuBatchChunkSolver {
                                 int[] switched = GpuAutomationSystemOuterLoop.switchedBranchNums(in.phases().automationSystem(), operatedDisabled, s);
                                 automationSystemSwitchedByIndex[harvested[s].index()] = switched.length > 0 ? switched : null;
                             }
+                        }
+                    }
+                    // the taps the outer loops left on each scenario's transformers: the host evaluates its flows with them
+                    double[][] tapMoves = DeviceTapMoves.read(in.phases().phases(), handle, harvestedCount);
+                    if (tapMoves != null) {
+                        for (int s = 0; s < harvestedCount; s++) {
+                            deviceTapMovesByIndex[harvested[s].index()] = tapMoves[s];
                         }
                     }
                     if (in.phases().areaInterchangeControlWithAreas() && BatchReadbackNative.readBatchSolveCount(handle) - solveCountBefore == 1) {

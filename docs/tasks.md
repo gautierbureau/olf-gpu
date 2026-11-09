@@ -1475,7 +1475,9 @@ when few scenarios are active). Worth it only if a consumer insists on eps=1e-4 
 Keep the fixed-iter bench and the SA tests at baseline for any such work.
 
 ### #40 — Batched transposed solve (adjoint/VJP) — ONE primitive, THREE consumers
-Not started. The single highest-leverage missing capability on the batched device path,
+In progress: the cuDSS workaround's steps 1a/1b done 2026-07-22; the transposed solve on our own batched LU written
+2026-11-09, verified on the host, NOT yet run on a device (see "On our own batched LU" below). The single
+highest-leverage missing capability on the batched device path,
 because three separate roadmap items all need the *same* thing: **a transposed solve against
 the per-scenario cuDSS factorization we have already computed**, without shipping Jacobians
 back to the host.
@@ -1770,6 +1772,46 @@ and `GpuAdjointOnRealJacobianTest` now passes on a real ieee14 Jacobian:
 **The orientation claim above is CONFIRMED by measurement, not inverted:** powsybl's CSC arrays read
 as CSR are already one transpose, that is the matrix KLU factorizes, so OLF's plain `solve()` IS the
 adjoint direction and our single GPU transpose lands on it.
+
+**On our own batched LU the second direction is free (2026-11-09).** The route kept above for "if cuDSS
+exposes the raw `L`/`U` factors" is open on our own LU (`linearSolver` BATCHED_LU, mode-7 contexts):
+`solveLanesTransposed` (`native/cuda/lu/batched_lu.cuh`) solves `A_sᵀ x = b` for every lane of the last
+factorization, on the SAME factors, each lane on the engine that factorized it: no second factorization, no explicit
+`Jᵀ`. That is the `klu_tsolve` parity this entry asks of cuDSS.
+- **How** (`native/cuda/lu/transposed_solve.cuh`): the transpose of each operation of the plain solve, in reverse
+  order. Fast engine: `Uᵀ` forward then `Lᵀ` backward, each row reading its COLUMN of the factors (column lists,
+  `buildScalarLuColumns`), on the plain solve's levels reversed. They are longest-path levels, so the reversal is
+  race-free and exactly as deep (ieee300: 55 + 54 levels either way). Pivoting engine: an up pass (the descendants'
+  U panel columns, the lane's column order `Q_s`, `U_sᵀ`) and a down pass (the supernode's own L panel, `L_sᵀ`, the
+  row order `P_s`), i.e. the plain solve with L/U and rows/columns swapped. The right-hand side goes in through the
+  column positions and the solution out through the row positions. Long columns split over warps as long rows do.
+- **Cost to runs that never call it:** none on the device. The column lists and U runs upload on the first transposed
+  solve; the pivoting plan keeps one more int per forward run on the host (`forwardRunUpper`).
+- **Verified WITHOUT a GPU** (the session that wrote it had neither a GPU nor nvcc): `tools/run_lu_host_check.sh`
+  compiles the real plans and the real per-row / per-supernode bodies with g++, factorizes with a host port of the
+  factor kernels, and checks the schedules' race-freedom separately. 306 checks, 0 failures. Worst backward error of
+  the transposed solve: 5.3e-14 (fast engine) and 8.0e-15 (pivoting engine), over Jacobian-shaped random patterns,
+  weak diagonals, zero-diagonal dense blocks, the coupler line groups on learned pivot-delay orders, hub chains, and
+  converged IEEE 14-300 Jacobians (4e-18 to 2.5e-17 there, as good as the plain solve on the same factors). Ten
+  deliberate bugs all fail it. The input/output permutation swap fails ONLY on the systems whose rows were moved so
+  that the row and column orders differ: every symmetric-order system passes with that bug, so keep those systems.
+  The kernels were type-checked with clang's CUDA front end (sm_86, against a stub of the CUDA/cuDSS headers); they
+  have NOT been compiled with nvcc or run.
+- **GPU tests (gated, NOT YET RUN on a device):** `GpuBatchedLuTest#transposedSolveOnTheFastEngineFactors`,
+  `#transposedSolveOnThePivotingEngineFactors`, `#longColumnsSplitOverSeveralWarpsInTheTransposedSolve`, through
+  `BatchedLuNative.factorizeAndSolveTransposed` (one factorization, both directions).
+- **Gotcha met on the way, the 1b trap again:** OLF's CPU Jacobian dumped as it is pairs equations and variables in
+  their own sorted orders, so many diagonals are structural zeros and both engines distrust it (ieee118: 48 troubled
+  pivots on the fast engine, 2 clamped on the pivoting one). The GPU structure's stable pairing (a bus's P equation
+  on its PHI row, its Q or V target on its V row) puts the identity rows on the diagonal, and the fast engine then
+  trusts every IEEE case.
+- **Still open on this path:** (a) run the gated tests and time the transposed solve against the plain one on a
+  device: the same launches, but column-gathered reads, so measure; (b) the seam on the batch context, step 3 below:
+  this solve for a BATCHED_LU context, transpose-and-refactorize for a cuDSS one; (c) refinement on coupler
+  structures: the forward refines there (`solveNewtonStep`), and the transposed solve needs the residual `c − Aᵀy`,
+  i.e. a transposed SpMV (the counting-sort map of `transposed_solve_jni.cu`, once per pattern), not built yet;
+  (d) the singleton substitution (one-variable equations solved exactly) does not carry over: a singleton row of J is
+  a singleton column of Jᵀ.
 
 > **Pivoting is a hard prerequisite for any GPU solve on a RAW Jacobian.** 1b failed at 7.164e-03 for
 > a week on a misdiagnosis ("stale extraction"). The extraction was always correct — a dense solve

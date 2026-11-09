@@ -511,8 +511,10 @@ final class GpuBatchChunkSolver {
                                 hvdcStatus, rs.disabledMask);
                     }
                     boolean monitoringVoltageActive = phases.monitoring() != null && !phases.monitoring().isEmpty();
+                    // ...and a caller that hands each scenario's PV/PQ decisions to OLF's network (the batched
+                    // sensitivity analysis) reads them back too
                     boolean readReactiveLimitsFinalState = (!pairPhase && !pairIdxList.isEmpty() || monitoringVoltageActive
-                            || GpuTrace.RL_TRACE.isOn()) && nReactiveLimitEntries > 0;
+                            || GpuTrace.RL_TRACE.isOn() || in.sinks().reactiveLimitDecisionsByIndex() != null) && nReactiveLimitEntries > 0;
                     cl.upload(handle, gpuData);
                     // The two HVDC AC-emulation loops run as DRIVER PHASES, in OLF's own position
                     // between DistributedSlack and ReactiveLimits. Running them instead as host
@@ -699,6 +701,7 @@ final class GpuBatchChunkSolver {
                             }
                         }
                     }
+                    exportReactiveLimitDecisions(run, chunk, harvested, harvestedCount);
                     // HOST ORCHESTRATORS — in OLF's DefaultAcOuterLoopConfig order.
                     // In-kernel: DS(0), HVDC(1,2), Monitoring(5), RL(6) already ran in the main solve.
                     // Post-RL host orchestrators below: SVC(4), Monitoring(5), Phase(7), TVC(8), TRPC(9), Shunt(10).
@@ -1722,6 +1725,25 @@ final class GpuBatchChunkSolver {
                 }
                 System.err.printf("GPU_RL ctg=%s switchedThisSolve=%d switchedToPqTotal=%d%s%n",
                         contingencies.get(harvested[s].index()).contingencyId(), switched, switchedToPq, ids);
+            }
+        }
+    }
+
+    /**
+     * Each harvested contingency's reactive-limit decisions into the run's result sink, when the request asked for them:
+     * the slices {@link #captureForStrategies} has just taken (the same arrays, not copies). A pair phase exports
+     * nothing, its scenarios are no contingency's own.
+     */
+    private static void exportReactiveLimitDecisions(RunView run, ChunkView chunk, SlotOccupant[] harvested, int harvestedCount) {
+        BatchScenarioResult.ReactiveLimitDecisions[] sink = run.in().sinks().reactiveLimitDecisionsByIndex();
+        if (sink == null || chunk.pairPhase()) {
+            return;
+        }
+        for (int s = 0; s < harvestedCount; s++) {
+            int idx = harvested[s].index();
+            int[] finalState = run.captures().reactiveLimitsStateByIndex.get(idx);
+            if (finalState != null) {
+                sink[idx] = new BatchScenarioResult.ReactiveLimitDecisions(finalState, run.captures().reactiveLimitTargetQByIndex.get(idx));
             }
         }
     }

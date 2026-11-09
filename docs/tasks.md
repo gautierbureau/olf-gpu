@@ -345,19 +345,48 @@ first, on the current stack; post-action states once olf-gpu moves to OLF main.
   run uses), `beforeContingencySimulations` (base solved and written, contingency parameters applied, before the first
   contingency: where a batch is prepared), `runPostContingencyLoadFlow` (a contingency's state) and `solveFactorsStates`
   (the factor groups' right-hand sides on a state's Jacobian, the base case or a contingency's).
-- **M2 - next: the post-contingency load flows as one device batch.** `GpuBatchedAcSensitivityAnalysis` (a subclass of
-  `AcSensitivityAnalysis`, returned by `GpuSensitivityAnalysisProvider.createAcSensitivityAnalysis`):
-  `beforeContingencySimulations` precomputes the batch as the security analysis does in `afterPreContingencySimulation`
-  (`GpuSaRunScope.evaluate` + `GpuBatchPrecomputer.precompute`, both package-private in `sa.gpu` today and the scope
-  taking `SecurityAnalysisParameters`: to make reusable), and `runPostContingencyLoadFlow` injects the contingency's
-  device state instead of solving, falling back to the per-contingency GPU Newton-Raphson for a contingency the batch
-  does not answer. **The injection is not the security analysis's:** `GpuStateInjector` sets the state with
-  `setValuesOnly` (the Jacobian deliberately left stale: the security analysis reads flows, never the Jacobian) and
-  `GpuPostContingencyState` restores what violation screening reads. Sensitivities are solved ON that Jacobian, so the
-  injection must use the full `StateVector.set` and hand the contingency's discrete decisions back to OLF's network the
-  way the load flow provider does (PV/PQ switches with OLF's own bus calls, as `GpuReactiveLimitsOuterLoop.applyToNetwork`;
-  taps, shunts), so OLF's equation system holds the equations the device converged on. Gate: a GPU-gated test, every
-  sensitivity of every contingency against OLF on the CPU, with a generator switching to PQ in some contingencies only.
+- **M2 - DONE, not yet run on a device (branch `gpu-sensitivity-batch`, on `gpu-sensitivity`): the post-contingency
+  load flows as one device batch.** `GpuBatchedAcSensitivityAnalysis` (`sensi.gpu`, returned by
+  `GpuSensitivityAnalysisProvider.createAcSensitivityAnalysis`): `beforeContingencySimulations` solves the batch,
+  `runPostContingencyLoadFlow` brings a contingency from it, or runs the contingency's own load flow (M1's path) when the
+  batch has nothing for it. `GpuPostContingencyBatch` (public, `sa.gpu`: the one entry point from outside the package)
+  does both halves:
+  - `solve`: the scope (`GpuSaRunScope.evaluate`'s overload without security analysis parameters: the "Default" loss
+    distribution, `startWithFrozenACEmulation` from the contingency parameters) and `GpuBatchPrecomputer.precompute`
+    asked for each contingency's reactive-limit decisions.
+  - `bringToConvergedState`: the device's islands must be buses OLF disabled, every current variable must have a base row,
+    then the reactive-limit decisions are handed back, the state set whole (`GpuStateInjector.injectFullState`: the
+    security analysis's injector split into one remap and two sets, values-only and full) and the bus voltages updated
+    (`AcSolverUtil.updateNetwork`).
+  - **Why the reactive-limit switches are all there is to hand back:** within the loops a batched run admits, only they
+    change OLF's equations. The distributed slack moves targets only, and the sensitivity analysis computes the slack
+    participation BEFORE the post-contingency load flow (`computeLfContingency`) and restores the network after it
+    (`NetworkState`: PV/PQ, generation target Q, q-limit type), so the Jacobian and the function references read the state
+    and the equation set, nothing else. The admission (`loopsNotHandedBack`): `DistributedSlack`, `ReactiveLimits`;
+    `VoltageMonitoring` only without a `MONITORING_VOLTAGE` SVC, the two HVDC AC emulation loops only without an HVDC;
+    any other loop (transformer, shunt, phase, secondary voltage control, area interchange) sends every contingency of the
+    run to its own load flow. Plus the scope's own gates, and `scope.distributedSlack() == isDistributedSlack()`: the
+    device pre-distributes a loss when its loops distribute active power, the sensitivity analysis when the slack is
+    distributed, with the same call as the security analysis's default distribution once area interchange is out.
+  - Device side: `BatchSolveRequest.withReactiveLimitDecisions` makes the chunk solver read back every scenario's
+    reactive-limit final state and frozen row target Q (it did so for strategy pairs, voltage monitoring and RL_TRACE
+    only); `exportReactiveLimitDecisions` puts the slices `captureForStrategies` took into a new `ResultSinks` array, then
+    `BatchScenarioResult.reactiveLimitDecisions` and `PrecomputedBatch.reactiveLimitDecisions`. Off for the security
+    analysis, which runs as before.
+  - Handback: `GpuReactiveLimitsOuterLoop.applyScenarioToNetwork`, the single solve's transitions with the frozen limit
+    from the exported row target (plus load Q; the packed limit where none was exported), all or nothing (an entry frozen
+    by the generator voltage control manager refuses the scenario before any switch).
+  - Tests, CPU: `GpuBatchedAcSensitivityAnalysisTest` brings states OLF solved itself, in the device's layout and
+    encoding (`CpuPostContingencyBatches`, test support), and gets OLF's sensitivities and function references to 1e-9:
+    IEEE 14 with B8-G capped at 17 MVar (PQ in the base; T4-7-1 and L7-9-1 switch it back to PV; L1-2-1, L2-3-1 and
+    T5-6-1 switch others to PQ; L7-8-1 islands bus 8; L3-4-1 switches nothing), both directions asserted. Control: the same
+    states with the base's PV/PQ states differ by more than 1e-3 on L1-2-1, so the agreement is the handback's. A
+    contingency left out of the batch runs its own load flow, same results. `GpuReactiveLimitsScenarioHandbackTest` (5)
+    and `GpuPostContingencyBatchTest` (the admission rule, a run without the device).
+  - **Not verified yet:** the GPU-gated `deviceBatchGivesOlfsSensitivities` (the real provider; every contingency
+    brought from the device batch, counted by `BATCHED_CONTINGENCIES`; OLF's sensitivities on the CPU to 1e-6), and its
+    time against OLF on the CPU. The decisions are kept per contingency for the run (reactive-limit entries x (int +
+    double) each).
 - **M3 - then: the sensitivity solves on the device, per scenario.** At each scenario's converged state: refill its
   Jacobian (the fused kernels), factorize it (our batched LU or cuDSS UBATCH), build its factor groups' right-hand sides
   (unit columns for injections and target voltages, scaled by the slack participation; state-dependent ones for phase

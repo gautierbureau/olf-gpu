@@ -19,6 +19,7 @@ import com.powsybl.openloadflow.graph.EvenShiloachGraphDecrementalConnectivityFa
 import com.powsybl.openloadflow.graph.GraphConnectivityFactory;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
+import com.powsybl.openloadflow.sensi.AcSensitivityAnalysis;
 import com.powsybl.openloadflow.sensi.OpenSensitivityAnalysisParameters;
 import com.powsybl.openloadflow.sensi.OpenSensitivityAnalysisProvider;
 import com.powsybl.sensitivity.SensitivityAnalysisParameters;
@@ -38,11 +39,12 @@ import java.util.concurrent.CompletableFuture;
 
 /**
  * OLF's sensitivity analysis with its AC load flows on the GPU (name {@value #NAME}, the same as the GPU load flow and
- * security analysis providers'): the base case and every post-contingency load flow run on the GPU Newton-Raphson,
- * as {@link GpuLoadFlowProvider} runs a load flow, and the sensitivities are then computed by OLF on the Jacobian at
- * the state those load flows reach. The GPU solver hands its final state back to OLF's network as OLF's own outer
- * loops do (the state vector, the generators it switched to PQ at their reactive limits and back), so that Jacobian
- * holds the equations the run converged on.
+ * security analysis providers'): the base case runs on the GPU Newton-Raphson, as {@link GpuLoadFlowProvider} runs a
+ * load flow, the post-contingency load flows together in one device batch ({@link GpuBatchedAcSensitivityAnalysis};
+ * one by one on the GPU Newton-Raphson where the batch does not cover them), and the sensitivities are then computed
+ * by OLF on the Jacobian at the state those load flows reach. Each state is handed back to OLF's network as OLF's own
+ * outer loops leave it (the state vector, the generators switched to PQ at their reactive limits and back), so that
+ * Jacobian holds the equations the run converged on.
  *
  * <p>OLF's sensitivity parameters and its load flow parameters are used as they are, on a copy: the caller's
  * parameters are left as they were, so reusing them with OLF's provider runs on the CPU. The copy selects the GPU
@@ -93,6 +95,14 @@ public class GpuSensitivityAnalysisProvider extends OpenSensitivityAnalysisProvi
     @Override
     public Optional<ExtensionJsonSerializer> getSpecificParametersSerializer() {
         return Optional.empty();
+    }
+
+    /** The AC sensitivity analysis whose post-contingency load flows are solved together on the device. */
+    @Override
+    protected AcSensitivityAnalysis createAcSensitivityAnalysis(MatrixFactory matrixFactory,
+                                                                GraphConnectivityFactory<LfBus, LfBranch> connectivityFactory,
+                                                                SensitivityAnalysisParameters sensitivityAnalysisParameters) {
+        return new GpuBatchedAcSensitivityAnalysis(matrixFactory, connectivityFactory, sensitivityAnalysisParameters);
     }
 
     @Override

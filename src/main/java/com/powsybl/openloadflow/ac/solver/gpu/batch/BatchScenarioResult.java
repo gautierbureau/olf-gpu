@@ -42,7 +42,10 @@ public record BatchScenarioResult(String contingencyId, double[] state, int iter
                                    *  slack). */
                                   GeneratorTargets generatorTargets,
                                   /** The scenario's PV/PQ decisions as its solve ended (see the class comment). */
-                                  ReactiveLimitDecisions reactiveLimitDecisions) {
+                                  ReactiveLimitDecisions reactiveLimitDecisions,
+                                  /** The solutions of the request's sensitivity basis at the scenario's converged state
+                                   *  (SensitivityBasisRequest#resultLength values), null when not asked or not solved. */
+                                  double[] sensitivityBasis) {
 
     /**
      * A scenario's reactive-limit decisions as its solve ended, per reactive-limit entry (the order of
@@ -69,7 +72,7 @@ public record BatchScenarioResult(String contingencyId, double[] state, int iter
     public BatchScenarioResult(String contingencyId, double[] state, int iterations,
                                double finalMismatch, int convergenceStatus, int[] islandedBusNums) {
         this(contingencyId, state, iterations, finalMismatch, convergenceStatus, islandedBusNums, Double.NaN, Double.NaN, new int[0],
-                new double[0], null, null);
+                new double[0], null, null, null);
     }
 
     /** The target P each participating generator ends a scenario with, by generator id (its distribution anchor plus

@@ -31,6 +31,7 @@
 #include "../outerloop/reactive_capability_curves.cuh"
 #include "../outerloop/reactive_limits_seed.cuh"
 #include "../outerloop/sensitivity.cuh"
+#include "../outerloop/sensitivity_basis.cuh"
 #include "../outerloop/slack_participants.cuh"
 #include "../solver/batch_context.cuh"
 #include "../solver/compact_solve.cuh"
@@ -413,6 +414,9 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         gNewtonLoopMilliseconds += nowMilliseconds() - newtonStartMilliseconds;
         gNewtonLoopWidthIterations += gWidthIterSum - newtonStartWidthIterations;
     }
+    // A batched sensitivity analysis's basis, solved at every slot's converged state while the slots still hold their
+    // scenarios (nothing when the context holds no basis); read back with the handed-back rows like every readback.
+    sensitivityBasisStep(ctx, drv);
 
     traceSwitchLog(ctx, drv);
     // ---- OLF_GPU_RL_AUDIT=<pu threshold>: audit the FINAL state against the reactive-limit rule

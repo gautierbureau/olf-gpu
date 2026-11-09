@@ -57,6 +57,7 @@ final class GpuStateInjector {
         private int[] baseRowOf;                             // current row -> base row, -1 = variable absent at base
         private boolean identity;                            // no variable was removed: row == base row throughout
         private boolean missing;                             // a current variable has no base row (the device has no value)
+        private int[] currentRowOfBase;                      // base row -> current row, -1 = gone (built on demand)
         private double[] buf;                                // the state array handed to the equation system
         /** base row per (elementNum, variable type), -1 = absent — the run-constant base snapshot in
          *  dense form. Applying a contingency invalidates the equation system's variable index about
@@ -217,7 +218,31 @@ final class GpuStateInjector {
             remap.missing = missing;
             remap.buf = new double[vars.size()];
             remap.vars = vars;
+            remap.currentRowOfBase = null;
         }
+    }
+
+    /** The current variable row of each of {@code baseRows} (base variable rows), -1 for a variable the current system no
+     *  longer finds: where a value solved in the base layout goes in the current one. */
+    static int[] currentRows(EquationSystem<AcVariableType, AcEquationType> es,
+                             Map<Variable<AcVariableType>, Integer> baseVariableRows, Remap remap, int[] baseRows) {
+        rebuildIfStale(es, baseVariableRows, remap);
+        if (remap.currentRowOfBase == null) {
+            int[] inverse = new int[baseVariableRows.size()];
+            java.util.Arrays.fill(inverse, -1);
+            for (int row = 0; row < remap.baseRowOf.length; row++) {
+                int baseRow = remap.baseRowOf[row];
+                if (baseRow >= 0 && baseRow < inverse.length) {
+                    inverse[baseRow] = row;
+                }
+            }
+            remap.currentRowOfBase = inverse;
+        }
+        int[] current = new int[baseRows.length];
+        for (int i = 0; i < baseRows.length; i++) {
+            current[i] = baseRows[i] >= 0 && baseRows[i] < remap.currentRowOfBase.length ? remap.currentRowOfBase[baseRows[i]] : -1;
+        }
+        return current;
     }
 
     private static void setValues(EquationSystem<AcVariableType, AcEquationType> es, double[] values, int[] closedBranchNums) {

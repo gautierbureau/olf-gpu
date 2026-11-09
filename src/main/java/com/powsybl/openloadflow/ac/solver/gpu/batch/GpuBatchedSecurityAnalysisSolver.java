@@ -268,6 +268,8 @@ public final class GpuBatchedSecurityAnalysisSolver {
         // Each scenario's reactive-limit decisions, when the request asks for them (null = not read back).
         BatchScenarioResult.ReactiveLimitDecisions[] reactiveLimitDecisionsByIndex = request.reactiveLimitDecisions()
                 ? new BatchScenarioResult.ReactiveLimitDecisions[contingencies.size()] : null;
+        // Each scenario's sensitivity basis solutions, when the request asks for them (null = not solved).
+        double[][] sensitivityBasisByIndex = request.sensitivityBasis() != null ? new double[contingencies.size()][] : null;
         if (!batchedIndices.isEmpty()) {
             // PER_EQUATION_TYPE stopping criterion: per-row thresholds from the equation system's
             // variable pairing (null under UNIFORM_CRITERIA — the chunk solver then CLEARS the cached
@@ -310,12 +312,12 @@ public final class GpuBatchedSecurityAnalysisSolver {
                                 n, nElements, varType, hvdcElemIndex),
                         plan,
                         new ChunkInputs.SolveSettings(parameters, distributedSlack, reactiveLimits, tol, reactiveLimitTol, slackDistTol,
-                                convEpsPerEq, rowCriteria),
+                                convEpsPerEq, rowCriteria, request.sensitivityBasis()),
                         new ChunkInputs.DevicePhaseInputs(phases, hvdcControllers, reactiveCapabilityCurves, forcedTargetQ,
                                 areaInterchangeControl, areaInterchangeControlBaseMoves, automationSystem),
                         new ChunkInputs.ResultSinks(resultsByIndex, preDistributedByIndex, distributedByIndex,
                                 automationSystemSwitchedByIndex, deviceTapMovesByIndex, distributedSlackGeneratorMovesByIndex,
-                                reactiveLimitDecisionsByIndex),
+                                reactiveLimitDecisionsByIndex, sensitivityBasisByIndex),
                         config));
             }
         }
@@ -333,7 +335,8 @@ public final class GpuBatchedSecurityAnalysisSolver {
                         movesOrNone(deviceTapMovesByIndex[i]),
                         generatorTargets(distributedSlackGeneratorIds, distributedSlackGeneratorAnchors,
                                 distributedSlackGeneratorMovesByIndex[i]),
-                        reactiveLimitDecisionsByIndex != null ? reactiveLimitDecisionsByIndex[i] : null));
+                        reactiveLimitDecisionsByIndex != null ? reactiveLimitDecisionsByIndex[i] : null,
+                        sensitivityBasisByIndex != null ? sensitivityBasisByIndex[i] : null));
             } else if (result != null) {                   // the state is the result row's first n entries
                 results.add(new BatchScenarioResult(id, result, (int) result[n], result[n + 1], (int) result[n + 2],
                         plan.islandedNumsByIndex()[i] != null ? plan.islandedNumsByIndex()[i] : new int[0],
@@ -341,14 +344,15 @@ public final class GpuBatchedSecurityAnalysisSolver {
                         movesOrNone(deviceTapMovesByIndex[i]),
                         generatorTargets(distributedSlackGeneratorIds, distributedSlackGeneratorAnchors,
                                 distributedSlackGeneratorMovesByIndex[i]),
-                        reactiveLimitDecisionsByIndex != null ? reactiveLimitDecisionsByIndex[i] : null));
+                        reactiveLimitDecisionsByIndex != null ? reactiveLimitDecisionsByIndex[i] : null,
+                        sensitivityBasisByIndex != null ? sensitivityBasisByIndex[i] : null));
             } else {
                 // Never batched: the plan refused it. Named by id for the harness, because the same
                 // GpuAcSolverStatus.REJECTED also comes back for a scenario the device TRIED and threw away, and the
                 // census counts cannot tell the two apart per contingency.
                 GpuBatchScopeCensus.planRefused(id);
                 results.add(new BatchScenarioResult(id, baseState.clone(), 0, Double.NaN, GpuAcSolverStatus.REJECTED, new int[0],
-                        Double.NaN, Double.NaN, new int[0], new double[0], null, null));
+                        Double.NaN, Double.NaN, new int[0], new double[0], null, null, null));
             }
         }
         return results;

@@ -11,7 +11,10 @@ import com.google.common.base.Stopwatch;
 import com.powsybl.action.Action;
 import com.powsybl.commons.report.ReportNode;
 import com.powsybl.contingency.Contingency;
+import com.powsybl.contingency.strategy.ConditionalActions;
 import com.powsybl.contingency.strategy.OperatorStrategy;
+import com.powsybl.contingency.strategy.condition.BranchThresholdCondition;
+import com.powsybl.contingency.strategy.condition.ThreeWindingsTransformerThresholdCondition;
 import com.powsybl.iidm.network.Network;
 import com.powsybl.math.matrix.MatrixFactory;
 import com.powsybl.openloadflow.ac.AcLoadFlowContext;
@@ -367,10 +370,12 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
      * The branches whose flows the detection of a device-answered operator strategy reads (see flowReadSet): those of
      * the limits the screen flagged for the pair, those it does not cover, and {@code scanInFull}; null for "refresh
      * them all" when the screen is not available for the pair or another reader of flows is on (a branch or
-     * three-windings transformer state monitor, the diagnostics).
+     * three-windings transformer state monitor, the diagnostics, another strategy's flow condition).
      */
-    private int[] strategyFlowReadSet(GpuSaRunState run, String pairId, java.util.Collection<LfBranch> scanInFull) {
+    private int[] strategyFlowReadSet(GpuSaRunState run, String pairId, String contingencyId, OperatorStrategy strategy,
+                                      java.util.Collection<LfBranch> scanInFull) {
         if (run.violationScreen == null || run.candidates == null || flowsMonitored()
+                || anotherStrategyReadsFlows(run, contingencyId, strategy)
                 || GpuTrace.SA_RESID.isOn() || GpuTrace.VIOL_CROSSCHECK.isOn()) {
             return null;
         }
@@ -471,6 +476,29 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         monitors.addAll(monitorIndex.getSpecificStateMonitors().values());
         return monitors.stream().anyMatch(m -> m != null
                 && (!m.getBranchIds().isEmpty() || !m.getThreeWindingsTransformerIds().isEmpty()));
+    }
+
+    /**
+     * Whether another strategy on the contingency has a stage conditioned on a flow (a branch or three-windings
+     * transformer threshold). OLF evaluates a strategy's condition on the network the previous strategy's load flow
+     * left: the restore between them puts the network's elements back, not the state that load flow solved, so the
+     * condition reads every flow of that state, and a device-answered strategy before it must have refreshed them all.
+     * Which strategy runs before which is left out: refreshing for one that runs after the conditioned one costs only
+     * the refresh.
+     */
+    private static boolean anotherStrategyReadsFlows(GpuSaRunState run, String contingencyId, OperatorStrategy strategy) {
+        for (OperatorStrategy other : run.operatorStrategies) {
+            if (other.getId().equals(strategy.getId()) || !targets(other, contingencyId)) {
+                continue;
+            }
+            for (ConditionalActions stage : other.getConditionalActions()) {
+                if (stage.getCondition() instanceof BranchThresholdCondition
+                        || stage.getCondition() instanceof ThreeWindingsTransformerThresholdCondition) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     private static boolean targetedByOperatorStrategy(List<OperatorStrategy> strategies, String contingencyId) {
@@ -878,7 +906,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         scanInFull.addAll(pairRetapped);
         // only the flows the screened detection reads are refreshed, as for a contingency (flowReadSet)
         GpuStateInjector.injectState(precomputed.equationSystem(), precomputed.baseVariableRows(), state,
-                runState.get().remap, strategyFlowReadSet(runState.get(), scId, scanInFull));
+                runState.get().remap, strategyFlowReadSet(runState.get(), scId, contingency.getId(), operatorStrategy, scanInFull));
         AcSolverUtil.updateNetwork(network, precomputed.equationSystem());
         var postActionsViolationManager = new LimitViolationManager(preContingencyLimitViolationManager, limitReductions,
                 securityAnalysisParameters.getIncreasedViolationsParameters());

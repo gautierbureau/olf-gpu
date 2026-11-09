@@ -345,20 +345,21 @@ abstract class AbstractGpuSaTest extends AbstractOpenSecurityAnalysisTest {
         }
     }
 
-    void assertStrategyMatchesCpu(Network network, List<Contingency> contingencies,
+    SecurityAnalysisResult assertStrategyMatchesCpu(Network network, List<Contingency> contingencies,
                                           List<com.powsybl.contingency.strategy.OperatorStrategy> strategies,
                                           List<com.powsybl.action.Action> actions, int expectedPrecomputed) {
-        assertStrategyMatchesCpu(network, contingencies, strategies, actions, expectedPrecomputed, true);
+        return assertStrategyMatchesCpu(network, contingencies, strategies, actions, expectedPrecomputed, true);
     }
 
-    void assertStrategyMatchesCpu(Network network, List<Contingency> contingencies,
+    SecurityAnalysisResult assertStrategyMatchesCpu(Network network, List<Contingency> contingencies,
                                           List<com.powsybl.contingency.strategy.OperatorStrategy> strategies,
                                           List<com.powsybl.action.Action> actions, int expectedPrecomputed,
                                           boolean distributedSlack) {
-        assertStrategyMatchesCpu(network, contingencies, strategies, actions, expectedPrecomputed, distributedSlack, p -> { });
+        return assertStrategyMatchesCpu(network, contingencies, strategies, actions, expectedPrecomputed, distributedSlack, p -> { });
     }
 
-    void assertStrategyMatchesCpu(Network network, List<Contingency> contingencies,
+    /** @return the CPU arm's result, for a test to assert that what it compares is not vacuous */
+    SecurityAnalysisResult assertStrategyMatchesCpu(Network network, List<Contingency> contingencies,
                                           List<com.powsybl.contingency.strategy.OperatorStrategy> strategies,
                                           List<com.powsybl.action.Action> actions, int expectedPrecomputed,
                                           boolean distributedSlack,
@@ -453,6 +454,7 @@ abstract class AbstractGpuSaTest extends AbstractOpenSecurityAnalysisTest {
                             "strategy bus voltage " + cpuBuses.get(b).getBusId());
                 }
             }
+            return cpu;
         } finally {
             securityAnalysisProvider = new OpenSecurityAnalysisProvider(commonTestConfig.matrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>());
         }

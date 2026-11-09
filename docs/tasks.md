@@ -11,6 +11,36 @@ complete. Keep the numbering: it is cited in commit messages.
 
 ## Open
 
+### #87 — operator strategies: an unrealistic pair is never answered (b); a flow condition after a device strategy (c, FIXED) (2026-11-09)
+
+Issues b and c of `docs/device-final-results-plan.md` §7 (branch `device-final-results`).
+
+**b — not reachable, no change.** The host builds a device-answered pair's result as CONVERGED without the realistic
+voltage check the contingency path applies (`updateBusesFromState`). No unrealistic pair ever gets there. The driver
+checks the band where `AcloadFlowEngine` does: at the end of the last loop able to fix an unrealistic state
+(`i == realisticFixingIdx`), after every later solve, and after every solve when there is no fixing loop. Those points
+always include the final state. `DeviceLoopTables.install` switches the check on for every context the device drives,
+the robust retry's too. Such a pair is rejected and the CPU replays it. Measured on IEEE 14, with 20 MVar more at B14
+after L2-5-1 and a minimum realistic voltage of 1.0 pu (B14 at 0.974 pu, the contingency alone at 1.01 pu or above):
+both attempts are rejected with `unrealistic-state`, and the CPU reports FAILED like OLF.
+`GpuSaOperatorStrategyTest.strategyWithAnUnrealisticStateFailsLikeCpu` keeps it that way, with the contingency alone
+on the device.
+
+**c — FIXED.** OLF evaluates strategy k's condition on the network strategy k−1's load flow left: its restore puts back
+the network's elements, not the state vector. A branch or three-windings transformer threshold therefore reads every
+flow of k−1's state. A device-answered k−1 refreshed only the flows its own detection reads (`strategyFlowReadSet`),
+so k's condition read the post-contingency flow of any other branch. Now a pair refreshes every flow when another
+strategy on its contingency has a stage conditioned on a flow (`anotherStrategyReadsFlows`). The contingency itself
+already refreshed them all when a strategy targets it. The test is
+`GpuSaOperatorStrategyTest.thresholdConditionAfterADeviceStrategyReadsThatStrategysFlows`. PS1's tap raises L1 over the
+second strategy's threshold, and L1 carries a limit far above its flow, so the screen leaves it out. Before the fix the
+CPU reported 2 strategy results and the GPU 1, with all three scenarios on the device.
+
+**f — no visible effect, left as is.** The HVDC action (`LfHvdcAction`, AC emulation off) sets the converter target P
+from `getP1().eval()`. On the device path that reads the state vector as the previous injection left it, where OLF
+re-initializes it from the restored network first. The device composes the pair itself, nothing in the result reads the
+converter target P, and the full restore that follows a non-tap strategy puts it back.
+
 ### #86 — FIXED (in OLF): the continuous phase control's target P kept the initial tap's admittance (2026-11-09)
 
 Found while proving the device tap write-back (branch `fix-device-tap-moves`): the existing phase-control fixtures

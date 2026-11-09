@@ -469,6 +469,59 @@ class GpuSaOperatorStrategyTest extends AbstractGpuSaTest {
     }
 
     @Test
+    void thresholdConditionAfterADeviceStrategyReadsThatStrategysFlows() {
+        // OLF evaluates a strategy's condition on the network the previous strategy of the contingency left: the restore
+        // between them puts the network's elements back, not the state its load flow solved, so a branch threshold reads
+        // the previous strategy's flows. A device-answered strategy refreshes only the flows its own detection reads, and
+        // L1 is not among them here (a limit far above its flow): the condition read L1's post-contingency flow. The
+        // first strategy moves PS1's tap, which raises L1's flow over the second one's threshold.
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = com.powsybl.openloadflow.network.PhaseControlFactory.createNetworkWithT2wt();
+        com.powsybl.iidm.network.Line l1 = network.getLine("L1");
+        network.newLine().setId("L1_BIS")
+                .setVoltageLevel1(l1.getTerminal1().getVoltageLevel().getId()).setBus1(l1.getTerminal1().getBusBreakerView().getBus().getId())
+                .setVoltageLevel2(l1.getTerminal2().getVoltageLevel().getId()).setBus2(l1.getTerminal2().getBusBreakerView().getBus().getId())
+                .setR(l1.getR()).setX(l1.getX()).setG1(0).setB1(0).setG2(0).setB2(0).add();
+        com.powsybl.iidm.network.PhaseTapChanger ptc = network.getTwoWindingsTransformer("PS1").getPhaseTapChanger();
+        // L1's active power after the contingency, at PS1's own tap and at each other tap
+        int baseTap = ptc.getTapPosition();
+        network.getLine("L1_BIS").disconnect();
+        java.util.Map<Integer, Double> flowByTap = new java.util.TreeMap<>();
+        for (int tap = ptc.getLowTapPosition(); tap <= ptc.getHighTapPosition(); tap++) {
+            ptc.setTapPosition(tap);
+            new com.powsybl.loadflow.LoadFlow.Runner(new com.powsybl.openloadflow.OpenLoadFlowProvider(commonTestConfig.matrixFactory())).run(network);
+            flowByTap.put(tap, l1.getTerminal1().getP());
+        }
+        ptc.setTapPosition(baseTap);
+        network.getLine("L1_BIS").connect();
+        int actionTap = flowByTap.entrySet().stream().max(java.util.Map.Entry.comparingByValue()).orElseThrow().getKey();
+        double before = flowByTap.get(baseTap);
+        double after = flowByTap.get(actionTap);
+        org.junit.jupiter.api.Assertions.assertTrue(after > before + 10, "the fixture needs a tap that raises L1's flow: " + flowByTap);
+        int otherTap = flowByTap.keySet().stream().filter(t -> t != baseTap && t != actionTap).findFirst().orElseThrow();
+        l1.newActivePowerLimits1().setPermanentLimit(10 * Math.max(Math.abs(before), Math.abs(after))).add();
+        List<Contingency> contingencies = List.of(new Contingency("L1_BIS", new BranchContingency("L1_BIS")));
+        List<com.powsybl.action.Action> actions = List.of(
+                new com.powsybl.action.PhaseTapChangerTapPositionAction("ps1Raise", "PS1", false, actionTap),
+                new com.powsybl.action.PhaseTapChangerTapPositionAction("ps1Other", "PS1", false, otherTap));
+        List<com.powsybl.contingency.strategy.OperatorStrategy> strategies = List.of(
+                new com.powsybl.contingency.strategy.OperatorStrategy("sRaise",
+                        com.powsybl.contingency.ContingencyContext.specificContingency("L1_BIS"),
+                        new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of("ps1Raise")),
+                new com.powsybl.contingency.strategy.OperatorStrategy("sOnL1Flow",
+                        com.powsybl.contingency.ContingencyContext.specificContingency("L1_BIS"),
+                        new com.powsybl.contingency.strategy.condition.BranchThresholdCondition("L1",
+                                com.powsybl.contingency.strategy.condition.AbstractThresholdCondition.Variable.ACTIVE_POWER,
+                                com.powsybl.contingency.strategy.condition.AbstractThresholdCondition.ComparisonType.GREATER_THAN,
+                                (before + after) / 2, com.powsybl.iidm.network.TwoSides.ONE),
+                        List.of("ps1Other")));
+        // the contingency and both pairs on the device (the conditional one speculatively)
+        SecurityAnalysisResult cpu = assertStrategyMatchesCpu(network, contingencies, strategies, actions, 3);
+        assertEquals(2, cpu.getOperatorStrategyResults().size(), "OLF runs the conditional strategy on the first one's flows");
+    }
+
+    @Test
     void strategyAfterADeviceTapStrategyStartsFromThePostContingencyState() {
         // Between two strategies of a contingency OLF restores the post-contingency state; after a device-answered
         // strategy with tap actions only, the GPU security analysis restores the retapped branches (and lazily the
@@ -674,6 +727,33 @@ class GpuSaOperatorStrategyTest extends AbstractGpuSaTest {
                         com.powsybl.contingency.ContingencyContext.specificContingency(lineId),
                         new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of("q14")));
         assertStrategyMatchesCpu(network, contingencies, strategies, actions, 3);
+    }
+
+    /** A strategy whose state leaves the realistic band FAILS like OLF's. 20 MVar more at B14's load after the L2-5-1
+     *  outage take B14 to 0.974 pu, while the base and the contingency stay at 1.01 pu or above: with a minimum
+     *  realistic voltage of 1.0 pu, OLF's load flow ends UNREALISTIC_STATE, which the security analysis reports FAILED,
+     *  without violations or network results. The host builds a device-answered pair's result as CONVERGED, so the pair
+     *  must never come back answered: the device checks the band where OLF does (at the end of the last loop able to
+     *  fix the state, then after every later solve) and rejects it, and the CPU replays it. Only the contingency is
+     *  answered on the device. */
+    @Test
+    void strategyWithAnUnrealisticStateFailsLikeCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = IeeeCdfNetworkFactory.create14();
+        String lineId = network.getLineStream().skip(4).findFirst().orElseThrow().getId();
+        com.powsybl.iidm.network.Load load14 = loadAtBus(network, "B14");
+        List<Contingency> contingencies = List.of(new Contingency(lineId, new BranchContingency(lineId)));
+        List<com.powsybl.action.Action> actions = List.of(
+                new com.powsybl.action.LoadActionBuilder().withId("q14").withLoadId(load14.getId())
+                        .withRelativeValue(true).withReactivePowerValue(20).build());
+        SecurityAnalysisResult cpu = assertStrategyMatchesCpu(network, contingencies, strategiesOf(lineId, "q14"), actions,
+                1, true, p -> p.setMinNominalVoltageRealisticVoltageCheck(0).setMinRealisticVoltage(1.0));
+        assertEquals(com.powsybl.security.PostContingencyComputationStatus.CONVERGED,
+                cpu.getPostContingencyResults().get(0).getStatus(), "the contingency alone stays realistic");
+        assertEquals(com.powsybl.security.PostContingencyComputationStatus.FAILED,
+                cpu.getOperatorStrategyResults().get(0).getConditionalActionsResults().get(0).getStatus(),
+                "the strategy's state is unrealistic");
     }
 
     @Test

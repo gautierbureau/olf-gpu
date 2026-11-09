@@ -324,6 +324,9 @@ void solveScalar(ScalarLu& lu, const int* selected, int width, const double* b, 
 
 }  // namespace
 
+// A regrown factor buffer keeps 1 / LU_REGROWTH_HEADROOM more than it needs (createScalarLu).
+constexpr size_t LU_REGROWTH_HEADROOM = 64;
+
 void createScalarLu(ScalarLu& lu, const ScalarLuPlan& plan, int capacity) {
     if (capacity <= 0) {
         throw std::runtime_error("batched LU capacity must be positive: " + std::to_string(capacity));
@@ -377,7 +380,11 @@ void createScalarLu(ScalarLu& lu, const ScalarLuPlan& plan, int capacity) {
     uploadVector(lu.dBackwardRow, plan.backwardRow);
     uploadVector(lu.dRowPosition, rowPosition);
     uploadVector(lu.dColPosition, colPosition);
-    lu.dLu.alloc(static_cast<size_t>(plan.nnzLu) * capacity * sizeof(double));
+    // The learned pivot delays grow the factors by a few hundredths of a percent at a time (network.xiidm: 36 times,
+    // 0.9 % in all), and each growth cost a free, a 700 MB allocation and its zeroing. A regrowth keeps 1/64 more:
+    // the first one then holds the rest of the run.
+    const size_t luBytes = static_cast<size_t>(plan.nnzLu) * capacity * sizeof(double);
+    lu.dLu.alloc(lu.dLu.cap == 0 || luBytes <= lu.dLu.cap ? luBytes : luBytes + luBytes / LU_REGROWTH_HEADROOM);
     lu.dWork.alloc(static_cast<size_t>(plan.n) * capacity * sizeof(double));
     lu.dLaneMap.alloc(static_cast<size_t>(capacity) * sizeof(int));
     lu.dTrouble.alloc(static_cast<size_t>(capacity) * sizeof(int));

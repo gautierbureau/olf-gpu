@@ -183,14 +183,16 @@ final class GpuViolationScreen {
             return out;
         }
         onDevice = 0;
+        // One direct buffer for every chunk, which the device reads in place: each state is written into it once (read
+        // straight from the state store's file when the states are there), with no chunk array and no JNI copy of it.
+        java.nio.ByteBuffer flat = java.nio.ByteBuffer.allocateDirect(Math.min(DEVICE_CHUNK, ids.size()) * n * Double.BYTES)
+                .order(java.nio.ByteOrder.nativeOrder());
         try {
             for (int from = 0; from < ids.size(); from += DEVICE_CHUNK) {
                 int to = Math.min(from + DEVICE_CHUNK, ids.size());
                 int count = to - from;
-                double[] flat = new double[count * n];
                 for (int i = 0; i < count; i++) {
-                    double[] state = states.get(ids.get(from + i));
-                    System.arraycopy(state, 0, flat, i * n, Math.min(n, state.length));
+                    writeState(states, ids.get(from + i), flat, i, n);
                 }
                 int[] result = ViolationScreenNative.screenViolationsBatch(table, flat, count, n, BAND, DEVICE_CAPACITY);
                 if (result == null) {
@@ -222,6 +224,21 @@ final class GpuViolationScreen {
             deviceTable = 0;
         }
         return out;
+    }
+
+    /** The state of {@code id} into scenario {@code i}'s {@code n} doubles of {@code flat}, zero past a shorter state. */
+    private static void writeState(java.util.Map<String, double[]> states, String id, java.nio.ByteBuffer flat, int i, int n) {
+        int at = i * n * Double.BYTES;
+        if (states instanceof GpuStateStore store && store.stateLength() == n && store.readInto(id, flat, at)) {
+            return;
+        }
+        double[] state = states.get(id);
+        int length = Math.min(n, state.length);
+        java.nio.DoubleBuffer into = flat.slice(at, n * Double.BYTES).order(java.nio.ByteOrder.nativeOrder()).asDoubleBuffer();
+        into.put(state, 0, length);
+        while (into.hasRemaining()) {
+            into.put(0.0);
+        }
     }
 
     /** Scenarios whose candidates did not fit the device buffer and were screened on the host. */

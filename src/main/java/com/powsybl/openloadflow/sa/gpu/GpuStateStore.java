@@ -185,6 +185,33 @@ public final class GpuStateStore extends AbstractMap<String, double[]> implement
         return state;
     }
 
+    /**
+     * The state of {@code key} read straight into {@code n} doubles of {@code target} at byte {@code at} (native order),
+     * without the array {@link #get} allocates: the device screen gathers its chunk of states this way. False when the key
+     * holds no state.
+     */
+    public synchronized boolean readInto(Object key, ByteBuffer target, int at) {
+        checkOpen();
+        Integer slot = slotOf.get(key);
+        if (slot == null) {
+            return false;
+        }
+        ByteBuffer into = target.slice(at, n * Double.BYTES);
+        try {
+            long offset = (long) slot * n * Double.BYTES;
+            while (into.hasRemaining()) {
+                int r = channel.read(into, offset);
+                if (r < 0) {
+                    throw new PowsyblException("GPU state store: state " + slot + " is missing from " + file);
+                }
+                offset += r;
+            }
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+        return true;
+    }
+
     private void checkOpen() {
         if (closed) {
             throw new PowsyblException("GPU state store: closed");

@@ -31,13 +31,13 @@ public final class ViolationScreenNative {
     /**
      * Screen a chunk of post-contingency states against an uploaded table.
      *
-     * @param states {@code nScenarios * n} states, scenario-major
+     * @param states a DIRECT buffer of {@code nScenarios * n} doubles in native order, scenario-major, read in place
      * @param band relative slack on every threshold, so the screen can only over-emit
      * @param capacity records per scenario
      * @return {@code nScenarios} counts, then {@code nScenarios * capacity} records; a count ABOVE
      *         the capacity means that scenario overflowed and must be scanned on the host
      */
-    public static native int[] screenViolationsBatch(long tableHandle, double[] states, int nScenarios,
+    public static native int[] screenViolationsBatch(long tableHandle, java.nio.ByteBuffer states, int nScenarios,
                                                      int n, double band, int capacity);
 
     /**

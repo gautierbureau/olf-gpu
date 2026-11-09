@@ -85,6 +85,65 @@ public final class GpuReactiveLimitsOuterLoop {
         }
     }
 
+    /**
+     * One batched scenario's PV/PQ decisions applied to the network the way {@link #applyToNetwork} applies a solve's
+     * (the same transitions, the same two calls per bus), for a caller that brings that scenario's converged state
+     * into OLF itself and needs OLF's equation system to be the one the device converged on (the batched sensitivity
+     * analysis: its Jacobian is read at that state). {@code finalState} is the scenario's {@link GpuReactiveLimitsState}
+     * per entry and {@code frozenRowTargetQ} the target its switch to PQ froze on the entry's row (limit minus load Q,
+     * NaN where none was exported; the whole array may be null), as the batch reads them back.
+     *
+     * <p>All or nothing: false, with the network left as it was, when an entry is frozen by the generator voltage
+     * control manager (the transformer voltage control's port owns those buses, and no batch scenario of that kind is
+     * handed back), so that the caller solves that state itself. A disabled bus (the contingency's island) is skipped:
+     * OLF has no equation for it. An entry the device holds PQ without a limit (a bus PQ in the base for another
+     * reason) is no transition and is left as it is, as {@link #applyToNetwork} leaves it.
+     */
+    public static boolean applyScenarioToNetwork(LfNetwork network, GpuAcData data, int[] finalState, double[] frozenRowTargetQ) {
+        int[] busNum = data.reactiveLimits().busNum();
+        if (busNum == null || busNum.length == 0) {
+            return true;                                      // nothing to decide
+        }
+        if (finalState == null || finalState.length < busNum.length) {
+            return false;
+        }
+        for (int i = 0; i < busNum.length; i++) {            // check every entry before changing anything
+            LfBus bus = network.getBus(busNum[i]);
+            if (bus != null && !bus.isDisabled() && GpuReactiveLimitsState.limitType(finalState[i]) == GpuQLimitType.FROZEN) {
+                return false;
+            }
+        }
+        for (int i = 0; i < busNum.length; i++) {
+            LfBus bus = network.getBus(busNum[i]);
+            if (bus == null || bus.isDisabled()) {
+                continue;
+            }
+            int limitType = GpuReactiveLimitsState.limitType(finalState[i]);
+            if (limitType != GpuQLimitType.NONE && bus.isGeneratorVoltageControlEnabled()) {
+                double rowTargetQ = frozenRowTargetQ != null && i < frozenRowTargetQ.length ? frozenRowTargetQ[i] : Double.NaN;
+                bus.freezeGenerationTargetQAndDisableGeneratorVoltageControl(!Double.isNaN(rowTargetQ)
+                        ? rowTargetQ + data.reactiveLimits().loadQ()[i] : packedLimit(data, i, limitType));
+                bus.setQLimitType(GpuQLimitType.toOlf(limitType));
+            } else if (limitType == GpuQLimitType.NONE && !bus.isGeneratorVoltageControlEnabled() && switchesBackToPv(bus)) {
+                bus.setGeneratorVoltageControlEnabledAndRecomputeTargetQ(true);
+                bus.setQLimitType(null);
+            }
+        }
+        return true;
+    }
+
+    /** A bus held PQ at a reactive limit that OLF's loop switches back to PV, as the device does: MIN_Q or MAX_Q (robust
+     *  mode's realistic-voltage freezes are never undone). */
+    private static boolean switchesBackToPv(LfBus bus) {
+        return bus.getQLimitType().map(t -> t == LfBus.QLimitType.MIN_Q || t == LfBus.QLimitType.MAX_Q).orElse(false);
+    }
+
+    /** The limit of entry {@code i} as packed at extraction, for a switch to PQ whose frozen target was not exported. */
+    private static double packedLimit(GpuAcData data, int i, int limitType) {
+        return limitType == GpuQLimitType.MIN_Q ? data.reactiveLimits().minQ()[i]
+                : limitType == GpuQLimitType.MAX_Q ? data.reactiveLimits().maxQ()[i] : data.reactiveLimits().initialTargetQ()[i];
+    }
+
     /** The row whose target holds the frozen target Q of RL entry {@code i}, switched to PQ ({@code target + loadQ =
      *  the limit}). Its own V row, except for a pilot-self pilot enrolled in the candidate table (its V row is
      *  candidate 0 of a group and still a V identity, FIXED_VARIABLE, while PQ): then the same pick the

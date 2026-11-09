@@ -71,11 +71,13 @@ record ChunkInputs(List<BatchContingency> contingencies, ChunkInputs.BaseCase ba
     /** Where the results go, per contingency index: the result row (null = route to the CPU), the replayed loss
      *  pre-distribution, the total distributed active power (pu, NaN = unknown), the nums of the branches the
      *  AutomationSystem phase switched (null = none), the taps the outer loops moved (DeviceTapMoves, null = none),
-     *  each distributed-slack generator's final move (null = not read) and the strategy pairs left unsolved because OLF
-     *  never applies them (StateHandback#pairMayApply). */
+     *  each distributed-slack generator's final move (null = not read), the strategy pairs left unsolved because OLF
+     *  never applies them (StateHandback#pairMayApply) and, when the request asks for them (the array non-null), the
+     *  scenario's reactive-limit decisions (null = none read back). */
     record ResultSinks(double[][] resultsByIndex, double[] preDistributedByIndex, double[] distributedByIndex,
                        int[][] automationSystemSwitchedByIndex, double[][] deviceTapMovesByIndex,
-                       double[][] distributedSlackGeneratorMovesByIndex, boolean[] notAppliedByIndex) {
+                       double[][] distributedSlackGeneratorMovesByIndex, boolean[] notAppliedByIndex,
+                       BatchScenarioResult.ReactiveLimitDecisions[] reactiveLimitDecisionsByIndex) {
     }
 
     /** The same inputs from another base state. */

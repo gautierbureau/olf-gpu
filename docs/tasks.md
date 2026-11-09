@@ -288,6 +288,42 @@ control off, so rte6515 and network.xiidm never move a tap: their CPU references
 `@EnumSource` runs the modes in the enum's declaration order, CONTINUOUS_WITH_DISCRETISATION first, whatever order
 `names` lists them in.)
 
+### #94 — GPU sensitivity analysis provider: step 1, the AC load flows on the device (2026-11-09)
+
+**Done (branch `gpu-sensitivity`), not yet run on a device.** `GpuSensitivityAnalysisProvider` (`sensi.gpu`,
+`@AutoService`, name `OpenLoadFlowGpu` like the load flow and security analysis providers) extends OLF's
+`OpenSensitivityAnalysisProvider`. An AC run takes a JSON copy of the caller's parameters, its load flow parameters
+those of a GPU load flow (`GpuLoadFlowProvider.withGpuSolver`, made public for it: `GPU_NEWTON_RAPHSON`, plus OLF's
+parameters set by name), and `threadCount` 1 (concurrent native solves on one device are not supported, open bug (1)
+in CLAUDE.md); a DC run is OLF's. Its load flow provider is `OpenLoadFlowGpu`, so pypowsybl's `provider_parameters`
+for the run's load flow set the GPU solver's and OLF's.
+- **Why it is sound without new device code:** OLF's sensitivity analysis runs every load flow through
+  `getSolverFactory().createLoadFlowEngine(context)` (the fork's 7a795ca), then computes the sensitivities on
+  `context.getJacobianMatrix()`. The GPU solver writes its state back with the full `StateVector.set` (the Jacobian is
+  notified, unlike `setValuesOnly`), and its reactive-limit decisions with OLF's own bus calls
+  (`freezeGenerationTargetQAndDisableGeneratorVoltageControl`, `setGeneratorVoltageControlEnabledAndRecomputeTargetQ`),
+  so OLF's equation system, which the Jacobian is built from, swaps the voltage-target and Q equations as OLF's own
+  ReactiveLimits loop would. `GpuSensitivityAnalysisProviderTest#acSensitivitiesAreOlfsOnTheCpu` (GPU-gated) checks it:
+  IEEE 14 with bus 8's condenser held at +-6 MVar (PQ at its limit), two contingencies, every sensitivity and function
+  reference against OLF on the CPU, and the condenser's target-voltage sensitivities exactly 0 on both (OLF fills that
+  right-hand side only while the voltage-target equation is active).
+- **Found on the way, fixed in the security analysis provider too:** powsybl collects the parameter serializers of
+  every provider by extension name (`Collectors.toMap`, no merge), so a provider inheriting OLF's serializer makes the
+  extension name a duplicate key. With the olf-gpu jar on the classpath, every JSON write and read of
+  `SecurityAnalysisParameters` failed (`Duplicate key open-security-analysis-parameters`), and the new provider would
+  have done the same for sensitivity parameters. Both GPU providers now register no serializer
+  (`getSpecificParametersSerializer` empty: their specific parameters are OLF's, which OLF's provider serializes);
+  regression tests in `GpuSecurityAnalysisProviderTest` and `GpuSensitivityAnalysisProviderTest`.
+- **Next steps:**
+  1. Run the gated test on a device and time a run against OLF's on the CPU (each load flow is a batch-of-one device
+     solve, with a re-extraction after each contingency's topology change).
+  2. The sensitivity solves on the device. OLF's forward sensitivities are `solveTransposed` on its stored `M = Jᵀ`,
+     i.e. `J⁻¹` on the many right-hand sides of the factor groups: a plain solve with our true-CSR `J`, available with
+     cuDSS (several right-hand sides on one factorization) and with our batched LU. The adjoint (`runAdjoint`) is the
+     other direction, which the transposed solve of #40 / PR 25 provides on our LU.
+  3. Batched contingencies: the security analysis's batch machinery solves the post-contingency load flows together;
+     the sensitivity solves then run per scenario on its factors.
+
 ### #85 — PLAN: post-contingency results without writing the state back (2026-11-09; P0 to P4 done 2026-11-11)
 
 Plan: `docs/device-final-results-plan.md` (written on branch `device-final-results`, now on `state-view`). For every

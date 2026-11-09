@@ -324,6 +324,49 @@ for the run's load flow set the GPU solver's and OLF's.
   3. Batched contingencies: the security analysis's batch machinery solves the post-contingency load flows together;
      the sensitivity solves then run per scenario on its factors.
 
+**The goal: batched AC sensitivities over contingencies and post-action states (2026-11-09).** Decided: contingencies
+first, on the current stack; post-action states once olf-gpu moves to OLF main.
+- **Why post-actions wait:** on `olf-local-patches` (OLF 2.4.0-SNAPSHOT-gpu) OLF's AC sensitivity analysis throws on any
+  operator strategy ("AC sensitivity analysis does not support operator strategies"); main's #1385 (AC preventive and
+  curative actions sensitivities) lifts that, and is on `olf-local-patches-rebase` (2.5.0-SNAPSHOT-gpu). That OLF needs
+  powsybl-core 7.4.0 (`LimitScaling`): on the cuDSS core fork (June main) a security analysis dies with `NoSuchMethodError:
+  SecurityAnalysisRunParameters.getLimitScalings()`. Decided: rebase the core fork (`cudss_factory`) onto core v7.4.0
+  for the move. Measured cost of olf-gpu on the rebased OLF + core 7.4.0: 13 compile errors from #1490's renames
+  (`limitreduction` -> `limitscaling`), then 10 API changes: `EquationSystemIndexListener.onEquationTermConstantsChanged`
+  (#1475) and a changed `LfNetworkListener.onTapPositionChange` in `GpuAcDataCache` and `GpuSolverInvalidation` (their
+  cache invalidation: validate on a device), the `PostContingencyResult` constructor (core 7.4.0), `getLimitScalings()`,
+  and `AbstractLfBranchAction.updateBusesAndBranchStatus` gone (#1385's `NetworkActivations`) in
+  `GpuAutomationSystemOuterLoop`.
+- **M1 - DONE: hooks in OLF** (branch `olf-local-patches-sensi-hooks` of the OLF fork, on `olf-local-patches`, commit
+  "Let a subclass batch the AC sensitivity analysis's contingencies"; not pushed at the time of writing). OLF's
+  `AcSensitivityAnalysis` was private all the way through; four protected seams, each doing what the code did before
+  (the `sensi` package's 323 tests pass): `OpenSensitivityAnalysisProvider.createAcSensitivityAnalysis` (the analysis a
+  run uses), `beforeContingencySimulations` (base solved and written, contingency parameters applied, before the first
+  contingency: where a batch is prepared), `runPostContingencyLoadFlow` (a contingency's state) and `solveFactorsStates`
+  (the factor groups' right-hand sides on a state's Jacobian, the base case or a contingency's).
+- **M2 - next: the post-contingency load flows as one device batch.** `GpuBatchedAcSensitivityAnalysis` (a subclass of
+  `AcSensitivityAnalysis`, returned by `GpuSensitivityAnalysisProvider.createAcSensitivityAnalysis`):
+  `beforeContingencySimulations` precomputes the batch as the security analysis does in `afterPreContingencySimulation`
+  (`GpuSaRunScope.evaluate` + `GpuBatchPrecomputer.precompute`, both package-private in `sa.gpu` today and the scope
+  taking `SecurityAnalysisParameters`: to make reusable), and `runPostContingencyLoadFlow` injects the contingency's
+  device state instead of solving, falling back to the per-contingency GPU Newton-Raphson for a contingency the batch
+  does not answer. **The injection is not the security analysis's:** `GpuStateInjector` sets the state with
+  `setValuesOnly` (the Jacobian deliberately left stale: the security analysis reads flows, never the Jacobian) and
+  `GpuPostContingencyState` restores what violation screening reads. Sensitivities are solved ON that Jacobian, so the
+  injection must use the full `StateVector.set` and hand the contingency's discrete decisions back to OLF's network the
+  way the load flow provider does (PV/PQ switches with OLF's own bus calls, as `GpuReactiveLimitsOuterLoop.applyToNetwork`;
+  taps, shunts), so OLF's equation system holds the equations the device converged on. Gate: a GPU-gated test, every
+  sensitivity of every contingency against OLF on the CPU, with a generator switching to PQ in some contingencies only.
+- **M3 - then: the sensitivity solves on the device, per scenario.** At each scenario's converged state: refill its
+  Jacobian (the fused kernels), factorize it (our batched LU or cuDSS UBATCH), build its factor groups' right-hand sides
+  (unit columns for injections and target voltages, scaled by the slack participation; state-dependent ones for phase
+  shifters and branch parameters), solve them (OLF's forward sensitivities are `solveTransposed` on its stored `Jᵀ`: a
+  plain `J⁻¹` solve with our true-CSR `J`, several right-hand sides per factorization), and contract against the functions'
+  derivatives on the device, so only the requested sensitivity values cross PCIe. `solveFactorsStates` is the seam on
+  OLF's side. The adjoint direction (`runAdjoint`, VJP) is the transposed solve of #40 / PR 25.
+- **Then post-action states:** after the move, the same batch over contingency + operator strategy pairs (the security
+  analysis's batch already composes strategies, `GpuStrategyComposer`), on top of #1385.
+
 ### #85 — PLAN: post-contingency results without writing the state back (2026-11-09; P0 to P4 done 2026-11-11)
 
 Plan: `docs/device-final-results-plan.md` (written on branch `device-final-results`, now on `state-view`). For every

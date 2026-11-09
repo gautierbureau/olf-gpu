@@ -71,11 +71,41 @@ final class GpuSaRunScope {
     static Scope evaluate(LfNetwork lfNetwork, AcLoadFlowParameters acParameters,
                           SecurityAnalysisParameters securityAnalysisParameters,
                           LoadFlowParameters.BalanceType balanceType, boolean contingencyLoops) {
+        com.powsybl.openloadflow.sa.OpenSecurityAnalysisParameters securityAnalysisParametersExt =
+                com.powsybl.openloadflow.sa.OpenSecurityAnalysisParameters.getOrDefault(securityAnalysisParameters);
+        return evaluate(lfNetwork, acParameters, securityAnalysisParameters.getLoadFlowParameters(), balanceType,
+                contingencyLoops, securityAnalysisParametersExt.isStartWithFrozenACEmulation(),
+                securityAnalysisParametersExt.getContingencyActivePowerLossDistribution());
+    }
+
+    /**
+     * The scope of a batch of post-contingency load flows, from what it depends on: the load flow parameters, whether
+     * the contingencies start with frozen AC emulation, and the contingency active power loss distribution (the batch
+     * replays the default one only), with the run's balance type and its base loops. A security analysis reads the last
+     * two from its parameters; a sensitivity analysis starts frozen per its own parameter and distributes the loss as the
+     * default distribution does.
+     */
+    static Scope evaluate(LfNetwork lfNetwork, AcLoadFlowParameters acParameters, LoadFlowParameters loadFlowParameters,
+                          boolean startWithFrozenACEmulation, String contingencyActivePowerLossDistribution) {
+        return evaluate(lfNetwork, acParameters, loadFlowParameters, loadFlowParameters.getBalanceType(), false,
+                startWithFrozenACEmulation, contingencyActivePowerLossDistribution);
+    }
+
+    /**
+     * The scope from all it depends on: the load flow parameters, the balance type and whether the loops are already a
+     * contingency's own ({@code balanceType} and {@code contingencyLoops} as in the overload taking security analysis
+     * parameters), whether the contingencies start with frozen AC emulation, and the contingency active power loss
+     * distribution.
+     */
+    @SuppressWarnings("java:S107")
+    static Scope evaluate(LfNetwork lfNetwork, AcLoadFlowParameters acParameters, LoadFlowParameters loadFlowParameters,
+                          LoadFlowParameters.BalanceType balanceType, boolean contingencyLoops,
+                          boolean startWithFrozenACEmulation, String contingencyActivePowerLossDistribution) {
         boolean noHvdc = lfNetwork.getHvdcs().isEmpty();
         // TransformerVoltageControl is BATCHABLE since the per-scenario orchestrator port
         // (AFTER_GENERATOR mode only; stage-1 scope = no generator voltage controls under the
         // transformer-controlled level — the solver checks). Anything else falls back.
-        OpenLoadFlowParameters olfGuardParams = OpenLoadFlowParameters.get(securityAnalysisParameters.getLoadFlowParameters());
+        OpenLoadFlowParameters olfGuardParams = OpenLoadFlowParameters.get(loadFlowParameters);
         // Shared groups (plan-group-member-dynamics A3/A4): AFTER_GENERATOR and WITH_GENERATOR
         // orchestrate them with group-level controllers, INCLUDING the useInitialTapPosition
         // shared-ratio manager since 2026-09-07 (group-averaged clamp bounds + the spread-
@@ -119,8 +149,7 @@ final class GpuSaRunScope {
         // orchestrator seeds those bits, so a non-linear base still requires the freeze or limits
         // loop to actually RUN (controllers built); without either (startWithFrozenACEmulation
         // explicitly off and no limits loop) the base coupling would double-count -> keep the gate.
-        boolean hvdcLoopsRun = !contingencyLoops && com.powsybl.openloadflow.sa.OpenSecurityAnalysisParameters
-                .getOrDefault(securityAnalysisParameters).isStartWithFrozenACEmulation()
+        boolean hvdcLoopsRun = !contingencyLoops && startWithFrozenACEmulation
                 || acParameters.getOuterLoops().stream().anyMatch(outerLoop ->
                         "AcHvdcAcEmulationLimits".equals(outerLoop.getName()) || "FreezingHvdcACEmulation".equals(outerLoop.getName()));
         boolean hvdcBatchable = noHvdc
@@ -174,7 +203,7 @@ final class GpuSaRunScope {
         // bus feeds an AFTER_GENERATOR transformer; 2.4e-1 kV with the pre-2026-09-15 host chain, whose
         // re-solves do not compose). The chunk path runs it as an in-kernel driver phase at its own slot, so
         // the order is OLF's and no co-presence gate is needed (tasks #48).
-        LoadFlowParameters lfGuardParams = securityAnalysisParameters.getLoadFlowParameters();
+        LoadFlowParameters lfGuardParams = loadFlowParameters;
         // AreaInterchangeControl takes DistributedSlack's place in a run (OLF drops that loop) and runs as a driver phase
         // (outerloop/area_interchange_control.cu) that moves the distribution's own per-generator participants: it needs
         // them (no load-based balance type) and one slack bus when the network has areas; OLF itself refuses a network
@@ -256,8 +285,7 @@ final class GpuSaRunScope {
         // OLF's SA distributes each contingency's SCHEDULED active power loss BEFORE the post-contingency
         // solve (ContingencyActivePowerLossDistribution SPI). The batch replays the "Default" impl
         // host-side (GpuBatchLossPreDistribution); a custom SPI cannot be replayed -> whole-run CPU.
-        String lossDistName = com.powsybl.openloadflow.sa.OpenSecurityAnalysisParameters
-                .getOrDefault(securityAnalysisParameters).getContingencyActivePowerLossDistribution();
+        String lossDistName = contingencyActivePowerLossDistribution;
         boolean defaultLossDist = com.powsybl.openloadflow.sa.OpenSecurityAnalysisParameters
                 .CONTINGENCY_ACTIVE_POWER_LOSS_DISTRIBUTION_DEFAULT_VALUE.equals(lossDistName);
         boolean distributedSlackActive = distributesActivePower;
@@ -295,8 +323,7 @@ final class GpuSaRunScope {
         // keying on acParameters.getOuterLoops() alone silently skipped the freeze phase for the
         // batch (found 2026-09-05: ~1e-4 kV plateau gaps on live-hvdc branch outages — the arms
         // solved along different paths and stopped at different points inside the criterion).
-        boolean saContingencyFreeze = !contingencyLoops && com.powsybl.openloadflow.sa.OpenSecurityAnalysisParameters
-                .getOrDefault(securityAnalysisParameters).isStartWithFrozenACEmulation();
+        boolean saContingencyFreeze = !contingencyLoops && startWithFrozenACEmulation;
         boolean cfgHvdcFreezing = !noHvdc && hvdcBatchable
                 && (saContingencyFreeze
                     || acParameters.getOuterLoops().stream().anyMatch(outerLoop -> "FreezingHvdcACEmulation".equals(outerLoop.getName())));
@@ -314,7 +341,7 @@ final class GpuSaRunScope {
         // UNIFORM_CRITERIA (the default) ties it to convEpsPerEq, PER_EQUATION_TYPE_CRITERIA to
         // maxReactivePowerMismatch/SB. Deriving it the same way keeps the device switch DECISIONS identical to
         // OLF when a user changes convEpsPerEq (with defaults both are 1e-4, which masked the divergence).
-        OpenLoadFlowParameters olfParams = OpenLoadFlowParameters.get(securityAnalysisParameters.getLoadFlowParameters());
+        OpenLoadFlowParameters olfParams = OpenLoadFlowParameters.get(loadFlowParameters);
         double slackDistTol = olfParams.getSlackBusPMaxMismatch() / PerUnit.SB;
         double reactiveLimitTol = switch (olfParams.getNewtonRaphsonStoppingCriteriaType()) {
             case UNIFORM_CRITERIA -> olfParams.getNewtonRaphsonConvEpsPerEq();
@@ -371,7 +398,7 @@ final class GpuSaRunScope {
                 false,                                       // the robust retry pass derives its own config
                 slackRelocation(acParameters),
                 null,                                        // the precomputer picks the state sink per run
-                GpuLoadFlowParameters.get(securityAnalysisParameters.getLoadFlowParameters()),
+                GpuLoadFlowParameters.get(loadFlowParameters),
                 areaInterchangeControlBatchable ? areaInterchangeControlLoop : null,
                 automationSystemOnDevice && acParameters.getOuterLoops().stream().anyMatch(outerLoop -> "AutomationSystem".equals(outerLoop.getName())),
                 null);                                       // the precomputer sets the state handback per run

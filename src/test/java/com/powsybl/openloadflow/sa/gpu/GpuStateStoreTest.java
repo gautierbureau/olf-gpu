@@ -10,6 +10,9 @@ package com.powsybl.openloadflow.sa.gpu;
 import com.powsybl.commons.PowsyblException;
 import org.junit.jupiter.api.Test;
 
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import java.nio.DoubleBuffer;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -67,6 +70,29 @@ class GpuStateStoreTest {
             }
             assertEquals(new ArrayList<>(store.keySet()), walked);
             assertThrows(PowsyblException.class, () -> store.put("bad", new double[n - 1]));
+        }
+    }
+
+    @Test
+    void statesReadIntoABufferLandAtTheirOffsetBitForBit() {
+        int n = 1001;
+        try (GpuStateStore store = GpuStateStore.create(n)) {
+            for (int k = 0; k < 5; k++) {
+                store.put("c" + k, state(n, k));
+            }
+            // the device screen's chunk: scenario i at byte i * n * 8, native order, read in place
+            ByteBuffer chunk = ByteBuffer.allocateDirect(3 * n * Double.BYTES).order(ByteOrder.nativeOrder());
+            String[] order = {"c4", "c1", "c3"};
+            for (int i = 0; i < order.length; i++) {
+                assertTrue(store.readInto(order[i], chunk, i * n * Double.BYTES));
+            }
+            assertFalse(store.readInto("c9", chunk, 0));
+            DoubleBuffer doubles = chunk.asDoubleBuffer();
+            for (int i = 0; i < order.length; i++) {
+                double[] read = new double[n];
+                doubles.get(i * n, read);
+                assertArrayEquals(store.get(order[i]), read, 0.0, "scenario " + i);
+            }
         }
     }
 

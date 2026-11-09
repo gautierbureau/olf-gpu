@@ -266,7 +266,7 @@ OLF_JNI(sa_gpu, ViolationScreenNative, destroyViolationTable)(
 }
 
 /** Run the screen over one chunk of states, leaving counts and records on the device. False on any CUDA failure. */
-static bool runChunk(JNIEnv* env, ViolationTable* t, jdoubleArray jStates, jint nScenarios, jint n,
+static bool runChunk(JNIEnv* env, ViolationTable* t, jobject jStates, jint nScenarios, jint n,
                      jdouble band, jint capacity) {
     size_t stateBytes = (size_t) nScenarios * n * sizeof(double);
     size_t recordBytes = (size_t) nScenarios * capacity * sizeof(int);
@@ -285,9 +285,12 @@ static bool runChunk(JNIEnv* env, ViolationTable* t, jdoubleArray jStates, jint 
             || !grow(t->counts, t->countsCap, countBytes)) {
         return false;
     }
-    jdouble* states = env->GetDoubleArrayElements(jStates, nullptr);
+    // The chunk's states sit in a direct buffer: read in place, no JNI copy of them first.
+    const void* states = env->GetDirectBufferAddress(jStates);
+    if (states == nullptr || env->GetDirectBufferCapacity(jStates) < static_cast<jlong>(stateBytes)) {
+        return false;
+    }
     cudaError_t err = cudaMemcpy(t->states.p, states, stateBytes, cudaMemcpyHostToDevice);
-    env->ReleaseDoubleArrayElements(jStates, states, JNI_ABORT);
     if (err != cudaSuccess) {
         std::fprintf(stderr, "olfgpu violations: state upload: %s\n", cudaGetErrorString(err));
         return false;
@@ -322,7 +325,7 @@ static bool runChunk(JNIEnv* env, ViolationTable* t, jdoubleArray jStates, jint 
  */
 JNIEXPORT jintArray JNICALL
 OLF_JNI(sa_gpu, ViolationScreenNative, screenViolationsBatch)(
-        JNIEnv* env, jclass, jlong handle, jdoubleArray jStates, jint nScenarios, jint n,
+        JNIEnv* env, jclass, jlong handle, jobject jStates, jint nScenarios, jint n,
         jdouble band, jint capacity) {
     auto* t = reinterpret_cast<ViolationTable*>(handle);
     if (t == nullptr || nScenarios <= 0 || !runChunk(env, t, jStates, nScenarios, n, band, capacity)) {

@@ -11,7 +11,10 @@ import com.powsybl.contingency.BranchContingency;
 import com.powsybl.contingency.Contingency;
 import com.powsybl.iidm.network.Network;
 import com.powsybl.openloadflow.CommonTestConfig;
+import com.powsybl.openloadflow.OpenLoadFlowParameters;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 import java.util.List;
 
@@ -59,13 +62,18 @@ class GpuSaPhaseControlTest extends AbstractGpuSaTest {
     /** A PHASE tap the device's loops move after an outage, seen in the reported FLOWS, not only in the voltages
      *  (assertFlowsMatchCpu): PS1's fixture tap changer has three taps, too coarse for any post-contingency move, so it
      *  gets 21 steps of one degree, each with its own impedance — a move changes the angle and the branch model. The
-     *  incremental loop (a flow controller) moves PS1 from tap index 17 to 15 after L1. (The continuous loop is not here:
-     *  on this tap changer its device solve ends 0.54 kV from OLF's after L1_BIS — tasks.md #86.) */
-    @Test
-    void devicePhaseTapMoveIsInTheReportedBranchFlows() {
+     *  incremental loop (a flow controller) moves PS1 from tap index 17 to 15 after L1. The continuous loop is run from
+     *  three initial taps: the one its base load flow rounds to (7) and two it rounds away from (0, 6). OLF's phase
+     *  control target P is a flow term of its own, which kept the admittance of the INITIAL tap after the base rounding
+     *  until olf-local-patches refreshed it on every tap change: the device's continuous a1 after L1_BIS then differed
+     *  from OLF's by up to two taps (tasks.md #86). */
+    @ParameterizedTest
+    @CsvSource({"INCREMENTAL, 0", "CONTINUOUS_WITH_DISCRETISATION, 0", "CONTINUOUS_WITH_DISCRETISATION, 6",
+        "CONTINUOUS_WITH_DISCRETISATION, 7"})
+    void devicePhaseTapMoveIsInTheReportedBranchFlows(OpenLoadFlowParameters.PhaseShifterControlMode mode, int initialTap) {
         Network network = com.powsybl.openloadflow.network.PhaseControlFactory.createNetworkWithT2wt();
         com.powsybl.iidm.network.TwoWindingsTransformer ps1 = network.getTwoWindingsTransformer("PS1");
-        com.powsybl.iidm.network.PhaseTapChangerAdder ptc = ps1.newPhaseTapChanger().setLowTapPosition(-10).setTapPosition(0)
+        com.powsybl.iidm.network.PhaseTapChangerAdder ptc = ps1.newPhaseTapChanger().setLowTapPosition(-10).setTapPosition(initialTap)
                 .setRegulationMode(com.powsybl.iidm.network.PhaseTapChanger.RegulationMode.ACTIVE_POWER_CONTROL)
                 .setTargetDeadband(1).setRegulating(true).setRegulationTerminal(ps1.getTerminal1()).setRegulationValue(83);
         for (int t = -10; t <= 10; t++) {
@@ -82,8 +90,7 @@ class GpuSaPhaseControlTest extends AbstractGpuSaTest {
                 new Contingency("L1", new BranchContingency("L1")));
         com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
                 .setPhaseShifterRegulationOn(true).setDistributedSlack(true).setUseReactiveLimits(true);
-        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp).setPhaseShifterControlMode(
-                com.powsybl.openloadflow.OpenLoadFlowParameters.PhaseShifterControlMode.INCREMENTAL);
+        OpenLoadFlowParameters.create(lfp).setPhaseShifterControlMode(mode);
         assertFlowsMatchCpu(network, ctgs, lfp, 2);
     }
 

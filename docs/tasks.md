@@ -11,6 +11,16 @@ complete. Keep the numbering: it is cited in commit messages.
 
 ## Open
 
+### #94 — PROPOSAL: array-form outer loops, one source for CPU and GPU (2026-11-10)
+
+Not started. The device port of the outer loops is 10,621 lines of code against OLF's 3,286 (ReactiveLimits alone:
+2,965 against 331). `docs/outer-loops-on-device.md` describes the current workflow and where those lines go;
+`docs/outer-loop-array-form-proposal.md` proposes a gather / decide / derive / apply shape over per-loop arrays, with
+the decision written once in OLF and generated for the device, and a ReactiveLimits pilot in seven stages, each with
+its own exit test. Stage 4 of the pilot (host-decide on the loop's arrays, no `LfNetwork`) is also the measurement of
+what keeping a loop in Java costs — the question #50's stage 0 was meant to answer before the hybrid engine was
+removed (f9b08414).
+
 ### #93 — DONE: the tests' tolerance switches are gone (2026-11-10)
 
 `AbstractGpuSaTest`'s two comparison helpers read `olf.gpu.test.convEps` / `olf.gpu.test.slackTol` (falling back to

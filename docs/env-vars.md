@@ -64,6 +64,7 @@ from those two lists; add a channel there, then here.
 | `OLF_GPU_SHUNT_TRACE` | java | The incremental shunt voltage control's sensitivities and decisions. |
 | `OLF_GPU_SLOT_DUMP` | native | `<prefix>`: the traced slot's row targets, state and modes at driver start and pass 0 |
 | `OLF_GPU_STATE_DUMP` | native | `<n>`: slot 0's rows (mode, target, state, residual) for iterations 0..n |
+| `OLF_GPU_STRUCTURE_DUMP` | java + native | `<prefix>`: every structure's union pattern as text (`<prefix>-n<n>.pattern`, native) and the variable owning each row (`<prefix>-n<n>.rows`, java); input of `tools/structure-gap` |
 | `OLF_GPU_SW_LOG` | native | `<slot>` or `all`: every reactive-limit check of that slot, logged on the device |
 | `OLF_GPU_SW_TRACE` | native | `<slot>`: every controller that switches in that slot's reactive-limit passes |
 | `OLF_GPU_TRACE` | native | cuDSS analysis timing and the zero-diagonal repair's tables |

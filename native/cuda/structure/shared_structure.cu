@@ -211,6 +211,21 @@ SharedStructure* buildStructure(int n,
     }
     for (int r = 0; r < n; r++) structure->rowPtr[r + 1] += structure->rowPtr[r];
     CsrPattern pos{structure->rowPtr.data(), structure->colIdx.data()};    // (row,col) -> slot by binary search
+    if (const char* dump = traceValue(Trace::STRUCTURE_DUMP)) {
+        // text, four lines: "n nnz", rowMap[n], rowPtr[n + 1], colIdx[nnz]. One file per structure size; a later
+        // structure of the same size overwrites it. The Java side names the rows (<prefix>-n<n>.rows).
+        const std::string path = std::string(dump) + "-n" + std::to_string(n) + ".pattern";
+        if (FILE* f = std::fopen(path.c_str(), "w")) {
+            std::fprintf(f, "%d %d\n", n, structure->nnz);
+            for (int r = 0; r < n; r++) std::fprintf(f, r ? " %d" : "%d", rowMap[r]);
+            std::fprintf(f, "\n");
+            for (int r = 0; r <= n; r++) std::fprintf(f, r ? " %d" : "%d", structure->rowPtr[r]);
+            std::fprintf(f, "\n");
+            for (int i = 0; i < structure->nnz; i++) std::fprintf(f, i ? " %d" : "%d", structure->colIdx[i]);
+            std::fprintf(f, "\n");
+            std::fclose(f);
+        }
+    }
     storeZeroDiagonalRepairTables(structure.get(), zeroDiagonalRows, zeroDiagonalDonors, zeroDiagonalRepairSigns);
     structure->dRowPtr.upload(structure->rowPtr.data(), (n + 1) * sizeof(int));
     structure->dColIdx.upload(structure->colIdx.data(), structure->nnz * sizeof(int));

@@ -16,6 +16,7 @@ import com.powsybl.openloadflow.equations.Variable;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfNetwork;
+import com.powsybl.openloadflow.util.gpu.GpuTrace;
 
 import java.io.IOException;
 import java.io.Writer;
@@ -55,6 +56,30 @@ public final class GpuEquationDump {
             };
         } catch (RuntimeException e) {
             return "#" + num;                                // a diagnostic never fails the run it describes
+        }
+    }
+
+    /**
+     * The variable owning each stable row, one line per row: {@code row<TAB>variable type<TAB>element id}. Written to
+     * {@code <prefix>-n<n>.rows} when {@link GpuTrace#STRUCTURE_DUMP} is set, next to the union pattern the native
+     * side writes for the structure of that size ({@code <prefix>-n<n>.pattern}); tools/structure-gap joins the two.
+     * Throwaway measurement support: a diagnostic, it never fails the extraction it describes.
+     */
+    static void writeRowOwners(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es) {
+        String prefix = GpuTrace.STRUCTURE_DUMP.value();
+        if (prefix == null) {
+            return;
+        }
+        List<Variable<AcVariableType>> variables = es.getIndex().getSortedVariablesToFind();
+        StringBuilder sb = new StringBuilder();
+        for (Variable<AcVariableType> v : variables) {
+            sb.append(v.getRow()).append('\t').append(v.getType().name()).append('\t')
+                    .append(elementId(network, v.getType(), v.getElementNum())).append('\n');
+        }
+        try {
+            java.nio.file.Files.writeString(java.nio.file.Path.of(prefix + "-n" + variables.size() + ".rows"), sb);
+        } catch (IOException | RuntimeException e) {
+            System.err.println("OLF_GPU_STRUCTURE_DUMP failed: " + e);
         }
     }
 

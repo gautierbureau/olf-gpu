@@ -64,6 +64,8 @@ public enum GpuTrace {
     SA_VAR_DUMP("OLF_GPU_SA_VAR_DUMP"),
     /** {@code <file>}: the per-generator seed of the loss pre-distribution of every contingency. */
     SEED_DUMP("OLF_GPU_SEED_DUMP"),
+    /** {@code <prefix>}: the variable owning each row of every extraction, next to the native union pattern (tools/structure-gap). */
+    STRUCTURE_DUMP("OLF_GPU_STRUCTURE_DUMP"),
     /** The incremental shunt voltage control's sensitivities and decisions. */
     SHUNT_TRACE("OLF_GPU_SHUNT_TRACE"),
     /** The post-contingency realistic-voltage check: which buses make a state unrealistic. */

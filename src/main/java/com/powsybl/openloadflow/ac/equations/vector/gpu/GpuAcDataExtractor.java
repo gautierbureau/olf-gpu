@@ -89,6 +89,7 @@ public final class GpuAcDataExtractor {
                                     java.util.Set<String> baseOpenBranchIds,
                                     java.util.Set<String> baseOpenZeroImpedanceBranchIdList, GpuDistributedSlackParameters distributedSlackParameters) {
         GpuAcValidation.validate(es);
+        GpuEquationDump.writeRowOwners(network, es);
         ExtractionColumns columns = ExtractionColumns.of(network, es);
         // A coupler disabled after OLF built its equation system (an action or an automation system opened it) keeps its
         // DUMMY_P / DUMMY_Q variables, held at 0 by DUMMY_TARGET_P / DUMMY_TARGET_Q: packed base-open, the device claims

@@ -23,6 +23,7 @@ enum class Trace : int {
     RL_TRACE,             // OLF_GPU_RL_TRACE: the reactive-limit tables a context is built with
     SLOT_DUMP,            // OLF_GPU_SLOT_DUMP=<prefix>: the traced slot's row targets, state and modes at driver start and pass 0
     STATE_DUMP,           // OLF_GPU_STATE_DUMP=<n>: slot 0's rows (mode, target, state, residual) for iterations 0..n
+    STRUCTURE_DUMP,       // OLF_GPU_STRUCTURE_DUMP=<prefix>: every structure's union pattern as text (tools/structure-gap)
     SW_LOG,               // OLF_GPU_SW_LOG=<slot> or all: every reactive-limit check of that slot, logged on the device
     SW_TRACE,             // OLF_GPU_SW_TRACE=<slot>: every controller that switches in that slot's reactive-limit passes
     TRACE,                // OLF_GPU_TRACE: cuDSS analysis timing and the zero-diagonal repair's tables
@@ -35,7 +36,7 @@ inline const char* traceValue(Trace channel) {
     static const std::array<const char*, static_cast<int>(Trace::COUNT)> values = [] {
         const char* variables[] = {"OLF_GPU_BATCH_TRACE", "OLF_GPU_DQ_TRACE", "OLF_GPU_DX_DUMP_ON_REJECT", "OLF_GPU_LOOP_TRACE",
                                    "OLF_GPU_LU_COMPARE", "OLF_GPU_LU_PATTERN_DUMP", "OLF_GPU_PHASE_TIME", "OLF_GPU_REJECT_TRACE", "OLF_GPU_RL_AUDIT", "OLF_GPU_RL_TRACE",
-                                   "OLF_GPU_SLOT_DUMP", "OLF_GPU_STATE_DUMP", "OLF_GPU_SW_LOG", "OLF_GPU_SW_TRACE", "OLF_GPU_TRACE",
+                                   "OLF_GPU_SLOT_DUMP", "OLF_GPU_STATE_DUMP", "OLF_GPU_STRUCTURE_DUMP", "OLF_GPU_SW_LOG", "OLF_GPU_SW_TRACE", "OLF_GPU_TRACE",
                                    "OLF_GPU_UNREALISTIC_TRACE"};
         static_assert(sizeof(variables) / sizeof(variables[0]) == static_cast<int>(Trace::COUNT), "one variable per channel");
         std::array<const char*, static_cast<int>(Trace::COUNT)> read{};

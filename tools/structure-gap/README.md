@@ -67,7 +67,28 @@ diagonal on every row); `compare.py` reads `rowMap` but does not use it.
 
 Default load flow parameters, sparse matrix, one run in a shared container: the timings are indicative.
 
+| network | modeling | n | nnz initial | nnz solved | vs legacy solved | structure builds | pattern stable | LU us (solved) | vs legacy |
+|---|---|---|---|---|---|---|---|---|---|
+| ieee14 | LEGACY | 28 | 180 | 180 |  | 1 | yes | 22 |  |
+| ieee14 | ALTERNATIVE | 28 | 211 | 211 | +17.2% | 1 | yes | 27 | +23% |
+| ieee14 | ALTERNATIVE_SA | 28 | 211 | 211 | +17.2% | 1 | yes | 32 | +45% |
+| ieee118 | LEGACY | 236 | 1453 | 1515 |  | 2 | no | 161 |  |
+| ieee118 | ALTERNATIVE | 236 | 1891 | 1891 | +24.8% | 1 | yes | 223 | +39% |
+| ieee118 | ALTERNATIVE_SA | 236 | 1891 | 1891 | +24.8% | 1 | yes | 233 | +45% |
+| ieee300 | LEGACY | 600 | 4130 | 4190 |  | 3 | no | 716 |  |
+| ieee300 | ALTERNATIVE | 600 | 4469 | 4469 | +6.7% | 1 | yes | 552 | -23% |
+| ieee300 | ALTERNATIVE_SA | 600 | 4469 | 4469 | +6.7% | 1 | yes | 555 | -22% |
+| case1354pegase | LEGACY | 2708 | 17481 | 17784 |  | 3 | no | 2244 |  |
+| case1354pegase | ALTERNATIVE | 2708 | 19085 | 19085 | +7.3% | 1 | yes | 2604 | +16% |
+| case1354pegase | ALTERNATIVE_SA | 2708 | 19085 | 19085 | +7.3% | 1 | yes | 2488 | +11% |
+| case2869pegase | LEGACY | 5738 | 39941 | 40577 |  | 4 | no | 5611 |  |
+| case2869pegase | ALTERNATIVE | 5738 | 43209 | 43209 | +6.5% | 1 | yes | 6194 | +10% |
+| case2869pegase | ALTERNATIVE_SA | 5738 | 43209 | 43209 | +6.5% | 1 | yes | 6213 | +11% |
+| case9241pegase | LEGACY | 18482 | 139900 | 142089 |  | 4 | no | 25329 |  |
+| case9241pegase | ALTERNATIVE | 18482 | 150609 | 150609 | +6.0% | 1 | yes | 26370 | +4% |
+| case9241pegase | ALTERNATIVE_SA | 18482 | 150609 | 150609 | +6.0% | 1 | yes | 26647 | +5% |
 
+ieee14: 0 of 14 buses not eligible {}; 0 of 5 generator voltage controls not eligible {} (0 remote, 0 shared); 0 zero-impedance branches
 
 - `structure builds`: how many times the load flow built the matrix structure. Legacy rebuilds on each PV to PQ
   wave (4 on case9241pegase); alternative equations build once.

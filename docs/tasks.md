@@ -29,7 +29,7 @@ susceptance with the changed section, and its first section change summed it in.
 
 `BusState` now saves and restores the section of each compensator of the controller shunt and of the shunt. Fork commit
 3d9e6d64b on `olf-local-patches` (suite 1531/0/3); upstream branch `restore-shunt-sections` 2927936b9 on upstream main
-144a54c9d, signed off (suite 1617/0/4, 0 checkstyle violations). Neither is pushed. The tests
+144a54c9d, signed off (suite 1617/0/4, 0 checkstyle violations). Both are pushed to `gb` (2026-11-10). The tests
 `OpenSecurityAnalysisTest.testIncrementalShuntVoltageControlAfterASectionChange` and
 `OpenSecurityAnalysisWithActionsTest.testShuntActionAfterAnotherOnTheSameBus` fail without the fix.
 

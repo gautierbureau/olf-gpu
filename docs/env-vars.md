@@ -4,13 +4,16 @@ Every one of these is read at runtime. The project's standing goal is to **match
 precision on every difference**, so the dangerous category is the third table: a switch that selects a
 different computation can preserve a wrong answer behind a default, and nothing in CI explores it.
 
-Three were removed on 2026-09-17 for exactly that reason:
+Three were removed on 2026-09-17 for exactly that reason, and two on 2026-11-10 with the `olf.gpu.test.convEps` /
+`olf.gpu.test.slackTol` system properties that were read before them:
 
 | removed | why |
 |---|---|
 | `OLF_GPU_CURVE_GENCUM` | re-enabled the share-reconstructed curve P after the per-generator read was proven better (rte6515 worst generator error 3.790e-02 -> 4.837e-05 kV) |
 | `OLF_GPU_NO_CURVES` | a bisection lever that made curve buses wrong by design; it had served its purpose |
 | `OLF_GPU_SA_NO_BATCH` | duplicated the pre-existing `-Dolf.gpu.sa.disableBatch=true` |
+| `OLF_GPU_DBG_CONV_EPS` | tightened OLF's Newton criterion on both arms (the SA test helpers, the rte6515 harness). Tightening hides where the arms' trajectories part instead of answering it |
+| `OLF_GPU_DBG_SLACK_TOL` | tightened the slack band on both arms (the SA test helpers). The two tests that set it match the CPU at 1e-12 kV at OLF's default criteria |
 
 Classification below is by NAME and call site, not an individual audit of each one's semantics.
 Anything in the third table should be treated as unverified until someone reads it.
@@ -142,9 +145,9 @@ These set a tolerance for the GPU arm that the CPU arm does not get:
 
 A one-sided tolerance is the mechanism by which a GPU/CPU difference can be made to disappear without
 being fixed, which the project forbids: **a disagreement at the default tolerance is an orchestration
-bug to fix, not a tolerance to loosen.** Contrast `OLF_GPU_DBG_CONV_EPS`, which tightens BOTH arms —
-that is the legitimate instrument, because squeezing the slack and watching what survives is how a real
-state difference is told from convergence slack.
+bug to fix, not a tolerance to loosen.** Tightening both arms does not answer it
+either: the arms must take the same iterates at the default criterion, and the rte6515 harness's `OLF_GPU_DBG_NR`
+prints the CPU arm's trajectory to put beside the device's.
 
 Also in the list and wrong by construction, useful only as momentary bisection levers:
 `OLF_GPU_NO_DS`, `OLF_GPU_NO_RL`, `OLF_GPU_NO_DIST_SLACK`, `OLF_GPU_SA_NO_DS`, `OLF_GPU_SA_NO_RL`,
@@ -152,15 +155,13 @@ Also in the list and wrong by construction, useful only as momentary bisection l
 run with one set cannot match the CPU. They should be deleted once the question that motivated them is
 answered — the three removed above were removed on exactly that ground.
 
-## BEHAVIOUR-CHANGING (22) — REVIEW
+## BEHAVIOUR-CHANGING (20) — REVIEW
 
 Each selects a different computation. Several disable an outer loop or loosen a tolerance, which is wrong by construction (and note the standing rule: never loosen a tolerance to make the GPU agree with the CPU). These should be justified individually or deleted.
 
 | variable | read at |
 |---|---|
 | `OLF_GPU_BASE_ON_GPU` | src/test/java/com/powsybl/openloadflow/ac/solver/gpu/batch/GpuBatchedN1FixedIterTest.java:149 +2 |
-| `OLF_GPU_DBG_CONV_EPS` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuVsCpuRte6515SaTest.java:295 +2 |
-| `OLF_GPU_DBG_SLACK_TOL` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuBatchedAcSecurityAnalysisTest.java:3084 +1 |
 | `OLF_GPU_DISC_EPS` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuSingleSolveRejectReasonProbe.java:60 |
 | `OLF_GPU_DISC_SLACKTOL` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuSingleSolveRejectReasonProbe.java:64 |
 | `OLF_GPU_FIXED_ITERS` | src/test/java/com/powsybl/openloadflow/ac/solver/gpu/batch/GpuBatchedN1FixedIterTest.java:79 |

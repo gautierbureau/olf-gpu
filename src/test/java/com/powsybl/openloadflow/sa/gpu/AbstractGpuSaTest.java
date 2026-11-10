@@ -251,16 +251,6 @@ abstract class AbstractGpuSaTest extends AbstractOpenSecurityAnalysisTest {
 
     void assertGpuMatchesCpu(Network network, List<Contingency> contingencies, double vToleranceKv,
                                      com.powsybl.loadflow.LoadFlowParameters lfp, boolean requireEngage) {
-        String convEps = System.getProperty("olf.gpu.test.convEps", System.getenv("OLF_GPU_DBG_CONV_EPS"));
-        if (convEps != null) {
-            com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)   // create() ATTACHES (get() would detach!)
-                    .setNewtonRaphsonConvEpsPerEq(Double.parseDouble(convEps));
-        }
-        String slackTol = System.getProperty("olf.gpu.test.slackTol", System.getenv("OLF_GPU_DBG_SLACK_TOL"));
-        if (slackTol != null) {
-            com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
-                    .setSlackBusPMaxMismatch(Double.parseDouble(slackTol));
-        }
         com.powsybl.security.SecurityAnalysisParameters sap = new com.powsybl.security.SecurityAnalysisParameters();
         sap.setLoadFlowParameters(lfp);
         // STATE-LEVEL comparison (task #21): monitor every voltage level — status/violation-count
@@ -375,16 +365,6 @@ abstract class AbstractGpuSaTest extends AbstractOpenSecurityAnalysisTest {
                                           List<com.powsybl.contingency.strategy.OperatorStrategy> strategies,
                                           List<com.powsybl.action.Action> actions, int expectedPrecomputed,
                                           com.powsybl.loadflow.LoadFlowParameters lfp) {
-        String sConvEps = System.getProperty("olf.gpu.test.convEps", System.getenv("OLF_GPU_DBG_CONV_EPS"));
-        if (sConvEps != null) {
-            com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
-                    .setNewtonRaphsonConvEpsPerEq(Double.parseDouble(sConvEps));
-        }
-        String sSlackTol = System.getProperty("olf.gpu.test.slackTol", System.getenv("OLF_GPU_DBG_SLACK_TOL"));
-        if (sSlackTol != null) {
-            com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
-                    .setSlackBusPMaxMismatch(Double.parseDouble(sSlackTol));
-        }
         com.powsybl.security.SecurityAnalysisParameters sap = new com.powsybl.security.SecurityAnalysisParameters();
         // Node-breaker networks: contingency PROPAGATION opens the target's breakers too (switches are
         // LfBranches in breaker mode), tripping the batch's >2-branch guard — keep the strategy tests

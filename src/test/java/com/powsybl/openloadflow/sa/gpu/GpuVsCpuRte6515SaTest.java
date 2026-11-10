@@ -798,9 +798,6 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
         }
 
         LoadFlowParameters lfp = JsonLoadFlowParameters.read(PARAMS_FILE);
-        // OLF_GPU_DBG_CONV_EPS: tighten the inner-Newton criterion on BOTH arms. The only honest way to
-        // tell a real state difference from convergence slack is to squeeze the slack and watch what
-        // survives — see the standing rule against calling a difference a tolerance artefact unproven.
         // OLF_GPU_DBG_RL: TRACE the CPU arm's ReactiveLimitsOuterLoop, so every PV<->PQ switch it
         // makes (bus id, q, qLimit) can be diffed against the device's GPU_RL / GPU_RL_FINAL switch
         // list. A PV -> PQ switch the device makes and OLF does not is invisible in any residual - the device
@@ -826,11 +823,6 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
         if ("1".equals(System.getenv("OLF_GPU_SA_NO_DS"))) {
             lfp.setDistributedSlack(false);
             System.out.println("  distributed slack DISABLED on both arms (OLF_GPU_SA_NO_DS=1)");
-        }
-        String convEpsEnv = System.getenv("OLF_GPU_DBG_CONV_EPS");
-        if (convEpsEnv != null) {
-            com.powsybl.openloadflow.OpenLoadFlowParameters.get(lfp)
-                    .setNewtonRaphsonConvEpsPerEq(Double.parseDouble(convEpsEnv));
         }
         // OLF_GPU_SVC=1: enable SecondaryVoltageControl — the RTE params default to off, but
         // the rte6515 case carries SVC zones. This is the path that differed between GPU and

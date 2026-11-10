@@ -40,7 +40,7 @@ device's 393.2433456 kV; b3 19.393 against 20.133 kV). With the fixed OLF: `GpuS
 LU, full suite 514/0/6 with checkstyle. The RTE parameters leave the shunt voltage control off and the RTE runs carry
 no action, so no RTE bus has a shunt with sections.
 
-### #89 — the device answers a contingency without its own load flow parameters (2026-11-10)
+### #89 — a contingency's own load flow parameters, on the device (2026-11-10; step 1 done)
 
 OLF applies a contingency's `ContingencyLoadFlowParameters` (distributed slack, area interchange control, balance type,
 outer loop names) to the context before its simulation (`AbstractSecurityAnalysis`, `applySpecificContingencyParameters`).
@@ -70,6 +70,34 @@ key. Plan:
    run's loops but start from the parent's device run (state, reactive-limit states, distribution anchors), captured in
    another solve; first step keeps those contingencies on the CPU, second step carries the parent captures across.
 4. Result time: `pairDistributedOnDevice` reads the pair's group distribution, not the run's flag.
+
+**Step 1 (2026-11-10).** Done as planned: `GpuSaRunScope.evaluate` takes a group's balance type and keys its HVDC freeze
+on its own loops (`contingencyLoops`); `GpuBatchPrecomputer` takes `SolveGroup`s (one `SolveSettings` each, the run's
+first) and solves them one after the other into one sink and one set of results; `GpuBatchedAcSecurityAnalysis.solveGroups`
+builds them through OLF's own `applySpecificContingencyParameters`; `pairDistributedOnDevice` reads
+`GpuSaRunState.ownDistributedSlack`. `GpuSaContingencyParametersTest`, each at 1e-12 with the contingency on the device,
+each failing without the change: own loop list (ShuntNetworkFactory, OLF holds SHUNT where the run's shunt loop moves
+it), distributed slack off and load-based balance on B2-G's 40 MW (42.67 MW distributed by the old device run against
+0 and 37.87), a strategy under the default scope (pair in the contingency's solve), a strategy under `CONTINGENCY_ONLY`
+(on the CPU, below), an explicit list without `FreezingHvdcACEmulation` on an HVDC network (branch flows compared too:
+both buses hold their voltage). Gates: `GpuSa*Test` 297/0/2 on cuDSS and on our LU, full suite 520/0/6 with checkstyle.
+
+That last case found a device bug of its own: the HVDC controller tables were built only when the freeze or limits loop
+ran, and the slack check counts a link's flow at the slack bus from them (`hvdcSlackBalanceBatch`). With neither loop
+the link's 2.4 MW stayed out of the check, and the device distributed 2.6 MW where OLF distributes none. OLF's default
+loop list always holds the limits loop with AC emulation on, so it takes an explicit list (per contingency, or the run's
+`outerLoopNames`). The tables are now built whenever the pack holds an AC emulation link, in the batch
+(`GpuBatchedSecurityAnalysisSolver`) and the base load flow (`GpuNewtonRaphson`); without the freeze loop nothing is
+frozen and the device's freeze phase finds nothing to release.
+
+**Step 2, not started: `CONTINGENCY_ONLY` with strategies.** The contingency runs with its own loops, its strategies with
+the run's from the contingency's state. Today such a contingency and its strategies run on the CPU (correct, measured).
+The pair phase seeds a pair from its parent's result row and six captures (`ParentCaptures`: reactive-limit states and
+target Q, distribution targets, generator moves, exhausted start, absorbed slack), all keyed by the parent's index in
+the same solve. Carrying them across solves is enough when the override leaves the distribution alone (an outer loop
+list with the run's distribution). An override that changes the distribution (distributed slack, balance type, area
+interchange) gives the parent another extraction with other participants, so its captures do not apply to the pair's:
+the pair would have to start from the parent's full targets, which the pair phase has no path for.
 
 ### #88 — FIXED: the targeted restore left the device's control state variables in the network (2026-11-10)
 

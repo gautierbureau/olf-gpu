@@ -133,15 +133,63 @@ class GpuSaShuntControlTest extends AbstractGpuSaTest {
         assertEquals(1, GpuBatchedAcSecurityAnalysis.LAST_TARGETED_RESTORE_COUNT.get(), "l1 answered on the device, its restore targeted");
     }
 
+    /** The incremental control moves SHUNT's sections from where they are, so OLF's restore has to put the sections back
+     *  with the susceptance (fixed in OLF, tasks #90): l1's outage takes SHUNT from section 2 to section 1, ld1's loss
+     *  alone keeps it on 2, and ld1 after l1 then started from section 1 in OLF (1.9e-5 kV on one bus). The device answers
+     *  every contingency from the base sections. */
+    @Test
+    void deviceIncrementalShuntSectionsAfterAContingencyThatSwitchedOne() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = shuntNetworkWithParallelL1(10);
+        network.getShuntCompensator("SHUNT").setTargetV(395).setTargetDeadband(0.1);
+        List<Contingency> ctgs = List.of(new Contingency("l1", new BranchContingency("l1")),
+                new Contingency("ld1", new com.powsybl.contingency.LoadContingency("ld1")));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setShuntCompensatorVoltageControlOn(true).setDistributedSlack(true).setUseReactiveLimits(true);
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
+                .setShuntVoltageControlMode(com.powsybl.openloadflow.OpenLoadFlowParameters.ShuntVoltageControlMode.INCREMENTAL_VOLTAGE_CONTROL);
+        assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
+        assertEquals(2, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(), "both contingencies on the device");
+    }
+
+    /** SHUNT3 and SHUNT3B make one shunt of b3, whose susceptance is the sum of their sections. OLF's restore after
+     *  strategy1 put the sum back but left SHUNT3 on strategy1's section, which strategy2's action summed in (fixed in
+     *  OLF, tasks #90: b4 at 392.407 kV instead of 399.617 kV). The device composes every pair from the
+     *  post-contingency state. */
+    @Test
+    void deviceShuntActionAfterAnotherOnTheSameBus() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = com.powsybl.openloadflow.network.VoltageControlNetworkFactory.createWithShuntSharedRemoteControl();
+        network.getShuntCompensator("SHUNT2").setSectionCount(25);
+        network.getShuntCompensator("SHUNT3").setSectionCount(25);
+        network.getVoltageLevel("vl3").newShuntCompensator().setId("SHUNT3B").setBus("b3").setConnectableBus("b3")
+                .setSectionCount(25).newLinearModel().setMaximumSectionCount(50).setBPerSection(-1E-2).setGPerSection(0.0).add().add();
+        List<Contingency> ctgs = List.of(new Contingency("tr2", new com.powsybl.contingency.TwoWindingsTransformerContingency("tr2")));
+        List<com.powsybl.action.Action> actions = List.of(
+                new com.powsybl.action.ShuntCompensatorPositionActionBuilder().withId("shunt3To50").withShuntCompensatorId("SHUNT3")
+                        .withSectionCount(50).build(),
+                new com.powsybl.action.ShuntCompensatorPositionActionBuilder().withId("shunt3bTo0").withShuntCompensatorId("SHUNT3B")
+                        .withSectionCount(0).build());
+        SecurityAnalysisResult cpu = assertStrategyMatchesCpu(network, ctgs, strategiesOf("tr2", "shunt3To50", "shunt3bTo0"), actions, 3);
+        assertEquals(399.617, cpu.getOperatorStrategyResults().get(1).getConditionalActionsResults().get(0).getNetworkResult()
+                .getBusResult("b4").getV(), 1e-3, "strategy2 on its own sections");
+    }
+
     /** ShuntNetworkFactory with l1 doubled by l1_BIS (twice its impedance), so that either outage keeps the grid
      *  connected and moves the voltage SHUNT controls. */
     private static Network shuntNetworkWithParallelL1() {
+        return shuntNetworkWithParallelL1(2);
+    }
+
+    private static Network shuntNetworkWithParallelL1(double impedanceFactor) {
         Network network = com.powsybl.openloadflow.network.ShuntNetworkFactory.create();
         com.powsybl.iidm.network.Line l1 = network.getLine("l1");
         network.newLine().setId("l1_BIS")
                 .setVoltageLevel1(l1.getTerminal1().getVoltageLevel().getId()).setBus1(l1.getTerminal1().getBusBreakerView().getBus().getId())
                 .setVoltageLevel2(l1.getTerminal2().getVoltageLevel().getId()).setBus2(l1.getTerminal2().getBusBreakerView().getBus().getId())
-                .setR(l1.getR() * 2).setX(l1.getX() * 2)
+                .setR(l1.getR() * impedanceFactor).setX(l1.getX() * impedanceFactor)
                 .setG1(l1.getG1()).setB1(l1.getB1()).setG2(l1.getG2()).setB2(l1.getB2()).add();
         return network;
     }

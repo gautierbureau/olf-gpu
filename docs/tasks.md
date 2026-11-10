@@ -11,24 +11,34 @@ complete. Keep the numbering: it is cited in commit messages.
 
 ## Open
 
-### #90 — OLF: incremental shunt control results depend on the order of the contingencies (2026-11-10)
+### #90 — FIXED (in OLF): the network restore left the shunt compensators' sections, so results depended on the order (2026-11-10)
 
-OLF's network restore puts back a controller shunt's susceptance but not its controllers' section positions: `BusState`
-saves `controllerShuntB` and `controllerShuntG`, not `Controller.position` (upstream main 144a54c9d too). The
-incremental loop moves sections from the current position (`Controller.updateSectionB`: `newB = getB() + deltaB`, with
-`getB()` the B of the current section), so after a contingency that switched a section, the next one starts from that
-section with the base susceptance. Measured with OLF alone (CPU security analysis) on ShuntNetworkFactory plus `l1_BIS`,
-INCREMENTAL_VOLTAGE_CONTROL, SHUNT's deadband at 0.1 kV, contingencies `l1` and the loss of `ld1`; b3 against the same
-contingency run alone:
-- target 393 kV, `l1_BIS` at twice `l1`'s impedance (base on section 2, both contingencies on 1): `ld1` after `l1`
-  +4.2e-8 kV, `l1` after `ld1` +1.3e-6 kV;
-- target 395 kV, ten times `l1`'s impedance (base on 2, `l1` on 1, `ld1` on 2): `ld1` after `l1` +4.0e-5 kV.
+A shunt with sections (a voltage-controlling shunt, or shunt compensators an action operates) keeps the section of each
+of its compensators, and its susceptance and conductance are their sum: every section change sums them again
+(`Controller.updateSectionB`, `dispatchB`). OLF's `BusState` saved and restored the sums but not the sections (upstream
+main 144a54c9d too), so after a contingency or a strategy that changed a section, the next one started from the base
+susceptance with the changed section, and its first section change summed it in. Measured with OLF alone:
+- **Incremental shunt voltage control** (ShuntNetworkFactory plus `l1_BIS`, SHUNT's deadband at 0.1 kV, contingencies
+  `l1` and the loss of `ld1`), b3 against the same contingency run alone: target 393 kV with `l1_BIS` at twice `l1`'s
+  impedance, `ld1` after `l1` +4.2e-8 kV and `l1` after `ld1` +1.3e-6 kV; target 395 kV at ten times, `ld1` after `l1`
+  +4.0e-5 kV. Every other case of the sweep was bit-identical, and so was the continuous mode, whose rounding starts from
+  the section only to break an exact tie.
+- **Position actions on one bus** (`createWithShuntSharedRemoteControl` plus SHUNT3B next to SHUNT3, both on section 25,
+  contingency `tr2`): strategy1 puts SHUNT3 on 50, strategy2 SHUNT3B on 0; strategy2 kept SHUNT3 on 50 after strategy1,
+  b4 at 392.407 kV instead of 399.617 kV.
 
-Every other case of the sweep (targets 390.5 to 395 kV) was bit-identical, and so was the continuous mode, whose
-rounding (`dispatchB`) starts from the position only to break an exact tie. The device answers each contingency from the
-base positions, i.e. as if alone, so it cannot match OLF there; mirroring OLF would make the device's results depend on
-the list order too. The fix belongs in OLF, as for #86: `BusState` saves and restores the positions. The device test
-(`deviceIncrementalShuntVoltageControlMatchesCpu`) keeps the factory's 5 kV deadband, where no section moves.
+`BusState` now saves and restores the section of each compensator of the controller shunt and of the shunt. Fork commit
+3d9e6d64b on `olf-local-patches` (suite 1531/0/3); upstream branch `restore-shunt-sections` 2927936b9 on upstream main
+144a54c9d, signed off (suite 1617/0/4, 0 checkstyle violations). Neither is pushed. The tests
+`OpenSecurityAnalysisTest.testIncrementalShuntVoltageControlAfterASectionChange` and
+`OpenSecurityAnalysisWithActionsTest.testShuntActionAfterAnotherOnTheSameBus` fail without the fix.
+
+The device answers every contingency from the base sections and every pair from the post-contingency ones, which is
+what the fixed OLF computes. `GpuSaShuntControlTest.deviceIncrementalShuntSectionsAfterAContingencyThatSwitchedOne` and
+`deviceShuntActionAfterAnotherOnTheSameBus` hold it, and fail against OLF without the fix (b2 393.2433645 against the
+device's 393.2433456 kV; b3 19.393 against 20.133 kV). With the fixed OLF: `GpuSa*Test` 291/0/2 on cuDSS and on our
+LU, full suite 514/0/6 with checkstyle. The RTE parameters leave the shunt voltage control off and the RTE runs carry
+no action, so no RTE bus has a shunt with sections.
 
 ### #89 — the device answers a contingency without its own load flow parameters (2026-11-10)
 
@@ -38,8 +48,28 @@ The batch precomputes every contingency with the run's parameters, and nothing i
 `ReplayedLossDistribution`, which then falls back to OLF's distribution. Measured on ShuntNetworkFactory with `l1_BIS`
 (continuous shunt control), `l1_BIS` carrying outer loops `[DistributedSlack, ReactiveLimits]`: the device answers it
 with the shunt loop, b3 390.929 kV against OLF's 395.710 kV, and reports it. The RTE contingency list carries no such
-extension, so network.xiidm is not affected. Open: answer such a contingency on the device with its own parameters, or
-until then leave it to the CPU.
+extension, so network.xiidm is not affected.
+
+**Decided (2026-11-10): on the device, not the CPU.** What OLF changes for such a contingency is its outer-loop list
+only (`AcSecurityAnalysis.applySpecificContingencyParameters`: the loops rebuilt from the run's parameters and the
+overrides), for the contingency and, with the default scope `CONTINGENCY_AND_OPERATOR_STRATEGY`, for its strategies;
+`CONTINGENCY_ONLY` puts the run's loops back before the strategies. The device's whole loop configuration is a pure
+function of a loop list (`GpuSaRunScope.evaluate`), the run-wide batch settings are read nowhere but at the precompute
+call, and the loss replay reads its participation factors from the extraction, which the distributed-slack parameters
+key. Plan:
+1. Group the contingencies by their overrides; a group's loops are OLF's own (`applySpecificContingencyParameters` on
+   the context's parameters, put back after, as OLF's resetter does), with the generic contingency parameters
+   (`startWithFrozenACEmulation`) applied the way `applyGenericContingencyParameters` does. A group's scope keys the HVDC
+   freeze on its loops alone: an explicit list without `FreezingHvdcACEmulation` does not freeze, where the run's scope
+   adds the freeze from the analysis flag because the run's list is still the base one. Its balance type is the
+   override's.
+2. Precompute every group in the same pass (`GpuBatchPrecomputer`): one walk over the contingencies in OLF's order (the
+   zero-impedance tree replay depends on it), one batch and one solve per group with its own settings, one state sink
+   and one set of result maps. A group whose loops the device does not run stays on the CPU, as the whole run would.
+3. A pair takes its contingency's group (default scope). `CONTINGENCY_ONLY` with strategies: the pairs run with the
+   run's loops but start from the parent's device run (state, reactive-limit states, distribution anchors), captured in
+   another solve; first step keeps those contingencies on the CPU, second step carries the parent captures across.
+4. Result time: `pairDistributedOnDevice` reads the pair's group distribution, not the run's flag.
 
 ### #88 — FIXED: the targeted restore left the device's control state variables in the network (2026-11-10)
 

@@ -55,19 +55,6 @@ __global__ void toInterleaved(int count, int stride, int width, int capacity, co
     }
 }
 
-// dst[map[k] * capacity + a] = src[k * stride + laneMap[a]]: values already interleaved by scenario
-// (common/batch_layout.cuh) into the lane-interleaved layout, one thread per (entry, lane), the lanes fastest.
-__global__ void fromScenarioInterleaved(int count, int stride, int width, int capacity, const int* __restrict__ laneMap,
-                                        const int* __restrict__ map, const double* __restrict__ src,
-                                        double* __restrict__ dst) {
-    const size_t t = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-    if (t < static_cast<size_t>(count) * width) {
-        const int a = static_cast<int>(t % width);
-        const int k = static_cast<int>(t / width);
-        dst[static_cast<size_t>(map[k]) * capacity + a] = src[static_cast<size_t>(k) * stride + laneMap[a]];
-    }
-}
-
 // The way back: dst[laneMap[a] * stride + k] = src[map[k] * capacity + a].
 __global__ void fromInterleaved(int count, int stride, int width, int capacity, const int* __restrict__ laneMap,
                                 const int* __restrict__ selected, const int* __restrict__ map,
@@ -102,11 +89,15 @@ __global__ void zeroFill(int nFill, int width, int capacity, const int* __restri
     lu[static_cast<size_t>(fillEntry[f]) * capacity + a] = 0.0;
 }
 
-// Gather: every (entry, lane) of the level's supernodes takes its descendants' runs, in ascending order.
+// Gather: every (entry, lane) of the level's supernodes takes its descendants' runs, in ascending order. Values
+// interleaved by scenario (common/batch_layout.cuh) are read in place here - src[k * stride + scenario] for the A entry
+// k, 0 for a fill entry - every stored entry belonging to one level's supernodes and no earlier level touching it; any
+// other layout was copied into lu first.
 __global__ void gatherLevel(int nItems, int width, int capacity, const int* __restrict__ levelEntry,
                             const int* __restrict__ runStart, const int* __restrict__ runLower,
                             const int* __restrict__ runUpper, const int* __restrict__ runLength,
-                            double* __restrict__ lu) {
+                            const double* __restrict__ src, int stride, const int* __restrict__ storedSource,
+                            const int* __restrict__ laneMap, double* __restrict__ lu) {
     const size_t g = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (g >= static_cast<size_t>(nItems) * width) {
         return;
@@ -115,10 +106,15 @@ __global__ void gatherLevel(int nItems, int width, int capacity, const int* __re
     const int a = static_cast<int>(g - static_cast<size_t>(t) * width);
     const int e = levelEntry[t];
     const int rEnd = runStart[e + 1];
-    if (runStart[e] == rEnd) {
+    double acc;
+    if (src != nullptr) {
+        const int k = storedSource[e];
+        acc = k >= 0 ? src[static_cast<size_t>(k) * stride + laneMap[a]] : 0.0;
+    } else if (runStart[e] == rEnd) {
         return;
+    } else {
+        acc = lu[static_cast<size_t>(e) * capacity + a];
     }
-    double acc = lu[static_cast<size_t>(e) * capacity + a];
     for (int r = runStart[e]; r < rEnd; r++) {
         const double* l = lu + static_cast<size_t>(runLower[r]) * capacity + a;
         const double* u = lu + static_cast<size_t>(runUpper[r]) * capacity + a;
@@ -457,6 +453,10 @@ void createSupernodalLu(SupernodalLu& lu, const SupernodalLuPlan& plan, int capa
         }
     }
     lu.nFill = static_cast<int>(fillEntry.size());
+    std::vector<int> storedSource(plan.nStored, -1);
+    for (int k = 0; k < plan.nnzA; k++) {
+        storedSource[plan.storedOfA[k]] = k;
+    }
     std::vector<int> rowPosition(plan.n);
     std::vector<int> colPosition(plan.n);
     for (int i = 0; i < plan.n; i++) {
@@ -465,6 +465,7 @@ void createSupernodalLu(SupernodalLu& lu, const SupernodalLuPlan& plan, int capa
     }
     uploadVector(lu.dStoredOfA, plan.storedOfA);
     uploadVector(lu.dFillEntry, fillEntry);
+    uploadVector(lu.dStoredSource, storedSource);
     uploadVector(lu.dSupernodeStart, plan.supernodeStart);
     uploadVector(lu.dRowStart, plan.rowStart);
     uploadVector(lu.dRows, plan.rows);
@@ -506,25 +507,26 @@ void factorizeSupernodalLanes(SupernodalLu& lu, const double* vals, BatchLayout 
     }
     CUDA_CHECK(cudaMemcpyAsync(lu.dLaneMap.p, laneMap, width * sizeof(int), cudaMemcpyHostToDevice, stream));
     CUDA_CHECK(cudaMemsetAsync(lu.dPivotClamps.p, 0, width * sizeof(int), stream));
-    if (layout.interleaved) {
-        fromScenarioInterleaved<<<blocksFor(static_cast<size_t>(lu.nnzA) * width), LU_BLOCK, 0, stream>>>(lu.nnzA,
-                layout.stride, width, lu.capacity, lu.dLaneMap.as<int>(), lu.dStoredOfA.as<int>(), vals, lu.dLu.as<double>());
-    } else {
+    // Values interleaved by scenario are read in place by the gathers; scenario-major ones are copied into the
+    // lane-interleaved layout first, the fill entries zeroed.
+    const double* src = layout.interleaved ? vals : nullptr;
+    if (!layout.interleaved) {
         const dim3 tileBlock(TILE, TILE_ROWS);
         const dim3 valuesGrid((lu.nnzA + TILE - 1) / TILE, (width + TILE - 1) / TILE);
         toInterleaved<<<valuesGrid, tileBlock, 0, stream>>>(lu.nnzA, lu.nnzA, width, lu.capacity, lu.dLaneMap.as<int>(),
                 nullptr, lu.dStoredOfA.as<int>(), vals, lu.dLu.as<double>());
-    }
-    if (lu.nFill > 0) {
-        zeroFill<<<blocksFor(static_cast<size_t>(lu.nFill) * width), LU_BLOCK, 0, stream>>>(lu.nFill, width,
-                lu.capacity, lu.dFillEntry.as<int>(), lu.dLu.as<double>());
+        if (lu.nFill > 0) {
+            zeroFill<<<blocksFor(static_cast<size_t>(lu.nFill) * width), LU_BLOCK, 0, stream>>>(lu.nFill, width,
+                    lu.capacity, lu.dFillEntry.as<int>(), lu.dLu.as<double>());
+        }
     }
     for (int l = 0; l + 1 < static_cast<int>(lu.levelStart.size()); l++) {
         const int entries = lu.levelEntryStart[l + 1] - lu.levelEntryStart[l];
         if (entries > 0) {
             gatherLevel<<<blocksFor(static_cast<size_t>(entries) * width), LU_BLOCK, 0, stream>>>(entries, width,
                     lu.capacity, lu.dLevelEntry.as<int>() + lu.levelEntryStart[l], lu.dRunStart.as<int>(),
-                    lu.dRunLower.as<int>(), lu.dRunUpper.as<int>(), lu.dRunLength.as<int>(), lu.dLu.as<double>());
+                    lu.dRunLower.as<int>(), lu.dRunUpper.as<int>(), lu.dRunLength.as<int>(), src, layout.stride,
+                    lu.dStoredSource.as<int>(), lu.dLaneMap.as<int>(), lu.dLu.as<double>());
         }
         const int supernodes = lu.levelStart[l + 1] - lu.levelStart[l];
         factorBlocks<<<blocksFor(static_cast<size_t>(supernodes) * width), LU_BLOCK, 0, stream>>>(supernodes, width,

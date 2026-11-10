@@ -638,6 +638,39 @@ class GpuBatchedLuTest {
         }
     }
 
+    /**
+     * Values interleaved by scenario, as a batch context holds them, are read in place by both engines - the fast
+     * one's factorization steps and the pivoting one's gathers, a fill entry starting from 0 - and give every lane the
+     * solution, the engine and the clamps the values copied from the scenario-major layout give it, bit for bit: lanes
+     * on both engines, a lane map neither in order nor holding every scenario, and a stride (8) above the 6 scenarios.
+     * Checked to fail with either engine's in-place read taking lane a's scenario as a, or a fill entry starting from
+     * 1 instead of 0.
+     */
+    @Test
+    void interleavedValuesAreReadInPlaceAsTheCopiedOnes() {
+        CouplerSystem system = couplerSystem(32, 80, 3, 0.03);
+        Csr csr = system.csr();
+        int n = csr.n();
+        double[] values = refinementBatch(system);
+        double[] rightHandSides = refinementRightHandSides(6 * n);
+        double[] copied = filled(6 * n, 42);
+        int[] copiedPivoted = new int[REFINEMENT_LANE_MAP.length];
+        int[] copiedClamps = new int[REFINEMENT_LANE_MAP.length];
+        BatchedLuNative.factorizeAndSolve(n, csr.rowPtr(), csr.colIdx(), identity(n), identity(n), 6, values,
+                rightHandSides, REFINEMENT_LANE_MAP, copied, copiedPivoted, copiedClamps);
+        double[] inPlace = filled(6 * n, 42);
+        int[] inPlacePivoted = new int[REFINEMENT_LANE_MAP.length];
+        int[] inPlaceClamps = new int[REFINEMENT_LANE_MAP.length];
+        BatchedLuNative.factorizeAndSolveInterleaved(n, csr.rowPtr(), csr.colIdx(), identity(n), identity(n), 6, values,
+                rightHandSides, REFINEMENT_LANE_MAP, inPlace, inPlacePivoted, inPlaceClamps);
+        assertArrayEquals(new int[] {1, 0, 1, 0, 0}, copiedPivoted);
+        assertArrayEquals(copiedPivoted, inPlacePivoted);
+        assertArrayEquals(copiedClamps, inPlaceClamps);
+        for (int s = 0; s < 6; s++) {
+            assertArrayEquals(scenario(copied, s, n), scenario(inPlace, s, n), "scenario " + s);
+        }
+    }
+
     /** A hub joined to every other row, plus a chain through those rows; the hub is row n - 1 or row 0. */
     private static Csr hubAndChain(int n, boolean hubLast) {
         boolean[][] pattern = new boolean[n][n];

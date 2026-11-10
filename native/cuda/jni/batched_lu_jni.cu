@@ -117,12 +117,12 @@ OLF_JNI(ac_solver_gpu, BatchedLuNative, supernodalPlanStatistics)(
 
 // values: capacity * nnz, rightHandSides and solutions: capacity * n, scenario-major; laneMap: the scenarios to
 // factorize and solve; pivoted (1 when the pivoting engine factorized the lane) and pivotClamps: per entry of laneMap,
-// written.
-extern "C" JNIEXPORT void JNICALL
-OLF_JNI(ac_solver_gpu, BatchedLuNative, factorizeAndSolve)(
-        JNIEnv* env, jclass, jint n, jintArray jRowPtr, jintArray jColIdx, jintArray jRowOrder, jintArray jColOrder,
-        jint capacity, jdoubleArray jValues, jdoubleArray jRightHandSides, jintArray jLaneMap, jdoubleArray jSolutions,
-        jintArray jPivoted, jintArray jPivotClamps) {
+// written. With interleavedValues, the values reach the factorization interleaved by scenario, as a batch context
+// holds them (the engines read them in place), instead of scenario-major.
+static void factorizeAndSolveIn(JNIEnv* env, jint n, jintArray jRowPtr, jintArray jColIdx, jintArray jRowOrder,
+                                jintArray jColOrder, jint capacity, jdoubleArray jValues, jdoubleArray jRightHandSides,
+                                jintArray jLaneMap, jdoubleArray jSolutions, jintArray jPivoted, jintArray jPivotClamps,
+                                bool interleavedValues) {
     try {
         const std::vector<int> rowPtr = intsOf(env, jRowPtr);
         const std::vector<int> colIdx = intsOf(env, jColIdx);
@@ -149,7 +149,18 @@ OLF_JNI(ac_solver_gpu, BatchedLuNative, factorizeAndSolve)(
         DeviceBuf dValues;
         DeviceBuf dRightHandSides;
         DeviceBuf dSolutions;
-        dValues.upload(values.data(), values.size() * sizeof(double));
+        const BatchLayout layout = interleavedValues ? interleavedLayout(capacity) : scenarioMajorLayout(capacity);
+        if (interleavedValues) {
+            std::vector<double> interleaved(static_cast<size_t>(layout.stride) * nnz, 0.0);
+            for (int s = 0; s < capacity; s++) {
+                for (int k = 0; k < nnz; k++) {
+                    interleaved[static_cast<size_t>(k) * layout.stride + s] = values[static_cast<size_t>(s) * nnz + k];
+                }
+            }
+            dValues.upload(interleaved.data(), interleaved.size() * sizeof(double));
+        } else {
+            dValues.upload(values.data(), values.size() * sizeof(double));
+        }
         dRightHandSides.upload(rightHandSides.data(), rightHandSides.size() * sizeof(double));
         dSolutions.upload(solutions.data(), solutions.size() * sizeof(double));
         cudaStream_t stream = nullptr;
@@ -157,8 +168,7 @@ OLF_JNI(ac_solver_gpu, BatchedLuNative, factorizeAndSolve)(
         std::vector<int> clamps;
         std::vector<int> pivoted(laneMap.size(), 0);
         try {
-            factorizeLanes(lu, dValues.as<double>(), scenarioMajorLayout(capacity), laneMap.data(),
-                           static_cast<int>(laneMap.size()), stream);
+            factorizeLanes(lu, dValues.as<double>(), layout, laneMap.data(), static_cast<int>(laneMap.size()), stream);
             solveLanes(lu, dRightHandSides.as<double>(), dSolutions.as<double>(), stream);
             clamps = readPivotClamps(lu, stream);
             size_t next = 0;
@@ -181,6 +191,24 @@ OLF_JNI(ac_solver_gpu, BatchedLuNative, factorizeAndSolve)(
     } catch (const std::exception& e) {
         throwJava(env, e);
     }
+}
+
+extern "C" JNIEXPORT void JNICALL
+OLF_JNI(ac_solver_gpu, BatchedLuNative, factorizeAndSolve)(
+        JNIEnv* env, jclass, jint n, jintArray jRowPtr, jintArray jColIdx, jintArray jRowOrder, jintArray jColOrder,
+        jint capacity, jdoubleArray jValues, jdoubleArray jRightHandSides, jintArray jLaneMap, jdoubleArray jSolutions,
+        jintArray jPivoted, jintArray jPivotClamps) {
+    factorizeAndSolveIn(env, n, jRowPtr, jColIdx, jRowOrder, jColOrder, capacity, jValues, jRightHandSides, jLaneMap,
+                        jSolutions, jPivoted, jPivotClamps, false);
+}
+
+extern "C" JNIEXPORT void JNICALL
+OLF_JNI(ac_solver_gpu, BatchedLuNative, factorizeAndSolveInterleaved)(
+        JNIEnv* env, jclass, jint n, jintArray jRowPtr, jintArray jColIdx, jintArray jRowOrder, jintArray jColOrder,
+        jint capacity, jdoubleArray jValues, jdoubleArray jRightHandSides, jintArray jLaneMap, jdoubleArray jSolutions,
+        jintArray jPivoted, jintArray jPivotClamps) {
+    factorizeAndSolveIn(env, n, jRowPtr, jColIdx, jRowOrder, jColOrder, capacity, jValues, jRightHandSides, jLaneMap,
+                        jSolutions, jPivoted, jPivotClamps, true);
 }
 
 // factorizeAndSolve's factorization, then the solve of the lanes whose scenario is in selected only (selectLanes,

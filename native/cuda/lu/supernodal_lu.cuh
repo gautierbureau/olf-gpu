@@ -31,6 +31,7 @@ struct SupernodalLu {
     std::vector<int> levelStart, levelEntryStart, levelPanelStart;
     int nFill = 0;
     DeviceBuf dStoredOfA, dFillEntry;                        // A entry -> stored entry; the stored entries without one
+    DeviceBuf dStoredSource;                                 // stored entry -> A entry, -1 for a fill entry
     DeviceBuf dSupernodeStart, dRowStart, dRows, dDiagonalBase, dLowerBase, dUpperBase, dLevelSupernode;
     DeviceBuf dRunStart, dRunLower, dRunUpper, dRunLength, dLevelEntry, dPanelSupernode, dPanelRow;
     DeviceBuf dForwardRunStart, dForwardRunLower, dForwardRunY, dForwardRunLength;

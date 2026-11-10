@@ -78,6 +78,16 @@ public final class BatchedLuNative {
                                                 double[] solutions, int[] pivoted, int[] pivotClamps);
 
     /**
+     * {@link #factorizeAndSolve} with the values handed to the factorization interleaved by scenario, as a batch
+     * context holds them: the engines then read them in place instead of copying them. The arrays are the same,
+     * scenario-major.
+     */
+    public static native void factorizeAndSolveInterleaved(int n, int[] rowPtr, int[] colIdx, int[] rowOrder,
+                                                           int[] colOrder, int capacity, double[] values,
+                                                           double[] rightHandSides, int[] laneMap, double[] solutions,
+                                                           int[] pivoted, int[] pivotClamps);
+
+    /**
      * Factorizes the scenarios of {@code laneMap} as {@link #factorizeAndSolve} does, then solves the systems of those
      * in {@code selected} only, as the adaptive refinement solves its corrections on the lanes still refining. Every
      * other scenario's solution is left as it is.

@@ -1,6 +1,6 @@
 # Proposal: array-form outer loops, one source for CPU and GPU
 
-**Status:** stage 1 of the ReactiveLimits pilot is built on the OLF fork (section 5.1); the rest is a proposal (2026-11-10).
+**Status:** stages 1 and 2 of the ReactiveLimits pilot are built (sections 5.1 and 5.2); the rest is a proposal (2026-11-10).
 **Read first:** [`outer-loops-on-device.md`](outer-loops-on-device.md) — the current workflow and
 the size accounting this proposal responds to.
 
@@ -416,6 +416,34 @@ network (`ReactiveLimitsDecisionsTest`).
 **Not checked:** nothing here ran against olf-gpu (no GPU in the container). olf-gpu uses only the loop's public
 API, which is unchanged. The fork's two pre-existing checkstyle failures (`AbstractSecurityAnalysis`,
 `NewtonRaphson`) are not from this change.
+
+### 5.2 Stage 2 as built (2026-11-10)
+
+On this repository's branch `claude/reactive-limits-decisions-codegen` (cut from `main`, not merged), with one
+more commit on the OLF fork's pilot branch (`a72acc1`).
+
+- **OLF side:** `ReactiveLimitsDecisionsVectorsTest` keeps
+  `src/test/resources/reactiveLimitsDecisionsVectors.txt`: 2,644 calls of the rules with the Java's result, one
+  per line, doubles as the hexadecimal digits of their bits. They stand on each comparison of the rules, one bit
+  under it, one bit over it, far from it and undefined, then at 300 seeded random points. The test fails when the
+  file is not what the Java gives now.
+- **Here:** a second java2cuda shape, the rule family (`codegen/java2cuda/rules.py`). It keeps the Java
+  statements one for one with their types — the existing parser handles `double` expressions only and inlines
+  everything into one — and emits `native/cuda/outerloop/generated/reactive_limits_decisions.cuh`: seven
+  functions (`pvBusDecision`, `resetsV`, `frozenQ`, `isMinLimit`, `pqBusDecision`, `isSwitchToPq`,
+  `limitTypeOf`) and the fourteen decision and limit codes.
+- **Proof, no GPU:** parse == golden manifest; render == committed header; and the committed header, compiled
+  for the host with `g++`, gives the Java's result on every reference vector, bit for bit. Four mutations of the
+  header (`<` to `<=`, `>` to `>=`, a wrong frozen target) are each caught. `codegen/regenerate.sh` passes with
+  the six equation families unchanged.
+
+**What it does not show.** That a kernel calls these functions with the right arguments: none does yet. The
+functions that walk the vector (`keepStrongestPv`, `blockSwitchesToPv`) have loops and are not transpiled; the
+parser refuses them. Section 2's expectation stands: this removes rule drift, not volume.
+
+**A dependency to mind.** The rule family is generated from a class that is on the fork's pilot branch and not on
+`olf-local-patches`. `codegen-check.yml` on that branch therefore checks the pilot branch out (`OLF_REF`). The
+two OLF commits have to reach `olf-local-patches` before the codegen branch merges, and `OLF_REF` goes back then.
 
 **Decision points.**
 

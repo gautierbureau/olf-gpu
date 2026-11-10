@@ -63,6 +63,29 @@ __global__ void copyToScenarioMajorBatch(int n, int nS, int stride, const double
     }
 }
 
+// The way in: to[r * stride + s] = from[s * n + r], on every scenario or the active ones.
+__global__ void copyToInterleavedBatch(int n, int nS, int stride, const double* __restrict__ from,
+                                       double* __restrict__ to, const char* __restrict__ active) {
+    __shared__ double tile[TILE][TILE + 1];
+    const int r0 = blockIdx.x * TILE;
+    const int s0 = blockIdx.y * TILE;
+    for (int j = threadIdx.y; j < TILE; j += TILE_ROWS) {
+        const int s = s0 + j;
+        const int r = r0 + threadIdx.x;
+        if (s < nS && r < n && (active == nullptr || active[s])) {
+            tile[threadIdx.x][j] = from[static_cast<size_t>(s) * n + r];
+        }
+    }
+    __syncthreads();
+    for (int j = threadIdx.y; j < TILE; j += TILE_ROWS) {
+        const int r = r0 + j;
+        const int s = s0 + threadIdx.x;
+        if (s < nS && r < n && (active == nullptr || active[s])) {
+            to[static_cast<size_t>(r) * stride + s] = tile[j][threadIdx.x];
+        }
+    }
+}
+
 dim3 tilesOf(int n, int nS) {
     return dim3((n + TILE - 1) / TILE, (nS + TILE - 1) / TILE);
 }
@@ -80,6 +103,13 @@ void copyToScenarioMajor(int n, BatchLayout layout, const double* from, double* 
                          cudaStream_t stream) {
     copyToScenarioMajorBatch<<<tilesOf(n, layout.nS), dim3(TILE, TILE_ROWS), 0, stream>>>(n, layout.nS,
             layout.stride, from, to, active);
+    CUDA_CHECK(cudaGetLastError());
+}
+
+void copyToInterleaved(int n, BatchLayout layout, const double* from, double* to, const char* active,
+                       cudaStream_t stream) {
+    copyToInterleavedBatch<<<tilesOf(n, layout.nS), dim3(TILE, TILE_ROWS), 0, stream>>>(n, layout.nS, layout.stride,
+            from, to, active);
     CUDA_CHECK(cudaGetLastError());
 }
 

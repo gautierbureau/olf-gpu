@@ -64,10 +64,14 @@ void setupBatchMatricesUbatch(BatchSolverContext* ctx) {
 void setupBatchedLu(BatchSolverContext* ctx) {
     ctx->batchedLu = std::make_unique<BatchedLu>();
     createBatchedLu(*ctx->batchedLu, luPlanOf(*ctx->structure), ctx->nScenarios);
-    const size_t vectorBytes = static_cast<size_t>(ctx->n) * ctx->nScenarios * sizeof(double);
+    // n x the interleaved stride: the Newton step's solve works on vectors interleaved as the values (solveNewtonStep)
+    const size_t vectorBytes = static_cast<size_t>(ctx->n) * ctx->layout.stride * sizeof(double);
     ctx->dR.alloc(vectorBytes);                              // zeroed: a lane that never solves keeps a clean 0
     ctx->dDelta.alloc(vectorBytes);
-    ctx->dIterativeRefinementScore.alloc(static_cast<size_t>(ctx->nScenarios) * sizeof(double));
+    ctx->dLuRightHandSide.alloc(vectorBytes);
+    ctx->dLuSolution.alloc(vectorBytes);
+    // the scores, then the interleaved score's maxima (launchRefinementScore)
+    ctx->dIterativeRefinementScore.alloc(static_cast<size_t>(ctx->nScenarios) * 3 * sizeof(double));
     if (ctx->structure->nZeroImpedanceBranch > 0) {
         ctx->dInternalRefinementResidual.alloc(vectorBytes);
         ctx->dInternalRefinementCorrection.alloc(vectorBytes);

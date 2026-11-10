@@ -819,6 +819,46 @@ class GpuBatchedLuTest {
     }
 
     /**
+     * On values interleaved by scenario, as a batch context holds them, the Newton step's solve and its adaptive
+     * refinement work on vectors interleaved the same way - the right-hand side copied in once and the step out once,
+     * the residual, its score and the corrections interleaved, the LU taking and giving its vectors by gathers - and
+     * every lane's step is the scenario-major one bit for bit: lanes refining on both engines, lanes done after the plain
+     * solve, and a scenario outside the lane map left as it was. Checked to fail with the residual reading the iterate
+     * scenario-major, the scores all 0, the corrections added to every lane, either gather taking lane a's scenario as
+     * a, and the step copied out of every scenario.
+     */
+    @Test
+    void newtonStepOnInterleavedVectorsIsTheScenarioMajorOne() {
+        CouplerSystem system = couplerSystem(32, 80, 3, 0.03);
+        Csr csr = system.csr();
+        int n = csr.n();
+        double[] values = refinementBatch(system);
+        double[] rightHandSides = refinementRightHandSides(6 * n);
+        double[] plainSolve = new double[6 * n];
+        try {
+            new GpuLoadFlowParameters().setIterativeRefinementBaseSteps(0).setIterativeRefinementMaxSteps(0).install();   // no refinement
+            BatchedLuNative.factorizeAndSolveNewtonStep(n, csr.rowPtr(), csr.colIdx(), identity(n), identity(n), 6,
+                    values, rightHandSides, REFINEMENT_LANE_MAP, plainSolve);
+        } finally {
+            new GpuLoadFlowParameters().install();
+        }
+        double[] scenarioMajor = filled(6 * n, 42);
+        BatchedLuNative.factorizeAndSolveNewtonStep(n, csr.rowPtr(), csr.colIdx(), identity(n), identity(n), 6, values,
+                rightHandSides, REFINEMENT_LANE_MAP, scenarioMajor);
+        double[] interleaved = filled(6 * n, 42);
+        BatchedLuNative.factorizeAndSolveNewtonStepInterleaved(n, csr.rowPtr(), csr.colIdx(), identity(n), identity(n),
+                6, values, rightHandSides, REFINEMENT_LANE_MAP, interleaved);
+        for (int s = 0; s < 6; s++) {
+            assertArrayEquals(scenario(scenarioMajor, s, n), scenario(interleaved, s, n), "scenario " + s);
+        }
+        assertArrayEquals(filled(n, 42), scenario(interleaved, 5, n));
+        for (int s : new int[] {0, 1, 3}) {
+            assertFalse(Arrays.equals(scenario(plainSolve, s, n), scenario(interleaved, s, n)),
+                    "scenario " + s + " refines past the plain solve");
+        }
+    }
+
+    /**
      * Two buses joined by a line, and to the rest of the network by a coupler only, as breaker mode builds them, in the
      * variables {phi1, phi2, phi3, p}: the line's balances g1 (phi1 - phi2) and g2 (phi2 - phi1) + p (p the coupler's
      * flow) depend on the angle difference only; the coupler's ZERO_PHI phi2 - phi3 sits on the third bus's angle row

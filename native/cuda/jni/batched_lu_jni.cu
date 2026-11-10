@@ -349,11 +349,13 @@ OLF_JNI(ac_solver_gpu, BatchedLuNative, factorizeRounds)(
 
 // The Newton step's linear solve of a structure with couplers (solveNewtonStep: the solve with cuDSS's in-solve
 // refinement steps, then the adaptive refinement) on the scenarios of laneMap, every other scenario's solution left as
-// it is. values: capacity * nnz, rightHandSides and solutions: capacity * n, scenario-major.
-extern "C" JNIEXPORT void JNICALL
-OLF_JNI(ac_solver_gpu, BatchedLuNative, factorizeAndSolveNewtonStep)(
-        JNIEnv* env, jclass, jint n, jintArray jRowPtr, jintArray jColIdx, jintArray jRowOrder, jintArray jColOrder,
-        jint capacity, jdoubleArray jValues, jdoubleArray jRightHandSides, jintArray jLaneMap, jdoubleArray jSolutions) {
+// it is. values: capacity * nnz, rightHandSides and solutions: capacity * n, scenario-major. With interleaved, the
+// values reach the solve interleaved by scenario, as a batch context holds them, and the solve works on vectors
+// interleaved the same way.
+static void factorizeAndSolveNewtonStepIn(JNIEnv* env, jint n, jintArray jRowPtr, jintArray jColIdx,
+                                          jintArray jRowOrder, jintArray jColOrder, jint capacity, jdoubleArray jValues,
+                                          jdoubleArray jRightHandSides, jintArray jLaneMap, jdoubleArray jSolutions,
+                                          bool interleaved) {
     try {
         const std::vector<int> rowPtr = intsOf(env, jRowPtr);
         const std::vector<int> colIdx = intsOf(env, jColIdx);
@@ -379,12 +381,25 @@ OLF_JNI(ac_solver_gpu, BatchedLuNative, factorizeAndSolveNewtonStep)(
                                                          colOrder.data());
         BatchedLu lu;
         createBatchedLu(lu, *plan, capacity);
-        const size_t vectorBytes = static_cast<size_t>(capacity) * n * sizeof(double);
+        const BatchLayout layout = interleaved ? interleavedLayout(capacity) : scenarioMajorLayout(capacity);
+        const size_t vectorBytes = static_cast<size_t>(interleaved ? layout.stride : capacity) * n * sizeof(double);
         DeviceBuf dRowPtr, dColIdx, dValues, dRightHandSides, dSolutions, dLanes, dResidual, dCorrection,
-                dInternalResidual, dInternalCorrection, dScore, dMask;
+                dInternalResidual, dInternalCorrection, dScore, dMask, dInterleavedRightHandSide, dInterleavedSolution;
         dRowPtr.upload(rowPtr.data(), rowPtr.size() * sizeof(int));
         dColIdx.upload(colIdx.data(), colIdx.size() * sizeof(int));
-        dValues.upload(values.data(), values.size() * sizeof(double));
+        if (interleaved) {
+            std::vector<double> interleavedValues(static_cast<size_t>(layout.stride) * nnz, 0.0);
+            for (int s = 0; s < capacity; s++) {
+                for (int k = 0; k < nnz; k++) {
+                    interleavedValues[static_cast<size_t>(k) * layout.stride + s] = values[static_cast<size_t>(s) * nnz + k];
+                }
+            }
+            dValues.upload(interleavedValues.data(), interleavedValues.size() * sizeof(double));
+            dInterleavedRightHandSide.alloc(vectorBytes);
+            dInterleavedSolution.alloc(vectorBytes);
+        } else {
+            dValues.upload(values.data(), values.size() * sizeof(double));
+        }
         dRightHandSides.upload(rightHandSides.data(), rightHandSides.size() * sizeof(double));
         dSolutions.upload(solutions.data(), solutions.size() * sizeof(double));
         dLanes.upload(lanes.data(), lanes.size());
@@ -392,16 +407,16 @@ OLF_JNI(ac_solver_gpu, BatchedLuNative, factorizeAndSolveNewtonStep)(
         dCorrection.alloc(vectorBytes);
         dInternalResidual.alloc(vectorBytes);
         dInternalCorrection.alloc(vectorBytes);
-        dScore.alloc(static_cast<size_t>(capacity) * sizeof(double));
+        dScore.alloc(static_cast<size_t>(capacity) * 3 * sizeof(double));
         cudaStream_t stream = nullptr;
         CUDA_CHECK(cudaStreamCreate(&stream));
         try {
-            factorizeLanes(lu, dValues.as<double>(), scenarioMajorLayout(capacity), laneMap.data(),
-                           static_cast<int>(laneMap.size()), stream);
+            factorizeLanes(lu, dValues.as<double>(), layout, laneMap.data(), static_cast<int>(laneMap.size()), stream);
             const BatchedLuSystems systems{&lu, n, capacity, nnz, dRowPtr.as<int>(), dColIdx.as<int>(), dValues.as<double>(),
                                            true, dLanes.as<char>(), stream, dResidual.as<double>(), dCorrection.as<double>(),
                                            dInternalResidual.as<double>(), dInternalCorrection.as<double>(), dScore, dMask,
-                                           scenarioMajorLayout(capacity)};
+                                           layout, dInterleavedRightHandSide.as<double>(),
+                                           dInterleavedSolution.as<double>()};
             solveNewtonStep(systems, dRightHandSides.as<double>(), dSolutions.as<double>());
             CUDA_CHECK(cudaStreamSynchronize(stream));
             CUDA_CHECK(cudaMemcpy(solutions.data(), dSolutions.p, solutions.size() * sizeof(double),
@@ -415,6 +430,22 @@ OLF_JNI(ac_solver_gpu, BatchedLuNative, factorizeAndSolveNewtonStep)(
     } catch (const std::exception& e) {
         throwJava(env, e);
     }
+}
+
+extern "C" JNIEXPORT void JNICALL
+OLF_JNI(ac_solver_gpu, BatchedLuNative, factorizeAndSolveNewtonStep)(
+        JNIEnv* env, jclass, jint n, jintArray jRowPtr, jintArray jColIdx, jintArray jRowOrder, jintArray jColOrder,
+        jint capacity, jdoubleArray jValues, jdoubleArray jRightHandSides, jintArray jLaneMap, jdoubleArray jSolutions) {
+    factorizeAndSolveNewtonStepIn(env, n, jRowPtr, jColIdx, jRowOrder, jColOrder, capacity, jValues, jRightHandSides,
+                                  jLaneMap, jSolutions, false);
+}
+
+extern "C" JNIEXPORT void JNICALL
+OLF_JNI(ac_solver_gpu, BatchedLuNative, factorizeAndSolveNewtonStepInterleaved)(
+        JNIEnv* env, jclass, jint n, jintArray jRowPtr, jintArray jColIdx, jintArray jRowOrder, jintArray jColOrder,
+        jint capacity, jdoubleArray jValues, jdoubleArray jRightHandSides, jintArray jLaneMap, jdoubleArray jSolutions) {
+    factorizeAndSolveNewtonStepIn(env, n, jRowPtr, jColIdx, jRowOrder, jColOrder, capacity, jValues, jRightHandSides,
+                                  jLaneMap, jSolutions, true);
 }
 
 // The row and column orders cuDSS's ANALYSIS picks for the pattern under the run's ordering (CUDSS_DATA_PERM_REORDER_*,

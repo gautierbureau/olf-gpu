@@ -12,6 +12,7 @@
 #include "../common/stats.cuh"
 #include "../common/trace.cuh"
 #include "../diagnostics/batched_lu_compare.cuh"
+#include "../equations/fill_layout.cuh"
 #include "../lu/batched_lu.cuh"
 #include "iterative_refinement.cuh"
 #include "singleton_substitution.cuh"
@@ -27,7 +28,8 @@ BatchedLuSystems systemsOf(BatchSolverContext* ctx, int nS, const char* lanes) {
                             ctx->structure->nZeroImpedanceBranch > 0, lanes, ctx->stream, ctx->dR.as<double>(),
                             ctx->dDelta.as<double>(), ctx->dInternalRefinementResidual.as<double>(),
                             ctx->dInternalRefinementCorrection.as<double>(), ctx->dIterativeRefinementScore,
-                            ctx->dIterativeRefinementScenarioMask, ctx->layout};
+                            ctx->dIterativeRefinementScenarioMask, ctx->layout, ctx->dLuRightHandSide.as<double>(),
+                            ctx->dLuSolution.as<double>()};
 }
 
 // The internal refinement steps of a solve: cuDSS's base steps on a structure with couplers, none without.
@@ -35,10 +37,11 @@ int internalRefinementSteps(const BatchedLuSystems& systems) {
     return systems.couplers ? configuredIterativeRefinementBaseSteps() : ITERATIVE_REFINEMENT_STEPS_WITHOUT_COUPLERS;
 }
 
-// x = A^-1 b with steps internal refinement steps, solve(rhs, out) solving the lanes of lanes (every lane when null).
+// x = A^-1 b with steps internal refinement steps, solve(rhs, out) solving the lanes of lanes (every lane when null);
+// the vectors interleaved by scenario as the values when interleavedVectors, scenario-major otherwise.
 template <typename SolveFn>
 void solveRefined(const BatchedLuSystems& systems, const double* b, double* x, double* r, double* d, const char* lanes,
-                  int steps, SolveFn solve) {
+                  int steps, bool interleavedVectors, SolveFn solve) {
     const int n = systems.n;
     const int nS = systems.nS;
     {
@@ -47,16 +50,12 @@ void solveRefined(const BatchedLuSystems& systems, const double* b, double* x, d
     }
     for (int step = 0; step < steps; step++) {
         launchResidual(systems.stream, n, nS, systems.nnz, systems.rowPtr, systems.colIdx, systems.vals, systems.layout,
-                       x, b, lanes, r);
+                       x, b, lanes, r, interleavedVectors);
         {
             AnalysisTimer at_(__LINE__, 'S');
             solve(r, d);
         }
-        if (lanes != nullptr) {
-            axpyLaneMaskBatch<<<grid(n * nS), BLOCK, 0, systems.stream>>>(n, n * nS, 1.0, d, lanes, x);
-        } else {
-            axpy1Batch<<<grid(n * nS), BLOCK, 0, systems.stream>>>(n * nS, d, x);
-        }
+        launchLaneAxpy(systems.stream, n, nS, 1.0, d, lanes, x, systems.layout, interleavedVectors);
     }
 }
 
@@ -70,7 +69,8 @@ void solveRefined(const BatchedLuSystems& systems, const double* b, double* x, d
 // backward ratio of 1.1 where cuDSS refines the same system to 3e-11.
 void solveWithInternalRefinement(const BatchedLuSystems& systems, const double* b, double* x, double* r, double* d,
                                  const char* lanes) {
-    solveRefined(systems, b, x, r, d, lanes, internalRefinementSteps(systems), [&](const double* rhs, double* out) {
+    solveRefined(systems, b, x, r, d, lanes, internalRefinementSteps(systems), false,
+                 [&](const double* rhs, double* out) {
         solveLanes(*systems.lu, rhs, out, systems.stream);
     });
 }
@@ -84,32 +84,56 @@ void solveWithInternalRefinement(const BatchedLuSystems& systems, const double* 
 // plain solve already solved to the tolerance takes no refinement: the internal step every lane took after it was half
 // of a coupler system's triangular solves. On a busbar scope, where nearly every lane refines, the first correction
 // solved with its own internal step cost a third solve per lane (network.xiidm busbar: 811 -> 1598 extra solves).
+//
+// On interleaved values the solve and its refinement work on vectors interleaved the same way: the residual then reads
+// the values and the iterate in whole sectors, and the LU takes and gives its vectors by plain gathers. b goes in once
+// and dx comes out once, on the solved lanes, where each solve of the refinement used to transpose its right-hand side
+// in and its solution out (network.xiidm busbar: 12 solves per factorization).
 void solveNewtonStep(const BatchedLuSystems& systems, const double* b, double* dx, const std::function<void()>& afterSolve) {
+    const int n = systems.n;
+    const bool interleavedVectors = systems.layout.interleaved && systems.interleavedRightHandSide != nullptr;
+    const BatchLayout layout{systems.nS, systems.layout.stride, true};
+    const BatchLayout vectors = interleavedVectors ? layout : BatchLayout{};
+    const double* rhs = b;
+    double* x = dx;
+    if (interleavedVectors) {
+        copyToInterleaved(n, layout, b, systems.interleavedRightHandSide, systems.lanes, systems.stream);
+        rhs = systems.interleavedRightHandSide;
+        x = systems.interleavedSolution;
+    }
+    auto solutionOut = [&]() {
+        if (interleavedVectors) {
+            copyToScenarioMajor(n, layout, x, dx, systems.lanes, systems.stream);
+        }
+    };
     const int steps = systems.couplers ? 0 : internalRefinementSteps(systems);
-    solveRefined(systems, b, dx, systems.residual, systems.correction, systems.lanes, steps,
-                 [&](const double* rhs, double* out) {
-        solveLanes(*systems.lu, rhs, out, systems.stream);
+    solveRefined(systems, rhs, x, systems.residual, systems.correction, systems.lanes, steps, interleavedVectors,
+                 [&](const double* in, double* out) {
+        solveLanes(*systems.lu, in, out, systems.stream, vectors);
     });
     if (afterSolve) {
+        solutionOut();
         afterSolve();
     }
     if (!systems.couplers) {
+        solutionOut();
         return;
     }
     // the adaptive refinement of the lanes above the tolerance, each correction solved on those lanes only: the other
     // lanes would not take theirs
     int corrections = 0;
     refineLanes(RefinementContext{systems.stream, systems.rowPtr, systems.colIdx, systems.score, systems.mask,
-                                  systems.lanes, systems.layout}, systems.nS,
-                systems.n, systems.nnz, systems.vals, dx, b, systems.residual, systems.correction, systems.lanes,
+                                  systems.lanes, systems.layout, interleavedVectors}, systems.nS,
+                systems.n, systems.nnz, systems.vals, x, rhs, systems.residual, systems.correction, systems.lanes,
                 steps, [&](const std::vector<char>& refining, const char* refiningMask) {
         selectLanes(*systems.lu, refining, systems.stream);
         const int internal = corrections++ == 0 ? steps : internalRefinementSteps(systems);
         solveRefined(systems, systems.residual, systems.correction, systems.internalResidual, systems.internalCorrection,
-                     refiningMask, internal, [&](const double* rhs, double* out) {
-            solveSelectedLanes(*systems.lu, rhs, out, systems.stream);
+                     refiningMask, internal, interleavedVectors, [&](const double* in, double* out) {
+            solveSelectedLanes(*systems.lu, in, out, systems.stream, vectors);
         });
     });
+    solutionOut();
 }
 
 void batchedLuNewtonSolve(BatchSolverContext* ctx, DriverPass& drv, int iteration) {
@@ -129,11 +153,14 @@ void batchedLuNewtonSolve(BatchSolverContext* ctx, DriverPass& drv, int iteratio
         factorizeLanes(*ctx->batchedLu, ctx->dVals.as<double>(), ctx->layout, laneMap.data(), static_cast<int>(laneMap.size()),
                        ctx->stream);
     }
-    solveNewtonStep(systemsOf(ctx, nS, ctx->dActive.as<char>()), ctx->dB.as<double>(), ctx->dDx.as<double>(), [&]() {
-        if (traceOn(Trace::LU_COMPARE)) {
+    std::function<void()> afterSolve;                        // the trace only: dDx is copied out for it
+    if (traceOn(Trace::LU_COMPARE)) {
+        afterSolve = [&]() {
             compareBatchedLuWithCudss(ctx, drv.outer, iteration);
-        }
-    });
+        };
+    }
+    solveNewtonStep(systemsOf(ctx, nS, ctx->dActive.as<char>()), ctx->dB.as<double>(), ctx->dDx.as<double>(),
+                    afterSolve);
     AnalysisTimer at_(__LINE__, 'S');
     substituteSingletons(ctx, ctx->dB.as<double>(), ctx->dDx.as<double>());
 }

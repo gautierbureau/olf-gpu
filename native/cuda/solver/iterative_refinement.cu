@@ -18,6 +18,7 @@
 #include "../common/launch.cuh"
 #include "../solver/linear_solver_settings.cuh"
 #include "iterative_refinement.cuh"
+#include "state_vector_scaling.cuh"
 
 namespace olfgpu {
 
@@ -176,12 +177,131 @@ linResidRowInterleavedBatch(int n, int nS, int stride, const int* __restrict__ r
     }
 }
 
+// residualBatch with the values and the vectors all interleaved by scenario: one thread per (row, scenario), the
+// scenarios fastest, every read and write in whole sectors. Each r is b - (the row's products summed in order), as in
+// residualBatch.
+__global__ void residualAllInterleavedBatch(int n, int nS, int stride, const int* __restrict__ rowPtr,
+                                            const int* __restrict__ colIdx, const double* __restrict__ vals,
+                                            const double* __restrict__ dx, const double* __restrict__ b,
+                                            const char* __restrict__ lanes, double* __restrict__ r) {
+    const size_t g = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (g >= static_cast<size_t>(n) * stride) {
+        return;
+    }
+    const int i = static_cast<int>(g / stride);
+    const int s = static_cast<int>(g - static_cast<size_t>(i) * stride);
+    if (s >= nS || (lanes != nullptr && !lanes[s])) {
+        return;
+    }
+    double acc = 0.0;
+    for (int k = rowPtr[i]; k < rowPtr[i + 1]; k++) {
+        acc += vals[static_cast<size_t>(k) * stride + s] * dx[static_cast<size_t>(colIdx[k]) * stride + s];
+    }
+    r[g] = b[g] - acc;
+}
+
+// The interleaved score's maxima: block (32 scenarios, SCORE_ROWS row groups) over SCORE_CHUNK rows. |r| and |b| maxima
+// are taken with fmax as iterativeRefinementScoreBatch takes them (a NaN entry is passed over), then merged into
+// maxima[2 s] and maxima[2 s + 1] by an atomic max on their bits: non-negative doubles order as their bit patterns, and
+// a maximum is the same whatever the order, so every score comes out as iterativeRefinementScoreBatch's.
+constexpr int SCORE_SCENARIOS = 32;
+constexpr int SCORE_ROWS = 8;
+constexpr int SCORE_CHUNK = 256;
+
+__global__ void refinementMaximaInterleavedBatch(int n, int nS, int stride, const double* __restrict__ r,
+                                                 const double* __restrict__ b, const char* __restrict__ active,
+                                                 unsigned long long* __restrict__ maxima) {
+    __shared__ double sharedR[SCORE_ROWS][SCORE_SCENARIOS];
+    __shared__ double sharedB[SCORE_ROWS][SCORE_SCENARIOS];
+    const int s = blockIdx.x * SCORE_SCENARIOS + threadIdx.x;
+    const bool scored = s < nS && (active == nullptr || active[s]);
+    double mr = 0.0;
+    double mb = 0.0;
+    if (scored) {
+        const int end = min(n, (blockIdx.y + 1) * SCORE_CHUNK);
+        for (int i = blockIdx.y * SCORE_CHUNK + threadIdx.y; i < end; i += SCORE_ROWS) {
+            mr = fmax(mr, fabs(r[static_cast<size_t>(i) * stride + s]));
+            mb = fmax(mb, fabs(b[static_cast<size_t>(i) * stride + s]));
+        }
+    }
+    sharedR[threadIdx.y][threadIdx.x] = mr;
+    sharedB[threadIdx.y][threadIdx.x] = mb;
+    __syncthreads();
+    if (threadIdx.y == 0 && scored) {
+        for (int y = 1; y < SCORE_ROWS; y++) {
+            mr = fmax(mr, sharedR[y][threadIdx.x]);
+            mb = fmax(mb, sharedB[y][threadIdx.x]);
+        }
+        atomicMax(&maxima[2 * s], static_cast<unsigned long long>(__double_as_longlong(mr)));
+        atomicMax(&maxima[2 * s + 1], static_cast<unsigned long long>(__double_as_longlong(mb)));
+    }
+}
+
+__global__ void refinementScoreOfMaxima(int nS, const char* __restrict__ active,
+                                        const unsigned long long* __restrict__ maxima, double* __restrict__ score) {
+    const int s = blockIdx.x * blockDim.x + threadIdx.x;
+    if (s >= nS) {
+        return;
+    }
+    if (active != nullptr && !active[s]) {
+        score[s] = 0.0;
+        return;
+    }
+    const double mr = __longlong_as_double(static_cast<long long>(maxima[2 * s]));
+    const double mb = __longlong_as_double(static_cast<long long>(maxima[2 * s + 1]));
+    score[s] = mb > 0.0 ? (isfinite(mr) ? mr / mb : 1e300) : 0.0;
+}
+
+__global__ void axpyLaneMaskInterleavedBatch(int nS, int stride, size_t total, double sign, const double* d,
+                                             const char* lane, double* x) {
+    const size_t g = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (g >= total) {
+        return;
+    }
+    const int s = static_cast<int>(g % stride);
+    if (s < nS && (lane == nullptr || lane[s])) {
+        x[g] += sign * d[g];
+    }
+}
+
 }  // namespace
+
+void launchRefinementScore(cudaStream_t stream, int n, int nS, const double* r, const double* b, const char* active,
+                           DeviceBuf& score, BatchLayout layout, bool interleavedVectors) {
+    if (!interleavedVectors) {
+        iterativeRefinementScoreBatch<<<nS, LANE_NORM_BLOCK, 0, stream>>>(n, nS, r, b, active, score.as<double>());
+        return;
+    }
+    score.ensure(static_cast<size_t>(nS) * 3 * sizeof(double));
+    unsigned long long* maxima = reinterpret_cast<unsigned long long*>(score.as<double>() + nS);
+    CUDA_CHECK(cudaMemsetAsync(maxima, 0, static_cast<size_t>(nS) * 2 * sizeof(unsigned long long), stream));
+    const dim3 blocks((nS + SCORE_SCENARIOS - 1) / SCORE_SCENARIOS, (n + SCORE_CHUNK - 1) / SCORE_CHUNK);
+    refinementMaximaInterleavedBatch<<<blocks, dim3(SCORE_SCENARIOS, SCORE_ROWS), 0, stream>>>(n, nS, layout.stride, r,
+            b, active, maxima);
+    refinementScoreOfMaxima<<<grid(nS), BLOCK, 0, stream>>>(nS, active, maxima, score.as<double>());
+}
+
+void launchLaneAxpy(cudaStream_t stream, int n, int nS, double sign, const double* d, const char* lane, double* x,
+                    BatchLayout layout, bool interleavedVectors) {
+    if (interleavedVectors) {
+        const size_t total = static_cast<size_t>(n) * layout.stride;
+        axpyLaneMaskInterleavedBatch<<<static_cast<unsigned int>((total + BLOCK - 1) / BLOCK), BLOCK, 0, stream>>>(nS,
+                layout.stride, total, sign, d, lane, x);
+    } else if (lane != nullptr) {
+        axpyLaneMaskBatch<<<grid(n * nS), BLOCK, 0, stream>>>(n, n * nS, sign, d, lane, x);
+    } else {
+        axpy1Batch<<<grid(n * nS), BLOCK, 0, stream>>>(n * nS, d, x);
+    }
+}
 
 void launchResidual(cudaStream_t stream, int n, int nS, int nnz, const int* rowPtr, const int* colIdx,
                     const double* vals, BatchLayout layout, const double* dx, const double* b, const char* lanes,
-                    double* r) {
-    if (layout.interleaved) {
+                    double* r, bool interleavedVectors) {
+    if (interleavedVectors) {
+        const size_t threads = static_cast<size_t>(n) * layout.stride;
+        residualAllInterleavedBatch<<<static_cast<unsigned int>((threads + BLOCK - 1) / BLOCK), BLOCK, 0, stream>>>(n,
+                nS, layout.stride, rowPtr, colIdx, vals, dx, b, lanes, r);
+    } else if (layout.interleaved) {
         const dim3 tiles((n + RESIDUAL_TILE_ROWS - 1) / RESIDUAL_TILE_ROWS,
                          (nS + RESIDUAL_TILE_SCENARIOS - 1) / RESIDUAL_TILE_SCENARIOS);
         residualInterleavedBatch<<<tiles, dim3(RESIDUAL_TILE_SCENARIOS, RESIDUAL_TILE_ROWS), 0, stream>>>(n, nS,

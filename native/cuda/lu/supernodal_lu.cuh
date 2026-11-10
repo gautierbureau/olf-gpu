@@ -54,12 +54,15 @@ void factorizeSupernodalLanes(SupernodalLu& lu, const double* vals, BatchLayout 
 
 // Solve with the last factorization's lanes: x[s * n ..] = A_s^-1 b[s * n ..] for every s of its lane map. Scenarios
 // outside the lane map keep their x.
-void solveSupernodalLanes(SupernodalLu& lu, const double* b, double* x, cudaStream_t stream);
+// vectors: how b and x are laid out - scenario-major (x[s * n ..], the default) or, when interleaved, by scenario at
+// x[i * vectors.stride + s] (common/batch_layout.cuh).
+void solveSupernodalLanes(SupernodalLu& lu, const double* b, double* x, cudaStream_t stream,
+                          BatchLayout vectors = BatchLayout{});
 
 // solveSupernodalLanes on count of the last factorization's lanes only, selected[0 .. count) (device array of positions
 // in its lane map): each of them takes the operations solveSupernodalLanes gives it; every other scenario keeps its x.
 void solveSupernodalSelectedLanes(SupernodalLu& lu, const int* selected, int count, const double* b, double* x,
-                                  cudaStream_t stream);
+                                  cudaStream_t stream, BatchLayout vectors = BatchLayout{});
 
 // The last factorization's clamp counts, per lane of its lane map (synchronizes the stream).
 std::vector<int> readSupernodalClamps(SupernodalLu& lu, cudaStream_t stream);

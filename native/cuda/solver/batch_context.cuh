@@ -541,6 +541,9 @@ struct BatchSolverContext {
     // mode 7 with couplers: the residual and correction of the internal refinement steps inside a refinement's own
     // correction solve (batched_lu_solve.cu solveWithInternalRefinement)
     DeviceBuf dInternalRefinementResidual, dInternalRefinementCorrection;
+    // mode 7: the Newton step's right-hand side and solution interleaved by scenario as dVals, the vectors its solve and
+    // refinement work on (batched_lu_solve.cu solveNewtonStep); the refinement buffers are n x the stride too
+    DeviceBuf dLuRightHandSide, dLuSolution;
     // mode 7: the exact substitution of the one-variable equations after each solve (singleton_substitution.cuh)
     DeviceBuf dSingletonHazardSlot, dSingletonColumnStart, dSingletonColumnRow, dSingletonList, dSingletonPendingList,
             dSingletonFixed, dSingletonTouched, dSingletonOwner, dSingletonProposal, dSingletonProposalValue, dSingletonCounters;

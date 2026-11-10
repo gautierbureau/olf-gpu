@@ -38,14 +38,25 @@ void launchLinResidRows(cudaStream_t stream, int n, int nS, int nnz, const int* 
 __global__ void residualBatch(int n, int nS, int nnz, const int* rowPtr, const int* colIdx,
                               const double* vals, const double* dx, const double* b, const char* lanes, double* r);
 
-// r = b - J dx (residualBatch) with J's values laid out by layout; b, dx and r scenario-major.
+// r = b - J dx (residualBatch) with J's values laid out by layout; b, dx and r scenario-major, or interleaved by
+// scenario as the values are when interleavedVectors (layout then interleaved too).
 void launchResidual(cudaStream_t stream, int n, int nS, int nnz, const int* rowPtr, const int* colIdx,
                     const double* vals, BatchLayout layout, const double* dx, const double* b, const char* lanes,
-                    double* r);
+                    double* r, bool interleavedVectors = false);
 
 __global__ void iterativeRefinementScoreBatch(int n, int nS, const double* r, const double* b, const char* active, double* score);
 
+// score[s] = ||r_s||inf / ||b_s||inf (iterativeRefinementScoreBatch) for the nS lanes, r and b laid out as
+// launchResidual's vectors; score holds nS doubles of scores, then the scratch of the interleaved maxima.
+void launchRefinementScore(cudaStream_t stream, int n, int nS, const double* r, const double* b, const char* active,
+                           DeviceBuf& score, BatchLayout layout, bool interleavedVectors);
+
 __global__ void axpyLaneMaskBatch(int n, int total, double sign, const double* d, const char* lane, double* x);
+
+// x += sign * d on the lanes whose mask is set (every lane when lane is null), x and d laid out as launchResidual's
+// vectors.
+void launchLaneAxpy(cudaStream_t stream, int n, int nS, double sign, const double* d, const char* lane, double* x,
+                    BatchLayout layout, bool interleavedVectors);
 
 // What the refinement uses of a solver: its stream, the systems' CSR pattern, its per-lane score and mask scratch
 // (a batch context's, or a standalone LU's in a test), and the lanes it solves: null for every lane (cuDSS's batch
@@ -59,6 +70,7 @@ struct RefinementContext {
     DeviceBuf& mask;
     const char* solvedLanes;
     BatchLayout layout;                                      // the values'
+    bool interleavedVectors = false;                         // dx, b, r and the corrections interleaved as the values
 };
 
 // Adaptive iterative refinement (see configuredIterativeRefinementBaseSteps / configuredIterativeRefinementMaxSteps / iterativeRefinementTolerance), decided PER LANE. internalSteps: the refinement steps the solver
@@ -82,8 +94,9 @@ void refineLanes(const RefinementContext& ctx, int lanes, int n, int nnz, const 
     std::vector<char> lane(lanes), undo(lanes);
     // r = b - J dx on the lanes of residualLanes, and the score of those of scoredLanes (every lane when null)
     auto scores = [&](const char* residualLanes, const char* scoredLanes, std::vector<double>& out) {
-        launchResidual(ctx.stream, n, lanes, nnz, ctx.rowPtr, ctx.colIdx, vals, ctx.layout, dx, b, residualLanes, r);
-        iterativeRefinementScoreBatch<<<lanes, LANE_NORM_BLOCK, 0, ctx.stream>>>(n, lanes, r, b, scoredLanes, ctx.score.as<double>());
+        launchResidual(ctx.stream, n, lanes, nnz, ctx.rowPtr, ctx.colIdx, vals, ctx.layout, dx, b, residualLanes, r,
+                       ctx.interleavedVectors);
+        launchRefinementScore(ctx.stream, n, lanes, r, b, scoredLanes, ctx.score, ctx.layout, ctx.interleavedVectors);
         CUDA_CHECK(cudaStreamSynchronize(ctx.stream));
         CUDA_CHECK(cudaMemcpy(out.data(), ctx.score.as<double>(), lanes * sizeof(double), cudaMemcpyDeviceToHost));
         gIterativeRefinementChecks++;
@@ -100,7 +113,7 @@ void refineLanes(const RefinementContext& ctx, int lanes, int n, int nnz, const 
         if (!solveLanes(lane, nLane)) {
             solve(lane, ctx.mask.as<char>());                // delta = J^-1 r on the lanes refining
         }
-        axpyLaneMaskBatch<<<grid(n * lanes), BLOCK, 0, ctx.stream>>>(n, n * lanes, 1.0, delta, ctx.mask.as<char>(), dx);
+        launchLaneAxpy(ctx.stream, n, lanes, 1.0, delta, ctx.mask.as<char>(), dx, ctx.layout, ctx.interleavedVectors);
         gIterativeRefinementExtraSolves++;
         scores(ctx.mask.as<char>(), ctx.mask.as<char>(), sc); // only the lanes refining read theirs
         int nUndo = 0;
@@ -120,7 +133,7 @@ void refineLanes(const RefinementContext& ctx, int lanes, int n, int nnz, const 
         }
         if (nUndo > 0) {
             CUDA_CHECK(cudaMemcpy(ctx.mask.p, undo.data(), lanes, cudaMemcpyHostToDevice));
-            axpyLaneMaskBatch<<<grid(n * lanes), BLOCK, 0, ctx.stream>>>(n, n * lanes, -1.0, delta, ctx.mask.as<char>(), dx);
+            launchLaneAxpy(ctx.stream, n, lanes, -1.0, delta, ctx.mask.as<char>(), dx, ctx.layout, ctx.interleavedVectors);
         }
     }
 }

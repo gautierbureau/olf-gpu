@@ -119,6 +119,16 @@ public final class BatchedLuNative {
                                                           int[] laneMap, double[] solutions);
 
     /**
+     * {@link #factorizeAndSolveNewtonStep} with the values handed to the solve interleaved by scenario, as a batch
+     * context holds them: the solve and its refinement then work on vectors interleaved the same way. The arrays are
+     * the same, scenario-major.
+     */
+    public static native void factorizeAndSolveNewtonStepInterleaved(int n, int[] rowPtr, int[] colIdx, int[] rowOrder,
+                                                                     int[] colOrder, int capacity, double[] values,
+                                                                     double[] rightHandSides, int[] laneMap,
+                                                                     double[] solutions);
+
+    /**
      * Factorizes the scenarios of {@code laneMap} {@code rounds} times on one plan, the fast engine's order learning its
      * pivot delays between rounds, then solves their systems with the last factorization; every other scenario's
      * solution is left as it is.

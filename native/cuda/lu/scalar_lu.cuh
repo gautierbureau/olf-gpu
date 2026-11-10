@@ -53,12 +53,15 @@ void factorizeScalarLanes(ScalarLu& lu, const double* vals, BatchLayout layout, 
 
 // Solve with the last factorization's lanes: x[s * n ..] = A_s^-1 b[s * n ..] for every s of its lane map. Scenarios
 // outside the lane map keep their x.
-void solveScalarLanes(ScalarLu& lu, const double* b, double* x, cudaStream_t stream);
+// vectors: how b and x are laid out - scenario-major (x[s * n ..], the default) or, when interleaved, by scenario at
+// x[i * vectors.stride + s] (common/batch_layout.cuh).
+void solveScalarLanes(ScalarLu& lu, const double* b, double* x, cudaStream_t stream,
+                      BatchLayout vectors = BatchLayout{});
 
 // solveScalarLanes on count of the last factorization's lanes only, selected[0 .. count) (device array of positions in
 // its lane map): each of them takes the operations solveScalarLanes gives it; every other scenario keeps its x.
 void solveScalarSelectedLanes(ScalarLu& lu, const int* selected, int count, const double* b, double* x,
-                              cudaStream_t stream);
+                              cudaStream_t stream, BatchLayout vectors = BatchLayout{});
 
 // The last factorization's trouble counts, per lane of its lane map (synchronizes the stream): a lane with any needs
 // the pivoting engine.

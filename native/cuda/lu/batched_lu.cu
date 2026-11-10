@@ -101,10 +101,10 @@ void factorizeLanes(BatchedLu& lu, const double* vals, BatchLayout layout, const
                              stream);
 }
 
-void solveLanes(BatchedLu& lu, const double* b, double* x, cudaStream_t stream) {
-    solveScalarLanes(lu.scalar, b, x, stream);
+void solveLanes(BatchedLu& lu, const double* b, double* x, cudaStream_t stream, BatchLayout vectors) {
+    solveScalarLanes(lu.scalar, b, x, stream, vectors);
     if (!lu.hPivoted.empty()) {
-        solveSupernodalLanes(lu.supernodal, b, x, stream);  // after the fast engine: the flagged lanes' x is its own
+        solveSupernodalLanes(lu.supernodal, b, x, stream, vectors);  // after the fast engine: the flagged lanes' x is its own
     }
 }
 
@@ -128,11 +128,12 @@ void selectLanes(BatchedLu& lu, const std::vector<char>& scenarios, cudaStream_t
     }
 }
 
-void solveSelectedLanes(BatchedLu& lu, const double* b, double* x, cudaStream_t stream) {
-    solveScalarSelectedLanes(lu.scalar, lu.dSelected.as<int>(), lu.selectedFast, b, x, stream);
+void solveSelectedLanes(BatchedLu& lu, const double* b, double* x, cudaStream_t stream, BatchLayout vectors) {
+    solveScalarSelectedLanes(lu.scalar, lu.dSelected.as<int>(), lu.selectedFast, b, x, stream, vectors);
     const int pivoted = static_cast<int>(lu.hSelected.size()) - lu.selectedFast;
     if (pivoted > 0) {                                       // after the fast engine, as in solveLanes
-        solveSupernodalSelectedLanes(lu.supernodal, lu.dSelected.as<int>() + lu.selectedFast, pivoted, b, x, stream);
+        solveSupernodalSelectedLanes(lu.supernodal, lu.dSelected.as<int>() + lu.selectedFast, pivoted, b, x, stream,
+                                     vectors);
     }
 }
 

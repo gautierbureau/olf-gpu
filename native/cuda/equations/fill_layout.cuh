@@ -23,6 +23,11 @@ void initInterleavedMismatch(int n, BatchLayout layout, const double* target, do
 void copyToScenarioMajor(int n, BatchLayout layout, const double* from, double* to, const char* active,
                          cudaStream_t stream);
 
+// The interleaved copy of a scenario-major array of n entries per scenario: every scenario's, or the active ones'
+// when active is set (the others are neither read nor written).
+void copyToInterleaved(int n, BatchLayout layout, const double* from, double* to, const char* active,
+                       cudaStream_t stream);
+
 }  // namespace olfgpu
 
 #endif  // OLF_GPU_EQUATIONS_FILL_LAYOUT_CUH

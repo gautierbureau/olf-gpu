@@ -37,6 +37,10 @@ struct BatchedLuSystems {
     DeviceBuf& score;
     DeviceBuf& mask;
     BatchLayout layout;
+    // n x layout.stride each, on interleaved values: solveNewtonStep's right-hand side and solution interleaved by
+    // scenario as the values are (null: it works on the scenario-major vectors)
+    double* interleavedRightHandSide = nullptr;
+    double* interleavedSolution = nullptr;
 };
 
 // x = J^-1 b as cuDSS's SOLVE phase computes it under the batch context's configuration: the solve, then its internal
@@ -47,7 +51,9 @@ void solveWithInternalRefinement(const BatchedLuSystems& systems, const double* 
 
 // The Newton step's linear solve: dx = J^-1 b with the internal steps, then on a structure with couplers the adaptive
 // refinement of the lanes still above the tolerance, each correction solved with the internal steps too, on those
-// lanes only. afterSolve, if set, runs between the two (a trace comparing the solve with cuDSS's).
+// lanes only. afterSolve, if set, runs between the two (a trace comparing the solve with cuDSS's), dx written by then.
+// b and dx are scenario-major; with the interleaved buffers set the solve works on vectors interleaved as the values
+// (residual, correction and the internal ones then n x layout.stride too).
 void solveNewtonStep(const BatchedLuSystems& systems, const double* b, double* dx,
                      const std::function<void()>& afterSolve = nullptr);
 

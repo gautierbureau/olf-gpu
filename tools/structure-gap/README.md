@@ -103,7 +103,7 @@ What the comparison shows on these networks:
   load flow's own switches to PQ would have added 2 189 anyway.
 - The security-analysis variant (every bus can be disabled) adds no entry: the disabled alternatives sit on
   diagonals that already exist.
-- The union costs a few percent more per factorisation on the large cases (+4% to +11% from case1354 up),
+- The union costs a few percent more per factorisation on the large cases (+4% to +16% from case1354pegase up),
   against three structure rebuilds saved per load flow on case9241pegase. The small IEEE cases are too small
   to time.
 

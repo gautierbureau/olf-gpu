@@ -11,9 +11,11 @@ complete. Keep the numbering: it is cited in commit messages.
 
 ## Open
 
-### #94 — PROPOSAL: array-form outer loops, one source for CPU and GPU (2026-11-10)
+### #94 — array-form outer loops, one source for CPU and GPU (2026-11-10; pilot stage 1 built)
 
-Not started. The device port of the outer loops is 10,621 lines of code against OLF's 3,286 (ReactiveLimits alone:
+Stage 1 of the ReactiveLimits pilot is on the OLF fork, branch `claude/hopeful-edison-8lqr3p` (one commit over
+`olf-local-patches`, which is untouched): 1,531 tests pass, 6,945 decision records identical before and after — see
+section 5.1 of the proposal. Stages 2 to 6 not started. The device port of the outer loops is 10,621 lines of code against OLF's 3,286 (ReactiveLimits alone:
 2,965 against 331). `docs/outer-loops-on-device.md` describes the current workflow and where those lines go;
 `docs/outer-loop-array-form-proposal.md` proposes a gather / decide / derive / apply shape over per-loop arrays, with
 the decision written once in OLF and generated for the device, and a ReactiveLimits pilot in seven stages, each with

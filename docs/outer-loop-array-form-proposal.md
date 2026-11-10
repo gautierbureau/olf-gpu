@@ -1,6 +1,6 @@
 # Proposal: array-form outer loops, one source for CPU and GPU
 
-**Status:** proposal, nothing implemented (2026-11-10).
+**Status:** stage 1 of the ReactiveLimits pilot is built on the OLF fork (section 5.1); the rest is a proposal (2026-11-10).
 **Read first:** [`outer-loops-on-device.md`](outer-loops-on-device.md) — the current workflow and
 the size accounting this proposal responds to.
 
@@ -382,6 +382,40 @@ Each stage has its own exit test and is useful if the next one is never done.
 | 4 | Host-decide mode for this loop behind a trace channel | this repo | same results as stage 3; measured µs per scenario-check and total overhead vs in-kernel |
 | 5 | `deriveGroup` in OLF's updater and as a device kernel replacing the transition kernels | both | busbar and injection scopes unchanged; `remote_voltage_control.cu` + `pilot_voltage.cu` shrink |
 | 6 | Generate packer / JNI / kernel signature from the vector description | this repo | no hand-written upload code left for this loop |
+
+### 5.1 Stage 1 as built (2026-11-10)
+
+On the OLF fork, branch `claude/hopeful-edison-8lqr3p`, cut from `olf-local-patches` and one commit ahead of it
+(`1f53c13`); `olf-local-patches` itself is untouched. Three classes in `OLF: ac/outerloop/`:
+`ReactiveLimitsVector` (the arrays), `ReactiveLimitsDecisions` (the rules, no network), and
+`ReactiveLimitsOuterLoop.check` rewritten as gather, decide, apply with the same setters, reports and traces.
+
+**Checked.** OLF's 1,531 tests pass before and after. With `OLF_RL_TRACE=1` and `OLF_RL_TRACE_BUS=""` (every bus)
+and the loggers silenced, the whole suite prints 6,945 decision records (`RL_PVCHECK`, `RL_DECIDE`, `RL_REFREEZE`,
+`RL_PASS`, `RL_SWITCH`): the same records before and after, in the same order for 147 of the 148 contingency
+labels; for the `base` label the order differs only where multi-threaded tests print. The suite reaches every
+branch: the strongest bus kept PV (22 times), a capped switch back, a re-freeze at a moved limit (9), the remote
+reactive power controllers, a realistic-voltage switch. The decisions also have their own test without a
+network (`ReactiveLimitsDecisionsTest`).
+
+**Where it differs from the sketch in section 3**, and why:
+
+- **A bus is read, decided and given its in-scan effects before the next bus is read.** Section 3.2 proposed
+  deciding every bus on the pre-check inputs. That is not always what OLF does: a bus's field holds one generator
+  voltage control, and a bus that is the controlled bus of one control and a remote controller of another keeps
+  the second, so its `setV(1)` can be read as the controlled voltage of a later bus. Stage 1 keeps OLF's order
+  exactly; `ReactiveLimitsDecisions.decideEntries` (all at once) is there for an engine that decides on a whole
+  vector, with that one stated difference.
+- **Two more decision codes**, `TO_PV_BLOCKED` and `KEPT_PV`: the loop reports both, so "nothing happens" was
+  not enough.
+- **The election keys are gathered only when the election runs** (every controlling bus would switch), and the
+  id rank is among its candidates only. Ranking every bus id at every check would have cost a sort per check.
+- **The entries are rebuilt at every check**, since the controller elements change with contingencies and
+  merged controls; the switch counts are kept per bus number.
+
+**Not checked:** nothing here ran against olf-gpu (no GPU in the container). olf-gpu uses only the loop's public
+API, which is unchanged. The fork's two pre-existing checkstyle failures (`AbstractSecurityAnalysis`,
+`NewtonRaphson`) are not from this change.
 
 **Decision points.**
 

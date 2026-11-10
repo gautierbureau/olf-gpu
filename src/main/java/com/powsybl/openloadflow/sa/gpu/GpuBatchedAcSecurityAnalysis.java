@@ -215,10 +215,15 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         if (targeted) {
             java.util.Set<LfBus> buses = touchedBuses(network, lfContingency, run);
             java.util.Collection<LfBranch> branches = lfContingency.getDisabledNetwork().getBranchesStatus().keySet();
-            if (!automationSystemSwitched.isEmpty() || !deviceRetapped.isEmpty()) {
+            // the susceptance, ratio and phase state variables the network update wrote: a later contingency left to
+            // the CPU starts its Newton from them, and holds them as targets where its control stays off
+            controlStateElements(network, run);
+            buses.addAll(run.controlStateBuses);
+            if (!automationSystemSwitched.isEmpty() || !deviceRetapped.isEmpty() || !run.controlStateBranches.isEmpty()) {
                 branches = new java.util.ArrayList<>(branches);
                 branches.addAll(automationSystemSwitched);
                 branches.addAll(deviceRetapped);              // back on their base tap
+                branches.addAll(run.controlStateBranches);
             }
             // the voltage loop over every bus is redundant when the next contingency is device-answered: its injection
             // writes every live bus (restoreStaleVoltages covers the rest)
@@ -304,16 +309,9 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         c.getLostLoads().keySet().forEach(l -> touched.add(l.getBus()));
         c.getLostGenerators().forEach(g -> touched.add(g.getBus()));
         if (!c.getShuntsShift().isEmpty()) {
-            if (run.shuntBus == null) {
-                run.shuntBus = new java.util.IdentityHashMap<>();
-                for (LfBus b : network.getBuses()) {
-                    b.getShunt().ifPresent(shunt -> run.shuntBus.put(shunt, b));
-                    b.getControllerShunt().ifPresent(shunt -> run.shuntBus.put(shunt, b));
-                    b.getSvcShunt().ifPresent(shunt -> run.shuntBus.put(shunt, b));
-                }
-            }
+            java.util.Map<com.powsybl.openloadflow.network.LfShunt, LfBus> shuntBus = shuntBus(network, run);
             c.getShuntsShift().keySet().forEach(shunt -> {
-                LfBus b = run.shuntBus.get(shunt);
+                LfBus b = shuntBus.get(shunt);
                 if (b != null) {
                     touched.add(b);
                 }
@@ -328,6 +326,47 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
             b.getGeneratorReactivePowerControl().ifPresent(reactivePowerControl -> closed.addAll(reactivePowerControl.getControllerBuses()));
         }
         return closed;
+    }
+
+    /** Shunt -> its bus (LfShunt does not know its bus), built once per run. */
+    private static java.util.Map<com.powsybl.openloadflow.network.LfShunt, LfBus> shuntBus(LfNetwork network, GpuSaRunState run) {
+        if (run.shuntBus == null) {
+            run.shuntBus = new java.util.IdentityHashMap<>();
+            for (LfBus b : network.getBuses()) {
+                b.getShunt().ifPresent(shunt -> run.shuntBus.put(shunt, b));
+                b.getControllerShunt().ifPresent(shunt -> run.shuntBus.put(shunt, b));
+                b.getSvcShunt().ifPresent(shunt -> run.shuntBus.put(shunt, b));
+            }
+        }
+        return run.shuntBus;
+    }
+
+    /**
+     * Sets the run's control state elements: what AcSolverUtil.updateNetwork writes beyond the bus voltages when the
+     * base system holds those variables (GpuPostContingencyState.updateNetworkAndCheckRealistic) — a SHUNT_B into its
+     * controller shunt's susceptance, restored with the shunt's bus, and a BRANCH_ALPHA1 or BRANCH_RHO1 into its
+     * branch's phase or ratio override. From the base system's variables, which no contingency adds to; once per
+     * extraction.
+     */
+    private static void controlStateElements(LfNetwork network, GpuSaRunState run) {
+        Map<com.powsybl.openloadflow.equations.Variable<com.powsybl.openloadflow.ac.equations.AcVariableType>, Integer> baseRows =
+                run.precomputed.baseVariableRows();
+        if (run.controlStateFor == baseRows) {
+            return;
+        }
+        java.util.Set<LfBus> buses = new java.util.LinkedHashSet<>();
+        java.util.Set<LfBranch> branches = new java.util.LinkedHashSet<>();
+        for (var v : baseRows.keySet()) {
+            switch (v.getType()) {
+                case SHUNT_B -> buses.add(Objects.requireNonNull(shuntBus(network, run).get(network.getShunt(v.getElementNum()))));
+                case BRANCH_ALPHA1, BRANCH_RHO1 -> branches.add(network.getBranch(v.getElementNum()));
+                default -> {
+                }
+            }
+        }
+        run.controlStateBuses = List.copyOf(buses);
+        run.controlStateBranches = List.copyOf(branches);
+        run.controlStateFor = baseRows;
     }
 
     /**

@@ -40,7 +40,7 @@ public final class BatchedLuNative {
      * fast-engine orders built with learned pivot delays, the fast-engine factorization steps and solve levels launched
      * with their long rows split over several warps, the pivoting-engine forward solve levels launched with their long
      * rows split, the lanes sent straight to the pivoting engine, past the fast one, because the pivoting engine
-     * factorized them last}.
+     * factorized them last, the lanes the fast engine's triangular solves ran on}.
      */
     public static native long[] factorizationCounts();
 
@@ -140,6 +140,16 @@ public final class BatchedLuNative {
                                               int capacity, double[] values, double[] rightHandSides, int[] laneMap,
                                               int rounds, int installRound, double[] solutions, int[] pivoted,
                                               int[] delays);
+
+    /**
+     * {@link #factorizeRounds} with the values reaching the factorizations interleaved by scenario, as a batch context
+     * holds them ({@code values} is given scenario-major and interleaved on the way).
+     */
+    public static native void factorizeRoundsInterleaved(int n, int[] rowPtr, int[] colIdx, int[] rowOrder,
+                                                         int[] colOrder, int capacity, double[] values,
+                                                         double[] rightHandSides, int[] laneMap, int rounds,
+                                                         int installRound, double[] solutions, int[] pivoted,
+                                                         int[] delays);
 
     /**
      * The orders cuDSS's analysis picks for the pattern, written into {@code rowOrder} and {@code colOrder} as cuDSS

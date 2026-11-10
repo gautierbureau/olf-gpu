@@ -476,4 +476,15 @@ std::vector<double> readScalarLaneFactors(ScalarLu& lu, int lane, DeviceBuf& scr
     return factors;
 }
 
+std::vector<double> readInterleavedScenario(const double* values, int count, int stride, int scenario, DeviceBuf& scratch,
+                                            cudaStream_t stream) {
+    std::vector<double> out(count);
+    scratch.ensure(out.size() * sizeof(double));
+    gatherLane<<<blocksFor(out.size()), LU_BLOCK, 0, stream>>>(count, stride, scenario, values, scratch.as<double>());
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaMemcpyAsync(out.data(), scratch.p, out.size() * sizeof(double), cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaStreamSynchronize(stream));
+    return out;
+}
+
 }  // namespace olfgpu

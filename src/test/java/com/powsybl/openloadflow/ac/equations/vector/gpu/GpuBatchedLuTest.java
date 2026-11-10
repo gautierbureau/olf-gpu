@@ -639,6 +639,86 @@ class GpuBatchedLuTest {
     }
 
     /**
+     * The lanes the fast engine flags go to the pivoting engine, which solves them: the fast engine's triangular solves
+     * run on the lanes it trusts only, in the solve of every lane and in the solve of selected lanes, and every lane's
+     * solution stays the one the whole batch gives it. Here the fast engine flags 2 of its 5 lanes (scenario 1 among
+     * them), so the whole solve runs it on 3 lanes and the selected solve of scenarios 1 and 0 on 1. Checked to fail with
+     * the flagged lanes solved by the fast engine too, in the whole solve and in the selection.
+     */
+    @Test
+    void flaggedLanesAreSolvedByThePivotingEngineAlone() {
+        CouplerSystem system = couplerSystem(32, 80, 3, 0.03);
+        Csr csr = system.csr();
+        int n = csr.n();
+        double[] values = refinementBatch(system);
+        double[] rightHandSides = refinementRightHandSides(6 * n);
+        double[] whole = filled(6 * n, 42);
+        int[] pivoted = new int[REFINEMENT_LANE_MAP.length];
+        int[] clamps = new int[REFINEMENT_LANE_MAP.length];
+        long before = BatchedLuNative.factorizationCounts()[6];
+        BatchedLuNative.factorizeAndSolve(n, csr.rowPtr(), csr.colIdx(), identity(n), identity(n), 6, values,
+                rightHandSides, REFINEMENT_LANE_MAP, whole, pivoted, clamps);
+        long wholeSolves = BatchedLuNative.factorizationCounts()[6] - before;
+        assertArrayEquals(new int[] {1, 0, 1, 0, 0}, pivoted);
+        assertEquals(3, wholeSolves, "lanes the fast engine solved in the whole solve: the 3 it trusts");
+        double[] selected = filled(6 * n, 42);
+        before = BatchedLuNative.factorizationCounts()[6];
+        BatchedLuNative.factorizeAndSolveSelected(n, csr.rowPtr(), csr.colIdx(), identity(n), identity(n), 6, values,
+                rightHandSides, REFINEMENT_LANE_MAP, new int[] {1, 0}, selected);
+        long selectedSolves = BatchedLuNative.factorizationCounts()[6] - before;
+        assertEquals(1, selectedSolves, "lanes the fast engine solved in the selection: scenario 0's, not flagged 1's");
+        for (int s = 0; s < 6; s++) {
+            double[] expected = s <= 1 ? scenario(whole, s, n) : filled(n, 42);
+            assertArrayEquals(expected, scenario(selected, s, n), "scenario " + s);
+        }
+    }
+
+    /**
+     * The fast engine learns its pivot delays from the values of the lanes it flagged; interleaved by scenario, as a
+     * batch context holds them, they are gathered on the device by scenario. The line group of
+     * cancelledPivotIsDelayedUntilARowGivesItAValue on scenarios 2, 3 and 4 of 5, interleaved, learns as it does there:
+     * scenarios 0 and 1, outside the lane map, hold NaN values, which teach nothing, and keep their solutions. Checked to
+     * fail with the gather taking a lane's position in the lane map as its scenario (it reads scenarios 0 and 1).
+     */
+    @Test
+    void pivotDelaysAreLearnedFromInterleavedValues() {
+        Random random = new Random(11);
+        int capacity = 5;
+        double[][] lanes = new double[capacity][];
+        for (int s = 0; s < capacity; s++) {
+            double g = 1 + 9 * random.nextDouble();
+            lanes[s] = s < 2 ? new double[] {Double.NaN, Double.NaN, Double.NaN} : new double[] {g, g, 1 + 9 * random.nextDouble()};
+        }
+        double[] values = lineGroupValues(lanes);
+        double[] rightHandSides = new double[capacity * 4];
+        for (int i = 0; i < rightHandSides.length; i++) {
+            rightHandSides[i] = random.nextDouble() * 2 - 1;
+        }
+        int[] laneMap = {2, 3, 4};
+        double[] solutions = filled(capacity * 4, 42);
+        int[] pivoted = new int[4 * laneMap.length];
+        int[] roundDelays = new int[4];
+        BatchedLuNative.factorizeRoundsInterleaved(4, LINE_GROUP.rowPtr(), LINE_GROUP.colIdx(), identity(4), identity(4),
+                capacity, values, rightHandSides, laneMap, 4, -1, solutions, pivoted, roundDelays);
+        int[] expected = new int[4 * laneMap.length];
+        Arrays.fill(expected, 0, 2 * laneMap.length, 1);
+        assertArrayEquals(expected, pivoted, "lanes the pivoting engine took, round by round");
+        assertArrayEquals(new int[] {0, 1, 1, 1}, roundDelays, "pivot delays of each round's order");
+        for (int s = 0; s < capacity; s++) {
+            double[] solution = Arrays.copyOfRange(solutions, s * 4, s * 4 + 4);
+            if (s < 2) {
+                assertArrayEquals(filled(4, 42), solution, "scenario " + s + " is outside the lane map");
+                continue;
+            }
+            double[] expectedSolution = denseSolve(dense(LINE_GROUP, values, s), Arrays.copyOfRange(rightHandSides, s * 4, s * 4 + 4));
+            double scale = Arrays.stream(expectedSolution).map(Math::abs).max().orElseThrow();
+            for (int i = 0; i < 4; i++) {
+                assertEquals(expectedSolution[i], solution[i], 1e-12 * scale, "scenario " + s + " unknown " + i);
+            }
+        }
+    }
+
+    /**
      * Values interleaved by scenario, as a batch context holds them, are read in place by both engines - the fast
      * one's factorization steps and the pivoting one's gathers, a fill entry starting from 0 - and give every lane the
      * solution, the engine and the clamps the values copied from the scenario-major layout give it, bit for bit: lanes

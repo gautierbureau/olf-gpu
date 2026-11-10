@@ -37,15 +37,13 @@ void learnFromUntrustedLanes(BatchedLu& lu, const double* vals, BatchLayout layo
     for (size_t t = 0; t < untrusted.size() && t < static_cast<size_t>(PIVOT_DELAY_LEARNING_LANES); t++) {
         const int lane = untrusted[t];                       // a position in the fast engine's lane map
         const std::vector<double> factors = readScalarLaneFactors(lu.scalar, lane, lu.laneFactors, stream);
-        if (layout.interleaved) {                            // one value of this scenario every stride values
-            CUDA_CHECK(cudaMemcpy2DAsync(a.data(), sizeof(double), vals + lu.scalar.hLaneMap[lane],
-                                         static_cast<size_t>(layout.stride) * sizeof(double), sizeof(double), a.size(),
-                                         cudaMemcpyDeviceToHost, stream));
+        if (layout.interleaved) {                            // one value of this scenario every stride values: gathered
+            a = readInterleavedScenario(vals, nnzA, layout.stride, lu.scalar.hLaneMap[lane], lu.laneValues, stream);
         } else {
             CUDA_CHECK(cudaMemcpyAsync(a.data(), vals + static_cast<size_t>(lu.scalar.hLaneMap[lane]) * nnzA,
                                        a.size() * sizeof(double), cudaMemcpyDeviceToHost, stream));
+            CUDA_CHECK(cudaStreamSynchronize(stream));
         }
-        CUDA_CHECK(cudaStreamSynchronize(stream));
         changed = learnPivotDelays(delays, *lu.fast, plan.rowPtr.data(), plan.colIdx.data(), factors.data(), a.data())
                   || changed;
     }
@@ -72,6 +70,8 @@ void factorizeLanes(BatchedLu& lu, const double* vals, BatchLayout layout, const
     lu.hSelected.clear();
     lu.selectedFast = 0;
     lu.fastHasEveryLane = true;
+    lu.fastFlagged.clear();
+    lu.fastTrusted = 0;
     if (width == 0) {
         factorizeScalarLanes(lu.scalar, vals, layout, laneMap, 0, stream);   // no lane: nothing left to solve
         return;
@@ -106,6 +106,25 @@ void factorizeLanes(BatchedLu& lu, const double* vals, BatchLayout layout, const
             untrusted.push_back(f - 1);
         }
     }
+    lu.fastTrusted = fastWidth - static_cast<int>(untrusted.size());
+    if (!untrusted.empty()) {                                // the fast engine solves the lanes it trusts only
+        lu.fastFlagged.assign(fastWidth, 0);
+        for (int f : untrusted) {
+            lu.fastFlagged[f] = 1;
+        }
+        std::vector<int>& trusted = lu.hFastTrusted;          // kept: the upload below is asynchronous
+        trusted.clear();
+        for (int f = 0; f < fastWidth; f++) {
+            if (!lu.fastFlagged[f]) {
+                trusted.push_back(f);
+            }
+        }
+        if (!trusted.empty()) {
+            lu.dFastTrusted.ensure(static_cast<size_t>(lu.capacity) * sizeof(int));
+            CUDA_CHECK(cudaMemcpyAsync(lu.dFastTrusted.p, trusted.data(), trusted.size() * sizeof(int),
+                                       cudaMemcpyHostToDevice, stream));
+        }
+    }
     for (int s : lu.hPivoted) {
         lu.pivotingRoute[s] = 1;
     }
@@ -137,9 +156,15 @@ void forgetLaneRouting(BatchedLu& lu, const std::vector<int>& slots) {
 }
 
 void solveLanes(BatchedLu& lu, const double* b, double* x, cudaStream_t stream) {
-    solveScalarLanes(lu.scalar, b, x, stream);
+    if (lu.fastFlagged.empty()) {
+        solveScalarLanes(lu.scalar, b, x, stream);
+        gBatchedLuFastLaneSolves += static_cast<long long>(lu.scalar.hLaneMap.size());
+    } else if (lu.fastTrusted > 0) {                         // not the lanes it flagged: the pivoting engine solves them
+        solveScalarSelectedLanes(lu.scalar, lu.dFastTrusted.as<int>(), lu.fastTrusted, b, x, stream);
+        gBatchedLuFastLaneSolves += lu.fastTrusted;
+    }
     if (!lu.hPivoted.empty()) {
-        solveSupernodalLanes(lu.supernodal, b, x, stream);  // after the fast engine: the flagged lanes' x is its own
+        solveSupernodalLanes(lu.supernodal, b, x, stream);
     }
 }
 
@@ -147,7 +172,7 @@ void selectLanes(BatchedLu& lu, const std::vector<char>& scenarios, cudaStream_t
     lu.hSelected.clear();
     const std::vector<int>& fastLanes = lu.scalar.hLaneMap;
     for (int a = 0; a < static_cast<int>(fastLanes.size()); a++) {
-        if (scenarios[fastLanes[a]]) {
+        if (scenarios[fastLanes[a]] && (lu.fastFlagged.empty() || !lu.fastFlagged[a])) {   // a flagged lane: below
             lu.hSelected.push_back(a);
         }
     }
@@ -166,6 +191,7 @@ void selectLanes(BatchedLu& lu, const std::vector<char>& scenarios, cudaStream_t
 
 void solveSelectedLanes(BatchedLu& lu, const double* b, double* x, cudaStream_t stream) {
     solveScalarSelectedLanes(lu.scalar, lu.dSelected.as<int>(), lu.selectedFast, b, x, stream);
+    gBatchedLuFastLaneSolves += lu.selectedFast;
     const int pivoted = static_cast<int>(lu.hSelected.size()) - lu.selectedFast;
     if (pivoted > 0) {                                       // after the fast engine, as in solveLanes
         solveSupernodalSelectedLanes(lu.supernodal, lu.dSelected.as<int>() + lu.selectedFast, pivoted, b, x, stream);

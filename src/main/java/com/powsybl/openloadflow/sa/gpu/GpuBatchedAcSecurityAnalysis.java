@@ -564,13 +564,16 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
      * reports the distribution of the strategy load flow alone (no loss pre-distribution, counted from the parent's
      * distributed targets); the device records it when one solve covered the pair's chunk.
      */
-    private static Double pairDistributedOnDevice(PrecomputedBatch precomputed, String pairId,
+    private static Double pairDistributedOnDevice(GpuSaRunState run, String contingencyId, String pairId,
                                                   SecurityAnalysisParameters securityAnalysisParameters) {
+        PrecomputedBatch precomputed = run.precomputed;
         if (!precomputed.isReady() || precomputed.states().get(pairId) == null) {
             return null;
         }
-        return securityAnalysisParameters.getLoadFlowParameters().isDistributedSlack()
-                ? precomputed.distributedActivePower().get(pairId) : Double.valueOf(0.0);
+        // a contingency's own load flow parameters, when they hold for its strategies too, decide the distribution
+        boolean distributes = run.ownDistributedSlack.getOrDefault(contingencyId,
+                securityAnalysisParameters.getLoadFlowParameters().isDistributedSlack());
+        return distributes ? precomputed.distributedActivePower().get(pairId) : Double.valueOf(0.0);
     }
 
     /**
@@ -593,7 +596,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                 return false;
             }
             for (List<String> actionIds : candidates) {
-                if (pairDistributedOnDevice(run.precomputed, GpuStrategyComposer.pairId(contingencyId, strategy, actionIds),
+                if (pairDistributedOnDevice(run, contingencyId, GpuStrategyComposer.pairId(contingencyId, strategy, actionIds),
                         securityAnalysisParameters) == null) {
                     return false;
                 }
@@ -851,10 +854,14 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         GpuSaRunState run = runState.get();
         long tPre = System.nanoTime();
         closeStateStore(run);                                 // a previous batch's file-backed states
+        GpuBatchPrecomputer.SolveGroup runGroup = GpuBatchPrecomputer.SolveGroup.run(new GpuBatchPrecomputer.SolveSettings(
+                run.batchDistributedSlack, run.batchReactiveLimits, run.batchReactiveLimitTol, run.batchSlackDistTol,
+                run.batchConvEpsPerEq, run.batchConfig));
+        java.util.Set<String> leftToCpu = new java.util.HashSet<>();
+        List<GpuBatchPrecomputer.SolveGroup> groups = run.lfNetwork != null && run.contingencies != null
+                ? solveGroups(run, parameters, runGroup, leftToCpu) : List.of(runGroup);
         run.precomputed = GpuBatchPrecomputer.precompute(network, run.lfNetwork, run.context,
-                run.contingencies, run.operatorStrategies, run.actions, run.batchDistributedSlack,
-                run.batchReactiveLimits, run.batchReactiveLimitTol, run.batchSlackDistTol, run.batchConvEpsPerEq,
-                run.batchConfig, reportNode);
+                run.contingencies, run.operatorStrategies, run.actions, groups, leftToCpu, reportNode);
         PHASE_NS.computeIfAbsent("precompute (extraction + batched solves)", k -> new java.util.concurrent.atomic.LongAdder())
                 .add(System.nanoTime() - tPre);
         if (run.precomputed.isReady()) {
@@ -868,6 +875,74 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         if (parameters.getSolverFactory() instanceof GpuNewtonRaphsonFactory && run.loadFlowParameters != null) {
             parameters.setSolverFactory(new NewtonRaphsonFactory(), run.loadFlowParameters);
         }
+    }
+
+    /**
+     * The precompute's solve groups: the run's, and one per distinct set of a contingency's own load flow parameters
+     * (ContingencyLoadFlowParameters), run with the outer loops OLF runs that contingency with. They are OLF's own:
+     * applySpecificContingencyParameters on the context's parameters, put back after as OLF's resetter does, from the
+     * generic contingency parameters OLF passes it (applyGenericContingencyParameters: the frozen AC emulation). A group
+     * whose loops the device does not run leaves its contingencies to the CPU ({@code leftToCpu}). The strategies of a
+     * contingency whose parameters hold for its strategies too run in its group; with scope CONTINGENCY_ONLY they run
+     * with the run's loops from the contingency's state, which another solve holds, so none is composed.
+     */
+    private List<GpuBatchPrecomputer.SolveGroup> solveGroups(GpuSaRunState run, AcLoadFlowParameters parameters,
+                                                             GpuBatchPrecomputer.SolveGroup runGroup,
+                                                             java.util.Set<String> leftToCpu) {
+        Map<List<Object>, List<Contingency>> byParameters = new java.util.LinkedHashMap<>();
+        for (PropagatedContingency propagatedContingency : run.contingencies) {
+            Contingency contingency = propagatedContingency.getContingency();
+            var own = contingency.getExtension(com.powsybl.openloadflow.sa.extensions.ContingencyLoadFlowParameters.class);
+            if (own != null) {
+                byParameters.computeIfAbsent(java.util.Arrays.asList(own.isDistributedSlack().orElse(null),
+                        own.isAreaInterchangeControl().orElse(null), own.getBalanceType().orElse(null),
+                        own.getOuterLoopNames().orElse(null)), k -> new java.util.ArrayList<>()).add(contingency);
+            }
+        }
+        List<GpuBatchPrecomputer.SolveGroup> groups = new java.util.ArrayList<>(List.of(runGroup));
+        if (byParameters.isEmpty()) {
+            return groups;
+        }
+        var loadFlowParameters = run.securityAnalysisParameters.getLoadFlowParameters();
+        var contingencyOpenLoadFlowParameters = com.powsybl.openloadflow.OpenLoadFlowParameters.get(loadFlowParameters);
+        if (OpenSecurityAnalysisParameters.getOrDefault(run.securityAnalysisParameters).isStartWithFrozenACEmulation()) {
+            contingencyOpenLoadFlowParameters = com.powsybl.openloadflow.OpenLoadFlowParameters.clone(contingencyOpenLoadFlowParameters);
+            contingencyOpenLoadFlowParameters.setStartWithFrozenACEmulation(true);
+        }
+        List<com.powsybl.openloadflow.ac.outerloop.AcOuterLoop> runLoops = List.copyOf(parameters.getOuterLoops());
+        for (List<Contingency> sameParameters : byParameters.values()) {
+            var own = sameParameters.getFirst().getExtension(com.powsybl.openloadflow.sa.extensions.ContingencyLoadFlowParameters.class);
+            GpuSaRunScope.Scope scope;
+            try {
+                applySpecificContingencyParameters(parameters, own, loadFlowParameters, contingencyOpenLoadFlowParameters);
+                scope = GpuSaRunScope.evaluate(run.lfNetwork, parameters, run.securityAnalysisParameters,
+                        own.getBalanceType(loadFlowParameters), true);
+            } finally {
+                parameters.setOuterLoops(runLoops);
+            }
+            java.util.Set<String> ids = new java.util.LinkedHashSet<>();
+            java.util.Set<String> withoutStrategies = new java.util.HashSet<>();
+            for (Contingency contingency : sameParameters) {
+                ids.add(contingency.getId());
+                if (contingency.getExtension(com.powsybl.openloadflow.sa.extensions.ContingencyLoadFlowParameters.class).getScope()
+                        == com.powsybl.openloadflow.sa.extensions.ContingencyLoadFlowParameters.Scope.CONTINGENCY_ONLY) {
+                    withoutStrategies.add(contingency.getId());
+                }
+            }
+            if (scope.batchDisabled()) {
+                LOGGER.info("GPU batched SA: outer loops {} of {} contingencies' own load flow parameters are not run on the "
+                        + "device, they run on the CPU", scope.unsupportedOuterLoops(), ids.size());
+                leftToCpu.addAll(ids);
+                continue;
+            }
+            groups.add(new GpuBatchPrecomputer.SolveGroup(GpuBatchPrecomputer.SolveSettings.of(scope), ids, withoutStrategies));
+            for (String id : ids) {
+                if (!withoutStrategies.contains(id)) {
+                    run.ownDistributedSlack.put(id, scope.distributedSlack());
+                }
+            }
+        }
+        return groups;
     }
 
     @Override
@@ -885,7 +960,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         String scId = GpuStrategyComposer.pairId(contingency.getId(), operatorStrategy, actionsIds);
         PrecomputedBatch precomputed = runState.get().precomputed;
         double[] state = precomputed.states().get(scId);
-        Double distributed = pairDistributedOnDevice(precomputed, scId, securityAnalysisParameters);
+        Double distributed = pairDistributedOnDevice(runState.get(), contingency.getId(), scId, securityAnalysisParameters);
         if (distributed == null) {
             // pair not precomputed (condition not TrueCondition / out-of-scope action / diverged) or its
             // distributed active power not recorded — CPU path

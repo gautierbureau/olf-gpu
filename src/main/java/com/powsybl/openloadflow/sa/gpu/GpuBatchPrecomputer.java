@@ -67,6 +67,29 @@ final class GpuBatchPrecomputer {
     private GpuBatchPrecomputer() {
     }
 
+    /** One batched solve's settings: the run's, or those of the contingencies sharing their own load flow parameters. */
+    record SolveSettings(boolean distributedSlack, boolean reactiveLimits, double reactiveLimitTol, double slackDistTol,
+                         double convEpsPerEq, BatchConfig config) {
+
+        static SolveSettings of(GpuSaRunScope.Scope scope) {
+            return new SolveSettings(scope.distributedSlack(), scope.reactiveLimits(), scope.reactiveLimitTol(),
+                    scope.slackDistTol(), scope.convEpsPerEq(), scope.batchConfig());
+        }
+    }
+
+    /**
+     * The contingencies one batched solve runs with one set of settings: the run's ({@code contingencyIds} null: every
+     * contingency in no other group), or those carrying the same load flow parameters (ContingencyLoadFlowParameters).
+     * The strategies of those in {@code withoutStrategies} run with the run's outer loops (scope CONTINGENCY_ONLY), and
+     * none is composed here.
+     */
+    record SolveGroup(SolveSettings settings, java.util.Set<String> contingencyIds, java.util.Set<String> withoutStrategies) {
+
+        static SolveGroup run(SolveSettings settings) {
+            return new SolveGroup(settings, null, java.util.Set.of());
+        }
+    }
+
     /**
      * Solve the qualified single-branch contingencies in one GPU batch, from the converged
      * base state. Failures (no GPU, an out-of-scope network the extractor rejects, a device
@@ -77,6 +100,19 @@ final class GpuBatchPrecomputer {
                                        List<Action> actions, boolean distributedSlack, boolean reactiveLimits,
                                        double reactiveLimitTol, double slackDistTol, double convEpsPerEq,
                                        BatchConfig config, ReportNode reportNode) {
+        return precompute(network, net, context, contingencies, strategies, actions,
+                List.of(SolveGroup.run(new SolveSettings(distributedSlack, reactiveLimits, reactiveLimitTol, slackDistTol,
+                        convEpsPerEq, config))), java.util.Set.of(), reportNode);
+    }
+
+    /**
+     * The same with the contingencies split in {@code groups}, one solve each, the run's group among them; the
+     * contingencies in {@code leftToCpu} are not batched (their own outer loops are not run on the device).
+     */
+    static PrecomputedBatch precompute(Network network, LfNetwork net, AcLoadFlowContext context,
+                                       List<PropagatedContingency> contingencies, List<OperatorStrategy> strategies,
+                                       List<Action> actions, List<SolveGroup> groups, java.util.Set<String> leftToCpu,
+                                       ReportNode reportNode) {
         if (GpuTrace.BATCH_TRACE.isOn()) {   // the network the batch starts from
             for (var b : net.getBuses()) {
                 for (var g : b.getGenerators()) {
@@ -86,17 +122,15 @@ final class GpuBatchPrecomputer {
             }
         }
         synchronized (GPU_DEVICE_LOCK) {
-            return precomputeLocked(network, net, context, contingencies, strategies, actions, distributedSlack,
-                    reactiveLimits, reactiveLimitTol, slackDistTol, convEpsPerEq, config, reportNode);
+            return precomputeLocked(network, net, context, contingencies, strategies, actions, groups, leftToCpu, reportNode);
         }
     }
 
     private static PrecomputedBatch precomputeLocked(Network network, LfNetwork net, AcLoadFlowContext context,
                                                      List<PropagatedContingency> contingencies, List<OperatorStrategy> strategies,
-                                                     List<Action> actions, boolean distributedSlack, boolean reactiveLimits,
-                                                     double reactiveLimitTol, double slackDistTol, double convEpsPerEq,
-                                                     BatchConfig configIn, ReportNode reportNode) {
-        BatchConfig config = configIn;
+                                                     List<Action> actions, List<SolveGroup> groups,
+                                                     java.util.Set<String> leftToCpu, ReportNode reportNode) {
+        SolveGroup runGroup = groups.stream().filter(g -> g.contingencyIds() == null).findFirst().orElseThrow();
         if (!GpuAcNewtonSolver.isAvailable() || net == null || context == null || contingencies.isEmpty()) {
             if (GpuTrace.BATCH_TRACE.isOn()) {
                 System.err.println("PRECOMP_BAIL avail=" + GpuAcNewtonSolver.isAvailable() + " net=" + (net != null)
@@ -115,18 +149,40 @@ final class GpuBatchPrecomputer {
             double[] baseState = es.getStateVector().get().clone();
             var target = context.getTargetVector();
 
-            List<BatchContingency> batch = new ArrayList<>();
+            // one batch per group, the contingencies taken in OLF's order
+            List<List<BatchContingency>> batches = new ArrayList<>();
+            Map<String, Integer> groupIndex = new HashMap<>();
+            for (int g = 0; g < groups.size(); g++) {
+                batches.add(new ArrayList<>());
+                if (groups.get(g).contingencyIds() != null) {
+                    for (String id : groups.get(g).contingencyIds()) {
+                        groupIndex.put(id, g);
+                    }
+                }
+            }
+            int runGroupIndex = groups.indexOf(runGroup);
             // OLF's zero-impedance spanning trees, replayed contingency by contingency (ZeroImpedanceTreeReplay):
             // the device extracted its structure on the base tree, and every coupler OLF has out of its
             // tree when it reaches a contingency must be held out of it there, ALL of them, not one per network.
             ZeroImpedanceTreeReplay ziTree = new ZeroImpedanceTreeReplay(net);
             for (PropagatedContingency propagatedContingency : contingencies) {
-                addBatchScenarios(net, network, propagatedContingency, context, ziTree, batch, strategies, config, actions);
+                String contingencyId = propagatedContingency.getContingency().getId();
+                if (leftToCpu.contains(contingencyId)) {
+                    GpuBatchScopeCensus.record("PLAN:CONTINGENCY_PARAMETERS");
+                    GpuBatchScopeCensus.planRefused(contingencyId, "PLAN:CONTINGENCY_PARAMETERS");
+                    continue;
+                }
+                int g = groupIndex.getOrDefault(contingencyId, runGroupIndex);
+                SolveGroup group = groups.get(g);
+                addBatchScenarios(net, network, propagatedContingency, context, ziTree, batches.get(g),
+                        group.withoutStrategies().contains(contingencyId) ? List.of() : strategies,
+                        group.settings().config(), actions);
             }
+            int batchSize = batches.stream().mapToInt(List::size).sum();
             if (GpuTrace.BATCH_TRACE.isOn()) {
-                System.err.println("PRECOMP_BATCH size=" + batch.size());
+                System.err.println("PRECOMP_BATCH size=" + batchSize);
             }
-            if (batch.isEmpty()) {
+            if (batchSize == 0) {
                 return PrecomputedBatch.empty();
             }
 
@@ -135,32 +191,42 @@ final class GpuBatchPrecomputer {
             // it is the cache hit the solver is about to take, and the plain (no base-open) flavor is
             // self-consistent with the plain mapper below — a base-open branch simply maps to no
             // element and falls back to the host scan.
-            GpuAcData screenData = GpuAcDataCache.extract(net, es, config.distributedSlackParameters());
+            GpuAcData screenData = GpuAcDataCache.extract(net, es, runGroup.settings().config().distributedSlackParameters());
             GpuAcElementMapper screenMapper = new GpuAcElementMapper(net);
 
             // Every batched scenario's state is held until the analysis ends (the violation screen decides on all of
             // them at once, the results are injected later in OLF's loop). Past GpuStateStore's threshold they go to
             // a temporary file as each chunk completes instead of the heap: network.xiidm's all-kinds + busbar list
             // is 37k states of 280 KB, 10.4 GB, more than this machine's heap can hold beside the rest of the run.
-            if (config.stateSink() == null && com.powsybl.openloadflow.sa.gpu.GpuStateStore.wanted(batch.size(),
-                                 baseState.length)) {
-                config = config.withStateSink(com.powsybl.openloadflow.sa.gpu.GpuStateStore.create(baseState.length));
-                LOGGER.info("Batched N-1: {} states of {} entries go to a temporary file (over {} bytes)", batch.size(),
+            Map<String, double[]> stateSink = runGroup.settings().config().stateSink();
+            if (stateSink == null && com.powsybl.openloadflow.sa.gpu.GpuStateStore.wanted(batchSize, baseState.length)) {
+                stateSink = com.powsybl.openloadflow.sa.gpu.GpuStateStore.create(baseState.length);
+                LOGGER.info("Batched N-1: {} states of {} entries go to a temporary file (over {} bytes)", batchSize,
                         baseState.length, com.powsybl.openloadflow.sa.gpu.GpuStateStore.thresholdBytes());
             }
-            List<BatchScenarioResult> results = GpuBatchedSecurityAnalysisSolver.solveBatchN1(
-                    BatchSolveRequest.of(net, baseState, batch, es, target, deviceSolverParameters(context),
-                            reportNode)
-                            .withOuterLoops(distributedSlack, reactiveLimits)
-                            .withOuterLoopTolerances(reactiveLimitTol, slackDistTol)
-                            .withConvEpsPerEq(convEpsPerEq)
-                            .withConfig(config));
-            results = retryRejectedOnDevice(results, batch, net, baseState, es, target, context,
-                    distributedSlack, reactiveLimits, reactiveLimitTol, slackDistTol, convEpsPerEq,
-                    reportNode, config);
+            // one solve per group, with its own outer loops, into the same results
+            List<BatchScenarioResult> results = new ArrayList<>();
+            for (int g = 0; g < groups.size(); g++) {
+                List<BatchContingency> batch = batches.get(g);
+                if (batch.isEmpty()) {
+                    continue;
+                }
+                SolveSettings settings = groups.get(g).settings();
+                BatchConfig config = stateSink != null ? settings.config().withStateSink(stateSink) : settings.config();
+                List<BatchScenarioResult> groupResults = GpuBatchedSecurityAnalysisSolver.solveBatchN1(
+                        BatchSolveRequest.of(net, baseState, batch, es, target, deviceSolverParameters(context),
+                                reportNode)
+                                .withOuterLoops(settings.distributedSlack(), settings.reactiveLimits())
+                                .withOuterLoopTolerances(settings.reactiveLimitTol(), settings.slackDistTol())
+                                .withConvEpsPerEq(settings.convEpsPerEq())
+                                .withConfig(config));
+                results.addAll(retryRejectedOnDevice(groupResults, batch, net, baseState, es, target, context,
+                        settings.distributedSlack(), settings.reactiveLimits(), settings.reactiveLimitTol(),
+                        settings.slackDistTol(), settings.convEpsPerEq(), reportNode, config));
+            }
             // the converged states: the sink when the run has one (every chunk put its states there as it
             // completed), a heap map otherwise
-            Map<String, double[]> states = config.stateSink() != null ? config.stateSink() : new HashMap<>();
+            Map<String, double[]> states = stateSink != null ? stateSink : new HashMap<>();
             Map<String, int[]> islandedBuses = new HashMap<>();
             java.util.Set<String> exhausted = new java.util.HashSet<>();
             Map<String, Double> preDistributed = new HashMap<>();
@@ -216,11 +282,11 @@ final class GpuBatchPrecomputer {
                 baseVariableRows.put(v, v.getRow());
             }
             LOGGER.info("GPU batched SA: precomputed {} of {} branch (N-1..N-k) contingencies on the device",
-                    states.size(), batch.size());
+                    states.size(), batchSize);
             // ...and on stderr, unconditionally: the device's share is decided HERE, before the CPU replays the
             // contingencies it did not solve. On a large scope that replay is the long tail (network.xiidm's full
             // busbar scope: about two hours on one thread), and the engagement number should not wait for it.
-            System.err.println("GPU_PRECOMPUTED " + states.size() + " / " + batch.size() + " batched scenarios on device"
+            System.err.println("GPU_PRECOMPUTED " + states.size() + " / " + batchSize + " batched scenarios on device"
                     + " census=" + GpuBatchScopeCensus.snapshot());
 
             return new PrecomputedBatch(states, islandedBuses, exhausted, baseVariableRows, es, screenData, screenMapper,

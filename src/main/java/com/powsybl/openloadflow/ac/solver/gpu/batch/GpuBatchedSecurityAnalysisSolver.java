@@ -289,9 +289,12 @@ public final class GpuBatchedSecurityAnalysisSolver {
                 // built in the order the call evaluated them when they were its arguments
                 var hvdcElemIndex = GpuHvdcAcEmulationLimitsOuterLoop.elementIndices(network, nElements);
                 int[] varType = config.stateVectorScalingMode() == GpuStateVectorScalingMode.MAX_VOLTAGE_CHANGE ? GpuAcActivationExtractor.extractVarType(equationSystem, n) : null;
-                List<GpuHvdcAcEmulationLimitsOuterLoop.Controller> hvdcControllers = config.hvdcFreezing() || config.hvdcLimits()
-                        ? GpuHvdcAcEmulationLimitsOuterLoop.buildControllers(network, equationSystem, nElements, gpuData)
-                        : null;
+                // every AC emulation link of the pack, whichever of its loops the run names: the slack check counts a link's
+                // flow at the slack bus from these tables (hvdcSlackBalanceBatch), with or without a loop to freeze or limit
+                // it, which an explicit loop list may leave out (measured: 2.6 MW distributed on a 2.4 MW link where OLF
+                // distributes none); without the freeze loop nothing is frozen, and the freeze phase has nothing to release
+                List<GpuHvdcAcEmulationLimitsOuterLoop.Controller> hvdcControllers =
+                        GpuHvdcAcEmulationLimitsOuterLoop.buildControllers(network, equationSystem, nElements, gpuData);
                 GpuBatchChunkSolver.solveQualifiedInChunks(new ChunkInputs(contingencies,
                         new ChunkInputs.BaseCase(elementMapper, gpuData, baseState, baseTargets, baseActivation.rowMode(),
                                 n, nElements, varType, hvdcElemIndex),

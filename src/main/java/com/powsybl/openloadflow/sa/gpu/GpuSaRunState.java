@@ -109,6 +109,9 @@ final class GpuSaRunState {
      *  pairs' (GpuDeviceTaps): each scenario's moves are from the base, so a branch moved earlier and not listed goes back
      *  to its base tap, and the restores put every one of them back. */
     final Map<LfBranch, Integer> deviceTapBase = new java.util.LinkedHashMap<>();
+    /** Whether the strategy load flows of a contingency carrying its own load flow parameters distribute active power
+     *  (its group's outer loops, GpuBatchPrecomputer.SolveGroup); the run's flag for every other contingency. */
+    final Map<String, Boolean> ownDistributedSlack = new java.util.HashMap<>();
     /** The branches the current contingency's device tap moves changed: the screen read them at their base tap, so they
      *  are scanned in full on the host and their flows refreshed. */
     List<LfBranch> deviceRetapped = List.of();

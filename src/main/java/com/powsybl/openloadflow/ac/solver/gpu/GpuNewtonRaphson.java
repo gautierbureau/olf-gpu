@@ -901,10 +901,9 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
      *  network holds. */
     private void installHvdcDriverLoops(final int nElements, final boolean[][] elementMask, final long handle) {
         boolean hvdcLimits = driverLoop("AcHvdcAcEmulationLimits") != null;
-        boolean hvdcFreeze = driverLoop("FreezingHvdcACEmulation") != null;
-        if (hvdcLimits || hvdcFreeze) {
-            hvdcAcEmulationControllers = GpuHvdcAcEmulationLimitsOuterLoop.buildControllers(network, equationSystem, nElements, cachedData);
-        }
+        // every AC emulation link, whichever of its loops the run names: the slack check counts a link's flow at the slack
+        // bus from these tables, with or without a loop to freeze or limit it (an explicit loop list may leave both out)
+        hvdcAcEmulationControllers = GpuHvdcAcEmulationLimitsOuterLoop.buildControllers(network, equationSystem, nElements, cachedData);
         if (hvdcAcEmulationControllers != null && !hvdcAcEmulationControllers.isEmpty()) {
             int nh = hvdcAcEmulationControllers.size();
             int[][] hvdcAcEmulationStatus = new int[1][nh];

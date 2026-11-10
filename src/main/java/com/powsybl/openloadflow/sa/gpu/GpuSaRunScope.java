@@ -58,6 +58,19 @@ final class GpuSaRunScope {
 
     static Scope evaluate(LfNetwork lfNetwork, AcLoadFlowParameters acParameters,
                           SecurityAnalysisParameters securityAnalysisParameters) {
+        return evaluate(lfNetwork, acParameters, securityAnalysisParameters,
+                securityAnalysisParameters.getLoadFlowParameters().getBalanceType(), false);
+    }
+
+    /**
+     * The scope for the outer loops in {@code acParameters} and the balance type {@code balanceType}. With
+     * {@code contingencyLoops} the loops are already those OLF runs a contingency with (a contingency's own load flow
+     * parameters, AcSecurityAnalysis.applySpecificContingencyParameters), which hold the HVDC freeze when OLF freezes; the
+     * run's loops are still the base ones when the run's scope is evaluated, so the freeze comes from the analysis flag.
+     */
+    static Scope evaluate(LfNetwork lfNetwork, AcLoadFlowParameters acParameters,
+                          SecurityAnalysisParameters securityAnalysisParameters,
+                          LoadFlowParameters.BalanceType balanceType, boolean contingencyLoops) {
         boolean noHvdc = lfNetwork.getHvdcs().isEmpty();
         // TransformerVoltageControl is BATCHABLE since the per-scenario orchestrator port
         // (AFTER_GENERATOR mode only; stage-1 scope = no generator voltage controls under the
@@ -106,7 +119,7 @@ final class GpuSaRunScope {
         // orchestrator seeds those bits, so a non-linear base still requires the freeze or limits
         // loop to actually RUN (controllers built); without either (startWithFrozenACEmulation
         // explicitly off and no limits loop) the base coupling would double-count -> keep the gate.
-        boolean hvdcLoopsRun = com.powsybl.openloadflow.sa.OpenSecurityAnalysisParameters
+        boolean hvdcLoopsRun = !contingencyLoops && com.powsybl.openloadflow.sa.OpenSecurityAnalysisParameters
                 .getOrDefault(securityAnalysisParameters).isStartWithFrozenACEmulation()
                 || acParameters.getOuterLoops().stream().anyMatch(outerLoop ->
                         "AcHvdcAcEmulationLimits".equals(outerLoop.getName()) || "FreezingHvdcACEmulation".equals(outerLoop.getName()));
@@ -168,8 +181,8 @@ final class GpuSaRunScope {
         // with several synchronous components, which the CPU path then reports. Its scenarios with an active power loss,
         // an island, an HVDC or a strategy go to the CPU (GpuBatchQualification.refuseAreaInterchangeControlShapes).
         var areaInterchangeControlLoop = com.powsybl.openloadflow.ac.outerloop.gpu.GpuAreaInterchangeControlOuterLoop.find(acParameters.getOuterLoops());
-        boolean areaInterchangeControlLoadBased = lfGuardParams.getBalanceType() == LoadFlowParameters.BalanceType.PROPORTIONAL_TO_LOAD
-                || lfGuardParams.getBalanceType() == LoadFlowParameters.BalanceType.PROPORTIONAL_TO_CONFORM_LOAD;
+        boolean areaInterchangeControlLoadBased = balanceType == LoadFlowParameters.BalanceType.PROPORTIONAL_TO_LOAD
+                || balanceType == LoadFlowParameters.BalanceType.PROPORTIONAL_TO_CONFORM_LOAD;
         boolean areaInterchangeControlBatchable = areaInterchangeControlLoop != null && lfNetwork.getSynchronousNetworks().size() == 1
                 && (!lfNetwork.hasArea() || !areaInterchangeControlLoadBased
                         && lfNetwork.getSynchronousNetworks().getFirst().getSlackBuses().size() == 1);
@@ -212,13 +225,13 @@ final class GpuSaRunScope {
         // six — incl. the load-based types and REMAINING_MARGIN via the margin factors, GpuDistributedSlackFactorMode)
         // and both useActiveLimits settings, so this guard is future-proofing for balance types
         // OLF adds later, not a live fallback.
-        if (distributedSlackLoopActive && !com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDistributedSlackParameters.supports(lfGuardParams.getBalanceType())) {
-            unsupportedOuterLoops.add("DistributedSlack[balanceType=" + lfGuardParams.getBalanceType() + "]");
+        if (distributedSlackLoopActive && !com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDistributedSlackParameters.supports(balanceType)) {
+            unsupportedOuterLoops.add("DistributedSlack[balanceType=" + balanceType + "]");
         }
         // loadPowerFactorConstant rescales each distributed load's targetQ alongside targetP — a per-round
         // bus Q-target mutation the device DS pass does not model.
-        boolean loadBased = lfGuardParams.getBalanceType() == LoadFlowParameters.BalanceType.PROPORTIONAL_TO_LOAD
-                || lfGuardParams.getBalanceType() == LoadFlowParameters.BalanceType.PROPORTIONAL_TO_CONFORM_LOAD;
+        boolean loadBased = balanceType == LoadFlowParameters.BalanceType.PROPORTIONAL_TO_LOAD
+                || balanceType == LoadFlowParameters.BalanceType.PROPORTIONAL_TO_CONFORM_LOAD;
         if (distributedSlackLoopActive && loadBased && olfGuardParams.isLoadPowerFactorConstant()) {
             unsupportedOuterLoops.add("DistributedSlack[loadPowerFactorConstant]");
         }
@@ -282,7 +295,7 @@ final class GpuSaRunScope {
         // keying on acParameters.getOuterLoops() alone silently skipped the freeze phase for the
         // batch (found 2026-09-05: ~1e-4 kV plateau gaps on live-hvdc branch outages — the arms
         // solved along different paths and stopped at different points inside the criterion).
-        boolean saContingencyFreeze = com.powsybl.openloadflow.sa.OpenSecurityAnalysisParameters
+        boolean saContingencyFreeze = !contingencyLoops && com.powsybl.openloadflow.sa.OpenSecurityAnalysisParameters
                 .getOrDefault(securityAnalysisParameters).isStartWithFrozenACEmulation();
         boolean cfgHvdcFreezing = !noHvdc && hvdcBatchable
                 && (saContingencyFreeze
@@ -331,7 +344,7 @@ final class GpuSaRunScope {
                 // OLF's area distributions reset every participant to its INITIAL target (resetToInitialState) and the
                 // device keeps their moves from there; the plain distributed slack anchors at the converged base
                 new com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDistributedSlackParameters(
-                        lfGuardParams.getBalanceType(), olfGuardParams.isUseActiveLimits(),
+                        balanceType, olfGuardParams.isUseActiveLimits(),
                         areaInterchangeControlLoop != null && lfNetwork.hasArea()),
                 cfgIncrementalTransformerVoltageControl, olfGuardParams.getIncrementalTransformerRatioTapControlOuterLoopMaxTapShift(),
                 cfgIncrementalShunt, olfGuardParams.getIncrementalShuntControlOuterLoopMaxSectionShift(),

@@ -900,19 +900,23 @@ class GpuBatchedLuTest {
 
     /**
      * The pivoting engine spreads a supernode's rows where a level leaves the GPU threads to spare - over warps in a
-     * backward level, over blocks in a split forward level: each form solves as the one-thread-per-supernode kernels do,
-     * bit for bit, on all 37 lanes and on 5 selected ones (setPivotingEngineOneThreadKernelsForTests). Three systems:
+     * backward level, over blocks in a split forward level - and factorizes a diagonal block of 8 rows or more a row per
+     * warp: each form solves as the one-thread-per-supernode kernels do, bit for bit, on all 37 lanes and on 5 selected
+     * ones (setPivotingEngineOneThreadKernelsForTests). Four systems:
      * <ul>
      * <li>40 units of two dense 3-row blocks and 2 border rows joined to both (each block a supernode with the border rows
      * in its U panel) and a dense block of 16 rows on its own: narrow backward levels, no forward split;</li>
      * <li>the hub and chain of pivotingEngineSplitsItsLongForwardRows: the hub row's 299 L terms, a split forward level;</li>
-     * <li>a 4-row supernode with a 2-row U panel (it and a 2-row block are the children of the last 2 rows): an identity
+     * <li>an 8-row supernode with a 2-row U panel (it and a 2-row block are the children of the last 2 rows): an identity
      * row (empty panel) after a row of a single nonzero whose panel is not empty, and 100 in the identity row's column
      * on another row - complete pivoting would take it first.
-     * The singleton pivot keeps the identity row's value at its right-hand side to the last bit.</li>
+     * The singleton pivot keeps the identity row's value at its right-hand side to the last bit;</li>
+     * <li>a dense 16-row block of zero diagonals and off-diagonal entries in -3..3: complete pivoting meets ties, broken as
+     * the one-thread kernel breaks them.</li>
      * </ul>
      * Every lane goes to the pivoting engine (zero diagonals). Checked to fail with a row's last U panel term left out of
-     * backwardLevelRows and with forwardLevelSplitRows' partial sums added from the last warp.
+     * backwardLevelRows, with forwardLevelSplitRows' partial sums added from the last warp, with factorBlocksRows' ties
+     * going to the last row and with its singleton rows ignored.
      */
     @Test
     void pivotingEngineSpreadKernelsSolveAsTheirOneThreadForms() {
@@ -940,6 +944,7 @@ class GpuBatchedLuTest {
         double[] unitValues = withZeroDiagonalCorner(units8, diagonallyDominantValues(units8, capacity, 71), capacity, 3, 2);
         long[] counts = assertSpreadSolvesAsOneThread(units8, unitValues, capacity, chosen, random);
         assertTrue(counts[7] > 0, "backward levels solved a row per warp: " + counts[7]);
+        assertTrue(counts[9] > 0, "diagonal blocks factorized a row per warp: " + counts[9]);
         assertEquals(0, counts[4], "no forward level is split");
         // a split forward level
         int hubN = 300;
@@ -960,44 +965,96 @@ class GpuBatchedLuTest {
         double[] hubValues = withZeroDiagonalCorner(hubCsr, diagonallyDominantValues(hubCsr, capacity, 61), capacity, 4, 3);
         counts = assertSpreadSolvesAsOneThread(hubCsr, hubValues, capacity, chosen, random);
         assertTrue(counts[8] > 0, "split forward levels summed a row per block: " + counts[8]);
-        // a singleton row in a supernode with a U panel: block A (rows 0-3) and block B (rows 4-5) are the two children
-        // of rows 6-7, so A is a supernode of its own with rows 6-7 in its U panel; NaN: no entry
+        // a singleton row in a supernode with a U panel: block A (rows 0-7) and block B (rows 8-9) are the two children
+        // of rows 10-11, so A is a supernode of its own with rows 10-11 in its U panel; NaN: no entry, 0: an entry that is 0
         double x = Double.NaN;
-        double[][] m = {
-            {3, 0, 0, 0, x, x, 1, 0},
-            {0, 1, 0, 0, x, x, 0, 0},
-            {2, 100, 0, 1, x, x, 0, 1},
-            {1, 5, 2, 40, x, x, 2, 0},
-            {x, x, x, x, 10, 1, 1, 0},
-            {x, x, x, x, 1, 10, 0, 1},
-            {1, 0, 0, 1, 1, 0, 10, 1},
-            {0, 0, 1, 0, 0, 1, 1, 10}};
-        boolean[][] singleton = new boolean[8][8];
+        int sn = 12;
+        double[][] m = new double[sn][sn];
+        for (double[] row : m) {
+            Arrays.fill(row, x);
+        }
         for (int i = 0; i < 8; i++) {
-            for (int j = 0; j < 8; j++) {
+            Arrays.fill(m[i], 0, 8, 0.0);                    // A dense
+            m[i][10] = 0.0;
+            m[i][11] = 0.0;
+            m[10][i] = 0.0;
+            m[11][i] = 0.0;
+        }
+        m[0][0] = 3;                                         // a single nonzero in A, its panel not empty
+        m[0][10] = 1;
+        m[1][1] = 1;                                         // the identity row, its panel empty
+        m[2][0] = 2;                                         // 100 in the identity row's column, a zero diagonal
+        m[2][1] = 100;
+        for (int c = 3; c < 8; c++) {
+            m[2][c] = 1;
+        }
+        m[2][11] = 1;
+        Random blockValues = new Random(83);
+        for (int i = 3; i < 8; i++) {
+            for (int c = 0; c < 8; c++) {
+                m[i][c] = c == i ? 40 : 1 + 4 * blockValues.nextDouble();
+            }
+            m[i][10 + i % 2] = 2;
+            m[10 + i % 2][i] = 1;
+        }
+        m[8][8] = 10;                                        // block B
+        m[8][9] = 1;
+        m[9][8] = 1;
+        m[9][9] = 10;
+        m[8][10] = 1;
+        m[9][11] = 1;
+        m[10][8] = 1;
+        m[11][9] = 1;
+        m[10][10] = 10;                                      // the two last rows
+        m[10][11] = 1;
+        m[11][10] = 1;
+        m[11][11] = 10;
+        m[10][0] = 1;
+        m[11][2] = 1;
+        boolean[][] singleton = new boolean[sn][sn];
+        for (int i = 0; i < sn; i++) {
+            for (int j = 0; j < sn; j++) {
                 singleton[i][j] = !Double.isNaN(m[i][j]);
             }
         }
         Csr singletonCsr = toCsr(singleton);
         double[] singletonValues = new double[capacity * singletonCsr.nnz()];
         for (int sc = 0; sc < capacity; sc++) {
-            for (int i = 0; i < 8; i++) {
+            for (int i = 0; i < sn; i++) {
                 for (int k = singletonCsr.rowPtr()[i]; k < singletonCsr.rowPtr()[i + 1]; k++) {
                     int j = singletonCsr.colIdx()[k];
                     singletonValues[sc * singletonCsr.nnz() + k] = i == 1 && j == 1 ? 1.0 : m[i][j] * (1 + sc / 64.0);
                 }
             }
         }
-        double[] singletonRightHandSides = new double[capacity * 8];
+        double[] singletonRightHandSides = new double[capacity * sn];
         for (int k = 0; k < singletonRightHandSides.length; k++) {
             singletonRightHandSides[k] = random.nextDouble() * 2 - 1;
         }
         double[][] solved = new double[2][];
         counts = assertSpreadSolvesAsOneThread(singletonCsr, singletonValues, capacity, chosen, singletonRightHandSides, solved);
-        assertTrue(counts[7] > 0, "backward levels solved a row per warp: " + counts[7]);
+        assertTrue(counts[9] > 0, "the singleton block factorized a row per warp: " + counts[9]);
         for (int s = 0; s < capacity; s++) {
-            assertEquals(singletonRightHandSides[s * 8 + 1], solved[0][s * 8 + 1], 0.0, "identity row of scenario " + s);
+            assertEquals(singletonRightHandSides[s * sn + 1], solved[0][s * sn + 1], 0.0, "identity row of scenario " + s);
         }
+        // ties: a dense 16-row block, zero diagonals, off-diagonal entries in -3..3 without 0
+        boolean[][] dense16 = new boolean[16][16];
+        for (boolean[] row : dense16) {
+            Arrays.fill(row, true);
+        }
+        Csr tiesCsr = toCsr(dense16);
+        double[] tiesValues = new double[capacity * tiesCsr.nnz()];
+        Random ties = new Random(87);
+        for (int sc = 0; sc < capacity; sc++) {
+            for (int i = 0; i < 16; i++) {
+                for (int k = tiesCsr.rowPtr()[i]; k < tiesCsr.rowPtr()[i + 1]; k++) {
+                    int v = 1 + ties.nextInt(3);
+                    tiesValues[sc * tiesCsr.nnz() + k] = tiesCsr.colIdx()[k] == i ? 0.0 : (ties.nextBoolean() ? v : -v);
+                }
+            }
+        }
+        counts = assertSpreadSolvesAsOneThread(tiesCsr, tiesValues, capacity, chosen, random);
+        assertTrue(counts[9] > 0, "the tied block factorized a row per warp: " + counts[9]);
     }
 
     /** values with, on every lane, the first `size` rows' block made of zero diagonals (the first `zeros` rows) and
@@ -1026,9 +1083,9 @@ class GpuBatchedLuTest {
     }
 
     /** Solves every lane and the chosen ones with the pivoting engine's spread kernels and with their one-thread forms:
-     *  every lane pivots, the solutions are the dense solve's to rounding and equal bit for bit between the two forms
+     *  every lane pivots, the solutions are the dense solve's to 1e-12 of their scale and equal bit for bit between the two forms
      *  (solved: the whole batch's solutions of each, spread first). Returns the counts the spread solve moved; the
-     *  one-thread solve must move neither of the two it replaces. */
+     *  one-thread solve must move none of the three it replaces. */
     private static long[] assertSpreadSolvesAsOneThread(Csr csr, double[] values, int capacity, int[] chosen,
                                                         double[] rightHandSides, double[][] solved) {
         int n = csr.n();
@@ -1059,11 +1116,12 @@ class GpuBatchedLuTest {
                 if (form == 0) {
                     spreadCounts = moved;
                 } else {
-                    assertEquals(0, moved[7] + moved[8], "the one-thread forms spread nothing");
+                    assertEquals(0, moved[7] + moved[8] + moved[9], "the one-thread forms spread nothing");
                 }
                 for (int s = 0; s < capacity; s++) {
                     double[] reference = denseSolve(dense(csr, values, s), scenario(rightHandSides, s, n));
-                    assertArrayEquals(reference, scenario(whole[form], s, n), 1e-12, "form " + form + " scenario " + s);
+                    double scale = Math.max(1, Arrays.stream(reference).map(Math::abs).max().orElseThrow());
+                    assertArrayEquals(reference, scenario(whole[form], s, n), 1e-12 * scale, "form " + form + " scenario " + s);
                 }
             }
         } finally {

@@ -42,14 +42,14 @@ public final class BatchedLuNative {
      * rows split, the lanes sent straight to the pivoting engine, past the fast one, because the pivoting engine
      * factorized them last, the lanes the fast engine's triangular solves ran on, the pivoting-engine backward solve
      * levels launched with a supernode's rows on separate warps, its split forward solve levels launched with a
-     * supernode's rows on separate blocks}.
+     * supernode's rows on separate blocks, its diagonal blocks factorized with their rows on separate warps}.
      */
     public static native long[] factorizationCounts();
 
     /**
      * Tests: true makes the pivoting engine run its one-thread-per-supernode kernels where it would spread a supernode's
-     * rows (backward and split forward solve levels) - the forms the others must match bit for bit. False (the default)
-     * restores the spread ones.
+     * rows (backward and split forward solve levels, the factorization of the diagonal blocks of FACTOR_ROWS_MIN rows or
+     * more) - the forms the others must match bit for bit. False (the default) restores the spread ones.
      */
     public static native void setPivotingEngineOneThreadKernelsForTests(boolean on);
 

@@ -1,8 +1,12 @@
 # On-device limit-violation detection — scope
 
-**Status**: step 1 (the flat table + a host scanner over it) LANDED 2026-09-10; the kernel itself is
-next. Written 2026-09-09, re-measured 2026-09-10 on rte6515_full, 2000 branch contingencies, RTE
-production parameters, DEVICE arm, 1 thread.
+**Status** (updated 2026-11-10): all three steps landed and are the default. The flat table and its host scanner
+(2026-09-10), the screen/confirm split proven in Java, then the kernel (`3f8ba88e`, 2026-09-10): the device screens
+every scenario, the host confirms each candidate with OLF's exact `>` on OLF's own value. Since `9725fdfd`
+(2026-09-25) a group stops at its first limit exceeded beyond the band. An experiment that let the device decide
+(L12 in `docs/gpu-sa-host-overhead-assessment.md`) measured the device-vs-host gap and was deleted (`8b02accd`). The
+sections below keep the original scope (written 2026-09-09, measured 2026-09-10 on rte6515_full, 2000 branch
+contingencies, RTE production parameters, DEVICE arm, 1 thread); where it was wrong, it says so in place.
 
 ## Step 1 landed: the table, scanned on the host
 
@@ -11,7 +15,7 @@ A/B at 2000 contingencies, violation sets **identical (0 differing lines, 133134
 
 | arm | wall | detectViolations |
 |---|---|---|
-| flat table (`olf.gpu.sa.tableViolations` on, default) | **36.1 s** | **6.9 s** |
+| flat table (then `olf.gpu.sa.tableViolations` on, the default; the property is gone) | **36.1 s** | **6.9 s** |
 | OLF's own walk (property off) | 38.8 s | 10.8 s |
 
 So flattening alone took 36% off detection without touching the device — the walk through
@@ -40,7 +44,10 @@ before).
 
 Records come back unordered (threads finish when they finish) and are SORTED on the host, which is
 why a bus record is encoded ABOVE every limit index: one ascending sort restores table order for the
-"first exceeded of the group wins" rule and leaves the bus block at the end.
+"first exceeded of the group wins" rule and leaves the bus block at the end. The branches the host scans in full
+(those the screen does not cover — zero-impedance or not packed — and those a contingency opened at one side or
+retapped) are scanned at their table position, before the buses, so the violations come out in the order OLF's
+`LimitViolationManager` reports them (branches, then buses).
 
 It takes nothing from the batch solver — no context, no chunk lifetime, no share of the memory
 ceiling that already OOMs at 2781 scenarios.
@@ -63,9 +70,10 @@ It is ~29% of the wall at 1 thread and ~5 s at the 2–4 threads we recommend. T
 comparisons each, 108 million over the run, at ~90 ns apiece. That is comparison arithmetic over
 data the device already holds.
 
-**A screen would not help**: on this case 2000 of 2000 contingencies have violations (133,154 in
-total, ~67 each), so "flag candidates on the device, let the host confirm" skips nothing. The
-detection itself has to move.
+**A screen would not help** — WRONG, and what landed is a screen. On this case 2000 of 2000 contingencies have
+violations (133,154 in total, ~67 each), so a screen that only flags which CONTINGENCIES violate skips nothing. The
+screen that landed flags LIMITS: the host re-tests the candidates (about the number of violations per contingency
+since `9725fdfd`, ~415 before it on rte6515) instead of the ~54,000 comparisons per contingency.
 
 **Caveat on the payoff**: the CPU security analysis pays this same cost, so removing it makes the
 product faster in absolute terms — it does not close a GPU-specific inefficiency. Expected effect:
@@ -145,14 +153,18 @@ move real reported violations (see the knife-edge below). Two changes remove the
 
 - the kernel compares against a **relaxed threshold** (`value > threshold * (1 - band)`), so it can
   only ever emit MORE candidates than OLF would, never fewer;
-- it does **not** stop at the first exceeded limit of a group — it emits all of them, so the host is
-  free to reject the first;
+- it does **not** stop at the first exceeded limit of a group while that limit is within the band (the host may
+  reject it); it stops at the first limit exceeded BEYOND the band, which the host is certain to confirm (since
+  `9725fdfd`; before that it emitted every exceeded limit of the group);
 - the host, holding the exact values already (the network vector is updated for the result anyway),
   re-tests each candidate with OLF's exact `>` and takes the first that confirms.
 
 The record then needs no value at all — an int per candidate. Correctness stops depending on device
 precision and depends only on the band being wider than the device-vs-host discrepancy, which is
-measurable (and a debug mode should report the observed maximum against the band).
+measurable. Measured by L12 on network.xiidm (14,255 contingencies, 906,434 violations): worst relative difference
+**2.1e-10**, on currents, where nearly cancelling terms amplify last-bit differences — not the ~1e-16 the code's
+comments assumed. Against the 1e-9 band of the time that was a 5x margin; the band is 1e-7 since 2026-11-10 (about
+500x), which costs only the candidates within 1e-7 of a threshold.
 
 **Safety valve**: a bounded per-scenario record capacity with an overflow flag; a scenario that
 overflows falls back to the host `detectViolations`. Also the natural kill switch for the whole
@@ -179,7 +191,8 @@ only bus angles) and the reference filtering.
   as the host does.
 - **Three-winding transformers** appear as `LfLegBranch` in `network.getBranches()`;
   `branch.getOriginalSide()` decides the reported side. Metadata only, but the table must carry it.
-- **Zero-impedance branches** and open sides: confirm which ones the host actually reaches.
+- **Zero-impedance branches** and open sides — settled: the screen does not cover a zero-impedance or unpacked
+  branch, nor a side the contingency opened, and the host scans those in full, in table order.
 - **Per-unit scales**: current uses `PerUnit.ib(bus.getNominalV())` of the SIDE's bus, power uses
   `PerUnit.SB`, bus voltage uses the bus nominal V. The table must store the scale per entry.
 - **Validation must diff violation SETS, not counts** — and must expect a knife-edge that is NOT
@@ -208,5 +221,6 @@ only bus angles) and the reference filtering.
 
 ## What NOT to do
 
-- Do not build a device pre-screen that defers to the host: measured, it skips nothing here.
+- Do not decide on the device with device values: the last bits differ (2.1e-10 relative on currents) and
+  zero-tolerance comparisons follow them (L12, deleted in `8b02accd`). The device screens, the host decides.
 - Do not re-implement the violation metadata on the device; emit table indices.

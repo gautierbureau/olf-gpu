@@ -150,6 +150,54 @@ class GpuLimitTableTest {
         assertEquals(stockBranch, describe(scanned.getLimitViolations()));
     }
 
+    /**
+     * OLF reports every branch's violations before the buses' ({@code LimitViolationManager.detectViolations}), in
+     * network order. A branch the screen does not cover (zero-impedance, or out of the device's packs) has no
+     * candidates and is scanned in full on the host, which scanned it after the buses: its violations came out last.
+     * Here the screen is forged to emit every limit and every bus record (an over-emission the re-test absorbs) except
+     * the uncovered branch's, and the uncovered one is the overloaded NHV1_NHV2_2, beside a high voltage at VLLOAD.
+     */
+    @Test
+    void scansAnUncoveredBranchInPlaceBeforeTheBuses() {
+        Network iidm = EurostagTutorialExample1Factory.createWithFixedCurrentLimits();
+        iidm.getVoltageLevel("VLLOAD").setLowVoltageLimit(0).setHighVoltageLimit(100);    // its bus sits near 147 kV
+        LoadFlowParameters lfp = new LoadFlowParameters();
+        OpenLoadFlowParameters olfp = OpenLoadFlowParameters.create(lfp);
+        AcLoadFlowParameters acp = OpenLoadFlowParameters.createAcParameters(iidm, lfp, olfp,
+                new SparseMatrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>(), false, false);
+        LfNetwork network = LfNetwork.load(iidm, new LfNetworkLoaderImpl(), acp.getNetworkParameters(), ReportNode.NO_OP).get(0);
+        network.getBranchById("NHV1_NHV2_1").setDisabled(true);
+        new AcloadFlowEngine(new AcLoadFlowContext(network, acp)).run();
+        List<LimitViolation> stock = detectStock(network);
+        assertTrue(describe(stock).contains("NHV1_NHV2_2|") && describe(stock).contains("VLLOAD|"),
+                "the fixture needs the line's and the voltage level's violations: " + describe(stock));
+
+        GpuLimitTable table = GpuLimitTable.build(network, LimitReductionManager.create(List.of()));
+        int uncovered = -1;
+        for (int k = 0; k < table.branches().length; k++) {
+            if (table.branches()[k].getId().equals("NHV1_NHV2_2")) {
+                uncovered = k;
+            }
+        }
+        java.util.List<Integer> forged = new java.util.ArrayList<>();
+        for (int k = 0; k < table.branches().length; k++) {
+            for (int g = table.groupStart(k); k != uncovered && g < table.groupEnd(k); g++) {
+                for (int l = table.limitStart(g); l < table.limitEnd(g); l++) {
+                    forged.add(l);
+                }
+            }
+        }
+        for (int i = 0; i < table.buses().length; i++) {
+            forged.add(table.limitCount() + 2 * i);                 // the high voltage record
+            forged.add(table.limitCount() + 2 * i + 1);             // the low voltage record
+        }
+        int[] candidates = forged.stream().mapToInt(Integer::intValue).sorted().toArray();
+
+        var manager = new LimitViolationManager(List.of());
+        new GpuLimitScanner(table).detectFromCandidates(network, manager, candidates, null, new int[] {uncovered}, null);
+        assertEquals(describe(stock), describe(manager.getLimitViolations()));
+    }
+
     private static List<LimitViolation> detectStock(LfNetwork network) {
         var manager = new LimitViolationManager(List.of());
         manager.detectViolations(network);

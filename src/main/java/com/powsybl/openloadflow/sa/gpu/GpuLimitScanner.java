@@ -114,15 +114,24 @@ final class GpuLimitScanner {
      * {@code break}.
      *
      * <p>{@code sideOpened} (nullable, table indices) are branches the contingency opened at one side: the screen
-     * evaluated them closed, so their candidates are dropped and they are scanned in full here instead — in place, at
-     * their table position, so the violations come out in the stock detection's order.
+     * evaluated them closed, so their candidates are dropped and they are scanned in full here instead. So are the
+     * {@code uncoveredBranches} (table indices), which the screen does not evaluate at all. Both are scanned in place, at
+     * their table position, before the buses, so the violations come out in the stock detection's order (every branch,
+     * then every bus): the uncovered ones used to be scanned after the buses.
      */
     void detectFromCandidates(LfNetwork network, LimitViolationManager manager, int[] candidates,
                               GpuViolationScreen screen, int[] uncoveredBranches, java.util.BitSet sideOpened) {
         LfBranch[] branches = table.branches();
+        java.util.BitSet inFull = sideOpened;
+        if (uncoveredBranches.length > 0) {
+            inFull = sideOpened != null ? (java.util.BitSet) sideOpened.clone() : new java.util.BitSet();
+            for (int b : uncoveredBranches) {
+                inFull.set(b);
+            }
+        }
         int reportedGroup = -1;
         int currentBranch = -1;
-        int nextSideOpened = sideOpened != null ? sideOpened.nextSetBit(0) : -1;
+        int nextSideOpened = inFull != null ? inFull.nextSetBit(0) : -1;
         int i = 0;
         int busBase = table.limitCount();
         for (; i < candidates.length && candidates[i] < busBase; i++) {
@@ -135,10 +144,10 @@ final class GpuLimitScanner {
             while (nextSideOpened >= 0 && nextSideOpened <= b) {
                 scanBranch(nextSideOpened, manager);
                 currentBranch = -1;
-                nextSideOpened = sideOpened.nextSetBit(nextSideOpened + 1);
+                nextSideOpened = inFull.nextSetBit(nextSideOpened + 1);
             }
             LfBranch branch = branches[b];
-            if (branch.isDisabled() || sideOpened != null && sideOpened.get(b)) {
+            if (branch.isDisabled() || inFull != null && inFull.get(b)) {
                 continue;                                    // taken out by the contingency, or scanned in full above
             }
             if (b != currentBranch) {
@@ -149,7 +158,7 @@ final class GpuLimitScanner {
                 reportedGroup = group;
             }
         }
-        for (; nextSideOpened >= 0; nextSideOpened = sideOpened.nextSetBit(nextSideOpened + 1)) {
+        for (; nextSideOpened >= 0; nextSideOpened = inFull.nextSetBit(nextSideOpened + 1)) {
             scanBranch(nextSideOpened, manager);
         }
         for (; i < candidates.length; i++) {
@@ -170,11 +179,6 @@ final class GpuLimitScanner {
                 manager.addBusLimitViolation(LimitViolationManager.createBusLimitViolation(bus,
                         com.powsybl.contingency.violations.LimitViolationType.LOW_VOLTAGE,
                         table.busLowLimit(busIndex) * table.busScale(busIndex), v * table.busScale(busIndex)), bus);
-            }
-        }
-        for (int b : uncoveredBranches) {
-            if (sideOpened == null || !sideOpened.get(b)) {
-                scanBranch(b, manager);
             }
         }
         manager.detectVoltageAngleViolations(network);

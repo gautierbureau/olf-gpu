@@ -619,7 +619,8 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
     private static Double pairDistributedOnDevice(GpuSaRunState run, String contingencyId, String pairId,
                                                   SecurityAnalysisParameters securityAnalysisParameters) {
         PrecomputedBatch precomputed = run.precomputed;
-        if (!precomputed.isReady() || precomputed.states().get(pairId) == null) {
+        // an existence test: with the state store a get reads the whole state from its file
+        if (!precomputed.isReady() || !precomputed.states().containsKey(pairId)) {
             return null;
         }
         // a contingency's own load flow parameters, when they hold for its strategies too, decide the distribution
@@ -1122,7 +1123,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
             // when one of its strategies is not answered on the device, and OLF then starts from every bus's voltage
             // (rte6515 LINE-2349-694 after LINE-2348-693: started from the previous injection's voltages, 1.44 MW off)
             boolean devicePath = precomputed.isReady() && !precomputed.exhausted().contains(contingency.getId())
-                    && precomputed.states().get(contingency.getId()) != null
+                    && precomputed.states().containsKey(contingency.getId())
                     && everyStrategyAnsweredOnDevice(run, contingency.getId(), securityAnalysisParameters);
             // device-answered: the injection writes every live bus, so only the disabled ones need their base back
             restoreStaleVoltages(run, devicePath ? lfContingency.getDisabledNetwork().getBuses() : null);

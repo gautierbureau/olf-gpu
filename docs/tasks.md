@@ -11,6 +11,29 @@ complete. Keep the numbering: it is cited in commit messages.
 
 ## Open
 
+### #92 — DONE: the violation screen's band, existence tests, scan order and doc (h–k) (2026-11-10)
+
+Issues h–k of `docs/device-final-results-plan.md` §7 (branch `device-final-results`).
+- **h.** `GpuViolationScreen` (and the kernel's comment) put the device-vs-host gap at ~1e-16 relative and the 1e-9
+  band ~7 orders above it. L12 measured 2.1e-10 at worst (network.xiidm, 906,434 violations, on currents: nearly
+  cancelling terms amplify last-bit differences), a 5x margin. A candidate the screen misses is a violation lost and
+  one it adds costs one exact re-test, so the band is now 1e-7 (about 500x); the comments give the measurement.
+- **i.** `pairDistributedOnDevice` and the post-contingency path tested a state's existence with `states().get`,
+  which with the state store reads the whole state from its file: for every candidate pair of every strategy, three
+  times per contingency (`everyStrategyAnsweredOnDevice` runs three times). They use `containsKey`, an index lookup.
+- **j.** `GpuLimitScanner.detectFromCandidates` scanned the branches the screen does not cover after the buses, while
+  OLF reports every branch before the buses. They are scanned in place with the side-opened ones.
+  `GpuLimitTableTest.scansAnUncoveredBranchInPlaceBeforeTheBuses` (an uncovered overloaded line beside a voltage
+  violation, the screen forged) fails without it. No case of ours shows it: the screen leaves out zero-impedance
+  branches (OLF reports no violation on them: measured on IEEE 14 with a zero-impedance line given an active power
+  limit under its flow), base-disabled ones (OLF skips them) and branches missing a state column (none on one
+  connected component).
+- **k.** `docs/on-device-violation-detection.md`: status, the screen that "would not help" (what landed is a screen),
+  the group cut (stops at the first limit beyond the band since 9725fdfd), the band's measurement, zero-impedance
+  branches settled, and "What NOT to do" now names deciding on the device instead of screening.
+
+Gates: `GpuSa*Test` 299/0/2 on cuDSS and on our batched LU; full suite 523/0/6 with checkstyle.
+
 ### #91 — FIXED: what a strategy's threshold condition reads after a device contingency (d, e) (2026-11-10)
 
 Issues d and e of `docs/device-final-results-plan.md` §7 (branch `device-final-results`). OLF evaluates a strategy's

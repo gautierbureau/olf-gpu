@@ -39,7 +39,9 @@ import java.util.Map;
  * {@code >} on OLF's own value and takes the first that confirms. So a candidate list computed in
  * double precision on a GPU, whose {@code sin}/{@code cos} and FMA contraction differ from the
  * host's in the last bits, cannot change a single reported violation as long as the band is wider
- * than that discrepancy — and the discrepancy is ~1e-16 relative while the band is 1e-9.
+ * than that discrepancy. It is not ~1e-16 relative: on currents nearly cancelling terms amplify the last-bit
+ * differences, and the worst measured on network.xiidm's 906,434 violations is 2.1e-10 (L12 in
+ * docs/gpu-sa-host-overhead-assessment.md), against a band of 1e-7.
  *
  * <p>This Java implementation is not scaffolding: it is the fallback whenever the device path is
  * off or a branch is not in the device model, and it is the ORACLE the kernel is validated against —
@@ -57,9 +59,11 @@ import java.util.Map;
 final class GpuViolationScreen {
 
     /** Relative slack on the threshold, so the screen over-emits rather than ever missing a
-     *  violation the host would report. Chosen ~7 orders of magnitude above the device-vs-host
-     *  discrepancy it covers, and it costs only a handful of extra candidates per contingency. */
-    static final double BAND = 1e-9;
+     *  violation the host would report: a candidate the screen misses is a violation lost, one it adds
+     *  costs one exact re-test. About 500 times the worst device-vs-host discrepancy measured (2.1e-10
+     *  relative, on a current); 1e-9 until 2026-11-10, which the comment here put ~7 orders above a
+     *  ~1e-16 discrepancy, was 5 times. */
+    static final double BAND = 1e-7;
 
     /** Where a branch's flows come from: the closed-branch pack, the open-branch pack, or nowhere
      *  (zero-impedance branches take their flows from dummy variables, and anything the extraction
